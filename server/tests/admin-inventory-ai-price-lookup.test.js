@@ -181,3 +181,29 @@ test('an intentionally empty results array stays a success', async () => {
     expect(ledgerCallRejected).not.toHaveBeenCalled();
   });
 });
+
+// Codex r14 on #4884: a positive price under an invented or misspelled vendor
+// can never become an approval, so a batch of only those must not read as a
+// successful call. Matching is on the requested vendor's name, trimmed and
+// case-insensitive; quantity/url/notes are cleaned so they cannot fail the insert.
+test('results only from vendors that were never requested are a ledger failure and create zero approvals', async () => {
+  const inserts = wireDb();
+  respondWith([{ vendor: 'Acme Suply', price: 42.5 }, { vendor: 'Some Other Store', price: 39.99 }]);
+  await withServer(async (baseUrl) => {
+    const body = await (await lookup(baseUrl)).json();
+    expect(body.approvalsCreated).toBe(0);
+    expect(inserts).toHaveLength(0);
+    expect(ledgerCallRejected).toHaveBeenCalledWith(expect.anything(), 'schema_invalid');
+  });
+});
+
+test('a requested vendor named with different case and spacing still matches; optional fields are cleaned', async () => {
+  const inserts = wireDb();
+  respondWith([{ vendor: ' ACME supply', price: 42.5, quantity: 32, url: 'not a url', notes: { n: 1 } }]);
+  await withServer(async (baseUrl) => {
+    const body = await (await lookup(baseUrl)).json();
+    expect(body.approvalsCreated).toBe(1);
+    expect(inserts[0]).toMatchObject({ vendor_id: 'v-acme', new_price: 42.5, new_quantity: '32', source_url: null, notes: 'AI agent lookup — ' });
+    expect(ledgerCallRejected).not.toHaveBeenCalled();
+  });
+});

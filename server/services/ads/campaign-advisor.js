@@ -37,14 +37,52 @@ function adsClientConfigured() {
 // normalizeRecommendations; the SMS summary reads grade and
 // overall_assessment straight off the object. The old validate only checked
 // "object, not array" — a reply like `{}` passed it and produced exactly
-// that silent no-op. Same shape as seo-advisor.js's isUsableSeoReport.
+// that silent no-op. Every recommendation must also carry a non-empty
+// `action`, and its other rendered fields must be text: a {} rec was stored
+// and counted as one and texted "• undefined" (Codex r14 on #4884), and the
+// Ads page renders these fields as React children, where an object throws.
+// Same shape as seo-advisor.js's isUsableSeoReport.
 const ADS_REPORT_OBJECT_LISTS = ['recommendations', 'waste_alerts', 'scaling_opportunities', 'capacity_warnings', 'seo_insights'];
+const isRenderable = (v) => v == null || typeof v === 'string' || typeof v === 'number';
+function isUsableRecommendation(rec) {
+  return typeof rec.action === 'string' && rec.action.trim() !== ''
+    && ['campaign', 'reasoning', 'estimated_impact', 'priority'].every((k) => isRenderable(rec[k]));
+}
 function isUsableAdsReport(advice) {
   if (!advice || typeof advice !== 'object' || Array.isArray(advice)) return false;
   if (typeof advice.grade !== 'string' || !advice.grade.trim()) return false;
   if (typeof advice.overall_assessment !== 'string' || !advice.overall_assessment.trim()) return false;
   if (advice.insights != null && !Array.isArray(advice.insights)) return false;
-  return ADS_REPORT_OBJECT_LISTS.every((key) => advice[key] == null || (Array.isArray(advice[key]) && advice[key].every((v) => v && typeof v === 'object' && !Array.isArray(v))));
+  const listsOk = ADS_REPORT_OBJECT_LISTS.every((key) => advice[key] == null || (Array.isArray(advice[key]) && advice[key].every((v) => v && typeof v === 'object' && !Array.isArray(v))));
+  return listsOk && (advice.recommendations == null || advice.recommendations.every(isUsableRecommendation));
+}
+
+// The Ads page lists recommendations by exact priority ('high'/'medium'/
+// 'low'), so a rec labelled "High" or unlabelled would never be shown; the
+// secondary lists and insights print each item's label and text fields, so
+// an item without its label (e.g. a copied {"search_term": ""} template) or
+// with a non-text field is dropped rather than rendered blank or thrown on.
+// [label, ...other rendered fields] per list — the first must be non-empty text.
+const ADS_LIST_FIELDS = {
+  waste_alerts: ['search_term', 'spend', 'conversions', 'action'],
+  scaling_opportunities: ['campaign', 'current_budget', 'suggested_budget', 'headroom_reason'],
+  capacity_warnings: ['area', 'utilization', 'recommendation'],
+  seo_insights: ['detail', 'type', 'action'],
+};
+function normalizeAdsReport(advice) {
+  if (Array.isArray(advice.recommendations)) {
+    for (const rec of advice.recommendations) {
+      const p = typeof rec.priority === 'string' ? rec.priority.trim().toLowerCase() : '';
+      rec.priority = ['high', 'medium', 'low'].includes(p) ? p : 'medium';
+    }
+  }
+  for (const [key, [label, ...fields]] of Object.entries(ADS_LIST_FIELDS)) {
+    if (!Array.isArray(advice[key])) continue;
+    advice[key] = advice[key].filter((item) => typeof item[label] === 'string' && item[label].trim() !== ''
+      && fields.every((f) => isRenderable(item[f])));
+  }
+  if (Array.isArray(advice.insights)) advice.insights = advice.insights.filter((i) => typeof i === 'string' && i.trim() !== '');
+  return advice;
 }
 
 class CampaignAdvisor {
@@ -266,7 +304,7 @@ Analyze BOTH paid ads and organic SEO performance. Provide specific recommendati
       // dispatcher (the next provider gets a turn); a two-leg miss lands in
       // the catch below and stores the deterministic fallback advice.
       if (!res.ok) throw new Error(`advice dispatch failed: ${res.reason}`);
-      const advice = res.json;
+      const advice = normalizeAdsReport(res.json);
 
       advice.date = etDateString(now);
       this.normalizeRecommendations(advice, campaigns);
@@ -507,3 +545,4 @@ Analyze BOTH paid ads and organic SEO performance. Provide specific recommendati
 
 module.exports = new CampaignAdvisor();
 module.exports.isUsableAdsReport = isUsableAdsReport;
+module.exports.normalizeAdsReport = normalizeAdsReport;

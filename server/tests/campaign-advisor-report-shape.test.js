@@ -9,7 +9,7 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/twilio', () => ({}));
 
-const { isUsableAdsReport } = require('../services/ads/campaign-advisor');
+const { isUsableAdsReport, normalizeAdsReport } = require('../services/ads/campaign-advisor');
 
 const GOOD = { grade: 'B', overall_assessment: 'ROAS steady, one campaign underspending.' };
 
@@ -55,5 +55,44 @@ describe('isUsableAdsReport', () => {
       recommendations: [{ priority: 'high', action: 'raise budget' }],
       waste_alerts: [],
     })).toBe(true);
+  });
+});
+
+// Codex r14 on #4884: a {} recommendation was stored, counted as one, and
+// texted as "• undefined"; the Ads page renders rec fields as React children.
+describe('recommendations must be usable', () => {
+  test.each([
+    ['an empty object', {}],
+    ['a blank action', { action: '   ' }],
+    ['a non-string action', { action: 42 }],
+    ['an object reasoning (would throw as a React child)', { action: 'raise budget', reasoning: { why: 'x' } }],
+    ['an array campaign', { action: 'raise budget', campaign: ['Pest'] }],
+  ])('%s fails the report', (_label, rec) => {
+    expect(isUsableAdsReport({ ...GOOD, recommendations: [{ priority: 'high', action: 'ok' }, rec] })).toBe(false);
+  });
+
+  test('a rec with an action and text fields is usable', () => {
+    expect(isUsableAdsReport({ ...GOOD, recommendations: [{ priority: 'High', action: 'raise budget', campaign: 'Pest', reasoning: 'headroom', estimated_impact: '+$40/wk' }] })).toBe(true);
+  });
+});
+
+describe('normalizeAdsReport', () => {
+  test('canonicalizes rec priority so every rec lands in a rendered group', () => {
+    const out = normalizeAdsReport({ ...GOOD, recommendations: [{ priority: ' High ', action: 'a' }, { action: 'b' }, { priority: 'urgent', action: 'c' }] });
+    expect(out.recommendations.map((r) => r.priority)).toEqual(['high', 'medium', 'medium']);
+  });
+
+  test('drops secondary-list items without their label or with a non-text rendered field', () => {
+    const out = normalizeAdsReport({
+      ...GOOD,
+      waste_alerts: [{ search_term: '', spend: 0 }, { search_term: 'free pest control', spend: 12.5, conversions: 0, action: 'add_negative', extra: [1] }, { search_term: 'bugs', spend: { usd: 3 } }],
+      scaling_opportunities: [{ campaign: 'Pest', current_budget: 20, suggested_budget: 30, headroom_reason: 'IS lost to budget' }, {}],
+      capacity_warnings: [{ area: 'Venice', utilization: 95, recommendation: 'slow spend' }, { utilization: 90 }],
+      insights: ['CPA is down', '', { text: 'x' }],
+    });
+    expect(out.waste_alerts.map((w) => w.search_term)).toEqual(['free pest control']);
+    expect(out.scaling_opportunities).toHaveLength(1);
+    expect(out.capacity_warnings).toHaveLength(1);
+    expect(out.insights).toEqual(['CPA is down']);
   });
 });

@@ -93,8 +93,9 @@ function callbackNumberCoachingNote(v2Extraction, contactPhone) {
 // past an "object, not array" check; r11 found fractional values for INTEGER
 // columns; r13 found values outside the rubric's documented ranges
 // (total_score: 999, rescue_score: -4, warmth_score: 100) persisted into CSR
-// averages. Required: the nine rubric scores within their ranges (integers
-// where the column is INTEGER), a call_outcome from the rubric's list
+// averages; r14 found totals that are not core + rescue. Required: the nine
+// rubric scores within their ranges (integers where the column is INTEGER),
+// total_score === core_score + rescue_score, a call_outcome from the rubric's list
 // (canonicalized — call_outcome === 'booked' drives the booking rate and the
 // follow-up gate, so "Booked" must not read as a loss), and a point_details
 // object. Optional fields are canonicalized, and an absent or off-contract
@@ -156,6 +157,10 @@ function normalizeCsrScore(raw) {
     if (n === null || n < min || n > max || (integer && !Number.isInteger(n))) return null;
     score[field] = n;
   }
+  // The rubric's 15-point total IS the 10-point core plus the 5-point rescue;
+  // an answer that breaks that equation (e.g. 15 = 0 + 0) is inconsistent,
+  // not a score to average (Codex r14 on #4884).
+  if (score.total_score !== score.core_score + score.rescue_score) return null;
   score.call_outcome = csrEnum(raw.call_outcome, CSR_CALL_OUTCOMES);
   if (!score.call_outcome) return null;
   // JSON.stringify(undefined) IS undefined — never let that reach the insert.

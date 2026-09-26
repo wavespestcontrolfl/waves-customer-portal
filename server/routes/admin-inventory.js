@@ -3564,13 +3564,6 @@ router.put('/:id', async (req, res, next) => {
   }
 });
 
-// The fields the approval-queue loop below (and procurement-tools.js's own
-// copy of it) actually reads off a web-search result — an object missing
-// them (e.g. {}) matches the "is it shaped like a result" schema check but
-// contributes nothing: `!vendor || !result.price` already skips it in the
-// loop, but a batch of nothing-but-those must not read as a successful
-// ledger call, and approvalsCreated must count real inserts, not raw
-// entries (Codex r8 on #4884).
 // A price may arrive as a number or a strictly numeric string ("42.50" —
 // the old loop accepted it and Postgres coerced it); anything else is null.
 function priceResultNumber(price) {
@@ -3582,10 +3575,33 @@ function priceResultNumber(price) {
   return null;
 }
 
-function isUsablePriceResult(r) {
-  return !!r && typeof r === 'object'
-    && typeof r.vendor === 'string' && r.vendor.trim() !== ''
-    && priceResultNumber(r.price) !== null;
+// The requested vendor a result names (trimmed, any case), or undefined. The
+// prompt lists the vendors to check, and an approval needs the vendor's id.
+function findPriceVendor(vendors, name) {
+  if (typeof name !== 'string' || !name.trim()) return undefined;
+  const key = name.trim().toLowerCase();
+  return (vendors || []).find((v) => String(v.name || '').trim().toLowerCase() === key);
+}
+
+// One parse of a web-search price result, shared by both approval loops and
+// their ledger checks: a requested vendor and a real price are required (an
+// invented or misspelled vendor can never become an approval — Codex r14 on
+// #4884); quantity, url and notes are optional and cleaned so they cannot
+// fail the insert. Returns { vendor, price, quantity, url, notes } or null.
+function parsePriceResult(r, vendors) {
+  if (!r || typeof r !== 'object' || Array.isArray(r)) return null;
+  const vendor = findPriceVendor(vendors, r.vendor);
+  const price = priceResultNumber(r.price);
+  if (!vendor || price === null) return null;
+  const quantity = typeof r.quantity === 'number' && Number.isFinite(r.quantity) ? String(r.quantity)
+    : (typeof r.quantity === 'string' && r.quantity.trim() ? r.quantity.trim() : null);
+  const url = typeof r.url === 'string' && /^https?:\/\/\S+$/i.test(r.url.trim()) ? r.url.trim() : null;
+  const notes = typeof r.notes === 'string' ? r.notes.trim() : '';
+  return { vendor, price, quantity, url, notes };
+}
+
+function isUsablePriceResult(r, vendors) {
+  return parsePriceResult(r, vendors) !== null;
 }
 
 // =========================================================================
@@ -3699,24 +3715,23 @@ RESPOND WITH ONLY valid JSON (no markdown fences, no preamble):
     // them, so it must not read as a successful call (Codex r8 on #4884).
     if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.results)
       || !parsed.results.every((r) => r && typeof r === 'object' && !Array.isArray(r))
-      || (parsed.results.length > 0 && !parsed.results.some(isUsablePriceResult))) {
+      || (parsed.results.length > 0 && !parsed.results.some((r) => isUsablePriceResult(r, vendors)))) {
       ledgerCallRejected(currentMsg, 'schema_invalid');
     }
 
     // If we have a productId, create approval queue entries for found prices
     let approvalsCreated = 0;
     if (productId && parsed.results && parsed.results.length > 0) {
-      for (const result of parsed.results) {
-        if (!isUsablePriceResult(result)) continue;
-        // Find vendor by name
-        const vendor = vendors.find(v => v.name.toLowerCase() === result.vendor?.toLowerCase());
-        if (!vendor) continue;
+      for (const raw of parsed.results) {
+        const result = parsePriceResult(raw, vendors);
+        if (!result) continue;
+        const { vendor } = result;
 
         // Check existing price
         const existing = await db('vendor_pricing')
           .where({ product_id: productId, vendor_id: vendor.id }).first();
 
-        const newPrice = priceResultNumber(result.price);
+        const newPrice = result.price;
         // Create approval entry
         try {
           await db('price_approvals').insert({
@@ -3724,17 +3739,17 @@ RESPOND WITH ONLY valid JSON (no markdown fences, no preamble):
             vendor_id: vendor.id,
             old_price: existing?.price || null,
             new_price: newPrice,
-            new_quantity: result.quantity || null,
-            source_url: result.url || null,
+            new_quantity: result.quantity,
+            source_url: result.url,
             price_change_pct: existing?.price
               ? Math.round(((newPrice - existing.price) / existing.price) * 10000) / 100
               : null,
             status: 'pending',
-            notes: `AI agent lookup — ${result.notes || ''}`,
+            notes: `AI agent lookup — ${result.notes}`,
           });
           approvalsCreated += 1;
         } catch (e) {
-          logger.warn(`[AI Price Lookup] Failed to create approval for ${result.vendor}: ${e.message}`);
+          logger.warn(`[AI Price Lookup] Failed to create approval for ${vendor.name}: ${e.message}`);
         }
       }
     }
@@ -3809,6 +3824,6 @@ router.quantityToOz = quantityToOz;
 // Shared web-search-result usability check (Codex r8 on #4884) —
 // procurement-tools.js's own price lookup applies the same validation.
 router.isUsablePriceResult = isUsablePriceResult;
-router.priceResultNumber = priceResultNumber;
+router.parsePriceResult = parsePriceResult;
 
 module.exports = router;

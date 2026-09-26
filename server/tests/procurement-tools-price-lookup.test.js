@@ -116,3 +116,25 @@ test('an intentionally empty results array stays a success', async () => {
   expect(out.approvals_created).toBe(0);
   expect(ledgerCallRejected).not.toHaveBeenCalled();
 });
+
+// Codex r14 on #4884: a positive price under an invented or misspelled vendor
+// can never become an approval, so a batch of only those must not read as a
+// successful call. Matching is on the requested vendor's name, trimmed and
+// case-insensitive.
+test('results only from vendors that were never requested are a ledger failure and create zero approvals', async () => {
+  const inserts = wireDb();
+  respondWith([{ vendor: 'Acme Suply', price: 55.25 }, { vendor: 'Some Other Store', price: 49.99 }]);
+  const out = await executeProcurementTool('run_price_lookup', { product_name: 'Taurus SC' });
+  expect(out.approvals_created).toBe(0);
+  expect(inserts).toHaveLength(0);
+  expect(ledgerCallRejected).toHaveBeenCalledWith(expect.anything(), 'schema_invalid');
+});
+
+test('a requested vendor named with different case and spacing still matches; optional fields are cleaned', async () => {
+  const inserts = wireDb();
+  respondWith([{ vendor: '  acme supply ', price: '55.25', quantity: { oz: 20 }, url: 'javascript:alert(1)' }]);
+  const out = await executeProcurementTool('run_price_lookup', { product_name: 'Taurus SC' });
+  expect(out.approvals_created).toBe(1);
+  expect(inserts[0]).toMatchObject({ vendor_id: 'v-acme', new_price: 55.25, source_url: null });
+  expect(ledgerCallRejected).not.toHaveBeenCalled();
+});

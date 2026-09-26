@@ -38,13 +38,15 @@ describe('isUsableCsrScore', () => {
     expect(isUsableCsrScore({ ...GOOD, [field]: 'great job' })).toBe(false);
     expect(isUsableCsrScore({ ...GOOD, [field]: NaN })).toBe(false);
     expect(isUsableCsrScore({ ...GOOD, [field]: '' })).toBe(false);
-    expect(isUsableCsrScore({ ...GOOD, [field]: '3' })).toBe(true);
+    // A numeric string stands for its number (the sum fields keep the
+    // total = core + rescue equation by restating GOOD's own values).
+    expect(isUsableCsrScore({ ...GOOD, [field]: String(GOOD[field]) })).toBe(true);
   });
 
   test.each(['total_score', 'core_score', 'rescue_score', 'lead_quality_score'])('rejects a fractional %s (INTEGER column)', (field) => {
     expect(isUsableCsrScore({ ...GOOD, [field]: 2.5 })).toBe(false);
     expect(isUsableCsrScore({ ...GOOD, [field]: '2.5' })).toBe(false);
-    expect(isUsableCsrScore({ ...GOOD, [field]: '3' })).toBe(true);
+    expect(isUsableCsrScore({ ...GOOD, [field]: String(GOOD[field]) })).toBe(true);
   });
 
   test('decimal skill dimensions still accept fractions inside 1-5', () => {
@@ -53,10 +55,25 @@ describe('isUsableCsrScore', () => {
 
   // Codex r13 on #4884: values outside the rubric's documented ranges used to
   // be accepted and persisted into CSR averages.
+  const triple = (core, rescue, total = core + rescue) => ({ ...GOOD, core_score: core, rescue_score: rescue, total_score: total });
+  test('enforces the documented ranges of core (0-10), rescue (0-5) and total (0-15)', () => {
+    expect(isUsableCsrScore(triple(0, 0))).toBe(true);
+    expect(isUsableCsrScore(triple(10, 5))).toBe(true);
+    expect(isUsableCsrScore(triple(11, 0))).toBe(false);
+    expect(isUsableCsrScore(triple(-1, 1))).toBe(false);
+    expect(isUsableCsrScore(triple(5, 6))).toBe(false);
+    expect(isUsableCsrScore(triple(9, -4))).toBe(false);
+    expect(isUsableCsrScore(triple(10, 5, 16))).toBe(false);
+  });
+
+  // Codex r14 on #4884: the rubric's total IS core + rescue.
+  test('rejects a total that is not core + rescue (e.g. 15 = 0 + 0)', () => {
+    expect(isUsableCsrScore(triple(0, 0, 15))).toBe(false);
+    expect(isUsableCsrScore(triple(8, 4, 11))).toBe(false);
+    expect(isUsableCsrScore(triple(8, 4, 12))).toBe(true);
+  });
+
   test.each([
-    ['total_score', -1, 16, [0, 15]],
-    ['core_score', -1, 11, [0, 10]],
-    ['rescue_score', -4, 6, [0, 5]],
     ['control_score', 0, 5.5, [1, 5]],
     ['warmth_score', 0.5, 100, [1, 5]],
     ['clarity_score', 0, 6, [1, 5]],

@@ -57,3 +57,20 @@ describe('isUsableSeoReport', () => {
     })).toBe(true);
   });
 });
+
+// Codex r14 on #4884 (parallel to campaign-advisor): a {} recommendation was
+// stored, counted, and texted as "• undefined"; the advisor tab renders
+// action/reasoning as React children.
+describe('recommendations must be usable', () => {
+  test.each([
+    ['an empty object', {}],
+    ['a blank action', { action: '' }],
+    ['an object reasoning', { action: 'add FAQ content', reasoning: { why: 'x' } }],
+  ])('%s fails the report', (_label, rec) => {
+    expect(isUsableSeoReport({ ...GOOD, recommendations: [rec] })).toBe(false);
+  });
+
+  test('a rec with an action and text fields is usable', () => {
+    expect(isUsableSeoReport({ ...GOOD, recommendations: [{ priority: 'high', category: 'content', action: 'add FAQ content', page_or_query: '/termite', reasoning: 'page 2', estimated_impact: '+40 clicks' }] })).toBe(true);
+  });
+});

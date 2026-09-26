@@ -35,14 +35,24 @@ try { TwilioService = require('../twilio'); } catch { TwilioService = null; }
 // list fields feed `.length` / iteration; the SMS summary reads grade and
 // overall_assessment straight off the object. The old validate only checked
 // "object, not array" — a reply like `{}` passed it and produced exactly
-// that silent no-op. Same shape as tax-advisor.js's isUsableTaxReport.
+// that silent no-op. Every recommendation must also carry a non-empty
+// `action`, and its other rendered fields must be text: a {} rec was stored,
+// counted, and texted as "• undefined" (Codex r14 on #4884), and the advisor
+// tab renders action/reasoning as React children, where an object throws.
+// Same shape as tax-advisor.js's isUsableTaxReport.
 const SEO_REPORT_OBJECT_LISTS = ['recommendations', 'page2_opportunities', 'declining_alerts', 'gbp_insights', 'technical_issues', 'mobile_insights'];
+const isRenderable = (v) => v == null || typeof v === 'string' || typeof v === 'number';
+function isUsableRecommendation(rec) {
+  return typeof rec.action === 'string' && rec.action.trim() !== ''
+    && ['priority', 'category', 'page_or_query', 'reasoning', 'estimated_impact'].every((k) => isRenderable(rec[k]));
+}
 function isUsableSeoReport(report) {
   if (!report || typeof report !== 'object' || Array.isArray(report)) return false;
   if (typeof report.grade !== 'string' || !report.grade.trim()) return false;
   if (typeof report.overall_assessment !== 'string' || !report.overall_assessment.trim()) return false;
   if (report.wins != null && !Array.isArray(report.wins)) return false;
-  return SEO_REPORT_OBJECT_LISTS.every((key) => report[key] == null || (Array.isArray(report[key]) && report[key].every((v) => v && typeof v === 'object' && !Array.isArray(v))));
+  const listsOk = SEO_REPORT_OBJECT_LISTS.every((key) => report[key] == null || (Array.isArray(report[key]) && report[key].every((v) => v && typeof v === 'object' && !Array.isArray(v))));
+  return listsOk && (report.recommendations == null || report.recommendations.every(isUsableRecommendation));
 }
 
 class SEOAdvisor {

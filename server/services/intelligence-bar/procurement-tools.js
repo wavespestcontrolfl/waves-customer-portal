@@ -591,31 +591,30 @@ Search vendor websites for exact prices. Return JSON only:
       return { success: true, raw_response: responseText, note: 'AI returned non-JSON. See raw_response.' };
     }
 
-    // A nonempty results array with no usable entry (e.g. [{}]) is a schema
-    // shape that answered nothing — the loop below would skip every one of
-    // them, so it must not read as a successful call (Codex r8 on #4884).
-    // isUsablePriceResult is admin-inventory.js's ai-price-lookup route's
-    // own check on the identical response shape; shared rather than
-    // duplicated a third time.
-    const { isUsablePriceResult, priceResultNumber } = require('../../routes/admin-inventory');
+    // A nonempty results array with no usable entry (e.g. [{}], or only
+    // vendors that were never requested) is a schema shape that answered
+    // nothing — the loop below would skip every one of them, so it must not
+    // read as a successful call (Codex r8, r14 on #4884). parsePriceResult is
+    // admin-inventory.js's ai-price-lookup route's own parse of the identical
+    // response shape; shared rather than duplicated a third time.
+    const { isUsablePriceResult, parsePriceResult } = require('../../routes/admin-inventory');
     if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.results)
       || !parsed.results.every((r) => r && typeof r === 'object' && !Array.isArray(r))
-      || (parsed.results.length > 0 && !parsed.results.some(isUsablePriceResult))) {
+      || (parsed.results.length > 0 && !parsed.results.some((r) => isUsablePriceResult(r, vendors)))) {
       ledgerCallRejected(currentMsg, 'schema_invalid');
     }
 
     // Create approval queue entries
     let approvalsCreated = 0;
     if (parsed.results && parsed.results.length > 0) {
-      for (const result of parsed.results) {
-        if (!isUsablePriceResult(result)) continue;
-        const vendor = vendors.find(v => v.name.toLowerCase() === result.vendor?.toLowerCase());
-        if (!vendor) continue;
+      for (const raw of parsed.results) {
+        const result = parsePriceResult(raw, vendors);
+        if (!result) continue;
         try {
           await db('price_approvals').insert({
-            product_id: product.id, vendor_id: vendor.id,
-            new_price: priceResultNumber(result.price), new_quantity: result.quantity || product.container_size,
-            source_url: result.url || null, status: 'pending',
+            product_id: product.id, vendor_id: result.vendor.id,
+            new_price: result.price, new_quantity: result.quantity || product.container_size,
+            source_url: result.url, status: 'pending',
           });
           approvalsCreated++;
         } catch (insertErr) {
