@@ -160,22 +160,17 @@ function parseAddressLine(line) {
     unit,
   };
 }
-
-// Callers hand over designator-bearing units ("#102", "Suite 102",
-// "Unit 102", "Ste. 102", or a COMPOUND "Bldg 9 Unit 204") while the
-// extract's parsed unit can be the bare "102" or its own differently-ordered
-// compound — strip EVERY designator word wherever it falls (not just a
-// single leading one) so both sides of a compound designator reduce to the
-// same key ("Bldg 9 Unit 204" and "BLDG 9 UNIT 204" both -> "9204"; primary
-// review of PR #4840 r5 P2). No `^` anchor and the `g` flag are the whole
-// fix — a prior single, start-anchored replace left a second/middle
-// designator word (e.g. the "Unit" in "Bldg 9 Unit 204") in the string,
-// where it then survived into the alnum-only key as literal letters.
-const UNIT_DESIGNATOR_RE = /(?:suite|ste\.?|unit|apt\.?|apartment|bldg\.?|building|bay|space|#)/gi;
+// Unit key, compared on both sides (caller address and DBPR row). Every
+// designator word is dropped (whole words only, so "WEST" keeps its "ST"),
+// then each remaining value keeps its own boundary: "Bldg 9 Unit 204" and
+// "BLDG 9 UNIT 204" -> "9-204", never "9204" (which "Bldg 92 Unit 04" would
+// also produce). "#102", "Suite 102", "102" -> "102".
+const UNIT_DESIGNATOR_RE = /\b(?:suite|ste|unit|apt|apartment|bldg|building|bay|space)\b\.?|#/gi;
 
 function normalizeUnitValue(value) {
-  const bare = String(value || '').trim().replace(UNIT_DESIGNATOR_RE, ' ');
-  return bare.replace(/[^A-Z0-9]/gi, '').toUpperCase() || null;
+  const parts = String(value || '').replace(UNIT_DESIGNATOR_RE, ' ')
+    .split(/[^A-Za-z0-9]+/).filter(Boolean).map((p) => p.toUpperCase());
+  return parts.length ? parts.join('-') : null;
 }
 
 function normalizePhoneDigits(value) {

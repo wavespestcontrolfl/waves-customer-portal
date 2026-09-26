@@ -325,7 +325,7 @@ describe('compound designators ("Bldg 9 Unit 204") normalize to the same key on 
 
   test('normalizeUnitValue reduces "Bldg 9 Unit 204" and "BLDG 9 UNIT 204" to the same key', () => {
     expect(normalizeUnitValue('Bldg 9 Unit 204')).toBe(normalizeUnitValue('BLDG 9 UNIT 204'));
-    expect(normalizeUnitValue('Bldg 9 Unit 204')).toBe('9204');
+    expect(normalizeUnitValue('Bldg 9 Unit 204')).toBe('9-204');
   });
 
   test('the compound designator sits in the street line — the "Bldg 9" prefix must not leak into the street name', () => {
@@ -360,5 +360,20 @@ describe('DBPR row unit in Location Address Line 2, and both phone columns', () 
   test('the caller matches the PRIMARY phone even when a secondary phone is also listed', () => {
     const row = { ...base, 'Primary Phone Number': '(555) 010-0111', 'Secondary Phone Number': '555-010-0999' };
     expect(matchDbprRow([row], { street: '4400 Test Commons Pkwy E', zip: '00000', phone: '+15550100111' })).toBe(row);
+  });
+});
+
+describe('compound unit keys keep component boundaries', () => {
+  const { normalizeUnitValue } = require('../services/commercial-suite-size/dbpr-food-license');
+  test('Bldg 9 Unit 204 and Bldg 92 Unit 04 never collide', () => {
+    expect(normalizeUnitValue('Bldg 9 Unit 204')).toBe('9-204');
+    expect(normalizeUnitValue('BLDG 9 UNIT 204')).toBe('9-204');
+    expect(normalizeUnitValue('Bldg 92 Unit 04')).toBe('92-04');
+  });
+  test('single designators reduce to the bare value; words containing a designator are not mangled', () => {
+    expect(normalizeUnitValue('#102')).toBe('102');
+    expect(normalizeUnitValue('Suite 102')).toBe('102');
+    expect(normalizeUnitValue('Ste. 102')).toBe('102');
+    expect(normalizeUnitValue('Suite WEST-2')).toBe('WEST-2');
   });
 });
