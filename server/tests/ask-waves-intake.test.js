@@ -250,6 +250,7 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ['The EPA gave this product the green light.', ''],
     ['This product got the green light from the EPA.', ''],
     ['EPA approval was granted for this pesticide.', ''],
+    ['The EPA gave this product the go-ahead.', ''],
     ['EPA approval is given to all our products.', ''],
     ['The EPA accepts this pesticide for use.', ''],
     ['This pesticide has EPA acceptance.', ''],
@@ -666,6 +667,11 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
     expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
   });
 
+  test('"emergency service for wasp nests" with a price keeps the price redirect', () => {
+    const out = normalizeIntakeResult({ reply: 'We offer emergency service for wasp nests for $50.', intent: 'quote', service_keys: [], ready_for_quote: true }, 'openai', 'Do you do wasp nests?');
+    expect(out.reply).toMatch(/Get my price/);
+  });
+
   test('"out of danger" after an ingestion gets the emergency script', () => {
     const out = normalizeIntakeResult({ reply: 'Your child is out of danger.', intent: 'question', service_keys: [], ready_for_quote: false }, 'openai', 'My child swallowed pesticide');
     expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
@@ -1019,6 +1025,7 @@ describe('normalizeIntakeResult', () => {
     ['Your service plan begins in 2 days.', ''],
     ['Your plan expires in 2 weeks.', ''],
     ['Your account will be active in 2 hours.', ''],
+    ['For after-hours pest service, call our office.', 'Do you offer pest control service at night?'],
     ['The EPA has not accepted this pesticide; it is EPA-registered.', ''],
     ['The EPA did not okay this product; it is EPA-registered.', ''],
     ['EPA approval is not required for this EPA-exempt product.', ''],
@@ -2029,6 +2036,7 @@ describe('looksLikeEmergency', () => {
     'My dog is covered in pesticide',
     'My child was stung\nNow the swelling is worse',
     'My child was bitten\nNow there are hives',
+    "I didn't get pesticide in my eyes, but my son did",
     "I'm at the hospital",
     'We are on our way to the hospital now',
     'My husband is on his way to the hospital',
@@ -2116,6 +2124,9 @@ describe('looksLikeEmergency', () => {
     "My child didn't get pesticide in her eyes",
     "I didn't get pesticide in my eye",
     "My dog didn't get poison on his paws",
+    'The rats were poisoned by spray',
+    'The roaches were poisoned by the product',
+    'The ants got poisoned by chemicals',
     'Do ants bite?\nMy child has a question about the lawn',
     'I notice a burning smell after the treatment',
     'I saw a rash of brown spots after the lawn treatment',
