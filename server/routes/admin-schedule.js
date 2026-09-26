@@ -9725,6 +9725,20 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                   { isValidation: true },
                 );
               }
+              // Same-trip first-application resplit chokepoint (prod
+              // 2026-09-26): a bulk date move may pull this row off the date
+              // of a shared first-application invoice, on either side — same
+              // transaction as the date write, but never blocks the batch:
+              // an unexpected failure here is logged loudly and left for
+              // reconciliation rather than failing this row's move.
+              if (prevDate !== bulkTargetDate) {
+                try {
+                  await require('../services/first-application-sibling-split')
+                    .reconcileFirstApplicationSplitOnDateChange(trx, id);
+                } catch (splitErr) {
+                  logger.error(`[schedule] first-application sibling-split reconcile failed for ${id} (bulk move still committing): ${splitErr.message}`);
+                }
+              }
               {
                 const committedTechId = bulkCommittedRows[0]?.technician_id || null;
                 const nextStartRaw = updates.window_start !== undefined ? updates.window_start : svc.window_start;
@@ -13574,6 +13588,20 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // land between the claim and the provider request. Recurring children
         // keep inheriting the parent's Bill-To through this update.)
         await trx('scheduled_services').where({ id: req.params.id }).update(updates);
+        // Same-trip first-application resplit chokepoint (prod 2026-09-26):
+        // a date-only edit here may pull this row off the date of a shared
+        // first-application invoice, on either side (the invoice-holding row
+        // or an unpriced sibling) — same transaction as the date write, but
+        // never blocks a legitimate save: an unexpected failure here is
+        // logged loudly and left for reconciliation rather than aborting.
+        if (updates.scheduled_date !== undefined) {
+          try {
+            await require('../services/first-application-sibling-split')
+              .reconcileFirstApplicationSplitOnDateChange(trx, req.params.id);
+          } catch (splitErr) {
+            logger.error(`[schedule] first-application sibling-split reconcile failed for ${req.params.id} (save still committing): ${splitErr.message}`);
+          }
+        }
         // A job Bill-To edit (payer cleared, self-pay override set) that makes a
         // withdrawn combined-visit invoice self-pay again requeues it here.
         if (updates.payer_id !== undefined || updates.self_pay_override !== undefined) {

@@ -1737,6 +1737,22 @@ class SmartRebooker {
         original_window: service.window_start ? `${service.window_start}-${service.window_end}` : null,
         new_window: win.start ? `${win.start}-${win.end}` : null,
       });
+
+      // Same-trip first-application resplit chokepoint (prod 2026-09-26): a
+      // date-only move of this row may pull it off the date of a shared
+      // first-application invoice (either side — the invoice-holding row or
+      // an unpriced sibling). Same transaction as the date write, so a
+      // successful split commits atomically with the move — but never blocks
+      // a legitimate reschedule: an unexpected failure here is logged loudly
+      // and left for reconciliation rather than aborting the whole move.
+      if (dateOnly(newDate) !== dateOnly(originalDate)) {
+        try {
+          await require('./first-application-sibling-split')
+            .reconcileFirstApplicationSplitOnDateChange(trx, serviceId);
+        } catch (splitErr) {
+          logger.error(`[rebooker] first-application sibling-split reconcile failed for ${serviceId} (move still committing): ${splitErr.message}`);
+        }
+      }
     });
 
     // Tech-facing notice (tech-visit-notifications.js), post-commit,
@@ -3312,6 +3328,22 @@ class SmartRebooker {
         new_window: win.start ? `${win.start}-${win.end}` : null,
         series_move_id: seriesMoveId,
       });
+
+      // Same-trip first-application resplit chokepoint (prod 2026-09-26):
+      // the anchor's own date always changes on this path (the caller only
+      // reaches rescheduleSeries when it does) — it may pull the anchor off
+      // the date of a shared first-application invoice, on either side. Same
+      // transaction as the date write, but never blocks a legitimate series
+      // move: an unexpected failure here is logged loudly and left for
+      // reconciliation rather than aborting the whole move.
+      if (dateOnly(newDate) !== dateOnly(service.scheduled_date)) {
+        try {
+          await require('./first-application-sibling-split')
+            .reconcileFirstApplicationSplitOnDateChange(trx, serviceId);
+        } catch (splitErr) {
+          logger.error(`[rebooker] first-application sibling-split reconcile failed for series anchor ${serviceId} (move still committing): ${splitErr.message}`);
+        }
+      }
 
       return touched;
     }).catch(async (err) => {
