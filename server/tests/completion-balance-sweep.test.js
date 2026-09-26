@@ -36,20 +36,35 @@ const stoppedResults = { rows: [] };
 // each whereIn(ids) call against that table (dedupe/call-count assertions);
 // `dbError`, when set, makes a scheduled_services query reject instead of
 // resolving (simulating the lookup itself throwing).
-const mockVisitState = { unperformed: new Set(), scheduledServicesCalls: [], dbError: null };
+// `invoiceDocs` maps invoice id → { notes, line_items } for the provenance
+// read of unlinked invoices (default: a plain ad-hoc bill); `performedEstimates`
+// lists estimate ids that have a completed visit booked from them.
+const mockVisitState = {
+  unperformed: new Set(), scheduledServicesCalls: [], dbError: null, invoiceDocs: {}, performedEstimates: new Set(),
+};
 jest.mock('../models/db', () => {
   const mkChain = (table) => {
     const q = {};
     let ids = [];
-    q.whereIn = (_col, values) => {
+    let col = null;
+    q.whereIn = (column, values) => {
       ids = values;
-      if (table === 'scheduled_services') mockVisitState.scheduledServicesCalls.push(values);
+      col = column;
+      if (table === 'scheduled_services' && column === 'id') mockVisitState.scheduledServicesCalls.push(values);
       return q;
     };
     for (const m of ['where', 'select']) q[m] = () => q;
     q.then = (onOk, onErr) => {
       if (table === 'scheduled_services' && mockVisitState.dbError) {
         return Promise.reject(mockVisitState.dbError).then(onOk, onErr);
+      }
+      if (table === 'invoices') {
+        const docs = ids.map((id) => ({ id, notes: null, line_items: [], ...(mockVisitState.invoiceDocs[String(id)] || {}) }));
+        return Promise.resolve(docs).then(onOk, onErr);
+      }
+      if (table === 'scheduled_services' && col === 'source_estimate_id') {
+        const done = ids.filter((id) => mockVisitState.performedEstimates.has(String(id))).map((id) => ({ source_estimate_id: id }));
+        return Promise.resolve(done).then(onOk, onErr);
       }
       const rows = table === 'scheduled_services'
         // Completed-visit ids are matched by String() (production code
@@ -93,6 +108,8 @@ describe('completion balance sweep', () => {
     mockVisitState.unperformed = new Set();
     mockVisitState.scheduledServicesCalls = [];
     mockVisitState.dbError = null;
+    mockVisitState.invoiceDocs = {};
+    mockVisitState.performedEstimates = new Set();
     mockCharge.mockImplementation(async () => ({ status: 'paid' }));
   });
 
@@ -267,6 +284,52 @@ describe('completion balance sweep', () => {
       { id: 'today', scheduled_service_id: null, service_date: new Date('2026-09-26T00:00:00Z') },
     ], { today: '2026-09-26' });
     expect([...skip]).toEqual(['tomorrow']);
+  });
+
+  test('a setup-only acceptance bill waits until a visit from its estimate is completed', async () => {
+    // Accept with no first-application amount mints the setup fee with no
+    // visit link and no service date (routes/estimate-public.js).
+    openBalanceResults.rows = [
+      { id: 'setup-only', invoice_number: 'INV-1', subtotal: '99.00', total: '99.00', scheduled_service_id: null, service_date: null },
+      { id: 'ad-hoc', invoice_number: 'INV-2', subtotal: '40.00', total: '40.00', scheduled_service_id: null, service_date: null },
+    ];
+    mockVisitState.invoiceDocs = {
+      'setup-only': {
+        notes: 'Auto-generated from accepted estimate #11111111-2222-3333-4444-555555555555. Customer selected pay per application — $99.00 setup fee only.',
+        line_items: [{ description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: 99, amount: 99 }],
+      },
+    };
+    const result = await runCompletionBalanceSweep(baseArgs);
+    expect(result.skipped).toBe(1);
+    expect(mockCharge).toHaveBeenCalledTimes(1);
+    expect(mockCharge.mock.calls[0][0]).toBe('ad-hoc');
+  });
+
+  test('the same acceptance bill is collected once a visit from its estimate is completed', async () => {
+    openBalanceResults.rows = [
+      { id: 'setup-only', invoice_number: 'INV-1', subtotal: '99.00', total: '99.00', scheduled_service_id: null, service_date: null },
+    ];
+    mockVisitState.invoiceDocs = {
+      'setup-only': { notes: 'Auto-generated from accepted estimate #11111111-2222-3333-4444-555555555555. Customer selected pay per application — $99.00 setup fee only.' },
+    };
+    mockVisitState.performedEstimates = new Set(['11111111-2222-3333-4444-555555555555']);
+    const result = await runCompletionBalanceSweep(baseArgs);
+    expect(result.skipped).toBe(0);
+    expect(mockCharge).toHaveBeenCalledTimes(1);
+    expect(mockCharge.mock.calls[0][0]).toBe('setup-only');
+  });
+
+  test('an unstamped setup-fee bill with no visit link cannot prove its visit, so it waits', async () => {
+    const { unperformedVisitInvoiceIds } = require('../services/completion-balance-sweep');
+    mockVisitState.invoiceDocs = {
+      fee: { line_items: [{ description: 'WaveGuard Membership — one-time setup fee', quantity: 1, unit_price: 99 }] },
+      waived: { line_items: [{ description: 'WaveGuard Membership — setup fee waived', quantity: 1, unit_price: 0 }] },
+    };
+    const skip = await unperformedVisitInvoiceIds([
+      { id: 'fee', scheduled_service_id: null, service_date: null },
+      { id: 'waived', scheduled_service_id: null, service_date: null },
+    ], { today: '2026-09-26' });
+    expect([...skip]).toEqual(['fee']);
   });
 
   test('missing method or customer → no-op, never throws', async () => {
