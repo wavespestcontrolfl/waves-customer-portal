@@ -96,6 +96,19 @@ async function resolveScheduledRecipient(msg, claimMeta) {
   }
 }
 
+// Only a registered Email-only replay proceeds without a phone: its row was
+// queued blank on purpose. Every other billing row that reaches the executor
+// without a resolved phone is a failed or empty lookup and stays on the
+// bounded recipient-refresh rail above (codex #4803 r5).
+function canReplayBillingWithoutPhone(msg, claimMeta) {
+  return Boolean(msg.customer_id
+    && claimMeta?.requires_registered_dispatch === true
+    && require('./messaging/deferred-replay-registry').replaysWithoutPhone(claimMeta.entry_point)
+    && claimMeta.recipient_identity_unverified !== true && claimMeta.explicit_recipient !== true
+    && ['invoice', 'payment_issue', 'billing', 'payment_receipt']
+      .includes(claimMeta.billingDeliveryCategory));
+}
+
 // Deposit-receipt replays re-check payment_receipt_channel at send time —
 // the immediate send honors the channel choice, and a customer who switches
 // to email-only between the hold and scheduled_for must not be texted by the
@@ -3903,7 +3916,7 @@ function initScheduledJobs() {
           }
 
           const toPhone = await resolveScheduledRecipient(msg, claimMeta);
-          if (!toPhone) {
+          if (!toPhone && !canReplayBillingWithoutPhone(msg, claimMeta)) {
             // Refresh-required row whose current customer phone can't be
             // verified right now — retry on the bounded attempt rail rather
             // than sending to the frozen snapshot under customer trust.
@@ -4046,10 +4059,17 @@ function initScheduledJobs() {
               || ((claimMeta.consent_basis && typeof claimMeta.consent_basis.status === 'string')
                 ? claimMeta.consent_basis
                 : undefined),
+            // A deferred billing notice re-enters the same channel routing
+            // its immediate attempt used: the persisted delivery category
+            // and the branded-Email sidecar marker ride along (codex #4833
+            // r3), so an explicit Email / App choice is neither texted nor
+            // double-emailed on the morning replay.
+            ...(claimMeta.hasEmailLeg === true ? { hasEmailLeg: true } : {}),
             metadata: {
               original_message_type: msg.message_type || 'scheduled',
               scheduled_sms_log_id: msg.id,
               notificationEventKey: claimMeta.notificationEventKey,
+              ...(claimMeta.billingDeliveryCategory ? { billingDeliveryCategory: claimMeta.billingDeliveryCategory } : {}),
               ...(claimMeta.entry_point === 'request_app_deferred' ? { appOnly: true,
                 service_request_id: claimMeta.service_request_id, request_status: claimMeta.request_status,
                 request_status_version: claimMeta.request_status_version,
@@ -6442,6 +6462,19 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // Payment retry timing stays on the billing cron. This bounded sweep only
+  // materializes Email decisions that were committed with that retry state
+  // but could not be queued during the originating process.
+  cron.schedule('*/5 * * * *', async () => {
+    try {
+      await runExclusive('billing-retry-email-reconcile', async () => {
+        await require('./billing-retry-email-obligation').reconcilePendingNotices({ limit: 50 });
+      });
+    } catch (err) {
+      logger.error(`Billing retry Email reconciliation failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // Stranded prepay auto-charge recovery every 15 min (Codex #3492 r12):
   // an accept can crash between commit and its in-flow charge, and
   // same-day slots book with a two-hour lead — a job stranded just after
@@ -7151,6 +7184,7 @@ module.exports = {
   initBankingSync,
   purposeForScheduledMessageType,
   resolveScheduledRecipient,
+  canReplayBillingWithoutPhone,
   scheduledDepositReceiptAllowed,
   classifyDepositReplayFallback,
   holdFinalReviewUncertainty,

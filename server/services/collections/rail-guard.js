@@ -68,8 +68,10 @@ async function collectionsChannelPermitted({
   excludeCollectionCaseId = null,
   excludeLedgerIds = [],
   logTag = 'collections',
+  detail = false,
 }) {
-  if (process.env.GATE_COLLECTIONS_POLICY !== 'true') return true;
+  const answer = (allowed, durable = false) => (detail ? { allowed, durable } : allowed);
+  if (process.env.GATE_COLLECTIONS_POLICY !== 'true') return answer(true);
   let verdict;
   try {
     const ContactPolicy = require('./contact-policy');
@@ -78,7 +80,7 @@ async function collectionsChannelPermitted({
     // evaluate() is documented never to throw (it denies internally), but a
     // guard-level surprise must read as a denial, not abort a sweep loop.
     logger.warn(`[${logTag}] collections policy consult failed for customer ${customerId}: ${err.message} — denying`);
-    return false;
+    return answer(false);
   }
   const member = invoiceId == null
     ? true
@@ -86,9 +88,23 @@ async function collectionsChannelPermitted({
   if (!verdict.allowed || !member) {
     const why = !verdict.allowed ? verdict.denialReasons.join(', ') : 'invoice_not_eligible';
     logger.info(`[${logTag}] collections policy denied ${channel} for customer ${customerId}${invoiceId ? ` invoice ${invoiceId}` : ''}: ${why}`);
-    return false;
+    return answer(false, !verdict.allowed && verdict.denialReasons.some(isDurableDenial));
   }
-  return true;
+  return answer(true);
 }
 
-module.exports = { collectionsChannelPermitted, collectionsChannelVerdict };
+// A denial that will not lift on its own schedule: an operator flag, a
+// suppression, the account's standing (archived, commercial, language,
+// line type, missing consent). Spacing windows, call windows and read
+// failures are transient and keep an owed leg pending.
+const DURABLE_DENIALS = new Set([
+  'customer_not_found', 'customer_archived', 'commercial_customer', 'customer_prefers_spanish',
+  'line_type_not_mobile', 'consent_no_evidence', 'unknown_channel', 'unknown_purpose',
+]);
+function isDurableDenial(reason) {
+  return DURABLE_DENIALS.has(reason) || /^(flag|suppression)_/.test(reason);
+}
+
+module.exports = {
+  collectionsChannelPermitted, collectionsChannelVerdict, isDurableDenial,
+};

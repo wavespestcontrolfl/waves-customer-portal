@@ -11817,6 +11817,108 @@ function addonLineRecurrence(line) {
 // that already recurs, a retained add-on reposted with a DIFFERENT pattern
 // than its stored one (one_time promoted to the plan, or a plan pattern
 // changed) — gated by id and by name with the new cadence.
+// Pairs a visit edit's posted add-on lines to the stored rows ONE-TO-ONE
+// (codex r26/r27 on #4786): first by the stored row's own id when a posted
+// line carries it (and the same identity), then by identity — catalog id,
+// else id-less name — in posted order. EVERY read of "which stored row is
+// this posted line" (storedLine) and "which posted line keeps this stored
+// row" (postedFor) goes through the pairing, so two stored copies of one
+// service (one one_time, one riding the parent) each resolve to their own
+// posted line, and a posted line left unpaired is an added line — a second
+// copy of an add-on already on the visit is gated like any new line. The
+// primary line's own catalog id is one occurrence too: a same-id posted
+// primary takes it first, else a posted primary that matches a stored
+// add-on's service moves that row to the primary.
+function pairVisitEditAddonLines({ current, currentAddons, postedServiceId, lines }) {
+  const norm = (v) => String(v || '').trim().toLowerCase();
+  const pairs = (l, a) => (l.serviceId
+    ? String(a?.service_id || '') === String(l.serviceId)
+    : (!a?.service_id && norm(a?.service_name) === norm(l.serviceName)));
+  const pairedLine = new Map(); // stored row index -> posted line
+  const pairedStored = new Map(); // posted line -> stored row
+  const pairUp = (l, idx) => { pairedLine.set(idx, l); pairedStored.set(l, currentAddons[idx]); };
+  const firstFree = (match) => currentAddons.findIndex((a, i) => !pairedLine.has(i) && match(a));
+  // The PUT path hands the gate normalizeUpdateDetailsAddons' rows, which
+  // carry the stored row id as `submittedAddonId` (codex r28 on #4786).
+  const rowIdOf = (l) => (l.submittedAddonId != null ? l.submittedAddonId : l.id);
+  const sameRow = (l, a) => rowIdOf(l) != null && a?.id != null && String(rowIdOf(l)) === String(a.id);
+  for (const l of lines) {
+    const idx = firstFree((a) => sameRow(l, a) && pairs(l, a));
+    if (idx >= 0) pairUp(l, idx);
+  }
+  let primaryIdFree = !!current.service_id;
+  const takePrimaryId = (id) => {
+    if (!primaryIdFree || !id || String(id) !== String(current.service_id)) return false;
+    primaryIdFree = false;
+    return true;
+  };
+  const primaryAddedIds = [];
+  if (postedServiceId && !takePrimaryId(postedServiceId)) {
+    const idx = firstFree((a) => String(a?.service_id || '') === String(postedServiceId));
+    // The moved row stays on the visit as the primary, riding the parent.
+    if (idx >= 0) pairUp({ serviceId: String(postedServiceId), serviceName: null, recurringPattern: null, recurringIntervalDays: null }, idx);
+    // A row that ran on its own cadence (one_time, custom) now takes the
+    // parent's, so promoting it is a new plan line (codex r32 on #4786).
+    if (idx < 0 || currentAddons[idx]?.recurring_pattern) primaryAddedIds.push(String(postedServiceId));
+  }
+  for (const l of lines) {
+    if (pairedStored.has(l)) continue;
+    const idx = firstFree((a) => pairs(l, a));
+    if (idx >= 0) pairUp(l, idx);
+  }
+  return {
+    storedLine: (l) => pairedStored.get(l) || null,
+    postedFor: (a) => pairedLine.get(currentAddons.indexOf(a)) || null,
+    addedLines: lines.filter((l) => !pairedStored.has(l) && !takePrimaryId(l.serviceId)),
+    primaryAddedIds,
+  };
+}
+
+// The cadence a retained add-on will actually run at: the reposted line's
+// own, else the stored one (null rides the parent).
+function storedAddonRecurrence(a) {
+  return addonLineRecurrence({ recurringPattern: a?.recurring_pattern, recurringIntervalDays: a?.recurring_interval_days });
+}
+
+// When the edit sells the visit's retained lines as a PLAN
+// (`plansRetainedLines`), every line that remains after the save is gated as
+// if newly added. A stored add-on survives an explicit replacement only when
+// reposted, and a one_time add-on never rides the parent's cadence (codex
+// r24); the primary line survives unless a different service id is posted
+// (the new one is gated as added). Every retained add-on name goes through,
+// catalog-backed or not (codex r23: a live 6x T&S add-on riding a parent that
+// just turned quarterly is the retired plan by name + cadence).
+function retainedPlanLinesForVisitEdit({ current, currentAddons, postedServiceId, addonsReplaced, renamed, pairing }) {
+  const effectiveRecurrence = (a) => {
+    const posted = pairing.postedFor(a);
+    return posted ? addonLineRecurrence(posted) : storedAddonRecurrence(a);
+  };
+  const ridesPlan = (a) => (effectiveRecurrence(a)?.pattern || null) !== 'one_time';
+  const retainedAddons = currentAddons.filter((a) => ridesPlan(a) && (!addonsReplaced || pairing.postedFor(a)));
+  const primaryRetained = !postedServiceId || String(postedServiceId) === String(current.service_id || '');
+  const keepsPrimaryLabel = primaryRetained && !renamed && typeof current.service_type === 'string' && !!current.service_type.trim();
+  return {
+    ids: [primaryRetained ? current.service_id : null, ...retainedAddons.map((a) => a?.service_id)].filter(Boolean).map(String),
+    names: [
+      ...(keepsPrimaryLabel ? [current.service_type] : []),
+      ...retainedAddons.filter((a) => typeof a?.service_name === 'string' && a.service_name.trim())
+        .map((a) => ({ label: a.service_name, recurrence: effectiveRecurrence(a) })),
+    ],
+  };
+}
+
+// On a visit that already recurs, a retained add-on reposted with a different
+// cadence than its stored one — pattern OR interval (codex r24: custom every
+// 60 days → every 90 days) — joins the plan at the new cadence.
+function repatternedAddonLinesForVisitEdit({ lines, pairing }) {
+  const cadenceKey = (r) => (r ? `${r.pattern || ''}|${r.intervalDays || ''}` : '');
+  return lines.filter((l) => {
+    const stored = pairing.storedLine(l);
+    return stored && (l.recurringPattern || null) !== 'one_time'
+      && cadenceKey(storedAddonRecurrence(stored)) !== cadenceKey(addonLineRecurrence(l));
+  });
+}
+
 function retiredGateInputsForVisitEdit({
   current, currentAddons = [], postedServiceId = null, postedAddons = null, serviceType, plansRetainedLines = false,
 }) {
@@ -11830,98 +11932,17 @@ function retiredGateInputsForVisitEdit({
   const labelOf = (l) => ({ label: l.serviceName.trim(), recurrence: addonLineRecurrence(l) });
   const renamed = typeof serviceType === 'string' && !!serviceType.trim() && norm(serviceType) !== norm(current.service_type);
   const primaryLabel = typeof serviceType === 'string' && serviceType.trim() ? serviceType : (current.service_type || null);
-  const pairs = (l, a) => (l.serviceId
-    ? String(a?.service_id || '') === String(l.serviceId)
-    : (!a?.service_id && norm(a?.service_name) === norm(l.serviceName)));
-  // Posted lines are paired to stored rows ONE-TO-ONE (codex r26/r27 on
-  // #4786): first by the stored row's own id when a posted line carries it
-  // (and the same identity), then by identity — catalog id, else id-less
-  // name — in posted order. EVERY read of "which stored row is this posted
-  // line" (storedLine) and "which posted line keeps this stored row"
-  // (postedFor) goes through the pairing, so two stored copies of one
-  // service (one one_time, one riding the parent) each resolve to their own
-  // posted line, and a posted line left unpaired is an added line — a second
-  // copy of an add-on already on the visit is gated like any new line. The
-  // primary line's own catalog id is one occurrence too: a same-id posted
-  // primary takes it first, else a posted primary that matches a stored
-  // add-on's service moves that row to the primary.
-  const pairedLine = new Map(); // stored row index -> posted line
-  const pairedStored = new Map(); // posted line -> stored row
-  const pairUp = (l, idx) => { pairedLine.set(idx, l); pairedStored.set(l, currentAddons[idx]); };
-  // The PUT path hands the gate normalizeUpdateDetailsAddons' rows, which
-  // carry the stored row id as `submittedAddonId` (codex r28 on #4786).
-  const rowIdOf = (l) => (l.submittedAddonId != null ? l.submittedAddonId : l.id);
-  const sameRow = (l, a) => rowIdOf(l) != null && a?.id != null && String(rowIdOf(l)) === String(a.id);
-  for (const l of lines) {
-    const idx = currentAddons.findIndex((a, i) => !pairedLine.has(i) && sameRow(l, a) && pairs(l, a));
-    if (idx >= 0) pairUp(l, idx);
-  }
-  let primaryIdFree = !!current.service_id;
-  const takePrimaryId = (id) => {
-    if (!primaryIdFree || !id || String(id) !== String(current.service_id)) return false;
-    primaryIdFree = false;
-    return true;
-  };
-  const primaryAddedIds = [];
-  if (postedServiceId && !takePrimaryId(postedServiceId)) {
-    const idx = currentAddons.findIndex((a, i) => !pairedLine.has(i) && String(a?.service_id || '') === String(postedServiceId));
-    // The moved row stays on the visit as the primary, riding the parent.
-    if (idx >= 0) {
-      pairUp({ serviceId: String(postedServiceId), serviceName: null, recurringPattern: null, recurringIntervalDays: null }, idx);
-      // A row that ran on its own cadence (one_time, custom) now takes the
-      // parent's, so promoting it is a new plan line (codex r32 on #4786).
-      const moved = currentAddons[idx];
-      if (moved?.recurring_pattern) primaryAddedIds.push(String(postedServiceId));
-    } else primaryAddedIds.push(String(postedServiceId));
-  }
-  for (const l of lines) {
-    if (pairedStored.has(l)) continue;
-    const idx = currentAddons.findIndex((a, i) => !pairedLine.has(i) && pairs(l, a));
-    if (idx >= 0) pairUp(l, idx);
-  }
-  const storedLine = (l) => pairedStored.get(l) || null;
-  const postedFor = (a) => pairedLine.get(currentAddons.indexOf(a)) || null;
-  const addedLines = lines.filter((l) => !pairedStored.has(l) && !takePrimaryId(l.serviceId));
-  // The cadence a retained add-on will actually run at: the reposted line's
-  // own, else the stored one (null rides the parent).
-  const storedRecurrence = (a) => addonLineRecurrence({ recurringPattern: a?.recurring_pattern, recurringIntervalDays: a?.recurring_interval_days });
-  const effectiveRecurrence = (a) => { const posted = postedFor(a); return posted ? addonLineRecurrence(posted) : storedRecurrence(a); };
-  // A one_time add-on line never rides the parent's cadence, so a parent
-  // cadence change does not sell it as a plan (codex r24).
-  const ridesPlan = (a) => (effectiveRecurrence(a)?.pattern || null) !== 'one_time';
-  // Every retained add-on name — catalog-backed or not (codex r23: a live
-  // 6x T&S add-on riding a parent that just turned quarterly is the retired
-  // plan by name + cadence, while its id stays live).
-  // Lines that remain after this save: a stored add-on survives an explicit
-  // replacement only when reposted; the primary line survives unless a
-  // different service id is posted (the new one is gated as added).
-  const retainedAddons = currentAddons.filter((a) => ridesPlan(a) && (!addonsReplaced || postedFor(a)));
-  const primaryRetained = !postedServiceId || String(postedServiceId) === String(current.service_id || '');
-  const retainedIds = plansRetainedLines
-    ? [primaryRetained ? current.service_id : null, ...retainedAddons.map((a) => a?.service_id)].filter(Boolean).map(String)
-    : [];
-  const retainedNames = plansRetainedLines
-    ? [
-      ...(primaryRetained && !renamed && typeof current.service_type === 'string' && current.service_type.trim() ? [current.service_type] : []),
-      ...retainedAddons.filter((a) => typeof a?.service_name === 'string' && a.service_name.trim())
-        .map((a) => ({ label: a.service_name, recurrence: effectiveRecurrence(a) })),
-    ]
-    : [];
-  // A retained add-on reposted with a different cadence than its stored one
-  // — pattern OR interval (codex r24: custom every 60 days → every 90 days)
-  // — joins the plan at the new cadence.
-  const cadenceKey = (r) => (r ? `${r.pattern || ''}|${r.intervalDays || ''}` : '');
-  const repatterned = current.is_recurring && !plansRetainedLines
-    ? lines.filter((l) => {
-      const stored = storedLine(l);
-      return stored && (l.recurringPattern || null) !== 'one_time' && cadenceKey(storedRecurrence(stored)) !== cadenceKey(addonLineRecurrence(l));
-    })
-    : [];
+  const pairing = pairVisitEditAddonLines({ current, currentAddons, postedServiceId, lines });
+  const { addedLines, primaryAddedIds } = pairing;
+  const retained = plansRetainedLines
+    ? retainedPlanLinesForVisitEdit({ current, currentAddons, postedServiceId, addonsReplaced, renamed, pairing })
+    : { ids: [], names: [] };
+  const repatterned = current.is_recurring && !plansRetainedLines ? repatternedAddonLinesForVisitEdit({ lines, pairing }) : [];
   return {
     serviceIds: [...new Set([
       ...primaryAddedIds,
       ...addedLines.filter((l) => l.serviceId).map((l) => String(l.serviceId)),
-      ...retainedIds,
+      ...retained.ids,
       ...repatterned.filter((l) => l.serviceId).map((l) => String(l.serviceId)),
     ])],
     serviceTypes: [
@@ -11935,7 +11956,7 @@ function retiredGateInputsForVisitEdit({
       // pattern is the retired plan by name + cadence while its id is live —
       // the same shape POST / hands the gate for every add-on.
       ...addedLines.filter(named).map(labelOf),
-      ...retainedNames,
+      ...retained.names,
       ...repatterned.filter(named).map(labelOf),
     ],
   };
