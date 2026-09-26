@@ -168,14 +168,19 @@ function answerProjectReportQuestion({ question, project, payload, intent }) {
     || WHEN_SEE_AGAIN_RE.test(q)) {
     return answerNextVisit({ project, payload });
   }
+  // codex #4839 round-4 P2 (4109926460): explicit findings/observation
+  // cues outrank the treatment nouns below — "What did you find in the
+  // treated areas?" / "What did you observe while treating?" answer with
+  // the recorded findings, not just the treatment fields, even though both
+  // cues are present.
+  if (/\b(find|found|finding|findings|see|saw|observe|observed|activity|evidence|result|results)\b/.test(q)) {
+    return answerFindings({ project, typeCfg });
+  }
   if (/\b(treat|treats|treating|treated|treatment|treatments|product|products|use|used|appl(?:y|ies|ied|ying|ication|ications)|chemical|chemicals|spray|sprays|sprayed|spraying|bait|baits|baited|gallon|gallons)\b/.test(q)) {
     return answerTreatment({ project, typeCfg });
   }
   if (/\b(recommend(?:ation|ations)?|next step|advice|prep|do now|should i|do i need|need to do|do next)\b/.test(q)) {
     return answerRecommendations({ project });
-  }
-  if (/\b(find|found|finding|findings|see|saw|observe|observed|activity|evidence|result|results)\b/.test(q)) {
-    return answerFindings({ project, typeCfg });
   }
   if (/\b(follow|when|visit|next)\b/.test(q)) {
     return answerNextVisit({ project, payload });

@@ -131,6 +131,18 @@ describe('project report — every shipped chip answers its own category (AW-06)
     expect(answer).toMatch(/Seal the gap at the rear wall/i);
     expect(answer).not.toMatch(/Nothing further is scheduled/i);
   });
+
+  // codex #4839 round-4 P2 4109926460: explicit findings/observation cues
+  // outrank the treatment nouns even when the same question also names the
+  // treatment ("treated"/"treating").
+  test.each([
+    'What did you find in the treated areas?',
+    'What did you observe while treating?',
+  ])('"%s" answers with the recorded findings, not just the treatment fields', (question) => {
+    const answer = answerProjectReportQuestion({ question, project, payload });
+    expect(answer).toMatch(/Activity at the rear wall/i);
+    expect(answer).not.toMatch(/^Areas treated: Exterior perimeter/i);
+  });
 });
 
 describe('service report — every shipped chip answers its own category (AW-06)', () => {
@@ -405,5 +417,52 @@ describe('service report — every shipped chip answers its own category (AW-06)
     const answer = answerServiceReportQuestion({ question: 'What did you spray on the thin areas?', data: lawnData });
     expect(answer).toMatch(/Sources used: this service report/);
     expect(answer).not.toMatch(/Lawn snapshot summary|overall/i);
+  });
+
+  // --- codex #4839 round-4 P2 4109926453: post-treatment location question,
+  // motion word before the temporal phrase, as a single sentence (not
+  // padded with a second "How long ... go in" sentence) — locks in that the
+  // REENTRY_TEMPORAL_RE "can I go <location>" alternative already covers
+  // this exact wording without depending on a second sentence.
+  test.each([
+    'Can I go indoors after the application?',
+    'Can I go outside after the treatment?',
+  ])('post-treatment location question "%s" reaches re-entry on its own, with no second sentence', (question) => {
+    const answer = answerServiceReportQuestion({ question, data: pestData });
+    expect(answer).toBe('Treated areas are ready for normal use.');
+    expect(answer).not.toMatch(/Sources used: this service report/);
+  });
+
+  // --- codex #4839 round-4 P2 4109926455: lawn-trend subjects gated on the
+  // report actually carrying lawn data — on a pest report these words
+  // describe a FINDING, not a lawn score, and must reach answerFindings.
+  test.each([
+    'Where was the damage?',
+    'What color were the ants?',
+  ])('"%s" on a pest report reaches the findings answer, not the lawn-trend answer', (question) => {
+    const answer = answerServiceReportQuestion({ question, data: pestData });
+    expect(answer).toMatch(/Ant activity noted/i);
+    expect(answer).not.toMatch(/pressure index/i);
+  });
+
+  // --- codex #4839 round-4 P2 4109926456: findings cues override plural pet
+  // nouns, while a genuine pet re-entry question still reaches re-entry.
+  test('"Did you find ants near the pet bowls?" reaches the findings answer, not re-entry', () => {
+    const answer = answerServiceReportQuestion({ question: 'Did you find ants near the pet bowls?', data: pestData });
+    expect(answer).toMatch(/Ant activity noted/i);
+    expect(answer).not.toBe('Treated areas are ready for normal use.');
+  });
+
+  test('"When can my pets go out?" still reaches the re-entry answer', () => {
+    const answer = answerServiceReportQuestion({ question: 'When can my pets go out?', data: pestData });
+    expect(answer).toBe('Treated areas are ready for normal use.');
+  });
+
+  // --- codex #4839 round-4 P2 4109926457: appointment cues outrank a
+  // treatment inflection ("applying") in the same question.
+  test('"What are you applying at my next appointment?" answers the next appointment, not today\'s application', () => {
+    const answer = answerServiceReportQuestion({ question: 'What are you applying at my next appointment?', data: pestData, nextAppointment });
+    expect(answer).toMatch(/Your next appointment is/);
+    expect(answer).not.toMatch(/Sources used: this service report/);
   });
 });
