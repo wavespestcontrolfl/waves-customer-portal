@@ -733,6 +733,13 @@ describe('R5 owner ruling 2026-09-24: per-kind default deadlines', () => {
     },
   );
 
+  test('Codex #4816 r31: an unresolved clock suppresses the default only for the obligation whose quote states it', () => {
+    const item = (quote) => ({ party: 'waves', kind: 'callback', basis: 'request', due_at: null, due_text: null, timing_unverified: true, quote });
+    // "Call me at 3 and send the estimate": the flag covers the whole SMS.
+    expect(resolveDueDeadline(item('Call me at 3'), at)).toEqual({ due_at: null, due_basis: null });
+    expect(resolveDueDeadline({ ...item('send the estimate'), kind: 'send_estimate' }, at).due_basis).toBe('default_kind');
+  });
+
   test('Codex #4816 r28 (reverses r22): only the obligation\'s own quote can suppress the default deadline', () => {
     const item = (quote) => ({ party: 'waves', kind: 'callback', basis: 'request', due_at: null, due_text: null, quote });
     // Timing in the quote itself: undated.

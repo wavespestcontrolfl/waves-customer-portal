@@ -15,7 +15,7 @@ const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-re
 const { hashExtractionSource, recordExtractionAttempt, shouldSkipExtraction, TERMINAL_STATUSES } = require('./data-hygiene/source-extraction-store');
 const { stalePendingExtractionProposals, findPendingExtractionProposal, upsertSensitiveProposal, findSmsExtractionProposals, buildIdempotencyKey } = require('./data-hygiene/proposal-store');
 const { resolvePropertyPreferencesTarget, applyPropertyPreferenceValue } = require('./data-hygiene/property-preferences');
-const { VERSION, extractSmsOperations, explicitContactPreference, matchesExplicitAccessCode } = require('./sms-operational-extractor');
+const { VERSION, extractSmsOperations, explicitContactPreference, matchesExplicitAccessCode, statesClock } = require('./sms-operational-extractor');
 const { IRRIGATION_INPUT_FIELDS } = require('./irrigation-schedule-confirmation');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
 const { isSmsReaction } = require('./sms-intent');
@@ -347,7 +347,11 @@ function resolveDueDeadline(item, messageCreatedAt) {
   // me") would silently drop a real follow-up, while timing a shortened
   // quote omits only makes the default bell early. A missed bell is the
   // worse failure.
-  if (item.due_text || item.timing_unverified || STATED_TIMING.test(item.quote || '')) return { due_at: null, due_basis: null };
+  // timing_unverified is computed from every clock in the SMS; it speaks for
+  // this obligation only when its own quote states a clock ("Call me at 3
+  // and send the estimate" leaves the estimate its default — Codex #4816 r31).
+  const unresolvedClock = item.timing_unverified && statesClock(item.quote);
+  if (item.due_text || unresolvedClock || STATED_TIMING.test(item.quote || '')) return { due_at: null, due_basis: null };
   const hours = item.basis === 'promise' ? PROMISE_DEFAULT_DEADLINE_HOURS : DEFAULT_DEADLINE_HOURS[item.kind];
   if (hours == null) return { due_at: null, due_basis: null };
   return { due_at: new Date(new Date(messageCreatedAt).getTime() + hours * 3600000).toISOString(), due_basis: 'default_kind' };
