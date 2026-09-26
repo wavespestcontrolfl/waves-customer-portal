@@ -97,7 +97,17 @@ async function runInner({ now = new Date(), scope = null } = {}) {
     const ids = await require('./followup-sla-watcher').takeoverIds(db, list, now);
     return list.filter((r) => ids.has(r.id));
   };
-  if (scope === 'sla_takeover') rows = await takeoverScope(rows);
+  // The narrow scope holds only while the pager is healthy. If it is
+  // failing (or its health cannot be read), this sweep IS the failover and
+  // runs as the full watchdog, paging current misses too.
+  let takeover = scope === 'sla_takeover';
+  if (takeover) {
+    takeover = await require('./followup-sla-watcher').pagerHealthy(db, now).catch((err) => {
+      logger.warn(`[call-commitments-watchdog] pager health unreadable — running the full sweep: ${err.message}`);
+      return false;
+    });
+  }
+  if (takeover) rows = await takeoverScope(rows);
   // A promise a later record already kept must not ring: nothing stamps
   // fulfillment unless someone opens the queue or the panel, so refresh the
   // candidate calls here — the same cheap indexed lookups the queue route
@@ -122,7 +132,7 @@ async function runInner({ now = new Date(), scope = null } = {}) {
   }
   if (refreshed > 0) {
     rows = await listAllOpenWaves(now);
-    if (scope === 'sla_takeover') rows = await takeoverScope(rows);
+    if (takeover) rows = await takeoverScope(rows);
   }
   let candidates = commitments.selectOverdue(rows, { now }).filter((r) => !isInternalTestCustomerId(r.customer_id));
   // While the one-hour follow-up pager is live it owns the callback / quote
@@ -192,7 +202,7 @@ async function runInner({ now = new Date(), scope = null } = {}) {
       .update({ read_at: now, metadata: trx.raw("metadata || '{\"dedupeVersion\":\"retired\"}'::jsonb") });
     // A takeover-scoped sweep sees only a sliver of the backlog: it never
     // retires or re-mints the day's aggregate bell, which speaks for all of it.
-    const scoped = scope === 'sla_takeover';
+    const scoped = takeover;
     if (!overdue.length && scoped) return result;
     if (!overdue.length) {
       await noticeRows().whereRaw("metadata->>'dedupeKey' LIKE 'call-commitments-overdue:%'")

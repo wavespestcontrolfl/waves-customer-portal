@@ -220,9 +220,23 @@ test('the takeover-scoped sweep pages only the promises that just aged off the p
   listOpenCommitments.mockResolvedValue([row('aged'), row('other', { call_log_id: 'call-other' })]);
   const sla = require('../services/followup-sla-watcher');
   const spy = jest.spyOn(sla, 'takeoverIds').mockResolvedValue(new Set(['aged']));
+  const healthy = jest.spyOn(sla, 'pagerHealthy').mockResolvedValue(true);
   const result = await runCallCommitmentsWatchdog({ now: NOW, scope: 'sla_takeover' });
+  healthy.mockRestore();
   expect(result.overdue).toBe(1);
   expect(refreshFulfillment.mock.calls.map((c) => c[1])).toEqual(['call-aged']);
   expect(NotificationService.notifyAdmin.mock.calls.every((c) => !String(c[3].dedupeKey).startsWith('call-commitments-overdue:'))).toBe(true);
   spy.mockRestore();
+});
+
+test('when the pager is failing, the takeover sweep runs as the full watchdog and pages current misses', async () => {
+  listOpenCommitments.mockResolvedValue([row('current'), row('aged', { call_log_id: 'call-aged' })]);
+  const sla = require('../services/followup-sla-watcher');
+  const takeover = jest.spyOn(sla, 'takeoverIds').mockResolvedValue(new Set(['aged']));
+  const healthy = jest.spyOn(sla, 'pagerHealthy').mockResolvedValue(false);
+  const result = await runCallCommitmentsWatchdog({ now: NOW, scope: 'sla_takeover' });
+  expect(takeover).not.toHaveBeenCalled();
+  expect(result.overdue).toBe(2);
+  takeover.mockRestore();
+  healthy.mockRestore();
 });
