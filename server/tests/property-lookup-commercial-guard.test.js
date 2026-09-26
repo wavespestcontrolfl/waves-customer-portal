@@ -1406,7 +1406,7 @@ describe('unit-address lookup on an apartment building (GATE_UNIT_SCOPE_GUARDRAI
 });
 
 describe('unit-address lookup on a residential condo record (GATE_UNIT_SCOPE_GUARDRAILS)', () => {
-  // 2026-09-25: "4502 3rd St Cir West, Unit 242" — the listing typed the
+  // 2026-09-25: "210 Example Harbor Way, Unit 3C" — the listing typed the
   // record residential Condo, so the commercial unit verdict never ran and
   // the complex's pool, the association's 2,500 sf of turf, and the
   // building's 2 floors all landed in a 725 sf unit's quote.
@@ -1415,7 +1415,7 @@ describe('unit-address lookup on a residential condo record (GATE_UNIT_SCOPE_GUA
 
   function condoRecord(overrides = {}) {
     return {
-      formattedAddress: '4502 3rd St Cir W Apt 242, Bradenton, FL 34207',
+      formattedAddress: '210 Example Harbor Way Apt 3C, Sarasota, FL 34232',
       propertyType: 'Condo',
       unitCount: 1,
       squareFootage: 725,
@@ -1434,8 +1434,8 @@ describe('unit-address lookup on a residential condo record (GATE_UNIT_SCOPE_GUA
     treeDensity: 'HEAVY',
     waterProximity: 'ADJACENT',
   };
-  const unit = '4502 3rd St Cir West, Unit 242, Bradenton, FL 34207';
-  const bare = '4502 3rd St Cir West, Bradenton, FL 34207';
+  const unit = '210 Example Harbor Way, Unit 3C, Sarasota, FL 34232';
+  const bare = '210 Example Harbor Way, Sarasota, FL 34232';
 
   test('unit address: parcel-wide reads dropped, the unit\'s own sq ft kept, floor flagged', () => {
     const profile = buildEnrichedProfile(condoRecord(), parcelWideAi, null, null, null, null, unit);
@@ -1457,10 +1457,10 @@ describe('unit-address lookup on a residential condo record (GATE_UNIT_SCOPE_GUA
     expect(flag.reason).toMatch(/Condo — Upper/);
   });
 
-  test('"Apt. 242" and "#242" read the same as "Unit 242"', () => {
+  test('"Apt. 3C" and "#3C" read the same as "Unit 3C"', () => {
     for (const address of [
-      '4502 3rd St Cir W Apt. 242, Bradenton, FL 34207',
-      '4502 3rd St Cir W #242, Bradenton, FL 34207',
+      '210 Example Harbor Way Apt. 3C, Sarasota, FL 34232',
+      '210 Example Harbor Way #3C, Sarasota, FL 34232',
     ]) {
       const profile = buildEnrichedProfile(condoRecord(), parcelWideAi, null, null, null, null, address);
       expect({ address, unit: !!profile.residentialUnitLookup, stories: profile.stories })
@@ -1484,7 +1484,7 @@ describe('unit-address lookup on a residential condo record (GATE_UNIT_SCOPE_GUA
     expect(bareProfile.stories).toBe(2);
 
     const suite = buildEnrichedProfile(
-      condoRecord(), parcelWideAi, null, null, null, null, '4502 3rd St Cir W Suite 242, Bradenton, FL 34207',
+      condoRecord(), parcelWideAi, null, null, null, null, '210 Example Harbor Way Suite 3C, Sarasota, FL 34232',
     );
     expect(suite.residentialUnitLookup).toBeNull();
 

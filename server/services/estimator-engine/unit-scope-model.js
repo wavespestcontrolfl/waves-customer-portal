@@ -549,7 +549,7 @@ const RESIDENTIAL_CONDO_PRICING_TYPES = new Set(['condo_ground', 'condo_upper'])
  * Condo is the same one-unit quote — but it never reaches the commercial
  * verdict above, so the parcel-wide satellite reads (the complex's pool,
  * the association's turf and landscape) and the building's floor count
- * flowed straight into a unit quote (2026-09-25: a 725 sf "Unit 242"
+ * flowed straight into a unit quote (2026-09-25: a 725 sf condo unit
  * quoted with a pool, 2,500 sf of turf and 2 stories). Pure.
  */
 function residentialCondoUnitLookupVerdict({ address, category, pricingPropertyType }) {
