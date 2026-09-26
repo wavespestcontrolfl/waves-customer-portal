@@ -71,17 +71,165 @@ async function apiCall(method, path, body, signal) {
   return res.json();
 }
 
-// Every events POST is bounded by the run's deadline: a stalled request must
-// not keep processLead() pending past it.
-async function sendSessionEvents(sessionId, events, deadline) {
+// Every API request — session creation included — is bounded by the run's
+// deadline: a stalled request must not keep processLead() pending past it.
+async function apiCallWithinDeadline(method, path, body, sessionId, deadline) {
   const signal = AbortSignal.timeout(remainingMs(sessionId, deadline));
   try {
-    return await apiCall('POST', `/sessions/${sessionId}/events`, { events }, signal);
+    return await apiCall(method, path, body, signal);
   } catch (err) {
     if (signal.aborted) throw deadlineError(sessionId, deadline);
     throw err;
   }
 }
+
+function sendSessionEvents(sessionId, events, deadline) {
+  return apiCallWithinDeadline('POST', `/sessions/${sessionId}/events`, { events }, sessionId, deadline);
+}
+
+// Whatever the agent asks, one lead run makes at most MAX_TOOL_CALLS tool
+// calls, answers a tool use id once, and makes ONE reply decision: once a
+// text went out or the lead was queued for the owner, a further
+// send_lead_response / queue_for_adam is answered as skipped — a looping
+// session must never text a lead twice or alert the owner twice. The other
+// writes (estimate flag, saved report) likewise complete at most once. A
+// side effect counts as done only when it actually happened.
+const MAX_TOOL_CALLS = 20;
+const SIDE_EFFECTS = {
+  send_lead_response: { key: 'reply', done: (result) => result?.sent === true },
+  queue_for_adam: { key: 'reply', done: (result) => result?.queued === true },
+  flag_for_estimate: { key: 'flag_for_estimate', done: (result) => Boolean(result) && !result.error },
+  save_lead_response_report: { key: 'save_lead_response_report', done: (result) => Boolean(result) && !result.error },
+};
+
+// One classification per frame. The JSON `type` is authoritative: the SSE
+// `event:` line may be absent, and readSessionFrames then reports 'message'.
+function leadFrameKind(event, data) {
+  const type = data?.type || event;
+  if (type === 'agent.message' || event === 'assistant' || event === 'text') return 'text';
+  if (type === 'agent.custom_tool_use' || type === 'tool_use' || event === 'tool_use') return 'tool_use';
+  if (isSessionTerminal(event, data)) return 'end';
+  return isSessionError(event) ? 'error' : 'other';
+}
+
+function frameText(data) {
+  const blocks = Array.isArray(data?.content) ? data.content : [];
+  return (data?.text || '') + blocks.filter(block => block?.type === 'text').map(block => block.text).join('');
+}
+
+// Runs ONE lead tool call under the lead's send-safety policy and reports
+// { toolResult, failed, actionTaken }:
+//   - a side effect this lead already has (its reply decision, flag, report)
+//     is answered as skipped, never repeated;
+//   - with critical context missing, send_lead_response is converted into a
+//     queue_for_adam draft — no text goes out;
+//   - an open breaker fast-fails; any other call executes within the run
+//     deadline (a deadline expiry propagates, never becomes a tool error).
+async function runLeadToolCall({ toolName, toolInput, toolContext, deadline, criticalFailures, alreadyDone }) {
+  const { sessionId } = toolContext;
+  remainingMs(sessionId, deadline); // no tool starts after the deadline
+  logger.info(`[lead-agent] Tool: ${toolName}`);
+
+  let toolResult;
+  let failed = false;
+  let circuitOpen = false;
+  let toolError = null;
+  let actionTaken = null;
+  const toolStartedAt = Date.now();
+
+  if (alreadyDone) {
+    toolResult = { skipped: true, reason: `${toolName}: already done for this lead in this run` };
+  } else if (toolName === 'send_lead_response' && criticalFailures.length > 0) {
+    // Pre-send quality check: if critical context is missing, don't let the
+    // agent auto-send a personalized SMS. Queue the draft for human review
+    // without sending a generic customer acknowledgment.
+    logger.warn(`[lead-agent] Blocking auto-send — critical tool failures: ${criticalFailures.join(', ')}. Queueing draft for human review.`);
+    try {
+      const queued = await withinDeadline(executeLeadTool('queue_for_adam', {
+        lead_id: toolContext.leadId,
+        customer_id: toolContext.customerId,
+        reason: `Auto-send blocked — critical context tools failed (${criticalFailures.join(', ')}). Please review and follow up.`,
+        draft_response: toolInput.message || '',
+      }, toolContext), sessionId, deadline);
+      if (queued?.queued !== true) throw new Error(queued?.error || 'Draft was not saved');
+      toolResult = {
+        ...queued,
+        sent: false,
+        queued: true,
+        autoSendSuppressed: true,
+        note: 'Queued for human review due to missing context; no fallback SMS sent.',
+      };
+      if (isToolFailure(queued)) {
+        failed = true;
+        toolError = queued.error || 'Owner alert delivery failed';
+        if (!queued.validationError) leadToolBreaker.recordFailure();
+      } else {
+        actionTaken = 'auto_send_suppressed_queued';
+      }
+    } catch (err) {
+      if (err?.code === 'session_timeout') throw err;
+      toolResult = { error: `Human-review queue failed: ${err.message}` };
+      failed = true;
+      logger.error(`[lead-agent] Human-review queue failed: ${err.message}`);
+    }
+  } else if (leadToolBreaker.isTripped()) {
+    toolResult = leadToolBreaker.fastFailResult();
+    failed = true;
+    circuitOpen = true;
+    toolError = toolResult.message;
+    if (CRITICAL_CONTEXT_TOOLS.has(toolName)) criticalFailures.push(toolName);
+  } else {
+    try {
+      toolResult = await withinDeadline(executeLeadTool(toolName, toolInput, toolContext), sessionId, deadline);
+      if (isToolFailure(toolResult)) {
+        failed = true;
+        toolError = toolResult.error || 'tool returned error';
+        if (!toolResult.validationError) leadToolBreaker.recordFailure();
+        if (CRITICAL_CONTEXT_TOOLS.has(toolName)) criticalFailures.push(toolName);
+      } else {
+        leadToolBreaker.recordSuccess();
+        // Gate auto_sent on actual delivery, not just absence-of-error.
+        // send_lead_response distinguishes:
+        //   { sent: true, ... }                 — provider accepted (auto_sent)
+        //   { sent: false, blocked: true, ... } — wrapper-policy block,
+        //                                        non-failure, NOT auto_sent
+        //   { sent: false, failed: true, ... }  — provider failure
+        //                                        (caught by isToolFailure above)
+        if (toolName === 'send_lead_response' && toolResult?.sent === true) actionTaken = 'auto_sent';
+        if (toolName === 'queue_for_adam' && toolResult?.queued === true) actionTaken = 'queued_for_adam';
+      }
+    } catch (err) {
+      if (err?.code === 'session_timeout') throw err;
+      toolResult = { error: `Tool failed: ${err.message}` };
+      failed = true;
+      toolError = err.message;
+      leadToolBreaker.recordFailure();
+      if (CRITICAL_CONTEXT_TOOLS.has(toolName)) criticalFailures.push(toolName);
+      logger.error(`[lead-agent] Tool ${toolName} error: ${err.message}`);
+    }
+  }
+
+  recordToolEvent({
+    source: 'lead-response-agent',
+    context: 'lead-response',
+    toolName,
+    success: !failed,
+    durationMs: Date.now() - toolStartedAt,
+    circuitOpen,
+    errorMessage: toolError,
+  });
+  return { toolResult, failed, actionTaken };
+}
+
+// Lead fields added to the kickoff prompt when present, in this order.
+const OPTIONAL_PROMPT_FIELDS = [
+  ['Message/Service Interest', 'message'],
+  ['Address', 'address'],
+  ['City', 'city'],
+  ['Lead Source', 'leadSource'],
+  ['Page URL', 'pageUrl'],
+  ['Form', 'formName'],
+];
 
 const DEFAULT_LEAD_AGENT_TIMEOUT_MS = 180000;
 
@@ -220,12 +368,9 @@ const LeadResponseAgent = {
     prompt += `Customer ID: ${lead.customerId}\n`;
     prompt += `Name: ${lead.name}\n`;
     prompt += `Phone: ${lead.phone}\n`;
-    if (lead.message) prompt += `Message/Service Interest: ${lead.message}\n`;
-    if (lead.address) prompt += `Address: ${lead.address}\n`;
-    if (lead.city) prompt += `City: ${lead.city}\n`;
-    if (lead.leadSource) prompt += `Lead Source: ${lead.leadSource}\n`;
-    if (lead.pageUrl) prompt += `Page URL: ${lead.pageUrl}\n`;
-    if (lead.formName) prompt += `Form: ${lead.formName}\n`;
+    for (const [label, key] of OPTIONAL_PROMPT_FIELDS) {
+      if (lead[key]) prompt += `${label}: ${lead[key]}\n`;
+    }
     prompt += `\nTime is ${new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })} ET.`;
     prompt += `\n\nFollow your workflow: analyze → gather context → draft response → decide auto-send vs queue → set up follow-up → save report.`;
 
@@ -235,15 +380,15 @@ const LeadResponseAgent = {
     let sessionEnded = false;
     let openedStream = null;
     try {
-      const session = await apiCall('POST', '/sessions', {
+      const deadline = Date.now() + leadAgentTimeoutMs();
+      const session = await apiCallWithinDeadline('POST', '/sessions', {
         agent: LEAD_AGENT_ID,
         environment_id: LEAD_AGENT_ENVIRONMENT_ID,
-      });
+      }, 'new session', deadline);
 
       sessionId = session.id;
       logger.info(`[lead-agent] Session ${sessionId} for lead ${lead.leadId}`);
 
-      const deadline = Date.now() + leadAgentTimeoutMs();
       // Open the stream first — the kickoff message is posted only once the
       // SSE connection is live, so no early event is emitted before we're
       // listening for it.
@@ -258,136 +403,48 @@ const LeadResponseAgent = {
       let toolsExecuted = [];
       let actionTaken = null;
       const criticalFailures = [];
+      const answeredToolUseIds = new Set();
+      const completedSideEffects = new Set();
+      let toolCalls = 0;
 
       for await (const { event, data } of readOpenedStream(openedStream)) {
-        // Agent text arrives as `agent.message` (content blocks); the SSE
-        // `event:` line may be absent, so the JSON `type` is authoritative.
-        if (event === 'assistant' || event === 'text' || event === 'agent.message' || data?.type === 'agent.message') {
-          if (data.text) report += data.text;
-          if (data.content) {
-            for (const block of data.content) {
-              if (block.type === 'text') report += block.text;
-            }
-          }
-        }
-
-        if (
-          event === 'tool_use' ||
-          event === 'agent.custom_tool_use' ||
-          data?.type === 'tool_use' ||
-          data?.type === 'agent.custom_tool_use'
-        ) {
+        const kind = leadFrameKind(event, data);
+        if (kind === 'text') report += frameText(data);
+        else if (kind === 'tool_use') {
           const toolName = data.name;
-          const toolInput = data.input || {};
           const toolUseId = data.id;
-          const toolContext = { leadId: lead.leadId, customerId: lead.customerId, sessionId, toolUseId };
-
-          remainingMs(sessionId, openedStream.deadline); // no tool starts after the deadline
-          logger.info(`[lead-agent] Tool: ${toolName}`);
-
-          let toolResult;
-          let failed = false;
-          let circuitOpen = false;
-          let toolError = null;
-          const toolStartedAt = Date.now();
-
-          // Pre-send quality check: if critical context is missing, don't
-          // let the agent auto-send a personalized SMS. Queue the draft for
-          // human review without sending a generic customer acknowledgment.
-          if (toolName === 'send_lead_response' && criticalFailures.length > 0) {
-            logger.warn(`[lead-agent] Blocking auto-send — critical tool failures: ${criticalFailures.join(', ')}. Queueing draft for human review.`);
-            try {
-              const queued = await withinDeadline(executeLeadTool('queue_for_adam', {
-                lead_id: lead.leadId,
-                customer_id: lead.customerId,
-                reason: `Auto-send blocked — critical context tools failed (${criticalFailures.join(', ')}). Please review and follow up.`,
-                draft_response: toolInput.message || '',
-              }, toolContext), sessionId, openedStream.deadline);
-              if (queued?.queued !== true) throw new Error(queued?.error || 'Draft was not saved');
-              toolResult = {
-                ...queued,
-                sent: false,
-                queued: true,
-                autoSendSuppressed: true,
-                note: 'Queued for human review due to missing context; no fallback SMS sent.',
-              };
-              if (isToolFailure(queued)) {
-                failed = true;
-                toolError = queued.error || 'Owner alert delivery failed';
-                if (!queued.validationError) leadToolBreaker.recordFailure();
-              } else {
-                actionTaken = 'auto_send_suppressed_queued';
-              }
-            } catch (err) {
-              if (err?.code === 'session_timeout') throw err;
-              toolResult = { error: `Human-review queue failed: ${err.message}` };
-              failed = true;
-              logger.error(`[lead-agent] Human-review queue failed: ${err.message}`);
-            }
-          } else if (leadToolBreaker.isTripped()) {
-            toolResult = leadToolBreaker.fastFailResult();
-            failed = true;
-            circuitOpen = true;
-            toolError = toolResult.message;
-            if (CRITICAL_CONTEXT_TOOLS.has(toolName)) criticalFailures.push(toolName);
-          } else {
-            try {
-              toolResult = await withinDeadline(executeLeadTool(toolName, toolInput, toolContext), sessionId, openedStream.deadline);
-              if (isToolFailure(toolResult)) {
-                failed = true;
-                toolError = toolResult.error || 'tool returned error';
-                if (!toolResult.validationError) leadToolBreaker.recordFailure();
-                if (CRITICAL_CONTEXT_TOOLS.has(toolName)) criticalFailures.push(toolName);
-              } else {
-                leadToolBreaker.recordSuccess();
-                // Gate auto_sent on actual delivery, not just absence-of-error.
-                // send_lead_response now distinguishes:
-                //   { sent: true, ... }                 — provider accepted (auto_sent)
-                //   { sent: false, blocked: true, ... } — wrapper-policy block,
-                //                                        non-failure, NOT auto_sent
-                //   { sent: false, failed: true, ... }  — provider failure
-                //                                        (caught by isToolFailure above)
-                if (toolName === 'send_lead_response' && toolResult && toolResult.sent === true) {
-                  actionTaken = 'auto_sent';
-                }
-                if (toolName === 'queue_for_adam' && toolResult?.queued === true) actionTaken = 'queued_for_adam';
-              }
-            } catch (err) {
-              if (err?.code === 'session_timeout') throw err;
-              toolResult = { error: `Tool failed: ${err.message}` };
-              failed = true;
-              toolError = err.message;
-              leadToolBreaker.recordFailure();
-              if (CRITICAL_CONTEXT_TOOLS.has(toolName)) criticalFailures.push(toolName);
-              logger.error(`[lead-agent] Tool ${toolName} error: ${err.message}`);
-            }
+          if (answeredToolUseIds.has(toolUseId)) continue; // a repeated request for a call already answered
+          answeredToolUseIds.add(toolUseId);
+          if (++toolCalls > MAX_TOOL_CALLS) {
+            throw Object.assign(new Error(`session ${sessionId} exceeded ${MAX_TOOL_CALLS} tool calls`), { code: 'max_tool_calls' });
           }
-
-          recordToolEvent({
-            source: 'lead-response-agent',
-            context: 'lead-response',
+          const sideEffect = SIDE_EFFECTS[toolName];
+          const outcome = await runLeadToolCall({
             toolName,
-            success: !failed,
-            durationMs: Date.now() - toolStartedAt,
-            circuitOpen,
-            errorMessage: toolError,
+            toolInput: data.input || {},
+            toolContext: { leadId: lead.leadId, customerId: lead.customerId, sessionId, toolUseId },
+            deadline: openedStream.deadline,
+            criticalFailures,
+            alreadyDone: Boolean(sideEffect) && completedSideEffects.has(sideEffect.key),
           });
-
+          if (outcome.actionTaken) actionTaken = outcome.actionTaken;
+          if (!outcome.failed && sideEffect?.done(outcome.toolResult)) completedSideEffects.add(sideEffect.key);
+          if (outcome.actionTaken === 'auto_send_suppressed_queued') completedSideEffects.add('reply');
           toolsExecuted.push(toolName);
 
           await sendSessionEvents(sessionId, [{
             type: 'user.custom_tool_result',
             custom_tool_use_id: toolUseId,
-            content: [{ type: 'text', text: JSON.stringify(toolResult) }],
-            ...(failed ? { is_error: true } : {}),
+            content: [{ type: 'text', text: JSON.stringify(outcome.toolResult) }],
+            ...(outcome.failed ? { is_error: true } : {}),
           }], openedStream.deadline);
-        }
-
-        // session.status_idle is NOT terminal on its own (it arrives with
-        // requires_action while the agent waits for the tool result sent
-        // above) — the shared predicate reads only real terminals.
-        if (isSessionTerminal(event, data)) { sessionEnded = true; break; }
-        if (isSessionError(event)) {
+        } else if (kind === 'end') {
+          // session.status_idle is NOT terminal on its own (it arrives with
+          // requires_action while the agent waits for the tool result sent
+          // above) — the shared predicate reads only real terminals.
+          sessionEnded = true;
+          break;
+        } else if (kind === 'error') {
           logger.error(`[lead-agent] Agent error: ${JSON.stringify(data)}`);
           failure = 'session_error_event';
           break;

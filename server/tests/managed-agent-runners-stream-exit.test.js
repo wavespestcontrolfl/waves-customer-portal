@@ -335,6 +335,69 @@ describe('lead-response-agent — a status_idle event is not terminal on its own
     expect(recorded()).toMatchObject({ failure: expect.objectContaining({ code: 'session_timeout' }) });
   });
 
+  const leadTool = (id, name, input = {}) => ({ event: 'agent.custom_tool_use', data: { id, name, input } });
+
+  it('a session-creation POST that stalls ends at the deadline — no paid session, nothing billed', async () => {
+    process.env.LEAD_AGENT_TIMEOUT_MS = '50';
+    global.fetch = jest.fn((url, opts = {}) => new Promise((_, reject) => opts.signal.addEventListener('abort', () => reject(opts.signal.reason))));
+    expect(await run(load(path))).toBeNull();
+    expect(mockRecordSessionUsage).not.toHaveBeenCalled();
+  });
+
+  it('a repeated request for a tool use id already answered is not executed again', async () => {
+    mockExecuteLeadTool.mockResolvedValue({ ok: true });
+    global.fetch = fetchFor([leadTool('tool-1', 'get_lead_details'), leadTool('tool-1', 'get_lead_details'), idle('end_turn')]);
+    await run(load(path));
+    expect(mockExecuteLeadTool).toHaveBeenCalledTimes(1);
+  });
+
+  it('a lead gets at most ONE text per run — a second send_lead_response is answered as skipped', async () => {
+    mockExecuteLeadTool.mockImplementation(async (name) => (name === 'send_lead_response' ? { sent: true } : { ok: true }));
+    global.fetch = fetchFor([
+      leadTool('tool-1', 'send_lead_response', { message: 'First' }),
+      leadTool('tool-2', 'send_lead_response', { message: 'Second' }),
+      idle('end_turn'),
+    ]);
+    const result = await run(load(path));
+    expect(mockExecuteLeadTool.mock.calls.filter(([name]) => name === 'send_lead_response')).toHaveLength(1);
+    expect(result).toMatchObject({ actionTaken: 'auto_sent' });
+  });
+
+  it('once the lead is queued for the owner, the agent cannot also text it (one reply decision)', async () => {
+    mockExecuteLeadTool.mockImplementation(async (name) => (name === 'queue_for_adam' ? { queued: true } : { sent: true }));
+    global.fetch = fetchFor([
+      leadTool('tool-1', 'queue_for_adam', { draft_response: 'Draft' }),
+      leadTool('tool-2', 'send_lead_response', { message: 'Text' }),
+      idle('end_turn'),
+    ]);
+    const result = await run(load(path));
+    expect(mockExecuteLeadTool.mock.calls.map(([name]) => name)).toEqual(['queue_for_adam']);
+    expect(result).toMatchObject({ actionTaken: 'queued_for_adam' });
+  });
+
+  it('a blocked text does not use up the reply — the agent may still queue it for the owner', async () => {
+    mockExecuteLeadTool.mockImplementation(async (name) => (name === 'send_lead_response' ? { sent: false, blocked: true } : { queued: true }));
+    global.fetch = fetchFor([
+      leadTool('tool-1', 'send_lead_response', { message: 'Text' }),
+      leadTool('tool-2', 'queue_for_adam', { draft_response: 'Draft' }),
+      idle('end_turn'),
+    ]);
+    const result = await run(load(path));
+    expect(mockExecuteLeadTool.mock.calls.map(([name]) => name)).toEqual(['send_lead_response', 'queue_for_adam']);
+    expect(result).toMatchObject({ actionTaken: 'queued_for_adam' });
+  });
+
+  it('a session that asks for more than 20 tool calls is stopped (max_tool_calls)', async () => {
+    mockExecuteLeadTool.mockResolvedValue({ ok: true });
+    global.fetch = fetchFor([
+      ...Array.from({ length: 21 }, (_, i) => leadTool(`tool-${i}`, 'get_lead_details')),
+      idle('end_turn'),
+    ]);
+    expect(await run(load(path))).toBeNull();
+    expect(mockExecuteLeadTool).toHaveBeenCalledTimes(20);
+    expect(recorded()).toMatchObject({ failure: expect.objectContaining({ code: 'max_tool_calls' }) });
+  });
+
   it('a kickoff POST that fails closes the already-open stream', async () => {
     const { fetchMock, seen } = fetchWithOpenStream({
       onEventsPost: () => Promise.resolve({ ok: false, status: 500, text: async () => 'boom' }),
