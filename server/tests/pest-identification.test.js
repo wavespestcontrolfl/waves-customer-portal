@@ -94,6 +94,10 @@ describe('mergeModelResults', () => {
     const roachSplit = mergeModelResults(claude({ best_match: 'american cockroach' }), claude({ best_match: 'german cockroach' }));
     expect(_test.aggregateIdentification([split, blurry]).group).toBe('ants');
     expect(_test.aggregateIdentification([split, roachSplit]).group).toBeNull();
+    // A cross-group model conflict is a disagreement, not a blurry photo.
+    const roachSpiderConflict = mergeModelResults(claude({ best_match: 'american cockroach' }), claude({ best_match: 'wolf spider', category: 'arachnid' }));
+    expect(roachSpiderConflict).toMatchObject({ agreement: 'conflict', category: 'other' });
+    expect(_test.aggregateIdentification([split, roachSpiderConflict]).group).toBeNull();
   });
 
   test('a group-only photo from another group disputes a species winner', () => {

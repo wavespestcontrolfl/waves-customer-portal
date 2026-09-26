@@ -424,7 +424,7 @@ async function callOpenAIVision(base64Image, mimeType) {
       maxTokens: 8192,
       reasoningEffort: 'medium',
       timeoutMs: OPENAI_VISION_TIMEOUT_MS,
-      laneId: 'pest_identification',
+      laneId: 'pest_id',
       policyLabel: policy.name,
     });
     if (!result.ok || !result.json) {
@@ -494,7 +494,7 @@ function escalateBelow() {
 
 function isRisky(entry) {
   return !!entry && !!(entry.inspection_required || entry.safety.stinging
-    || entry.safety.venomous || entry.safety.structural_threat);
+    || entry.safety.venomous || entry.safety.structural_threat || entry.safety.disease_vector);
 }
 
 // Unsure = the score is under the bar (with no usable score, anything short of
@@ -576,7 +576,19 @@ function mergeModelResults(openai, gemini) {
     }
     const single = a.match ? a : (b.match ? b : null);
     if (single) {
-      return { ...base, entry: single.match, confidence: downgrade(single.confidence), category: single.match.category, agreement: 'single_model' };
+      // One model named a library species, the other did not. Only an
+      // inconclusive read (nothing identifiable) leaves that species standing;
+      // naming something else, calling it not-a-pest, or another category
+      // disagrees with it and collapses like any conflict (Codex #4865 r2).
+      const other = single === a ? b : a;
+      const inconclusive = normalizeName(other.raw.best_match) === 'unidentifiable'
+        || (other.category === 'other' && other.confidence === 'low');
+      if (inconclusive) {
+        return { ...base, entry: single.match, confidence: downgrade(single.confidence), category: single.match.category, agreement: 'single_model' };
+      }
+      const otherCategory = other.notAPest ? 'not_a_pest' : other.category;
+      const category = otherCategory === single.match.category ? otherCategory : 'other';
+      return { ...base, entry: null, confidence: 'low', category, agreement: 'conflict' };
     }
     const category = a.category === b.category ? a.category : 'other';
     const notAPest = a.notAPest && b.notAPest;
@@ -617,7 +629,8 @@ function aggregateIdentification(perPhoto) {
     // A group survives only when every photo agrees on it (or showed nothing
     // usable): two models that split on the species still agree it's an ant.
     const groups = [...new Set(perPhoto.map((r) => r.group).filter(Boolean))];
-    const group = groups.length === 1 && perPhoto.every((r) => r.group === groups[0] || r.category === 'other')
+    const group = groups.length === 1
+      && perPhoto.every((r) => r.group === groups[0] || (r.category === 'other' && r.agreement !== 'conflict'))
       ? groups[0] : null;
     return {
       entry: null,

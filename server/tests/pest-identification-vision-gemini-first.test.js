@@ -74,7 +74,7 @@ describe('analyzePhoto — Gemini first, ChatGPT only for a second look', () => 
     expect(payload).toMatchObject({
       images: [{ data: 'base64photo', mimeType: 'image/png' }],
       jsonMode: true,
-      laneId: 'pest_identification',
+      laneId: 'pest_id',
       policyLabel: 'photoIdVision',
     });
     expect(payload.timeoutMs).toBeGreaterThan(0);
@@ -122,6 +122,15 @@ describe('analyzePhoto — Gemini first, ChatGPT only for a second look', () => 
 
     expect(mockDispatch).toHaveBeenCalledTimes(1);
     expect(result.openai).toMatchObject({ best_match: 'ghost ant' });
+  });
+
+  it('a disease-carrying runner-up counts as a different risk', async () => {
+    global.fetch = jest.fn().mockResolvedValue(geminiResponse({ ...GEMINI_ID, best_match: 'silverfish', alternates: ['american cockroach'] }));
+    openaiAnswers({ ...GEMINI_ID, best_match: 'silverfish' });
+
+    await analyzePhoto('base64photo', 'image/jpeg');
+
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
   });
 
   it('a runner-up of the same risk does not escalate', async () => {
@@ -188,6 +197,21 @@ describe('merging the ladder\'s results', () => {
     const merged = mergeModelResults({ ...GEMINI_ID, confidence: 'high' }, { ...GEMINI_ID, confidence: 'moderate' });
     expect(merged.agreement).toBe('match');
     expect(merged.confidence).toBe('moderate');
+  });
+
+  it.each([
+    ['names something outside the library', { ...OPENAI_ID, best_match: 'white-footed ant' }, 'insect'],
+    ['calls it not a pest', { ...OPENAI_ID, best_match: 'march fly', category: 'not_a_pest', not_a_pest: true }, 'other'],
+    ['puts it in another category', { ...OPENAI_ID, best_match: 'springtail', category: 'other', confidence: 'moderate' }, 'other'],
+  ])('a second look that %s disagrees: no species survives', (_label, openai, category) => {
+    const merged = mergeModelResults(openai, { ...GEMINI_ID, confidence: 'moderate' });
+    expect(merged).toMatchObject({ entry: null, confidence: 'low', category, agreement: 'conflict' });
+  });
+
+  it('an inconclusive second look leaves the named species, downgraded as a lone answer', () => {
+    const unidentifiable = { ...OPENAI_ID, best_match: 'unidentifiable', category: 'other', confidence: 'low' };
+    expect(mergeModelResults(unidentifiable, GEMINI_ID)).toMatchObject({ agreement: 'single_model', confidence: 'moderate' });
+    expect(mergeModelResults(unidentifiable, GEMINI_ID).entry.slug).toBe('ghost-ant');
   });
 
   it('two different species of one group keep only the group, at low confidence', () => {
