@@ -66,6 +66,10 @@ describe('termite annual renewal charge', () => {
         // Codex round-2 P1 backstop pass — a no-op stub by default so the
         // sweep's own try/catch never masks a real assertion below.
         reconcileParentRenewedStamps: jest.fn(reconcileParentRenewedStampsImpl || (async () => ({ scanned: 0, stamped: 0 }))),
+        // Codex round-7 P1: a transparent pass-through — the REAL advisory
+        // lock is annual-prepay-renewals.js's own concern (tested there);
+        // this suite only needs the callback to actually run.
+        withParentDecisionLock: jest.fn((termId, fn) => fn()),
       };
       return actual;
     });
@@ -156,6 +160,19 @@ describe('termite annual renewal charge', () => {
   function makeMintTrx({ parent, existingSuccessor = undefined, peek } = {}) {
     const parentUpdate = jest.fn().mockResolvedValue(1);
     const trx = jest.fn((table) => {
+      if (table === 'invoices') {
+        // Codex round-7 P1: resolveParentEligibility's own paid-and-not-
+        // refunded read, whenever the parent carries a linked invoice and
+        // its status already passed the allow-list's status gate — 'paid'
+        // by default so an ordinary 'active' parent (baseParent()'s own
+        // shape) mints normally; a test exercising the refund race passes
+        // its OWN parent without a prepay_invoice_id, or overrides this
+        // via a fresh makeMintTrx if it ever needs the unpaid shape.
+        return { where: jest.fn().mockReturnValue({ first: jest.fn().mockResolvedValue({ status: 'paid', paid_at: new Date('2025-09-01T00:00:00Z') }) }) };
+      }
+      if (table === 'payments') {
+        return { whereRaw: jest.fn().mockReturnValue({ first: jest.fn().mockResolvedValue(undefined) }) };
+      }
       if (table !== 'annual_prepay_terms') throw new Error(`unexpected table ${table}`);
       return {
         where: jest.fn((filter) => {
@@ -592,22 +609,54 @@ describe('termite annual renewal charge', () => {
 
   // ---- charge decision --------------------------------------------------
 
-  function makeClaimConn(claimResult = 1) {
+  // Codex round-7 P1: decideAndCharge now opens with checkStillEligibleForRenewalAction
+  // — a PLAIN (non-forUpdate) `.where({id}).first()` lookup of the successor
+  // AND (when it has a parent) the parent, on the OUTER conn — before ANY
+  // of the no_consent/no_method/surcharge_not_authorized fallback skips.
+  // Defaults resolve to fresh, fully-eligible copies of baseSuccessor()/
+  // baseParent() so every EXISTING skip-branch test keeps passing
+  // unchanged; a test that needs the up-front check to itself fail passes
+  // its own successor/parent override.
+  function makeClaimConn({
+    claimResult = 1,
+    successor = baseSuccessor(),
+    parent = baseParent(),
+  } = {}) {
     const claimUpdate = jest.fn().mockResolvedValue(claimResult);
-    // Codex round-4 P1: decideAndCharge's own pre-fence skips now ALSO
-    // stamp renewal_charge_skipped_at (stampRenewalChargeSkip) — a
-    // SEPARATE whereNull/update chain on the same table.
     const skipStampUpdate = jest.fn().mockResolvedValue(1);
     const conn = jest.fn((table) => {
+      if (table === 'invoices') {
+        // ID-aware: the PARENT's invoice (resolveParentEligibility's own
+        // paid-and-not-refunded read) reads paid; the SUCCESSOR's OWN
+        // invoice (checkStillEligibleForRenewalAction's "still open" read)
+        // reads open — the two must never share one fixed answer.
+        return {
+          where: jest.fn((filter) => ({
+            first: jest.fn().mockResolvedValue(
+              parent && filter?.id === parent.prepay_invoice_id
+                ? { status: 'paid', paid_at: new Date('2025-09-01T00:00:00Z') }
+                : { status: 'sent' },
+            ),
+          })),
+        };
+      }
+      if (table === 'payments') {
+        // No refund on file — parentInvoicePaidAndNotFullyRefunded's own
+        // ledger check, run only once the invoice above reads paid.
+        return { whereRaw: jest.fn().mockReturnValue({ first: jest.fn().mockResolvedValue(undefined) }) };
+      }
       if (table !== 'annual_prepay_terms') throw new Error(`unexpected table ${table}`);
       return {
-        where: jest.fn().mockReturnValue({
+        where: jest.fn((filter) => ({
+          first: jest.fn().mockResolvedValue(
+            filter?.id === successor.id ? successor : (parent && filter?.id === parent.id ? parent : undefined),
+          ),
           whereNull: jest.fn((col) => {
             if (col === 'renewal_charge_attempted_at') return { update: claimUpdate };
             if (col === 'renewal_charge_skipped_at') return { update: skipStampUpdate };
             throw new Error(`unexpected whereNull(${col})`);
           }),
-        }),
+        })),
       };
     });
     return { conn, claimUpdate, skipStampUpdate };
@@ -667,24 +716,38 @@ describe('termite annual renewal charge', () => {
       throw new Error(`unexpected table ${table} in eligibility trx`);
     });
     // Codex round-4 P1: decideAndCharge's own stampRenewalChargeSkip runs
-    // on the OUTER conn (never trx) for an 'ineligible' outcome.
+    // on the OUTER conn (never trx) for an 'ineligible' outcome. Codex
+    // round-7 P1: the OUTER conn is ALSO where checkStillEligibleForRenewalAction
+    // (the up-front re-validation) and withParentDecisionLock's own
+    // pre-Stripe parent re-check run their PLAIN (non-forUpdate)
+    // successor/parent lookups — a `.first()` chain alongside the
+    // existing `.whereNull().update()` skip-stamp chain, on the SAME
+    // `where()` call.
     const skipStampUpdate = jest.fn().mockResolvedValue(1);
+    // The FIRST read of the successor's own invoice on the outer conn is
+    // checkStillEligibleForRenewalAction's "is it still open" check
+    // (before ANY customer-facing action) — it must see the SAME
+    // still-open shape eligibilityInvoice already represents inside the
+    // trx. Only the SECOND read (decideAndCharge's own post-charge
+    // classification, reached only once a charge actually ran) sees
+    // freshInvoice.
+    const outerInvoiceFirst = jest.fn().mockResolvedValueOnce(eligibilityInvoice);
+    outerInvoiceFirst.mockImplementation(() => (freshInvoiceError ? Promise.reject(freshInvoiceError) : Promise.resolve(freshInvoice)));
     const conn = jest.fn((table) => {
       if (table === 'invoices') {
-        return {
-          where: jest.fn().mockReturnValue({
-            first: freshInvoiceError ? jest.fn().mockRejectedValue(freshInvoiceError) : jest.fn().mockResolvedValue(freshInvoice),
-          }),
-        };
+        return { where: jest.fn().mockReturnValue({ first: outerInvoiceFirst }) };
       }
       if (table === 'annual_prepay_terms') {
         return {
-          where: jest.fn().mockReturnValue({
+          where: jest.fn((filter) => ({
+            first: jest.fn().mockResolvedValue(
+              filter?.id === successor.id ? successor : (parent && filter?.id === parent.id ? parent : undefined),
+            ),
             whereNull: jest.fn((col) => {
               expect(col).toBe('renewal_charge_skipped_at');
               return { update: skipStampUpdate };
             }),
-          }),
+          })),
         };
       }
       throw new Error(`unexpected table ${table} on outer conn`);
@@ -1268,6 +1331,12 @@ describe('termite annual renewal charge', () => {
     // exercise the retirement branch.
     freshSuccessor = { status: 'payment_pending', prepay_invoice_id: null },
     freshInvoice = null,
+    // Codex round-7 P1: resolveLapseVoidEligibility now ALSO re-checks the
+    // PARENT (under this SAME lock, before ever voiding) when
+    // freshSuccessor.renewed_from_term_id is set. Default: undecided/live
+    // (the normal case) so it never blocks the happy path unless a test
+    // explicitly passes a decided freshParent.
+    freshParent = { status: 'active', renewal_decision: null },
   } = {}) {
     const startedUpdate = jest.fn().mockResolvedValue(1);
     const completedUpdate = jest.fn().mockResolvedValue(1);
@@ -1286,10 +1355,23 @@ describe('termite annual renewal charge', () => {
     // Codex round-5 P0: assertNoInvoiceChargeReconciliationPending is now
     // folded INTO this same transaction (run against `trx`, not the outer
     // `conn`) — a single stable `trx` (not re-created per call) so tests
-    // can assert against it directly.
+    // can assert against it directly. Codex round-7 P1: the trx's
+    // `annual_prepay_terms` lookup is filter-aware — the successor's own
+    // id resolves to freshSuccessor, the successor's renewed_from_term_id
+    // resolves to freshParent.
     const trx = jest.fn((table) => {
       if (table === 'annual_prepay_terms') {
-        return { where: jest.fn().mockReturnValue({ forUpdate: jest.fn().mockReturnValue({ first: jest.fn().mockResolvedValue(freshSuccessor) }) }) };
+        return {
+          where: jest.fn((filter) => ({
+            forUpdate: jest.fn().mockReturnValue({
+              first: jest.fn().mockResolvedValue(
+                filter && freshSuccessor.renewed_from_term_id && filter.id === freshSuccessor.renewed_from_term_id
+                  ? freshParent
+                  : freshSuccessor,
+              ),
+            }),
+          })),
+        };
       }
       if (table === 'invoices') {
         return { where: jest.fn().mockReturnValue({ first: jest.fn().mockResolvedValue(freshInvoice) }) };
@@ -1405,6 +1487,76 @@ describe('termite annual renewal charge', () => {
       expect(raiseTermiteRetrievalTask).not.toHaveBeenCalled();
       expect(recordDecision).not.toHaveBeenCalled();
       expect(completedUpdate).toHaveBeenCalledWith(expect.objectContaining({ renewal_lapse_outcome: 'retired_settled' }));
+    });
+
+    // Codex round-7 P1 (item 5): a crash right AFTER voidInvoice's own sync
+    // flips the successor to 'cancelled' (move 9, renewal_decision IS
+    // NULL) — but BEFORE retrieval/the parent decision ran — must CONTINUE
+    // the sequence (voidInvoice self-heals as a no-op, then retrieval +
+    // parent decision + complete), never be misread as "settled by
+    // something else" and retired with the retrieval/decision skipped.
+    test('P1: a crash after voidInvoice committed (successor cancelled, invoice void, renewal_decision NULL) resumes and completes — never retired', async () => {
+      mockCommon();
+      const { voidInvoice, raiseTermiteRetrievalTask, recordDecision } = mockLapseDeps();
+      jest.doMock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'n1' })) }));
+      const { conn, completedUpdate } = makeLapseConn({
+        // The void already ran (a prior tick, or this same one before the
+        // crash): successor is 'cancelled' with NO decision recorded yet
+        // (move 9's shape), and its invoice already reads 'void'.
+        freshSuccessor: { status: 'cancelled', renewal_decision: null, prepay_invoice_id: 'succ-invoice-1' },
+        freshInvoice: { status: 'void', paid_at: null },
+      });
+
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      const term = {
+        id: 'succ-term-1', customer_id: 'cust-1', prepay_invoice_id: 'succ-invoice-1', renewed_from_term_id: 'parent-1', prepay_amount: 249,
+        renewal_lapse_started_at: new Date('2026-10-01T00:00:00Z'), // this pass already started it
+      };
+      const outcome = await _private.processGraceLapseForTerm(term, conn);
+
+      expect(outcome).toBe('lapsed');
+      // voidInvoice's own re-entry self-heals as a no-op — still called.
+      expect(voidInvoice).toHaveBeenCalledWith('succ-invoice-1');
+      expect(raiseTermiteRetrievalTask).toHaveBeenCalledTimes(1);
+      expect(recordDecision).toHaveBeenCalledWith({ termId: 'parent-1', action: 'cancel', conn });
+      expect(completedUpdate).toHaveBeenCalledWith(expect.objectContaining({
+        renewal_lapse_completed_at: expect.any(Date), renewal_lapse_outcome: 'lapsed',
+      }));
+    });
+
+    // Codex round-7 P1 (item 3): recordDecision('cancel') returns null
+    // (never throws) when an operator already recorded 'renew' or
+    // 'switch_plan' on the parent — the OLD code only watched for a
+    // THROWN error, so the lapse would still complete (voidInvoice +
+    // retrieval already ran) against a plan the operator just renewed.
+    // resolveLapseVoidEligibility's own parent re-check (under the SAME
+    // lock, BEFORE the void) must catch this and defer instead.
+    test('P1: the parent was already decided \'renew\' by an operator — deferred, NO void, NO retrieval', async () => {
+      mockCommon();
+      const { voidInvoice, raiseTermiteRetrievalTask, recordDecision } = mockLapseDeps();
+      const notifyAdmin = jest.fn(async () => ({ id: 'n1' }));
+      jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
+      const { conn, startedUpdate, completedUpdate } = makeLapseConn({
+        freshSuccessor: { status: 'payment_pending', prepay_invoice_id: 'succ-invoice-1', renewed_from_term_id: 'parent-1' },
+        freshInvoice: { status: 'sent', paid_at: null },
+        freshParent: { status: 'renewed', renewal_decision: 'renew' },
+      });
+
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      const term = {
+        id: 'succ-term-1', customer_id: 'cust-1', prepay_invoice_id: 'succ-invoice-1', renewed_from_term_id: 'parent-1', prepay_amount: 249,
+      };
+      const outcome = await _private.processGraceLapseForTerm(term, conn);
+
+      expect(outcome).toBe('deferred');
+      expect(startedUpdate).toHaveBeenCalledTimes(1); // provenance stamped regardless
+      expect(voidInvoice).not.toHaveBeenCalled(); // NEVER voided against an already-decided parent
+      expect(raiseTermiteRetrievalTask).not.toHaveBeenCalled();
+      expect(recordDecision).not.toHaveBeenCalled();
+      expect(completedUpdate).not.toHaveBeenCalled(); // stays started-but-not-completed, for a human to resolve
+      expect(notifyAdmin).toHaveBeenCalledWith('billing', expect.stringMatching(/already decided/i), expect.stringMatching(/renew/), expect.objectContaining({
+        dedupeKey: 'termite-renewal-charge:succ-term-1:lapse_parent_decided_elsewhere',
+      }));
     });
 
     // Codex round-2 P0.

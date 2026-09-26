@@ -13,6 +13,18 @@
 const knexLib = require('knex');
 const { randomUUID } = require('crypto');
 
+// annualPrepayCoversVisit's termiteGraceCoversVisit leg (Codex round-7 P1)
+// calls annualPrepayTableExists(), which — unlike every OTHER function
+// exercised in this file — always queries the MODULE's own top-level `db`
+// (`require('../models/db')`), never the `conn`/`db` argument a caller
+// passes in. This process has no real DATABASE_URL configured (only
+// REPAIR_TEST_DATABASE_URL, read directly by createScratchDb below), so
+// that real connection would fail outright; stub just the one method
+// actually called. Every other test in this file passes its OWN scratch
+// `db` explicitly to coveredTermsAsOf/annualPrepayCoversVisit and never
+// touches this mock.
+jest.mock('../models/db', () => ({ schema: { hasTable: jest.fn().mockResolvedValue(true) } }));
+
 const SKIP = !process.env.REPAIR_TEST_DATABASE_URL;
 const describeOrSkip = SKIP ? describe.skip : describe;
 
@@ -49,6 +61,7 @@ async function createScratchDb() {
     renewal_decision text,
     renewed_from_term_id uuid,
     annual_plan_version text,
+    coverage_service_type text,
     term_start date NOT NULL,
     term_end date NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
@@ -200,5 +213,34 @@ describeOrSkip('coveredTermsAsOf — termite renewal grace coverage (P2-4), real
 
       expect(sqlDeadline).toBe(jsDeadline);
     }
+  });
+
+  // Codex round-7 P1: refreshTermSnapshot's attach+stamp step is
+  // ACTIVE_STATUSES-only, so a grace-period successor's visits are NEVER
+  // stamped prepaid — annualPrepayCoversVisit's own termiteGraceCoversVisit
+  // check must recognize grace coverage WITHOUT relying on any stamp at
+  // all. Real Postgres: a visit "completed" on grace day 10 (well inside
+  // the 30-day window) reads as covered; one on day 31 (past the
+  // deadline) does not.
+  test('a visit completed on grace day 10 is covered — no stamp required', async () => {
+    await insertSuccessor({ termStart: '2026-09-27', createdAt: '2026-09-27T12:00:00Z' });
+    const fakeVisit = {
+      id: randomUUID(), customer_id: customerId, service_type: null,
+      scheduled_date: '2026-10-07', // day 10 from term_start
+      prepaid_method: null, prepaid_amount: null, annual_prepay_term_id: null,
+    };
+    const covered = await AnnualPrepayRenewals.annualPrepayCoversVisit(fakeVisit, db);
+    expect(covered).toBe(true);
+  });
+
+  test('a visit completed on grace day 31 (past the deadline) is NOT covered', async () => {
+    await insertSuccessor({ termStart: '2026-09-27', createdAt: '2026-09-27T12:00:00Z' });
+    const fakeVisit = {
+      id: randomUUID(), customer_id: customerId, service_type: null,
+      scheduled_date: '2026-10-28', // day 31 from term_start
+      prepaid_method: null, prepaid_amount: null, annual_prepay_term_id: null,
+    };
+    const covered = await AnnualPrepayRenewals.annualPrepayCoversVisit(fakeVisit, db);
+    expect(covered).toBe(false);
   });
 });

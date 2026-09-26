@@ -28,7 +28,22 @@
 const fs = require('fs');
 const path = require('path');
 
-jest.mock('../models/db', () => jest.fn());
+jest.mock('../models/db', () => {
+  const dbFn = jest.fn();
+  // Codex round-7 P1: recordDecision's own advisory lock
+  // (withParentDecisionLock) acquires a raw connection and always
+  // succeeds on the first try — same pattern
+  // admin-customers-cancel-plan.test.js already uses for its own
+  // session-scoped advisory lock.
+  const lockConn = { query: jest.fn().mockResolvedValue({ rows: [{ locked: true }] }) };
+  dbFn.client = {
+    locked: true,
+    lockConn,
+    acquireConnection: jest.fn(async () => lockConn),
+    releaseConnection: jest.fn(async () => {}),
+  };
+  return dbFn;
+});
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
 jest.mock('../services/sms-template-renderer', () => ({ renderSmsTemplate: jest.fn() }));

@@ -1,4 +1,24 @@
-jest.mock('../models/db', () => jest.fn());
+jest.mock('../models/db', () => {
+  const dbFn = jest.fn();
+  // Codex round-7 P1: recordDecision's own advisory lock
+  // (withParentDecisionLock) acquires a raw connection and always
+  // succeeds on the FIRST try by default — same pattern
+  // admin-customers-cancel-plan.test.js already uses for its own
+  // session-scoped advisory lock. A test exercising contention flips
+  // `dbFn.client.locked` to `false`.
+  const lockConn = {
+    query: jest.fn(async (sql) => (/pg_try_advisory_lock/.test(String(sql))
+      ? { rows: [{ locked: dbFn.client.locked }] }
+      : { rows: [] })),
+  };
+  dbFn.client = {
+    locked: true,
+    lockConn,
+    acquireConnection: jest.fn(async () => lockConn),
+    releaseConnection: jest.fn(async () => {}),
+  };
+  return dbFn;
+});
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
   warn: jest.fn(),
