@@ -607,6 +607,17 @@ async function dispatch(route, payload = {}) {
  * string for rejection. Rejected output is never returned as a success.
  * reserveFallbackBudget splits even an explicit timeoutMs across remaining
  * legs; maxAttemptMs optionally caps each leg without extending the deadline.
+ * hardDeadline (opt-in, default false) races each leg against its own share
+ * of the budget from the CHAIN's side, so the wall-clock ceiling holds even
+ * if an adapter ignores the timeoutMs it was handed (ADAPTERS already ask
+ * their own transport to abort at that mark — fetch AbortSignal / the
+ * Anthropic SDK's `timeout`+`maxRetries:0` — this is the belt-and-suspenders
+ * backstop for a caller with a hard, user-facing wait budget, e.g. a
+ * synchronous chat reply). The raced-away call is left to settle on its own
+ * (its adapter-level abort still fires); a late resolution or rejection is
+ * swallowed so it can never surface as an unhandled rejection. A leg that
+ * times out this way fails as `<provider>_timeout` — the same code an
+ * adapter's own deadline produces — so it classifies and reports identically.
  */
 async function dispatchWithFallback(policy, payload = {}, options = {}) {
   // Every leg of the chain shares one agent-control chain id (the ledger's
@@ -627,7 +638,28 @@ function legFailure(route, reason, result, extra = {}) {
   return { provider: route.provider, model: route.model, reason, ...extra, ...(result?.usage ? { usage: result.usage } : {}) };
 }
 
-async function runFallbackChain(policy, payload, { validate, reserveFallbackBudget = false, maxAttemptMs } = {}) {
+// hardDeadline backstop: bounds one leg from the chain's own side instead of
+// trusting the adapter to honor `timeoutMs`. Never throws/rejects — a thrown
+// dispatch() is caught here (the same 'error' code runFallbackChain's own
+// try/catch would have produced) so the race always settles with a plain
+// result object.
+function dispatchWithHardDeadline(route, routePayload, legMs) {
+  const attempt = Promise.resolve()
+    .then(() => dispatch(route, routePayload))
+    .catch((err) => {
+      logger.error(`[llm] ${route.provider} dispatch threw: ${err.message}`);
+      return { ok: false, reason: 'error' };
+    });
+  if (!(legMs > 0)) return Promise.resolve({ ok: false, reason: `${route.provider}_timeout` });
+  let timer;
+  const timedOut = new Promise((resolve) => {
+    timer = setTimeout(() => resolve({ ok: false, reason: `${route.provider}_timeout` }), legMs);
+    if (typeof timer.unref === 'function') timer.unref();
+  });
+  return Promise.race([attempt, timedOut]).finally(() => clearTimeout(timer));
+}
+
+async function runFallbackChain(policy, payload, { validate, reserveFallbackBudget = false, maxAttemptMs, hardDeadline = false } = {}) {
   const routes = [policy?.primary, policy?.fallback].filter(Boolean);
   if (!routes.length) return { ok: false, reason: 'no_route', failures: [] };
   if (routes.length > 1 && routes[0].provider === routes[1].provider) {
@@ -664,7 +696,7 @@ async function runFallbackChain(policy, payload, { validate, reserveFallbackBudg
     const routePayload = { ...payload, timeoutMs: legMs, policyLabel: chainLabel };
     let result;
     try {
-      result = await dispatch(route, routePayload);
+      result = hardDeadline ? await dispatchWithHardDeadline(route, routePayload, legMs) : await dispatch(route, routePayload);
     } catch (err) {
       logger.error(`[llm] ${route.provider} dispatch threw: ${err.message}`);
       result = { ok: false, reason: 'error' };
