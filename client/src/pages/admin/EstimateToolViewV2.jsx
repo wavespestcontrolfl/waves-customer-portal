@@ -1133,6 +1133,13 @@ function RoachOverrideAppliedNote({ estimate, variant }) {
 // ═══════════════════════════════════════════════════════════════
 // MAIN COMPONENT — EstimateToolViewV2
 // ═══════════════════════════════════════════════════════════════
+// The two tree & shrub programs sold today. Anything else a reopened
+// estimate carries (light — 4x retired 2026-09-24) is shown as 6x in the
+// Program picker and submitted as 6x, never as a tier the builder rejects.
+export function sellableTreeShrubTier(tier) {
+  return tier === "enhanced" ? "enhanced" : "standard";
+}
+
 export default function EstimateToolViewV2({
   initialLeadId = "",
   initialCustomerId = "",
@@ -1729,6 +1736,11 @@ export default function EstimateToolViewV2({
     return {
           ...buildDefaultEstimateForm(),
           ...(d.inputs || {}),
+          // A saved retired T&S program (4x light) is seeded as 6x so the
+          // Program picker shows exactly what will be submitted.
+          ...(d.inputs && d.inputs.tsTier !== undefined
+            ? { tsTier: sellableTreeShrubTier(d.inputs.tsTier) }
+            : {}),
           // Live contact columns win over the stored form snapshot, and a
           // revise never re-links a lead — the row keeps its own linkage
           // server-side, so the form's leadId must stay blank here.
@@ -3580,7 +3592,11 @@ export default function EstimateToolViewV2({
         treeShrubDensity: formIsCommercial ? form.treeShrubDensity || "" : "",
         // Tree & shrub program + access ride the service line (server
         // translator builds services.treeShrub from these — audit INP-004).
-        treeShrubTier: form.svcTs ? form.tsTier || "standard" : undefined,
+        // Only the two sold programs are sent. A reopened estimate still
+        // holding a retired tsTier (light, 4x — retired 2026-09-24) shows
+        // 6x in the Program picker, so it submits 6x too instead of a tier
+        // the builder now rejects.
+        treeShrubTier: form.svcTs ? sellableTreeShrubTier(form.tsTier) : undefined,
         treeShrubAccess: form.svcTs ? form.tsAccess || "easy" : undefined,
         mosquitoPressure: formIsCommercial ? form.mosquitoPressure || "" : "",
         fleaOfferKey: "flea_elimination_two_visit",
@@ -5311,12 +5327,17 @@ export default function EstimateToolViewV2({
                           counts (owner directive 2026-08-04) and the 9x
                           program is sellable here — the builder used to
                           hardcode standard (audit INP-004). Keys stay
-                          light/standard/enhanced. */}
+                          light/standard/enhanced (light retained server-side
+                          for the one grandfathered quarterly customer), but
+                          4x — Light/Quarterly is dropped from this picker
+                          (owner directive 2026-09-24: stop offering
+                          quarterly tree & shrub care). A reopened estimate
+                          that still carries tsTier=light displays 6x here
+                          and the payload builder submits 6x to match. */}
                       <Field label="Program" id="estimate-tsTier" className="mb-4">
                         <SelectV2
                           k="tsTier"
                           options={[
-                            { value: "light", label: "4x applications/yr" },
                             { value: "standard", label: "6x applications/yr" },
                             { value: "enhanced", label: "9x applications/yr" },
                           ]}

@@ -128,18 +128,21 @@ export function ProjectReviewAsk({ data }) {
     : reviewLocationForProject(data);
   return (
     <section
+      className="project-review-ask"
+      data-section="review-request-project"
       data-glass="card"
       aria-label="Share feedback"
       style={{
-        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-        gap: 14, flexWrap: 'wrap', background: '#fff',
+        display: 'grid', gridTemplateColumns: '1fr', alignItems: 'center', justifyItems: 'center',
+        gap: 16, background: '#fff',
         border: '1px solid var(--line, #E2E8F0)', borderRadius: 16,
         padding: '18px 22px', margin: '18px 0 0',
       }}
     >
-      <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: 'var(--text, #04395E)' }}>
+      {/* Match the service-report review card's h3 type step. */}
+      <h3 style={{ margin: '0 0 4px', textAlign: 'center', color: 'var(--text, #04395E)' }}>
         How did today&apos;s visit go?
-      </h2>
+      </h3>
       <a
         data-glass-accent=""
         href={location.reviewUrl}

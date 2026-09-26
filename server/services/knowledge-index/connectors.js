@@ -18,6 +18,7 @@ const fs = require('fs');
 const path = require('path');
 const db = require('../../models/db');
 const logger = require('../logger');
+const { RETIRED_SALE_SERVICE_KEYS } = require('../pricing-engine/retired-sale-catalog');
 const { TRUSTED_STATUSES } = require('../agronomic-wiki');
 
 const clean = (v) => String(v || '').trim();
@@ -60,6 +61,9 @@ async function loadServices() {
   // rows must not resurface as knowledge.
   const rows = await db('services')
     .where({ is_active: true, is_archived: false })
+    // Retired-for-sale rows stay active only for grandfathered plans — never
+    // index them as current offerings.
+    .whereNotIn('service_key', [...RETIRED_SALE_SERVICE_KEYS])
     .select('service_key', 'name', 'short_name', 'description', 'category', 'subcategory', 'frequency', 'visits_per_year', 'updated_at');
   return rows.map((r) => ({
     sourceId: r.service_key,

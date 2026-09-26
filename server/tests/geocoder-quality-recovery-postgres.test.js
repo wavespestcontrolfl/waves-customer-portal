@@ -24,7 +24,7 @@ const knex = require('knex');
 const { geocodeAddressWithStatus } = require('../services/geocoder');
 const { sweepUngeocodedServices } = require('../services/geocoder-service-locations');
 const { getScheduleQualityMeasurements, QUALITY_EXCLUDED_STATUSES } = require('../services/scheduling/day-quality');
-const { refreshScheduleQualityAfterChange } = require('../services/scheduling/quality-after-change');
+const { refreshScheduleQualityAfterChange, retryScheduleQualityRefreshes } = require('../services/scheduling/quality-after-change');
 const { refreshScheduleQualityAlerts } = require('../services/scheduling/quality-alerts');
 
 const connection = process.env.SERVICE_GEOCODE_TEST_DATABASE_URL;
@@ -122,6 +122,8 @@ postgres('geocoder quality recovery on isolated PostgreSQL', () => {
       await mockConnection.raw('ALTER TABLE ?? ALTER COLUMN id SET DEFAULT gen_random_uuid()', [table]);
       await mockConnection.raw('ALTER TABLE ?? ALTER COLUMN created_at SET DEFAULT NOW()', [table]);
     }
+    await mockConnection.raw(`CREATE TEMP TABLE schedule_quality_refresh_jobs
+      (LIKE public.schedule_quality_refresh_jobs INCLUDING ALL) ON COMMIT DROP`);
     await mockConnection('technicians').insert({
       id: TECH,
       name: 'Synthetic routing technician',
@@ -242,5 +244,34 @@ postgres('geocoder quality recovery on isolated PostgreSQL', () => {
     const plannedIds = details.route_quality.flatMap(row => row.plannedStops.map(stop => stop.id));
     expect(plannedIds.sort()).toEqual([futureOne, futureTwo].sort());
     for (const excluded of [today, terminal, outside, otherCustomer]) expect(plannedIds).not.toContain(excluded);
+  }, 30000);
+
+  test('a failed refresh beyond the nightly band retains its date and later clears the real warning', async () => {
+    const lateDate = '2026-10-08';
+    await insertService(RECOVERED, { scheduled_date: lateDate });
+    expect(await refreshScheduleQualityAlerts({ dates: [lateDate], now: NOW }, mockConnection))
+      .toMatchObject({ status: 'reconciled', created: 1, resolved: 0 });
+    const [opened] = await mockConnection('dispatch_alerts').whereNull('resolved_at');
+    await mockConnection('scheduled_services').where({ id: RECOVERED }).update({ lat: PIN.lat, lng: PIN.lng });
+
+    // A real SQL failure rolls back the measurement savepoint while the
+    // registered request and prior coordinate update remain intact.
+    await mockConnection.raw('ALTER TABLE route_optimization_planner_runs RENAME COLUMN result TO unavailable_result');
+    expect(await refreshScheduleQualityAfterChange({ jobId: RECOVERED, now: NOW }, mockConnection))
+      .toEqual({ status: 'failed' });
+    await mockConnection.raw('ALTER TABLE route_optimization_planner_runs RENAME COLUMN unavailable_result TO result');
+    const [pending] = await mockConnection('schedule_quality_refresh_jobs');
+    expect(pending.payload.resolvedDates).toEqual([lateDate]);
+    expect((await mockConnection('dispatch_alerts').where({ id: opened.id }).first()).resolved_at).toBeNull();
+
+    const retryAt = new Date(NOW.getTime() + 6 * 60 * 1000);
+    expect(await retryScheduleQualityRefreshes({ now: retryAt }, mockConnection))
+      .toEqual({ status: 'completed', processed: 1, succeeded: 1, failed: 0 });
+    expect(await mockConnection('schedule_quality_refresh_jobs')).toHaveLength(0);
+    expect((await mockConnection('dispatch_alerts').where({ id: opened.id }).first()).resolved_at).not.toBeNull();
+    const [ledger] = await mockConnection('route_optimization_planner_runs').where({ run_type: 'schedule_quality_change' });
+    expect(ledger.result.route_quality).toEqual(expect.arrayContaining([
+      expect.objectContaining({ date: lateDate, technician_id: TECH, missingCoordinates: [] }),
+    ]));
   }, 30000);
 });

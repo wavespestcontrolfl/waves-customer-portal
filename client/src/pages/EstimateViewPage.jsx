@@ -3919,6 +3919,41 @@ export function SuccessCard({ acceptResult, appointmentLabel = null, recurring =
     );
   }
 
+  if (nextStep === 'sign_agreement') {
+    // Sign-before-pay (termite annual-plan restructure, P2): the accept
+    // parked — no invoice, no schedule, no charge — until the customer
+    // signs the annual agreement. Plain wording, no dollar amount (none is
+    // final until signature). Codex #4819 r6: signing starts the plan and
+    // its billing, but the coverage year runs from the installation date —
+    // never imply coverage is active at signature.
+    return (
+      <div style={{ ...estimateCard({ padding: 24, textAlign: 'center' }), borderTop: `4px solid ${W.green}` }}>
+        <div style={{ fontSize: 24, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
+          Next step: sign your plan agreement.
+        </div>
+        <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
+          We'll send you the signing link. Signing starts your plan; your 12-month coverage begins on your installation date.
+        </div>
+      </div>
+    );
+  }
+
+  if (nextStep === 'activation_pending') {
+    // Signed, but the plan is still being set up (activation running, or
+    // with the office) — the signing link is already used, so never ask
+    // for a signature again.
+    return (
+      <div style={{ ...estimateCard({ padding: 24, textAlign: 'center' }), borderTop: `4px solid ${W.green}` }}>
+        <div style={{ fontSize: 24, fontWeight: 700, color: COLORS.navy, marginTop: 8 }}>
+          We received your signature.
+        </div>
+        <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
+          We're setting up your plan now and will follow up with the next steps.
+        </div>
+      </div>
+    );
+  }
+
   if (nextStep === 'site_confirmation') {
     // Narrow low-confidence commercial: approved online, but the exact price is
     // confirmed on site before the first invoice — so no payment step here.

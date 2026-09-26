@@ -24,6 +24,7 @@ const { isEnabled } = require('../config/feature-gates');
 const { safeEqual } = require('../middleware/hermes-auth');
 const db = require('../models/db');
 const logger = require('../services/logger');
+const { RETIRED_SALE_SERVICE_KEYS } = require('../services/pricing-engine/retired-sale-catalog');
 const { embedQuery } = require('../services/llm/embed');
 const { rrfFuse, applyRecencyDecay } = require('../services/knowledge-index/hybrid-search');
 const { toVectorLiteral } = require('../services/knowledge-index/ingest');
@@ -116,6 +117,9 @@ async function getService(serviceKey) {
   // a known key can't resurface retired/archived service guidance here.
   const row = await db('services')
     .where({ service_key: String(serviceKey || ''), is_active: true, is_archived: false })
+    // Retired-for-sale rows (active only for grandfathered plans) are not
+    // presented to agents as a current service.
+    .whereNotIn('service_key', [...RETIRED_SALE_SERVICE_KEYS])
     .first('service_key', 'name', 'short_name', 'description', 'category', 'subcategory', 'billing_type', 'frequency', 'visits_per_year');
   return row || { error: 'service not found' };
 }

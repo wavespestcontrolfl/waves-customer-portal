@@ -22,12 +22,14 @@ jest.mock('../services/bouncie-mileage-crons', () => ({ initBouncieMileageCrons:
 jest.mock('../services/analytics/ga4-crons', () => ({ initGA4Crons: jest.fn() }));
 jest.mock('../services/geocoder', () => ({ sweepUngeocodedCustomers: jest.fn() }));
 jest.mock('../services/geocoder-service-locations', () => ({ sweepUngeocodedServices: jest.fn() }));
+jest.mock('../services/scheduling/quality-after-change', () => ({ retryScheduleQualityRefreshes: jest.fn() }));
 
 const cron = require('../utils/scheduled-cron');
 const { isEnabled } = require('../config/feature-gates');
 const { runExclusive } = require('../utils/cron-lock');
 const { sweepUngeocodedCustomers } = require('../services/geocoder');
 const { sweepUngeocodedServices } = require('../services/geocoder-service-locations');
+const { retryScheduleQualityRefreshes } = require('../services/scheduling/quality-after-change');
 const logger = require('../services/logger');
 const { initScheduledJobs } = require('../services/scheduler');
 
@@ -36,6 +38,7 @@ beforeEach(() => {
   isEnabled.mockImplementation(name => name === 'cronJobs');
   sweepUngeocodedCustomers.mockResolvedValue({ status: 'completed' });
   sweepUngeocodedServices.mockResolvedValue({ status: 'completed' });
+  retryScheduleQualityRefreshes.mockResolvedValue({ status: 'completed', processed: 2, succeeded: 2, failed: 0 });
 });
 
 function registeredTick() {
@@ -81,4 +84,31 @@ test('a customer sweep rejection still reaches the existing outer failure handle
   expect(sweepUngeocodedServices).toHaveBeenCalledTimes(1);
   expect(sweepUngeocodedCustomers).toHaveBeenCalledTimes(1);
   expect(logger.error).toHaveBeenCalledWith('[geocoder] backstop sweep failed: synthetic customer query failure');
+});
+
+function registeredRetryTick() {
+  initScheduledJobs();
+  const registrations = cron.schedule.mock.calls.filter(([expression, callback]) =>
+    expression === '*/5 * * * *' && callback.toString().includes('retryScheduleQualityRefreshes'));
+  expect(registrations).toHaveLength(1);
+  expect(registrations[0][2]).toEqual({ timezone: 'America/New_York' });
+  return registrations[0][1];
+}
+
+test('the retry tick drains durable refreshes independently of the geocoder sweep', async () => {
+  await registeredRetryTick()();
+  expect(retryScheduleQualityRefreshes).toHaveBeenCalledTimes(1);
+  expect(sweepUngeocodedCustomers).not.toHaveBeenCalled();
+  expect(runExclusive).not.toHaveBeenCalled();
+  expect(logger.info).toHaveBeenCalledWith('[schedule-quality] retry sweep: processed=2 succeeded=2 failed=0');
+});
+
+test('a failed retry is observable without escaping the scheduled callback', async () => {
+  const tick = registeredRetryTick();
+  retryScheduleQualityRefreshes.mockResolvedValueOnce({ status: 'completed', processed: 1, succeeded: 0, failed: 1 });
+  await tick();
+  expect(logger.error).toHaveBeenCalledWith('[schedule-quality] retry sweep has pending failures');
+  retryScheduleQualityRefreshes.mockRejectedValueOnce(Object.assign(new Error('synthetic private detail'), { code: '57P01' }));
+  await tick();
+  expect(logger.error).toHaveBeenCalledWith('[schedule-quality] retry sweep failed (57P01)');
 });

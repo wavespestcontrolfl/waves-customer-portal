@@ -888,6 +888,32 @@ describe('product purpose follows recorded pest identity', () => {
     expect(applicationPurpose({ method: 'station_check', product: { name: 'Trelona ATBS' } }, 'termite')).toBe('Station service');
     expect(applicationPurpose({ method: 'bait_placement', product: { name: 'Contrac Blox' } }, 'rodent')).toBe('Bait placement');
   });
+
+  it('distinguishes root-zone injections from trunk injections', () => {
+    for (const method of ['root_injection', 'soil_injection']) {
+      const app = { method, product: { name: 'Safari 20 SG' } };
+      expect(applicationPurpose(app, 'tree_shrub')).toBe('Systemic root-zone treatment');
+      expect(applicationPurposeCopy(app, 'tree_shrub')).toMatch(/^Applied at the root zone/);
+    }
+    const trunk = { method: 'trunk_injection', product: { name: 'Tree-age G4' } };
+    expect(applicationPurpose(trunk, 'tree_shrub')).toBe('Trunk injection');
+    expect(applicationPurposeCopy(trunk, 'tree_shrub')).toMatch(/^Delivered directly into the trunk/);
+  });
+
+  it('describes ornamental-bed herbicides by their recorded areas and weed targets', () => {
+    const herbicides = [
+      { applicationArea: 'Bedding areas', targets: ['Broadleaf weeds'], product: { name: 'Celsius WG', category: 'Herbicide' } },
+      { applicationArea: 'Bedding areas', targets: ['Sedge'], product: { name: 'SedgeHammer', category: 'Herbicide' } },
+    ];
+    for (const app of herbicides) {
+      expect(applicationPurpose(app, 'tree_shrub')).toBe('Targeted weed treatment');
+      expect(applicationPurposeCopy(app, 'tree_shrub')).toMatch(/targeted control/);
+      const detail = applicationTechnicalExplanation(app, 'tree_shrub').join(' ');
+      expect(detail).toContain('Bedding areas');
+      expect(detail).toContain(app.targets[0].toLowerCase());
+      expect(detail).not.toMatch(/affected plants/i);
+    }
+  });
 });
 
 // Fungicide purpose copy names the RECORDED disease targets — the same
@@ -1291,6 +1317,7 @@ describe('smartStatusSummary — re-service (callback) branch', () => {
       applications: [],
     }, 'static');
     expect(status.heading).toBe('your service is complete!');
-    expect(status.result).toBe('Routine service completed. No high-priority issues were noted.');
+    expect(status.result).toBe('Service completed. Visit details are below.');
   });
+
 });

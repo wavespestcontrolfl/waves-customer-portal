@@ -1638,6 +1638,19 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       if (!existingCustomer) customerId = null;
     }
 
+    // Retired-for-sale catalog rows (quarterly T&S) book only for a customer
+    // already on that plan — the shared admin write gate (codex r13 on #4786).
+    // A lead with no live customer holds nothing.
+    const notHeldRetired = await require('../services/service-library').retiredServicesNotHeldBy({
+      customerId, serviceIds: [serviceId], serviceTypes: [svcType],
+    });
+    if (notHeldRetired.length) {
+      return res.status(409).json({
+        error: `${notHeldRetired.map((r) => r.name).join(', ')} is retired for new sales and this customer is not on that plan.`,
+        code: 'RETIRED_SERVICE_NOT_SELLABLE',
+      });
+    }
+
     // Provisional — re-derived from the row-locked re-read inside the
     // transaction below (a concurrent convert can have created the customer
     // between this read and the lock).
