@@ -144,7 +144,6 @@ const KNOWN_UNWRAPPED = {
   'services/voice-agent/relay-conversation.js': [1, 'voice_relay streams; ledgerCall takes a resolved Message'],
   'services/collections/outbound-voice/collections-conversation.js': [1, 'voice_relay_collections streams'],
   'services/lawn-assessment.js': [1, 'lawn_assess: its Gemini primary is a raw fetch, unrecorded'],
-  'services/pest-identification.js': [1, 'pest_id: Gemini primary is a raw fetch'],
   'services/tree-shrub-assessment.js': [1, 'tree_shrub: Gemini primary is a raw fetch'],
   'services/treatment-zone-suggest.js': [1, 'treatment_zone: Gemini primary is a raw fetch'],
   'services/turf-height-ocr.js': [1, 'turf_ocr: Gemini primary is a raw fetch'],
