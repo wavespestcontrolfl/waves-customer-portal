@@ -115,20 +115,17 @@ function physicalStops(stops) {
   return out;
 }
 
-// Where the moving visit joins the day's sequence: before the first stop
-// that starts later, a tie broken by the canonical rule (currentOrder:
-// route_order, then created_at, then id) — the order dispatch would read.
-function insertVisit(sequence, visit) {
-  // The visit sits at its scored start (the candidate's, or its current
-  // one), whatever window it stores for its duration.
+// The day's chain WITH the moving visit: the whole chain sorted by the
+// canonical dispatch comparator (currentOrder — COALESCE(route_order, 999)
+// first, then window_start, then created_at), exactly as dispatch will run
+// it. The visit carries the route_order it will actually have (the caller's
+// job: kept on a same-day, same-tech move, cleared otherwise, per the
+// rebooker) and sits at its scored start (the candidate's, or its current
+// one), whatever window it stores for its duration. Codex r4 + pre-push P1:
+// an unsequenced visit runs after every sequenced stop, not by its time.
+function chainWithVisit(sequence, visit) {
   const v = Number.isFinite(visit.startMin) ? { ...visit, window_start: hhmmFromMin(visit.startMin) } : withSequenceKeys(visit);
-  const start = String(v.window_start).slice(0, 5);
-  const at = sequence.findIndex((s) => {
-    const other = String(s.window_start || '23:59').slice(0, 5);
-    if (other !== start) return other > start;
-    return currentOrder([s, v])[0] === v;
-  });
-  return at < 0 ? [...sequence, v] : [...sequence.slice(0, at), v, ...sequence.slice(at)];
+  return currentOrder([...sequence, v]);
 }
 
 /**
@@ -173,7 +170,7 @@ function routeCost(otherStops, visit) {
       routeTimeWithMinutes: routeTimeWithoutMinutes,
     };
   }
-  const driveWithMinutes = chainDriveMinutes(insertVisit(sequence, visit).map((s) => s.geo));
+  const driveWithMinutes = chainDriveMinutes(chainWithVisit(sequence, visit).map((s) => s.geo));
   // The moving unit: the visit plus any co-located group members moving with it.
   const visitMinutes = stopPlanningMinutes(visit) + sumPlanningMinutes(visit.unitMembers);
   const routeTimeWithMinutes = driveWithMinutes + otherServiceMinutes + visitMinutes;
@@ -209,5 +206,5 @@ module.exports = {
   chainDriveMinutes,
   routeCost,
   clusterShare,
-  _internals: { physicalStops, insertVisit, sumPlanningMinutes },
+  _internals: { physicalStops, chainWithVisit, sumPlanningMinutes },
 };

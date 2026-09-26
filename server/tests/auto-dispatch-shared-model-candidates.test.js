@@ -37,7 +37,7 @@ const {
   findValidCandidateSlots,
   computeCurrentPlacement,
   _internals: {
-    loadDayStops, loadGroupContext, filterAndScoreSharedModelCandidates, loadDateOccupiedSpans, planUnitPlacement, currentUnitStartMin,
+    loadDayStops, loadGroupContext, filterAndScoreSharedModelCandidates, loadDateOccupiedSpans, planUnitPlacement, currentUnitStartMin, candidateRouteOrder,
   },
 } = require('../services/auto-dispatch/candidate-slots');
 
@@ -820,6 +820,15 @@ test('a grouped visit charges its siblings\' planning minutes on both the curren
   expect(groupedCand.route_minutes - aloneCand.route_minutes).toBeCloseTo(45, 5);
   expect(groupedCurrent.route_minutes - aloneCurrent.route_minutes).toBeCloseTo(45, 5);
   expect(groupedCand.detour_minutes).toBeCloseTo(aloneCand.detour_minutes, 5);
+});
+
+// Pre-push P1 (PRRT_kwDOR3YQi86mQsaf): a candidate is scored with the
+// route_order the visit will actually carry after the move.
+test('candidateRouteOrder: kept on a same-day, same-tech move; cleared on a date or technician change (as the rebooker does)', () => {
+  const svc = { scheduled_date: '2026-08-06', technician_id: 't1', route_order: 3 };
+  expect(candidateRouteOrder(svc, { date: '2026-08-06', technician_id: 't1' })).toBe(3);
+  expect(candidateRouteOrder(svc, { date: '2026-08-07', technician_id: 't1' })).toBeNull();
+  expect(candidateRouteOrder(svc, { date: '2026-08-06', technician_id: 't2' })).toBeNull();
 });
 
 // Codex r4 (PRRT_kwDOR3YQi86mQsaf / PRRT_kwDOR3YQi86mQsai): the day-stop rows

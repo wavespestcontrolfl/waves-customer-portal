@@ -201,7 +201,7 @@ describe('routeCost: a visit group is one physical drive stop', () => {
 // sequence (currentOrder: COALESCE(route_order, 999), window_start,
 // created_at), not window_start alone.
 describe('routeCost: the canonical dispatch sequence', () => {
-  const { _internals: { insertVisit, physicalStops } } = require('../services/auto-dispatch/route-model');
+  const { _internals: { chainWithVisit, physicalStops } } = require('../services/auto-dispatch/route-model');
 
   test('tied window_starts run in route_order', () => {
     const second = { id: 'x', geo: FAR, startMin: 540, window_start: '09:00', route_order: 2, estimated_duration_minutes: 30 };
@@ -216,16 +216,27 @@ describe('routeCost: the canonical dispatch sequence', () => {
     expect(physicalStops([early, late]).map((st) => st.id)).toEqual(['late', 'early']);
   });
 
-  test('the moving visit joins by its start; a tie is broken by the canonical rule (an unsequenced visit goes after a sequenced stop)', () => {
+  // Pre-push P1: the WHOLE chain, visit included, sorts by the canonical
+  // comparator — route_order first — never time-first insertion.
+  test('A 09:00 (#1) / B 11:00 (#2): a moved, unsequenced 10:00 visit runs A -> B -> visit, as dispatch will run it', () => {
     const day = physicalStops([
       { id: 'a', geo: NEAR_HQ, window_start: '09:00', route_order: 1 },
       { id: 'b', geo: FAR, window_start: '11:00', route_order: 2 },
     ]);
-    const at = (visit) => insertVisit(day, visit).map((st) => st.id);
-    expect(at({ id: 'v', geo: NEAR_HQ, startMin: 600, route_order: null })).toEqual(['a', 'v', 'b']); // 10:00
-    expect(at({ id: 'v', geo: NEAR_HQ, startMin: 540, route_order: null })).toEqual(['a', 'v', 'b']); // tied at 09:00, 999 > 1
-    expect(at({ id: 'v', geo: NEAR_HQ, startMin: 540, route_order: 0 })).toEqual(['v', 'a', 'b']); // tied, sequenced first
+    const chain = (visit) => chainWithVisit(day, visit).map((st) => st.id);
+    expect(chain({ id: 'v', geo: NEAR_HQ, startMin: 600, route_order: null })).toEqual(['a', 'b', 'v']);
+    // A visit keeping its number (same-day, same-tech move) runs by it: #2
+    // ties with B and its 10:00 start breaks the tie.
+    expect(chain({ id: 'v', geo: NEAR_HQ, startMin: 600, route_order: 2 })).toEqual(['a', 'v', 'b']);
+    expect(chain({ id: 'v', geo: NEAR_HQ, startMin: 540, route_order: 0 })).toEqual(['v', 'a', 'b']);
+    // And the drive is charged on that chain: HQ -> A -> B -> visit -> HQ.
+    const cost = routeCost([
+      { id: 'a', geo: NEAR_HQ, startMin: 540, window_start: '09:00', route_order: 1 },
+      { id: 'b', geo: FAR, startMin: 660, window_start: '11:00', route_order: 2 },
+    ], { id: 'v', geo: NEAR_HQ, startMin: 600, route_order: null });
+    expect(cost.driveWithMinutes).toBeCloseTo(chainDriveMinutes([NEAR_HQ, FAR, NEAR_HQ]), 5);
   });
+
 });
 
 // Codex r4 (PRRT_kwDOR3YQi86mQsai): a legacy null-visit_id co-visit (same

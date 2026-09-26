@@ -749,6 +749,6 @@ module.exports = {
   violatesPreferredTime,
   _internals: {
     hhmmToMin, weekdayOf, isSaturday, loadDayStops, loadDayStopRows, loadGroupContext,
-    filterAndScoreSharedModelCandidates, loadDateOccupiedSpans, planUnitPlacement, currentUnitStartMin,
+    filterAndScoreSharedModelCandidates, loadDateOccupiedSpans, planUnitPlacement, currentUnitStartMin, candidateRouteOrder,
   },
 };
