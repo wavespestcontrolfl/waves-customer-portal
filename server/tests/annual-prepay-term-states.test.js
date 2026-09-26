@@ -627,7 +627,7 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
       {
         expr: "term.status === 'active' ? 'renewal_pending' : term.status",
         guards: ['where({ id: term.id })', "whereIn('status', ACTIVE_STATUSES)", "whereNull('renewal_decision')",
-          'whereNull(noticeCol)', 'where(function noticeClaimAvailable()', 'whereNull(claimCol)',
+          'whereNull(noticeCol)', 'where(lateTermiteSendAbsent(daysOut)', 'where(function noticeClaimAvailable()', 'whereNull(claimCol)',
           "orWhere(claimCol, '<', staleClaimCutoff)"],
       },
       // Move 5: claim release — undecided + still unsent.
@@ -689,6 +689,15 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
         _private.paymentReminderColumnForDaysOut, _private.paymentReminderClaimColumnForDaysOut]) {
         const col = fn(days);
         if (col !== null) expect(col).toMatch(/^(notice|payment_reminder)_/);
+        expect(col).not.toBe('status');
+      }
+    }
+    // sentCol in the notice mark-sent write comes from noticeWitnessColumn:
+    // the rung's own column, or the late 45-day column.
+    for (const days of [45, 30, 15, 7]) {
+      for (const today of ['2026-01-01', '2026-12-20']) {
+        const col = _private.noticeWitnessColumn(days, { term_end: '2026-12-31' }, today);
+        expect(col).toMatch(/^notice_/);
         expect(col).not.toBe('status');
       }
     }

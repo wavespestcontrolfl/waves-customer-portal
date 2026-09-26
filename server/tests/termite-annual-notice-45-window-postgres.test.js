@@ -32,7 +32,8 @@ async function createScratchDb() {
     renewal_decision text,
     annual_plan_version text,
     notice_45_sent_at timestamptz,
-    notice_45_claimed_at timestamptz
+    notice_45_claimed_at timestamptz,
+    notice_45_late_sent_at timestamptz
   )`);
   return { db, async destroy() { await db.raw('DROP SCHEMA ?? CASCADE', [schema]); await db.destroy(); } };
 }
@@ -67,6 +68,7 @@ describeOrSkip('termite 45-day renewal notice — catch-up window (real Postgres
       term('day46', { term_end: plus(46) }),
       term('nonTermite', { term_end: plus(40), annual_plan_version: null }),
       term('alreadySent', { term_end: plus(40), notice_45_sent_at: new Date() }),
+      term('alreadySentLate', { term_end: plus(38), notice_45_late_sent_at: new Date() }),
       term('decided', { term_end: plus(40), renewal_decision: 'cancel' }),
       term('cancelled', { term_end: plus(40), status: 'cancelled' }),
       term('freshClaim', { term_end: plus(40), notice_45_claimed_at: new Date() }),
@@ -81,5 +83,17 @@ describeOrSkip('termite 45-day renewal notice — catch-up window (real Postgres
 
     const candidates = await _private.termiteNotice45Candidates({ today, conn: db });
     expect(candidates.map((row) => ids[row.id])).toEqual(['day31', 'renewalPending', 'day40', 'staleClaim', 'day45']);
+  });
+
+  test('witness column: on time (>= 45 days out) stamps notice_45_sent_at; a late catch-up never does', () => {
+    jest.doMock('../models/db', () => fixture.db);
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    const { _private } = require('../services/annual-prepay-renewals');
+    const t = { term_end: '2026-11-10' };
+    expect(_private.noticeWitnessColumn(45, t, '2026-09-26')).toBe('notice_45_sent_at'); // 45 days
+    expect(_private.noticeWitnessColumn(45, t, '2026-09-20')).toBe('notice_45_sent_at'); // 51 days
+    expect(_private.noticeWitnessColumn(45, t, '2026-09-27')).toBe('notice_45_late_sent_at'); // 44 days
+    expect(_private.noticeWitnessColumn(45, t, '2026-10-10')).toBe('notice_45_late_sent_at'); // 31 days
+    expect(_private.noticeWitnessColumn(30, t, '2026-10-20')).toBe('notice_30_sent_at');
   });
 });

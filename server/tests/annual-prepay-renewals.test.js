@@ -6,6 +6,7 @@ jest.mock('../services/logger', () => ({
 }));
 jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn(),
+  classifyDeliveryCertainty: jest.requireActual('../services/messaging/send-customer-message').classifyDeliveryCertainty,
 }));
 jest.mock('../services/sms-template-renderer', () => ({
   renderSmsTemplate: jest.fn(),
@@ -2209,7 +2210,7 @@ describe('annual prepay renewal helpers', () => {
     });
     CancellationResolution.cancelFlowV2Enabled.mockReturnValue(true);
     renderSmsTemplate.mockResolvedValue('rendered termite sms');
-    sendCustomerMessage.mockResolvedValue({ sent: true });
+    sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted' });
     AccountMembershipEmail.sendTermiteRenewalReminder.mockResolvedValue({ ok: true });
 
     await expect(AnnualPrepayRenewals.sendCustomerTermNotice(term, 45)).resolves.toMatchObject({
@@ -2246,7 +2247,8 @@ describe('annual prepay renewal helpers', () => {
       daysOut: 45,
       renewalDate: '2027-05-20',
       renewalFee: 650,
-      newStart: '2027-05-20',
+      // term_end is inclusive coverage: the successor starts the day after.
+      newStart: '2027-05-21',
       newEnd: '2028-05-20',
       cancelLink: 'https://portal.wavespestcontrol.com/?tab=plan',
       // No source estimate → no plan property → the email falls back to
@@ -2254,6 +2256,82 @@ describe('annual prepay renewal helpers', () => {
       address: null,
       lastInspectionDate: null,
     });
+  });
+
+  // Shared harness for the witness-evidence cases below (Codex #4921 r1).
+  function termiteNoticeHarness({ termEnd = '2027-05-20' } = {}) {
+    const term = {
+      id: 'term-1',
+      customer_id: 'customer-1',
+      status: 'active',
+      term_start: '2026-05-20',
+      term_end: termEnd,
+      annual_plan_version: 'v3',
+      prepay_amount: 650,
+      notice_45_sent_at: null,
+      notice_45_claimed_at: null,
+      notice_45_late_sent_at: null,
+      renewal_decision: null,
+    };
+    const refreshedTerm = { ...term, last_scheduled_service_id: null, last_scheduled_service_date: null };
+    const claimQuery = query({ returning: [{ ...refreshedTerm, status: 'renewal_pending' }] });
+    const secondQuery = query();
+    setDbQueues({
+      scheduled_services: [query({ first: null }), query({ columnInfo: {} })],
+      annual_prepay_terms: [query({ returning: [refreshedTerm] }), claimQuery, secondQuery],
+      customers: [
+        query({ first: { id: 'customer-1', first_name: 'Stan', address_line1: '123 Bayshore Rd', city: 'Bradenton', email: 'stan@example.com', phone: '+19415550100' } }),
+      ],
+      customer_interactions: [query()],
+    });
+    CancellationResolution.cancelFlowV2Enabled.mockReturnValue(true);
+    renderSmsTemplate.mockResolvedValue('rendered termite sms');
+    return { term, secondQuery };
+  }
+
+  test('an owner-silenced termite SMS (sent:true, deliveryOutcome not_sent) is NOT a witness — the email must confirm, else the claim is released', async () => {
+    const { term, secondQuery } = termiteNoticeHarness();
+    sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'not_sent', providerMessageId: 'owner-silence' });
+    AccountMembershipEmail.sendTermiteRenewalReminder.mockResolvedValue({ ok: false, reason: 'opted_out' });
+
+    await expect(AnnualPrepayRenewals.sendCustomerTermNotice(term, 45)).resolves.toMatchObject({ sent: false, reason: 'sms_not_sent' });
+    expect(secondQuery.update).toHaveBeenCalledWith(expect.objectContaining({ notice_45_claimed_at: null }));
+    expect(secondQuery.update).not.toHaveBeenCalledWith(expect.objectContaining({ notice_45_sent_at: expect.anything() }));
+  });
+
+  test('an owner-silenced termite SMS with a confirmed email stamps the witness via email', async () => {
+    const { term, secondQuery } = termiteNoticeHarness();
+    sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'not_sent', providerMessageId: 'owner-silence' });
+    AccountMembershipEmail.sendTermiteRenewalReminder.mockResolvedValue({ ok: true });
+
+    await expect(AnnualPrepayRenewals.sendCustomerTermNotice(term, 45)).resolves.toMatchObject({ sent: true, channel: 'email' });
+    expect(secondQuery.update).toHaveBeenCalledWith(expect.objectContaining({ notice_45_sent_at: expect.any(Date), notice_45_claimed_at: null }));
+  });
+
+  test('an UNCERTAIN termite SMS with no confirmed email keeps its claim (never re-texted immediately) and records no witness', async () => {
+    const { term, secondQuery } = termiteNoticeHarness();
+    sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'uncertain' });
+    AccountMembershipEmail.sendTermiteRenewalReminder.mockResolvedValue({ ok: false });
+
+    await expect(AnnualPrepayRenewals.sendCustomerTermNotice(term, 45)).resolves.toMatchObject({ sent: false, reason: 'sms_unknown' });
+    expect(secondQuery.update).not.toHaveBeenCalled();
+  });
+
+  test('a LATE 45-day catch-up (under 45 days to term_end) goes to notice_45_late_sent_at, never the 45-day witness, and bells staff', async () => {
+    const termEnd = new Date(Date.now() + 38 * 86400000).toISOString().slice(0, 10);
+    const { term, secondQuery } = termiteNoticeHarness({ termEnd });
+    sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted' });
+    AccountMembershipEmail.sendTermiteRenewalReminder.mockResolvedValue({ ok: true });
+
+    await expect(AnnualPrepayRenewals.sendCustomerTermNotice(term, 45)).resolves.toMatchObject({ sent: true });
+    expect(secondQuery.update).toHaveBeenCalledWith(expect.objectContaining({ notice_45_late_sent_at: expect.any(Date), notice_45_claimed_at: null }));
+    expect(secondQuery.update).not.toHaveBeenCalledWith(expect.objectContaining({ notice_45_sent_at: expect.anything() }));
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith(
+      'alert',
+      'Termite annual renewal notice went out late',
+      expect.any(String),
+      expect.objectContaining({ bell: true, metadata: expect.objectContaining({ customerId: 'customer-1', reason: 'notice_45_late' }) }),
+    );
   });
 
   test('the termite notice names the PLAN\'s property (source estimate), not a different billing address', async () => {
@@ -2288,7 +2366,7 @@ describe('annual prepay renewal helpers', () => {
     });
     CancellationResolution.cancelFlowV2Enabled.mockReturnValue(true);
     renderSmsTemplate.mockResolvedValue('rendered termite sms');
-    sendCustomerMessage.mockResolvedValue({ sent: true });
+    sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted' });
     AccountMembershipEmail.sendTermiteRenewalReminder.mockResolvedValue({ ok: true });
 
     await expect(AnnualPrepayRenewals.sendCustomerTermNotice(term, 45)).resolves.toMatchObject({ sent: true });
@@ -2528,7 +2606,7 @@ describe('annual prepay renewal helpers', () => {
     });
     CancellationResolution.cancelFlowV2Enabled.mockReturnValue(true);
     renderSmsTemplate.mockResolvedValue('rendered termite sms');
-    sendCustomerMessage.mockResolvedValue({ sent: true });
+    sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted' });
     AccountMembershipEmail.sendTermiteRenewalReminder.mockResolvedValue({ ok: true });
 
     await expect(AnnualPrepayRenewals.sendCustomerTermNotice(term, 45)).resolves.toMatchObject({ sent: true });

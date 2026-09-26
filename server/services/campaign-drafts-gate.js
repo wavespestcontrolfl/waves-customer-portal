@@ -157,7 +157,10 @@ async function campaignCooldownReason(customerId, { excludeDraftId = null } = {}
     .where(function () {
       this.where('notice_30_sent_at', '>', db.raw(COOLDOWN_INTERVAL))
         .orWhere('notice_15_sent_at', '>', db.raw(COOLDOWN_INTERVAL))
-        .orWhere('notice_7_sent_at', '>', db.raw(COOLDOWN_INTERVAL));
+        .orWhere('notice_7_sent_at', '>', db.raw(COOLDOWN_INTERVAL))
+        // Termite annual plans' extra 45-day rung (on time or late catch-up).
+        .orWhere('notice_45_sent_at', '>', db.raw(COOLDOWN_INTERVAL))
+        .orWhere('notice_45_late_sent_at', '>', db.raw(COOLDOWN_INTERVAL));
     })
     .first('id');
   if (recentPrepayNotice) return 'recent_prepay_notice';
