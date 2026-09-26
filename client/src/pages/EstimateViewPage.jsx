@@ -4334,6 +4334,20 @@ function ReviewBeforeBookingCard({ reason }) {
 // new tab, so a customer mid-configuration here never loses their
 // in-progress choices. Placed near the accept/decision area but never
 // disables or replaces the estimate's own accept CTA.
+// A /data refresh keeps what the first load showed for the two projections
+// the server composes on a fresh open only — returnVisit (withheld on a
+// refresh it cannot place in a recorded sitting, GH codex r6 P2) and
+// consultationOffer (composed on the first load only, GH codex #4853 r2 P2)
+// — unless the refreshed payload turned terminal, where the server's
+// active-only eligibility wins (GH codex r8 P2).
+export function carryRefreshProjections(prev, body, isRefresh) {
+  if (!isRefresh || body?.cta?.terminalState != null) return body;
+  const carried = {};
+  if (prev?.returnVisit && !body.returnVisit) carried.returnVisit = prev.returnVisit;
+  if (prev?.consultationOffer && !body.consultationOffer) carried.consultationOffer = prev.consultationOffer;
+  return Object.keys(carried).length ? { ...body, ...carried } : body;
+}
+
 export function ConsultationOfferSection({ consultationOffer }) {
   if (!consultationOffer?.url) return null;
   return (
@@ -5857,16 +5871,9 @@ function EstimateViewPageInner({ websiteMode = false }) {
     // same ordering rule — before setData) so the commercial copy pack and
     // the residential fallback can never render torn on one paint.
     setCommercialGlass(body?.cta?.commercialGlass === true);
-    // A refresh belongs to the sitting already on screen: the server withholds
-    // returnVisit on a refresh it cannot prove is inside a recorded sitting
-    // (a tab left open past the session gap), and the strip must not vanish
-    // mid-session for that — carry the loaded projection forward (GH codex
-    // r6 P2). A fresh open always takes the server's word.
-    // Never on a payload that turned terminal (declined via the sheet, accepted,
-    // expired): the server's active-only eligibility wins there (GH codex r8 P2).
-    setData((prev) => (isRefresh && prev?.returnVisit && !body.returnVisit && body?.cta?.terminalState == null
-      ? { ...body, returnVisit: prev.returnVisit }
-      : body));
+    // A refresh keeps the first load's returnVisit / consultationOffer
+    // unless the payload turned terminal (carryRefreshProjections).
+    setData((prev) => carryRefreshProjections(prev, body, isRefresh));
     setLoading(false);
     const defaultServiceMode = body?.estimate?.defaultServiceMode || body?.pricing?.defaultServiceMode;
     const isOneTimeOnly = body?.estimate?.isOneTimeOnly === true || defaultServiceMode === 'one_time';

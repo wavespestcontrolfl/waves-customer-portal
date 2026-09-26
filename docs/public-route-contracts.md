@@ -1421,10 +1421,16 @@ linked lead passes `leadLinkRefusal` (open lead, US phone, and — if a
 customer is linked — that customer live and still on the lead's phone) and
 `leadWantsRecurringPlan`; and the `/inspection/:token` page's own lead-wide
 probe (`inspection-public.js` `_internals.computeConsultationSlotsForLead`,
-the same one the email block uses) says the page would offer a time — at
-least one open slot, or no address on file yet (the page asks for one); an
-out-of-area, unresolved, retired-catalog or no-open-times result omits the
-field. The Intelligence Bar's `get_estimate_detail` projection drops
+the same one the email block uses) finds at least one open slot AT THIS
+ESTIMATE'S PROPERTY — the address the page resolved matches the estimate's
+(same street key, unit and zip); an out-of-area, unresolved, no-address,
+retired-catalog, no-open-times or other-property result omits the field.
+Quote-first only: never on an estimate drafted from a visit
+(`estimate_data.scheduled_service_id`) or on a grouped estimate
+(`estimate_group_id`). Composed on the page's own first `/data` load only —
+never on an internal `?refresh=1` of a viewed estimate (the client carries
+the first load's offer forward) and never for a caller that does not opt in
+(`includeConsultationOffer`). The Intelligence Bar's `get_estimate_detail` projection drops
 `consultationOffer` (the URL is a booking bearer). The URL is
 `consultationUrlForLead(leadId)` with NO channel (unverified delivery — this
 is neither an SMS send, which asserts phone delivery, nor an email send);

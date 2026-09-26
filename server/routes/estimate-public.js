@@ -26162,6 +26162,11 @@ async function composeEstimateDataPayload(estimate, {
   verifiedStaffPreview = false,
   currentViewRecorded = false,
   isInternalRefresh = false,
+  // The consultation offer runs an availability probe, so only the page's
+  // own first /data load asks for it (Codex #4853 r2 P2): never an internal
+  // ?refresh=1 re-fetch (the client keeps the first load's offer) and never
+  // a non-page projection such as the Intelligence Bar's estimate detail.
+  includeConsultationOffer = false,
 } = {}) {
     let estimateDataForIntelligence = {};
     try {
@@ -26608,11 +26613,16 @@ async function composeEstimateDataPayload(estimate, {
     // on this page (returnVisit, softExit below) — never a staff draft/
     // preview or the headless document pass. Include-when-present; the
     // builder itself fails soft (never throws) on any ineligibility or error.
-    const consultationOffer = await buildEstimateConsultationOffer({
-      leadId: estimateDataForIntelligence?.lead_id,
-      leadLinkage: estimateDataForIntelligence?.lead_linkage,
-      acceptActive: !adminDraftPreview && !verifiedStaffPreview && !isPdfRenderPass && isEstimateAcceptActive(estimate),
-    });
+    const consultationOffer = includeConsultationOffer && !isInternalRefresh
+      ? await buildEstimateConsultationOffer({
+        leadId: estimateDataForIntelligence?.lead_id,
+        leadLinkage: estimateDataForIntelligence?.lead_linkage,
+        acceptActive: !adminDraftPreview && !verifiedStaffPreview && !isPdfRenderPass && isEstimateAcceptActive(estimate),
+        estimateAddress: estimate.address,
+        fromVisit: Boolean(estimateDataForIntelligence?.scheduled_service_id),
+        grouped: Boolean(estimate.estimate_group_id),
+      })
+      : null;
 
     // Returning-visitor strip (GATE_ESTIMATE_RETURN_VISIT). Include-when-TRUE
     // only: gate on, a live accept-active row, never a staff draft preview or
@@ -27224,6 +27234,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       verifiedStaffPreview,
       currentViewRecorded,
       isInternalRefresh,
+      includeConsultationOffer: true,
     }));
   } catch (err) { next(err); }
 });

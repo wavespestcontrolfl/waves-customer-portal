@@ -153,6 +153,9 @@ function estimateRow(overrides = {}) {
   };
 }
 
+// The address the /inspection page resolved — the estimate fixture's property.
+const PAGE_ADDRESS = { line1: '123 Consult Ln', line2: null, city: 'Bradenton', state: 'FL', zip: '34203' };
+
 const OPEN_RECURRING_LEAD = {
   id: LEAD_ID,
   phone: '9415551234',
@@ -178,7 +181,7 @@ async function withServer(fn) {
 beforeEach(() => {
   dbRows = {};
   dbThrows = {};
-  mockComputeConsultationSlotsForLead.mockReset().mockResolvedValue({ ok: true, slots: [{ date: '2026-10-01', start_time: '09:00' }], needsAddress: false });
+  mockComputeConsultationSlotsForLead.mockReset().mockResolvedValue({ ok: true, slots: [{ date: '2026-10-01', start_time: '09:00' }], needsAddress: false, address: PAGE_ADDRESS });
   process.env.GATE_ESTIMATE_CONSULTATION_OFFER = 'true';
   process.env.GATE_LEAD_INSPECTION_LINK = 'true';
 });
@@ -354,7 +357,7 @@ describe('composeEstimateDataPayload — acceptActive threading for the three pr
   test('adminDraftPreview (staff Customer View of a draft) → absent even though the estimate would otherwise be eligible', async () => {
     const row = estimateRow({ status: 'draft' });
     dbRows = { estimates: row, leads: OPEN_RECURRING_LEAD };
-    const payload = await composeEstimateDataPayload(row, { adminDraftPreview: true });
+    const payload = await composeEstimateDataPayload(row, { ...{ adminDraftPreview: true }, includeConsultationOffer: true });
     expect(Object.prototype.hasOwnProperty.call(payload, 'consultationOffer')).toBe(false);
     expect(mockComputeConsultationSlotsForLead).not.toHaveBeenCalled();
   });
@@ -362,7 +365,7 @@ describe('composeEstimateDataPayload — acceptActive threading for the three pr
   test('verifiedStaffPreview (staff Customer View of a published estimate) → absent', async () => {
     const row = estimateRow();
     dbRows = { estimates: row, leads: OPEN_RECURRING_LEAD };
-    const payload = await composeEstimateDataPayload(row, { verifiedStaffPreview: true });
+    const payload = await composeEstimateDataPayload(row, { ...{ verifiedStaffPreview: true }, includeConsultationOffer: true });
     expect(Object.prototype.hasOwnProperty.call(payload, 'consultationOffer')).toBe(false);
     expect(mockComputeConsultationSlotsForLead).not.toHaveBeenCalled();
   });
@@ -370,7 +373,7 @@ describe('composeEstimateDataPayload — acceptActive threading for the three pr
   test('isPdfRenderPass (headless document render) → absent', async () => {
     const row = estimateRow();
     dbRows = { estimates: row, leads: OPEN_RECURRING_LEAD };
-    const payload = await composeEstimateDataPayload(row, { isPdfRenderPass: true });
+    const payload = await composeEstimateDataPayload(row, { ...{ isPdfRenderPass: true }, includeConsultationOffer: true });
     expect(Object.prototype.hasOwnProperty.call(payload, 'consultationOffer')).toBe(false);
     expect(mockComputeConsultationSlotsForLead).not.toHaveBeenCalled();
   });
@@ -378,7 +381,68 @@ describe('composeEstimateDataPayload — acceptActive threading for the three pr
   test('none of the three flags set, otherwise eligible → present (control case for the three above)', async () => {
     const row = estimateRow();
     dbRows = { estimates: row, leads: OPEN_RECURRING_LEAD };
-    const payload = await composeEstimateDataPayload(row, {});
+    const payload = await composeEstimateDataPayload(row, { includeConsultationOffer: true });
     expect(payload.consultationOffer).toEqual({ url: expect.stringContaining('/inspection/') });
+  });
+
+  test('a caller that does not opt in (the Intelligence Bar projection) never runs the probe', async () => {
+    const row = estimateRow();
+    dbRows = { estimates: row, leads: OPEN_RECURRING_LEAD };
+    const payload = await composeEstimateDataPayload(row, {});
+    expect(Object.prototype.hasOwnProperty.call(payload, 'consultationOffer')).toBe(false);
+    expect(mockComputeConsultationSlotsForLead).not.toHaveBeenCalled();
+  });
+});
+
+describe('GET /:token/data — quote-first, first-load-only rules (Codex #4853 r2)', () => {
+  test('an internal ?refresh=1 of a viewed estimate never runs the probe (the client carries the first load\'s offer)', async () => {
+    const row = estimateRow({ viewed_at: new Date(Date.now() - 60000).toISOString() });
+    dbRows = { estimates: row, leads: OPEN_RECURRING_LEAD };
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/estimates/${row.token}/data?refresh=1`);
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(Object.prototype.hasOwnProperty.call(body, 'consultationOffer')).toBe(false);
+      expect(mockComputeConsultationSlotsForLead).not.toHaveBeenCalled();
+    });
+  });
+
+  test('a fresh open of a viewed estimate still gets the offer', async () => {
+    const row = estimateRow({ viewed_at: new Date(Date.now() - 60000).toISOString() });
+    dbRows = { estimates: row, leads: OPEN_RECURRING_LEAD };
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/estimates/${row.token}/data`);
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.consultationOffer).toEqual({ url: expect.stringContaining('/inspection/') });
+    });
+  });
+
+  test('an estimate drafted from a visit (estimate_data.scheduled_service_id) → absent, no probe', async () => {
+    const base = estimateRow();
+    const row = estimateRow({ estimate_data: { ...base.estimate_data, scheduled_service_id: 'svc-assessment-1' } });
+    dbRows = { estimates: row, leads: OPEN_RECURRING_LEAD };
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/estimates/${row.token}/data?refresh=1`);
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(Object.prototype.hasOwnProperty.call(body, 'consultationOffer')).toBe(false);
+      expect(mockComputeConsultationSlotsForLead).not.toHaveBeenCalled();
+    });
+  });
+
+  test('the page would book at another property than the estimate → absent', async () => {
+    mockComputeConsultationSlotsForLead.mockResolvedValue({
+      ok: true, slots: [{ date: '2026-10-01', start_time: '09:00' }], needsAddress: false,
+      address: { line1: '900 Other Rd', line2: null, city: 'Bradenton', state: 'FL', zip: '34203' },
+    });
+    const row = estimateRow();
+    dbRows = { estimates: row, leads: OPEN_RECURRING_LEAD };
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/estimates/${row.token}/data?refresh=1`);
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(Object.prototype.hasOwnProperty.call(body, 'consultationOffer')).toBe(false);
+    });
   });
 });

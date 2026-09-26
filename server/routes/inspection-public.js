@@ -748,7 +748,8 @@ function shapeAvailability(availability, range) {
 // still verifies a call-sourced lead by its own call_log row, so a
 // call-originated lead's already-booked assessment is still caught.
 // Returns `{ ok:false }` on ANY ineligibility/error (fail closed — the
-// email caller renders nothing), or `{ ok:true, slots, needsAddress }`:
+// email caller renders nothing), or `{ ok:true, slots, needsAddress, address }`
+// (`address` = the resolved service address the page would book at):
 // `needsAddress:true` (empty slots) means the lead has no address on file
 // at all — the caller may still offer a plain booking-page link; any other
 // reason for zero slots (out of area, unresolved address, no bookable
@@ -779,7 +780,7 @@ async function computeConsultationSlotsForLead(leadId, { count = 3 } = {}) {
     const config = await booking._internals.loadBookingConfig();
     const range = bookingRange(config);
     const built = await buildAvailabilityForLead(resolved.location, { ...range, config, duration: catalog.durationMinutes });
-    return { ok: true, slots: flattenNextSlots(built, count), needsAddress: false };
+    return { ok: true, slots: flattenNextSlots(built, count), needsAddress: false, address: resolved.address };
   } catch (err) {
     logger.warn(`[inspection-public] consultation slot compute failed for lead ${leadId}: ${err.message}`);
     return { ok: false };

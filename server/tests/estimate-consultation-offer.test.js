@@ -54,8 +54,13 @@ const OPEN_RECURRING_LEAD = {
   customer_id: null,
 };
 
+const PAGE_ADDRESS = { line1: '123 Palm Street', line2: null, city: 'Bradenton', state: 'FL', zip: '34205' };
+
 function baseArgs(overrides = {}) {
-  return { leadId: LEAD_ID, leadLinkage: 'sid', acceptActive: true, ...overrides };
+  return {
+    leadId: LEAD_ID, leadLinkage: 'sid', acceptActive: true,
+    estimateAddress: '123 Palm St, Bradenton, FL 34205', ...overrides,
+  };
 }
 
 beforeEach(() => {
@@ -65,7 +70,7 @@ beforeEach(() => {
   process.env.GATE_ESTIMATE_CONSULTATION_OFFER = 'true';
   process.env.GATE_LEAD_INSPECTION_LINK = 'true';
   process.env.LEAD_PREFILL_SECRET = 'test-prefill-secret';
-  mockComputeConsultationSlotsForLead.mockResolvedValue({ ok: true, slots: [{ date: '2026-10-01', start_time: '09:00' }], needsAddress: false });
+  mockComputeConsultationSlotsForLead.mockResolvedValue({ ok: true, slots: [{ date: '2026-10-01', start_time: '09:00' }], needsAddress: false, address: PAGE_ADDRESS });
 });
 
 afterEach(() => {
@@ -186,11 +191,33 @@ describe('buildEstimateConsultationOffer — happy path', () => {
     expect(mockComputeConsultationSlotsForLead).toHaveBeenCalledWith(LEAD_ID, { count: 1 });
   });
 
-  test('a lead with no address on file still gets the offer (the page asks for one)', async () => {
+  test('a lead with no address on file → null (nothing to match the estimate property against)', async () => {
     mockComputeConsultationSlotsForLead.mockResolvedValue({ ok: true, slots: [], needsAddress: true });
-    const result = await buildEstimateConsultationOffer(baseArgs());
-    expect(result).not.toBeNull();
-    expect(result.url).toContain('/inspection/');
+    expect(await buildEstimateConsultationOffer(baseArgs())).toBeNull();
+  });
+
+  test('an estimate drafted from a visit (quote-first only) → null, no probe', async () => {
+    expect(await buildEstimateConsultationOffer(baseArgs({ fromVisit: true }))).toBeNull();
+    expect(mockComputeConsultationSlotsForLead).not.toHaveBeenCalled();
+  });
+
+  test('a grouped (multi-property) estimate → null, no probe', async () => {
+    expect(await buildEstimateConsultationOffer(baseArgs({ grouped: true }))).toBeNull();
+    expect(mockComputeConsultationSlotsForLead).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['another street', '456 Oak Ave, Bradenton, FL 34205'],
+    ['same street, another unit', '123 Palm St Apt 4, Bradenton, FL 34205'],
+    ['same street, another zip', '123 Palm St, Sarasota, FL 34236'],
+    ['no estimate address', null],
+  ])('the page would book at a different property (%s) → null', async (_label, estimateAddress) => {
+    expect(await buildEstimateConsultationOffer(baseArgs({ estimateAddress }))).toBeNull();
+  });
+
+  test('the same property written differently (St vs Street, no zip) still matches', async () => {
+    const result = await buildEstimateConsultationOffer(baseArgs({ estimateAddress: '123 palm street, Bradenton FL' }));
+    expect(result?.url).toContain('/inspection/');
   });
 
   test('eligible but nothing to pick (out of area, retired catalog, no open times) → null', async () => {

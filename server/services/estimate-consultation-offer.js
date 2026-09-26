@@ -46,6 +46,8 @@ const logger = require('./logger');
 const { estimateConsultationOfferLive, leadInspectionLinkLive } = require('../config/feature-gates');
 const { leadLinkRefusal, consultationUrlForLead } = require('./lead-consultation-link');
 const { leadWantsRecurringPlan } = require('./lead-recurring-intent');
+const { streetKey, normalizeZip, unitKey, streetEmbeddedUnitKey } = require('./customer-properties');
+const { parseRawAddress } = require('../utils/address-normalizer');
 
 // The strong-linkage set the accept handler's own re-lock condition on
 // (server/routes/estimate-public.js, e.g. its accept transaction and
@@ -53,10 +55,34 @@ const { leadWantsRecurringPlan } = require('./lead-recurring-intent');
 // absent linkage is never trusted to identify a real lead for this offer.
 const STRONG_LEAD_LINKAGES = ['sid', 'stamp'];
 
-async function buildEstimateConsultationOffer({ leadId, leadLinkage, acceptActive } = {}) {
+// Whether the estimate's property is the one the /inspection page would book
+// at (Codex #4853 r2 P1) — the page's own profileMatchesAddress rule: same
+// canonical street, same unit, same zip when both carry one. A grouped
+// estimate or a staff address revision keeps the lead link but not the
+// lead's address, and must not book a consultation at another property.
+function sameProperty(estimateAddress, pageAddress) {
+  if (!estimateAddress || !pageAddress?.line1) return false;
+  const est = parseRawAddress(String(estimateAddress));
+  const estLine1 = est.line1 || String(estimateAddress).split(',')[0];
+  const key = streetKey(estLine1);
+  if (!key || streetKey(pageAddress.line1) !== key) return false;
+  const unitOf = (line1, line2) => unitKey(line2 || '') || streetEmbeddedUnitKey(line1);
+  if (unitOf(estLine1, null) !== unitOf(pageAddress.line1, pageAddress.line2)) return false;
+  const estZip = normalizeZip(est.zip);
+  const pageZip = normalizeZip(pageAddress.zip);
+  return !estZip || !pageZip || estZip === pageZip;
+}
+
+async function buildEstimateConsultationOffer({
+  leadId, leadLinkage, acceptActive, estimateAddress, fromVisit = false, grouped = false,
+} = {}) {
   try {
     if (!estimateConsultationOfferLive() || !leadInspectionLinkLive()) return null;
     if (!acceptActive) return null;
+    // Quote-first estimates only (Codex #4853 r2 P1): one drafted from a
+    // visit (estimate_data.scheduled_service_id — the assessment pre-draft)
+    // already had its look, and a grouped estimate spans properties.
+    if (fromVisit || grouped) return null;
     if (!leadId || !STRONG_LEAD_LINKAGES.includes(leadLinkage)) return null;
 
     const lead = await db('leads').where({ id: String(leadId) }).whereNull('deleted_at')
@@ -69,11 +95,13 @@ async function buildEstimateConsultationOffer({ leadId, leadLinkage, acceptActiv
     // offer can never link to a page that would refuse the same lead.
     const { computeConsultationSlotsForLead } = require('../routes/inspection-public')._internals;
     const result = await computeConsultationSlotsForLead(lead.id, { count: 1 });
-    // The email block's bookability rule (Codex #4853 r1 P2): a lead with
-    // no address on file can still give one on the page, but any other
-    // empty result — out of area, unresolved address, retired catalog, no
-    // open times — would open a page with nothing to pick.
-    if (!result.ok || (!result.needsAddress && result.slots.length === 0)) return null;
+    // Bookable at THIS estimate's property: an open slot (Codex #4853 r1
+    // P2 — out of area, retired catalog or no open times would open a page
+    // with nothing to pick) at the address the page resolved, matched to
+    // the estimate (r2 P1). A lead with no address on file has nothing to
+    // match, so it gets no offer here.
+    if (!result.ok || result.slots.length === 0) return null;
+    if (!sameProperty(estimateAddress, result.address)) return null;
 
     const url = consultationUrlForLead(lead.id);
     if (!url) return null;
@@ -84,4 +112,4 @@ async function buildEstimateConsultationOffer({ leadId, leadLinkage, acceptActiv
   }
 }
 
-module.exports = { buildEstimateConsultationOffer };
+module.exports = { buildEstimateConsultationOffer, _test: { sameProperty } };

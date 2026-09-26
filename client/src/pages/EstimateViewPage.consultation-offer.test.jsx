@@ -7,7 +7,7 @@ import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
-import { ConsultationOfferSection } from './EstimateViewPage';
+import { ConsultationOfferSection, carryRefreshProjections } from './EstimateViewPage';
 
 afterEach(() => cleanup());
 
@@ -45,5 +45,34 @@ describe('ConsultationOfferSection', () => {
     render(<ConsultationOfferSection consultationOffer={{ url: 'https://portal.wavespestcontrol.com/inspection/abc.123.sig' }} />);
     expect(screen.queryByText(/\bAdam\b/)).not.toBeInTheDocument();
     expect(screen.getByText(/A Waves technician/)).toBeInTheDocument();
+  });
+});
+
+describe('carryRefreshProjections', () => {
+  const offer = { url: 'https://portal.example/inspection/tok' };
+  const visit = { previousViewedAt: '2026-09-20T12:00:00Z' };
+
+  it('a refresh keeps the first load\'s consultation offer (the server composes it on the first load only)', () => {
+    const next = carryRefreshProjections({ consultationOffer: offer }, { cta: {} }, true);
+    expect(next.consultationOffer).toBe(offer);
+  });
+
+  it('a refresh keeps returnVisit the same way', () => {
+    expect(carryRefreshProjections({ returnVisit: visit }, { cta: {} }, true).returnVisit).toBe(visit);
+  });
+
+  it('a payload that turned terminal drops both', () => {
+    const body = { cta: { terminalState: 'accepted' } };
+    expect(carryRefreshProjections({ consultationOffer: offer, returnVisit: visit }, body, true)).toBe(body);
+  });
+
+  it('a fresh open takes the server\'s word', () => {
+    const body = { cta: {} };
+    expect(carryRefreshProjections({ consultationOffer: offer }, body, false)).toBe(body);
+  });
+
+  it('returns the body itself when nothing needs carrying', () => {
+    const body = { cta: {}, consultationOffer: offer };
+    expect(carryRefreshProjections({ consultationOffer: { url: 'old' } }, body, true)).toBe(body);
   });
 });
