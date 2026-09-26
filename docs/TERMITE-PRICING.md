@@ -74,7 +74,7 @@ Full pre-slab pricing formula — including labor calculation, volume-discount b
 
 Updated in three in-sync copies of the constant as part of Session 6:
 - `server/services/pricing-engine/constants.js` (v1 modular, `SPECIALTY.preSlabTermidor.bottleCost`)
-- `server/services/pricing-engine-v2.js` (v2 inline, `PS_BTL` in `calcPreslab`)
+- `server/services/pricing-engine-v2.js` (v2 inline, `PS_BTL` in `calcPreslab`) — **deleted since; two copies remain**
 - `client/src/lib/estimateEngine.js` (client mirror)
 
 ---
@@ -83,8 +83,8 @@ Updated in three in-sync copies of the constant as part of Session 6:
 
 The following services are quoted in production but NOT documented here. The v4.4 refactor reference doc will cover them once the refactor lands:
 
-- **Bait station install** — per-station material + 1.75× margin multiplier formula. Complication: pre-session draft included a fabricated HexPro system ($8.69/station) that does not exist in `TERMITE.systems` — only `advance` ($14) and `trelona` ($24) are in code. Needs product/offering confirmation before documenting.
-- **Trench (perimeter liquid barrier)** — per-linear-foot, surface-type weighted. Complications: v1 and v2 engines diverge on the concrete-percentage cap (v1 = 0.60, v2 = 0.50), and the pool-feature composition has replace-vs-add semantics the pre-session draft misdescribed.
+- **Bait station install** — per-station material × `installMultiplier` (1.45× since April 2026; 1.75× before). Complication: pre-session draft included a fabricated HexPro system ($8.69/station) that does not exist in `TERMITE.systems` — only `advance` ($13.16) and `trelona` ($24) are in code. Needs product/offering confirmation before documenting.
+- **Trench (perimeter liquid barrier)** — per-linear-foot, surface-type weighted. Complications: the concrete-percentage cap is 0.60 (`SPECIALTY.trenching.concretePctCap`; the retired v2 engine used 0.50 and the client mirror has since been raised to match), and the pool-feature composition has replace-vs-add semantics the pre-session draft misdescribed.
 - **Bora-Care (attic wood treatment)** — per-gallon with margin divisor. Complications: formula includes a labor curve (variable by attic size, with multi-day split over 4500 sqft) and a min-3-gallons floor that were missing from the pre-session draft.
 - **Pre-slab Termidor — full pricing formula** — the bottle-cost correction is in this doc (section 3); the full formula (labor curve, volume-discount placement, margin divisor) is deferred. Volume discount is seller-selected (`'NONE'` / `'5'` / `'10'` builder-contract tier), applied post-margin to price rather than pre-margin to material cost.
 

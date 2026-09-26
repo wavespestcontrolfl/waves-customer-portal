@@ -88,7 +88,8 @@ Light `APPOINTMENT_CARD_REQUEST` + activate the SMS template (and optionally
   terms.
   **Update 2026-09-26:** this lane now has both rails, each dark behind its own
   gate. One-time completion invoices auto-charge the /secure-consented card,
-  capped at the visit's stamped estimated_price (`GATE_APPT_CARD_COMPLETION_CHARGE`,
+  capped at the frozen `appointment_card_requests.accepted_amount`, never the live visit
+  price (`GATE_APPT_CARD_COMPLETION_CHARGE`,
   `complete-scheduled-service.js:10773-10786`). The disclosed no-show/late-cancel
   fee is charged from the `appointment_card_requests` row by
   `chargeAppointmentNoShowFee` (`GATE_APPT_CARD_NO_SHOW_FEE`,
