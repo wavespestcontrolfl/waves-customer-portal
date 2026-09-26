@@ -43,7 +43,17 @@ const { renderSmsTemplate } = require('../services/sms-template-renderer');
 const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
 const { _private } = AnnualPrepayRenewals;
 
+// A fully-migrated schema: annualPrepayColumns caches only a probe that
+// carries every termite notice column (Codex #4921 r8), and these tests rely
+// on that cache across the per-rung loop.
+const TERMITE_NOTICE_COLS = Object.fromEntries([
+  'annual_plan_version', 'notice_45_sent_at', 'notice_45_claimed_at', 'notice_45_late_sent_at',
+  'notice_45_late_escalated_at', 'notice_30_sent_at', 'notice_30_claimed_at', 'notice_30_late_sent_at',
+  'notice_30_late_escalated_at', 'notice_missed_escalated_at',
+  'notice_45_undelivered_escalated_at', 'notice_30_undelivered_escalated_at',
+].map((c) => [c, {}]));
 const REMINDER_COLS = {
+  ...TERMITE_NOTICE_COLS,
   payment_reminder_3d_sent_at: {},
   payment_reminder_3d_claimed_at: {},
   payment_reminder_1d_sent_at: {},

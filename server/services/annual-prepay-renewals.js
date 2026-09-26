@@ -130,7 +130,7 @@ async function scheduledServiceColumns() {
   return scheduledColsCache;
 }
 
-// Codex #4921 r4 P1: only a SUCCESSFUL, non-empty probe is cached. This
+// Codex #4921 r4 P1: only a SUCCESSFUL, complete probe is cached. This
 // used to cache {} forever after one transient columnInfo() failure, which
 // silently disabled every column-gated path for the life of the process
 // (the termite 45/30 notice pass among them) until a restart. A failed or
@@ -146,8 +146,19 @@ async function annualPrepayColumns(conn = db) {
     logger.warn(`[annual-prepay] annual_prepay_terms column probe failed (not cached): ${err.message}`);
     return {};
   }
-  if (conn === db && Object.keys(cols).length > 0) termColsCache = cols;
+  // Codex #4921 r8 P1: a SUCCESSFUL but INCOMPLETE probe (mid rolling
+  // deploy, before the termite notice migrations land) is not cached either
+  // — caching it would keep termiteNoticeColumnsReady false until a restart.
+  if (conn === db && termiteNoticeSchemaComplete(cols)) termColsCache = cols;
   return cols;
+}
+
+// Every termite notice column the notice pass (and its gated undelivered
+// sub-pass) queries. Referenced lazily (call time), after module init.
+function termiteNoticeSchemaComplete(cols) {
+  return TERMITE_NOTICE_PASS_COLUMNS.every((col) => Boolean(cols[col]))
+    && Boolean(cols[TERMITE_45_UNDELIVERED_ESCALATION_COLUMN])
+    && Boolean(cols[TERMITE_30_UNDELIVERED_ESCALATION_COLUMN]);
 }
 
 async function invoiceColumns() {
@@ -5616,7 +5627,10 @@ async function recordTermNoticeInteraction(customerId, termiteRung, daysOut) {
 // Claim a rung for one term (15-minute TTL claim; a stale claim is
 // re-claimable). Moves an active term to renewal_pending. Null when another
 // sender holds it, the rung already went out, or the term was decided.
-async function claimTermNotice(term, daysOut) {
+// baseline (Codex #4921 r8): the generic ladder's fallback when the termite
+// notice schema is NOT ready — the claim then names only baseline columns
+// (no late column), so a pre-000106 schema cannot throw here.
+async function claimTermNotice(term, daysOut, baseline = false) {
   const noticeCol = noticeColumnForDaysOut(daysOut);
   const claimCol = noticeClaimColumnForDaysOut(daysOut);
   const now = new Date();
@@ -5626,7 +5640,7 @@ async function claimTermNotice(term, daysOut) {
     .whereIn('status', ACTIVE_STATUSES)
     .whereNull('renewal_decision')
     .whereNull(noticeCol)
-    .where(lateTermiteSendAbsent(daysOut, term))
+    .where(lateTermiteSendAbsent(daysOut, term, baseline))
     .where(function noticeClaimAvailable() {
       this.whereNull(claimCol).orWhere(claimCol, '<', staleClaimCutoff);
     })
@@ -5636,7 +5650,16 @@ async function claimTermNotice(term, daysOut) {
       updated_at: now,
     })
     .returning('*');
-  return claimedTerm || null;
+  return withClaimStamp(claimedTerm, [claimCol], now);
+}
+
+// The claimed row, carrying the exact claim timestamp(s) THIS attempt wrote
+// — what the release matches on (Codex #4921 r8), never a later claimer's.
+function withClaimStamp(claimedTerm, claimCols, now) {
+  if (!claimedTerm) return null;
+  const stamped = { ...claimedTerm };
+  for (const col of claimCols) stamped[col] = claimedTerm[col] || now;
+  return stamped;
 }
 
 // Codex #4921 r7 P1: a COMBINED 30+45 notice (both rungs discharged by one
@@ -5671,29 +5694,50 @@ async function claimCombinedTermNotice(term) {
       updated_at: now,
     })
     .returning('*');
-  return claimedTerm || null;
+  return withClaimStamp(claimedTerm, ['notice_30_claimed_at', 'notice_45_claimed_at'], now);
 }
 
-// Releases BOTH claims a combined send took (the 30 still unsent, the term
-// undecided), restoring the pre-claim status — the rollback of
-// claimCombinedTermNotice, same guard shape as releaseTermNoticeClaim.
+// Releases BOTH claims a combined send took — the rollback of
+// claimCombinedTermNotice, with the same ownership rule as
+// releaseTermNoticeClaim: the pre-claim status is restored ONLY while the
+// row still holds exactly what THIS attempt wrote (status renewal_pending,
+// both claims at this attempt's timestamp); otherwise only this attempt's
+// own claim columns are cleared and the status is left alone.
 async function releaseCombinedTermNoticeClaim(claimedTerm, previousStatus) {
-  await db('annual_prepay_terms')
-    .where({ id: claimedTerm.id })
-    .whereNull('renewal_decision')
-    .whereNull('notice_30_sent_at')
-    .update({
-      notice_30_claimed_at: null,
-      notice_45_claimed_at: null,
-      status: previousStatus,
-      updated_at: new Date(),
-    })
-    .catch((err) => logger.warn(`[annual-prepay] combined notice claim release failed for term ${claimedTerm.id}: ${err.message}`));
+  const claimedAt30 = claimedTerm.notice_30_claimed_at;
+  const claimedAt45 = claimedTerm.notice_45_claimed_at;
+  try {
+    const restored = await db('annual_prepay_terms')
+      .where({ id: claimedTerm.id })
+      .whereNull('renewal_decision')
+      .whereNull('notice_30_sent_at')
+      .where('status', 'renewal_pending')
+      .where('notice_30_claimed_at', claimedAt30)
+      .where('notice_45_claimed_at', claimedAt45)
+      .update({
+        notice_30_claimed_at: null,
+        notice_45_claimed_at: null,
+        status: previousStatus,
+        updated_at: new Date(),
+      });
+    if (restored) return;
+    await db('annual_prepay_terms')
+      .where({ id: claimedTerm.id })
+      .where('notice_30_claimed_at', claimedAt30)
+      .update({ notice_30_claimed_at: null, updated_at: new Date() });
+    await db('annual_prepay_terms')
+      .where({ id: claimedTerm.id })
+      .where('notice_45_claimed_at', claimedAt45)
+      .update({ notice_45_claimed_at: null, updated_at: new Date() });
+  } catch (err) {
+    logger.warn(`[annual-prepay] combined notice claim release failed for term ${claimedTerm.id}: ${err.message}`);
+  }
 }
 
-// Claim for one delivery: the combined pair, or the single rung.
-function claimForDelivery(term, daysOut, combined) {
-  return combined ? claimCombinedTermNotice(term) : claimTermNotice(term, daysOut);
+// Claim for one delivery: the combined pair, or the single rung (baseline
+// columns only when the termite notice schema is not ready).
+function claimForDelivery(term, daysOut, combined, baseline = false) {
+  return combined ? claimCombinedTermNotice(term) : claimTermNotice(term, daysOut, baseline);
 }
 
 function releaseForDelivery(claimedTerm, daysOut, previousStatus, combined) {
@@ -5708,9 +5752,10 @@ function releaseForDelivery(claimedTerm, daysOut, previousStatus, combined) {
 // any daysOut, including the generic 30-day rung) gets an empty group
 // (knex drops it) — a non-termite term never writes either late column in
 // the first place, so this is a no-op for it either way.
-function lateTermiteSendAbsent(daysOut, term) {
+// baseline: the schema-not-ready fallback names no late column at all.
+function lateTermiteSendAbsent(daysOut, term, baseline = false) {
   return function lateTermiteSendAbsentGroup() {
-    const lateCol = isTermiteAnnualPlanTerm(term) ? termiteLateColumnForDaysOut(daysOut) : null;
+    const lateCol = !baseline && isTermiteAnnualPlanTerm(term) ? termiteLateColumnForDaysOut(daysOut) : null;
     if (lateCol) this.whereNull(lateCol);
   };
 }
@@ -5719,19 +5764,38 @@ function lateTermiteSendAbsent(daysOut, term) {
 // term undecided), restoring the status the claim moved it from. The ONE
 // claim-release status write — shared by the send path and the
 // acceptance-recovery path.
+//
+// Codex #4921 r8 P1: the release is conditional on the state THIS attempt
+// wrote. The status is restored only WHERE status = 'renewal_pending' (what
+// the claim set) AND the claim column still holds this attempt's exact
+// claim timestamp — a refund, void or dispute that moved the status
+// meanwhile (or a successor that re-claimed after the TTL) is never
+// overwritten. Otherwise only this attempt's own claim is cleared (matched
+// by timestamp) and the status is left alone.
 async function releaseTermNoticeClaim(claimedTerm, daysOut, previousStatus) {
   const noticeCol = noticeColumnForDaysOut(daysOut);
   const claimCol = noticeClaimColumnForDaysOut(daysOut);
-  await db('annual_prepay_terms')
-    .where({ id: claimedTerm.id })
-    .whereNull('renewal_decision')
-    .whereNull(noticeCol)
-    .update({
-      [claimCol]: null,
-      status: previousStatus,
-      updated_at: new Date(),
-    })
-    .catch((err) => logger.warn(`[annual-prepay] notice claim release failed for term ${claimedTerm.id}: ${err.message}`));
+  const claimedAt = claimedTerm[claimCol];
+  try {
+    const restored = await db('annual_prepay_terms')
+      .where({ id: claimedTerm.id })
+      .whereNull('renewal_decision')
+      .whereNull(noticeCol)
+      .where('status', 'renewal_pending')
+      .where(claimCol, claimedAt)
+      .update({
+        [claimCol]: null,
+        status: previousStatus,
+        updated_at: new Date(),
+      });
+    if (restored) return;
+    await db('annual_prepay_terms')
+      .where({ id: claimedTerm.id })
+      .where(claimCol, claimedAt)
+      .update({ [claimCol]: null, updated_at: new Date() });
+  } catch (err) {
+    logger.warn(`[annual-prepay] notice claim release failed for term ${claimedTerm.id}: ${err.message}`);
+  }
 }
 
 // THE single place a notice witness is written. The witness column is always
@@ -5760,10 +5824,12 @@ async function releaseTermNoticeClaim(claimedTerm, daysOut, previousStatus) {
 //
 // Combined: the caller holds BOTH claims (claimCombinedTermNotice), so the
 // other rung's claim is cleared with its late record.
-async function stampTermNoticeWitness(claimedTerm, daysOut, sentAt, { alsoRecordMissedRung = null, missedRungAt = null } = {}) {
+// baseline (schema-not-ready fallback, exact-day send): the rung's own
+// column only — no late classification, no late predicate.
+async function stampTermNoticeWitness(claimedTerm, daysOut, sentAt, { alsoRecordMissedRung = null, missedRungAt = null, baseline = false } = {}) {
   const noticeCol = noticeColumnForDaysOut(daysOut);
   const claimCol = noticeClaimColumnForDaysOut(daysOut);
-  const sentCol = noticeWitnessColumn(daysOut, claimedTerm, etDateString(sentAt));
+  const sentCol = baseline ? noticeCol : noticeWitnessColumn(daysOut, claimedTerm, etDateString(sentAt));
   const lateCol = alsoRecordMissedRung ? termiteLateColumnForDaysOut(alsoRecordMissedRung) : null;
   const missedRungWitnessCol = alsoRecordMissedRung ? noticeColumnForDaysOut(alsoRecordMissedRung) : null;
   const missedClaimCol = alsoRecordMissedRung ? noticeClaimColumnForDaysOut(alsoRecordMissedRung) : null;
@@ -5773,7 +5839,7 @@ async function stampTermNoticeWitness(claimedTerm, daysOut, sentAt, { alsoRecord
     stamped = await trx('annual_prepay_terms')
       .where({ id: claimedTerm.id })
       .whereNull(noticeCol)
-      .where(lateTermiteSendAbsent(daysOut, claimedTerm))
+      .where(lateTermiteSendAbsent(daysOut, claimedTerm, baseline))
       .update({
         [sentCol]: sentAt,
         [claimCol]: null,
@@ -5981,6 +6047,10 @@ async function termNoticeGate(termOrId, daysOut, opts) {
   const term = refreshed || (typeof termOrId === 'object' ? termOrId : null);
   if (!term) return { result: { sent: false, reason: 'term_not_found' } };
   if (termiteRungRecorded(term, daysOut)) return { result: { sent: false, reason: 'already_sent' } };
+  // Schema-not-ready fallback (Codex #4921 r8): acceptance recovery and the
+  // combined guard both depend on the termite notice columns — skipped; the
+  // termite pass owns them once the schema is ready.
+  if (opts.baseline) return termNoticePreflightResult(term, daysOut);
 
   // Persisted acceptance evidence first — before the send-content preflight
   // and before any send (see recoverTermiteNoticeFromAcceptance). A lookup
@@ -5995,6 +6065,10 @@ async function termNoticeGate(termOrId, daysOut, opts) {
     return { result: { sent: false, reason: 'missed_rung_has_acceptance' } };
   }
 
+  return termNoticePreflightResult(term, daysOut);
+}
+
+async function termNoticePreflightResult(term, daysOut) {
   const preflight = await termiteNoticePreflight(term, daysOut);
   if (preflight.blocked) return { result: { sent: false, reason: preflight.blocked } };
   return { term, termiteRung: preflight.termiteRung };
@@ -6014,7 +6088,8 @@ async function sendCustomerTermNotice(termOrId, daysOut, opts = {}) {
   // is held elsewhere, defer to the next run rather than race it.
   const combined = Boolean(termiteRung && opts.alsoRecordMissedRung);
   const previousStatus = term.status;
-  const claimedTerm = await claimForDelivery(term, daysOut, combined);
+  const baseline = Boolean(opts.baseline);
+  const claimedTerm = await claimForDelivery(term, daysOut, combined, baseline);
   if (!claimedTerm) return { sent: false, reason: 'already_claimed' };
 
   // One attempt's delivery context. `recorded` = the witness landed (never
@@ -6028,6 +6103,7 @@ async function sendCustomerTermNotice(termOrId, daysOut, opts = {}) {
     termiteRung,
     opts,
     combined,
+    baseline,
     recorded: false,
     keepClaimOnError: false,
     release: () => releaseForDelivery(claimedTerm, daysOut, previousStatus, combined),
@@ -6060,7 +6136,7 @@ async function deliverClaimedTermNotice(ctx) {
   // obligation without depending on the retry's call-site options.
   ctx.coversRungs = ctx.combined ? [Number(ctx.daysOut), Number(ctx.opts.alsoRecordMissedRung)] : null;
 
-  const recovered = termiteRung ? await recoverTermNoticeUnderClaim(ctx) : null;
+  const recovered = termiteRung && !ctx.baseline ? await recoverTermNoticeUnderClaim(ctx) : null;
   if (recovered) return recovered;
 
   if (!customer.phone) {
@@ -6089,7 +6165,10 @@ function sendTermNoticeEmailFor(ctx) {
 // recorded for claim purposes — the rung HAS a record, so releasing the
 // claim would only reset status — but it is surfaced on the result.
 async function markTermNoticeSent(ctx, sentAt) {
-  ctx.witness = await stampTermNoticeWitness(ctx.claimedTerm, ctx.daysOut, sentAt, { alsoRecordMissedRung: ctx.opts.alsoRecordMissedRung });
+  ctx.witness = await stampTermNoticeWitness(ctx.claimedTerm, ctx.daysOut, sentAt, {
+    alsoRecordMissedRung: ctx.opts.alsoRecordMissedRung,
+    baseline: ctx.baseline,
+  });
   ctx.recorded = true;
 }
 
@@ -6190,7 +6269,7 @@ async function recordAcceptedTermNoticeSms(ctx, smsResult) {
   const { claimedTerm, termiteRung, daysOut } = ctx;
   let witnessAt = acceptanceTimeFrom(smsResult.sentAt) || new Date();
   let emailAlreadyAttempted = false;
-  if (termiteRung && noticeWitnessColumn(daysOut, claimedTerm, etDateString(witnessAt)) !== noticeColumnForDaysOut(daysOut)) {
+  if (termiteRung && !ctx.baseline && noticeWitnessColumn(daysOut, claimedTerm, etDateString(witnessAt)) !== noticeColumnForDaysOut(daysOut)) {
     const email = await sendTermNoticeEmailFor(ctx);
     emailAlreadyAttempted = true;
     if (email.acceptedAt && email.acceptedAt < witnessAt) witnessAt = email.acceptedAt;
@@ -6777,16 +6856,19 @@ function genericNoticeAnchored(term, target) {
   return !isTermiteAnnualPlanTerm(term) && isLastServiceNearTermEnd(term);
 }
 
-async function runGenericNoticeLadder(today, excludeTermite30) {
+async function runGenericNoticeLadder(today, termiteReady) {
   let sent = 0;
   for (const daysOut of CUSTOMER_NOTICE_DAYS) {
     const target = addDaysYmd(today, daysOut);
-    const terms = (await genericNoticeCandidates(daysOut, target, excludeTermite30))
+    // Termite pass ran → it owns the termite 30; not ready → the termite 30
+    // falls back here, with baseline columns only for every claim/stamp/
+    // release (Codex #4921 r8 — a pre-000106 schema has no late columns).
+    const terms = (await genericNoticeCandidates(daysOut, target, termiteReady))
       .filter((term) => genericNoticeAnchored(term, target));
     sent += await forEachTermIsolated(
       terms,
       'reminder failed',
-      async (term) => (await sendCustomerTermNotice(term, daysOut)).sent,
+      async (term) => (await sendCustomerTermNotice(term, daysOut, { baseline: !termiteReady })).sent,
     );
   }
   return sent;
@@ -7317,6 +7399,7 @@ module.exports = {
     claimCombinedTermNotice,
     claimTermNotice,
     releaseCombinedTermNoticeClaim,
+    releaseTermNoticeClaim,
     resolveUnstampedWitness,
     recoveryPlan,
     recoveredBeforeEscalation,

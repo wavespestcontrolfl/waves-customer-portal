@@ -597,6 +597,117 @@ describeOrSkip('termite annual-plan notice obligations — against a schema buil
     expect(lateBells(notifyAdmin, 45).map((c) => c[3].metadata.annual_prepay_term_id)).toEqual([combinedOnly.id]);
   });
 
+  // Codex #4921 r8 P1, real SQL: on a pre-000106 schema (no late columns —
+  // the termite pass is NOT ready) the generic ladder's exact-day 30-day
+  // fallback must claim, send and stamp using ONLY baseline columns.
+  test('pre-000106 schema (only 000101–000105 run): the generic 30-day fallback claims, sends and stamps notice_30_sent_at with baseline columns only — no error', async () => {
+    const { db } = fixture;
+    for (const file of MIGRATION_FILES_101_TO_107.slice(0, 5)) {
+      await require(`../models/migrations/${file}`).up(db);
+    }
+    const cols = await db('annual_prepay_terms').columnInfo();
+    expect(cols.notice_30_late_sent_at).toBeUndefined(); // really pre-000106
+    // Base-table (20260514000001) columns the send path reads/writes that the
+    // pre-101 fixture above leaves out.
+    await db.schema.alterTable('annual_prepay_terms', (t) => {
+      t.decimal('prepay_amount', 10, 2); t.uuid('source_estimate_id'); t.uuid('last_scheduled_service_id');
+    });
+    await db.raw(`CREATE TABLE scheduled_services (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), customer_id uuid, scheduled_date date,
+      status text, service_type text, created_at timestamptz DEFAULT now()
+    )`);
+    await db.raw(`CREATE TABLE customers (
+      id uuid PRIMARY KEY, first_name text, phone text, email text, address_line1 text, city text,
+      created_at timestamptz DEFAULT now(), updated_at timestamptz DEFAULT now()
+    )`);
+    jest.doMock('../models/db', () => db);
+    const logger = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
+    jest.doMock('../services/logger', () => logger);
+    jest.doMock('../services/messaging/send-customer-message', () => ({
+      sendCustomerMessage: jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted', sentAt: new Date().toISOString() })),
+      classifyDeliveryCertainty: jest.fn(() => 'sent'),
+    }));
+    jest.doMock('../services/sms-template-renderer', () => ({ renderSmsTemplate: jest.fn(async () => 'rendered termite sms') }));
+    jest.doMock('../services/account-membership-email', () => ({
+      sendMembershipRenewalReminder: jest.fn(), sendTermiteRenewalReminder: jest.fn(async () => ({ ok: true })),
+      findAcceptedTermiteRenewalReminder: jest.fn(async () => null),
+    }));
+    jest.doMock('../services/cancellation-resolution', () => ({ cancelFlowV2Enabled: jest.fn(() => true) }));
+    jest.doMock('../services/notification-service', () => ({ notifyAdmin: jest.fn().mockResolvedValue({ id: 'n' }) }));
+    const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+
+    const customerId = randomUUID();
+    await db('customers').insert({ id: customerId, first_name: 'Stan', phone: '+19415550100', address_line1: '1 Palm Ave', city: 'Sarasota' });
+    const [term] = await db('annual_prepay_terms').insert({
+      customer_id: customerId, term_start: '2025-10-26', term_end: '2026-10-26', // exactly 30 days after 2026-09-26
+      status: 'active', annual_plan_version: 'v3', installation_anchored_at: new Date('2025-10-26T12:00:00Z'),
+      prepay_amount: 650,
+    }).returning('*');
+
+    await expect(AnnualPrepayRenewals.checkAndSend({ today: '2026-09-26' })).resolves.toEqual({ sent: 1 });
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(sendCustomerMessage.mock.calls[0][0].metadata).toMatchObject({ days_out: 30, original_message_type: 'termite_annual_renewal_notice' });
+    const row = await db('annual_prepay_terms').where({ id: term.id }).first();
+    expect(row.notice_30_sent_at).toBeInstanceOf(Date);
+    expect(row.notice_30_claimed_at).toBeNull();
+    expect(row.status).toBe('renewal_pending');
+    expect(logger.error).not.toHaveBeenCalled();
+  });
+
+  // Codex #4921 r8 P1: a claim release restores the status only while the
+  // row still holds exactly what THIS attempt wrote.
+  test('release: a refund landing mid-attempt is never overwritten (only this attempt\'s claim is cleared); the normal failure still restores', async () => {
+    const { db } = fixture;
+    await migrateThrough108(db);
+    jest.doMock('../models/db', () => db);
+    mockSendSide();
+    const { _private } = require('../services/annual-prepay-renewals');
+    const base = {
+      term_start: '2025-10-01', term_end: '2026-10-20', status: 'active', annual_plan_version: 'v3',
+      installation_anchored_at: new Date('2025-10-01T12:00:00Z'),
+    };
+    const insert = async () => (await db('annual_prepay_terms').insert({ ...base, customer_id: randomUUID() }).returning('*'))[0];
+
+    // Normal failure: restore.
+    const a = await insert();
+    const claimedA = await _private.claimTermNotice(a, 45);
+    await _private.releaseTermNoticeClaim(claimedA, 45, 'active');
+    const ra = await db('annual_prepay_terms').where({ id: a.id }).first();
+    expect(ra).toMatchObject({ status: 'active', notice_45_claimed_at: null });
+
+    // A refund cancels the term mid-attempt: the release clears only our claim.
+    const b = await insert();
+    const claimedB = await _private.claimTermNotice(b, 45);
+    await db('annual_prepay_terms').where({ id: b.id }).update({ status: 'cancelled' });
+    await _private.releaseTermNoticeClaim(claimedB, 45, 'active');
+    const rb = await db('annual_prepay_terms').where({ id: b.id }).first();
+    expect(rb).toMatchObject({ status: 'cancelled', notice_45_claimed_at: null });
+
+    // A successor re-claimed after our TTL: neither its claim nor status is touched.
+    const c = await insert();
+    const claimedC = await _private.claimTermNotice(c, 45);
+    const successorAt = new Date(Date.now() + 1000);
+    await db('annual_prepay_terms').where({ id: c.id }).update({ notice_45_claimed_at: successorAt });
+    await _private.releaseTermNoticeClaim(claimedC, 45, 'active');
+    const rc = await db('annual_prepay_terms').where({ id: c.id }).first();
+    expect(rc).toMatchObject({ status: 'renewal_pending', notice_45_claimed_at: successorAt });
+
+    // Combined: a refund mid-attempt keeps 'cancelled'; both of our claims are cleared.
+    const d = await insert();
+    const claimedD = await _private.claimCombinedTermNotice(d);
+    await db('annual_prepay_terms').where({ id: d.id }).update({ status: 'cancelled' });
+    await _private.releaseCombinedTermNoticeClaim(claimedD, 'active');
+    const rd = await db('annual_prepay_terms').where({ id: d.id }).first();
+    expect(rd).toMatchObject({ status: 'cancelled', notice_30_claimed_at: null, notice_45_claimed_at: null });
+    // Combined normal failure: restore.
+    const e = await insert();
+    const claimedE = await _private.claimCombinedTermNotice(e);
+    await _private.releaseCombinedTermNoticeClaim(claimedE, 'active');
+    const re = await db('annual_prepay_terms').where({ id: e.id }).first();
+    expect(re).toMatchObject({ status: 'active', notice_30_claimed_at: null, notice_45_claimed_at: null });
+  });
+
   // Codex #4921 r7 P1, real SQL: a combined send claims BOTH rungs in one
   // conditional UPDATE, so two instances can never each hold one of the
   // pair; and a zero-row witness stamp is classified, never silently

@@ -82,6 +82,10 @@ beforeEach(() => {
   jest.clearAllMocks();
   builders.length = 0;
   queues = {};
+  // Default schema: every termite notice column present (the probe now
+  // fails CLOSED on an error — Codex #4921 r8 — so a test must provide it).
+  db.schema = { hasColumn: jest.fn(async () => true) };
+  require('../services/campaign-drafts-gate')._resetNoticeColumnCacheForTests();
   // Default prefs row = explicit opt-in on BOTH toggles: the gate requires
   // the campaign's OWN consent column === true (toggles are independent —
   // owner ruling 08-25), so tests exercising OTHER predicates get a
@@ -336,8 +340,21 @@ describe('unified 30d cooldown (HOLD)', () => {
     enqueue('annual_prepay_terms', { first: undefined });
     await evaluateCampaignSendGate({ campaignType: 'reactivation', customerId: 'cust-1' });
     expect(db.schema.hasColumn.mock.calls.length).toBeGreaterThan(probesAfterFirst);
-    delete db.schema;
     _resetNoticeColumnCacheForTests();
+  });
+
+  // Codex #4921 r8 P2: a probe FAILURE fails the gate CLOSED (guard_error)
+  // instead of silently checking only the base columns — which could miss a
+  // recent termite notice and let a campaign text through inside the cooldown.
+  test('a column-probe FAILURE fails closed as guard_error (never a base-columns-only cooldown check)', async () => {
+    db.schema = { hasColumn: jest.fn(async () => { throw new Error('connection reset'); }) };
+    enqueue('customers', { first: liveCustomer({ pipeline_stage: 'dormant' }) });
+    enqueue('message_drafts', { first: undefined });
+    enqueue('sms_log', { first: undefined });
+    enqueue('annual_prepay_terms', { first: undefined });
+    const verdict = await evaluateCampaignSendGate({ campaignType: 'reactivation', customerId: 'cust-1' });
+    expect(verdict).toMatchObject({ ok: false, code: 'guard_error' });
+    expect(builders.find((b) => b._table === 'annual_prepay_terms')).toBeUndefined();
   });
 
   test('excludeDraftId: the draft being approved never trips its own cooldown', async () => {

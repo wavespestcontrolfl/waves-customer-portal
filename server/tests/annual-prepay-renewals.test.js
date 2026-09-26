@@ -99,6 +99,14 @@ function query({ first, returning, columnInfo, rows = [], updateCount = 1 } = {}
   return q;
 }
 
+// Every termite notice column annualPrepayColumns requires before it caches.
+const COMPLETE_TERMITE_NOTICE_COLS = Object.fromEntries([
+  'id', 'annual_plan_version', 'notice_45_sent_at', 'notice_45_claimed_at', 'notice_45_late_sent_at',
+  'notice_45_late_escalated_at', 'notice_30_sent_at', 'notice_30_claimed_at', 'notice_30_late_sent_at',
+  'notice_30_late_escalated_at', 'notice_missed_escalated_at',
+  'notice_45_undelivered_escalated_at', 'notice_30_undelivered_escalated_at',
+].map((c) => [c, {}]));
+
 // messaging_audit_log stand-in: resolves .first() from `auditLedger`
 // (daysOut, callNo, query) when a test installs one, else "no row".
 let auditLedger = null;
@@ -3111,6 +3119,29 @@ describe('annual prepay renewal helpers', () => {
       expect(release.whereNull).toHaveBeenCalledWith('notice_30_sent_at');
     });
 
+    // Codex #4921 r8 P1: the release restores status only while the row
+    // still shows THIS attempt's claim; a refund landing mid-attempt keeps
+    // its status and only our claim is cleared.
+    test('a failed delivery whose term was refunded mid-attempt: the release never restores status — it clears only this attempt\'s claim', async () => {
+      pinTermiteToday();
+      const restoreAttempt = query({ updateCount: 0 }); // status no longer 'renewal_pending' / claim not ours
+      const clearOwnClaim = query();
+      setDbQueues({
+        scheduled_services: [query({ first: null }), query({ columnInfo: {} })],
+        annual_prepay_terms: [query({ returning: [refreshed] }), claimed(), restoreAttempt, clearOwnClaim],
+        customers: [query({ first: customerRow })],
+      });
+      smsOutcomes({ sent: false, code: 'PROVIDER_DOWN', deliveryOutcome: 'not_sent' });
+      emailOutcomes({ ok: false, reason: 'email_opted_out' });
+
+      await expect(AnnualPrepayRenewals.sendCustomerTermNotice(termFields, 45)).resolves.toMatchObject({ sent: false });
+      expect(restoreAttempt.update).toHaveBeenCalledWith(expect.objectContaining({ notice_45_claimed_at: null, status: 'active' }));
+      expect(restoreAttempt.where).toHaveBeenCalledWith('status', 'renewal_pending');
+      expect(restoreAttempt.where).toHaveBeenCalledWith('notice_45_claimed_at', expect.any(Date));
+      expect(clearOwnClaim.update).toHaveBeenCalledWith({ notice_45_claimed_at: null, updated_at: expect.any(Date) });
+      expect(clearOwnClaim.where).toHaveBeenCalledWith('notice_45_claimed_at', expect.any(Date));
+    });
+
     test('the combined late-45 record also clears the 45 claim the combined send held', async () => {
       pinTermiteToday();
       jest.setSystemTime(DAY28);
@@ -4180,6 +4211,21 @@ describe('annual prepay renewal helpers', () => {
   // Codex #4921 r4 P1: a transient columnInfo() failure used to be cached as
   // {} for the life of the process, silently disabling every column-gated
   // path until a restart.
+  // Codex #4921 r8 P1: a SUCCESSFUL but INCOMPLETE probe (mid rolling
+  // deploy — the termite notice migrations not yet run) is not cached either.
+  test('annualPrepayColumns never caches a successful but INCOMPLETE probe (missing termite notice columns); the next call re-probes', async () => {
+    const partial = { ...TERMITE_READY_COLS };
+    delete partial.notice_30_late_sent_at;
+    const partialProbe = query({ columnInfo: partial });
+    const completeProbe = query({ columnInfo: TERMITE_READY_COLS });
+    setDbQueues({ annual_prepay_terms: [partialProbe, completeProbe] });
+
+    await expect(_private.annualPrepayColumns()).resolves.toBe(partial);
+    await expect(_private.annualPrepayColumns()).resolves.toBe(TERMITE_READY_COLS); // re-probed
+    await expect(_private.annualPrepayColumns()).resolves.toBe(TERMITE_READY_COLS); // now cached
+    expect(completeProbe.columnInfo).toHaveBeenCalledTimes(1);
+  });
+
   test('annualPrepayColumns never caches a failed or empty probe; the next call re-probes and caches the real columns', async () => {
     const failingProbe = query();
     failingProbe.columnInfo = jest.fn(async () => { throw new Error('connection reset'); });
@@ -5085,10 +5131,11 @@ describe('createTermForAnnualPrepay born-already-paid reconcile', () => {
   test('a term inserted already ACTIVE reconciles its pending-window completions (Customer 360 record-prepay path)', async () => {
     setDbQueues({
       annual_prepay_terms: [
-        // annualPrepayColumns: a minimal NON-empty probe (no optional
-        // column) — only a successful non-empty probe is cached (Codex
-        // #4921 r4 P1), and later steps reuse this one.
-        query({ columnInfo: { id: {} } }),
+        // annualPrepayColumns: a probe carrying the termite notice columns
+        // (and none of the optional term columns this path gates on) — only
+        // a successful, COMPLETE probe is cached (Codex #4921 r4/r8 P1), and
+        // later steps reuse this one.
+        query({ columnInfo: COMPLETE_TERMITE_NOTICE_COLS }),
         query({ first: undefined }), // existing-term lookup (customer + window)
         query({ returning: [TERM] }), // insert
         query({ first: TERM }), // refreshTermSnapshot term read

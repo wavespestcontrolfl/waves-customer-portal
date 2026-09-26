@@ -634,7 +634,7 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
       {
         expr: "term.status === 'active' ? 'renewal_pending' : term.status",
         guards: ['where({ id: term.id })', "whereIn('status', ACTIVE_STATUSES)", "whereNull('renewal_decision')",
-          'whereNull(noticeCol)', 'where(lateTermiteSendAbsent(daysOut, term)', 'where(function noticeClaimAvailable()', 'whereNull(claimCol)',
+          'whereNull(noticeCol)', 'where(lateTermiteSendAbsent(daysOut, term, baseline)', 'where(function noticeClaimAvailable()', 'whereNull(claimCol)',
           "orWhere(claimCol, '<', staleClaimCutoff)"],
       },
       // Move 4 (combined, Codex #4921 r7): a 30-day send that also discharges
@@ -648,10 +648,22 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
           'where(function claim30Available()', "whereNull('notice_30_claimed_at')", "orWhere('notice_30_claimed_at', '<', staleClaimCutoff)",
           'where(function claim45Available()', "whereNull('notice_45_claimed_at')", "orWhere('notice_45_claimed_at', '<', staleClaimCutoff)"],
       },
-      // Move 5 (combined): release of both claims — undecided + the 30 still unsent.
-      { expr: 'previousStatus', guards: ['where({ id: claimedTerm.id })', "whereNull('renewal_decision')", "whereNull('notice_30_sent_at')"] },
-      // Move 5: claim release — undecided + still unsent.
-      { expr: 'previousStatus', guards: ['where({ id: claimedTerm.id })', "whereNull('renewal_decision')", 'whereNull(noticeCol)'] },
+      // Move 5 (combined): release of both claims — undecided, the 30 still
+      // unsent, AND still exactly what THIS attempt wrote (Codex #4921 r8:
+      // status renewal_pending + both claims at this attempt's timestamp),
+      // so a refund/dispute that moved the status meanwhile is never undone.
+      {
+        expr: 'previousStatus',
+        guards: ['where({ id: claimedTerm.id })', "whereNull('renewal_decision')", "whereNull('notice_30_sent_at')",
+          "where('status', 'renewal_pending')", "where('notice_30_claimed_at', claimedAt30)", "where('notice_45_claimed_at', claimedAt45)"],
+      },
+      // Move 5: claim release — undecided + still unsent + still this
+      // attempt's own state (status renewal_pending, claim at its timestamp).
+      {
+        expr: 'previousStatus',
+        guards: ['where({ id: claimedTerm.id })', "whereNull('renewal_decision')", 'whereNull(noticeCol)',
+          "where('status', 'renewal_pending')", 'where(claimCol, claimedAt)'],
+      },
       // Move 3: contacted.
       { expr: "'renewal_pending'", guards: ['where({ id: termId })', "whereIn('status', ACTIVE_STATUSES)", "whereNull('renewal_decision')"] },
       // Moves 6–8: decisions.
