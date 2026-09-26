@@ -7060,6 +7060,7 @@ async function generateLeadSynopsis(transcription) {
     // enough.
     const response = await client.messages.create({
       model: MODELS.FLAGSHIP,
+      ...MODELS.anthropicEffortConfig(MODELS.FLAGSHIP),
       max_tokens: 1200,
       messages: [{
         role: 'user',

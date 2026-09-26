@@ -902,6 +902,7 @@ async function draftSmsReply(input) {
 
   const msg = await client.messages.create({
     model: MODELS.FLAGSHIP,
+    ...MODELS.anthropicEffortConfig(MODELS.FLAGSHIP),
     max_tokens: 200,
     messages: [{
       role: 'user',

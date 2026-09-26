@@ -280,6 +280,19 @@ describe('callAnthropic prompt caching', () => {
     expect(mockAnthropicCreate.mock.calls.at(-1)[0].system[0].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
   });
 
+  test('anthropicEffortConfig is the spread form for direct SDK sites: output_config when pinned + capable, {} otherwise', () => {
+    const MODELS = require('../config/models');
+    expect(MODELS.anthropicEffortConfig('claude-opus-4-8')).toEqual({});
+    MODELS.ANTHROPIC_EFFORT = 'high';
+    try {
+      expect(MODELS.anthropicEffortConfig('claude-opus-4-8')).toEqual({ output_config: { effort: 'high' } });
+      expect(MODELS.anthropicEffortConfig('claude-haiku-4-5-20251001')).toEqual({});
+      expect({ model: 'claude-opus-5-5', ...MODELS.anthropicEffortConfig('claude-opus-5-5'), max_tokens: 1 }).toEqual({ model: 'claude-opus-5-5', output_config: { effort: 'high' }, max_tokens: 1 });
+    } finally {
+      delete MODELS.ANTHROPIC_EFFORT;
+    }
+  });
+
   test('MODEL_ANTHROPIC_EFFORT accepts only the five API levels (a typo resolves to undefined, never a 400)', () => {
     const load = (level) => {
       let out;

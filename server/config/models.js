@@ -25,7 +25,9 @@
  *   content[0]); `thinking: { type: 'disabled' }` is a 400 (only the two
  *   VOICE lanes send it, and VOICE is Sonnet); forced tool_choice any/tool
  *   is a 400 (no caller sends one); the effort default is 'medium', not
- *   'high' — set MODEL_ANTHROPIC_EFFORT=high with the flip to keep depth.
+ *   'high' — set MODEL_ANTHROPIC_EFFORT=high with the flip to keep depth
+ *   (adapter + DEEP helper via anthropicEffortFor; direct SDK sites spread
+ *   anthropicEffortConfig(model) into their request).
  *   Flip MODEL_DEEP first (deep.js strips thinking + has an OpenAI backup),
  *   watch a night of ledger rows, then FLAGSHIP / VISION / the Opus pins.
  *
@@ -92,6 +94,13 @@ const EFFORT_CAPABLE_RE = /^claude-opus-(4-[5-9]|[5-9])(?![0-9])|^claude-sonnet-
 function anthropicEffortFor(model) {
   const pinned = module.exports.ANTHROPIC_EFFORT;
   return pinned && EFFORT_CAPABLE_RE.test(String(model || '')) ? pinned : undefined;
+}
+// Spread form for direct SDK sites that build their own messages.create
+// request: `...anthropicEffortConfig(MODELS.FLAGSHIP)` adds
+// `output_config: { effort }` when pinned and applicable, nothing otherwise.
+function anthropicEffortConfig(model) {
+  const effort = anthropicEffortFor(model);
+  return effort ? { output_config: { effort } } : {};
 }
 
 // Code defaults for every env-overridable selector, in one place so the admin
@@ -420,6 +429,7 @@ const TEXT_POLICIES = Object.freeze({
 module.exports = {
   ANTHROPIC_EFFORT,
   anthropicEffortFor,
+  anthropicEffortConfig,
   DEEP,
   EXTREME,
   FLAGSHIP,

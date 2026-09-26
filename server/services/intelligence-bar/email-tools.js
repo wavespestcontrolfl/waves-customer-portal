@@ -414,6 +414,7 @@ Address: ${customer.address_line1 || ''}, ${customer.city || ''}`;
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
     const msg = await anthropic.messages.create({
       model: MODELS.FLAGSHIP,
+      ...MODELS.anthropicEffortConfig(MODELS.FLAGSHIP),
       max_tokens: 800,
       messages: [{
         role: 'user',
