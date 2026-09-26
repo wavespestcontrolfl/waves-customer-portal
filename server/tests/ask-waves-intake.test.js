@@ -582,6 +582,25 @@ describe('normalizeIntakeResult', () => {
     expect(out.ready_for_quote).toBe(false);
   });
 
+  test('a pet ingestion in the visitor message gets the veterinary script', () => {
+    const out = scrubUnsafeClaims(
+      { reply: 'The product is not safe to consume. Get professional help immediately.', intent: 'question', service_keys: [], ready_for_quote: true },
+      'My dog swallowed some bait',
+    );
+    expect(out.reply).toMatch(/veterinarian or an emergency animal hospital/);
+    expect(out.reply).not.toContain('911');
+    expect(out.intent).toBe('emergency');
+  });
+
+  test('a child ingestion in the visitor message gets 911 plus the Poison Control line', () => {
+    const out = scrubUnsafeClaims(
+      { reply: 'The product is not safe to consume. Get professional help immediately.', intent: 'question', service_keys: [], ready_for_quote: true },
+      'My son swallowed some bait',
+    );
+    expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
+    expect(out.reply).toContain('1-800-222-1222');
+  });
+
   test('price talk never erases emergency direction (safety runs on the original reply)', () => {
     const out = normalizeIntakeResult(
       { reply: 'The product is not safe to ingest; call Poison Control now. Treatment costs $50.', intent: 'question', service_keys: ['pest'], ready_for_quote: true },

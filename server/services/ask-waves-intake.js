@@ -404,6 +404,8 @@ function intakeSafetyClaimSupplement(rawReply, rawContext = '') {
 // must not be replaced with copy that only says to call Waves.
 const HUMAN_EMERGENCY_DIRECTION_RE = /\b(?:(?:call|contact|see|consult|reach|phone|ask)\s+(?:a\s+|your\s+|the\s+)?(?:doctor|physician|pediatrician|nurse|medical\s+(?:provider|professional)|health\s*care\s+provider)|(?:llame|consulte|contacte|vea|acuda)\s+(?:a|al)\s+(?:su\s+)?(?:m[eé]dico|doctor|pediatra)|(?:go|get|head|rush|drive|take\s+\S+)\s+(?:straight\s+|right\s+)?to\s+(?:the\s+|a\s+|an\s+)?(?:nearest\s+|closest\s+|local\s+)?(?:hospital|emergency\s+room)|(?:go|get|head|take\s+\S+)\s+to\s+(?:the\s+)?(?:er|e\.r\.)|urgencias|call(?:ing)?\s+911|dial\s+911|911\s+(?:right\s+away|immediately|now)|poison\s+(?:control|help)|emergency\s+(?:room|care|services?|department)|urgent\s+care|seek\s+(?:immediate\s+)?(?:medical|emergency)|medical\s+(?:attention|care|help|emergency)|call\s+(?:a|your)\s+(?:doctor|physician)|centro\s+de\s+(?:toxicolog[ií]a|envenenamientos?)|control\s+de\s+(?:envenenamientos?|intoxicaciones)|sala\s+de\s+emergencias?|atenci[oó]n\s+m[eé]dica|llam[ea]\s+al\s+911)\b/i;
 const VET_DIRECTION_RE = /\b(?:vets?|veterinarian|veterinary|animal\s+(?:hospital|poison|emergency|er)|veterinari[oa]s?|cl[ií]nica\s+veterinaria|hospital\s+veterinario)\b/i;
+const PET_SUBJECT_RE = /\b(?:dogs?|cats?|pupp(?:y|ies)|kittens?|pets?|perr[oa]s?|gat[oa]s?|mascotas?|cachorr\w*)\b/i;
+const PERSON_SUBJECT_RE = /\b(?:i|me|myself|we|someone|somebody|kids?|child|children|son|daughter|baby|toddler|infant|husband|wife|mom|dad|grand\w+|hij[oa]s?|beb[eé]|ni[ñn][oa]s?|esposo|esposa|alguien|yo)\b/i;
 const ANIMAL_EMERGENCY_REPLY = ' If a pet may have been exposed or seems unwell, call your veterinarian or an emergency animal hospital right away. / Si una mascota pudo haber estado expuesta o no se siente bien, llame a su veterinario o a un hospital veterinario de emergencia de inmediato.';
 const POISON_MENTION_RE = /\b(?:poison\s+(?:control|help)|swallow\w*|ingest\w*|control\s+de\s+envenenamientos?|centro\s+de\s+toxicolog[ií]a|ingiri\w*|ingerir|trag[oó]\w*)\b/i;
 const POISON_CONTROL_LINE = ' If someone swallowed a product, call Poison Control at 1-800-222-1222. / Si alguien ingirió un producto, llame a Control de Envenenamientos al 1-800-222-1222.';
@@ -421,14 +423,21 @@ const REVIEWED_REPLIES = new Set([
 // null when there is no emergency evidence.
 function emergencyGuidance(result, contextText = '') {
   const folded = foldTypography(result.reply);
+  const context = foldTypography(contextText);
   // The visitor's own words count too: a flagged reply to an emergency message
-  // gets the emergency script even if the model's reply names no direction.
-  const human = HUMAN_EMERGENCY_DIRECTION_RE.test(folded) || looksLikeEmergency(foldTypography(contextText));
-  const vet = VET_DIRECTION_RE.test(folded);
+  // gets the emergency script even if the model's reply names no direction —
+  // and who it happened to picks the script ("My dog swallowed bait" → vet;
+  // "My son swallowed bait" → 911 + Poison Control).
+  const visitorEmergency = looksLikeEmergency(context);
+  const petSubject = PET_SUBJECT_RE.test(context);
+  const personSubject = PERSON_SUBJECT_RE.test(context);
+  const human = HUMAN_EMERGENCY_DIRECTION_RE.test(folded) || (visitorEmergency && (personSubject || !petSubject));
+  const vet = VET_DIRECTION_RE.test(folded) || (visitorEmergency && petSubject);
   if (!(result.intent === 'emergency' || human || vet)) return null;
+  const ingestion = POISON_MENTION_RE.test(folded) || INGESTION_RE.test(context);
   const parts = [];
   if (human || (result.intent === 'emergency' && !vet)) {
-    parts.push(EMERGENCY_FALLBACK_RESULT.reply + (POISON_MENTION_RE.test(folded) ? POISON_CONTROL_LINE : ''));
+    parts.push(EMERGENCY_FALLBACK_RESULT.reply + (ingestion ? POISON_CONTROL_LINE : ''));
   }
   if (vet) {
     parts.push(`${ANIMAL_EMERGENCY_REPLY.trim()} For an urgent pest problem at your home, call us at ${COMPANY.phone}.`);
