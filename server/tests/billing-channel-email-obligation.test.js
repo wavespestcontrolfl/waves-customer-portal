@@ -237,6 +237,57 @@ test('a pre-fence exception carrying an uncertain providerOutcome still holds as
     deliveryOutcome: 'uncertain', code: 'BILLING_EMAIL_DELIVERY_UNCERTAIN' });
 });
 
+describe('a post-fence replay throw trusts the error\'s own providerOutcome over the fence (codex r4 #4844 P1)', () => {
+  // The fence is claimed IN-BAND during this same send attempt (the mocked
+  // sendCustomerMessage invokes the replay's own preSendCheck, exactly like
+  // the real dispatcher would), then throws while persisting its audit row
+  // — the shape sendCustomerMessageCore actually produces.
+  test('a definite not_sent providerOutcome clears the fence for bounded retry, even though the fence was claimed', async () => {
+    await obligation.queueObligation(notice(), 'payment_receipt', 'receipt:event-postfence-notsent',
+      { sent: false, retryable: true, deliveryOutcome: 'not_sent' }, ['sms']);
+    sendCustomerMessage.mockImplementationOnce(async (input) => {
+      expect(await input.preSendCheck()).toEqual({ ok: true });
+      const err = new Error('SendGrid 400: rejected after the fence was claimed');
+      err.providerOutcome = { deliveryOutcome: 'not_sent', code: 'EMAIL_PROVIDER_REJECTED' };
+      throw err;
+    });
+    const meta = { ...db._rows[0].metadata, scheduled_sms_log_id: 'queue-1' };
+    await expect(obligation.replay(meta)).resolves.toMatchObject({ sent: false,
+      deliveryOutcome: 'not_sent', retryable: true, code: 'EMAIL_PROVIDER_REJECTED' });
+  });
+
+  test('an accepted providerOutcome settles as accepted, even though the fence was claimed', async () => {
+    await obligation.queueObligation({ customerId, purpose: 'late_payment', body: 'Your balance is due.',
+      metadata: { original_message_type: 'reminder', collections_ledger_id: 'ledger-postfence-accepted' },
+      entryPoint: 'invoice_followup_sequence' },
+    'balance_reminder', 'reminder:event-postfence-accepted',
+    { sent: false, retryable: true, deliveryOutcome: 'not_sent' }, []);
+    sendCustomerMessage.mockImplementationOnce(async (input) => {
+      expect(await input.preSendCheck()).toEqual({ ok: true });
+      const err = new Error('audit persist failed after SendGrid accepted');
+      err.providerOutcome = { deliveryOutcome: 'accepted', providerMessageId: 'sg-postfence-1' };
+      throw err;
+    });
+    const row = db._rows.find((candidate) => candidate.id === 'queue-1');
+    const meta = { ...row.metadata, scheduled_sms_log_id: 'queue-1' };
+    await expect(obligation.replay(meta)).resolves.toMatchObject({ sent: true,
+      deliveryOutcome: 'accepted', providerMessageId: 'sg-postfence-1' });
+    expect(collectionsContactLedgerMock.markDelivered).toHaveBeenCalledWith({ id: 'ledger-postfence-accepted' });
+  });
+
+  test('an absent providerOutcome still stays uncertain once the fence was claimed (unchanged)', async () => {
+    await obligation.queueObligation(notice(), 'payment_receipt', 'receipt:event-postfence-absent',
+      { sent: false, retryable: true, deliveryOutcome: 'not_sent' }, []);
+    sendCustomerMessage.mockImplementationOnce(async (input) => {
+      expect(await input.preSendCheck()).toEqual({ ok: true });
+      throw new Error('process died with no known provider outcome');
+    });
+    const meta = { ...db._rows[0].metadata, scheduled_sms_log_id: 'queue-1' };
+    await expect(obligation.replay(meta)).resolves.toMatchObject({ sent: false, blocked: true,
+      deliveryOutcome: 'uncertain', code: 'BILLING_EMAIL_DELIVERY_UNCERTAIN' });
+  });
+});
+
 test('pre-charge replay refuses a paused customer before Email provider preparation', async () => {
   const chargeDate = etDateString(addETDays(new Date(), 3));
   db._customers.set(customerId, { id: customerId, active: true, autopay_enabled: true,
@@ -515,6 +566,38 @@ describe('collections policy recheck on INVOICE_GUARDS-sourced obligations (code
     expect(collectionsChannelPermitted).toHaveBeenCalledWith(expect.objectContaining({ excludeLedgerIds: [] }));
   });
 
+  // codex r4 #4844 P1: the same-run SIBLING leg's own reservation (e.g. the
+  // dunning SMS sent immediately before this Email leg) must be excluded
+  // alongside this leg's own reservation — the producer already excludes it
+  // from its own consult for the identical reason.
+  test('excludes both this leg\'s own reservation id and its sibling reservation ids', async () => {
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    collectionsChannelPermitted.mockResolvedValue(true);
+    await obligation.producerEligible({ customer_id: customerId, invoice_id: invoiceId,
+      source_entry_point: reminderSource, collections_ledger_id: ledgerId,
+      collections_sibling_ledger_ids: ['sibling-sms-1', 'sibling-push-1'] });
+    expect(collectionsChannelPermitted.mock.calls[0][0].excludeLedgerIds)
+      .toEqual(expect.arrayContaining([ledgerId, 'sibling-sms-1', 'sibling-push-1']));
+    expect(collectionsChannelPermitted.mock.calls[0][0].excludeLedgerIds).toHaveLength(3);
+  });
+
+  test('missing collections_sibling_ledger_ids passes only this leg\'s own reservation id (unchanged)', async () => {
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    collectionsChannelPermitted.mockResolvedValue(true);
+    await obligation.producerEligible({ customer_id: customerId, invoice_id: invoiceId,
+      source_entry_point: reminderSource, collections_ledger_id: ledgerId });
+    expect(collectionsChannelPermitted.mock.calls[0][0].excludeLedgerIds).toEqual([ledgerId]);
+  });
+
+  test('dedupes a sibling id that coincides with this leg\'s own reservation id', async () => {
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    collectionsChannelPermitted.mockResolvedValue(true);
+    await obligation.producerEligible({ customer_id: customerId, invoice_id: invoiceId,
+      source_entry_point: reminderSource, collections_ledger_id: ledgerId,
+      collections_sibling_ledger_ids: [ledgerId, 'sibling-sms-1', 'sibling-sms-1'] });
+    expect(collectionsChannelPermitted.mock.calls[0][0].excludeLedgerIds).toEqual([ledgerId, 'sibling-sms-1']);
+  });
+
   test('gate off never consults the rail guard', async () => {
     await expect(obligation.producerEligible({ customer_id: customerId, invoice_id: invoiceId,
       source_entry_point: reminderSource, collections_ledger_id: ledgerId }))
@@ -623,6 +706,70 @@ describe('collections_ledger_id persistence (codex r2 #4844 P1)', () => {
     await obligation.queueObligation(notice(), 'payment_receipt', 'receipt:event-no-ledger-persist',
       { sent: false, retryable: true, deliveryOutcome: 'not_sent' }, []);
     expect(db._rows[0].metadata.collections_ledger_id).toBeNull();
+  });
+});
+
+describe('collections_sibling_ledger_ids persistence (codex r4 #4844 P1)', () => {
+  test('sibling reservation ids are filtered to non-empty strings and persisted', async () => {
+    const input = { customerId, purpose: 'late_payment', body: 'Your balance is due.',
+      metadata: { original_message_type: 'reminder',
+        collections_sibling_ledger_ids: ['sibling-sms-1', '', 42, null, undefined, 'sibling-push-1'] },
+      entryPoint: 'invoice_followup_sequence' };
+    await obligation.queueObligation(input, 'balance_reminder', 'reminder:event-siblings-persist',
+      { sent: false, retryable: true, deliveryOutcome: 'not_sent' }, []);
+    expect(db._rows[0].metadata.collections_sibling_ledger_ids).toEqual(['sibling-sms-1', 'sibling-push-1']);
+  });
+
+  test('no sibling ids in the enqueue input default to an empty array', async () => {
+    await obligation.queueObligation(notice(), 'payment_receipt', 'receipt:event-no-siblings-persist',
+      { sent: false, retryable: true, deliveryOutcome: 'not_sent' }, []);
+    expect(db._rows[0].metadata.collections_sibling_ledger_ids).toEqual([]);
+  });
+
+  test('a non-array collections_sibling_ledger_ids defaults to an empty array', async () => {
+    await obligation.queueObligation({ ...notice(),
+      metadata: { original_message_type: 'receipt', collections_sibling_ledger_ids: 'not-an-array' } },
+    'payment_receipt', 'receipt:event-siblings-non-array', { sent: false, retryable: true, deliveryOutcome: 'not_sent' }, []);
+    expect(db._rows[0].metadata.collections_sibling_ledger_ids).toEqual([]);
+  });
+});
+
+describe('replay() consults canonical email evidence before eligibility (codex r4 #4844 P2)', () => {
+  const invoiceId = 'invoice-early-accepted-1';
+  const reminderSource = 'invoice_followup_sequence';
+  const ledgerId = 'ledger-early-accepted-1';
+  const eventKey = 'reminder:event-early-accepted';
+
+  test('an accepted email row resolves accepted/deduped and settles the reservation even though the invoice is now ineligible', async () => {
+    await obligation.queueObligation({ customerId, purpose: 'late_payment', body: 'Your balance is due.',
+      metadata: { original_message_type: 'reminder', collections_ledger_id: ledgerId },
+      entryPoint: reminderSource, invoiceId },
+    'balance_reminder', eventKey, { sent: false, retryable: true, deliveryOutcome: 'not_sent' }, []);
+    // The invoice went terminal (paid) AFTER the send was queued — the
+    // eligibility recheck alone would now refuse this replay outright
+    // (invoice-terminal:paid), the exact bug this fix addresses.
+    db._rows.push({ id: invoiceId, status: 'paid', total: 100, credit_applied: 0, payer_id: null });
+    // But SendGrid's own canonical acceptance evidence survived.
+    db._rows.push({ idempotency_key: obligation.obligationKey(eventKey), status: 'delivered',
+      provider_message_id: 'sg-early-accepted-1', metadata: {} });
+    const row = db._rows.find((candidate) => candidate.metadata?.billing_channel_email_key === obligation.obligationKey(eventKey));
+    const meta = { ...row.metadata, scheduled_sms_log_id: row.id };
+    await expect(obligation.replay(meta)).resolves.toMatchObject({ sent: true,
+      deliveryOutcome: 'accepted', deduped: true, providerMessageId: 'sg-early-accepted-1' });
+    expect(collectionsContactLedgerMock.markDelivered).toHaveBeenCalledWith({ id: ledgerId });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('an eligible invoice with no canonical evidence still runs the normal eligibility-then-dispatch path', async () => {
+    await obligation.queueObligation({ customerId, purpose: 'late_payment', body: 'Your balance is due.',
+      metadata: { original_message_type: 'reminder' }, entryPoint: reminderSource, invoiceId: 'invoice-still-eligible-1' },
+    'balance_reminder', 'reminder:event-still-eligible', { sent: false, retryable: true, deliveryOutcome: 'not_sent' }, []);
+    db._rows.push({ id: 'invoice-still-eligible-1', status: 'sent', total: 100, credit_applied: 0, payer_id: null });
+    sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted', channel: 'email' });
+    const row = db._rows.find((candidate) => candidate.metadata?.notificationEventKey === 'reminder:event-still-eligible');
+    const meta = { ...row.metadata, scheduled_sms_log_id: row.id };
+    await expect(obligation.replay(meta)).resolves.toMatchObject({ sent: true, deliveryOutcome: 'accepted' });
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -98,6 +98,15 @@ async function collidingEmailMessage(trx, key, customerId) {
   return { emailMessage };
 }
 
+// Non-empty string ids only, defaulting to []. Shared by the metadata
+// persisted at queue time and (via that persisted field) the replay-time
+// collections-policy exclusion below.
+function siblingLedgerIds(meta) {
+  return Array.isArray(meta.collections_sibling_ledger_ids)
+    ? meta.collections_sibling_ledger_ids.filter((id) => typeof id === 'string' && id)
+    : [];
+}
+
 function queuedRowMetadata(input, category, eventKey, key, siblings, holdUncertain) {
   const meta = input.metadata || {};
   return {
@@ -135,6 +144,17 @@ function queuedRowMetadata(input, category, eventKey, key, siblings, holdUncerta
     // the frequency window, never double-counting it) and settle it
     // delivered once the replay actually lands (codex r2 #4844 P1).
     collections_ledger_id: meta.collections_ledger_id || null,
+    // The SAME-RUN sibling leg's (e.g. the SMS the dunning producer sent
+    // immediately before this Email leg) own reservation id(s) — the
+    // producer deliberately excludes them from ITS OWN collections-policy
+    // consult (workflows/balance-reminder.js, late-payment-checker.js) so
+    // the any-channel 24h window doesn't fence a companion leg against
+    // itself. A queued replay must exclude the same siblings for the same
+    // reason, or its own policy recheck denies it on a touch the producer
+    // already accounted for (codex r4 #4844 P1). Settlement stays scoped to
+    // THIS leg's own collections_ledger_id above — siblings settle through
+    // their own leg's send, never through this one.
+    collections_sibling_ledger_ids: siblingLedgerIds(meta),
   };
 }
 
@@ -414,6 +434,16 @@ async function invoiceSelfPayRefusal(meta, database) {
 // replay purely because of the touch IT ITSELF already reserved; no id ->
 // no exclusion, which only ever over-suppresses (the safe direction) rather
 // than risk under-suppressing a customer who should not be contacted.
+// The same-run SIBLING leg's reservation(s) (codex r4 #4844 P1) join the
+// exclusion alongside this obligation's own — the producer excluded them
+// from ITS OWN consult for the identical reason (a dunning SMS immediately
+// before this Email leg), and a queued replay re-deriving the window from
+// scratch must see the same exclusions or it denies a companion leg the
+// producer already deliberately let through.
+function collectionsPolicyExclusions(meta) {
+  return [...new Set([meta.collections_ledger_id, ...siblingLedgerIds(meta)].filter(Boolean))];
+}
+
 async function collectionsPolicyRefusal(meta) {
   if (!INVOICE_GUARDS.has(meta.source_entry_point)) return null;
   if (process.env.GATE_COLLECTIONS_POLICY !== 'true') return null;
@@ -426,7 +456,7 @@ async function collectionsPolicyRefusal(meta) {
     // for pays_by_check customers where late-payment outreach is not.
     purpose: meta.source_entry_point === 'balance_reminder_workflow' ? 'balance_reminder' : 'late_payment',
     logTag: 'billing-email-obligation-replay',
-    excludeLedgerIds: meta.collections_ledger_id ? [meta.collections_ledger_id] : [],
+    excludeLedgerIds: collectionsPolicyExclusions(meta),
   });
   if (!permitted) return refused('collections-policy-denied');
   return null;
@@ -586,14 +616,35 @@ function replaySendInput(meta, row, database, fence) {
 // (sendCustomerMessageCore tags every throw with the provider outcome it had
 // observed, or the pre-dispatch 'not_sent' default) instead of reporting
 // every exception uncertain, which left an unambiguous pre-fence failure
-// blocked forever (codex r1 #4844 P1). A throw after the fence was claimed
-// stays uncertain — the provider may already have been contacted.
+// blocked forever (codex r1 #4844 P1).
+//
+// A DEFINITE providerOutcome on the throw outranks the fence entirely
+// (codex r4 #4844 P1): SendGrid can return a definite verdict and
+// sendCustomerMessageCore can still throw while persisting its own audit
+// row, tagging the error with that already-observed verdict. Checking
+// fence.providerStarted FIRST converted a definitive not_sent into an
+// uncertain permanent block — a claimed fence never proves the provider was
+// actually reached when the throw itself says otherwise. 'accepted' settles
+// exactly like a returned accepted result; 'not_sent' clears the fence via
+// the existing clearProviderStarted path exactly like a returned not_sent
+// result. Only when the providerOutcome is ABSENT or itself 'uncertain' does
+// the fence decide: pre-fence (no provider request began) is retryable
+// not_sent, a fence already claimed stays uncertain (the provider may
+// already have been contacted) — unchanged from before this fix.
 async function dispatchReplaySend(input, fence) {
   try { return { result: await require('./send-customer-message').sendCustomerMessage(input) }; }
   catch (err) {
+    const providerOutcome = err?.providerOutcome;
+    if (providerOutcome?.deliveryOutcome === 'accepted') {
+      return { result: { sent: true, deliveryOutcome: 'accepted', channel: 'email',
+        providerMessageId: providerOutcome.providerMessageId || null } };
+    }
+    if (providerOutcome?.deliveryOutcome === 'not_sent') {
+      return { result: { sent: false, deliveryOutcome: 'not_sent', retryable: true,
+        code: providerOutcome.code || 'EMAIL_PROVIDER_REJECTED' } };
+    }
     if (fence.providerStarted) return { refusal: deliveryUncertainOutcome() };
-    const deliveryOutcome = err?.providerOutcome?.deliveryOutcome || 'not_sent';
-    if (deliveryOutcome !== 'not_sent') return { refusal: deliveryUncertainOutcome() };
+    if (providerOutcome?.deliveryOutcome === 'uncertain') return { refusal: deliveryUncertainOutcome() };
     return { refusal: { sent: false, blocked: false, deliveryOutcome: 'not_sent',
       retryable: true, code: 'BILLING_EMAIL_REPLAY_PRE_FENCE_ERROR' } };
   }
@@ -627,26 +678,47 @@ async function finalizeReplayResult(meta, database, fence, result) {
   return result;
 }
 
+// A resolution this early (codex r4 #4844 P2) is limited to the two
+// verdicts that are true regardless of whether this obligation is even
+// still eligible: a definitive ACCEPTED (the email already went — reporting
+// a fresh eligibility refusal instead would misrecord a real delivery and
+// leave its collections reservation unsettled forever) and a definitive
+// KEY_COLLISION (this idempotency key belongs to someone else — eligibility
+// against THIS customer's invoice is irrelevant). An UNCERTAIN evidence
+// resolution is deliberately excluded — it stays positioned exactly where
+// it always was, alongside the fence logic below.
+function earlyMessageResolution(resolved) {
+  return Boolean(resolved) && (resolved.deliveryOutcome === 'accepted' || resolved.code === 'BILLING_EMAIL_KEY_COLLISION');
+}
+
 async function replay(meta, database = db) {
   if (!meta.scheduled_sms_log_id) return {
     sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'EMAIL_OBLIGATION_ID_MISSING',
   };
+  const state = await replayQueuedRowState(meta, database);
+  if (state.refusal) return state.refusal;
+  // Canonical email-row evidence is consulted for an ACCEPTED/KEY_COLLISION
+  // resolution BEFORE eligibility (codex r4 #4844 P2): a process death after
+  // SendGrid accepted the send, with the invoice paid or the sequence
+  // stopped by the time replay runs, must still settle the reservation and
+  // report the real accepted outcome instead of a stale not_sent/blocked
+  // eligibility refusal that never looked at what actually happened.
+  // Eligibility still gates every NEW provider attempt below, unchanged.
+  const messageOutcome = await replayEmailMessageOutcome(meta, state.rowMeta, database);
+  if (earlyMessageResolution(messageOutcome.resolved)) {
+    if (messageOutcome.resolved.deliveryOutcome === 'accepted') await settleCollectionsLedger(meta);
+    return messageOutcome.resolved;
+  }
   const eligibility = await replayEligibility(meta);
   if (!eligibility.eligible) return {
     sent: false, blocked: !eligibility.retryable, retryable: eligibility.retryable === true,
     deliveryOutcome: 'not_sent', code: eligibility.reason,
   };
-  const state = await replayQueuedRowState(meta, database);
-  if (state.refusal) return state.refusal;
   // Reconcile canonical email-row evidence BEFORE honoring a surviving
-  // provider-started/uncertain fence (codex r2 #4844 P2): a fence with
-  // definitive accepted evidence resolves to accepted (deduped); only a
-  // fence with no definitive provider evidence stays uncertain.
-  const messageOutcome = await replayEmailMessageOutcome(meta, state.rowMeta, database);
-  if (messageOutcome.resolved) {
-    if (messageOutcome.resolved.deliveryOutcome === 'accepted') await settleCollectionsLedger(meta);
-    return messageOutcome.resolved;
-  }
+  // provider-started/uncertain fence (codex r2 #4844 P2, unchanged): an
+  // UNCERTAIN evidence resolution stays right here, ahead of the fence
+  // check below.
+  if (messageOutcome.resolved) return messageOutcome.resolved;
   const fenceRefusal = survivingFenceRefusal(state.rowMeta);
   if (fenceRefusal) return fenceRefusal;
   const fence = { providerStarted: false, uncertain: false };
