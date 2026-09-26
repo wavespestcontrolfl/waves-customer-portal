@@ -267,19 +267,27 @@ async function getRoutePerformance({ from, to, now = new Date() }, conn) {
   };
 }
 
-// Ungrouped completed rows only (visit_id groups stay out of scope here, the
-// same way measureRoutePerformance's own "comparable" check excludes them —
-// their occupancy/duration is a SUM-of-members model this reader does not
-// re-compose). Keyed the same way coveredRoutes/unbaselinedByRoute are.
+// Every completed row for the tech-day, GROUPED ones included (Codex P1: an
+// all-grouped no-baseline day was dropping every one of its stops, reading
+// as zero actual stops with coverage that could still look complete). A
+// visit_id group's occupancy/duration is a SUM-of-members model this reader
+// does not re-compose, so a grouped row's own recordedTiming is never
+// trusted as ITS on-site duration — durationEvidence/recordedServiceMinutes
+// are forced the same way measureRoutePerformance's own "comparable" check
+// forces them for a grouped plan stop ('unmatched_or_uncompleted_work',
+// null) — but the row still counts as a completed stop, and its recorded
+// arrival/completion (if any) still counts toward the day's span. Keyed the
+// same way coveredRoutes/unbaselinedByRoute are.
 function missingBaselineActualStops(routes, pastWork, routeKey) {
   const byKey = new Map();
   for (const route of routes) {
     const completed = pastWork.filter(row => dateOnly(row.scheduled_date) === route.date
-      && (row.technician_id || null) === route.technicianId && row.status === 'completed' && !row.visit_id);
+      && (row.technician_id || null) === route.technicianId && row.status === 'completed');
     byKey.set(routeKey(route.date, route.technicianId), completed.map(row => {
       const timing = recordedTiming(row);
-      return { appointmentId: row.id, durationEvidence: timing.durationEvidence,
-        recordedServiceMinutes: timing.durationMinutes,
+      return { appointmentId: row.id,
+        durationEvidence: row.visit_id ? 'unmatched_or_uncompleted_work' : timing.durationEvidence,
+        recordedServiceMinutes: row.visit_id ? null : timing.durationMinutes,
         recordedArrivalMinute: timing.arrival ? minuteInET(timing.arrival) : null,
         recordedCompletionMinute: timing.completion ? minuteInET(timing.completion) : null };
     }));

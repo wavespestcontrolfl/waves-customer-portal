@@ -103,7 +103,7 @@ test('malformed or duplicated baseline stops remain missing evidence instead of 
 describe('missingBaselineActualStops', () => {
   const routes = [{ date: day, technicianId: 'tech' }];
 
-  test('only completed, ungrouped rows for the matching date+technician are included', () => {
+  test('only completed rows for the matching date+technician are included (grouped ones too)', () => {
     const rows = [
       recorded({ id: 'a' }),
       recorded({ id: 'wrong-date', scheduled_date: '2026-09-09' }),
@@ -113,7 +113,20 @@ describe('missingBaselineActualStops', () => {
     ];
     const byKey = missingBaselineActualStops(routes, rows, routeKey);
     const stops = byKey.get(routeKey(day, 'tech'));
-    expect(stops.map(stop => stop.appointmentId)).toEqual(['a']);
+    // Codex P1: a completed grouped row must still count as a completed
+    // stop for the tech-day — dropping it entirely (the old behavior) made
+    // an all-grouped no-baseline day read as zero actual stops.
+    expect(stops.map(stop => stop.appointmentId).sort()).toEqual(['a', 'grouped']);
+  });
+
+  test('a grouped completed row counts as a stop but never contributes an accepted duration', () => {
+    const stops = missingBaselineActualStops(routes, [recorded({ id: 'a', visit_id: 'group-1' })], routeKey).get(routeKey(day, 'tech'));
+    // A visit_id group's real duration is a SUM across members this reader
+    // does not re-compose, so the row's OWN recordedTiming is never trusted
+    // as its on-site minutes — same forcing measureRoutePerformance applies
+    // to a grouped plan stop ('unmatched_or_uncompleted_work', null).
+    expect(stops).toEqual([{ appointmentId: 'a', durationEvidence: 'unmatched_or_uncompleted_work',
+      recordedServiceMinutes: null, recordedArrivalMinute: 490, recordedCompletionMinute: 535 }]);
   });
 
   test('each completed row is shaped like a plan stop, with recordedTiming\'s own evidence', () => {

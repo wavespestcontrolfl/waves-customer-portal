@@ -149,8 +149,8 @@ describe('getDayScorecard', () => {
         date, technicianId: 'tech1', plannedVisits: 2, plannedServiceMinutes: 90, plannedDriveMinutes: 25,
         plannedWaitingMinutes: 5, plannedReturnMinuteBeforeBreaks: 600, driveModel: 'legacy',
         stops: [
-          { durationEvidence: 'recorded_lifecycle_interval', recordedServiceMinutes: 45, recordedArrivalMinute: 480, recordedCompletionMinute: 600 },
-          { durationEvidence: 'unmatched_or_uncompleted_work', recordedServiceMinutes: null, recordedArrivalMinute: null, recordedCompletionMinute: null },
+          { durationEvidence: 'recorded_lifecycle_interval', recordedServiceMinutes: 45, recordedArrivalMinute: 480, recordedCompletionMinute: 600, arrivalOutcome: 'on_time' },
+          { durationEvidence: 'unmatched_or_uncompleted_work', recordedServiceMinutes: null, recordedArrivalMinute: null, recordedCompletionMinute: null, arrivalOutcome: 'not_completed' },
         ],
       }],
     });
@@ -184,10 +184,10 @@ describe('getDayScorecard', () => {
         date, technicianId: 'tech1', plannedVisits: 4, plannedServiceMinutes: 180, plannedDriveMinutes: 40,
         plannedWaitingMinutes: 5, plannedReturnMinuteBeforeBreaks: 700, driveModel: 'legacy',
         stops: [
-          { durationEvidence: 'recorded_lifecycle_interval', recordedServiceMinutes: 45, recordedArrivalMinute: 480, recordedCompletionMinute: 540 },
-          { durationEvidence: 'unmatched_or_uncompleted_work', recordedServiceMinutes: null, recordedArrivalMinute: null, recordedCompletionMinute: null },
-          { durationEvidence: 'unverified_timing', recordedServiceMinutes: null, recordedArrivalMinute: null, recordedCompletionMinute: null },
-          { durationEvidence: 'unmatched_or_uncompleted_work', recordedServiceMinutes: null, recordedArrivalMinute: null, recordedCompletionMinute: null },
+          { durationEvidence: 'recorded_lifecycle_interval', recordedServiceMinutes: 45, recordedArrivalMinute: 480, recordedCompletionMinute: 540, arrivalOutcome: 'on_time' },
+          { durationEvidence: 'unmatched_or_uncompleted_work', recordedServiceMinutes: null, recordedArrivalMinute: null, recordedCompletionMinute: null, arrivalOutcome: 'not_completed' },
+          { durationEvidence: 'unverified_timing', recordedServiceMinutes: null, recordedArrivalMinute: null, recordedCompletionMinute: null, arrivalOutcome: 'unknown' },
+          { durationEvidence: 'unmatched_or_uncompleted_work', recordedServiceMinutes: null, recordedArrivalMinute: null, recordedCompletionMinute: null, arrivalOutcome: 'not_completed' },
         ],
       }],
     });
@@ -233,7 +233,7 @@ describe('getDayScorecard', () => {
       plans: [{
         date, technicianId: 'ghost', plannedVisits: 1, plannedServiceMinutes: 60, plannedDriveMinutes: 10,
         plannedWaitingMinutes: 0, plannedReturnMinuteBeforeBreaks: 540, driveModel: 'legacy',
-        stops: [{ durationEvidence: 'recorded_lifecycle_interval', recordedServiceMinutes: 55, recordedArrivalMinute: 480, recordedCompletionMinute: 540 }],
+        stops: [{ durationEvidence: 'recorded_lifecycle_interval', recordedServiceMinutes: 55, recordedArrivalMinute: 480, recordedCompletionMinute: 540, arrivalOutcome: 'on_time' }],
       }],
     });
     const result = await getDayScorecard({ date_from: date, date_to: date },
@@ -284,8 +284,8 @@ describe('getDayScorecard', () => {
         plannedWaitingMinutes: 5, plannedReturnMinuteBeforeBreaks: 600, driveModel: 'legacy',
         unbaselinedCompletedVisits: 1,
         stops: [
-          { durationEvidence: 'recorded_lifecycle_interval', recordedServiceMinutes: 45, recordedArrivalMinute: 480, recordedCompletionMinute: 540 },
-          { durationEvidence: 'recorded_lifecycle_interval', recordedServiceMinutes: 45, recordedArrivalMinute: 540, recordedCompletionMinute: 600 },
+          { durationEvidence: 'recorded_lifecycle_interval', recordedServiceMinutes: 45, recordedArrivalMinute: 480, recordedCompletionMinute: 540, arrivalOutcome: 'on_time' },
+          { durationEvidence: 'recorded_lifecycle_interval', recordedServiceMinutes: 45, recordedArrivalMinute: 540, recordedCompletionMinute: 600, arrivalOutcome: 'on_time' },
         ],
       }],
     });
@@ -298,6 +298,41 @@ describe('getDayScorecard', () => {
     expect(row.actual.stops).toBe(3);
   });
 
+  // Codex P1 (round 4): measureRoutePerformance forces durationEvidence to
+  // 'unmatched_or_uncompleted_work' for ANY grouped stop, completed or not
+  // (a visit_id group's real duration is a SUM this reader does not
+  // re-compose) — filtering the completed count on durationEvidence
+  // silently dropped every completed grouped stop, so an all-grouped day
+  // read as zero actual stops even with full coverage. The fix keys off
+  // arrivalOutcome instead, which is only 'grouped_work_requires_review'
+  // (not one of the NOT-completed outcomes) when the row really was
+  // completed on this route.
+  test('a completed grouped stop still counts toward actual.stops, and coverage never accepts its duration', async () => {
+    const date = '2026-09-01';
+    getScheduleQualityMeasurements.mockResolvedValue({
+      driveModel: 'legacy',
+      days: [{ date, closed: false, byTech: [{ technicianId: 'tech1', technician: 'Tech One' }] }],
+    });
+    getRoutePerformance.mockResolvedValue({
+      plans: [{
+        date, technicianId: 'tech1', plannedVisits: 2, plannedServiceMinutes: 90, plannedDriveMinutes: 20,
+        plannedWaitingMinutes: 0, plannedReturnMinuteBeforeBreaks: 560, driveModel: 'legacy',
+        stops: [
+          // A completed member of a visit_id group: real completion, but
+          // measureRoutePerformance never trusts ITS OWN duration/coverage.
+          { durationEvidence: 'unmatched_or_uncompleted_work', recordedServiceMinutes: null, recordedArrivalMinute: null, recordedCompletionMinute: null, arrivalOutcome: 'grouped_work_requires_review' },
+          { durationEvidence: 'recorded_lifecycle_interval', recordedServiceMinutes: 45, recordedArrivalMinute: 480, recordedCompletionMinute: 540, arrivalOutcome: 'on_time' },
+        ],
+      }],
+    });
+    const result = await getDayScorecard({ date_from: date, date_to: date }, conn([]), new Date('2026-09-08T12:00:00Z'));
+    const row = result.days[0].byTech[0];
+    // Both stops completed (2), not just the ungrouped one (the pre-fix bug
+    // would have reported 1). Coverage still only accepts the ungrouped
+    // stop's evidence — the grouped one never inflates onSiteMinutes.
+    expect(row.actual).toMatchObject({ stops: 2, onSiteMinutes: 45, onSiteCoverage: { covered: 1, total: 2, unbaselined: 0 } });
+  });
+
   test('a plan with no unbaselined completed visits reports unbaselined: 0, not undefined', async () => {
     const date = '2026-09-01';
     getScheduleQualityMeasurements.mockResolvedValue({
@@ -308,7 +343,7 @@ describe('getDayScorecard', () => {
       plans: [{
         date, technicianId: 'tech1', plannedVisits: 1, plannedServiceMinutes: 60, plannedDriveMinutes: 10,
         plannedWaitingMinutes: 0, plannedReturnMinuteBeforeBreaks: 540, driveModel: 'legacy',
-        stops: [{ durationEvidence: 'recorded_lifecycle_interval', recordedServiceMinutes: 55, recordedArrivalMinute: 480, recordedCompletionMinute: 540 }],
+        stops: [{ durationEvidence: 'recorded_lifecycle_interval', recordedServiceMinutes: 55, recordedArrivalMinute: 480, recordedCompletionMinute: 540, arrivalOutcome: 'on_time' }],
       }],
     });
     const result = await getDayScorecard({ date_from: date, date_to: date }, conn([]), new Date('2026-09-08T12:00:00Z'));
@@ -355,7 +390,7 @@ describe('getDayScorecard', () => {
     getRoutePerformance.mockResolvedValue({
       plans: [{ date, technicianId: 'tech1', plannedVisits: 1, plannedServiceMinutes: 60, plannedDriveMinutes: 10,
         plannedWaitingMinutes: 0, plannedReturnMinuteBeforeBreaks: 540, driveModel: 'legacy',
-        stops: [{ durationEvidence: 'recorded_lifecycle_interval', recordedServiceMinutes: 55, recordedArrivalMinute: 480, recordedCompletionMinute: 540 }] }],
+        stops: [{ durationEvidence: 'recorded_lifecycle_interval', recordedServiceMinutes: 55, recordedArrivalMinute: 480, recordedCompletionMinute: 540, arrivalOutcome: 'on_time' }] }],
       missingBaselineRoutes: [], truncatedPlanningRuns: true,
     });
     const result = await getDayScorecard({ date_from: date, date_to: date }, conn([]), new Date('2026-09-08T12:00:00Z'));
@@ -444,7 +479,7 @@ describe('getDayScorecard', () => {
       plans: [{
         date, technicianId: 'tech1', plannedVisits: 1, plannedServiceMinutes: 60, plannedDriveMinutes: 10,
         plannedWaitingMinutes: 0, plannedReturnMinuteBeforeBreaks: 540, driveModel: 'legacy',
-        stops: [{ durationEvidence: 'recorded_lifecycle_interval', recordedServiceMinutes: 55, recordedArrivalMinute: 480, recordedCompletionMinute: 540 }],
+        stops: [{ durationEvidence: 'recorded_lifecycle_interval', recordedServiceMinutes: 55, recordedArrivalMinute: 480, recordedCompletionMinute: 540, arrivalOutcome: 'on_time' }],
       }],
     });
     const rows = [
@@ -489,6 +524,30 @@ describe('getDayScorecard', () => {
       onSiteCoverage: { covered: 2, total: 2, unbaselined: 0 },
       spanMinutes: 100, // 580 - 480
     });
+  });
+
+  // Codex P1 (round 4): the no-baseline reader (missingBaselineActualStops)
+  // used to drop every grouped completed row outright — an all-grouped
+  // no-baseline day read as zero actual stops. It now includes them (with a
+  // forced non-accepted durationEvidence, matching the has-a-plan path), so
+  // actual.stops counts the grouped row too, while onSiteMinutes/coverage
+  // still never trust its individual duration.
+  test('a missing-baseline tech-day counts a grouped completed row toward stops, never toward on-site minutes', async () => {
+    const date = '2026-09-01';
+    getScheduleQualityMeasurements.mockResolvedValue({
+      driveModel: 'legacy',
+      days: [{ date, closed: false, byTech: [{ technicianId: 'tech1', technician: 'Tech One' }] }],
+    });
+    const missingBaselineStops = new Map([[`${date}|tech1`, [
+      { appointmentId: 'grouped', durationEvidence: 'unmatched_or_uncompleted_work', recordedServiceMinutes: null, recordedArrivalMinute: 480, recordedCompletionMinute: null },
+      { appointmentId: 'ungrouped', durationEvidence: 'recorded_lifecycle_interval', recordedServiceMinutes: 45, recordedArrivalMinute: 540, recordedCompletionMinute: 585 },
+    ]]]);
+    getRoutePerformance.mockResolvedValue({
+      plans: [], missingBaselineRoutes: [{ date, technicianId: 'tech1' }], missingBaselineStops, truncatedPlanningRuns: false,
+    });
+    const result = await getDayScorecard({ date_from: date, date_to: date }, conn([]), new Date('2026-09-08T12:00:00Z'));
+    const row = result.days[0].byTech.find(r => r.technicianId === 'tech1');
+    expect(row.actual).toMatchObject({ stops: 2, onSiteMinutes: 45, onSiteCoverage: { covered: 1, total: 2 } });
   });
 
   test('a missing-baseline tech-day with no completed evidence at all still reports null, not zero', async () => {

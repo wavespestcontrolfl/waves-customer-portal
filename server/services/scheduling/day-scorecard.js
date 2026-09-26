@@ -35,6 +35,15 @@ const MAX_RANGE_DAYS = 30; // Same 31-day inclusive cap as day-quality.
 // own distinction) — 'unverified_timing'/'unmatched_or_uncompleted_work' never
 // contribute a minute to the actual side.
 const RECORDED_EVIDENCE = new Set(['operator_corrected', 'operator_reported', 'recorded_lifecycle_interval']);
+// measureRoutePerformance's arrivalOutcome values that mean the row was NOT
+// completed on this route (missing/moved/still open) — every other value,
+// including 'grouped_work_requires_review', only exists because row.status
+// WAS 'completed' (see measureRoutePerformance's own branch order). Codex
+// P1: durationEvidence is the wrong signal for "was this stop completed" —
+// it's forced to 'unmatched_or_uncompleted_work' for ANY grouped stop
+// regardless of real completion, so filtering on it dropped every completed
+// grouped stop from the count.
+const NOT_COMPLETED_OUTCOMES = new Set(['missing_visit', 'day_or_technician_changed', 'not_completed']);
 const DEPARTURE_MINUTES = 8 * 60; // 08:00 — the same default measureDayQuality falls back to.
 
 function routeScorecardEnabled() {
@@ -106,13 +115,15 @@ function plannedPastRow(plan) {
 // from mileage_log (null, not 0, when no trip rows exist).
 //
 // `stops` (Codex P2, round 3) is the COMPLETED stop count for the tech-day —
-// planned-and-completed (plan.stops entries whose durationEvidence isn't
-// 'unmatched_or_uncompleted_work', measureRoutePerformance's own marker for
-// "didn't match a completed row on this route") plus any same-day job
-// completed outside the snapshot (unbaselined, below). physicalStops stays
-// null: route-performance's own select carries no premise/coordinate
-// columns, so a co-visit collapse is not cheaply derivable here the way it
-// is from day-quality's own raw-stops read (plannedFutureRow).
+// planned-and-completed (plan.stops entries whose arrivalOutcome proves the
+// row was completed on this route — NOT the durationEvidence-based check an
+// earlier round used, which forces 'unmatched_or_uncompleted_work' onto
+// every grouped stop regardless of real completion and silently dropped a
+// completed group from the count, Codex P1) plus any same-day job completed
+// outside the snapshot (unbaselined, below). physicalStops stays null:
+// route-performance's own select carries no premise/coordinate columns, so
+// a co-visit collapse is not cheaply derivable here the way it is from
+// day-quality's own raw-stops read (plannedFutureRow).
 //
 // fallbackStops (Codex P1/P2, round 3): a MISSING-baseline tech-day (no
 // saved plan at all) still has route-performance's own raw completed rows,
@@ -152,7 +163,7 @@ function actualPastRow(plan, mileage, fallbackStops) {
   const spanMinutes = arrivals.length && completions.length ? Math.max(...completions) - Math.min(...arrivals) : null;
   const unbaselined = plan && Number.isFinite(plan.unbaselinedCompletedVisits) ? plan.unbaselinedCompletedVisits : 0;
   const completedStops = plan
-    ? plan.stops.filter(stop => stop.durationEvidence !== 'unmatched_or_uncompleted_work').length + unbaselined
+    ? plan.stops.filter(stop => !NOT_COMPLETED_OUTCOMES.has(stop.arrivalOutcome)).length + unbaselined
     : fallbackStops.length;
   return { stops: completedStops, physicalStops: null, onSiteMinutes,
     onSiteCoverage: { covered: recorded.length, total: stops.length, unbaselined },
