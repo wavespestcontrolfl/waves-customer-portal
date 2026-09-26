@@ -225,7 +225,9 @@ ${JSON.stringify(list)}`;
       reason: hit.reason || 'llm',
     };
   });
-  if (chunk.length && !hits) ledgerCallRejected(resp, 'schema_invalid');
+  // Any entry the heuristic had to fill is a degraded answer — a partial
+  // chunk must show in the lane's error rate, not only a zero-hit one.
+  if (chunk.length && hits !== chunk.length) ledgerCallRejected(resp, 'schema_invalid');
   return scored;
 }
 

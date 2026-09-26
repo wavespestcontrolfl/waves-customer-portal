@@ -6,7 +6,7 @@ const { serviceCountsTowardWaveGuardTier } = require('./pricing-engine/discount-
 const { loadEstimateAiSupportContext, serviceKeysFromContext, serviceFamiliesFromText } = require('./estimate-ai-context');
 const { dispatch, rejectCall } = require('./llm/call');
 const { isMistingSystemService } = require('../utils/mosquito-misting-system');
-const { ledgerCall } = require('./llm-dispatch-metrics');
+const { ledgerCall, ledgerCallRejected } = require('./llm-dispatch-metrics');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -1443,7 +1443,11 @@ async function answerWithAnthropic(question, context) {
       content: buildAssistantUserContent(question, context),
     }],
   }), { laneId: 'estimate_assistant' });
-  return extractAnthropicText(response);
+  // Same rule as the OpenAI leg: text the sanitizer strips to nothing is an
+  // unusable answer (the caller serves the template), so fail the row.
+  const answer = extractAnthropicText(response);
+  if (!answer) ledgerCallRejected(response, 'invalid_output');
+  return answer;
 }
 
 async function answerEstimateQuestion({

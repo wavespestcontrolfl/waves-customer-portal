@@ -203,7 +203,7 @@ describe('classifyBatch LLM path', () => {
       expect(ledgerCallRejected).toHaveBeenCalledWith(expect.anything(), 'schema_invalid');
     });
 
-    test('a chunk with at least one real hit is NOT flagged, even alongside junk entries', async () => {
+    test('a partially classified chunk (one real hit + junk) is flagged — the heuristic filled part of it', async () => {
       const fake = {
         messages: {
           create: async () => ({
@@ -218,6 +218,25 @@ describe('classifyBatch LLM path', () => {
       };
       const [a, b] = await scorer.classifyBatch([{ domain: 'x.com' }, { domain: 'y.com' }], { anthropic: fake });
       expect(a.reason).toBe('heuristic');
+      expect(b.reason).not.toBe('heuristic');
+      expect(ledgerCallRejected).toHaveBeenCalledWith(expect.anything(), 'schema_invalid');
+    });
+
+    test('a fully classified chunk is NOT flagged', async () => {
+      const fake = {
+        messages: {
+          create: async () => ({
+            content: [{
+              text: JSON.stringify([
+                { i: 0, domain: 'x.com', intent_class: 'resource', relevance_0_100: 40 },
+                { i: 1, domain: 'y.com', intent_class: 'editorial', relevance_0_100: 70 },
+              ]),
+            }],
+          }),
+        },
+      };
+      const [a, b] = await scorer.classifyBatch([{ domain: 'x.com' }, { domain: 'y.com' }], { anthropic: fake });
+      expect(a.reason).not.toBe('heuristic');
       expect(b.reason).not.toBe('heuristic');
       expect(ledgerCallRejected).not.toHaveBeenCalled();
     });
