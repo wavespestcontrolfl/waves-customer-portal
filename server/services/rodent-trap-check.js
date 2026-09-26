@@ -135,48 +135,79 @@ function sliceJobs(visits, declared) {
   return jobs;
 }
 
-/**
- * Current trapping job for a customer: the latest job (see sliceJobs)
- * whose last active visit is within JOB_GAP_DAYS of today, with its visit
- * count and grandfathering. Reads the full trapping history, so an opener
- * of any age still anchors its job. When the job's opener cannot be
- * identified, the answer is openerUnknown — never "billable". Scoped to one
- * premise (the booking's property, or the primary/unstamped premise when
- * none is chosen) with review-request's trapping premise rules, so checks
- * at another of the customer's properties never spend this one's
- * allowance. Read-only.
- */
-async function trappingJobStatus(db, customerId, { today, propertyId = null, premiseMatcher } = {}) {
-  const anchor = today || etToday();
-  // Lazy: review-request pulls in the messaging stack.
-  const inPremise = premiseMatcher
-    || await require('./review-request').trappingPremiseMatcher(customerId, { property_id: propertyId || null });
+const VISIT_COLUMNS = [
+  'ss.id',
+  'ss.status',
+  'ss.source_estimate_id',
+  'ss.followup_source_service_id',
+  'ss.property_id',
+  'ss.service_address_line1',
+  'ss.service_address_line2',
+  'ss.service_address_city',
+  'ss.service_address_zip',
+  'sv.service_key',
+];
 
-  const rows = await db('scheduled_services as ss')
+// Active trapping visits of the customer: appointments whose primary line
+// OR an add-on line is a trapping SKU. One appointment is one visit — an
+// appointment matched through both keeps its primary row.
+async function trappingVisits(db, customerId) {
+  const dayCols = () => [
+    db.raw("to_char(ss.scheduled_date, 'YYYY-MM-DD') as scheduled_day"),
+    db.raw("to_char(e.accepted_at AT TIME ZONE 'America/New_York', 'YYYY-MM-DD') as accepted_day"),
+    db.raw("to_char(ss.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS.US') as created_key"),
+  ];
+  const primaries = await db('scheduled_services as ss')
     .join('services as sv', 'ss.service_id', 'sv.id')
     .leftJoin('estimates as e', 'ss.source_estimate_id', 'e.id')
     .where('ss.customer_id', customerId)
     .whereIn('sv.service_key', TRAPPING_VISIT_KEYS)
     .whereNotIn('ss.status', INACTIVE_STATUSES)
-    .orderBy('ss.scheduled_date', 'asc')
-    .orderBy('ss.created_at', 'asc')
+    .orderBy('ss.scheduled_date', 'desc')
     .limit(HISTORY_LIMIT)
-    .select(
-      'ss.id',
-      'ss.status',
-      'ss.source_estimate_id',
-      'ss.followup_source_service_id',
-      'ss.property_id',
-      'ss.service_address_line1',
-      'ss.service_address_line2',
-      'ss.service_address_city',
-      'ss.service_address_zip',
-      'sv.service_key',
-      db.raw("to_char(ss.scheduled_date, 'YYYY-MM-DD') as scheduled_day"),
-      db.raw("to_char(e.accepted_at AT TIME ZONE 'America/New_York', 'YYYY-MM-DD') as accepted_day"),
-    );
+    .select(...VISIT_COLUMNS, ...dayCols());
+  const addons = await db('scheduled_service_addons as a')
+    .join('scheduled_services as ss', 'a.scheduled_service_id', 'ss.id')
+    .join('services as sv', 'a.service_id', 'sv.id')
+    .leftJoin('estimates as e', 'ss.source_estimate_id', 'e.id')
+    .where('ss.customer_id', customerId)
+    .whereIn('sv.service_key', TRAPPING_VISIT_KEYS)
+    .whereNotIn('ss.status', INACTIVE_STATUSES)
+    .orderBy('ss.scheduled_date', 'desc')
+    .limit(HISTORY_LIMIT)
+    .select(...VISIT_COLUMNS, ...dayCols());
+  const byVisit = new Map();
+  for (const row of [...primaries, ...addons]) {
+    if (!byVisit.has(row.id)) byVisit.set(row.id, row);
+  }
+  return [...byVisit.values()].sort((x, y) => (
+    x.scheduled_day === y.scheduled_day
+      ? String(x.created_key || '').localeCompare(String(y.created_key || ''))
+      : (x.scheduled_day < y.scheduled_day ? -1 : 1)
+  ));
+}
 
-  const visits = rows.filter((r) => inPremise(r));
+/**
+ * The trapping job a booking on `date` (ET 'YYYY-MM-DD', default today)
+ * belongs to: only visits on or before that date count (a later booked
+ * visit comes after this one), and the latest job among them applies when
+ * its last visit is within JOB_GAP_DAYS of the date. Returns its visit
+ * count and grandfathering. Reads the full trapping history (primary and
+ * add-on lines), so an opener of any age still anchors its job. When the
+ * job's opener cannot be identified, the answer is openerUnknown — never
+ * "billable". Scoped to one premise (the booking's property, or the
+ * primary/unstamped premise when none is chosen) with review-request's
+ * trapping premise rules, so checks at another of the customer's
+ * properties never spend this one's allowance. Read-only.
+ */
+async function trappingJobStatus(db, customerId, { date, today, propertyId = null, premiseMatcher } = {}) {
+  const anchor = date || today || etToday();
+  // Lazy: review-request pulls in the messaging stack.
+  const inPremise = premiseMatcher
+    || await require('./review-request').trappingPremiseMatcher(customerId, { property_id: propertyId || null });
+
+  const visits = (await trappingVisits(db, customerId))
+    .filter((r) => r.scheduled_day <= anchor && inPremise(r));
   const plainIds = visits.filter((v) => v.service_key === 'rodent_trapping').map((v) => v.id);
   const jobs = sliceJobs(visits, await declaredTypes(db, plainIds));
   const last = jobs[jobs.length - 1];

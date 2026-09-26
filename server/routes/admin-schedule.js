@@ -2563,7 +2563,8 @@ router.get('/mosquito-onetime-quote', requireAdmin, async (req, res, next) => {
 // trapping job already has, and whether the next one is billable as the
 // $95 "Rodent Trap Check - Additional" row (owner ruling 2026-09-26: $350
 // covers setup + 1 check; grandfathered jobs keep included checks). Scoped
-// to the booking's property (optional propertyId; none = primary premise).
+// to the booking's property (optional propertyId; none = primary premise)
+// and counted as of the booking date (optional date, default today ET).
 // Read-only; the office still picks the service.
 router.get('/rodent-trapping-status', requireAdmin, async (req, res, next) => {
   try {
@@ -2575,7 +2576,9 @@ router.get('/rodent-trapping-status', requireAdmin, async (req, res, next) => {
     if (propertyId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(propertyId)) {
       throw httpError(400, 'propertyId must be a valid property id');
     }
-    res.json(await trappingJobStatus(db, customerId, { propertyId: propertyId || null }));
+    const date = req.query.date == null ? '' : String(req.query.date).trim();
+    if (date && !/^\d{4}-\d{2}-\d{2}$/.test(date)) throw httpError(400, 'date must be YYYY-MM-DD');
+    res.json(await trappingJobStatus(db, customerId, { propertyId: propertyId || null, date: date || null }));
   } catch (err) { next(err); }
 });
 

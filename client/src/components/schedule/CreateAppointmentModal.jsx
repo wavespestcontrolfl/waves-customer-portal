@@ -2649,7 +2649,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // Keyed by customer + booking property: another property's trapping job
   // never spends this one's allowance.
   const trappingPropertyId = propertyPickerActive && selectedPropertyId ? String(selectedPropertyId) : '';
-  const trappingStatusKey = selectedCustomer?.id ? `${selectedCustomer.id}|${trappingPropertyId}` : null;
+  // ...and by the booking date: the job and count are as of that day.
+  const trappingDate = /^\d{4}-\d{2}-\d{2}$/.test(String(apptDate || '')) ? String(apptDate) : '';
+  const trappingStatusKey = selectedCustomer?.id ? `${selectedCustomer.id}|${trappingPropertyId}|${trappingDate}` : null;
   useEffect(() => {
     const id = selectedCustomer?.id;
     if (!id || !hasRodentTrappingLine) return;
@@ -2658,14 +2660,14 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     setTrappingStatus({ key, status: 'loading' });
     (async () => {
       try {
-        const qs = `customerId=${encodeURIComponent(id)}${trappingPropertyId ? `&propertyId=${encodeURIComponent(trappingPropertyId)}` : ''}`;
+        const qs = `customerId=${encodeURIComponent(id)}${trappingPropertyId ? `&propertyId=${encodeURIComponent(trappingPropertyId)}` : ''}${trappingDate ? `&date=${trappingDate}` : ''}`;
         const r = await adminFetch(`/admin/schedule/rodent-trapping-status?${qs}`);
         setTrappingStatus((prev) => (prev?.key === key ? { ...r, key, status: 'ready' } : prev));
       } catch {
         setTrappingStatus((prev) => (prev?.key === key ? { key, status: 'error' } : prev));
       }
     })();
-  }, [selectedCustomer?.id, trappingStatusKey, trappingPropertyId, hasRodentTrappingLine, trappingStatus]);
+  }, [selectedCustomer?.id, trappingStatusKey, trappingPropertyId, trappingDate, hasRodentTrappingLine, trappingStatus]);
   const trappingHint = (svc) => {
     if (!isRodentTrappingLine(svc)) return null;
     const t = trappingStatus;
