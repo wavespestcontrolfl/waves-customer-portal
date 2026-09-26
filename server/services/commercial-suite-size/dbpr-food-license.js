@@ -132,8 +132,13 @@ function parseAddressLine(line) {
 // level license ("Bldg 9") never matches a suite that happens to share the
 // number ("Suite 9"), and "Bldg 9 Unit 204" never collides with "Bldg 92
 // Unit 04".
+// In a plaza, "Space 12" / "Spc 12" / "Bay 12" name the same tenant unit as
+// "Suite 12" (the residential normalizer keeps Space as a lot and Bay as a
+// structure), so they are spelled as Suite first; Bldg stays structural.
+const COMMERCIAL_SUITE_WORD_RE = /\b(?:space|spc|bay)\b\.?/gi;
+
 function normalizeUnitValue(value) {
-  const raw = String(value || '').trim();
+  const raw = String(value || '').trim().replace(COMMERCIAL_SUITE_WORD_RE, 'Suite');
   if (!raw) return null;
   return unitLineValueKey(normalizeUnitLine(raw)) || null;
 }

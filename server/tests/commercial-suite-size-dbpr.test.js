@@ -418,12 +418,20 @@ describe('Codex r6 DBPR matching', () => {
   });
 });
 
-describe('Codex r7: Spc and Space compare equal', () => {
-  const { normalizeUnitValue } = require('../services/commercial-suite-size/dbpr-food-license');
-  test('"Spc 12", "Spc. 12" and "Space 12" all reduce to the same key', () => {
-    expect(normalizeUnitValue('Spc 12')).toBe('spc 12');
-    expect(normalizeUnitValue('Spc. 12')).toBe('spc 12');
-    expect(normalizeUnitValue('Space 12')).toBe('spc 12');
+describe('Codex r7 + #4840 r8: plaza unit words compare equal to Suite', () => {
+  const { normalizeUnitValue, matchDbprRow } = require('../services/commercial-suite-size/dbpr-food-license');
+  test('"Spc 12", "Spc. 12", "Space 12" and "Bay 12" all key like "Suite 12"', () => {
+    for (const u of ['Spc 12', 'Spc. 12', 'Space 12', 'Bay 12', 'BAY 12']) {
+      expect(normalizeUnitValue(u)).toBe(normalizeUnitValue('Suite 12'));
+    }
+  });
+  test('Bldg stays structural: "Bldg 9 Bay 4" matches "Bldg 9 Suite 4", never "Suite 4"', () => {
+    expect(normalizeUnitValue('Bldg 9 Bay 4')).toBe(normalizeUnitValue('Bldg 9 Suite 4'));
+    expect(normalizeUnitValue('Bldg 9 Bay 4')).not.toBe(normalizeUnitValue('Suite 4'));
+  });
+  test('a caller\'s "Suite 12" matches a license row filed as "SPACE 12"', () => {
+    const row = { 'Location Street Address': '4400 TEST COMMONS PKWY E SPACE 12', 'Location Zip Code': '00000' };
+    expect(matchDbprRow([row], { street: '4400 Test Commons Pkwy E', unit: 'Suite 12', zip: '00000' })).toBe(row);
   });
 });
 
