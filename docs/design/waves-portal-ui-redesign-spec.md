@@ -68,7 +68,7 @@ Named promotions in [the active admin UI consistency contract](admin-ui-consiste
 
 Two colors: neutral grayscale and alert red. Nothing else. Light mode only.
 
-**Superseded:** the admin shell adopted a Square-inspired warm-stone palette instead of this zinc ramp (see `docs/design/DECISIONS.md`, 2026-04-18, and `client/src/styles/theme-square.css`). The `alert-border` and `alert-text-strong` tokens below were never built.
+**Superseded:** the admin shell adopted a warm-stone palette instead of this zinc ramp (see `docs/design/DECISIONS.md`, 2026-04-18). The `alert-border` and `alert-text-strong` tokens below were never built.
 
 **Neutral ramp (zinc):**
 
