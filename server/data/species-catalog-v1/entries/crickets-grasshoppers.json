@@ -1,0 +1,199 @@
+[
+  {
+    "kind": "organism",
+    "aka": [],
+    "stages": [
+      "nymph",
+      "adult"
+    ],
+    "sign_of": [],
+    "safety_line": null,
+    "legacy_slugs": [],
+    "review": {
+      "status": "draft",
+      "notes": ""
+    },
+    "slug": "lubber-grasshopper",
+    "common_name": "Eastern Lubber Grasshopper",
+    "aliases": [
+      "lubber grasshopper",
+      "lubber",
+      "lubbers",
+      "eastern lubber"
+    ],
+    "scientific_name": "Romalea microptera",
+    "rank": "species",
+    "group": "crickets-grasshoppers",
+    "subgroup": null,
+    "site_category": "Lawn",
+    "traits": [
+      "Huge — up to 3 inches — slow-moving, and can barely fly",
+      "Adults yellow-orange-red with black wing edges; nymphs are black with a yellow/orange/red stripe",
+      "Marches across yards and driveways in early summer, often in groups",
+      "Hisses and spreads its wings when threatened, sometimes spraying a foul-smelling defensive foam"
+    ],
+    "look_alikes": [
+      {
+        "slug": "katydid",
+        "difference": "Lubbers are heavy-bodied, slow, and can barely fly; katydids are slender, leaf-green, and jump or fly readily.",
+        "next_photo": "A side-on photo showing body shape and wing length relative to the body."
+      }
+    ],
+    "size": "large",
+    "where": [
+      "lawn-garden",
+      "lanai-patio"
+    ],
+    "looks": [
+      "crawler"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "range": "common",
+    "active_months": [
+      4,
+      5,
+      6,
+      7,
+      8
+    ],
+    "peak_months": [
+      5,
+      6
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "Its bold colors are a warning label — lubbers are toxic enough that most predators spit them back out. They chew ornamentals but rarely at damaging scale in a typical yard; hand-picking off favorite plants is usually enough.",
+      "fact": "Its colors are a warning label — lubbers are toxic enough that most predators spit them back out.",
+      "blurb": "They chew ornamentals but rarely at damaging scale in yards. Hand-pick if they’re on your favorites."
+    },
+    "tech_notes": "Not a lawn-turf pest; ornamental nibbling only. Hand removal or spot treatment on high-value ornamentals if numerous.",
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN132"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/lubber-grasshopper/",
+      "guides": []
+    }
+  },
+  {
+    "kind": "organism",
+    "aka": [],
+    "stages": [
+      "nymph",
+      "adult"
+    ],
+    "sign_of": [],
+    "safety_line": null,
+    "legacy_slugs": [],
+    "review": {
+      "status": "draft",
+      "notes": ""
+    },
+    "slug": "mole-cricket",
+    "common_name": "Mole Cricket",
+    "aliases": [
+      "mole cricket",
+      "mole crickets",
+      "neoscapteriscus"
+    ],
+    "scientific_name": "Neoscapteriscus spp.",
+    "rank": "genus",
+    "group": "crickets-grasshoppers",
+    "subgroup": null,
+    "site_category": "Lawn",
+    "traits": [
+      "Raised, meandering surface tunnels like mini mole runs in turf",
+      "Spongy turf that peels up easily where tunneling is heavy",
+      "Velvety brown insect with shovel-shaped front legs, up to about 3.5 cm",
+      "Loud trilling or nasal calling song from burrows on spring evenings"
+    ],
+    "look_alikes": [
+      {
+        "slug": "eastern-mole",
+        "difference": "Mole cricket tunnels are narrow, meandering ridges made by an insect; eastern mole tunnels are wider ridges made by a furry mammal, not an insect.",
+        "next_photo": "A wide shot of the tunnel width and any entry holes, plus a close-up if the animal is seen."
+      }
+    ],
+    "size": "medium",
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "lawn-damage",
+      "crawler"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      3,
+      4,
+      5,
+      9,
+      10
+    ],
+    "service": {
+      "line": "lawn",
+      "key": "lawnPestControl",
+      "label": "Lawn Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "Tunneling severs turf roots, so small areas usually recover on their own while spreading tunnels are worth treating. Males shape their burrows like megaphones to amplify their calling song across the neighborhood.",
+      "fact": "Males sing from burrows shaped like megaphones to amplify the call across the neighborhood.",
+      "blurb": "Tunneling severs roots — small areas recover, spreading tunnels need treatment."
+    },
+    "tech_notes": "Soap-flush test confirms presence/density. Peak egg-lay/hatch spring; treat young nymphs for best control.",
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN391"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/mole-cricket/",
+      "guides": []
+    }
+  }
+]

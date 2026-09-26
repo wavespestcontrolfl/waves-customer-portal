@@ -1,0 +1,202 @@
+[
+  {
+    "kind": "organism",
+    "aka": [],
+    "stages": [
+      "juvenile",
+      "adult"
+    ],
+    "sign_of": [],
+    "safety_line": null,
+    "legacy_slugs": [],
+    "review": {
+      "status": "draft",
+      "notes": ""
+    },
+    "slug": "brown-anole",
+    "common_name": "Brown Anole",
+    "aliases": [
+      "brown anole",
+      "brown anoles"
+    ],
+    "scientific_name": "Anolis sagrei",
+    "rank": "species",
+    "group": "lizards",
+    "subgroup": "anoles",
+    "site_category": "Wildlife neighbors",
+    "traits": [
+      "Brown lizard doing push-ups and bobbing its head on walkways",
+      "Orange-red throat fan (dewlap) displayed by males",
+      "A smooth-edged crest along the neck, back, and tail in males",
+      "Ground and low-perch dweller, 5-9 inches total length"
+    ],
+    "look_alikes": [
+      {
+        "slug": "green-anole",
+        "difference": "Brown anoles stay brown-gray and low to the ground; green anoles can shift between green and brown and perch higher in shrubs.",
+        "next_photo": "A close-up of the throat fan color while displaying, plus how high off the ground it is."
+      }
+    ],
+    "size": "small",
+    "where": [
+      "lanai-patio",
+      "lawn-garden"
+    ],
+    "looks": [
+      "lizard-frog"
+    ],
+    "verdict": "ally",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "An invasive lizard that has pushed Florida’s native green anole up into the trees — look up to find the green ones. It eats large numbers of insects and is the lanai’s volunteer security team; no treatment needed.",
+      "fact": "The invasive cousin — it pushed Florida’s native green anole up into the trees. Look up to find the green ones.",
+      "blurb": "Eats enormous numbers of insects. The lanai’s volunteer security team."
+    },
+    "tech_notes": "Beneficial insectivore; no treatment. Not a pest-control matter; educate if asked about population.",
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/UW486"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/brown-anole/",
+      "guides": []
+    }
+  },
+  {
+    "kind": "organism",
+    "aka": [],
+    "stages": [
+      "juvenile",
+      "adult"
+    ],
+    "sign_of": [],
+    "safety_line": null,
+    "legacy_slugs": [],
+    "review": {
+      "status": "draft",
+      "notes": "A dedicated Featured Creatures page for Hemidactylus house geckos could not be reached during this pass (404/410 on the pages found); facts here reflect widely corroborated general knowledge and should be spot-checked against a live UF/IFAS gecko publication."
+    },
+    "slug": "gecko",
+    "common_name": "House Gecko",
+    "aliases": [
+      "house gecko",
+      "geckos",
+      "gecko"
+    ],
+    "scientific_name": "Hemidactylus spp.",
+    "rank": "genus",
+    "group": "lizards",
+    "subgroup": "geckos",
+    "site_category": "Wildlife neighbors",
+    "traits": [
+      "Pale, almost translucent lizard active on walls at night",
+      "Clusters around porch lights hunting insects",
+      "Audible chirping and clicking calls in the evening",
+      "Toe pads that let it climb smooth vertical surfaces"
+    ],
+    "look_alikes": [
+      {
+        "slug": "brown-anole",
+        "difference": "House geckos are pale, nocturnal, and cling to walls near lights; brown anoles are brown, active by day, and stay closer to the ground.",
+        "next_photo": "A close-up of the skin color and whether it was seen by day or at night near a light."
+      }
+    ],
+    "size": "small",
+    "where": [
+      "lights-windows",
+      "lanai-patio"
+    ],
+    "looks": [
+      "lizard-frog"
+    ],
+    "verdict": "ally",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "One of the few lizards with a voice — the evening chirps are territorial calls. It runs night-shift bug patrol around porch lights, and any droppings on the windowsill are simply the rent for that free pest control.",
+      "fact": "One of the few lizards with a voice — those evening chirps are territorial calls.",
+      "blurb": "Night-shift bug patrol. The droppings on the windowsill are the rent."
+    },
+    "tech_notes": "Beneficial insectivore; no treatment. Non-native Hemidactylus species are common and harmless around structures.",
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/UW486"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/gecko/",
+      "guides": []
+    }
+  }
+]

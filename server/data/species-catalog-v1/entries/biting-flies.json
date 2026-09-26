@@ -1,0 +1,108 @@
+[
+  {
+    "kind": "organism",
+    "aka": [
+      "Biting Midge"
+    ],
+    "stages": [
+      "adult"
+    ],
+    "sign_of": [],
+    "safety_line": "Bites itch and burn but are not known to spread disease locally. See a doctor if a bite site becomes increasingly red, swollen, or painful days later.",
+    "legacy_slugs": [],
+    "review": {
+      "status": "draft",
+      "notes": ""
+    },
+    "slug": "no-see-um",
+    "common_name": "No-See-Um",
+    "aliases": [
+      "no see um",
+      "no see ums",
+      "biting midge",
+      "biting midges",
+      "sand fly",
+      "sand flies"
+    ],
+    "scientific_name": "Culicoides spp.",
+    "rank": "genus",
+    "group": "biting-flies",
+    "subgroup": null,
+    "site_category": "Mosquitoes & biters",
+    "traits": [
+      "You feel the burn but can barely see the insect — about 1 mm long",
+      "Worst at sunrise and sunset, especially near water",
+      "Wings patterned with tiny dark and pale spots under magnification",
+      "Passes through standard 16-mesh window screens"
+    ],
+    "look_alikes": [
+      {
+        "slug": "chiggers",
+        "difference": "No-see-ums bite and leave scattered welts; chiggers come from vegetation and bite around sock lines, waistbands, and skin folds.",
+        "next_photo": "A close-up of the bite pattern and where on the body it appears."
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "lanai-patio"
+    ],
+    "looks": [
+      "flying-biter"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      9,
+      10
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "Miserable but not a home-infestation issue — no-see-ums breed in wet soil, marsh edges, and sand well beyond any one yard. Timing outdoor time away from dawn/dusk, a fan on the lanai, and finer \"no-see-um mesh\" screening are the real fixes.",
+      "fact": "They’re small enough to pass through regular 16-mesh screening — coastal homes use finer \"no-see-um mesh\" for a reason.",
+      "blurb": "Miserable but not a home infestation issue — timing, fans, and finer screens are the real fixes."
+    },
+    "tech_notes": "Breeding sites are usually off-property (marsh, wet sand); barrier treatment of harborage vegetation gives modest relief, set expectations honestly.",
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN626"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/no-see-um/",
+      "guides": []
+    }
+  }
+]

@@ -1,0 +1,303 @@
+[
+  {
+    "kind": "organism",
+    "aka": [],
+    "stages": [
+      "juvenile",
+      "adult"
+    ],
+    "sign_of": [],
+    "safety_line": "Can pinch if handled, but venom is too weak to bother most people. See a doctor for an unusual reaction.",
+    "legacy_slugs": [],
+    "review": {
+      "status": "draft",
+      "notes": ""
+    },
+    "slug": "house-centipede",
+    "common_name": "House Centipede",
+    "aliases": [
+      "house centipede",
+      "house centipedes",
+      "centipede",
+      "centipedes"
+    ],
+    "scientific_name": "Scutigera coleoptrata",
+    "rank": "species",
+    "group": "many-legged",
+    "subgroup": null,
+    "site_category": "Occasional invaders",
+    "traits": [
+      "Fifteen pairs of very long legs — moves in a fast, ghostly blur",
+      "Found in tubs and sinks it can’t climb out of",
+      "Yellowish-gray with dark stripes running down the body",
+      "Always running away from you, not toward you"
+    ],
+    "look_alikes": [
+      {
+        "slug": "florida-blue-centipede",
+        "difference": "House centipedes have extremely long, thread-like legs and blur when moving; Florida blue centipedes have short legs and move deliberately.",
+        "next_photo": "A close-up from the side showing leg length relative to body width."
+      }
+    ],
+    "size": "medium",
+    "where": [
+      "bathroom",
+      "garage-storage"
+    ],
+    "looks": [
+      "crawler"
+    ],
+    "verdict": "ally",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "It actively hunts roaches, silverfish, and moths at night — an unpaid exterminator with too many legs. If you can stand the look of it, it’s working for you; cup-and-release outdoors is the easy compromise.",
+      "fact": "It actively hunts roaches, silverfish, and moths at night — an unpaid exterminator with too many legs.",
+      "blurb": "If you can stand it, it’s working for you. If you can’t, cup-and-release counts."
+    },
+    "tech_notes": "Beneficial predator; indicates other insect prey present. No treatment needed unless customer wants it excluded; check bathroom/garage moisture entry points.",
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IG093"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/house-centipede/",
+      "guides": []
+    }
+  },
+  {
+    "kind": "organism",
+    "aka": [],
+    "stages": [
+      "juvenile",
+      "adult"
+    ],
+    "sign_of": [],
+    "safety_line": null,
+    "legacy_slugs": [],
+    "review": {
+      "status": "draft",
+      "notes": ""
+    },
+    "slug": "millipede",
+    "common_name": "Florida Ivory Millipede",
+    "aliases": [
+      "millipede",
+      "millipedes"
+    ],
+    "scientific_name": "Chicobolus spinigerus",
+    "rank": "species",
+    "group": "many-legged",
+    "subgroup": null,
+    "site_category": "Occasional invaders",
+    "traits": [
+      "Coils into a tight spiral when touched",
+      "Slow, round-bodied, legs ripple in waves as it moves",
+      "Two pairs of legs per body segment (versus one pair for centipedes)",
+      "Shows up in large numbers after soaking rain"
+    ],
+    "look_alikes": [
+      {
+        "slug": "house-centipede",
+        "difference": "Millipedes have two short leg pairs per segment and coil when touched; house centipedes have one very long leg pair per segment and move fast.",
+        "next_photo": "A close-up from the side counting legs per body segment, next to a coin."
+      }
+    ],
+    "size": "medium",
+    "where": [
+      "garage-storage",
+      "lanai-patio"
+    ],
+    "looks": [
+      "crawler"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A composting machine that recycles dead leaves into soil — heavy rain floods the leaf litter and evicts them onto the lanai. They can’t survive indoors for long; sweep them out or wait, and they dry out within a day.",
+      "fact": "A composting machine — it recycles dead leaves into soil. Rain floods the leaf litter and evicts them onto your lanai.",
+      "blurb": "They can’t survive indoors — sweep them out or wait; they dry out in a day."
+    },
+    "tech_notes": "Rain-driven seasonal migration from mulch/leaf litter. Exterior perimeter treatment + reducing mulch-to-foundation contact handles recurring waves.",
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IG093"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/millipede/",
+      "guides": []
+    }
+  },
+  {
+    "kind": "organism",
+    "aka": [
+      "Roly-poly"
+    ],
+    "stages": [
+      "juvenile",
+      "adult"
+    ],
+    "sign_of": [],
+    "safety_line": null,
+    "legacy_slugs": [],
+    "review": {
+      "status": "draft",
+      "notes": ""
+    },
+    "slug": "pillbug",
+    "common_name": "Pillbug",
+    "aliases": [
+      "pillbug",
+      "pillbugs",
+      "roly poly",
+      "roly polies",
+      "sowbug",
+      "sowbugs"
+    ],
+    "scientific_name": "Armadillidium vulgare",
+    "rank": "species",
+    "group": "many-legged",
+    "subgroup": null,
+    "site_category": "Occasional invaders",
+    "traits": [
+      "Rolls into a perfect ball when disturbed",
+      "Gray, armored, oval, about half an inch, under pots and stepping stones",
+      "Needs consistent dampness — dies quickly indoors",
+      "A land crustacean, not an insect — breathes through gill-like organs"
+    ],
+    "look_alikes": [
+      {
+        "slug": "sowbug",
+        "difference": "Pillbugs roll into a tight ball and have no tail appendages; sowbugs cannot roll up and have two small tail-like appendages at the rear.",
+        "next_photo": "A close-up of the rear end for tail appendages, and whether it can roll into a ball."
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "lawn-garden",
+      "garage-storage"
+    ],
+    "looks": [
+      "crawler"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A land crustacean, not an insect — it breathes through gill-like organs, a tiny armored cousin of a shrimp. Mainly beneficial in the garden; it occasionally wanders indoors but causes no structural damage.",
+      "fact": "Not an insect at all — it’s a land crustacean that breathes through gill-like organs, a tiny armored shrimp cousin.",
+      "blurb": "A drainage indicator more than a pest. Kids’ favorite yard animal."
+    },
+    "tech_notes": "Beneficial decomposer; occasional indoor wanderer tied to moisture. No treatment usually needed; exterior perimeter if numerous indoors.",
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN1099"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/pillbug/",
+      "guides": []
+    }
+  }
+]

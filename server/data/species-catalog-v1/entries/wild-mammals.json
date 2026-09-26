@@ -1,0 +1,98 @@
+[
+  {
+    "kind": "organism",
+    "aka": [],
+    "stages": [
+      "adult"
+    ],
+    "sign_of": [],
+    "safety_line": null,
+    "legacy_slugs": [],
+    "review": {
+      "status": "draft",
+      "notes": ""
+    },
+    "slug": "armadillo",
+    "common_name": "Nine-banded Armadillo",
+    "aliases": [
+      "armadillo",
+      "armadillos",
+      "nine banded armadillo"
+    ],
+    "scientific_name": "Dasypus novemcinctus",
+    "rank": "species",
+    "group": "wild-mammals",
+    "subgroup": null,
+    "site_category": "Wildlife neighbors",
+    "traits": [
+      "Shallow, cone-shaped holes dug overnight, 1-3 inches deep",
+      "Armored, cat-sized (15-17 inches, 8-17 lbs), terrible eyesight",
+      "Long, tapering snout and large front claws for digging",
+      "Digs where soil is soft and grubs or earthworms are plentiful"
+    ],
+    "look_alikes": [
+      {
+        "slug": "feral-hog-rooting",
+        "difference": "Armadillo holes are small, cone-shaped, and scattered overnight; feral hog rooting tears up much larger patches of turf and soil in a single visit.",
+        "next_photo": "A wide shot showing the size and shape of the disturbed area."
+      }
+    ],
+    "size": "large",
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "lawn-damage",
+      "mammal"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [],
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "It's digging your lawn because grubs and earthworms are there to eat — treating the food source usually sends the armadillo looking for better hunting elsewhere. Homeowners may legally live-trap nuisance animals per FWC rules.",
+      "fact": "When startled it jumps straight up — and it digs your lawn because grubs are there. Fix the grubs, lose the digger.",
+      "blurb": "We treat the grubs (the food source); the armadillo moves to better hunting on its own."
+    },
+    "tech_notes": "Treat the underlying grub population; armadillo relocation/removal follows FWC nuisance-wildlife rules (euthanize, release on-site, or relocate within-county with landowner permission).",
+    "sources": [
+      "https://myfwc.com/wildlifehabitats/profiles/mammals/land/armadillo/"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/armadillo/",
+      "guides": []
+    }
+  }
+]

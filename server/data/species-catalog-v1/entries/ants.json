@@ -1,0 +1,640 @@
+[
+  {
+    "kind": "organism",
+    "aka": [],
+    "stages": [
+      "worker"
+    ],
+    "sign_of": [],
+    "safety_line": null,
+    "legacy_slugs": [],
+    "review": {
+      "status": "draft",
+      "notes": ""
+    },
+    "slug": "ghost-ant",
+    "common_name": "Ghost Ant",
+    "aliases": [
+      "ghost ant",
+      "ghost ants",
+      "sugar ant",
+      "tapinoma melanocephalum"
+    ],
+    "scientific_name": "Tapinoma melanocephalum",
+    "rank": "species",
+    "group": "ants",
+    "subgroup": null,
+    "site_category": "Ants",
+    "traits": [
+      "Dark brown head and thorax with a pale, almost see-through abdomen and legs",
+      "Extremely small — about 1.5 mm, smaller than most household ants",
+      "Erratic, fast trails to sweets and moisture indoors",
+      "Colonies split into many small satellite nests instead of one big one"
+    ],
+    "look_alikes": [
+      {
+        "slug": "white-footed-ant",
+        "difference": "White-footed ants are black all over with only pale feet; ghost ants are pale from the head back, not just the feet.",
+        "next_photo": "A close-up of the whole body from the side, showing how much of it is pale versus black."
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "kitchen",
+      "bathroom",
+      "living-areas"
+    ],
+    "looks": [
+      "ant-like"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "Ghost ants are tiny, fast-moving ants that trail to moisture and sweets indoors. They nest in wall voids and potted plants and split into many small colonies, which is why sprays alone tend to scatter rather than solve them.",
+      "fact": "Colonies split easily into many satellite nests connected by scent trails, which is why one trail you spray can seem to turn into several.",
+      "blurb": "Ghost ants are tiny, fast-moving ants that trail to moisture and sweets indoors. They nest in wall voids and potted plants, and colonies split easily — which is why sprays alone usually make them worse."
+    },
+    "tech_notes": "Confirm pale abdomen/legs vs. bigheaded ant. Baiting program, no repellent sprays. Locate moisture sources; check potted plants and window sills.",
+    "links": {
+      "site_page": "/pest-identifier/ghost-ant/",
+      "guides": [
+        {
+          "label": "Ghost ants: identification and next steps",
+          "href": "/pest-control/get-rid-of-ghost-ants-in-sarasota/"
+        }
+      ]
+    },
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN532"
+    ]
+  },
+  {
+    "kind": "organism",
+    "aka": [],
+    "stages": [
+      "minor worker",
+      "major worker"
+    ],
+    "sign_of": [],
+    "safety_line": null,
+    "legacy_slugs": [],
+    "review": {
+      "status": "draft",
+      "notes": ""
+    },
+    "slug": "bigheaded-ant",
+    "common_name": "Bigheaded Ant",
+    "aliases": [
+      "bigheaded ant",
+      "big headed ant",
+      "big-headed ant",
+      "pheidole"
+    ],
+    "scientific_name": "Pheidole megacephala",
+    "rank": "species",
+    "group": "ants",
+    "subgroup": null,
+    "site_category": "Ants",
+    "traits": [
+      "Sandy soil piles between pavers, along foundations, and in lawns",
+      "Two worker sizes in one trail — most tiny, a few with an oversized, squarish head",
+      "Major workers make up only about 1% of the colony but stand out immediately",
+      "Foraging trails of loose dirt running up walls"
+    ],
+    "look_alikes": [
+      {
+        "slug": "fire-ant",
+        "difference": "Bigheaded ant majors have a squarish, sculpted head and don't sting; fire ant workers are more uniform in size and sting readily when the mound is disturbed.",
+        "next_photo": "A close-up from above of a major worker next to a coin, showing the head shape."
+      }
+    ],
+    "size": "small",
+    "where": [
+      "lanai-patio",
+      "lawn-garden",
+      "kitchen"
+    ],
+    "looks": [
+      "ant-like"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "Bigheaded ants leave sandy trails along patios, driveways, and baseboards and are one of the most common ant invaders in Southwest Florida. Mostly a paver and foundation nuisance, but large colonies are worth a bait program before they spread.",
+      "fact": "The big-headed \"major\" workers are the colony's soldiers — their oversized jaws crack seeds and defend the nest, not attack people.",
+      "blurb": "Bigheaded ants leave sandy trails along patios, driveways, and baseboards and are one of the most common ant invaders in Southwest Florida."
+    },
+    "tech_notes": "Dimorphic workers (major head). Soil/foam trails at slab edges. Granular bait + non-repellent perimeter.",
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN712"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/bigheaded-ant/",
+      "guides": []
+    }
+  },
+  {
+    "kind": "organism",
+    "aka": [],
+    "stages": [
+      "worker",
+      "major worker",
+      "mound"
+    ],
+    "sign_of": [],
+    "safety_line": "Stings burn immediately and can trigger allergic reactions. Keep kids and pets away from mounds, and do not kick or disturb one.",
+    "legacy_slugs": [],
+    "review": {
+      "status": "draft",
+      "notes": ""
+    },
+    "slug": "fire-ant",
+    "common_name": "Red Imported Fire Ant",
+    "aliases": [
+      "fire ant",
+      "fire ants",
+      "red imported fire ant",
+      "rifa",
+      "solenopsis invicta"
+    ],
+    "scientific_name": "Solenopsis invicta",
+    "rank": "species",
+    "group": "ants",
+    "subgroup": "fire-ants",
+    "site_category": "Ants",
+    "traits": [
+      "Fluffy dome mounds with no visible entry hole on top, often after rain",
+      "Workers boil out of the mound within seconds when it is disturbed",
+      "Reddish-brown, mixed worker sizes with a two-segment (two-node) waist",
+      "Sting burns immediately, then forms a small white pustule the next day"
+    ],
+    "look_alikes": [
+      {
+        "slug": "tropical-fire-ant",
+        "difference": "Tropical fire ant major workers have a head much wider than the body; red imported fire ant majors have a normal-proportioned head.",
+        "next_photo": "A close-up from above of the largest workers from the mound, next to a coin."
+      }
+    ],
+    "size": "small",
+    "where": [
+      "lawn-garden",
+      "lanai-patio"
+    ],
+    "looks": [
+      "ant-like"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": true,
+      "bites": false,
+      "venomous": true,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": true,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "Fire ants build mounds in sunny turf and sting in numbers when disturbed. With kids or pets in the yard, mounds are worth treating properly — kicking one just relocates the colony rather than removing it.",
+      "fact": "Workers grip with their jaws and pivot to sting repeatedly, and they cue on movement, so a disturbed mound tends to sting all at once.",
+      "blurb": "Fire ants build mounds in sunny turf and sting in numbers when disturbed. Stings matter for kids and pets, so we treat these as a priority."
+    },
+    "tech_notes": "Confirm mound structure + two-node workers of varied size. Broadcast bait + mound drench per label. Flag electrical boxes/AC pads.",
+    "sources": [
+      "https://ask.ifas.ufl.edu/in352"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/fire-ant/",
+      "guides": []
+    }
+  },
+  {
+    "kind": "organism",
+    "aka": [],
+    "stages": [
+      "worker",
+      "winged reproductive"
+    ],
+    "sign_of": [],
+    "safety_line": null,
+    "legacy_slugs": [],
+    "review": {
+      "status": "draft",
+      "notes": ""
+    },
+    "slug": "carpenter-ant",
+    "common_name": "Florida Carpenter Ant",
+    "aliases": [
+      "carpenter ant",
+      "carpenter ants",
+      "bull ant",
+      "camponotus"
+    ],
+    "scientific_name": "Camponotus floridanus",
+    "rank": "species",
+    "group": "ants",
+    "subgroup": "carpenter-ants",
+    "site_category": "Ants",
+    "traits": [
+      "Large — among the biggest ants seen indoors, bicolored reddish-orange head/thorax and black abdomen",
+      "Abundant long golden body hairs and a circular hair fringe at the abdomen tip",
+      "Most active at night, peak activity near sunset and dawn",
+      "Fine sawdust-like frass piles under trim or window sills"
+    ],
+    "look_alikes": [
+      {
+        "slug": "subterranean-termite",
+        "difference": "Carpenter ant swarmers have a pinched waist and elbowed antennae; termite swarmers have a straight waist, straight antennae, and four equal wings.",
+        "next_photo": "A close-up from the side of the waist and antennae of a winged individual, next to a coin."
+      }
+    ],
+    "size": "medium",
+    "where": [
+      "kitchen",
+      "attic-walls",
+      "lights-windows"
+    ],
+    "looks": [
+      "ant-like",
+      "winged-swarmer"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": true,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "Carpenter ants are large ants that nest in damp or already-damaged wood — they don't eat sound wood like termites do. The ants are manageable; the moisture-damaged wood they chose to nest in is the real finding worth fixing.",
+      "fact": "They don't eat wood like termites — they hollow out damp or damaged wood to nest, so finding them often means finding a moisture problem first.",
+      "blurb": "Carpenter ants are large ants that nest in damp or damaged wood. They don't eat wood like termites, but a nest is a sign of a moisture problem worth finding."
+    },
+    "tech_notes": "Large, single node, evenly rounded thorax in profile. Night-trail to nest; check frass kick-out, moisture-damaged wood, attic/soffit lines.",
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN1075"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/carpenter-ant/",
+      "guides": []
+    }
+  },
+  {
+    "kind": "organism",
+    "aka": [],
+    "stages": [
+      "worker"
+    ],
+    "sign_of": [],
+    "safety_line": null,
+    "legacy_slugs": [],
+    "review": {
+      "status": "draft",
+      "notes": ""
+    },
+    "slug": "tawny-crazy-ant",
+    "common_name": "Tawny Crazy Ant",
+    "aliases": [
+      "tawny crazy ant",
+      "crazy ant",
+      "crazy ants",
+      "caribbean crazy ant",
+      "nylanderia fulva"
+    ],
+    "scientific_name": "Nylanderia fulva",
+    "rank": "species",
+    "group": "ants",
+    "subgroup": "crazy-ants",
+    "site_category": "Ants",
+    "traits": [
+      "Erratic, zigzag \"crazy\" running — never forms a neat trail",
+      "Uniform reddish-brown, golden-haired, all workers one size",
+      "Massive numbers — thousands at a time, not dozens",
+      "Swarms into electrical boxes, AC units, and other equipment"
+    ],
+    "look_alikes": [
+      {
+        "slug": "longhorn-crazy-ant",
+        "difference": "Tawny crazy ants are uniformly reddish-brown and slightly larger; longhorn crazy ants are dark with noticeably long legs and antennae.",
+        "next_photo": "A close-up from above showing body color and leg/antenna length next to a coin."
+      }
+    ],
+    "size": "small",
+    "where": [
+      "garage-storage",
+      "lanai-patio",
+      "kitchen"
+    ],
+    "looks": [
+      "ant-like"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "range": "occasional",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "Tawny crazy ants show up in overwhelming numbers and are known for swarming into electrical boxes and equipment, where they can cause damage. Numbers this large make DIY treatment largely hopeless — infestations are measured in the millions.",
+      "fact": "They displace even fire ants where they establish and have caused documented damage to phone lines, AC units, and computers by swarming into equipment.",
+      "blurb": "They're notorious for swarming into electrical boxes and equipment — and they displace even fire ants where they establish."
+    },
+    "tech_notes": "Confirm erratic non-trailing movement + uniform worker size. Bait-based program; numbers make spot-treatment ineffective. Documented in dozens of FL counties.",
+    "sources": [
+      "https://ask.ifas.ufl.edu/in1071"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/tawny-crazy-ant/",
+      "guides": []
+    }
+  },
+  {
+    "kind": "organism",
+    "aka": [],
+    "stages": [
+      "worker"
+    ],
+    "sign_of": [],
+    "safety_line": null,
+    "legacy_slugs": [],
+    "review": {
+      "status": "draft",
+      "notes": ""
+    },
+    "slug": "white-footed-ant",
+    "common_name": "White-footed Ant",
+    "aliases": [
+      "white footed ant",
+      "white-footed ant",
+      "white footed ants"
+    ],
+    "scientific_name": "Technomyrmex difficilis",
+    "rank": "species",
+    "group": "ants",
+    "subgroup": null,
+    "site_category": "Ants",
+    "traits": [
+      "Black body with pale yellowish-white feet (look closely at the last leg segment)",
+      "Long, steady trails along fence tops, eaves, and screen frames",
+      "Prefers sweets and honeydew; largely ignores standard protein baits",
+      "Colonies can hold from 8,000 to several million ants"
+    ],
+    "look_alikes": [
+      {
+        "slug": "ghost-ant",
+        "difference": "White-footed ants are black with only the feet pale; ghost ants are pale from the head backward across the whole abdomen and legs.",
+        "next_photo": "A close-up of the whole body from the side, showing how much of it is pale versus black."
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "kitchen",
+      "lanai-patio",
+      "attic-walls"
+    ],
+    "looks": [
+      "ant-like"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "White-footed ants form huge, persistent colonies that trail along fences, eaves, and screens. Harmless but famously stubborn — exterior treatment beats kitchen-counter sprays because most of the colony never leaves the nest.",
+      "fact": "Colonies can hold a million-plus ants, and most workers never leave the nest — which is why the trail you treat keeps coming back.",
+      "blurb": "Colonies can hold a million-plus ants, and most workers never leave the nest — which is why the trail you kill keeps coming back."
+    },
+    "tech_notes": "Sweet-feeding, low bait acceptance for standard protein baits. Exterior perimeter + trail treatment; manage moisture and canopy contact with roofline.",
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN551"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/white-footed-ant/",
+      "guides": []
+    }
+  }
+]

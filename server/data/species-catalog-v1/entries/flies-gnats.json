@@ -1,0 +1,292 @@
+[
+  {
+    "kind": "organism",
+    "aka": [],
+    "stages": [
+      "adult"
+    ],
+    "sign_of": [],
+    "safety_line": null,
+    "legacy_slugs": [],
+    "review": {
+      "status": "draft",
+      "notes": ""
+    },
+    "slug": "lovebug",
+    "common_name": "Lovebug",
+    "aliases": [
+      "lovebug",
+      "love bug",
+      "lovebugs",
+      "love bugs",
+      "plecia nearctica"
+    ],
+    "scientific_name": "Plecia nearctica",
+    "rank": "species",
+    "group": "flies-gnats",
+    "subgroup": null,
+    "site_category": "Mosquitoes & biters",
+    "traits": [
+      "Black flies about 6-9 mm with a dull red thorax",
+      "Fly attached together in mating pairs",
+      "Two flights a year, roughly April-May and August-September",
+      "Splatter accumulates on car fronts and headlights"
+    ],
+    "look_alikes": [
+      {
+        "slug": "non-biting-midge",
+        "difference": "Lovebugs have a red thorax and often fly stuck together in pairs; non-biting midges are smaller, mosquito-shaped, and don't pair up.",
+        "next_photo": "A close-up of the body color and shape, and whether two individuals are joined together."
+      }
+    ],
+    "size": "small",
+    "where": [
+      "lanai-patio",
+      "lights-windows"
+    ],
+    "looks": [
+      "small-fly",
+      "crawler"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "range": "common",
+    "active_months": [
+      4,
+      5,
+      8,
+      9
+    ],
+    "peak_months": [
+      4,
+      5,
+      8,
+      9
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "Lovebugs don't bite or sting at all — they're a car-wash problem, not a pest-control problem, and no treatment prevents them since they drift in from miles around. The swarm season is short, typically about four weeks each flight.",
+      "fact": "Their body fluids are slightly acidic and can etch car paint if left baked on for several days — modern clear coats hold up much better than older paint.",
+      "blurb": "Lovebugs are a twice-a-year Florida nuisance that no treatment prevents — they drift in from miles around. The good news: they’re harmless and the swarm season is short."
+    },
+    "tech_notes": "No treatment; set expectations honestly — this is not a pest-control problem.",
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN204"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/lovebug/",
+      "guides": []
+    }
+  },
+  {
+    "kind": "organism",
+    "aka": [],
+    "stages": [
+      "larva",
+      "adult"
+    ],
+    "sign_of": [],
+    "safety_line": null,
+    "legacy_slugs": [],
+    "review": {
+      "status": "draft",
+      "notes": ""
+    },
+    "slug": "drain-fly",
+    "common_name": "Drain Fly",
+    "aliases": [
+      "drain fly",
+      "drain flies",
+      "moth fly",
+      "moth flies"
+    ],
+    "scientific_name": "Psychoda spp.",
+    "rank": "genus",
+    "group": "flies-gnats",
+    "subgroup": null,
+    "site_category": "Occasional invaders",
+    "traits": [
+      "Fuzzy, moth-like micro-fly, about 2.5-4.5 mm, resting on bathroom walls",
+      "Weak, hopping flight near sinks, tubs, and showers",
+      "Worse after a drain sits unused for a while",
+      "Larvae live in the gel-like film that builds up inside drains"
+    ],
+    "look_alikes": [
+      {
+        "slug": "fungus-gnat",
+        "difference": "Drain flies are fuzzy and moth-shaped and stick to bathroom walls near drains; fungus gnats are slender, long-legged, and hover around houseplant soil.",
+        "next_photo": "A close-up of the wing shape and where it was resting (drain vs. potted plant)."
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "bathroom",
+      "kitchen"
+    ],
+    "looks": [
+      "small-fly"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "The larvae live in the gel film that builds up inside drains, which is why sprays fail and a stiff brush plus an enzyme cleaner succeeds. Clean the drain film and they are usually gone within days.",
+      "fact": "The larvae live in the gel film inside drains — which is why sprays fail and a stiff brush plus enzyme cleaner succeeds.",
+      "blurb": "Clean the drain film (brush + enzyme cleaner) and they’re gone in days."
+    },
+    "tech_notes": "Non-biting, no known disease transmission. Recommend mechanical drain cleaning; treatment is rarely needed if the source is addressed.",
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN1226"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/drain-fly/",
+      "guides": []
+    }
+  },
+  {
+    "kind": "organism",
+    "aka": [],
+    "stages": [
+      "larva",
+      "adult"
+    ],
+    "sign_of": [],
+    "safety_line": null,
+    "legacy_slugs": [],
+    "review": {
+      "status": "draft",
+      "notes": ""
+    },
+    "slug": "fungus-gnat",
+    "common_name": "Fungus Gnat",
+    "aliases": [
+      "fungus gnat",
+      "fungus gnats"
+    ],
+    "scientific_name": "Sciaridae",
+    "rank": "family",
+    "group": "flies-gnats",
+    "subgroup": null,
+    "site_category": "Occasional invaders",
+    "traits": [
+      "Tiny dark flies with long legs and thread-like antennae, hovering around potted plants",
+      "Weak fliers that drift rather than dart",
+      "Larvae are slender, white, and legless in the top layer of wet potting soil",
+      "Numbers track soil moisture — more gnats means soil staying too wet"
+    ],
+    "look_alikes": [
+      {
+        "slug": "drain-fly",
+        "difference": "Fungus gnats are slender and long-legged and hover over houseplant soil; drain flies are fuzzy and moth-shaped and stick to bathroom walls near drains.",
+        "next_photo": "A close-up of the wing shape and where it was resting (potted plant vs. drain)."
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "living-areas",
+      "kitchen"
+    ],
+    "looks": [
+      "small-fly"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "It's an overwatering alarm with wings — the larvae need soggy soil to survive. Let pots dry out between waterings and yellow sticky cards will catch the stragglers; most cases need no treatment at all.",
+      "fact": "It's an overwatering alarm with wings — the larvae need soggy soil to survive.",
+      "blurb": "Let pots dry between waterings; yellow sticky cards catch the stragglers."
+    },
+    "tech_notes": "Harmless nuisance tied to overwatering; advise cultural fix (drying cycle) before any treatment.",
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN372"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/fungus-gnat/",
+      "guides": []
+    }
+  }
+]

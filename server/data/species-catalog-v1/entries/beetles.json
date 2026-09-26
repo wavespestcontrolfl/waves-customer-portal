@@ -1,0 +1,203 @@
+[
+  {
+    "kind": "organism",
+    "aka": [
+      "June Beetle Larva"
+    ],
+    "stages": [
+      "larva"
+    ],
+    "sign_of": [],
+    "safety_line": null,
+    "legacy_slugs": [],
+    "review": {
+      "status": "draft",
+      "notes": ""
+    },
+    "slug": "white-grub",
+    "common_name": "White Grub",
+    "aliases": [
+      "white grub",
+      "grub",
+      "grubs",
+      "june beetle larva"
+    ],
+    "scientific_name": "Phyllophaga spp. and other scarab larvae",
+    "rank": "group",
+    "group": "beetles",
+    "subgroup": "scarabs-grubs",
+    "site_category": "Lawn",
+    "traits": [
+      "Turf lifts like loose carpet — roots are gone",
+      "White, C-shaped grub with a brown head, in the top few inches of soil",
+      "Two parallel rows of spines on the underside of the last body segment",
+      "Armadillos, raccoons, and birds digging at night for an easy meal"
+    ],
+    "look_alikes": [
+      {
+        "slug": "june-beetle",
+        "difference": "White grubs are pale, C-shaped larvae found in soil; June beetles (their adult stage) are brown, oval, hard-shelled beetles that fly at night.",
+        "next_photo": "A close-up of the specimen — a soft C-shaped grub versus a hard-shelled flying beetle."
+      }
+    ],
+    "size": "medium",
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "worm-caterpillar",
+      "lawn-damage"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "lawn",
+      "key": "lawnPestControl",
+      "label": "Lawn Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "Animal digging is usually the first sign — the grubs are the buffet and your lawn is the tablecloth. Fixing the grubs typically sends the diggers looking for better hunting elsewhere.",
+      "fact": "Animal digging is usually the first sign — the grubs are the buffet, your lawn is the tablecloth.",
+      "blurb": "Fix the grubs and the diggers leave on their own."
+    },
+    "tech_notes": "Tug test — roots sheared at grub-damaged spots. Cut-and-peel count per sq ft; treat over threshold per label, water-in required.",
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN202"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/white-grub/",
+      "guides": []
+    }
+  },
+  {
+    "kind": "organism",
+    "aka": [],
+    "stages": [
+      "adult"
+    ],
+    "sign_of": [],
+    "safety_line": null,
+    "legacy_slugs": [],
+    "review": {
+      "status": "draft",
+      "notes": ""
+    },
+    "slug": "sri-lankan-weevil",
+    "common_name": "Sri Lankan Weevil",
+    "aliases": [
+      "sri lankan weevil",
+      "asian grey weevil"
+    ],
+    "scientific_name": "Myllocerus undecimpustulatus undatus",
+    "rank": "subspecies",
+    "group": "beetles",
+    "subgroup": "weevils",
+    "site_category": "Plant pests",
+    "traits": [
+      "Chalk-white to gray weevil with a short snout, about 6-8.5 mm",
+      "Leaf edges notched inward from the margin like pinking shears",
+      "Drops and plays dead when the branch is bumped",
+      "Feeds on a very wide range of ornamentals — over 150 plant species"
+    ],
+    "look_alikes": [
+      {
+        "slug": "diaprepes-root-weevil",
+        "difference": "Sri Lankan weevil is chalky white to gray with a short snout; Diaprepes root weevil has a black wing cover banded with orange or yellow.",
+        "next_photo": "A close-up from above showing the wing-cover color pattern, next to a coin."
+      }
+    ],
+    "size": "small",
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "crawler"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      4,
+      5,
+      6
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A newer Florida arrival that already feeds on more than 150 plant species — the notched-leaf signature turns up almost everywhere. Cosmetic on mature plants; young or newly planted ornamentals can need protection.",
+      "fact": "A newer Florida arrival that already feeds on 150+ plant species — the notched-leaf signature is everywhere.",
+      "blurb": "Cosmetic on mature plants; young ornamentals may need protection."
+    },
+    "tech_notes": "Confirm leaf-margin notching + play-dead drop behavior. Weevils fly/hide readily, limiting contact-spray success; targeted ornamental treatment on high-value plants.",
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN1016"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/sri-lankan-weevil/",
+      "guides": []
+    }
+  }
+]

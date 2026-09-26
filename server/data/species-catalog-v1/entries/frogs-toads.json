@@ -1,0 +1,106 @@
+[
+  {
+    "kind": "organism",
+    "aka": [],
+    "stages": [
+      "tadpole",
+      "juvenile",
+      "adult"
+    ],
+    "sign_of": [],
+    "safety_line": "Skin secretions can irritate eyes, nose, and airways, especially for people with asthma, and can bother pets that mouth one. Wash hands after contact; see a doctor if irritation doesn’t clear up.",
+    "legacy_slugs": [],
+    "review": {
+      "status": "draft",
+      "notes": "This EDIS article page returned a 403 to direct fetch during this pass; facts here are corroborated across multiple UF/IFAS and USFWS sources found via search rather than a single directly-loaded page. Worth a follow-up direct verification."
+    },
+    "slug": "cuban-treefrog",
+    "common_name": "Cuban Treefrog",
+    "aliases": [
+      "cuban treefrog",
+      "cuban tree frog",
+      "cuban treefrogs"
+    ],
+    "scientific_name": "Osteopilus septentrionalis",
+    "rank": "species",
+    "group": "frogs-toads",
+    "subgroup": "treefrogs",
+    "site_category": "Wildlife neighbors",
+    "traits": [
+      "Large warty treefrog, up to about 5 inches — the largest treefrog in the US",
+      "Oversized toe pads compared to native treefrogs",
+      "Common around porch lights at night hunting insects",
+      "Skin secretions can irritate eyes and airways — wash hands after contact"
+    ],
+    "look_alikes": [
+      {
+        "slug": "green-treefrog",
+        "difference": "Cuban treefrogs are much larger with warty skin and oversized toe pads; green treefrogs are smaller, smooth-skinned, and usually have a white side stripe.",
+        "next_photo": "A close-up of the toe pads and overall size next to a coin."
+      }
+    ],
+    "size": "large",
+    "where": [
+      "lanai-patio",
+      "lights-windows"
+    ],
+    "looks": [
+      "lizard-frog"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": true,
+      "regulated": false
+    },
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "pest",
+      "key": null,
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "An invasive species that eats Florida's smaller native treefrogs — one reason a porch chorus may have gone quiet. Wash hands after contact, and turning porch lights off (or switching to amber) removes the insect buffet that draws them in.",
+      "fact": "An invasive that eats Florida’s smaller native treefrogs — one reason your porch chorus may have gone quiet.",
+      "blurb": "Wash hands after contact. Turning porch lights off (or amber) removes the insect buffet that draws them."
+    },
+    "tech_notes": "Confirm size + toe pad size vs. native treefrogs. Humane removal/exclusion; avoid bare-hand contact due to skin secretions.",
+    "sources": [
+      "https://journals.flvc.org/edis/article/view/132662"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/cuban-treefrog/",
+      "guides": []
+    }
+  }
+]

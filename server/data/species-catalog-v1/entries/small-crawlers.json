@@ -1,0 +1,202 @@
+[
+  {
+    "kind": "organism",
+    "aka": [],
+    "stages": [
+      "nymph",
+      "adult"
+    ],
+    "sign_of": [],
+    "safety_line": null,
+    "legacy_slugs": [],
+    "review": {
+      "status": "draft",
+      "notes": ""
+    },
+    "slug": "silverfish",
+    "common_name": "Silverfish",
+    "aliases": [
+      "silverfish"
+    ],
+    "scientific_name": "Lepisma saccharinum / Ctenolepisma spp.",
+    "rank": "group",
+    "group": "small-crawlers",
+    "subgroup": null,
+    "site_category": "Occasional invaders",
+    "traits": [
+      "Carrot-shaped, silvery, wiggles side to side as it runs",
+      "Three long tail bristles at the rear",
+      "Found in books, boxes, and closets — anywhere starchy and still",
+      "Thrives in high humidity, 72-81°F"
+    ],
+    "look_alikes": [
+      {
+        "slug": "firebrat",
+        "difference": "Silverfish are silvery and prefer humid spots like bathrooms; firebrats are mottled gray-brown and prefer hot, dry spots like near water heaters and furnaces.",
+        "next_photo": "A close-up of the body color and where it was found (humid vs. hot/dry area)."
+      }
+    ],
+    "size": "small",
+    "where": [
+      "bathroom",
+      "garage-storage",
+      "living-areas"
+    ],
+    "looks": [
+      "crawler"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "Silverfish are older than dinosaurs and mostly a storage-box nuisance — they feed on paper, glue, and starchy materials. Lots of them signals a humidity problem worth fixing rather than a health concern.",
+      "fact": "Silverfish are older than dinosaurs — they were doing this exact job 100 million years before T. rex.",
+      "blurb": "Mostly a storage-box nuisance. Lots of them signals a humidity problem worth fixing."
+    },
+    "tech_notes": "Moisture-driven; check garage/attic/closet humidity. Covered under general pest program; dehumidifying helps long-term.",
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN1211"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/silverfish/",
+      "guides": []
+    }
+  },
+  {
+    "kind": "organism",
+    "aka": [],
+    "stages": [
+      "nymph",
+      "adult"
+    ],
+    "sign_of": [],
+    "safety_line": null,
+    "legacy_slugs": [],
+    "review": {
+      "status": "draft",
+      "notes": ""
+    },
+    "slug": "earwig",
+    "common_name": "Earwig",
+    "aliases": [
+      "earwig",
+      "earwigs",
+      "pincher bug",
+      "pincher bugs"
+    ],
+    "scientific_name": "Dermaptera",
+    "rank": "order",
+    "group": "small-crawlers",
+    "subgroup": null,
+    "site_category": "Occasional invaders",
+    "traits": [
+      "Rear pincers (harmless to people), 12-16 mm, dark brown",
+      "Hides under pots, mats, and mulch during the day",
+      "Wanders indoors after heavy rain",
+      "Voracious predator of caterpillars, aphids, and other small insects"
+    ],
+    "look_alikes": [
+      {
+        "slug": "silverfish",
+        "difference": "Earwigs have rear pincers and a beetle-like body; silverfish have three tail bristles instead of pincers and a tapered, scaly body.",
+        "next_photo": "A close-up of the tail end — pincers versus bristles."
+      }
+    ],
+    "size": "small",
+    "where": [
+      "bathroom",
+      "lanai-patio",
+      "lawn-garden"
+    ],
+    "looks": [
+      "crawler"
+    ],
+    "verdict": "harmless",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "The pincers look dramatic but are harmless to people — they’re for folding wings and courtship, not attacking. Earwigs are voracious predators of other garden insects; fixing door sweeps and drainage usually stops indoor wandering.",
+      "fact": "The pincers are for folding its wings and courtship — the ear-crawling myth is pure medieval legend.",
+      "blurb": "Fix door sweeps and drainage; the visitors stop themselves."
+    },
+    "tech_notes": "Minor nuisance; beneficial predator of caterpillars/aphids likely outweighs plant nibbling. Exterior perimeter + exclusion advice covers it.",
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN245"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/earwig/",
+      "guides": []
+    }
+  }
+]

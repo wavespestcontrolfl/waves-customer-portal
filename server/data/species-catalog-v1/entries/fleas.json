@@ -1,0 +1,111 @@
+[
+  {
+    "kind": "organism",
+    "aka": [],
+    "stages": [
+      "egg",
+      "larva",
+      "pupa",
+      "adult"
+    ],
+    "sign_of": [],
+    "safety_line": "Bites itch and can trigger flea allergy dermatitis in pets. See a doctor if bites become infected or you develop a rash that spreads.",
+    "legacy_slugs": [],
+    "review": {
+      "status": "draft",
+      "notes": ""
+    },
+    "slug": "cat-flea",
+    "common_name": "Cat Flea",
+    "aliases": [
+      "cat flea",
+      "cat fleas",
+      "flea",
+      "fleas"
+    ],
+    "scientific_name": "Ctenocephalides felis",
+    "rank": "species",
+    "group": "fleas",
+    "subgroup": null,
+    "site_category": "Biting",
+    "traits": [
+      "Pets scratching, plus bites appearing around human ankles",
+      "Reddish-brown to black, wingless, 1-3 mm, strong jumping legs",
+      "Black specks on pet bedding that turn red when wetted (\"flea dirt\")",
+      "Tiny jumpers in carpet, especially in shaded rooms"
+    ],
+    "look_alikes": [
+      {
+        "slug": "chiggers",
+        "difference": "Cat fleas are visible jumpers on pets and carpet; chiggers are outdoor-picked-up and too small to see, causing itchy welts at sock lines.",
+        "next_photo": "A close-up of the biting insect if visible, versus just the bite pattern on skin."
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "on-pets",
+      "living-areas",
+      "lawn-garden"
+    ],
+    "looks": [
+      "crawler",
+      "flying-biter"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": true,
+      "structural": false,
+      "allergen": true,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "pest",
+      "key": "flea",
+      "label": "Flea & Tick Treatment",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "Adults on the pet are only about 5% of the infestation — the rest is eggs, larvae, and pupae hiding in carpet and bedding. Pet treatment alone tends to lose; home, yard, and pet together, timed to the life cycle, wins.",
+      "fact": "Adults on the pet are roughly 5% of the infestation — the other 95% is eggs, larvae, and pupae in carpet and bedding.",
+      "blurb": "Pet treatment alone loses. Home + yard + pet together, timed to the life cycle, wins."
+    },
+    "tech_notes": "IGR + adulticide inside/out; customer prep sheet mandatory (vacuum, wash bedding, pet treatment same week).",
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN137"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/cat-flea/",
+      "guides": []
+    }
+  }
+]
