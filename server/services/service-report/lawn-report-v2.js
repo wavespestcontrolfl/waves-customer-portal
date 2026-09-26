@@ -442,6 +442,8 @@ function isDeferredWateringInstruction(note) {
 function isWateringHoldInstruction(note) {
   const text = String(note || '').trim();
   return /\b(?:do not|don't|avoid|delay|hold)\b[^.]{0,48}\b(?:water|watering|irrigat\w*)\b/i.test(text)
+    || /\bno\s+(?:(?:additional|further)\s+)?(?:water(?:ing)?|irrigation)\b(?!\s+(?:is\s+)?(?:required|needed|necessary)\b)/i.test(text)
+    || /\brefrain\s+from\s+(?:water(?:ing)?|irrigat\w*)\b/i.test(text)
     || /\bkeep\s+(?:the\s+)?(?:water|irrigation)\s+off\b/i.test(text)
     || /\bkeep\s+(?:off|from)\s+(?:watering|irrigating)\b/i.test(text);
 }
@@ -468,7 +470,22 @@ function isCompleteWaterInInstruction(note) {
 function recordedWateringInstruction(note) {
   // Circular placeholder sentences provide no direction. A separate explicit
   // restriction still belongs in aftercare, including its recorded duration.
-  return String(note || '').trim().split(/(?<=[.!?;])\s+/)
+  const text = String(note || '').trim();
+  const clauses = [];
+  const boundary = /[.!?;]\s+/g;
+  let start = 0;
+  let match;
+  while ((match = boundary.exec(text)) !== null) {
+    const end = match.index + 1;
+    const candidate = text.slice(start, end);
+    // `in.` is a supported measurement unit, not a sentence boundary. Keep
+    // the following timing/condition attached to the amount it qualifies.
+    if (match[0][0] === '.' && /\b\d+(?:\.\d+)?\s*in\.$/i.test(candidate)) continue;
+    clauses.push(candidate.trim());
+    start = match.index + match[0].length;
+  }
+  clauses.push(text.slice(start).trim());
+  return clauses
     .filter((clause) => !isDeferredWateringInstruction(clause) || isWateringHoldInstruction(clause))
     .join(' ');
 }

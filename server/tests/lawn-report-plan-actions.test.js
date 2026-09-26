@@ -170,6 +170,25 @@ describe('neutral aftercare defers to the plan (codex gh-r28)', () => {
         creditableWaterIn: true,
       });
   });
+  test('an abbreviated inches measurement keeps its timing and conditional qualifier attached', () => {
+    const recorded = 'Water in with 0.25 in. within 24 hours as directed by your technician.';
+    expect(buildAftercare([{ product: { irrigation_required: true, irrigation_notes: recorded } }]))
+      .toMatchObject({
+        watering: recorded,
+        evidenceSource: 'product_instruction',
+        needsReview: false,
+        creditableWaterIn: true,
+      });
+
+    const conditional = 'Water with 0.25 in. when directed by the service report.';
+    expect(buildAftercare([{ product: { irrigation_required: true, irrigation_notes: conditional } }]))
+      .toMatchObject({
+        watering: expect.stringMatching(/does not include a specific amount or timing/i),
+        evidenceSource: 'incomplete_product_instruction',
+        needsReview: true,
+        creditableWaterIn: false,
+      });
+  });
   test('numbers and timing words do not turn conditional report references into instructions', () => {
     for (const irrigationNotes of [
       'Watering may be needed within 24 hours when directed by the service report.',
@@ -266,6 +285,28 @@ describe('multi-product aftercare keeps compatible catalog constraints (codex PR
     });
   });
 
+  test.each([
+    'No irrigation for 24 hours after application.',
+    'No watering for 24 hours.',
+    'Refrain from watering until tomorrow.',
+  ])('noun-form restriction is a hold and cannot earn water-in credit: %s', (irrigationNotes) => {
+    expect(buildAftercare([{ product: { irrigation_required: true, irrigation_notes: irrigationNotes } }]))
+      .toMatchObject({
+        wateringHold: true,
+        waterInRequired: true,
+        needsReview: true,
+        creditableWaterIn: false,
+      });
+  });
+
+  test.each([
+    'No irrigation is required after application.',
+    'No watering is needed after application.',
+  ])('absence-of-requirement copy is not misread as a watering hold: %s', (irrigationNotes) => {
+    expect(buildAftercare([{ product: { irrigation_required: false, irrigation_notes: irrigationNotes } }]))
+      .toMatchObject({ wateringHold: false, waterInRequired: false, creditableWaterIn: false });
+  });
+
   test('a circular follow-up sentence does not discard an explicit hold or its duration', () => {
     expect(buildAftercare([{ product: { irrigation_notes: 'Do not water for 24 hours. Follow the service report for further instructions.' } }])).toMatchObject({
       watering: 'Do not water for 24 hours.',
@@ -332,5 +373,19 @@ describe('generic moisture card defers to the plan (codex gh-r29)', () => {
     expect(card({ status: 'balanced', overwatering: true }).customerAction).toMatch(/ease back an irrigation cycle/);
     expect(card({ status: 'balanced', overwatering: true, weekPlan: PLAN }).customerAction).toMatch(/follow this week’s watering plan below rather than adding cycles/);
     expect(card({ status: 'balanced', overwatering: true, weekPlan: PLAN }, { waterInRequired: true }).customerAction).toMatch(/^Water in today’s application as directed first.*this week’s watering plan below already accounts for it/);
+  });
+});
+
+describe('localized coverage checks survive product watering restrictions', () => {
+  const localizedDry = { status: 'balanced', localizedDry: true, localizedDryConfidence: 'area_estimated' };
+
+  test.each([
+    [{ wateringHold: true }, /Follow the product-specific watering restriction/],
+    [{ needsReview: true }, /Confirm the product watering directions/],
+  ])('keeps the safe coverage check beside aftercare %j', (aftercare, qualifier) => {
+    const card = buildLawnInsightCards({ water: localizedDry, aftercare })
+      .find((insight) => insight.category === 'water');
+    expect(card.customerAction).toMatch(/^Check sprinkler coverage in that area/);
+    expect(card.customerAction).toMatch(qualifier);
   });
 });

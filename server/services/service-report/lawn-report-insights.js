@@ -104,8 +104,10 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
         : 'One area reads drier than the rest of the lawn in today’s photos.',
       whyItMatters: 'That pattern usually points to uneven sprinkler coverage, not the whole lawn needing more water.',
       wavesAction: 'Flagged the area and will recheck it next visit.',
-      customerAction: aftercareWaterAction
-        || 'Check sprinkler coverage in that area rather than watering the whole yard more.',
+      customerAction: [
+        'Check sprinkler coverage in that area rather than watering the whole yard more.',
+        aftercareWaterAction,
+      ].filter(Boolean).join(' '),
       nextVisitPlan: 'Recheck the flagged area next visit to see whether coverage evened out.',
     });
   } else if (waterCat && (waterCat.status === 'watch' || waterCat.status === 'needs_attention')) {
