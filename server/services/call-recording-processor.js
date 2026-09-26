@@ -1032,6 +1032,21 @@ function resolveCallContactPhone(call = {}, extractedPhone = null) {
   return firstExternalPhone(call.from_phone, extracted, call.to_phone);
 }
 
+// True when an extracted same-day start (ET date "YYYY-MM-DD" + "HH:MM") is
+// earlier than the call's own ET wall clock — the agreed window had already
+// begun when it was agreed (codex #4919 r1 P1). Only the call's date is
+// compared with the slot's; a later date never precedes the call.
+function startPrecedesCall({ scheduledDate, windowStart, callCreatedAt }) {
+  if (!scheduledDate || !windowStart || !callCreatedAt) return false;
+  const at = new Date(callCreatedAt);
+  if (Number.isNaN(at.getTime())) return false;
+  if (String(scheduledDate) !== etDateString(at)) return false;
+  const [sh, sm] = String(windowStart).replace(/^24:/, '00:').split(':').map(Number);
+  if (!Number.isFinite(sh)) return false;
+  const p = etParts(at);
+  return sh * 60 + (sm || 0) < p.hour * 60 + p.minute;
+}
+
 function isLiveLeadConversation({ call, extracted, leadId, finalStatus, nonLeadCall, voicemailLeadPath, transcription }) {
   return !!leadId && finalStatus === 'processed' && !nonLeadCall && !voicemailLeadPath
     && call?.status === 'completed' && call.call_outcome !== 'voicemail'
@@ -6800,7 +6815,7 @@ Do not inflate quality: a caller who is still comparing companies or said they'd
 IMPORTANT — appointment_confirmed rules:
 - Only set appointment_confirmed to true if BOTH a specific DATE and a specific TIME were explicitly agreed to by the caller.
 - Vague references like "tomorrow", "next week", "noonish", "sometime Tuesday" do NOT count — the caller must confirm an actual time (e.g. "10 AM", "2:30 PM", "noon").
-- ARRIVAL WINDOW EXCEPTION: an arrival window staff OFFERED and the caller ACCEPTED, on a specific day, with a clear start hour ("between 6 and 9 tonight", "we'll be there between noon and 1 today", "Tuesday, 2 to 4") DOES count as confirmed — this is a specific time slot, just expressed as a range. Set appointment_confirmed true and preferred_date_time to the window's START. Tentative language ("we'll try to get there", "sometime between", "the tech will call you first", "probably") stays NOT confirmed.
+- ARRIVAL WINDOW EXCEPTION: an arrival window staff COMMITTED to and the caller ACCEPTED, on a specific day, with a clear start hour ("between 6 and 9 tonight", "we'll be there between noon and 1 today", "between 10 and noon tomorrow", "Tuesday, 2 to 4") DOES count as confirmed — it is a specific time slot expressed as a range. Set appointment_confirmed true and preferred_date_time to the window's START. A relative day that resolves to one calendar date ("today", "tonight", "tomorrow", "this Tuesday") is a specific day here; the vague examples above are vague because they carry no time. A committed window stays confirmed even when phrased loosely ("we'll be there sometime between 6 and 9") or paired with a courtesy heads-up ("the tech will call when he's on the way"). An offer staff did not commit to ("we'll try to fit you in", "maybe", "I'll check the schedule and call you back with a time") stays NOT confirmed.
 - If the agent says "I'll text you" or "let me check" without the caller confirming a specific time slot, appointment_confirmed must be false.
 - preferred_date_time must include the confirmed time, not just a date.
 - Resolve relative dates against the call date above in Eastern Time. "Today" means ${callDateET}; do not invent a prior year or use the model's training/current date.
@@ -15225,6 +15240,21 @@ const CallRecordingProcessor = {
             }
 
             const callDateET = etDateString(call.created_at || new Date());
+            // A same-day start that had already passed when the call was
+            // placed (a 6:30 PM caller accepting "between 6 and 9 tonight")
+            // is never booked at its stale start — it goes to the office
+            // like any other unbookable approved call (codex #4919 r1 P1).
+            if (scheduledDate && startPrecedesCall({ scheduledDate, windowStart, callCreatedAt: call.created_at })) {
+              logger.warn(`[call-proc] Extracted start ${scheduledDate}T${windowStart} had already passed when the call was placed; skipping schedule + SMS for ${maskSid(callSid)}`);
+              appointmentResult = {
+                service: serviceType,
+                dateTime: extracted.preferred_date_time,
+                scheduleCreated: false,
+                smsSent: false,
+                skippedReason: 'start_before_call',
+              };
+              scheduledDate = null;
+            }
             if (scheduledDate && scheduledDate < callDateET) {
               logger.warn(
                 `[call-proc] Extracted appointment date ${scheduledDate} is before call date ${callDateET}; skipping schedule + SMS`
@@ -20013,6 +20043,7 @@ CallRecordingProcessor._test = {
   resolveDefaultCallBookingTechnician,
   resolveDefaultCallBookingTechnicianId,
   resolveCallContactPhone,
+  startPrecedesCall,
   isLiveLeadConversation,
   summarizeCustomerServiceContext,
   resolveSchedulableCallService,

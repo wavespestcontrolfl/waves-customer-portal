@@ -77,6 +77,13 @@ describe('v2 extraction prompt', () => {
     expect(prompt).toContain('unknown');
   });
 
+  test('an accepted arrival window is a confirmed start; loose phrasing and call-ahead courtesy do not undo it (owner ruling 2026-09-26)', () => {
+    const prompt = buildExtractionPrompt('', '', '');
+    expect(prompt).toContain('ARRIVAL WINDOW');
+    expect(prompt).toContain("\"tomorrow\"");
+    expect(prompt).toContain('courtesy heads-up');
+  });
+
   test('prompt version and hash are stable', () => {
     expect(PROMPT_VERSION).toBe('v11');
     expect(PROMPT_HASH).toMatch(/^v11-[a-f0-9]{12}$/);

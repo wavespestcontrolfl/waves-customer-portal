@@ -1626,3 +1626,26 @@ describe('attachCandidateMatchesProperty (attach evidence gate)', () => {
     expect(attachCandidateMatchesProperty({ property_id: 'prop-9' }, { propertyId: null, address: null })).toBe(false);
   });
 });
+
+describe('startPrecedesCall — an accepted window that had already begun is never booked at its stale start (codex #4919 r1 P1)', () => {
+  const { startPrecedesCall } = CallRecordingProcessor._test;
+  // 2026-09-26 18:30 EDT = 22:30Z.
+  const CALL_AT = '2026-09-26T22:30:00Z';
+
+  test('a same-day start earlier than the call time precedes the call', () => {
+    expect(startPrecedesCall({ scheduledDate: '2026-09-26', windowStart: '18:00', callCreatedAt: CALL_AT })).toBe(true);
+  });
+
+  test('a same-day start at or after the call time does not', () => {
+    expect(startPrecedesCall({ scheduledDate: '2026-09-26', windowStart: '19:00', callCreatedAt: CALL_AT })).toBe(false);
+  });
+
+  test('a later day never precedes the call', () => {
+    expect(startPrecedesCall({ scheduledDate: '2026-09-27', windowStart: '08:00', callCreatedAt: CALL_AT })).toBe(false);
+  });
+
+  test('missing inputs fail open to the existing date guard', () => {
+    expect(startPrecedesCall({ scheduledDate: '2026-09-26', windowStart: null, callCreatedAt: CALL_AT })).toBe(false);
+    expect(startPrecedesCall({ scheduledDate: '2026-09-26', windowStart: '18:00', callCreatedAt: null })).toBe(false);
+  });
+});
