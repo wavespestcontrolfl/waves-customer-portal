@@ -43,6 +43,7 @@
  *   GATE_PEST_IDENTIFIER=true   (public pest-identifier photo funnel — paid vision per upload)
  *   GATE_CUSTOMER_PHOTO_ID=true (authenticated customer Photo ID API — POST/GET /api/photo-id/*, comms-free; dark: every handler 404s while off)
  *   GATE_CUSTOMER_PHOTO_ID_ISSUES=true (customer pest Photo ID issue association + observation dates; strict opt-in in every environment; requires GATE_APP_PROPERTY_SCOPE)
+ *   GATE_PHOTO_ID_V2=true (customer Photo ID PEST path calls the v2 species-catalog engine, identifyPestV2 — server/services/photo-id-v2/pest-engine.js — instead of v1's identifyPest; layered on GATE_CUSTOMER_PHOTO_ID, which must also be on. Response keeps every v1 field and ADDS `v2`; the customer v2 object is persisted with no migration, embedded in the existing report_contract jsonb column under a `v2` key. A v2 engine failure (ok:false) answers the SAME 503 the v1 path already does — never a silent fallback to v1. Stored v2 answers are served back (history headline, next step, detail `v2`) only while the gate is on. Dark = today's v1-only pest path, byte-identical, for new AND already-stored rows; lawn/tree_shrub are unaffected at any setting.)
  *   GATE_PHOTO_TRIAGE=true      (inbound photo texts that read like a lawn/plant/pest "what is this" run the admin photo assessment and park ONE pending reply draft for owner approval — never sends; paid vision capped by PHOTO_TRIAGE_DAILY_CAP per ET day, default 20, and the paid caption classifier by PHOTO_TRIAGE_CLASSIFIER_DAILY_CAP, default = the vision cap; a triage candidate skips the legacy AI draft; read at call time; dark in dev AND prod)
  *   GATE_AUTOPAY_CUSTOMER_SMS=true       (enable customer-facing autopay SMS)
  *   GATE_PORTAL_METHOD_REMOVAL_GUARD=true (portal DELETE /api/billing/cards/:id refuses the method Auto Pay is using — 409 autopay_method_in_use — and never mutates Auto Pay as a side effect; off = legacy remove-and-silently-disable)
@@ -648,6 +649,14 @@ const gates = {
   // environment; requires appPropertyScope so every issue has a durable saved-
   // property identity. Gate off keeps existing payloads and writes unchanged.
   customerPhotoIdIssues: process.env.GATE_CUSTOMER_PHOTO_ID_ISSUES === 'true',
+  // v2 species-catalog pest engine (server/services/photo-id-v2/pest-engine.js)
+  // behind the customer Photo ID PEST path only — lawn/tree_shrub are
+  // unaffected at any setting. A SEPARATE, layered gate: customerPhotoId
+  // above must also be on, or every handler still 404s regardless of this
+  // one. Off = identifyPestV2 is never called, stored v2 answers are not
+  // served back, and the v1 identifyPest path stays byte-identical to
+  // today. Kill switch: unset or any non-'true' value.
+  photoIdV2: process.env.GATE_PHOTO_ID_V2 === 'true',
   // Public careers application funnel (POST /api/public/careers/apply).
   // Dark until the owner turns hiring on; the admin recruiting queue works
   // at any setting (it only reads/updates existing rows).
