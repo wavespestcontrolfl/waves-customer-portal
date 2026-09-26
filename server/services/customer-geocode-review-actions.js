@@ -38,10 +38,22 @@ function hasUsablePin(row) {
     && Number(row.latitude) !== 0 && Number(row.longitude) !== 0;
 }
 
-function reviewPinMatchesCustomer(customer, review) {
-  return hasUsablePin(customer) && hasUsablePin(review)
-    && pinAtScale(customer.latitude, 7) === pinAtScale(review.latitude, 7)
-    && pinAtScale(customer.longitude, 7) === pinAtScale(review.longitude, 7);
+function pinsMatch(left, right) {
+  return hasUsablePin(left) && hasUsablePin(right)
+    && pinAtScale(left.latitude, 7) === pinAtScale(right.latitude, 7)
+    && pinAtScale(left.longitude, 7) === pinAtScale(right.longitude, 7);
+}
+
+function reviewAddressMatchesCustomer(customer, review) {
+  return Array.isArray(review?.address_snapshot)
+    && ADDRESS_FIELDS.every((field, index) => (customer?.[field] ?? null) === (review.address_snapshot[index] ?? null));
+}
+
+function rejectedPrimaryPin(customer, primary, storedReview) {
+  if (hasUsablePin(primary) && !pinsMatch(customer, primary)) return primary;
+  if (hasUsablePin(customer)) return customer;
+  if (hasUsablePin(primary)) return primary;
+  return reviewAddressMatchesCustomer(customer, storedReview) ? storedReview : null;
 }
 
 async function lockedContext(trx, customerId, proposedAddress = null) {
@@ -159,9 +171,10 @@ async function markOutside({ trx, customerId, input, actorId, customer, primary,
   if (!REVIEW_SOURCES.has(source)) {
     throw actionError('A reviewed source is required.', 400, 'review_evidence_required');
   }
-  const pin = hasUsablePin(customer)
-    ? { ...storedReview, latitude: customer.latitude, longitude: customer.longitude }
-    : storedReview;
+  const rejected = rejectedPrimaryPin(customer, primary, storedReview);
+  const pin = rejected ? {
+    ...storedReview, latitude: rejected.latitude, longitude: rejected.longitude,
+  } : null;
   await reviewStore.saveReview(trx, customer, {
     status: 'outside_area', reason: 'staff_confirmed_outside_area',
     source, evidence: input.evidence,
@@ -169,10 +182,11 @@ async function markOutside({ trx, customerId, input, actorId, customer, primary,
   });
   const cleared = await clearMatchingPins(trx, customer, primary, pin, visitContext);
   await auditResolution(trx, customerId, actorId, input.action, { cleared });
+  return { addressBriefIds: cleared.visitIds };
 }
 
 async function revokePin({ trx, customerId, input, actorId, customer, primary, storedReview, visitContext }) {
-  if (!reviewPinMatchesCustomer(customer, storedReview)) {
+  if (!pinsMatch(customer, storedReview)) {
     throw actionError('The current pin has no matching review provenance.', 409, 'review_pin_missing');
   }
   await reviewStore.saveReview(trx, customer, {
@@ -181,6 +195,7 @@ async function revokePin({ trx, customerId, input, actorId, customer, primary, s
   });
   const cleared = await clearMatchingPins(trx, customer, primary, storedReview, visitContext);
   await auditResolution(trx, customerId, actorId, input.action, { cleared });
+  return { addressBriefIds: cleared.visitIds };
 }
 
 async function requestRetry({ trx, customerId, input, actorId, customer, storedReview }) {
@@ -230,7 +245,7 @@ async function resolveCustomerGeocodeReview(customerId, input, actorId, conn = d
       trx, customerId, input, actorId, customer, primary, visitReference, storedReview, visitContext,
     }) || null;
     retryAddress = outcome?.retryAddress || null;
-    addressBriefIds = outcome?.addressBriefIds || [];
+    addressBriefIds = [...new Set(outcome?.addressBriefIds || [])];
     if (!reviewStore.reviewEnabled()) throw actionError('Geocode review is disabled.', 404, 'review_disabled');
   }).catch(err => {
     if (err?.code === '23505' && err?.constraint === PROPERTY_ADDRESS_CONSTRAINT) {
@@ -254,10 +269,28 @@ async function resolveCustomerGeocodeReview(customerId, input, actorId, conn = d
       .catch(() => logger.warn('[customer-geocode-review] Address brief refresh failed after commit', {
         code: 'address_brief_refresh_failed', customerId, visitCount: addressBriefIds.length,
       }));
+    const { emitDispatchJobUpdate, flushDispatchQualityDates } = require('./dispatch-assignment');
+    const qualityDates = new Set();
+    const broadcasts = await Promise.allSettled(addressBriefIds.map(jobId => emitDispatchJobUpdate({
+      jobId, actorId, qualityDates,
+    })));
+    try {
+      await flushDispatchQualityDates(qualityDates);
+    } catch {
+      logger.warn('[customer-geocode-review] Route quality refresh failed after commit', {
+        code: 'dispatch_quality_refresh_failed', customerId, visitCount: addressBriefIds.length,
+      });
+    }
+    if (broadcasts.some(result => result.status === 'rejected')) {
+      logger.warn('[customer-geocode-review] Dispatch refresh failed after commit', {
+        code: 'dispatch_refresh_failed', customerId, visitCount: addressBriefIds.length,
+      });
+    }
+  } else {
+    await require('./scheduling/quality-after-change')
+      .refreshScheduleQualityAfterChange({ customerIds: [customerId] }, conn)
+      .catch(() => {});
   }
-  await require('./scheduling/quality-after-change')
-    .refreshScheduleQualityAfterChange({ customerIds: [customerId] }, conn)
-    .catch(() => {});
   return reviewStore.getReviewDetail(customerId, conn);
 }
 
