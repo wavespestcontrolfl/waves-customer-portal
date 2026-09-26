@@ -206,4 +206,40 @@ postgres('billing Email-only obligation PostgreSQL', () => {
       .resolves.toMatchObject({ sent: true, deliveryOutcome: 'accepted' });
     expect(sendCustomerMessage).toHaveBeenCalledTimes(2);
   });
+
+  // codex r2 #4844 P2: a process death after SendGrid accepted the send but
+  // before the owning sms_log row was marked sent leaves EXACTLY this fence
+  // (billing_email_provider_started_at survives, no crash-time metadata
+  // change reaches the row) — the canonical email_messages acceptance must
+  // still resolve the replay to accepted, not a durable uncertain hold.
+  test('a surviving provider-started fence resolves accepted once canonical email evidence proves acceptance', async () => {
+    const eventKey = `receipt:${randomUUID()}`;
+    const queued = await obligation.queueObligation(notice(), 'payment_receipt', eventKey,
+      { sent: false, retryable: true, deliveryOutcome: 'not_sent' }, []);
+    await mockPg('sms_log').where({ id: queued.id }).update({ status: 'sending', metadata: mockPg.raw(
+      "COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('billing_email_provider_started_at', ?::timestamptz)",
+      [new Date()]) });
+    await mockPg('email_messages').insert({ id: randomUUID(),
+      idempotency_key: obligation.obligationKey(eventKey), status: 'delivered',
+      provider_message_id: randomUUID(), recipient_id: customerId,
+      recipient_email_snapshot: 'synthetic@example.invalid' });
+    const row = await mockPg('sms_log').where({ id: queued.id }).first();
+    await expect(obligation.replay({ ...row.metadata, scheduled_sms_log_id: queued.id }))
+      .resolves.toMatchObject({ sent: true, deliveryOutcome: 'accepted', deduped: true });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('a surviving provider-started fence with no canonical evidence at all still stays uncertain', async () => {
+    const eventKey = `receipt:${randomUUID()}`;
+    const queued = await obligation.queueObligation(notice(), 'payment_receipt', eventKey,
+      { sent: false, retryable: true, deliveryOutcome: 'not_sent' }, []);
+    await mockPg('sms_log').where({ id: queued.id }).update({ status: 'sending', metadata: mockPg.raw(
+      "COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('billing_email_provider_started_at', ?::timestamptz)",
+      [new Date()]) });
+    const row = await mockPg('sms_log').where({ id: queued.id }).first();
+    await expect(obligation.replay({ ...row.metadata, scheduled_sms_log_id: queued.id }))
+      .resolves.toMatchObject({ sent: false, blocked: true, deliveryOutcome: 'uncertain',
+        code: 'BILLING_EMAIL_DELIVERY_UNCERTAIN' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
 });

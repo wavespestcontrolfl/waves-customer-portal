@@ -117,6 +117,12 @@ function queuedRowMetadata(input, category, eventKey, key, siblings, holdUncerta
     expiry_stage: meta.expiry_stage || null,
     billing_mode_at_send: meta.billing_mode_at_send || null,
     customer_initiated: input.customerInitiated === true,
+    // The reservation id the collections-rail producer (PR #4803) minted for
+    // this Email leg, when it made one — persisted so replay can reuse the
+    // SAME reservation for its collections-policy consult (excluding it from
+    // the frequency window, never double-counting it) and settle it
+    // delivered once the replay actually lands (codex r2 #4844 P1).
+    collections_ledger_id: meta.collections_ledger_id || null,
   };
 }
 
@@ -365,9 +371,15 @@ async function expiryRefusal(meta, database) {
 // terminal status, payer-billed/withdrawn, a stopped followup sequence, and
 // a rendered amount that no longer matches the live balance — none of which
 // selfPayAtDispatch alone catches (codex r1 #4844 P1). No-op when there is
-// no invoice.
+// no invoice, and ONLY for the reminder/dunning entry points in
+// INVOICE_GUARDS (codex r2 #4844 P1): payment-receipt sends also carry an
+// invoiceId (invoice.js's sendReceipt, entryPoint 'invoice_receipt_sms') but
+// fire AFTER the payment that made the invoice terminal — the unconditional
+// recheck was returning `invoice-terminal:paid` and suppressing every queued
+// receipt retry. Every invoice-backed row, receipts included, still keeps
+// the self-pay check below.
 async function invoiceCollectibilityRefusal(meta) {
-  if (!meta.invoice_id) return null;
+  if (!meta.invoice_id || !INVOICE_GUARDS.has(meta.source_entry_point)) return null;
   const { invoiceStillCollectible } = require('./deferred-replay-registry');
   const verdict = await invoiceStillCollectible(meta);
   if (verdict.eligible === true) return null;
@@ -381,6 +393,34 @@ async function invoiceSelfPayRefusal(meta, database) {
   return null;
 }
 
+// Dunning/reminder entry points in INVOICE_GUARDS consult the collections
+// rail for email immediately before send (mirrors invoice_followup_deferred
+// in deferred-replay-registry.js exactly): a do_not_email, collection hold,
+// another contact inside the 24h window, or an invoice-policy exclusion that
+// appeared while this replay was queued must suppress it too — the
+// enqueue-time producer check is stale by the time a retry actually fires.
+// Gate off -> no read at all, byte-identical to before this lane (same
+// contract as the sms precedent). Excluding this obligation's OWN ledger
+// reservation (when the producer minted one) keeps the rail from denying a
+// replay purely because of the touch IT ITSELF already reserved; no id ->
+// no exclusion, which only ever over-suppresses (the safe direction) rather
+// than risk under-suppressing a customer who should not be contacted.
+async function collectionsPolicyRefusal(meta) {
+  if (!INVOICE_GUARDS.has(meta.source_entry_point)) return null;
+  if (process.env.GATE_COLLECTIONS_POLICY !== 'true') return null;
+  const { collectionsChannelPermitted } = require('../collections/rail-guard');
+  const permitted = await collectionsChannelPermitted({
+    customerId: meta.customer_id,
+    invoiceId: meta.invoice_id || null,
+    channel: 'email',
+    purpose: 'late_payment',
+    logTag: 'billing-email-obligation-replay',
+    excludeLedgerIds: meta.collections_ledger_id ? [meta.collections_ledger_id] : [],
+  });
+  if (!permitted) return refused('collections-policy-denied');
+  return null;
+}
+
 async function producerEligible(meta, database = db) {
   const precharge = await prechargeRefusal(meta, database);
   if (precharge) return precharge;
@@ -390,14 +430,38 @@ async function producerEligible(meta, database = db) {
   if (collectibility) return collectibility;
   const invoice = await invoiceSelfPayRefusal(meta, database);
   if (invoice) return invoice;
+  const collectionsPolicy = await collectionsPolicyRefusal(meta);
+  if (collectionsPolicy) return collectionsPolicy;
   return { eligible: true };
 }
 
+function invalidObligationMeta(meta) {
+  return !meta.customer_id || !meta.notificationEventKey || meta.billingDeliveryLeg !== 'email' || meta.channel !== 'email';
+}
+
+// Standalone pre-dispatch recheck (the scheduler's own "is this still worth
+// attempting" gate, before a replay/row-state check is even in play): a
+// known fence on the CALLER'S OWN metadata short-circuits here exactly as
+// before.
 async function recheck(meta) {
   try {
-    if (!meta.customer_id || !meta.notificationEventKey || meta.billingDeliveryLeg !== 'email'
-      || meta.channel !== 'email') return refused('invalid-email-obligation');
+    if (invalidObligationMeta(meta)) return refused('invalid-email-obligation');
     if (meta.billing_email_provider_started_at || meta.billing_email_uncertain === true) return refused('billing-email-delivery-uncertain');
+    return await producerEligible(meta);
+  } catch {
+    return refused('billing-email-eligibility-unavailable', true);
+  }
+}
+
+// replay()'s own eligibility gate: same shape validation and producer
+// recheck as the standalone recheck() above, but deliberately WITHOUT its
+// fence short-circuit (codex r2 #4844 P2) — replay() reconciles a surviving
+// fence against the freshly re-read row state and canonical email evidence
+// itself, further down, rather than refusing on the (possibly stale)
+// claim metadata it was handed.
+async function replayEligibility(meta) {
+  try {
+    if (invalidObligationMeta(meta)) return refused('invalid-email-obligation');
     return await producerEligible(meta);
   } catch {
     return refused('billing-email-eligibility-unavailable', true);
@@ -408,17 +472,19 @@ function deliveryUncertainOutcome() {
   return { sent: false, blocked: true, deliveryOutcome: 'uncertain', code: 'BILLING_EMAIL_DELIVERY_UNCERTAIN' };
 }
 
-// Re-reads the queued row and refuses replay outright when a prior attempt
-// already left an unresolved provider fence — that row is not this replay's
-// to retry.
+// Re-reads the queued row. Does NOT itself refuse on a surviving
+// provider-started/uncertain fence (codex r2 #4844 P2) — a process death
+// after SendGrid accepted the send but before the owner row was marked sent
+// leaves exactly this fence standing, and refusing here would suppress a
+// delivered email before replayEmailMessageOutcome() ever gets to see the
+// definitive acceptance recorded against email_messages. The caller
+// consults that canonical evidence first; survivingFenceRefusal() below is
+// the fallback once it comes back empty.
 async function replayQueuedRowState(meta, database) {
   const row = await database('sms_log').where({ id: meta.scheduled_sms_log_id, customer_id: meta.customer_id })
     .first('id', 'message_body', 'metadata');
   if (!row) return { refusal: { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'EMAIL_OBLIGATION_MISSING' } };
   const rowMeta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
-  if (rowMeta.billing_email_provider_started_at || rowMeta.billing_email_uncertain === true) {
-    return { refusal: deliveryUncertainOutcome() };
-  }
   return { row, rowMeta };
 }
 
@@ -436,6 +502,17 @@ async function replayEmailMessageOutcome(meta, rowMeta, database) {
     deduped: true, providerMessageId: message.provider_message_id || null } };
   if (evidence === 'uncertain') return { resolved: deliveryUncertainOutcome() };
   return {};
+}
+
+// Only reached once replayEmailMessageOutcome found no definitive provider
+// evidence either way (no email_messages row, or one proven not_sent) — a
+// surviving fence with nothing to reconcile against genuinely stays
+// unresolved, exactly the pre-fix behavior for that case.
+function survivingFenceRefusal(rowMeta) {
+  if (rowMeta.billing_email_provider_started_at || rowMeta.billing_email_uncertain === true) {
+    return deliveryUncertainOutcome();
+  }
+  return null;
 }
 
 // The registered dispatcher's own pre-send fence: refuse a producer that has
@@ -502,6 +579,23 @@ async function dispatchReplaySend(input, fence) {
   }
 }
 
+// Best-effort settlement of the collections-rail reservation this replay's
+// producer minted (codex r2 #4844 P1), once the email is actually accepted —
+// never throws (contact-ledger.markDelivered already never throws; the
+// try/catch here only guards a require failure). A failed stamp only ever
+// over-suppresses a later frequency-window check, the safe direction, so it
+// is logged (no PII — a ledger row id only) and swallowed rather than
+// turning a real delivery into a reported failure.
+async function settleCollectionsLedger(meta) {
+  if (!meta.collections_ledger_id) return;
+  try {
+    const ContactLedger = require('../collections/contact-ledger');
+    await ContactLedger.markDelivered({ id: meta.collections_ledger_id });
+  } catch (err) {
+    require('../logger').warn(`[billing-channel-email-obligation] collections ledger delivered-stamp threw for reservation ${meta.collections_ledger_id}: ${err.message}`);
+  }
+}
+
 // A fence claimed but never resolved to a definite result, or a definite
 // not_sent whose fence could not be cleared, both leave the retry decision
 // unsafe — either is reported uncertain rather than trusted.
@@ -509,6 +603,7 @@ async function finalizeReplayResult(meta, database, fence, result) {
   if (fence.uncertain || result?.deliveryOutcome === 'uncertain') return deliveryUncertainOutcome();
   if (fence.providerStarted && result?.deliveryOutcome === 'not_sent'
     && !await clearProviderStarted(meta.scheduled_sms_log_id, database)) return deliveryUncertainOutcome();
+  if (result?.deliveryOutcome === 'accepted') await settleCollectionsLedger(meta);
   return result;
 }
 
@@ -516,15 +611,24 @@ async function replay(meta, database = db) {
   if (!meta.scheduled_sms_log_id) return {
     sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'EMAIL_OBLIGATION_ID_MISSING',
   };
-  const eligibility = await recheck(meta);
+  const eligibility = await replayEligibility(meta);
   if (!eligibility.eligible) return {
     sent: false, blocked: !eligibility.retryable, retryable: eligibility.retryable === true,
     deliveryOutcome: 'not_sent', code: eligibility.reason,
   };
   const state = await replayQueuedRowState(meta, database);
   if (state.refusal) return state.refusal;
+  // Reconcile canonical email-row evidence BEFORE honoring a surviving
+  // provider-started/uncertain fence (codex r2 #4844 P2): a fence with
+  // definitive accepted evidence resolves to accepted (deduped); only a
+  // fence with no definitive provider evidence stays uncertain.
   const messageOutcome = await replayEmailMessageOutcome(meta, state.rowMeta, database);
-  if (messageOutcome.resolved) return messageOutcome.resolved;
+  if (messageOutcome.resolved) {
+    if (messageOutcome.resolved.deliveryOutcome === 'accepted') await settleCollectionsLedger(meta);
+    return messageOutcome.resolved;
+  }
+  const fenceRefusal = survivingFenceRefusal(state.rowMeta);
+  if (fenceRefusal) return fenceRefusal;
   const fence = { providerStarted: false, uncertain: false };
   const input = replaySendInput(meta, state.row, database, fence);
   const dispatch = await dispatchReplaySend(input, fence);
