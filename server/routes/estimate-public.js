@@ -16400,9 +16400,8 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
     // row-existence oracle; docs/public-route-contracts.md). The admin
     // extension keeps extendEstimate's explicit 409.
     {
-      const { gatedSendAuthorityPredicateApplies } = require('../services/pricing-authority-gate');
       const { extensionDeliverableUnderGate } = require('../services/estimate-extension');
-      if (gatedSendAuthorityPredicateApplies() && !(await extensionDeliverableUnderGate(db, estimate))) {
+      if (!(await extensionDeliverableUnderGate(db, estimate))) {
         return res.status(404).json({ error: 'Estimate not found' });
       }
     }
@@ -18916,6 +18915,12 @@ function buildAcceptSuccessPayload({
   // Signed, but the plan is still being set up (activation running, or
   // held for staff) — the signing link is burned, so never ask again.
   else if (invoiceKind === 'annual_prepay_activation_pending') nextStep = 'activation_pending';
+  // Slice 3b: the customer never signed within the abandon window — the
+  // offer closed automatically, nothing was billed or booked. Checked
+  // alongside the other annual sign-before-pay outcomes, before the generic
+  // 'prepay_invoice' branch below could otherwise claim it (billingTerm is
+  // still 'prepay_annual' here). Never 'sign_agreement' — that link is dead.
+  else if (invoiceKind === 'annual_prepay_signature_expired') nextStep = 'offer_closed';
   // A payer-billed annual-prepay accept also has no homeowner step — the prepay
   // invoice went to the payer AP inbox, so don't surface prepay follow-up copy.
   else if (!payerBilled && !treatAsOneTime && billingTerm === 'prepay_annual') nextStep = 'prepay_invoice';
@@ -18998,6 +19003,13 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
   // losing the prepay_annual context and reporting the generic 'confirmed'
   // outcome instead of pointing the customer back at the signature step.
   const awaitingAnnualSignature = !prepayTerm && estimate.annual_plan_activation_status === 'awaiting_signature';
+  // Slice 3b: the customer never signed within the abandon window — the
+  // offer closed automatically (termite-annual-activation.js
+  // expireAbandonedSignatures). This is a TERMINAL outcome distinct from
+  // "awaiting signature": the signing link (if it still resolves at all) no
+  // longer leads anywhere, so the retry must show an honest closed state,
+  // never re-offer 'sign_agreement'.
+  const annualSignatureExpired = !prepayTerm && estimate.annual_plan_activation_status === 'signature_expired';
   // Codex round-3 P2: once the customer HAS signed, "sign your agreement"
   // is impossible (signing burned the link) — while activation is still
   // running, or failed and sits with the retry sweep / staff, report that
@@ -19006,7 +19018,7 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
     .where({ document_template_key: require('../services/termite-annual-activation').ANNUAL_TEMPLATE_KEY, status: 'signed' })
     .whereRaw("document_variables_snapshot -> 'estimate' ->> 'id' = ?", [String(estimate.id)])
     .first('id'));
-  const billingTerm = (prepayTerm || awaitingAnnualSignature) ? 'prepay_annual' : 'standard';
+  const billingTerm = (prepayTerm || awaitingAnnualSignature || annualSignatureExpired) ? 'prepay_annual' : 'standard';
 
   // Invoice reconstruction is SETTLED-aware (audit P1): 'void' still means a
   // dead pay link the office re-bills manually (skip / fall through), but any
@@ -19160,11 +19172,13 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
     ? 'annual_prepay'
     : awaitingAnnualSignature
       ? (annualAgreementSigned ? 'annual_prepay_activation_pending' : 'annual_prepay_deferred')
-      : invoiceNotes.includes('(invoice-mode one-time)')
-        ? 'one_time'
-        : invoiceNotes.includes('(invoice-mode recurring)')
-          ? 'recurring_first_visit'
-          : null;
+      : annualSignatureExpired
+        ? 'annual_prepay_signature_expired'
+        : invoiceNotes.includes('(invoice-mode one-time)')
+          ? 'one_time'
+          : invoiceNotes.includes('(invoice-mode recurring)')
+            ? 'recurring_first_visit'
+            : null;
   // Explicit payment outcome from the LIVE invoice status (Codex r5 P1):
   // only paid/prepaid may say "payment went through", only an INITIATED
   // bank debit may say "processing". But 'processing' is ALSO how an
@@ -19225,7 +19239,9 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
         ? 'Annual prepay'
         : awaitingAnnualSignature
           ? (annualAgreementSigned ? 'Annual prepay — signed, setting up' : 'Annual prepay — awaiting signature')
-          : (invoice?.title || null),
+          : annualSignatureExpired
+            ? 'Annual prepay — signing window closed'
+            : (invoice?.title || null),
       billingTerm,
       prepayInvoiceAmount: prepayTerm ? invoiceAmount : null,
       bookingUrl,
@@ -25644,8 +25660,8 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
     // row — or group link — the shared verdict refuses answers the family's
     // generic 404, before either provider path.
     {
-      const { gatedSendAuthorityPredicateApplies, estimateDeliverableUnderGate } = require('../services/pricing-authority-gate');
-      if (gatedSendAuthorityPredicateApplies() && !(await estimateDeliverableUnderGate(db, estimate))) {
+      const { estimateDeliverableUnderGate } = require('../services/pricing-authority-gate');
+      if (!(await estimateDeliverableUnderGate(db, estimate))) {
         return res.status(404).json({ error: 'Estimate not found' });
       }
     }
@@ -26615,12 +26631,9 @@ async function composeEstimateDataPayload(estimate, {
     // builder itself fails soft (never throws) on any ineligibility or error.
     const consultationOffer = includeConsultationOffer && !isInternalRefresh
       ? await buildEstimateConsultationOffer({
-        leadId: estimateDataForIntelligence?.lead_id,
-        leadLinkage: estimateDataForIntelligence?.lead_linkage,
+        estimate,
+        estimateData: estimateDataForIntelligence,
         acceptActive: !adminDraftPreview && !verifiedStaffPreview && !isPdfRenderPass && isEstimateAcceptActive(estimate),
-        estimateAddress: estimate.address,
-        fromVisit: Boolean(estimateDataForIntelligence?.scheduled_service_id),
-        grouped: Boolean(estimate.estimate_group_id),
       })
       : null;
 
@@ -26920,6 +26933,12 @@ async function composeEstimateDataPayload(estimate, {
         // derived mode/frequency when null.
         acceptedServiceMode: estimate.accepted_service_mode || null,
         acceptedFrequencyKey: estimate.accepted_frequency_key || null,
+        // Slice 3b: the termite annual offer closed unsigned (the estimate's
+        // status stays 'accepted') — the page must render the honest closed
+        // state on a normal reload, never the "booked" terminal page
+        // (Codex #4922 r3 P1). Present only then, so every other response
+        // stays byte-identical.
+        ...(estimate.annual_plan_activation_status === 'signature_expired' ? { annualPlanOfferClosed: true } : {}),
         // Effective (incl. derived guarantee-only) — the React view's accept
         // copy and payment buttons key off this, and accept resolves the same
         // derived value server-side.

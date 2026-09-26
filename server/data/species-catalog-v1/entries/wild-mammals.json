@@ -1,0 +1,105 @@
+[
+  {
+    "kind": "organism",
+    "aka": [],
+    "stages": [
+      "adult"
+    ],
+    "sign_of": [],
+    "legacy_slugs": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": ""
+    },
+    "slug": "armadillo",
+    "common_name": "Nine-banded Armadillo",
+    "aliases": [
+      "armadillo",
+      "armadillos",
+      "nine banded armadillo"
+    ],
+    "scientific_name": "Dasypus novemcinctus",
+    "rank": "species",
+    "group": "wild-mammals",
+    "subgroup": null,
+    "site_category": "Wildlife neighbors",
+    "traits": [
+      "Shallow, cone-shaped holes dug overnight, 1-3 inches deep",
+      "Armored, cat-sized (15-17 inches, 8-17 lbs), terrible eyesight",
+      "Long, tapering snout and large front claws for digging",
+      "Digs where soil is soft and grubs or earthworms are plentiful"
+    ],
+    "look_alikes": [
+      {
+        "slug": "feral-hog-rooting",
+        "difference": "Armadillo holes are small, cone-shaped, and scattered overnight; feral hog rooting tears up much larger patches of turf and soil in a single visit.",
+        "next_photo": "A wide shot showing the size and shape of the disturbed area.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "large",
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "lawn-damage",
+      "mammal"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": true,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "safety_line": "Florida armadillos can carry the bacteria that causes Hansen's disease (leprosy). Don't handle one bare-handed, and wash your hands after any contact with soil it's dug in.",
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "Wildlife Referral",
+      "inspection_first": false,
+      "referral": "wildlife_trapper"
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "It's likely digging for grubs and earthworms in soft soil, but digging alone doesn't prove which — armadillos eat both, so removing grubs isn't a reliable way to send it elsewhere. Florida allows a licensed nuisance-wildlife trapper to live-trap and relocate it under FWC rules; don't handle one bare-handed.",
+      "fact": "When startled it jumps straight up — a reflex that surprises people more than it protects the armadillo.",
+      "blurb": "Digs overnight for grubs and earthworms in soft soil. A wildlife trapper can live-trap and relocate it under FWC rules — don't handle one bare-handed."
+    },
+    "tech_notes": "Armadillo digging correlates with grub/earthworm presence, but removing grubs is not a documented reliable deterrent per UF/IFAS. Refer to a licensed nuisance-wildlife trapper; FWC rules allow live-trap and release on-site, in-county relocation, or euthanasia. Advise against bare-hand contact (Hansen's disease association in Florida armadillos).",
+    "sources": [
+      "https://myfwc.com/wildlifehabitats/profiles/mammals/land/armadillo/"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/armadillo/",
+      "guides": []
+    },
+    "role": "wildlife",
+    "risk": "medical",
+    "action": "specialist",
+    "season_basis": "year_round",
+    "verification": []
+  }
+]

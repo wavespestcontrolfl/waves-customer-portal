@@ -3,6 +3,7 @@ const express = require('express');
 const crypto = require('crypto');
 const { estimateOfferVersion, annualPlanOfferFingerprint } = require('../services/estimate-offer-version');
 const { gateEnvValue } = require('../config/feature-gates');
+const { legacyAutofillPriceReasons, rowHeldForLegacyAutofillPrice } = require('../services/estimate-legacy-autofill-hold');
 const router = express.Router();
 const db = require('../models/db');
 const { DELIVERY_CLAIM_NOT_LIVE_SQL, callSideBlockForEstimateData, REPRICE_PENDING_ABSENT_SQL } = require('../utils/estimate-claim-sql');
@@ -512,6 +513,9 @@ async function findGroupSiblingBlockingSend(estimate, { database = db, autoSend 
     // delivery later, so the refusal lands at scheduling time instead of
     // a queued send that cannot run.
     if (parseEstimateData(sibling.estimate_data)?.addressUnverified === true) return { sibling, statusCode: 409, code: 'ADDRESS_UNVERIFIED' };
+    // …and a sibling whose stored price the lookup guards refuse: the group
+    // link would show it, gate or no gate.
+    if (rowHeldForLegacyAutofillPrice(sibling)) return { sibling, statusCode: 409, code: 'LEGACY_AUTOFILL_PRICE' };
     const authority = String(sibling.pricing_authority || '').toUpperCase();
     // Automation: the explicit SERVER stamp only. Manual sends: the ONE
     // shared row verdict — SERVER, a genuinely locked accepted price, or an
@@ -538,6 +542,9 @@ function blockingSiblingMessage(blockingSibling, beforeWhat) {
   const id = blockingSibling.sibling.id;
   if (blockingSibling.code === 'REPRICE_PENDING') {
     return `Grouped estimate ${id} is held for a re-price (a clarify answer replaces its dollars or address) — re-draft or revise it before ${beforeWhat}.`;
+  }
+  if (blockingSibling.code === 'LEGACY_AUTOFILL_PRICE') {
+    return `Grouped estimate ${id} has a price saved before a pricing fix — open it in the estimate tool, generate it again and save before ${beforeWhat}.`;
   }
   if (blockingSibling.code === 'ADDRESS_UNVERIFIED') {
     return `Grouped estimate ${id} has a house number county records could not confirm — correct or confirm its address before ${beforeWhat}.`;
@@ -576,6 +583,17 @@ function assertEstimateSendable(estimate, { engineReviewAcknowledged = false } =
       const err = new Error('County records could not confirm this house number. Correct the address on the estimate (or confirm it) before sending — the customer link stays off until then.');
       err.statusCode = 409;
       err.code = 'ADDRESS_UNVERIFIED';
+      throw err;
+    }
+    // A stored estimate-tool price built from values the 2026-09-26 lookup
+    // guards now refuse: every send replays the stored price, so hold it until
+    // staff regenerate and save it (services/estimate-legacy-autofill-hold.js).
+    // An authored proposal and an accepted price are exempt (codex r1 P1 #4941).
+    const legacyReasons = rowHeldForLegacyAutofillPrice(estimate) ? legacyAutofillPriceReasons(data) : [];
+    if (legacyReasons.length > 0) {
+      const err = new Error(`This estimate's price was saved before a pricing fix and was built from ${legacyReasons.join('; ')}. Open it in the estimate tool, generate it again and save, then send.`);
+      err.statusCode = 409;
+      err.code = 'LEGACY_AUTOFILL_PRICE';
       throw err;
     }
   }
@@ -5057,7 +5075,7 @@ router.post('/:id/follow-up', async (req, res, next) => {
     // this text carries the estimate link, and the link renders every
     // viewable sibling — a SERVER anchor beside an unverified sibling is
     // refused like any other send while the gate is on.
-    if (gatedSendAuthorityPredicateApplies() && !(await estimateDeliverableUnderGate(db, estimate))) {
+    if (!(await estimateDeliverableUnderGate(db, estimate))) {
       return res.status(409).json({
         error: 'A property on this estimate\'s link has no engine-verified price — re-save it from the estimate tool before sending this follow-up.',
         code: 'PRICING_AUTHORITY_NOT_SERVER',
