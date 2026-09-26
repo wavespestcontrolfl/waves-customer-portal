@@ -869,7 +869,7 @@ async function alertNeedsReview({ customerId, requestId, reason }) {
       'billing',
       'Auto Pay setup link — method not enrolled',
       `A customer saved a payment method from their Auto Pay setup link but it could not be enrolled (${reason}) — review their saved methods.`,
-      { link: customerId ? `/admin/customers/${customerId}` : '/admin/dashboard', metadata: { customerId, appointmentCardRequestId: requestId, reason } },
+      { link: customerId ? `/admin/customers?customerId=${customerId}` : '/admin/dashboard', metadata: { customerId, appointmentCardRequestId: requestId, reason } },
     );
   } catch (e) { logger.warn(`[autopay-setup-link] review alert failed: ${e.message}`); }
 }
