@@ -27,7 +27,8 @@ const DESCRIBES_CURRENT_SQL = (t) => `${t}.d = scheduled_services.scheduled_date
 // 6: an unscoped cancel ask needs the customer's sole active property (#4816 r14).
 // 7: inside an open window only an event record grounds a verdict (#4816 r17).
 // 8: the unscoped cancel ask's sole property is fixed at request time (#4816 r20).
-const FULFILLMENT_POLICY = 8;
+// 9: an unscoped cancel ask is never answered by a cancellation (#4816 r27).
+const FULFILLMENT_POLICY = 9;
 const SCHEMA = {
   type: 'object', additionalProperties: false, required: ['verdict', 'record_ref', 'quote'],
   properties: {
@@ -241,17 +242,12 @@ function scopedToProperty(record, commitment) {
     // The request never named a property (e.g. "you still coming this
     // morning?"). Field progress on any of this customer's own visits — the
     // evidence query is already customer-scoped — can still answer it (owner
-    // ruling 2026-09-24). A cancellation needs the customer's sole active
-    // property: it is the one outcome that leaves the asked-about visit
-    // booked when it lands at the wrong property.
-    // The sole property is the one recorded when the text arrived (Codex
-    // #4816 r14/r20): a request made while the customer had two properties
-    // stays ambiguous even if one is deactivated later.
-    if (commitment.kind === 'other' && record.status === 'cancelled') {
-      const sole = commitment.sms_context?.sole_property_id;
-      return !!sole && record.property_id === sole;
-    }
-    return true;
+    // ruling 2026-09-24). A cancellation never does: it is the one outcome
+    // that leaves the asked-about visit booked when it lands at the wrong
+    // property, and nothing records which properties the customer had when
+    // the text arrived, so no later snapshot can vouch that there was only
+    // one (Codex #4816 r14–r27). An unscoped cancel ask bells at its deadline.
+    return !(commitment.kind === 'other' && record.status === 'cancelled');
   }
   return !!propertyId && witnessProperty === propertyId;
 }

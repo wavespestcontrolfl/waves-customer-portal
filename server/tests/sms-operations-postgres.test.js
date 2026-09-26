@@ -910,12 +910,14 @@ postgres('SMS operations on PostgreSQL', () => {
     await recordMessageOperations(mockPg, message, result, context);
     expect(await mockPg('property_preferences')).toHaveLength(0);
     expect((await mockPg('sms_log').first()).operational_analysis.facts[0].outcome).toBe('temporary_instruction');
-    // R4 owner ruling 2026-09-24 (the access-note text "my son should be there"): a
-    // temporary-instruction-only message is not urgent and never bells.
-    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    // Codex #4816 r27: the extractor labelled this fact durable; only the
+    // wording holds it back, and that wording cannot be tied to the fact, so
+    // staff review it. R4 silence covers facts the extractor itself labels
+    // temporary or visit-only (the "my son should be there" access note).
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
   });
 
-  test('Codex #4816 r26: a durable sibling held back only by another sentence\'s temporary wording still rings the review bell', async () => {
+  test('Codex #4816 r26/r27: a durable fact held back only by temporary wording still rings the review bell', async () => {
     message.message_body = "For tomorrow's visit use the side gate. My lockbox code is 1234";
     await mockPg('sms_log').where({ id: message.id }).update({ message_body: message.message_body });
     const property_id = context.properties[0].id;
@@ -932,6 +934,15 @@ postgres('SMS operations on PostgreSQL', () => {
     // only by "tomorrow's", is not — staff see it.
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
     expect(NotificationService.notifyAdmin.mock.calls[0][1]).toBe('SMS instructions need review');
+  });
+
+  test('R4 owner ruling 2026-09-24: a fact the extractor labels temporary is silent even with temporary wording in the text', async () => {
+    message.message_body = `For tomorrow only. ${message.message_body}`;
+    await mockPg('sms_log').where({ id: message.id }).update({ message_body: message.message_body });
+    await recordMessageOperations(mockPg, message, { ...result, facts: [{ ...result.facts[0], duration: 'temporary' }] }, context);
+    expect(await mockPg('property_preferences')).toHaveLength(0);
+    expect((await mockPg('sms_log').first()).operational_analysis.facts[0].outcome).toBe('temporary_instruction');
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 
   test('Codex #4816 r10: an uncertain-duration fact is not known-temporary — it still rings the review bell', async () => {

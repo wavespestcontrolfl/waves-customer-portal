@@ -220,9 +220,10 @@ postgres('SMS commitments on PostgreSQL', () => {
     await recordMessageOperations(mockPg, message, result, context);
     expect(await mockPg('property_preferences')).toHaveLength(0);
     expect((await mockPg('sms_log').first()).operational_analysis.facts[0].outcome).toBe('temporary_instruction');
-    // R4 owner ruling 2026-09-24 (the access-note text "my son should be there"): a
-    // temporary-instruction-only message is not urgent and never bells.
-    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    // Codex #4816 r27: labelled durable, held back only by wording that
+    // cannot be tied to the fact — staff review it. R4 silence covers facts
+    // the extractor itself labels temporary or visit-only.
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
   });
 
   test('an excluded source type discovered under lock cannot update the profile', async () => {
@@ -1263,6 +1264,38 @@ postgres('SMS commitments on PostgreSQL', () => {
   },
   );
 
+  test('Codex #4816 r27: the event page counts activity from the effective source time, not the queue row', async () => {
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', basis: 'request', due_at: null, due_text: 'sometime soon',
+      quote: 'You still coming?', description: 'You still coming?' };
+    await recordMessageOperations(mockPg, message, result, context);
+    await mockPg('call_commitments').update({ due_at: null });
+    const [target] = await mockPg('call_commitments').pluck('id');
+    const minutes = (m) => new Date(message.created_at.getTime() + m * 60000);
+    // A scheduled send: queued at the sms_log row's time, delivered 10 min later.
+    await mockPg('call_commitments').update({ sms_context: mockPg.raw("jsonb_set(sms_context, '{source_at}', to_jsonb(?::text))", [minutes(10).toISOString()]) });
+    const [visit] = await mockPg('scheduled_services').insert({
+      customer_id: message.customer_id, property_id: context.properties[0].id, service_type: 'Quarterly Pest Control',
+      scheduled_date: etDateString(minutes(5)), window_start: '09:00:00', status: 'en_route',
+      created_at: new Date(message.created_at.getTime() - 86400000), updated_at: minutes(5),
+    }).returning('id');
+    await mockPg('job_status_history').insert({ job_id: visit.id, from_status: 'confirmed', to_status: 'en_route', transitioned_at: minutes(5) });
+    const verify = jest.fn(async () => ({ verdict: 'open', reason: 'no_answer', evidence_hash: 'x', retry_after: null }));
+    const tick = async (at) => {
+      await mockPg('system_settings').insert({ key: 'sms_operations.fulfillment_cursor', value: 'ffffffff-ffff-4fff-bfff-ffffffffffff', category: 'sms_operations' })
+        .onConflict('key').merge({ value: 'ffffffff-ffff-4fff-bfff-ffffffffffff' });
+      verify.mockClear();
+      return refreshSmsCommitments({ conn: mockPg, verify, now: at });
+    };
+    // Activity between enqueue and delivery predates the promise: no event.
+    expect(await tick(minutes(12))).toMatchObject({ scanned: 0 });
+    // Activity after delivery is a new event: the page picks the row up.
+    await mockPg('job_status_history').insert({ job_id: visit.id, from_status: 'en_route', to_status: 'on_site', transitioned_at: minutes(15) });
+    expect(await tick(minutes(16))).toMatchObject({ scanned: 1 });
+    expect(new Date((await mockPg('call_commitments').where({ id: target }).first()).sms_context.event_seen_at).getTime())
+      .toBe(minutes(6).getTime());
+  });
+
   test('Codex #4816 r21: a failed evidence query leaves the visit event pending for the next tick', async () => {
     result.facts = [];
     result.obligations[0] = { ...result.obligations[0], kind: 'other', basis: 'request', due_at: null, due_text: 'sometime soon',
@@ -1440,7 +1473,9 @@ postgres('SMS commitments on PostgreSQL', () => {
 
   test('Codex #4816 r7: a visit cancelled after a cancel ask is evidence for the model, never a no-model close', async () => {
     result.facts = [];
-    result.obligations[0] = { ...result.obligations[0], kind: 'other', due_at: null,
+    // Scoped to the property: an unscoped cancel ask is never answered by a
+    // cancellation (Codex #4816 r27).
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', due_at: null, property_id: context.properties[0].id,
       quote: 'Please cancel my appointment', description: 'Please cancel my appointment' };
     await recordMessageOperations(mockPg, message, result, context);
     const after = new Date(message.created_at.getTime() + 1000);
@@ -1461,35 +1496,23 @@ postgres('SMS commitments on PostgreSQL', () => {
   });
 
   test.each([
-    ['one active property throughout', 1, null, true],
-    ['two active properties at request time', 2, null, false],
-    // Codex #4816 r20: deactivating one later does not make the old ask unambiguous.
-    ['two at request time, one deactivated before the cancellation', 2, 'deactivate', false],
-    ['one at request time, a second added later', 1, 'add', true],
-    // Codex #4816 r22: two when extraction started, one deactivated before the
-    // write committed — still ambiguous.
-    ['two before extraction, one deactivated before the write', 2, 'deactivate-before-write', false],
-    // Codex #4816 r26: a context loaded long after the text (a backlog) cannot
-    // vouch for the property set the customer had when it arrived.
-    ['one property, but the text was first processed after a backlog', 1, 'late-context', false],
-  ])('Codex #4816 r14/r20: an unscoped cancel ask admits a cancellation only at the request-time sole property (%s)',
-    async (_label, activeAtRequest, later, admissible) => {
+    ['an unscoped ask, one active property', null, false],
+    ['an unscoped ask, two active properties', null, false],
+    ['an ask scoped to the cancelled visit\'s property', 'scoped', true],
+  ])('Codex #4816 r14–r27: a cancellation answers a cancel ask only when its property was resolved (%s)',
+    async (label, scope, admissible) => {
       result.facts = [];
-      result.obligations[0] = { ...result.obligations[0], kind: 'other', due_at: null, property_id: null,
+      result.obligations[0] = { ...result.obligations[0], kind: 'other', due_at: null,
+        property_id: scope === 'scoped' ? context.properties[0].id : null,
         quote: 'Please cancel my appointment', description: 'Please cancel my appointment' };
-      const second = randomUUID();
-      const addSecond = () => mockPg('customer_properties').insert({ id: second, customer_id: message.customer_id,
-        address_line1: '200 Example Lane', city: 'Sarasota', zip: '34236', active: true });
-      if (activeAtRequest === 2) await addSecond();
-      const snapshot = { ...context, properties: await mockPg('customer_properties').where({ customer_id: message.customer_id, active: true }).select('id'),
-        loadedAt: new Date(new Date(message.created_at).getTime() + (later === 'late-context' ? 11 * 60000 : 1000)) };
-      if (later === 'deactivate-before-write') await mockPg('customer_properties').where({ id: second }).update({ active: false });
-      await recordMessageOperations(mockPg, message, result, snapshot);
+      if (label.includes('two active')) {
+        await mockPg('customer_properties').insert({ id: randomUUID(), customer_id: message.customer_id,
+          address_line1: '200 Example Lane', city: 'Sarasota', zip: '34236', active: true });
+      }
+      await recordMessageOperations(mockPg, message, result, context);
       const [commitment] = await mockPg('call_commitments').select('*');
-      expect(commitment.sms_context).toMatchObject({ property_id: null,
-        sole_property_id: activeAtRequest === 1 && later !== 'late-context' ? context.properties[0].id : null });
-      if (later === 'deactivate') await mockPg('customer_properties').where({ id: second }).update({ active: false });
-      if (later === 'add') await addSecond();
+      expect(commitment.sms_context.property_id).toBe(scope === 'scoped' ? context.properties[0].id : null);
+      expect(commitment.sms_context).not.toHaveProperty('sole_property_id');
       const after = new Date(message.created_at.getTime() + 1000);
       const [visit] = await mockPg('scheduled_services').insert({
         customer_id: message.customer_id, property_id: context.properties[0].id, service_type: 'Quarterly Pest Control',

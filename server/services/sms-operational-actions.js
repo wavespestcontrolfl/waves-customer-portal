@@ -105,6 +105,10 @@ const STATED_TIMING = new RegExp([
   // "good morning" is a greeting, not timing (Codex #4816 r24).
   String.raw`\b(?:in the|during the|by|before|after|around|until|till|early|late) (?:morning|afternoon|evening|night)\b`,
   String.raw`\b(?:mornings|afternoons|evenings|nights)\b`,
+  // The period forms TEMPORARY_INSTRUCTION already knows (Codex #4816 r27).
+  String.raw`\bover the (?:weekend|summer|winter|holidays?|next (?:${COUNT} )?(?:days?|weeks?|months?))\b`,
+  String.raw`\b(?:through|thru) the (?:weekend|week|month)\b`,
+  String.raw`\b(?:next|coming|following) (?:${COUNT} )?(?:days?|weeks?|months?)\b|\bnext (?:visit|appointment|service|time)\b`,
   String.raw`\b(?:after|before) (?:work|school|lunch|dinner|noon)\b|\b(?:at )?lunch ?time\b`,
   String.raw`\b${WEEKDAY}`,
   // Undotted abbreviations ("call me Fri"). Wed/sat/sun double as ordinary
@@ -289,7 +293,7 @@ async function loadMessageContext(conn, message) {
       .select('id', 'is_primary', 'address_line1', 'address_line2', 'city', 'zip'),
     conn('property_preferences').where({ customer_id: message.customer_id }).first(),
   ]);
-  return { message, history: history.reverse(), properties, preferences: preferences || {}, loadedAt: new Date(), captureCommitments: smsCommitmentsEnabled(), captureAdditionalProperties: require('./sms-additional-properties').enabled() };
+  return { message, history: history.reverse(), properties, preferences: preferences || {}, captureCommitments: smsCommitmentsEnabled(), captureAdditionalProperties: require('./sms-additional-properties').enabled() };
 }
 
 async function appliedSmsProfileFields(conn, message) {
@@ -345,22 +349,6 @@ function resolveDueDeadline(item, messageCreatedAt, messageBody = '') {
   return { due_at: new Date(new Date(messageCreatedAt).getTime() + hours * 3600000).toISOString(), due_basis: 'default_kind' };
 }
 
-// Sole only when the snapshot taken before the provider call and the one read
-// under the write lock agree: a property deactivated while extraction was in
-// flight must not make an ambiguous request unambiguous (Codex #4816 r22).
-// Property rows carry no reliable change time, so a snapshot taken long
-// after the text arrived (a backlog, an interrupted post-ack kick) cannot
-// vouch for the property set the customer had then: fail closed and leave
-// the request ambiguous (Codex #4816 r26).
-const SOLE_PROPERTY_SNAPSHOT_GRACE_MS = 10 * 60 * 1000;
-function requestTimeSoleProperty(locked, context, sourceAt) {
-  const soleOf = (list) => (list?.length === 1 ? list[0].id : null);
-  const sole = soleOf(locked);
-  const prompt = context.loadedAt instanceof Date
-    && context.loadedAt.getTime() - new Date(sourceAt).getTime() <= SOLE_PROPERTY_SNAPSHOT_GRACE_MS;
-  return sole && prompt && sole === soleOf(context.properties) ? sole : null;
-}
-
 async function recordMessageOperations(conn, message, extracted, matchedContext) {
   const replay = matchedContext.replay === true;
   if (replay && message.direction !== 'inbound') return { skipped: 'source_changed' };
@@ -406,7 +394,6 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
     const additional = !replay && matchedContext.captureAdditionalProperties
       ? await require('./sms-additional-properties').stageAdditionalProperties({ trx, message: live, proposals: extracted.additional_properties })
       : null;
-    const soleProperty = requestTimeSoleProperty(properties, matchedContext, message.created_at);
     if (obligations.length) await trx('call_commitments').insert(obligations.map((item) => {
       const propertyId = properties.length === 1 && properties.some((p) => p.id === item.property_id) ? item.property_id : null;
       const { due_at: dueAt, due_basis: dueBasis } = resolveDueDeadline(item, message.created_at, message.message_body);
@@ -420,7 +407,7 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
         // unscoped cancel ask is answered only by a cancellation there, never
         // by a property that became the sole one later (Codex #4816 r20).
         sms_context: { basis: item.basis, due_text: item.due_text, property_id: propertyId,
-          property_ambiguous: !propertyId, sole_property_id: soleProperty,
+          property_ambiguous: !propertyId,
           customer_id: customer.id, source_at: message.created_at },
       };
     })).onConflict(['sms_log_id', 'commitment_key']).ignore();
@@ -435,14 +422,13 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
     // Only a KNOWN-temporary fact is silent: the extractor marks ambiguous
     // timing duration 'uncertain' precisely for staff review, so that one
     // still rings (Codex #4816 r10).
-    // A fact the extractor itself labelled temporary/visit-only is known
-    // temporary. One it labelled durable is held back only by temporary
-    // wording somewhere in the message; that wording speaks for it only when
-    // it is the message's sole fact — a durable sibling ("For tomorrow's
-    // visit use the side gate. My permanent lockbox code is 1234") still
-    // rings the bell (Codex #4816 r26).
-    const temporaryFacts = facts.filter((f) => f.outcome === 'temporary_instruction' && f.duration !== 'uncertain'
-      && (f.duration !== 'durable' || facts.length === 1));
+    // Only a fact the extractor itself labelled temporary or visit-only is
+    // known temporary. One it labelled durable is held back by temporary
+    // wording somewhere in the message, and every fact carries the whole
+    // message as its quote, so that wording cannot be tied to it ("I'm away
+    // tomorrow. My lockbox code is 1234"): it still rings the bell (Codex
+    // #4816 r26/r27).
+    const temporaryFacts = facts.filter((f) => f.outcome === 'temporary_instruction' && ['temporary', 'visit_only'].includes(f.duration));
     const exceptions = facts.filter((f) => !['applied', 'unchanged', 'proposed', 'superseded', 'previously_applied'].includes(f.outcome)
       && !temporaryFacts.includes(f));
     let notification = null;
@@ -640,7 +626,11 @@ async function applySmsCommitmentUpdate(conn, id, { customerId, action, note, re
 // the cap passes it; the verdict cache makes that free of model calls.
 const EVENT_COMMIT_GRACE_MS = 10 * 60 * 1000;
 const RETRY_AFTER_SQL = "(cc.sms_context->'fulfillment_check'->>'retry_after')::timestamptz";
-const UNSEEN_FLOOR = "GREATEST(s.created_at, COALESCE((cc.sms_context->>'event_seen_at')::timestamptz, s.created_at))";
+// Anchored to the obligation's effective source time: a scheduled outbound
+// promise's queue row predates the delivery that actually made it (Codex
+// #4816 r27).
+const SOURCE_AT = "COALESCE((cc.sms_context->>'source_at')::timestamptz, s.created_at)";
+const UNSEEN_FLOOR = `GREATEST(${SOURCE_AT}, COALESCE((cc.sms_context->>'event_seen_at')::timestamptz, ${SOURCE_AT}))`;
 // The floor and the tick bound sit in every branch, so each scan starts from
 // the row's watermark rather than the customer's whole visit history.
 const unseen = (column) => `${column} <= ? AND ${column} > ${UNSEEN_FLOOR}`;
