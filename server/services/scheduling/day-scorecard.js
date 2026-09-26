@@ -315,8 +315,15 @@ function pastTechRow({ technicianId, technician }, planByKey, mileageByKey, miss
 // (QUALITY_EXCLUDED_STATUSES), so its totals shrink as the day's work gets
 // done. Without a saved plan, today falls back to the board, labeled
 // 'remaining_route' so it never reads as the whole day's plan.
-function futureTechRows(day, driveModel, savedPlans) {
-  return day.byTech.map(techQuality => {
+//
+// Today's roster also takes every technician with a saved plan for today
+// (Codex P2, round 10), as past days already take their history: one who
+// became inactive/non-assignable after the snapshot is gone from day.byTech,
+// and their completed planned work is gone from the unallocated footer too
+// (day-quality excludes completed rows), so the saved plan is the only
+// place it shows. Named via nameById (no assignable filter).
+function futureTechRows(day, driveModel, savedPlans, nameById) {
+  const rows = day.byTech.map(techQuality => {
     const saved = savedPlans ? savedPlans.get(techQuality.technicianId) : null;
     if (saved) {
       return { technicianId: techQuality.technicianId, technician: techQuality.technician,
@@ -326,6 +333,25 @@ function futureTechRows(day, driveModel, savedPlans) {
       plannedBasis: savedPlans ? 'remaining_route' : 'board',
       planned: plannedFutureRow(techQuality), actual: null };
   });
+  const onBoard = new Set(day.byTech.map(techQuality => techQuality.technicianId));
+  for (const [technicianId, saved] of savedPlans || []) {
+    if (onBoard.has(technicianId)) continue;
+    rows.push({ technicianId, technician: nameById.get(technicianId) || null,
+      driveModel: saved.driveModel, plannedBasis: 'saved_plan', planned: plannedPastRow(saved), actual: null });
+  }
+  return rows;
+}
+
+// Past completed work with NO technician at all (Codex P2, round 10):
+// route-performance reports it as a missing-baseline route keyed
+// "date|" and builds its recorded rows, and day-quality's unallocated
+// footer excludes completed work, so without this row it vanished. Shown
+// as one "Unassigned" row — no plan or mileage can belong to it.
+function unassignedPastRow(date, missingBaselineStopsByKey) {
+  const fallbackStops = missingBaselineStopsByKey.get(`${date}|`);
+  if (!fallbackStops || !fallbackStops.length) return null;
+  return { technicianId: null, technician: 'Unassigned', driveModel: null, plannedUnavailableReason: 'unassigned',
+    planned: null, actual: actualPastRow(null, null, fallbackStops) };
 }
 
 // keyed "date|technicianId" -> Map(date -> Set(technicianId)), shared by the
@@ -345,7 +371,8 @@ function idsByDate(keyedMap) {
 // the SAME condition that would otherwise silently drop this technician's
 // day from the roster if their only evidence is a missing baseline (no
 // plan, and no mileage that day either). Non-null technicianIds only: a
-// route with no technician at all has no row to build.
+// route with no technician at all gets its own Unassigned row instead
+// (unassignedPastRow).
 function missingBaselineIdsByDate(routes = []) {
   const byDate = new Map();
   for (const route of routes) {
@@ -392,6 +419,14 @@ function pastDayRoster(date, techs, idsByDateMaps) {
   return ids;
 }
 
+function pastDayRows(date, { techs, idsByDateMaps, nameById, planByKey, mileageByKey, missingBaselineStopsByKey, truncatedPlanningRuns }) {
+  const rows = [...pastDayRoster(date, techs, idsByDateMaps)].map(technicianId => pastTechRow(
+    { technicianId, technician: nameById.get(technicianId) || null }, planByKey, mileageByKey,
+    missingBaselineStopsByKey, date, truncatedPlanningRuns));
+  const unassigned = unassignedPastRow(date, missingBaselineStopsByKey);
+  return unassigned ? [...rows, unassigned] : rows;
+}
+
 async function getDayScorecard(input = {}, conn = require('../../models/db'), now = new Date()) {
   const from = input.date_from;
   const to = input.date_to;
@@ -419,18 +454,17 @@ async function getDayScorecard(input = {}, conn = require('../../models/db'), no
   const missingIdsByDate = missingBaselineIdsByDate(performance.missingBaselineRoutes);
   const missingBaselineStopsByKey = performance.missingBaselineStops || new Map();
   const idsByDateMaps = [planIdsByDate, mileageIdsByDate, missingIdsByDate];
-  const nameById = await resolveHistoricalNames(conn, techs, idsByDateMaps);
   const truncatedPlanningRuns = Boolean(performance.truncatedPlanningRuns);
   const todayPlans = from <= today && to >= today
     ? await getSavedDayPlans({ date: today, now }, conn) : null;
+  const todayIdsByDate = new Map([[today, new Set(todayPlans ? todayPlans.keys() : [])]]);
+  const nameById = await resolveHistoricalNames(conn, techs, [...idsByDateMaps, todayIdsByDate]);
 
   const days = [];
   for (const day of quality.days) {
     const byTech = day.date < today
-      ? [...pastDayRoster(day.date, techs, idsByDateMaps)].map(technicianId => pastTechRow(
-        { technicianId, technician: nameById.get(technicianId) || null }, planByKey, mileageByKey,
-        missingBaselineStopsByKey, day.date, truncatedPlanningRuns))
-      : futureTechRows(day, quality.driveModel, day.date === today ? todayPlans : null);
+      ? pastDayRows(day.date, { techs, idsByDateMaps, nameById, planByKey, mileageByKey, missingBaselineStopsByKey, truncatedPlanningRuns })
+      : futureTechRows(day, quality.driveModel, day.date === today ? todayPlans : null, nameById);
     days.push({ date: day.date, closed: day.closed, byTech,
       // Stops assigned to no assignable technician at all (unassigned, or an
       // offboarding/ineligible tech that still carries assigned work — Codex

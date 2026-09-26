@@ -388,3 +388,20 @@ it('labels a raw row count when the physical stop count is unknown', async () =>
   expect(screen.getByText('4 rows · physical unknown')).toBeInTheDocument();
   expect(screen.getByText('3 rows · physical unknown')).toBeInTheDocument();
 });
+
+// Codex P2 (round 10): past completed work with no technician renders as
+// its own Unassigned row instead of vanishing.
+it('renders an Unassigned past row with its own basis label', async () => {
+  mockAdminFetch.mockResolvedValue(ok({
+    driveModel: 'legacy',
+    days: [{ date: '2026-09-01', byTech: [
+      { technicianId: 'tech1', technician: 'Adam', driveModel: 'legacy', plannedUnavailableReason: 'no_saved_plan', planned: null,
+        actual: { stops: 1, onSiteMinutes: 30, onSiteCoverage: { covered: 1, total: 1 }, driveMinutes: null, spanMinutes: 30 } },
+      { technicianId: null, technician: 'Unassigned', driveModel: null, plannedUnavailableReason: 'unassigned', planned: null,
+        actual: { stops: 2, onSiteMinutes: 70, onSiteCoverage: { covered: 2, total: 2 }, driveMinutes: null, spanMinutes: 120 } },
+    ] }],
+  }));
+  render(<DayScorecardPanel />);
+  const label = await screen.findByText('Unassigned (no plan)');
+  expect(within(label.closest('tr')).getByText('Unassigned')).toBeInTheDocument();
+});

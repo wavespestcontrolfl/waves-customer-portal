@@ -466,6 +466,53 @@ describe('getDayScorecard', () => {
     expect(tomorrowRows[0]).toMatchObject({ plannedBasis: 'board', planned: { stops: 1 } });
   });
 
+  // Codex P2 (round 10): a technician who became non-assignable after
+  // today's snapshot is gone from the board roster, and their completed
+  // planned work from the unallocated footer — the saved plan is the only
+  // place it shows, so it joins the roster (named without the assignable
+  // filter), as past days already do.
+  test("today's roster includes a saved-plan technician no longer on the board", async () => {
+    const today = '2026-09-08';
+    const goneId = '123e4567-e89b-12d3-a456-426614174000';
+    getScheduleQualityMeasurements.mockResolvedValue({ driveModel: 'calibrated', days: [{ date: today, closed: false,
+      byTech: [{ technicianId: 'tech1', technician: 'Tech One', scheduledVisits: 1, serviceMinutes: 30, coVisitOnSiteMinutes: 30,
+        physicalStops: 1, modeledDriveMinutes: 5, modeledWaitingMinutes: 0, modeledReturnMinuteBeforeBreaks: 540, modeledLateVisits: [] }] }] });
+    getSavedDayPlans.mockResolvedValue(new Map([[goneId, { plannedVisits: 3, plannedPhysicalStops: 3, plannedServiceMinutes: 150,
+      plannedDriveMinutes: 40, plannedWaitingMinutes: 0, plannedReturnMinuteBeforeBreaks: 780, driveModel: 'legacy' }]]));
+    const result = await getDayScorecard({ date_from: today, date_to: today },
+      conn([], [{ id: goneId, name: 'Former Tech' }]), new Date(`${today}T16:00:00Z`));
+    const rows = result.days[0].byTech;
+    expect(rows.map(row => row.technicianId)).toEqual(['tech1', goneId]);
+    expect(rows[0]).toMatchObject({ plannedBasis: 'remaining_route' });
+    expect(rows[1]).toMatchObject({ technician: 'Former Tech', plannedBasis: 'saved_plan', driveModel: 'legacy', actual: null,
+      planned: { stops: 3, physicalStops: 3, onSiteMinutes: 150, returnMinute: 780 } });
+  });
+
+  // Codex P2 (round 10): past completed work with no technician at all is a
+  // missing-baseline route keyed "date|" — it was dropped from the roster,
+  // and the unallocated footer excludes completed work, so it vanished.
+  test('past completed work with no technician renders as one Unassigned row', async () => {
+    const date = '2026-09-01';
+    getScheduleQualityMeasurements.mockResolvedValue({ driveModel: 'legacy', days: [
+      { date, closed: false, byTech: [{ technicianId: 'tech1', technician: 'Tech One' }] },
+      { date: '2026-09-02', closed: false, byTech: [{ technicianId: 'tech1', technician: 'Tech One' }] }] });
+    getRoutePerformance.mockResolvedValue({
+      plans: [], truncatedPlanningRuns: false,
+      missingBaselineRoutes: [{ date, technicianId: null }],
+      missingBaselineStops: new Map([[`${date}|`, [
+        { appointmentId: 'u1', visitId: null, windowStartMin: 480, durationEvidence: 'recorded_lifecycle_interval', recordedServiceMinutes: 40, recordedArrivalMinute: 480, recordedCompletionMinute: 520 },
+        { appointmentId: 'u2', visitId: null, windowStartMin: 600, durationEvidence: 'operator_reported', recordedServiceMinutes: 30, recordedArrivalMinute: 600, recordedCompletionMinute: null },
+      ]]]),
+    });
+    const result = await getDayScorecard({ date_from: date, date_to: '2026-09-02' }, conn([]), new Date('2026-09-08T12:00:00Z'));
+    const unassigned = result.days[0].byTech.find(row => row.technicianId === null);
+    expect(unassigned).toMatchObject({ technician: 'Unassigned', planned: null, plannedUnavailableReason: 'unassigned', driveModel: null,
+      actual: { stops: 2, physicalStops: 2, onSiteMinutes: 70, onSiteCoverage: { covered: 2, total: 2 }, driveMinutes: null,
+        spanMinutes: 40, spanCoverage: { covered: 1, total: 2 } } }); // u2 has no recorded completion: partial
+    // Only the date that actually had such work gets the row.
+    expect(result.days[1].byTech.some(row => row.technicianId === null)).toBe(false);
+  });
+
   test('a range that does not include today never reads saved day plans', async () => {
     getScheduleQualityMeasurements.mockResolvedValue({ driveModel: 'legacy', days: [{ date: '2026-09-10', closed: false, byTech: [] }] });
     await getDayScorecard({ date_from: '2026-09-10', date_to: '2026-09-10' }, conn(), new Date('2026-09-08T16:00:00Z'));

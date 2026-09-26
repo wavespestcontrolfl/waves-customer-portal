@@ -122,6 +122,8 @@ function basisLabel(row, isPast) {
   if (!isPast && row.plannedBasis === 'remaining_route') return `Remaining route (${modelLabel(row.driveModel)})`;
   if (!isPast) return `Board (${modelLabel(row.driveModel)})`;
   if (row.planned) return `Planned (${modelLabel(row.driveModel)})`;
+  // Completed work with no technician at all has no route to plan.
+  if (row.plannedUnavailableReason === 'unassigned') return 'Unassigned (no plan)';
   return row.plannedUnavailableReason === 'may_be_truncated' ? 'Planned (baseline may be truncated)' : 'Planned (no saved plan)';
 }
 
