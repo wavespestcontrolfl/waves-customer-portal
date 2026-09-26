@@ -32,7 +32,7 @@ const { etParts } = require('../../utils/datetime-et');
 const ConsentProvenance = require('./consent-provenance');
 const { anchorInvoiceOf, accountDaysOverdue, dunningTierForOverdue, dueDayOf } = require('./account-anchor');
 
-const CHANNELS = new Set(['sms', 'email', 'voice', 'manual_call']);
+const CHANNELS = new Set(['sms', 'email', 'push', 'voice', 'manual_call']);
 
 // Strict purpose allowlist (codex 2026-08-14 r2 ruling): an unknown purpose
 // on ANY channel is a denial, never an unrestricted allow — before this, any
@@ -45,11 +45,12 @@ const KNOWN_PURPOSES_BY_CHANNEL = {
   manual_call: ['late_payment'],
   sms: ['late_payment', 'balance_reminder'],
   email: ['late_payment', 'balance_reminder'],
+  push: ['late_payment', 'balance_reminder'],
 };
 
 // Which channels each active flag blocks. Absolute flags block everything —
 // including manual_call, so even a human dial-sheet consumer sees the denial.
-const ALL_CHANNELS = ['sms', 'email', 'voice', 'manual_call'];
+const ALL_CHANNELS = ['sms', 'email', 'push', 'voice', 'manual_call'];
 const FLAG_BLOCKED_CHANNELS = {
   do_not_collect: ALL_CHANNELS,
   collection_hold: ALL_CHANNELS,
@@ -64,7 +65,7 @@ const FLAG_BLOCKED_CHANNELS = {
   // late-payment outreach — no automated call, no late-payment text or
   // email. Pre-visit balance reminders and human calls are unaffected
   // (see FLAG_LATE_PAYMENT_ONLY). Set via ops/agents/collections-flag.js.
-  pays_by_check: ['voice', 'sms', 'email'],
+  pays_by_check: ['voice', 'sms', 'email', 'push'],
   // Approved payment plan (A2 mirrors its PAYMENT_PLAN state here in the
   // same txn): the whole sequence pauses — every channel.
   payment_plan_active: ALL_CHANNELS,
@@ -175,7 +176,7 @@ async function deliveredDunningTouches(invoice) {
   // direction.
   const [led] = await db('collections_contact_ledger')
     .whereRaw('invoice_ids @> ?::jsonb', [JSON.stringify([invoice.id])])
-    .whereIn('channel', ['sms', 'email'])
+    .whereIn('channel', ['sms', 'email', 'push'])
     .where({ purpose: 'late_payment' })
     .whereIn('source', ['balance_reminder_late_payment_check'])
     .whereRaw("metadata->>'delivered' = 'true'")
@@ -456,7 +457,7 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
         deny('voice_contact_within_7d');
         proposeNextEligible(new Date(new Date(voice7d.occurred_at).getTime() + 7 * DAY_MS));
       }
-    } else if (channel === 'sms' || channel === 'email') {
+    } else if (channel === 'sms' || channel === 'email' || channel === 'push') {
       // A live conversation (either direction of a real call) supersedes the
       // automated text/email cadence for a week. Only LIVE ones (gh
       // prb-r12): a ledger voice row finalized live_conversation:false

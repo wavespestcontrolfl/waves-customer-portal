@@ -8,6 +8,7 @@ const config = require('../../config');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { minutesFromElapsed } = require('../../utils/duration-minutes');
+const { detectServiceLine } = require('./service-line-configs');
 
 const FALLBACK_PDF_MARKER = 'Browser PDF rendering was unavailable';
 const MIN_EXPECTED_REPORT_BYTES = 50000;
@@ -74,6 +75,13 @@ function reportPdfStorageKey(serviceRecordId, { visibilitySignature = '' } = {})
   // edit, or the next view/email keeps serving the stale cached PDF.
   const sigPart = visibilitySignature ? `-pp${visibilitySignature}` : '';
   return `reports/${serviceRecordId}/report-${SERVICE_REPORT_PDF_STORAGE_VERSION}${sigPart}.pdf`;
+}
+
+// Older tree reports can contain hidden photo scores promoted to "healthy".
+// Scope the content-version miss to tree/shrub PDFs; other lines keep their key.
+function treeShrubReviewPdfSignature(service = {}) {
+  const line = service.service_line || detectServiceLine(service.service_type);
+  return line === 'tree_shrub' ? '-tsreview2' : '';
 }
 
 // Time-on-site correction key component (codex P2 #3152): nulling
@@ -242,4 +250,5 @@ module.exports = {
   storedReportPdfLooksBroken,
   timeOnSiteAdjustedPdfSignature,
   reentryAdjustedPdfSignature,
+  treeShrubReviewPdfSignature,
 };

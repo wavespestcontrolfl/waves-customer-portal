@@ -58,8 +58,10 @@ async function getRecent(customerId, limit = 50) {
 /**
  * Check if an event of a given type exists for a customer in the last N days.
  * Used to prevent duplicate notifications (e.g. card-expiring-soon reminders).
+ * `details` = { key: value } pairs the matching row's JSONB details must
+ * carry (or lack entirely).
  */
-async function eventExistsRecently(customerId, eventType, withinDays = 30, paymentMethodId = null) {
+async function eventExistsRecently(customerId, eventType, withinDays = 30, paymentMethodId = null, details = null) {
   const cutoff = new Date();
   cutoff.setDate(cutoff.getDate() - withinDays);
 
@@ -67,6 +69,13 @@ async function eventExistsRecently(customerId, eventType, withinDays = 30, payme
     .where({ customer_id: customerId, event_type: eventType })
     .where('created_at', '>=', cutoff);
   if (paymentMethodId) q = q.where({ payment_method_id: paymentMethodId });
+  // A details filter narrows the cooldown to rows that recorded the same
+  // value (a reminder stage, a delivery leg). Rows written before the key
+  // existed still match, so a legacy row keeps its cooldown instead of
+  // re-sending the notice it already covered.
+  for (const [key, value] of Object.entries(details || {})) {
+    q = q.whereRaw('(details->>? IS NULL OR details->>? = ?)', [key, key, String(value)]);
+  }
 
   const row = await q.first();
   return !!row;
