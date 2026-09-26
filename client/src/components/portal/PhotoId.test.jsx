@@ -669,6 +669,31 @@ describe('v2 result card (GATE_PHOTO_ID_V2, server-side)', () => {
     expect(screen.queryByRole('link', { name: 'Read more on our website' })).not.toBeInTheDocument();
   });
 
+  it('renders the entry role/risk/action lines from the payload, and skips any field the server omits (2026-09-26 contract delta)', async () => {
+    api.getPhotoIds.mockResolvedValue({ items: [] });
+    render(<Harness />);
+    fireEvent.click(await screen.findByRole('button', { name: /Photo ID/i }));
+    fireEvent.click(screen.getByText('Bug or pest'));
+    fireEvent.change(document.querySelector('input[type="file"]'), { target: { files: [photoFile()] } });
+    await screen.findByRole('img');
+
+    api.createPhotoId.mockResolvedValueOnce({
+      id: 'v1d', type: 'pest', created_at: '2026-09-26T00:00:00Z',
+      result: {},
+      // action_label deliberately omitted — no server field for it.
+      v2: { ...v2Entry, entry: { ...v2Entry.entry, role_label: 'Stinging pest', risk_label: 'Can bite or sting if handled or disturbed' } },
+      next_step: { kind: 'none', title: 'All set', body: 'x' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Identify' }));
+
+    await screen.findByText("We're pretty sure: Tropical Fire Ant");
+    expect(screen.getByText('What it is:')).toBeInTheDocument();
+    expect(screen.getByText('Stinging pest')).toBeInTheDocument();
+    expect(screen.getByText('Risk:')).toBeInTheDocument();
+    expect(screen.getByText('Can bite or sting if handled or disturbed')).toBeInTheDocument();
+    expect(screen.queryByText('What to do:')).not.toBeInTheDocument();
+  });
+
   it('renders "Other possibilities" after the top candidate, with the difference and local labels', async () => {
     api.getPhotoIds.mockResolvedValue({ items: [] });
     render(<Harness />);
@@ -736,7 +761,7 @@ describe('v2 result card (GATE_PHOTO_ID_V2, server-side)', () => {
     expect(screen.getByText('Needs more evidence')).toBeInTheDocument();
     // No entry means no verdict chip / About section.
     expect(screen.queryByRole('button', { name: /^About /i })).not.toBeInTheDocument();
-    expect(screen.getByText('Take the photo that settles it')).toBeInTheDocument();
+    expect(screen.getByText('A photo that would help confirm it')).toBeInTheDocument();
     expect(screen.getByText('A close-up showing the waist from the side would settle it.')).toBeInTheDocument();
     expect(screen.getByText('That view separates the two most likely ants.')).toBeInTheDocument();
 
@@ -786,6 +811,65 @@ describe('v2 result card (GATE_PHOTO_ID_V2, server-side)', () => {
     expect(await screen.findByText('A photo from directly above would settle it.')).toBeInTheDocument();
     expect(screen.getByText(/3-photo limit/)).toBeInTheDocument();
     expect(screen.getAllByRole('img')).toHaveLength(3);
+  });
+
+  it('next_photo.photo_can_confirm === false shows the ask under a "can\'t confirm" heading with no retake button', async () => {
+    api.getPhotoIds.mockResolvedValue({ items: [] });
+    render(<Harness />);
+    fireEvent.click(await screen.findByRole('button', { name: /Photo ID/i }));
+    fireEvent.click(screen.getByText('Bug or pest'));
+    fireEvent.change(document.querySelector('input[type="file"]'), { target: { files: [photoFile()] } });
+    await screen.findByRole('img');
+
+    api.createPhotoId.mockResolvedValueOnce({
+      id: 'v2cantconfirm', type: 'pest', created_at: '2026-09-26T00:00:00Z',
+      result: {},
+      v2: {
+        version: 2, catalog_version: '2026-09-26.1', tier: 'needs_more_evidence',
+        answer: { level: 'group', node_id: 'ants', wording: 'group_only', headline: 'Looks like an ant', subhead: null },
+        group: { id: 'ants', label: 'Ants', generic: 'an ant' }, entry: null, evidence: {}, candidates: [],
+        next_photo: {
+          ask: 'These two can only be told apart with a lab sample.',
+          why: 'A technician can confirm it on an inspection.',
+          photo_can_confirm: false,
+        },
+        referral: null,
+      },
+      next_step: { kind: 'unclear', title: 'Not sure yet', body: 'x' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Identify' }));
+
+    expect(await screen.findByText("A photo can't confirm this one")).toBeInTheDocument();
+    expect(screen.getByText('These two can only be told apart with a lab sample.')).toBeInTheDocument();
+    expect(screen.getByText('A technician can confirm it on an inspection.')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Take this photo' })).not.toBeInTheDocument();
+    expect(screen.queryByText('A photo that would help confirm it')).not.toBeInTheDocument();
+  });
+
+  it('next_photo.photo_can_confirm === true keeps the normal retake flow (same as missing)', async () => {
+    api.getPhotoIds.mockResolvedValue({ items: [] });
+    render(<Harness />);
+    fireEvent.click(await screen.findByRole('button', { name: /Photo ID/i }));
+    fireEvent.click(screen.getByText('Bug or pest'));
+    fireEvent.change(document.querySelector('input[type="file"]'), { target: { files: [photoFile()] } });
+    await screen.findByRole('img');
+
+    api.createPhotoId.mockResolvedValueOnce({
+      id: 'v2canconfirm', type: 'pest', created_at: '2026-09-26T00:00:00Z',
+      result: {},
+      v2: {
+        version: 2, catalog_version: '2026-09-26.1', tier: 'needs_more_evidence',
+        answer: { level: 'group', node_id: 'ants', wording: 'group_only', headline: 'Looks like an ant', subhead: null },
+        group: { id: 'ants', label: 'Ants', generic: 'an ant' }, entry: null, evidence: {}, candidates: [],
+        next_photo: { ask: 'A side close-up would help.', why: 'y', photo_can_confirm: true },
+        referral: null,
+      },
+      next_step: { kind: 'unclear', title: 'Not sure yet', body: 'x' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Identify' }));
+
+    expect(await screen.findByText('A photo that would help confirm it')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Take this photo' })).toBeInTheDocument();
   });
 
   it('a history-sourced retake clears an unrelated note/location left over from an earlier, abandoned photos-step visit (Codex round-0 P1)', async () => {

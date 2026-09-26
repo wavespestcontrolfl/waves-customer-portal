@@ -354,7 +354,7 @@ export function PhotoIdSheet({ open, onClose, items = [], onRefreshHistory, onOp
   const [unavailableHistoryPhotoIds, setUnavailableHistoryPhotoIds] = useState([]);
   const [historyError, setHistoryError] = useState('');
   const [loadingHistoryId, setLoadingHistoryId] = useState(null);
-  // Set by the v2 result's "Take the photo that settles it" button
+  // Set by the v2 result's "A photo that would help confirm it" button
   // (handleRetakePhoto below) — { ask, full } shown as a banner on the
   // photos step. `full` means the 3-photo limit was already reached, so the
   // banner asks the customer to remove one before the retake photo fits.
@@ -525,7 +525,7 @@ export function PhotoIdSheet({ open, onClose, items = [], onRefreshHistory, onOp
     }
   };
 
-  // v2 "Take the photo that settles it" (V2Result's NextPhotoCard). Returns
+  // v2 "A photo that would help confirm it" (V2Result's NextPhotoCard). Returns
   // to the photos step, KEEPING the live photos already on the sheet — for
   // a live result those are this session's own uploads; for a history-
   // opened result `photos` is already [] (cleared in openHistoryItem), so
@@ -1100,21 +1100,32 @@ function EvidenceSection({ evidence }) {
   );
 }
 
-// "Take the photo that settles it" — the one decisive next photo the engine
-// asks for. Tapping the button hands next_photo back up to the sheet, which
-// returns to the photos step with `ask` shown as a banner (PhotoIdSheet's
-// handleRetakePhoto).
+// "A photo that would help confirm it" — the one decisive next photo the
+// engine asks for (never "settles it" — 2026-09-26 contract delta #4:
+// a photo narrows things, it doesn't settle them). Tapping the button hands
+// next_photo back up to the sheet, which returns to the photos step with
+// `ask` shown as a banner (PhotoIdSheet's handleRetakePhoto).
+//
+// `photo_can_confirm === false` (contract delta #3): the chosen look-alike
+// pair can't be told apart by photo at all — the ask text says what DOES
+// confirm it (e.g. a technician's sample), so there is no retake button.
+// `true` or missing keeps today's retake flow.
 function NextPhotoCard({ nextPhoto, onRetakePhoto }) {
+  const canConfirm = nextPhoto.photo_can_confirm !== false;
   return (
     <section data-glass="soft" style={{ borderRadius: 8, border: `1px solid ${SHELL.border}`, padding: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
-      <div style={{ fontSize: 16, fontWeight: 700, color: SHELL.text }}>Take the photo that settles it</div>
+      <div style={{ fontSize: 16, fontWeight: 700, color: SHELL.text }}>
+        {canConfirm ? 'A photo that would help confirm it' : "A photo can't confirm this one"}
+      </div>
       {nextPhoto.ask && <div style={{ fontSize: 15, color: SHELL.body, lineHeight: 1.5 }}>{nextPhoto.ask}</div>}
       {nextPhoto.why && <div style={{ fontSize: 14, color: SHELL.muted, lineHeight: 1.45 }}>{nextPhoto.why}</div>}
-      <button type="button" data-glass-accent="" onClick={() => onRetakePhoto?.(nextPhoto)} style={{
-        minHeight: 48, borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 16, fontWeight: 700, fontFamily: FONTS.body,
-      }}>
-        Take this photo
-      </button>
+      {canConfirm && (
+        <button type="button" data-glass-accent="" onClick={() => onRetakePhoto?.(nextPhoto)} style={{
+          minHeight: 48, borderRadius: 8, border: 'none', cursor: 'pointer', fontSize: 16, fontWeight: 700, fontFamily: FONTS.body,
+        }}>
+          Take this photo
+        </button>
+      )}
     </section>
   );
 }
@@ -1230,6 +1241,23 @@ function V2Result({ v2, photos, unavailablePhotoIds, onPhotoUnavailable, onRetak
             )}
             {entry.safety_line && (
               <div style={{ fontSize: 15, color: B.red, fontWeight: 700, lineHeight: 1.45 }}>{entry.safety_line}</div>
+            )}
+            {/* Fixed catalog labels (2026-09-26 contract delta #2) — payload
+                strings, rendered only for the fields present. */}
+            {entry.role_label && (
+              <div style={{ fontSize: 15, color: SHELL.body, lineHeight: 1.45 }}>
+                <span style={{ fontWeight: 700, color: SHELL.text }}>What it is: </span>{entry.role_label}
+              </div>
+            )}
+            {entry.risk_label && (
+              <div style={{ fontSize: 15, color: SHELL.body, lineHeight: 1.45 }}>
+                <span style={{ fontWeight: 700, color: SHELL.text }}>Risk: </span>{entry.risk_label}
+              </div>
+            )}
+            {entry.action_label && (
+              <div style={{ fontSize: 15, color: SHELL.body, lineHeight: 1.45 }}>
+                <span style={{ fontWeight: 700, color: SHELL.text }}>What to do: </span>{entry.action_label}
+              </div>
             )}
             <AboutEntrySection entry={entry} />
           </div>
