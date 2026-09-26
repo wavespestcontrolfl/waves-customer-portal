@@ -539,8 +539,16 @@ export function PhotoIdSheet({ open, onClose, items = [], onRefreshHistory, onOp
   // be sitting in state and ride along into this new submission (Codex
   // round-0 P1). A live retake is the same identification's own note, so it
   // stays.
+  //
+  // Also resets busyPhotos, same as pickType: openHistoryItem already bumped
+  // genRef when the customer opened this history item, so if a photo add
+  // was still in flight from an earlier, abandoned photos-step visit, its
+  // own `finally` can no longer clear the flag (its generation no longer
+  // matches) — left set, Add and Identify would stay disabled forever on
+  // this new photos-step visit (Codex round-0 P1).
   const handleRetakePhoto = (nextPhoto) => {
     setSubmitError('');
+    setBusyPhotos(false);
     if (resultSource === 'history') {
       setNote('');
       setLocation('');

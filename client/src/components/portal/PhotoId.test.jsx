@@ -921,6 +921,61 @@ describe('v2 result card (GATE_PHOTO_ID_V2, server-side)', () => {
     expect(payload.location).toBeUndefined();
   });
 
+  it('a history-sourced retake clears busyPhotos left stuck by an abandoned photo read on an earlier visit (Codex round-0 P1)', async () => {
+    api.getPhotoIds.mockResolvedValue({
+      items: [{ id: 'h2', type: 'pest', created_at: '2026-09-25T00:00:00Z', headline: 'Roaches', next_step_kind: 'unclear' }],
+    });
+    api.getPhotoId.mockResolvedValueOnce({
+      id: 'h2', type: 'pest', created_at: '2026-09-25T00:00:00Z',
+      result: {},
+      v2: {
+        version: 2, catalog_version: '2026-09-26.1', tier: 'needs_more_evidence',
+        answer: { level: 'group', node_id: 'roaches', wording: 'group_only', headline: 'Looks like a roach', subhead: null },
+        group: { id: 'roaches', label: 'Roaches', generic: 'a roach' }, entry: null, evidence: {}, candidates: [],
+        next_photo: { ask: 'The underside would help.', why: 'y' }, referral: null,
+      },
+      next_step: { kind: 'unclear', title: 'Not sure yet', body: 'x' },
+      photos: [],
+    });
+    // A FileReader whose read never completes on its own (same pattern as the
+    // "switching type mid photo-read" test above).
+    class DeferredFileReader {
+      readAsDataURL() { DeferredFileReader.pending.push(this); }
+    }
+    DeferredFileReader.pending = [];
+    vi.stubGlobal('FileReader', DeferredFileReader);
+    render(<Harness />);
+
+    // Start adding a photo on a DIFFERENT, abandoned visit and leave the read
+    // pending, then back out to the picker without it ever resolving.
+    fireEvent.click(await screen.findByRole('button', { name: /Photo ID/i }));
+    fireEvent.click(screen.getByText('Bug or pest'));
+    fireEvent.change(document.querySelector('input[type="file"]'), { target: { files: [photoFile()] } });
+    expect(await screen.findByText('Adding…')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }));
+
+    // Open the unrelated history item and retake its next photo.
+    fireEvent.click(await screen.findByText('Roaches'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Take this photo' }));
+
+    // Add must not be stuck disabled on "Adding…", and a fresh photo/Identify
+    // must both work.
+    await screen.findByText('The underside would help.');
+    expect(screen.getByText('Add')).toBeInTheDocument();
+    expect(screen.queryByText('Adding…')).not.toBeInTheDocument();
+
+    vi.stubGlobal('FileReader', FixtureFileReader);
+    fireEvent.change(document.querySelector('input[type="file"]'), { target: { files: [photoFile()] } });
+    await screen.findByRole('img');
+    api.createPhotoId.mockResolvedValueOnce({
+      id: 'h2-retake', type: 'pest', created_at: '2026-09-26T00:00:00Z',
+      result: {}, v2: null, next_step: { kind: 'none', title: 'Fine', body: 'x' },
+    });
+    expect(screen.getByRole('button', { name: 'Identify' })).not.toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Identify' }));
+    await waitFor(() => expect(api.createPhotoId).toHaveBeenCalledTimes(1));
+  });
+
   it('a referral next_step renders the referral text and a Done button, with no request CTA', async () => {
     api.getPhotoIds.mockResolvedValue({ items: [] });
     render(<Harness />);
