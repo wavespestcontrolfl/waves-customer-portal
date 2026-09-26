@@ -23,6 +23,15 @@ const db = require('../models/db');
 const logger = require('./logger');
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('./llm/call');
+// The repo's ONE product-claim/safety-compliance rule set (20+ review rounds
+// of paraphrase coverage): unconditional "safe" claims, the "EPA-approved"
+// ban, and fixed re-entry/drying minute figures. Already the canonical check
+// for comms-lint, lawn-visit customer copy, email replies, and voice-agent
+// copy — reused here rather than duplicated (AW additional-gaps: "unlike the
+// estimate assistant's controlled safety path, public intake does not
+// explicitly apply the repository's product-claim rules to successful model
+// answers").
+const { reentrySafetyClaimFinding } = require('./content/content-guardrails');
 
 const COMPANY = {
   name: 'Waves Pest Control',
@@ -122,6 +131,82 @@ function looksLikeEmergency(text) {
   return EMERGENCY_RE.test(t) || (BITE_STING_RE.test(t) && REACTION_RE.test(t));
 }
 
+// Codex round 1 P2 (L423): looksLikeEmergency is deliberately maximally
+// cautious for the both-providers-failed floor below (unchanged, still calls
+// looksLikeEmergency directly) — but the SUCCESSFUL-turn override further
+// down needs a stricter read: "I am not having an allergic reaction; I just
+// need ant control" and "Do you provide pest control for hospitals?" must
+// not override a valid model answer. This override-only variant (a) requires
+// an affirmative match — only a negation that directly governs the term
+// voids it (see EMERGENCY_OVERRIDE_NEGATION_RE) — and (b) drops the bare
+// institutional nouns (hospital/E.R./emergency room/urgencias) from the
+// term list, since alone they describe a place, not a symptom; the
+// bite/sting + reaction combo below still needs no negation exemption ("my
+// child was stung and cannot breathe" is the symptom itself, not a negated
+// claim of one). "Allergic reaction" alone is left to the model (it drew
+// every negation false positive); breathing trouble, anaphylaxis, throat
+// swelling, collapse and poison ingestion (EN + ES) are the override set.
+// Bare "poison" / "allergic" are not on this list — "do you
+// use rat poison?" and "I'm allergic to bees, can you treat a nest?" are
+// ordinary pest questions; poisoning needs an ingestion or "poisoned" cue.
+const EMERGENCY_OVERRIDE_TERM_RE = /\b(?:(?:call|called|calling|dial|dialed|need|needs)\s+911|can'?t\s+breathe|trouble\s+breathing|difficulty\s+breathing|short(?:ness)?\s+of\s+breath|anaphyla\w*|anafila\w*|epi\s?pen|throat\s+(?:is\s+)?(?:closing|swelling)|chest\s+pain|(?:he|she|they|i|someone|my\s+\w+|child|son|daughter|kid|baby)\s+(?:has\s+|just\s+|already\s+)?passed\s+out|unconscious|inconsciente|desmay\w*|poisoned|poisoning|envenenad\w*|envenenamiento|(?:swallowed|ate|drank|ingested|licked|got\s+into)\s+(?:some\s+|the\s+|your\s+)?(?:rat\s+)?(?:poison|bait|pesticide|chemicals?)|(?:comi[óo]|trag[óo]|bebi[óo]|se\s+comi[óo]|ingiri[óo]|lami[óo])\s+(?:un\s+poco\s+de\s+|el\s+|la\s+|los\s+|las\s+)?(?:veneno|pesticida|cebo|qu[íi]mico)|no\s+pued[eo]\s+respirar|dificultad\s+para\s+respirar|falta\s+de\s+aire|dolor\s+de\s+pecho)\b/gi;
+// Only a negation that directly governs the term voids it ("not having an
+// allergic reaction", "no signs of anaphylaxis", "isn't an emergency").
+// Anything looser fails open on real emergencies ("No, he can't breathe",
+// "I can't tell, but he has chest pain"), and this path decides who gets
+// the 911 script — so when in doubt, it fires.
+const EMERGENCY_OVERRIDE_NEGATION_RE = /(?:\b(?:not|never)\s+(?:having|experiencing|had|getting)\s+(?:an?\s+|any\s+)?|\b(?:don['’]t|doesn['’]t|didn['’]t|do\s+not|does\s+not)\s+(?:have|has|had)\s+(?:an?\s+|any\s+)?|\bno\s+signs?\s+of\s+(?:an?\s+)?|\b(?:isn['’]t|is\s+not|wasn['’]t|was\s+not)\s+(?:an?\s+)?|(?:^|[.;,!?]\s*)no\s+|\bno\s+(?:tiene|tengo|hay)\s+(?:una\s+)?)$/i;
+
+// A past sting ("was stung last year and swelled up") is history, not a
+// current emergency.
+const PAST_EVENT_RE = /\b(?:last\s+(?:year|month|week|summer|spring|fall|winter|time)|years?\s+ago|months?\s+ago|weeks?\s+ago|in\s+the\s+past|used\s+to|el\s+a[ñn]o\s+pasado|hace\s+(?:un|una|dos|tres|\d+)\s+(?:a[ñn]os?|mes(?:es)?|semanas?))\b/i;
+// A hypothetical ("If my child gets stung, can swelling happen?") is a
+// question, not a current event.
+const CONDITIONAL_RE = /\b(?:if|what\s+if|in\s+case|suppose|en\s+caso\s+de)\b/i;
+// A reaction the visitor denies ("was stung but has no swelling", "does not
+// have a rash") is not affirmed.
+const REACTION_NEGATION_RE = /(?:\bno|\bnot|\bnever|(?:n['’]t|\bnot|\bnever)\s+(?:have|has|had|got|see|notice|show\w*)|\bwithout|\bsin)\s+(?:any\s+|a\s+|an\s+|signs?\s+of\s+)?$/i;
+function reactionIsAffirmed(t) {
+  const re = new RegExp(REACTION_RE.source, 'gi');
+  let m;
+  while ((m = re.exec(t))) {
+    const before = t.slice(Math.max(0, m.index - 30), m.index);
+    if (!REACTION_NEGATION_RE.test(before)) return true;
+  }
+  return false;
+}
+
+// Only the clause that carries the sting counts — "…I don't know if I should
+// call" later in the message must not void a real sting.
+function stingClauseIsHypotheticalOrPast(t) {
+  const m = BITE_STING_RE.exec(t);
+  if (!m) return false;
+  const start = Math.max(t.lastIndexOf('.', m.index), t.lastIndexOf(';', m.index), t.lastIndexOf('!', m.index), t.lastIndexOf('?', m.index)) + 1;
+  const nextStop = t.slice(m.index).search(/[.;!?]/);
+  const clause = t.slice(start, nextStop === -1 ? t.length : m.index + nextStop);
+  const lead = t.slice(start, m.index);
+  return CONDITIONAL_RE.test(lead) || PAST_EVENT_RE.test(clause);
+}
+const PERSONAL_CUE_RE = /\b(?:i|i['’]m|me|my|we|our|us|he|she|his|her|they|their|son|daughter|child|kid|baby|husband|wife|mom|dad|mi|mis|mijo|mija|hijo|hija|ni[ñn]o|ni[ñn]a|esposo|esposa|beb[ée])\b/i;
+
+function looksLikeEmergencyOverride(text) {
+  const t = String(text || '');
+  // Symptom-combo path (e.g. "stung and can't breathe") — no negation
+  // exemption; the reaction word IS the emergency, never a negated claim.
+  // Needs someone actually affected ("my child was stung…", "I got bit…") —
+  // "Can wasp stings cause swelling?" is an informational question.
+  if (BITE_STING_RE.test(t) && reactionIsAffirmed(t) && PERSONAL_CUE_RE.test(t) && !stingClauseIsHypotheticalOrPast(t)) return true;
+  EMERGENCY_OVERRIDE_TERM_RE.lastIndex = 0;
+  let m;
+  while ((m = EMERGENCY_OVERRIDE_TERM_RE.exec(t))) {
+    // "I don't have an EpiPen" is missing medication, not an absent symptom.
+    if (/^epi\s?pen$/i.test(m[0])) return true;
+    const before = t.slice(Math.max(0, m.index - 40), m.index);
+    if (!EMERGENCY_OVERRIDE_NEGATION_RE.test(before)) return true;
+  }
+  return false;
+}
+
 const EMERGENCY_FALLBACK_RESULT = Object.freeze({
   reply: `If anyone is having a medical reaction — trouble breathing, swelling, or feeling faint — please call 911 or seek medical care right away. For an urgent pest problem at your home, call us now at ${COMPANY.phone} and a real person will help. / Si alguien tiene una reacción médica, llame al 911 o busque atención médica de inmediato. Para una urgencia de plagas, llámenos al ${COMPANY.phone}.`,
   intent: 'emergency',
@@ -218,9 +303,79 @@ function scrubPriceTalk(result) {
   return { ...result, reply: PRICE_REDIRECT_REPLY, ready_for_quote: true };
 }
 
+// Additional-gaps finding: "unlike the estimate assistant's controlled safety
+// path, public intake does not explicitly apply the repository's
+// product-claim rules to successful model answers." A live provider is
+// free-text — nothing stops it writing "completely safe", "pet-safe",
+// "EPA-approved" (banned; EPA-registered/EPA-exempt is the required wording),
+// or a fixed re-entry/drying minute figure. reentrySafetyClaimFinding is the
+// SAME predicate the estimate assistant's label-safety copy, lawn-visit
+// customer copy, email replies, and voice-agent copy are all held to —
+// reused verbatim, not re-implemented. Replacing wholesale with one fixed,
+// reviewed sentence (never trying to salvage the rest of the model's
+// wording) keeps this a substitution, not a parallel claim-rules list.
+const UNSAFE_CLAIM_REPLY_ES = `No puedo dar una garantía general de seguridad ni un tiempo fijo para volver a entrar — depende del producto y de su hogar. Su técnico sigue las instrucciones de la etiqueta del producto y puede explicarle los detalles para su propiedad. Para algo urgente, llámenos al ${COMPANY.phone}.`;
+// Two or more distinctly Spanish words (single words like "son" or "es" are
+// ambiguous with English), or Spanish-only punctuation.
+const SPANISH_WORD_RE = /\b(?:el|los|las|para|puede|pueden|usted|seguro|segura|seguros|producto|productos|tratamiento|mascotas|niños|horas|minutos|está|están|también|después|hora|salir|volver|entrar|seco|seca|secarse|tarda)\b/gi;
+function looksSpanish(text) {
+  const t = String(text || '');
+  return /[ñ¿¡]/.test(t) || (t.match(SPANISH_WORD_RE) || []).length >= 2;
+}
+const UNSAFE_CLAIM_REPLY = `I can't make a blanket safety claim or give a fixed re-entry time — that depends on the exact product used and your home. Your technician follows the product label directions and can walk you through specifics for your property. For anything urgent, call us at ${COMPANY.phone}.`;
+
+// Topic chokepoint (Codex rounds 1-3): parsing claim grammar in free model
+// text never converges — pronoun subjects, Spanish predicates, negations and
+// idiom exemptions each opened a new hole. So a reply that uses ANY safety
+// vocabulary while the reply or the visitor's own words are about a
+// treatment/product gets the reviewed replacement wholesale — no grammar, no
+// exemptions (the replacement is itself the compliant answer). Safety wording
+// with no treatment context ("house geckos are safe around pets") is left
+// alone. reentrySafetyClaimFinding (the shared rule set) still runs first.
+const INTAKE_SAFETY_WORD_RE = /\b(?:safe|safer|safely|safety|harmless|non-?toxic|seguro|segura|seguros|seguras|seguridad|inofensiv\w*)\b|\b(?:pet|kid|family|child)-safe\b|\bno\s+(?:es\s+)?t[óo]xic\w*/i;
+const INTAKE_TREATMENT_CONTEXT_RE = /\b(?:treat\w*|products?|spray\w*|pesticid\w*|insecticid\w*|herbicid\w*|fungicid\w*|chemicals?|applications?|applied|apply|bait\w*|fertiliz\w*|granul\w*|repellent\w*|tratamiento\w*|productos?|qu[íi]mic\w*|pesticida\w*|insecticida\w*|fumig\w*|rociad\w*|aplicaci[óo]n\w*|cebos?)\b/i;
+// Spanish forms the shared (English) rule set can't see: fixed re-entry /
+// drying times in minutes or hours, and "aprobado por la EPA".
+const ES_DURATION = `(?:\\d+|${NUM_WORD_ES}(?:[-\\s]+(?:y[-\\s]+)?${NUM_WORD_ES})*|media)`;
+// Chokepoint, not grammar: any Spanish duration in minutes/hours plus any
+// drying or re-entry word anywhere in the reply ("se seca en dos horas",
+// "tarda cinco minutos en secarse", "puede volver en media hora").
+const ES_DURATION_RE = new RegExp(`\\b${ES_DURATION}\\s+(?:minutos?|horas?)\\b`, 'i');
+const ES_DRY_OR_REENTRY_RE = /\b(?:sec[oa]s?|seca(?:r|rse|do|da)?|se\s+seca|volver|regresar|entrar|reingres\w*|salir|re-?entrada)\b/i;
+const INTAKE_REENTRY_MINUTES_ES_RE = { test: (t) => ES_DURATION_RE.test(t) && ES_DRY_OR_REENTRY_RE.test(t) };
+const INTAKE_EPA_APPROVED_ES_RE = /\baprobad[oa]s?\s+por\s+la\s+epa\b/i;
+
+// In a pest-control chat a pronoun or missing subject ("Yes, it's completely
+// safe for pets", "Totally safe for dogs", "Sí, es seguro") is the treatment;
+// an explicit other subject ("house geckos are safe around pets") is not.
+const INTAKE_PRONOUN_SAFE_RE = /\b(?:it|it['’]s|this|that|they|these|those|everything|all\s+of\s+(?:it|them))\b[^.!?]{0,30}\b(?:safe|harmless|non-?toxic)\b/i;
+const INTAKE_SUBJECTLESS_SAFE_RE = /(?:^|[.!?]\s*)(?:(?:yes|yep|absolutely)[,!]?\s*)?(?:(?:completely|totally|perfectly|100%)\s+)?(?:safe|harmless|non-?toxic)\b|(?:^|[.!?]\s*)(?:s[íi][,!]?\s*)?(?:es|son|est[áa]n?)\s+(?:(?:completamente|totalmente|muy)\s+)?(?:segur|inofensiv)/i;
+
+function intakeSafetyClaimSupplement(reply, contextText = '') {
+  const t = String(reply || '');
+  if (INTAKE_REENTRY_MINUTES_ES_RE.test(t) || INTAKE_EPA_APPROVED_ES_RE.test(t)) return true;
+  if (!INTAKE_SAFETY_WORD_RE.test(t)) return false;
+  return INTAKE_TREATMENT_CONTEXT_RE.test(`${t}\n${contextText || ''}`)
+    || INTAKE_PRONOUN_SAFE_RE.test(t)
+    || INTAKE_SUBJECTLESS_SAFE_RE.test(t);
+}
+
+function scrubUnsafeClaims(result, contextText = '') {
+  if (!reentrySafetyClaimFinding(result.reply) && !intakeSafetyClaimSupplement(result.reply, contextText)) return result;
+  // An emergency reply keeps its 911 / call-now guidance — same special case
+  // the price scrub makes above.
+  const spanish = looksSpanish(result.reply);
+  const reply = result.intent === 'emergency'
+    ? EMERGENCY_FALLBACK_RESULT.reply
+    : (spanish ? UNSAFE_CLAIM_REPLY_ES : UNSAFE_CLAIM_REPLY);
+  return { ...result, reply };
+}
+
 // Validate + coerce whatever JSON a provider returned into the wire contract.
 // Returns null when there is no usable reply (caller moves down the ladder).
-function normalizeIntakeResult(json, source) {
+// `contextText` is the visitor's side of the conversation (treatment context
+// for the safety chokepoint).
+function normalizeIntakeResult(json, source, contextText = '') {
   if (!json || typeof json !== 'object') return null;
   const reply = cleanText(json.reply, REPLY_MAX_LEN);
   if (!reply) return null;
@@ -237,15 +392,15 @@ function normalizeIntakeResult(json, source) {
     const safeReply = PRICE_TALK_RE.test(reply)
       ? (intent === 'emergency' ? EMERGENCY_FALLBACK_RESULT.reply : SUPPORT_FALLBACK_RESULT.reply)
       : reply;
-    return { reply: safeReply, intent, service_keys: [], ready_for_quote: false, source };
+    return scrubUnsafeClaims({ reply: safeReply, intent, service_keys: [], ready_for_quote: false, source }, contextText);
   }
-  return scrubPriceTalk({
+  return scrubUnsafeClaims(scrubPriceTalk({
     reply,
     intent,
     service_keys: serviceKeys,
     ready_for_quote: json.ready_for_quote === true,
     source,
-  });
+  }), contextText);
 }
 
 // Best-effort conversation log into the existing assistant tables so Ask Waves
@@ -376,6 +531,17 @@ async function processIntakeMessage({ message, history, sessionId } = {}) {
   const text = buildTranscript(message, history);
   let result = null;
 
+  // Guard over the whole visitor side of the transcript, not just the last
+  // turn — history "my child was stung and can't breathe" followed by "what
+  // should I do now?" must still get the emergency answer. History is
+  // untrusted client input, but using it here can only make the fallback
+  // MORE cautious, never less. Computed once up front: it doubles as the
+  // treatment-context signal fed to the safety-claim chokepoint below.
+  const guardText = [
+    ...sanitizeHistory(history).filter((t) => t.role === 'user').map((t) => t.content),
+    cleanText(message, MESSAGE_MAX_LEN),
+  ].join('\n');
+
   // The shared chain owns budget splitting, provider-failure handling, and
   // chain telemetry (recordDispatchOutcome) — the whole customer-turn
   // wall-clock budget covers BOTH legs combined (reserveFallbackBudget: true
@@ -402,19 +568,28 @@ async function processIntakeMessage({ message, history, sessionId } = {}) {
     logger.error(`[ask-waves] dispatch chain threw unexpectedly: ${err.message}`);
     dispatched = { ok: false, reason: 'error' };
   }
-  if (dispatched.ok) result = normalizeIntakeResult(dispatched.json, dispatched.provider);
+  if (dispatched.ok) result = normalizeIntakeResult(dispatched.json, dispatched.provider, guardText);
+
+  // Additional-gaps finding: the deterministic emergency recognizer used to
+  // run ONLY after both providers missed. A clear medical/urgent emergency in
+  // the visitor's own words must override a wrong SUCCESSFUL model
+  // classification too (e.g. the model calls it "quote" on "my child was
+  // stung and can't breathe") — never the other direction: a correct
+  // "emergency" call from the model is left exactly as normalizeIntakeResult
+  // produced it, and this never fires on the model's judgement alone, only
+  // on the same conservative deterministic guard used below. Only the
+  // CURRENT message is checked here — unlike the both-providers-missed path,
+  // a live model saw the full transcript, and scanning history would pin
+  // every later turn of a conversation that once mentioned a sting reaction
+  // to the emergency script.
+  if (result && result.intent !== 'emergency' && looksLikeEmergencyOverride(cleanText(message, MESSAGE_MAX_LEN))) {
+    // Provenance so overrides can be audited for false positives.
+    result = { ...EMERGENCY_FALLBACK_RESULT, source: 'emergency_override' };
+    logger.info('[ask-waves] emergency override replaced a successful model reply');
+  }
 
   if (!result) {
     logger.warn('[ask-waves] both providers missed; serving deterministic fallback');
-    // Guard over the whole visitor side of the transcript, not just the last
-    // turn — history "my child was stung and can't breathe" followed by "what
-    // should I do now?" must still get the emergency answer. History is
-    // untrusted client input, but using it here can only make the fallback
-    // MORE cautious, never less.
-    const guardText = [
-      ...sanitizeHistory(history).filter((t) => t.role === 'user').map((t) => t.content),
-      cleanText(message, MESSAGE_MAX_LEN),
-    ].join('\n');
     result = looksLikeEmergency(guardText) ? { ...EMERGENCY_FALLBACK_RESULT }
       : SUPPORT_RE.test(guardText) ? { ...SUPPORT_FALLBACK_RESULT }
         : { ...FALLBACK_RESULT };
@@ -436,6 +611,8 @@ module.exports = {
     sanitizeHistory,
     buildTranscript,
     scrubPriceTalk,
+    scrubUnsafeClaims,
+    intakeSafetyClaimSupplement,
     logIntakeExchange,
     logIntakeExchangeOnce,
     QUOTABLE_SERVICES,
@@ -446,6 +623,7 @@ module.exports = {
     SUPPORT_FALLBACK_RESULT,
     SUPPORT_RE,
     looksLikeEmergency,
+    looksLikeEmergencyOverride,
     MESSAGE_MAX_LEN,
     ASK_WAVES_TURN_BUDGET_MS,
     ASK_WAVES_TURN_BUDGET_MAX_MS,

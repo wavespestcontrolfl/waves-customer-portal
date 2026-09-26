@@ -30,7 +30,7 @@ const db = require('../models/db');
 const { dispatchWithFallback } = require('../services/llm/call');
 const { processIntakeMessage, _internals } = require('../services/ask-waves-intake');
 const {
-  normalizeIntakeResult, sanitizeHistory, scrubPriceTalk,
+  normalizeIntakeResult, sanitizeHistory, scrubPriceTalk, scrubUnsafeClaims,
   QUOTABLE_SERVICES, FALLBACK_RESULT, EMERGENCY_FALLBACK_RESULT,
   SUPPORT_FALLBACK_RESULT, looksLikeEmergency, PRICE_TALK_RE,
   ASK_WAVES_TURN_BUDGET_MS, turnBudgetMs,
@@ -49,6 +49,134 @@ const chainMiss = (failures = [{ provider: 'openai', reason: 'no_key' }, { provi
 });
 
 afterEach(() => jest.clearAllMocks());
+
+describe('scrubUnsafeClaims — the repository product-claim rules on intake output', () => {
+  const base = { reply: '', intent: 'question', service_keys: [], ready_for_quote: false, source: 'openai' };
+
+  test.each([
+    // the real audit reproduction (backend-reproductions.json)
+    'All our products are pet-safe and EPA-approved. You can re-enter after 30 minutes.',
+    'Our treatments are completely safe for kids and pets.',
+    'The pesticide is EPA-approved and totally safe.',
+    'You can go back inside 30 minutes after treatment.',
+  ])('replaces a reply carrying a banned safety/EPA/re-entry claim: %s', (reply) => {
+    const out = scrubUnsafeClaims({ ...base, reply });
+    expect(out.reply).not.toBe(reply);
+    expect(out.reply).toMatch(/label directions|instrucciones de la etiqueta/);
+    expect(out.intent).toBe(base.intent); // only the reply text changes
+  });
+
+  test.each([
+    'Ghost ants are common in Florida kitchens this time of year.',
+    'Your technician follows the product label directions for every application.',
+    // Safety wording with an explicit non-treatment subject is pest education.
+    'The repaired screen is safe for pets.',
+    'Ladybugs are generally safe for children to handle.',
+  ])('leaves compliant replies untouched: %s', (reply) => {
+    expect(scrubUnsafeClaims({ ...base, reply }).reply).toBe(reply);
+  });
+
+  test.each([
+    'Don\'t worry, it\'s completely safe for pets.',
+    'No worries — it is safe for kids.',
+    'We do not use dyes, and it\'s pet-safe.',
+    'It is not safe for fish, but it is safe for kids.',
+  ])('an unrelated or earlier negation does not exempt a later claim: %s', (reply) => {
+    expect(scrubUnsafeClaims({ ...base, reply }).reply).toMatch(/label directions|instrucciones de la etiqueta/);
+  });
+
+  test.each([
+    'Our products are completely safe.',
+    'The treatment is safe around pets.',
+    'It\'s family-safe and non-toxic.',
+    'Totally safe for dogs and cats.',
+  ])('flags widened blanket-safety phrasing: %s', (reply) => {
+    expect(scrubUnsafeClaims({ ...base, reply }).reply).toMatch(/label directions|instrucciones de la etiqueta/);
+  });
+
+  // Topic chokepoint: no grammar exemptions — negated, idiomatic or
+  // technician-qualified safety wording about a treatment all get the
+  // reviewed replacement (which is itself the compliant answer).
+  test.each([
+    'No product is ever completely safe for pets — your technician follows the label.',
+    "It's safe once dry — your technician will confirm the timing.",
+    "It's safe once dry, but your technician cannot confirm the timing.",
+    'El producto es seguro.',
+    'El tratamiento es seguro para perros.',
+    'Sí, es seguro.',
+  ])('treatment safety wording is replaced with the reviewed copy: %s', (reply) => {
+    expect(scrubUnsafeClaims({ ...base, reply }).reply).toMatch(/label directions|instrucciones de la etiqueta/);
+  });
+
+  test.each([
+    'Todos nuestros productos están aprobados por la EPA.',
+    'Puede volver a entrar en dos horas.',
+    'Después de 4 horas ya está seco y puede volver.',
+  ])('Spanish EPA-approved and fixed-time claims are replaced: %s', (reply) => {
+    expect(scrubUnsafeClaims({ ...base, reply }).reply).toMatch(/label directions|instrucciones de la etiqueta/);
+  });
+
+  test.each([
+    'Puede volver a entrar en cinco minutos.',
+    'Pueden regresar después de treinta y cinco minutos.',
+    'Puede salir en media hora.',
+  ])('any Spanish fixed re-entry duration is replaced: %s', (reply) => {
+    expect(scrubUnsafeClaims({ ...base, reply }).reply).toMatch(/instrucciones de la etiqueta/);
+  });
+
+  test.each([
+    'El producto se seca en dos horas.',
+    'El tratamiento estará seco en treinta minutos.',
+    'El pesticida tarda cinco minutos en secarse.',
+  ])('Spanish drying-duration claims are replaced: %s', (reply) => {
+    expect(scrubUnsafeClaims({ ...base, reply }).reply).toMatch(/instrucciones de la etiqueta/);
+  });
+
+  test('an English claim mentioning "son" gets the English copy', () => {
+    expect(scrubUnsafeClaims({ ...base, reply: 'The treatment is safe for your son.' }).reply).toMatch(/label directions/);
+  });
+
+  test('a Spanish claim gets the Spanish replacement, an English one the English copy', () => {
+    expect(scrubUnsafeClaims({ ...base, reply: 'El producto es seguro.' }).reply).toMatch(/instrucciones de la etiqueta/);
+    expect(scrubUnsafeClaims({ ...base, reply: "Yes, it's completely safe." }).reply).toMatch(/label directions/);
+  });
+
+  test('the visitor\'s own words supply treatment context', () => {
+    const reply = 'Yes — safe for your dog.';
+    expect(scrubUnsafeClaims({ ...base, reply }, 'Is your spray okay for my dog?').reply).toMatch(/label directions|instrucciones de la etiqueta/);
+  });
+
+  test('an emergency reply with a banned claim keeps the 911 / call-now guidance', () => {
+    const out = scrubUnsafeClaims({ ...base, intent: 'emergency', reply: 'Call 911. The product is completely safe, so stay calm.' });
+    expect(out.reply).toBe(EMERGENCY_FALLBACK_RESULT.reply);
+    expect(out.intent).toBe('emergency');
+  });
+
+  // Codex round 1 P1 (L241): reentrySafetyClaimFinding's pronoun-subject rule
+  // needs a treatment antecedent EARLIER IN THE SAME TEXT — a standalone Ask
+  // Waves reply usually has none, so the intake-local supplement (still
+  // running alongside, not instead of, the shared rule) widens the net for
+  // this surface only, English and Spanish.
+  test.each([
+    'Yes, it is completely safe for pets.',
+    "Yes, it's totally safe for pets.",
+    "It's 100% safe for kids and pets.",
+    'Our treatment is safe for your family.',
+    'This is a pet-safe option for your yard.',
+    'We only use kid-safe products.',
+    'Todos nuestros productos son seguros para mascotas y aprobados por la EPA.',
+    'El tratamiento es completamente seguro y no daña las plantas.',
+  ])('flags a conversational/Spanish blanket-safety claim: %s', (reply) => {
+    const out = scrubUnsafeClaims({ ...base, reply });
+    expect(out.reply).not.toBe(reply);
+    expect(out.reply).toMatch(/label directions|instrucciones de la etiqueta/);
+  });
+
+
+  test('"safe once dry" without the technician-confirms clause is still replaced', () => {
+    expect(scrubUnsafeClaims({ ...base, reply: "It's safe once dry." }).reply).toMatch(/label directions|instrucciones de la etiqueta/);
+  });
+});
 
 describe('scrubPriceTalk — the no-price invariant', () => {
   const base = { reply: '', intent: 'quote', service_keys: ['pest'], ready_for_quote: false };
@@ -223,6 +351,41 @@ describe('normalizeIntakeResult', () => {
     expect(out.ready_for_quote).toBe(false);
   });
 
+  // Additional-gaps finding: "unlike the estimate assistant's controlled
+  // safety path, public intake does not explicitly apply the repository's
+  // product-claim rules to successful model answers." reentrySafetyClaimFinding
+  // (content-guardrails) is the SAME predicate the estimate assistant, comms
+  // lint, lawn-visit customer copy, email replies, and voice-agent copy are
+  // all held to.
+  test('a blanket safety/EPA/fixed-re-entry claim from the model is replaced, not passed through', () => {
+    const out = normalizeIntakeResult({
+      reply: 'All our products are pet-safe and EPA-approved. You can re-enter after 30 minutes.',
+      intent: 'question',
+      ready_for_quote: false,
+    }, 'openai');
+    expect(out.reply).not.toContain('pet-safe');
+    expect(out.reply).not.toContain('EPA-approved');
+    expect(out.reply).not.toMatch(/\b30\s+minutes\b/);
+    // exact replacement text is pinned in the scrubUnsafeClaims describe block above
+  });
+
+  test('a conversational blanket-safety claim with a pronoun subject is caught even with no antecedent', () => {
+    const out = normalizeIntakeResult({
+      reply: 'Yes, it is completely safe for pets.',
+      intent: 'question',
+      ready_for_quote: false,
+    }, 'openai');
+    expect(out.reply).toMatch(/label directions|instrucciones de la etiqueta/);
+  });
+
+  test('an ordinary, compliant reply is untouched by the safety-claim scrub', () => {
+    const out = normalizeIntakeResult({
+      reply: 'Ghost ants are common in Florida kitchens this time of year.',
+      intent: 'question',
+    }, 'openai');
+    expect(out.reply).toBe('Ghost ants are common in Florida kitchens this time of year.');
+  });
+
   test('missing/empty reply returns null so the caller falls down the ladder', () => {
     expect(normalizeIntakeResult({ intent: 'quote' }, 'openai')).toBeNull();
     expect(normalizeIntakeResult({ reply: '   ' }, 'openai')).toBeNull();
@@ -366,6 +529,175 @@ describe('processIntakeMessage provider ladder', () => {
     const out = await processIntakeMessage({ message: 'how much for rats?' });
     expect(out.reply).not.toMatch(PRICE_TALK_RE);
     expect(out.ready_for_quote).toBe(true);
+  });
+
+  // Additional-gaps finding: "[the] deterministic emergency recognizer also
+  // runs only after both providers fail; it does not override a successful
+  // but incorrect model intent." (backend-reproductions.json:
+  // emergency_guard_only_on_provider_failure — a mocked live provider
+  // answers "quote" on "My child was stung and cannot breathe.")
+  test('a clear emergency overrides a wrong SUCCESSFUL model intent', async () => {
+    dispatchWithFallback.mockResolvedValue(chainOk(
+      { reply: 'Get your property quote.', intent: 'quote', service_keys: ['pest'], ready_for_quote: true },
+    ));
+    const out = await processIntakeMessage({ message: 'My child was stung and cannot breathe.' });
+    expect(out).toEqual({ ...EMERGENCY_FALLBACK_RESULT, source: 'emergency_override' });
+  });
+
+  test('a correct model "emergency" call on a successful turn is left as normalizeIntakeResult produced it', async () => {
+    dispatchWithFallback.mockResolvedValue(chainOk(
+      { reply: 'Please seek medical care right away for the reaction.', intent: 'emergency', service_keys: [], ready_for_quote: false },
+    ));
+    const out = await processIntakeMessage({ message: 'My child was stung and cannot breathe.' });
+    expect(out.reply).toBe('Please seek medical care right away for the reaction.');
+    expect(out.source).toBe('openai');
+  });
+
+  test('an emergency earlier in HISTORY does not pin later successful turns to the emergency script', async () => {
+    dispatchWithFallback.mockResolvedValue(chainOk(goodJson));
+    const out = await processIntakeMessage({
+      message: 'ok, can I get a quote for the wasp nest?',
+      history: [
+        { role: 'user', content: 'I got stung yesterday and had swelling.' },
+        { role: 'assistant', content: 'If anyone has trouble breathing, call 911.' },
+      ],
+    });
+    expect(out.intent).toBe('quote');
+    expect(out.source).toBe('openai');
+  });
+
+  test('an ordinary successful turn with no emergency wording is never overridden', async () => {
+    dispatchWithFallback.mockResolvedValue(chainOk(goodJson));
+    const out = await processIntakeMessage({ message: 'rats in my attic' });
+    expect(out.intent).toBe('quote');
+    expect(out.source).toBe('openai');
+  });
+
+  // Codex round 1 P2 (L423): the SUCCESSFUL-turn emergency override must
+  // require affirmative context — a negation preceding the term, or a bare
+  // institutional noun with no other emergency wording, must not override a
+  // valid model answer. The both-providers-failed floor stays maximally
+  // cautious (untouched, covered by the "chain reports every provider
+  // missed" tests above).
+  test('a negated emergency term does not override a successful non-emergency turn', async () => {
+    dispatchWithFallback.mockResolvedValue(chainOk(
+      { reply: "Ants are common in Florida kitchens — here's how to handle them.", intent: 'quote', service_keys: ['pest'], ready_for_quote: true },
+    ));
+    const out = await processIntakeMessage({ message: 'I am not having an allergic reaction; I just need ant control' });
+    expect(out.intent).toBe('quote');
+    expect(out.source).toBe('openai');
+  });
+
+  test.each([
+    'No, he can\'t breathe',
+    'I can\'t tell, but he has chest pain',
+  ])('an unrelated negation never voids a real emergency: %s', async (message) => {
+    dispatchWithFallback.mockResolvedValue(chainOk(goodJson));
+    const out = await processIntakeMessage({ message });
+    expect(out).toEqual({ ...EMERGENCY_FALLBACK_RESULT, source: 'emergency_override' });
+  });
+
+  test.each([
+    'Do you use rat poison in the attic?',
+    'I\'m allergic to bees, can you treat a nest?',
+  ])('an ordinary pest question with "poison"/"allergic" is not overridden: %s', async (message) => {
+    dispatchWithFallback.mockResolvedValue(chainOk(goodJson));
+    const out = await processIntakeMessage({ message });
+    expect(out.source).toBe('openai');
+    expect(out.intent).toBe('quote');
+  });
+
+  test('a missing EpiPen is never voided by the negation', async () => {
+    dispatchWithFallback.mockResolvedValue(chainOk(goodJson));
+    const out = await processIntakeMessage({ message: "I don't have an EpiPen and he was just stung" });
+    expect(out).toEqual({ ...EMERGENCY_FALLBACK_RESULT, source: 'emergency_override' });
+  });
+
+  test.each([
+    'My address is 911 Bayshore Rd, how much for ants?',
+    'We passed out flyers and now see ants everywhere',
+  ])('a 911 street number or "passed out flyers" is not an emergency: %s', async (message) => {
+    dispatchWithFallback.mockResolvedValue(chainOk(goodJson));
+    const out = await processIntakeMessage({ message });
+    expect(out.source).toBe('openai');
+  });
+
+  test('a later "if" in the message never voids a current sting reaction', async () => {
+    dispatchWithFallback.mockResolvedValue(chainOk(goodJson));
+    const out = await processIntakeMessage({ message: "My son was stung and his face is swelling, I don't know if I should call" });
+    expect(out).toEqual({ ...EMERGENCY_FALLBACK_RESULT, source: 'emergency_override' });
+  });
+
+  test.each([
+    'My child was stung but has no swelling',
+    'My child was stung and does not have a rash',
+  ])('a denied reaction keeps the model answer: %s', async (message) => {
+    dispatchWithFallback.mockResolvedValue(chainOk(goodJson));
+    const out = await processIntakeMessage({ message });
+    expect(out.source).toBe('openai');
+  });
+
+  test('a hypothetical sting question is not a current emergency', async () => {
+    dispatchWithFallback.mockResolvedValue(chainOk(goodJson));
+    const out = await processIntakeMessage({ message: 'If my child gets stung, can swelling happen?' });
+    expect(out.source).toBe('openai');
+  });
+
+  test('a past sting reaction is not a current emergency', async () => {
+    dispatchWithFallback.mockResolvedValue(chainOk(goodJson));
+    const out = await processIntakeMessage({ message: 'My son was stung last year and had swelling, can you remove the wasp nest?' });
+    expect(out.source).toBe('openai');
+  });
+
+  test('an informational sting question is not overridden', async () => {
+    dispatchWithFallback.mockResolvedValue(chainOk(
+      { reply: 'Stings can cause local swelling; call us if nests are near your home.', intent: 'question', service_keys: ['pest'], ready_for_quote: false },
+    ));
+    const out = await processIntakeMessage({ message: 'Can wasp stings cause swelling?' });
+    expect(out.source).toBe('openai');
+    expect(out.intent).toBe('question');
+  });
+
+  test.each([
+    'Mi perro comió veneno',
+    'Mi hijo tragó pesticida',
+  ])('Spanish poison ingestion overrides a wrong successful intent: %s', async (message) => {
+    dispatchWithFallback.mockResolvedValue(chainOk(goodJson));
+    const out = await processIntakeMessage({ message });
+    expect(out).toEqual({ ...EMERGENCY_FALLBACK_RESULT, source: 'emergency_override' });
+  });
+
+  test.each([
+    "I don't have an allergic reaction; I need ant control",
+    'No allergic reaction, just ants',
+    'No trouble breathing, just ants in the kitchen',
+  ])('a governing negation or bare allergy mention keeps the model answer: %s', async (message) => {
+    dispatchWithFallback.mockResolvedValue(chainOk(goodJson));
+    const out = await processIntakeMessage({ message });
+    expect(out.source).toBe('openai');
+  });
+
+  test('ingestion of poison still overrides to the emergency script', async () => {
+    dispatchWithFallback.mockResolvedValue(chainOk(goodJson));
+    const out = await processIntakeMessage({ message: 'My dog ate rat poison from the garage' });
+    expect(out).toEqual({ ...EMERGENCY_FALLBACK_RESULT, source: 'emergency_override' });
+  });
+
+  test('a bare institutional "hospitals" mention does not override a successful turn', async () => {
+    dispatchWithFallback.mockResolvedValue(chainOk(
+      { reply: 'Yes, we service commercial properties including hospitals.', intent: 'question', service_keys: [], ready_for_quote: false },
+    ));
+    const out = await processIntakeMessage({ message: 'Do you provide pest control for hospitals?' });
+    expect(out.intent).toBe('question');
+    expect(out.source).toBe('openai');
+  });
+
+  test('an affirmative emergency term still overrides a wrong SUCCESSFUL model intent ("cannot breathe")', async () => {
+    dispatchWithFallback.mockResolvedValue(chainOk(
+      { reply: 'Get your property quote.', intent: 'quote', service_keys: ['pest'], ready_for_quote: true },
+    ));
+    const out = await processIntakeMessage({ message: 'My child was stung and cannot breathe.' });
+    expect(out).toEqual({ ...EMERGENCY_FALLBACK_RESULT, source: 'emergency_override' });
   });
 
   // Codex round 1 P1: this service used to run its own provider-chain +
