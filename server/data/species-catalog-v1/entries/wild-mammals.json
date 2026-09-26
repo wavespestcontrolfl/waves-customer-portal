@@ -6,7 +6,6 @@
       "adult"
     ],
     "sign_of": [],
-    "safety_line": null,
     "legacy_slugs": [],
     "review": {
       "status": "draft",
@@ -34,7 +33,8 @@
       {
         "slug": "feral-hog-rooting",
         "difference": "Armadillo holes are small, cone-shaped, and scattered overnight; feral hog rooting tears up much larger patches of turf and soil in a single visit.",
-        "next_photo": "A wide shot showing the size and shape of the disturbed area."
+        "next_photo": "A wide shot showing the size and shape of the disturbed area.",
+        "photo_can_confirm": true
       }
     ],
     "size": "large",
@@ -45,18 +45,20 @@
       "lawn-damage",
       "mammal"
     ],
-    "verdict": "watch",
+    "verdict": "call",
     "safety": {
       "stings": false,
       "bites": false,
       "venomous": false,
-      "disease_vector": false,
+      "disease_vector": true,
       "structural": false,
       "allergen": false,
       "protected": false,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": false
     },
+    "safety_line": "Florida armadillos can carry the bacteria that causes Hansen's disease (leprosy). Don't handle one bare-handed, and wash your hands after any contact with soil it's dug in.",
     "range": "common",
     "active_months": [
       1,
@@ -74,25 +76,30 @@
     ],
     "peak_months": [],
     "service": {
-      "line": "lawn",
+      "line": "none",
       "key": null,
-      "label": "Lawn Pest Control",
+      "label": "Wildlife Referral",
       "inspection_first": false,
-      "referral": null
+      "referral": "wildlife_trapper"
     },
-    "urgency": "moderate",
+    "urgency": "low",
     "copy": {
-      "what_it_means": "It's digging your lawn because grubs and earthworms are there to eat — treating the food source usually sends the armadillo looking for better hunting elsewhere. Homeowners may legally live-trap nuisance animals per FWC rules.",
-      "fact": "When startled it jumps straight up — and it digs your lawn because grubs are there. Fix the grubs, lose the digger.",
-      "blurb": "We treat the grubs (the food source); the armadillo moves to better hunting on its own."
+      "what_it_means": "It's likely digging for grubs and earthworms in soft soil, but digging alone doesn't prove which — armadillos eat both, so removing grubs isn't a reliable way to send it elsewhere. Florida allows a licensed nuisance-wildlife trapper to live-trap and relocate it under FWC rules; don't handle one bare-handed.",
+      "fact": "When startled it jumps straight up — a reflex that surprises people more than it protects the armadillo.",
+      "blurb": "Digs overnight for grubs and earthworms in soft soil. A wildlife trapper can live-trap and relocate it under FWC rules — don't handle one bare-handed."
     },
-    "tech_notes": "Treat the underlying grub population; armadillo relocation/removal follows FWC nuisance-wildlife rules (euthanize, release on-site, or relocate within-county with landowner permission).",
+    "tech_notes": "Armadillo digging correlates with grub/earthworm presence, but removing grubs is not a documented reliable deterrent per UF/IFAS. Refer to a licensed nuisance-wildlife trapper; FWC rules allow live-trap and release on-site, in-county relocation, or euthanasia. Advise against bare-hand contact (Hansen's disease association in Florida armadillos).",
     "sources": [
       "https://myfwc.com/wildlifehabitats/profiles/mammals/land/armadillo/"
     ],
     "links": {
       "site_page": "/pest-identifier/armadillo/",
       "guides": []
-    }
+    },
+    "role": "wildlife",
+    "risk": "medical",
+    "action": "specialist",
+    "season_basis": "year_round",
+    "verification": []
   }
 ]

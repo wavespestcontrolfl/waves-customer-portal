@@ -36,7 +36,8 @@
       {
         "slug": "florida-blue-centipede",
         "difference": "House centipedes have extremely long, thread-like legs and blur when moving; Florida blue centipedes have short legs and move deliberately.",
-        "next_photo": "A close-up from the side showing leg length relative to body width."
+        "next_photo": "A close-up from the side showing leg length relative to body width.",
+        "photo_can_confirm": true
       }
     ],
     "size": "medium",
@@ -57,7 +58,8 @@
       "allergen": false,
       "protected": false,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": false
     },
     "range": "common",
     "active_months": [
@@ -76,9 +78,9 @@
     ],
     "peak_months": [],
     "service": {
-      "line": "pest",
-      "key": "pest",
-      "label": "General Pest Control",
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
       "inspection_first": false,
       "referral": null
     },
@@ -95,7 +97,17 @@
     "links": {
       "site_page": "/pest-identifier/house-centipede/",
       "guides": []
-    }
+    },
+    "role": "beneficial",
+    "risk": "defensive",
+    "action": "leave_alone",
+    "season_basis": "year_round",
+    "verification": [
+      {
+        "claim": "Range in Southwest Florida specifically (vs. common statewide/nationally)",
+        "note": "House centipedes are well documented as common indoor arthropods across Florida generally; density specific to Southwest Florida was not separately verified this pass."
+      }
+    ]
   },
   {
     "kind": "organism",
@@ -105,7 +117,7 @@
       "adult"
     ],
     "sign_of": [],
-    "safety_line": null,
+    "safety_line": "Its defensive secretion can mildly irritate skin or eyes if handled roughly; sweep it up rather than picking it up bare-handed.",
     "legacy_slugs": [],
     "review": {
       "status": "draft",
@@ -132,7 +144,8 @@
       {
         "slug": "house-centipede",
         "difference": "Millipedes have two short leg pairs per segment and coil when touched; house centipedes have one very long leg pair per segment and move fast.",
-        "next_photo": "A close-up from the side counting legs per body segment, next to a coin."
+        "next_photo": "A close-up from the side counting legs per body segment, next to a coin.",
+        "photo_can_confirm": true
       }
     ],
     "size": "medium",
@@ -153,7 +166,8 @@
       "allergen": false,
       "protected": false,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": true
     },
     "range": "common",
     "active_months": [
@@ -185,18 +199,23 @@
     },
     "urgency": "low",
     "copy": {
-      "what_it_means": "A composting machine that recycles dead leaves into soil — heavy rain floods the leaf litter and evicts them onto the lanai. They can’t survive indoors for long; sweep them out or wait, and they dry out within a day.",
+      "what_it_means": "A composting machine that recycles dead leaves into soil — heavy rain floods the leaf litter and evicts them onto the lanai. It can release a mild defensive secretion if handled roughly, so sweeping it out beats picking it up bare-handed; otherwise it dries out and moves on after a day or so indoors.",
       "fact": "A composting machine — it recycles dead leaves into soil. Rain floods the leaf litter and evicts them onto your lanai.",
-      "blurb": "They can’t survive indoors — sweep them out or wait; they dry out in a day."
+      "blurb": "They can't survive indoors for long — sweep them out (rather than handling) and they're gone after a day."
     },
-    "tech_notes": "Rain-driven seasonal migration from mulch/leaf litter. Exterior perimeter treatment + reducing mulch-to-foundation contact handles recurring waves.",
+    "tech_notes": "Rain-driven seasonal migration from mulch/leaf litter. Defensive secretion can mildly irritate skin/eyes on contact; advise sweeping rather than handling. Exterior perimeter treatment + reducing mulch-to-foundation contact handles recurring waves.",
     "sources": [
       "https://ask.ifas.ufl.edu/publication/IG093"
     ],
     "links": {
       "site_page": "/pest-identifier/millipede/",
       "guides": []
-    }
+    },
+    "role": "harmless_visitor",
+    "risk": "irritant",
+    "action": "fix_conditions",
+    "season_basis": "year_round",
+    "verification": []
   },
   {
     "kind": "organism",
@@ -220,9 +239,7 @@
       "pillbug",
       "pillbugs",
       "roly poly",
-      "roly polies",
-      "sowbug",
-      "sowbugs"
+      "roly polies"
     ],
     "scientific_name": "Armadillidium vulgare",
     "rank": "species",
@@ -239,7 +256,8 @@
       {
         "slug": "sowbug",
         "difference": "Pillbugs roll into a tight ball and have no tail appendages; sowbugs cannot roll up and have two small tail-like appendages at the rear.",
-        "next_photo": "A close-up of the rear end for tail appendages, and whether it can roll into a ball."
+        "next_photo": "A close-up of the rear end for tail appendages, and whether it can roll into a ball.",
+        "photo_can_confirm": true
       }
     ],
     "size": "tiny",
@@ -260,7 +278,8 @@
       "allergen": false,
       "protected": false,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": false
     },
     "range": "common",
     "active_months": [
@@ -298,6 +317,11 @@
     "links": {
       "site_page": "/pest-identifier/pillbug/",
       "guides": []
-    }
+    },
+    "role": "harmless_visitor",
+    "risk": "low",
+    "action": "fix_conditions",
+    "season_basis": "year_round",
+    "verification": []
   }
 ]

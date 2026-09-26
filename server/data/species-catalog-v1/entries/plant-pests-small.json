@@ -34,7 +34,8 @@
       {
         "slug": "mealybug",
         "difference": "Aphids are soft, pear-shaped, and clustered in the open on new growth; mealybugs are covered in white cottony wax and tucked into stem joints.",
-        "next_photo": "A close-up of the cluster showing whether it has a waxy white coating or is bare-bodied."
+        "next_photo": "A close-up of the cluster showing whether it has a waxy white coating or is bare-bodied.",
+        "photo_can_confirm": true
       }
     ],
     "size": "tiny",
@@ -55,7 +56,8 @@
       "allergen": false,
       "protected": false,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": false
     },
     "range": "common",
     "active_months": [
@@ -99,7 +101,12 @@
     "links": {
       "site_page": "/pest-identifier/aphid/",
       "guides": []
-    }
+    },
+    "role": "plant_pest",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": []
   },
   {
     "kind": "organism",
@@ -136,7 +143,8 @@
       {
         "slug": "mealybug-destroyer",
         "difference": "Mealybugs are stationary, waxy-white, and clustered on the plant; the mealybug destroyer beetle larva looks similar but moves around actively hunting them.",
-        "next_photo": "A close-up showing whether the waxy insect is moving and actively hunting versus stationary and feeding."
+        "next_photo": "A close-up showing whether the waxy insect is moving and actively hunting versus stationary and feeding.",
+        "photo_can_confirm": true
       }
     ],
     "size": "tiny",
@@ -158,7 +166,8 @@
       "allergen": false,
       "protected": false,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": false
     },
     "range": "common",
     "active_months": [
@@ -196,7 +205,12 @@
     "links": {
       "site_page": "/pest-identifier/mealybug/",
       "guides": []
-    }
+    },
+    "role": "plant_pest",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": []
   },
   {
     "kind": "organism",
@@ -235,7 +249,8 @@
       {
         "slug": "ficus-whitefly",
         "difference": "Rugose spiraling whitefly lays eggs in a visible spiral, mainly on palms; ficus whitefly doesn't spiral and targets ficus hedges.",
-        "next_photo": "A close-up of the leaf underside egg pattern, plus which plant it is on."
+        "next_photo": "A close-up of the leaf underside egg pattern, plus which plant it is on.",
+        "photo_can_confirm": true
       }
     ],
     "size": "tiny",
@@ -257,7 +272,8 @@
       "allergen": false,
       "protected": false,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": false
     },
     "range": "common",
     "active_months": [
@@ -301,7 +317,12 @@
     "links": {
       "site_page": "/pest-identifier/spiraling-whitefly/",
       "guides": []
-    }
+    },
+    "role": "plant_pest",
+    "risk": "low",
+    "action": "specialist",
+    "season_basis": "year_round",
+    "verification": []
   },
   {
     "kind": "organism",
@@ -337,7 +358,8 @@
       {
         "slug": "florida-wax-scale",
         "difference": "Tea scale is flat, brown flecking on leaf undersides of camellias and hollies; Florida wax scale is a raised, pinkish-white waxy bump on stems.",
-        "next_photo": "A close-up of the scale shape (flat vs. raised) and which plant part it is on."
+        "next_photo": "A close-up of the scale shape (flat vs. raised) and which plant part it is on.",
+        "photo_can_confirm": true
       }
     ],
     "size": "tiny",
@@ -358,7 +380,8 @@
       "allergen": false,
       "protected": false,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": false
     },
     "range": "common",
     "active_months": [
@@ -385,17 +408,22 @@
     },
     "urgency": "moderate",
     "copy": {
-      "what_it_means": "Adult scales cement themselves down and live under armor for life, so they never move again once settled. Systemic treatment beats sprays, since the waxy armor sheds contact products.",
-      "fact": "Adult scales never move again — they cement themselves down and live under armor for life.",
-      "blurb": "Systemic treatment beats sprays — the armor sheds contact products."
+      "what_it_means": "Adult scales cement themselves in place and live under a waxy shell for life, which is why a quick spray often doesn't reach them. A technician picks the approach — product choice, coverage on leaf undersides, timing and follow-up — based on how established the infestation is and the plant's condition.",
+      "fact": "Adult scales never move again once they settle — they cement themselves down and live under that shell for the rest of their life.",
+      "blurb": "The waxy shell is why timing and coverage on leaf undersides matter as much as which product is used."
     },
-    "tech_notes": "Confirm flat brown armor on leaf underside + matching top-side chlorosis. Systemic drench/injection; contact sprays largely ineffective against armored scale.",
+    "tech_notes": "Confirm flat brown armor on leaf underside plus matching top-side chlorosis. Evaluate product choice (horticultural oil applied to leaf undersides is a recognized option), timing, plant condition and follow-up rather than one fixed treatment.",
     "sources": [
       "https://ask.ifas.ufl.edu/publication/IN522"
     ],
     "links": {
       "site_page": "/pest-identifier/tea-scale/",
       "guides": []
-    }
+    },
+    "role": "plant_pest",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": []
   }
 ]

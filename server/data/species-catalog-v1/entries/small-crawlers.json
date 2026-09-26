@@ -33,7 +33,8 @@
       {
         "slug": "firebrat",
         "difference": "Silverfish are silvery and prefer humid spots like bathrooms; firebrats are mottled gray-brown and prefer hot, dry spots like near water heaters and furnaces.",
-        "next_photo": "A close-up of the body color and where it was found (humid vs. hot/dry area)."
+        "next_photo": "A close-up of the body color and where it was found (humid vs. hot/dry area).",
+        "photo_can_confirm": true
       }
     ],
     "size": "small",
@@ -55,7 +56,8 @@
       "allergen": false,
       "protected": false,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": false
     },
     "range": "common",
     "active_months": [
@@ -93,7 +95,12 @@
     "links": {
       "site_page": "/pest-identifier/silverfish/",
       "guides": []
-    }
+    },
+    "role": "nuisance",
+    "risk": "low",
+    "action": "fix_conditions",
+    "season_basis": "year_round",
+    "verification": []
   },
   {
     "kind": "organism",
@@ -123,7 +130,7 @@
     "subgroup": null,
     "site_category": "Occasional invaders",
     "traits": [
-      "Rear pincers (harmless to people), 12-16 mm, dark brown",
+      "Rear pincers can pinch but rarely break skin, 12-16 mm, dark brown",
       "Hides under pots, mats, and mulch during the day",
       "Wanders indoors after heavy rain",
       "Voracious predator of caterpillars, aphids, and other small insects"
@@ -132,7 +139,8 @@
       {
         "slug": "silverfish",
         "difference": "Earwigs have rear pincers and a beetle-like body; silverfish have three tail bristles instead of pincers and a tapered, scaly body.",
-        "next_photo": "A close-up of the tail end — pincers versus bristles."
+        "next_photo": "A close-up of the tail end — pincers versus bristles.",
+        "photo_can_confirm": true
       }
     ],
     "size": "small",
@@ -147,14 +155,15 @@
     "verdict": "harmless",
     "safety": {
       "stings": false,
-      "bites": false,
+      "bites": true,
       "venomous": false,
       "disease_vector": false,
       "structural": false,
       "allergen": false,
       "protected": false,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": false
     },
     "range": "common",
     "active_months": [
@@ -186,7 +195,7 @@
     },
     "urgency": "low",
     "copy": {
-      "what_it_means": "The pincers look dramatic but are harmless to people — they’re for folding wings and courtship, not attacking. Earwigs are voracious predators of other garden insects; fixing door sweeps and drainage usually stops indoor wandering.",
+      "what_it_means": "The pincers look dramatic but rarely break skin — they’re for folding wings and courtship, not attacking. Earwigs are voracious predators of other garden insects; fixing door sweeps and drainage usually stops indoor wandering.",
       "fact": "The pincers are for folding its wings and courtship — the ear-crawling myth is pure medieval legend.",
       "blurb": "Fix door sweeps and drainage; the visitors stop themselves."
     },
@@ -197,6 +206,11 @@
     "links": {
       "site_page": "/pest-identifier/earwig/",
       "guides": []
-    }
+    },
+    "role": "harmless_visitor",
+    "risk": "defensive",
+    "action": "fix_conditions",
+    "season_basis": "year_round",
+    "verification": []
   }
 ]

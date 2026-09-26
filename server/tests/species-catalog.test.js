@@ -41,13 +41,37 @@ const ENUMS = {
   line: ['pest', 'termite', 'mosquito', 'lawn', 'tree_shrub', 'rodent', 'none'],
   key: ['pest', 'mosquito', 'flea', 'lawnPestControl', null],
   referral: [null, 'bee_relocation', 'wildlife_trapper', 'report_fwc', 'report_fdacs', 'protected_leave_alone'],
+  // Revision 2 (outside review, 2026-09-26): what it is / the risk / what to do.
+  role: ['beneficial', 'harmless_visitor', 'nuisance', 'plant_pest', 'lawn_pest', 'structural_pest', 'health_pest', 'stinging_pest', 'wildlife', 'protected_wildlife'],
+  risk: ['low', 'defensive', 'irritant', 'medical'],
+  action: ['leave_alone', 'monitor', 'fix_conditions', 'inspection', 'specialist', 'report'],
+  season_basis: ['observed', 'swarming', 'year_round', 'unverified'],
+  review_status: ['draft', 'owner_approved'],
 };
-const SAFETY_KEYS = ['stings', 'bites', 'venomous', 'disease_vector', 'structural', 'allergen', 'protected', 'toxic_to_pets', 'regulated'];
-const NEEDS_SAFETY_LINE = ['stings', 'venomous', 'disease_vector', 'toxic_to_pets', 'protected', 'regulated'];
+const SAFETY_KEYS = ['stings', 'bites', 'venomous', 'irritant', 'disease_vector', 'structural', 'allergen', 'protected', 'toxic_to_pets', 'regulated'];
+const NEEDS_SAFETY_LINE = ['stings', 'venomous', 'irritant', 'disease_vector', 'toxic_to_pets', 'protected', 'regulated'];
+// Overclaims the outside review found: a diagnosis from a photo, absolute
+// safety, or a treatment promise. Commercial promises (prices, response
+// times) are customer copy the catalog must never carry either.
+const OVERCLAIM = /\b(means an active|confirms? (an |the )?infestation|completely harmless|beats sprays?|main way to get relief|will (solve|eliminate|get rid))\b/i;
+// "Doesn't bite / can't sting" is only true of an animal that can't: a flat
+// claim about the species must agree with its own safety flags (the southern
+// house spider's "can't bite" was the error this catches). A sentence about
+// one sex or life stage ("males cannot sting", "adults don't bite") or a
+// frequency ("almost never stings") is not a flat claim.
+const NO_BITE = /\b(can['’]?t|cannot|(does|do) not|(doesn|don)['’]?t|won['’]?t|never) (bite|bites)\b/i;
+const NO_STING = /\b(can['’]?t|cannot|(does|do) not|(doesn|don)['’]?t|won['’]?t|never) (sting|stings)\b|\bno stinger\b/i;
+function flatClaim(text, pattern) {
+  return text.split(/(?<=[.!?;—])\s+/).some((sentence) => pattern.test(sentence)
+    && !/\b(males?|females?|adults?|larvae|larva|workers?)\b/i.test(sentence) && !/\b(almost|rarely|seldom|usually)\b/i.test(sentence));
+}
+// A fixed-time outcome is a promise too ("they're gone in days").
+const TIMED_OUTCOME = /\b(gone|cleared|fixed|solved|over) (in|within) (a few |\d+ )?(days?|weeks?)\b/i;
+const COMMERCIAL_PROMISE = /\bfree (inspection|estimate|quote)s?\b|\bwithin (a|one|two|\d+) (day|days|hour|hours)\b|\busually within\b|\bno[- ]charge\b/i;
 const WILDLIFE_GROUPS = new Set(['wild-mammals', 'lizards', 'snakes', 'turtles', 'frogs-toads', 'birds']);
 
 function forbiddenCopyText(entry) {
-  return `${entry.copy.what_it_means} ${entry.copy.fact} ${entry.safety_line || ''} ${(entry.traits || []).join(' ')}`;
+  return `${entry.copy.what_it_means} ${entry.copy.fact} ${entry.copy.blurb || ''} ${entry.safety_line || ''} ${(entry.traits || []).join(' ')}`;
 }
 
 describe('species-catalog-v1 entries — schema (ported from validate.js)', () => {
@@ -71,8 +95,8 @@ describe('species-catalog-v1 entries — schema (ported from validate.js)', () =
       const sg = index.subgroups.find((s) => s.id === e.subgroup);
       expect(sg.group).toBe(e.group);
     }
-    expect(typeof e.site_category).toBe('string');
-    expect(e.site_category.trim().length).toBeGreaterThan(0);
+    // The website's category filters join on these exact strings.
+    expect(index.site_categories).toContain(e.site_category);
 
     expect(Array.isArray(e.stages)).toBe(true);
     expect(Array.isArray(e.sign_of)).toBe(true);
@@ -98,6 +122,7 @@ describe('species-catalog-v1 entries — schema (ported from validate.js)', () =
       expect(la.difference.length).toBeLessThanOrEqual(160);
       expect(la.next_photo.trim().length).toBeGreaterThan(0);
       expect(la.next_photo.length).toBeLessThanOrEqual(180);
+      expect(typeof la.photo_can_confirm).toBe('boolean');
     }
 
     expect(ENUMS.size).toContain(e.size);
@@ -109,6 +134,20 @@ describe('species-catalog-v1 entries — schema (ported from validate.js)', () =
     for (const l of e.looks) expect(ENUMS.looks).toContain(l);
 
     expect(ENUMS.verdict).toContain(e.verdict);
+    expect(ENUMS.role).toContain(e.role);
+    expect(ENUMS.risk).toContain(e.risk);
+    expect(ENUMS.action).toContain(e.action);
+    expect(ENUMS.season_basis).toContain(e.season_basis);
+    if (e.role === 'beneficial') expect(e.verdict).toBe('ally');
+    if (e.role === 'protected_wildlife') expect(['leave_alone', 'report', 'specialist']).toContain(e.action);
+    if (e.risk === 'irritant') expect(e.safety.irritant).toBe(true);
+    if (e.risk === 'medical') expect((e.safety_line || '').trim().length).toBeGreaterThan(0);
+    // An unverified fact is an open item, never a recorded "false".
+    expect(Array.isArray(e.verification)).toBe(true);
+    for (const v of e.verification) {
+      expect(typeof v.claim).toBe('string');
+      expect(v.claim.trim().length).toBeGreaterThan(0);
+    }
 
     expect(e.safety).toBeTruthy();
     for (const k of SAFETY_KEYS) expect(typeof e.safety[k]).toBe('boolean');
@@ -183,6 +222,13 @@ describe('species-catalog-v1 entries — schema (ported from validate.js)', () =
     const copyText = forbiddenCopyText(e);
     expect(copyText).not.toMatch(/\$\s?\d/);
     expect(copyText).not.toMatch(/\b(guarantee|guaranteed|same[- ]day|within (an|the) hour|today)\b/i);
+    expect(copyText).not.toMatch(OVERCLAIM);
+    expect(copyText).not.toMatch(COMMERCIAL_PROMISE);
+    expect(copyText).not.toMatch(TIMED_OUTCOME);
+    if (flatClaim(copyText, NO_BITE)) expect(e.safety.bites).toBe(false);
+    if (flatClaim(copyText, NO_STING)) expect(e.safety.stings).toBe(false);
+    // Adult biting flies aren't a mosquito-treatment target (UF/IFAS).
+    if (e.group === 'biting-flies' && e.slug !== 'no-see-um') expect(s.line).not.toBe('mosquito');
 
     expect(typeof e.tech_notes).toBe('string');
     expect(e.tech_notes.trim().length).toBeGreaterThan(0);
@@ -201,7 +247,9 @@ describe('species-catalog-v1 entries — schema (ported from validate.js)', () =
     for (const u of e.sources) expect(u).toMatch(/^https:\/\//);
 
     expect(e.review).toBeTruthy();
-    expect(e.review.status).toBe('draft');
+    expect(ENUMS.review_status).toContain(e.review.status);
+    // Nothing is owner-approved while a fact-check is still open.
+    if (e.review.status === 'owner_approved') expect(e.verification).toEqual([]);
     expect(typeof e.review.notes).toBe('string');
   });
 
@@ -253,20 +301,27 @@ describe('cross-worker slugs (planned_slugs contract)', () => {
   });
 });
 
-describe('alias collisions', () => {
-  // The one known, intentional exception: honey-bee-swarm and
-  // honey-bee-wall-colony are both genuinely Apis mellifera — the same
-  // species in two different situations (BRIEF's own split). Every other
-  // scientific-name / alias / common-name collision is a data bug.
-  const ALLOWED = new Set(['apis mellifera:honey-bee-swarm:honey-bee-wall-colony']);
+describe('name collisions', () => {
+  // A name several nodes share resolves to their deepest common ancestor
+  // (Codex #4873 r1): Apis mellifera is both the swarm and the wall colony,
+  // so it names the bees subgroup, never one of them. A name that would only
+  // meet at a category is too broad and must not exist.
+  test('every shared name resolves to a common subgroup or group', () => {
+    const unresolved = catalog.nameIndexCollisions().filter((c) => !c.resolvesTo);
+    expect(unresolved).toEqual([]);
+  });
 
-  test('no alias/common-name/scientific-name maps to two different entries, except the documented Apis mellifera split', () => {
-    const collisions = catalog.nameIndexCollisions();
-    const unexpected = collisions.filter((c) => {
-      const key = `${c.name}:${[...c.slugs].sort().join(':')}`;
-      return !ALLOWED.has(key);
-    });
-    expect(unexpected).toEqual([]);
+  test('Apis mellifera names the bees subgroup, not one honey bee situation', () => {
+    const result = catalog.resolveName('Apis mellifera');
+    expect(result.node).toMatchObject({ level: 'subgroup', id: 'bees' });
+  });
+
+  test('a plain "honey bee" never assumes a swarm; the specific situation still resolves', () => {
+    for (const q of ['honey bee', 'honey bees', 'I found honey bees']) {
+      expect(catalog.resolveName(q).node).toMatchObject({ level: 'subgroup', id: 'bees' });
+    }
+    expect(catalog.resolveName('a honey bee swarm on the fence').node.slug).toBe('honey-bee-swarm');
+    expect(catalog.resolveName('honey bee wall colony').node.slug).toBe('honey-bee-wall-colony');
   });
 });
 
@@ -300,11 +355,56 @@ describe('resolveName regressions', () => {
     expect(catalog.resolveName('antenna')).toBeNull();
   });
 
-  test('whole-word alias match: "fire ants" resolves to the fire-ant entry', () => {
-    const result = catalog.resolveName('fire ants');
-    expect(result).toBeTruthy();
-    expect(result.node.slug).toBe('fire-ant');
-    expect(result.via).toBe('alias');
+  test('a group or subgroup name resolves to that node, never one arbitrary species (Codex #4873 r1)', () => {
+    expect(catalog.resolveName('fire ants').node).toMatchObject({ level: 'subgroup', id: 'fire-ants' });
+    expect(catalog.resolveName('termite').node).toMatchObject({ level: 'group', id: 'termites' });
+    expect(catalog.resolveName('I think these are termites').node).toMatchObject({ level: 'group', id: 'termites' });
+    // A singular generic inside a sentence stays generic too (Codex #4873 pre-push P1).
+    expect(catalog.resolveName('I found a termite').node).toMatchObject({ level: 'group', id: 'termites' });
+    expect(catalog.resolveName('saw a fire ant by the pool').node).toMatchObject({ level: 'subgroup', id: 'fire-ants' });
+    expect(catalog.resolveName('insect').node).toMatchObject({ level: 'category', id: 'insect' });
+  });
+
+  test('a specific name inside a sentence still beats the group name inside it', () => {
+    expect(catalog.resolveName('drywood termite pellets on the sill').node.slug).toBe('drywood-termite');
+  });
+
+  test('a raw v1 legacy slug resolves through the legacy map before any fuzzy match (Codex #4873 r1)', () => {
+    expect(catalog.resolveName('drywood-termite')).toMatchObject({ via: 'legacy', node: { slug: 'drywood-termite' } });
+    expect(catalog.resolveName('whitefly')).toMatchObject({ via: 'legacy', node: { id: 'whiteflies' } });
+    expect(catalog.resolveName('aphid-scale')).toMatchObject({ via: 'legacy', node: { id: 'plant-pests-small' } });
+    expect(catalog.resolveName('beneficial')).toBeNull();
+  });
+
+  test('hyphens and spaces are the same (Codex #4873 r1)', () => {
+    expect(catalog.resolveName('golden silk orb weaver').node.slug).toBe('golden-silk-orbweaver');
+    expect(catalog.resolveName('Golden Silk Orb-weaver').node.slug).toBe('golden-silk-orbweaver');
+  });
+
+  test('a curated short alias still matches inside a sentence (Codex #4873 r1)', () => {
+    expect(catalog.resolveName('I found an asp on the oak').node.slug).toBe('puss-caterpillar');
+  });
+
+  test('a -ies plural keeps the specific species (Codex #4873 r2)', () => {
+    expect(catalog.resolveName('rugose spiraling whiteflies').node.slug).toBe('spiraling-whitefly');
+    expect(catalog.resolveName('whiteflies').node).toMatchObject({ level: 'subgroup', id: 'whiteflies' });
+  });
+
+  test('each taxon in a slash-delimited subgroup name resolves (Codex #4873 r2)', () => {
+    expect(catalog.resolveName('Viperidae').node).toMatchObject({ level: 'subgroup', id: 'venomous-snakes' });
+    expect(catalog.resolveName('Elapidae').node).toMatchObject({ level: 'subgroup', id: 'venomous-snakes' });
+    expect(catalog.resolveName('Paratrechina').node).toMatchObject({ level: 'subgroup', id: 'crazy-ants' });
+  });
+
+  test('object-prototype names are never legacy slugs (Codex #4873 r2)', () => {
+    for (const name of ['constructor', '__proto__', 'toString', 'hasOwnProperty']) {
+      expect(catalog.resolveLegacySlug(name)).toBeNull();
+      expect(catalog.resolveName(name)).toBeNull();
+    }
+  });
+
+  test('a bare genus resolves an "X spp." scientific name', () => {
+    expect(catalog.resolveName('Phyllophaga').node.slug).toBe('white-grub');
   });
 
   test('scientific name match takes priority and works case-insensitively', () => {
@@ -321,8 +421,8 @@ describe('resolveName regressions', () => {
     expect(result.via).toBe('legacy');
   });
 
-  test('an unbuilt cross-worker term (e.g. "assassin bug") resolves to null rather than a wrong entry', () => {
-    expect(catalog.resolveName('assassin bug')).toBeNull();
+  test('a name whose species aren\'t in this batch resolves to its subgroup, never a wrong entry', () => {
+    expect(catalog.resolveName('assassin bug').node).toMatchObject({ level: 'subgroup', id: 'assassin-bugs' });
   });
 
   test('an exact common-name match wins over a shorter alias fuzzy-matching inside it (Codex r1 P1)', () => {
@@ -393,6 +493,14 @@ describe('loader API surface', () => {
     expect(rungs).toEqual([{ level: 'category', id: 'insect', label: 'Insect', generic: 'an insect' }]);
   });
 
+  test('nextPhoto has guidance for a category too (Codex #4873 r1)', () => {
+    for (const id of ['insect', 'arachnid', 'rodent', 'wildlife', 'other']) {
+      const np = catalog.nextPhoto(id);
+      expect(np.ask.length).toBeGreaterThan(0);
+      expect(np.why.length).toBeGreaterThan(0);
+    }
+  });
+
   test('nextPhoto returns the authored next_photo for a group/subgroup', () => {
     const np = catalog.nextPhoto('ants');
     expect(np.ask.length).toBeGreaterThan(0);
@@ -402,7 +510,7 @@ describe('loader API surface', () => {
   test('nextPhoto falls back to the first look-alike photo for an entry, with its rationale (Codex r3 P1)', () => {
     const np = catalog.nextPhoto('fire-ant');
     const firstLookAlike = catalog.getEntry('fire-ant').look_alikes[0];
-    expect(np).toEqual({ ask: firstLookAlike.next_photo, why: firstLookAlike.difference });
+    expect(np).toEqual({ ask: firstLookAlike.next_photo, why: firstLookAlike.difference, photo_can_confirm: firstLookAlike.photo_can_confirm !== false });
     expect(np.why).toBeTruthy();
   });
 

@@ -8,6 +8,11 @@
       "adult"
     ],
     "sign_of": [],
+    "role": "health_pest",
+    "risk": "medical",
+    "action": "specialist",
+    "season_basis": "year_round",
+    "verification": [],
     "safety_line": "Can spread disease to dogs and, less commonly, to people. See a doctor if a bite site develops a rash or fever follows.",
     "legacy_slugs": [],
     "review": {
@@ -36,7 +41,8 @@
       {
         "slug": "american-dog-tick",
         "difference": "Brown dog tick is plain reddish-brown and can live entirely indoors; American dog tick has pale mottling on the back and needs to go back outdoors.",
-        "next_photo": "A close-up from above of the back for any pale mottling, next to a coin."
+        "next_photo": "A close-up from above of the back for any pale mottling, next to a coin.",
+        "photo_can_confirm": true
       }
     ],
     "size": "small",
@@ -51,14 +57,15 @@
     "verdict": "call",
     "safety": {
       "stings": false,
-      "bites": false,
+      "bites": true,
       "venomous": false,
       "disease_vector": true,
       "structural": false,
       "allergen": false,
       "protected": false,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": false
     },
     "range": "common",
     "active_months": [

@@ -30,13 +30,14 @@
       "Large warty treefrog, up to about 5 inches — the largest treefrog in the US",
       "Oversized toe pads compared to native treefrogs",
       "Common around porch lights at night hunting insects",
-      "Skin secretions can irritate eyes and airways — wash hands after contact"
+      "Grayish, brownish, or greenish with variable blotching, and rough, warty skin"
     ],
     "look_alikes": [
       {
         "slug": "green-treefrog",
         "difference": "Cuban treefrogs are much larger with warty skin and oversized toe pads; green treefrogs are smaller, smooth-skinned, and usually have a white side stripe.",
-        "next_photo": "A close-up of the toe pads and overall size next to a coin."
+        "next_photo": "A close-up of the toe pads and overall size next to a coin.",
+        "photo_can_confirm": true
       }
     ],
     "size": "large",
@@ -57,7 +58,8 @@
       "allergen": false,
       "protected": false,
       "toxic_to_pets": true,
-      "regulated": false
+      "regulated": false,
+      "irritant": true
     },
     "range": "common",
     "active_months": [
@@ -82,13 +84,13 @@
       9
     ],
     "service": {
-      "line": "pest",
+      "line": "none",
       "key": null,
-      "label": "General Pest Control",
+      "label": "No Treatment Needed",
       "inspection_first": false,
       "referral": null
     },
-    "urgency": "moderate",
+    "urgency": "low",
     "copy": {
       "what_it_means": "An invasive species that eats Florida's smaller native treefrogs — one reason a porch chorus may have gone quiet. Wash hands after contact, and turning porch lights off (or switching to amber) removes the insect buffet that draws them in.",
       "fact": "An invasive that eats Florida’s smaller native treefrogs — one reason your porch chorus may have gone quiet.",
@@ -101,6 +103,16 @@
     "links": {
       "site_page": "/pest-identifier/cuban-treefrog/",
       "guides": []
-    }
+    },
+    "role": "wildlife",
+    "risk": "irritant",
+    "action": "fix_conditions",
+    "season_basis": "year_round",
+    "verification": [
+      {
+        "claim": "Skin-secretion irritation details and native-treefrog predation facts",
+        "note": "The primary EDIS article returned a 403 on direct fetch this pass; facts are corroborated across multiple UF/IFAS and USFWS sources found via search rather than one directly-loaded page. Worth a follow-up direct verification."
+      }
+    ]
   }
 ]

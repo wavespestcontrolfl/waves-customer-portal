@@ -7,7 +7,7 @@
       "adult"
     ],
     "sign_of": [],
-    "safety_line": null,
+    "safety_line": "Toxic enough to make a pet vomit or act ill if eaten; call your vet if that happens. Its defensive foam can also irritate skin and eyes — wear gloves if you handle it.",
     "legacy_slugs": [],
     "review": {
       "status": "draft",
@@ -36,7 +36,8 @@
       {
         "slug": "katydid",
         "difference": "Lubbers are heavy-bodied, slow, and can barely fly; katydids are slender, leaf-green, and jump or fly readily.",
-        "next_photo": "A side-on photo showing body shape and wing length relative to the body."
+        "next_photo": "A side-on photo showing body shape and wing length relative to the body.",
+        "photo_can_confirm": true
       }
     ],
     "size": "large",
@@ -47,7 +48,7 @@
     "looks": [
       "crawler"
     ],
-    "verdict": "harmless",
+    "verdict": "watch",
     "safety": {
       "stings": false,
       "bites": false,
@@ -56,8 +57,9 @@
       "structural": false,
       "allergen": false,
       "protected": false,
-      "toxic_to_pets": false,
-      "regulated": false
+      "toxic_to_pets": true,
+      "regulated": false,
+      "irritant": true
     },
     "range": "common",
     "active_months": [
@@ -78,20 +80,25 @@
       "inspection_first": false,
       "referral": null
     },
-    "urgency": "low",
+    "urgency": "moderate",
     "copy": {
-      "what_it_means": "Its bold colors are a warning label — lubbers are toxic enough that most predators spit them back out. They chew ornamentals but rarely at damaging scale in a typical yard; hand-picking off favorite plants is usually enough.",
-      "fact": "Its colors are a warning label — lubbers are toxic enough that most predators spit them back out.",
-      "blurb": "They chew ornamentals but rarely at damaging scale in yards. Hand-pick if they’re on your favorites."
+      "what_it_means": "Its bold colors are a warning label — lubbers carry chemicals toxic enough that most predators spit them out, and a dog or cat that eats one can get sick. They chew ornamentals but rarely at damaging scale in a typical yard; the bigger concern where pets have yard access is keeping them from eating one.",
+      "fact": "Its colors are a warning label — lubbers are toxic enough that most predators spit them back out, and the same chemicals can make a pet ill if it eats one.",
+      "blurb": "They chew ornamentals but rarely at damaging scale in yards. Keep pets from eating them, and wear gloves if you remove any by hand."
     },
-    "tech_notes": "Not a lawn-turf pest; ornamental nibbling only. Hand removal or spot treatment on high-value ornamentals if numerous.",
+    "tech_notes": "Not a lawn-turf pest; ornamental nibbling only. If hand removal is needed, use gloves — the defensive foam can irritate skin/eyes and the insect is toxic if a pet eats it. Spot treatment on high-value ornamentals if numerous.",
     "sources": [
       "https://ask.ifas.ufl.edu/publication/IN132"
     ],
     "links": {
       "site_page": "/pest-identifier/lubber-grasshopper/",
       "guides": []
-    }
+    },
+    "role": "plant_pest",
+    "risk": "medical",
+    "action": "monitor",
+    "season_basis": "observed",
+    "verification": []
   },
   {
     "kind": "organism",
@@ -129,7 +136,8 @@
       {
         "slug": "eastern-mole",
         "difference": "Mole cricket tunnels are narrow, meandering ridges made by an insect; eastern mole tunnels are wider ridges made by a furry mammal, not an insect.",
-        "next_photo": "A wide shot of the tunnel width and any entry holes, plus a close-up if the animal is seen."
+        "next_photo": "A wide shot of the tunnel width and any entry holes, plus a close-up if the animal is seen.",
+        "photo_can_confirm": true
       }
     ],
     "size": "medium",
@@ -150,7 +158,8 @@
       "allergen": false,
       "protected": false,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": false
     },
     "range": "common",
     "active_months": [
@@ -194,6 +203,11 @@
     "links": {
       "site_page": "/pest-identifier/mole-cricket/",
       "guides": []
-    }
+    },
+    "role": "lawn_pest",
+    "risk": "low",
+    "action": "specialist",
+    "season_basis": "year_round",
+    "verification": []
   }
 ]

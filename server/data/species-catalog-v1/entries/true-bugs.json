@@ -29,14 +29,15 @@
     "traits": [
       "Yellowing patches that start in the sunniest, driest spots and spread outward",
       "Damage looks like drought stress but doesn't green up after watering",
-      "Adults about 6 mm, black body, white wings with a small dark spot on the margin",
+      "Adults about 3-4 mm (under 1/5 inch), black body, white wings with a small dark spot on the margin",
       "Part the grass at the patch edge — tiny black bugs with white wing marks"
     ],
     "look_alikes": [
       {
         "slug": "big-eyed-bug",
         "difference": "Chinch bugs are black with a small dark wing-margin spot and kill turf; big-eyed bugs have noticeably large eyes and are a beneficial predator, not a pest.",
-        "next_photo": "The closest possible photo of the insect on a blade of grass, next to a coin."
+        "next_photo": "The closest possible photo of the insect on a blade of grass, next to a coin.",
+        "photo_can_confirm": true
       }
     ],
     "size": "tiny",
@@ -57,7 +58,8 @@
       "allergen": false,
       "protected": false,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": false
     },
     "range": "common",
     "active_months": [
@@ -90,7 +92,7 @@
     },
     "urgency": "high",
     "copy": {
-      "what_it_means": "The #1 killer of St. Augustine lawns in Florida. The tell: drought stress recovers with water, chinch damage doesn't. They kill outward from the first patch, so early treatment saves the lawn where a late catch often means resodding.",
+      "what_it_means": "The #1 killer of St. Augustine lawns in Florida. The tell: drought stress recovers with water, chinch damage doesn't. They kill outward from the first patch, so the earlier it's caught the better the lawn's chances; extensive dead patches may need resodding rather than just treatment.",
       "fact": "The #1 killer of St. Augustine lawns in Florida. The tell: drought stress recovers with water, chinch damage doesn't.",
       "blurb": "Southern chinch bugs kill St. Augustine grass in expanding yellow-to-brown patches, usually starting in the sunniest, driest spots."
     },
@@ -101,7 +103,12 @@
     "links": {
       "site_page": "/pest-identifier/chinch-bug/",
       "guides": []
-    }
+    },
+    "role": "lawn_pest",
+    "risk": "low",
+    "action": "specialist",
+    "season_basis": "year_round",
+    "verification": []
   },
   {
     "kind": "organism",
@@ -133,13 +140,14 @@
       "White foam blobs on grass stems — the nymphs' bubble shelters",
       "Adults 6-12 mm, dark brown to black with two reddish-orange lines across the wings",
       "Grass develops purple, red, or white streaking, then yellows and browns",
-      "Two generations a year, the second (late summer) doing the most damage"
+      "Nymphs inside the foam are pale yellow-green, wingless, and much smaller than the adults"
     ],
     "look_alikes": [
       {
         "slug": "chinch-bug",
         "difference": "Spittlebugs leave white foam and leaf streaking; chinch bugs cause drought-like patches with tiny black bugs at the soil line, no foam.",
-        "next_photo": "A close-up of the grass blades showing foam (or streaking) versus bare patches."
+        "next_photo": "A close-up of the grass blades showing foam (or streaking) versus bare patches.",
+        "photo_can_confirm": true
       }
     ],
     "size": "small",
@@ -160,7 +168,8 @@
       "allergen": false,
       "protected": false,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": false
     },
     "range": "occasional",
     "active_months": [
@@ -195,7 +204,12 @@
     "links": {
       "site_page": "/pest-identifier/spittlebug/",
       "guides": []
-    }
+    },
+    "role": "lawn_pest",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "observed",
+    "verification": []
   },
   {
     "kind": "organism",
@@ -225,16 +239,17 @@
     "subgroup": "stink-leaf-footed",
     "site_category": "Occasional invaders",
     "traits": [
-      "Shield-shaped body, roughly 12-13 mm, usually dull green or brown",
-      "Gathers on sunny walls and around windows in cooler months",
+      "Shield-shaped body, roughly 12-13 mm, green or brown depending on species",
+      "Found year-round on vegetable and ornamental plants, especially tomatoes and beans",
       "Releases a defensive odor from thorax glands when crushed or handled",
-      "Overwinters as an adult in bark, leaf litter, or wall gaps"
+      "Occasionally wanders indoors around doors and windows"
     ],
     "look_alikes": [
       {
         "slug": "leaf-footed-bug",
         "difference": "Stink bugs have a plain shield outline; leaf-footed bugs have a flattened, leaf-like flare on the hind legs.",
-        "next_photo": "A close-up from above of the hind legs and overall body outline, next to a coin."
+        "next_photo": "A close-up from above of the hind legs and overall body outline, next to a coin.",
+        "photo_can_confirm": true
       }
     ],
     "size": "small",
@@ -255,24 +270,31 @@
       "allergen": false,
       "protected": false,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": false
     },
     "range": "common",
     "active_months": [
-      10,
-      11,
-      12,
       1,
       2,
       3,
-      4
-    ],
-    "peak_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
       10,
       11,
-      12,
+      12
+    ],
+    "peak_months": [
       3,
-      4
+      4,
+      5,
+      9,
+      10,
+      11
     ],
     "service": {
       "line": "pest",
@@ -283,17 +305,22 @@
     },
     "urgency": "low",
     "copy": {
-      "what_it_means": "Seasonal wall-sitters that gather on sunny exteriors and slip inside around window gaps in cooler months. Sealing window and door gaps is usually the whole fix — vacuum rather than squish to avoid the odor.",
+      "what_it_means": "In Southwest Florida, stink bugs are year-round garden feeders on tomatoes and other plants, not the cold-weather wall-sitters seen up north. They occasionally wander indoors around doors and windows; sealing gaps helps, and heavy vegetable damage is worth a look.",
       "fact": "The smell is a defense chemical from glands on the thorax — vacuuming rather than squishing avoids it.",
-      "blurb": "Seasonal wall-sitters. Sealing window gaps is the whole fix."
+      "blurb": "Southwest Florida's stink bugs are year-round garden feeders on tomatoes and other vegetables, not the cold-weather wall-sitters found up north. Sealing door and window gaps helps keep wandering ones outside."
     },
-    "tech_notes": "Seasonal exterior aggregator; exclusion (weatherstripping, screens) beats interior chemical treatment.",
+    "tech_notes": "SWFL pentatomids (southern green stink bug, brown stink bug) are year-round plant/fruit feeders — distinguish from the northern brown marmorated stink bug's cold-weather wall-aggregation behavior, which isn't established here. Exclusion (weatherstripping, screens) for occasional indoor wanderers; garden-side treatment per label if vegetable damage is heavy.",
     "sources": [
       "https://ask.ifas.ufl.edu/publication/IN142"
     ],
     "links": {
       "site_page": "/pest-identifier/stink-bug/",
       "guides": []
-    }
+    },
+    "role": "nuisance",
+    "risk": "low",
+    "action": "fix_conditions",
+    "season_basis": "year_round",
+    "verification": []
   }
 ]

@@ -34,7 +34,8 @@
       {
         "slug": "green-anole",
         "difference": "Brown anoles stay brown-gray and low to the ground; green anoles can shift between green and brown and perch higher in shrubs.",
-        "next_photo": "A close-up of the throat fan color while displaying, plus how high off the ground it is."
+        "next_photo": "A close-up of the throat fan color while displaying, plus how high off the ground it is.",
+        "photo_can_confirm": true
       }
     ],
     "size": "small",
@@ -55,7 +56,8 @@
       "allergen": false,
       "protected": false,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": false
     },
     "range": "common",
     "active_months": [
@@ -100,7 +102,12 @@
     "links": {
       "site_page": "/pest-identifier/brown-anole/",
       "guides": []
-    }
+    },
+    "role": "beneficial",
+    "risk": "low",
+    "action": "leave_alone",
+    "season_basis": "year_round",
+    "verification": []
   },
   {
     "kind": "organism",
@@ -138,7 +145,8 @@
       {
         "slug": "brown-anole",
         "difference": "House geckos are pale, nocturnal, and cling to walls near lights; brown anoles are brown, active by day, and stay closer to the ground.",
-        "next_photo": "A close-up of the skin color and whether it was seen by day or at night near a light."
+        "next_photo": "A close-up of the skin color and whether it was seen by day or at night near a light.",
+        "photo_can_confirm": true
       }
     ],
     "size": "small",
@@ -159,7 +167,8 @@
       "allergen": false,
       "protected": false,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": false
     },
     "range": "common",
     "active_months": [
@@ -197,6 +206,16 @@
     "links": {
       "site_page": "/pest-identifier/gecko/",
       "guides": []
-    }
+    },
+    "role": "beneficial",
+    "risk": "low",
+    "action": "leave_alone",
+    "season_basis": "year_round",
+    "verification": [
+      {
+        "claim": "General house gecko (Hemidactylus spp.) behavior facts (chirping, wall-climbing)",
+        "note": "A dedicated UF/IFAS Featured Creatures page for Hemidactylus house geckos could not be reached this pass (404/410); facts reflect widely corroborated general knowledge and should be spot-checked against a live UF/IFAS gecko publication."
+      }
+    ]
   }
 ]

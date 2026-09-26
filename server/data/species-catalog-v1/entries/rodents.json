@@ -35,7 +35,8 @@
       {
         "slug": "norway-rat",
         "difference": "Roof rats are found up high (attic, roofline, trees) with a tail longer than the body; Norway rats burrow at ground level and have a shorter, thicker tail.",
-        "next_photo": "A close-up of the droppings next to a coin, plus a wide shot of where the activity is (attic vs. ground)."
+        "next_photo": "A close-up of the droppings next to a coin, plus a wide shot of where the activity is (attic vs. ground).",
+        "photo_can_confirm": true
       }
     ],
     "size": "large",
@@ -50,14 +51,15 @@
     "verdict": "call",
     "safety": {
       "stings": false,
-      "bites": false,
+      "bites": true,
       "venomous": false,
       "disease_vector": true,
       "structural": true,
       "allergen": false,
       "protected": false,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": false
     },
     "range": "common",
     "active_months": [
@@ -84,9 +86,9 @@
     },
     "urgency": "high",
     "copy": {
-      "what_it_means": "Florida's aerialist — it runs fences and branches like a tightrope walker and enters at roofline, not floor level. Attic noise plus chewed wires is urgent; sealing entry points (exclusion) is the permanent fix, done after an inspection finds them.",
+      "what_it_means": "Florida's aerialist — it runs fences and branches like a tightrope walker and enters at roofline, not floor level. Attic noise plus chewed wires is worth an inspection; sealing entry points (exclusion) is the standard approach once the entries are found.",
       "fact": "It runs fences and branches like a tightrope walker and enters buildings at roofline, not floor level.",
-      "blurb": "Attic noise + chewed wires is an urgent combination. Exclusion (sealing entries) is the permanent fix."
+      "blurb": "Attic noise + chewed wires is worth an inspection. Exclusion (sealing entry points) is the standard approach, done after the entries are located."
     },
     "tech_notes": "Confirm tail-longer-than-body + roofline entry signs. Full exclusion walk (roof returns, AC chase, garage corners); quote trapping + exclusion after inspection.",
     "sources": [
@@ -95,7 +97,17 @@
     "links": {
       "site_page": "/pest-identifier/roof-rat/",
       "guides": []
-    }
+    },
+    "role": "structural_pest",
+    "risk": "medical",
+    "action": "inspection",
+    "season_basis": "year_round",
+    "verification": [
+      {
+        "claim": "Some behavioral/control details are normally cited from UF/IFAS ENY-224 (\"Rat and Mouse Control\")",
+        "note": "ENY-224 returned 410/Gone when checked this pass; sourced from a related UF/IFAS pest-exclusion publication instead. Re-verify against ENY-224 once its URL is restored."
+      }
+    ]
   },
   {
     "kind": "organism",
@@ -133,7 +145,8 @@
       {
         "slug": "roof-rat",
         "difference": "Norway rats burrow at ground level with a tail shorter than the body; roof rats are found up high with a tail longer than the body.",
-        "next_photo": "A close-up of the droppings next to a coin, plus a wide shot of where the activity is (ground vs. attic)."
+        "next_photo": "A close-up of the droppings next to a coin, plus a wide shot of where the activity is (ground vs. attic).",
+        "photo_can_confirm": true
       }
     ],
     "size": "large",
@@ -147,14 +160,15 @@
     "verdict": "call",
     "safety": {
       "stings": false,
-      "bites": false,
+      "bites": true,
       "venomous": false,
       "disease_vector": true,
       "structural": true,
       "allergen": false,
       "protected": false,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": false
     },
     "range": "occasional",
     "active_months": [
@@ -181,9 +195,9 @@
     },
     "urgency": "high",
     "copy": {
-      "what_it_means": "Where roof rats take the high road, Norway rats dig in at the foundation. A burrow plus droppings means an established population — trapping paired with sealing entry points, in that order, after an inspection.",
+      "what_it_means": "Where roof rats take the high road, Norway rats dig in at the foundation. A burrow plus droppings suggests an established population; an inspection confirms the extent, then trapping paired with sealing entry points, in that order.",
       "fact": "Ground-floor specialist — where roof rats take the high road, Norway rats dig in at the foundation.",
-      "blurb": "Burrow + droppings = established. Trapping plus entry sealing, in that order."
+      "blurb": "Burrow + droppings suggest an established population. An inspection confirms it, then trapping plus entry sealing, in that order."
     },
     "tech_notes": "Confirm burrow entrances + tail-shorter-than-body. Ground-level exclusion focus (foundation gaps, slab penetrations); quote trapping + exclusion after inspection.",
     "sources": [
@@ -192,7 +206,17 @@
     "links": {
       "site_page": "/pest-identifier/norway-rat/",
       "guides": []
-    }
+    },
+    "role": "structural_pest",
+    "risk": "medical",
+    "action": "inspection",
+    "season_basis": "year_round",
+    "verification": [
+      {
+        "claim": "Some behavioral/control details are normally cited from UF/IFAS ENY-224 (\"Rat and Mouse Control\")",
+        "note": "ENY-224 returned 410/Gone when checked this pass; sourced from a related UF/IFAS pest-exclusion publication instead. Re-verify against ENY-224 once its URL is restored."
+      }
+    ]
   },
   {
     "kind": "organism",
@@ -230,7 +254,8 @@
       {
         "slug": "norway-rat",
         "difference": "House mice are much smaller with rice-grain droppings; Norway rats are large with thick, capsule-shaped droppings and a burrow at ground level.",
-        "next_photo": "A close-up of the droppings next to a coin for size."
+        "next_photo": "A close-up of the droppings next to a coin for size.",
+        "photo_can_confirm": true
       }
     ],
     "size": "medium",
@@ -245,14 +270,15 @@
     "verdict": "call",
     "safety": {
       "stings": false,
-      "bites": false,
+      "bites": true,
       "venomous": false,
       "disease_vector": true,
-      "structural": false,
+      "structural": true,
       "allergen": false,
       "protected": false,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": false
     },
     "range": "common",
     "active_months": [
@@ -279,9 +305,9 @@
     },
     "urgency": "high",
     "copy": {
-      "what_it_means": "A mouse nibbles at 20-30 food sites a night rather than eating one big meal, which is why droppings show up in many places at once. One mouse is rarely just one — sealing dime-sized gaps stops the next one from using the same door.",
+      "what_it_means": "A mouse nibbles at 20-30 food sites a night rather than eating one big meal, which is why droppings show up in many places at once. One mouse is rarely just one — sealing dime-sized gaps helps keep the next one from using the same door.",
       "fact": "A mouse nibbles at 20-30 food sites a night rather than one big meal, which is why droppings show up everywhere at once.",
-      "blurb": "One mouse is rarely one mouse. Seal dime-sized gaps or the next one uses the same door."
+      "blurb": "One mouse is rarely one mouse. Sealing dime-sized gaps helps keep the next one from using the same door."
     },
     "tech_notes": "Confirm rice-grain dropping size vs. rat. Full exclusion walk for dime-sized gaps; quote trapping + exclusion after inspection.",
     "sources": [
@@ -290,6 +316,16 @@
     "links": {
       "site_page": "/pest-identifier/house-mouse/",
       "guides": []
-    }
+    },
+    "role": "structural_pest",
+    "risk": "medical",
+    "action": "inspection",
+    "season_basis": "year_round",
+    "verification": [
+      {
+        "claim": "Some behavioral/control details are normally cited from UF/IFAS ENY-224 (\"Rat and Mouse Control\")",
+        "note": "ENY-224 returned 410/Gone when checked this pass; sourced from a related UF/IFAS pest-exclusion publication instead. Re-verify against ENY-224 once its URL is restored."
+      }
+    ]
   }
 ]

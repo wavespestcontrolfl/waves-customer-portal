@@ -36,7 +36,8 @@
       {
         "slug": "sod-webworm",
         "difference": "Fall armyworm has an inverted \"Y\" on the head and damages turf uniformly; sod webworm larvae are smaller with patchy, notched blades.",
-        "next_photo": "A close-up of the caterpillar's head marking, plus a wide shot of the damage pattern."
+        "next_photo": "A close-up of the caterpillar's head marking, plus a wide shot of the damage pattern.",
+        "photo_can_confirm": true
       }
     ],
     "size": "small",
@@ -57,7 +58,8 @@
       "allergen": false,
       "protected": false,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": false
     },
     "range": "common",
     "active_months": [
@@ -100,7 +102,12 @@
     "links": {
       "site_page": "/pest-identifier/fall-armyworm/",
       "guides": []
-    }
+    },
+    "role": "lawn_pest",
+    "risk": "low",
+    "action": "specialist",
+    "season_basis": "year_round",
+    "verification": []
   },
   {
     "kind": "organism",
@@ -141,7 +148,8 @@
       {
         "slug": "fall-armyworm",
         "difference": "Sod webworm damage starts as ragged, notched blades in smaller patches; fall armyworm eats uniformly across a large area and has an inverted \"Y\" on the head.",
-        "next_photo": "A wide shot of the damage pattern, plus a close-up of any caterpillar found."
+        "next_photo": "A wide shot of the damage pattern, plus a close-up of any caterpillar found.",
+        "photo_can_confirm": true
       }
     ],
     "size": "small",
@@ -162,7 +170,8 @@
       "allergen": false,
       "protected": false,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": false
     },
     "range": "common",
     "active_months": [
@@ -193,9 +202,9 @@
     },
     "urgency": "high",
     "copy": {
-      "what_it_means": "The moths do zero damage — it's their caterpillars feeding at night that shear the lawn. This is a late-summer classic; treated early, St. Augustine typically regrows well.",
+      "what_it_means": "The moths do zero damage — it's their caterpillars feeding at night that shear the lawn. This is a late-summer classic; a technician can evaluate how far the damage has spread and whether the lawn needs overseeding to recover.",
       "fact": "The moths do zero damage — it’s their caterpillars feeding at night that shear the lawn.",
-      "blurb": "Late-summer classic. Treated early, the lawn regrows quickly."
+      "blurb": "Late-summer classic. A technician evaluates the extent of the damage and the best path to recovery."
     },
     "tech_notes": "Moths flush when disturbed; larvae feed at night (window-feeding first 4 instars, then full blade). Treat late afternoon; re-check 10-14 days.",
     "sources": [
@@ -204,7 +213,12 @@
     "links": {
       "site_page": "/pest-identifier/sod-webworm/",
       "guides": []
-    }
+    },
+    "role": "lawn_pest",
+    "risk": "low",
+    "action": "specialist",
+    "season_basis": "year_round",
+    "verification": []
   },
   {
     "kind": "organism",
@@ -215,7 +229,7 @@
       "larva"
     ],
     "sign_of": [],
-    "safety_line": "The most venomous caterpillar in the US — hidden spines under the fur cause intense pain. Never touch it. See a doctor if pain, swelling, or nausea gets worse rather than better.",
+    "safety_line": "The most venomous caterpillar in the US — hidden spines under the fur cause intense pain. Never touch it. See a doctor if pain or swelling worsens. Call 911 if someone has trouble breathing.",
     "legacy_slugs": [],
     "review": {
       "status": "draft",
@@ -243,7 +257,8 @@
       {
         "slug": "io-moth-caterpillar",
         "difference": "Puss caterpillars are uniformly fuzzy with no visible spines; Io moth caterpillars are bright green with a red-and-white stripe and obvious branched spines.",
-        "next_photo": "A close-up of the body surface — fuzzy all over versus spiny with visible stripes."
+        "next_photo": "From a few feet away, zoom in on the body surface without touching it — fuzzy all over versus spiny with visible stripes.",
+        "photo_can_confirm": true
       }
     ],
     "size": "small",
@@ -264,10 +279,14 @@
       "allergen": false,
       "protected": false,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": true
     },
     "range": "occasional",
     "active_months": [
+      4,
+      5,
+      6,
       9,
       10,
       11,
@@ -297,7 +316,17 @@
     "links": {
       "site_page": "/pest-identifier/puss-caterpillar/",
       "guides": []
-    }
+    },
+    "role": "stinging_pest",
+    "risk": "medical",
+    "action": "leave_alone",
+    "season_basis": "unverified",
+    "verification": [
+      {
+        "claim": "Puss caterpillars have a spring generation (roughly April-June) in Southwest Florida in addition to the fall peak",
+        "note": "UF/IFAS Featured Creatures describes generation timing that varies by region; the presence and exact timing of a spring generation specifically in Southwest Florida was not directly confirmed this pass."
+      }
+    ]
   },
   {
     "kind": "organism",
@@ -307,7 +336,7 @@
       "adult"
     ],
     "sign_of": [],
-    "safety_line": "Spines sting like nettles and can cause a burning, itchy welt. See a doctor if you have a strong allergic reaction or symptoms don’t ease within a day.",
+    "safety_line": "Spines sting like nettles and can cause a burning, itchy welt. See a doctor for a strong allergic reaction. Call 911 if someone has trouble breathing.",
     "legacy_slugs": [],
     "review": {
       "status": "draft",
@@ -335,7 +364,8 @@
       {
         "slug": "puss-caterpillar",
         "difference": "Io moth caterpillars are green with branched spines and a red-white stripe; puss caterpillars are uniformly furry with no visible spines.",
-        "next_photo": "A close-up of the body surface — spiny with a stripe versus uniformly fuzzy."
+        "next_photo": "From a few feet away, zoom in on the body surface without touching it — spiny with a stripe versus uniformly fuzzy.",
+        "photo_can_confirm": true
       }
     ],
     "size": "medium",
@@ -349,13 +379,14 @@
     "safety": {
       "stings": true,
       "bites": false,
-      "venomous": false,
+      "venomous": true,
       "disease_vector": false,
       "structural": false,
       "allergen": false,
       "protected": false,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": true
     },
     "range": "occasional",
     "active_months": [
@@ -391,6 +422,11 @@
     "links": {
       "site_page": "/pest-identifier/io-moth-caterpillar/",
       "guides": []
-    }
+    },
+    "role": "stinging_pest",
+    "risk": "irritant",
+    "action": "leave_alone",
+    "season_basis": "observed",
+    "verification": []
   }
 ]
