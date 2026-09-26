@@ -2029,5 +2029,5 @@ module.exports = {
   writeTechDayOrder,
   classifyWriteError,
   _internals: { currentOrder, modelDriveMinutes, effectiveWindowStart, effectiveWindowRange, violatesWindowFeasibility, withinFreezeClock, violatesWindowChronology, modelDistanceMeters, loadAutoDispatchSummary, EXCLUDE_STATUSES, GOOGLE_WAYPOINT_CAP, LIVE_HOLD_SQL,
-    boundedDateList, canonicalizeBaselineOrder, routeOrderChanges, canonicalSourceLabel, buildDryRunPlan },
+    UNCERTIFIABLE_REASONS, boundedDateList, canonicalizeBaselineOrder, routeOrderChanges, canonicalSourceLabel, buildDryRunPlan },
 };

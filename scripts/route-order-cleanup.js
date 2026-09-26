@@ -43,10 +43,11 @@
  * at commit time, today/past and the 72h reminder freeze — so a rollback
  * can never reinstate a stale position under a promise the customer has
  * since been told about, and never on a day that changed under it between
- * the pre-write read and the write itself. BEFORE that write, the
- * restored order is also run through the SAME window-legality guards
- * chooseWindowSafeOrder itself certifies an order with (chronology +
- * drive-time feasibility, reused from route-reorder-window-fit.js): windows
+ * the pre-write read and the write itself. BEFORE that write, the order
+ * dispatch will read after the restore is run through the SHARED guard,
+ * chooseWindowSafeOrder itself (certification incl. coordinates, then
+ * chronology + drive-time feasibility), and only an order it certifies as
+ * is may be written: windows
  * can change since a backup with route_order left untouched, and restoring
  * the old position under the new windows could otherwise put an afternoon
  * promise before a morning one. Everything the writer or this legality
@@ -362,28 +363,42 @@ function restoredDispatchOrder(liveRows, positions, deps) {
 }
 
 /**
- * The SAME legality guards chooseWindowSafeOrder itself runs before ever
- * certifying an order (route-reorder-window-fit.js's pure checks, reused
- * via `deps` rather than re-implemented): a target order that places a
- * later-window promise before an earlier one (WINDOW_ORDER_CONFLICT), or
- * one the truck provably cannot drive in time under the shared distance
- * model (WINDOW_FIT_CONFLICT — day-open 08:00, HQ origin, the same
- * future-day defaults the nightly pass itself falls back to; a rollback is
- * only ever eligible on a future date — the writer refuses today/past).
- * Windows can change after a backup was taken with route_order left alone
- * — restoring the OLD position under the NEW windows could otherwise put
- * an afternoon promise before a morning one. `liveRows` doubles as both the
- * legality check's window/coordinate source AND the writer's comparison
- * snapshot — the SAME live read, never a second one. Returns null when the
- * order is legal, or which guard it failed.
+ * The rollback's legality verdict — the SHARED guard itself,
+ * chooseWindowSafeOrder (via `deps`), called the way the forward pass calls
+ * it, over `targetOrder` = the exact order dispatch will read once the
+ * restore commits (restoredDispatchOrder) — never hand-rolled checks of our
+ * own (codex pre-push P1: calling violatesWindowFeasibility directly skipped
+ * the guard's COORDLESS_STOPS refusal, so a coordless stop's travel counted
+ * as zero and an undrivable restore could pass). Windows can change after a
+ * backup was taken with route_order left alone — restoring the OLD position
+ * under the NEW windows could put an afternoon promise before a morning one.
+ * `liveRows` doubles as both the guard's window/coordinate source AND the
+ * writer's comparison snapshot — the SAME live read, never a second one.
+ *
+ * Returns null ONLY when the guard certifies that exact order as is — a
+ * window-fit repair it proposes instead is never accepted (the rollback
+ * restores recorded positions or nothing). Otherwise the guard's reason:
+ * an uncertifiable day's reason (COORDLESS_STOPS, …) first — the day can't
+ * be judged at all — then the order's own conflict (WINDOW_ORDER_CONFLICT /
+ * WINDOW_FIT_CONFLICT).
  */
 function rollbackWindowConflict(targetOrder, liveRows, deps) {
-  const { RouteOptimizer, violatesWindowChronology, violatesWindowFeasibility } = deps;
-  if (violatesWindowChronology(targetOrder, liveRows)) return 'WINDOW_ORDER_CONFLICT';
-  if (violatesWindowFeasibility(RouteOptimizer, targetOrder, liveRows, null, 8 * 60, RouteOptimizer.HQ)) {
-    return 'WINDOW_FIT_CONFLICT';
-  }
+  const { RouteOptimizer, chooseWindowSafeOrder, UNCERTIFIABLE_REASONS } = deps;
+  const guard = chooseWindowSafeOrder({
+    RouteOptimizer, googleOrder: targetOrder, sourceStops: liveRows, googleSource: 'rollback',
+  });
+  if (UNCERTIFIABLE_REASONS.has(guard.reason)) return guard.reason;
+  if (guard.conflict) return guard.conflict;
+  const certifiedIds = (guard.orderedStops || []).map((s) => s.id).join(',');
+  if (certifiedIds !== targetOrder.map((s) => s.id).join(',')) return guard.reason || 'UNCERTIFIED_ORDER';
   return null;
+}
+
+/** Operator-facing explanation for a rollbackWindowConflict verdict. */
+function rollbackConflictDetail(conflict) {
+  return conflict.startsWith('WINDOW_')
+    ? 'the restored order would violate a promised window — windows likely changed since the backup'
+    : 'the shared route guard cannot certify the restored order (e.g. a stop without usable coordinates)';
 }
 
 /**
@@ -478,7 +493,7 @@ async function applyRollback(conn, rows, now, deps) {
       summary.skipped.push({
         ...entryBase,
         reason: conflict,
-        detail: 'the restored order would violate a promised window — windows likely changed since the backup',
+        detail: rollbackConflictDetail(conflict),
       });
       continue;
     }
@@ -501,7 +516,7 @@ function printRollbackPlan(plan) {
     if (day.would_restore) {
       console.log(`${day.date} tech ${day.technician_id}: would restore ${day.row_count} row(s) (${day.note})`);
     } else if (day.conflict) {
-      console.log(`${day.date} tech ${day.technician_id}: WOULD SKIP — ${day.conflict} (the restored order would violate a promised window)`);
+      console.log(`${day.date} tech ${day.technician_id}: WOULD SKIP — ${day.conflict} (${rollbackConflictDetail(day.conflict)})`);
     } else {
       console.log(`${day.date} tech ${day.technician_id}: WOULD SKIP (${day.mismatched_ids.length} row(s) no longer match, ids only): ${day.mismatched_ids.join(', ')}`);
     }
@@ -732,7 +747,7 @@ async function main() {
     // building blocks, never a second copy of its guards.
     const {
       writeTechDayOrder, classifyWriteError, ROUTE_WRITE_GUARD_COLUMNS, CUSTOMER_PREMISE_ALIASES,
-      _internals: { EXCLUDE_STATUSES, LIVE_HOLD_SQL, violatesWindowChronology, violatesWindowFeasibility, currentOrder },
+      chooseWindowSafeOrder, _internals: { EXCLUDE_STATUSES, LIVE_HOLD_SQL, UNCERTIFIABLE_REASONS, currentOrder },
     } = require('../server/services/route-reorder');
     const { guardedCoordSelects } = require('../server/services/scheduling/day-stops');
     const RouteOptimizer = require('../server/services/route-optimizer');
@@ -740,7 +755,7 @@ async function main() {
       writeTechDayOrder, classifyWriteError,
       ROUTE_WRITE_GUARD_COLUMNS, CUSTOMER_PREMISE_ALIASES, guardedCoordSelects,
       EXCLUDE_STATUSES, LIVE_HOLD_SQL,
-      RouteOptimizer, violatesWindowChronology, violatesWindowFeasibility, currentOrder,
+      RouteOptimizer, chooseWindowSafeOrder, UNCERTIFIABLE_REASONS, currentOrder,
       runExclusive, wasLockSkipped,
     };
     process.exitCode = await runRollback(db, ROLLBACK_PATH, EXECUTE, new Date(), rollbackDeps);

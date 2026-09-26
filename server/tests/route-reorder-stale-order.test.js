@@ -605,8 +605,8 @@ describe('writeTechDayOrder explicit positions (rollback) — persisted values',
       CUSTOMER_PREMISE_ALIASES: routeReorder.CUSTOMER_PREMISE_ALIASES,
       guardedCoordSelects: jest.requireMock('../services/scheduling/day-stops').guardedCoordSelects,
       EXCLUDE_STATUSES: _internals.EXCLUDE_STATUSES, LIVE_HOLD_SQL: _internals.LIVE_HOLD_SQL,
-      RouteOptimizer, violatesWindowChronology: _internals.violatesWindowChronology,
-      violatesWindowFeasibility: _internals.violatesWindowFeasibility,
+      RouteOptimizer, chooseWindowSafeOrder: routeReorder.chooseWindowSafeOrder,
+      UNCERTIFIABLE_REASONS: _internals.UNCERTIFIABLE_REASONS,
       currentOrder: _internals.currentOrder,
     };
   }

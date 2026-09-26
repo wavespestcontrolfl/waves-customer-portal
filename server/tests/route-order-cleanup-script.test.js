@@ -19,7 +19,7 @@ const {
   buildRunOpts, writeBackupFile, outOfHorizonDates, runIsUnhealthy, runRollback, rollbackIsIncomplete,
 } = require('../../scripts/route-order-cleanup');
 const {
-  ROUTE_WRITE_GUARD_COLUMNS, CUSTOMER_PREMISE_ALIASES, classifyWriteError, _internals: reorderInternals,
+  ROUTE_WRITE_GUARD_COLUMNS, CUSTOMER_PREMISE_ALIASES, classifyWriteError, chooseWindowSafeOrder, _internals: reorderInternals,
 } = require('../services/route-reorder');
 const { guardedCoordSelects } = require('../services/scheduling/day-stops');
 const RouteOptimizer = require('../services/route-optimizer');
@@ -27,17 +27,16 @@ const RouteOptimizer = require('../services/route-optimizer');
 // The real building blocks writeTechDayOrder itself reads from — passed
 // through as `deps` so readLiveTechDay builds the EXACT same select shape
 // the writer's own internal re-read does, never a second copy of it. The
-// real window-legality guards too (violatesWindowChronology /
-// violatesWindowFeasibility) — a rollback proposal is checked with the SAME
-// functions chooseWindowSafeOrder itself certifies an order with.
+// real shared guard too (chooseWindowSafeOrder) — a rollback proposal is
+// certified by the SAME decision every other route_order write uses.
 function rollbackDeps(overrides = {}) {
   return {
     ROUTE_WRITE_GUARD_COLUMNS, CUSTOMER_PREMISE_ALIASES, guardedCoordSelects,
     EXCLUDE_STATUSES: reorderInternals.EXCLUDE_STATUSES, LIVE_HOLD_SQL: reorderInternals.LIVE_HOLD_SQL,
     classifyWriteError,
     RouteOptimizer,
-    violatesWindowChronology: reorderInternals.violatesWindowChronology,
-    violatesWindowFeasibility: reorderInternals.violatesWindowFeasibility,
+    chooseWindowSafeOrder,
+    UNCERTIFIABLE_REASONS: reorderInternals.UNCERTIFIABLE_REASONS,
     currentOrder: reorderInternals.currentOrder,
     ...overrides,
   };
@@ -57,7 +56,11 @@ function fakeLiveConn(rowsByKey) {
       leftJoin: () => chain,
       select: () => {
         const key = `${filters['scheduled_services.technician_id']}:${filters['scheduled_services.scheduled_date']}`;
+        // Geocoded by default (the shared guard refuses coordless stops); a
+        // test that needs a coordless row sets lat/lng: null explicitly.
+        // (Filled in place so the returned array is the fixture itself.)
         const rows = rowsByKey[key] || [];
+        for (const row of rows) if (!('lat' in row)) Object.assign(row, { lat: 27.5, lng: -82.5 });
         const thenable = Promise.resolve(rows);
         thenable.forUpdate = () => Promise.resolve(rows);
         return thenable;
@@ -266,50 +269,93 @@ describe('restoredDispatchOrder (the order dispatch reads after the rollback com
   });
 });
 
-describe('rollbackWindowConflict', () => {
-  test('a legal chronological order with no window data at all is not a conflict', () => {
-    const target = [{ id: 'a' }, { id: 'b' }];
+describe('rollbackWindowConflict (the shared guard, chooseWindowSafeOrder)', () => {
+  const at = (row) => ({ lat: 27.5, lng: -82.5, ...row });
+
+  test('a legal chronological geocoded order with no window data at all is certified', () => {
+    const target = [at({ id: 'a' }), at({ id: 'b' })];
     expect(rollbackWindowConflict(target, target, rollbackDeps())).toBeNull();
   });
 
   test('restoring a row to an earlier slot whose window is now LATER than the row after it is a WINDOW_ORDER_CONFLICT (windows changed since the backup)', () => {
-    // B's window changed from an early slot (when it sat first) to 14:00
-    // some time after the backup was taken; route_order was never touched.
-    // Restoring B to the front now puts an afternoon promise before A's
-    // still-morning one.
+    // B's window changed to 14:00 after the backup; route_order untouched.
     const liveRows = [
-      { id: 'A', route_order: 1, window_start: '09:00' },
-      { id: 'B', route_order: 2, window_start: '14:00' },
+      at({ id: 'A', route_order: 1, window_start: '09:00' }),
+      at({ id: 'B', route_order: 2, window_start: '14:00' }),
     ];
     const target = [liveRows[1], liveRows[0]]; // [B, A] — B restored to the front
     expect(rollbackWindowConflict(target, liveRows, rollbackDeps())).toBe('WINDOW_ORDER_CONFLICT');
   });
 
-  test('an order whose windows are still chronological is not a conflict', () => {
+  test('an order whose windows are still chronological is certified', () => {
     const liveRows = [
-      { id: 'A', route_order: 1, window_start: '09:00' },
-      { id: 'B', route_order: 2, window_start: '14:00' },
+      at({ id: 'A', route_order: 1, window_start: '09:00' }),
+      at({ id: 'B', route_order: 2, window_start: '14:00' }),
     ];
     expect(rollbackWindowConflict(liveRows, liveRows, rollbackDeps())).toBeNull();
   });
 
-  test('feasibility is checked (and reported as WINDOW_FIT_CONFLICT) only when chronology already passed — same short-circuit chooseWindowSafeOrder itself uses', () => {
-    const violatesWindowChronology = jest.fn(() => false);
-    const violatesWindowFeasibility = jest.fn(() => true);
-    const target = [{ id: 'a' }];
-    const result = rollbackWindowConflict(target, target, rollbackDeps({ violatesWindowChronology, violatesWindowFeasibility }));
-    expect(result).toBe('WINDOW_FIT_CONFLICT');
-    expect(violatesWindowChronology).toHaveBeenCalledWith(target, target);
-    expect(violatesWindowFeasibility).toHaveBeenCalledWith(RouteOptimizer, target, target, null, 8 * 60, RouteOptimizer.HQ);
+  test('codex pre-push P1: a coordless stop is refused with the guard\'s COORDLESS_STOPS — never certified on zero-travel legs', () => {
+    const liveRows = [
+      at({ id: 'A', route_order: 1, window_start: '09:00' }),
+      { id: 'B', route_order: 2, window_start: '14:00', lat: null, lng: null },
+    ];
+    expect(rollbackWindowConflict(liveRows, liveRows, rollbackDeps())).toBe('COORDLESS_STOPS');
   });
 
-  test('a chronology conflict short-circuits — feasibility is never even checked', () => {
-    const violatesWindowChronology = jest.fn(() => true);
-    const violatesWindowFeasibility = jest.fn();
-    const target = [{ id: 'a' }];
-    const result = rollbackWindowConflict(target, target, rollbackDeps({ violatesWindowChronology, violatesWindowFeasibility }));
-    expect(result).toBe('WINDOW_ORDER_CONFLICT');
-    expect(violatesWindowFeasibility).not.toHaveBeenCalled();
+  test('the guard\'s uncertifiable verdict wins over a chronology conflict on the same day', () => {
+    const liveRows = [
+      at({ id: 'A', route_order: 1, window_start: '09:00' }),
+      { id: 'B', route_order: 2, window_start: '14:00', lat: null, lng: null },
+    ];
+    expect(rollbackWindowConflict([liveRows[1], liveRows[0]], liveRows, rollbackDeps())).toBe('COORDLESS_STOPS');
+  });
+
+  test('calls the guard with the exact dispatch-read order as googleOrder and the live read as sourceStops', () => {
+    const target = [at({ id: 'a' })];
+    const guard = jest.fn(() => ({ orderedStops: target, conflict: null }));
+    expect(rollbackWindowConflict(target, target, rollbackDeps({ chooseWindowSafeOrder: guard }))).toBeNull();
+    expect(guard).toHaveBeenCalledWith(expect.objectContaining({ RouteOptimizer, googleOrder: target, sourceStops: target }));
+  });
+
+  test('a guard that only offers a REPLACEMENT order (window-fit repair) is not a certification — the conflict is reported', () => {
+    const a = at({ id: 'a' });
+    const b = at({ id: 'b' });
+    const guard = jest.fn(() => ({ orderedStops: [b, a], source: 'window_constrained', conflict: 'WINDOW_FIT_CONFLICT' }));
+    expect(rollbackWindowConflict([a, b], [a, b], rollbackDeps({ chooseWindowSafeOrder: guard }))).toBe('WINDOW_FIT_CONFLICT');
+  });
+
+  test('a guard that certifies a DIFFERENT order with no conflict is still not a certification of the target', () => {
+    const a = at({ id: 'a' });
+    const b = at({ id: 'b' });
+    const guard = jest.fn(() => ({ orderedStops: [b, a], conflict: null }));
+    expect(rollbackWindowConflict([a, b], [a, b], rollbackDeps({ chooseWindowSafeOrder: guard }))).toBe('UNCERTIFIED_ORDER');
+  });
+});
+
+describe('applyRollback / previewRollback — a coordless restored day is skipped with the guard\'s reason', () => {
+  const NOW = new Date('2026-09-27T12:00:00Z');
+  const liveRows = [
+    { id: 'B', route_order: 1, window_start: '09:00' },
+    { id: 'A', route_order: 2, window_start: '11:00', lat: null, lng: null },
+  ];
+  const rows = [
+    { id: 'A', date: '2026-10-05', technician_id: 't1', before: 1, after: 2 },
+    { id: 'B', date: '2026-10-05', technician_id: 't1', before: 2, after: 1 },
+  ];
+
+  test('execute: skipped COORDLESS_STOPS, writer never called', async () => {
+    const conn = fakeLiveConn({ 't1:2026-10-05': liveRows });
+    const writeTechDayOrder = jest.fn();
+    const result = await applyRollback(conn, rows, NOW, rollbackDeps({ writeTechDayOrder }));
+    expect(writeTechDayOrder).not.toHaveBeenCalled();
+    expect(result.summary.skipped).toEqual([expect.objectContaining({ reason: 'COORDLESS_STOPS' })]);
+  });
+
+  test('preview shows the same verdict', async () => {
+    const conn = fakeLiveConn({ 't1:2026-10-05': liveRows });
+    const plan = await previewRollback(conn, rows, rollbackDeps());
+    expect(plan[0]).toMatchObject({ would_restore: false, conflict: 'COORDLESS_STOPS' });
   });
 });
 
