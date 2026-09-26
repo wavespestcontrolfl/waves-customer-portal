@@ -125,7 +125,7 @@ function stripAnySignerOnce(text, addresseeFirstName) {
   const addressee = String(addresseeFirstName || '').trim().toLowerCase();
   return ANY_SIGNER_RES.reduce((current, { re, addresseeKept }) => current.replace(re, (...args) => {
     const { name } = args[args.length - 1];
-    const first = String(name || '').split(/\\s+/)[0].toLowerCase();
+    const first = String(name || '').split(/\s+/)[0].toLowerCase();
     return addresseeKept && addressee && first === addressee ? args[0] : '';
   }), text).trim();
 }

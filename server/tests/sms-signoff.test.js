@@ -194,3 +194,10 @@ describe('stripTrailingSignature — anySigner', () => {
     expect(stripTrailingSignature('We can help.\nSarah', { anySigner: true, addresseeFirstName: 'Tom' })).toBe('We can help.');
   });
 });
+
+// Pre-push audit on #4975: the addressee check compares the first word of a
+// full name ("Sarah Jones") with the customer's first name.
+test('anySigner keeps a closer block that names the customer by full name', () => {
+  expect(stripTrailingSignature('Thanks,\nSarah Jones!', { anySigner: true, addresseeFirstName: 'Sarah' })).toBe('Thanks,\nSarah Jones!');
+  expect(stripTrailingSignature('We can help.\nSarah Jones', { anySigner: true, addresseeFirstName: 'Sarah' })).toBe('We can help.\nSarah Jones');
+});
