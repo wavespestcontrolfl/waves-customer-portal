@@ -2,7 +2,7 @@
 // mapped onto the lead anyway while only the ledger row said it failed; it is
 // now the same null the callers already handle for any AI failure.
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
-jest.mock('../services/llm/call', () => ({ dispatch: jest.fn(async () => ({ ok: false, reason: 'openai_timeout' })) }));
+jest.mock('../services/llm/call', () => ({ dispatch: jest.fn(async () => ({ ok: false, reason: 'openai_timeout' })), rejectCall: jest.fn() }));
 
 const mockCreate = jest.fn();
 jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({ messages: { create: mockCreate } })));
@@ -15,6 +15,7 @@ jest.mock('../services/llm-dispatch-metrics', () => {
 });
 
 const { aiTriageLead } = require('../services/lead-triage');
+const { dispatch, rejectCall } = require('../services/llm/call');
 const { ledgerCallRejected } = require('../services/llm-dispatch-metrics');
 
 const LEAD = { name: 'Pat Doe', phone: '+19415550100', message: 'Ants in the kitchen', address: 'Sarasota', pageUrl: '/', formName: 'contact' };
@@ -36,9 +37,33 @@ describe('aiTriageLead — Claude fallback schema', () => {
     ['an off-enum urgency', { ...VALID, urgency: 'critical' }],
     ['a missing extractedData', { ...VALID, extractedData: undefined }],
     ['an object serviceInterest', { ...VALID, serviceInterest: { name: 'x' } }],
+    // Codex r16 on #4884: mapTriage turns blanks into null — no classification, no reply.
+    ['a blank serviceInterest', { ...VALID, serviceInterest: '   ' }],
+    ['a blank suggestedReply', { ...VALID, suggestedReply: '' }],
   ])('%s returns null (nothing written to the lead) and fails the row', async (_label, answer) => {
     mockCreate.mockResolvedValue(reply(answer));
     expect(await aiTriageLead(LEAD)).toBeNull();
     expect(ledgerCallRejected).toHaveBeenCalledWith(expect.anything(), 'schema_invalid');
+  });
+});
+
+describe('aiTriageLead — structured-output primary', () => {
+  const prevKey = process.env.ANTHROPIC_API_KEY;
+  beforeEach(() => { process.env.ANTHROPIC_API_KEY = 'test-key'; mockCreate.mockReset(); ledgerCallRejected.mockClear(); rejectCall.mockClear(); });
+  afterAll(() => { if (prevKey === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = prevKey; });
+
+  test('a usable primary answer is mapped without touching the fallback', async () => {
+    dispatch.mockResolvedValueOnce({ ok: true, json: VALID });
+    expect(await aiTriageLead(LEAD)).toMatchObject({ urgency: 'high' });
+    expect(rejectCall).not.toHaveBeenCalled();
+    expect(mockCreate).not.toHaveBeenCalled();
+  });
+
+  test('a blank primary answer fails its row and the Claude fallback answers', async () => {
+    dispatch.mockResolvedValueOnce({ ok: true, json: { ...VALID, suggestedReply: ' ' } });
+    mockCreate.mockResolvedValue(reply(VALID));
+    expect(await aiTriageLead(LEAD)).toMatchObject({ suggestedReply: VALID.suggestedReply });
+    expect(rejectCall).toHaveBeenCalledWith(expect.anything(), 'schema_invalid');
+    expect(mockCreate).toHaveBeenCalledTimes(1);
   });
 });

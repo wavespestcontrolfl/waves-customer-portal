@@ -59,8 +59,11 @@ async function callClaude(systemPrompt, userPrompt, maxTokens = 2048) {
     const r = await dispatch(ROUTES.knowledgeAnswer, { laneId: 'knowledge_qa', system: systemPrompt, text: userPrompt, jsonMode: true, maxTokens });
     if (r.ok && r.json) {
       const problem = objectAnswerProblem(r.json);
-      if (problem) rejectCall(r, problem);
-      return JSON.stringify(r.json);
+      if (!problem) return JSON.stringify(r.json);
+      // The caller would reject this answer at the same gate and return null,
+      // so returning it here denied the Claude fallback its turn (Codex r16 on
+      // #4884): fail the row and fall through instead.
+      rejectCall(r, problem);
     }
   }
   // Fallback — Claude (FLAGSHIP).
@@ -1539,7 +1542,7 @@ Return a JSON object with:
 };
 
 module.exports = KnowledgeBridge;
-module.exports._test = { sanitizeRecommendationsAgainstTreatment, contradictsAppliedTreatment, contradictsAppliedProducts, appliedTreatmentClasses, generationInFlight, activeGenerationRuns, recommendationPayloadShapeValid, sendSealActive };
+module.exports._test = { callClaude, sanitizeRecommendationsAgainstTreatment, contradictsAppliedTreatment, contradictsAppliedProducts, appliedTreatmentClasses, generationInFlight, activeGenerationRuns, recommendationPayloadShapeValid, sendSealActive };
 // Pure render-time guard surface (no DB, no LLM) — consumed by report-data
 // as the last line of defense for instantly opened report links.
 module.exports.sealRecommendationsForSend = sealForSend;

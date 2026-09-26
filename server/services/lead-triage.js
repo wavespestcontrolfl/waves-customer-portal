@@ -1,6 +1,6 @@
 const logger = require('./logger');
 const MODELS = require('../config/models');
-const { dispatch } = require('./llm/call');
+const { dispatch, rejectCall } = require('./llm/call');
 const { stripThinkingBlocks } = require('./llm/deep');
 const { ledgerCall, ledgerCallRejected } = require('./llm-dispatch-metrics');
 
@@ -31,12 +31,16 @@ const TRIAGE_SCHEMA = {
 // TRIAGE_SCHEMA's own types — the Claude fallback is not schema-constrained
 // the way the structured-output leg is, so its answer is checked here.
 const strOrNull = (v) => v === null || typeof v === 'string';
+// serviceInterest and suggestedReply are the answer: mapTriage turns a blank
+// one into null, leaving the lead with no classification or reply while the
+// row read success (Codex r16 on #4884) — so they must be non-blank.
+const nonBlank = (v) => typeof v === 'string' && v.trim() !== '';
 function triageMatchesSchema(t) {
   if (!t || typeof t !== 'object' || Array.isArray(t)) return false;
   const x = t.extractedData;
-  return typeof t.serviceInterest === 'string'
+  return nonBlank(t.serviceInterest)
     && TRIAGE_SCHEMA.properties.urgency.enum.includes(t.urgency)
-    && typeof t.suggestedReply === 'string'
+    && nonBlank(t.suggestedReply)
     && !!x && typeof x === 'object' && !Array.isArray(x)
     && strOrNull(x.pestType) && strOrNull(x.location) && strOrNull(x.propertyType);
 }
@@ -83,7 +87,13 @@ Return ONLY valid JSON, no markdown.`;
   // Live model — GPT-5.5. On any miss, fall through to Claude below (never a gap).
   {
     const r = await dispatch(MODELS.ROUTES.leadClassify, { laneId: 'lead_triage', text: prompt, jsonMode: true, jsonSchema: TRIAGE_SCHEMA, maxTokens: 300 });
-    if (r.ok && r.json) return mapTriage(r.json);
+    if (r.ok && r.json) {
+      // The structured-output schema cannot forbid blank strings, so the
+      // primary gets the same check as the fallback; a miss fails its row
+      // and Claude gets a turn.
+      if (triageMatchesSchema(r.json)) return mapTriage(r.json);
+      rejectCall(r, 'schema_invalid');
+    }
   }
 
   // Fallback — Claude (FLAGSHIP).
