@@ -394,6 +394,83 @@ describe('listicle_family lane fence (kill-switch contract)', () => {
   });
 });
 
+describe('citability_backfill lane fence (kill-switch contract, 2026-09-25)', () => {
+  // The seeder's gate check fences WRITES only; this fence makes
+  // GATE_CITABILITY_BACKFILL a real stop switch for rows already queued
+  // (Sonnet fallback P1 on edd0f96d32): while the gate is off, backfill
+  // rows are unclaimable and age out. Same mechanics as the listicle
+  // fence above (spy on isEnabled, gates required inside each test).
+  const peekChain = () => {
+    const q = {
+      _filters: [],
+      where: jest.fn(function (...args) { q._filters.push(args); return q; }),
+      whereNot: jest.fn(function (...args) { q._filters.push(['not', ...args]); return q; }),
+      whereRaw: jest.fn(function (...args) { q._filters.push(['raw', ...args]); return q; }),
+      orderBy: jest.fn(() => q),
+      limit: jest.fn(() => q),
+      select: jest.fn(() => Promise.resolve([])),
+    };
+    return q;
+  };
+
+  test('claimNext excludes citability_backfill rows while the gate is off', async () => {
+    const gates = require('../config/feature-gates');
+    const spy = jest.spyOn(gates, 'isEnabled').mockImplementation((g) => g !== 'citabilityBackfill');
+    try {
+      db.mockImplementation(() => chain());
+      db.raw.mockResolvedValue({ rows: [] });
+
+      await queue.claimNext({});
+
+      const [sql] = db.raw.mock.calls[0];
+      expect(sql).toContain(`AND bucket <> 'citability_backfill'`);
+      // Only THIS lane is fenced — the listicle gates were left on.
+      expect(sql).not.toContain(`bucket <> 'listicle_family'`);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('with the gate on, claimNext does not fence the bucket', async () => {
+    db.mockImplementation(() => chain());
+    db.raw.mockResolvedValue({ rows: [] });
+
+    await queue.claimNext({}); // dev-open gates: lane open
+
+    const [sql] = db.raw.mock.calls[0];
+    expect(sql).not.toContain(`bucket <> 'citability_backfill'`);
+  });
+
+  test('peek mirrors the fence', async () => {
+    const gates = require('../config/feature-gates');
+    const spy = jest.spyOn(gates, 'isEnabled').mockImplementation((g) => g !== 'citabilityBackfill');
+    try {
+      const q = peekChain();
+      db.mockImplementation(() => q);
+
+      await queue.peek({});
+
+      expect(q._filters).toEqual(expect.arrayContaining([
+        ['not', 'bucket', 'citability_backfill'],
+      ]));
+      expect(q._filters).not.toEqual(expect.arrayContaining([
+        ['not', 'bucket', 'listicle_family'],
+      ]));
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('the fence fails CLOSED — an unreadable gate shuts the lane', () => {
+    const fs = require('fs');
+    const src = fs.readFileSync(require.resolve('../services/content/opportunity-queue'), 'utf8');
+    expect(src).toMatch(/isEnabled\('citabilityBackfill'\) === true/);
+    expect(src).toMatch(/function citabilityBackfillLaneOpen\(\) \{[\s\S]*?catch \(_\) \{\s*return false;/);
+    const { citabilityBackfillLaneOpen } = require('../services/content/opportunity-queue')._internals;
+    expect(typeof citabilityBackfillLaneOpen).toBe('function');
+  });
+});
+
 describe('defer() — cap/gate-retry deferral back to pending (exceptions-only review queue)', () => {
   test('claim-guarded update: pending, future available_at, cleared skip_reason, extended expires_at', async () => {
     const q = chain({ updateResult: 1 });

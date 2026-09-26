@@ -3716,3 +3716,33 @@ describe('city-service protected-page paths match the brief builder (Codex P1 on
     }
   });
 });
+
+describe('_citabilityNudgeFindings — early-gate retries carry citability feedback (Codex r7 P2)', () => {
+  // Fresh module graph: earlier suites doMock the quality gate.
+  let runner;
+  beforeAll(() => {
+    jest.isolateModules(() => {
+      jest.unmock('../services/content/content-quality-gate');
+      const { AutonomousRunner } = require('../services/content/autonomous-runner');
+      runner = new AutonomousRunner();
+    });
+  });
+  const draft = { title: 'Bait vs. Spray for Ghost Ants', body: 'Experts say ants trail after rain. Wait a few weeks.', frontmatter: {} };
+
+  test('a supporting-blog draft yields its citability misses as non-blocking P3 findings', () => {
+    const out = runner._citabilityNudgeFindings({ page_type: 'supporting-blog', draft_payload: draft }, {});
+    expect(out.map((f) => f.code)).toEqual(['CITABILITY_NAMED_SOURCES', 'CITABILITY_CONCRETE_SPECIFICS', 'CITABILITY_COMPARISON']);
+    expect(out.every((f) => f.severity === 'P3')).toBe(true);
+  });
+  test('non-blog runs and missing drafts yield nothing; backfill refreshes are included', () => {
+    expect(runner._citabilityNudgeFindings({ page_type: 'refresh', draft_payload: draft }, {})).toEqual([]);
+    expect(runner._citabilityNudgeFindings({ page_type: 'supporting-blog' }, {})).toEqual([]);
+    expect(runner._citabilityNudgeFindings({ page_type: 'refresh', draft_payload: draft }, { bucket: 'citability_backfill' })).toHaveLength(3);
+  });
+  test('every nudge code has a canonical retry directive', () => {
+    const { GATE_RETRY_INSTRUCTIONS } = require('../services/content/gate-retry-directives');
+    for (const code of ['CITABILITY_NAMED_SOURCES', 'CITABILITY_CONCRETE_SPECIFICS', 'CITABILITY_COMPARISON', 'CITABILITY_HOW_TO_CHOOSE']) {
+      expect(GATE_RETRY_INSTRUCTIONS[code]).toMatch(/non-blocking/);
+    }
+  });
+});

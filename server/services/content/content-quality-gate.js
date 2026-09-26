@@ -146,6 +146,20 @@ const PAGE_TYPE_CHECKS = {
     // soft, a refresh that guts >20% of prior content or has no prior
     // version to compare would still pass on common points alone.
     { name: 'improvement_over_prior', weight: 10, isHard: true, evaluate: checkImprovementOverPrior },
+    // Citability backfill only: the row's planned gaps must actually clear
+    // before the refresh may publish and complete the row (Codex r6 P2).
+    // Weight-0 hard, scoped by isCitabilityBackfillBrief — the global
+    // nudges stay signal-only; an unresolved row fails, gets its one
+    // feedback redraft, then skips instead of closing as done.
+    { name: 'citability_backfill_gaps_cleared', weight: 0, isHard: true, evaluate: checkCitabilityBackfillGapsCleared },
+    // Citability nudges ride the refresh lane too (2026-09-25 backfill):
+    // weight 0, signal-only, and each short-circuits to ok on a non-blog
+    // target (the runner resolves target_page_type from the live file). The
+    // all-hard refresh threshold (47) is unchanged.
+    { name: 'citability_named_sources', weight: 0, evaluate: checkCitabilityNamedSources },
+    { name: 'citability_concrete_specifics', weight: 0, evaluate: checkCitabilityConcreteSpecifics },
+    { name: 'citability_comparison', weight: 0, evaluate: checkCitabilityComparison },
+    { name: 'citability_how_to_choose', weight: 0, evaluate: checkCitabilityHowToChoose },
   ],
   'supporting-blog': [
     // Hard: hub links are the point of a supporting blog (hub-and-spoke
@@ -163,6 +177,18 @@ const PAGE_TYPE_CHECKS = {
     { name: 'blog_meta_contract', weight: 0, isHard: true, evaluate: checkBlogMetaContract },
     { name: 'blog_meta_soft_cta', weight: 0, evaluate: checkBlogMetaSoftCta },
     { name: 'meta_rendered_length_in_bounds', weight: 0, isHard: true, evaluate: checkAuthoredMetaLength },
+    // Citability nudges (2026-09-25): the traits AI answer engines cite —
+    // a named source behind the claims, supported facts stated as numbers
+    // with units, a ComparisonTable wherever the reader faces a choice, and a
+    // "How to choose" section beside it. Weight 0 like blog_meta_soft_cta:
+    // signal-only BY DESIGN — the writer prompt forbids a stat quota and
+    // invented products/sources, so a weighted check would pressure the
+    // writer toward fabrication. They ride the redraft feedback and the
+    // review queue (soft_failures) without moving the pass threshold.
+    { name: 'citability_named_sources', weight: 0, evaluate: checkCitabilityNamedSources },
+    { name: 'citability_concrete_specifics', weight: 0, evaluate: checkCitabilityConcreteSpecifics },
+    { name: 'citability_comparison', weight: 0, evaluate: checkCitabilityComparison },
+    { name: 'citability_how_to_choose', weight: 0, evaluate: checkCitabilityHowToChoose },
   ],
   metadata: [
     { name: 'title_length_in_bounds', weight: 6, isHard: true, evaluate: checkTitleLengthBounds },
@@ -426,12 +452,27 @@ function isCompetitorGapBrief(brief) {
     && !!s.competitor_domain;
 }
 
+// citability_backfill briefs (citability-backfill-seeder) are page-anchored
+// refreshes mined from a corpus SCAN, not from GSC: the scan result
+// (gsc_signal.citability_gaps, a non-empty gap list) IS the provenance.
+// Same anti-spoofing key (persisted gsc_signal.bucket) and same "evidence
+// must actually be present" posture as isCompetitorGapBrief — a backfill
+// row that lost its gap list still hard-fails.
+function isCitabilityBackfillBrief(brief) {
+  const s = brief?.gsc_signal;
+  return !!s && s.bucket === 'citability_backfill'
+    && Array.isArray(s.citability_gaps) && s.citability_gaps.length > 0;
+}
+
 function checkGscSignalAttached(_draft, brief) {
   if (isOperatorAuthoredBrief(brief)) {
     return { ok: true, reason: 'operator_authored_brief' };
   }
   if (isCompetitorGapBrief(brief)) {
     return { ok: true, reason: 'competitor_gap_evidence' };
+  }
+  if (isCitabilityBackfillBrief(brief)) {
+    return { ok: true, reason: 'citability_backfill_scan_evidence' };
   }
   const s = brief.gsc_signal;
   if (!s || s.impressions == null) return { ok: false, reason: 'no_gsc_signal' };
@@ -916,12 +957,16 @@ function checkRedactionPassed(draft) {
 
 // ── refresh checks ──────────────────────────────────────────────────
 
-function checkImprovementOverPrior(draft, _brief, context) {
+function checkImprovementOverPrior(draft, brief, context) {
   const prev = context.previousVersion;
   if (!prev) return { ok: false, reason: 'no_previous_version_to_compare' };
   const prevLen = (prev.body || '').length;
   const newLen = String(draft.body || '').length;
   if (newLen < prevLen * 0.8) return { ok: false, reason: 'refresh_lost_>20%_of_prior_content' };
+  // A citability backfill is a targeted edit (an attribution or a number
+  // can be a few words): its improvement proof is
+  // citability_backfill_gaps_cleared, not body growth (Codex r6 P2).
+  if (isCitabilityBackfillBrief(brief)) return { ok: true, reason: 'citability_backfill_targeted_edit' };
   if (newLen < prevLen + 200) return { ok: false, reason: 'refresh_adds_less_than_200_chars' };
   return { ok: true };
 }
@@ -1062,6 +1107,238 @@ function checkVoiceMatch(draft) {
   const youMatches = (body.match(/\byou(r)?\b/g) || []).length;
   if (youMatches >= 5) signals++;
   if (signals === 0) return { ok: false, reason: 'no_voice_match_signals' };
+  return { ok: true };
+}
+
+// ── citability nudges (supporting-blog, weight 0) ────────────────────
+//
+// Mirrors the writer prompt's CITABILITY section (same bracket codes). All
+// four are heuristics over the raw body: they detect the SHAPE of a citable
+// post, never the truth of a claim — truth stays with the guardrails and the
+// evidence rules. Failing any of them only adds a nudge.
+
+// Post types whose contract is a choice (packages/blog-schema
+// postTypeRequirements: decision + comparison + cost all require a
+// ComparisonTable). Read from the writer's frontmatter; unset or unknown
+// post types are treated as non-choice (the astro publisher's own
+// normalization decides the final type — this gate only nudges).
+const CHOICE_POST_TYPES = new Set(['decision', 'comparison', 'cost']);
+
+function draftPostType(draft) {
+  return String(draft?.frontmatter?.post_type ?? draft?.post_type ?? '').trim().toLowerCase();
+}
+
+// Named authorities the evidence rules already point the writer at (UF/IFAS,
+// FDACS, EPA, CDC, county mosquito programs, product labels). Deliberately a
+// SOURCE-attribution list, not a brand list: PRO_PRODUCT_TERMS stay banned in
+// recommendation context and competitor names live only inside the
+// ComparisonTable, so neither may count toward this nudge.
+// The county prefix is REQUIRED: a bare "Mosquito Control" is our own
+// service name and must not count as an external authority (fallback P2).
+const NAMED_AUTHORITY = String.raw`(?:UF\s*\/\s*IFAS|IFAS|University of Florida|USDA|NOAA|National Weather Service|(?:[A-Z][\w&.]+ )+(?:State )?University Extension|Cooperative Extension|FDACS|Florida Department of Agriculture|Florida Department of Health|(?:U\.?S\.? )?EPA\b|Environmental Protection Agency|CDC\b|Centers for Disease Control|National Pesticide Information Center|NPIC|Florida Statutes?|[A-Z][a-z]+ County Mosquito (?:Control|Management)|Mosquito Control District)`;
+// Bare mentions are NOT attribution (Codex P2, 2026-09-26): "an
+// EPA-registered product" names EPA without citing it for any claim. A named
+// authority counts only in a citation frame — led by an attribution phrase,
+// or followed by a reporting verb / source noun.
+const NAMED_SOURCE_RE = new RegExp(
+  String.raw`\b(?:[Aa]ccording to|[Pp]er|[Ff]rom|[Bb]y|[Cc]it(?:es?|ing)|[Uu]nder|[Ss]ee)\s+(?:the\s+)?(?:[\w.&'’-]+\s+){0,2}${NAMED_AUTHORITY}\b`
+  + String.raw`|\b${NAMED_AUTHORITY}(?:'s|’s)?\s+(?:[\w-]+\s+){0,2}?(?:recommends?|says|notes?|reports?|advises?|found|finds|warns?|tracks?|lists?|states?|requires?|publish(?:es)?|estimates?|confirms?|defines?|guidance|data|research|fact sheets?|publications?|stud(?:y|ies)|surveys?|rules?|records?|recommendations?|label(?:ing)?)\b`
+  + String.raw`|\b(?:[Pp]er|[Oo]n|[Uu]nder|[Aa]ccording to|[Rr]ead|[Ff]ollow) the (?:product )?label\b`,
+);
+
+// Refresh lane: the runner stamps target_page_type 'page' for non-blog
+// targets (service/city pages), where the blog citability contract does not
+// apply. Supporting-blog briefs carry no target_page_type → checks apply.
+function nonBlogTarget(brief) {
+  return brief?.target_page_type === 'page';
+}
+
+// Rendered lines only: fenced code, HTML/MDX comments and other non-rendered
+// Markdown must not satisfy (or trip) a citability check (Codex r8 P2).
+// The shared guardrails blanker preserves line structure but flattens list
+// indentation, so it is used as a per-line MASK over the original text —
+// nested-bullet indentation survives for the how-to criteria count.
+function renderedCitabilityBody(body) {
+  const raw = String(body || '');
+  const { blankNonRenderedMarkdown } = require('./content-guardrails');
+  const blanked = blankNonRenderedMarkdown(raw);
+  const orig = raw.split(/\r?\n/);
+  const mask = blanked.split(/\r?\n/);
+  if (orig.length !== mask.length) return blanked;
+  return orig.map((line, i) => (mask[i].trim() ? line : '')).join('\n');
+}
+
+// Attribution to ANY proper-noun source ("according to the Florida Forest
+// Service", "data from NOAA", "per Mote Marine Laboratory"): the writer
+// contract asks for the SPECIFIC authority the evidence came from, so the
+// hardcoded list above cannot be exhaustive (Codex P2, 2026-09-26). The
+// source must start with a capital; our own company never counts as the
+// authority behind a claim.
+const ATTRIBUTED_SOURCE_RE = /\b(?:[Aa]ccording to|[Pp]er|[Rr]eported by|[Pp]ublished by|[Dd]ata from|[Gg]uidance from|[Rr]esearch (?:from|by))\s+(?:the\s+)?([A-Z][\w&.'’-]*(?:\s+(?:of|for|and|&)?\s*[A-Z][\w&.'’-]*){0,6})/g;
+const OWN_COMPANY_RE = /^Waves\b/;
+
+function hasAttributedSource(body) {
+  for (const m of String(body || '').matchAll(ATTRIBUTED_SOURCE_RE)) {
+    if (!OWN_COMPANY_RE.test(m[1])) return true;
+  }
+  return false;
+}
+
+// Reduce inline Markdown/HTML to its visible text so a LINKED or emphasized
+// source ("According to [UF/IFAS](…)", "**CDC** recommends") reads the same
+// as plain text to the attribution matchers (Codex P2, 2026-09-26).
+function visibleInlineText(body) {
+  return String(body || '')
+    .replace(/!\[[^\]\n]*\]\([^)\n]*\)/g, ' ')
+    .replace(/\[([^\]\n]+)\]\([^)\n]*\)/g, '$1')
+    .replace(/<a\b[^>]*>([\s\S]*?)<\/a>/gi, '$1')
+    .replace(/(\*\*|__|\*|_)(?=\S)([^*_\n]+?)\1/g, '$2');
+}
+
+function checkCitabilityNamedSources(draft, brief) {
+  if (nonBlogTarget(brief)) return { ok: true, reason: 'non_blog_target' };
+  const body = visibleInlineText(renderedCitabilityBody(draft.body));
+  if (NAMED_SOURCE_RE.test(body) || hasAttributedSource(body)) return { ok: true };
+  return { ok: false, reason: 'no_named_source_attribution' };
+}
+
+// A "concrete specific" is a number bound to a unit of measure, time, or
+// rate. Dollar amounts are excluded on purpose (HARDCODED_PRICE bans them),
+// as are bare years and bare counts ("3 ways", "2024") — those are not the
+// extractable measurements the nudge is after. Ranges ("3.5–4 inches",
+// "10-14 days") count once.
+const CONCRETE_SPECIFIC_RE = /(?<![$\d.])\d+(?:\.\d+)?(?:\s?(?:-|–|to)\s?\d+(?:\.\d+)?)?\s?(?:%|(?:percent|inch(?:es)?|feet|foot|ft\b|yards?|sq\.? ?ft|square feet|millimeters?|mm\b|centimeters?|cm\b|meters?|°\s?F|degrees|days?|weeks?|months?|hours?|minutes?|seconds?|mph|gallons?|ounces?|oz\b|pounds?|lbs?|acres?|applications?|treatments?|visits?|mowings?|times? (?:a|per) (?:year|month|week|day)|per (?:year|month|week|day|acre|1,?000 sq))\b)/gi;
+
+// Vague stand-ins for a measurement — the prompt's own examples ("tall",
+// "a couple of weeks", "deeply"). Softening is what the nudge targets.
+const VAGUE_QUALIFIER_RE = /\b(?:a (?:couple|few) (?:of )?(?:days|weeks|months|hours|inches|feet)|several (?:days|weeks|months|hours|inches)|(?:water|soak)(?:ing)? deeply|mow(?:ing)? (?:it )?(?:tall|high|short|low)|a while)\b/i;
+
+function countConcreteSpecifics(body) {
+  return (String(body || '').match(CONCRETE_SPECIFIC_RE) || []).length;
+}
+
+// NOT a count quota (Codex P2, 2026-09-26): a fixed minimum fired on every
+// brief whose evidence held fewer measurements, pressuring a redraft toward
+// invented numbers. The gate cannot see the writer's tool evidence, so it
+// flags only what is visible as softening: a refresh that states fewer
+// measurements than the page it replaces, or a draft with no measurement at
+// all that leans on a vague stand-in instead.
+function checkCitabilityConcreteSpecifics(draft, brief, context) {
+  if (nonBlogTarget(brief)) return { ok: true, reason: 'non_blog_target' };
+  const n = countConcreteSpecifics(renderedCitabilityBody(draft.body));
+  const prev = context?.previousVersion?.body;
+  if (prev != null) {
+    const before = countConcreteSpecifics(renderedCitabilityBody(prev));
+    if (n < before) return { ok: false, reason: `refresh_dropped_measurements_${before}_to_${n}` };
+  }
+  if (n === 0) {
+    const vague = renderedCitabilityBody(draft.body).match(VAGUE_QUALIFIER_RE);
+    if (vague) return { ok: false, reason: `vague_qualifier_without_measurement:${vague[0].toLowerCase()}` };
+  }
+  return { ok: true };
+}
+
+const COMPARISON_TABLE_RE = /<ComparisonTable\b/;
+// A choice the post itself frames: the title or a heading pits options
+// against each other, or the post type's contract is a choice. Body prose
+// is NOT scanned ("DIY" appears in most posts) — the nudge must not push a
+// generic DIY-vs-pro table onto every post (the no-filler visual rule).
+// Deliberately narrow: "X vs Y", "X or Y?" as a whole heading/title, and
+// "which option/approach…". A bare "Should you…?" or a yes/no question is
+// NOT a two-path comparison (it fired on 73% of the live corpus in the
+// 2026-09-25 calibration run — most were single-answer questions).
+const CHOICE_FRAMING_RE = /\bvs\.?\b|\bversus\b|^#*\s*[\w'’-]+(?: [\w'’-]+){0,3} or [\w'’-]+(?: [\w'’-]+){0,3}\?\s*$|\bwhich (?:one|option|approach|method|plan|treatment|service) (?:is|fits|works|makes|do)\b/i;
+
+function headingLines(body) {
+  return String(body || '').split(/\r?\n/).filter((l) => /^#{1,3}\s+\S/.test(l));
+}
+
+function postFramesAChoice(draft) {
+  if (CHOICE_POST_TYPES.has(draftPostType(draft))) return true;
+  const title = String(draft.title || draft.frontmatter?.title || '');
+  if (CHOICE_FRAMING_RE.test(title)) return true;
+  return headingLines(renderedCitabilityBody(draft.body)).some((h) => CHOICE_FRAMING_RE.test(h));
+}
+
+function checkCitabilityComparison(draft, brief) {
+  if (nonBlogTarget(brief)) return { ok: true, reason: 'non_blog_target' };
+  const hasTable = COMPARISON_TABLE_RE.test(renderedCitabilityBody(draft.body));
+  if (hasTable) return { ok: true };
+  if (!postFramesAChoice(draft)) return { ok: true, reason: 'no_choice_framed' };
+  return { ok: false, reason: 'choice_framed_without_ComparisonTable' };
+}
+
+const HOW_TO_CHOOSE_HEADING_RE = /\b(?:how to (?:choose|pick|decide)|choosing (?:between|the right|a|your)|which (?:one|option|approach|method|plan|treatment|service)[^\n]{0,40}\b(?:right|fits?|for you|for your)|what to (?:weigh|look for|consider)|decision (?:guide|checklist)|fits your situation)\b/i;
+
+const HOW_TO_CHOOSE_MIN_CRITERIA = 3;
+const HOW_TO_CHOOSE_MAX_CRITERIA = 5;
+
+// The contract is an H2 carrying 3–5 bulleted criteria (Codex P2s,
+// 2026-09-26 — both bounds): an H3, or an H2 over plain prose, is not the extractable
+// structure the nudge measures. Criteria = list items before the next H1/H2.
+function howToChooseSectionCriteria(body) {
+  const lines = String(body || '').split(/\r?\n/);
+  let best = -1;
+  for (let i = 0; i < lines.length; i += 1) {
+    if (!/^##\s+\S/.test(lines[i]) || !HOW_TO_CHOOSE_HEADING_RE.test(lines[i])) continue;
+    // Top-level criteria only: the first list item fixes the criterion
+    // indent; deeper (nested explanation) bullets never count (Codex r7 P2).
+    let items = 0;
+    let topIndent = null;
+    for (let j = i + 1; j < lines.length && !/^#{1,2}\s/.test(lines[j]); j += 1) {
+      const m = lines[j].match(/^(\s*)(?:[-*+]|\d+[.)])\s+\S/);
+      if (!m) continue;
+      const indent = m[1].replace(/\t/g, '    ').length;
+      if (topIndent === null || indent < topIndent) { topIndent = indent; items = 0; }
+      if (indent === topIndent) items += 1;
+    }
+    best = Math.max(best, items);
+  }
+  return best; // -1 = no H2 found
+}
+
+function checkCitabilityHowToChoose(draft, brief) {
+  if (nonBlogTarget(brief)) return { ok: true, reason: 'non_blog_target' };
+  const body = renderedCitabilityBody(draft.body);
+  const applies = CHOICE_POST_TYPES.has(draftPostType(draft)) || COMPARISON_TABLE_RE.test(body);
+  if (!applies) return { ok: true, reason: 'no_comparison_to_choose_from' };
+  const criteria = howToChooseSectionCriteria(body);
+  if (criteria < 0) return { ok: false, reason: 'no_how_to_choose_section' };
+  if (criteria < HOW_TO_CHOOSE_MIN_CRITERIA) return { ok: false, reason: `how_to_choose_has_${criteria}_criteria_need_${HOW_TO_CHOOSE_MIN_CRITERIA}+` };
+  if (criteria > HOW_TO_CHOOSE_MAX_CRITERIA) return { ok: false, reason: `how_to_choose_has_${criteria}_criteria_max_${HOW_TO_CHOOSE_MAX_CRITERIA}` };
+  return { ok: true };
+}
+
+const CITABILITY_GAP_CHECKS = {
+  named_sources: checkCitabilityNamedSources,
+  concrete_specifics: checkCitabilityConcreteSpecifics,
+  comparison: checkCitabilityComparison,
+  how_to_choose: checkCitabilityHowToChoose,
+};
+
+function checkCitabilityBackfillGapsCleared(draft, brief, context) {
+  if (!isCitabilityBackfillBrief(brief)) return { ok: true, reason: 'not_citability_backfill' };
+  if (nonBlogTarget(brief)) return { ok: true, reason: 'non_blog_target' };
+  const unresolved = [];
+  for (const gap of brief.gsc_signal.citability_gaps) {
+    const check = CITABILITY_GAP_CHECKS[gap];
+    if (!check) continue;
+    const r = check(draft, brief, context || {});
+    if (!r.ok) unresolved.push(`${gap}(${r.reason})`);
+  }
+  if (unresolved.length) return { ok: false, reason: `planned_gaps_unresolved:${unresolved.join(',')}` };
+  // A targeted edit must not trade one trait for another: a trait the
+  // prior page already satisfied may not regress (Codex r8 P2).
+  const prevBody = context?.previousVersion?.body;
+  if (prevBody != null) {
+    const prevDraft = { ...draft, body: prevBody };
+    const regressed = [];
+    for (const [gap, check] of Object.entries(CITABILITY_GAP_CHECKS)) {
+      if (brief.gsc_signal.citability_gaps.includes(gap)) continue;
+      if (check(prevDraft, brief, {}).ok && !check(draft, brief, context).ok) regressed.push(gap);
+    }
+    if (regressed.length) return { ok: false, reason: `citability_traits_regressed:${regressed.join(',')}` };
+  }
   return { ok: true };
 }
 
@@ -1231,7 +1508,7 @@ module.exports._internals = {
   MIN_TOTAL_SCORES,
   // individual evaluators surfaced for unit tests:
   checkSchemaValid, checkTitleMetaSpamFree, checkMetaDescriptionComplete, checkSerpBriefAttached, checkGscSignalAttached,
-  isOperatorAuthoredBrief, isCompetitorGapBrief,
+  isOperatorAuthoredBrief, isCompetitorGapBrief, isCitabilityBackfillBrief,
   checkNoDuplicateIntent, checkCanonical, checkIndexable,
   checkSitemapUpdated, checkPreviewSuccess,
   checkNapConsistent, checkLocalProof, checkCtaAboveFold,
@@ -1239,6 +1516,9 @@ module.exports._internals = {
   checkAnswerInFirstParagraph, checkSourceInternalLink, checkRedactionPassed,
   checkImprovementOverPrior,
   checkHubLinkPresent, checkTwoPlusCityMentions, checkFaqSectionPresent, checkVoiceMatch,
+  checkCitabilityNamedSources, checkCitabilityConcreteSpecifics, checkCitabilityComparison, checkCitabilityHowToChoose,
+  checkCitabilityBackfillGapsCleared,
+  countConcreteSpecifics, CHOICE_POST_TYPES,
   checkTitleLengthBounds, checkMetaLengthBounds,
   checkPrimaryKeywordInTitle, checkNoDuplicateTitle,
   checkMetaPhoneTokenPresent, checkCityServiceMetaPhone, checkBlogMetaContract,

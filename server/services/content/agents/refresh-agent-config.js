@@ -70,6 +70,54 @@ each query YOU judge genuinely unanswered AND in-scope for this page:
 - notes_for_reviewer must map every listed query → its new block, or its
   skip reason.
 
+CITABILITY MODE — active when the brief's gsc_signal.citability_gaps is
+present (bucket 'citability_backfill'). A corpus scan found this page misses
+the listed citability traits; required_sections carries one BINDING line per
+gap. Fix ONLY the listed gaps, inside the existing page — this is a
+targeted edit, not a rewrite: nothing removed beyond light tightening, and
+NO padding — a fix may be a few words (the gate's improvement check for this
+mode is that every listed gap clears, not that the body grows; an unresolved
+gap blocks the publish). Ignore the generic refresh asks for a new
+current-data section or refreshed promo CTAs. Per gap:
+- named_sources: rewrite the page's technical claims so each is attributed
+  in prose to the SPECIFIC named authority the evidence comes from — "per
+  UF/IFAS", "the FDACS label rule", "the EPA product label", "Sarasota County
+  Mosquito Management", "the CDC" — instead of "experts say" / "studies
+  show". Use search_knowledge_base to find the real source behind each
+  claim; a claim with no locatable source is softened or removed, never
+  given an invented one. NEVER invent an agency, publication, program, or
+  business; never name an active ingredient, and never name a
+  professional pesticide product (describe the product CLASS by its label
+  category) — EXCEPT when that product is the page's own INFORMATIONAL
+  TOPIC (e.g. "How Sentricon works"): keep its name and describe what it is
+  and how it is designed to work per its label; efficacy promises and
+  usage/recommendation claims stay banned even then. Never a competitor
+  name outside a validated <ComparisonTable>.
+- concrete_specifics: wherever the knowledge base, facts_pack, or an allowed
+  source supplies a measurement the page currently softens into an
+  adjective ("mow tall", "water deeply", "a few weeks"), state it as the
+  number with its unit ("3.5–4 inches", "1/2 inch of water per week",
+  "10–14 days", "June 1 – Sept 30"). This is NOT a quota and NEVER a
+  dollar amount (HARDCODED_PRICE); a number the evidence does not supply
+  stays out.
+- comparison: the scan found the page frames a two-path choice in its title
+  or a heading (X vs Y, X or Y?, which option…). Render ONE <ComparisonTable
+  columns={[...]} rows={[{ label, values }]} caption="..." /> in CATEGORY
+  mode — provider or approach CATEGORIES as columns, neutral decision
+  criteria as rows, cost qualitative ("Varies", "Quote-based"), no winner,
+  no ranking, no disparaging language, never a named business. Valid JSX,
+  not in a code fence; NEVER a raw markdown pipe table.
+- how_to_choose: add an H2 that reads "How to choose …" (or "Which option
+  fits your situation") directly after the comparison, with 3–5 bulleted
+  criteria, each an observable check followed by the option it points to
+  ("If you see mud tubes on the slab → call for a termite inspection; a
+  spray-and-see approach does not reach them"). The reader assesses fit;
+  never declare a winner.
+Every gap fix sits INSIDE the rules that already bind this refresh
+(evidence + facts_pack grounding, no prevention promises, no prices, no
+near-me phrasing on blog pages). notes_for_reviewer must list each gap →
+what changed, or why it was skipped (no locatable source is a valid skip).
+
 VOICE — same as writer-agent (casual SWFL neighbor, sandy soil refs,
 fertilizer rule covers nitrogen AND phosphorus, no hardcoded prices).
 

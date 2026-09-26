@@ -65,6 +65,14 @@ const GATE_RETRY_INSTRUCTIONS = {
   EMPTY_AFFILIATE_LINK_TEXT: 'Every <AffiliateLink> must wrap visible link text and close with </AffiliateLink> — write <AffiliateLink product="…" placement="…">a plain product name</AffiliateLink>; never self-close it, leave it empty, or put only a comment or expression inside (the text becomes the link).',
   INVALID_INLINECTA_PROPS: 'Every <InlineCTA> prop must be one the component accepts (headline, description, ctaLabel, ctaHref, phone, tel, eyebrow — exact casing) with a valid literal value; tel must be a phone number (optionally tel:-prefixed). Remove or fix any other prop.',
   INVALID_INLINECTA_DESTINATION: 'Every <InlineCTA ctaHref> must be a single quoted literal that is a root-relative path (no dot segments) or an https URL — never a spread, expression, duplicate, or any other scheme; omit ctaHref entirely to use the default quote page.',
+  // Weight-0 citability nudges (content-quality-gate) ride an EARLY-gate
+  // retry too, so the one redraft hears them (Codex r7 P2). Non-blocking
+  // unless the brief is a citability backfill; never license invented
+  // sources or numbers.
+  CITABILITY_NAMED_SOURCES: 'Citability (non-blocking): attribute technical claims in prose to the specific named authority the evidence came from ("per UF/IFAS", "the EPA product label") instead of "experts say" — never invent a source.',
+  CITABILITY_CONCRETE_SPECIFICS: 'Citability (non-blocking): where the evidence supplies a measurement, state the number with its unit instead of a vague stand-in ("a few weeks", "water deeply") — never invent a number, never a dollar amount.',
+  CITABILITY_COMPARISON: 'Citability (non-blocking): this post frames a choice — render ONE <ComparisonTable> in CATEGORY mode with neutral decision criteria as rows.',
+  CITABILITY_HOW_TO_CHOOSE: 'Citability (non-blocking): add an H2 "How to choose …" with 3–5 top-level bulleted criteria, each an observable check → the option it points to.',
 };
 
 // The header defaults to the RUN-LEVEL framing (one feedback-informed

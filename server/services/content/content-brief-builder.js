@@ -33,6 +33,16 @@ const router = require('./decision-router');
 const factsSufficiency = require('./facts-sufficiency');
 const factsLoader = require('../content-astro/facts-bank-loader');
 const interceptSeeder = require('./intercept-brief-seeder');
+
+// citability_backfill gap id → the binding required_sections line the
+// refresh agent must satisfy (mirrors refresh-agent-config CITABILITY MODE
+// and the quality gate's citability_* nudges; same ids as the seeder).
+const CITABILITY_GAP_SECTIONS = Object.freeze({
+  named_sources: 'attribute the page\'s technical claims in prose to the specific named authority the evidence comes from (UF/IFAS, FDACS, the EPA product label, the county mosquito program, the CDC) — never "experts say"; never invent an agency, publication, program, or business',
+  concrete_specifics: 'where the facts_pack, knowledge base, or an allowed source supplies a measurement, state it as the number with its unit (inches, days, a date window, a percentage) instead of an adjective — not a quota, never a dollar amount, never an invented figure',
+  comparison: 'the page frames a two-path choice in its title or a heading — render ONE <ComparisonTable> in CATEGORY mode with the decision criteria as rows (no winner, no ranking, cost qualitative)',
+  how_to_choose: 'add an H2 "How to choose …" (or "Which option fits your situation") with 3–5 bulleted criteria, each an observable check followed by the option it points to',
+});
 const spokeSeeder = require('./spoke-seed-seeder');
 const categorySeeder = require('./category-seed-seeder');
 
@@ -83,6 +93,8 @@ const getSerpProfiler = lazy('serp-profiler', '../seo/serp-profiler');
 const getConversionMiner = lazy('conversion-feedback-miner', '../seo/conversion-feedback-miner');
 
 // ── required-sections matrix (per page-type, per v3.1 brief schema) ─
+
+const CITABILITY_BACKFILL_REFRESH_SECTIONS = ['preserve existing slug', 'update dateModified'];
 
 const REQUIRED_SECTIONS = {
   'city-service': [
@@ -426,8 +438,26 @@ class ContentBriefBuilder {
    * persist=true writes to content_briefs as a new version.
    */
   async compose(opportunityId, { persist = true, skipSerp = false } = {}) {
-    const opp = await queue.getById(opportunityId);
+    let opp = await queue.getById(opportunityId);
     if (!opp) throw new Error(`opportunity ${opportunityId} not found`);
+
+    // Citability backfill: re-scan the live page — the seeded gap list can
+    // be days stale. Current gaps replace the seeded ones; none left routes
+    // the row to do_not_publish (the runner skips it) instead of drafting a
+    // redundant refresh. Unreadable page → keep the seeded gaps.
+    let citabilityResolved = false;
+    let citabilityIneligible = false;
+    if (opp.bucket === 'citability_backfill') {
+      const live = await require('./citability-backfill-seeder').rescanLive(opp).catch((err) => {
+        logger.warn(`[brief-builder] citability live re-scan failed (opp ${opp.id}): ${err.message}`);
+        return null;
+      });
+      if (live) {
+        opp = { ...opp, signal_metadata: { ...(opp.signal_metadata || {}), citability_gaps: live.gaps, citability_scan: live.results } };
+        citabilityIneligible = !!live.ineligible;
+        citabilityResolved = !citabilityIneligible && live.gaps.length === 0;
+      }
+    }
 
     // Operator-pinned intercept briefs skip signal gathering entirely: the
     // operator manifest IS the signal (decision-router pins the action
@@ -440,7 +470,15 @@ class ContentBriefBuilder {
       : await this._gatherSignals(opp, { skipSerp });
     const existingBriefVersions = await this._countExistingBriefs(opp.id);
 
-    const decision = router.route(opp, { ...signals, existing_brief_versions: existingBriefVersions });
+    let decision = router.route(opp, { ...signals, existing_brief_versions: existingBriefVersions });
+    if (citabilityResolved || citabilityIneligible) {
+      decision = {
+        ...decision,
+        action_type: 'do_not_publish',
+        human_review_required: false,
+        human_review_reason: citabilityIneligible ? 'citability_target_not_indexable' : 'citability_gaps_already_resolved',
+      };
+    }
 
     // Facts pack — the verified facts-bank facts the writer agent may cite.
     // Only assembled for facts-gated content actions with a city × service.
@@ -507,11 +545,16 @@ class ContentBriefBuilder {
     }
 
     // Customer-insight cluster — match topic-ish keywords against
-    // the opportunity's query / service / city.
-    out.customer_signal = await this._matchCustomerCluster(opportunity).catch((err) => {
-      logger.warn(`[brief-builder] customer cluster lookup failed: ${err.message}`);
-      return null;
-    });
+    // the opportunity's query / service / city. Skipped for citability
+    // backfills: their query is null, so the matcher would fall back to the
+    // service's top cluster and hand an unrelated customer question to a
+    // targeted edit (Codex P2, 2026-09-26).
+    if (opportunity.bucket !== 'citability_backfill') {
+      out.customer_signal = await this._matchCustomerCluster(opportunity).catch((err) => {
+        logger.warn(`[brief-builder] customer cluster lookup failed: ${err.message}`);
+        return null;
+      });
+    }
 
     // Conversion feedback for this (city, service).
     if (opportunity.service || opportunity.city) {
@@ -645,7 +688,13 @@ class ContentBriefBuilder {
     const aeo = applyAeoTreatment({
       isAeoGap: opportunity.bucket === 'aeo_gap',
       pageType,
-      requiredSections: REQUIRED_SECTIONS[pageType] || [],
+      // Citability backfills are targeted edits: the generic refresh
+      // asks (a new current-data section, refreshed promo CTAs) would force
+      // padding onto a surgical fix (Codex r6 P2). Keep slug + dateModified;
+      // the gap lines added below are the binding work.
+      requiredSections: opportunity.bucket === 'citability_backfill' && pageType === 'refresh'
+        ? CITABILITY_BACKFILL_REFRESH_SECTIONS
+        : (REQUIRED_SECTIONS[pageType] || []),
       schemaTypes: SCHEMA_TYPES[pageType] || [],
       voiceConstraints: VOICE_CONSTRAINTS,
     });
@@ -712,6 +761,21 @@ class ContentBriefBuilder {
       requiredSections = [
         ...requiredSections,
         `family coverage: the refreshed page must directly address EVERY fragmented phrasing of this intent — ${familyQueries.map((q) => `"${q}"`).join(', ')} — ${coverageHow} for any phrasing the page does not already answer`,
+      ];
+    }
+
+    // citability_backfill refreshes: the measured gaps become BINDING
+    // sections (the data in gsc_signal, the requirement in
+    // required_sections — the answer-gap pattern). Comparison / how-to-
+    // choose only ever appear here when the seeder's scan found the post
+    // frames a choice, so this never asks for a filler table.
+    const citabilityGaps = Array.isArray(opportunity.signal_metadata?.citability_gaps)
+      ? opportunity.signal_metadata.citability_gaps.filter((g) => CITABILITY_GAP_SECTIONS[g])
+      : [];
+    if (decision.action_type === 'refresh_existing_page' && citabilityGaps.length) {
+      requiredSections = [
+        ...requiredSections,
+        ...citabilityGaps.map((g) => `citability (${g}): ${CITABILITY_GAP_SECTIONS[g]}`),
       ];
     }
 
@@ -837,6 +901,15 @@ class ContentBriefBuilder {
         // so the refresh agent writes self-contained answer blocks without
         // re-deriving the gaps (refresh-agent-config ANSWER-GAP MODE).
         unanswered_queries: opportunity.signal_metadata?.unanswered_queries || null,
+        // citability_backfill rows: the seeder's per-post gap list
+        // (['named_sources', 'concrete_specifics', 'comparison',
+        // 'how_to_choose'] subset) rides the brief so the refresh agent's
+        // CITABILITY MODE addresses exactly the measured gaps, and the
+        // quality gate's GSC-evidence exemption can verify the provenance
+        // after the content_briefs round-trip (isCitabilityBackfillBrief).
+        citability_gaps: Array.isArray(opportunity.signal_metadata?.citability_gaps)
+          ? opportunity.signal_metadata.citability_gaps
+          : null,
         // listicle_family rows: `impressions` above is the FAMILY SUM, not
         // the representative query's own volume — carry the provenance so
         // the writer and reviewers see the aggregation instead of reading
@@ -1062,6 +1135,7 @@ function nextWeekday9amET() {
 module.exports = new ContentBriefBuilder();
 module.exports.ContentBriefBuilder = ContentBriefBuilder;
 module.exports._internals = {
+  CITABILITY_GAP_SECTIONS,
   REQUIRED_SECTIONS,
   SCHEMA_TYPES,
   WORD_COUNT_TARGET,
