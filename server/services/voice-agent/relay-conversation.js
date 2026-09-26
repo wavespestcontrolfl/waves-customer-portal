@@ -202,9 +202,26 @@ const OPENAI_VOICE_OVERRIDE_MODEL_IDS = new Set(
     .map(([id]) => id)
 );
 
+/**
+ * GATE_VOICE_RELAY_OPENAI, live — prefers feature-gates.js's canonical
+ * voiceRelayOpenaiLive() (same convention as discountStackingLive, so the
+ * gate shows up in that module's status listing too), but falls back to
+ * reading the env directly when the required module doesn't export it —
+ * hundreds of test files across this repo replace '../config/feature-gates'
+ * wholesale with a narrow `{ isEnabled, gateEnvValue }`-shaped stub that
+ * predates this gate; those must not throw for a lane they never touch.
+ * Both paths apply the exact same strict `=== 'true'` rule.
+ */
+function voiceRelayOpenaiGateLive() {
+  const featureGates = require('../../config/feature-gates');
+  return typeof featureGates.voiceRelayOpenaiLive === 'function'
+    ? featureGates.voiceRelayOpenaiLive()
+    : process.env.GATE_VOICE_RELAY_OPENAI === 'true';
+}
+
 /** The full override allowlist for THIS call — gate-aware, always fresh. */
 function allowedOverrideModelIds() {
-  if (!require('../../config/feature-gates').voiceRelayOpenaiLive()) return new Set(ALLOWED_OVERRIDE_MODEL_IDS);
+  if (!voiceRelayOpenaiGateLive()) return new Set(ALLOWED_OVERRIDE_MODEL_IDS);
   return new Set([...ALLOWED_OVERRIDE_MODEL_IDS, ...OPENAI_VOICE_OVERRIDE_MODEL_IDS]);
 }
 

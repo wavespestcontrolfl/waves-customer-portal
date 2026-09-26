@@ -92,6 +92,22 @@ describe('gate — production default unchanged, opt-in only', () => {
     expect(resolveSessionModel({ sandbox: true })).toEqual({ model: OPENAI_CANDIDATE, fallbackReason: null });
   });
 
+  // Many suites replace '../config/feature-gates' wholesale with a narrow
+  // `{ isEnabled, gateEnvValue }` stub that predates this gate — a session
+  // resolved under one must not throw, and must apply the same strict rule.
+  test('a narrow feature-gates stub (no voiceRelayOpenaiLive export) neither throws nor loosens the gate', () => {
+    jest.isolateModules(() => {
+      jest.doMock('../config/feature-gates', () => ({ isEnabled: () => false, gateEnvValue: () => undefined }));
+      const fresh = require('../services/voice-agent/relay-conversation');
+      expect(fresh.isAllowedOverrideModel(OPENAI_CANDIDATE)).toBe(false);
+      process.env.GATE_VOICE_RELAY_OPENAI = 'TRUE';
+      expect(fresh.isAllowedOverrideModel(OPENAI_CANDIDATE)).toBe(false);
+      process.env.GATE_VOICE_RELAY_OPENAI = 'true';
+      expect(fresh.isAllowedOverrideModel(OPENAI_CANDIDATE)).toBe(true);
+    });
+    jest.dontMock('../config/feature-gates');
+  });
+
 });
 
 // Codex r1 P1: the resolved model no longer only shapes request params — it
