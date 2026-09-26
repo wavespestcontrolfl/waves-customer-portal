@@ -77,6 +77,7 @@ async function loadCustomer(customerId) {
       'email',
       'phone',
       'address_line1',
+      'address_line2',
       'city',
       'state',
       'zip',

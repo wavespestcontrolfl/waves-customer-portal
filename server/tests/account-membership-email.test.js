@@ -523,4 +523,30 @@ describe('sendTermiteRenewalReminder (45/30-day termite annual renewal notice, s
       payload: expect.objectContaining({ last_inspection_sentence: '' }),
     }));
   });
+
+  // Codex #4921 r3 P2: loadCustomer's own SELECT list omitted address_line2,
+  // so the customer-address fallback (no planAddress passed) always saw it
+  // as undefined and silently dropped a real unit/suite line from the
+  // notice. Fixed by adding address_line2 to loadCustomer's projection.
+  test('the customer-address fallback (no plan property) includes address_line2 when the customer has one', async () => {
+    setDbQueues({
+      customers: [chain({ first: customer({ address_line2: 'Unit 4B' }) }), chain({ first: customer({ address_line2: 'Unit 4B' }) })],
+    });
+
+    await AccountMembershipEmail.sendTermiteRenewalReminder({
+      customerId: 'cust-1',
+      termId: 'term-1',
+      daysOut: 45,
+      renewalDate: '2027-01-05',
+      renewalFee: 650,
+      newStart: '2027-01-05',
+      newEnd: '2028-01-05',
+      cancelLink: 'https://portal.wavespestcontrol.com/?tab=plan',
+      // No `address` (planAddress) passed — forces the loadCustomer fallback.
+    });
+
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      payload: expect.objectContaining({ address: '123 Main St, Unit 4B, Bradenton, FL, 34211' }),
+    }));
+  });
 });

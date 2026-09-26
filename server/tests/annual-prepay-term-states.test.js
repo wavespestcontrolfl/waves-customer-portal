@@ -66,7 +66,12 @@ const ACTIVE_STATUSES = ['active', 'renewal_pending'];
 // Each is fed exclusively by the notice/payment-reminder column helpers,
 // which are behaviorally pinned below to never return 'status'. Any other
 // identifier ([statusCol], [column], …) fails closed.
-const SANCTIONED_KEY_IDENTIFIERS = ['noticeCol', 'claimCol', 'sentCol'];
+// lateCol / escalatedCol (Codex #4921 r3): fed by
+// termiteLateColumnForDaysOut / termiteLateEscalationColumnForDaysOut,
+// pinned below to return only notice_45_late_sent_at / notice_30_late_sent_at
+// and notice_45_late_escalated_at / notice_30_late_escalated_at (or null) —
+// never 'status'.
+const SANCTIONED_KEY_IDENTIFIERS = ['noticeCol', 'claimCol', 'sentCol', 'lateCol', 'escalatedCol'];
 
 // Non-literal `status:` expressions the scanner accepts, each one a pass-
 // through of a value that is itself CHECK-valid: a constant pinned below, the
@@ -627,7 +632,7 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
       {
         expr: "term.status === 'active' ? 'renewal_pending' : term.status",
         guards: ['where({ id: term.id })', "whereIn('status', ACTIVE_STATUSES)", "whereNull('renewal_decision')",
-          'whereNull(noticeCol)', 'where(lateTermiteSendAbsent(daysOut)', 'where(function noticeClaimAvailable()', 'whereNull(claimCol)',
+          'whereNull(noticeCol)', 'where(lateTermiteSendAbsent(daysOut, term)', 'where(function noticeClaimAvailable()', 'whereNull(claimCol)',
           "orWhere(claimCol, '<', staleClaimCutoff)"],
       },
       // Move 5: claim release — undecided + still unsent.
@@ -693,13 +698,28 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
       }
     }
     // sentCol in the notice mark-sent write comes from noticeWitnessColumn:
-    // the rung's own column, or the late 45-day column.
+    // the rung's own column, or the rung's own late column (45 or 30 —
+    // isTermiteAnnualPlanTerm gates whether the late branch is even reachable).
     for (const days of [45, 30, 15, 7]) {
       for (const today of ['2026-01-01', '2026-12-20']) {
-        const col = _private.noticeWitnessColumn(days, { term_end: '2026-12-31' }, today);
-        expect(col).toMatch(/^notice_/);
-        expect(col).not.toBe('status');
+        for (const term of [{ term_end: '2026-12-31' }, { term_end: '2026-12-31', annual_plan_version: 'v3' }]) {
+          const col = _private.noticeWitnessColumn(days, term, today);
+          expect(col).toMatch(/^notice_/);
+          expect(col).not.toBe('status');
+        }
       }
+    }
+    // lateCol (recordTermiteRungMissedLate) / escalatedCol
+    // (fileTermiteLateNoticeException) — Codex #4921 r3: only ever
+    // notice_45_late_sent_at / notice_30_late_sent_at and
+    // notice_45_late_escalated_at / notice_30_late_escalated_at, or null.
+    for (const days of [45, 30, 15, 7, 99, null]) {
+      const lateCol = _private.termiteLateColumnForDaysOut(days);
+      if (lateCol !== null) expect(lateCol).toMatch(/^notice_(45|30)_late_sent_at$/);
+      expect(lateCol).not.toBe('status');
+      const escalatedCol = _private.termiteLateEscalationColumnForDaysOut(days);
+      if (escalatedCol !== null) expect(escalatedCol).toMatch(/^notice_(45|30)_late_escalated_at$/);
+      expect(escalatedCol).not.toBe('status');
     }
   });
 

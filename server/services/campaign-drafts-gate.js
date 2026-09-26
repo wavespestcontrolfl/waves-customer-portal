@@ -158,9 +158,12 @@ async function campaignCooldownReason(customerId, { excludeDraftId = null } = {}
       this.where('notice_30_sent_at', '>', db.raw(COOLDOWN_INTERVAL))
         .orWhere('notice_15_sent_at', '>', db.raw(COOLDOWN_INTERVAL))
         .orWhere('notice_7_sent_at', '>', db.raw(COOLDOWN_INTERVAL))
-        // Termite annual plans' extra 45-day rung (on time or late catch-up).
+        // Termite annual plans' extra 45-day rung (on time or late catch-up),
+        // and the 30-day rung's own late catch-up (Codex #4921 r3) — a late
+        // send is still a real customer-facing renewal touch.
         .orWhere('notice_45_sent_at', '>', db.raw(COOLDOWN_INTERVAL))
-        .orWhere('notice_45_late_sent_at', '>', db.raw(COOLDOWN_INTERVAL));
+        .orWhere('notice_45_late_sent_at', '>', db.raw(COOLDOWN_INTERVAL))
+        .orWhere('notice_30_late_sent_at', '>', db.raw(COOLDOWN_INTERVAL));
     })
     .first('id');
   if (recentPrepayNotice) return 'recent_prepay_notice';

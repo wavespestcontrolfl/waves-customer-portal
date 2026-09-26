@@ -31,6 +31,25 @@ const TERMITE_COPY_NOTICE_DAYS = [45, 30];
 // A 45-day-rung notice sent fewer than 45 days out (catch-up) — recorded
 // here, never as the notice_45_sent_at witness. See noticeWitnessColumn.
 const TERMITE_LATE_NOTICE_COLUMN = 'notice_45_late_sent_at';
+// Same shape, one rung down: a 30-day-rung notice sent fewer than 30 days
+// out — either a genuine retry landing late, or (Codex #4921 r3) the
+// single combined send chosen when a term is first seen at <=30 days and
+// BOTH rungs are due at once (see processTermiteNoticeObligations). Never
+// the notice_30_sent_at witness. The renewal-charge gate (slice 6b) reads
+// notice_45_sent_at only, so a late 30-day send does not independently
+// block auto-charge the way a late 45-day send does — this column exists
+// for the durable record and its own staff escalation.
+const TERMITE_30_LATE_NOTICE_COLUMN = 'notice_30_late_sent_at';
+// Confirmed-bell witnesses for the two late columns above — same
+// confirmed-insert-only pattern as notice_45_late_escalated_at: stamped
+// only after notifyAdmin returns non-null, so a transient insert failure
+// is retried on the next sweep instead of losing the escalation for good.
+const TERMITE_30_LATE_ESCALATION_COLUMN = 'notice_30_late_escalated_at';
+// Stamped once a termite term reaches its OWN term_end with the 45-day
+// and/or 30-day rung never delivered at all (neither on-time nor late) —
+// the durable safety net for a rung whose daily retry never landed before
+// the renewal date arrived (Codex #4921 r3 finding #2, generalized).
+const TERMITE_NOTICE_MISSED_ESCALATION_COLUMN = 'notice_missed_escalated_at';
 // Days BEFORE term_start the unpaid-prepay payment reminder fires (daily cron
 // granularity: 3 days out and the day before the first visit).
 const PAYMENT_REMINDER_DAYS = [3, 1];
@@ -1713,16 +1732,18 @@ function formatCurrencyLabel(amount) {
 // notice entirely and tell staff the install never happened than to send
 // one off a date that is not real yet. Same one-open-alert-per-reason-per-
 // week dedupe shape as the sibling exceptions below, keyed per term+rung.
+// Dedupe window for the three "skipped" termite exceptions below — one open
+// alert per term+rung+reason per week. Codex #4921 r3 P1: this used to be a
+// standalone SELECT-then-insert probe run BEFORE notifyAdmin, which is not
+// atomic across pods/dynos — two concurrent sweeps can both see "no existing
+// row" and both insert. notifyAdmin's own dedupeKey (+ dedupeWindowMs for a
+// rolling window instead of forever) serializes the probe and insert under
+// one Postgres advisory lock inside notifyAdmin's own transaction
+// (notification-service.js), so this is now genuinely atomic.
+const TERMITE_EXCEPTION_DEDUPE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
 async function fileTermiteAwaitingInstallationException(term, daysOut) {
   try {
-    const dedupeKey = `termite-annual-notice:${term?.id}:${daysOut}:awaiting_installation`;
-    const existing = await db('notifications')
-      .where({ recipient_type: 'admin' })
-      .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
-      .where('created_at', '>=', db.raw("now() - interval '7 days'"))
-      .first('id')
-      .catch(() => null);
-    if (existing) return;
     const NotificationService = require('./notification-service');
     await NotificationService.notifyAdmin(
       'alert',
@@ -1733,8 +1754,9 @@ async function fileTermiteAwaitingInstallationException(term, daysOut) {
         // bell:true — same rationale as the sibling termite exceptions: a
         // skipped notice must ring even under GATE_ADMIN_BELL_POLICY.
         bell: true,
+        dedupeKey: `termite-annual-notice:${term?.id}:${daysOut}:awaiting_installation`,
+        dedupeWindowMs: TERMITE_EXCEPTION_DEDUPE_WINDOW_MS,
         metadata: {
-          dedupeKey,
           customer_id: term?.customer_id || null,
           annual_prepay_term_id: term?.id || null,
           days_out: daysOut,
@@ -1754,14 +1776,6 @@ async function fileTermiteAwaitingInstallationException(term, daysOut) {
 // off does not spam a bell per customer per day.
 async function fileTermiteCancelLinkException(term, daysOut) {
   try {
-    const dedupeKey = `termite-annual-notice:${term?.id}:${daysOut}:cancel_flow_disabled`;
-    const existing = await db('notifications')
-      .where({ recipient_type: 'admin' })
-      .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
-      .where('created_at', '>=', db.raw("now() - interval '7 days'"))
-      .first('id')
-      .catch(() => null);
-    if (existing) return;
     const NotificationService = require('./notification-service');
     await NotificationService.notifyAdmin(
       'alert',
@@ -1773,8 +1787,9 @@ async function fileTermiteCancelLinkException(term, daysOut) {
         // notice witness, so this must ring even under GATE_ADMIN_BELL_POLICY
         // (the 'alert' category is silenced by default there).
         bell: true,
+        dedupeKey: `termite-annual-notice:${term?.id}:${daysOut}:cancel_flow_disabled`,
+        dedupeWindowMs: TERMITE_EXCEPTION_DEDUPE_WINDOW_MS,
         metadata: {
-          dedupeKey,
           customer_id: term?.customer_id || null,
           annual_prepay_term_id: term?.id || null,
           days_out: daysOut,
@@ -1796,14 +1811,6 @@ async function fileTermiteCancelLinkException(term, daysOut) {
 // fileTermiteCancelLinkException, keyed per term+rung.
 async function fileTermiteMissingFeeException(term, daysOut) {
   try {
-    const dedupeKey = `termite-annual-notice:${term?.id}:${daysOut}:missing_prepay_amount`;
-    const existing = await db('notifications')
-      .where({ recipient_type: 'admin' })
-      .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
-      .where('created_at', '>=', db.raw("now() - interval '7 days'"))
-      .first('id')
-      .catch(() => null);
-    if (existing) return;
     const NotificationService = require('./notification-service');
     await NotificationService.notifyAdmin(
       'alert',
@@ -1815,8 +1822,9 @@ async function fileTermiteMissingFeeException(term, daysOut) {
         // skipped termite notice leaves the renewal without its notice
         // witness, so this must ring even under GATE_ADMIN_BELL_POLICY.
         bell: true,
+        dedupeKey: `termite-annual-notice:${term?.id}:${daysOut}:missing_prepay_amount`,
+        dedupeWindowMs: TERMITE_EXCEPTION_DEDUPE_WINDOW_MS,
         metadata: {
-          dedupeKey,
           customer_id: term?.customer_id || null,
           annual_prepay_term_id: term?.id || null,
           days_out: daysOut,
@@ -1829,38 +1837,56 @@ async function fileTermiteMissingFeeException(term, daysOut) {
   }
 }
 
-// Admin bell when the 45-day rung went out LATE (catch-up, fewer than 45
-// days before term_end). The customer was told, but the signed agreement's
-// "at least 45 days" promise was missed, so notice_45_sent_at stays empty
-// and the renewal must be handled by staff rather than auto-charged.
+// The escalation-witness column for a termite rung's late-notice bell —
+// mirrors termiteLateColumnForDaysOut for the *_late_escalated_at side.
+function termiteLateEscalationColumnForDaysOut(daysOut) {
+  const n = Number(daysOut);
+  if (n === TERMITE_EXTRA_NOTICE_DAYS) return 'notice_45_late_escalated_at';
+  if (n === 30) return TERMITE_30_LATE_ESCALATION_COLUMN;
+  return null;
+}
+
+// Admin bell when a termite rung (45 or 30) went out LATE — fewer than its
+// own threshold of days before term_end, either a genuine retry landing
+// late or the single combined send processTermiteNoticeObligations chooses
+// when both rungs are due at once. The customer was told, but the signed
+// agreement's notice promise for THIS rung was missed. Only the 45-day
+// rung gates the renewal-charge auto-send (slice 6b reads notice_45_sent_at
+// only) — the 30-day rung's lateness is a durable record + staff
+// escalation on its own, not an independent billing gate.
 //
 // notifyAdmin returns null on an INSERT failure rather than throwing
 // (notification-service.js: "create() returns null on an insert failure …
 // spreading that null would report {deduped:false} as if a row landed" —
 // it throws inside its own transaction and the outer catch turns that into
-// null too). notice_45_sent_at is already permanently empty and
-// notice_45_late_sent_at already blocks every retry of the SEND itself, so
-// swallowing a null result here would lose the escalation bell for good
-// with no way even to notice, let alone retry, it. The escalated stamp is
-// therefore written ONLY on a confirmed (non-null) result; a null result
-// leaves it unset so termiteLateNoticeEscalationCandidates() retries this
-// same call on the next daily sweep (Codex #4921 r2 P1).
+// null too). The rung's own late-sent column already permanently blocks
+// every retry of the SEND itself, so swallowing a null result here would
+// lose the escalation bell for good with no way even to notice, let alone
+// retry, it. The escalated stamp is therefore written ONLY on a confirmed
+// (non-null) result; a null result leaves it unset so
+// termiteLateNoticeEscalationCandidates() retries this same call on the
+// next daily sweep (Codex #4921 r2 P1, generalized to 30 in r3).
 async function fileTermiteLateNoticeException(term, daysOut) {
   try {
+    const n = Number(daysOut);
+    const escalatedCol = termiteLateEscalationColumnForDaysOut(n);
+    const chargeSentence = n === TERMITE_EXTRA_NOTICE_DAYS
+      ? ' this renewal will not be auto-charged — handle it manually.'
+      : ' handle this renewal\'s notice timing manually if the 45-day rung was also late.';
     const NotificationService = require('./notification-service');
     const result = await NotificationService.notifyAdmin(
       'alert',
       'Termite annual renewal notice went out late',
-      `The ${daysOut}-day termite renewal notice for term ${term?.id} (renews ${formatDateLabel(term?.term_end)}) was sent fewer than 45 days before the renewal date, so the agreement's 45-day notice promise was missed. The customer has been told; this renewal will not be auto-charged — handle it manually.`,
+      `The ${n}-day termite renewal notice for term ${term?.id} (renews ${formatDateLabel(term?.term_end)}) was sent fewer than ${n} days before the renewal date, so the agreement's ${n}-day notice promise was missed. The customer has been told;${chargeSentence}`,
       {
         link: term?.customer_id ? `/admin/customers/${term.customer_id}` : '/admin/dispatch',
         bell: true,
-        dedupeKey: `termite-annual-notice:${term?.id}:${daysOut}:late`,
+        dedupeKey: `termite-annual-notice:${term?.id}:${n}:late`,
         metadata: {
           customerId: term?.customer_id || null,
           annual_prepay_term_id: term?.id || null,
-          days_out: daysOut,
-          reason: 'notice_45_late',
+          days_out: n,
+          reason: `notice_${n}_late`,
         },
       },
     );
@@ -1868,13 +1894,13 @@ async function fileTermiteLateNoticeException(term, daysOut) {
       logger.warn(`[annual-prepay] termite late-notice admin bell insert failed for term ${term?.id}; will retry on the next sweep`);
       return false;
     }
-    if (term?.id) {
+    if (term?.id && escalatedCol) {
       const cols = await annualPrepayColumns();
-      if (cols.notice_45_late_escalated_at) {
+      if (cols[escalatedCol]) {
         await db('annual_prepay_terms')
           .where({ id: term.id })
-          .whereNull('notice_45_late_escalated_at')
-          .update({ notice_45_late_escalated_at: new Date(), updated_at: new Date() });
+          .whereNull(escalatedCol)
+          .update({ [escalatedCol]: new Date(), updated_at: new Date() });
       }
     }
     return true;
@@ -1885,14 +1911,21 @@ async function fileTermiteLateNoticeException(term, daysOut) {
 }
 
 // Retry point for fileTermiteLateNoticeException's admin-bell insert
-// failing (notifyAdmin returning null): every term whose 45-day rung went
-// out LATE but never got a confirmed escalation stamp. Guarded on the new
-// column existing so a DB mid-rollout never 500s here — see checkAndSend.
+// failing (notifyAdmin returning null): every term with a late-sent 45 or
+// 30-day rung missing its OWN confirmed escalation stamp. A term can carry
+// both (found late, e.g.) — checkAndSend re-files whichever of the two is
+// still unescalated on this row. Guarded on the relevant columns existing
+// so a DB mid-rollout never 500s here — see checkAndSend.
 async function termiteLateNoticeEscalationCandidates({ conn = db } = {}) {
   return conn('annual_prepay_terms')
     .whereNotNull('annual_plan_version')
-    .whereNotNull(TERMITE_LATE_NOTICE_COLUMN)
-    .whereNull('notice_45_late_escalated_at')
+    .where(function anyLateUnescalated() {
+      this.where(function late45() {
+        this.whereNotNull(TERMITE_LATE_NOTICE_COLUMN).whereNull('notice_45_late_escalated_at');
+      }).orWhere(function late30() {
+        this.whereNotNull(TERMITE_30_LATE_NOTICE_COLUMN).whereNull(TERMITE_30_LATE_ESCALATION_COLUMN);
+      });
+    })
     .select('*');
 }
 
@@ -5371,24 +5404,41 @@ async function termiteNoticePreflight(term, daysOut) {
   return { termiteRung: true };
 }
 
-// Which column a delivered notice is recorded in. The 45-day rung's witness
-// (notice_45_sent_at) is the contractual proof the renewal charge relies on
-// — the signed v3 agreement promises the first notice "at least 45 days"
-// before the renewal date (term_end). A catch-up send fewer than 45 days
-// out still informs the customer but is recorded in notice_45_late_sent_at,
-// never as the 45-day witness (Codex #4921 r1 P1).
-function noticeWitnessColumn(daysOut, term, today = etDateString()) {
-  const noticeCol = noticeColumnForDaysOut(daysOut);
-  if (Number(daysOut) !== TERMITE_EXTRA_NOTICE_DAYS) return noticeCol;
-  const daysLeft = daysUntil(today, dateOnly(term.term_end));
-  return daysLeft != null && daysLeft >= TERMITE_EXTRA_NOTICE_DAYS ? noticeCol : TERMITE_LATE_NOTICE_COLUMN;
+// The late-notice column for a termite rung, or null when daysOut isn't
+// one of the two termite rungs (45/30).
+function termiteLateColumnForDaysOut(daysOut) {
+  const n = Number(daysOut);
+  if (n === TERMITE_EXTRA_NOTICE_DAYS) return TERMITE_LATE_NOTICE_COLUMN;
+  if (n === 30) return TERMITE_30_LATE_NOTICE_COLUMN;
+  return null;
 }
 
-// Every column that means "this rung already went out" — for 45, a late
-// send counts too, so the catch-up window never re-sends it.
-function noticeDoneColumns(daysOut) {
+// Which column a delivered notice is recorded in. Both termite rungs' "on
+// time" witnesses (notice_45_sent_at / notice_30_sent_at) are contractual
+// proof — the signed v3 agreement promises written notice "at least 45
+// days AND again 30 days" before the renewal date (term_end); the renewal-
+// charge gate (slice 6b) reads notice_45_sent_at specifically. A send fewer
+// than the rung's own threshold out still informs the customer but is
+// recorded in the rung's *_late_sent_at column, never as its witness
+// (Codex #4921 r1 P1, generalized to 30 in r3). A non-termite term (or a
+// non-termite rung: 15/7) never reaches the late branch — the generic
+// 30/15/7 loop excludes termite terms from its own 30-day pass, and 15/7
+// have no late column at all.
+function noticeWitnessColumn(daysOut, term, today = etDateString()) {
   const noticeCol = noticeColumnForDaysOut(daysOut);
-  return Number(daysOut) === TERMITE_EXTRA_NOTICE_DAYS ? [noticeCol, TERMITE_LATE_NOTICE_COLUMN] : [noticeCol];
+  const lateCol = isTermiteAnnualPlanTerm(term) ? termiteLateColumnForDaysOut(daysOut) : null;
+  if (!lateCol) return noticeCol;
+  const daysLeft = daysUntil(today, dateOnly(term.term_end));
+  return daysLeft != null && daysLeft >= Number(daysOut) ? noticeCol : lateCol;
+}
+
+// Every column that means "this rung already went out" — for a termite
+// term's 45/30 rungs, a late send counts too, so the daily retry never
+// re-sends it.
+function noticeDoneColumns(daysOut, term) {
+  const noticeCol = noticeColumnForDaysOut(daysOut);
+  const lateCol = isTermiteAnnualPlanTerm(term) ? termiteLateColumnForDaysOut(daysOut) : null;
+  return lateCol ? [noticeCol, lateCol] : [noticeCol];
 }
 
 async function renderTermNoticeSms({ termiteRung, customer, term, addressShort, cancelLink }) {
@@ -5538,7 +5588,7 @@ async function claimTermNotice(term, daysOut) {
     .whereIn('status', ACTIVE_STATUSES)
     .whereNull('renewal_decision')
     .whereNull(noticeCol)
-    .where(lateTermiteSendAbsent(daysOut))
+    .where(lateTermiteSendAbsent(daysOut, term))
     .where(function noticeClaimAvailable() {
       this.whereNull(claimCol).orWhere(claimCol, '<', staleClaimCutoff);
     })
@@ -5551,12 +5601,16 @@ async function claimTermNotice(term, daysOut) {
   return claimedTerm || null;
 }
 
-// For the 45-day rung, a late catch-up send also counts as "already went
-// out" (notice_45_late_sent_at), so it is never re-claimed or re-sent. Other
-// rungs get an empty group (knex drops it).
-function lateTermiteSendAbsent(daysOut) {
+// For a termite term's 45/30 rung, a late catch-up send also counts as
+// "already went out" (its own *_late_sent_at column), so it is never
+// re-claimed or re-sent. Every other case (15/7, or a non-termite term at
+// any daysOut, including the generic 30-day rung) gets an empty group
+// (knex drops it) — a non-termite term never writes either late column in
+// the first place, so this is a no-op for it either way.
+function lateTermiteSendAbsent(daysOut, term) {
   return function lateTermiteSendAbsentGroup() {
-    if (Number(daysOut) === TERMITE_EXTRA_NOTICE_DAYS) this.whereNull(TERMITE_LATE_NOTICE_COLUMN);
+    const lateCol = isTermiteAnnualPlanTerm(term) ? termiteLateColumnForDaysOut(daysOut) : null;
+    if (lateCol) this.whereNull(lateCol);
   };
 }
 
@@ -5565,10 +5619,10 @@ async function sendCustomerTermNotice(termOrId, daysOut, opts = {}) {
   const noticeCol = noticeColumnForDaysOut(daysOut);
   const claimCol = noticeClaimColumnForDaysOut(daysOut);
   if (!noticeCol || !claimCol) return { sent: false, reason: 'unsupported_days_out' };
-  const doneCols = noticeDoneColumns(daysOut);
 
   const refreshed = await refreshTermSnapshot(termOrId);
   const term = refreshed || (typeof termOrId === 'object' ? termOrId : null);
+  const doneCols = noticeDoneColumns(daysOut, term);
   if (!term || doneCols.some((col) => term[col])) return { sent: false, reason: term ? 'already_sent' : 'term_not_found' };
 
   const preflight = await termiteNoticePreflight(term, daysOut);
@@ -5610,14 +5664,14 @@ async function sendCustomerTermNotice(termOrId, daysOut, opts = {}) {
       await db('annual_prepay_terms')
         .where({ id: claimedTerm.id })
         .whereNull(noticeCol)
-        .where(lateTermiteSendAbsent(daysOut))
+        .where(lateTermiteSendAbsent(daysOut, claimedTerm))
         .update({
           [sentCol]: sentAt,
           [claimCol]: null,
           updated_at: sentAt,
         });
       noticeRecorded = true;
-      if (sentCol === TERMITE_LATE_NOTICE_COLUMN) await fileTermiteLateNoticeException(claimedTerm, daysOut);
+      if (sentCol === termiteLateColumnForDaysOut(daysOut)) await fileTermiteLateNoticeException(claimedTerm, daysOut);
     };
     // Email-only delivery: the witness lands only on a confirmed email send.
     const deliverByEmail = async (reason, extra = {}) => {
@@ -5677,28 +5731,185 @@ async function sendCustomerTermNotice(termOrId, daysOut, opts = {}) {
   }
 }
 
-// The 45-day termite rung's candidates. A CATCH-UP window, not an exact
-// day: every unsent termite term renewing between 31 and 45 days out. The
-// notice's witness (notice_45_sent_at) is what the renewal transition
-// requires, so a single missed cron day or a failed send must not lose it
-// for good — the next daily run sends it (still at least 30 days ahead,
-// the day before the 30-day rung takes over). Keyed on term_end: the signed
-// agreement renews on the term's end date, not on a last-visit anchor.
-async function termiteNotice45Candidates({ today = etDateString(), conn = db } = {}) {
-  const noticeCol = noticeColumnForDaysOut(TERMITE_EXTRA_NOTICE_DAYS);
-  const claimCol = noticeClaimColumnForDaysOut(TERMITE_EXTRA_NOTICE_DAYS);
+// ── Termite annual-plan notice obligations: ONE pass, both rungs ──────────
+//
+// Codex #4921 rounds 1–3 found a new edge case each round in the SAME class:
+// an exact-day or narrow-window candidate query with no durable record that
+// a notice was ever owed. r1/r2 patched the 45-day rung's own window twice;
+// r3 found the shared loop's 30-day termite branch had the identical
+// exact-day bug, PLUS the 45-day catch-up window's own day-31 cutoff still
+// dropped a final failed attempt or a term first discovered inside 30 days.
+// Rather than patch a third window, this is ONE candidate query for BOTH
+// rungs, and a rung is a candidate every day from when it opens until
+// term_end itself — not one exact day, not a bounded catch-up window — so a
+// missed cron run or a failed send is retried tomorrow, never dropped.
+//
+// A rung is DUE the day today reaches term_end minus its own threshold, and
+// stays due (retried daily) until it is recorded (on time OR late) or
+// term_end arrives. term_end > today is required — once a term reaches its
+// own term_end with an undelivered rung, termiteMissedNoticeEscalationCandidates
+// below is the safety net, not another send attempt.
+function termiteRungDue(term, daysOut, today) {
+  const doneCols = noticeDoneColumns(daysOut, term);
+  if (doneCols.some((col) => term[col])) return false;
+  const daysLeft = daysUntil(today, dateOnly(term.term_end));
+  return daysLeft != null && daysLeft <= Number(daysOut);
+}
+
+// ONE query for every termite annual-plan term with a due, unclaimed 45- or
+// 30-day rung. annual_plan_version IS NOT NULL restricts this to termite
+// terms only — no lawn/mosquito/rodent/quarterly prepay term is ever
+// considered here. term_end > today excludes a term that has already
+// reached its renewal date (the missed-notice sweep owns that case).
+async function termiteNoticeObligationCandidates({ today = etDateString(), conn = db } = {}) {
+  const staleClaimCutoff = new Date(Date.now() - NOTICE_CLAIM_TTL_MS);
+  const claim45 = noticeClaimColumnForDaysOut(TERMITE_EXTRA_NOTICE_DAYS);
+  const claim30 = noticeClaimColumnForDaysOut(30);
+  const claimAvailable = (claimCol) => function claimAvailableGroup() {
+    this.whereNull(claimCol).orWhere(claimCol, '<', staleClaimCutoff);
+  };
   return conn('annual_prepay_terms')
     .whereIn('status', ACTIVE_STATUSES)
     .whereNull('renewal_decision')
     .whereNotNull('annual_plan_version')
-    .whereNull(noticeCol)
-    .whereNull(TERMITE_LATE_NOTICE_COLUMN)
-    .where(function noticeClaimAvailable() {
-      this.whereNull(claimCol).orWhere(claimCol, '<', new Date(Date.now() - NOTICE_CLAIM_TTL_MS));
+    .where('term_end', '>', today)
+    .where(function anyRungDue() {
+      this.where(function rung45Due() {
+        this.whereNull('notice_45_sent_at')
+          .whereNull(TERMITE_LATE_NOTICE_COLUMN)
+          .where('term_end', '<=', addDaysYmd(today, TERMITE_EXTRA_NOTICE_DAYS))
+          .where(claimAvailable(claim45));
+      }).orWhere(function rung30Due() {
+        this.whereNull('notice_30_sent_at')
+          .whereNull(TERMITE_30_LATE_NOTICE_COLUMN)
+          .where('term_end', '<=', addDaysYmd(today, 30))
+          .where(claimAvailable(claim30));
+      });
     })
-    .whereBetween('term_end', [addDaysYmd(today, 31), addDaysYmd(today, TERMITE_EXTRA_NOTICE_DAYS)])
     .orderBy('term_end', 'asc')
     .select('*');
+}
+
+// Stamps the 45-day rung as missed/late WITHOUT a second customer send —
+// used only by the "both rungs due at once" case in
+// processTermiteNoticeObligations below. Same confirmed-insert-only
+// escalation as an ordinary late send (fileTermiteLateNoticeException).
+async function recordTermiteRungMissedLate(term, daysOut) {
+  const lateCol = termiteLateColumnForDaysOut(daysOut);
+  const noticeCol = noticeColumnForDaysOut(daysOut);
+  const now = new Date();
+  const [updated] = await db('annual_prepay_terms')
+    .where({ id: term.id })
+    .whereNull(noticeCol)
+    .whereNull(lateCol)
+    .update({ [lateCol]: now, updated_at: now })
+    .returning('*');
+  if (updated) await fileTermiteLateNoticeException(updated, daysOut);
+  return !!updated;
+}
+
+// One term's notice-obligation decision. At most ONE customer message per
+// run: a term first seen at <=30 days out has BOTH rungs due
+// simultaneously, and texting/emailing the same customer twice back to
+// back in one sweep (a 45-day notice immediately followed by a 30-day one)
+// is more surprising than the alternative chosen here — send the near-term
+// 30-day notice (the one that actually discloses the imminent renewal) and
+// record the 45-day rung as missed/late with its own staff escalation. The
+// 45-day promise is already unkeepable the instant both are due at once —
+// there is no "on time" version of it left to attempt — so this is the same
+// outcome a genuinely missed 45-day rung gets once day 30 arrives, just
+// recognized a few days earlier instead of silently carried forward.
+//
+// coverageAwaitsInstallation (checked here before the missed-late stamp, and
+// again inside sendCustomerTermNotice's own preflight for the rung actually
+// sent) blocks EVERY rung — an unanchored original's term_end is only a
+// provisional placeholder, so nothing about it should be recorded as missed,
+// late, or sent.
+async function processTermiteNoticeObligations(term, today) {
+  const due45 = termiteRungDue(term, TERMITE_EXTRA_NOTICE_DAYS, today);
+  const due30 = termiteRungDue(term, 30, today);
+  if (!due45 && !due30) return { sent: false, reason: 'not_due' };
+
+  if (due45 && due30) {
+    if (!coverageAwaitsInstallation(term)) await recordTermiteRungMissedLate(term, TERMITE_EXTRA_NOTICE_DAYS);
+    return sendCustomerTermNotice(term, 30);
+  }
+  if (due30) return sendCustomerTermNotice(term, 30);
+  return sendCustomerTermNotice(term, TERMITE_EXTRA_NOTICE_DAYS);
+}
+
+// Durable safety net: a termite term that has reached its OWN term_end with
+// the 45-day and/or 30-day rung never delivered at all (neither on-time nor
+// late — a rung whose daily retry never landed before the renewal date
+// arrived). notice_missed_escalated_at guards against re-filing once
+// confirmed; a failed notifyAdmin insert leaves it unset so the next sweep
+// retries (same confirmed-insert-only pattern as the late-notice escalation).
+async function termiteMissedNoticeEscalationCandidates({ today = etDateString(), conn = db } = {}) {
+  return conn('annual_prepay_terms')
+    .whereIn('status', ACTIVE_STATUSES)
+    .whereNull('renewal_decision')
+    .whereNotNull('annual_plan_version')
+    .where('term_end', '<=', today)
+    .whereNull(TERMITE_NOTICE_MISSED_ESCALATION_COLUMN)
+    .where(function anyRungMissing() {
+      this.where(function rung45Missing() {
+        this.whereNull('notice_45_sent_at').whereNull(TERMITE_LATE_NOTICE_COLUMN);
+      }).orWhere(function rung30Missing() {
+        this.whereNull('notice_30_sent_at').whereNull(TERMITE_30_LATE_NOTICE_COLUMN);
+      });
+    })
+    .select('*');
+}
+
+// Files the durable "renewal notice obligation missed" bell for a term the
+// sweep above selected, atomically deduped via notifyAdmin's own dedupeKey
+// (never a standalone SELECT — Codex #4921 r3 P1). Stamped only on a
+// confirmed (non-null) result so a transient insert failure is retried on
+// the next sweep instead of losing the escalation for good.
+async function fileTermiteMissedNoticeException(term) {
+  try {
+    const missing45 = !term.notice_45_sent_at && !term[TERMITE_LATE_NOTICE_COLUMN];
+    const missing30 = !term.notice_30_sent_at && !term[TERMITE_30_LATE_NOTICE_COLUMN];
+    const missingLabel = missing45 && missing30 ? 'its 45-day AND 30-day notices' : missing45 ? 'its 45-day notice' : 'its 30-day notice';
+    const NotificationService = require('./notification-service');
+    const result = await NotificationService.notifyAdmin(
+      'alert',
+      'Termite annual renewal notice obligation missed',
+      `Term ${term?.id} reached its renewal date (${formatDateLabel(term?.term_end)}) without ${missingLabel} ever going out. The v3 agreement's notice obligation was missed — this renewal must be handled by staff, not auto-charged.`,
+      {
+        link: term?.customer_id ? `/admin/customers/${term.customer_id}` : '/admin/dispatch',
+        bell: true,
+        dedupeKey: `termite-annual-notice:${term?.id}:missed`,
+        metadata: {
+          customerId: term?.customer_id || null,
+          annual_prepay_term_id: term?.id || null,
+          reason: 'notice_missed',
+          missing45,
+          missing30,
+        },
+      },
+    );
+    if (!result) {
+      logger.warn(`[annual-prepay] termite missed-notice admin bell insert failed for term ${term?.id}; will retry on the next sweep`);
+      return false;
+    }
+    if (term?.id) {
+      const cols = await annualPrepayColumns();
+      if (cols[TERMITE_NOTICE_MISSED_ESCALATION_COLUMN]) {
+        await db('annual_prepay_terms')
+          .where({ id: term.id })
+          .whereNull(TERMITE_NOTICE_MISSED_ESCALATION_COLUMN)
+          // Literal column name (never computed): TERMITE_NOTICE_MISSED_ESCALATION_COLUMN
+          // is a single fixed constant here, unlike lateCol/escalatedCol below
+          // which vary by rung.
+          .update({ notice_missed_escalated_at: new Date(), updated_at: new Date() });
+      }
+    }
+    return true;
+  } catch (err) {
+    logger.warn(`[annual-prepay] termite missed-notice exception failed for term ${term?.id}: ${err.message}`);
+    return false;
+  }
 }
 
 async function checkAndSend({ today = etDateString() } = {}) {
@@ -5706,38 +5917,62 @@ async function checkAndSend({ today = etDateString() } = {}) {
   await activatePaidPendingTerms();
   let sent = 0;
 
-  // Termite annual-plan terms ONLY: the extra 45-day rung, restricted to
-  // annual_plan_version IS NOT NULL so no lawn/mosquito/rodent/quarterly
-  // prepay term is ever considered here. This is a separate loop rather than
-  // folding 45 into CUSTOMER_NOTICE_DAYS so the shared loop right below stays
-  // byte-identical for every term (termite terms still get 30/15/7 there,
-  // exactly like before this change). Guarded on the claim column existing
-  // (the new migration) so a DB mid-rollback/rollout never 500s here.
+  // Termite annual-plan terms ONLY: the unified 45/30-day notice-obligation
+  // pass, restricted to annual_plan_version IS NOT NULL so no lawn/
+  // mosquito/rodent/quarterly prepay term is ever considered here. This is
+  // a separate pass rather than folding into CUSTOMER_NOTICE_DAYS so the
+  // shared loop right below stays byte-identical for every non-termite
+  // term (termite terms still get 15/7 there — see the loop's own
+  // annual_plan_version filter at daysOut===30). Guarded on every column
+  // the pass touches existing (the new migrations) so a DB mid-rollback/
+  // rollout never 500s here.
   const termCols = await annualPrepayColumns();
-  if (termCols.annual_plan_version && termCols.notice_45_sent_at && termCols.notice_45_claimed_at
-    && termCols[TERMITE_LATE_NOTICE_COLUMN]) {
-    const terms = await termiteNotice45Candidates({ today });
+  const termiteNoticeColsReady = termCols.annual_plan_version && termCols.notice_45_sent_at
+    && termCols.notice_45_claimed_at && termCols[TERMITE_LATE_NOTICE_COLUMN]
+    && termCols.notice_30_sent_at && termCols.notice_30_claimed_at && termCols[TERMITE_30_LATE_NOTICE_COLUMN];
+  if (termiteNoticeColsReady) {
+    const terms = await termiteNoticeObligationCandidates({ today });
     for (const term of terms) {
       try {
-        const result = await sendCustomerTermNotice(term, TERMITE_EXTRA_NOTICE_DAYS);
+        const result = await processTermiteNoticeObligations(term, today);
         if (result.sent) sent++;
       } catch (err) {
-        logger.error(`[annual-prepay] termite 45-day reminder failed for term ${term.id}: ${err.message}`);
+        logger.error(`[annual-prepay] termite notice-obligation pass failed for term ${term.id}: ${err.message}`);
       }
     }
 
-    // Retry every LATE 45-day notice whose admin-bell escalation never got
-    // a confirmed insert (fileTermiteLateNoticeException's notifyAdmin
-    // call returned null) — otherwise a transient notification-insert
-    // failure loses that bell for good, since notice_45_late_sent_at
-    // already blocks the send itself from ever retrying.
-    if (termCols.notice_45_late_escalated_at) {
+    // Retry every LATE 45- or 30-day notice whose admin-bell escalation
+    // never got a confirmed insert (fileTermiteLateNoticeException's
+    // notifyAdmin call returned null) — otherwise a transient
+    // notification-insert failure loses that bell for good, since each
+    // rung's own late-sent column already blocks the send itself from
+    // ever retrying.
+    if (termCols.notice_45_late_escalated_at || termCols[TERMITE_30_LATE_ESCALATION_COLUMN]) {
       const lateUnescalated = await termiteLateNoticeEscalationCandidates();
       for (const term of lateUnescalated) {
         try {
-          await fileTermiteLateNoticeException(term, TERMITE_EXTRA_NOTICE_DAYS);
+          if (term[TERMITE_LATE_NOTICE_COLUMN] && !term.notice_45_late_escalated_at) {
+            await fileTermiteLateNoticeException(term, TERMITE_EXTRA_NOTICE_DAYS);
+          }
+          if (term[TERMITE_30_LATE_NOTICE_COLUMN] && !term[TERMITE_30_LATE_ESCALATION_COLUMN]) {
+            await fileTermiteLateNoticeException(term, 30);
+          }
         } catch (err) {
           logger.error(`[annual-prepay] termite late-notice escalation retry failed for term ${term.id}: ${err.message}`);
+        }
+      }
+    }
+
+    // Terms that reached their OWN term_end with a rung never delivered at
+    // all — durable staff escalation, atomically deduped via notifyAdmin's
+    // own dedupeKey (never a standalone SELECT).
+    if (termCols[TERMITE_NOTICE_MISSED_ESCALATION_COLUMN]) {
+      const missed = await termiteMissedNoticeEscalationCandidates({ today });
+      for (const term of missed) {
+        try {
+          await fileTermiteMissedNoticeException(term);
+        } catch (err) {
+          logger.error(`[annual-prepay] termite missed-notice escalation failed for term ${term.id}: ${err.message}`);
         }
       }
     }
@@ -5764,6 +5999,13 @@ async function checkAndSend({ today = etDateString() } = {}) {
       .where(function renewalAnchorMatches() {
         this.where('term_end', target).orWhere('last_scheduled_service_date', target);
       })
+      // The 30-day rung is now owned ENTIRELY by the termite notice-
+      // obligation pass above for a termite annual-plan term (Codex #4921
+      // r3 — the exact-day-only match here was itself the r3 P1 finding:
+      // a missed cron day or a double-channel failure dropped it for
+      // good). Every non-termite term's 30/15/7 handling here is
+      // untouched; termite terms still get 15/7 from this same loop.
+      .modify((qb) => { if (daysOut === 30) qb.whereNull('annual_plan_version'); })
       .select('*');
 
     for (const term of terms) {
@@ -5771,18 +6013,7 @@ async function checkAndSend({ today = etDateString() } = {}) {
       // term end (the effective end); a term matched solely by an early
       // last-service date still reminds on term_end instead.
       const onTermEnd = dateOnly(term.term_end) === target;
-      // TERMITE annual-plan terms' 30-day rung is the exception (Codex
-      // #4921 r2 P1): it is the LAST chance before the 45-day rung's own
-      // catch-up window closes and the copy discloses a real charge date,
-      // so it must anchor on term_end ONLY — an early completed visit
-      // (last_scheduled_service_date within 120 days of term_end,
-      // isLastServiceNearTermEnd) must never stamp notice_30_sent_at ahead
-      // of the true 30-days-before-renewal point. Every other rung (15/7,
-      // any daysOut for a non-termite term) keeps the shared last-service
-      // anchor untouched — generic prepay behavior stays byte-identical.
-      if (daysOut === 30 && isTermiteAnnualPlanTerm(term)) {
-        if (!onTermEnd) continue;
-      } else if (!onTermEnd && !isLastServiceNearTermEnd(term)) continue;
+      if (!onTermEnd && !isLastServiceNearTermEnd(term)) continue;
       try {
         const result = await sendCustomerTermNotice(term, daysOut);
         if (result.sent) sent++;
@@ -6295,10 +6526,19 @@ module.exports = {
     noticeClaimColumnForDaysOut,
     isTermiteAnnualPlanTerm,
     formatCurrencyLabel,
-    termiteNotice45Candidates,
+    termiteNoticeObligationCandidates,
+    termiteRungDue,
+    processTermiteNoticeObligations,
+    termiteMissedNoticeEscalationCandidates,
+    fileTermiteMissedNoticeException,
+    termiteLateColumnForDaysOut,
+    termiteLateEscalationColumnForDaysOut,
     planPropertyForTerm,
     TERMITE_EXTRA_NOTICE_DAYS,
     TERMITE_COPY_NOTICE_DAYS,
+    TERMITE_30_LATE_NOTICE_COLUMN,
+    TERMITE_30_LATE_ESCALATION_COLUMN,
+    TERMITE_NOTICE_MISSED_ESCALATION_COLUMN,
     paymentReminderColumnForDaysOut,
     paymentReminderClaimColumnForDaysOut,
     invoiceDunningActiveToday,
