@@ -21,14 +21,14 @@ const mockDb = jest.fn((table) => mockBuilders[table]);
 jest.mock('../models/db', () => mockDb);
 
 const mockComputeConsultationSlotsForLead = jest.fn();
-// The inputs the page's booking address resolves from, fingerprinted by the
-// probe and re-read by the final check (Codex #4918 r17) — unchanged unless
-// a test moves them.
-const mockCurrentBookingAddressInputs = jest.fn();
+// What the page would do with the lead now — its lead-wide bookability and
+// the inputs its booking address resolves from — re-read by the final check
+// after the probe (Codex #4918 r17/r18); unchanged unless a test moves it.
+const mockCurrentBookingState = jest.fn();
 jest.mock('../routes/inspection-public', () => ({
   _internals: {
     computeConsultationSlotsForLead: (...args) => mockComputeConsultationSlotsForLead(...args),
-    currentBookingAddressInputs: (...args) => mockCurrentBookingAddressInputs(...args),
+    currentBookingState: (...args) => mockCurrentBookingState(...args),
   },
 }));
 
@@ -135,7 +135,10 @@ beforeEach(() => {
   mockComputeConsultationSlotsForLead.mockResolvedValue({
     ok: true, slots: [{ date: '2026-10-01', start_time: '09:00' }], needsAddress: false, address: PAGE_ADDRESS, addressInputs: 'INPUTS-A',
   });
-  mockCurrentBookingAddressInputs.mockResolvedValue('INPUTS-A');
+  // Mirrors the leads builder, so the judged lead fields agree with the final read.
+  mockCurrentBookingState.mockImplementation(async () => ({
+    lead: await mockBuilders.leads.first(), bookable: true, addressInputs: 'INPUTS-A',
+  }));
 });
 
 afterEach(() => {
@@ -458,9 +461,9 @@ describe('estimateConsultationLead context + reconfirmConsultationLead', () => {
   test('the lead\'s booking address inputs moved after the build (lead or customer address edited, customer relinked) → the reconfirm returns null (Codex #4918 r17)', async () => {
     const context = {};
     await estimateConsultationLead({ ...baseArgs(), context });
-    mockCurrentBookingAddressInputs.mockResolvedValue('INPUTS-B');
+    mockCurrentBookingState.mockResolvedValue({ lead: OPEN_RECURRING_LEAD, bookable: true, addressInputs: 'INPUTS-B' });
     expect(await reconfirmConsultationLead(context)).toBeNull();
-    expect(mockCurrentBookingAddressInputs).toHaveBeenLastCalledWith(LEAD_ID);
+    expect(mockCurrentBookingState).toHaveBeenLastCalledWith(LEAD_ID);
   });
 
   test('the estimate goes off-surface after the build → the reconfirm returns null', async () => {
@@ -476,7 +479,7 @@ describe('estimateConsultationLead context + reconfirmConsultationLead', () => {
 // re-geocoded.
 describe('buildEstimateConsultationOffer — the booking address inputs after the probe', () => {
   test('the lead\'s address (or its trusted customer\'s) moved during the probe → no offer, even though the estimate still matches the probed property', async () => {
-    mockCurrentBookingAddressInputs.mockResolvedValue('INPUTS-B');
+    mockCurrentBookingState.mockResolvedValue({ lead: OPEN_RECURRING_LEAD, bookable: true, addressInputs: 'INPUTS-B' });
     expect(await buildEstimateConsultationOffer(baseArgs())).toBeNull();
   });
 
@@ -489,5 +492,41 @@ describe('buildEstimateConsultationOffer — the booking address inputs after th
 
   test('unchanged inputs → the offer stands', async () => {
     expect((await buildEstimateConsultationOffer(baseArgs()))?.url).toContain('/inspection/');
+  });
+});
+
+// Codex #4918 r18: the page's own lead-wide state is re-judged after the
+// probe, and the contact-bearing lead read is the LAST one.
+describe('buildEstimateConsultationOffer — lead-wide state and the final lead read', () => {
+  const { estimateConsultationLead } = require('../services/estimate-consultation-offer');
+
+  test('an assessment or visit booked for the lead during the probe (the page would answer already_booked/converted) → no offer', async () => {
+    mockCurrentBookingState.mockResolvedValue({ lead: OPEN_RECURRING_LEAD, bookable: false, addressInputs: 'INPUTS-A' });
+    expect(await buildEstimateConsultationOffer(baseArgs())).toBeNull();
+  });
+
+  test('the contact-bearing lead read comes AFTER the booking-state lookup, and its row is the one returned', async () => {
+    const order = [];
+    mockCurrentBookingState.mockImplementation(async () => {
+      order.push('booking-state');
+      return { lead: OPEN_RECURRING_LEAD, bookable: true, addressInputs: 'INPUTS-A' };
+    });
+    const leadFirst = mockBuilders.leads.first;
+    mockBuilders.leads.first = jest.fn(async (...args) => { order.push('lead-read'); return leadFirst(...args); });
+    const context = {};
+    const lead = await estimateConsultationLead({ ...baseArgs(), context });
+    expect(lead).toBeTruthy();
+    expect(order[order.length - 1]).toBe('lead-read');
+    expect(order.lastIndexOf('booking-state')).toBeLessThan(order.lastIndexOf('lead-read'));
+  });
+
+  test('a lead field the checks judged moved before the final read (here: the lead converted after the refusal check passed) → fails closed', async () => {
+    mockCurrentBookingState.mockResolvedValue({ lead: OPEN_RECURRING_LEAD, bookable: true, addressInputs: 'INPUTS-A' });
+    const converted = { ...OPEN_RECURRING_LEAD, status: 'converted', converted_at: new Date('2026-09-26T12:00:00Z') };
+    let leadReads = 0;
+    // Open for the pre-probe read, converted by the final contact read.
+    mockBuilders.leads.first = jest.fn(async () => (++leadReads === 1 ? OPEN_RECURRING_LEAD : converted));
+    expect(await buildEstimateConsultationOffer(baseArgs())).toBeNull();
+    expect(leadReads).toBe(2);
   });
 });

@@ -1482,7 +1482,10 @@ change, hold, re-link or contact edit that lands during the probe omits the
 field — and so does a change to what the page's booking address resolves
 from (the lead's own address, its trusted customer's stored address or
 coordinates, or which customer that is: `inspection-public.js`
-`bookingAddressInputs`, compared, never re-geocoded).
+`bookingAddressInputs`, compared, never re-geocoded), or a booking that
+leaves the page's own lead-wide state no longer bookable (an assessment or
+visit booked meanwhile: `currentBookingState`, the same `readEligibility`
+the probe ran).
 Quote-first only: never on an estimate drafted from a visit
 (`estimate_data.scheduled_service_id`) or on a grouped estimate
 (`estimate_group_id`). Composed on the page's own first `/data` load only —

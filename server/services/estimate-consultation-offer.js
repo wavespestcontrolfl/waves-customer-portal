@@ -178,6 +178,10 @@ async function estimateConsultationLead({ estimate, estimateData, acceptActive, 
   return fresh;
 }
 
+// Lead fields the booking-state and refusal checks judge; the final
+// contact-bearing read must still carry the same values.
+const JUDGED_LEAD_FIELDS = ['phone', 'status', 'converted_at', 'customer_id', 'address', 'city', 'zip'];
+
 // The final, post-probe eligibility re-check — a fresh read of the
 // estimate and lead rows, re-judged against the same rules
 // estimateConsultationLead applies above. Kept single-sourced so a rule
@@ -202,21 +206,28 @@ async function finalEligibility(estimateId, leadId, probedAddress, probedAddress
   const freshLeadId = await linkedLeadIdFor(freshEstimate.id, freshEstimateData);
   if (!freshLeadId || String(freshLeadId).toLowerCase() !== String(leadId).toLowerCase()) return null;
 
+  // What /inspection/:token would do with this lead now (Codex #4918
+  // r17/r18): its lead-wide state must still allow a booking (an assessment
+  // or visit booked meanwhile means already_booked/converted), and what its
+  // booking address resolves from — the lead's own address, its trusted
+  // customer's, which customer that is — must be what the probe resolved
+  // from (compared, never re-geocoded). Missing probe inputs fail closed.
+  const { currentBookingState } = require('../routes/inspection-public')._internals;
+  const booking = await currentBookingState(leadId);
+  if (!booking?.bookable || !probedAddressInputs || booking.addressInputs !== probedAddressInputs) return null;
+  if (await leadLinkRefusal(booking.lead)) return null;
+
+  // The contact-bearing lead row is the LAST read (Codex #4918 r18): only
+  // synchronous checks follow it, so the caller's own-inbox judgment sees
+  // the lead as it is now. It must still be the lead the checks above
+  // judged — any field they read that moved since fails closed.
   const freshLead = await db('leads').where({ id: leadId }).whereNull('deleted_at')
-    .first('id', 'phone', 'email', 'service_interest', 'status', 'converted_at', 'customer_id');
+    .first('id', 'phone', 'email', 'service_interest', 'status', 'converted_at', 'customer_id', 'address', 'city', 'zip');
   if (!freshLead) return null;
+  if (JUDGED_LEAD_FIELDS.some((col) => JSON.stringify(freshLead[col]) !== JSON.stringify(booking.lead[col]))) return null;
   const { leadMatchesEstimateContact } = require('./lead-estimate-link');
   if (!leadMatchesEstimateContact(freshLead, freshEstimate)) return null;
-  if (await leadLinkRefusal(freshLead)) return null;
   if (!leadWantsRecurringPlan(freshLead)) return null;
-  // The booking property itself can move during the probe too (Codex #4918
-  // r17): staff editing the lead's address, or its trusted customer's, or
-  // relinking that customer, would send /inspection/:token to a property
-  // other than the one the probe resolved — even while the estimate still
-  // matches it. The inputs the page resolves its address from must be the
-  // ones the probe used; compared, never re-geocoded.
-  const { currentBookingAddressInputs } = require('../routes/inspection-public')._internals;
-  if (!probedAddressInputs || (await currentBookingAddressInputs(leadId)) !== probedAddressInputs) return null;
   return freshLead;
 }
 

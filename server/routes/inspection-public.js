@@ -597,10 +597,8 @@ function storedAddressCandidates(lead, custRow) {
 // Everything the page's own booking address resolves from when no address
 // is typed (storedCoordsResolution + storedAddressCandidates): the trusted
 // customer's identity, stored coordinates and address, and the lead's own
-// address — as one comparable string, never geocoded. The estimate
-// consultation offer re-reads it after its slot probe (Codex #4918 r17): if
-// these inputs moved, the page would now book somewhere other than the
-// property the probe resolved.
+// address — as one comparable string, never geocoded. If these inputs move,
+// the page books somewhere other than the property a probe resolved.
 function bookingAddressInputs(lead, custRow) {
   return JSON.stringify([
     custRow?.id || null, custRow?.latitude ?? null, custRow?.longitude ?? null,
@@ -610,10 +608,17 @@ function bookingAddressInputs(lead, custRow) {
   ]);
 }
 
-async function currentBookingAddressInputs(leadId) {
+// What the page would do with this lead right now, short of geocoding —
+// re-read by the estimate consultation offer after its slot probe (Codex
+// #4918 r17/r18): whether the lead-wide state still allows a booking (the
+// SAME readEligibility the probe ran — never already_booked/converted), and
+// what the booking address resolves from. `lead` is the row it judged.
+async function currentBookingState(leadId) {
   const lead = await loadLead(db, leadId);
   if (!lead) return null;
-  return bookingAddressInputs(lead, await loadTrustedCustomer(db, lead, undefined));
+  const custRow = await loadTrustedCustomer(db, lead, undefined);
+  const eligibility = await readEligibility(lead, custRow, undefined, { includeRescheduleUrl: false });
+  return { lead, bookable: eligibility.state === 'ok', addressInputs: bookingAddressInputs(lead, custRow) };
 }
 
 // Street-level geocode of one address, or null. requireInServiceArea:false —
@@ -2431,7 +2436,7 @@ router.post('/:token/waitlist', findSlotsLimiter, async (req, res, next) => {
 // automation email), not test introspection.
 router._internals = {
   computeConsultationSlotsForLead,
-  currentBookingAddressInputs,
+  currentBookingState,
   bookingAddressInputs,
 };
 

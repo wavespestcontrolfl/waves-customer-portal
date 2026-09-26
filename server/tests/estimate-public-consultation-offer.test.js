@@ -76,14 +76,14 @@ jest.mock('../config/feature-gates', () => ({
 }));
 
 const mockComputeConsultationSlotsForLead = jest.fn();
-// The inputs the page's booking address resolves from, fingerprinted by the
-// probe and re-read by the final check (Codex #4918 r17) — unchanged unless
-// a test moves them.
-const mockCurrentBookingAddressInputs = jest.fn();
+// What the page would do with the lead now — its lead-wide bookability and
+// the inputs its booking address resolves from — re-read by the final check
+// after the probe (Codex #4918 r17/r18); unchanged unless a test moves it.
+const mockCurrentBookingState = jest.fn();
 jest.mock('../routes/inspection-public', () => ({
   _internals: {
     computeConsultationSlotsForLead: (...args) => mockComputeConsultationSlotsForLead(...args),
-    currentBookingAddressInputs: (...args) => mockCurrentBookingAddressInputs(...args),
+    currentBookingState: (...args) => mockCurrentBookingState(...args),
   },
 }));
 
@@ -198,7 +198,7 @@ beforeEach(() => {
   mockComputeConsultationSlotsForLead.mockReset().mockResolvedValue({
     ok: true, slots: [{ date: '2026-10-01', start_time: '09:00' }], needsAddress: false, address: PAGE_ADDRESS, addressInputs: 'INPUTS-A',
   });
-  mockCurrentBookingAddressInputs.mockReset().mockResolvedValue('INPUTS-A');
+  mockCurrentBookingState.mockReset().mockImplementation(async () => ({ lead: dbRows.leads, bookable: true, addressInputs: 'INPUTS-A' }));
   process.env.GATE_ESTIMATE_CONSULTATION_OFFER = 'true';
   process.env.GATE_LEAD_INSPECTION_LINK = 'true';
 });

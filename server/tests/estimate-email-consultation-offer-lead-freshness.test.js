@@ -20,14 +20,14 @@ const mockDb = jest.fn((table) => mockBuilders[table]);
 jest.mock('../models/db', () => mockDb);
 
 const mockComputeConsultationSlotsForLead = jest.fn();
-// The inputs the page's booking address resolves from, fingerprinted by the
-// probe and re-read by the final check (Codex #4918 r17) — unchanged unless
-// a test moves them.
-const mockCurrentBookingAddressInputs = jest.fn();
+// What the page would do with the lead now — its lead-wide bookability and
+// the inputs its booking address resolves from — re-read by the final check
+// after the probe (Codex #4918 r17/r18); unchanged unless a test moves it.
+const mockCurrentBookingState = jest.fn();
 jest.mock('../routes/inspection-public', () => ({
   _internals: {
     computeConsultationSlotsForLead: (...args) => mockComputeConsultationSlotsForLead(...args),
-    currentBookingAddressInputs: (...args) => mockCurrentBookingAddressInputs(...args),
+    currentBookingState: (...args) => mockCurrentBookingState(...args),
   },
 }));
 
@@ -135,7 +135,7 @@ beforeEach(() => {
     address: { line1: '123 Palm Street', line2: null, city: 'Bradenton', state: 'FL', zip: '34205' },
     addressInputs: 'INPUTS-A',
   });
-  mockCurrentBookingAddressInputs.mockResolvedValue('INPUTS-A');
+  mockCurrentBookingState.mockResolvedValue({ lead: leadRow(), bookable: true, addressInputs: 'INPUTS-A' });
 });
 
 afterEach(() => {
@@ -236,9 +236,18 @@ describe('a change AFTER the probe, before the send (Codex #4918 r9/r12) — the
   });
 
   test("the lead's booking address moved between the probe and the send → \"\" (Codex #4918 r17)", async () => {
-    mockCurrentBookingAddressInputs
-      .mockResolvedValueOnce('INPUTS-A') // the probe step's own post-probe check
-      .mockResolvedValue('INPUTS-B'); // the final check before the send
+    mockCurrentBookingState
+      .mockResolvedValueOnce({ lead: leadRow(), bookable: true, addressInputs: 'INPUTS-A' }) // the probe step's own post-probe check
+      .mockResolvedValue({ lead: leadRow(), bookable: true, addressInputs: 'INPUTS-B' }); // the final check before the send
+    const { context, url } = await offerFor();
+    expect(context).not.toBeNull();
+    expect(url).toBe('');
+  });
+
+  test('an assessment or visit is booked for the lead between the probe and the send → "" (Codex #4918 r18)', async () => {
+    mockCurrentBookingState
+      .mockResolvedValueOnce({ lead: leadRow(), bookable: true, addressInputs: 'INPUTS-A' })
+      .mockResolvedValue({ lead: leadRow(), bookable: false, addressInputs: 'INPUTS-A' });
     const { context, url } = await offerFor();
     expect(context).not.toBeNull();
     expect(url).toBe('');
