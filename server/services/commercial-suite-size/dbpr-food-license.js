@@ -156,8 +156,15 @@ function parseAddressLine(line) {
   };
 }
 
+// Callers hand over designator-bearing units ("#102", "Suite 102",
+// "Unit 102", "Ste. 102") while the extract's parsed unit is the bare
+// "102" — strip the designator before comparing, or the right suite reads
+// as a different one.
+const UNIT_DESIGNATOR_RE = /^(?:suite|ste\.?|unit|apt\.?|apartment|bldg\.?|building|bay|space|#)\s*#?\s*/i;
+
 function normalizeUnitValue(value) {
-  return String(value || '').replace(/[^A-Z0-9]/gi, '').toUpperCase() || null;
+  const bare = String(value || '').trim().replace(UNIT_DESIGNATOR_RE, '');
+  return bare.replace(/[^A-Z0-9]/gi, '').toUpperCase() || null;
 }
 
 function normalizePhoneDigits(value) {

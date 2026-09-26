@@ -307,3 +307,15 @@ describe('matchDbprRow never returns another suite', () => {
     })).toBe(noUnit);
   });
 });
+
+describe('designator-bearing target units match the bare extract unit', () => {
+  const { matchDbprRow } = require('../services/commercial-suite-size/dbpr-food-license');
+  const row102 = {
+    'Location Street Address': '4400 TEST COMMONS PKWY E #102',
+    'Location Zip Code': '00000',
+    'Business Name': 'TEST TACO SHOP',
+  };
+  test.each(['Suite 102', 'Unit 102', 'Ste. 102', '#102', '102'])('%s matches the #102 license', (unit) => {
+    expect(matchDbprRow([row102], { street: '4400 Test Commons Pkwy E', unit, zip: '00000' })).toBe(row102);
+  });
+});

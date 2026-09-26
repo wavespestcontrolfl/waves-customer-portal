@@ -1735,7 +1735,13 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
       propertyType: rc?.propertyType,
       landUseDescription: rc?._parcel?.landUseDescription || rc?._raw?.landUse || null,
     });
-    if (suiteSubpremiseSignal && suitePartBuildingEvidence) {
+    // A tech-verified sqft on this address (verified overrides never
+    // expire and re-apply on every cache hit) is a field measurement of
+    // what we service here — it outranks every resolver guess, so the
+    // suite path stands down and the verified figure stays the size.
+    const sqftVerified = rc?._fieldEvidence?.squareFootage?.sourceType === 'verified'
+      || (Array.isArray(rc?._verifiedFields) && rc._verifiedFields.includes('squareFootage'));
+    if (suiteSubpremiseSignal && suitePartBuildingEvidence && !sqftVerified) {
       const commercialSuiteBuildingSqft = rc?.squareFootage || null;
       const stamp = rc?._commercialSuiteSize;
       if (stamp && Number(stamp.value) > 0) {

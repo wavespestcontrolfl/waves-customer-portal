@@ -163,3 +163,19 @@ describe('applyCommercialSuiteSize — the async resolution', () => {
     );
   });
 });
+
+describe('a tech-verified sqft outranks the suite resolver', () => {
+  test('verified squareFootage on a plaza suite: no candidate, the verified size stays the size', () => {
+    const record = plazaSuiteRecord({
+      squareFootage: 1650,
+      _verifiedFields: ['squareFootage'],
+      _fieldEvidence: {
+        propertyType: { value: 'Commercial', confidence: 'high', sourceType: 'county', fieldVerify: false, score: 100 },
+        squareFootage: { value: 1650, confidence: 'high', sourceType: 'verified' },
+      },
+    });
+    const profile = buildEnrichedProfile(record, null, 27.5, -82.45, null, null, SUITE_ADDRESS);
+    expect(profile.homeSqFt).toBe(1650);
+    expect(profile._commercialSuiteCandidate).toBeNull();
+  });
+});
