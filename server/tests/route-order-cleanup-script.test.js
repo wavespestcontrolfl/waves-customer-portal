@@ -15,7 +15,7 @@ const { wasLockSkipped } = require('../utils/cron-lock');
 const {
   buildDateRange, buildBackupRows, applyRollback, parseLedgerResult, recoveryInstruction,
   collectEntries, reportAndBackup, groupRowsByTechDay, mismatchedIdsForDay, previewRollback,
-  printRollbackPlan, printRollbackResult,
+  printRollbackPlan, printRollbackResult, buildRunOpts, writeBackupFile,
 } = require('../../scripts/route-order-cleanup');
 
 const deps = { addETDays, etDateString, parseETDateTime };
@@ -466,12 +466,43 @@ describe('collectEntries', () => {
   });
 });
 
+describe('writeBackupFile', () => {
+  let writeSpy;
+  let renameSpy;
+  beforeEach(() => {
+    writeSpy = jest.spyOn(fs, 'writeFileSync').mockImplementation(() => {});
+    renameSpy = jest.spyOn(fs, 'renameSync').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    writeSpy.mockRestore();
+    renameSpy.mockRestore();
+  });
+
+  test('writes to a .tmp sibling, then renames it into place — never writes the final path directly', () => {
+    const rows = [{ id: 'a', date: '2026-10-05', technician_id: 't1', before: 2, after: 1 }];
+    writeBackupFile('/tmp/backup.json', rows);
+    const resolved = require('path').resolve('/tmp/backup.json');
+    expect(writeSpy).toHaveBeenCalledTimes(1);
+    const [writtenPath, writtenBody] = writeSpy.mock.calls[0];
+    expect(writtenPath).toBe(`${resolved}.tmp`);
+    expect(JSON.parse(writtenBody).rows).toEqual(rows);
+    expect(renameSpy).toHaveBeenCalledWith(`${resolved}.tmp`, resolved);
+  });
+
+  test('a write failure never reaches the rename — an existing backup at the final path is untouched', () => {
+    writeSpy.mockImplementation(() => { throw new Error('disk full'); });
+    expect(() => writeBackupFile('/tmp/backup.json', [])).toThrow('disk full');
+    expect(renameSpy).not.toHaveBeenCalled();
+  });
+});
+
 describe('reportAndBackup', () => {
   let logs;
   let errors;
   let logSpy;
   let errorSpy;
   let writeSpy;
+  let renameSpy;
 
   beforeEach(() => {
     logs = [];
@@ -479,48 +510,77 @@ describe('reportAndBackup', () => {
     logSpy = jest.spyOn(console, 'log').mockImplementation((msg) => logs.push(msg));
     errorSpy = jest.spyOn(console, 'error').mockImplementation((msg) => errors.push(msg));
     writeSpy = jest.spyOn(fs, 'writeFileSync').mockImplementation(() => {});
+    renameSpy = jest.spyOn(fs, 'renameSync').mockImplementation(() => {});
   });
   afterEach(() => {
     logSpy.mockRestore();
     errorSpy.mockRestore();
     writeSpy.mockRestore();
+    renameSpy.mockRestore();
   });
 
   const entries = [{ date: '2026-10-05', technicianId: 't1', route_order_changes: [{ id: 'a', before: 2, after: 1 }] }];
 
-  test('writes the backup file when entries were read cleanly', () => {
-    reportAndBackup({ execute: true, result: { ledgerId: 'ledger-1' }, entries, error: null, outPath: '/tmp/backup.json' });
+  test('writes the backup file (via the tmp+rename path) when entries were read cleanly', () => {
+    const outcome = reportAndBackup({ execute: true, result: { ledgerId: 'ledger-1' }, entries, error: null, outPath: '/tmp/backup.json' });
+    expect(outcome).toEqual({ backupFailed: false });
     expect(writeSpy).toHaveBeenCalledTimes(1);
+    const resolved = require('path').resolve('/tmp/backup.json');
     const [writtenPath, writtenBody] = writeSpy.mock.calls[0];
-    expect(writtenPath).toBe(require('path').resolve('/tmp/backup.json'));
+    expect(writtenPath).toBe(`${resolved}.tmp`);
+    expect(renameSpy).toHaveBeenCalledWith(`${resolved}.tmp`, resolved);
     const parsed = JSON.parse(writtenBody);
     expect(parsed.rows).toEqual([{ id: 'a', date: '2026-10-05', technician_id: 't1', before: 2, after: 1 }]);
   });
 
   test('no --out path: prints the plan, never touches the filesystem', () => {
-    reportAndBackup({ execute: true, result: { ledgerId: 'ledger-1' }, entries, error: null, outPath: null });
+    const outcome = reportAndBackup({ execute: true, result: { ledgerId: 'ledger-1' }, entries, error: null, outPath: null });
+    expect(outcome).toEqual({ backupFailed: false });
     expect(writeSpy).not.toHaveBeenCalled();
     expect(logs.some((l) => /stop\(s\)/.test(l))).toBe(true);
   });
 
   test('a ledger read error refuses to write an EMPTY backup — never a silent "nothing changed" file', () => {
-    reportAndBackup({ execute: true, result: { ledgerId: 'ledger-1' }, entries: [], error: new Error('boom'), outPath: '/tmp/backup.json' });
+    const outcome = reportAndBackup({ execute: true, result: { ledgerId: 'ledger-1' }, entries: [], error: new Error('boom'), outPath: '/tmp/backup.json' });
+    expect(outcome).toEqual({ backupFailed: false });
     expect(writeSpy).not.toHaveBeenCalled();
     expect(errors.some((e) => /Refusing to write/.test(e))).toBe(true);
     expect(errors.some((e) => /ALREADY COMMITTED/.test(e) && /ledger-1/.test(e))).toBe(true);
   });
 
-  test('a filesystem write failure after a successful run still prints the ledger-id recovery instruction', () => {
+  test('a filesystem write failure after a successful run reports backupFailed AND prints the ledger-id recovery instruction', () => {
     writeSpy.mockImplementation(() => { throw new Error('EACCES: permission denied'); });
-    reportAndBackup({ execute: true, result: { ledgerId: 'ledger-1' }, entries, error: null, outPath: '/tmp/backup.json' });
+    const outcome = reportAndBackup({ execute: true, result: { ledgerId: 'ledger-1' }, entries, error: null, outPath: '/tmp/backup.json' });
+    expect(outcome).toEqual({ backupFailed: true });
     expect(errors.some((e) => /Failed to write backup file/.test(e))).toBe(true);
     expect(errors.some((e) => /ALREADY COMMITTED/.test(e) && /ledger-1/.test(e))).toBe(true);
+    // The final path was never touched — only the never-renamed .tmp file was attempted.
+    expect(renameSpy).not.toHaveBeenCalled();
   });
 
-  test('a filesystem write failure in DRY RUN does not claim writes were committed (nothing to recover)', () => {
+  test('a filesystem write failure in DRY RUN reports backupFailed but does not claim writes were committed (nothing to recover)', () => {
     writeSpy.mockImplementation(() => { throw new Error('disk full'); });
-    reportAndBackup({ execute: false, result: { ledgerId: null }, entries, error: null, outPath: '/tmp/backup.json' });
+    const outcome = reportAndBackup({ execute: false, result: { ledgerId: null }, entries, error: null, outPath: '/tmp/backup.json' });
+    expect(outcome).toEqual({ backupFailed: true });
     expect(errors.some((e) => /Failed to write backup file/.test(e))).toBe(true);
     expect(errors.some((e) => /ALREADY COMMITTED/.test(e))).toBe(false);
+  });
+});
+
+describe('buildRunOpts', () => {
+  const now = new Date('2026-09-27T04:20:00Z');
+
+  test('--execute omits `now` entirely — runRouteReorder must read the real wall clock at commit time', () => {
+    // The exact codex P1: passing a fixed `now` here would freeze BOTH the
+    // load-time freeze check and writeTechDayOrder's commit-time re-check
+    // to this one instant for the whole run, even if it takes minutes.
+    const opts = buildRunOpts({ execute: true, dates: ['2026-10-05'], now, runType: 'route_order_cleanup' });
+    expect(opts).toEqual({ canonicalizeStale: true, dates: ['2026-10-05'], dryRun: false, runType: 'route_order_cleanup' });
+    expect(opts).not.toHaveProperty('now');
+  });
+
+  test('dry run keeps `now` — nothing commits, so one consistent preview clock across the whole range is safe', () => {
+    const opts = buildRunOpts({ execute: false, dates: ['2026-10-05'], now, runType: 'route_order_cleanup' });
+    expect(opts).toEqual({ canonicalizeStale: true, dates: ['2026-10-05'], dryRun: true, runType: 'route_order_cleanup', now });
   });
 });

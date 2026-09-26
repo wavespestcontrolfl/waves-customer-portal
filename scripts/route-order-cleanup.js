@@ -108,6 +108,33 @@ function buildDateRange(from, to, { addETDays, etDateString, parseETDateTime }) 
   return { error: `--from/--to spans more than 60 days (${from}..${to}) — narrow the range.` };
 }
 
+/**
+ * The exact opts object passed to runRouteReorder for the forward
+ * (non-rollback) run. `now` is threaded through ONLY for a dry run:
+ * runRouteReorder's own opts.now, when set, pins BOTH the load-time freeze
+ * check AND the commit-time re-check (writeTechDayOrder's `commitNow =
+ * opts.now || new Date()`) to that ONE instant for the run's ENTIRE
+ * duration — a live --execute run can take minutes (Google Maps calls, DB
+ * round trips across many dates), so a tech-day that crosses the 72h
+ * freeze boundary WHILE the script is still working through an earlier
+ * date would still pass its commit-time re-check under the stale clock and
+ * get WRITTEN after it should have frozen (codex pre-push P1). Omitting
+ * `now` for --execute lets every internal `opts.now || new Date()` read
+ * the REAL wall clock fresh at each check, exactly like the nightly cron.
+ * A dry run never commits anything (writeTechDayOrder is never called), so
+ * pinning its clock is safe and keeps one consistent preview across the
+ * whole date range.
+ */
+function buildRunOpts({ execute, dates, now, runType }) {
+  return {
+    canonicalizeStale: true,
+    dates,
+    dryRun: !execute,
+    runType,
+    ...(execute ? {} : { now }),
+  };
+}
+
 /** Flatten runRouteReorder's per-tech-day entries (the dry-run `plan` array,
  *  or reorder rows read back from the ledger after --execute) into the
  *  backup file's per-ROW shape: {id, date, technician_id, before, after}.
@@ -355,11 +382,26 @@ async function collectEntries(db, execute, result) {
   return { entries, error: null };
 }
 
+/** Writes the backup JSON to a `.tmp` sibling first, then renames it into
+ *  place — a POSIX rename is atomic, so a write that fails partway (or the
+ *  process dying mid-write) never touches an EXISTING backup file at
+ *  `outPath`; the old file survives untouched either way. */
+function writeBackupFile(outPath, rows) {
+  const resolved = path.resolve(outPath);
+  const tmpPath = `${resolved}.tmp`;
+  fs.writeFileSync(tmpPath, JSON.stringify({ generated_at: new Date().toISOString(), rows }, null, 2));
+  fs.renameSync(tmpPath, resolved);
+}
+
 /** Prints the plan and (with --out) writes the backup file — or, on any
  *  failure at this stage, prints recoveryInstruction instead of leaving the
  *  operator to guess whether an --execute run's writes are backed up.
  *  Never writes an empty/partial backup file after a read failure — that
- *  would look like a clean "nothing changed" file instead of a missing one. */
+ *  would look like a clean "nothing changed" file instead of a missing one.
+ *  Returns `{ backupFailed }` so the caller can exit nonzero when a
+ *  --execute run's writes committed but the backup that was supposed to
+ *  protect them could not be written (codex pre-push P1: this used to be
+ *  swallowed here and the process exited 0). */
 function reportAndBackup({ execute, result, entries, error, outPath }) {
   if (error) {
     console.error(`Could not read back the ledger row for reporting/backup (${error.message}).`);
@@ -367,18 +409,20 @@ function reportAndBackup({ execute, result, entries, error, outPath }) {
   } else {
     printPlan(entries);
   }
-  if (!outPath) return;
+  if (!outPath) return { backupFailed: false };
   if (error) {
     console.error(`Refusing to write ${outPath} — the ledger could not be read back (see above). ${recoveryInstruction(result.ledgerId)}`);
-    return;
+    return { backupFailed: false };
   }
   try {
     const rows = buildBackupRows(entries);
-    fs.writeFileSync(path.resolve(outPath), JSON.stringify({ generated_at: new Date().toISOString(), rows }, null, 2));
+    writeBackupFile(outPath, rows);
     console.log(`\nWrote ${rows.length} row(s) to ${outPath}.`);
+    return { backupFailed: false };
   } catch (err) {
     console.error(`Failed to write backup file ${outPath}: ${err.message}`);
     if (execute) console.error(recoveryInstruction(result.ledgerId));
+    return { backupFailed: true };
   }
 }
 
@@ -431,9 +475,9 @@ async function main() {
   console.log(`${EXECUTE ? 'EXECUTING' : 'DRY RUN'} — route-order cleanup ${from}..${to} (${range.dates.length} day${range.dates.length === 1 ? '' : 's'})\n`);
 
   const { runRouteReorder } = require('../server/services/route-reorder');
-  const lockResult = await runExclusive('auto-dispatch-recurring', () => runRouteReorder({
-    canonicalizeStale: true, dates: range.dates, dryRun: !EXECUTE, runType: 'route_order_cleanup', now,
-  }), { recordHealth: false, waitForSlot: false });
+  const runOpts = buildRunOpts({ execute: EXECUTE, dates: range.dates, now, runType: 'route_order_cleanup' });
+  const lockResult = await runExclusive('auto-dispatch-recurring', () => runRouteReorder(runOpts),
+    { recordHealth: false, waitForSlot: false });
 
   // wasLockSkipped, not a bare `lockResult.skipped` truthiness check: a
   // SUCCESSFUL --execute run's own return carries `skipped` as a NUMBER
@@ -459,13 +503,16 @@ async function main() {
   // from here is reporting/backup only, and collectEntries/reportAndBackup
   // never let a failure in it look like the writes themselves were lost.
   const { entries, error: reportError } = await collectEntries(db, EXECUTE, result);
-  reportAndBackup({ execute: EXECUTE, result, entries, error: reportError, outPath: OUT_PATH });
+  const { backupFailed } = reportAndBackup({ execute: EXECUTE, result, entries, error: reportError, outPath: OUT_PATH });
   if (!EXECUTE) {
     console.log('\nDry run only — nothing was written. Pass --execute to commit.');
   }
 
   await db.destroy();
-  if (reportError && EXECUTE) process.exitCode = 1;
+  // A --execute run's writes already committed by this point — a lost
+  // backup (ledger unreadable, or the backup file itself failed to write)
+  // must never exit 0 (codex pre-push P1).
+  if ((reportError || backupFailed) && EXECUTE) process.exitCode = 1;
 }
 
 // require.main guard: lets route-order-cleanup.test.js require this file to
@@ -484,4 +531,5 @@ if (require.main === module) {
 module.exports = {
   buildDateRange, buildBackupRows, applyRollback, parseLedgerResult, recoveryInstruction, collectEntries, reportAndBackup,
   groupRowsByTechDay, mismatchedIdsForDay, previewRollback, printRollbackPlan, printRollbackResult,
+  buildRunOpts, writeBackupFile,
 };
