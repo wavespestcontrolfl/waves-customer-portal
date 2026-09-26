@@ -115,13 +115,14 @@ const STATED_TIMING = new RegExp([
   // words, so they count only after a day preposition (Codex #4816 r21).
   String.raw`\b(?:mon|tue|tues|thu|thur|thurs|fri)\b`,
   String.raw`\b(?:on|by|next|this|til|till|until|before|after) (?:wed|sat|sun)\b`,
-  // Any relative offset, every unit and its abbreviations ("in 30 min",
-  // "within 2 hrs", "half an hour", "45mins"), and vague near-term phrasing
-  // ("in a bit", "in a few", "later") — Codex #4816 r25 closes the family
-  // rather than one unit at a time.
+  // Any relative offset introduced as one, every unit and its abbreviations
+  // ("in 30 min", "within 2 hrs", "in half an hour", "give me 20 mins"), and
+  // "in a bit" / "in a few" — Codex #4816 r25 closes the family rather than
+  // one unit at a time. Bare "later", "shortly" or "2 hours" are left out:
+  // an undated row never bells, so a false match would drop a real
+  // follow-up, while a vague "later" only makes the default bell early.
   String.raw`\b(?:in|within|after|give me|about|like) (?:(?:${COUNT}|half an?|an?(?: half)?|\d+(?:\.\d+)?)\s*(?:-|to|or)?\s*(?:\d+\s*)?)(?:secs?|seconds?|mins?|minutes?|hrs?|hours?|days?|weeks?|wks?|months?)\b`,
-  String.raw`\b\d+(?:\.\d+)?\s*(?:mins?|minutes?|hrs?|hours?)\b|\bhalf (?:an|a) hour\b`,
-  String.raw`\b(?:in|after) (?:a (?:bit|few|while|sec|second|minute|moment)|a little (?:bit|while)|a few)\b|\b(?:later(?: on)?|shortly)\b`,
+  String.raw`\b(?:in|after) (?:a (?:bit|few|while|sec|second|minute|moment)|a little (?:bit|while)|a few)\b`,
   String.raw`\b(?:mid|early|late)[- ]?(?:${MONTH}\b|next (?:week|month)\b)`,
   String.raw`\b${MONTH}\.? ?(?:${ORDINAL_DAY}|\d{1,2})\b`,
   String.raw`\b(?:${ORDINAL_DAY}|\d{1,2}) (?:of )?${MONTH}\b`,
@@ -813,11 +814,13 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
     if (result.closed) counts.fulfilled += 1;
     // Stamped only after the row is handled: an error above, or a deferred
     // close, leaves its event pending for the next tick.
+    // Only while the row is still open and untouched by staff: a human
+    // closure or correction in between wins.
     if (seenThrough.has(row.id)) {
       const { at, customerId } = seenThrough.get(row.id);
-      await conn('call_commitments').where({ id: row.id }).update({ sms_context: result.outcome === 'deferred'
+      await conn('call_commitments').where({ id: row.id, status: 'open' }).whereNull('human_state').update({ sms_context: result.outcome === 'deferred'
         ? conn.raw("jsonb_set(COALESCE(sms_context, '{}'::jsonb), '{event_attempted_at}', to_jsonb(?::text))", [now.toISOString()])
-        : conn.raw("COALESCE(sms_context, '{}'::jsonb) || jsonb_build_object('event_seen_at', ?::text, 'event_seen_customer_id', ?::text)", [at, customerId]) });
+        : conn.raw("(COALESCE(sms_context, '{}'::jsonb) - 'event_attempted_at') || jsonb_build_object('event_seen_at', ?::text, 'event_seen_customer_id', ?::text)", [at, customerId]) });
     }
   }
   for (const { cursorKey, rows: pageRows } of pages) {
