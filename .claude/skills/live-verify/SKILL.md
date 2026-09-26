@@ -27,9 +27,11 @@ one. Merge gates are unchanged until then.
 - **Brief.** PR number, head SHA, the PR body's review map, and the
   intended behavior in plain words. Derive what to test from the diff too;
   do not take the PR body's account on trust.
-- **When.** Once the head is code-ready, before the first `@codex` tag. A
-  later run is needed only when the patch-id changed (§Patch-id), and only
-  for the scenarios whose files changed.
+- **When (during the trial).** On the exact head SHA that Codex round 1
+  reviewed, before anything from that round is fixed, so both auditors
+  judge the same patch and "caught beyond Codex" is measurable. A later run
+  is needed only when the patch-id changed (§Patch-id), and only for the
+  scenarios whose files changed.
 - **Scope.** The verifier writes only under `.tmp/`. It never edits
   source, commits, pushes, comments on the PR, or tags Codex. The owning
   session posts the verdict file unedited.
@@ -50,6 +52,16 @@ one. Merge gates are unchanged until then.
   runner, server code can read the checkout's `.env`, which may point at
   production. Talking to the managed stack over HTTP (a browser, `curl`) is
   fine.
+- **Clean starting environment.** Some managed entry points import server
+  modules in their own process before they build the child environment
+  (`scripts/qa/e2e.js` does), so the verifier's shell and worktree must
+  already be clean. Before the first command, both of these must print
+  nothing. If either does, stop and report `BLOCKED`:
+
+  ```sh
+  ls .env server/.env 2>/dev/null
+  env | grep -E '^(DATABASE_URL|GATE_[A-Z0-9_]+|[A-Z0-9_]*(KEY|SECRET|TOKEN|PASSWORD|AUTH)[A-Z0-9_]*)=' | cut -d= -f1
+  ```
 - Only a verified dev/preview cluster, per `docs/development.md` §Dev
   database. Never production.
 - Never a real customer's record (CLAUDE.md rule 13) and never a customer
@@ -74,10 +86,10 @@ one. Merge gates are unchanged until then.
 
 | Change touches | Drive it with | Proof to capture |
 |---|---|---|
-| Admin page | the matching `scripts/qa/admin-*` harness; if none covers the change, the page on the rung-1 stack via `ui-verify` | 1440 and 390 screenshots of the changed state and the changed interaction's result |
+| Admin page | the matching `scripts/qa/admin-*` harness (`admin-inventory-foundation.cjs` does not start its own client: run `dev:managed-client` and pass its URL as `ADMIN_UI_PREVIEW_URL`); if none covers the change, the page on the rung-1 stack via `ui-verify` | 1440 and 390 screenshots of the changed state and the changed interaction's result |
 | Customer portal, secure appointment, service report, track, schedule | `qa:previews` and its `preview-*.html` entries; rung 1 via `qa:e2e` | same, both widths |
 | Estimate page | `audit:estimate-previews`, `estimate-foundation.cjs`; rung 1 for acceptance | screenshots or PDF. Never click frequency tabs on a real estimate |
-| Tech portal | `tech-foundation.cjs`, `field-team.cjs` | 390 screenshots, interaction result |
+| Tech portal | `tech-foundation.cjs` (rung 2, screenshots); `field-team.cjs` is a rung-1 database harness that needs the rung-1 setup | 390 screenshots from `tech-foundation.cjs`; `field-team.cjs` results as database evidence |
 | Server route reachable over HTTP | rung 1: call it on the managed stack as a seeded user | request, response, and the changed state read back over HTTP |
 | Migration | `dev:migrate` on this worktree's QA database, then rung 1 | the behavior that depends on it; a second `dev:migrate` is a no-op |
 
@@ -113,13 +125,19 @@ capability, record "not on base" and verify the end state instead.
 Right after each base run, including a failed one, copy its non-secret
 evidence (screenshots, traces, `report.json`; never `fixture.json` or other
 credential files) into `.tmp/live-verify/<head-sha>/base/` in the head
-worktree, then run `npm run qa:cleanup` and `npm run worktree:stop` in the
-base worktree. Keep the base worktree between runs: it holds the context
+worktree. Then, in the base worktree, run `npm run qa:cleanup` only if
+that run seeded a fixture, and `npm run worktree:stop` only if it started
+the managed runner. Keep the base worktree between runs: it holds the context
 and private QA database that `qa:cleanup` deliberately retains. A later run
 moves it with `git -C .tmp/live-verify/base checkout --detach <new
-merge-base>` and runs `npm ci` there only if the lockfile changed. Removing
-it and recreating it would provision a second database and orphan the
-first.
+merge-base>` and runs `npm ci` there only if the lockfile changed, but only
+when the old merge-base is an ancestor of the new one
+(`git merge-base --is-ancestor <old> <new>`), so the retained database only
+ever gains migrations. Otherwise (another PR, a rebased stack parent) use a
+new path `.tmp/live-verify/base-<pr>-<short-sha>` with its own database,
+and name the superseded worktree and database in the verdict's notes for
+cleanup. Removing and recreating the same path would provision a second
+database and orphan the first without a record.
 
 ## Patch-id
 
@@ -152,12 +170,14 @@ Head `<sha>` · patch-id `<id>` · verifier `<agent / model>`, did not write thi
 
 **Notes:** one line each, with file:line and how to reproduce.
 **Not exercised:** the path and why (including "out of trial scope").
-**Caught beyond Codex:** yes or no. If yes, what, and which Codex round missed it.
+**Caught beyond Codex:** yes or no, against Codex round 1 on this same SHA. If yes, what.
 ```
 
-- **PASS.** Every in-scope scenario from the review map behaved as
-  intended, and the regression lane shows the change.
-- **PASS+NOTES.** It works. Handle each note like a Codex P2.
+- **PASS.** Every in-scope scenario from the review map ran and behaved
+  as intended, and the regression lane shows the change.
+- **PASS+NOTES.** It works, with notes, or some in-scope scenarios could
+  not run. List each one under `Not exercised`. Never mark partial coverage
+  `PASS`. Handle each note like a Codex P2.
 - **FAIL.** A scenario misbehaved. Fix it with a red-first test covering
   every site of the same defect. The new head gets a fresh verdict. A note
   that describes a defect is a FAIL.
