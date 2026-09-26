@@ -72,6 +72,12 @@ const FAQ_PRICE =
 // — so it stays safe for termite/commercial/bundle recipients. Any future
 // re-cut that adds recurring-terms claims to the app tour must move it
 // behind per-pack gating like the report tours.
+//
+// RETIRED from emails 2026-09-26: the report tours say "90-day money-back
+// guarantee" on camera, and the owner removed that promise. The per-pack
+// `video` config stays so a re-cut without the 90-day claim can be switched
+// back on here; until then every pack emits empty slots and the module drops.
+const REPORT_TOUR_VIDEOS_LIVE = false;
 const VIDEO_BASE = 'https://portal.wavespestcontrol.com/app-email/videos';
 
 // smsHook completes the phrase "your Waves {smsHook}" so brand
@@ -306,6 +312,7 @@ function packForEstimate(estimate) {
  */
 function followupEmailVars(estimate) {
   const pack = packForEstimate(estimate);
+  const video = REPORT_TOUR_VIDEOS_LIVE ? pack.video : null;
   return {
     service_label: pack.label,
     category_headline: pack.headline,
@@ -318,11 +325,12 @@ function followupEmailVars(estimate) {
     faq_terms: pack.faq.terms,
     faq_between_visits: pack.faq.betweenVisits,
     faq_price: pack.faq.price,
-    // Video slots are empty strings off-scope — the email image/small_note
-    // blocks drop on blank src/content, so the module vanishes cleanly.
-    report_video_preview: pack.video ? `${VIDEO_BASE}/waves-${pack.video.slug}-tour-preview.gif` : '',
-    report_video_url: pack.video ? `${VIDEO_BASE}/waves-${pack.video.slug}-tour.mp4` : '',
-    report_video_caption: pack.video ? pack.video.caption : '',
+    // Video slots are empty strings off-scope (or while the tours are
+    // retired) — the email image/small_note blocks drop on blank
+    // src/content, so the module vanishes cleanly.
+    report_video_preview: video ? `${VIDEO_BASE}/waves-${video.slug}-tour-preview.gif` : '',
+    report_video_url: video ? `${VIDEO_BASE}/waves-${video.slug}-tour.mp4` : '',
+    report_video_caption: video ? video.caption : '',
   };
 }
 
@@ -338,5 +346,5 @@ module.exports = {
   copyCategoryForEstimate,
   followupEmailVars,
   followupSmsHook,
-  _private: { PACKS, RECURRING_TERMS_BENEFIT, NEUTRAL_BENEFIT },
+  _private: { PACKS, RECURRING_TERMS_BENEFIT, NEUTRAL_BENEFIT, REPORT_TOUR_VIDEOS_LIVE },
 };
