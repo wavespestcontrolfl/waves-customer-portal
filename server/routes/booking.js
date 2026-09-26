@@ -148,7 +148,7 @@ const {
 } = require('../services/scheduling/customer-windows');
 const { violatesSelfServeNotice } = require('../services/scheduling/self-serve-notice');
 const { selfBookDayCapEnabled, reserviceRankAfterNewLive } = require('../config/feature-gates');
-const { etDateString, addETDays, etParts } = require('../utils/datetime-et');
+const { etDateString, addETDays, addETBusinessDays } = require('../utils/datetime-et');
 const TwilioService = require('../services/twilio');
 const { applyContactNormalization } = require('../utils/intake-normalize');
 const { normalizeUnitLine, unitLineValueKey, splitStreetLineUnit, parseRawAddress } = require('../utils/address-normalizer');
@@ -334,19 +334,57 @@ function reserviceAdjustedScore(candidate) {
   return base + emptyDayPenalty + idlePenalty;
 }
 
+// Effective stops_that_day for the re-service ranking penalty ONLY (never
+// the packed-ends fan-out above, which reads slot.stops_that_day directly
+// and is unaffected). Under GATE_SCHEDULING_CAPACITY, find-time's own
+// stops_that_day (fit.arrivals.length - 1, find-time.js) counts only the
+// SELECTED technician's own assigned stops — an unassigned committed visit
+// is a real fixed blocker on every technician's route (find-time.js's
+// capacityGapNeighbours) but never appears in fit.arrivals, so a tech-day
+// whose sole visit is unassigned reads as empty and would wrongly eat the
+// 240-minute penalty. occupiedByDate is GLOBAL (every technician +
+// unassigned + live holds — scheduling/occupancy.js's listOccupiedWindows,
+// already loaded above for the overlap/idle checks) — any non-hold row for
+// this date means it genuinely is not empty. A mere reservation hold (no
+// customer yet) does not count as a committed visit.
+function reserviceStopsThatDay(occupiedByDate, date, rawStopsThatDay) {
+  const raw = rawStopsThatDay || 0;
+  if (raw > 0) return raw;
+  const rows = occupiedByDate ? (occupiedByDate.get(date) || []) : [];
+  return rows.some((row) => !row.hold) ? 1 : 0;
+}
+
 // The ET calendar date that is `businessDays` business days (Mon-Fri) after
-// `today` — the re-service latency guard's horizon. Counts from the NEXT
-// calendar day, since the earliest offerable slot is already at least one
-// day out (booking_config advance_days_min).
+// `today` — the re-service latency guard's horizon. Thin wrapper over the
+// shared addETBusinessDays (server/utils/datetime-et.js, also used by
+// routes/stripe-webhook.js's ACH "expected to clear" date) — this module
+// needs the calendar-date STRING to compare against candidates' `.date`.
 function businessDayHorizonEnd(today, businessDays) {
-  let cursor = today;
-  let counted = 0;
-  while (counted < businessDays) {
-    cursor = addETDays(cursor, 1);
-    const dow = etParts(cursor).dayOfWeek; // 0=Sun..6=Sat
-    if (dow !== 0 && dow !== 6) counted += 1;
-  }
-  return etDateString(cursor);
+  return etDateString(addETBusinessDays(today, businessDays));
+}
+
+// curateSlots' latencyCutoffDate guard only guarantees the near-term slot a
+// SEAT among the (up to 4) curated picks — but the client's own picker
+// (PickerBestTimes, client/src/components/booking/SchedulePicker.jsx)
+// re-sorts those picks by `rank` and shows only the best 3. A within-horizon
+// pick whose adjusted rank is still numerically worse than the other three
+// therefore never actually reaches the customer, silently defeating the
+// guard (Codex r1 P1 on #4926). Promote it into the top 3 by swapping ranks
+// with whichever pick currently HOLDS the 3rd-best rank — is_best_fit and
+// `days` recompute from these SAME candidate objects (by reference), so
+// both stay consistent with the promotion. A no-op when the protected pick
+// is already in the top 3, or when there is nothing to protect.
+function promoteLatencyPickRank(curatedSlots, latencyCutoffDate) {
+  if (!latencyCutoffDate || curatedSlots.length < 4) return;
+  const inHorizon = curatedSlots.filter((s) => s.date <= latencyCutoffDate);
+  if (!inHorizon.length) return;
+  const protectedPick = inHorizon.reduce((best, s) => (best == null || s.rank < best.rank ? s : best), null);
+  const byRank = [...curatedSlots].sort((a, b) => a.rank - b.rank);
+  if (byRank.indexOf(protectedPick) < 3) return;
+  const thirdBest = byRank[2];
+  const swap = protectedPick.rank;
+  protectedPick.rank = thirdBest.rank;
+  thirdBest.rank = swap;
 }
 
 function fallbackZoneCenter(city) {
@@ -1456,10 +1494,10 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
       idle_minutes: idleMinutes,
       // Carried for the re-service rank profile's empty-day penalty
       // (reserviceAdjustedScore) — otherwise unused by any other caller.
-      // No `|| 0` fallback here (reserviceAdjustedScore's own read already
-      // treats a missing value as 0) — addCandidate is already at the
-      // complexity ceiling and this field adds no branching either way.
-      stops_that_day: slot.stops_that_day,
+      // reserviceStopsThatDay corrects for capacity mode's per-technician
+      // blind spot (see its own doc comment); a single function call adds
+      // no branching to this already-at-ceiling function.
+      stops_that_day: reserviceStopsThatDay(occupiedByDate, slot.date, slot.stops_that_day),
       startTime24: startTime,
       endTime24: fmt(endMin),
       start: minToTime12(startMin),
@@ -1543,6 +1581,7 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     ? { latencyCutoffDate: businessDayHorizonEnd(today, RESERVICE_LATENCY_BUSINESS_DAYS) }
     : {};
   const curatedSlots = curateSlots(candidates, today, curateOpts);
+  if (reserviceRankActive) promoteLatencyPickRank(curatedSlots, curateOpts.latencyCutoffDate);
   if (rankProfile) {
     logger.info(`[booking] availability rank_profile=${rankProfile} active=${reserviceRankActive} total_feasible=${result.total_feasible || 0} before=${JSON.stringify(reserviceBeforeDates)} after=${JSON.stringify(curatedSlots.map((s) => s.date))}`);
   }
@@ -6061,6 +6100,8 @@ module.exports._internals = {
   compareRankedSlots,
   curateSlots,
   reserviceAdjustedScore,
+  reserviceStopsThatDay,
+  promoteLatencyPickRank,
   businessDayHorizonEnd,
   RESERVICE_EMPTY_DAY_PENALTY_MINUTES,
   RESERVICE_IDLE_WEIGHT,
