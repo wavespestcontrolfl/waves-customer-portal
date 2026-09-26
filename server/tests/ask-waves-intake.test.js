@@ -900,6 +900,17 @@ describe('normalizeIntakeResult', () => {
     expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
   });
 
+  test('an emergency in the active message keeps earlier ingestion evidence (Poison Control line)', () => {
+    const out = normalizeIntakeResult(
+      { reply: 'It is completely safe.', intent: 'question', service_keys: [], ready_for_quote: false },
+      'openai',
+      'My son swallowed some bait\nNow he cannot breathe',
+      'Now he cannot breathe',
+    );
+    expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
+    expect(out.reply).toContain('1-800-222-1222');
+  });
+
   test('a vague "now" is not a follow-up to an old emergency', () => {
     const out = normalizeIntakeResult(
       { reply: 'Service is $50 a month.', intent: 'quote', service_keys: [], ready_for_quote: true },

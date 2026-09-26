@@ -538,7 +538,10 @@ const REVIEWED_REPLIES = new Set([
 const FOLLOW_UP_RE = /\b(?:what\s+should\s+(?:he|she|they)\s+do|is\s+(?:this|that|it)\s+(?:serious|dangerous|bad|normal|an\s+emergency)|could\s+(?:this|that|it)\s+(?:get|be)\s+(?:worse|serious|dangerous)|will\s+(?:he|she|they|it)\s+be\s+(?:ok|okay|fine|alright)|should\s+(?:i|we|he|she)\s+(?:be\s+worried|worry)|how\s+(?:serious|bad)\s+is|(?:es|ser[aá])\s+(?:grave|serio|peligroso)|se\s+pondr[aá]\s+peor|qu[eé]\s+(?:debe|deber[ií]a)\s+hacer|what\s+(?:should|do|can)\s+(?:i|we)\s+do|what\s+now|now\s+what|still\s+(?:swell\w*|itch\w*|hurt\w*|red|sick|vomit\w*|not)|(?:getting|got)\s+worse|(?:is|are)\s+(?:he|she|they|it)\s+(?:ok|okay|going\s+to\s+be)|(?:he|she|they)(?:'s|'re|\s+is|\s+are)\s+(?:still|getting|now)|help\s+(?:him|her|them|me|us)|need\s+help|should\s+(?:i|we)\s+(?:go|call|take)|qu[eé]\s+(?:hago|hacemos|debo\s+hacer)|todav[ií]a\s+(?:tiene|est[aá])|(?:est[aá]|se\s+puso)\s+peor|sigue\s+(?:hinchad\w*|mal|con))(?![a-zñáéíóú])/i;
 function emergencyContextOf(contextText, activeMessage) {
   if (activeMessage === contextText) return contextText;
-  if (looksLikeEmergency(foldTypography(activeMessage))) return activeMessage;
+  // An emergency in the active message fires the script either way; reading
+  // the history too keeps earlier ingestion / pet evidence (Poison Control and
+  // veterinary lines) — it can only add guidance, never remove it.
+  if (looksLikeEmergency(foldTypography(activeMessage))) return contextText;
   return FOLLOW_UP_RE.test(activeMessage) ? contextText : activeMessage;
 }
 
