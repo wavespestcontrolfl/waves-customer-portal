@@ -730,11 +730,19 @@ describe('invoice SMS provider handoff', () => {
         billingDeliveryCategory: 'invoice',
         notificationEventKey: 'invoice:inv-1:sent',
         hasEmailLeg: true,
+        // Codex #4963 round 4 P2: Email is also carried in replaySkipChannels
+        // now (not just hasEmailLeg) — the generalized "already-delivered
+        // channels" marker billing-channel-routing.js's selectedLegs reads.
+        replaySkipChannels: ['email'],
         original_block_code: 'BILLING_CHANNEL_FAILED',
         replay_purpose: 'payment_link',
         refresh_customer_phone: true,
         resolve_from_by_customer: true,
       });
+      // Text is the only channel still owed — persisted so a later replay
+      // finalize (finding C) knows which timestamp to stamp.
+      expect(meta.pending_channels).toEqual(['sms']);
+      expect(meta.partial_fanout_retry).toBe(true);
       // A phoned row never carries the phone-less replay marker.
       expect(meta.requires_registered_dispatch).toBeUndefined();
       // No explicit nextAllowedAt on a plain retryable — falls back to the
@@ -855,6 +863,79 @@ describe('invoice SMS provider handoff', () => {
       const dispatch = jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted' }));
       sendCustomerMessage.mockImplementation(async ({ withProviderHandoff }) => withProviderHandoff(dispatch));
       withInvoiceDepositSettlement.mockImplementation(async (_invoiceId, callback) => callback(db, invoice));
+
+      const result = await InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' });
+      expect(result).toMatchObject({ sent: true });
+      expect(result.pendingChannel).toBeUndefined();
+      expect(smsLogInserts).toHaveLength(0);
+    });
+  });
+
+  // Codex #4963 round 4 P2 (finding B): billingDispatchOutcome
+  // (billing-channel-routing.js) picks an ACCEPTED Text as the
+  // representative outcome over a still-retrying Email — sendResult.sent
+  // comes back TRUE even though Email is still pending, which used to zero
+  // out pendingLegs entirely (gated on `!sendResult.sent`) and silently drop
+  // the Email retry. Gate on "any leg accepted and any leg isn't" instead.
+  // Finding C: persist which channel(s) are still owed (pending_channels +
+  // partial_fanout_retry) and which already delivered (replaySkipChannels)
+  // so a Text has no dedupe of its own to fall back on.
+  describe('Codex #4963 round 4: an accepted Text representative outcome still surfaces and queues a pending Email leg', () => {
+    function invoiceQueryDb({ smsLogInserts } = {}) {
+      return {
+        mock: (table) => {
+          if (table === 'invoices') return query({ first: invoiceReads.shift() || invoice });
+          if (table === 'customers') return query({ first: { id: 'cust-1', first_name: 'Pat', phone: '+19415550101' } });
+          if (table === 'activity_log') return query();
+          if (table === 'sms_log') {
+            const q = query({ returning: [] });
+            if (smsLogInserts) q.insert = jest.fn((row) => { smsLogInserts.push(row); return q; });
+            return q;
+          }
+          throw new Error(`Unexpected table: ${table}`);
+        },
+      };
+    }
+
+    test('Email retryable + Text accepted (sendResult.sent: true): the Email leg still surfaces and queues, with replaySkipChannels [\'sms\'] and no hasEmailLeg', async () => {
+      const smsLogInserts = [];
+      const { mock } = invoiceQueryDb({ smsLogInserts });
+      db.mockImplementation(mock);
+      // Mirrors billingDispatchOutcome's actual shape for this scenario: the
+      // accepted Text wins as the representative outcome (sent:true), never
+      // surfacing the still-pending Email at the top level.
+      sendCustomerMessage.mockImplementation(async () => ({
+        sent: true, deliveryOutcome: 'accepted', channel: 'sms',
+        channelResults: {
+          email: { sent: false, blocked: false, deliveryOutcome: 'not_sent',
+            code: 'BILLING_CHANNEL_FAILED', reason: 'provider timeout', retryable: true },
+          sms: { sent: true, deliveryOutcome: 'accepted' },
+        },
+      }));
+
+      const result = await InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' });
+      expect(result).toMatchObject({
+        sent: true, pendingChannel: 'email', pendingChannelCode: 'BILLING_CHANNEL_FAILED', pendingChannelQueued: true,
+      });
+      expect(smsLogInserts).toHaveLength(1);
+      const meta = JSON.parse(smsLogInserts[0].metadata);
+      expect(meta.hasEmailLeg).toBeUndefined();
+      expect(meta.replaySkipChannels).toEqual(['sms']);
+      expect(meta.pending_channels).toEqual(['email']);
+      expect(meta.partial_fanout_retry).toBe(true);
+    });
+
+    test('every leg accepted: pendingLegs stays empty regardless of the sendResult.sent gate removal', async () => {
+      const smsLogInserts = [];
+      const { mock } = invoiceQueryDb({ smsLogInserts });
+      db.mockImplementation(mock);
+      sendCustomerMessage.mockImplementation(async () => ({
+        sent: true, deliveryOutcome: 'accepted',
+        channelResults: {
+          email: { sent: true, deliveryOutcome: 'accepted' },
+          sms: { sent: true, deliveryOutcome: 'accepted' },
+        },
+      }));
 
       const result = await InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' });
       expect(result).toMatchObject({ sent: true });

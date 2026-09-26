@@ -268,9 +268,36 @@ const REGISTRY = {
     async recheck(meta) {
       return invoiceStillCollectible(meta);
     },
-    async finalize(meta) {
+    async finalize(meta, ctx = {}) {
       const { finalizeDeferredCompletionSend } = require('../dispatch-completion-deferred');
-      return finalizeDeferredCompletionSend(meta);
+      const result = await finalizeDeferredCompletionSend(meta);
+      // Codex round-4 P2 (#4963) finding C: a partial_fanout_retry row
+      // (queuePendingChannelReplay, invoice.js) carries neither
+      // mark_invoice_delivery nor bundled_review_request_id/etc, so the
+      // call above is a no-op for it — finalizeDeferredCompletionSend only
+      // stamps SMS-only invoice delivery for the WRAPPER's own pre-existing
+      // completion-send rows (mark_invoice_delivery===true, always sms:true).
+      // Stamp the channel(s) THIS replay's own dispatch actually accepted
+      // (never the stale snapshot from when the row was queued) directly
+      // here, scoped to the marker so the wrapper's rows stay untouched.
+      if (meta.partial_fanout_retry === true && meta.invoice_id && ctx.channelResults) {
+        const legAccepted = (leg) => leg?.sent === true && leg?.deliveryOutcome === 'accepted';
+        const emailAccepted = legAccepted(ctx.channelResults.email);
+        const smsOrAppAccepted = legAccepted(ctx.channelResults.sms) || legAccepted(ctx.channelResults.push);
+        if (emailAccepted || smsOrAppAccepted) {
+          try {
+            await db('invoices').where({ id: meta.invoice_id }).update({
+              ...(emailAccepted ? { email_sent_at: new Date() } : {}),
+              ...(smsOrAppAccepted ? { sms_sent_at: new Date() } : {}),
+              updated_at: new Date(),
+            });
+          } catch (err) {
+            logger.warn(`[deferred-replay] partial-fanout replay stamp failed for invoice ${meta.invoice_id}: ${err.message}`);
+            return { ok: false };
+          }
+        }
+      }
+      return result;
     },
     durableFinalize: true,
   },

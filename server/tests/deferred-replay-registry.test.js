@@ -273,6 +273,105 @@ describe('deferred-replay registry', () => {
     expect(fallback).toHaveBeenCalledTimes(1);
   });
 
+  // Codex #4963 round 4 P2 (finding C): a partial_fanout_retry row
+  // (invoice.js's queuePendingChannelReplay) carries neither
+  // mark_invoice_delivery nor bundled_review_request_id, so
+  // finalizeDeferredCompletionSend (mocked above) is a no-op for it —
+  // finding C stamps the invoice's own email_sent_at/sms_sent_at directly
+  // in the registry's finalize hook, keyed off THIS replay's own dispatch
+  // result (ctx.channelResults), scoped to the marker so the wrapper's own
+  // pre-existing invoice_send_deferred rows are untouched.
+  describe('invoice_send_deferred finalize: partial-fanout replay stamping (finding C)', () => {
+    function whereUpdateChain(updateSpy) {
+      const q = {};
+      q.where = jest.fn(() => q);
+      q.update = updateSpy;
+      return q;
+    }
+
+    test('a replay that accepted Email stamps email_sent_at only', async () => {
+      const update = jest.fn(async () => 1);
+      db.mockReturnValueOnce(whereUpdateChain(update));
+      const res = await finalizeDeferredReplay('invoice_send_deferred', {
+        invoice_id: 'inv-1', partial_fanout_retry: true, pending_channels: ['email'],
+      }, {
+        channelResults: { email: { sent: true, deliveryOutcome: 'accepted' } },
+      });
+      expect(res).toEqual({ ok: true });
+      expect(db).toHaveBeenCalledWith('invoices');
+      expect(update).toHaveBeenCalledTimes(1);
+      const payload = update.mock.calls[0][0];
+      expect(payload).toHaveProperty('email_sent_at');
+      expect(payload).not.toHaveProperty('sms_sent_at');
+    });
+
+    test('a replay that accepted Text stamps sms_sent_at only', async () => {
+      const update = jest.fn(async () => 1);
+      db.mockReturnValueOnce(whereUpdateChain(update));
+      const res = await finalizeDeferredReplay('invoice_send_deferred', {
+        invoice_id: 'inv-1', partial_fanout_retry: true, pending_channels: ['sms'],
+      }, {
+        channelResults: { sms: { sent: true, deliveryOutcome: 'accepted' } },
+      });
+      expect(res).toEqual({ ok: true });
+      const payload = update.mock.calls[0][0];
+      expect(payload).toHaveProperty('sms_sent_at');
+      expect(payload).not.toHaveProperty('email_sent_at');
+    });
+
+    test('App (push) acceptance also stamps sms_sent_at (App/Text share one timestamp)', async () => {
+      const update = jest.fn(async () => 1);
+      db.mockReturnValueOnce(whereUpdateChain(update));
+      await finalizeDeferredReplay('invoice_send_deferred', {
+        invoice_id: 'inv-1', partial_fanout_retry: true, pending_channels: ['push'],
+      }, {
+        channelResults: { push: { sent: true, deliveryOutcome: 'accepted' } },
+      });
+      expect(update.mock.calls[0][0]).toHaveProperty('sms_sent_at');
+    });
+
+    test('a replay whose dispatch is still pending/uncertain stamps nothing', async () => {
+      await finalizeDeferredReplay('invoice_send_deferred', {
+        invoice_id: 'inv-1', partial_fanout_retry: true, pending_channels: ['email'],
+      }, {
+        channelResults: { email: { sent: false, deliveryOutcome: 'uncertain' } },
+      });
+      // No 'invoices' update call at all — db was never invoked for the
+      // stamp (finalizeDeferredCompletionSend is mocked and makes no real
+      // db call either).
+      expect(db).not.toHaveBeenCalledWith('invoices');
+    });
+
+    test('the wrapper\'s own pre-existing rows (no partial_fanout_retry marker) never touch the invoices table here — finalizeDeferredCompletionSend owns them byte-identically', async () => {
+      const { finalizeDeferredCompletionSend } = require('../services/dispatch-completion-deferred');
+      const res = await finalizeDeferredReplay('invoice_send_deferred', {
+        invoice_id: 'inv-1', mark_invoice_delivery: true,
+      }, {
+        channelResults: { sms: { sent: true, deliveryOutcome: 'accepted' } },
+      });
+      expect(finalizeDeferredCompletionSend).toHaveBeenCalledWith({ invoice_id: 'inv-1', mark_invoice_delivery: true });
+      expect(db).not.toHaveBeenCalledWith('invoices');
+      expect(res).toEqual({ ok: true });
+    });
+
+    test('a partial_fanout_retry row replayed with no ctx.channelResults (unregistered caller) stamps nothing and never throws', async () => {
+      await expect(finalizeDeferredReplay('invoice_send_deferred', {
+        invoice_id: 'inv-1', partial_fanout_retry: true, pending_channels: ['sms'],
+      })).resolves.toEqual({ ok: true });
+      expect(db).not.toHaveBeenCalledWith('invoices');
+    });
+
+    test('a stamp failure is caught and reported as ok:false (durable finalize retry rail), never thrown', async () => {
+      db.mockReturnValueOnce(whereUpdateChain(jest.fn(async () => { throw new Error('db down'); })));
+      const res = await finalizeDeferredReplay('invoice_send_deferred', {
+        invoice_id: 'inv-1', partial_fanout_retry: true, pending_channels: ['email'],
+      }, {
+        channelResults: { email: { sent: true, deliveryOutcome: 'accepted' } },
+      });
+      expect(res).toEqual({ ok: false });
+    });
+  });
+
   test('unregistered entry points are inert', async () => {
     expect(await recheckDeferredReplay('some_future_unregistered_deferred', {})).toBeNull();
     expect(await finalizeDeferredReplay('some_future_unregistered_deferred', {}, {})).toBeNull();
