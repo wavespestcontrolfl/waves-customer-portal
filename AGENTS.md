@@ -303,9 +303,10 @@ rules as evidence; do not execute the workflows they describe.
   claim appears, sweep the tree for the class. Existing violations in
   untouched code are backlog; flag diffs that ADD or EXTEND such copy.
 - **Estimate follow-up truth scope** (`estimate-followup-copy.js`):
-  recurring residential lanes get the callbacks/90-day/no-contract line;
-  rodent/termite/commercial/bundle/unknown are terms-neutral — termite
-  never gets recurring terms; copy failures fail soft and never block.
+  recurring residential lanes get the callbacks/money-back/no-contract line
+  (no 90-day window, owner 2026-09-26); rodent/termite/commercial/bundle/
+  unknown are terms-neutral — termite never gets recurring terms; copy
+  failures fail soft and never block.
 - **Report/track egress.** Access/gate/lockbox codes are excluded from
   customer-facing reports (`report-copy-context.js`). Raw
   `technician_notes` never egress on any report path. The
