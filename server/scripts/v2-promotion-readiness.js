@@ -41,6 +41,7 @@ const {
 // audit cannot drift from the live contract (local pre-push audit P1).
 const {
   buildFailOpenRoutingContext, demoteFailOpenOnV1AddressConflict, resolveCallContactPhone,
+  resolveKnownCallerCustomer,
 } = require('../services/call-recording-processor');
 const { checkTcpaConsent } = require('../services/call-routing-gates');
 const { isV2Extraction } = require('../utils/extraction-compat');
@@ -139,7 +140,7 @@ async function main() {
     // source + metadata feed resolveCallContactPhone below (a
     // lead-webhook-auto-bridge outbound call's customer leg lives in
     // metadata.leadPhone, never in to_phone — see contactPhone comment).
-    .select('id', 'twilio_call_sid', 'ai_extraction', 'ai_extraction_enriched', 'ai_extraction_validation_errors', 'v2_extraction_status', 'created_at', 'from_phone', 'to_phone', 'direction', 'source', 'metadata', 'ai_extraction_model', 'ai_extraction_prompt_version', 'ai_address_validation', 'customer_id', 'ai_validation');
+    .select('id', 'twilio_call_sid', 'ai_extraction', 'ai_extraction_enriched', 'ai_extraction_validation_errors', 'v2_extraction_status', 'created_at', 'from_phone', 'to_phone', 'direction', 'source', 'metadata', 'ai_extraction_model', 'ai_extraction_prompt_version', 'ai_address_validation', 'ai_validation');
 
   // Cohort boundary: rows are attributed by MODEL, so after a route change
   // a previous primary's rows could masquerade as current-route executions
@@ -225,11 +226,6 @@ async function main() {
   // summarizeKnownCaller reads the pipeline stage and every address
   // component.
   const auditFailOpen = process.env.GATE_CALL_FAIL_OPEN_BOOKING === 'true';
-  const linkedCustomerIds = [...new Set(boundedRouteRows.map((r) => r.customer_id).filter(Boolean))];
-  const customerById = new Map((linkedCustomerIds.length
-    ? await db('customers').whereIn('id', linkedCustomerIds)
-      .select('id', 'pipeline_stage', 'address_line1', 'address_line2', 'city', 'state', 'zip')
-    : []).map((c) => [c.id, c]));
 
   // The GATE scores the PRIMARY leg alone — pooling both legs would let a
   // healthy primary mask a small failing fallback cohort, or pass a route
@@ -318,9 +314,10 @@ async function main() {
     const effectiveAv = recoveredCallIds.has(r.id)
       ? { status: 'corrected', inServiceArea: true, county: storedAv?.county || null, normalized: storedAv?.normalized || null, reconstructed_from: 'address_recovered' }
       : storedAv;
+    const linkedCustomer = await resolveKnownCallerCustomer(r, contactPhone, { db }).catch(() => null);
     const { knownCaller, options: failOpenOptions } = buildFailOpenRoutingContext({
       call: r,
-      customer: r.customer_id ? customerById.get(r.customer_id) || null : null,
+      customer: linkedCustomer,
       contactPhone,
       failOpenEnabled: auditFailOpen,
     });

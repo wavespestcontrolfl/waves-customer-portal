@@ -18,6 +18,7 @@ const {
   resolveCallSecondaryContacts,
   resolveCallBookingPropertyLinkage,
   findCustomerForCallContact,
+  resolveKnownCallerCustomer,
   extractedNameMatchesCustomer,
 } = _test;
 const { sameFirstName } = require('../utils/name-match');
@@ -318,6 +319,46 @@ describe('findCustomerForCallContact cascade', () => {
       callAddress: { address_line1: '456 Pine Ave', address_line2: null, city: 'Venice', zip: '34285' },
     });
     expect(result).toBe(b);
+  });
+
+  test('offline known-caller lookup honors relink/unlink and otherwise uses current phone matching on the supplied connection', async () => {
+    db.mockImplementation(() => { throw new Error('must not use the processor connection'); });
+    const auditDb = jest.fn((table) => {
+      const builder = {
+        where: () => builder,
+        whereNull: () => builder,
+        whereRaw: () => builder,
+        orWhereRaw: () => builder,
+        orderBy: () => builder,
+        limit: () => builder,
+        first: () => Promise.resolve({ id: 'override-customer' }),
+        then: (resolve, reject) => Promise.resolve([
+          { id: 'phone-customer', phone: PHONE },
+        ]).then(resolve, reject),
+      };
+      expect(table).toBe('customers');
+      return builder;
+    });
+
+    const relinked = await resolveKnownCallerCustomer({
+      customer_id: 'stale-customer',
+      metadata: { customer_link_override: { customer_id: 'override-customer' } },
+    }, PHONE, { db: auditDb });
+    expect(relinked?.id).toBe('override-customer');
+
+    const phoneMatched = await resolveKnownCallerCustomer({
+      customer_id: 'stale-customer',
+      metadata: {},
+    }, PHONE, { db: auditDb });
+    expect(phoneMatched?.id).toBe('phone-customer');
+
+    auditDb.mockClear();
+    expect(await resolveKnownCallerCustomer({
+      customer_id: 'stale-customer',
+      metadata: { customer_link_override: { customer_id: null } },
+    }, PHONE, { db: auditDb })).toBeNull();
+    expect(await resolveKnownCallerCustomer({ customer_id: 'stale-customer' }, null, { db: auditDb })).toBeNull();
+    expect(auditDb).not.toHaveBeenCalled();
   });
 });
 

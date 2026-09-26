@@ -1365,9 +1365,15 @@ async function trustValidatedNewLeadAddress(knownCaller, { validate = validateAd
 // gate lifts address flags and nothing else for a new lead.
 function failOpenKnownCustomer(knownCaller) {
   if (!knownCaller || !knownCaller.addressTrusted) return null;
+  // Address recovery dispatches to the saved address, so it needs the same
+  // complete street + ZIP evidence as onFileAddressSatisfaction. Keep the
+  // known-customer context for the non-address fail-open rules, but never let
+  // a legacy row with only a street clear an address blocker.
+  const hasAddress = !!(String(knownCaller.addressLine1 || '').trim()
+    && String(knownCaller.addressZip || '').trim());
   return {
     addressOnly: knownCaller.addressOnly === true,
-    hasAddress: knownCaller.hasAddress,
+    hasAddress,
     addressLine1: knownCaller.addressLine1 || null,
     addressLine2: knownCaller.addressLine2 || null,
     addressCity: knownCaller.addressCity || null,
@@ -1443,6 +1449,26 @@ function buildFailOpenRoutingContext({
       knownCustomer: failOpenKnownCustomer(knownCaller),
     },
   };
+}
+
+// The known-caller selection shared with the offline routing audits. This
+// mirrors the live Step 2 pre-lookup: an operator relink outranks phone
+// matching, an explicit unlink means no known caller, and call.customer_id
+// is not consulted. opts.db keeps audit reads on the script's own connection.
+async function resolveKnownCallerCustomer(call = {}, contactPhone = null, opts = {}) {
+  const conn = opts.db || db;
+  let metadata = call.metadata || {};
+  try { if (typeof metadata === 'string') metadata = JSON.parse(metadata); } catch { metadata = {}; }
+  const override = metadata?.customer_link_override;
+  const customerLinkOverride = override && typeof override === 'object' && 'customer_id' in override
+    ? override
+    : null;
+  if (customerLinkOverride) {
+    return customerLinkOverride.customer_id
+      ? conn('customers').where({ id: customerLinkOverride.customer_id }).whereNull('deleted_at').first()
+      : null;
+  }
+  return findCustomerForCallContact(contactPhone, {}, { db: conn });
 }
 
 function persistedOnFileAddressVerdict(call) {
@@ -2864,7 +2890,7 @@ async function avAddressUniqueOwner(matches, opts) {
     const callKey = addressKey(opts.callAddress);
     if (!callKey) return null;
     const candidateIds = matches.map((m) => m.id);
-    const props = await db('customer_properties')
+    const props = await (opts.db || db)('customer_properties')
       .whereIn('customer_id', candidateIds)
       .where({ active: true })
       .select('customer_id', 'address_line1', 'address_line2', 'city', 'zip');
@@ -2888,11 +2914,12 @@ async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
   const contactKey = phoneKey(phone);
   if (!contactKey) return null;
 
+  const conn = opts.db || db;
   const predicateFor = (col) => (contactKey.length === 10
     ? `RIGHT(regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g'), 10) = ?`
     : `regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g') = ?`);
   const base = () => {
-    const query = db('customers').whereNull('deleted_at');
+    const query = conn('customers').whereNull('deleted_at');
     return query.where(function orPhones() {
       for (const col of CONTACT_MATCH_PHONE_COLS) {
         this.orWhereRaw(predicateFor(col), [contactKey]);
@@ -2902,7 +2929,7 @@ async function findCustomerForCallContact(phone, extracted = {}, opts = {}) {
   const matchedViaPrimary = (c) => samePhone(phone, c.phone);
 
   if (opts.preferredCustomerId) {
-    const preferred = await db('customers')
+    const preferred = await conn('customers')
       .where({ id: opts.preferredCustomerId })
       .whereNull('deleted_at')
       .first();
@@ -20242,6 +20269,7 @@ CallRecordingProcessor._test = {
   demoteFailOpenOnV1AddressConflict,
   resolveOnFileAddressAuthority,
   buildFailOpenRoutingContext,
+  resolveKnownCallerCustomer,
   v2IsoToEtWallClock,
   phoneNearMissOfAni,
   isUsableContactPhone,
@@ -20273,6 +20301,7 @@ CallRecordingProcessor.updateUnifiedVoiceMessage = updateUnifiedVoiceMessage;
 // changing the gate. Deliberately on the module surface, not `_test`.
 CallRecordingProcessor.buildFailOpenRoutingContext = buildFailOpenRoutingContext;
 CallRecordingProcessor.demoteFailOpenOnV1AddressConflict = demoteFailOpenOnV1AddressConflict;
+CallRecordingProcessor.resolveKnownCallerCustomer = resolveKnownCallerCustomer;
 
 // Production contract for the VOICE-RELAY booking path (NOT test-only): the
 // relay must decide WHICH PREMISE a voice booking lands on with the exact

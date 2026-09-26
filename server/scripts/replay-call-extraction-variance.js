@@ -1172,8 +1172,6 @@ async function loadCandidateCalls(db, options) {
     'transcription_provider',
     'transcription_model',
     'recording_url',
-    // Feeds the on-file fail-open context the live gate receives (round-21 P2).
-    'customer_id',
     // The persisted on-file address verdict a new lead was judged by
     // (buildFailOpenRoutingContext replays it — #4685 r3 P1).
     'ai_validation',
@@ -1273,11 +1271,10 @@ async function replayCall(call, context) {
   // for both call directions (owner directive 2026-09-26) and the on-file
   // lane is limited to actively-served pipeline stages, so a local "has an
   // address" test over-granted it (local pre-push audit P1).
-  const linkedCustomer = call.customer_id
-    ? await db('customers').where({ id: call.customer_id })
-      .first('id', 'pipeline_stage', 'address_line1', 'address_line2', 'city', 'state', 'zip')
-      .catch(() => null)
-    : null;
+  // Match production's pre-lookup: operator override/unlink first, then the
+  // current contact-phone resolver. Persisted call.customer_id can be stale.
+  const linkedCustomer = await CRP.resolveKnownCallerCustomer(call, contactPhone, { db })
+    .catch(() => null);
   const { knownCaller, options: failOpenContext } = CRP.buildFailOpenRoutingContext({
     call,
     customer: linkedCustomer,

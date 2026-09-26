@@ -1179,6 +1179,35 @@ describe('call lead classification (what is / isn\'t a lead)', () => {
     expect(canAutoRoute(unconfirmed, { ...ctx.options, contactPhone, addressValidation: av }).allowed).toBe(false);
   });
 
+  test.each(['inbound', 'outbound'])('a trusted %s caller with a street but no ZIP keeps address blockers', (direction) => {
+    const { canAutoRoute } = require('../services/call-triage-flags');
+    const customerNumber = '+19414651056';
+    const call = direction === 'outbound'
+      ? { direction, from_phone: '+19415550100', to_phone: customerNumber }
+      : { direction, from_phone: customerNumber, to_phone: '+19415550100' };
+    const contactPhone = CallRecordingProcessor._test.resolveCallContactPhone(call);
+    const ctx = buildFailOpenRoutingContext({
+      call,
+      customer: { pipeline_stage: 'won', address_line1: '123 Main St', city: 'Venice', state: 'FL', zip: null },
+      contactPhone,
+      failOpenEnabled: true,
+    });
+    expect(ctx.options.knownCustomer).toMatchObject({
+      hasAddress: false,
+      addressLine1: '123 Main St',
+      addressZip: null,
+    });
+
+    const route = canAutoRoute({
+      triage_flags: ['missing_service_address'],
+      confidence: { overall: 0.9 },
+      scheduling: { status: 'confirmed', confirmed_start_at: '2026-10-01T09:00:00-04:00' },
+      consent: {},
+    }, { ...ctx.options, contactPhone });
+    expect(route.allowed).toBe(false);
+    expect(route.appointmentBlockingFlags).toContain('missing_service_address');
+  });
+
   // The four owner-reported false leads, plus the genuine-but-early prospect.
   test('vetoes existing-customer / non-sales calls, keeps genuine new inquiries', () => {
     // Martin Max + Uma — "are you coming today?" / arrival check-in.
