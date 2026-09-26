@@ -154,15 +154,42 @@ describe('deferred-replay registry', () => {
     const meta = { scheduled_sms_log_id: 'queue-1', customer_id: 'customer-1' };
 
     await expect(dispatchDeferredReplay('test_dispatch_deferred', meta, fallback)).resolves.toBe(outcome);
-    expect(dispatch).toHaveBeenCalledWith(meta);
+    // defaultDispatch rides along as a second argument so an entry can
+    // hand ordinary rows straight back to it (see stripe_webhook_billing_deferred).
+    expect(dispatch).toHaveBeenCalledWith(meta, fallback);
     expect(fallback).not.toHaveBeenCalled();
   });
 
-  test('only the Email-only replay is allowed to run without a recipient phone', () => {
+  test('only the Email-only replay and the Stripe billing hold are allowed to run without a recipient phone', () => {
     const { replaysWithoutPhone } = require('../services/messaging/deferred-replay-registry');
     expect(replaysWithoutPhone('billing_retry_email_deferred')).toBe(true);
+    expect(replaysWithoutPhone('stripe_webhook_billing_deferred')).toBe(true);
     expect(replaysWithoutPhone('invoice_followup_deferred')).toBe(false);
     expect(replaysWithoutPhone(undefined)).toBe(false);
+  });
+
+  // PR #4843 Codex r6: stripe_webhook_billing_deferred registers a dispatch
+  // hook only to satisfy dispatchDeferredReplay's requires_registered_dispatch
+  // contract (see the "unknown ordinary entries" test below) — the hook
+  // itself is a pure pass-through to defaultDispatch for EVERY row, whether
+  // or not it carries the phone-less stamp, so a phone-bearing hold under
+  // this entry point is byte-identical to having no dispatch hook at all.
+  test('the Stripe billing hold dispatch hook always defers to defaultDispatch', async () => {
+    const phoneBearingOutcome = { sent: true, deliveryOutcome: 'accepted', channel: 'sms' };
+    const phoneLessOutcome = { sent: true, deliveryOutcome: 'accepted', channel: 'push' };
+    const phoneBearingFallback = jest.fn(async () => phoneBearingOutcome);
+    const phoneLessFallback = jest.fn(async () => phoneLessOutcome);
+
+    await expect(dispatchDeferredReplay('stripe_webhook_billing_deferred', {
+      entry_point: 'stripe_webhook_billing_deferred',
+    }, phoneBearingFallback)).resolves.toBe(phoneBearingOutcome);
+    expect(phoneBearingFallback).toHaveBeenCalledTimes(1);
+
+    await expect(dispatchDeferredReplay('stripe_webhook_billing_deferred', {
+      entry_point: 'stripe_webhook_billing_deferred', requires_registered_dispatch: true,
+      billingDeliveryCategory: 'payment_issue',
+    }, phoneLessFallback)).resolves.toBe(phoneLessOutcome);
+    expect(phoneLessFallback).toHaveBeenCalledTimes(1);
   });
 
   test('billing retry Email obligations use their registered Email-only dispatcher', async () => {
