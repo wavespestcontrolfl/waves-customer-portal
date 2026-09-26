@@ -202,6 +202,44 @@ describe.each(['/estimate', '/quick-quote'])('%s customer eligibility', (path) =
   });
 });
 
+test('admin trapping estimates read the catalog when this process still has a fresh stale price', async () => {
+  const db = require('../models/db');
+  const pricingEngine = require('../services/pricing-engine');
+  const pricingBridge = require('../services/pricing-engine/db-bridge');
+  const { RODENT } = pricingEngine.constants;
+  const oldPrice = RODENT.trapping.additionalCheckPrice;
+  RODENT.trapping.additionalCheckPrice = 95;
+  const needsSync = jest.spyOn(pricingEngine, 'needsSync').mockReturnValue(false);
+  const readCatalog = jest.spyOn(pricingBridge, 'readRodentAdditionalCheckPriceFromCatalog').mockResolvedValue(110.25);
+  try {
+    await withServer(async (baseUrl) => {
+      const response = await call(baseUrl, 'POST', '/estimate', {
+        role: 'admin',
+        body: {
+          homeSqFt: 2000,
+          lotSqFt: 10000,
+          stories: 1,
+          propertyType: 'single_family',
+          zone: 'A',
+          features: { shrubs: 'moderate', trees: 'moderate', complexity: 'standard' },
+          services: { rodentTrapping: { plan: 'standard' } },
+        },
+      });
+
+      expect(response.status).toBe(200);
+      const trapping = response.json.estimate.lineItems.find((line) => line.service === 'rodent_trapping');
+      expect(trapping.additionalCheckPrice).toBe(110.25);
+      expect(trapping.detail).toContain('$110.25');
+      expect(needsSync).toHaveBeenCalled();
+      expect(readCatalog).toHaveBeenCalledWith(db);
+    });
+  } finally {
+    RODENT.trapping.additionalCheckPrice = oldPrice;
+    needsSync.mockRestore();
+    readCatalog.mockRestore();
+  }
+});
+
 describe('write authorization — technician logins cannot change pricing', () => {
   test.each([
     ['PUT', '/lawn-brackets/st_augustine', { brackets: [{ sqft_bracket: 3000, tier: 'basic', monthly_price: 45 }] }],
