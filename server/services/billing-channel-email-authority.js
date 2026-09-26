@@ -86,7 +86,8 @@ async function contextBlock(input, category, { customer, prefs, invoice }, datab
     }
     const ownership = await require('./invoice-helpers').selfPayAtDispatch(invoice.id, database)();
     if (ownership.ok !== true) {
-      return { error: blocked(ownership.code || 'INVOICE_NOT_SELF_PAY', ownership.reason || 'Invoice is not eligible for customer delivery') };
+      return { error: blocked(ownership.code || 'INVOICE_NOT_SELF_PAY', ownership.reason || 'Invoice is not eligible for customer delivery',
+        { retryable: ownership.code === 'INVOICE_UNREADABLE' }) };
     }
   }
   return null;

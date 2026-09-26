@@ -4,6 +4,8 @@ const logger = require('./logger');
 const sendgrid = require('./sendgrid-mail');
 const emailTemplates = require('./email-template-library');
 const NotificationService = require('./notification-service');
+const billingReplay = require('./billing-email-provider-replay');
+const billingReservation = require('./billing-email-reservation');
 
 const RETRY_DELAYS_MS = [10 * 60 * 1000, 60 * 60 * 1000, 6 * 60 * 60 * 1000];
 const MAX_RETRIES = RETRY_DELAYS_MS.length;
@@ -318,12 +320,15 @@ async function markRetryUncertain(message, err, now = new Date()) {
 // summary's aggregate is settled from the ledger since no webhook follows.
 async function stopRetry(message, { status, reason, exhaustedAlert = false, rejectedAfterStart = false }) {
   const isSummary = message.template_key === 'service.visit_summary';
+  const terminalBillingRefusal = status === 'blocked' && billingReplay.isBillingEmailProviderReplay(message);
+  const storedReason = terminalBillingRefusal
+    ? `${billingReservation.BILLING_EMAIL_TERMINAL_REFUSAL_PREFIX}${reason}` : reason;
   const settle = async (trx) => {
     const expectedPhase = rejectedAfterStart ? HANDOFF_PHASE_STARTED : HANDOFF_PHASE_PENDING;
     const [row] = await trx('email_messages')
       .where({ id: message.id, send_attempt_token: message.send_attempt_token, status: 'queued',
         provider_handoff_phase: expectedPhase, provider_handoff_attempt_token: message.send_attempt_token })
-      .update({ status, error_message: reason, provider_retry_next_at: null, provider_retry_exhausted_at: new Date(),
+      .update({ status, error_message: storedReason, provider_retry_next_at: null, provider_retry_exhausted_at: new Date(),
         provider_handoff_phase: rejectedAfterStart ? HANDOFF_PHASE_REJECTED : HANDOFF_PHASE_PENDING, updated_at: new Date() })
       .returning('*');
     if (row && isSummary) {
@@ -338,6 +343,10 @@ async function stopRetry(message, { status, reason, exhaustedAlert = false, reje
     return row || null;
   };
   const updated = isSummary ? await db.transaction(settle) : await settle(db);
+  if (updated && terminalBillingRefusal) {
+    await billingReservation.resolveBillingEmailReservationRefusal(updated)
+      .catch((err) => logger.warn(`[email-provider-retry] billing refusal not reconciled for ${message.id}: ${err.message}`));
+  }
   if (updated && exhaustedAlert) await alertExhausted(updated, reason);
   return { sent: false, stopped: true, reason };
 }
@@ -423,6 +432,10 @@ async function recordRetrySend(message, result) {
     await require('./visit-completion-summary').reconcileSummaryEmailRecovery(updated)
       .catch((err) => logger.warn(`[email-provider-retry] visit summary recovery not reconciled for ${message.id}: ${err.message}`));
   }
+  if (billingReplay.isBillingEmailProviderReplay(updated)) {
+    await billingReservation.markBillingEmailReservationDelivered(updated)
+      .catch((err) => logger.warn(`[email-provider-retry] billing acceptance not reconciled for ${message.id}: ${err.message}`));
+  }
   return { sent: true, message: updated || message };
 }
 
@@ -447,7 +460,7 @@ async function retryOne(message) {
   // failure clearing the provider block is provably pre-send and keeps the
   // ordinary retry schedule.
   const state = { dispatchStarted: false, rejected: false, result: null, blocked: false };
-  const dispatchToProvider = async () => {
+  const dispatchToProvider = async (database) => {
     // Blocks are a provider-specific suppression distinct from hard bounces.
     // If it remains, SendGrid will drop the retry before attempting delivery.
     await sendgrid.clearBlockedAddress(message.recipient_email_snapshot);
@@ -515,6 +528,7 @@ async function retryOne(message) {
         },
         suppressErrorLog: true,
         templateKey: message.template_key,
+        database,
       });
     } catch (err) {
       // Pre-push audit P1 (b49be57b12 round 4): a guard INFRASTRUCTURE
@@ -547,6 +561,17 @@ async function retryOne(message) {
     if (message.template_key === 'service.visit_summary') {
       const handoff = await retrySummaryThroughHandoff(message, dispatchToProvider, state);
       if (handoff.outcome) return handoff.outcome;
+    } else if (billingReplay.isBillingEmailProviderReplay(message)) {
+      const handoff = await billingReplay.runBillingEmailProviderReplayHandoff(message, dispatchToProvider);
+      if (!handoff.allowed) {
+        if (handoff.retryable) {
+          const err = new Error(handoff.reason);
+          err.code = handoff.code;
+          await markRetryFailure(message, err);
+          return { sent: false, error: err };
+        }
+        return await stopRetry(message, { status: 'blocked', reason: handoff.reason });
+      }
     } else {
       await dispatchToProvider();
     }
