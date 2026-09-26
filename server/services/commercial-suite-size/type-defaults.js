@@ -16,8 +16,11 @@ const SUITE_TYPE_DEFAULT_SQFT = {
 };
 
 function defaultSuiteSqftFor({ commercialRiskType, commercialSubtype } = {}) {
-  const text = [commercialRiskType, commercialSubtype]
-    .filter(Boolean).join(' ').toLowerCase();
+  // ONE authoritative key: the risk type when present, else the subtype —
+  // the same precedence the evidence label uses, so the operator is told
+  // the key that actually chose the priced area (never regex order across
+  // two disagreeing fields).
+  const text = String(commercialRiskType || commercialSubtype || '').toLowerCase();
   if (/restaurant|food/.test(text)) return SUITE_TYPE_DEFAULT_SQFT.restaurant;
   if (/salon|spa|barber|personal.?service/.test(text)) return SUITE_TYPE_DEFAULT_SQFT.salon;
   if (/medical|clinic|health.?care|healthcare/.test(text)) return SUITE_TYPE_DEFAULT_SQFT.medical;

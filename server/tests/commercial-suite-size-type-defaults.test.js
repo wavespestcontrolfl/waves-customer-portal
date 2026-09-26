@@ -31,3 +31,14 @@ describe('defaultSuiteSqftFor', () => {
     expect(defaultSuiteSqftFor({ businessType: 'hair salon', commercialRiskType: 'restaurant_food' })).toBe(1800);
   });
 });
+
+describe('Codex r7: risk type takes precedence over subtype', () => {
+  const { defaultSuiteSqftFor, SUITE_TYPE_DEFAULT_SQFT } = require('../services/commercial-suite-size/type-defaults');
+  test('a retail risk type with a medical subtype uses the retail default, not regex order', () => {
+    expect(defaultSuiteSqftFor({ commercialRiskType: 'retail_standard', commercialSubtype: 'medical_office' }))
+      .toBe(SUITE_TYPE_DEFAULT_SQFT.retailOffice);
+  });
+  test('the subtype decides only when the risk type is absent', () => {
+    expect(defaultSuiteSqftFor({ commercialSubtype: 'medical_office' })).toBe(SUITE_TYPE_DEFAULT_SQFT.medical);
+  });
+});

@@ -410,3 +410,12 @@ describe('Codex r6 DBPR matching', () => {
     await first;
   });
 });
+
+describe('Codex r7: Spc and Space compare equal', () => {
+  const { normalizeUnitValue } = require('../services/commercial-suite-size/dbpr-food-license');
+  test('"Spc 12", "Spc. 12" and "Space 12" all reduce to "12"', () => {
+    expect(normalizeUnitValue('Spc 12')).toBe('12');
+    expect(normalizeUnitValue('Spc. 12')).toBe('12');
+    expect(normalizeUnitValue('Space 12')).toBe('12');
+  });
+});

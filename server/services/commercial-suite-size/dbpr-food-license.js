@@ -165,7 +165,7 @@ function parseAddressLine(line) {
 // then each remaining value keeps its own boundary: "Bldg 9 Unit 204" and
 // "BLDG 9 UNIT 204" -> "9-204", never "9204" (which "Bldg 92 Unit 04" would
 // also produce). "#102", "Suite 102", "102" -> "102".
-const UNIT_DESIGNATOR_RE = /\b(?:suite|ste|unit|apt|apartment|bldg|building|bay|space)\b\.?|#/gi;
+const UNIT_DESIGNATOR_RE = /\b(?:suite|ste|unit|apt|apartment|bldg|building|bay|space|spc)\b\.?|#/gi;
 
 function normalizeUnitValue(value) {
   const parts = String(value || '').replace(UNIT_DESIGNATOR_RE, ' ')
