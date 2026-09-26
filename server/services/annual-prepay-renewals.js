@@ -6295,14 +6295,16 @@ async function raiseRetrievalAfterAnchor(termId) {
 // installed (or renewal) termite term still in its paid year whose
 // retrieval task was never settled. Bounded, oldest end first.
 async function raisePendingDeclineRetrievalTasks({ limit = 50 } = {}) {
-  const today = etDateString();
   const candidates = await db('annual_prepay_terms as dt')
     .whereNotNull('dt.annual_plan_version')
     .where({ 'dt.status': 'cancelled', 'dt.renewal_decision': 'cancel' })
     .where(function installed() {
       this.whereNotNull('dt.installation_anchored_at').orWhereNotNull('dt.renewed_from_term_id');
     })
-    .where('dt.term_end', '>=', today)
+    // No term_end bound: a raise that keeps failing through the whole paid
+    // year must still be retried after it ends — the stations still need
+    // collecting, and the absent settled-marker is what makes this set
+    // converge (the staff bell promises a daily retry).
     // Still PAID (billing's own test): a refunded/disputed decline is never
     // a candidate, so it can't hold a `limit` slot every day.
     .whereExists(coveredTermsAsOf(db).whereRaw('t.id = dt.id').select(db.raw('1')))

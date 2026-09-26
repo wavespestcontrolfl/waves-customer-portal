@@ -396,6 +396,19 @@ describeOrSkip('termite annual renewal decline — coverage, renew supersession,
     });
   });
 
+  test('a raise still unsettled AFTER the term ends is still retried (stations still need collecting)', async () => {
+    const { db, Renewals, raiseTermiteRetrievalTask } = await load();
+    const fx = await paidInstalledTerm(db, { status: 'cancelled', renewalDecision: 'cancel' });
+    await db('annual_prepay_terms').where({ id: fx.term.id }).update({ term_end: '2025-01-15' });
+    await db('activity_log').insert({
+      customer_id: fx.customerId, action: 'termite_annual_renewal_declined', description: 'x', metadata: { term_id: fx.term.id },
+    });
+
+    expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 1, raised: 1 });
+    expect(raiseTermiteRetrievalTask).toHaveBeenCalledWith(fx.customerId, null, expect.objectContaining({ retrieveAfter: '2025-01-15' }));
+    expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 0, raised: 0 });
+  });
+
   test('the sweep never touches a decline staff recorded (no portal-decline row) or a refunded one, and a failed raise is retried', async () => {
     const { db, Renewals, raiseTermiteRetrievalTask, notifyAdmin } = await load();
     const staffDeclined = await paidInstalledTerm(db, { status: 'cancelled', renewalDecision: 'cancel' });
