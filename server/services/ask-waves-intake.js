@@ -251,77 +251,103 @@ function looksSpanish(text) {
 }
 const UNSAFE_CLAIM_REPLY = `I can't make a blanket safety claim or give a fixed re-entry time — that depends on the exact product used and your home. Your technician follows the product label directions and can walk you through specifics for your property. For anything urgent, call us at ${COMPANY.phone}.`;
 
-// Topic chokepoint (Codex rounds 1-3): parsing claim grammar in free model
-// text never converges — pronoun subjects, Spanish predicates, negations and
-// idiom exemptions each opened a new hole. So a reply that uses ANY safety
-// vocabulary while the reply or the visitor's own words are about a
-// treatment/product gets the reviewed replacement wholesale — no grammar, no
-// exemptions (the replacement is itself the compliant answer). Safety wording
-// with no treatment context ("house geckos are safe around pets") is left
-// alone.
-const INTAKE_SAFETY_WORD_RE = /\b(?:safe|safer|safely|safety|harmless|non-?toxic|risk[-\s]?free|no\s+risk|zero\s+risk|seguro|segura|seguros|seguras|seguridad|inofensiv\w*|sin\s+riesgos?|libre\s+de\s+riesgos?)\b|\b(?:pet|kid|family|child)-safe\b|\bno\s+(?:es\s+)?t[óo]xic\w*/i;
-const INTAKE_TREATMENT_CONTEXT_RE = /\b(?:treat\w*|products?|spray\w*|pesticid\w*|insecticid\w*|herbicid\w*|fungicid\w*|chemicals?|applications?|applied|apply|bait\w*|fertiliz\w*|granul\w*|repellent\w*|pest\s+control|lawn\s+care|extermin\w*|mosquito\s+(?:service|control|barrier)|tratamiento\w*|productos?|qu[íi]mic\w*|pesticida\w*|insecticida\w*|fumig\w*|rociad\w*|aplicaci[óo]n\w*|cebos?|control\s+de\s+plagas|servicios?|programas?|services?|programs?|plans?|extermin\w*)\b/i;
-// Spanish forms the shared (English) rule set can't see: fixed re-entry /
-// drying times in minutes or hours, and "aprobado por la EPA".
-// Chokepoint, not number grammar (accents, fractions and word numbers kept
-// opening holes): any minutes/hours unit word plus any drying or re-entry
-// word anywhere in the reply ("se seca en dos horas", "tarda veintidós
-// minutos en secarse", "puede volver en media hora").
-const ES_DURATION_RE = /(?:\b|(?<=\d))(?:segundos?|minutos?|horas?|d[ií]as?|semanas?|seg|min|mins|hrs?|h)\b\.?/i;
-const ES_DRY_OR_REENTRY_RE = /\b(?:sec[oa]s?|seca(?:r|rse|do|da)?|se\s+seca|volver|regresar|entrar|reingres\w*|salir|re-?entrada|esper\w*|evit\w*|mant[eé]n\w*\s+(?:\S+\s+){0,3}(?:fuera|alejad\w*)|lejos|antes\s+de\s+(?:dejar|permitir|caminar|salir))\b/i;
-const INTAKE_REENTRY_MINUTES_ES_RE = { test: (t) => ES_DURATION_RE.test(t) && ES_DRY_OR_REENTRY_RE.test(t) };
-// Spanish duration matches need the same treatment context as English
-// ("Puede volver a entrar al portal en dos horas" is not a re-entry claim).
-// English counterpart of the Spanish chokepoint: a duration in minutes/hours
-// plus drying or re-entry wording ("It dries in 30 minutes.", "You can go
-// inside after 30 minutes.") — only with treatment context in the reply or
-// the visitor's words, so an appointment-window reply isn't caught.
-// Units may be glued to digits ("30min", "2hrs").
-const EN_DURATION_RE = /(?:\b|(?<=\d))(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?|overnight)\b/i;
-const EN_DRY_OR_REENTRY_RE = /\b(?:dr(?:y|ies|ied|ying)|re-?ent\w*|(?:keep|stay|kept)\s+(?:\S+\s+){0,3}(?:off|away|out|inside|indoors)|wait(?:ing)?|avoid\w*|before\s+(?:letting|walking|going|allowing|touching)|return(?:ing)?\s+(?:indoors|inside|outside|home|in|to)|back\s+in(?:side|doors)?|go\s+(?:back\s+)?(?:inside|outside|in|out)|come\s+(?:back\s+)?in(?:side)?|let\s+\w+\s+(?:out|in|back)|walk\s+on|play\s+(?:outside|in))\b/i;
-// Passive, active and dash-joined forms in both languages ("EPA–approved",
-// "The EPA has approved…", "aprobado por la EPA", "la EPA aprobó…").
-const INTAKE_EPA_APPROVED_ES_RE = /\bepa\s*[-‐‑‒–—\s]\s*approv\w*|\bapproved\s+by\s+(?:the\s+)?epa\b|\bepa\s+(?:has\s+|have\s+|had\s+)?(?:fully\s+)?approv\w*|\baprobad[oa]s?\s+por\s+la\s+epa\b|\bla\s+epa\s+(?:ha\s+|los\s+ha\s+)?aprob\w*/i;
+// Claim-shape chokepoint. Matching claim vocabulary word by word never
+// converged (every Codex round found a new synonym), so the rules follow the
+// SHAPE of the prohibited claims instead:
+//   1. EPA approval: any mention of the EPA together with approval or
+//      certification wording, in any order or grammatical form.
+//   2. Blanket safety: a positive safety word (safe, harmless, gentle,
+//      pet-friendly, non-toxic, risk-free…) or a NEGATED hazard ("no / zero /
+//      won't / poses no" + harm, danger, hazard, threat, risk, toxic, poison,
+//      affect…), when the reply or the visitor's own words are about a
+//      treatment — or when a pronoun / missing subject stands for the
+//      treatment ("Yes, it won't harm your pets", "Sí, es seguro"). A plain
+//      statement that something IS dangerous ("black widows are dangerous")
+//      is not a safety claim and passes.
+//   3. Fixed times: ANY duration with treatment context, unless it is clearly
+//      a visit / scheduling duration with no drying or re-entry wording in the
+//      conversation. Inverting this rule closes the re-entry-vocabulary class
+//      ("reoccupied", "keep off", "wait", "after 30 min" answering "when can I
+//      re-enter?") instead of chasing it.
+// A flagged reply is replaced wholesale with reviewed copy; one that carries
+// emergency direction keeps the emergency script (see scrubUnsafeClaims).
+const INTAKE_TREATMENT_CONTEXT_RE = /\b(?:treat\w*|products?|spray\w*|pesticid\w*|insecticid\w*|herbicid\w*|fungicid\w*|chemicals?|applications?|applied|apply|bait\w*|fertiliz\w*|granul\w*|repellent\w*|pest\s+control|lawn\s+care|extermin\w*|mosquito\s+(?:service|control|barrier)|tratamiento\w*|productos?|qu[íi]mic\w*|pesticida\w*|insecticida\w*|fumig\w*|rociad\w*|aplicaci[óo]n\w*|cebos?|control\s+de\s+plagas|servicios?|programas?|services?|programs?|plans?)\b/i;
 
-// In a pest-control chat a pronoun or missing subject ("Yes, it's completely
-// safe for pets", "Totally safe for dogs", "Sí, es seguro") is the treatment;
-// an explicit other subject ("house geckos are safe around pets") is not.
-// Pronouns that can stand for the treatment — not relative "that"
-// ("Ladybugs that are generally safe around pets").
-const INTAKE_PRONOUN_SAFE_RE = /(?:^|[.!?,;:—–-]\s*|\b(?:yes|yeah|and|but|so)\s+)(?:it|it['’]s|this|they|everything|all\s+of\s+(?:it|them))\b[^.!?]{0,30}\b(?:safe|harmless|non-?toxic|risk[-\s]?free)\b/i;
-const INTAKE_SUBJECTLESS_SAFE_RE = /(?:^|[.!?]\s*)(?:(?:yes|yep|absolutely)[,!]?\s*)?(?:(?:completely|totally|perfectly|100%)\s+)?(?:safe|harmless|non-?toxic)\b|(?:^|[.!?]\s*)(?:s[íi][,!]?\s*)?(?:es|son|est[áa]n?)\s+(?:(?:completamente|totalmente|muy)\s+)?(?:segur|inofensiv)/i;
+const EPA_MENTION_RE = /\b(?:epa|e\.\s?p\.\s?a\.?|environmental\s+protection\s+agency|agencia\s+de\s+protecci[oó]n\s+ambiental)(?![a-z])/i;
+const APPROVAL_WORD_RE = /\b(?:approv\w*|endors\w*|certif\w*|sanction\w*|authoriz\w*|clear(?:ed|ance)|aprob\w*|avalad\w*|respaldad\w*|autoriz\w*)\b/i;
+
+const POSITIVE_SAFETY_RE = /\b(?:safe(?:r|ly|ty)?|harmless|gentle|non-?toxic|risk[-\s]?free|hazard[-\s]?free|worry[-\s]?free|(?:pet|kid|child|children|family|people|eco)[-\s]?(?:safe|friendly)|seguros?|seguras?|seguridad|inofensiv\w*)\b/i;
+// Negation directly governing a hazard, allowing only filler words between
+// ("doesn't pose any risk", "will not cause any harm") — so "We can't treat
+// dangerous wasp nests at height" is not a claim.
+const HAZARD_FILLER = '(?:(?:a|an|any|much|real|serious|significant|health|to|your|you|for|the|be|pose|poses|cause|causes|bring|of|at|all|known|major|big)\\s+){0,3}';
+const NEGATED_HAZARD_RE = new RegExp(`\\b(?:no|zero|not|never|without|poses?\\s+no|presents?\\s+no|free\\s+(?:of|from)|won['’]?t|will\\s+not|doesn['’]?t|does\\s+not|isn['’]?t|is\\s+not|aren['’]?t|are\\s+not|can['’]?t|cannot|shouldn['’]?t|should\\s+not)\\s+${HAZARD_FILLER}(?:harm\\w*|hurt\\w*|danger\\w*|hazard\\w*|threat\\w*|risk\\w*|toxic\\w*|poison\\w*|affect\\w*|side[-\\s]?effects?|injur\\w*)\\b`, 'i');
+const NEGATED_HAZARD_ES_RE = /\b(?:no|sin|ning[uú]n|ninguna|cero|nunca|libre\s+de)\s+(?:(?:hay|representa|representan|causa|causan|tiene|tienen|es|son|un|una|ning[uú]n|ninguna|mayor|gran|alg[uú]n|alguna|para|a|la|el|los|las|su|sus|le|les|hace|hacen)\s+){0,3}(?:peligr\w*|riesgos?|da[ñn]\w*|t[oó]xic\w*|afect\w*|venen\w*|efectos?\s+secundarios)\b/i;
+function safetyClaimIn(text) {
+  return POSITIVE_SAFETY_RE.test(text) || NEGATED_HAZARD_RE.test(text) || NEGATED_HAZARD_ES_RE.test(text);
+}
+// In a pest-control chat a leading pronoun or a missing subject stands for
+// the treatment; an explicit other subject ("The repaired screen is safe for
+// pets", "Ladybugs that are generally safe…") does not.
+const PRONOUN_LEAD_RE = /^(?:(?:yes|yeah|yep|absolutely|sure|no|and|but|so|well|of\s+course)[,!]?\s+)*(?:it|it['’]s|this|they|they['’]re|everything|all\s+of\s+(?:it|them))\b/i;
+const SUBJECTLESS_SAFE_RE = /^(?:(?:yes|yep|absolutely|sure)[,!]?\s*)?(?:(?:completely|totally|perfectly|100%|very)\s+)?(?:safe|harmless|non-?toxic|risk[-\s]?free)\b|^(?:s[íi][,!]?\s*)?(?:es|son|est[áa]n?)\s+(?:(?:completamente|totalmente|muy)\s+)?(?:segur|inofensiv)/i;
+// Clauses, not just sentences: "Don't worry, it's completely safe".
+function sentencesOf(text) {
+  return String(text || '')
+    .split(/(?<=[.!?])\s+|[,;:—–]\s*|\n+/)
+    .map((part) => part.trim().replace(/^[¿¡"'“”‘’(\s]+/, ''))
+    .filter(Boolean);
+}
+
+// Any duration unit, glued to digits or not, English or Spanish.
+const DURATION_RE = /(?:\b|(?<=\d))(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?|overnight|segundos?|minutos?|horas?|d[ií]as?|semanas?|seg|h)\b/i;
+// A visit / scheduling duration ("The visit takes about 45 minutes", "every
+// 21 days") — exempt only when no drying or re-entry wording is present.
+const SCHEDULING_DURATION_RE = /\b(?:visits?|appointments?|arriv\w*|window|technicians?|tech|inspections?|on[-\s]?site|takes?|took|lasts?|business\s+days?|respond\w*|repl(?:y|ies)|schedul\w*|book\w*|next\s+(?:treatment|service|visit|application)|(?:next|this|coming|following)\s+(?:week|month|day)|every|each|pr[oó]xim[oa]\s+(?:semana|mes|d[ií]a)|esta\s+semana|quarterly|monthly|citas?|visitas?|lleg\w*|t[eé]cnicos?|inspecci[oó]n|dura(?:n|r)?|cada|programad\w*)\b/i;
+const DRY_OR_REENTRY_RE = /\b(?:dr(?:y|ies|ied|ying)|re-?ent\w*|re-?occup\w*|occup\w*|re-?ocup\w*|ocupa\w*|keep|kept|stay\w*|wait\w*|avoid\w*|before\s+(?:letting|walking|going|allowing|touching)|return\w*|back\s+in(?:side|doors)?|go(?:ing)?\s+(?:back\s+)?(?:inside|outside|in|out)|come\s+(?:back\s+)?in(?:side)?|let\s+\S+\s+(?:out|in|back)|walk\w*|play\w*|touch\w*|contact\w*|access\w*|resume\w*|normal\s+(?:use|activit\w*)|until|rainfast|rain\w*|water(?:ing|ed)?|sec[oa]s?|seca(?:r|rse|do|da)?|volver|regres\w*|entrar|reingres\w*|salir|re-?entrada|esper\w*|evit\w*|mant[eé]n\w*|fuera|lejos|hasta|lluvia|regar|rieg\w*|toc\w*|acceso)\b/i;
+
+const INTAKE_EPA_APPROVED_ES_RE = { test: (t) => EPA_MENTION_RE.test(t) && APPROVAL_WORD_RE.test(t) };
 
 function intakeSafetyClaimSupplement(reply, contextText = '') {
   const t = String(reply || '');
   if (INTAKE_EPA_APPROVED_ES_RE.test(t)) return true;
-  const treatmentContext = INTAKE_TREATMENT_CONTEXT_RE.test(`${t}\n${contextText || ''}`);
-  // The drying/re-entry wording may be in the visitor's question and only
-  // the duration in the reply ("How long after treatment can I re-enter?" →
-  // "Usually about 30 minutes.").
   const conversation = `${t}\n${contextText || ''}`;
-  if (treatmentContext && ES_DURATION_RE.test(t) && ES_DRY_OR_REENTRY_RE.test(conversation)) return true;
-  if (treatmentContext && EN_DURATION_RE.test(t) && EN_DRY_OR_REENTRY_RE.test(conversation)) return true;
-  if (!INTAKE_SAFETY_WORD_RE.test(t)) return false;
-  return treatmentContext
-    || INTAKE_PRONOUN_SAFE_RE.test(t)
-    || INTAKE_SUBJECTLESS_SAFE_RE.test(t);
+  const treatmentContext = INTAKE_TREATMENT_CONTEXT_RE.test(conversation);
+  if (treatmentContext && DURATION_RE.test(t)
+    && (!SCHEDULING_DURATION_RE.test(t) || DRY_OR_REENTRY_RE.test(conversation))) return true;
+  if (treatmentContext && safetyClaimIn(t)) return true;
+  return sentencesOf(t).some((sentence) => SUBJECTLESS_SAFE_RE.test(sentence)
+    || (PRONOUN_LEAD_RE.test(sentence) && safetyClaimIn(sentence)));
 }
+
+// A flagged reply that directs someone to emergency help keeps emergency
+// guidance (the reviewed emergency script) regardless of the model's intent
+// label — "This product is not safe to ingest; call Poison Control now."
+// must not be replaced with copy that only says to call Waves.
+const EMERGENCY_DIRECTION_RE = /\b(?:call(?:ing)?\s+911|dial\s+911|911\s+(?:right\s+away|immediately|now)|poison\s+(?:control|help)|emergency\s+(?:room|vet|veterinarian|care|services?|department)|urgent\s+care|seek\s+(?:immediate\s+)?(?:medical|emergency)|medical\s+(?:attention|care|help|emergency)|call\s+(?:a|your)\s+(?:doctor|physician|vet|veterinarian)|centro\s+de\s+(?:toxicolog[ií]a|envenenamientos?)|control\s+de\s+(?:envenenamientos?|intoxicaciones)|sala\s+de\s+emergencias?|atenci[oó]n\s+m[eé]dica|llam[ea]\s+al\s+911)\b/i;
+const POISON_MENTION_RE = /\b(?:poison\s+(?:control|help)|swallow\w*|ingest\w*|control\s+de\s+envenenamientos?|centro\s+de\s+toxicolog[ií]a|ingiri\w*|ingerir|trag[oó]\w*)\b/i;
+const POISON_CONTROL_LINE = ' If someone swallowed a product, call Poison Control at 1-800-222-1222. / Si alguien ingirió un producto, llame a Control de Envenenamientos al 1-800-222-1222.';
 
 function scrubUnsafeClaims(result, contextText = '') {
   // The shared reentrySafetyClaimFinding is NOT called here: its worst case
   // blocks the event loop for seconds on ordinary replies (#4905), and this
-  // runs on every chat turn. The intake chokepoint below covers its classes
-  // for this surface (blanket safety, EPA-approved, fixed drying/re-entry).
+  // runs on every chat turn. The chokepoint above covers its classes for this
+  // surface (blanket safety, EPA approval, fixed drying/re-entry times).
   if (!intakeSafetyClaimSupplement(result.reply, contextText)) return result;
-  // An emergency reply keeps its 911 / call-now guidance — same special case
-  // the price scrub makes above.
+  if (result.intent === 'emergency' || EMERGENCY_DIRECTION_RE.test(result.reply)) {
+    // Emergency guidance wins, and the turn stops offering a quote.
+    return {
+      ...result,
+      reply: EMERGENCY_FALLBACK_RESULT.reply + (POISON_MENTION_RE.test(result.reply) ? POISON_CONTROL_LINE : ''),
+      intent: 'emergency',
+      service_keys: [],
+      ready_for_quote: false,
+    };
+  }
   // The reply's own language, falling back to the visitor's for short replies
   // ("Sí, es seguro.").
   const spanish = looksSpanish(result.reply) || looksSpanish(contextText);
-  const reply = result.intent === 'emergency'
-    ? EMERGENCY_FALLBACK_RESULT.reply
-    : (spanish ? UNSAFE_CLAIM_REPLY_ES : UNSAFE_CLAIM_REPLY);
-  return { ...result, reply };
+  return { ...result, reply: spanish ? UNSAFE_CLAIM_REPLY_ES : UNSAFE_CLAIM_REPLY };
 }
 
 // Validate + coerce whatever JSON a provider returned into the wire contract.

@@ -256,6 +256,56 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
   });
 });
 
+// Claim-shape chokepoint: EPA approval in any form, positive safety words or
+// negated hazards, and any treatment-context duration that isn't a plain
+// visit/scheduling duration — plus false-positive guards for each shape.
+describe('intakeSafetyClaimSupplement — claim shapes', () => {
+  const { intakeSafetyClaimSupplement } = _internals;
+  test.each([
+    ['Our pesticide was approved for residential use by the EPA.', ''],
+    ['These products have approval from the EPA.', ''],
+    ['Our treatment poses zero danger to children.', ''],
+    ['Our pesticide presents no hazard to pets.', ''],
+    ['The treated room can be reoccupied after 30 minutes.', ''],
+    ["It won't harm your pets.", 'Is your spray okay for dogs?'],
+    ['Yes, it will not cause any harm.', ''],
+    ['No te preocupes, el tratamiento no representa ningún peligro para tus mascotas.', ''],
+    ['Usually about 30 minutes.', 'How long after treatment can I re-enter?'],
+    ['It takes about 2 hours to dry.', 'How long does the treatment take?'],
+    ['Our products are gentle on pets.', ''],
+    ['The spray is pet-friendly.', ''],
+  ])('flags: %s', (reply, context) => {
+    expect(intakeSafetyClaimSupplement(reply, context)).toBe(true);
+  });
+
+  test.each([
+    ['Black widows are dangerous; we treat webs and harborage areas.', ''],
+    ['The visit takes about 45 minutes.', 'How long does the treatment take?'],
+    ['No problem, we can treat your yard next week.', ''],
+    ["We can't treat dangerous wasp nests at height, but we can refer you.", ''],
+    ['Our barrier treatment repeats every 21 days.', 'How often do you treat for mosquitoes?'],
+    ['Our products are EPA-registered and your technician follows the label.', ''],
+    ['Your next treatment is in two weeks.', ''],
+  ])('leaves alone: %s', (reply, context) => {
+    expect(intakeSafetyClaimSupplement(reply, context)).toBe(false);
+  });
+
+  test('a flagged reply with emergency direction keeps emergency guidance and drops the quote CTA', () => {
+    const out = scrubUnsafeClaims({
+      reply: 'This product is not safe to ingest; call Poison Control now.',
+      intent: 'question',
+      service_keys: ['pest'],
+      ready_for_quote: true,
+      source: 'openai',
+    });
+    expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
+    expect(out.reply).toContain('1-800-222-1222');
+    expect(out.intent).toBe('emergency');
+    expect(out.ready_for_quote).toBe(false);
+    expect(out.service_keys).toEqual([]);
+  });
+});
+
 describe('scrubPriceTalk — the no-price invariant', () => {
   const base = { reply: '', intent: 'quote', service_keys: ['pest'], ready_for_quote: false };
 
