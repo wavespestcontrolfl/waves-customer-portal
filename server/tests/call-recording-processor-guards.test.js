@@ -1675,3 +1675,27 @@ describe('attachCandidateMatchesProperty (attach evidence gate)', () => {
     expect(attachCandidateMatchesProperty({ property_id: 'prop-9' }, { propertyId: null, address: null })).toBe(false);
   });
 });
+
+describe('clarify-draft target phone (owner directive 2026-09-26: both directions)', () => {
+  const { clarifyAskTargetPhone } = CallRecordingProcessor._test;
+
+  test('inbound: the caller ANI', () => {
+    expect(clarifyAskTargetPhone({ direction: 'inbound', from_phone: '+19145234413', to_phone: '+19412975749' }))
+      .toBe('+19145234413');
+  });
+
+  test('outbound: the dialed customer number, never our own line', () => {
+    expect(clarifyAskTargetPhone({ direction: 'outbound', from_phone: '+19412975749', to_phone: '+19145234413' }))
+      .toBe('+19145234413');
+  });
+
+  test('outbound lead-webhook bridge: the lead leg from bridge metadata, not the staff cell in to_phone', () => {
+    expect(clarifyAskTargetPhone({
+      direction: 'outbound',
+      source: 'lead-webhook-auto-bridge',
+      from_phone: '+19412975749',
+      to_phone: '+19415550123',
+      metadata: { type: 'lead_auto_bridge', leadPhone: '+19145234413' },
+    })).toBe('+19145234413');
+  });
+});

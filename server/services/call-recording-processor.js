@@ -1032,6 +1032,16 @@ function resolveCallContactPhone(call = {}, extractedPhone = null) {
   return firstExternalPhone(call.from_phone, extracted, call.to_phone);
 }
 
+// The customer's own number for an approval-gated clarify draft, either
+// direction (owner directive 2026-09-26): the inbound ANI, or on an outbound
+// call the customer leg resolveCallContactPhone already derives — the dialed
+// number, or for a lead-webhook-auto-bridge call (whose to_phone is the staff
+// cell) the bridge metadata's leadPhone. Never a dictated callback number:
+// no extracted override is passed (codex pre-push P1).
+function clarifyAskTargetPhone(call = {}) {
+  return isOutboundCall(call) ? resolveCallContactPhone(call, null) : firstExternalPhone(call.from_phone);
+}
+
 function isLiveLeadConversation({ call, extracted, leadId, finalStatus, nonLeadCall, voicemailLeadPath, transcription }) {
   return !!leadId && finalStatus === 'processed' && !nonLeadCall && !voicemailLeadPath
     && call?.status === 'completed' && call.call_outcome !== 'voicemail'
@@ -14233,10 +14243,7 @@ const CallRecordingProcessor = {
           && v2Result?.extraction?.consent?.do_not_contact_request !== true
           && extracted.do_not_contact_request !== true) {
           try {
-            // The customer's own number either way — the inbound ANI, or
-            // the dialed number on an outbound call (never call.from_phone,
-            // which on outbound is one of our own lines).
-            const clarifyAni = firstExternalPhone(isOutboundCall(call) ? call.to_phone : call.from_phone);
+            const clarifyAni = clarifyAskTargetPhone(call);
             const hasStreet = !!String(extracted.address_line1 || '').trim();
             // The ACTIVE missing_unit_number card is the source of truth for
             // the unit ask (codex post-trim r2 P1 ×2): on a reprocess the
@@ -20045,6 +20052,7 @@ CallRecordingProcessor._test = {
   resolveDefaultCallBookingTechnician,
   resolveDefaultCallBookingTechnicianId,
   resolveCallContactPhone,
+  clarifyAskTargetPhone,
   isLiveLeadConversation,
   summarizeCustomerServiceContext,
   resolveSchedulableCallService,
