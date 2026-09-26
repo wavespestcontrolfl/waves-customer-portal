@@ -52,6 +52,10 @@ function adsClientConfigured() {
 const ADS_REPORT_OBJECT_LISTS = ['recommendations', 'waste_alerts', 'scaling_opportunities', 'capacity_warnings', 'seo_insights'];
 const ADS_PRIORITIES = new Set(['high', 'medium', 'low']);
 const isRenderable = (v) => v == null || typeof v === 'string' || typeof v === 'number';
+const canonicalGrade = (v) => {
+  const g = typeof v === 'string' ? v.trim().toUpperCase() : '';
+  return /^[ABCDF][+-]?$/.test(g) ? g : null;
+};
 const isText = (v) => typeof v === 'string' && v.trim() !== '';
 const canonicalPriority = (v) => (typeof v === 'string' ? v.trim().toLowerCase() : '');
 // [label, ...other rendered fields] per secondary list.
@@ -70,7 +74,9 @@ function isUsableRecommendation(rec) {
 }
 function isUsableAdsReport(advice) {
   if (!advice || typeof advice !== 'object' || Array.isArray(advice)) return false;
-  if (typeof advice.grade !== 'string' || !advice.grade.trim() || advice.grade.length > 255) return false;
+  // The documented A/B/C/D/F (a +/- is kept): the pages colour a grade by
+  // its first letter, so " A " or "Excellent" showed the wrong status (Codex r21).
+  if (!canonicalGrade(advice.grade)) return false;
   if (typeof advice.overall_assessment !== 'string' || !advice.overall_assessment.trim()) return false;
   if (advice.insights != null && !(Array.isArray(advice.insights) && advice.insights.every(isText))) return false;
   const listsOk = ADS_REPORT_OBJECT_LISTS.every((key) => advice[key] == null || (Array.isArray(advice[key]) && advice[key].every((v) => v && typeof v === 'object' && !Array.isArray(v))));
@@ -84,6 +90,7 @@ function isUsableAdsReport(advice) {
 // check already accepted ("High" → "high"), so the page's exact grouping
 // shows it.
 function normalizeAdsReport(advice) {
+  advice.grade = canonicalGrade(advice.grade) || advice.grade;
   if (Array.isArray(advice.recommendations)) {
     for (const rec of advice.recommendations) rec.priority = canonicalPriority(rec.priority);
   }

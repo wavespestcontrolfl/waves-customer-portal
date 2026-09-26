@@ -42,6 +42,10 @@ try { TwilioService = require('../twilio'); } catch { TwilioService = null; }
 // Same shape as tax-advisor.js's isUsableTaxReport.
 const SEO_REPORT_OBJECT_LISTS = ['recommendations', 'page2_opportunities', 'declining_alerts', 'gbp_insights', 'technical_issues', 'mobile_insights'];
 const isRenderable = (v) => v == null || typeof v === 'string' || typeof v === 'number';
+const canonicalGrade = (v) => {
+  const g = typeof v === 'string' ? v.trim().toUpperCase() : '';
+  return /^[ABCDF][+-]?$/.test(g) ? g : null;
+};
 // The advisor tab groups recommendations by exact lowercase priority, so one
 // labelled "High" or unlabelled silently disappeared (Codex r20 on #4884):
 // any case is accepted here and lower-cased after acceptance.
@@ -54,7 +58,9 @@ function isUsableRecommendation(rec) {
 }
 function isUsableSeoReport(report) {
   if (!report || typeof report !== 'object' || Array.isArray(report)) return false;
-  if (typeof report.grade !== 'string' || !report.grade.trim() || report.grade.length > 255) return false;
+  // The documented A/B/C/D/F (a +/- is kept): the pages colour a grade by
+  // its first letter, so " A " or "Excellent" showed the wrong status (Codex r21).
+  if (!canonicalGrade(report.grade)) return false;
   if (typeof report.overall_assessment !== 'string' || !report.overall_assessment.trim()) return false;
   if (report.wins != null && !Array.isArray(report.wins)) return false;
   const listsOk = SEO_REPORT_OBJECT_LISTS.every((key) => report[key] == null || (Array.isArray(report[key]) && report[key].every((v) => v && typeof v === 'object' && !Array.isArray(v))));
@@ -252,6 +258,7 @@ Analyze and provide specific, prioritized recommendations.`,
       // the catch below and stores the deterministic fallback report.
       if (!res.ok) throw new Error(`report dispatch failed: ${res.reason}`);
       const report = res.json;
+      report.grade = canonicalGrade(report.grade) || report.grade;
       if (Array.isArray(report.recommendations)) {
         for (const rec of report.recommendations) rec.priority = canonicalPriority(rec.priority);
       }

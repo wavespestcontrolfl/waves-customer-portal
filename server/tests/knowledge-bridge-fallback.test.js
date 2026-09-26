@@ -33,3 +33,19 @@ describe('knowledge-bridge callClaude', () => {
     expect(mockCreate).toHaveBeenCalledTimes(1);
   });
 });
+
+// Codex r21 on #4884: `{}` passed the (r37, tested) shape rule and was stored
+// with grounded provenance; a separate content rule now requires the summary.
+test('an empty primary payload fails its row and the Claude fallback answers', async () => {
+  dispatch.mockResolvedValue({ ok: true, json: {} });
+  mockCreate.mockResolvedValue({ stop_reason: 'end_turn', content: [{ type: 'text', text: JSON.stringify(GOOD) }] });
+  expect(JSON.parse(await callClaude('sys', 'user'))).toEqual(GOOD);
+  expect(rejectCall).toHaveBeenCalledWith(expect.anything(), 'schema_invalid');
+});
+
+test('recommendationPayloadHasContent needs a non-blank summary', () => {
+  const { _test: { recommendationPayloadHasContent } } = require('../services/knowledge-bridge');
+  expect(recommendationPayloadHasContent({})).toBe(false);
+  expect(recommendationPayloadHasContent({ summary: '   ', recommendations: [] })).toBe(false);
+  expect(recommendationPayloadHasContent({ summary: 'Lawn is recovering.' })).toBe(true);
+});

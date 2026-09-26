@@ -214,6 +214,9 @@ function planShapeInvalid(plan) {
   // automation_policy 'skip' for the prospect (Codex r18 on #4884).
   if (!plan.actions.length) return true;
   if (!plan.actions.every((a) => a && ALLOWED_ACTIONS.has(a.action))) return true;
+  // Playwright takes a selector string; an object one was accepted here and
+  // then rejected by $eval / fill / click (Codex r21 on #4884).
+  if (!plan.actions.every((a) => typeof a.selector === 'string' && a.selector.trim())) return true;
   if (plan.actions.some((a) => (a.action === 'fill' || a.action === 'select') && !hasUsableValue(a))) return true;
   const last = plan.actions[plan.actions.length - 1];
   if (plan.actions.filter((a) => a.action === 'submit').length !== 1 || last.action !== 'submit' || !last.selector) return true;
@@ -426,7 +429,7 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
       // A vocab field action (fill/select/check) with NO selector can't be performed —
       // fail closed (abort before submit) rather than silently skip and submit a
       // partially-blank listing.
-      if (!act.selector) return { outcome: 'failed', errorCode: 'field_action_failed', screenshot: shot1, notes: `${act.action} action missing selector (not submitted)` };
+      if (typeof act.selector !== 'string' || !act.selector.trim()) return { outcome: 'failed', errorCode: 'field_action_failed', screenshot: shot1, notes: `${act.action} action missing selector (not submitted)` };
       // Mirrors the plan-shape gate: an object/array/boolean value on fill/select
       // would type "[object Object]" / "true" into the live form (review on #4884).
       if ((act.action === 'fill' || act.action === 'select') && !hasUsableValue(act)) {
@@ -521,4 +524,4 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
 }
 
 module.exports = { fillCitationForm };
-module.exports._internals = { parseJson, planPrompt, ALLOWED_ACTIONS, requestAllowed, hostOf, hostMatchesExpected, resolvePublicIps, boundedShot, MAX_SHOT_EDGE };
+module.exports._internals = { parseJson, planPrompt, planShapeInvalid, ALLOWED_ACTIONS, requestAllowed, hostOf, hostMatchesExpected, resolvePublicIps, boundedShot, MAX_SHOT_EDGE };

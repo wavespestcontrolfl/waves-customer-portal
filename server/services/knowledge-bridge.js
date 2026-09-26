@@ -46,7 +46,8 @@ function slugify(text) {
 function objectAnswerProblem(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return 'invalid_output';
   // The caller's nested rule (codex P1 r37 there), so both fail the same answers.
-  return recommendationPayloadShapeValid(value) ? null : 'schema_invalid';
+  if (!recommendationPayloadShapeValid(value)) return 'schema_invalid';
+  return recommendationPayloadHasContent(value) ? null : 'schema_invalid';
 }
 
 async function callClaude(systemPrompt, userPrompt, maxTokens = 2048) {
@@ -208,6 +209,14 @@ function recommendationPayloadShapeValid(raw) {
     }
   }
   return true;
+}
+
+// Shape (above) and content are separate rules: the r37 shape check keeps
+// accepting absent fields, but a payload with no summary answered nothing —
+// `{}` was persisted with grounded provenance, replacing the assessment's
+// recommendations and blocking the Claude fallback (Codex r21 on #4884).
+function recommendationPayloadHasContent(raw) {
+  return typeof raw.summary === 'string' && raw.summary.trim() !== '';
 }
 
 function parseStoredRecommendations(value) {
@@ -1277,6 +1286,10 @@ Return a JSON object with:
           logger.warn(`[knowledge-bridge] recommendation payload for ${assessmentId} had malformed nested fields — failing run as ungrounded`);
           return null;
         }
+        if (!recommendationPayloadHasContent(raw)) {
+          logger.warn(`[knowledge-bridge] recommendation payload for ${assessmentId} had no summary — failing run as ungrounded`);
+          return null;
+        }
 
         // Model output advising against a product class applied today must
         // never persist (codex P1 r5) — the prompt rule is not a guarantee.
@@ -1542,7 +1555,7 @@ Return a JSON object with:
 };
 
 module.exports = KnowledgeBridge;
-module.exports._test = { callClaude, sanitizeRecommendationsAgainstTreatment, contradictsAppliedTreatment, contradictsAppliedProducts, appliedTreatmentClasses, generationInFlight, activeGenerationRuns, recommendationPayloadShapeValid, sendSealActive };
+module.exports._test = { callClaude, recommendationPayloadHasContent, sanitizeRecommendationsAgainstTreatment, contradictsAppliedTreatment, contradictsAppliedProducts, appliedTreatmentClasses, generationInFlight, activeGenerationRuns, recommendationPayloadShapeValid, sendSealActive };
 // Pure render-time guard surface (no DB, no LLM) — consumed by report-data
 // as the last line of defense for instantly opened report links.
 module.exports.sealRecommendationsForSend = sealForSend;

@@ -49,3 +49,25 @@ describe('wdo history — a "no" verdict needs a cited source too', () => {
     expect(normalizeHistory({ previousTreatment: 'no', confidence: 'high', sources: ['https://www.sc-pa.com/permit/9'] })).toMatchObject({ previousTreatment: 'no' });
   });
 });
+
+// Codex r21 on #4884: nested evidence is copied into FDACS Section 4 — an
+// object there became "[object Object]" on the legal form.
+describe('wdo history — nested evidence must be text as given', () => {
+  const CITED = { previousTreatment: 'yes', confidence: 'high', sources: ['https://www.manateepao.gov/permit/1'] };
+  test.each([
+    ['object treatmentNotes', { treatmentNotes: {} }],
+    ['object fumigation date', { fumigation: { date: {} } }],
+    ['a non-object fumigation', { fumigation: 'tented 2019' }],
+    ['an object permit field', { permits: [{ type: { t: 1 }, date: '2019' }] }],
+    ['a non-array permits', { permits: 'reroof 2019' }],
+    ['an implausible roof permit year', { roofPermitYear: 1850 }],
+    ['a fractional roof permit year', { roofPermitYear: 2019.5 }],
+  ])('%s fails the lookup', (_label, extra) => {
+    expect(normalizeHistory({ ...CITED, ...extra })).toBeNull();
+  });
+
+  test('text evidence, a numeric-string year and nulls are read', () => {
+    const out = normalizeHistory({ ...CITED, treatmentNotes: 'Tented 2019', fumigation: { date: '2019-05-01', fumigant: 'Vikane', company: 'Acme', notes: null }, permits: [{ type: 'reroof', date: '2021', description: 'shingle' }], roofPermitYear: '2021' });
+    expect(out).toMatchObject({ treatmentNotes: 'Tented 2019', roofPermitYear: 2021, fumigation: { fumigant: 'Vikane' } });
+  });
+});

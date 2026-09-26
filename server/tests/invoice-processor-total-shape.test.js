@@ -111,3 +111,14 @@ describe('readParsedInvoice — invoice date year', () => {
     expect(degraded).toBe(true);
   });
 });
+
+// Codex r21 on #4884: expenses.amount is decimal(12,2).
+describe('isUsableInvoiceTotal — column range', () => {
+  const { isUsableInvoiceTotal } = require('../services/email/invoice-processor');
+  test.each([[1e10], [-1e10], ['9'.repeat(400)]])('%p is off-contract', (total) => {
+    expect(isUsableInvoiceTotal(total)).toBe(false);
+  });
+  test.each([[9999999999.99], ['1250.50'], [-42.1], [null]])('%p is usable', (total) => {
+    expect(isUsableInvoiceTotal(total)).toBe(true);
+  });
+});

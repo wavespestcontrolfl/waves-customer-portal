@@ -691,3 +691,19 @@ test('a delayed JavaScript submit POST remains authorized after DOM load is alre
   expect(actions.filter(a => a[0] === 'click')).toHaveLength(1);
   expect(result).toMatchObject({ outcome: 'placed', pending: true });
 });
+
+// Codex r21 on #4884: Playwright takes a selector string.
+describe('planShapeInvalid — selectors', () => {
+  const { planShapeInvalid } = require('../services/seo/browser-form-filler')._internals;
+  const plan = (actions) => ({ form_present: true, blocked: null, actions });
+  test.each([
+    ['an object submit selector', [{ action: 'fill', selector: '#n', value: 'W' }, { action: 'submit', selector: {} }]],
+    ['an object field selector', [{ action: 'fill', selector: { css: '#n' }, value: 'W' }, { action: 'submit', selector: '#go' }]],
+    ['a blank selector', [{ action: 'check', selector: '  ' }, { action: 'submit', selector: '#go' }]],
+  ])('%s makes the plan invalid', (_label, actions) => {
+    expect(planShapeInvalid(plan(actions))).toBe(true);
+  });
+  test('string selectors are a valid plan', () => {
+    expect(planShapeInvalid(plan([{ action: 'fill', selector: '#n', value: 'W' }, { action: 'submit', selector: '#go' }]))).toBe(false);
+  });
+});

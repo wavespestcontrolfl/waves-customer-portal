@@ -125,3 +125,12 @@ describe('recommendation apply fields', () => {
     expect(isUsableAdsReport({ ...GOOD, recommendations: [{ ...rec, apply_action: 'increase_budget', apply_value: 30, campaign_id: '123' }] })).toBe(true);
   });
 });
+
+// Codex r21 on #4884: the documented A/B/C/D/F (a +/- kept); the pages colour
+// a grade by its first letter.
+test.each([['Excellent'], ['G'], ['AA'], [7]])('grade %p fails the report', (grade) => {
+  expect(isUsableAdsReport({ ...GOOD, grade })).toBe(false);
+});
+test.each([[' a '], ['B+'], ['C-'], ['F']])('grade %p is usable', (grade) => {
+  expect(isUsableAdsReport({ ...GOOD, grade })).toBe(true);
+});

@@ -94,8 +94,30 @@ function hasHistoryVerdict(parsed) {
     && ['high', 'medium', 'low'].includes(String(parsed.confidence || '').trim().toLowerCase());
 }
 
+// Nested evidence is copied into the FDACS-13645 Section 4 fields, so it must
+// be text as given: str() used to turn an object into "[object Object]" on the
+// legal form, and any number > 1800 passed as a roof permit year (Codex r21 on
+// #4884). A present off-contract value fails the lookup (retryable).
+const isEvidenceText = (v) => v === undefined || v === null || typeof v === 'string'
+  || (typeof v === 'number' && Number.isFinite(v));
+const isPlainObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+function permitYear(value) {
+  if (value === undefined || value === null || value === '') return null;
+  const year = typeof value === 'number' || typeof value === 'string' ? Number(value) : NaN;
+  return Number.isInteger(year) && year >= 1900 && year <= new Date().getUTCFullYear() + 1 ? year : undefined;
+}
+function nestedEvidenceValid(parsed) {
+  if (!isEvidenceText(parsed.treatmentNotes)) return false;
+  if (parsed.fumigation != null && !(isPlainObject(parsed.fumigation)
+    && ['date', 'fumigant', 'company', 'notes'].every((k) => isEvidenceText(parsed.fumigation[k])))) return false;
+  if (parsed.permits != null && !(Array.isArray(parsed.permits)
+    && parsed.permits.every((p) => isPlainObject(p) && ['type', 'date', 'description'].every((k) => isEvidenceText(p[k]))))) return false;
+  return permitYear(parsed.roofPermitYear) !== undefined;
+}
+
 function normalizeHistory(parsed) {
   if (!hasHistoryVerdict(parsed)) return null;
+  if (!nestedEvidenceValid(parsed)) return null;
   const pt = String(parsed.previousTreatment || '').trim().toLowerCase();
   const conf = String(parsed.confidence || '').trim().toLowerCase();
   const fum = parsed.fumigation && typeof parsed.fumigation === 'object' ? parsed.fumigation : null;
@@ -119,9 +141,7 @@ function normalizeHistory(parsed) {
         notes: str(fum.notes, 300),
       }
       : null,
-    roofPermitYear: Number.isFinite(Number(parsed.roofPermitYear)) && Number(parsed.roofPermitYear) > 1800
-      ? Number(parsed.roofPermitYear)
-      : null,
+    roofPermitYear: permitYear(parsed.roofPermitYear),
     permits: Array.isArray(parsed.permits)
       ? parsed.permits.slice(0, 10).map((p) => ({
         type: str(p?.type, 60),

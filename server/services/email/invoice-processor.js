@@ -24,8 +24,11 @@ const anthropic = new Anthropic();
 // coerce correctly).
 function isUsableInvoiceTotal(total) {
   if (total == null) return true;
-  if (typeof total === 'number') return Number.isFinite(total);
-  return typeof total === 'string' && /^-?\d+(\.\d+)?$/.test(total.trim());
+  const n = typeof total === 'number' ? total
+    : (typeof total === 'string' && /^-?\d+(\.\d+)?$/.test(total.trim()) ? Number(total) : NaN);
+  // expenses.amount is decimal(12,2): a larger total (or a digit run that
+  // converts to Infinity) failed the expense insert after acceptance (Codex r21).
+  return Number.isFinite(n) && Math.abs(n) < 1e10;
 }
 
 // The one read of the extraction: everything downstream uses these values,

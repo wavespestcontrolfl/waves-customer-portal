@@ -88,3 +88,12 @@ describe('recommendation priority', () => {
     expect(isUsableSeoReport({ ...GOOD, grade: 'B'.repeat(256) })).toBe(false);
   });
 });
+
+// Codex r21 on #4884: the documented A/B/C/D/F (a +/- kept); the pages colour
+// a grade by its first letter.
+test.each([['Excellent'], ['G'], ['AA'], [7]])('grade %p fails the report', (grade) => {
+  expect(isUsableSeoReport({ ...GOOD, grade })).toBe(false);
+});
+test.each([[' a '], ['B+'], ['C-'], ['F']])('grade %p is usable', (grade) => {
+  expect(isUsableSeoReport({ ...GOOD, grade })).toBe(true);
+});
