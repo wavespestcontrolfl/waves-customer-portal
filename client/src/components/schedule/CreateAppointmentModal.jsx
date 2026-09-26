@@ -859,6 +859,51 @@ export function lineDiscountFields(discount, discountDollars) {
   };
 }
 
+// The one WaveGuard tiers a customer can carry that ever earn an automatic
+// pick (Bronze is a real catalog row but its amount is 0 — "no discount" —
+// and One-Time/None never had a percentage row at all).
+const AUTO_TIER_ELIGIBLE = ['Silver', 'Gold', 'Platinum'];
+
+// Owner ruling 2026-09-26 ("auto-fill, staff can remove it"): a recurring
+// line with no discount chosen yet, for a Silver+ customer, preselects that
+// customer's WaveGuard tier discount — so staff stop forgetting to pick one
+// by hand (three real Silver customers were booked at full price this way).
+// Pure and testable on its own: every input the caller must already have
+// computed the SAME way a manual pick would (see the two call sites in this
+// file), so a discount the picker itself would not offer for this line is
+// never force-fed through here either.
+//
+// `offeredDiscounts` is exactly what the line's own manual picker offers —
+// the same scope/stack-group/tier-exclusivity-filtered catalog rows
+// (offeredLineDiscounts below, shared with matchingLineDiscounts) — never a
+// second, parallel eligibility computation. If a conflicting tier already
+// sits elsewhere in the same submit group, that catalog row is simply
+// absent from `offeredDiscounts` and this returns null exactly like the
+// picker would show nothing to click.
+export function autoTierDiscountForLine({
+  customerTier,
+  cadence,
+  linkedEstimate,
+  linePrepaid,
+  hasLineDiscount,
+  autoTierRemoved,
+  offeredDiscounts,
+} = {}) {
+  // An operator's own pick (or an already-applied auto pick) is never
+  // overridden, and a line the operator explicitly took the auto pick off
+  // of never gets it back — only a customer change resets that.
+  if (hasLineDiscount || autoTierRemoved) return null;
+  // Recurring lines only — a one-time (or blank-cadence) line is untouched.
+  if (!cadence || cadence === 'one_time') return null;
+  // An estimate-loaded booking may already have the tier % baked into its
+  // quoted line price; a prepaid/pay-in-full line bills the flat prepay
+  // total, not this line's own discounted rate. Neither gets an auto pick.
+  if (linkedEstimate || linePrepaid) return null;
+  if (!AUTO_TIER_ELIGIBLE.includes(customerTier)) return null;
+  const rows = Array.isArray(offeredDiscounts) ? offeredDiscounts : [];
+  return rows.find((d) => d?.is_waveguard_tier_discount && d?.requires_waveguard_tier === customerTier) || null;
+}
+
 // A recurringCount typed by the operator, parsed once: a finite integer >=
 // 2, or null when the input is blank/unusable and the server's own
 // plannedCount fallback (recurringCount || 4) should own the default — the
@@ -1939,6 +1984,15 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // jump lines and assign boosters to the wrong series.
   const [boosterOpenKey, setBoosterOpenKey] = useState(null);
 
+  // Lines the operator explicitly took the auto-preselected tier discount
+  // off of (or replaced) — keyed by the line's own stable lineId, never
+  // re-offered it for THIS line until the customer changes (the effect
+  // below resets this on a new selectedCustomer.id). Cleared by
+  // clearLineDiscount only when the discount it's removing was itself
+  // auto-applied — an operator clearing their OWN manual pick never touches
+  // this set, so a fresh auto pick can still reach an empty line later.
+  const [autoTierDismissed, setAutoTierDismissed] = useState({});
+
   const lineDiscountPresets = useMemo(() => {
     return discountPresets.filter((d) => (
       d.is_active
@@ -2319,21 +2373,31 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       })
       .filter(Boolean);
   };
+  // Codex #4405 P2: the appointment discount rides exactly ONE cadence
+  // group (appointmentDiscountGroup — a split booking posts each group as
+  // its own separate appointment request). Including its spansAll row
+  // unconditionally hid the identical tier from every line's picker, even
+  // one in a DIFFERENT group that never carries this discount and posts
+  // separately. appointmentDiscountGroup is defined below; safe here for
+  // the same forward-reference reason lineLaneRows above already relies on.
+  //
+  // The FULL scope/stack-group/tier-exclusivity-filtered catalog for one
+  // line, with no search-query filter and no display cap — shared by
+  // matchingLineDiscounts (the picker) and autoTierDiscountForLine (the
+  // auto-preselect effect below) so both ask the exact same "would this
+  // line's picker offer it" question.
+  const offeredLineDiscounts = (idx) => {
+    const svc = services[idx];
+    return presetsStackableWith([
+      ...lineLaneRows(idx),
+      appointmentDiscountSpansLine(appointmentDiscountGroup, svc) ? laneRow(appointmentDiscount, { spansAll: true }) : null,
+    ], { scope: `line:${idx}` });
+  };
   const matchingLineDiscounts = (idx) => {
     const svc = services[idx];
     const key = svc?.lineId || idx;
     const q = (lineDiscountQueries[key] || '').trim().toLowerCase();
-    // Codex #4405 P2: the appointment discount rides exactly ONE cadence
-    // group (appointmentDiscountGroup — a split booking posts each group as
-    // its own separate appointment request). Including its spansAll row
-    // unconditionally hid the identical tier from every line's picker, even
-    // one in a DIFFERENT group that never carries this discount and posts
-    // separately. appointmentDiscountGroup is defined below; safe here for
-    // the same forward-reference reason lineLaneRows above already relies on.
-    const offered = presetsStackableWith([
-      ...lineLaneRows(idx),
-      appointmentDiscountSpansLine(appointmentDiscountGroup, svc) ? laneRow(appointmentDiscount, { spansAll: true }) : null,
-    ], { scope: `line:${idx}` });
+    const offered = offeredLineDiscounts(idx);
     if (!q) return offered.slice(0, 10);
     return offered
       .filter((d) => `${d.name || ''} ${d.description || ''} ${formatDiscountLabel(d)}`.toLowerCase().includes(q))
@@ -2515,6 +2579,15 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   };
   const clearLineDiscount = (idx) => {
     if (partialCommitLocked) return;
+    // Removing (or, via this same "x" then a fresh pick, changing) an
+    // AUTO-applied discount permanently opts this line out of the auto
+    // pick — never a manual pick the operator made themselves, and never
+    // past a customer change (autoTierDismissed resets there).
+    const wasAutoTier = !!services[idx]?.lineDiscount?.autoApplied;
+    if (wasAutoTier) {
+      const key = services[idx]?.lineId || idx;
+      setAutoTierDismissed((prev) => ({ ...prev, [key]: true }));
+    }
     setServices((arr) => arr.map((s, i) => (i === idx ? { ...s, lineDiscount: null } : s)));
   };
   // Display totals use the EFFECTIVE amounts (entered price, or the auto
@@ -3228,6 +3301,75 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     // catches a cadence-only edit with no discount change at all — same
     // reasoning as existingSelectionConflict's own dependency list above.
   }, [appointmentSubmitGroups, services, selectedCustomer, apptDate, appointmentDiscount, appointmentDiscountGroup, recurringCount, collectPrepay, committedGroupKeysVersion]);
+
+  // --- WaveGuard tier auto-preselect (owner ruling 2026-09-26: "auto-fill,
+  // staff can remove it") — three real Silver customers were booked at full
+  // price from admin because nothing on this form ever picked their tier
+  // discount for them. Silently stamps a recurring line's discount slot
+  // exactly like a manual pick would (the same base-amount/preview-cap
+  // guards applyLineDiscount enforces), but never toasts or blocks on them
+  // — an automatic action that can't yet apply just skips, and the effect
+  // below tries again on the next relevant change (a price typed in, a
+  // line added, a group reshaped).
+  const applyAutoTierDiscount = (idx, discount, tier) => {
+    if (partialCommitLocked) return;
+    const targetGroup = appointmentSubmitGroups.find((g) => g.lines.includes(services[idx]));
+    if (targetGroup && wouldExceedPreviewGroupCap({ previewGroupRequests, targetKey: groupKey(targetGroup), cap: PREVIEW_GROUP_CAP })) return;
+    const base = lineEffectiveBaseAmount(services[idx]);
+    if (base <= 0 || previewLineDiscount(discount, base) <= 0) return;
+    setServices((arr) => arr.map((s, i) => (i === idx ? {
+      ...s,
+      lineDiscount: {
+        id: discount.id,
+        name: discount.name,
+        discount_type: discount.discount_type,
+        amount: discount.amount,
+        max_discount_dollars: discount.max_discount_dollars,
+        // Tags this pick as OURS, never an operator's own choice — read by
+        // clearLineDiscount's autoTierDismissed bookkeeping and by the
+        // "Auto-applied" hint below. autoTier is frozen at the moment this
+        // was picked (never re-derived from selectedCustomer.tier later,
+        // which the customer-change effect below may since have moved on).
+        autoApplied: true,
+        autoTier: tier,
+      },
+    } : s)));
+  };
+  // A customer change re-evaluates from scratch: clear this session's
+  // dismissals and any still-auto-applied discount (one picked for the
+  // PREVIOUS customer's tier would otherwise survive, unremovable, onto a
+  // newly selected different customer) so the effect just below picks
+  // correctly for whoever is selected now — or applies nothing at all for
+  // a Bronze/None/One-Time customer.
+  const autoTierCustomerId = selectedCustomer?.id ?? null;
+  useEffect(() => {
+    setAutoTierDismissed({});
+    setServices((arr) => arr.map((s) => (s.lineDiscount?.autoApplied ? { ...s, lineDiscount: null } : s)));
+  }, [autoTierCustomerId]);
+  useEffect(() => {
+    if (partialCommitLocked || !selectedCustomer) return;
+    const tier = selectedCustomer.tier;
+    if (!AUTO_TIER_ELIGIBLE.includes(tier)) return;
+    const prepaid = !!(collectPrepay || billAsAnnualPrepay || billAsManualPrepay);
+    services.forEach((svc, idx) => {
+      const key = svc.lineId || idx;
+      const discount = autoTierDiscountForLine({
+        customerTier: tier,
+        cadence: svc.cadence,
+        linkedEstimate: !!linkedEstimate,
+        linePrepaid: prepaid,
+        hasLineDiscount: !!svc.lineDiscount,
+        autoTierRemoved: !!autoTierDismissed[key],
+        offeredDiscounts: offeredLineDiscounts(idx),
+      });
+      if (discount) applyAutoTierDiscount(idx, discount, tier);
+    });
+  }, [
+    selectedCustomer, services, linkedEstimate, collectPrepay, billAsAnnualPrepay,
+    billAsManualPrepay, discountPresets, appointmentDiscount, appointmentDiscountGroup,
+    autoTierDismissed, partialCommitLocked,
+  ]);
+
   const previewRequestKey = previewGroupRequests.length ? JSON.stringify(previewGroupRequests) : '';
   const [serverPreview, setServerPreview] = useState({ status: 'idle', forKey: '', regime: null, byKey: new Map() });
   // Bumping this forces the effect below to re-run even when
@@ -5400,6 +5542,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                     <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
                       {formatDiscountLabel(svc.lineDiscount)}
                     </div>
+                    {svc.lineDiscount.autoApplied && (
+                      <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
+                        Auto-applied: WaveGuard {svc.lineDiscount.autoTier} member
+                      </div>
+                    )}
                   </div>
                   <div style={{ fontFamily: ROBOTO_STACK, fontSize: 13, fontWeight: 500, color: D.text, textAlign: isMobile ? 'left' : 'right', whiteSpace: 'nowrap' }}>
                     -${stackedLineDiscountAmount(svc).toFixed(2)}
