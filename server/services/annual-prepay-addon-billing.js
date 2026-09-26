@@ -51,6 +51,7 @@ function parseNotes(value) {
 }
 
 const roundCents = (n) => Math.round(n * 100) / 100;
+const UNPRICED_REASON = 'an add-on has no price yet — price it and bill it';
 // How an invoice is named in an office alert.
 const invoiceLabel = (invoice) => invoice?.invoice_number || invoice?.id || 'unknown';
 
@@ -246,13 +247,29 @@ class CoveredVisitCloseout {
       await this.alert('the add-on lines could not be built', { error: String(err.message).slice(0, 200) });
       return null;
     }
-    if (addons.unpriced) await this.alert('an add-on has no price yet — price it and bill it');
+    if (addons.unpriced) await this.alert(UNPRICED_REASON);
     if (!extras.lines.length) return null;
     if (extras.ambiguous) {
       await this.alert(`a visit-wide discount applies, so the add-ons' share of it is unclear (they list at $${extras.total.toFixed(2)})`, { addonTotal: extras.total });
       return null;
     }
     return { current, addons, extras };
+  }
+
+  // This closeout's own add-ons bill, found again on a retry: collected
+  // again, and an add-on still awaiting its price is alerted again (the
+  // earlier pass's alert may not have landed).
+  async resumeOwnBill(own) {
+    let addons;
+    try {
+      addons = await annualPrepayAddonRows(this.svc);
+    } catch (err) {
+      this.lookupError = err;
+      logger.error(`[dispatch] annual-prepay add-on rows unreadable for visit ${this.svc.id}: ${err.message}`);
+      return;
+    }
+    if (addons.unpriced) await this.alert(UNPRICED_REASON);
+    await this.takeBill(own);
   }
 
   // Bill the add-ons on a visit with no invoice history. The mint re-checks
@@ -442,7 +459,7 @@ class CoveredVisitCloseout {
     // recorded, nothing is minted again: voided, canceled or refunded since,
     // or joined by another invoice, it is the office's call.
     if (own && history.length === 1 && !require('./invoice').CANCELLED_SERVICE_RESOLVED_STATUSES.includes(own.status)) {
-      await this.takeBill(own);
+      await this.resumeOwnBill(own);
     } else if (history.length || this.ctx.terminalCompletionInvoice || this.ownBillId) {
       await this.reconcileWithOfficeInvoices(history);
     } else if (this.billable) {

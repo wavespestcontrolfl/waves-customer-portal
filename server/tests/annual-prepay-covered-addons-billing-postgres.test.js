@@ -494,6 +494,21 @@ postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
       expect(Number((await liveInvoices(f))[0].total)).toBe(ADDON);
     });
 
+    test('an unpriced add-on alert that did not land beside a minted bill is raised by the retry — the bill is taken back, not re-minted', async () => {
+      const f = await coveredVisit({ secondAddon: true });
+      await trx('scheduled_service_addons').where({ id: f.addon2Id }).update({ base_price: null, estimated_price: null });
+      await trx('scheduled_services').where({ id: f.serviceId }).update({ estimated_price: BASE + ADDON });
+      const idempotencyKey = randomUUID();
+      const held = await withFailure(failAlerts((key) => key === `annual_prepay_addons_unbilled:${f.serviceId}`), () => complete(f, {}, { idempotencyKey }));
+      expect(held).toMatchObject({ status: 503, body: { code: 'annual_prepay_addons_alert_failed' } });
+      const [bill] = await liveInvoices(f);
+      const retry = await complete(f, {}, { idempotencyKey });
+      expect(retry).toMatchObject({ status: 200 });
+      expect((await liveInvoices(f)).map((i) => i.id)).toEqual([bill.id]);
+      expect(retry.body?.invoiceId).toBe(bill.id);
+      expect((await addonsAlert(f)).body).toMatch(/no price yet/);
+    });
+
     test('a bill minted but not recorded on the record is never billed twice — the retry leaves it to the office', async () => {
       const f = await coveredVisit();
       const idempotencyKey = randomUUID();
