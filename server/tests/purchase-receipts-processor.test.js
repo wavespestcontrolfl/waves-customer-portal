@@ -47,11 +47,11 @@ jest.mock('../models/db', () => {
       q.first = async () => { mockDbState.lockedProducts.push(q._cond.id); return { id: q._cond.id }; };
       return q;
     }
-    // By full key, or (the hand-off check) by vendor + shipment + a status list.
+    // By full key; or (the hand-off check) every row of a shipment with one of a status list.
     q.whereIn = (_column, statuses) => { q._statuses = statuses; return q; };
-    q.first = async () => (q._statuses
-      ? Object.values(mockDbState.lines).find((l) => l.vendor === q._cond.vendor && l.shipment_key === q._cond.shipment_key && q._statuses.includes(l.status))
-      : mockDbState.lines[`${q._cond.vendor}|${q._cond.order_number}|${q._cond.shipment_key}|${q._cond.line_no}`]);
+    q.select = async () => Object.values(mockDbState.lines)
+      .filter((l) => l.vendor === q._cond.vendor && l.shipment_key === q._cond.shipment_key && q._statuses.includes(l.status));
+    q.first = async () => mockDbState.lines[`${q._cond.vendor}|${q._cond.order_number}|${q._cond.shipment_key}|${q._cond.line_no}`];
     q.insert = (row) => {
       const res = {
         onConflict: () => res,
@@ -436,9 +436,27 @@ describe('processReceiptLine', () => {
     expect(mockAdjustStock).not.toHaveBeenCalled();
   });
 
+  test.each([
+    ['an itemless email\'s no_items placeholder', 'no_items', 'email-other'],
+    ['an earlier email with no readable Order #', 'no_order_number', 'email-other'],
+  ])('a later readable email for a shipment handed off by %s is never auto-logged', async (_label, status, emailId) => {
+    mockState.match = { matched: true, product: taurus };
+    mockDbState.lines['amazon|unknown|ship-1|1'] = { id: 'line-held', vendor: 'amazon', shipment_key: 'ship-1', status, email_id: emailId };
+    expect(await processReceiptLine(taurusLine({ lineNo: 2 }))).toEqual({ skipped: true, reason: 'asked_to_log_by_hand' });
+    expect(mockAdjustStock).not.toHaveBeenCalled();
+  });
+
+  test('an orderless email\'s own second item is still recorded (its first line\'s hold stops only other emails)', async () => {
+    mockState.match = { matched: true, product: taurus };
+    const orderless = (lineNo) => taurusLine({ orderNumber: null, holdAs: 'no_order_number', lineNo });
+    await processReceiptLine(orderless(1));
+    expect(await processReceiptLine(orderless(2))).toMatchObject({ status: 'no_order_number' });
+    expect(Object.keys(mockDbState.lines)).toEqual(['amazon|unknown|ship-1|1', 'amazon|unknown|ship-1|2']);
+  });
+
   test('a shipment already handed to a person (no_delivery_email) is never auto-logged by its late Delivered email', async () => {
     mockState.match = { matched: true, product: taurus };
-    mockDbState.lines['amazon|900-1000001-1000001|ship-1|7'] = { id: 'line-alert', vendor: 'amazon', shipment_key: 'ship-1', status: 'no_delivery_email' };
+    mockDbState.lines['amazon|900-1000001-1000001|ship-1|7'] = { id: 'line-alert', vendor: 'amazon', shipment_key: 'ship-1', status: 'no_delivery_email', email_id: 'shipped-email' };
     expect(await processReceiptLine(taurusLine())).toEqual({ skipped: true, reason: 'asked_to_log_by_hand' });
     expect(mockAdjustStock).not.toHaveBeenCalled();
     expect(Object.keys(mockDbState.lines)).toEqual(['amazon|900-1000001-1000001|ship-1|7']);

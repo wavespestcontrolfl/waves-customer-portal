@@ -158,6 +158,17 @@ jest.setTimeout(30000);
     expect(await mockConn('purchase_receipt_lines').where({ order_number: 'unknown' }).first()).toMatchObject({ status: 'no_order_number', product_id: taurus.id });
   });
 
+  test.each([
+    ['an itemless email (no_items placeholder)', { forcedStatus: 'no_items', item: { title: 'Delivered: 1 Lawn & Garden item', quantity: 1 } }],
+    ['an email with no readable Order # (no_order_number)', { orderNumber: null, holdAs: 'no_order_number' }],
+  ])('after %s asked for a hand log, a later readable email for the shipment adds nothing', async (_label, first) => {
+    await processReceiptLine(line(first));
+    const later = { email: { id: randomUUID(), received_at: RECEIVED_AT } };
+    expect(await processReceiptLine(line({ ...later, lineNo: 1 }))).toMatchObject({ skipped: true });
+    expect(await processReceiptLine(line({ ...later, lineNo: 2 }))).toEqual({ skipped: true, reason: 'asked_to_log_by_hand' });
+    expect(await stock()).toBe(0);
+  });
+
   test('a failing stock write rolls the claim back, so the next sweep retries the line', async () => {
     await mockConn('products_catalog').where({ id: taurus.id }).update({ inventory_unit: 'each' }); // fl oz can't convert to each
     await expect(processReceiptLine(line())).rejects.toThrow(/Cannot convert/);

@@ -42,13 +42,14 @@
  * the right instruction even when sizing failed too, and it never moves
  * stock. Unmatched lines stay 'unmatched'.
  *
- * A shipment or invoice already handed to a person as a whole is never
- * auto-logged afterwards, or the box would be counted twice:
- * undelivered-shipments.js recorded it as 'no_delivery_email' (its Delivered
- * email never came), or a SiteOne invoice got an 'unreadable' placeholder
- * and its lines were read later. Every writer of a shipment's lines takes
- * the same per-shipment advisory lock (lockShipment), and the hand-off is
- * checked under it.
+ * A shipment or invoice already handed to a person is never auto-logged
+ * afterwards, or the box would be counted twice: an itemless Delivered email
+ * ('no_items') or one with no readable Order # ('no_order_number') followed
+ * by a readable email for the same shipment, a shipment whose Delivered
+ * email never came ('no_delivery_email', undelivered-shipments.js), or a
+ * SiteOne invoice with an 'unreadable' placeholder whose lines were read
+ * later. Every writer of a shipment's lines takes the same per-shipment
+ * advisory lock (lockShipment), and the hand-off is checked under it.
  *
  * Duplicate-receipt guard: the claim only catches the SAME email twice. If
  * staff already put the box on the shelf by hand, the line is held as
@@ -71,9 +72,12 @@ const SOURCES = { amazon: 'amazon_delivery', siteone: 'siteone_invoice' };
 const DUPLICATE_RESTOCK_LOOKBACK_MS = 48 * 60 * 60 * 1000;
 const UNKNOWN_ORDER = 'unknown';
 const HANDED_TO_PERSON = Object.freeze({ skipped: true, reason: 'asked_to_log_by_hand' });
-// A shipment or invoice with one of these rows was handed to a person as a
-// whole (see the header): nothing more from it is ever auto-logged.
-const HANDED_OFF_STATUSES = ['no_delivery_email', 'unreadable'];
+// Rows that asked a person to log a whole shipment or invoice by hand (see
+// the header). A placeholder stands in for every line of its email, so it
+// stops that email's own later lines too; the others stop only other emails
+// for the shipment, so the rest of their own email is still recorded.
+const PLACEHOLDER_HAND_OFFS = ['no_items', 'unreadable'];
+const HANDED_OFF_STATUSES = [...PLACEHOLDER_HAND_OFFS, 'no_order_number', 'no_delivery_email'];
 const ALREADY_PROCESSED = Object.freeze({ skipped: true, reason: 'already_processed' });
 
 // Within 1% (min 0.01 unit) counts as agreement — the rounding slack the
@@ -256,9 +260,9 @@ async function processReceiptLine({ vendor, email, orderNumber, shipmentKey, ite
 
   return conn.transaction(async (trx) => {
     await lockShipment(trx, vendor, shipmentKey);
-    if (await trx('purchase_receipt_lines').where({ vendor, shipment_key: shipmentKey }).whereIn('status', HANDED_OFF_STATUSES).first('id')) {
-      return { ...HANDED_TO_PERSON };
-    }
+    const handOffs = await trx('purchase_receipt_lines').where({ vendor, shipment_key: shipmentKey })
+      .whereIn('status', HANDED_OFF_STATUSES).select('status', 'email_id');
+    if (handOffs.some((row) => PLACEHOLDER_HAND_OFFS.includes(row.status) || row.email_id !== email.id)) return { ...HANDED_TO_PERSON };
     let classified = forcedStatus ? { status: forcedStatus, productId: null, product: null } : await classifyUnderLock(item, trx);
     if (holdAs && classified.productId) {
       classified = { status: holdAs, productId: classified.productId, product: classified.product };
