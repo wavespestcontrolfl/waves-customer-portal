@@ -5,7 +5,7 @@
 // can't: the duplicate-receipt guard's time windows and NULL-safe source
 // test, the UNIQUE claim under a concurrent run, re-reading the product
 // under a real row lock, the bell committing (or failing) with its line,
-// the status CHECKs, and rollback.
+// the status CHECKs, rollback, and the undelivered-shipment alert.
 const SKIP = !process.env.DATABASE_URL;
 const knex = require('knex');
 const { randomUUID } = require('crypto');
@@ -21,11 +21,15 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const { processReceiptLine } = require('../services/purchase-receipts/receipt-processor');
 const notifications = require('../services/notification-service');
+const { alertUndeliveredShipments } = require('../services/purchase-receipts/undelivered-shipments');
+const { runPurchaseReceiptRestockSweep } = require('../services/purchase-receipts/sweep');
 
-const TABLES = ['products_catalog', 'product_aliases', 'product_inventory_movements', 'product_restock_requests', 'purchase_receipt_lines', 'notifications'];
+const TABLES = ['products_catalog', 'product_aliases', 'product_inventory_movements', 'product_restock_requests', 'purchase_receipt_lines', 'notifications', 'emails', 'email_attachments'];
 const RECEIVED_AT = new Date('2026-09-27T15:00:00Z');
 const TITLE = 'Control Solutions Taurus SC Termiticide 78 oz';
 const HOUR = 60 * 60 * 1000;
+const DAY = 24 * HOUR;
+const ALIGNED_AMAZON_AUTH = 'dkim=pass header.i=@amazon.com; spf=pass smtp.mailfrom=amazon.com';
 
 jest.setTimeout(30000);
 (SKIP ? describe.skip : describe)('purchase receipts on PostgreSQL', () => {
@@ -51,7 +55,7 @@ jest.setTimeout(30000);
   });
 
   const line = (overrides = {}) => ({
-    email: { id: randomUUID(), received_at: RECEIVED_AT }, orderNumber: '900-1000001-1000001',
+    vendor: 'amazon', email: { id: randomUUID(), received_at: RECEIVED_AT }, orderNumber: '900-1000001-1000001',
     shipmentKey: 'ship-1', item: { title: TITLE, quantity: 2 }, lineNo: 1, ...overrides,
   });
   // A ledger row `hours` after the email's received_at (negative = before).
@@ -149,9 +153,20 @@ jest.setTimeout(30000);
   });
 
   test('no readable Order #: a would-be restock is held as no_order_number under order "unknown"', async () => {
-    expect(await processReceiptLine(line({ orderNumber: null }))).toMatchObject({ status: 'no_order_number' });
+    expect(await processReceiptLine(line({ orderNumber: null, holdAs: 'no_order_number' }))).toMatchObject({ status: 'no_order_number' });
     expect(await stock()).toBe(0);
     expect(await mockConn('purchase_receipt_lines').where({ order_number: 'unknown' }).first()).toMatchObject({ status: 'no_order_number', product_id: taurus.id });
+  });
+
+  test.each([
+    ['an itemless email (no_items placeholder)', { forcedStatus: 'no_items', item: { title: 'Delivered: 1 Lawn & Garden item', quantity: 1 } }],
+    ['an email with no readable Order # (no_order_number)', { orderNumber: null, holdAs: 'no_order_number' }],
+  ])('after %s asked for a hand log, a later readable email for the shipment adds nothing', async (_label, first) => {
+    await processReceiptLine(line(first));
+    const later = { email: { id: randomUUID(), received_at: RECEIVED_AT } };
+    expect(await processReceiptLine(line({ ...later, lineNo: 1 }))).toMatchObject({ skipped: true });
+    expect(await processReceiptLine(line({ ...later, lineNo: 2 }))).toEqual({ skipped: true, reason: 'asked_to_log_by_hand' });
+    expect(await stock()).toBe(0);
   });
 
   test('a failing stock write rolls the claim back, so the next sweep retries the line', async () => {
@@ -160,5 +175,209 @@ jest.setTimeout(30000);
     expect(await savedLine()).toBeUndefined();
     await mockConn('products_catalog').where({ id: taurus.id }).update({ inventory_unit: 'fl_oz' });
     expect(await processReceiptLine(line())).toMatchObject({ status: 'logged' });
+  });
+  describe('shipments whose Delivered email never came', () => {
+    const NOW = new Date('2026-09-30T12:00:00Z').getTime();
+    const shipped = (shipmentId, overrides = {}) => mockConn('emails').insert({
+      gmail_id: `gm-${randomUUID()}`, gmail_thread_id: 'thread', from_address: 'shipment-tracking@amazon.com',
+      subject: 'Shipped: "Control Solutions Taurus..." and 1 more item', authentication_results: ALIGNED_AMAZON_AUTH,
+      body_text: `Order #\n900-1000001-1000001\nTrack package: https://www.amazon.com/x?shipmentId=${shipmentId}\n\n`
+        + `* ${TITLE}\n  Quantity: 2\n\n* Lenovo Chromebook\n  Quantity: 1\n`,
+      received_at: new Date(NOW - 4 * DAY), ...overrides,
+    });
+    const run = (now = NOW) => alertUndeliveredShipments({
+      since: new Date(NOW - 30 * DAY), now, notifyAdmin: (...args) => notifications.notifyAdmin(...args),
+    });
+    const alertBells = (shipmentId) => mockConn('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`purchase-receipt-undelivered:${shipmentId}`]);
+
+    test('a stocked shipment unconfirmed after 3 days: its stocked items are held and ONE bell asks for a hand log', async () => {
+      await shipped('ship-1');
+      expect((await run()).undelivered).toHaveLength(1);
+      const rows = await mockConn('purchase_receipt_lines').where({ shipment_key: 'ship-1' });
+      expect(rows).toEqual([expect.objectContaining({ status: 'no_delivery_email', product_id: taurus.id, raw_title: TITLE, line_no: 1 })]);
+      const [bell] = await alertBells('ship-1');
+      expect(bell.body).toBe("Amazon shipped Taurus SC ×2 on September 26 but never sent a delivery confirmation, so it wasn't added. If it arrived, log it by hand.");
+      expect(await stock()).toBe(0);
+    });
+
+    test('a re-run never re-rings', async () => {
+      await shipped('ship-1');
+      await run();
+      expect((await run()).undelivered).toEqual([]);
+      expect(await alertBells('ship-1')).toHaveLength(1);
+      expect(await mockConn('purchase_receipt_lines').where({ shipment_key: 'ship-1' })).toHaveLength(1);
+    });
+
+    test('its late Delivered email is never auto-logged, so the box can\'t be counted twice', async () => {
+      await shipped('ship-1');
+      await run();
+      // The same line key as the alert's row, and a line the Delivered email numbers differently.
+      expect(await processReceiptLine(line())).toEqual({ skipped: true, reason: 'already_processed' });
+      expect(await processReceiptLine(line({ lineNo: 2 }))).toEqual({ skipped: true, reason: 'asked_to_log_by_hand' });
+      expect(await stock()).toBe(0);
+    });
+
+    test('a shipment whose Delivered email came is settled: no bell', async () => {
+      await processReceiptLine(line()); // the Delivered line for shipment ship-1
+      await shipped('ship-1');
+      expect((await run()).undelivered).toEqual([]);
+      expect(await alertBells('ship-1')).toHaveLength(0);
+    });
+
+    test('a promised arrival day is waited out, plus the day after: "Arriving Wednesday" from Sun Sep 13 rings Fri Sep 18', async () => {
+      const shippedSunday = new Date('2026-09-13T17:12:00Z'); // 1:12 PM ET
+      await shipped('ship-6', { received_at: shippedSunday, body_text: `Arriving Wednesday\nOrder #\n900-1000001-1000001\nhttps://www.amazon.com/x?shipmentId=ship-6\n\n* ${TITLE}\n  Quantity: 1\n` });
+      expect((await run(new Date('2026-09-17T16:00:00Z').getTime())).undelivered).toEqual([]); // Thursday noon ET
+      expect((await run(new Date('2026-09-18T05:00:00Z').getTime())).undelivered).toHaveLength(1); // Friday 1 AM ET
+      const [bell] = await alertBells('ship-6');
+      expect(bell.body).toBe("Amazon shipped Taurus SC ×1 on September 13 (due September 16) but never sent a delivery confirmation, so it wasn't added. If it arrived, log it by hand.");
+    });
+
+    test('around the physical count: flagged by when it was due, and any Delivered email settles it', async () => {
+      const since = new Date(NOW - 5 * DAY); // the count
+      const beforeCount = new Date(since.getTime() - DAY); // shipped the day before it
+      const dueAfterCount = new Date(beforeCount.getTime() + 3 * DAY).toLocaleDateString('en-US', { weekday: 'long', timeZone: 'America/New_York' });
+      const body = (shipmentId, arriving) => `Arriving ${arriving}\nOrder #\n900-1000001-1000001\nhttps://www.amazon.com/x?shipmentId=${shipmentId}\n\n* ${TITLE}\n  Quantity: 1\n`;
+      await shipped('ship-due-after', { received_at: beforeCount, body_text: body('ship-due-after', dueAfterCount) }); // not in the count: flagged
+      await shipped('ship-due-before', { received_at: beforeCount, body_text: body('ship-due-before', 'today') }); // due before the count: in it
+      await shipped('ship-delivered', { received_at: beforeCount, body_text: body('ship-delivered', dueAfterCount) });
+      await deliveredEmail({ body_text: 'Order #\n900-1000001-1000001\nhttps://www.amazon.com/x?shipmentId=ship-delivered\n', received_at: new Date(since.getTime() - HOUR) });
+      const { undelivered } = await alertUndeliveredShipments({ since, now: NOW, notifyAdmin: (...args) => notifications.notifyAdmin(...args) });
+      expect(undelivered.map((row) => row.shipmentId)).toEqual(['ship-due-after']);
+    });
+
+    // A Delivered email settles a shipment only when it really came from
+    // Amazon and names exactly that shipment.
+    const deliveredEmail = (overrides) => mockConn('emails').insert({
+      gmail_id: `gm-${randomUUID()}`, gmail_thread_id: 'thread', from_address: 'order-update@amazon.com', subject: 'Delivered: "Control Solutions Taurus..."',
+      authentication_results: ALIGNED_AMAZON_AUTH, received_at: new Date(NOW - 5 * DAY), ...overrides,
+    });
+    test.each([
+      ['an HTML-only Delivered email with a plain link settles it', 'ship-html', { body_text: '', body_html: '<p>Order # 900-1000001-1000001</p><a href="https://www.amazon.com/x?orderId=1&amp;shipmentId=ship-html">Track</a>' }, false],
+      ['a spoofed Delivered email does not', 'ship-spoofed', { authentication_results: 'dkim=pass header.i=@evil.example', body_text: 'Order # 900-1\nhttps://www.amazon.com/x?shipmentId=ship-spoofed\n' }, true],
+      ['one naming a longer shipment id does not', 'ship-prefix', { body_text: 'Order # 900-1\nhttps://www.amazon.com/x?shipmentId=ship-prefix1\n' }, true],
+    ])('%s', async (_label, shipmentId, delivered, alerts) => {
+      await shipped(shipmentId);
+      await deliveredEmail(delivered);
+      expect((await run()).undelivered.map((row) => row.shipmentId)).toEqual(alerts ? [shipmentId] : []);
+    });
+
+    test('too recent, unauthenticated, personal items only, or outside the lookback: no bell', async () => {
+      await shipped('ship-2', { received_at: new Date(NOW - 2 * DAY) });
+      await shipped('ship-3', { authentication_results: 'dkim=pass header.i=@evil.example; spf=fail' });
+      await shipped('ship-4', { body_text: 'Order #\n900-1\nhttps://www.amazon.com/x?shipmentId=ship-4\n\n* Lenovo Chromebook\n  Quantity: 1\n' });
+      await shipped('ship-5', { received_at: new Date(NOW - 15 * DAY) });
+      expect((await run()).undelivered).toEqual([]);
+      expect(await mockConn('purchase_receipt_lines')).toEqual([]);
+      expect(await mockConn('notifications')).toEqual([]);
+    });
+  });
+  describe('SiteOne invoices through the sweep', () => {
+    const INVOICE = '900000001-001';
+    const TAURUS_LINE = 'CSI-Pest Taurus SC Broad Spectrum Liquid Concentrate Termiticide/Insecticide 78 fl oz. Bottle (QGCY) UOM:EA';
+    const SPRAYER_LINE = 'Flowzone Cyclone 3 Variable Pressure 18V Battery Powered Sprayer (4-Gallon)';
+    const savedEnv = {};
+    beforeAll(() => {
+      for (const key of ['GATE_PURCHASE_RECEIPT_RESTOCK', 'PURCHASE_RECEIPT_SINCE']) savedEnv[key] = process.env[key];
+      process.env.GATE_PURCHASE_RECEIPT_RESTOCK = 'true';
+      process.env.PURCHASE_RECEIPT_SINCE = new Date(Date.now() - 2 * DAY).toISOString();
+    });
+    afterAll(() => {
+      for (const [key, value] of Object.entries(savedEnv)) {
+        if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      }
+    });
+
+    // An authenticated invoice email plus the invoice pipeline's extraction of its PDF.
+    async function invoiceEmail({ from, subject, bodyHtml = '', hoursAgo, lines, total }) {
+      const [email] = await mockConn('emails').insert({
+        gmail_id: `gm-${randomUUID()}`, gmail_thread_id: 'thread', from_address: from, subject, body_html: bodyHtml,
+        authentication_results: `dkim=pass header.i=@${from.split('@')[1]}`, received_at: new Date(Date.now() - hoursAgo * HOUR),
+      }).returning('*');
+      const subtotal = lines.reduce((sum, line) => sum + line.total, 0);
+      await mockConn('email_attachments').insert({
+        email_id: email.id, filename: 'invoice.pdf', mime_type: 'application/pdf', is_invoice: true,
+        extracted_data: JSON.stringify({ invoice_number: INVOICE, subtotal, tax: total - subtotal, total, line_items: lines }),
+      });
+      return email;
+    }
+    const storeCopy = (lines, total) => invoiceEmail({ from: 'AB00000@siteone.com', subject: `SiteOne Confirmation : Invoice #${INVOICE}`, hoursAgo: 3, lines, total });
+    const billingCopy = (lines, total) => invoiceEmail({
+      from: 'siteoneus@billtrust.com', subject: 'Acct No. 0000000: Your Invoice From SiteOne Landscape Supply, LLC is Attached',
+      bodyHtml: `<td align=center>${INVOICE}</td>`, hoursAgo: 1, lines, total,
+    });
+    const notify = (...args) => notifications.notifyAdmin(...args);
+
+    test('a reconciled invoice adds its stocked line to stock; its billing copy adds nothing more', async () => {
+      const lines = [
+        { description: TAURUS_LINE, quantity: 1, unit_price: 95, total: 95 },
+        { description: SPRAYER_LINE, quantity: 1, unit_price: 269.99, total: 269.99 },
+      ];
+      await storeCopy(lines, 390.54);
+      const result = await runPurchaseReceiptRestockSweep({ notify });
+      expect(result.logged).toHaveLength(1);
+      expect(await stock()).toBe(78);
+      const rows = await mockConn('purchase_receipt_lines').where({ vendor: 'siteone', shipment_key: INVOICE }).orderBy('line_no');
+      expect(rows.map((row) => [row.line_no, row.status])).toEqual([[1, 'logged'], [2, 'unmatched']]);
+      const [movement] = await mockConn('product_inventory_movements').where({ product_id: taurus.id });
+      expect(movement.metadata).toMatchObject({ source: 'siteone_invoice', orderNumber: INVOICE });
+      const [bell] = await mockConn('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`purchase-receipt:${rows[0].id}`]);
+      expect(bell.body).toBe(`SiteOne invoice ${INVOICE} logged: Taurus SC +78 fl oz (1 × 78 fl oz)`);
+
+      await billingCopy(lines, 390.54);
+      await runPurchaseReceiptRestockSweep({ notify });
+      expect(await stock()).toBe(78);
+      expect(await mockConn('purchase_receipt_lines').where({ vendor: 'siteone' })).toHaveLength(2);
+    });
+
+    test('an invoice handed off as unreadable never auto-logs its lines when they are read later', async () => {
+      const [email] = await mockConn('emails').insert({
+        gmail_id: `gm-${randomUUID()}`, gmail_thread_id: 'thread', from_address: 'AB00000@siteone.com',
+        subject: `SiteOne Confirmation : Invoice #${INVOICE}`, authentication_results: 'dkim=pass header.i=@siteone.com',
+        received_at: new Date(Date.now() - 3 * HOUR),
+      }).returning('*');
+      await runPurchaseReceiptRestockSweep({ notify }); // no extraction after 2 hours: one unreadable placeholder
+      expect(await mockConn('purchase_receipt_lines').where({ vendor: 'siteone' })).toEqual([expect.objectContaining({ status: 'unreadable', line_no: 1 })]);
+      await mockConn('email_attachments').insert({
+        email_id: email.id, filename: 'invoice.pdf', mime_type: 'application/pdf', is_invoice: true,
+        extracted_data: JSON.stringify({ invoice_number: INVOICE, subtotal: 190, tax: 13.3, total: 203.3, line_items: [
+          { description: SPRAYER_LINE, quantity: 1, unit_price: 95, total: 95 },
+          { description: TAURUS_LINE, quantity: 1, unit_price: 95, total: 95 },
+        ] }),
+      });
+      await runPurchaseReceiptRestockSweep({ notify });
+      expect(await stock()).toBe(0);
+      expect(await mockConn('purchase_receipt_lines').where({ vendor: 'siteone' })).toHaveLength(1);
+    });
+
+    test.each([
+      ['an authenticated store copy before it means the billing copy adds nothing', 'dkim=pass header.i=@siteone.com', 0],
+      ['an unauthenticated "copy" before it proves nothing: the billing copy logs', 'dkim=pass header.i=@evil.example', 78],
+    ])('copies straddling the cutoff: %s', async (_label, earlyAuth, expectedStock) => {
+      const lines = [{ description: TAURUS_LINE, quantity: 1, unit_price: 95, total: 95 }];
+      const since = new Date(process.env.PURCHASE_RECEIPT_SINCE);
+      await mockConn('emails').insert({
+        gmail_id: `gm-${randomUUID()}`, gmail_thread_id: 'thread', from_address: 'AB00000@siteone.com',
+        subject: `SiteOne Confirmation : Invoice #${INVOICE}`, authentication_results: earlyAuth,
+        received_at: new Date(since.getTime() - 5 * HOUR),
+      });
+      await billingCopy(lines, 101.65);
+      await runPurchaseReceiptRestockSweep({ notify });
+      expect(await stock()).toBe(expectedStock);
+    });
+
+    test('a return of a stocked product is held for a hand adjustment, never subtracted or added', async () => {
+      await storeCopy([{ description: TAURUS_LINE, quantity: -1, unit_price: 95, total: -95 }], -101.65);
+      await runPurchaseReceiptRestockSweep({ notify });
+      expect(await stock()).toBe(0);
+      expect(await mockConn('purchase_receipt_lines').where({ vendor: 'siteone' }).first()).toMatchObject({ status: 'returned', product_id: taurus.id });
+    });
+
+    test('an invoice whose numbers don\'t reconcile moves nothing; its stocked line is held unverified', async () => {
+      await storeCopy([{ description: TAURUS_LINE, quantity: 2, unit_price: 95, total: 95 }], 101.65);
+      await runPurchaseReceiptRestockSweep({ notify });
+      expect(await stock()).toBe(0);
+      expect(await mockConn('purchase_receipt_lines').where({ vendor: 'siteone' }).first()).toMatchObject({ status: 'unverified' });
+    });
   });
 });
