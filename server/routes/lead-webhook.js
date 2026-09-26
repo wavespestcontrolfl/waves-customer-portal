@@ -782,7 +782,14 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
     if (leadAgentConfigured) {
       leadFallbackDeadlineAt = Date.now() + LEAD_AGENT_FALLBACK_AFTER_MS;
       pendingLeadFallbacks.set(sendFallbackAutoReply, null);
-      leadFallbackGuard = setTimeout(() => { void sendFallbackAutoReply(); }, LEAD_AGENT_FALLBACK_AFTER_MS);
+      // If the guard itself sends (the agent was never started), it also
+      // drops the registration, unless settleLeadResponseAgentRun has since
+      // taken it over (its entry then carries the run's completion).
+      leadFallbackGuard = setTimeout(() => {
+        void sendFallbackAutoReply().finally(() => {
+          if (pendingLeadFallbacks.get(sendFallbackAutoReply) === null) pendingLeadFallbacks.delete(sendFallbackAutoReply);
+        });
+      }, LEAD_AGENT_FALLBACK_AFTER_MS);
       leadFallbackGuard.unref?.();
     }
     try {
