@@ -34,6 +34,11 @@ const {
   outOfAreaCities,
 } = require('../content-guardrails');
 const { HYPE_TERMS, COMMERCIAL_TERMS } = require('../title-meta-spam-gate');
+// Same single-source-of-truth rule for the related-post link minimum: the
+// content-quality-gate HARD check `related_posts_linked` enforces exactly
+// this number (capped by however many the brief lists), so the prompt can
+// never ask for a count the gate doesn't actually require.
+const { RELATED_POSTS_LINK_MINIMUM } = require('../content-quality-gate');
 
 // The FAQ-blocked list is interpolated into the system prompt straight from
 // content-guardrails so the writer's instructions can never drift from the
@@ -166,6 +171,11 @@ rule follows in later sections, but this checklist is binding on its own:
   WaveGuard plan coverage — one-time, termite, rodent, mosquito, and
   tree-and-shrub-only topics and DIY guides are NOT re-service eligible, so
   promising a callback there invents an offer.
+- [RELATED_POSTS_NOT_LINKED] (supporting-blog only, when the brief carries
+  voice_constraints.related_posts) — link natural in-text anchors to AT
+  LEAST ${RELATED_POSTS_LINK_MINIMUM} of them (or ALL of them if the brief
+  lists fewer). See RELATED POSTS below for the full rule; this is a HARD
+  gate like the others on this list, not a nudge.
 - COMPARISON DRAFTS [COMPARISON_UNKNOWN_COMPETITOR /
   COMPARISON_UNCLASSIFIED_OPTION / COMPARISON_RIGGED_RANKING /
   COMPARISON_COMPETITOR_IN_PROSE]: NEVER invent or compose a business name —
@@ -325,16 +335,24 @@ wasted):
   dead internal link parks the whole draft.
 - RELATED POSTS (supporting-blog only, when the brief carries
   voice_constraints.related_posts): these are REAL, LIVE Waves blog posts
-  the brief already verified exist — a ranked list of 8-12, each with a
-  title, canonical path, and primary keyword. Add natural in-text links to
-  AT LEAST 3 of them, but only where the related topic genuinely comes up in
-  the prose — real anchor text tied to what that sentence is about, never a
-  bare "click here" and never a stacked list of unrelated links dropped in
-  to hit the count. You are never required to use all of them, and you may
-  use more than 3 when the topic naturally calls for it. This list is the
-  ONLY source of blog-post links you may use — never link a blog post that
-  is not on it, in internal_links_to_add, or in the static allowlist above,
-  no matter how confident you are that the page exists.
+  the brief already verified exist — a ranked list of up to 12, each with a
+  title, canonical path, and primary keyword. HARD requirement
+  [RELATED_POSTS_NOT_LINKED] — a deterministic gate parks the draft on a
+  miss, exactly like the other codes in HARD PUBLISH GATES above: add
+  natural in-text links to AT LEAST ${RELATED_POSTS_LINK_MINIMUM} of them
+  (or ALL of them if the brief lists fewer than
+  ${RELATED_POSTS_LINK_MINIMUM} — a brief with only 1 or 2 candidates still
+  requires linking every one it has), but only where the related topic
+  genuinely comes up in the prose — real anchor text tied to what that
+  sentence is about, never a bare "click here" and never a stacked list of
+  unrelated links dropped in to hit the count.
+  Relinking the same post twice still counts as one. When the brief lists
+  ${RELATED_POSTS_LINK_MINIMUM} or more, you are never required to use all of them
+  — pick the ones that genuinely fit, and you may use more than
+  ${RELATED_POSTS_LINK_MINIMUM} when the topic naturally calls for it. This
+  list is the ONLY source of blog-post links you may use — never link a
+  blog post that is not on it, in internal_links_to_add, or in the static
+  allowlist above, no matter how confident you are that the page exists.
 
 PAGE-TYPE OUTPUT STANDARDS:
 - city-service:

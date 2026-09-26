@@ -156,17 +156,20 @@ const PAGE_TYPE_CHECKS = {
     { name: 'two_plus_city_mentions', weight: 4, evaluate: checkTwoPlusCityMentions },
     { name: 'faq_section_present', weight: 4, evaluate: checkFaqSectionPresent },
     { name: 'voice_match', weight: 6, evaluate: checkVoiceMatch },
-    // SOFT + weight 0 by design (owner rule 2026-09-26, related-post link
-    // lane), same posture as blog_meta_soft_cta below: the brief's
-    // voice_constraints.related_posts is an allowance, not a checklist like
-    // internal_links_to_add, so a draft that skips it (topic genuinely has
-    // no natural related-link moment, or the brief carries no related_posts
-    // at all) must never lose a whole autonomous run over it OR shift the
-    // page type's score/threshold math for every OTHER supporting-blog
-    // draft. It surfaces in soft_failures for review, nothing more. Passes
-    // trivially (ok:true, contributing nothing either way) when the brief
-    // carries no related_posts.
-    { name: 'related_posts_linked', weight: 0, evaluate: checkRelatedPostsLinked },
+    // HARD but weight 0 (owner rule 2026-09-26, Codex round-1 P2 on #4984):
+    // a brief that supplies related_posts is telling the writer real,
+    // verified link targets exist for this topic — a draft that ignores
+    // them entirely ships exactly the orphan-post problem this whole lane
+    // exists to fix, so this DOES block (ok:false → hard_failures), unlike
+    // an ordinary soft nudge. Weight 0 so it contributes nothing to
+    // total_score and never shifts MIN_TOTAL_SCORES for every OTHER
+    // supporting-blog draft — the score/threshold math is untouched
+    // (computeMinTotalScores sums WEIGHTS, and this one is 0 whichever list
+    // it's in). Required = min(3, however many related_posts the brief
+    // actually lists) — a brief with only 1-2 candidates can still pass by
+    // linking all of them; a brief with none is not applicable (passes
+    // trivially). See checkRelatedPostsLinked for the redraft-directive text.
+    { name: 'related_posts_linked', weight: 0, isHard: true, evaluate: checkRelatedPostsLinked },
     // Owner rule 2026-07-29: blog metas carry NO phone and nothing salesy.
     // Weight 0 hard gate — without it a freshly authored blog meta bypassed
     // the metadata-lane check entirely. The soft-CTA ending was demoted out
@@ -1031,24 +1034,47 @@ function checkFaqSectionPresent(draft, brief) {
   return { ok: true };
 }
 
-// SOFT check (see PAGE_TYPE_CHECKS['supporting-blog'] above): counts links
-// to the brief's voice_constraints.related_posts allowance (related-posts.js)
-// — the writer prompt asks for at least 3 natural in-text links to them.
-// Plain substring match on each candidate's path, same style as
-// checkHubLinkPresent's body.includes(h). No related_posts on the brief
-// (older/non-blog briefs, or a topic with no candidates) passes trivially —
-// this check exists to nudge, never to park a run that had no allowance
-// to use in the first place.
+// The minimum distinct related-post links a supporting-blog draft must
+// carry, capped by however many the brief actually lists — a brief with
+// fewer candidates than this can still pass by linking all of them.
+const RELATED_POSTS_LINK_MINIMUM = 3;
+
+// HARD check (see PAGE_TYPE_CHECKS['supporting-blog'] above, weight 0 —
+// blocks without moving score/threshold math): counts DISTINCT links to the
+// brief's voice_constraints.related_posts allowance (related-posts.js) —
+// the writer prompt asks for at least min(3, N) natural in-text links to
+// them. Plain substring match on each candidate's path, same style as
+// checkHubLinkPresent's body.includes(h); a post linked twice (or via two
+// different anchors) still counts once, since the loop below visits each
+// RELATED POST once, not each occurrence in the body. No related_posts on
+// the brief (older/non-blog briefs, or a topic with no candidates) passes
+// trivially — not applicable, not a miss.
 function checkRelatedPostsLinked(draft, brief) {
   const related = Array.isArray(brief?.voice_constraints?.related_posts) ? brief.voice_constraints.related_posts : [];
   if (!related.length) return { ok: true, reason: 'no_related_posts_on_brief' };
   const body = String(draft.body || '');
   let linked = 0;
+  const unlinked = [];
   for (const post of related) {
     const p = String(post?.path || '').trim();
     if (p && body.includes(p)) linked++;
+    else unlinked.push(post);
   }
-  return linked >= 3 ? { ok: true } : { ok: false, reason: `only_${linked}_related_post_links` };
+  const required = Math.min(RELATED_POSTS_LINK_MINIMUM, related.length);
+  if (linked >= required) return { ok: true };
+  // Actionable redraft text (Codex round-1 P2 on #4984: the prior weight-0
+  // soft version could silently ship with fewer links than the brief
+  // proposed). The CORE instruction (first sentence, always well under the
+  // 300-char cap autonomous-runner._recordGateRetry applies to every
+  // gate-retry message) is complete and actionable on its own — the writer
+  // can always re-fetch the full candidate list via get_content_brief's
+  // voice_constraints.related_posts. One named example just grounds it;
+  // losing the rest to truncation on a long title never loses the ask.
+  const example = unlinked[0] ? ` — e.g. "${String(unlinked[0].title || 'untitled')}" (${unlinked[0].path || ''})` : '';
+  return {
+    ok: false,
+    reason: `Add natural in-text links to at least ${required} of the ${related.length} related posts in voice_constraints.related_posts where the topic comes up (linked ${linked} so far)${example}.`,
+  };
 }
 
 // Raw markdown pipe table detector — delegates to the single-source
@@ -1255,7 +1281,11 @@ function checkNoDuplicateTitle(draft, _brief, context) {
 // DANGLING_META_ENDINGS is exported as the single source of truth for
 // "words a meta may not end on" — astro-publisher's clamp fallback strips
 // against the SAME set so a clamped meta can never fail this gate.
-module.exports = { evaluate, MIN_TOTAL_SCORES, minTotalScoreFor, DANGLING_META_ENDINGS };
+// RELATED_POSTS_LINK_MINIMUM is exported (like ALLOWED_INTERNAL_LINKS from
+// content-guardrails) so writer-agent-config's prompt wording can interpolate
+// the SAME number this gate enforces — instruction and enforcement can never
+// drift out of sync on what "at least N" means.
+module.exports = { evaluate, MIN_TOTAL_SCORES, minTotalScoreFor, DANGLING_META_ENDINGS, RELATED_POSTS_LINK_MINIMUM };
 module.exports._internals = {
   HARD_CHECKS,
   PAGE_TYPE_CHECKS,

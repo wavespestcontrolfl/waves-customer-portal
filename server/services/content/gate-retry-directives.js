@@ -30,6 +30,12 @@ const GATE_RETRY_INSTRUCTIONS = {
   PREVENTION_PROMISE: 'Remove every promise that pests are prevented, eliminated, or won\'t return — describe REDUCED recurrence instead, always conditional, never guaranteed. Mention free re-treatment between visits ONLY if the piece concerns recurring WaveGuard plan coverage; one-time, termite, rodent, mosquito, and tree-and-shrub-only topics and DIY guides are not re-service eligible, so soften the outcome claim there WITHOUT promising a callback.',
   REENTRY_SAFETY_CLAIM: 'Never describe a pesticide, treatment, or treated area as unconditionally "safe" (including pet-safe/child-safe compounds and "safe for kids and pets"); never write "EPA-approved" (the required wording is EPA-registered or EPA-exempt); never give a fixed re-entry/drying minute figure. The ONLY approved safety idiom is conditional: "safe once dry", with the technician confirming timing.',
   BANNED_TOPIC: 'Waves does NOT offer door-to-door sales, structural fumigation/tenting, insulation, or wildlife/animal trapping — remove every we/our/schedule/call framing around these. A purely informational mention (what the method is, when a specialist handles it) is fine; presenting it as our service is not.',
+  // Related-post link minimum (owner rule 2026-09-26, Codex round-1 P2 on
+  // #4984). The gate-reported message (appended below as "[Gate reported:
+  // …]") names the exact required/linked counts and one example; this
+  // canonical text is the always-actionable core in case that message gets
+  // truncated by autonomous-runner._recordGateRetry's 300-char cap.
+  RELATED_POSTS_NOT_LINKED: 'Add natural in-text links to at least the required number of posts from this brief\'s voice_constraints.related_posts (each already has a real title + a canonical path you can use as-is) where the related topic genuinely comes up in the prose — real anchor text tied to what that sentence is about, never "click here". Count only DISTINCT posts actually linked (relinking the same one twice does not count twice), and never link a related post that is not on that list.',
   // CTA-wording hard rule (owner 2026-08-27). The gate message names the
   // offending anchor but not the passing SHAPE, and the writer burned three
   // consecutive attempts on AP01 (2026-09-02) trying "request a quote",

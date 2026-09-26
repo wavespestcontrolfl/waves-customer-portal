@@ -422,42 +422,114 @@ describe('supporting-blog: hub link / cities / faq / voice', () => {
     expect(checkNoRawMarkdownTables({ body: 'Choose either|or — both work.\n\n---\n\nNext section.' }).ok).toBe(true);
     expect(checkNoRawMarkdownTables({ body: '' }).ok).toBe(true);
   });
-  // Owner rule 2026-09-26 (related-post link lane): SOFT + weight 0 — see
-  // PAGE_TYPE_CHECKS['supporting-blog'] in content-quality-gate.js. Never
-  // blocks and never moves total_score; it only appears in soft_failures.
-  test('related posts linked (soft, weight 0)', () => {
+  // Owner rule 2026-09-26 (related-post link lane), tightened per Codex
+  // round-1 P2 on #4984: HARD (blocks ok:false via hard_failures) but
+  // weight 0 (never moves total_score / MIN_TOTAL_SCORES for every OTHER
+  // supporting-blog draft — computeMinTotalScores sums WEIGHTS, and this
+  // one is 0 whichever bucket it lands in). Required = min(3, however many
+  // related_posts the brief lists).
+  describe('related posts linked (HARD, weight 0)', () => {
     const relatedPosts = [
       { title: 'A', path: '/termite/a/', keyword: 'a' },
       { title: 'B', path: '/termite/b/', keyword: 'b' },
       { title: 'C', path: '/termite/c/', keyword: 'c' },
       { title: 'D', path: '/termite/d/', keyword: 'd' },
     ];
-    // No related_posts on the brief at all — passes trivially.
-    expect(checkRelatedPostsLinked({ body: 'no links here' }, {}).ok).toBe(true);
-    expect(checkRelatedPostsLinked({ body: 'no links here' }, { voice_constraints: {} }).ok).toBe(true);
-    // Fewer than 3 linked — soft fail, reason names the count.
-    const two = checkRelatedPostsLinked(
-      { body: 'See [A](/termite/a/) and [B](/termite/b/).' },
-      { voice_constraints: { related_posts: relatedPosts } }
-    );
-    expect(two.ok).toBe(false);
-    expect(two.reason).toBe('only_2_related_post_links');
-    // 3+ linked — passes.
-    expect(checkRelatedPostsLinked(
-      { body: 'See [A](/termite/a/), [B](/termite/b/), and [C](/termite/c/).' },
-      { voice_constraints: { related_posts: relatedPosts } }
-    ).ok).toBe(true);
-    // The check is weight 0: an evaluate() run with <3 linked never loses
-    // score or blocks, only surfaces in soft_failures.
-    const withMiss = evaluate(
-      fullDraft({ body: 'Termite swarmers show up after rain in Bradenton and Sarasota. See our [pest control services](/pest-control-services/) for treatment options.\n\nFAQ\n- Do swarmers bite?\n- No.' }),
-      brief({ page_type: 'supporting-blog', voice_constraints: { related_posts: relatedPosts } }),
-      { previewBuildSuccess: true, sitemapHasUrl: true }
-    );
-    expect(withMiss.checks.related_posts_linked.ok).toBe(false);
-    expect(withMiss.soft_failures.some((f) => f.name === 'related_posts_linked')).toBe(true);
-    expect(withMiss.total_score).toBe(51); // unchanged from the no-related_posts case — weight 0
-    expect(withMiss.hard_failures).toEqual([]);
+
+    test('no related_posts on the brief at all — not applicable, passes', () => {
+      expect(checkRelatedPostsLinked({ body: 'no links here' }, {}).ok).toBe(true);
+      expect(checkRelatedPostsLinked({ body: 'no links here' }, { voice_constraints: {} }).ok).toBe(true);
+      expect(checkRelatedPostsLinked({ body: 'no links here' }, { voice_constraints: { related_posts: [] } }).ok).toBe(true);
+    });
+
+    test('N=4 available, 2 linked: fails, reason is an actionable directive naming the required count', () => {
+      const two = checkRelatedPostsLinked(
+        { body: 'See [A](/termite/a/) and [B](/termite/b/).' },
+        { voice_constraints: { related_posts: relatedPosts } }
+      );
+      expect(two.ok).toBe(false);
+      expect(two.reason).toMatch(/Add natural in-text links to at least 3/);
+      expect(two.reason).toMatch(/voice_constraints\.related_posts/);
+      expect(two.reason).toMatch(/linked 2 so far/);
+    });
+
+    test('N=4 available, exactly min(3,4)=3 linked: passes', () => {
+      expect(checkRelatedPostsLinked(
+        { body: 'See [A](/termite/a/), [B](/termite/b/), and [C](/termite/c/).' },
+        { voice_constraints: { related_posts: relatedPosts } }
+      ).ok).toBe(true);
+    });
+
+    test('N=4 available, all 4 linked: passes (never required to stop at 3)', () => {
+      expect(checkRelatedPostsLinked(
+        { body: 'See [A](/termite/a/), [B](/termite/b/), [C](/termite/c/), and [D](/termite/d/).' },
+        { voice_constraints: { related_posts: relatedPosts } }
+      ).ok).toBe(true);
+    });
+
+    test('N=2 available: requires 2 (min(3,2)), not the flat 3', () => {
+      const two = [relatedPosts[0], relatedPosts[1]];
+      expect(checkRelatedPostsLinked(
+        { body: 'See [A](/termite/a/).' },
+        { voice_constraints: { related_posts: two } }
+      ).ok).toBe(false);
+      expect(checkRelatedPostsLinked(
+        { body: 'See [A](/termite/a/) and [B](/termite/b/).' },
+        { voice_constraints: { related_posts: two } }
+      ).ok).toBe(true);
+    });
+
+    test('N=1 available: requires 1', () => {
+      const one = [relatedPosts[0]];
+      expect(checkRelatedPostsLinked({ body: 'no links' }, { voice_constraints: { related_posts: one } }).ok).toBe(false);
+      expect(checkRelatedPostsLinked({ body: 'See [A](/termite/a/).' }, { voice_constraints: { related_posts: one } }).ok).toBe(true);
+    });
+
+    test('duplicate links to one post count once — relinking A twice is still only 1 distinct post', () => {
+      const result = checkRelatedPostsLinked(
+        { body: 'See [A](/termite/a/) here and again [A once more](/termite/a/) later, plus [B](/termite/b/).' },
+        { voice_constraints: { related_posts: relatedPosts } }
+      );
+      // 2 DISTINCT posts linked (A, B) despite A appearing twice — still short of 3.
+      expect(result.ok).toBe(false);
+      expect(result.reason).toMatch(/linked 2 so far/);
+    });
+
+    test('a full evaluate() run: fewer than required HARD-FAILS (ok:false) but never moves total_score', () => {
+      const passingBody = 'Termite swarmers show up after rain in Bradenton and Sarasota. See our [pest control services](/pest-control-services/) for treatment options.\n\nFAQ\n- Do swarmers bite?\n- No.';
+      const baseline = evaluate(
+        fullDraft({ body: passingBody }),
+        brief({ page_type: 'supporting-blog' }),
+        { previewBuildSuccess: true, sitemapHasUrl: true }
+      );
+      const withMiss = evaluate(
+        fullDraft({ body: passingBody }),
+        brief({ page_type: 'supporting-blog', voice_constraints: { related_posts: relatedPosts } }),
+        { previewBuildSuccess: true, sitemapHasUrl: true }
+      );
+      expect(withMiss.checks.related_posts_linked.ok).toBe(false);
+      // HARD now: it blocks via hard_failures, not soft_failures.
+      expect(withMiss.hard_failures.some((f) => f.name === 'related_posts_linked')).toBe(true);
+      expect(withMiss.soft_failures.some((f) => f.name === 'related_posts_linked')).toBe(false);
+      expect(withMiss.ok).toBe(false);
+      // Weight 0: total_score and min_total_score are BYTE-IDENTICAL to the
+      // no-related_posts baseline — this check never shifts the page type's
+      // score/threshold math for any other supporting-blog draft.
+      expect(withMiss.total_score).toBe(baseline.total_score);
+      expect(withMiss.min_total_score).toBe(baseline.min_total_score);
+      expect(baseline.ok).toBe(true);
+
+      // Satisfying the minimum flips ok back to true with the same score.
+      const satisfied = evaluate(
+        fullDraft({ body: `${passingBody} Also see [A](/termite/a/), [B](/termite/b/), and [C](/termite/c/).` }),
+        brief({ page_type: 'supporting-blog', voice_constraints: { related_posts: relatedPosts } }),
+        { previewBuildSuccess: true, sitemapHasUrl: true }
+      );
+      expect(satisfied.checks.related_posts_linked.ok).toBe(true);
+      expect(satisfied.hard_failures).toEqual([]);
+      expect(satisfied.ok).toBe(true);
+      expect(satisfied.total_score).toBe(baseline.total_score);
+    });
   });
   test('voice match', () => {
     const body = 'Your sandy soil and afternoon storms create perfect conditions. You should protect your home. Your yard matters. You need this. Your call.';
