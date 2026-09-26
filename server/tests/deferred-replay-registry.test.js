@@ -91,6 +91,7 @@ jest.mock('../services/billing-retry-email-obligation', () => ({
 
 const db = require('../models/db');
 const {
+  invoiceStillCollectible,
   recheckDeferredReplay,
   dispatchDeferredReplay,
   finalizeDeferredReplay,
@@ -118,6 +119,31 @@ describe('deferred-replay registry', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     delete _registry.test_dispatch_deferred;
+  });
+
+  test('invoice collectibility uses the injected database for the invoice and sequence reads', async () => {
+    const heldDatabase = jest.fn((table) => {
+      if (table === 'invoices') return firstChain({
+        id: 'inv-1', status: 'sent', payer_id: null, scheduled_send_error: null,
+      });
+      if (table === 'invoice_followup_sequences') return firstChain({ status: 'stopped' });
+      throw new Error(`Unexpected table ${table}`);
+    });
+    await expect(invoiceStillCollectible({
+      invoice_id: 'inv-1', followup_sequence_id: 'seq-1',
+    }, heldDatabase)).resolves.toEqual({ eligible: false, reason: 'sequence-stopped' });
+    expect(heldDatabase.mock.calls.map(([table]) => table))
+      .toEqual(['invoices', 'invoice_followup_sequences']);
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('exports the canonical collectibility check for billing Email eligibility', async () => {
+    db.mockReturnValueOnce(firstChain({ id: 'inv-1', status: 'paid' }));
+    await expect(invoiceStillCollectible({ invoice_id: 'inv-1' }))
+      .resolves.toMatchObject({ eligible: false, reason: 'invoice-terminal:paid' });
+    db.mockReturnValueOnce(throwChain());
+    await expect(invoiceStillCollectible({ invoice_id: 'inv-1' }))
+      .resolves.toMatchObject({ eligible: false, retryable: true });
   });
 
   test('registered dispatch owns the replay and receives its trusted claim metadata', async () => {

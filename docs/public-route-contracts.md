@@ -1415,7 +1415,8 @@ field is absent from ordinary customer responses.
 Router-wide url-safe 15-64 token param gate (generic 404, prod-verified
 against all live tokens 2026-08-07); accept/decline carry a 10/hr
 limiter — the two heaviest public money-adjacent writes; select-tier/
-preferences ride estimateToggleLimiter, data/pdf ride dataLimiter).
+preferences ride estimateToggleLimiter, data rides dataLimiter, pdf rides
+its own estimatePdfLimiter (10 per 5 min)).
 `/data`'s optional `consultationOffer: { url }` (consultation-first lane,
 owner ruling 2026-09-23; dark behind BOTH `GATE_ESTIMATE_CONSULTATION_OFFER`
 and `GATE_LEAD_INSPECTION_LINK` — `server/services/estimate-consultation-offer.js`)
@@ -1801,7 +1802,12 @@ count; it must never grow beyond that single bounded metadata write).
 confirmation texts link to. Gated by `scheduled_services.reschedule_token`
 — the SAME secret /reschedule uses, deliberately reused rather than
 minting a second one — plus a 60 req/min router limit and 10 req/min on
-the confirm. **Every route 404s unless `GATE_APPOINTMENT_PAGE=true`.**
+the confirm. **Anonymous application GET/POST requests return 404 unless
+`GATE_APPOINTMENT_PAGE` is exactly `true`.** A prefix-scoped noStore + gate
+runs before the global API limiter and body parsers; the router retains
+its gate before its local limits. Earlier shared controls keep precedence:
+CORS can finish OPTIONS requests, and signed Staff requests receive 503
+while Staff maintenance is enabled.
 GET returns the visit summary (service type, date + window_start, the
 server-derived arrival range, plan/one-time flag, confirmed flag, and
 `vanScene` — a boolean that is exactly `GATE_VAN_SCENE` in production
@@ -1932,7 +1938,12 @@ or commit path as security-critical).
 customer self-serve FREE re-service (callback) scheduler — the standing
 customer link texted by the office/comms composer and surfaced on the
 portal Visits tab. Whole surface is dark behind GATE_RESERVICE_SELF_SERVE
-(fail-closed `==='true'` in every env — every route 404s while off).
+(fail-closed `==='true'` in every env — anonymous application GET/POST
+requests return 404 while off). Prefix-scoped noStore + gate precedes the
+global API limiter and body parsers; the router also gates before its local
+limits and retains its handler checks. Earlier CORS handling of OPTIONS
+and the Staff maintenance interlock (503 for signed Staff requests while
+enabled) keep precedence.
 `customers.reservice_token` (64-hex, `TOKEN_RE` format gate; standing for
 the life of the customer like the /card token) is the ONLY gate, plus
 60 req/min router limit, 10 req/min on the commit POST, 15 req/min on
@@ -2039,9 +2050,13 @@ a raw `resolveServiceAddress` — a directly supplied out-of-area address
 422s `{ error: 'out_of_area', county, waitlist_ticket }` or 503s
 `{ error: 'service_area_unavailable' }` instead of returning slot
 availability for a location that could never survive the commit handler's
-own area check. `resolveServiceAddress` and `checkServiceArea` have no
-callers anywhere in this file outside `finalizeBookingLocation`'s own body
-— a structural test on the route file's source enforces it. `POST
+own area check. `resolveServiceAddress` has no callers anywhere in this file outside
+`finalizeBookingLocation`'s own body, and `checkServiceArea` has none outside
+`serviceAreaFailure` — reached from `finalizeBookingLocation` and from the
+commit route's own recheck of a verified lead's adopted property (the one
+location not produced by `finalizeBookingLocation`), never a bare
+`checkServiceArea` call. A structural test on the route file's source
+enforces both. `POST
 /:token` commit:
 body `{ date, time, address?, notes? }`; idempotent — a lead whose customer
 already holds an open assessment short-circuits to the SAME `already_booked`
