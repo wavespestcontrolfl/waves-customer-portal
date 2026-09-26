@@ -16,6 +16,7 @@ import { CUSTOMER_SURFACE } from '../theme-customer';
 import NotificationBell from '../components/NotificationBell';
 import { showCustomerAlert, showCustomerConfirm } from '../components/brand/CustomerDialogHost';
 import { cardBrandLabel } from '../lib/cardBrand';
+import { microdepositSavedPhrases } from '../lib/microdeposit';
 import AutopayCard from '../components/billing/AutopayCard';
 import SaveCardConsent from '../components/billing/SaveCardConsent';
 import Icon from '../components/Icon';
@@ -5884,6 +5885,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
   const [achOffered, setAchOffered] = useState(false);
   const [bankPendingNotice, setBankPendingNotice] = useState(false);
   const [bankPendingVerifyUrl, setBankPendingVerifyUrl] = useState('');
+  const [bankPendingMicrodepositType, setBankPendingMicrodepositType] = useState(null);
   // Set-default consent retry: the default role carries Auto Pay, and a
   // method with no enrollment-scoped consent row 409s. The retry must
   // present the REAL SaveCardConsent checkbox — the recorded snapshot's
@@ -6105,6 +6107,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
       if (awaitingMicrodeposits && setupIntent.payment_method) {
         await api.saveStripeCard(setupIntent.payment_method, setupIntent.id);
         setBankPendingVerifyUrl(setupIntent?.next_action?.verify_with_microdeposits?.hosted_verification_url || '');
+        setBankPendingMicrodepositType(setupIntent?.next_action?.verify_with_microdeposits?.microdeposit_type || null);
         setBankPendingNotice(true);
         setShowAddCard(false);
         paymentElementRef.current = null;
@@ -7019,7 +7022,9 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
               {isBankMethod(c.methodType) && c.bankName && <div style={{ fontSize: 14, color: muted, marginTop: 2 }}>{c.bankName}</div>}
               {isBankMethod(c.methodType) && c.achStatus === 'pending_verification' && (
                 <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy, marginTop: 2 }}>
-                  Verification pending — watch for two small deposits.
+                  {/* The row doesn't say which verification Stripe chose, so
+                      this wording holds for one deposit or two. */}
+                  Verification pending — watch for {microdepositSavedPhrases(null).deposits} from Stripe.
                   {' '}
                   <button data-glass-accent=""
                     type="button"
@@ -7077,7 +7082,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
         )}
         {bankPendingNotice && !showAddCard && (
           <div style={{ padding: 10, background: GLASS_SUBTLE, border: '1px solid #E7E2D7', borderRadius: 8, fontSize: 14, color: B.glassNavy, marginTop: 8 }}>
-            Bank account saved. Stripe will send two small deposits in 1–2 business days — once you confirm them, the account is verified and ready for Auto Pay.
+            Bank account saved. Stripe will send {microdepositSavedPhrases(bankPendingMicrodepositType).deposits} in 1–2 business days — once you {microdepositSavedPhrases(bankPendingMicrodepositType).confirmStep}, the account is verified and ready for Auto Pay.
             {bankPendingVerifyUrl && (
               <>
                 {' '}

@@ -136,10 +136,38 @@ describe('glassCtaMicroFor', () => {
     expect(glassCtaMicroFor('termite_trenching')).toMatch(/Licensed & insured/);
     expect(glassCtaMicroFor('termite_trenching')).not.toMatch(/JB351547/);
     expect(glassCtaMicroFor('termite_trenching')).not.toMatch(/long-term contract/);
-    expect(glassCtaMicroFor('bora_care')).toMatch(/Satisfaction guaranteed/);
+    // Bora-Care is termite work, and termite carries no guarantee of any kind
+    // (owner ruling; the same rule as the server's estimateMakesNoGuaranteeClaim).
+    expect(glassCtaMicroFor('bora_care')).not.toMatch(/guarantee/i);
+    expect(glassCtaMicroFor('bora_care')).toMatch(/Licensed & insured/);
     // Row-slug spelling of rodent resolves to the rodent pack's line.
     expect(glassCtaMicroFor('rodent_bait')).toBe(glassCtaMicroFor('rodent'));
     expect(glassCtaMicroFor('rodent')).not.toMatch(/callbacks/);
+  });
+});
+
+describe('termite work never carries a guarantee (owner ruling; server estimateMakesNoGuaranteeClaim)', () => {
+  const TERMITE = ['termite_bait', 'foam_recurring', 'termite_trenching', 'pre_slab_termiticide', 'bora_care', 'termite_foam', 'wdo_inspection'];
+
+  it.each(TERMITE)('the %s CTA line makes no guarantee', (slug) => {
+    expect(glassCtaMicroFor(slug)).not.toMatch(/guarantee/i);
+    expect(glassCtaMicroFor(slug)).toMatch(/Licensed & insured/);
+  });
+
+  it('a CTA covering termite beside another service makes no guarantee', () => {
+    expect(glassCtaMicroForKeys(['pest_control', 'termite_bait'])).not.toMatch(/guarantee/i);
+    expect(glassCtaMicroForKeys(['Pest Control', 'Termite Trenching'])).not.toMatch(/guarantee/i);
+  });
+
+  it('a CTA covering a service the page cannot classify makes no guarantee', () => {
+    expect(glassCtaMicroForKeys(['bundle'])).not.toMatch(/guarantee/i);
+    expect(glassCtaMicroForKeys([])).not.toMatch(/guarantee/i);
+  });
+
+  it('non-termite plans keep their guarantee lines', () => {
+    expect(glassCtaMicroForKeys(['pest_control'])).toBe(GLASS_COPY.ctaMicro);
+    expect(glassCtaMicroForKeys(['rodent'])).toMatch(/Satisfaction guaranteed/);
+    expect(glassCtaMicroForKeys(['pest_control', 'rodent_bait'])).toMatch(/Satisfaction guaranteed/);
   });
 });
 
@@ -149,6 +177,19 @@ describe('glassOneTimeHeroOverlay', () => {
     const wdo = glassEstimateCopyFor('wdo_inspection');
     expect(glassOneTimeHeroOverlay(wdo, { preserveServiceHero: true }).heroH1).toMatch(/WDO inspection/i);
     expect(glassOneTimeHeroOverlay(glassEstimateCopyFor('pest_control')).heroH1).toMatch(/service quote/i);
+  });
+
+  it('a no-guarantee estimate (server noGuaranteeClaims) drops "satisfaction guaranteed" from both one-time heroes', () => {
+    setGlassDefault(true);
+    const pack = glassEstimateCopyFor('bundle');
+    expect(glassOneTimeHeroOverlay(pack).heroSub).toMatch(/satisfaction guaranteed/i);
+    for (const reviewBeforeBooking of [false, true]) {
+      const hero = glassOneTimeHeroOverlay(pack, { reviewBeforeBooking, noGuarantee: true });
+      expect(hero.heroSub).not.toMatch(/guarantee/i);
+      expect(hero.heroSub).toMatch(/Licensed & insured\./);
+    }
+    // The review-gated variant keeps its confirm-with-you clause.
+    expect(glassOneTimeHeroOverlay(pack, { reviewBeforeBooking: true, noGuarantee: true }).heroSub).toMatch(/our team reviews it/);
   });
 });
 

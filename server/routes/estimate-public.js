@@ -5592,9 +5592,14 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // on unused visits, cancel anytime with no contract, money-back guarantee +
   // free re-service. Gated to recurring plans (same condition as the billing
   // card) and mode-aware so it hides in one-time mode.
+  // Termite and unclassifiable estimates make no guarantee claim (the shared
+  // rule, estimate-followup-copy.js, decided by the route from the estimate
+  // row): the card keeps its cancel/refund terms and drops the guarantee
+  // heading and item.
+  const planTermsNoGuarantee = estimate?.noGuaranteeClaims === true;
   const planTermsCardHtml = showBillingCard ? `
   <section class="card plan-terms-card"${billingModeAttr}>
-    <h2>Cancel, refunds &amp; our guarantee</h2>
+    <h2>${planTermsNoGuarantee ? 'Cancel &amp; refunds' : 'Cancel, refunds &amp; our guarantee'}</h2>
     <p class="billing-lede">No contracts and no lock-in. Here&rsquo;s exactly where you stand if your plans change.</p>
     <ul class="plan-terms-list">
       <li class="plan-terms-item">
@@ -5609,10 +5614,10 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
         <span class="plan-terms-term">Annual prepay is prorated</span>
         <span class="plan-terms-detail">On the 12-month prepay plan, cancel anytime and we refund every application you haven&rsquo;t used yet, prorated.</span>
       </li>` : ''}
-      <li class="plan-terms-item">
+      ${planTermsNoGuarantee ? '' : `<li class="plan-terms-item">
         <span class="plan-terms-term">Money-back guarantee</span>
         <span class="plan-terms-detail">If a covered problem comes back between visits, we re-treat free. If we can&rsquo;t solve it, we refund your most recent service payment.</span>
-      </li>
+      </li>`}
     </ul>
   </section>` : '';
 
@@ -8832,6 +8837,9 @@ async function handleEstimateView(req, res, next) {
 
     sendEstimatePage(res, req.params.token, {
       id: estimate.id,
+      // The shared guarantee rule, decided here from the estimate row
+      // (renderPage only sees this view and the parsed data).
+      noGuaranteeClaims: require('../services/estimate-followup-copy').estimateMakesNoGuaranteeClaim(estimate),
       status: estimate.status === 'accepted'
         ? estimate.status
         : (pageQuoteRequirement.quoteRequired ? 'quote_required' : estimate.status),
@@ -26239,6 +26247,10 @@ async function composeEstimateDataPayload(estimate, {
       recurringServicesForIntelligence,
       oneTimeItemsForCategory,
     );
+    // The shared guarantee rule (estimate-followup-copy.js): a termite lane or
+    // an unclassifiable estimate makes no guarantee claim. The drip emails,
+    // this page and its proposal document all read the same decision.
+    const noGuaranteeClaims = require('../services/estimate-followup-copy').estimateMakesNoGuaranteeClaim(estimate);
     // Guarantee-only renewals accept with NO appointment: the acceptance
     // contract tells the React view to skip the slot picker and offer the
     // payment-only (invoice) accept. An existing linked appointment keeps
@@ -26914,6 +26926,11 @@ async function composeEstimateDataPayload(estimate, {
         // the Ask bar (codex r5 P1). Present only when true so every other
         // response stays byte-identical.
         ...(isRegulatedCertificateSurface ? { regulatedCertificateSurface: true } : {}),
+        // The server's guarantee decision (estimateMakesNoGuaranteeClaim):
+        // the React page and proposal document drop "Satisfaction
+        // guaranteed" wherever they'd make an estimate-wide claim. Present
+        // only when true so every other response stays byte-identical.
+        ...(noGuaranteeClaims ? { noGuaranteeClaims: true } : {}),
         notes: estimate.notes || null,
         licenseNumber: process.env.WAVES_FDACS_LICENSE || null,
         showOneTimeOption: !!estimate.show_one_time_option,

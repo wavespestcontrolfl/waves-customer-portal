@@ -209,6 +209,40 @@ describe('EstimateProposalDocument', () => {
     expect(text).toContain('Free between-visit service calls');
   });
 
+  it('a no-guarantee estimate (server noGuaranteeClaims: termite work) prints the terms line without a guarantee', () => {
+    const lines = [
+      { description: 'Pest Control', quantity: 1, unitPrice: 55, amount: 55, frequency: 'monthly', frequencyLabel: 'Monthly', taxable: false },
+      { description: 'Termite Trenching', quantity: 1, unitPrice: 1200, amount: 1200, frequency: 'one_time', frequencyLabel: 'One-time', taxable: false },
+    ];
+    const termite = {
+      ...BASE_DATA,
+      estimate: { ...BASE_DATA.estimate, category: 'RESIDENTIAL', noGuaranteeClaims: true },
+      proposal: {
+        ...BASE_DATA.proposal,
+        enabled: false,
+        synthesized: true,
+        pestRecurringOnly: false,
+        title: 'Service Proposal',
+        buildings: [{ name: '123 Palm Way', note: null, lineItems: lines }],
+        totals: { annualRecurring: 660, monthlyEquivalent: 55, oneTime: 1200, totalTax: 0, firstYearTotal: 1860, hasTax: false, isMultiBuilding: false },
+      },
+      cta: { commercialProposal: false, commercialAutoPriced: false },
+    };
+    const PEST_TERMS = 'No long-term contract · Unlimited free callbacks · Money-back guarantee';
+    const { container } = render(<EstimateProposalDocument data={termite} token="tok-123" />);
+    // The document-wide terms line drops to the neutral line: no guarantee.
+    expect(container.textContent).not.toContain(PEST_TERMS);
+    expect(container.textContent).not.toMatch(/Satisfaction guaranteed/);
+    expect(container.textContent).toContain('Licensed & insured');
+    // The pest line's own inclusion bullets still describe the pest plan's
+    // terms; nothing guarantees the termite work.
+    expect(container.textContent).toMatch(/Money-back guarantee — if we can’t solve/);
+
+    // Without the flag the same document keeps the pest plan's terms line.
+    const { container: flagless } = render(<EstimateProposalDocument data={{ ...termite, estimate: { ...termite.estimate, noGuaranteeClaims: undefined } }} token="tok-123" />);
+    expect(flagless.textContent).toContain(PEST_TERMS);
+  });
+
   it('authored terms govern — inclusions and plan-terms claims stay out beside them', () => {
     const authoredTerms = {
       ...BASE_DATA,

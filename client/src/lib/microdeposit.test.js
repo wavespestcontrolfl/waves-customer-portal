@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { microdepositDetailFromNextAction, microdepositGuidance } from './microdeposit';
+import { microdepositDetailFromNextAction, microdepositGuidance, microdepositSavedPhrases } from './microdeposit';
 
 // Fixed future/past instants relative to nothing — guidance derives "passed"
 // from the real clock via isInvoiceDueDateOverdue, so build them dynamically.
@@ -62,5 +62,25 @@ describe('microdepositGuidance', () => {
       hostedVerificationUrl: 'https://evil.example.com/phish',
     }).verifyUrl).toBeNull();
     expect(microdepositGuidance({ hostedVerificationUrl: 42 }).verifyUrl).toBeNull();
+  });
+});
+
+describe('microdepositSavedPhrases', () => {
+  test('names one deposit and its SM code for descriptor_code', () => {
+    const p = microdepositSavedPhrases('descriptor_code');
+    expect(p.deposits).toBe('one small deposit');
+    expect(p.confirmStep).toMatch(/6-character code starting with “SM”/);
+  });
+
+  test('names two deposits and their amounts for amounts', () => {
+    expect(microdepositSavedPhrases('amounts')).toEqual({ deposits: 'two small deposits', confirmStep: 'confirm the two amounts' });
+  });
+
+  test('stays true for either kind when the type is unknown', () => {
+    for (const type of [null, undefined, 'something_new']) {
+      const p = microdepositSavedPhrases(type);
+      expect(p.deposits).toBe('a small deposit (or two)');
+      expect(p.deposits).not.toMatch(/^two/);
+    }
   });
 });

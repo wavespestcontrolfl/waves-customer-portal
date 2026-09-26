@@ -4518,6 +4518,32 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('const target = ev.target instanceof Element ? ev.target : ev.target?.parentElement;');
   });
 
+  test('a no-guarantee estimate (termite work) keeps its cancel/refund terms and drops the guarantee', () => {
+    const html = renderPage('terms-noguarantee-token', {
+      status: 'sent',
+      customerName: 'Pat Customer',
+      address: '123 Main St',
+      monthlyTotal: 50,
+      annualTotal: 600,
+      onetimeTotal: 0,
+      tier: 'Bronze',
+      noGuaranteeClaims: true,
+    }, {
+      result: {
+        recurring: { services: [{ name: 'Pest Control', mo: 50 }] },
+        oneTime: { items: [], specItems: [] },
+        specItems: [],
+        results: { pest: { apps: 4 } },
+      },
+    });
+
+    expect(html).toContain('class="card plan-terms-card"');
+    expect(html).toContain('<h2>Cancel &amp; refunds</h2>');
+    expect(html).toContain('Cancel anytime &mdash; no contract');
+    expect(html).not.toContain('our guarantee');
+    expect(html).not.toContain('Money-back guarantee');
+  });
+
   test('server-rendered recurring estimates surface cancel/refund/guarantee terms', () => {
     const html = renderPage('terms-token', {
       status: 'sent',

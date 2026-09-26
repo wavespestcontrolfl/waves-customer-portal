@@ -405,6 +405,15 @@ function inferEstimateServiceLines(estimate = {}) {
   }));
 }
 
+// Lane keys of the estimate's one-time rows. inferEstimateServiceLines reports
+// only the recurring plan when there is one, so a reader that must see every
+// kind of work quoted (the guarantee rule in estimate-followup-copy.js) reads
+// these too.
+function oneTimeServiceKeys(estimate = {}) {
+  const data = parseEstimateData(estimate.estimateData ?? estimate.estimate_data);
+  return unique(oneTimeServicesFromData(data).map((line) => line.key).filter((key) => key && key !== 'unknown'));
+}
+
 function inferEstimateServiceInterest(estimate = {}) {
   const explicit = String(estimate.serviceInterest || estimate.service_interest || '').trim();
   if (explicit) return explicit;
@@ -419,6 +428,7 @@ module.exports = {
   SERVICE_LINE_LABELS,
   inferEstimateServiceInterest,
   inferEstimateServiceLines,
+  oneTimeServiceKeys,
   parseEstimateData,
   serviceKeysFromText,
 };

@@ -147,8 +147,22 @@ const ONE_TIME_CTA_MICRO = 'Licensed & insured · Satisfaction guaranteed · App
 
 // Terms-neutral micro line: used whenever we cannot verify that the
 // recurring contract/callback/guarantee terms apply to EVERY service the
-// CTA covers (rodent plans, unknown/mixed compositions).
+// CTA covers (rodent plans, mixed non-termite compositions).
 const NEUTRAL_CTA_MICRO = 'Licensed & insured · Satisfaction guaranteed · No pressure — approve when you’re ready';
+
+// Termite work carries no guarantee of any kind (owner ruling: re-treatment
+// needs the paid bond; the estimate drip applies the same rule server-side,
+// estimate-followup-copy.js estimateMakesNoGuaranteeClaim). These are the
+// page's termite slugs; the server's termite lane (estimate-service-lines.js)
+// covers the same work: bait, foam, trenching, pre-slab, Bora-Care and WDO.
+// Each keeps its existing micro line with the guarantee dropped, and nothing
+// new is claimed.
+const TERMITE_SLUGS = new Set([
+  'termite_bait', 'foam_recurring', 'termite_trenching', 'pre_slab_termiticide',
+  'bora_care', 'termite_foam', 'wdo_inspection',
+]);
+const ONE_TIME_NO_GUARANTEE_CTA_MICRO = 'Licensed & insured · Approve online in 60 seconds';
+const NO_GUARANTEE_CTA_MICRO = 'Licensed & insured · No pressure — approve when you’re ready';
 
 // Commercial pack — every claim is grounded in standing owner statements or
 // an already-shipped surface: interior treatment available on every visit
@@ -267,6 +281,7 @@ const GLASS_PACKS = {
       'Basic vs Premier?',
       'What about active termites?',
     ],
+    ctaMicro: NO_GUARANTEE_CTA_MICRO,
   },
   foam_recurring: {
     heroH1: 'Hello {first}, your recurring foam treatment plan is ready!',
@@ -280,6 +295,7 @@ const GLASS_PACKS = {
       'Can I prepay annually?',
       'What about active termites?',
     ],
+    ctaMicro: NO_GUARANTEE_CTA_MICRO,
   },
   termite_trenching: {
     heroH1: 'Hello {first}, your termite barrier quote is ready!',
@@ -293,7 +309,7 @@ const GLASS_PACKS = {
       'What product is used?',
       'What’s covered?',
     ],
-    ctaMicro: ONE_TIME_CTA_MICRO,
+    ctaMicro: ONE_TIME_NO_GUARANTEE_CTA_MICRO,
   },
   pre_slab_termiticide: {
     heroH1: 'Hello {first}, your pre-slab termite treatment quote is ready!',
@@ -302,7 +318,7 @@ const GLASS_PACKS = {
     aiTitle: 'Priced from the measured slab area',
     aiBody: 'This quote comes from the measured slab area, the selected product, and your warranty option — nothing padded, nothing guessed.',
     askChips: [],
-    ctaMicro: ONE_TIME_CTA_MICRO,
+    ctaMicro: ONE_TIME_NO_GUARANTEE_CTA_MICRO,
   },
   bora_care: {
     heroH1: 'Hello {first}, your Bora-Care wood treatment quote is ready!',
@@ -316,7 +332,7 @@ const GLASS_PACKS = {
       'How long does it last?',
       'When should this be done?',
     ],
-    ctaMicro: ONE_TIME_CTA_MICRO,
+    ctaMicro: ONE_TIME_NO_GUARANTEE_CTA_MICRO,
   },
   // Scope-neutral on purpose: this category covers everything from
   // bait-station-only monitoring plans to full trapping + exclusion
@@ -343,7 +359,7 @@ const GLASS_PACKS = {
     aiTitle: 'Prepared for the property shown on this estimate',
     aiBody: 'The inspection and reporting scope shown here applies to this property; it is not a pest-control treatment plan.',
     askChips: [],
-    ctaMicro: ONE_TIME_CTA_MICRO,
+    ctaMicro: ONE_TIME_NO_GUARANTEE_CTA_MICRO,
   },
   termite_foam: {
     heroH1: 'Hello {first}, your termite foam treatment quote is ready!',
@@ -352,7 +368,7 @@ const GLASS_PACKS = {
     aiTitle: 'Prepared for the targeted treatment area',
     aiBody: 'This quote covers localized termite foam treatment, not recurring pest control or a whole-home liquid barrier.',
     askChips: ['Where will the foam be applied?', 'What does this treatment cover?', 'What precautions should I follow for this application?', 'How do I schedule the treatment?'],
-    ctaMicro: ONE_TIME_CTA_MICRO,
+    ctaMicro: ONE_TIME_NO_GUARANTEE_CTA_MICRO,
   },
   trap_only: {
     heroH1: 'Hello {first}, your trap-only monitoring plan is ready!',
@@ -407,11 +423,24 @@ const GLASS_ONE_TIME_HERO_REVIEW = {
   heroH1: GLASS_ONE_TIME_HERO.heroH1,
   heroSub: 'One visit, priced from your actual property — our team reviews it and confirms scheduling with you. Licensed & insured, satisfaction guaranteed.',
 };
+// The same heroes without the guarantee, for an estimate the server marks
+// noGuaranteeClaims (a termite lane, or lanes it can't classify).
+const GLASS_ONE_TIME_HERO_NO_GUARANTEE = {
+  heroH1: GLASS_ONE_TIME_HERO.heroH1,
+  heroSub: 'One visit, priced from your actual property — approve online and pick a day that works. Licensed & insured.',
+};
+const GLASS_ONE_TIME_HERO_REVIEW_NO_GUARANTEE = {
+  heroH1: GLASS_ONE_TIME_HERO.heroH1,
+  heroSub: 'One visit, priced from your actual property — our team reviews it and confirms scheduling with you. Licensed & insured.',
+};
 
-export function glassOneTimeHeroOverlay(pack, { reviewBeforeBooking = false, preserveServiceHero = false } = {}) {
+export function glassOneTimeHeroOverlay(pack, { reviewBeforeBooking = false, preserveServiceHero = false, noGuarantee = false } = {}) {
   if (!glassCopyActive()) return null;
   if (preserveServiceHero && pack) return pack;
-  return { ...(pack || GLASS_PACKS.bundle), ...(reviewBeforeBooking ? GLASS_ONE_TIME_HERO_REVIEW : GLASS_ONE_TIME_HERO) };
+  const hero = noGuarantee
+    ? (reviewBeforeBooking ? GLASS_ONE_TIME_HERO_REVIEW_NO_GUARANTEE : GLASS_ONE_TIME_HERO_NO_GUARANTEE)
+    : (reviewBeforeBooking ? GLASS_ONE_TIME_HERO_REVIEW : GLASS_ONE_TIME_HERO);
+  return { ...(pack || GLASS_PACKS.bundle), ...hero };
 }
 
 // One-time-only service hero (server contract pricing.oneTimeServiceCopy —
@@ -458,16 +487,18 @@ export function glassCtaMicroFor(serviceCategory) {
 // 'bundle' with unknown composition) demotes to the terms-neutral line —
 // a split rodent+lawn bundle must not advertise callback terms the rodent
 // copy deliberately avoids (codex rd2).
+//
+// A CTA that covers termite work, or a service the page can't classify (it
+// might be termite), never carries a guarantee: the same rule as the
+// server's estimateMakesNoGuaranteeClaim.
 export function glassCtaMicroForKeys(keys) {
   const list = (Array.isArray(keys) ? keys : [keys]).filter(Boolean);
-  if (!list.length) return NEUTRAL_CTA_MICRO;
-  const micros = list.map((key) => {
-    const slug = glassServiceSlug(String(key));
-    return slug ? glassCtaMicroFor(slug) : null;
-  });
-  if (micros.includes(null)) return NEUTRAL_CTA_MICRO;
-  const distinct = [...new Set(micros)];
-  return distinct.length === 1 ? distinct[0] : NEUTRAL_CTA_MICRO;
+  if (!list.length) return NO_GUARANTEE_CTA_MICRO;
+  const slugs = list.map((key) => glassServiceSlug(String(key)));
+  if (slugs.includes(null)) return NO_GUARANTEE_CTA_MICRO;
+  const distinct = [...new Set(slugs.map((slug) => glassCtaMicroFor(slug)))];
+  if (distinct.length === 1) return distinct[0];
+  return slugs.some((slug) => TERMITE_SLUGS.has(slug)) ? NO_GUARANTEE_CTA_MICRO : NEUTRAL_CTA_MICRO;
 }
 
 // Section-key → glass slug. Same substring vocabulary as PriceCard's

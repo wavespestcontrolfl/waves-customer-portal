@@ -17,6 +17,25 @@ export function microdepositDetailFromNextAction(vwm = {}) {
   };
 }
 
+// The deposit wording for a "bank saved, now verify it" notice, by Stripe's
+// verification type (the SetupIntent's next_action.verify_with_microdeposits
+// .microdeposit_type): `descriptor_code` sends ONE deposit whose description
+// carries a 6-character code starting with “SM”; `amounts` sends TWO deposits
+// whose amounts the customer confirms. An unknown type (a row read back from
+// the server, a redirect return) gets wording that is true for both.
+export function microdepositSavedPhrases(microdepositType) {
+  if (microdepositType === 'descriptor_code') {
+    return {
+      deposits: 'one small deposit',
+      confirmStep: 'enter the 6-character code starting with “SM” from its description',
+    };
+  }
+  if (microdepositType === 'amounts') {
+    return { deposits: 'two small deposits', confirmStep: 'confirm the two amounts' };
+  }
+  return { deposits: 'a small deposit (or two)', confirmStep: 'confirm it' };
+}
+
 // Copy building blocks for the "verify your bank to finish paying" state.
 // `descriptor_code` sends ONE deposit carrying a 6-character SM-prefixed code;
 // `amounts` sends TWO deposits the customer re-enters. Unknown type (older 409

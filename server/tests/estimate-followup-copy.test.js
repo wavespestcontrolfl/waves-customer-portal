@@ -11,6 +11,7 @@
 
 jest.mock('../services/estimate-service-lines', () => ({
   inferEstimateServiceLines: jest.fn(),
+  oneTimeServiceKeys: jest.fn(() => []),
 }));
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
@@ -18,8 +19,9 @@ jest.mock('../services/logger', () => ({
   error: jest.fn(),
 }));
 
-const { inferEstimateServiceLines } = require('../services/estimate-service-lines');
+const { inferEstimateServiceLines, oneTimeServiceKeys } = require('../services/estimate-service-lines');
 const {
+  estimateMakesNoGuaranteeClaim,
   copyCategoryForEstimate,
   followupEmailVars,
   followupSmsHook,
@@ -337,5 +339,38 @@ describe('no guarantee wherever termite may be quoted', () => {
   test('a recurring pest + lawn bundle keeps its satisfaction guarantee', () => {
     lanes('pest', 'lawn');
     expect(followupEmailVars(recurring).category_benefit).toMatch(/satisfaction guaranteed/i);
+  });
+
+  // The shared rule the estimate page, proposal document and legacy
+  // server-rendered plan terms read (the /data field noGuaranteeClaims).
+  test.each([
+    ['a termite lane', ['termite'], true],
+    ['termite beside pest', ['pest', 'termite'], true],
+    ['commercial termite bait', ['commercial_termite_bait'], true],
+    ['no classifiable lane', ['unknown'], true],
+    ['pest only', ['pest'], false],
+    ['pest + lawn', ['pest', 'lawn'], false],
+  ])('estimateMakesNoGuaranteeClaim: %s → %s', (_, keys, expected) => {
+    lanes(...keys);
+    expect(estimateMakesNoGuaranteeClaim(recurring)).toBe(expected);
+  });
+
+  test('a pest plan with termite work quoted one-time beside it makes no guarantee claim', () => {
+    lanes('pest');
+    oneTimeServiceKeys.mockReturnValueOnce(['termite']);
+    expect(estimateMakesNoGuaranteeClaim(recurring)).toBe(true);
+    oneTimeServiceKeys.mockReturnValueOnce(['pest']);
+    expect(estimateMakesNoGuaranteeClaim(recurring)).toBe(false);
+  });
+
+  test('a failed one-time read counts as termite, never as a guarantee', () => {
+    lanes('pest');
+    oneTimeServiceKeys.mockImplementationOnce(() => { throw new Error('bad data'); });
+    expect(estimateMakesNoGuaranteeClaim(recurring)).toBe(true);
+  });
+
+  test('estimateMakesNoGuaranteeClaim fails closed on a lane-inference failure', () => {
+    inferEstimateServiceLines.mockImplementation(() => { throw new Error('boom'); });
+    expect(estimateMakesNoGuaranteeClaim(recurring)).toBe(true);
   });
 });

@@ -215,7 +215,11 @@ export default function EstimateProposalDocument({ data, token }) {
   // rodent document never prints the pest callbacks/guarantee line the
   // page deliberately withholds (codex #3281 r1). One-time-only (no
   // recurring lines) resolves to the neutral line the same way.
-  const NEUTRAL_TERMS = 'Licensed & insured · Satisfaction guaranteed';
+  // A termite (or unclassifiable) estimate makes no guarantee claim: the
+  // server's noGuaranteeClaims decision, shared with the page and the
+  // estimate emails.
+  const noGuarantee = data?.estimate?.noGuaranteeClaims === true;
+  const NEUTRAL_TERMS = noGuarantee ? 'Licensed & insured' : 'Licensed & insured · Satisfaction guaranteed';
   const recurringLineDescriptions = buildings
     .flatMap((b) => (b.lineItems || []))
     .filter((li) => li.frequency !== 'one_time')
@@ -223,7 +227,9 @@ export default function EstimateProposalDocument({ data, token }) {
   // Programs are authored content: their inclusions state the plan terms,
   // so the canned no-long-term-contract claim must not print beside them
   // (codex 1A-ii r3d).
-  const termsLine = (authoredTermsPresent || programList.length > 0)
+  // The terms line speaks for the whole document, so a no-guarantee estimate
+  // prints the neutral line on every path, as its estimate emails do.
+  const termsLine = (noGuarantee || authoredTermsPresent || programList.length > 0)
     ? NEUTRAL_TERMS
     : isCommercial
       // Structural terms only — commercial accepts run the MANUAL invoicing

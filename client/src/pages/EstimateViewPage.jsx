@@ -7846,8 +7846,15 @@ function EstimateViewPageInner({ websiteMode = false }) {
     'termite_trenching', 'pre_slab_termiticide', 'bora_care',
     'wdo_inspection', 'termite_foam', 'trap_only',
   ]).has(serviceCategory);
+  // noGuaranteeClaims: the server's guarantee decision (termite lane, or
+  // lanes it can't classify), so the one-time hero drops "satisfaction
+  // guaranteed" the same way the estimate emails do.
   const baseGlassPack = estimate.isOneTimeOnly === true
-    ? glassOneTimeHeroOverlay(glassEstimateCopyFor(serviceCategory), { reviewBeforeBooking, preserveServiceHero: serviceSpecificOneTimeHero })
+    ? glassOneTimeHeroOverlay(glassEstimateCopyFor(serviceCategory), {
+      reviewBeforeBooking,
+      preserveServiceHero: serviceSpecificOneTimeHero,
+      noGuarantee: estimate?.noGuaranteeClaims === true,
+    })
     : glassEstimateCopyFor(serviceCategory);
   // One-time-only service copy (server contract pricing.oneTimeServiceCopy —
   // roach cleanout, flea, wasp, bed bug, …): its hero names the service

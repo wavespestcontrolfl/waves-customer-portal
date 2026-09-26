@@ -33,6 +33,7 @@ jest.mock('../services/logger', () => ({
 }));
 jest.mock('../services/estimate-service-lines', () => ({
   inferEstimateServiceLines: jest.fn(() => [{ key: 'pest' }]),
+  oneTimeServiceKeys: jest.fn(() => []),
   parseEstimateData: jest.fn((raw) => {
     if (!raw) return null;
     if (typeof raw === 'string') { try { return JSON.parse(raw); } catch { return null; } }
