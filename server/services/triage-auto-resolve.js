@@ -66,6 +66,12 @@ const { v2PrimaryLabelForCategory, composeWordsForV2Category } = require('../uti
 
 const SPAM_AGE_DAYS = 7;
 const ADVISORY_AGE_DAYS = 30;
+// not_confirmed's bare-ask fallback (bookingCoversRequest below): how soon
+// after the CARD a live booking must be created to count as the call
+// finally getting scheduled. A booking weeks later is not evidence this
+// call's own ask was answered — the office likely fielded an unrelated,
+// later request from the same customer.
+const NOT_CONFIRMED_BOOKING_MAX_AGE_DAYS = 7;
 // Per-run transition cap: the historical backlog drains over a few nightly
 // runs instead of one giant write burst (also bounds the knowledge-index
 // re-sync triggered by updated_at bumps).
@@ -1472,6 +1478,61 @@ function visitAtOnFileAddress(item, visit, places) {
   return place.key === onFile && place.unit === onFileUnit(item) && localityMatches(item, place);
 }
 
+// The date / hour / blackout signals a card's filing-time ask can bind, as
+// their own predicate — shared by inAsk below (cadence-checked, for a card
+// that DOES snapshot a service ask) and bareNotConfirmedBookingCoversCall
+// (no cadence to check, for one that doesn't). Same rules either way: a
+// CONFIRMED call binds the agreed hour, not merely its day; a REQUESTED ask
+// with a morning / afternoon / evening preference binds that band; a day
+// the caller excluded from the range is never answered by a booking on it;
+// a card that asked for no date binds none.
+function withinRequestedTiming(item, visit) {
+  const window = requestedWindow(item);
+  const hour = confirmedWallClock(item);
+  const blackout = blackoutDays(item);
+  if (hour && String(visit.window_start || '').slice(0, 5) !== hour) return false;
+  if (!hour && !timeOfDayMatches(item, visit)) return false;
+  if (blackout.size && (!toDate(visit.scheduled_date) || blackout.has(etCalendarDayOf(visit.scheduled_date)))) return false;
+  if (!window) return true;
+  if (!toDate(visit.scheduled_date)) return false;
+  const day = etCalendarDayOf(visit.scheduled_date);
+  return day >= window.start && day <= window.end;
+}
+
+// not_confirmed's bare-ask fallback: the card snapshotted NO requested
+// service category and NO requested_service_intent — what every REAL
+// not_confirmed payload does (2026-09-26 prod audit: 74 such cards filed
+// since 08-01, 0 auto-resolved by this sweep, because bookingCoversRequest
+// returned false on the categories check below before ever looking at a
+// booking — the scheduling extraction snapshots a service ask only when
+// the transcript actually named one, which a "didn't confirm a time" call
+// usually didn't). This asks the plainer question a human triager already
+// answers by hand: did the SAME customer get a live PARENT booking,
+// created after the card and within NOT_CONFIRMED_BOOKING_MAX_AGE_DAYS of
+// it, at the address this call was about (the on-file address when the
+// call named none)? Every date/time signal the card DID capture still
+// binds, through withinRequestedTiming — this only lifts the service ask,
+// because there is no ask left to check a booking's cadence against.
+// The address check is a POSITIVE one-to-one match on the booking's own
+// stamp or property (bookingAtReadings → visitAtOnFileAddress for "named no
+// address"), never an inference from account shape, so this needs no
+// singleProperty guard: a two-property account is fine as long as the
+// booking that answers it is stamped at the address the call was about —
+// the assignment's own instruction not to loosen multi-property matching
+// beyond that positive per-visit check. Direct-vs-association provenance is
+// not judged either: a booking a human made by hand after reading the card
+// carries no source_call_log_id pointing back at this call at all, and
+// that is exactly the case this fallback exists for.
+function bareNotConfirmedBookingCoversCall(item, mine, places) {
+  const asked = requestedPlaces(item);
+  if (!asked) return false;
+  const candidates = mine.filter((v) => !v.parent_service_id && !v.recurring_parent_id
+    && strictlyAfter(v.created_at, item.created_at)
+    && ageDays(item.created_at, toDate(v.created_at) || new Date(NaN)) <= NOT_CONFIRMED_BOOKING_MAX_AGE_DAYS
+    && withinRequestedTiming(item, v));
+  return asked.every((readings) => candidates.some((v) => bookingAtReadings(item, v, places, readings)));
+}
+
 // not_confirmed → bookings created after the card that COLLECTIVELY cover
 // every service category the card snapshotted at filing. Booking
 // provenance is PARENT rows only (follow-up children are not the booking
@@ -1484,38 +1545,26 @@ function visitAtOnFileAddress(item, visit, places) {
 // booking must not close the original ask. A card with no snapshot (filed before it
 // existed — the historical backlog) gets NO booking evidence: without the
 // requested service there is nothing to prove a booking answered, and a
-// reprocess could have re-classified the call. Those cards stay for humans.
+// reprocess could have re-classified the call — EXCEPT the bare-ask
+// fallback above, scoped to not_confirmed alone, when the snapshot also
+// carries no requested_service_intent: the address / authorization /
+// house-number cards that share this evidence arm through the
+// confirmed-unbooked guard (cardConfirmedUnbooked / callConfirmedUnbooked)
+// keep the strict `return false` here unweakened.
 function bookingCoversRequest(item, mine, { singleProperty, places }) {
   const categories = requestedServiceTokens(item);
-  if (!categories.length) return false;
+  if (!categories.length) {
+    if (item.reason_code !== 'not_confirmed' || intentRule(item)) return false;
+    return bareNotConfirmedBookingCoversCall(item, mine, places);
+  }
   // Parent rows only: neither a follow-up child (parent_service_id) nor a
   // recurring series occurrence (recurring_parent_id) is a booking the
   // call created — an existing plan generating its next visit inside the
   // requested window would otherwise answer a new-membership ask (codex
   // r31 P1). The completed-visit address arm keeps both.
   const parents = mine.filter((v) => !v.parent_service_id && !v.recurring_parent_id && strictlyAfter(v.created_at, item.created_at));
-  // The requested days bind every booking, this call's own included — a
-  // reprocess that moved only the date and minted a new booking must not
-  // close the original ask. A card that asked for no date binds none. A
-  // CONFIRMED call binds the agreed hour too, not merely its day: another
-  // booking that afternoon is not the appointment the caller confirmed,
-  // and a row with no window_start cannot prove the hour. A REQUESTED ask
-  // with a morning / afternoon / evening preference binds that band, and a
-  // day the caller excluded from the range is never answered by a booking
-  // on it (a row with no date cannot prove it avoided one).
   const window = requestedWindow(item);
-  const hour = confirmedWallClock(item);
-  const blackout = blackoutDays(item);
-  const inAsk = (v) => {
-    if (!cadenceMatches(item, v)) return false;
-    if (hour && String(v.window_start || '').slice(0, 5) !== hour) return false;
-    if (!hour && !timeOfDayMatches(item, v)) return false;
-    if (blackout.size && (!toDate(v.scheduled_date) || blackout.has(etCalendarDayOf(v.scheduled_date)))) return false;
-    if (!window) return true;
-    if (!toDate(v.scheduled_date)) return false;
-    const day = etCalendarDayOf(v.scheduled_date);
-    return day >= window.start && day <= window.end;
-  };
+  const inAsk = (v) => cadenceMatches(item, v) && withinRequestedTiming(item, v);
   const asked = requestedPlaces(item);
   if (!asked) return false;
   const direct = parents.filter((v) => String(v.source_call_log_id) === String(item.call_log_id) && inAsk(v));

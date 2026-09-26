@@ -1227,6 +1227,96 @@ describe('evidence helpers', () => {
     expect(requestedAddressIsOnFile(item({ ...onFile, payload: { scheduling_window: {} } }))).toBe(false);
   });
 
+  // not_confirmed's bare-ask fallback (2026-09-26 prod audit): 74
+  // not_confirmed cards filed since 08-01, 0 auto-resolved, because every
+  // real payload carries no requested_service_categories and no
+  // requested_service_intent at all — bookingCoversRequest returned false
+  // on the categories check before ever looking at a booking. These pin
+  // the fallback against the REAL payload shape: top-level
+  // {flag, confidence, on_file_address, scheduling_status, scheduling_window},
+  // scheduling_window {status, blackout_dates, requested_address,
+  // confirmed_start_at: null, callback_window_start/end,
+  // scheduling_notes_raw, preferred_time_of_day: 'unspecified',
+  // requested_date_range_start/end} — never requested_service_categories,
+  // requested_specific_service or requested_service_intent.
+  test('not_confirmed with no requested service and no requested intent resolves on a live parent booking at the call\'s premise within 7 days', () => {
+    const none = { street_line_1: null, street_line_2: null, city: null, postal_code: null, raw_text: null, additional_properties: 0 };
+    const bareSchedulingWindow = (over = {}) => ({
+      status: 'requested',
+      blackout_dates: [],
+      requested_address: none,
+      confirmed_start_at: null,
+      callback_window_start: null,
+      callback_window_end: null,
+      scheduling_notes_raw: 'caller said sometime next week, no specific day',
+      preferred_time_of_day: 'unspecified',
+      requested_date_range_start: null,
+      requested_date_range_end: null,
+      ...over,
+    });
+    const cardAt = (createdAt, over = {}) => item({
+      reason_code: 'not_confirmed', call_log_id: 'call-1', call_customer_id: 'cust-1',
+      created_at: createdAt,
+      customer_address_line1: '77 Oak St', customer_city: 'Bradenton', customer_zip: '34205',
+      payload: { flag: 'not_confirmed', confidence: 0.6, scheduling_status: 'requested', scheduling_window: bareSchedulingWindow(over) },
+    });
+    const CARD_AT = '2026-09-10T15:00:00Z';
+    const card = cardAt(CARD_AT);
+    const days = (n) => new Date(new Date(CARD_AT).getTime() + n * 24 * 3600 * 1000).toISOString();
+    const places = new Map([['p1', { customer_id: 'cust-1', key: '77oakstreet', unit: '', city: 'Bradenton', zip: '34205' }]]);
+    // A live parent booking, manually scheduled by staff off the card (no
+    // source_call_log_id at all — the office read the card and booked by
+    // hand), at the on-file address, 5 days after the card.
+    const bareBooking = (over) => ({
+      id: 'b1', parent_service_id: null, recurring_parent_id: null, status: 'confirmed',
+      service_type: 'Bi-Monthly Pest Control', created_at: days(5), scheduled_date: '2026-09-15',
+      service_address_line1: '77 Oak Street', service_address_city: 'Bradenton', service_address_zip: '34205',
+      ...over,
+    });
+    // (b) no window at all, single property, created same day as the card,
+    // scheduled the next day — resolves.
+    expect(bookingCoversRequest(card, [bareBooking({ created_at: days(0.2), scheduled_date: days(1).slice(0, 10) })], { singleProperty: true, places })).toBe(true);
+    // (d) no window, MULTI-property account, booked 5 days later AT THE
+    // ON-FILE ADDRESS — the assignment's own instruction: multi-property is
+    // fine here as long as the visit's own stamped address matches the
+    // call's premise (no singleProperty guard on this fallback).
+    expect(bookingCoversRequest(card, [bareBooking({})], { singleProperty: false, places })).toBe(true);
+    // (c) a STATED window the booking lands exactly inside — still binds
+    // (the fallback only lifts the service ask, not the date signals).
+    const windowed = cardAt(CARD_AT, { requested_date_range_start: '2026-09-25', requested_date_range_end: '2026-09-25' });
+    expect(bookingCoversRequest(windowed, [bareBooking({ scheduled_date: '2026-09-25', service_type: 'Bee / Wasp Nest Removal' })], { singleProperty: true, places })).toBe(true);
+    // A stated window the booking lands OUTSIDE — the date signal the card
+    // DID capture still binds; this fallback lifts the service ask only,
+    // never the date protections (no principled tolerance for an off-window
+    // day exists elsewhere in this file).
+    expect(bookingCoversRequest(windowed, [bareBooking({ scheduled_date: '2026-09-26' })], { singleProperty: true, places })).toBe(false);
+    // A stated requested_service_intent (even with empty categories) is
+    // still an ask to check cadence against — the strict path applies, and
+    // a bare booking answers nothing without a category to match.
+    const withIntent = cardAt(CARD_AT, {}).payload;
+    withIntent.scheduling_window.requested_service_intent = 'preventative_one_time';
+    expect(bookingCoversRequest({ ...card, payload: withIntent }, [bareBooking({})], { singleProperty: true, places })).toBe(false);
+
+    // ── Negatives ──────────────────────────────────────────────────────
+    // Booking created 8+ days after the card → outside
+    // NOT_CONFIRMED_BOOKING_MAX_AGE_DAYS, stays open.
+    expect(bookingCoversRequest(card, [bareBooking({ created_at: days(8) })], { singleProperty: true, places })).toBe(false);
+    // Booking for a DIFFERENT property on a multi-property account (the
+    // visit's own stamp does not match the call's premise) → stays open.
+    expect(bookingCoversRequest(card, [bareBooking({ service_address_line1: '5 Pine Ave', service_address_city: 'Sarasota', service_address_zip: '34236' })], { singleProperty: false, places })).toBe(false);
+    // Booking created BEFORE the card → not evidence this call was
+    // answered, stays open.
+    expect(bookingCoversRequest(card, [bareBooking({ created_at: days(-1) })], { singleProperty: true, places })).toBe(false);
+    // A follow-up child or a recurring series occurrence is not a booking
+    // the office made in response to this card (codex r31 P1 — kept for
+    // the fallback too).
+    expect(bookingCoversRequest(card, [bareBooking({ parent_service_id: 'parent-1' })], { singleProperty: true, places })).toBe(false);
+    expect(bookingCoversRequest(card, [bareBooking({ recurring_parent_id: 'series-1' })], { singleProperty: true, places })).toBe(false);
+    // (e)-shaped: no property_id / no address stamp at all cannot be
+    // positively placed anywhere, even well within the age window.
+    expect(bookingCoversRequest(card, [bareBooking({ service_address_line1: null, service_address_city: null, service_address_zip: null, property_id: null })], { singleProperty: true, places })).toBe(false);
+  });
+
   test('loadEvidence is an empty map with the evidence gate off — no DB access', async () => {
     const OLD = process.env.GATE_TRIAGE_AUTO_RESOLVE_EVIDENCE;
     delete process.env.GATE_TRIAGE_AUTO_RESOLVE_EVIDENCE;
