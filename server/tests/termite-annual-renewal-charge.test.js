@@ -1407,8 +1407,22 @@ describe('termite annual renewal charge', () => {
     // a row DOES exist, so every EXISTING test's happy path is unaffected
     // unless it explicitly passes `notificationsTaskRow: null`.
     notificationsTaskRow = { id: 'notif-1' },
+    // Codex #4971 post-push audit round-6 P1 (item 1): the whereNull()
+    // stamp now RETURNS the persisted renewal_lapse_started_at (knex
+    // `.returning()`, rows are objects) rather than the caller fabricating
+    // its own `new Date()` — this array is what `.returning()` resolves
+    // to. Default: this tick's own whereNull() guard won the race, so
+    // every EXISTING test's happy path is unaffected. Pass `[]` to model a
+    // concurrent tick winning that race instead, alongside
+    // `raceLostLapseStartedAt` for the plain re-read that follows.
+    startedAtReturning = [{ renewal_lapse_started_at: new Date('2026-01-01T12:00:00Z') }],
+    // The value the plain re-read (`.first('renewal_lapse_started_at')`)
+    // resolves to when the whereNull() race was LOST (startedAtReturning
+    // is `[]`) — the concurrent tick's own persisted stamp.
+    raceLostLapseStartedAt = null,
   } = {}) {
-    const startedUpdate = jest.fn().mockResolvedValue(1);
+    const startedAtReturningFn = jest.fn().mockResolvedValue(startedAtReturning);
+    const startedUpdate = jest.fn(() => ({ returning: startedAtReturningFn }));
     const completedUpdate = jest.fn().mockResolvedValue(1);
     const conn = jest.fn((table) => {
       if (table === 'notifications') {
@@ -1422,9 +1436,16 @@ describe('termite annual renewal charge', () => {
             return { update: startedUpdate };
           }),
           update: completedUpdate,
-          // The ONLY `.where(...).first()` call this outer `conn` sees is
-          // processGraceLapseSequence's own parent-guard-miss re-read.
-          first: jest.fn().mockResolvedValue(parentAfterGuardMiss),
+          // Two DISTINCT `.where(...).first(...)` call sites share this
+          // outer `conn`, told apart by the column they ask for: the
+          // whereNull()-race-lost re-read asks for 'renewal_lapse_started_at'
+          // on the successor; processGraceLapseSequence's own parent-
+          // guard-miss re-read asks for 'renewal_decision' on the parent.
+          first: jest.fn((col) => Promise.resolve(
+            col === 'renewal_lapse_started_at'
+              ? (raceLostLapseStartedAt == null ? null : { renewal_lapse_started_at: raceLostLapseStartedAt })
+              : parentAfterGuardMiss,
+          )),
         })),
       };
     });
@@ -1460,6 +1481,7 @@ describe('termite annual renewal charge', () => {
 
   function mockLapseDeps({
     voidInvoiceImpl, raiseTermiteRetrievalTaskImpl, recordDecisionImpl, assertNoInvoiceChargeReconciliationPendingImpl,
+    otherLiveTermiteCoverageImpl,
   } = {}) {
     const voidInvoice = jest.fn(voidInvoiceImpl || (async () => ({})));
     jest.doMock('../services/invoice', () => ({ voidInvoice }));
@@ -1478,13 +1500,18 @@ describe('termite annual renewal charge', () => {
     // recordDecision('cancel')) in withParentDecisionLock — a transparent
     // pass-through here, same as mockGraceHelpers' own mock.
     const withParentDecisionLock = jest.fn((termId, fn) => fn());
-    jest.doMock('../services/annual-prepay-renewals', () => ({ recordDecision, withParentDecisionLock }));
+    // Codex #4971 post-push audit round-6 P1 (item 2): default = no other
+    // live termite coverage, so every EXISTING test's happy path reaches
+    // the ordinary raise unchanged unless it explicitly passes its own
+    // otherLiveTermiteCoverageImpl.
+    const otherLiveTermiteCoverage = jest.fn(otherLiveTermiteCoverageImpl || (async () => null));
+    jest.doMock('../services/annual-prepay-renewals', () => ({ recordDecision, withParentDecisionLock, otherLiveTermiteCoverage }));
     const assertNoInvoiceChargeReconciliationPending = jest.fn(
       assertNoInvoiceChargeReconciliationPendingImpl || (async () => undefined),
     );
     jest.doMock('../services/stripe', () => ({ assertNoInvoiceChargeReconciliationPending }));
     return {
-      voidInvoice, raiseTermiteRetrievalTask, recordDecision, assertNoInvoiceChargeReconciliationPending, withParentDecisionLock,
+      voidInvoice, raiseTermiteRetrievalTask, recordDecision, assertNoInvoiceChargeReconciliationPending, withParentDecisionLock, otherLiveTermiteCoverage,
     };
   }
 
@@ -1841,6 +1868,111 @@ describe('termite annual renewal charge', () => {
       expect(raiseTermiteRetrievalTask).toHaveBeenCalledWith('cust-1', null, expect.objectContaining({
         termId: 'succ-term-1', episodeKey: 'renewal_grace_lapse', eventAt: startedAt,
       }));
+    });
+
+    // Codex #4971 post-push audit round-6 P1 (item 1): a FRESH lapse (no
+    // renewal_lapse_started_at yet) used to pass eventAt=null down to the
+    // retrieval raise — the in-memory `term` never picked up the value the
+    // whereNull() stamp just persisted. eventAt must equal that persisted
+    // stamp, never null and never a second, independently-fabricated Date.
+    test('P1 (item 1): a FRESH lapse\'s retrieval raise gets eventAt = the just-persisted stamp, never null', async () => {
+      mockCommon();
+      const { raiseTermiteRetrievalTask } = mockLapseDeps();
+      const stampedAt = new Date('2026-09-01T08:00:00Z');
+      const { conn } = makeLapseConn({ startedAtReturning: [{ renewal_lapse_started_at: stampedAt }] });
+
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      const term = {
+        id: 'succ-term-1', customer_id: 'cust-1', prepay_invoice_id: 'succ-invoice-1', renewed_from_term_id: 'parent-1',
+      };
+      await _private.processGraceLapseForTerm(term, conn);
+
+      const call = raiseTermiteRetrievalTask.mock.calls[0];
+      expect(call[2].eventAt).not.toBeNull();
+      expect(call[2].eventAt).toEqual(stampedAt);
+    });
+
+    // Codex #4971 post-push audit round-6 P1 (item 1): when a CONCURRENT
+    // tick's own whereNull() guard already won the race (this tick's
+    // update affects 0 rows, .returning() comes back empty), the code
+    // falls back to a plain re-read of the persisted value rather than
+    // treating it as unset — the retrieval raise still gets the REAL
+    // first-detected time, never null.
+    test('P1 (item 1): the whereNull() race lost to a concurrent tick — re-reads the persisted stamp', async () => {
+      mockCommon();
+      const { raiseTermiteRetrievalTask } = mockLapseDeps();
+      const concurrentStampedAt = new Date('2026-09-02T09:30:00Z');
+      const { conn } = makeLapseConn({
+        startedAtReturning: [],
+        raceLostLapseStartedAt: concurrentStampedAt,
+      });
+
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      const term = {
+        id: 'succ-term-1', customer_id: 'cust-1', prepay_invoice_id: 'succ-invoice-1', renewed_from_term_id: 'parent-1',
+      };
+      const outcome = await _private.processGraceLapseForTerm(term, conn);
+
+      expect(outcome).not.toBe('deferred');
+      const call = raiseTermiteRetrievalTask.mock.calls[0];
+      expect(call[2].eventAt).toEqual(concurrentStampedAt);
+    });
+
+    // Codex #4971 post-push audit round-6 P1 (item 2): raiseTermiteRetrievalTask
+    // counts EVERY Waves-owned termite station on the ACCOUNT — an
+    // account-wide task is only safe when this lapsed plan is the
+    // account's ONLY live termite coverage. With other coverage on file,
+    // no automatic task may be raised; staff are belled to confirm which
+    // stations belong to THIS lapsed plan instead.
+    test('P1 (item 2): other live termite coverage on file — no automatic retrieval task, staff belled instead', async () => {
+      mockCommon();
+      const notifyAdmin = jest.fn(async () => ({ id: 'n1', deduped: false, suppressed: false }));
+      jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
+      const { raiseTermiteRetrievalTask, recordDecision } = mockLapseDeps({
+        otherLiveTermiteCoverageImpl: async () => 'other_termite_plan',
+      });
+      const { conn, completedUpdate } = makeLapseConn();
+
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      const term = {
+        id: 'succ-term-1', customer_id: 'cust-1', prepay_invoice_id: 'succ-invoice-1', renewed_from_term_id: 'parent-1',
+        renewal_lapse_started_at: new Date('2026-10-01T00:00:00Z'),
+      };
+      const outcome = await _private.processGraceLapseForTerm(term, conn);
+
+      expect(outcome).toBe('lapsed');
+      expect(raiseTermiteRetrievalTask).not.toHaveBeenCalled();
+      expect(notifyAdmin).toHaveBeenCalledWith('billing', expect.any(String), expect.stringMatching(/other_termite_plan/), expect.objectContaining({
+        dedupeKey: 'termite-renewal-charge:succ-term-1:lapse_retrieval_other_coverage',
+      }));
+      expect(recordDecision).toHaveBeenCalledTimes(1); // still decides the parent — the bell persisted
+      expect(completedUpdate).toHaveBeenCalledWith(expect.objectContaining({ renewal_lapse_completed_at: expect.any(Date) }));
+    });
+
+    // The SAME other-coverage guard, but the confirmation bell itself
+    // fails to persist (notifyAdmin returns null) — staff were never
+    // actually told, so this lapse must stay retryable, never marked
+    // complete, and the parent must never be decided on an unconfirmed
+    // outcome.
+    test('P1 (item 2): other coverage on file, but the confirmation bell fails to persist — stays deferred, never completes', async () => {
+      mockCommon();
+      jest.doMock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => null) }));
+      const { raiseTermiteRetrievalTask, recordDecision } = mockLapseDeps({
+        otherLiveTermiteCoverageImpl: async () => 'termite_bond',
+      });
+      const { conn, completedUpdate } = makeLapseConn();
+
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      const term = {
+        id: 'succ-term-1', customer_id: 'cust-1', prepay_invoice_id: 'succ-invoice-1', renewed_from_term_id: 'parent-1',
+        renewal_lapse_started_at: new Date('2026-10-01T00:00:00Z'),
+      };
+      const outcome = await _private.processGraceLapseForTerm(term, conn);
+
+      expect(outcome).toBe('deferred');
+      expect(raiseTermiteRetrievalTask).not.toHaveBeenCalled();
+      expect(recordDecision).not.toHaveBeenCalled();
+      expect(completedUpdate).not.toHaveBeenCalled();
     });
 
     // A newer retrieval instruction already stands on the account —

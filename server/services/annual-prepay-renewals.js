@@ -4530,89 +4530,102 @@ async function isUnpaidGracePendingTerm(term, conn) {
   return !reallyPaid;
 }
 
+// Extracted from reconcileCoveredTermsSweep (complexity reduction, no
+// behavior change — the eslint complexity/max-depth gate on this diff):
+// the per-term body of the sweep's dated loop, unchanged apart from
+// `continue` -> `return` (equivalent at the end of a loop body with
+// nothing left to run). `todayKey` is `dateOnly(today) || etDateString()`,
+// hoisted ONCE by the caller — the original inline calls were the exact
+// same pure computation repeated per-term, so reusing one value changes
+// nothing observable.
+async function reconcileOneCoveredTermInSweep(term, conn, todayKey, summary) {
+  summary.terms += 1;
+  if (await isUnpaidGracePendingTerm(term, conn)) return;
+  // Dispute-marker leg (Codex round-3 P2): a COVERED term still carrying
+  // dispute_suspended_at means the dispute resolved (coverage requires the
+  // prepay invoice paid again) but the one-shot won-dispute restore didn't
+  // finish — its errors are swallowed on the paid-invoice sync, and
+  // nothing else re-enters it. Finish the restore here: re-stamp coverage
+  // + billing mode (idempotent; skips foreign-term and out-of-band
+  // stamps), claw back dispute-window dues, and clear the marker only
+  // when nothing deferred. Bounds any lost restore to one sweep cycle.
+  if (term.dispute_suspended_at) {
+    try {
+      const normalized = { ...term, term_start: dateOnly(term.term_start), term_end: dateOnly(term.term_end) };
+      // Direct stamping path — detach legacy callbacks first (r4 P1).
+      await detachCallbacksFromTerm(normalized, conn);
+      await applyPrepaidCoverageForTerm(normalized, conn);
+      await stampAnnualPrepayBillingMode(term.customer_id, conn, term.id);
+      const recovery = await finishDisputeRecoveryForTerm(term, conn);
+      summary.disputeRecovered += recovery.credited;
+    } catch (err) {
+      logger.warn(`[annual-prepay] sweep dispute-recovery leg failed for term ${term.id}: ${err.message}`);
+    }
+  }
+  // ADMIN-BUG-R18: an end-at-term lapse's skipped paid visit is replaced
+  // here, once a night — per-edit refreshes only attach and stamp.
+  if (isEndAtTermLapseInWindow(term, todayKey)) {
+    try {
+      const kept = await keepEndAtTermLapseCoverage(term, conn, { reseed: true, today: todayKey });
+      if (kept?.createdCount) logger.info(`[annual-prepay] sweep replaced ${kept.createdCount} visit(s) for end-at-term lapse ${term.id}`);
+      if (kept?.skipped === 'cancel_commit_in_progress') logger.info(`[annual-prepay] sweep reseed skipped for term ${term.id}: a cancellation is being committed`);
+    } catch (err) {
+      logger.warn(`[annual-prepay] sweep end-at-term reseed failed for term ${term.id}: ${err.message}`);
+    }
+  }
+  const res = await reconcilePendingWindowCompletions(term, conn);
+  summary.settled += res.settled || 0;
+  summary.credited += res.credited || 0;
+  // Covered = paid-backed (coveredTermsAsOf revalidates the prepay
+  // invoice), so any clawed extension credit is owed back — self-heals a
+  // repayment whose inline restore was lost (guards P0). Idempotent.
+  try {
+    summary.credited += await restoreWaveguardExtensionCredits(term, conn);
+  } catch (err) {
+    logger.warn(`[annual-prepay] sweep extension-credit restore failed for term ${term.id}: ${err.message}`);
+  }
+  try {
+    const grants = await conn('customer_credit_ledger')
+      .where({ customer_id: term.customer_id, created_by: PENDING_COMPLETION_CREDIT_BY })
+      .where('note', 'like', `%term ${term.id},%`)
+      .where('delta', '>', 0)
+      .select('note', 'invoice_id');
+    for (const grant of grants) {
+      const visitMatch = String(grant.note || '').match(/visit ([0-9a-f-]+)\)/i);
+      const visitId = visitMatch ? visitMatch[1] : null;
+      // The grant row carries the exact invoice the credit was issued
+      // against — check THAT invoice, not the visit's latest (a re-invoiced
+      // visit must not mask its refunded original, and a pre-grant void
+      // must not trigger a reversal).
+      if (!visitId || !grant.invoice_id) continue;
+      const grantInvoice = await conn('invoices')
+        .where({ id: grant.invoice_id })
+        .first('id', 'status');
+      if (!grantInvoice) continue;
+      const status = String(grantInvoice.status || '').toLowerCase();
+      if (!INVOICE_CANCELLED_STATUSES.has(status)) continue;
+      // The reversal is marker-deduped, so re-running for an
+      // already-reversed grant is a no-op.
+      summary.reversed += await reversePendingWindowCompletionCredits(term, conn, { visitId });
+    }
+  } catch (err) {
+    logger.warn(`[annual-prepay] sweep reversal recovery failed for term ${term.id}: ${err.message}`);
+  }
+}
+
 async function reconcileCoveredTermsSweep({ today = etDateString(), conn = db } = {}) {
   const summary = { terms: 0, settled: 0, credited: 0, reversed: 0, disputeRecovered: 0 };
   if (!(await annualPrepayTableExists())) return summary;
+  const todayKey = dateOnly(today) || etDateString();
   let terms = [];
   try {
-    terms = await coveredTermsAsOf(conn, dateOnly(today) || etDateString()).select('t.*');
+    terms = await coveredTermsAsOf(conn, todayKey).select('t.*');
   } catch (err) {
     logger.warn(`[annual-prepay] covered-term sweep query failed: ${err.message}`);
     return summary;
   }
   for (const term of terms) {
-    summary.terms += 1;
-    if (await isUnpaidGracePendingTerm(term, conn)) continue;
-    // Dispute-marker leg (Codex round-3 P2): a COVERED term still carrying
-    // dispute_suspended_at means the dispute resolved (coverage requires the
-    // prepay invoice paid again) but the one-shot won-dispute restore didn't
-    // finish — its errors are swallowed on the paid-invoice sync, and
-    // nothing else re-enters it. Finish the restore here: re-stamp coverage
-    // + billing mode (idempotent; skips foreign-term and out-of-band
-    // stamps), claw back dispute-window dues, and clear the marker only
-    // when nothing deferred. Bounds any lost restore to one sweep cycle.
-    if (term.dispute_suspended_at) {
-      try {
-        const normalized = { ...term, term_start: dateOnly(term.term_start), term_end: dateOnly(term.term_end) };
-        // Direct stamping path — detach legacy callbacks first (r4 P1).
-        await detachCallbacksFromTerm(normalized, conn);
-        await applyPrepaidCoverageForTerm(normalized, conn);
-        await stampAnnualPrepayBillingMode(term.customer_id, conn, term.id);
-        const recovery = await finishDisputeRecoveryForTerm(term, conn);
-        summary.disputeRecovered += recovery.credited;
-      } catch (err) {
-        logger.warn(`[annual-prepay] sweep dispute-recovery leg failed for term ${term.id}: ${err.message}`);
-      }
-    }
-    // ADMIN-BUG-R18: an end-at-term lapse's skipped paid visit is replaced
-    // here, once a night — per-edit refreshes only attach and stamp.
-    if (isEndAtTermLapseInWindow(term, dateOnly(today) || etDateString())) {
-      try {
-        const kept = await keepEndAtTermLapseCoverage(term, conn, { reseed: true, today: dateOnly(today) || etDateString() });
-        if (kept?.createdCount) logger.info(`[annual-prepay] sweep replaced ${kept.createdCount} visit(s) for end-at-term lapse ${term.id}`);
-        if (kept?.skipped === 'cancel_commit_in_progress') logger.info(`[annual-prepay] sweep reseed skipped for term ${term.id}: a cancellation is being committed`);
-      } catch (err) {
-        logger.warn(`[annual-prepay] sweep end-at-term reseed failed for term ${term.id}: ${err.message}`);
-      }
-    }
-    const res = await reconcilePendingWindowCompletions(term, conn);
-    summary.settled += res.settled || 0;
-    summary.credited += res.credited || 0;
-    // Covered = paid-backed (coveredTermsAsOf revalidates the prepay
-    // invoice), so any clawed extension credit is owed back — self-heals a
-    // repayment whose inline restore was lost (guards P0). Idempotent.
-    try {
-      summary.credited += await restoreWaveguardExtensionCredits(term, conn);
-    } catch (err) {
-      logger.warn(`[annual-prepay] sweep extension-credit restore failed for term ${term.id}: ${err.message}`);
-    }
-    try {
-      const grants = await conn('customer_credit_ledger')
-        .where({ customer_id: term.customer_id, created_by: PENDING_COMPLETION_CREDIT_BY })
-        .where('note', 'like', `%term ${term.id},%`)
-        .where('delta', '>', 0)
-        .select('note', 'invoice_id');
-      for (const grant of grants) {
-        const visitMatch = String(grant.note || '').match(/visit ([0-9a-f-]+)\)/i);
-        const visitId = visitMatch ? visitMatch[1] : null;
-        // The grant row carries the exact invoice the credit was issued
-        // against — check THAT invoice, not the visit's latest (a re-invoiced
-        // visit must not mask its refunded original, and a pre-grant void
-        // must not trigger a reversal).
-        if (!visitId || !grant.invoice_id) continue;
-        const grantInvoice = await conn('invoices')
-          .where({ id: grant.invoice_id })
-          .first('id', 'status');
-        if (!grantInvoice) continue;
-        const status = String(grantInvoice.status || '').toLowerCase();
-        if (!INVOICE_CANCELLED_STATUSES.has(status)) continue;
-        // The reversal is marker-deduped, so re-running for an
-        // already-reversed grant is a no-op.
-        summary.reversed += await reversePendingWindowCompletionCredits(term, conn, { visitId });
-      }
-    } catch (err) {
-      logger.warn(`[annual-prepay] sweep reversal recovery failed for term ${term.id}: ${err.message}`);
-    }
+    await reconcileOneCoveredTermInSweep(term, conn, todayKey, summary);
   }
   // Expired-window marker pass (Codex round-4 P2): the loop above selects
   // covered-TODAY terms, so a dispute resolved AFTER term_end never enters
@@ -5829,6 +5842,125 @@ async function termCountsAsPaidAfterCreate(term, anchorInstallation, conn) {
   return !!anchorInstallation && isPaidDecidedLapseTerm(term, conn);
 }
 
+// Extracted from createTermForAnnualPrepay's "existing" edit branch
+// (complexity reduction, no behavior change — the eslint complexity gate
+// on this diff): detaches out-of-window visits ONLY when the coverage
+// window was actually edited (start/end explicitly supplied). Every
+// comment and the throw-on-failure rationale are unchanged from the
+// original inline block.
+async function detachOutOfWindowEditedVisits(existing, updates, conn) {
+  // Skipped when no dates were given (the estimate re-run path), so it
+  // only fires on a real window change.
+  if (!(updates.term_start || updates.term_end)) return;
+  const scCols = await scheduledServiceColumns();
+  if (!scCols.annual_prepay_term_id) return;
+  const winStart = dateOnly(updates.term_start || existing.term_start);
+  const winEnd = dateOnly(updates.term_end || existing.term_end);
+  function detachOutOfWindow() {
+    this.where('scheduled_date', '<', winStart).orWhere('scheduled_date', '>', winEnd);
+  }
+  try {
+    // Completion billing keys on prepaid_amount independently of the term
+    // link, so a now-out-of-window FUTURE visit would still be treated as
+    // prepaid and skip invoicing unless its stamp is cleared too. Clear the
+    // stamps on the non-completed out-of-window visits first (while they're
+    // still findable by term id); completed/terminal visits keep their
+    // historical stamp.
+    if (scCols.prepaid_amount) {
+      const stampClear = { prepaid_amount: null, updated_at: new Date() };
+      if (scCols.prepaid_method) stampClear.prepaid_method = null;
+      if (scCols.prepaid_at) stampClear.prepaid_at = null;
+      if (scCols.prepaid_note) stampClear.prepaid_note = null;
+      const stampQuery = conn('scheduled_services')
+        .where({ annual_prepay_term_id: existing.id })
+        .andWhere(detachOutOfWindow)
+        .whereNotIn('status', Array.from(PREPAID_UPDATE_EXCLUDED_STATUSES));
+      // Only clear annual-prepay stamps; preserve an independent cash/Zelle
+      // prepayment made on the visit through the regular schedule route.
+      if (scCols.prepaid_method) stampQuery.where('prepaid_method', ANNUAL_PREPAY_PREPAID_METHOD);
+      await stampQuery.update(stampClear);
+    }
+    await conn('scheduled_services')
+      .where({ annual_prepay_term_id: existing.id })
+      .andWhere(detachOutOfWindow)
+      .update({ annual_prepay_term_id: null, updated_at: new Date() });
+  } catch (err) {
+    // The completion-billing gate (annualPrepayCoversVisit) is
+    // calendar-independent: a stamped visit is covered while its term
+    // stays paid, wherever the visit sits on the calendar. That is only
+    // sound because THIS detach is the one place a window edit strips
+    // stamps from the visits it removed from coverage — a best-effort
+    // log-and-continue here left the shrunken window silently
+    // suppressing billing for those visits. Fail the edit loudly
+    // instead; the operator retries and the detach re-runs. (Partial
+    // failure is billing-safe: the stamp clear runs before the
+    // term-link detach and the gate requires BOTH fields.)
+    throw new Error(`annual prepay window edit for term ${existing.id} could not detach out-of-window visits — edit aborted: ${err.message}`);
+  }
+}
+
+// Extracted from createTermForAnnualPrepay's "existing" edit branch
+// (complexity reduction, no behavior change): detaches visits dropped by
+// a coverage-SELECTION change (service type / visit count / cadence), as
+// opposed to a date-window change (handled by detachOutOfWindowEditedVisits
+// above). Every comment is unchanged from the original inline block.
+async function detachDroppedCoverageSelectionVisits(existing, {
+  normalizedCoverageServiceType, normalizedCoverageVisitCount, normalizedCoverageCadence,
+}, conn) {
+  // When the coverage SELECTION changes on an edit (service type / visit count
+  // / cadence) — not just the date window handled above — the visits that
+  // matched the OLD selection keep their annual-prepay prepaid stamps, since
+  // attachScheduledServices/applyPrepaidCoverageForTerm only add+stamp the new
+  // matches and never clear the old ones. Completion billing keys on
+  // prepaid_amount, so those stale visits would keep skipping billing on top
+  // of the newly covered ones. Clear the term's stamps here so the
+  // refreshTermSnapshot below re-stamps ONLY the new selection; visits dropped
+  // from coverage fall back to normal billing. Method-scoped + non-completed
+  // (clearPrepaidStampsForTerm), so manual cash/Zelle stamps and already
+  // serviced visits are untouched. Best-effort, mirroring the window block.
+  const coverageSelectionChanged = (
+    (normalizedCoverageServiceType !== undefined
+      && (normalizeCoverageServiceType(existing.coverage_service_type) || null)
+        !== (normalizedCoverageServiceType || null))
+    || (normalizedCoverageVisitCount !== undefined
+      && (normalizeCoverageVisitCount(existing.coverage_visit_count) || null)
+        !== (normalizedCoverageVisitCount || null))
+    || (normalizedCoverageCadence !== undefined
+      && (normalizeCoverageCadence(existing.coverage_cadence) || null)
+        !== (normalizedCoverageCadence || null))
+  );
+  if (!coverageSelectionChanged) return;
+  // Clearing stamps isn't enough: the dropped visits keep their
+  // annual_prepay_term_id link, which the repo treats as Annual Prepay for
+  // reporting/forecasting (pricing-reality-check) and copies onto recurring
+  // children (recurring-appointment-seeder). Detach the term link from the
+  // non-completed linked visits too, then let refreshTermSnapshot below
+  // re-attach + re-stamp ONLY the new selection — visits dropped from
+  // coverage fall fully back to normal billing. Completed/terminal visits
+  // keep their historical link + stamp (PREPAID_UPDATE_EXCLUDED_STATUSES).
+  //
+  // The stamp clear and the link detach must be atomic: if the detach
+  // landed but the stamp clear silently failed, those visits would keep a
+  // prepaid_amount with no term link — completion billing would still skip
+  // them and no term-keyed cleanup could ever find them again. Run both in
+  // one (sub)transaction with the stamp clear set to throw, so a failed
+  // clear rolls back the detach instead of orphaning the stamps.
+  const scCols = await scheduledServiceColumns();
+  try {
+    await conn.transaction(async (trx) => {
+      await clearPrepaidStampsForTerm(existing.id, trx, { throwOnError: true });
+      if (scCols.annual_prepay_term_id) {
+        await trx('scheduled_services')
+          .where({ annual_prepay_term_id: existing.id })
+          .whereNotIn('status', Array.from(PREPAID_UPDATE_EXCLUDED_STATUSES))
+          .update({ annual_prepay_term_id: null, updated_at: new Date() });
+      }
+    });
+  } catch (err) {
+    logger.warn(`[annual-prepay] coverage-change stamp/link cleanup skipped: ${err.message}`);
+  }
+}
+
 async function createTermForAnnualPrepay({
   customerId,
   sourceEstimateId = null,
@@ -5971,109 +6103,11 @@ async function createTermForAnnualPrepay({
     // any visits attachScheduledServices() stamped under the old window that now
     // fall outside it — refreshTermSnapshot only re-attaches in-window visits, it
     // never removes out-of-window ones, so a shortened/moved window would keep
-    // reporting stale visits as Annual Prepay. Skipped when no dates were given
-    // (the estimate re-run path), so it only fires on a real window change.
-    if (updates.term_start || updates.term_end) {
-      const scCols = await scheduledServiceColumns();
-      if (scCols.annual_prepay_term_id) {
-        const winStart = dateOnly(updates.term_start || existing.term_start);
-        const winEnd = dateOnly(updates.term_end || existing.term_end);
-        function detachOutOfWindow() {
-          this.where('scheduled_date', '<', winStart).orWhere('scheduled_date', '>', winEnd);
-        }
-        try {
-          // Completion billing keys on prepaid_amount independently of the term
-          // link, so a now-out-of-window FUTURE visit would still be treated as
-          // prepaid and skip invoicing unless its stamp is cleared too. Clear the
-          // stamps on the non-completed out-of-window visits first (while they're
-          // still findable by term id); completed/terminal visits keep their
-          // historical stamp.
-          if (scCols.prepaid_amount) {
-            const stampClear = { prepaid_amount: null, updated_at: new Date() };
-            if (scCols.prepaid_method) stampClear.prepaid_method = null;
-            if (scCols.prepaid_at) stampClear.prepaid_at = null;
-            if (scCols.prepaid_note) stampClear.prepaid_note = null;
-            const stampQuery = conn('scheduled_services')
-              .where({ annual_prepay_term_id: existing.id })
-              .andWhere(detachOutOfWindow)
-              .whereNotIn('status', Array.from(PREPAID_UPDATE_EXCLUDED_STATUSES));
-            // Only clear annual-prepay stamps; preserve an independent cash/Zelle
-            // prepayment made on the visit through the regular schedule route.
-            if (scCols.prepaid_method) stampQuery.where('prepaid_method', ANNUAL_PREPAY_PREPAID_METHOD);
-            await stampQuery.update(stampClear);
-          }
-          await conn('scheduled_services')
-            .where({ annual_prepay_term_id: existing.id })
-            .andWhere(detachOutOfWindow)
-            .update({ annual_prepay_term_id: null, updated_at: new Date() });
-        } catch (err) {
-          // The completion-billing gate (annualPrepayCoversVisit) is
-          // calendar-independent: a stamped visit is covered while its term
-          // stays paid, wherever the visit sits on the calendar. That is only
-          // sound because THIS detach is the one place a window edit strips
-          // stamps from the visits it removed from coverage — a best-effort
-          // log-and-continue here left the shrunken window silently
-          // suppressing billing for those visits. Fail the edit loudly
-          // instead; the operator retries and the detach re-runs. (Partial
-          // failure is billing-safe: the stamp clear runs before the
-          // term-link detach and the gate requires BOTH fields.)
-          throw new Error(`annual prepay window edit for term ${existing.id} could not detach out-of-window visits — edit aborted: ${err.message}`);
-        }
-      }
-    }
-    // When the coverage SELECTION changes on an edit (service type / visit count
-    // / cadence) — not just the date window handled above — the visits that
-    // matched the OLD selection keep their annual-prepay prepaid stamps, since
-    // attachScheduledServices/applyPrepaidCoverageForTerm only add+stamp the new
-    // matches and never clear the old ones. Completion billing keys on
-    // prepaid_amount, so those stale visits would keep skipping billing on top
-    // of the newly covered ones. Clear the term's stamps here so the
-    // refreshTermSnapshot below re-stamps ONLY the new selection; visits dropped
-    // from coverage fall back to normal billing. Method-scoped + non-completed
-    // (clearPrepaidStampsForTerm), so manual cash/Zelle stamps and already
-    // serviced visits are untouched. Best-effort, mirroring the window block.
-    const coverageSelectionChanged = (
-      (normalizedCoverageServiceType !== undefined
-        && (normalizeCoverageServiceType(existing.coverage_service_type) || null)
-          !== (normalizedCoverageServiceType || null))
-      || (normalizedCoverageVisitCount !== undefined
-        && (normalizeCoverageVisitCount(existing.coverage_visit_count) || null)
-          !== (normalizedCoverageVisitCount || null))
-      || (normalizedCoverageCadence !== undefined
-        && (normalizeCoverageCadence(existing.coverage_cadence) || null)
-          !== (normalizedCoverageCadence || null))
-    );
-    if (coverageSelectionChanged) {
-      // Clearing stamps isn't enough: the dropped visits keep their
-      // annual_prepay_term_id link, which the repo treats as Annual Prepay for
-      // reporting/forecasting (pricing-reality-check) and copies onto recurring
-      // children (recurring-appointment-seeder). Detach the term link from the
-      // non-completed linked visits too, then let refreshTermSnapshot below
-      // re-attach + re-stamp ONLY the new selection — visits dropped from
-      // coverage fall fully back to normal billing. Completed/terminal visits
-      // keep their historical link + stamp (PREPAID_UPDATE_EXCLUDED_STATUSES).
-      //
-      // The stamp clear and the link detach must be atomic: if the detach
-      // landed but the stamp clear silently failed, those visits would keep a
-      // prepaid_amount with no term link — completion billing would still skip
-      // them and no term-keyed cleanup could ever find them again. Run both in
-      // one (sub)transaction with the stamp clear set to throw, so a failed
-      // clear rolls back the detach instead of orphaning the stamps.
-      const scCols = await scheduledServiceColumns();
-      try {
-        await conn.transaction(async (trx) => {
-          await clearPrepaidStampsForTerm(existing.id, trx, { throwOnError: true });
-          if (scCols.annual_prepay_term_id) {
-            await trx('scheduled_services')
-              .where({ annual_prepay_term_id: existing.id })
-              .whereNotIn('status', Array.from(PREPAID_UPDATE_EXCLUDED_STATUSES))
-              .update({ annual_prepay_term_id: null, updated_at: new Date() });
-          }
-        });
-      } catch (err) {
-        logger.warn(`[annual-prepay] coverage-change stamp/link cleanup skipped: ${err.message}`);
-      }
-    }
+    // reporting stale visits as Annual Prepay.
+    await detachOutOfWindowEditedVisits(existing, updates, conn);
+    await detachDroppedCoverageSelectionVisits(existing, {
+      normalizedCoverageServiceType, normalizedCoverageVisitCount, normalizedCoverageCadence,
+    }, conn);
     await syncInvoiceTerm(prepayInvoiceId, existing.id, conn);
     const refreshed = await refreshTermSnapshot(existing.id, conn);
     if (await termCountsAsPaidAfterCreate(refreshed, anchorInstallation, conn)) {
@@ -9466,6 +9500,11 @@ module.exports = {
   // the successor's own activation).
   reconcileParentRenewedStamps,
   declineTermiteAnnualRenewal,
+  // Codex #4971 post-push audit round-6 P1 (item 2): reused by the
+  // grace-lapse retrieval task, the SAME "is this plan the account's ONLY
+  // live termite coverage" guard #4940's own portal-decline retrieval
+  // already uses — never a parallel re-derivation of the same check.
+  otherLiveTermiteCoverage,
   // ADMIN-BUG-R16/R17: the canonical term-cancel pipeline and its
   // billing_mode restore, both now shared by callers OUTSIDE this module
   // (admin-invoices.js's remove-flag and reverse-prepaid routes) so no

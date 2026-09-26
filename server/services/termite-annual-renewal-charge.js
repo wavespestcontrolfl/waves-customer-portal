@@ -1182,6 +1182,16 @@ const RENEWAL_BELL_COPY = {
     title: 'Termite annual renewal — grace lapse retrieval superseded, confirm coverage',
     body: `The termite annual renewal for customer ${successor.customer_id} (invoice for $${Number(successor.prepay_amount).toFixed(2)}) reached its grace deadline, but its station-retrieval task was not raised: ${reason}. Confirm the newer instruction actually covers this term's stations before treating this lapse as fully handled.`,
   }),
+  // Codex #4971 post-push audit round-6 P1 (item 2): an account-wide
+  // retrieval task would count every Waves-owned termite station on the
+  // account, but this customer has other live termite coverage — pulling
+  // stations automatically here could pull ones that belong to that OTHER
+  // coverage. Staff must confirm which stations are actually this lapsed
+  // plan's before any are pulled.
+  lapse_retrieval_other_coverage: (successor, reason) => ({
+    title: 'Termite annual renewal — grace lapse retrieval needs staff review (other coverage on file)',
+    body: `The termite annual renewal for customer ${successor.customer_id} (invoice for $${Number(successor.prepay_amount).toFixed(2)}) reached its grace deadline, but no automatic station-retrieval task was raised: ${reason}. Confirm which stations belong to THIS lapsed plan before pulling any — an account-wide task could pull stations that belong to the other coverage.`,
+  }),
 };
 
 // Returns the underlying notifyAdmin result (or null on failure) so
@@ -1626,9 +1636,27 @@ async function resolveLapseVoidEligibility(term, conn = db) {
 // (settled before the void ran — no void, no retrieval), or 'deferred' (a
 // pending Stripe reconciliation — retry next tick).
 async function processGraceLapseForTerm(term, conn = db) {
-  if (!term.renewal_lapse_started_at) {
-    await conn('annual_prepay_terms').where({ id: term.id }).whereNull('renewal_lapse_started_at')
-      .update({ renewal_lapse_started_at: new Date() });
+  let lapseStartedAt = term.renewal_lapse_started_at;
+  if (!lapseStartedAt) {
+    // Codex #4971 post-push audit round-6 P1: a fresh lapse only stamped
+    // renewal_lapse_started_at in the DB — the in-memory `term` object
+    // passed down to raiseGraceLapseRetrievalTask still read null, so its
+    // eventAt was null and the raise ranked as the OLDEST event in the
+    // account's retrieval chronology, yielding to any earlier request-
+    // backed row even one staff already acted on. RETURNING the persisted
+    // value (or, when a concurrent tick's own whereNull() guard already
+    // won the race, re-reading it) means eventAt always reflects the REAL
+    // first-detected time, never a fabricated new one and never null.
+    const [stamped] = await conn('annual_prepay_terms').where({ id: term.id }).whereNull('renewal_lapse_started_at')
+      .update({ renewal_lapse_started_at: new Date() })
+      .returning('renewal_lapse_started_at');
+    if (stamped) {
+      lapseStartedAt = stamped.renewal_lapse_started_at;
+    } else {
+      const fresh = await conn('annual_prepay_terms').where({ id: term.id }).first('renewal_lapse_started_at');
+      lapseStartedAt = fresh?.renewal_lapse_started_at || null;
+    }
+    term = { ...term, renewal_lapse_started_at: lapseStartedAt };
   }
 
   // Codex round-7 P1 (2nd audit round): the eligibility re-check above
@@ -1665,7 +1693,25 @@ async function processGraceLapseForTerm(term, conn = db) {
 // true when the caller may continue (raise the retrieval, decide the
 // parent, stamp completed_at); false when it must return 'deferred'
 // immediately, leaving this lapse exactly as started-but-not-completed.
-async function raiseGraceLapseRetrievalTask(term, conn) {
+async function raiseGraceLapseRetrievalTask(term, conn, today = etDateString()) {
+  // Codex #4971 post-push audit round-6 P1 (item 2): raiseTermiteRetrievalTask
+  // counts EVERY Waves-owned termite station on the ACCOUNT (no property or
+  // term key), so an automatic "pull the stations" task is only safe when
+  // this lapsed plan is the account's ONLY live termite coverage — the SAME
+  // guard #4940's own portal-decline retrieval already applies
+  // (otherLiveTermiteCoverage, annual-prepay-renewals.js), reused rather
+  // than re-derived. Other coverage found: bell staff to confirm which
+  // stations belong to THIS lapsed plan instead of an account-wide task,
+  // and this lapse proceeds to complete only once that bell itself persists.
+  const { otherLiveTermiteCoverage } = require('./annual-prepay-renewals');
+  const otherCoverage = await otherLiveTermiteCoverage(term, today);
+  if (otherCoverage) {
+    return !!(await ringRenewalBell(
+      term,
+      'lapse_retrieval_other_coverage',
+      `other live termite coverage on this account (${otherCoverage}) — confirm which stations belong to this lapsed plan before any are pulled`,
+    ));
+  }
   const { raiseTermiteRetrievalTask, termRetrievalDedupeKey } = require('./cancellation-processor');
   // This raise has no service request behind it, so without eventAt
   // #4940's helper ranks it as the OLDEST event in the account's
