@@ -554,17 +554,14 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
           })
           .first('id');
         // The proof must state what was delivered: the stored notification
-        // is the accepted payload. A retry whose body or visit differs from
-        // it (template or appointment changed since) repairs nothing
-        // (Codex #4816 r46). A scheduled send's queue row is its own proof.
-        const delivered = appNotification;
-        const deliveredMeta = typeof delivered.metadata === 'string'
-          ? (() => { try { return JSON.parse(delivered.metadata); } catch { return {}; } })()
-          : (delivered.metadata || {});
-        const samePayload = delivered.body === body
-          && String(deliveredMeta.appointmentId || '') === String(appointmentId || '');
+        // is the accepted payload. A retry whose body differs from it
+        // (template changed since) repairs nothing (Codex #4816 r46). The
+        // stored notification does not record its visit, so a repaired proof
+        // carries none: it proves delivery but never a property scope it
+        // cannot show. A scheduled send's queue row is its own proof.
+        const samePayload = appNotification.body === body;
         if (!existing && !scheduledSmsLogId && samePayload) {
-          await db('sms_log').insert(proofRow({ push_notification_id: notificationId }));
+          await db('sms_log').insert(proofRow({ push_notification_id: notificationId, scheduled_service_id: undefined, proof_repaired: true }));
         } else if (!existing && !samePayload) {
           logger.warn(`[push-routing] proof repair skipped for notification ${notificationId}: retry payload differs from the delivered notice`);
         }
@@ -589,9 +586,13 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
       // One immediate retry: a transient write failure here would leave an
       // accepted, non-scheduled push with no durable proof (Codex #4816 r44).
       const insertProof = () => db('sms_log').insert(proofRow()).returning('id');
-      const inserted = await insertProof().catch((firstErr) => {
+      const inserted = await insertProof().catch(async (firstErr) => {
         logger.warn(`[push-routing] sms_log proof insert failed, retrying once: ${firstErr.message}`);
-        return insertProof();
+        // The first write may have committed before the error reached us:
+        // the same customer, channel, type and acceptance instant identify it.
+        const committed = await db('sms_log').where({ customer_id: customerId, from_phone: 'push', message_type: messageType, created_at: acceptedAt })
+          .first('id');
+        return committed ? [committed] : insertProof();
       });
       proofRowId = inserted && inserted[0] ? (inserted[0].id || inserted[0]) : null;
     } catch (logErr) {

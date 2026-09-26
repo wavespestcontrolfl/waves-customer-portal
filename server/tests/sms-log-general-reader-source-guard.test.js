@@ -63,6 +63,11 @@ const WINDOW_SPAN = 15;
 const ALLOWLIST = [
   {
     file: 'services/messaging/push-channel-routing.js',
+    snippet: "const committed = await db('sms_log').where({ customer_id: customerId, from_phone: 'push', message_type: messageType, created_at: acceptedAt })",
+    reason: 'idempotency check for this push proof before a retried insert (exact acceptance instant); a send reservation is never a push proof.',
+  },
+  {
+    file: 'services/messaging/push-channel-routing.js',
     snippet: "const existing = await db('sms_log').where({ customer_id: customerId, from_phone: 'push' })",
     reason: 'existence check for an accepted push proof row (from_phone push) before repairing it; a send reservation is never a push proof, and nothing is presented as a message.',
   },
