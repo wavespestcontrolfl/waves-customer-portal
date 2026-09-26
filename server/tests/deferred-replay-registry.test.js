@@ -120,6 +120,16 @@ describe('deferred-replay registry', () => {
     delete _registry.test_dispatch_deferred;
   });
 
+  test('exports the canonical collectibility check for billing Email eligibility', async () => {
+    const { invoiceStillCollectible } = require('../services/messaging/deferred-replay-registry');
+    db.mockReturnValueOnce(firstChain({ id: 'inv-1', status: 'paid' }));
+    await expect(invoiceStillCollectible({ invoice_id: 'inv-1' }))
+      .resolves.toMatchObject({ eligible: false, reason: 'invoice-terminal:paid' });
+    db.mockReturnValueOnce(throwChain());
+    await expect(invoiceStillCollectible({ invoice_id: 'inv-1' }))
+      .resolves.toMatchObject({ eligible: false, retryable: true });
+  });
+
   test('registered dispatch owns the replay and receives its trusted claim metadata', async () => {
     const outcome = { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'fixture-provider-id' };
     const dispatch = jest.fn(async () => outcome);

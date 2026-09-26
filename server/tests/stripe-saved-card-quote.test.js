@@ -440,6 +440,82 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
     expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
   });
 
+
+  test('a visit that is no longer completed refuses the charge under the visit lock (requireCompletedVisit — owner ruling 2026-09-26)', async () => {
+    // An invoice with NO scheduled service has nothing for the visit-keyed
+    // self-pay guard to key on — the default-payer resolve on the
+    // transaction connection is the binding check.
+    const invoice = {
+      id: 'inv-1', invoice_number: 'INV-1', customer_id: 'cust-1', status: 'draft',
+      subtotal: '200.00', total: '200.00', discount_amount: '0.00',
+      credit_applied: '0.00', payer_id: null, stripe_payment_intent_id: null,
+    };
+    const card = {
+      id: 'pm-1', customer_id: 'cust-1', method_type: 'card',
+      stripe_payment_method_id: 'pm_stripe_1', card_funding: 'debit', last_four: '4242',
+    };
+    let chargeAttempt = null;
+    const db = jest.fn((table) => {
+      const chain = {};
+      ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereRaw', 'orWhereColumn', 'forUpdate', 'orderBy'].forEach((method) => {
+        chain[method] = jest.fn((arg) => {
+          if (method === 'where' && typeof arg === 'function') arg.call(chain);
+          return chain;
+        });
+      });
+      chain.first = jest.fn(async () => {
+        if (table === 'invoices') return invoice;
+        if (table === 'payment_methods') return card;
+        if (table === 'customers') return { id: 'cust-1', stripe_customer_id: 'cus-1' };
+        if (table === 'stripe_invoice_charge_attempts') return chargeAttempt;
+        // Reopened after the sweep's unlocked preflight read it completed.
+        if (table === 'scheduled_services') return { id: 'svc-1', customer_id: 'cust-1', status: 'confirmed' };
+        return null;
+      });
+      chain.insert = jest.fn((payload) => {
+        if (table === 'stripe_invoice_charge_attempts') {
+          chargeAttempt = { ...payload, created_at: new Date(), resolved_at: null };
+        }
+        return chain;
+      });
+      chain.returning = jest.fn(async () => (chargeAttempt ? [chargeAttempt] : []));
+      chain.update = jest.fn(async (payload) => {
+        if (table === 'stripe_invoice_charge_attempts' && chargeAttempt) Object.assign(chargeAttempt, payload);
+        return 1;
+      });
+      // getChargeableAutopayMethod walks candidates via orderBy().select()
+      // since the multi-default fix — resolve the same row first() serves.
+      chain.select = chain.select || jest.fn(async () => { const row = await chain.first(); return row ? [row] : []; });
+      return chain;
+    });
+    db.transaction = jest.fn(async (callback) => callback(db));
+    db.fn = { now: jest.fn(() => 'NOW') };
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+
+    const stripeClient = { paymentIntents: { retrieve: jest.fn(), cancel: jest.fn(), create: jest.fn() } };
+    jest.doMock('../models/db', () => db);
+    jest.doMock('stripe', () => jest.fn(() => stripeClient));
+    jest.doMock('../config', () => ({}));
+    jest.doMock('../config/stripe-config', () => ({ secretKey: 'sk_test_mock', publishableKey: 'pk_test_mock' }));
+    jest.doMock('../config/feature-gates', () => ({ gates: { autoApplyAccountCredit: false } }));
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    jest.doMock('../services/payer', () => ({
+      resolveForInvoice: jest.fn(async () => ({ payerId: null })),
+    }));
+
+    const StripeService = require('../services/stripe');
+    await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', {
+      requireSelfPayScheduledServiceId: 'svc-1', requireCompletedVisit: true,
+    })).rejects.toThrow('The visit is no longer completed');
+    expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
+  });
+
+  test('requireCompletedVisit without a visit id refuses before touching Stripe', async () => {
+    jest.doMock('../config/stripe-config', () => ({ secretKey: 'sk_test_mock', publishableKey: 'pk_test_mock' }));
+    const StripeService = require('../services/stripe');
+    await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { requireCompletedVisit: true }))
+      .rejects.toThrow('requireCompletedVisit needs requireSelfPayScheduledServiceId');
+  });
   test('a stopped dunning sequence refuses the charge inside the locked transaction (refuseWhenDunningStopped — balance-sweep pre-push P0)', async () => {
     // "Stop dunning" is an explicit admin stop-collecting instruction; the
     // sweep's preflight reads it unlocked, so the binding check must run

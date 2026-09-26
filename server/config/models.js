@@ -16,6 +16,26 @@
  * Option C (check what's new):
  *   Run `npm run models:check` to see current Anthropic model IDs.
  *
+ * ── Opus 5.5 flip order (2026-09-25 cost audit) ───────────────────
+ *
+ *   Opus 5.5 ($4/$20, cache reads $0.20) replaces Opus 4.8 ($5/$25/$0.50)
+ *   with the same tokenizer and a 512-token cache minimum (4.8: 1024). What
+ *   differs on the wire, and where this repo handles it:
+ *   - Thinking is always on and precedes the text block: callers read text
+ *     with anthropicText() / stripThinkingBlocks, never content[0].
+ *   - Thinking spends from max_tokens: every Anthropic request (adapter,
+ *     DEEP helper, and each direct SDK site on an Opus tier) sizes its cap
+ *     through anthropicMaxTokens(model, cap) in services/llm/anthropic-wire.js,
+ *     which raises it to a floor on ANTHROPIC_THINKING_FLOOR_RE models only.
+ *   - Effort defaults to 'medium' (4.8: 'high'): set MODEL_ANTHROPIC_EFFORT=high
+ *     with the flip; the same module applies it to ANTHROPIC_EFFORT_CAPABLE_RE
+ *     models, and a caller's own effort wins.
+ *   - `thinking: { type: 'disabled' }` and forced tool_choice any/tool are
+ *     400s: only the two VOICE lanes send the former (VOICE is Sonnet), and
+ *     nothing sends the latter. Tool loops push response.content back whole.
+ *   Flip MODEL_DEEP first (deep.js strips thinking + has an OpenAI backup),
+ *   watch a night of ledger rows, then FLAGSHIP / VISION / the Opus pins.
+ *
  * ── Tiers ─────────────────────────────────────────────────────────
  *
  *  These are workload tiers. Each points to the least-expensive model that is
@@ -58,6 +78,34 @@
  * issue never causes a gap. Managed agents stay on Anthropic. Call transcription
  * + extraction keep their own providers in call-recording-processor.js.
  */
+
+// Anthropic effort for adapter + DEEP-helper calls (output_config.effort).
+// Unset = the model's own default. Opus 4.8 defaults to 'high'; Opus 5.5
+// defaults to 'medium', so a tier flip to 5.5 quietly drops effort unless
+// this pins it. Only the five API levels are honored; anything else is
+// ignored with the default (never a 400 on a typo).
+const ANTHROPIC_EFFORT_LEVELS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
+const ANTHROPIC_EFFORT = ANTHROPIC_EFFORT_LEVELS.has(process.env.MODEL_ANTHROPIC_EFFORT)
+  ? process.env.MODEL_ANTHROPIC_EFFORT
+  : undefined;
+// Model-family patterns read by services/llm/anthropic-wire.js (kept here so
+// every Anthropic ID shape stays in the registry; a test that mocks this
+// module without them gets byte-identical requests).
+//
+// Effort: only models that accept ALL five levels (low … max, incl. xhigh)
+// get the pin — Opus 4.7 and later, Sonnet 5 and later, Fable, Mythos.
+// Opus 4.5 takes low/medium/high only and Opus 4.6 has no xhigh; Haiku 4.5
+// and pre-5 Sonnets 400 on the field. The admin picker can pin any of those
+// on a lane, so the pin must never reach them.
+const ANTHROPIC_EFFORT_CAPABLE_RE = /^claude-opus-(4-[7-9]|[5-9])(?![0-9])|^claude-sonnet-[5-9](?![0-9])|^claude-(fable|mythos)-/;
+// Thinking floor: Opus 5 and later, Fable and Mythos think on every request
+// that omits `thinking` (5.5, Fable and Mythos cannot turn it off), and
+// thinking spends from max_tokens ahead of the text block — a cap sized for
+// a no-thinking reply ends the turn with no text. Sonnet 5 also thinks by
+// default, but its lanes' caps were already tuned against it in production
+// (previsit brief 1000 → 2000 → 3000), so it is left out and this stays
+// inert for today's traffic.
+const ANTHROPIC_THINKING_FLOOR_RE = /^claude-opus-[5-9](?![0-9])|^claude-(fable|mythos)-/;
 
 // Code defaults for every env-overridable selector, in one place so the admin
 // switchboard can say what a selector returns to when its Railway override is
@@ -259,7 +307,6 @@ const ROUTES = Object.freeze({
   leadClassify:      Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_FAST }), // low-cost structured lane; Claude fallback
   knowledgeAnswer:   Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BALANCED }), // balanced Q&A; Claude fallback
   estimateAssistant: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BALANCED }), // balanced prose; Claude fallback
-  askWaves:          Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BALANCED }), // balanced public chat; Claude fallback
   churnClassify:     Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_FAST }), // low-cost structured lane; Claude fallback
   // Owner ruling 2026-07-30 (v9 sealed-exam ranking: Sonnet beat Luna on
   // voice 7.79 vs 7.25, overall 6.50 vs 5.90, 0 unsafe vs 1): Claude Sonnet
@@ -313,6 +360,19 @@ const TEXT_POLICIES = Object.freeze({
     name: 'balancedAnswer',
     primary: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BALANCED }),
     fallback: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: WORKHORSE }),
+  }),
+  askWaves: Object.freeze({
+    name: 'askWaves',
+    // Public sales-intake chat (services/ask-waves-intake.js): balanced OpenAI
+    // primary, Claude VOICE-tier fallback — through dispatchWithFallback like
+    // every other policy, so the shared chain (budget split, provider
+    // failures, chain telemetry) owns the fallback instead of a bespoke local
+    // implementation. ASK_WAVES_MODEL overrides the Anthropic fallback leg
+    // only (the call site swaps this policy's fallback route when set — same
+    // convention as MODEL_FACTCHECK/MODEL_COMPLIANCE overriding one leg of
+    // deepAnalysis); the OpenAI primary always follows OPENAI_BALANCED.
+    primary: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BALANCED }),
+    fallback: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: VOICE }),
   }),
   visionAnalysis: Object.freeze({
     name: 'visionAnalysis',
@@ -383,6 +443,9 @@ const TEXT_POLICIES = Object.freeze({
 });
 
 module.exports = {
+  ANTHROPIC_EFFORT,
+  ANTHROPIC_EFFORT_CAPABLE_RE,
+  ANTHROPIC_THINKING_FLOOR_RE,
   DEEP,
   EXTREME,
   FLAGSHIP,

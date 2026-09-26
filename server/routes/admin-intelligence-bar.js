@@ -84,6 +84,7 @@ let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
 const MODELS = require('../config/models');
+const { anthropicMaxTokens, anthropicEffortConfig } = require('../services/llm/anthropic-wire');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -2353,7 +2354,8 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
       const response = await anthropic.messages.create({
         model: model,
-        max_tokens: context === 'tech' ? 1024 : 4096,
+        ...anthropicEffortConfig(model),
+        max_tokens: anthropicMaxTokens(model, context === 'tech' ? 1024 : 4096),
         // 1h TTL on the tools+system prefix: operator queries routinely arrive
         // more than 5 minutes apart, so the default TTL expired between them
         // and every query paid the cache-write premium with no read. The
