@@ -106,3 +106,34 @@ describe('collectionsChannelVerdict', () => {
       .toEqual({ permitted: false, eligibleInvoiceIds: [] });
   });
 });
+
+describe('detail verdict', () => {
+  test('gate off permits with no durable denial', async () => {
+    await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1', detail: true }))
+      .resolves.toEqual({ allowed: true, durable: false });
+  });
+
+  test.each([
+    [['flag_do_not_email'], true],
+    [['suppression_unsubscribe'], true],
+    [['commercial_customer'], true],
+    [['contact_within_24h'], false],
+    [['balance_read_incomplete'], false],
+    [['contact_within_24h', 'flag_do_not_email'], true],
+  ])('denial %j is durable: %p', async (denialReasons, durable) => {
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    ContactPolicy.evaluate.mockResolvedValueOnce({ allowed: false, denialReasons, eligibleInvoiceIds: ['inv-1'] });
+    await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1', detail: true }))
+      .resolves.toEqual({ allowed: false, durable });
+  });
+
+  test('an ineligible invoice and a failed consult are transient denials', async () => {
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    ContactPolicy.evaluate.mockResolvedValueOnce({ allowed: true, denialReasons: [], eligibleInvoiceIds: ['inv-2'] });
+    await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1', detail: true }))
+      .resolves.toEqual({ allowed: false, durable: false });
+    ContactPolicy.evaluate.mockRejectedValueOnce(new Error('db down'));
+    await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1', detail: true }))
+      .resolves.toEqual({ allowed: false, durable: false });
+  });
+});

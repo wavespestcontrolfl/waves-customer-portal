@@ -46,6 +46,7 @@ const { getInvoiceEmailRecipients } = require('./customer-contact');
 const { currency } = require('./email-template');
 const { formatDateOnly } = require('../utils/date-only');
 const { billingChannelAllowed, explicitBillingChannels } = require('./billing-delivery-channels');
+const { verdictAllows, verdictDurablyDenied } = require('./billing-reminder-delivery');
 
 const FOLLOWUP_EMAIL_TEMPLATE_BY_STEP_ID = {
   d3_friendly: 'invoice.followup_3_day',
@@ -101,9 +102,9 @@ function isSchedulableInvoice(invoice) {
 // byte-identical, per-channel verdicts, invoice-membership required.
 const { collectionsChannelPermitted: railGuardPermitted } = require('./collections/rail-guard');
 
-async function collectionsChannelPermitted(customerId, invoiceId, channel, excludeLedgerIds = []) {
+async function collectionsChannelPermitted(customerId, invoiceId, channel, excludeLedgerIds = [], detail = false) {
   return railGuardPermitted({
-    customerId, invoiceId, channel, purpose: 'late_payment', excludeLedgerIds, logTag: 'invoice-followups',
+    customerId, invoiceId, channel, purpose: 'late_payment', excludeLedgerIds, logTag: 'invoice-followups', detail,
   });
 }
 
@@ -945,8 +946,9 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
     }
   }
   const policyResults = await Promise.all(policyChannels.map((channel) =>
-    collectionsChannelPermitted(row.customer_id, row.invoice_id, channel, ownLedgerIds)));
-  const channelPolicy = Object.fromEntries(policyChannels.map((channel, index) => [channel, policyResults[index]]));
+    collectionsChannelPermitted(row.customer_id, row.invoice_id, channel, ownLedgerIds, true)));
+  const channelPolicy = Object.fromEntries(policyChannels.map((channel, index) => [channel, verdictAllows(policyResults[index])]));
+  const emailDurablyDenied = verdictDurablyDenied(policyResults[policyChannels.indexOf('email')]);
   const smsPermitted = channelPolicy.sms === true;
   const emailPermitted = channelPolicy.email === true;
   if (!Object.values(channelPolicy).some(Boolean)) {
@@ -1050,7 +1052,10 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
   // keeps the claim held until delivery evidence can settle it.
   const ContactLedger = require('./collections/contact-ledger');
   let emailResult = { ok: false, skipped: true, reason: 'collections_policy_denied' };
-  let emailHold = selectedChannels !== null && emailSelected && !emailPermitted;
+  // A spacing-window denial keeps the selected Email owed on this step; a
+  // durable one (flag, suppression) waives it so the step cannot be pinned
+  // forever. The global-hold gate above still stops an all-denied touch.
+  let emailHold = selectedChannels !== null && emailSelected && !emailPermitted && !emailDurablyDenied;
   if (emailPermitted) {
     let emailLedger = null;
     try {
@@ -1088,7 +1093,7 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
       }
     } else if (selectedChannels !== null) emailHold = true;
   }
-  if (selectedChannels !== null && emailSelected && emailResult.ok !== true
+  if (selectedChannels !== null && emailSelected && !emailDurablyDenied && emailResult.ok !== true
     && !terminalFollowupEmailRefusal(emailResult)) emailHold = true;
 
   let smsSent = false;

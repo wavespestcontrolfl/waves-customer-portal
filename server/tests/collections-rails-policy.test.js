@@ -299,6 +299,36 @@ describe('late-payment-checker rail', () => {
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
+  test.each([
+    ['a durable do-not-email flag waives the selected Email', 'flag_do_not_email', false],
+    ['a spacing window keeps the selected Email owed', 'contact_within_24h', true],
+  ])('%s after Text delivers', async (_label, reason, stillPending) => {
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    ContactPolicy.evaluate.mockImplementation(async (_customerId, { channel }) => channel === 'email'
+      ? { allowed: false, denialReasons: [reason], eligibleInvoiceIds: ['inv-1'] }
+      : ALLOWED);
+    const activityInsert = chain();
+    setDbQueues({
+      invoices: [
+        chain({ result: [LP_INVOICE] }),
+        chain({ first: { payer_id: null, scheduled_send_error: null } }),
+        chain({ first: { payer_id: null, scheduled_send_error: null } }),
+        chain({ first: { payer_id: null, scheduled_send_error: null } }),
+      ],
+      activity_log: [chain({ first: null }), chain(), activityInsert],
+      customers: [chain({ first: LP_CUSTOMER })],
+      notification_prefs: [chain({ first: { billing_channels: ['email', 'sms'] } })],
+      invoice_followup_sequences: [chain({ first: undefined }), chain({ first: undefined })],
+    });
+
+    await LatePaymentChecker.checkAndNotify();
+
+    expect(BalanceReminder.sendLatePaymentEmail).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    const inserted = JSON.parse(activityInsert.insert.mock.calls[0][0].metadata);
+    expect(inserted.pendingEmail === true).toBe(stillPending);
+  });
+
   test('gate UNSET: policy never consulted, legacy content and billing routing metadata are preserved', async () => {
     armLatePaymentHappyPath();
     const result = await LatePaymentChecker.checkAndNotify();
@@ -579,6 +609,25 @@ describe('invoice-followups rail', () => {
     expect(sendCustomerMessage.mock.calls[0][0].metadata.billingDeliveryLeg).toBe('push');
     expect(sequenceUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ step_index: 1 }));
     expect(finalInteraction.insert).toHaveBeenCalledWith(expect.objectContaining({ interaction_type: 'app_outbound' }));
+  });
+
+  test.each([
+    ['a durable do-not-email flag waives the selected Email and the step advances', 'flag_do_not_email', true],
+    ['a spacing window holds the step for the selected Email', 'contact_within_24h', false],
+  ])('%s after App delivers', async (_label, reason, advances) => {
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    ContactPolicy.evaluate.mockImplementation(async (_id, { channel }) => channel === 'email'
+      ? { allowed: false, denialReasons: [reason], eligibleInvoiceIds: ['inv-1'] }
+      : ALLOWED);
+    const sequenceUpdate = armFollowupHappyPath({ prefs: { invoice_channels: ['email', 'push'] } });
+
+    await InvoiceFollowUps.runPending();
+
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(sendCustomerMessage.mock.calls[0][0].metadata.billingDeliveryLeg).toBe('push');
+    if (advances) expect(sequenceUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ step_index: 1 }));
+    else expect(sequenceUpdate.update.mock.calls[0][0]).not.toHaveProperty('step_index');
   });
 
   test('microdeposit follow-up uses payment-issue App policy instead of invoice Text policy', async () => {

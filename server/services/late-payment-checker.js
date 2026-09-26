@@ -18,7 +18,7 @@ const StripeService = require('./stripe');
 const { sendMicrodepositVerificationEmail } = require('./microdeposit-verification-email');
 const { formatDateOnly } = require('../utils/date-only');
 const { billingChannelAllowed, explicitBillingChannels } = require('./billing-delivery-channels');
-const { isTerminalEmailRefusal } = require('./billing-reminder-delivery');
+const { isTerminalEmailRefusal, verdictAllows, verdictDurablyDenied } = require('./billing-reminder-delivery');
 
 function tierDaysForOverdue(daysSince) {
   if (daysSince < 14) return 7;
@@ -306,7 +306,16 @@ async function maybeDivertToMicrodepositReminder(inv, daysSince, domain, now = n
       return 'deduped';
     }
     const priorLedgerIds = pendingEmailEpisode.ledgerIds || [];
-    if (!await collectionsChannelPermitted(customer.id, inv.id, 'email', now, priorLedgerIds)) return 'skip';
+    const pendingVerdict = await collectionsChannelPermitted(customer.id, inv.id, 'email', now, priorLedgerIds, true);
+    if (!verdictAllows(pendingVerdict)) {
+      // A durable denial (flag, suppression) means this Email is no longer
+      // owed and must not hold the invoice on this tier forever; a spacing
+      // window keeps it pending for the next sweep.
+      if (!verdictDurablyDenied(pendingVerdict)
+        || !await resolvePendingEmailEpisode(pendingEmailEpisode, 'email_policy_denied')) return 'skip';
+      await completePendingEmail(pendingEmailActivity, pendingDeliveryChannel(pendingEmailActivity));
+      return 'deduped';
+    }
     let emailLedger;
     try {
       emailLedger = await ContactLedger.recordContact({
@@ -359,8 +368,9 @@ async function maybeDivertToMicrodepositReminder(inv, daysSince, domain, now = n
       { microdeposit: true, channels: policyChannels });
     if (ownLedgerIds === null) return 'skip';
     const policyResults = await Promise.all(policyChannels.map((channel) =>
-      collectionsChannelPermitted(customer.id, inv.id, channel, now, ownLedgerIds)));
-    const policy = Object.fromEntries(policyChannels.map((channel, index) => [channel, policyResults[index]]));
+      collectionsChannelPermitted(customer.id, inv.id, channel, now, ownLedgerIds, true)));
+    const policy = Object.fromEntries(policyChannels.map((channel, index) => [channel, verdictAllows(policyResults[index])]));
+    const emailDurablyDenied = verdictDurablyDenied(policyResults[policyChannels.indexOf('email')]);
     const emailPermitted = policy.email;
     let emailAttempted = false;
     let emailDelivered = false;
@@ -415,7 +425,8 @@ async function maybeDivertToMicrodepositReminder(inv, daysSince, domain, now = n
     if (!delivery.sentChannels && !emailDelivered) return 'skip';
     const terminalEmailResolved = !!delivery.sentChannels && isTerminalEmailRefusal(emailResult)
       && await resolvePendingEmailEpisode({ emailLedgerId: emailLedger?.id }, 'email_terminal_refusal');
-    const pendingEmail = !!delivery.sentChannels && explicitEmailSelected && !emailDelivered && !terminalEmailResolved;
+    const pendingEmail = !!delivery.sentChannels && explicitEmailSelected && !emailDurablyDenied
+      && !emailDelivered && !terminalEmailResolved;
     const activityInsert = db('activity_log').insert({
       customer_id: customer.id,
       action: 'microdeposit_verification_reminder',
@@ -443,9 +454,9 @@ async function maybeDivertToMicrodepositReminder(inv, daysSince, domain, now = n
 // byte-identical, per-channel verdicts, invoice-membership required.
 const { collectionsChannelPermitted: railGuardPermitted } = require('./collections/rail-guard');
 
-async function collectionsChannelPermitted(customerId, invoiceId, channel, now, excludeLedgerIds = []) {
+async function collectionsChannelPermitted(customerId, invoiceId, channel, now, excludeLedgerIds = [], detail = false) {
   return railGuardPermitted({
-    customerId, invoiceId, channel, purpose: 'late_payment', now, excludeLedgerIds, logTag: 'late-payment',
+    customerId, invoiceId, channel, purpose: 'late_payment', now, excludeLedgerIds, logTag: 'late-payment', detail,
   });
 }
 
@@ -690,8 +701,9 @@ const LatePaymentService = {
           : await currentEpisodeLedgerIds(inv.id, tierDays, { channels: policyChannels });
         if (ownLedgerIds === null) { skipped++; continue; }
         const policyResults = await Promise.all(policyChannels.map((channel) =>
-          collectionsChannelPermitted(customer.id, inv.id, channel, now, ownLedgerIds)));
-        const policy = Object.fromEntries(policyChannels.map((channel, index) => [channel, policyResults[index]]));
+          collectionsChannelPermitted(customer.id, inv.id, channel, now, ownLedgerIds, true)));
+        const policy = Object.fromEntries(policyChannels.map((channel, index) => [channel, verdictAllows(policyResults[index])]));
+        const emailDurablyDenied = verdictDurablyDenied(policyResults[policyChannels.indexOf('email')]);
         const emailPolicyPermitted = policy.email;
         let emailResult = null;
         let emailAttempted = false;
@@ -756,8 +768,9 @@ const LatePaymentService = {
           if (emailResult?.ok === true) {
             await completePendingEmail(pendingEmailActivity, `${pendingDeliveryChannel(pendingEmailActivity)}+email`);
             notified++;
-          } else if (isTerminalEmailRefusal(emailResult)
-            && await resolvePendingEmailEpisode({ emailLedgerId: emailLedger?.id }, 'email_terminal_refusal')) {
+          } else if ((isTerminalEmailRefusal(emailResult)
+            && await resolvePendingEmailEpisode({ emailLedgerId: emailLedger?.id }, 'email_terminal_refusal'))
+            || (emailDurablyDenied && await resolvePendingEmailEpisode(pendingEmailEpisode, 'email_policy_denied'))) {
             await completePendingEmail(pendingEmailActivity, pendingDeliveryChannel(pendingEmailActivity));
             skipped++;
           } else skipped++;
@@ -793,7 +806,10 @@ const LatePaymentService = {
         const emailDelivered = emailResult?.ok === true;
         const terminalEmailResolved = !!delivery.sentChannels && isTerminalEmailRefusal(emailResult)
           && await resolvePendingEmailEpisode({ emailLedgerId: emailLedger?.id }, 'email_terminal_refusal');
-        const pendingEmail = !!delivery.sentChannels && explicitEmailSelected && !emailDelivered && !terminalEmailResolved;
+        // A durably denied Email (flag, suppression) is not owed for this
+        // tier and must not leave a pending hold that blocks later tiers.
+        const pendingEmail = !!delivery.sentChannels && explicitEmailSelected && !emailDurablyDenied
+          && !emailDelivered && !terminalEmailResolved;
 
         if (delivery.sentChannels) {
           notified++;

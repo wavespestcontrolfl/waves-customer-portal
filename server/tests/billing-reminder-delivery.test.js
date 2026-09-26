@@ -136,6 +136,33 @@ describe('billing reminder per-channel delivery progress', () => {
     expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
   });
 
+  test('a spacing-window Email denial stays owed after Text delivers', async () => {
+    collectionsChannelPermitted.mockImplementation(async ({ channel }) => (channel === 'email'
+      ? { allowed: false, durable: false } : { allowed: true, durable: false }));
+    const send = jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted', auditLogId: 'audit-sms' }));
+
+    await expect(deliver(['email', 'sms'], send)).resolves.toMatchObject({ complete: false, deliveredNow: ['sms'] });
+    expect(rows.find((row) => row.channel === 'sms').metadata.policy_waived_channels).toBeUndefined();
+  });
+
+  test('a durably denied Email is waived once Text delivers, and never settles an episode alone', async () => {
+    collectionsChannelPermitted.mockImplementation(async ({ channel }) => (channel === 'email'
+      ? { allowed: false, durable: true } : { allowed: true, durable: false }));
+    const send = jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted', auditLogId: 'audit-sms' }));
+
+    await expect(deliver(['email', 'sms'], send)).resolves.toMatchObject({ complete: true, deliveredNow: ['sms'] });
+    expect(rows.find((row) => row.channel === 'sms').metadata.policy_waived_channels).toEqual(['email']);
+    // A later sweep reads the episode as settled rather than pending forever.
+    const { reminderProgress } = require('../services/billing-reminder-delivery');
+    await expect(reminderProgress('customer-1', 'balance_reminder_workflow', ['email', 'sms']))
+      .resolves.toEqual([expect.objectContaining({ complete: true })]);
+    expect(send.mock.calls.map(([channel]) => channel)).toEqual(['sms']);
+
+    collectionsChannelPermitted.mockResolvedValue({ allowed: false, durable: true });
+    await expect(deliver(['email', 'sms'], send, 'invoice-1:firm')).resolves.toMatchObject({ complete: false, deliveredNow: [] });
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
   test('an unstamped acceptance is held and never sent twice', async () => {
     ContactLedger.markDelivered.mockResolvedValueOnce(false);
     const send = jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted', auditLogId: 'audit-sms' }));

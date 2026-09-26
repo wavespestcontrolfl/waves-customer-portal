@@ -16,6 +16,23 @@ function isTerminalEmailRefusal(result) {
   );
 }
 
+// Readers for a rail-guard `detail: true` verdict that also accept the plain
+// boolean the guard returns without it.
+function verdictAllows(verdict) {
+  return verdict === true || verdict?.allowed === true;
+}
+function verdictDurablyDenied(verdict) {
+  return verdict?.allowed === false && verdict.durable === true;
+}
+
+// Every selected leg is delivered, terminally resolved, or was denied by the
+// collections policy while a sibling delivered. A policy-denied leg is not
+// owed (legacy skip) but can never settle an episode on its own.
+function legsSettled(channels, delivered, resolved, waived) {
+  return channels.every((channel) => delivered.has(channel) || resolved.has(channel)
+    || (waived.has(channel) && delivered.size > 0));
+}
+
 function metadataOf(row) {
   return typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
 }
@@ -27,8 +44,10 @@ async function reminderProgress(customerId, source, channels) {
   for (const row of rows) {
     const metadata = metadataOf(row);
     if (!metadata.notificationEventKey) continue;
-    const event = events.get(metadata.notificationEventKey) || { metadata, entries: [], delivered: new Set(), resolved: new Set() };
+    const event = events.get(metadata.notificationEventKey)
+      || { metadata, entries: [], delivered: new Set(), resolved: new Set(), waived: new Set() };
     event.entries.push(row);
+    for (const channel of metadata.policy_waived_channels || []) event.waived.add(channel);
     if (metadata.resolved === true && metadata.delivered !== true) event.resolved.add(row.channel);
     if (metadata.delivered === true) {
       event.delivered.add(row.channel);
@@ -37,7 +56,7 @@ async function reminderProgress(customerId, source, channels) {
     events.set(metadata.notificationEventKey, event);
   }
   return [...events.values()].map((event) => ({ ...event,
-    complete: channels.every((channel) => event.delivered.has(channel) || event.resolved.has(channel)),
+    complete: legsSettled(channels, event.delivered, event.resolved, event.waived),
   }));
 }
 
@@ -88,14 +107,19 @@ async function sendReminderChannels({ customerId, invoiceId, source, purpose, ev
     && !delivered.has(channel) && !resolved.has(channel));
   const permitted = await Promise.all(pending.map((channel) => collectionsChannelPermitted({
     customerId, invoiceId, channel, purpose, excludeLedgerIds: entries.map((entry) => entry.id), logTag: 'billing-reminder',
+    detail: true,
   })));
   const digest = crypto.createHash('sha256').update(`${customerId}:${eventKey}`).digest('hex');
+  // Only a durable denial waives its leg; a spacing window keeps it owed.
+  const waived = new Set([...(existing?.waived || []),
+    ...pending.filter((_channel, index) => verdictDurablyDenied(permitted[index]))]);
   for (const [index, channel] of pending.entries()) {
-    if (!permitted[index]) { results[channel] = { sent: false, blocked: true, code: 'COLLECTIONS_POLICY' }; continue; }
+    if (!verdictAllows(permitted[index])) { results[channel] = { sent: false, blocked: true, code: 'COLLECTIONS_POLICY' }; continue; }
     const entry = await ContactLedger.recordContact({
       customerId, channel, purpose, invoiceIds: [invoiceId], source,
       idempotencyKey: `billing-reminder:${digest}:${channel}`,
-      metadata: { ...metadata, notificationEventKey: eventKey, selectedChannels: channels },
+      metadata: { ...metadata, notificationEventKey: eventKey, selectedChannels: channels,
+        ...(waived.size ? { policy_waived_channels: [...waived] } : {}) },
     });
     const claim = await ContactLedger.claimAttempt(entry);
     if (claim.delivered) { delivered.add(channel); continue; }
@@ -108,10 +132,9 @@ async function sendReminderChannels({ customerId, invoiceId, source, purpose, ev
       if (!result.deduped) deliveredNow.push(channel);
     } else if (state === 'resolved') resolved.add(channel);
   }
-  return {
-    complete: channels.every((channel) => delivered.has(channel) || resolved.has(channel)),
-    deliveredNow, results,
-  };
+  return { complete: legsSettled(channels, delivered, resolved, waived), deliveredNow, results };
 }
 
-module.exports = { reminderProgress, sendReminderChannels, isTerminalEmailRefusal };
+module.exports = {
+  reminderProgress, sendReminderChannels, isTerminalEmailRefusal, verdictAllows, verdictDurablyDenied,
+};
