@@ -819,7 +819,7 @@ describe('Tree & Shrub v4.7 knobs (density / palm reserve / callback reserve)', 
 
   test('neutral defaults change nothing: worked example matches v4.6 numbers exactly', () => {
     expect(TS().densityFactors).toEqual({ light: 1, moderate: 1, heavy: 1 });
-    expect(TS().routinePalmCareReserve).toEqual({ perPalmAnnual: 0, minutesPerPalmVisit: 0 });
+    expect(TS().routinePalmCareReserve).toEqual({ perPalmAnnual: 0, minutesPerPalmVisit: 0, largePalmFactor: 1 });
     expect(TS().callbackReservePerVisit).toBe(0);
 
     // Same fixture as the "standard 2,000 sqft worked example (v4.6)" above,
@@ -1014,6 +1014,43 @@ describe('Tree & Shrub v4.7 knobs (density / palm reserve / callback reserve)', 
     expect(quote.materialModel.perPalmAnnual).toBe(6);
   });
 
+  test('a large palm prices as largePalmFactor regular palms in both armed reserve terms', () => {
+    TS().routinePalmCareReserve.perPalmAnnual = 6;
+    TS().routinePalmCareReserve.minutesPerPalmVisit = 1;
+    TS().routinePalmCareReserve.largePalmFactor = 2.5;
+    const quote = priceTreeShrub(
+      { bedArea: 2000, treeCount: 0, access: 'easy', palmCount: 8 },
+      { tier: 'enhanced', largePalmCount: 2 }
+    );
+    // 6 regular + 2 large x 2.5 = 11 palm units.
+    expect(quote.costs.palmReserveCost).toBe(66);
+    expect(quote.onSiteMin).toBe(20 + 4 + 11);
+    // Every palm COUNT stays physical palms.
+    expect(quote.palmCount).toBe(8);
+    expect(quote.largePalmCount).toBe(2);
+    expect(quote.pricingKnobs.largePalmFactor).toBe(2.5);
+  });
+
+  test('large palms: inert at the neutral factor, clamped to the palm count, never in the unarmed legacy fold', () => {
+    TS().routinePalmCareReserve.perPalmAnnual = 6;
+    TS().routinePalmCareReserve.minutesPerPalmVisit = 1;
+    const job = { bedArea: 2000, treeCount: 0, access: 'easy', palmCount: 8 };
+    const base = priceTreeShrub(job, { tier: 'standard' });
+    expect(priceTreeShrub(job, { tier: 'standard', largePalmCount: 3 }).annual).toBe(base.annual);
+
+    TS().routinePalmCareReserve.largePalmFactor = 2;
+    const clamped = priceTreeShrub({ ...job, palmCount: 3 }, { tier: 'standard', largePalmCount: 9 });
+    expect(clamped.largePalmCount).toBe(3);
+    expect(clamped.costs.palmReserveCost).toBe(36); // 3 palms x 2 units x $6
+
+    // Unarmed: service-line palms ride the legacy per-tree term, large or not.
+    TS().routinePalmCareReserve.perPalmAnnual = 0;
+    TS().routinePalmCareReserve.minutesPerPalmVisit = 0;
+    const unarmed = priceTreeShrub({ bedArea: 2000, access: 'easy' }, { tier: 'standard', palmCount: 5 });
+    const unarmedLarge = priceTreeShrub({ bedArea: 2000, access: 'easy' }, { tier: 'standard', palmCount: 5, largePalmCount: 5 });
+    expect(unarmedLarge.annual).toBe(unarmed.annual);
+  });
+
   test('palm count reads property-level sources and treats absent/invalid as zero', () => {
     TS().routinePalmCareReserve.perPalmAnnual = 6;
     const inventory = priceTreeShrub(
@@ -1087,6 +1124,11 @@ describe('Tree & Shrub v4.7 density source eligibility + admin validation', () =
     expect(ok({ density_light: 0.2 })).toBe(false);
     expect(ok({ palm_per_palm_annual: 500 })).toBe(false);
     expect(ok({ palm_minutes_per_visit: 45 })).toBe(false);
+    // Large-palm factor: 1 (off) to 5 regular palms' worth.
+    expect(ok({ palm_large_factor: 1 })).toBe(true);
+    expect(ok({ palm_large_factor: 2.5 })).toBe(true);
+    expect(ok({ palm_large_factor: 0.5 })).toBe(false);
+    expect(ok({ palm_large_factor: 6 })).toBe(false);
     expect(ok({ callback_reserve_per_visit: true })).toBe(false); // Number(true)=1 must NOT slip through
     expect(ok({ palm_per_palm_annual: '6' })).toBe(false); // strict numbers, no numeric strings
     expect(ok({ callback_reserve_per_visit: null })).toBe(false);
@@ -1232,6 +1274,25 @@ describe('Tree & Shrub v4.7 leg independence for inferred trees + tier-row parit
       expect(row.ann).toBe(Math.round(direct.annual));
     }
   });
+
+  test('alternate-tier rows price the same LARGE palms as the selected row', () => {
+    constants.TREE_SHRUB.routinePalmCareReserve = { perPalmAnnual: 6, minutesPerPalmVisit: 1, largePalmFactor: 2.5 };
+    const estimate = generateEstimate({
+      homeSqFt: 2000,
+      lotSqFt: 8000,
+      bedArea: 2000,
+      services: { treeShrub: { tier: 'standard', palmCount: 10, largePalmCount: 4 } },
+    });
+    expect(estimate.lineItems.find((li) => li.service === 'tree_shrub').largePalmCount).toBe(4);
+    const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
+    for (const row of mapV1ToLegacyShape(estimate).results.ts) {
+      const direct = priceTreeShrub(
+        { bedArea: 2000, access: 'easy' },
+        { tier: row.tier, palmCount: 10, largePalmCount: 4 }
+      );
+      expect(row.ann).toBe(Math.round(direct.annual));
+    }
+  });
 });
 
 describe('Tree & Shrub v4.7 quote-time knob snapshot (sent-estimate replay)', () => {
@@ -1247,14 +1308,14 @@ describe('Tree & Shrub v4.7 quote-time knob snapshot (sent-estimate replay)', ()
   test('every quote stamps the knob values it priced with', () => {
     const neutral = priceTreeShrub({ bedArea: 2000, access: 'easy' }, { tier: 'standard' });
     expect(neutral.pricingKnobs).toEqual({
-      densityFactor: 1, perPalmAnnual: 0, minutesPerPalmVisit: 0, callbackReservePerVisit: 0,
+      densityFactor: 1, perPalmAnnual: 0, minutesPerPalmVisit: 0, largePalmFactor: 1, callbackReservePerVisit: 0,
     });
     constants.TREE_SHRUB.densityFactors.heavy = 1.3;
-    constants.TREE_SHRUB.routinePalmCareReserve = { perPalmAnnual: 6, minutesPerPalmVisit: 1 };
+    constants.TREE_SHRUB.routinePalmCareReserve = { perPalmAnnual: 6, minutesPerPalmVisit: 1, largePalmFactor: 2.5 };
     constants.TREE_SHRUB.callbackReservePerVisit = 2;
     const armed = priceTreeShrub({ bedArea: 2000, access: 'easy', shrubDensity: 'heavy' }, { tier: 'standard' });
     expect(armed.pricingKnobs).toEqual({
-      densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, callbackReservePerVisit: 2,
+      densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, largePalmFactor: 2.5, callbackReservePerVisit: 2,
     });
   });
 
@@ -1281,11 +1342,27 @@ describe('Tree & Shrub v4.7 quote-time knob snapshot (sent-estimate replay)', ()
     expect(replay.onSiteMin).toBe(sent.onSiteMin);
   });
 
+  test('a sent quote with large palms replays its stamped factor after a later factor change', () => {
+    const job = { bedArea: 2000, access: 'easy', palmCount: 10 };
+    constants.TREE_SHRUB.routinePalmCareReserve = { perPalmAnnual: 6, minutesPerPalmVisit: 1, largePalmFactor: 2.5 };
+    const sent = priceTreeShrub(job, { tier: 'standard', largePalmCount: 4 });
+    constants.TREE_SHRUB.routinePalmCareReserve = { perPalmAnnual: 6, minutesPerPalmVisit: 1, largePalmFactor: 4 };
+    expect(priceTreeShrub(job, { tier: 'standard', largePalmCount: 4 }).annual).toBeGreaterThan(sent.annual);
+    const replay = priceTreeShrub(job, { tier: 'standard', largePalmCount: 4, knobs: sent.pricingKnobs });
+    expect(replay.annual).toBe(sent.annual);
+    expect(replay.costs.palmReserveCost).toBe(sent.costs.palmReserveCost);
+  });
+
   test('legacy estimates (no stamp) replay NEUTRAL — they could only have been priced with the knobs off', () => {
     const { estimateTreeShrubKnobSignal: signal } = require('../routes/estimate-public');
     expect(signal({ result: { lineItems: [{ service: 'tree_shrub' }] } })).toEqual({
-      densityFactor: 1, perPalmAnnual: 0, minutesPerPalmVisit: 0, callbackReservePerVisit: 0,
+      densityFactor: 1, perPalmAnnual: 0, minutesPerPalmVisit: 0, largePalmFactor: 1, callbackReservePerVisit: 0,
     });
+    // A stamp from before the large-palm factor replays it neutral; a newer
+    // stamp replays its own factor.
+    const stamp = { densityFactor: 1, perPalmAnnual: 6, minutesPerPalmVisit: 1, callbackReservePerVisit: 0 };
+    expect(signal({ result: { lineItems: [{ service: 'tree_shrub', pricingKnobs: stamp }] } }).largePalmFactor).toBe(1);
+    expect(signal({ result: { lineItems: [{ service: 'tree_shrub', pricingKnobs: { ...stamp, largePalmFactor: 2.5 } }] } }).largePalmFactor).toBe(2.5);
     // No T&S line at all → inject nothing (fresh quotes resolve live config).
     expect(signal({ result: { lineItems: [{ service: 'pest_control' }] } })).toBeNull();
   });
@@ -1356,7 +1433,7 @@ describe('Tree & Shrub v4.7 knob snapshot survives the mapped admin envelope', (
     });
     const meta = mapV1ToLegacyShape(estimate).results.tsMeta;
     expect(meta.pricingKnobs).toEqual({
-      densityFactor: 1, perPalmAnnual: 6, minutesPerPalmVisit: 1, callbackReservePerVisit: 0,
+      densityFactor: 1, perPalmAnnual: 6, minutesPerPalmVisit: 1, largePalmFactor: 1, callbackReservePerVisit: 0,
     });
     expect(meta.palmCount).toBe(10);
     expect(meta.palmCountSource).toBe('service_line');
@@ -1366,13 +1443,13 @@ describe('Tree & Shrub v4.7 knob snapshot survives the mapped admin envelope', (
     const { estimateTreeShrubKnobSignal: signal } = require('../routes/estimate-public');
     expect(signal({
       result: { results: { tsMeta: { pricingKnobs: { densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, callbackReservePerVisit: 2 } } } },
-    })).toEqual({ densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, callbackReservePerVisit: 2 });
+    })).toEqual({ densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, largePalmFactor: 1, callbackReservePerVisit: 2 });
     // Mapped legacy T&S estimate saved before the knobs existed.
     expect(signal({ result: { results: { tsMeta: { eb: 2000, et: 3 } } } })).toEqual({
-      densityFactor: 1, perPalmAnnual: 0, minutesPerPalmVisit: 0, callbackReservePerVisit: 0,
+      densityFactor: 1, perPalmAnnual: 0, minutesPerPalmVisit: 0, largePalmFactor: 1, callbackReservePerVisit: 0,
     });
     expect(signal({ result: { results: { ts: [{ tier: 'standard', ann: 600 }] } } })).toEqual({
-      densityFactor: 1, perPalmAnnual: 0, minutesPerPalmVisit: 0, callbackReservePerVisit: 0,
+      densityFactor: 1, perPalmAnnual: 0, minutesPerPalmVisit: 0, largePalmFactor: 1, callbackReservePerVisit: 0,
     });
     // No T&S anywhere → inject nothing.
     expect(signal({ result: { results: { pest: {} } } })).toBeNull();
@@ -1401,7 +1478,7 @@ describe('Tree & Shrub v4.7 GH review round 1 fixes', () => {
     expect(estimateTreeShrubKnobSignal).toBe(shared.treeShrubKnobSignalForReplay);
     const stamped = { result: { results: { tsMeta: { pricingKnobs: { densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, callbackReservePerVisit: 2 } } } } };
     expect(shared.treeShrubKnobSignalForReplay(stamped)).toEqual({
-      densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, callbackReservePerVisit: 2,
+      densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, largePalmFactor: 1, callbackReservePerVisit: 2,
     });
   });
 
@@ -1425,7 +1502,7 @@ describe('Tree & Shrub v4.7 GH review round 1 fixes', () => {
     };
 
     // Membership-lapse reconcile: a DECLARED replay of a persisted row.
-    expect((await run({ replay: true }))?.treeShrubPricingKnobs).toEqual(STAMPED);
+    expect((await run({ replay: true }))?.treeShrubPricingKnobs).toEqual({ ...STAMPED, largePalmFactor: 1 });
 
     // Create/revision save: estimateData is browser-controlled, so a posted
     // snapshot must NOT override the admin-only live pricing_config.
@@ -1437,7 +1514,7 @@ describe('Tree & Shrub v4.7 GH review round 1 fixes', () => {
     forged.engineInputs.treeShrubPricingKnobs = {
       densityFactor: 0.5, perPalmAnnual: 0, minutesPerPalmVisit: 0, callbackReservePerVisit: 0,
     };
-    expect((await run({ replay: true, data: forged }))?.treeShrubPricingKnobs).toEqual(STAMPED);
+    expect((await run({ replay: true, data: forged }))?.treeShrubPricingKnobs).toEqual({ ...STAMPED, largePalmFactor: 1 });
     // …and with no replay declared, the forged value is simply gone.
     const forgedNoReplay = estData();
     forgedNoReplay.engineInputs.treeShrubPricingKnobs = { densityFactor: 0.5 };
@@ -1458,11 +1535,11 @@ describe('Tree & Shrub v4.7 GH review round 2 fixes', () => {
         results: { tsMeta: { pricingKnobs: { densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, callbackReservePerVisit: 2 } } },
       },
     });
-    expect(signal).toEqual({ densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, callbackReservePerVisit: 2 });
+    expect(signal).toEqual({ densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, largePalmFactor: 1, callbackReservePerVisit: 2 });
     // With no mapped stamp, the raw line still answers.
     expect(treeShrubKnobSignalForReplay({
       engineResult: { lineItems: [{ service: 'tree_shrub', pricingKnobs: { densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, callbackReservePerVisit: 2 } }] },
-    })).toEqual({ densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, callbackReservePerVisit: 2 });
+    })).toEqual({ densityFactor: 1.3, perPalmAnnual: 6, minutesPerPalmVisit: 1, largePalmFactor: 1, callbackReservePerVisit: 2 });
   });
 });
 
