@@ -143,6 +143,11 @@ detail, and it makes the whole benchmark's exit code non-zero, exactly like a
 real crash (`crashedRuns`, no JSON / exit 2 / a timeout/signal). A candidate
 that merely could not be evaluated must never look like a clean pass, and its
 sample count must never be silently padded into `scenarioAttemptSamples`.
+Replay errors (scenarios the harness could not evaluate) likewise make the
+exit code non-zero: they are excluded from task accuracy as missing data, so
+without this a run could report 100% accuracy having skipped part of the
+fixture. `--out` is checked for writability before the first paid run, since
+the combined report is only written after every trial finishes.
 
 ### Model-stamp verification (candidate conditions only)
 

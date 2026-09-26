@@ -463,6 +463,23 @@ function summarizeCondition(id, runs) {
  * is the only caller that prints/writes by default, so tests can drive this
  * directly against a stubbed child process.
  */
+/**
+ * Where the combined report will be written, checked BEFORE the first paid
+ * child runs: the write happens only after every condition and trial has
+ * finished, so an unwritable destination discovered then would throw away
+ * hours of runs and their provider spend.
+ */
+function resolveOutPath(ARGS, { fsImpl = fs } = {}) {
+  const outPath = path.resolve(ARGS.out || path.join(__dirname, '..', '..', `voice-relay-benchmark-${Date.now()}.json`));
+  const target = fsImpl.existsSync(outPath) ? outPath : path.dirname(outPath);
+  try {
+    fsImpl.accessSync(target, fs.constants.W_OK);
+  } catch (err) {
+    throw new Error(`--out destination is not writable: ${outPath} (${err.code || err.message})`);
+  }
+  return outPath;
+}
+
 async function runBenchmark({ argv = process.argv.slice(2), execFileImpl = execFile, scriptPath = SCRIPT_PATH, timeoutMs = CHILD_TIMEOUT_MS, log = () => {} } = {}) {
   const ARGS = parseArgs(argv);
   const unknownOptions = Object.keys(ARGS).filter((k) => !SUPPORTED_OPTIONS.has(k));
@@ -474,6 +491,7 @@ async function runBenchmark({ argv = process.argv.slice(2), execFileImpl = execF
   }
   assertValueOptions(ARGS);
   assertOnlyHasIds(ARGS);
+  const outPath = resolveOutPath(ARGS);
   if (!ARGS['candidate-model'] || ARGS['candidate-model'] === true) {
     throw new Error(
       "--candidate-model is required (e.g. --candidate-model=claude-haiku-4-5-20251001). "
@@ -545,8 +563,11 @@ async function runBenchmark({ argv = process.argv.slice(2), execFileImpl = execF
   // condition whose resolved model didn't match what was requested — makes
   // the whole benchmark exit non-zero: none of the three is a scenario-level
   // miss inside a completed run, so none is allowed to look like a clean pass.
-  const anyIncomplete = byCondition.some((c) => c.crashedRuns > 0 || c.inconclusiveRuns > 0 || c.modelMismatchRuns > 0);
-  return { report, outPath: ARGS.out || null, exitCode: anyIncomplete ? 1 : 0 };
+  // A replay error is missing data too: those scenarios are excluded from
+  // scenarioEvaluatedSamples, so without this a run could print 100% task
+  // accuracy and exit 0 having never evaluated part of the fixture.
+  const anyIncomplete = byCondition.some((c) => c.crashedRuns > 0 || c.inconclusiveRuns > 0 || c.modelMismatchRuns > 0 || c.replayErrors > 0);
+  return { report, outPath, exitCode: anyIncomplete ? 1 : 0 };
 }
 
 module.exports = {
@@ -555,6 +576,7 @@ module.exports = {
   rotateConditions,
   resolveTrials,
   assertOnlyHasIds,
+  resolveOutPath,
   runOnce,
   percentile,
   summarizeCondition,
@@ -568,9 +590,7 @@ module.exports = {
 if (require.main === module) {
   (async function main() {
     try {
-      const { report, exitCode } = await runBenchmark({ log: (line) => process.stderr.write(line) });
-      const outPath = parseArgs(process.argv.slice(2)).out
-        || path.join(__dirname, '..', '..', `voice-relay-benchmark-${Date.now()}.json`);
+      const { report, outPath, exitCode } = await runBenchmark({ log: (line) => process.stderr.write(line) });
       fs.writeFileSync(outPath, JSON.stringify(report, null, 2));
       console.log(`\nWrote ${outPath}\n`);
       console.table(report.conditions.map((c) => ({

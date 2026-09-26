@@ -654,6 +654,39 @@ describe('runBenchmark — required --candidate-model and the benchmark-level ex
     expect(report.conditions.every((c) => c.inconclusiveRuns === 1)).toBe(true);
   });
 
+  test('replay errors (unevaluated scenarios) make the whole benchmark report exitCode 1', async () => {
+    const execFileImpl = stubChild([{
+      code: 1,
+      stdout: JSON.stringify({ status: 'fail', flaky: false, summary: { scenarios: 3, passed: 2, replayErrors: 1, durationMs: 500 }, attempts: [{ status: 'fail', summary: { scenarios: 3, passed: 2, replayErrors: 1, durationMs: 500 } }] }),
+    }]);
+    const { report, exitCode } = await runBenchmark({
+      argv: ['--candidate-model=claude-haiku-4-5-20251001', '--trials=1'],
+      execFileImpl,
+    });
+    expect(exitCode).toBe(1);
+    expect(report.conditions.every((c) => c.replayErrors === 1)).toBe(true);
+  });
+
+  test('an unwritable --out destination is rejected before any child runs', async () => {
+    const execFileImpl = jest.fn();
+    await expect(runBenchmark({
+      argv: ['--candidate-model=claude-haiku-4-5-20251001', '--trials=1', '--out=/nonexistent-dir-for-benchmark-test/report.json'],
+      execFileImpl,
+    })).rejects.toThrow(/--out destination is not writable/);
+    expect(execFileImpl).not.toHaveBeenCalled();
+  });
+
+  test('a writable --out destination is resolved and returned', async () => {
+    const os = require('os');
+    const target = require('path').join(os.tmpdir(), `benchmark-out-${process.pid}.json`);
+    const execFileImpl = stubChild([{ code: 3, stdout: JSON.stringify({ status: 'inconclusive', error: { message: 'x' } }) }]);
+    const { outPath } = await runBenchmark({
+      argv: ['--candidate-model=claude-haiku-4-5-20251001', '--trials=1', `--out=${target}`],
+      execFileImpl,
+    });
+    expect(outPath).toBe(target);
+  });
+
   test('a fully clean run (every condition pass, no retries, no crashes) reports exitCode 0', async () => {
     const execFileImpl = stubChild([{
       code: 0,
