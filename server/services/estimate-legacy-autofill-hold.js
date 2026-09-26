@@ -94,4 +94,27 @@ function legacyAutofillPriceReasons(data) {
   return [...new Set(reasons)];
 }
 
-module.exports = { legacyAutofillPriceReasons };
+function parseData(value) {
+  if (!value) return null;
+  if (typeof value === 'string') {
+    try { return JSON.parse(value); } catch { return null; }
+  }
+  return typeof value === 'object' ? value : null;
+}
+
+/**
+ * The row verdict every customer-facing rail shares (assertEstimateSendable,
+ * the group-sibling preflight, and pricing-authority-gate's
+ * rowPassesGatedSendAuthority, which the follow-up / engagement / renewal /
+ * extension / composer / deposit / voice rails all ask). Exempt: an authored
+ * proposal (its line items are the price; the retained builder snapshot is
+ * inert — codex r1 P1 #4941) and a price the customer already accepted.
+ */
+function rowHeldForLegacyAutofillPrice(row = {}) {
+  const data = parseData(row?.estimate_data ?? row?.estimateData);
+  if (!data || data.proposal?.enabled === true) return false;
+  if (row.price_locked_at != null || String(row.status || '') === 'accepted') return false;
+  return legacyAutofillPriceReasons(data).length > 0;
+}
+
+module.exports = { legacyAutofillPriceReasons, rowHeldForLegacyAutofillPrice };

@@ -3,7 +3,8 @@
  * guards refuse (#4862 / #4871 / #4878). Mirrors the estimate tool's reopen
  * scrub (client/src/lib/lookupPrefill.js) — the same fixtures hold here.
  */
-const { legacyAutofillPriceReasons } = require('../services/estimate-legacy-autofill-hold');
+const { legacyAutofillPriceReasons, rowHeldForLegacyAutofillPrice } = require('../services/estimate-legacy-autofill-hold');
+const { rowPassesGatedSendAuthority } = require('../services/pricing-authority-gate');
 
 const UNIT = { residentialUnitLookup: { wholePropertyCategory: 'RESIDENTIAL' } };
 const UNIT_PARCEL = { lotSqFt: 400000, fieldVerifyFlags: [{ field: 'lotSize', scope: 'unit_parcel' }] };
@@ -58,5 +59,23 @@ describe('legacyAutofillPriceReasons', () => {
     expect(legacyAutofillPriceReasons({ engineRequest: { profile: {} }, result: { recurring: { services: [pest({ footprintWasDefaulted: true })] } } }))
       .toEqual([]);
     expect(legacyAutofillPriceReasons(null)).toEqual([]);
+  });
+});
+
+describe('rowHeldForLegacyAutofillPrice — the shared row verdict (codex r1 P1 #4941)', () => {
+  const guessed = saved({ svcPest: true, lotSqFt: '9000' }, {}, [pest({ footprintWasDefaulted: true })]);
+
+  test('holds a legacy row, parsed from the stored string, and the shared authority verdict refuses it', () => {
+    const row = { status: 'sent', pricing_authority: 'SERVER', estimate_data: JSON.stringify(guessed) };
+    expect(rowHeldForLegacyAutofillPrice(row)).toBe(true);
+    // Every follow-up / engagement / renewal / composer rail asks this verdict.
+    expect(rowPassesGatedSendAuthority(row)).toBe(false);
+    expect(rowPassesGatedSendAuthority({ ...row, estimate_data: saved({ homeSqFt: '2400' }) })).toBe(true);
+  });
+
+  test('exempts an authored proposal and a price the customer already accepted', () => {
+    expect(rowHeldForLegacyAutofillPrice({ status: 'sent', estimate_data: { ...guessed, proposal: { enabled: true } } })).toBe(false);
+    expect(rowHeldForLegacyAutofillPrice({ status: 'accepted', estimate_data: guessed })).toBe(false);
+    expect(rowHeldForLegacyAutofillPrice({ status: 'sent', price_locked_at: new Date(), estimate_data: guessed })).toBe(false);
   });
 });

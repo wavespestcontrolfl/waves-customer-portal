@@ -12,6 +12,7 @@
 // not throw, and textual booleans must not pass).
 const { isEnabled } = require('../config/feature-gates');
 const { isProposalAuthoredByEditor } = require('./estimate-proposal');
+const { rowHeldForLegacyAutofillPrice } = require('./estimate-legacy-autofill-hold');
 
 const SERVER_PRICING_AUTHORITY_SQL = "UPPER(pricing_authority) = 'SERVER'";
 // Acceptance rewrites pricing_authority to LOCKED — the price is frozen and
@@ -41,6 +42,11 @@ function parseEstimateDataLoose(value) {
 }
 
 function rowPassesGatedSendAuthority(row = {}) {
+  // An estimate-tool price the 2026-09-26 lookup guards refuse is not the
+  // engine's verdict on today's inputs either: no rail puts it in front of
+  // the customer until staff regenerate it (codex r1 P1 #4941 — the
+  // follow-up / engagement rails ask only this verdict).
+  if (rowHeldForLegacyAutofillPrice(row)) return false;
   const authority = String(row.pricing_authority || row.pricingAuthority || '').toUpperCase();
   if (authority === 'SERVER') return true;
   const data = parseEstimateDataLoose(row.estimate_data ?? row.estimateData);
