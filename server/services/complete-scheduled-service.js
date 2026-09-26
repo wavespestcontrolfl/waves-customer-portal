@@ -10818,6 +10818,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // Add-ons are owed but only alerted: the completion text must not say
     // "all paid" (the plain report-ready text goes instead).
     let annualPrepayAddonsUnbilled = false;
+    // Dark (off): no add-on read, bill or alert — a covered visit's invoice
+    // settles or voids exactly as it did before R13.
+    const annualPrepayAddonBilling = require('../config/feature-gates').gateEnvValue('GATE_ANNUAL_PREPAY_ADDON_BILLING');
     // An office alert that did not land leaves the add-ons neither billed
     // nor flagged; the closeout then stays unfinalized (the release/503
     // after these blocks) and the retry re-derives the same alert.
@@ -10957,10 +10960,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
       let coveredAddons = null;
       try {
         const InvoiceService = require('../services/invoice');
-        coveredAddons = await annualPrepayAddonRows(svc).catch((lookupErr) => {
-          annualPrepayLookupError = lookupErr;
-          throw lookupErr;
-        });
+        coveredAddons = annualPrepayAddonBilling
+          ? await annualPrepayAddonRows(svc).catch((lookupErr) => {
+            annualPrepayLookupError = lookupErr;
+            throw lookupErr;
+          })
+          : { clientIds: new Set(), priced: false };
         const invoiceLines = classifyCoveredVisitInvoice(invoice, svc, coveredAddons);
         if (invoiceLines.billsOnlyAddons) {
           annualPrepayExtrasCollectible = true;
@@ -10983,7 +10988,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             alreadyPaid = true;
             // An office invoice that predates the visit's add-ons settles as
             // covered; the add-ons it never carried are still owed.
-            if (visitPerformed && !recapReviewOnly) await billAnnualPrepayAddons({ coveredInvoiceId: settleRes.invoice?.id || null });
+            if (annualPrepayAddonBilling && visitPerformed && !recapReviewOnly) await billAnnualPrepayAddons({ coveredInvoiceId: settleRes.invoice?.id || null });
           } else if (['has_add_ons', 'has_applied_credit', 'has_deposit_credit'].includes(settleRes.reason)) {
             const voidedInvoice = invoice;
             const voidedInvoiceId = voidedInvoice.id;
@@ -10991,12 +10996,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // finds no live invoice, and must still judge the add-ons bill
             // against this invoice's own pricing (afterCoveredInvoiceVoided).
             // Unsaved → no void: the office reconciles the invoice instead.
-            let voidRecorded = false;
-            try {
-              await mergeRecordNotesKeys(record.id, { annualPrepayVoidedInvoiceId: voidedInvoiceId });
-              voidRecorded = true;
-            } catch (markErr) {
-              logger.error(`[dispatch] annual-prepay void marker write FAILED for visit ${svc.id} (invoice ${voidedInvoiceId}): ${markErr.message}`);
+            let voidRecorded = !annualPrepayAddonBilling;
+            if (annualPrepayAddonBilling) {
+              try {
+                await mergeRecordNotesKeys(record.id, { annualPrepayVoidedInvoiceId: voidedInvoiceId });
+                voidRecorded = true;
+              } catch (markErr) {
+                logger.error(`[dispatch] annual-prepay void marker write FAILED for visit ${svc.id} (invoice ${voidedInvoiceId}): ${markErr.message}`);
+              }
             }
             if (!voidRecorded) {
               await alertAnnualPrepayAddons(`invoice ${voidedInvoice.invoice_number || voidedInvoiceId} bills the covered visit together with other charges and was left as is`, { invoiceId: voidedInvoiceId });
@@ -11015,7 +11022,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               invoiceCreated = false;
               payUrl = null;
               alreadyPaid = true;
-              await afterCoveredInvoiceVoided(voidedInvoice, invoiceLines);
+              if (annualPrepayAddonBilling) await afterCoveredInvoiceVoided(voidedInvoice, invoiceLines);
             }
           }
           // else (payer_billed / already_settled / processing): leave for normal handling.
@@ -11038,7 +11045,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // main auto-invoice gate). A retry whose earlier pass voided the office
     // invoice (its id saved before the void) finishes that void's work
     // instead — a plain bill would skip the office-pricing check.
-    if (!annualPrepayAddonsHandled && annualPrepayCovered && !invoice?.id && !terminalCompletionInvoice) {
+    if (annualPrepayAddonBilling && !annualPrepayAddonsHandled && annualPrepayCovered && !invoice?.id && !terminalCompletionInvoice) {
       const priorVoidedId = parseJsonObject(record?.structured_notes)?.annualPrepayVoidedInvoiceId || null;
       if (priorVoidedId) {
         let priorVoided = null;
@@ -11057,7 +11064,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // add-ons sibling: the retry reloads the base, already 'prepaid' as this
     // term's coverage. Bill the add-ons beside it (the mint adopts a sibling
     // an earlier pass did commit, and never the base itself).
-    if (!annualPrepayAddonsHandled && annualPrepayCovered && invoice?.id && !issuedInvoiceCloseout
+    if (annualPrepayAddonBilling && !annualPrepayAddonsHandled && annualPrepayCovered && invoice?.id && !issuedInvoiceCloseout
       && !recapReviewOnly && visitPerformed && !terminalCompletionInvoice
       && String(invoice.status || '').toLowerCase() === 'prepaid'
       && svc.annual_prepay_term_id

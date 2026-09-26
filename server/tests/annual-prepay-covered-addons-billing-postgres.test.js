@@ -72,6 +72,7 @@ postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
       && url.pathname === `/waves_qa_${String(process.env.WAVES_WORKTREE_ID || '').replaceAll('-', '')}`;
     if (!localCI && !ownedQA) throw new Error('Use disposable CI or this worktree\'s private QA database');
     process.env.DATA_HYGIENE_VAULT_KEY = 'synthetic-visit-summary-test-key';
+    process.env.GATE_ANNUAL_PREPAY_ADDON_BILLING = 'true';
     database = require('knex')({ client: 'pg', connection, pool: { min: 0, max: 4 } });
     require('../models/db').connection = database;
     // Cold transforms of the completion module graph stay outside a test's timer.
@@ -86,7 +87,10 @@ postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
   });
 
   afterEach(async () => { if (trx) await trx.rollback(); });
-  afterAll(async () => { await database?.destroy(); });
+  afterAll(async () => {
+    delete process.env.GATE_ANNUAL_PREPAY_ADDON_BILLING;
+    await database?.destroy();
+  });
 
   async function coveredVisit({ discountDollars = null, invoiceLines = null, invoiceStatus = 'draft', daysAgo = 0, depositDollars = null } = {}) {
     const { etDateString, addETDays } = require('../utils/datetime-et');
@@ -498,6 +502,31 @@ postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
     expect((await trx('invoices').where({ id: f.invoiceId }).first('status')).status).toBe('draft');
     expect(await addonsAlert(f)).toBeTruthy();
     expect(PAID_TEXTS).not.toContain(out.body?.completionSmsType);
+  });
+
+  describe('dark (GATE_ANNUAL_PREPAY_ADDON_BILLING off): today\'s behavior', () => {
+    beforeEach(() => { delete process.env.GATE_ANNUAL_PREPAY_ADDON_BILLING; });
+    afterEach(() => { process.env.GATE_ANNUAL_PREPAY_ADDON_BILLING = 'true'; });
+
+    test('a covered visit with a priced add-on and no invoice bills nothing and alerts no one', async () => {
+      const f = await coveredVisit();
+      const out = await complete(f);
+      expect(out).toMatchObject({ status: 200 });
+      expect(await liveInvoices(f)).toHaveLength(0);
+      expect(await addonsAlert(f)).toBeUndefined();
+    });
+
+    test('an office invoice mixing the covered base with the add-on is voided and nothing is re-billed or saved for a retry', async () => {
+      const f = await coveredVisit({ invoiceLines: (x) => [baseLine(x), addonLine(x)] });
+      const out = await complete(f);
+      expect(out).toMatchObject({ status: 200 });
+      expect((await trx('invoices').where({ id: f.invoiceId }).first('status')).status).toBe('void');
+      expect(await liveInvoices(f)).toHaveLength(0);
+      expect(await addonsAlert(f)).toBeUndefined();
+      const record = await trx('service_records').where({ id: out.body.serviceRecordId }).first('structured_notes');
+      const notes = typeof record.structured_notes === 'string' ? JSON.parse(record.structured_notes) : record.structured_notes;
+      expect(notes?.annualPrepayVoidedInvoiceId).toBeUndefined();
+    });
   });
 
   test('a visit that performed no application bills no add-ons', async () => {
