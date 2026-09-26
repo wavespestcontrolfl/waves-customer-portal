@@ -2276,58 +2276,123 @@ const WORD_RE = /[a-záéíóúñü'’]+/gi;
 // Words both languages use, neutral in a short reply: "No problem" is
 // English by its one English word, "No." and "Okay." are neither.
 const SHARED_WORDS_RE = /\b(?:a|no|me|he|as|son|ten|sin|con|ha|okay|ok|okey)\b/gi;
-const SHARED_WORD_RE = new RegExp(`^(?:${SHARED_WORDS_RE.source})$`, 'i');
 const count = (re, text) => { re.lastIndex = 0; return (text.match(re) || []).length; };
-// Any Spanish accented letter anywhere in the sentence is itself Spanish
-// evidence — a conjugated verb or word this file's necessarily-finite
-// lexicon doesn't happen to list ("anoté", "está" already listed, "envié",
-// "dirección" already listed…) still carries one, and English essentially
-// never does. Closes the "every possible Spanish word" tail the lexicon
-// can't enumerate, without reopening "Done."/"Perfect." (neither has one).
-const SPANISH_ACCENT_RE = /[áéíóúñÁÉÍÓÚÑ]/;
-// A mid-sentence capitalized token reads as a proper noun (a name, a brand,
-// a place — "Owen Pratt", "Bradenton", "Waves") and is exempt from proving
-// itself Spanish; the SENTENCE-INITIAL word is not exempt this way; only
-// ordinary capitalization puts it there, and an ordinary English word is
-// capitalized there too ("Done.", "Perfect.") — exempting it would just
-// reopen the gap this rule exists to close.
-function nonNeutralWordCount(sentence) {
-  let n = 0;
+
+// ── only_language('es'): three-valued word classification (Codex round-4) ──
+// Round 3 required POSITIVE Spanish evidence to pass, which is what made
+// "Listo.", "Correcto." and a bare "Owen Pratt." fail — a real Spanish
+// reply or a name the lexicon doesn't happen to enumerate is no rarer than
+// an English one the dictionary doesn't enumerate. The fix is not a bigger
+// Spanish lexicon; it is to stop requiring proof of Spanish at all. A
+// sentence now fails ONLY on positive proof of ENGLISH — a common English
+// word that is never valid Spanish. Everything else (a Spanish word this
+// file's lexicon does list, a Spanish word it doesn't, a name, a brand, a
+// digit, a loanword used as-is in spoken Spanish, or a word this can't
+// place at all) is neutral and never decides the sentence either way.
+//
+// Neutral overrides, checked before the English lexicon: the Waves brand,
+// "ok/okay" (used in both languages), and common tech loanwords Spanish
+// speech borrows as-is.
+const NEUTRAL_WORDS_RE = /^(?:waves|ok|okay|okey|email|e-mail|link|app|online|internet|web|wifi|whatsapp|zelle)$/i;
+// English-evidence: common English words that are NEVER valid Spanish.
+// Deliberately EXCLUDES English/Spanish cognates that would trip a
+// perfectly correct Spanish sentence just for sharing a spelling: a, me,
+// he, no, sin, son, con, fin, mas, real, final, total, local, normal,
+// hotel, plan, control, error, idea, radio, general, animal, material, and
+// the many other -al/-ión/-ar cognates (actual, especial, nacional,
+// personal, social, capital, hospital, digital, popular, similar…) are
+// left out on purpose — only a spelling with no Spanish reading at all
+// belongs here.
+const ENGLISH_EVIDENCE_WORDS = [
+  'the', 'you', 'your', 'yours', 'we', 'our', 'ours', 'us', 'they', 'them', 'their', 'theirs',
+  'she', 'her', 'hers', 'him', 'his', 'it', 'its', 'i', 'my', 'mine', 'this', 'these', 'those',
+  'who', 'whom', 'whose', 'which', 'what', 'when', 'where', 'why', 'how',
+  'is', 'are', 'am', 'was', 'were', 'be', 'been', 'being',
+  'have', 'has', 'had', 'having', 'do', 'does', 'did', 'done', 'doing',
+  'will', 'would', 'shall', 'should', 'can', 'could', 'may', 'might', 'must',
+  'and', 'or', 'but', 'so', 'if', 'because', 'although', 'though', 'while', 'than', 'then',
+  'to', 'of', 'for', 'with', 'without', 'from', 'into', 'onto', 'about', 'over', 'under',
+  'above', 'below', 'between', 'among', 'through', 'during', 'before', 'after', 'until',
+  'since', 'there', 'here', 'up', 'down', 'off', 'away', 'back', 'out', 'again', 'still',
+  'already', 'just', 'only', 'also', 'very', 'really', 'soon', 'shortly', 'now', 'today',
+  'tomorrow', 'tonight', 'yesterday', 'morning', 'afternoon', 'evening', 'night', 'week',
+  'month', 'year', 'day', 'time', 'moment', 'please', 'thank', 'thanks', 'welcome', 'sorry',
+  'right', 'correct', 'wrong', 'best', 'better', 'worst', 'worse', 'more', 'most', 'less',
+  'least', 'yes', 'great', 'good', 'perfect', 'sounds', 'alright', 'absolutely', 'certainly',
+  'understood', 'gotcha', 'anytime', 'hello', 'goodbye', 'bye',
+  'get', 'got', 'give', 'gave', 'given', 'make', 'made', 'go', 'going', 'went', 'gone', 'come',
+  'coming', 'came', 'see', 'saw', 'seen', 'know', 'knew', 'known', 'think', 'thought', 'say',
+  'said', 'tell', 'told', 'ask', 'asked', 'want', 'wanted', 'need', 'needed', 'needs', 'help',
+  'helped', 'call', 'calls', 'called', 'calling', 'send', 'sent', 'check', 'checked', 'look',
+  'looked', 'looking', 'find', 'found', 'let', 'put', 'keep', 'kept', 'hold', 'held', 'holding',
+  'leave', 'left', 'start', 'started', 'stop', 'stopped', 'try', 'tried', 'trying', 'work',
+  'worked', 'working', 'show', 'showed', 'follow', 'followed', 'open', 'opened', 'close',
+  'closed', 'move', 'moved', 'stay', 'stayed', 'arrive', 'arrived', 'finish', 'finished',
+  'complete', 'completed', 'begin', 'began', 'continue', 'continued', 'remember', 'remembered',
+  'forget', 'forgot', 'understand', 'realize', 'realized', 'decide', 'decided', 'choose',
+  'chose', 'chosen', 'agree', 'agreed', 'accept', 'accepted', 'allow', 'allowed', 'write',
+  'wrote', 'written', 'read', 'listen', 'listening', 'hear', 'heard', 'speak', 'spoke',
+  'spoken', 'talk', 'talked', 'wait', 'waited', 'waiting', 'happen', 'happened',
+  'someone', 'anyone', 'everyone', 'everybody', 'nobody', 'somebody', 'something', 'anything',
+  'everything', 'nothing', 'person', 'people', 'thing', 'things', 'way', 'ways', 'reason',
+  'question', 'answer', 'problem', 'issue', 'matter', 'part', 'side', 'end', 'happy', 'glad',
+  'ready', 'busy', 'late', 'early', 'quick', 'easy', 'hard', 'difficult', 'simple', 'short',
+  'long', 'new', 'old', 'young', 'small', 'big', 'large', 'little', 'much', 'many', 'few',
+  'several', 'enough', 'all', 'any', 'some', 'one', 'first', 'last', 'next', 'team', 'member',
+  'office', 'follow', 'text', 'sorry', 'number', 'address', 'know', 'sure',
+  'schedule', 'scheduled', 'service', 'technician', 'visit', 'estimate', 'quote', 'price',
+  'account', 'phone', 'name', 'pleasure', 'appointment', 'appointments', 'confirm', 'confirmed',
+  'confirms', 'book', 'books', 'booked', 'submit', 'submitted', 'note', 'noted', 'save', 'saved',
+  'cancel', 'cancelled', 'canceled', 'update', 'updated', 'pending', 'available', 'unavailable',
+];
+const ENGLISH_EVIDENCE_RE = new RegExp(`^(?:${ENGLISH_EVIDENCE_WORDS.join('|')}|[a-z]{2,}ing)$`, 'i');
+/**
+ * A CAPITALIZED token that is NOT the sentence's first word reads as a
+ * proper noun (a name, a brand — "Le escribí a Grace", "Anoté la de
+ * Owen") and is exempt from the English-evidence check even if it happens
+ * to share a spelling with a listed word; the sentence-initial word gets
+ * no such exemption, since an ordinary English sentence is capitalized
+ * there too ("Done.", "Saved.") — exempting it would reopen the gap this
+ * check exists to close.
+ */
+function hasEnglishEvidence(sentence) {
   let seenFirst = false;
   for (const m of sentence.matchAll(WORD_RE)) {
     const w = m[0];
     const isFirst = !seenFirst;
     seenFirst = true;
-    if (SHARED_WORD_RE.test(w)) continue;
     if (/^[A-ZÁÉÍÓÚÑ]/.test(w) && !isFirst) continue;
-    n++;
+    if (NEUTRAL_WORDS_RE.test(w)) continue;
+    if (ENGLISH_EVIDENCE_RE.test(w)) return true;
   }
-  return n;
+  return false;
 }
 
 /**
  * value: 'en' | 'es' — every sentence Sandy speaks must be in that language.
- * A sentence is in the wrong language when it carries two or more of the
- * wrong language's words and more of them than the right one's — or when it
- * carries none of the right language's words at all and the wrong language's
- * words are half or more of what it says ("Someone is calling soon"), or all
- * of it for a one- or two-word reply ("No problem", "You're welcome"): a
- * name, an address or "Okay, Owen Pratt" is neither, and "okay" is both.
- * For a Spanish target specifically, a sentence also fails outright when it
- * carries ANY real content (nonNeutralWordCount above) and ZERO Spanish-
- * lexicon evidence at all — closing "Done."/"Saved."/"Got it." as a CLASS
- * (words the English dictionary above doesn't happen to list) rather than
- * needing each one added by hand (Codex round-3 structural fix).
+ * For a Spanish target: a sentence fails iff it contains at least one
+ * ENGLISH-evidence token (hasEnglishEvidence above) — no Spanish evidence
+ * is required to pass (Codex round-4 structural fix; see the block comment
+ * above hasEnglishEvidence for why round 3's "prove it's Spanish" design
+ * had to go). For an English target, the original design is unchanged: a
+ * sentence is in the wrong language when it carries two or more of the
+ * wrong language's words and more of them than the right one's, or when it
+ * carries none of the right language's words at all and the wrong
+ * language's words are half or more of what it says ("Someone is calling
+ * soon"), or all of it for a one- or two-word reply ("No problem", "You're
+ * welcome"): a name, an address, or "Okay, Owen Pratt" is neither, and
+ * "okay" is both.
  */
 function only_language(value, record, { spoken }) {
   const other = value === 'es' ? 'en' : 'es';
   const label = other === 'en' ? 'English' : 'Spanish';
   for (const text of spoken) {
     for (const sentence of text.split(SENTENCE_SPLIT_RE)) {
-      const right = count(LANGUAGE_WORDS[value], sentence);
-      if (value === 'es' && right === 0 && !SPANISH_ACCENT_RE.test(sentence) && nonNeutralWordCount(sentence) > 0) {
-        return ['fail', `${label} spoken: "${clip(sentence, 160)}"`];
+      if (value === 'es') {
+        if (hasEnglishEvidence(sentence)) return ['fail', `${label} spoken: "${clip(sentence, 160)}"`];
+        continue;
       }
+      const right = count(LANGUAGE_WORDS[value], sentence);
       const wrong = count(LANGUAGE_WORDS[other], sentence);
       if (!wrong) continue;
       const words = count(WORD_RE, sentence);

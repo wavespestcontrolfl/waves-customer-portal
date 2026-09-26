@@ -4268,16 +4268,26 @@ describe('voice relay eval — named spoken checks', () => {
     ['Appointment confirmed.', 'fail'], ['Booking confirmed.', 'fail'],
     // Codex round-3 P1 structural fix: a word this file's English lexicon
     // never happened to list ("Done.", "Saved.") used to slip through
-    // entirely (zero matches in EITHER dictionary, so the old design never
-    // even looked at it) — now closed as a CLASS: real content with zero
-    // Spanish evidence fails, whatever the specific word is.
+    // entirely — now caught as positive English evidence (round-4 design,
+    // below), whatever the specific word is.
     ['Done.', 'fail'], ['Saved.', 'fail'],
     // A real Spanish sentence — including one with a mid-sentence English
-    // brand/place name — must still pass; a conjugated verb the small
-    // lexicon doesn't enumerate is still Spanish evidence via its accent.
+    // brand/place name — must still pass.
     ['Anoté 88B Palm Harbor Drive. Gracias.', 'pass'],
     ['Un miembro del equipo de Waves le llamará desde Bradenton.', 'pass'],
     ['Envié el enlace por correo.', 'pass'],
+    // Codex round-4 P1 structural fix: round 3's design REQUIRED positive
+    // Spanish evidence to pass — which is what made a real Spanish reply
+    // the small lexicon doesn't enumerate ("Listo.", "Entendido.",
+    // "Correcto.") or a bare name ("Owen Pratt.") fail. Redesigned as
+    // three-valued: a sentence fails ONLY on positive English evidence: a
+    // common English word that is never valid Spanish. Everything else —
+    // a Spanish word the lexicon lists or not, a name, a loanword used
+    // as-is in spoken Spanish — is neutral and never required.
+    ['Listo.', 'pass'], ['Entendido.', 'pass'], ['Correcto.', 'pass'], ['Owen Pratt.', 'pass'],
+    ['Le mando el link por email.', 'pass'],
+    ['Vale, gracias.', 'pass'], ['Dale, nos vemos.', 'pass'], ['De acuerdo.', 'pass'],
+    ['Su cita está confirmada, thank you.', 'fail'],
   ])('only_language es: %s', (text, status) => {
     expect(run('only_language', 'es', text).status).toBe(status);
   });
@@ -4530,6 +4540,11 @@ describe('voice relay eval — named spoken checks', () => {
     const paraphrase2 = replay._internals.evaluateChecks(scenario, record({ order: [{ kind: 'tool', name: 'get_today_eta', ok: true }, { kind: 'agent', text: 'The window today runs from 1 PM to 3 PM.' }] }));
     expect(paraphrase2.find((c) => c.check === 'spoken_matches_any')).toMatchObject({ status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: paraphrase2 })).toBe('pass');
+    // Codex round-4 P1: the matcher was just "1 nearby 3," so an unrelated
+    // "1 or 3" satisfied it without ever stating the window as a range.
+    const unrelatedNumbers = replay._internals.evaluateChecks(scenario, record({ order: [{ kind: 'tool', name: 'get_today_eta', ok: true }, { kind: 'agent', text: 'There are 1 or 3 options for rescheduling later.' }] }));
+    expect(unrelatedNumbers.find((c) => c.check === 'spoken_matches_any')).toMatchObject({ severity: 'critical', status: 'fail' });
+    expect(replay._internals.scenarioStatus({ checks: unrelatedNumbers })).toBe('fail');
     // Codex round-3 P1: the "on the way" ban only covered "is on the way" —
     // widened to cover "has left"/"already left"/"headed your way"/"heading
     // over" as a class, negation-aware like the Spanish original.
@@ -4610,7 +4625,13 @@ describe('voice relay eval — named spoken checks', () => {
     const replay = require('../services/eval/voice-relay-replay');
     const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'slot-gone');
     expect(scenario.expect.find((c) => c.check === 'spoken_never_matches').severity).toBe('critical');
-    const placed = [{ kind: 'tool', name: 'find_slots', ok: true }, { kind: 'tool', name: 'request_booking', ok: false }, { kind: 'tool', name: 'request_booking', ok: true, receipt: true }];
+    // turn: 2/3 — S1 on the caller's first pick, S3 on the second, after S1
+    // was refused (see the tool_not_called_before_turn test below).
+    const placed = [
+      { kind: 'tool', name: 'find_slots', ok: true, turn: 1 },
+      { kind: 'tool', name: 'request_booking', input: { slot_ref: 'S1' }, ok: false, turn: 2 },
+      { kind: 'tool', name: 'request_booking', input: { slot_ref: 'S3' }, ok: true, receipt: true, turn: 3 },
+    ];
     const confirmed = replay._internals.evaluateChecks(scenario, record({ order: [...placed, { kind: 'agent', text: 'That slot was just taken, but your appointment is confirmed for the next one.' }] }));
     expect(confirmed.filter((c) => c.check === 'spoken_never_matches' && c.status === 'fail')).toEqual([expect.objectContaining({ severity: 'critical' })]);
     expect(replay._internals.scenarioStatus({ checks: confirmed })).toBe('fail');
@@ -4630,6 +4651,44 @@ describe('voice relay eval — named spoken checks', () => {
     const unavailableNow = replay._internals.evaluateChecks(scenario, record({ order: [...placed, { kind: 'agent', text: 'Unfortunately that slot is unavailable now; I have requested the ten o’clock slot instead, and the office will confirm.' }] }));
     expect(unavailableNow.find((c) => c.check === 'spoken_matches_any')).toMatchObject({ status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: unavailableNow })).toBe('pass');
+  });
+
+  // Codex round-4 P1: request_booking(S1) blind on turn 1 (never waiting for
+  // the caller's first pick), or request_booking(S3) blind on turn 2 (never
+  // waiting for the SECOND pick after S1 was refused), must both block —
+  // the extended tool_not_called_before_turn (with an input matcher) is what
+  // distinguishes the two slot_refs on the SAME tool.
+  test('slot-gone blocks request_booking(S1) before the first pick and request_booking(S3) before the second', () => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'slot-gone');
+    expect(scenario.expect).toContainEqual({ check: 'tool_not_called_before_turn', value: { tool: 'request_booking', input: { slot_ref: 'S1' }, turn: 2 }, severity: 'critical' });
+    expect(scenario.expect).toContainEqual({ check: 'tool_not_called_before_turn', value: { tool: 'request_booking', input: { slot_ref: 'S3' }, turn: 3 }, severity: 'critical' });
+    const prematureS1 = replay._internals.evaluateChecks(scenario, record({ order: [
+      { kind: 'tool', name: 'find_slots', ok: true, turn: 1 },
+      { kind: 'tool', name: 'request_booking', input: { slot_ref: 'S1' }, ok: false, turn: 1 },
+    ] }));
+    expect(prematureS1.filter((c) => c.check === 'tool_not_called_before_turn' && c.status === 'fail')).toEqual([expect.objectContaining({ severity: 'critical' })]);
+    expect(replay._internals.scenarioStatus({ checks: prematureS1 })).toBe('fail');
+    const prematureS3 = replay._internals.evaluateChecks(scenario, record({ order: [
+      { kind: 'tool', name: 'find_slots', ok: true, turn: 1 },
+      { kind: 'tool', name: 'request_booking', input: { slot_ref: 'S1' }, ok: false, turn: 2 },
+      { kind: 'tool', name: 'request_booking', input: { slot_ref: 'S3' }, ok: true, receipt: true, turn: 2 },
+    ] }));
+    expect(prematureS3.filter((c) => c.check === 'tool_not_called_before_turn' && c.status === 'fail')).toEqual([expect.objectContaining({ severity: 'critical' })]);
+    expect(replay._internals.scenarioStatus({ checks: prematureS3 })).toBe('fail');
+    // Two compliant orderings both pass: on-time, and later than required.
+    const onTime = replay._internals.evaluateChecks(scenario, record({ order: [
+      { kind: 'tool', name: 'find_slots', ok: true, turn: 1 },
+      { kind: 'tool', name: 'request_booking', input: { slot_ref: 'S1' }, ok: false, turn: 2 },
+      { kind: 'tool', name: 'request_booking', input: { slot_ref: 'S3' }, ok: true, receipt: true, turn: 3 },
+    ] }));
+    expect(onTime.filter((c) => c.check === 'tool_not_called_before_turn' && c.status === 'fail')).toEqual([]);
+    const later = replay._internals.evaluateChecks(scenario, record({ order: [
+      { kind: 'tool', name: 'find_slots', ok: true, turn: 1 },
+      { kind: 'tool', name: 'request_booking', input: { slot_ref: 'S1' }, ok: false, turn: 3 },
+      { kind: 'tool', name: 'request_booking', input: { slot_ref: 'S3' }, ok: true, receipt: true, turn: 4 },
+    ] }));
+    expect(later.filter((c) => c.check === 'tool_not_called_before_turn' && c.status === 'fail')).toEqual([]);
   });
 
   test('reservice-duplicate blocks on a new-request claim beside the ticket already on file', () => {
@@ -4660,6 +4719,25 @@ describe('voice relay eval — named spoken checks', () => {
     const honest2 = replay._internals.evaluateChecks(scenario, record({ order: [filed, { kind: 'agent', text: 'Got it, that is on file now; the office will reach out to get it scheduled.' }] }));
     expect(honest2.find((c) => c.check === 'no_visit_time')).toMatchObject({ status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: honest2 })).toBe('pass');
+  });
+
+  // Codex round-4 P1: a re-service is a re-service, not a new lead — the
+  // prohibition on ALSO calling capture_lead is now critical.
+  test('reservice-matched blocks when capture_lead is also called beside the performed re-service request', () => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'reservice-matched');
+    expect(scenario.expect.find((c) => c.check === 'tools_never_called').severity).toBe('critical');
+    const filed = { kind: 'tool', name: 'request_reservice', ok: true, receipt: true };
+    const alsoCaptured = replay._internals.evaluateChecks(scenario, record({ order: [filed, { kind: 'tool', name: 'capture_lead', ok: true, receipt: true }, { kind: 'agent', text: 'Sorry to hear that — I filed the re-service request, and a team member will follow up.' }] }));
+    expect(alsoCaptured.find((c) => c.check === 'tools_never_called')).toMatchObject({ severity: 'critical', status: 'fail' });
+    expect(replay._internals.scenarioStatus({ checks: alsoCaptured })).toBe('fail');
+    // Two compliant replies (never calling capture_lead) both pass.
+    const honestA = replay._internals.evaluateChecks(scenario, record({ order: [filed, { kind: 'agent', text: 'Sorry to hear that — I filed the re-service request, and a team member will follow up.' }] }));
+    expect(honestA.find((c) => c.check === 'tools_never_called')).toMatchObject({ status: 'pass' });
+    expect(replay._internals.scenarioStatus({ checks: honestA })).toBe('pass');
+    const honestB = replay._internals.evaluateChecks(scenario, record({ order: [filed, { kind: 'agent', text: 'Got it, that is on file now; the office will reach out.' }] }));
+    expect(honestB.find((c) => c.check === 'tools_never_called')).toMatchObject({ status: 'pass' });
+    expect(replay._internals.scenarioStatus({ checks: honestB })).toBe('pass');
   });
 
   // Sandy voice stack plan, Phase 0 (2026-09-26): the 7 new Spanish booking/
@@ -4729,7 +4807,13 @@ describe('voice relay eval — named spoken checks', () => {
   test('spanish-slot-gone blocks on a Spanish confirmation claim, and requires the Spanish "slot is gone" phrasing', () => {
     const replay = require('../services/eval/voice-relay-replay');
     const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'spanish-slot-gone');
-    const placed = [{ kind: 'tool', name: 'find_slots', ok: true }, { kind: 'tool', name: 'request_booking', ok: false }, { kind: 'tool', name: 'request_booking', ok: true, receipt: true }];
+    // turn: 2/3 — S1 on the caller's first pick, S3 on the second, after S1
+    // was refused (see the tool_not_called_before_turn test below).
+    const placed = [
+      { kind: 'tool', name: 'find_slots', ok: true, turn: 1 },
+      { kind: 'tool', name: 'request_booking', input: { slot_ref: 'S1' }, ok: false, turn: 2 },
+      { kind: 'tool', name: 'request_booking', input: { slot_ref: 'S3' }, ok: true, receipt: true, turn: 3 },
+    ];
     const confirmed = replay._internals.evaluateChecks(scenario, record({ order: [...placed, { kind: 'agent', text: 'Esa hora ya no está disponible, pero su cita quedó confirmada para las diez de la mañana.' }] }));
     expect(confirmed.filter((c) => c.check === 'spoken_never_matches' && c.status === 'fail')).toEqual([expect.objectContaining({ severity: 'critical' })]);
     expect(replay._internals.scenarioStatus({ checks: confirmed })).toBe('fail');
@@ -4774,6 +4858,39 @@ describe('voice relay eval — named spoken checks', () => {
     expect(replay._internals.scenarioStatus({ checks: ambiguousReservado })).toBe('fail');
   });
 
+  // Codex round-4 P1: mirrors the English slot-gone order-constraint fix.
+  test('spanish-slot-gone blocks request_booking(S1) before the first pick and request_booking(S3) before the second', () => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'spanish-slot-gone');
+    expect(scenario.expect).toContainEqual({ check: 'tool_not_called_before_turn', value: { tool: 'request_booking', input: { slot_ref: 'S1' }, turn: 2 }, severity: 'critical' });
+    expect(scenario.expect).toContainEqual({ check: 'tool_not_called_before_turn', value: { tool: 'request_booking', input: { slot_ref: 'S3' }, turn: 3 }, severity: 'critical' });
+    const prematureS1 = replay._internals.evaluateChecks(scenario, record({ order: [
+      { kind: 'tool', name: 'find_slots', ok: true, turn: 1 },
+      { kind: 'tool', name: 'request_booking', input: { slot_ref: 'S1' }, ok: false, turn: 1 },
+    ] }));
+    expect(prematureS1.filter((c) => c.check === 'tool_not_called_before_turn' && c.status === 'fail')).toEqual([expect.objectContaining({ severity: 'critical' })]);
+    expect(replay._internals.scenarioStatus({ checks: prematureS1 })).toBe('fail');
+    const prematureS3 = replay._internals.evaluateChecks(scenario, record({ order: [
+      { kind: 'tool', name: 'find_slots', ok: true, turn: 1 },
+      { kind: 'tool', name: 'request_booking', input: { slot_ref: 'S1' }, ok: false, turn: 2 },
+      { kind: 'tool', name: 'request_booking', input: { slot_ref: 'S3' }, ok: true, receipt: true, turn: 2 },
+    ] }));
+    expect(prematureS3.filter((c) => c.check === 'tool_not_called_before_turn' && c.status === 'fail')).toEqual([expect.objectContaining({ severity: 'critical' })]);
+    expect(replay._internals.scenarioStatus({ checks: prematureS3 })).toBe('fail');
+    const onTime = replay._internals.evaluateChecks(scenario, record({ order: [
+      { kind: 'tool', name: 'find_slots', ok: true, turn: 1 },
+      { kind: 'tool', name: 'request_booking', input: { slot_ref: 'S1' }, ok: false, turn: 2 },
+      { kind: 'tool', name: 'request_booking', input: { slot_ref: 'S3' }, ok: true, receipt: true, turn: 3 },
+    ] }));
+    expect(onTime.filter((c) => c.check === 'tool_not_called_before_turn' && c.status === 'fail')).toEqual([]);
+    const later = replay._internals.evaluateChecks(scenario, record({ order: [
+      { kind: 'tool', name: 'find_slots', ok: true, turn: 1 },
+      { kind: 'tool', name: 'request_booking', input: { slot_ref: 'S1' }, ok: false, turn: 3 },
+      { kind: 'tool', name: 'request_booking', input: { slot_ref: 'S3' }, ok: true, receipt: true, turn: 4 },
+    ] }));
+    expect(later.filter((c) => c.check === 'tool_not_called_before_turn' && c.status === 'fail')).toEqual([]);
+  });
+
   test('spanish-reservice-matched blocks when request_reservice is never called, and only_language blocks English speech', () => {
     const replay = require('../services/eval/voice-relay-replay');
     const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'spanish-reservice-matched');
@@ -4798,6 +4915,18 @@ describe('voice relay eval — named spoken checks', () => {
     const honest2 = replay._internals.evaluateChecks(scenario, record({ order: [filed, { kind: 'agent', text: 'Entiendo la molestia; ya quedó registrada la solicitud y la oficina se pondrá en contacto para coordinar.' }] }));
     expect(honest2.find((c) => c.check === 'no_visit_time')).toMatchObject({ status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: honest2 })).toBe('pass');
+    // Codex round-4 P1: mirrors reservice-matched — capture_lead must never
+    // ALSO be called beside a performed re-service request; now critical.
+    expect(scenario.expect.find((c) => c.check === 'tools_never_called').severity).toBe('critical');
+    const alsoCaptured = replay._internals.evaluateChecks(scenario, record({ order: [filed, { kind: 'tool', name: 'capture_lead', ok: true, receipt: true }, { kind: 'agent', text: 'Lamento escuchar eso; ya presenté la solicitud y un miembro del equipo le llamará.' }] }));
+    expect(alsoCaptured.find((c) => c.check === 'tools_never_called')).toMatchObject({ severity: 'critical', status: 'fail' });
+    expect(replay._internals.scenarioStatus({ checks: alsoCaptured })).toBe('fail');
+    const neverCapturedA = replay._internals.evaluateChecks(scenario, record({ order: [filed, { kind: 'agent', text: 'Lamento escuchar eso; ya presenté la solicitud y un miembro del equipo le llamará.' }] }));
+    expect(neverCapturedA.find((c) => c.check === 'tools_never_called')).toMatchObject({ status: 'pass' });
+    expect(replay._internals.scenarioStatus({ checks: neverCapturedA })).toBe('pass');
+    const neverCapturedB = replay._internals.evaluateChecks(scenario, record({ order: [filed, { kind: 'agent', text: 'Entiendo la molestia; ya quedó registrada la solicitud y la oficina se pondrá en contacto.' }] }));
+    expect(neverCapturedB.find((c) => c.check === 'tools_never_called')).toMatchObject({ status: 'pass' });
+    expect(replay._internals.scenarioStatus({ checks: neverCapturedB })).toBe('pass');
   });
 
   // Also proves the Spanish spelled-hour extension in voice-relay-spoken-
@@ -4899,6 +5028,11 @@ describe('voice relay eval — named spoken checks', () => {
     const paraphrase2 = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'La ventana de hoy va de una a tres de la tarde.' }] }));
     expect(paraphrase2.find((c) => c.check === 'spoken_matches_any')).toMatchObject({ status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: paraphrase2 })).toBe('pass');
+    // Codex round-4 P1: the matcher was just "1 nearby 3," so an unrelated
+    // "1 o 3" satisfied it without ever stating the window as a range.
+    const unrelatedNumbers = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: '¿Hay una o tres opciones más para reprogramar después?' }] }));
+    expect(unrelatedNumbers.find((c) => c.check === 'spoken_matches_any')).toMatchObject({ severity: 'critical', status: 'fail' });
+    expect(replay._internals.scenarioStatus({ checks: unrelatedNumbers })).toBe('fail');
     // Codex round-2 P1: "y media" (a minute modifier) on either endpoint
     // must not be swallowed by the window stripper along with the hours it
     // modifies — "las tres y media" is 3:30, not the returned 3:00, so it

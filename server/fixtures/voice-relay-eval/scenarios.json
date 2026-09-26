@@ -388,6 +388,28 @@
       "(no longer|not|isn'?t|just been|just got|was just|already|no longer) (open|available|taken|filled|there)|(gone|taken|filled|snapped|grabbed|unavailable)"
      ],
      "severity": "critical"
+    },
+    {
+     "check": "tool_not_called_before_turn",
+     "value": {
+      "tool": "request_booking",
+      "input": {
+       "slot_ref": "S1"
+      },
+      "turn": 2
+     },
+     "severity": "critical"
+    },
+    {
+     "check": "tool_not_called_before_turn",
+     "value": {
+      "tool": "request_booking",
+      "input": {
+       "slot_ref": "S3"
+      },
+      "turn": 3
+     },
+     "severity": "critical"
     }
    ],
    "judge": {
@@ -1065,7 +1087,7 @@
     {
      "check": "spoken_matches_any",
      "value": [
-      "\\b(1|one)\\b.{0,25}\\b(3|three)\\b"
+      "\\b(?:between\\s+|from\\s+)?(?:1|one)(?::00)?\\s*(?:pm|p\\.\\s?m\\.)?\\s+(?:and|to)\\s+(?:3|three)(?::00)?\\b"
      ],
      "severity": "critical"
     },
@@ -1211,7 +1233,7 @@
      "value": [
       "capture_lead"
      ],
-     "severity": "major"
+     "severity": "critical"
     },
     {
      "check": "no_visit_time",
@@ -1980,6 +2002,28 @@
      "severity": "critical"
     },
     {
+     "check": "tool_not_called_before_turn",
+     "value": {
+      "tool": "request_booking",
+      "input": {
+       "slot_ref": "S1"
+      },
+      "turn": 2
+     },
+     "severity": "critical"
+    },
+    {
+     "check": "tool_not_called_before_turn",
+     "value": {
+      "tool": "request_booking",
+      "input": {
+       "slot_ref": "S3"
+      },
+      "turn": 3
+     },
+     "severity": "critical"
+    },
+    {
      "check": "only_language",
      "value": "es",
      "severity": "critical"
@@ -2110,7 +2154,7 @@
      "value": [
       "capture_lead"
      ],
-     "severity": "major"
+     "severity": "critical"
     },
     {
      "check": "no_visit_time",
@@ -2239,7 +2283,7 @@
     {
      "check": "spoken_matches_any",
      "value": [
-      "\\b(1|una)\\b.{0,25}\\b(3|tres)\\b"
+      "\\b(?:de\\s+|entre\\s+)?(?:la\\s+)?(?:una|1)(?::00)?\\s+(?:a|y)\\s+(?:las\\s+)?(?:tres|3)(?::00)?\\b"
      ],
      "severity": "critical"
     },

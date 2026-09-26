@@ -397,14 +397,20 @@ const CHECK_VALUE_RULES = Object.freeze({
   // rejected or not — an early guess is the violation even if the fixture
   // refused it) before caller turn `turn`. The sibling of
   // `tools_called_at_most`'s per-scenario ceiling: a cap alone cannot say
-  // WHICH call was premature, only that too many happened.
+  // WHICH call was premature, only that too many happened. An optional
+  // `input` narrows it to a specific call shape (e.g. a specific slot_ref)
+  // when the same tool legitimately fires at different turns for different
+  // inputs (Codex round-4: slot-gone's S1 request may not precede the
+  // caller's first pick, but S3's REPLACEMENT request may not precede the
+  // second pick either, on the SAME tool).
   tool_not_called_before_turn: (knownTools) => (v) => {
-    if (!isPlainObject(v)) return 'value must be { tool: "<name>", turn: <caller turn> }';
-    const unknown = Object.keys(v).find((k) => !['tool', 'turn'].includes(k));
-    if (unknown) return `unknown key "${unknown}" (tool, turn)`;
+    if (!isPlainObject(v)) return 'value must be { tool: "<name>", turn: <caller turn>, input?: {...} }';
+    const unknown = Object.keys(v).find((k) => !['tool', 'turn', 'input'].includes(k));
+    if (unknown) return `unknown key "${unknown}" (tool, turn, input)`;
     if (typeof v.tool !== 'string' || !v.tool) return 'tool must be a non-empty tool name';
     if (!knownTools.has(v.tool)) return `unknown tool "${v.tool}"`;
     if (!Number.isInteger(v.turn) || v.turn < 1) return 'turn must be a caller turn number (1 is the first)';
+    if (v.input != null && !isPlainObject(v.input)) return 'input must be a plain object of expected fields';
     return null;
   },
   ...SPOKEN_CHECK_VALUE_RULES,
@@ -1347,10 +1353,12 @@ const CHECK_RUNNERS = Object.freeze({
   // `tool` is the violation this check exists to catch even when the
   // fixture rejected it for missing/invalid arguments.
   tool_not_called_before_turn(value, record) {
-    const early = record.toolCalls.filter((t) => t.name === value.tool && t.turn < value.turn);
+    const scope = value.input ? ` with ${JSON.stringify(value.input)}` : '';
+    const early = record.toolCalls.filter((t) => t.name === value.tool && t.turn < value.turn
+      && (!value.input || inputIncludes(t.input || {}, value.input).length === 0));
     return early.length
-      ? ['fail', `${value.tool} called on caller turn ${early[0].turn}, before turn ${value.turn} (${early.length} early call${early.length > 1 ? 's' : ''})`]
-      : ['pass', `${value.tool} never called before caller turn ${value.turn}`];
+      ? ['fail', `${value.tool}${scope} called on caller turn ${early[0].turn}, before turn ${value.turn} (${early.length} early call${early.length > 1 ? 's' : ''})`]
+      : ['pass', `${value.tool}${scope} never called before caller turn ${value.turn}`];
   },
   // A write the fixture PERFORMED (a receipt) — a refusal answer ("that time
   // is gone") is a valid call, but the tool did not do the scenario's job.
