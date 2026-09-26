@@ -2326,12 +2326,11 @@ router.delete('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
   try {
     const invoice = await db('invoices')
       .where({ id: req.params.id })
-      .first('id', 'annual_prepay_term_id');
+      .first('id', 'customer_id', 'annual_prepay_term_id');
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
 
-    const termId = invoice.annual_prepay_term_id;
-    if (termId) {
-      const term = await db('annual_prepay_terms').where({ id: termId }).first('id', 'renewal_decision', 'status');
+    if (invoice.annual_prepay_term_id) {
+      const term = await db('annual_prepay_terms').where({ id: invoice.annual_prepay_term_id }).first('renewal_decision');
       if (term?.renewal_decision) {
         return res.status(409).json({
           error: `This term already has a renewal decision (${term.renewal_decision}) and cannot be removed this way — use the renewal workflow instead.`,
@@ -2343,6 +2342,18 @@ router.delete('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
     // inside a transaction, so it runs after commit (below).
     let coveredInvoiceIds = [];
     await db.transaction(async (trx) => {
+      // Customer before invoice — the order reverse-prepaid and apply-credit
+      // take, and the cancel below locks the customer too — then re-read the
+      // invoice under its own lock: the pre-read above can go stale.
+      await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');
+      const locked = await trx('invoices').where({ id: invoice.id }).forUpdate().first('customer_id', 'annual_prepay_term_id');
+      if (!locked || locked.customer_id !== invoice.customer_id) {
+        const err = new Error('This invoice changed while the annual prepay flag was being removed — retry.');
+        err.statusCode = 409;
+        err.isOperational = true;
+        throw err;
+      }
+      const termId = locked.annual_prepay_term_id;
       await trx('invoices')
         .where({ id: invoice.id })
         .update({ annual_prepay_term_id: null, updated_at: new Date() });
