@@ -7,6 +7,7 @@ jest.mock('../services/annual-prepay-renewals', () => ({ getCardExpiryExemptions
 jest.mock('../services/messaging/deferred-replay-registry', () => ({ invoiceStillCollectible: jest.fn() }));
 jest.mock('../services/invoice-helpers', () => ({ selfPayAtDispatch: jest.fn() }));
 jest.mock('../services/collections/rail-guard', () => ({ collectionsChannelPermitted: jest.fn() }));
+jest.mock('../services/previsit-balance-reminder', () => ({ currentDuesAllowanceCents: jest.fn(async () => 0) }));
 
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { getChargeableAutopayMethod } = require('../services/autopay-eligibility');
@@ -198,6 +199,55 @@ describe('balance-reminder visit identity', () => {
       scheduled_date: new Date('2026-09-28T00:00:00Z'), service_type: 'General Pest Control' };
     await expect(billingEmailReplayEligible(meta, databaseWith({ scheduled_services: [visit] })))
       .resolves.toEqual({ eligible: true });
+  });
+});
+
+describe('previsit balance reminder replay (aggregate, visit-pinned)', () => {
+  const meta = { customer_id: customerId, source_entry_point: 'previsit_balance_reminder', appointment_id: 'visit-1',
+    appointment_date: '2026-09-28', appointment_service_type: 'General Pest Control', appointment_rendered_on: '2026-09-26',
+    notificationEventKey: 'previsit-balance:visit-1', collections_ledger_id: 'own-email' };
+  const visit = { id: 'visit-1', customer_id: customerId, status: 'confirmed',
+    scheduled_date: new Date('2026-09-28T00:00:00Z'), service_type: 'General Pest Control' };
+
+  test('shares the balance-reminder visit pin: missing pin, stale copy and a moved visit are refused', async () => {
+    await expect(billingEmailReplayEligible({ ...meta, appointment_id: null }, databaseWith()))
+      .resolves.toMatchObject({ eligible: false, reason: 'balance-reminder-visit-pin-missing' });
+    await expect(billingEmailReplayEligible({ ...meta, appointment_rendered_on: '2026-09-25' }, databaseWith()))
+      .resolves.toMatchObject({ eligible: false, reason: 'balance-reminder-copy-stale' });
+    await expect(billingEmailReplayEligible(meta, databaseWith({ scheduled_services: [{ ...visit, status: 'cancelled' }] })))
+      .resolves.toMatchObject({ eligible: false, reason: 'balance-reminder-visit-changed' });
+    await expect(billingEmailReplayEligible(meta, databaseWith({ scheduled_services: [visit] })))
+      .resolves.toEqual({ eligible: true });
+  });
+
+  test('gate-on rechecks the collections policy as a balance reminder with no single invoice', async () => {
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    const database = databaseWith({ scheduled_services: [visit], collections_contact_ledger: [
+      { id: 'own-email', customer_id: customerId, source: 'previsit_balance_reminder',
+        metadata: { notificationEventKey: meta.notificationEventKey } },
+    ] });
+    await expect(billingEmailReplayEligible(meta, database)).resolves.toEqual({ eligible: true });
+    expect(collectionsChannelPermitted).toHaveBeenCalledWith(expect.objectContaining({
+      customerId, invoiceId: null, channel: 'email', purpose: 'balance_reminder', excludeLedgerIds: ['own-email'],
+    }));
+  });
+
+  test('a dues-only previsit replay counts the dues still unpaid now as off-ledger debt', async () => {
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    const { currentDuesAllowanceCents } = require('../services/previsit-balance-reminder');
+    currentDuesAllowanceCents.mockResolvedValueOnce(4900);
+    const database = databaseWith({ scheduled_services: [visit], collections_contact_ledger: [] });
+    await billingEmailReplayEligible(meta, database);
+    expect(currentDuesAllowanceCents).toHaveBeenCalledWith(customerId, database);
+    expect(collectionsChannelPermitted).toHaveBeenCalledWith(expect.objectContaining({ offLedgerBalanceCents: 4900 }));
+  });
+
+  test('an unreadable dues state fails closed and stays retryable', async () => {
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    const { currentDuesAllowanceCents } = require('../services/previsit-balance-reminder');
+    currentDuesAllowanceCents.mockRejectedValueOnce(new Error('customers read failed'));
+    await expect(billingEmailReplayEligible(meta, databaseWith({ scheduled_services: [visit] })))
+      .resolves.toEqual({ eligible: false, reason: 'billing-email-eligibility-unavailable', retryable: true });
   });
 });
 

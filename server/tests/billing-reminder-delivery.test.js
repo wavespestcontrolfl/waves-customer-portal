@@ -95,7 +95,17 @@ describe('billing reminder per-channel delivery progress', () => {
 
   test('without an allowance the recheck counts no off-ledger balance', async () => {
     await deliver(['sms'], jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted' })));
-    expect(collectionsChannelPermitted.mock.calls[0][0]).toMatchObject({ offLedgerBalanceCents: 0 });
+    // Left undefined, so rail-guard's own default (0) applies.
+    expect(collectionsChannelPermitted.mock.calls[0][0].offLedgerBalanceCents).toBeUndefined();
+  });
+
+  test('an aggregate reminder records the invoices it quotes on each reservation', async () => {
+    await sendReminderChannels({
+      customerId: 'customer-1', invoiceId: null, invoiceIds: ['inv-a', 'inv-b'], source: 'previsit_balance_reminder',
+      purpose: 'balance_reminder', eventKey: 'previsit-balance:ss-1', channels: ['sms'],
+      send: jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted' })),
+    });
+    expect(ContactLedger.recordContact).toHaveBeenCalledWith(expect.objectContaining({ invoiceIds: ['inv-a', 'inv-b'] }));
   });
 
   test('each leg is sent with its own reservation', async () => {

@@ -155,7 +155,7 @@ test("explicit selection ['email'] ⇒ only the email leg is attempted, keyed to
   armOneVisit({ notificationPrefs: { billing_channels: ['email'] } });
   sendReminderChannels.mockImplementation(async ({ send }) => {
     const outcome = await send('email', { id: 'led-77' });
-    return { complete: true, deliveredNow: outcome.ok ? ['email'] : [], results: { email: outcome } };
+    return { complete: true, deliveredNow: outcome.sent ? ['email'] : [], results: { email: outcome } };
   });
   const result = await runSweep({ now: new Date('2026-08-14T15:00:00Z') });
   expect(sendReminderChannels).toHaveBeenCalledWith(expect.objectContaining({
@@ -166,11 +166,22 @@ test("explicit selection ['email'] ⇒ only the email leg is attempted, keyed to
     eventKey: 'previsit-balance:ss-1',
     channels: ['email'],
   }));
-  expect(sendCustomerMessage).not.toHaveBeenCalled();
-  expect(AccountMembershipEmail.sendPrevisitBalanceReminder).toHaveBeenCalledTimes(1);
-  expect(AccountMembershipEmail.sendPrevisitBalanceReminder).toHaveBeenCalledWith(
-    expect.objectContaining({ customerId: 'cust-1', idempotencyKey: 'billing.previsit_balance:ss-1' }),
-  );
+  // The Email leg goes through the billing email adapter (sendCustomerMessage
+  // channel 'email'), bound to its reservation, never the unbound
+  // billing.previsit_balance sidecar.
+  expect(AccountMembershipEmail.sendPrevisitBalanceReminder).not.toHaveBeenCalled();
+  expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+  expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+    channel: 'email',
+    to: undefined,
+    entryPoint: 'previsit_balance_reminder',
+    body: 'previsit balance sms body',
+    metadata: expect.objectContaining({
+      billingDeliveryLeg: 'email',
+      notificationEventKey: 'previsit-balance:ss-1',
+      collections_ledger_id: 'led-77',
+    }),
+  }));
   expect(result).toMatchObject({ sent: 1, skipped: 0 });
 });
 
@@ -257,13 +268,13 @@ test('a failed sms leg does not prevent an independently delivered email leg fro
     const emailOutcome = await send('email', { id: 'led-email' });
     return {
       complete: true,
-      deliveredNow: emailOutcome.ok ? ['email'] : [],
+      deliveredNow: emailOutcome.sent ? ['email'] : [],
       results: { sms: smsOutcome, email: emailOutcome },
     };
   });
   const result = await runSweep({ now: new Date('2026-08-14T15:00:00Z') });
-  expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
-  expect(AccountMembershipEmail.sendPrevisitBalanceReminder).toHaveBeenCalledTimes(1);
+  expect(sendCustomerMessage).toHaveBeenCalledTimes(2);
+  expect(sendCustomerMessage.mock.calls.map(([args]) => args.channel)).toEqual(['sms', 'email']);
   expect(result).toMatchObject({ sent: 1, skipped: 0 });
 });
 
@@ -379,4 +390,40 @@ test('an unreadable episode history skips before any claim', async () => {
   expect(sendReminderChannels).not.toHaveBeenCalled();
   expect(claimChain.update).not.toHaveBeenCalled();
   expect(result).toMatchObject({ sent: 0, skipped: 1 });
+});
+
+test('the ledger reservations carry the quoted overdue invoice ids', async () => {
+  armOneVisit({ notificationPrefs: { billing_channels: ['sms'] } });
+  sendReminderChannels.mockResolvedValueOnce({ complete: true, deliveredNow: ['sms'], results: {} });
+  await runSweep({ now: new Date('2026-08-14T15:00:00Z') });
+  expect(sendReminderChannels.mock.calls[0][0]).toMatchObject({ invoiceId: null, invoiceIds: ['inv-9'] });
+});
+
+describe('currentDuesAllowanceCents (retry-time dues allowance)', () => {
+  const { currentDuesAllowanceCents } = require('../services/previsit-balance-reminder');
+  const billingLane = require('../services/billing-lane');
+
+  function customersDb(row) {
+    return jest.fn((table) => {
+      if (table !== 'customers') throw new Error(`Unexpected table ${table}`);
+      const q = { where: jest.fn(() => q), first: jest.fn(async () => row) };
+      return q;
+    });
+  }
+
+  test('late unpaid monthly dues count in cents', async () => {
+    billingLane.resolveBillingLane.mockReturnValueOnce({ mode: 'monthly_membership' });
+    billingLane.monthlyDuesCollected.mockResolvedValueOnce(false);
+    const database = customersDb({ billing_mode: 'monthly_membership', monthly_rate: '49.00', billing_day: 1 });
+    await expect(currentDuesAllowanceCents('cust-1', database, new Date('2026-08-20T15:00:00Z'))).resolves.toBe(4900);
+  });
+
+  test('collected dues, per-visit billing, or a missing customer count nothing', async () => {
+    billingLane.resolveBillingLane.mockReturnValueOnce({ mode: 'monthly_membership' });
+    billingLane.monthlyDuesCollected.mockResolvedValueOnce(true);
+    const now = new Date('2026-08-20T15:00:00Z');
+    await expect(currentDuesAllowanceCents('cust-1', customersDb({ monthly_rate: '49.00', billing_day: 1 }), now)).resolves.toBe(0);
+    await expect(currentDuesAllowanceCents('cust-1', customersDb({ monthly_rate: '49.00', billing_day: 1 }), now)).resolves.toBe(0);
+    await expect(currentDuesAllowanceCents('cust-1', customersDb(undefined), now)).resolves.toBe(0);
+  });
 });
