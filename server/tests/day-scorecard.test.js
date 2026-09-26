@@ -1,4 +1,3 @@
-jest.mock('../services/scheduling/day-stops', () => ({ dayStopsQuery: jest.fn(), guardedCoordSelects: () => ['lat', 'lng'] }));
 jest.mock('../services/scheduling/day-quality', () => {
   const actual = jest.requireActual('../services/scheduling/day-quality');
   return { ...actual, getScheduleQualityMeasurements: jest.fn() };
@@ -6,7 +5,6 @@ jest.mock('../services/scheduling/day-quality', () => {
 jest.mock('../services/scheduling/route-performance', () => ({ getRoutePerformance: jest.fn() }));
 jest.mock('../services/technician-eligibility', () => ({ applyAssignable: jest.fn() }));
 
-const { dayStopsQuery } = require('../services/scheduling/day-stops');
 const { getScheduleQualityMeasurements } = require('../services/scheduling/day-quality');
 const { getRoutePerformance } = require('../services/scheduling/route-performance');
 const { applyAssignable } = require('../services/technician-eligibility');
@@ -109,22 +107,28 @@ describe('getDayScorecard', () => {
     expect(getScheduleQualityMeasurements).not.toHaveBeenCalled();
   });
 
-  test('a future/today row is planned only, with a physical-stop count the quality measurement does not compute', async () => {
+  test('a future/today row reads day-quality\'s own physicalStops/coVisitOnSiteMinutes, never a second raw-stops query', async () => {
     const date = '2026-09-08';
     getScheduleQualityMeasurements.mockResolvedValue({
       driveModel: 'calibrated',
       days: [{ date, closed: false, byTech: [{
-        technicianId: 'tech1', technician: 'Tech One', scheduledVisits: 2, serviceMinutes: 90,
+        // serviceMinutes (120) is the flat, double-counting sum; the co-visit-
+        // aware field (90) is what plannedFutureRow must actually use.
+        technicianId: 'tech1', technician: 'Tech One', scheduledVisits: 2, serviceMinutes: 120,
+        coVisitOnSiteMinutes: 90, physicalStops: 1,
         modeledDriveMinutes: 30, modeledWaitingMinutes: 5, modeledReturnMinuteBeforeBreaks: 600,
         modeledLateVisits: [], uncertaintyReasons: [],
       }] }],
     });
-    getRoutePerformance.mockResolvedValue({ plans: [] });
-    const a = stop('a');
-    const b = stop('bb', { customer_id: a.customer_id }); // co-visit — one physical stop
-    dayStopsQuery.mockImplementation(() => ({ whereRaw: () => Promise.resolve([a, b]) }));
 
-    const result = await getDayScorecard({ date_from: date, date_to: date }, conn(), new Date(`${date}T12:00:00Z`));
+    const dbConn = conn();
+    const result = await getDayScorecard({ date_from: date, date_to: date }, dbConn, new Date(`${date}T12:00:00Z`));
+    // includeStopExtras must be requested, and a pure-future range never
+    // needs route-performance at all (Codex P1 — nothing to consume its
+    // newest-500-planner-runs cap for a date range with no past side).
+    expect(getScheduleQualityMeasurements).toHaveBeenCalledWith(
+      expect.objectContaining({ includeStopExtras: true }), dbConn, expect.any(Date));
+    expect(getRoutePerformance).not.toHaveBeenCalled();
     expect(result.driveModel).toBe('calibrated');
     expect(result.days).toHaveLength(1);
     const row = result.days[0].byTech[0];
@@ -166,7 +170,6 @@ describe('getDayScorecard', () => {
     // a (possibly partial) actual on-site sum — planned-only fields.
     expect(row.actual).not.toHaveProperty('driveShare');
     expect(row.actual).not.toHaveProperty('stopsPerHour');
-    expect(dayStopsQuery).not.toHaveBeenCalled(); // past rows never re-query raw stops
   });
 
   test('a partial on-site sum never inflates coverage or a no-idle claim', async () => {
@@ -307,6 +310,123 @@ describe('getDayScorecard', () => {
     });
     const result = await getDayScorecard({ date_from: date, date_to: date }, conn([]), new Date('2026-09-08T12:00:00Z'));
     expect(result.days[0].byTech[0].actual.onSiteCoverage.unbaselined).toBe(0);
+  });
+
+  // Codex P1: getRoutePerformance keeps only the newest 500 planner runs;
+  // future-dated runs (the nightly D+1..D+6 reorder) can evict a genuinely
+  // past baseline and a truncated caller has no way to tell "never had a
+  // plan" from "had one, evicted" apart — the response must say so.
+  test('a truncated planner-runs read marks a null-planned row distinctly from a definite no-saved-plan', async () => {
+    const date = '2026-09-01';
+    getScheduleQualityMeasurements.mockResolvedValue({
+      driveModel: 'legacy',
+      days: [{ date, closed: false, byTech: [{ technicianId: 'tech1', technician: 'Tech One' }] }],
+    });
+    getRoutePerformance.mockResolvedValue({ plans: [], missingBaselineRoutes: [], truncatedPlanningRuns: true });
+    const result = await getDayScorecard({ date_from: date, date_to: date }, conn([]), new Date('2026-09-08T12:00:00Z'));
+    expect(result.truncatedPlanningRuns).toBe(true);
+    const row = result.days[0].byTech.find(r => r.technicianId === 'tech1');
+    expect(row.planned).toBeNull();
+    expect(row.plannedUnavailableReason).toBe('may_be_truncated');
+  });
+
+  test('an untruncated planner-runs read marks a null-planned row as a definite no-saved-plan', async () => {
+    const date = '2026-09-01';
+    getScheduleQualityMeasurements.mockResolvedValue({
+      driveModel: 'legacy',
+      days: [{ date, closed: false, byTech: [{ technicianId: 'tech1', technician: 'Tech One' }] }],
+    });
+    getRoutePerformance.mockResolvedValue({ plans: [], missingBaselineRoutes: [], truncatedPlanningRuns: false });
+    const result = await getDayScorecard({ date_from: date, date_to: date }, conn([]), new Date('2026-09-08T12:00:00Z'));
+    expect(result.truncatedPlanningRuns).toBe(false);
+    const row = result.days[0].byTech.find(r => r.technicianId === 'tech1');
+    expect(row.plannedUnavailableReason).toBe('no_saved_plan');
+  });
+
+  test('a plan already carries a baseline, so plannedUnavailableReason is null regardless of truncation', async () => {
+    const date = '2026-09-01';
+    getScheduleQualityMeasurements.mockResolvedValue({
+      driveModel: 'legacy',
+      days: [{ date, closed: false, byTech: [{ technicianId: 'tech1', technician: 'Tech One' }] }],
+    });
+    getRoutePerformance.mockResolvedValue({
+      plans: [{ date, technicianId: 'tech1', plannedVisits: 1, plannedServiceMinutes: 60, plannedDriveMinutes: 10,
+        plannedWaitingMinutes: 0, plannedReturnMinuteBeforeBreaks: 540, driveModel: 'legacy',
+        stops: [{ durationEvidence: 'recorded_lifecycle_interval', recordedServiceMinutes: 55, recordedArrivalMinute: 480, recordedCompletionMinute: 540 }] }],
+      missingBaselineRoutes: [], truncatedPlanningRuns: true,
+    });
+    const result = await getDayScorecard({ date_from: date, date_to: date }, conn([]), new Date('2026-09-08T12:00:00Z'));
+    expect(result.days[0].byTech[0].plannedUnavailableReason).toBeNull();
+  });
+
+  // Codex P1: a range that includes today/future dates was still sent to
+  // getRoutePerformance unclamped, letting future-dated planner runs compete
+  // for its cap even though the future side of the scorecard never reads
+  // `performance` at all.
+  test('getRoutePerformance is called with to clamped to yesterday when the requested range reaches into today/future', async () => {
+    const from = '2026-09-01';
+    const to = '2026-09-10'; // "today" below is 2026-09-08
+    getScheduleQualityMeasurements.mockResolvedValue({
+      driveModel: 'legacy',
+      days: [
+        { date: '2026-09-01', closed: false, byTech: [{ technicianId: 'tech1', technician: 'Tech One' }] },
+        { date: '2026-09-10', closed: false, byTech: [{ technicianId: 'tech1', technician: 'Tech One', scheduledVisits: 0, serviceMinutes: 0, modeledLateVisits: [] }] },
+      ],
+    });
+    getRoutePerformance.mockResolvedValue({ plans: [], missingBaselineRoutes: [], truncatedPlanningRuns: false });
+    await getDayScorecard({ date_from: from, date_to: to }, conn([]), new Date('2026-09-08T12:00:00Z'));
+    expect(getRoutePerformance).toHaveBeenCalledWith(
+      expect.objectContaining({ from, to: '2026-09-07' }), expect.any(Function));
+  });
+
+  // Codex P1: performance.missingBaselineRoutes is route-performance's own
+  // record of "past completed work exists, no covering plan" — a technician
+  // who appears ONLY there (no plan, no mileage, e.g. a vehicle-less tech)
+  // must still get a row instead of vanishing entirely.
+  test('a technicianId known only through missingBaselineRoutes still gets a past row and a resolved name', async () => {
+    const date = '2026-09-01';
+    getScheduleQualityMeasurements.mockResolvedValue({
+      driveModel: 'legacy',
+      days: [{ date, closed: false, byTech: [{ technicianId: 'tech1', technician: 'Tech One' }] }],
+    });
+    getRoutePerformance.mockResolvedValue({
+      plans: [], missingBaselineRoutes: [{ date, technicianId: 'ghost' }], truncatedPlanningRuns: false,
+    });
+    const result = await getDayScorecard({ date_from: date, date_to: date },
+      conn([], [{ id: 'ghost', name: 'Former Tech' }]), new Date('2026-09-08T12:00:00Z'));
+    const ghostRow = result.days[0].byTech.find(row => row.technicianId === 'ghost');
+    expect(ghostRow).toBeTruthy();
+    expect(ghostRow.technician).toBe('Former Tech');
+    expect(ghostRow.planned).toBeNull();
+  });
+
+  test('a missingBaselineRoutes entry with no technicianId is never turned into a row', async () => {
+    const date = '2026-09-01';
+    getScheduleQualityMeasurements.mockResolvedValue({
+      driveModel: 'legacy',
+      days: [{ date, closed: false, byTech: [{ technicianId: 'tech1', technician: 'Tech One' }] }],
+    });
+    getRoutePerformance.mockResolvedValue({
+      plans: [], missingBaselineRoutes: [{ date, technicianId: null }], truncatedPlanningRuns: false,
+    });
+    const result = await getDayScorecard({ date_from: date, date_to: date }, conn([]), new Date('2026-09-08T12:00:00Z'));
+    expect(result.days[0].byTech).toHaveLength(1); // only tech1 (the assignable roster)
+  });
+
+  // Codex P1: an offboarding technician can still carry an assigned FUTURE
+  // visit; day-quality already tallies work with no assignable technician
+  // (unassigned OR assigned to a non-assignable tech) at the day level as
+  // unallocatedVisits/unallocatedServiceMinutes — surfaced instead of a
+  // fabricated per-tech row this data can't support honestly.
+  test('day-level unallocated workload (offboarding/unassigned techs) is passed through for every day', async () => {
+    const date = '2026-09-08';
+    getScheduleQualityMeasurements.mockResolvedValue({
+      driveModel: 'legacy',
+      days: [{ date, closed: false, unallocatedVisits: 2, unallocatedServiceMinutes: 90,
+        byTech: [{ technicianId: 'tech1', technician: 'Tech One', scheduledVisits: 1, serviceMinutes: 60, modeledLateVisits: [] }] }],
+    });
+    const result = await getDayScorecard({ date_from: date, date_to: date }, conn(), new Date(`${date}T12:00:00Z`));
+    expect(result.days[0].unallocated).toEqual({ visits: 2, serviceMinutes: 90 });
   });
 
   // Codex P1: the mileage rollup summed every trip including ones Bouncie

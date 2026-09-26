@@ -68,6 +68,26 @@ const METRICS = [
   { key: 'returnMinute', label: 'Return', format: (m) => fmtClock(m?.returnMinute) },
 ];
 
+// row.driveModel is THIS row's own saved/current drive model, not the
+// footer's single global value — a past row's snapshot can have been
+// captured under a different drive-time model than the one live today.
+function modelLabel(value) {
+  if (value === 'calibrated') return 'calibrated';
+  if (value === 'legacy') return 'legacy';
+  return 'unknown';
+}
+
+// The Planned/Board basis label names its OWN row's drive model (past rows
+// use the model the saved snapshot was captured under, never the footer's
+// current-day value). A null planned row says which of the two distinct
+// reasons applies — a definite no_saved_plan, or the newest-500-planner-
+// runs cap that may have evicted a real one (see day-scorecard.js).
+function basisLabel(row, isPast) {
+  if (!isPast) return `Board (${modelLabel(row.driveModel)})`;
+  if (row.planned) return `Planned (${modelLabel(row.driveModel)})`;
+  return row.plannedUnavailableReason === 'may_be_truncated' ? 'Planned (baseline may be truncated)' : 'Planned (no saved plan)';
+}
+
 // Two stacked sub-rows (Planned / Actual) for a past tech-day, one row for a
 // future/today tech-day (nothing recorded yet). Date and, when more than one
 // technician is in range, the technician name are rowSpan'd across both.
@@ -78,7 +98,7 @@ function TechDayRows({ date, row, isPast, showTechName }) {
       <TR>
         <TD className="font-medium text-ink-primary" rowSpan={span}>{date}</TD>
         {showTechName && <TD className="text-ink-secondary" rowSpan={span}>{row.technician || row.technicianId}</TD>}
-        <TD className="text-11 text-ink-tertiary">{isPast ? 'Planned' : 'Board'}</TD>
+        <TD className="text-11 text-ink-tertiary">{basisLabel(row, isPast)}</TD>
         {METRICS.map((metric) => <TD key={metric.key} nums align="right">{metric.format(row.planned)}</TD>)}
       </TR>
       {isPast && (
@@ -159,9 +179,17 @@ export default function DayScorecardPanel() {
           </Table>
         </CardBody>
       </Card>
+      {days.some((day) => day.unallocated?.visits > 0) && (
+        <div className="text-11 text-ink-tertiary mt-3">
+          Not shown per technician (unassigned, or assigned to an ineligible/offboarding technician): {days
+            .filter((day) => day.unallocated?.visits > 0)
+            .map((day) => `${day.date} (${day.unallocated.visits} stop${day.unallocated.visits === 1 ? '' : 's'}, ${fmtMinutes(day.unallocated.serviceMinutes)})`)
+            .join('; ')}.
+        </div>
+      )}
       <div className={cn('text-11 text-ink-tertiary mt-3')}>
-        Drive model: {request.data?.driveModel === 'calibrated' ? 'calibrated (fitted from real trips)' : 'legacy (straight-line estimate)'}.
-        {' '}Actual drive minutes exclude personal trips; unclassified trips are counted as day driving.
+        Future/today drive model: {request.data?.driveModel === 'calibrated' ? 'calibrated (fitted from real trips)' : 'legacy (straight-line estimate)'}.
+        {' '}Past rows label their own saved model instead. Actual drive minutes exclude personal trips; unclassified trips are counted as day driving.
       </div>
     </div>
   );

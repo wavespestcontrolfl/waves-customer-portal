@@ -1,6 +1,7 @@
 /** Planned route measurements. No writes, geocoding, traffic calls or invented
  * stop capacity. Gross calendar gaps are not automatically bookable time. */
-const { currentOrder, effectiveWindowRange, simulateArrivalRoute, workDuration, isCoVisitPair } = require('../route-reorder-window-fit');
+const { currentOrder, effectiveWindowRange, simulateArrivalRoute, workDuration, isCoVisitPair,
+  startCoVisitChain, advanceCoVisit } = require('../route-reorder-window-fit');
 const { allocationKey, occupiedRows } = require('./visit-capacity');
 const { isHoldStop } = require('./travel-gap');
 
@@ -64,6 +65,65 @@ function doubleBookedPairs(stops) {
 function durationBasis(stops) {
   return stops.some(stop => plannedWorkMinutes(stop) != null)
     ? 'owner_planning_minutes_or_stored_window_or_estimate' : 'stored_window_or_estimate';
+}
+
+/**
+ * Opt-in extras for a callers that need physical-stop counting or a
+ * co-visit-aware on-site-minutes total (today: day-scorecard.js's
+ * per-day scorecard) without a second raw-stops read of their own.
+ *
+ * Same-property co-visit rows collapse into one physical stop; a
+ * service-visit group (visit_id) is also one physical stop no matter how
+ * many member rows it has (arrival-route's SUM-of-durations contract —
+ * doubleBookedPairs above collapses co-visits the same way for its own
+ * purpose). Walks the board order so a 3+ member co-visit chain (not just a
+ * pair) still collapses to one.
+ */
+function physicalStopCount(stops) {
+  const ordered = currentOrder(stops);
+  const seenVisitIds = new Set();
+  let count = 0;
+  let chainTail = null;
+  for (const stop of ordered) {
+    if (stop.visit_id) {
+      if (!seenVisitIds.has(stop.visit_id)) { seenVisitIds.add(stop.visit_id); count += 1; }
+      chainTail = null;
+      continue;
+    }
+    if (chainTail && isCoVisitPair(effectiveWindowRange, chainTail, stop)) { chainTail = stop; continue; }
+    count += 1;
+    chainTail = stop;
+  }
+  return count;
+}
+
+/**
+ * On-site minutes, but a co-visit chain counts once instead of once per
+ * member — plain serviceMinutes (a flat sum of workDuration) double-counts
+ * a co-visited pair sharing a single fallback-duration promise (the same
+ * "phantom hour" isCoVisitPair's own comment describes), which
+ * simulateArrivalRoute never does. Reuses the SAME chain arithmetic the
+ * simulation itself calls (startCoVisitChain/advanceCoVisit in
+ * route-reorder-window-fit.js) rather than a second, driftable formula —
+ * only the duration bookkeeping, no clock/travel state, so it needs no
+ * RouteOptimizer or blocked-interval input.
+ */
+function coVisitOnSiteMinutes(stops) {
+  const ordered = currentOrder(stops);
+  let total = 0;
+  let chain = null;
+  let chainTail = null;
+  for (const stop of ordered) {
+    if (chainTail && isCoVisitPair(effectiveWindowRange, chainTail, stop)) {
+      chain = advanceCoVisit(chain, stop);
+    } else {
+      if (chain) total += chain.coMerged;
+      chain = startCoVisitChain(stop);
+    }
+    chainTail = stop;
+  }
+  if (chain) total += chain.coMerged;
+  return total;
 }
 
 function measureDayQuality(RouteOptimizer, stops, {
@@ -204,7 +264,8 @@ async function getScheduleQualityMeasurements(input = {}, conn = require('../../
     const unallocated = stops.filter(stop => !techs.some(tech => tech.id === stop.technician_id));
     const closed = blackouts.dates.has(date);
     const byTech = techs.map(tech => {
-      const quality = measureDayQuality(RouteOptimizer, stops.filter(stop => stop.technician_id === tech.id), {
+      const techStops = stops.filter(stop => stop.technician_id === tech.id);
+      const quality = measureDayQuality(RouteOptimizer, techStops, {
         departureMinutes, targetReturnMinutes, breakMinutes, future: date > today,
       });
       if (unallocated.length || closed) {
@@ -222,7 +283,11 @@ async function getScheduleQualityMeasurements(input = {}, conn = require('../../
         quality.insertionStatus = candidateAnalysis.reason;
       }
       return { technicianId: tech.id, technician: tech.name, ...quality,
-        ...(candidateAnalysis ? { candidateAnalysis } : {}) };
+        ...(candidateAnalysis ? { candidateAnalysis } : {}),
+        // Opt-in only (day-scorecard.js) — every other caller's byTech shape
+        // is unchanged. Reuses techStops instead of re-filtering `stops`.
+        ...(input.includeStopExtras ? { physicalStops: physicalStopCount(techStops),
+          coVisitOnSiteMinutes: coVisitOnSiteMinutes(techStops) } : {}) };
     });
     days.push({ date, closed, unallocatedVisits: unallocated.length,
       unallocatedServiceMinutes: unallocated.reduce((sum, stop) => sum + workDuration(stop), 0), byTech });
@@ -235,4 +300,5 @@ async function getScheduleQualityMeasurements(input = {}, conn = require('../../
 }
 
 module.exports = {
-  QUALITY_EXCLUDED_STATUSES, measureDayQuality, getScheduleQualityMeasurements, dayStopSelect };
+  QUALITY_EXCLUDED_STATUSES, measureDayQuality, getScheduleQualityMeasurements, dayStopSelect,
+  physicalStopCount, coVisitOnSiteMinutes };

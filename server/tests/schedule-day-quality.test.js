@@ -178,6 +178,61 @@ describe('getScheduleQualityMeasurements selects the planning-minute inputs (Cod
     expect(result.days[0].byTech[0].serviceMinutes).toBe(60);
     expect(result.days[0].byTech[0].assumptions.durationBasis).toBe('stored_window_or_estimate');
   });
+
+  // Codex P2: day-scorecard.js's physical-stop count and co-visit-aware
+  // on-site minutes must come from the SAME raw-stops read this measurement
+  // already does, opt-in only so every other caller's byTech shape is
+  // unchanged by default.
+  test('includeStopExtras opts a caller into physicalStops/coVisitOnSiteMinutes; default output is unchanged', async () => {
+    const coVisitStop = (id, extra = {}) => ({
+      id, technician_id: 'tech1', customer_id: 'cust-a', visit_id: null,
+      scheduled_date: DATE, window_start: '09:00', window_end: '10:00', time_window: null, route_order: null,
+      status: 'confirmed', reservation_expires_at: null, created_at: `2020-01-01T0${id.length}:00:00Z`,
+      // No REAL stored estimate — workDuration falls back to the 60-minute
+      // WINDOW SPAN for each row, the exact "phantom hour" coVisitOnSiteMinutes
+      // exists to not double-charge (two real, additive estimates instead
+      // WOULD sum, by the same rule route-reorder-window-fit.js documents).
+      estimated_duration_minutes: null, service_type: null, is_recurring: false, is_callback: false,
+      lat: 27.4, lng: -82.4, service_address_line1: '1 Main St', service_address_line2: null,
+      service_address_city: 'Bradenton', service_address_zip: '34205',
+      customer_address_line1: '1 Main St', customer_address_line2: null,
+      customer_city: 'Bradenton', customer_state: 'FL', customer_zip: '34205',
+      ...extra,
+    });
+    // Two ungrouped rows sharing one promised window at one premise — a
+    // co-visit pair. Flat serviceMinutes double-counts it (120); the
+    // co-visit-aware total must not (60).
+    const stops = [coVisitStop('a'), coVisitStop('bb')];
+    dayStopsQuery.mockImplementation(() => ({ whereRaw: () => Promise.resolve(stops) }));
+
+    const withoutFlag = await getScheduleQualityMeasurements({ date: DATE }, conn, new Date(`${DATE}T12:00:00Z`));
+    expect(withoutFlag.days[0].byTech[0].serviceMinutes).toBe(120);
+    expect(withoutFlag.days[0].byTech[0]).not.toHaveProperty('physicalStops');
+    expect(withoutFlag.days[0].byTech[0]).not.toHaveProperty('coVisitOnSiteMinutes');
+
+    const withFlag = await getScheduleQualityMeasurements({ date: DATE, includeStopExtras: true }, conn, new Date(`${DATE}T12:00:00Z`));
+    expect(withFlag.days[0].byTech[0]).toMatchObject({ serviceMinutes: 120, physicalStops: 1, coVisitOnSiteMinutes: 60 });
+  });
+
+  test('coVisitOnSiteMinutes only collapses a fallback-duration pair — two REAL, distinct estimates still sum', async () => {
+    const realEstimateStop = (id, extra = {}) => ({
+      id, technician_id: 'tech1', customer_id: 'cust-a', visit_id: null,
+      scheduled_date: DATE, window_start: '09:00', window_end: null, time_window: null, route_order: null,
+      status: 'confirmed', reservation_expires_at: null, created_at: `2020-01-01T0${id.length}:00:00Z`,
+      estimated_duration_minutes: 45, service_type: null, is_recurring: false, is_callback: false,
+      lat: 27.4, lng: -82.4, service_address_line1: '1 Main St', service_address_line2: null,
+      service_address_city: 'Bradenton', service_address_zip: '34205',
+      customer_address_line1: '1 Main St', customer_address_line2: null,
+      customer_city: 'Bradenton', customer_state: 'FL', customer_zip: '34205',
+      ...extra,
+    });
+    const stops = [realEstimateStop('a'), realEstimateStop('bb')];
+    dayStopsQuery.mockImplementation(() => ({ whereRaw: () => Promise.resolve(stops) }));
+    const result = await getScheduleQualityMeasurements({ date: DATE, includeStopExtras: true }, conn, new Date(`${DATE}T12:00:00Z`));
+    // 45+45 minutes of genuinely separate work at one co-visited premise is
+    // additive (arrival-route's SUM contract) — never floored down to 45.
+    expect(result.days[0].byTech[0]).toMatchObject({ serviceMinutes: 90, physicalStops: 1, coVisitOnSiteMinutes: 90 });
+  });
 });
 
 test('an owner-planned stop with no stored estimate is not a default duration (Codex #4829 r5 P2)', () => {

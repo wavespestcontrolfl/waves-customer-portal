@@ -6,6 +6,9 @@
  * refreshScheduleQualityAfterChange or any other writer:
  *   - day-quality.js's getScheduleQualityMeasurements for future/today rows
  *     (PLANNED ONLY — there is nothing recorded yet to compare against).
+ *     Called with includeStopExtras:true so day-quality does the physical-
+ *     stop and co-visit-aware on-site-minutes math on the SAME raw-stops
+ *     read its own quality numbers use, instead of a second query here.
  *   - route-performance.js's getRoutePerformance for past rows: the saved
  *     pre-service snapshot (PLANNED-as-of-the-day-before) paired with
  *     recorded work (ACTUAL), plus a Bouncie mileage_log rollup for actual
@@ -14,15 +17,16 @@
  *     read straight from the plan object rather than duplicating it).
  *
  * A past technician-day with no saved snapshot (see getRoutePerformance's
- * own missingBaselineRoutes) reports planned:null rather than inventing one.
+ * own missingBaselineRoutes) reports planned:null rather than inventing one,
+ * with plannedUnavailableReason distinguishing a definite "no_saved_plan"
+ * from "may_be_truncated" (the newest-500-planner-runs cap can evict a real
+ * baseline; truncatedPlanningRuns says which is true for this response).
  * Every null shows as "unknown" in the UI, never 0 (day-quality's own rule).
  */
-const { etDateString, validCalendarDate } = require('../../utils/datetime-et');
+const { etDateString, addETDays, validCalendarDate } = require('../../utils/datetime-et');
 const { etDateDiffDays } = require('../recurring-appointment-seeder');
 const { gateEnvValue } = require('../../config/feature-gates');
-const { currentOrder, effectiveWindowRange, isCoVisitPair } = require('../route-reorder-window-fit');
-const { dayStopsQuery } = require('./day-stops');
-const { QUALITY_EXCLUDED_STATUSES, getScheduleQualityMeasurements, dayStopSelect } = require('./day-quality');
+const { getScheduleQualityMeasurements, physicalStopCount } = require('./day-quality');
 const { getRoutePerformance } = require('./route-performance');
 const { applyAssignable } = require('../technician-eligibility');
 
@@ -45,32 +49,6 @@ function dateOnly(value) {
   return value instanceof Date ? value.toISOString().slice(0, 10) : String(value || '').slice(0, 10);
 }
 
-/**
- * Same-property co-visit rows collapse into one physical stop; a service-
- * visit group (visit_id) is also one physical stop no matter how many member
- * rows it has (arrival-route's SUM-of-durations contract — day-quality's own
- * doubleBookedPairs collapses co-visits the same way for its own purpose).
- * Walks the board order so a 3+ member co-visit chain (not just a pair)
- * still collapses to one.
- */
-function physicalStopCount(stops) {
-  const ordered = currentOrder(stops);
-  const seenVisitIds = new Set();
-  let count = 0;
-  let chainTail = null;
-  for (const stop of ordered) {
-    if (stop.visit_id) {
-      if (!seenVisitIds.has(stop.visit_id)) { seenVisitIds.add(stop.visit_id); count += 1; }
-      chainTail = null;
-      continue;
-    }
-    if (chainTail && isCoVisitPair(effectiveWindowRange, chainTail, stop)) { chainTail = stop; continue; }
-    count += 1;
-    chainTail = stop;
-  }
-  return count;
-}
-
 function stopsPerHour(stops, departureMinutes, returnMinute) {
   if (!Number.isFinite(stops) || !Number.isFinite(departureMinutes) || !Number.isFinite(returnMinute) || returnMinute <= departureMinutes) return null;
   return stops / ((returnMinute - departureMinutes) / 60);
@@ -81,12 +59,18 @@ function driveShare(driveMinutes, onSiteMinutes) {
   return driveMinutes / (driveMinutes + onSiteMinutes);
 }
 
-// Future/today: straight from the existing quality measurement, plus the
-// physical-stop count that measurement does not compute for itself.
-function plannedFutureRow(techQuality, physicalStops) {
-  const onSiteMinutes = Number.isFinite(techQuality.serviceMinutes) ? techQuality.serviceMinutes : null;
+// Future/today: straight from the existing quality measurement. onSiteMinutes
+// prefers day-quality's co-visit-aware coVisitOnSiteMinutes (a co-visit
+// chain of fallback-duration rows counts once, matching what
+// simulateArrivalRoute itself charges) over the plain serviceMinutes flat
+// sum, which double-counts that case; physicalStops is day-quality's own
+// count from the SAME raw stops, not a second dayStopsQuery here.
+function plannedFutureRow(techQuality) {
+  const onSiteMinutes = Number.isFinite(techQuality.coVisitOnSiteMinutes) ? techQuality.coVisitOnSiteMinutes
+    : (Number.isFinite(techQuality.serviceMinutes) ? techQuality.serviceMinutes : null);
   const driveMinutes = techQuality.modeledDriveMinutes ?? null;
   const returnMinute = techQuality.modeledReturnMinuteBeforeBreaks ?? null;
+  const physicalStops = Number.isFinite(techQuality.physicalStops) ? techQuality.physicalStops : null;
   return {
     stops: techQuality.scheduledVisits, physicalStops,
     onSiteMinutes, driveMinutes, waitMinutes: techQuality.modeledWaitingMinutes ?? null,
@@ -98,8 +82,12 @@ function plannedFutureRow(techQuality, physicalStops) {
 
 // Past, PLANNED-as-of-the-day-before: the saved snapshot's own numbers
 // (route-performance's passthrough fields), never recomputed here. No
-// physical-stop count — the snapshot keeps ids/durations/windows, not the
-// premise/coordinate columns isCoVisitPair needs (see design_choices).
+// physical-stop count, and onSiteMinutes is the snapshot's flat per-stop
+// sum, NOT co-visit-aware: plan.stops keeps only ids/durations/windows, not
+// the customer/premise/coordinate columns isCoVisitPair needs to detect a
+// co-visit at all, so a co-visited pair sharing a fallback duration MAY be
+// double-counted here (see getDayScorecard's assumptions.plannedOnSiteMinutes
+// — noted rather than silently wrong or falsely "fixed").
 function plannedPastRow(plan) {
   if (!plan) return null;
   return {
@@ -166,6 +154,9 @@ function actualPastRow(plan, mileage) {
 const EXCLUDED_MILEAGE_PURPOSES = ['personal', 'commute'];
 const MILEAGE_NOTE = 'Actual drive minutes sum mileage_log trips for the day, excluding personal trips; '
   + 'unclassified trips (no confirmed business/personal match) are counted as day driving.';
+const PLANNED_ONSITE_NOTE = "Future/today on-site minutes count a co-visited pair once. Past PLANNED on-site minutes "
+  + 'come from the saved snapshot, which cannot detect a co-visit (no customer/premise/coordinate columns) and may '
+  + 'double-count one; past ACTUAL minutes are unaffected (summed from recorded evidence per row).';
 
 // Date range + technician_id IS NOT NULL only — NOT the assignable-tech
 // list (a deactivated/no-longer-eligible technician's own history must not
@@ -190,21 +181,23 @@ async function mileageByTechDay(conn, from, to) {
   return byKey;
 }
 
-function pastTechRow({ technicianId, technician }, planByKey, mileageByKey, date) {
+function pastTechRow({ technicianId, technician }, planByKey, mileageByKey, date, truncatedPlanningRuns) {
   const key = `${date}|${technicianId}`;
   const plan = planByKey.get(key) || null;
   const mileage = mileageByKey.get(key) || null;
   return { technicianId, technician,
     driveModel: plan ? plan.driveModel : null,
+    // Distinct from a definite "never had a baseline": the newest-500
+    // planner-runs cap can evict a real one (see getDayScorecard), and this
+    // response can't tell the two apart for any one row.
+    plannedUnavailableReason: plan ? null : (truncatedPlanningRuns ? 'may_be_truncated' : 'no_saved_plan'),
     planned: plannedPastRow(plan), actual: actualPastRow(plan, mileage) };
 }
 
-async function futureTechRows(conn, day, driveModel) {
-  const stops = await dayStopsQuery(conn, { dateStr: day.date, excludeStatuses: QUALITY_EXCLUDED_STATUSES,
-    select: dayStopSelect(conn) }).whereRaw('(scheduled_services.reservation_expires_at IS NULL OR scheduled_services.reservation_expires_at > NOW())');
+function futureTechRows(day, driveModel) {
   return day.byTech.map(techQuality => ({
     technicianId: techQuality.technicianId, technician: techQuality.technician, driveModel,
-    planned: plannedFutureRow(techQuality, physicalStopCount(stops.filter(stop => stop.technician_id === techQuality.technicianId))),
+    planned: plannedFutureRow(techQuality),
     actual: null,
   }));
 }
@@ -222,9 +215,25 @@ function idsByDate(keyedMap) {
   return byDate;
 }
 
-async function resolveHistoricalNames(conn, techs, planIdsByDate, mileageIdsByDate) {
+// route-performance's own record of "past work exists, no covering plan" —
+// the SAME condition that would otherwise silently drop this technician's
+// day from the roster if their only evidence is a missing baseline (no
+// plan, and no mileage that day either). Non-null technicianIds only: a
+// route with no technician at all has no row to build.
+function missingBaselineIdsByDate(routes = []) {
+  const byDate = new Map();
+  for (const route of routes) {
+    if (!route.technicianId) continue;
+    if (!byDate.has(route.date)) byDate.set(route.date, new Set());
+    byDate.get(route.date).add(route.technicianId);
+  }
+  return byDate;
+}
+
+async function resolveHistoricalNames(conn, techs, idsByDateMaps) {
   const known = new Set(techs.map(tech => tech.id));
-  const historicalIds = new Set([...planIdsByDate.values(), ...mileageIdsByDate.values()].flatMap(set => [...set]));
+  const historicalIds = new Set();
+  for (const map of idsByDateMaps) for (const set of map.values()) for (const id of set) historicalIds.add(id);
   const missingIds = [...historicalIds].filter(id => !known.has(id));
   const extra = missingIds.length ? await conn('technicians').whereIn('id', missingIds).select('id', 'name') : [];
   return new Map([...techs.map(tech => [tech.id, tech.name]), ...extra.map(tech => [tech.id, tech.name])]);
@@ -232,14 +241,16 @@ async function resolveHistoricalNames(conn, techs, planIdsByDate, mileageIdsByDa
 
 // PAST rosters are NOT day.byTech (getScheduleQualityMeasurements' own
 // applyAssignable-filtered list) — a deactivated/no-longer-eligible
-// technician's saved snapshot or mileage history would silently vanish from
-// their own PAST day. Instead: the union of technicianIds evidenced in the
-// plans/mileage for THIS date, plus every currently-assignable technician
-// (so a day with no history for an active technician still shows their
-// empty row, matching the future/today board's own "every technician gets a
-// row" behavior).
-function pastDayRoster(date, techs, planIdsByDate, mileageIdsByDate) {
-  return new Set([...techs.map(tech => tech.id), ...(planIdsByDate.get(date) || []), ...(mileageIdsByDate.get(date) || [])]);
+// technician's saved snapshot, mileage history, or known-missing baseline
+// would silently vanish from their own PAST day. Instead: the union of
+// technicianIds evidenced in the plans/mileage/missing-baseline records for
+// THIS date, plus every currently-assignable technician (so a day with no
+// history for an active technician still shows their empty row, matching
+// the future/today board's own "every technician gets a row" behavior).
+function pastDayRoster(date, techs, idsByDateMaps) {
+  const ids = new Set(techs.map(tech => tech.id));
+  for (const map of idsByDateMaps) for (const id of (map.get(date) || [])) ids.add(id);
+  return ids;
 }
 
 async function getDayScorecard(input = {}, conn = require('../../models/db'), now = new Date()) {
@@ -248,28 +259,45 @@ async function getDayScorecard(input = {}, conn = require('../../models/db'), no
   if (!validDateRange(from, to)) return { error: 'Use a valid date range of at most 31 days.' };
   const today = etDateString(now);
 
-  const quality = await getScheduleQualityMeasurements({ date_from: from, date_to: to }, conn, now);
+  const quality = await getScheduleQualityMeasurements({ date_from: from, date_to: to, includeStopExtras: true }, conn, now);
   if (quality.error) return quality; // Defensive only: the same rule already passed above.
 
   const techs = await applyAssignable(conn('technicians')).select('technicians.id', 'technicians.name');
-  const performance = await getRoutePerformance({ from, to, now }, conn);
+  // Past rows never need a route-performance snapshot dated today or later.
+  // Asking for one anyway lets the nightly reorder's future-dated planner
+  // runs (D+1..D+6) compete for getRoutePerformance's newest-500-runs cap
+  // and evict a genuinely past baseline this exact range needed (Codex P1)
+  // — cheap to avoid since the future side never reads `performance` at all.
+  const yesterday = etDateString(addETDays(now, -1));
+  const pastTo = to < yesterday ? to : yesterday;
+  const performance = pastTo >= from
+    ? await getRoutePerformance({ from, to: pastTo, now }, conn)
+    : { plans: [], missingBaselineRoutes: [], truncatedPlanningRuns: false };
   const planByKey = new Map(performance.plans.map(plan => [`${plan.date}|${plan.technicianId}`, plan]));
   const mileageByKey = await mileageByTechDay(conn, from, to);
   const planIdsByDate = idsByDate(planByKey);
   const mileageIdsByDate = idsByDate(mileageByKey);
-  const nameById = await resolveHistoricalNames(conn, techs, planIdsByDate, mileageIdsByDate);
+  const missingIdsByDate = missingBaselineIdsByDate(performance.missingBaselineRoutes);
+  const idsByDateMaps = [planIdsByDate, mileageIdsByDate, missingIdsByDate];
+  const nameById = await resolveHistoricalNames(conn, techs, idsByDateMaps);
+  const truncatedPlanningRuns = Boolean(performance.truncatedPlanningRuns);
 
   const days = [];
   for (const day of quality.days) {
     const byTech = day.date < today
-      ? [...pastDayRoster(day.date, techs, planIdsByDate, mileageIdsByDate)].map(technicianId => pastTechRow(
-        { technicianId, technician: nameById.get(technicianId) || null }, planByKey, mileageByKey, day.date))
-      : await futureTechRows(conn, day, quality.driveModel);
-    days.push({ date: day.date, closed: day.closed, byTech });
+      ? [...pastDayRoster(day.date, techs, idsByDateMaps)].map(technicianId => pastTechRow(
+        { technicianId, technician: nameById.get(technicianId) || null }, planByKey, mileageByKey, day.date, truncatedPlanningRuns))
+      : futureTechRows(day, quality.driveModel);
+    days.push({ date: day.date, closed: day.closed, byTech,
+      // Stops assigned to no assignable technician at all (unassigned, or an
+      // offboarding/ineligible tech that still carries assigned work — Codex
+      // P1) never get a named row; day-quality already tallies this at the
+      // day level, so it's surfaced instead of a silently missing tech row.
+      unallocated: { visits: day.unallocatedVisits, serviceMinutes: day.unallocatedServiceMinutes } });
   }
   return {
-    range: { from, to }, driveModel: quality.driveModel, days,
-    assumptions: { actualDriveMinutes: MILEAGE_NOTE },
+    range: { from, to }, driveModel: quality.driveModel, days, truncatedPlanningRuns,
+    assumptions: { actualDriveMinutes: MILEAGE_NOTE, plannedOnSiteMinutes: PLANNED_ONSITE_NOTE },
     note: 'Future/today rows are planned only — nothing recorded yet to compare against. '
       + 'Past rows compare the saved pre-service plan with recorded work. Unknown values are null, never 0. '
       + MILEAGE_NOTE,
