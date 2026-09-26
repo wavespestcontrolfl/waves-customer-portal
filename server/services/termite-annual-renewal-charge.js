@@ -574,6 +574,45 @@ async function bellStaleOverdueTerms({ conn = db, limit = 200, today = etDateStr
 // minted: false } when a successor already existed (this call did
 // nothing), or null when the parent no longer qualifies under lock (a
 // concurrent decision/cancel landed first).
+// Self-contained sub-decisions extracted from mintRenewalSuccessor below
+// (Codex round-7 P2 self-review, AGENTS.md L412-418) — each is a
+// genuinely independent question, not a one-use wrapper relocating a
+// single branch.
+//
+// Mint only ever fires for a still-undecided parent (P2-1) — checked
+// FIRST, so resolveParentEligibility's 'renewed'+'renew' branch can never
+// apply here; only its plain RENEWABLE_STATUSES branch matters. Codex
+// round-4 P0: reuses the SAME allow-list resolveChargeEligibility's parent
+// re-check uses below — a cancelled/canceled/refunded/payment_pending/
+// switch_plan parent (moves 9, 10, 13) can never mint a successor either
+// way. Codex round-7 P1: the paid-and-not-fully-refunded ledger check now
+// runs here too (not just at charge time) — a full refund that outraced
+// the parent's own status sync must never mint a renewal against it.
+async function parentEligibleToMintSuccessor(trx, parent) {
+  if (!parent.annual_plan_version) return false;
+  if (parent.renewal_decision) return false;
+  return (await resolveParentEligibility(trx, parent)).eligible;
+}
+
+function assertValidPrepayAmount(parent) {
+  const prepayAmount = Number(parent.prepay_amount);
+  if (!Number.isFinite(prepayAmount) || prepayAmount <= 0) {
+    throw new Error(`parent term ${parent.id} has no valid prepay_amount to renew (${parent.prepay_amount})`);
+  }
+  return prepayAmount;
+}
+
+// Frozen-price enforcement, mirroring the original activation's own guard
+// (estimate-converter.js): the minted invoice must equal the quoted
+// renewal fee to the cent, with no tax picked up.
+function assertInvoiceMatchesQuotedRenewalFee(invoice, prepayAmount, parentId) {
+  const mintedTotalCents = Math.round(Number(invoice.total) * 100);
+  const expectedCents = Math.round(prepayAmount * 100);
+  if (mintedTotalCents !== expectedCents || Math.round(Number(invoice.tax_amount || 0) * 100) !== 0) {
+    throw new Error(`renewal invoice for term ${parentId} does not match the quoted renewal fee (total ${invoice.total} vs ${prepayAmount}, tax ${invoice.tax_amount})`);
+  }
+}
+
 async function mintRenewalSuccessor(parentTermId, conn = db) {
   const InvoiceService = require('./invoice');
   const AnnualPrepayRenewals = require('./annual-prepay-renewals');
@@ -602,19 +641,7 @@ async function mintRenewalSuccessor(parentTermId, conn = db) {
     if (!parent) return null;
     const existingSuccessor = await trx('annual_prepay_terms').where({ renewed_from_term_id: parent.id }).first();
     if (existingSuccessor) return { successor: existingSuccessor, minted: false };
-    if (!parent.annual_plan_version) return null;
-    // Mint only ever fires for a still-undecided parent (P2-1) — checked
-    // FIRST, so resolveParentEligibility's 'renewed'+'renew' branch can
-    // never apply here; only its plain RENEWABLE_STATUSES branch matters.
-    // Codex round-4 P0: reuses the SAME allow-list
-    // resolveChargeEligibility's parent re-check uses below — a
-    // cancelled/canceled/refunded/payment_pending/switch_plan parent
-    // (moves 9, 10, 13) can never mint a successor either way. Codex
-    // round-7 P1: the paid-and-not-fully-refunded ledger check now runs
-    // here too (not just at charge time) — a full refund that outraced
-    // the parent's own status sync must never mint a renewal against it.
-    if (parent.renewal_decision) return null;
-    if (!(await resolveParentEligibility(trx, parent)).eligible) return null;
+    if (!(await parentEligibleToMintSuccessor(trx, parent))) return null;
 
     // term_end is INCLUSIVE (annual-prepay-renewals.js ~2640) — the
     // successor's coverage starts the very next day, or admin-customers.js's
@@ -635,10 +662,7 @@ async function mintRenewalSuccessor(parentTermId, conn = db) {
     );
 
     const planLabel = parent.plan_label || 'Waves Subterranean Termite Protection';
-    const prepayAmount = Number(parent.prepay_amount);
-    if (!Number.isFinite(prepayAmount) || prepayAmount <= 0) {
-      throw new Error(`parent term ${parent.id} has no valid prepay_amount to renew (${parent.prepay_amount})`);
-    }
+    const prepayAmount = assertValidPrepayAmount(parent);
 
     const invoice = await InvoiceService.create({
       database: trx,
@@ -661,15 +685,7 @@ async function mintRenewalSuccessor(parentTermId, conn = db) {
       skipAccrual: true,
     });
     if (!invoice?.id) throw new Error(`renewal invoice mint failed for parent term ${parent.id}`);
-
-    // Frozen-price enforcement, mirroring the original activation's own
-    // guard (estimate-converter.js): the minted invoice must equal the
-    // quoted renewal fee to the cent, with no tax picked up.
-    const mintedTotalCents = Math.round(Number(invoice.total) * 100);
-    const expectedCents = Math.round(prepayAmount * 100);
-    if (mintedTotalCents !== expectedCents || Math.round(Number(invoice.tax_amount || 0) * 100) !== 0) {
-      throw new Error(`renewal invoice for term ${parent.id} does not match the quoted renewal fee (total ${invoice.total} vs ${prepayAmount}, tax ${invoice.tax_amount})`);
-    }
+    assertInvoiceMatchesQuotedRenewalFee(invoice, prepayAmount, parent.id);
 
     const successor = await AnnualPrepayRenewals.createTermForAnnualPrepay({
       customerId: parent.customer_id,
@@ -883,6 +899,42 @@ async function checkStillEligibleForRenewalAction(successorId, conn = db) {
 // Everything after the mint transaction commits: resolve consent + a
 // chargeable saved method, and either attempt the ONE Stripe charge or
 // hand the renewal off to the pay-link + bell fallback. Never throws.
+// Self-contained sub-decision, extracted from decideAndCharge (Codex
+// round-7 P2 self-review, AGENTS.md L412-418: a genuinely independent
+// decision pulled out whole, not a one-use wrapper relocating a single
+// branch) — resolves the customer's consented, chargeable saved payment
+// method, or null on any resolution failure (never throws).
+async function resolveChargeableSavedMethod(customerId, termId) {
+  const RecurringCards = require('./recurring-card-on-file');
+  try {
+    const method = await RecurringCards.resolvePrepayChargeMethod({
+      policy: { exemptReason: 'autopay_already_active' },
+      customerId,
+    });
+    return method?.paymentMethodRowId ? method : null;
+  } catch (err) {
+    logger.warn(`[termite-annual-renewal] saved-method resolution failed for term ${termId}: ${err.message}`);
+    return null;
+  }
+}
+
+// Self-contained sub-decision, extracted from decideAndCharge for the same
+// reason as resolveChargeableSavedMethod above (P1-5): would a card
+// surcharge push the collected total above the flat renewal fee the v3
+// agreement quoted? A quote failure is non-fatal — the caller's own
+// maxAuthorizedTotalCents ceiling on the actual charge still holds as the
+// fail-closed backstop, so this defaults to "no" rather than blocking.
+async function wouldSurchargeExceedFlatFee(successor, method, prepayAmountCents) {
+  try {
+    const StripeService = require('./stripe');
+    const quote = await StripeService.quoteInvoiceSavedCardCharge(successor.prepay_invoice_id, method.paymentMethodRowId);
+    return Math.round(Number(quote?.total) * 100) > prepayAmountCents;
+  } catch (err) {
+    logger.warn(`[termite-annual-renewal] pre-charge quote failed for term ${successor.id} — relying on the charge ceiling: ${err.message}`);
+    return false;
+  }
+}
+
 async function decideAndCharge(successor, parentTerm, conn = db) {
   const upfront = await checkStillEligibleForRenewalAction(successor.id, conn);
   if (!upfront.eligible) {
@@ -897,18 +949,8 @@ async function decideAndCharge(successor, parentTerm, conn = db) {
     return { status: 'no_consent' };
   }
 
-  const RecurringCards = require('./recurring-card-on-file');
-  let method = null;
-  try {
-    method = await RecurringCards.resolvePrepayChargeMethod({
-      policy: { exemptReason: 'autopay_already_active' },
-      customerId: successor.customer_id,
-    });
-  } catch (err) {
-    logger.warn(`[termite-annual-renewal] saved-method resolution failed for term ${successor.id}: ${err.message}`);
-    method = null;
-  }
-  if (!method?.paymentMethodRowId) {
+  const method = await resolveChargeableSavedMethod(successor.customer_id, successor.id);
+  if (!method) {
     await deliverInvoiceAndStampSkip(successor, 'no_method', 'No consented, chargeable saved payment method was found on file.', conn);
     return { status: 'no_method' };
   }
@@ -920,18 +962,10 @@ async function decideAndCharge(successor, parentTerm, conn = db) {
   // push the collected total above the flat renewal fee the v3 agreement
   // quoted is not authorized by that signature — that customer gets the
   // pay link (showing the exact surcharge) instead of a silent over-
-  // collection. Checked BEFORE the attempt fence is even stamped; a quote
-  // failure here is not fatal — the charge's own maxAuthorizedTotalCents
-  // ceiling below still holds as the fail-closed backstop.
-  try {
-    const StripeService = require('./stripe');
-    const quote = await StripeService.quoteInvoiceSavedCardCharge(successor.prepay_invoice_id, method.paymentMethodRowId);
-    if (Math.round(Number(quote?.total) * 100) > prepayAmountCents) {
-      await deliverInvoiceAndStampSkip(successor, 'surcharge_not_authorized', 'A credit-card surcharge would exceed the flat renewal fee the v3 agreement quoted, so it was not charged.', conn);
-      return { status: 'surcharge_not_authorized' };
-    }
-  } catch (err) {
-    logger.warn(`[termite-annual-renewal] pre-charge quote failed for term ${successor.id} — relying on the charge ceiling: ${err.message}`);
+  // collection. Checked BEFORE the attempt fence is even stamped.
+  if (await wouldSurchargeExceedFlatFee(successor, method, prepayAmountCents)) {
+    await deliverInvoiceAndStampSkip(successor, 'surcharge_not_authorized', 'A credit-card surcharge would exceed the flat renewal fee the v3 agreement quoted, so it was not charged.', conn);
+    return { status: 'surcharge_not_authorized' };
   }
 
   // P0: re-validate eligibility (parent still undecided/'renew', successor
@@ -1386,6 +1420,39 @@ async function processGraceLapses({ conn = db, limit = 200, counts }) {
 // lapse instead of voiding), or { outcome: 'deferred', kind, reason } (a
 // pending Stripe reconciliation, or the parent decided elsewhere — retry
 // next tick either way).
+// Self-contained sub-decisions extracted from resolveLapseVoidEligibility
+// below (Codex round-7 P2 self-review, AGENTS.md L412-418) — each is a
+// genuinely independent question the transaction asks in sequence, not a
+// one-use wrapper relocating a single branch.
+function lapseVoidAlreadyRanFor(fresh, invoice) {
+  const invoiceStatusKey = String(invoice?.status || '').toLowerCase();
+  return fresh.status === 'cancelled' && !fresh.renewal_decision
+    && !!invoice && INVOICE_CANCELLED_STATUSES.has(invoiceStatusKey);
+}
+
+async function parentStillDecidableForLapse(trx, fresh) {
+  if (!fresh.renewed_from_term_id) return { ok: true };
+  const parent = await trx('annual_prepay_terms').where({ id: fresh.renewed_from_term_id }).forUpdate().first();
+  const parentUndecidedOrOwnCancel = parent
+    && ((RENEWABLE_STATUSES.includes(parent.status) && !parent.renewal_decision)
+      || (parent.status === 'cancelled' && parent.renewal_decision === 'cancel'));
+  if (parentUndecidedOrOwnCancel) return { ok: true };
+  const reason = parent
+    ? `the parent was already decided '${parent.renewal_decision || parent.status}'`
+    : 'the parent no longer exists';
+  return { ok: false, reason };
+}
+
+async function reconciliationStatusForVoid(trx, invoiceId) {
+  if (!invoiceId) return { ok: true };
+  try {
+    await require('./stripe').assertNoInvoiceChargeReconciliationPending(invoiceId, trx);
+    return { ok: true };
+  } catch (reconErr) {
+    return { ok: false, reason: reconErr.message };
+  }
+}
+
 async function resolveLapseVoidEligibility(term, conn = db) {
   return conn.transaction(async (trx) => {
     const fresh = await trx('annual_prepay_terms').where({ id: term.id }).forUpdate().first();
@@ -1396,7 +1463,6 @@ async function resolveLapseVoidEligibility(term, conn = db) {
     if (fresh.prepay_invoice_id) {
       invoice = await trx('invoices').where({ id: fresh.prepay_invoice_id }).first('status', 'paid_at');
     }
-    const invoiceStatusKey = String(invoice?.status || '').toLowerCase();
 
     // Codex round-7 P1: a crash right after voidInvoice's OWN sync flips
     // this successor to 'cancelled' (move 9, renewal_decision IS NULL) —
@@ -1410,10 +1476,9 @@ async function resolveLapseVoidEligibility(term, conn = db) {
     // invoice reading a cancelled/void shape — a genuinely different
     // resolution reads 'active'/'paid'/'prepaid' instead, which the
     // status and invoice checks below still catch and retire correctly.
-    const lapseOwnedVoidAlreadyRan = fresh.status === 'cancelled' && !fresh.renewal_decision
-      && invoice && INVOICE_CANCELLED_STATUSES.has(invoiceStatusKey);
+    const voidAlreadyRan = lapseVoidAlreadyRanFor(fresh, invoice);
 
-    if (!lapseOwnedVoidAlreadyRan) {
+    if (!voidAlreadyRan) {
       if (fresh.status !== PAYMENT_PENDING_STATUS) {
         return { outcome: 'retired', reason: `the successor is already ${fresh.status}, not payment_pending` };
       }
@@ -1437,27 +1502,16 @@ async function resolveLapseVoidEligibility(term, conn = db) {
     // still undecided (the normal case) or ALREADY decided 'cancel' by a
     // prior partial run of THIS SAME lapse (idempotent resume — a crash
     // between recordDecision succeeding and the completed_at stamp).
-    if (fresh.renewed_from_term_id) {
-      const parent = await trx('annual_prepay_terms').where({ id: fresh.renewed_from_term_id }).forUpdate().first();
-      const parentUndecidedOrOwnCancel = parent
-        && ((RENEWABLE_STATUSES.includes(parent.status) && !parent.renewal_decision)
-          || (parent.status === 'cancelled' && parent.renewal_decision === 'cancel'));
-      if (!parentUndecidedOrOwnCancel) {
-        const parentReason = parent
-          ? `the parent was already decided '${parent.renewal_decision || parent.status}'`
-          : 'the parent no longer exists';
-        return { outcome: 'deferred', kind: 'parent_decided_elsewhere', reason: parentReason };
-      }
+    const parentCheck = await parentStillDecidableForLapse(trx, fresh);
+    if (!parentCheck.ok) {
+      return { outcome: 'deferred', kind: 'parent_decided_elsewhere', reason: parentCheck.reason };
     }
 
-    if (lapseOwnedVoidAlreadyRan) return { outcome: 'proceed' };
+    if (voidAlreadyRan) return { outcome: 'proceed' };
 
-    if (fresh.prepay_invoice_id) {
-      try {
-        await require('./stripe').assertNoInvoiceChargeReconciliationPending(fresh.prepay_invoice_id, trx);
-      } catch (reconErr) {
-        return { outcome: 'deferred', kind: 'reconciliation_pending', reason: reconErr.message };
-      }
+    const reconciliation = await reconciliationStatusForVoid(trx, fresh.prepay_invoice_id);
+    if (!reconciliation.ok) {
+      return { outcome: 'deferred', kind: 'reconciliation_pending', reason: reconciliation.reason };
     }
     return { outcome: 'proceed' };
   });

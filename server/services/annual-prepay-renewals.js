@@ -2756,6 +2756,18 @@ function coveredTermsAsOf(conn, coverageDate = null) {
 // keeps this check legible as "grace, specifically". Fails closed (false)
 // on any lookup error, matching every other non-strict path here.
 async function termiteGraceCoversVisit(scheduledService, conn) {
+  // Scoped to a visit with NO prepay stamp at all — one that already
+  // carries SOME prepaid_method (even a malformed/incomplete one) has a
+  // stamp from a DIFFERENT coverage decision and must fall through to
+  // that stamp's own validation in the caller, never be waved through by
+  // an unrelated grace window (Codex round-7 self-review: caught the
+  // regression this caused in annual-prepay-card-expiry-exempt and
+  // annual-prepay-coverage-gate before it shipped). Checked here, not as
+  // an `&&` at the call site, so annualPrepayCoversVisit gets one plain
+  // `if (await termiteGraceCoversVisit(...))` — the cheapest call shape,
+  // keeping that already-large function's own complexity at the ceiling
+  // rather than over it.
+  if (scheduledService.prepaid_method) return false;
   if (!scheduledService.customer_id) return false;
   const visitDate = dateOnly(scheduledService.scheduled_date) || dateOnly(scheduledService.completed_at);
   if (!visitDate) return false;
@@ -2824,15 +2836,10 @@ async function annualPrepayCoversVisit(scheduledService, conn = db, { throwOnErr
   // service? If so, suppress billing even with no stamp at all — never
   // mutates the visit row itself (a full stamp still requires the
   // successor to actually activate; this is a read-only billing-time
-  // recognition of the SAME window). Scoped to a visit with NO prepay
-  // stamp at all (`prepaid_method` unset) — a visit that already carries
-  // SOME prepaid_method (even a malformed/incomplete one, e.g. amount or
-  // term_id missing) has a stamp from a DIFFERENT coverage decision and
-  // must fall through to that stamp's own validation below, never be
-  // waved through by an unrelated grace window (Codex round-7 self-review:
-  // caught the regression this caused in annual-prepay-card-expiry-exempt
-  // and annual-prepay-coverage-gate before it shipped).
-  if (!scheduledService.prepaid_method && await termiteGraceCoversVisit(scheduledService, conn)) return true;
+  // recognition of the SAME window). termiteGraceCoversVisit itself scopes
+  // to an unstamped visit (see its own comment) — never waves through a
+  // visit that already carries some other, even malformed, prepay stamp.
+  if (await termiteGraceCoversVisit(scheduledService, conn)) return true;
 
   if (scheduledService.prepaid_method !== ANNUAL_PREPAY_PREPAID_METHOD) return false;
   // Strict callers (the extended-completion charging guard): a STAMPED
@@ -3698,6 +3705,28 @@ async function suspendActiveTermsForDisputedInvoice(invoiceId, conn = db) {
  *      (marker-deduped, balance-capped) reversal re-attempted.
  * Best-effort per term; a failure on one term never blocks the rest.
  */
+// P2-4 guard, extracted (Codex round-7 P2 self-review, AGENTS.md
+// L412-418): coveredTermsAsOf now also matches an UNPAID termite renewal
+// successor riding its 30-day grace — that is a "don't cancel it yet"
+// signal, not "money collected". Every leg of reconcileCoveredTermsSweep
+// below (pending-window completion settle/credit, extension-credit
+// restore, dispute recovery) assumes real money landed on the prepay
+// invoice; running any of them against a still-unpaid successor would
+// settle or credit against a charge that never happened. Confirm the
+// invoice actually reads paid before touching a payment_pending row — the
+// pre-existing paidPending branch (invoice already paid, term flip just
+// lagging) still proceeds untouched; only a genuinely-unpaid grace row is
+// skipped.
+async function isUnpaidGracePendingTerm(term, conn) {
+  if (term.status !== PAYMENT_PENDING_STATUS) return false;
+  const invoiceRow = term.prepay_invoice_id
+    ? await conn('invoices').where({ id: term.prepay_invoice_id }).first('status', 'paid_at')
+    : null;
+  const reallyPaid = !!invoiceRow
+    && (String(invoiceRow.status || '').toLowerCase() === 'paid' || !!invoiceRow.paid_at);
+  return !reallyPaid;
+}
+
 async function reconcileCoveredTermsSweep({ today = etDateString(), conn = db } = {}) {
   const summary = { terms: 0, settled: 0, credited: 0, reversed: 0, disputeRecovered: 0 };
   if (!(await annualPrepayTableExists())) return summary;
@@ -3710,24 +3739,7 @@ async function reconcileCoveredTermsSweep({ today = etDateString(), conn = db } 
   }
   for (const term of terms) {
     summary.terms += 1;
-    // P2-4 guard: coveredTermsAsOf now also matches an UNPAID termite
-    // renewal successor riding its 30-day grace — that is a "don't cancel
-    // it yet" signal, not "money collected". Every leg below (pending-
-    // window completion settle/credit, extension-credit restore, dispute
-    // recovery) assumes real money landed on the prepay invoice; running
-    // any of them against a still-unpaid successor would settle or credit
-    // against a charge that never happened. Confirm the invoice actually
-    // reads paid before touching a payment_pending row — the pre-existing
-    // paidPending branch (invoice already paid, term flip just lagging)
-    // still proceeds untouched; only a genuinely-unpaid grace row skips.
-    if (term.status === PAYMENT_PENDING_STATUS) {
-      const invoiceRow = term.prepay_invoice_id
-        ? await conn('invoices').where({ id: term.prepay_invoice_id }).first('status', 'paid_at')
-        : null;
-      const reallyPaid = !!invoiceRow
-        && (String(invoiceRow.status || '').toLowerCase() === 'paid' || !!invoiceRow.paid_at);
-      if (!reallyPaid) continue;
-    }
+    if (await isUnpaidGracePendingTerm(term, conn)) continue;
     // Dispute-marker leg (Codex round-3 P2): a COVERED term still carrying
     // dispute_suspended_at means the dispute resolved (coverage requires the
     // prepay invoice paid again) but the one-shot won-dispute restore didn't
@@ -5935,38 +5947,58 @@ async function hasAnnualPrepayRenewal(customerId, termEnd) {
 // Codex round-7 P1: a per-term SESSION-scoped Postgres advisory lock,
 // shared between recordDecision's own decision write below AND
 // termite-annual-renewal-charge.js's charge path (decideAndCharge, right
-// before its Stripe submission). SAME pattern admin-cancellation.js's
-// acquireCancelCommitLock already uses for its own commit-serialization —
-// pg_try_advisory_lock + an explicit pg_advisory_unlock, deliberately NOT
-// pg_advisory_xact_lock: the charge path holds this lock ACROSS a live
-// Stripe network call, which must never happen inside an open DB
-// transaction (a held xact lock would pin a pooled connection for the
-// whole round trip). Without a SHARED lock here, a cancel (or any other
-// decision) committed in the gap between resolveChargeEligibility's own
-// row lock releasing and the actual Stripe submission starting could
-// still get charged — those are two separate DB transactions with
-// nothing serializing them otherwise. Bounded retry (pg_try_advisory_lock,
-// not the blocking pg_advisory_lock, so a caller inside an HTTP request
-// can never hang indefinitely); fails CLOSED (throws) rather than
-// proceeding unserialized if the lock never frees up — the money path
-// never guesses.
+// before its Stripe submission). Deliberately NOT pg_advisory_xact_lock:
+// the charge path holds this lock ACROSS a live Stripe network call, which
+// must never happen inside an open DB transaction (a held xact lock would
+// pin a pooled connection for the whole round trip). Without a SHARED lock
+// here, a cancel (or any other decision) committed in the gap between
+// resolveChargeEligibility's own row lock releasing and the actual Stripe
+// submission starting could still get charged — those are two separate DB
+// transactions with nothing serializing them otherwise.
+//
+// Codex round-7 P2 self-review: admin-cancellation.js's own
+// acquireCancelCommitLock (the same session-scoped pg_try_advisory_lock +
+// explicit pg_advisory_unlock shape) fails IMMEDIATELY (409) on the first
+// missed try — correct for a foreground admin click, where "try again" is
+// free. Here a miss can mean "a decline landed exactly while the charge is
+// mid-flight", and a spurious failure has money/UX consequences a customer
+// never asked for. So this uses the BLOCKING pg_advisory_lock instead,
+// bounded by a `lock_timeout` set on the SAME connection (via set_config,
+// parameterized — `SET lock_timeout = <literal>` cannot take a bind
+// parameter) rather than a client-side pg_try_advisory_lock poll loop:
+// Postgres queues the waiter and wakes it the instant the lock frees
+// (no poll-interval latency), and a miss raises a precise 55P03
+// (lock_not_available) we translate into one clear, typed error — still
+// fails CLOSED (throws) rather than ever proceeding unserialized. The
+// session-level lock_timeout is RESET on this connection before it either
+// runs `fn()` or goes back to the pool — a session knex hands to some
+// unrelated later borrower must never inherit a 5-second lock ceiling on
+// its own unrelated locks.
 const PARENT_DECISION_LOCK_NS = 'annual-prepay-parent-decision';
-async function withParentDecisionLock(termId, fn, { maxAttempts = 25, retryDelayMs = 200 } = {}) {
+const PARENT_DECISION_LOCK_TIMEOUT_MS = 5000;
+async function withParentDecisionLock(termId, fn, { timeoutMs = PARENT_DECISION_LOCK_TIMEOUT_MS } = {}) {
+  // Internal, code-controlled only (never request-derived) — still clamp
+  // defensively before it ever reaches a query, parameterized or not.
+  const boundedTimeoutMs = Number.isInteger(timeoutMs) && timeoutMs > 0 ? timeoutMs : PARENT_DECISION_LOCK_TIMEOUT_MS;
   let lockConn = null;
   let locked = false;
   try {
     lockConn = await db.client.acquireConnection();
-    for (let attempt = 0; attempt < maxAttempts && !locked; attempt += 1) {
-      const res = await lockConn.query(
-        'SELECT pg_try_advisory_lock(hashtext($1), hashtext($2::text)) AS locked',
-        [PARENT_DECISION_LOCK_NS, String(termId)],
-      );
-      locked = !!(res && res.rows && res.rows[0] && res.rows[0].locked === true);
-      if (!locked) {
-        await new Promise((resolve) => { setTimeout(resolve, retryDelayMs); });
+    try {
+      await lockConn.query('SELECT set_config(\'lock_timeout\', $1, false)', [`${boundedTimeoutMs}ms`]);
+      await lockConn.query('SELECT pg_advisory_lock(hashtext($1), hashtext($2::text))', [PARENT_DECISION_LOCK_NS, String(termId)]);
+      locked = true;
+    } catch (err) {
+      if (err && err.code === '55P03') {
+        throw new Error(`could not acquire the parent-decision lock for term ${termId} within ${boundedTimeoutMs}ms — a decision or charge is already in progress for this term`);
       }
+      throw err;
+    } finally {
+      // Always clear the session-level timeout on THIS connection before
+      // it's used for anything else — including fn() below and the unlock
+      // statement, both of which run on the SAME session either way.
+      try { await lockConn.query('RESET lock_timeout'); } catch { /* connection likely already broken; the outer catch/finally handles it */ }
     }
-    if (!locked) throw new Error(`could not acquire the parent-decision lock for term ${termId}`);
     return await fn();
   } finally {
     if (lockConn) {

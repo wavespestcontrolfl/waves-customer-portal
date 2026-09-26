@@ -1,15 +1,25 @@
 jest.mock('../models/db', () => {
   const dbFn = jest.fn();
-  // Codex round-7 P1: recordDecision's own advisory lock
+  // Codex round-7 P1/P2: recordDecision's own advisory lock
   // (withParentDecisionLock) acquires a raw connection and always
   // succeeds on the FIRST try by default — same pattern
   // admin-customers-cancel-plan.test.js already uses for its own
-  // session-scoped advisory lock. A test exercising contention flips
-  // `dbFn.client.locked` to `false`.
+  // session-scoped advisory lock. The blocking pg_advisory_lock (bounded
+  // by a set_config'd lock_timeout, never the old pg_try_advisory_lock
+  // poll) either resolves (lock acquired) or throws a 55P03
+  // (lock_not_available) — flip `dbFn.client.locked` to `false` to
+  // exercise the timeout/contention path.
   const lockConn = {
-    query: jest.fn(async (sql) => (/pg_try_advisory_lock/.test(String(sql))
-      ? { rows: [{ locked: dbFn.client.locked }] }
-      : { rows: [] })),
+    query: jest.fn(async (sql) => {
+      if (/pg_advisory_lock/.test(String(sql)) && !/pg_advisory_unlock/.test(String(sql))) {
+        if (!dbFn.client.locked) {
+          const err = new Error('canceling statement due to lock timeout');
+          err.code = '55P03';
+          throw err;
+        }
+      }
+      return { rows: [] };
+    }),
   };
   dbFn.client = {
     locked: true,

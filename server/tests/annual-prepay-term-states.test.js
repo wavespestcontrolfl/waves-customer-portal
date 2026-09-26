@@ -30,12 +30,12 @@ const path = require('path');
 
 jest.mock('../models/db', () => {
   const dbFn = jest.fn();
-  // Codex round-7 P1: recordDecision's own advisory lock
-  // (withParentDecisionLock) acquires a raw connection and always
-  // succeeds on the first try — same pattern
-  // admin-customers-cancel-plan.test.js already uses for its own
-  // session-scoped advisory lock.
-  const lockConn = { query: jest.fn().mockResolvedValue({ rows: [{ locked: true }] }) };
+  // Codex round-7 P1/P2: recordDecision's own advisory lock
+  // (withParentDecisionLock) acquires a raw connection and its blocking
+  // pg_advisory_lock always resolves (never the 55P03 timeout path) —
+  // same pattern admin-customers-cancel-plan.test.js already uses for its
+  // own session-scoped advisory lock.
+  const lockConn = { query: jest.fn().mockResolvedValue({ rows: [] }) };
   dbFn.client = {
     locked: true,
     lockConn,
