@@ -1,6 +1,23 @@
 {
   "catalog_version": "2026-09-26.1",
   "section": "pest",
+  "site_categories": [
+    "Ants",
+    "Termites",
+    "Roaches",
+    "Mosquitoes & biters",
+    "Lawn",
+    "Spiders",
+    "Rodents",
+    "Biting",
+    "Stingers",
+    "Occasional invaders",
+    "Wildlife neighbors",
+    "Plant pests",
+    "Flies & gnats",
+    "Beetles & bugs",
+    "Pantry & fabric pests"
+  ],
   "categories": {
     "insect": {
       "id": "insect",

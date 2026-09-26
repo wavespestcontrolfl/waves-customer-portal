@@ -91,7 +91,9 @@ function loadCatalog() {
   for (const list of entriesByGroup.values()) deepFreeze(list);
 
   const lookAlikeGroups = deepFreeze((index.look_alike_groups || []).map((g) => Object.assign({}, g)));
-  const legacySlugMap = deepFreeze(Object.assign({}, index.legacy_slug_map || {}));
+  // Null prototype: an input like "constructor" or "__proto__" is not a
+  // legacy slug (Codex #4873 r2).
+  const legacySlugMap = deepFreeze(Object.assign(Object.create(null), index.legacy_slug_map || {}));
   const plannedSlugs = deepFreeze((index.planned_slugs || []).slice());
 
   return {
@@ -301,7 +303,10 @@ function buildWholeWordIndex(pairs) {
 // colony") would win over another entry's exact common-name match, purely
 // because its index happened to be checked first (Codex r1 P1).
 function exactMatch(normalized, index) {
-  const variants = [normalized, `${normalized}s`, normalized.replace(/s$/, '')];
+  const variants = [
+    normalized, `${normalized}s`, normalized.replace(/s$/, ''),
+    normalized.replace(/ies$/, 'y'), normalized.replace(/y$/, 'ies'),
+  ];
   for (const variant of variants) {
     const direct = variant && index.get(variant);
     if (direct) return direct;
@@ -324,8 +329,11 @@ function fuzzyScanAcross(normalized, indexed) {
     for (const [name, id] of index.entries()) {
       if (name.length < 4 && !SHORT_ALIASES.has(name)) continue;
       if (best && name.length <= best.len) continue;
-      const pluralSuffix = name.endsWith('larva') ? 'e?' : '(?:s|es)?';
-      if (new RegExp(`\\b${name}${pluralSuffix}\\b`).test(normalized)) {
+      // "whitefly" also matches "whiteflies"; "larva" matches "larvae".
+      const pattern = name.endsWith('larva') ? `${name}e?`
+        : /[^aeiou]y$/.test(name) ? `${name.slice(0, -1)}(?:y|ies)`
+          : `${name}(?:s|es)?`;
+      if (new RegExp(`\\b${pattern}\\b`).test(normalized)) {
         best = { id, via, len: name.length };
       }
     }
@@ -370,7 +378,9 @@ function buildNameIndices() {
   for (const sg of CATALOG.subgroups.values()) {
     nodePairs.push([sg.label, sg.id], [sg.id, sg.id]);
     if (generic(sg.generic)) nodePairs.push([generic(sg.generic), sg.id]);
-    if (sg.scientific && TAXON.test(sg.scientific.trim())) nodePairs.push([sg.scientific, sg.id]);
+    for (const part of String(sg.scientific || '').split('/')) {
+      if (TAXON.test(part.trim())) nodePairs.push([part.trim(), sg.id]);
+    }
   }
   return {
     scientific: buildWholeWordIndex(scientificPairs),

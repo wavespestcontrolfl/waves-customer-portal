@@ -53,7 +53,20 @@ const NEEDS_SAFETY_LINE = ['stings', 'venomous', 'irritant', 'disease_vector', '
 // Overclaims the outside review found: a diagnosis from a photo, absolute
 // safety, or a treatment promise. Commercial promises (prices, response
 // times) are customer copy the catalog must never carry either.
-const OVERCLAIM = /\b(means an active|confirms? (an |the )?infestation|can'?t bite|cannot bite|does not bite|won'?t bite|completely harmless|beats sprays?|main way to get relief|will (solve|eliminate|get rid))\b/i;
+const OVERCLAIM = /\b(means an active|confirms? (an |the )?infestation|completely harmless|beats sprays?|main way to get relief|will (solve|eliminate|get rid))\b/i;
+// "Doesn't bite / can't sting" is only true of an animal that can't: a flat
+// claim about the species must agree with its own safety flags (the southern
+// house spider's "can't bite" was the error this catches). A sentence about
+// one sex or life stage ("males cannot sting", "adults don't bite") or a
+// frequency ("almost never stings") is not a flat claim.
+const NO_BITE = /\b(can['’]?t|cannot|(does|do) not|(doesn|don)['’]?t|won['’]?t|never) (bite|bites)\b/i;
+const NO_STING = /\b(can['’]?t|cannot|(does|do) not|(doesn|don)['’]?t|won['’]?t|never) (sting|stings)\b|\bno stinger\b/i;
+function flatClaim(text, pattern) {
+  return text.split(/(?<=[.!?;—])\s+/).some((sentence) => pattern.test(sentence)
+    && !/\b(males?|females?|adults?|larvae|larva|workers?)\b/i.test(sentence) && !/\b(almost|rarely|seldom|usually)\b/i.test(sentence));
+}
+// A fixed-time outcome is a promise too ("they're gone in days").
+const TIMED_OUTCOME = /\b(gone|cleared|fixed|solved|over) (in|within) (a few |\d+ )?(days?|weeks?)\b/i;
 const COMMERCIAL_PROMISE = /\bfree (inspection|estimate|quote)s?\b|\bwithin (a|one|two|\d+) (day|days|hour|hours)\b|\busually within\b|\bno[- ]charge\b/i;
 const WILDLIFE_GROUPS = new Set(['wild-mammals', 'lizards', 'snakes', 'turtles', 'frogs-toads', 'birds']);
 
@@ -82,8 +95,8 @@ describe('species-catalog-v1 entries — schema (ported from validate.js)', () =
       const sg = index.subgroups.find((s) => s.id === e.subgroup);
       expect(sg.group).toBe(e.group);
     }
-    expect(typeof e.site_category).toBe('string');
-    expect(e.site_category.trim().length).toBeGreaterThan(0);
+    // The website's category filters join on these exact strings.
+    expect(index.site_categories).toContain(e.site_category);
 
     expect(Array.isArray(e.stages)).toBe(true);
     expect(Array.isArray(e.sign_of)).toBe(true);
@@ -211,6 +224,9 @@ describe('species-catalog-v1 entries — schema (ported from validate.js)', () =
     expect(copyText).not.toMatch(/\b(guarantee|guaranteed|same[- ]day|within (an|the) hour|today)\b/i);
     expect(copyText).not.toMatch(OVERCLAIM);
     expect(copyText).not.toMatch(COMMERCIAL_PROMISE);
+    expect(copyText).not.toMatch(TIMED_OUTCOME);
+    if (flatClaim(copyText, NO_BITE)) expect(e.safety.bites).toBe(false);
+    if (flatClaim(copyText, NO_STING)) expect(e.safety.stings).toBe(false);
     // Adult biting flies aren't a mosquito-treatment target (UF/IFAS).
     if (e.group === 'biting-flies' && e.slug !== 'no-see-um') expect(s.line).not.toBe('mosquito');
 
@@ -364,6 +380,24 @@ describe('resolveName regressions', () => {
 
   test('a curated short alias still matches inside a sentence (Codex #4873 r1)', () => {
     expect(catalog.resolveName('I found an asp on the oak').node.slug).toBe('puss-caterpillar');
+  });
+
+  test('a -ies plural keeps the specific species (Codex #4873 r2)', () => {
+    expect(catalog.resolveName('rugose spiraling whiteflies').node.slug).toBe('spiraling-whitefly');
+    expect(catalog.resolveName('whiteflies').node).toMatchObject({ level: 'subgroup', id: 'whiteflies' });
+  });
+
+  test('each taxon in a slash-delimited subgroup name resolves (Codex #4873 r2)', () => {
+    expect(catalog.resolveName('Viperidae').node).toMatchObject({ level: 'subgroup', id: 'venomous-snakes' });
+    expect(catalog.resolveName('Elapidae').node).toMatchObject({ level: 'subgroup', id: 'venomous-snakes' });
+    expect(catalog.resolveName('Paratrechina').node).toMatchObject({ level: 'subgroup', id: 'crazy-ants' });
+  });
+
+  test('object-prototype names are never legacy slugs (Codex #4873 r2)', () => {
+    for (const name of ['constructor', '__proto__', 'toString', 'hasOwnProperty']) {
+      expect(catalog.resolveLegacySlug(name)).toBeNull();
+      expect(catalog.resolveName(name)).toBeNull();
+    }
   });
 
   test('a bare genus resolves an "X spp." scientific name', () => {
