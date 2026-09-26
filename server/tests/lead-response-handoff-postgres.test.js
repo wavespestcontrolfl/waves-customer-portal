@@ -76,6 +76,12 @@ const SKIP = !process.env.DATABASE_URL;
     await db('lead_activities').whereIn('lead_id', leads).del();
     await db('phone_line_types').whereIn('phone', phones).del();
     await db('messaging_suppression').whereIn('phone', phones).del();
+    // send_lead_response takes the phone's once-ever first-touch claim; a
+    // leftover claim would short-circuit later cases (and later suite runs)
+    // with FIRST_TOUCH_ALREADY_SENT before the behavior they assert.
+    await db('lead_auto_reply_sends')
+      .whereIn('phone_digits', [...phones, '+19415550122', '+19415550129'].map(phone => phone.slice(-10)))
+      .del();
   }
 
   beforeEach(async () => {

@@ -20,7 +20,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/automation-runner', () => ({ enrollCustomer: jest.fn() }));
 
 const { _test } = require('../routes/lead-webhook');
-const { settleLeadResponseAgentRun, LEAD_AGENT_FALLBACK_AFTER_MS, flushPendingLeadFallbacks, pendingLeadFallbacks } = _test;
+const { settleLeadResponseAgentRun, LEAD_AGENT_FALLBACK_AFTER_MS, flushPendingLeadFallbacks, pendingLeadFallbacks, singleFlight } = _test;
 
 // Runs that never settle stay registered in the module-level set.
 beforeEach(() => pendingLeadFallbacks.clear());
@@ -184,5 +184,33 @@ describe('flushPendingLeadFallbacks (deploy shutdown)', () => {
     const started = Date.now();
     await expect(flushPendingLeadFallbacks(20)).resolves.toBe(1);
     expect(Date.now() - started).toBeLessThan(1000);
+  });
+});
+
+describe('singleFlight (the route\'s fallback sender)', () => {
+  test('a flush during the guard\'s in-flight send waits for that same send', async () => {
+    let finishSend;
+    const send = jest.fn(() => new Promise((resolve) => { finishSend = resolve; }));
+    const sendFallback = singleFlight(send);
+    const guardSend = sendFallback();
+    pendingLeadFallbacks.add(sendFallback);
+    let flushed = false;
+    const flushing = flushPendingLeadFallbacks(1000).then(() => { flushed = true; });
+    await new Promise(r => setImmediate(r));
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(flushed).toBe(false);
+    finishSend();
+    await flushing;
+    await guardSend;
+    expect(flushed).toBe(true);
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  test('a call after the send settles starts a fresh one (the late retry)', async () => {
+    const send = jest.fn(async () => {});
+    const sendFallback = singleFlight(send);
+    await sendFallback();
+    await sendFallback();
+    expect(send).toHaveBeenCalledTimes(2);
   });
 });

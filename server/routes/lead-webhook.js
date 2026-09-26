@@ -762,9 +762,12 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
     // record, double submission racing the 5-min window — 20 phones got
     // the menu text twice in prod). See services/lead-auto-reply.js for
     // the dedup predicate and the once-ever claim mechanism.
-    // The agent's fallback: the standard reply, once-ever claimed.
-    const sendFallbackAutoReply = () => sendLeadAutoReplyOnce({ customer, phoneFormatted, firstName, location, leadSource })
-      .catch(fallbackErr => logger.error(`[lead-agent] Fallback standard reply failed: ${fallbackErr.message}`));
+    // The agent's fallback: the standard reply, once-ever claimed. Single
+    // flight: a call while a send is in flight (the guard's, then a
+    // shutdown flush) returns that same send, so the flush waits for the
+    // real dispatch instead of a duplicate that finds the claim and returns.
+    const sendFallbackAutoReply = singleFlight(() => sendLeadAutoReplyOnce({ customer, phoneFormatted, firstName, location, leadSource })
+      .catch(fallbackErr => logger.error(`[lead-agent] Fallback standard reply failed: ${fallbackErr.message}`)));
     // With the agent configured, the lead's one-minute clock starts here,
     // where the immediate reply is skipped, not after the estimate work
     // below. The guard sends the standard reply at the deadline even if
@@ -1839,6 +1842,16 @@ const LEAD_AGENT_FALLBACK_AFTER_MS = 60 * 1000;
 // allows exactly one text, so an agent send that already landed wins.
 const pendingLeadFallbacks = new Set();
 
+// Wraps an async function so overlapping calls share the one in flight; a
+// call after it settles starts a fresh one.
+function singleFlight(fn) {
+  let inFlight = null;
+  return () => {
+    if (!inFlight) inFlight = Promise.resolve().then(fn).finally(() => { inFlight = null; });
+    return inFlight;
+  };
+}
+
 async function flushPendingLeadFallbacks(timeoutMs = 10000) {
   const pending = [...pendingLeadFallbacks];
   pendingLeadFallbacks.clear();
@@ -1939,6 +1952,7 @@ module.exports._test = {
   settleLeadResponseAgentRun,
   flushPendingLeadFallbacks,
   pendingLeadFallbacks,
+  singleFlight,
   LEAD_AGENT_FALLBACK_AFTER_MS,
   applyLeadEstimateAutomationGate,
   determineLeadSource,
