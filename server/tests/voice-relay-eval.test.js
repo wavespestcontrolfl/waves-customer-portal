@@ -951,6 +951,36 @@ describe('voice relay eval — each expect key', () => {
     for (const text of violating) expect([text, matches(text)]).toEqual([text, false]);
   });
 
+  // PR #4946 review (r7): a bare figure followed by ANY billing unit is a
+  // price, so each quoted figure must carry "per application" on its own —
+  // while a single-digit count before "per month" is not a price.
+  test.each([
+    [['Son 119 por aplicación y 99 por tratamiento.'], 'aplicación', 'fail'],
+    [['It is $119 per application and 99 per treatment.'], 'application', 'fail'],
+    [['It is $119 per application and 99 per visit.'], 'application', 'fail'],
+    [['Son 119 por aplicación y 99 por aplicación.'], 'aplicación', 'pass'],
+    [['It is $119 per application; we come 2 per month.'], 'application', 'pass'],
+  ])('amount_requires_unit: every billed figure needs the unit: %j', (spoken, unit, status) => {
+    const { SPOKEN_CHECK_RUNNERS } = require('../services/eval/voice-relay-spoken-checks');
+    expect(SPOKEN_CHECK_RUNNERS.amount_requires_unit({ amount: [119, 99], unit }, {}, { spoken })[0]).toBe(status);
+  });
+
+  // PR #4946 review (r7): "from"/"desde" windows (with Spanish articles) must
+  // be detected, so a window spoken BEFORE get_today_eta ran is ungrounded.
+  test.each([
+    ['eta-matched-attested', 'The window is from one to three.'],
+    ['spanish-eta-matched-attested', 'La ventana es desde la una hasta las tres.'],
+    ['spanish-eta-matched-attested', 'La ventana es de la una a las tres de la tarde.'],
+  ])('%s: a window spoken before the lookup fails, the same words after it pass: %s', (id, text) => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === id);
+    const looked = { kind: 'tool', name: 'get_today_eta', ok: true };
+    const early = replay._internals.evaluateChecks(scenario, record({ order: [{ kind: 'agent', text }, looked, { kind: 'agent', text }] }));
+    expect(early.find((c) => c.check === 'no_visit_time')).toMatchObject({ severity: 'critical', status: 'fail' });
+    const grounded = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text }] }));
+    expect(replay._internals.scenarioStatus({ checks: grounded })).toBe('pass');
+  });
+
   test('pricing-gate-on: a discount is a major miss beside a correct quote', () => {
     const replay = require('../services/eval/voice-relay-replay');
     const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'pricing-gate-on');

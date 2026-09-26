@@ -168,7 +168,14 @@ const PRICE_NUMBER = `(?:(?<![\\d.,/-])(?:0|[1-9][\\d,]*)(?:\\.\\d+)?(?![\\d/-])
 // bilingual regex, not a per-language copy — Spanish spelled-out numbers are
 // already digits by the time this runs (normalizeSpanishSpokenText, wired
 // in gradedRecordFor), so PRICE_NUMBER itself needs no Spanish number words.
-const priceRe = (unit) => new RegExp(`\\$\\s?(${PRICE_NUMBER})|(${PRICE_NUMBER})\\s*(?:dollars?|bucks|d[oó]lares?)\\b|(${PRICE_NUMBER})\\s*(?:per|an?|each|every|for each|for every|por|cada)\\s+${unit}s?\\b`, 'gi');
+// PR #4946 review: a bare figure followed by ANY billing unit is a price too
+// ("119 por aplicación y 99 por tratamiento"), so every quoted figure must
+// carry the required unit on its own. For units other than the required one
+// the figure needs two or more digits (as BARE_TOTAL_NUMBER below): a single
+// digit before "por mes"/"per visit" is a count ("2 por mes"), not a price.
+const BILLING_UNIT = '(?:applications?|treatments?|visits?|services?|months?|years?|weeks?|quarters?|aplicaci[oó]n(?:es)?|tratamientos?|visitas?|servicios?|mes(?:es)?|a[nñ]os?|semanas?|trimestres?)';
+const BARE_BILLED_NUMBER = '(?<![\\d.,/$-])[1-9]\\d(?:\\d|,\\d{3})*(?:\\.\\d+)?(?![\\d/-])';
+const priceRe = (unit) => new RegExp(`\\$\\s?(${PRICE_NUMBER})|(${PRICE_NUMBER})\\s*(?:dollars?|bucks|d[oó]lares?)\\b|(${PRICE_NUMBER})\\s*(?:per|an?|each|every|for each|for every|por|cada)\\s+${unit}s?\\b|(${BARE_BILLED_NUMBER})\\s*(?:per|each|every|por|cada)\\s+${BILLING_UNIT}(?![a-záéíóúñ])`, 'gi');
 // Customer-facing price copy reads "per application"/"por aplicación" —
 // AGENTS.md; "per visit"/"por visita"/"cada visita" is banned outright,
 // negated or not: "not per visit" is still the prohibited phrase in the
@@ -238,7 +245,7 @@ function amount_requires_unit(value, record, { spoken }) {
     for (const sentence of text.split(SENTENCE_SPLIT_RE)) {
       for (const clause of sentence.split(PRICE_CLAUSE_SPLIT_RE)) {
         price.lastIndex = 0;
-        const amounts = [...clause.matchAll(price)].map((m) => parseAmount(m[1] || m[2] || m[3]));
+        const amounts = [...clause.matchAll(price)].map((m) => parseAmount(m[1] || m[2] || m[3] || m[4]));
         if (!amounts.length) continue;
         if (!unit.test(clause)) {
           // The caller cut Sandy off right after the figure, before its unit
@@ -348,7 +355,11 @@ const TIME_ANYWHERE_RES = Object.freeze([
   // for this to catch. The trailing negative lookahead (NOT_A_TIME/
   // NOT_A_QUANTITY_ES) is a second Codex round-2 P1: without it "entre dos y
   // cuatro habitaciones" (a room count, not a time) also matched.
-  new RegExp(`\\b(?:between|entre|de)\\s+${RANGE_HOUR}(?::[0-5]\\d)?\\s*${MERIDIEM}?\\s*${RANGE}\\s+${RANGE_HOUR}\\b(?!\\s*(?:${NOT_A_TIME}|${NOT_A_QUANTITY_ES}))`, 'i'),
+  // PR #4946 review: "from"/"desde" lead a window too, and Spanish puts an
+  // article before either endpoint ("desde la una hasta las tres") — every
+  // form the ETA requirement accepts must also be DETECTED here, or a window
+  // spoken before the lookup (afterTool) slips through ungrounded.
+  new RegExp(`\\b(?:between|from|entre|de|desde)\\s+(?:las?\\s+)?${RANGE_HOUR}(?::[0-5]\\d)?\\s*${MERIDIEM}?\\s*${RANGE}\\s+(?:las?\\s+)?${RANGE_HOUR}\\b(?!\\s*(?:${NOT_A_TIME}|${NOT_A_QUANTITY_ES}))`, 'i'),
   new RegExp(`\\b(?:at|around|about|by|exactly at|right at|closer to|near|before|after|until|till)\\s+${HOUR}(?::00)?\\b(?!\\s*(?:${RANGE}|${NOT_A_TIME}))`, 'i'),
   new RegExp(`\\b(?:expect(?:ing|ed)?|anticipat(?:e|ing)|arriv(?:e|es|ing|al)|be there|show(?:ing)? up|get there|come by|coming|due|eta)(?:\\s+(?:is|of|should|will|would|might|may|could|to|probably|likely|be|there))*\\s+(?:(?:at|around|about|by|before|after)\\s+)?${HOUR}(?::00)?\\b(?!\\s*(?:${RANGE}|${NOT_A_TIME}))`, 'i'),
   /\b(?:noon|midday|midnight|mediod[ií]a|medianoche)\b/i,
