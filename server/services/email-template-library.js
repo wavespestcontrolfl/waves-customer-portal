@@ -16,6 +16,7 @@ const logger = require('./logger');
 const NotificationService = require('./notification-service');
 const { isInternalTestEmail } = require('./internal-test-customers');
 const { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_E164 } = require('../constants/business');
+const { sanitizeBillingReplayContext } = require('./billing-email-replay-context');
 
 const VARIABLE_RE = /\{\{\s*([a-zA-Z][a-zA-Z0-9_]*)\s*\}\}/g;
 const ASM_UNSUBSCRIBE_URL = '<%asm_group_unsubscribe_raw_url%>';
@@ -572,6 +573,28 @@ function redactedPayloadSnapshot(value) {
   ]));
 }
 
+const BILLING_REPLAY_CONTEXT_KEY = '__billing_replay_context';
+
+function billingReplayContextForSnapshot(context, facts = {}) {
+  const out = sanitizeBillingReplayContext(context);
+  if (!out) return null;
+  const expectedTemplate = out.category === 'payment_receipt' ? 'billing.receipt_notice' : 'billing.notice';
+  const expectedKey = `billing_channel_email:${out.notificationEventKey}:email`;
+  if (facts.templateKey !== expectedTemplate || facts.recipientType !== 'customer'
+    || String(facts.recipientId) !== out.customer_id || facts.triggerEventId !== out.notificationEventKey
+    || facts.idempotencyKey !== expectedKey || !(facts.categories || []).includes(out.category)) return null;
+  return out;
+}
+
+function payloadSnapshotForSend(payload, billingReplayContext, facts) {
+  const snapshot = redactedPayloadSnapshot(payload || {});
+  if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) return snapshot;
+  delete snapshot[BILLING_REPLAY_CONTEXT_KEY];
+  const safeContext = billingReplayContextForSnapshot(billingReplayContext, facts);
+  if (safeContext) snapshot[BILLING_REPLAY_CONTEXT_KEY] = safeContext;
+  return snapshot;
+}
+
 function effectiveSuppressionGroupKeyFor(template, suppressionGroupKey) {
   if (suppressionGroupKey !== undefined && suppressionGroupKey !== null) {
     const override = String(suppressionGroupKey).trim();
@@ -969,6 +992,7 @@ async function sendTemplate({
   categories = [],
   attachments = [],
   suppressionGroupKey,
+  billingReplayContext = null,
   // PII-sensitive bulk callers (e.g. the weekly irrigation sweep) set this so
   // sendOne does NOT log the raw SendGrid response body — provider rejections
   // can echo the recipient address, and email addresses in logs are a P1. The
@@ -1220,7 +1244,14 @@ async function sendTemplate({
     subject_snapshot: test ? `[TEST] ${rendered.subject}` : rendered.subject,
     html_snapshot: rendered.html,
     text_snapshot: rendered.text,
-    payload_snapshot: JSON.stringify(redactedPayloadSnapshot(payload || {})),
+    payload_snapshot: JSON.stringify(payloadSnapshotForSend(payload, billingReplayContext, {
+      templateKey: template.template_key,
+      recipientType: test ? 'test' : (recipientType || null),
+      recipientId: recipientId || null,
+      triggerEventId: triggerEventId || null,
+      idempotencyKey: idempotencyKey || null,
+      categories: allCategories,
+    })),
     categories: JSON.stringify(allCategories),
     idempotency_key: idempotencyKey || null,
     // Attachments aren't persisted in the snapshot; flag their presence so the
@@ -1582,6 +1613,7 @@ module.exports = {
   normalizeBlocks,
   validationFor,
   redactedPayloadSnapshot,
+  payloadSnapshotForSend,
   redactEmailAddresses,
   safeUrl,
   productionPlaceholderPayloadValues,
