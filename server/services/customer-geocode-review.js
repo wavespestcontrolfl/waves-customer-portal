@@ -162,4 +162,4 @@ async function attemptReviewedGeocode(customerId, conn = db, { onCoordinatesComm
 
 module.exports = { reviewEnabled, addressSnapshot, reviewRevision, saveReview, getReviewDetail, listReviewQueue,
   attemptReviewedGeocode, excludeReviewedAddresses, effectiveReview, blocksAutomaticGeocode,
-  filterServiceReviewBlocks, reviewedServiceLocation };
+  filterServiceReviewBlocks, reviewedServiceLocation, serviceReviewDecision };

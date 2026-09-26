@@ -449,6 +449,22 @@ postgres('service-location geocoder against isolated PostgreSQL', () => {
       .toMatchObject({ metadata: expect.objectContaining({ source: 'staff_verified_pin' }) });
   });
 
+  test('staff verification releases a cached provider rejection without retrying unrelated properties', async () => {
+    await mockConnection('customers').where({ id: CUSTOMER }).update({ latitude: null, longitude: null });
+    await enableReviewGate();
+    await insertService(id(98), { service_address_line1: '100 Primary Fixture Way', service_address_zip: '34205-6789' });
+    await insertService(id(99), { service_address_line1: '900 Secondary Fixture Way' });
+    geocodeAddressWithStatus.mockResolvedValue({ location: null, permanent: true });
+    expect(await sweepUngeocodedServices({ now: NOW, dryRun: false }, mockConnection))
+      .toMatchObject({ checked: 2, unresolved: 2 });
+    await insertReview('verified');
+    const recovered = await sweepUngeocodedServices({ now: NOW, dryRun: false }, mockConnection);
+    expect(recovered).toMatchObject({ checked: 1, geocoded: 1, failed: 0 });
+    expect(recovered.stops[0].id).toBe(id(98));
+    expect(geocodeAddressWithStatus).toHaveBeenCalledTimes(2);
+    expect(await mockConnection('scheduled_services').where({ id: id(99) }).first('lat', 'lng')).toEqual({ lat: null, lng: null });
+  });
+
   test('a reviewed primary does not block appointments with a different unit or state', async () => {
     const differentUnit = id(96);
     const differentState = id(97);

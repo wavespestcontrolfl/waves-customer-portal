@@ -26,6 +26,15 @@ async function pruneUnresolved(conn) {
   while (unresolved.size > 2000) unresolved.delete(unresolved.keys().next().value);
   if (!unresolved.size) return;
   const rows = await conn('scheduled_services').whereIn('id', [...unresolved.keys()]).select(SNAPSHOT_COLUMNS);
+  const review = require('./customer-geocode-review');
+  if (review.reviewEnabled()) {
+    const verified = await conn('customer_geocode_reviews').where('status', 'verified')
+      .whereIn('customer_id', [...new Set(rows.map(row => row.customer_id))]);
+    const byCustomer = new Map(verified.map(row => [row.customer_id, row]));
+    for (const row of rows) {
+      if (review.serviceReviewDecision(row, byCustomer.get(row.customer_id))?.location) unresolved.delete(row.id);
+    }
+  }
   const current = new Map(rows.map(row => [row.id, fingerprint(row)]));
   for (const [id, stamp] of unresolved) if (current.get(id) !== stamp) unresolved.delete(id);
 }
