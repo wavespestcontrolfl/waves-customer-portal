@@ -102,17 +102,26 @@ function parseData(value) {
   return typeof value === 'object' ? value : null;
 }
 
+// An authored proposal prices from its own stored itemization — building
+// line items, service programs, or corrective work (estimate-proposal.js
+// normalizeProposal). A bare `enabled` flag without any falls back to the
+// synthesized builder price, which the hold still judges (codex r2 P1 #4941).
+function proposalCarriesItemization(proposal) {
+  if (!proposal || proposal.enabled !== true) return false;
+  return ['buildings', 'programs', 'correctiveWork'].some((key) => Array.isArray(proposal[key]) && proposal[key].length > 0);
+}
+
 /**
  * The row verdict every customer-facing rail shares (assertEstimateSendable,
  * the group-sibling preflight, and pricing-authority-gate's
  * rowPassesGatedSendAuthority, which the follow-up / engagement / renewal /
- * extension / composer / deposit / voice rails all ask). Exempt: an authored
+ * extension / composer / deposit / voice rails all ask). Exempt: an itemized
  * proposal (its line items are the price; the retained builder snapshot is
  * inert — codex r1 P1 #4941) and a price the customer already accepted.
  */
 function rowHeldForLegacyAutofillPrice(row = {}) {
   const data = parseData(row?.estimate_data ?? row?.estimateData);
-  if (!data || data.proposal?.enabled === true) return false;
+  if (!data || proposalCarriesItemization(data.proposal)) return false;
   if (row.price_locked_at != null || String(row.status || '') === 'accepted') return false;
   return legacyAutofillPriceReasons(data).length > 0;
 }

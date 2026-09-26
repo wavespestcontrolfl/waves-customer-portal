@@ -74,7 +74,9 @@ describe('rowHeldForLegacyAutofillPrice — the shared row verdict (codex r1 P1 
   });
 
   test('exempts an authored proposal and a price the customer already accepted', () => {
-    expect(rowHeldForLegacyAutofillPrice({ status: 'sent', estimate_data: { ...guessed, proposal: { enabled: true } } })).toBe(false);
+    expect(rowHeldForLegacyAutofillPrice({ status: 'sent', estimate_data: { ...guessed, proposal: { enabled: true, buildings: [{ name: 'A' }] } } })).toBe(false);
+    // A bare flag falls back to the synthesized builder price — still held (codex r2 P1).
+    expect(rowHeldForLegacyAutofillPrice({ status: 'sent', estimate_data: { ...guessed, proposal: { enabled: true } } })).toBe(true);
     expect(rowHeldForLegacyAutofillPrice({ status: 'accepted', estimate_data: guessed })).toBe(false);
     expect(rowHeldForLegacyAutofillPrice({ status: 'sent', price_locked_at: new Date(), estimate_data: guessed })).toBe(false);
   });
