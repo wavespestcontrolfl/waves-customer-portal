@@ -134,3 +134,17 @@ describe('risk-type inference source', () => {
     expect(guard).not.toMatch(/businessType/);
   });
 });
+
+describe('engine adoption of the lookup suite size', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const src = fs.readFileSync(path.join(__dirname, '../services/estimator-engine/index.js'), 'utf8');
+  test('adopts only a license-sourced lookup size; a lookup type default is re-resolved with the call context', () => {
+    const i = src.indexOf('const lookupSuiteSize = effectiveSignals.enriched?.suiteSize');
+    expect(i).toBeGreaterThan(-1);
+    const block = src.slice(i, i + 1400);
+    expect(block).toMatch(/lookupSuiteSize\.source === SQFT_SOURCES\.LICENSE_SEATS/);
+    expect(block).toMatch(/phone: context\?\.phone/);
+    expect(block).toMatch(/skipWebSearch: Boolean\(lookupSuiteSize\)/);
+  });
+});

@@ -2646,8 +2646,14 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
             // Only resolve directly when the lookup didn't (no lookup
             // record, or its own classifier didn't see the suite signal the
             // call/SMS extraction did).
+            // Adopt only a SOURCED lookup result (license seats). A lookup
+            // type default was chosen without what the call knows — the
+            // caller's phone (a DBPR disambiguator) and the composed risk
+            // type — so re-resolve with those instead (no web leg: the
+            // lookup already ran it, and it sizes nothing).
             const lookupSuiteSize = effectiveSignals.enriched?.suiteSize || null;
-            let suiteSize = (lookupSuiteSize && Number(lookupSuiteSize.value) > 0) ? lookupSuiteSize : null;
+            let suiteSize = (lookupSuiteSize && Number(lookupSuiteSize.value) > 0
+              && lookupSuiteSize.source === SQFT_SOURCES.LICENSE_SEATS) ? lookupSuiteSize : null;
             if (!suiteSize) {
               const { resolveCommercialSuiteSize } = require('../commercial-suite-size');
               const { parseRawAddress, splitStreetLineUnitParts } = require('../../utils/address-normalizer');
@@ -2660,7 +2666,10 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
                 businessNameHint: intent.customer_name || null,
                 commercialRiskType: intent.commercial_risk_type || null,
                 commercialSubtype: intent.commercial_subtype || null,
-              });
+              }, { skipWebSearch: Boolean(lookupSuiteSize) });
+              if (suiteSize && !suiteSize.businessName && lookupSuiteSize?.businessName) {
+                suiteSize = { ...suiteSize, businessName: lookupSuiteSize.businessName };
+              }
             }
             if (suiteSize && Number(suiteSize.value) > 0) {
               propertyFacts.home = {
