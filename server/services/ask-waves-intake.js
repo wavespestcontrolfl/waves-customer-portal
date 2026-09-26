@@ -469,7 +469,12 @@ function emergencyGuidance(result, contextText = '') {
   // Human guidance is dropped for a clause only when the animal is plainly
   // the patient ("My dog swallowed bait") — a pet mention alone ("My leg is
   // swelling after a dog bite") keeps it; an ambiguous clause gets both.
-  const humanClause = clauses.some((c) => !(PET_PATIENT_RE.test(c) && !PERSON_SUBJECT_RE.test(c)));
+  // A direct medical symptom (EMERGENCY_RE: can't breathe, unconscious,
+  // chest pain…) always keeps the human script, even beside a pet
+  // ("My dog swallowed bait and I cannot breathe") — the human script is
+  // dropped only when a pet eating something is the clause's sole evidence.
+  const humanClause = clauses.some((c) => EMERGENCY_RE.test(c)
+    || !(PET_PATIENT_RE.test(c) && !PERSON_SUBJECT_RE.test(c)));
   const petClause = clauses.some((c) => PET_SUBJECT_RE.test(c));
   const human = HUMAN_EMERGENCY_DIRECTION_RE.test(folded) || humanClause;
   const vet = VET_DIRECTION_RE.test(folded) || petClause;

@@ -676,6 +676,12 @@ describe('normalizeIntakeResult', () => {
     expect(out.reply).toMatch(/veterinarian or an emergency animal hospital/);
   });
 
+  test('a pet ingestion and a human symptom in ONE sentence gets both scripts', () => {
+    const out = scrubUnsafeClaims({ reply: 'It is not safe to eat.', intent: 'question', service_keys: [], ready_for_quote: false }, 'My dog swallowed bait and I cannot breathe.');
+    expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
+    expect(out.reply).toMatch(/veterinarian or an emergency animal hospital/);
+  });
+
   test('an earlier pet mention does not add vet copy to a child ingestion', () => {
     const out = scrubUnsafeClaims({ reply: 'It is not safe to eat.', intent: 'question', service_keys: [], ready_for_quote: false }, 'I have a dog and a cat.\nMy son swallowed some bait');
     expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
