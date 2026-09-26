@@ -492,3 +492,23 @@ test('a held-over promise whose call cannot be verified still drops off when lat
   await expect(runFollowUpSlaWatcher({ now: NOW })).rejects.toThrow('verification incomplete');
   expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
 });
+
+test('the closure calendar runs from the oldest scanned promise through 60 days AHEAD of now — a closed today counts', async () => {
+  mockDb();
+  listOpenCommitments.mockResolvedValue([]);
+  await runFollowUpSlaWatcher({ now: NOW });
+  const { getBlackoutLayers } = require('../services/scheduling/blackout-dates');
+  const [from, to] = getBlackoutLayers.mock.calls.at(-1);
+  expect(from <= '2026-07-27').toBe(true);
+  expect(to).toBe('2026-11-25');
+});
+
+test('the scan pages until exhaustion — no hidden row ceiling', async () => {
+  mockDb();
+  const page = (n) => Array.from({ length: n }, (_, i) => row(`p${n}-${i}`, { call_started_at: et('09:00', '2026-09-20').toISOString() }));
+  listOpenCommitments.mockReset();
+  for (let i = 0; i < 30; i += 1) listOpenCommitments.mockResolvedValueOnce(page(200));
+  listOpenCommitments.mockResolvedValueOnce([]);
+  await runFollowUpSlaWatcher({ now: NOW });
+  expect(listOpenCommitments).toHaveBeenCalledTimes(31);
+});

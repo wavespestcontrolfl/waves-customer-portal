@@ -49,7 +49,6 @@ const DAY_OPEN = '08:00';
 const DAY_CLOSE = '20:00';
 const WINDOW_MS = 24 * 60 * 60 * 1000;
 const SCAN_LIMIT = 200;
-const MAX_PAGES = 25;
 // Each rolling-list post is keyed `${ROLLING_KEY}:<posted at>`.
 const ROLLING_KEY = 'followup-sla-rolling';
 
@@ -58,10 +57,13 @@ const ROLLING_KEY = 'followup-sla-rolling';
 // calendar marks closed (holidays, closures: the blackout layers the
 // callback cards already honor). The math is callback-cards' staffedDeadline.
 const OPEN_CALENDAR = Object.freeze({ start: DAY_OPEN, end: DAY_CLOSE, closed: new Set() });
-async function loadSlaCalendar(conn, from) {
+// Closed days from the oldest promise scanned through the furthest deadline
+// staffedDeadline can reach from now (60 days ahead) — today's and future
+// closures included, or a closed day would count as staffed time.
+async function loadSlaCalendar(conn, from, now = new Date()) {
   const { getBlackoutLayers } = require('./scheduling/blackout-dates');
   const { addETDays } = require('../utils/datetime-et');
-  const { dates } = await getBlackoutLayers(etDateString(from), etDateString(addETDays(from, 60)), conn);
+  const { dates } = await getBlackoutLayers(etDateString(from), etDateString(addETDays(now, 60)), conn);
   return { start: DAY_OPEN, end: DAY_CLOSE, closed: dates };
 }
 
@@ -237,7 +239,9 @@ const LOOKBACK_MS = WINDOW_MS + 60 * 24 * 60 * 60 * 1000;
 async function listOpenWaves(now) {
   const all = [];
   const activeSince = new Date(now.getTime() - LOOKBACK_MS);
-  for (let page = 0; page < MAX_PAGES; page += 1) {
+  // Every page, however many: the list is uncapped, and the read is already
+  // bounded to promises that can fall due inside the window (activeSince).
+  for (let page = 0; ; page += 1) {
     const rows = await commitments.listOpenCommitments(db, { party: 'waves', limit: SCAN_LIMIT, offset: page * SCAN_LIMIT, includeHints: true, prepare: page === 0, now, activeSince });
     all.push(...rows);
     if (rows.length < SCAN_LIMIT) break;
@@ -282,7 +286,7 @@ async function slaOwnedIds(conn, rows, now = new Date()) {
     : [];
   const endedById = new Map(calls.map((c) => [c.id, commitments.callEndedAt(c)]));
   const floor = now.getTime() - WINDOW_MS;
-  const calendar = await loadSlaCalendar(conn, new Date(now.getTime() - LOOKBACK_MS));
+  const calendar = await loadSlaCalendar(conn, new Date(now.getTime() - LOOKBACK_MS), now);
   return new Set(eligible.filter((r) => {
     const due = slaDueAt({ ...r, call_ended_at: endedById.get(r.call_log_id) || null }, calendar);
     return due && due.getTime() > floor;
@@ -342,7 +346,7 @@ async function runInner({ now = new Date() } = {}) {
     : [];
   const endedById = new Map(calls.map((c) => [c.id, commitments.callEndedAt(c)]));
   const rows = listed.map((r) => ({ ...r, call_ended_at: endedById.get(r.call_log_id) || null }));
-  const calendar = await loadSlaCalendar(db, new Date(now.getTime() - LOOKBACK_MS));
+  const calendar = await loadSlaCalendar(db, new Date(now.getTime() - LOOKBACK_MS), now);
   let candidates = selectMissed(rows, { now, calendar });
   // Refresh the proof for the candidate calls first — nothing stamps
   // fulfillment until someone opens the queue — and never page on a call
