@@ -49,6 +49,8 @@ function parseNotes(value) {
 }
 
 const roundCents = (n) => Math.round(n * 100) / 100;
+// Money is compared in integer cents, never as float dollars.
+const toCents = (n) => Math.round((Number(n) || 0) * 100);
 
 // The visit's add-on rows, read strictly — the canonical line builder
 // swallows a failed read into "no add-ons", which here would silently skip a
@@ -90,7 +92,8 @@ async function annualPrepayExtrasForVisit(svc, addons) {
   const primaryId = `scheduled_${svc.id}_primary`;
   const lines = lineItems.filter((li) => addons.clientIds.has(li.client_id) || addons.clientIds.has(li.discount_for));
   if (!lines.some((li) => Number(li.amount) > 0)) {
-    throw new Error('the visit has priced add-ons but no add-on invoice lines were built');
+    // A data problem a retry cannot fix (the builder dropped priced rows).
+    throw Object.assign(new Error('the visit has priced add-ons but no add-on invoice lines were built'), { code: 'ADDON_LINES_NOT_BUILT' });
   }
   const ambiguous = lineItems.some((li) => Number(li.amount) < 0
     && li.discount_for !== primaryId && !addons.clientIds.has(li.discount_for));
@@ -132,7 +135,7 @@ function invoiceBillsExactExtras(invoice, addons, extras) {
   const want = billedIds(extras.lines);
   const have = billedIds(invoiceAddonLines);
   const net = roundCents(invoiceAddonLines.reduce((sum, li) => sum + (Number(li.amount) || 0), 0));
-  return want.size === have.size && [...want].every((id) => have.has(id)) && net === extras.total;
+  return want.size === have.size && [...want].every((id) => have.has(id)) && toCents(net) === toCents(extras.total);
 }
 
 // A voided office invoice may have priced the add-ons its own way (a
@@ -147,7 +150,7 @@ function voidedInvoiceRepricing(voidedInvoice, addons, extras, serviceId) {
   const addonLines = lines.filter(onAddons);
   const otherCredit = lines.some((li) => Number(li.amount) < 0 && !onAddons(li) && li.discount_for !== primaryId);
   const voidedAddonTotal = roundCents(addonLines.reduce((sum, li) => sum + (Number(li.amount) || 0), 0));
-  const differs = addonLines.length > 0 && voidedAddonTotal !== extras.total;
+  const differs = addonLines.length > 0 && toCents(voidedAddonTotal) !== toCents(extras.total);
   return otherCredit || differs ? { otherCredit, voidedAddonTotal } : null;
 }
 
@@ -270,8 +273,14 @@ class CoveredVisitCloseout {
     try {
       read = await this.currentExtras();
     } catch (err) {
-      logger.warn(`[dispatch] annual-prepay add-on lines unreadable for visit ${this.svc.id}: ${err.message}`);
-      await this.alert('the add-on lines could not be read', { ...meta, error: String(err.message).slice(0, 200) });
+      if (err.code !== 'ADDON_LINES_NOT_BUILT') {
+        // A failed read: hold for the retry, which reads and bills again.
+        this.lookupError = err;
+        logger.error(`[dispatch] annual-prepay add-on lines unreadable for visit ${this.svc.id}: ${err.message}`);
+        return null;
+      }
+      logger.warn(`[dispatch] annual-prepay add-on lines not built for visit ${this.svc.id}: ${err.message}`);
+      await this.alert('the add-on lines could not be built', { ...meta, error: String(err.message).slice(0, 200) });
       return null;
     }
     if (read.addons.unpriced) {

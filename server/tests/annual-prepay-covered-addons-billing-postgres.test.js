@@ -833,6 +833,31 @@ postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
     expect(PAID_TEXTS).not.toContain(out.body?.completionSmsType);
   });
 
+  test('a failed add-on read on the billing path holds the closeout for the retry instead of a permanent office alert (pre-push P1)', async () => {
+    const f = await coveredVisit();
+    const idempotencyKey = randomUUID();
+    const dbMock = require('../models/db');
+    const real = dbMock.connection;
+    dbMock.connection = new Proxy(real, {
+      apply(target, thisArg, args) {
+        if (args[0] === 'scheduled_service_addons' && /currentExtras/.test(new Error().stack)) throw new Error('synthetic add-on read failure');
+        return Reflect.apply(target, thisArg, args);
+      },
+    });
+    let held;
+    try {
+      held = await complete(f, {}, { idempotencyKey });
+    } finally {
+      dbMock.connection = real;
+    }
+    expect(held).toMatchObject({ status: 503, body: { code: 'annual_prepay_addons_lookup_failed' } });
+    expect(await addonsAlert(f)).toBeUndefined();
+    const retry = await complete(f, {}, { idempotencyKey });
+    expect(retry).toMatchObject({ status: 200 });
+    expect(Number((await liveInvoices(f))[0].total)).toBe(ADDON);
+    expect(await addonsAlert(f)).toBeUndefined();
+  });
+
   describe('dark (GATE_ANNUAL_PREPAY_ADDON_BILLING off): today\'s behavior', () => {
     beforeEach(() => { delete process.env.GATE_ANNUAL_PREPAY_ADDON_BILLING; });
     afterEach(() => { process.env.GATE_ANNUAL_PREPAY_ADDON_BILLING = 'true'; });
