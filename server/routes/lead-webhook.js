@@ -158,6 +158,9 @@ const leadWebhookPhoneLimiter = rateLimit({
 
 // POST /api/webhooks/lead — website lead-form submission webhook
 router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res) => {
+  // When the form arrived: the delayed lead fallback stands down for any text
+  // exchanged with the customer after this moment.
+  const leadReceivedAt = new Date();
   try {
     const body = req.body;
 
@@ -766,7 +769,6 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
     // flight: a call while a send is in flight (the guard's, then a
     // shutdown flush) returns that same send, so the flush waits for the
     // real dispatch instead of a duplicate that finds the claim and returns.
-    const leadReceivedAt = new Date();
     const sendFallbackAutoReply = singleFlight(() => sendLeadAutoReplyOnce({ customer, phoneFormatted, firstName, location, leadSource, revalidateRecipient: true, leadReceivedAt })
       // Stable code + id only: provider/messaging errors can carry the phone or body.
       .catch(fallbackErr => logger.error(`[lead-agent] Fallback standard reply failed for customer ${customer.id}: ${fallbackErr?.code || fallbackErr?.name || 'error'}`)));
@@ -1836,6 +1838,9 @@ function shouldRunLeadAcquisition({ isNewCustomer, isDuplicateSubmission } = {})
 // double-text: the fallback takes the phone's shared first-touch claim
 // first, and the agent's send_lead_response is then refused.
 const LEAD_AGENT_FALLBACK_AFTER_MS = 60 * 1000;
+// How long after the fallback a still-unsettled agent run stays registered
+// for a late retry: well past the agent's own run deadline (3 min).
+const LEAD_AGENT_LATE_RETRY_WINDOW_MS = 5 * 60 * 1000;
 
 // Agent runs whose fallback has not been settled yet. Both live only in this
 // process, so a deploy's SIGTERM flushes them (flushPendingLeadFallbacks,
@@ -1899,7 +1904,13 @@ async function settleLeadResponseAgentRun({ agentConfigured, processLead, sendFa
     // flight and skip. If that send then fails and releases the claim, the
     // lead would get nothing, so once the run ends without a send the
     // standard reply is tried again (the claim keeps it to one text).
+    // A run that never settles would keep its entry (and the flush's wait)
+    // forever; after the agent's own deadline has long passed no late retry
+    // is coming, so let it go.
+    const abandon = setTimeout(done, LEAD_AGENT_LATE_RETRY_WINDOW_MS);
+    abandon.unref?.();
     void run.then(({ outcome, err }) => {
+      clearTimeout(abandon);
       if (err) onError(err);
       if (outcome?.actionTaken === 'auto_sent') return done();
       return finalFallback();

@@ -152,6 +152,21 @@ describe('delayedLeadReplyStillEligible', () => {
       .resolves.toMatchObject({ ok: false, code: 'LEAD_CONVERSATION_STARTED' });
   });
 
+  test('staff already replied from the Inbox (lead still new) → refused', async () => {
+    mockInbound = { id: 'sms-out-1' }; // an outbound row to this phone since the form
+    await expect(delayedLeadReplyStillEligible('cust-1', '9415551234', undefined, { since: new Date() }))
+      .resolves.toMatchObject({ ok: false, code: 'LEAD_CONVERSATION_STARTED' });
+  });
+
+  test('inside the handoff the lead rows are locked through dispatch', async () => {
+    const db = require('../models/db');
+    const chains = [];
+    const trx = jest.fn((table) => { const c = db.__tableChain(table); chains.push([table, c]); return c; });
+    await delayedLeadReplyStillEligible('cust-1', '9415551234', trx, { since: new Date() });
+    const [, leadChain] = chains.find(([table]) => table === 'leads');
+    expect(leadChain.forNoKeyUpdate).toHaveBeenCalled();
+  });
+
   test('no inbound text since the form → ok', async () => {
     await expect(delayedLeadReplyStillEligible('cust-1', '9415551234', undefined, { since: new Date() })).resolves.toEqual({ ok: true });
   });

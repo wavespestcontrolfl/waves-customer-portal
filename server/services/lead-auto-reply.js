@@ -173,21 +173,28 @@ async function delayedLeadReplyStillEligible(customerId, phoneDigits, conn = db,
   const recipient = await recipientStillCurrent(customerId, phoneDigits, conn);
   if (!recipient.ok) return recipient;
   if (since) {
-    const inbound = await conn('sms_log')
-      .where({ direction: 'inbound' })
+    // Any text either way since the form: the customer replied, or staff
+    // already answered from the Inbox (which leaves lead status untouched).
+    const exchanged = await conn('sms_log')
+      .whereIn('direction', ['inbound', 'outbound'])
       .where('created_at', '>=', since)
       .where((q) => q.where({ customer_id: customerId })
-        .orWhereRaw("RIGHT(regexp_replace(COALESCE(from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [phoneDigits]))
+        .orWhereRaw("RIGHT(regexp_replace(COALESCE(from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [phoneDigits])
+        .orWhereRaw("RIGHT(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [phoneDigits]))
       .first('id');
-    if (inbound) {
-      return { ok: false, code: 'LEAD_CONVERSATION_STARTED', reason: 'The customer texted before the delayed lead reply' };
+    if (exchanged) {
+      return { ok: false, code: 'LEAD_CONVERSATION_STARTED', reason: 'A text was exchanged with the customer before the delayed lead reply' };
     }
   }
   const customer = await conn('customers').where({ id: customerId }).first('lead_intake_status');
   if (!UNTOUCHED_INTAKE_STATUSES.includes(customer?.lead_intake_status ?? null)) {
     return { ok: false, code: 'LEAD_CONVERSATION_STARTED', reason: 'The lead conversation moved on before the delayed lead reply' };
   }
-  const leads = await conn('leads').where({ customer_id: customerId }).select('status', 'deleted_at');
+  // Locked through dispatch (customer before lead, the Customer 360 order):
+  // a staff status change waits until the provider has the request.
+  const leadQuery = conn('leads').where({ customer_id: customerId });
+  if (conn !== db) leadQuery.forNoKeyUpdate();
+  const leads = await leadQuery.select('status', 'deleted_at');
   const livePreContact = leads.some(lead => !lead.deleted_at && (lead.status == null || PRE_CONTACT_LEAD_STATUSES.includes(lead.status)));
   if (leads.length && !livePreContact) {
     return { ok: false, code: 'LEAD_NO_LONGER_PRE_CONTACT', reason: 'The lead was contacted, closed or deleted before the delayed lead reply' };

@@ -264,3 +264,21 @@ describe('flushPendingLeadFallbacks waits for the agent run itself', () => {
     expect(pendingLeadFallbacks.size).toBe(0);
   });
 });
+
+describe('a permanently stalled agent run', () => {
+  test('leaves the registry after the late-retry window', async () => {
+    jest.useFakeTimers();
+    try {
+      const sendFallback = jest.fn(async () => {});
+      const processLead = jest.fn(() => new Promise(() => {}));
+      const settling = settleLeadResponseAgentRun({ agentConfigured: true, processLead, sendFallback, onError: jest.fn(), fallbackAfterMs: 1000 });
+      await jest.advanceTimersByTimeAsync(1000);
+      await settling;
+      expect(pendingLeadFallbacks.has(sendFallback)).toBe(true);
+      await jest.advanceTimersByTimeAsync(5 * 60 * 1000);
+      expect(pendingLeadFallbacks.has(sendFallback)).toBe(false);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+});
