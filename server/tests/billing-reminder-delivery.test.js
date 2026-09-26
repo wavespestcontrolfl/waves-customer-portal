@@ -250,6 +250,9 @@ describe('billing reminder per-channel delivery progress', () => {
     expect(send.mock.calls.map(([channel]) => channel)).toEqual(['email', 'sms', 'email']);
     expect(ContactLedger.claimAttempt).toHaveBeenLastCalledWith(expect.objectContaining({
       reused: true, metadata: expect.objectContaining({ send_failed: true }),
+    }), expect.objectContaining({
+      invoiceIds: ['invoice-1'],
+      metadata: expect.objectContaining({ notificationEventKey: 'invoice-1:gentle', tier: 'gentle' }),
     }));
     expect(rows.find((row) => row.channel === 'email').metadata)
       .toMatchObject({ send_failed: false, delivered: true });

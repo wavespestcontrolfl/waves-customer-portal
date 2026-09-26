@@ -433,7 +433,7 @@ describe('currentDuesAllowanceCents (retry-time dues allowance)', () => {
   });
 });
 
-describe('quotedBalanceStillOwed (pre-dispatch recheck of the quoted balance)', () => {
+describe('quotedBalanceStillOwed (provider handoff recheck of the quoted balance)', () => {
   const { quotedBalanceStillOwed } = require('../services/previsit-balance-reminder');
   const live = { id: 'inv-9', customer_id: 'cust-1', status: 'sent', total: '96.60', payer_id: null };
 
@@ -492,14 +492,35 @@ describe('quotedBalanceStillOwed (pre-dispatch recheck of the quoted balance)', 
     await expect(check()).resolves.toMatchObject({ ok: false, retryable: true });
   });
 
-  test('the explicit legs carry the recheck into sendCustomerMessage', async () => {
-    armOneVisit({ notificationPrefs: { billing_channels: ['sms'] } });
+  test.each(['sms', 'email', 'push'])('the %s leg checks its quote after provider preparation', async (channel) => {
+    armOneVisit({ notificationPrefs: { billing_channels: [channel] } });
     sendReminderChannels.mockImplementation(async ({ send }) => {
-      await send('sms', { id: 'led-1' });
-      return { complete: true, deliveredNow: ['sms'], results: {} };
+      await send(channel, { id: 'led-1' });
+      return { complete: true, deliveredNow: [channel], results: {} };
     });
     await runSweep({ now: new Date('2026-08-14T15:00:00Z') });
-    expect(typeof sendCustomerMessage.mock.calls[0][0].preDispatchCheck).toBe('function');
+    const input = sendCustomerMessage.mock.calls[0][0];
+    expect(input.preDispatchCheck).toBeUndefined();
+    expect(input.preSendCheck).toEqual(expect.any(Function));
+    if (channel === 'sms') expect(input.providerPreSendCheck).toBe(input.preSendCheck);
+    invoicesDb([{ ...live, status: 'paid' }]);
+    const boundary = channel === 'sms' ? input.providerPreSendCheck : input.preSendCheck;
+    await expect(boundary()).resolves.toMatchObject({
+      ok: false, code: 'PREVISIT_QUOTE_CHANGED', retryable: true,
+    });
+  });
+
+  test.each(['database', 'dbi'])('boundary reads reuse the %s authority transaction through a savepoint', async (key) => {
+    const query = { whereIn: jest.fn(async () => [live]) };
+    const savepoint = jest.fn(() => query);
+    const transaction = { isTransaction: true, transaction: jest.fn(async (callback) => callback(savepoint)) };
+    const predicate = quotedBalanceStillOwed({
+      customerId: 'cust-1', scheduledServiceId: 'ss-1', quotedInvoices: [{ id: 'inv-9', due: 96.6 }], quotedDuesCents: 0,
+    });
+    await expect(predicate({ [key]: transaction })).resolves.toEqual({ ok: true });
+    expect(require('../services/payer').resolveForInvoice).toHaveBeenCalledWith(expect.objectContaining({ database: savepoint }));
+    expect(require('../services/invoice-followups').isDunningStopped).toHaveBeenCalledWith('inv-9', savepoint);
+    expect(db).not.toHaveBeenCalled();
   });
 });
 
@@ -523,5 +544,9 @@ test('an App leg is addressed by customer, never the loaded phone', async () => 
     return { complete: true, deliveredNow: ['push'], results: {} };
   });
   await runSweep({ now: new Date('2026-08-14T15:00:00Z') });
-  expect(sendCustomerMessage.mock.calls[0][0]).toMatchObject({ channel: 'push', to: null, customerId: 'cust-1' });
+  const input = sendCustomerMessage.mock.calls[0][0];
+  expect(input).toMatchObject({ channel: 'sms', to: null, customerId: 'cust-1',
+    metadata: { billingDeliveryLeg: 'push', appOnly: true } });
+  expect(jest.requireActual('../services/messaging/send-customer-message')._internals.validateContract(input))
+    .toEqual({ ok: true });
 });

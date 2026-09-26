@@ -229,6 +229,30 @@ postgres('billing Email reservation reconciliation (PostgreSQL)', () => {
       .resolves.toMatchObject({ status: 'delivered', delivered_at: expect.any(Date) });
   });
 
+  test('only the winning retry refreshes its quote and ledger outcome flags stay authoritative', async () => {
+    const customerId = randomUUID();
+    const invoiceId = randomUUID();
+    const reservation = ledger({ customerId, invoiceId, eventKey: 'previsit:retry',
+      source: 'previsit_balance_reminder', metadata: { send_failed: true, amount: 89 } });
+    await mockDatabase('collections_contact_ledger').insert(reservation);
+    const ContactLedger = require('../services/collections/contact-ledger');
+    const stale = { id: reservation.id, reused: true, metadata: { send_failed: true } };
+    const quotes = [42, 57].map((amount) => ({ invoiceIds: [randomUUID()],
+      metadata: { amount, delivered: true, resolved: true, resolution: 'forged', send_failed: true } }));
+    const claims = await Promise.all(quotes.map((quote) => ContactLedger.claimAttempt(stale, quote)));
+    expect(claims.filter((claim) => claim.allowed)).toHaveLength(1);
+    const winner = quotes[claims.findIndex((claim) => claim.allowed)];
+    let stored = await mockDatabase('collections_contact_ledger').where({ id: reservation.id }).first();
+    expect(stored.invoice_ids).toEqual(winner.invoiceIds);
+    expect(stored.metadata).toEqual({ notificationEventKey: 'previsit:retry', amount: winner.metadata.amount, send_failed: false });
+    await ContactLedger.markDelivered(stale);
+    await expect(ContactLedger.claimAttempt(stale, { invoiceIds: [], metadata: { amount: 0 } }))
+      .resolves.toMatchObject({ allowed: false });
+    stored = await mockDatabase('collections_contact_ledger').where({ id: reservation.id }).first();
+    expect(stored.invoice_ids).toEqual(winner.invoiceIds);
+    expect(stored.metadata).toMatchObject({ amount: winner.metadata.amount, delivered: true });
+  });
+
   test('progress repairs accepted and terminal evidence while unknown attempts stay held', async () => {
     const customerId = randomUUID();
     const invoiceId = randomUUID();

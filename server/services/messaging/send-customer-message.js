@@ -1011,6 +1011,7 @@ async function sendCustomerMessageCore(input) {
       sent: false,
       blocked: true,
       deliveryOutcome: providerOutcome.deliveryOutcome,
+      ...(providerOutcome.bellPersisted ? { bellPersisted: true } : {}),
       code: providerOutcome.code,
       reason: providerOutcome.error,
       ...(providerOutcome.retryable ? { retryable: true } : {}),

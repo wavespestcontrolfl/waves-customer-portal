@@ -179,4 +179,17 @@ postgres('billing replay eligibility (PostgreSQL)', () => {
     await expect(billingEmailReplayEligible(meta, mockPg))
       .resolves.toMatchObject({ eligible: false, reason: 'previsit-visit-payer-billed', retryable: false });
   });
+
+  test('a failed previsit quote read rolls back its savepoint and preserves the Email authority transaction', async () => {
+    const meta = await previsitFixture();
+    const { quotedBalanceStillOwed } = require('../services/previsit-balance-reminder');
+    const check = quotedBalanceStillOwed({ customerId, scheduledServiceId: visitId,
+      quotedInvoices: [{ id: meta.invoice_ids[0], due: 40 }], quotedDuesCents: 0 });
+    await mockPg.transaction(async (trx) => {
+      await trx.schema.renameTable('invoices', 'invoices_temporarily_unavailable');
+      await expect(check({ database: trx })).resolves.toMatchObject({ ok: false, retryable: true });
+      await expect(trx.raw('select 1 as usable')).resolves.toMatchObject({ rows: [{ usable: 1 }] });
+      await trx.schema.renameTable('invoices_temporarily_unavailable', 'invoices');
+    });
+  });
 });
