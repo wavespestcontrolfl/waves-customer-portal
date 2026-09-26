@@ -131,22 +131,24 @@ async function loadUnkeptPromises() {
           AND (COALESCE(e.source, '') NOT IN ('service_report_cta', 'plan_restart')
                OR (COALESCE(e.estimate_data #>> '{deliveryState,lastDeliveredAt}', '') <> ''
                    AND (e.estimate_data #>> '{deliveryState,lastDeliveredAt}')::timestamptz > CASE
-                     WHEN c.bridged_at IS NOT NULL THEN c.bridged_at + make_interval(secs => COALESCE(c.duration_seconds, 0))
+                     WHEN c.bridged_at IS NOT NULL THEN c.created_at + make_interval(secs => COALESCE(c.duration_seconds, 0))
                      WHEN c.direction = 'inbound' THEN c.created_at + make_interval(secs => COALESCE(c.duration_seconds, 0))
                      ELSE c.created_at
                    END))
-          -- End-of-call boundary (codex r23): bridged rows end at
-          -- bridge-start + duration; late-created rows (recording/status
-          -- callback) already carry post-call created_at — adding
-          -- duration there would overshoot.
-          -- End-of-call boundary (codex r23/r41): bridged rows end at
-          -- bridge + duration; NORMAL inbound rows are inserted at RING
-          -- time (bridged_at null) so their end is created_at + duration —
-          -- an estimate sent mid-call must not clear a promise made later
-          -- in the same call. Only recovered rows (outbound, created near
-          -- call end by status callbacks) use bare created_at.
+          -- End-of-call boundary (codex r23/r41, corrected — see
+          -- call-commitments.js's callEndedAt): NORMAL inbound rows are
+          -- inserted at RING time (bridged_at null) so their end is
+          -- created_at + duration — an estimate sent mid-call must not
+          -- clear a promise made later in the same call. A bridged row's
+          -- duration_seconds is the PARENT leg's Twilio CallDuration,
+          -- measured from created_at (bridged_at only marks when staff
+          -- connected the customer leg, on an outbound admin-connect call),
+          -- so its end is also created_at + duration, never bridge +
+          -- duration (that double-counts the pre-bridge wait). Only
+          -- recovered rows (outbound, created near call end by status
+          -- callbacks) use bare created_at.
           AND e.sent_at > CASE
-            WHEN c.bridged_at IS NOT NULL THEN c.bridged_at + make_interval(secs => COALESCE(c.duration_seconds, 0))
+            WHEN c.bridged_at IS NOT NULL THEN c.created_at + make_interval(secs => COALESCE(c.duration_seconds, 0))
             WHEN c.direction = 'inbound' THEN c.created_at + make_interval(secs => COALESCE(c.duration_seconds, 0))
             ELSE c.created_at
           END

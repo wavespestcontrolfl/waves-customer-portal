@@ -1135,16 +1135,22 @@ function leadIdsOf(call) {
 // uses (its `sent_at > CASE …` clause): a record stamped while the caller
 // was still on the line (an estimate sent mid-call) cannot have kept a
 // promise made later in the same call. Normal inbound rows are inserted at
-// ring time, so their end is created_at + duration; bridged rows end at
-// bridge + duration; other rows (recovered outbound, inserted near the end
-// by status callbacks) end at created_at.
+// ring time, so their end is created_at + duration. bridged_at (the only
+// writer is /outbound-connect: staff pressed 1 on an outbound admin-connect
+// call before the customer was dialed) marks when the customer leg
+// connected, NOT when the call ended — its duration_seconds is the parent
+// leg's Twilio CallDuration, measured from created_at, so it already spans
+// the pre-bridge ring/wait; bridge + duration would double-count that wait
+// and overstate the end. A bridged row's end is therefore created_at +
+// duration, same as inbound. Other rows (recovered outbound, inserted near
+// the end by status callbacks) end at created_at.
 function callEndedAt(call) {
   const created = call?.created_at ? new Date(call.created_at) : null;
   if (!created || Number.isNaN(created.getTime())) return null;
   const durationMs = Math.max(0, Number(call?.duration_seconds) || 0) * 1000;
   if (call?.bridged_at) {
     const bridged = new Date(call.bridged_at);
-    if (!Number.isNaN(bridged.getTime())) return new Date(bridged.getTime() + durationMs);
+    if (!Number.isNaN(bridged.getTime())) return new Date(created.getTime() + durationMs);
   }
   if (String(call?.direction || "") === "inbound") return new Date(created.getTime() + durationMs);
   return created;

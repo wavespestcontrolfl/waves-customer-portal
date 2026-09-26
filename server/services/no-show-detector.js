@@ -842,23 +842,28 @@ function callCommitmentInstant(call, { notAfter = null } = {}) {
   const anchor = instant(notAfter);
   const ceiling = Number.isFinite(anchor) && anchor >= started ? anchor : NaN;
   const clamp = (ms) => (Number.isFinite(ceiling) ? Math.min(ms, ceiling) : ms);
-  // bridged_at is the recorded moment the two legs were connected — the
-  // convention call-commitments.js's callEndedAt already uses — so for an
-  // outbound call the end is bridge + talk time, measured rather than
-  // guessed at a fixed allowance (codex P2 round 11). Rows without it (an
-  // inbound call, or one recovered near the end by a status callback) keep
-  // created_at as the floor.
+  // bridged_at is the recorded moment the two legs were connected — an
+  // outbound admin-connect call where staff pressed 1 before the customer
+  // was dialed (/outbound-connect is the only writer). It marks when the
+  // customer leg connected, NOT when the call ended: duration_seconds is
+  // the PARENT leg's Twilio CallDuration, measured from created_at, so it
+  // already spans the pre-bridge ring/wait. Adding duration to bridged_at
+  // would double-count that wait and overstate the end (the bug
+  // call-commitments.js's callEndedAt fixed). Rows without a usable bridge
+  // (an inbound call, or one recovered near the end by a status callback)
+  // keep created_at as the floor.
   const bridged = instant(call?.bridged_at);
   const usableBridge = Number.isFinite(bridged) && bridged >= started;
-  // The whole convention, not half of it: a bridged call ends at bridge +
-  // duration, an INBOUND row at created_at + duration, and an outbound row
-  // with NO bridge stamp at created_at — those are recovered rows, inserted
-  // near the end of the call, so adding the duration would push the
-  // commitment past the call itself (call-commitments.js's callEndedAt, codex
-  // P2 round 14).
+  // The whole convention, not half of it: a bridged call ends at
+  // created_at + duration (same as an INBOUND row), and an outbound row
+  // with NO bridge stamp ends at bare created_at — those are recovered
+  // rows, inserted near the end of the call, so adding the duration would
+  // push the commitment past the call itself (call-commitments.js's
+  // callEndedAt, codex P2 round 14). `bridged` itself is only used to
+  // decide WHETHER this row counts as bridged (usableBridge) — the end
+  // instant always anchors on created_at.
   const outboundNoBridge = !usableBridge && String(call?.direction || '').startsWith('outbound');
-  const floor = usableBridge ? bridged : started;
-  const talkEnd = clamp(!outboundNoBridge && Number.isFinite(seconds) && seconds > 0 ? floor + seconds * 1000 : floor);
+  const talkEnd = clamp(!outboundNoBridge && Number.isFinite(seconds) && seconds > 0 ? started + seconds * 1000 : started);
   return new Date(talkEnd);
 }
 

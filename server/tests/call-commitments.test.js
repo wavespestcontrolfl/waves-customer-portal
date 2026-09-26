@@ -903,10 +903,17 @@ describe('the model pass sends no sampling controls (current models reject them)
     expect(out.items.map((i) => i.kind)).toEqual(['send_paperwork']);
     expect(out.items[0].due_type).toBeNull();
   });
-  test('callEndedAt: inbound rows end at ring + duration, bridged rows at bridge + duration, other rows at created_at', () => {
+  test('callEndedAt: inbound rows end at ring + duration, bridged rows at created_at + duration, other rows at created_at', () => {
     const created = '2026-09-02T14:00:00.000Z';
     expect(callEndedAt({ created_at: created, direction: 'inbound', duration_seconds: 90 }).toISOString()).toBe('2026-09-02T14:01:30.000Z');
-    expect(callEndedAt({ created_at: created, direction: 'inbound', duration_seconds: 90, bridged_at: '2026-09-02T14:00:20.000Z' }).toISOString()).toBe('2026-09-02T14:01:50.000Z');
+    // A bridged row's duration_seconds is the parent leg's Twilio
+    // CallDuration, measured from created_at — it already spans the
+    // pre-bridge wait, so the end is created_at + duration, not
+    // bridged_at + duration (that would double-count the wait).
+    expect(callEndedAt({ created_at: created, direction: 'inbound', duration_seconds: 90, bridged_at: '2026-09-02T14:00:20.000Z' }).toISOString()).toBe('2026-09-02T14:01:30.000Z');
+    // A bridged outbound row with a LONG pre-bridge wait: the end is still
+    // created_at + duration, never bridge + duration.
+    expect(callEndedAt({ created_at: created, direction: 'outbound', duration_seconds: 90, bridged_at: '2026-09-02T14:05:00.000Z' }).toISOString()).toBe('2026-09-02T14:01:30.000Z');
     expect(callEndedAt({ created_at: created, direction: 'outbound-api', duration_seconds: 90 }).toISOString()).toBe(created);
     expect(callEndedAt({ created_at: 'nope' })).toBeNull();
   });

@@ -59,6 +59,30 @@ test('the unfulfilled-promise query has no lower date bound that would clear age
   }
 });
 
+test('the end-of-call boundary for a bridged (staff-connect) row is created_at + duration, never bridge + duration', async () => {
+  const db = require('../models/db');
+  const originalRaw = db.raw;
+  db.raw = jest.fn(async () => ({ rows: [] }));
+  try {
+    await loadUnkeptPromises();
+    const [sql] = db.raw.mock.calls[0];
+    // bridged_at only marks when the customer leg connected on a staff
+    // admin-connect call; duration_seconds is the parent leg's Twilio
+    // CallDuration measured from created_at, so it already spans the
+    // pre-bridge wait. bridge + duration would double-count that wait.
+    expect(sql).not.toMatch(/c\.bridged_at\s*\+\s*make_interval/);
+    // Every occurrence of the CASE resolves the bridged branch to
+    // created_at + duration.
+    const bridgedBranches = sql.match(/WHEN c\.bridged_at IS NOT NULL THEN [^\n]+/g) || [];
+    expect(bridgedBranches.length).toBeGreaterThan(0);
+    for (const branch of bridgedBranches) {
+      expect(branch).toContain('c.created_at + make_interval');
+    }
+  } finally {
+    db.raw = originalRaw;
+  }
+});
+
 describe('commitmentsHandoffClause', () => {
   test('gate off: no handoff — this lane keeps covering every call', () => {
     isEnabled.mockReturnValue(false);

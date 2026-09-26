@@ -83,6 +83,23 @@ describe('composeUnworkedCommsDigest', () => {
     expect(block).not.toMatch(/channels,email,ok/);
   });
 
+  test('the end-of-call boundary for a bridged (staff-connect) row is created_at + duration, never bridge + duration', () => {
+    // bridged_at only marks when the customer leg connected on a staff
+    // admin-connect call (/outbound-connect); duration_seconds is the
+    // parent leg's Twilio CallDuration, measured from created_at — it
+    // already spans the pre-bridge wait, so bridge + duration would
+    // double-count that wait and overstate the end.
+    const src = require('fs').readFileSync(
+      require('path').join(__dirname, '../services/unworked-comms-watcher.js'), 'utf8',
+    );
+    expect(src).not.toMatch(/bridged_at\s*\+\s*make_interval/);
+    const bridgedBranches = src.match(/bridged_at IS NOT NULL THEN [^\n]+/g) || [];
+    expect(bridgedBranches.length).toBe(3);
+    for (const branch of bridgedBranches) {
+      expect(branch).toMatch(/\.created_at \+ make_interval/);
+    }
+  });
+
   test('fully-worked day composes nothing', () => {
     expect(composeUnworkedCommsDigest({ callbacks: [], followUps: [], unanswered: [] })).toBeNull();
     expect(composeUnworkedCommsDigest({})).toBeNull();
