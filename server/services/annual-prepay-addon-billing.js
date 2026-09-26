@@ -176,7 +176,7 @@ class CoveredVisitCloseout {
       const NotificationService = require('./notification-service');
       const bell = await NotificationService.notifyAdmin('billing', 'Annual-prepay add-ons need billing — bill by hand',
         `Completing ${svc.service_type} for customer ${svc.customer_id}: the visit is covered by the annual prepay, but its add-ons were not billed automatically — ${reasons}.`,
-        { link: `/admin/customers/${svc.customer_id}`, bell: true, dedupeKey: `annual_prepay_addons_unbilled:${svc.id}`,
+        { link: `/admin/customers?customerId=${encodeURIComponent(svc.customer_id)}`, bell: true, dedupeKey: `annual_prepay_addons_unbilled:${svc.id}`,
           refreshOnDedupe: true,
           metadata: { customerId: svc.customer_id, scheduledServiceId: svc.id, reason: reasons, ...extra } });
       // notifyAdmin returns null when its insert fails.
