@@ -90,8 +90,9 @@ per-photo AI score columns.
 **Not reused (existing-customer machinery, stays untouched):** baseline logic,
 `lawn_baseline_resets`, the `server/routes/lawn-health.js` customer endpoints.
 (`lawn-snapshot.js` and `lawn-recommendation-engine.js` were deleted in
-commit `29264bdfd6`; the cautious finding phrasing now lives in
-`server/services/lawn-diagnostic-report.js`.)
+commit `29264bdfd6`; the cautious finding phrasing now lives in `safeFindingNote` in
+`server/routes/public-lawn-diagnostic.js`, while `server/services/lawn-diagnostic-report.js`
+normalizes findings, confidence and input sufficiency.)
 
 ## Lifecycle
 1. Tech starts a diagnostic → photos → AI diagnosis (their eyes only). Done, if internal.
@@ -370,9 +371,10 @@ pre-written customer-safe snippets for what it sees in the photos; it does NOT i
 - Micronutrient yellowing blog (`.../blog/sarasota-lawn-yellowing-micronutrient-deficiency.md`) —
   best customer-facing copy for color/yellowing: Fe (new growth) vs Mn (green veins) vs Mg
   (margins) vs N (uniform/older); sandy-soil + high-pH iron lockout.
-- `server/services/lawn-diagnostic-report.js` (the former `lawn-snapshot.js`
+- `safeFindingNote` in `server/routes/public-lawn-diagnostic.js` (the former `lawn-snapshot.js`
   phrasing now lives here) — reuse the cautious finding phrasing
-  ("We saw signs consistent with …") verbatim for unconfirmed disease.
+  ("We saw signs consistent with …") verbatim for unconfirmed disease. The service module
+  `server/services/lawn-diagnostic-report.js` owns finding/confidence normalization, not this copy.
 
 **Internal-only (powers the TECH view, never the customer report):**
 - `server/models/migrations/20260401000026_service_protocols.js` — diagnostic differentials

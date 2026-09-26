@@ -1,6 +1,6 @@
 # Termite Foam — Marked-Photo Treatment Visual
 
-**Date:** 2026-08-08, revised 2026-08-09 · **Status:** scope for owner sign-off. No code changes in this doc.
+**Date:** 2026-08-08, revised 2026-08-09 · **Status:** historical scope — the marked-photo build shipped 2026-08-10 in #3301, dark behind `GATE_PHOTO_MARKS`; the remaining work is the gate rollout. Sections below record the original proposal; see the dated updates for what shipped.
 
 **Visual mock — the build:** https://claude.ai/code/artifact/042796a8-3fdd-43e4-8ae6-ab65e467c0d3
 — the marked-photo card as the customer sees it, the count rule shown side by side, the
@@ -72,7 +72,7 @@ than generic. But it does mean foam has no positive classification of its own ye
 **Update 2026-09-26:** since #3301 both keys are in `SERVICE_KEY_RULES` as eligible `photo`
 variants (`server/services/service-report/trace-eligibility.js`).
 
-### The routing this needs
+### The routing this needed (shipped in #3301)
 
 Typed lanes are evaluated first, and the module is explicit that *a typed lane's verdict must
 not depend on which catalog key routed to it*. Since foam shares `termite_treatment` with the
