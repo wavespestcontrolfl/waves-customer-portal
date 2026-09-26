@@ -22,10 +22,13 @@ const {
   reserviceAdjustedScore,
   reserviceStopsThatDay,
   promoteLatencyPickRank,
+  isReserviceNearbySlot,
+  reservicePickerStripOrder,
   businessDayHorizonEnd,
   RESERVICE_EMPTY_DAY_PENALTY_MINUTES,
   RESERVICE_IDLE_WEIGHT,
   RESERVICE_LATENCY_BUSINESS_DAYS,
+  NEARBY_DETOUR_MINUTES,
 } = require('../routes/booking')._internals;
 const { etDateString, addETDays, addETBusinessDays, parseETDateTime } = require('../utils/datetime-et');
 
@@ -55,10 +58,10 @@ function withGate(value, fn) {
 // real route gap to fan out. `rank` mirrors find-time's own contract (each
 // slot's position in GLOBAL ascending-score order) — only load-bearing for
 // the is_best_fit assertions below.
-function capacitySlot(date, { score = 5, stopsThatDay = 0, startTime = '10:00', rank = 1 } = {}) {
+function capacitySlot(date, { score = 5, stopsThatDay = 0, startTime = '10:00', rank = 1, detourMinutes = 3, technicianId = 'tech-1' } = {}) {
   return {
     date, start_time: startTime, end_time: null,
-    technician: { id: 'tech-1' }, detour_minutes: 3,
+    technician: { id: technicianId }, detour_minutes: detourMinutes,
     stops_that_day: stopsThatDay, rank, score, insertion: {},
   };
 }
@@ -152,11 +155,44 @@ describe('reserviceStopsThatDay (pure) — the unassigned-committed-visit fix (C
     const occupiedByDate = new Map([['2026-10-01', [{ hold: true }, { hold: false }]]]);
     expect(reserviceStopsThatDay(occupiedByDate, '2026-10-01', 0)).toBe(1);
   });
+
+  // Pre-push audit P1 on #4926: the fallback used to count ANY committed
+  // stop on the date regardless of technician, so a busy tech-A made an
+  // actually-empty tech-B look occupied and let B dodge the penalty (and
+  // potentially win the per-start dedupe over a genuinely packed A).
+  test('raw 0 with a real committed row belonging to a DIFFERENT technician — still empty for THIS technician', () => {
+    const occupiedByDate = new Map([['2026-10-01', [{ technician_id: 'tech-A', hold: false }]]]);
+    expect(reserviceStopsThatDay(occupiedByDate, '2026-10-01', 0, 'tech-B')).toBe(0);
+  });
+
+  test('raw 0 with a real committed row belonging to THIS SAME technician — not empty', () => {
+    const occupiedByDate = new Map([['2026-10-01', [{ technician_id: 'tech-A', hold: false }]]]);
+    expect(reserviceStopsThatDay(occupiedByDate, '2026-10-01', 0, 'tech-A')).toBe(1);
+  });
+
+  test('raw 0 with an unassigned (technician_id: null) row — not empty for ANY technician', () => {
+    const occupiedByDate = new Map([['2026-10-01', [{ technician_id: null, hold: false }]]]);
+    expect(reserviceStopsThatDay(occupiedByDate, '2026-10-01', 0, 'tech-A')).toBe(1);
+    expect(reserviceStopsThatDay(occupiedByDate, '2026-10-01', 0, 'tech-B')).toBe(1);
+  });
+
+  test('a mix of another technician\'s row and this technician\'s own row — this technician\'s own row makes it not-empty', () => {
+    const occupiedByDate = new Map([['2026-10-01', [
+      { technician_id: 'tech-other', hold: false },
+      { technician_id: 'tech-A', hold: false },
+    ]]]);
+    expect(reserviceStopsThatDay(occupiedByDate, '2026-10-01', 0, 'tech-A')).toBe(1);
+  });
 });
 
 describe('promoteLatencyPickRank (pure) — client-visibility fix (Codex r1 P1 on #4926)', () => {
   // client/src/components/booking/SchedulePicker.jsx's PickerBestTimes
   // re-sorts the curated 4 by `rank` ascending and shows only the best 3.
+  // These fixtures carry no `detour_minutes`, so isReserviceNearbySlot
+  // reads every pick as equally "not nearby" — the nearby key is a no-op
+  // tie and pure rank order decides, exactly like PickerBestTimes' own
+  // fallback. The dedicated "nearby-aware" describe block below exercises
+  // the nearby key itself.
   const top3ByRank = (picks) => [...picks].sort((a, b) => a.rank - b.rank).slice(0, 3);
 
   test('a no-op when there are fewer than 4 picks (nothing is ever hidden)', () => {
@@ -212,6 +248,101 @@ describe('promoteLatencyPickRank (pure) — client-visibility fix (Codex r1 P1 o
     const before = picks.map((p) => ({ ...p }));
     promoteLatencyPickRank(picks, '2026-10-05');
     expect(picks).toEqual(before);
+  });
+});
+
+describe('isReserviceNearbySlot / reservicePickerStripOrder (pure) — mirrors PickerBestTimes\' exact comparator', () => {
+  test('isReserviceNearbySlot: at or under the threshold is nearby, over it is not, null/undefined detour is not', () => {
+    expect(isReserviceNearbySlot({ detour_minutes: NEARBY_DETOUR_MINUTES })).toBe(true);
+    expect(isReserviceNearbySlot({ detour_minutes: NEARBY_DETOUR_MINUTES - 1 })).toBe(true);
+    expect(isReserviceNearbySlot({ detour_minutes: NEARBY_DETOUR_MINUTES + 1 })).toBe(false);
+    expect(isReserviceNearbySlot({ detour_minutes: null })).toBe(false);
+    expect(isReserviceNearbySlot({})).toBe(false);
+  });
+
+  test('reservicePickerStripOrder: nearby beats a better rank — the exact PickerBestTimes tie-break order', () => {
+    const nearbyWorseRank = { date: 'a', rank: 4, detour_minutes: 3 };
+    const farBetterRank = { date: 'b', rank: 1, detour_minutes: 30 };
+    const ordered = reservicePickerStripOrder([farBetterRank, nearbyWorseRank]);
+    expect(ordered).toEqual([nearbyWorseRank, farBetterRank]);
+  });
+
+  test('reservicePickerStripOrder: within the same nearby bucket, rank decides', () => {
+    const worse = { date: 'a', rank: 2, detour_minutes: 3 };
+    const better = { date: 'b', rank: 1, detour_minutes: 5 };
+    expect(reservicePickerStripOrder([worse, better])).toEqual([better, worse]);
+  });
+
+  test('reservicePickerStripOrder: original array position breaks a tie when neither side has a usable rank', () => {
+    const first = { date: 'a', detour_minutes: 3 };
+    const second = { date: 'b', detour_minutes: 3 };
+    expect(reservicePickerStripOrder([first, second])).toEqual([first, second]);
+    expect(reservicePickerStripOrder([second, first])).toEqual([second, first]);
+  });
+});
+
+describe('promoteLatencyPickRank — nearby-aware branches (pre-push audit P1 on #4926)', () => {
+  const NEAR = NEARBY_DETOUR_MINUTES - 5; // comfortably nearby
+  const FAR = NEARBY_DETOUR_MINUTES + 20; // comfortably not nearby
+
+  test('protected pick and the boundary pick share a nearby bucket (both far): a rank swap is enough', () => {
+    const protectedPick = { date: '2026-10-02', rank: 4, detour_minutes: FAR };
+    const picks = [
+      { date: '2026-10-11', rank: 1, detour_minutes: FAR },
+      { date: '2026-10-12', rank: 2, detour_minutes: FAR },
+      { date: '2026-10-13', rank: 3, detour_minutes: FAR },
+      protectedPick,
+    ];
+    promoteLatencyPickRank(picks, '2026-10-05');
+    expect(picks).toHaveLength(4);
+    expect(protectedPick.rank).toBe(3);
+    expect(reservicePickerStripOrder(picks).slice(0, 3)).toContain(protectedPick);
+  });
+
+  test('protected pick and the boundary pick share a nearby bucket (both nearby): a rank swap is enough', () => {
+    const protectedPick = { date: '2026-10-02', rank: 4, detour_minutes: NEAR };
+    const picks = [
+      { date: '2026-10-11', rank: 1, detour_minutes: NEAR },
+      { date: '2026-10-12', rank: 2, detour_minutes: NEAR },
+      { date: '2026-10-13', rank: 3, detour_minutes: NEAR },
+      protectedPick,
+    ];
+    promoteLatencyPickRank(picks, '2026-10-05');
+    expect(picks).toHaveLength(4);
+    expect(protectedPick.rank).toBe(3);
+    expect(reservicePickerStripOrder(picks).slice(0, 3)).toContain(protectedPick);
+  });
+
+  test('protected pick is NOT nearby but 3 peers ARE — no rank swap can rescue it (nearby beats rank in the client\'s own sort), so the boundary pick is dropped instead, leaving exactly 3', () => {
+    const protectedPick = { date: '2026-10-02', rank: 4, detour_minutes: FAR };
+    const nearbyPeer1 = { date: '2026-10-11', rank: 1, detour_minutes: NEAR };
+    const nearbyPeer2 = { date: '2026-10-12', rank: 2, detour_minutes: NEAR };
+    const nearbyPeer3 = { date: '2026-10-13', rank: 3, detour_minutes: NEAR };
+    const picks = [nearbyPeer1, nearbyPeer2, nearbyPeer3, protectedPick];
+    promoteLatencyPickRank(picks, '2026-10-05');
+    expect(picks).toHaveLength(3);
+    expect(picks).toContain(protectedPick);
+    // The boundary pick (stripOrder[2] before the drop) is the one removed —
+    // here that is the WORST-ranked of the three nearby peers.
+    expect(picks).not.toContain(nearbyPeer3);
+    expect(picks).toContain(nearbyPeer1);
+    expect(picks).toContain(nearbyPeer2);
+    // The client's own comparator now shows protectedPick among the visible
+    // (at most 3) results, unconditionally.
+    expect(reservicePickerStripOrder(picks).slice(0, 3)).toContain(protectedPick);
+  });
+
+  test('protected pick IS nearby but 3 OTHER nearby peers outrank it — same bucket, so a rank swap (not a drop) fixes it', () => {
+    const protectedPick = { date: '2026-10-02', rank: 4, detour_minutes: NEAR };
+    const picks = [
+      { date: '2026-10-11', rank: 1, detour_minutes: NEAR },
+      { date: '2026-10-12', rank: 2, detour_minutes: NEAR },
+      { date: '2026-10-13', rank: 3, detour_minutes: NEAR },
+      protectedPick,
+    ];
+    promoteLatencyPickRank(picks, '2026-10-05');
+    expect(picks).toHaveLength(4); // no drop — a swap sufficed
+    expect(reservicePickerStripOrder(picks).slice(0, 3)).toContain(protectedPick);
   });
 });
 
@@ -374,6 +505,37 @@ describe('buildBookingAvailability — rankProfile: reservice (end to end)', () 
     });
   });
 
+  test('latency guard: the guaranteed slot is NOT nearby but 3 far picks ARE nearby — a rank swap alone cannot rescue it (the client sorts nearby before rank), so the strip is trimmed to 3 to guarantee visibility (pre-push audit P1 on #4926)', async () => {
+    await withGate('true', async () => {
+      const cutoff = businessDayHorizonEnd(NOW, RESERVICE_LATENCY_BUSINESS_DAYS);
+      const nearDate = cutoff;
+      const farDates = [dayOffset(20), dayOffset(21), dayOffset(22)];
+      const slots = [
+        // Empty-day-penalized AND a big detour (not nearby) — a tech has to
+        // drive a while to get there, on top of it being a room-for-new-
+        // customers day.
+        capacitySlot(nearDate, { score: 5, stopsThatDay: 0, detourMinutes: NEARBY_DETOUR_MINUTES + 20 }),
+        // Three packed, NEARBY far-out days.
+        ...farDates.map((d, i) => capacitySlot(d, { score: 10 + i, stopsThatDay: 2, detourMinutes: 2 })),
+      ];
+      const result = await build(slots, { rankProfile: 'reservice' });
+      // Trimmed to exactly 3 — the client renders every pick it's handed
+      // once there is no 4th to truncate.
+      expect(result.slots).toHaveLength(3);
+      const curatedDates = result.slots.map((s) => s.date);
+      expect(curatedDates).toContain(nearDate);
+      // Faithfully replicate PickerBestTimes' own comparator (nearby DESC,
+      // then rank, then original position) over what the server actually
+      // returned, proving the near-term slot is genuinely visible, not
+      // merely present in the raw array.
+      const isNearby = (s) => s.detour_minutes != null && s.detour_minutes <= NEARBY_DETOUR_MINUTES;
+      const visible = [...result.slots]
+        .sort((a, b) => (Number(isNearby(b)) - Number(isNearby(a))) || (a.rank - b.rank))
+        .slice(0, 3);
+      expect(visible.map((s) => s.date)).toContain(nearDate);
+    });
+  });
+
   test('an unassigned committed visit that day (a real fixed blocker, per find-time.js capacityGapNeighbours) is NOT treated as an empty day under capacity mode, even though the selected technician\'s own stops_that_day reads 0 (Codex r1 P1 on #4926)', async () => {
     const trulyEmptyDate = dayOffset(10);
     const unassignedVisitDate = dayOffset(11);
@@ -431,5 +593,27 @@ describe('buildBookingAvailability — rankProfile: reservice (end to end)', () 
     expect(on.slots.map((s) => s.technician_id)).toEqual(['tech-packed']);
     // Still one offered slot at that date+start either way — nothing added or hidden.
     expect(techAt(on)).toHaveLength(techAt(off).length);
+  });
+
+  test('competing technicians with REAL occupancy anchors: tech-A (packed via a genuine committed visit) beats tech-B (genuinely empty, better raw score) — pre-push audit P1 on #4926', async () => {
+    const date = dayOffset(10);
+    // A real committed visit belonging ONLY to tech-A, 09:00-10:00 (540-600,
+    // immediately before the 10:00 candidate window so idle_minutes lands
+    // at 0 — isolating the "not empty" fix from the separate idle-weight
+    // math). find-time's OWN per-technician stops_that_day reads 0 for BOTH
+    // candidates below (a synthetic mismatch used deliberately, to prove
+    // the fix reads real GLOBAL occupancy rather than trusting that field
+    // alone) — before the fix, this single tech-A row would have made
+    // tech-B's day look occupied too (the bug), letting B's better raw
+    // score win the dedupe despite B having nothing on the books that day.
+    loadPackingAnchors.mockResolvedValue([{
+      technician_id: 'tech-A', customer_id: 'cust-a', date,
+      rawStartMin: 540, rawEndMin: 600, expectedEndMin: 600,
+      lat: 27.4, lng: -82.4, hold: false,
+    }]);
+    const techA = capacitySlot(date, { score: 2, stopsThatDay: 0, technicianId: 'tech-A' });
+    const techB = capacitySlot(date, { score: 1, stopsThatDay: 0, technicianId: 'tech-B', rank: 2 });
+    const result = await withGate('true', () => build([techA, techB], { rankProfile: 'reservice' }));
+    expect(result.slots.map((s) => s.technician_id)).toEqual(['tech-A']);
   });
 });

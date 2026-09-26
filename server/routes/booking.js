@@ -336,22 +336,26 @@ function reserviceAdjustedScore(candidate) {
 
 // Effective stops_that_day for the re-service ranking penalty ONLY (never
 // the packed-ends fan-out above, which reads slot.stops_that_day directly
-// and is unaffected). Under GATE_SCHEDULING_CAPACITY, find-time's own
-// stops_that_day (fit.arrivals.length - 1, find-time.js) counts only the
-// SELECTED technician's own assigned stops — an unassigned committed visit
-// is a real fixed blocker on every technician's route (find-time.js's
-// capacityGapNeighbours) but never appears in fit.arrivals, so a tech-day
-// whose sole visit is unassigned reads as empty and would wrongly eat the
-// 240-minute penalty. occupiedByDate is GLOBAL (every technician +
-// unassigned + live holds — scheduling/occupancy.js's listOccupiedWindows,
-// already loaded above for the overlap/idle checks) — any non-hold row for
-// this date means it genuinely is not empty. A mere reservation hold (no
-// customer yet) does not count as a committed visit.
-function reserviceStopsThatDay(occupiedByDate, date, rawStopsThatDay) {
+// and is unaffected). find-time's own stops_that_day (fit.arrivals.length -
+// 1, find-time.js) counts only the SELECTED technician's own assigned
+// stops — an unassigned committed visit is a real fixed blocker on every
+// technician's route (find-time.js's capacityGapNeighbours) but never
+// appears in fit.arrivals, so a tech-day whose sole visit is unassigned
+// reads as empty and would wrongly eat the 240-minute penalty.
+// occupiedByDate is GLOBAL — every technician + unassigned + live holds
+// (scheduling/occupancy.js's listOccupiedWindows, already loaded above for
+// the overlap/idle checks) — so it must be scoped to THIS technicianId (or
+// unassigned) before counting: a DIFFERENT technician's busy day must never
+// make THIS technician's genuinely empty day look occupied (that would let
+// an idle tech dodge the penalty and win the per-start dedupe over one
+// that's actually packed, Codex pre-push audit P1 on #4926). A mere
+// reservation hold (no customer yet) does not count as a committed visit.
+function reserviceStopsThatDay(occupiedByDate, date, rawStopsThatDay, technicianId) {
   const raw = rawStopsThatDay || 0;
   if (raw > 0) return raw;
   const rows = occupiedByDate ? (occupiedByDate.get(date) || []) : [];
-  return rows.some((row) => !row.hold) ? 1 : 0;
+  const relevant = rows.filter((row) => row.technician_id == null || row.technician_id === technicianId);
+  return relevant.some((row) => !row.hold) ? 1 : 0;
 }
 
 // The ET calendar date that is `businessDays` business days (Mon-Fri) after
@@ -363,28 +367,67 @@ function businessDayHorizonEnd(today, businessDays) {
   return etDateString(addETBusinessDays(today, businessDays));
 }
 
+// A slot reads "nearby" the SAME way the day-list stamps it (see the
+// daySlots map below) — detour_minutes is identical on both the day-list
+// row and this curated one (same source candidate), so this is exactly the
+// value client/src/components/booking/SchedulePicker.jsx's PickerBestTimes
+// reads off its matched panel row.
+function isReserviceNearbySlot(slot) {
+  return slot.detour_minutes != null && slot.detour_minutes <= NEARBY_DETOUR_MINUTES;
+}
+
+// PickerBestTimes' EXACT visible-strip order (SchedulePicker.jsx ~141-153):
+// nearby DESC, then `rank` ASC (only when both sides carry one), then
+// original array position ASC. Mirrored here so the server can tell whether
+// a candidate promotion will actually survive the client's own re-sort —
+// swapping `rank` alone cannot rescue a pick the client's comparator ranks
+// behind 3 nearby peers on the nearby key alone (Codex pre-push audit P1 on
+// #4926).
+function reservicePickerStripOrder(curatedSlots) {
+  return [...curatedSlots].sort((a, b) => {
+    const nearbyDiff = Number(isReserviceNearbySlot(b)) - Number(isReserviceNearbySlot(a));
+    if (nearbyDiff !== 0) return nearbyDiff;
+    if (a.rank != null && b.rank != null) return a.rank - b.rank;
+    return curatedSlots.indexOf(a) - curatedSlots.indexOf(b);
+  });
+}
+
 // curateSlots' latencyCutoffDate guard only guarantees the near-term slot a
-// SEAT among the (up to 4) curated picks — but the client's own picker
-// (PickerBestTimes, client/src/components/booking/SchedulePicker.jsx)
-// re-sorts those picks by `rank` and shows only the best 3. A within-horizon
-// pick whose adjusted rank is still numerically worse than the other three
-// therefore never actually reaches the customer, silently defeating the
-// guard (Codex r1 P1 on #4926). Promote it into the top 3 by swapping ranks
-// with whichever pick currently HOLDS the 3rd-best rank — is_best_fit and
+// SEAT among the (up to 4) curated picks — but the client only ever DISPLAYS
+// the best 3 of those 4 (PickerBestTimes' own re-sort + slice(0,3)), so a
+// seat alone can still never reach the customer (Codex r1 P1 on #4926).
+// Fixed here by promoting rank alone; but the client sorts nearby BEFORE
+// rank, so a non-nearby protected pick against ≥3 nearby peers cannot be
+// rescued by any rank value (Codex pre-push audit P1 on #4926) — dropping
+// the pick that currently occupies the visible boundary is the only fix
+// that survives the client's real comparator in every case: same nearby
+// bucket as the protected pick → a rank swap flips the client's own order;
+// different bucket → nearby always wins regardless of rank, so instead
+// drop that boundary pick, leaving exactly 3 curated slots (the client
+// shows every pick once there is no 4th to truncate). is_best_fit and
 // `days` recompute from these SAME candidate objects (by reference), so
-// both stay consistent with the promotion. A no-op when the protected pick
-// is already in the top 3, or when there is nothing to protect.
+// both stay consistent either way. A no-op when the protected pick is
+// already visible, or when there is nothing to protect.
 function promoteLatencyPickRank(curatedSlots, latencyCutoffDate) {
   if (!latencyCutoffDate || curatedSlots.length < 4) return;
   const inHorizon = curatedSlots.filter((s) => s.date <= latencyCutoffDate);
   if (!inHorizon.length) return;
   const protectedPick = inHorizon.reduce((best, s) => (best == null || s.rank < best.rank ? s : best), null);
-  const byRank = [...curatedSlots].sort((a, b) => a.rank - b.rank);
-  if (byRank.indexOf(protectedPick) < 3) return;
-  const thirdBest = byRank[2];
-  const swap = protectedPick.rank;
-  protectedPick.rank = thirdBest.rank;
-  thirdBest.rank = swap;
+
+  const stripOrder = reservicePickerStripOrder(curatedSlots);
+  if (stripOrder.slice(0, 3).includes(protectedPick)) return;
+
+  // Exactly 4 curated slots and protectedPick isn't visible — it must be
+  // the strip's invisible 4th; stripOrder[2] is the pick currently holding
+  // the visible boundary it needs to take over.
+  const boundaryPick = stripOrder[2];
+  if (isReserviceNearbySlot(protectedPick) === isReserviceNearbySlot(boundaryPick)) {
+    const swap = protectedPick.rank;
+    protectedPick.rank = boundaryPick.rank;
+    boundaryPick.rank = swap;
+    return;
+  }
+  curatedSlots.splice(curatedSlots.indexOf(boundaryPick), 1);
 }
 
 function fallbackZoneCenter(city) {
@@ -1497,7 +1540,7 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
       // reserviceStopsThatDay corrects for capacity mode's per-technician
       // blind spot (see its own doc comment); a single function call adds
       // no branching to this already-at-ceiling function.
-      stops_that_day: reserviceStopsThatDay(occupiedByDate, slot.date, slot.stops_that_day),
+      stops_that_day: reserviceStopsThatDay(occupiedByDate, slot.date, slot.stops_that_day, slot.technician.id),
       startTime24: startTime,
       endTime24: fmt(endMin),
       start: minToTime12(startMin),
@@ -6102,7 +6145,10 @@ module.exports._internals = {
   reserviceAdjustedScore,
   reserviceStopsThatDay,
   promoteLatencyPickRank,
+  isReserviceNearbySlot,
+  reservicePickerStripOrder,
   businessDayHorizonEnd,
+  NEARBY_DETOUR_MINUTES,
   RESERVICE_EMPTY_DAY_PENALTY_MINUTES,
   RESERVICE_IDLE_WEIGHT,
   RESERVICE_LATENCY_BUSINESS_DAYS,
