@@ -549,7 +549,7 @@ describe('termite annual plan activation on sign', () => {
     const contract = makeContract();
     const estimate = makeEstimate({ annual_plan_activation_status: 'signature_expired' });
     const {
-      activateTermiteAnnualPlanForSignedContract, conn, estimateUpdate, termUpdate, convertEstimate,
+      activateTermiteAnnualPlanForSignedContract, conn, estimateUpdate, termUpdate, convertEstimate, notifyAdmin,
     } = setup({ contract, estimate });
 
     const result = await activateTermiteAnnualPlanForSignedContract({ contractId: CONTRACT_ID, conn });
@@ -558,6 +558,24 @@ describe('termite annual plan activation on sign', () => {
     expect(convertEstimate).not.toHaveBeenCalled();
     expect(estimateUpdate).not.toHaveBeenCalled();
     expect(termUpdate).not.toHaveBeenCalled();
+    // A signed agreement with no plan behind it is never silent: staff are
+    // told the customer signed after the offer closed.
+    expect(notifyAdmin).toHaveBeenCalledWith(
+      'estimate',
+      'Termite annual agreement signed after the offer closed',
+      expect.stringMatching(/Nothing was billed or booked/),
+      expect.objectContaining({ bell: true, dedupeKey: expect.stringContaining(':signed_after_close') }),
+    );
+  });
+
+  test('an already-activated estimate skips WITHOUT the signed-after-close bell', async () => {
+    const contract = makeContract();
+    const estimate = makeEstimate({ annual_plan_activation_status: 'activated' });
+    const { activateTermiteAnnualPlanForSignedContract, conn, notifyAdmin } = setup({ contract, estimate });
+
+    await activateTermiteAnnualPlanForSignedContract({ contractId: CONTRACT_ID, conn });
+
+    expect(notifyAdmin).not.toHaveBeenCalledWith('estimate', 'Termite annual agreement signed after the offer closed', expect.anything(), expect.anything());
   });
 
   test('not the annual template: skips without touching the estimate', async () => {

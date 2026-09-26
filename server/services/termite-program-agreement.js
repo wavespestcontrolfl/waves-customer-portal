@@ -1269,6 +1269,16 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
       // not have us insert (and autosend) from a just-disabled template —
       // the version pointer alone doesn't move on pause/archive.
       if (!liveTemplate || liveTemplate.status !== 'active' || liveTemplate.active_version_id !== version.id) return 'version_changed';
+      // Slice 3b: never draft an ANNUAL agreement for an estimate whose
+      // offer closed unsigned. Re-read under the lock above, which the
+      // close-out (termite-annual-activation.js expireAbandonedSignature)
+      // also takes: an evidence check done before this transaction can be
+      // stale by the time a close-out commits.
+      if (prepared.templateKey === ANNUAL_TEMPLATE_KEY && estimate?.id
+        && await trx.schema.hasColumn('estimates', 'annual_plan_activation_status')) {
+        const current = await trx('estimates').where({ id: estimate.id }).first('annual_plan_activation_status');
+        if (current?.annual_plan_activation_status === 'signature_expired') return 'offer_closed';
+      }
       // FOR UPDATE: the status re-read must be current when we cancel — a
       // customer signing the older agreement concurrently would otherwise
       // commit 'signed' between our unlocked read and an unconditional
@@ -1380,6 +1390,10 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
     if (contract === 'version_changed') {
       // Retryable: the next sweep re-reads the fresh active version.
       return { ok: false, skipped: 'version_changed' };
+    }
+    if (contract === 'offer_closed') {
+      // Terminal: the plan offer closed unsigned (slice 3b) — re-quote.
+      return { ok: false, skipped: 'annual_plan_offer_closed' };
     }
     if (!contract) {
       const winner = await existingBlockingProgramAgreement(customerId, estimate);

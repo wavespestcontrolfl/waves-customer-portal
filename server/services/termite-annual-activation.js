@@ -158,6 +158,12 @@ function bellCopyFor(kind, {
       body: `The station installation for the signed annual termite plan${estimateId ? ` (estimate #${estimateId})` : ''} is complete, but its coverage year could not be re-anchored to the installation: ${reason}. The term still runs from the signing date — fix the overlapping term, and the daily sweep will anchor it.`,
     };
   }
+  if (kind === 'signed_after_close') {
+    return {
+      title: 'Termite annual agreement signed after the offer closed',
+      body: `The customer signed the annual termite agreement (contract #${contractId}${estimateId ? `, estimate #${estimateId}` : ''}) after the plan offer had closed unsigned. Nothing was billed or booked. Contact the customer: re-quote the plan, or reinstate it by hand.`,
+    };
+  }
   if (kind === 'no_source_estimate') {
     return {
       title: 'Termite annual agreement has no linked estimate',
@@ -448,6 +454,15 @@ async function activateTermiteAnnualPlanForSignedContract({ contractId, conn = d
         requestedFirstVisit: acceptContext.requestedFirstVisit || null,
       };
     });
+
+    // A signature on an estimate whose offer already closed unsigned (slice
+    // 3b): activation correctly refuses it, but a signed agreement with no
+    // plan behind it must never be silent, whatever route produced it.
+    if (result?.skipped === 'signature_expired') {
+      await ringActivationBell(require('./notification-service'), {
+        estimateId, contractId, kind: 'signed_after_close', reason: 'the offer closed before the signature',
+      });
+    }
 
     // Everything below runs AFTER the activation transaction committed — a
     // failure here never undoes the money side.
@@ -1222,6 +1237,13 @@ async function expireAbandonedSignature({ estimateId, conn = db }) {
     const peek = await trx('estimates').where({ id: estimateId }).first('id', 'customer_id');
     if (!peek) return { skipped: 'estimate_not_found' };
     if (peek.customer_id) {
+      // Agreement issuance's own per-customer lock
+      // (termite-program-agreement.js maybeCreateTermiteProgramAgreement),
+      // taken FIRST: issuance holds it while it inserts (its event insert
+      // takes the customer FK lock), so a reissue and this close-out are
+      // serialized without a lock cycle. Issuance re-checks the estimate
+      // under it and never drafts an annual agreement for a closed offer.
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`termite-agreement:${peek.customer_id}`]);
       await trx('customers').where({ id: peek.customer_id }).forUpdate().first('id');
     }
     const estimate = await trx('estimates').where({ id: estimateId }).forUpdate().skipLocked().first();

@@ -690,4 +690,33 @@ describeOrSkip('termite annual signature expiry (slice 3b) — real Postgres', (
     const nudgedContracts = reminderDedupeKeys(notifyAdmin).map((key) => key.split(':')[1]);
     expect(new Set(nudgedContracts)).toEqual(new Set(contracts.map((c) => String(c.id))));
   });
+
+  test('the close-out waits on agreement issuance\'s per-customer lock, so a reissue in flight finishes first', async () => {
+    const { sweep, db } = load();
+    const { estimateId, customerId } = await makeParkedEstimate(db, { acceptedAt: daysAgo(ABANDON_DAYS + 2) });
+    await makeAgreement(db, { estimateId, customerId });
+
+    // Hold the lock maybeCreateTermiteProgramAgreement takes while it drafts.
+    let release;
+    const held = new Promise((resolve) => { release = resolve; });
+    let locked;
+    const lockTaken = new Promise((resolve) => { locked = resolve; });
+    const issuance = db.transaction(async (trx) => {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`termite-agreement:${customerId}`]);
+      locked();
+      await held;
+    });
+    await lockTaken;
+
+    let settled = false;
+    const sweeping = sweep().then((counts) => { settled = true; return counts; });
+    await new Promise((resolve) => { setTimeout(resolve, 400); });
+    expect(settled).toBe(false);
+    expect((await db('estimates').where({ id: estimateId }).first()).annual_plan_activation_status).toBe('awaiting_signature');
+
+    release();
+    await issuance;
+    const counts = await sweeping;
+    expect(counts.signatureExpired).toBe(1);
+  });
 });
