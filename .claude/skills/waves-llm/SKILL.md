@@ -92,8 +92,11 @@ Why (both have caused real parsing bugs):
 - **Refusals.** The model's safety classifiers can refuse benign
   pesticide/termiticide-adjacent content (HTTP 200, `stop_reason: 'refusal'`).
   The helper retries on OpenAI (`TEXT_POLICIES.deepAnalysis.fallback`), and
-  API failures get the same backup, unless less than `FALLBACK_MIN_MS` of the
-  caller's time budget remains.
+  API failures get the same backup. On the raw-message path the backup is
+  skipped when less than `FALLBACK_MIN_MS` of the caller's time budget
+  remains; structured calls (`options.jsonSchema`) go through
+  `dispatchWithFallback`, where both legs share one deadline and the OpenAI
+  leg runs whenever any budget is left.
 
 Also required at DEEP sites:
 - `max_tokens` **≥ 4096** — thinking spends from the same budget.

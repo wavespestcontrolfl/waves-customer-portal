@@ -46,8 +46,10 @@ absent), so the marketing→portal handoff keeps stitching for existing users.
 2. **Astro** (Cloudflare Pages env, all relevant builds):
    - `PUBLIC_POSTHOG_KEY=phc_…`
    - `PUBLIC_POSTHOG_HOST=https://us.i.posthog.com` (default; only set to override —
-     or point at the portal's first-party `/ingest` proxy, dark behind
-     `GATE_POSTHOG_INGEST_PROXY`, if ad-blocker loss matters more than the extra hop)
+     or `PUBLIC_POSTHOG_HOST=https://portal.wavespestcontrol.com/ingest` to use the
+     portal's first-party proxy, dark behind `GATE_POSTHOG_INGEST_PROXY`, if
+     ad-blocker loss matters more than the extra hop; the Astro sites run on other
+     origins, so the host must be absolute)
 3. **Portal** (Railway, client build env — Vite reads these at build time):
    - `VITE_POSTHOG_KEY=phc_…`
    - `VITE_POSTHOG_HOST=https://us.i.posthog.com` (default, or `/ingest` with the
