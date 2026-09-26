@@ -272,3 +272,57 @@ it('keeps the ranked "best times" strip visible after an AI search (re-service o
   await screen.findByText('Tuesday afternoon');
   expect(screen.getByText('Our best times for you')).toBeInTheDocument();
 });
+
+// Pre-push audit P1 on #4926: PickerBestTimes' rankOf() used to prefer
+// panelSlot.rank (days[].slots' own per-day rank, which the re-service
+// profile never mutates) over the curated strip's own `rank` — so with
+// equal `nearby`, a demoted empty-day pick whose RAW rank happened to be
+// lower still rendered ahead of the packed pick the strip had ranked first.
+// This constructs exactly that inversion (empty day's raw rank 1, packed
+// day's raw rank 5, both nearby) and asserts the STRIP's order (packed
+// first) wins in the rendered DOM.
+it('renders the curated strip order (adjusted score), not the day panel\'s raw per-day rank, when both are equally nearby (#4926)', async () => {
+  const packedDate = '2026-07-13';
+  const emptyDate = '2026-07-12';
+  const payload = {
+    state: 'bookable',
+    customerFirstName: 'Pat',
+    lanes: [{ key: 'pest', label: 'Pest Control Re-Service', alreadyBooked: null }],
+    availability: {
+      // Curated strip order: the packed slot is rank 1 (best), the demoted
+      // empty-day slot is rank 2 — this is the order that must render.
+      slots: [
+        { date: packedDate, start_time: '10:00', rank: 1 },
+        { date: emptyDate, start_time: '13:00', rank: 2 },
+      ],
+      nearby: true,
+      rangeFrom: '2026-07-11', rangeTo: '2026-07-24',
+      days: [
+        {
+          date: emptyDate, fullDate: 'Sunday, July 12', nearby: true,
+          slots: [{
+            start_time: '13:00', end_time: '13:45', start_label: '1:00 PM', end_label: '1:45 PM',
+            technician_id: 'tech-1', nearby: true,
+            // The day panel's OWN (never-mutated) raw rank is inverted on
+            // purpose — the empty day happened to have the best raw score.
+            rank: 1,
+          }],
+        },
+        {
+          date: packedDate, fullDate: 'Monday, July 13', nearby: true,
+          slots: [{
+            start_time: '10:00', end_time: '10:45', start_label: '10:00 AM', end_label: '10:45 AM',
+            technician_id: 'tech-1', nearby: true, rank: 5,
+          }],
+        },
+      ],
+    },
+  };
+  stubFetch({ get: jsonResponse(payload) });
+  const { container } = renderPage();
+  await screen.findByText('Our best times for you');
+  const order = [...container.querySelectorAll('.wpk-best-when')].map((node) => node.textContent);
+  expect(order).toHaveLength(2);
+  expect(order[0]).toContain('10:00 AM'); // packed (strip rank 1) renders first
+  expect(order[1]).toContain('1:00 PM'); // demoted empty day (strip rank 2) renders second
+});
