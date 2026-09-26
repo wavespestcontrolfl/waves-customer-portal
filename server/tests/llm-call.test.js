@@ -241,23 +241,35 @@ describe('callAnthropic prompt caching', () => {
     expect(mockAnthropicCreate.mock.calls.at(-1)[0].cacheTtl).toBeUndefined();
   });
 
-  test('MODELS.ANTHROPIC_EFFORT pins output_config.effort next to a json_schema format (and alone without one)', async () => {
+  test('MODELS.ANTHROPIC_EFFORT pins output_config.effort on effort-capable models only (next to a json_schema format, or alone)', async () => {
     const MODELS = require('../config/models');
     mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: '{"ok":true}' }] });
     MODELS.ANTHROPIC_EFFORT = 'high';
     try {
       const schema = { type: 'object', additionalProperties: false, required: ['ok'], properties: { ok: { type: 'boolean' } } };
-      await callAnthropic({ model: FLAGSHIP, system: 'S', text: 'hi', jsonMode: true, jsonSchema: schema });
+      await callAnthropic({ model: 'claude-opus-4-8', system: 'S', text: 'hi', jsonMode: true, jsonSchema: schema });
       const withSchema = mockAnthropicCreate.mock.calls.at(-1)[0].output_config;
       expect(withSchema.effort).toBe('high');
       expect(withSchema.format.type).toBe('json_schema');
-      await callAnthropic({ model: FLAGSHIP, text: 'hi', jsonMode: false });
+      await callAnthropic({ model: 'claude-sonnet-5', text: 'hi', jsonMode: false });
       expect(mockAnthropicCreate.mock.calls.at(-1)[0].output_config).toEqual({ effort: 'high' });
+      await callAnthropic({ model: 'claude-haiku-4-5-20251001', text: 'hi', jsonMode: false });
+      expect(mockAnthropicCreate.mock.calls.at(-1)[0].output_config).toBeUndefined();
+      await callAnthropic({ model: 'claude-sonnet-4-6', text: 'hi', jsonMode: false });
+      expect(mockAnthropicCreate.mock.calls.at(-1)[0].output_config).toBeUndefined();
     } finally {
       delete MODELS.ANTHROPIC_EFFORT;
     }
     await callAnthropic({ model: FLAGSHIP, text: 'hi', jsonMode: false });
     expect(mockAnthropicCreate.mock.calls.at(-1)[0].output_config).toBeUndefined();
+  });
+
+  test('dispatchWithFallback forwards cacheTtl from the payload to the Anthropic wire (the previsit brief relies on this)', async () => {
+    mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: '{"ok":true}' }] });
+    const policy = { name: 'ttlTest', primary: { provider: 'anthropic', model: FLAGSHIP }, fallback: { provider: 'openai', model: 'x' } };
+    const r = await dispatchWithFallback(policy, { system: 'S', text: 'hi', jsonMode: false, cacheTtl: '1h' });
+    expect(r.ok).toBe(true);
+    expect(mockAnthropicCreate.mock.calls.at(-1)[0].system[0].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
   });
 
   test('MODEL_ANTHROPIC_EFFORT accepts only the five API levels (a typo resolves to undefined, never a 400)', () => {

@@ -15,6 +15,10 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/models', () => ({
   DEEP: 'deep-model',
+  anthropicEffortFor(model) {
+    const pinned = require('../config/models').ANTHROPIC_EFFORT;
+    return pinned && /^claude-(opus|fable|mythos)-|^claude-sonnet-5(?![0-9])/.test(String(model || '')) ? pinned : undefined;
+  },
   TEXT_POLICIES: {
     deepAnalysis: {
       name: 'deepAnalysis',
@@ -74,18 +78,23 @@ describe('createDeepMessage', () => {
     expect(withSystemCache({ messages: [] }).system).toBeUndefined();
   });
 
-  test('MODELS.ANTHROPIC_EFFORT pins output_config.effort on the raw path without clobbering a caller format', () => {
+  test('MODELS.ANTHROPIC_EFFORT is a default: caller format survives, a caller effort wins, non-effort models never see it', () => {
     const MODELS = require('../config/models');
     const { wireParams } = require('../services/llm/deep')._test;
     MODELS.ANTHROPIC_EFFORT = 'high';
     try {
-      const req = wireParams({ max_tokens: 10, messages: [], output_config: { format: { type: 'json_schema', schema: {} } } }, 'm');
-      expect(req.output_config).toEqual({ format: { type: 'json_schema', schema: {} }, effort: 'high' });
-      expect(req.model).toBe('m');
+      const withFormat = wireParams({ max_tokens: 10, messages: [], output_config: { format: { type: 'json_schema', schema: {} } } }, 'claude-opus-4-8');
+      expect(withFormat.output_config).toEqual({ format: { type: 'json_schema', schema: {} }, effort: 'high' });
+      const callerEffort = wireParams({ max_tokens: 10, messages: [], output_config: { effort: 'low' } }, 'claude-opus-4-8');
+      expect(callerEffort.output_config).toEqual({ effort: 'low' });
+      expect(wireParams({ max_tokens: 10, messages: [] }, 'claude-haiku-4-5-20251001').output_config).toBeUndefined();
+      expect(wireParams({ max_tokens: 10, messages: [] }, 'claude-sonnet-4-6').output_config).toBeUndefined();
+      expect(wireParams({ max_tokens: 10, messages: [] }, 'claude-sonnet-5').output_config).toEqual({ effort: 'high' });
+      expect(wireParams({ max_tokens: 10, messages: [] }, 'claude-fable-5').output_config).toEqual({ effort: 'high' });
     } finally {
       delete MODELS.ANTHROPIC_EFFORT;
     }
-    expect(wireParams({ max_tokens: 10, messages: [] }, 'm').output_config).toBeUndefined();
+    expect(wireParams({ max_tokens: 10, messages: [] }, 'claude-opus-4-8').output_config).toBeUndefined();
   });
 
   test('respects an explicit params.model (per-feature env overrides)', async () => {

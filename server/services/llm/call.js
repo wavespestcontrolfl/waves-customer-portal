@@ -518,7 +518,8 @@ function anthropicRequest({ model, system, text, images, documents, tools, jsonM
   if (tools) req.tools = tools;
   const outputConfig = {};
   if (jsonMode && jsonSchema) outputConfig.format = { type: 'json_schema', schema: anthropicSchema(jsonSchema) };
-  if (MODELS.ANTHROPIC_EFFORT) outputConfig.effort = MODELS.ANTHROPIC_EFFORT;
+  const effort = MODELS.anthropicEffortFor?.(model);
+  if (effort) outputConfig.effort = effort;
   if (Object.keys(outputConfig).length) req.output_config = outputConfig;
   return req;
 }

@@ -81,6 +81,17 @@ const ANTHROPIC_EFFORT_LEVELS = new Set(['low', 'medium', 'high', 'xhigh', 'max'
 const ANTHROPIC_EFFORT = ANTHROPIC_EFFORT_LEVELS.has(process.env.MODEL_ANTHROPIC_EFFORT)
   ? process.env.MODEL_ANTHROPIC_EFFORT
   : undefined;
+// Only the models that accept output_config.effort get it: the Opus line
+// (4.5+), Sonnet 5, and the Fable / Mythos line. Haiku 4.5 and older Sonnets
+// 400 on the field, and the admin picker can pin those on a lane, so the pin
+// must never reach them. Returns the pinned level or undefined.
+const EFFORT_CAPABLE_RE = /^claude-(opus|fable|mythos)-|^claude-sonnet-5(?![0-9])/;
+// Reads the exported value at call time (not the const) so a test can pin
+// the level on the registry object without re-loading every consumer.
+function anthropicEffortFor(model) {
+  const pinned = module.exports.ANTHROPIC_EFFORT;
+  return pinned && EFFORT_CAPABLE_RE.test(String(model || '')) ? pinned : undefined;
+}
 
 // Code defaults for every env-overridable selector, in one place so the admin
 // switchboard can say what a selector returns to when its Railway override is
@@ -407,6 +418,7 @@ const TEXT_POLICIES = Object.freeze({
 
 module.exports = {
   ANTHROPIC_EFFORT,
+  anthropicEffortFor,
   DEEP,
   EXTREME,
   FLAGSHIP,

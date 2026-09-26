@@ -96,11 +96,15 @@ function withSystemCache(params) {
 
 // `cacheTtl` is a helper option, never a wire field; `output_config.effort`
 // follows the same registry selector the adapter honors, so an Opus 5.5 flip
-// (default effort 'medium') keeps DEEP lanes at the pinned depth.
+// (default effort 'medium') keeps DEEP lanes at the pinned depth unless a
+// caller set its own.
 function wireParams(params, model) {
   const { cacheTtl: _cacheTtl, ...rest } = withSystemCache(params);
   const req = { ...rest, model };
-  if (MODELS.ANTHROPIC_EFFORT) req.output_config = { ...(rest.output_config || {}), effort: MODELS.ANTHROPIC_EFFORT };
+  // The env pin is a DEFAULT: a caller that chose its own effort keeps it,
+  // and models that reject the field (Haiku, older Sonnets) never see it.
+  const effort = MODELS.anthropicEffortFor?.(model);
+  if (effort) req.output_config = { effort, ...(rest.output_config || {}) };
   return req;
 }
 
