@@ -308,11 +308,12 @@ const DRY_OR_REENTRY_RE = /\b(?:dr(?:y|ies|ied|ying)|re-?ent\w*|re-?occup\w*|occ
 
 const INTAKE_EPA_APPROVED_ES_RE = { test: (t) => EPA_MENTION_RE.test(t) && APPROVAL_WORD_RE.test(t) };
 
-// Explicit re-entry wording makes any duration a re-entry claim, even with no
-// treatment keyword ("When can we come back inside?" → "You can re-enter
-// after 30 minutes."). Bare "come back in" is not here — "We'll come back in
-// two weeks" is a follow-up visit.
-const EXPLICIT_REENTRY_RE = /\b(?:re-?ent(?:er|ers|ered|ering|ry)|re-?occup\w*|(?:come|go|get|let\s+\S+)\s+back\s+(?:inside|indoors|into)|volver\s+a\s+entrar|reingres\w*|re-?entrada|reocup\w*)\b/i;
+// Explicit re-entry or drying wording makes any duration a timing claim, even
+// with no treatment keyword ("When can we come back inside?" → "You can
+// re-enter after 30 minutes."; "How long does it take to dry?" → "It dries in
+// 30 minutes."). Bare "come back in" is not here — "We'll come back in two
+// weeks" is a follow-up visit.
+const EXPLICIT_REENTRY_RE = /\b(?:re-?ent(?:er|ers|ered|ering|ry)|re-?occup\w*|(?:come|go|get|let\s+\S+)\s+back\s+(?:inside|indoors|into)|volver\s+a\s+entrar|reingres\w*|re-?entrada|reocup\w*|dr(?:y|ies|ied|ying)|sec(?:o|a|os|as|ar|arse|ado|ada)|se\s+seca)\b/i;
 
 // "Re-enter the portal / volver a entrar al portal" is a login, not a room.
 const DIGITAL_CONTEXT_RE = /\b(?:portal|account|login|log\s+in|password|website|site|app|página|pagina|cuenta|contraseña|sesi[oó]n|sistema)\b/i;

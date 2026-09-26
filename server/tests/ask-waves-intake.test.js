@@ -292,6 +292,8 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
 
   test('explicit re-entry wording makes a duration a claim without a treatment keyword', () => {
     expect(intakeSafetyClaimSupplement('You can re-enter after 30 minutes.', 'When can we come back inside?')).toBe(true);
+    expect(intakeSafetyClaimSupplement('It dries in 30 minutes.', 'How long does it take to dry?')).toBe(true);
+    expect(intakeSafetyClaimSupplement('Se seca en 30 minutos.', '¿Cuánto tarda en secarse?')).toBe(true);
     expect(intakeSafetyClaimSupplement('We will come back in two weeks for the follow-up.', '')).toBe(false);
     expect(intakeSafetyClaimSupplement('Puede volver a entrar al portal en dos horas.', '¿Cuándo puedo entrar al portal?')).toBe(false);
   });
