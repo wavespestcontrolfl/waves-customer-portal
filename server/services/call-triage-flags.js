@@ -250,21 +250,22 @@ function suppressUnsupportedModelFlags(modelFlags, extraction) {
 // and, through isAuthorizedWdoArrangerBooking, cleared caller_not_authorized
 // on a third party's TREATMENT request (codex #4890 post-merge review P1).
 // The owner ruling covers only an INSPECTION/report arranged for a lender or
-// closing, so a name must clear the identity check AND read as an
-// inspection/report/letter/certificate/clearance AND carry NONE of the
-// treatment/remediation wording below — the treatment veto runs first and
-// wins over any co-occurring inspection word ("WDO inspection and
-// treatment" is a treatment call, not an inspection one). There is no
-// catalog service_key available here (this predicate is pure over the
-// extraction only, by design — see isAuthorizedWdoArrangerBooking's
-// no-clock note), so this stays a closed-vocabulary text check rather than a
-// DB lookup; the coarse 'wdo' category below is schema-enumerated
+// closing. A treatment-word blocklist kept missing inflections ("treatments",
+// "retreatment", "tented", "baited" — codex #4966 r2 P1), so the name is now
+// an ALLOWLIST: after normalizing case and punctuation it must be exactly a
+// WDO inspection name ("WDO", "WDO Inspection", "WDO Inspection Service",
+// "Wood-Destroying Organism (WDO) Inspection", optionally "report"/"letter"/
+// "clearance letter"/"certificate"). Any other word anywhere fails closed.
+// There is no catalog service_key here (this predicate is pure over the
+// extraction, by design — see isAuthorizedWdoArrangerBooking's no-clock
+// note). The coarse 'wdo' category below is schema-enumerated
 // (call-extraction.persisted.schema.json), not free text, and that enum has
-// no separate WDO-treatment value (WDO treatment work is always categorized
-// under 'termite', never 'wdo'), so it stays a safe, inspection-only signal
-// on its own. Ambiguous text fails closed — not authorized.
-const WDO_TREATMENT_WORDING_RE = /\btreat(?:ment|ed|ing)?\b|\btent(?:ing)?\b|\bfumigat(?:e|ion|ing)\b|\bbait(?:ing)?\b|\btermidor\b|\bremediat(?:e|ion|ing)\b/i;
-const WDO_INSPECTION_WORDING_RE = /\binspect(?:ion)?\b|\breport\b|\bletter\b|\bcertif(?:y|icate|ication)\b|\bclearance\b/i;
+// no WDO-treatment value (WDO treatment is categorized 'termite'), so it
+// stays a safe inspection-only signal on its own.
+const WDO_INSPECTION_NAME_RE = /^(?:wdo|wood destroying organisms?(?: wdo)?)(?: inspection)?(?: service| report| letter| clearance(?: letter)?| certificate)?$/;
+function normalizeWdoServiceName(name) {
+  return String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
 function isWdoInspectionRequest(serviceRequest = {}) {
   // The extraction's own intent must be an inspection: a treatment (or any
   // other) intent paired with a catalog-looking "WDO Inspection Service" name
@@ -279,9 +280,7 @@ function isWdoInspectionRequest(serviceRequest = {}) {
     // The acronym or the spelled-out form ("Wood-Destroying Organism
     // Inspection"), the same equivalence service-normalizer.js uses (codex
     // #4890 r7 P2).
-    if (!/\bWDO\b|wood[-\s]*destroy/i.test(specific)) return false;
-    if (WDO_TREATMENT_WORDING_RE.test(specific)) return false;
-    return WDO_INSPECTION_WORDING_RE.test(specific);
+    return WDO_INSPECTION_NAME_RE.test(normalizeWdoServiceName(specific));
   }
   return serviceRequest?.primary_service_category === 'wdo';
 }

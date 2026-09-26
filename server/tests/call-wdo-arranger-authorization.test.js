@@ -98,6 +98,23 @@ describe('isAuthorizedWdoArrangerBooking (predicate)', () => {
     }
   );
 
+  // codex #4966 r2 P1: the name is an exact-name ALLOWLIST, so inflected or
+  // extra treatment wording can never slip past a blocklist.
+  test.each([
+    'WDO inspection and treatments', 'WDO Retreatment', 'WDO inspection (tented)',
+    'WDO inspection, baited', 'WDO fumigated inspection', 'WDO Inspection + Termite Treatment',
+    'WDO Inspection and Repair', 'Termite Inspection Service', 'WDO Inspection Service for treatment',
+  ])('name %p never qualifies', (name) => {
+    expect(isWdoInspectionRequest({ service_intent: 'inspection_only', primary_service_category: 'wdo', specific_service_name: name })).toBe(false);
+  });
+  test.each([
+    'WDO', 'WDO Inspection', 'WDO Inspection Service', 'wdo inspection report',
+    'Wood-Destroying Organism Inspection', 'Wood Destroying Organisms (WDO) Inspection',
+    'WDO clearance letter', 'WDO Inspection Certificate',
+  ])('name %p qualifies', (name) => {
+    expect(isWdoInspectionRequest({ service_intent: 'inspection_only', primary_service_category: 'wdo', specific_service_name: name })).toBe(true);
+  });
+
   test('isWdoInspectionRequest matches on category or specific name', () => {
     expect(isWdoInspectionRequest({ service_intent: 'inspection_only', primary_service_category: 'wdo', specific_service_name: null })).toBe(true);
     expect(isWdoInspectionRequest({ service_intent: 'inspection_only', primary_service_category: 'inspection_only', specific_service_name: 'WDO Inspection Service' })).toBe(true);
