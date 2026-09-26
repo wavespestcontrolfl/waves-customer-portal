@@ -49,11 +49,15 @@ describe('canAutoRoute fail-open booking', () => {
   });
 
   // Owner ruling 2026-09-26 standing directive: every call-agent rule behaves
-  // the same on outbound and inbound calls. failOpen is inbound-only
-  // (call-recording-processor.js gates it on !isOutboundCall), so this test
-  // simulates the OUTBOUND shape directly: fail-open OFF, name_email_mismatch
-  // is the only flag on an otherwise-clean confirmed booking.
-  test('an OUTBOUND-shaped confirmed booking (fail-open off) is NOT blocked by name_email_mismatch alone', () => {
+  // the same on outbound and inbound calls. UPDATED same day: fail-open used
+  // to be inbound-only (call-recording-processor.js gated it on
+  // !isOutboundCall) — that exclusion is now removed (see the "outbound
+  // calls use the fail-open contract too" describe block below), so this is
+  // no longer a simulation of an outbound-specific shape. It still stands on
+  // its own merits: name_email_mismatch is advisory outright (never blocks)
+  // regardless of failOpen or direction, so leaving failOpen unset here still
+  // isolates that fact from the fail-open machinery.
+  test('a confirmed booking with fail-open off is NOT blocked by name_email_mismatch alone (advisory on any direction)', () => {
     const r = canAutoRoute(extraction(['name_email_mismatch']), { addressValidation: AV_CLEAN });
     expect(r.allowed).toBe(true);
     expect(r.flags).toContain('name_email_mismatch');
@@ -2863,5 +2867,107 @@ describe('V2 decision version bookkeeping', () => {
     const { V2_DECISION_VERSION, V2_DECISION_VERSIONS } = require('../services/call-routing-gates');
     expect(V2_DECISION_VERSIONS[V2_DECISION_VERSIONS.length - 1]).toBe(V2_DECISION_VERSION);
     expect(new Set(V2_DECISION_VERSIONS).size).toBe(V2_DECISION_VERSIONS.length);
+  });
+});
+
+// Owner ruling (2026-09-26): a staff-placed (OUTBOUND) call that ends with a
+// confirmed appointment time books itself like an inbound call does. Prod
+// evidence (8 weeks): 7 outbound calls ended confirmed-with-start; 5 were
+// held, 2 of them ONLY by address_unverifiable+missing_service_address for a
+// customer whose address was already on file. call-recording-processor.js
+// used to hard-exclude outbound from the fail-open contract
+// (`&& !isOutboundCall(call)` at the live path, the routing-context builder,
+// and the offline audit replay) — that exclusion is now removed so the SAME
+// on-file-address recovery inbound gets applies to outbound. What stays
+// inbound-only (deliberately unchanged): agentCommitFailOpen, impliedConsent,
+// and the "Waves Assessment" generic-service fallback.
+describe('outbound calls use the fail-open contract too (owner ruling 2026-09-26)', () => {
+  const CallRecordingProcessor = require('../services/call-recording-processor');
+  const { buildFailOpenRoutingContext } = CallRecordingProcessor;
+
+  const knownCustomer = {
+    id: 'cust-onfile-1',
+    first_name: 'Barbara',
+    last_name: 'Onfile',
+    pipeline_stage: 'won',
+    address_line1: '123 Main St',
+    city: 'Venice',
+    state: 'FL',
+    zip: '34285',
+  };
+
+  test('buildFailOpenRoutingContext no longer excludes outbound calls (was: failOpen: !!failOpenEnabled && !isOutboundCall(call))', () => {
+    const outboundCtx = buildFailOpenRoutingContext({
+      call: { direction: 'outbound' }, customer: knownCustomer, contactPhone: '+19415550100', failOpenEnabled: true,
+    });
+    expect(outboundCtx.options.failOpen).toBe(true);
+    expect(outboundCtx.options.knownCustomer).toMatchObject({ hasAddress: true });
+
+    const inboundCtx = buildFailOpenRoutingContext({
+      call: { direction: 'inbound' }, customer: knownCustomer, contactPhone: '+19415550100', failOpenEnabled: true,
+    });
+    expect(inboundCtx.options.failOpen).toBe(true);
+
+    // The gate flag itself still governs both directions identically.
+    expect(buildFailOpenRoutingContext({
+      call: { direction: 'outbound' }, customer: knownCustomer, failOpenEnabled: false,
+    }).options.failOpen).toBe(false);
+  });
+
+  test('an OUTBOUND confirmed call for a known customer with an on-file address, no new address stated, fails open and the call routes', () => {
+    const ctx = buildFailOpenRoutingContext({
+      call: { direction: 'outbound' }, customer: knownCustomer, contactPhone: '+19415550100', failOpenEnabled: true,
+    });
+    // No addressValidation passed: the known-customer on-file address is what
+    // must satisfy both the address flags AND the common AV exit gate here —
+    // exactly the Barbara-case shape above, just on an outbound call.
+    const ex = extraction(['address_unverifiable', 'missing_service_address', 'caller_phone_missing']);
+    ex.property = { service_address: {} }; // nothing stated on THIS call → on-file address governs
+    const r = canAutoRoute(ex, ctx.options);
+    expect(r.allowed).toBe(true);
+    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['address_unverifiable', 'missing_service_address', 'caller_phone_missing']));
+  });
+
+  test('an OUTBOUND call that states a NEW address still holds despite fail-open being on', () => {
+    const ctx = buildFailOpenRoutingContext({
+      call: { direction: 'outbound' }, customer: knownCustomer, contactPhone: '+19415550100', failOpenEnabled: true,
+    });
+    expect(ctx.options.failOpen).toBe(true); // fail-open IS active for this outbound call...
+    const ex = extraction(['address_unverifiable', 'missing_service_address']);
+    ex.property = { service_address: { street_line_1: '9999 Nonexistent Rd', city: 'Sarasota', zip: '34231' } };
+    const r = canAutoRoute(ex, ctx.options);
+    // ...but a NEW stated address is never auto-approved — AV still governs it.
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toEqual(expect.arrayContaining(['address_unverifiable', 'missing_service_address']));
+  });
+
+  test('caller_phone_missing fail-open is sound on outbound: resolveCallContactPhone resolves the DIALED (customer) number, not the staff/office leg', () => {
+    const { resolveCallContactPhone } = CallRecordingProcessor._test;
+    // Outbound: from_phone is Waves' own line, to_phone is the customer dialed.
+    expect(resolveCallContactPhone({ direction: 'outbound', from_phone: '+19412975749', to_phone: '+19145234413' }))
+      .toBe('+19145234413');
+  });
+
+  // Deliberately UNCHANGED by this lane — pinned against the exact source so a
+  // future edit that widens these too gets caught. (Behavioral coverage for
+  // agentCommitFailOpen/impliedConsent already lives in
+  // call-recording-processor-guards.test.js and call-triage-flags tests;
+  // these lines are deep inside the single large processing function and are
+  // not independently callable, so the source pin is the practical guard —
+  // same pattern used elsewhere in this suite, e.g.
+  // call-onfile-house-number-conflict.test.js.)
+  test('agent-commit demotion, implied consent, and the Waves Assessment fallback stay inbound-only in source', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    const outboundExcluded = (needle) => {
+      expect(src).toContain(needle);
+    };
+    outboundExcluded("agentCommitFailOpen: isEnabled('callAgentCommitBooking') && !isOutboundCall(call),");
+    outboundExcluded("impliedConsent: isEnabled('callInboundImpliedConsent') && !isOutboundCall(call),");
+    outboundExcluded("&& isEnabled('callFailOpenBooking') && !isOutboundCall(call)) {");
+    // ...while the three fail-open sites this lane changed no longer exclude outbound.
+    expect(src).toContain("const failOpenBooking = isEnabled('callFailOpenBooking');");
+    expect(src).not.toContain("const failOpenBooking = isEnabled('callFailOpenBooking') && !isOutboundCall(call);");
+    expect(src).toContain('failOpen: !!failOpenEnabled,');
+    expect(src).not.toContain('failOpen: !!failOpenEnabled && !isOutboundCall(call),');
   });
 });

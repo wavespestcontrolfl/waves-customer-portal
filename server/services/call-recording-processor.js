@@ -1383,9 +1383,11 @@ function callerIdNameForPrompt(call) {
  * call. Exported so the three offline routing audits MIRROR production rather
  * than approximating it (local pre-push audit P1; round-13 residual): a
  * hand-rolled "linked customer with an address" test also granted the lane to
- * OUTBOUND calls and to dormant/lost/duplicate accounts, whose stale on-file
- * data must never clear a blocker — both directions of error land on the
- * permissive side of a promotion gate.
+ * dormant/lost/duplicate accounts, whose stale on-file data must never clear
+ * a blocker — that direction of error lands on the permissive side of a
+ * promotion gate. (Outbound calls are no longer excluded here — owner ruling
+ * 2026-09-26 — but summarizeKnownCaller/failOpenKnownCustomer still refuse a
+ * dormant/lost/duplicate account regardless of direction.)
  *
  * The caller must still run demoteFailOpenOnV1AddressConflict on the result,
  * exactly as the live path does — the two are one contract.
@@ -1404,9 +1406,14 @@ function buildFailOpenRoutingContext({
   return {
     knownCaller,
     options: {
-      // Fail-open is INBOUND-only: an outbound callback is our own dial, not
-      // a customer volunteering their identity by calling the office.
-      failOpen: !!failOpenEnabled && !isOutboundCall(call),
+      // Owner ruling (2026-09-26): a staff-placed (OUTBOUND) call that ends
+      // with a confirmed appointment time books itself like an inbound call
+      // does. Fail-open now applies on both directions — an outbound call's
+      // known customer with an on-file address clears the same recoverable
+      // flags an inbound caller's does; it only ever recovers what the
+      // customer already has on file, never a value stated on this call
+      // (see the newAddressGiven guard in call-triage-flags.js).
+      failOpen: !!failOpenEnabled,
       callerAni: contactPhone,
       knownCustomer: failOpenKnownCustomer(knownCaller),
     },
@@ -9521,7 +9528,16 @@ const CallRecordingProcessor = {
           // isn't held over recoverable contact-field flags — the ANI satisfies
           // caller_phone_missing, an existing customer's on-file address clears
           // address flags, a garbled email (name_email_mismatch) is advisory.
-          const failOpenBooking = isEnabled('callFailOpenBooking') && !isOutboundCall(call);
+          // Owner ruling (2026-09-26): a staff-placed (OUTBOUND) call that ends
+          // with a confirmed appointment time books itself like an inbound
+          // call does, so this contract is no longer gated on !isOutboundCall
+          // — resolveCallContactPhone already resolves contactPhone to the
+          // DIALED (customer) number on an outbound call, so callerAni below
+          // is sound on both directions, and the address recovery only ever
+          // uses the on-file address (never one stated on this call — see
+          // newAddressGiven in call-triage-flags.js). agentCommitFailOpen
+          // stays inbound-only (below) — that demotion is a distinct contract.
+          const failOpenBooking = isEnabled('callFailOpenBooking');
           // A new lead's on-file address is validated HERE, once, and only
           // when this call does not state its own (codex #4685 r2 P2).
           knownCaller = await trustValidatedNewLeadAddress(knownCaller, { extraction: v2Extraction, failOpen: failOpenBooking });
@@ -18639,13 +18655,16 @@ const CallRecordingProcessor = {
           canonicalRecord: extracted,
         });
         finalFlags = mergeTriageFlags(modelFlags, deterministicFlags);
-        knownCaller = await trustValidatedNewLeadAddress(knownCaller, { extraction: v2ExtractionForAudit, failOpen: isEnabled('callFailOpenBooking') && !isOutboundCall(call) });
+        // Owner ruling (2026-09-26): fail-open applies on both directions —
+        // mirror the live path exactly (no !isOutboundCall gate) so the
+        // replayed audit decision agrees with what enforce mode would do.
+        knownCaller = await trustValidatedNewLeadAddress(knownCaller, { extraction: v2ExtractionForAudit, failOpen: isEnabled('callFailOpenBooking') });
         routingResult = canAutoRoute(v2ExtractionForAudit, {
           contactPhone,
           addressValidation: v2AddressValidation,
           canonicalRecord: extracted,
           // Keep the audit/shadow decision consistent with the enforce path.
-          failOpen: isEnabled('callFailOpenBooking') && !isOutboundCall(call),
+          failOpen: isEnabled('callFailOpenBooking'),
           callerAni: contactPhone,
           knownCustomer: failOpenKnownCustomer(knownCaller),
           agentCommitFailOpen: isEnabled('callAgentCommitBooking') && !isOutboundCall(call),
