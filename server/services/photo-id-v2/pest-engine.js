@@ -604,6 +604,17 @@ function pairIfBothApproved(entry, targetSlug) {
  * same "no second candidate to pair against" fallback `nextPhotoFor` uses),
  * shared with `entryLevelAnswer`'s photo-confirmability guard so both apply
  * the SAME fallback pair consistently. */
+/** The look-alike pair that governs whether a photo can confirm `top`:
+ * its curated pair against the second candidate, else its own first
+ * look-alike — read WITHOUT the approval filter. `photo_can_confirm: false`
+ * is a fact about the pair, not about whether the other side's page is
+ * published yet (Codex round-0 P1, round 19: bed bug vs a still-planned
+ * bat bug). Callers must not surface an unapproved target's identity. */
+function governingPair(top, second) {
+  const las = top?.entry?.look_alikes || [];
+  return (second?.entry && las.find((la) => la.slug === second.entry.slug)) || las[0] || null;
+}
+
 function firstApprovedLookAlike(entry) {
   return (entry.look_alikes || []).find((la) => isApproved(catalog.getEntry(la.slug))) || null;
 }
@@ -628,6 +639,13 @@ function nextPhotoFor(wording, candidates, level, nodeId) {
   // look-alike WHOSE OWN TARGET IS APPROVED) — read directly so
   // `photo_can_confirm` survives (`catalog.nextPhoto`'s wrapper drops it).
   if (level === 'entry' && top?.entry) {
+    const governing = governingPair(top, second);
+    if (governing && !isApproved(catalog.getEntry(governing.slug))) {
+      // Its prose names the unapproved look-alike: ask with the group's
+      // generic prompt instead, but keep the pair's own confirmability.
+      const np = catalog.nextPhoto(top.entry.group);
+      return { ask: np?.ask || null, why: np?.why || null, photo_can_confirm: governing.photo_can_confirm !== false };
+    }
     const fallbackPair = firstApprovedLookAlike(top.entry);
     return fallbackPair
       ? { ask: fallbackPair.next_photo || null, why: fallbackPair.difference || null, photo_can_confirm: fallbackPair.photo_can_confirm !== false }
@@ -670,7 +688,8 @@ function entryLevelAnswer(candidates, top, blockPrettySure) {
   // to the top entry's own first-approved look-alike, the same as having
   // no second candidate at all.
   const applicablePair = (second?.entry && pairIfBothApproved(top.entry, second.entry.slug)) || firstApprovedLookAlike(top.entry);
-  const unconfirmablePair = applicablePair?.photo_can_confirm === false;
+  const unconfirmablePair = applicablePair?.photo_can_confirm === false
+    || governingPair(top, second)?.photo_can_confirm === false;
   // Codex round-0 P1 (rounds 10–15): "pretty sure" is only ever earned by a
   // confidence a real trait check produced. One gate here, instead of each
   // merge path proving it never lets an unchecked number through.

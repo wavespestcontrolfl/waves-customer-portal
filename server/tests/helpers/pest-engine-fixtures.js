@@ -244,6 +244,20 @@ const FIXTURE = buildFixtureCatalog({
       service: { line: 'pest', key: 'pest', label: 'General Pest Control', inspection_first: false, referral: null },
       urgency: 'low', review: APPROVED, verification: [],
     },
+    {
+      // bed bug vs a still-planned bat bug: the pair is photo-unconfirmable
+      // while its other side is unapproved (Codex round-0 P1, round 19).
+      slug: 'no-photo-pair-c', common_name: 'No Photo Pair C', scientific_name: 'Testus c', kind: 'organism',
+      group: 'ants', subgroup: null, verdict: 'watch', role: 'nuisance', risk: 'low', action: 'monitor',
+      safety_line: null, safety: { stings: false, venomous: false, structural: false, toxic_to_pets: false, disease_vector: false, irritant: false },
+      range: 'common', active_months: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+      traits: ['Trait C1', 'Trait C2'],
+      look_alikes: [{ slug: 'unreviewed-ant', difference: 'Unreviewed ants need a lab look.', next_photo: 'No single photo separates these from unreviewed ants.', photo_can_confirm: false }],
+      copy: { what_it_means: 'C.', fact: 'C.' },
+      links: {},
+      service: { line: 'pest', key: 'pest', label: 'General Pest Control', inspection_first: false, referral: null },
+      urgency: 'low', review: APPROVED, verification: [],
+    },
   ],
   legacySlugMap: {
     'ghost-ant': { node: 'ghost-ant', kind: 'entry', note: '' },

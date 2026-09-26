@@ -311,7 +311,16 @@ describe('buildAnswer — look-alike identities respect the review gate (Codex r
     // when that one look-alike is swapped for an unapproved target.
     const built = buildAnswer(baseCtx({ candidates: [cand('fire-ant', 0.55)] })); // fire-ant's only look-alike is unapproved
     expect(built.answer.wording).toBe('likely');
-    expect(built.nextPhoto).toBeNull(); // no approved look-alike to fall back to, and no node-level prompt at entry level
+    // The group's generic prompt stands in; nothing names the unapproved ant.
+    expect(built.nextPhoto).toEqual({ ask: 'Ant group node photo', why: 'Ant group why', photo_can_confirm: true });
+  });
+
+  test('a photo-unconfirmable pair blocks pretty_sure even while its other side is unapproved (Codex round-0 P1, round 19)', () => {
+    const built = buildAnswer(baseCtx({ candidates: [cand('no-photo-pair-c', 0.95, { traitsVisible: [1] })] }));
+    expect(built.answer.wording).toBe('likely');
+    expect(built.tier).toBe('needs_more_evidence');
+    expect(built.nextPhoto.photo_can_confirm).toBe(false);
+    expect(JSON.stringify(built)).not.toMatch(/unreviewed/i);
   });
 });
 
