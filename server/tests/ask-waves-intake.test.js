@@ -221,6 +221,9 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ['No les hará daño a sus mascotas.', ''],
     ['El tratamiento no molesta a sus mascotas.', ''],
     ['El producto no irrita a los niños.', ''],
+    ['Our treatment will not have any effect on your pets.', ''],
+    ['The product poses no concerns for children.', ''],
+    ['No tiene ningún efecto en sus mascotas.', ''],
     ['Our solution is completely harmless.', ''],
     ['Completely family-safe.', 'I have children'],
     ['Our treatment is non\u2011toxic.', ''],
@@ -251,6 +254,9 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ['Stay off the treated lawn until dusk.', ''],
     ['Keep pets inside until dawn after treatment.', ''],
     ['You may re-enter at sunrise.', ''],
+    ['Stay off the treated lawn until dark.', ''],
+    ['Keep the kids indoors until the sun goes down after treatment.', ''],
+    ['Mantenga a los niños dentro hasta las cuatro después del tratamiento.', ''],
   ])('a clock-time re-entry instruction is replaced: %s', (reply, context) => {
     expect(scrubUnsafeClaims({ ...base, reply }, context).reply).toMatch(/label directions|instrucciones de la etiqueta/);
   });
@@ -669,6 +675,7 @@ describe('normalizeIntakeResult', () => {
     ['No, the EPA has not approved this pesticide; it is EPA-registered.', ''],
     ["The EPA doesn't approve pesticides; it registers them.", ''],
     ["The EPA didn't approve this product; it is EPA-registered.", ''],
+    ['This product is not EPA-approved; it is EPA-registered.', ''],
     ['The barrier provides protection for 90 days.', 'How long does the mosquito treatment work?'],
   ])('ordinary service times and an explicit EPA denial are untouched: %s', (reply, context) => {
     expect(scrubUnsafeClaims({ reply, intent: 'question', service_keys: [], ready_for_quote: false }, context).reply).toBe(reply);
@@ -747,6 +754,7 @@ describe('normalizeIntakeResult', () => {
     'Which hospital do you service?',
     'We need pest control at the hospital',
     'I work in the hospital and need roach control',
+    "I found bait in the roach's mouth",
     );
     expect(out.reply).toMatch(/Get my price/);
   });
@@ -768,6 +776,11 @@ describe('normalizeIntakeResult', () => {
   ])('a short answer of either polarity to a harm or access question is replaced: %s', (reply, active) => {
     expect(scrubUnsafeClaims({ reply, intent: 'question', service_keys: [], ready_for_quote: false }, active).reply)
       .toMatch(/label directions|instrucciones de la etiqueta/);
+  });
+
+  test('Spanish is judged on the whole turn: "Mascotas?" + "No les afecta."', () => {
+    expect(scrubUnsafeClaims({ reply: 'No les afecta.', intent: 'question', service_keys: [], ready_for_quote: false }, 'Mascotas?').reply)
+      .toMatch(/instrucciones de la etiqueta/);
   });
 
   test('"No molesta a sus mascotas." gets the Spanish replacement', () => {
@@ -1525,6 +1538,8 @@ describe('looksLikeEmergency', () => {
     'My child got rat poison in his eyes',
     'My child inhaled rat poison',
     'My dog breathed in rat poison',
+    'Pesticide was inhaled by my child',
+    'My bird ate rat poison',
     'My child ate pesticide granules',
     'The bait was eaten by my dog',
   ])('flags urgent/medical text: %s', (text) => {
