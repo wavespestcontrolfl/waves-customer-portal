@@ -175,8 +175,11 @@ function answerProjectReportQuestion({ question, project, payload, intent }) {
   if (/\b(recommend(?:ation|ations)?|next step|advice|prep|do now|should i|do i need|need to do|do next|do about)\b/.test(q)) {
     return answerRecommendations({ project });
   }
+  // Future cue on either side of the treatment verb ("When will you treat?",
+  // "Will you treat next week?", "Are you applying next week?").
   if (!/\b(was|were|did|have you|has)\b/.test(q)
-    && (/\b(when|next)\b[^?.!]*\b(treat\w*|spray\w*|appl\w*)\b/.test(q) || /\b(treat|spray)\w*\s+again\b/.test(q))) {
+    && /\b(treat\w*|spray\w*|appl\w*)\b/.test(q)
+    && /\b(when|next|again|upcoming|will\s+you|going\s+to)\b/.test(q)) {
     return answerNextVisit({ project, payload });
   }
   if (/\b(find|found|finding|findings|see|saw|observe|observed|activity|evidence|result|results)\b/.test(q)) {

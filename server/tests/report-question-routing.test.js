@@ -47,6 +47,13 @@ describe('project report — every shipped chip answers its own category (AW-06)
   });
 
   test.each([
+    'Will you treat next week?',
+    'Are you applying next week?',
+  ])('a future cue after the treatment verb goes to the next visit: %s', (question) => {
+    expect(answerProjectReportQuestion({ question, project, payload })).toMatch(/Nothing further is scheduled|scheduled for/i);
+  });
+
+  test.each([
     ['When will you treat again?', /Nothing further is scheduled|scheduled for/i],
     ['When is the next treatment?', /Nothing further is scheduled|scheduled for/i],
     ['When was it treated?', /Exterior perimeter/i],
@@ -367,6 +374,11 @@ describe('service report — every shipped chip answers its own category (AW-06)
   });
 
   // codex #4839 round 6: precedence follows the question's form.
+  test('"When is my next treatment after today?" goes to the appointment', () => {
+    expect(answerServiceReportQuestion({ question: 'When is my next treatment after today?', data: pestData, nextAppointment }))
+      .toMatch(/Your next appointment is/);
+  });
+
   test.each([
     'When are you spraying next?',
     'What are you treating next?',

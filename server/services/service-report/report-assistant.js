@@ -31,6 +31,9 @@ const OBSERVATION_QUESTION_RE = /\b(?:what|which|anything)\b[^?.!]{0,20}\bdid\s+
 // treating next?", "When is the next treatment?") is a scheduling question.
 const FUTURE_TREATMENT_RE = /\b(?:next|again|upcoming|will\s+you|are\s+you\s+(?:going\s+to|coming))\b/;
 const PAST_TENSE_RE = /\b(?:was|were|did|today|applied|sprayed|treated|used)\b/;
+// Past-tense verbs only — "today" anchors time but doesn't cancel an explicit
+// future cue ("When is my next treatment after today?").
+const PAST_VERB_RE = /\b(?:was|were|did|applied|sprayed|treated|used)\b/;
 // "What did you spray near my dogs' beds?" asks what was applied, even with
 // a pet noun in it.
 const WHAT_APPLIED_RE = /\b(?:what|which)\b[^?.!]{0,40}\b(?:spray\w*|appl\w*|use[sd]?|treat\w*|products?)\b/;
@@ -571,7 +574,7 @@ function questionRoutingRules({
     { test: (q) => PREP_ADVICE_RE.test(q), answer: () => answerNextSteps({ data, nextAppointment }) },
     // Future treatment timing is scheduling, not today's application.
     {
-      test: (q) => TREATMENT_QUESTION_RE.test(q) && FUTURE_TREATMENT_RE.test(q) && !PAST_TENSE_RE.test(q),
+      test: (q) => TREATMENT_QUESTION_RE.test(q) && FUTURE_TREATMENT_RE.test(q) && !PAST_VERB_RE.test(q),
       answer: () => answerNextAppointment({ nextAppointment }),
     },
     {
