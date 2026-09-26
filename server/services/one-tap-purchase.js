@@ -1192,7 +1192,7 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
       'billing',
       'One-tap purchase: Auto Pay enrollment skipped (payer check failed)',
       'A one-tap purchase confirmed but the payer-routing check failed, so Auto Pay was NOT enrolled (fail closed) — review the account or self-pay visits will invoice unprotected.',
-      { link: `/admin/customers/${customerId}`, metadata: { customerId, estimateId: purchase.estimate_id, purchaseId: purchase.id } },
+      { link: `/admin/customers?customerId=${customerId}`, metadata: { customerId, estimateId: purchase.estimate_id, purchaseId: purchase.id } },
     ).catch(() => {});
   } else {
     try {
@@ -1214,7 +1214,7 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
           'billing',
           'One-tap purchase: Auto Pay enrollment refused',
           `A one-tap purchase confirmed with a consented saved card but Auto Pay enrollment was refused (${enrollment.reason}) — re-add a payment method or the visits will invoice unprotected.`,
-          { link: `/admin/customers/${customerId}`, metadata: { customerId, estimateId: purchase.estimate_id, purchaseId: purchase.id, reason: enrollment.reason } },
+          { link: `/admin/customers?customerId=${customerId}`, metadata: { customerId, estimateId: purchase.estimate_id, purchaseId: purchase.id, reason: enrollment.reason } },
         ).catch(() => {});
       }
     } catch (e) {
@@ -1223,7 +1223,7 @@ async function confirm({ customerId, purchaseId, termsAccepted, ip, userAgent })
         'billing',
         'One-tap purchase: Auto Pay enrollment failed',
         'A one-tap purchase confirmed but Auto Pay enrollment threw — review the account or the visits will invoice unprotected.',
-        { link: `/admin/customers/${customerId}`, metadata: { customerId, estimateId: purchase.estimate_id, purchaseId: purchase.id } },
+        { link: `/admin/customers?customerId=${customerId}`, metadata: { customerId, estimateId: purchase.estimate_id, purchaseId: purchase.id } },
       ).catch(() => {});
     }
   }

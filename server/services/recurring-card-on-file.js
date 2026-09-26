@@ -824,7 +824,7 @@ async function alertEnrollmentNeedsReview({ customerId, estimateId, reason }) {
       'billing',
       'Recurring accept: Auto Pay card not enrolled',
       `A recurring accept completed but the saved card could not be enrolled (${reason}) — re-add a payment method or the visits will invoice unprotected.`,
-      { link: customerId ? `/admin/customers/${customerId}` : '/admin/dashboard', metadata: { customerId, estimateId, reason } },
+      { link: customerId ? `/admin/customers?customerId=${customerId}` : '/admin/dashboard', metadata: { customerId, estimateId, reason } },
     );
   } catch (e) { logger.warn('[recurring-cof] enrollment review alert failed', { error: e.message }); }
 }
@@ -1076,7 +1076,7 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
     };
     const alertUncollected = async (title, body) => require('./notification-service').notifyAdmin(
       'billing', title, body,
-      { link: '/admin/invoices', metadata: { estimateId: row.id, invoiceId: job.invoice_id } },
+      { link: job.invoice_id ? `/admin/invoices?invoice=${job.invoice_id}` : '/admin/invoices', metadata: { estimateId: row.id, invoiceId: job.invoice_id } },
     ).catch(() => {});
     // Hoisted above the try so the catch's payer-guard handler (Codex r10
     // P0) can reach the invoice row and the shared payer-delivery helper.

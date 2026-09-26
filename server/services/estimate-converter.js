@@ -4712,7 +4712,14 @@ const EstimateConverter = {
     // GATE_TERMITE_ANNUAL_PLAN off an annual-plan draft marked won with
     // standard billing slipped past (Codex #4937 r1 P1). The product has no
     // per-application shape whatever the gate says.
+    // An estimate that already entered sign-before-pay (a persisted
+    // parked / activated / closed stamp) is NOT refused here: a retry that
+    // omits billingTerm must still reach parkTermiteAnnualPlanAccept's
+    // idempotent no-op below (isTermiteAnnualPlanAccept is true for it) —
+    // refusing it would 422 a harmless replay of an accept that already
+    // happened. The refusal is for a FRESH accept only.
     if (billingTerm !== 'prepay_annual'
+      && !PERSISTED_SIGN_BEFORE_PAY_STAMPS.includes(estimate?.annual_plan_activation_status)
       && selectedTermiteAnnualPlanRows(estimateData).length > 0) {
       const err = new Error(
         'The Subterranean Termite Protection annual plan can only be accepted with annual prepay ("Pay the year upfront") — pick that option to continue.',
