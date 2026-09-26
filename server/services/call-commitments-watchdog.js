@@ -212,6 +212,19 @@ async function runInner({ now = new Date(), scope = null } = {}) {
     }
     const openSince = (r) => r.source === 'human' ? r.created_at : (r.call_started_at || r.created_at);
     const describe = (r) => `${whoFor(r)} — ${r.description}${r.due_at ? ` (due ${etWhen(r.due_at)} ET)` : ` (open since ${etWhen(openSince(r))} ET)`}`;
+    // A takeover burst (e.g. a closure run ageing many promises off the
+    // pager's list at once) still collapses into one bell — its own key, so
+    // it never retires or rewrites the day's full-sweep aggregate.
+    if (scoped && overdue.length > AGGREGATE_THRESHOLD) {
+      const notif = await NotificationService.notifyAdmin('alert', `${overdue.length} promises to callers are overdue`,
+        `${overdue.length} promises aged off the one-hour follow-up list without being kept. Oldest: ${describe(overdue[0])}. Open the Owed tab and work them oldest-first.`, {
+          link: '/admin/communications#tab=owed', dedupeKey: `call-commitments-takeover:${today}`,
+          dedupeVersion: require('node:crypto').createHash('sha256').update(JSON.stringify(overdue.map((r) => versions[r.id]).sort())).digest('hex'),
+          refreshOnDedupe: true, bell: true, trx,
+          metadata: { triggerKey: TRIGGER_KEY, overdue_count: overdue.length, overdue_commitment_ids: overdue.map((r) => r.id).sort() },
+        });
+      return { ...result, alerted: persisted(notif) ? 1 : 0, aggregate: true, ...(persisted(notif) ? {} : { unannounced: overdue.length }) };
+    }
     if (!scoped && overdue.length > AGGREGATE_THRESHOLD) {
       const ids = overdue.map((r) => r.id).sort();
       const notif = await NotificationService.notifyAdmin('alert', `${overdue.length} promises to callers are overdue`,

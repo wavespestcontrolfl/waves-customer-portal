@@ -240,3 +240,17 @@ test('when the pager is failing, the takeover sweep runs as the full watchdog an
   takeover.mockRestore();
   healthy.mockRestore();
 });
+
+test('a takeover burst past the threshold collapses into one bell under its own key, never the day aggregate', async () => {
+  const many = Array.from({ length: AGGREGATE_THRESHOLD + 2 }, (_, i) => row(`t${i}`));
+  listOpenCommitments.mockResolvedValue(many);
+  const sla = require('../services/followup-sla-watcher');
+  const takeover = jest.spyOn(sla, 'takeoverIds').mockResolvedValue(new Set(many.map((r) => r.id)));
+  const healthy = jest.spyOn(sla, 'pagerHealthy').mockResolvedValue(true);
+  const result = await runCallCommitmentsWatchdog({ now: NOW, scope: 'sla_takeover' });
+  expect(result).toMatchObject({ aggregate: true, alerted: 1 });
+  expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+  expect(NotificationService.notifyAdmin.mock.calls[0][3].dedupeKey).toMatch(/^call-commitments-takeover:/);
+  takeover.mockRestore();
+  healthy.mockRestore();
+});
