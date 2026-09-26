@@ -1,7 +1,7 @@
 const express = require('express');
 const Sentry = require('@sentry/node');
 const { safeErrorToken } = require('../utils/sentry-scrub');
-const { REPLAY_HOLD_CODES } = require('../services/messaging/billing-channel-routing');
+const { REPLAY_HOLD_CODES, billingDeliveryCategory: resolveBillingDeliveryCategory } = require('../services/messaging/billing-channel-routing');
 const router = express.Router();
 const Stripe = require('stripe');
 const db = require('../models/db');
@@ -192,21 +192,37 @@ async function isCustomerInitiatedPaymentIntent(pi) {
 }
 
 async function sendBillingSms(customer, body, metadata = {}, { customerInitiated = false } = {}) {
-  if (!customer?.phone || !customer?.id) {
+  // ach_payment_processing is legacy-only (never routed by channel choice),
+  // so it still needs a phone; every other notice may route phone-less.
+  if (!customer?.id
+    || (!customer.phone && metadata.original_message_type === 'ach_payment_processing')) {
     return { sent: false, blocked: true, code: 'MISSING_CUSTOMER_CONTACT' };
   }
   const eventId = metadata.stripe_event_id || metadata.stripe_setup_intent_id
     || metadata.stripe_payment_intent_id;
   if (eventId && metadata.original_message_type !== 'ach_payment_processing') metadata = { ...metadata, notificationEventKey:
     `payment-problem:stripe:${eventId}:${metadata.original_message_type}:${metadata.recent_failures || 0}` };
+  // A phone-less customer can still have explicitly selected Email/App
+  // billing delivery (PR #4843's router) — the central router resolves
+  // those legs off customerId alone. billingDeliveryCategory rides along so
+  // a held phone-less notice's queued row (below) carries the category the
+  // scheduler's phone-required gate checks (canReplayBillingWithoutPhone).
+  if (!customer.phone) {
+    metadata = { ...metadata, billingDeliveryCategory: resolveBillingDeliveryCategory({ metadata }) };
+  }
   const result = await sendCustomerMessage({
-    to: customer.phone,
+    to: customer.phone || null,
     body,
     channel: 'sms',
     audience: 'customer',
     purpose: 'payment_failure',
     customerId: customer.id,
-    identityTrustLevel: 'phone_matches_customer',
+    // Only asserted when a phone actually backs it — omitted (rather than
+    // stamped false) for a phone-less send so the identity validator falls
+    // back to its own customerId-based resolution (resolveTrustLevel,
+    // validators/identity.js) instead of this call vouching for a phone
+    // match that never happened.
+    ...(customer.phone ? { identityTrustLevel: 'phone_matches_customer' } : {}),
     entryPoint: 'stripe_webhook',
     // Explicit customer-provenance marker (see validators/send-window.js):
     // the caller verified this notice follows a payment the customer
@@ -250,7 +266,9 @@ async function sendBillingSms(customer, body, metadata = {}, { customerInitiated
         customer_id: customer.id,
         direction: 'outbound',
         from_phone: TWILIO_NUMBERS.getOutboundNumber(),
-        to_phone: customer.phone,
+        // sms_log.to_phone is NOT NULL; a phone-less hold uses the blank-phone
+        // convention (billing-retry-email.js) and replays via replayWithoutPhone.
+        to_phone: customer.phone || '',
         message_body: body,
         status: 'scheduled',
         scheduled_for: new Date(result.nextAllowedAt),
@@ -264,6 +282,13 @@ async function sendBillingSms(customer, body, metadata = {}, { customerInitiated
           replay_purpose: 'payment_failure',
           refresh_customer_phone: true,
           resolve_from_by_customer: true,
+          // Phone-less rows only: the scheduler refuses a row with no
+          // resolved phone (canReplayBillingWithoutPhone,
+          // server/services/scheduler.js) unless this is stamped AND the
+          // registry entry opts in (replayWithoutPhone) — a phone-bearing
+          // row never carries this and keeps refreshing/retrying its phone
+          // exactly as before.
+          ...(!customer.phone ? { requires_registered_dispatch: true } : {}),
         }),
       });
       logger.info(`[stripe-webhook] Billing SMS for customer ${customer.id} held outside the 8AM-8PM ET send window — queued for ${result.nextAllowedAt} (${metadata.original_message_type || 'billing'})`);
@@ -5666,7 +5691,10 @@ async function handleAchFailure(paymentIntent, failureReason, eventId = null) {
     // Send SMS outside the transaction so a slow provider call doesn't
     // hold the per-customer advisory lock against concurrent failures.
     try {
-      if (customer.phone) {
+      // Phone-less customers with an explicit Email/App billing selection
+      // still reach sendBillingSms — it now requires only customer.id and
+      // routes through the central router with to: customer.phone || null.
+      {
         let body;
         let messageType;
         // Deep link into the portal's Billing tab (Codex #2822 P2). The
@@ -6446,7 +6474,9 @@ async function handlePaymentIntentRequiresAction(paymentIntent, eventId) {
     const payment = await db('payments').where({ stripe_payment_intent_id: piId }).first();
     if (payment?.customer_id) {
       const customer = await db('customers').where({ id: payment.customer_id }).first();
-      if (customer?.phone) {
+      // Phone-less customers with an explicit Email/App billing selection
+      // still reach sendBillingSms — see the ACH-failure notice above.
+      if (customer?.id) {
         const body = await renderRequiredSmsTemplate('bank_verification_incomplete', {
           first_name: customer.first_name || 'there',
           billing_url: `${publicPortalUrl()}/?tab=billing`,
@@ -8273,7 +8303,9 @@ async function handleSetupIntentFailed(setupIntent, eventId) {
     const customerId = setupIntent.metadata?.waves_customer_id;
     if (customerId) {
       const customer = await db('customers').where({ id: customerId }).first();
-      if (customer?.phone) {
+      // Phone-less customers with an explicit Email/App billing selection
+      // still reach sendBillingSms — see the ACH-failure notice above.
+      if (customer?.id) {
         const body = await renderRequiredSmsTemplate('bank_verification_failed', {
           first_name: customer.first_name || 'there',
           billing_url: `${publicPortalUrl()}/?tab=billing`,
@@ -8331,3 +8363,5 @@ module.exports._handleAchFailure = handleAchFailure;
 module.exports._armMonthlyAutopayRetryForAsyncFailure = armMonthlyAutopayRetryForAsyncFailure;
 module.exports._handlePaymentIntentSucceeded = handlePaymentIntentSucceeded;
 module.exports._handleSetupIntentSucceeded = handleSetupIntentSucceeded;
+module.exports._sendBillingSms = sendBillingSms;
+module.exports._handlePaymentIntentRequiresAction = handlePaymentIntentRequiresAction;
