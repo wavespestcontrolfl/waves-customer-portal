@@ -178,6 +178,7 @@ postgres('customer geocode review visit propagation in PostgreSQL', () => {
     const parentId = randomUUID();
     const childId = randomUUID();
     const standaloneId = randomUUID();
+    const primaryLinkedStaleId = randomUUID();
     const independentId = randomUUID();
     const primaryPin = { latitude: 27.4987654, longitude: -82.5754321 };
     await trx('customers').where({ id: CUSTOMER_ID }).update({ latitude: null, longitude: null });
@@ -202,15 +203,16 @@ postgres('customer geocode review visit propagation in PostgreSQL', () => {
       }),
       visitRow(childId, { property_id: PRIMARY_ID, recurring_parent_id: parentId, lat: 27.498765, lng: -82.575432 }),
       visitRow(standaloneId, { property_id: PRIMARY_ID, lat: 27.498765, lng: -82.575432 }),
-      visitRow(independentId, { property_id: PRIMARY_ID, lat: 27.4, lng: -82.4, route_order: 9 }),
+      visitRow(primaryLinkedStaleId, { property_id: PRIMARY_ID, lat: 27.45, lng: -82.45 }),
+      visitRow(independentId, { lat: 27.4, lng: -82.4, route_order: 9 }),
     ]);
 
     const locked = await context();
     expect((await updatePrimaryVisits(
       trx, customer, primary, CORRECTED, NEW_PIN.latitude, NEW_PIN.longitude, locked, ACTOR_ID,
-    )).sort()).toEqual([childId, standaloneId].sort());
+    )).sort()).toEqual([childId, primaryLinkedStaleId, standaloneId].sort());
 
-    for (const id of [childId, standaloneId]) {
+    for (const id of [childId, primaryLinkedStaleId, standaloneId]) {
       expect(await trx('scheduled_services').where({ id }).first()).toMatchObject({
         property_id: PRIMARY_ID, lat: '27.500000', lng: '-82.500000',
       });
@@ -229,7 +231,7 @@ postgres('customer geocode review visit propagation in PostgreSQL', () => {
     await trx('scheduled_services').insert([
       visitRow(primaryPinId, { property_id: PRIMARY_ID, lat: 27.5, lng: -82.5 }),
       visitRow(customerPinId, { property_id: PRIMARY_ID, lat: 27.498124, lng: -82.574813 }),
-      visitRow(independentId, { property_id: PRIMARY_ID, lat: 27.4, lng: -82.4, route_order: 7 }),
+      visitRow(independentId, { lat: 27.4, lng: -82.4, route_order: 7 }),
     ]);
 
     const locked = await context();
@@ -275,12 +277,13 @@ postgres('customer geocode review visit propagation in PostgreSQL', () => {
     const parentId = randomUUID();
     const matchingId = randomUUID();
     const protectedId = randomUUID();
+    const linkedDifferentId = randomUUID();
     const independentId = randomUUID();
     const template = {
-      property_id: null, service_address_line1: ADDRESS.address_line1,
+      property_id: PRIMARY_ID, service_address_line1: ADDRESS.address_line1,
       service_address_line2: null, service_address_city: ADDRESS.city,
       service_address_state: ADDRESS.state, service_address_zip: ADDRESS.zip,
-      lat: OLD_PIN.latitude, lng: OLD_PIN.longitude, zone: 'legacy',
+      lat: 27.45, lng: -82.45, zone: 'legacy',
     };
     await trx('scheduled_services').insert([
       visitRow(parentId, {
@@ -291,14 +294,18 @@ postgres('customer geocode review visit propagation in PostgreSQL', () => {
       visitRow(protectedId, {
         lat: 27.498124, lng: -82.574813, zone: 'legacy', route_order: 5, auto_dispatch_locked: true,
       }),
+      visitRow(linkedDifferentId, {
+        property_id: PRIMARY_ID, lat: 27.45, lng: -82.45, zone: 'legacy', route_order: 7,
+      }),
       visitRow(independentId, { lat: 27.4, lng: -82.4, zone: 'independent', route_order: 6 }),
     ]);
 
     const locked = await context({ includeProtected: true, verifyPin: false });
     await expect(clearMatchingPins(trx, customer, primary, OLD_PIN, locked)).resolves.toEqual({
-      customer: 1, property: 0, visits: 2, templates: 1,
+      customer: 1, property: 0, visits: 3, templates: 1,
+      visitIds: expect.arrayContaining([matchingId, protectedId, linkedDifferentId]),
     });
-    for (const id of [matchingId, protectedId]) {
+    for (const id of [matchingId, protectedId, linkedDifferentId]) {
       expect(await trx('scheduled_services').where({ id }).first()).toMatchObject({
         lat: null, lng: null, zone: null, route_order: null,
       });
