@@ -237,9 +237,25 @@ export default function MobileAppointmentDetailSheet({
 
   const tier = service.waveguardTier ? String(service.waveguardTier).toLowerCase() : null;
   const rawPrice = service.estimatedPrice != null ? Number(service.estimatedPrice) : null;
+  // Sibling-covered first-application visit (a combined per-application
+  // accept — server/services/billing-lane.js siblingCoveredCompletionPrediction):
+  // this visit is deliberately unpriced because a same-day sibling's invoice
+  // already covers it. Never preview a $0 or a borrowed rate for it — the
+  // billing-lane card explains the real reason, and this sheet just needs to
+  // not contradict it.
+  const siblingCoveredInvoice = service.billingLane?.prediction?.kind === 'covered_sibling_invoice'
+    ? service.billingLane.prediction
+    : null;
   // Callbacks (re-services) are free for recurring/WaveGuard customers — don't
   // preview the monthlyRate fallback (mirrors the completion panel + checkout).
-  const price = rawPrice != null ? rawPrice : (service.isCallback ? 0 : Number(service.monthlyRate || 0));
+  // Outside the monthly-membership lane, monthlyRate is a DUES figure, not a
+  // per-visit price — falling back to it here showed the annual/12
+  // equivalent (e.g. $74.70) as an unpriced per-application visit's price,
+  // a number with no relationship to what that visit bills.
+  const isMonthlyMembershipLane = service.billingLane?.mode === 'monthly_membership';
+  const price = rawPrice != null
+    ? rawPrice
+    : (service.isCallback || !isMonthlyMembershipLane ? 0 : Number(service.monthlyRate || 0));
   const appointmentAddons = Array.isArray(service.serviceAddons) ? service.serviceAddons : [];
   const appointmentAddonTotal = Math.round(
     appointmentAddons.reduce((sum, addon) => sum + (Number(addon.estimatedPrice) || 0), 0) * 100
@@ -264,13 +280,13 @@ export default function MobileAppointmentDetailSheet({
   // a one-off prepaid visit, in which case we fall back to the original
   // single-visit "Prepaid $X via Y" copy below.
   const seriesCtx = service.prepaidSeriesContext || null;
-  const hasChargeableAmount = total > 0 && !coveredByMembership && !prepaidCovered;
+  const hasChargeableAmount = total > 0 && !coveredByMembership && !prepaidCovered && !siblingCoveredInvoice;
   // Fully prepay-covered visits collect nothing, so the line items and total
   // read $0.00 — the monthlyRate fallback figure looks like a bill due when
   // the customer already paid the year up front. Partially prepaid visits
   // (prepaidAmt < total) keep the real figures and the checkout path.
-  const displayBasePrice = prepaidCovered ? 0 : baseServicePrice;
-  const displayTotal = prepaidCovered ? 0 : total;
+  const displayBasePrice = (prepaidCovered || siblingCoveredInvoice) ? 0 : baseServicePrice;
+  const displayTotal = (prepaidCovered || siblingCoveredInvoice) ? 0 : total;
   // Invoice already attached to this visit (accept-minted first-visit
   // setup+application invoice, or a tech pre-mint). It's what completion /
   // Charge-now actually collects, so surface its breakdown — the per-visit
@@ -483,6 +499,12 @@ export default function MobileAppointmentDetailSheet({
             Covered by WaveGuard {tierLabel(tier)} — no charge needed
           </div>
         )}
+        {!coveredByMembership && !isPrepaid && siblingCoveredInvoice && (
+          <div className="text-ink-secondary text-center mt-2" style={{ fontSize: 12 }}>
+            Covered by invoice {siblingCoveredInvoice.invoiceNumber || 'on file'}
+            {siblingCoveredInvoice.siblingServiceType ? ` on the ${siblingCoveredInvoice.siblingServiceType} visit` : ''} — no charge needed
+          </div>
+        )}
         {isPrepaid && seriesCtx && seriesCtx.totalCoveredVisits > 1 && (
           <div className="mt-3 rounded-sm border border-hairline border-zinc-200 bg-zinc-50" style={{ padding: '10px 14px' }}>
             <div className="flex items-center justify-between gap-3">
@@ -636,6 +658,11 @@ export default function MobileAppointmentDetailSheet({
               {prepaidCovered && (
                 <span className="text-ink-secondary block" style={{ fontSize: 12 }}>
                   Covered by prepay
+                </span>
+              )}
+              {!prepaidCovered && siblingCoveredInvoice && (
+                <span className="text-ink-secondary block" style={{ fontSize: 12 }}>
+                  Covered by invoice {siblingCoveredInvoice.invoiceNumber || 'on file'}
                 </span>
               )}
             </span>

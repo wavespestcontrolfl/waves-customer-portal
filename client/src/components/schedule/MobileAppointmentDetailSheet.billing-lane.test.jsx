@@ -229,3 +229,70 @@ describe('MobileAppointmentDetailSheet priced-but-unminted warning', () => {
     expect(screen.queryByText(/No rate or price is set/i)).not.toBeInTheDocument();
   });
 });
+
+describe('MobileAppointmentDetailSheet sibling-covered first-application visit', () => {
+  // Prod 2026-09-26: a per-application Silver customer accepted lawn
+  // ($56.40/app) + pest ($97.20/app) into one reserved slot. The pest row's
+  // invoice ($153.60) covered the trip; the lawn row was deliberately left
+  // unpriced. The sheet showed $74.70 (monthlyRate/12 — meaningless here)
+  // and warned "nothing will bill". Both are wrong: this pins the fix.
+  const SIBLING_COVERED_SERVICE = {
+    ...BASE_SERVICE,
+    id: 'svc-lawn',
+    serviceType: 'Every 6 Weeks Lawn Care',
+    serviceTypeDisplay: 'Every 6 Weeks Lawn Care',
+    waveguardTier: 'Silver',
+    estimatedPrice: null,
+    monthlyRate: 74.7,
+    customerId: 'cust-1',
+    billingLane: {
+      mode: 'per_application',
+      source: 'explicit',
+      monthlyRate: 74.7,
+      prediction: {
+        kind: 'covered_sibling_invoice',
+        amount: null,
+        conflictStampedPrice: false,
+        invoiceId: 'inv-1',
+        invoiceNumber: 'WPC-2026-0505',
+        invoiceStatus: 'sent',
+        siblingServiceType: 'Quarterly Pest Control',
+      },
+      unbilledGap: null,
+    },
+  };
+
+  it('reads "no charge — covered by invoice" instead of the money-gap warning', () => {
+    render(<MobileAppointmentDetailSheet service={SIBLING_COVERED_SERVICE} onClose={() => {}} />);
+    expect(screen.getByText(/no charge —.*WPC-2026-0505.*Quarterly Pest Control.*same trip/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Nothing will bill for this visit/i)).not.toBeInTheDocument();
+  });
+
+  it('never previews the monthlyRate as this unpriced visit\'s price ($74.70 was the annual/12 equivalent, not a per-visit price)', () => {
+    render(<MobileAppointmentDetailSheet service={SIBLING_COVERED_SERVICE} onClose={() => {}} />);
+    expect(screen.queryByText(/\$74\.70/)).not.toBeInTheDocument();
+    // Reads as covered, not as a $0.00 bill with no explanation.
+    expect(screen.getAllByText(/Covered by invoice WPC-2026-0505/i).length).toBeGreaterThan(0);
+  });
+
+  it('does not fall back to monthlyRate for a non-monthly-membership lane even without sibling coverage', () => {
+    render(
+      <MobileAppointmentDetailSheet
+        service={{
+          ...BASE_SERVICE,
+          estimatedPrice: null,
+          monthlyRate: 74.7,
+          billingLane: {
+            mode: 'per_application',
+            source: 'explicit',
+            monthlyRate: 74.7,
+            prediction: { kind: 'no_charge', amount: 0, conflictStampedPrice: false, reason: 'no_amount_on_file' },
+            unbilledGap: { reason: 'no_amount_on_file', noPaymentMethod: true },
+          },
+        }}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.queryByText(/\$74\.70/)).not.toBeInTheDocument();
+  });
+});

@@ -139,9 +139,14 @@ export default function ScheduleCustomerSidebar({
   const payments = data?.payments || [];
   const cards = data?.cards || [];
 
+  // Display-only preview (nothing here feeds a charge or invoice mint) —
+  // but outside a real WaveGuard membership, monthlyRate is a DUES figure,
+  // not a per-visit price, so an unpriced visit previewed the annual/12
+  // equivalent as if it were this visit's charge. Only fall back to it for
+  // an actual member.
   const basePrice = service?.estimatedPrice != null
     ? Number(service.estimatedPrice)
-    : Number(service?.monthlyRate || c.monthlyRate || 0);
+    : ((service?.waveguardTier || c.tier) ? Number(service?.monthlyRate || c.monthlyRate || 0) : 0);
   const appointmentAddons = Array.isArray(service?.serviceAddons) ? service.serviceAddons : [];
   const appointmentAddonTotal = Math.round(
     appointmentAddons.reduce((sum, addon) => sum + (Number(addon.estimatedPrice) || 0), 0) * 100

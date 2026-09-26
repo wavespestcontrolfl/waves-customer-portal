@@ -659,6 +659,124 @@ async function monthlyDuesCollected(dbConn, customerId, now = new Date()) {
 const UNBILLED_MONEY_GAP_REASONS = new Set(['no_amount_on_file', 'no_invoice_will_mint']);
 
 /**
+ * Per-service breakdown of a combined first-application invoice: each
+ * same-day, same-estimate, non-recurring-child sibling's OWN anchored
+ * per-visit split — recurring_template_overrides.anchored_split_per_visit,
+ * stamped on the PARENT row by recurring-appointment-seeder.js
+ * markParentRecurring from estimate-converter.js
+ * reservedAcceptPerVisitSplit's per-line amounts, falling back to the row's
+ * own estimated_price when it carries no anchored marker (the reserved row
+ * keeps its stamped price rather than a template override).
+ *
+ * Returns the breakdown array ONLY when it fully reconciles to
+ * `invoiceTotal` (cent-exact) and names more than one service — a partial
+ * or stale split must never relabel money that doesn't add up. Returns
+ * null otherwise (including on any lookup error), so callers can leave
+ * their prediction exactly as it was.
+ */
+async function sameTripFirstApplicationBreakdown({ svc, invoiceTotal, dbConn } = {}) {
+  if (!svc?.source_estimate_id || !svc?.customer_id || !svc?.scheduled_date || !dbConn) return null;
+  try {
+    const members = await dbConn('scheduled_services')
+      .where({
+        customer_id: svc.customer_id,
+        source_estimate_id: svc.source_estimate_id,
+        scheduled_date: svc.scheduled_date,
+      })
+      .whereNull('recurring_parent_id')
+      .select('id', 'service_type', 'estimated_price', 'recurring_template_overrides');
+    if (members.length < 2) return null;
+    const amountFor = (row) => {
+      let overrides = row.recurring_template_overrides;
+      if (typeof overrides === 'string') {
+        try { overrides = JSON.parse(overrides); } catch { overrides = null; }
+      }
+      const anchored = Number(overrides?.anchored_split_per_visit);
+      if (Number.isFinite(anchored) && anchored > 0) return Math.round(anchored * 100) / 100;
+      return row.estimated_price != null && Number(row.estimated_price) > 0 ? Number(row.estimated_price) : null;
+    };
+    const breakdown = members.map((row) => ({ id: row.id, serviceType: row.service_type, amount: amountFor(row) }));
+    const sum = breakdown.reduce((acc, item) => (acc === null || item.amount == null ? null : acc + item.amount), 0);
+    const total = Number(invoiceTotal);
+    if (sum != null && Number.isFinite(total) && Math.round(sum * 100) === Math.round(total * 100)) {
+      return breakdown;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// The shared lookup, validated: a match only counts as "covering" this visit
+// when it names a DIFFERENT visit (a sibling, never svc's own row — that
+// case is already handled by the attached-invoice prediction) and is not
+// one of the resolved/dead statuses closeout-status.js itself treats as a
+// manual-billing alert rather than a settled cover.
+async function coveringSiblingInvoice(svc, dbConn) {
+  let result;
+  try {
+    const { findFirstApplicationInvoiceForEstimateService } = require('./estimate-first-application-invoice');
+    result = await findFirstApplicationInvoiceForEstimateService(svc, dbConn);
+  } catch {
+    return null;
+  }
+  const inv = result?.invoice;
+  if (!inv || !inv.scheduled_service_id || String(inv.scheduled_service_id) === String(svc.id)) return null;
+  const { CANCELLED_SERVICE_RESOLVED_STATUSES } = require('./invoice');
+  return CANCELLED_SERVICE_RESOLVED_STATUSES.includes(String(inv.status)) ? null : inv;
+}
+
+/**
+ * Sibling-covered first-application visit — a per-application accept that
+ * combines two recurring programs into ONE same-day slot invoices the
+ * RESERVED program's row for the combined same-day total and leaves the
+ * PROMOTED program's row deliberately unpriced (estimate-converter.js
+ * `reservedAcceptPerVisitSplit`) — the reserved row's first-application
+ * invoice covers the trip. closeout-status.js reads exactly this shape as
+ * `sibling_first_application` via the SAME lookup this function calls
+ * (estimate-first-application-invoice.js findFirstApplicationInvoiceForEstimateService)
+ * — no second classifier, so the schedule sheet can never predict a money
+ * gap that completion itself would not raise.
+ *
+ * Read-only and advisory, like predictCompletionBilling: it never mints,
+ * voids, or changes what completion charges. Returns null (fail toward the
+ * ordinary unbilled-gap verdict, never toward a false "covered") when there
+ * is no source estimate to look a sibling up from, the lookup errors, or
+ * the only match is a refunded/void/canceled invoice — those stay
+ * completion's own manual-billing alert, not a quiet "nothing to see".
+ *
+ * `dbConn` is caller-owned (day/week schedule feeds pass their `db`), kept
+ * as an explicit param so this module stays DB-free for pure unit tests
+ * except where a caller opts in, same as monthlyDuesCollected above.
+ */
+async function siblingCoveredCompletionPrediction({ svc, dbConn } = {}) {
+  if (!svc?.source_estimate_id || !svc?.customer_id || !svc?.scheduled_date || !dbConn) return null;
+  const inv = await coveringSiblingInvoice(svc, dbConn);
+  if (!inv) return null;
+
+  let siblingVisit = null;
+  try {
+    siblingVisit = await dbConn('scheduled_services').where({ id: inv.scheduled_service_id }).first('id', 'service_type');
+  } catch {
+    siblingVisit = null;
+  }
+
+  const prediction = {
+    kind: 'covered_sibling_invoice',
+    amount: null,
+    conflictStampedPrice: false,
+    invoiceId: inv.id,
+    invoiceNumber: inv.invoice_number || null,
+    invoiceStatus: inv.status || null,
+    siblingServiceType: siblingVisit?.service_type || null,
+  };
+
+  const breakdown = await sameTripFirstApplicationBreakdown({ svc, invoiceTotal: inv.total, dbConn });
+  if (breakdown) prediction.breakdown = breakdown;
+  return prediction;
+}
+
+/**
  * Does completing this visit leave money on the table? Reads the SAME
  * prediction the sheet renders and the completion path mirrors — no second
  * classifier (the 2026-07 double-billing incident came from exactly that).
@@ -742,6 +860,8 @@ module.exports = {
   completionInvoiceAmount,
   predictCompletionBilling,
   monthlyDuesCollected,
+  siblingCoveredCompletionPrediction,
+  sameTripFirstApplicationBreakdown,
   verifyExtendedCompletionAnchor,
   attachedInvoiceAutoChargeLikely,
 };

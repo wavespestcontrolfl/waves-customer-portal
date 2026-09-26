@@ -93,7 +93,17 @@ export default function MobileCheckoutSheet({
   // customers — the server zeroes the visit and won't bill monthly dues, so the
   // checkout preview must not fall back to monthlyRate (which would show a
   // "Charge $<rate>" button that the mint endpoint then rejects as $0).
-  const price = rawPrice != null ? rawPrice : (service.isCallback ? 0 : Number(service.monthlyRate || 0));
+  // Outside the monthly-membership lane, monthlyRate is a DUES figure, not a
+  // per-visit price — the mint endpoint's OWN resolveScheduledServiceCharge
+  // (server/routes/admin-schedule.js) already refuses that fallback for any
+  // other explicit lane, so previewing it here only misrepresented what
+  // Charge would actually mint (a real prod case: a $56.40/app lawn visit
+  // whose invoice is covered by a same-day sibling previewed $74.70 — the
+  // annual/12 equivalent — here, then minted $0 on tap).
+  const isMonthlyMembershipLane = service.billingLane?.mode === 'monthly_membership';
+  const price = rawPrice != null
+    ? rawPrice
+    : (service.isCallback || !isMonthlyMembershipLane ? 0 : Number(service.monthlyRate || 0));
   const appointmentAddons = Array.isArray(service.serviceAddons) ? service.serviceAddons : [];
   const appointmentAddonTotal = Math.round(
     appointmentAddons.reduce((sum, addon) => sum + (Number(addon.estimatedPrice) || 0), 0) * 100
