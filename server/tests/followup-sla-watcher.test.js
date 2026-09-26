@@ -117,7 +117,7 @@ function mockDb({ activity = {}, call = null, standingRow = null, settled = [], 
         // One far-future record per contact the query asked about.
         const ins = entry.calls.filter(([m]) => m === 'whereIn');
         const custs = ins.filter(([, col]) => col === 'customer_id').flatMap(([, , v]) => v);
-        const phones = entry.calls.filter(([m, sql]) => (m === 'whereRaw' || m === 'orWhereRaw') && /right\(regexp_replace/.test(sql)).flatMap(([, , v]) => v);
+        const phones = entry.calls.filter(([m, sql]) => (m === 'whereRaw' || m === 'orWhereRaw') && /regexp_replace\(COALESCE/.test(sql)).flatMap(([, , v]) => v);
         return [...custs.map((c) => ({ id: 'x', customer_id: c, created_at: '2100-01-01T00:00:00Z' })),
           ...phones.map((p) => ({ id: 'x', customer_id: null, to_phone: p, created_at: '2100-01-01T00:00:00Z' }))];
       }
@@ -284,9 +284,9 @@ test('a lead with no customer record is checked by the number the promise was ma
   mockDb({ activity: { sms_log: true } });
   listOpenCommitments.mockResolvedValue([row('lead', { customer_id: null, from_phone: '+19415550123' })]);
   expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(0);
-  const keyed = (t) => [...argsOf(t, 'whereRaw'), ...argsOf(t, 'orWhereRaw')].filter(([sql]) => /right\(regexp_replace/.test(sql)).map(([, v]) => v);
-  expect(keyed('call_log')).toContainEqual(['9415550123']);
-  expect(keyed('sms_log')).toContainEqual(['9415550123']);
+  const keyed = (t) => [...argsOf(t, 'whereRaw'), ...argsOf(t, 'orWhereRaw')].filter(([sql]) => /regexp_replace\(COALESCE/.test(sql)).map(([, v]) => v);
+  expect(keyed('call_log')).toContainEqual(['9415550123', '19415550123']);
+  expect(keyed('sms_log')).toContainEqual(['9415550123', '19415550123']);
   // No customer holds that number in this fixture, so no visit lookup.
   expect(queriesOn('scheduled_services')).toHaveLength(0);
 });
@@ -453,8 +453,8 @@ test('an unlinked lead matches follow-up however its number was written', async 
   mockDb();
   listOpenCommitments.mockResolvedValue([row('lead', { customer_id: null, from_phone: '(941) 555-0123' })]);
   await runFollowUpSlaWatcher({ now: NOW });
-  const raw = argsOf('sms_log', 'orWhereRaw').find(([sql]) => /right\(regexp_replace/.test(sql));
-  expect(raw[1]).toEqual(['9415550123']);
+  const raw = argsOf('sms_log', 'orWhereRaw').find(([sql]) => /regexp_replace\(COALESCE/.test(sql));
+  expect(raw[1]).toEqual(['9415550123', '19415550123']);
 });
 
 test('takeoverIds: only promises that aged off the list within the last hour', async () => {

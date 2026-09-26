@@ -135,9 +135,10 @@ function selectMissed(rows, { now = new Date(), calendar = OPEN_CALENDAR } = {})
 // texts (reminders, confirmations) never count as a follow-up.
 // The caller's number on the promise's call: the dialed number on an
 // outbound call, the caller ID on an inbound one.
+// The call-commitments digits rule (phoneDigits / phoneWhere), so the pager
+// and the fulfillment proof always agree on which numbers match.
 function phoneKey(value) {
-  const digits = String(value || '').replace(/\D/g, '');
-  return digits.length >= 10 ? digits.slice(-10) : null;
+  return commitments.phoneDigits(value) || null;
 }
 
 function contactPhone(row) {
@@ -160,20 +161,19 @@ async function followedUpIds(conn, rows) {
   if (!scoped.length) return done;
   const floor = new Date(Math.min(...scoped.map((x) => x.since.getTime())));
   const customerIds = [...new Set(scoped.filter((x) => x.r.customer_id).map((x) => x.r.customer_id))];
-  // Numbers match on their last ten digits, however they were written
-  // (9415550123, +19415550123, (941) 555-0123) — call-commitments' phoneWhere.
+  // Numbers match however they were written (9415550123, +19415550123,
+  // (941) 555-0123) — call-commitments' phoneWhere rule, batched.
   const phones = [...new Set(scoped.filter((x) => x.phone).map((x) => phoneKey(x.phone)).filter(Boolean))];
-  const phoneIn = (column) => [`right(regexp_replace(COALESCE(${column}, ''), '[^0-9]', '', 'g'), 10) IN (${phones.map(() => '?').join(', ')})`, phones];
   // A caller with no customer record when the promise was made is usually
   // linked (or created) by the very follow-up that keeps it, so their later
   // calls and texts match by number whether or not they carry a customer now.
   const byContact = (qb) => qb.where(function contact() {
     if (customerIds.length) this.whereIn('customer_id', customerIds);
-    if (phones.length) this.orWhereRaw(...phoneIn('to_phone'));
+    if (phones.length) commitments.phoneWhereAny(this, 'to_phone', phones, { or: true });
   });
   // …and a booking made for them lands under the customer that number
   // belongs to by then.
-  const phoneCustomers = phones.length ? await conn('customers').whereRaw(...phoneIn('phone')).select('id', 'phone') : [];
+  const phoneCustomers = phones.length ? await commitments.phoneWhereAny(conn('customers'), 'phone', phones).select('id', 'phone') : [];
   const customersByPhone = new Map();
   for (const c of phoneCustomers) {
     const k = phoneKey(c.phone);

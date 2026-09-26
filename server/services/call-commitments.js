@@ -1116,6 +1116,17 @@ function phoneWhere(builder, column, phone) {
   builder.whereRaw(`regexp_replace(COALESCE(${column}, ''), '[^0-9]', '', 'g') IN (?, ?)`, [key, `1${key}`]);
 }
 
+// phoneWhere for many numbers at once (the follow-up pager's batched
+// evidence read): the same digits rule, one IN list.
+function phoneWhereAny(builder, column, phones, { or = false } = {}) {
+  const keys = [...new Set((phones || []).map(phoneDigits).filter(Boolean))];
+  const method = or ? 'orWhereRaw' : 'whereRaw';
+  if (!keys.length) { builder[method]('false'); return builder; }
+  const values = keys.flatMap((k) => [k, `1${k}`]);
+  builder[method](`regexp_replace(COALESCE(${column}, ''), '[^0-9]', '', 'g') IN (${values.map(() => '?').join(', ')})`, values);
+  return builder;
+}
+
 function windowEnd(after) {
   return new Date(after.getTime() + ASSOCIATION_WINDOW_DAYS * 24 * 60 * 60 * 1000);
 }
@@ -2608,6 +2619,8 @@ module.exports = {
   deriveCommitmentsFromExtraction,
   callbackDueAt,
   callEndedAt,
+  phoneDigits,
+  phoneWhereAny,
   whereEstimateCustomerOwnership,
   handedOffWithin,
   handoffOrder,
