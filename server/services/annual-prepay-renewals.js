@@ -2818,6 +2818,9 @@ function isEndAtTermLapseInWindow(term, today = etDateString()) {
 //     money (a dispute clears a decided lapse's stamps through that gate);
 //   - the term re-read: the disposition may have moved to end_now_refund
 //     since the caller read it;
+//   - no open end-now Cancel plan run for the customer: one that failed
+//     between pulling the visits and recording the disposition leaves the
+//     term end_at_term with every visit gone (hasOpenEndNowCancellation);
 //   - reseed only: Cancel plan's commit key, try-held — an end-now commit
 //     pulls every visit BEFORE it records the disposition, and a reseed
 //     interleaved with it would recreate a pulled visit. A busy key skips
@@ -2838,6 +2841,8 @@ async function keepEndAtTermLapseCoverage(termOrId, conn = db, { reseed = false,
     }
     const term = await t('annual_prepay_terms').where({ id: termId }).first();
     if (!isEndAtTermLapseInWindow(term, today)) return { skipped: 'not_end_at_term_lapse' };
+    const { hasOpenEndNowCancellation } = require('./admin-cancellation');
+    if (await hasOpenEndNowCancellation(term.customer_id, t)) return { skipped: 'end_now_cancellation_open' };
     if (!(await coveredTermsAsOf(t, today).where('t.id', term.id).first('t.id'))) return { skipped: 'not_paid_coverage' };
     const termStart = dateOnly(term.term_start);
     const termEnd = dateOnly(term.term_end);

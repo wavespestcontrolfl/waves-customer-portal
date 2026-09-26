@@ -241,6 +241,26 @@ function requestCancelPlanMeta(row) {
     return meta && meta.cancel_plan ? meta.cancel_plan : null;
   } catch { return null; }
 }
+// ADMIN-BUG-R18: an accepted whole-account "end now + refund" run that has
+// not finished — its request is still open ('new'), so the processor may
+// have pulled every visit while the term's disposition was never written
+// (a failure, or a process exit, before recordCancelDisposition). The
+// annual-prepay end-at-term upkeep neither stamps nor recreates visits for
+// the customer until the run is repaired or resolved. The disposition is
+// read the way resolvePrepay derives it (blank + effective date 'now' =
+// end_now_refund).
+async function hasOpenEndNowCancellation(customerId, conn = db) {
+  const rows = await conn('service_requests')
+    .where({ customer_id: customerId, category: 'cancellation', source: 'admin', status: 'new' })
+    .select('id', 'metadata');
+  return (rows || []).some((row) => {
+    const meta = requestCancelPlanMeta(row);
+    if (!meta || (Array.isArray(meta.scope) && meta.scope.length)) return false;
+    const disposition = meta.prepayDisposition
+      || ((meta.effectiveDate || 'now') === 'end_of_coverage' ? 'end_at_term' : 'end_now_refund');
+    return disposition === 'end_now_refund';
+  });
+}
 async function findCancelAcceptance(customerId, wholeAccount, scope, status) {
   const wanted = cancelScopeKey(wholeAccount, scope);
   let query = db('service_requests')
@@ -2331,6 +2351,8 @@ module.exports = {
   // The same key, transaction-scoped: the annual-prepay end-at-term reseed
   // serializes with a cancel commit through it (ADMIN-BUG-R18).
   tryHoldCancelCommitLockForTransaction,
+  // …and holds off while an end-now run awaits repair (ADMIN-BUG-R18).
+  hasOpenEndNowCancellation,
   // Portal replay guard (requests.js dedupe + inactive retry): never re-run
   // a portal cancellation without the boundary an admin end-of-coverage
   // decision holds.

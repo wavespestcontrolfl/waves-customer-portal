@@ -210,6 +210,35 @@ postgres('end-at-term annual-prepay lapses keep their paid visits through term_e
     expect(await coverage(t)).toHaveLength(0);
   });
 
+  test('an end-now run that failed between pulling the visits and recording the disposition leaves the lapse untouched until it is repaired (pre-push P1)', async () => {
+    const t = await seededTerm();
+    await decideCancel(t);
+    // The operator ends it now: the acceptance is written before anything
+    // destructive, the processor pulls every visit, and the run dies before
+    // the disposition lands — the term still reads end_at_term.
+    const [request] = await trx('service_requests').insert({
+      customer_id: t.customerId, category: 'cancellation', subject: 'Cancel plan', source: 'admin', status: 'new',
+      metadata: JSON.stringify({ cancel_plan: { scope: [], effectiveDate: 'now', prepayDisposition: null } }),
+    }).returning('*');
+    const pulled = await pullAll(t);
+    const replacementId = await handAdded(t, pulled[pulled.length - 1]);
+    expect(await disposition(t)).toBe('end_at_term');
+    const liveVisits = async () => (await trx('scheduled_services')
+      .where({ customer_id: t.customerId }).whereNot('status', 'cancelled').pluck('id')).sort();
+    await AnnualPrepayRenewals.refreshActiveTermsForCustomer(t.customerId, trx);
+    await sweep();
+    expect(await liveVisits()).toEqual([replacementId]);
+    expect(await trx('scheduled_services').where({ id: replacementId }).first('prepaid_method', 'annual_prepay_term_id'))
+      .toEqual({ prepaid_method: null, annual_prepay_term_id: null });
+    // The repair retry records the disposition and resolves the request:
+    // still nothing is stamped or recreated.
+    await AnnualPrepayRenewals.recordCancelDisposition({ termId: t.termId, disposition: 'end_now_refund' }, trx);
+    await trx('service_requests').where({ id: request.id }).update({ status: 'resolved' });
+    await AnnualPrepayRenewals.refreshActiveTermsForCustomer(t.customerId, trx);
+    await sweep();
+    expect(await liveVisits()).toEqual([replacementId]);
+  });
+
   test('a cancellation being committed for the customer holds the nightly reseed off until it finishes', async () => {
     const t = await seededTerm();
     await decideCancel(t);
