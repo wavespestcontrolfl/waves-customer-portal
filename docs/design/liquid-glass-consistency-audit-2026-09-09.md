@@ -165,9 +165,10 @@ Severity: **P1** = breaks a documented rule on a primary surface or blocks the "
 
 ### G-03 · P1 · Primary `BrandButton` renders 44px, not the 48px the standard specifies
 
-**Update 2026-09-26:** fixed — `client/src/glass/glass-theme.css` now carries a
-`html[data-glass-theme] :is(button, a)[data-glass-accent].btn-primary { min-height: 48px !important; }` rule, so the
-specific selector wins over the 44px floor.
+**Update 2026-09-26:** fixed — `client/src/glass/glass-theme.css` now sets `min-height: 48px !important` on
+`html[data-glass-theme] :is(button, a)[data-glass-size="primary"]`, and `BrandButton.jsx` emits
+`data-glass-size="primary"` on its primary variant, so that selector wins over the 44px floor. (The
+adjacent `[data-glass-accent].btn-primary` selector covers other gold primaries, not `BrandButton`.)
 
 - **Affected.** Every `BrandButton variant="primary"` (pay, statement, contract, the tokens showcase) and every gold accent authored ≥44 without extra padding.
 - **Measured.** Showcase "Approve my plan" and "Send code" (primary) **44px**; "Show all open times" (secondary) **40px**; ghost "Not now" **48px**; `a[data-glass-accent]` "Pay …" 56px (padding-driven).

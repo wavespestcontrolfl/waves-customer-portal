@@ -1130,7 +1130,7 @@ The most consequential first; the full table follows.
 1. **Which text floor governs Tier 1 admin: the consistency contract's 13/12/11 scale or the 14px hard line** (F0228 and ~3,500 sites). Every reader hit this. Until ruled, sweeps stop at 10px.
 2. **Customer 360 IA**: keep or delete the Health Radar (real sub-scores exist, F0062); "Add Note" — build the note composer or remove the two entries (F0065); reuse `CustomerSmsPanel` in the Comms tab (F0071); collapse the seven identical header pills (F0064); the duplicated mobile bars (F0073).
 3. **Tax A/R "Send Reminder"** posts to a route that does not exist (F0544, P1): remove it, or route through the invoice follow-up sequence (which owns stop-on-payment and quiet hours).
-4. **"Charge card on file" from Invoices** charges off-session with one tap, no amount, no confirmation (F0348, P1): add a quote → confirm step, or keep one-tap for field speed.
+4. **"Charge card on file" from Invoices** charges off-session with one tap, no amount, no confirmation (F0348, P1): add a quote → confirm step, or keep one-tap for field speed. (2026-09-26: the quote + `expectedTotal` guard shipped; the pre-tap amount and confirm step remain the owner decision.)
 5. **Pipeline**: keep or delete the unrouted Unified Pipeline directory (2,660 lines); does "Convert to Customer" survive; which lead-close path is canonical; give the mobile estimates list the desktop actions (F0467, P1).
 6. **Customer pills** after the 2026-09-04 "no status chips" ruling: hero/re-entry status pills (F0326), six V2 report folders (F0153), weather/score/TrendChip (CRF-19).
 7. **Dead code deletion** (37 unreachable files, ~12,800 lines + 2 dead-import panels) and the reachability test that stops it recurring.
