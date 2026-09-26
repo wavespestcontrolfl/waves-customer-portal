@@ -24,6 +24,12 @@ function conflictingRoutineObservations(observations = []) {
       return `Choose either no visible activity or visible activity for the inspected ${scope} areas.`;
     }
   }
+  const trends = catalog.recurring_pest
+    .filter(([id]) => id === 'activity-reduced' || id === 'activity-increased')
+    .map(([, label]) => label);
+  if (trends.every((label) => selected.has(label))) {
+    return 'Choose either reduced or increased activity compared with the previous documented visit.';
+  }
   return null;
 }
 

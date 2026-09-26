@@ -1912,7 +1912,8 @@ function completionStructuredObservationAllowlist({
     : observationsForSpecialtyService(resolvedSpecialtyServiceKey);
   let routineFamily = null;
   if (!resolvedSpecialtyServiceKey) {
-    if (reportServiceLine === 'tree_shrub' && (!typedFindingsType || typedFindingsType === 'tree_shrub')) {
+    if ((!typedFindingsType && ['tree_shrub', 'palm'].includes(reportServiceLine))
+      || (reportServiceLine === 'tree_shrub' && typedFindingsType === 'tree_shrub')) {
       // Recurring Tree & Shrub uses the typed findings form and the governed
       // routine observation picker together. Other typed lanes stay isolated.
       routineFamily = 'tree_shrub';
@@ -3590,6 +3591,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           label: String(entry.label || '').trim() || null,
           scope,
           treatmentApplied: entry.treatmentApplied === true,
+          ...(entry.dryDown === false ? { dryDown: false } : {}),
         };
       })
       .filter(Boolean);

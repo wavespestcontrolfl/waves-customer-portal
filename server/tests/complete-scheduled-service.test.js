@@ -69,6 +69,7 @@ describe('customer-safe routine completion observations', () => {
   test.each([
     ['lawn', 'lawn'],
     ['tree_shrub', 'tree_shrub'],
+    ['palm', 'tree_shrub'],
     ['pest', 'recurring_pest'],
   ])('accepts the shared %s catalog and rejects arbitrary text', (serviceLine, family) => {
     const allowed = completionStructuredObservationAllowlist({ reportServiceLine: serviceLine });
@@ -77,6 +78,10 @@ describe('customer-safe routine completion observations', () => {
   });
 
   test('keeps the typed tree-and-shrub routine vocabulary without widening other typed or specialty closeouts', () => {
+    expect(completionStructuredObservationAllowlist({
+      reportServiceLine: 'palm',
+      typedFindingsType: 'palm_injection',
+    }).has(completionObservationCatalog.tree_shrub[0][1])).toBe(false);
     expect(completionStructuredObservationAllowlist({
       reportServiceLine: 'tree_shrub',
       typedFindingsType: 'tree_shrub',
@@ -112,9 +117,13 @@ describe('customer-safe routine completion observations', () => {
     expect(allowed.has(completionObservationCatalog.recurring_pest[0][1])).toBe(true);
   });
 
-  test.each(['interior', 'exterior'])('rejects opposite activity observations for the same %s scope', async (scope) => {
+  test.each([
+    ['interior', ['no-live-interior', 'live-interior']],
+    ['exterior', ['no-live-exterior', 'live-exterior']],
+    ['trend', ['activity-reduced', 'activity-increased']],
+  ])('rejects opposite activity observations for the same %s scope', async (_scope, ids) => {
     const observations = completionObservationCatalog.recurring_pest
-      .filter(([id]) => id === `no-live-${scope}` || id === `live-${scope}`)
+      .filter(([id]) => ids.includes(id))
       .map(([, label]) => label);
     const result = await complete({ structuredObservations: observations });
     expect(result).toMatchObject({ status: 422, body: { code: 'conflicting_structured_observations' } });
