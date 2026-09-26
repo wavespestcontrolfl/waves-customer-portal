@@ -358,8 +358,15 @@ async function runSweep({ now = new Date() } = {}) {
         // of opening a new one (billing-reminder-delivery.js's
         // reminderProgress finds it by customer_id + source + this key).
         const eventKey = `previsit-balance:${visit.id}`;
-        const result = await sendReminderChannels({
+        const releaseClaim = () => db('scheduled_services')
+          .where({ id: visit.id })
+          .update({ balance_reminder_sent_at: null })
+          .catch(() => {});
+        let result;
+        try {
+          result = await sendReminderChannels({
           customerId: visit.customer_id,
+          offLedgerBalanceCents: duesCents,
           invoiceId: null, // aggregate balance rail, no single target invoice (rail-guard.js)
           source: 'previsit_balance_reminder',
           purpose: 'balance_reminder',
@@ -415,7 +422,16 @@ async function runSweep({ now = new Date() } = {}) {
               },
             });
           },
-        });
+          });
+        } catch (helperErr) {
+          // A progress read or reservation write failed: release the claim so
+          // the next sweep retries under the same eventKey (its reservations
+          // still guard any leg whose outcome is uncertain).
+          logger.warn(`[previsit-balance] explicit-channel send failed for visit ${visit.id}: ${helperErr.message}`);
+          await releaseClaim();
+          skipped++;
+          continue;
+        }
         // Release the claim while the episode is still open (a replay hold,
         // an uncertain outcome, or a transient policy/provider denial on ANY
         // selected leg — even when a sibling leg delivered now) so the next
@@ -423,12 +439,7 @@ async function runSweep({ now = new Date() } = {}) {
         // eventKey; sendReminderChannels never re-sends a delivered or
         // resolved leg. A COMPLETE episode keeps the claim: every leg is
         // delivered or terminally resolved.
-        if (!result.complete) {
-          await db('scheduled_services')
-            .where({ id: visit.id })
-            .update({ balance_reminder_sent_at: null })
-            .catch(() => {});
-        }
+        if (!result.complete) await releaseClaim();
         if (result.deliveredNow.length) sent++;
         else skipped++;
         continue;

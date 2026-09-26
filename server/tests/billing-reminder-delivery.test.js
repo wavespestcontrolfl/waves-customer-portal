@@ -80,6 +80,24 @@ describe('billing reminder per-channel delivery progress', () => {
     purpose: 'balance_reminder', eventKey, channels, metadata: { tier: 'gentle' }, send,
   });
 
+  test('an off-ledger balance allowance reaches every leg policy recheck', async () => {
+    const send = jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted' }));
+    await sendReminderChannels({
+      customerId: 'customer-1', invoiceId: null, source: 'previsit_balance_reminder',
+      purpose: 'balance_reminder', eventKey: 'previsit-balance:ss-1', channels: ['sms', 'email'],
+      offLedgerBalanceCents: 4900, send,
+    });
+    expect(collectionsChannelPermitted).toHaveBeenCalledTimes(2);
+    for (const [args] of collectionsChannelPermitted.mock.calls) {
+      expect(args).toMatchObject({ offLedgerBalanceCents: 4900 });
+    }
+  });
+
+  test('without an allowance the recheck counts no off-ledger balance', async () => {
+    await deliver(['sms'], jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted' })));
+    expect(collectionsChannelPermitted.mock.calls[0][0]).toMatchObject({ offLedgerBalanceCents: 0 });
+  });
+
   test('each leg is sent with its own reservation', async () => {
     const send = jest.fn().mockResolvedValue({ sent: true, deliveryOutcome: 'accepted' });
 

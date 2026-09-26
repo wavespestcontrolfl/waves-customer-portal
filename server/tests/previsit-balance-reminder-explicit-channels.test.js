@@ -303,3 +303,23 @@ test('a delivered leg with a held sibling counts as sent and still releases the 
   expect(releaseChain.update).toHaveBeenCalledWith({ balance_reminder_sent_at: null });
   expect(result).toMatchObject({ sent: 1, skipped: 0 });
 });
+
+// A throw inside the shared helper (progress read / reservation write) must
+// release the claim so the next sweep retries under the same event key.
+test('a shared-helper failure releases the claim', async () => {
+  armOneVisit({ notificationPrefs: { billing_channels: ['email'] } });
+  const releaseChain = armReleaseChain();
+  sendReminderChannels.mockRejectedValueOnce(new Error('ledger write failed'));
+  const result = await runSweep({ now: new Date('2026-08-14T15:00:00Z') });
+  expect(releaseChain.update).toHaveBeenCalledWith({ balance_reminder_sent_at: null });
+  expect(result).toMatchObject({ sent: 0, skipped: 1 });
+});
+
+// The previsit policy check counts late monthly dues as off-ledger debt; the
+// helper's per-leg recheck must receive the same allowance.
+test('the dues allowance is forwarded to the shared helper', async () => {
+  armOneVisit({ notificationPrefs: { billing_channels: ['sms'] } });
+  sendReminderChannels.mockResolvedValueOnce({ complete: true, deliveredNow: ['sms'], results: {} });
+  await runSweep({ now: new Date('2026-08-14T15:00:00Z') });
+  expect(sendReminderChannels.mock.calls[0][0]).toHaveProperty('offLedgerBalanceCents');
+});
