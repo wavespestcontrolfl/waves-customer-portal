@@ -549,4 +549,32 @@ describe('sendTermiteRenewalReminder (45/30-day termite annual renewal notice, s
       payload: expect.objectContaining({ address: '123 Main St, Unit 4B, Bradenton, FL, 34211' }),
     }));
   });
+
+  // Codex #4921 r4 P1: a retry deduped against an email the provider already
+  // accepted must carry the ORIGINAL acceptance time (the existing
+  // email_messages row's sent_at), so the termite notice witness is
+  // classified from when the customer was actually told, not the retry.
+  test('a deduped retry returns the ORIGINAL acceptance time (sentAt) from the existing email_messages row', async () => {
+    setDbQueues({ customers: [chain({ first: customer() }), chain({ first: customer() })] });
+    EmailTemplates.sendTemplate.mockResolvedValueOnce({
+      sent: true,
+      deduped: true,
+      message: { provider_message_id: 'sg-orig', status: 'sent', sent_at: '2026-09-26T14:05:00.000Z' },
+    });
+
+    const result = await AccountMembershipEmail.sendTermiteRenewalReminder({
+      customerId: 'cust-1',
+      termId: 'term-1',
+      daysOut: 45,
+      renewalDate: '2026-11-10',
+      renewalFee: 650,
+      newStart: '2026-11-11',
+      newEnd: '2027-11-11',
+      cancelLink: 'https://portal.wavespestcontrol.com/?tab=plan',
+    });
+
+    expect(result).toEqual(expect.objectContaining({
+      ok: true, deduped: true, messageId: 'sg-orig', sentAt: '2026-09-26T14:05:00.000Z',
+    }));
+  });
 });

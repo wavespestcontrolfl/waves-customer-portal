@@ -2487,6 +2487,239 @@ describe('annual prepay renewal helpers', () => {
     );
   });
 
+  // ---- Codex #4921 r4 P1: a plan-property lookup ERROR is not absence ----
+  describe('planPropertyForTerm — errors propagate, only genuine absence falls back (Codex #4921 r4 P1)', () => {
+    const throwingFirst = () => {
+      const q = query();
+      q.first = jest.fn(async () => { throw new Error('connection terminated'); });
+      return q;
+    };
+
+    test('an ERROR reading the estimate rejects (never a silent null → customer address)', async () => {
+      setDbQueues({ estimates: [throwingFirst()] });
+      await expect(_private.planPropertyForTerm({ id: 't', source_estimate_id: 'est-1' })).rejects.toThrow('connection terminated');
+    });
+
+    test('an ERROR reading the linked property rejects too', async () => {
+      setDbQueues({
+        estimates: [query({ first: { property_id: 'prop-1', address: '9 Palm Ave' } })],
+        customer_properties: [throwingFirst()],
+      });
+      await expect(_private.planPropertyForTerm({ id: 't', source_estimate_id: 'est-1' })).rejects.toThrow('connection terminated');
+    });
+
+    test('genuinely absent data still returns null (no estimate link, no estimate row, no property and no address)', async () => {
+      setDbQueues({
+        estimates: [query({ first: undefined }), query({ first: { property_id: 'prop-gone', address: null } })],
+        customer_properties: [query({ first: undefined })],
+      });
+      await expect(_private.planPropertyForTerm({ id: 't' })).resolves.toBeNull();
+      await expect(_private.planPropertyForTerm({ id: 't', source_estimate_id: 'est-missing' })).resolves.toBeNull();
+      await expect(_private.planPropertyForTerm({ id: 't', source_estimate_id: 'est-2' })).resolves.toBeNull();
+    });
+
+    test('sendCustomerTermNotice aborts on a plan-property lookup error: nothing is sent, the claim is released, and the error surfaces for the sweep to log and retry', async () => {
+      pinTermiteToday();
+      const term = {
+        id: 'term-err', customer_id: 'customer-1', source_estimate_id: 'estimate-9', status: 'active',
+        term_start: '2026-05-20', term_end: '2027-05-20', annual_plan_version: 'v3',
+        installation_anchored_at: '2026-05-20T00:00:00.000Z', prepay_amount: 650,
+        notice_45_sent_at: null, notice_45_claimed_at: null, notice_45_late_sent_at: null, renewal_decision: null,
+      };
+      const refreshedTerm = { ...term, last_scheduled_service_id: null, last_scheduled_service_date: null };
+      const releaseQuery = query();
+      setDbQueues({
+        scheduled_services: [query({ first: null }), query({ columnInfo: {} })],
+        annual_prepay_terms: [
+          query({ returning: [refreshedTerm] }),
+          query({ returning: [{ ...refreshedTerm, status: 'renewal_pending' }] }),
+          releaseQuery,
+        ],
+        customers: [query({ first: { id: 'customer-1', first_name: 'Stan', address_line1: '1 Billing Way', city: 'Tampa', phone: '+19415550100' } })],
+        estimates: [throwingFirst()],
+      });
+
+      await expect(AnnualPrepayRenewals.sendCustomerTermNotice(term, 45)).rejects.toThrow('connection terminated');
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(AccountMembershipEmail.sendTermiteRenewalReminder).not.toHaveBeenCalled();
+      expect(releaseQuery.update).toHaveBeenCalledWith(expect.objectContaining({ notice_45_claimed_at: null, status: 'active' }));
+      expect(releaseQuery.update).not.toHaveBeenCalledWith(expect.objectContaining({ notice_45_sent_at: expect.anything() }));
+    });
+  });
+
+  // ---- Codex #4921 r4 P1: a deduped email retry keeps its ORIGINAL time ----
+  describe('on-time email acceptance survives a failed witness stamp (Codex #4921 r4 P1)', () => {
+    const DAY45 = new Date('2026-09-26T16:00:00Z'); // term_end 2026-11-10 → exactly 45 days out (ET)
+    const termFields = {
+      id: 'term-dedupe', customer_id: 'customer-1', status: 'active', term_start: '2025-11-10', term_end: '2026-11-10',
+      annual_plan_version: 'v3', installation_anchored_at: '2025-11-10T00:00:00.000Z', prepay_amount: 650,
+      notice_45_sent_at: null, notice_45_claimed_at: null, notice_45_late_sent_at: null, renewal_decision: null,
+    };
+    const refreshed = { ...termFields, last_scheduled_service_id: null, last_scheduled_service_date: null };
+    const customerRow = { id: 'customer-1', first_name: 'Stan', address_line1: '123 Bayshore Rd', city: 'Bradenton', phone: '+19415550100' };
+
+    test('day 45: email accepted on time but the stamp transaction fails; day 44: the deduped retry still stamps notice_45_sent_at at the ORIGINAL time — never late, no late bell', async () => {
+      pinTermiteToday();
+      const stampQuery = query();
+      setDbQueues({
+        scheduled_services: [query({ first: null }), query({ columnInfo: {} }), query({ first: null })],
+        annual_prepay_terms: [
+          // day 45 (the failed stamp leaves the claim to its 15-minute TTL,
+          // so tomorrow's sweep re-claims it)
+          query({ returning: [refreshed] }),
+          query({ returning: [{ ...refreshed, status: 'renewal_pending' }] }),
+          // day 44
+          query({ returning: [refreshed] }),
+          query({ returning: [{ ...refreshed, status: 'renewal_pending' }] }),
+          stampQuery,
+        ],
+        customers: [query({ first: customerRow }), query({ first: customerRow })],
+      });
+      renderSmsTemplate.mockResolvedValue('rendered termite sms');
+      // SMS is definitively down both days; the email carries the notice.
+      sendCustomerMessage.mockResolvedValue({ sent: false, code: 'PROVIDER_DOWN', deliveryOutcome: 'not_sent' });
+
+      // Day 45: provider accepts the email, then the witness transaction fails.
+      AccountMembershipEmail.sendTermiteRenewalReminder.mockResolvedValueOnce({ ok: true, messageId: 'sg-1' });
+      db.transaction.mockImplementationOnce(async () => { throw new Error('stamp write failed'); });
+      await expect(AnnualPrepayRenewals.sendCustomerTermNotice(termFields, 45)).rejects.toThrow('stamp write failed');
+
+      // Day 44: the email layer dedupes against the day-45 acceptance.
+      jest.setSystemTime(new Date('2026-09-27T16:00:00Z'));
+      AccountMembershipEmail.sendTermiteRenewalReminder.mockResolvedValueOnce({
+        ok: true, deduped: true, messageId: 'sg-1', sentAt: DAY45.toISOString(),
+      });
+      await expect(AnnualPrepayRenewals.sendCustomerTermNotice(termFields, 45)).resolves.toMatchObject({ sent: true, channel: 'email' });
+
+      expect(stampQuery.update).toHaveBeenCalledWith(expect.objectContaining({ notice_45_sent_at: DAY45, notice_45_claimed_at: null }));
+      expect(stampQuery.update).not.toHaveBeenCalledWith(expect.objectContaining({ notice_45_late_sent_at: expect.anything() }));
+      expect(NotificationService.notifyAdmin).not.toHaveBeenCalledWith('alert', 'Termite annual renewal notice went out late', expect.anything(), expect.anything());
+    });
+
+    test('day 44 retry whose SMS is accepted: the email leg is awaited first and its deduped day-45 acceptance is the witness time (on time)', async () => {
+      pinTermiteToday();
+      jest.setSystemTime(new Date('2026-09-27T16:00:00Z'));
+      const stampQuery = query();
+      setDbQueues({
+        scheduled_services: [query({ first: null }), query({ columnInfo: {} })],
+        annual_prepay_terms: [
+          query({ returning: [refreshed] }),
+          query({ returning: [{ ...refreshed, status: 'renewal_pending' }] }),
+          stampQuery,
+        ],
+        customers: [query({ first: customerRow })],
+        customer_interactions: [query()],
+      });
+      renderSmsTemplate.mockResolvedValue('rendered termite sms');
+      sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted' });
+      AccountMembershipEmail.sendTermiteRenewalReminder.mockResolvedValue({
+        ok: true, deduped: true, messageId: 'sg-1', sentAt: DAY45.toISOString(),
+      });
+
+      await expect(AnnualPrepayRenewals.sendCustomerTermNotice(termFields, 45)).resolves.toMatchObject({ sent: true });
+      expect(AccountMembershipEmail.sendTermiteRenewalReminder).toHaveBeenCalledTimes(1); // not re-sent in the background
+      expect(stampQuery.update).toHaveBeenCalledWith(expect.objectContaining({ notice_45_sent_at: DAY45 }));
+      expect(stampQuery.update).not.toHaveBeenCalledWith(expect.objectContaining({ notice_45_late_sent_at: expect.anything() }));
+    });
+
+    test('with NO earlier acceptance, a day-44 send is still recorded late (the deduped time is the only thing trusted)', async () => {
+      pinTermiteToday();
+      jest.setSystemTime(new Date('2026-09-27T16:00:00Z'));
+      const stampQuery = query();
+      setDbQueues({
+        scheduled_services: [query({ first: null }), query({ columnInfo: {} })],
+        annual_prepay_terms: [
+          query({ returning: [refreshed] }),
+          query({ returning: [{ ...refreshed, status: 'renewal_pending' }] }),
+          stampQuery,
+        ],
+        customers: [query({ first: customerRow })],
+        customer_interactions: [query()],
+      });
+      renderSmsTemplate.mockResolvedValue('rendered termite sms');
+      sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted' });
+      // A fresh (non-deduped) send: any sentAt on it is ignored.
+      AccountMembershipEmail.sendTermiteRenewalReminder.mockResolvedValue({ ok: true, messageId: 'sg-2', sentAt: DAY45.toISOString() });
+
+      await expect(AnnualPrepayRenewals.sendCustomerTermNotice(termFields, 45)).resolves.toMatchObject({ sent: true });
+      expect(stampQuery.update).toHaveBeenCalledWith(expect.objectContaining({ notice_45_late_sent_at: expect.any(Date) }));
+      expect(stampQuery.update).not.toHaveBeenCalledWith(expect.objectContaining({ notice_45_sent_at: expect.anything() }));
+    });
+
+    test('originalEmailAcceptance trusts only a deduped, valid, non-future sentAt', () => {
+      pinTermiteToday();
+      expect(_private.originalEmailAcceptance({ ok: true, deduped: true, sentAt: '2026-09-26T14:00:00Z' })).toEqual(new Date('2026-09-26T14:00:00Z'));
+      expect(_private.originalEmailAcceptance({ ok: true, deduped: true, sentAt: new Date('2026-09-25T10:00:00Z') })).toEqual(new Date('2026-09-25T10:00:00Z'));
+      expect(_private.originalEmailAcceptance({ ok: true, sentAt: '2026-09-26T14:00:00Z' })).toBeNull();
+      expect(_private.originalEmailAcceptance({ ok: true, deduped: true, sentAt: null })).toBeNull();
+      expect(_private.originalEmailAcceptance({ ok: true, deduped: true, sentAt: 'not a date' })).toBeNull();
+      expect(_private.originalEmailAcceptance({ ok: true, deduped: true, sentAt: '2026-09-28T00:00:00Z' })).toBeNull();
+    });
+  });
+
+  // ---- Codex #4921 r4 P1: undelivered past a rung's own deadline ----
+  describe('undelivered-past-deadline escalation (Codex #4921 r4 P1)', () => {
+    const TODAY = '2026-09-26';
+    const plus = (n) => _private.addDaysYmd(TODAY, n);
+    const base = { id: 'term-u', customer_id: 'customer-1', annual_plan_version: 'v3' };
+
+    test('termiteUndeliveredRungs: the 45 rung the first day it is under 45 days out and undelivered; the 30 rung under 30; never on/before its deadline, once delivered or already escalated, or at term_end', () => {
+      expect(_private.termiteUndeliveredRungs({ ...base, term_end: plus(45) }, TODAY)).toEqual([]);
+      expect(_private.termiteUndeliveredRungs({ ...base, term_end: plus(44) }, TODAY)).toEqual([45]);
+      expect(_private.termiteUndeliveredRungs({ ...base, term_end: plus(30) }, TODAY)).toEqual([45]);
+      expect(_private.termiteUndeliveredRungs({ ...base, term_end: plus(29) }, TODAY)).toEqual([45, 30]);
+      expect(_private.termiteUndeliveredRungs({ ...base, term_end: plus(29), notice_45_late_sent_at: new Date() }, TODAY)).toEqual([30]);
+      expect(_private.termiteUndeliveredRungs({ ...base, term_end: plus(29), notice_45_sent_at: new Date() }, TODAY)).toEqual([30]);
+      expect(_private.termiteUndeliveredRungs({ ...base, term_end: plus(29), notice_45_undelivered_escalated_at: new Date() }, TODAY)).toEqual([30]);
+      expect(_private.termiteUndeliveredRungs({ ...base, term_end: plus(29), notice_30_undelivered_escalated_at: new Date() }, TODAY)).toEqual([45]);
+      expect(_private.termiteUndeliveredRungs({ ...base, term_end: TODAY }, TODAY)).toEqual([]);
+    });
+
+    test('a confirmed bell stamps the rung\'s OWN undelivered column (45), keyed per term+rung, and never the late-escalation column', async () => {
+      const updateQuery = query();
+      setDbQueues({ annual_prepay_terms: [updateQuery] });
+      NotificationService.notifyAdmin.mockResolvedValue({ id: 'notif-u45', deduped: false });
+
+      await expect(_private.fileTermiteUndeliveredNoticeException({ ...base, term_end: plus(44) }, 45)).resolves.toBe(true);
+
+      expect(NotificationService.notifyAdmin).toHaveBeenCalledWith(
+        'alert',
+        'Termite annual renewal notice not delivered',
+        expect.stringContaining('45-day deadline has passed'),
+        expect.objectContaining({
+          bell: true,
+          dedupeKey: 'termite-annual-notice:term-u:45:undelivered',
+          metadata: expect.objectContaining({ reason: 'notice_45_undelivered', days_out: 45 }),
+        }),
+      );
+      expect(updateQuery.whereNull).toHaveBeenCalledWith('notice_45_undelivered_escalated_at');
+      expect(updateQuery.update).toHaveBeenCalledWith(expect.objectContaining({ notice_45_undelivered_escalated_at: expect.any(Date) }));
+      expect(updateQuery.update).not.toHaveBeenCalledWith(expect.objectContaining({ notice_45_late_escalated_at: expect.anything() }));
+    });
+
+    test('the 30 rung stamps notice_30_undelivered_escalated_at', async () => {
+      const updateQuery = query();
+      setDbQueues({ annual_prepay_terms: [updateQuery] });
+      NotificationService.notifyAdmin.mockResolvedValue({ id: 'notif-u30' });
+
+      await expect(_private.fileTermiteUndeliveredNoticeException({ ...base, term_end: plus(20) }, 30)).resolves.toBe(true);
+      expect(NotificationService.notifyAdmin).toHaveBeenCalledWith(
+        'alert', 'Termite annual renewal notice not delivered', expect.any(String),
+        expect.objectContaining({ dedupeKey: 'termite-annual-notice:term-u:30:undelivered' }),
+      );
+      expect(updateQuery.update).toHaveBeenCalledWith(expect.objectContaining({ notice_30_undelivered_escalated_at: expect.any(Date) }));
+    });
+
+    test('a failed bell insert (notifyAdmin null) or a throw stamps nothing and reports false, so the next sweep retries', async () => {
+      setDbQueues({ annual_prepay_terms: [] });
+      NotificationService.notifyAdmin.mockResolvedValueOnce(null);
+      await expect(_private.fileTermiteUndeliveredNoticeException({ ...base, term_end: plus(44) }, 45)).resolves.toBe(false);
+      NotificationService.notifyAdmin.mockRejectedValueOnce(new Error('db unavailable'));
+      await expect(_private.fileTermiteUndeliveredNoticeException({ ...base, term_end: plus(44) }, 45)).resolves.toBe(false);
+      await expect(_private.fileTermiteUndeliveredNoticeException({ ...base, term_end: plus(44) }, 15)).resolves.toBe(false);
+    });
+  });
+
   test('a termite annual-plan term whose SMS send fails does NOT stamp notice_45_sent_at when the email fallback also fails (provider-success-only witness)', async () => {
     const term = {
       id: 'term-1',
@@ -3300,17 +3533,40 @@ describe('annual prepay renewal helpers', () => {
     });
   });
 
+  // Every column checkAndSend's termite readiness gate requires, plus the
+  // 000108 undelivered-escalation pair.
+  const TERMITE_READY_COLS = {
+    annual_plan_version: {},
+    notice_45_sent_at: {},
+    notice_45_claimed_at: {},
+    notice_45_late_sent_at: {},
+    notice_45_late_escalated_at: {},
+    notice_30_sent_at: {},
+    notice_30_claimed_at: {},
+    notice_30_late_sent_at: {},
+    notice_30_late_escalated_at: {},
+    notice_missed_escalated_at: {},
+    notice_45_undelivered_escalated_at: {},
+    notice_30_undelivered_escalated_at: {},
+  };
+
   // Generic (non-termite) prepay terms: the shared 30/15/7 loop excludes
-  // termite terms from ITS OWN 30-day query (the termite notice-obligation
-  // pass owns that rung entirely now), but 15/7 are untouched for every term.
-  test('checkAndSend: the shared loop excludes termite terms from its OWN 30-day query only — 15/7 stay unfiltered', async () => {
-    const columnInfoQuery = query({ columnInfo: {} }); // termite notice columns NOT ready → the whole termite pass is skipped
+  // termite terms from ITS OWN 30-day query when the termite notice-
+  // obligation pass ran (it owns that rung then), but 15/7 are untouched.
+  test('checkAndSend: with the termite pass ready, the shared loop excludes termite terms from its OWN 30-day query only — 15/7 stay unfiltered', async () => {
     const q30 = query({ rows: [] });
     const q15 = query({ rows: [] });
     const q7 = query({ rows: [] });
     setDbQueues({
       'annual_prepay_terms as t': [query({ rows: [] })], // activatePaidPendingTerms
-      annual_prepay_terms: [columnInfoQuery, q30, q15, q7],
+      annual_prepay_terms: [
+        query({ columnInfo: TERMITE_READY_COLS }),
+        query({ rows: [] }), // termite obligation candidates
+        query({ rows: [] }), // late-escalation retry candidates
+        query({ rows: [] }), // undelivered-past-deadline candidates
+        query({ rows: [] }), // missed-notice candidates
+        q30, q15, q7,
+      ],
     });
 
     const result = await AnnualPrepayRenewals.checkAndSend({ today: '2026-09-26' });
@@ -3319,6 +3575,43 @@ describe('annual prepay renewal helpers', () => {
     expect(q30.whereNull).toHaveBeenCalledWith('annual_plan_version');
     expect(q15.whereNull).not.toHaveBeenCalledWith('annual_plan_version');
     expect(q7.whereNull).not.toHaveBeenCalledWith('annual_plan_version');
+  });
+
+  // Codex #4921 r4 P1: when the termite pass did NOT run (a failed or
+  // incomplete schema probe), the shared loop must not exclude termite
+  // terms either — they fall back to the exact-day 30-day send instead of
+  // getting no notice at all.
+  test('checkAndSend: with the termite pass NOT ready (failed schema probe), the shared 30-day loop keeps termite terms instead of excluding them', async () => {
+    const failingProbe = query();
+    failingProbe.columnInfo = jest.fn(async () => { throw new Error('connection reset'); });
+    const q30 = query({ rows: [] });
+    const q15 = query({ rows: [] });
+    const q7 = query({ rows: [] });
+    setDbQueues({
+      'annual_prepay_terms as t': [query({ rows: [] })],
+      annual_prepay_terms: [failingProbe, q30, q15, q7],
+    });
+
+    await expect(AnnualPrepayRenewals.checkAndSend({ today: '2026-09-26' })).resolves.toEqual({ sent: 0 });
+    expect(q30.whereNull).not.toHaveBeenCalledWith('annual_plan_version');
+  });
+
+  // Codex #4921 r4 P1: a transient columnInfo() failure used to be cached as
+  // {} for the life of the process, silently disabling every column-gated
+  // path until a restart.
+  test('annualPrepayColumns never caches a failed or empty probe; the next call re-probes and caches the real columns', async () => {
+    const failingProbe = query();
+    failingProbe.columnInfo = jest.fn(async () => { throw new Error('connection reset'); });
+    const emptyProbe = query({ columnInfo: {} });
+    const goodProbe = query({ columnInfo: TERMITE_READY_COLS });
+    setDbQueues({ annual_prepay_terms: [failingProbe, emptyProbe, goodProbe] });
+
+    await expect(_private.annualPrepayColumns()).resolves.toEqual({});
+    await expect(_private.annualPrepayColumns()).resolves.toEqual({});
+    await expect(_private.annualPrepayColumns()).resolves.toBe(TERMITE_READY_COLS);
+    // Cached now: no further probe (the queue is empty, so a probe would throw).
+    await expect(_private.annualPrepayColumns()).resolves.toBe(TERMITE_READY_COLS);
+    expect(goodProbe.columnInfo).toHaveBeenCalledTimes(1);
   });
 
 });
@@ -4211,7 +4504,10 @@ describe('createTermForAnnualPrepay born-already-paid reconcile', () => {
   test('a term inserted already ACTIVE reconciles its pending-window completions (Customer 360 record-prepay path)', async () => {
     setDbQueues({
       annual_prepay_terms: [
-        query({ columnInfo: {} }), // annualPrepayColumns
+        // annualPrepayColumns: a minimal NON-empty probe (no optional
+        // column) — only a successful non-empty probe is cached (Codex
+        // #4921 r4 P1), and later steps reuse this one.
+        query({ columnInfo: { id: {} } }),
         query({ first: undefined }), // existing-term lookup (customer + window)
         query({ returning: [TERM] }), // insert
         query({ first: TERM }), // refreshTermSnapshot term read

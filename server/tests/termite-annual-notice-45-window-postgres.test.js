@@ -41,6 +41,8 @@ async function createScratchDb() {
     notice_30_late_sent_at timestamptz,
     notice_30_late_escalated_at timestamptz,
     notice_missed_escalated_at timestamptz,
+    notice_45_undelivered_escalated_at timestamptz,
+    notice_30_undelivered_escalated_at timestamptz,
     installation_anchored_at timestamptz,
     renewed_from_term_id uuid
   )`);
@@ -213,6 +215,60 @@ describeOrSkip('termite annual-plan notice obligations — unified 45/30 candida
     ].sort());
   });
 
+  // Codex #4921 r4 P1: a rung still undelivered after its OWN deadline
+  // (today > term_end - 45 / term_end - 30) is a candidate for one staff
+  // bell per rung — not only once term_end arrives.
+  test('termiteUndeliveredNoticeEscalationCandidates: a termite term the first day a rung is past its deadline and undelivered; never on the deadline day, once delivered/late, once that rung is bell-stamped, at/after term_end, or for an unanchored original', async () => {
+    const { db } = fixture;
+    jest.doMock('../models/db', () => db);
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    const { _private } = require('../services/annual-prepay-renewals');
+    const today = '2026-09-26';
+    const plus = (n) => _private.addDaysYmd(today, n);
+    const term = (label, fields) => ({
+      label, customer_id: randomUUID(), term_start: '2025-10-01', status: 'renewal_pending', annual_plan_version: 'v3',
+      installation_anchored_at: new Date('2025-10-01T12:00:00Z'), ...fields,
+    });
+    const rows = [
+      term('day45_onDeadline', { term_end: plus(45) }),
+      term('day44_45undelivered', { term_end: plus(44) }),
+      term('day44_45late', { term_end: plus(44), notice_45_late_sent_at: new Date() }),
+      term('day44_45alreadyBelled', { term_end: plus(44), notice_45_undelivered_escalated_at: new Date() }),
+      term('day30_onlyRung45', { term_end: plus(30), notice_30_sent_at: null }),
+      term('day29_30undelivered', { term_end: plus(29), notice_45_sent_at: new Date() }),
+      term('day29_30belled', { term_end: plus(29), notice_45_sent_at: new Date(), notice_30_undelivered_escalated_at: new Date() }),
+      term('day29_bothBelled45only', { term_end: plus(29), notice_45_undelivered_escalated_at: new Date() }),
+      term('day29_bothDelivered', { term_end: plus(29), notice_45_sent_at: new Date(), notice_30_late_sent_at: new Date() }),
+      term('atTermEnd', { term_end: today }),
+      term('unanchoredOriginal', { term_end: plus(20), installation_anchored_at: null }),
+      term('successor', { term_end: plus(20), installation_anchored_at: null, renewed_from_term_id: randomUUID() }),
+      term('nonTermite', { term_end: plus(20), annual_plan_version: null }),
+      term('decided', { term_end: plus(20), renewal_decision: 'cancel' }),
+    ];
+    const ids = {};
+    for (const { label, ...fields } of rows) {
+      const [row] = await db('annual_prepay_terms').insert(fields).returning('*');
+      ids[row.id] = label;
+    }
+
+    const candidates = await _private.termiteUndeliveredNoticeEscalationCandidates({ today, conn: db });
+    expect(candidates.map((row) => ids[row.id]).sort()).toEqual([
+      'day29_30undelivered',
+      'day29_bothBelled45only',
+      'day30_onlyRung45',
+      'day44_45undelivered',
+      'successor',
+    ].sort());
+    const rungsByLabel = Object.fromEntries(candidates.map((row) => [ids[row.id], _private.termiteUndeliveredRungs(row, today)]));
+    expect(rungsByLabel).toEqual({
+      day29_30undelivered: [30],
+      day29_bothBelled45only: [30],
+      day30_onlyRung45: [45],
+      day44_45undelivered: [45],
+      successor: [45, 30],
+    });
+  });
+
   test('witness column: on time (>= threshold days out) stamps the rung\'s own sent_at; a late send stamps the rung\'s own late column', () => {
     jest.doMock('../models/db', () => fixture.db);
     jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -309,6 +365,63 @@ describeOrSkip('termite annual-plan notice obligations — against a schema buil
     }
   });
 
+  // Codex #4921 r4 P1, end to end on a schema built by the REAL 000101–000108
+  // migrations: a 45-day rung whose send keeps failing rings ONE staff bell
+  // the first day it is past its deadline (not only at term_end), stamps
+  // notice_45_undelivered_escalated_at only on a confirmed insert, retries a
+  // failed insert on the next sweep, and never rings twice. The send itself
+  // fails here because the customer's contact rows are unavailable — any
+  // failure mode (SMS+email down, a propagated lookup error) leaves the rung
+  // undelivered the same way.
+  test('checkAndSend: an undelivered 45-day rung past its deadline rings one confirmed, deduped staff bell; a failed bell insert retries next sweep', async () => {
+    const { db } = fixture;
+    for (const file of [...MIGRATION_FILES_101_TO_107, '20260926000108_termite_annual_notice_undelivered_escalated_columns']) {
+      await require(`../models/migrations/${file}`).up(db);
+    }
+    jest.doMock('../models/db', () => db);
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    jest.doMock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn(), classifyDeliveryCertainty: jest.fn() }));
+    jest.doMock('../services/sms-template-renderer', () => ({ renderSmsTemplate: jest.fn() }));
+    jest.doMock('../services/account-membership-email', () => ({ sendMembershipRenewalReminder: jest.fn(), sendTermiteRenewalReminder: jest.fn() }));
+    jest.doMock('../services/cancellation-resolution', () => ({ cancelFlowV2Enabled: jest.fn(() => true) }));
+    const notifyAdmin = jest.fn();
+    jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
+    const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+
+    const [term] = await db('annual_prepay_terms').insert({
+      customer_id: randomUUID(), term_start: '2025-11-09', term_end: '2026-11-09', // 44 days after 2026-09-26
+      status: 'active', annual_plan_version: 'v3', installation_anchored_at: new Date('2025-11-09T12:00:00Z'),
+    }).returning('*');
+
+    // Sweep 1: the send fails and the bell insert fails (notifyAdmin null).
+    notifyAdmin.mockResolvedValue(null);
+    await expect(AnnualPrepayRenewals.checkAndSend({ today: '2026-09-26' })).resolves.toEqual({ sent: 0 });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    const undeliveredBells = () => notifyAdmin.mock.calls.filter((c) => c[1] === 'Termite annual renewal notice not delivered');
+    expect(undeliveredBells()).toHaveLength(1);
+    expect(undeliveredBells()[0][3]).toMatchObject({ bell: true, dedupeKey: `termite-annual-notice:${term.id}:45:undelivered` });
+    let row = await db('annual_prepay_terms').where({ id: term.id }).first();
+    expect(row.notice_45_undelivered_escalated_at).toBeNull(); // unconfirmed → not stamped
+    expect(row.notice_45_sent_at).toBeNull();
+    expect(row.notice_45_late_sent_at).toBeNull();
+
+    // Sweep 2: the bell insert is confirmed → stamped.
+    notifyAdmin.mockResolvedValue({ id: 'notif-1' });
+    await AnnualPrepayRenewals.checkAndSend({ today: '2026-09-26' });
+    expect(undeliveredBells()).toHaveLength(2);
+    row = await db('annual_prepay_terms').where({ id: term.id }).first();
+    expect(row.notice_45_undelivered_escalated_at).toBeInstanceOf(Date);
+    expect(row.notice_45_late_escalated_at).toBeNull(); // "not sent" never conflated with "sent late"
+
+    // Sweep 3 (next day): still undelivered, but the 45 bell never rings again;
+    // the 30 rung is not past its own deadline yet.
+    await AnnualPrepayRenewals.checkAndSend({ today: '2026-09-27' });
+    expect(undeliveredBells()).toHaveLength(2);
+    row = await db('annual_prepay_terms').where({ id: term.id }).first();
+    expect(row.notice_30_undelivered_escalated_at).toBeNull();
+  });
+
   test('termiteLateNoticeEscalationCandidates and termiteMissedNoticeEscalationCandidates run without a "column does not exist" error against the fully-migrated schema, and select the right rows', async () => {
     const { db } = fixture;
     for (const file of [
@@ -349,7 +462,7 @@ describeOrSkip('termite annual-plan notice obligations — against a schema buil
     expect(missedCandidates).toEqual([]); // term_end is in the future for every row above
   });
 
-  test('a database that ran only through 000106 (pre-000107) — checkAndSend\'s readiness gate skips the ENTIRE termite pass instead of throwing, and the generic 30/15/7 loop still runs', async () => {
+  test('a database that ran only through 000106 (pre-000107) — checkAndSend\'s readiness gate skips the ENTIRE termite pass instead of throwing, and the generic 30/15/7 loop still runs WITHOUT excluding termite terms', async () => {
     const { db } = fixture;
     for (const file of [
       '20260926000101_termite_annual_notice_45_claim_column',
@@ -384,8 +497,11 @@ describeOrSkip('termite annual-plan notice obligations — against a schema buil
     db.on('query', (q) => sql.push(q.sql));
     await expect(AnnualPrepayRenewals.checkAndSend({ today: '2026-09-26' })).resolves.toEqual({ sent: 0 });
     // Not a false green: the generic 30/15/7 loop really queried this
-    // (live) schema — the 30-day rung's query carries the termite exclusion.
-    expect(sql.some((q) => /notice_30_sent_at/.test(q) && /"annual_plan_version" is null/.test(q))).toBe(true);
+    // (live) schema. Codex #4921 r4 P1: with the termite pass skipped, its
+    // 30-day query must NOT exclude termite terms — otherwise they would
+    // get no 30-day notice from either path.
+    expect(sql.some((q) => /notice_30_sent_at/.test(q) && /"term_end" = /.test(q))).toBe(true);
+    expect(sql.some((q) => /"annual_plan_version" is null/.test(q))).toBe(false);
     expect(sql.some((q) => /notice_7_sent_at/.test(q))).toBe(true);
     // …and the termite pass was skipped by the readiness gate, never run.
     expect(sql.some((q) => /notice_30_late_escalated_at/.test(q))).toBe(false);

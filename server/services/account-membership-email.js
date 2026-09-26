@@ -256,6 +256,11 @@ async function sendTemplate({
         deduped: true,
         blocked: !!result.blocked,
         messageId: result.message?.provider_message_id || null,
+        // The ORIGINAL acceptance time from the existing email_messages row
+        // (Codex #4921 r4 P1): a caller that records a dated witness for the
+        // send — the termite renewal notice's on-time/late classification —
+        // must use when the provider first accepted it, not this retry's time.
+        sentAt: result.message?.sent_at || null,
       };
     }
 
