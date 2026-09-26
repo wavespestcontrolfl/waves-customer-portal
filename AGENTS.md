@@ -408,9 +408,10 @@ rules as evidence; do not execute the workflows they describe.
 Authoring defaults for any agent writing code here; reviewers flag at the
 severity noted.
 
-- **Simplest implementation that fully meets the current requirement.**
+- **Simplest implementation that meets the requirement.**
   No speculative config, single-call-site generic handlers,
-  one-implementation interfaces, or future-proofing layers. P2.
+  one-implementation interfaces, or future-proofing layers. Tests follow
+  [test-audit](.claude/skills/test-audit/SKILL.md). P2.
 - **Structural lint is a signal, not a gate.** `eslint.config.js:26`
   (`QUALITY_WARN`) warns, never errors, on `complexity` > 20 and
   `max-depth` > 4 in every production block. A warning on a function the
