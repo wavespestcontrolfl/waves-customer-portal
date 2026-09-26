@@ -803,6 +803,7 @@ describe('normalizeIntakeResult', () => {
     ['Keep the bait dry and place it in 2 stations.', ''],
     ['Store the product in a dry location below 90°F.', ''],
     ['You can go back into your account in 2 hours.', ''],
+    ['Yes.', 'Can I log back into my account in 30 minutes?'],
     ['They can damage St. Augustine grass.', 'Are chinch bugs harmful to grass?'],
     ['Please wait 30 minutes for our dispatcher to call you back.', ''],
     ['Please wait 2 business days for the refund to appear.', ''],
