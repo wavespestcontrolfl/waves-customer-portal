@@ -189,6 +189,30 @@ it('drops a tree & shrub protocol action restored from a draft saved for another
   expect(body.treeShrubCompletion.customerNote).not.toContain('April');
 });
 
+it('a draft saved under another month restores without that month\'s actions and clears the report written from them', async () => {
+  const shrubs = { ...service, serviceType: 'Tree & Shrub Care', completionProfile: { serviceKey: 'tree_shrub' }, scheduledDate: '2026-05-12', waveguardTier: null };
+  completionActions = { programKey: 'tree_shrub', visit: { visit: 5, month: 'May' }, actions: [{ id: 'may-palm', label: 'May palm fertilizer', note: 'May palm fertilizer', raw: 'May palm fertilizer' }] };
+  // Saved in April after Generate: the notes are the untouched AI report,
+  // the pre-generation notes still carry the April chip marker.
+  const report = 'WHAT WE DID:\nApplied April palm fertilizer.\nWHAT WE FOUND:\nPalms looked healthy.';
+  localStorage.setItem(`waves_completion_draft_${shrubs.id}`, JSON.stringify({
+    serviceId: shrubs.id, savedAt: Date.now(), visitOutcome: 'incomplete', protocolVisitMonth: 'Apr',
+    notes: report, generatedReportText: report, aiReportUsed: true, chipLinesDetached: true,
+    preGenerationNotes: '[Protocol] April palm fertilizer\nChecked the side-yard palms.',
+    selectedProtocolActionLabels: ['April palm fertilizer'],
+  }));
+  render(<CompletionPanel service={shrubs} products={[]} onClose={() => {}} onSubmit={submit} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  await screen.findByRole('option', { name: /May palm fertilizer/ });
+  expect(screen.getByText(/the draft\s+was cleared/)).toBeTruthy();
+  expect(screen.queryByText(/April palm fertilizer/)).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: /mark visit incomplete/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  const body = submit.mock.calls[0][1];
+  expect(body.protocolActionsCompleted).toEqual([]);
+  expect(body.technicianNotes).toBe('Checked the side-yard palms.');
+});
+
 
 it('normalizes legacy previous scores using the same four categories as the customer report', async () => {
   history = [{ confirmed_by_tech: true, service_date: '2026-07-10', overall_score: 99,

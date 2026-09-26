@@ -14786,6 +14786,10 @@ export function CompletionPanel({
         // (billing-409 detour, reload) or the resumed completion records
         // aiDraftUsed: false for an AI-installed report (codex r17).
         aiReportUsed,
+        // The protocol visit the action selections (and any report written
+        // from them) came from: a month-keyed list binds them to its month
+        // ("Apr"); "Any" or no list binds nothing (see restoreDraft).
+        protocolVisitMonth: protocolActionMeta?.visit?.month || null,
         // The installed-report identity restores too, so an UNTOUCHED
         // restored draft stays invalidatable on later typed edits (codex r24).
         generatedReportText: generatedReportTextRef.current,
@@ -14895,6 +14899,7 @@ export function CompletionPanel({
     parkedNext,
     chipLinesDetached,
     aiReportUsed,
+    protocolActionMeta,
     nextVisitNote,
     showNextVisitNote,
     treeShrubCloseout,
@@ -14939,7 +14944,22 @@ export function CompletionPanel({
       ? Object.fromEntries(Object.entries(savedDraft.lawnRemovedDefaultNames).filter(([, name]) => typeof name === 'string' && name.trim()))
       : {};
     setLawnDefaultsSeedSuppressed(savedDraft.lawnDefaultsSeedSuppressed === true || !Object.hasOwn(savedDraft, "lawnRemovedDefaultIds"));
-    setNotes(savedDraft.notes || "");
+    // A month-keyed program (tree & shrub) offers the appointment month's own
+    // protocol actions. A draft saved under another month's visit (the visit
+    // moved since) restores none of those selections: their marker lines
+    // leave the restored notes, and a report written from them is
+    // invalidated below (restorePruned). Lawn keeps its plan reconciliation.
+    const draftProtocolLabels = Array.isArray(savedDraft.selectedProtocolActionLabels)
+      ? savedDraft.selectedProtocolActionLabels
+      : [];
+    const protocolVisitMoved = !isLawn
+      && typeof savedDraft.protocolVisitMonth === "string"
+      && savedDraft.protocolVisitMonth !== "Any"
+      && savedDraft.protocolVisitMonth !== protocolMonthForService(service);
+    const restoredProtocolLabels = protocolVisitMoved ? [] : draftProtocolLabels;
+    setNotes(protocolVisitMoved
+      ? withoutProtocolMarkerLines(savedDraft.notes || "", draftProtocolLabels)
+      : savedDraft.notes || "");
     // A draft restored while the plan request has already failed carries the
     // suggestions saved under an earlier plan, and the reconcile effect stays
     // off during a plan error — withdraw them exactly as the failed request
@@ -15112,13 +15132,9 @@ export function CompletionPanel({
       normalizeCustomerInteractionValue(savedDraft.customerInteraction),
     );
     setCustomerConcern(savedDraft.customerConcern || "");
-    setSelectedProtocolActionLabels(
-      Array.isArray(savedDraft.selectedProtocolActionLabels)
-        ? savedDraft.selectedProtocolActionLabels
-        : [],
-    );
+    setSelectedProtocolActionLabels(restoredProtocolLabels);
     setActionScopeByLabel(
-      savedDraft.actionScopeByLabel && typeof savedDraft.actionScopeByLabel === "object"
+      !protocolVisitMoved && savedDraft.actionScopeByLabel && typeof savedDraft.actionScopeByLabel === "object"
         ? savedDraft.actionScopeByLabel
         : {},
     );
@@ -15163,7 +15179,9 @@ export function CompletionPanel({
       ? savedDraft.generatedReportText
       : null;
     preGenerationNotesRef.current = typeof savedDraft.preGenerationNotes === "string"
-      ? savedDraft.preGenerationNotes
+      ? protocolVisitMoved
+        ? withoutProtocolMarkerLines(savedDraft.preGenerationNotes, draftProtocolLabels)
+        : savedDraft.preGenerationNotes
       : null;
     preGenerationChipDetachedRef.current = savedDraft.preGenerationChipDetached === true;
     stationAutoCountsRef.current = savedDraft.stationAutoCounts
@@ -15199,6 +15217,11 @@ export function CompletionPanel({
       && 'generationLawnAssessmentId' in savedDraft
       && ((savedDraft.generationLawnAssessmentId ?? null) !== (lawnAssessmentId ?? null)
         || (savedDraft.generationLawnAssessmentRevision ?? null) !== (lawnAssessmentRevision ?? null))) {
+      restorePruned = true;
+    }
+    // ... and for protocol actions dropped because the visit moved months:
+    // the installed prose describes the old month's work.
+    if (generatedReportTextRef.current && protocolVisitMoved && draftProtocolLabels.length) {
       restorePruned = true;
     }
     const restoredFindings =
