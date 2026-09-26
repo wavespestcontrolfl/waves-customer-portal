@@ -178,12 +178,12 @@ const REPORT_NUMERIC_CREDENTIAL_GROUP = String.raw`[A-Za-z#*]*\d[A-Za-z0-9#*]*`;
 // Do not let the optional leading affix consume the device noun itself in
 // suffix forms such as "rear gate 2468-AB"; the contextual detector still
 // needs that noun after normalization.
-const REPORT_CREDENTIAL_LEADING_AFFIX_GROUP = String.raw`(?!(?:[Gg][Aa][Tt][Ee]|[Dd][Oo][Oo][Rr]|[Gg][Aa][Rr][Aa][Gg][Ee]|[Ee][Nn][Tt][Rr][Yy]|[Kk][Ee][Yy][Pp][Aa][Dd]|[Ll][Oo][Cc][Kk][Bb][Oo][Xx]|[Aa][Ll][Aa][Rr][Mm])\b)[A-Za-z#*]{1,8}`;
+const REPORT_CREDENTIAL_LEADING_AFFIX_GROUP = String.raw`(?!(?:[Gg][Aa][Tt][Ee]|[Dd][Oo][Oo][Rr]|[Gg][Aa][Rr][Aa][Gg][Ee]|[Ee][Nn][Tt][Rr][Yy]|[Kk][Ee][Yy][Pp][Aa][Dd]|[Ll][Oo][Cc][Kk][Bb][Oo][Xx]|[Aa][Ll][Aa][Rr][Mm])\b)(?=[A-Za-z0-9#*]{1,12}[\s–—-])(?=[A-Za-z0-9#*]*[A-Za-z#*])[A-Za-z0-9#*]{1,12}`;
 // A separated suffix must be uppercase/symbolic. Lowercase words after a code
 // are ordinary prose ("8842 after hours") and must remain available to the
 // surrounding detector rather than being absorbed as part of the token.
-const REPORT_CREDENTIAL_TRAILING_AFFIX_GROUP = String.raw`[A-Z#*]{1,8}`;
-const REPORT_NUMERIC_CREDENTIAL_TOKEN = String.raw`(?:${REPORT_CREDENTIAL_LEADING_AFFIX_GROUP}[\s–—-]+)?${REPORT_NUMERIC_CREDENTIAL_GROUP}(?:[\s–—-]+${REPORT_NUMERIC_CREDENTIAL_GROUP})*(?:[\s–—-]+${REPORT_CREDENTIAL_TRAILING_AFFIX_GROUP})?`;
+const REPORT_CREDENTIAL_TRAILING_AFFIX_GROUP = String.raw`(?=[A-Z0-9#*]{1,12}(?![A-Za-z0-9#*]))(?=[A-Z0-9#*]*[A-Z#*])[A-Z0-9#*]{1,12}`;
+const REPORT_NUMERIC_CREDENTIAL_TOKEN = String.raw`(?:${REPORT_CREDENTIAL_LEADING_AFFIX_GROUP}[\s–—-]+){0,3}${REPORT_NUMERIC_CREDENTIAL_GROUP}(?:[\s–—-]+${REPORT_NUMERIC_CREDENTIAL_GROUP})*(?:[\s–—-]+${REPORT_CREDENTIAL_TRAILING_AFFIX_GROUP}){0,3}`;
 const REPORT_EXPLICIT_NUMERIC_CREDENTIAL_RE = new RegExp(
   String.raw`\b(?:code|pin|combo(?!\s+(?:of|with)\b)|combination(?!\s+(?:of|with)\b)|passcode|password|passphrase|keypad|lock\s?box)\b[^\n.!?]{0,25}?["'‘’“”]?(${REPORT_NUMERIC_CREDENTIAL_TOKEN})`,
   'gi',
@@ -235,20 +235,44 @@ const REPORT_DEVICE_BEFORE_ANALYSIS_RE = /\b(?:gate|door|garage|entry|keypad|loc
 const REPORT_DEVICE_ACCESS_BEFORE_ANALYSIS_RE = /\b(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b[^\n.!?]{0,20}\b(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?)\b[^\n.!?]{0,15}(?:with|using|via|code|pin|combo|combination|[:=])?\s*$/i;
 const REPORT_ACCESS_AFTER_ANALYSIS_RE = /^[^\n.!?]{0,20}\b(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?)\b[^\n.!?]{0,25}\b(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b/i;
 
+function hasCredentialAffixAroundAnalysis(before, after, preserveLeading, preserveTrailing) {
+  if (/(?:\d\s*[-–—]|[#*])\s*$/.test(before)) return true;
+  if (/^\s*(?:[-–—]\s*\d|[#*])/.test(after)) return true;
+
+  const leadingGroup = before.match(/([A-Za-z0-9#*]{1,12})([\s–—-]+)$/);
+  if (leadingGroup && /[A-Za-z#*]/.test(leadingGroup[1])) {
+    if (/[-–—]/.test(leadingGroup[2]) || !preserveLeading) return true;
+  }
+
+  const trailingGroup = after.match(/^([\s–—-]+)([A-Za-z0-9#*]{1,12})/);
+  const uppercaseCredentialGroup = trailingGroup
+    && /^[A-Z0-9#*]+$/.test(trailingGroup[2])
+    && /[A-Z#*]/.test(trailingGroup[2]);
+  return Boolean(uppercaseCredentialGroup && !preserveTrailing);
+}
+
 function maskFertilizerAnalyses(text) {
   return String(text || '').replace(REPORT_FERTILIZER_ANALYSIS_RE, (analysis, offset, source) => {
     const before = source.slice(0, offset);
     const after = source.slice(offset + analysis.length);
-    const embeddedToken = /(?:\d\s*[-–—]|[#*])\s*$/.test(before)
-      || /^\s*(?:[-–—]\s*\d|[#*])/.test(after);
-    if (embeddedToken) return analysis;
-
     const clauseBefore = before.slice(Math.max(before.lastIndexOf('.'), before.lastIndexOf('!'), before.lastIndexOf('?'), before.lastIndexOf('\n')) + 1);
     const clauseEndOffsets = [after.indexOf('.'), after.indexOf('!'), after.indexOf('?'), after.indexOf('\n')]
       .filter((value) => value >= 0);
     const clauseAfter = clauseEndOffsets.length ? after.slice(0, Math.min(...clauseEndOffsets)) : after;
-    const directApplication = REPORT_APPLICATION_BEFORE_RE.test(clauseBefore)
-      || REPORT_APPLICATION_AFTER_RE.test(clauseAfter);
+    const applicationBefore = REPORT_APPLICATION_BEFORE_RE.test(clauseBefore);
+    const applicationAfter = REPORT_APPLICATION_AFTER_RE.test(clauseAfter);
+    const fertilizerNounBefore = REPORT_FERTILIZER_NOUN_BEFORE_RE.test(clauseBefore);
+    const fertilizerNounAfter = REPORT_FERTILIZER_NOUN_AFTER_RE.test(clauseAfter);
+
+    const embeddedToken = hasCredentialAffixAroundAnalysis(
+      before,
+      after,
+      applicationBefore || fertilizerNounBefore,
+      applicationAfter || fertilizerNounAfter,
+    );
+    if (embeddedToken) return analysis;
+
+    const directApplication = applicationBefore || applicationAfter;
     const credentialNoun = REPORT_CREDENTIAL_NOUN_IN_CLAUSE_RE.test(clauseBefore)
       || REPORT_CREDENTIAL_NOUN_IN_CLAUSE_RE.test(clauseAfter);
     const deviceAccess = REPORT_ACCESS_BEFORE_ANALYSIS_RE.test(clauseBefore)
@@ -258,9 +282,7 @@ function maskFertilizerAnalyses(text) {
     const accessInstruction = credentialNoun || (!directApplication && deviceAccess);
     if (accessInstruction) return analysis;
 
-    const treatmentEvidence = directApplication
-      || REPORT_FERTILIZER_NOUN_BEFORE_RE.test(clauseBefore)
-      || REPORT_FERTILIZER_NOUN_AFTER_RE.test(clauseAfter);
+    const treatmentEvidence = directApplication || fertilizerNounBefore || fertilizerNounAfter;
     return treatmentEvidence ? '[fertilizer-analysis]' : analysis;
   });
 }

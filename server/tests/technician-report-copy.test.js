@@ -90,6 +90,13 @@ describe('custom action credential screening', () => {
     'Rear gate is 24-0-11 fertilizer',
     'Opened rear gate with #24-0-11 fertilizer',
     'Opened rear gate with 2-4-6-8 and applied fertilizer',
+    'Rear gate AB-24-0-11 fertilizer',
+    'Rear gate is AB-24-0-11 fertilizer',
+    'Rear gate #AB-24-0-11 fertilizer',
+    'Rear gate AB-CD-24-0-11 fertilizer',
+    'Rear gate A2B-XY-24-0-11-ZZ fertilizer',
+    'Rear gate ab 24-0-11 fertilizer',
+    'Rear gate 24-0-11-AB fertilizer',
   ])('rejects recorded access credentials: %s', (action) => {
     expect(customerCopyViolations(action)).toContain('access_code');
   });

@@ -218,6 +218,13 @@ describe('deterministic report fallback', () => {
         'Opened rear gate with 24-0-11. Applied fertilizer to turf.',
         '24-0-11 is the gate code. Applied fertilizer.',
         'Opened rear gate with 2-4-6-8 and applied fertilizer',
+        'Rear gate AB-24-0-11 fertilizer',
+        'Rear gate is AB-24-0-11 fertilizer',
+        'Rear gate #AB-24-0-11 fertilizer',
+        'Rear gate AB-CD-24-0-11 fertilizer',
+        'Rear gate A2B-XY-24-0-11-ZZ fertilizer',
+        'Rear gate ab 24-0-11 fertilizer',
+        'Rear gate 24-0-11-AB fertilizer',
         'Applied 24-0-11 near the rear gate',
       ],
     });
@@ -429,6 +436,13 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(reportCopyRejection('Opened rear gate with 24-0-11. Applied fertilizer to turf.')).toBe('access_code');
     expect(reportCopyRejection('24-0-11 is the gate code. Applied fertilizer.')).toBe('access_code');
     expect(reportCopyRejection('Opened rear gate with 2-4-6-8 and applied fertilizer.')).toBe('access_code');
+    expect(reportCopyRejection('Rear gate AB-24-0-11 fertilizer.')).toBe('access_code');
+    expect(reportCopyRejection('Rear gate is AB-24-0-11 fertilizer.')).toBe('access_code');
+    expect(reportCopyRejection('Rear gate #AB-24-0-11 fertilizer.')).toBe('access_code');
+    expect(reportCopyRejection('Rear gate AB-CD-24-0-11 fertilizer.')).toBe('access_code');
+    expect(reportCopyRejection('Rear gate A2B-XY-24-0-11-ZZ fertilizer.')).toBe('access_code');
+    expect(reportCopyRejection('Rear gate ab 24-0-11 fertilizer.')).toBe('access_code');
+    expect(reportCopyRejection('Rear gate 24-0-11-AB fertilizer.')).toBe('access_code');
     expect(reportCopyRejection('Opened the gate onto 400 sqft of treated turf.')).toBeNull();
     expect(reportCopyRejection('Opened rear gate, applied 100 ml around hinges.')).toBeNull();
     expect(reportCopyRejection('Inspected the rear gate 120–150 feet from the lanai.')).toBeNull();
