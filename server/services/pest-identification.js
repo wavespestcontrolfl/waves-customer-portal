@@ -1,10 +1,13 @@
 /**
  * Pest Identification Service
  *
- * Gemini-first species/category identification from prospect photos, for the
- * public pest-identifier funnel and the admin assessment view. Owner ruling
- * 2026-09-24: no more Claude+Gemini fan-out — each photo tries Gemini first;
- * Claude runs ONLY when Gemini returns nothing (HTTP/parse/empty miss).
+ * Gemini-first species/category identification from photos, for the public
+ * pest-identifier funnel, the SMS photo triage, the admin assessment view and
+ * the customer app. Owner ruling 2026-09-26 (TEXT_POLICIES.photoIdVision):
+ * each photo goes to Gemini 3.8 Flash first; when Gemini misses, is unsure
+ * (confidence_score below PHOTO_ID_ESCALATE_BELOW, default 0.80) or names a
+ * pest whose risky look-alike it also lists, the same photo goes to ChatGPT's
+ * best vision model (OPENAI_FRONTIER). Sequential, never parallel, no Claude.
  *
  * Trust model mirrors the lawn diagnostic stack:
  *  - Model output NEVER reaches a prospect directly. Every customer-facing
@@ -13,30 +16,24 @@
  *  - Confidence gates naming: only a high-confidence, library-matched,
  *    model-agreeing ID names a pest plainly; moderate reads "likely", low
  *    reads as a category ("an ant species") with an in-person confirm. A
- *    single-model result (Gemini alone, or Claude as its fallback) always
- *    goes through mergeModelResults' single_model path, which downgrades
- *    confidence a notch — so one model alone can never read "high".
+ *    single-model result (Gemini alone, or OpenAI alone after a Gemini miss)
+ *    always goes through mergeModelResults' single_model path, which
+ *    downgrades confidence a notch — so one model alone can never read "high".
  *  - Termite/WDO photo ID is SUGGESTIVE ONLY: the library forces
  *    inspection_required and copy that routes to a free inspection. Photo ID
  *    must never read like a WDO inspection finding.
  *
- * Vision goes to the Gemini vision scorer, falling back to MODELS.VISION
- * (Claude) — the same pattern as lawn-assessment.js. Vision does NOT route
- * through llm/deep.js (DEEP is text-only lanes). No sampling controls on the
- * request — current Anthropic models reject them.
+ * Vision does NOT route through llm/deep.js (DEEP is text-only lanes).
  */
 
 const logger = require('./logger');
 const MODELS = require('../config/models');
-const { anthropicText, geminiText } = require('./llm/call');
+const { dispatch, geminiText } = require('./llm/call');
 const {
   safePublicFirstName,
   safePublicCity,
   sanitizePricingSnapshot,
 } = require('../utils/public-report-egress');
-
-let Anthropic;
-try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
 const GEMINI_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
 const GEMINI_VISION_MODEL = process.env.GEMINI_VISION_MODEL || MODELS.GEMINI_VISION_BEST;
@@ -363,6 +360,7 @@ const VISION_PROMPT = `You are a pest identification tool for a professional pes
   "alternates": ["up to 3 plausible alternative common names"],
   "category": "insect" | "arachnid" | "rodent" | "wildlife" | "other" | "not_a_pest",
   "confidence": "low" | "moderate" | "high",
+  "confidence_score": "a number from 0 to 1: how likely best_match is correct (high is 0.8 or more, moderate 0.5 to 0.79, low under 0.5)",
   "distinguishing_features": ["visible features that drove the ID"],
   "not_a_pest": true | false,
   "observations": "one concise paragraph on what is visible, including size cues and context (indoors/outdoors, on plant, droppings, damage)"
@@ -377,7 +375,7 @@ Rules:
 - Never invent species not plausible in Florida.`;
 
 // Codex P1 class (#4730 r1, lawn-assessment): a parseable but empty response
-// (`{}`) is still a truthy object and would skip the Claude fallback. Require
+// (`{}`) is still a truthy object and would skip the escalation. Require
 // the three fields the merge actually reads before accepting a model's answer.
 function isValidPestIdentification(parsed) {
   if (!parsed || typeof parsed !== 'object') return false;
@@ -394,6 +392,12 @@ function isValidPestIdentification(parsed) {
 // a padded " true " as false (Codex r4).
 function normalizePestIdentification(parsed) {
   if (typeof parsed.not_a_pest === 'string') parsed.not_a_pest = parsed.not_a_pest.trim().toLowerCase() === 'true';
+  // confidence_score drives the escalation only. A percentage (85) is read as
+  // 0.85; anything else unusable is null and the enum decides instead.
+  const raw = parsed.confidence_score;
+  const score = typeof raw === 'number' || (typeof raw === 'string' && raw.trim()) ? Number(raw) : NaN;
+  const fraction = score > 1 && score <= 100 ? score / 100 : score;
+  parsed.confidence_score = Number.isFinite(fraction) && fraction >= 0 && fraction <= 1 ? fraction : null;
   return parsed;
 }
 
@@ -404,26 +408,34 @@ function parseVisionJson(text, source) {
   return null;
 }
 
-async function callClaudeVision(base64Image, mimeType) {
-  if (!Anthropic || !process.env.ANTHROPIC_API_KEY) return null;
+// ChatGPT's best vision model (TEXT_POLICIES.photoIdVision's OpenAI leg)
+// reads the same photo when Gemini misses or needs a second look. Same prompt
+// and validator as Gemini; any miss returns null. Bounded: the website funnel
+// and the app wait on this request.
+const OPENAI_VISION_TIMEOUT_MS = 60 * 1000;
+
+async function callOpenAIVision(base64Image, mimeType) {
+  const policy = MODELS.TEXT_POLICIES.photoIdVision;
   try {
-    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-    const response = await anthropic.messages.create({
-      model: MODELS.VISION,
-      max_tokens: 500,
-      messages: [{
-        role: 'user',
-        content: [
-          { type: 'image', source: { type: 'base64', media_type: mimeType, data: base64Image } },
-          { type: 'text', text: VISION_PROMPT },
-        ],
-      }],
+    const result = await dispatch(policy.fallback, {
+      text: VISION_PROMPT,
+      images: [{ data: base64Image, mimeType }],
+      jsonMode: true,
+      maxTokens: 8192,
+      reasoningEffort: 'medium',
+      timeoutMs: OPENAI_VISION_TIMEOUT_MS,
+      laneId: 'pest_identification',
+      policyLabel: policy.name,
     });
-    const text = anthropicText(response);
-    if (!text) { logger.warn('[pest-identification] Claude returned empty content'); return null; }
-    return parseVisionJson(text, 'Claude');
+    if (!result.ok || !result.json) {
+      logger.warn(`[pest-identification] OpenAI vision miss (${result.reason || 'no_json'})`);
+      return null;
+    }
+    if (isValidPestIdentification(result.json)) return normalizePestIdentification(result.json);
+    logger.warn('[pest-identification] OpenAI vision response failed schema validation');
+    return null;
   } catch (err) {
-    logger.error(`Pest identification Claude vision failed: ${err.message}`);
+    logger.error(`Pest identification OpenAI vision failed: ${err.message}`);
     return null;
   }
 }
@@ -471,6 +483,39 @@ async function callGeminiVision(base64Image, mimeType) {
 
 const CONFIDENCE_RANK = { low: 0, moderate: 1, high: 2 };
 
+// Owner ruling 2026-09-26: a Gemini answer scored below this goes to ChatGPT's
+// best vision model too. Read per call; a missing or bad value means 0.80.
+const DEFAULT_ESCALATE_BELOW = 0.8;
+
+function escalateBelow() {
+  const value = Number(process.env.PHOTO_ID_ESCALATE_BELOW);
+  return Number.isFinite(value) && value > 0 && value <= 1 ? value : DEFAULT_ESCALATE_BELOW;
+}
+
+function isRisky(entry) {
+  return !!entry && !!(entry.inspection_required || entry.safety.stinging
+    || entry.safety.venomous || entry.safety.structural_threat);
+}
+
+// Unsure = the score is under the bar (with no usable score, anything short of
+// "high"). A sure answer still gets a second look when one of its own
+// alternates differs from the pick in risk: an ant with a termite as the
+// runner-up, a beneficial with a stinging insect.
+function needsSecondLook(result) {
+  const score = result.confidence_score;
+  const sure = typeof score === 'number'
+    ? score >= escalateBelow()
+    : clampEnum(result.confidence, CONFIDENCES) === 'high';
+  if (!sure) return true;
+  const pickRisky = isRisky(resolveLibraryMatch(result.best_match));
+  return (Array.isArray(result.alternates) ? result.alternates : [])
+    .filter((name) => typeof name === 'string')
+    .some((name) => {
+      const alternate = resolveLibraryMatch(name);
+      return !!alternate && isRisky(alternate) !== pickRisky;
+    });
+}
+
 function downgrade(confidence) {
   const rank = Math.max(0, (CONFIDENCE_RANK[confidence] ?? 0) - 1);
   return CONFIDENCES[rank];
@@ -486,15 +531,13 @@ function lowerConfidenceOf(a, b) {
  * Merge one photo's model result(s) into a single per-photo identification.
  * Agreement (same library slug) keeps the ID at the models' LOWER confidence;
  * one-model-only results are downgraded a notch; slug disagreement collapses
- * to a category-level result at low confidence. Since 2026-09-24 identifyPest
- * only ever hands this ONE result per photo (Gemini, or Claude as its
- * fallback) — the single_model branch is the live path; the two-result
- * agreement/conflict branches are kept for this function's own shape and any
- * direct caller that passes both. Raw model text is preserved only for the
- * internal record, never for egress.
+ * to the shared group, or a category-level result, at low confidence. Two
+ * results arrive when Gemini answered but needed a second look (analyzePhoto);
+ * one when Gemini was sure, or missed and OpenAI answered alone. Raw model
+ * text is preserved only for the internal record, never for egress.
  */
-function mergeModelResults(claude, gemini) {
-  const results = [claude, gemini].filter(Boolean);
+function mergeModelResults(openai, gemini) {
+  const results = [openai, gemini].filter(Boolean);
   if (!results.length) return null;
 
   const resolved = results.map((r) => ({
@@ -593,33 +636,30 @@ function aggregateIdentification(perPhoto) {
 }
 
 /**
- * Analyze one photo — Gemini first (owner ruling 2026-09-24); Claude runs
- * ONLY when Gemini returns nothing (HTTP/parse/empty miss). Returns
- * { claude, gemini } with the unused side null, same shape mergeModelResults
- * already expects from its two-argument callers.
+ * Analyze one photo — Gemini first; ChatGPT's best vision model second, only
+ * when Gemini missed or needsSecondLook says so (owner ruling 2026-09-26).
+ * Returns { openai, gemini } with an unused side null — the pair
+ * mergeModelResults takes.
  */
 async function analyzePhoto(base64Image, mimeType) {
   const gemini = await callGeminiVision(base64Image, mimeType);
-  const claude = gemini ? null : await callClaudeVision(base64Image, mimeType);
-  return { claude, gemini };
+  const openai = !gemini || needsSecondLook(gemini) ? await callOpenAIVision(base64Image, mimeType) : null;
+  return { openai, gemini };
 }
 
 /**
  * Identify from a set of photos (the funnel sends 1–5 of the same subject).
- * Per-photo Gemini-first vision (Claude only on a Gemini miss), then a
+ * Per-photo Gemini-first vision with the OpenAI second look, then a
  * cross-photo vote: the most-supported library entry wins; cross-photo
- * disagreement caps confidence at moderate.
+ * disagreement caps confidence at moderate. Photos are independent reads and
+ * run side by side, so one photo's escalation doesn't delay the others.
  */
 async function identifyPest(photos = []) {
   const usable = photos.filter((p) => p && p.data);
   if (!usable.length) return { ok: false, reason: 'no_photos' };
 
-  const perPhoto = [];
-  for (const photo of usable) {
-    const { claude, gemini } = await analyzePhoto(photo.data, photo.mimeType || 'image/jpeg');
-    const merged = mergeModelResults(claude, gemini);
-    if (merged) perPhoto.push(merged);
-  }
+  const analyses = await Promise.all(usable.map((photo) => analyzePhoto(photo.data, photo.mimeType || 'image/jpeg')));
+  const perPhoto = analyses.map(({ openai, gemini }) => mergeModelResults(openai, gemini)).filter(Boolean);
 
   if (!perPhoto.length) return { ok: false, reason: 'vision_unavailable' };
 
@@ -812,6 +852,7 @@ module.exports = {
     lowerConfidenceOf,
     downgrade,
     aggregateIdentification,
+    needsSecondLook,
     LIBRARY_BY_SLUG,
     GROUP_GENERIC,
     CATEGORY_GENERIC,

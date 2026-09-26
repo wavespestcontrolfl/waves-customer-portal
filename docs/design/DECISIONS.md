@@ -2583,3 +2583,25 @@ changes; the remaining 73 are real, and still R3/R4 work.
 - `annual_prepay_terms.renewal_charge_consent_at` — Auto Pay consent captured at acceptance (A-13). The renewal auto-charge job requires this column non-null before it will submit a saved-card charge for a successor term; NULL means invoice-and-wait only, never a silent charge.
 
 Nothing reads or writes these columns yet, and `GATE_TERMITE_ANNUAL_PLAN` stays off. The renewal transition, the auto-charge job, the notice-ladder extension, and the v3 agreement workflow are follow-up PRs.
+
+## 2026-09-26 — Photo ID: Gemini first, ChatGPT's best vision model for a second look
+
+Owner ruling: "Gemini Flash 3.8 should be the model; if it comes back incorrect
+or is unsure, below a specific rating or score, hand it to ChatGPT's best image
+analysis."
+
+`TEXT_POLICIES.photoIdVision` puts the Gemini vision tier first and the OpenAI
+frontier tier (GPT-6 Astra at approval, the same leg as
+`lawnVisitAssessment`) second, with no Claude leg. This is the second
+owner-approved exception to the Claude-fallback convention. In the pest
+identifier (`pest-identification.js`: website funnel, SMS photo triage, admin
+assessments, the customer app) each photo is read by Gemini, and the same
+photo goes to OpenAI only when Gemini misses, scores its own answer below
+`PHOTO_ID_ESCALATE_BELOW` (default 0.80), or names a runner-up whose risk
+differs from its pick (an ant with a termite, a beneficial with a stinging
+insect). Providers run sequentially per photo; photos run side by side. Two
+answers merge under the existing rule: agreement keeps the lower confidence,
+a disagreement keeps only the shared group or category, and a lone answer is
+downgraded a notch. It supersedes the 2026-09-24 "Claude only when Gemini
+returns nothing" rule for this lane only; lawn and tree & shrub scoring keep
+it until they move to the photo ID v2 engine.
