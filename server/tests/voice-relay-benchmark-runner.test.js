@@ -982,14 +982,16 @@ describe('CHILD_TIMEOUT_MS — a ceiling compatible with the eval harness\'s own
   // Each child this runner spawns IS a full run-voice-relay-eval.js
   // invocation (the shipped fixture, its own retry-once wrapper, and
   // --judge's chains) — exactly the run server/services/eval/
-  // voice-relay-replay.js's own CHILD_TIMEOUT_MS (10h, bumped from 8h by the
-  // Spanish booking/mechanics slice's 7 added scenarios) is derived to bound.
-  // Mirrored as a literal, not required directly (see this file's own
-  // comment on the constant), so this test is what actually pins the two
-  // numbers together — a future change to one without the other fails here.
+  // voice-relay-replay.js's own CHILD_TIMEOUT_MS (12h, bumped from 10h by
+  // Codex round-2 P2: the corrected judge-chain math — ceil(45/4) = 12
+  // four-minute batches, not 45 minutes rounded down — puts the retry pair's
+  // worst case at 10h16m, which the prior 10h ceiling undercut). Mirrored as
+  // a literal, not required directly (see this file's own comment on the
+  // constant), so this test is what actually pins the two numbers together —
+  // a future change to one without the other fails here.
   test('mirrors voice-relay-replay.js\'s own CHILD_TIMEOUT_MS exactly', () => {
     const { _internals } = require('../services/eval/voice-relay-replay');
     expect(CHILD_TIMEOUT_MS).toBe(_internals.CHILD_TIMEOUT_MS);
-    expect(CHILD_TIMEOUT_MS).toBe(10 * 60 * 60 * 1000);
+    expect(CHILD_TIMEOUT_MS).toBe(12 * 60 * 60 * 1000);
   });
 });

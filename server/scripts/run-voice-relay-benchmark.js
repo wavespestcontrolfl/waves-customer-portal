@@ -48,16 +48,19 @@ const DEFAULT_TRIALS = 3;
 // turn) plus the eval's own retry-once wrapper, plus --judge's chains. That
 // is exactly the run the eval harness's own operational ceiling is sized for
 // (server/services/eval/voice-relay-replay.js CHILD_TIMEOUT_MS derivation,
-// exported as _internals.CHILD_TIMEOUT_MS: just over 4h/attempt, doubled for
-// the retry = a little over 9h30m, +~25m overhead = 10h) — so this runner
-// must use a ceiling AT LEAST that generous, or it would kill a legitimately
-// still-running child well before the eval's own wrapper would. Mirrored as
-// a literal rather than required directly: voice-relay-eval.js's module
-// graph is heavier (call-extraction-replay, the relay conversation loader,
-// etc.) than this file's own runOnce/summarizeCondition unit tests need —
-// see runBenchmark's existing lazy require of relay-conversation below for
-// the same reason. Re-derive together if that file's ceiling ever changes.
-const CHILD_TIMEOUT_MS = 10 * 60 * 60 * 1000;
+// exported as _internals.CHILD_TIMEOUT_MS: 4h20m/attempt for 130 turns, plus
+// 45 judge chains at ceil(45/4)=12 four-minute batches = 48m, so 5h08m/
+// attempt; the retry-once wrapper doubles that to a 10h16m worst case for
+// the pair) — so this runner must use a ceiling AT LEAST that generous, with
+// real margin over it (Codex round-2 P2: the prior 10h value here UNDERCUT
+// that 10h16m bound), or it would kill a legitimately still-running child
+// well before the eval's own wrapper would. Mirrored as a literal rather
+// than required directly: voice-relay-eval.js's module graph is heavier
+// (call-extraction-replay, the relay conversation loader, etc.) than this
+// file's own runOnce/summarizeCondition unit tests need — see runBenchmark's
+// existing lazy require of relay-conversation below for the same reason.
+// Re-derive together if that file's ceiling ever changes.
+const CHILD_TIMEOUT_MS = 12 * 60 * 60 * 1000;
 // The full set of flags this runner understands (see the file header's
 // usage examples). An unrecognized flag — a typo like --onyl or --trail — is
 // a usage error caught here, before any child process runs, rather than

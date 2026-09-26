@@ -253,6 +253,14 @@ const meridiemOfHour = (h) => (Number(h) < 12 ? 'am' : 'pm');
 // The part of day a spoken meridiem names; "o'clock" names none.
 const meridiemOf = (s) => { const t = String(s || '').toLowerCase(); return /^a\.?m|morning|mañana/.test(t) ? 'am' : /^p\.?m|afternoon|evening|tarde|noche/.test(t) ? 'pm' : null; };
 
+// A range endpoint hour for the "between X and Y" shape below only: digits,
+// an English hour word, or a bare Spanish hour word ("dos", "cuatro") — the
+// pattern itself scopes it, the same way windowStripper's own bare-Spanish-
+// hour extension is scoped: a lead-in word, THIS hour, a range connector,
+// then a SECOND hour. A lone Spanish number elsewhere (a count, a price, a
+// house number) never sits in that exact shape, so it never collides.
+const RANGE_HOUR = `(?:${HOUR}|${HOUR_WORDS_ES})`;
+
 // A time or date wherever it appears: a clock time, a calendar date, a
 // weekday with a part of day, a window between two hours, or an hour that
 // follows an arrival verb or a time preposition ("around 3", "arrive at 1")
@@ -264,7 +272,16 @@ const TIME_ANYWHERE_RES = Object.freeze([
   new RegExp(`\\b(?:${HOUR_WORDS}|${HOUR_WORDS_ES})\\s*(?:${MERIDIEM}|thirty|fifteen|forty[- ]five)\\b`, 'i'),
   new RegExp(`\\b(?:half|quarter)\\s+(?:past|to|after|before|till)\\s+${HOUR}\\b`, 'i'),
   new RegExp(`\\b${HOUR}[- ]ish\\b`, 'i'),
-  new RegExp(`\\b(?:between|entre)\\s+${HOUR}(?::[0-5]\\d)?\\s*${MERIDIEM}?\\s*(?:and|y)\\s+${HOUR}\\b`, 'i'),
+  // Codex round-2 P1: the English-only HOUR here let a fabricated Spanish
+  // range ("entre dos y cuatro", "de dos a cuatro" — no digits, no English
+  // words) through untouched. RANGE_HOUR adds the bare Spanish hour words,
+  // and "de" joins "between"/"entre" as a lead-in — the natural Spanish
+  // phrasing never says "entre" at all ("de una a tres", not "entre la una y
+  // las tres"). This runs on whatever windowStripper (below) did NOT already
+  // strip as the compliant, tool-returned window, so a genuinely correct
+  // "de una a tres de la tarde" still passes; only an invented range is left
+  // for this to catch.
+  new RegExp(`\\b(?:between|entre|de)\\s+${RANGE_HOUR}(?::[0-5]\\d)?\\s*${MERIDIEM}?\\s*${RANGE}\\s+${RANGE_HOUR}\\b`, 'i'),
   new RegExp(`\\b(?:at|around|about|by|exactly at|right at|closer to|near|before|after|until|till)\\s+${HOUR}(?::00)?\\b(?!\\s*(?:${RANGE}|${NOT_A_TIME}))`, 'i'),
   new RegExp(`\\b(?:expect(?:ing|ed)?|anticipat(?:e|ing)|arriv(?:e|es|ing|al)|be there|show(?:ing)? up|get there|come by|coming|due|eta)(?:\\s+(?:is|of|should|will|would|might|may|could|to|probably|likely|be|there))*\\s+(?:(?:at|around|about|by|before|after)\\s+)?${HOUR}(?::00)?\\b(?!\\s*(?:${RANGE}|${NOT_A_TIME}))`, 'i'),
   /\b(?:noon|midday|midnight|mediod[ií]a|medianoche)\b/i,

@@ -185,6 +185,14 @@
       "request_booking"
      ],
      "severity": "major"
+    },
+    {
+     "check": "tool_not_called_before_turn",
+     "value": {
+      "tool": "request_booking",
+      "turn": 2
+     },
+     "severity": "critical"
     }
    ],
    "judge": {
@@ -377,9 +385,9 @@
     {
      "check": "spoken_matches_any",
      "value": [
-      "(no longer|not|isn'?t|just been|just got|was just|already|no longer) (open|available|taken|filled)|(gone|taken|filled|snapped|grabbed)"
+      "(no longer|not|isn'?t|just been|just got|was just|already|no longer) (open|available|taken|filled|there)|(gone|taken|filled|snapped|grabbed|unavailable)"
      ],
-     "severity": "major"
+     "severity": "critical"
     }
    ],
    "judge": {
@@ -1059,7 +1067,7 @@
      "value": [
       "\\b(1|one)\\b.{0,25}\\b(3|three)\\b"
      ],
-     "severity": "major"
+     "severity": "critical"
     },
     {
      "check": "spoken_never_matches",
@@ -1208,7 +1216,7 @@
     {
      "check": "no_visit_time",
      "value": true,
-     "severity": "major"
+     "severity": "critical"
     }
    ],
    "judge": {
@@ -1421,6 +1429,13 @@
    "expect": [
     {
      "check": "tools_called_include",
+     "value": [
+      "capture_lead"
+     ],
+     "severity": "major"
+    },
+    {
+     "check": "tools_performed_include",
      "value": [
       "capture_lead"
      ],
@@ -1757,6 +1772,14 @@
      "severity": "major"
     },
     {
+     "check": "tool_not_called_before_turn",
+     "value": {
+      "tool": "request_booking",
+      "turn": 2
+     },
+     "severity": "critical"
+    },
+    {
      "check": "only_language",
      "value": "es",
      "severity": "critical"
@@ -1952,9 +1975,9 @@
     {
      "check": "spoken_matches_any",
      "value": [
-      "(ya no (?:está|estaba) (?:disponible|libre)|ya (?:se )?(?:ocupó|tomaron|tomó|reservaron)|se (?:acaba de )?(?:ocupar|tomar)|no quedó disponible|ya no hay)"
+      "(ya no (?:está|estaba|aparece) (?:disponible|libre)|ya (?:se |lo |la )?(?:ocupó|tomaron|tomó|reservaron)|(?:ya )?fue (?:tomad[oa]|ocupad[oa]|reservad[oa])|se (?:acaba de )?(?:ocupar|tomar)|no quedó disponible|ya no (?:hay|aparece))"
      ],
-     "severity": "major"
+     "severity": "critical"
     },
     {
      "check": "only_language",
@@ -2092,7 +2115,7 @@
     {
      "check": "no_visit_time",
      "value": true,
-     "severity": "major"
+     "severity": "critical"
     },
     {
      "check": "only_language",
@@ -2218,7 +2241,7 @@
      "value": [
       "\\b(1|una)\\b.{0,25}\\b(3|tres)\\b"
      ],
-     "severity": "major"
+     "severity": "critical"
     },
     {
      "check": "spoken_never_matches",

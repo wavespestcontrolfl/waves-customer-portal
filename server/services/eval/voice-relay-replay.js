@@ -66,12 +66,17 @@ const OPS_HEADING = 'Voice relay conversation eval';
 // slice — was 36 scenarios/98 turns before it). Every caller turn may use all
 // six 20-second streams (relay-conversation MAX_TOOL_ROUNDS /
 // STREAM_TIMEOUT_MS), not merely one, so 130 turns can spend just over four
-// hours on Sandy per attempt. Forty-five judge chains, four-wide at the
-// dispatcher's four-minute budget, add 45 minutes. Twice that is a little
-// over 9h30m; ten hours leaves about 25 minutes for fixture-tool timeouts and
-// other overhead. Re-derive this ceiling if the live bounds change or the
-// fixture grows past those counts.
-const CHILD_TIMEOUT_MS = 10 * 60 * 60 * 1000;
+// hours (4h20m) on Sandy per attempt. Forty-five judge chains, four-wide at
+// the dispatcher's four-minute budget, take ceil(45/4) = 12 batches — 48
+// minutes, not the 45/4 = 11.25 rounded DOWN to 45 minutes this comment used
+// to claim. 4h20m + 48m is 5h08m per attempt; the eval's own retry-once
+// wrapper doubles that to a 10h16m worst case for the pair. Twelve hours
+// leaves about 1h44m for fixture-tool timeouts and other overhead (Codex
+// round-2 P2: the prior 10h ceiling UNDERCUT that 10h16m worst case by 16
+// minutes — this is a floor, not a target, so it must exceed the bound with
+// margin, never merely round up to meet it). Re-derive this ceiling if the
+// live bounds change or the fixture grows past those counts.
+const CHILD_TIMEOUT_MS = 12 * 60 * 60 * 1000;
 const JUDGE_CONCURRENCY = 4;
 // scenario.gates key → the env var the relay reads at call time. Every one of
 // these is read per call (no module-top reads), so a scenario may flip them
