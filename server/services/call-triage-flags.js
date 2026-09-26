@@ -219,7 +219,7 @@ function initialsCorroborated(local, tokens, nameWords) {
   }
   // A surname prefix directly adjacent to a short (2-3 letter) initials-like
   // remainder anywhere in the local — e.g. a surname prefix followed by a
-  // short first-name abbreviation ("chow" + "pr").
+  // short first-name abbreviation ("cast" + "nc").
   for (const p of surnamePrefixes) {
     const idx = local.indexOf(p);
     if (idx === -1) continue;
@@ -264,8 +264,8 @@ function hasNameEmailMismatch(caller = {}) {
 
   // (d) owner ruling 2026-09-26: rule (2) below never fires when the caller's
   // own FIRST name is itself one of the delimited segments — a personal
-  // handle prefixed/suffixed with an unrelated word ("packers.brad@" for a
-  // caller named Brad) is not evidence of someone else's name, even though
+  // handle prefixed/suffixed with an unrelated word ("lakers.nolan@" for a
+  // caller named Nolan) is not evidence of someone else's name, even though
   // the OTHER segment matches nothing extracted.
   const firstNameToken = String(caller.first_name || '').toLowerCase().replace(/[^a-z]/g, '');
   if (firstNameToken.length >= 3 && localRaw.split(/[^a-z]+/).includes(firstNameToken)) {

@@ -1034,7 +1034,7 @@ describe('hasNameEmailMismatch', () => {
       expect(hasNameEmailMismatch({ first_name: 'Nolan', last_name: 'Reyes', email: 'lakers.nolan@example.com' })).toBe(false);
     });
     test('a pure handle with no name signal still flags (advisory, never a hold)', () => {
-      expect(hasNameEmailMismatch({ first_name: 'Karen', last_name: 'Boyd', email: 'freshideas1987@example.com' })).toBe(true);
+      expect(hasNameEmailMismatch({ first_name: 'Karen', last_name: 'Boyd', email: 'sunnydays1987@example.com' })).toBe(true);
     });
     test('the incident shape (uncorroborated spoken first name, null surname) still flags', () => {
       // Same shape as the real incident this flag was introduced for
@@ -1066,9 +1066,9 @@ describe('name_email_mismatch in routing', () => {
 
   test('name_email_mismatch is advisory, not appointment-blocking', () => {
     const e = validV2Extraction();
-    e.caller.first_name = 'Jeanette';
+    e.caller.first_name = 'Marisol';
     e.caller.last_name = null;
-    e.caller.email = 'gennettryan@yahoo.com';
+    e.caller.email = 'tpageharlan@example.com';
     const r = canAutoRoute(e, { contactPhone: '+19415551234', addressValidation: AV_CLEAN });
     expect(r.appointmentBlockingFlags || []).not.toContain('name_email_mismatch');
     expect(ADVISORY_TRIAGE_FLAGS.has('name_email_mismatch')).toBe(true);
