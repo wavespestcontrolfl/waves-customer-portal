@@ -2,7 +2,7 @@
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { MemoryRouter } from 'react-router-dom';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import EstimateToolViewV2 from './EstimateToolViewV2';
 
@@ -28,18 +28,22 @@ function jsonResponse(body) {
 
 let fetchMock;
 let calculated;
+let calculateReply;
 let lookupEnriched;
 beforeEach(() => {
   localStorage.setItem('waves_admin_token', 'qa-token');
   vi.spyOn(window, 'confirm').mockReturnValue(true);
   vi.spyOn(window, 'alert').mockImplementation(() => {});
   lookupEnriched = { homeSqFt: 0, lotSqFt: 9000, stories: 1 };
+  calculateReply = null;
   fetchMock = vi.fn((url) => {
     const path = String(url);
     if (path.endsWith('/estimator/property-lookup')) {
       return Promise.resolve(jsonResponse({ enriched: structuredClone(lookupEnriched), errors: [] }));
     }
-    if (path.endsWith('/calculate-estimate')) return Promise.resolve(jsonResponse(structuredClone(calculated)));
+    if (path.endsWith('/calculate-estimate')) {
+      return calculateReply ? calculateReply() : Promise.resolve(jsonResponse(structuredClone(calculated)));
+    }
     if (path.includes('/discounts')) return Promise.resolve(jsonResponse([]));
     return Promise.resolve(jsonResponse({}));
   });
@@ -100,6 +104,15 @@ describe('home-size guard on a generated estimate', () => {
     await waitFor(() => expect(window.alert).toHaveBeenCalledWith(
       expect.stringMatching(/^Enter the number of stories\. Pest Control is priced by the home's footprint/),
     ));
+  });
+
+  it('a response already stale when it lands is dropped silently — no alert for a value just typed', async () => {
+    let finish;
+    calculateReply = () => new Promise((resolve) => { finish = resolve; });
+    await lookUpAndGenerate();
+    fireEvent.change(screen.getByLabelText('Home Sq Ft'), { target: { value: '1800' } });
+    await act(async () => finish(jsonResponse(resultWith(pestLine({ footprintWasDefaulted: true })))));
+    expect(window.alert).not.toHaveBeenCalledWith(expect.stringMatching(/^Enter home sq ft/));
   });
 
   it('lets a quote-required line through — it is not a price', async () => {

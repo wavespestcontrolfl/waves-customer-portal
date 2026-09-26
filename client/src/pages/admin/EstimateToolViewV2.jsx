@@ -3816,6 +3816,21 @@ export default function EstimateToolViewV2({
         return null;
       }
 
+      // Stash the exact engine request so the server can replay it on save and
+      // be the authority on the persisted price (Decision #2). This is the same
+      // payload sent to /calculate-estimate above.
+      result.engineRequest = { profile, selectedServices, options };
+      if (estimateVersionRef.current !== versionAtStart) {
+        // A pricing edit landed while the calculate call was in flight; the
+        // invalidation already cleared the preview. Mounting this result would
+        // pair stale pricing with the new form state (and Save would persist
+        // the stale engineRequest), so drop it and let the operator regenerate.
+        return null;
+      }
+
+      // Runs AFTER the stale-response check above: a response computed before
+      // the operator typed Home Sq Ft is dropped silently, never answered with
+      // an alert asking for a value already entered (codex r3 P2).
       // The pre-flight gate above only stops a quote with NO home and NO lot
       // size. A lot alone still prices home-sized services at the engine's
       // 2,000 sq ft default — refuse that result until Home Sq Ft is entered.
@@ -3831,18 +3846,6 @@ export default function EstimateToolViewV2({
         alert(profile.footprintUnknown === true
           ? `Enter the number of stories. ${names} ${verb} priced by the home's footprint, and this property's home size is a building total with an unknown story count.`
           : `Enter home sq ft. ${names} ${verb} priced by the home's size, and without it the price is a guess at a 2,000 sq ft house.`);
-        return null;
-      }
-
-      // Stash the exact engine request so the server can replay it on save and
-      // be the authority on the persisted price (Decision #2). This is the same
-      // payload sent to /calculate-estimate above.
-      result.engineRequest = { profile, selectedServices, options };
-      if (estimateVersionRef.current !== versionAtStart) {
-        // A pricing edit landed while the calculate call was in flight; the
-        // invalidation already cleared the preview. Mounting this result would
-        // pair stale pricing with the new form state (and Save would persist
-        // the stale engineRequest), so drop it and let the operator regenerate.
         return null;
       }
       setEstimate(result);
