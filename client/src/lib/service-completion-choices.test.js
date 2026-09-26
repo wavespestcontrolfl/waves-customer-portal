@@ -1,4 +1,5 @@
 import { describe, expect, test } from "vitest";
+import observationCatalog from "../../../shared/service-completion-observations.json";
 import {
   SERVICE_COMPLETION_CHOICE_CATEGORIES,
   SERVICE_COMPLETION_CHOICE_COUNTS,
@@ -11,6 +12,13 @@ import {
 } from "./service-completion-choices";
 
 describe("service completion choices", () => {
+  test("builds the customer-safe observation choices from the shared vocabulary", () => {
+    for (const family of SERVICE_COMPLETION_CHOICE_FAMILIES) {
+      expect(SERVICE_COMPLETION_CHOICES[family].observations.map(({ label }) => label))
+        .toEqual(observationCatalog[family].map(([, label]) => label));
+    }
+  });
+
   test("provides 25–30 stable, unique choices in every routine-service category", () => {
     const allIds = [];
     for (const family of SERVICE_COMPLETION_CHOICE_FAMILIES) {

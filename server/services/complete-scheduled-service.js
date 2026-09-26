@@ -1898,7 +1898,45 @@ const {
   validateSpecialtyClosureCombination,
 } = require('../../shared/specialty-service-closeouts');
 const { LAWN_STRUCTURED_OBSERVATIONS } = require('../../shared/lawn-condition-findings');
+const { observationsForRoutineService, conflictingRoutineObservations } = require('../../shared/service-completion-observations');
 const { completionTierSnapshotFields } = require('../services/completion-tier-snapshot');
+
+const ROUTINE_OBSERVATION_FAMILY_BY_COMPLETION = Object.freeze({
+  'tree_shrub:untyped': 'tree_shrub',
+  'tree_shrub:tree_shrub': 'tree_shrub',
+  'palm:untyped': 'tree_shrub',
+  'lawn:untyped': 'lawn',
+  'pest:untyped': 'recurring_pest',
+});
+
+function completionStructuredObservationAllowlist({
+  reportServiceLine,
+  typedFindingsType = null,
+  resolvedSpecialtyServiceKey = null,
+  completionProfile = null,
+}) {
+  const legacyObservations = reportServiceLine === 'lawn' && !typedFindingsType
+    ? LAWN_STRUCTURED_OBSERVATIONS
+    : observationsForSpecialtyService(resolvedSpecialtyServiceKey);
+  const completionIdentity = `${reportServiceLine}:${typedFindingsType || 'untyped'}`;
+  let routineFamily = resolvedSpecialtyServiceKey
+    ? null
+    : ROUTINE_OBSERVATION_FAMILY_BY_COMPLETION[completionIdentity] || null;
+  // Recurring Tree & Shrub is the one typed form that also carries this
+  // governed picker. Other typed identities never enter the map. Pest then
+  // narrows by its mutable profile so one-time/internal/inspection closeouts
+  // cannot borrow the recurring vocabulary; re-service is the callback lane.
+  if (routineFamily === 'recurring_pest'
+    && ((completionProfile?.completionMode && completionProfile.completionMode !== 'service_report')
+      || (completionProfile?.serviceKey !== 'pest_re_service' && completionProfile?.billingType === 'one_time')
+      || completionProfile?.category === 'inspection')) {
+    routineFamily = null;
+  }
+  return new Set([
+    ...legacyObservations,
+    ...observationsForRoutineService(routineFamily),
+  ]);
+}
 
 // Whether to capture application conditions (weather snapshot) for the
 // service_record at completion time (extracted for unit testing).
@@ -3555,10 +3593,19 @@ async function completeScheduledService(completionInput, packetContext = null) {
         if (!entry || typeof entry !== 'object') return null;
         const scope = String(entry.scope || '').toLowerCase();
         if (scope !== 'interior' && scope !== 'exterior') return null;
+        const label = String(entry.label || '').trim() || null;
+        // Only governed non-spray actions can waive drying. Never trust a
+        // client exemption on a spray or arbitrary legacy action.
+        const nonDryingAction = (reportServiceLine === 'pest' && [
+          'Applied gel bait in the recorded locations.',
+          'Applied dust to the recorded accessible voids.',
+        ].includes(label)) || (['tree_shrub', 'palm'].includes(reportServiceLine)
+          && label === 'Completed the documented trunk application.');
         return {
-          label: String(entry.label || '').trim() || null,
+          label,
           scope,
           treatmentApplied: entry.treatmentApplied === true,
+          ...(nonDryingAction ? { dryDown: false } : {}),
         };
       })
       .filter(Boolean);
@@ -3607,11 +3654,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // lane; a keyless legacy row resolved by display name may still complete
     // with the dynamic actions its older client offered.
     const explicitSpecialtyLane = Boolean(specialtyServiceKey({ serviceKey: completionProfile?.serviceKey }));
-    const allowedStructuredObservations = new Set(
-      reportServiceLine === 'lawn' && !typedFindingsType
-        ? LAWN_STRUCTURED_OBSERVATIONS
-        : observationsForSpecialtyService(resolvedSpecialtyServiceKey),
-    );
+    const allowedStructuredObservations = completionStructuredObservationAllowlist({
+      reportServiceLine,
+      typedFindingsType,
+      resolvedSpecialtyServiceKey,
+      completionProfile,
+    });
     // New clients separate controlled dropdown values from free text. For an
     // older specialty client that lacks that field, recover only exact values
     // from this service lane's server-owned allowlist; arbitrary form text and
@@ -3628,38 +3676,40 @@ async function completeScheduledService(completionInput, packetContext = null) {
     const invalidStructuredObservation = formObservations.find(
       (value) => !allowedStructuredObservations.has(value),
     );
-    if (invalidStructuredObservation && !packetEffects) {
-      return ({ status: 422, body: {
+    const invalidStructuredObservationError = invalidStructuredObservation && !packetEffects
+      ? { status: 422, body: {
         error: 'A structured observation is not valid for customer report publication.',
         code: 'invalid_structured_observation',
-      } });
-    }
+      } }
+      : null;
     // Findings are also checked against the completed protocol actions (a
     // no-work finding beside performed work, or vice versa) and an exclusive
     // inspection/deferred action is rejected beside other preset actions or
     // applied products — none of it may reach the immutable customer report
     // from a stale or direct API client (codex P2 r8 #3701 + local audit).
-    const structuredObservationConflict = validateSpecialtyClosureCombination(
-      resolvedSpecialtyServiceKey,
-      {
-        observations: formObservations,
-        actions: reportProtocolActions,
-        productCount: Array.isArray(products)
-          ? products.filter((prod) => prod && typeof prod === 'object').length
-          : 0,
-        enforcePresetActions: explicitSpecialtyLane,
-        // inspection_only / customer_declined bill as not performed (see
-        // visitPerformed below) — the report must not publish performed
-        // work or applied products beside them (codex r16 P1 on #3701).
-        visitOutcome,
-      },
-    );
-    if (structuredObservationConflict && !packetEffects) {
-      return ({ status: 422, body: {
+    const structuredObservationConflict = invalidStructuredObservation
+      ? null
+      : conflictingRoutineObservations(formObservations) || validateSpecialtyClosureCombination(
+        resolvedSpecialtyServiceKey,
+        {
+          observations: formObservations,
+          actions: reportProtocolActions,
+          productCount: Array.isArray(products)
+            ? products.filter((prod) => prod && typeof prod === 'object').length
+            : 0,
+          enforcePresetActions: explicitSpecialtyLane,
+          // inspection_only / customer_declined bill as not performed (see
+          // visitPerformed below) — the report must not publish performed
+          // work or applied products beside them (codex r16 P1 on #3701).
+          visitOutcome,
+        },
+      );
+    const structuredObservationConflictError = structuredObservationConflict && !packetEffects
+      ? { status: 422, body: {
         error: structuredObservationConflict,
         code: 'conflicting_structured_observations',
-      } });
-    }
+      } }
+      : null;
     // The treated areas drive the derived action scope below, so they are
     // validated against the lane first (codex P1 r13 #3701).
     // Product application areas are scope signals too (report-data
@@ -3986,6 +4036,21 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // Fresh executions validate typed rules; replays returned above with the
     // stored payload, and resumes re-enter after an already-committed trx.
     if (claim.action === 'proceed') {
+      // Governed observation catalogs and completion profiles can change
+      // after a completion commits. Claim the exact request first so a lost-
+      // response replay returns its stored result, while a changed body with
+      // the same key still loses at the request-hash boundary. Only a fresh
+      // attempt is judged against today's mutable catalogs.
+      const structuredObservationError = invalidStructuredObservationError
+        || structuredObservationConflictError;
+      if (structuredObservationError) {
+        await CompletionAttempts.markCompletionAttemptFailed(
+          completionAttempt,
+          new Error(structuredObservationError.body.code),
+          db,
+        );
+        return ({ status: structuredObservationError.status, body: structuredObservationError.body });
+      }
       // The lawn assessment confirmation is a FORM gate; an invoice-issued
       // closeout has no form behind it and renders no report (pre-push P1).
       if (canLinkLawnAssessmentRecord && !issuedInvoiceCloseout) {
@@ -13352,6 +13417,7 @@ module.exports = {
   reportV1InvoiceBodyCarriesPayLink,
   completionUsesReportLane,
   completionSmsWithheldForMissingReportToken,
+  completionStructuredObservationAllowlist,
   backfillExpectedMintAtCommit,
   shouldAutoInvoiceCompletion,
   parseCompletionReviewDelayMinutes,
