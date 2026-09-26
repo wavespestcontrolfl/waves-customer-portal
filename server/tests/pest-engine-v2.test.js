@@ -1074,3 +1074,23 @@ describe('Codex #4916 r1', () => {
     expect(v1.report_contract.alternate_slugs).toEqual(['ghost-ant']);
   });
 });
+
+describe('pre-push audit on Codex #4916 r1: a "nothing" read never backs a named result', () => {
+  test.each([
+    ['a lone Gemini "nothing" read with a confident match', 'nothing', null],
+    ['two agreeing "nothing" reads', 'nothing', 'nothing'],
+  ])('%s', async (_label, geminiShows, openaiShows) => {
+    dispatch.mockReset();
+    dispatch
+      .mockResolvedValueOnce(candidatesReply([{ slug: 'fire-ant', confidence: openaiShows ? 0.5 : 0.9 }], undefined, geminiShows))
+      .mockResolvedValueOnce({ ok: true, json: { candidates: [{ slug: 'fire-ant', confidence: openaiShows ? 0.5 : 0.9, traits_visible: [1, 2], traits_not_visible: [] }] } });
+    if (openaiShows) {
+      dispatch.mockResolvedValueOnce({ ok: true, json: {
+        quality: { usable: true, issue: 'none' }, shows: openaiShows,
+        candidates: [{ slug: 'fire-ant', confidence: 0.9, traits_visible: [1, 2], traits_not_visible: [] }],
+      } });
+    }
+    const result = await identifyPestV2([PHOTO]);
+    expect(result.v2.tier).toBe('needs_more_evidence');
+  });
+});

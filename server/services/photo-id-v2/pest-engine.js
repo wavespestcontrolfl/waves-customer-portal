@@ -1152,7 +1152,11 @@ async function identifyPestV2(photos = []) {
 
   const escalationJson = validLegJson(escalationResult, 'escalation');
   const quality = combineQuality(candidatesJson?.quality, escalationJson?.quality);
-  const subjectConflict = showsConflict(candidatesJson?.shows, escalationJson?.shows);
+  // A leg that names a candidate while reporting the photos show nothing
+  // contradicts itself; one such read (or two agreeing ones) is as weak as
+  // two legs that disagree (pre-push audit on Codex #4916 r1).
+  const subjectConflict = showsConflict(candidatesJson?.shows, escalationJson?.shows)
+    || candidatesJson?.shows === 'nothing' || escalationJson?.shows === 'nothing';
   const currentMonth = etParts(new Date()).month;
 
   const built = buildAnswer({
