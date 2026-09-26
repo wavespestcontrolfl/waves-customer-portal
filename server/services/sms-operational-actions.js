@@ -100,6 +100,12 @@ const TEMPORARY_INSTRUCTION = new RegExp([
 // replaced by a per-kind default that could ring before that period.
 const STATED_TIMING = new RegExp([
   String.raw`\b(?:today|tomorrow|tmrw|tonight|this (?:morning|afternoon|evening|week(?:end)?|month)|next (?:week(?:end)?|month)|later (?:today|this week)|end of (?:the )?(?:day|week|month)|eod|eow)\b`,
+  // Day parts after a timing preposition ("call me in the morning", "after
+  // work"), or plural as a standing preference ("evenings are best"). A bare
+  // "good morning" is a greeting, not timing (Codex #4816 r24).
+  String.raw`\b(?:in the|during the|by|before|after|around|until|till|early|late) (?:morning|afternoon|evening|night)\b`,
+  String.raw`\b(?:mornings|afternoons|evenings|nights)\b`,
+  String.raw`\b(?:after|before) (?:work|school|lunch|dinner|noon)\b|\b(?:at )?lunch ?time\b`,
   String.raw`\b${WEEKDAY}`,
   // Undotted abbreviations ("call me Fri"). Wed/sat/sun double as ordinary
   // words, so they count only after a day preposition (Codex #4816 r21).

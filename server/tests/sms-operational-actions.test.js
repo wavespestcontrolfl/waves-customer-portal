@@ -722,7 +722,8 @@ describe('R5 owner ruling 2026-09-24: per-kind default deadlines', () => {
   test.each(['Can you call me tomorrow?', 'Please send it this afternoon', 'Can someone come out Friday?', 'Schedule me mid Oct',
     'Call me back in 2 hours', 'Can you come on 10/14?', 'Need someone out by the 15th', 'Send it by end of the week',
     'Call me Fri', 'Can you come next Tues', 'Can someone come on Sat?', 'Send it by Wed',
-    'Call me on 2027-01-15', 'Hold off until the 20th', 'Starting the 3rd please call'])(
+    'Call me on 2027-01-15', 'Hold off until the 20th', 'Starting the 3rd please call',
+    'Please call me in the morning', 'Can you call in the afternoon?', 'Call after work', 'Evenings are best to call', 'Call around lunchtime'])(
     'Codex #4816 r20: timing stated in the quote keeps the row undated even when due_text is empty (%s)', (quote) => {
       expect(resolveDueDeadline({ party: 'waves', kind: 'callback', basis: 'request', due_at: null, due_text: null, quote }, at))
         .toEqual({ due_at: null, due_basis: null });
@@ -737,7 +738,8 @@ describe('R5 owner ruling 2026-09-24: per-kind default deadlines', () => {
   });
 
   test.each(['Please call me back', 'Can you send the estimate?', 'Call me back ASAP', 'Are you still coming?',
-    'The sun is burning the lawn, can someone call me?', 'The dog sat on the bait station, please call'])(
+    'The sun is burning the lawn, can someone call me?', 'The dog sat on the bait station, please call',
+    'Good morning, can someone call me back?'])(
     'Codex #4816 r20: a quote with no stated timing still gets the per-kind default (%s)', (quote) => {
       expect(resolveDueDeadline({ party: 'waves', kind: 'callback', basis: 'request', due_at: null, due_text: null, quote }, at).due_basis)
         .toBe('default_kind');
