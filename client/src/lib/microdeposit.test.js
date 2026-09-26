@@ -78,6 +78,7 @@ describe('microdepositSavedPhrases', () => {
       confirmStep: 'confirm the two amounts',
       linkLabel: 'Confirm the deposits here',
       arrival: 'once they arrive',
+      actionLabel: 'Confirm the deposits',
     });
   });
 
@@ -85,6 +86,9 @@ describe('microdepositSavedPhrases', () => {
     expect(microdepositSavedPhrases('descriptor_code')).toMatchObject({ linkLabel: 'Enter the code here', arrival: 'once it arrives' });
     expect(microdepositSavedPhrases(null).linkLabel).not.toMatch(/deposits/);
     expect(microdepositSavedPhrases(null).arrival).toBe('once it arrives');
+    // A saved bank row doesn't know Stripe's type: its button stays neutral (Codex r3).
+    expect(microdepositSavedPhrases(null).actionLabel).toBe('Verify your account');
+    expect(microdepositSavedPhrases('descriptor_code').actionLabel).toBe('Enter the code');
   });
 
   test('stays true for either kind when the type is unknown', () => {

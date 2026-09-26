@@ -7031,7 +7031,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
                     onClick={() => handleResumeBankVerification(c.id)}
                     style={{ background: 'transparent', border: 'none', padding: 0, cursor: 'pointer', fontSize: 14, fontWeight: 700, color: B.glassNavy, textDecoration: 'underline' }}
                   >
-                    Confirm deposits
+                    {microdepositSavedPhrases(null).actionLabel}
                   </button>
                 </div>
               )}
