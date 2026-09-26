@@ -141,13 +141,13 @@ async function fetchGeocodeResult(address, cacheOnly = false) {
  */
 async function geocodeAddressWithStatus(address, { serviceAddress = true, cacheOnly = false, requireInServiceArea = serviceAddress } = {}) {
   const { result, permanent } = await fetchGeocodeResult(address, cacheOnly);
-  if (!result) return { location: null, permanent };
+  if (!result) return { location: null, permanent, reason: permanent ? 'no_result' : 'provider_unavailable' };
   if (serviceAddress) {
     const rejected = rejectGeocodeResult(result, { requireInServiceArea });
     if (rejected) {
       // Reason only — the address is customer PII and does not belong in logs.
       logger.warn(`[geocoder] rejected geocode: ${rejected}`);
-      return { location: null, permanent: true };
+      return { location: null, permanent: true, reason: rejected };
     }
   }
   const location = result.geometry && result.geometry.location;
@@ -172,6 +172,8 @@ async function geocodeAddress(address, options) {
 async function ensureCustomerGeocoded(customerId) {
   // Shared by auto-dispatch dry runs: keep writes limited to coordinates.
   // geocoder-sweep.test.js guards against triggering route repair here.
+  const review = require('./customer-geocode-review');
+  if (review.reviewEnabled()) return review.attemptReviewedGeocode(customerId);
   const c = await db('customers').where({ id: customerId }).first();
   if (!c) return null;
   if (c.latitude != null && c.longitude != null) {
@@ -203,6 +205,15 @@ async function ensureCustomerGeocoded(customerId) {
  * coalesce route-quality refreshes after those commits.
  */
 async function regeocodeCustomerAddressGuarded(customerId, { scheduleQualityCustomerIds = null } = {}) {
+  const review = require('./customer-geocode-review');
+  if (review.reviewEnabled()) {
+    return review.attemptReviewedGeocode(customerId, db, {
+      onCoordinatesCommitted: async () => {
+        if (scheduleQualityCustomerIds) scheduleQualityCustomerIds.add(customerId);
+        else await require('./scheduling/quality-after-change').refreshScheduleQualityAfterChange({ customerIds: [customerId] });
+      },
+    });
+  }
   const c = await db('customers').where({ id: customerId }).first();
   if (!c) return null;
   // Locality-only rows never geocode (round-10): with no street the
@@ -285,6 +296,8 @@ async function pruneStaleExclusions() {
 }
 
 async function sweepUngeocodedCustomers({ limit = 25 } = {}) {
+  const review = require('./customer-geocode-review');
+  const reviewOn = review.reviewEnabled();
   // Excluding in the query (not post-filter) so a backlog of unresolvable
   // rows can never crowd eligible older customers out of the batch. The map
   // is capped by evicting the OLDEST exclusions (Map preserves insertion
@@ -292,8 +305,8 @@ async function sweepUngeocodedCustomers({ limit = 25 } = {}) {
   while (sweepUnresolved.size > SWEEP_UNRESOLVED_CAP) {
     sweepUnresolved.delete(sweepUnresolved.keys().next().value);
   }
-  await pruneStaleExclusions();
-  const excluded = Array.from(sweepUnresolved.keys());
+  if (!reviewOn) await pruneStaleExclusions();
+  const excluded = reviewOn ? [] : Array.from(sweepUnresolved.keys());
   const rows = await db('customers')
     .whereNull('deleted_at')
     .where(function () {
@@ -306,6 +319,7 @@ async function sweepUngeocodedCustomers({ limit = 25 } = {}) {
     .whereRaw("btrim(address_line1) <> ''")
     .modify((q) => {
       if (excluded.length) q.whereNotIn('id', excluded);
+      if (reviewOn) review.excludeReviewedAddresses(q);
     })
     .orderBy('created_at', 'desc')
     .limit(limit)
@@ -315,6 +329,13 @@ async function sweepUngeocodedCustomers({ limit = 25 } = {}) {
   const recoveredCustomers = [];
   for (const row of rows) {
     try {
+      if (reviewOn) {
+        if (await review.attemptReviewedGeocode(row.id)) {
+          results.geocoded += 1;
+          recoveredCustomers.push(row.id);
+        } else results.unresolved += 1;
+        continue;
+      }
       const c = await db('customers').where({ id: row.id }).first();
       if (!c) continue;
       if (c.latitude != null && c.longitude != null) {
@@ -369,6 +390,7 @@ async function sweepUngeocodedCustomers({ limit = 25 } = {}) {
 }
 
 module.exports = {
+  clearGeocodeMemo: address => { memo.delete(address); },
   geocodeAddress,
   geocodeAddressWithStatus,
   ensureCustomerGeocoded,

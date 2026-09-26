@@ -427,6 +427,13 @@ function buildTurfRequestProfile(baseProfile, form) {
   return profile;
 }
 
+// One unit inside a building (a unit-address lookup), for as long as the
+// form still types it a condo — staff correcting the type to a whole
+// structure takes it out of unit scope (codex r5 P2 #4862).
+function isUnitScopedForm(form) {
+  return !!form?._unitLookup && /^condo/i.test(String(form?.propertyType || ""));
+}
+
 async function summarizeEstimateResponseFailure(response, fallbackLabel) {
   try {
     const data = await response.clone().json();
@@ -844,6 +851,10 @@ function lookupTermiteFootprintSqFt(data = {}) {
   // deriving homeSqFt/stories here would prefill a summed-living-area
   // "slab" the lookup explicitly refused to claim (codex P1 #2721).
   if (data.footprintUnknown === true) return undefined;
+  // One unit inside a building: its living area is interior floor space,
+  // never a slab/attic/perimeter to price termite work from (codex r2 P1
+  // #4862).
+  if (data.residentialUnitLookup) return undefined;
   const explicitFootprint = firstPositiveNumber(
     data.footprint,
     data.footprintSqFt,
@@ -2160,6 +2171,9 @@ export default function EstimateToolViewV2({
           !(f._storiesEdited && Number(f.stories) >= 1)
         )
           return f;
+        // A unit lookup has no footprint to derive at all — no Stories
+        // edit supplies one (pre-push codex P1 #4862).
+        if (isUnitScopedForm(f)) return f;
         const upd = {};
         if (!f.termiteFootprintSqFt || f._termiteFootprintAuto)
           upd.termiteFootprintSqFt = String(fp);
@@ -3058,6 +3072,7 @@ export default function EstimateToolViewV2({
           // Rides the form so the homeSqFt/stories effect can't re-derive a
           // footprint the lookup refused to claim (codex P1 #2721).
           _footprintUnknownLookup: ep.footprintUnknown === true,
+          _unitLookup: !!ep.residentialUnitLookup,
           _poolCageSizeEdited: false,
           _storiesEdited: !!f._storiesEdited,
           _unitCountEdited: false,
@@ -3485,7 +3500,7 @@ export default function EstimateToolViewV2({
         trenchingConcreteLF,
         trenchingDirtLF,
         trenchingConcretePct,
-        trenchingEstimateFromFootprint: !!form.trenchingEstimateFromFootprint,
+        trenchingEstimateFromFootprint: !!form.trenchingEstimateFromFootprint && !isUnitScopedForm(form),
         trenchingProductKey: form.trenchingProductKey || "taurus_sc",
         trenchingApplicationRate: form.trenchingApplicationRate || "standard",
         trenchingDepthFt: form.trenchingDepthFt || "0.5",
@@ -4087,6 +4102,7 @@ export default function EstimateToolViewV2({
       serviceSpecificDiscountKeys: [],
       _termiteFootprintAuto: false,
       _footprintUnknownLookup: false,
+      _unitLookup: false,
       _trenchingPerimeterAuto: false,
       _boracareSqftAuto: false,
       _preslabSqftAuto: false,
@@ -4282,7 +4298,7 @@ export default function EstimateToolViewV2({
       : null,
     form.svcTrenching &&
       !parsePositiveNumber(form.trenchingPerimeterLF) &&
-      !form.trenchingEstimateFromFootprint
+      !(form.trenchingEstimateFromFootprint && !isUnitScopedForm(form))
       ? "Trenching needs measured perimeter LF before pricing."
       : null,
     form.svcBoracare && !parsePositiveNumber(form.boracareSqft) && !parsePositiveNumber(form.boracareSurfaceLinearFt)
@@ -4691,6 +4707,7 @@ export default function EstimateToolViewV2({
                       trenchingEstimateFromFootprint: false,
                       _termiteFootprintAuto: false,
                       _footprintUnknownLookup: false,
+                      _unitLookup: false,
                       _trenchingPerimeterAuto: false,
                       _boracareSqftAuto: false,
                       _preslabSqftAuto: false,
@@ -6256,10 +6273,18 @@ export default function EstimateToolViewV2({
                           />
                         </Field>
                       </div>
-                      <CheckboxV2
-                        k="trenchingEstimateFromFootprint"
-                        label="Estimate trenching perimeter from footprint"
-                      />
+                      {isUnitScopedForm(form) ? (
+                        // A unit's area is interior floor space — there is no
+                        // footprint to estimate a perimeter from (codex r5 P2).
+                        <div className="text-14 text-zinc-600 leading-snug mb-1">
+                          One unit in a building: enter the measured perimeter LF.
+                        </div>
+                      ) : (
+                        <CheckboxV2
+                          k="trenchingEstimateFromFootprint"
+                          label="Estimate trenching perimeter from footprint"
+                        />
+                      )}
                       <CheckboxV2
                         k="trenchingLabelConfirmed"
                         label="Label rate and trench depth confirmed"
