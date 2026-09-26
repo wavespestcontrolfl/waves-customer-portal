@@ -675,7 +675,7 @@ describe('collections policy + ledger on latePaymentCheck', () => {
     const failedPrefs = chain();
     failedPrefs.first.mockRejectedValue(new Error('preferences temporarily unavailable'));
     const service = customer({ cust_id: 'cust-1', scheduled_date: new Date(Date.now() + 5 * 86400000) });
-    const balance = { oldestInvoiceId: 'inv-1', totalBalance: 129, daysOverdue: 8 };
+    const balance = { oldestInvoiceId: 'inv-1', oldestInvoiceUrl: 'https://portal/pay/token-1', totalBalance: 129, daysOverdue: 8 };
     const balanceRead = jest.spyOn(BalanceReminder, 'getCustomerBalance').mockResolvedValue(balance);
     try {
       setDbQueues({
@@ -925,6 +925,28 @@ describe('collections policy + ledger on latePaymentCheck', () => {
   });
 });
 
+describe('balance reminder pay link', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('a tokenless oldest invoice gets no pay link and skips the reminder, never texting /pay/<customer id>', async () => {
+    setDbQueues({
+      payments: [chain({ result: [overduePayment(8)] })],
+      invoices: [
+        chain({ result: [] }), // payer-billed invoice-id lookup (none)
+        chain({ first: invoice({ token: null }) }),
+      ],
+    });
+
+    const balance = await BalanceReminder.getCustomerBalance('cust-1');
+    expect(balance).toEqual(expect.objectContaining({ oldestInvoiceId: 'inv-1', oldestInvoiceUrl: null }));
+
+    await expect(BalanceReminder.sendReminder({ id: 'svc-1', cust_id: 'cust-1', scheduled_date: '2026-06-01' }, balance, 'three_day', 3))
+      .rejects.toThrow('no unpaid invoice id/token found');
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+});
 
 describe('account-level dunning stops', () => {
   const paths = [

@@ -334,9 +334,11 @@ class BalanceReminder {
       invoiceIds,
       invoiceCount: outstanding.length,
       oldestInvoiceId: oldestInvoice?.id || null,
+      // /pay/ is keyed by the invoice token only — a customer id there opens a
+      // "not found" pay page, so a tokenless invoice gets no link at all.
       oldestInvoiceUrl: oldestInvoice?.token
         ? `${publicPortalUrl()}/pay/${oldestInvoice.token}`
-        : `${publicPortalUrl()}/pay/${customerId}`,
+        : null,
       oldestDueDate: oldest.payment_date,
       daysOverdue,
     };
@@ -344,9 +346,9 @@ class BalanceReminder {
 
   async sendReminder(service, balance, tier, daysUntil) {
     if (await customerDunningStopped(balance)) return false;
-    if (!balance.oldestInvoiceId) {
+    if (!balance.oldestInvoiceId || !balance.oldestInvoiceUrl) {
       throw new Error(
-        "balance reminder payment-link SMS skipped: no unpaid invoice id found",
+        "balance reminder payment-link SMS skipped: no unpaid invoice id/token found",
       );
     }
     // Collections policy (gate off ⇒ permitted without consulting — this
