@@ -100,12 +100,15 @@ describe('parseAmazonDeliveredEmail — item blocks', () => {
     expect(parsed.items).toEqual([{ title: 'Atticus Talak 7.9 F Bifenthrin Insecticide Concentrate (96oz)', quantity: 2 }]);
   });
 
-  test('a bad Quantity line (non-numeric or zero) falls back to quantity 1 rather than throwing', () => {
-    const email = {
-      from_address: 'order-update@amazon.com',
-      subject: 'Delivered: your order',
-      body_text: 'Order # 100-0000000-0000000\n\n* Some Product\n  Quantity: 0\n',
-    };
+  test.each([
+    ['0', null], ['unknown', null], ['', null], ['2.0', 2], ['3', 3],
+  ])('an explicit "Quantity: %s" reads as %s (unreadable -> null, held for review; never a guessed 1)', (raw, expected) => {
+    const email = { from_address: 'order-update@amazon.com', subject: 'Delivered: your order', body_text: `Order # 900-0000001-0000001\n\n* Some Product\n  Quantity: ${raw}\n` };
+    expect(parseAmazonDeliveredEmail(email).items).toEqual([{ title: 'Some Product', quantity: expected }]);
+  });
+
+  test('no Quantity line at all is quantity 1', () => {
+    const email = { from_address: 'order-update@amazon.com', subject: 'Delivered: your order', body_text: 'Order # 900-0000001-0000001\n\n* Some Product\n' };
     expect(parseAmazonDeliveredEmail(email).items).toEqual([{ title: 'Some Product', quantity: 1 }]);
   });
 

@@ -17,7 +17,9 @@
  * indented (`  Quantity: 4`) — never trailing the title on the same line.
  * A same-line "Quantity: N" is also accepted defensively (some other
  * Amazon template may still write it that way) but is not the common case.
- * A title with no quantity found either way is quantity 1.
+ * A title with no quantity found either way is quantity 1; an explicit
+ * quantity that isn't a whole number above 0 ("0", "unknown") is null — the
+ * sweep holds that line for review rather than guessing a count.
  *
  * Order # sits on its own "Order #" line with the number on the line right
  * after it (or, defensively, trailing on the same line) — this is always
@@ -110,16 +112,17 @@ function extractShipmentId(text) {
   return m ? m[1] : null;
 }
 
-function safeQuantity(raw) {
-  const n = Number.parseInt(raw, 10);
-  return Number.isFinite(n) && n > 0 ? n : 1;
+// An explicit "Quantity: N": a whole number above 0 ("2", "2.0"), else null.
+function explicitQuantity(raw) {
+  const match = String(raw).trim().match(/^(\d+)(?:\.0+)?$/);
+  const n = match ? Number(match[1]) : 0;
+  return n > 0 ? n : null;
 }
 
 // Item blocks: a line starting "* " is a title. Its quantity is either
 // inline ("... Quantity: 4" trailing the same line — defensive) or, in the
 // confirmed real template, alone on the NEXT non-blank line ("  Quantity:
-// 4"); either way it is never Number()'d, only Number.parseInt on the
-// captured digit group. No quantity found either way -> 1.
+// 4"). No quantity line either way -> 1; an unreadable one -> null.
 function parseItemBlocksFromText(text) {
   const rawLines = String(text || '').split('\n');
   const items = [];
@@ -130,16 +133,16 @@ function parseItemBlocksFromText(text) {
     if (!title) continue;
 
     let quantity = 1;
-    const inlineQty = title.match(/\s*quantity:\s*(\d+)\s*$/i);
+    const inlineQty = title.match(/\s*quantity:\s*(\S*)\s*$/i);
     if (inlineQty) {
-      quantity = safeQuantity(inlineQty[1]);
+      quantity = explicitQuantity(inlineQty[1]);
       title = title.slice(0, inlineQty.index).trim();
     } else {
       let j = i + 1;
       while (j < rawLines.length && rawLines[j].trim() === '') j++;
       if (j < rawLines.length) {
-        const nextQty = rawLines[j].trim().match(/^quantity:\s*(\d+)\s*$/i);
-        if (nextQty) quantity = safeQuantity(nextQty[1]);
+        const nextQty = rawLines[j].trim().match(/^quantity:\s*(\S*)\s*$/i);
+        if (nextQty) quantity = explicitQuantity(nextQty[1]);
       }
     }
     if (title) items.push({ title, quantity });

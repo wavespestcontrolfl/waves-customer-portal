@@ -102,7 +102,7 @@ async function stockedItems(items, conn) {
 }
 
 async function ringUndeliveredBell(notifyAdmin, { email, parsed, stocked, promised, trx }) {
-  const what = stocked.map(({ item, product }) => `${product.name} ×${item.quantity}`).join(', ');
+  const what = stocked.map(({ item, product }) => (item.quantity ? `${product.name} ×${item.quantity}` : product.name)).join(', ');
   const due = promised ? ` (due ${formatETDate(promised)})` : '';
   const body = `Amazon shipped ${what} on ${formatETDate(new Date(email.received_at))}${due} but never sent a delivery confirmation, `
     + "so it wasn't added. If it arrived, log it by hand.";
@@ -133,7 +133,7 @@ async function alertIfUndelivered(email, { notifyAdmin, now }, conn) {
     if (await shipmentSettled(trx, parsed.shipmentId)) return null;
     await trx('purchase_receipt_lines').insert(stocked.map(({ item, lineNo, product }) => ({
       vendor: VENDOR, order_number: parsed.orderNumber || UNKNOWN_ORDER, shipment_key: parsed.shipmentId, line_no: lineNo,
-      email_id: email.id, raw_title: item.title, quantity: item.quantity, product_id: product.id, status: 'no_delivery_email',
+      email_id: email.id, raw_title: item.title, quantity: item.quantity ?? 0, product_id: product.id, status: 'no_delivery_email',
     })));
     await ringUndeliveredBell(notifyAdmin, { email, parsed, stocked, promised, trx });
     return { shipmentId: parsed.shipmentId, orderNumber: parsed.orderNumber, titles: stocked.map(({ item }) => item.title) };

@@ -74,7 +74,7 @@ const HELD_REASONS = {
   no_items: "The email doesn't name the item. If it's stock, log it by hand.",
   no_order_number: "The email's order number couldn't be read, so log it by hand.",
   returned: "It's a return, so take it out of stock by hand.",
-  unverified: "The invoice line couldn't be checked (its numbers or unit of measure), so log it by hand.",
+  unverified: "Its quantity, numbers or unit of measure couldn't be checked, so log it by hand.",
   unreadable: "The invoice couldn't be read. If it has stock, log it by hand.",
 };
 
@@ -208,10 +208,9 @@ async function processReceiptEmail(email, { notify } = {}) {
   const notifyAdmin = adminNotifier(notify);
   const summary = emptySummary();
   // An itemless "Delivered: N Lawn & Garden item(s)" email (see the parser's
-  // header) gets one no_items placeholder line, titled with its subject. A
-  // line with no readable Order # that would move stock is held instead.
+  // header) gets one no_items placeholder line, titled with its subject.
   const lines = parsed.items.length
-    ? parsed.items.map((item) => ({ item, holdAs: parsed.orderNumber ? undefined : 'no_order_number' }))
+    ? parsed.items.map((item) => amazonLine(item, parsed.orderNumber))
     : [{ item: { title: email.subject, quantity: 1 }, forcedStatus: 'no_items' }];
   for (const [index, line] of lines.entries()) {
     await recordLineOutcome({
@@ -219,6 +218,13 @@ async function processReceiptEmail(email, { notify } = {}) {
     });
   }
   return summary;
+}
+
+// A stocked Amazon item is held rather than logged when its quantity was
+// unreadable (recorded as 0, never guessed) or its email has no Order #.
+function amazonLine(item, orderNumber) {
+  if (item.quantity == null) return { item: { ...item, quantity: 0 }, holdAs: 'unverified' };
+  return { item, holdAs: orderNumber ? undefined : 'no_order_number' };
 }
 
 // The lines one SiteOne invoice email records, or null for none this pass:

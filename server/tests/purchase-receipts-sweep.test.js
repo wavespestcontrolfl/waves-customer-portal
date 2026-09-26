@@ -219,6 +219,14 @@ describe('processReceiptEmail', () => {
     expect(processReceiptLine.mock.calls[0][0]).toMatchObject({ vendor: 'amazon', orderNumber: null, holdAs: 'no_order_number' });
   });
 
+  test('an item whose explicit quantity couldn\'t be read is recorded as 0 and held, never guessed', async () => {
+    mockState.outcomes = [{ status: 'unverified', product: taurus, inserted: true, lineId: 'line-6' }];
+    const notify = jest.fn(async () => ({}));
+    await processReceiptEmail({ ...deliveredEmail, body_text: 'Order # 900-1000001-1000001\n\n* Taurus SC Termiticide 78 oz\n  Quantity: unknown\n' }, { notify });
+    expect(processReceiptLine.mock.calls[0][0]).toMatchObject({ item: { title: 'Taurus SC Termiticide 78 oz', quantity: 0 }, holdAs: 'unverified' });
+    expect(notify.mock.calls[0][2]).toBe("Amazon delivery: Taurus SC wasn't added. Its quantity, numbers or unit of measure couldn't be checked, so log it by hand.");
+  });
+
   test('an already-processed line lands in alreadyProcessed with no bell', async () => {
     mockState.outcomes = [{ skipped: true, reason: 'already_processed' }, unmatched];
     const notify = jest.fn(async () => ({}));
@@ -331,7 +339,7 @@ describe('SiteOne invoices in the sweep', () => {
     const notify = jest.fn(async () => ({}));
     await runPurchaseReceiptRestockSweep({ notify });
     expect(processReceiptLine.mock.calls[0][0]).toMatchObject({ holdAs: 'unverified' });
-    expect(notify.mock.calls[0][2]).toBe("SiteOne invoice 900000001-001: Taurus SC ×1 wasn't added. The invoice line couldn't be checked (its numbers or unit of measure), so log it by hand.");
+    expect(notify.mock.calls[0][2]).toBe("SiteOne invoice 900000001-001: Taurus SC ×1 wasn't added. Its quantity, numbers or unit of measure couldn't be checked, so log it by hand.");
   });
 
   test('on an invoice that doesn\'t reconcile, a 0 line is kept (it may be the misread) and held', async () => {
@@ -341,7 +349,7 @@ describe('SiteOne invoices in the sweep', () => {
     const notify = jest.fn(async () => ({}));
     await runPurchaseReceiptRestockSweep({ notify });
     expect(processReceiptLine.mock.calls[0][0]).toMatchObject({ lineNo: 1, holdAs: 'unverified' });
-    expect(notify.mock.calls[0][2]).toBe("SiteOne invoice 900000001-001: Taurus SC wasn't added. The invoice line couldn't be checked (its numbers or unit of measure), so log it by hand.");
+    expect(notify.mock.calls[0][2]).toBe("SiteOne invoice 900000001-001: Taurus SC wasn't added. Its quantity, numbers or unit of measure couldn't be checked, so log it by hand.");
   });
 
   test.each([
