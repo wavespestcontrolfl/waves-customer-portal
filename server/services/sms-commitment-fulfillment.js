@@ -442,6 +442,9 @@ async function revalidateSmsFulfillment(trx, commitment, message, verdict, now) 
     quote: verdict.quote }, evidence, commitment, { eventOnly }).verdict === 'fulfilled';
 }
 
+// How long a provider/schema failure is reused before the model is retried.
+const PROVIDER_RETRY_MS = 3600000;
+
 async function verifySmsFulfillment(commitment, evidence, { now = new Date(), eventOnly = false } = {}) {
   const previous = commitment.sms_context?.fulfillment_check;
   const { obligation, evidenceHash } = fulfillmentFingerprint(commitment, evidence, { eventOnly });
@@ -451,7 +454,7 @@ async function verifySmsFulfillment(commitment, evidence, { now = new Date(), ev
   // uncertain results remain valid until their evidence or contract changes.
   return { ...verdict, evidence_hash: evidenceHash, ...(eventOnly ? { event_only: true } : {}),
     retry_after: ['provider_failed', 'invalid_model_output'].includes(verdict.reason)
-      ? new Date(now.getTime() + 3600000).toISOString() : null };
+      ? new Date(now.getTime() + PROVIDER_RETRY_MS).toISOString() : null };
 }
 
 async function checkSmsFulfillment(commitment, evidence, { eventOnly = false } = {}) {
@@ -491,4 +494,4 @@ ${stringifySmsEvidence({ obligation: commitment, records, witness_refs: witnessR
   return groundFulfillment(result.json, evidence, commitment, { eventOnly });
 }
 
-module.exports = { loadSmsFulfillmentEvidence, admissibleWitness, groundFulfillment, verifySmsFulfillment, revalidateSmsFulfillment, fulfillmentFingerprint, FULFILLMENT_POLICY, SYSTEM_EVENT_TYPES };
+module.exports = { loadSmsFulfillmentEvidence, admissibleWitness, groundFulfillment, verifySmsFulfillment, revalidateSmsFulfillment, fulfillmentFingerprint, FULFILLMENT_POLICY, SYSTEM_EVENT_TYPES, PROVIDER_RETRY_MS };

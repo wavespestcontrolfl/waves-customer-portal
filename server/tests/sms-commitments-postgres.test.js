@@ -1194,7 +1194,8 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect(verify.mock.calls.map(([row, , opts]) => [row.id, opts.eventOnly])).toEqual([[target, false]]);
   });
 
-  test.each(['revalidation refuses the close', 'the source text changes under the lock', 'the provider fails'])(
+  test.each(['revalidation refuses the close', 'the source text changes under the lock', 'the provider fails',
+    'new activity lands during the provider backoff'])(
     'Codex #4816 r18/r19: a verdict the transaction does not persist leaves the event unseen for the next tick (%s)', async (cause) => {
     result.facts = [];
     result.obligations[0] = { ...result.obligations[0], kind: 'other', basis: 'request', due_at: null, due_text: 'sometime soon',
@@ -1213,7 +1214,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     // A stale evidence hash: revalidation refuses the close, as it does for a
     // witness that changed or is locked by another writer.
     const verify = jest.fn(async () => {
-      if (cause === 'the provider fails') {
+      if (['the provider fails', 'new activity lands during the provider backoff'].includes(cause)) {
         return { verdict: 'uncertain', reason: 'provider_failed', evidence_hash: 'x', retry_after: new Date(now.getTime() + 3600000).toISOString() };
       }
       if (cause === 'the source text changes under the lock') {
@@ -1241,11 +1242,45 @@ postgres('SMS commitments on PostgreSQL', () => {
       // ...and returns, event still unseen, once the retry is due.
       retryAt = new Date(now.getTime() + 3601000);
     }
+    if (cause === 'new activity lands during the provider backoff') {
+      // Codex #4816 r21: activity after the failed attempt changes the
+      // evidence, so the row comes back before retry_after.
+      await mockPg('job_status_history').insert({ job_id: visit.id, from_status: 'en_route', to_status: 'on_site',
+        transitioned_at: new Date(now.getTime() + 500) });
+      await mockPg('scheduled_services').where({ id: visit.id }).update({ status: 'on_site' });
+    }
     verify.mockClear();
     await refreshSmsCommitments({ conn: mockPg, verify, now: retryAt });
     expect(verify.mock.calls.map(([r]) => r.id)).toEqual([target]);
   },
   );
+
+  test('Codex #4816 r21: a failed evidence query leaves the visit event pending for the next tick', async () => {
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', basis: 'request', due_at: null, due_text: 'sometime soon',
+      quote: 'You still coming?', description: 'You still coming?' };
+    await recordMessageOperations(mockPg, message, result, context);
+    await mockPg('call_commitments').update({ due_at: null });
+    const [target] = await mockPg('call_commitments').pluck('id');
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 1000);
+    const [visit] = await mockPg('scheduled_services').insert({
+      customer_id: message.customer_id, property_id: context.properties[0].id, service_type: 'Quarterly Pest Control',
+      scheduled_date: etDateString(after), window_start: '09:00:00', status: 'en_route',
+      created_at: new Date(message.created_at.getTime() - 86400000), updated_at: after,
+    }).returning('id');
+    await mockPg('job_status_history').insert({ job_id: visit.id, from_status: 'confirmed', to_status: 'en_route', transitioned_at: after });
+    // The visit source query fails outright this tick.
+    const failingConn = new Proxy(mockPg, { apply: (target_, thisArg, [table, ...rest]) => (
+      table === 'scheduled_services' ? mockPg('scheduled_services_unavailable') : mockPg(table, ...rest)) });
+    const verify = jest.fn(async () => ({ verdict: 'open', reason: 'no_answer', evidence_hash: 'x', retry_after: null }));
+    expect(await refreshSmsCommitments({ conn: failingConn, verify, now })).toMatchObject({ scanned: 1, skipped_no_witness: 0 });
+    expect((await mockPg('call_commitments').where({ id: target }).first()).sms_context.event_seen_at).toBeUndefined();
+    await mockPg('system_settings').insert({ key: 'sms_operations.fulfillment_cursor', value: 'ffffffff-ffff-4fff-bfff-ffffffffffff', category: 'sms_operations' })
+      .onConflict('key').merge({ value: 'ffffffff-ffff-4fff-bfff-ffffffffffff' });
+    await refreshSmsCommitments({ conn: mockPg, verify, now: new Date(now.getTime() + 1000) });
+    expect(verify.mock.calls.map(([r]) => r.id)).toEqual([target]);
+  });
 
   test('Codex #4816 r19/r20: the watermark never passes now minus the commit grace, and keeps microseconds', async () => {
     result.facts = [];

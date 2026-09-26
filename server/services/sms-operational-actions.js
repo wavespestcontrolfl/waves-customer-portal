@@ -19,7 +19,7 @@ const { VERSION, extractSmsOperations, explicitContactPreference, matchesExplici
 const { IRRIGATION_INPUT_FIELDS } = require('./irrigation-schedule-confirmation');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
 const { isSmsReaction } = require('./sms-intent');
-const { loadSmsFulfillmentEvidence, verifySmsFulfillment, revalidateSmsFulfillment, admissibleWitness, SYSTEM_EVENT_TYPES } = require('./sms-commitment-fulfillment');
+const { loadSmsFulfillmentEvidence, verifySmsFulfillment, revalidateSmsFulfillment, admissibleWitness, SYSTEM_EVENT_TYPES, PROVIDER_RETRY_MS } = require('./sms-commitment-fulfillment');
 
 const { hashSensitiveValue } = require('./data-hygiene/sensitive-vault');
 const REPLAY_VERSION = `${VERSION}:replay`;
@@ -101,6 +101,10 @@ const TEMPORARY_INSTRUCTION = new RegExp([
 const STATED_TIMING = new RegExp([
   String.raw`\b(?:today|tomorrow|tmrw|tonight|this (?:morning|afternoon|evening|week(?:end)?|month)|next (?:week(?:end)?|month)|later (?:today|this week)|end of (?:the )?(?:day|week|month)|eod|eow)\b`,
   String.raw`\b${WEEKDAY}`,
+  // Undotted abbreviations ("call me Fri"). Wed/sat/sun double as ordinary
+  // words, so they count only after a day preposition (Codex #4816 r21).
+  String.raw`\b(?:mon|tue|tues|thu|thur|thurs|fri)\b`,
+  String.raw`\b(?:on|by|next|this|til|till|until|before|after) (?:wed|sat|sun)\b`,
   String.raw`\bin (?:${COUNT}|half an?) (?:hours?|days?|weeks?|months?)\b`,
   String.raw`\b(?:mid|early|late)[- ]?(?:${MONTH}\b|next (?:week|month)\b)`,
   String.raw`\b${MONTH}\.? ?(?:${ORDINAL_DAY}|\d{1,2})\b`,
@@ -593,6 +597,7 @@ async function applySmsCommitmentUpdate(conn, id, { customerId, action, note, re
 // write stays above it. A fresh event is re-scanned for a tick or two until
 // the cap passes it; the verdict cache makes that free of model calls.
 const EVENT_COMMIT_GRACE_MS = 10 * 60 * 1000;
+const RETRY_AFTER_SQL = "(cc.sms_context->'fulfillment_check'->>'retry_after')::timestamptz";
 const UNSEEN_FLOOR = "GREATEST(s.created_at, COALESCE((cc.sms_context->>'event_seen_at')::timestamptz, s.created_at))";
 // The floor and the tick bound sit in every branch, so each scan starts from
 // the row's watermark rather than the customer's whole visit history.
@@ -623,7 +628,10 @@ async function refreshSmsCommitment(conn, row, now, verify) {
   // entirely rather than spend it on an obligation with no chance of a
   // grounded verdict, and leave the row open and silent.
   if (!deadlinePassed && !evidence.records.some((record) => admissibleWitness(record, current, evidence.records))) {
-    return { outcome: 'no_witness' };
+    // A source query that failed outright may hold the witness: retry it
+    // next tick (Codex #4816 r21). Truncation is persistent, so it counts as
+    // handled rather than pinning the row on the event page.
+    return { outcome: evidence.failures.some((f) => !f.endsWith('_truncated')) ? 'deferred' : 'no_witness' };
   }
   // R1 (owner ruling 2026-09-24): inside an open window only an event may
   // act. An admissible visit record (field progress, a move, a
@@ -731,13 +739,16 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
   // tick wherever the cursors stand (Codex #4816 r15–r17).
   const tickBound = Array(4).fill(now);
   // A row waiting out a provider/schema failure's retry_after cannot make
-  // progress (verify returns the stored failure until then), so it yields
-  // its slot rather than pinning the page through an outage; its event stays
-  // unseen and it returns once the retry is due.
+  // progress on the same evidence (verify returns the stored failure until
+  // then), so it yields its slot rather than pinning the page through an
+  // outage; its event stays unseen and it returns once the retry is due.
+  // Activity newer than the failed attempt changes the evidence, so it brings
+  // the row back at once (Codex #4816 r21).
   // Least recently stamped first, so a re-scan inside the commit grace never
   // holds back a row whose event has not been seen at all.
   const eventRows = await openRows().whereRaw(`${UNSEEN_VISIT_ACTIVITY} IS NOT NULL`, tickBound)
-    .whereRaw("COALESCE((cc.sms_context->'fulfillment_check'->>'retry_after')::timestamptz, '-infinity'::timestamptz) <= ?", [now])
+    .where((q) => q.whereRaw(`${RETRY_AFTER_SQL} IS NULL OR ${RETRY_AFTER_SQL} <= ?`, [now])
+      .orWhereRaw(`${UNSEEN_VISIT_ACTIVITY} > ${RETRY_AFTER_SQL} - make_interval(secs => ?)`, [...tickBound, PROVIDER_RETRY_MS / 1000]))
     .orderByRaw("(cc.sms_context->>'event_seen_at')::timestamptz ASC NULLS FIRST, cc.id").limit(PAGE)
     .select('cc.*', conn.raw(`LEAST(${UNSEEN_VISIT_ACTIVITY}, ?::timestamptz)::text AS event_seen_through`,
       [...tickBound, new Date(now.getTime() - EVENT_COMMIT_GRACE_MS)]));
