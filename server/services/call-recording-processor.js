@@ -16353,6 +16353,22 @@ const CallRecordingProcessor = {
                     }
                   }
                 }
+                // Recheck the arranger slot elapsed guard INSIDE this
+                // transaction, immediately before the fresh insert (codex
+                // #4890 P2): the check above ran BEFORE this transaction
+                // opened, and the payer lookup + advisory locks + comms-fence
+                // revalidation above can hold long enough for the agreed slot
+                // to elapse in the gap — the original check alone can't catch
+                // that. Same authorization gate as the early check (enforce
+                // mode only) and the same call-linked-visit exemption, now
+                // read through this transaction's own connection (`trx`) so
+                // it sees the state under the locks already taken, not a
+                // stale pre-transaction snapshot.
+                if (arrangerSlotElapsed({ authorized: CALL_EXTRACTION_V2_DRIVES_ROUTING && wdoArrangerAuthorizedThisPass, scheduledDate, windowStart })
+                  && !(await findExistingCallAppointment({ customerId, call, scheduledDate, windowStart, serviceType, trx }))) {
+                  logger.warn(`[call-proc] Arranger-authorized WDO date ${scheduledDate} elapsed while the scheduling transaction was in flight; refusing the insert for ${maskSid(callSid)}`);
+                  return { __held: { reason: 'arranger_slot_elapsed_pre_insert' } };
+                }
                 const [created] = await trx('scheduled_services')
                   .insert(insertData)
                   .onConflict('idempotency_key')
@@ -17964,7 +17980,7 @@ const CallRecordingProcessor = {
     if (CALL_EXTRACTION_V2_DRIVES_ROUTING && v2ApprovedExtraction && extracted.appointment_confirmed) {
       const bookedServiceId = appointmentResult?.scheduledServiceId || null;
       // Held bookings already opened their own reason-specific card above.
-      const heldReasons = new Set(['existing_appointment_same_date', 'ambiguous_existing_appointment', 'auto_booking_previously_cancelled', 'open_reservice_callback_exists', 'reservice_eligibility_lapsed', 'reservice_property_uncovered', 'on_file_proof_customer_mismatch']);
+      const heldReasons = new Set(['existing_appointment_same_date', 'ambiguous_existing_appointment', 'auto_booking_previously_cancelled', 'open_reservice_callback_exists', 'reservice_eligibility_lapsed', 'reservice_property_uncovered', 'on_file_proof_customer_mismatch', 'arranger_slot_elapsed_pre_insert']);
       // The house-number hold has its own card only when that card actually
       // landed (a thrown insert or a lost claim holds the booking without
       // one) — otherwise the fallback card below is the call's only
@@ -18804,6 +18820,15 @@ const CallRecordingProcessor = {
       call, extracted, leadId, finalStatus, nonLeadCall, voicemailLeadPath, transcription,
     });
     const finalized = await db.transaction(async (trx) => {
+      // Advisory lock FIRST (same rule as every other triage_items writer —
+      // see triage-locks.js): this transaction transitions cards
+      // (customer_creation_failed / lead_creation_failed / caller_not_authorized
+      // / additional_recording) and recomputes call_log.review_status below.
+      // Without the lock, a concurrent writer resolving a DIFFERENT card on
+      // this same call can interleave with the whereNotExists recompute here
+      // — each transaction sees the other's card as still open and both skip
+      // clearing review_status, stranding it 'open' on a fully-terminal call.
+      await lockTriageCall(trx, call.id);
       // Keep the established leads -> call_log lock order. The transition
       // below must commit only with this processing token's final verdict.
       if (liveLeadConversation) await trx('leads').where({ id: leadId }).forUpdate().first('id');

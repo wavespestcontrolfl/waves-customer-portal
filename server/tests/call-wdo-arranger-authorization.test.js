@@ -337,3 +337,104 @@ describe('codex #4890 r5/r6 — WDO identity and elapsed agreed days', () => {
     expect(isAuthorizedWdoArrangerBooking(spelled)).toBe(true);
   });
 });
+
+// codex #4890 review, P2 round 2 — two source-contract pins on
+// call-recording-processor.js. Both fixes touch code deep inside a single
+// giant transaction closure that processRecording builds up (Twilio,
+// extraction, DB pool, and 15k+ lines of surrounding state), so a live
+// through-the-transaction integration test would need to stand up almost
+// that entire pass. The finalization transaction's lock-then-transition
+// contract is already pinned this way elsewhere in this codebase (see
+// call-processor-ownership-fences.test.js's regex-scan style for the same
+// function), and arrangerSlotElapsed's own logic is already exhaustively
+// unit-tested above — what these two pin is that the fix is actually wired
+// in, in the right place, relative to the writes it must run before.
+describe('codex #4890 P2 — the card-retirement finalization transaction takes the triage lock first', () => {
+  const fs = require('fs');
+  const source = fs.readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+
+  const txStart = source.indexOf('const finalized = await db.transaction(async (trx) => {');
+  const retireMarker = source.indexOf('Superseded — a lender or realtor arranging a confirmed WDO inspection is an authorized caller');
+
+  test('the finalization transaction and the WDO-authorized retire block are both found in source', () => {
+    expect(txStart).toBeGreaterThan(-1);
+    expect(retireMarker).toBeGreaterThan(txStart);
+  });
+
+  test('lockTriageCall(trx, call.id) is taken inside the transaction, before every triage_items card transition it contains (including the WDO retire)', () => {
+    const body = source.slice(txStart, retireMarker);
+    const lockIdx = body.indexOf('await lockTriageCall(trx, call.id);');
+    const firstTriageWrite = body.indexOf("trx('triage_items')");
+    expect(lockIdx).toBeGreaterThan(-1);
+    expect(firstTriageWrite).toBeGreaterThan(-1);
+    // The lock must precede the FIRST card transition in this transaction —
+    // an admin verdict resolving a different card concurrently must fully
+    // serialize against every one of these, not just the WDO retire.
+    expect(lockIdx).toBeLessThan(firstTriageWrite);
+  });
+
+  test('the review_status recompute that follows the WDO retire is also inside the locked transaction', () => {
+    const retireBlockEnd = source.indexOf('\n      }\n', retireMarker);
+    const retireBlock = source.slice(retireMarker, retireBlockEnd);
+    expect(retireBlock).toContain("trx('call_log')");
+    expect(retireBlock).toContain('review_status: null');
+  });
+});
+
+describe('codex #4890 P2 — the arranger slot-elapsed guard is rechecked inside the scheduling transaction', () => {
+  const fs = require('fs');
+  const source = fs.readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+
+  const txStart = source.indexOf('const svc = await db.transaction(async (trx) => {');
+  const insertMarker = source.indexOf("const [created] = await trx('scheduled_services')");
+
+  test('the scheduling transaction and the fresh-insert site are both found in source', () => {
+    expect(txStart).toBeGreaterThan(-1);
+    expect(insertMarker).toBeGreaterThan(txStart);
+  });
+
+  test('the elapsed check is re-run immediately before the fresh insert, gated the same way as the early (pre-transaction) check', () => {
+    const body = source.slice(txStart, insertMarker);
+    const idx = body.lastIndexOf('arrangerSlotElapsed({');
+    expect(idx).toBeGreaterThan(-1);
+    const recheck = body.slice(idx, idx + 500);
+    // Same authorization gate (enforce mode only) as the early check.
+    expect(recheck).toContain('CALL_EXTRACTION_V2_DRIVES_ROUTING && wdoArrangerAuthorizedThisPass');
+    // Same call-linked-visit exemption as the early check, now read through
+    // this transaction's own connection.
+    expect(recheck).toContain('findExistingCallAppointment({ customerId, call, scheduledDate, windowStart, serviceType, trx }');
+    // Refuses via the same generic hold mechanism every other in-transaction
+    // scheduling refusal on this path uses.
+    expect(recheck).toContain('__held');
+  });
+
+  test('nothing between the recheck and the insert can move scheduledDate/windowStart out from under it', () => {
+    const body = source.slice(txStart, insertMarker);
+    const idx = body.lastIndexOf('arrangerSlotElapsed({');
+    const between = body.slice(idx, body.length);
+    // The only statement between the recheck and the insert is the insert
+    // call itself (plus the recheck's own guard body) — no re-assignment of
+    // scheduledDate/windowStart sneaks in between the check and the write it
+    // guards.
+    expect(between).not.toMatch(/\bscheduledDate\s*=/);
+    expect(between).not.toMatch(/\bwindowStart\s*=/);
+  });
+
+  test('the in-transaction hold reason is excluded from the generic auto_booking_skipped_after_approval fallback (no double-filed card for the same refusal)', () => {
+    const heldReasonsMatch = source.match(/const heldReasons = new Set\(\[[^\]]*\]\);/);
+    expect(heldReasonsMatch).toBeTruthy();
+    expect(heldReasonsMatch[0]).toContain("'arranger_slot_elapsed_pre_insert'");
+    // And the recheck itself returns exactly that reason, so the two stay in sync.
+    expect(source).toContain("return { __held: { reason: 'arranger_slot_elapsed_pre_insert' } };");
+  });
+
+  test('the in-transaction hold reason is distinct from the early (pre-transaction) check\'s skippedReason, so the early check keeps its own auto_booking_skipped_after_approval fallback card', () => {
+    // Regression guard: if the in-transaction reason were ever changed back
+    // to 'past_extracted_date' (the early check's own skippedReason) and
+    // added to heldReasons, the early check's refusal would silently stop
+    // filing ANY review card (pre-push audit P1 the early check's own
+    // comment relies on).
+    const heldReasonsMatch = source.match(/const heldReasons = new Set\(\[[^\]]*\]\);/)[0];
+    expect(heldReasonsMatch).not.toContain("'past_extracted_date'");
+  });
+});
