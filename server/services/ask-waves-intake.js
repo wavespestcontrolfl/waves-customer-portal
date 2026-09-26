@@ -89,7 +89,7 @@ const USD_AMOUNT = `(?:\\d+(?:\\.\\d+)?|${NUM_WORD}(?:[-\\s]+(?:and[-\\s]+)?${NU
 const ES_AMOUNT = `(?:\\d+(?:\\.\\d+)?|${NUM_WORD_ES}(?:[-\\s]+(?:y[-\\s]+)?${NUM_WORD_ES})*)`;
 const PRICE_TALK_RE = new RegExp(
   '\\$\\s*\\d' // $45, $ 100, US$85 (the $ needs no left boundary), $85.00/mo
-  + `|\\bUSD(?:\\s*\\$\\s*|\\s+)${USD_AMOUNT}\\b` // USD 85, USD$85, USD eighty-five — never "USDA" (AW-08)
+  + `|\\bUSD(?:\\s*\\$\\s*|\\s*)${USD_AMOUNT}\\b` // USD 85, USD$85, USD eighty-five, USD1200 (no space) — never "USDA" (AW-08)
   + `|\\b${USD_AMOUNT}\\s*USD\\b` // 85 USD, eighty-five USD (AW-08)
   + `|\\b${EN_AMOUNT}\\s+(?:dollars?|bucks?)\\b` // 45 dollars, forty-five bucks, a few bucks, 80-120 dollars
   + `|\\b${ES_AMOUNT}\\s+(?:d[oó]lar(?:es)?|pesos?)\\b` // 45 dólares, cuarenta y cinco dólares

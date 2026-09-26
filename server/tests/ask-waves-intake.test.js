@@ -87,6 +87,15 @@ describe('scrubPriceTalk — the no-price invariant', () => {
     // digit RANGES before a currency word/unit (AW-08)
     'Plans run 80-120 dollars depending on the home.',
     'That would be 80 to 120 dollars a visit.',
+    // comma-grouped thousands (live-verify edge probe)
+    'Whole-home treatments run 1,200 dollars a year.',
+    'That plan is $ 1,200.00 up front.',
+    // USD glued directly to the digits, no space (live-verify edge probe —
+    // the USD-prefix branch used to require at least one space/currency
+    // symbol between "USD" and the amount, so "USD1200" slipped through)
+    'Your plan comes out to USD1200 for the year.',
+    'That treatment runs about 85usd per visit.',
+    'Cuesta 85 dólares al mes según el tamaño de su casa.',
   ])('replaces a reply containing a price: %s', (reply) => {
     const out = scrubPriceTalk({ ...base, reply });
     expect(out.reply).not.toMatch(PRICE_TALK_RE);
@@ -479,6 +488,205 @@ describe('processIntakeMessage provider ladder', () => {
       await processIntakeMessage({ message: 'still ants', sessionId: 'overlap-session' });
       for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve));
       expect(lookups).toBe(2);
+    });
+
+    // live-verify edge probe: two turns for the SAME session that are truly
+    // concurrent (no await between them, not just fired-and-immediately-
+    // resolved in sequence) must still only log once, exercising the actual
+    // race the Codex round 1 P2 fix targets rather than a sequential proxy.
+    test('two genuinely concurrent turns for the same session (Promise.all) still log only once', async () => {
+      dispatch.mockResolvedValue({ ok: true, json: goodJson });
+      let releaseFirstLookup;
+      const firstLookupPending = new Promise((resolve) => { releaseFirstLookup = resolve; });
+      let lookups = 0;
+      db.mockImplementation(() => ({
+        where() { return this; },
+        orderBy() { return this; },
+        first: () => {
+          lookups += 1;
+          return lookups === 1 ? firstLookupPending : Promise.resolve({ id: 'concurrent-session', message_count: 0 });
+        },
+        update: async () => 1,
+        insert: () => ({ returning: async () => [{ id: 'concurrent-session', message_count: 0 }] }),
+      }));
+
+      const [out1, out2] = await Promise.all([
+        processIntakeMessage({ message: 'ants', sessionId: 'concurrent-session' }),
+        processIntakeMessage({ message: 'more ants', sessionId: 'concurrent-session' }),
+      ]);
+      expect(out1.source).toBe('openai');
+      expect(out2.source).toBe('openai');
+
+      releaseFirstLookup({ id: 'concurrent-session', message_count: 0 });
+      for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve));
+      expect(lookups).toBe(1);
+    });
+
+    // live-verify edge probe: the in-flight set is capped at 500 (source
+    // comment, INTAKE_LOG_IN_FLIGHT_MAX) so a client that spins up unbounded
+    // distinct sessionIds against a stalled DB can't grow it forever.
+    test('the in-flight log set is capped at 500: the 501st distinct session is skipped outright', async () => {
+      dispatch.mockResolvedValue({ ok: true, json: goodJson });
+      const releases = [];
+      let dbCalls = 0;
+      db.mockImplementation(() => ({
+        where() { return this; },
+        orderBy() { return this; },
+        first: () => {
+          dbCalls += 1;
+          return new Promise((resolve) => { releases.push(resolve); });
+        },
+        update: async () => 1,
+        insert: () => ({ returning: async () => [{ id: 'cap-session', message_count: 0 }] }),
+      }));
+
+      for (let i = 0; i < 500; i += 1) {
+        await processIntakeMessage({ message: 'ants', sessionId: `cap-session-${String(i).padStart(4, '0')}` });
+      }
+      expect(dbCalls).toBe(500);
+
+      // A 501st distinct session's log is skipped outright — no DB lookup.
+      await processIntakeMessage({ message: 'ants', sessionId: 'cap-session-over-0001' });
+      expect(dbCalls).toBe(500);
+
+      // Drain every pending lookup so the shared in-flight set (module-level
+      // state, not reset between tests) is empty again for later tests.
+      releases.forEach((resolve) => resolve({ id: 'cap-session', message_count: 0 }));
+      for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve));
+
+      // The set has drained: a fresh session now logs normally again.
+      await processIntakeMessage({ message: 'ants', sessionId: 'cap-session-drained-01' });
+      expect(dbCalls).toBe(501);
+    });
+
+    // live-verify edge probe: a client-supplied sessionId that is malformed,
+    // oversized, or the wrong type must never reach the DB and must never
+    // block/throw — logIntakeExchange's own regex gate is the safety net,
+    // and logIntakeExchangeOnce must not choke on a non-string key either.
+    describe('malformed / oversized / wrong-type sessionId', () => {
+      test.each([
+        ['too short (7 chars)', 'abcdefg'],
+        ['too long (200 chars)', 'x'.repeat(200)],
+        ['invalid chars (spaces)', 'session id with spaces'],
+        ['empty string', ''],
+        ['numeric (wrong type)', 12345],
+        ['object (wrong type)', { id: 'nope' }],
+        ['null', null],
+      ])('%s never reaches the DB and the turn still resolves normally', async (_label, sessionId) => {
+        dispatch.mockResolvedValue({ ok: true, json: goodJson });
+        let dbCalled = false;
+        db.mockImplementation(() => {
+          dbCalled = true;
+          return {
+            where() { return this; },
+            orderBy() { return this; },
+            first: async () => null,
+            update: async () => 1,
+            insert: () => ({ returning: async () => [{ id: 'x', message_count: 0 }] }),
+          };
+        });
+
+        const out = await processIntakeMessage({ message: 'ants', sessionId });
+        for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve));
+
+        expect(out.source).toBe('openai');
+        expect(dbCalled).toBe(false);
+      });
+    });
+
+    // live-verify edge probe: an exception thrown from inside the log's own
+    // DB work (sync OR via a rejected sub-call) must never escape as an
+    // unhandled rejection and must never affect the already-computed reply —
+    // logIntakeExchange's internal try/catch is the primary net, and the
+    // outer .catch in processIntakeMessage is the documented defensive one.
+    test('an exception inside the background log is swallowed; the reply is unaffected', async () => {
+      dispatch.mockResolvedValue({ ok: true, json: goodJson });
+      db.mockImplementation(() => ({
+        where() { return this; },
+        orderBy() { return this; },
+        first: async () => null,
+        update: async () => 1,
+        insert: () => { throw new Error('insert exploded'); },
+      }));
+
+      const out = await processIntakeMessage({ message: 'ants', sessionId: 'throwing-log-session' });
+      expect(out.source).toBe('openai');
+      // Give the background log's (internally caught) error a chance to
+      // settle; a leaked unhandled rejection would fail the test run.
+      for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve));
+    });
+
+    // live-verify edge probe: a primary that resolves OK just AFTER its own
+    // capped share must be discarded (withDeadline already declared it a
+    // miss) — the fallback must still be the one that answers, not the late
+    // primary result.
+    test('a primary that resolves ok just after its own capped share is discarded; fallback answers', async () => {
+      process.env.ASK_WAVES_TURN_BUDGET_MS = '200'; // primary share ~120ms
+      dispatch.mockImplementation(() => new Promise((resolve) => {
+        setTimeout(() => resolve({ ok: true, json: goodJson }), 150); // after its ~120ms share
+      }));
+      callAnthropic.mockResolvedValue({ ok: true, json: { ...goodJson, reply: 'Sounds like fleas.' } });
+
+      const out = await processIntakeMessage({ message: 'ants' });
+      expect(out.source).toBe('anthropic');
+    });
+
+    // live-verify edge probe: a fallback that would eventually resolve OK,
+    // but only after the WHOLE turn deadline has passed, must be discarded —
+    // the visitor gets the deterministic fallback on time, never a reply that
+    // waits out a slow Anthropic response past the budget.
+    test('a fallback resolving after the total deadline is discarded; deterministic fallback wins on time', async () => {
+      process.env.ASK_WAVES_TURN_BUDGET_MS = '60';
+      dispatch.mockImplementation(() => new Promise(() => {})); // never resolves -> times out at ~36ms
+      callAnthropic.mockImplementation(() => new Promise((resolve) => {
+        setTimeout(() => resolve({ ok: true, json: goodJson }), 300); // well past the ~24ms left for it
+      }));
+
+      const start = Date.now();
+      const out = await processIntakeMessage({ message: 'ants' });
+      const elapsedMs = Date.now() - start;
+
+      expect(out).toEqual(FALLBACK_RESULT);
+      // Resolved on its own deadline, not by waiting for the late Anthropic
+      // resolve (which would have pushed this past ~300ms).
+      expect(elapsedMs).toBeLessThan(200);
+    });
+
+    // live-verify edge probe: a garbage/zero/negative/non-finite env value
+    // must fall back to the real 22000ms default, not a runaway wait and not
+    // an immediate (0ms) fallback either. Fakes both Date and timers so the
+    // assertion doesn't cost 22 real seconds per case.
+    describe('garbage turn-budget env values fall back to the 22000ms default', () => {
+      beforeEach(() => { jest.useFakeTimers(); });
+      afterEach(() => { jest.useRealTimers(); });
+
+      test.each([
+        ['non-numeric string', 'not-a-number'],
+        ['zero', '0'],
+        ['negative', '-500'],
+        ['empty string', ''],
+        ['Infinity', 'Infinity'],
+        ['NaN literal', 'NaN'],
+      ])('%s env value still waits out the real ~22000ms default before falling back', async (_label, envVal) => {
+        process.env.ASK_WAVES_TURN_BUDGET_MS = envVal;
+        dispatch.mockImplementation(() => new Promise(() => {}));
+        callAnthropic.mockImplementation(() => new Promise(() => {}));
+
+        let settled = false;
+        const promise = processIntakeMessage({ message: 'ants' }).then((out) => {
+          settled = true;
+          return out;
+        });
+
+        // Well under the ~22000ms default combined ladder — still pending.
+        await jest.advanceTimersByTimeAsync(21000);
+        expect(settled).toBe(false);
+
+        // Past the default — now resolved with the deterministic fallback.
+        await jest.advanceTimersByTimeAsync(2000);
+        expect(settled).toBe(true);
+        expect(await promise).toEqual(FALLBACK_RESULT);
+      });
     });
   });
 });
