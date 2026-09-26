@@ -531,6 +531,14 @@ function pairIfBothApproved(entry, targetSlug) {
   return pair && isApproved(catalog.getEntry(targetSlug)) ? pair : null;
 }
 
+/** The entry's own first look-alike whose TARGET is also approved (the
+ * same "no second candidate to pair against" fallback `nextPhotoFor` uses),
+ * shared with `entryLevelAnswer`'s photo-confirmability guard so both apply
+ * the SAME fallback pair consistently. */
+function firstApprovedLookAlike(entry) {
+  return (entry.look_alikes || []).find((la) => isApproved(catalog.getEntry(la.slug))) || null;
+}
+
 function nextPhotoFor(wording, candidates, level, nodeId) {
   if (wording === 'pretty_sure') return null;
   const top = candidates[0] || null;
@@ -551,7 +559,7 @@ function nextPhotoFor(wording, candidates, level, nodeId) {
   // look-alike WHOSE OWN TARGET IS APPROVED) — read directly so
   // `photo_can_confirm` survives (`catalog.nextPhoto`'s wrapper drops it).
   if (level === 'entry' && top?.entry) {
-    const fallbackPair = (top.entry.look_alikes || []).find((la) => isApproved(catalog.getEntry(la.slug)));
+    const fallbackPair = firstApprovedLookAlike(top.entry);
     return fallbackPair
       ? { ask: fallbackPair.next_photo || null, why: fallbackPair.difference || null, photo_can_confirm: fallbackPair.photo_can_confirm !== false }
       : null;
@@ -576,14 +584,21 @@ function referralFor(entry) {
 function entryLevelAnswer(candidates, top, unansweredTrigger) {
   if (!top?.entry || !isApproved(top.entry)) return null;
   const second = candidates[1] || null;
-  // Codex round-0 P1 (round 5): a curated pair the catalog marks
+  // Codex round-0 P1 (rounds 5–6): a curated pair the catalog marks
   // `photo_can_confirm: false` must never resolve as pretty_sure, however
   // high the model's own confidence — that flag exists precisely because
-  // NO photo can settle it. Falling through to the `likely` bar instead
-  // (still allowed) leaves `nextPhotoFor` + the tier check to surface the
-  // pair's own confirmation instructions and force needs_more_evidence,
-  // rather than a confident answer with `next_photo: null`.
-  const unconfirmablePair = !!second?.entry && pairIfBothApproved(top.entry, second.entry.slug)?.photo_can_confirm === false;
+  // NO photo can settle it. Applies whether the model itself returned a
+  // second candidate to pair against, or (a SINGLE confident candidate)
+  // the entry's own first-approved look-alike is the applicable pair —
+  // same fallback `nextPhotoFor` uses. Falling through to the `likely` bar
+  // instead (still allowed) leaves `nextPhotoFor` + the tier check to
+  // surface the pair's own confirmation instructions and force
+  // needs_more_evidence, rather than a confident answer with
+  // `next_photo: null`.
+  const applicablePair = second?.entry
+    ? pairIfBothApproved(top.entry, second.entry.slug)
+    : firstApprovedLookAlike(top.entry);
+  const unconfirmablePair = applicablePair?.photo_can_confirm === false;
   const named = (wording) => ({
     level: 'entry', wording, nodeId: top.slug, subhead: top.entry.scientific_name || null,
     headline: `${wording === 'pretty_sure' ? "We're pretty sure" : 'Likely'}: ${top.entry.common_name}`,

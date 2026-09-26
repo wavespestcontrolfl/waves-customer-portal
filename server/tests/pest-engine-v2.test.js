@@ -219,6 +219,14 @@ describe('buildAnswer — tier', () => {
     expect(built.tier).toBe('needs_more_evidence');
   });
 
+  test('a SINGLE candidate (no second candidate at all) whose own fallback pair is unconfirmable also blocks pretty_sure — Codex round-0 P1 (round 6)', () => {
+    const built = buildAnswer(baseCtx({ candidates: [cand('no-photo-pair-a', 0.95)], currentMonth: CURRENT_MONTH }));
+    expect(built.answer.wording).toBe('likely'); // never pretty_sure despite 0.95
+    expect(built.nextPhoto).not.toBeNull();
+    expect(built.nextPhoto.photo_can_confirm).toBe(false);
+    expect(built.tier).toBe('needs_more_evidence');
+  });
+
   test('an unconfirmable pair blocks pretty_sure even at 0.90 confidence — Codex round-0 P1 (round 5)', () => {
     const built = buildAnswer(baseCtx({
       candidates: [cand('no-photo-pair-a', 0.90), cand('no-photo-pair-b', 0.85)], currentMonth: CURRENT_MONTH,
