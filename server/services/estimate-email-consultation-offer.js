@@ -77,7 +77,9 @@ async function probeGoneQuietConsultation(estimateId) {
     // the recipient of the actual send — never against this pre-probe row.
     return lead ? context : null;
   } catch (err) {
-    logger.warn(`[estimate-email-consultation-offer] probe failed for estimate ${estimateId}: ${err.message}`);
+    // Ids and the error's name only — the probe resolves addresses, and a
+    // geocoder message can carry one.
+    logger.warn(`[estimate-email-consultation-offer] probe failed for estimate ${estimateId} (${err?.name || 'Error'})`);
     return null;
   }
 }
@@ -104,7 +106,7 @@ async function finalizeGoneQuietConsultationUrl(context, recipientEmail) {
     if (!lead || !recipientIsLead(recipientEmail, lead)) return '';
     return shortUrl;
   } catch (err) {
-    logger.warn(`[estimate-email-consultation-offer] finalize failed for estimate ${context?.estimateId}: ${err.message}`);
+    logger.warn(`[estimate-email-consultation-offer] finalize failed for estimate ${context?.estimateId} (${err?.name || 'Error'})`);
     return '';
   }
 }

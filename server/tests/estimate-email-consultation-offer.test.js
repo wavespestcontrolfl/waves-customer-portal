@@ -151,13 +151,17 @@ describe('probeGoneQuietConsultation — the slow step, once the engine\'s check
     expect(mockRecipientIsLead).not.toHaveBeenCalled();
   });
 
-  test('any throw (estimate read, shared helper) fails closed → null, logged', async () => {
+  test('any throw (estimate read, shared helper) fails closed → null, logged by id and error name only — never the message (a geocoder message can carry an address)', async () => {
     mockEstimateRow = new Error('db exploded');
     expect(await probeGoneQuietConsultation('est-1')).toBeNull();
     mockEstimateRow = estimateRow();
-    mockEstimateConsultationLead.mockRejectedValue(new Error('probe exploded'));
+    mockEstimateConsultationLead.mockRejectedValue(new Error('geocode failed for 123 Palm St'));
     expect(await probeGoneQuietConsultation('est-1')).toBeNull();
     expect(logger.warn).toHaveBeenCalledTimes(2);
+    for (const [line] of logger.warn.mock.calls) {
+      expect(line).toContain('est-1');
+      expect(line).not.toMatch(/exploded|Palm/);
+    }
   });
 
   test('the gate is read fresh on every call — a mid-run flip changes the very next result', async () => {
@@ -234,9 +238,10 @@ describe('finalizeGoneQuietConsultationUrl — the last step before the send', (
     expect(mockReconfirmConsultationLead).not.toHaveBeenCalled();
   });
 
-  test('the re-judge throwing fails closed → ""', async () => {
-    mockReconfirmConsultationLead.mockRejectedValue(new Error('db down'));
+  test('the re-judge throwing fails closed → "", logged without the message', async () => {
+    mockReconfirmConsultationLead.mockRejectedValue(new Error('lookup failed for 123 Palm St'));
     expect(await finalizeGoneQuietConsultationUrl(CONTEXT, 'taylor@example.com')).toBe('');
+    expect(logger.warn.mock.calls[0][0]).not.toMatch(/Palm/);
   });
 
   test('only the short URL is ever returned — never the long bearer URL', async () => {
