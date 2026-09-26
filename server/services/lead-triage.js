@@ -2,7 +2,7 @@ const logger = require('./logger');
 const MODELS = require('../config/models');
 const { dispatch } = require('./llm/call');
 const { stripThinkingBlocks } = require('./llm/deep');
-const { ledgerCall } = require('./llm-dispatch-metrics');
+const { ledgerCall, ledgerCallRejected } = require('./llm-dispatch-metrics');
 
 // Structured-output contract for the live (dispatcher) leg. The direct-SDK
 // Claude fallback below has no schema path, so the prompt keeps its field
@@ -89,7 +89,9 @@ Return ONLY valid JSON, no markdown.`;
     // JSON.parse('') threw straight into the catch below — AI lead triage
     // silently returned null on every lead. See event-ingestion.js.
     const text = stripThinkingBlocks(response).content?.[0]?.text || '';
-    return mapTriage(JSON.parse(text));
+    let triage;
+    try { triage = JSON.parse(text); } catch (err) { ledgerCallRejected(response, 'invalid_json'); throw err; }
+    return mapTriage(triage);
   } catch (err) {
     logger.error(`[lead-triage] AI triage failed: ${err.message}`);
     return null;

@@ -40,7 +40,7 @@ const logger = require('./logger');
 const MODELS = require('../config/models');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('./llm/anthropic-wire');
 const { parseETDateTime, etDateString, addETDays } = require('../utils/datetime-et');
-const { ledgerCall } = require('./llm-dispatch-metrics');
+const { ledgerCall, ledgerCallRejected } = require('./llm-dispatch-metrics');
 
 // A due time typed by the office arrives either as an ISO instant (the
 // panel converts its datetime-local value with the ET helper) or, from any
@@ -713,6 +713,7 @@ async function extractCommitmentsWithModel(transcript, { callStartedAt = null, c
   try {
     parsed = parseLooseJsonObject(text);
   } catch (err) {
+    ledgerCallRejected(response, 'invalid_json');
     return { items: [], skipped: 'parse_failed', error: err.message, model: MODELS.FLAGSHIP, ms: Date.now() - startedAt };
   }
   normalizeModelOutput(parsed, transcript);
@@ -720,6 +721,7 @@ async function extractCommitmentsWithModel(transcript, { callStartedAt = null, c
   if (!validate(parsed)) {
     // Paths and keywords only — never the model text (it quotes the caller).
     const why = (validate.errors || []).slice(0, 3).map((e) => `${e.instancePath || '/'} ${e.message}`).join('; ');
+    ledgerCallRejected(response, 'schema_invalid');
     logger.warn(`[call-commitments] model output failed schema (${(validate.errors || []).length} error(s)): ${why}`);
     return { items: [], skipped: 'schema_failed', errors: validate.errors, model: MODELS.FLAGSHIP, ms: Date.now() - startedAt };
   }

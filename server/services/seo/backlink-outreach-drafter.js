@@ -19,7 +19,7 @@ const worker = require('./link-prospect-worker');
 const { fetchPageText } = require('./contact-finder');
 const { callAnthropic } = require('../llm/call');
 const { etDateString, etParts } = require('../../utils/datetime-et');
-const { ledgerCall } = require('../llm-dispatch-metrics');
+const { ledgerCall, ledgerCallRejected } = require('../llm-dispatch-metrics');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -178,7 +178,9 @@ async function draftOne(prospect, { profile, anthropic, fetchPageFn = fetchPageT
     messages: [{ role: 'user', content: buildUserPrompt(prospect, profile, loc, page) }],
   }), { laneId: 'outreach_drafter' });
   const text = (resp && resp.content ? resp.content : []).map((b) => b.text || '').join('');
-  return parseDraft(text);
+  const draft = parseDraft(text);
+  if (!draft) ledgerCallRejected(resp, 'invalid_json');
+  return draft;
 }
 
 /**

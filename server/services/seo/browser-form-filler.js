@@ -33,7 +33,7 @@ const { anthropicMaxTokens, anthropicEffortConfig } = require('../llm/anthropic-
 const logger = require('../logger');
 const sharp = require('sharp');
 const { _internals: ssrf } = require('./contact-finder'); // isBlockedHostname + isPrivateIp
-const { ledgerCall } = require('../llm-dispatch-metrics');
+const { ledgerCall, ledgerCallRejected } = require('../llm-dispatch-metrics');
 
 function hostOf(url) {
   try { return new URL(url).hostname.replace(/^www\./, '').toLowerCase(); } catch { return ''; }
@@ -191,7 +191,9 @@ async function callVision(anthropic, screenshotB64, text) {
       { type: 'text', text },
     ] }],
   }), { laneId: 'form_filler' });
-  return parseJson((resp.content || []).map((b) => b.text || '').join(''));
+  const parsed = parseJson((resp.content || []).map((b) => b.text || '').join(''));
+  if (!parsed) ledgerCallRejected(resp, 'invalid_json');
+  return parsed;
 }
 
 /**

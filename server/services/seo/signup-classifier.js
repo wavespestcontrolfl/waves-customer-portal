@@ -14,7 +14,7 @@ const MODELS = require('../../config/models');
 const logger = require('../logger');
 const db = require('../../models/db');
 const { fetchPageText } = require('./contact-finder');
-const { ledgerCall } = require('../llm-dispatch-metrics');
+const { ledgerCall, ledgerCallRejected } = require('../llm-dispatch-metrics');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -95,8 +95,9 @@ Return ONLY JSON with ALL fields:
 - requires_account=false ONLY if a free public "add your business / submit listing" form with no login is offered.
 - detected_price_usd = null if no price is shown.`;
   let o;
+  let resp;
   try {
-    const resp = await ledgerCall('anthropic', MODEL, () => anthropic.messages.create({ model: MODEL, max_tokens: 400, messages: [{ role: 'user', content: prompt }] }), { laneId: 'signup_classifier' });
+    resp = await ledgerCall('anthropic', MODEL, () => anthropic.messages.create({ model: MODEL, max_tokens: 400, messages: [{ role: 'user', content: prompt }] }), { laneId: 'signup_classifier' });
     o = parseJson((resp.content || []).map((b) => b.text || '').join(''));
   } catch (err) {
     logger.warn(`[signup-classifier] LLM failed for ${host}: ${err.message}`);
@@ -115,6 +116,7 @@ Return ONLY JSON with ALL fields:
     && isBool(o.requires_account) && isBool(o.requires_email_verification)
     && isBool(o.requires_captcha) && isBool(o.requires_payment) && isBool(o.recurring) && priceOk;
   if (!valid) {
+    ledgerCallRejected(resp, o ? 'schema_invalid' : 'invalid_json');
     logger.warn(`[signup-classifier] incomplete/invalid classification for ${host} — failing safe to needs_account`);
     return fallback;
   }

@@ -29,7 +29,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const MODELS = require('../../config/models');
 const { stripThinkingBlocks } = require('../llm/deep');
-const { ledgerCall } = require('../llm-dispatch-metrics');
+const { ledgerCall, ledgerCallRejected } = require('../llm-dispatch-metrics');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -287,6 +287,7 @@ async function classifyQueryIntent({ queries = [] } = {}) {
       if (!m) return null;
       return { query: m[1].trim(), intent: m[2], confidence: Math.min(1, Number(m[3])) };
     }).filter(Boolean);
+    if (!parsed.length && batch.length) ledgerCallRejected(msg, 'invalid_output');
     return {
       implemented: true,
       tool: 'classify_query_intent',

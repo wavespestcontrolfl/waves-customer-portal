@@ -380,6 +380,37 @@ describe('llm call ledger', () => {
       expect(callRows()[0]).toMatchObject({ ok: false, error_code: 'anthropic_incomplete', error_class: 'incomplete', input_tokens: 200, output_tokens: 40 });
     });
 
+    it('files a finished turn with no text as empty_text / incomplete; a tool round is never empty (value unchanged)', async () => {
+      const { metrics } = load();
+      const empty = { ...ANTHROPIC_MESSAGE, stop_reason: 'end_turn', content: [{ type: 'thinking', thinking: '' }, { type: 'text', text: '  ' }] };
+      const toolRound = { ...ANTHROPIC_MESSAGE, stop_reason: 'tool_use', content: [{ type: 'tool_use', id: 't1', name: 'lookup', input: {} }] };
+      const answered = { ...ANTHROPIC_MESSAGE, stop_reason: 'end_turn' };
+      expect(await metrics.ledgerCall('anthropic', 'm', () => Promise.resolve(empty))).toBe(empty);
+      await metrics.ledgerCall('anthropic', 'm', () => Promise.resolve(toolRound));
+      await metrics.ledgerCall('anthropic', 'm', () => Promise.resolve(answered));
+      await flush();
+      expect(callRows().map((r) => [r.ok, r.error_code, r.error_class])).toEqual([
+        [false, 'empty_text', 'incomplete'],
+        [true, null, null],
+        [true, null, null],
+      ]);
+    });
+
+    it("ledgerCallRejected flips the row ledgerCall recorded for that exact value to the caller's reason; anything else is a no-op", async () => {
+      const { metrics } = load();
+      const message = { ...ANTHROPIC_MESSAGE, stop_reason: 'end_turn' };
+      await metrics.ledgerCall('anthropic', 'm', () => Promise.resolve(message));
+      await flush();
+      mockUpdate.mockClear();
+      metrics.ledgerCallRejected(message, 'invalid_json');
+      metrics.ledgerCallRejected({ ...message }, 'invalid_json'); // a copy was never returned by ledgerCall
+      metrics.ledgerCallRejected(undefined, 'invalid_json'); // the call threw before a value existed
+      await flush();
+      expect(mockUpdate.mock.calls.map(([t, cond, patch]) => [t, cond.id > 0, patch])).toEqual([
+        ['llm_dispatch_log', true, { ok: false, error_code: 'invalid_json', error_class: 'instruction' }],
+      ]);
+    });
+
     it('DEEP helper: a refusal is a failed Anthropic leg and the OpenAI backup a successful one, same chain', async () => {
       const { deep } = load();
       const client = { messages: { create: jest.fn().mockResolvedValue({ ...ANTHROPIC_MESSAGE, stop_reason: 'refusal', stop_details: { category: 'x' }, content: [] }) } };

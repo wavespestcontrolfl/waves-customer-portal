@@ -31,7 +31,7 @@ const { anthropicText, geminiText } = require('./llm/call');
 // BEFORE the narrative LLM sees them, so no raw/injected finding text can echo into
 // the published customer_summary (the output is scrubbed again at the public route).
 const { safeConditionLabel, scrubCustomerText, NO_VISIBLE_STRESS_FINDING } = require('./lawn-diagnostic-report');
-const { ledgerCall } = require('./llm-dispatch-metrics');
+const { ledgerCall, ledgerCallRejected } = require('./llm-dispatch-metrics');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -598,6 +598,8 @@ async function runChallenge(perception = {}, context = {}) {
     try { parsed = parseJsonResponse(response); } catch { parsed = null; }
     if (!parsed) {
       const failureType = response?.stop_reason === 'refusal' ? 'policy_refusal' : 'invalid_json';
+      // A refusal is already a failed row; only an answered-but-unparseable one flips here.
+      if (failureType === 'invalid_json') ledgerCallRejected(response, 'invalid_json');
       return { ok: false, reason: 'empty_response', findings: [], challenge: challengeMeta({ attempted: true, degraded: true, failureType }) };
     }
     const normalized = normalizeDiagnosisJson(parsed);

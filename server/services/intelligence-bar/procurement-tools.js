@@ -17,7 +17,7 @@ const logger = require('../logger');
 const MODELS = require('../../config/models');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('../llm/anthropic-wire');
 const inventory = require('../inventory-operations');
-const { ledgerCall } = require('../llm-dispatch-metrics');
+const { ledgerCall, ledgerCallRejected } = require('../llm-dispatch-metrics');
 
 const PROCUREMENT_TOOLS = [
   {
@@ -587,6 +587,7 @@ Search vendor websites for exact prices. Return JSON only:
       const jsonMatch = clean.match(/\{[\s\S]*\}/);
       parsed = JSON.parse(jsonMatch ? jsonMatch[0] : clean);
     } catch {
+      ledgerCallRejected(currentMsg, 'invalid_json');
       return { success: true, raw_response: responseText, note: 'AI returned non-JSON. See raw_response.' };
     }
 

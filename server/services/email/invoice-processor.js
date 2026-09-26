@@ -9,7 +9,7 @@ const { anthropicMaxTokens, anthropicEffortConfig } = require('../llm/anthropic-
 const { anthropicText } = require('../llm/call');
 const { etDateString } = require('../../utils/datetime-et');
 const { taxPeriodFor } = require('../../utils/tax-period');
-const { ledgerCall } = require('../llm-dispatch-metrics');
+const { ledgerCall, ledgerCallRejected } = require('../llm-dispatch-metrics');
 
 const anthropic = new Anthropic();
 
@@ -89,6 +89,7 @@ async function processVendorInvoice(email, classification) {
       }), { laneId: 'invoice_pdf' });
 
       parsedInvoice = parseClaudeJson(anthropicText(parseResponse));
+      if (!parsedInvoice) ledgerCallRejected(parseResponse, 'invalid_json');
 
       if (parsedInvoice) {
         await db('email_attachments').where({ id: pdfAttachment.id }).update({

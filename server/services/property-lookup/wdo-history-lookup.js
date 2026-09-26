@@ -14,7 +14,7 @@
 
 const logger = require('../logger');
 const MODELS = require('../../config/models');
-const { ledgerCall } = require('../llm-dispatch-metrics');
+const { ledgerCall, ledgerCallRejected } = require('../llm-dispatch-metrics');
 
 const DEFAULT_TIMEOUT_MS = 60000;
 const DEFAULT_MAX_SEARCHES = 8;
@@ -152,10 +152,12 @@ async function lookupWdoHistory(address, options = {}) {
 
     const textBlock = (resp.content || []).filter((b) => b.type === 'text').pop();
     if (!textBlock?.text) {
+      ledgerCallRejected(resp, 'empty_text');
       throw new Error('no text block in lookup response');
     }
     const normalized = normalizeHistory(parseJson(textBlock.text));
     if (!normalized) {
+      ledgerCallRejected(resp, 'invalid_json');
       throw new Error('unparseable lookup response');
     }
     logger.info('[wdo-history] resolved', {

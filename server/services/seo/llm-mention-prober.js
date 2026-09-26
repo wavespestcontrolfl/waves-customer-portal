@@ -34,7 +34,7 @@ const { etDateString, addETDays } = require('../../utils/datetime-et');
 // so a busy query set (≈queries × platforms rows/day) can't truncate history.
 const TREND_DAYS = 30;
 const { isEnabled } = require('../../config/feature-gates');
-const { ledgerCall } = require('../llm-dispatch-metrics');
+const { ledgerCall, ledgerCallRejected } = require('../llm-dispatch-metrics');
 
 let Anthropic = null;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { /* SDK absent in some envs */ }
@@ -408,7 +408,9 @@ class LLMMentionProber {
   // with a thinking block (no .text) on larger inputs, which made a blind
   // content[0] read return '' — see event-ingestion.js for the incident.
       const word = (stripThinkingBlocks(resp).content?.[0]?.text || '').toLowerCase().trim();
-      return ['positive', 'negative', 'neutral'].find(s => word.includes(s)) || 'neutral';
+      const label = ['positive', 'negative', 'neutral'].find(s => word.includes(s));
+      if (!label) ledgerCallRejected(resp, 'invalid_output');
+      return label || 'neutral';
     } catch {
       return 'neutral';
     }

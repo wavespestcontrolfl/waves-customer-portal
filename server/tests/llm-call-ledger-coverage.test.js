@@ -128,9 +128,12 @@ describe('llm call-ledger coverage', () => {
   });
 });
 
-// Every direct Anthropic SDK call (a file that loads @anthropic-ai/sdk and
-// calls `.messages.create(` / `.messages.stream(`) runs inside ledgerCall, or
-// is listed here with the count and the reason its lane stays `unrecordable`.
+// Every `.messages.create(` / `.messages.stream(` call in server code runs
+// inside ledgerCall, or is listed here with the count and the reason its lane
+// stays `unrecordable`. Structural, not import-based: a file that receives an
+// injected Anthropic client (llm/deep.js has that shape) is covered too, so
+// the one non-Anthropic client with the same method name (Twilio) is listed
+// explicitly (Codex on #4884).
 // Two-sided like UNLABELLED_LANES: a file whose unwrapped count drops below
 // its entry fails (shrink the entry), and a new unwrapped call fails (wrap it:
 // `await ledgerCall('anthropic', model, () => client.messages.create({...}),
@@ -147,6 +150,7 @@ const KNOWN_UNWRAPPED = {
   'services/lawn-diagnostic-prompt.js': [2, 'lawn_diag_vision / lawn_diag_writer: Gemini and OpenAI legs are raw fetches'],
   'services/property-lookup/ai-property-lookup.js': [2, 'property_trio: OpenAI and Gemini legs are raw fetches'],
   'services/seo/llm-mention-prober.js': [1, 'mentions_prober: a measurement probe (search), recorded by design as unrecordable'],
+  'services/twilio.js': [1, "Twilio's SMS client — its messages.create is Twilio's API, not Anthropic"],
 };
 
 function jsFiles(dir) {
@@ -161,7 +165,6 @@ describe('direct Anthropic SDK calls are on the call ledger', () => {
   const counts = {};
   for (const file of jsFiles(SERVER_DIR)) {
     const src = read(file);
-    if (!src.includes('@anthropic-ai/sdk')) continue;
     const unwrapped = src.split('\n').filter((line) => /\.messages\.(create|stream)\(/.test(line)
       && !/ledgerCall\(/.test(line) && !/^\s*(\/\/|\*)/.test(line)).length;
     if (unwrapped) counts[path.relative(SERVER_DIR, file)] = unwrapped;

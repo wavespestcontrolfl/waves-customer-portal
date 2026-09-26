@@ -73,7 +73,7 @@ const labelExtractLimiter = require('express-rate-limit')({
   keyGenerator: (req) => String(req.technicianId),
   message: { error: 'Too many label reads. Try again in ten minutes.' },
 });
-const { ledgerCall } = require('../services/llm-dispatch-metrics');
+const { ledgerCall, ledgerCallRejected } = require('../services/llm-dispatch-metrics');
 router.get('/label-pipeline', (req, res) => res.json({ enabled: gateEnvValue('GATE_LABEL_PIPELINE') }));
 router.use('/:id/label-review', (req, res, next) => {
   if (!gateEnvValue('GATE_LABEL_PIPELINE')) return res.status(404).json({ enabled: false, error: 'Label pipeline is unavailable.' });
@@ -1839,6 +1839,7 @@ RESPOND WITH ONLY valid JSON (no markdown fences, no preamble):
 
   const mappings = parseAutoMapResponse(responseText);
   if (!mappings.length && responseText.trim()) {
+    ledgerCallRejected(msg, 'invalid_json');
     logger.warn(`[auto-map] No parseable mappings in AI response for ${vendor.name}`);
   }
   return mappings;
@@ -3632,6 +3633,7 @@ RESPOND WITH ONLY valid JSON (no markdown fences, no preamble):
       const jsonMatch = clean.match(/\{[\s\S]*\}/);
       parsed = JSON.parse(jsonMatch ? jsonMatch[0] : clean);
     } catch (parseErr) {
+      ledgerCallRejected(currentMsg, 'invalid_json');
       logger.warn(`[AI Price Lookup] Failed to parse JSON: ${parseErr.message}`);
       return res.json({ success: true, raw: responseText, results: [], summary: 'AI returned non-JSON response. See raw field.' });
     }

@@ -145,7 +145,7 @@ try {
 
 const MODELS = require('../config/models');
 const { stripThinkingBlocks } = require('./llm/deep');
-const { ledgerCall } = require('./llm-dispatch-metrics');
+const { ledgerCall, ledgerCallRejected } = require('./llm-dispatch-metrics');
 
 const HTTP_TIMEOUT_MS = 15000;
 const MAX_ITEMS_PER_FEED = 200;
@@ -610,7 +610,10 @@ async function extractEventsWithClaude(source, content, { mode, maxEvents }) {
     // against an outer object that never closed): salvage the complete
     // event objects instead of dropping the whole pull.
     const recovered = recoverEventObjectsFromTruncatedJson(text);
-    if (!recovered) throw new Error('Claude did not return parseable JSON for event extraction');
+    if (!recovered) {
+      ledgerCallRejected(response, 'invalid_json');
+      throw new Error('Claude did not return parseable JSON for event extraction');
+    }
     logger.warn(
       `[event-ingestion] recovered ${recovered.length} event(s) from truncated JSON for source ${source.id} (${source.name || source.feed_url})`,
     );

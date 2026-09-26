@@ -22,7 +22,7 @@
 const MODELS = require('../../config/models');
 const logger = require('../logger');
 const { findContact } = require('./contact-finder');
-const { ledgerCall } = require('../llm-dispatch-metrics');
+const { ledgerCall, ledgerCallRejected } = require('../llm-dispatch-metrics');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -178,7 +178,10 @@ ${JSON.stringify(list)}`;
   }), { laneId: 'prospect_score' });
   const text = resp?.content?.map((b) => b.text || '').join('') || '';
   const arr = parseJsonArray(text);
-  if (!Array.isArray(arr)) throw new Error('classifier returned non-array');
+  if (!Array.isArray(arr)) {
+    ledgerCallRejected(resp, 'invalid_json');
+    throw new Error('classifier returned non-array');
+  }
   // Map back by index defensively (model may drop/reorder).
   return chunk.map((c, idx) => {
     const hit = arr.find((o) => o && (o.i === idx || String(o.domain).toLowerCase() === String(c.domain).toLowerCase()));
