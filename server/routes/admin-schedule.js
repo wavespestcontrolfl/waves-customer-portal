@@ -67,6 +67,8 @@ const {
 } = require('../utils/service-duration-capture');
 const { resolveCompletionProfileForScheduledService } = require('../services/service-completion-profiles');
 const { resolveSeriesChildIdentity } = require('../services/service-catalog-names');
+const { detectServiceLine } = require('../services/service-report/service-line-configs');
+const { validateTreeShrubReviewForReport } = require('../services/tree-shrub-assessment');
 const ActivityIndicators = require('../services/service-report/activity-indicators');
 const { redactAccessCodes } = require('../services/context-aggregator');
 const { technicianReportCustomerCopy, containsReportAccessCode } = require('../services/service-report/technician-report-copy');
@@ -22439,6 +22441,7 @@ router.post('/generate-report', async (req, res) => {
       customerInteraction, customerConcern, pestActivityRating, photoCount,
       includeCustomerComms,
       structuredFindings, nextStepChips, companionFindings, typedActivityScore,
+      treeShrubReview,
     } = req.body;
 
     if (scheduledServiceId && !(await technicianOwnsScheduledService(req, scheduledServiceId))) {
@@ -22453,6 +22456,7 @@ router.post('/generate-report', async (req, res) => {
     const concernText = typeof customerConcern === 'string' ? customerConcern.trim() : '';
     const productsText = typeof productsApplied === 'string' ? productsApplied.trim() : '';
     const ratingNum = Number.isInteger(pestActivityRating) ? pestActivityRating : null;
+    const suppliedTreeShrubReview = treeShrubReview !== undefined && treeShrubReview !== null;
     // Same "is there enough to generate?" rule as the client (buildAiReportPayload).
     // photoCount is intentionally NOT sufficient on its own — the model can't see photos.
     // A confirmed photo-scored lawn assessment is substantive input on its
@@ -22554,7 +22558,8 @@ router.post('/generate-report', async (req, res) => {
       || concernText.length > 0
       || ratingNum !== null
       || typedHasFindingInput
-      || hasValidLawnAssessment;
+      || hasValidLawnAssessment
+      || suppliedTreeShrubReview;
     if (!hasReportInput) return res.status(400).json({ error: 'Not enough visit detail to generate a report' });
     // Typed findings ground ONLY through the visit's completion profile —
     // without a scheduledServiceId the entire grounding block is skipped,
@@ -22565,6 +22570,13 @@ router.post('/generate-report', async (req, res) => {
       return res.status(400).json({
         error: 'Typed findings require the scheduled service — reopen the visit and try again.',
         code: 'typed_findings_require_service',
+      });
+    }
+    if (!scheduledServiceId && suppliedTreeShrubReview) {
+      return res.status(400).json({
+        error: 'Tree & shrub photo review requires the scheduled service. Reopen the visit, analyze the photos again, and retry Generate.',
+        code: 'tree_shrub_review_requires_service',
+        retryable: true,
       });
     }
 
@@ -22605,7 +22617,7 @@ A generic report is a failed report. Build both sections around the concrete det
 
 2. **No overpromising.** Never claim: elimination, eradication, impenetrable, guaranteed, 100%, total protection, pest-free, foolproof. Use language like: reduce activity, manage pressure, support long-term control, limit conducive conditions.
 
-3. **No invented observations.** Only reference conditions, pest types, or findings that appear in the service notes or in a STRUCTURED SERVICE FINDINGS block below (both are technician-recorded for THIS visit) — and a block line's own group decides HOW it may be used per constraint #7: only its "Findings observed" lines are observations. If the inputs say "general pest control" with no specifics, write generally. Do not fabricate sightings. ONE exception: tech-confirmed LAWN ASSESSMENT scores supplied in GROUNDING CONTEXT are verified findings for this visit — you may (and should) reference them and their deltas even when the notes do not repeat them.
+3. **No invented observations.** Only reference conditions, pest types, or findings that appear in the service notes or in a STRUCTURED SERVICE FINDINGS block below (both are technician-recorded for THIS visit) — and a block line's own group decides HOW it may be used per constraint #7: only its "Findings observed" lines are observations. If the inputs say "general pest control" with no specifics, write generally. Do not fabricate sightings. Two narrowly scoped sources may also be used from GROUNDING CONTEXT: tech-confirmed LAWN ASSESSMENT scores are verified findings for this visit and may support their supplied deltas; TREE & SHRUB REVIEWED PHOTO SIGNALS may describe reviewed visual appearances only, with their photo-signal provenance. Tree photo signals never establish a diagnosis, confirmed cause, observed pest species, or completed work. Omitted/hidden signals are unavailable, not healthy or absent.
 
 4. **No brand names for products.** Use active ingredient names (fipronil, bifenthrin, imidacloprid, prodiamine, etc.) or functional descriptions (non-repellent residual, insect growth regulator, pre-emergent herbicide, systemic drench). If the active ingredient is not provided in the inputs, use the functional description only. When the copy tells the homeowner to DO something with a product, lead with the plain-language role, not a bare chemical name — "water in today's grub treatment", never "water in the clothianidin".
 
@@ -22791,7 +22803,7 @@ Customer concern (as reported, not a verified finding): ${promptConcern || 'None
 [FUTURE ADVICE — not completed work]
 Recommendations: ${promptRecs.length ? promptRecs.join('; ') : 'None'}
 
-Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you cannot see them; do not describe their contents)`;
+Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a count alone supplies no visual facts; use only separately supplied TREE & SHRUB REVIEWED PHOTO SIGNALS with their limited provenance, never infer unseen photo contents)`;
 
     // Assemble real, customer-specific grounding (prior visits, pressure trend,
     // weather, product label data, season, household notes). Fail-soft: if it
@@ -22818,6 +22830,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
     let typedFallbackObservations = [];
     let typedFallbackActions = [];
     let typedFallbackNextSteps = [];
+    let treeShrubReviewGrounding = null;
     if (scheduledServiceId) {
       const svc = await db('scheduled_services')
         .where({ id: scheduledServiceId })
@@ -22837,6 +22850,39 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
       // panel sends one) must not break the route's fail-soft behavior for
       // a notes/products-grounded report (codex r12).
       const substantiveTypedFacts = primaryTypedInput || companionEntries.some(companionEntryHasInput);
+      if (svc === 'lookup_failed' && suppliedTreeShrubReview) {
+        return res.status(503).json({
+          error: 'Tree & shrub photo review could not be verified right now — try Generate again in a moment.',
+          code: 'tree_shrub_review_verification_unavailable',
+          retryable: true,
+        });
+      }
+      if (!svc && suppliedTreeShrubReview) {
+        return res.status(404).json({ error: 'Scheduled service not found' });
+      }
+      if (svc && suppliedTreeShrubReview) {
+        if (detectServiceLine(svc.service_type) !== 'tree_shrub') {
+          return res.status(400).json({
+            error: 'This photo review does not belong to a tree & shrub visit. Reopen the correct visit, analyze the photos again, and retry Generate.',
+            code: 'tree_shrub_review_service_mismatch',
+            retryable: true,
+          });
+        }
+        const reviewValidation = validateTreeShrubReviewForReport(treeShrubReview, {
+          serviceId: svc.id,
+        });
+        if (!reviewValidation.ok) {
+          return res.status(400).json({
+            error: 'The tree & shrub photo review is invalid or stale. Analyze the current photos again, confirm the review, and retry Generate.',
+            code: 'tree_shrub_review_invalid',
+            reason: reviewValidation.reason,
+            retryable: true,
+          });
+        }
+        treeShrubReviewGrounding = reviewValidation.grounding;
+        groundingServiceType = svc.service_type;
+        groundingServiceDate = svc.scheduled_date || serviceDate;
+      }
       if (svc === 'lookup_failed') {
         if (substantiveTypedFacts) {
           return res.status(503).json({
@@ -23015,7 +23061,8 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
       // gate open for callers the ownership branch refused, generating a
       // generic report with none of the submitted findings.
       || primaryTypedConfirmed
-      || hasValidLawnAssessment;
+      || hasValidLawnAssessment
+      || Object.keys(treeShrubReviewGrounding?.scores || {}).length > 0;
     if (!baseHasReportInput && !companionCustomerInput) {
       return res.status(400).json({ error: 'Not enough visit detail to generate a report' });
     }
@@ -23036,6 +23083,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
         // confirmed row is superseded — no today section); absent (legacy
         // caller) falls back to the visit-linked lookup.
         lawnAssessmentId: groundingCustomerId ? lawnAssessmentId : undefined,
+        treeShrubReviewGrounding,
         serviceType: groundingServiceType,
         serviceLine: null, // derived from the server-side service type, not the body
         suppressPressureTrend: groundingSuppressPressure,
@@ -23047,6 +23095,15 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
       contextSignals = ctx.signals || {};
     } catch (ctxErr) {
       logger.warn(`[generate-report] grounding context failed: ${ctxErr.message}`);
+    }
+
+    if (Object.keys(treeShrubReviewGrounding?.scores || {}).length > 0
+      && !contextSignals.hasTreeShrubReviewedPhotoSignals) {
+      return res.status(503).json({
+        error: 'Tree & shrub photo review grounding is unavailable right now — try Generate again in a moment.',
+        code: 'tree_shrub_review_grounding_unavailable',
+        retryable: true,
+      });
     }
 
     // Scores-only requests live or die by the assessment grounding: when the

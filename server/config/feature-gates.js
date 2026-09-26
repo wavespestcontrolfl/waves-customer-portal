@@ -2847,6 +2847,12 @@ const gates = {
   // estimateConsultationOfferLive() below, same leadInspectionLinkLive()
   // convention.
   estimateConsultationOffer: process.env.GATE_ESTIMATE_CONSULTATION_OFFER === 'true',
+  // Commercial suite sizing: a commercial tenant in a multi-tenant building
+  // is sized by the SUITE (state food-license seats, else a type default)
+  // instead of the whole building, in the estimator engine's call drafts.
+  // **Ships DARK: off unless exactly `true`**; canonical CALL-TIME reader
+  // commercialSuiteSizingLive(). Off = byte-identical to before.
+  commercialSuiteSizing: process.env.GATE_COMMERCIAL_SUITE_SIZING === 'true',
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks
@@ -2904,6 +2910,14 @@ function recurringSeriesTopUpLive() {
 // kill/enable with no redeploy. Kill = unset GATE_CANCEL_RESEEDS_RECURRING.
 function cancelReseedsRecurringLive() {
   return process.env.GATE_CANCEL_RESEEDS_RECURRING === 'true';
+}
+
+// GATE_COMMERCIAL_SUITE_SIZING read at CALL time — strict `=== 'true'`,
+// same convention as recurringSeriesTopUpLive(). The one reader for both
+// suite-sizing entry points (performPropertyLookup's opt-in and the
+// estimator engine's own resolve), so a flip is a live kill/enable.
+function commercialSuiteSizingLive() {
+  return process.env.GATE_COMMERCIAL_SUITE_SIZING === 'true';
 }
 
 function leadInspectionLinkLive() {
@@ -2979,5 +2993,5 @@ function logGateStatus() {
   }
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, customerIntelAiLive, selfBookDayCapEnabled, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, customerIntelAiLive, selfBookDayCapEnabled, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, commercialSuiteSizingLive };
 // gates 1775330914

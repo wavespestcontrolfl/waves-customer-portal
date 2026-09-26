@@ -9,6 +9,10 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const MODELS = require('../../config/models');
+const { anthropicMaxTokens, anthropicEffortConfig } = require('../llm/anthropic-wire');
+// First TEXT block of a Message — a thinking block leads the content on
+// always-thinking models (Opus 5.5, Fable), so content[0] is not the answer.
+const { anthropicText } = require('../llm/call');
 const { etDateString, parseETDateTime } = require('../../utils/datetime-et');
 const { excludeUnresolvedSendReservations } = require('../messaging/review-ask-reservation');
 const {
@@ -899,7 +903,8 @@ async function draftSmsReply(input) {
 
   const msg = await client.messages.create({
     model: MODELS.FLAGSHIP,
-    max_tokens: 200,
+    ...anthropicEffortConfig(MODELS.FLAGSHIP),
+    max_tokens: anthropicMaxTokens(MODELS.FLAGSHIP, 200),
     messages: [{
       role: 'user',
       content: `Draft a short SMS reply (max 160 chars) for Waves Pest Control.
@@ -916,7 +921,7 @@ Return ONLY the SMS text, nothing else.`
     }],
   });
 
-  const draft = msg.content[0]?.text || '';
+  const draft = anthropicText(msg);
 
   return {
     draft: true,

@@ -539,6 +539,34 @@ function residentialUnitLookupVerdict({
   return residentialMultifamilyVerdict({ commercialSubtype, commercialDetectionSource });
 }
 
+// Record types that name ONE unit in a stacked building. Townhome/duplex
+// are deliberately absent: those units own their ground and their stories.
+const RESIDENTIAL_CONDO_PRICING_TYPES = new Set(['condo_ground', 'condo_upper']);
+// Confident satellite reads that the addressed structure is NOT one stacked
+// unit. A detached "site condo" villa or a townhome-style condo row is a
+// whole building on its own ground — condo is its legal form, not its shape
+// — so its lot, pool, stories, and area reads are its own (codex r4 P1).
+const NON_STACKED_ATTACHMENTS = new Set(['DETACHED', 'ATTACHED_END', 'ATTACHED_INTERIOR']);
+
+/**
+ * Gate ON only: the RESIDENTIAL twin of residentialUnitLookupVerdict. A
+ * dwelling subpremise (Apt/Unit/#) on a record already typed residential
+ * Condo is the same one-unit quote — but it never reaches the commercial
+ * verdict above, so the parcel-wide satellite reads (the complex's pool,
+ * the association's turf and landscape) and the building's floor count
+ * flowed straight into a unit quote (2026-09-25: a 725 sf condo unit
+ * quoted with a pool, 2,500 sf of turf and 2 stories). Pure.
+ */
+function residentialCondoUnitLookupVerdict({ address, category, pricingPropertyType, structureAttachment = null }) {
+  if (!unitScopeGuardrailsEnabled()) return false;
+  if (String(category || '').toUpperCase() !== 'RESIDENTIAL') return false;
+  if (NON_STACKED_ATTACHMENTS.has(String(structureAttachment || '').toUpperCase())) return false;
+  if (!RESIDENTIAL_CONDO_PRICING_TYPES.has(String(pricingPropertyType || ''))) return false;
+  const normalizedAddress = String(address || '').replace(DESIGNATOR_PERIOD_RE, '$1');
+  if (!normalizedAddress || !shadowPrivate.hasSubpremiseSignal({ address: normalizedAddress })) return false;
+  return !SUITE_DESIGNATOR_RE.test(normalizedAddress);
+}
+
 /**
  * Gate ON only: resolve a unit/suite scope's lot as NOT APPLICABLE — a
  * resolved fact, not missing data (property-facts-v2 doctrine). A lot
@@ -654,6 +682,7 @@ module.exports = {
   applyUnitScopeToPropertyFacts,
   lookupCategoryConflict,
   residentialUnitLookupVerdict,
+  residentialCondoUnitLookupVerdict,
   _private: {
     resolvePropertyUse,
     resolveCustomerRelationship,

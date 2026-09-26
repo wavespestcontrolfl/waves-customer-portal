@@ -4201,7 +4201,7 @@ router.post('/:serviceId/tree-shrub/assess-preview', async (req, res) => {
     // can verify the review came from this preview for these images.
     const photosHash = treeShrubPhotosHash(photos.map((p) => p && p.data));
     result.signature = treeShrubReviewSignature(result.scores, result.scoredCount, req.params.serviceId, photosHash, result.observations);
-    return res.json({ ...result, status: 'complete' });
+    return res.json({ ...result, photosHash, status: 'complete' });
   } catch (err) {
     return res.status(500).json({ error: 'Tree & shrub assessment preview failed', detail: err.message });
   }

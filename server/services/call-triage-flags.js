@@ -484,6 +484,12 @@ const ADVISORY_TRIAGE_FLAGS = new Set([
   // triage-auto-resolve.js): a "get a real callback number" ask is a
   // human-only verdict, same as missing_unit_number.
   'callback_number_needed',
+  // Owner ruling 2026-09-26: nicknames, initials, and personal/work email
+  // handles must not block anything, and every call-agent rule behaves the
+  // same on outbound and inbound calls. name_email_mismatch still files the
+  // name_review card (an uncorroborated name is worth a human look) but never
+  // holds the appointment or the first-touch email.
+  'name_email_mismatch',
 ]);
 
 // Explicit allowlist of flags allowed to HOLD an appointment (owner ruling
@@ -520,7 +526,6 @@ const BLOCKING_TRIAGE_FLAGS = new Set([
   'existing_appointment_coordination',
   'voicemail',
   'caller_phone_missing',
-  'name_email_mismatch',
 ]);
 
 // Flags that mean "this is not a customer we should write to canonical tables."
@@ -697,16 +702,31 @@ function normalizeForGrounding(s) {
 // token in that turn fails the grounding. Curated, conservative, fail-closed
 // — a benign turn containing "not" is sacrificed to triage rather than
 // risking a booking the agent rejected.
+// Codex round 10, P1 (:655): a bare rejection token ("Yeah, but no.") named
+// none of the phrases below, so a caller's flat "no"/"nope"/"nah" never
+// tripped this screen on its own — only multi-word hedges did. Added as
+// defense in depth alongside pulling "but" out of the shared commitment
+// vocabulary (above): either fix alone already closes the specific "Yeah,
+// but no." regression, but a bare rejection token is exactly the shape this
+// screen exists to catch, so it belongs here regardless.
 const NEGATION_HEDGE_TOKENS = [
   ' not ', ' won t ', ' wont ', ' can t ', ' cant ', ' cannot ', ' don t ',
   ' dont ', ' doesn t ', ' doesnt ', ' isn t ', ' isnt ', ' unable ',
   ' instead ', ' unless ', ' rather ', ' maybe ', ' might ',
   ' unfortunately ', ' call you back ', ' have to check ', ' let me check ',
-  ' see if ', ' ask someone ',
+  ' see if ', ' ask someone ', ' no ', ' nope ', ' nah ',
 ];
+// Codex round 22, P1 (:611): the bare noncommittal "We'll see." / "Let's
+// see." — whitelisted words only, and "see if" was the only see-hedge.
+// Anchored to the END of the sentence (a courtesy tail aside), so the
+// commitment heads "we'll see you/him/her/them" never match.
+const SEE_HEDGE_RE = /(?:^| )(?:(?:we|i) (?:ll|will|shall)(?: (?:just|have to|just have to))? see|let s see|let us see)(?: (?:then|thanks|thank you|okay|ok|so))*$/;
 function turnHasNegationOrHedge(normalizedTurn) {
-  const padded = ` ${normalizedTurn} `;
-  return NEGATION_HEDGE_TOKENS.some((t) => padded.includes(t));
+  // "No problem." is an affirmation, not the bare-"no" rejection (codex
+  // round 10, P2) — drop the phrase before the token screen.
+  const padded = ` ${normalizedTurn} `.replace(/ no problem(?= )/g, '');
+  return NEGATION_HEDGE_TOKENS.some((t) => padded.includes(t))
+    || SEE_HEDGE_RE.test(normalizedTurn);
 }
 
 // Conditional-language screen (codex P0): "If the homeowner approves, we
@@ -719,6 +739,7 @@ function turnHasNegationOrHedge(normalizedTurn) {
 const CONDITIONAL_TOKENS = [
   ' unless ', ' assuming ', ' provided ', ' as long as ', ' pending ',
   ' depends ', ' depending ', ' when ', ' once ', ' should the ',
+  ' subject to ',
 ];
 // "if" is exempt ONLY inside the exact recognized closing construction —
 // "(just) let us know if <benign follower>" (codex P0, round 7g: "we will
@@ -726,7 +747,12 @@ const CONDITIONAL_TOKENS = [
 // even though the follower matches, so the follower alone is not enough:
 // the words BEFORE the "if" must be the let-us-know closer).
 const BENIGN_IF_PRECEDER_RE = /(?:^| )(?:just )?let us know $/;
-const BENIGN_IF_FOLLOWER_RE = /^if (anything changes|that changes|anything comes up|something comes up|you need anything|you have any questions)/;
+// Codex round 18, P1 (:1590): the follower was matched as a PREFIX, so
+// "Let us know if anything changes, and then we will put you down." read
+// as a closed conditional and its appended booking consequent was never
+// checked. The follower must now END the sentence — only a courtesy tail
+// ("thanks", "thank you so much", "bye") may follow it.
+const BENIGN_IF_FOLLOWER_RE = /^if (?:anything changes|that changes|anything comes up|something comes up|you need anything|you have any questions)(?: (?:thanks|thank you|so much|much|bye|talk to you soon))* $/;
 function turnHasUnresolvedConditional(normalizedTurn) {
   const padded = ` ${normalizedTurn} `;
   if (CONDITIONAL_TOKENS.some((t) => padded.includes(t))) return true;
@@ -750,10 +776,33 @@ function turnHasUnresolvedConditional(normalizedTurn) {
 // construction and fails closed to triage. Numbers are permitted as tokens;
 // what they may MEAN is validated separately by quoteBindsConfirmedSlot.
 // The negation/conditional screens above stay as defense in depth.
+// Codex round 10, P1 (:655): "yeah" and "but" were added here (codex round
+// 9) only because the real PINNED grounding sentence started with "But
+// yeah, …" — but this Set was also the closed vocabulary an OTHER
+// sentence's stripped text was checked against under the (now-removed,
+// owner ruling 2026-09-25) other-sentence whitelist, so a free "but" here
+// let an OTHER sentence go contrastive-clean too: "We'll see you Sunday at
+// noon. Yeah, but no." named no scheduling predicate and no declarative-
+// poison term, and every token (yeah/but/no) happened to be vocabulary, so
+// the rejection the caller actually spoke ("no") read as a benign aside.
+// Moot under the single-sentence rule (any OTHER sentence besides a bare
+// acknowledgement now fails closed regardless), but "but"/"yeah" are
+// discourse OPENERS, not ordinary content words that belong anywhere in a
+// sentence — they already live in COMMITMENT_OPENER_TOKENS for exactly that
+// reason. Pulled out of the shared/base vocabulary; commitmentTurnVocabularyOk
+// (the PINNED-sentence-only check, below) now admits them via
+// COMMITMENT_OPENER_TOKENS as an explicit extra set instead, so "But yeah,
+// we'll see you Sunday at noon." still grounds as the pinned sentence.
 const COMMITMENT_TURN_VOCAB = new Set([
   'so', 'ok', 'okay', 'alright', 'awesome', 'perfect', 'great', 'sounds',
   'good', 'yep', 'yes', 'and', 'then', 'all', 'set', 'right',
   'we', 'i', 'll', 'will', 're', 'are', 'you', 'your', 'it', 'that', 's',
+  // Third-party point-of-contact commitments ("we'll see him Monday", a
+  // booking made for someone other than the caller — codex P1, live miss
+  // 17ed9362, a lender scheduling a WDO inspection for the homeowner) use
+  // the ordinary object pronoun in place of "you"; the closed vocabulary
+  // must carry it too.
+  'him', 'her', 'them',
   'see', 'confirm', 'confirmed', 'confirming', 'book', 'booked', 'booking',
   'schedule', 'scheduled', 'have', 'put', 'get', 'got', 'be', 'come',
   'coming', 'out', 'there', 'down', 'visit', 'appointment', 'inspection',
@@ -765,14 +814,32 @@ const COMMITMENT_TURN_VOCAB = new Set([
   'just', 'let', 'us', 'know', 'anything', 'changes', 'if', 'comes', 'up',
   'need', 'needs', 'questions', 'thanks', 'thank', 'much', 'bye', 'talk',
   'soon', 'welcome', 'care', 'no', 'problem',
+  // Ordinary, clearly non-contingent filler: "go" (ordinary movement verb —
+  // "it should go to him"); "made"/"send"/"momentarily" (small-talk / "I'll
+  // send you a text momentarily" filler). Still reachable on the PINNED
+  // commitment sentence and on a later-turn restatement
+  // (commitmentTurnVocabularyOk), so kept even though the OTHER-sentence
+  // whitelist that originally motivated widening this Set is gone (owner
+  // ruling 2026-09-25, single-sentence rule — see
+  // COMMITMENT_TURN_ACKNOWLEDGEMENTS, below).
+  'go', 'made', 'send', 'momentarily',
 ]);
+function turnVocabularyTokenOk(tok, extraSets) {
+  if (!tok) return true;
+  if (COMMITMENT_TURN_VOCAB.has(tok)) return true;
+  if (extraSets && extraSets.some((set) => set.has(tok))) return true;
+  if (/^\d{1,4}$/.test(tok)) return true;
+  if (/^\d{1,2}(st|nd|rd|th)$/.test(tok)) return true;
+  return false;
+}
+// PINNED-sentence-only vocabulary check (codex round 10, P1 :655): openers
+// like "but"/"yeah" are valid ONLY at the head of the pinned commitment
+// sentence itself (COMMITMENT_OPENER_TOKENS, below — turnHasAffirmativeCommitmentForm
+// already requires them there), never as free tokens OTHER sentences can
+// also draw on, so they're passed here as an explicit extra set rather than
+// living in the shared COMMITMENT_TURN_VOCAB.
 function commitmentTurnVocabularyOk(normalizedTurn) {
-  return normalizedTurn.split(' ').every((tok) => (
-    !tok
-    || COMMITMENT_TURN_VOCAB.has(tok)
-    || /^\d{1,4}$/.test(tok)
-    || /^\d{1,2}(st|nd|rd|th)$/.test(tok)
-  ));
+  return normalizedTurn.split(' ').every((tok) => turnVocabularyTokenOk(tok, [COMMITMENT_OPENER_TOKENS]));
 }
 
 // Affirmative sentence FORM (codex P0, interrogatives): normalization strips
@@ -782,14 +849,19 @@ function commitmentTurnVocabularyOk(normalizedTurn) {
 // leading) never match and fail closed.
 const COMMITMENT_OPENER_TOKENS = new Set([
   'so', 'ok', 'okay', 'alright', 'awesome', 'perfect', 'great', 'sounds',
-  'good', 'yep', 'yes', 'and', 'then', 'all', 'right',
+  'good', 'yep', 'yes', 'yeah', 'but', 'and', 'then', 'all', 'right',
 ]);
 // Full head+predicate templates (codex P0, round 7f): a bare first-person
 // prefix accepted non-commitments ("we will NEED YOU TO CONFIRM…"). The
 // commitment PREDICATE is part of the template — anything after the subject
-// that isn't an explicit commitment verb phrase fails closed.
+// that isn't an explicit commitment verb phrase fails closed. "See him"/
+// "see her"/"see them" (codex P1, live miss 17ed9362) cover a booking made
+// for a third-party point of contact, not the caller.
 const COMMITMENT_HEADS = [
   'we ll see you ', 'we will see you ', 'i ll see you ', 'i will see you ',
+  'we ll see him ', 'we will see him ', 'i ll see him ', 'i will see him ',
+  'we ll see her ', 'we will see her ', 'i ll see her ', 'i will see her ',
+  'we ll see them ', 'we will see them ', 'i ll see them ', 'i will see them ',
   'we ll confirm ', 'we will confirm ', 'i ll confirm ', 'i will confirm ',
   'we ll be there ', 'we will be there ', 'we ll be out ', 'we will be out ',
   'we ll come ', 'we will come ',
@@ -810,6 +882,9 @@ const COMMITMENT_HEADS = [
 // day/date/time set — anything else after the head fails closed.
 const SLOT_WORDS = new Set([
   'for', 'at', 'on', 'the', 'this', 'it', 'of',
+  // "in the morning" / "in the afternoon" (codex round 30, P2) — the day
+  // period is parsed by parseSpokenSlot and must match the slot.
+  'in', 'morning', 'afternoon',
   'noon', 'midnight', 'am', 'pm', 'a', 'm', 'p', 'o', 'clock',
   'sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday',
   'january', 'february', 'march', 'april', 'may', 'june', 'july', 'august',
@@ -856,63 +931,188 @@ function normalizeCommitmentText(s) {
 // you Tuesday at 10 AM. Are you booked Sunday at noon?" with the second
 // sentence pinned passed the form check via the first. Sentence boundaries
 // are preserved (split on .!?; after collapsing "a.m."/"p.m." so the
-// abbreviation dots don't split), and the SAME sentence must: contain the
-// pinned quote, pass the negation/conditional screens, satisfy the closed
-// vocabulary AND the affirmative commitment form, and bind the slot. A quote
-// spanning sentences grounds nowhere and fails closed; if the quote appears
-// in several sentences, EVERY one must pass (ambiguity fails closed).
+// abbreviation dots don't split), and the PINNED sentence (the one
+// containing the quote) must: pass the negation/conditional screens,
+// satisfy the closed vocabulary AND the affirmative commitment form, and
+// bind the slot. A quote spanning sentences grounds nowhere and fails
+// closed; if the quote appears in several sentences, EVERY one must pass
+// (ambiguity fails closed).
+//
+// OTHER sentences of the same turn (codex P1, live miss 17ed9362, through
+// codex round 27) went through 18+ rounds of an ever-more-precise
+// blacklist-then-whitelist clearance test (otherSentenceIsClean and its
+// conditional-clause/scheduling-predicate/benign-topic machinery), each
+// round finding a new phrasing that slipped past the round before it. Owner
+// ruling 2026-09-25 (SINGLE-SENTENCE RULE) replaced all of that: an OTHER
+// sentence is no longer judged on its content at all — see
+// COMMITMENT_TURN_ACKNOWLEDGEMENTS and agentCommitmentSentenceVerified,
+// below, where any OTHER sentence besides a bare acknowledgement now fails
+// the turn closed to triage, whatever it says.
+// Splits one speaker turn into its sentences. Sentence chunks KEEP their
+// terminator (codex P0, round 7n): splitting on [.!?;]+ discarded the "?"
+// that makes "So we will confirm it for noon on Sunday?" a QUESTION — an
+// interrogative sentence can never be the commitment sentence. "a.m."/
+// "p.m." abbreviation dots are collapsed first so they don't split a
+// sentence in two.
+// Codex round 30, P1 (:851): non-ASCII question marks (fullwidth "？",
+// Arabic "؟", Greek ";", "‽", "⁇"/"⁈"/"⁉", reversed "⸮") terminate a
+// sentence and mark it interrogative exactly like "?", and an inverted "¿"
+// marks it interrogative; fullwidth/ideographic full stops and "！" end a
+// sentence like "." / "!". Folded to ASCII before splitting so every
+// downstream interrogative check sees them.
+const UNICODE_QUESTION_MARKS_RE = /[\uFF1F\u061F\u037E\u203D\u2047\u2048\u2049\u2E2E]/g;
+const UNICODE_STOPS_RE = /[\u3002\uFF0E]/g;
+function splitSentences(turn) {
+  const folded = String(turn)
+    .replace(UNICODE_QUESTION_MARKS_RE, '?')
+    .replace(UNICODE_STOPS_RE, '.')
+    .replace(/\uFF01/g, '!');
+  // Codex round 32, P2: collapsing "a.m."/"p.m." used to eat the period that
+  // also ENDS the sentence ("… at 10 a.m. Okay." became one sentence ending
+  // "am okay" and held a real booking). The final dot stays a sentence break
+  // when a new capitalized word follows that is not a weekday/month (so "10
+  // a.m. Sunday" still stays one sentence).
+  const collapsed = folded.replace(/\b([ap])\.\s?m(\.?)(?=(\s+)(\S+)|)/gi, (_m, ap, dot, _gap, next) => {
+    const nextWord = String(next || '').replace(/[^A-Za-z]/g, '');
+    const newSentence = dot && /^[A-Z]/.test(nextWord)
+      && !WEEKDAY_NAMES.includes(nextWord.toLowerCase()) && !MONTH_NAMES.includes(nextWord.toLowerCase());
+    return `${ap.toLowerCase()}m${newSentence ? '.' : ''}`;
+  });
+  const chunks = (collapsed.match(/[^.!?;]+[.!?;]*/g) || []);
+  return chunks
+    .map((c) => ({ raw: c, ns: normalizeCommitmentText(c), interrogative: /[?\u00BF]/.test(c) }))
+    .filter((s) => s.ns);
+}
+
+// LATER-TURN SINGLE-SENTENCE RULE (owner ruling 2026-09-25, round 28
+// extension). Codex rounds 23-27 built the same kind of ever-widening
+// term-list/restatement screen for LATER turns (RETRACTION_MARKER_TERMS,
+// LATER_TURN_SLOT_TERMS, a same-slot-restatement carve-out on the agent
+// side, CALLER_CAVEAT_TERMS/CALLER_REFUSAL_STEM_RE on the caller side) that
+// the committing-turn whitelist had already gone through 18 rounds of before
+// the owner replaced it outright (see COMMITMENT_TURN_ACKNOWLEDGEMENTS,
+// below) -- round 28 found four more open threads on exactly this
+// later-turn screen (a withdrawal that named no retraction-marker term, a
+// non-slot condition read as preserving the commitment, a pronoun-based
+// approval deferral, and a bare calendar date read as a later slot change).
+// The owner ruling now applies the SAME single-sentence rule to every turn
+// AFTER the committing one, whoever is speaking: laterSentenceRetracts,
+// below (defined after COMMITMENT_TURN_ACKNOWLEDGEMENTS, which it shares).
+// SINGLE-SENTENCE RULE (owner ruling 2026-09-25, final). 18 Codex rounds of
+// otherSentenceIsClean each found a new phrasing in an OTHER sentence of the
+// committing turn that slipped past the closed-vocabulary/allowlist screen
+// of the round before it ("We need you confirming it.", "Let us know if
+// anything changes, and then we will put you down.", "Okay will come in the
+// email.", "It should go to him." — round 18 alone). Rather than keep
+// chasing new phrasings, the owner ruled MORE RESTRICTIVE than every prior
+// round: a committing agent turn now grounds ONLY when the pinned
+// commitment sentence stands ALONE in that turn. Any other sentence sends
+// the call to triage for a human look, even one that would have cleared the
+// old whitelist — the owner explicitly accepts that some real bookings will
+// now get a human review instead of auto-booking.
+//
+// The one narrow allowance: a whole OTHER sentence that, after
+// normalization, is EXACTLY one of this tiny acknowledgement list. Matched
+// whole-sentence only (otherSentenceIsBareAcknowledgement, below) — never a
+// prefix, never a combination of list words, never a substring — so "Okay
+// will come in the email." (round 18) does NOT read as "Okay" plus a
+// tolerated remainder: splitSentences only ever splits on [.!?;], so this
+// unpunctuated sentence is one unit and its full normalized text is checked
+// against the whole list, not any prefix of it.
+const COMMITMENT_TURN_ACKNOWLEDGEMENTS = new Set([
+  'yes', 'yeah', 'okay', 'ok', 'alright', 'all right', 'perfect', 'great',
+  'awesome', 'sounds good', 'thank you', 'thanks', 'no problem',
+]);
+// A sentence made ENTIRELY of listed phrases, back to back ("Okay, thank
+// you." → "okay thank you", "Alright, bye.") is still nothing but
+// acknowledgement — requiring a single exact phrase sent the most common
+// real wrap-up ("Okay, thank you.") to triage. Every token must belong to a
+// listed phrase; any other word ("Okay will come in the email.") fails, so a
+// sequence can never carry a withdrawal, condition or deferral.
+function isPhraseSequence(ns, phraseSets) {
+  const toks = String(ns || '').split(' ').filter(Boolean);
+  if (!toks.length) return false;
+  const reachable = [true];
+  for (let i = 0; i < toks.length; i += 1) {
+    if (!reachable[i]) continue;
+    for (const set of phraseSets) {
+      for (const phrase of set) {
+        const words = phrase.split(' ');
+        if (words.every((w, k) => toks[i + k] === w)) reachable[i + words.length] = true;
+      }
+    }
+  }
+  return reachable[toks.length] === true;
+}
+// A question-marked acknowledgement ("We'll see you Sunday at noon. Okay?")
+// is a tag question asking the caller to confirm, not an acknowledgement
+// (Codex round 29) — it never qualifies, in the committing turn or later.
+function otherSentenceIsBareAcknowledgement(other) {
+  return !other.interrogative && isPhraseSequence(other.ns, [COMMITMENT_TURN_ACKNOWLEDGEMENTS]);
+}
+// LATER_TURN_CLOSERS extends the acknowledgement list with the call-ending
+// phrases a routine wrap-up actually uses that a mid-call acknowledgement
+// would not (owner ruling 2026-09-25, round 28 extension) — still
+// whole sentences made only of listed phrases (isPhraseSequence), same as
+// COMMITMENT_TURN_ACKNOWLEDGEMENTS.
+const LATER_TURN_CLOSERS = new Set([
+  'bye', 'goodbye', 'have a good day', 'have a great day', 'you too',
+  'thank you so much', 'talk to you then', 'see you then',
+]);
+// True when a sentence in a turn AFTER the committing one is anything other
+// than an exact acknowledgement/closer match — the single rule that
+// replaces every later-turn term list and restatement carve-out rounds
+// 23-27 built, for both speakers alike.
+function laterSentenceRetracts(sentence) {
+  return sentence.interrogative
+    || !isPhraseSequence(sentence.ns, [COMMITMENT_TURN_ACKNOWLEDGEMENTS, LATER_TURN_CLOSERS]);
+}
 function agentCommitmentSentenceVerified(quote, transcript, confirmedStartAt, callStartedAt) {
   const q = normalizeCommitmentText(quote);
   if (!q || q.length < 12) return false;
-  const agentTurns = [];
-  let sawCaller = false;
+  const turns = [];
   for (const line of String(transcript || '').split(/\r?\n/)) {
     if (!line.trim()) continue;
     const m = line.match(/^\s*(agent|caller)\s*:\s*(.*)$/i);
     if (!m) return false;
-    if (m[1].toLowerCase() === 'agent') agentTurns.push(m[2]);
-    else sawCaller = true;
+    turns.push({ agent: m[1].toLowerCase() === 'agent', text: m[2] });
   }
-  if (!agentTurns.length || !sawCaller) return false;
-  // Negation/conditional screens run on the WHOLE TURN (codex P0, round 7l:
-  // "If the homeowner approves. We will see you Sunday at noon." — an
-  // adjacent conditional sentence must poison the commitment sentence next
-  // to it); vocabulary, affirmative form, and slot binding stay scoped to
-  // the single sentence containing the pinned quote.
-  // Terminal closure for adjacent-sentence bypasses (codex P0, round 7m:
-  // "Subject to homeowner approval. We will see you Sunday at noon."):
-  // EVERY sentence of the grounding turn must itself pass the closed
-  // commitment vocabulary — which cannot express conditions, approvals, or
-  // retractions — so any surrounding sentence with out-of-vocabulary words
-  // poisons the whole turn. Multi-sentence turns discussing anything beyond
-  // the commitment (SMS logistics, addresses, names) fail closed to triage;
-  // the pinned single-sentence commitment turn is the supported shape.
+  if (!turns.some((turn) => turn.agent) || !turns.some((turn) => !turn.agent)) return false;
   const containing = [];
-  for (const turn of agentTurns) {
-    const wholeTurn = normalizeCommitmentText(turn);
-    // Sentence chunks KEEP their terminator (codex P0, round 7n): splitting
-    // on [.!?;]+ discarded the "?" that makes "So we will confirm it for
-    // noon on Sunday?" a QUESTION — an interrogative sentence can never be
-    // the commitment sentence.
-    const chunks = (String(turn).replace(/\b([ap])\.\s?m\.?/gi, '$1m').match(/[^.!?;]+[.!?;]*/g) || []);
-    // ANY question mark in the turn poisons it (codex P1, round 7o: a tag
-    // question — "You're booked Sunday at noon. Right?" — means the agent is
-    // ASKING, not committing, even when the pinned sentence is declarative).
-    const turnHasQuestion = String(turn).includes('?');
-    const sentences = chunks
-      .map((c) => ({ ns: normalizeCommitmentText(c), interrogative: c.includes('?') }))
-      .filter((s) => s.ns);
-    const turnFullyInVocabulary = sentences.every((s) => commitmentTurnVocabularyOk(s.ns));
-    for (const s of sentences) {
-      if (s.ns.includes(q)) containing.push({ ...s, wholeTurn, turnFullyInVocabulary, turnHasQuestion });
+  for (let t = 0; t < turns.length; t += 1) {
+    if (!turns[t].agent) continue;
+    const sentences = splitSentences(turns[t].text);
+    for (let i = 0; i < sentences.length; i += 1) {
+      const s = sentences[i];
+      if (!s.ns.includes(q)) continue;
+      // Single-sentence rule: every OTHER sentence in this turn must be a
+      // bare acknowledgement, or the turn is multi-sentence and fails
+      // closed to triage.
+      const otherSentencesClean = sentences.every((other, j) => j === i
+        || otherSentenceIsBareAcknowledgement(other));
+      // Later-turn single-sentence rule (owner ruling 2026-09-25, round 28):
+      // every sentence in every turn AFTER the committing one, from either
+      // speaker, must be a bare acknowledgement/closer or the call fails to
+      // triage — "Caller: No, Sunday does not work for me." holds, and so
+      // does anything else that isn't an exact list match.
+      const laterTurnsClean = turns.slice(t + 1).every((later) => splitSentences(later.text)
+        .every((ls) => !laterSentenceRetracts(ls)));
+      containing.push({ ...s, otherSentencesClean: otherSentencesClean && laterTurnsClean });
     }
   }
   if (!containing.length) return false;
-  return containing.every(({ ns, interrogative, wholeTurn, turnFullyInVocabulary, turnHasQuestion }) => !interrogative
-    && !turnHasQuestion
-    && turnFullyInVocabulary
-    && !turnHasNegationOrHedge(wholeTurn)
-    && !turnHasUnresolvedConditional(wholeTurn)
+  return containing.every(({ ns, interrogative, otherSentencesClean }) => !interrogative
+    && otherSentencesClean
+    // codex round 4: the PINNED sentence gets the same unconditional
+    // declarative-poison screen as every other sentence — "we'll see you
+    // Sunday, he still needs to confirm" already fails
+    // turnHasAffirmativeCommitmentForm's slot-word-only tail below, but
+    // that's the form check's accident, not a guarantee this screen makes
+    // explicit.
+    && !sentenceHasDeclarativePoisonVocabulary(ns)
+    && commitmentTurnVocabularyOk(ns)
+    && !turnHasNegationOrHedge(ns)
+    && !turnHasUnresolvedConditional(ns)
     && turnHasAffirmativeCommitmentForm(ns)
     && quoteBindsConfirmedSlot(ns, confirmedStartAt, callStartedAt));
 }
@@ -930,6 +1130,260 @@ function agentCommitmentSentenceVerified(quote, transcript, confirmedStartAt, ca
 const WEEKDAY_NAMES = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
 const MONTH_NAMES = ['january', 'february', 'march', 'april', 'may', 'june', 'july',
   'august', 'september', 'october', 'november', 'december'];
+
+// Declarative poison vocabulary (codex P1, rounds 1-2 of this PR's local+
+// Codex audit): a sentence naming who has to sign off, the act of
+// approving/authorizing, an unmet-approval DECLARATIVE ("Homeowner approval
+// is still required."), or a plain statement that someone/something is
+// unavailable poisons the pinned commitment REGARDLESS of conditional
+// structure — none of "That still needs the homeowner's sign-off.",
+// "Homeowner approval is still required.", or "The technician is
+// unavailable." carries an "if"/"unless"/"subject to" trigger word, so a
+// conditional-gated screen alone never sees them. Checked unconditionally,
+// before any conditional-structure test. Built as two proper phrase lists
+// (not a single narrow token like the old ` unable `) so a future round
+// adds a phrase here without touching the flow below.
+const AUTHORIZATION_PARTY_OR_ACT_TERMS = [
+  ' homeowner ', ' owner ', ' landlord ', ' tenant ',
+  ' approve ', ' approves ', ' approved ', ' approval ',
+  ' sign off ', ' authorize ', ' authorizes ', ' authorized ', ' authorization ',
+  ' permission ', ' confirm with ', ' check with ', ' run it by ',
+  ' needs to okay ', ' decision maker ', ' decision ', ' okay with ', ' ok with ',
+  ' still required ', ' still needs ', ' still need ',
+  ' needs approval ', ' need approval ', ' pending approval ',
+  ' waiting on ', ' waiting to hear ', ' need to confirm ', ' needs to confirm ',
+  ' have to confirm ', ' has to confirm ', ' get back to you ', ' getting back to you ',
+  ' need the go ahead ', ' needs the go ahead ', ' need the ok ', ' needs the ok ',
+];
+const UNAVAILABILITY_TERMS = [
+  ' unavailable ', ' not available ', ' no availability ', ' booked up ',
+  ' fully booked ', ' no openings ', ' no opening ', ' cant make ', ' can t make ',
+  ' cannot make ', ' cannot ', ' unable ', ' not free ', ' has no time ',
+  ' doesn t have time ', ' does not have time ',
+  // Codex round 11, P1 (:1331): "We are (all) booked." is the business
+  // stating it has NO capacity — the same meaning as "booked up"/"fully
+  // booked". Anchored to the first-person-plural subject so "You're all
+  // booked." / "It's booked." (the caller's slot) are untouched.
+  ' we are booked ', ' we re booked ', ' we are all booked ', ' we re all booked ',
+];
+// Anchored companion to AUTHORIZATION_PARTY_OR_ACT_TERMS (codex round 4,
+// finding 1): "I need him to confirm the appointment." names no term from
+// that phrase list, and every one of its individual WORDS (i/need/him/to/
+// confirm/the/appointment) is ordinary COMMITMENT_TURN_VOCAB on its own —
+// round 3's assumption that these two lists are "by construction" excluded
+// from the base vocabulary was true only because the words each list uses
+// happened not to overlap with base vocab THEN; "him"/"need"/"confirm" are
+// all base vocab now. Two anchored SHAPES (never an ever-growing word list):
+//   (a) "need(s)"/"going to need" + a PARTY (him/her/them/someone/the
+//       owner/the homeowner/the client — codex round 8: also the CALLER
+//       themself, you/us/me/you guys/y'all, normalized text strips
+//       apostrophes so "y all" — "I need YOU to okay it." names no party
+//       from the original third-party-only list, since the caller isn't a
+//       third party) + "to" + an AUTHORIZATION VERB (confirm/approve/sign
+//       off/sign/okay/ok/authorize), with an optional trailing object
+//       (codex round 8: "okay IT"/"sign off ON IT"/"confirm IT" are the
+//       same shape as the bare verb, just with a pronoun object) — the
+//       third-party INFINITIVE form, "I need him/you TO confirm (it)".
+//   (b) codex round 6, P1: "We need your okay." names no party/verb pair
+//       from shape (a) either (it's a DIRECT OBJECT, not "him to confirm").
+//       "need(s)/going to need/waiting on/waiting for" + a POSSESSIVE
+//       (your/his/her/their/the owner's/the homeowner's/the client's —
+//       normalized text strips apostrophes, so "owner s") + an
+//       AUTHORIZATION NOUN (okay/ok/approval/confirmation/go ahead/sign
+//       off/permission/authorization/blessing) directly, no "to <verb>".
+// Codex round 13, P1 (:1084): "We need your yes." — a bare "yes" is an
+// authorization noun too ("your yes" = your approval), as is "green light".
+// One shared alternative for every approval-noun shape below (possessive,
+// request, non-possessive), so a noun added once poisons in all three.
+// ("go-ahead"/"sign-off" normalize to "go ahead"/"sign off".)
+// The OBJECT-form approval PARTY shared by every anchored approval shape
+// below (third parties and the caller themself; normalized text strips
+// apostrophes, so "y all"). Codex round 14, P1 (:1037): hoisted into one
+// alternative so the delegated-decision shape reuses exactly this set, with
+// "my boss"/"the boss" added (only ever widens what poisons).
+const APPROVAL_PARTY_ALT = '(?:him|her|them|someone|the owner|the homeowner|the client|you|us|me|you guys|y all|my boss|the boss|his boss|her boss)';
+const AUTHORIZATION_NOUN_ALT = '(?:okay|ok|yes|approval|confirmation|go ahead|green light|sign off|permission|authorization|blessing)';
+const AUTHORIZATION_NEED_RE = new RegExp(`\\b(?:(?:need|needs|going to need) ${APPROVAL_PARTY_ALT} to (?:confirm|approve|sign off|sign|okay|ok|authorize)(?: it| on it)?|(?:need|needs|going to need|waiting on|waiting for) (?:your|his|her|their|the owner s|the homeowner s|the client s) ${AUTHORIZATION_NOUN_ALT})\\b`);
+// codex round 7, P1(b): AUTHORIZATION_NEED_RE covers "need"/"waiting on"
+// TRIGGERS; this covers the ACT of chasing that authorization down —
+// "should get your okay.", "have to get his sign off.", "once we have your
+// go ahead" — none of which say "need" or "waiting on" at all. Anchored
+// SHAPE, not a word list: (get/getting/obtain/secure/have/wait for/waiting
+// for) + a POSSESSIVE (your/his/her/their/the owner's/the homeowner's/the
+// client's — normalized text strips apostrophes) + an AUTHORIZATION NOUN.
+const APPROVAL_REQUEST_RE = new RegExp(`\\b(?:get|getting|obtain|secure|have|wait for|waiting for) (?:your|his|her|their|the (?:owner|homeowner|client) s) ${AUTHORIZATION_NOUN_ALT}\\b`);
+// Codex round 10, P1 (:1044): the NON-possessive form — "We need the
+// okay." / "Just have to get an approval." — names the same outstanding
+// authorization with an article instead of an owner. Fails closed: "we
+// have the okay" also poisons, which only ever leaves a turn in triage.
+// Codex round 16, P1 (:1109): DEMONSTRATIVE determiners — "We need that
+// okay." / "need this approval" — are the same outstanding-authorization
+// shape, so that/this/any join the determiner set.
+// Codex round 22, P1 (:1121): ASR/elliptical "We need yes." drops the
+// determiner. For the unambiguous NEED verbs (need/require/wait for) the
+// determiner is now optional; get/have keep requiring one, since "have
+// okay"/"get yes" are not natural and "okay"/"yes" double as openers.
+const NON_POSSESSIVE_APPROVAL_RE = new RegExp(`\\b(?:(?:need|needs|needed|require|requires|get|getting|obtain|secure|have|wait for|waiting for) (?:the|an|a|some|that|this|any)|need|needs|needed|require|requires|wait for|waiting for) ${AUTHORIZATION_NOUN_ALT}\\b`);
+// Codex round 9, P1 (:713): neither AUTHORIZATION_NEED_RE nor
+// APPROVAL_REQUEST_RE covers a DIRECTIVE the agent gives to have a third
+// party grant approval — "I will tell him to okay it." names no "need"/
+// "waiting"/"get...your" trigger, and every one of its words
+// (i/will/him/to/okay/it) is ordinary COMMITMENT_TURN_VOCAB; "tell" itself
+// only reached the sentence because BENIGN_CONDITIONAL_GLUE_WORDS is passed
+// to turnVocabularyTokenOk for EVERY other sentence in otherSentenceIsClean,
+// not just a conditional one (see that Set's comment) — so the whole
+// sentence read as clean. A third anchored SHAPE, same family as (a)/(b)
+// above: (tell/ask/have/get) + a PARTY (the same third-party/caller set as
+// AUTHORIZATION_NEED_RE) + an optional "to" + an AUTHORIZATION VERB
+// (confirm/approve/sign off/sign/okay/ok/authorize), with the same optional
+// trailing object ("it"/"on it") — "tell him to okay it", "ask her to
+// approve it", "have him sign off on it". "to" is optional because the
+// causative forms ("have"/"get") read naturally without it ("have him sign
+// off"); being lenient here only widens what poisons, never what grounds.
+// Codex round 20, P1 (:1138): the directive can go through a CHANNEL —
+// "We'll text him to okay it." / "We'll send him a link to approve it." —
+// and stripBenignTopicPhrases later removes the channel verb, leaving only
+// whitelisted words. Channel verbs join the directive set, and up to three
+// object words ("a link", "the email") may sit between the party and "to".
+const THIRD_PARTY_APPROVAL_DIRECTIVE_RE = new RegExp(`\\b(?:tell|ask|have|get|text|txt|email|e mail|message|call|phone|ring|remind|ping|contact|send|shoot) ${APPROVAL_PARTY_ALT} (?:(?:[a-z]+ ){0,3}to )?(?:confirm|approve|sign off|sign|okay|ok|authorize)(?: it| on it)?\\b`);
+// Codex round 9, P1 (:1048): AUTHORIZATION_NEED_RE's shape (a) only covers
+// "need(s) <PARTY> to <verb>" where the party needing to act is the OBJECT
+// of "need" — it never matches a SUBJECT-LED phrasing where the party
+// needing to act IS the sentence's subject: "You need to okay it." names no
+// object party at all (there's nothing between "need" and "to"), and every
+// one of its words (you/need/to/okay/it) is ordinary COMMITMENT_TURN_VOCAB,
+// so it read as clean. A fourth anchored SHAPE, same family as (a)/(b)/the
+// third-party directive above: a PARTY (the same third-party/caller set,
+// now including the "he/she/they" subject forms and "you"/"y'all"/"you
+// guys" for the caller) as the SENTENCE'S SUBJECT, directly followed by a
+// need-auxiliary (need/needs/have/has/got/gotta/must), an optional "to",
+// and an AUTHORIZATION VERB, with the same optional trailing object
+// ("it"/"on it") as the other shapes — "you need to okay it", "he has to
+// sign off", "they must approve it", "you guys gotta authorize it". Also
+// covers the phrase-verb "give the go ahead" (no trailing-object variant
+// needed; the phrase already ends the verb).
+// Codex round 11, P1 (:1126): FIRST-PERSON subjects — "I need to okay
+// it." / "We need to okay it." — are the same outstanding-approval shape
+// (the agent's side still has to authorize), so "i"/"we" join the subject
+// set. The auxiliary + authorization-verb anchor is unchanged: "We have
+// confirmed" / "I have okayed it" never match ("confirm"/"okay" must end at
+// a word boundary), so the past-tense reinforcement forms still ground.
+// Codex round 12, P1 (:1137): a FUTURE/MODAL auxiliary between the subject
+// and the need-auxiliary — "You'll need to okay it." normalizes to "you ll
+// need to okay it", and "ll"/"will" are whitelisted, so the subject was never
+// directly followed by "need". Up to two modal/adverb tokens (ll/will/would/
+// d/should/may/might/shall/re going to/are going to/going to/gonna/still/
+// also/just) may now sit between them — "you'll need to", "you will have
+// to", "they're going to need to", "he'll still have to". Only widens what
+// poisons; the auxiliary + authorization-verb anchor is unchanged.
+// Codex round 19, P1 (:1169, :1215): the subject can also be MISSING —
+// an ASR fragment ("Need to okay it.", "Have to okay it.") at the start of
+// the sentence after at most two openers — or INHERITED through a
+// coordinator ("You may get a text and need to okay it." — the benign
+// routing span carried the subject, so no subject sits before "need").
+// Both now take the same slot as a named subject; the auxiliary +
+// authorization-verb anchor is unchanged.
+const SUBJECT_LED_APPROVAL_NEED_RE = /(?:^(?:(?:so|and|but|yeah|yep|yes|ok|okay|alright) ){0,2}|\b(?:i|we|you|he|she|they|someone|the owner|the homeowner|the client|y all|you guys|and|or|but|then|so|also) )(?:(?:ll|will|would|d|should|may|might|shall|re going to|are going to|is going to|going to|re gonna|are gonna|gonna|still|also|just) ){0,2}(?:need|needs|have|has|got|gotta|must)(?: to)? (?:confirm|approve|sign off|sign|okay|ok|authorize|give the go ahead)(?: it| on it)?\b/;
+// Unconditional declarative-poison check (codex rounds 2, 4, 7, 9 and this
+// round): either term list, or any anchored shape, anywhere in the sentence
+// poisons regardless of conditional structure. Restored as a real function
+// and run FIRST in otherSentenceIsClean's whitelist (codex round 4, finding
+// 1) — round 3 assumed the vocabulary early-return alone would already
+// reject these words, but "him"/"need"/"confirm"/"the"/"appointment" are all
+// in COMMITMENT_TURN_VOCAB, so commitmentTurnVocabularyOk(other.ns) returned
+// true and short-circuited past clauseIsBenign entirely, before it ever
+// ran. This screen must run BEFORE the whitelist early return, not after.
+// It also guards the PINNED commitment sentence
+// (agentCommitmentSentenceVerified's final check, below) as a second,
+// independent layer: "we'll see you Sunday, he still needs to confirm"
+// already fails turnHasAffirmativeCommitmentForm's slot-word-only tail
+// today, but that's an accident of the form check, not a guarantee — this
+// check makes the safety property explicit rather than incidental.
+// Codex round 14, P1 (:1037): a DELEGATED decision — "It's up to him." —
+// names no approval verb or noun at all, and every word (it/s/up/to/him) is
+// ordinary COMMITMENT_TURN_VOCAB. Anchored shape: (it's/that's) + optional
+// "all" + (up to/on) + APPROVAL_PARTY_ALT ("It's up to him", "That's on the
+// owner"), a bare "up to <PARTY>" fragment ("Up to you."), or a SUBJECT
+// party that decides ("He decides", "The owner has the final say", "You
+// make the call").
+const DELEGATED_DECISION_RE = new RegExp(`\\b(?:(?:(?:it s|it is|its|that s|that is|thats) (?:all )?)?up to ${APPROVAL_PARTY_ALT}|(?:it s|it is|its|that s|that is|thats) (?:all )?on ${APPROVAL_PARTY_ALT}|(?:he|she|they|someone|the owner|the homeowner|the client|you|y all|you guys|my boss|the boss|his boss|her boss) (?:decides|decide|makes the call|make the call|has the final say|have the final say|has to decide|have to decide|gets to decide|get to decide))\\b`);
+// Codex round 14, P1 (:1476): agent/caller-side MODAL uncertainty — "We may
+// get you in." — stayed clean because "may" is vocabulary (the month). A
+// subject + (may/might/could possibly/should be able to/may|might|could be
+// able to) poisons. The month use never has a subject directly before it
+// followed by a word ("see you May 3rd"/"May the 3rd" are excluded by the
+// lookahead; "in May" has no subject), and the benign notification-routing
+// modals ("it may go to him", "you may get a text") are removed first by
+// BENIGN_MODAL_ROUTING_RE, an anchored phrase, before the test.
+// Codex round 15, P1 (:1192): stripping the benign span whole also stripped
+// its SUBJECT, so a verb coordinated onto it — "It may go to him and may put
+// you down." / "…go to him, may put you down." — lost the subject the
+// regex keys on. The benign span is now replaced by its own subject (the
+// span is exempt, the subject is not), and a coordinator (and/or/but/then/
+// so/also) directly before the modal counts as carrying the subject over.
+// "It may go to him." / "You may get a text." alone still leave only the
+// bare subject behind, so they stay benign.
+const MODAL_UNCERTAINTY_RE = /\b(?:we|i|you|it|that|this|he|she|they|and|or|but|then|so|also) (?:may(?= [a-z])(?! the \d)|might|could possibly|should be able to|may be able to|might be able to|could be able to)\b/;
+// Codex round 18, P1 (:746): a bare "It may go to him." names no topic and
+// can route the decision itself, so the pronoun form is benign only with
+// the notification/email/text named.
+const BENIGN_MODAL_ROUTING_RE = /\b(?:(you) may (?:get|receive) (?:a|an|the) (?:text message|text|email|notification|confirmation text|confirmation email)|(it|that) may (?:go|be sent|be going) to (?:him|her|them|you) the (?:notification|email|text))\b/g;
+function sentenceHasModalUncertainty(ns) {
+  return MODAL_UNCERTAINTY_RE.test(ns.replace(BENIGN_MODAL_ROUTING_RE, (_span, you, itThat) => you || itThat));
+}
+// Codex round 17, P1 (:1020): an approval named as the SUBJECT of a future
+// or pending verb — "The okay will come in the email." / "Your approval
+// should come through." — is still outstanding authorization, and once the
+// benign topic ("email") is stripped every remaining token is whitelisted.
+// Anchored shape on the RAW sentence: a determiner + an approval noun
+// (AUTHORIZATION_NOUN_ALT minus "confirmation", which names the ordinary
+// booking-confirmation message: "The confirmation will come by text.") + a
+// future/pending auxiliary.
+// Codex round 18, P1 (:1213): ASR drops the article — "Okay will come in
+// the email." The determiner is now optional for the unambiguous approval
+// nouns anywhere, and for okay/ok/yes (also ordinary discourse openers) at
+// the start of the sentence, after at most one opener.
+const PENDING_APPROVAL_AUX_ALT = '(?:will|ll|would|should|shall|is going to|s going to|has to|needs to|still|is still|s still|is coming|s coming|comes|come|is pending|s pending)';
+const PENDING_APPROVAL_SUBJECT_RE = new RegExp(
+  `\\b(?:(?:the|your|his|her|their|that|this|an|a|our) )?(?:approval|go ahead|green light|sign off|permission|authorization|blessing) ${PENDING_APPROVAL_AUX_ALT}\\b`
+  + `|\\b(?:the|your|his|her|their|that|this|an|a|our) (?:okay|ok|yes) ${PENDING_APPROVAL_AUX_ALT}\\b`
+  + `|^(?:(?:so|and|but|yeah|yep|yes|ok|okay|alright) )?(?:okay|ok|yes) ${PENDING_APPROVAL_AUX_ALT}\\b`,
+);
+// Codex round 21, P1 (:1143, :1181): the approval-verb family, closed at
+// the VERB instead of per carrier. Every shape so far — directives ("tell
+// him to okay it", "send the email to him to okay it"), needs ("need to
+// okay it"), future promises ("You will okay it.") — puts an authorization
+// verb right after an infinitive "to" or a modal/future auxiliary. That
+// position alone now poisons, whoever the subject is and whatever
+// channel or object sits before it. "confirm" is left out on purpose: it
+// is a pinned commitment head ("We'll confirm you for…") and already a
+// SCHEDULING_PREDICATE_TERMS entry for every other sentence.
+const APPROVAL_VERB_USE_RE = /\b(?:to|will|ll|would|d|should|shall|can|could|must|gonna|may|might|please) (?:approve|sign off|sign|okay|ok|authorize|give the go ahead|give the okay|give the green light)\b/;
+function sentenceHasDeclarativePoisonVocabulary(ns) {
+  const padded = ` ${ns} `;
+  return AUTHORIZATION_PARTY_OR_ACT_TERMS.some((t) => padded.includes(t))
+    || UNAVAILABILITY_TERMS.some((t) => padded.includes(t))
+    || AUTHORIZATION_NEED_RE.test(ns)
+    || APPROVAL_REQUEST_RE.test(ns)
+    || NON_POSSESSIVE_APPROVAL_RE.test(ns)
+    || THIRD_PARTY_APPROVAL_DIRECTIVE_RE.test(ns)
+    || SUBJECT_LED_APPROVAL_NEED_RE.test(ns)
+    || DELEGATED_DECISION_RE.test(ns)
+    || PENDING_APPROVAL_SUBJECT_RE.test(ns)
+    || APPROVAL_VERB_USE_RE.test(ns)
+    || sentenceHasModalUncertainty(ns);
+}
+// Codex rounds 1-27 built an ever-more-precise CLEARANCE test for one OTHER
+// sentence in the committing turn (conditional-clause extraction, a
+// scheduling-predicate screen, a curated non-booking-topic allowlist, a
+// closed OTHER_SENTENCE_ALLOWED_SHAPES allowlist) -- otherSentenceIsClean,
+// clauseIsBenign, extractConditionalClauses, stripBenignTopicPhrases,
+// sentenceHasSchedulingPredicate and their supporting term lists/regexes.
+// Owner ruling 2026-09-25 (SINGLE-SENTENCE RULE, see
+// COMMITMENT_TURN_ACKNOWLEDGEMENTS above) replaced all of that machinery: an
+// OTHER sentence no longer gets judged on its content at all -- it is either
+// a bare acknowledgement or the turn fails closed. Removed as dead code
+// rather than left unreachable.
 
 // Canonical ET wall clock (codex P0, round 7h): the BOOKING path preserves
 // the LITERAL wall clock of an ET-offset timestamp even when the seasonal
@@ -959,113 +1413,197 @@ function etWallClockOfConfirmedStart(value) {
   return raw.slice(0, 16);
 }
 
-// Binds one ALREADY-NORMALIZED commitment sentence (normalizeCommitmentText
-// output) to the confirmed slot. Sentence-scoped by the caller: the slot
-// facts come from the same utterance that passed the affirmative-form and
-// vocabulary checks.
-function quoteBindsConfirmedSlot(normalizedSentence, confirmedStartAt, callStartedAt) {
-  const q = ` ${String(normalizedSentence || '')} `;
-  // All slot facts derive from the CANONICAL ET wall clock — the same value
-  // booking writes (see etWallClockOfConfirmedStart above).
+// Slot facts of the confirmed start, from the CANONICAL ET wall clock — the
+// same value booking writes (see etWallClockOfConfirmedStart above). Null
+// when the slot is unreadable or outside the calendar window below.
+//
+// Calendar disambiguation (codex round-5 P1, tightened round 7): a weekday
+// name alone cannot distinguish "this Sunday" from "next Sunday". Compare
+// ET CALENDAR dates (an absolute 168h window is not calendar-unique around
+// DST transitions) and require the slot to fall 1–6 ET days after the
+// call's ET date: same-day is rejected (a "Sunday" spoken on a Sunday is
+// ambiguous between today and next week) and day 7 is rejected (same
+// weekday again). Within 1–6 days every weekday names exactly one date.
+function confirmedSlotFacts(confirmedStartAt, callStartedAt) {
   const wall = etWallClockOfConfirmedStart(confirmedStartAt);
-  if (!q.trim() || !wall) return false;
-  const wallY = Number(wall.slice(0, 4));
-  const wallMo = Number(wall.slice(5, 7));
-  const wallD = Number(wall.slice(8, 10));
-  const wallH = Number(wall.slice(11, 13));
-  if (![wallY, wallMo, wallD, wallH].every(Number.isFinite)) return false;
-  // Calendar disambiguation (codex round-5 P1, tightened round 7): a weekday
-  // name alone cannot distinguish "this Sunday" from "next Sunday". Compare
-  // ET CALENDAR dates (an absolute 168h window is not calendar-unique around
-  // DST transitions) and require the slot to fall 1–6 ET days after the
-  // call's ET date: same-day is rejected (a "Sunday" spoken on a Sunday is
-  // ambiguous between today and next week) and day 7 is rejected (same
-  // weekday again). Within 1–6 days every weekday names exactly one date.
   const call = new Date(String(callStartedAt || ''));
-  if (Number.isNaN(call.getTime())) return false;
+  if (!wall || Number.isNaN(call.getTime())) return null;
+  const [year, month, day, hour] = [[0, 4], [5, 7], [8, 10], [11, 13]].map(([a, b]) => Number(wall.slice(a, b)));
   let dayDiff;
   try {
     const callYmd = new Intl.DateTimeFormat('en-CA', {
       timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit',
     }).format(call);
-    dayDiff = (Date.UTC(wallY, wallMo - 1, wallD) - Date.parse(`${callYmd}T00:00:00Z`)) / 86400000;
-  } catch { return false; }
-  if (!(dayDiff >= 1 && dayDiff <= 6)) return false;
-  // Weekday/hour/date facts from the canonical wall clock (a calendar date
-  // is timezone-free, so UTC day-of-week of the wall date is exact).
-  const weekday = WEEKDAY_NAMES[new Date(Date.UTC(wallY, wallMo - 1, wallD)).getUTCDay()];
-  const hour12 = String(wallH % 12 || 12);
-  const dayPeriod = wallH >= 12 ? 'pm' : 'am';
-  const slotMonth = MONTH_NAMES[wallMo - 1];
-  const slotDay = wallD;
-  if (!weekday || !slotMonth) return false;
-  // Explicit calendar dates must match the slot (codex P1): "Sunday, August
-  // 9, at noon" shares weekday+time with an August 2 slot — the weekday
-  // window alone cannot catch it. Any month name in the quote must be the
-  // slot's ET month AND be immediately followed by the slot's day number
-  // (ordinal suffixes tolerated); any standalone ordinal day ("the 9th")
-  // must equal the slot's day. Unparseable or mismatched explicit dates
-  // fail closed.
-  const monthsInQuote = MONTH_NAMES.filter((m) => q.includes(` ${m} `));
-  if (monthsInQuote.length) {
-    if (monthsInQuote.length > 1 || monthsInQuote[0] !== slotMonth) return false;
-    const dm = q.match(new RegExp(` ${slotMonth} (\\d{1,2})(?:st|nd|rd|th)?(?= )`));
-    if (!dm || Number(dm[1]) !== slotDay) return false;
-  }
-  for (const om of q.matchAll(/ (\d{1,2})(?:st|nd|rd|th)(?= )/g)) {
-    if (Number(om[1]) !== slotDay) return false;
-  }
-  // Numeric dates and years (codex P1): "Sunday 8/9 at noon" normalizes to
-  // the adjacent digit pair "8 9" — every adjacent pair whose second token
-  // is not the ":00" minutes must equal the slot's ET month/day. Any 3–4
-  // digit number must be the slot's ET year; anything else is an
-  // unvalidated explicit date token and fails closed.
-  // Positional numeric-shape consumption (codex round-7j/7k): every RUN of
-  // consecutive number tokens must parse as a complete shape the slot
-  // explains — position matters, not just membership ("Sunday 8/2/2 at
-  // noon" must not book a 2026-08-02 slot because the trailing 2 happens to
-  // equal the day). Valid shapes: [hour12] · [hour12, 00] (spoken ":00") ·
-  // [month, day] · [month, day, year] with a 2- or 4-digit slot year ·
-  // [day] alone. Anything else — extra components, stray street numbers,
-  // prices — fails closed.
-  const runs = [];
-  let run = [];
-  for (const tok of q.split(' ')) {
-    if (/^\d{1,4}$/.test(tok)) run.push(Number(tok));
-    else if (run.length) { runs.push(run); run = []; }
-  }
-  if (run.length) runs.push(run);
-  const h12 = Number(hour12);
-  for (const r of runs) {
-    const ok = (r.length === 1 && (r[0] === h12 || r[0] === slotDay))
-      || (r.length === 2 && r[0] === h12 && r[1] === 0)
-      || (r.length === 2 && r[0] === wallMo && r[1] === slotDay)
-      || (r.length === 3 && r[0] === wallMo && r[1] === slotDay && (r[2] === wallY || r[2] === wallY % 100));
-    if (!ok) return false;
-  }
-  // Exact binding, not presence (codex round-5 P1): a multi-slot turn
-  // ("Sunday at 10 AM won't work, but we'll see you at 11 AM") scatters
-  // matching tokens without committing to them. The quote must contain
-  // EXACTLY ONE time mention and EXACTLY ONE weekday name, each equal to the
-  // confirmed slot's. Time mentions are period-attached hours ("10 am",
-  // "10 00 am") plus the unambiguous aliases noon (12 PM) / midnight
-  // (12 AM), deduplicated by meaning ("12 pm" + "noon" is one mention).
-  // Negations can't be parsed deterministically, so ANY second time or
-  // weekday mention fails closed — the extraction prompt directs the model
-  // to pin the single final commitment sentence.
-  const mentions = new Set();
-  for (const m of q.matchAll(/(?:^| )(\d{1,2})(?: 00)? (am|pm)(?= |$)/g)) {
-    const h = String(Number(m[1]));
-    if (Number(h) >= 1 && Number(h) <= 12) mentions.add(`${h} ${m[2]}`);
-    else mentions.add(`invalid ${m[1]} ${m[2]}`);
-  }
-  if (q.includes(' noon ')) mentions.add('12 pm');
-  if (q.includes(' midnight ')) mentions.add('12 am');
-  const weekdaysInQuote = WEEKDAY_NAMES.filter((w) => q.includes(` ${w} `));
-  return mentions.size === 1
-    && mentions.has(`${Number(hour12)} ${dayPeriod}`)
-    && weekdaysInQuote.length === 1
-    && weekdaysInQuote[0] === weekday;
+    dayDiff = (Date.UTC(year, month - 1, day) - Date.parse(`${callYmd}T00:00:00Z`)) / 86400000;
+  } catch { return null; }
+  // A calendar date is timezone-free, so the UTC day-of-week of the wall
+  // date is exact.
+  const weekday = WEEKDAY_NAMES[new Date(Date.UTC(year, month - 1, day)).getUTCDay()];
+  const monthName = MONTH_NAMES[month - 1];
+  if (!(dayDiff >= 1 && dayDiff <= 6) || !weekday || !monthName) return null;
+  return { year, month, day, weekday, monthName, hour24: hour, hour12: hour % 12 || 12, period: hour >= 12 ? 'pm' : 'am' };
+}
+
+// What ONE normalized sentence says about a slot, parsed once into a flat
+// mention structure (codex round 13, P2: the binder used to interleave
+// parsing and comparison in one 57-branch function). Every field is
+// slot-independent; SLOT_BINDING_CHECKS, below, compares it to the slot.
+//
+// Numbers: every RUN of consecutive number tokens is kept with its
+// position (codex round-7j/7k: position matters, not just membership —
+// "Sunday 8/2/2 at noon" must not bind a 2026-08-02 slot because the
+// trailing 2 happens to equal the day). A lone number directly after
+// "the", a weekday, or a month name is in DATE position (codex round 11,
+// P1 :1605 — "Sunday the 10 at 10 o'clock" must match the slot DAY, not
+// just the hour) unless the next token marks it as an hour (am/pm/o'clock:
+// "the 10 o'clock slot", "Sunday 10 am").
+//
+// Times (codex round-5 P1 — exact binding, not presence): period-attached
+// hours ("10 am", "10 00 am"), noon (12 pm) / midnight (12 am), "N
+// o'clock" with an optional attached period, and a bare "at N" ONLY when
+// it ends the sentence or precedes "on <weekday>" (anywhere else "at 10" is
+// too likely an address or unrelated number). A form with no attached
+// period (live miss 17ed9362: "at 10 o'clock") takes the sentence's
+// STANDALONE period when it states one (codex round 13, P1 :1659: "We'll
+// see you Sunday PM at 10." is 22:00, not the inferred 10:00), and only
+// otherwise infers one from the Waves business day (7–11 morning, 12 noon,
+// 1–6 afternoon). Mentions dedupe by meaning ("12 pm" + "noon" is one);
+// any unparseable hour is an invalid mention and fails the binding.
+// Codex round 30, P1 (:1341): the date prepositions "for"/"on" also put a
+// lone cardinal in date position ("confirmed for 10 Sunday", "Sunday on 10
+// at 10 o'clock" — ASR drops the article/ordinal), still exempt when the
+// next token marks an hour ("for 10 o'clock", "on 10 am").
+const DATE_POSITION_PREV = new Set(['the', 'for', 'on', ...WEEKDAY_NAMES, ...MONTH_NAMES]);
+// Codex round 30, P2 (:1350): spoken day periods ("10 o'clock in the
+// morning", "3 o'clock in the afternoon") state the period like a standalone
+// am/pm — they take precedence over business-hours inference and must match
+// the slot's period.
+const SPOKEN_DAY_PERIODS = { morning: 'am', afternoon: 'pm' };
+const SPOKEN_DAY_PERIOD_HOURS = { morning: [5, 11], afternoon: [12, 17] };
+const HOUR_MARKER_NEXT = new Set(['am', 'pm', 'o', 'oclock']);
+// A period token is ATTACHED when it follows an hour ("10 pm", "10 00 pm")
+// or an o'clock ("10 o'clock pm"); any other am/pm is a STANDALONE period.
+const PERIOD_ATTACHED_PREV_RE = /^(?:\d{1,2}|clock|oclock)$/;
+const DAY_NUMBER_RE = /^\d{1,2}(?:st|nd|rd|th)?$/;
+const ORDINAL_DAY_RE = /^\d{1,2}(?:st|nd|rd|th)$/;
+const SPOKEN_TIME_RES = [
+  /(?:^| )(\d{1,2})(?: 00)? (am|pm)(?= |$)/g,
+  /(?:^| )(\d{1,2}) o ?clock(?: (am|pm))?(?= |$)/g,
+  new RegExp(`(?:^| )at (\\d{1,2})(?= $| on (?:${WEEKDAY_NAMES.join('|')})(?= |$))`, 'g'),
+];
+function inferPeriodFromBusinessHours(n) {
+  if (n >= 7 && n <= 11) return 'am';
+  return n >= 1 && n <= 12 ? 'pm' : null;
+}
+function parseSpokenSlot(normalizedSentence) {
+  const ns = String(normalizedSentence || '');
+  const toks = ns.split(' ');
+  const at = (i) => toks[i] || '';
+  const numberRuns = [];
+  toks.forEach((tok, i) => {
+    if (!/^\d{1,4}$/.test(tok)) return;
+    if (!/^\d{1,4}$/.test(at(i - 1))) numberRuns.push({ nums: [], prev: at(i - 1) });
+    numberRuns[numberRuns.length - 1].nums.push(Number(tok));
+    numberRuns[numberRuns.length - 1].next = at(i + 1);
+  });
+  const periods = new Set([
+    ...toks.filter((t, i) => (t === 'am' || t === 'pm') && !PERIOD_ATTACHED_PREV_RE.test(at(i - 1))),
+    ...toks.filter((t) => SPOKEN_DAY_PERIODS[t]).map((t) => SPOKEN_DAY_PERIODS[t]),
+  ]);
+  // More than one standalone period ("AM … PM") states no single period.
+  const statedPeriod = periods.size === 1 ? [...periods][0] : null;
+  const times = new Set(SPOKEN_TIME_RES.flatMap((re) => [...` ${ns} `.matchAll(re)].map((m) => {
+    const n = Number(m[1]);
+    const period = m[2] || (periods.size ? statedPeriod : inferPeriodFromBusinessHours(n));
+    return n >= 1 && n <= 12 && period ? `${n} ${period}` : 'invalid';
+  })));
+  if (toks.includes('noon')) times.add('12 pm');
+  if (toks.includes('midnight')) times.add('12 am');
+  // Codex round 17, P1 (:1705): a LONE period initial right after the hour
+  // ("10 o'clock p." → "10 o clock p") states a period the parser can't
+  // read; falling back to business-hours inference would bind the wrong
+  // half of the day. Reject the time outright (fails binding) instead.
+  if (toks.some((t, i) => (t === 'a' || t === 'p') && PERIOD_ATTACHED_PREV_RE.test(at(i - 1)))) times.add('invalid');
+  return {
+    weekdays: new Set(toks.filter((t) => WEEKDAY_NAMES.includes(t))),
+    months: new Set(toks.filter((t) => MONTH_NAMES.includes(t))),
+    // The day number directly after each month name ("August 2nd").
+    monthDays: toks.flatMap((t, i) => (MONTH_NAMES.includes(t) && DAY_NUMBER_RE.test(at(i + 1)) ? [parseInt(at(i + 1), 10)] : [])),
+    ordinals: toks.filter((t) => ORDINAL_DAY_RE.test(t)).map((t) => parseInt(t, 10)),
+    // Codex round 31, P1 (:1359): a LONE number must now be EXPLAINED by its
+    // position — hour position (an hour marker follows: am/pm/o'clock, or
+    // "at" precedes it) or date position (see DATE_POSITION_PREV) — and is
+    // otherwise unexplained and fails binding. Position used to matter only
+    // for date position, so a lone number anywhere else passed merely by
+    // equalling the hour ("We'll see you 10 Sunday at 10 o'clock" for a
+    // Sunday-the-2nd slot). Guilty unless positioned, not one more
+    // preposition at a time.
+    numberRuns: numberRuns.map(({ nums, prev, next }) => {
+      const hourPosition = nums.length === 1 && (HOUR_MARKER_NEXT.has(next) || prev === 'at');
+      const datePosition = nums.length === 1 && !hourPosition && DATE_POSITION_PREV.has(prev);
+      return { nums, hourPosition, datePosition };
+    }),
+    spokenDayPeriods: new Set(toks.filter((t) => SPOKEN_DAY_PERIODS[t])),
+    periods,
+    times,
+  };
+}
+
+// The complete MULTI-number shapes a slot explains: [hour12, 00] (spoken
+// ":00") · [month, day] · [month, day, year] with a 2- or 4-digit slot
+// year. A lone number is checked by position instead (SLOT_BINDING_CHECKS,
+// codex round 31). Anything else — extra components, stray street numbers,
+// prices, a 3–4 digit non-year — fails closed.
+const NUMBER_RUN_SHAPES = [
+  (r, s) => r.length === 2 && r[0] === s.hour12 && r[1] === 0,
+  (r, s) => r.length === 2 && r[0] === s.month && r[1] === s.day,
+  (r, s) => r.length === 3 && r[0] === s.month && r[1] === s.day && (r[2] === s.year || r[2] === s.year % 100),
+];
+// Every check must hold. Negations can't be parsed deterministically, so any
+// SECOND weekday or time mention fails closed — the extraction prompt
+// directs the model to pin the single final commitment sentence.
+const SLOT_BINDING_CHECKS = [
+  // Exactly one weekday, the slot's.
+  (said, slot) => said.weekdays.size === 1 && said.weekdays.has(slot.weekday),
+  // Exactly one time mention, the slot's hour AND period.
+  (said, slot) => said.times.size === 1 && said.times.has(`${slot.hour12} ${slot.period}`),
+  // A standalone period ("Sunday PM at 10") must be the slot's (codex round 13).
+  (said, slot) => [...said.periods].every((p) => p === slot.period),
+  // Explicit calendar dates (codex P1): "Sunday, August 9, at noon" shares
+  // weekday+time with an August 2 slot. Any month name must be the slot's
+  // only month, immediately followed by the slot's day number.
+  (said, slot) => !said.months.size
+    || (said.months.size === 1 && said.months.has(slot.monthName) && said.monthDays[0] === slot.day),
+  // Any ordinal ("the 9th") must be the slot's day.
+  (said, slot) => said.ordinals.every((d) => d === slot.day),
+  // Every number run is a complete shape the slot explains, and a lone
+  // number in date position is the slot's day.
+  (said, slot) => said.numberRuns.every((run) => {
+    if (run.nums.length === 1) {
+      if (run.hourPosition) return run.nums[0] === slot.hour12;
+      if (run.datePosition) return run.nums[0] === slot.day;
+      return false;
+    }
+    return NUMBER_RUN_SHAPES.some((fits) => fits(run.nums, slot));
+  }),
+  // Codex round 31, P1 (:1400): a spoken day period must actually contain
+  // the slot's hour — "morning" 5–11, "afternoon" 12–17 — not just share its
+  // am/pm ("10 o'clock in the afternoon" never binds 22:00).
+  (said, slot) => [...said.spokenDayPeriods].every((word) => {
+    const [from, to] = SPOKEN_DAY_PERIOD_HOURS[word];
+    return slot.hour24 >= from && slot.hour24 <= to;
+  }),
+];
+
+// Binds one ALREADY-NORMALIZED commitment sentence (normalizeCommitmentText
+// output) to the confirmed slot. Sentence-scoped by the caller: the slot
+// facts come from the same utterance that passed the affirmative-form and
+// vocabulary checks.
+function quoteBindsConfirmedSlot(normalizedSentence, confirmedStartAt, callStartedAt) {
+  const slot = confirmedSlotFacts(confirmedStartAt, callStartedAt);
+  if (!slot) return false;
+  const said = parseSpokenSlot(normalizedSentence);
+  return SLOT_BINDING_CHECKS.every((check) => check(said, slot));
 }
 
 // True only when the model pinned an AGENT-spoken evidence quote for the
@@ -1206,8 +1744,9 @@ function canAutoRouteDecision(extraction, opts = {}, out = {}) {
   // Fail-open booking (opts.failOpen): a CONFIRMED appointment must not die over
   // recoverable contact-field flags. Grounded in live misses (2026-07-10):
   // bookings blocked because the caller didn't recite a callback number (the ANI
-  // is present), an existing customer didn't restate an address already on file,
-  // or a garbled email tripped name_email_mismatch. The flag is still returned
+  // is present) or an existing customer didn't restate an address already on
+  // file. (name_email_mismatch is advisory outright since the owner ruling of
+  // 2026-09-26 — see ADVISORY_TRIAGE_FLAGS.) The flag is still returned
   // (failedOpenFlags) so the office can confirm the field — it just no longer
   // holds the appointment. Hard blocks (out_of_service_area, do_not_contact,
   // caller_not_authorized, spam) are NOT recoverable and stay in the filter —
@@ -1256,7 +1795,6 @@ function canAutoRouteDecision(extraction, opts = {}, out = {}) {
     // so it must hold for review, not fall back to the on-file primary.
     appointmentBlockingFlags = appointmentBlockingFlags.filter((f) => {
       if (f === 'caller_phone_missing' && aniPresent) { failedOpenFlags.push(f); return false; }
-      if (f === 'name_email_mismatch') { failedOpenFlags.push(f); return false; }
       if (f === 'low_extraction_confidence' && knownCustomerConfidenceTrusted) { failedOpenFlags.push(f); return false; }
       if (FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS.has(f) && knownCustomerHasAddress && !newAddressGiven) { failedOpenFlags.push(f); return false; }
       return true;

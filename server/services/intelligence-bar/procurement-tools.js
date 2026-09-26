@@ -15,6 +15,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const MODELS = require('../../config/models');
+const { anthropicMaxTokens, anthropicEffortConfig } = require('../llm/anthropic-wire');
 const inventory = require('../inventory-operations');
 
 const PROCUREMENT_TOOLS = [
@@ -544,7 +545,8 @@ Search vendor websites for exact prices. Return JSON only:
 
     const msg = await anthropic.messages.create({
       model: MODELS.FLAGSHIP,
-      max_tokens: 2000,
+      ...anthropicEffortConfig(MODELS.FLAGSHIP),
+      max_tokens: anthropicMaxTokens(MODELS.FLAGSHIP, 2000),
       tools: [{ type: 'web_search_20250305', name: 'web_search' }],
       messages: [{ role: 'user', content: prompt }],
     });
@@ -566,7 +568,8 @@ Search vendor websites for exact prices. Return JSON only:
       }));
       currentMsg = await anthropic.messages.create({
         model: MODELS.FLAGSHIP,
-        max_tokens: 2000,
+        ...anthropicEffortConfig(MODELS.FLAGSHIP),
+        max_tokens: anthropicMaxTokens(MODELS.FLAGSHIP, 2000),
         tools: [{ type: 'web_search_20250305', name: 'web_search' }],
         messages: [
           { role: 'user', content: prompt },
