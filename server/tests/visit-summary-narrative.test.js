@@ -88,13 +88,18 @@ test('reviewed prompt keeps pressure qualitative and treats missing or zero pres
     scoreRow: { displayed_score: 0, label_name: 'No visible activity', trend: 'first_marker' },
   });
   expect(pressure.displayScore).toBe('0.0');
-  const zero = groundingFacts(input({ pestPressure: pressure }));
+  const zero = groundingFacts(input({
+    pestPressure: pressure,
+    serviceTypeDisplay: 'One-Time Pest Control',
+  }));
   expect(zero.pressure).toEqual({ label: 'No visible activity', trend: 'first_marker', isZero: true });
   expect(groundingFacts(input({
     pestPressure: { enabled: true, displayScore: 0.3, label: 'None' },
   })).pressure).toEqual({ label: 'None', trend: null, isZero: false });
+  expect(buildUserMessage(zero)).toContain('"serviceTypeDisplay": "One-Time Pest Control"');
   expect(buildUserMessage(zero)).not.toContain('"displayScore"');
   expect(groundingFacts(input({ pestPressure: { enabled: true, displayScore: null } })).pressure).toBeNull();
+  expect(SYSTEM_PROMPT).toContain('for a Waves pest control service.');
   expect(SYSTEM_PROMPT).toContain('within the assessed scope');
   expect(SYSTEM_PROMPT).toContain('Missing pressure is unknown, not zero');
   expect(SYSTEM_PROMPT).toContain('Report change only when supplied');
@@ -172,6 +177,7 @@ test.each([
   ['We treated the perimeter. Your next visit is scheduled for Oct 2. - Waves', 'We treated the perimeter.'],
   ['We treated the perimeter. Your next visit is scheduled for Oct 2, 1–3 PM.', 'We treated the perimeter.'],
   ['We sealed a 1.5-foot gap, and your next appointment is booked for Sep 24 at 1 p.m.', 'We sealed a 1.5-foot gap.'],
+  [sanitizeRecap('We sealed a gap, and your next appointment is booked for Sep 24 at 1 p.m.'), 'We sealed a gap.'],
 ])('appointment removal preserves sentence boundaries: %s', (recap, expected) => {
   expect(recapWithoutStaleAppointment(recap, { date: 'Friday, October 9' })).toBe(expected);
 });

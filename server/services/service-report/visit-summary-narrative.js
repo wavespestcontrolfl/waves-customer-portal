@@ -92,7 +92,9 @@ function recapWithoutStaleAppointment(recap, nextVisit) {
     // that clear sentence boundary; other surrounding prose stays verbatim.
     const consumedTerminalDot = /\.\s*$/.test(appointment);
     const remainder = source.slice(offset + appointment.length);
-    const followedBySentence = !remainder.trim() || /^\s+[A-Z]/.test(remainder);
+    const followedBySentence = !remainder.trim()
+      || /^\s*[-–—]\s*Waves\s*$/i.test(remainder)
+      || /^\s+[A-Z]/.test(remainder);
     return removedLeadingConnector && consumedTerminalDot && followedBySentence ? '.' : '';
   });
   if (stripped === text) return text;
@@ -201,7 +203,7 @@ function deterministicSummary(facts) {
   return parts.filter(Boolean).join(' ');
 }
 
-const SYSTEM_PROMPT = `You rewrite one customer-facing Visit Summary for Waves recurring pest control.
+const SYSTEM_PROMPT = `You rewrite one customer-facing Visit Summary for a Waves pest control service.
 
 ${HUMAN_PROSE_RULES}
 
