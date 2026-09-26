@@ -303,7 +303,7 @@ function accessCodeDetectionText(text) {
     const digits = token.replace(/\D/g, '');
     const credentialShape = /[A-Za-z#*]/.test(token) || /[\s–—-]/.test(token);
     if (!credentialShape || digits.length < 3 || digits.length > 8) return match;
-    const compactDevice = token.match(/^(?:(rear|side|front|back|main|north|south|east|west)[\s–—-]*)?(gate|door|garage|entry|keypad|lockbox|alarm)/i);
+    const compactDevice = token.match(/^(?:(rear|side|front|back|main|north|south|east|west)[\s–—-]*)?(gate|door|garage|entry|keypad|lockbox|alarm)(?=[\d#*\s–—-]|$)/i);
     if (compactDevice) {
       const direction = compactDevice[1] ? `${compactDevice[1]} ` : '';
       return `${prefix}${direction}${compactDevice[2]} ${digits}`;
