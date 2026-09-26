@@ -6028,6 +6028,19 @@ router.get('/', async (req, res, next) => {
       byTech[key].zones[s.zone] = (byTech[key].zones[s.zone] || 0) + 1;
     });
 
+    // Schedule tie-proximity display order (owner ruling 2026-09-26, dark by
+    // default): DISPLAY ONLY — attaches a `displayOrder` index to each of a
+    // tech's stops so the mobile day list and the desktop day board's route-
+    // order badge can break a window-start tie by drive-time proximity to
+    // the previous stop, instead of booking order. Nothing is written to the
+    // DB and no stop is physically reordered here — `enriched` (and every
+    // response field built from it) keeps its DB-query order; only the new
+    // `displayOrder` field is added, in place, on the SAME objects `enriched`
+    // holds. Off = no field, byte-identical to before this gate existed.
+    if (require('../config/feature-gates').gateEnvValue('GATE_SCHEDULE_TIE_PROXIMITY')) {
+      Object.values(byTech).forEach((tech) => require('../services/schedule-tie-proximity').stampTieProximityDisplayOrder(tech.services));
+    }
+
     // Calculate tech summaries
     Object.values(byTech).forEach(tech => {
       tech.totalServices = tech.services.length;
@@ -6189,6 +6202,10 @@ router.get('/week', async (req, res, next) => {
           'scheduled_services.weekend_shift',
           'scheduled_services.source_estimate_id',
           'scheduled_services.annual_prepay_term_id',
+          // Tie-proximity display order (GATE_SCHEDULE_TIE_PROXIMITY) needs
+          // each stop's point — same stamped-vs-customer rule as the day feed.
+          db.raw(`COALESCE(scheduled_services.lat, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.latitude END) as visit_lat`),
+          db.raw(`COALESCE(scheduled_services.lng, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.longitude END) as visit_lng`),
           'customers.first_name', 'customers.last_name', 'customers.waveguard_tier',
           'customers.monthly_rate', 'customers.autopay_enabled', 'customers.autopay_paused_until',
           'customers.autopay_payment_method_id',
@@ -6509,6 +6526,13 @@ router.get('/week', async (req, res, next) => {
           visitCloseoutPacket: s.closeout_packet_id ? { id: s.closeout_packet_id, status: s.closeout_packet_status } : null,
         };
       }));
+
+      // Same display-only tie-proximity order as the day feed, per tech per
+      // day, so week mode and day mode agree. Coordinates come from the raw
+      // rows; only `displayOrder` is added to the payload.
+      if (require('../config/feature-gates').gateEnvValue('GATE_SCHEDULE_TIE_PROXIMITY')) {
+        require('../services/schedule-tie-proximity').stampTieProximityDisplayOrder(servicePayloads, services);
+      }
 
       days.push({
         date: dateStr,

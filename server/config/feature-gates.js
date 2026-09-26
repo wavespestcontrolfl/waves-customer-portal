@@ -2224,6 +2224,20 @@ const gates = {
   // would calibrate the estimator while logGateStatus reported it disabled.
   driveTimeCalibration: gateEnvValue('GATE_DRIVE_TIME_CALIBRATION'),
 
+  // Schedule tie-proximity display order (owner ruling 2026-09-26) — when two
+  // stops on a tech's day start within 30 minutes of each other, the one
+  // closer to the previous stop shows first, instead of falling back to
+  // whichever was booked first. DISPLAY ONLY: server/services/schedule-tie-
+  // proximity.js returns a `displayOrder` per stop; nothing writes
+  // route_order or any other column, and no customer communication is sent.
+  // Uses the existing shared drive-time estimator (GATE_DRIVE_TIME_CALIBRATION
+  // governs which one) — no new Google API calls. Off (default in every
+  // environment) → the mobile day/week list and the desktop day board's route-
+  // order badge sort by window start alone, exactly as before this gate
+  // existed. Consumers read gateEnvValue() at CALL time, so a flip needs no
+  // redeploy. Kill switch: unset GATE_SCHEDULE_TIE_PROXIMITY.
+  scheduleTieProximity: gateEnvValue('GATE_SCHEDULE_TIE_PROXIMITY'),
+
   // Slot Travel Gap — the customer-facing pickers (estimate, one-tap, /book,
   // reschedule, re-service, voice, rain-out, AI assistant) and every commit
   // gate behind them require modeled drive time + SLOT_TRAVEL_BUFFER_MINUTES
