@@ -20,6 +20,7 @@ MRR: $X (+Y%)
 Revenue MTD: $X
 Active: X customers (+X this mo)
 At-risk: X (name highest-value critical)
+Ops 7d: resp 64m (tgt 60m), completion 78% (tgt 85%)
 Ads: CPA $X | ROAS Xx
 Reviews: X.X★ (X total, X unresponded)
 Content: X published, X decaying
@@ -27,14 +28,22 @@ SEO: backlinks +X
 ⚠️ any anomalies
 — Waves BI Agent"
 
+OPS 7D LINE (required, every briefing):
+- get_operations_snapshot returns kpis: an array of { metric, label, last7, last30, target, lowerIsBetter, tone, window } — window is 'rolling' (last7 is the rolling 7-day value vs a rolling last30 30-day baseline — kpiWindow explains the exact wording; this is NOT "last week vs the week before", never describe it that way) or 'current' (last7 is a live snapshot as of today, e.g. AR days; last30 is null — there is no 30-day baseline for it, so never present it as a 7-day value compared to a 30-day baseline) or 'cohort' (retention: last7/last30 are the share of customers who joined before each window began that are still active TODAY — use kpiWindow.cohort's wording, never call it a period ending yesterday).
+- collection_rate also carries "n" (issued invoices in the 7-day window) and "lowSample" (true when n < 5 — the SAME threshold the dashboard's Collection Rate tile uses to fade itself). When lowSample is true, tone is null and it never appears in opsLine (not even in the "n/a" list) — 1-4 issued invoices is noise, not a target miss or an outage. Report it in operations_section as "too few invoices to grade" — never "unavailable" (that's for a real computation failure) and never "on target".
+- get_operations_snapshot ALSO returns "opsLine": the exact, already-composed "Ops 7d: ..." string. Copy it into the SMS VERBATIM as the Ops 7d line — do NOT recompute, rephrase, reorder, round differently, or re-derive it from the kpis array yourself. It already ranks off-target metrics worst-first (capped at 4) and marks any targeted metric with no usable value as unavailable (an "; n/a: ..." suffix, or the whole line reading "Ops 7d: KPIs unavailable") rather than ever reporting missing/failed data as "all on target" (with an unavailable metric the line reads "rest on target; n/a: ...").
+- This line is never dropped. If the SMS is running long, trim the content/SEO line(s) first, then the ads line — never drop MRR, revenue MTD, active customers, at-risk, reviews, or the Ops 7d line.
+
 ANALYSIS RULES:
 - Compare every metric to last week AND last month
 - Flag anything >15% change as noteworthy
-- SMS: only 6-8 most actionable numbers + anomalies
-- Always include: MRR, revenue MTD, active customers, at-risk, reviews
+- SMS: only 6-8 most actionable numbers + anomalies + the required Ops 7d line
+- Always include: MRR, revenue MTD, active customers, at-risk, reviews, Ops 7d
 - Use ↑↓ arrows, not words
 - Name specific customers for critical issues
 - Running experiments (get_experiment_results): one line each at the end of the content & SEO section; "too early" until the readiness note says otherwise
+
+SAVED REPORT — operations_section (save_weekly_report): list EVERY kpi from get_operations_snapshot's kpis array, one per line — label, last7 value, the last30 baseline (for a 'current'-window kpi like AR days, write "as of today — no 30-day baseline" instead of a baseline number; never present it as a 7-day-vs-30-day comparison), the target (or "no target set"), and the tone (write "unavailable" instead of a tone when last7 or tone is null — never "on target"; EXCEPTION: collection_rate with lowSample true — write "too few invoices to grade" instead, never "unavailable" or "on target") — plus the rest of the operations narrative (completion rate, unassigned, weather). This is the durable record; the SMS only surfaces the outliers.
 
 Save a detailed report to the dashboard after sending the SMS.`,
 
@@ -64,7 +73,7 @@ Save a detailed report to the dashboard after sending the SMS.`,
     {
       type: 'custom',
       name: 'get_operations_snapshot',
-      description: `Get this week's operations: services scheduled vs completed, completion rate, unassigned count, services by tech, tomorrow's schedule with weather forecast, and any services flagged for reschedule due to weather.`,
+      description: `Get this week's operations: services scheduled vs completed, completion rate, unassigned count, services by tech, tomorrow's schedule with weather forecast, and any services flagged for reschedule due to weather. Also returns "kpis": completion_rate, callback_rate, response_speed_min, lead_conversion, stops_per_hour, revenue_per_man_hour, gross_margin, ar_days, retention_pct, and collection_rate, each as { metric, label, last7, last30, target, lowerIsBetter, tone, window } — window is 'rolling' (last7 is the rolling 7-day value, last30 the rolling 30-day baseline — see "kpiWindow" for the exact wording, never call this "last week vs the week before") or 'current' (last7 is a live snapshot as of today, e.g. AR days; last30 is null, there is no 30-day baseline) or 'cohort' (retention: customers who joined before each window began, still active today — see kpiWindow.cohort), target/tone come from the owner's kpi_targets (tone is 'good'/'warn'/'bad'/null); collection_rate additionally carries "n" (issued invoices in the 7-day window) and "lowSample" (true when n < 5, the same threshold the dashboard's Collection Rate tile fades at) — tone is null and it is withheld from opsLine when lowSample is true, and the saved report must call it "too few invoices to grade" rather than "unavailable" or "on target". Also returns "opsLine": the ready-made "Ops 7d: ..." SMS line — copy it into the SMS verbatim, never recompute it. Required for the SMS's "Ops 7d" line and the saved report's operations_section.`,
       input_schema: { type: 'object', properties: {} },
     },
 
@@ -140,14 +149,14 @@ Save a detailed report to the dashboard after sending the SMS.`,
           summary: { type: 'string', description: 'Executive summary (2-3 sentences)' },
           revenue_section: { type: 'string', description: 'Full revenue analysis' },
           customer_section: { type: 'string', description: 'Customer base analysis' },
-          operations_section: { type: 'string', description: 'Operations analysis' },
+          operations_section: { type: 'string', description: 'Operations analysis, including every kpi from get_operations_snapshot.kpis (label, last7, last30 baseline, target, tone) — not just the ones that made the SMS' },
           ads_section: { type: 'string', description: 'Google Ads analysis' },
           reviews_section: { type: 'string', description: 'Reviews analysis' },
           content_seo_section: { type: 'string', description: 'Content & SEO analysis' },
           anomalies_section: { type: 'string', description: 'Anomalies and alerts' },
           action_items: { type: 'string', description: 'Prioritized action items for the week' },
         },
-        required: ['summary', 'action_items'],
+        required: ['summary', 'operations_section', 'action_items'],
       },
     },
   ],

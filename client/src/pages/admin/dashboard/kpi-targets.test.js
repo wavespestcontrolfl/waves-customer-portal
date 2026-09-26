@@ -1,8 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { DEFAULT_KPI_TARGETS, kpiTargetTone } from "@kpi-targets";
 import {
-  DEFAULT_KPI_TARGETS,
   KPI_METRIC_LABELS,
-  kpiTargetTone,
   resolveTargetDef,
 } from "./kpi-targets";
 

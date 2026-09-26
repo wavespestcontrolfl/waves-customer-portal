@@ -123,4 +123,4 @@ async function getKpiHistory(days = 90, conn) {
   return { days: clamped, series };
 }
 
-module.exports = { recordKpiSnapshot, getKpiHistory, SNAPSHOT_METRICS };
+module.exports = { recordKpiSnapshot, getKpiHistory, SNAPSHOT_METRICS, toFiniteOrNull };
