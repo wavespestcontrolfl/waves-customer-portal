@@ -194,8 +194,16 @@ exports.up = async function up(knex) {
     const source = await knex('service_completion_profiles').where({ service_key: 'rodent_trapping_followup' }).first();
     if (!hasProfile && source) {
       const { id, created_at: _c, updated_at: _u, ...rest } = source;
+      // JSONB columns (companion_types etc.) come back from pg as JS
+      // arrays/objects; passed straight to insert, pg serializes an array as
+      // a Postgres array literal — invalid JSON that aborts the migration
+      // (waves-db §5d). Stringify every array/plain-object value.
+      const cloned = Object.fromEntries(Object.entries(rest).map(([col, val]) => [
+        col,
+        val && typeof val === 'object' && !(val instanceof Date) && !Buffer.isBuffer(val) ? JSON.stringify(val) : val,
+      ]));
       await knex('service_completion_profiles').insert({
-        ...rest,
+        ...cloned,
         service_key: NEW_KEY,
         service_name_snapshot: NEW_SERVICE_ROW.name,
         billing_type: 'one_time',

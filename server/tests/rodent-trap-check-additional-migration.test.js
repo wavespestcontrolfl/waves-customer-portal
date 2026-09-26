@@ -62,6 +62,8 @@ const seedDb = () => ({
     id: 'p-fu', service_key: 'rodent_trapping_followup', service_name_snapshot: 'Rodent Trapping Follow-Up Visit',
     billing_type: 'one_time', completion_mode: 'service_report', project_type: 'rodent_trapping', delivery_mode: 'auto_send',
     active: true, notes: '[rodent_graduation_action=graduated]',
+    companion_types: ['rodent_exclusion', 'rodent_sanitation'],
+    form_config: { sections: ['traps'] },
   }],
   scheduled_services: [],
   scheduled_service_addons: [],
@@ -171,5 +173,14 @@ describe('20260927000001 rodent trap check additional', () => {
     await migration.down(knex);
     expect(db.service_completion_profiles.some((p) => p.service_key === 'rodent_trap_check_additional')).toBe(false);
     expect(svc(db, 'rodent_trap_check_additional')).toMatchObject({ id: 'svc-pre', is_active: true });
+  });
+
+  test('JSONB array/object columns are serialized when the profile is cloned', async () => {
+    const db = seedDb();
+    await migration.up(fakeKnex(db));
+    const cloned = db.service_completion_profiles.find((p) => p.service_key === 'rodent_trap_check_additional');
+    expect(cloned.companion_types).toBe(JSON.stringify(['rodent_exclusion', 'rodent_sanitation']));
+    expect(cloned.form_config).toBe(JSON.stringify({ sections: ['traps'] }));
+    expect(cloned.active).toBe(true);
   });
 });
