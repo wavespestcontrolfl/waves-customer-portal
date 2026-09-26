@@ -38,9 +38,10 @@ const { hasAlignedAuth } = require('../email/inbox-hygiene');
 const { domainFromAddress } = require('../email/spam-blocker');
 const { formatETDate, etParts, etDateString, addETDays, parseETDateTime } = require('../../utils/datetime-et');
 const { parseAmazonShippedEmail, AMAZON_SHIPPED_FROM } = require('./amazon-delivery-parser');
-const { matchAmazonTitleToProduct } = require('./product-matcher');
-const { VENDOR, UNKNOWN_ORDER, lockShipment } = require('./receipt-processor');
+const { matchTitleToProduct } = require('./product-matcher');
+const { UNKNOWN_ORDER, lockShipment } = require('./receipt-processor');
 
+const VENDOR = 'amazon';
 const DAY_MS = 24 * 60 * 60 * 1000;
 const SHIPPED_GRACE_MS = 3 * DAY_MS;
 const SHIPPED_LOOKBACK_MS = 14 * DAY_MS;
@@ -87,7 +88,7 @@ function shipmentSettled(conn, shipmentId) {
 async function stockedItems(items, conn) {
   const stocked = [];
   for (const [index, item] of items.entries()) {
-    const match = await matchAmazonTitleToProduct(item.title, conn);
+    const match = await matchTitleToProduct(item.title, conn);
     if (match.matched) stocked.push({ item, lineNo: index + 1, product: match.product });
   }
   return stocked;
@@ -120,7 +121,7 @@ async function alertIfUndelivered(email, { notifyAdmin, now }, conn) {
   const stocked = await stockedItems(parsed.items, conn);
   if (!stocked.length) return null;
   return conn.transaction(async (trx) => {
-    await lockShipment(trx, parsed.shipmentId);
+    await lockShipment(trx, VENDOR, parsed.shipmentId);
     // A Delivered email for it may have been processed since the check above.
     if (await shipmentSettled(trx, parsed.shipmentId)) return null;
     await trx('purchase_receipt_lines').insert(stocked.map(({ item, lineNo, product }) => ({

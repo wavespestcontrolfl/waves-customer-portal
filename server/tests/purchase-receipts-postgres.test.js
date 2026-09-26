@@ -22,8 +22,9 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const { processReceiptLine } = require('../services/purchase-receipts/receipt-processor');
 const notifications = require('../services/notification-service');
 const { alertUndeliveredShipments } = require('../services/purchase-receipts/undelivered-shipments');
+const { runPurchaseReceiptRestockSweep } = require('../services/purchase-receipts/sweep');
 
-const TABLES = ['products_catalog', 'product_aliases', 'product_inventory_movements', 'product_restock_requests', 'purchase_receipt_lines', 'notifications', 'emails'];
+const TABLES = ['products_catalog', 'product_aliases', 'product_inventory_movements', 'product_restock_requests', 'purchase_receipt_lines', 'notifications', 'emails', 'email_attachments'];
 const RECEIVED_AT = new Date('2026-09-27T15:00:00Z');
 const TITLE = 'Control Solutions Taurus SC Termiticide 78 oz';
 const HOUR = 60 * 60 * 1000;
@@ -54,7 +55,7 @@ jest.setTimeout(30000);
   });
 
   const line = (overrides = {}) => ({
-    email: { id: randomUUID(), received_at: RECEIVED_AT }, orderNumber: '900-1000001-1000001',
+    vendor: 'amazon', email: { id: randomUUID(), received_at: RECEIVED_AT }, orderNumber: '900-1000001-1000001',
     shipmentKey: 'ship-1', item: { title: TITLE, quantity: 2 }, lineNo: 1, ...overrides,
   });
   // A ledger row `hours` after the email's received_at (negative = before).
@@ -152,7 +153,7 @@ jest.setTimeout(30000);
   });
 
   test('no readable Order #: a would-be restock is held as no_order_number under order "unknown"', async () => {
-    expect(await processReceiptLine(line({ orderNumber: null }))).toMatchObject({ status: 'no_order_number' });
+    expect(await processReceiptLine(line({ orderNumber: null, holdAs: 'no_order_number' }))).toMatchObject({ status: 'no_order_number' });
     expect(await stock()).toBe(0);
     expect(await mockConn('purchase_receipt_lines').where({ order_number: 'unknown' }).first()).toMatchObject({ status: 'no_order_number', product_id: taurus.id });
   });
@@ -229,6 +230,78 @@ jest.setTimeout(30000);
       expect((await run()).undelivered).toEqual([]);
       expect(await mockConn('purchase_receipt_lines')).toEqual([]);
       expect(await mockConn('notifications')).toEqual([]);
+    });
+  });
+  describe('SiteOne invoices through the sweep', () => {
+    const INVOICE = '900000001-001';
+    const TAURUS_LINE = 'CSI-Pest Taurus SC Broad Spectrum Liquid Concentrate Termiticide/Insecticide 78 fl oz. Bottle (QGCY) UOM:EA';
+    const SPRAYER_LINE = 'Flowzone Cyclone 3 Variable Pressure 18V Battery Powered Sprayer (4-Gallon)';
+    const savedEnv = {};
+    beforeAll(() => {
+      for (const key of ['GATE_PURCHASE_RECEIPT_RESTOCK', 'PURCHASE_RECEIPT_SINCE']) savedEnv[key] = process.env[key];
+      process.env.GATE_PURCHASE_RECEIPT_RESTOCK = 'true';
+      process.env.PURCHASE_RECEIPT_SINCE = new Date(Date.now() - 2 * DAY).toISOString();
+    });
+    afterAll(() => {
+      for (const [key, value] of Object.entries(savedEnv)) {
+        if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      }
+    });
+
+    // An authenticated invoice email plus the invoice pipeline's extraction of its PDF.
+    async function invoiceEmail({ from, subject, bodyHtml = '', hoursAgo, lines, total }) {
+      const [email] = await mockConn('emails').insert({
+        gmail_id: `gm-${randomUUID()}`, gmail_thread_id: 'thread', from_address: from, subject, body_html: bodyHtml,
+        authentication_results: `dkim=pass header.i=@${from.split('@')[1]}`, received_at: new Date(Date.now() - hoursAgo * HOUR),
+      }).returning('*');
+      const subtotal = lines.reduce((sum, line) => sum + line.total, 0);
+      await mockConn('email_attachments').insert({
+        email_id: email.id, filename: 'invoice.pdf', mime_type: 'application/pdf', is_invoice: true,
+        extracted_data: JSON.stringify({ invoice_number: INVOICE, subtotal, tax: total - subtotal, total, line_items: lines }),
+      });
+      return email;
+    }
+    const storeCopy = (lines, total) => invoiceEmail({ from: 'AB00000@siteone.com', subject: `SiteOne Confirmation : Invoice #${INVOICE}`, hoursAgo: 3, lines, total });
+    const billingCopy = (lines, total) => invoiceEmail({
+      from: 'siteoneus@billtrust.com', subject: 'Acct No. 0000000: Your Invoice From SiteOne Landscape Supply, LLC is Attached',
+      bodyHtml: `<td align=center>${INVOICE}</td>`, hoursAgo: 1, lines, total,
+    });
+    const notify = (...args) => notifications.notifyAdmin(...args);
+
+    test('a reconciled invoice adds its stocked line to stock; its billing copy adds nothing more', async () => {
+      const lines = [
+        { description: TAURUS_LINE, quantity: 1, unit_price: 95, total: 95 },
+        { description: SPRAYER_LINE, quantity: 1, unit_price: 269.99, total: 269.99 },
+      ];
+      await storeCopy(lines, 390.54);
+      const result = await runPurchaseReceiptRestockSweep({ notify });
+      expect(result.logged).toHaveLength(1);
+      expect(await stock()).toBe(78);
+      const rows = await mockConn('purchase_receipt_lines').where({ vendor: 'siteone', shipment_key: INVOICE }).orderBy('line_no');
+      expect(rows.map((row) => [row.line_no, row.status])).toEqual([[1, 'logged'], [2, 'unmatched']]);
+      const [movement] = await mockConn('product_inventory_movements').where({ product_id: taurus.id });
+      expect(movement.metadata).toMatchObject({ source: 'siteone_invoice', orderNumber: INVOICE });
+      const [bell] = await mockConn('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`purchase-receipt:${rows[0].id}`]);
+      expect(bell.body).toBe(`SiteOne invoice ${INVOICE} logged: Taurus SC +78 fl oz (1 × 78 fl oz)`);
+
+      await billingCopy(lines, 390.54);
+      await runPurchaseReceiptRestockSweep({ notify });
+      expect(await stock()).toBe(78);
+      expect(await mockConn('purchase_receipt_lines').where({ vendor: 'siteone' })).toHaveLength(2);
+    });
+
+    test('a return of a stocked product is held for a hand adjustment, never subtracted or added', async () => {
+      await storeCopy([{ description: TAURUS_LINE, quantity: -1, unit_price: 95, total: -95 }], -101.65);
+      await runPurchaseReceiptRestockSweep({ notify });
+      expect(await stock()).toBe(0);
+      expect(await mockConn('purchase_receipt_lines').where({ vendor: 'siteone' }).first()).toMatchObject({ status: 'returned', product_id: taurus.id });
+    });
+
+    test('an invoice whose numbers don\'t reconcile moves nothing; its stocked line is held unverified', async () => {
+      await storeCopy([{ description: TAURUS_LINE, quantity: 2, unit_price: 95, total: 95 }], 101.65);
+      await runPurchaseReceiptRestockSweep({ notify });
+      expect(await stock()).toBe(0);
+      expect(await mockConn('purchase_receipt_lines').where({ vendor: 'siteone' }).first()).toMatchObject({ status: 'unverified' });
     });
   });
 });

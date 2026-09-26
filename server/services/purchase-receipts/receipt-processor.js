@@ -1,8 +1,9 @@
 /**
- * purchase-receipts/receipt-processor.js — turns one parsed Amazon delivery
- * item into a purchase_receipt_lines row and, when it resolves cleanly, a
- * stock movement through the EXISTING adjustStock path
- * (inventory-operations.js), never raw SQL.
+ * purchase-receipts/receipt-processor.js — turns one purchase line (an
+ * Amazon delivery item, a SiteOne invoice line) into a purchase_receipt_lines
+ * row and, when it resolves cleanly, a stock movement through the EXISTING
+ * adjustStock path (inventory-operations.js), never raw SQL. Each vendor
+ * writes under its own movement source (SOURCES).
  *
  * Stock only. This lane never closes, receives or otherwise writes a
  * product_restock_requests row: three audit rounds each found a new way an
@@ -34,10 +35,11 @@
  * the line from scratch. The claim's ON CONFLICT DO NOTHING is the
  * at-most-once guard against a concurrent run.
  *
- * An email with no readable "Order #" (a template change) is keyed under
- * order_number 'unknown' by its shipment; a line that would move stock is
- * held as 'no_order_number' instead, so it surfaces for review rather than
- * vanishing.
+ * A caller can hold a line that would move stock under another status
+ * (holdAs) — an Amazon email with no readable "Order #" ('no_order_number',
+ * keyed under order_number 'unknown'), a SiteOne return ('returned') or an
+ * invoice whose numbers don't reconcile ('unverified') — so it surfaces for
+ * review rather than moving stock. Unmatched lines stay 'unmatched'.
  *
  * A shipment already handed to a person — undelivered-shipments.js recorded
  * it as 'no_delivery_email' and asked for a hand log because its Delivered
@@ -56,14 +58,14 @@
  */
 const db = require('../../models/db');
 const logger = require('../logger');
-const { matchAmazonTitleToProduct } = require('./product-matcher');
+const { matchTitleToProduct } = require('./product-matcher');
 const { parsePackSize } = require('../product-costing');
 const { convertInventoryQuantity } = require('../inventory-units');
 const { LIVE_RESTOCK_STATUSES } = require('../procurement/live-restock-request');
 const { adjustStock } = require('../inventory-operations');
 
-const VENDOR = 'amazon';
-const SOURCE = 'amazon_delivery';
+// Vendor -> the product_inventory_movements.metadata.source its restocks carry.
+const SOURCES = { amazon: 'amazon_delivery', siteone: 'siteone_invoice' };
 const DUPLICATE_RESTOCK_LOOKBACK_MS = 48 * 60 * 60 * 1000;
 const UNKNOWN_ORDER = 'unknown';
 const HANDED_TO_PERSON = Object.freeze({ skipped: true, reason: 'asked_to_log_by_hand' });
@@ -96,7 +98,9 @@ const MULTIPACK_PATTERNS = [
 // stripped: "Twin Pack", "Pack of Two", "2 Count", "2ct", "78 oz x 2",
 // "(2) jugs", a second marker. The title claims a unit count this lane
 // can't read, so the line goes to a person.
-const PACK_CLAIM_RE = /(?:\b|(?<=\d))(?:packs?|pks?|count|ct|qty|twin|bundle|cases?|sets?)\b|(?:^|[^a-z])[x×]\s*\d|\d\s*[x×](?![a-z])|\(\s*\d+\s*\)/i;
+// A SiteOne line's unit of measure other than EA (each) — "UOM:CS" is a
+// case — is the same kind of claim.
+const PACK_CLAIM_RE = /(?:\b|(?<=\d))(?:packs?|pks?|count|ct|qty|twin|bundle|cases?|sets?)\b|(?:^|[^a-z])[x×]\s*\d|\d\s*[x×](?![a-z])|\(\s*\d+\s*\)|\buom:\s*(?!ea\b)[a-z]+/i;
 
 // Plural containers with no recognized marker ("2 Bottles", "4 tubes / 30
 // g"): more than one unit, in a form this lane doesn't count.
@@ -180,7 +184,7 @@ function amountPerItem(title, container, aliasMatch) {
 
 // Pure classification (match + sizing, no writes). Exported for unit tests.
 async function classifyItem(item, conn = db) {
-  const match = await matchAmazonTitleToProduct(item.title, conn);
+  const match = await matchTitleToProduct(item.title, conn);
   if (!match.matched) return { status: 'unmatched', productId: null };
   const { product } = match;
   const container = parsePackSize(product.container_size);
@@ -199,9 +203,9 @@ async function claimLine(conn, row) {
 }
 
 // Serializes every writer of one shipment's lines (a Delivered line, the
-// undelivered alert) for the rest of the transaction.
-function lockShipment(trx, shipmentKey) {
-  return trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`purchase-receipt-shipment:${shipmentKey}`]);
+// undelivered alert, one invoice's lines) for the rest of the transaction.
+function lockShipment(trx, vendor, shipmentKey) {
+  return trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`purchase-receipt-shipment:${vendor}:${shipmentKey}`]);
 }
 
 // Classify, and for a line that would move stock, lock its product row and
@@ -220,35 +224,39 @@ async function classifyUnderLock(item, trx) {
 }
 
 /**
- * @param {{email, orderNumber, shipmentKey, item, lineNo, forcedStatus, ringBell}} params
+ * @param {{vendor, email, orderNumber, shipmentKey, item, lineNo, forcedStatus, holdAs, ringBell}} params
+ *   vendor: a SOURCES key ('amazon' | 'siteone').
  *   orderNumber: may be null (no readable Order #) — keyed as 'unknown'.
- *   shipmentKey: the parser's (shipmentId, else the email's gmail_id / id).
- *   forcedStatus: 'no_items' for the one placeholder line an itemless
- *   Delivered email gets (sweep.js) — no matching or sizing at all.
+ *   shipmentKey: Amazon's shipmentId (else the email's gmail_id / id), or
+ *   the SiteOne invoice number.
+ *   forcedStatus: a placeholder line with no matching or sizing at all —
+ *   'no_items' (an itemless Delivered email), 'unreadable' (a SiteOne
+ *   invoice never read into lines).
+ *   holdAs: the status a line that would move stock is held under instead.
  *   ringBell(outcome, trx): writes the line's bell on its transaction.
  * @returns one of (every recorded outcome carries lineId):
  *   { skipped: true, reason }                                    — nothing written
  *     (reason 'asked_to_log_by_hand': the shipment was handed to a person)
- *   { status: 'unmatched'|'size_mismatch'|'needs_size'|'no_items'|'no_order_number', inserted: true, product }
+ *   { status: 'unmatched'|'size_mismatch'|'needs_size'|forcedStatus|holdAs, inserted: true, product }
  *   { status: 'possible_duplicate', product, receivedQty, receivedUnit }  — held, no movement
  *   { status: 'logged', product, receivedQty, receivedUnit, movement, hasOpenRestockRequest }
  */
-async function processReceiptLine({ email, orderNumber, shipmentKey, item, lineNo, forcedStatus, ringBell = async () => {} }, conn = db) {
+async function processReceiptLine({ vendor, email, orderNumber, shipmentKey, item, lineNo, forcedStatus, holdAs, ringBell = async () => {} }, conn = db) {
   if (!shipmentKey) {
     logger.warn(`[purchase-receipts] email ${email.id} line ${lineNo}: no shipment key, skipped`);
     return { skipped: true, reason: 'no_shipment_key' };
   }
-  const key = { vendor: VENDOR, order_number: orderNumber || UNKNOWN_ORDER, shipment_key: shipmentKey, line_no: lineNo };
+  const key = { vendor, order_number: orderNumber || UNKNOWN_ORDER, shipment_key: shipmentKey, line_no: lineNo };
   if (await conn('purchase_receipt_lines').where(key).first('id')) return { ...ALREADY_PROCESSED };
 
   return conn.transaction(async (trx) => {
-    await lockShipment(trx, shipmentKey);
-    if (await trx('purchase_receipt_lines').where({ vendor: VENDOR, shipment_key: shipmentKey, status: 'no_delivery_email' }).first('id')) {
+    await lockShipment(trx, vendor, shipmentKey);
+    if (await trx('purchase_receipt_lines').where({ vendor, shipment_key: shipmentKey, status: 'no_delivery_email' }).first('id')) {
       return { ...HANDED_TO_PERSON };
     }
     let classified = forcedStatus ? { status: forcedStatus, productId: null, product: null } : await classifyUnderLock(item, trx);
-    if (!orderNumber && classified.status === 'logged') {
-      classified = { status: 'no_order_number', productId: classified.productId, product: classified.product };
+    if (holdAs && classified.status === 'logged') {
+      classified = { status: holdAs, productId: classified.productId, product: classified.product };
     }
     const claim = await claimLine(trx, {
       ...key, email_id: email.id, raw_title: item.title, quantity: item.quantity, product_id: classified.productId,
@@ -256,7 +264,7 @@ async function processReceiptLine({ email, orderNumber, shipmentKey, item, lineN
     });
     if (!claim) return { ...ALREADY_PROCESSED };
     const outcome = classified.status === 'logged'
-      ? await performLoggedMovement(trx, { claim, classified, orderNumber, email, item })
+      ? await performLoggedMovement(trx, { vendor, claim, classified, orderNumber, email, item })
       : { status: classified.status, inserted: true, product: classified.product || null };
     await ringBell({ ...outcome, lineId: claim.id }, trx);
     return { ...outcome, lineId: claim.id };
@@ -264,8 +272,9 @@ async function processReceiptLine({ email, orderNumber, shipmentKey, item, lineN
 }
 
 // A movement already on the ledger that may be this same box: a restock
-// from any other source since 48h before the email, or a count/correction
-// at or after it (see the header).
+// from any source but these automatic lanes (a hand entry, a received
+// restock request) since 48h before the email, or a count/correction at or
+// after it (see the header).
 function findPossibleDuplicateMovement(trx, productId, receivedAt) {
   const received = new Date(receivedAt);
   return trx('product_inventory_movements')
@@ -273,7 +282,7 @@ function findPossibleDuplicateMovement(trx, productId, receivedAt) {
     .where((either) => either
       .where((restock) => restock
         .where('movement_type', 'restock')
-        .whereRaw("(metadata ->> 'source') IS DISTINCT FROM ?", [SOURCE])
+        .whereRaw(`COALESCE(metadata ->> 'source', '') NOT IN (${Object.values(SOURCES).map(() => '?').join(', ')})`, Object.values(SOURCES))
         .where('created_at', '>=', new Date(received.getTime() - DUPLICATE_RESTOCK_LOOKBACK_MS)))
       .orWhere((correction) => correction
         .where('movement_type', 'correction')
@@ -285,7 +294,7 @@ function findPossibleDuplicateMovement(trx, productId, receivedAt) {
 // product row is already locked (classifyUnderLock), so no manual
 // adjustment commits between the duplicate check and the movement;
 // adjustStock locks the same row again, which Postgres treats as a no-op.
-async function performLoggedMovement(trx, { claim, classified, orderNumber, email, item }) {
+async function performLoggedMovement(trx, { vendor, claim, classified, orderNumber, email, item }) {
   const { product, receivedQty, receivedUnit } = classified;
   if (await findPossibleDuplicateMovement(trx, classified.productId, email.received_at)) {
     await trx('purchase_receipt_lines').where({ id: claim.id }).update({ status: 'possible_duplicate' });
@@ -293,7 +302,7 @@ async function performLoggedMovement(trx, { claim, classified, orderNumber, emai
   }
 
   const result = await adjustStock(classified.productId, { movementType: 'restock', quantity: receivedQty, unit: receivedUnit },
-    { source: SOURCE, extraMetadata: { orderNumber, emailId: email.id, rawTitle: item.title }, trx });
+    { source: SOURCES[vendor], extraMetadata: { orderNumber, emailId: email.id, rawTitle: item.title }, trx });
   await trx('purchase_receipt_lines').where({ id: claim.id }).update({ movement_id: result.movement.id });
   // Read-only: the bell mentions a live request; this lane never writes one.
   const liveRequest = await trx('product_restock_requests')
@@ -301,4 +310,4 @@ async function performLoggedMovement(trx, { claim, classified, orderNumber, emai
   return { status: 'logged', product, receivedQty, receivedUnit, movement: result.movement, hasOpenRestockRequest: Boolean(liveRequest) };
 }
 
-module.exports = { classifyItem, processReceiptLine, lockShipment, VENDOR, SOURCE, UNKNOWN_ORDER };
+module.exports = { classifyItem, processReceiptLine, lockShipment, SOURCES, UNKNOWN_ORDER };

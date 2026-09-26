@@ -11,7 +11,7 @@
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
-const mockState = { outcomes: [], emails: [], whereCalls: [] };
+const mockState = { outcomes: [], emails: [], whereCalls: [], siteOneEmails: [], siteOneInvoice: null, otherCopy: undefined };
 // Like the real processor, a recorded outcome's bell is rung through the
 // ringBell callback on the line's transaction ('trx-stub' here).
 jest.mock('../services/purchase-receipts/receipt-processor', () => ({
@@ -20,6 +20,13 @@ jest.mock('../services/purchase-receipts/receipt-processor', () => ({
     if (outcome?.status) await params.ringBell(outcome, 'trx-stub');
     return outcome;
   }),
+}));
+// Which emails are invoices and what their PDFs say are covered in
+// purchase-receipts-siteone.test.js; here only what the sweep records.
+jest.mock('../services/purchase-receipts/siteone-invoices', () => ({
+  ...jest.requireActual('../services/purchase-receipts/siteone-invoices'),
+  findSiteOneInvoiceEmails: jest.fn(async () => mockState.siteOneEmails),
+  readSiteOneInvoice: jest.fn(async () => mockState.siteOneInvoice),
 }));
 // Covered against Postgres in purchase-receipts-postgres.test.js; here only
 // its place in the sweep.
@@ -30,8 +37,9 @@ jest.mock('../models/db', () => {
   // Only runPurchaseReceiptRestockSweep's own emails query touches db in
   // this file — processReceiptEmail takes an already-fetched row.
   const q = {};
-  for (const m of ['whereRaw', 'orderBy', 'select']) q[m] = () => q;
+  for (const m of ['whereRaw', 'orderBy', 'select', 'whereNot']) q[m] = () => q;
   q.where = (...args) => { mockState.whereCalls.push(args); return q; };
+  q.first = async () => mockState.otherCopy; // another copy of a SiteOne invoice already recorded
   q.then = (resolve, reject) => Promise.resolve(mockState.emails).then(resolve, reject);
   return jest.fn(() => q);
 });
@@ -63,6 +71,9 @@ beforeEach(() => {
   mockState.outcomes = [];
   mockState.emails = [];
   mockState.whereCalls = [];
+  mockState.siteOneEmails = [];
+  mockState.siteOneInvoice = null;
+  mockState.otherCopy = undefined;
   processReceiptLine.mockClear();
   alertUndeliveredShipments.mockClear();
   logger.warn.mockClear();
@@ -182,7 +193,7 @@ describe('processReceiptEmail', () => {
     expect(notify).toHaveBeenCalledTimes(1);
     const [, title, body, opts] = notify.mock.calls[0];
     expect(title).toBe('Amazon delivery not added');
-    expect(body).toBe(`Amazon delivery of Taurus SC ×2 wasn't added. ${reason}`);
+    expect(body).toBe(`Amazon delivery: Taurus SC ×2 wasn't added. ${reason}`);
     expect(opts).toMatchObject({ bell: true, dedupeKey: 'purchase-receipt:line-9', trx: 'trx-stub', metadata: { emailId: 'e1', productId: 'p1', status } });
   });
 
@@ -200,6 +211,12 @@ describe('processReceiptEmail', () => {
     const result = await processReceiptEmail(deliveredEmail, { notify: jest.fn() });
     expect(result.errors).toEqual([{ title: 'Taurus SC Termiticide 78 oz', message: 'inventory-operations boom' }]);
     expect(result.unmatched).toHaveLength(1);
+  });
+
+  test('items with no readable Order # are passed down to be held (no_order_number), never logged', async () => {
+    mockState.outcomes = [{ status: 'no_order_number', product: taurus, inserted: true, lineId: 'line-5' }];
+    await processReceiptEmail({ ...deliveredEmail, body_text: '* Taurus SC Termiticide 78 oz\n  Quantity: 2\n' }, { notify: jest.fn(async () => ({})) });
+    expect(processReceiptLine.mock.calls[0][0]).toMatchObject({ vendor: 'amazon', orderNumber: null, holdAs: 'no_order_number' });
   });
 
   test('an already-processed line lands in alreadyProcessed with no bell', async () => {
@@ -225,7 +242,7 @@ describe('processReceiptEmail', () => {
       orderNumber: '900-7000007-7000007', item: { title: 'Delivered: 2 Lawn & Garden items', quantity: 1 }, lineNo: 1, forcedStatus: 'no_items',
     });
     expect(result.noItems).toEqual([{ title: 'Delivered: 2 Lawn & Garden items', productId: null, receivedQty: null, receivedUnit: null }]);
-    expect(notify.mock.calls[0][2]).toBe('Amazon delivery of "2 Lawn & Garden items" wasn\'t added. The email doesn\'t name the item. If it\'s stock, log it by hand.');
+    expect(notify.mock.calls[0][2]).toBe('Amazon delivery "2 Lawn & Garden items" wasn\'t added. The email doesn\'t name the item. If it\'s stock, log it by hand.');
   });
 });
 
@@ -260,7 +277,7 @@ describe('runPurchaseReceiptRestockSweep', () => {
       undelivered: [{ shipmentId: 'SHIPTEST02', emailId: 'e9' }], errors: [{ title: 'Shipped: x', message: 'boom', emailId: 'e8' }],
     });
     const result = await runPurchaseReceiptRestockSweep({ notify: jest.fn(async () => ({})) });
-    expect(alertUndeliveredShipments).toHaveBeenCalledWith({ since: new Date('2026-09-26T05:49:45Z'), notifyAdmin: expect.any(Function) });
+    expect(alertUndeliveredShipments).toHaveBeenCalledWith({ since: new Date('2026-09-26T05:49:45Z'), now: expect.any(Number), notifyAdmin: expect.any(Function) });
     // Delivered emails first, so a delivery whose email did come is settled before the check.
     expect(processReceiptLine.mock.invocationCallOrder[0]).toBeLessThan(alertUndeliveredShipments.mock.invocationCallOrder[0]);
     expect(result.undelivered).toEqual([{ shipmentId: 'SHIPTEST02', emailId: 'e9' }]);
@@ -273,5 +290,69 @@ describe('runPurchaseReceiptRestockSweep', () => {
     expect(result.emailsScanned).toBe(1);
     expect(processReceiptLine).not.toHaveBeenCalled();
     expect(result.logged).toEqual([]);
+  });
+});
+
+describe('SiteOne invoices in the sweep', () => {
+  beforeEach(openGates);
+  const siteOneEmail = {
+    id: 's1', from_address: 'AB00000@siteone.com', subject: 'SiteOne Confirmation : Invoice #900000001-001',
+    received_at: new Date('2026-09-27T12:00:00Z'), authentication_results: 'dkim=pass header.i=@siteone.com; spf=pass smtp.mailfrom=siteone.com',
+  };
+  const lines = [
+    { title: 'CSI-Pest Taurus SC Broad Spectrum Liquid Concentrate Termiticide/Insecticide 78 fl oz. Bottle (QGCY)', quantity: 1, lineNo: 1 },
+    { title: 'Flowzone Cyclone 3 Variable Pressure 18V Battery Powered Sprayer (4-Gallon)', quantity: 0, lineNo: 2 },
+    { title: 'LESCO 18V Variable Flow Zero Pump 4 gal. Battery Powered Backpack Sprayer', quantity: -1, lineNo: 3 },
+  ];
+  const run = () => runPurchaseReceiptRestockSweep({ notify: jest.fn(async () => ({})) });
+
+  test('a reconciled invoice records its lines by invoice number: zero lines skipped, returns held', async () => {
+    mockState.siteOneEmails = [siteOneEmail];
+    mockState.siteOneInvoice = { number: '900000001-001', problem: null, lines };
+    mockState.outcomes = [
+      { status: 'logged', product: taurus, receivedQty: 78, receivedUnit: 'fl_oz', hasOpenRestockRequest: false, lineId: 'line-s1' },
+      { status: 'unmatched', inserted: true, product: null, lineId: 'line-s3' },
+    ];
+    const notify = jest.fn(async () => ({}));
+    const result = await runPurchaseReceiptRestockSweep({ notify });
+    const calls = processReceiptLine.mock.calls.map(([params]) => params);
+    expect(calls.map(({ vendor, orderNumber, shipmentKey, lineNo, holdAs }) => ({ vendor, orderNumber, shipmentKey, lineNo, holdAs }))).toEqual([
+      { vendor: 'siteone', orderNumber: '900000001-001', shipmentKey: '900000001-001', lineNo: 1, holdAs: undefined },
+      { vendor: 'siteone', orderNumber: '900000001-001', shipmentKey: '900000001-001', lineNo: 3, holdAs: 'returned' },
+    ]);
+    expect(notify.mock.calls[0].slice(1, 3)).toEqual(['SiteOne invoice logged', 'SiteOne invoice 900000001-001 logged: Taurus SC +78 fl oz (1 × 78 fl oz)']);
+    expect(result.logged).toEqual([expect.objectContaining({ productId: 'p1', emailId: 's1' })]);
+  });
+
+  test('an invoice whose numbers don\'t reconcile holds every stocked line as unverified', async () => {
+    mockState.siteOneEmails = [siteOneEmail];
+    mockState.siteOneInvoice = { number: '900000001-001', problem: 'line_math', lines: [lines[0]] };
+    mockState.outcomes = [{ status: 'unverified', product: taurus, inserted: true, lineId: 'line-s1' }];
+    const notify = jest.fn(async () => ({}));
+    await runPurchaseReceiptRestockSweep({ notify });
+    expect(processReceiptLine.mock.calls[0][0]).toMatchObject({ holdAs: 'unverified' });
+    expect(notify.mock.calls[0][2]).toBe("SiteOne invoice 900000001-001: Taurus SC ×1 wasn't added. The invoice's numbers don't add up, so log it by hand.");
+  });
+
+  test('an invoice never read into lines gets one unreadable placeholder and a bell', async () => {
+    mockState.siteOneEmails = [siteOneEmail];
+    mockState.siteOneInvoice = { number: '900000001-001', problem: 'unreadable', lines: [] };
+    mockState.outcomes = [{ status: 'unreadable', product: null, inserted: true, lineId: 'line-s1' }];
+    const notify = jest.fn(async () => ({}));
+    await runPurchaseReceiptRestockSweep({ notify });
+    expect(processReceiptLine.mock.calls[0][0]).toMatchObject({ lineNo: 1, forcedStatus: 'unreadable' });
+    expect(notify.mock.calls[0][2]).toBe("SiteOne invoice 900000001-001 wasn't added. The invoice couldn't be read. If it has stock, log it by hand.");
+  });
+
+  test.each([
+    ['still being read', () => { mockState.siteOneInvoice = { pending: true }; }],
+    ['the other copy of the invoice already recorded', () => { mockState.otherCopy = { id: 'line-from-store-copy' }; }],
+    ['unauthenticated', () => { mockState.siteOneEmails = [{ ...siteOneEmail, authentication_results: 'dkim=pass header.i=@evil.example' }]; }],
+  ])('nothing is recorded when the invoice is %s', async (_label, arrange) => {
+    mockState.siteOneEmails = [siteOneEmail];
+    mockState.siteOneInvoice = { number: '900000001-001', problem: null, lines };
+    arrange();
+    await run();
+    expect(processReceiptLine).not.toHaveBeenCalled();
   });
 });
