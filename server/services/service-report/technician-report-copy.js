@@ -174,7 +174,11 @@ const REPORT_ACCESS_CODE_RES = [
 // 2468ft" is still a credential, even though "400 ft" beside a gate can be
 // legitimate work detail. Inspect the original text before measurement
 // suppression and count digits in compact or grouped numeric tokens.
-const REPORT_EXPLICIT_NUMERIC_CREDENTIAL_RE = /\b(?:code|pin|combo(?!\s+(?:of|with)\b)|combination(?!\s+(?:of|with)\b)|passcode|password|passphrase|keypad|lock\s?box)\b[^\n.!?]{0,25}?["'‘’“”]?([A-Za-z#*]*(?:\d+(?:[\s–—-]+\d+)+[A-Za-z#*]*|\d[A-Za-z0-9#*]*))/gi;
+const REPORT_NUMERIC_CREDENTIAL_TOKEN = String.raw`[A-Za-z#*]*(?:\d+(?:[\s–—-]+\d+)+[A-Za-z#*]*|\d[A-Za-z0-9#*]*)`;
+const REPORT_EXPLICIT_NUMERIC_CREDENTIAL_RE = new RegExp(
+  String.raw`\b(?:code|pin|combo(?!\s+(?:of|with)\b)|combination(?!\s+(?:of|with)\b)|passcode|password|passphrase|keypad|lock\s?box)\b[^\n.!?]{0,25}?["'‘’“”]?(${REPORT_NUMERIC_CREDENTIAL_TOKEN})`,
+  'gi',
+);
 
 function containsExplicitNumericCredential(text) {
   for (const match of String(text || '').matchAll(REPORT_EXPLICIT_NUMERIC_CREDENTIAL_RE)) {
@@ -198,7 +202,10 @@ const REPORT_MEASUREMENT_QUANTITY_RE = new RegExp(
 // by every contextual detector above. This covers compact alphanumeric tokens
 // on either side of the digits and individually separated digits without
 // teaching each gate/action/shorthand branch another token spelling.
-const REPORT_CREDENTIAL_TOKEN_RE = /(^|[^A-Za-z0-9])([#*]?\d+(?:[\s–—-]+\d+)+|[#*]?[A-Za-z0-9#*]{3,16})(?=$|[^A-Za-z0-9])/g;
+const REPORT_CREDENTIAL_TOKEN_RE = new RegExp(
+  String.raw`(^|[^A-Za-z0-9])(${REPORT_NUMERIC_CREDENTIAL_TOKEN})(?=$|[^A-Za-z0-9])`,
+  'g',
+);
 
 function accessCodeDetectionText(text) {
   return String(text || '')

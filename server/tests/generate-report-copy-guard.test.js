@@ -409,6 +409,8 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(reportCopyRejection('Gate code is 1 2 3 4ft.')).toBe('access_code');
     expect(reportCopyRejection('Gate code is 2-4-6-8ml.')).toBe('access_code');
     expect(reportCopyRejection('Gate PIN AB24 68oz.')).toBe('access_code');
+    expect(reportCopyRejection('The rear gate AB24-68 was used for entry.')).toBe('access_code');
+    expect(reportCopyRejection('Opened rear gate with #AB24–68C*.')).toBe('access_code');
     expect(reportCopyRejection('Opened the gate onto 400 sqft of treated turf.')).toBeNull();
     expect(reportCopyRejection('Opened rear gate, applied 100 ml around hinges.')).toBeNull();
     expect(reportCopyRejection('Inspected the rear gate 120–150 feet from the lanai.')).toBeNull();

@@ -275,6 +275,10 @@ describe('Lawn Report V2 — consistency golden fixtures', () => {
         'Gate code is 1 2 3 4ft',
         'Gate code is 2-4-6-8ml',
         'Gate PIN AB24 68oz',
+        'rear gate AB24-68',
+        'rear gate A24-68',
+        'rear gate 24-68A',
+        'Opened rear gate with #AB24–68C*',
       ],
     });
 
@@ -300,6 +304,10 @@ describe('Lawn Report V2 — consistency golden fixtures', () => {
       'Gate code is 1 2 3 4ft',
       'Gate code is 2-4-6-8ml',
       'Gate PIN AB24 68oz',
+      'rear gate AB24-68',
+      'rear gate A24-68',
+      'rear gate 24-68A',
+      'Opened rear gate with #AB24–68C*',
     ];
     const privateReport = buildLawnReportV2({
       lawnAssessment: CASES.healthy,
