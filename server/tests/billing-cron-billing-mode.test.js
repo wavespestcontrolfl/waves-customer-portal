@@ -239,11 +239,27 @@ describe('processMonthlyBilling — payment_receipt replay holds (#4843 r7)', ()
       notificationEventKey: 'payment:pay-receipt-1:autopay_charge_success',
       billingDeliveryCategory: 'payment_receipt',
       refresh_customer_phone: true, resolve_from_by_customer: true,
+      requires_registered_dispatch: true,
     });
     expect(meta.attempt_payment_id).toBeUndefined();
     // The owner lives only on sms_log.customer_id, which a customer merge
     // repoints; a metadata copy would go stale and win in the scheduler.
     expect(meta.customer_id).toBeUndefined();
+  });
+
+  test('a held receipt for a customer with no phone queues a blank to_phone row that replays without a phone', async () => {
+    mockCustomers = [{ ...baseCustomer, id: 'cust-NP', phone: null, billing_mode: 'monthly_membership' }];
+    StripeService.chargeMonthly.mockResolvedValue({ id: 'pay-receipt-2', status: 'paid', amount: '55.30' });
+    const sender = require('../services/messaging/send-customer-message').sendCustomerMessage;
+    sender.mockResolvedValueOnce({
+      sent: false, deferred: true, code: 'APP_PROVIDER_RETRY', nextAllowedAt: '2026-09-09T12:00:00Z',
+    });
+    await BillingCron.processMonthlyBilling();
+    expect(mockScheduledNotices).toHaveLength(1);
+    expect(mockScheduledNotices[0].to_phone).toBe('');
+    expect(JSON.parse(mockScheduledNotices[0].metadata)).toMatchObject({
+      entry_point: 'billing_receipt_deferred', requires_registered_dispatch: true, billingDeliveryCategory: 'payment_receipt',
+    });
   });
 
   test('a non-hold receipt-send failure still throws (caught and logged, no scheduled row)', async () => {

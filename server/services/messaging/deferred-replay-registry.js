@@ -671,6 +671,13 @@ const REGISTRY = {
   // receipt would misstate money the customer no longer owes or was given
   // back — suppress rather than replay it.
   billing_receipt_deferred: {
+    // Every receipt row carries requires_registered_dispatch so a receipt
+    // with no phone (Email/App only, or a phone removed while held) still
+    // replays through the router instead of parking on the phone refresh.
+    replayWithoutPhone: true,
+    async dispatch(meta, defaultDispatch) {
+      return defaultDispatch();
+    },
     async recheck(meta) {
       try {
         const payment = await db('payments').where({ id: meta.payment_id, customer_id: meta.customer_id })

@@ -101,7 +101,7 @@ async function sendCustomerBillingSms({ customer, body, purpose = 'billing', mes
   if (purpose === 'payment_receipt' && paymentId && isReplayHold(sendResult) && sendResult.nextAllowedAt) {
     await db('sms_log').insert({
       customer_id: customer.id, direction: 'outbound',
-      from_phone: require('../config/twilio-numbers').getOutboundNumber(), to_phone: customer.phone,
+      from_phone: require('../config/twilio-numbers').getOutboundNumber(), to_phone: customer.phone || '', // NOT NULL; a phone-less receipt replays via replayWithoutPhone
       message_body: body, message_type: messageType, status: 'scheduled',
       scheduled_for: new Date(sendResult.nextAllowedAt),
       metadata: JSON.stringify({ ...metadata,
@@ -113,6 +113,10 @@ async function sendCustomerBillingSms({ customer, body, purpose = 'billing', mes
         payment_id: paymentId, replay_purpose: 'payment_receipt',
         original_block_code: sendResult.code,
         refresh_customer_phone: true, resolve_from_by_customer: true,
+        // Always stamped: a receipt may be Email/App only, and a phone that
+        // is gone at replay time must not park it. The registry entry opts
+        // in (replayWithoutPhone) and its dispatch is a pass-through.
+        requires_registered_dispatch: true,
       }),
     });
     return { ...sendResult, scheduled: true };
