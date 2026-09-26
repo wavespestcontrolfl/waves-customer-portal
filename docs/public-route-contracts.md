@@ -1732,7 +1732,11 @@ dropped on 2026-09-06 once the page stopped reading them (owner
 2026-09-05: education, not a schedule).
 `/data` breakdown rows (`pricing.oneTimeBreakdown.items[]`) may carry a
 `copy` object — `{ key, outcome, includes[], assurance|null, terms }` —
-and a one-time-ONLY estimate whose billable rows all resolve to one copy
+and rodent-trapping rows may carry the sold allowance used to render that
+copy: `includedFollowUps` / `includedCallbacks` (number, `'unlimited'`, or
+null), `unlimitedCallbacks` (boolean or null), and `includedScope` (string or
+null). These are terms from the saved pricing snapshot, not live job counts.
+A one-time-ONLY estimate whose billable rows all resolve to one copy
 pack may carry `pricing.oneTimeServiceCopy` — `{ key, hero: { eyebrow, h1,
 sub }, aiTitle?, aiBody?, askChips[] }` (hero strings keep `{first}`/`{city}`
 tokens for the page; `aiTitle`/`aiBody` are present only for packs that

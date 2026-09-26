@@ -12,7 +12,7 @@ describe('rodent trap check pricing + copy', () => {
     expect(RODENT.trapping.additionalCheckPrice).toBe(95);
   });
 
-  test('the extra check is excluded from every % discount', () => {
+  test('the extra check is excluded from pricing-engine percentage discounts', () => {
     const { serviceExcludedFromPercentDiscount } = require('../services/pricing-engine/discount-engine');
     expect(serviceExcludedFromPercentDiscount('rodent_trap_check_additional')).toBe(true);
   });

@@ -2134,7 +2134,7 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
           .where({ service_key: 'rodent_trap_check_additional', is_active: true })
           .first('base_price');
         const price = Number(extraCheck?.base_price);
-        if (Number.isFinite(price) && price > 0) constants.RODENT.trapping.additionalCheckPrice = r(price);
+        if (Number.isFinite(price) && price > 0) constants.RODENT.trapping.additionalCheckPrice = money(price);
       }
     } catch (err) {
       console.warn('[pricing-engine] rodent extra-check catalog price read skipped:', err.message);

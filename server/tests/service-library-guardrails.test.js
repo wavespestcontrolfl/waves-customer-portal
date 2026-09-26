@@ -8,6 +8,7 @@ const db = require('../models/db');
 const { auditServiceCatalogChange } = require('../services/audit-log');
 const serviceLibrary = require('../services/service-library');
 const { validatePackagePayload, assertPackagePriceRange } = serviceLibrary.__private;
+const pricingBridge = require('../services/pricing-engine/db-bridge');
 
 function serviceRow(overrides = {}) {
   return {
@@ -91,6 +92,28 @@ describe('service library guardrails', () => {
     db.isTransaction = true;
     db.raw = db.raw || jest.fn().mockResolvedValue(undefined);
     db.transaction = jest.fn(async (callback) => callback(db));
+  });
+
+  test('refreshes the pricing bridge after the additional trap-check catalog row changes', async () => {
+    const before = serviceRow({
+      service_key: 'rodent_trap_check_additional',
+      category: 'rodent',
+      billing_type: 'one_time',
+      base_price: '95.00',
+    });
+    const after = { ...before, base_price: '110.00' };
+    mockServiceDb({ before, after });
+    const invalidate = jest.spyOn(pricingBridge, 'invalidatePricingConfigCache').mockImplementation(() => {});
+    const sync = jest.spyOn(pricingBridge, 'syncConstantsFromDB').mockResolvedValue(true);
+    try {
+      await expect(serviceLibrary.updateService(before.id, { base_price: 110 })).resolves.toEqual(after);
+
+      expect(invalidate).toHaveBeenCalledTimes(1);
+      expect(sync).toHaveBeenCalledWith(db);
+    } finally {
+      invalidate.mockRestore();
+      sync.mockRestore();
+    }
   });
 
   test.each([['true', 45, false], ['false', 60, true], ['false', 90, true]])('validates edits against the effective bounds (gate %s, duration %i)', async (gate, duration, valid) => {

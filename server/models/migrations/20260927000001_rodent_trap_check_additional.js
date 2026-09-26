@@ -109,6 +109,25 @@ async function existingColumns(knex, table, row) {
   return out;
 }
 
+const SERVICE_REFERENCE_COLUMNS = {
+  scheduled_services: ['service_id'],
+  scheduled_service_addons: ['service_id'],
+  service_records: ['service_id'],
+  service_addons: ['parent_service_id', 'addon_service_id'],
+  service_package_items: ['service_id'],
+};
+
+async function serviceIsReferenced(knex, serviceId) {
+  for (const [table, columns] of Object.entries(SERVICE_REFERENCE_COLUMNS)) {
+    if (!(await knex.schema.hasTable(table))) continue;
+    for (const column of columns) {
+      if (!(await knex.schema.hasColumn(table, column))) continue;
+      if (await knex(table).where({ [column]: serviceId }).first(column)) return true;
+    }
+  }
+  return false;
+}
+
 exports.up = async function up(knex) {
   // A re-run must not overwrite the recorded state (down() would lose what
   // the first run changed).
@@ -232,12 +251,7 @@ exports.down = async function down(knex) {
   if (ownedServiceId && await knex.schema.hasTable('services')) {
     const row = await knex('services').where({ id: ownedServiceId, service_key: NEW_KEY }).first('id');
     if (row) {
-      for (const table of ['scheduled_services', 'scheduled_service_addons', 'service_records']) {
-        if (keepInsertedRow) break;
-        if (await knex.schema.hasColumn(table, 'service_id')) {
-          keepInsertedRow = Boolean(await knex(table).where({ service_id: row.id }).first('service_id'));
-        }
-      }
+      keepInsertedRow = await serviceIsReferenced(knex, row.id);
       if (keepInsertedRow) {
         await knex('services').where({ id: row.id }).update({ is_active: false, updated_at: knex.fn.now() });
         await writeSetting(knex, KEPT_KEY, String(row.id));
