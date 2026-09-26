@@ -20,9 +20,9 @@
  * A shipment is settled once purchase_receipt_lines has any row for its
  * shipmentId (its Delivered email was processed — every authenticated one
  * leaves at least one row, and sweep.js runs its Delivered pass first — or it
- * was already alerted), or once any Delivered email names it (one received
- * before the count, which the lane never processes, still proves it
- * arrived). Otherwise,
+ * was already alerted), or once an authenticated Delivered email names it
+ * exactly (one received before the count, which the lane never processes,
+ * still proves it arrived). Otherwise,
  * when the shipment carries at least one stocked product, its stocked items
  * are recorded as 'no_delivery_email' and ONE bell asks for a hand log, in
  * one transaction (the bell via notifyAdmin's trx option): a re-run never
@@ -40,7 +40,9 @@ const logger = require('../logger');
 const { hasAlignedAuth } = require('../email/inbox-hygiene');
 const { domainFromAddress } = require('../email/spam-blocker');
 const { formatETDate, etParts, etDateString, addETDays, parseETDateTime } = require('../../utils/datetime-et');
-const { parseAmazonShippedEmail, extractText, AMAZON_SHIPPED_FROM, AMAZON_DELIVERY_FROM } = require('./amazon-delivery-parser');
+const {
+  parseAmazonShippedEmail, parseAmazonDeliveredEmail, extractText, AMAZON_SHIPPED_FROM, AMAZON_DELIVERY_FROM,
+} = require('./amazon-delivery-parser');
 const { matchTitleToProduct } = require('./product-matcher');
 const { UNKNOWN_ORDER, lockShipment } = require('./receipt-processor');
 
@@ -97,13 +99,21 @@ function alertAfter(email, since) {
 // A LIKE pattern matching the literal text.
 const likeLiteral = (text) => text.replace(/[\\%_]/g, '\\$&');
 
+function authenticated(email) {
+  return hasAlignedAuth(email.authentication_results, domainFromAddress(email.from_address));
+}
+
 async function shipmentSettled(conn, shipmentId) {
   if (await conn('purchase_receipt_lines').where({ vendor: VENDOR, shipment_key: shipmentId }).first('id')) return true;
-  const id = likeLiteral(shipmentId);
-  const delivered = await conn('emails').whereRaw('LOWER(from_address) = ?', [AMAZON_DELIVERY_FROM]).whereRaw('subject ILIKE ?', ['Delivered:%'])
-    .where((named) => named.whereRaw('body_text LIKE ?', [`%shipmentId=${id}%`]).orWhereRaw('body_html LIKE ?', [`%shipmentId\\%3D${id}%`]))
-    .first('id');
-  return Boolean(delivered);
+  // The id's text narrows the candidates (it appears verbatim in every link
+  // form); the parser's own shipmentId must then equal it exactly, from an
+  // email that really came from Amazon.
+  const id = `%${likeLiteral(shipmentId)}%`;
+  const candidates = await conn('emails')
+    .select('id', 'gmail_id', 'from_address', 'subject', 'body_text', 'body_html', 'authentication_results')
+    .whereRaw('LOWER(from_address) = ?', [AMAZON_DELIVERY_FROM]).whereRaw('subject ILIKE ?', ['Delivered:%'])
+    .where((named) => named.whereRaw('body_text LIKE ?', [id]).orWhereRaw('body_html LIKE ?', [id]));
+  return candidates.some((email) => parseAmazonDeliveredEmail(email)?.shipmentId === shipmentId && authenticated(email));
 }
 
 async function stockedItems(items, conn) {
@@ -137,7 +147,7 @@ async function alertIfUndelivered(email, { notifyAdmin, now, since }, conn) {
   if (dueBeforeCount || now < at.getTime()) return null;
   const parsed = parseAmazonShippedEmail(email);
   if (!parsed?.shipmentId || !parsed.items.length) return null;
-  if (!hasAlignedAuth(email.authentication_results, domainFromAddress(email.from_address))) return null;
+  if (!authenticated(email)) return null;
   if (await shipmentSettled(conn, parsed.shipmentId)) return null;
   const stocked = await stockedItems(parsed.items, conn);
   if (!stocked.length) return null;

@@ -241,12 +241,25 @@ jest.setTimeout(30000);
       await shipped('ship-due-after', { received_at: beforeCount, body_text: body('ship-due-after', dueAfterCount) }); // not in the count: flagged
       await shipped('ship-due-before', { received_at: beforeCount, body_text: body('ship-due-before', 'today') }); // due before the count: in it
       await shipped('ship-delivered', { received_at: beforeCount, body_text: body('ship-delivered', dueAfterCount) });
-      await mockConn('emails').insert({ // a Delivered email from before the count names it: it arrived
-        gmail_id: `gm-${randomUUID()}`, gmail_thread_id: 'thread', from_address: 'order-update@amazon.com', subject: 'Delivered: "Control Solutions Taurus..."',
-        body_text: 'Order #\n900-1000001-1000001\nhttps://www.amazon.com/x?shipmentId=ship-delivered\n', received_at: new Date(since.getTime() - HOUR),
-      });
+      await deliveredEmail({ body_text: 'Order #\n900-1000001-1000001\nhttps://www.amazon.com/x?shipmentId=ship-delivered\n', received_at: new Date(since.getTime() - HOUR) });
       const { undelivered } = await alertUndeliveredShipments({ since, now: NOW, notifyAdmin: (...args) => notifications.notifyAdmin(...args) });
       expect(undelivered.map((row) => row.shipmentId)).toEqual(['ship-due-after']);
+    });
+
+    // A Delivered email settles a shipment only when it really came from
+    // Amazon and names exactly that shipment.
+    const deliveredEmail = (overrides) => mockConn('emails').insert({
+      gmail_id: `gm-${randomUUID()}`, gmail_thread_id: 'thread', from_address: 'order-update@amazon.com', subject: 'Delivered: "Control Solutions Taurus..."',
+      authentication_results: ALIGNED_AMAZON_AUTH, received_at: new Date(NOW - 5 * DAY), ...overrides,
+    });
+    test.each([
+      ['an HTML-only Delivered email with a plain link settles it', 'ship-html', { body_text: '', body_html: '<p>Order # 900-1000001-1000001</p><a href="https://www.amazon.com/x?orderId=1&amp;shipmentId=ship-html">Track</a>' }, false],
+      ['a spoofed Delivered email does not', 'ship-spoofed', { authentication_results: 'dkim=pass header.i=@evil.example', body_text: 'Order # 900-1\nhttps://www.amazon.com/x?shipmentId=ship-spoofed\n' }, true],
+      ['one naming a longer shipment id does not', 'ship-prefix', { body_text: 'Order # 900-1\nhttps://www.amazon.com/x?shipmentId=ship-prefix1\n' }, true],
+    ])('%s', async (_label, shipmentId, delivered, alerts) => {
+      await shipped(shipmentId);
+      await deliveredEmail(delivered);
+      expect((await run()).undelivered.map((row) => row.shipmentId)).toEqual(alerts ? [shipmentId] : []);
     });
 
     test('too recent, unauthenticated, personal items only, or outside the lookback: no bell', async () => {
@@ -337,18 +350,20 @@ jest.setTimeout(30000);
       expect(await mockConn('purchase_receipt_lines').where({ vendor: 'siteone' })).toHaveLength(1);
     });
 
-    test('copies straddling the cutoff: the store copy before it means the billing copy adds nothing', async () => {
+    test.each([
+      ['an authenticated store copy before it means the billing copy adds nothing', 'dkim=pass header.i=@siteone.com', 0],
+      ['an unauthenticated "copy" before it proves nothing: the billing copy logs', 'dkim=pass header.i=@evil.example', 78],
+    ])('copies straddling the cutoff: %s', async (_label, earlyAuth, expectedStock) => {
       const lines = [{ description: TAURUS_LINE, quantity: 1, unit_price: 95, total: 95 }];
       const since = new Date(process.env.PURCHASE_RECEIPT_SINCE);
       await mockConn('emails').insert({
         gmail_id: `gm-${randomUUID()}`, gmail_thread_id: 'thread', from_address: 'AB00000@siteone.com',
-        subject: `SiteOne Confirmation : Invoice #${INVOICE}`, authentication_results: 'dkim=pass header.i=@siteone.com',
+        subject: `SiteOne Confirmation : Invoice #${INVOICE}`, authentication_results: earlyAuth,
         received_at: new Date(since.getTime() - 5 * HOUR),
       });
       await billingCopy(lines, 101.65);
       await runPurchaseReceiptRestockSweep({ notify });
-      expect(await stock()).toBe(0);
-      expect(await mockConn('purchase_receipt_lines').where({ vendor: 'siteone' })).toEqual([]);
+      expect(await stock()).toBe(expectedStock);
     });
 
     test('a return of a stocked product is held for a hand adjustment, never subtracted or added', async () => {

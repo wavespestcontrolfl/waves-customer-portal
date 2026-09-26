@@ -26,6 +26,8 @@
  * ("... 78 fl oz. Bottle (QGCY) UOM:EA").
  */
 const db = require('../../models/db');
+const { hasAlignedAuth } = require('../email/inbox-hygiene');
+const { domainFromAddress } = require('../email/spam-blocker');
 
 const VENDOR = 'siteone';
 const STORE_DOMAIN = '@siteone.com';
@@ -53,16 +55,18 @@ function findSiteOneInvoiceEmails(floor, conn = db) {
     .orderBy('received_at', 'asc');
 }
 
-// Another emailed copy of this invoice (the store subject or the billing body
-// naming its number) received before `since` — then the physical count at
-// the cutoff already includes the purchase.
-function copyReceivedBefore(number, since, conn = db) {
-  return conn('emails').where('received_at', '<', since)
+// Another emailed copy of this invoice received before `since` — then the
+// physical count at the cutoff already includes the purchase. The number's
+// text narrows the candidates; each must be an authenticated SiteOne invoice
+// email naming exactly this invoice number.
+async function copyReceivedBefore(number, since, conn = db) {
+  const candidates = await conn('emails').select(EMAIL_COLUMNS).where('received_at', '<', since)
     .where((either) => either
-      .where((store) => store.whereRaw('LOWER(from_address) LIKE ?', [`%${STORE_DOMAIN}`]).whereRaw('subject ILIKE ?', [`%Invoice #${number}%`]))
+      .where((store) => store.whereRaw('LOWER(from_address) LIKE ?', [`%${STORE_DOMAIN}`]).whereRaw('subject LIKE ?', [`%${number}%`]))
       .orWhere((billing) => billing.whereRaw('LOWER(from_address) = ?', [BILLING_FROM])
-        .where((body) => body.whereRaw('body_html LIKE ?', [`%${number}%`]).orWhereRaw('body_text LIKE ?', [`%${number}%`]))))
-    .first('id');
+        .where((body) => body.whereRaw('body_html LIKE ?', [`%${number}%`]).orWhereRaw('body_text LIKE ?', [`%${number}%`]))));
+  return candidates.some((email) => isSiteOneInvoiceEmail(email) && emailInvoiceNumber(email) === number
+    && hasAlignedAuth(email.authentication_results, domainFromAddress(email.from_address)));
 }
 
 // The invoice number the email itself names: the store email's subject, or
