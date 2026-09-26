@@ -49,6 +49,7 @@ import {
 import Customer360Profile from "../../components/admin/Customer360ProfileV2";
 import Customer360Workspace from "../../components/admin/Customer360Workspace";
 import CustomerDirectoryTable from "../../components/admin/CustomerDirectoryTable";
+import CustomerGeocodeReviewPanel from "../../components/admin/CustomerGeocodeReviewPanel";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import MobileNewCustomerSheet from "../../components/admin/MobileNewCustomerSheet";
 import AddressAutocomplete from "../../components/AddressAutocomplete";
@@ -1047,6 +1048,9 @@ function CustomerDirectoryView({
   return (
     view === "directory" && (
       <>
+        {isAdmin && (
+          <CustomerGeocodeReviewPanel onSelectCustomer={openCustomerProfile} />
+        )}
         {" "}
         <div className="u-nums text-ui-caption text-ink-tertiary text-right mb-3 mt-3">
           {totalCustomers} result{totalCustomers !== 1 ? "s" : ""}

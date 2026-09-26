@@ -136,6 +136,7 @@ const INVOICE_STATUS_TEXT = {
 };
 import CallBridgeLink, { callViaBridge } from "./CallBridgeLink";
 import CustomerRequestsPanel from "./CustomerRequestsPanel";
+import CustomerGeocodeReviewPanel from "./CustomerGeocodeReviewPanel";
 import CustomerPropertiesPanelV2 from "./CustomerPropertiesPanelV2";
 import CancelPlanDialog from "./CancelPlanDialog";
 import { CONTACT_ROLE_OPTIONS, contactRoleLabel, contactRoleTitle } from "../../lib/contact-roles";
@@ -5932,6 +5933,7 @@ function CustomerProfileOverview({
   setData,
   setProfileActionErr,
   billingSummary,
+  addressReview,
 }) {
   return (
     <div className="c360-overview-content">
@@ -5957,6 +5959,7 @@ function CustomerProfileOverview({
           referral={referral}
         />
       )}
+      {addressReview}
       <CustomerRequestsPanel customerId={customerId} />
       {/* both customer-scoped zone endpoints are requireAdmin — a
                   technician session would only 403 on expand */}
@@ -9928,6 +9931,12 @@ export default function Customer360ProfileV2({
         setData={setData}
         setProfileActionErr={setProfileActionErr}
         billingSummary={billingSummary}
+        addressReview={isAdmin ? (
+          <CustomerGeocodeReviewPanel
+            key={customerId}
+            customerId={customerId}
+          />
+        ) : null}
       />
     ),
     billing: (
