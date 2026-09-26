@@ -73,6 +73,9 @@ describe('stripTrailingSignature', () => {
     '"Quarterly" means every three months, not "monthly"',
     '"Sounds good"',
     "'Gold' covers ants, not 'termites'",
+    // A lone name or company as the last sentence can answer the one before.
+    'Who will be coming? Adam.',
+    'Which company is this? Waves Pest Control.',
     // A label/value layout answers the customer; it is not a sign-off.
     'Your technician is:\nAdam',
     'The charge appears as:\nWaves Pest Control',

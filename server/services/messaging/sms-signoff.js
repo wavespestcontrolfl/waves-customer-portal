@@ -10,7 +10,9 @@
 //     is never mistaken for one
 //   - a signer set off by a dash or its own line: "— Adam", "\nWaves Pest Control"
 //     (not after a colon: "Your technician is:\nAdam" is an answer, not a sign-off)
-//   - a bare signer that is its own final sentence: "Talk soon. Adam, Waves Pest Control"
+//   - a full name-and-company block that is its own final sentence:
+//     "Talk soon. Adam, Waves Pest Control" (a lone name or company there may
+//     answer the sentence before it: "Who will be coming? Adam.")
 // even when the whole text is wrapped in quotes or emoji trail the name.
 // Signers are the people whose texts the models learn from (Adam, Virginia)
 // and the company.
@@ -23,7 +25,8 @@ const CLOSER = '(?:thanks|thank\\s+you|best(?:\\s+wishes)?|(?:(?:best|warm|kind)
 const VALEDICTION = "\\p{L}[\\p{L}'\\u2019]*(?:\\s+\\p{L}[\\p{L}'\\u2019]*){0,3},";
 const COMPANY = '(?:the\\s+)?waves(?:\\s+pest\\s+control)?(?:\\s+team)?';
 const PERSON = '(?:adam(?:\\s+(?:benetti|b\\b\\.?))?|virginia)';
-const SIGNER = `(?:${PERSON}(?:\\s*,?\\s*(?:(?:from|at|with)\\s+)?${COMPANY})?|${COMPANY})`;
+const SIGNATURE_BLOCK = `${PERSON}\\s*,?\\s*(?:(?:from|at|with)\\s+)?${COMPANY}`;
+const SIGNER = `(?:${SIGNATURE_BLOCK}|${PERSON}|${COMPANY})`;
 // A line break that is not the value side of a "Label:" line.
 const OWN_LINE = '(?<![:\\s])[ \\t]*\\n\\s*';
 // After the signer: optional end punctuation, then only whitespace, quote
@@ -38,7 +41,7 @@ const SIGNATURE_TAIL_RES = [
   new RegExp(`(?:^|(?<=[.!?])\\s+|${OWN_LINE}|\\s*${DASH}\\s*)${CLOSER},?\\s+${SIGNER}${TAIL}`, 'iu'),
   new RegExp(`(?:^|(?<=[.!?])\\s+|${OWN_LINE})${VALEDICTION}[ \\t]*\\n\\s*${SIGNER}${TAIL}`, 'iu'),
   new RegExp(`(?:\\s*${DASH}\\s*|${OWN_LINE})${SIGNER}${TAIL}`, 'iu'),
-  new RegExp(`(?<=[.!?])\\s+${SIGNER}${TAIL}`, 'iu'),
+  new RegExp(`(?<=[.!?])\\s+${SIGNATURE_BLOCK}${TAIL}`, 'iu'),
 ];
 
 const DOUBLE_QUOTES = '"“”';
