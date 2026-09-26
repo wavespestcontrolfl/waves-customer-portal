@@ -1,10 +1,10 @@
-// Account-level choice lookup: read the fixture's notification_prefs row
-// (primary-profile resolution is unit-tested in billing-delivery-channels).
+// Stored-choice lookup: read the fixture's notification_prefs row
+// (storedBillingChannels is unit-tested in billing-delivery-channels).
 jest.mock('../services/billing-delivery-channels', () => {
   const actual = jest.requireActual('../services/billing-delivery-channels');
   return {
     ...actual,
-    accountBillingChannels: jest.fn(async (customerId, category, knex) => actual.explicitBillingChannels(
+    storedBillingChannels: jest.fn(async (customerId, category, knex) => actual.explicitBillingChannels(
       (await knex('notification_prefs').where({ customer_id: customerId }).first()) || {}, category,
     )),
   };
@@ -501,9 +501,9 @@ describe('annual prepay pre-visit payment reminders', () => {
   test('the scan resumes an open 3-day stage 2 days out only for customers with a stored channel choice', async () => {
     const explicitTerm = { ...BASE_TERM, id: 'term-explicit', customer_id: 'cust-explicit', term_start: '2026-07-10' };
     const legacyTerm = { ...BASE_TERM, id: 'term-legacy', customer_id: 'cust-legacy', term_start: '2026-07-10' };
-    const { accountBillingChannels } = require('../services/billing-delivery-channels');
-    accountBillingChannels
-      .mockResolvedValueOnce(['email']) // cust-explicit (read from its primary profile)
+    const { storedBillingChannels } = require('../services/billing-delivery-channels');
+    storedBillingChannels
+      .mockResolvedValueOnce(['email']) // cust-explicit
       .mockResolvedValueOnce(null); // cust-legacy
     // The sender's first read is the invoice; a missing invoice stops it there.
     const explicitInvoiceQ = query({ first: undefined });
@@ -521,16 +521,16 @@ describe('annual prepay pre-visit payment reminders', () => {
 
     await AnnualPrepayRenewals.checkAndSendPaymentReminders({ today: '2026-07-08' });
 
-    expect(accountBillingChannels).toHaveBeenCalledWith('cust-explicit', 'billing', expect.anything());
-    expect(accountBillingChannels).toHaveBeenCalledWith('cust-legacy', 'billing', expect.anything());
+    expect(storedBillingChannels).toHaveBeenCalledWith('cust-explicit', 'billing', expect.anything());
+    expect(storedBillingChannels).toHaveBeenCalledWith('cust-legacy', 'billing', expect.anything());
     // Only the explicit-choice term reaches the sender; the legacy term does not.
     expect(explicitInvoiceQ.where).toHaveBeenCalledWith({ id: 'inv-1' });
     expect(unexpectedInvoiceQ.where).not.toHaveBeenCalled();
   });
 
   test('a failed resume lookup skips resumption but still runs the 1-day stage', async () => {
-    const { accountBillingChannels } = require('../services/billing-delivery-channels');
-    accountBillingChannels.mockRejectedValueOnce(new Error('connection reset'));
+    const { storedBillingChannels } = require('../services/billing-delivery-channels');
+    storedBillingChannels.mockRejectedValueOnce(new Error('connection reset'));
     const oneDayQ = query({ rows: [] });
     setDbQueues({
       'annual_prepay_terms as t': [query({ rows: [] })],

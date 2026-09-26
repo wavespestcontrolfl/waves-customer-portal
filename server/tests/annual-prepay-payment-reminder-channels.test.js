@@ -5,13 +5,13 @@
 // (event key, per-leg ledger row, replay-hold retry) against an in-memory
 // fake of the collections_contact_ledger table, so the assertions prove the
 // actual router-core contract rather than a mocked pass-through.
-// Account-level choice lookup: read the fixture's notification_prefs row
-// (primary-profile resolution is unit-tested in billing-delivery-channels).
+// Stored-choice lookup: read the fixture's notification_prefs row
+// (storedBillingChannels is unit-tested in billing-delivery-channels).
 jest.mock('../services/billing-delivery-channels', () => {
   const actual = jest.requireActual('../services/billing-delivery-channels');
   return {
     ...actual,
-    accountBillingChannels: jest.fn(async (customerId, category, knex) => actual.explicitBillingChannels(
+    storedBillingChannels: jest.fn(async (customerId, category, knex) => actual.explicitBillingChannels(
       (await knex('notification_prefs').where({ customer_id: customerId }).first()) || {}, category,
     )),
   };

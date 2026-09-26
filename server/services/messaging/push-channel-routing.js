@@ -427,7 +427,9 @@ function hasDurableAppReplay(messageType, billingDeliveryCategory) {
 // push. Only a bell inserted or refreshed by THIS attempt carries this
 // attempt's copy; a deduped unchanged bell still shows the earlier one.
 function bellReachedThisAttempt(appNotification) {
-  return !!appNotification && (appNotification.deduped !== true || appNotification.refreshed === true);
+  // A suppressed sentinel ({ id: null, suppressed: true }) inserted nothing.
+  if (!appNotification?.id || appNotification.suppressed === true) return false;
+  return appNotification.deduped !== true || appNotification.refreshed === true;
 }
 
 async function attemptPushFirst({ customerId, to, body, messageType, fromNumber, scheduledSmsLogId, preSendCheck, explicitPushOnly = false, notificationEventKey, appointmentId = null, invoiceId, requestNotification, billingDeliveryCategory }) {

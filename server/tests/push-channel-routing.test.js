@@ -221,5 +221,6 @@ describe('bellReachedThisAttempt', () => {
   test('a deduped unchanged bell, or none, did not', () => {
     expect(bellReachedThisAttempt({ id: 'n-1', deduped: true })).toBe(false);
     expect(bellReachedThisAttempt(null)).toBe(false);
+    expect(bellReachedThisAttempt({ id: null, suppressed: true })).toBe(false);
   });
 });

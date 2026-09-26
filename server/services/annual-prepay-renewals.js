@@ -5598,9 +5598,9 @@ function invoiceStillOwedAsQuoted({ invoiceId, customerId, amountDue }) {
 async function routeExplicitPaymentReminder(ctx) {
   let explicitChannels;
   try {
-    // Account-level choice, stored on the primary profile.
-    const { accountBillingChannels } = require('./billing-delivery-channels');
-    explicitChannels = await accountBillingChannels(ctx.customer.id, 'billing', db);
+    // The property's own stored choice, read exactly as the send path reads it.
+    const { storedBillingChannels } = require('./billing-delivery-channels');
+    explicitChannels = await storedBillingChannels(ctx.customer.id, 'billing', db);
   } catch (err) {
     logger.warn(`[annual-prepay] notification_prefs lookup failed for customer ${ctx.customer.id}: ${err.message}`);
     await ctx.reverseReminderCredit();
@@ -5895,13 +5895,13 @@ async function pendingExplicitEpisodeTerms({ today, daysOut, stageTerms }) {
     logger.warn(`[annual-prepay] payment reminder resume scan skipped for the ${daysOut}-day stage: ${err.message}`);
     return [];
   }
-  // Account-level choice (primary profile); an unreadable one skips only
-  // that term's resumption today.
-  const { accountBillingChannels } = require('./billing-delivery-channels');
+  // The property's stored choice; an unreadable one skips only that term's
+  // resumption today.
+  const { storedBillingChannels } = require('./billing-delivery-channels');
   const resumable = [];
   for (const term of candidates) {
     try {
-      if (await accountBillingChannels(term.customer_id, 'billing', db)) resumable.push(term);
+      if (await storedBillingChannels(term.customer_id, 'billing', db)) resumable.push(term);
     } catch (err) {
       logger.warn(`[annual-prepay] resume skipped for term ${term.id}: billing channel choice unreadable (${err.message})`);
     }
