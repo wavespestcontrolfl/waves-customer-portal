@@ -19,8 +19,10 @@ const mockState = {
   // selectRestockRequestOutcome's own query (see the db mock below) — every
   // row here is treated as already-filtered to open/ordered for the product.
   liveRequests: [],
-  // Seeds the fake `vendors` table lookup findAmazonVendor runs.
-  amazonVendor: { id: 'vend-amazon', name: 'Amazon', website: 'https://www.amazon.com', active: true },
+  // Seeds the fake `vendor_orders` table: { [restock_request_id]: { external_order_number } }.
+  // orderedRequestMatchesDelivery reads this to correlate an 'ordered'
+  // request to the delivered order by ORDER IDENTITY, never by vendor name.
+  vendorOrders: {},
   adjustResult: null, adjustError: null, updateResult: null, updateError: null, claimUpdateError: null,
 };
 
@@ -43,13 +45,6 @@ jest.mock('../services/inventory-operations', () => ({
 const dbState = { lines: {} };
 jest.mock('../models/db', () => {
   const fn = (table) => {
-    // findAmazonVendor's lookup — `.where(cb).where('active', true).first()`.
-    if (table === 'vendors') {
-      const q = {};
-      q.where = () => q;
-      q.first = async () => mockState.amazonVendor;
-      return q;
-    }
     // selectRestockRequestOutcome's own query — `.where({product_id}).whereIn('status', [...])`,
     // awaited directly (no .first()); mockState.liveRequests stands in as
     // "every row already scoped to this product and open/ordered".
@@ -58,6 +53,13 @@ jest.mock('../models/db', () => {
       q.where = () => q;
       q.whereIn = () => q;
       q.then = (resolve, reject) => Promise.resolve(mockState.liveRequests).then(resolve, reject);
+      return q;
+    }
+    // orderedRequestMatchesDelivery's lookup — `.where({restock_request_id}).first('external_order_number')`.
+    if (table === 'vendor_orders') {
+      const q = {};
+      q.where = (cond) => { q._cond = cond; return q; };
+      q.first = async () => mockState.vendorOrders[q._cond?.restock_request_id];
       return q;
     }
     const q = {};
@@ -119,7 +121,7 @@ const taurus = { id: 'p-taurus', name: 'Taurus SC', container_size: '78 fl oz', 
 beforeEach(() => {
   mockState.match = { matched: false, reason: 'unmatched' };
   mockState.liveRequests = [];
-  mockState.amazonVendor = { id: 'vend-amazon', name: 'Amazon', website: 'https://www.amazon.com', active: true };
+  mockState.vendorOrders = {};
   mockState.adjustResult = { movement: { id: 'mv-1' }, product: taurus };
   mockState.adjustError = null;
   mockState.updateResult = { movement: { id: 'mv-2' }, request: { id: 'req-1' } };
@@ -219,12 +221,50 @@ describe('classifyItem — multipack markers (anywhere in the title, not just a 
     expect(result.receivedQty).toBe(312); // 2 (order qty) * 2 (pack) * 78
   });
 
+  test('qty 3 of a 2-pack of 78 oz -> 468 against a 78 oz container', async () => {
+    const result = await classifyItem({ title: 'Taurus SC 2 x 78 oz', quantity: 3 });
+    expect(result.receivedQty).toBe(468); // 3 (order qty) * 2 (pack) * 78
+  });
+
+  // A LEADING "N x SIZE" ("2 x 78 oz Taurus SC") is the one form
+  // parsePackSize ALSO multiplies on its own (its own multiplier check is
+  // anchored to the very start of the string) — the exact double-counting
+  // trap: sizing the raw title there would read 156 as if it were the
+  // per-unit size, not 78. These three tests lock in that the marker is
+  // stripped before sizing, so a LEADING marker behaves identically to an
+  // embedded one.
+  describe('a LEADING multipack marker is never double-counted (parsePackSize would otherwise have already multiplied it once)', () => {
+    test('"2 x 78 oz Taurus SC" against a 78 fl oz container -> 156 per item (same as the embedded form)', async () => {
+      const result = await classifyItem({ title: '2 x 78 oz Taurus SC', quantity: 1 });
+      expect(result).toEqual({ status: 'logged', productId: 'p-taurus', product: taurus, receivedQty: 156, receivedUnit: 'fl_oz' });
+    });
+
+    test('"2 x 78 oz Taurus SC" against a 156 fl oz container -> 156 per item (the container IS the pack, not 312)', async () => {
+      const bulkContainer = { id: 'p-taurus', name: 'Taurus SC', container_size: '156 fl oz' };
+      mockState.match = { matched: true, product: bulkContainer };
+      const result = await classifyItem({ title: '2 x 78 oz Taurus SC', quantity: 1 });
+      expect(result).toEqual({ status: 'logged', productId: 'p-taurus', product: bulkContainer, receivedQty: 156, receivedUnit: 'fl_oz' });
+    });
+
+    test('qty 3 of a leading "2 x 78 oz" -> 468 against a 78 oz container', async () => {
+      const result = await classifyItem({ title: '2 x 78 oz Taurus SC', quantity: 3 });
+      expect(result.receivedQty).toBe(468);
+    });
+  });
+
   test('agreement branch B: N x per-unit size equals the catalog container (the container IS the whole pack)', async () => {
     const bulkContainer = { id: 'p-taurus', name: 'Taurus SC', container_size: '156 fl oz' };
     mockState.match = { matched: true, product: bulkContainer };
     const result = await classifyItem({ title: 'Taurus SC 2 x 78 oz', quantity: 1 });
     // 78 != 156 (branch A fails) but 2*78 == 156 (branch B) -> the container
     // already IS the 2-pack, so received per item is just the container size.
+    expect(result).toEqual({ status: 'logged', productId: 'p-taurus', product: bulkContainer, receivedQty: 156, receivedUnit: 'fl_oz' });
+  });
+
+  test('agreement branch B via "(Pack of N)": the container IS the whole pack -> 156, not 312', async () => {
+    const bulkContainer = { id: 'p-taurus', name: 'Taurus SC', container_size: '156 fl oz' };
+    mockState.match = { matched: true, product: bulkContainer };
+    const result = await classifyItem({ title: 'Taurus SC 78 oz (Pack of 2)', quantity: 1 });
     expect(result).toEqual({ status: 'logged', productId: 'p-taurus', product: bulkContainer, receivedQty: 156, receivedUnit: 'fl_oz' });
   });
 
@@ -271,10 +311,10 @@ describe('processReceiptLine', () => {
     expect(saved).toMatchObject({ status: 'logged', movement_id: 'mv-1', restock_request_id: null, received_qty: 156, received_unit: 'fl_oz' });
   });
 
-  describe('restock request vendor correlation', () => {
+  describe('restock request order-number correlation', () => {
     test('a live OPEN request qualifies regardless of vendor — a need, not yet placed with anyone', async () => {
       mockState.match = { matched: true, product: taurus };
-      mockState.liveRequests = [{ id: 'req-open', status: 'open', vendor: 'SiteOne', metadata: null }];
+      mockState.liveRequests = [{ id: 'req-open', status: 'open', vendor: 'SiteOne' }];
       const outcome = await processReceiptLine({ email, orderNumber: '114-9578837-7732259', shipmentKey: 'ship-1', item: { title: 'Taurus SC Termiticide 78 oz', quantity: 1 }, lineNo: 1 });
       expect(outcome.viaRequest).toBe(true);
       expect(outcome.leftoverRequest).toBeNull();
@@ -285,39 +325,52 @@ describe('processReceiptLine', () => {
       expect(dbState.lines['amazon|114-9578837-7732259|ship-1|1']).toMatchObject({ movement_id: 'mv-2', restock_request_id: 'req-open' });
     });
 
-    test('a live ORDERED request qualifies when it was placed with Amazon (metadata.vendorId)', async () => {
+    test('an ORDERED request whose linked vendor order carries the SAME external_order_number as the delivery is received', async () => {
       mockState.match = { matched: true, product: taurus };
-      mockState.liveRequests = [{ id: 'req-amz', status: 'ordered', vendor: 'Amazon', metadata: { vendorId: 'vend-amazon' } }];
+      mockState.liveRequests = [{ id: 'req-amz', status: 'ordered', vendor: 'Amazon' }];
+      mockState.vendorOrders = { 'req-amz': { external_order_number: '114-9578837-7732259' } };
       const outcome = await processReceiptLine({ email, orderNumber: '114-9578837-7732259', shipmentKey: 'ship-1', item: { title: 'Taurus SC Termiticide 78 oz', quantity: 1 }, lineNo: 1 });
       expect(outcome.viaRequest).toBe(true);
       expect(mockUpdateRestockRequest).toHaveBeenCalledWith('req-amz', expect.objectContaining({ action: 'receive' }), expect.anything());
       expect(mockAdjustStock).not.toHaveBeenCalled();
     });
 
-    test('a live ORDERED request qualifies via the plain vendor display text ("Amazon") when metadata carries no vendorId', async () => {
+    test('the order-number match trims whitespace and ignores case', async () => {
       mockState.match = { matched: true, product: taurus };
-      mockState.liveRequests = [{ id: 'req-amz-text', status: 'ordered', vendor: 'Amazon', metadata: null }];
+      mockState.liveRequests = [{ id: 'req-amz', status: 'ordered', vendor: 'Amazon' }];
+      mockState.vendorOrders = { 'req-amz': { external_order_number: '  114-9578837-7732259  ' } };
       const outcome = await processReceiptLine({ email, orderNumber: '114-9578837-7732259', shipmentKey: 'ship-1', item: { title: 'Taurus SC Termiticide 78 oz', quantity: 1 }, lineNo: 1 });
       expect(outcome.viaRequest).toBe(true);
-      expect(mockUpdateRestockRequest).toHaveBeenCalledWith('req-amz-text', expect.objectContaining({ action: 'receive' }), expect.anything());
     });
 
-    test('a live ORDERED request placed with a DIFFERENT vendor (SiteOne) is left untouched — stock is adjusted directly and the leftover is named', async () => {
+    test('an ORDERED request placed with Amazon but a DIFFERENT order number is left untouched — stock adjusted, leftover named (vendor identity never substitutes for order identity)', async () => {
       mockState.match = { matched: true, product: taurus };
-      mockState.liveRequests = [{ id: 'req-site1', status: 'ordered', vendor: 'SiteOne', metadata: { vendorId: 'vend-siteone' } }];
+      mockState.liveRequests = [{ id: 'req-amz-other', status: 'ordered', vendor: 'Amazon' }];
+      mockState.vendorOrders = { 'req-amz-other': { external_order_number: '999-0000000-0000000' } };
       const outcome = await processReceiptLine({ email, orderNumber: '114-9578837-7732259', shipmentKey: 'ship-1', item: { title: 'Taurus SC Termiticide 78 oz', quantity: 1 }, lineNo: 1 });
       expect(outcome.viaRequest).toBe(false);
-      expect(outcome.leftoverRequest).toEqual({ vendor: 'SiteOne', status: 'ordered' });
+      expect(outcome.leftoverRequest).toEqual({ vendor: 'Amazon', status: 'ordered' });
       expect(mockAdjustStock).toHaveBeenCalled();
       expect(mockUpdateRestockRequest).not.toHaveBeenCalled();
       expect(dbState.lines['amazon|114-9578837-7732259|ship-1|1']).toMatchObject({ movement_id: 'mv-1', restock_request_id: null });
     });
 
+    test('an ORDERED request with NO linked vendor order at all is left untouched', async () => {
+      mockState.match = { matched: true, product: taurus };
+      mockState.liveRequests = [{ id: 'req-nolink', status: 'ordered', vendor: 'SiteOne' }];
+      // mockState.vendorOrders stays {} — no row for req-nolink.
+      const outcome = await processReceiptLine({ email, orderNumber: '114-9578837-7732259', shipmentKey: 'ship-1', item: { title: 'Taurus SC Termiticide 78 oz', quantity: 1 }, lineNo: 1 });
+      expect(outcome.viaRequest).toBe(false);
+      expect(outcome.leftoverRequest).toEqual({ vendor: 'SiteOne', status: 'ordered' });
+      expect(mockAdjustStock).toHaveBeenCalled();
+      expect(mockUpdateRestockRequest).not.toHaveBeenCalled();
+    });
+
     test('two qualifying live requests are ambiguous — none received, stock adjusted, no leftover named', async () => {
       mockState.match = { matched: true, product: taurus };
       mockState.liveRequests = [
-        { id: 'req-open-1', status: 'open', vendor: 'SiteOne', metadata: null },
-        { id: 'req-open-2', status: 'open', vendor: 'Gemplers', metadata: null },
+        { id: 'req-open-1', status: 'open', vendor: 'SiteOne' },
+        { id: 'req-open-2', status: 'open', vendor: 'Gemplers' },
       ];
       const outcome = await processReceiptLine({ email, orderNumber: '114-9578837-7732259', shipmentKey: 'ship-1', item: { title: 'Taurus SC Termiticide 78 oz', quantity: 1 }, lineNo: 1 });
       expect(outcome.viaRequest).toBe(false);
