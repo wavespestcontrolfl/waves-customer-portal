@@ -164,8 +164,24 @@ describe('script arguments', () => {
     expect(parseArgs(['--days', '14', '--json', '--end=2026-09-25'])).toEqual({ days: '14', json: true, end: '2026-09-25' });
   });
 
-  test('utcMidnight validates the date format', () => {
+  test('utcMidnight accepts valid calendar dates', () => {
     expect(utcMidnight('2026-09-25').toISOString()).toBe('2026-09-25T00:00:00.000Z');
+    expect(utcMidnight('2024-02-29').toISOString()).toBe('2024-02-29T00:00:00.000Z');
+    expect(utcMidnight('2000-02-29').toISOString()).toBe('2000-02-29T00:00:00.000Z');
+  });
+
+  test('utcMidnight rejects malformed dates', () => {
     expect(() => utcMidnight('09/25/2026')).toThrow('--end must be YYYY-MM-DD');
+  });
+
+  test.each([
+    '2026-00-15',
+    '2026-13-01',
+    '2026-01-00',
+    '2026-04-31',
+    '2026-02-29',
+    '1900-02-29',
+  ])('utcMidnight rejects impossible calendar date %s', (value) => {
+    expect(() => utcMidnight(value)).toThrow('--end must be a valid calendar date');
   });
 });

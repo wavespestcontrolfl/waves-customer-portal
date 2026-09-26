@@ -238,11 +238,25 @@ function positiveInt(value, fallback) {
 }
 
 function utcMidnight(dateStr) {
-  if (dateStr && !/^\d{4}-\d{2}-\d{2}$/.test(String(dateStr))) {
+  if (!dateStr) {
+    const now = new Date();
+    return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  }
+  const value = String(dateStr);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
     throw new Error(`--end must be YYYY-MM-DD, got "${dateStr}"`);
   }
-  const base = dateStr ? new Date(`${dateStr}T00:00:00Z`) : new Date();
-  return new Date(Date.UTC(base.getUTCFullYear(), base.getUTCMonth(), base.getUTCDate()));
+  const [year, month, day] = value.split('-').map(Number);
+  const base = new Date(`${value}T00:00:00Z`);
+  if (
+    Number.isNaN(base.getTime())
+    || base.getUTCFullYear() !== year
+    || base.getUTCMonth() !== month - 1
+    || base.getUTCDate() !== day
+  ) {
+    throw new Error(`--end must be a valid calendar date in YYYY-MM-DD format, got "${dateStr}"`);
+  }
+  return base;
 }
 
 async function cf(path, init = {}) {
