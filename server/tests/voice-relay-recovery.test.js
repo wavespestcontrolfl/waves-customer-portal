@@ -201,6 +201,15 @@ describe('relay-recovery module', () => {
     expect((await recovery.readReconnectState(db, 'CA-1')).profile).toEqual({ relayProfileId: 'flux_fast_v1', relayAttrs: { speechModel: 'flux' } });
   });
 
+  // Codex r3 P2 on #4947: a language is a property of the profile that set
+  // it, so a leftover `relay_language` on a CLEARED stamp (relay_profile_id
+  // null — e.g. a row written before the clearing branch wiped it) is never
+  // restored onto the profile-less resumed leg.
+  test('a leftover `relay_language` on a cleared stamp is ignored — no profile, no language', async () => {
+    const { db } = primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1, relay_profile_id: null, relay_attrs: null, relay_language: 'multi' } } });
+    expect((await recovery.readReconnectState(db, 'CA-1')).profile).toEqual({ relayProfileId: null, relayAttrs: {} });
+  });
+
   test('promises ride the segment and are restored (latest per kind) with their expectation and timestamp; caller turns are extracted (hook P1)', async () => {
     const at = new Date('2026-09-05T02:00:00.000Z');
     const seg = segmentStore.buildSegment({ generation: 1, text: 'Caller: ants\nAgent: I will send an estimate.\nCaller: thanks', promises: [{ kind: 'send_estimate', verdict: true, expectation: 'about_15_minutes', at }] });

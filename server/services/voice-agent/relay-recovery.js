@@ -207,7 +207,10 @@ async function readReconnectState(db, callSid, { timeoutMs = RESUME_STATE_TIMEOU
       ? {
           relayProfileId: meta.relay_profile_id ? String(meta.relay_profile_id) : null,
           relayAttrs: (meta.relay_attrs && typeof meta.relay_attrs === 'object') ? meta.relay_attrs : {},
-          ...(meta.relay_language ? { language: String(meta.relay_language) } : {}),
+          // Only alongside a stamped profile: a language is a property of
+          // the profile that set it, so a leftover one on a cleared stamp
+          // (relay_profile_id null) is never restored (codex r3 P2 on #4947).
+          ...(meta.relay_profile_id && meta.relay_language ? { language: String(meta.relay_language) } : {}),
         }
       : null;
     return {

@@ -286,7 +286,7 @@ describe('POST /relay-sandbox', () => {
     expect(update).not.toHaveBeenCalled();
     // The Spanish leg clears a pre-stamped English profile when its own options resolve empty (codex r14 P2).
     await stampRelayProfile('CA-prod-2', {}, { clearWhenEmpty: true });
-    expect(JSON.parse(update.mock.calls[0][0].metadata.bindings[0])).toEqual({ relay_profile_id: null, relay_attrs: null });
+    expect(JSON.parse(update.mock.calls[0][0].metadata.bindings[0])).toEqual({ relay_profile_id: null, relay_attrs: null, relay_language: null });
     db.mockImplementation(() => { throw new Error('pool down'); });
     await expect(stampRelayProfile('CA-prod-3', { relayProfileId: 'nova_hints_v1' })).resolves.toBeUndefined(); // fail-soft
   });
@@ -383,6 +383,24 @@ describe('POST /relay-sandbox/cell', () => {
       relay_attrs: expect.objectContaining({ speechModel: 'flux' }),
       relay_language: null,
     });
+  });
+
+  // Codex r3 P2 on #4947: with recovery on, an EMPTY stamp (e.g. a retried
+  // /relay-sandbox after the cell-10 continuation) takes the clearing branch,
+  // which must wipe relay_language too — the jsonb merge keeps omitted keys.
+  test('clearing a cell-10 stamp (recovery on, empty options) also clears relay_language', async () => {
+    const saved = process.env.GATE_VOICE_RELAY_RECOVERY;
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    try {
+      const { update } = primeInsert();
+      await stampRelayProfile('CA-sb-10c', { relayProfileId: 'flux_multilingual_es_v1', relayAttrs: { speechModel: 'flux' }, language: 'multi' });
+      expect(JSON.parse(update.mock.calls[0][0].metadata.bindings[0]).relay_language).toBe('multi');
+      update.mockClear();
+      await stampRelayProfile('CA-sb-10c', {});
+      expect(JSON.parse(update.mock.calls[0][0].metadata.bindings[0])).toEqual({ relay_profile_id: null, relay_attrs: null, relay_language: null });
+    } finally {
+      if (saved === undefined) delete process.env.GATE_VOICE_RELAY_RECOVERY; else process.env.GATE_VOICE_RELAY_RECOVERY = saved;
+    }
   });
 
   test('a stamp failure never costs the caller the call', async () => {

@@ -2177,7 +2177,10 @@ async function stampRelayProfile(callSid, opts, { clearWhenEmpty = false } = {})
         // (falsy ⇒ no `language` key on the restored profile).
         relay_language: opts.language || null,
       }
-    : { relay_profile_id: null, relay_attrs: null };
+    // Clearing wipes `relay_language` too — the merge keeps any key this
+    // side omits, so a CallSid first stamped by cell 10 would otherwise keep
+    // a stale "multi" after its profile was cleared (codex r3 P2 on #4947).
+    : { relay_profile_id: null, relay_attrs: null, relay_language: null };
   try {
     await db('call_log')
       .where({ twilio_call_sid: callSid })
