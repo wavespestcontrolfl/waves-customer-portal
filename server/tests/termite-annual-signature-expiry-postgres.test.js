@@ -157,15 +157,23 @@ describeOrSkip('termite annual signature expiry (slice 3b) — real Postgres', (
   const daysAgo = (n) => new Date(Date.now() - n * 24 * 60 * 60 * 1000);
 
   async function makeParkedEstimate(db, {
-    customerId = randomUUID(), acceptedAt = daysAgo(1), parkedAt = acceptedAt,
+    customerId = null, acceptedAt = daysAgo(1), parkedAt = acceptedAt, parkedAtRaw, archived = false,
   } = {}) {
+    // A real customers row: the nudge only reaches customers the Requests
+    // page can show (non-archived).
+    const resolvedCustomerId = customerId
+      || (await db('customers').insert({ deleted_at: archived ? new Date() : null }).returning('id'))[0].id;
     const [estimate] = await db('estimates').insert({
-      customer_id: customerId,
+      customer_id: resolvedCustomerId,
       accepted_at: acceptedAt,
       annual_plan_activation_status: 'awaiting_signature',
-      annual_plan_deferred_invoice: JSON.stringify({ version: 1, parkedAt: parkedAt.toISOString(), frozenFinancials: { total: 449 } }),
+      annual_plan_deferred_invoice: JSON.stringify({
+        version: 1,
+        parkedAt: parkedAtRaw !== undefined ? parkedAtRaw : parkedAt.toISOString(),
+        frozenFinancials: { total: 449 },
+      }),
     }).returning('*');
-    return { estimateId: estimate.id, customerId };
+    return { estimateId: estimate.id, customerId: resolvedCustomerId };
   }
 
   async function makeAgreement(db, {
@@ -198,6 +206,7 @@ describeOrSkip('termite annual signature expiry (slice 3b) — real Postgres', (
       const first = await sweep();
       expect(first).toMatchObject({ signatureNudgeScanned: 1, signatureNudged: 1 });
       expect(reminderDedupeKeys(notifyAdmin)).toHaveLength(1);
+      const firstKey = reminderDedupeKeys(notifyAdmin)[0];
 
       notifyAdmin.mockClear();
       const second = await sweep();
@@ -205,7 +214,7 @@ describeOrSkip('termite annual signature expiry (slice 3b) — real Postgres', (
       // notifyAdmin is called again but the real dedupe would suppress it;
       // this fake always "delivers", so assert the KEY is stable instead.
       expect(second.signatureNudgeScanned).toBe(1);
-      expect(reminderDedupeKeys(notifyAdmin)[0]).toBe(reminderDedupeKeys(notifyAdmin)[0]);
+      expect(reminderDedupeKeys(notifyAdmin)).toEqual([firstKey]);
     });
 
     test('never nudges while the signing link is still valid', async () => {
@@ -374,6 +383,74 @@ describeOrSkip('termite annual signature expiry (slice 3b) — real Postgres', (
         expect(row.status).toBe('cancelled');
         expect(row.share_token_hash).toBeNull();
       }
+    });
+  });
+
+  // ---- primary review hardening ----------------------------------------
+  describe('hardening', () => {
+    test('an archived customer\'s lapsed link is never nudged (the Requests page hides it)', async () => {
+      const { sweep, notifyAdmin, db } = load();
+      const { estimateId, customerId } = await makeParkedEstimate(db, { archived: true });
+      await makeAgreement(db, { estimateId, customerId, shareTokenExpiresAt: daysAgo(1) });
+
+      const counts = await sweep();
+      expect(counts.signatureNudgeScanned).toBe(0);
+      expect(reminderDedupeKeys(notifyAdmin)).toHaveLength(0);
+    });
+
+    test('a malformed parkedAt falls back to accepted_at instead of failing the whole scan', async () => {
+      const { sweep, db } = load();
+      const garbage = await makeParkedEstimate(db, { acceptedAt: daysAgo(ABANDON_DAYS + 3), parkedAtRaw: 'yesterday' });
+      await makeAgreement(db, { estimateId: garbage.estimateId, customerId: garbage.customerId });
+      const fresh = await makeParkedEstimate(db, { acceptedAt: daysAgo(ABANDON_DAYS + 1), parkedAtRaw: '2026-13-45 nonsense' });
+      await makeAgreement(db, { estimateId: fresh.estimateId, customerId: fresh.customerId });
+
+      const counts = await sweep();
+      expect(counts.signatureExpireScanError).toBeUndefined();
+      expect(counts.signatureExpired).toBe(2);
+    });
+
+    test('an estimate locked by an in-flight activation is skipped (never waited on), then closes on a later sweep', async () => {
+      const { sweep, db } = load();
+      const { estimateId, customerId } = await makeParkedEstimate(db, { acceptedAt: daysAgo(ABANDON_DAYS + 2) });
+      await makeAgreement(db, { estimateId, customerId });
+
+      // Hold the estimate row lock the way activation does, on another connection.
+      let release;
+      const held = new Promise((resolve) => { release = resolve; });
+      let locked;
+      const lockTaken = new Promise((resolve) => { locked = resolve; });
+      const holder = db.transaction(async (trx) => {
+        await trx('estimates').where({ id: estimateId }).forUpdate().first('id');
+        locked();
+        await held;
+      });
+      await lockTaken;
+
+      const during = await sweep();
+      expect(during.signatureExpired).toBe(0);
+      expect(during.signatureExpireFailed).toBe(0);
+      expect((await db('estimates').where({ id: estimateId }).first()).annual_plan_activation_status).toBe('awaiting_signature');
+
+      release();
+      await holder;
+      const after = await sweep();
+      expect(after.signatureExpired).toBe(1);
+    });
+
+    test('a close-out that failed before rotates behind never-attempted rows', async () => {
+      const { sweep, db } = load();
+      const older = await makeParkedEstimate(db, { acceptedAt: daysAgo(ABANDON_DAYS + 9) });
+      await makeAgreement(db, { estimateId: older.estimateId, customerId: older.customerId });
+      const newer = await makeParkedEstimate(db, { acceptedAt: daysAgo(ABANDON_DAYS + 2) });
+      await makeAgreement(db, { estimateId: newer.estimateId, customerId: newer.customerId });
+      // The older row's last automated attempt failed (stamped by the pass).
+      await db('estimates').where({ id: older.estimateId }).update({ annual_plan_activation_attempted_at: daysAgo(1) });
+
+      const counts = await sweep({ limit: 1 });
+      expect(counts.signatureExpired).toBe(1);
+      expect((await db('estimates').where({ id: newer.estimateId }).first()).annual_plan_activation_status).toBe('signature_expired');
+      expect((await db('estimates').where({ id: older.estimateId }).first()).annual_plan_activation_status).toBe('awaiting_signature');
     });
   });
 });

@@ -1111,6 +1111,11 @@ async function remindExpiredSignatureLinks({ conn, limit, counts }) {
         this.on(conn.raw("cc.document_variables_snapshot -> 'estimate' ->> 'id' = e.id::text"))
           .andOnVal('cc.document_template_key', ANNUAL_TEMPLATE_KEY);
       })
+      // Only agreements the Contracts → Requests page can show (it hides
+      // archived customers — document-contract-delivery.js requestBaseQuery):
+      // a nudge whose "resend it" action has no visible row is unactionable.
+      .join('customers as c', 'c.id', 'cc.customer_id')
+      .whereNull('c.deleted_at')
       .where('e.annual_plan_activation_status', 'awaiting_signature')
       .whereNotIn('cc.status', ['signed', 'cancelled', 'voided'])
       .whereNotNull('cc.share_token_expires_at')
@@ -1122,7 +1127,11 @@ async function remindExpiredSignatureLinks({ conn, limit, counts }) {
           .whereRaw('cc2.created_at > cc.created_at');
       })
       .select('e.id as estimate_id', 'e.annual_plan_deferred_invoice', 'e.accepted_at', 'cc.id as contract_id', 'cc.share_token_expires_at')
-      .orderBy('cc.share_token_expires_at', 'asc')
+      // Most recently lapsed first: an already-nudged link stays a
+      // (deduped) candidate until its estimate closes at day 45, so an
+      // oldest-first batch could keep re-selecting stale, already-belled
+      // rows ahead of a link that lapsed today.
+      .orderBy('cc.share_token_expires_at', 'desc')
       .limit(limit);
     counts.signatureNudgeScanned = candidates.length;
     const NotificationService = require('./notification-service');
@@ -1161,15 +1170,18 @@ async function remindExpiredSignatureLinks({ conn, limit, counts }) {
 
 // Hard expiry: an estimate parked more than ANNUAL_SIGNATURE_ABANDON_DAYS
 // ago and STILL unsigned closes out for good — never billed, never booked,
-// so nothing to undo. Locked customer-before-estimate (the shared order
-// admin-contracts.js's cancel route and /:token/sign hold), THEN the
-// estimate row FOR UPDATE (activateTermiteAnnualPlanForSignedContract's own
-// lock) so a signature committing concurrently on another connection either
-// wins outright (already 'activated' by the time this transaction gets the
-// estimate lock) or is re-checked for explicitly below (a signed contract
-// recorded a beat before this transaction's own re-check, but after this
-// row was selected as a candidate) — either way the customer's actual
-// signature is never overridden by this administrative close-out.
+// so nothing to undo. Lock order: CUSTOMER row FOR UPDATE first — the
+// shared order /:token/sign, admin-contracts.js /:id/cancel and customer
+// merges hold (customer before contract; the event insert below also takes
+// the customer FK lock) — so an in-flight signature commits before this
+// re-check runs. The ESTIMATE lock is then taken SKIP LOCKED: activation
+// (activateTermiteAnnualPlanForSignedContract) locks the estimate FIRST and
+// the customer later (inside convertEstimate), the opposite order, so
+// waiting here could deadlock with an activation already running on this
+// estimate. A locked estimate means exactly that — a signature is being
+// activated — so this tick skips it and the next sweep's re-check sees the
+// outcome. Either way the customer's actual signature always wins over this
+// administrative close-out.
 async function expireAbandonedSignature({ estimateId, conn = db }) {
   return conn.transaction(async (trx) => {
     const peek = await trx('estimates').where({ id: estimateId }).first('id', 'customer_id');
@@ -1177,8 +1189,13 @@ async function expireAbandonedSignature({ estimateId, conn = db }) {
     if (peek.customer_id) {
       await trx('customers').where({ id: peek.customer_id }).forUpdate().first('id');
     }
-    const estimate = await trx('estimates').where({ id: estimateId }).forUpdate().first();
-    if (!estimate) return { skipped: 'estimate_not_found' };
+    const estimate = await trx('estimates').where({ id: estimateId }).forUpdate().skipLocked().first();
+    if (!estimate) {
+      // Row gone, or locked by an activation in flight (see above) — never
+      // wait on it while holding the customer lock.
+      const exists = await trx('estimates').where({ id: estimateId }).first('id');
+      return { skipped: exists ? 'estimate_locked' : 'estimate_not_found' };
+    }
     if (estimate.annual_plan_activation_status !== 'awaiting_signature') {
       // Already activated (a signature won the race), already expired by a
       // prior attempt, or never parked — nothing to do either way.
@@ -1227,7 +1244,7 @@ async function expireAbandonedSignature({ estimateId, conn = db }) {
       retiredCount += 1;
       await trx('customer_contract_events').insert({
         contract_id: row.id,
-        customer_id: estimate.customer_id,
+        customer_id: row.customer_id || estimate.customer_id,
         event_type: 'cancelled',
         actor_type: 'system',
         metadata: JSON.stringify({ reason: 'annual_plan_signature_expired', estimateId, abandonDays: ANNUAL_SIGNATURE_ABANDON_DAYS }),
@@ -1244,11 +1261,21 @@ async function expireAbandonedSignatures({ conn, limit, counts }) {
     // accepted_at in SQL exactly like parkedAtForEstimate does in JS (kept
     // in sync deliberately — this WHERE decides the candidate set, the JS
     // helper decides the per-row verdict inside the locked transaction).
-    const parkedAtExpr = "COALESCE((e.annual_plan_deferred_invoice ->> 'parkedAt')::timestamptz, e.accepted_at)";
+    // The ::timestamptz cast only ever sees an ISO-8601 instant (the park
+    // writes new Date().toISOString()): anything else falls back to
+    // accepted_at, so one malformed stamp can never fail the whole scan.
+    // (No '?' in the pattern — knex raw would read it as a binding.)
+    const isoParkedAt = "(e.annual_plan_deferred_invoice ->> 'parkedAt') ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+|)(Z|[+-][0-9]{2}(:|)[0-9]{2})$'";
+    const parkedAtExpr = `COALESCE(CASE WHEN ${isoParkedAt} THEN (e.annual_plan_deferred_invoice ->> 'parkedAt')::timestamptz END, e.accepted_at)`;
     const candidates = await conn('estimates as e')
       .where('e.annual_plan_activation_status', 'awaiting_signature')
       .whereRaw(`${parkedAtExpr} IS NOT NULL`)
       .whereRaw(`${parkedAtExpr} < ?`, [cutoff])
+      // A close-out that failed is stamped (below) and rotates behind the
+      // never-attempted rows, so a backlog of failures larger than the limit
+      // can't re-select the same oldest batch every day. A successful close
+      // leaves the 'awaiting_signature' set and needs no stamp.
+      .orderBy('e.annual_plan_activation_attempted_at', 'asc', 'first')
       .orderByRaw(`${parkedAtExpr} asc`)
       .select('e.id as estimate_id')
       .limit(limit);
@@ -1275,6 +1302,13 @@ async function expireAbandonedSignatures({ conn, limit, counts }) {
       } catch (err) {
         counts.signatureExpireFailed += 1;
         logger.error(`[termite-annual-activation] signature hard-expiry failed for estimate ${row.estimate_id}: ${err.message}`);
+        try {
+          await conn('estimates')
+            .where({ id: row.estimate_id, annual_plan_activation_status: 'awaiting_signature' })
+            .update({ annual_plan_activation_attempted_at: new Date() });
+        } catch (stampErr) {
+          logger.warn(`[termite-annual-activation] hard-expiry attempt stamp failed for estimate ${row.estimate_id}: ${stampErr.message}`);
+        }
       }
     }
   } catch (err) {
