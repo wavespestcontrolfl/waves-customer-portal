@@ -328,11 +328,11 @@ export const SERVICE_COMPLETION_CHOICE_COUNTS = Object.freeze(Object.fromEntries
 const FAMILY_ALIASES = Object.freeze({
   lawn: "lawn",
   lawn_care: "lawn",
-  commercial_lawn: "lawn",
   tree_shrub: "tree_shrub",
   tree_and_shrub: "tree_shrub",
   trees_shrubs: "tree_shrub",
   ornamental: "tree_shrub",
+  palm: "tree_shrub",
   recurring_pest: "recurring_pest",
   pest: "recurring_pest",
   pest_control: "recurring_pest",
@@ -349,6 +349,8 @@ const CATEGORY_ALIASES = Object.freeze({
   completed_action: "completedActions",
   completed_actions: "completedActions",
   completedactions: "completedActions",
+  actionscompleted: "completedActions",
+  protocolactionscompleted: "completedActions",
   protocol_action: "completedActions",
   protocol_actions: "completedActions",
 });

@@ -41,8 +41,13 @@ describe("service completion choices", () => {
     expect(normalizeServiceCompletionChoiceFamily("Tree & Shrub")).toBe("tree_shrub");
     expect(normalizeServiceCompletionChoiceFamily("pest_control")).toBe("recurring_pest");
     expect(normalizeServiceCompletionChoiceFamily("mosquito")).toBeNull();
+    expect(serviceCompletionChoicesFor("commercial_lawn", "recommendations")).toEqual([]);
+    expect(serviceCompletionChoicesFor("palm", "observations")).toBe(SERVICE_COMPLETION_CHOICES.tree_shrub.observations);
     expect(normalizeServiceCompletionChoiceCategory("protocol actions")).toBe("completedActions");
     expect(normalizeServiceCompletionChoiceCategory("recommendation")).toBe("recommendations");
+    for (const category of ["actionsCompleted", "protocolActionsCompleted"]) {
+      expect(serviceCompletionChoicesFor("lawn", category)).toBe(SERVICE_COMPLETION_CHOICES.lawn.completedActions);
+    }
     expect(serviceCompletionChoicesFor("unknown", "observations")).toEqual([]);
   });
 
