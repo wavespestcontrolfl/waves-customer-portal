@@ -190,8 +190,14 @@ function mapResponseToMessage(response, requestedModel) {
       let input;
       try {
         input = item.arguments ? JSON.parse(item.arguments) : {};
-      } catch (err) {
-        throw new Error(`OpenAI function_call "${item.name || item.call_id}" returned invalid JSON arguments: ${err.message}`);
+      } catch {
+        // Neither the parse error's own message nor the raw arguments string
+        // is included: `item.arguments` is caller-supplied tool-call input
+        // (phone, name, address on a lookup/booking tool) and JSON.parse's
+        // error message can echo a slice of the malformed text verbatim —
+        // this error is logged (relay-conversation.js's model-round catch),
+        // so a fixed, content-free message is the only PII-safe choice here.
+        throw new Error(`OpenAI function_call "${item.name || item.call_id}" returned invalid JSON arguments (unparseable).`);
       }
       content.push({ type: 'tool_use', id: item.call_id || item.id, name: item.name, input });
     }

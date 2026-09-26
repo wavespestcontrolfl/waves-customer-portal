@@ -160,6 +160,11 @@ const MODEL = process.env.VOICE_RELAY_MODEL || MODELS.VOICE;
 // directly, so these two vars have no effect on that flow.
 const INBOUND_MODEL_ENV = 'VOICE_RELAY_INBOUND_MODEL';
 const SANDBOX_MODEL_ENV = 'VOICE_RELAY_SANDBOX_MODEL';
+// Named for the fallback-reason/warning text only when the shared MODEL
+// default itself fails validation (see resolveSessionModel) — VOICE_RELAY_MODEL
+// is the operator-facing lever for it (MODEL_VOICE moves MODELS.VOICE, the
+// value VOICE_RELAY_MODEL falls back to when unset).
+const SHARED_MODEL_ENV = 'VOICE_RELAY_MODEL';
 
 // Allowlist for the override envs above — derived from the shared catalog
 // (config/models.js MODEL_CATALOG) rather than a locally hand-typed list, so
@@ -232,6 +237,19 @@ function warnRejectedOverrideOnce(source, value) {
  * `fallbackReason` even if a lower-precedence override or the shared default
  * ends up running instead — the version stamp must show a rejection happened
  * even when the call still ran on a legitimate (if less-preferred) model.
+ *
+ * The shared MODEL fallback (VOICE_RELAY_MODEL / MODELS.VOICE, computed at
+ * module load, never allowlist-checked before this lane picked a client by
+ * provider) is validated here too — the resolved model no longer only
+ * shapes request params, it now SELECTS THE PROVIDER CLIENT (providerFor,
+ * used by the constructor right after this returns). A misconfigured
+ * VOICE_RELAY_MODEL or MODEL_VOICE pointing at a non-Anthropic id
+ * (GATE_VOICE_RELAY_OPENAI off, or an OpenAI id this registry never marked
+ * voice-eligible, or any id the registry does not recognize at all) must
+ * fail closed to the registry's own code default (MODELS.DEFAULTS.VOICE —
+ * always a valid, allowlisted Anthropic id) rather than silently reach the
+ * OpenAI client, or an unrecognized provider entirely, with no override
+ * ever having been rejected.
  */
 function resolveSessionModel({ sandbox } = {}) {
   const candidates = [];
@@ -252,7 +270,12 @@ function resolveSessionModel({ sandbox } = {}) {
       warnRejectedOverrideOnce(source, value);
     }
   }
-  return { model: MODEL, fallbackReason };
+  if (isAllowedOverrideModel(MODEL)) return { model: MODEL, fallbackReason };
+  if (!fallbackReason) {
+    fallbackReason = `unknown_shared_model:${SHARED_MODEL_ENV}=${MODEL}`;
+    warnRejectedOverrideOnce(SHARED_MODEL_ENV, MODEL);
+  }
+  return { model: MODELS.DEFAULTS.VOICE, fallbackReason };
 }
 
 // output_config.effort — GA, no beta header. See the call site for why `low`.

@@ -194,6 +194,28 @@ describe('mapResponseToMessage — Responses response -> Anthropic Message shape
     }, 'gpt-6-sol')).toThrow(/invalid JSON arguments/);
   });
 
+  // Codex r1 P1: the raw (malformed) arguments string is caller-supplied
+  // tool-call input — a phone number, name, or address on a lookup/booking
+  // tool — and this error is logged verbatim by relay-conversation.js's
+  // model-round catch block. Neither the raw arguments text nor JSON.parse's
+  // own error message (which can echo a slice of it) may ever appear in the
+  // thrown message.
+  test('invalid JSON arguments never leaks the raw (possibly PII-carrying) argument text into the error', () => {
+    const phone = '+19415559999';
+    let thrown;
+    try {
+      mapResponseToMessage({
+        status: 'completed',
+        output: [{ type: 'function_call', call_id: 'c1', name: 'lookup_customer', arguments: `{"phone":"${phone}"` }], // truncated — invalid JSON
+      }, 'gpt-6-sol');
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+    expect(thrown.message).not.toContain(phone);
+    expect(thrown.message).toMatch(/invalid JSON arguments/);
+  });
+
   test('an incomplete response for max_output_tokens maps to stop_reason max_tokens', () => {
     const msg = mapResponseToMessage({
       status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' },

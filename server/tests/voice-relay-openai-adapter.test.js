@@ -32,7 +32,7 @@ const {
   RelayConversation, resolveSessionModel, isAllowedOverrideModel, providerFor, MODEL,
 } = require('../services/voice-agent/relay-conversation');
 
-const OVERRIDE_ENV_KEYS = ['VOICE_RELAY_INBOUND_MODEL', 'VOICE_RELAY_SANDBOX_MODEL', 'GATE_VOICE_RELAY_OPENAI'];
+const OVERRIDE_ENV_KEYS = ['VOICE_RELAY_INBOUND_MODEL', 'VOICE_RELAY_SANDBOX_MODEL', 'VOICE_RELAY_MODEL', 'GATE_VOICE_RELAY_OPENAI'];
 let SAVED_ENV;
 let SAVED_FETCH;
 
@@ -90,6 +90,57 @@ describe('gate — production default unchanged, opt-in only', () => {
     process.env.GATE_VOICE_RELAY_OPENAI = 'true';
     process.env.VOICE_RELAY_SANDBOX_MODEL = OPENAI_CANDIDATE;
     expect(resolveSessionModel({ sandbox: true })).toEqual({ model: OPENAI_CANDIDATE, fallbackReason: null });
+  });
+
+});
+
+// Codex r1 P1: the resolved model no longer only shapes request params — it
+// now SELECTS THE PROVIDER CLIENT (providerFor). A shared VOICE_RELAY_MODEL/
+// MODEL_VOICE value bypasses the override-specific allowlist entirely (it is
+// read once at module load, into the `MODEL` constant — see the file
+// header), so it must be validated too, never let it reach the OpenAI client
+// with the gate off (or any unrecognized id at all) with no override ever
+// having been rejected. VOICE_RELAY_MODEL is boot-time config (same
+// convention as every other tier default in config/models.js), so each test
+// sets the env and loads a FRESH module instance inside jest.isolateModules
+// — scoped to the callback only, so the file's shared top-level
+// `resolveSessionModel`/`RelayConversation`/`relay-tools` mock bindings
+// (captured once, before any test ran, and reused via a lazy `require`
+// inside relay-conversation.js's own methods) are never disturbed for any
+// other describe block in this file.
+describe('a shared VOICE_RELAY_MODEL/MODEL_VOICE value is validated too (Codex r1 P1)', () => {
+  test('an OpenAI id fails closed to the Anthropic default when the gate is off', () => {
+    process.env.VOICE_RELAY_MODEL = OPENAI_CANDIDATE;
+    let result;
+    let fresh;
+    jest.isolateModules(() => {
+      fresh = require('../services/voice-agent/relay-conversation');
+      result = fresh.resolveSessionModel({ sandbox: false });
+    });
+    expect(result.model).toBe(MODELS.DEFAULTS.VOICE);
+    expect(fresh.providerFor(result.model)).toBe('anthropic');
+    expect(result.fallbackReason).toBe(`unknown_shared_model:VOICE_RELAY_MODEL=${OPENAI_CANDIDATE}`);
+  });
+
+  test('an OpenAI id IS honored once the gate is on', () => {
+    process.env.GATE_VOICE_RELAY_OPENAI = 'true';
+    process.env.VOICE_RELAY_MODEL = OPENAI_CANDIDATE;
+    let result;
+    jest.isolateModules(() => {
+      result = require('../services/voice-agent/relay-conversation').resolveSessionModel({ sandbox: false });
+    });
+    expect(result).toEqual({ model: OPENAI_CANDIDATE, fallbackReason: null });
+  });
+
+  test('a garbage id fails closed even with the gate on', () => {
+    process.env.GATE_VOICE_RELAY_OPENAI = 'true';
+    process.env.VOICE_RELAY_MODEL = 'not-a-real-model-at-all';
+    let result;
+    jest.isolateModules(() => {
+      result = require('../services/voice-agent/relay-conversation').resolveSessionModel({ sandbox: false });
+    });
+    expect(result.model).toBe(MODELS.DEFAULTS.VOICE);
+    expect(result.fallbackReason).toBe('unknown_shared_model:VOICE_RELAY_MODEL=not-a-real-model-at-all');
   });
 });
 
