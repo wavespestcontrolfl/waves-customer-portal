@@ -520,6 +520,16 @@ describe('buildEstimateConsultationOffer — lead-wide state and the final lead 
     expect(order.lastIndexOf('booking-state')).toBeLessThan(order.lastIndexOf('lead-read'));
   });
 
+  test('the call-origin proof that picked the trusted customer was cleared before the final read (an admin unlinked the call) → fails closed (Codex #4918 r20)', async () => {
+    const callLead = { ...OPEN_RECURRING_LEAD, first_contact_channel: 'call', twilio_call_sid: 'CA123' };
+    mockCurrentBookingState.mockResolvedValue({ lead: callLead, bookable: true, addressInputs: 'INPUTS-A' });
+    let leadReads = 0;
+    // Call-verified for the pre-probe read, unlinked by the final contact read.
+    mockBuilders.leads.first = jest.fn(async () => (++leadReads === 1 ? callLead : { ...callLead, twilio_call_sid: null }));
+    expect(await buildEstimateConsultationOffer(baseArgs())).toBeNull();
+    expect(leadReads).toBe(2);
+  });
+
   test('a lead field the checks judged moved before the final read (here: the lead converted after the refusal check passed) → fails closed', async () => {
     mockCurrentBookingState.mockResolvedValue({ lead: OPEN_RECURRING_LEAD, bookable: true, addressInputs: 'INPUTS-A' });
     const converted = { ...OPEN_RECURRING_LEAD, status: 'converted', converted_at: new Date('2026-09-26T12:00:00Z') };

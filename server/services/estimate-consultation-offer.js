@@ -178,9 +178,15 @@ async function estimateConsultationLead({ estimate, estimateData, acceptActive, 
   return fresh;
 }
 
-// Lead fields the booking-state and refusal checks judge; the final
-// contact-bearing read must still carry the same values.
-const JUDGED_LEAD_FIELDS = ['phone', 'status', 'converted_at', 'customer_id', 'address', 'city', 'zip'];
+// Lead fields the booking-state and refusal checks judge — every lead-row
+// field those checks consume, including the call-origin proof
+// (first_contact_channel, twilio_call_sid) that decides which customer the
+// page trusts (Codex #4918 r20). The final contact-bearing read must still
+// carry the same values.
+const JUDGED_LEAD_FIELDS = [
+  'phone', 'status', 'converted_at', 'customer_id', 'address', 'city', 'zip',
+  'first_contact_channel', 'twilio_call_sid',
+];
 
 // The final, post-probe eligibility re-check — a fresh read of the
 // estimate and lead rows, re-judged against the same rules
@@ -222,7 +228,7 @@ async function finalEligibility(estimateId, leadId, probedAddress, probedAddress
   // the lead as it is now. It must still be the lead the checks above
   // judged — any field they read that moved since fails closed.
   const freshLead = await db('leads').where({ id: leadId }).whereNull('deleted_at')
-    .first('id', 'phone', 'email', 'service_interest', 'status', 'converted_at', 'customer_id', 'address', 'city', 'zip');
+    .first('id', 'email', 'service_interest', ...JUDGED_LEAD_FIELDS);
   if (!freshLead) return null;
   if (JUDGED_LEAD_FIELDS.some((col) => JSON.stringify(freshLead[col]) !== JSON.stringify(booking.lead[col]))) return null;
   const { leadMatchesEstimateContact } = require('./lead-estimate-link');
