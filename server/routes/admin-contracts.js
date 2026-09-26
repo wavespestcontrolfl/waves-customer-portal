@@ -351,12 +351,26 @@ async function createShareLink(contractId, req) {
   let expiresAt = null;
   let error = null;
   await db.transaction(async (trx) => {
+    // Lock order (Codex #4922 r2 P2): unlocked peek → CUSTOMER row FOR
+    // UPDATE → contract, the order /:id/cancel, /:token/sign and the
+    // termite annual close-out hold — the event insert below takes a key
+    // lock on customers, so contract-first cycled with them.
+    const peek = await trx('customer_contracts').where({ id: contractId }).first('id', 'customer_id');
+    if (!peek) {
+      error = { status: 404, message: 'Contract not found' };
+      return;
+    }
+    if (peek.customer_id) await trx('customers').where({ id: peek.customer_id }).forUpdate().first('id');
     const contract = await trx('customer_contracts')
       .where({ id: contractId })
       .forUpdate()
       .first();
     if (!contract) {
       error = { status: 404, message: 'Contract not found' };
+      return;
+    }
+    if (String(contract.customer_id || '') !== String(peek.customer_id || '')) {
+      error = { status: 409, message: 'Contract status changed. Refresh and try again.' };
       return;
     }
     if (SHARE_LINK_TERMINAL_STATUSES.includes(contract.status)) {

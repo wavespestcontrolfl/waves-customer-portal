@@ -227,6 +227,7 @@ async function dispatchSelectedNonEmail({ ContactLedger, customer, invoice, body
         original_message_type: originalMessageType,
         billingDeliveryCategory: category,
         notificationEventKey: eventKey,
+        collections_ledger_id: ledger.id,
         ...(explicitChannels !== null ? { billingDeliveryLeg: channel } : {}),
         ...(channel === 'push' ? { appOnly: true } : {}),
       },

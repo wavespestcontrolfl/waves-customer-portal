@@ -208,6 +208,11 @@ const websiteEstimateHelmet = helmet({
 // raw body. Dark until GATE_POSTHOG_INGEST_PROXY=true (404 otherwise).
 app.use('/ingest', require('./routes/posthog-ingest'));
 
+// Report ask privacy headers (no-store / noindex) before ANY response-producing
+// middleware — CORS preflights, the global /api limiter, body-parser errors —
+// so every response on those token routes carries them.
+app.use('/api/reports', reportsPublicRoutes.reportsAskPrivacyHeaders);
+
 app.use((req, res, next) => {
   // Only the /book HTML document needs frame-ancestors loosened
   // (query string is not part of req.path; handle trailing slash too)
@@ -674,6 +679,7 @@ app.use('/api/admin/customers/intelligence', adminCustomerIntelRoutes);
 app.use('/api/admin/customers', require('./routes/admin-customer-turf-profile'));
 app.use('/api/admin/customers', adminCustomerRoutes);
 app.use('/api/admin/customer-duplicates', require('./routes/admin-customer-duplicates'));
+app.use('/api/admin/customer-geocodes', require('./routes/admin-customer-geocodes'));
 app.use('/api/admin/dashboard', adminDashboardRoutes);
 app.use('/api/admin/kpi-targets', require('./routes/admin-kpi-targets'));
 app.use('/api/admin/usage', require('./routes/admin-usage'));

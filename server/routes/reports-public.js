@@ -8,7 +8,7 @@ const logger = require('../services/logger');
 const { formatAddress } = require('../utils/address-normalizer');
 const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 const { FULL_TOKEN_RE, extractProjectReportTokenLookup } = require('../services/project-report-links');
-const { answerProjectReportQuestion } = require('../services/project-report-assistant');
+const { answerProjectReportQuestion, PROMPT_INTENTS } = require('../services/project-report-assistant');
 const {
   stripInternalFindingKeys,
   redactInspectionFeeCues,
@@ -210,6 +210,26 @@ const reportLimiter = rateLimit({
   skip: isReportLimiterExempt,
   message: { error: 'Too many requests. Please try again in a minute.' },
 });
+
+// Ask Waves privacy headers (audit "Additional gaps"): both report ask
+// endpoints answer with recorded-but-sensitive service/project facts and
+// must never be cached or indexed. Global Helmet already sets
+// Referrer-Policy — do not duplicate it here. Registered path-less, BEFORE
+// the rate limiter below, and matched on req.path instead of a `:token`
+// route path: a `:token` path would fire router.param('token') (the
+// suppression DB read) ahead of both this and the limiter, and a param-gate
+// 404 would then go out without these headers.
+const REPORT_ASK_PATH_RE = /^\/(?:project\/)?[^/]+\/ask\/?$/i;
+function reportsAskPrivacyHeaders(req, res, next) {
+  if (REPORT_ASK_PATH_RE.test(req.path || '')) {
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+  }
+  next();
+}
+// Also mounted app-level ahead of the global /api limiter and JSON parser
+// (server/index.js); kept here so the router is self-contained.
+router.use(reportsAskPrivacyHeaders);
 
 router.use(reportLimiter);
 
@@ -946,6 +966,14 @@ router.post('/project/:token/ask', async (req, res, next) => {
     const question = String(req.body?.question || '').trim();
     if (!question) return res.status(400).json({ error: 'question_required' });
     if (question.length > 500) return res.status(400).json({ error: 'question_too_long' });
+    // AW-06: a shipped prompt chip may send its own explicit intent instead
+    // of relying on free-text matching of its (possibly later reworded)
+    // label. Optional and whitelisted — an older client that never sends it,
+    // or sends something unrecognized, falls through to free-text routing.
+    const rawIntent = req.body?.intent;
+    const intent = typeof rawIntent === 'string' && Object.prototype.hasOwnProperty.call(PROMPT_INTENTS, rawIntent)
+      ? rawIntent
+      : null;
 
     const project = await findProjectByReportSegment(req.params.token);
     if (!project) return res.status(404).json({ error: 'Report not found' });
@@ -965,6 +993,7 @@ router.post('/project/:token/ask', async (req, res, next) => {
     const answer = answerProjectReportQuestion({
       question,
       project,
+      intent,
       payload: {
         upcomingAppointment: upcomingAppointment
           ? { serviceType: upcomingAppointment.service_type, scheduledDate: upcomingAppointment.scheduled_date }
@@ -2467,5 +2496,6 @@ async function ensureReportToken(serviceRecordId) {
 module.exports = router;
 module.exports.ensureReportToken = ensureReportToken;
 module.exports.reportLimiter = reportLimiter;
+module.exports.reportsAskPrivacyHeaders = reportsAskPrivacyHeaders;
 module.exports.storedRevisionMatches = storedRevisionMatches;
 module.exports.suppressedTypedReport = suppressedTypedReport;

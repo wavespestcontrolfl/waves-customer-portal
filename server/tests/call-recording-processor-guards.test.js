@@ -1129,6 +1129,56 @@ describe('call lead classification (what is / isn\'t a lead)', () => {
     expect(buildFailOpenRoutingContext({ call: { direction: 'inbound' }, customer: { ...customer, pipeline_stage: 'won' }, failOpenEnabled: true }).options.knownCustomer).toMatchObject({ addressOnly: false });
   });
 
+  // Owner directive 2026-09-26: every call-agent rule works the same for
+  // inbound and outbound calls. Fail-open used to hard-exclude outbound
+  // (`failOpen: !!failOpenEnabled && !isOutboundCall(call)`) — these pin the
+  // reversal end to end: the routing context, composed with the SAME
+  // canAutoRoute the live pass calls, actually allows a confirmed outbound
+  // booking held only on recoverable flags, and the contact number it uses
+  // is the dialed customer number, never our own line.
+  test('fail-open now applies the same to an OUTBOUND call: recoverable flags no longer block a confirmed booking', () => {
+    const { canAutoRoute } = require('../services/call-triage-flags');
+    const OUR_LINE = '+19415550100';
+    const CUSTOMER_NUMBER = '+19414651056';
+    const outboundCall = { direction: 'outbound', from_phone: OUR_LINE, to_phone: CUSTOMER_NUMBER };
+
+    // Item D: the contact phone buildFailOpenRoutingContext hands to
+    // canAutoRoute as callerAni is the dialed number on an outbound call
+    // (resolveCallContactPhone), never our own line — the same composition
+    // the live pass and the offline audits use.
+    const contactPhone = CallRecordingProcessor._test.resolveCallContactPhone(outboundCall);
+    expect(contactPhone).toBe(CUSTOMER_NUMBER);
+
+    const ctx = buildFailOpenRoutingContext({ call: outboundCall, customer: null, contactPhone, failOpenEnabled: true });
+    expect(ctx.options.failOpen).toBe(true); // pre-fix this was false for any outbound call
+    expect(ctx.options.callerAni).toBe(CUSTOMER_NUMBER);
+    expect(ctx.options.callerAni).not.toBe(OUR_LINE);
+
+    // Item A: composed with canAutoRoute, an outbound CONFIRMED booking held
+    // only on recoverable flags (ANI present but caller_phone_missing) now
+    // books — identical to the inbound contract in
+    // call-fail-open-booking.test.js. name_email_mismatch is advisory outright
+    // since #4901, so it never needed fail-open in either direction.
+    const extraction = {
+      triage_flags: ['caller_phone_missing', 'name_email_mismatch'],
+      confidence: { overall: 0.9 },
+      scheduling: { status: 'confirmed', confirmed_start_at: '2026-10-01T09:00:00-04:00' },
+      consent: {},
+    };
+    const av = { status: 'validated_accept', inServiceArea: true, county: 'Manatee County' };
+    const blockedPreFix = canAutoRoute(extraction, { contactPhone, addressValidation: av, callerAni: contactPhone, failOpen: false });
+    expect(blockedPreFix.allowed).toBe(false);
+    const allowedPostFix = canAutoRoute(extraction, { ...ctx.options, contactPhone, addressValidation: av });
+    expect(allowedPostFix.allowed).toBe(true);
+    expect(allowedPostFix.failedOpenFlags).toEqual(expect.arrayContaining(['caller_phone_missing']));
+
+    // Item C (unchanged, both before and after this lane): an UNCONFIRMED
+    // call is never fail-opened into a booking, outbound or inbound — the
+    // scheduling.status gate in canAutoRoute never depended on direction.
+    const unconfirmed = { ...extraction, scheduling: { status: 'tentative' } };
+    expect(canAutoRoute(unconfirmed, { ...ctx.options, contactPhone, addressValidation: av }).allowed).toBe(false);
+  });
+
   // The four owner-reported false leads, plus the genuine-but-early prospect.
   test('vetoes existing-customer / non-sales calls, keeps genuine new inquiries', () => {
     // Martin Max + Uma — "are you coming today?" / arrival check-in.
@@ -1766,5 +1816,29 @@ describe('start_before_call shadow-mode review card is refreshed, not dropped, o
     expect(enforcePayload).toContain('dispute_customer_id: customerId ? String(customerId) : null');
     expect(enforcePayload).toContain('retained_service_id: null');
     expect(enforcePayload).toContain('retained_scheduled_date: null');
+  });
+});
+
+describe('clarify-draft target phone (owner directive 2026-09-26: both directions)', () => {
+  const { clarifyAskTargetPhone } = CallRecordingProcessor._test;
+
+  test('inbound: the caller ANI', () => {
+    expect(clarifyAskTargetPhone({ direction: 'inbound', from_phone: '+19145234413', to_phone: '+19412975749' }))
+      .toBe('+19145234413');
+  });
+
+  test('outbound: the dialed customer number, never our own line', () => {
+    expect(clarifyAskTargetPhone({ direction: 'outbound', from_phone: '+19412975749', to_phone: '+19145234413' }))
+      .toBe('+19145234413');
+  });
+
+  test('outbound lead-webhook bridge: the lead leg from bridge metadata, not the staff cell in to_phone', () => {
+    expect(clarifyAskTargetPhone({
+      direction: 'outbound',
+      source: 'lead-webhook-auto-bridge',
+      from_phone: '+19412975749',
+      to_phone: '+19415550123',
+      metadata: { type: 'lead_auto_bridge', leadPhone: '+19145234413' },
+    })).toBe('+19145234413');
   });
 });

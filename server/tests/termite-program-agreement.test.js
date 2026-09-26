@@ -694,6 +694,31 @@ describe('Annual Protection plan selection (buildTermiteProgramAgreementValues)'
     expect(await annualPlanDurableEvidence({ id: 'e1' }, fakeConn(null, true, { annual_plan_activation_status: null }))).toBe(false);
   });
 
+  // Slice 3b: a closed, never-signed offer is NOT durable evidence — it must
+  // never license issuing/reissuing a v3 annual agreement or prepaid
+  // auto-renewal wording for this estimate again. Covered both from the
+  // in-memory estimate row (the common maybeCreateTermiteProgramAgreement
+  // path) and via the column-guarded re-read (the reconcileSupersededProgramAgreements
+  // path), and confirmed a live term still overrides it (a signature that
+  // won a concurrent race must still count as durable).
+  test('durable evidence: signature_expired is NOT durable — only awaiting_signature/activated are (slice 3b)', async () => {
+    const fakeConn = (termRow, hasColumn = false, stampRow = null) => {
+      const conn = (table) => ({
+        where: () => ({
+          whereNotIn: (_col, statuses) => ({ first: async () => (termRow && !statuses.includes(termRow.status) ? termRow : undefined) }),
+          first: async () => stampRow,
+        }),
+      });
+      conn.schema = { hasColumn: async () => hasColumn };
+      return conn;
+    };
+    expect(await annualPlanDurableEvidence({ id: 'e1', annual_plan_activation_status: 'signature_expired' }, fakeConn(null))).toBe(false);
+    expect(await annualPlanDurableEvidence({ id: 'e1' }, fakeConn(null, true, { annual_plan_activation_status: 'signature_expired' }))).toBe(false);
+    // A live term for the same estimate still counts — a signature that won
+    // a concurrent race against the expiry sweep is never overridden.
+    expect(await annualPlanDurableEvidence({ id: 'e1', annual_plan_activation_status: 'signature_expired' }, fakeConn({ id: 't', status: 'active' }))).toBe(true);
+  });
+
   test('PROGRAM_TEMPLATE_KEYS includes the annual key for customer-scoped lookups (existing-agreement checks span all three)', () => {
     expect(PROGRAM_TEMPLATE_KEYS).toEqual(expect.arrayContaining([PURCHASE_TEMPLATE_KEY, RENTAL_TEMPLATE_KEY, ANNUAL_TEMPLATE_KEY]));
     expect(PROGRAM_TEMPLATE_KEYS).toHaveLength(3);

@@ -104,6 +104,13 @@ function chainFor(table) {
   chain.leftJoin = jest.fn(self);
   chain.select = jest.fn(self);
   chain.orderBy = jest.fn(self);
+  chain.limit = jest.fn(self);
+  // leads.estimate_id pointer lookup (estimate-consultation-offer.js
+  // linkedLeadIdFor): dbRows.leads_pointing = ids of leads pointing here.
+  chain.pluck = jest.fn(async () => {
+    if (dbThrows[table]) throw new Error(`${table} lookup exploded (simulated)`);
+    return dbRows[`${table}_pointing`] || [];
+  });
   chain.then = (resolve, reject) => Promise.resolve(dbRows.siblings || []).then(resolve, reject);
   chain.first = jest.fn(async () => {
     if (dbThrows[table]) throw new Error(`${table} lookup exploded (simulated)`);
@@ -126,7 +133,9 @@ function estimateRow(overrides = {}) {
     archived_at: null,
     customer_id: null,
     customer_name: 'Pat Consult',
-    customer_phone: null,
+    // The linked lead's own phone — the offer requires the lead to still be
+    // the estimate's contact (leadMatchesEstimateContact).
+    customer_phone: '9415551234',
     customer_email: null,
     address: '123 Consult Ln, Bradenton, FL 34203',
     satellite_url: null,
@@ -395,6 +404,19 @@ describe('composeEstimateDataPayload — acceptActive threading for the three pr
 });
 
 describe('GET /:token/data — quote-first, first-load-only rules (Codex #4853 r2)', () => {
+  test('an estimate linked only by leads.estimate_id (the admin estimate tool\'s link, no stamp) gets the offer', async () => {
+    const base = estimateRow();
+    const { lead_id: _lid, lead_linkage: _ll, ...unstamped } = base.estimate_data;
+    const row = estimateRow({ estimate_data: unstamped });
+    dbRows = { estimates: row, leads: OPEN_RECURRING_LEAD, leads_pointing: [LEAD_ID] };
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/estimates/${row.token}/data?refresh=1`);
+      const body = await res.json();
+      expect(res.status).toBe(200);
+      expect(body.consultationOffer).toEqual({ url: expect.stringContaining('/inspection/') });
+    });
+  });
+
   test('an internal ?refresh=1 of a viewed estimate never runs the probe (the client carries the first load\'s offer)', async () => {
     const row = estimateRow({ viewed_at: new Date(Date.now() - 60000).toISOString() });
     dbRows = { estimates: row, leads: OPEN_RECURRING_LEAD };

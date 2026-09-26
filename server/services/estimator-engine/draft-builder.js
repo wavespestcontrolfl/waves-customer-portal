@@ -291,8 +291,21 @@ function buildEngineInput({
     // auto-price commercial pest — the engine's own manual-quote guards key
     // off these flags.
     lotSizeMeasured: !!lotSqFt && !FALLBACK_SQFT_SOURCES.has(lotSource),
+    // A suite_type_default is a business-type GUESS (no license, no operator
+    // measurement): it is NOT a measured building, so every measured-only
+    // guard (bed bug, termite bait, rodent bait, initial roach) keeps its
+    // manual-quote posture. footprintSizeEstimated is the separate, narrow
+    // opt-in that lets RECURRING commercial pest price off the guess — and
+    // grades every priced commercial line LOW (generateEstimate). A
+    // license_seats size is a real state record: measured, MEDIUM.
     ...(isCommercial
-      ? { buildingSizeMeasured: !!homeSqFt && !FALLBACK_SQFT_SOURCES.has(homeSource) }
+      ? {
+        buildingSizeMeasured: !!homeSqFt && !FALLBACK_SQFT_SOURCES.has(homeSource)
+          && homeSource !== SQFT_SOURCES.SUITE_TYPE_DEFAULT,
+      }
+      : {}),
+    ...(isCommercial && homeSource === SQFT_SOURCES.SUITE_TYPE_DEFAULT
+      ? { footprintSizeEstimated: true }
       : {}),
     // Lookup-resolved feature modifiers (residential — the commercial risk
     // model prices off footprint/risk-type, not homeowner features).
@@ -654,6 +667,27 @@ function classifyLane({ intent, propertyFacts, engineResult, engineInput = null,
   if (usesHomeSqft && FALLBACK_SQFT_SOURCES.has(propertyFacts?.home?.source)) {
     reasons.push(`home/building sqft from fallback source (${propertyFacts.home.source}${propertyFacts.home.sampleCount ? `, n=${propertyFacts.home.sampleCount}` : ''})`);
   }
+  // Commercial-suite sizing (server/services/commercial-suite-size/): a
+  // license-derived or type-defaulted suite size auto-prices the draft
+  // (buildingSizeMeasured stays true — these sources are deliberately NOT
+  // in FALLBACK_SQFT_SOURCES), but it is still an INFERENCE, not a
+  // measurement, so it parks yellow with a reason the operator can verify
+  // on site.
+  const suiteSize = propertyFacts?.commercialSuiteSize;
+  if (usesHomeSqft && suiteSize
+    && (suiteSize.source === SQFT_SOURCES.LICENSE_SEATS
+      || suiteSize.source === SQFT_SOURCES.SUITE_TYPE_DEFAULT)) {
+    const sizedSqft = Number(propertyFacts.home?.value) || suiteSize.value;
+    if (suiteSize.source === SQFT_SOURCES.LICENSE_SEATS) {
+      reasons.push(`suite size estimated from state restaurant license: ${suiteSize.seats ?? '?'} seats → ${sizedSqft.toLocaleString()} sq ft — confirm on site`);
+    } else {
+      // Label with the input that actually SELECTED the default (the
+      // resolver's defaultBasis: a specific subtype, else the risk type) —
+      // never suiteSize.businessType, a web-search field that plays no part.
+      const defaultedFor = suiteSize.defaultBasis || intent.commercial_risk_type || intent.commercial_subtype || 'this business type';
+      reasons.push(`suite size not found by license — defaulted to ${sizedSqft.toLocaleString()} sq ft for ${defaultedFor} — confirm on site`);
+    }
+  }
   // Lot-driven services (lawn/mosquito/tree & shrub price off turf/treatable
   // area derived from the lot) priced from an unverified lot source deserve
   // the same review flag as fallback building sqft.
@@ -808,6 +842,20 @@ function unitBandNoteLines(unitScope) {
   return lines;
 }
 
+// Commercial-suite sizing audit lines (server/services/commercial-suite-size/):
+// businessName + the evidence trail, so an operator reviewing the draft sees
+// WHY a suite priced the way it did without opening estimate_data by hand.
+function commercialSuiteSizeNoteLines(suiteSize) {
+  if (!suiteSize) return [];
+  const lines = [
+    `- Suite business: ${suiteSize.businessName || '(not identified)'}${suiteSize.businessType ? ` (${suiteSize.businessType})` : ''} · size source: ${suiteSize.source}`,
+  ];
+  for (const e of (suiteSize.evidence || [])) {
+    lines.push(`  - ${e.detail}${e.url ? ` (${e.url})` : ''}`);
+  }
+  return lines;
+}
+
 function buildDraftNotes({ intent, propertyFacts, totals, lane, laneReasons, comps, calibration, model, call }) {
   const factLine = (label, fact) => {
     if (!fact) return `- ${label}: (unresolved)`;
@@ -833,6 +881,7 @@ function buildDraftNotes({ intent, propertyFacts, totals, lane, laneReasons, com
       ? `- Scope: ${propertyFacts.unitScope.serviceScope} · Use: ${propertyFacts.unitScope.propertyUse} · Relationship: ${propertyFacts.unitScope.customerRelationship} · Size basis: ${propertyFacts.unitScope.sizeBasis}`
       : null,
     ...unitBandNoteLines(propertyFacts?.unitScope),
+    ...commercialSuiteSizeNoteLines(propertyFacts?.commercialSuiteSize),
     '',
     `Totals: $${totals.monthly}/mo · $${totals.annual}/yr · $${totals.oneTime} one-time`,
     comps && !comps.insufficient
