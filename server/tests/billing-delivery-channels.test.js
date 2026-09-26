@@ -216,8 +216,13 @@ describe('accountBillingChannels (account-level choice on the primary profile)',
     await expect(accountBillingChannels('sibling', 'billing', database)).resolves.toEqual(['email']);
   });
 
+  test('a sibling with no prefs row of its own routes legacy, like the messaging core', async () => {
+    const database = databaseWith({ customers, prefs: [{ customer_id: 'primary', billing_channels: ['email'] }] });
+    await expect(accountBillingChannels('sibling', 'billing', database)).resolves.toBeNull();
+  });
+
   test('no stored choice on the primary is null (legacy routing)', async () => {
-    const database = databaseWith({ customers, prefs: [{ customer_id: 'primary' }] });
+    const database = databaseWith({ customers, prefs: [{ customer_id: 'primary' }, { customer_id: 'sibling' }] });
     await expect(accountBillingChannels('sibling', 'billing', database)).resolves.toBeNull();
   });
 
