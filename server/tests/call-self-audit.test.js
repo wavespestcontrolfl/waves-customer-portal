@@ -6,7 +6,7 @@ jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }))
 jest.mock('../services/llm/deep', () => ({ createDeepMessage: jest.fn() }));
 
 const db = require('../models/db');
-const { runSelfAudit, stratifySample, OUTBOUND_DIRECTION_SQL } = require('../services/call-self-audit');
+const { runSelfAudit, stratifySample, OUTBOUND_DIRECTION_SQL, callDirectionBlock } = require('../services/call-self-audit');
 
 const SAMPLE = (over = {}) => ({
   id: 'call-1', twilio_call_sid: 'CA_sa1', created_at: new Date(), processing_status: 'processed',
@@ -81,6 +81,47 @@ test('outbound calls are sampled even when newer inbound calls alone would fill 
   await runSelfAudit({ createMessage: async (params) => { seen.push(params.messages[0].content); return OK_VERDICT; } });
   expect(seen.length).toBe(25);
   expect(seen.filter((t) => t.includes('returning your call')).length).toBe(2);
+});
+
+// codex #4912 r2 P2: outbound diarized transcripts can have SWAPPED
+// "Agent:"/"Caller:" speaker labels (the Copeman call). Adding outbound to
+// the self-audit sample without warning the judge produces false
+// disagreements. The judge is told the direction and, on outbound, told the
+// labels may be wrong and to identify parties by content.
+describe('callDirectionBlock', () => {
+  test('outbound warns that speaker labels may be swapped and says who dialed', () => {
+    const block = callDirectionBlock('outbound-dial');
+    expect(block).toMatch(/OUTBOUND/);
+    expect(block).toMatch(/SWAPPED/);
+    expect(block).toMatch(/staff placed this call/i);
+  });
+
+  test('inbound carries no swap warning', () => {
+    const block = callDirectionBlock('inbound');
+    expect(block).toMatch(/INBOUND/);
+    expect(block).not.toMatch(/SWAPPED/);
+  });
+
+  test('a missing/unknown direction is treated as inbound (no swap warning)', () => {
+    expect(callDirectionBlock(null)).toMatch(/INBOUND/);
+    expect(callDirectionBlock('')).toMatch(/INBOUND/);
+  });
+});
+
+test('an outbound call in the sample gets the swap warning in its prompt; inbound does not', async () => {
+  const outboundText = 'Agent: Hi, this is Waves returning your call. Caller: Yes, about the ants. '.repeat(6);
+  const seen = [];
+  mockDb({ calls: [
+    SAMPLE({ id: 'out-1', direction: 'outbound-dial', transcription: outboundText }),
+    SAMPLE({ id: 'in-1', direction: 'inbound' }),
+  ] });
+  await runSelfAudit({ createMessage: async (params) => { seen.push(params.messages[0].content); return OK_VERDICT; } });
+  const outboundPrompt = seen.find((t) => t.includes('returning your call'));
+  const inboundPrompt = seen.find((t) => !t.includes('returning your call'));
+  expect(outboundPrompt).toMatch(/OUTBOUND/);
+  expect(outboundPrompt).toMatch(/SWAPPED/);
+  expect(inboundPrompt).toMatch(/INBOUND/);
+  expect(inboundPrompt).not.toMatch(/SWAPPED/);
 });
 
 test('stratifySample reserves half per direction and gives unused share to the other', () => {
