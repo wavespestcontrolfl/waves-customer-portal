@@ -355,10 +355,15 @@ const toolList = (knownTools) => (v) => (!Array.isArray(v) || !v.length ? 'value
 const writeToolList = () => (v) => (!Array.isArray(v) || !v.length ? 'value must be a non-empty write-tool list'
   : (v.find((n) => !WRITE_TOOLS.includes(n)) ? `"${v.find((n) => !WRITE_TOOLS.includes(n))}" is not a write tool (${WRITE_TOOLS.join(', ')})` : null));
 const isPlainObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
-// A { tool, input? } reference to one particular call (afterTool / after).
-const isCallRef = (v) => isPlainObject(v) && typeof v.tool === 'string' && v.tool.length > 0
-  && Object.keys(v).every((k) => k === 'tool' || k === 'input')
+// A { tool, input?, after? } reference to one particular call (afterTool /
+// after). The optional flat `after` reference selects the first matching call
+// after another call, e.g. the refreshed find_slots after the refused S1.
+const hasCallRefCore = (v) => isPlainObject(v) && typeof v.tool === 'string' && v.tool.length > 0
   && (v.input === undefined || (isPlainObject(v.input) && Object.keys(v.input).length > 0));
+const isBaseCallRef = (v) => hasCallRefCore(v) && Object.keys(v).every((k) => k === 'tool' || k === 'input');
+const isCallRef = (v) => hasCallRefCore(v)
+  && Object.keys(v).every((k) => k === 'tool' || k === 'input' || k === 'after')
+  && (v.after === undefined || isBaseCallRef(v.after));
 const regexPatterns = (v) => (!Array.isArray(v) || !v.length ? 'value must be a non-empty regex list'
   : (v.find((re) => !compileRegex(re)) !== undefined ? `invalid regex ${JSON.stringify(v.find((re) => !compileRegex(re)))}` : null));
 // A regex list, or the same list graded over a caller-turn window —
@@ -372,7 +377,7 @@ const regexList = (v) => {
   const unknown = Object.keys(v).find((k) => !['patterns', 'fromTurn', 'onTurn', 'afterTool'].includes(k));
   if (unknown) return `unknown key "${unknown}" (patterns, fromTurn, onTurn, afterTool)`;
   if (v.afterTool !== undefined && !(typeof v.afterTool === 'string' && v.afterTool) && !isCallRef(v.afterTool)) {
-    return 'afterTool must be a tool name or { tool, input? }';
+    return 'afterTool must be a tool name or { tool, input?, after?: { tool, input? } }';
   }
   if ((v.fromTurn == null) === (v.onTurn == null)) return 'value must set exactly one of fromTurn or onTurn';
   const turn = v.onTurn != null ? v.onTurn : v.fromTurn;
@@ -394,7 +399,7 @@ const CHECK_VALUE_RULES = Object.freeze({
     if (!isPlainObject(v)) return 'value must be { tool: "<name>", input: {...}, fromTurn?: <caller turn>, untilTurn?: <caller turn> }';
     const unknown = Object.keys(v).find((k) => !['tool', 'input', 'fromTurn', 'untilTurn', 'after'].includes(k));
     if (unknown) return `unknown key "${unknown}" (tool, input, fromTurn, untilTurn, after)`;
-    if (v.after !== undefined && !isCallRef(v.after)) return 'after must be { tool, input? }';
+    if (v.after !== undefined && !isCallRef(v.after)) return 'after must be { tool, input?, after?: { tool, input? } }';
     if (typeof v.tool !== 'string' || !v.tool) return 'tool must be a non-empty tool name';
     if (!knownTools.has(v.tool)) return `unknown tool "${v.tool}"`;
     if (!isPlainObject(v.input) || !Object.keys(v.input).length) return 'input must be a non-empty object of expected fields';
@@ -1515,11 +1520,16 @@ const CHECK_RUNNERS = Object.freeze({
 // { patterns, fromTurn } / { patterns, onTurn } — only what Sandy said from
 // that caller turn on, or on exactly that caller turn.
 // The first successful call a reference names: a tool name, or { tool,
-// input } to pin one particular call (the S3 booking, not the refused S1).
+// input, after? } to pin one particular call (the refreshed find_slots after
+// the refused S1, rather than the initial lookup).
 function firstCallIndex(record, ref) {
   const tool = typeof ref === 'string' ? ref : ref && ref.tool;
   const input = ref && typeof ref === 'object' ? ref.input : null;
+  const afterRef = ref && typeof ref === 'object' ? ref.after : null;
+  const afterIndex = afterRef ? firstCallIndex(record, afterRef) : null;
+  if (afterRef && afterIndex == null) return null;
   const call = ((record && record.toolCalls) || []).find((t) => t.name === tool && t.ok === true
+    && (afterIndex == null || t.index > afterIndex)
     && (!input || inputIncludes(t.input || {}, input).length === 0));
   return call ? call.index : null;
 }

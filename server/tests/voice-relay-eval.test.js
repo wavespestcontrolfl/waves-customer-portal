@@ -1181,13 +1181,13 @@ describe('voice relay eval — each expect key', () => {
       expect(failingR([find1, s1, find2, gone, s3, outcome])).not.toContain('spoken_matches_any');
       // r13: the slot-gone explanation only counts after the refused S1
       expect(failingR([find1, gone, s1, find2, s3, outcome])).toContain('spoken_matches_any');
-      // r14: the selected date and time must both be relayed after S3. The
-      // first matching find_slots call is the stale lookup, so neither a
-      // pre-refresh guess nor the refreshed offer can satisfy this proof.
+      // r14: the selected date and time must be grounded after the refreshed
+      // lookup. A fresh offer may supply the time before S3, while a guess
+      // made before find2 cannot satisfy the proof.
       const byDateOnly = { kind: 'agent', turn: 3, text: es ? 'Un miembro del equipo le llamará para confirmar el horario del lunes 5 de octubre.' : 'A team member will call you to confirm Monday October 5.' };
       expect(failingR([find1, s1, find2, gone, s3, byDateOnly])).toContain('spoken_matches_any');
       const offer = { kind: 'agent', turn: 2, text: es ? 'Tengo el lunes 5 de octubre a las 10 de la mañana, o el martes 6 de octubre a las 9 de la mañana.' : 'I have Monday October 5 at 10 AM, or Tuesday October 6 at 9 AM.' };
-      expect(failingR([find1, s1, find2, gone, offer, s3, byDateOnly])).toContain('spoken_matches_any');
+      expect(failingR([find1, s1, find2, gone, offer, s3, byDateOnly])).not.toContain('spoken_matches_any');
       // The previously passing exploit guessed S3 after the refusal but
       // before fresh availability was fetched; it must fail in both languages.
       expect(failingR([find1, s1, gone, offer, find2, s3, byDateOnly])).toContain('spoken_matches_any');
@@ -1211,14 +1211,17 @@ describe('voice relay eval — each expect key', () => {
       expect(run(check, record({ order: [{ kind: 'agent', turn: 2, text }] })).status).toBe(status);
     });
 
-    test('afterTool / after accept a { tool, input } call reference, and reject malformed ones', () => {
+    test('afterTool / after accept a { tool, input, after } call reference, and reject malformed ones', () => {
       const lint = (check, value) => replay._internals.lintScenario({
         id: 'x', language: 'en', gates: {}, allowedTools: ['request_booking', 'find_slots'], caller: { from: '+19415550100', verified: true, context: null }, fixtures: {},
         turns: [{ caller: 'hi' }], spec: { required_facts: [] }, expect: [exp(check, value, 'critical')],
       }, replay.knownToolNames()).join('\n');
       expect(lint('spoken_matches_any', { patterns: ['x'], fromTurn: 1, afterTool: { tool: 'request_booking', input: { slot_ref: 'S3' } } })).not.toMatch(/spoken_matches_any/);
+      expect(lint('spoken_matches_any', { patterns: ['x'], fromTurn: 1, afterTool: { tool: 'find_slots', input: { city: 'Bradenton' }, after: { tool: 'request_booking', input: { slot_ref: 'S1' } } } })).not.toMatch(/spoken_matches_any/);
       expect(lint('spoken_matches_any', { patterns: ['x'], fromTurn: 1, afterTool: { tool: '' } })).toMatch(/afterTool must be/);
       expect(lint('spoken_matches_any', { patterns: ['x'], fromTurn: 1, afterTool: { tool: 'request_booking', extra: 1 } })).toMatch(/afterTool must be/);
+      expect(lint('spoken_matches_any', { patterns: ['x'], fromTurn: 1, afterTool: { tool: 'find_slots', after: 'request_booking' } })).toMatch(/afterTool must be/);
+      expect(lint('spoken_matches_any', { patterns: ['x'], fromTurn: 1, afterTool: { tool: 'find_slots', after: { tool: 'request_booking', after: { tool: 'find_slots' } } } })).toMatch(/afterTool must be/);
       expect(lint('tool_input_includes', { tool: 'find_slots', input: { city: 'Bradenton' }, after: { tool: 'request_booking', input: { slot_ref: 'S1' } } })).not.toMatch(/tool_input_includes/);
       expect(lint('tool_input_includes', { tool: 'find_slots', input: { city: 'Bradenton' }, after: 'request_booking' })).toMatch(/after must be/);
     });

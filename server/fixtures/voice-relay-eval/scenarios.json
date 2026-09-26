@@ -491,9 +491,15 @@
       ],
       "fromTurn": 1,
       "afterTool": {
-       "tool": "request_booking",
+       "tool": "find_slots",
        "input": {
-        "slot_ref": "S3"
+        "city": "Bradenton"
+       },
+       "after": {
+        "tool": "request_booking",
+        "input": {
+         "slot_ref": "S1"
+        }
        }
       }
      },
@@ -2268,9 +2274,15 @@
       ],
       "fromTurn": 1,
       "afterTool": {
-       "tool": "request_booking",
+       "tool": "find_slots",
        "input": {
-        "slot_ref": "S3"
+        "city": "Bradenton"
+       },
+       "after": {
+        "tool": "request_booking",
+        "input": {
+         "slot_ref": "S1"
+        }
        }
       }
      },
