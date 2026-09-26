@@ -50,6 +50,19 @@ describe('settleLeadResponseAgentRun — agent configured', () => {
     expect(onError).not.toHaveBeenCalled();
   });
 
+  test('an agent run that never settles → the fallback goes out after the bounded wait', async () => {
+    const { sendFallback, onError, processLead } = harness(() => new Promise(() => {}));
+    await settleLeadResponseAgentRun({ agentConfigured: true, processLead, sendFallback, onError, fallbackAfterMs: 20 });
+    expect(sendFallback).toHaveBeenCalledTimes(1);
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  test('an agent that sends before the bounded wait ends → no fallback', async () => {
+    const { sendFallback, onError, processLead } = harness(() => new Promise((resolve) => setTimeout(() => resolve({ actionTaken: 'auto_sent' }), 5)));
+    await settleLeadResponseAgentRun({ agentConfigured: true, processLead, sendFallback, onError, fallbackAfterMs: 1000 });
+    expect(sendFallback).not.toHaveBeenCalled();
+  });
+
   test('a rejected processLead run → onError called, fallback sent exactly once', async () => {
     const boom = new Error('session stream EOF');
     const { sendFallback, onError, processLead } = harness(async () => { throw boom; });

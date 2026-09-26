@@ -1802,18 +1802,26 @@ function shouldRunLeadAcquisition({ isNewCustomer, isDuplicateSubmission } = {})
 // can never double-text a phone the agent already reached.
 // processLead/sendFallback/onError are injected so this can be tested
 // directly without driving the whole POST handler.
-async function settleLeadResponseAgentRun({ agentConfigured, processLead, sendFallback, onError }) {
+// How long a configured agent gets before the standard reply goes out
+// instead — longer than the agent's own run deadline, so normally the agent
+// has finished (or failed) by then. A late agent send cannot double-text:
+// the fallback takes the phone's shared first-touch claim first.
+const LEAD_AGENT_FALLBACK_AFTER_MS = 4 * 60 * 1000;
+
+async function settleLeadResponseAgentRun({ agentConfigured, processLead, sendFallback, onError, fallbackAfterMs = LEAD_AGENT_FALLBACK_AFTER_MS }) {
   if (!agentConfigured) {
     return processLead().catch(err => onError(err));
   }
-  let outcome;
-  try {
-    outcome = await processLead();
-  } catch (err) {
-    onError(err);
-    return sendFallback();
-  }
-  if (!outcome || outcome.actionTaken !== 'auto_sent') return sendFallback();
+  let timer;
+  const timedOut = new Promise((resolve) => {
+    timer = setTimeout(() => resolve({ timedOut: true }), fallbackAfterMs);
+    timer.unref?.();
+  });
+  const run = Promise.resolve().then(processLead).then(outcome => ({ outcome }), err => ({ err }));
+  const settled = await Promise.race([run, timedOut]);
+  clearTimeout(timer);
+  if (settled.err) onError(settled.err);
+  if (settled.outcome?.actionTaken !== 'auto_sent') return sendFallback();
 }
 
 // The lead auto-reply dedup predicate, once-ever claim, and the send itself
