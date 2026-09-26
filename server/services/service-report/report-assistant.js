@@ -48,11 +48,18 @@ const REENTRY_TEMPORAL_RE = /\b(?:when|after|how\s+long|how\s+soon)\b[^?.]*\b(?:
 // ("When can my pets go out?", "Is it safe for my pets to go outside?") are
 // still caught below by REENTRY_PHRASE_RE / REENTRY_TEMPORAL_RE on their own
 // wording, so this guard only needs to stop the bare-subject branch.
+// A past-tense treatment question ("Were chemicals applied around my cats?",
+// "Why did you spray near my dogs' beds?") asks about the application, not
+// re-entry — unless it also asks about safety or going back out.
+const REENTRY_ASK_RE = /\b(safe|okay|ok|fine|alright|when\s+can|can\s+(?:i|we|they|he|she|my)|go\s+(?:out|back|in)|let\s+(?:my|the|them))\b/;
 function isReentryIntent(q) {
-  return (SAFETY_SUBJECT_RE.test(q) && !FINDINGS_VERB_RE.test(q) && !(WHAT_APPLIED_RE.test(q) && PAST_TENSE_RE.test(q)))
+  const askedAboutApplication = TREATMENT_QUESTION_RE.test(q) && PAST_TENSE_RE.test(q) && !REENTRY_ASK_RE.test(q);
+  return (SAFETY_SUBJECT_RE.test(q) && !FINDINGS_VERB_RE.test(q) && !askedAboutApplication)
     || REENTRY_PHRASE_RE.test(q)
     || REENTRY_TEMPORAL_RE.test(q)
-    || (LOCATION_RE.test(q) && !TREATMENT_QUESTION_RE.test(q) && !FINDINGS_QUESTION_RE.test(q));
+    // A bare location word is re-entry only without treatment, findings or
+    // appointment wording ("When is my next appointment outdoors?").
+    || (LOCATION_RE.test(q) && !TREATMENT_QUESTION_RE.test(q) && !FINDINGS_QUESTION_RE.test(q) && !APPOINTMENT_RE.test(q));
 }
 // Results questions ("Is the weed treatment working?") belong to the trend
 // answer even though they name the treatment.

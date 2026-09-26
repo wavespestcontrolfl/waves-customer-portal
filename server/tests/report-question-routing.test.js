@@ -384,6 +384,21 @@ describe('service report — every shipped chip answers its own category (AW-06)
     expect(answerServiceReportQuestion({ question, data: pestData })).toMatch(/Sources used: this service report/);
   });
 
+  test.each([
+    'When is my next appointment outdoors?',
+    'What time is my appointment indoors?',
+  ])('appointment wording outranks a bare location word: %s', (question) => {
+    expect(answerServiceReportQuestion({ question, data: pestData, nextAppointment })).toMatch(/Your next appointment is/);
+  });
+
+  test.each([
+    "Why did you spray near my dogs' beds?",
+    'Why was product applied near my pets?',
+    'Were chemicals applied around my cats?',
+  ])('any past-tense treatment question outranks a bare pet noun: %s', (question) => {
+    expect(answerServiceReportQuestion({ question, data: pestData })).toMatch(/Sources used: this service report/);
+  });
+
   test('"Did you notice the lawn improving?" gets the trend answer, not findings', () => {
     expect(answerServiceReportQuestion({ question: 'Did you notice the lawn improving?', data: lawnData }))
       .toBe(answerServiceReportQuestion({ question: 'Is my lawn getting better?', data: lawnData }));
