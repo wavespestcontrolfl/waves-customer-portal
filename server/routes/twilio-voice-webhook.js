@@ -1974,8 +1974,16 @@ async function renderRelayReconnect(req, callSid, failure, genMs) {
   const stamped = await recovery.readReconnectState(db, callSid, { timeoutMs: STAMP_DEADLINE_MS });
   if (!stamped) return { unconfirmed: true }; // never replace unreadable attribution with today's active profile
   const relayOpts = stamped.profile || activeRelayTwiMLOptions(spanish ? { language: SPANISH_LANGUAGE } : {});
+  // Flux Multilingual (sandbox cell 10): the vestibule's own `?lang=es`
+  // query param (`spanish` above) is one Spanish marker; the stamped
+  // profile's restored `language: 'multi'` (relay-recovery.js
+  // readReconnectState) is the other — either makes THIS a Spanish
+  // reconnect, or the resumed greeting and setup-frame marker silently stay
+  // English (codex r1 P2 on #4947).
+  const { FLUX_MULTILINGUAL_LANGUAGE } = require('../services/voice-agent/relay-profiles');
+  const spanishMarker = spanish || relayOpts.language === FLUX_MULTILINGUAL_LANGUAGE;
   await withDeadline(stampRelayProfile(callSid, relayOpts));
-  logger.info(`[relay-complete] reconnecting ${maskSid(callSid)} after ${failure} (${sandbox ? 'sandbox' : 'prod'}${spanish ? ', es' : ''})`);
+  logger.info(`[relay-complete] reconnecting ${maskSid(callSid)} after ${failure} (${sandbox ? 'sandbox' : 'prod'}${spanishMarker ? ', es' : ''})`);
   // The resumed leg's action carries the reconnect generation, so its own
   // failure callback is told apart from a retry of the first leg's.
   const baseAction = sandbox ? RELAY_COMPLETE_ACTION_SANDBOX : (spanish ? RELAY_COMPLETE_ACTION_ES : RELAY_COMPLETE_ACTION);
@@ -1988,10 +1996,10 @@ async function renderRelayReconnect(req, callSid, failure, genMs) {
     callSid,
     action,
     ...(spanish ? { language: SPANISH_LANGUAGE, voice: spanishVoice || null } : {}),
-    welcomeGreeting: recovery.resumeGreeting(language),
+    welcomeGreeting: recovery.resumeGreeting(spanishMarker ? SPANISH_LANGUAGE : language),
     tokenNow: genMs, // a concurrent reissue makes this token stale at the atomic claim fence
     ...relayOpts,
-    parameters: { resumed: '1', ...(spanish ? { lang: 'es' } : {}) },
+    parameters: { resumed: '1', ...(spanishMarker ? { lang: 'es' } : {}) },
   });
   return { xml, duplicate: false, secondFailure: false };
 }
@@ -2111,12 +2119,22 @@ function sandboxRelayHost(req) {
 }
 function sandboxRelayXml({ callSid, cell, req = null }) {
   const { buildRelayTwiML, RELAY_WS_PATH } = require('../services/voice-agent/relay-protocol');
+  const { FLUX_MULTILINGUAL_LANGUAGE } = require('../services/voice-agent/relay-profiles');
   const domain = sandboxRelayHost(req);
+  const options = cell || activeRelayTwiMLOptions();
   return buildRelayTwiML({
     wsUrl: `wss://${domain}${RELAY_WS_PATH}`,
     callSid,
     action: RELAY_COMPLETE_ACTION_SANDBOX,
-    ...(cell || activeRelayTwiMLOptions()),
+    ...options,
+    // Flux Multilingual (cell 10): `language="multi"` (from `options` above)
+    // only tells Twilio's own STT/TTS to auto-detect — it carries no Spanish
+    // signal into OUR OWN prompt addendum / fallback copy / streaming-hold
+    // logic, which key off RelayConversation.language. Mirror the
+    // Spanish-menu vestibule's own `<Parameter lang=es>` marker (codex r1 P1
+    // on #4947) so relay-server.js's setup-frame resolution treats this leg
+    // as Spanish the same way that leg is.
+    ...(options.language === FLUX_MULTILINGUAL_LANGUAGE ? { parameters: { lang: 'es' } } : {}),
   });
 }
 
@@ -2134,7 +2152,19 @@ async function stampRelayProfile(callSid, opts, { clearWhenEmpty = false } = {})
   const has = Boolean(opts && opts.relayProfileId);
   if (!has && !clearWhenEmpty && process.env.GATE_VOICE_RELAY_RECOVERY !== 'true') return;
   const stamp = has
-    ? { relay_profile_id: opts.relayProfileId, relay_attrs: opts.relayAttrs || {} }
+    ? {
+        relay_profile_id: opts.relayProfileId,
+        relay_attrs: opts.relayAttrs || {},
+        // `relay_language` (Flux Multilingual's `language: 'multi'` today —
+        // see relay-profiles.js) travels with the profile stamp so the one
+        // permitted reconnect can restore it: without this,
+        // readReconnectState rebuilt no language and the resumed leg
+        // defaulted to en-US, silently dropping the Spanish marker the
+        // FIRST leg's setup frame carried (codex r1 P2 on #4947). Omitted
+        // entirely (not `null`) for every profile with no language — the
+        // exact prior stamp shape, unchanged.
+        ...(opts.language ? { relay_language: opts.language } : {}),
+      }
     : { relay_profile_id: null, relay_attrs: null };
   try {
     await db('call_log')

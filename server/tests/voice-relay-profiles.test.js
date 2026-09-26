@@ -9,7 +9,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const logger = require('../services/logger');
 const {
   RELAY_PROFILES, SANDBOX_CELLS, validateRelayAttrs, resolveRelayProfile,
-  activeRelayProfile, activeRelayTwiMLOptions, profileSupportsLanguage, resolveSandboxCell, parseTtsVoice,
+  activeRelayProfile, activeRelayTwiMLOptions, resolveSandboxCell, parseTtsVoice,
   FLUX_MULTILINGUAL_SPEECH_MODEL, FLUX_MULTILINGUAL_LANGUAGE,
 } = require('../services/voice-agent/relay-profiles');
 const { STT_HINTS } = require('../config/transcription-vocabulary');
@@ -239,23 +239,20 @@ describe('flux_multilingual_es_v1 — Sandy voice stack plan, Phase 0', () => {
     }
   });
 
-  test('profileSupportsLanguage recognizes it as supporting Spanish (and any non-English language); a same-speechModel profile with no language override stays English-only', () => {
-    const multilingual = resolveRelayProfile('flux_multilingual_es_v1');
-    const englishOnlyFlux = resolveRelayProfile('flux_balanced_v1');
-    expect(profileSupportsLanguage(multilingual, 'es-US')).toBe(true);
-    expect(profileSupportsLanguage(multilingual, 'fr-FR')).toBe(true);
-    expect(profileSupportsLanguage(multilingual, 'en-US')).toBe(true);
-    // Codex r10 P1's original finding, unchanged: plain "flux" is still
-    // English-only when no `language` override is present.
-    expect(profileSupportsLanguage(englishOnlyFlux, 'es-US')).toBe(false);
-    expect(profileSupportsLanguage(englishOnlyFlux, 'en-US')).toBe(true);
-  });
-
   // This profile ships sandboxOnly, so VOICE_RELAY_PROFILE (the production
-  // activation env var) can never select it — activeRelayProfile() refuses
-  // any sandboxOnly id (see "a sandbox-only profile is refused in
-  // production" above), so profileSupportsLanguage's language-aware branch
-  // for it is unreachable through activeRelayTwiMLOptions today. The tests
-  // above exercise it directly instead, the same way the shipped-profiles
-  // tests exercise resolveRelayProfile independent of that production gate.
+  // activation env var) can never select it — same fail-closed rule as
+  // every other sandboxOnly profile (see "a sandbox-only profile is refused
+  // in production" above). Codex r1 P2 on #4947: profileSupportsLanguage
+  // gained, then lost, a `language: 'multi'` branch for exactly this
+  // profile — it can never be reached through activeRelayTwiMLOptions today
+  // (only resolveSandboxCell's real, reachable path carries `language`
+  // through — see the tests above), so that branch was dead code and was
+  // removed rather than kept untested-in-practice.
+  test('is refused as the active production profile like any other sandboxOnly one', () => {
+    process.env.VOICE_RELAY_PROFILE = 'flux_multilingual_es_v1';
+    expect(activeRelayProfile()).toBeNull();
+    expect(activeRelayTwiMLOptions()).toEqual({});
+    expect(activeRelayTwiMLOptions({ language: 'es-US' })).toEqual({});
+    delete process.env.VOICE_RELAY_PROFILE;
+  });
 });

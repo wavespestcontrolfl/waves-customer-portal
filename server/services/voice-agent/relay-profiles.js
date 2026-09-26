@@ -291,17 +291,19 @@ function activeRelayTwiMLOptions({ language = null } = {}) {
 }
 
 const ENGLISH_RE = /^en(?:[-_]|$)/i;
+// NOTE: flux_multilingual_es_v1 (language: 'multi') never reaches this
+// function today — it is sandboxOnly, and activeRelayProfile() refuses any
+// sandboxOnly id for VOICE_RELAY_PROFILE, so activeRelayTwiMLOptions (this
+// function's only caller) can never be handed that profile. The sandbox path
+// (resolveSandboxCell → relay-sandbox's sandboxRelayXml) carries its
+// `language: 'multi'` straight into buildRelayTwiML instead — see there and
+// in relay-server.js's setup-frame language resolution. Add a
+// `profile.language === FLUX_MULTILINGUAL_LANGUAGE` branch here only if a
+// future change actually routes a multilingual profile through
+// activeRelayTwiMLOptions (codex r1 P2 on #4947 — a dead branch was removed
+// from here for exactly this reason).
 function profileSupportsLanguage(profile, language) {
   if (ENGLISH_RE.test(language)) return true;
-  // A plain "flux" profile (speechModel="flux", no `language` override) is
-  // the ENGLISH-only Flux model — Twilio selects Deepgram's multilingual
-  // model by the session's own `language`/`transcriptionLanguage` setting,
-  // not by a different speechModel string (see FLUX_MULTILINGUAL_LANGUAGE's
-  // citations above), so a profile that already carries
-  // `language: 'multi'` genuinely supports any non-English caller and is
-  // never dropped here — unlike a same-speechModel profile with no language
-  // override, which stays English-only.
-  if (profile.language === FLUX_MULTILINGUAL_LANGUAGE) return true;
   return String(profile.attrs.speechModel || '').toLowerCase() !== 'flux';
 }
 
@@ -366,7 +368,6 @@ module.exports = {
   resolveRelayProfile,
   activeRelayProfile,
   activeRelayTwiMLOptions,
-  profileSupportsLanguage,
   resolveSandboxCell,
   parseTtsVoice,
   FLUX_MULTILINGUAL_SPEECH_MODEL,

@@ -340,6 +340,26 @@ describe('POST /relay-sandbox/cell', () => {
     });
   });
 
+  // Codex r1 P1 on #4947: language="multi" alone carries no Spanish signal
+  // into RelayConversation.language — cell 10 must ALSO carry the same
+  // <Parameter lang=es> marker the Spanish-menu vestibule uses, and the row
+  // stamp must persist the language for the one permitted reconnect.
+  test('cell "10" (Flux Multilingual) renders language="multi" AND the <Parameter lang=es> marker, and stamps relay_language', async () => {
+    const { update } = primeStamp();
+    const res = mockRes();
+    await handlerFor('/relay-sandbox/cell')({ body: { CallSid: 'CA-sb-10', To: SANDBOX, Digits: '10' } }, res);
+    expect(res.body).toContain('speechModel="flux"');
+    expect(res.body).toContain('language="multi"');
+    expect(res.body).toContain('<Parameter name="lang" value="es" />');
+    expect(res.body).toContain('<Parameter name="relay_profile" value="flux_multilingual_es_v1" />');
+    const patch = update.mock.calls[0][0];
+    expect(JSON.parse(patch.metadata.bindings[0])).toEqual({
+      relay_profile_id: 'flux_multilingual_es_v1',
+      relay_attrs: expect.objectContaining({ speechModel: 'flux', transcriptionProvider: 'Deepgram' }),
+      relay_language: 'multi',
+    });
+  });
+
   test('a stamp failure never costs the caller the call', async () => {
     const { update } = primeStamp();
     update.mockRejectedValue(new Error('pool down'));
@@ -388,6 +408,18 @@ describe('sandboxRelayXml', () => {
     expect(xml).toContain('<Connect action="/api/webhooks/twilio/relay-complete?sandbox=1" method="POST">');
     expect(xml).toContain('speechModel="flux"');
     expect(xml).toContain('welcomeGreeting=');
+  });
+
+  // Codex r1 P1 on #4947.
+  test('a cell carrying language: "multi" (Flux Multilingual) ALSO gets the <Parameter lang=es> Spanish marker', () => {
+    const xml = sandboxRelayXml({ callSid: 'CA-sb-multi', cell: { relayAttrs: { speechModel: 'flux' }, relayProfileId: 'flux_multilingual_es_v1', language: 'multi' } });
+    expect(xml).toContain('language="multi"');
+    expect(xml).toContain('<Parameter name="lang" value="es" />');
+  });
+
+  test('a cell with no `language` key renders no lang parameter — byte-identical to before this profile existed', () => {
+    const xml = sandboxRelayXml({ callSid: 'CA-sb-plain', cell: { relayAttrs: { speechModel: 'flux' }, relayProfileId: 'flux_balanced_v1' } });
+    expect(xml).not.toContain('<Parameter name="lang"');
   });
 });
 
