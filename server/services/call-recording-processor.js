@@ -4718,35 +4718,6 @@ function v2IsoToEtWallClock(value) {
   return raw.slice(0, 16);
 }
 
-/**
- * Arrival-window END for a call booking (schema 1.15.0, owner ruling
- * 2026-09-26 — "agreed time windows like '6 to 9pm' never get booked").
- * windowStart is ALREADY guaranteed on-the-hour by the off-hour guard that
- * runs before this (owner rule, confirmedStartOnTheHour in
- * call-triage-flags.js — window_start is always HH:00) — this function does
- * not re-check it. confirmedWindowEndAt is the extraction's own ET wall-clock
- * string ("YYYY-MM-DDTHH:MM", from v2IsoToEtWallClock) or null.
- *
- * Returns the agreed end when it is USABLE — same day as the start, strictly
- * AFTER it, and itself on the hour or the half hour (never a bare minute
- * value nothing on a call actually states) — else the historical start+1h
- * default, unchanged. Pure; no I/O.
- */
-function resolveCallBookingWindowEnd({ scheduledDate, windowStart, confirmedWindowEndAt } = {}) {
-  if (!windowStart) return { windowEnd: null, agreedUsed: false };
-  const [hh, mm] = windowStart.split(':').map(Number);
-  const defaultEnd = `${String(hh >= 23 ? 23 : hh + 1).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
-  const endMatch = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})$/.exec(String(confirmedWindowEndAt || ''));
-  if (endMatch) {
-    const [, endDate, endTime] = endMatch;
-    const onHourOrHalf = /^\d{2}:(?:00|30)$/.test(endTime);
-    if (endDate === scheduledDate && onHourOrHalf && endTime > windowStart) {
-      return { windowEnd: endTime, agreedUsed: true };
-    }
-  }
-  return { windowEnd: defaultEnd, agreedUsed: false };
-}
-
 // Trims/caps every field of a flat address object the same way — shared by
 // the booking linkage resolver's own extraction read and its two on-file
 // sources (a caller-supplied proof snapshot, or a fresh customers read).
@@ -14658,11 +14629,6 @@ const CallRecordingProcessor = {
       const v2WallClock = v2IsoToEtWallClock(v2Flat.preferred_date_time);
       if (v2WallClock) {
         extracted.preferred_date_time = v2WallClock;
-        // Arrival-window END (schema 1.15.0) — re-adopt from the SAME
-        // V2-approved extraction the start just came from, same rule as the
-        // early adoption pass (extraction-compat.js): only alongside a valid
-        // start; null when the approved extraction carries no window.
-        extracted.confirmed_window_end_at = v2IsoToEtWallClock(v2Flat.confirmed_window_end_at) || null;
       }
       extracted.appointment_confirmed = v2Flat.appointment_confirmed;
       // flatView.matched_service is the coarse category→legacy map ("Termite
@@ -15274,33 +15240,12 @@ const CallRecordingProcessor = {
             }
 
             if (scheduledDate) {
-              // Compute window_end and 12-hour display. Default: 1 hour
-              // after start, as before. When the caller agreed an ARRIVAL
-              // WINDOW on this call (schema 1.15.0, owner ruling 2026-09-26
-              // — "agreed time windows like '6 to 9pm' never get booked"),
-              // use the AGREED end instead, so the visit isn't recorded as a
-              // 1-hour slot the customer never agreed to. windowStart is
-              // already guaranteed on-the-hour by the off-hour guard above
-              // (owner rule, confirmedStartOnTheHour); the agreed end only
-              // needs its OWN validity check: same day as the start, after
-              // the start, and on the hour or half hour (never a bare
-              // minute value nothing on a call actually states).
-              // window_display stays the START time only, unchanged: the
-              // customer-facing arrival phrase ({window} in the
-              // appointment_confirmation template) is computed fresh from
-              // window_start via spokenArrivalWindow — an explicit owner
-              // directive (server/utils/sms-time-format.js) already forbids
-              // quoting window_end to a customer as the arrival window, so a
-              // wider display value here would never even reach them.
+              // Compute window_end (1 hour after start) and 12-hour display
               let windowEnd = null, windowDisplay = '9:00 AM';
               if (windowStart) {
-                const rawEnd = extracted.confirmed_window_end_at;
-                const resolvedEnd = resolveCallBookingWindowEnd({ scheduledDate, windowStart, confirmedWindowEndAt: rawEnd });
-                windowEnd = resolvedEnd.windowEnd;
-                if (rawEnd && !resolvedEnd.agreedUsed) {
-                  logger.warn(`[call-proc] Agreed window end ${rawEnd} is not usable for start ${scheduledDate}T${windowStart} (same-day/after-start/on-the-half-hour required); falling back to start+1h`);
-                }
                 const [hh, mm] = windowStart.split(':').map(Number);
+                const endH = hh >= 23 ? 23 : hh + 1;
+                windowEnd = `${String(endH).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
                 const ampm = hh >= 12 ? 'PM' : 'AM';
                 const displayH = hh % 12 || 12;
                 windowDisplay = `${displayH}:${String(mm).padStart(2, '0')} ${ampm}`;
@@ -20137,7 +20082,6 @@ CallRecordingProcessor._test = {
   resolveOnFileAddressAuthority,
   buildFailOpenRoutingContext,
   v2IsoToEtWallClock,
-  resolveCallBookingWindowEnd,
   phoneNearMissOfAni,
   isUsableContactPhone,
   labeledTranscriptPreservesWords,

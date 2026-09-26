@@ -72,15 +72,7 @@ const persistedSchema = require('./call-extraction.persisted.schema.json');
 // Feeds the deterministic callback_number_needed triage flag
 // (call-triage-flags.js) when no spoken callback number also covers it.
 // Optional/nullable: older payloads still validate.
-// 1.15.0: additive — scheduling.confirmed_window_end_at (owner ruling
-// 2026-09-26, "agreed time windows like '6 to 9pm' never get booked"). An
-// arrival WINDOW staff offered and the caller accepted ("between 6 and 9
-// tonight") now confirms — confirmed_start_at carries the window START (as
-// before) and this new field carries the window END, so booking can offer
-// the agreed range instead of silently rounding to a 1-hour slot the
-// customer never agreed to. Null unless a window was agreed. Optional/
-// nullable: older payloads still validate.
-const SCHEMA_VERSION = '1.15.0';
+const SCHEMA_VERSION = '1.14.0';
 
 const ajv = new Ajv({ allErrors: true, strict: false });
 addFormats(ajv);

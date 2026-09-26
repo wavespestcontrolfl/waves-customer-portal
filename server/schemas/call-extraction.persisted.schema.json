@@ -52,10 +52,9 @@
             "1.11.0",
             "1.12.0",
             "1.13.0",
-            "1.14.0",
-            "1.15.0"
+            "1.14.0"
           ],
-          "description": "Schema version for format detection. Server-owned. 1.1.0 is additive (multi-property, quote signals); 1.2.0 is additive (secondary_contact); 1.3.0 is additive (other_parties_mentioned, existing_appointment_coordination flag, enum widenings); 1.8.0 is additive (scheduling.agent_committed_booking); 1.10.0 is additive (property.bedroom_count); 1.11.0 is additive (scheduling.proposed_start_at); 1.12.0 is additive (service_request.price); 1.13.0 is additive (service_request.price.caller_response, service_request.prices[]); 1.14.0 is additive (caller.caller_id_disclaimed, caller.phone_note — live miss 2026-09-25: a caller stating the ANI is a shared/office line, not theirs); 1.15.0 is additive (scheduling.confirmed_window_end_at — owner ruling 2026-09-26: an agreed ARRIVAL WINDOW, e.g. 'between 6 and 9 tonight', now confirms with confirmed_start_at as the window START and this field carrying the window END) — older payloads remain valid."
+          "description": "Schema version for format detection. Server-owned. 1.1.0 is additive (multi-property, quote signals); 1.2.0 is additive (secondary_contact); 1.3.0 is additive (other_parties_mentioned, existing_appointment_coordination flag, enum widenings); 1.8.0 is additive (scheduling.agent_committed_booking); 1.10.0 is additive (property.bedroom_count); 1.11.0 is additive (scheduling.proposed_start_at); 1.12.0 is additive (service_request.price); 1.13.0 is additive (service_request.price.caller_response, service_request.prices[]); 1.14.0 is additive (caller.caller_id_disclaimed, caller.phone_note — live miss 2026-09-25: a caller stating the ANI is a shared/office line, not theirs) — older payloads remain valid."
         },
         "extracted_at": {
           "type": "string",
@@ -1180,14 +1179,6 @@
             "null"
           ],
           "format": "date-time"
-        },
-        "confirmed_window_end_at": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "format": "date-time",
-          "description": "schema 1.15.0 — the END of an agreed ARRIVAL WINDOW; confirmed_start_at carries the window START. Null when no window was agreed."
         },
         "proposed_start_at": {
           "type": ["string", "null"],

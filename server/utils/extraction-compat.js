@@ -122,11 +122,6 @@ function flatView(extraction) {
 
     appointment_confirmed: sched.status === 'confirmed',
     preferred_date_time: sched.confirmed_start_at || null,
-    // Arrival-window END (schema 1.15.0, owner ruling 2026-09-26) — carried
-    // alongside preferred_date_time (the window START) so the booking path
-    // can offer the agreed range instead of a silent start+1h default. Never
-    // read unless preferred_date_time/confirmed_start_at is also present.
-    confirmed_window_end_at: sched.confirmed_window_end_at || null,
     proposed_start_at: sched.proposed_start_at || null,
     agent_committed_booking: sched.agent_committed_booking === true,
     follow_up_visit_mentioned: sched.follow_up_mentioned === true,
@@ -491,12 +486,6 @@ function adoptV2PrimaryFields(extracted = {}, v2Extraction = null, { etWallClock
     if (wallClock) {
       if (merged.appointment_confirmed !== true) adopt('appointment_confirmed', true);
       if (merged.preferred_date_time !== wallClock) adopt('preferred_date_time', wallClock);
-      // Arrival-window END (schema 1.15.0) rides along with the start —
-      // only meaningful beside a start the booking path will actually use.
-      // Not itself required to be parseable: an invalid/off-day value is
-      // rejected by the booking-time window-end validation, not here.
-      const windowEndWallClock = toWallClock(sched.confirmed_window_end_at);
-      if (merged.confirmed_window_end_at !== windowEndWallClock) adopt('confirmed_window_end_at', windowEndWallClock);
     } else if (merged.appointment_confirmed === true) {
       // V2 says confirmed but carries NO parseable start time — the routing
       // gate blocks this as confirmed_without_start_time, so the canonical
@@ -504,12 +493,10 @@ function adoptV2PrimaryFields(extracted = {}, v2Extraction = null, { etWallClock
       // (codex r4 P2). The triage card carries the follow-up.
       adopt('appointment_confirmed', false);
       if (merged.preferred_date_time !== null) adopt('preferred_date_time', null);
-      if (merged.confirmed_window_end_at !== null) adopt('confirmed_window_end_at', null);
     }
   } else if (has(sched.status) && sched.status !== 'ambiguous' && merged.appointment_confirmed === true) {
     adopt('appointment_confirmed', false);
     if (merged.preferred_date_time !== null) adopt('preferred_date_time', null);
-    if (merged.confirmed_window_end_at !== null) adopt('confirmed_window_end_at', null);
   }
   if (flat.follow_up_visit_mentioned === true && merged.follow_up_visit_mentioned !== true) {
     adopt('follow_up_visit_mentioned', true);

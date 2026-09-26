@@ -23,9 +23,10 @@ const modelOutputSchema = require('../../schemas/call-extraction.model-output.sc
 // windows like '6 to 9pm' never get booked" — calls 35e569de, cab0bab9). A
 // window staff offered and the caller accepted, on a specific day with a
 // clear start hour, now confirms (confirmed_start_at = window start); it
-// previously fell through to "requested" and nothing booked. New field
-// scheduling.confirmed_window_end_at carries the window end. New
-// instructions the model must follow, so this is a new cohort.
+// previously fell through to "requested" and nothing booked. The window's
+// end is not carried: window_end is the job-duration block and the quoted
+// arrival window is always derived from the start (sms-time-format.js).
+// New instructions the model must follow, so this is a new cohort.
 const PROMPT_VERSION = 'v11';
 
 // Cross-call threading (2026-07-11): callers finish one arrangement across
@@ -107,8 +108,8 @@ GENERALIZATION — callers phrase the same intents in endless unseen ways. Match
 
 SCHEDULING STATUS — This is the most important field for downstream routing:
 - "confirmed": ONLY when BOTH a specific DATE and a specific TIME are explicitly agreed to by the caller. Vague references ("tomorrow", "next week", "noonish", "sometime Tuesday") do NOT qualify — the caller must confirm an actual time slot (e.g. "10 AM", "2:30 PM", "noon"). If the agent says "I'll text you" or "let me check" without the caller confirming, status is NOT confirmed.
-  - ARRIVAL WINDOW: an arrival window staff OFFERED and the caller ACCEPTED, on a specific day, with a clear start hour ("between 6 and 9 tonight", "we'll be there between noon and 1 today", "Tuesday, 2 to 4") DOES qualify as confirmed — this is a specific time slot, just expressed as a range. Set confirmed_start_at to the window's START and confirmed_window_end_at to the window's END (same ISO Eastern-offset format). Tentative language — "we'll try to get there", "sometime between", "the tech will call you first", "probably" — is NOT an agreed window and stays NOT confirmed (status "requested"/"offered" as appropriate, both fields null). A single confirmed TIME with no window (no end mentioned) leaves confirmed_window_end_at null.
-  - When confirmed, set confirmed_start_at to ISO 8601 with the Eastern Time offset (e.g. "2026-05-28T10:00:00-04:00" for EDT, "2026-05-28T10:00:00-05:00" for EST). NEVER emit a UTC "Z" timestamp. Resolve relative dates against the call date: "today" = ${callDateET}. Do not invent dates or use the model's training date. confirmed_window_end_at uses the identical format and offset, on the SAME day as confirmed_start_at, and is null unless a window was agreed.
+  - ARRIVAL WINDOW: an arrival window staff OFFERED and the caller ACCEPTED, on a specific day, with a clear start hour ("between 6 and 9 tonight", "we'll be there between noon and 1 today", "Tuesday, 2 to 4") DOES qualify as confirmed — this is a specific time slot, just expressed as a range. Set confirmed_start_at to the window's START. Tentative language — "we'll try to get there", "sometime between", "the tech will call you first", "probably" — is NOT an agreed window and stays NOT confirmed (status "requested"/"offered" as appropriate, confirmed_start_at null).
+  - When confirmed, set confirmed_start_at to ISO 8601 with the Eastern Time offset (e.g. "2026-05-28T10:00:00-04:00" for EDT, "2026-05-28T10:00:00-05:00" for EST). NEVER emit a UTC "Z" timestamp. Resolve relative dates against the call date: "today" = ${callDateET}. Do not invent dates or use the model's training date.
   - EXISTING APPOINTMENT: a caller who is re-confirming, double-checking, or coordinating an appointment that ALREADY EXISTS ("just checking — are we still on for Tuesday at 10?") is NOT booking. Status is "none" (or "reschedule_requested"/"canceled" if they change it) and you set the existing_appointment_coordination triage flag. "confirmed" is ONLY for a NEW visit agreed on this call.
 - "requested": Caller asked about availability or expressed interest in scheduling but no specific time was agreed.
 - "offered": Agent offered specific time slots but caller has not confirmed.

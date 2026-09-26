@@ -137,8 +137,8 @@ function validPersisted() {
 // ═══════════════════════════════════════════════════
 
 describe('schema validation', () => {
-  test('schema version is 1.15.0', () => {
-    expect(SCHEMA_VERSION).toBe('1.15.0');
+  test('schema version is 1.14.0', () => {
+    expect(SCHEMA_VERSION).toBe('1.14.0');
   });
 
   describe('model-output schema', () => {
@@ -165,46 +165,6 @@ describe('schema validation', () => {
       old.meta.schema_version = '1.10.0';
       expect(validatePersisted(normalizeExtractionV2(old)).valid).toBe(true);
       expect(flatView(old).proposed_start_at).toBeNull();
-    });
-
-    // confirmed_window_end_at (schema 1.15.0, owner ruling 2026-09-26 —
-    // "agreed time windows like '6 to 9pm' never get booked").
-    test('an agreed arrival window (confirmed_window_end_at) validates, normalizes and flattens through', () => {
-      const data = validPersisted();
-      data.meta.schema_version = SCHEMA_VERSION;
-      data.scheduling.status = 'confirmed';
-      data.scheduling.confirmed_start_at = '2026-05-28T18:00:00-04:00';
-      data.scheduling.confirmed_window_end_at = '2026-05-28T21:00:00-04:00';
-      expect(validatePersisted(data).valid).toBe(true);
-      const normalized = normalizeExtractionV2(data);
-      expect(flatView(normalized)).toMatchObject({
-        preferred_date_time: '2026-05-28T18:00:00-04:00',
-        confirmed_window_end_at: '2026-05-28T21:00:00-04:00',
-        appointment_confirmed: true,
-      });
-    });
-
-    test('confirmed_window_end_at is null-able and optional (a single confirmed time, no window)', () => {
-      const data = validModelOutput();
-      data.scheduling.confirmed_window_end_at = null;
-      expect(validateModelOutput(data).valid).toBe(true);
-      delete data.scheduling.confirmed_window_end_at;
-      expect(validateModelOutput(data).valid).toBe(true);
-      const persisted = validPersisted();
-      persisted.meta.schema_version = SCHEMA_VERSION;
-      expect(flatView(persisted).confirmed_window_end_at).toBeNull();
-    });
-
-    test('malformed confirmed_window_end_at is refused while older rows without it still validate', () => {
-      const data = validModelOutput();
-      data.scheduling.confirmed_window_end_at = 'between 6 and 9 tonight';
-      expect(validateModelOutput(data).valid).toBe(false);
-      data.scheduling.confirmed_window_end_at = '2026-05-28T21:00:00-04:00';
-      expect(validateModelOutput(data).valid).toBe(true);
-      const old = validPersisted();
-      old.meta.schema_version = '1.14.0';
-      expect(validatePersisted(normalizeExtractionV2(old)).valid).toBe(true);
-      expect(flatView(old).confirmed_window_end_at).toBeNull();
     });
 
     test('valid extraction passes', () => {
