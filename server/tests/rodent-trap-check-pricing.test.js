@@ -47,3 +47,27 @@ describe('rodent trap check pricing + copy', () => {
     expect(all).not.toMatch(/\{checks\}|\{Checks\}/);
   });
 });
+
+describe('a new trapping quote renders the 1-check copy on the public page path', () => {
+  const { generateEstimate } = require('../services/pricing-engine');
+  const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
+  const { normalizeOneTimeBreakdown } = require('../routes/estimate-public');
+
+  test('engine → legacy mapper → normalizeOneTimeBreakdown keeps the allowance', () => {
+    const mapped = mapV1ToLegacyShape(generateEstimate({
+      homeSqFt: 2000, stories: 1, lotSqFt: 10000, propertyType: 'single_family', zone: 'A',
+      features: { shrubs: 'moderate', trees: 'moderate', complexity: 'standard' },
+      services: { rodentTrapping: { plan: 'standard' } },
+    }));
+    const rows = normalizeOneTimeBreakdown({ result: mapped }).items
+      .filter((r) => r.service === 'rodent_trapping');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ includedFollowUps: 1, unlimitedCallbacks: false });
+
+    const [rowCopy] = copy.resolveOneTimeRowCopies(rows);
+    expect(rowCopy.includes).toContain('Setup visit plus 1 trap-check visit — additional checks are billed separately if the job needs them');
+    const page = copy.oneTimeOnlyIntelligenceCopy(rows);
+    expect(page.aiBody).toMatch(/the setup visit and one trap check for/);
+    expect(page.hero.sub).not.toMatch(/until the activity stops/);
+  });
+});
