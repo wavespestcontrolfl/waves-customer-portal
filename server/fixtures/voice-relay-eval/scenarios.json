@@ -2223,7 +2223,7 @@
     {
      "check": "spoken_never_matches",
      "value": [
-      "\\b(?:ya (?:va|está|se encuentra) (?:en camino|para allá)|viene en camino|está en camino|ya va para all[aá])\\b"
+      "(?<!\\b(?:no|todavía no|aún no|nunca)\\b(?:(?!\\b(?:pero|sino|aunque)\\b)[^.!?;,])*)\\b(?:ya (?:va|está|se encuentra) (?:en camino|para allá)|viene en camino|está en camino|ya va para all[aá])\\b"
      ],
      "severity": "critical"
     },

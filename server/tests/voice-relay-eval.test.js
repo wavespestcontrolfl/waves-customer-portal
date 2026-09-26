@@ -4563,6 +4563,13 @@ describe('voice relay eval — named spoken checks', () => {
     expect(replay._internals.scenarioStatus({ checks: onTheWay })).toBe('fail');
     const correct = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'El técnico llega hoy de la una a las tres de la tarde.' }] }));
     expect(replay._internals.scenarioStatus({ checks: correct })).toBe('pass');
+    // codex r1 P1: the "on the way" prohibition must be negation-aware (same
+    // as the EN "on the way" check and the ES confirmation-claim check
+    // above) — "todavía no está en camino" is the CORRECT thing to say and
+    // must never be graded as the violation it merely mentions.
+    const correctlyDenied = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'El técnico todavía no está en camino; llega de la una a las tres de la tarde.' }] }));
+    expect(correctlyDenied.find((c) => c.check === 'spoken_never_matches')).toMatchObject({ status: 'pass' });
+    expect(replay._internals.scenarioStatus({ checks: correctlyDenied })).toBe('pass');
   });
 
   test.each([
