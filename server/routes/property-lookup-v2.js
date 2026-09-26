@@ -4496,7 +4496,7 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
   const p = profile || {};
   const o = options || {};
   const sel = new Set(selectedServices || []);
-  const homeSqFt = Number(p.homeSqFt || p.squareFootage) || 0;
+  let homeSqFt = Number(p.homeSqFt || p.squareFootage) || 0;
   const lotSqFt = Number(p.lotSqFt) || 0;
   const stories = Number(p.stories) || 1;
   const normalizePropertyType = (value) => {
@@ -4517,6 +4517,26 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
   // Risk-type bucket (drives commercial pest/rodent cadence). Admin-set; persisted
   // on the raw engineRequest options/profile → replays on re-price.
   const commercialRiskType = commercialProfile ? (o.commercialRiskType || p.commercialRiskType || null) : null;
+  // A type-default suite size (server/services/commercial-suite-size/type-defaults.js)
+  // resolves BEFORE the admin operator has necessarily set commercialRiskType/
+  // commercialSubtype — the resolver runs once, off whatever the lookup's own
+  // county subtype guessed (often the generic office_retail bucket), and never
+  // runs again. An operator who then picks a DIFFERENT business type (e.g.
+  // Restaurant) in the form gets that new type forwarded for cadence, but the
+  // stale lookup-time default sqft (still sitting in homeSqFt/footprint from
+  // buildTurfRequestProfile) silently keeps pricing off the OLD bucket (codex
+  // P2 #4840). Recompute an untouched type-default size from the CURRENT
+  // commercialRiskType/commercialSubtype at every generate — gated on the same
+  // provenance flag footprintSizeEstimated uses below (_homeSqFtManuallyEdited,
+  // never a numeric comparison), so an operator-typed or -confirmed size is
+  // never overwritten, and a license_seats/verified suite (a real measurement)
+  // is never recomputed.
+  let suiteTypeDefaultSqFt;
+  if (commercialProfile && p.suiteSize?.source === 'suite_type_default' && !p._homeSqFtManuallyEdited) {
+    const { defaultSuiteSqftFor } = require('../services/commercial-suite-size/type-defaults');
+    suiteTypeDefaultSqFt = defaultSuiteSqftFor({ commercialRiskType, commercialSubtype });
+    if (Number(suiteTypeDefaultSqFt) > 0) homeSqFt = Number(suiteTypeDefaultSqFt);
+  }
   // Direct pest-cadence override (beats the risk-type bucket for pest visits).
   // Admin-set; same options/profile ride-along → replays on re-price.
   const commercialPestCadence = commercialProfile ? (o.commercialPestCadence || p.commercialPestCadence || null) : null;
@@ -5156,7 +5176,11 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     // resolvePestFootprint takes footprintSqFt before homeSqFt, and this
     // translator never forwards `footprint`). Same silent-drop class as the
     // attachedGarage key note in EstimatePage.jsx.
-    footprintSqFt: p.footprintUnknown === true ? 0 : (p.footprint ?? p.footprintSqFt),
+    // A recomputed type-default suite (above) keeps the client's own suite
+    // rule — footprint IS the suite's homeSqFt, single-story, never divided
+    // by the building's story count — off the CORRECTED size, not the stale
+    // one buildTurfRequestProfile forwarded in p.footprint/p.footprintSqFt.
+    footprintSqFt: p.footprintUnknown === true ? 0 : (Number(suiteTypeDefaultSqFt) > 0 ? homeSqFt : (p.footprint ?? p.footprintSqFt)),
     footprintUnknown: p.footprintUnknown === true || undefined,
     // A suite sized off the business-type default (no DBPR license, no
     // operator measurement) is a GUESS — the estimate engine reads this to

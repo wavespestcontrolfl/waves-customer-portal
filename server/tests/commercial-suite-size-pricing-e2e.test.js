@@ -154,6 +154,83 @@ describe('manual admin-tool path — buildEnrichedProfile -> applyCommercialSuit
     expect(v1Input.footprintSizeEstimated).toBe(true);
   });
 
+  // Codex P2 (PR #4840): the type-default resolver runs once, at lookup
+  // time, off whatever commercialRiskType the ADMIN FORM had then (usually
+  // none — commercialRiskType is null in applyCommercialSuiteSize's own
+  // resolveCommercialSuiteSize call, so it falls back to the county subtype,
+  // here 'office_retail' -> the generic 1,500 sq ft office default). It
+  // never re-runs once the operator picks a real business type. These pin
+  // that translateV2CallToV1Input — the generate-time chokepoint — recomputes
+  // an UNTOUCHED default off whatever commercialRiskType/commercialSubtype
+  // is current at generate, so the price always matches the selected type.
+  describe('an untouched type-default recomputes off the CURRENT commercialRiskType/commercialSubtype at generate time (codex P2 #4840)', () => {
+    test('resolves as the generic office default before any risk type is chosen (control)', async () => {
+      resolveViaDbprLicense.mockResolvedValue(null);
+      const profile = buildEnrichedProfile(plazaSuiteRecord(), null, 27.5, -82.45, null, null, SUITE_ADDRESS, { commercialSuiteSizing: true });
+      await routePrivate.applyCommercialSuiteSize(profile);
+      expect(profile.suiteSize.source).toBe('suite_type_default');
+      expect(profile.homeSqFt).toBe(1500);
+      const v1Input = translateV2CallToV1Input(profile, ['PEST'], {});
+      expect(v1Input.homeSqFt).toBe(1500);
+      expect(v1Input.footprintSqFt).toBe(1500);
+    });
+
+    test('operator then picks Restaurant: prices the 1,800 sq ft restaurant default, not the stale 1,500 office default', async () => {
+      resolveViaDbprLicense.mockResolvedValue(null);
+      const profile = buildEnrichedProfile(plazaSuiteRecord(), null, 27.5, -82.45, null, null, SUITE_ADDRESS, { commercialSuiteSizing: true });
+      await routePrivate.applyCommercialSuiteSize(profile);
+      expect(profile.suiteSize.source).toBe('suite_type_default');
+      expect(profile.homeSqFt).toBe(1500); // still the stale office default — untouched by the pick below
+
+      const v1Input = translateV2CallToV1Input(profile, ['PEST'], { commercialRiskType: 'restaurant_food' });
+      expect(v1Input.homeSqFt).toBe(1800);
+      expect(v1Input.footprintSqFt).toBe(1800);
+
+      const result = generateEstimate(v1Input);
+      const line = result.lineItems.find((l) => l.service === 'commercial_pest');
+      expect(line.footprintUsed).toBe(1800);
+    });
+
+    test('operator then picks Healthcare: prices the 2,500 sq ft healthcare default', async () => {
+      resolveViaDbprLicense.mockResolvedValue(null);
+      const profile = buildEnrichedProfile(plazaSuiteRecord(), null, 27.5, -82.45, null, null, SUITE_ADDRESS, { commercialSuiteSizing: true });
+      await routePrivate.applyCommercialSuiteSize(profile);
+      expect(profile.suiteSize.source).toBe('suite_type_default');
+
+      const v1Input = translateV2CallToV1Input(profile, ['PEST'], { commercialRiskType: 'healthcare_childcare' });
+      expect(v1Input.homeSqFt).toBe(2500);
+      expect(v1Input.footprintSqFt).toBe(2500);
+    });
+
+    test('a manually edited/confirmed Home Sq Ft box is never overwritten by the recompute', async () => {
+      resolveViaDbprLicense.mockResolvedValue(null);
+      const profile = buildEnrichedProfile(plazaSuiteRecord(), null, 27.5, -82.45, null, null, SUITE_ADDRESS, { commercialSuiteSizing: true });
+      await routePrivate.applyCommercialSuiteSize(profile);
+      expect(profile.suiteSize.source).toBe('suite_type_default');
+
+      const typed = { ...profile, homeSqFt: 2200, footprint: 2200, _homeSqFtManuallyEdited: true };
+      const v1Input = translateV2CallToV1Input(typed, ['PEST'], { commercialRiskType: 'restaurant_food' });
+      expect(v1Input.homeSqFt).toBe(2200);
+      expect(v1Input.footprintSqFt).toBe(2200);
+    });
+
+    test('license_seats / verified suite sizes are real measurements — never recomputed off risk type', async () => {
+      resolveViaDbprLicense.mockResolvedValue({
+        value: 1400, businessName: 'Test Taco Shop', seats: 25,
+        evidence: [{ source: 'license_seats', detail: '25 seats -> 1,400 sq ft' }],
+      });
+      const profile = buildEnrichedProfile(plazaSuiteRecord(), null, 27.5, -82.45, null, null, SUITE_ADDRESS, { commercialSuiteSizing: true });
+      await routePrivate.applyCommercialSuiteSize(profile);
+      expect(profile.suiteSize.source).toBe('license_seats');
+
+      // Even picking a risk type whose default (2,500) differs sharply from
+      // the licensed 1,400 must not touch a real measurement.
+      const v1Input = translateV2CallToV1Input(profile, ['PEST'], { commercialRiskType: 'healthcare_childcare' });
+      expect(v1Input.homeSqFt).toBe(1400);
+      expect(v1Input.footprintSqFt).toBe(1400);
+    });
+  });
+
   test('a DBPR miss (business-type default) prices LOW and trips the low-confidence delivery gate (primary review PR #4840 r4 P1)', async () => {
     resolveViaDbprLicense.mockResolvedValue(null);
 

@@ -4009,6 +4009,26 @@ export default function EstimateToolViewV2({
           : `Enter home sq ft. ${names} ${verb} priced by the home's size, and without it the price is a guess at a 2,000 sq ft house.`);
         return null;
       }
+      // The server (translateV2CallToV1Input) recomputes an untouched
+      // suite-type-default size off whatever commercialRiskType/
+      // commercialSubtype is CURRENTLY selected (codex P2 #4840) — it can
+      // now differ from the lookup-time value still sitting in the Home Sq
+      // Ft box. Sync the box (and the remembered suite-size note) to what
+      // was actually priced so the displayed size and the priced size never
+      // disagree. A manually edited/confirmed box (_homeSqFtEdited) is
+      // never touched — same provenance gate the server checks.
+      if (
+        profile.suiteSize?.source === "suite_type_default" &&
+        !form._homeSqFtEdited &&
+        Number(result.property?.homeSqFt) > 0 &&
+        Number(result.property.homeSqFt) !== Number(form.homeSqFt)
+      ) {
+        const resolvedSuiteSqFt = Number(result.property.homeSqFt);
+        setForm((f) => ({ ...f, homeSqFt: String(resolvedSuiteSqFt) }));
+        setEnrichedProfile((ep) =>
+          ep?.suiteSize ? { ...ep, suiteSize: { ...ep.suiteSize, value: resolvedSuiteSqFt } } : ep
+        );
+      }
       setEstimate(result);
       setSavedId(null);
       setSavedViewUrl(null);
