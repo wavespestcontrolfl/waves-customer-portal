@@ -2668,6 +2668,29 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       }
     })();
   }, [selectedCustomer?.id, trappingStatusKey, trappingPropertyId, trappingDate, hasRodentTrappingLine, trappingStatus]);
+  // Carry the job's per-check price (the opener estimate's quoted price, or
+  // the live catalog price) into a newly added extra-check line ONCE; a
+  // later operator edit is left alone and flagged by the hint instead.
+  const trapCheckPriceSyncedRef = useRef(new Set());
+  useEffect(() => {
+    const t = trappingStatus;
+    if (!t || t.key !== trappingStatusKey || t.status !== 'ready' || !t.hasJob || t.grandfathered) return;
+    const target = Number(t.additionalCheckPrice);
+    if (!(target > 0)) return;
+    setServices((arr) => {
+      let changed = false;
+      const next = arr.map((s) => {
+        if ((s?.service_key ?? s?.serviceKey) !== 'rodent_trap_check_additional') return s;
+        if (trapCheckPriceSyncedRef.current.has(s.lineId)) return s;
+        trapCheckPriceSyncedRef.current.add(s.lineId);
+        if (Number(s.price) === target) return s;
+        changed = true;
+        return { ...s, price: String(target) };
+      });
+      return changed ? next : arr;
+    });
+  }, [trappingStatus, trappingStatusKey, services]);
+
   const trappingHint = (svc) => {
     if (!isRodentTrappingLine(svc)) return null;
     const t = trappingStatus;
@@ -2684,6 +2707,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     }
     if (t.nextVisitBillable && key !== 'rodent_trap_check_additional') {
       return `Visit ${visitNo} of this trapping job — the ${t.includedVisits} included visits are used. Book "Rodent Trap Check - Additional" ($${t.additionalCheckPrice}).`;
+    }
+    if (key === 'rodent_trap_check_additional' && t.nextVisitBillable
+      && svc?.price !== '' && svc?.price != null && Number(svc.price) !== Number(t.additionalCheckPrice)) {
+      return `Visit ${visitNo} of this trapping job. This job's extra check price is $${t.additionalCheckPrice}, but this line is set to $${svc.price}. Confirm before saving.`;
     }
     if (!t.nextVisitBillable && key === 'rodent_trap_check_additional') {
       return `Visit ${visitNo} of this trapping job — still included. Book the no-charge Trap Follow-Up instead.`;
