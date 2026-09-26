@@ -473,6 +473,28 @@ describe('the writing wrapper and the batch', () => {
     expect(inserted.filter((row) => row.__table === 'activity_log')).toHaveLength(0);
   });
 
+  test('a retried bulk request: an already-cancelled row whose first reseed failed is re-evaluated on its own, and never turns a NEW single cancel of the same plan into a "reduction" (pre-push audit P1)', async () => {
+    // 22 was cancelled by an earlier request (its reseed failed, no stamp); this request re-carries 22 and newly cancels 24
+    const { handler } = scenario({
+      transitions: [{ id: 81, job_id: 22, from_status: 'confirmed' }, { id: 82, job_id: 24, from_status: 'pending' }],
+      decisions: [{ recurring_parent_id: 10, resolved_action: 'cancel_series' }], // any refusal proves the row was evaluated
+    });
+    const conn = makeConn((q) => {
+      if (q.table === 'scheduled_services' && q.op === 'await') return [{ id: 24, is_recurring: true, recurring_parent_id: 10 }];
+      return handler(q);
+    });
+    const out = await reseedRecurringSeriesAfterCancelBatch(conn, [24], { source: 'test', retryIds: [22, 24] });
+    // 24 alone is a single cancel (not a batch reduction), and 22 is retried separately; 24 is not evaluated twice
+    expect(out.skippedRoots).toEqual([]);
+    expect(out.results).toHaveLength(2);
+    // (the scripted conn serves a full row for 22 only, so 24's own evaluation stops at not_found; 22 reaches the stopped-plan refusal)
+    expect(out.results.map((r) => r.skipped).sort()).toEqual(['not_found', 'series_stopped']);
+    // retries alone still run
+    const only = await reseedRecurringSeriesAfterCancelBatch(conn, [], { source: 'test', retryIds: [22] });
+    expect(only.results).toHaveLength(1);
+    expect(only.results[0].skipped).toBe('series_stopped');
+  });
+
   test('recordReseedDeclines: one row per cancelled visit, keyed on its CURRENT episode, carrying the whole reduction group', async () => {
     const { handler, inserted } = scenario({
       // job 22: an older cancel compensated back to live, then the current cancel (entering row 73)

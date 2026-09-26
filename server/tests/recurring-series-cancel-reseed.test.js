@@ -56,7 +56,7 @@ describe('runPostCancelSeriesReseed bridge', () => {
     const db = () => {};
     await runPostCancelSeriesReseed({ db, serviceId: 'svc-1', source: 'admin-dispatch-status-cancel' });
     expect(adminSchedule.reseedRecurringSeriesAfterCancelBatch).toHaveBeenCalledTimes(1);
-    expect(adminSchedule.reseedRecurringSeriesAfterCancelBatch).toHaveBeenCalledWith(db, ['svc-1'], { source: 'admin-dispatch-status-cancel' });
+    expect(adminSchedule.reseedRecurringSeriesAfterCancelBatch).toHaveBeenCalledWith(db, ['svc-1'], { source: 'admin-dispatch-status-cancel', retryIds: [] });
   });
 
   test('bulk form hands the whole batch over once, deduped', async () => {
@@ -64,7 +64,17 @@ describe('runPostCancelSeriesReseed bridge', () => {
     const db = () => {};
     await runPostCancelSeriesReseed({ db, serviceIds: ['a', 'b', 'a', null], source: 'admin-schedule-bulk-cancel' });
     expect(adminSchedule.reseedRecurringSeriesAfterCancelBatch).toHaveBeenCalledTimes(1);
-    expect(adminSchedule.reseedRecurringSeriesAfterCancelBatch).toHaveBeenCalledWith(db, ['a', 'b'], { source: 'admin-schedule-bulk-cancel' });
+    expect(adminSchedule.reseedRecurringSeriesAfterCancelBatch).toHaveBeenCalledWith(db, ['a', 'b'], { source: 'admin-schedule-bulk-cancel', retryIds: [] });
+  });
+
+  test('already-cancelled rows of a retried bulk request ride along as retryIds — deduped, never merged into the batch (pre-push audit P1)', async () => {
+    adminSchedule.reseedRecurringSeriesAfterCancelBatch.mockResolvedValue({ results: [], skippedRoots: [] });
+    const db = () => {};
+    await runPostCancelSeriesReseed({ db, serviceIds: ['a'], retryIds: ['r1', 'a', 'r1', null], source: 'admin-schedule-bulk-cancel' });
+    expect(adminSchedule.reseedRecurringSeriesAfterCancelBatch).toHaveBeenLastCalledWith(db, ['a'], { source: 'admin-schedule-bulk-cancel', retryIds: ['r1'] });
+    // a request that only re-carried already-cancelled rows still retries them
+    await runPostCancelSeriesReseed({ db, serviceIds: [], retryIds: ['r2'], source: 'admin-schedule-bulk-cancel' });
+    expect(adminSchedule.reseedRecurringSeriesAfterCancelBatch).toHaveBeenLastCalledWith(db, [], { source: 'admin-schedule-bulk-cancel', retryIds: ['r2'] });
   });
 
   test('NEVER throws — a failed reseed must not fail the committed cancel', async () => {
@@ -433,11 +443,14 @@ describe('cancel surfaces wire the hook (source guards)', () => {
     const notify = route.indexOf('AppointmentReminders.handleCancellation(id, {', cancelCase);
     const voidCall = route.indexOf('await voidOpenInvoicesForCancelledService(id);', cancelCase);
     expect(route.split('cancelReseedIds.push(id)').length - 1).toBe(1);
+    // an already-cancelled row (a retried request) is collected as a RETRY, right beside it (pre-push audit P1)
+    expect(route).toMatch(/if \(fromStatus !== 'cancelled'\) cancelReseedIds\.push\(id\);\s*else cancelReseedRetryIds\.push\(id\);/);
+    expect(route).toMatch(/if \(cancelReseedIds\.length \|\| cancelReseedRetryIds\.length\) \{/);
     expect(collect).toBeGreaterThan(cancelCase);
     expect(collect).toBeLessThan(notify);
     expect(collect).toBeLessThan(voidCall);
     const flush = route.indexOf('await flushDispatchQualityDates(qualityDates);');
-    const call = route.indexOf("serviceIds: cancelReseedIds, source: 'admin-schedule-bulk-cancel'");
+    const call = route.indexOf("serviceIds: cancelReseedIds, retryIds: cancelReseedRetryIds, source: 'admin-schedule-bulk-cancel'");
     const respond = route.indexOf('res.json({');
     expect(flush).toBeGreaterThan(collect);
     expect(call).toBeGreaterThan(flush);
@@ -446,7 +459,7 @@ describe('cancel surfaces wire the hook (source guards)', () => {
   });
 
   test('bulk cancel: plan-reduction intent is read BEFORE the loop and each row\'s ledger row is written INSIDE its own cancel transaction, ungated (pre-push audit P1)', () => {
-    const route = schedule.slice(schedule.indexOf("router.post('/bulk-action'"), schedule.indexOf("serviceIds: cancelReseedIds, source: 'admin-schedule-bulk-cancel'"));
+    const route = schedule.slice(schedule.indexOf("router.post('/bulk-action'"), schedule.indexOf("serviceIds: cancelReseedIds, retryIds: cancelReseedRetryIds, source: 'admin-schedule-bulk-cancel'"));
     const intent = route.indexOf("? planReductionGroups(await db('scheduled_services').whereIn('id', serviceIds)");
     const loop = route.indexOf('for (const id of serviceIds) {');
     expect(intent).toBeGreaterThan(-1);

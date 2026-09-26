@@ -9341,6 +9341,11 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
     // batch settled, so a bulk cancel that removes several visits of one
     // plan reads as the plan reduction it is, not N single cancels.
     const cancelReseedIds = [];
+    // Rows this request carried that were ALREADY cancelled (a retried bulk
+    // request): their first reseed may have failed or never run, so they
+    // are re-evaluated one at a time — never counted as this request's
+    // plan reduction (pre-push audit P1).
+    const cancelReseedRetryIds = [];
     // Plan-reduction INTENT, read before any row commits (pre-push audit P1
     // on #4814): this route cancels row by row, each in its own transaction,
     // so "2+ visits of one plan" cannot be decided after the fact without a
@@ -9933,6 +9938,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
             // recover it (fromStatus is 'cancelled' by then). Only a real
             // transition qualifies; see cancelReseedIds above.
             if (fromStatus !== 'cancelled') cancelReseedIds.push(id);
+            else cancelReseedRetryIds.push(id);
             try {
               const AppointmentReminders = require('../services/appointment-reminders');
               // payload.notifyCustomer === false (the list view's bulk
@@ -10055,9 +10061,9 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
     }
     // Counted-plan reseed (owner ruling 2026-09-24): once per series for the
     // batch's single-visit cancels. Gated, failure-isolated, post-commit.
-    if (cancelReseedIds.length) {
+    if (cancelReseedIds.length || cancelReseedRetryIds.length) {
       await require('../services/recurring-series-cancel-reseed').runPostCancelSeriesReseed({
-        db, serviceIds: cancelReseedIds, source: 'admin-schedule-bulk-cancel',
+        db, serviceIds: cancelReseedIds, retryIds: cancelReseedRetryIds, source: 'admin-schedule-bulk-cancel',
       });
     }
 
@@ -18683,10 +18689,34 @@ async function recordReseedDeclines(conn, { customerId, rootId, cancelledIds, ba
   })));
 }
 
-async function reseedRecurringSeriesAfterCancelBatch(conn, serviceIds, { source = 'cancel' } = {}) {
-  const { isPlanSeriesRow, isCountingSourceStatus, cancelEpisodeSourceStatus } = require('../services/recurring-series-cancel-reseed');
+async function reseedRecurringSeriesAfterCancelBatch(conn, serviceIds, { source = 'cancel', retryIds = [] } = {}) {
   const ids = [...new Set((serviceIds || []).filter(Boolean).map(String))];
-  if (!ids.length) return { results: [], skippedRoots: [] };
+  const retries = [...new Set((retryIds || []).filter(Boolean).map(String))].filter((id) => !ids.includes(id));
+  if (!ids.length && !retries.length) return { results: [], skippedRoots: [] };
+  const results = [];
+  const skippedRoots = [];
+  if (ids.length) await reseedNewBatchCancels(conn, { ids, source, results, skippedRoots });
+  // Already-cancelled rows a retried request carried again (pre-push audit
+  // P1): one at a time, never part of the reduction test above — the stamp
+  // (already reseeded), the current-episode checks and the plan-reduction
+  // ledger (a batch that removed 2+ visits recorded it in each row's cancel
+  // transaction) decide, exactly as on the dispatch / Intelligence Bar
+  // replay paths. Same per-row isolation.
+  for (const id of retries) {
+    try {
+      results.push(await reseedRecurringSeriesAfterCancel(conn, id, { source: `${source}-retry` }));
+    } catch (e) {
+      logger.error(`[recurring-cancel-reseed] reseed retry failed (${source}, cancelled=${id}): ${e.message}`);
+      results.push({ added: [], skipped: 'error', error: e.message });
+    }
+  }
+  return { results, skippedRoots };
+}
+
+// The rows THIS request cancelled: grouped by series, a series that lost 2+
+// visits is a plan reduction (skipped); each other series is reseeded once.
+async function reseedNewBatchCancels(conn, { ids, source, results, skippedRoots }) {
+  const { isPlanSeriesRow, isCountingSourceStatus, cancelEpisodeSourceStatus } = require('../services/recurring-series-cancel-reseed');
   const rows = await conn('scheduled_services').whereIn('id', ids)
     .select('id', 'is_recurring', 'recurring_parent_id', 'is_callback', 'followup_included');
   // Only cancels whose CURRENT episode removed a counting visit take part in
@@ -18720,8 +18750,6 @@ async function reseedRecurringSeriesAfterCancelBatch(conn, serviceIds, { source 
     if (!byRoot.has(rootId)) byRoot.set(rootId, []);
     byRoot.get(rootId).push(String(row.id));
   }
-  const results = [];
-  const skippedRoots = [];
   for (const [rootId, cancelledIds] of byRoot) {
     if (cancelledIds.length > 1) {
       skippedRoots.push({ rootId, cancelledIds, skipped: 'batch_series_cancel' });
@@ -18744,7 +18772,6 @@ async function reseedRecurringSeriesAfterCancelBatch(conn, serviceIds, { source 
       results.push({ added: [], skipped: 'error', parentId: rootId, error: e.message });
     }
   }
-  return { results, skippedRoots };
 }
 
 // PUT /api/admin/schedule/:id/status — change status with automations.

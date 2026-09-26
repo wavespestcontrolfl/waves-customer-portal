@@ -315,9 +315,15 @@ function planReductionGroups(rows) {
 // `serviceId` for the single-visit surfaces; `serviceIds` for the bulk
 // cancel, which hands over the whole batch so the writer can group by
 // series and treat several cancels of one plan as the plan reduction it is.
-async function runPostCancelSeriesReseed({ db, serviceId, serviceIds, source = 'cancel' } = {}) {
+async function runPostCancelSeriesReseed({ db, serviceId, serviceIds, retryIds, source = 'cancel' } = {}) {
   const ids = [...new Set([...(serviceIds || []), serviceId].filter(Boolean).map(String))];
-  if (!db || !ids.length) return;
+  // Rows a retried bulk request carried again that were ALREADY cancelled
+  // (pre-push audit P1): their first reseed may have failed or never run, so
+  // each is re-evaluated on its own — the stamp, the episode checks and the
+  // plan-reduction ledger keep it idempotent — but never counted toward this
+  // request's "2+ visits of one plan" reduction test.
+  const retries = [...new Set((retryIds || []).filter(Boolean).map(String))].filter((id) => !ids.includes(id));
+  if (!db || (!ids.length && !retries.length)) return;
   try {
     const { cancelReseedsRecurringLive } = require('../config/feature-gates');
     if (!cancelReseedsRecurringLive()) return;
@@ -326,14 +332,14 @@ async function runPostCancelSeriesReseed({ db, serviceId, serviceIds, source = '
       logger.warn('[recurring-series-cancel-reseed] reseedRecurringSeriesAfterCancelBatch export missing — skipping');
       return;
     }
-    const { results } = await reseedRecurringSeriesAfterCancelBatch(db, ids, { source });
+    const { results } = await reseedRecurringSeriesAfterCancelBatch(db, ids, { source, retryIds: retries });
     for (const result of results || []) {
       if (result?.skipped) {
         logger.info(`[recurring-series-cancel-reseed] no reseed (${source}, parent=${result.parentId || '?'}): ${result.skipped}`);
       }
     }
   } catch (e) {
-    logger.error(`[recurring-series-cancel-reseed] post-cancel series reseed failed (${source}, services=${ids.join(',')}): ${e.message}`);
+    logger.error(`[recurring-series-cancel-reseed] post-cancel series reseed failed (${source}, services=${[...ids, ...retries].join(',')}): ${e.message}`);
   }
 }
 
