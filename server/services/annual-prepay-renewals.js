@@ -2793,14 +2793,16 @@ function isDecidedLapseInWindow(term, today = etDateString()) {
 
 // Cancel plan records that same decided-lapse shape for "end now + refund",
 // which pulls every visit first and owes the unused value back, so it must
-// never be reseeded or stamped. Its disposition is durable on the
-// cancellation case (snapshot.prepayTermId / prepayDisposition, the record the
-// cancel flow's own idempotency latch reads). Every other decided lapse — "end
-// of paid coverage", or a renewal-time lapse, which has no case — keeps its
-// guarantees, but only while the read side still reports it as paid coverage
-// today (coveredTermsAsOf): a dispute clears a decided lapse's stamps and
-// suspends it through that paid-invoice gate, and a refresh must not hand the
-// stamps back while the money is contested or refunded.
+// never be reseeded or stamped. Its disposition is durable twice: on the
+// cancellation service request, written before anything destructive (it
+// survives a lost case write), and on the cancellation case after. Either
+// one, from a cancellation opened since this term began, stops the reseed —
+// fail closed. Every other decided lapse — "end of paid coverage", or a
+// renewal-time lapse, which has neither — keeps its guarantees, but only
+// while the read side still reports it as paid coverage today
+// (coveredTermsAsOf): a dispute clears a decided lapse's stamps and suspends
+// it through that paid-invoice gate, and a refresh must not hand the stamps
+// back while the money is contested or refunded.
 async function decidedLapseKeepsCoverage(term, conn = db) {
   const stillPaid = await coveredTermsAsOf(conn, etDateString()).where('t.id', term.id).first('t.id');
   if (!stillPaid) return false;
@@ -2808,7 +2810,12 @@ async function decidedLapseKeepsCoverage(term, conn = db) {
     .where({ customer_id: term.customer_id })
     .whereRaw("snapshot->>'prepayTermId' = ?", [String(term.id)])
     .whereRaw("snapshot->>'prepayDisposition' = 'end_now_refund'")
-    .first('id');
+    .first('id')
+    || await conn('service_requests')
+      .where({ customer_id: term.customer_id, category: 'cancellation' })
+      .where('created_at', '>=', term.created_at || term.term_start)
+      .whereRaw("metadata->'cancel_plan'->>'prepayDisposition' = 'end_now_refund'")
+      .first('id');
   return !endedNow;
 }
 

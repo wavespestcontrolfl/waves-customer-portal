@@ -81,9 +81,10 @@ These constants in `R` decide what each stage *means* to the rest of billing:
   skipped after an "end of paid coverage" cancel or a renewal-time lapse is
   still replaced and a hand-added replacement is still stamped. Cancel plan
   records the same shape for "end now + refund", which pulls every visit
-  first; the disposition on its cancellation case
-  (`snapshot.prepayDisposition = 'end_now_refund'`) keeps that term from ever
-  being reseeded or stamped (`decidedLapseKeepsCoverage`). Only while
+  first; its disposition (`end_now_refund`, on the cancellation service
+  request written before anything destructive and on the cancellation case
+  after) keeps that term from ever being reseeded or stamped
+  (`decidedLapseKeepsCoverage`, fail closed). Only while
   `coveredTermsAsOf` still reports the term as paid coverage today (a
   dispute's cleared stamps are not handed back), and under Cancel plan's
   commit key (`tryHoldCancelCommitLockForTransaction`) so a cancellation

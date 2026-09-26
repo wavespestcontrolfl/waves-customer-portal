@@ -186,6 +186,23 @@ postgres('decided-lapse annual-prepay terms keep their coverage guarantees throu
     expect((await coverage(t)).every((row) => row.prepaid_method === null)).toBe(true);
   });
 
+  test('an end-now-refund cancel whose case write failed is still never reseeded', async () => {
+    const t = await seededTerm();
+    // The cancellation request carries the disposition from before the
+    // processor ran; the case that would repeat it was never written.
+    await trx('service_requests').insert({
+      customer_id: t.customerId, category: 'cancellation', subject: 'Cancel plan', source: 'admin', status: 'new',
+      metadata: JSON.stringify({ cancel_plan: { scope: [], prepayDisposition: 'end_now_refund', effectiveDate: 'now' } }),
+    });
+    const pulled = await coverage(t);
+    await trx('scheduled_services').whereIn('id', pulled.map((v) => v.id)).update({ status: 'cancelled', updated_at: new Date() });
+    await decideCancel(t);
+
+    await AnnualPrepayRenewals.refreshActiveTermsForCustomer(t.customerId, trx);
+    await AnnualPrepayRenewals.refreshTermSnapshot(t.termId, trx);
+    expect(await coverage(t)).toHaveLength(0);
+  });
+
   test('an end-now-refund cancel is never reseeded or stamped', async () => {
     const t = await seededTerm();
     const pulled = await coverage(t);
