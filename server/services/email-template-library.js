@@ -897,9 +897,9 @@ async function runProviderHandoff({ withProviderHandoff, dispatchToProvider, tem
   let result;
   let verdict;
   try {
-    verdict = await withProviderHandoff(async () => {
+    verdict = await withProviderHandoff(async (database) => {
       dispatchStarted = true;
-      result = await dispatchToProvider();
+      result = await dispatchToProvider(database);
     });
   } catch (err) {
     if (dispatchStarted && result === undefined) throw err;
@@ -1378,7 +1378,7 @@ async function sendTemplate({
     // directly with no caller opinion of their own. This library forwards
     // `withheldLinkPolicy` only when a caller explicitly passed one (an
     // override); otherwise sendOne's template-keyed default governs.
-    const sendToProvider = (html, text, guardIds) => sendgrid.sendOne({
+    const sendToProvider = (html, text, guardIds, database) => sendgrid.sendOne({
         to,
         fromEmail,
         fromName,
@@ -1397,6 +1397,7 @@ async function sendTemplate({
         suppressErrorLog: suppressProviderErrorLog,
         estimateIds: guardIds,
         templateKey,
+        ...(database ? { database } : {}),
         ...(withheldLinkPolicy ? { withheldLinkPolicy } : {}),
       });
     // Codex round 1 on #4608 (P1): keying this ONLY on estimateId/estimateIds
@@ -1417,9 +1418,9 @@ async function sendTemplate({
     // have produced) both resolve to their own sentinel instead, so
     // dispatchToProvider always either sends or reports a real,
     // non-throwing outcome.
-    const dispatchToProvider = async () => {
+    const dispatchToProvider = async (database) => {
       try {
-        const providerResult = await sendToProvider(rendered.html, rendered.text, guardEstimateIds);
+        const providerResult = await sendToProvider(rendered.html, rendered.text, guardEstimateIds, database);
         if (providerResult?.withheldLinksRewritten?.length) {
           // Pre-push audit P1 (b49be57b12 round 4), still true under the
           // round 9 structural move: the STORED row should match what
@@ -1437,7 +1438,7 @@ async function sendTemplate({
           // touched. Best-effort: a write failure here must not block a
           // send that already succeeded.
           try {
-            await db('email_messages')
+            await (database || db)('email_messages')
               .where({ id: message.id, status: 'queued', send_attempt_token: sendAttemptToken })
               .update({
                 html_snapshot: providerResult.html,
