@@ -127,7 +127,7 @@ const REACTION_RE = /\b(?:swell\w*|swoll\w*|hives|rash|dizzy|faint\w*|vomit\w*|n
 
 // Swallowing/ingesting is an emergency only when a person or pet did it —
 // "Have the ants ingested the bait?" is pest behavior, not a poisoning.
-const INGESTION_RE = /\b(?:i|we|he|she|someone|somebody|anyone|my|our|his|her|their|the\s+(?:baby|kids?|child|children|toddler|dogs?|cats?|puppy|pets?)|kids?|child|children|son|daughter|baby|toddler|infant|dogs?|cats?|puppy|pets?|husband|wife)\b[^.?!]{0,40}?\b(?:swallow(?:ed|ing|s)?|ingest(?:ed|ing|s)?)\b|\b(?:swallow|ingest)(?:ed)?\b[^.?!]{0,30}?\bby\s+(?:(?:my|our|his|her|their|the|a|an)\s+)?(?:baby|kids?|child|children|toddler|infant|son|daughter|husband|wife|someone|somebody|dogs?|cats?|pupp(?:y|ies)|kittens?|pets?|me|us|him|her|them)\b|\b(?:got|went|gets?|put)\s+(?:\w+\s+)?in(?:to)?\s+(?:his|her|their|my|our|the\s+\w+'?s?)\s+mouth\b|\b(?:me\s+)?tragu[eé](?![a-zñáéíóú])|\bingeri(?![a-zñáéíóú])|\b(?:mi|su|el|la|nuestr[oa]|tu)\s+(?:hij[oa]s?|beb[eé]s?|ni[ñn][oa]s?|esposo|esposa|perr[oa]s?|gat[oa]s?|mascotas?|cachorr\w*)\b[^.?!]{0,30}?\b(?:se\s+)?(?:trag[oó]|ingiri[oó]|comi[oó])(?![a-zñáéíóú])|\b(?:ingerid|tragad|comid)[oa]s?\s+por\s+(?:(?:mi|su|el|la|nuestr[oa]|tu)\s+)?(?:hij[oa]s?|beb[eé]s?|ni[ñn][oa]s?|esposo|esposa|perr[oa]s?|gat[oa]s?|mascotas?|cachorr\w*)\b/i;
+const INGESTION_RE = /\b(?:i|we|he|she|someone|somebody|anyone|my|our|his|her|their|the\s+(?:baby|kids?|child|children|toddler|dogs?|cats?|puppy|pets?)|kids?|child|children|son|daughter|baby|toddler|infant|dogs?|cats?|puppy|pets?|husband|wife)\s+(?:(?!(?:ants?|roach\w*|cockroach\w*|bugs?|mice|rats?|rodents?|pests?|termites?|spiders?|insects?|flies|fleas?|squirrels?|birds?|wasps?|bees?)\b)\S+\s+){0,3}?(?:swallow(?:ed|ing|s)?|ingest(?:ed|ing|s)?|ate|eaten|drank|drunk)\b|\b(?:swallow(?:ed)?|ingest(?:ed)?|eaten|drunk)\b[^.?!]{0,30}?\bby\s+(?:(?:my|our|his|her|their|the|a|an)\s+)?(?:baby|kids?|child|children|toddler|infant|son|daughter|husband|wife|someone|somebody|dogs?|cats?|pupp(?:y|ies)|kittens?|pets?|me|us|him|her|them)\b|\b(?:got|went|gets?|put)\s+(?:\w+\s+)?in(?:to)?\s+(?:his|her|their|my|our|the\s+\w+'?s?)\s+mouth\b|\b(?:me\s+)?tragu[eé](?![a-zñáéíóú])|\bingeri(?![a-zñáéíóú])|\b(?:mi|su|el|la|nuestr[oa]|tu)\s+(?:hij[oa]s?|beb[eé]s?|ni[ñn][oa]s?|esposo|esposa|perr[oa]s?|gat[oa]s?|mascotas?|cachorr\w*)\b[^.?!]{0,30}?\b(?:se\s+)?(?:trag[oó]|ingiri[oó]|comi[oó])(?![a-zñáéíóú])|\b(?:ingerid|tragad|comid)[oa]s?\s+por\s+(?:(?:mi|su|el|la|nuestr[oa]|tu)\s+)?(?:hij[oa]s?|beb[eé]s?|ni[ñn][oa]s?|esposo|esposa|perr[oa]s?|gat[oa]s?|mascotas?|cachorr\w*)\b/i;
 
 // A denied symptom ("stung but has no swelling", "sin ronchas") is not a
 // reaction; it is removed before the sting/bite pairing is checked.
@@ -318,7 +318,7 @@ const DURATION_RE = /(?:\b|(?<=\d))(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|
 const CLOCK_TIME_RE = /\b\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)(?![a-z])|\b\d{1,2}:\d{2}\b|\b(?:noon|midday|midnight|tonight|tomorrow|this\s+(?:morning|afternoon|evening)|sunset|sundown|dinner\s*time|bedtime|mediod[ií]a|medianoche|esta\s+(?:tarde|noche)|ma[ñn]ana|la\s+(?:tarde|noche))\b|\blas?\s+\d{1,2}(?::\d{2})?\b/i;
 // A visit / scheduling duration ("The visit takes about 45 minutes", "every
 // 21 days") — exempt only when no drying or re-entry wording is present.
-const SCHEDULING_DURATION_RE = /\b(?:visits?|appointments?|arriv\w*|window|inspections?|business\s+days?|respond\w*|repl(?:y|ies)|schedul\w*|book\w*|next\s+(?:treatment|service|visit|application)|come\s+back|follow[-\s]?ups?|return\s+visits?|re-?service|(?:next|this|coming|following)\s+(?:week|month|day)|every|each|pr[oó]xim[oa]\s+(?:semana|mes|d[ií]a)|esta\s+semana|quarterly|monthly|citas?|visitas?|lleg\w*|inspecci[oó]n|cada|programad\w*)\b/i;
+const SCHEDULING_DURATION_RE = /\b(?:same-?\s*day|next-?\s*day|days?\s+(?:a|per)\s+week|weekdays?|weekends?|24\/7|(?:service|office|business|opening)\s+hours|hours\s+(?:are|of)|open|horario|mismo\s+d[ií]a|visits?|appointments?|arriv\w*|window|inspections?|business\s+days?|respond\w*|repl(?:y|ies)|schedul\w*|book\w*|next\s+(?:treatment|service|visit|application)|come\s+back|follow[-\s]?ups?|return\s+visits?|re-?service|(?:next|this|coming|following)\s+(?:week|month|day)|every|each|pr[oó]xim[oa]\s+(?:semana|mes|d[ií]a)|esta\s+semana|quarterly|monthly|citas?|visitas?|lleg\w*|inspecci[oó]n|cada|programad\w*)\b/i;
 // Generic length verbs ("takes about 45 minutes") exempt a duration only when
 // the visitor didn't ask a timing / access question — "It takes about 30
 // minutes" answering "How long after treatment can I re-enter?" is a claim.
@@ -342,7 +342,11 @@ const ACCESS_SIGNAL_RE = new RegExp([
   '\\bantes\\s+de\\s+(?:dejar|permitir|caminar|salir|entrar|volver|usar|tocar)\\b|\\b(?:[aá]reas?|zonas?|c[eé]sped|jard[ií]n|habitaci[oó]n)\\s+tratad\\w*',
 ].join('|'), 'i');
 
-const INTAKE_EPA_APPROVED_ES_RE = { test: (t) => EPA_MENTION_RE.test(t) && APPROVAL_WORD_RE.test(t) };
+// An explicit denial ("No, the EPA has not approved this pesticide") is a
+// direct regulatory answer, not a claim: negated approval wording is removed
+// before the check, so any remaining affirmative approval still flags.
+const NEGATED_APPROVAL_RE = /\b(?:not|never|isn'?t|aren'?t|wasn'?t|weren'?t|hasn'?t|haven'?t|has\s+not|have\s+not|is\s+not|are\s+not|no\s+(?:est[aá]n?|ha|han|fue)|nunca)\s+(?:been\s+|sido\s+|ever\s+)?(?:approv\w*|endors\w*|certif\w*|sanction\w*|authoriz\w*|aprob\w*|avalad\w*|autoriz\w*)/gi;
+const INTAKE_EPA_APPROVED_ES_RE = { test: (t) => EPA_MENTION_RE.test(t) && APPROVAL_WORD_RE.test(t.replace(NEGATED_APPROVAL_RE, ' ')) };
 
 
 
@@ -368,7 +372,7 @@ const DIGITAL_ACCESS_RE = /\b(?:re-?enter(?:ing)?|log(?:ging)?\s*(?:in|back\s+in
 // Looser than ACCESS_SIGNAL_RE, for deciding the TOPIC only: any subject or
 // modal in front of going in/out ("You'll be able to go inside", "When can
 // we go inside?", "Can the kids play outside?").
-const ACCESS_TOPIC_RE = /\b(?:(?:go|get|come|head|walk|be|play|stay)\s+(?:back\s+)?(?:inside|outside|indoors|outdoors)|(?:go|get)\s+(?:back\s+)?(?:out|in)\b|back\s+(?:inside|outside|indoors|outdoors)|re-?ent(?:er|ers|ered|ering|ry)|re-?occup\w*|dr(?:y|ies|ied|ying)|stay\s+(?:off|out|away|inside|indoors)|(?:salir|entrar|volver|regresar)|sec(?:o|a|os|as|ar|arse))\b/i;
+const ACCESS_TOPIC_RE = /\b(?:(?:return|go|get|come|head|move)\s+(?:back\s+)?(?:home|to\s+(?:the|my|our)\s+(?:house|home|apartment|condo))|back\s+(?:home|in\s+the\s+house)|(?:volver|regresar)\s+a\s+(?:casa|la\s+casa)|(?:go|get|come|head|walk|be|play|stay)\s+(?:back\s+)?(?:inside|outside|indoors|outdoors)|(?:go|get)\s+(?:back\s+)?(?:out|in)\b|back\s+(?:inside|outside|indoors|outdoors)|re-?ent(?:er|ers|ered|ering|ry)|re-?occup\w*|dr(?:y|ies|ied|ying)|stay\s+(?:off|out|away|inside|indoors)|(?:salir|entrar|volver|regresar)|sec(?:o|a|os|as|ar|arse))\b/i;
 function fixedTimingClaim(reply, contextText, treatmentContext, activeMessage = contextText) {
   const text = String(reply || '');
   // Topic, not proximity: when the reply or the visitor's question is about
@@ -421,10 +425,12 @@ function intakeSafetyClaimSupplement(rawReply, rawContext = '', rawActive = rawC
 // label — "This product is not safe to ingest; call Poison Control now."
 // must not be replaced with copy that only says to call Waves.
 const HUMAN_EMERGENCY_DIRECTION_RE = /(?:\+?1[-.\s]?)?\(?800\)?[-.\s]?222[-.\s]?1222|\b(?:(?:call|contact|see|consult|reach|phone|ask)\s+(?:a\s+|your\s+|the\s+)?(?:doctor|physician|pediatrician|nurse|medical\s+(?:provider|professional)|health\s*care\s+provider)|(?:llame|consulte|contacte|vea|acuda)\s+(?:a|al)\s+(?:su\s+)?(?:m[eé]dico|doctor|pediatra)|(?:go|get|head|rush|drive|take\s+\S+)\s+(?:straight\s+|right\s+)?to\s+(?:the\s+|a\s+|an\s+)?(?:nearest\s+|closest\s+|local\s+)?(?:hospital|emergency\s+room)|(?:go|get|head|take\s+\S+)\s+to\s+(?:the\s+)?(?:er|e\.r\.)|urgencias|call(?:ing)?\s+911|dial\s+911|911\s+(?:right\s+away|immediately|now)|poison\s+(?:control|help)|emergency\s+(?:room|care|services?|department)|urgent\s+care|seek\s+(?:immediate\s+)?(?:medical|emergency)|medical\s+(?:attention|care|help|emergency)|call\s+(?:a|your)\s+(?:doctor|physician)|centro\s+de\s+(?:toxicolog[ií]a|envenenamientos?)|control\s+de\s+(?:envenenamientos?|intoxicaciones)|sala\s+de\s+emergencias?|atenci[oó]n\s+m[eé]dica|llam[ea]\s+al\s+911)\b/i;
-const VET_DIRECTION_RE = /\b(?:vets?|veterinarian|veterinary|animal\s+(?:hospital|poison|emergency|er)|veterinari[oa]s?|cl[ií]nica\s+veterinaria|hospital\s+veterinario)\b/i;
+// A referral, not the bare word — "safe for veterinary clinics" is not a
+// direction to a vet.
+const VET_DIRECTION_RE = /\b(?:call|contact|see|consult|visit|reach|phone|ask|go\s+to|get\s+\S+(?:\s+\S+)?\s+to|take\s+\S+(?:\s+\S+)?\s+to|rush\s+\S+(?:\s+\S+)?\s+to)\s+(?:a\s+|an\s+|your\s+|the\s+)?(?:nearest\s+|local\s+|closest\s+|emergency\s+)?(?:vets?|veterinarian|veterinary\s+(?:clinic|hospital|office|er|emergency)|animal\s+(?:hospital|er|emergency\s+(?:clinic|hospital|room)))\b|\b(?:animal|pet)\s+poison\s+(?:control|helpline|hotline)|\b(?:llame|lleve|consulte|contacte|acuda|vaya)\b[^.?!]{0,25}?\b(?:veterinari[oa]|hospital\s+veterinario|cl[ií]nica\s+veterinaria)\b/i;
 const PET_SUBJECT_RE = /\b(?:dogs?|cats?|pupp(?:y|ies)|kittens?|pets?|perr[oa]s?|gat[oa]s?|mascotas?|cachorr\w*)\b/i;
-const PET_PATIENT_RE = /\b(?:my|our|the|his|her|their)\s+(?:dogs?|cats?|pupp(?:y|ies)|kittens?|pets?)\b[^.?!]{0,25}?\b(?:swallow\w*|ingest\w*|ate|eaten|lick\w*|got\s+into|(?:was|got|is|has\s+been)\s+(?:stung|bit|bitten)|vomit\w*|throw\w*\s+up|seiz\w*|drool\w*|(?:is|seems|got)\s+sick)\b|\b(?:swallow|ingest)(?:ed)?\s+by\s+(?:my|our|the)\s+(?:dogs?|cats?|pupp(?:y|ies)|kittens?|pets?)\b|\bmi\s+(?:perr|gat|mascota|cachorr)\w*\s+[^.?!]{0,25}?(?:trag|comi|vomit|ingiri)\w*/i;
-const PERSON_SUBJECT_RE = /\b(?:i|me|myself|we|someone|somebody|kids?|child|children|son|daughter|baby|toddler|infant|husband|wife|mom|dad|grand\w+|hij[oa]s?|beb[eé]|ni[ñn][oa]s?|esposo|esposa|alguien|yo)\b/i;
+const PET_PATIENT_RE = /\b(?:my|our|the|his|her|their)\s+(?:dogs?|cats?|pupp(?:y|ies)|kittens?|pets?)\b[^.?!]{0,25}?\b(?:swallow\w*|ingest\w*|ate|eaten|lick\w*|got\s+into|(?:was|got|is|has\s+been)\s+(?:stung|bit|bitten)|vomit\w*|throw\w*\s+up|seiz\w*|drool\w*|(?:is|seems|got)\s+sick)\b|\b(?:swallow(?:ed)?|ingest(?:ed)?|eaten)\s+by\s+(?:my|our|the)\s+(?:dogs?|cats?|pupp(?:y|ies)|kittens?|pets?)\b|\bmi\s+(?:perr|gat|mascota|cachorr)\w*\s+[^.?!]{0,25}?(?:trag|comi|vomit|ingiri)\w*/i;
+const PERSON_SUBJECT_RE = /\b(?:someone|somebody|kids?|child|children|son|daughter|baby|toddler|infant|husband|wife|mom|dad|grand\w+|hij[oa]s?|beb[eé]|ni[ñn][oa]s?|esposo|esposa|alguien|yo)\b/i;
 const ANIMAL_EMERGENCY_REPLY = ' If a pet may have been exposed or seems unwell, call your veterinarian or an emergency animal hospital right away. / Si una mascota pudo haber estado expuesta o no se siente bien, llame a su veterinario o a un hospital veterinario de emergencia de inmediato.';
 const POISON_MENTION_RE = /\(?800\)?[-.\s]?222[-.\s]?1222|\b(?:poison\s+(?:control|help)|swallow\w*|ingest\w*|control\s+de\s+envenenamientos?|centro\s+de\s+toxicolog[ií]a|ingiri\w*|ingerir|trag[oó]\w*)\b/i;
 const POISON_CONTROL_LINE = ' If someone swallowed a product, call Poison Control at 1-800-222-1222. / Si alguien ingirió un producto, llame a Control de Envenenamientos al 1-800-222-1222.';
@@ -447,13 +453,17 @@ function emergencyGuidance(result, contextText = '') {
   // gets the emergency script even if the model's reply names no direction —
   // and who it happened to picks the script ("My dog swallowed bait" → vet;
   // "My son swallowed bait" → 911 + Poison Control).
+  // Who is the patient is read from the emergency-bearing clauses only — an
+  // unrelated earlier pet (or person) mention must not change the script.
+  const emergencyClauses = context.split(/(?<=[.!?])\s+|\n+/).filter((c) => looksLikeEmergency(c)).join('\n');
   const visitorEmergency = looksLikeEmergency(context);
-  const petSubject = PET_SUBJECT_RE.test(context);
-  const personSubject = PERSON_SUBJECT_RE.test(context);
+  const patientText = emergencyClauses || context;
+  const petSubject = PET_SUBJECT_RE.test(patientText);
+  const personSubject = PERSON_SUBJECT_RE.test(patientText);
   // Human guidance is dropped only when the animal is plainly the patient
   // ("My dog swallowed bait") — a pet mention alone ("My leg is swelling after
   // a dog bite") keeps it, and an ambiguous message gets both scripts.
-  const petIsPatient = PET_PATIENT_RE.test(context) && !personSubject;
+  const petIsPatient = PET_PATIENT_RE.test(patientText) && !personSubject;
   const human = HUMAN_EMERGENCY_DIRECTION_RE.test(folded) || (visitorEmergency && !petIsPatient);
   const vet = VET_DIRECTION_RE.test(folded) || (visitorEmergency && petSubject);
   if (!(result.intent === 'emergency' || human || vet)) return null;

@@ -237,6 +237,7 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ['Manténgase fuera del césped tratado hasta las cuatro.', ''],
     ['You can re-enter at 4 PM.', "I cannot log in to the portal; when can I re-enter the house?"],
     ["You'll be able to go inside after 30 minutes.", 'When can we go inside?'],
+    ['At 4 PM.', 'When can I return home after pest control?'],
   ])('a clock-time re-entry instruction is replaced: %s', (reply, context) => {
     expect(scrubUnsafeClaims({ ...base, reply }, context).reply).toMatch(/label directions|instrucciones de la etiqueta/);
   });
@@ -647,6 +648,32 @@ describe('normalizeIntakeResult', () => {
     );
     expect(out.reply).toBe(SUPPORT_FALLBACK_RESULT.reply);
     expect(out.ready_for_quote).toBe(false);
+  });
+
+  test.each([
+    ['We offer same-day service.', 'Do you offer pest control service?'],
+    ['Our service hours are 8 AM to 5 PM, six days a week.', 'What are your service hours?'],
+    ['No, the EPA has not approved this pesticide; it is EPA-registered.', ''],
+  ])('ordinary service times and an explicit EPA denial are untouched: %s', (reply, context) => {
+    expect(scrubUnsafeClaims({ reply, intent: 'question', service_keys: [], ready_for_quote: false }, context).reply).toBe(reply);
+  });
+
+  test('"safe for veterinary clinics" is not a veterinary direction', () => {
+    const out = scrubUnsafeClaims({ reply: 'Our treatment is completely safe for veterinary clinics.', intent: 'question', service_keys: [], ready_for_quote: false });
+    expect(out.reply).toMatch(/label directions/);
+    expect(out.intent).toBe('question');
+  });
+
+  test('"I think my dog swallowed bait" gets only the veterinary script', () => {
+    const out = scrubUnsafeClaims({ reply: 'It is not safe to eat.', intent: 'question', service_keys: [], ready_for_quote: false }, 'I think my dog swallowed bait');
+    expect(out.reply).toMatch(/veterinarian or an emergency animal hospital/);
+    expect(out.reply).not.toContain('911');
+  });
+
+  test('an earlier pet mention does not add vet copy to a child ingestion', () => {
+    const out = scrubUnsafeClaims({ reply: 'It is not safe to eat.', intent: 'question', service_keys: [], ready_for_quote: false }, 'I have a dog and a cat.\nMy son swallowed some bait');
+    expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
+    expect(out.reply).not.toMatch(/veterinarian/);
   });
 
   test('price talk never erases emergency direction (safety runs on the original reply)', () => {
@@ -1319,6 +1346,8 @@ describe('looksLikeEmergency', () => {
     'mi hijo no está respirando',
     'El cebo fue ingerido por mi hijo',
     'mi perro se comió el cebo',
+    'My dog ate the bait',
+    'My child ate pesticide granules',
   ])('flags urgent/medical text: %s', (text) => {
     expect(looksLikeEmergency(text)).toBe(true);
   });
@@ -1334,6 +1363,7 @@ describe('looksLikeEmergency', () => {
     'Have the ants ingested the bait?',
     'the roaches swallowed the gel bait fast',
     'La hormiga se tragó el cebo',
+    'We noticed the ants ate the bait',
     'My child was stung but has no swelling',
     'stung yesterday, no rash and no fever',
   ])('does not flag routine pest talk: %s', (text) => {
