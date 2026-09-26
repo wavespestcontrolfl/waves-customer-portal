@@ -377,6 +377,20 @@ test.each([[['pest'], 'pest_control'], [['lawn'], 'lawn_care'], [['pest', 'lawn'
   },
 );
 
+test('re-service availability opts every buildAvailabilityForCustomer call into the reservice rank profile (GATE_RESERVICE_RANK_AFTER_NEW)', async () => {
+  // buildAvailabilityForCustomer is the ONE shared helper behind browse (GET),
+  // find-slots, the commit-time single-day revalidation, and both SLOT_TAKEN
+  // refreshes — passing rankProfile here covers every one of them.
+  const booking = require('../routes/booking')._internals;
+  const build = jest.spyOn(booking, 'buildBookingAvailability').mockResolvedValue({ days: [] });
+  try {
+    await reservicePublicRouter._test.buildAvailabilityForCustomer({ latitude: 27.4, longitude: -82.4 }, {
+      rangeFrom: '2027-05-20', rangeTo: '2027-05-20', config: {}, duration: 30, lanes: ['pest'],
+    });
+    expect(build).toHaveBeenCalledWith(expect.objectContaining({ rankProfile: 'reservice' }));
+  } finally { build.mockRestore(); }
+});
+
 
 describe('selected-lane availability for a customer with both plans', () => {
   let build;
