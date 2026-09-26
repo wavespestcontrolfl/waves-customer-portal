@@ -153,6 +153,8 @@ test('appointment sanitizer preserves unrelated decimal and AM/PM work and advic
 test.each([
   'We will see you again on Thursday, September 24, arriving 1–3 PM.',
   'See you Sep 24, arriving 1–3 p.m.',
+  'Your next service is scheduled for Thursday, September 24, arriving 1–3 PM.',
+  'Your next follow-up is booked for Thursday, September 24, arriving 1–3 PM.',
 ])('common writer appointment form is replaced: %s', (appointmentCopy) => {
   const recap = `We treated the perimeter today. ${appointmentCopy} Keep people and pets away until dry.`;
   const facts = groundingFacts(input({ recap }));
@@ -231,6 +233,42 @@ test('clean model output is used verbatim', async () => {
     maxTokens: 400,
     promptVersion: 'pest_visit_summary_narrative_v3',
   }));
+});
+
+test('model output must include the supplied next visit', async () => {
+  const args = input();
+  const summary = 'We refreshed the perimeter and entry points today, and activity has continued to trend down.';
+  const out = await applyVisitSummaryNarrative(args, {
+    callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary } }),
+  });
+  expect(out).toBe(deterministicSummary(groundingFacts(args)));
+});
+
+test('model output cannot add a year to the supplied next-visit date', async () => {
+  const args = input();
+  const summary = 'We refreshed the perimeter and entry points today. Your next visit is Friday, October 2, 2027, arriving 8–10 AM.';
+  const out = await applyVisitSummaryNarrative(args, {
+    callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary } }),
+  });
+  expect(out).toBe(deterministicSummary(groundingFacts(args)));
+});
+
+test.each([
+  'We treated a gap first noted on September 18, and your next visit is Friday, October 2, arriving 8–10 AM.',
+  'Keep pets away until 4 PM, and your next visit is Friday, October 2, arriving 8–10 AM.',
+])('appointment guard ignores dates and times before the appointment clause: %s', (summary) => {
+  expect(appointmentClaimProblems(summary, {
+    nextVisit: { date: 'Friday, October 2', window: '8–10 AM' },
+  })).toEqual([]);
+});
+
+test('model output keeps an unrelated work date before the grounded appointment', async () => {
+  const args = input();
+  const summary = 'We treated a gap first noted on September 18, and your next visit is Friday, October 2, arriving 8–10 AM.';
+  const out = await applyVisitSummaryNarrative(args, {
+    callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary } }),
+  });
+  expect(out).toBe(summary);
 });
 
 test.each([

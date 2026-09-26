@@ -62,7 +62,7 @@ function cleanText(value) {
 const APPOINTMENT_DATE = '(?:(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),?\\s+)?(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\\s+\\d{1,2}(?:st|nd|rd|th)?\\b(?:,?\\s+\\d{4})?';
 const APPOINTMENT_TIME = '\\d{1,2}(?::\\d{2})?\\s*(?:a\\.?m\\.?|p\\.?m\\.?)';
 const APPOINTMENT_WINDOW = `\\d{1,2}(?::\\d{2})?(?:\\s*(?:a\\.?m\\.?|p\\.?m\\.?))?\\s*(?:–|—|-|to)\\s*${APPOINTMENT_TIME}`;
-const APPOINTMENT_LEAD = '(?:(?:(?:your|the)\\s+)?(?:next|upcoming)\\s+(?:visit|appointment)\\s+(?:(?:is\\s+)?(?:scheduled|booked|set)\\s+(?:for|on)|is\\s+on)|(?:we(?:\\s+will|[’\']ll)\\s+)?see\\s+you(?:\\s+again)?\\s+(?:on\\s+)?)';
+const APPOINTMENT_LEAD = '(?:(?:(?:your|the)\\s+)?(?:next|upcoming)\\s+(?:visit|appointment|service|follow[-\\s]?up)\\s+(?:(?:is\\s+)?(?:scheduled|booked|set)\\s+(?:for|on)|is\\s+on)|(?:we(?:\\s+will|[’\']ll)\\s+)?see\\s+you(?:\\s+again)?\\s+(?:on\\s+)?)';
 const RECAP_APPOINTMENT_RE = new RegExp(
   `(?:,?\\s+and\\s+)?\\b${APPOINTMENT_LEAD}\\s*${APPOINTMENT_DATE}(?:,?\\s*(?:arriving|from)\\s+${APPOINTMENT_WINDOW}|,?\\s+with\\s+an?\\s+${APPOINTMENT_WINDOW}\\s+arrival\\s+window|,?\\s+at\\s+${APPOINTMENT_TIME}|,?\\s+${APPOINTMENT_WINDOW})?(?:,?\\s+(?:and|then)\\s+(\\S))?`,
   'gi',
