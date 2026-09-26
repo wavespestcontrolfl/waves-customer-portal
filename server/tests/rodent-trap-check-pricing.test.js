@@ -137,4 +137,31 @@ describe('public trapping quote catalog freshness', () => {
     expect(readCatalog).toHaveBeenCalledTimes(2);
     expect(second.cacheHit).not.toBe(true);
   });
+
+  test('a sent snapshot stays frozen without consulting the current catalog', async () => {
+    const readCatalog = jest.spyOn(bridge, 'readRodentAdditionalCheckPriceFromCatalog').mockResolvedValue(110);
+    const frozen = {
+      id: 'rodent-sent-snapshot',
+      estimate_data: {
+        engineInputs: {
+          services: { rodentTrapping: { plan: 'standard' } },
+        },
+        sendSnapshot: {
+          pricingBundle: {
+            frequencies: [{ key: 'quarterly', label: 'Quarterly', monthly: 88, annual: 1056 }],
+            firstVisitFees: [{ service: 'waveguard_setup', amount: 99, label: 'WaveGuard setup', waivedWithPrepay: true }],
+            source: 'frozen_rodent_snapshot',
+          },
+        },
+        result: {
+          recurring: { services: [{ name: 'Pest Control', mo: 88 }] },
+        },
+      },
+    };
+
+    const bundle = await buildPricingBundle(frozen, { monthlyBilled: false });
+
+    expect(bundle).toMatchObject({ snapshotHit: true, source: 'frozen_rodent_snapshot' });
+    expect(readCatalog).not.toHaveBeenCalled();
+  });
 });
