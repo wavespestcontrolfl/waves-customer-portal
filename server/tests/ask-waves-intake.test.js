@@ -261,6 +261,7 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ['Your dog should be fine.', ''],
     ['Your pets will be okay.', ''],
     ['Your children should be all right.', ''],
+    ['Your dog is going to be fine.', ''],
     ['The EPA allows this pesticide for residential use.', ''],
     ['The EPA permits this product.', ''],
     ['This pesticide is permitted by the EPA.', ''],
@@ -309,6 +310,7 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ['Two hours.', 'When can I walk my dog outside again?'],
     ['At 4 PM.', 'When can my baby crawl on the floor again?'],
     ['Two hours.', 'When can we touch the countertops again?'],
+    ['Two hours.', 'How long until it is safe?'],
     ['Residents may return after 30 minutes.', 'How should I prepare?'],
     ['Keep the kids indoors until the sun goes down after treatment.', ''],
     ['Mantenga a los niños dentro hasta las cuatro después del tratamiento.', ''],
@@ -580,6 +582,11 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
       'I need help with my invoice',
     );
     expect(out.reply).toBe(SUPPORT_FALLBACK_RESULT.reply);
+  });
+
+  test('"going to be fine" after a recognized pet emergency gets the veterinary script', () => {
+    const out = normalizeIntakeResult({ reply: 'Your dog is going to be fine.', intent: 'question', service_keys: [], ready_for_quote: false }, 'openai', 'My dog ate rat poison');
+    expect(out.reply).toMatch(/veterinarian or an emergency animal hospital/);
   });
 
   test.each(['Your child should be fine.', 'It should be okay.'])('a reassuring reply to an emergency turn gets the emergency script: %s', (reply) => {
@@ -1885,6 +1892,7 @@ describe('looksLikeEmergency', () => {
     'We might have been poisoned',
     'El pesticida me cayó en los ojos',
     'El insecticida le cayó en la piel a mi hijo',
+    'Pesticide splashed me in the eyes',
     'At the hospital after a wasp sting',
     'Going to the hospital now after the treatment',
     'Hospital after a bee sting',
@@ -1954,6 +1962,8 @@ describe('looksLikeEmergency', () => {
     'My dog is not sick after the pesticide treatment',
     "My child wasn't ill after treatment",
     'Do ants bite?\nMy lawn has a rash of brown spots',
+    'I used the pesticide and it made the ants sick',
+    'The pesticide made the ants sick while I watched',
   ])('does not flag routine pest talk: %s', (text) => {
     expect(looksLikeEmergency(text)).toBe(false);
   });
@@ -2031,24 +2041,14 @@ describe('intake chokepoint worst-case latency (#4905)', () => {
 });
 
 // Drift guard: this surface keeps its own chokepoint (the shared checker is
-// too slow per turn, #4905), so anything the shared reentrySafetyClaimFinding
-// flags must also be flagged here. A new wording added to the shared rules
-// that the intake chokepoint misses fails this test.
-describe('intake chokepoint never misses a claim the shared rule set flags', () => {
-  const { reentrySafetyClaimFinding } = require('../services/content/content-guardrails');
+// too slow per turn, #4905). The corpus lives in a shared fixture that the
+// shared rule set's own suite also asserts against, so a wording added there
+// is automatically required here.
+describe('intake chokepoint flags every wording the shared rule set flags', () => {
+  const { FLAGGED_CLAIMS } = require('./fixtures/safety-claim-corpus');
   const { intakeSafetyClaimSupplement } = _internals;
-  const corpus = [
-    'Our treatment is completely safe for pets.', 'The product is EPA-approved.',
-    'You can re-enter after 30 minutes.', 'It is harmless to children.',
-    'Pets can go outside after 2 hours.', 'This spray is non-toxic.',
-    'It is pet-friendly and safe for kids.', 'Totally safe once dry.',
-    'Kids can play on the lawn in 30 minutes.', 'Our products are 100% safe.',
-    'It poses no risk to your family.', 'Safe for the whole family.',
-    'It will not harm your pets.', 'Wait 4 hours before letting pets out.',
-    'The treatment dries in 20 minutes.', 'Es completamente seguro para sus mascotas.',
-    'Aprobado por la EPA.', 'Puede volver a entrar en 2 horas.',
-  ];
-  test.each(corpus)('%s', (text) => {
-    if (reentrySafetyClaimFinding(text)) expect(intakeSafetyClaimSupplement(text, '')).toBe(true);
+  test.each(FLAGGED_CLAIMS)('%s', (text) => {
+    expect(intakeSafetyClaimSupplement(text, '')).toBe(true);
   });
 });
+
