@@ -1371,7 +1371,18 @@ class RelayConversation {
         }
       }
       if (entry) this._playing.push(entry);
-      this._send(t);
+      // P2-d (codex r3): a strict `false` means this line never reached
+      // Twilio — the transcript must never claim an undelivered line was
+      // heard. Distinct from the existing `[not played — caller
+      // interrupted]` copy `_syncPlayedEntry` renders elsewhere (this is not
+      // an interruption): set an honest text directly rather than routing
+      // through that shared, interruption-specific string. Test stubs
+      // return `undefined` (not `false`), so ordinary block-mode behavior
+      // is unchanged.
+      if (this._send(t) === false && entry) {
+        entry.notPlayed = true;
+        entry.text = '[not played — send failed]';
+      }
       return entry;
     }
     return null;
@@ -1408,6 +1419,22 @@ class RelayConversation {
   }
 
   /**
+   * THE ONE CHOKEPOINT for every stream-renderer send (P1-a class fix,
+   * codex r3). relay-server.js's real `send` returns true only when the
+   * frame was actually handed to `ws.send`: false when the socket is not
+   * OPEN, or `ws.send` itself threw and `send` swallowed it (logging, not
+   * re-throwing). A strict `false` means the frame never reached Twilio, so
+   * it is synthesized into a throw here — every caller (direct, or via
+   * `_flushStreamChunk` / `_closeStreamEntry`) must then treat delivery
+   * failure as failure, never as a success to build on. A test stub or the
+   * constructor's default `() => {}` returns `undefined`, which is NOT a
+   * delivery failure — only strict `false` counts.
+   */
+  _streamSend(piece, last) {
+    if (this._send(piece, last === true) === false) throw new Error('relay send not delivered');
+  }
+
+  /**
    * Send one more piece of a streaming utterance. The FIRST piece is
    * leading-trimmed once (mirroring block mode's single `.trim()` on the
    * whole reply); the LAST piece (`isLast`) is trailing-trimmed once.
@@ -1431,10 +1458,9 @@ class RelayConversation {
     // the transcript and history must never claim text that did not reach
     // Twilio, so a strict `false` is synthesized into a throw BEFORE any
     // entry mutation below — the flush chain's catch then ends the round as
-    // `failed` with only what really went out. Only strict `false` counts:
-    // a test stub or the constructor's default `() => {}` returns
-    // `undefined`, which is not a delivery failure.
-    if (this._send(piece, isLast === true) === false) throw new Error('relay send not delivered');
+    // `failed` with only what really went out. Routed through `_streamSend`
+    // (P1-a class fix) so every stream-path send shares this one throw.
+    this._streamSend(piece, isLast === true);
     if (!state.entry) {
       const entry = {
         role: 'agent', text: piece, planned: piece, played: null,
@@ -1485,7 +1511,12 @@ class RelayConversation {
     // interrupt() recorded what was played. A trailing last:true or a
     // planned/text rewrite here would clobber that record.
     if (state.entry.interrupted) { state.closed = true; return; }
-    this._send('', true);
+    // Routed through `_streamSend` (P1-a class fix, codex r3) — a strict
+    // `false` here previously went unchecked, so finalize could report
+    // success (and a write-turn tool loop proceed) after the close frame
+    // itself failed to reach Twilio. Every caller of `_closeStreamEntry`
+    // now handles this throw.
+    this._streamSend('', true);
     state.entry.planned = state.entry.planned.replace(/\s+$/, '');
     // P1 (played evidence): same as the growth branch above — derive
     // `entry.text` from played evidence when there is any, rather than
@@ -1672,21 +1703,76 @@ class RelayConversation {
     if (streamState.signal.aborted) return this._closeStreamedRoundEarly(streamState, msg, 'interrupted');
     if (streamState.failed) return this._closeStreamedRoundEarly(streamState, msg, 'failed');
     const sent = streamState.entry ? streamState.entry.planned : '';
-    const reconciled = !sent || text.startsWith(sent);
+    // P2-c (codex r3): reconcile against the RAW concatenation of the
+    // model's text blocks (no separator) — exactly what streaming deltas
+    // produced (`_onStreamTextDelta` appends every delta verbatim across
+    // block boundaries) — never against `text` (the outer join(' ') used
+    // for block-mode's spoken prosody). A multi-text-block reply with no
+    // natural space between blocks is a valid response whose raw
+    // concatenation matches `sent` exactly; comparing it to the
+    // space-joined `text` instead would report a mismatch that never
+    // happened. `.trim()` mirrors the leading/trailing trims already
+    // applied to the first/last streamed piece.
+    const rawText = msg.content.filter((b) => b.type === 'text').map((b) => b.text).join('').trim();
+    let reconciled = !sent || rawText.startsWith(sent);
+    let tail = reconciled ? rawText.slice(sent.length) : '';
+    if (!reconciled && sent.replace(/\s+$/, '') === rawText) {
+      // Not a real mismatch: a sentence flushed progressively (never as the
+      // round's `isLast` piece) keeps its own trailing boundary whitespace
+      // in `planned` until the entry actually closes — when that sentence
+      // is also the LAST thing the model said, `sent` ends up one space
+      // longer than the (already-trimmed) `rawText` it's compared against,
+      // even though every character of the reply was already sent. Nothing
+      // left to hold back.
+      reconciled = true;
+      tail = '';
+    }
     if (!reconciled) {
       // Should not happen (deltas are a strict prefix of the final text);
       // fail toward NOT replaying/duplicating anything already spoken.
       logger.warn(`[voice-relay] stream renderer text mismatch callSid=${this.callSid} — closing without a replay`);
     }
-    const tail = reconciled ? text.slice(sent.length) : '';
     if (hasPendingWrite) {
-      this._closeStreamEntry(streamState);
+      try {
+        this._closeStreamEntry(streamState);
+      } catch (err) {
+        // P1-a class fix: the close frame itself failed to reach Twilio —
+        // never let this write-turn branch report success (and let its
+        // caller's tool loop proceed) off an unchecked close.
+        logger.error(`[voice-relay] stream renderer close failed on a write-tool turn callSid=${maskSid(this.callSid)}: ${err.message}`);
+        return this._closeStreamedRoundEarly(streamState, msg, 'failed');
+      }
+      const keep = msg.content.filter((b) => b.type !== 'text');
+      const assistantMessage = {
+        role: 'assistant',
+        // P2-c: on a genuine mismatch, keep history to sent-only text +
+        // tool_use blocks — the same shape as this write-turn branch
+        // already uses — rather than the normal exit's full `msg.content`.
+        content: sent.trim() ? [{ type: 'text', text: sent.trim() }, ...keep] : keep,
+      };
+      if (tail.trim()) logger.info(`[voice-relay] suppressed unsent stream tail on a write-tool turn callSid=${this.callSid}`);
+      this.messages.push(assistantMessage);
+      if (streamState.entry) streamState.entry.historyMessage = assistantMessage;
+      return { assistantMessage };
+    }
+    if (!reconciled) {
+      // P2-c: the normal (no-pending-write) exit below pushes the model's
+      // full `msg.content` into history, claiming the caller heard
+      // everything — untrue on a genuine mismatch, where only `sent` ever
+      // reached the air. Close here with history holding sent-only text +
+      // tool_use blocks (same shape as the write-turn branch above) instead
+      // of falling through to the normal path.
+      try {
+        this._closeStreamEntry(streamState);
+      } catch (err) {
+        logger.error(`[voice-relay] stream renderer close failed on a text mismatch callSid=${maskSid(this.callSid)}: ${err.message}`);
+        return this._closeStreamedRoundEarly(streamState, msg, 'failed');
+      }
       const keep = msg.content.filter((b) => b.type !== 'text');
       const assistantMessage = {
         role: 'assistant',
         content: sent.trim() ? [{ type: 'text', text: sent.trim() }, ...keep] : keep,
       };
-      if (tail.trim()) logger.info(`[voice-relay] suppressed unsent stream tail on a write-tool turn callSid=${this.callSid}`);
       this.messages.push(assistantMessage);
       if (streamState.entry) streamState.entry.historyMessage = assistantMessage;
       return { assistantMessage };
@@ -1720,7 +1806,15 @@ class RelayConversation {
         return this._closeStreamedRoundEarly(streamState, msg, 'failed');
       }
     } else {
-      this._closeStreamEntry(streamState);
+      try {
+        this._closeStreamEntry(streamState);
+      } catch (err) {
+        // P1-a class fix: nothing left to hold back here (the whole reply
+        // was already sent) but the close frame itself failed to reach
+        // Twilio — never fall through to reporting success off that.
+        logger.error(`[voice-relay] stream renderer close failed callSid=${maskSid(this.callSid)}: ${err.message}`);
+        return this._closeStreamedRoundEarly(streamState, msg, 'failed');
+      }
     }
     const assistantMessage = { role: 'assistant', content: msg.content };
     this.messages.push(assistantMessage);
@@ -2882,8 +2976,29 @@ class RelayConversation {
             if (failureHandoff) await this._maybeHandoffForFailure(toolCtx);
             return;
           }
+          // P1-b (class fix, codex r3): the pre-tool check above only ever
+          // observes a barge-in landing BEFORE a tool call — a barge-in
+          // during the only (or last) tool's own await was never caught
+          // until the loop reached its NEXT tool_use block, which may not
+          // exist. Re-check right after this tool settles too: its real
+          // result is already recorded above, so only the REMAINING
+          // tool_use blocks (this one excluded — it has a result) need the
+          // synthetic "not run" pairing.
+          if (roundSignal && roundSignal.aborted) {
+            const remaining = msg.content.filter((b) => b.type === 'tool_use' && !results.some((r) => r.tool_use_id === b.id));
+            results.push(...remaining.map((b) => ({ type: 'tool_result', tool_use_id: b.id, content: 'Not run — the current turn was interrupted.' })));
+            this.messages.push({ role: 'user', content: results });
+            return;
+          }
         }
         this.messages.push({ role: 'user', content: results });
+        // P1-b chokepoint: re-check right before the loop proceeds to
+        // another model round with this round's queued tool results — every
+        // tool_use block already has a real result by this point (the
+        // per-tool checks above cover mid-loop), so there is nothing left
+        // to pair; just stop here instead of starting a model round ahead
+        // of the caller's queued prompt.
+        if (roundSignal && roundSignal.aborted) return;
         continue; // let the model respond to the tool result
       }
       this._maybeEndAfterTurn(); // lead captured + agent done → end the call

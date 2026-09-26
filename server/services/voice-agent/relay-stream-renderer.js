@@ -167,6 +167,19 @@ const DATE_TIME_RE = new RegExp(
   'i',
 );
 
+// P2-e (codex r3): a bare clock-hour scheduling question — "Does eleven
+// work?", "Would eleven work?", "Is eleven open?", "How about ten?" — has
+// no digit, weekday, month or AM/PM marker for DATE_TIME_RE above to catch,
+// and HOUR_WORDS there only holds when paired with an at/by/... preposition
+// or a thirty/fifteen/o'clock suffix (deliberately, so "One moment." keeps
+// streaming). This is a separate, narrower veto: an hour word (or
+// noon/midnight) ANYWHERE in the sentence together with a scheduling word
+// (work(s)/open/available/free/good/okay/ok/fine, or "how about"/"what
+// about") — never triggered by the hour word alone, so "One moment.",
+// "Sure, one moment." and "Give me one second" are unaffected.
+const HOUR_OR_NOON_RE = new RegExp(`\\b(?:${HOUR_WORDS}|noon|midnight)\\b`, 'i');
+const SCHEDULE_QUESTION_WORD_RE = /\b(?:works?|open|available|free|good|okay|ok|fine)\b|how about|what about/i;
+
 // A COMMITMENT-OR-SUCCESS CLAIM: an explicit commitment verb, OR a success
 // phrase that asserts the same outcome without using one of those verbs
 // ("you're all set" claims exactly what "booked" claims). Deliberately
@@ -239,7 +252,22 @@ const FILLER_CLAUSE_SOURCE = `(?:${FILLER_MODAL_SOURCE}) (?:quickly )?(?:${FILLE
   + `(?: (?:(?:${FILLER_PREP_SOURCE}) )?(?:${FILLER_OBJECT_SOURCE}))?(?: for you)?`;
 // A short hold-on phrase stands in for the read-only clause on its own.
 const FILLER_WAIT_SOURCE = 'one moment|just a moment|one sec|just a sec|hang on|bear with me';
-const FILLER_CLAUSE_OR_WAIT_SOURCE = `(?:(?:${FILLER_CLAUSE_SOURCE})|(?:${FILLER_WAIT_SOURCE}))`;
+// P2-f (codex r3): a wait phrase followed by its OWN "while I ..." clause —
+// "One moment while I pull that up.", "Sure, one moment while I look that
+// up." — was never matched before: only FILLER_MODAL_SOURCE's "give me a
+// moment ... while i" had room for a trailing clause; a bare wait phrase
+// did not. Read-only verbs only (never a write verb, so "One moment while
+// I book that." / "One moment while I schedule you." still hold by
+// default) and an optional trailing " up" for the split phrasal ("pull
+// that up", "look that up").
+const FILLER_WHILE_VERB_SOURCE = 'check|look|pull|find|see';
+const FILLER_WAIT_WHILE_SOURCE = `(?:${FILLER_WAIT_SOURCE})(?:\\s+while i (?:${FILLER_WHILE_VERB_SOURCE})\\s+(?:${FILLER_OBJECT_SOURCE})(?:\\s+up)?)?`;
+// "I'll see what I can find." / "Let me see what I can find." — this idiom
+// takes a full embedded clause ("what I can find") rather than a simple
+// object, so it doesn't fit FILLER_CLAUSE_SOURCE's object slot above and
+// needs its own literal alternative.
+const FILLER_SEE_WHAT_I_CAN_FIND_SOURCE = "(?:i['’]ll|let me) see what i can find";
+const FILLER_CLAUSE_OR_WAIT_SOURCE = `(?:(?:${FILLER_CLAUSE_SOURCE})|(?:${FILLER_WAIT_WHILE_SOURCE})|(?:${FILLER_SEE_WHAT_I_CAN_FIND_SOURCE}))`;
 const SAFE_FILLER_RE = new RegExp(
   '^\\s*(?:'
   + `${ACKS_SOURCE}(?:\\s*[,.!]\\s*${FILLER_CLAUSE_OR_WAIT_SOURCE})?` // acks, optionally + one clause
@@ -310,6 +338,7 @@ function needsHold(sentence) {
   if (NON_ENGLISH_HINT_RE.test(t)) return true;
   if (amountMentions(t).length) return true;
   if (DATE_TIME_RE.test(t)) return true;
+  if (HOUR_OR_NOON_RE.test(t) && SCHEDULE_QUESTION_WORD_RE.test(t)) return true; // P2-e
   if (NEGATION_RE.test(t)) return true;
   if (COMMITMENT_OR_SUCCESS_RE.test(t)) return true;
   if (WRITE_COMMITMENT_RE.test(t)) return true;

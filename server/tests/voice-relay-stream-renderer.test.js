@@ -243,6 +243,30 @@ describe('relay-stream-renderer — pure chunking + hold policy', () => {
     expect(needsHold('Great question!')).toBe(false);
     expect(needsHold('Let me check on that for you.')).toBe(false);
   });
+
+  // P2-e (codex r3): a bare clock-hour scheduling question has no digit,
+  // weekday, month or AM/PM marker for DATE_TIME_RE to catch — needs its
+  // own hour-word + scheduling-word veto.
+  test.each([
+    'Does eleven work?',
+    'Would eleven work?',
+    'Is eleven open?',
+    'How about ten?',
+    'Is noon good for you?',
+    'Would midnight work for the crew?',
+  ])('a bare clock-hour scheduling question needs holding: %s', (sentence) => {
+    expect(needsHold(sentence)).toBe(true);
+  });
+
+  // P2-e: the new veto must not fire on an hour word alone — only paired
+  // with a scheduling word. These safe fillers keep streaming.
+  test.each([
+    'One moment.',
+    'Sure, one moment.',
+    'Give me one second',
+  ])('an hour word with no scheduling word nearby is unaffected: %s', (sentence) => {
+    expect(needsHold(sentence)).toBe(false);
+  });
 });
 
 // ── isStreamSafe — the allowlist grammar (structural fix #1) ───────────────
@@ -305,6 +329,36 @@ describe('isStreamSafe — allowlist grammar (structural fix, replaces the block
   test('a question carrying a date/amount still holds — needsHold vetoes isStreamSafe', () => {
     expect(isStreamSafe('What time on Tuesday works?')).toBe(true); // allowlisted as a question...
     expect(needsHold('What time on Tuesday works?')).toBe(true); // ...but the veto still wins
+  });
+
+  // P2-f (codex r3): a wait phrase's OWN "while I ..." read-only clause, and
+  // the "see what I can find" idiom, were rejected by the grammar even
+  // though they carry no commitment — extend the allowlist to cover them.
+  // The combined decision (needsHold false AND isStreamSafe true) is what
+  // actually decides streaming, so both are asserted for each case.
+  test.each([
+    'One moment while I pull that up.',
+    'Sure, one moment while I look that up.',
+    "I'll see what I can find.",
+    'Let me see what I can find.',
+    'One moment while I check that.',
+    'Just a moment while I look that up.',
+  ])('a read-only "while I ..." filler / "see what I can find" streams: %s', (sentence) => {
+    expect(needsHold(sentence)).toBe(false);
+    expect(isStreamSafe(sentence)).toBe(true);
+  });
+
+  // P2-f negatives: the SAME "while I ..." shape with a commitment/booking
+  // verb in the read-only slot must still hold — the allowlist extension
+  // must not open a hole for a write verb.
+  test.each([
+    'One moment while I book that.',
+    "Let me send that over.",
+    'One moment while I schedule you.',
+    'One moment while I charge your card.',
+    'One moment while I cancel that.',
+  ])('a "while I ..." filler with a commitment verb does not stream: %s', (sentence) => {
+    expect(isStreamSafe(sentence)).toBe(false);
   });
 });
 
@@ -1265,5 +1319,200 @@ describe('stream renderer — full round loop', () => {
       { type: 'tool_result', tool_use_id: 't1', content: 'Not run — the current turn was interrupted.' },
     ]);
     expect(captured[1]).toBeUndefined(); // no further model round
+  });
+
+  // P1-b (codex r3, class fix): the pre-tool abort check only ever observes
+  // a barge-in landing BEFORE a tool call — a barge-in during the ONLY (or
+  // last) tool's own await was never caught until the loop reached its next
+  // tool_use block, which may not exist. Here the barge-in lands WHILE
+  // `_executeToolBounded` is still pending, on a round with a single write
+  // tool: its real result must still be recorded, and no second model round
+  // may start ahead of the caller's queued next prompt.
+  test('a barge-in while the single write tool itself is awaiting is observed the instant it settles — no second model round', async () => {
+    const { IsolatedConvo, captured } = isolatedConvoFactory();
+    process.env.VOICE_RELAY_RENDERER = 'stream';
+    const send = jest.fn();
+    const convo = new IsolatedConvo({ callSid: 'CA-tool-mid-abort', from: '+19415551234', send });
+    let resolveTool;
+    const executeToolBoundedSpy = jest.spyOn(convo, '_executeToolBounded')
+      .mockImplementation(() => new Promise((resolve) => { resolveTool = resolve; }));
+
+    const promptPromise = convo.handlePrompt('book me for tuesday');
+    await flush();
+    const round = captured[0];
+    round.textCb('Let me check on that for you. '); // safe filler — flushes
+    await flush();
+    round.resolve({
+      content: [
+        { type: 'text', text: 'Let me check on that for you.' },
+        { type: 'tool_use', id: 't1', name: 'request_booking', input: {} },
+      ],
+      stop_reason: 'tool_use',
+    });
+    await flush(); // finalize settles; the tool loop is now awaiting the tool
+    expect(executeToolBoundedSpy).toHaveBeenCalledTimes(1); // the tool DID start
+    convo.interrupt({ utteranceUntilInterrupt: 'Let me check on that for you.' }); // barge-in while it awaits
+    resolveTool('booking confirmed for Tuesday'); // the tool settles with a REAL result
+    await promptPromise;
+
+    const toolResultMsg = convo.messages.find(
+      (m) => m.role === 'user' && Array.isArray(m.content) && m.content[0]?.type === 'tool_result',
+    );
+    // The real result is recorded — not a synthetic "not run" — because the
+    // tool had already settled by the time the abort was observed.
+    expect(toolResultMsg.content).toEqual([
+      { type: 'tool_result', tool_use_id: 't1', content: 'booking confirmed for Tuesday' },
+    ]);
+    expect(captured[1]).toBeUndefined(); // no second model round starts ahead of the caller's next prompt
+  });
+
+  // P1-a (codex r3, class fix): a strict `false` from the close-frame send
+  // inside `_closeStreamEntry` must never be swallowed — every caller now
+  // routes the throw through `_closeStreamedRoundEarly(..., 'failed')`.
+  // Write-turn branch: the close frame (not the tail) fails.
+  test('P1-a: a failed close-frame send on a write-tool turn ends the round through the failed chokepoint — the tool never runs', async () => {
+    const { IsolatedConvo, captured } = isolatedConvoFactory();
+    process.env.VOICE_RELAY_RENDERER = 'stream';
+    let n = 0;
+    // call #1 = the safe-filler flush (delivered); call #2 = the close
+    // frame `_closeStreamEntry` sends on this write-tool turn (undelivered).
+    const send = jest.fn(() => { n += 1; return n === 2 ? false : undefined; });
+    const convo = new IsolatedConvo({ callSid: 'CA-p1a-write', from: '+19415551234', send });
+    const executeToolBoundedSpy = jest.spyOn(convo, '_executeToolBounded');
+
+    const promptPromise = convo.handlePrompt('book me for tuesday');
+    await flush();
+    const round = captured[0];
+    round.textCb('Let me check on that for you. '); // safe filler — flushes (call #1, delivered)
+    await flush();
+    round.resolve({
+      content: [
+        { type: 'text', text: 'Let me check on that for you.' },
+        { type: 'tool_use', id: 't1', name: 'request_booking', input: {} },
+      ],
+      stop_reason: 'tool_use',
+    });
+    await promptPromise;
+
+    // Before the fix: the unchecked close frame let finalize report success,
+    // so the write tool ran despite delivery having failed. After: the tool
+    // never runs and the round ends through the same 'failed' chokepoint
+    // every other undelivered send uses.
+    expect(executeToolBoundedSpy).not.toHaveBeenCalled();
+    const assistant = convo.messages.filter((m) => m.role === 'assistant');
+    expect(assistant).toHaveLength(1);
+    expect(assistant[0].content[0]).toEqual({ type: 'text', text: 'Let me check on that for you.' });
+    const resultMsg = convo.messages[convo.messages.indexOf(assistant[0]) + 1];
+    expect(resultMsg.content[0]).toEqual(expect.objectContaining({ type: 'tool_result', tool_use_id: 't1' }));
+    expect(resultMsg.content[0].content).toMatch(/^Not run — speech to the caller failed/);
+    expect(captured[1]).toBeUndefined(); // the tool loop never started a second model round
+  });
+
+  // P1-a: the normal (no pending write, no held tail) finalize branch — the
+  // close frame is the only remaining send this round, and it fails.
+  test('P1-a: a failed close-frame send on a normal (no-tail) finalize ends the round through the failed chokepoint', async () => {
+    const { IsolatedConvo, captured } = isolatedConvoFactory();
+    process.env.VOICE_RELAY_RENDERER = 'stream';
+    let n = 0;
+    // call #1 = the whole reply, flushed in full (delivered); call #2 = the
+    // close frame (undelivered) — there is no held tail to flush instead.
+    const send = jest.fn(() => { n += 1; return n === 2 ? false : undefined; });
+    const convo = new IsolatedConvo({ callSid: 'CA-p1a-notail', from: '+19415551234', send });
+
+    const promptPromise = convo.handlePrompt('what areas do you cover');
+    await flush();
+    const round = captured[0];
+    round.textCb('Sure, one moment please. '); // the entire reply — flushes in full
+    await flush();
+    round.resolve({ content: [{ type: 'text', text: 'Sure, one moment please.' }], stop_reason: 'end_turn' });
+    await promptPromise;
+
+    // The spoken text itself DID reach Twilio (only the trailing empty
+    // close frame failed) — history holds exactly that sent text, same
+    // shape `_closeStreamedRoundEarly` always uses, plus the separate
+    // failure-copy utterance recovering the round.
+    const assistant = convo.messages.filter((m) => m.role === 'assistant');
+    expect(assistant).toHaveLength(1);
+    expect(assistant[0].content).toEqual([{ type: 'text', text: 'Sure, one moment please.' }]);
+    const copy = require('../services/voice-agent/relay-language').copy('modelError', null);
+    const agentLines = convo._transcript.filter((e) => e.role === 'agent');
+    expect(agentLines.some((e) => e.text === copy)).toBe(true);
+  });
+
+  // P2-c (codex r3): reconciliation must compare against the RAW
+  // concatenation of the model's text blocks, not the space-joined `text`
+  // used for block-mode prosody — otherwise a valid multi-text-block reply
+  // with no natural space between blocks reports a mismatch that never
+  // happened, and history would wrongly fall back to a truncated shape.
+  test('a multi-text-block reply with no natural space between blocks reconciles cleanly (no false mismatch)', async () => {
+    const { IsolatedConvo, captured } = isolatedConvoFactory();
+    process.env.VOICE_RELAY_RENDERER = 'stream';
+    const send = jest.fn();
+    const convo = new IsolatedConvo({ callSid: 'CA-p2c', from: '+19415551234', send });
+
+    const promptPromise = convo.handlePrompt('tell me about your services');
+    await flush();
+    const round = captured[0];
+    // Both sentences flush progressively — the raw streamed concatenation
+    // has exactly one space between them (each sentence carries its own
+    // trailing boundary whitespace).
+    round.textCb('Sure, one moment. ');
+    round.textCb('Great, all set. ');
+    await flush();
+    // The model's own response is split into TWO adjacent text blocks with
+    // no separator between them at all — a real shape the SDK can produce.
+    round.resolve({
+      content: [
+        { type: 'text', text: 'Sure, one moment. ' },
+        { type: 'text', text: 'Great, all set.' },
+      ],
+      stop_reason: 'end_turn',
+    });
+    await promptPromise;
+
+    // Full history — not the sent-only-text mismatch fallback shape a false
+    // "text mismatch" would have produced.
+    const assistant = convo.messages.filter((m) => m.role === 'assistant');
+    expect(assistant).toHaveLength(1);
+    expect(assistant[0].content).toEqual([
+      { type: 'text', text: 'Sure, one moment. ' },
+      { type: 'text', text: 'Great, all set.' },
+    ]);
+  });
+});
+
+// P2-d (codex r3): `say()` is shared by both renderers — including the
+// failure-copy recovery line the stream round loop speaks after a mid-stream
+// model error / failed send (e.g. `relay-conversation.js`'s `modelError`
+// copy). It must never record a transcript entry as spoken when its own
+// send comes back strictly undelivered.
+describe('say() — a failed send never claims an undelivered line was heard (P2-d)', () => {
+  test('a strict `false` from _send marks the entry notPlayed with an honest, distinct text', () => {
+    const send = jest.fn(() => false); // relay-server.js's real `send`: strict false = not delivered
+    const convo = new RelayConversation({ callSid: 'CA-say-fail', from: '+19415551234', send });
+
+    const spoken = 'Sorry, something went wrong. Let me get someone on the line.';
+    const entry = convo.say(spoken);
+
+    expect(entry).toBeTruthy();
+    expect(entry.notPlayed).toBe(true);
+    // Never the caller-interruption copy — this was a delivery failure, not
+    // a barge-in — and never the raw spoken text either (that would claim
+    // the caller heard it).
+    expect(entry.text).not.toBe(spoken);
+    expect(entry.text).not.toBe('[not played — caller interrupted]');
+    expect(entry.text).toMatch(/not played/);
+    expect(convo._transcript.find((e) => e.role === 'agent')).toBe(entry);
+  });
+
+  test('_send returning undefined (every existing test stub, and the constructor default) leaves say() unchanged', () => {
+    const send = jest.fn(); // returns undefined, not false
+    const convo = new RelayConversation({ callSid: 'CA-say-ok', from: '+19415551234', send });
+
+    const spoken = 'All good, thanks for calling.';
+    const entry = convo.say(spoken);
+
+    expect(entry.notPlayed).toBe(false);
+    expect(entry.text).toBe(spoken);
   });
 });
