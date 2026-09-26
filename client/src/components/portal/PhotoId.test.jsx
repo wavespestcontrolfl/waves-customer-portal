@@ -732,6 +732,43 @@ describe('v2 result card (GATE_PHOTO_ID_V2, server-side)', () => {
     expect(screen.getByText('Uncommon here')).toBeInTheDocument();
   });
 
+  it('a group-level answer (no entry) keeps the leading candidate in "Other possibilities" instead of dropping it (Codex #4882 P2)', async () => {
+    api.getPhotoIds.mockResolvedValue({ items: [] });
+    render(<Harness />);
+    fireEvent.click(await screen.findByRole('button', { name: /Photo ID/i }));
+    fireEvent.click(screen.getByText('Bug or pest'));
+    fireEvent.change(document.querySelector('input[type="file"]'), { target: { files: [photoFile()] } });
+    await screen.findByRole('img');
+
+    api.createPhotoId.mockResolvedValueOnce({
+      id: 'v2groupcand', type: 'pest', created_at: '2026-09-26T00:00:00Z',
+      result: {},
+      v2: {
+        version: 2, catalog_version: '2026-09-26.1', tier: 'needs_more_evidence',
+        answer: { level: 'group', node_id: 'ants', wording: 'group_only', headline: 'Looks like an ant', subhead: null },
+        group: { id: 'ants', label: 'Ants', generic: 'an ant' },
+        entry: null,
+        evidence: {},
+        candidates: [
+          { slug: 'top-ant', common_name: 'Top Ant', strength: 'strong', difference_from_top: null, local: 'common_here_now' },
+          { slug: 'alt-ant', common_name: 'Alt Ant', strength: 'possible', difference_from_top: 'Smaller, rounder head.', local: 'uncommon_here' },
+        ],
+        next_photo: null,
+        referral: null,
+      },
+      next_step: { kind: 'unclear', title: 'Not sure yet', body: 'x' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Identify' }));
+
+    expect(await screen.findByText('Looks like an ant')).toBeInTheDocument();
+    // No entry card names Top Ant, so it must still surface as a possibility
+    // instead of being silently discarded as "already shown".
+    expect(screen.getByText('Other possibilities')).toBeInTheDocument();
+    expect(screen.getByText('Top Ant')).toBeInTheDocument();
+    expect(screen.getByText('Alt Ant')).toBeInTheDocument();
+    expect(screen.getByText('Smaller, rounder head.')).toBeInTheDocument();
+  });
+
   it('an unresolved group answer with next_photo shows the retake card; tapping it returns to photos with the ask banner and keeps the existing photo', async () => {
     api.getPhotoIds.mockResolvedValue({ items: [] });
     render(<Harness />);

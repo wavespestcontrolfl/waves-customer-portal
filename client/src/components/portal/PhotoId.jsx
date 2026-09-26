@@ -931,7 +931,7 @@ function NextStepBlock({ nextStep, onOpenRequestCta, onDone }) {
   return (
     <section data-glass="soft" style={{ borderRadius: 8, border: `1px solid ${SHELL.border}`, padding: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
       {nextStep.title && <div style={{ fontSize: 17, fontWeight: 700, color: SHELL.text }}>{nextStep.title}</div>}
-      {nextStep.body && <div style={{ fontSize: 15, color: SHELL.muted, lineHeight: 1.5 }}>{nextStep.body}</div>}
+      {nextStep.body && <div style={{ fontSize: kind === 'referral' ? 16 : 15, color: SHELL.muted, lineHeight: 1.5 }}>{nextStep.body}</div>}
       {kind === 'reservice' && nextStep.url && (
         <a href={nextStep.url} data-glass-accent="" data-glass-size="primary" style={{
           minHeight: 48, borderRadius: 8, textDecoration: 'none', display: 'inline-flex',
@@ -1145,9 +1145,14 @@ function NextPhotoCard({ nextPhoto, onRetakePhoto }) {
   );
 }
 
-function CandidatesSection({ candidates }) {
-  if (!Array.isArray(candidates) || candidates.length < 2) return null;
-  const others = candidates.slice(1);
+// `hasEntry` says whether the rendered entry card above already names
+// candidates[0] (species-level answers only). A group-level answer
+// (`entry` null) has no card or headline naming any one species, so the
+// leading candidate is kept here rather than dropped as "already shown".
+function CandidatesSection({ candidates, hasEntry }) {
+  if (!Array.isArray(candidates) || candidates.length === 0) return null;
+  const others = hasEntry ? candidates.slice(1) : candidates;
+  if (others.length === 0) return null;
   return (
     <section data-glass="soft" style={{ borderRadius: 8, border: `1px solid ${SHELL.border}`, padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
       <div style={{ fontSize: 14, fontWeight: 700, color: SHELL.muted, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
@@ -1283,7 +1288,7 @@ function V2Result({ v2, photos, unavailablePhotoIds, onPhotoUnavailable, onRetak
 
       {v2.next_photo && <NextPhotoCard nextPhoto={v2.next_photo} onRetakePhoto={onRetakePhoto} />}
 
-      <CandidatesSection candidates={v2.candidates} />
+      <CandidatesSection candidates={v2.candidates} hasEntry={!!entry} />
 
       {v2.referral?.text && (
         <section data-glass="soft" style={{ borderRadius: 8, border: `1px solid ${SHELL.border}`, padding: 16 }}>
