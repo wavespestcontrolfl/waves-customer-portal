@@ -148,3 +148,17 @@ describe('engine adoption of the lookup suite size', () => {
     expect(block).toMatch(/skipWebSearch: Boolean\(lookupSuiteSize\)/);
   });
 });
+
+describe('engine suite sizing depends on unit-scope guardrails (declared)', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const src = fs.readFileSync(path.join(__dirname, '../services/estimator-engine/index.js'), 'utf8');
+  test('the suite block sits inside the guardrails apply, and guardrails-off with the suite gate on warns', () => {
+    const apply = src.indexOf('applyUnitScopeToPropertyFacts(propertyFacts, unitScope);');
+    const guard = src.lastIndexOf('if (unitScopeGuardrailsEnabled()) {', apply);
+    const suite = src.indexOf("unitScope.serviceScope === 'commercial_suite'", apply);
+    expect(guard).toBeGreaterThan(-1);
+    expect(suite).toBeGreaterThan(apply);
+    expect(src.slice(guard - 600, guard)).toMatch(/GATE_UNIT_SCOPE_GUARDRAILS is off/);
+  });
+});

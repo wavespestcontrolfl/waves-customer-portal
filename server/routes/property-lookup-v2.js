@@ -2572,11 +2572,9 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
 // "#102"). Null when the address names no unit.
 function suiteUnitKey(address) {
   try {
-    const { parseRawAddress, splitStreetLineUnitParts } = require('../utils/address-normalizer');
+    const { suiteAddressParts } = require('../services/commercial-suite-size/address-parts');
     const { normalizeUnitValue } = require('../services/commercial-suite-size/dbpr-food-license');
-    const parsed = parseRawAddress(address) || {};
-    const { unit } = splitStreetLineUnitParts(parsed.line1 || address || '');
-    return normalizeUnitValue(unit);
+    return normalizeUnitValue(suiteAddressParts(address).unit);
   } catch {
     return null;
   }
@@ -2599,11 +2597,9 @@ async function applyCommercialSuiteSize(profile, opts = {}) {
   if (opts.cacheOnly) return profile;
   try {
     const { resolveCommercialSuiteSize } = require('../services/commercial-suite-size');
-    const { parseRawAddress, splitStreetLineUnitParts } = require('../utils/address-normalizer');
-    const parsedAddr = parseRawAddress(candidate.address) || {};
-    const { street, unit } = splitStreetLineUnitParts(parsedAddr.line1 || candidate.address || '');
+    const { suiteAddressParts } = require('../services/commercial-suite-size/address-parts');
     const suiteSize = await resolveCommercialSuiteSize({
-      address: { street, unit, city: parsedAddr.city, zip: parsedAddr.zip },
+      address: suiteAddressParts(candidate.address),
       phone: null,
       // The point of this lane is discovering the business FROM the
       // address — no hint is typed in by the operator here.
@@ -2630,6 +2626,7 @@ async function applyCommercialSuiteSize(profile, opts = {}) {
         source: suiteSize.source,
         confidence: suiteSize.confidence,
         businessName: suiteSize.businessName || null,
+        businessType: suiteSize.businessType || null,
         evidence: suiteSize.evidence || [],
         ...(suiteSize.seats != null ? { seats: suiteSize.seats } : {}),
         // When this was resolved, so a persisted stamp can be aged out

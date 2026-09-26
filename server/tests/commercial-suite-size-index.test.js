@@ -87,3 +87,18 @@ describe('resolveCommercialSuiteSize — priority order (caller/tech-stated -> l
     expect(webCallArg.buildingSqft).toBeUndefined();
   });
 });
+
+describe('suiteAddressParts', () => {
+  const { suiteAddressParts } = require('../services/commercial-suite-size');
+  test('unit-first address splits into street + unit', () => {
+    const p = suiteAddressParts('Unit 102, 4400 Test Commons Pkwy E, Bradenton, FL 00000');
+    expect(p.street).toMatch(/^4400 Test Commons Pkwy E/i);
+    expect(String(p.unit)).toMatch(/102/);
+    expect(p.zip).toBe('00000');
+  });
+  test('street-first address with trailing unit still splits', () => {
+    const p = suiteAddressParts('4400 Test Commons Pkwy E Unit 102, Bradenton, FL 00000');
+    expect(p.street).toMatch(/^4400 Test Commons Pkwy E$/i);
+    expect(String(p.unit)).toMatch(/102/);
+  });
+});

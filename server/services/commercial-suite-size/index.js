@@ -122,7 +122,11 @@ async function resolveCommercialSuiteSize(input = {}, opts = {}) {
   };
 }
 
+
+const { suiteAddressParts } = require('./address-parts');
+
 module.exports = {
   SOURCES,
+  suiteAddressParts,
   resolveCommercialSuiteSize,
 };

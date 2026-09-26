@@ -2625,6 +2625,11 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
       // re-gathered record and composed address. Skipping the apply there
       // let a second-property Unit/Suite quote keep the master-parcel lot
       // (codex r10 P1, refining the r4 fence).
+      if (!unitScopeGuardrailsEnabled()
+        && require('../../config/feature-gates').commercialSuiteSizingLive()
+        && unitScope.serviceScope === 'commercial_suite') {
+        logger.warn('[estimator-engine] GATE_COMMERCIAL_SUITE_SIZING is on but GATE_UNIT_SCOPE_GUARDRAILS is off — commercial suite sizing is skipped in the engine (it depends on unit-scope guardrails)');
+      }
       if (unitScopeGuardrailsEnabled()) {
         applyUnitScopeToPropertyFacts(propertyFacts, unitScope);
         // Commercial suite sizing (owner ruling 2026-09-25,
@@ -2635,6 +2640,12 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
         // Runs only when the apply above left home genuinely unresolved: a
         // caller-stated size, or a non-aggregated condo's own per-unit
         // folio, both survive the apply and always outrank this.
+        // DECLARED DEPENDENCY: suite sizing in the engine requires
+        // GATE_UNIT_SCOPE_GUARDRAILS (on in prod) — the apply above is what
+        // clears the whole-building size for a part-building suite, and
+        // this block sizes only what that left unresolved. With guardrails
+        // off the engine keeps its prior behavior and warns once per run
+        // (below) instead of sizing a suite it never scoped.
         if (intent.is_commercial === true
           && require('../../config/feature-gates').commercialSuiteSizingLive()
           && unitScope.serviceScope === 'commercial_suite'
@@ -2657,12 +2668,10 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
               && lookupSuiteSize.source === SQFT_SOURCES.LICENSE_SEATS) ? lookupSuiteSize : null;
             if (!suiteSize) {
               const { resolveCommercialSuiteSize } = require('../commercial-suite-size');
-              const { parseRawAddress, splitStreetLineUnitParts } = require('../../utils/address-normalizer');
+              const { suiteAddressParts } = require('../commercial-suite-size/address-parts');
               const quotedAddressLine = intent.address || result.addressUsed || address;
-              const parsedAddr = parseRawAddress(quotedAddressLine) || {};
-              const { street, unit } = splitStreetLineUnitParts(parsedAddr.line1 || quotedAddressLine || '');
               suiteSize = await resolveCommercialSuiteSize({
-                address: { street, unit, city: parsedAddr.city, zip: parsedAddr.zip },
+                address: suiteAddressParts(quotedAddressLine),
                 phone: context?.phone || null,
                 businessNameHint: intent.customer_name || null,
                 commercialRiskType: intent.commercial_risk_type || null,
