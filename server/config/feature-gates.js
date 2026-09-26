@@ -102,7 +102,7 @@
  *     below), so flipping only this gate silently keeps the legacy
  *     invoice-and-pay-link behavior. isPrepayCardAndChargeEnabled() enforces
  *     the conjunction; the flip checklist is all three vars.)
- *   GATE_ANNUAL_PREPAY_ADDON_BILLING=true (completing an annual-prepay-covered visit bills its add-ons as their own invoice with the pay link and the unpaid completion text; an office alert instead when a visit-wide discount makes their share unclear, ADMIN-BUG-R13, owner ruling 2026-09-26; read at call time; dark = today's behavior: the covered visit bills nothing for its add-ons and an office invoice carrying them is voided)
+ *   GATE_ANNUAL_PREPAY_ADDON_BILLING=true (completing an annual-prepay-covered visit with no invoice history bills its add-ons as their own invoice with the pay link and the unpaid completion text; any other invoice on the visit, or an unclear amount — a visit-wide discount, an add-on awaiting its price — gets one office alert instead, ADMIN-BUG-R13, owner ruling 2026-09-26; read at call time and frozen on the service record at the first gate-on pass; dark = today's behavior: the covered visit bills nothing for its add-ons and an office invoice carrying them is voided)
  *
  *   GATE_LAWN_PROPERTY_HISTORY=true (property-scoped confirmed lawn history, one installed row per visit, report-date/reset windows and confirm-time baseline; dark in dev AND prod; consumers read at call time)
  *   GATE_LAWN_COMPLETION_DEFAULTS=true (appointment-plan completion defaults; requires GATE_LAWN_PROPERTY_HISTORY; opt-in in every environment)
@@ -507,9 +507,10 @@ const gates = {
   prepayOnBook: process.env.GATE_PREPAY_ON_BOOK === 'true',
 
   // Add-ons on an annual-prepay-covered visit billed at completion
-  // (ADMIN-BUG-R13): their own invoice through the shared scheduled mint,
-  // pay link + unpaid completion text; an office alert when a visit-wide
-  // discount makes their share unclear. logGateStatus only — the completion
+  // (ADMIN-BUG-R13): with no invoice history, their own invoice through the
+  // shared scheduled mint, pay link + unpaid completion text; any other
+  // invoice on the visit, or an unclear amount, gets one office alert
+  // instead. logGateStatus only — the completion
   // reads gateEnvValue('GATE_ANNUAL_PREPAY_ADDON_BILLING') at CALL time.
   // Off: the covered visit bills nothing for its add-ons, as before.
   annualPrepayAddonBilling: gateEnvValue('GATE_ANNUAL_PREPAY_ADDON_BILLING'),
