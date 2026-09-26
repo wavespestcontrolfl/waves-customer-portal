@@ -64,51 +64,48 @@ function needsRetry(result) {
   return result?.retryable || result?.deliveryOutcome === 'uncertain';
 }
 
-async function dispatchBillingChannels(input, prefs, sendLeg) {
-  const category = billingDeliveryCategory(input);
+function selectedLegs(input, prefs, category) {
   const selected = explicitBillingChannels(prefs, category);
-  const channels = ['email', 'push', 'sms'].filter((channel) => selected.includes(channel)
+  return ['email', 'push', 'sms'].filter((channel) => selected.includes(channel)
     && !(channel === 'email' && input.hasEmailLeg === true));
-  if (!channels.length) return {
-    sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'CHANNEL_EMAIL_ONLY',
-    reason: 'The selected email is delivered by this notice’s email sender', channelResults: {},
-  };
+}
 
-  const notificationEventKey = billingNotificationEventKey(input);
-  const channelResults = {};
-  // Each leg runs the complete guarded pipeline. Email and App use their
-  // existing event deduplication; Text is last. A deferred earlier leg holds
-  // Text as well, so the caller can replay without duplicating an accepted
-  // text. A selected quiet-hours hold must survive an accepted email.
-  for (const channel of channels) {
-    if (channel === 'sms' && !String(input.to || '').trim()) {
-      channelResults.sms = {
-        sent: false, blocked: true, channel: 'sms', deliveryOutcome: 'not_sent',
-        code: 'MISSING_SMS_RECIPIENT', reason: 'Text is selected but no phone recipient is available',
-      };
-      continue;
-    }
-    try {
-      const metadata = { ...input.metadata, billingDeliveryLeg: channel,
-        billingDeliveryCategory: category, notificationEventKey };
-      // App acceptance cannot settle pending Email or Text. Its event key
-      // dedupes a replay while those selected channels remain unfinished.
-      if (channel === 'push' && (channels.includes('sms') || needsRetry(channelResults.email))) {
-        delete metadata.scheduled_sms_log_id;
-      }
-      channelResults[channel] = await sendLeg({
-        ...input, channel: channel === 'push' ? 'sms' : channel,
-        metadata,
-      });
-    } catch (err) {
-      const outcome = err.providerOutcome;
-      channelResults[channel] = outcome?.deliveryOutcome === 'accepted'
-        ? { ...outcome, sent: true, blocked: false, channel }
-        : { sent: false, blocked: false, channel, deliveryOutcome: outcome?.deliveryOutcome || 'not_sent',
-          code: 'BILLING_CHANNEL_FAILED', reason: err.message, retryable: true };
-    }
-    if (isReplayHold(channelResults[channel])) break;
+function legFailure(channel, err) {
+  const outcome = err.providerOutcome;
+  return outcome?.deliveryOutcome === 'accepted'
+    ? { ...outcome, sent: true, blocked: false, channel }
+    : { sent: false, blocked: false, channel, deliveryOutcome: outcome?.deliveryOutcome || 'not_sent',
+      code: 'BILLING_CHANNEL_FAILED', reason: err.message, retryable: true };
+}
+
+// One leg through the complete guarded pipeline.
+async function sendBillingLeg({ input, channel, channels, channelResults, category, notificationEventKey, sendLeg }) {
+  if (channel === 'sms' && !String(input.to || '').trim()) {
+    return {
+      sent: false, blocked: true, channel: 'sms', deliveryOutcome: 'not_sent',
+      code: 'MISSING_SMS_RECIPIENT', reason: 'Text is selected but no phone recipient is available',
+    };
   }
+  try {
+    const metadata = { ...input.metadata, billingDeliveryLeg: channel,
+      billingDeliveryCategory: category, notificationEventKey };
+    // App acceptance cannot settle pending Email or Text. Its event key
+    // dedupes a replay while those selected channels remain unfinished.
+    if (channel === 'push' && (channels.includes('sms') || needsRetry(channelResults.email))) {
+      delete metadata.scheduled_sms_log_id;
+    }
+    return await sendLeg({
+      ...input, channel: channel === 'push' ? 'sms' : channel,
+      metadata,
+    });
+  } catch (err) {
+    return legFailure(channel, err);
+  }
+}
+
+// A replay hold wins; an unfinished Text outranks an earlier acceptance so
+// the caller retries it; otherwise the latest acceptance, then any retry.
+function billingDispatchOutcome(channelResults) {
   const results = Object.values(channelResults);
   const accepted = [...results].reverse().find((result) => result.sent && result.deliveryOutcome === 'accepted');
   const retry = results.find(needsRetry);
@@ -118,6 +115,29 @@ async function dispatchBillingChannels(input, prefs, sendLeg) {
     || (!textAccepted && (textRetry || retry)) || accepted || retry
     || results[results.length - 1];
   return { ...outcome, channelResults };
+}
+
+async function dispatchBillingChannels(input, prefs, sendLeg) {
+  const category = billingDeliveryCategory(input);
+  const channels = selectedLegs(input, prefs, category);
+  if (!channels.length) return {
+    sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'CHANNEL_EMAIL_ONLY',
+    reason: 'The selected email is delivered by this notice’s email sender', channelResults: {},
+  };
+
+  const notificationEventKey = billingNotificationEventKey(input);
+  const channelResults = {};
+  // Email and App use their existing event deduplication; Text is last. A
+  // deferred earlier leg holds Text as well, so the caller can replay without
+  // duplicating an accepted text. A selected quiet-hours hold must survive an
+  // accepted email.
+  for (const channel of channels) {
+    channelResults[channel] = await sendBillingLeg({
+      input, channel, channels, channelResults, category, notificationEventKey, sendLeg,
+    });
+    if (isReplayHold(channelResults[channel])) break;
+  }
+  return billingDispatchOutcome(channelResults);
 }
 
 module.exports = {
