@@ -332,7 +332,7 @@ function singularName(name) {
 // `indexed` is `[{ via, index }, ...]` in priority order, used only as a
 // tie-break when two matches are the same length.
 function fuzzyScanAcross(normalized, indexed) {
-  let best = null; // { id, via, len }
+  const matches = []; // { id, via, len, start, end }
   for (const { via, index } of indexed) {
     for (const [name, id] of index.entries()) {
       if (name.length < 4 && !SHORT_ALIASES.has(name)) continue;
@@ -341,17 +341,30 @@ function fuzzyScanAcross(normalized, indexed) {
       // singular alias of the same word, leaving index priority to decide
       // (the group beats a species alias; Codex #4873 pre-push P1).
       const stem = singularName(name);
-      if (best && stem.length <= best.len) continue;
       // "whitefly" also matches "whiteflies"; "larva" matches "larvae".
       const pattern = stem.endsWith('larva') ? `${stem}e?`
         : /[^aeiou]y$/.test(stem) ? `${stem.slice(0, -1)}(?:y|ies)`
           : `${stem}(?:s|es)?`;
-      if (new RegExp(`\\b${pattern}\\b`).test(normalized)) {
-        best = { id, via, len: stem.length };
-      }
+      const hit = new RegExp(`\\b${pattern}\\b`).exec(normalized);
+      if (hit) matches.push({ id, via, len: stem.length, start: hit.index, end: hit.index + hit[0].length });
     }
   }
-  return best;
+  if (!matches.length) return null;
+  // Longest match wins; on a tie the earlier index in `indexed` does.
+  let best = matches[0];
+  for (const m of matches) if (m.len > best.len) best = m;
+  // A descendant of the winner that names words the winner's own match
+  // doesn't cover is the more specific claim: "brown widow spider" is the
+  // brown widow, not just "widow spider" (Codex #4873 r3). A descendant
+  // wholly inside the winner's span ("termite" within "termites") adds
+  // nothing, so the group keeps it.
+  let deeper = null;
+  for (const m of matches) {
+    if (m.id === best.id || (m.start >= best.start && m.end <= best.end)) continue;
+    if (!lineage(m.id).some((r) => r.id === best.id)) continue;
+    if (!deeper || m.len > deeper.len) deeper = m;
+  }
+  return deeper || best;
 }
 
 function buildNameIndices() {

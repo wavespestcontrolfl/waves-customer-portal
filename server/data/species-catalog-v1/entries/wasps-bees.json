@@ -15,7 +15,7 @@
     "safety_line": "Stings hurt and can trigger allergic reactions. See a doctor if swelling spreads beyond the sting site, and call 911 if someone has trouble breathing.",
     "legacy_slugs": [],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": ""
     },
     "slug": "paper-wasp",
@@ -100,7 +100,7 @@
     "copy": {
       "what_it_means": "They hunt caterpillars all day to feed their young, so a nest away from doors is quietly working your garden. Leave nests you can comfortably avoid; remove the ones over doorways or high-traffic areas.",
       "fact": "They hunt caterpillars all day to feed their young — a nest away from doors is quietly working your garden.",
-      "blurb": "Leave nests you can ignore; remove the ones over doorways (early morning, or have us do it)."
+      "blurb": "Leave nests you can ignore. For nests over doorways or other busy spots, keep your distance and have a technician remove them."
     },
     "tech_notes": "Confirm open comb, no paper envelope. Treat at dusk; remove nest after knockdown. Check soffits, shutters, playsets.",
     "sources": [

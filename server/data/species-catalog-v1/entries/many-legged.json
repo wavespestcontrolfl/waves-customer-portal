@@ -120,7 +120,7 @@
     "safety_line": "Its defensive secretion can mildly irritate skin or eyes if handled roughly; sweep it up rather than picking it up bare-handed.",
     "legacy_slugs": [],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": ""
     },
     "slug": "millipede",
@@ -199,9 +199,9 @@
     },
     "urgency": "low",
     "copy": {
-      "what_it_means": "A composting machine that recycles dead leaves into soil — heavy rain floods the leaf litter and evicts them onto the lanai. It can release a mild defensive secretion if handled roughly, so sweeping it out beats picking it up bare-handed; otherwise it dries out and moves on after a day or so indoors.",
+      "what_it_means": "A composting machine that recycles dead leaves into soil. Heavy rain floods the leaf litter and pushes them onto the lanai. It can release a mild defensive secretion, so sweep it out rather than pick it up; indoors it usually dries out, and repeat visitors point to a damp spot near the door.",
       "fact": "A composting machine — it recycles dead leaves into soil. Rain floods the leaf litter and evicts them onto your lanai.",
-      "blurb": "They can't survive indoors for long — sweep them out (rather than handling) and they're gone after a day."
+      "blurb": "They rarely survive long indoors. Sweep them out rather than handling them, and if they keep coming in, look for damp spots near doors."
     },
     "tech_notes": "Rain-driven seasonal migration from mulch/leaf litter. Defensive secretion can mildly irritate skin/eyes on contact; advise sweeping rather than handling. Exterior perimeter treatment + reducing mulch-to-foundation contact handles recurring waves.",
     "sources": [
