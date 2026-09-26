@@ -41,7 +41,7 @@ mockDb.raw = (sql) => sql;
 
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
-jest.mock('../services/forecast-analyzer', () => ({ analyzeTomorrow: async () => ({ needsReschedule: [] }) }), { virtual: true });
+jest.mock('../services/forecast-analyzer', () => ({ analyzeTomorrow: async () => ({ needsReschedule: [] }) }));
 
 const mockComputeCoreKpis = jest.fn();
 jest.mock('../routes/admin-dashboard', () => ({ computeCoreKpis: (...a) => mockComputeCoreKpis(...a) }));
@@ -80,6 +80,7 @@ describe('get_operations_snapshot — kpis (last7 vs last30 vs targets)', () => 
     expect(result.kpiWindow).toEqual({
       last7: 'rolling 7 days ending today (ET)',
       baseline: 'rolling 30 days ending today (ET)',
+      current: 'a live snapshot as of today (ET) — no 30-day baseline (e.g. AR days)',
     });
 
     const byMetric = Object.fromEntries(result.kpis.map((k) => [k.metric, k]));
@@ -149,6 +150,90 @@ describe('get_operations_snapshot — kpis (last7 vs last30 vs targets)', () => 
       expect(k.last7).toBeNull();
       expect(k.last30).toBeNull();
       expect(k.tone).toBeNull();
+    });
+  });
+
+  describe('window classification (rolling vs current)', () => {
+    it("ar_days is 'current' — last30 is null even though the underlying value differs by period", async () => {
+      // ar.days has no period filter in computeCoreKpis at all (it's a live
+      // snapshot over ALL currently-unpaid invoices), but this mock still
+      // varies it by period to prove the tool itself nulls last30 for a
+      // 'current' metric rather than merely passing through equal values.
+      mockComputeCoreKpis.mockImplementation(async (period) => (
+        period === 'last_7' ? kpiSet({ arDays: 34 }) : kpiSet({ arDays: 99 })
+      ));
+      const result = await executeBITool('get_operations_snapshot', {});
+      const ar = result.kpis.find((k) => k.metric === 'ar_days');
+      expect(ar.window).toBe('current');
+      expect(ar.last7).toBe(34);
+      expect(ar.last30).toBeNull();
+    });
+
+    it('a rolling metric (response_speed_min) keeps both last7 and last30', async () => {
+      mockComputeCoreKpis.mockImplementation(async (period) => (
+        period === 'last_7' ? kpiSet({ response: 64 }) : kpiSet({ response: 55 })
+      ));
+      const result = await executeBITool('get_operations_snapshot', {});
+      const resp = result.kpis.find((k) => k.metric === 'response_speed_min');
+      expect(resp.window).toBe('rolling');
+      expect(resp.last7).toBe(64);
+      expect(resp.last30).toBe(55);
+    });
+  });
+
+  describe('opsLine — deterministic "Ops 7d: ..." SMS line', () => {
+    // A "good" baseline for every targeted metric (stops_per_hour has no
+    // target either way) so each scenario only has to override the metric(s)
+    // it's testing.
+    const GOOD = {
+      completion: 90, callback: 3, response: 50, conversion: 25,
+      rpmh: 130, margin: 45, arDays: 20, retention: 90, collection: 75,
+    };
+
+    it('ranks two off-target metrics bad-before-warn', async () => {
+      // response_speed_min: target 60 (lowerIsBetter), 90 misses by 30 vs a
+      // band of 6 => bad. completion_rate: target 85, 80 misses by 5 vs a
+      // band of 8.5 => warn.
+      mockComputeCoreKpis.mockResolvedValue(kpiSet({ ...GOOD, response: 90, completion: 80 }));
+      const result = await executeBITool('get_operations_snapshot', {});
+      expect(result.opsLine).toBe('Ops 7d: resp 90m (tgt 60m), completion 80% (tgt 85%)');
+    });
+
+    it('is "Ops 7d: all on target" when every targeted metric meets its target', async () => {
+      mockComputeCoreKpis.mockResolvedValue(kpiSet(GOOD));
+      const result = await executeBITool('get_operations_snapshot', {});
+      expect(result.opsLine).toBe('Ops 7d: all on target');
+    });
+
+    it('is "Ops 7d: KPIs unavailable" on a computeCoreKpis failure — never "all on target"', async () => {
+      mockComputeCoreKpis.mockRejectedValue(new Error('dashboard query failed'));
+      const result = await executeBITool('get_operations_snapshot', {});
+      expect(result.opsLine).toBe('Ops 7d: KPIs unavailable');
+    });
+
+    it('flags a null targeted metric as "; n/a: ..." rather than folding it into "all on target"', async () => {
+      // Every other targeted metric is at its good value; ar_days alone came
+      // back null (e.g. its query threw while the rest of computeCoreKpis
+      // succeeded — a partial failure, not a total one).
+      mockComputeCoreKpis.mockResolvedValue(kpiSet({ ...GOOD, arDays: null }));
+      const result = await executeBITool('get_operations_snapshot', {});
+      expect(result.opsLine).toBe('Ops 7d: all on target; n/a: AR days');
+    });
+
+    it('lists only the worst 4 when more than 4 metrics are off target', async () => {
+      // bad (desc relative miss): ar_days (2.0), response_speed_min (1.5),
+      // collection_rate (1.0); warn (desc relative miss): gross_margin (0.1)
+      // ahead of retention_pct (0.0824) and completion_rate (0.0588) — both
+      // excluded by the top-4 cutoff. callback_rate, lead_conversion, rpmh
+      // stay at GOOD; stops_per_hour has no target.
+      mockComputeCoreKpis.mockResolvedValue(kpiSet({
+        completion: 80, callback: GOOD.callback, response: 150, conversion: GOOD.conversion,
+        rpmh: GOOD.rpmh, margin: 36, arDays: 90, retention: 78, collection: 0,
+      }));
+      const result = await executeBITool('get_operations_snapshot', {});
+      expect(result.opsLine).toBe(
+        'Ops 7d: AR days 90d (tgt 30d), resp 150m (tgt 60m), collections 0% (tgt 70%), margin 36% (tgt 40%)'
+      );
     });
   });
 });

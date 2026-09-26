@@ -44,6 +44,32 @@ const OPERATIONS_KPI_LABELS = {
 };
 const SNAPSHOT_GETTERS_BY_METRIC = new Map(SNAPSHOT_METRICS);
 
+// Window classification: does the metric's value actually depend on the
+// requested computeCoreKpis period start, or is it a current-state snapshot
+// that reads the same regardless of period? (Codex P1, bi-agent-tools.js:239
+// pre-fix — ar.days is computed over ALL currently-unpaid invoices with no
+// period filter at all: routes/admin-dashboard.js's arAgg query never
+// references `start`, so last_7 and last_30 always return the identical
+// number.) Every other metric's underlying query DOES filter on `start`
+// (scheduled_date/service_date/first_contact_at/issueDateET/member_since —
+// see routes/admin-dashboard.js computeCoreKpis), so they get a real rolling
+// last7-vs-last30 comparison, including retention_pct, whose cohort is bounded
+// by `CONVERSION_DATE_SQL < start` even though it reads as a point-in-time
+// "still live" check. A 'current' metric is reported once, "as of today", with
+// no fabricated 30-day baseline.
+const OPERATIONS_KPI_WINDOW = {
+  completion_rate: 'rolling',
+  callback_rate: 'rolling',
+  response_speed_min: 'rolling',
+  lead_conversion: 'rolling',
+  stops_per_hour: 'rolling',
+  revenue_per_man_hour: 'rolling',
+  gross_margin: 'rolling',
+  ar_days: 'current',
+  retention_pct: 'rolling',
+  collection_rate: 'rolling',
+};
+
 // Ops KPI targets: a kpi_targets row wins over DEFAULT_KPI_TARGETS, same
 // precedence as the client's resolveTargetDef — but read here directly since
 // resolveTargetDef itself stays client-only. A failed table read degrades to
@@ -67,6 +93,25 @@ async function loadOperationsKpiTargets() {
   }
 }
 
+function buildKpiRow(metric, { last7, last30, storeTargets }) {
+  const window = OPERATIONS_KPI_WINDOW[metric] || 'rolling';
+  const def = storeTargets[metric] || DEFAULT_KPI_TARGETS[metric] || null;
+  return {
+    metric,
+    label: OPERATIONS_KPI_LABELS[metric],
+    last7,
+    // A 'current' metric (ar_days) is a single live snapshot — computeCoreKpis
+    // has no period filter for it at all, so last_7 and last_30 would always
+    // be the identical number. Reporting that as a "baseline" would fabricate
+    // a comparison that never happened. null makes the absence explicit.
+    last30: window === 'current' ? null : last30,
+    target: def?.target ?? null,
+    lowerIsBetter: def?.lowerIsBetter ?? null,
+    tone: def ? kpiTargetTone(last7, def) : null,
+    window,
+  };
+}
+
 async function buildOperationsKpis() {
   // Lazy require (like the forecast-analyzer require below) — admin-dashboard.js
   // is a large route module and this tool needs only the one already-exported
@@ -81,17 +126,74 @@ async function buildOperationsKpis() {
     const getter = SNAPSHOT_GETTERS_BY_METRIC.get(metric);
     const last7 = getter ? toFiniteOrNull(getter(k7)) : null;
     const last30 = getter ? toFiniteOrNull(getter(k30)) : null;
-    const def = storeTargets[metric] || DEFAULT_KPI_TARGETS[metric] || null;
-    return {
-      metric,
-      label: OPERATIONS_KPI_LABELS[metric],
-      last7,
-      last30,
-      target: def?.target ?? null,
-      lowerIsBetter: def?.lowerIsBetter ?? null,
-      tone: def ? kpiTargetTone(last7, def) : null,
-    };
+    return buildKpiRow(metric, { last7, last30, storeTargets });
   });
+}
+
+// Short label + display formatter per metric for the deterministic "Ops 7d"
+// SMS line (Codex P1, bi-agent-config.js:34 — an LLM-composed line satisfied
+// "no bad/warn -> all on target" even when the underlying computation failed
+// or returned nulls). Values are pre-rounded upstream; roundOne just clamps
+// display to 1 decimal (an already-whole number prints with none: 78, not
+// 78.0, because 78.0 === 78 as a JS Number).
+function roundOne(v) {
+  return Math.round(Number(v) * 10) / 10;
+}
+const OPS_LINE_METRIC_META = {
+  completion_rate: { short: 'completion', fmt: (v) => `${roundOne(v)}%` },
+  callback_rate: { short: 'callbacks', fmt: (v) => `${roundOne(v)}%` },
+  response_speed_min: { short: 'resp', fmt: (v) => `${roundOne(v)}m` },
+  lead_conversion: { short: 'conversion', fmt: (v) => `${roundOne(v)}%` },
+  stops_per_hour: { short: 'stops/hr', fmt: (v) => `${roundOne(v)}` },
+  revenue_per_man_hour: { short: '$/man-hr', fmt: (v) => `$${roundOne(v)}/hr` },
+  gross_margin: { short: 'margin', fmt: (v) => `${roundOne(v)}%` },
+  ar_days: { short: 'AR days', fmt: (v) => `${roundOne(v)}d` },
+  retention_pct: { short: 'retention', fmt: (v) => `${roundOne(v)}%` },
+  collection_rate: { short: 'collections', fmt: (v) => `${roundOne(v)}%` },
+};
+
+// Deterministic "Ops 7d: ..." SMS line — the model copies this verbatim
+// (bi-agent-config.js) instead of composing it, so a computation failure or a
+// null value can never be reported as "all on target". `window` ('current'
+// vs 'rolling') doesn't change the on/off-target logic here — ar_days is
+// graded against its target exactly like any rolling metric.
+function buildOpsLine(kpis) {
+  // "Targeted" = has a resolvable target (store row or DEFAULT_KPI_TARGETS);
+  // an untargeted metric (e.g. stops_per_hour with no store row) is neither
+  // on-target nor unavailable — there's nothing to grade it against.
+  const targeted = kpis.filter((k) => k.target != null && OPS_LINE_METRIC_META[k.metric]);
+  if (targeted.length === 0) return 'Ops 7d: all on target';
+
+  // Unavailable = has a target but no usable value (null last7, or a null
+  // tone — a computeCoreKpis failure, an empty window, or a partial query
+  // failure all land here). Never reported as "on target".
+  const unavailable = targeted.filter((k) => k.last7 == null || k.tone == null);
+  if (unavailable.length === targeted.length) return 'Ops 7d: KPIs unavailable';
+
+  const offTarget = targeted.filter((k) => k.tone === 'bad' || k.tone === 'warn');
+  offTarget.sort((a, b) => {
+    if (a.tone !== b.tone) return a.tone === 'bad' ? -1 : 1; // bad before warn
+    const missRatio = (k) => {
+      const t = Number(k.target);
+      return t !== 0 ? Math.abs(k.last7 - t) / Math.abs(t) : Math.abs(k.last7 - t);
+    };
+    return missRatio(b) - missRatio(a); // larger relative miss first
+  });
+
+  const top = offTarget.slice(0, 4).map((k) => {
+    const meta = OPS_LINE_METRIC_META[k.metric];
+    return `${meta.short} ${meta.fmt(k.last7)} (tgt ${meta.fmt(k.target)})`;
+  });
+
+  // "all on target" describes the available, targeted metrics only — an
+  // unavailable metric is flagged separately via the "; n/a: ..." suffix
+  // rather than silently excluded from (or falsely folded into) that claim.
+  let line = `Ops 7d: ${top.length > 0 ? top.join(', ') : 'all on target'}`;
+  if (unavailable.length > 0) {
+    const names = unavailable.map((k) => OPS_LINE_METRIC_META[k.metric].short);
+    line += `; n/a: ${names.join(', ')}`;
+  }
+  return line;
 }
 
 async function executeBITool(toolName, input) {
@@ -213,19 +315,22 @@ async function executeBITool(toolName, input) {
       const total = parseInt(weekServices?.total || 0);
       const completed = parseInt(weekServices?.completed || 0);
 
-      // Ops KPIs: last 7 days vs a rolling 30-day baseline vs owner targets.
-      // computeCoreKpis has no historical-window replay, so this is a rolling
-      // "as of today" comparison — never described as "last week vs the week
-      // before" (see kpiWindow below).
+      // Ops KPIs: last 7 days vs a rolling 30-day baseline (or, for a
+      // 'current'-window metric like ar_days, a single live snapshot) vs
+      // owner targets. computeCoreKpis has no historical-window replay, so
+      // this is a rolling "as of today" comparison — never described as
+      // "last week vs the week before" (see kpiWindow below). A computation
+      // failure still resolves targets (independent of computeCoreKpis) so
+      // every targeted metric reads as UNAVAILABLE, never as "all on target".
       let kpis = [];
       try {
         kpis = await buildOperationsKpis();
       } catch (err) {
         logger.warn(`[bi-agent] operations KPI computation failed: ${err.message}`);
-        kpis = OPERATIONS_KPI_KEYS.map((metric) => ({
-          metric, label: OPERATIONS_KPI_LABELS[metric], last7: null, last30: null, target: null, lowerIsBetter: null, tone: null,
-        }));
+        const storeTargets = await loadOperationsKpiTargets();
+        kpis = OPERATIONS_KPI_KEYS.map((metric) => buildKpiRow(metric, { last7: null, last30: null, storeTargets }));
       }
+      const opsLine = buildOpsLine(kpis);
 
       return {
         servicesThisWeek: total,
@@ -236,9 +341,11 @@ async function executeBITool(toolName, input) {
         tomorrowRescheduleCount: tomorrowForecast?.needsReschedule?.length || 0,
         tomorrowWeather: tomorrowForecast?.needsReschedule?.length > 0 ? 'Weather impact expected' : 'Clear',
         kpis,
+        opsLine,
         kpiWindow: {
           last7: 'rolling 7 days ending today (ET)',
           baseline: 'rolling 30 days ending today (ET)',
+          current: 'a live snapshot as of today (ET) — no 30-day baseline (e.g. AR days)',
         },
       };
     }
