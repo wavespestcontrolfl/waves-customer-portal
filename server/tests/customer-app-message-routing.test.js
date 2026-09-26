@@ -540,6 +540,88 @@ describe('explicit billing channel combinations', () => {
     expect(sendBillingChannelEmail).not.toHaveBeenCalled();
   });
 
+  test('a suppression lookup failure fails CLOSED for the selected App leg but stays fail-OPEN for the selected Text leg in the same dispatch (requiresVerifiedSuppression)', async () => {
+    // validators/suppression.js's requiresVerifiedSuppression() draws the
+    // line at push/email — SMS keeps its own independent kill switch
+    // (sms_enabled) as a backstop and is allowed to fail open on an
+    // unresolved phone-keyed suppression read. Run both legs through ONE
+    // real dispatch (not two separate single-leg tests) so a regression
+    // that accidentally makes them agree (both open or both closed) is
+    // caught even if each leg's own single-channel test still passes.
+    prefs.payment_receipt_channels = ['push', 'sms'];
+    suppressionError = true;
+    const result = await sendCustomerMessage(input);
+    expect(result.channelResults.push).toMatchObject({ sent: false, code: 'SUPPRESSION_LOOKUP_FAILED' });
+    expect(result.channelResults.sms).toMatchObject({ sent: true, deliveryOutcome: 'accepted' });
+    expect(Twilio.sendSMS).toHaveBeenCalledTimes(1);
+    expect(Twilio.sendSMS.mock.calls[0][2].explicitPushOnly).toBe(false);
+  });
+
+  test('an operator-initiated send stays on the plain Text path even when the customer has an explicit multi-channel billing selection on file', async () => {
+    // isBillingDeliveryCandidate excludes operatorInitiated sends (unless
+    // useCustomerChannel is set) — a staff-composed billing text must never
+    // silently expand into an Email+App+Text fan-out just because the
+    // customer separately picked several delivery channels for automated
+    // billing notices.
+    prefs.payment_receipt_channels = ['email', 'push', 'sms'];
+    const result = await sendCustomerMessage({ ...input, operatorInitiated: true });
+    expect(result.channelResults).toBeUndefined();
+    expect(sendBillingChannelEmail).not.toHaveBeenCalled();
+    expect(Twilio.sendSMS).toHaveBeenCalledTimes(1);
+    expect(Twilio.sendSMS.mock.calls[0][2].explicitPushOnly).toBe(false);
+  });
+
+  test('with no explicit billing channel arrays on the preferences row, the fan-out is never invoked (gate-off / legacy shape, byte-identical to origin/main)', async () => {
+    // Prod carries zero non-null billing channel arrays while
+    // GATE_BILLING_NOTIFICATION_CHANNELS is off — this is that exact shape.
+    // Assert it directly against the router entry point rather than only
+    // inferring it from the outcome, so a future change that starts calling
+    // dispatchBillingChannels on a legacy row (even if it happens to still
+    // return the same single-channel outcome) is caught.
+    const BillingRouting = require('../services/messaging/billing-channel-routing');
+    const dispatchSpy = jest.spyOn(BillingRouting, 'dispatchBillingChannels');
+    try {
+      prefs = { payment_receipt_channel: 'push', payment_receipt: true, sms_enabled: true, payment_confirmation_sms: true };
+      const result = await sendCustomerMessage(input);
+      expect(dispatchSpy).not.toHaveBeenCalled();
+      expect(result.channelResults).toBeUndefined();
+      expect(result).toMatchObject({ sent: true, channel: 'push' });
+    } finally {
+      dispatchSpy.mockRestore();
+    }
+  });
+
+  test('the app gate being off makes an explicit App-only billing leg a terminal APP_UNAVAILABLE, not the schedulable preference-change hold', async () => {
+    // attemptPushFirst returns reason:'app_gate_off' distinctly from
+    // reason:'preference_changed' — only the latter is remapped to the
+    // schedulable BILLING_PREFERENCES_CHANGED hold. A dark app gate must
+    // stay a plain terminal refusal (a producer should not keep retrying a
+    // notice against a gate that is simply off).
+    prefs.payment_receipt_channels = ['push'];
+    process.env.GATE_CUSTOMER_APP_NOTIFICATIONS = 'false';
+    Twilio.sendSMS.mockResolvedValue({ success: false, appUnavailable: true, error: 'app_gate_off' });
+    const result = await sendCustomerMessage(input);
+    expect(result.channelResults.push).toMatchObject({ sent: false, blocked: true, code: 'APP_UNAVAILABLE' });
+    expect(result.channelResults.push.deferred).not.toBe(true);
+    expect(result.channelResults.push.code).not.toBe('BILLING_PREFERENCES_CHANGED');
+  });
+
+  test('an explicit channel selection with no recognized channel (empty array, or only unrecognized values) selects nothing and never calls a provider', async () => {
+    // Defense in depth: the preferences API's Joi schema enforces
+    // .min(1) on every billing channel array, so this should be
+    // unreachable through the normal write path — but the router itself
+    // must still fail safely (blocked, no provider call) rather than
+    // silently falling back to some default channel if a row is ever
+    // written some other way (backfill, direct DB edit, a future writer).
+    const { dispatchBillingChannels } = require('../services/messaging/billing-channel-routing');
+    const sendLeg = jest.fn();
+    for (const channels of [[], ['carrier_pigeon']]) {
+      const result = await dispatchBillingChannels(input, { payment_receipt_channels: channels }, sendLeg);
+      expect(sendLeg).not.toHaveBeenCalled();
+      expect(result).toMatchObject({ sent: false, blocked: true, deliveryOutcome: 'not_sent', channelResults: {} });
+    }
+  });
+
   test.each([['push'], ['email', 'push']])('unavailable App never creates an unselected text: %j', async (...channels) => {
     prefs.payment_receipt_channels = channels;
     Twilio.sendSMS.mockResolvedValue({ success: false, appUnavailable: true, error: 'no_fresh_device' });
