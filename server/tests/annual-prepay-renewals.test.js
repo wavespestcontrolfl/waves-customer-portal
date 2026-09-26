@@ -62,6 +62,7 @@ function query({ first, returning, columnInfo, rows = [] } = {}) {
     'select',
     'forUpdate',
     'leftJoin',
+    'join',
     'whereRaw',
     'whereNotNull',
     'orWhereNotNull',
@@ -2248,8 +2249,57 @@ describe('annual prepay renewal helpers', () => {
       newStart: '2027-05-20',
       newEnd: '2028-05-20',
       cancelLink: 'https://portal.wavespestcontrol.com/?tab=plan',
+      // No source estimate → no plan property → the email falls back to
+      // the customer's address.
+      address: null,
       lastInspectionDate: null,
     });
+  });
+
+  test('the termite notice names the PLAN\'s property (source estimate), not a different billing address', async () => {
+    const term = {
+      id: 'term-2',
+      customer_id: 'customer-1',
+      source_estimate_id: 'estimate-9',
+      status: 'active',
+      term_start: '2026-05-20',
+      term_end: '2027-05-20',
+      annual_plan_version: 'v3',
+      prepay_amount: 650,
+      notice_45_sent_at: null,
+      notice_45_claimed_at: null,
+      renewal_decision: null,
+    };
+    const refreshedTerm = { ...term, last_scheduled_service_id: null, last_scheduled_service_date: null };
+    setDbQueues({
+      scheduled_services: [query({ first: null }), query({ columnInfo: {} })],
+      annual_prepay_terms: [
+        query({ returning: [refreshedTerm] }),
+        query({ returning: [{ ...refreshedTerm, status: 'renewal_pending' }] }),
+        query(),
+      ],
+      customers: [
+        query({ first: { id: 'customer-1', first_name: 'Stan', address_line1: '1 Billing Way', city: 'Tampa', email: 'stan@example.com', phone: '+19415550100' } }),
+      ],
+      'estimates as e': [
+        query({ first: { address_line1: '9 Palm Ave', address_line2: null, city: 'Sarasota', state: 'FL', zip: '34236' } }),
+      ],
+      customer_interactions: [query()],
+    });
+    CancellationResolution.cancelFlowV2Enabled.mockReturnValue(true);
+    renderSmsTemplate.mockResolvedValue('rendered termite sms');
+    sendCustomerMessage.mockResolvedValue({ sent: true });
+    AccountMembershipEmail.sendTermiteRenewalReminder.mockResolvedValue({ ok: true });
+
+    await expect(AnnualPrepayRenewals.sendCustomerTermNotice(term, 45)).resolves.toMatchObject({ sent: true });
+    expect(renderSmsTemplate).toHaveBeenCalledWith(
+      'termite_annual_renewal_notice',
+      expect.objectContaining({ address_short: '9 Palm Ave, Sarasota' }),
+      expect.anything(),
+    );
+    expect(AccountMembershipEmail.sendTermiteRenewalReminder).toHaveBeenCalledWith(
+      expect.objectContaining({ address: '9 Palm Ave, Sarasota, FL, 34236' }),
+    );
   });
 
   test('a termite annual-plan term whose SMS send fails does NOT stamp notice_45_sent_at when the email fallback also fails (provider-success-only witness)', async () => {

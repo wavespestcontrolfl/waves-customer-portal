@@ -1654,6 +1654,24 @@ function isTermiteAnnualPlanTerm(term) {
   return !!term?.annual_plan_version;
 }
 
+// The plan's OWN property (the source estimate's property) — a
+// multi-property customer's billing address can be a different site, and
+// the termite notice names the protected property. Falls back to the
+// customer's address when the estimate has no property recorded.
+async function planPropertyForTerm(term, conn = db) {
+  if (!term?.source_estimate_id) return null;
+  try {
+    const row = await conn('estimates as e')
+      .join('customer_properties as cp', 'cp.id', 'e.property_id')
+      .where('e.id', term.source_estimate_id)
+      .first('cp.address_line1', 'cp.address_line2', 'cp.city', 'cp.state', 'cp.zip');
+    return row?.address_line1 ? row : null;
+  } catch (err) {
+    logger.warn(`[annual-prepay] plan property lookup failed for term ${term?.id}: ${err.message}`);
+    return null;
+  }
+}
+
 // Matches email-template.js's currency() formatting so the SMS and email
 // legs of the same notice render the same figure the same way.
 function formatCurrencyLabel(amount) {
@@ -1683,6 +1701,10 @@ async function fileTermiteCancelLinkException(term, daysOut) {
       `The ${daysOut}-day termite renewal notice for term ${term?.id} was skipped because the customer portal's cancel-request flow (GATE_CANCEL_FLOW_V2) is off — sending would promise auto-renewal with no working cancel link. Enable the gate or handle this renewal manually.`,
       {
         link: term?.customer_id ? `/admin/customers/${term.customer_id}` : '/admin/dispatch',
+        // bell:true — a skipped termite notice leaves the renewal without its
+        // notice witness, so this must ring even under GATE_ADMIN_BELL_POLICY
+        // (the 'alert' category is silenced by default there).
+        bell: true,
         metadata: {
           dedupeKey,
           customer_id: term?.customer_id || null,
@@ -5221,7 +5243,12 @@ async function sendCustomerTermNotice(termOrId, daysOut, opts = {}) {
     const renewalFeeLabel = formatCurrencyLabel(claimedTerm.prepay_amount);
     const successorStart = dateOnly(claimedTerm.term_end);
     const successorEnd = addMonthsSameDay(claimedTerm.term_end, 12);
-    const addressShort = [customer.address_line1, customer.city].filter(Boolean).join(', ') || 'your property';
+    const planProperty = termiteRung ? await planPropertyForTerm(claimedTerm) : null;
+    const addressSource = planProperty || customer;
+    const addressShort = [addressSource.address_line1, addressSource.city].filter(Boolean).join(', ') || 'your property';
+    const planAddress = planProperty
+      ? [planProperty.address_line1, planProperty.address_line2, planProperty.city, planProperty.state, planProperty.zip].filter(Boolean).join(', ')
+      : null;
 
     const sendRenewalEmail = async () => {
       try {
@@ -5235,6 +5262,7 @@ async function sendCustomerTermNotice(termOrId, daysOut, opts = {}) {
             newStart: successorStart,
             newEnd: successorEnd,
             cancelLink,
+            address: planAddress,
             // No annual-inspection date is tracked anywhere yet (the signed
             // annual report is a later slice per the build brief) — always
             // unknown for now, so the email's last-inspection sentence is
@@ -5373,6 +5401,29 @@ async function sendCustomerTermNotice(termOrId, daysOut, opts = {}) {
   }
 }
 
+// The 45-day termite rung's candidates. A CATCH-UP window, not an exact
+// day: every unsent termite term renewing between 31 and 45 days out. The
+// notice's witness (notice_45_sent_at) is what the renewal transition
+// requires, so a single missed cron day or a failed send must not lose it
+// for good — the next daily run sends it (still at least 30 days ahead,
+// the day before the 30-day rung takes over). Keyed on term_end: the signed
+// agreement renews on the term's end date, not on a last-visit anchor.
+async function termiteNotice45Candidates({ today = etDateString(), conn = db } = {}) {
+  const noticeCol = noticeColumnForDaysOut(TERMITE_EXTRA_NOTICE_DAYS);
+  const claimCol = noticeClaimColumnForDaysOut(TERMITE_EXTRA_NOTICE_DAYS);
+  return conn('annual_prepay_terms')
+    .whereIn('status', ACTIVE_STATUSES)
+    .whereNull('renewal_decision')
+    .whereNotNull('annual_plan_version')
+    .whereNull(noticeCol)
+    .where(function noticeClaimAvailable() {
+      this.whereNull(claimCol).orWhere(claimCol, '<', new Date(Date.now() - NOTICE_CLAIM_TTL_MS));
+    })
+    .whereBetween('term_end', [addDaysYmd(today, 31), addDaysYmd(today, TERMITE_EXTRA_NOTICE_DAYS)])
+    .orderBy('term_end', 'asc')
+    .select('*');
+}
+
 async function checkAndSend({ today = etDateString() } = {}) {
   if (!(await annualPrepayTableExists())) return { sent: 0 };
   await activatePaidPendingTerms();
@@ -5387,29 +5438,10 @@ async function checkAndSend({ today = etDateString() } = {}) {
   // (the new migration) so a DB mid-rollback/rollout never 500s here.
   const termCols = await annualPrepayColumns();
   if (termCols.annual_plan_version && termCols.notice_45_sent_at && termCols.notice_45_claimed_at) {
-    const daysOut = TERMITE_EXTRA_NOTICE_DAYS;
-    const target = addDaysYmd(today, daysOut);
-    const noticeCol = noticeColumnForDaysOut(daysOut);
-    const claimCol = noticeClaimColumnForDaysOut(daysOut);
-    const terms = await db('annual_prepay_terms')
-      .whereIn('status', ACTIVE_STATUSES)
-      .whereNull('renewal_decision')
-      .whereNotNull('annual_plan_version')
-      .whereNull(noticeCol)
-      .where(function noticeClaimAvailable() {
-        this.whereNull(claimCol).orWhere(claimCol, '<', new Date(Date.now() - NOTICE_CLAIM_TTL_MS));
-      })
-      // Same effective-coverage-end anchor as the shared loop below.
-      .where(function renewalAnchorMatches() {
-        this.where('term_end', target).orWhere('last_scheduled_service_date', target);
-      })
-      .select('*');
-
+    const terms = await termiteNotice45Candidates({ today });
     for (const term of terms) {
-      const onTermEnd = dateOnly(term.term_end) === target;
-      if (!onTermEnd && !isLastServiceNearTermEnd(term)) continue;
       try {
-        const result = await sendCustomerTermNotice(term, daysOut);
+        const result = await sendCustomerTermNotice(term, TERMITE_EXTRA_NOTICE_DAYS);
         if (result.sent) sent++;
       } catch (err) {
         logger.error(`[annual-prepay] termite 45-day reminder failed for term ${term.id}: ${err.message}`);
@@ -5957,6 +5989,8 @@ module.exports = {
     noticeClaimColumnForDaysOut,
     isTermiteAnnualPlanTerm,
     formatCurrencyLabel,
+    termiteNotice45Candidates,
+    planPropertyForTerm,
     TERMITE_EXTRA_NOTICE_DAYS,
     TERMITE_COPY_NOTICE_DAYS,
     paymentReminderColumnForDaysOut,

@@ -900,11 +900,14 @@ async function sendTermiteRenewalReminder({
   // "Your last annual inspection: ." — see the last_inspection_sentence
   // paragraph block in the seeded template, which drops on empty content).
   lastInspectionDate = null,
+  // The plan's own property (annual-prepay-renewals planPropertyForTerm);
+  // falls back to the customer's address.
+  address: planAddress = null,
   idempotencyKey,
 } = {}) {
   const customer = await loadCustomer(customerId);
   if (!customer) return { ok: false, skipped: true, reason: 'customer_not_found' };
-  const address = [customer.address_line1, customer.address_line2, customer.city, customer.state, customer.zip]
+  const address = planAddress || [customer.address_line1, customer.address_line2, customer.city, customer.state, customer.zip]
     .filter(Boolean)
     .join(', ');
   return sendTemplate({
