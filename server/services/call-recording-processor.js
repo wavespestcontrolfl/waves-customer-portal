@@ -8653,10 +8653,10 @@ const CallRecordingProcessor = {
     // assignment was observed inconsistent on outbound calls (2026-07-11,
     // the Copeman call labeled the WAVES AGENT as "Caller:"), which could
     // read the agent's own plan pitch as customer intent on the caller-text
-    // scan. The owner weighed that residual mislabel risk against every
-    // agent rule applying the same way on both directions and chose parity;
-    // the prompt-driven model (which sees the whole conversation either way)
-    // remains the primary signal regardless.
+    // scan. That residual mislabel risk is accepted under the directive that
+    // every call-agent rule applies to both directions; the prompt-driven
+    // model (which sees the whole conversation either way) remains the
+    // primary signal regardless.
     extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames);
 
     // ── Shadow v2 extraction (records alongside v1, no side effects) ──
