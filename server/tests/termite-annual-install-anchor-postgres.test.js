@@ -529,8 +529,10 @@ describeOrSkip('termite annual countersign reminder — real Postgres (codex #48
   test('re-rings a signed annual agreement left un-countersigned past a day; never a countersigned, fresh, or other-template one', async () => {
     const { sweep, notifyAdmin, db } = load();
     const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+    // 9:30pm ET on Sep 20 is already Sep 21 in UTC — the reminder names the ET day.
+    const lateEvening = new Date('2026-09-21T01:30:00Z');
     const [pending] = await db('customer_contracts').insert({
-      customer_id: randomUUID(), document_template_key: ANNUAL_TEMPLATE_KEY, status: 'signed', signed_at: twoDaysAgo, signed_name: 'Sam Customer',
+      customer_id: randomUUID(), document_template_key: ANNUAL_TEMPLATE_KEY, status: 'signed', signed_at: lateEvening, signed_name: 'Sam Customer',
     }).returning('*');
     await db('customer_contracts').insert([
       { customer_id: randomUUID(), document_template_key: ANNUAL_TEMPLATE_KEY, status: 'signed', signed_at: twoDaysAgo, countersigned_at: new Date() },
@@ -548,6 +550,7 @@ describeOrSkip('termite annual countersign reminder — real Postgres (codex #48
     expect(category).toBe('customer');
     expect(title).toMatch(/still needs your countersignature/i);
     expect(body).toMatch(/Sam Customer/);
+    expect(body).toMatch(/on 2026-09-20;/);
     expect(opts).toMatchObject({
       bell: true,
       dedupeKey: `termite-annual-countersign-reminder:${pending.id}`,

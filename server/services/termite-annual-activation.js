@@ -562,7 +562,7 @@ async function remindPendingCountersignatures({ conn, limit, counts }) {
         const bell = await NotificationService.notifyAdmin(
           'customer',
           'Termite annual agreement still needs your countersignature',
-          `${row.signed_name || 'The customer'} signed the Waves Subterranean Termite Protection annual agreement on ${dateOnlyString(row.signed_at) || 'an earlier day'}; it has not been countersigned yet. Only the certified operator in charge can countersign, on the Contracts page.`,
+          `${row.signed_name || 'The customer'} signed the Waves Subterranean Termite Protection annual agreement on ${row.signed_at ? etDateString(new Date(row.signed_at)) : 'an earlier day'}; it has not been countersigned yet. Only the certified operator in charge can countersign, on the Contracts page.`,
           {
             link: '/admin/contracts?tab=requests&status=signed',
             bell: true,
