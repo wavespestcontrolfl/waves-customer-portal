@@ -3015,7 +3015,11 @@ export default function EstimateToolViewV2({
           treeCount: "",
         });
       }
-      if (ep.pool === "YES" || ep.pool === "POSSIBLE") upd.hasPool = "YES";
+      // Only a DECIDED pool prefills. POSSIBLE is satellite seeing a pool
+      // the records don't (the lookup's own flag says "may be neighbor") —
+      // the call-draft builder, customer pricing, and the website quote all
+      // leave it unpriced, and the verify flag asks the operator to check.
+      if (ep.pool === "YES") upd.hasPool = "YES";
       if (ep.poolCage === "YES") upd.hasPoolCage = "YES";
       if (ep.poolCageSize && ep.poolCageSize !== "NONE")
         upd.poolCageSize = ep.poolCageSize;
