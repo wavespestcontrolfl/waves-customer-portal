@@ -33,6 +33,7 @@ const catalog = require('../species-catalog');
 const { dispatch } = require('../llm/call');
 const { etParts } = require('../../utils/datetime-et');
 const { PEST_LIBRARY } = require('../pest-identification');
+const Ajv = require('ajv');
 const {
   CANDIDATES_SCHEMA,
   VERIFY_SCHEMA,
@@ -112,6 +113,38 @@ function escalateBelow() {
 // any other provider miss.
 function hasCandidatesArray(json) {
   return !!json && Array.isArray(json.candidates);
+}
+
+// Codex #4916 r1 P1: a leg counts as answered only when its whole envelope
+// matches the contract — `quality`, `shows` and a `candidates` array. A
+// response like `{ candidates: [{ slug, confidence }] }` never classified
+// the photos, so it must not reach a named result through combineQuality's
+// "no quality read" default. Candidates are then checked one at a time
+// against the item schema and malformed ones dropped (the round-5 rule:
+// one bad element does not sink the leg's valid candidates).
+const ajv = new Ajv({ strict: false, allErrors: false });
+const envelopeOf = (schema) => ({
+  type: 'object',
+  required: ['quality', 'shows', 'candidates'],
+  properties: { quality: schema.properties.quality, shows: schema.properties.shows, candidates: { type: 'array' } },
+});
+// Items: the fields the engine reads must be present and typed (slug,
+// confidence in 0..1); the rest are type-checked when present. Escalation
+// trait arrays are enforced by isValidEscalationCandidate.
+const itemOf = (schema) => {
+  const props = schema.properties.candidates.items.properties;
+  return { type: 'object', required: ['slug', 'confidence'], properties: props };
+};
+const LEG_CONTRACT = {
+  candidates: { envelope: ajv.compile(envelopeOf(CANDIDATES_SCHEMA)), item: ajv.compile(itemOf(CANDIDATES_SCHEMA)) },
+  escalation: { envelope: ajv.compile(envelopeOf(ESCALATION_SCHEMA)), item: ajv.compile(itemOf(ESCALATION_SCHEMA)) },
+};
+
+/** The leg's JSON when its envelope matches `kind`'s contract, else null;
+ * the returned object's `candidates` holds only schema-valid items. */
+function validLegJson(result, kind) {
+  if (!result?.ok || !result.json || !LEG_CONTRACT[kind].envelope(result.json)) return null;
+  return { ...result.json, candidates: result.json.candidates.filter((c) => LEG_CONTRACT[kind].item(c)) };
 }
 
 /** The `candidates` array, with any non-object element (a raw provider
@@ -741,7 +774,7 @@ function groupBlockFor(level, nodeId, entry) {
 function buildAnswer(ctx) {
   const {
     candidates, disagreed, disagreementNode, escalationTriggered, openaiAnswered, openaiStoodInAlone,
-    qualityUsable, qualityIssue, currentMonth,
+    qualityUsable, qualityIssue, subjectConflict, currentMonth,
   } = ctx;
   const unansweredTrigger = escalationTriggered && !openaiAnswered;
   // Codex round-0 P1 (round 10): an OpenAI candidate that stood in ALONE
@@ -767,7 +800,7 @@ function buildAnswer(ctx) {
   // keeps the tier at needs_more_evidence even at entry level (`likely`) —
   // added to the same-effect checks the original contract already listed
   // (quality, subject conflict, disagreement, above-entry-level).
-  const tier = (!qualityUsable || qualityIssue === 'multiple_subjects' || disagreed || level !== 'entry'
+  const tier = (!qualityUsable || qualityIssue === 'multiple_subjects' || subjectConflict || disagreed || level !== 'entry'
     || nextPhoto?.photo_can_confirm === false)
     ? 'needs_more_evidence'
     : 'ai_suggestion';
@@ -856,7 +889,12 @@ function mapToV1(built) {
     service: { line: serviceLine, key: serviceKey, label: serviceLabel, inspection_required: inspectionRequired },
     observations: built.evidence.matches,
     distinguishing_features: built.evidence.still_need,
-    alternate_slugs: built.candidatesBlock.slice(1).map((c) => c.slug).filter(Boolean),
+    // Codex #4916 r1 P2: the stored contract is pest_id_v1, and the admin
+    // differential resolves each alternate through the v1 library — so
+    // alternates are mapped like the primary; v2-only entries are dropped.
+    alternate_slugs: [...new Set(built.candidatesBlock.slice(1)
+      .map((c) => (c.slug ? V2_TO_V1_SLUG.get(c.slug) : null))
+      .filter((v) => v && v !== v1Slug))],
   };
 
   return { species_slug: v1Slug, category, service_line: serviceLine, urgency, report_contract: reportContract };
@@ -921,14 +959,14 @@ function combineEscalation(geminiCandidates, escalationResult, contextSlugs) {
   // whose `candidates` field isn't an array (or is missing) must be
   // treated as a failed/unavailable leg, never consumed as-is (it would
   // throw on `.map` below, breaking the engine's never-throws contract).
-  if (!escalationResult?.ok || !hasCandidatesArray(escalationResult.json)) {
+  if (!validLegJson(escalationResult, 'escalation')) {
     // OpenAI unavailable (or answered something invalid) — Gemini's result
     // stands, capped from reading pretty_sure by `unansweredTrigger` inside
     // `buildAnswer`.
     return { finalCandidates: geminiCandidates, disagreed: false, disagreementNode: null, openaiAnswered: false, openaiStoodInAlone: false };
   }
   const openaiCandidates = dedupeCandidates(
-    sanitizedCandidatesOf(escalationResult.json).filter(isValidEscalationCandidate).map(resolveCandidate)
+    sanitizedCandidatesOf(validLegJson(escalationResult, 'escalation')).filter(isValidEscalationCandidate).map(resolveCandidate)
       .map((c) => stripUncontextedTraits(c, contextSlugs)),
   );
   const openaiTop = openaiCandidates[0] || null;
@@ -1011,6 +1049,18 @@ function combineQuality(geminiQuality, openaiQuality) {
   return { usable, issue };
 }
 
+// Codex #4916 r1 P1: two legs that agree on a name but not on what the
+// photos contain (an organism vs only a sign, or nothing at all) have not
+// agreed on the evidence. `both` overlaps either read; `nothing` overlaps
+// only itself. A single read (no escalation) cannot conflict.
+const SHOWS_READS = { organism: ['organism'], sign: ['sign'], both: ['organism', 'sign'], nothing: [] };
+function showsConflict(a, b) {
+  if (!a || !b || a === b) return false;
+  const left = SHOWS_READS[a] || [];
+  const right = SHOWS_READS[b] || [];
+  return !left.some((v) => right.includes(v));
+}
+
 function legInfo(result) {
   if (!result) return null;
   return { ok: !!result.ok, provider: result.provider || null, model: result.model || null, reason: result.ok ? null : (result.reason || null) };
@@ -1039,7 +1089,7 @@ async function identifyPestV2(photos = []) {
   const candidatesResult = await callCandidatesModel(images, catalogEntries, legTimeoutMs(3));
   // An `ok:true` response whose shape doesn't match what was requested is
   // treated the same as a failed leg — see `hasCandidatesArray`.
-  const candidatesJson = candidatesResult.ok && hasCandidatesArray(candidatesResult.json) ? candidatesResult.json : null;
+  const candidatesJson = validLegJson(candidatesResult, 'candidates');
   const candidatesFromCall1 = candidatesJson ? dedupeCandidates(sanitizedCandidatesOf(candidatesJson).map(resolveCandidate)) : [];
   const catalogCandidates1 = candidatesFromCall1.filter((c) => c.entry);
 
@@ -1100,8 +1150,9 @@ async function identifyPestV2(photos = []) {
     return { ok: false, reason: 'no_route' };
   }
 
-  const escalationJson = escalationResult?.ok && hasCandidatesArray(escalationResult.json) ? escalationResult.json : null;
+  const escalationJson = validLegJson(escalationResult, 'escalation');
   const quality = combineQuality(candidatesJson?.quality, escalationJson?.quality);
+  const subjectConflict = showsConflict(candidatesJson?.shows, escalationJson?.shows);
   const currentMonth = etParts(new Date()).month;
 
   const built = buildAnswer({
@@ -1113,6 +1164,7 @@ async function identifyPestV2(photos = []) {
     openaiStoodInAlone,
     qualityUsable: !!quality.usable,
     qualityIssue: quality.issue || 'none',
+    subjectConflict,
     currentMonth,
   });
 
@@ -1172,5 +1224,5 @@ module.exports = {
   REFERRAL_TEMPLATES,
   escalateBelow,
   toImages,
-  _test: { candidateContextFor, mergeVerify, combineEscalation, V2_TO_V1_SLUG },
+  _test: { candidateContextFor, mergeVerify, combineEscalation, showsConflict, V2_TO_V1_SLUG },
 };

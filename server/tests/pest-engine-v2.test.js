@@ -1017,3 +1017,60 @@ describe('combineEscalation — agreement only takes a CHECKED confidence (Codex
     expect(out.finalCandidates[0].traitsVisible).toEqual([1, 2]);
   });
 });
+
+describe('Codex #4916 r1', () => {
+  test('P1: a leg without quality/shows is a failed leg, never a named result off combineQuality\'s default', async () => {
+    dispatch.mockReset();
+    dispatch
+      .mockResolvedValueOnce({ ok: true, json: { candidates: [{ slug: 'fire-ant', confidence: 0.95 }] } }) // no quality, no shows
+      .mockResolvedValueOnce({ ok: false, reason: 'provider_error' }); // escalation unavailable
+    const result = await identifyPestV2([PHOTO]);
+    expect(result.internal.escalation_reasons).toContain('gemini_missed');
+    expect(result.v2.tier).toBe('needs_more_evidence');
+    expect(result.v2.answer.wording).not.toBe('pretty_sure');
+  });
+
+  test('P1: a candidate missing confidence is dropped; the leg\'s valid candidates survive', async () => {
+    dispatch.mockReset();
+    dispatch
+      .mockResolvedValueOnce(candidatesReply([{ slug: 'ghost-ant' }, { slug: 'fire-ant', confidence: 0.9 }]))
+      .mockResolvedValueOnce({ ok: true, json: { candidates: [{ slug: 'fire-ant', confidence: 0.9, traits_visible: [1, 2], traits_not_visible: [] }] } });
+    const result = await identifyPestV2([PHOTO]);
+    expect(result.v2.candidates.map((c) => c.slug)).toEqual(['fire-ant']);
+  });
+
+  test('P1: legs that agree on the name but not on what the photos show need more evidence', () => {
+    const agreed = [cand('fire-ant', 0.9, { traitsVisible: [1, 2] })];
+    expect(buildAnswer(baseCtx({ candidates: agreed })).tier).toBe('ai_suggestion');
+    expect(buildAnswer(baseCtx({ candidates: agreed, subjectConflict: true })).tier).toBe('needs_more_evidence');
+  });
+
+  test.each([
+    ['organism', 'sign', true], ['organism', 'nothing', true], ['sign', 'nothing', true],
+    ['organism', 'both', false], ['sign', 'both', false], ['nothing', 'nothing', false],
+    ['organism', undefined, false],
+  ])('P1: shows %s vs %s conflicts = %s', (a, b, expected) => {
+    expect(engine._test.showsConflict(a, b)).toBe(expected);
+    expect(engine._test.showsConflict(b, a)).toBe(expected);
+  });
+
+  test('P1: an escalation that agrees on the slug but reads only a sign forces needs_more_evidence end to end', async () => {
+    dispatch.mockReset();
+    dispatch
+      .mockResolvedValueOnce(candidatesReply([{ slug: 'fire-ant', confidence: 0.5 }]))
+      .mockResolvedValueOnce({ ok: true, json: { candidates: [{ slug: 'fire-ant', confidence: 0.5, traits_visible: [1], traits_not_visible: [] }] } })
+      .mockResolvedValueOnce({ ok: true, json: {
+        quality: { usable: true, issue: 'none' }, shows: 'sign',
+        candidates: [{ slug: 'fire-ant', confidence: 0.9, traits_visible: [1, 2], traits_not_visible: [] }],
+      } });
+    const result = await identifyPestV2([PHOTO]);
+    expect(result.internal.escalation_triggered).toBe(true);
+    expect(result.v2.tier).toBe('needs_more_evidence');
+  });
+
+  test('P2: alternates are stored as v1 slugs; v2-only alternates are dropped, never passed through', () => {
+    const built = buildAnswer(baseCtx({ candidates: [cand('fire-ant', 0.85), cand('ghost-ant', 0.5), cand('roof-rat', 0.4)] }));
+    const v1 = mapToV1({ ...built, disagreed: false });
+    expect(v1.report_contract.alternate_slugs).toEqual(['ghost-ant']);
+  });
+});
