@@ -87,6 +87,16 @@ async function createScratchDb() {
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now()
   )`);
+  // The station-retrieval task rows (raised by the stubbed helper below,
+  // shaped like notifyAdmin's) — the decline settles only once its own
+  // row exists (Codex #4940 r6).
+  await db.raw(`CREATE TABLE notifications (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    recipient_type text,
+    read_at timestamptz,
+    metadata jsonb,
+    created_at timestamptz NOT NULL DEFAULT now()
+  )`);
   await db.raw(`CREATE TABLE activity_log (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     customer_id uuid,
@@ -159,11 +169,21 @@ describeOrSkip('termite annual renewal decline — coverage, renew supersession,
     fixture = await createScratchDb();
     const { db } = fixture;
     const notifyAdmin = jest.fn(async () => ({ id: randomUUID() }));
-    const raiseTermiteRetrievalTask = jest.fn(async () => ({ raised: true, stationCount: 12 }));
+    // Lazy: the real module must load only AFTER '../models/db' is mocked.
+    const termRetrievalDedupeKey = (...args) => jest.requireActual('../services/cancellation-processor').termRetrievalDedupeKey(...args);
+    // Stands in for the real helper's insert: one admin retrieval row keyed
+    // like the real one (its own suites cover chronology + supersession).
+    const raiseTermiteRetrievalTask = jest.fn(async (customerId, _requestId, { retrieveAfter, termId, episodeKey }) => {
+      await db('notifications').insert({
+        recipient_type: 'admin',
+        metadata: { kind: 'termite_station_retrieval', customerId, dedupeKey: termRetrievalDedupeKey(termId, episodeKey, retrieveAfter) },
+      });
+      return { raised: true, stationCount: 12 };
+    });
     jest.doMock('../models/db', () => db);
     jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
     jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
-    jest.doMock('../services/cancellation-processor', () => ({ raiseTermiteRetrievalTask }));
+    jest.doMock('../services/cancellation-processor', () => ({ raiseTermiteRetrievalTask, termRetrievalDedupeKey }));
     const Renewals = require('../services/annual-prepay-renewals');
     const { anchorTermToInstallation } = require('../services/termite-annual-activation');
     return {
@@ -283,6 +303,7 @@ describeOrSkip('termite annual renewal decline — coverage, renew supersession,
       retrieveAfter: ymd(fx.term.term_end),
       termId: fx.term.id,
       episodeKey: 'portal_renewal_decline',
+      eventAt: expect.anything(),
     });
   });
 
@@ -368,7 +389,7 @@ describeOrSkip('termite annual renewal decline — coverage, renew supersession,
 
     expect(raiseTermiteRetrievalTask).toHaveBeenCalledTimes(1);
     expect(raiseTermiteRetrievalTask).toHaveBeenCalledWith(customerId, null, {
-      retrieveAfter: newTermEnd, termId: term.id, episodeKey: 'portal_renewal_decline',
+      retrieveAfter: newTermEnd, termId: term.id, episodeKey: 'portal_renewal_decline', eventAt: expect.anything(),
     });
     const marker = await db('activity_log').where({ action: 'termite_annual_decline_retrieval' }).first();
     expect(marker.metadata).toEqual(expect.objectContaining({ term_id: term.id, term_end: newTermEnd, outcome: 'raised' }));
@@ -392,7 +413,7 @@ describeOrSkip('termite annual renewal decline — coverage, renew supersession,
     expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 0, raised: 0 });
     expect(raiseTermiteRetrievalTask).toHaveBeenCalledTimes(1);
     expect(raiseTermiteRetrievalTask).toHaveBeenCalledWith(fx.customerId, null, {
-      retrieveAfter: ymd(fx.term.term_end), termId: fx.term.id, episodeKey: 'portal_renewal_decline',
+      retrieveAfter: ymd(fx.term.term_end), termId: fx.term.id, episodeKey: 'portal_renewal_decline', eventAt: expect.anything(),
     });
   });
 

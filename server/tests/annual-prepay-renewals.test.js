@@ -37,6 +37,8 @@ jest.mock('../services/notification-service', () => ({
 // its own suites cover the task body/dedupe; here only the call is pinned.
 jest.mock('../services/cancellation-processor', () => ({
   raiseTermiteRetrievalTask: jest.fn().mockResolvedValue({ raised: true, stationCount: 12 }),
+  // The REAL key format — the decline confirms its own task row by it.
+  termRetrievalDedupeKey: (...args) => jest.requireActual('../services/cancellation-processor').termRetrievalDedupeKey(...args),
 }));
 
 const db = require('../models/db');
@@ -2676,13 +2678,18 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
     // portal-decline row, finds no settled marker, re-checks it is paid,
     // looks for another live plan, raises, then writes the settled marker.
     let markerInsert;
-    const freshDecline = (termRow, otherPlan = null) => {
+    let taskRowProbe;
+    const freshDecline = (termRow, otherPlan = null, { taskRow = { id: 'notif-task' } } = {}) => {
       const decided = { ...termRow, status: 'cancelled', renewal_decision: 'cancel' };
       markerInsert = query();
+      taskRowProbe = query({ first: taskRow });
       setDeclineQueues({
         annual_prepay_terms: [query({ first: termRow }), query({ returning: [decided] }), query({ first: decided }), query({ first: otherPlan })],
-        activity_log: [query(), query({ first: { id: 'decline-row' } }), query({ first: null }), markerInsert],
+        activity_log: [query(), query({ first: { id: 'decline-row', created_at: '2026-09-26T14:00:00Z', metadata: { term_id: 'term-1', decided_at: '2026-09-26T14:00:00.000Z' } } }), query({ first: null }), markerInsert],
         'annual_prepay_terms as t': [query({ first: { id: 'term-1' } })],
+        // Codex #4940 r6: the marker is written only once THIS decline's
+        // own task row is confirmed to exist.
+        notifications: [taskRowProbe],
         customers: [query({ first: { first_name: 'Jane', last_name: 'Doe' } })],
       });
       return AnnualPrepayRenewals.declineTermiteAnnualRenewal({ customerId: 'cust-1', termId: 'term-1', today: '2026-09-26' });
@@ -2695,7 +2702,12 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
       expect(raiseTermiteRetrievalTask).toHaveBeenCalledTimes(1);
       expect(raiseTermiteRetrievalTask).toHaveBeenCalledWith('cust-1', null, {
         retrieveAfter: '2027-05-20', termId: 'term-1', episodeKey: 'portal_renewal_decline',
+        // The decline's own time — its place in the retrieval chronology.
+        eventAt: '2026-09-26T14:00:00.000Z',
       });
+      expect(taskRowProbe.whereRaw).toHaveBeenCalledWith(
+        "metadata->>'dedupeKey' = ?", ['termite_station_retrieval:term:term-1:portal_renewal_decline:dated:2027-05-20'],
+      );
       expect(bellBody()).toContain('A dated station-retrieval task was raised for after');
       expect(bellBody()).not.toContain('no action needed');
       // Settled: the persisted marker keeps the daily sweep off this term.
@@ -2744,6 +2756,20 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
       expect(result.ok).toBe(true);
       expect(raiseTermiteRetrievalTask).not.toHaveBeenCalled();
       expect(result.retrieval).toEqual({ raised: false, reason: 'caller_transaction' });
+    });
+
+    test('a helper result of supersededByNewer is NOT raised — no marker (the sweep re-checks), and the bell says a newer instruction stands', async () => {
+      raiseTermiteRetrievalTask.mockResolvedValueOnce({ raised: true, stationCount: 12, deduped: true, supersededByNewer: 'req-9' });
+      await freshDecline(anchored);
+      expect(markerInsert.insert).not.toHaveBeenCalled();
+      expect(bellBody()).toContain('A newer station-retrieval instruction already stands on this account');
+      expect(bellBody()).not.toContain('A dated station-retrieval task was raised');
+    });
+
+    test('a "raised" result with no task row for THIS decline is not settled either', async () => {
+      await freshDecline(anchored, null, { taskRow: null });
+      expect(markerInsert.insert).not.toHaveBeenCalled();
+      expect(bellBody()).toContain('could not be raised yet');
     });
 
     test('a task failure never fails the committed decline — no marker, so the daily sweep retries; the bell says so', async () => {

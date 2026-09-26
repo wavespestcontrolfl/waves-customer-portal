@@ -6180,7 +6180,8 @@ async function raisePortalDeclineRetrievalTask(termId) {
     const portalDecline = await db('activity_log')
       .where({ action: CUSTOMER_DECLINE_ACTIVITY_ACTION })
       .whereRaw("metadata->>'term_id' = ?", [termIdText])
-      .first('id');
+      .orderBy('created_at', 'asc')
+      .first('id', 'created_at', 'metadata');
     if (!portalDecline) return { raised: false, reason: 'not_portal_decline' };
     const settled = await db('activity_log')
       .where({ action: DECLINE_RETRIEVAL_ACTIVITY_ACTION })
@@ -6208,11 +6209,33 @@ async function raisePortalDeclineRetrievalTask(termId) {
     if (other) {
       outcome = { raised: false, reason: 'other_termite_plan' };
     } else {
-      const { raiseTermiteRetrievalTask } = require('./cancellation-processor');
+      const { raiseTermiteRetrievalTask, termRetrievalDedupeKey } = require('./cancellation-processor');
+      // Codex #4940 r6 P1: the decline has no service request, so it passes
+      // its real event time — without it the helper ranks it as the OLDEST
+      // event and yields to any earlier request-keyed retrieval row (even
+      // one staff already acted on), raising nothing.
+      const declineMeta = typeof portalDecline.metadata === 'string'
+        ? (() => { try { return JSON.parse(portalDecline.metadata); } catch { return {}; } })()
+        : (portalDecline.metadata || {});
+      const eventAt = declineMeta.decided_at || portalDecline.created_at || null;
       const raised = await raiseTermiteRetrievalTask(term.customer_id, null, {
-        retrieveAfter: termEnd, termId: term.id, episodeKey: DECLINE_RETRIEVAL_EPISODE,
+        retrieveAfter: termEnd, termId: term.id, episodeKey: DECLINE_RETRIEVAL_EPISODE, eventAt,
       });
-      outcome = raised?.raised ? { raised: true } : { raised: false, reason: raised?.reason || 'not_raised' };
+      if (raised?.supersededByNewer) {
+        // A NEWER retrieval instruction stands on the account — nothing was
+        // created or reopened for THIS decline. Not settled: no marker, the
+        // sweep re-checks, and staff are told plainly.
+        outcome = { raised: false, reason: 'superseded_by_newer' };
+      } else if (raised?.raised) {
+        // Settle only on evidence: this decline's own task row must exist.
+        const taskRow = await db('notifications')
+          .where({ recipient_type: 'admin' })
+          .whereRaw("metadata->>'dedupeKey' = ?", [termRetrievalDedupeKey(term.id, DECLINE_RETRIEVAL_EPISODE, termEnd)])
+          .first('id');
+        outcome = taskRow ? { raised: true } : { raised: false, reason: 'not_raised' };
+      } else {
+        outcome = { raised: false, reason: raised?.reason || 'not_raised' };
+      }
     }
     const outcomeKey = outcome.raised ? 'raised' : outcome.reason;
     if (DECLINE_RETRIEVAL_SETTLED.has(outcomeKey)) {
@@ -6339,6 +6362,8 @@ function retrievalSentence(retrieval, termEndLabel) {
       return 'No Waves-owned termite stations are on file, so no retrieval task was raised.';
     case 'other_termite_plan':
       return `This customer has another termite annual plan, so no retrieval task was raised automatically — confirm which stations to pull after ${termEndLabel}.`;
+    case 'superseded_by_newer':
+      return `A newer station-retrieval instruction already stands on this account, so no separate task was raised for this decline — confirm it covers pulling the stations after ${termEndLabel}.`;
     case 'failed':
     case 'not_raised':
       return `The station-retrieval task could not be raised yet — it is retried automatically each day; create it by hand for after ${termEndLabel} if it does not appear.`;

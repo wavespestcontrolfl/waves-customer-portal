@@ -226,3 +226,52 @@ test('a term WITHOUT an episode (or no term) keeps the per-request key', async (
   ]);
   expect(mockNotifyAdmin.mock.calls[0][3].metadata).not.toHaveProperty('termId');
 });
+
+// #4940 r6: a request-less caller (the portal renewal decline) passes its
+// real event time. Without it the raise counts as the OLDEST event and
+// yields to any earlier request-keyed row, even one staff already read.
+describe('request-less raise with eventAt (portal renewal decline)', () => {
+  const portalArgs = (eventAt) => ({
+    retrieveAfter: '2027-05-20', termId: 'term-9', episodeKey: 'portal_renewal_decline', ...(eventAt ? { eventAt } : {}),
+  });
+
+  test('without eventAt (unchanged legacy behavior) it still yields to an older READ request-keyed row', async () => {
+    mockTables.notifications = [datedRow('req-a', {})];
+    mockTables.notifications[0].read_at = new Date('2026-08-11');
+    const out = await raiseTermiteRetrievalTask('c1', null, portalArgs(null));
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+    expect(out).toEqual(expect.objectContaining({ supersededByNewer: 'req-a' }));
+  });
+
+  test('an eventAt AFTER the older request raises this event\'s own dated task, stamped with its eventAt', async () => {
+    mockTables.notifications = [datedRow('req-a', {})];
+    mockTables.notifications[0].read_at = new Date('2026-08-11');
+    const out = await raiseTermiteRetrievalTask('c1', null, portalArgs('2026-09-26T14:00:00Z'));
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+    const opts = mockNotifyAdmin.mock.calls[0][3];
+    expect(opts.dedupeKey).toBe('termite_station_retrieval:term:term-9:portal_renewal_decline:dated:2027-05-20');
+    expect(opts.metadata).toEqual(expect.objectContaining({ eventAt: '2026-09-26T14:00:00.000Z', termId: 'term-9' }));
+    expect(out).toEqual({ raised: true, stationCount: 1 });
+  });
+
+  test('an eventAt BEFORE a newer request still yields to that request', async () => {
+    mockTables.notifications = [datedRow('req-b', {})];
+    const out = await raiseTermiteRetrievalTask('c1', null, portalArgs('2026-08-15T00:00:00Z'));
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+    expect(out).toEqual(expect.objectContaining({ supersededByNewer: 'req-b' }));
+  });
+
+  test('a later OLDER-request repair yields to the eventAt-stamped portal row instead of retiring it', async () => {
+    mockTables.notifications = [{
+      id: 'n-portal', recipient_type: 'admin', read_at: null,
+      metadata: {
+        kind: 'termite_station_retrieval', customerId: 'c1', retrieveAfter: '2027-05-20', eventAt: '2026-08-25T00:00:00.000Z',
+        dedupeKey: 'termite_station_retrieval:term:term-9:portal_renewal_decline:dated:2027-05-20',
+      },
+    }];
+    const out = await raiseTermiteRetrievalTask('c1', 'req-1', { retrieveAfter: '2027-02-28' });
+    expect(mockTables.notifications[0].read_at).toBeNull();
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+    expect(out).toEqual(expect.objectContaining({ supersededByNewer: 'event:2026-08-25T00:00:00.000Z' }));
+  });
+});
