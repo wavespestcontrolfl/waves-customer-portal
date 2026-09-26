@@ -145,7 +145,7 @@ const OPS_LINE_METRIC_META = {
   response_speed_min: { short: 'resp', fmt: (v) => `${roundOne(v)}m` },
   lead_conversion: { short: 'conversion', fmt: (v) => `${roundOne(v)}%` },
   stops_per_hour: { short: 'stops/hr', fmt: (v) => `${roundOne(v)}` },
-  revenue_per_man_hour: { short: '$/man-hr', fmt: (v) => `$${roundOne(v)}/hr` },
+  revenue_per_man_hour: { short: 'rev/hr', fmt: (v) => `$${roundOne(v)}` },
   gross_margin: { short: 'margin', fmt: (v) => `${roundOne(v)}%` },
   ar_days: { short: 'AR days', fmt: (v) => `${roundOne(v)}d` },
   retention_pct: { short: 'retention', fmt: (v) => `${roundOne(v)}%` },
@@ -162,7 +162,7 @@ function buildOpsLine(kpis) {
   // an untargeted metric (e.g. stops_per_hour with no store row) is neither
   // on-target nor unavailable — there's nothing to grade it against.
   const targeted = kpis.filter((k) => k.target != null && OPS_LINE_METRIC_META[k.metric]);
-  if (targeted.length === 0) return 'Ops 7d: all on target';
+  if (targeted.length === 0) return 'Ops 7d: no targets set';
 
   // Unavailable = has a target but no usable value (null last7, or a null
   // tone — a computeCoreKpis failure, an empty window, or a partial query
@@ -185,10 +185,11 @@ function buildOpsLine(kpis) {
     return `${meta.short} ${meta.fmt(k.last7)} (tgt ${meta.fmt(k.target)})`;
   });
 
-  // "all on target" describes the available, targeted metrics only — an
-  // unavailable metric is flagged separately via the "; n/a: ..." suffix
-  // rather than silently excluded from (or falsely folded into) that claim.
-  let line = `Ops 7d: ${top.length > 0 ? top.join(', ') : 'all on target'}`;
+  // "all on target" only when every targeted metric was graded 'good'; with
+  // an unavailable metric the claim narrows to "rest on target" and the
+  // "; n/a: ..." suffix names what could not be graded.
+  const onTarget = unavailable.length > 0 ? 'rest on target' : 'all on target';
+  let line = `Ops 7d: ${top.length > 0 ? top.join(', ') : onTarget}`;
   if (unavailable.length > 0) {
     const names = unavailable.map((k) => OPS_LINE_METRIC_META[k.metric].short);
     line += `; n/a: ${names.join(', ')}`;

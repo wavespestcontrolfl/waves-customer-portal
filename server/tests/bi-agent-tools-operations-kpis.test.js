@@ -211,13 +211,13 @@ describe('get_operations_snapshot — kpis (last7 vs last30 vs targets)', () => 
       expect(result.opsLine).toBe('Ops 7d: KPIs unavailable');
     });
 
-    it('flags a null targeted metric as "; n/a: ..." rather than folding it into "all on target"', async () => {
+    it('flags a null targeted metric as "; n/a: ..." and narrows the claim to "rest on target"', async () => {
       // Every other targeted metric is at its good value; ar_days alone came
       // back null (e.g. its query threw while the rest of computeCoreKpis
       // succeeded — a partial failure, not a total one).
       mockComputeCoreKpis.mockResolvedValue(kpiSet({ ...GOOD, arDays: null }));
       const result = await executeBITool('get_operations_snapshot', {});
-      expect(result.opsLine).toBe('Ops 7d: all on target; n/a: AR days');
+      expect(result.opsLine).toBe('Ops 7d: rest on target; n/a: AR days');
     });
 
     it('lists only the worst 4 when more than 4 metrics are off target', async () => {
