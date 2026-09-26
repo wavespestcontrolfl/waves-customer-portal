@@ -186,6 +186,14 @@ describe('stripTrailingSignature — anySigner', () => {
     'We can help.\nSarah Jones',
     'Thanks, Sarah!',
     'See you Tuesday — Mike will be your tech.',
+    // Codex r6 on #4975: a dashed value under a label, an information
+    // question or a list item is the answer, not a sign-off.
+    'Which service:\n— Lawn Care',
+    'Your technician:\n— Sarah',
+    'Your technician is:\n— Sarah',
+    'Who will be coming?\n— Sarah',
+    'Your technician is:\n— Adam',
+    'Options:\n- Lawn Care\n- Pest Control',
   ])('%j is not a sign-off and is kept', (text) => {
     expect(any(text)).toBe(text);
   });

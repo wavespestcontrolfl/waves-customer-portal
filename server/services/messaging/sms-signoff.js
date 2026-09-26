@@ -128,6 +128,17 @@ const ANY_SIGNER_RES = [
   { re: new RegExp(`(?<=(?:^|[.!?\\n])\\s*${ANY_CLOSER}[!.]?)[ \\t]*\\n\\s*${CAP_NAME}${TAIL}`, 'u'), mode: 'keepAddressee' },
   { re: new RegExp(`(?:^|(?<=[.!?])\\s+|${OWN_LINE})${ANY_CLOSER},?[ \\t]+${CAP_NAME}${TAIL}`, 'u'), mode: 'otherThanAddressee' },
 ];
+// A dash can also set a value on its own line: under a label ("Your
+// technician:\n— Sarah", "Which service:\n— Lawn Care"), under an information
+// question ("Who will be coming?\n— Sarah") or as the next item of a dashed
+// or bulleted list. Such a text keeps its tail through both passes, known
+// signers included. A broad closing question ("Would you like to
+// schedule?\n— Sarah") is still a sign-off.
+const VALUE_QUESTION = anyCase('(?:who|what|which|where|when|why|how)');
+const DASH_VALUE_TAIL_RE = new RegExp(
+  `(?:^|\\n)(?:[^\\n]*:[ \\t]*|[^\\n]*\\b${VALUE_QUESTION}\\b[^.!?\\n]*\\?[ \\t]*|[ \\t]*(?:${DASH}|[\\u2022*])[^\\n]*)\\n\\s*${DASH}\\s*${DASH_NAME}${TAIL}`,
+  'u',
+);
 
 function stripAnySignerOnce(text, addresseeFirstName) {
   const addressee = String(addresseeFirstName || '').trim().toLowerCase();
@@ -189,8 +200,9 @@ function stripTrailingSignature(message, { addresseeFirstName, anySigner = false
   if (key && THANKS_BY_NAME_RES[key].test(original)) return original;
   let text = original;
   for (let i = 0; i < 3; i += 1) {
-    let next = stripOnce(text, res);
-    if (anySigner) next = stripAnySignerOnce(next, addresseeFirstName);
+    const dashValue = anySigner && DASH_VALUE_TAIL_RE.test(text);
+    let next = dashValue ? text : stripOnce(text, res);
+    if (anySigner && !dashValue) next = stripAnySignerOnce(next, addresseeFirstName);
     if (next === text) break;
     text = next;
   }
