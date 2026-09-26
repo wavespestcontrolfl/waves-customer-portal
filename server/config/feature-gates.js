@@ -2149,6 +2149,19 @@ const gates = {
   // Kill switch: unset GATE_ROUTE_REORDER_COMPLETE_ORDER.
   routeReorderCompleteOrder: gateEnvValue('GATE_ROUTE_REORDER_COMPLETE_ORDER'),
 
+  // Stale-order canonicalization (nightly pass + the route-order-cleanup
+  // script): on an unfrozen tech-day whose stored route_order is stale (a
+  // null/duplicate position, a numeric gap, or a later promise numbered
+  // ahead of an earlier one — staleOrderReasons in route-reorder-window-fit.js),
+  // the comparison baseline becomes the promised-window order instead of the
+  // stale stored order, and a day Google can't even run (coordless, too few
+  // geocoded stops) still gets that baseline written. Non-stale days and
+  // gate-off are byte-for-byte the pre-existing behavior. Nested inside
+  // GATE_ROUTE_REORDER for the nightly pass; the cleanup script also honors
+  // opts.canonicalizeStale directly. Read at call time. No customer messages.
+  // Kill switch: unset GATE_ROUTE_REORDER_STALE_ORDER.
+  routeReorderStaleOrder: gateEnvValue('GATE_ROUTE_REORDER_STALE_ORDER'),
+
   // Planned route measurements and candidate-specific gap checks in the
   // existing Intelligence Bar. Read-only and explicitly opt-in everywhere.
   scheduleQualityMeasurements: gateEnvValue('GATE_SCHEDULE_QUALITY_MEASUREMENTS'),

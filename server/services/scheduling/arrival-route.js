@@ -11,7 +11,8 @@ const { etDateString, etParts } = require('../../utils/datetime-et');
 const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
 const { TERMINAL_ROW_STATUSES } = require('../visit-context/statuses');
 const { dayStopsQuery, guardedCoordSelects, serviceLocationSelects, resolveServiceLocation } = require('./day-stops');
-const { currentOrder, effectiveWindowRange, simulateArrivalRoute, workDuration, isCoVisitPair } = require('../route-reorder-window-fit');
+const { currentOrder, effectiveWindowRange, simulateArrivalRoute, workDuration,
+  staleOrderReasons, promisedWindowOrder } = require('../route-reorder-window-fit');
 const { SHIFT, capacityEnabled, placementFitsShift } = require('./policy');
 const { allocationKey, occupiedRows } = require('./visit-capacity');
 
@@ -185,19 +186,11 @@ function unverified(target, date) {
 
 /** A stored order that is not a whole, window-ordered sequence: a stop with
  *  no position, two stops sharing one, or a later promise numbered ahead of
- *  an earlier one. */
+ *  an earlier one. Delegates to route-reorder-window-fit's staleOrderReasons
+ *  (shared with the nightly canonicalization pass's per-reason ledger
+ *  evidence) — identical semantics, OR'd into one boolean here. */
 function storedOrderStale(rows, members = rows) {
-  const positions = rows.map(row => row.route_order);
-  if (positions.some(p => p == null) || new Set(positions.map(Number)).size !== positions.length) return true;
-  // A numeric gap (1, 3) is leftover numbering from a stop that left the
-  // day. Checked on the ungrouped rows, where a visit group's members hold
-  // consecutive positions; a completed prefix (today's route resuming at 4)
-  // is not a gap (Codex #4829 r5 P2).
-  const numbered = members.map(row => Number(row.route_order)).filter(Number.isFinite).sort((a, b) => a - b);
-  if (numbered.some((p, i) => i > 0 && p !== numbered[i - 1] + 1)) return true;
-  const starts = currentOrder(rows).map(row => (row.arrivalRange || effectiveWindowRange(row))?.startMin)
-    .filter(Number.isFinite);
-  return starts.some((start, i) => i > 0 && start < starts[i - 1]);
+  return staleOrderReasons(rows, members).length > 0;
 }
 
 /** The day in promised-window order, ignoring stored positions — sorted by
@@ -211,35 +204,11 @@ function storedOrderStale(rows, members = rows) {
  *  nulling route_order and re-sorting through currentOrder reproduced the
  *  exact same (inverted) order it was meant to rescue (Codex r1 P1).
  *  Genuinely unconstrained rows (no promise at all) still sort last, tied by
- *  created_at/id like the board. */
+ *  created_at/id like the board. Delegates to route-reorder-window-fit's
+ *  promisedWindowOrder (shared with the nightly canonicalization pass's
+ *  stale-order baseline) — identical behavior. */
 function clockOrder(rows) {
-  const sorted = [...rows].sort((a, b) => {
-    const sa = (a.arrivalRange || effectiveWindowRange(a))?.startMin ?? Infinity;
-    const sb = (b.arrivalRange || effectiveWindowRange(b))?.startMin ?? Infinity;
-    if (sa !== sb) return sa - sb;
-    const ca = a.created_at ? new Date(a.created_at).getTime() : 0;
-    const cb = b.created_at ? new Date(b.created_at).getTime() : 0;
-    if (ca !== cb) return ca - cb;
-    return String(a.id) < String(b.id) ? -1 : 1;
-  });
-  // The simulation merges a same-customer co-visit only when the two rows
-  // are consecutive, so a sibling pulled apart by another customer's row
-  // on the created_at tiebreak would be driven to twice (Codex #4829 r4
-  // P1). Pull each sibling up to sit right after its chain.
-  const rangeFor = row => row.arrivalRange || effectiveWindowRange(row);
-  const ordered = [];
-  const remaining = [...sorted];
-  while (remaining.length) {
-    let last = remaining.shift();
-    ordered.push(last);
-    let i = remaining.findIndex(row => isCoVisitPair(rangeFor, last, row));
-    while (i >= 0) {
-      last = remaining.splice(i, 1)[0];
-      ordered.push(last);
-      i = remaining.findIndex(row => isCoVisitPair(rangeFor, last, row));
-    }
-  }
-  return ordered;
+  return promisedWindowOrder(rows);
 }
 
 function routeDriveMinutes(stops, origin) {

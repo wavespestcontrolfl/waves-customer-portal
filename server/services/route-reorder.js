@@ -46,7 +46,8 @@ const { toDateStr } = require('./auto-dispatch/dates');
 const { effectiveServiceAddress } = require('./stamped-address');
 const { loadReminderFreeze, FREEZE_HOURS, TIER2_MIN_DAYS_OUT } = require('./auto-dispatch/route-tiers');
 const { computeWindowFitOrder, effectiveWindowRange, currentOrder, computeChronologicalRepair, workDuration,
-  simulateArrivalRoute, isCoVisitPair, advanceCoVisit, startCoVisitChain } = require('./route-reorder-window-fit');
+  simulateArrivalRoute, isCoVisitPair, advanceCoVisit, startCoVisitChain,
+  staleOrderReasons, promisedWindowOrder } = require('./route-reorder-window-fit');
 
 const GOOGLE_WAYPOINT_CAP = 25;
 // The reorder pass models future days, where en_route/on_site can't occur;
@@ -918,6 +919,238 @@ function hasIncompleteStoredOrder(stops) {
   return positions.some((p) => p == null) || new Set(positions.map(Number)).size !== positions.length;
 }
 
+/** Bounded, deduped, sorted date list — shared by opts.repairOnly and the
+ *  stale-order canonicalization mode's own opts.dates: both accept any date
+ *  in D+1..D+30 ET (today exclusive, lastDate inclusive). */
+function boundedDateList(rawDates, today, lastDate) {
+  return [...new Set((rawDates || []).map(toDateStr))]
+    .filter((date) => validCalendarDate(date) && date > today && date <= lastDate)
+    .sort();
+}
+
+/**
+ * The promised-window baseline for a stale tech-day (route-reorder-window-fit's
+ * promisedWindowOrder) plus the ONE feasibility check that matters for a
+ * baseline written with no Google call: can the day actually be driven in
+ * this order at all (untimed stops interleaved around fixed promises can
+ * still make a day undriveable even though every promise is in the right
+ * relative order). Returns null when the baseline itself is not drivable —
+ * fail closed, no baseline write, the day keeps its original skip reason.
+ */
+function canonicalizeBaselineOrder(RouteOptimizer, techStops) {
+  const orderedStops = promisedWindowOrder(techStops);
+  const simulation = simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, orderedStops, { startMin: 8 * 60 });
+  if (!simulation) return null;
+  return { orderedStops, meters: modelDistanceMeters(RouteOptimizer, orderedStops) };
+}
+
+/** {id, before, after} for every stop whose position actually moves between
+ *  the stored order and `finalOrdered` — the nightly ledger's
+ *  route_order_changes evidence (ids and integers only, never names/addresses). */
+function routeOrderChanges(techStops, finalOrdered) {
+  const beforeById = new Map(techStops.map((s) => [s.id, s.route_order == null ? null : Number(s.route_order)]));
+  return finalOrdered.reduce((changes, stop, index) => {
+    const before = beforeById.get(stop.id) ?? null;
+    const after = index + 1;
+    if (before !== after) changes.push({ id: stop.id, before, after });
+    return changes;
+  }, []);
+}
+
+/** 'repair' | 'window_fit' | 'google' | 'promised_window' — the canonicalized
+ *  ledger tag's source label, collapsing every optimizer/source string this
+ *  pass can produce into the four the brief names. */
+function canonicalSourceLabel(repair, sourceField) {
+  if (repair) return 'repair';
+  if (sourceField === 'window_constrained') return 'window_fit';
+  if (sourceField === 'promised_window') return 'promised_window';
+  return 'google';
+}
+
+/**
+ * The transactional route_order write — the exact write the trusted /optimize
+ * path performs, revalidated at commit time (membership, windows, freeze).
+ * Pulled out of the per-tech-day loop so the stale-order canonicalization
+ * paths that never call Google (COORDLESS/TOO_FEW_GEOCODED_STOPS/
+ * OVER_WAYPOINT_CAP days) can reuse the SAME fenced writer instead of a
+ * second one. Throws REMINDER_GUARD_OUTAGE / 40001 / STALE_TECH_DAY exactly
+ * as before — the caller classifies (classifyWriteError below).
+ *
+ * membership/window/freeze re-validation, all under COMMIT-TIME revalidation:
+ * the optimizer call can take seconds, so inside the transaction the
+ * tech-day is row-locked and re-read, and the write only proceeds when it
+ * still matches the optimized snapshot — same membership (nothing added,
+ * moved, cancelled, reassigned), same window_starts (the chronology guard's
+ * inputs), and still unfrozen (the 15-min reminder cron may have sent
+ * during the gap; freeze state is re-read on the trx). Any drift rolls the
+ * whole tech-day back untouched.
+ *
+ * SERIALIZABLE: FOR UPDATE locks existing rows but cannot stop a phantom —
+ * a stop INSERTED/reassigned into this tech-day after the membership
+ * SELECT. Serializable isolation predicate-locks the read; a concurrent
+ * membership change aborts THIS transaction with a serialization failure
+ * (40001), handled by the caller as a stale tech-day skip. Especially
+ * relevant while the 4:10 auto-dispatch run may still be applying moves
+ * under its own advisory lock.
+ *
+ * MEMBERSHIP FENCE (codex GitHub round P1): the writers that can
+ * add/reassign a stop onto this tech-day already serialize on the
+ * tech-scoped 'slot-reserve' advisory xact lock — the rebooker's move
+ * transaction (rebooker.js kept-tech lock), slot-reservation.js estimate
+ * reserves, and createSelfBooking all take
+ * `hashtext('slot-reserve'), hashtext('tech:date')`. Taking the SAME lock
+ * here (blocking, xact-scoped) before the membership read fences those
+ * writers for the duration of the reorder commit: they queue behind us;
+ * anything that committed before we got the lock is visible to the re-read
+ * below. Single lock per trx (one tech-day), taken before any row locks —
+ * no ordering inversion with the date→tech contract in
+ * scheduling/occupancy.js (tech-lock-only is the accepted slot-reservation
+ * pattern). The IB assign/swap/move tools hold the same fence via
+ * scheduling/tech-day-lock.js AND null the stop's route_order on entry.
+ *
+ * Deliberately NOT fenced: pure INSERT paths (appointment creation,
+ * recurring top-ups, estimate acceptance). No insert path anywhere sets
+ * route_order — only optimizer paths write it — and every consumer orders
+ * COALESCE(route_order, 999), so a stop inserted after this commit appends
+ * AFTER the ordered run: deterministic, never interleaved, identical to a
+ * booking landing after the shipped manual /optimize, and folded in by the
+ * next nightly pass while the day is in band. The fence's real job is
+ * writers that can CARRY or CLOBBER a non-null route_order (reassign/move/
+ * swap/rebooker/manual reorder mid-run — the latter caught by the commit
+ * guard's route_order re-check).
+ */
+async function writeTechDayOrder(conn, { dateStr, techId, techStops, finalOrdered, repair, opts, now, repairGates }) {
+  const stale = (msg) => Object.assign(new Error(msg), { code: 'STALE_TECH_DAY' });
+  await conn.transaction(async (trx) => {
+    await trx.raw(
+      'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+      ['slot-reserve', `${techId}:${dateStr}`],
+    );
+    const live = await trx('scheduled_services')
+      .where('scheduled_services.scheduled_date', dateStr)
+      .where('scheduled_services.technician_id', techId)
+      .whereNotIn('scheduled_services.status', EXCLUDE_STATUSES)
+      .whereRaw(LIVE_HOLD_SQL)
+      .forUpdate('scheduled_services')
+      .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+      .select('scheduled_services.id', 'scheduled_services.window_start',
+        'scheduled_services.window_end', 'scheduled_services.visit_id',
+        'scheduled_services.time_window',
+        'scheduled_services.estimated_duration_minutes',
+        'scheduled_services.auto_dispatch_locked', 'scheduled_services.auto_dispatch_excluded',
+        'scheduled_services.customer_id',
+        'scheduled_services.service_address_line1', 'scheduled_services.service_address_line2',
+        'scheduled_services.service_address_city', 'scheduled_services.service_address_zip',
+        { customer_address_line1: 'customers.address_line1',
+          customer_address_line2: 'customers.address_line2',
+          customer_city: 'customers.city',
+          customer_state: 'customers.state',
+          customer_zip: 'customers.zip' },
+        'scheduled_services.service_type', 'scheduled_services.is_recurring',
+        'scheduled_services.is_callback',
+        'scheduled_services.route_order', ...guardedCoordSelects(trx));
+    const num = (v) => (v == null || v === '' ? null : parseFloat(v));
+    const windowSig = (s) => windowGuardSignature(s, { repairDurationFallback: !!repair });
+    const snapshot = new Map(techStops.map((s) => [s.id, {
+      window: windowSig(s),
+      routeOrder: s.route_order == null ? null : Number(s.route_order),
+      lat: num(s.lat),
+      lng: num(s.lng),
+    }]));
+    if (live.length !== techStops.length) throw stale('tech-day membership changed during the run');
+    for (const row of live) {
+      const snap = snapshot.get(row.id);
+      if (!snap) throw stale(`stop ${row.id} joined the tech-day during the run`);
+      const win = windowSig(row);
+      if (win !== snap.window) throw stale(`stop ${row.id} window changed during the run`);
+      const ro = row.route_order == null ? null : Number(row.route_order);
+      if (ro !== snap.routeOrder) throw stale(`stop ${row.id} route_order changed during the run`);
+      if (num(row.lat) !== snap.lat || num(row.lng) !== snap.lng) {
+        throw stale(`stop ${row.id} coordinates changed during the run`);
+      }
+    }
+    const commitNow = opts.now || new Date();
+    const commitFreeze = await loadReminderFreeze(trx, techStops.map((s) => s.id), commitNow);
+    if (commitFreeze.failed) {
+      throw Object.assign(new Error('reminder status unreadable at commit'), { code: 'REMINDER_GUARD_OUTAGE' });
+    }
+    if (repair && !repairGates.every(gateEnvValue)) {
+      throw stale('route repair was disabled during the run');
+    }
+    if (etDateString(commitNow) >= dateStr) throw stale('the service day started during the run');
+    if (!repair && techStops.some((s) => commitFreeze.frozen.has(s.id))) throw stale('a 72h reminder was sent during the run');
+    if (!repair && techStops.some((s) => withinFreezeClock(dateStr, s.window_start, commitNow))) {
+      throw stale('day entered the 72h freeze window during the run');
+    }
+    for (let i = 0; i < finalOrdered.length; i++) {
+      const updated = await trx('scheduled_services')
+        .where({ id: finalOrdered[i].id })
+        .where('scheduled_date', dateStr)
+        .where('technician_id', techId)
+        .whereNotIn('status', EXCLUDE_STATUSES)
+        .update({ route_order: i + 1 });
+      if (updated !== 1) throw stale(`stop ${finalOrdered[i].id} changed during the run`);
+    }
+  }, { isolationLevel: 'serializable' });
+}
+
+/** Classify a writeTechDayOrder rejection into the run's summary — same three
+ *  outcomes the inline try/catch handled before this was pulled out (fail
+ *  closed + fail loud on a reminder-guard outage, quiet skip on a
+ *  serialization conflict or any other staleness). Returns true when the run
+ *  status must degrade to 'completed_with_errors'; rethrows anything else. */
+function classifyWriteError(writeErr, { summary, entryBase }) {
+  if (writeErr.code === 'REMINDER_GUARD_OUTAGE') {
+    summary.failed.push({ ...entryBase, reason: 'REMINDER_STATUS_UNKNOWN', error: writeErr.message });
+    logger.error(`[route-reorder] ${entryBase.date} tech ${entryBase.technician_id}: reminder-freeze read failed at commit — rolled back (fail closed)`);
+    return true;
+  }
+  if (writeErr.code === '40001') {
+    summary.skipped.push({ ...entryBase, reason: 'STALE_TECH_DAY', detail: 'serialization conflict — tech-day changed concurrently' });
+    logger.warn(`[route-reorder] ${entryBase.date} tech ${entryBase.technician_id}: serialization conflict — rolled back`);
+    return false;
+  }
+  if (writeErr.code === 'STALE_TECH_DAY') {
+    summary.skipped.push({ ...entryBase, reason: 'STALE_TECH_DAY', detail: writeErr.message });
+    logger.warn(`[route-reorder] ${entryBase.date} tech ${entryBase.technician_id}: superseded during the run — rolled back (${writeErr.message})`);
+    return false;
+  }
+  throw writeErr;
+}
+
+/**
+ * Write the promised-window baseline for a stale, unfrozen tech-day when
+ * nothing else cleared the savings floor against it — or when Google can't
+ * even run (COORDLESS_STOPS/TOO_FEW_GEOCODED_STOPS/OVER_WAYPOINT_CAP). A
+ * driveable order beats a stale one (owner ruling 2026-09-26) even at zero
+ * distance saving. Returns { handled: false } when the caller should fall
+ * through to its own original skip reason (no feasible baseline, or the
+ * baseline is already what's stored — nothing to canonicalize); { handled:
+ * true, failed } once this function has itself pushed the outcome (applied,
+ * dry-run plan, or a classified write failure) onto `summary`.
+ */
+async function attemptCanonicalizeWrite({ conn, dateStr, techId, techStops, staleReasons, entryBase, opts, now, RouteOptimizer, summary, repairGates }) {
+  const baseline = canonicalizeBaselineOrder(RouteOptimizer, techStops);
+  if (!baseline) return { handled: false };
+  const changes = routeOrderChanges(techStops, baseline.orderedStops);
+  if (!changes.length) return { handled: false };
+  const canonicalized = { reasons: staleReasons, source: 'promised_window' };
+  if (opts.dryRun) {
+    summary.applied.push({ ...entryBase, dry_run: true, source: 'promised_window', saved_meters: 0,
+      canonicalized, route_order_changes: changes,
+      before_ids: currentOrder(techStops).map((s) => s.id), after_ids: baseline.orderedStops.map((s) => s.id) });
+    return { handled: true, failed: false };
+  }
+  try {
+    await writeTechDayOrder(conn, { dateStr, techId, techStops, finalOrdered: baseline.orderedStops, repair: null, opts, now, repairGates });
+  } catch (writeErr) {
+    return { handled: true, failed: classifyWriteError(writeErr, { summary, entryBase }) };
+  }
+  summary.applied.push({ ...entryBase, saved_meters: 0, source: 'promised_window',
+    canonicalized, route_order_changes: changes });
+  return { handled: true, failed: false };
+}
+
 async function runRouteReorder(opts = {}, conn = db) {
   const config = getRouteReorderConfig(opts);
   const now = opts.now || new Date();
@@ -929,15 +1162,27 @@ async function runRouteReorder(opts = {}, conn = db) {
   const repairEnabled = repairGates.every(gateEnvValue);
   if (opts.repairOnly && !repairEnabled) return { status: 'gate_off' };
   const completeOrderEnabled = gateEnvValue('GATE_ROUTE_REORDER_COMPLETE_ORDER');
+  // Stale-order canonicalization mode (owner ruling 2026-09-26: "a driveable
+  // order beats a stale one"): opts.canonicalizeStale opts in directly (the
+  // route-order-cleanup script), or the gate opts in the nightly pass itself.
+  // Read at call time — unset/false is byte-for-byte today's behavior.
+  const canonicalizeStaleEnabled = opts.canonicalizeStale === true || gateEnvValue('GATE_ROUTE_REORDER_STALE_ORDER');
   const lastDate = etDateString(addETDays(now, 30));
-  const dates = opts.repairOnly
-    ? [...new Set((opts.dates || []).map(toDateStr))].filter(date => validCalendarDate(date) && date > today && date <= lastDate).sort()
+  // Custom dates (D+1..D+30 ET) are honored for opts.repairOnly (unchanged)
+  // and, ONLY when canonicalization is actually enabled, for a caller (the
+  // cleanup script) that names its own dates — the nightly band (D+1..D+6)
+  // is otherwise unaffected, and opts.dates is silently ignored exactly as
+  // before when the mode is off.
+  const customDates = opts.repairOnly
+    || (canonicalizeStaleEnabled && Array.isArray(opts.dates) && opts.dates.length > 0);
+  const dates = customDates
+    ? boundedDateList(opts.dates, today, lastDate)
     : Array.from({ length: TIER2_MIN_DAYS_OUT - 1 }, (_, index) => etDateString(addETDays(now, index + 1)));
   if (!dates.length) return { status: 'outside_planning_horizon' };
   const bandStart = dates[0];
   const bandEnd = dates.at(-1);
   const summary = {
-    run_type: opts.repairOnly ? 'route_repair_change' : 'route_tiers_nightly',
+    run_type: opts.runType || (opts.repairOnly ? 'route_repair_change' : 'route_tiers_nightly'),
     band: { start: bandStart, end: bandEnd },
     applied: [],
     skipped: [],
@@ -1057,8 +1302,34 @@ async function runRouteReorder(opts = {}, conn = db) {
             summary.skipped.push({ ...entryBase, reason: 'LOCKED_STOP' });
             continue;
           }
+          const RouteOptimizer = require('./route-optimizer');
+          // Stale-order canonicalization: reasons this tech-day's STORED
+          // order is stale (null/duplicate/gap/inversion — see
+          // staleOrderReasons), computed whenever the mode is enabled,
+          // whatever coordinates or freeze state this day turns out to have —
+          // the promised-window baseline needs neither Google nor an
+          // unfrozen clock to COMPUTE, only to WRITE.
+          const staleReasons = canonicalizeStaleEnabled ? staleOrderReasons(techStops) : [];
+          // Only attempted when unfrozen (freeze wins even under repairEnabled
+          // — mirrors the per-tech freeze check below) and under the same
+          // per-run apply cap every other write respects.
+          const canonicalizeUnfrozen = staleReasons.length > 0 && !clockFrozen && !reminderFrozen
+            && summary.applied.length < config.maxAppliesPerRun;
+          // Returns true when this tech-day is fully handled (applied, a
+          // dry-run plan entry, or a classified write failure) and the
+          // caller should `continue` instead of falling through to its own
+          // (Google-can't-run) skip reason.
+          const tryCanonicalizeOnly = async () => {
+            if (!canonicalizeUnfrozen) return false;
+            const outcome = await attemptCanonicalizeWrite({
+              conn, dateStr, techId, techStops, staleReasons, entryBase, opts, now, RouteOptimizer, summary, repairGates,
+            });
+            if (outcome.handled && outcome.failed) status = 'completed_with_errors';
+            return outcome.handled;
+          };
           const withCoords = techStops.filter((s) => parseFloat(s.lat) && parseFloat(s.lng));
           if (withCoords.length < 2) {
+            if (await tryCanonicalizeOnly()) continue;
             summary.skipped.push({ ...entryBase, reason: 'TOO_FEW_GEOCODED_STOPS', geocoded: withCoords.length });
             continue;
           }
@@ -1066,7 +1337,10 @@ async function runRouteReorder(opts = {}, conn = db) {
             // A stop without usable coordinates has no defensible position in
             // an autonomously computed order (optimizeRoute would push it to
             // the end with zero evidence that's driveable). An operator can
-            // make that call on the board; this pass skips the tech-day.
+            // make that call on the board; this pass skips the tech-day —
+            // UNLESS it is also stale, where the promised-window baseline
+            // needs no coordinates to compute (canonicalize mode only).
+            if (await tryCanonicalizeOnly()) continue;
             summary.skipped.push({ ...entryBase, reason: 'COORDLESS_STOPS', geocoded: withCoords.length });
             continue;
           }
@@ -1075,13 +1349,14 @@ async function runRouteReorder(opts = {}, conn = db) {
             continue;
           }
 
-          const RouteOptimizer = require('./route-optimizer');
           // Baseline = the current running order. Every stop must survive
           // the repair or optimizer; neither path may silently truncate it.
           const ordered = currentOrder(techStops);
           const repair = repairEnabled ? computeChronologicalRepair(RouteOptimizer, ordered) : null;
           if (!repair && withCoords.length > GOOGLE_WAYPOINT_CAP) {
-            // The pure repair never reaches Google's waypoint-limited API.
+            // The pure repair never reaches Google's waypoint-limited API —
+            // same coordinates-not-needed exception as above.
+            if (await tryCanonicalizeOnly()) continue;
             logger.warn(`[route-reorder] ${dateStr} tech ${techId}: ${withCoords.length} geocoded stops exceeds the ${GOOGLE_WAYPOINT_CAP}-waypoint cap — day skipped, not truncated`);
             summary.skipped.push({ ...entryBase, reason: 'OVER_WAYPOINT_CAP', geocoded: withCoords.length });
             continue;
@@ -1152,6 +1427,16 @@ async function runRouteReorder(opts = {}, conn = db) {
           const guardOutcome = chooseWindowSafeOrder({
             RouteOptimizer, googleOrder: result.orderedStops, sourceStops: techStops, googleSource: result.source, legs: result.legs,
           });
+          // Stale-order canonicalization: the comparison baseline becomes the
+          // promised-window order instead of the stale stored order — the
+          // Google/window-fit improvement below still has to beat THAT
+          // baseline under the normal floor. null when repair already fired
+          // (repair-first, unaffected) or the day is not stale (unchanged
+          // behavior — floorBaselineMeters falls back to the stored order's
+          // own distance, byte-identical to today).
+          const canonicalBaseline = (!repair && staleReasons.length > 0)
+            ? canonicalizeBaselineOrder(RouteOptimizer, techStops) : null;
+          const floorBaselineMeters = canonicalBaseline ? canonicalBaseline.meters : beforeMeters;
           // Savings floor for GOOGLE's order. Fallback ON + a guard conflict
           // defers the floor to the fallback's own check below: Google
           // optimizes ROUTED distance, so its (illegal) permutation can score
@@ -1169,14 +1454,30 @@ async function runRouteReorder(opts = {}, conn = db) {
           // Waived floor still demands a strictly shorter order (1 m).
           const floorWaived = completeOrderEnabled && hasIncompleteStoredOrder(techStops);
           const floorMeters = floorWaived ? 1 : config.minSavingsMeters;
-          if (!repair && savedMeters < floorMeters
+          // Attempt the promised-window baseline write when the improvement
+          // this iteration found does not clear the floor against it. A
+          // caller-supplied helper (not a bare `continue`) so all three
+          // below-floor exits share one decision: write the baseline if it
+          // differs from stored and is drivable, else fall through to the
+          // ORIGINAL skip below (no baseline write, exactly today's outcome).
+          const tryCanonicalizeFallback = async () => {
+            if (!canonicalBaseline) return false;
+            const outcome = await attemptCanonicalizeWrite({
+              conn, dateStr, techId, techStops, staleReasons, entryBase, opts, now, RouteOptimizer, summary, repairGates,
+            });
+            if (outcome.handled && outcome.failed) status = 'completed_with_errors';
+            return outcome.handled;
+          };
+          if (!repair && Math.max(0, floorBaselineMeters - afterMeters) < floorMeters
               && (guardOutcome.conflict === null || guardOutcome.gateOff === 'WINDOW_FIT')) {
+            if (await tryCanonicalizeFallback()) continue;
             summary.skipped.push({ ...entryBase, reason: 'BELOW_MIN_SAVINGS', ...metrics });
             continue;
           }
           if (guardOutcome.orderedStops == null) {
             // guardOutcome.conflict is always set here — orderedStops is only
             // null inside the shared decision's post-conflict branch.
+            if (await tryCanonicalizeFallback()) continue;
             const tag = gateStoodDown
               ? (guardOutcome.gateOff === 'CALIBRATION' ? { fallback: 'CALIBRATION_OFF' } : {})
               // NO_FEASIBLE_IMPROVEMENT (or, in principle, COORDLESS_STOPS —
@@ -1193,14 +1494,17 @@ async function runRouteReorder(opts = {}, conn = db) {
             // buttons have no savings floor); this pass only ever reorders
             // when it is worth it — apply ITS OWN floor to the found order
             // before accepting it (nightly-only bookkeeping, not a duplicate
-            // safety decision).
-            const fallbackSaved = Math.max(0, guardOutcome.beforeMeters - guardOutcome.afterMeters);
+            // safety decision). Baseline-relative when canonicalizing a stale
+            // day (see floorBaselineMeters above), else guardOutcome's own
+            // beforeMeters — byte-identical to today when not canonicalizing.
+            const fallbackSaved = Math.max(0, floorBaselineMeters - guardOutcome.afterMeters);
             if (fallbackSaved < floorMeters) {
               // The constrained search DID find and certify a legal order;
               // the nightly pass declines it only because it saves less than
               // this day's savings floor. Keep the original Google-order
               // conflict as evidence, but do not mislabel this as an
               // impossible schedule / missing feasible improvement.
+              if (await tryCanonicalizeFallback()) continue;
               summary.skipped.push({
                 ...entryBase,
                 reason: 'BELOW_MIN_SAVINGS',
@@ -1217,7 +1521,7 @@ async function runRouteReorder(opts = {}, conn = db) {
             // the promises cost us, for the ledger/observability.
             finalOrdered = guardOutcome.orderedStops;
             appliedMetrics = {
-              before_distance_meters: guardOutcome.beforeMeters,
+              before_distance_meters: floorBaselineMeters,
               after_distance_meters: guardOutcome.afterMeters,
               optimizer_distance_meters: result.totalDistanceMeters || 0,
               after_duration_seconds: guardOutcome.afterSeconds,
@@ -1232,180 +1536,39 @@ async function runRouteReorder(opts = {}, conn = db) {
           // finalOrdered/appliedMetrics keep their defaults set above.
 
           // Same write as the trusted /optimize path (route_order = position),
-          // but transactional AND revalidated at COMMIT time: the optimizer
-          // call can take seconds, so inside the transaction the tech-day is
-          // row-locked and re-read, and the write only proceeds when it still
-          // matches the optimized snapshot — same membership (nothing added,
-          // moved, cancelled, reassigned), same window_starts (the chronology
-          // guard's inputs), and still unfrozen (the 15-min reminder cron may
-          // have sent during the gap; freeze state is re-read on the trx).
-          // Any drift rolls the whole tech-day back untouched.
-          const stale = (msg) => Object.assign(new Error(msg), { code: 'STALE_TECH_DAY' });
-          try {
-            // SERIALIZABLE: FOR UPDATE locks existing rows but cannot stop a
-            // phantom — a stop INSERTED/reassigned into this tech-day after
-            // the membership SELECT. Serializable isolation predicate-locks
-            // the read; a concurrent membership change aborts THIS transaction
-            // with a serialization failure (40001), which is handled below as
-            // a stale tech-day skip. Especially relevant while the 4:10
-            // auto-dispatch run may still be applying moves under its own
-            // advisory lock.
-            await conn.transaction(async (trx) => {
-              // MEMBERSHIP FENCE (codex GitHub round P1): the writers that can
-              // add/reassign a stop onto this tech-day already serialize on
-              // the tech-scoped 'slot-reserve' advisory xact lock — the
-              // rebooker's move transaction (rebooker.js kept-tech lock),
-              // slot-reservation.js estimate reserves, and createSelfBooking
-              // all take `hashtext('slot-reserve'), hashtext('tech:date')`.
-              // Taking the SAME lock here (blocking, xact-scoped) before the
-              // membership read fences those writers for the duration of the
-              // reorder commit: they queue behind us; anything that committed
-              // before we got the lock is visible to the re-read below.
-              // Single lock per trx (one tech-day), taken before any row
-              // locks — no ordering inversion with the date→tech contract in
-              // scheduling/occupancy.js (tech-lock-only is the accepted
-              // slot-reservation pattern). The IB assign/swap/move tools hold
-              // the same fence via scheduling/tech-day-lock.js AND null the
-              // stop's route_order on entry.
-              //
-              // Deliberately NOT fenced: pure INSERT paths (appointment
-              // creation, recurring top-ups, estimate acceptance). No insert
-              // path anywhere sets route_order — only optimizer paths write
-              // it — and every consumer orders COALESCE(route_order, 999),
-              // so a stop inserted after this commit appends AFTER the
-              // ordered run: deterministic, never interleaved, identical to
-              // a booking landing after the shipped manual /optimize, and
-              // folded in by the next nightly pass while the day is in band.
-              // The fence's real job is writers that can CARRY or CLOBBER a
-              // non-null route_order (reassign/move/swap/rebooker/manual
-              // reorder mid-run — the latter caught by the commit guard's
-              // route_order re-check).
-              await trx.raw(
-                'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-                ['slot-reserve', `${techId}:${dateStr}`],
-              );
-              const live = await trx('scheduled_services')
-                .where('scheduled_services.scheduled_date', dateStr)
-                .where('scheduled_services.technician_id', techId)
-                .whereNotIn('scheduled_services.status', EXCLUDE_STATUSES)
-                .whereRaw(LIVE_HOLD_SQL)
-                // Lock the scheduled_services rows only — FOR UPDATE cannot
-                // target the nullable side of the customers left join.
-                .forUpdate('scheduled_services')
-                .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
-                .select('scheduled_services.id', 'scheduled_services.window_start',
-                  'scheduled_services.window_end', 'scheduled_services.visit_id',
-                  'scheduled_services.time_window',
-                  'scheduled_services.estimated_duration_minutes',
-                  'scheduled_services.auto_dispatch_locked', 'scheduled_services.auto_dispatch_excluded',
-                  // Co-visit inputs: two rows can keep identical
-                  // workDurations while their RAW estimates change the
-                  // merged clock (20+20 → 20+50 is 60 → 70 minutes on site),
-                  // and the merge itself keys on customer + premise (Codex
-                  // #4435 r2 P1).
-                  'scheduled_services.customer_id',
-                  'scheduled_services.service_address_line1', 'scheduled_services.service_address_line2',
-                  'scheduled_services.service_address_city', 'scheduled_services.service_address_zip',
-                  // The customer's primary premise too — an unstamped row's
-                  // merge identity lives there.
-                  { customer_address_line1: 'customers.address_line1',
-                    customer_address_line2: 'customers.address_line2',
-                    customer_city: 'customers.city',
-                    customer_state: 'customers.state',
-                    customer_zip: 'customers.zip' },
-                  // Planning-minute inputs, as selected at day-load.
-                  'scheduled_services.service_type', 'scheduled_services.is_recurring',
-                  'scheduled_services.is_callback',
-                  'scheduled_services.route_order', ...guardedCoordSelects(trx));
-              const num = (v) => (v == null || v === '' ? null : parseFloat(v));
-              // Full guard-input signature (shared with the admin optimize
-              // endpoints' own post-lock re-validation — see
-              // windowGuardSignature above): window RANGE + service duration —
-              // the chronology AND feasibility guards were evaluated against
-              // these, so any mid-run change invalidates the order.
-              const windowSig = (s) => windowGuardSignature(s, { repairDurationFallback: !!repair });
-              const snapshot = new Map(techStops.map((s) => [s.id, {
-                window: windowSig(s),
-                routeOrder: s.route_order == null ? null : Number(s.route_order),
-                lat: num(s.lat),
-                lng: num(s.lng),
-              }]));
-              if (live.length !== techStops.length) throw stale('tech-day membership changed during the run');
-              for (const row of live) {
-                const snap = snapshot.get(row.id);
-                if (!snap) throw stale(`stop ${row.id} joined the tech-day during the run`);
-                const win = windowSig(row);
-                if (win !== snap.window) throw stale(`stop ${row.id} window changed during the run`);
-                // route_order too: a dispatcher's manual reorder landing while
-                // the optimizer ran must WIN — never overwrite the operator's
-                // newer order with the autonomous one (codex round-3 P1).
-                const ro = row.route_order == null ? null : Number(row.route_order);
-                if (ro !== snap.routeOrder) throw stale(`stop ${row.id} route_order changed during the run`);
-                // Effective (divergence-guarded) coordinates too — the order
-                // was computed FOR those points; an address/coord change
-                // mid-optimization invalidates it (codex round-12 P1).
-                if (num(row.lat) !== snap.lat || num(row.lng) !== snap.lng) {
-                  throw stale(`stop ${row.id} coordinates changed during the run`);
-                }
-              }
-              // Freeze re-check at commit time (fail closed on unreadable).
-              const commitNow = opts.now || new Date();
-              const commitFreeze = await loadReminderFreeze(trx, techStops.map((s) => s.id), commitNow);
-              if (commitFreeze.failed) {
-                // Guard OUTAGE, not a superseded day — must fail LOUD like the
-                // day-level read (recorded as a failure, degrades run status),
-                // while the throw still rolls the write back.
-                throw Object.assign(new Error('reminder status unreadable at commit'), { code: 'REMINDER_GUARD_OUTAGE' });
-              }
-              if (repair && !repairGates.every(gateEnvValue)) {
-                throw stale('route repair was disabled during the run');
-              }
-              if (etDateString(commitNow) >= dateStr) throw stale('the service day started during the run');
-              if (!repair && techStops.some((s) => commitFreeze.frozen.has(s.id))) throw stale('a 72h reminder was sent during the run');
-              if (!repair && techStops.some((s) => withinFreezeClock(dateStr, s.window_start, commitNow))) {
-                throw stale('day entered the 72h freeze window during the run');
-              }
-              for (let i = 0; i < finalOrdered.length; i++) {
-                const updated = await trx('scheduled_services')
-                  .where({ id: finalOrdered[i].id })
-                  .where('scheduled_date', dateStr)
-                  .where('technician_id', techId)
-                  .whereNotIn('status', EXCLUDE_STATUSES)
-                  .update({ route_order: i + 1 });
-                if (updated !== 1) throw stale(`stop ${finalOrdered[i].id} changed during the run`);
-              }
-            }, { isolationLevel: 'serializable' });
-          } catch (writeErr) {
-            if (writeErr.code === 'REMINDER_GUARD_OUTAGE') {
-              // Fail closed AND loud: the reorder rolled back, and the outage
-              // is a FAILURE (status + failed_count), never a quiet skip.
-              status = 'completed_with_errors';
-              summary.failed.push({ ...entryBase, reason: 'REMINDER_STATUS_UNKNOWN', error: writeErr.message });
-              logger.error(`[route-reorder] ${dateStr} tech ${techId}: reminder-freeze read failed at commit — rolled back (fail closed)`);
+          // through writeTechDayOrder above (shared with the coordless/
+          // too-few-geocoded canonicalization paths, which never reach this
+          // point). opts.dryRun (the cleanup script's default) never opens
+          // this transaction at all — the plan below reports what WOULD be
+          // written, verified through every guard above but committed by
+          // nothing.
+          if (!opts.dryRun) {
+            try {
+              await writeTechDayOrder(conn, { dateStr, techId, techStops, finalOrdered, repair, opts, now, repairGates });
+            } catch (writeErr) {
+              if (classifyWriteError(writeErr, { summary, entryBase })) status = 'completed_with_errors';
               continue;
             }
-            // 40001 = serialization_failure: a concurrent transaction touched
-            // (or inserted into) this tech-day — same treatment as any other
-            // superseded day: roll back, skip, never retry blindly.
-            if (writeErr.code === '40001') {
-              summary.skipped.push({ ...entryBase, reason: 'STALE_TECH_DAY', detail: 'serialization conflict — tech-day changed concurrently' });
-              logger.warn(`[route-reorder] ${dateStr} tech ${techId}: serialization conflict — rolled back`);
-              continue;
-            }
-            if (writeErr.code === 'STALE_TECH_DAY') {
-              summary.skipped.push({ ...entryBase, reason: 'STALE_TECH_DAY', detail: writeErr.message });
-              logger.warn(`[route-reorder] ${dateStr} tech ${techId}: superseded during the run — rolled back (${writeErr.message})`);
-              continue;
-            }
-            throw writeErr;
           }
           summary.applied.push({
             ...entryBase,
             ...appliedMetrics,
             ...(!repair && appliedMetrics.saved_meters < config.minSavingsMeters
               ? { floor_waived: 'INCOMPLETE_STORED_ORDER' } : {}),
+            ...(opts.dryRun ? { dry_run: true, before_ids: ordered.map((s) => s.id), after_ids: finalOrdered.map((s) => s.id) } : {}),
+            // Canonicalization mode's ledger evidence — gated on the mode
+            // itself (never on gate-off) so it never changes the ordinary
+            // nightly pass's ledger shape. route_order_changes covers every
+            // applied day while the mode is on (the cleanup script's backup
+            // file needs an exact per-row before/after even for a plain
+            // distance reorder it happens to touch); `canonicalized` is added
+            // only for a day staleOrderReasons actually flagged.
+            ...(canonicalizeStaleEnabled ? { route_order_changes: routeOrderChanges(techStops, finalOrdered) } : {}),
+            ...(canonicalizeStaleEnabled && staleReasons.length > 0
+              ? { canonicalized: { reasons: staleReasons, source: canonicalSourceLabel(repair, appliedMetrics.source) } }
+              : {}),
           });
-          if (qualityEnabled) {
+          if (!opts.dryRun && qualityEnabled) {
             // Record the order that actually committed as well as the loaded
             // baseline, so later performance does not compare against the
             // defect this same run repaired.
@@ -1431,12 +1594,20 @@ async function runRouteReorder(opts = {}, conn = db) {
 
   // The existing nightly pass refreshes unresolved future-route cards.
   // Change-triggered repairs are followed by this check in their caller.
-  if (!opts.repairOnly && qualityEnabled && gateEnvValue('GATE_SCHEDULE_QUALITY_ALERTS')) {
+  // Never in dry-run mode — that also writes dispatch-card rows.
+  if (!opts.dryRun && !opts.repairOnly && qualityEnabled && gateEnvValue('GATE_SCHEDULE_QUALITY_ALERTS')) {
     const alerts = await require('./scheduling/quality-alerts').refreshScheduleQualityAlerts({ dates, now: opts.now }, conn);
     if (alerts.status === 'failed') {
       if (status === 'completed') status = 'completed_with_errors';
       summary.failed.push({ reason: 'QUALITY_ALERT_REFRESH_FAILED' });
     }
+  }
+  // Dry run (the route-order-cleanup script's default): every write above
+  // was diverted to a plan entry instead of a transaction (writeTechDayOrder
+  // is never called — see attemptCanonicalizeWrite and the per-tech commit
+  // above), and no ledger row is written either — a preview leaves no trace.
+  if (opts.dryRun) {
+    return { status, plan: buildDryRunPlan(summary) };
   }
   // ── Ledger: one route_optimization_planner_runs row per run. ──
   const ledger = await writeLedgerRow({ status, today, bandStart, bandEnd, techIds, config, summary }, conn);
@@ -1444,6 +1615,34 @@ async function runRouteReorder(opts = {}, conn = db) {
   // must surface as an exception, never report green (codex round-13 P1).
   const finalStatus = ledger == null && status === 'completed' ? 'completed_with_errors' : status;
   return { status: finalStatus, ledgerId: ledger, applied: summary.applied.length, skipped: summary.skipped.length, failed: summary.failed.length };
+}
+
+/** The route-order-cleanup script's dry-run contract: one entry per tech-day
+ *  this run REACHED, whether it would have applied a canonicalized order or
+ *  was skipped/failed. Built from the same summary.applied/skipped/failed
+ *  arrays the real run reports through the ledger — nothing extra to keep in
+ *  sync. `reasons`/`source` are populated only for a canonicalized entry
+ *  (see the `canonicalized` tag on summary.applied); a plain distance-only
+ *  reorder (non-stale day) still reports its before/after ids. */
+function buildDryRunPlan(summary) {
+  const applied = summary.applied.map((entry) => ({
+    date: entry.date, technicianId: entry.technician_id,
+    reasons: entry.canonicalized?.reasons || [],
+    source: entry.canonicalized?.source || entry.source || null,
+    before: entry.before_ids || [], after: entry.after_ids || [],
+    // Per-row {id, before, after} — the route-order-cleanup script's own
+    // backup-file format reads this directly rather than re-deriving
+    // positions from the id-order arrays above (which describe SEQUENCE,
+    // not the literal stored route_order a stale day can have gaps/nulls in).
+    route_order_changes: entry.route_order_changes || [],
+    skipped_reason: null,
+  }));
+  const notApplied = [...summary.skipped, ...summary.failed].map((entry) => ({
+    date: entry.date, technicianId: entry.technician_id,
+    reasons: [], source: null, before: [], after: [],
+    skipped_reason: entry.reason || null,
+  }));
+  return [...applied, ...notApplied];
 }
 
 /** Summarize the same night's auto-dispatch day-move run for the ledger
@@ -1619,5 +1818,6 @@ module.exports = {
   // re-validation reuses this SAME signature the shared decision was
   // evaluated against (codex GitHub round P2) rather than re-deriving it.
   windowGuardSignature,
-  _internals: { currentOrder, modelDriveMinutes, effectiveWindowStart, effectiveWindowRange, violatesWindowFeasibility, withinFreezeClock, violatesWindowChronology, modelDistanceMeters, loadAutoDispatchSummary, EXCLUDE_STATUSES, GOOGLE_WAYPOINT_CAP },
+  _internals: { currentOrder, modelDriveMinutes, effectiveWindowStart, effectiveWindowRange, violatesWindowFeasibility, withinFreezeClock, violatesWindowChronology, modelDistanceMeters, loadAutoDispatchSummary, EXCLUDE_STATUSES, GOOGLE_WAYPOINT_CAP,
+    boundedDateList, canonicalizeBaselineOrder, routeOrderChanges, canonicalSourceLabel, buildDryRunPlan },
 };

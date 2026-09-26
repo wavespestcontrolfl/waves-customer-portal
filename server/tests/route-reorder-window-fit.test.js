@@ -41,6 +41,7 @@ const routeTiers = require('../services/auto-dispatch/route-tiers');
 const { runRouteReorder, _internals } = require('../services/route-reorder');
 const {
   computeWindowFitOrder, computeChronologicalRepair, simulateArrivalRoute, effectiveWindowRange,
+  staleOrderReasons, promisedWindowOrder,
   _internals: wfInternals,
 } = require('../services/route-reorder-window-fit');
 
@@ -834,4 +835,80 @@ test('unit: an UNSTAMPED row inherits the customer premise — it does not merge
   const blankA = { ...inherited, customer_address_line1: null };
   const blankB = { ...sameUnit, service_address_line1: null, customer_address_line1: null };
   expect(isCoVisitPair(effectiveWindowRange, blankA, blankB)).toBe(false);
+});
+
+// ── Nightly canonicalization mode (GATE_ROUTE_REORDER_STALE_ORDER) — the
+// shared decomposition/baseline behind arrival-route.js's storedOrderStale
+// and clockOrder (see scheduling-planning-minutes.test.js's own coverage of
+// those two, which now runs against these same functions). ──
+describe('staleOrderReasons — canonicalization ledger evidence', () => {
+  const at = (id, start, routeOrder) => stop(id, { window_start: start, route_order: routeOrder });
+
+  test('null: any stop with no stored position', () => {
+    expect(staleOrderReasons([at('a', '09:00', 1), at('b', '11:00', null)])).toEqual(['null']);
+  });
+
+  test('duplicate: two DISTINCT non-null positions collide', () => {
+    expect(staleOrderReasons([at('a', '09:00', 1), at('b', '11:00', 1)])).toEqual(expect.arrayContaining(['duplicate']));
+  });
+
+  test('gap: a numeric gap in the ungrouped members; a resumed prefix is not a gap', () => {
+    expect(staleOrderReasons([at('a', '09:00', 1), at('b', '11:00', 3)])).toEqual(['gap']);
+    expect(staleOrderReasons([at('a', '09:00', 4), at('b', '11:00', 5)])).toEqual([]);
+  });
+
+  test('gap: a visit group\'s members hold consecutive positions, checked over the ungrouped members', () => {
+    const members = [at('g1', '09:00', 1), at('g2', '09:00', 2), at('b', '11:00', 3)];
+    expect(staleOrderReasons([members[0], members[2]], members)).toEqual([]);
+  });
+
+  test('inversion: a later promise numbered ahead of an earlier one', () => {
+    expect(staleOrderReasons([at('afternoon', '13:00', 1), at('morning', '09:00', 2)])).toEqual(['inversion']);
+  });
+
+  test('a complete, chronological order has no reasons at all', () => {
+    expect(staleOrderReasons([at('morning', '09:00', 1), at('afternoon', '13:00', 2)])).toEqual([]);
+  });
+});
+
+describe('promisedWindowOrder — the canonicalization baseline (shared with arrival-route.js clockOrder)', () => {
+  test('sorts by the REAL promised window, ignoring stored route_order entirely', () => {
+    const rows = [stop('afternoon', { window_start: '13:00', route_order: 1 }), stop('morning', { window_start: '09:00', route_order: 2 })];
+    expect(promisedWindowOrder(rows).map((r) => r.id)).toEqual(['morning', 'afternoon']);
+  });
+
+  test('a legacy time_window-only row sorts by its REAL resolved window, not last', () => {
+    const rows = [stop('afternoon', { time_window: 'afternoon', route_order: 1 }),
+      stop('morning', { time_window: 'morning', route_order: 2 })];
+    expect(promisedWindowOrder(rows).map((r) => r.id)).toEqual(['morning', 'afternoon']);
+  });
+
+  test('genuinely unconstrained rows sort last, tied by created_at then id', () => {
+    const rows = [
+      stop('u2', { created_at: '2020-01-02T00:00:00Z' }),
+      stop('timed', { window_start: '09:00' }),
+      stop('u1', { created_at: '2020-01-01T00:00:00Z' }),
+    ];
+    expect(promisedWindowOrder(rows).map((r) => r.id)).toEqual(['timed', 'u1', 'u2']);
+  });
+
+  test('same-customer co-visit siblings stay adjacent across another customer\'s tiebreak', () => {
+    const at = (id, customer, created) => ({ ...stop(id, { window_start: '09:00' }),
+      customer_id: customer, visit_id: null, created_at: created, lat: 1, lng: 1, service_address_line1: '1 Main St' });
+    const rows = [at('a-pest', 'cust-a', '2026-01-01T00:00:00Z'), at('b', 'cust-b', '2026-01-02T00:00:00Z'),
+      at('a-lawn', 'cust-a', '2026-01-03T00:00:00Z')];
+    expect(promisedWindowOrder(rows).map((r) => r.id)).toEqual(['a-pest', 'a-lawn', 'b']);
+  });
+
+  test('a shared visit_id keeps group members adjacent, even split by another row\'s tiebreak', () => {
+    // route-reorder.js never pre-groups visit_id members the way
+    // arrival-route.js's groupRouteStops does, so this generalization (beyond
+    // clockOrder's existing co-visit-only adjacency) is exercised directly.
+    const rows = [
+      stop('g1', { window_start: '09:00', visit_id: 'v1', created_at: '2026-01-01T00:00:00Z' }),
+      stop('other', { window_start: '09:00', created_at: '2026-01-02T00:00:00Z' }),
+      stop('g2', { window_start: '09:00', visit_id: 'v1', created_at: '2026-01-03T00:00:00Z' }),
+    ];
+    expect(promisedWindowOrder(rows).map((r) => r.id)).toEqual(['g1', 'g2', 'other']);
+  });
 });
