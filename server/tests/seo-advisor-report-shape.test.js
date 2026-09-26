@@ -28,9 +28,11 @@ describe('isUsableSeoReport', () => {
     expect(isUsableSeoReport({})).toBe(false);
   });
 
-  test('rejects a missing or non-enum grade — this is the undefined DB binding storeReport would throw on', () => {
+  test('rejects a missing or blank grade (the undefined DB binding storeReport would throw on); a stored-as-is grade like B+ is fine', () => {
     expect(isUsableSeoReport({ ...GOOD, grade: undefined })).toBe(false);
-    expect(isUsableSeoReport({ ...GOOD, grade: 'B+' })).toBe(false);
+    expect(isUsableSeoReport({ ...GOOD, grade: '  ' })).toBe(false);
+    expect(isUsableSeoReport({ ...GOOD, grade: 7 })).toBe(false);
+    expect(isUsableSeoReport({ ...GOOD, grade: 'B+' })).toBe(true);
   });
 
   test('rejects a missing, empty, or non-string overall_assessment', () => {

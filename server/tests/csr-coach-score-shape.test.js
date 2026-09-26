@@ -37,6 +37,8 @@ describe('isUsableCsrScore', () => {
     expect(isUsableCsrScore({ ...GOOD, [field]: undefined })).toBe(false);
     expect(isUsableCsrScore({ ...GOOD, [field]: 'great job' })).toBe(false);
     expect(isUsableCsrScore({ ...GOOD, [field]: NaN })).toBe(false);
+    expect(isUsableCsrScore({ ...GOOD, [field]: '' })).toBe(false);
+    expect(isUsableCsrScore({ ...GOOD, [field]: '8' })).toBe(true);
   });
 
   test('rejects a missing, empty, or non-string call_outcome', () => {

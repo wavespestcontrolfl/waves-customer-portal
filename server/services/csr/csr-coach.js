@@ -102,7 +102,10 @@ const CSR_SCORE_NUMERIC_FIELDS = [
 ];
 function isUsableCsrScore(score) {
   if (!score || typeof score !== 'object' || Array.isArray(score)) return false;
-  if (CSR_SCORE_NUMERIC_FIELDS.some((f) => typeof score[f] !== 'number' || !Number.isFinite(score[f]))) return false;
+  // A strict numeric string ("8") inserts fine into the numeric columns, so it
+  // counts; anything that isn't a number at all does not.
+  const numeric = (v) => (typeof v === 'number' && Number.isFinite(v)) || (typeof v === 'string' && /^\s*-?\d+(\.\d+)?\s*$/.test(v));
+  if (CSR_SCORE_NUMERIC_FIELDS.some((f) => !numeric(score[f]))) return false;
   if (typeof score.call_outcome !== 'string' || !score.call_outcome.trim()) return false;
   // JSON.stringify(undefined) IS undefined — an insert of that column value
   // is exactly the undefined-binding case this whole check exists to catch.

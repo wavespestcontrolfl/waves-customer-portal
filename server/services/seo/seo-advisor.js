@@ -37,10 +37,9 @@ try { TwilioService = require('../twilio'); } catch { TwilioService = null; }
 // "object, not array" — a reply like `{}` passed it and produced exactly
 // that silent no-op. Same shape as tax-advisor.js's isUsableTaxReport.
 const SEO_REPORT_OBJECT_LISTS = ['recommendations', 'page2_opportunities', 'declining_alerts', 'gbp_insights', 'technical_issues', 'mobile_insights'];
-const GRADES = new Set(['A', 'B', 'C', 'D', 'F']);
 function isUsableSeoReport(report) {
   if (!report || typeof report !== 'object' || Array.isArray(report)) return false;
-  if (!GRADES.has(report.grade)) return false;
+  if (typeof report.grade !== 'string' || !report.grade.trim()) return false;
   if (typeof report.overall_assessment !== 'string' || !report.overall_assessment.trim()) return false;
   if (report.wins != null && !Array.isArray(report.wins)) return false;
   return SEO_REPORT_OBJECT_LISTS.every((key) => report[key] == null || (Array.isArray(report[key]) && report[key].every((v) => v && typeof v === 'object' && !Array.isArray(v))));

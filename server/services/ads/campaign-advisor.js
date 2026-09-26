@@ -39,10 +39,9 @@ function adsClientConfigured() {
 // "object, not array" — a reply like `{}` passed it and produced exactly
 // that silent no-op. Same shape as seo-advisor.js's isUsableSeoReport.
 const ADS_REPORT_OBJECT_LISTS = ['recommendations', 'waste_alerts', 'scaling_opportunities', 'capacity_warnings', 'seo_insights'];
-const AD_GRADES = new Set(['A', 'B', 'C', 'D', 'F']);
 function isUsableAdsReport(advice) {
   if (!advice || typeof advice !== 'object' || Array.isArray(advice)) return false;
-  if (!AD_GRADES.has(advice.grade)) return false;
+  if (typeof advice.grade !== 'string' || !advice.grade.trim()) return false;
   if (typeof advice.overall_assessment !== 'string' || !advice.overall_assessment.trim()) return false;
   if (advice.insights != null && !Array.isArray(advice.insights)) return false;
   return ADS_REPORT_OBJECT_LISTS.every((key) => advice[key] == null || (Array.isArray(advice[key]) && advice[key].every((v) => v && typeof v === 'object' && !Array.isArray(v))));
