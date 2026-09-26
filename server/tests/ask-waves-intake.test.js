@@ -508,6 +508,11 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
     expect(out.reply).not.toContain('1-800-222-1222');
   });
 
+  test('"didn\'t eat the bait, but he licked it" keeps the dog as the patient (vet script)', () => {
+    const out = scrubUnsafeClaims({ reply: 'It is completely safe.', intent: 'question', service_keys: [], ready_for_quote: false }, "My dog didn't eat the bait, but he licked it");
+    expect(out.reply).toMatch(/veterinarian or an emergency animal hospital/);
+  });
+
   test('a breed-named pet gets the veterinary script', () => {
     const out = scrubUnsafeClaims({ reply: 'It is completely safe.', intent: 'question', service_keys: [], ready_for_quote: false }, 'My Labrador ate rat poison');
     expect(out.reply).toMatch(/veterinarian or an emergency animal hospital/);

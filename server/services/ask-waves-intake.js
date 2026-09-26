@@ -509,27 +509,34 @@ function aboutTreatment(question) {
 }
 
 // A terse reply takes its claim from the visitor's active question.
+const hasTimeFigure = (text) => CLOCK_TIME_RE.test(text) || DURATION_RE.test(text) || ANY_TIME_FIGURE_RE.test(text);
+const isPhysicalAccess = (text) => {
+  const physical = text.replace(DIGITAL_ACCESS_RE, ' ');
+  return ACCESS_SIGNAL_RE.test(physical) || ACCESS_TOPIC_RE.test(physical);
+};
+
+// A bare affirmation ("Yes.", "Absolutely.", "Sí, claro.") confirms whatever
+// the visitor asked — an EPA-approval, treatment-safety or timed re-entry
+// question makes the affirmation that claim.
+function affirmationClaim(t, question) {
+  if (!AFFIRMATION_RE.test(t)) return false;
+  if (EPA_MENTION_RE.test(question) && APPROVAL_WORD_RE.test(question)) return true;
+  if (SAFETY_QUESTION_RE.test(question) && aboutTreatment(question)) return true;
+  return isPhysicalAccess(question) && hasTimeFigure(question);
+}
+
+// A short answer of EITHER polarity ("No.", "No, it cannot.", "At 4 PM.") to
+// an active treatment-harm or physical-access question is itself the claim;
+// it needs a yes/no or time shape — "They can deliver a painful bite."
+// answering "Are black widows dangerous?" is pest education.
+function shortAnswerClaim(t, question) {
+  if (t.split(/\s+/).filter(Boolean).length > 6) return false;
+  if (HARM_QUESTION_RE.test(question) && aboutTreatment(question) && POLARITY_START_RE.test(t)) return true;
+  return isPhysicalAccess(question) && (POLARITY_START_RE.test(t) || hasTimeFigure(t));
+}
+
 function terseClaim(t, activeMessage) {
-  // A bare affirmation ("Yes.", "Absolutely.", "Sí, claro.") confirms whatever
-  // the visitor asked — so when the ACTIVE question carries a safety or
-  // re-entry proposition, the affirmation is that claim.
-  const physicalQuestion = activeMessage.replace(DIGITAL_ACCESS_RE, ' ');
-  // "Is it EPA-approved?" → "Yes." affirms the approval claim.
-  if (AFFIRMATION_RE.test(t) && EPA_MENTION_RE.test(activeMessage) && APPROVAL_WORD_RE.test(activeMessage)) return true;
-  if (AFFIRMATION_RE.test(t) && ((SAFETY_QUESTION_RE.test(activeMessage) && aboutTreatment(activeMessage))
-    || ((ACCESS_SIGNAL_RE.test(physicalQuestion) || ACCESS_TOPIC_RE.test(physicalQuestion)) && (DURATION_RE.test(activeMessage) || CLOCK_TIME_RE.test(activeMessage) || ANY_TIME_FIGURE_RE.test(activeMessage))))) return true;
-  // A short answer of EITHER polarity ("No.", "No, it cannot.", "At 4 PM.",
-  // "Tomorrow.") to an active harm or physical-access question is itself the
-  // claim — polarity words never ended, so length decides.
-  const physicalActive = activeMessage.replace(DIGITAL_ACCESS_RE, ' ');
-  // A short answer needs a yes/no or time shape — "They can deliver a painful
-  // bite." answering "Are black widows dangerous?" is pest education.
-  if (t.split(/\s+/).filter(Boolean).length <= 6) {
-    if (HARM_QUESTION_RE.test(activeMessage) && aboutTreatment(activeMessage) && POLARITY_START_RE.test(t)) return true;
-    if ((ACCESS_SIGNAL_RE.test(physicalActive) || ACCESS_TOPIC_RE.test(physicalActive))
-      && (POLARITY_START_RE.test(t) || CLOCK_TIME_RE.test(t) || DURATION_RE.test(t) || ANY_TIME_FIGURE_RE.test(t))) return true;
-  }
-  return false;
+  return affirmationClaim(t, activeMessage) || shortAnswerClaim(t, activeMessage);
 }
 
 const REFERENTIAL_RE = /\b(?:how\s+long\s+(?:is|was|does|would|will)\s+(?:that|it|this)|how\s+long\s+(?:should|do|must|would)\s+(?:they|we|i|he|she|you)\s+(?:wait|stay|keep)|and\s+how\s+long|how\s+much\s+longer|what\s+about\s+(?:the|my|our|them|him|her)|how\s+about|and\s+(?:the|my|our)\s+\w+|y\s+cu[aá]nto|cu[aá]nto\s+tiempo\s+(?:es|ser[ií]a|hay\s+que\s+esperar)|y\s+(?:los|las|el|la|mis)\s+\w+)(?![a-zñáéíóú])/i;
@@ -584,7 +591,7 @@ const VET_DIRECTION_RE = /\b(?:seek|get|find|obtain|needs?)\s+(?:\w+\s+){0,2}?(?
 // comió…"), or the agent of a passive exposure ("eaten by my dog") — not a
 // mere mention ("after a dog bite", "walking my dog when a wasp stung me").
 const PET_WORD = '(?:labs?|labradors?|beagles?|poodles?|terriers?|retrievers?|shepherds?|bulldogs?|chihuahuas?|dachshunds?|huskies|husky|pugs?|boxers?|collies?|spaniels?|schnauzers?|yorkies?|shih\\s*tzus?|pit\\s*bulls?|pitbulls?|corgis?|doodles?|goldendoodles?|labradoodles?|maltese|rottweilers?|dobermans?|greyhounds?|kitty|kitties|birds?|parrots?|parakeets?|rabbits?|bunn(?:y|ies)|hamsters?|guinea\\s+pigs?|ferrets?|horses?|tortoises?|turtles?|dogs?|cats?|pupp(?:y|ies)|kittens?|pets?|p[aá]jar\\w*|aves?|loros?|conejos?|caballos?|tortugas?|perr[oa]s?|gat[oa]s?|mascotas?|cachorr\\w*)';
-const PET_PATIENT_RE = new RegExp(`\\b${PET_WORD}(?:\\s+(?:and|y)\\s+(?:i|me|we|yo|my\\s+\\w+|mi\\s+\\w+))?\\s+(?:(?:just|also|both|all|may|might|has|have|had|is|was|were|got|seems?|probably|se|le|ha|est[aá]|fue|ambos)\\s+){0,3}(?:swallow\\w*|ingest\\w*|ate|eaten|eating|drank|drinking|lick\\w*|chew\\w*|consum\\w*|tast\\w*|inhal\\w*|breath\\w*|got\\s+into|stung|bitten|(?<=(?:was|got|been|is)\\s)bit|exposed|sprayed|touched|splashed|expuest[oa]|rociad[oa]|toc[oó]|cough\\w*|wheez\\w*|rash\\w*|hives|dizz\\w*|nause\\w*|faint\\w*|itch\\w*|scratch\\w*|letharg\\w*|limp\\w*|tos|tosiendo|mare[oa]\\w*|swell\\w*|swoll\\w*|vomit\\w*|throw\\w*\\s+up|seiz\\w*|drool\\w*|sick|collaps\\w*|shak\\w*|trag\\w*|comi[oó]|vomit\\w*|picad[oa]|mordid[oa]|enferm\\w*|hinchad[oa])(?![a-zñáéíóú])|\\b(?:swallow(?:ed)?|ingest(?:ed)?|eaten|drunk|chewed|licked|consumed|tasted|inhaled|comid[oa]s?|ingerid[oa]s?|tragad[oa]s?|inhalad[oa]s?)\\b[^.?!\\n]{0,30}?\\b(?:by|por)\\s+(?:(?:my|our|the|mi|su|el|la)\\s+)?${PET_WORD}\\b|\\b${PET_WORD}'?s?\\s+(?:eyes?|mouth|skin|face|paws?|nose)\\b`, 'i');
+const PET_PATIENT_RE = new RegExp(`\\b${PET_WORD}\\b[^.?!\\n]{0,40}?\\b(?:but|and|though|although|yet)\\s+(?:he|she|it|they)\\s+(?:\\w+\\s+){0,2}?(?:ate|eaten|licked|chewed|swallowed|ingested|inhaled|touched|tasted|consumed|sniffed|drank|got\\s+into)\\b|\\b${PET_WORD}(?:\\s+(?:and|y)\\s+(?:i|me|we|yo|my\\s+\\w+|mi\\s+\\w+))?\\s+(?:(?:just|also|both|all|may|might|has|have|had|is|was|were|got|seems?|probably|se|le|ha|est[aá]|fue|ambos)\\s+){0,3}(?:swallow\\w*|ingest\\w*|ate|eaten|eating|drank|drinking|lick\\w*|chew\\w*|consum\\w*|tast\\w*|inhal\\w*|breath\\w*|got\\s+into|stung|bitten|(?<=(?:was|got|been|is)\\s)bit|exposed|sprayed|touched|splashed|expuest[oa]|rociad[oa]|toc[oó]|cough\\w*|wheez\\w*|rash\\w*|hives|dizz\\w*|nause\\w*|faint\\w*|itch\\w*|scratch\\w*|letharg\\w*|limp\\w*|tos|tosiendo|mare[oa]\\w*|swell\\w*|swoll\\w*|vomit\\w*|throw\\w*\\s+up|seiz\\w*|drool\\w*|sick|collaps\\w*|shak\\w*|trag\\w*|comi[oó]|vomit\\w*|picad[oa]|mordid[oa]|enferm\\w*|hinchad[oa])(?![a-zñáéíóú])|\\b(?:swallow(?:ed)?|ingest(?:ed)?|eaten|drunk|chewed|licked|consumed|tasted|inhaled|comid[oa]s?|ingerid[oa]s?|tragad[oa]s?|inhalad[oa]s?)\\b[^.?!\\n]{0,30}?\\b(?:by|por)\\s+(?:(?:my|our|the|mi|su|el|la)\\s+)?${PET_WORD}\\b|\\b${PET_WORD}'?s?\\s+(?:eyes?|mouth|skin|face|paws?|nose)\\b`, 'i');
 const ANIMAL_EMERGENCY_REPLY = ' If a pet may have been exposed or seems unwell, call your veterinarian or an emergency animal hospital right away. / Si una mascota pudo haber estado expuesta o no se siente bien, llame a su veterinario o a un hospital veterinario de emergencia de inmediato.';
 const POISON_MENTION_RE = /\(?800\)?[-.\s]?222[-.\s]?1222|\b(?:(?<!(?:animal|pet)\s)poison\s+(?:control|help)|swallow\w*|ingest\w*|control\s+de\s+envenenamientos?|centro\s+de\s+toxicolog[ií]a|ingiri\w*|ingerir|trag[oó]\w*)\b/i;
 const POISON_CONTROL_LINE = ' If someone swallowed or breathed in a product, or got it in their eyes or on their skin, call Poison Control at 1-800-222-1222. / Si alguien ingirió o inhaló un producto, o le cayó en los ojos o la piel, llame a Control de Envenenamientos al 1-800-222-1222.';
