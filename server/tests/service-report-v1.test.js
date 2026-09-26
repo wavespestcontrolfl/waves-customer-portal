@@ -1414,7 +1414,16 @@ describe('service report v1', () => {
   test('renders provenance-kept form observations without exposing tagged technician notes', async () => {
     const fixtures = {
       service_products: [], property_geometries: [], property_zones: [],
-      service_findings: [], service_photos: [],
+      // Production completion shape before the provenance fix: the governed
+      // label was stored as a title-only row.
+      service_findings: [
+        {
+          id: 'persisted-governed-observation', service_record_id: 'service-structured-observation',
+          zone_id: null, category: 'observation', severity: 'medium',
+          title: 'Yellowjacket', detail: null, recommendation: null,
+        },
+      ],
+      service_photos: [],
     };
     const knex = (table) => {
       const rows = fixtures[table] || [];
@@ -1443,6 +1452,7 @@ describe('service report v1', () => {
     expect(data.findings).toEqual(expect.arrayContaining([
       expect.objectContaining({ title: 'Yellowjacket', detail: 'Recorded during the structured service closeout.' }),
     ]));
+    expect(data.findings.filter((finding) => finding.title === 'Yellowjacket')).toHaveLength(1);
     expect(data.findings.some((finding) => finding.title.includes('Internal access'))).toBe(false);
   });
 

@@ -1898,7 +1898,11 @@ const {
   validateSpecialtyClosureCombination,
 } = require('../../shared/specialty-service-closeouts');
 const { LAWN_STRUCTURED_OBSERVATIONS } = require('../../shared/lawn-condition-findings');
-const { observationsForRoutineService, conflictingRoutineObservations } = require('../../shared/service-completion-observations');
+const {
+  STRUCTURED_OBSERVATION_FINDING_DETAIL,
+  observationsForRoutineService,
+  conflictingRoutineObservations,
+} = require('../../shared/service-completion-observations');
 const { completionTierSnapshotFields } = require('../services/completion-tier-snapshot');
 
 const ROUTINE_OBSERVATION_FAMILY_BY_COMPLETION = Object.freeze({
@@ -6749,12 +6753,20 @@ async function completeScheduledService(completionInput, packetContext = null) {
           ? []
           : submittedObservations;
         if (useServiceReportV1 && serviceFindingsAvailable && customerFindingObservations.length && !isInternalOnlyCompletion) {
+          const structuredObservationTitles = new Set(
+            formObservations.map((title) => title.toLowerCase()),
+          );
           const findingRows = customerFindingObservations.map((title) => ({
             service_record_id: record.id,
             category: title.toLowerCase().includes('concern') ? 'conducive_condition' : 'observation',
             severity: completionFindingSeverity(title),
             title,
-            detail: null,
+            // A non-empty detail is the document renderer's provenance proof.
+            // Only the server-allowlisted form snapshot earns it; arbitrary
+            // observations remain title-only and fail closed at PDF egress.
+            detail: structuredObservationTitles.has(title.toLowerCase())
+              ? STRUCTURED_OBSERVATION_FINDING_DETAIL
+              : null,
             recommendation: null,
           }));
           await trx('service_findings').insert(findingRows);

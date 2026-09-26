@@ -58,6 +58,7 @@ const { stampedDivergesSql, stampedLine2Sql } = require('../stamped-address');
 const { applyReportIdentitySnapshot, canonicalProductId } = require('./report-identity-snapshot');
 const { scheduleUnconfirmedAfterMove } = require('../irrigation-schedule-confirmation');
 const { configuredPublicPortalOrigin } = require('../../utils/portal-url');
+const { STRUCTURED_OBSERVATION_FINDING_DETAIL } = require('../../../shared/service-completion-observations');
 
 let PhotoService = null;
 try {
@@ -3291,14 +3292,27 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
 
 
   for (const observation of protocol.structuredObservations) {
-    if (findings.some((finding) => finding.title.toLowerCase() === observation.toLowerCase())) continue;
+    const persistedFinding = findings.find(
+      (finding) => finding.title.toLowerCase() === observation.toLowerCase(),
+    );
+    if (persistedFinding) {
+      // Older completion rows stored the selected form label as a bare
+      // service_findings title. Once the authoritative formObservations
+      // snapshot proves its provenance, upgrade that row for customer egress.
+      // Unmatched bare rows stay bare so the document's raw-note guard keeps
+      // filtering them.
+      if (!persistedFinding.detail && !persistedFinding.recommendation) {
+        persistedFinding.detail = STRUCTURED_OBSERVATION_FINDING_DETAIL;
+      }
+      continue;
+    }
     findings.push({
       id: `observation-${findings.length + 1}`,
       zoneId: null,
       category: 'observation',
       severity: findingSeverityForObservation(observation),
       title: observation,
-      detail: 'Recorded during the structured service closeout.',
+      detail: STRUCTURED_OBSERVATION_FINDING_DETAIL,
       recommendation: '',
     });
   }

@@ -1,6 +1,7 @@
 const catalog = require('./service-completion-observations.json');
 
 const EMPTY_OBSERVATIONS = new Set();
+const STRUCTURED_OBSERVATION_FINDING_DETAIL = 'Recorded during the structured service closeout.';
 const ROUTINE_SERVICE_OBSERVATIONS = Object.freeze(Object.fromEntries(
   Object.entries(catalog).map(([family, rows]) => [
     family,
@@ -64,6 +65,7 @@ function conflictingRoutineObservations(observations = []) {
 
 module.exports = {
   ROUTINE_SERVICE_OBSERVATIONS,
+  STRUCTURED_OBSERVATION_FINDING_DETAIL,
   observationsForRoutineService,
   conflictingRoutineObservations,
 };
