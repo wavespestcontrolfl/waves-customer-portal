@@ -16,6 +16,7 @@
 
 const logger = require('../logger');
 const { parse: parseCsvSync } = require('csv-parse/sync');
+const { normalizeUnitLine, unitLineValueKey } = require('../../utils/address-normalizer');
 
 // Waves' three counties (Manatee, Sarasota, Charlotte) are all DBPR district 7.
 const DBPR_FOOD_LICENSE_DISTRICTS = [7];
@@ -124,17 +125,22 @@ function parseAddressLine(line) {
     unit,
   };
 }
-// Unit key, compared on both sides (caller address and DBPR row). Every
-// designator word is dropped (whole words only, so "WEST" keeps its "ST"),
-// then each remaining value keeps its own boundary: "Bldg 9 Unit 204" and
-// "BLDG 9 UNIT 204" -> "9-204", never "9204" (which "Bldg 92 Unit 04" would
-// also produce). "#102", "Suite 102", "102" -> "102".
-const UNIT_DESIGNATOR_RE = /\b(?:suite|ste|unit|apt|apartment|bldg|building|bay|space|spc)\b\.?|#/gi;
+// Unit key, compared on both sides (caller address and DBPR row): the
+// address normalizer's canonical comparison, the same one address-compare
+// uses. Dwelling spellings are equated ("Suite 102" / "Unit 102" / "Ste. 102"
+// / "#102" -> "102") while STRUCTURAL designators are kept, so a building-
+// level license ("Bldg 9") never matches a suite that happens to share the
+// number ("Suite 9"), and "Bldg 9 Unit 204" never collides with "Bldg 92
+// Unit 04".
+// In a plaza, "Space 12" / "Spc 12" / "Bay 12" name the same tenant unit as
+// "Suite 12" (the residential normalizer keeps Space as a lot and Bay as a
+// structure), so they are spelled as Suite first; Bldg stays structural.
+const COMMERCIAL_SUITE_WORD_RE = /\b(?:space|spc|bay)\b\.?/gi;
 
 function normalizeUnitValue(value) {
-  const parts = String(value || '').replace(UNIT_DESIGNATOR_RE, ' ')
-    .split(/[^A-Za-z0-9]+/).filter(Boolean).map((p) => p.toUpperCase());
-  return parts.length ? parts.join('-') : null;
+  const raw = String(value || '').trim().replace(COMMERCIAL_SUITE_WORD_RE, 'Suite');
+  if (!raw) return null;
+  return unitLineValueKey(normalizeUnitLine(raw)) || null;
 }
 
 function normalizePhoneDigits(value) {
@@ -270,46 +276,62 @@ function assertPlausibleExtract(rows, { minRows, lastGoodCount }) {
   }
 }
 
-async function defaultFetchText(url) {
-  const res = await fetch(url, { signal: AbortSignal.timeout(DBPR_FETCH_TIMEOUT_MS) });
+async function defaultFetchText(url, timeoutMs = DBPR_FETCH_TIMEOUT_MS) {
+  const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
   if (!res || !res.ok) throw new Error(`HTTP ${res && res.status}`);
   const buf = await res.arrayBuffer();
   return new TextDecoder('latin1').decode(buf);
 }
 
-async function loadDistrictRows(district, { fetchText = defaultFetchText, now = () => Date.now(), minRows = DBPR_MIN_EXTRACT_ROWS } = {}) {
+// timeoutMs (the admin lookup's remaining budget) caps only THIS caller's
+// wait, for a download it starts or joins alike. The shared download always
+// runs on the full 15s timeout, so a short-budget caller never aborts a
+// healthy download or trips the 10-minute backoff for every later lookup
+// (Codex #4840 r9 P2).
+async function loadDistrictRows(district, {
+  fetchText = defaultFetchText, now = () => Date.now(), minRows = DBPR_MIN_EXTRACT_ROWS, timeoutMs,
+} = {}) {
   const cached = _cache.get(district);
   if (cached && (now() - cached.fetchedAt) < DBPR_CACHE_TTL_MS) return cached.rows;
   const staleIfError = () => (cached && (now() - cached.fetchedAt) < DBPR_CACHE_TTL_MS + DBPR_STALE_IF_ERROR_MS
     ? cached.rows
     : []);
-  if (_inflight.has(district)) return _inflight.get(district);
-  const failedAt = _failedAt.get(district);
-  if (failedAt != null && (now() - failedAt) < DBPR_FAILURE_BACKOFF_MS) return staleIfError();
-  const promise = (async () => {
-    try {
-      const text = await fetchText(dbprExtractUrl(district));
-      // A malformed, truncated or error-page HTTP-200 body is a failed
-      // refresh, not a new license list: a parse error throws, and
-      // assertPlausibleExtract rejects anything that doesn't look like a
-      // whole district extract. Either way it goes down the failure path
-      // below — never cached, and the last good extract keeps serving
-      // within the stale-if-error window.
-      const rows = parseDbprCsv(text);
-      assertPlausibleExtract(rows, { minRows, lastGoodCount: cached?.rows?.length || 0 });
-      _cache.set(district, { rows, fetchedAt: now() });
-      _failedAt.delete(district);
-      return rows;
-    } catch (err) {
-      _failedAt.set(district, now());
-      logger.warn(`[commercial-suite-size] DBPR extract fetch failed for district ${district}: ${err.message}`);
-      return staleIfError();
-    } finally {
-      _inflight.delete(district);
-    }
-  })();
-  _inflight.set(district, promise);
-  return promise;
+  let download = _inflight.get(district);
+  if (!download) {
+    const failedAt = _failedAt.get(district);
+    if (failedAt != null && (now() - failedAt) < DBPR_FAILURE_BACKOFF_MS) return staleIfError();
+    download = (async () => {
+      try {
+        const text = await fetchText(dbprExtractUrl(district), DBPR_FETCH_TIMEOUT_MS);
+        // A malformed, truncated or error-page HTTP-200 body is a failed
+        // refresh, not a new license list: a parse error throws, and
+        // assertPlausibleExtract rejects anything that doesn't look like a
+        // whole district extract. Either way it goes down the failure path
+        // below — never cached, and the last good extract keeps serving
+        // within the stale-if-error window.
+        const rows = parseDbprCsv(text);
+        assertPlausibleExtract(rows, { minRows, lastGoodCount: cached?.rows?.length || 0 });
+        _cache.set(district, { rows, fetchedAt: now() });
+        _failedAt.delete(district);
+        return rows;
+      } catch (err) {
+        _failedAt.set(district, now());
+        logger.warn(`[commercial-suite-size] DBPR extract fetch failed for district ${district}: ${err.message}`);
+        return staleIfError();
+      } finally {
+        _inflight.delete(district);
+      }
+    })();
+    _inflight.set(district, download);
+  }
+  if (!(timeoutMs > 0)) return download;
+  let timer;
+  const expired = new Promise((resolve) => { timer = setTimeout(() => resolve(staleIfError()), timeoutMs); });
+  try {
+    return await Promise.race([download, expired]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // Test-only: clear the module cache so suites don't leak state across files.
@@ -317,6 +339,23 @@ function _resetCacheForTests() {
   _cache.clear();
   _inflight.clear();
   _failedAt.clear();
+}
+
+// Synchronous, zero-I/O peek for the admin lookup's cache-hit path: the warm
+// rows for a district, or null when the in-process cache is cold/expired.
+// Never triggers a fetch — a cache-hit property lookup must never await a
+// download.
+function peekDistrictRows(district, { now = () => Date.now() } = {}) {
+  const cached = _cache.get(district);
+  if (cached && (now() - cached.fetchedAt) < DBPR_CACHE_TTL_MS) return cached.rows;
+  return null;
+}
+
+// Fire-and-forget warm-up for a cold district, so a LATER lookup finds the
+// cache warm; loadDistrictRows never throws, and this guards once more so a
+// background task can never surface as an unhandled rejection.
+function warmDistrictRowsInBackground(district, opts = {}) {
+  Promise.resolve(loadDistrictRows(district, opts)).catch(() => {});
 }
 
 // Only an ACTIVE PERMANENT food-service license sizes a suite. The extract
@@ -348,7 +387,17 @@ async function resolveViaDbprLicense({ address = {}, phone = null, businessNameH
     const districts = opts.districts || DBPR_FOOD_LICENSE_DISTRICTS;
     let rows = [];
     for (const district of districts) {
-      rows = rows.concat(await loadDistrictRows(district, opts));
+      if (opts.requireWarmCache) {
+        // The admin lookup's cache-hit path: warm rows only, never a download.
+        const warm = peekDistrictRows(district, opts);
+        if (warm == null) {
+          warmDistrictRowsInBackground(district, opts);
+          return null;
+        }
+        rows = rows.concat(warm);
+      } else {
+        rows = rows.concat(await loadDistrictRows(district, opts));
+      }
     }
     rows = rows.filter(isEligibleDineInLicense);
     if (!rows.length) return null;
@@ -391,5 +440,7 @@ module.exports = {
   resolveViaDbprLicense,
   loadDistrictRows,
   isEligibleDineInLicense,
+  peekDistrictRows,
+  warmDistrictRowsInBackground,
   _resetCacheForTests,
 };

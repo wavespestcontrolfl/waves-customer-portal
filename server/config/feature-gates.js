@@ -2844,6 +2844,13 @@ const gates = {
   // it would insert, inside a transaction it rolls back, and logs the count
   // only — no writes). This entry is for logGateStatus only.
   recurringSeriesTopUp: process.env.GATE_RECURRING_SERIES_TOPUP === 'true',
+  // Commercial suite sizing (PR #4840): a commercial tenant in a
+  // multi-tenant building is sized by the SUITE (state food-license seats,
+  // else a type default) instead of the whole building, in the admin
+  // estimate lookup and the estimator engine. **Ships DARK: off unless
+  // exactly `true`**; canonical CALL-TIME reader commercialSuiteSizingLive().
+  // Off = byte-identical to before (the building size flows through).
+  commercialSuiteSizing: process.env.GATE_COMMERCIAL_SUITE_SIZING === 'true',
   // Post-cancel recurring-series reseed (owner ruling 2026-09-24): a
   // single-visit cancel inside a counted plan adds one visit back at the
   // END of the series (services/recurring-series-cancel-reseed.js →
@@ -2861,12 +2868,6 @@ const gates = {
   // estimateConsultationOfferLive() below, same leadInspectionLinkLive()
   // convention.
   estimateConsultationOffer: process.env.GATE_ESTIMATE_CONSULTATION_OFFER === 'true',
-  // Commercial suite sizing: a commercial tenant in a multi-tenant building
-  // is sized by the SUITE (state food-license seats, else a type default)
-  // instead of the whole building, in the estimator engine's call drafts.
-  // **Ships DARK: off unless exactly `true`**; canonical CALL-TIME reader
-  // commercialSuiteSizingLive(). Off = byte-identical to before.
-  commercialSuiteSizing: process.env.GATE_COMMERCIAL_SUITE_SIZING === 'true',
   // Auto-Dispatch shared route model + day clustering (owner-approved
   // 2026-09-26 dispatch-backlog item 3, incident: the 04:10 ET run scored a
   // visit's CURRENT placement with plain haversine while CANDIDATES went
