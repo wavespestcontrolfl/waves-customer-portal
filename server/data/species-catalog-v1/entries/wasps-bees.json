@@ -1,0 +1,648 @@
+[
+  {
+    "kind": "organism",
+    "aka": [],
+    "stages": [
+      "larva",
+      "adult"
+    ],
+    "sign_of": [],
+    "role": "stinging_pest",
+    "risk": "medical",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [],
+    "safety_line": "Stings hurt and can trigger allergic reactions. See a doctor if swelling spreads beyond the sting site, and call 911 if someone has trouble breathing.",
+    "legacy_slugs": [],
+    "review": {
+      "status": "draft",
+      "notes": ""
+    },
+    "slug": "paper-wasp",
+    "common_name": "Paper Wasp",
+    "aliases": [
+      "paper wasp",
+      "paper wasps",
+      "umbrella wasp",
+      "polistes"
+    ],
+    "scientific_name": "Polistes spp.",
+    "rank": "genus",
+    "group": "wasps-bees",
+    "subgroup": "social-wasps",
+    "site_category": "Stingers",
+    "traits": [
+      "Open, umbrella-shaped comb with no paper shell, under eaves or tree hollows",
+      "Long legs dangle visibly in flight",
+      "Slender, spindle-shaped body, brownish or reddish with yellow markings",
+      "Calm away from the nest; stings mainly in defense of it"
+    ],
+    "look_alikes": [
+      {
+        "slug": "yellowjacket",
+        "difference": "Paper wasps build an open, exposed umbrella comb; yellowjackets build enclosed paper-covered nests, often underground or in a wall void.",
+        "next_photo": "A photo of the whole nest shape from a few feet away.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "medium",
+    "where": [
+      "lanai-patio",
+      "attic-walls"
+    ],
+    "looks": [
+      "wasp-bee"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": true,
+      "bites": false,
+      "venomous": true,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": true,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "They hunt caterpillars all day to feed their young, so a nest away from doors is quietly working your garden. Leave nests you can comfortably avoid; remove the ones over doorways or high-traffic areas.",
+      "fact": "They hunt caterpillars all day to feed their young — a nest away from doors is quietly working your garden.",
+      "blurb": "Leave nests you can ignore. For nests over doorways or other busy spots, keep your distance and have a technician remove them."
+    },
+    "tech_notes": "Confirm open comb, no paper envelope. Treat at dusk; remove nest after knockdown. Check soffits, shutters, playsets.",
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN1112"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/paper-wasp/",
+      "guides": []
+    }
+  },
+  {
+    "kind": "organism",
+    "aka": [],
+    "stages": [
+      "larva",
+      "adult"
+    ],
+    "sign_of": [],
+    "role": "stinging_pest",
+    "risk": "medical",
+    "action": "specialist",
+    "season_basis": "observed",
+    "verification": [],
+    "safety_line": "Can sting repeatedly and become aggressive as a colony once disturbed. See a doctor if swelling spreads, and call 911 if someone has trouble breathing.",
+    "legacy_slugs": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": ""
+    },
+    "slug": "yellowjacket",
+    "common_name": "Yellowjacket",
+    "aliases": [
+      "yellowjacket",
+      "yellowjackets",
+      "yellow jacket",
+      "yellow jackets",
+      "ground wasp"
+    ],
+    "scientific_name": "Vespula squamosa",
+    "rank": "species",
+    "group": "wasps-bees",
+    "subgroup": "social-wasps",
+    "site_category": "Stingers",
+    "traits": [
+      "Ground nest — steady insect traffic in and out of a hole in the yard (some nests are aerial)",
+      "Compact, bright yellow-and-black, fast flier",
+      "Aggressive around food and drinks, especially in late summer",
+      "Colonies can hold thousands of workers by fall"
+    ],
+    "look_alikes": [
+      {
+        "slug": "paper-wasp",
+        "difference": "Yellowjackets build enclosed, paper-covered nests (often in the ground); paper wasps build a small, open, exposed umbrella comb.",
+        "next_photo": "A photo of the whole nest shape from a few feet away.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "lawn-garden",
+      "lanai-patio"
+    ],
+    "looks": [
+      "wasp-bee"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": true,
+      "bites": false,
+      "venomous": true,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": true,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "range": "common",
+    "active_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ],
+    "peak_months": [
+      8,
+      9,
+      10
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "A hidden ground nest can hold thousands of workers by fall, and a lawnmower usually finds it first. Ground nests near activity areas are exactly the kind of job worth leaving to a professional rather than DIY spray.",
+      "fact": "A hidden ground nest can hold thousands by fall — the lawnmower usually finds it first.",
+      "blurb": "Ground nests near activity areas are the definition of a professional job."
+    },
+    "tech_notes": "Confirm in/out traffic point before treating. Ground/void nests can be large; full suit. Never seal an active void entrance.",
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN238"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/yellowjacket/",
+      "guides": []
+    }
+  },
+  {
+    "kind": "organism",
+    "aka": [],
+    "stages": [
+      "larva",
+      "adult"
+    ],
+    "sign_of": [],
+    "role": "beneficial",
+    "risk": "defensive",
+    "action": "leave_alone",
+    "season_basis": "observed",
+    "verification": [],
+    "safety_line": "Almost never stings; venom lacks the pain compounds of social wasps. See a doctor if you have an unusual allergic reaction, and call 911 if someone has trouble breathing.",
+    "legacy_slugs": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": "Verdict changed from harmless to ally: it actively preys on spiders (including widows), which is a beneficial service, not just a neutral visitor."
+    },
+    "slug": "mud-dauber",
+    "common_name": "Mud Dauber",
+    "aliases": [
+      "mud dauber",
+      "mud daubers"
+    ],
+    "scientific_name": "Sceliphron / Trypoxylon spp.",
+    "rank": "group",
+    "group": "wasps-bees",
+    "subgroup": "solitary-wasps",
+    "site_category": "Stingers",
+    "traits": [
+      "Organ-pipe or urn-shaped mud tubes stuck to walls, eaves, or bridges",
+      "Slender wasp with a distinctive thread-thin waist",
+      "Solitary — no swarm, no group nest defense",
+      "Provisions each mud cell with paralyzed spiders for her young"
+    ],
+    "look_alikes": [
+      {
+        "slug": "cicada-killer",
+        "difference": "Mud daubers are slender-waisted and build mud tube nests on walls; cicada killers are much larger, dig burrows in bare soil, and have a thicker body.",
+        "next_photo": "A photo of the nest type (mud tube on a wall vs. a burrow in soil) and overall body size next to a coin.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "medium",
+    "where": [
+      "lanai-patio",
+      "garage-storage",
+      "attic-walls"
+    ],
+    "looks": [
+      "wasp-bee"
+    ],
+    "verdict": "ally",
+    "safety": {
+      "stings": true,
+      "bites": false,
+      "venomous": true,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "range": "common",
+    "active_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "peak_months": [
+      6,
+      7,
+      8
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "She stocks each mud cell with paralyzed spiders for her young — including widow spiders — making her a natural spider-control subcontractor. Almost never stings; scraping off old tubes is really the whole job if you want them gone.",
+      "fact": "She stocks each mud cell with paralyzed spiders for her young — including widows. A spider-control subcontractor.",
+      "blurb": "Almost never stings. Scrape old tubes off; that’s the whole job."
+    },
+    "tech_notes": "Solitary, docile; venom lacks social-wasp pain compounds. Scrape/remove old nests; treatment rarely needed.",
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN1478"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/mud-dauber/",
+      "guides": []
+    }
+  },
+  {
+    "kind": "organism",
+    "aka": [],
+    "stages": [
+      "adult"
+    ],
+    "sign_of": [],
+    "role": "beneficial",
+    "risk": "medical",
+    "action": "specialist",
+    "season_basis": "swarming",
+    "verification": [],
+    "safety_line": "A resting swarm is calm and temporary — don’t spray it. See a doctor for signs of a serious allergic reaction to a sting, and call 911 if someone has trouble breathing.",
+    "legacy_slugs": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": ""
+    },
+    "slug": "honey-bee-swarm",
+    "common_name": "Honey Bee (swarm)",
+    "aliases": [
+      "honey bee",
+      "honey bees",
+      "honeybee",
+      "bee swarm",
+      "honeybees",
+      "honey bee swarm",
+      "honeybee swarm"
+    ],
+    "scientific_name": "Apis mellifera",
+    "rank": "species",
+    "group": "wasps-bees",
+    "subgroup": "bees",
+    "site_category": "Stingers",
+    "traits": [
+      "Fuzzy, golden-brown, carries pollen on the hind legs",
+      "Beard-shaped cluster of thousands on a branch or fence — calm and temporary",
+      "No nest, no visible comb — the colony is between homes",
+      "Usually moves on to a permanent cavity after a day or two"
+    ],
+    "look_alikes": [
+      {
+        "slug": "honey-bee-wall-colony",
+        "difference": "A swarm is a temporary, comb-free cluster that moves on within days; a wall colony has steady traffic in and out of one gap for weeks and comb inside.",
+        "next_photo": "A photo from the same spot a day or two apart, from a safe distance, to see if the cluster has moved on.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "lawn-garden",
+      "lanai-patio"
+    ],
+    "looks": [
+      "wasp-bee"
+    ],
+    "verdict": "ally",
+    "safety": {
+      "stings": true,
+      "bites": false,
+      "venomous": true,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": true,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "range": "common",
+    "active_months": [
+      2,
+      3,
+      4,
+      5,
+      6,
+      10,
+      11
+    ],
+    "peak_months": [
+      3,
+      4,
+      5
+    ],
+    "service": {
+      "line": "pest",
+      "key": null,
+      "label": "Bee Assessment & Referral",
+      "inspection_first": true,
+      "referral": "bee_relocation"
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "A resting swarm usually moves on within a couple of days on its own. A local beekeeper will sometimes collect it — please don’t spray pollinators.",
+      "fact": "One worker bee makes about 1/12 of a teaspoon of honey in her lifetime — a swarm is house-hunting, not attacking.",
+      "blurb": "Swarms usually move on within days. A local beekeeper will sometimes collect them — don’t spray pollinators."
+    },
+    "tech_notes": "Swarm vs. established colony (comb visible, steady traffic) — swarm has neither. Florida rules favor live removal/relocation; do not treat a resting swarm; refer per current bee protocol.",
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN1005"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/honey-bee-swarm/",
+      "guides": []
+    }
+  },
+  {
+    "kind": "organism",
+    "aka": [],
+    "stages": [
+      "adult"
+    ],
+    "sign_of": [],
+    "role": "stinging_pest",
+    "risk": "medical",
+    "action": "specialist",
+    "season_basis": "year_round",
+    "verification": [],
+    "safety_line": "Never seal the entrance while bees are active — that traps them and can leak honey into the wall. See a doctor for a serious allergic reaction. Call 911 if someone has trouble breathing.",
+    "legacy_slugs": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": "role set to stinging_pest rather than beneficial even though honey bees are ecologically beneficial: verdict here is call (specialist removal, not leave-alone), and the validator ties role beneficial to verdict ally."
+    },
+    "slug": "honey-bee-wall-colony",
+    "common_name": "Honey Bee (wall colony)",
+    "aliases": [
+      "honey bee colony",
+      "bees in the wall",
+      "honey bee hive",
+      "honey bee",
+      "honey bees",
+      "honeybee",
+      "honeybees"
+    ],
+    "scientific_name": "Apis mellifera",
+    "rank": "species",
+    "group": "wasps-bees",
+    "subgroup": "bees",
+    "site_category": "Stingers",
+    "traits": [
+      "Steady bee traffic in and out of one gap in soffit, wall, or meter box",
+      "A low hum audible from the wall on warm afternoons",
+      "Activity persists for weeks — a passing swarm would have moved on",
+      "Comb visible if the void is opened"
+    ],
+    "look_alikes": [
+      {
+        "slug": "honey-bee-swarm",
+        "difference": "A wall colony has steady traffic in and out of one gap for weeks with comb inside; a swarm is a temporary, comb-free cluster hanging in the open.",
+        "next_photo": "A photo from the same spot a day or two apart to see if the activity is ongoing.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "attic-walls"
+    ],
+    "looks": [
+      "wasp-bee"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": true,
+      "bites": false,
+      "venomous": true,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": true,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "range": "occasional",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      3,
+      4,
+      5
+    ],
+    "service": {
+      "line": "pest",
+      "key": null,
+      "label": "Bee Assessment & Referral",
+      "inspection_first": true,
+      "referral": "bee_relocation"
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "A wall colony builds comb quickly, and sealing the entrance traps the bees inside, where dying comb can leak honey into the wall. This needs bee-friendly removal — comb out, cavity cleaned — not just plugging the hole.",
+      "fact": "A wall colony builds comb fast — and sealing the entrance traps bees inside, where dying comb leaks honey into the wall.",
+      "blurb": "Needs prompt bee-friendly removal (comb out, cavity cleaned). Never just plug the hole."
+    },
+    "tech_notes": "Confirm sustained traffic (weeks) + audible hum vs. a passing swarm. Refer for bee-friendly cavity removal; never treat-and-seal an active colony.",
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN1005"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/honey-bee-wall-colony/",
+      "guides": []
+    }
+  },
+  {
+    "kind": "organism",
+    "aka": [],
+    "stages": [
+      "larva",
+      "adult"
+    ],
+    "sign_of": [],
+    "role": "structural_pest",
+    "risk": "defensive",
+    "action": "fix_conditions",
+    "season_basis": "observed",
+    "verification": [],
+    "safety_line": "Females can sting if handled but rarely do; males cannot sting at all. See a doctor for signs of an allergic reaction, and call 911 if someone has trouble breathing.",
+    "legacy_slugs": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": "structural changed to true: they drill new tunnels into sound fascia/trim (not just nesting in existing damage), which fits the brief's structural-damage definition. Resolved 2026-09-26: EENY-100/IN257 (Grissell, Sanford & Fasulo, UF/IFAS) loaded directly via the FLVC/EDIS journal host (the ask.ifas.ufl.edu short link still errors). It confirms round drilled entry holes with sawdust below, boring into unpainted back-face trim/fascia under eaves, the shiny bare abdomen that distinguishes Xylocopa from fuzzy bumble bees, \"weakening of structural timbers\" as a recognized economic damage type, and that only females may sting (rarely) while males hover/dart at people near the nest. (Only females possess a stinger in Hymenoptera generally, which is why males cannot sting -- basic, undisputed apidology, not separately sourced.) Source URL added."
+    },
+    "slug": "carpenter-bee",
+    "common_name": "Carpenter Bee",
+    "aliases": [
+      "carpenter bee",
+      "carpenter bees",
+      "xylocopa"
+    ],
+    "scientific_name": "Xylocopa spp.",
+    "rank": "genus",
+    "group": "wasps-bees",
+    "subgroup": "bees",
+    "site_category": "Stingers",
+    "traits": [
+      "Perfectly round, half-inch holes drilled in fascia, pergolas, or unpainted wood",
+      "Big, shiny black abdomen (bumble bees are fuzzy all over)",
+      "Males hover and dive-bomb near the nest but cannot sting",
+      "Fine sawdust below the hole from drilling the tunnel"
+    ],
+    "look_alikes": [
+      {
+        "slug": "bumble-bee",
+        "difference": "Carpenter bees have a shiny, mostly bare black abdomen; bumble bees are fuzzy over the whole body, including the abdomen.",
+        "next_photo": "A close-up of the abdomen — shiny and bare versus fuzzy all over.",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "woodpecker-damage",
+        "difference": "Carpenter bee holes are a single, round, pencil-width hole with a dark stain below; woodpecker holes are larger, rougher-edged and often clustered in a row.",
+        "next_photo": "A close-up of one hole: perfectly round and stained (bee) versus larger, ragged-edged and clustered (woodpecker).",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "large",
+    "where": [
+      "lanai-patio",
+      "attic-walls"
+    ],
+    "looks": [
+      "wasp-bee"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": true,
+      "bites": false,
+      "venomous": true,
+      "disease_vector": false,
+      "structural": true,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "range": "common",
+    "active_months": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8
+    ],
+    "peak_months": [
+      3,
+      4,
+      5
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "That intimidating hovering guard is a male with no stinger — pure bluff. A hole or two is cosmetic, but they're boring into sound wood, and years of re-drilling plus any woodpecker follow-up damage adds up; painted wood helps prevent new holes.",
+      "fact": "That intimidating hovering guard is a male with no stinger — pure bluff.",
+      "blurb": "A hole or two is cosmetic; years of re-drilling plus woodpecker follow-up damage adds up. Paint is the best prevention."
+    },
+    "tech_notes": "Confirm round drilled holes + shiny bare abdomen. Treat active galleries per label; recommend painting/sealing exposed wood to prevent new drilling.",
+    "sources": [
+      "https://journals.flvc.org/edis/article/view/108283",
+      "https://journals.flvc.org/edis/article/download/108283/103564"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/carpenter-bee/",
+      "guides": []
+    }
+  }
+]

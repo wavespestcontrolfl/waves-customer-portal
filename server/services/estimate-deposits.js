@@ -621,12 +621,11 @@ async function sendDepositReceiptEmail({ estimate, customer, prefs, amountDollar
   // read falls closed to the portal home too.
   let estimateUrl = `${publicPortalUrl()}/estimate/${estimate.token}`;
   try {
-    const { gatedSendAuthorityPredicateApplies, estimateDeliverableUnderGate } = require('./pricing-authority-gate');
-    if (gatedSendAuthorityPredicateApplies()) {
-      const verdictRow = await db('estimates').where({ id: estimate.id })
-        .first('id', 'status', 'price_locked_at', 'pricing_authority', 'estimate_data', 'estimate_group_id');
-      if (!verdictRow || !(await estimateDeliverableUnderGate(db, verdictRow))) estimateUrl = publicPortalUrl();
-    }
+    // Asked with the gate on or off: the legacy autofill hold applies either way (#4941).
+    const { estimateDeliverableUnderGate } = require('./pricing-authority-gate');
+    const verdictRow = await db('estimates').where({ id: estimate.id })
+      .first('id', 'status', 'price_locked_at', 'pricing_authority', 'estimate_data', 'estimate_group_id');
+    if (!verdictRow || !(await estimateDeliverableUnderGate(db, verdictRow))) estimateUrl = publicPortalUrl();
   } catch (gateErr) {
     logger.warn(`[estimate-deposits] receipt link verdict unavailable for estimate ${estimate.id} — pointing the receipt CTA at the portal home: ${gateErr.message}`);
     estimateUrl = publicPortalUrl();

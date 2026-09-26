@@ -207,6 +207,24 @@ describe('TwilioService.sendSMS preSendCheck (provider-handoff gate)', () => {
   });
 
   test.each([
+    ['stamps the visit and its send-time property (Codex #4816 r41/r49)', { appointmentId: 'visit-123' }, 'visit-123', 'prop-1'],
+    ['leaves both off when the send names no visit', {}, undefined, undefined],
+  ])('%s', async (_label, extra, expected, expectedProperty) => {
+    const rows = [];
+    require('../models/db').mockImplementation((table) => (table === 'scheduled_services'
+      ? { where: () => ({ first: async () => ({ property_id: 'prop-1' }) }) }
+      : { insert: async row => { rows.push(row); } }));
+    try {
+      const result = await TwilioService.sendSMS(TO, 'Your appointment is confirmed.', {
+        messageType: 'confirmation', fromNumber: FROM, ...extra,
+      });
+      expect(result.success).toBe(true);
+      expect(JSON.parse(rows[0].metadata).scheduled_service_id).toBe(expected);
+      expect(JSON.parse(rows[0].metadata).property_id).toBe(expectedProperty);
+    } finally { require('../models/db').mockReset(); }
+  });
+
+  test.each([
     ['a typed send with no media option (scheduled dispatch) records zero media', { humanAuthored: true }, []],
     ['a typed send with media urls but no media option stays unknown', { humanAuthored: true, mediaUrls: ['https://example.invalid/a.jpg'] }, undefined],
     ['an automated send records no media evidence', { humanAuthored: false }, undefined],

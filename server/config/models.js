@@ -98,6 +98,19 @@ const ANTHROPIC_EFFORT = ANTHROPIC_EFFORT_LEVELS.has(process.env.MODEL_ANTHROPIC
 // and pre-5 Sonnets 400 on the field. The admin picker can pin any of those
 // on a lane, so the pin must never reach them.
 const ANTHROPIC_EFFORT_CAPABLE_RE = /^claude-opus-(4-[7-9]|[5-9])(?![0-9])|^claude-sonnet-[5-9](?![0-9])|^claude-(fable|mythos)-/;
+// Models that accept only SOME levels, for callers that request one specific
+// level (the voice lanes' `low`) rather than applying the admin pin.
+const ANTHROPIC_EFFORT_PARTIAL_LEVELS = Object.freeze([
+  { re: /^claude-opus-4-5(?![0-9])/, levels: Object.freeze(['low', 'medium', 'high']) },
+  { re: /^claude-opus-4-6(?![0-9])/, levels: Object.freeze(['low', 'medium', 'high', 'max']) },
+]);
+// True when `model` accepts output_config.effort at exactly `level`.
+function anthropicAcceptsEffort(model, level) {
+  const id = String(model || '');
+  if (ANTHROPIC_EFFORT_CAPABLE_RE.test(id)) return ANTHROPIC_EFFORT_LEVELS.has(level);
+  const partial = ANTHROPIC_EFFORT_PARTIAL_LEVELS.find(({ re }) => re.test(id));
+  return Boolean(partial && partial.levels.includes(level));
+}
 // Thinking floor: Opus 5 and later, Fable and Mythos think on every request
 // that omits `thinking` (5.5, Fable and Mythos cannot turn it off), and
 // thinking spends from max_tokens ahead of the text block — a cap sized for
@@ -456,6 +469,7 @@ const TEXT_POLICIES = Object.freeze({
 module.exports = {
   ANTHROPIC_EFFORT,
   ANTHROPIC_EFFORT_CAPABLE_RE,
+  anthropicAcceptsEffort,
   ANTHROPIC_THINKING_FLOOR_RE,
   DEEP,
   EXTREME,

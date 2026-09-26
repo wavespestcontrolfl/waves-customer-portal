@@ -114,7 +114,12 @@ describe('billing channel email authority', () => {
     rows.notification_prefs = { customer_id: 'cust-1', billing_channels: ['sms', 'push'] };
     const { context } = await runAuthority();
     expect(context.error).toMatchObject({
-      blocked: true, code: 'BILLING_EMAIL_NOT_SELECTED', deliveryOutcome: 'not_sent',
+      // A channel-selection mismatch can be the exact mid-dispatch
+      // preference-change race the locked recheck below exists to catch, so
+      // this returns the SAME schedulable hold Text/App already return via
+      // preferenceChangeHold() (billing-channel-routing.js) instead of a
+      // dead end.
+      blocked: true, code: 'BILLING_PREFERENCES_CHANGED', deliveryOutcome: 'not_sent', deferred: true, retryable: true,
     });
   });
 
@@ -131,6 +136,11 @@ describe('billing channel email authority', () => {
   });
 
   test('rechecks the selected channel at the provider boundary', async () => {
+    // This IS the Email-only -> Text-only mid-dispatch race: the locked
+    // recheck's channel-selection mismatch must return the shared
+    // schedulable hold, not a terminal drop, so the caller's replay
+    // schedules against the customer's new choice instead of losing the
+    // notice.
     let reads = 0;
     mockDb.mockImplementation((table) => ({
       where: jest.fn().mockReturnThis(),
@@ -147,7 +157,9 @@ describe('billing channel email authority', () => {
     }));
     const { outcome, state } = await runAuthority();
     expect(outcome.ok).toBe(false);
-    expect(state.boundaryBlock).toMatchObject({ blocked: true, code: 'BILLING_EMAIL_NOT_SELECTED' });
+    expect(state.boundaryBlock).toMatchObject({
+      blocked: true, code: 'BILLING_PREFERENCES_CHANGED', deferred: true, retryable: true,
+    });
   });
 
   test('rechecks the global email opt-out at the provider boundary', async () => {
@@ -266,6 +278,22 @@ describe('billing channel email authority', () => {
     expect(invoiceLocked).toBe(false);
   });
 
+  test('threads the SAME locked transaction into the pre-send check as the invoice/recipient locks (codex r2 P1)', async () => {
+    const lockedTrx = jest.fn((table) => defaultDbImplementation(table));
+    mockWithCustomerCommsLock.mockImplementationOnce(async (database, customerId, callback) => {
+      expect(database).toBe(mockDb);
+      expect(customerId).toBe('cust-1');
+      return callback(lockedTrx);
+    });
+    const preSendCheck = jest.fn(async ({ database }) => {
+      expect(database).toBe(lockedTrx);
+      return { ok: true };
+    });
+    const { outcome } = await runAuthority({}, { preSendCheck });
+    expect(outcome.ok).toBe(true);
+    expect(preSendCheck).toHaveBeenCalledWith({ channel: 'email', database: lockedTrx });
+  });
+
   test('blocks when invoice ownership changes before provider dispatch', async () => {
     selfPayAtDispatch
       .mockImplementationOnce(() => async () => ({ ok: true }))
@@ -312,7 +340,7 @@ describe('billing channel email authority', () => {
     expect(state.boundaryBlock).toMatchObject({ blocked: true, code: 'EMAIL_RECIPIENT_CHANGED' });
   });
 
-  test('invokes the pre-send check for the email channel before dispatch', async () => {
+  test('invokes the pre-send check for the email channel before dispatch, threading the locked transaction (codex r2 P1)', async () => {
     const preSendCheck = jest.fn(async () => ({ ok: true }));
     const { outcome } = await runAuthority({}, { preSendCheck });
     expect(outcome.ok).toBe(true);

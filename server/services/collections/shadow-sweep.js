@@ -135,7 +135,7 @@ async function fileProposalCard({ dedupeKey, customer, caseRow, invoice, invoice
       `Predicted opening: "${script}"`,
     ].join('\n'),
     {
-      link: `/admin/customers/${customer.id}`,
+      link: `/admin/customers?customerId=${customer.id}`,
       metadata: {
         dedupeKey,
         customerId: customer.id,
