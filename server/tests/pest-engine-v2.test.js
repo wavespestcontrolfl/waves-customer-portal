@@ -879,3 +879,40 @@ describe('identifyPestV2 — internal object never reaches v2', () => {
     expect(result.internal).toBeDefined();
   });
 });
+
+describe('combineEscalation — agreement only takes a CHECKED confidence (Codex round-0 P1, rounds 12–13)', () => {
+  const { combineEscalation } = engine._test;
+  const geminiTop = (confidence, verified) => ({ ...cand('fire-ant', confidence), verified });
+  const escalation = (confidence) => ({
+    ok: true,
+    json: {
+      quality: { usable: true, issue: 'none' }, shows: 'organism',
+      candidates: [{ slug: 'fire-ant', confidence, traits_visible: [1, 2], traits_not_visible: [] }],
+    },
+  });
+
+  test('two unverified guesses never bump each other: Gemini\'s reading stands', () => {
+    // fire-ant was never handed to OpenAI with numbered traits, so its 0.95 is a raw guess.
+    const out = combineEscalation([geminiTop(0.4, false)], escalation(0.95), new Set());
+    expect(out.disagreed).toBe(false);
+    expect(out.finalCandidates[0].confidence).toBe(0.4);
+    expect(out.finalCandidates[0].verified).toBe(false);
+  });
+
+  test('both verified: the higher of the two', () => {
+    const out = combineEscalation([geminiTop(0.6, true)], escalation(0.9), new Set(['fire-ant']));
+    expect(out.finalCandidates[0].confidence).toBe(0.9);
+    expect(out.finalCandidates[0].verified).toBe(true);
+  });
+
+  test('a verified Gemini reading is not overridden by a higher unverified OpenAI guess', () => {
+    const out = combineEscalation([geminiTop(0.8, true)], escalation(0.95), new Set());
+    expect(out.finalCandidates[0].confidence).toBe(0.8);
+  });
+
+  test('an unverified Gemini reading takes the verified OpenAI one, even when lower', () => {
+    const out = combineEscalation([geminiTop(0.97, false)], escalation(0.7), new Set(['fire-ant']));
+    expect(out.finalCandidates[0].confidence).toBe(0.7);
+    expect(out.finalCandidates[0].traitsVisible).toEqual([1, 2]);
+  });
+});

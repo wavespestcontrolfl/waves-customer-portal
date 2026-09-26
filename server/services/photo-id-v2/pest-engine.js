@@ -153,8 +153,15 @@ function resolveCandidate(raw) {
   const confidence = clamp01(raw?.confidence);
   const traitsVisible = Array.isArray(raw?.traits_visible) ? raw.traits_visible.filter(Number.isFinite) : [];
   const traitsNotVisible = Array.isArray(raw?.traits_not_visible) ? raw.traits_not_visible.filter(Number.isFinite) : [];
+  // `verified` (orchestration-internal only — buildAnswer never reads it;
+  // see combineEscalation's agreement branch, Codex round-0 P1): true only
+  // once a real trait check has actually applied to this candidate's OWN
+  // confidence number. A freshly resolved candidates-call/escalation-call
+  // candidate has NOT been checked against anything yet.
   if (entry) {
-    return { slug: entry.slug, offCatalogName: null, groupId: entry.group, confidence, entry, traitsVisible, traitsNotVisible };
+    return {
+      slug: entry.slug, offCatalogName: null, groupId: entry.group, confidence, entry, traitsVisible, traitsNotVisible, verified: false,
+    };
   }
   return {
     slug: null,
@@ -164,6 +171,7 @@ function resolveCandidate(raw) {
     entry: null,
     traitsVisible,
     traitsNotVisible,
+    verified: false,
   };
 }
 
@@ -340,6 +348,7 @@ function mergeVerify(candidates, verifyResult) {
       confidence: clamp01(v.confidence),
       traitsVisible: v.traits_visible.filter(Number.isFinite),
       traitsNotVisible: v.traits_not_visible.filter(Number.isFinite),
+      verified: true,
     };
   });
 }
@@ -822,8 +831,25 @@ function isValidEscalationCandidate(raw) {
  * catalog's real trait strings at those numbers as if they had been
  * observed. Codex round-0 P1 (round 11). */
 function stripUncontextedTraits(candidate, contextSlugs) {
-  if (!candidate.entry || contextSlugs.has(candidate.slug)) return candidate;
-  return { ...candidate, traitsVisible: [], traitsNotVisible: [] };
+  if (!candidate.entry) return candidate;
+  // In context: it had a real numbered-trait list to check its citations
+  // against, and already passed `isValidEscalationCandidate`'s array-shape
+  // requirement — a genuine check, `verified: true` (used by
+  // combineEscalation's agreement branch, Codex round-0 P1).
+  if (contextSlugs.has(candidate.slug)) return { ...candidate, verified: true };
+  return { ...candidate, traitsVisible: [], traitsNotVisible: [], verified: false };
+}
+
+/** Prefer whichever candidate's confidence was actually verified (a real
+ * trait check applied); between two verified numbers, the higher one;
+ * between two unverified guesses, `a` (the caller's default/fallback
+ * side) — there is no real evidence either way to prefer `b` over it. */
+function pickVerifiedWinner(a, b) {
+  const aVerified = !!a.verified;
+  const bVerified = !!b.verified;
+  if (aVerified && bVerified) return b.confidence > a.confidence ? b : a;
+  if (bVerified) return b;
+  return a;
 }
 
 function combineEscalation(geminiCandidates, escalationResult, contextSlugs) {
@@ -866,17 +892,24 @@ function combineEscalation(geminiCandidates, escalationResult, contextSlugs) {
     return { finalCandidates: geminiCandidates, disagreed: false, disagreementNode: null, openaiAnswered, openaiStoodInAlone: false };
   }
   if (sameCandidateKey(geminiTop, openaiTop)) {
-    // Codex round-0 P1: "the higher of the two" must carry that side's OWN
-    // validated trait evidence too — not just its confidence number stapled
-    // onto Gemini's (possibly empty, e.g. after a verify miss) traits. If
-    // OpenAI is the one supplying the winning confidence, its trait check
-    // is what actually earned it.
-    const winner = openaiTop.confidence > geminiTop.confidence ? openaiTop : geminiTop;
+    // Codex round-0 P1 (rounds 12–13): "the higher of the two" only makes
+    // sense between two numbers that were both actually CHECKED — a raw,
+    // never-verified candidates-call guess (Gemini's verify missed, which
+    // is exactly why low_confidence/gemini_missed escalated in the first
+    // place) is not a real confidence to compare via Math.max. Prefer
+    // whichever side is `verified` (mergeVerify only sets it once a valid
+    // trait check actually applied; stripUncontextedTraits sets it for an
+    // escalation candidate only when it had real numbered-trait context);
+    // when both are verified, THEN take the higher; when neither is,
+    // there is nothing to bump to, so Gemini's (already-capped-elsewhere)
+    // reading stands rather than inventing agreement out of two guesses.
+    const winner = pickVerifiedWinner(geminiTop, openaiTop);
     const bumped = {
       ...geminiTop,
-      confidence: Math.max(geminiTop.confidence, openaiTop.confidence),
+      confidence: winner.confidence,
       traitsVisible: winner.traitsVisible,
       traitsNotVisible: winner.traitsNotVisible,
+      verified: !!(geminiTop.verified || openaiTop.verified),
     };
     return {
       finalCandidates: dedupeCandidates([bumped, ...geminiCandidates.slice(1), ...openaiCandidates.slice(1)]),
@@ -1072,5 +1105,5 @@ module.exports = {
   REFERRAL_TEMPLATES,
   escalateBelow,
   toImages,
-  _test: { candidateContextFor, mergeVerify, V2_TO_V1_SLUG },
+  _test: { candidateContextFor, mergeVerify, combineEscalation, V2_TO_V1_SLUG },
 };
