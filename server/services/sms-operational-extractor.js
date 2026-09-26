@@ -201,7 +201,11 @@ function hasClockRange(body) {
 // clock preposition ("tomorrow at 9", "before five"). Shared with the SMS
 // deadline defaults so both read clock timing the same way.
 const CLOCK_TOKEN = /\b(?:\d{1,2}:\d{2}|\d{1,2}\s*[ap]\.?m\.?|\d{1,2}[ap]|o['’]?clock|noon|midnight)(?=\s|[,.!?;–-]|$)/gi;
-const CLOCK_PREPOSITION = /\b(?:at|by|around|before|after|until|till)\s+(?:\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)(?=\s|[,.!?;]|$)/i;
+// A spelled hour counts only when nothing or a time word follows it: "at one
+// of these numbers" is not a clock (Codex #4816 r35).
+const CLOCK_PREPOSITION = new RegExp('\\b(?:at|by|around|before|after|until|till)\\s+(?:\\d{1,2}(?=\\s|[,.!?;]|$)'
+  + '|(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)'
+  + '(?=\\s*(?:[,.!?;]|$)|\\s+(?:o[\'’]?clock|thirty|fifteen|forty|[ap]\\.?m\\b|or|to|and|in the|this|tonight|today|tomorrow|on|then|please|works|ish)\\b|-ish\\b))', 'i');
 function statesClock(text) {
   const value = String(text || '');
   return (value.match(CLOCK_TOKEN) || []).length > 0 || CLOCK_PREPOSITION.test(value);

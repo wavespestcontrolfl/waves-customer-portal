@@ -75,6 +75,15 @@ const PROGRESS_STATUSES = ['en_route', 'on_site', 'completed'];
 // both kinds; visitWitnessAt decides which recorded stamp may answer.
 const VISIT_STATUSES = { schedule_visit: ['confirmed', 'rescheduled', 'en_route', 'on_site', 'completed'],
   technician_follow_up: ['completed'], other: [...PROGRESS_STATUSES, 'cancelled'], callback: [...PROGRESS_STATUSES, 'cancelled'] };
+// Moving a live visit resets it to confirmed (admin-schedule reschedule
+// paths), so a logged move keeps the recorded progress admissible (Codex
+// #4816 r35). Without a logged move, a visit back at confirmed is an undone
+// En Route tap, which proves nobody came.
+const MOVED_STATUSES = ['confirmed', 'rescheduled'];
+function visitStatusAdmits(record, kind) {
+  if (VISIT_STATUSES[kind].includes(record.status)) return true;
+  return ['other', 'callback'].includes(kind) && MOVED_STATUSES.includes(record.status) && !!record.moved_at;
+}
 
 
 async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
@@ -285,7 +294,7 @@ function admissibleWitness(record, commitment, records = []) {
       && emails.size === 1 && emails.has(normalized(record.recipient_email_snapshot))
       && (!estimateDelivery || deliveredEstimate()),
     estimate: () => !!witnessAt(record, new Date(commitment.sms_context?.source_at)),
-    visit: () => VISIT_STATUSES[commitment.kind].includes(record.status) && !!visitWitnessAt(record, commitment),
+    visit: () => visitStatusAdmits(record, commitment.kind) && !!visitWitnessAt(record, commitment),
   };
   // Invoice sends are context, never evidence that a question was answered.
   return witnesses[record.type]?.() === true;

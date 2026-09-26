@@ -382,7 +382,8 @@ describe('SMS operational evidence and ownership', () => {
     expect(result.facts).toEqual([]);
   });
 
-  test.each([['Please send the estimate by September 10 at 3', 'send_estimate'], ['Please call before 5 tomorrow', 'callback']])(
+  test.each([['Please send the estimate by September 10 at 3', 'send_estimate'], ['Please call before 5 tomorrow', 'callback'],
+    ['Please call before five tomorrow', 'callback'], ['Please call at nine', 'callback'], ['Please call around ten or eleven', 'callback']])(
     'a bare hour after a clock preposition is stated timing that needs review: %s', (body, kind) => {
       const message = source(body);
       const result = groundExtraction(extracted([obligation(message.message_body, { kind })]), { message, properties });
@@ -412,7 +413,8 @@ describe('SMS operational evidence and ownership', () => {
       expect(result.dropped).toBe(0);
     });
 
-  test.each([['Please call me at 941-555-0100', 'callback'], ['Please send 2 estimates', 'send_estimate'], ['Please send 2 a month of the estimates', 'send_estimate']])(
+  test.each([['Please call me at 941-555-0100', 'callback'], ['Please send 2 estimates', 'send_estimate'], ['Please send 2 a month of the estimates', 'send_estimate'],
+    ['Please call me at one of these numbers', 'callback']])(
     'a number that is not a clock hour stays undated without review: %s', (body, kind) => {
       const message = source(body);
       const result = groundExtraction(extracted([obligation(message.message_body, { kind })]), { message, properties });
@@ -939,6 +941,24 @@ describe('fulfillment proof', () => {
     expect(admissibleWitness(cancelledOnly, ask('callback'))).toBe(false);
     // Scoped cancel ask: the cancellation answers; the earliest qualifying stamp is the witness time.
     expect(admissibleWitness(cancelledOnly, ask('other', { property_id: 'home' }))).toBe(true);
+  });
+
+  test('Codex #4816 r35: recorded progress still answers after a move resets the visit to confirmed', () => {
+    const ask = (kind) => ({ kind, description: 'You still coming?',
+      sms_context: { property_id: null, source_at: '2040-03-10T15:00:00Z' } });
+    const progressedThenMoved = { id: 'visit-m', ref: 'visit:visit-m', type: 'visit', status: 'confirmed', property_id: 'home',
+      created_at: '2040-03-01T15:00:00Z', progressed_at: '2040-03-10T16:00:00Z', moved_at: '2040-03-10T17:00:00Z',
+      text: 'Quarterly Lawn on 2040-03-12 at 09:00:00; status confirmed; moved after the request; en route/on site/completed after the request' };
+    for (const status of ['confirmed', 'rescheduled']) {
+      expect(admissibleWitness({ ...progressedThenMoved, status }, ask('other'))).toBe(true);
+      expect(admissibleWitness({ ...progressedThenMoved, status }, ask('callback'))).toBe(true);
+    }
+    // A move alone is not progress.
+    expect(admissibleWitness({ ...progressedThenMoved, progressed_at: null }, ask('other'))).toBe(false);
+    expect(admissibleWitness({ ...progressedThenMoved, progressed_at: null }, ask('callback'))).toBe(false);
+    // Back at confirmed with no logged move: an undone En Route tap, not progress.
+    expect(admissibleWitness({ ...progressedThenMoved, moved_at: null }, ask('other'))).toBe(false);
+    expect(admissibleWitness({ ...progressedThenMoved, moved_at: null }, ask('callback'))).toBe(false);
   });
 
   test('Codex #4816 r14–r27: a cancellation answers only a cancel ask whose property was resolved', () => {
