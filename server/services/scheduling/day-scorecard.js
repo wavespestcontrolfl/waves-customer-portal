@@ -117,6 +117,16 @@ function plannedPastRow(plan) {
 // complete one — see onSiteCoverage on the client) and drive minutes summed
 // from mileage_log (null, not 0, when no trip rows exist).
 //
+// onSiteCoverage.unbaselined (Codex P1): plan.stops is the SAVED snapshot —
+// a job added to the route after the snapshot was captured and then
+// completed the same day exists in `enriched` (route-performance's own
+// scheduled_services read) but never in plan.stops, so covered/total alone
+// would silently omit it and read as full coverage. route-performance.js's
+// getRoutePerformance already tallies this per route
+// (plan.unbaselinedCompletedVisits, the per-key breakdown behind its
+// top-level unbaselinedCompletedVisits count) — carried straight through so
+// the UI can mark the day partial and say so.
+//
 // No idle metric: mileage_log has no per-trip timestamps, only a day total,
 // so a day's drive minutes include the outbound/return legs OUTSIDE the
 // first-arrival-to-last-completion span, not just the driving that happened
@@ -135,7 +145,8 @@ function actualPastRow(plan, mileage) {
   const arrivals = plan.stops.map(stop => stop.recordedArrivalMinute).filter(Number.isFinite);
   const completions = plan.stops.map(stop => stop.recordedCompletionMinute).filter(Number.isFinite);
   const spanMinutes = arrivals.length && completions.length ? Math.max(...completions) - Math.min(...arrivals) : null;
-  return { onSiteMinutes, onSiteCoverage: { covered: recorded.length, total: plan.stops.length },
+  const unbaselined = Number.isFinite(plan.unbaselinedCompletedVisits) ? plan.unbaselinedCompletedVisits : 0;
+  return { onSiteMinutes, onSiteCoverage: { covered: recorded.length, total: plan.stops.length, unbaselined },
     driveMinutes, driveTrips, spanMinutes };
 }
 

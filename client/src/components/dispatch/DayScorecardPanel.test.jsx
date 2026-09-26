@@ -92,6 +92,26 @@ it('full actual coverage shows the count with no "(partial)" marker', async () =
   expect(within(actualRow).queryByText(/partial/)).not.toBeInTheDocument();
 });
 
+it('full baseline coverage still marks the day partial when a same-day added job was completed outside it', async () => {
+  mockAdminFetch.mockResolvedValue(ok(pastPayload({
+    onSiteMinutes: 90, onSiteCoverage: { covered: 2, total: 2, unbaselined: 1 }, driveMinutes: 20, driveTrips: 2, spanMinutes: 130,
+  })));
+  render(<DayScorecardPanel />);
+  await screen.findByText('2026-09-01');
+  const actualRow = screen.getByText('Actual').closest('tr');
+  expect(within(actualRow).getByText('1h 30m · 2/2 recorded +1 added same day not counted (partial)')).toBeInTheDocument();
+});
+
+it('zero baseline coverage with an unbaselined completed job still says so, not just "unknown"', async () => {
+  mockAdminFetch.mockResolvedValue(ok(pastPayload({
+    onSiteMinutes: null, onSiteCoverage: { covered: 0, total: 1, unbaselined: 1 }, driveMinutes: null, driveTrips: null, spanMinutes: null,
+  })));
+  render(<DayScorecardPanel />);
+  await screen.findByText('2026-09-01');
+  const actualRow = screen.getByText('Actual').closest('tr');
+  expect(within(actualRow).getByText('unknown +1 added same day not counted (partial)')).toBeInTheDocument();
+});
+
 it('zero recorded coverage reads as fully unknown, never "0m"', async () => {
   mockAdminFetch.mockResolvedValue(ok(pastPayload({
     onSiteMinutes: null, onSiteCoverage: { covered: 0, total: 3 }, driveMinutes: null, driveTrips: null, spanMinutes: null,

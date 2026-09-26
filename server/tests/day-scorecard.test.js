@@ -262,6 +262,53 @@ describe('getDayScorecard', () => {
     expect(ghostRow.actual).toMatchObject({ driveMinutes: 40, driveTrips: 1 });
   });
 
+  // Codex P1: onSiteCoverage was built only from plan.stops (the saved
+  // snapshot), so a job added to the route after the snapshot and completed
+  // the same day was invisible — covered/total read as full when real,
+  // uncounted work happened. route-performance.js's getRoutePerformance
+  // reports this per route as plan.unbaselinedCompletedVisits; day-scorecard
+  // must carry it through as onSiteCoverage.unbaselined rather than drop it.
+  test('a same-day added job completed outside the saved snapshot is carried as onSiteCoverage.unbaselined', async () => {
+    const date = '2026-09-01';
+    getScheduleQualityMeasurements.mockResolvedValue({
+      driveModel: 'legacy',
+      days: [{ date, closed: false, byTech: [{ technicianId: 'tech1', technician: 'Tech One' }] }],
+    });
+    getRoutePerformance.mockResolvedValue({
+      plans: [{
+        date, technicianId: 'tech1', plannedVisits: 2, plannedServiceMinutes: 90, plannedDriveMinutes: 25,
+        plannedWaitingMinutes: 5, plannedReturnMinuteBeforeBreaks: 600, driveModel: 'legacy',
+        unbaselinedCompletedVisits: 1,
+        stops: [
+          { durationEvidence: 'recorded_lifecycle_interval', recordedServiceMinutes: 45, recordedArrivalMinute: 480, recordedCompletionMinute: 540 },
+          { durationEvidence: 'recorded_lifecycle_interval', recordedServiceMinutes: 45, recordedArrivalMinute: 540, recordedCompletionMinute: 600 },
+        ],
+      }],
+    });
+    const result = await getDayScorecard({ date_from: date, date_to: date }, conn([]), new Date('2026-09-08T12:00:00Z'));
+    const row = result.days[0].byTech[0];
+    // Full coverage on the SNAPSHOT's own two stops, but a third, unbaselined
+    // completed job existed that day and is not folded into onSiteMinutes.
+    expect(row.actual.onSiteCoverage).toEqual({ covered: 2, total: 2, unbaselined: 1 });
+  });
+
+  test('a plan with no unbaselined completed visits reports unbaselined: 0, not undefined', async () => {
+    const date = '2026-09-01';
+    getScheduleQualityMeasurements.mockResolvedValue({
+      driveModel: 'legacy',
+      days: [{ date, closed: false, byTech: [{ technicianId: 'tech1', technician: 'Tech One' }] }],
+    });
+    getRoutePerformance.mockResolvedValue({
+      plans: [{
+        date, technicianId: 'tech1', plannedVisits: 1, plannedServiceMinutes: 60, plannedDriveMinutes: 10,
+        plannedWaitingMinutes: 0, plannedReturnMinuteBeforeBreaks: 540, driveModel: 'legacy',
+        stops: [{ durationEvidence: 'recorded_lifecycle_interval', recordedServiceMinutes: 55, recordedArrivalMinute: 480, recordedCompletionMinute: 540 }],
+      }],
+    });
+    const result = await getDayScorecard({ date_from: date, date_to: date }, conn([]), new Date('2026-09-08T12:00:00Z'));
+    expect(result.days[0].byTech[0].actual.onSiteCoverage.unbaselined).toBe(0);
+  });
+
   // Codex P1: the mileage rollup summed every trip including ones Bouncie
   // classified as personal, inflating "actual drive" with non-work driving.
   test('personal and commute trips are excluded from actual drive minutes; unclassified and business count', async () => {

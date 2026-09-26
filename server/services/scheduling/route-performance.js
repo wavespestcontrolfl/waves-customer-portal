@@ -235,11 +235,24 @@ async function getRoutePerformance({ from, to, now = new Date() }, conn) {
   const missingBaselineRoutes = [...missingRoutes.values()].sort((a, b) => a.date.localeCompare(b.date)
     || String(a.technicianId || '').localeCompare(String(b.technicianId || '')));
   const missingBaselineDates = [...new Set(missingBaselineRoutes.map(route => route.date))];
+  // Same tally the top-level unbaselinedCompletedVisits sums, kept per route
+  // key too: a route WITH a baseline can still miss a job added (and
+  // completed) after the snapshot was captured — a caller measuring "actual"
+  // work against `plan.plannedStops` alone would silently omit it (Codex
+  // P1 on day-scorecard.js's onSiteCoverage).
+  const unbaselinedByRoute = new Map();
+  for (const row of pastWork) {
+    if (row.status !== 'completed') continue;
+    const key = routeKey(dateOnly(row.scheduled_date), row.technician_id);
+    if (coveredRoutes.get(key)?.has(row.id)) continue;
+    unbaselinedByRoute.set(key, (unbaselinedByRoute.get(key) || 0) + 1);
+  }
   return {
     basis: 'saved_pre_service_plan_vs_recorded_work', asOf: now.toISOString(),
-    plans: plans.map(plan => measureRoutePerformance(plan, enriched)), missingBaselineDates, missingBaselineRoutes,
-    unbaselinedCompletedVisits: pastWork.filter(row => row.status === 'completed'
-      && !coveredRoutes.get(routeKey(dateOnly(row.scheduled_date), row.technician_id))?.has(row.id)).length,
+    plans: plans.map(plan => ({ ...measureRoutePerformance(plan, enriched),
+      unbaselinedCompletedVisits: unbaselinedByRoute.get(routeKey(plan.date, plan.technician_id)) || 0 })),
+    missingBaselineDates, missingBaselineRoutes,
+    unbaselinedCompletedVisits: [...unbaselinedByRoute.values()].reduce((sum, count) => sum + count, 0),
     truncatedPlanningRuns: runs.length > 500,
     durationReferences: summarizeDurationReferences(pastWork, recordedTiming),
     note: 'Unknown arrivals are excluded from the on-time denominator. Duration sources stay separate; no GPS gap is classified as idle and no model is updated.',

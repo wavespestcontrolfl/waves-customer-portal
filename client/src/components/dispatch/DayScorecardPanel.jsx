@@ -43,13 +43,17 @@ function fmtCount(value) {
 // On-site minutes, ACTUAL side: the sum is only ever over the recorded rows
 // (RECORDED_EVIDENCE on the server), so it's shown with its own coverage
 // rather than as a plain total that could pass for a complete day. No
-// recorded stop at all reads as fully unknown, never "0m".
+// recorded stop at all reads as fully unknown, never "0m". `unbaselined` is
+// a job added to the route after the saved snapshot and completed the same
+// day — it's real work the covered/total pair can't see at all (the
+// snapshot never named it), so it always marks the day partial too.
 function fmtOnSite(m) {
   if (!m?.onSiteCoverage) return fmtMinutes(m?.onSiteMinutes); // planned side — no coverage concept
-  const { covered, total } = m.onSiteCoverage;
-  if (!covered) return 'unknown';
+  const { covered, total, unbaselined = 0 } = m.onSiteCoverage;
+  const addedNote = unbaselined > 0 ? ` +${unbaselined} added same day not counted` : '';
+  if (!covered) return unbaselined > 0 ? `unknown${addedNote} (partial)` : 'unknown';
   const text = `${fmtMinutes(m.onSiteMinutes)} · ${covered}/${total} recorded`;
-  return covered < total ? `${text} (partial)` : text;
+  return (covered < total || unbaselined > 0) ? `${text}${addedNote} (partial)` : text;
 }
 
 // One metric column shared by the planned and actual sub-rows so the two
