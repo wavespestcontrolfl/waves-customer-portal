@@ -83,6 +83,8 @@ function setDbQueues(queues) {
       // The checker's active-plan gate (fail-closed) probes payment_plans
       // per invoice — default to "no active plan" unless a test scripts one.
       if (table === 'payment_plans') return chain({ first: undefined });
+      // No prefs row = legacy NULL arrays (a read failure is a distinct hold).
+      if (table === 'notification_prefs') return chain({ first: undefined });
       if (table === 'collections_contact_ledger') return chain({ result: [] });
       throw new Error(`Unexpected db table ${table}`);
     }
@@ -589,6 +591,29 @@ describe('late-payment checker email sidecar', () => {
 
     const result = await LatePaymentChecker.checkAndNotify();
 
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(BalanceReminder.sendLatePaymentEmail).not.toHaveBeenCalled();
+    expect(result.skipped).toBe(1);
+  });
+
+  test('holds the reminder when billing preferences cannot be read, never falling back to Text', async () => {
+    const invoice = {
+      id: 'inv-1', customer_id: 'cust-1', token: 'token-1', invoice_number: 'WPC-2026-1042',
+      status: 'sent', title: 'Quarterly Pest Control', total: '129.00', due_date: '2026-05-10',
+      service_date: '2026-05-01', created_at: '2026-05-01T12:00:00.000Z',
+    };
+    const unreadablePrefs = chain();
+    unreadablePrefs.first = jest.fn(async () => { throw new Error('connection terminated'); });
+    setDbQueues({
+      invoices: [chain({ result: [invoice] }), chain({ first: { payer_id: null, scheduled_send_error: null } })],
+      activity_log: [chain({ first: null })],
+      customers: [chain({ first: { id: 'cust-1', first_name: 'Taylor', phone: '+19415550101' } })],
+      notification_prefs: [unreadablePrefs],
+    });
+
+    const result = await LatePaymentChecker.checkAndNotify();
+
+    expect(unreadablePrefs.first).toHaveBeenCalled();
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(BalanceReminder.sendLatePaymentEmail).not.toHaveBeenCalled();
     expect(result.skipped).toBe(1);

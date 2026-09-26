@@ -5,6 +5,17 @@ const db = require('../models/db');
 const ContactLedger = require('./collections/contact-ledger');
 const { collectionsChannelPermitted } = require('./collections/rail-guard');
 
+// A permanent Email refusal (no address, Email not selected, template
+// unavailable, suppressed) can never succeed on retry. It resolves that leg
+// without claiming delivery, so the episode is not held open forever.
+function isTerminalEmailRefusal(result) {
+  return result?.ok === false && result.retryable !== true && result.deferred !== true
+    && result.deliveryOutcome !== 'uncertain' && (
+    (result.skipped === true && ['missing_email', 'billing_email_not_selected', 'template_unavailable'].includes(result.reason))
+    || (result.blocked === true && /^Suppressed: /.test(result.reason || ''))
+  );
+}
+
 function metadataOf(row) {
   return typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
 }
@@ -16,8 +27,9 @@ async function reminderProgress(customerId, source, channels) {
   for (const row of rows) {
     const metadata = metadataOf(row);
     if (!metadata.notificationEventKey) continue;
-    const event = events.get(metadata.notificationEventKey) || { metadata, entries: [], delivered: new Set() };
+    const event = events.get(metadata.notificationEventKey) || { metadata, entries: [], delivered: new Set(), resolved: new Set() };
     event.entries.push(row);
+    if (metadata.resolved === true && metadata.delivered !== true) event.resolved.add(row.channel);
     if (metadata.delivered === true) {
       event.delivered.add(row.channel);
       if (!event.deliveredAt || new Date(row.occurred_at) > new Date(event.deliveredAt)) event.deliveredAt = row.occurred_at;
@@ -25,8 +37,38 @@ async function reminderProgress(customerId, source, channels) {
     events.set(metadata.notificationEventKey, event);
   }
   return [...events.values()].map((event) => ({ ...event,
-    complete: channels.every((channel) => event.delivered.has(channel)),
+    complete: channels.every((channel) => event.delivered.has(channel) || event.resolved.has(channel)),
   }));
+}
+
+async function sendLeg(send, channel) {
+  try {
+    return await send(channel);
+  } catch (err) {
+    return err.providerOutcome || { sent: false, deliveryOutcome: 'uncertain', code: 'REMINDER_OUTCOME_UNCONFIRMED' };
+  }
+}
+
+// Stamps one leg's provider outcome on its reservation and returns the state
+// it reached: 'delivered', 'resolved' (terminal Email refusal, never counted
+// as delivered), or null while it stays pending. An uncertain outcome keeps
+// the reservation held; only a definite non-send becomes retryable.
+async function recordLegOutcome(entry, channel, result, results) {
+  const accepted = result?.deliveryOutcome === 'accepted'
+    || (channel === 'email' && result?.ok === true && result.deliveryOutcome === undefined);
+  if (accepted) {
+    if (await ContactLedger.markDelivered(entry)) return 'delivered';
+    results[channel] = { ...result, deliveryHeld: true, code: 'REMINDER_ACCEPTANCE_UNSTAMPED' };
+    return null;
+  }
+  if (result?.deliveryOutcome === 'uncertain') return null;
+  const terminal = channel === 'email' && isTerminalEmailRefusal(result);
+  const stamped = await ContactLedger.markSendFailed(entry, {
+    code: result?.code || result?.reason || 'not_sent',
+    ...(terminal ? { resolved: true, resolution: 'email_terminal_refusal' } : {}),
+  });
+  if (!stamped) results[channel] = { ...result, deliveryHeld: true, code: 'REMINDER_OUTCOME_UNCONFIRMED' };
+  return stamped && terminal ? 'resolved' : null;
 }
 
 // Each selected method owns a keyed reservation before provider handoff.
@@ -37,15 +79,17 @@ async function sendReminderChannels({ customerId, invoiceId, source, purpose, ev
   const existing = progress.find((event) => event.metadata.notificationEventKey === eventKey);
   const entries = existing?.entries || [];
   const delivered = new Set(existing?.delivered || []);
+  const resolved = new Set(existing?.resolved || []);
   const deliveredNow = [];
   const results = {};
-  const pending = ['email', 'push', 'sms'].filter((channel) => channels.includes(channel) && !delivered.has(channel));
+  const pending = ['email', 'push', 'sms'].filter((channel) => channels.includes(channel)
+    && !delivered.has(channel) && !resolved.has(channel));
   const permitted = await Promise.all(pending.map((channel) => collectionsChannelPermitted({
     customerId, invoiceId, channel, purpose, excludeLedgerIds: entries.map((entry) => entry.id), logTag: 'billing-reminder',
   })));
+  const digest = crypto.createHash('sha256').update(`${customerId}:${eventKey}`).digest('hex');
   for (const [index, channel] of pending.entries()) {
     if (!permitted[index]) { results[channel] = { sent: false, blocked: true, code: 'COLLECTIONS_POLICY' }; continue; }
-    const digest = crypto.createHash('sha256').update(`${customerId}:${eventKey}`).digest('hex');
     const entry = await ContactLedger.recordContact({
       customerId, channel, purpose, invoiceIds: [invoiceId], source,
       idempotencyKey: `billing-reminder:${digest}:${channel}`,
@@ -54,29 +98,18 @@ async function sendReminderChannels({ customerId, invoiceId, source, purpose, ev
     const claim = await ContactLedger.claimAttempt(entry);
     if (claim.delivered) { delivered.add(channel); continue; }
     if (!claim.allowed) { results[channel] = { sent: false, deliveryHeld: true, code: 'REMINDER_OUTCOME_UNCONFIRMED' }; continue; }
-    let result;
-    try {
-      result = await send(channel);
-    } catch (err) {
-      result = err.providerOutcome || { sent: false, deliveryOutcome: 'uncertain', code: 'REMINDER_OUTCOME_UNCONFIRMED' };
-    }
+    const result = await sendLeg(send, channel);
     results[channel] = result;
-    const accepted = result?.deliveryOutcome === 'accepted'
-      || (channel === 'email' && result?.ok === true && result.deliveryOutcome === undefined);
-    if (accepted) {
-      if (!await ContactLedger.markDelivered(entry)) {
-        results[channel] = { ...result, deliveryHeld: true, code: 'REMINDER_ACCEPTANCE_UNSTAMPED' };
-        continue;
-      }
+    const state = await recordLegOutcome(entry, channel, result, results);
+    if (state === 'delivered') {
       delivered.add(channel);
       if (!result.deduped) deliveredNow.push(channel);
-    } else if (result?.deliveryOutcome !== 'uncertain') {
-      if (!await ContactLedger.markSendFailed(entry, { code: result?.code || result?.reason || 'not_sent' })) {
-        results[channel] = { ...result, deliveryHeld: true, code: 'REMINDER_OUTCOME_UNCONFIRMED' };
-      }
-    }
+    } else if (state === 'resolved') resolved.add(channel);
   }
-  return { complete: channels.every((channel) => delivered.has(channel)), deliveredNow, results };
+  return {
+    complete: channels.every((channel) => delivered.has(channel) || resolved.has(channel)),
+    deliveredNow, results,
+  };
 }
 
-module.exports = { reminderProgress, sendReminderChannels };
+module.exports = { reminderProgress, sendReminderChannels, isTerminalEmailRefusal };

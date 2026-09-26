@@ -48,6 +48,8 @@ function setDbQueues(queues) {
     const queue = tableQueues.get(table);
     if (!queue || !queue.length) {
       if (table === 'payment_plans') return chain({ first: undefined });
+      // No prefs row = legacy NULL arrays (a read failure is a distinct hold).
+      if (table === 'notification_prefs') return chain({ first: undefined });
       if (table === 'collections_contact_ledger') return chain({ result: [] });
       throw new Error(`Unexpected db table ${table}`);
     }

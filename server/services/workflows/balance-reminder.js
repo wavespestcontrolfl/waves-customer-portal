@@ -854,7 +854,9 @@ class BalanceReminder {
           return null;
         });
         if (emailResult?.ok === true) await ContactLedger.markDelivered(emailLedger);
-        else await ContactLedger.markSendFailed(emailLedger, { reason: emailResult?.reason || 'email_not_sent' });
+        else if (emailResult?.deliveryOutcome !== 'uncertain') {
+          await ContactLedger.markSendFailed(emailLedger, { reason: emailResult?.reason || 'email_not_sent' });
+        }
         return emailResult;
       };
       if (explicitEmailSelected) await attemptEmail();

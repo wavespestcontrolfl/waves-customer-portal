@@ -99,6 +99,33 @@ describe('billing reminder per-channel delivery progress', () => {
       .toMatchObject({ send_failed: false, delivered: true });
   });
 
+  test('a terminal Email refusal resolves its leg without claiming delivery', async () => {
+    const send = jest.fn(async (channel) => (channel === 'email'
+      ? { ok: false, skipped: true, reason: 'missing_email', deliveryOutcome: 'not_sent' }
+      : { sent: true, deliveryOutcome: 'accepted', auditLogId: 'audit-sms' }));
+
+    await expect(deliver(['email', 'sms'], send)).resolves.toMatchObject({ complete: true, deliveredNow: ['sms'] });
+    await expect(deliver(['email', 'sms'], send)).resolves.toMatchObject({ complete: true, deliveredNow: [] });
+
+    expect(send.mock.calls.map(([channel]) => channel)).toEqual(['email', 'sms']);
+    const email = rows.find((row) => row.channel === 'email').metadata;
+    expect(email).toMatchObject({ send_failed: true, resolved: true, resolution: 'email_terminal_refusal' });
+    expect(email.delivered).toBeUndefined();
+  });
+
+  test('an uncertain Email outcome keeps its reservation held rather than retryable', async () => {
+    const send = jest.fn(async (channel) => (channel === 'email'
+      ? { ok: false, deliveryOutcome: 'uncertain', error: 'socket hang up' }
+      : { sent: true, deliveryOutcome: 'accepted', auditLogId: 'audit-sms' }));
+
+    await expect(deliver(['email', 'sms'], send)).resolves.toMatchObject({ complete: false });
+    await expect(deliver(['email', 'sms'], send)).resolves.toMatchObject({
+      complete: false, results: { email: expect.objectContaining({ deliveryHeld: true }) },
+    });
+    expect(send.mock.calls.map(([channel]) => channel)).toEqual(['email', 'sms']);
+    expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
+  });
+
   test('an unstamped acceptance is held and never sent twice', async () => {
     ContactLedger.markDelivered.mockResolvedValueOnce(false);
     const send = jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted', auditLogId: 'audit-sms' }));

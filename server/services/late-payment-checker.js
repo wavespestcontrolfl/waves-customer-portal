@@ -18,6 +18,7 @@ const StripeService = require('./stripe');
 const { sendMicrodepositVerificationEmail } = require('./microdeposit-verification-email');
 const { formatDateOnly } = require('../utils/date-only');
 const { billingChannelAllowed, explicitBillingChannels } = require('./billing-delivery-channels');
+const { isTerminalEmailRefusal } = require('./billing-reminder-delivery');
 
 function tierDaysForOverdue(daysSince) {
   if (daysSince < 14) return 7;
@@ -56,13 +57,6 @@ function emailEpisodeNeedsRetry(deliveryMetas, emailMeta) {
     && emailMeta.delivered !== true && emailMeta.resolved !== true;
 }
 
-function isTerminalEmailRefusal(result) {
-  return result?.ok === false && result.retryable !== true && result.deferred !== true
-    && result.deliveryOutcome !== 'uncertain' && (
-    (result.skipped === true && ['missing_email', 'billing_email_not_selected', 'template_unavailable'].includes(result.reason))
-    || (result.blocked === true && /^Suppressed: /.test(result.reason || ''))
-  );
-}
 
 async function recoverPendingEmailEpisode(invoiceId, { microdeposit = false } = {}) {
   const prefix = `late_payment_checker:${microdeposit ? 'microdeposit:' : ''}${invoiceId}:`;
@@ -292,7 +286,14 @@ async function maybeDivertToMicrodepositReminder(inv, daysSince, domain, now = n
 
   const customer = await db('customers').where({ id: inv.customer_id }).first();
   if (!customer || customer.deleted_at) return 'skip';
-  const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => null);
+  let prefs;
+  try {
+    prefs = await db('notification_prefs').where({ customer_id: customer.id }).first();
+  } catch (err) {
+    // An unreadable choice must not fall back to legacy Text: hold this run.
+    logger.warn(`[late-payment] micro-deposit reminder held for invoice ${inv.id} — preferences unavailable: ${err.message}`);
+    return 'skip';
+  }
   const explicitChannels = explicitBillingChannels(prefs || {}, 'payment_issue');
   if (!customer.phone && !explicitChannels?.some((channel) => channel === 'email' || channel === 'push')) return 'skip';
   const explicitEmailSelected = billingChannelAllowed(prefs || {}, 'payment_issue', 'email') === true;
@@ -328,7 +329,9 @@ async function maybeDivertToMicrodepositReminder(inv, daysSince, domain, now = n
       invoice: inv, customer, touchKey: `${tierDays}d`, enforceBillingPreference: true,
     }).catch((e) => ({ ok: false, error: e.message }));
     if (result?.ok !== true) {
-      await ContactLedger.markSendFailed(emailLedger, { error: result?.reason || 'sidecar_failed' });
+      if (result?.deliveryOutcome !== 'uncertain') {
+        await ContactLedger.markSendFailed(emailLedger, { error: result?.reason || 'sidecar_failed' });
+      }
       if (isTerminalEmailRefusal(result)
         && await resolvePendingEmailEpisode({ emailLedgerId: emailLedger.id }, 'email_terminal_refusal')) {
         await completePendingEmail(pendingEmailActivity, pendingDeliveryChannel(pendingEmailActivity));
@@ -394,7 +397,9 @@ async function maybeDivertToMicrodepositReminder(inv, daysSince, domain, now = n
       }).catch((e) => ({ ok: false, error: e.message }));
       emailDelivered = emailResult?.ok === true;
       if (emailDelivered) await ContactLedger.markDelivered(emailLedger);
-      else await ContactLedger.markSendFailed(emailLedger, { error: emailResult?.reason || 'sidecar_failed' });
+      else if (emailResult?.deliveryOutcome !== 'uncertain') {
+        await ContactLedger.markSendFailed(emailLedger, { error: emailResult?.reason || 'sidecar_failed' });
+      }
     };
     if (explicitEmailSelected) await attemptEmail();
 
@@ -607,7 +612,12 @@ const LatePaymentService = {
       let prefs = null;
       try {
         prefs = await db('notification_prefs').where({ customer_id: customer.id }).first();
-      } catch { /* preserve legacy routing when preferences cannot be read */ }
+      } catch (prefsErr) {
+        // An unreadable choice must not fall back to legacy Text: hold this run.
+        logger.warn(`[late-payment] reminder held for invoice ${inv.id} — preferences unavailable: ${prefsErr.message}`);
+        skipped++;
+        continue;
+      }
       const explicitChannels = explicitBillingChannels(prefs || {}, 'billing');
       if (!customer.phone && !explicitChannels?.some((channel) => channel === 'email' || channel === 'push')) {
         skipped++;
@@ -735,7 +745,7 @@ const LatePaymentService = {
           }
           if (emailResult?.ok === true) {
             if (typeof ContactLedger.markDelivered === 'function') await ContactLedger.markDelivered(emailLedger);
-          } else {
+          } else if (emailResult?.deliveryOutcome !== 'uncertain') {
             await ContactLedger.markSendFailed(emailLedger, { reason: emailResult?.reason || 'email_not_sent' });
           }
           return emailResult;
