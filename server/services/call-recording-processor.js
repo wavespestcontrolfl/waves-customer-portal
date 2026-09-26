@@ -100,7 +100,7 @@ function callExtractionV2PrimaryEnabled() {
     console.warn('[call-proc] WARNING: enforce mode without ADDRESS_VALIDATION_ENABLED — address_unverifiable is never suppressed, so virtually no call will auto-route.');
   }
 }
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms } = require('./call-triage-flags');
 const { normalizeState } = require('../utils/address-normalizer');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 
@@ -3859,7 +3859,7 @@ function canonicalizeInlineUnits(streetKey) {
 // reassert consumes can be nulled — its WHERE is self-guarded, but the
 // label must tell the truth). Runs AFTER dropFilledLeadColumns, so a
 // dropped identity key means the locked value is the live one.
-function reconcileConditionalLeadFieldsUnderLock(updates, lockedLead, { bridgeNeedsConfirmation = [], leadQuality = null, extractedDataDelta = null } = {}) {
+function reconcileConditionalLeadFieldsUnderLock(updates, lockedLead, { bridgeNeedsConfirmation = [], supersededNeedsConfirmation = [], leadQuality = null, extractedDataDelta = null } = {}) {
   if (!lockedLead || !updates) return { updates, contact: null, serviceInterestDropped: false };
   const stillEmpty = (v) => v === null || v === undefined || v === '';
   const out = { ...updates };
@@ -3899,7 +3899,7 @@ function reconcileConditionalLeadFieldsUnderLock(updates, lockedLead, { bridgeNe
           return Array.isArray(data.needs_confirmation) ? data.needs_confirmation : [];
         } catch { return []; }
       })();
-      const remergedNeedsConfirmation = mergeNeedsConfirmation(lockedPriorNeedsConfirmation, bridgeNeedsConfirmation);
+      const remergedNeedsConfirmation = mergeNeedsConfirmation(lockedPriorNeedsConfirmation, bridgeNeedsConfirmation, { superseded: supersededNeedsConfirmation });
       contact = leadContactCompleteness({
         first_name: out.first_name ?? lockedLead.first_name,
         last_name: out.last_name ?? lockedLead.last_name,
@@ -9201,6 +9201,14 @@ const CallRecordingProcessor = {
     // Address/identity bridge (populated below in shadow mode): "confirm before
     // dispatch" reasons that flag the call for a human without blocking writes.
     const bridgeNeedsConfirmation = [];
+    // Standing lead reasons this pass SETTLES (codex #4890 r1 P1): lead
+    // needs_confirmation is a union across calls, so an earlier pass's
+    // caller_not_authorized would outlive the owner ruling (2026-09-26) that a
+    // lender/realtor arranging a confirmed WDO inspection is authorized — and
+    // the finalizer below retires that pass's open card. Schema-valid V2 only.
+    const supersededNeedsConfirmation = (v2Result?.status === 'valid' && isAuthorizedWdoArrangerBooking(v2Result.extraction))
+      ? ['caller_not_authorized']
+      : [];
     let schedulingChangeHeld = false;
     // Set by WHICHEVER lane files the missing_unit_number card (enforce
     // advisory loop or the shadow bridge) — the completed-call clarify ask
@@ -9567,7 +9575,12 @@ const CallRecordingProcessor = {
           const deterministicFlags = computeDeterministicTriageFlags(v2Extraction, { contactPhone, addressValidation, canonicalRecord: extracted });
           // Strip model address flags too when AV accepted/corrected — otherwise
           // a stale model out_of_service_area would hard-veto a verified address.
-          const modelFlags = suppressAddressFlagsForAV(v2Extraction.triage_flags, addressValidation);
+          // The same model-flag suppression canAutoRoute applies (codex #4890
+          // r1 P1): a model-emitted caller_not_authorized that the routing
+          // verdict dropped (unsupported relationship, or an authorized
+          // lender/realtor WDO arranger) must not survive into the persisted
+          // flags, cards and route_decisions audit either.
+          const modelFlags = suppressAddressFlagsForAV(suppressUnsupportedModelFlags(v2Extraction.triage_flags, v2Extraction), addressValidation);
           // Address flags the routing verdict found satisfied by the linked
           // customer's on-file address file no card either — the verdict
           // (persisted in ai_validation.routing) is the audit trail.
@@ -9932,7 +9945,11 @@ const CallRecordingProcessor = {
           extracted,
           v2TriageFlags: bridgeTriageFlags,
           callerRelationship: v2Ext?.caller?.relationship_to_property,
-          v2Extraction: v2Ext,
+          // Only a schema-VALID extraction may clear an authorization card
+          // (codex #4890 r1 P1): schema_failed / normalization_failed keep the
+          // untrusted parsed object on v2Result, and the enforce gate rejects
+          // every non-valid extraction too.
+          v2Extraction: v2Result?.status === 'valid' ? v2Ext : null,
           addressRecovery,
         });
         // Decoder-only email evidence: when the primary extraction captured
@@ -12932,7 +12949,7 @@ const CallRecordingProcessor = {
             const priorNeedsConfirmation = Array.isArray(priorExtractedData.needs_confirmation)
               ? priorExtractedData.needs_confirmation
               : [];
-            const mergedNeedsConfirmation = mergeNeedsConfirmation(priorNeedsConfirmation, bridgeNeedsConfirmation);
+            const mergedNeedsConfirmation = mergeNeedsConfirmation(priorNeedsConfirmation, bridgeNeedsConfirmation, { superseded: supersededNeedsConfirmation });
             // MERGED over the lead's prior payload, never rebuilt wholesale
             // (server/utils/lead-extracted-data-merge.js): a follow-up call
             // that doesn't restate the pest problem or the promised quote must
@@ -13351,7 +13368,7 @@ const CallRecordingProcessor = {
                 const reconciled = reconcileConditionalLeadFieldsUnderLock(
                   dropFilledLeadColumns(leadUpdates, lockedLead),
                   lockedLead,
-                  { bridgeNeedsConfirmation, leadQuality: extracted.lead_quality, extractedDataDelta },
+                  { bridgeNeedsConfirmation, supersededNeedsConfirmation, leadQuality: extracted.lead_quality, extractedDataDelta },
                 );
                 if (reconciled.serviceInterestDropped) {
                   persistedServiceInterestLabel = null;
@@ -18630,7 +18647,8 @@ const CallRecordingProcessor = {
       let finalFlags = [];
 
       if (v2ExtractionForAudit) {
-        const modelFlags = suppressAddressFlagsForAV(v2ExtractionForAudit.triage_flags, v2AddressValidation);
+        // Same suppression as canAutoRoute and the enforce lane (codex #4890 r1 P1).
+        const modelFlags = suppressAddressFlagsForAV(suppressUnsupportedModelFlags(v2ExtractionForAudit.triage_flags, v2ExtractionForAudit), v2AddressValidation);
         const deterministicFlags = computeDeterministicTriageFlags(v2ExtractionForAudit, {
           contactPhone,
           addressValidation: v2AddressValidation,
@@ -18860,6 +18878,29 @@ const CallRecordingProcessor = {
           .whereIn('status', ['open', 'in_progress'])
           .update({ status: 'resolved', resolved_at: new Date(), resolution_note: 'Lead landed on a later pass' });
         if (repaired > 0) {
+          await trx('call_log')
+            .where({ id: call.id })
+            .whereNotExists(trx('triage_items').where('triage_items.call_log_id', call.id).whereIn('triage_items.status', ['open', 'in_progress']))
+            .update({ review_status: null });
+        }
+      }
+      // Owner ruling 2026-09-26 (codex #4890 r1 P1): a lender/realtor
+      // arranging a confirmed WDO inspection is an authorized caller. A
+      // force-reprocess of a call an earlier pass carded caller_not_authorized
+      // must retire that card here — the finalizer only ever OPENS review
+      // state — or the visit books while the office still sees a "confirm the
+      // account holder" task. Same transaction and fence as the repairs above.
+      if (written > 0 && finalStatus === 'processed' && supersededNeedsConfirmation.includes('caller_not_authorized')) {
+        const retired = await trx('triage_items')
+          .where({ call_log_id: call.id, reason_code: 'caller_not_authorized' })
+          .whereIn('status', ['open', 'in_progress'])
+          .update({
+            status: 'resolved',
+            resolved_at: new Date(),
+            resolution_source: 'system',
+            resolution_note: 'Superseded — a lender or realtor arranging a confirmed WDO inspection is an authorized caller (owner ruling 2026-09-26).',
+          });
+        if (retired > 0) {
           await trx('call_log')
             .where({ id: call.id })
             .whereNotExists(trx('triage_items').where('triage_items.call_log_id', call.id).whereIn('triage_items.status', ['open', 'in_progress']))

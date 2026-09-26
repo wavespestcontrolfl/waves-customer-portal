@@ -2343,9 +2343,15 @@ function applyEmailDisagreementHold(extracted, dictationEmailPayload) {
  * extraction has no unit to tie the acceptance to. See the owed-confirmation
  * doctrine in triage-auto-resolve.js.
  */
-function mergeNeedsConfirmation(prior, next) {
+function mergeNeedsConfirmation(prior, next, { superseded = [] } = {}) {
   const nextArr = Array.isArray(next) ? next : [];
-  const merged = [...new Set([...(Array.isArray(prior) ? prior : []), ...nextArr])];
+  // Reasons THIS pass settled (codex #4890 r1 P1): a standing reason from an
+  // earlier call that the current pass determined no longer applies — e.g.
+  // caller_not_authorized once a confirmed lender/realtor WDO arranger is
+  // authorized (owner ruling 2026-09-26) — leaves the union, unless this very
+  // pass re-raised it.
+  const drop = new Set((Array.isArray(superseded) ? superseded : []).filter((r) => !nextArr.includes(r)));
+  const merged = [...new Set([...(Array.isArray(prior) ? prior : []), ...nextArr])].filter((r) => !drop.has(r));
   return nextArr.includes('address_recovered')
     ? merged.filter((r) => r !== 'address_unverified')
     : merged;
@@ -2660,6 +2666,7 @@ module.exports = {
   isExplicitlyNonOwner,
   isAuthorizedWdoArrangerBooking,
   isWdoInspectionRequest,
+  suppressUnsupportedModelFlags,
   computeDeterministicTriageFlags,
   statesNewAddress,
   dispatchesToOnFileAddress,

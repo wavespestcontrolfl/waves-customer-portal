@@ -235,3 +235,65 @@ describe('canAutoRoute — the pipeline decision for a 17ed9362-shaped call', ()
     expect(rInbound.allowed).toBe(true);
   });
 });
+
+// Codex #4890 r1 follow-ups.
+describe('codex #4890 r1 — audit trail, shadow bridge, and superseded lead reasons', () => {
+  const {
+    suppressUnsupportedModelFlags,
+    mergeNeedsConfirmation,
+    deriveCallReviewBridge,
+  } = require('../services/call-triage-flags');
+  const { V2_DECISION_VERSION, V2_DECISION_VERSIONS } = require('../services/call-routing-gates');
+
+  test('the exported model-flag suppression drops the model copy for an authorized arranger (used by the processor finalFlags merges)', () => {
+    expect(suppressUnsupportedModelFlags(['caller_not_authorized', 'no_sms_consent_captured'], wdoExtraction()))
+      .toEqual(['no_sms_consent_captured']);
+  });
+
+  test('the model copy survives for a buyer (relationship other)', () => {
+    const buyer = wdoExtraction({ caller: { relationship_to_property: 'other', on_site_authorization: false } });
+    expect(suppressUnsupportedModelFlags(['caller_not_authorized'], buyer)).toEqual(['caller_not_authorized']);
+  });
+
+  test('the route-decision version is bumped for the new routing contract and stays in the version list', () => {
+    expect(V2_DECISION_VERSION).toBe('v2-1.44.0');
+    expect(V2_DECISION_VERSIONS).toEqual(expect.arrayContaining(['v2-1.43.0', 'v2-1.44.0']));
+  });
+
+  test('shadow bridge: without a (valid) V2 extraction the caller_not_authorized reason still files', () => {
+    const out = deriveCallReviewBridge({
+      addressValidation: AV_CLEAN,
+      extracted: { address_line1: '123 Example St', city: 'Bradenton', zip: '34205', first_name: 'Pat', last_name: 'Example' },
+      v2TriageFlags: ['caller_not_authorized'],
+      callerRelationship: 'lender',
+      v2Extraction: null,
+    });
+    expect(out.needsConfirmation).toContain('caller_not_authorized');
+  });
+
+  test('shadow bridge: a valid authorized-arranger extraction files no caller_not_authorized reason', () => {
+    const out = deriveCallReviewBridge({
+      addressValidation: AV_CLEAN,
+      extracted: { address_line1: '123 Example St', city: 'Bradenton', zip: '34205', first_name: 'Pat', last_name: 'Example' },
+      v2TriageFlags: ['caller_not_authorized'],
+      callerRelationship: 'lender',
+      v2Extraction: wdoExtraction(),
+    });
+    expect(out.needsConfirmation).not.toContain('caller_not_authorized');
+  });
+
+  test('a superseded reason leaves the standing lead union', () => {
+    expect(mergeNeedsConfirmation(['caller_not_authorized', 'email_unverified'], [], { superseded: ['caller_not_authorized'] }))
+      .toEqual(['email_unverified']);
+  });
+
+  test('a reason this very pass re-raised is never dropped as superseded', () => {
+    expect(mergeNeedsConfirmation(['caller_not_authorized'], ['caller_not_authorized'], { superseded: ['caller_not_authorized'] }))
+      .toEqual(['caller_not_authorized']);
+  });
+
+  test('no superseded option keeps the old union behavior', () => {
+    expect(mergeNeedsConfirmation(['caller_not_authorized'], ['email_unverified']))
+      .toEqual(['caller_not_authorized', 'email_unverified']);
+  });
+});
