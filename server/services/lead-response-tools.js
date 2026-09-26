@@ -272,18 +272,26 @@ async function executeLeadTool(toolName, input, context) {
       if (!customer.phone) return { error: 'Customer has no phone number', validationError: true };
 
       // Owner ruling 2026-09-26: exactly one automated text ever reaches a
-      // new website lead. This agent reply and the standard
-      // lead_auto_reply_biz reply (services/lead-auto-reply.js) share ONE
-      // first-touch claim on the phone — claim it here, before send, so a
-      // concurrent/racing standard reply can't also go out. Winning the
-      // claim means this is provably the customer's first automated text,
-      // so it gets the same first-touch opt-out line the standard reply
-      // carries; losing it (a standard reply, or another agent run, already
-      // claimed this phone) means the STOP line already reached this
-      // customer, so it isn't repeated here.
+      // new website lead — the agent's reply replaces the standard
+      // lead_auto_reply_biz reply, and inherits its once-per-person-ever
+      // rule (owner ruling 2026-08-05). Both share ONE first-touch claim on
+      // the phone. Winning it means this is provably the customer's first
+      // automated text: it carries the first-touch opt-out line. Losing it
+      // (an earlier automated reply, a concurrent run, a repeated call, or a
+      // dedup lookup that could not be read — fail closed) means NO send:
+      // the lead goes to the owner instead.
       const { claimLeadFirstTouch, resolveLeadAutoReplyClaim } = require('./lead-auto-reply');
       const firstTouch = await claimLeadFirstTouch(customer.phone, customer.id);
-      const messageBody = firstTouch.claimed ? `${input.message}\n\nReply STOP to opt out.` : input.message;
+      if (!firstTouch.claimed) {
+        return {
+          sent: false,
+          blocked: true,
+          code: 'FIRST_TOUCH_ALREADY_SENT',
+          reason: 'This number already had its one automated text (or it could not be verified). Queue the lead for the owner instead of texting.',
+          name: customer.first_name,
+        };
+      }
+      const messageBody = `${input.message}\n\nReply STOP to opt out.`;
 
       // Routed through the customer-message middleware so consent /
       // suppression / identity / voice / segment checks all apply, and
@@ -320,14 +328,14 @@ async function executeLeadTool(toolName, input, context) {
           // Settle (keep/release) the first-touch claim on the SAME
           // fail-closed rules resolveLeadAutoReplyClaim always applies —
           // an unknown/thrown outcome is ambiguous and keeps the claim.
-          if (firstTouch.claimed) await resolveLeadAutoReplyClaim(firstTouch.phoneDigits, err.providerOutcome || null);
+          await resolveLeadAutoReplyClaim(firstTouch.phoneDigits, err.providerOutcome || null);
           throw err;
         }
         logger.warn('[lead-agent] Response audit failed after provider acceptance', { leadId: context.leadId });
         return err.providerOutcome;
       });
 
-      if (firstTouch.claimed) await resolveLeadAutoReplyClaim(firstTouch.phoneDigits, result);
+      await resolveLeadAutoReplyClaim(firstTouch.phoneDigits, result);
 
       // No quiet-hours requeue: lead_response_auto_reply is a
       // customer-action entry point (owner ruling 2026-08-29) — the agent

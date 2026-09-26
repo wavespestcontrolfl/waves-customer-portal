@@ -97,13 +97,14 @@ test('first touch: claims the phone, appends the STOP line, and stamps the claim
   expect(result).toMatchObject({ sent: true });
 });
 
-test('a phone with a prior auto-reply (claim not won) sends the message unchanged, with no claim settlement', async () => {
+test('a phone that already had its one automated text (claim not won) gets NO second text', async () => {
   mockClaim.mockResolvedValue({ claimed: false, phoneDigits: '9415550100' });
 
-  await executeLeadTool('send_lead_response', { message: 'Thanks for reaching out!' }, context);
+  const result = await executeLeadTool('send_lead_response', { message: 'Thanks for reaching out!' }, context);
 
-  expect(mockMessage).toHaveBeenCalledWith(expect.objectContaining({ body: 'Thanks for reaching out!' }));
+  expect(mockMessage).not.toHaveBeenCalled();
   expect(mockResolveClaim).not.toHaveBeenCalled();
+  expect(result).toMatchObject({ sent: false, blocked: true, code: 'FIRST_TOUCH_ALREADY_SENT' });
 });
 
 test('a blocked send still settles (releases) the first-touch claim', async () => {
