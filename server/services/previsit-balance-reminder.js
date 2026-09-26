@@ -220,7 +220,7 @@ async function releasePrevisitClaim(visitId) {
 // billing_channel_email:<eventKey>:email and bound to this leg's reservation
 // (collections_ledger_id), so an acceptance whose stamp is lost is repaired
 // by reminderProgress.
-async function sendPrevisitLeg({ visit, amount, eventKey, channel, ledger }) {
+async function sendPrevisitLeg({ visit, amount, eventKey, channel, ledger, preDispatchCheck }) {
   const body = await renderSmsTemplate(TEMPLATE_KEY, {
     first_name: visit.first_name || 'there',
     amount: amount.toFixed(2),
@@ -247,6 +247,7 @@ async function sendPrevisitLeg({ visit, amount, eventKey, channel, ledger }) {
     // hasEmailLeg suppression heuristic (balance-reminder.js's
     // sendExplicitLatePaymentReminder contract).
     hasEmailLeg: true,
+    preDispatchCheck,
     metadata: {
       original_message_type: 'balance_reminder',
       billingDeliveryCategory: 'billing',
@@ -273,8 +274,12 @@ async function sendPrevisitLeg({ visit, amount, eventKey, channel, ledger }) {
 // pending legs; sendReminderChannels never re-sends a delivered or resolved
 // leg. A helper throw releases the claim too (its reservations still guard
 // any leg whose outcome is uncertain). A COMPLETE episode keeps the claim.
-async function deliverExplicitPrevisitReminder({ visit, amount, duesCents, explicitChannels, invoiceIds }) {
+async function deliverExplicitPrevisitReminder({ visit, amount, duesCents, explicitChannels, quotedInvoices }) {
   const eventKey = previsitEventKey(visit);
+  const invoiceIds = quotedInvoices.map((inv) => inv.id);
+  const preDispatchCheck = quotedBalanceStillOwed({
+    customerId: visit.customer_id, quotedInvoices, quotedDuesCents: duesCents,
+  });
   let result;
   try {
     result = await sendReminderChannels({
@@ -287,7 +292,7 @@ async function deliverExplicitPrevisitReminder({ visit, amount, duesCents, expli
       eventKey,
       channels: explicitChannels,
       metadata: { scheduled_service_id: visit.id, amount },
-      send: (channel, ledger) => sendPrevisitLeg({ visit, amount, eventKey, channel, ledger }),
+      send: (channel, ledger) => sendPrevisitLeg({ visit, amount, eventKey, channel, ledger, preDispatchCheck }),
     });
   } catch (helperErr) {
     logger.warn(`[previsit-balance] explicit-channel send failed for visit ${visit.id}: ${helperErr.message}`);
@@ -321,6 +326,36 @@ async function currentDuesAllowanceCents(customerId, database = db, now = new Da
     ? await monthlyDuesCollected(database, customerId, new Date(`${obligation.dueDateEt}T12:00:00Z`))
     : null;
   return lateDuesCents({ lane, duesCollected, todayEt, obligation, monthlyRate: customer.monthly_rate });
+}
+
+// Right before each leg dispatches, re-read everything the copy quotes: every
+// overdue invoice must still be collectible, self-pay and owe exactly what
+// was quoted, and the late dues must still be owed. Any change holds the leg
+// (retryable) so the next sweep re-quotes from current state.
+function quotedBalanceStillOwed({ customerId, quotedInvoices, quotedDuesCents }) {
+  const changed = (reason) => ({ ok: false, code: 'PREVISIT_QUOTE_CHANGED', reason, retryable: true });
+  return async () => {
+    try {
+      const helpers = require('./invoice-helpers');
+      const ids = quotedInvoices.map((inv) => inv.id);
+      const live = ids.length ? await db('invoices').whereIn('id', ids) : [];
+      for (const quoted of quotedInvoices) {
+        const row = live.find((inv) => String(inv.id) === String(quoted.id));
+        if (!row || String(row.customer_id) !== String(customerId)
+          || !helpers.isInvoiceCollectibleStatus(row.status)
+          || row.payer_id || helpers.invoiceWithdrawnFromCustomer(row)
+          || Math.round(helpers.invoiceAmountDue(row) * 100) !== Math.round(quoted.due * 100)) {
+          return changed(`quoted invoice ${quoted.id} changed before dispatch`);
+        }
+      }
+      if (quotedDuesCents > 0 && (await currentDuesAllowanceCents(customerId)) !== quotedDuesCents) {
+        return changed('quoted monthly dues changed before dispatch');
+      }
+      return { ok: true };
+    } catch (err) {
+      return changed(`quoted balance unreadable before dispatch: ${err.message}`);
+    }
+  };
 }
 
 // The customer's explicit billing channel choice is read BEFORE the
@@ -506,7 +541,8 @@ async function runSweep({ now = new Date() } = {}) {
 
       if (explicitChannels !== null) {
         const outcome = await deliverExplicitPrevisitReminder({
-          visit, amount, duesCents, explicitChannels, invoiceIds: fresh.map((inv) => inv.id),
+          visit, amount, duesCents: verdict.duesLate ? duesCents : 0, explicitChannels,
+          quotedInvoices: fresh.map((inv) => ({ id: inv.id, due: invoiceAmountDue(inv) })),
         });
         if (outcome === 'sent') sent++;
         else skipped++;
@@ -626,6 +662,7 @@ async function runSweep({ now = new Date() } = {}) {
 module.exports = {
   runSweep,
   currentDuesAllowanceCents,
+  quotedBalanceStillOwed,
   previsitBalanceReminderEligible,
   duesObligation,
   friendlyVisitDate,
