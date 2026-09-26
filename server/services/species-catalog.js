@@ -271,15 +271,25 @@ function exactMatch(normalized, index) {
   return null;
 }
 
-function fuzzyScan(normalized, index) {
-  let best = null;
-  let bestLen = 0;
-  for (const [name, slug] of index.entries()) {
-    if (name.length < 4) continue;
-    const pluralSuffix = name.endsWith('larva') ? 'e?' : '(?:s|es)?';
-    if (name.length > bestLen && new RegExp(`\\b${name}${pluralSuffix}\\b`).test(normalized)) {
-      best = slug;
-      bestLen = name.length;
+// Fuzzy (whole-word substring) scan across MULTIPLE indices at once,
+// returning the single longest match overall — never the first index's
+// best match regardless of length. A longer, more specific name (an exact
+// common name in one index) must beat a shorter one (a generic alias in
+// another index) that merely happens to be a substring of it, even when
+// the shorter name's index would otherwise be checked first (Codex r2 P1,
+// following r1's identical bug one level up in exactMatch priority).
+// `indexed` is `[{ via, index }, ...]` in priority order, used only as a
+// tie-break when two matches are the same length.
+function fuzzyScanAcross(normalized, indexed) {
+  let best = null; // { slug, via, len }
+  for (const { via, index } of indexed) {
+    for (const [name, slug] of index.entries()) {
+      if (name.length < 4) continue;
+      if (best && name.length <= best.len) continue;
+      const pluralSuffix = name.endsWith('larva') ? 'e?' : '(?:s|es)?';
+      if (new RegExp(`\\b${name}${pluralSuffix}\\b`).test(normalized)) {
+        best = { slug, via, len: name.length };
+      }
     }
   }
   return best;
@@ -312,11 +322,15 @@ const NAME_INDICES = buildNameIndices();
  * EXACT match always wins over a fuzzy (whole-word substring) match from a
  * lower-priority index — an exact common-name match for "Honey Bee (wall
  * colony)" must not lose to the shorter "honey bee" alias fuzzy-matching
- * inside it. So this tries an exact match against all three indices first,
- * then falls back to the fuzzy whole-word scan against all three, before
- * finally checking whether the raw text is itself a known v1 legacy slug.
- * Returns `{ node, via: 'scientific' | 'alias' | 'common' | 'legacy' }` or
- * `null`.
+ * inside it. So this tries an exact match against all three indices first
+ * (priority order breaks a same-string tie), then a SINGLE fuzzy scan
+ * across all three indices together, which picks the overall longest
+ * whole-word match rather than the first index's best match — a longer,
+ * more specific common name must beat a shorter alias that happens to be
+ * a substring of it, even when the alias index would otherwise be checked
+ * first. Finally checks whether the raw text is itself a known v1 legacy
+ * slug. Returns `{ node, via: 'scientific' | 'alias' | 'common' | 'legacy' }`
+ * or `null`.
  */
 function resolveName(text) {
   const normalized = normalizeName(text);
@@ -329,12 +343,12 @@ function resolveName(text) {
   const exactCommon = exactMatch(normalized, NAME_INDICES.common.index);
   if (exactCommon) return { node: getEntry(exactCommon), via: 'common' };
 
-  const sci = fuzzyScan(normalized, NAME_INDICES.scientific.index);
-  if (sci) return { node: getEntry(sci), via: 'scientific' };
-  const alias = fuzzyScan(normalized, NAME_INDICES.alias.index);
-  if (alias) return { node: getEntry(alias), via: 'alias' };
-  const common = fuzzyScan(normalized, NAME_INDICES.common.index);
-  if (common) return { node: getEntry(common), via: 'common' };
+  const fuzzy = fuzzyScanAcross(normalized, [
+    { via: 'scientific', index: NAME_INDICES.scientific.index },
+    { via: 'alias', index: NAME_INDICES.alias.index },
+    { via: 'common', index: NAME_INDICES.common.index },
+  ]);
+  if (fuzzy) return { node: getEntry(fuzzy.slug), via: fuzzy.via };
 
   const rawSlug = String(text || '').trim().toLowerCase();
   if (CATALOG.legacySlugMap[rawSlug]) {

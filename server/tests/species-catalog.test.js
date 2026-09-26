@@ -334,6 +334,17 @@ describe('resolveName regressions', () => {
     expect(result.via).toBe('common');
   });
 
+  test('a longer fuzzy common-name match wins over a shorter fuzzy alias match, across indices (Codex r2 P1)', () => {
+    // Neither phrase is an exact key here, so this exercises the fuzzy scan:
+    // "honey bee" (alias, 9 chars) is a substring, but the full 22-char
+    // common name "honey bee wall colony" is also present and must win —
+    // these two entries have different verdicts and next steps.
+    const result = catalog.resolveName('This is a honey bee wall colony');
+    expect(result).toBeTruthy();
+    expect(result.node.slug).toBe('honey-bee-wall-colony');
+    expect(result.via).toBe('common');
+  });
+
   test('an empty or nonsense query resolves to null', () => {
     expect(catalog.resolveName('')).toBeNull();
     expect(catalog.resolveName('   ')).toBeNull();
