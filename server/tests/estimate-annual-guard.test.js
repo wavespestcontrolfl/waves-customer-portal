@@ -645,6 +645,14 @@ describe('withheldLinkPolicyForTemplate (round 9 structural fix, P1: template-ke
     expect(withheldLinkPolicyForTemplate('invoice.receipt')).toBe('rewrite');
   });
 
+  test('billing.receipt_notice resolves to "rewrite" — billing-channel-email\'s payment_receipt-category template', () => {
+    expect(withheldLinkPolicyForTemplate('billing.receipt_notice')).toBe('rewrite');
+  });
+
+  test('billing.notice (the generic billing-channel-email template) stays "refuse"', () => {
+    expect(withheldLinkPolicyForTemplate('billing.notice')).toBe('refuse');
+  });
+
   test('every other template key resolves to the default "refuse"', () => {
     expect(withheldLinkPolicyForTemplate('service.visit_summary')).toBe('refuse');
     expect(withheldLinkPolicyForTemplate('invoice.sent')).toBe('refuse');
