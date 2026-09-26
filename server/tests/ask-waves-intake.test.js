@@ -693,6 +693,7 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
     'My dog was exposed to pesticide',
     'My cat got sprayed with insecticide',
     'My rabbit touched rat poison',
+    'My dog threw up after the treatment',
   ])('an exposed pet gets the veterinary script: %s', (context) => {
     const out = scrubUnsafeClaims({ reply: 'It is completely safe.', intent: 'question', service_keys: [], ready_for_quote: false }, context);
     expect(out.reply).toMatch(/veterinarian or an emergency animal hospital/);
@@ -1266,6 +1267,34 @@ describe('normalizeIntakeResult', () => {
       'What should I do now?',
     );
     expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
+  });
+
+  test.each([
+    'What should we do?',
+    'How much is service?\nWhat should we do?',
+    'How much is service?\nShe threw up',
+    'Should I cancel? She threw up',
+    'Is your service safe for kids?',
+  ])('later turns keep an earlier ingestion the subject until the visitor turns to business: %s', (later) => {
+    const out = normalizeIntakeResult(
+      { reply: 'No medical attention is needed.', intent: 'question', service_keys: [], ready_for_quote: false },
+      'openai',
+      `My child swallowed pesticide\n${later}`,
+      later.split('\n').pop(),
+    );
+    expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
+    expect(out.reply).toContain('1-800-222-1222');
+  });
+
+  test('a question after a business turn is judged on its own', () => {
+    const reply = 'No big deal, they are just American roaches.';
+    const out = normalizeIntakeResult(
+      { reply, intent: 'question', service_keys: [], ready_for_quote: false },
+      'openai',
+      'My child swallowed pesticide\nHow much is service?\nAre palmetto bugs roaches?',
+      'Are palmetto bugs roaches?',
+    );
+    expect(out.reply).toBe(reply);
   });
 
   test('price talk never erases emergency direction (safety runs on the original reply)', () => {
@@ -2048,6 +2077,12 @@ describe('looksLikeEmergency', () => {
     "I didn't get pesticide in my eyes, but my son did",
     'My child got poison in his nose',
     'My son got pesticide in his nostrils',
+    'My child got poison in the eyes',
+    'My child got poison up his nose',
+    'Poison splashed the child in the face',
+    'Ants got into the bait and it got in the eyes',
+    'Roach killer got in its eyes',
+    'My son threw up after the spray',
     "I'm at the hospital",
     'We are on our way to the hospital now',
     'My husband is on his way to the hospital',
@@ -2137,6 +2172,11 @@ describe('looksLikeEmergency', () => {
     "My dog didn't get poison on his paws",
     'My child did not have any vomiting after the pesticide treatment',
     "My dog didn't have a rash after the spray",
+    "The bait didn't get on the kids' hands",
+    'El veneno no le cayó en los ojos',
+    "My son didn't throw up after the spray",
+    'The rat got into the poison and put it in its mouth',
+    'Put bait in the mouth of the burrow',
     'The rats were poisoned by spray',
     'The roaches were poisoned by the product',
     'The ants got poisoned by chemicals',
