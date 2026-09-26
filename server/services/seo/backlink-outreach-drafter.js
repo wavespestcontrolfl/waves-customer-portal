@@ -144,7 +144,13 @@ function parseDraft(text) {
   if (!m) return null;
   try {
     const o = JSON.parse(m[0]);
-    if (o && o.subject && o.body) return { subject: String(o.subject).trim(), body: String(o.body).trim() };
+    // Both must be real strings that are non-blank after trimming: "   " used
+    // to pass the truthiness check and park an empty draft as 'drafted', and
+    // a number/object was String()-coerced into a meaningless one — the call
+    // then read as a success on both legs (Codex r13 on #4884).
+    const subject = o && typeof o.subject === 'string' ? o.subject.trim() : '';
+    const body = o && typeof o.body === 'string' ? o.body.trim() : '';
+    if (subject && body) return { subject, body };
   } catch { /* fall through */ }
   return null;
 }

@@ -8,7 +8,7 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
-const { isUsableCsrScore } = require('../services/csr/csr-coach');
+const { isUsableCsrScore, normalizeCsrScore } = require('../services/csr/csr-coach');
 
 const GOOD = {
   total_score: 12, core_score: 8, rescue_score: 4,
@@ -38,24 +38,88 @@ describe('isUsableCsrScore', () => {
     expect(isUsableCsrScore({ ...GOOD, [field]: 'great job' })).toBe(false);
     expect(isUsableCsrScore({ ...GOOD, [field]: NaN })).toBe(false);
     expect(isUsableCsrScore({ ...GOOD, [field]: '' })).toBe(false);
-    expect(isUsableCsrScore({ ...GOOD, [field]: '8' })).toBe(true);
+    expect(isUsableCsrScore({ ...GOOD, [field]: '3' })).toBe(true);
   });
 
   test.each(['total_score', 'core_score', 'rescue_score', 'lead_quality_score'])('rejects a fractional %s (INTEGER column)', (field) => {
-    expect(isUsableCsrScore({ ...GOOD, [field]: 12.5 })).toBe(false);
-    expect(isUsableCsrScore({ ...GOOD, [field]: '8.5' })).toBe(false);
-    expect(isUsableCsrScore({ ...GOOD, [field]: '8' })).toBe(true);
+    expect(isUsableCsrScore({ ...GOOD, [field]: 2.5 })).toBe(false);
+    expect(isUsableCsrScore({ ...GOOD, [field]: '2.5' })).toBe(false);
+    expect(isUsableCsrScore({ ...GOOD, [field]: '3' })).toBe(true);
   });
 
-  test('decimal skill dimensions still accept fractions', () => {
-    expect(isUsableCsrScore({ ...GOOD, warmth_score: 7.25 })).toBe(true);
+  test('decimal skill dimensions still accept fractions inside 1-5', () => {
+    expect(isUsableCsrScore({ ...GOOD, warmth_score: 3.25 })).toBe(true);
   });
 
-  test('rejects a missing, empty, or non-string call_outcome', () => {
+  // Codex r13 on #4884: values outside the rubric's documented ranges used to
+  // be accepted and persisted into CSR averages.
+  test.each([
+    ['total_score', -1, 16, [0, 15]],
+    ['core_score', -1, 11, [0, 10]],
+    ['rescue_score', -4, 6, [0, 5]],
+    ['control_score', 0, 5.5, [1, 5]],
+    ['warmth_score', 0.5, 100, [1, 5]],
+    ['clarity_score', 0, 6, [1, 5]],
+    ['objection_handling_score', 0, 6, [1, 5]],
+    ['closing_strength_score', 0, 6, [1, 5]],
+    ['lead_quality_score', 0, 11, [1, 10]],
+  ])('enforces the documented range of %s', (field, below, above, [min, max]) => {
+    expect(isUsableCsrScore({ ...GOOD, [field]: below })).toBe(false);
+    expect(isUsableCsrScore({ ...GOOD, [field]: above })).toBe(false);
+    expect(isUsableCsrScore({ ...GOOD, [field]: min })).toBe(true);
+    expect(isUsableCsrScore({ ...GOOD, [field]: max })).toBe(true);
+  });
+
+  test('rejects a missing, empty, non-string, or off-rubric call_outcome', () => {
     expect(isUsableCsrScore({ ...GOOD, call_outcome: undefined })).toBe(false);
     expect(isUsableCsrScore({ ...GOOD, call_outcome: '' })).toBe(false);
     expect(isUsableCsrScore({ ...GOOD, call_outcome: '   ' })).toBe(false);
     expect(isUsableCsrScore({ ...GOOD, call_outcome: 3 })).toBe(false);
+    expect(isUsableCsrScore({ ...GOOD, call_outcome: 'booked_maybe' })).toBe(false);
+  });
+
+  test('canonicalizes call_outcome — "Booked" must count as booked, not a loss', () => {
+    expect(normalizeCsrScore({ ...GOOD, call_outcome: ' Booked ' }).call_outcome).toBe('booked');
+    expect(normalizeCsrScore({ ...GOOD, call_outcome: 'Not Booked' }).call_outcome).toBe('not_booked');
+    expect(normalizeCsrScore({ ...GOOD, call_outcome: 'estimate-sent' }).call_outcome).toBe('estimate_sent');
+  });
+
+  test('numeric strings are normalized to numbers', () => {
+    const n = normalizeCsrScore({ ...GOOD, total_score: '12', warmth_score: '4.5' });
+    expect(n.total_score).toBe(12);
+    expect(n.warmth_score).toBe(4.5);
+  });
+
+  test('optional fields: off-contract values become null/[] instead of failing the insert; the score stays usable', () => {
+    const n = normalizeCsrScore({
+      ...GOOD,
+      call_summary: { text: 'x' },
+      coaching_notes: '   ',
+      better_phrasings: 'say it better',
+      lead_intent: 'Price Shopping',
+      lead_source_quality: 'excellent',
+      loss_reason: 'The customer said they would think about it and call back later, which happens a lot on first calls like this one',
+      estimated_job_value: '$500',
+    });
+    expect(n).not.toBeNull();
+    expect(n.call_summary).toBeNull();
+    expect(n.coaching_notes).toBeNull();
+    expect(n.better_phrasings).toEqual([]);
+    expect(n.lead_intent).toBe('price_shopping');
+    expect(n.lead_source_quality).toBeNull();
+    expect(n.loss_reason).toBeNull();
+    expect(n.estimated_job_value).toBeNull();
+    expect(normalizeCsrScore({ ...GOOD, estimated_job_value: '450.00' }).estimated_job_value).toBe(450);
+    expect(normalizeCsrScore({ ...GOOD, estimated_job_value: -5 }).estimated_job_value).toBeNull();
+  });
+
+  test('follow_up_task: needs a recommended_action; type and deadline fall back to safe defaults', () => {
+    expect(normalizeCsrScore({ ...GOOD, follow_up_task: 'call them' }).follow_up_task).toBeNull();
+    expect(normalizeCsrScore({ ...GOOD, follow_up_task: { type: 'call_back', recommended_action: '  ' } }).follow_up_task).toBeNull();
+    const t = normalizeCsrScore({ ...GOOD, follow_up_task: { type: 'Send SMS', recommended_action: 'Text the quote', deadline_hours: '4/24/48' } }).follow_up_task;
+    expect(t).toMatchObject({ type: 'send_sms', recommended_action: 'Text the quote', deadline_hours: 24 });
+    const u = normalizeCsrScore({ ...GOOD, follow_up_task: { type: 'carrier pigeon', recommended_action: 'Call back', deadline_hours: 48 } }).follow_up_task;
+    expect(u).toMatchObject({ type: 'call_back', deadline_hours: 48 });
   });
 
   test('rejects a missing, null, or array point_details — JSON.stringify(undefined) is undefined, not a string', () => {

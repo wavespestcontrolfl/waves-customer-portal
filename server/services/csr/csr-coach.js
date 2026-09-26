@@ -88,34 +88,94 @@ function callbackNumberCoachingNote(v2Extraction, contactPhone) {
   return CALLBACK_NUMBER_COACHING_NOTE;
 }
 
-// Every field the csr_call_scores insert (~L305-329) writes straight from
-// the model's answer, with no fallback. The old validator only checked
-// "object, not array" (codex r1-r9) — a reply missing e.g. total_score, or
-// carrying a string where a number belongs, passed that check and then blew
-// up on the DB insert deep inside a try/catch the caller reads back as
-// "scored: false", with the ledger row already marked a success (Codex r10
-// on #4884). Pure/testable.
-const CSR_SCORE_NUMERIC_FIELDS = [
-  'total_score', 'core_score', 'rescue_score',
-  'control_score', 'warmth_score', 'clarity_score', 'objection_handling_score', 'closing_strength_score',
-  'lead_quality_score',
-];
-const CSR_SCORE_INTEGER_FIELDS = ['total_score', 'core_score', 'rescue_score', 'lead_quality_score'];
+// The one parse of a scoring answer: the validate hook judges exactly what
+// the insert below writes. Codex r10 on #4884 found fields missing/mistyped
+// past an "object, not array" check; r11 found fractional values for INTEGER
+// columns; r13 found values outside the rubric's documented ranges
+// (total_score: 999, rescue_score: -4, warmth_score: 100) persisted into CSR
+// averages. Required: the nine rubric scores within their ranges (integers
+// where the column is INTEGER), a call_outcome from the rubric's list
+// (canonicalized — call_outcome === 'booked' drives the booking rate and the
+// follow-up gate, so "Booked" must not read as a loss), and a point_details
+// object. Optional fields are canonicalized, and an absent or off-contract
+// value becomes null / [] — the score itself is still usable — instead of a
+// varchar overflow or a non-numeric decimal failing the insert after the leg
+// was accepted. Pure/testable; returns the normalized score or null.
+const CSR_SCORE_RANGES = {
+  total_score: [0, 15, true],
+  core_score: [0, 10, true],
+  rescue_score: [0, 5, true],
+  control_score: [1, 5, false],
+  warmth_score: [1, 5, false],
+  clarity_score: [1, 5, false],
+  objection_handling_score: [1, 5, false],
+  closing_strength_score: [1, 5, false],
+  lead_quality_score: [1, 10, true],
+};
+const CSR_CALL_OUTCOMES = new Set(['booked', 'estimate_sent', 'callback_scheduled', 'not_booked', 'voicemail', 'no_answer']);
+const CSR_LEAD_INTENTS = new Set(['urgent', 'price_shopping', 'researching', 'referral_warm', 'repeat_customer', 'tire_kicker']);
+const CSR_SOURCE_QUALITIES = new Set(['high', 'medium', 'low']);
+const CSR_LOSS_REASONS = new Set(['bad_lead', 'csr_missed_script', 'pricing', 'no_availability', 'customer_shopping', 'after_hours', 'no_answer']);
+const CSR_TASK_TYPES = new Set(['call_back', 'send_sms', 'send_estimate', 'schedule_inspection', 'escalate_to_adam']);
+
+// A number, or a strictly numeric string ("8" inserts fine); anything else null.
+function csrNumber(v) {
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+  if (typeof v === 'string' && /^\s*-?\d+(\.\d+)?\s*$/.test(v)) return Number(v);
+  return null;
+}
+
+function csrEnum(v, allowed) {
+  if (typeof v !== 'string') return null;
+  const key = v.trim().toLowerCase().replace(/[\s-]+/g, '_');
+  return allowed.has(key) ? key : null;
+}
+
+function csrText(v) {
+  return typeof v === 'string' && v.trim() ? v.trim() : null;
+}
+
+function normalizeFollowUpTask(task) {
+  if (!task || typeof task !== 'object' || Array.isArray(task)) return null;
+  const action = csrText(task.recommended_action);
+  if (!action) return null;
+  const hours = csrNumber(task.deadline_hours);
+  return {
+    ...task,
+    type: csrEnum(task.type, CSR_TASK_TYPES) || 'call_back',
+    recommended_action: action,
+    deadline_hours: hours !== null && hours > 0 && hours <= 168 ? hours : 24,
+  };
+}
+
+function normalizeCsrScore(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const score = { ...raw };
+  for (const [field, [min, max, integer]] of Object.entries(CSR_SCORE_RANGES)) {
+    const n = csrNumber(raw[field]);
+    if (n === null || n < min || n > max || (integer && !Number.isInteger(n))) return null;
+    score[field] = n;
+  }
+  score.call_outcome = csrEnum(raw.call_outcome, CSR_CALL_OUTCOMES);
+  if (!score.call_outcome) return null;
+  // JSON.stringify(undefined) IS undefined — never let that reach the insert.
+  if (!raw.point_details || typeof raw.point_details !== 'object' || Array.isArray(raw.point_details)) return null;
+  score.call_summary = csrText(raw.call_summary);
+  score.coaching_notes = csrText(raw.coaching_notes);
+  score.better_phrasings = Array.isArray(raw.better_phrasings)
+    ? raw.better_phrasings.filter((p) => p && typeof p === 'object' && !Array.isArray(p))
+    : [];
+  score.lead_intent = csrEnum(raw.lead_intent, CSR_LEAD_INTENTS);
+  score.lead_source_quality = csrEnum(raw.lead_source_quality, CSR_SOURCE_QUALITIES);
+  score.loss_reason = csrEnum(raw.loss_reason, CSR_LOSS_REASONS);
+  const value = csrNumber(raw.estimated_job_value);
+  score.estimated_job_value = value !== null && value >= 0 && value < 1e8 ? value : null;
+  score.follow_up_task = normalizeFollowUpTask(raw.follow_up_task);
+  return score;
+}
+
 function isUsableCsrScore(score) {
-  if (!score || typeof score !== 'object' || Array.isArray(score)) return false;
-  // A strict numeric string ("8") inserts fine into the numeric columns, so it
-  // counts; anything that isn't a number at all does not.
-  const numeric = (v) => (typeof v === 'number' && Number.isFinite(v)) || (typeof v === 'string' && /^\s*-?\d+(\.\d+)?\s*$/.test(v));
-  // total/core/rescue/lead_quality are INTEGER columns (csr_coach migration):
-  // Postgres rejects 12.5 or "8.5" there, so a fractional value is unusable.
-  const integer = (v) => (typeof v === 'number' && Number.isInteger(v)) || (typeof v === 'string' && /^\s*-?\d+\s*$/.test(v));
-  if (CSR_SCORE_NUMERIC_FIELDS.some((f) => !numeric(score[f]))) return false;
-  if (CSR_SCORE_INTEGER_FIELDS.some((f) => !integer(score[f]))) return false;
-  if (typeof score.call_outcome !== 'string' || !score.call_outcome.trim()) return false;
-  // JSON.stringify(undefined) IS undefined — an insert of that column value
-  // is exactly the undefined-binding case this whole check exists to catch.
-  if (score.point_details === undefined || typeof score.point_details !== 'object' || score.point_details === null || Array.isArray(score.point_details)) return false;
-  return true;
+  return normalizeCsrScore(score) !== null;
 }
 
 class CSRCoach {
@@ -312,7 +372,10 @@ Score the call, grade the lead, and generate a follow-up task if applicable.`,
     if (!res.ok) {
       return { error: `Failed to score call (${res.reason})` };
     }
-    const score = res.json;
+    // The validate hook already accepted this answer, so this cannot be null;
+    // the insert writes the normalized values, never the raw reply.
+    const score = normalizeCsrScore(res.json);
+    if (!score) return { error: 'Failed to score call (schema_invalid)' };
 
     // Deterministic coaching addendum (see callbackNumberCoachingNote) — the
     // model's own coaching_notes never sees the extracted caller_id_disclaimed
@@ -375,7 +438,7 @@ Score the call, grade the lead, and generate a follow-up task if applicable.`,
         task_type: score.follow_up_task.type,
         recommended_action: score.follow_up_task.recommended_action,
         context_summary: score.call_summary,
-        deadline: new Date(Date.now() + (score.follow_up_task.deadline_hours || 24) * 3600000),
+        deadline: new Date(Date.now() + score.follow_up_task.deadline_hours * 3600000),
         status: 'pending',
       }).returning('*');
 
@@ -642,3 +705,4 @@ module.exports.SALES_RUBRIC_CALL_NATURE = SALES_RUBRIC_CALL_NATURE;
 module.exports.callbackNumberCoachingNote = callbackNumberCoachingNote;
 module.exports.CALLBACK_NUMBER_COACHING_NOTE = CALLBACK_NUMBER_COACHING_NOTE;
 module.exports.isUsableCsrScore = isUsableCsrScore;
+module.exports.normalizeCsrScore = normalizeCsrScore;

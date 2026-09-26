@@ -117,6 +117,95 @@ describe('scoreCandidates (end-to-end, heuristic + injected contact)', () => {
   });
 });
 
+// Codex r13 on #4884: the mapper coerced every field but the two the
+// validator checked — `!!"false"` read as true and could put a prospect in the
+// HARO lane, and Number(""/false/[]) made an explicit tier 0. Every consumed
+// field now goes through parseClassifiedEntry: parseable forms are read
+// correctly, an absent field keeps its designed default, and a present
+// off-contract value keeps that default AND fails the ledger row.
+describe('classifyBatch — every consumed field is parsed, not coerced (Codex r13 on #4884)', () => {
+  const VALID = { i: 0, domain: 'x.com', intent_class: 'editorial', relevance_0_100: 80, is_local_swfl: true, lead_value_tier: 2, is_haro_platform: false, target_topic: 'pest', suggested_anchor: 'pest tips', reason: 'local blog' };
+  const run = async (extra) => {
+    const fake = { messages: { create: async () => ({ content: [{ text: JSON.stringify([{ ...VALID, ...extra }]) }] }) } };
+    const [c] = await scorer.classifyBatch([{ domain: 'x.com' }], { anthropic: fake });
+    return c;
+  };
+
+  test('a fully conforming entry is used as-is and not flagged', async () => {
+    const c = await run({});
+    expect(c).toMatchObject({ intent_class: 'editorial', relevance_0_100: 80, is_local_swfl: true, lead_value_tier: 2, is_haro_platform: false, target_topic: 'pest', suggested_anchor: 'pest tips', reason: 'local blog' });
+    expect(ledgerCallRejected).not.toHaveBeenCalled();
+  });
+
+  test('"false" strings read as false (not true) — the prospect stays out of the HARO lane — and are not flagged', async () => {
+    const c = await run({ is_haro_platform: 'false', is_local_swfl: 'false' });
+    expect(c.is_haro_platform).toBe(false);
+    expect(c.is_local_swfl).toBe(false);
+    expect(scorer.contactGate(c, { has_contact_path: true }).lane).not.toBe('haro_platform');
+    expect(ledgerCallRejected).not.toHaveBeenCalled();
+  });
+
+  test('"true" strings read as true; absent booleans default to false without a flag', async () => {
+    expect((await run({ is_local_swfl: 'TRUE' })).is_local_swfl).toBe(true);
+    const { is_local_swfl, is_haro_platform, ...noBools } = VALID;
+    const fake = { messages: { create: async () => ({ content: [{ text: JSON.stringify([noBools]) }] }) } };
+    const [c] = await scorer.classifyBatch([{ domain: 'x.com' }], { anthropic: fake });
+    expect(c.is_local_swfl).toBe(false);
+    expect(c.is_haro_platform).toBe(false);
+    expect(ledgerCallRejected).not.toHaveBeenCalled();
+  });
+
+  test('an unparseable boolean defaults to false and fails the row', async () => {
+    const c = await run({ is_haro_platform: 'maybe' });
+    expect(c.is_haro_platform).toBe(false);
+    expect(ledgerCallRejected).toHaveBeenCalledWith(expect.anything(), 'schema_invalid');
+  });
+
+  test('a null tier stays undefined (intent fallback) without a flag; a numeric-string tier is read', async () => {
+    expect((await run({ lead_value_tier: null })).lead_value_tier).toBeUndefined();
+    expect((await run({ lead_value_tier: '3' })).lead_value_tier).toBe(3);
+    expect(ledgerCallRejected).not.toHaveBeenCalled();
+  });
+
+  test.each([['empty string', ''], ['false', false], ['an array', []], ['out of range', 7], ['fractional', 2.5], ['a word', 'high']])(
+    'a %s tier is off-contract: undefined (never an explicit 0), and the row fails', async (_label, tier) => {
+      const c = await run({ lead_value_tier: tier });
+      expect(c.lead_value_tier).toBeUndefined();
+      expect(ledgerCallRejected).toHaveBeenCalledWith(expect.anything(), 'schema_invalid');
+    },
+  );
+
+  test('an out-of-range relevance is clamped and fails the row', async () => {
+    expect((await run({ relevance_0_100: 150 })).relevance_0_100).toBe(100);
+    expect(ledgerCallRejected).toHaveBeenCalledWith(expect.anything(), 'schema_invalid');
+  });
+
+  test('an off-enum intent takes the heuristic intent and fails the row; a near-valid one is canonicalized without a flag', async () => {
+    const c = await run({ intent_class: 'blog post' });
+    expect(c.intent_class).toBe(scorer.classifyLinkType('x.com', undefined));
+    expect(ledgerCallRejected).toHaveBeenCalledWith(expect.anything(), 'schema_invalid');
+    ledgerCallRejected.mockClear();
+    expect((await run({ intent_class: 'Guest-Post' })).intent_class).toBe('guest_post');
+    expect(ledgerCallRejected).not.toHaveBeenCalled();
+  });
+
+  test('an off-enum topic falls back to general and fails the row', async () => {
+    expect((await run({ target_topic: 'bees' })).target_topic).toBe('general');
+    expect(ledgerCallRejected).toHaveBeenCalledWith(expect.anything(), 'schema_invalid');
+  });
+
+  test('a non-string anchor or reason is dropped and fails the row; the word "null" is just no anchor', async () => {
+    expect((await run({ suggested_anchor: 42 })).suggested_anchor).toBeNull();
+    expect(ledgerCallRejected).toHaveBeenCalledTimes(1);
+    ledgerCallRejected.mockClear();
+    expect((await run({ reason: { why: 'x' } })).reason).toBe('llm');
+    expect(ledgerCallRejected).toHaveBeenCalledTimes(1);
+    ledgerCallRejected.mockClear();
+    expect((await run({ suggested_anchor: 'null' })).suggested_anchor).toBeNull();
+    expect(ledgerCallRejected).not.toHaveBeenCalled();
+  });
+});
+
 describe('classifyBatch LLM path', () => {
   test('parses a JSON array from the model and maps by index', async () => {
     const fakeAnthropic = {

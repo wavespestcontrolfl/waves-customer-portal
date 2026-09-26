@@ -156,10 +156,85 @@ function isFiniteNumeric(x) {
   return false;
 }
 
-// The classification fields the mapper reads; an entry without them has not classified anything.
-function isClassifiedEntry(o) {
-  return typeof o.intent_class === 'string' && o.intent_class.trim() !== ''
-    && isFiniteNumeric(o.relevance_0_100);
+// A model-emitted boolean: true/false, 1/0, or those words as strings. Absent
+// is false. Anything else is off-contract (ok: false) and reads as false —
+// `!!"false"` used to read as true (Codex r13 on #4884).
+function parseModelBool(v) {
+  if (v === undefined || v === null) return { value: false, ok: true };
+  if (typeof v === 'boolean') return { value: v, ok: true };
+  if (v === 1 || v === 0) return { value: v === 1, ok: true };
+  if (typeof v === 'string') {
+    const t = v.trim().toLowerCase();
+    if (t === 'true' || t === 'yes' || t === '1') return { value: true, ok: true };
+    if (t === 'false' || t === 'no' || t === '0') return { value: false, ok: true };
+  }
+  return { value: false, ok: false };
+}
+
+// Every field the mapper stores comes through here, so what the ledger judges
+// is exactly what gets stored (Codex r13 on #4884: the old check covered two
+// fields while the mapper coerced the rest).
+//  - intent_class + relevance_0_100 are required: without them the entry has
+//    classified nothing and the caller's heuristic stands in (not a hit).
+//  - Every other field keeps its designed default when ABSENT (null or
+//    missing), but a PRESENT value off the prompt's contract also gets that
+//    default AND marks the entry degraded, which fails the row.
+// Returns null (not a hit) or { classification, degraded }.
+function parseClassifiedEntry(o, c) {
+  if (!o || typeof o !== 'object' || Array.isArray(o)) return null;
+  if (typeof o.intent_class !== 'string' || o.intent_class.trim() === '') return null;
+  if (!isFiniteNumeric(o.relevance_0_100)) return null;
+  let degraded = false;
+
+  const intentKey = o.intent_class.trim().toLowerCase().replace(/[\s-]+/g, '_');
+  if (!VALID_INTENTS.has(intentKey)) degraded = true; // normalizeIntent falls back to the heuristic intent
+
+  const rawRelevance = Number(o.relevance_0_100);
+  if (rawRelevance < 0 || rawRelevance > 100) degraded = true;
+
+  const local = parseModelBool(o.is_local_swfl);
+  const haro = parseModelBool(o.is_haro_platform);
+  if (!local.ok || !haro.ok) degraded = true;
+
+  // lead_value_tier is an integer 0-5. Absent stays undefined so tierFor()
+  // uses its intent fallback; Number() used to turn "", false and [] into an
+  // explicit 0 ("none" → tier 5) and underscore the prospect.
+  let tier;
+  if (o.lead_value_tier !== undefined && o.lead_value_tier !== null) {
+    const n = isFiniteNumeric(o.lead_value_tier) ? Number(o.lead_value_tier) : NaN;
+    if (Number.isInteger(n) && n >= 0 && n <= 5) tier = n;
+    else degraded = true;
+  }
+
+  const topicKey = typeof o.target_topic === 'string' ? o.target_topic.trim().toLowerCase() : '';
+  if (o.target_topic !== undefined && o.target_topic !== null && !VALID_TOPICS.has(topicKey)) degraded = true;
+
+  let anchor = null;
+  if (typeof o.suggested_anchor === 'string') {
+    const a = o.suggested_anchor.trim();
+    anchor = a && a.toLowerCase() !== 'null' ? a : null;
+  } else if (o.suggested_anchor !== undefined && o.suggested_anchor !== null) {
+    degraded = true;
+  }
+
+  let reason = 'llm';
+  if (typeof o.reason === 'string') reason = o.reason.trim() || 'llm';
+  else if (o.reason !== undefined && o.reason !== null) degraded = true;
+
+  return {
+    degraded,
+    classification: {
+      domain: c.domain,
+      intent_class: normalizeIntent(o.intent_class, c.domain, c.source_url),
+      relevance_0_100: Math.max(0, Math.min(100, rawRelevance)),
+      is_local_swfl: local.value,
+      lead_value_tier: tier,
+      is_haro_platform: haro.value || HARO_PLATFORMS.has(String(c.domain).toLowerCase()),
+      target_topic: normalizeTopic(o.target_topic),
+      suggested_anchor: anchor,
+      reason,
+    },
+  };
 }
 
 async function classifyChunk(chunk, { anthropic }) {
@@ -203,31 +278,21 @@ ${JSON.stringify(list)}`;
   // with no matching entry at all ([] or unrelated rows) is an answer that
   // contributed nothing — heuristics stand in, and the row is failed (Codex r6 on #4884).
   let hits = 0;
+  let degraded = 0;
   const scored = chunk.map((c, idx) => {
     const hit = arr.find((o) => o && (o.i === idx || String(o.domain).toLowerCase() === String(c.domain).toLowerCase()));
     // A matched entry without its classification (e.g. {"i":0}) would map to
     // unknown / 0 / false and depress the prospect's score; the heuristic
     // stands in instead, and it does not count as a hit (Codex r7 on #4884).
-    if (!hit || !isClassifiedEntry(hit)) return heuristicClassify(c);
+    const parsed = hit ? parseClassifiedEntry(hit, c) : null;
+    if (!parsed) return heuristicClassify(c);
     hits += 1;
-    return {
-      domain: c.domain,
-      intent_class: normalizeIntent(hit.intent_class, c.domain, c.source_url),
-      relevance_0_100: Math.max(0, Math.min(100, Number(hit.relevance_0_100) || 0)),
-      is_local_swfl: !!hit.is_local_swfl,
-      // Preserve a missing/invalid tier as undefined (NOT 0) so tierFor() can use
-      // its intent fallback — coercing to 0 would mark it explicit "none" → tier 5
-      // and underscore an editorial/resource prospect the intent could place.
-      lead_value_tier: Number.isFinite(Number(hit.lead_value_tier)) ? Number(hit.lead_value_tier) : undefined,
-      is_haro_platform: !!hit.is_haro_platform || HARO_PLATFORMS.has(String(c.domain).toLowerCase()),
-      target_topic: normalizeTopic(hit.target_topic),
-      suggested_anchor: hit.suggested_anchor || null,
-      reason: hit.reason || 'llm',
-    };
+    if (parsed.degraded) degraded += 1;
+    return parsed.classification;
   });
-  // Any entry the heuristic had to fill is a degraded answer — a partial
-  // chunk must show in the lane's error rate, not only a zero-hit one.
-  if (chunk.length && hits !== chunk.length) ledgerCallRejected(resp, 'schema_invalid');
+  // Any entry the heuristic had to fill, or that carried an off-contract
+  // field, is a degraded answer — it must show in the lane's error rate.
+  if (chunk.length && (hits !== chunk.length || degraded > 0)) ledgerCallRejected(resp, 'schema_invalid');
   return scored;
 }
 

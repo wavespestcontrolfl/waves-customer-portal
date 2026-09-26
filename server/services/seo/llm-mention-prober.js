@@ -53,6 +53,19 @@ const URL_RE = /https?:\/\/[^\s)<>\]"']+/gi;
 const configuredProbeCap = Number(process.env.LLM_MENTIONS_MAX_PROBES || 200);
 const MAX_PROBES_PER_RUN = Number.isSafeInteger(configuredProbeCap) && configuredProbeCap >= 0 ? configuredProbeCap : 200;
 
+// The sentiment reply must be ONE allowlisted label, unambiguously: its first
+// word is a label and no other label appears anywhere in it. A substring
+// search used to take whichever label it checked first — "not negative;
+// neutral" read as negative — and record that as a successful call
+// (Codex r13 on #4884). Anything else is null (caller: neutral + failed row).
+const SENTIMENT_LABELS = new Set(['positive', 'neutral', 'negative']);
+function parseSentimentLabel(text) {
+  const words = String(text || '').toLowerCase().match(/[a-z]+/g) || [];
+  if (!words.length || !SENTIMENT_LABELS.has(words[0])) return null;
+  const labels = new Set(words.filter((w) => SENTIMENT_LABELS.has(w)));
+  return labels.size === 1 ? words[0] : null;
+}
+
 function observationGroups(rows, keyFor) {
   const groups = new Map();
   for (const row of rows) {
@@ -407,8 +420,7 @@ class LLMMentionProber {
   // Thinking-block guard: WORKHORSE/FAST resolve to a model that can lead
   // with a thinking block (no .text) on larger inputs, which made a blind
   // content[0] read return '' — see event-ingestion.js for the incident.
-      const word = (stripThinkingBlocks(resp).content?.[0]?.text || '').toLowerCase().trim();
-      const label = ['positive', 'negative', 'neutral'].find(s => word.includes(s));
+      const label = parseSentimentLabel(stripThinkingBlocks(resp).content?.[0]?.text);
       if (!label) ledgerCallRejected(resp, 'invalid_output');
       return label || 'neutral';
     } catch {
@@ -522,3 +534,4 @@ class LLMMentionProber {
 module.exports = new LLMMentionProber();
 module.exports.LLMMentionProber = LLMMentionProber;
 module.exports.buildDashboard = buildDashboard;
+module.exports.parseSentimentLabel = parseSentimentLabel;

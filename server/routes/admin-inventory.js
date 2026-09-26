@@ -1761,6 +1761,22 @@ function buildAutoMapRow({ product, proposal, vendorId, vendorName, connectionId
   return { matched: true, row };
 }
 
+// A proposal the route can act on: an object for a product in this batch with
+// a boolean `found` — and, when found, an identifier (vendor SKU or product
+// URL) buildAutoMapRow can map. found:true with neither is contradictory, not
+// a "no match" decision, so it must not be persisted as one.
+function isUsableAutoMapProposal(m, requestedIds) {
+  if (!m || typeof m !== 'object' || Array.isArray(m)) return false;
+  if (!requestedIds.has(String(m.productId))) return false;
+  if (m.found === false) return true;
+  if (m.found !== true) return false;
+  // A real SKU (string or number, not the word "null") or an http(s) URL —
+  // cleanString alone would count {} as "[object Object]" and "null" as text.
+  const sku = typeof m.vendorSku === 'string' || typeof m.vendorSku === 'number' ? cleanString(m.vendorSku) : null;
+  const url = typeof m.productUrl === 'string' && /^https?:\/\/\S+$/i.test(m.productUrl.trim());
+  return !!(sku && sku.toLowerCase() !== 'null') || url;
+}
+
 // AI research pass: ask Claude (FLAGSHIP + web_search) to locate each internal product
 // on a single vendor's website and return that vendor's catalog identity for it.
 // Returns an array of proposal objects keyed by productId. Never throws — returns [] on
@@ -1838,27 +1854,27 @@ RESPOND WITH ONLY valid JSON (no markdown fences, no preamble):
   }
 
   const mappings = parseAutoMapResponse(responseText);
-  if (!mappings.length && responseText.trim()) {
-    ledgerCallRejected(msg, 'invalid_json');
+  // Only a real decision for a requested product may reach the route: the
+  // route persists an inactive "no match" marker for any product that has a
+  // proposal, dropping it from every later batch — so a malformed member of
+  // an otherwise good reply (e.g. {"productId": "<requested id>"}) must be
+  // dropped here and leave its product retryable, not be returned unfiltered
+  // (Codex r13 on #4884). The call itself fails unless the model finished and
+  // every requested product got exactly such a decision.
+  const requestedIds = new Set(products.map((p) => String(p.id)));
+  const usable = mappings.filter((m) => isUsableAutoMapProposal(m, requestedIds));
+  const decided = new Set(usable.map((m) => String(m.productId)));
+  if (msg.stop_reason === 'tool_use') {
+    ledgerCallRejected(msg, 'tool_loop_exhausted');
+    logger.warn(`[auto-map] Tool loop exhausted before a final answer for ${vendor.name}`);
+  } else if (!mappings.length) {
+    ledgerCallRejected(msg, responseText.trim() ? 'invalid_json' : 'empty_text');
     logger.warn(`[auto-map] No parseable mappings in AI response for ${vendor.name}`);
-  } else if (mappings.length) {
-    // A non-empty `mappings` array with only garbage entries — no productId
-    // among the requested products, or `found` missing/non-boolean — passes
-    // parseAutoMapResponse, but the lookup below (`proposals.find(...)`)
-    // resolves to nothing for every product: functionally identical to an
-    // empty batch, yet recorded a success (Codex r10 on #4884). Flag it only
-    // when NOT ONE entry is usable; a genuinely partial batch (some products
-    // omitted, e.g. the model found matches for only some) is by design —
-    // an omitted product has no proposal and simply stays retryable in the
-    // next batch, so that is not itself a ledger failure.
-    const requestedIds = new Set(products.map((p) => String(p.id)));
-    const usable = mappings.filter((m) => m && requestedIds.has(String(m.productId)) && typeof m.found === 'boolean');
-    if (!usable.length) {
-      ledgerCallRejected(msg, 'schema_invalid');
-      logger.warn(`[auto-map] AI response had no usable mappings (bad productId/found) for ${vendor.name}`);
-    }
+  } else if (usable.length < mappings.length || decided.size < requestedIds.size) {
+    ledgerCallRejected(msg, 'schema_invalid');
+    logger.warn(`[auto-map] AI response for ${vendor.name}: ${mappings.length - usable.length} unusable entr(ies), ${requestedIds.size - decided.size} product(s) without a decision`);
   }
-  return mappings;
+  return usable;
 }
 
 // Count active products that still have NO mapping row (of any status) to this vendor —
