@@ -646,6 +646,24 @@ describe('processIntakeMessage provider ladder', () => {
     expect(out.source).not.toBe('emergency_override');
   });
 
+  test.each([
+    "I don't know if this matters, but my child cannot breathe",
+    'My child had a reaction last year, but now he cannot breathe',
+  ])('an exclusion in another clause never voids a current emergency: %s', async (message) => {
+    dispatchWithFallback.mockResolvedValue(chainOk(goodJson));
+    const out = await processIntakeMessage({ message });
+    expect(out).toEqual({ ...EMERGENCY_FALLBACK_RESULT, source: 'emergency_override' });
+  });
+
+  test.each([
+    'My child was stung but is breathing normally',
+    'My child was stung but has no trouble breathing',
+  ])('ordinary or denied breathing is not an adverse reaction: %s', async (message) => {
+    dispatchWithFallback.mockResolvedValue(chainOk(goodJson));
+    const out = await processIntakeMessage({ message });
+    expect(out.source).not.toBe('emergency_override');
+  });
+
   test('"My child cannot breathe" overrides on its own (no sting cue)', async () => {
     dispatchWithFallback.mockResolvedValue(chainOk(goodJson));
     const out = await processIntakeMessage({ message: 'My child cannot breathe' });

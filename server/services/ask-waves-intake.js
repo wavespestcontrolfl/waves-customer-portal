@@ -155,7 +155,7 @@ const EMERGENCY_OVERRIDE_TERM_RE = /\b(?:(?:call|called|calling|dial|dialed|need
 // Anything looser fails open on real emergencies ("No, he can't breathe",
 // "I can't tell, but he has chest pain"), and this path decides who gets
 // the 911 script — so when in doubt, it fires.
-const EMERGENCY_OVERRIDE_NEGATION_RE = /(?:\b(?:not|never)\s+(?:having|experiencing|had|getting)\s+(?:an?\s+|any\s+)?|\b(?:don['’]t|doesn['’]t|didn['’]t|do\s+not|does\s+not)\s+(?:have|has|had)\s+(?:an?\s+|any\s+)?|\bno\s+signs?\s+of\s+(?:an?\s+)?|\b(?:isn['’]t|is\s+not|wasn['’]t|was\s+not)\s+(?:an?\s+)?|(?:^|[.;,!?]\s*)no\s+|\bno\s+(?:tiene|tengo|hay)\s+(?:una\s+)?)$/i;
+const EMERGENCY_OVERRIDE_NEGATION_RE = /(?:\b(?:not|never)\s+(?:having|experiencing|had|getting)\s+(?:an?\s+|any\s+)?|\b(?:don['’]t|doesn['’]t|didn['’]t|do\s+not|does\s+not)\s+(?:have|has|had)\s+(?:an?\s+|any\s+)?|\bno\s+signs?\s+of\s+(?:an?\s+)?|\b(?:isn['’]t|is\s+not|wasn['’]t|was\s+not)\s+(?:an?\s+)?|(?:^|[.;,!?]\s*)no\s+|\b(?:has|have|had|with|showing|shows?|there(?:'s|\s+is)|there\s+are)\s+no\s+|\bno\s+(?:tiene|tengo|hay)\s+(?:una\s+)?)$/i;
 
 // A past sting ("was stung last year and swelled up") is history, not a
 // current emergency.
@@ -166,8 +166,11 @@ const CONDITIONAL_RE = /\b(?:if|what\s+if|in\s+case|suppose|en\s+caso\s+de)\b/i;
 // A reaction the visitor denies ("was stung but has no swelling", "does not
 // have a rash") is not affirmed.
 const REACTION_NEGATION_RE = /(?:\bno|\bnot|\bnever|(?:n['’]t|\bnot|\bnever)\s+(?:have|has|had|got|see|notice|show\w*)|\bwithout|\bsin)\s+(?:any\s+|a\s+|an\s+|signs?\s+of\s+)?$/i;
+// Adverse symptoms only — ordinary "breathing" ("is breathing normally") is
+// not a reaction; breathing counts only as trouble/difficulty/short of breath.
+const ADVERSE_REACTION_RE = /\b(?:swell\w*|swoll\w*|hives|rash|dizzy|faint\w*|vomit\w*|nause\w*|fever|reaction|(?:trouble|difficulty|hard\s+time)\s+breathing|hard\s+to\s+breathe|short(?:ness)?\s+of\s+breath|(?:can'?t|cannot|can\s+not)\s+breathe|wheez\w*|hincha\w*|ronchas|urticaria|mare[oa]\w*|v[oó]mit\w*|n[aá]usea\w*|fiebre|sarpullido|reacci[oó]n|dificultad\s+para\s+respirar|no\s+puede\s+respirar)\b/i;
 function reactionIsAffirmed(t) {
-  const re = new RegExp(REACTION_RE.source, 'gi');
+  const re = new RegExp(ADVERSE_REACTION_RE.source, 'gi');
   let m;
   while ((m = re.exec(t))) {
     const before = t.slice(Math.max(0, m.index - 30), m.index);
@@ -180,10 +183,20 @@ function reactionIsAffirmed(t) {
 // call" later in the message must not void a real sting.
 // True when the clause containing position `index` is a hypothetical (the
 // conditional leads the clause) or a past event ("last year", "hace un año").
+// Clause boundaries: sentence punctuation, commas, and "but"/"pero" — so
+// "I don't know if this matters, but my child cannot breathe" scopes the
+// conditional to its own clause.
+const CLAUSE_BREAK_RE = /[.;!?,]|\bbut\b|\bpero\b/gi;
 function clauseIsHypotheticalOrPast(t, index) {
-  const start = Math.max(t.lastIndexOf('.', index), t.lastIndexOf(';', index), t.lastIndexOf('!', index), t.lastIndexOf('?', index)) + 1;
-  const nextStop = t.slice(index).search(/[.;!?]/);
-  const clause = t.slice(start, nextStop === -1 ? t.length : index + nextStop);
+  let start = 0;
+  let end = t.length;
+  CLAUSE_BREAK_RE.lastIndex = 0;
+  let b;
+  while ((b = CLAUSE_BREAK_RE.exec(t))) {
+    if (b.index < index) start = b.index + b[0].length;
+    else { end = b.index; break; }
+  }
+  const clause = t.slice(start, end);
   const lead = t.slice(start, index);
   return CONDITIONAL_RE.test(lead) || PAST_EVENT_RE.test(clause);
 }
