@@ -41,7 +41,15 @@ const LAWN_DEFINITE_LIVE_PEST_LABELS = new Set([
   'Fire ants',
   'Turf scale or mealybugs',
 ]);
+const LAWN_VISIBLE_DISEASE_SYMPTOM_IDS = new Set([
+  // A visible symptom can be recorded without asserting its cause. Keep
+  // mushrooms out: their catalog copy explicitly says they do not establish
+  // turf disease.
+  'leaf-spots-unconfirmed',
+]);
+const THROUGHOUT_INSPECTED_LAWN = 'Throughout inspected lawn';
 const LAWN_PEST_OBSERVATION_SCOPE = new Map();
+const LAWN_DISEASE_OBSERVATION_SCOPE = new Map();
 const lawnPestFindings = lawnCatalog.groups
   .flatMap(({ findings }) => findings)
   .filter(({ label }) => label === 'No live pests detected' || LAWN_DEFINITE_LIVE_PEST_LABELS.has(label));
@@ -58,6 +66,41 @@ for (const { label, statement } of lawnPestFindings) {
 }
 const routineLiveLawnPests = catalog.lawn.find(([id]) => id === 'live-pests')?.[1];
 LAWN_PEST_OBSERVATION_SCOPE.set(routineLiveLawnPests, { location: null, state: 'present' });
+
+const lawnDiseaseGroup = lawnCatalog.groups
+  .find(({ label }) => label === 'Disease and fungus-like conditions');
+const lawnDiseaseFindings = [
+  ...(lawnDiseaseGroup?.findings || []).filter(({ label }) => label !== 'Mushrooms'),
+  ...lawnCatalog.groups
+    .flatMap(({ findings }) => findings)
+    .filter(({ label }) => label === 'No visible disease symptoms'),
+];
+for (const { label, statement } of lawnDiseaseFindings) {
+  for (const location of lawnCatalog.locations) {
+    for (const extent of ['', ...lawnCatalog.extents]) {
+      const observation = `${statement} Location: ${location}.${extent ? ` Extent: ${extent}.` : ''}`;
+      LAWN_DISEASE_OBSERVATION_SCOPE.set(observation, {
+        location,
+        state: label === 'No visible disease symptoms' ? 'absent' : 'present',
+      });
+    }
+  }
+}
+for (const [id, label] of catalog.lawn) {
+  if (LAWN_VISIBLE_DISEASE_SYMPTOM_IDS.has(id)) {
+    LAWN_DISEASE_OBSERVATION_SCOPE.set(label, { location: null, state: 'present' });
+  }
+}
+
+function hasScopedPresenceConflict(scopes) {
+  const absent = scopes.filter(({ state }) => state === 'absent');
+  const present = scopes.filter(({ state }) => state === 'present');
+  return absent.some(({ location: absentLocation }) => present.some(({ location: presentLocation }) => (
+    absentLocation === THROUGHOUT_INSPECTED_LAWN
+      || presentLocation === THROUGHOUT_INSPECTED_LAWN
+      || (presentLocation && presentLocation === absentLocation)
+  )));
+}
 
 function observationsForRoutineService(family) {
   return Object.prototype.hasOwnProperty.call(ROUTINE_SERVICE_OBSERVATIONS, family)
@@ -94,15 +137,14 @@ function conflictingRoutineObservations(observations = [], { treeShrubLandscapeC
   const lawnPestStates = observations
     .map((observation) => LAWN_PEST_OBSERVATION_SCOPE.get(observation))
     .filter(Boolean);
-  const noLiveLawnPests = lawnPestStates.filter(({ state }) => state === 'absent');
-  const liveLawnPests = lawnPestStates.filter(({ state }) => state === 'present');
-  const throughout = 'Throughout inspected lawn';
-  if (noLiveLawnPests.some(({ location: noLiveLocation }) => liveLawnPests.some(({ location: liveLocation }) => (
-    noLiveLocation === throughout
-      || liveLocation === throughout
-      || (liveLocation && liveLocation === noLiveLocation)
-  )))) {
+  if (hasScopedPresenceConflict(lawnPestStates)) {
     return 'Choose either no live lawn pests or a live lawn-pest finding for the same inspected area.';
+  }
+  const lawnDiseaseStates = observations
+    .map((observation) => LAWN_DISEASE_OBSERVATION_SCOPE.get(observation))
+    .filter(Boolean);
+  if (hasScopedPresenceConflict(lawnDiseaseStates)) {
+    return 'Choose either no visible lawn disease symptoms or a visible disease-symptom finding for the same inspected area.';
   }
   return null;
 }

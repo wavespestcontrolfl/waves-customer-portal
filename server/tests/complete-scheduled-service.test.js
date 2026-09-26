@@ -302,6 +302,40 @@ describe('customer-safe routine completion observations', () => {
     ])).toBeNull();
   });
 
+  test.each(['', ...lawnConditionCatalog.extents])('rejects routine leaf spotting with a throughout-lawn disease-free claim (extent %s)', async (extent) => {
+    service.service_type = 'Lawn Care';
+    attempts.claimCompletionAttempt.mockResolvedValue({ action: 'proceed', attempt: { id: 'fixture-attempt' } });
+    resolveCompletionProfileForScheduledService.mockResolvedValueOnce({ serviceKey: 'lawn', completionMode: 'service_report' });
+
+    const result = await complete({
+      structuredObservations: [
+        completionObservationCatalog.lawn.find(([id]) => id === 'leaf-spots-unconfirmed')[1],
+        lawnObservation('No visible disease symptoms', 'Throughout inspected lawn', extent),
+      ],
+    });
+
+    expect(result).toMatchObject({ status: 422, body: { code: 'conflicting_structured_observations' } });
+  });
+
+  test('rejects legacy visible disease symptoms beside a disease-free claim in the same area', () => {
+    expect(conflictingRoutineObservations([
+      lawnObservation('No visible disease symptoms', 'Back yard'),
+      lawnObservation('Other leaf spot', 'Back yard'),
+    ])).toMatch(/same inspected area/);
+  });
+
+  test.each([
+    ['a visible symptom in a different area', lawnObservation('Other leaf spot', 'Front yard')],
+    ['mushrooms that do not establish turf disease', lawnObservation('Mushrooms', 'Back yard')],
+    ['an unknown cause that is not a visible disease symptom', lawnObservation('Further diagnosis needed', 'Back yard')],
+    ['routine yellowing with an unconfirmed cause', completionObservationCatalog.lawn.find(([id]) => id === 'yellowing-unknown')[1]],
+  ])('allows a same-area disease-free claim with %s', (_case, otherFinding) => {
+    expect(conflictingRoutineObservations([
+      lawnObservation('No visible disease symptoms', 'Back yard'),
+      otherFinding,
+    ])).toBeNull();
+  });
+
   test('the completion path rejects a routine observation on typed and specialty closeouts', async () => {
     const routineObservation = completionObservationCatalog.recurring_pest[0][1];
     attempts.claimCompletionAttempt.mockResolvedValue({ action: 'proceed', attempt: { id: 'fixture-attempt' } });
