@@ -366,6 +366,29 @@ describe('service report — every shipped chip answers its own category (AW-06)
       .toBe(answerServiceReportQuestion({ question: 'When can my pets go back out?', data: pestData }));
   });
 
+  // codex #4839 round 6: precedence follows the question's form.
+  test.each([
+    'When are you spraying next?',
+    'What are you treating next?',
+    'When is the next treatment?',
+    'Can I see my next appointment?',
+  ])('future treatment timing / appointment lookup goes to the appointment: %s', (question) => {
+    expect(answerServiceReportQuestion({ question, data: pestData, nextAppointment })).toMatch(/Your next appointment is/);
+  });
+
+  test.each([
+    "What did you spray near my dogs' beds?",
+    "Which product did you use by the kids' toys?",
+    "What treatment was applied near my pets' bowls?",
+  ])('a what/which treatment question outranks a pet noun: %s', (question) => {
+    expect(answerServiceReportQuestion({ question, data: pestData })).toMatch(/Sources used: this service report/);
+  });
+
+  test('"Did you notice the lawn improving?" gets the trend answer, not findings', () => {
+    expect(answerServiceReportQuestion({ question: 'Did you notice the lawn improving?', data: lawnData }))
+      .toBe(answerServiceReportQuestion({ question: 'Is my lawn getting better?', data: lawnData }));
+  });
+
   test('"When will you come back?" is a scheduling question, not re-entry', () => {
     const answer = answerServiceReportQuestion({ question: 'When will you come back?', data: pestData, nextAppointment });
     expect(answer).toMatch(/Your next appointment is/);

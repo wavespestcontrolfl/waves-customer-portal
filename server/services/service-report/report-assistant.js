@@ -23,6 +23,17 @@ const FINDINGS_QUESTION_RE = /\b(find|found|finding|see|saw|notice|noticed|activ
 // Observation verbs only — an intent verb outranks topic nouns. A pest noun
 // alone ("…after the ant treatment?") never suppresses a safety subject.
 const FINDINGS_VERB_RE = /\b(find|found|finding|findings|see|saw|notice|noticed|observe|observed|spot|spotted)\b/;
+// Observation as the question's main act ("what did you find/see…", "did
+// you notice…", "found", "findings") — not lookups ("Can I see my next
+// appointment?") or trend checks ("Did you notice the lawn improving?").
+const OBSERVATION_QUESTION_RE = /\b(?:what|which|anything)\b[^?.!]{0,20}\bdid\s+you\s+(?:find|see|notice|observe|spot)\b|\bdid\s+you\s+(?:find|see|notice|observe|spot)\b|\b(?:found|findings|observed|spotted)\b/;
+// Future treatment timing ("When are you spraying next?", "What are you
+// treating next?", "When is the next treatment?") is a scheduling question.
+const FUTURE_TREATMENT_RE = /\b(?:next|again|upcoming|will\s+you|are\s+you\s+(?:going\s+to|coming))\b/;
+const PAST_TENSE_RE = /\b(?:was|were|did|today|applied|sprayed|treated|used)\b/;
+// "What did you spray near my dogs' beds?" asks what was applied, even with
+// a pet noun in it.
+const WHAT_APPLIED_RE = /\b(?:what|which)\b[^?.!]{0,40}\b(?:spray\w*|appl\w*|use[sd]?|treat\w*|products?)\b/;
 // Preparation / action wording outranks appointment nouns ("What should I do
 // before my next visit?"); "Should I schedule…" stays a scheduling question.
 const PREP_ADVICE_RE = /\b(what\s+should\s+i\s+do|should\s+i\s+(?:do|prepare|prep|move|clean|mow|water|cover|remove)|prepare|before\s+(?:my|the|your)\s+next)\b/;
@@ -38,7 +49,7 @@ const REENTRY_TEMPORAL_RE = /\b(?:when|after|how\s+long|how\s+soon)\b[^?.]*\b(?:
 // still caught below by REENTRY_PHRASE_RE / REENTRY_TEMPORAL_RE on their own
 // wording, so this guard only needs to stop the bare-subject branch.
 function isReentryIntent(q) {
-  return (SAFETY_SUBJECT_RE.test(q) && !FINDINGS_VERB_RE.test(q))
+  return (SAFETY_SUBJECT_RE.test(q) && !FINDINGS_VERB_RE.test(q) && !(WHAT_APPLIED_RE.test(q) && PAST_TENSE_RE.test(q)))
     || REENTRY_PHRASE_RE.test(q)
     || REENTRY_TEMPORAL_RE.test(q)
     || (LOCATION_RE.test(q) && !TREATMENT_QUESTION_RE.test(q) && !FINDINGS_QUESTION_RE.test(q));
@@ -548,9 +559,14 @@ function questionRoutingRules({
     // appointment?" answers with the appointment, not today's application).
     // Observation verbs outrank treatment inflections ("What did you find
     // while treating?") — codex #4839 P2.
-    { test: (q) => FINDINGS_VERB_RE.test(q), answer: () => answerFindings({ data }) },
+    { test: (q) => OBSERVATION_QUESTION_RE.test(q) && !EFFECTIVENESS_RE.test(q) && !APPOINTMENT_RE.test(q), answer: () => answerFindings({ data }) },
     // Preparation wording outranks appointment nouns — codex #4839 P2.
     { test: (q) => PREP_ADVICE_RE.test(q), answer: () => answerNextSteps({ data, nextAppointment }) },
+    // Future treatment timing is scheduling, not today's application.
+    {
+      test: (q) => TREATMENT_QUESTION_RE.test(q) && FUTURE_TREATMENT_RE.test(q) && !PAST_TENSE_RE.test(q),
+      answer: () => answerNextAppointment({ nextAppointment }),
+    },
     {
       test: (q) => TREATMENT_QUESTION_RE.test(q) && !APPOINTMENT_RE.test(q),
       // "Is the treatment working?" asks about results, not what was applied.
