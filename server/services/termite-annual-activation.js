@@ -1012,10 +1012,12 @@ function whereTermHasCompletedInstallation(builder, alias, conn = db) {
     whereInstallationVisitForPlan(
       this.select(conn.raw('1')).from('scheduled_services as ss').where('ss.status', 'completed'),
       {
-        customerId: conn.ref(`${alias}.customer_id`),
-        estimateId: conn.ref(`${alias}.source_estimate_id`),
+        // Identifier raws (not conn.ref): callers pass the pool, a
+        // transaction or a proxy, and raw('??') works on all of them.
+        customerId: conn.raw('??', [`${alias}.customer_id`]),
+        estimateId: conn.raw('??', [`${alias}.source_estimate_id`]),
         estimatePropertyId: conn.raw(`(select e_inst.property_id from estimates e_inst where e_inst.id = ${alias}.source_estimate_id)`),
-        termId: conn.ref(`${alias}.id`),
+        termId: conn.raw('??', [`${alias}.id`]),
         floor: conn.raw(`LEAST(${alias}.term_start, (${alias}.created_at AT TIME ZONE 'America/New_York')::date)`),
       },
     );
