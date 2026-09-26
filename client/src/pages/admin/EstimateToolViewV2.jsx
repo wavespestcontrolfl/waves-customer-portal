@@ -3020,7 +3020,10 @@ export default function EstimateToolViewV2({
       // the call-draft builder, customer pricing, and the website quote all
       // leave it unpriced, and the verify flag asks the operator to check.
       if (ep.pool === "YES") upd.hasPool = "YES";
-      if (ep.poolCage === "YES") upd.hasPoolCage = "YES";
+      // A cage prefills only with a decided pool: pricing treats any cage as
+      // a pool, and a cage seen in the same satellite read as a POSSIBLE
+      // pool carries the same "may be neighbor" doubt (codex r1 P1).
+      if (ep.poolCage === "YES" && ep.pool === "YES") upd.hasPoolCage = "YES";
       if (ep.poolCageSize && ep.poolCageSize !== "NONE")
         upd.poolCageSize = ep.poolCageSize;
       if (ep.shrubDensity) upd.shrubDensity = ep.shrubDensity;

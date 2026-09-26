@@ -26,6 +26,7 @@ function jsonResponse(body) {
 
 let fetchMock;
 let pool;
+let poolCage;
 beforeEach(() => {
   localStorage.setItem('waves_admin_token', 'qa-token');
   vi.spyOn(window, 'confirm').mockReturnValue(true);
@@ -33,7 +34,7 @@ beforeEach(() => {
   fetchMock = vi.fn((url) => {
     const path = String(url);
     if (path.endsWith('/estimator/property-lookup')) {
-      return Promise.resolve(jsonResponse({ enriched: { homeSqFt: 1800, lotSqFt: 9000, stories: 1, pool }, errors: [] }));
+      return Promise.resolve(jsonResponse({ enriched: { homeSqFt: 1800, lotSqFt: 9000, stories: 1, pool, poolCage, poolCageSize: 'MEDIUM' }, errors: [] }));
     }
     if (path.endsWith('/calculate-estimate')) return Promise.resolve(jsonResponse(structuredClone(RESULT)));
     if (path.includes('/discounts')) return Promise.resolve(jsonResponse([]));
@@ -57,17 +58,20 @@ async function pricedPool() {
   fireEvent.click(screen.getByRole('button', { name: 'Generate Estimate', exact: true }));
   const calls = () => fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/calculate-estimate'));
   await waitFor(() => expect(calls().length).toBe(1));
-  return JSON.parse(calls()[0][1].body).profile.pool;
+  const { profile } = JSON.parse(calls()[0][1].body);
+  return { pool: profile.pool, poolCage: profile.poolCage };
 }
 
 describe('lookup pool prefill', () => {
-  it('a POSSIBLE pool (satellite sees one the records do not) is not priced', async () => {
+  it('a POSSIBLE pool (satellite sees one the records do not) is not priced — nor its cage from the same read', async () => {
     pool = 'POSSIBLE';
-    expect(await pricedPool()).toBe('NO');
+    poolCage = 'YES';
+    expect(await pricedPool()).toEqual({ pool: 'NO', poolCage: 'NO' });
   });
 
-  it('a decided pool is', async () => {
+  it('a decided pool is, with its cage', async () => {
     pool = 'YES';
-    expect(await pricedPool()).toBe('YES');
+    poolCage = 'YES';
+    expect(await pricedPool()).toEqual({ pool: 'YES', poolCage: 'YES' });
   });
 });
