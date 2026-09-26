@@ -13,6 +13,7 @@ jest.mock('../services/logger', () => ({
 }));
 jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn(),
+  classifyDeliveryCertainty: jest.requireActual('../services/messaging/send-customer-message').classifyDeliveryCertainty,
 }));
 jest.mock('../services/sms-template-renderer', () => ({
   renderSmsTemplate: jest.fn(),
@@ -375,5 +376,32 @@ describe('annual prepay payment reminder — explicit billing-channel selection'
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
     expect(reverseAppliedCredit).not.toHaveBeenCalled();
     expect(result).toMatchObject({ sent: true, complete: false });
+  });
+
+  test('a send that throws before dispatch (definite not_sent) reverses the credit', async () => {
+    const err = Object.assign(new Error('twilio client init failed'), {
+      providerOutcome: { sent: false, deliveryOutcome: 'not_sent' },
+    });
+    sendCustomerMessage.mockRejectedValueOnce(err);
+    autoApplyAccountCreditIfEnabled.mockResolvedValueOnce({ applied: 40 });
+    setDbQueues(standardQueues({ prefs: { billing_channels: ['sms'] } }));
+
+    const result = await AnnualPrepayRenewals.sendPaymentPendingReminder({ ...BASE_TERM }, 1);
+
+    expect(reverseAppliedCredit).toHaveBeenCalledWith(expect.objectContaining({ amount: 40 }));
+    expect(result).toMatchObject({ sent: false });
+  });
+
+  test('a send that throws after dispatch (unknown outcome) keeps the credit', async () => {
+    sendCustomerMessage.mockRejectedValueOnce(Object.assign(new Error('socket hang up'), {
+      providerOutcome: { deliveryOutcome: 'uncertain' },
+    }));
+    autoApplyAccountCreditIfEnabled.mockResolvedValueOnce({ applied: 40 });
+    setDbQueues(standardQueues({ prefs: { billing_channels: ['sms'] } }));
+
+    const result = await AnnualPrepayRenewals.sendPaymentPendingReminder({ ...BASE_TERM }, 1);
+
+    expect(reverseAppliedCredit).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ sent: true });
   });
 });

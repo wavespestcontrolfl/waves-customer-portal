@@ -487,32 +487,33 @@ describe('annual prepay pre-visit payment reminders', () => {
     expect(candidateQ1.where).toHaveBeenCalledWith('term_start', '2026-07-09');
   });
 
-  test('the scan resumes an open explicit-channel 3-day episode 2 days out, and only that', async () => {
-    const openTerm = { ...BASE_TERM, id: 'term-open', term_start: '2026-07-10' };
-    const legacyTerm = { ...BASE_TERM, id: 'term-legacy', term_start: '2026-07-10' };
-    const ledgerQ = query({ rows: [{ metadata: { notificationEventKey: 'annual-prepay-payment:term-open:3' } }] });
+  test('the scan resumes an open 3-day stage 2 days out only for customers with a stored channel choice', async () => {
+    const explicitTerm = { ...BASE_TERM, id: 'term-explicit', customer_id: 'cust-explicit', term_start: '2026-07-10' };
+    const legacyTerm = { ...BASE_TERM, id: 'term-legacy', customer_id: 'cust-legacy', term_start: '2026-07-10' };
+    const prefsQ = query({ rows: [
+      { customer_id: 'cust-explicit', billing_channels: ['email'] },
+      { customer_id: 'cust-legacy' },
+    ] });
     // The sender's first read is the invoice; a missing invoice stops it there.
-    const openInvoiceQ = query({ first: undefined });
+    const explicitInvoiceQ = query({ first: undefined });
     const unexpectedInvoiceQ = query({ first: undefined });
     setDbQueues({
       'annual_prepay_terms as t': [query({ rows: [] })],
       annual_prepay_terms: [
         query({ columnInfo: REMINDER_COLS }),
         query({ rows: [] }), // 3-day target date: none
-        query({ rows: [openTerm, legacyTerm] }), // 3-day resume window candidates
+        query({ rows: [explicitTerm, legacyTerm] }), // 3-day resume window candidates
         query({ rows: [] }), // 1-day target date: none
       ],
-      collections_contact_ledger: [ledgerQ],
-      invoices: [openInvoiceQ, unexpectedInvoiceQ],
+      notification_prefs: [prefsQ],
+      invoices: [explicitInvoiceQ, unexpectedInvoiceQ],
     });
-    db.raw = jest.fn((sql) => ({ sql }));
 
     await AnnualPrepayRenewals.checkAndSendPaymentReminders({ today: '2026-07-08' });
 
-    expect(ledgerQ.whereIn).toHaveBeenCalledWith(expect.anything(),
-      ['annual-prepay-payment:term-open:3', 'annual-prepay-payment:term-legacy:3']);
-    // Only the open explicit episode reaches the sender; the legacy term does not.
-    expect(openInvoiceQ.where).toHaveBeenCalledWith({ id: 'inv-1' });
+    expect(prefsQ.whereIn).toHaveBeenCalledWith('customer_id', ['cust-explicit', 'cust-legacy']);
+    // Only the explicit-choice term reaches the sender; the legacy term does not.
+    expect(explicitInvoiceQ.where).toHaveBeenCalledWith({ id: 'inv-1' });
     expect(unexpectedInvoiceQ.where).not.toHaveBeenCalled();
   });
 });
