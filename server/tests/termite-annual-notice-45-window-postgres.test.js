@@ -271,13 +271,21 @@ describeOrSkip('termite annual-plan notice obligations — against a schema buil
       -- 20260925000006 install anchor) the candidate queries read
       renewed_from_term_id uuid,
       installation_anchored_at timestamptz,
+      prepay_invoice_id uuid,
+      last_scheduled_service_date date,
       updated_at timestamptz
+    )`);
+    // activatePaidPendingTerms (checkAndSend's first step) joins invoices.
+    await db.raw(`CREATE TABLE invoices (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      status text,
+      paid_at timestamptz
     )`);
     return { db, async destroy() { await db.raw('DROP SCHEMA ?? CASCADE', [schema]); await db.destroy(); } };
   }
 
-  beforeEach(async () => { fixture = await createPre101Db(); });
-  afterEach(async () => { if (fixture) await fixture.destroy(); });
+  beforeEach(async () => { jest.resetModules(); fixture = await createPre101Db(); });
+  afterEach(async () => { jest.resetModules(); if (fixture) await fixture.destroy(); });
 
   const MIGRATION_FILES_101_TO_107 = [
     '20260926000101_termite_annual_notice_45_claim_column',
@@ -372,6 +380,14 @@ describeOrSkip('termite annual-plan notice obligations — against a schema buil
       status: 'active', annual_plan_version: 'v3',
     });
 
+    const sql = [];
+    db.on('query', (q) => sql.push(q.sql));
     await expect(AnnualPrepayRenewals.checkAndSend({ today: '2026-09-26' })).resolves.toEqual({ sent: 0 });
+    // Not a false green: the generic 30/15/7 loop really queried this
+    // (live) schema — the 30-day rung's query carries the termite exclusion.
+    expect(sql.some((q) => /notice_30_sent_at/.test(q) && /"annual_plan_version" is null/.test(q))).toBe(true);
+    expect(sql.some((q) => /notice_7_sent_at/.test(q))).toBe(true);
+    // …and the termite pass was skipped by the readiness gate, never run.
+    expect(sql.some((q) => /notice_30_late_escalated_at/.test(q))).toBe(false);
   });
 });
