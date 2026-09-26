@@ -681,8 +681,8 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
     grassLabel,
     customerConcern,
     treatmentKinds: treatment ? treatment.kinds : [],
-    waterInRequired: aftercare.waterInRequired === true,
-    waterInInstructionRecorded: aftercare.creditableWaterIn === true,
+    waterInRequired: aftercare.creditableWaterIn === true,
+    aftercare,
   });
 
   // Field photos for the horizontal strip (best photo first), plus ONE consolidated

@@ -4,12 +4,49 @@
  * the root-cause sentence, the surplus watering-in aftercare clause.
  */
 const { buildLawnInsightCards } = require('../services/service-report/lawn-report-insights');
-const { buildRootCause, buildAftercare, NEUTRAL_AFTERCARE_WITH_PLAN } = require('../services/service-report/lawn-report-v2');
+const {
+  buildLawnReportV2,
+  buildRootCause,
+  buildAftercare,
+  NEUTRAL_AFTERCARE_WITH_PLAN,
+} = require('../services/service-report/lawn-report-v2');
 const { answerServiceReportQuestion } = require('../services/service-report/report-assistant');
 
 const PLAN = { title: 'This week: check the rain before you water', detail: '…', action: 'run', conditionalOnForecast: true };
 const RUN_PLAN = { title: 'This week: 25 minutes per turf zone', detail: '…', action: 'run', conditionalOnForecast: false };
 const HOLD_PLAN = { title: 'This week: skip your turf watering', detail: '…', action: 'hold', conditionalOnForecast: false };
+
+const WATER_ASSESSMENT = {
+  scores: {
+    turfDensity: 80, weedSuppression: 80, colorHealth: 80,
+    stressDamage: 80, fungusControl: 80, overallScore: 80, season: 'peak',
+  },
+  overwateringSignal: true,
+  droughtStress: 'none',
+  turfProfile: { grassType: 'st_augustine' },
+  waterContext: {
+    rainfallInches7d: 2,
+    irrigationInchesPerWeek: 1,
+    effectiveInches7d: 3,
+    targetInchesPerWeek: 1.25,
+    irrigationAdvice: {
+      status: 'surplus', rainKnown: true, profileMissing: false,
+      recommendedInchesPerWeek: 1.25,
+    },
+    weekPlan: RUN_PLAN,
+  },
+};
+
+function combinedWaterReport(applications, assessmentOverrides = {}) {
+  return buildLawnReportV2({
+    lawnAssessment: { ...WATER_ASSESSMENT, ...assessmentOverrides },
+    applications,
+  });
+}
+
+function combinedWaterCard(report) {
+  return report.insights.find((card) => card.category === 'water');
+}
 
 describe('insight cards defer to the plan', () => {
   const waterCard = (water, extra = {}) => buildLawnInsightCards({ categories: [], water, grassLabel: 'St. Augustine', ...extra }).find((c) => c.category === 'water');
@@ -25,6 +62,56 @@ describe('insight cards defer to the plan', () => {
     expect(waterCard({ status: 'surplus' }).customerAction).toMatch(/Ease back on irrigation by one cycle/);
     expect(waterCard({ status: 'surplus', weekPlan: PLAN }).customerAction).toMatch(/Follow this week’s watering plan below — it already accounts for the extra water/);
     expect(waterCard({ status: 'surplus', weekPlan: PLAN }, { waterInRequired: true }).customerAction).toMatch(/^Water in today’s application as directed, then follow this week’s watering plan below/);
+  });
+});
+
+describe('combined report gives product aftercare priority over water insights', () => {
+  const confirmFirst = 'Confirm the product watering directions with your technician before changing irrigation.';
+
+  test.each([
+    ['missing', [{ product: { irrigation_required: true } }], {}],
+    ['incomplete', [{ product: { irrigation_required: true, irrigation_notes: 'Water in.' } }], {
+      waterContext: {
+        ...WATER_ASSESSMENT.waterContext,
+        irrigationAdvice: { ...WATER_ASSESSMENT.waterContext.irrigationAdvice, status: 'balanced' },
+      },
+    }],
+    ['opposing', [
+      { product: { irrigation_required: true, irrigation_notes: 'Water after service.' } },
+      { product: { irrigation_required: false, irrigation_notes: 'Do not water for 24 hours after service.' } },
+    ], {}],
+  ])('%s product directions require confirmation before the water-card action', (_name, applications, assessmentOverrides) => {
+    const report = combinedWaterReport(applications, assessmentOverrides);
+    expect(report.aftercare).toMatchObject({ needsReview: true, creditableWaterIn: false });
+    expect(combinedWaterCard(report).customerAction).toBe(confirmFirst);
+  });
+
+  test('an explicit hold controls the water card even when water-in is not required', () => {
+    const report = combinedWaterReport([{
+      product: { irrigation_required: false, irrigation_notes: 'Do not water for 24 hours after service.' },
+    }]);
+    expect(report.aftercare).toMatchObject({
+      wateringHold: true,
+      waterInRequired: false,
+      needsReview: false,
+    });
+    expect(combinedWaterCard(report).customerAction).toBe(
+      'Follow the product-specific watering restriction in Aftercare before making any other irrigation changes.',
+    );
+  });
+
+  test('a complete supported water-in keeps the existing plan-aware action', () => {
+    const report = combinedWaterReport([{
+      product: { irrigation_required: true, irrigation_notes: 'Water in with 0.25 inches within 24 hours.' },
+    }]);
+    expect(report.aftercare).toMatchObject({
+      wateringHold: false,
+      needsReview: false,
+      creditableWaterIn: true,
+    });
+    expect(combinedWaterCard(report).customerAction).toBe(
+      'Water in today’s application as directed, then follow this week’s watering plan below — it already accounts for the extra water.',
+    );
   });
 });
 
