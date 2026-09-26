@@ -6,7 +6,6 @@ const { priceGermanRoach, priceTopDressing, priceDethatching } = require('../ser
 const { ONE_TIME } = require('../services/pricing-engine/constants');
 
 const clientEstimatorPath = path.resolve(__dirname, '../../client/src/lib/estimateEngine.js');
-const legacyAdminEstimatePagePath = path.resolve(__dirname, '../../client/src/pages/admin/EstimatePage.jsx');
 const adminEstimateToolViewPath = path.resolve(__dirname, '../../client/src/pages/admin/EstimateToolViewV2.jsx');
 
 const TOP_DRESSING_LAWN_SQFT_CASES = [3000, 5000, 7500, 10000, 15000, 20000];
@@ -137,13 +136,11 @@ function clientDethatchingLine(calculateEstimate, { lawnSqFt, options }) {
 
 describe('deprecated client estimator pricing drift guards', () => {
   let source;
-  let legacyAdminSource;
   let adminToolViewSource;
   let calculateEstimate;
 
   beforeAll(() => {
     source = fs.readFileSync(clientEstimatorPath, 'utf8');
-    legacyAdminSource = fs.readFileSync(legacyAdminEstimatePagePath, 'utf8');
     adminToolViewSource = fs.readFileSync(adminEstimateToolViewPath, 'utf8');
     calculateEstimate = loadClientEstimator(source).calculateEstimate;
   });
@@ -185,10 +182,6 @@ describe('deprecated client estimator pricing drift guards', () => {
     }
 
     expect(adminToolViewSource).not.toMatch(/(?:Heavy|Moderate|Light) trees:|Large driveway:/);
-    // The V1 EstimatePage fallback carried these retired rows long after the
-    // server dropped them (driveway removed 2026-07-30, trees 2026-07-30) —
-    // guard both admin sources so they can't drift back.
-    expect(legacyAdminSource).not.toMatch(/(?:Heavy|Moderate|Light) trees:|Large driveway:/);
   });
 
   test('mirrors live server pest frequency discounts', () => {
@@ -362,51 +355,33 @@ describe('deprecated client estimator pricing drift guards', () => {
     });
   });
 
-  test('admin termite footprint override stays service-scoped', () => {
-    expect(legacyAdminSource).toContain('termiteFootprintSqFt,');
+  test('live admin termite footprint override stays service-scoped', () => {
     expect(adminToolViewSource).toContain('termiteFootprintSqFt,');
-    expect(legacyAdminSource).not.toContain('profile.footprint = termiteFootprintSqFt');
     expect(adminToolViewSource).not.toContain('profile.footprint = termiteFootprintSqFt');
   });
 
-  test('commercial risk-type rides in BOTH admin payloads (cadence stays in sync)', () => {
-    // Both admin surfaces must forward commercialRiskType so the pest/rodent
-    // cadence-by-business-type is applied identically regardless of which form
-    // the estimate was built in.
-    expect(legacyAdminSource).toContain('commercialRiskType: formIsCommercial');
+  test('commercial risk-type rides in the live admin payload and input control', () => {
+    // The live form forwards commercialRiskType so the server applies the
+    // pest/rodent cadence for the selected business type.
     expect(adminToolViewSource).toContain('commercialRiskType: formIsCommercial');
-    // Changing the business type must invalidate a generated estimate on BOTH
-    // forms (else Save persists stale pest/rodent totals). Legacy keeps the
-    // per-field reset set; V2 dropped it — SelectV2 routes through set(),
-    // which invalidates on every pricing-field change unconditionally.
-    expect(legacyAdminSource).toContain('"commercialRiskType",');
+    // SelectV2 routes through set(), which invalidates generated pricing on
+    // every input change rather than maintaining a per-field reset allowlist.
     expect(adminToolViewSource).toContain('k="commercialRiskType"');
   });
 
-  test('commercial multipliers ride in BOTH admin payloads + reset set (Phase 2)', () => {
-    // T&S density + mosquito pressure must forward + invalidate on both forms so
-    // the priced multiplier can never diverge between the two admin surfaces.
-    // Legacy invalidates via its per-field reset set; V2 dropped the set —
-    // these are SelectV2 fields, and set() invalidates unconditionally.
-    for (const src of [legacyAdminSource, adminToolViewSource]) {
-      expect(src).toContain('treeShrubDensity: formIsCommercial');
-      expect(src).toContain('mosquitoPressure: formIsCommercial');
-    }
-    expect(legacyAdminSource).toContain('"treeShrubDensity",');
-    expect(legacyAdminSource).toContain('"mosquitoPressure",');
+  test('commercial multipliers ride in the live admin payload and input controls (Phase 2)', () => {
+    // T&S density + mosquito pressure must forward through the live form;
+    // SelectV2 invalidates generated pricing whenever either input changes.
+    expect(adminToolViewSource).toContain('treeShrubDensity: formIsCommercial');
+    expect(adminToolViewSource).toContain('mosquitoPressure: formIsCommercial');
     expect(adminToolViewSource).toContain('k="treeShrubDensity"');
     expect(adminToolViewSource).toContain('k="mosquitoPressure"');
   });
 
-  test('commercial termite scope rides in BOTH admin payloads (liability gate stays in sync)', () => {
-    // Both admin surfaces must forward termiteScope to the server so the
-    // bond/warranty/install → manual-quote gate can never fire on one form but
-    // not the other.
-    expect(legacyAdminSource).toContain('termiteScope: form.termiteScope');
+  test('commercial termite scope rides in the live admin payload and liability preview gate', () => {
+    // The live form forwards termiteScope to the server and mirrors the
+    // fail-closed set used to decide whether the preview requires a manual quote.
     expect(adminToolViewSource).toContain('termiteScope: form.termiteScope');
-    // And both must apply the same fail-closed client-side preview set (auto
-    // scopes only; everything else previews as a manual quote, mirroring server).
-    expect(legacyAdminSource).toContain('COMMERCIAL_TERMITE_AUTO_SCOPES');
     expect(adminToolViewSource).toContain('COMMERCIAL_TERMITE_AUTO_SCOPES');
   });
 
@@ -619,17 +594,34 @@ describe('deprecated client estimator pricing drift guards', () => {
     expect(source).not.toContain("meth !== 'CHEMICAL'");
   });
 
-  test('legacy admin page blocks bed bug estimates from falling back to client pricing', () => {
-    expect(legacyAdminSource).toContain('const canUseServerForBedBug =');
-    expect(legacyAdminSource).toContain('const hasLawnPricedService =');
-    expect(legacyAdminSource).toContain('form.svcBedbug && hasLawnPricedService && !enrichedProfile && !hasManualLawnDimensions');
-    expect(legacyAdminSource).toContain('Enter lot size or run Property Lookup before generating a bed bug estimate with lawn services.');
-    expect(legacyAdminSource).toContain('form.svcBedbug && !canUseServerForBedBug');
-    expect(legacyAdminSource).toContain('Enter home sq ft or run Property Lookup before generating a mixed bed bug estimate.');
+  test('live admin page sends bed bug inputs through the authoritative server calculator', () => {
+    const generateAt = adminToolViewSource.indexOf('async function doGenerate(overrides = {}) {');
+    const saveAt = adminToolViewSource.indexOf('async function doSave(', generateAt);
+    expect(generateAt).toBeGreaterThan(0);
+    expect(saveAt).toBeGreaterThan(generateAt);
+    const generate = adminToolViewSource.slice(generateAt, saveAt);
+
+    expect(generate).toContain('selectedServices.push("BEDBUG")');
+    expect(generate).toContain('bedbugMethod: form.bedbugMethod');
+    expect(generate).toContain('bedbugSeverity: form.bedbugSeverity');
+    expect(generate).toContain('bedbugPrepStatus: form.bedbugPrepStatus');
+    expect(generate).toContain('bedbugOccupancyType: form.bedbugOccupancyType');
+    expect(generate).toContain('fetch("/api/admin/estimator/calculate-estimate"');
+    expect(generate).toContain('body: JSON.stringify({ profile, selectedServices, options })');
+
+    // A positive server-request check alone would still pass if a rejected
+    // request fell back to the deprecated client calculator. Keep the live
+    // builder structurally unable to call that dollar-authority substitute.
+    const estimateEngineImport = adminToolViewSource.match(
+      /import\s*\{([\s\S]*?)\}\s*from "\.\.\/\.\.\/lib\/estimateEngine";/,
+    );
+    expect(estimateEngineImport).not.toBeNull();
+    expect(estimateEngineImport[1]).not.toMatch(/\bcalculateEstimate\b/);
+    expect(generate).not.toMatch(/\bcalculateEstimate\s*\(/);
   });
 
-  test('legacy admin page recognizes canonical one-time pest rows', () => {
-    expect(legacyAdminSource).toContain('item.service === "one_time_pest" || item.name === "OT Pest"');
+  test('live admin page recognizes canonical one-time pest rows', () => {
+    expect(adminToolViewSource).toContain('item.service === "one_time_pest" || item.name === "OT Pest"');
   });
 
   test('matches server Top Dressing pricing for supported depths and recurring lawn states', () => {
@@ -683,40 +675,28 @@ describe('deprecated client estimator pricing drift guards', () => {
     }
   });
 
-  test('admin estimate pages expose dethatching hardening controls', () => {
-    expect(legacyAdminSource).toContain('dethatchingCleanupLevel');
-    expect(legacyAdminSource).toContain('DETHATCHING_ESTIMATE_RESET_FIELDS');
-    expect(legacyAdminSource).toContain('Manager approval required. Dethatching St. Augustine / Floratam can damage stolons.');
+  test('live admin estimator exposes dethatching hardening controls', () => {
     expect(adminToolViewSource).toContain('dethatchingCleanupLevel');
-    // V2 no longer keeps a per-field reset allowlist: toggle() invalidates the
-    // generated estimate on EVERY checkbox flip (the allowlist let pricing
-    // flags like rodentTrappingEmergency ship stale prices). Pin the invariant.
+    // The live form invalidates the generated estimate on EVERY checkbox flip;
+    // an allowlist previously let pricing flags ship stale prices.
     expect(adminToolViewSource).toContain('Every CheckboxV2 key is a pricing input or pricing gate');
     expect(adminToolViewSource).not.toContain('DETHATCHING_ESTIMATE_RESET_FIELDS');
     expect(adminToolViewSource).toContain('Base price does not include bagging or debris hauling.');
     expect(adminToolViewSource).toContain('Manager approval required. Dethatching St. Augustine / Floratam can damage stolons.');
   });
 
-  test('both admin previews count rodent bait toward the tier ONLY through rodentBaitWaveguardFlags (codex #3591 r33 P1)', () => {
-    for (const src of [legacyAdminSource, adminToolViewSource]) {
-      const at = src.indexOf('const qualifyingRecurringKeys = [');
-      expect(at).toBeGreaterThan(0);
-      const list = src.slice(at, src.indexOf('];', at));
-      expect(list).not.toMatch(/^\s*"svcRodentBait",\s*$/m);
-      expect(src).toMatch(/rodentBaitWaveguardFlags,\n/);
-      if (src === legacyAdminSource) {
-        expect(list).toContain('...(rodentBaitWaveguardFlags().tierQualifier !== false ? ["svcRodentBait"] : [])');
-      } else {
-        // V2 reads the SAME flags through a state mirror so the memoized
-        // preview re-runs once the live rows land (codex #3591 r34 P1) —
-        // the mirror must be seeded from, and refreshed by, the shared
-        // rodentBaitWaveguardFlags() reader after the live row applies.
-        expect(list).toContain('...(rodentWaveguardPosture.tierQualifier !== false ? ["svcRodentBait"] : [])');
-        expect(src).toContain('useState(() => rodentBaitWaveguardFlags())');
-        expect(src).toMatch(/applyServerRodentWaveguardPricingConfig\(waveguardRow\.data\);[\s\S]{0,200}setRodentWaveguardPosture\(rodentBaitWaveguardFlags\(\)\);/);
-        expect(src).toMatch(/\}, \[form, rodentWaveguardPosture\]\);/);
-      }
-    }
+  test('live admin preview counts rodent bait toward the tier ONLY through rodentBaitWaveguardFlags (codex #3591 r33 P1)', () => {
+    const at = adminToolViewSource.indexOf('const qualifyingRecurringKeys = [');
+    expect(at).toBeGreaterThan(0);
+    const list = adminToolViewSource.slice(at, adminToolViewSource.indexOf('];', at));
+    expect(list).not.toMatch(/^\s*"svcRodentBait",\s*$/m);
+    expect(adminToolViewSource).toMatch(/rodentBaitWaveguardFlags,\n/);
+    // The live preview reads the flags through a state mirror so the memoized
+    // result re-runs once the live pricing row lands (codex #3591 r34 P1).
+    expect(list).toContain('...(rodentWaveguardPosture.tierQualifier !== false ? ["svcRodentBait"] : [])');
+    expect(adminToolViewSource).toContain('useState(() => rodentBaitWaveguardFlags())');
+    expect(adminToolViewSource).toMatch(/applyServerRodentWaveguardPricingConfig\(waveguardRow\.data\);[\s\S]{0,200}setRodentWaveguardPosture\(rodentBaitWaveguardFlags\(\)\);/);
+    expect(adminToolViewSource).toMatch(/\}, \[form, rodentWaveguardPosture\]\);/);
   });
 
   test('client fallback emits rodentBaitMo 0 — the plan rides INSIDE monthlyTotal as a services row (codex #3591 r33 P2)', () => {
@@ -725,40 +705,54 @@ describe('deprecated client estimator pricing drift guards', () => {
     expect(clientEngineSource).not.toContain('rodentBaitMo: R.rodBaitMo || 0');
     // The summary/totals cards no longer depend on the scalar (or the tier
     // count) to render a rodent-only plan.
-    for (const src of [legacyAdminSource, adminToolViewSource]) {
-      expect((src.match(/Number\(E\.recurring\.monthlyTotal\) > 0 \|\|/g) || []).length).toBe(2);
-    }
+    expect((adminToolViewSource.match(/Number\(E\.recurring\.monthlyTotal\) > 0 \|\|/g) || []).length).toBe(2);
   });
 
-  test('legacy admin page batch-flow nextEstimate resets the customer binding through the binder (codex #3591 r32 P1)', () => {
-    const at = legacyAdminSource.indexOf('function nextEstimate() {');
+  test('live admin nextEstimate clears customer, property, and draft identity', () => {
+    // Runtime coverage: EstimateToolViewV2.property-lifecycle.test.jsx,
+    // "clears the previous property and customer identity when starting the next estimate".
+    const at = adminToolViewSource.indexOf('function nextEstimate() {');
     expect(at).toBeGreaterThan(0);
-    const body = legacyAdminSource.slice(at, legacyAdminSource.indexOf('\n  }\n', at));
-    expect(body).toContain('bindMatchedCustomer(null);');
-    expect(body).not.toContain('setExistingCustomerMatch(null);');
+    const end = adminToolViewSource.indexOf('async function reviewAndSend()', at);
+    const body = adminToolViewSource.slice(at, end);
+    expect(body).toContain('customerId: ""');
+    expect(body).toContain('...clearedPropertyFields()');
+    const clearAt = adminToolViewSource.indexOf('function clearedPropertyFields() {');
+    const clearEnd = adminToolViewSource.indexOf('\n  }\n', clearAt);
+    expect(adminToolViewSource.slice(clearAt, clearEnd)).toContain('propertyId: ""');
+    expect(body).toContain('setExistingCustomerMatch(null)');
+    expect(body).toContain('draftIdRef.current = null');
+    expect(body).toContain('setEditMode(null)');
   });
 
-  test('legacy admin page clears the stale customer binding at the TOP of doLookup (codex #3591 r62 P1)', () => {
-    // r61 cleared the binding only after the property request succeeded with
-    // usable enrichment — a changed address whose lookup returned non-2xx or
-    // the no-enrichment error exited before the clear and left the prior
-    // customer matched (priced with their services / setup waiver, attached
-    // to them). The clear + version bump must precede the property fetch so
-    // EVERY lookup outcome — success, error, abort — starts unbound.
-    const at = legacyAdminSource.indexOf('async function doLookup() {');
+  test('live admin property lookup discards superseded address results before applying them', () => {
+    // Runtime coverage: EstimateToolViewV2.property-lookup.test.jsx,
+    // "discards a response that was requested for a previous address"; and
+    // EstimateToolViewV2.property-lifecycle.test.jsx, "ignores a delayed
+    // old-address response after the next property has already populated".
+    const at = adminToolViewSource.indexOf('async function doLookup({ refresh = false } = {}) {');
     expect(at).toBeGreaterThan(0);
-    const fetchAt = legacyAdminSource.indexOf('"/api/admin/estimator/property-lookup"', at);
+    const fetchAt = adminToolViewSource.indexOf('"/api/admin/estimator/property-lookup"', at);
     expect(fetchAt).toBeGreaterThan(at);
-    expect(legacyAdminSource.slice(at, fetchAt)).toMatch(/bindMatchedCustomer\(null\);\s+estimateVersionRef\.current \+= 1;/);
+    const applyAt = adminToolViewSource.indexOf('setEnrichedProfile(ep);', fetchAt);
+    const body = adminToolViewSource.slice(at, applyAt);
+    expect(body).toContain('const address = form.address.trim()');
+    expect(body).toContain('const lookupSeq = ++lookupSeqRef.current');
+    expect(body).toContain('lookupAbortRef.current.abort()');
+    expect(body).toContain('const lookupSuperseded = () => {');
+    expect(body).toContain('if (lookupSuperseded()) return;');
   });
 
-  test('legacy admin page ignores a superseded qualifying-services load (codex #3591 r30 P2)', () => {
-    // A bind cleared/replaced before its fetch resolved must not repopulate
-    // the former customer's families for an unmatched fallback quote.
-    const bindAt = legacyAdminSource.indexOf('const bindMatchedCustomer = (match) => {');
-    expect(bindAt).toBeGreaterThan(0);
-    const bind = legacyAdminSource.slice(bindAt, bindAt + 2500);
-    expect(bind).toContain('existingQualifyingKeysRef.current = keysLoad;');
-    expect(bind).toMatch(/keysLoad\.then\(\(keys\) => \{[\s\S]*?if \(existingQualifyingKeysRef\.current !== keysLoad\) return;\s*\n\s*if \(Array\.isArray\(keys\)\) setExistingQualifyingKeys\(keys\);/);
+  test('live admin calculation binds the current customer for server-authoritative plan-family pricing', () => {
+    // Customer links are exercised through EstimateToolViewV2.address-match.test.jsx,
+    // including "Link applies the chosen customer" and "Unlink ... drops the
+    // linked customer". The calculation sends only the current linked id; the
+    // server derives canonical qualifying families instead of loading a client list.
+    const generateAt = adminToolViewSource.indexOf('async function doGenerate(overrides = {}) {');
+    const saveAt = adminToolViewSource.indexOf('async function doSave(', generateAt);
+    const generate = adminToolViewSource.slice(generateAt, saveAt);
+    expect(generate).toContain('existingCustomerId: existingCustomerMatch?.id || form.customerId || null');
+    expect(generate).toContain('fetch("/api/admin/estimator/calculate-estimate"');
+    expect(generate).toContain('body: JSON.stringify({ profile, selectedServices, options })');
   });
 });
