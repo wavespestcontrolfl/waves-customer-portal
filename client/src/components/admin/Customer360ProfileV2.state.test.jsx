@@ -1378,7 +1378,7 @@ describe('Customer360ProfileV2 profile state', () => {
     expect(screen.queryByRole('combobox', { name: 'Send from' })).not.toBeInTheDocument();
     failHistory = false;
     fireEvent.click(screen.getByRole('button', { name: 'Retry messages' }));
-    expect(await screen.findByRole('combobox', { name: 'Send from' })).toHaveValue('+12025550199');
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Send from' })).toHaveValue('+12025550199'));
   });
 
   it('uses prefetched SMS context beyond a call-only page when the opening refresh fails', async () => {
