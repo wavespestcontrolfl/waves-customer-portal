@@ -811,6 +811,12 @@ describe('v2 result card (GATE_PHOTO_ID_V2, server-side)', () => {
     expect(await screen.findByText('A photo from directly above would settle it.')).toBeInTheDocument();
     expect(screen.getByText(/3-photo limit/)).toBeInTheDocument();
     expect(screen.getAllByRole('img')).toHaveLength(3);
+
+    // Codex #4882 r1: the limit line follows the live count — removing a
+    // photo clears it while the ask stays.
+    fireEvent.click(screen.getByRole('button', { name: 'Remove photo 1' }));
+    expect(screen.queryByText(/3-photo limit/)).not.toBeInTheDocument();
+    expect(screen.getByText('A photo from directly above would settle it.')).toBeInTheDocument();
   });
 
   it('next_photo.photo_can_confirm === false shows the ask under a "can\'t confirm" heading with no retake button', async () => {

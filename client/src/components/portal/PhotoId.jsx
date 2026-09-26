@@ -314,14 +314,20 @@ function BackButton({ onClick }) {
 // ally/harmless/watch/call are deliberately calm and distinct from one
 // another; `call` ("Worth a pro look") is NOT alarm-red (that's `alert`,
 // reserved for the pest-result safety chips above).
+// Verdict chip text is 14px on the light glass chip, so each tone uses a
+// dark shade of its hue (≥ 4.5:1 on white): the brand green, sky and amber
+// are too light to read as text at this size.
+const VERDICT_TEXT = {
+  ally: '#166534', // green-800
+  harmless: '#075985', // sky-800
+  watch: '#92400E', // amber-800
+  call: B.glassNavy,
+};
+
 function Chip({ children, tone = 'default' }) {
   const toneColor = tone === 'alert' ? B.red
     : tone === 'accent' ? B.glassNavy
-    : tone === 'ally' ? B.green
-    : tone === 'harmless' ? B.teal
-    : tone === 'watch' ? B.orange
-    : tone === 'call' ? B.glassNavy
-    : SHELL.text;
+    : VERDICT_TEXT[tone] || SHELL.text;
   return (
     <span data-glass="chip" style={{
       display: 'inline-flex', alignItems: 'center', padding: '5px 12px', borderRadius: 999,
@@ -355,9 +361,10 @@ export function PhotoIdSheet({ open, onClose, items = [], onRefreshHistory, onOp
   const [historyError, setHistoryError] = useState('');
   const [loadingHistoryId, setLoadingHistoryId] = useState(null);
   // Set by the v2 result's "A photo that would help confirm it" button
-  // (handleRetakePhoto below) — { ask, full } shown as a banner on the
-  // photos step. `full` means the 3-photo limit was already reached, so the
-  // banner asks the customer to remove one before the retake photo fits.
+  // (handleRetakePhoto below) — { ask } shown as a banner on the photos
+  // step. While the photos are at the 3-photo limit the banner also asks the
+  // customer to remove one; that line follows the live photo count, so it
+  // disappears the moment a photo is removed.
   const [retakeBanner, setRetakeBanner] = useState(null);
 
   // Every async op (photo add, identify, history load) captures the current
@@ -553,7 +560,7 @@ export function PhotoIdSheet({ open, onClose, items = [], onRefreshHistory, onOp
       setNote('');
       setLocation('');
     }
-    setRetakeBanner({ ask: nextPhoto?.ask || '', full: photos.length >= PHOTO_LIMIT });
+    setRetakeBanner({ ask: nextPhoto?.ask || '' });
     setStep('photos');
   };
 
@@ -796,7 +803,7 @@ function PhotosStep({ type, photos, busyPhotos, note, location, submitError, ret
       {retakeBanner && (
         <div data-glass="soft" role="status" style={{ borderRadius: 8, border: `1px solid ${SHELL.border}`, padding: 12, display: 'flex', flexDirection: 'column', gap: 4 }}>
           {retakeBanner.ask && <div style={{ fontSize: 15, fontWeight: 700, color: SHELL.text, lineHeight: 1.4 }}>{retakeBanner.ask}</div>}
-          {retakeBanner.full && (
+          {photos.length >= PHOTO_LIMIT && (
             <div style={{ fontSize: 14, color: SHELL.muted, lineHeight: 1.4 }}>
               You're at the 3-photo limit — remove one below to add this one.
             </div>
@@ -1084,7 +1091,7 @@ function EvidenceList({ title, icon, items }) {
       </div>
       <ul style={{ margin: 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 6 }}>
         {items.map((text, i) => (
-          <li key={i} style={{ display: 'flex', gap: 8, alignItems: 'flex-start', fontSize: 15, color: SHELL.body, lineHeight: 1.45 }}>
+          <li key={i} style={{ display: 'flex', gap: 8, alignItems: 'flex-start', fontSize: 16, color: SHELL.body, lineHeight: 1.45 }}>
             <Icon name={icon} size={16} strokeWidth={2} style={{ color: SHELL.muted, flexShrink: 0, marginTop: 3 }} />
             <span>{text}</span>
           </li>
@@ -1125,7 +1132,7 @@ function NextPhotoCard({ nextPhoto, onRetakePhoto }) {
       <div style={{ fontSize: 16, fontWeight: 700, color: SHELL.text }}>
         {canConfirm ? 'A photo that would help confirm it' : "A photo can't confirm this one"}
       </div>
-      {nextPhoto.ask && <div style={{ fontSize: 15, color: SHELL.body, lineHeight: 1.5 }}>{nextPhoto.ask}</div>}
+      {nextPhoto.ask && <div style={{ fontSize: 16, color: SHELL.body, lineHeight: 1.5 }}>{nextPhoto.ask}</div>}
       {nextPhoto.why && <div style={{ fontSize: 14, color: SHELL.muted, lineHeight: 1.45 }}>{nextPhoto.why}</div>}
       {canConfirm && (
         <button type="button" data-glass-accent="" onClick={() => onRetakePhoto?.(nextPhoto)} style={{
@@ -1154,7 +1161,7 @@ function CandidatesSection({ candidates }) {
             borderBottom: i < others.length - 1 ? `1px solid ${SHELL.border}` : 'none',
           }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-              <span style={{ fontSize: 15, fontWeight: 700, color: SHELL.text }}>{c.common_name}</span>
+              <span style={{ fontSize: 16, fontWeight: 700, color: SHELL.text }}>{c.common_name}</span>
               <Chip>{c.strength === 'strong' ? 'Strong match' : 'Possible match'}</Chip>
               {c.local === 'common_here_now' && <Chip tone="ally">Common here now</Chip>}
               {c.local === 'uncommon_here' && <Chip>Uncommon here</Chip>}
@@ -1186,13 +1193,13 @@ function AboutEntrySection({ entry }) {
         width: '100%', minHeight: 44, display: 'flex', alignItems: 'center', justifyContent: 'space-between',
         padding: '6px 0', border: 'none', background: 'transparent', cursor: 'pointer', fontFamily: FONTS.body,
       }}>
-        <span style={{ fontSize: 15, fontWeight: 700, color: SHELL.text }}>About {entry.common_name}</span>
+        <span style={{ fontSize: 16, fontWeight: 700, color: SHELL.text }}>About {entry.common_name}</span>
         <Icon name={open ? 'chevronDown' : 'chevronRight'} size={16} strokeWidth={2} style={{ color: SHELL.muted, flexShrink: 0 }} />
       </button>
       {open && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10, padding: '2px 0 6px' }}>
-          {entry.what_it_means && <div style={{ fontSize: 15, color: SHELL.body, lineHeight: 1.55 }}>{entry.what_it_means}</div>}
-          {entry.fact && <div style={{ fontSize: 15, color: SHELL.body, lineHeight: 1.55 }}>{entry.fact}</div>}
+          {entry.what_it_means && <div style={{ fontSize: 16, color: SHELL.body, lineHeight: 1.55 }}>{entry.what_it_means}</div>}
+          {entry.fact && <div style={{ fontSize: 16, color: SHELL.body, lineHeight: 1.55 }}>{entry.fact}</div>}
           {Array.isArray(entry.look_alikes) && entry.look_alikes.length > 0 && (
             <div>
               <div style={{ fontSize: 14, fontWeight: 700, color: SHELL.muted, textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 6 }}>
@@ -1200,7 +1207,7 @@ function AboutEntrySection({ entry }) {
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                 {entry.look_alikes.map((la, i) => (
-                  <div key={la.slug || i} style={{ fontSize: 15, color: SHELL.body, lineHeight: 1.45 }}>
+                  <div key={la.slug || i} style={{ fontSize: 16, color: SHELL.body, lineHeight: 1.45 }}>
                     <span style={{ fontWeight: 700, color: SHELL.text }}>{la.common_name}</span>
                     {la.difference ? ` — ${la.difference}` : ''}
                   </div>
@@ -1209,7 +1216,7 @@ function AboutEntrySection({ entry }) {
             </div>
           )}
           {siteUrl && (
-            <a href={siteUrl} target="_blank" rel="noopener noreferrer" style={{ fontSize: 15, fontWeight: 700, color: B.glassNavy, textDecoration: 'underline' }}>
+            <a href={siteUrl} target="_blank" rel="noopener noreferrer" style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy, textDecoration: 'underline' }}>
               Read more on our website
             </a>
           )}
@@ -1234,7 +1241,7 @@ function V2Result({ v2, photos, unavailablePhotoIds, onPhotoUnavailable, onRetak
       <section data-glass="card" style={{ borderRadius: 8, border: `1px solid ${SHELL.border}`, padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
         <div>
           {answer.headline && <div style={{ fontSize: 20, fontWeight: 700, color: SHELL.text, lineHeight: 1.25 }}>{answer.headline}</div>}
-          {answer.subhead && <div style={{ fontSize: 15, fontStyle: 'italic', color: SHELL.muted, marginTop: 2 }}>{answer.subhead}</div>}
+          {answer.subhead && <div style={{ fontSize: 16, fontStyle: 'italic', color: SHELL.muted, marginTop: 2 }}>{answer.subhead}</div>}
         </div>
         {tierLabel && (
           <div style={{ fontSize: 14, fontWeight: 700, color: SHELL.muted, textTransform: 'uppercase', letterSpacing: '0.04em' }}>{tierLabel}</div>
@@ -1248,22 +1255,22 @@ function V2Result({ v2, photos, unavailablePhotoIds, onPhotoUnavailable, onRetak
               </div>
             )}
             {entry.safety_line && (
-              <div style={{ fontSize: 15, color: B.red, fontWeight: 700, lineHeight: 1.45 }}>{entry.safety_line}</div>
+              <div style={{ fontSize: 16, color: B.red, fontWeight: 700, lineHeight: 1.45 }}>{entry.safety_line}</div>
             )}
             {/* Fixed catalog labels (2026-09-26 contract delta #2) — payload
                 strings, rendered only for the fields present. */}
             {entry.role_label && (
-              <div style={{ fontSize: 15, color: SHELL.body, lineHeight: 1.45 }}>
+              <div style={{ fontSize: 16, color: SHELL.body, lineHeight: 1.45 }}>
                 <span style={{ fontWeight: 700, color: SHELL.text }}>What it is: </span>{entry.role_label}
               </div>
             )}
             {entry.risk_label && (
-              <div style={{ fontSize: 15, color: SHELL.body, lineHeight: 1.45 }}>
+              <div style={{ fontSize: 16, color: SHELL.body, lineHeight: 1.45 }}>
                 <span style={{ fontWeight: 700, color: SHELL.text }}>Risk: </span>{entry.risk_label}
               </div>
             )}
             {entry.action_label && (
-              <div style={{ fontSize: 15, color: SHELL.body, lineHeight: 1.45 }}>
+              <div style={{ fontSize: 16, color: SHELL.body, lineHeight: 1.45 }}>
                 <span style={{ fontWeight: 700, color: SHELL.text }}>What to do: </span>{entry.action_label}
               </div>
             )}
@@ -1280,7 +1287,7 @@ function V2Result({ v2, photos, unavailablePhotoIds, onPhotoUnavailable, onRetak
 
       {v2.referral?.text && (
         <section data-glass="soft" style={{ borderRadius: 8, border: `1px solid ${SHELL.border}`, padding: 16 }}>
-          <div style={{ fontSize: 15, color: SHELL.body, lineHeight: 1.5 }}>{v2.referral.text}</div>
+          <div style={{ fontSize: 16, color: SHELL.body, lineHeight: 1.5 }}>{v2.referral.text}</div>
         </section>
       )}
     </>
