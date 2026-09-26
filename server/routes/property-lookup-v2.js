@@ -1656,10 +1656,26 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   // is vision looking at THIS parcel, trusted as the shared-turf gate does.
   const condoTypeTrusted = recordCommercialSignalTrusted(rc)
     || String(rc?._fieldEvidence?.propertyType?.sourceType || '').toLowerCase() === 'satellite';
+  // One confident structure read feeds the verdict twice: a non-STACKED
+  // shape vetoes it (a detached site condo is its own building), and on a
+  // RECORDLESS lookup a STACKED read is the condo evidence — the same
+  // vision type the display falls back to (codex r4 P1 ×2).
+  const confidentAttachment = satelliteAttachmentIsConfident(ai)
+    ? String(ai?.structureAttachment || '').toUpperCase()
+    : null;
+  // (category is still wholePropertyCategory here: residentialUnitLookup
+  // is the only reclassification, and it is excluded.)
+  const recordlessVisionType = !residentialUnitLookup && !rc && wholePropertyCategory !== 'COMMERCIAL' && confidentAttachment
+    ? propertyTypeFromAttachment(ai)
+    : null;
+  const condoPricingType = rc?.propertyType
+    ? normalizePricingPropertyType(rc.propertyType)
+    : (recordlessVisionType ? normalizePricingPropertyType(recordlessVisionType) : null);
   const residentialCondoUnitLookup = !residentialUnitLookup && condoTypeTrusted && residentialCondoUnitLookupVerdict({
     address: lookupAddress,
     category: wholePropertyCategory,
-    pricingPropertyType: rc?.propertyType ? normalizePricingPropertyType(rc.propertyType) : null,
+    pricingPropertyType: condoPricingType,
+    structureAttachment: confidentAttachment,
   });
   // A condo record's sqft is the unit's own folio/listing — unless the
   // record covers more than one unit: a stacked-association aggregate, or a
@@ -1736,10 +1752,9 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   // is idempotent and covers cache-hit + standalone callers. The rc-null branch
   // can't carry evidence, so it only seeds the displayed type.
   const appliedVisionType = earlyAppliedVisionType || applySatelliteAttachmentType(rc, ai);
-  const visionPropertyType = appliedVisionType
-    || (!rc && !commercialProfile && satelliteAttachmentIsConfident(ai)
-      ? propertyTypeFromAttachment(ai)
-      : null);
+  // Read BEFORE the unit reset dropped the analysis, so a recordless unit
+  // lookup keeps displaying the Condo its verdict priced.
+  const visionPropertyType = appliedVisionType || recordlessVisionType;
 
   // On a RESIDENTIAL profile, never surface a record propertyType that
   // normalizes to commercial (an untrusted "Multifamily"/"Commercial" alias the
@@ -1833,7 +1848,7 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     const typeProvenance = priorTypeReasons.length ? ` Also confirm the type itself: ${priorTypeReasons.join(' ')}` : '';
     fieldVerifyFlags.push({
       field: 'propertyType',
-      reason: `Unit address on a condo record — quoted as ONE condo unit (single level, no lot, no pool assumed). The building's story count, the community pool, and every satellite read (turf, landscape, water) describe the whole parcel and were dropped. Confirm the unit's floor (upper floors price as Condo — Upper)${unitSqFtKept ? ' and its sq ft' : ', and get the unit\'s own sq ft from the customer'}.${typeProvenance}`,
+      reason: `Unit address in a stacked condo building — quoted as ONE condo unit (single level, no lot, no pool assumed). The building's story count, the community pool, and every satellite read (turf, landscape, water) describe the whole parcel and were dropped. Confirm the unit's floor (upper floors price as Condo — Upper)${unitSqFtKept ? ' and its sq ft' : ', and get the unit\'s own sq ft from the customer'}.${typeProvenance}`,
       priority: 'HIGH',
     });
   }

@@ -1558,6 +1558,46 @@ describe('unit-address lookup on a residential condo record (GATE_UNIT_SCOPE_GUA
     expect(profile.estimatedTurfSf || 0).toBe(0);
   });
 
+  test('a confident DETACHED or townhome-row read vetoes the reset — a site condo is its own building (codex r4 P1)', () => {
+    for (const structureAttachment of ['DETACHED', 'ATTACHED_END', 'ATTACHED_INTERIOR']) {
+      const profile = buildEnrichedProfile(
+        condoRecord(),
+        { ...parcelWideAi, structureAttachment, _structureAttachmentConfidence: 90 },
+        null, null, null, null, unit,
+      );
+      expect({ structureAttachment, unit: profile.residentialUnitLookup, stories: profile.stories, lot: profile.lotSqFt })
+        .toEqual({ structureAttachment, unit: null, stories: 2, lot: 8000 });
+    }
+    // A shaky read is no evidence either way — the stacked reset stands.
+    const shaky = buildEnrichedProfile(
+      condoRecord(),
+      { ...parcelWideAi, structureAttachment: 'DETACHED', _structureAttachmentConfidence: 40 },
+      null, null, null, null, unit,
+    );
+    expect(shaky.residentialUnitLookup).not.toBeNull();
+  });
+
+  test('a RECORDLESS lookup whose satellite read is confidently STACKED gets the unit reset (codex r4 P1)', () => {
+    const profile = buildEnrichedProfile(
+      null,
+      { ...parcelWideAi, propertyUse: 'RESIDENTIAL', structureAttachment: 'STACKED', _structureAttachmentConfidence: 90 },
+      null, null, null, null, unit,
+    );
+    expect(profile.propertyType).toBe('Condo');
+    expect(profile.residentialUnitLookup).not.toBeNull();
+    expect(profile.pool).not.toBe('POSSIBLE');
+    expect(profile.estimatedTurfSf || 0).toBe(0);
+    expect(profile.shrubDensity).not.toBe('HEAVY');
+    // …and the same read on a bare address is untouched.
+    const bareProfile = buildEnrichedProfile(
+      null,
+      { ...parcelWideAi, propertyUse: 'RESIDENTIAL', structureAttachment: 'STACKED', _structureAttachmentConfidence: 90 },
+      null, null, null, null, bare,
+    );
+    expect(bareProfile.residentialUnitLookup).toBeNull();
+    expect(bareProfile.propertyType).toBe('Condo');
+  });
+
   test('an untrusted web-listing "Condo" never clears parcel facts (codex r1 P1)', () => {
     const profile = buildEnrichedProfile(
       condoRecord({ _fieldEvidence: { propertyType: { value: 'Condo', sourceType: 'web', fieldVerify: true } } }),

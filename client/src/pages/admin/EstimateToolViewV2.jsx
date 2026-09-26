@@ -45,7 +45,7 @@ import {
   manualDiscountTypeForCatalogRow,
 } from "../../lib/discountCatalog";
 import { humanizeQuoteReason, quoteRequiredReasonNote } from "../../lib/quoteDisplay";
-import { EMPTY_PROPERTY_MEASUREMENTS, palmPrefillAllowed, lookupHomeSqFtPrefill, homeSqFtIsUnverifiedPlatMedian } from "../../lib/lookupPrefill";
+import { EMPTY_PROPERTY_MEASUREMENTS, palmPrefillAllowed, lookupHomeSqFtPrefill, homeSqFtIsUnverifiedPlatMedian, applyEngineProfileUnitScope } from "../../lib/lookupPrefill";
 import PropertyLookupResult from "../../components/admin/PropertyLookupResult";
 import { computeProvisionalState, provisionalSummary } from "../../utils/estimateProvisional";
 
@@ -1699,7 +1699,7 @@ export default function EstimateToolViewV2({
   };
 
   function formFromEditSource(d) {
-    return {
+    return applyEngineProfileUnitScope({
           ...buildDefaultEstimateForm(),
           ...(d.inputs || {}),
           // A saved retired T&S program (4x light) is seeded as 6x so the
@@ -1728,7 +1728,7 @@ export default function EstimateToolViewV2({
           // and the revise PUT sends form.notes back verbatim; seeding ""
           // would erase them on a service-only edit.
           notes: d.notes || "",
-        };
+        }, d.engineProfile);
   }
 
   // ── Edit mode: reopen an existing estimate for in-place revision ──
