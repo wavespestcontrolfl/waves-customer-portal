@@ -237,12 +237,20 @@ describe('buildAnswer — next_photo', () => {
 });
 
 describe('buildAnswer — look-alike identities respect the review gate (Codex round-0 P1)', () => {
-  test('an approved entry\'s look_alikes never names an UNAPPROVED look-alike', () => {
+  test('an approved entry\'s look_alikes list DROPS an UNAPPROVED look-alike entirely — name, slug, AND comparison prose', () => {
     const built = buildAnswer(baseCtx({ candidates: [cand('fire-ant', 0.85)] }));
-    expect(built.entry.look_alikes).toHaveLength(1);
-    expect(built.entry.look_alikes[0].slug).toBeNull();
-    expect(built.entry.look_alikes[0].common_name).toBeNull();
+    expect(built.entry.look_alikes).toHaveLength(0);
     expect(JSON.stringify(built.entry)).not.toContain('Unreviewed Ant');
+    expect(JSON.stringify(built.entry)).not.toContain('two-node waist'); // the comparison prose itself
+  });
+
+  test('next_photo does not surface a curated pair\'s comparison prose when the OTHER side is unapproved', () => {
+    // no-photo-pair-a's ONLY look-alike (no-photo-pair-b) is approved in the
+    // base fixture; this test's point is the SINGLE-candidate fallback path
+    // when that one look-alike is swapped for an unapproved target.
+    const built = buildAnswer(baseCtx({ candidates: [cand('fire-ant', 0.55)] })); // fire-ant's only look-alike is unapproved
+    expect(built.answer.wording).toBe('likely');
+    expect(built.nextPhoto).toBeNull(); // no approved look-alike to fall back to, and no node-level prompt at entry level
   });
 });
 
@@ -519,6 +527,19 @@ describe('identifyPestV2 — escalation triggers', () => {
     // The unverified 0.95 can never read pretty_sure once a trigger fired
     // with no OpenAI answer.
     expect(result.v2.answer.wording).toBe('likely');
+  });
+
+  test('an escalation call that answers ok but names NO candidate does not count as OpenAI confirmation — Codex round-0 P1 (round 2)', async () => {
+    dispatch
+      .mockResolvedValueOnce(candidatesReply([{ slug: 'fire-ant', confidence: 0.95 }]))
+      .mockResolvedValueOnce({ ok: true, json: { candidates: [{ slug: 'fire-ant', confidence: 0.4, traits_visible: [], traits_not_visible: [1, 2, 3] }] } }) // verify tanks the confidence
+      .mockResolvedValueOnce({ ok: true, json: { quality: { usable: true, issue: 'none' }, shows: 'organism', candidates: [] } }); // escalation answers ok, names nothing
+
+    const result = await identifyPestV2([PHOTO]);
+    expect(result.internal.models.escalation.ok).toBe(true);
+    // Confidence is unchanged (still 0.4 from verify) AND the trigger has no
+    // real OpenAI answer to lift the pretty_sure cap either way.
+    expect(result.v2.answer.wording).not.toBe('pretty_sure');
   });
 
   test('no trigger fires on a clean, confident, uncontested read — no escalation call at all', async () => {

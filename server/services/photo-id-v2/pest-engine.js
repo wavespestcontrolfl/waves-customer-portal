@@ -390,15 +390,15 @@ function buildEntryBlock(entry) {
     what_it_means: entry.copy?.what_it_means || null,
     fact: entry.copy?.fact || null,
     site_url: entry.links?.site_page ? `${SITE_BASE_URL}${entry.slug}/` : null,
-    // Codex round-0 P1: a look-alike's own catalog identity is gated by ITS
-    // OWN review approval, same as any other candidate — an approved
-    // entry's page must not out an unapproved look-alike by name/slug just
-    // because it happens to be listed here.
-    look_alikes: catalog.lookAlikes(entry.slug).map((la) => ({
-      slug: la.node && isApproved(la.node) ? la.slug : null,
-      common_name: la.node && isApproved(la.node) ? la.node.common_name : null,
-      difference: la.difference || null,
-    })),
+    // Codex round-0 P1 (round 2): a look-alike's own catalog identity is
+    // gated by ITS OWN review approval, same as any other candidate — an
+    // approved entry's page must not out an unapproved look-alike by
+    // name/slug, OR indirectly through the comparison PROSE (`difference`
+    // routinely names both species by common name), just because it
+    // happens to be listed here.
+    look_alikes: catalog.lookAlikes(entry.slug)
+      .filter((la) => la.node && isApproved(la.node))
+      .map((la) => ({ slug: la.slug, common_name: la.node.common_name, difference: la.difference || null })),
   };
 }
 
@@ -443,7 +443,11 @@ function candidatesBlockFor(candidates, currentMonth) {
       common_name: approved ? c.entry.common_name : (group ? group.generic : null),
       scientific_name: approved ? (c.entry.scientific_name || null) : null,
       strength: c.confidence >= LINEAGE_CLIMB_MIN ? 'strong' : 'possible',
-      difference_from_top: approved ? differenceFromTop(c, top) : null,
+      // Codex round-0 P1 (round 2): the difference prose names BOTH sides
+      // by common name — never computed unless the REFERENCE top is also
+      // approved (an unapproved `top` fallback must not leak its identity
+      // through an approved candidate's `difference_from_top` either).
+      difference_from_top: approved && top?.entry && isApproved(top.entry) ? differenceFromTop(c, top) : null,
       local: localLabel(c.entry, currentMonth),
     };
   });
@@ -453,6 +457,11 @@ function candidatesBlockFor(candidates, currentMonth) {
 // (false when no single photo separates the pair — the pair's `next_photo`
 // text says what DOES confirm it instead) rides on the object; a node-level
 // prompt (no specific pair) is always `photo_can_confirm: true`.
+function pairIfBothApproved(entry, targetSlug) {
+  const pair = (entry.look_alikes || []).find((l) => l.slug === targetSlug);
+  return pair && isApproved(catalog.getEntry(targetSlug)) ? pair : null;
+}
+
 function nextPhotoFor(wording, candidates, level, nodeId) {
   if (wording === 'pretty_sure') return null;
   const top = candidates[0] || null;
@@ -460,18 +469,20 @@ function nextPhotoFor(wording, candidates, level, nodeId) {
   // A curated pair between the top two candidates. Read the raw
   // `look_alikes` entry directly (not the `lookAlikes()` convenience
   // wrapper, which does not pass through `photo_can_confirm`) so a pair
-  // explicitly marked unconfirmable-by-photo is honored.
-  if (top?.entry && second?.entry) {
-    const pair = (top.entry.look_alikes || []).find((l) => l.slug === second.entry.slug);
+  // explicitly marked unconfirmable-by-photo is honored. Codex round-0 P1
+  // (round 2): the pair's `ask`/`why` prose routinely names BOTH species by
+  // common name, so this is only used when both sides are approved — an
+  // unapproved look-alike must not surface even indirectly through it.
+  if (top?.entry && second?.entry && isApproved(top.entry) && isApproved(second.entry)) {
+    const pair = pairIfBothApproved(top.entry, second.entry.slug);
     if (pair) return { ask: pair.next_photo || null, why: pair.difference || null, photo_can_confirm: pair.photo_can_confirm !== false };
   }
-  // Entry level with no second-candidate pair match: the SAME fallback
+  // Entry level with no usable second-candidate pair: the SAME fallback
   // `catalog.nextPhoto` uses internally for a bare entry (its own first
-  // look-alike) — read directly, same reason as above (Codex round-0 P1:
-  // `catalog.nextPhoto`'s wrapper was silently dropping `photo_can_confirm`
-  // here too, always reading as confirmable).
+  // look-alike WHOSE OWN TARGET IS APPROVED) — read directly so
+  // `photo_can_confirm` survives (`catalog.nextPhoto`'s wrapper drops it).
   if (level === 'entry' && top?.entry) {
-    const fallbackPair = (top.entry.look_alikes || [])[0];
+    const fallbackPair = (top.entry.look_alikes || []).find((la) => isApproved(catalog.getEntry(la.slug)));
     return fallbackPair
       ? { ask: fallbackPair.next_photo || null, why: fallbackPair.difference || null, photo_can_confirm: fallbackPair.photo_can_confirm !== false }
       : null;
@@ -668,19 +679,24 @@ function combineEscalation(geminiCandidates, escalationResult) {
   if (!escalationResult?.ok) {
     // OpenAI unavailable — Gemini's result stands, capped from reading
     // pretty_sure by `unansweredTrigger` inside `buildAnswer`.
-    return { finalCandidates: geminiCandidates, disagreed: false, disagreementNode: null };
+    return { finalCandidates: geminiCandidates, disagreed: false, disagreementNode: null, openaiAnswered: false };
   }
   const openaiCandidates = dedupeCandidates((escalationResult.json?.candidates || []).map(resolveCandidate));
   const openaiTop = openaiCandidates[0] || null;
   const geminiTop = geminiCandidates[0] || null;
+  // Codex round-0 P1 (round 2): the provider answered (HTTP ok, valid
+  // JSON) but named NO candidate at all — that is not confirmation of
+  // anything. Treat it the same as "unavailable" for the pretty_sure cap,
+  // even though there is nothing to combine either way.
+  const openaiAnswered = !!openaiTop;
 
   if (openaiTop && !geminiTop) {
-    return { finalCandidates: openaiCandidates, disagreed: false, disagreementNode: null };
+    return { finalCandidates: openaiCandidates, disagreed: false, disagreementNode: null, openaiAnswered };
   }
   if (!openaiTop || !geminiTop) {
     // Neither side has a top candidate, or OpenAI found nothing new —
     // Gemini's (already below-threshold/contested) result stands.
-    return { finalCandidates: geminiCandidates, disagreed: false, disagreementNode: null };
+    return { finalCandidates: geminiCandidates, disagreed: false, disagreementNode: null, openaiAnswered };
   }
   if (sameCandidateKey(geminiTop, openaiTop)) {
     const bumped = { ...geminiTop, confidence: Math.max(geminiTop.confidence, openaiTop.confidence) };
@@ -688,12 +704,14 @@ function combineEscalation(geminiCandidates, escalationResult) {
       finalCandidates: dedupeCandidates([bumped, ...geminiCandidates.slice(1), ...openaiCandidates.slice(1)]),
       disagreed: false,
       disagreementNode: null,
+      openaiAnswered,
     };
   }
   return {
     finalCandidates: dedupeCandidates([geminiTop, openaiTop, ...geminiCandidates.slice(1), ...openaiCandidates.slice(1)]),
     disagreed: true,
     disagreementNode: deepestSharedNode(candidateNodeId(geminiTop), candidateNodeId(openaiTop)),
+    openaiAnswered,
   };
 }
 
@@ -746,10 +764,15 @@ async function identifyPestV2(photos = []) {
   let disagreed = false;
   let disagreementNode = null;
   let escalationResult = null;
+  // Codex round-0 P1 (round 2): "OpenAI answered" must mean it actually
+  // named a candidate, not merely that the HTTP call succeeded — an ok
+  // response with an empty candidates list confirms nothing and must cap
+  // pretty_sure the same as an unavailable leg (see `combineEscalation`).
+  let openaiAnswered = false;
 
   if (escalationTriggered) {
     escalationResult = await callEscalationModel(images, catalogEntries, candidateContextFor(catalogCandidates1));
-    ({ finalCandidates, disagreed, disagreementNode } = combineEscalation(finalCandidates, escalationResult));
+    ({ finalCandidates, disagreed, disagreementNode, openaiAnswered } = combineEscalation(finalCandidates, escalationResult));
   }
 
   const quality = candidatesJson?.quality
@@ -762,7 +785,7 @@ async function identifyPestV2(photos = []) {
     disagreed,
     disagreementNode,
     escalationTriggered,
-    openaiAnswered: !!escalationResult?.ok,
+    openaiAnswered,
     qualityUsable: !!quality.usable,
     qualityIssue: quality.issue || 'none',
     currentMonth,
