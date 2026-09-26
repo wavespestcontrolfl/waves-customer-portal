@@ -1323,3 +1323,10 @@ describe('recruiting_comms_deferred (PR #4623)', () => {
     fin.mockRestore(); rec.mockRestore();
   });
 });
+
+test('only an entry flagged replayWithoutPhone may replay without a phone', () => {
+  const { replaysWithoutPhone } = require('../services/messaging/deferred-replay-registry');
+  expect(replaysWithoutPhone('invoice_followup_deferred')).toBe(false);
+  expect(replaysWithoutPhone('no_such_entry')).toBe(false);
+  expect(replaysWithoutPhone(undefined)).toBe(false);
+});

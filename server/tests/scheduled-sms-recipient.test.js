@@ -179,31 +179,37 @@ describe('resolveScheduledRecipient', () => {
 });
 
 describe('canReplayBillingWithoutPhone', () => {
-  test.each([
-    [{ recipient_identity_unverified: true }, false],
-    [{ explicit_recipient: true }, false],
-    [{ refresh_customer_phone: true }, true],
-    [{ refresh_customer_phone: true, recipient_identity_unverified: true }, false],
-  ])('never discards an unresolved original recipient: %j', (provenance, expected) => {
-    expect(canReplayBillingWithoutPhone({ customer_id: 'cust-1', to_phone: '+19415550101' },
-      { billingDeliveryCategory: 'invoice', ...provenance })).toBe(expected);
+  // The routing slice registers no Email-only replay entry yet; stub the
+  // registry lookup so the scheduler's own rule is exercised in isolation.
+  const registry = require('../services/messaging/deferred-replay-registry');
+  const registered = { entry_point: 'email_only_fixture', requires_registered_dispatch: true,
+    refresh_customer_phone: true, billingDeliveryCategory: 'payment_issue' };
+  beforeEach(() => {
+    jest.spyOn(registry, 'replaysWithoutPhone').mockImplementation((entry) => entry === 'email_only_fixture');
+  });
+  afterEach(() => jest.restoreAllMocks());
+
+  test('a registered Email-only replay proceeds without a phone', () => {
+    expect(canReplayBillingWithoutPhone({ customer_id: 'cust-1', to_phone: '' }, registered)).toBe(true);
+    expect(canReplayBillingWithoutPhone({ customer_id: 'cust-1', to_phone: '+19415550101' }, registered)).toBe(true);
   });
 
-  test('requires a customer row and a recognized explicit billing category', () => {
-    expect(canReplayBillingWithoutPhone(
-      { customer_id: 'cust-1' }, { billingDeliveryCategory: 'payment_issue' },
-    )).toBe(true);
-    expect(canReplayBillingWithoutPhone(
-      { customer_id: 'cust-1', to_phone: '' }, { billingDeliveryCategory: 'payment_issue', explicit_recipient: true },
-    )).toBe(true);
-    expect(canReplayBillingWithoutPhone(
-      { customer_id: null }, { billingDeliveryCategory: 'payment_issue' },
-    )).toBe(false);
-    expect(canReplayBillingWithoutPhone(
-      { customer_id: 'cust-1' }, { billingDeliveryCategory: 'appointment' },
-    )).toBe(false);
+  test.each([
+    ['an ordinary billing SMS row whose phone refresh failed', { refresh_customer_phone: true, billingDeliveryCategory: 'invoice' }],
+    ['a registered entry that still sends Text', { ...registered, entry_point: 'invoice_followup_deferred' }],
+    ['an unregistered row naming the Email entry point', { ...registered, requires_registered_dispatch: false }],
+    ['an unverified recipient identity', { ...registered, recipient_identity_unverified: true }],
+    ['an explicit foreign destination', { ...registered, explicit_recipient: true }],
+    ['an unrecognized billing category', { ...registered, billingDeliveryCategory: 'appointment' }],
+  ])('%s stays on the recipient-refresh rail', (_label, provenance) => {
+    expect(canReplayBillingWithoutPhone({ customer_id: 'cust-1', to_phone: '' }, provenance)).toBe(false);
+  });
+
+  test('requires a customer row', () => {
+    expect(canReplayBillingWithoutPhone({ customer_id: null, to_phone: '' }, registered)).toBe(false);
   });
 });
+
 
 describe('scheduledDepositReceiptAllowed', () => {
   afterEach(() => db.mockReset());

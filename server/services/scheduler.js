@@ -96,12 +96,17 @@ async function resolveScheduledRecipient(msg, claimMeta) {
   }
 }
 
+// Only a registered Email-only replay proceeds without a phone: its row was
+// queued blank on purpose. Every other billing row that reaches the executor
+// without a resolved phone is a failed or empty lookup and stays on the
+// bounded recipient-refresh rail above (codex #4803 r5).
 function canReplayBillingWithoutPhone(msg, claimMeta) {
   return Boolean(msg.customer_id
-    && (!String(msg.to_phone || '').trim() || (claimMeta?.refresh_customer_phone === true
-      && claimMeta.recipient_identity_unverified !== true && claimMeta.explicit_recipient !== true))
+    && claimMeta?.requires_registered_dispatch === true
+    && require('./messaging/deferred-replay-registry').replaysWithoutPhone(claimMeta.entry_point)
+    && claimMeta.recipient_identity_unverified !== true && claimMeta.explicit_recipient !== true
     && ['invoice', 'payment_issue', 'billing', 'payment_receipt']
-      .includes(claimMeta?.billingDeliveryCategory));
+      .includes(claimMeta.billingDeliveryCategory));
 }
 
 // Deposit-receipt replays re-check payment_receipt_channel at send time —

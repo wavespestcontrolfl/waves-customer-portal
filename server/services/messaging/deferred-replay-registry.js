@@ -1499,6 +1499,10 @@ async function dispatchDeferredReplay(entryPoint, claimMeta = {}, defaultDispatc
   return defaultDispatch();
 }
 
+function replaysWithoutPhone(entryPoint) {
+  return entryFor(entryPoint)?.replayWithoutPhone === true;
+}
+
 // undefined = no locked handoff registered: the sender dispatches normally.
 // Errors propagate: the provider wrapper distinguishes a failed read before
 // the handoff (retryable, nothing left) from a failure after acceptance.
@@ -1674,6 +1678,7 @@ const DURABLE_FINALIZE_ENTRY_POINTS = Object.entries(REGISTRY)
   .map(([key]) => key);
 
 module.exports = {
+  replaysWithoutPhone,
   recheckDeferredReplay,
   dispatchDeferredReplay,
   deferredSmsHandoff,
