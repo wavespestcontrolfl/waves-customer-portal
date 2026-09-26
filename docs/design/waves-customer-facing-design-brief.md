@@ -128,6 +128,12 @@ all-day live preview session, the owner approved a **liquid-glass** direction fo
 estimate surface specifically: system SF type stack with a deep-blue heading hierarchy
 (`#04395E`), translucent glass surface tiers over a mesh-gradient scene, and gold accent
 CTAs. The authoritative spec is `docs/design/estimate-glass-plan.md` (implementation) and
-`docs/design/estimate-glass-blueprint.js` (approved behavior); shipped dark behind
-`?glass=1` (PRs #2358/#2359 + the copy PR). The rest of this brief still governs the other
-customer surfaces (booking, invoice, portal, follow-up) until their own specs exist.
+`docs/design/estimate-glass-blueprint.js` (approved behavior); shipped via PRs #2358/#2359 +
+the copy PR. The `?glass=1` override was retired 2026-07-07 — glass is now the default
+customer theme on roughly 32 customer-facing pages, including booking, invoice, portal
+and follow-up. Some surfaces deliberately opt out — for example official compliance
+documents (WDO reports and termite certificates, owner ruling 2026-07-16), the `?website=1`
+estimate embed, and service-report PDF/static/SMS-preview render modes. The list is not
+exhaustive: each page decides via `useGlassSurface(active)`, so check the page before
+changing its theme. The warm-serif direction sketched above is superseded on
+those surfaces.

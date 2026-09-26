@@ -292,6 +292,7 @@ function manualEnrollMessage(templateName, result) {
     case 'already enrolled': return 'This customer already has an active enrollment on this automation — nothing was re-sent.';
     case 'template disabled': return 'This automation is disabled. Enable it first, then send.';
     case 'no steps': return 'This automation has no enabled steps yet, so there is nothing to send.';
+    case 'not_termite_bond': return 'This reminder is only for customers with a termite bond — this customer has none on file.';
     default: return `Couldn't enroll: ${result.reason || 'unknown reason'}.`;
   }
 }
@@ -363,12 +364,15 @@ const MEMBERSHIP_SQL = `
 // Live customers with an email, per the canonical real-customer predicate
 // (customer-stages.js — pipeline_stage, NOT the always-true `active` flag
 // alone). scope 'program' = hasMembership (above).
-function segmentQuery({ scope, locationId }) {
+function segmentQuery({ scope, locationId }, templateKey) {
   let q = db('customers')
     .modify(whereLiveCustomer)
     .whereNotNull('email')
     .whereRaw("TRIM(email) <> ''");
   if (scope === 'program') q = q.whereRaw(MEMBERSHIP_SQL);
+  // The count, the cap and the enrolled set all see only eligible customers,
+  // so a renewal segment is sized by bond holders, not the whole base.
+  if (AutomationRunner.requiresTermiteBond(templateKey)) q = q.whereNotNull('termite_renewal_date');
   if (locationId) {
     // nearest_location_id is nullable; the rest of the app falls back to
     // city routing (config/locations resolveLocation), so a location-scoped
@@ -412,7 +416,7 @@ router.post('/templates/:key/segment-preview', async (req, res) => {
     const template = await db('automation_templates').where({ key: req.params.key }).first();
     if (!template) return res.status(404).json({ error: 'template not found' });
 
-    const row = await segmentQuery(segment).count('* as count').first();
+    const row = await segmentQuery(segment, req.params.key).count('* as count').first();
     const count = Number(row?.count || 0);
     res.json({ count, cap: SEGMENT_SEND_CAP, overCap: count > SEGMENT_SEND_CAP });
   } catch (err) {
@@ -442,7 +446,7 @@ router.post('/templates/:key/segment-send', async (req, res) => {
     // ONE statement defines both the confirmed count and the enrolled set —
     // a separate count-then-select pair leaves a window where the row set can
     // shift between the two while the request proceeds under the old number.
-    const customers = await segmentQuery(segment)
+    const customers = await segmentQuery(segment, req.params.key)
       .select('id', 'email', 'first_name', 'last_name')
       .orderBy('id', 'asc');
     if (customers.length !== expectedCount) {
@@ -529,3 +533,4 @@ router.get('/enrollments', async (req, res, next) => {
 });
 
 module.exports = router;
+module.exports._internals = { segmentQuery };

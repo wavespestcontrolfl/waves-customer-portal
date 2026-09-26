@@ -10,6 +10,7 @@ const {
   estimateDataHasUnresolvedManagerApproval,
   normalizeEstimateDethatchingManagerApproval,
   validateEstimateDeliveryOptions,
+  isCommercialEstimateData,
 } = require('./estimate-delivery-options');
 const {
   attachLeadToEstimate,
@@ -1548,6 +1549,36 @@ async function assertGroupAssignmentAllowed(dbc, groupId, identity = {}, selfId 
   }
 }
 
+// The V2 admin form's isCommercial select saves the string "YES", which the
+// shared isCommercialEstimateData (strict boolean; other readers depend on
+// that) does not read. Recognized HERE only, for the category column, so a
+// commercial termite-only estimate with no commercial_* line still saves
+// COMMERCIAL without widening the shared detector's other callers.
+function v2FormMarkedCommercial(estimateData) {
+  const flag = estimateData?.inputs?.isCommercial;
+  return typeof flag === 'string' && flag.trim().toUpperCase() === 'YES';
+}
+
+// The mirror of v2FormMarkedCommercial (primary review of PR #4840 r7 P2):
+// a FULL V2-form save always carries inputs.isCommercial as an explicit
+// "YES"/"NO" string (it is the form's own classification toggle, present on
+// every save from that tool). A genuinely PARTIAL payload — the class the
+// "never downgrade" rule at buildEstimatePersistenceFields exists to
+// protect — has no reason to carry that exact string at all: it either
+// omits `inputs` entirely or carries a narrower shape without this key. So
+// an explicit "NO" is a positive, low-risk signal that the OPERATOR just
+// corrected this estimate to residential in a full re-save (e.g. after a
+// false-positive commercial-suite lookup), not an unrelated partial edit
+// that merely lacks commercial markers of its own.
+// Mirrors the pricing predicate (client isCommercialEstimateInput): a "NO"
+// toggle does not override Property Type = Commercial — that estimate prices
+// as commercial, so it must not be saved RESIDENTIAL (Codex #4840 r9 P1).
+function v2FormMarkedResidential(estimateData) {
+  const flag = estimateData?.inputs?.isCommercial;
+  const propertyType = String(estimateData?.inputs?.propertyType || '').trim().toLowerCase();
+  return typeof flag === 'string' && flag.trim().toUpperCase() === 'NO' && propertyType !== 'commercial';
+}
+
 function buildEstimatePersistenceFields(body, context = {}) {
   const estimateData = normalizeEstimateDethatchingManagerApproval(body.estimateData, context);
   if (estimateData) {
@@ -1579,6 +1610,50 @@ function buildEstimatePersistenceFields(body, context = {}) {
     : null;
 
   return {
+    // Emitted ONLY when positively COMMERCIAL-detected — never an explicit
+    // 'RESIDENTIAL'. The estimates.category CHECK-constrained column
+    // (RESIDENTIAL|COMMERCIAL, migration 20260401000014) was never written
+    // by the manual admin-tool save path before this — every commercial
+    // estimate saved through EstimateToolViewV2 silently kept the column's
+    // RESIDENTIAL default. That let a commercial row slip through
+    // residential-only guards keyed on estimates.category (AGENTS.md P0
+    // "Estimate service-mix rail member exclusion" checks
+    // `category !== 'RESIDENTIAL'` to stay out of a plan member's ladder —
+    // a commercial estimate stamped RESIDENTIAL passed that check by
+    // accident). isCommercialEstimateData scans the saved payload the same
+    // way estimate-delivery-options.js already does for its own commercial
+    // detection, so this can never disagree with that reader.
+    //
+    // The key is OMITTED (never set to 'RESIDENTIAL') on both create and
+    // update, deliberately: on CREATE, an omitted column falls to the
+    // migration default RESIDENTIAL — byte-identical to never having written
+    // it at all. On UPDATE, this function is shared by createOrReuseAdminEstimate
+    // AND reviseAdminEstimate (resolveEstimateWritePayload has no reliable
+    // "is this a revise" signal, and a revise's PARTIAL payload legitimately
+    // carries no commercial markers of its own even when the row genuinely
+    // is commercial — a category the row already carries, or one an engine
+    // draft / commercial proposal stamped, must never be silently reset to
+    // RESIDENTIAL by an unrelated field edit). An UPDATE with the key
+    // omitted leaves that column untouched (never downgrades); one row's
+    // ONLY path to COMMERCIAL, from either create or revise, is a payload
+    // this detector positively reads as commercial.
+    //
+    // ONE explicit exception to "never write RESIDENTIAL" (primary review of
+    // PR #4840 r7 P2): a FULL V2-form re-save carrying inputs.isCommercial
+    // === "NO" is the operator DELIBERATELY correcting a row to residential
+    // (e.g. after a false-positive commercial-suite lookup) — that positive
+    // marker, not a genuinely partial payload's mere absence of commercial
+    // signals, is what downgrades the column. See v2FormMarkedResidential.
+    // The operator's explicit V2-form selection decides first (a stale
+    // commercialSubtype left in the inputs after a correction to
+    // residential must not keep the column COMMERCIAL); only without an
+    // explicit selection do the derived commercial signals apply, and they
+    // never downgrade.
+    ...(v2FormMarkedCommercial(estimateData)
+      ? { category: 'COMMERCIAL' }
+      : v2FormMarkedResidential(estimateData)
+        ? { category: 'RESIDENTIAL' }
+        : (isCommercialEstimateData(estimateData) ? { category: 'COMMERCIAL' } : {})),
     // Always emitted: a non-SERVER rewrite RESETS the column to its migration
     // default, so a draft first stamped by a server price can't keep claiming
     // that version after a CLIENT_FALLBACK/quote-required rewrite replaced
@@ -2601,7 +2676,8 @@ const REVISE_BLOCKED_STATUSES = ['accepted', 'declined', 'expired', 'sending'];
 // re-saves it through the engine and then extends it.
 function expiredRowRecoverableUnderGate(row) {
   const gate = require('./pricing-authority-gate');
-  return gate.gatedSendAuthorityPredicateApplies() && !gate.rowPassesGatedSendAuthority(row || {});
+  return (gate.gatedSendAuthorityPredicateApplies() && !gate.rowPassesGatedSendAuthority(row || {}))
+    || !gate.rowClearOfLegacyAutofillHold(row || {});
 }
 
 function estimateReviseBlock(estimate, estimateData, now = new Date()) {

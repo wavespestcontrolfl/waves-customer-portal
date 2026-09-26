@@ -286,8 +286,8 @@ async function guardClickFollowupSend(draft) {
     // (declined / expired / archived) must reach its retirement path below,
     // never a permanent hold nobody can clear.
     if (estimate) {
-      const { gatedSendAuthorityPredicateApplies, estimateDeliverableUnderGate } = require('../services/pricing-authority-gate');
-      if (gatedSendAuthorityPredicateApplies() && !(await estimateDeliverableUnderGate(db, estimate))) {
+      const { estimateDeliverableUnderGate } = require('../services/pricing-authority-gate');
+      if (!(await estimateDeliverableUnderGate(db, estimate))) {
         return { hold: true, message: 'This estimate\'s price has no engine verification stamp — re-save it from the estimate tool before sending this follow-up (draft left pending).' };
       }
     }
