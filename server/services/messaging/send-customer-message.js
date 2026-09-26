@@ -882,7 +882,7 @@ async function sendCustomerMessageCore(input) {
       // same row. billingEmailPreSendCheck is stripped from sendInput above
       // and reaches here only when this leg is billingEmailLeg (the
       // allowlist above refuses any other Email leg that supplies one).
-      if (sendInput.metadata.billingDeliveryLeg === 'email' && typeof billingEmailPreSendCheck === 'function') {
+      if (sendInput.metadata?.billingDeliveryLeg === 'email' && typeof billingEmailPreSendCheck === 'function') {
         const invoiceVerdict = await billingEmailPreSendCheck({ channel: 'email', database: billingEmailTrx });
         if (!invoiceVerdict || invoiceVerdict.ok !== true) {
           return rememberBoundaryBlock(invoiceVerdict, 'billing_email_pre_send_check_boundary');

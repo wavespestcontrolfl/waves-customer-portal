@@ -1556,7 +1556,8 @@ async function stampPartialFanoutDelivery(meta, channelResults) {
   const smsOrAppAccepted = legAccepted(channelResults.sms) || legAccepted(channelResults.push);
   if (!emailAccepted && !smsOrAppAccepted) return { ok: true };
   try {
-    await db('invoices').where({ id: meta.invoice_id }).update({
+    // A voided invoice is never re-stamped, even if a delayed replay landed.
+    await db('invoices').where({ id: meta.invoice_id }).whereNot({ status: 'void' }).update({
       ...(emailAccepted ? { email_sent_at: new Date() } : {}),
       ...(smsOrAppAccepted ? { sms_sent_at: new Date() } : {}),
       updated_at: new Date(),

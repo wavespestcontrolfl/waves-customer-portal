@@ -290,9 +290,20 @@ describe('deferred-replay registry', () => {
     function whereUpdateChain(updateSpy) {
       const q = {};
       q.where = jest.fn(() => q);
+      q.whereNot = jest.fn(() => q);
       q.update = updateSpy;
       return q;
     }
+
+    test('a delayed replay never stamps a voided invoice', async () => {
+      const update = jest.fn(async () => 0);
+      const chain = whereUpdateChain(update);
+      db.mockReturnValueOnce(chain);
+      await finalizeDeferredReplay('invoice_send_deferred', {
+        invoice_id: 'inv-1', partial_fanout_retry: true, pending_channels: ['email'],
+      }, { channelResults: { email: { sent: true, deliveryOutcome: 'accepted' } } });
+      expect(chain.whereNot).toHaveBeenCalledWith({ status: 'void' });
+    });
 
     test('a replay that accepted Email stamps email_sent_at only', async () => {
       const update = jest.fn(async () => 1);
