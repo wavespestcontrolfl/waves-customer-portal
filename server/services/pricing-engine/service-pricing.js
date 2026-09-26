@@ -3191,7 +3191,11 @@ function priceCommercialPest(property = {}, options = {}) {
   // perimeter, so that override stays absolute). The one auto-priceable
   // exception: an EXTERIOR-ONLY program with an explicit measured perimeter —
   // its buildup never reads the footprint.
-  if (options.buildingSizeMeasured === false || (defaulted && (interiorSelected || !perimeterExplicit))) {
+  // allowEstimatedFootprint: a commercial suite sized off the business-type
+  // default (estimator engine) — not measured, but a real footprint the
+  // owner wants priced; generateEstimate grades the line LOW.
+  const unmeasured = options.buildingSizeMeasured === false && options.allowEstimatedFootprint !== true;
+  if (unmeasured || (defaulted && (interiorSelected || !perimeterExplicit))) {
     return {
       service: 'commercial_pest',
       name: 'Commercial Pest Control',

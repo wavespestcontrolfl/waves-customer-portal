@@ -2645,7 +2645,12 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
         if (intent.is_commercial === true
           && require('../../config/feature-gates').commercialSuiteSizingLive()
           && unitScope.serviceScope === 'commercial_suite'
-          && propertyFacts.home?.source === SQFT_SOURCES.NONE) {
+          // A cross-property draft prices from the fenced facts, where a
+          // size the caller stated about the ORIGINAL property is dropped —
+          // decide on that same view, or the stale fact would skip sizing
+          // and the quoted suite would price off nothing.
+          && (crossPropertyRegather ? fenceExtractionFact(propertyFacts.home, 'address') : propertyFacts.home)?.source
+            === SQFT_SOURCES.NONE) {
           try {
             const { resolveCommercialSuiteSize } = require('../commercial-suite-size');
             const { suiteAddressParts } = require('../commercial-suite-size/address-parts');

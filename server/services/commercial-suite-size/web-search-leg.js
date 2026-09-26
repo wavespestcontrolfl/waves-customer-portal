@@ -18,7 +18,7 @@
  */
 
 const MODELS = require('../../config/models');
-const { callAnthropic } = require('../llm/call');
+const { callAnthropic, parseLooseJson } = require('../llm/call');
 
 // Bounded well under the fresh lookup's own budget: with a cold DBPR
 // download (15s, once a day) this leg adds at most ~35s.
@@ -75,6 +75,14 @@ function acceptWebSearchResult(json) {
  * @returns {Promise<{businessName:string|null, businessType:string|null}|null>}
  *   Never a size — see the module doc.
  */
+// The LAST text block of a tool-using reply (the answer after any searches),
+// falling back to the helper's own text when no raw response rides along.
+function finalTextBlock(result) {
+  const blocks = (result?.response?.content || [])
+    .filter((b) => b && (b.type === 'text' || b.type == null) && typeof b.text === 'string');
+  return blocks.length ? blocks[blocks.length - 1].text : (result?.text || '');
+}
+
 async function resolveViaWebSearch({ address = {}, businessNameHint = null } = {}, opts = {}) {
   if (!webSearchLegEnabled()) return null;
   if (!address || !address.street) return null;
@@ -96,9 +104,13 @@ async function resolveViaWebSearch({ address = {}, businessNameHint = null } = {
     anthropicClient: opts.anthropicClient,
     laneId: 'commercial_suite_business_name',
     policyLabel: 'commercial_suite_business_name',
+    // Plain text, parsed below: a web-search reply can open with a text
+    // preamble before its searches and put the JSON in a LATER block, while
+    // the helper's JSON mode reads only the first text block.
+    jsonMode: false,
   });
   if (!result.ok) return null;
-  return acceptWebSearchResult(result.json);
+  return acceptWebSearchResult(parseLooseJson(finalTextBlock(result)));
 }
 
 module.exports = {

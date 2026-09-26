@@ -6,7 +6,10 @@
  * callAnthropic).
  */
 
-jest.mock('../services/llm/call');
+jest.mock('../services/llm/call', () => ({
+  ...jest.requireActual('../services/llm/call'),
+  callAnthropic: jest.fn(),
+}));
 
 const { callAnthropic } = require('../services/llm/call');
 const {
@@ -100,13 +103,13 @@ describe('resolveViaWebSearch — gating', () => {
   });
 
   test('parses a successful dispatcher response into an accepted result', async () => {
-    callAnthropic.mockResolvedValue({ ok: true, json: { businessName: 'Test Taco Shop', businessType: 'restaurant' } });
+    callAnthropic.mockResolvedValue({ ok: true, text: JSON.stringify({ businessName: 'Test Taco Shop', businessType: 'restaurant' }) });
     const result = await resolveViaWebSearch({ address: { street: '4400 Test Commons Pkwy E', unit: '102', zip: '00000' } });
     expect(result).toEqual({ businessName: 'Test Taco Shop', businessType: 'restaurant' });
   });
 
   test('calls callAnthropic with the web_search tool, WORKHORSE model, and an 8192 token budget', async () => {
-    callAnthropic.mockResolvedValue({ ok: true, json: { businessName: null, businessType: null } });
+    callAnthropic.mockResolvedValue({ ok: true, text: JSON.stringify({ businessName: null, businessType: null }) });
     await resolveViaWebSearch({ address: { street: '4400 Test Commons Pkwy E', unit: '102', zip: '00000' } });
     expect(callAnthropic).toHaveBeenCalledTimes(1);
     const call = callAnthropic.mock.calls[0][0];
@@ -117,7 +120,7 @@ describe('resolveViaWebSearch — gating', () => {
   });
 
   test('threads timeoutMs and anthropicClient through to the dispatcher', async () => {
-    callAnthropic.mockResolvedValue({ ok: true, json: { businessName: null, businessType: null } });
+    callAnthropic.mockResolvedValue({ ok: true, text: JSON.stringify({ businessName: null, businessType: null }) });
     const anthropicClient = { fake: true };
     await resolveViaWebSearch(
       { address: { street: '4400 Test Commons Pkwy E', zip: '00000' } },
@@ -126,5 +129,25 @@ describe('resolveViaWebSearch — gating', () => {
     const call = callAnthropic.mock.calls[0][0];
     expect(call.timeoutMs).toBe(5000);
     expect(call.anthropicClient).toBe(anthropicClient);
+  });
+});
+
+describe('Codex #4872 r1: the answer is read from the FINAL text block', () => {
+  test('a preamble text block before the searches does not hide the JSON answer', async () => {
+    callAnthropic.mockResolvedValue({
+      ok: true,
+      text: 'Let me search for that address.',
+      response: {
+        content: [
+          { type: 'text', text: 'Let me search for that address.' },
+          { type: 'server_tool_use', name: 'web_search' },
+          { type: 'web_search_tool_result', content: [] },
+          { type: 'text', text: '{"businessName":"Test Taco Shop","businessType":"restaurant"}' },
+        ],
+      },
+    });
+    const result = await resolveViaWebSearch({ address: { street: '4400 Test Commons Pkwy E', unit: '102', zip: '00000' } });
+    expect(result).toEqual({ businessName: 'Test Taco Shop', businessType: 'restaurant' });
+    expect(callAnthropic.mock.calls[0][0].jsonMode).toBe(false);
   });
 });

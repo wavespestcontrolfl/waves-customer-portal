@@ -55,24 +55,24 @@ describe('applyUnitScopeToPropertyFacts — the sizing sources survive a commerc
   });
 });
 
-describe('buildEngineInput — buildingSizeMeasured true for the sizing sources', () => {
-  test.each([SQFT_SOURCES.LICENSE_SEATS, SQFT_SOURCES.SUITE_TYPE_DEFAULT])(
-    '%s auto-prices (buildingSizeMeasured: true, footprintSqFt set)', (source) => {
-      const intent = {
-        is_commercial: true,
-        services: { pest: true },
-        commercial_risk_type: 'restaurant_food',
-      };
-      const propertyFacts = {
-        home: { value: 1400, source, confidence: 'medium', rejected: [] },
-        lot: { value: null, source: 'unresolved', confidence: 'none', rejected: [] },
-      };
-      const input = buildEngineInput({ intent, propertyFacts, context: {} });
-      expect(input.buildingSizeMeasured).toBe(true);
-      expect(input.footprintSqFt).toBe(1400);
-      expect(input.homeSqFt).toBe(1400);
-    },
-  );
+describe('buildEngineInput — measured flag per sizing source', () => {
+  const intent = { is_commercial: true, services: { pest: true }, commercial_risk_type: 'restaurant_food' };
+  const facts = (source) => ({
+    home: { value: 1400, source, confidence: 'medium', rejected: [] },
+    lot: { value: null, source: 'unresolved', confidence: 'none', rejected: [] },
+  });
+  test('a license size is a measured building (a real state record)', () => {
+    const input = buildEngineInput({ intent, propertyFacts: facts(SQFT_SOURCES.LICENSE_SEATS), context: {} });
+    expect(input.buildingSizeMeasured).toBe(true);
+    expect(input.footprintSizeEstimated).toBeUndefined();
+    expect(input.footprintSqFt).toBe(1400);
+  });
+  test('a type default is NOT measured (every measured-only guard holds) but opts recurring pest in via footprintSizeEstimated', () => {
+    const input = buildEngineInput({ intent, propertyFacts: facts(SQFT_SOURCES.SUITE_TYPE_DEFAULT), context: {} });
+    expect(input.buildingSizeMeasured).toBe(false);
+    expect(input.footprintSizeEstimated).toBe(true);
+    expect(input.footprintSqFt).toBe(1400);
+  });
 });
 
 describe('classifyLane — commercial-suite-size review reasons', () => {
@@ -181,5 +181,14 @@ describe('engine suite sizing depends on unit-scope guardrails (declared)', () =
     expect(guard).toBeGreaterThan(-1);
     expect(suite).toBeGreaterThan(apply);
     expect(src.slice(guard - 600, guard)).toMatch(/GATE_UNIT_SCOPE_GUARDRAILS is off/);
+  });
+});
+
+describe('cross-property drafts decide suite sizing on the fenced facts', () => {
+  const fs = require('fs');
+  const path = require('path');
+  test('a size stated about the ORIGINAL property does not skip sizing the quoted suite', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../services/estimator-engine/index.js'), 'utf8');
+    expect(src).toMatch(/crossPropertyRegather \? fenceExtractionFact\(propertyFacts\.home, 'address'\) : propertyFacts\.home\)\?\.source/);
   });
 });

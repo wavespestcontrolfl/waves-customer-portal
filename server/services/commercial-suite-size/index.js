@@ -33,7 +33,7 @@
 const logger = require('../logger');
 const { resolveViaDbprLicense } = require('./dbpr-food-license');
 const { resolveViaWebSearch } = require('./web-search-leg');
-const { defaultSuiteSqftFor } = require('./type-defaults');
+const { defaultSuiteSizeBasis } = require('./type-defaults');
 
 const SOURCES = {
   LICENSE_SEATS: 'license_seats',
@@ -142,20 +142,17 @@ async function resolveCommercialSuiteSize(input = {}, opts = {}) {
 
   // Type default keys OFF commercialRiskType/commercialSubtype ONLY — a
   // web-search-reported businessType never chooses the size (AGENTS.md); it
-  // still rides the RESULT for display/notes and subtype reconciliation.
-  const value = defaultSuiteSqftFor({ commercialRiskType, commercialSubtype });
-  // Label with the SAME deterministic key that selected `value` — never
-  // `businessType` (the web-search-reported field plays no part in the
-  // lookup above; primary review of PR #4840 r4 P2). A web-reported
-  // "restaurant" on an office_retail profile must read as office/retail,
-  // matching the 1,500 sq ft it actually got.
-  const businessTypeLabel = commercialRiskType || commercialSubtype || 'this business type';
+  // still rides the RESULT for display/notes. The label names the ONE input
+  // that chose the value (a specific subtype, else the risk type).
+  const { sqft: value, basis } = defaultSuiteSizeBasis({ commercialRiskType, commercialSubtype });
+  const businessTypeLabel = basis || 'this business type';
   return {
     value,
     source: SOURCES.SUITE_TYPE_DEFAULT,
     confidence: 'low',
     businessName,
     businessType,
+    defaultBasis: basis || null,
     evidence: [{
       source: SOURCES.SUITE_TYPE_DEFAULT,
       detail: `no suite-specific measurement found — defaulted to ${value.toLocaleString()} sq ft for ${businessTypeLabel}`,

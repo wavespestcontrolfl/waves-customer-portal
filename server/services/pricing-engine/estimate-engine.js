@@ -751,6 +751,11 @@ function generateEstimate(input) {
         // confirm-step default (no measured building) — pest can't auto-price
         // off it. Undefined (admin / measured) → auto-price as usual.
         buildingSizeMeasured: input.buildingSizeMeasured,
+        // A commercial suite sized off the business-type default is NOT a
+        // measured building (buildingSizeMeasured stays false for every
+        // measured-only guard); recurring commercial pest alone may still
+        // price off it, graded LOW below.
+        allowEstimatedFootprint: input.footprintSizeEstimated === true,
         // Risk-type cadence override (null → program default 12).
         pestVisits: commercialPestVisits,
         // Interior service selection ('excluded' → exterior-only base price;

@@ -61,7 +61,8 @@ describe('estimator engine path — buildEngineInput -> generateEstimate', () =>
       context: {},
     });
     expect(engineInput.footprintSizeEstimated).toBe(true);
-    expect(engineInput.buildingSizeMeasured).toBe(true);
+    // Not a measured building — recurring pest is opted in separately.
+    expect(engineInput.buildingSizeMeasured).toBe(false);
 
     const result = generateEstimate(engineInput);
     const line = result.lineItems.find((l) => l.service === 'commercial_pest');
@@ -71,35 +72,53 @@ describe('estimator engine path — buildEngineInput -> generateEstimate', () =>
     expect(commercialLowConfidenceRange({ lineItems: result.lineItems }).hasLowConfidence).toBe(true);
   });
 
-  test('the LOW grading reaches every commercial footprint pricer, not only pest', () => {
-    const plain = generateEstimate({
-      isCommercial: true,
-      category: 'COMMERCIAL',
-      propertyType: 'commercial',
-      commercialRiskType: 'retail_standard',
-      homeSqFt: 1500,
-      footprintSqFt: 1500,
-      buildingSizeMeasured: true,
-      stories: 1,
-      services: { termiteBait: {}, rodentBait: {} },
-    });
-    const estimated = generateEstimate({
-      isCommercial: true,
-      category: 'COMMERCIAL',
-      propertyType: 'commercial',
-      commercialRiskType: 'retail_standard',
-      homeSqFt: 1500,
-      footprintSqFt: 1500,
-      buildingSizeMeasured: true,
-      footprintSizeEstimated: true,
-      stories: 1,
-      services: { termiteBait: {}, rodentBait: {} },
-    });
-    const priced = (r) => r.lineItems.filter((l) => String(l.service || '').startsWith('commercial_')
-      && l.commercialPricingMode !== 'manual_quote');
-    expect(priced(estimated).length).toBeGreaterThan(0);
-    for (const l of priced(estimated)) expect(l.pricingConfidence).toBe('LOW');
-    // Without the flag the same inputs are not forced LOW.
-    expect(priced(plain).some((l) => l.pricingConfidence !== 'LOW')).toBe(true);
+  // Codex #4872 r1 P1: a type default is NOT a measured building. Recurring
+  // commercial pest is the only pricer opted in (footprintSizeEstimated);
+  // every measured-only guard keeps its manual-quote posture.
+  const typeDefaultInput = (services) => ({
+    isCommercial: true,
+    category: 'COMMERCIAL',
+    propertyType: 'commercial',
+    commercialRiskType: 'retail_standard',
+    homeSqFt: 1500,
+    footprintSqFt: 1500,
+    buildingSizeMeasured: false,
+    footprintSizeEstimated: true,
+    stories: 1,
+    services,
+  });
+
+  test('type default: recurring pest prices LOW; termite bait and rodent bait stay manual quotes', () => {
+    const result = generateEstimate(typeDefaultInput({ pest: { frequency: 'monthly' }, termiteBait: {}, rodentBait: {} }));
+    const pest = result.lineItems.find((l) => l.service === 'commercial_pest');
+    expect(pest.commercialPricingMode).toBe('auto_estimate');
+    expect(pest.pricingConfidence).toBe('LOW');
+    for (const service of ['commercial_termite_bait', 'commercial_rodent_bait']) {
+      const line = result.lineItems.find((l) => l.service === service);
+      expect(line).toBeTruthy();
+      expect(line.quoteRequired).toBe(true);
+    }
+  });
+
+  test('type default: a hotel bed-bug job never gets an exact price off the guessed footprint', () => {
+    const saved = process.env.GATE_COMMERCIAL_ONETIME_SCOPED;
+    process.env.GATE_COMMERCIAL_ONETIME_SCOPED = 'true';
+    try {
+      const measured = generateEstimate({ ...typeDefaultInput({ bedBug: { method: 'CHEMICAL', rooms: 3, severity: 'light', prepStatus: 'ready', occupancyType: 'hotel' } }), buildingSizeMeasured: true, footprintSizeEstimated: undefined });
+      const guessed = generateEstimate(typeDefaultInput({ bedBug: { method: 'CHEMICAL', rooms: 3, severity: 'light', prepStatus: 'ready', occupancyType: 'hotel' } }));
+      // Off the guess, no priced bed-bug line exists — the request falls to
+      // the commercial manual-quote row with no price.
+      expect(guessed.lineItems.some((l) => l.service === 'bed_bug')).toBe(false);
+      const manual = guessed.lineItems.find((l) => l.quoteRequired === true);
+      expect(manual).toBeTruthy();
+      expect(manual.commercialPricingMode).toBe('manual_quote');
+      // Control: the same scoped job on a measured building does price.
+      const priced = measured.lineItems.find((l) => l.service === 'bed_bug');
+      expect(priced).toBeTruthy();
+      expect(priced.quoteRequired).not.toBe(true);
+    } finally {
+      if (saved === undefined) delete process.env.GATE_COMMERCIAL_ONETIME_SCOPED;
+      else process.env.GATE_COMMERCIAL_ONETIME_SCOPED = saved;
+    }
   });
 });
