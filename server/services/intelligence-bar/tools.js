@@ -579,6 +579,20 @@ async function findOverdueCustomers(input) {
     return intervalDaysForPattern(plan.recurring_pattern, plan.recurring_interval_days)
       || TREE_SHRUB_KEY_INTERVAL[plan.service_key] || null;
   };
+  // A Feb–Oct seasonal plan runs monthly in season and skips Nov–Jan
+  // (seeder seasonalFebOctDate — codex r33 on #4786): due a month after the
+  // last visit, and a due date that lands in the winter gap moves to the
+  // following February 1, so an October visit is not overdue until spring.
+  const seasonalFebOctGapDays = (lastServiceDate) => {
+    if (!lastServiceDate) return 30;
+    const last = Date.parse(`${dateOnlyString(lastServiceDate)}T00:00:00Z`);
+    if (Number.isNaN(last)) return 30;
+    const due = new Date(last + 30 * 86400000);
+    const month = due.getUTCMonth() + 1;
+    if (month >= 2 && month <= 10) return 30;
+    const febYear = due.getUTCFullYear() + (month > 10 ? 1 : 0);
+    return Math.round((Date.UTC(febYear, 1, 1) - last) / 86400000);
+  };
   const treeShrubIntervalDays = (serviceType, plan) => {
     const fromPlan = planIntervalDays(plan);
     if (fromPlan) return fromPlan;
@@ -696,7 +710,11 @@ async function findOverdueCustomers(input) {
       const daysSince = c.last_service_date ? calendarDaysSince(c.last_service_date) : null;
       if (daysSince != null && Number.isNaN(daysSince)) continue;
       const activePlan = typeof c.active_plan === 'string' ? JSON.parse(c.active_plan) : c.active_plan;
-      const freq = cat === 'tree_shrub' ? treeShrubIntervalDays(c.active_plan_service_type || c.last_service_type, activePlan) : baseFreq;
+      const freq = cat === 'tree_shrub'
+        ? (activePlan?.recurring_pattern === 'seasonal_feb_oct'
+          ? seasonalFebOctGapDays(c.last_service_date)
+          : treeShrubIntervalDays(c.active_plan_service_type || c.last_service_type, activePlan))
+        : baseFreq;
       if (daysSince != null && daysSince < freq + overdue_days) continue;
 
       results.push({

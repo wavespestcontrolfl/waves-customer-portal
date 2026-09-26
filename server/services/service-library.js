@@ -454,9 +454,13 @@ function recurrenceWords(recurrence) {
   const { schedulerPlacesPattern, FALLBACK_RECURRENCE_GAP_DAYS } = require('./recurring-appointment-seeder');
   const fallsBack = rawPattern
     && (!schedulerPlacesPattern(rawPattern) || (rawPattern === 'custom' && !hasDays));
+  // Only 'custom' (or a bare booking-level interval) runs at its interval
+  // column; a fixed pattern ignores it, as nextRecurringDate does, so a live
+  // bimonthly line with a stale 90 is not the quarterly plan (codex r33).
+  const usesDays = hasDays && (!rawPattern || rawPattern === 'custom');
   return [
     rawPattern.replace(/_/g, ' '),
-    hasDays ? `every ${days} days` : (fallsBack ? `every ${FALLBACK_RECURRENCE_GAP_DAYS} days` : ''),
+    usesDays ? `every ${days} days` : (fallsBack ? `every ${FALLBACK_RECURRENCE_GAP_DAYS} days` : ''),
   ].filter(Boolean).join(' ');
 }
 
@@ -480,7 +484,11 @@ async function retiredServicesNotHeldBy({ customerId, serviceIds, serviceTypes, 
   const { RETIRED_SALE_SERVICE_KEYS, retiredSaleKeyForLabel, labelMayNameRetiredSale } = require('./pricing-engine/retired-sale-catalog');
   const bookingCadence = recurrenceWords(recurrence);
   const labelled = (serviceTypes || [])
-    .map((t) => (t && typeof t === 'object' ? { label: t.label, cadence: t.recurrence ? recurrenceWords(t.recurrence) : bookingCadence } : { label: t, cadence: bookingCadence }))
+    // A line with no pattern of its own rides the booking's recurrence,
+    // whatever its interval column says (codex r33 on #4786).
+    .map((t) => (t && typeof t === 'object'
+      ? { label: t.label, cadence: t.recurrence && typeof t.recurrence.pattern === 'string' && t.recurrence.pattern.trim() ? recurrenceWords(t.recurrence) : bookingCadence }
+      : { label: t, cadence: bookingCadence }))
     .filter((t) => typeof t.label === 'string' && t.label.trim());
   // Only names that could be a retired row cost a catalog read.
   const names = new Set(labelled

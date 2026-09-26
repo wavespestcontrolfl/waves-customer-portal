@@ -331,6 +331,12 @@ describe('new-appointment write boundary (codex r12)', () => {
     // one_time is anchor-only: a stale interval column is not a cadence (codex r32).
     expect(await ids(['Tree & Shrub Care'], { pattern: 'one_time', intervalDays: 90 })).toEqual([]);
     expect(await ids([{ label: 'Tree & Shrub Care', recurrence: { pattern: 'one_time', intervalDays: 90 } }], { pattern: 'monthly' })).toEqual([]);
+    // A fixed pattern ignores a stale interval column, and a line with no
+    // pattern rides the booking's recurrence (codex r33).
+    expect(await ids(['Tree & Shrub Care'], { pattern: 'bimonthly', intervalDays: 90 })).toEqual([]);
+    expect(await ids([{ label: 'Tree & Shrub Care', recurrence: { pattern: 'bimonthly', intervalDays: 90 } }], { pattern: 'monthly' })).toEqual([]);
+    expect(await ids([{ label: 'Tree & Shrub Care', recurrence: { pattern: null, intervalDays: 90 } }], { pattern: 'monthly' })).toEqual([]);
+    expect(await ids([{ label: 'Tree & Shrub Care', recurrence: { pattern: null, intervalDays: 60 } }], { pattern: 'quarterly' })).toEqual([RETIRED_ID]);
     expect(await ids(['Quarterly Pest Control'], { pattern: 'foo' })).toEqual([]);
   });
 
