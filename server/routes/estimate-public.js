@@ -5611,7 +5611,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
       </li>` : ''}
       <li class="plan-terms-item">
         <span class="plan-terms-term">Money-back guarantee</span>
-        <span class="plan-terms-detail">Pests back between visits? We re-treat free. If we can&rsquo;t solve a covered problem, we refund your most recent service payment.</span>
+        <span class="plan-terms-detail">If a covered problem comes back between visits, we re-treat free. If we can&rsquo;t solve it, we refund your most recent service payment.</span>
       </li>
     </ul>
   </section>` : '';
