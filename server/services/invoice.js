@@ -177,6 +177,19 @@ function prepaySwitchSupersededByMarker(prepayInvoiceId) {
 function prepaySwitchRestoreMarker(voidedInvoiceId) {
   return `[prepay-switch-restore:${voidedInvoiceId}]`;
 }
+// Did this prepay replace other charges when it was minted: an on-site
+// switch (a voided row carrying its superseded-by marker) or a positive
+// setup_fee_claims record? The claims table is server-mint only, so admin
+// routes ask here instead of reading it (setup-fee-claims-immutable test).
+async function prepayReplacedCharges(conn, prepayInvoiceId) {
+  return Boolean(
+    await conn("invoices")
+      .where({ status: "void" })
+      .where("notes", "like", `%${prepaySwitchSupersededByMarker(prepayInvoiceId)}%`)
+      .first("id")
+    || await conn("setup_fee_claims").where({ invoice_id: prepayInvoiceId }).where("amount", ">", 0).first("id"),
+  );
+}
 // A REPLACEMENT must never inherit the superseded-by marker (Codex
 // on-site-switch P0 r11): if the replacement is itself voided later, a
 // subsequent sync for the old prepay would read it as ANOTHER superseded
@@ -1390,9 +1403,17 @@ async function buildScheduledServiceInvoiceLines(
     // connection, or the price read here would come from a different
     // connection's snapshot and the lock would be theater.
     database = null,
+    // A failed read throws instead of degrading to fallback lines: a caller
+    // that bills FROM these lines must tell an outage from "no add-ons"
+    // (ADMIN-BUG-R13).
+    strictReads = false,
   } = {},
 ) {
   const conn = database || db;
+  const degrade = (fallback) => (err) => {
+    if (strictReads) throw err;
+    return fallback;
+  };
   if (!scheduledServiceId) {
     return {
       lineItems:
@@ -1414,7 +1435,7 @@ async function buildScheduledServiceInvoiceLines(
   const scheduled = await conn("scheduled_services")
     .where({ id: scheduledServiceId })
     .first()
-    .catch(() => null);
+    .catch(degrade(null));
   if (!scheduled) {
     return {
       lineItems:
@@ -1436,7 +1457,7 @@ async function buildScheduledServiceInvoiceLines(
   const addons = await conn("scheduled_service_addons")
     .where({ scheduled_service_id: scheduledServiceId })
     .orderBy("created_at", "asc")
-    .catch(() => []);
+    .catch(degrade([]));
   const primaryBaseKnown = hasNumericValue(scheduled.primary_line_price);
   const appointmentGrossKnown =
     primaryBaseKnown &&
@@ -6721,8 +6742,10 @@ const InvoiceService = {
    */
   async receiptSmsFacts(invoice) {
     const domain = publicPortalUrl();
+    // /receipt/, not /pay/: the pay page forwards paid invoices to the
+    // receipt but renders a refunded one as a "Refunded" payment page.
     const longReceiptUrl = invoice.token
-      ? `${domain}/pay/${invoice.token}`
+      ? `${domain}/receipt/${invoice.token}`
       : "";
     const receiptUrl = longReceiptUrl
       ? await shortenOrPassthrough(longReceiptUrl, {
@@ -9793,7 +9816,11 @@ const InvoiceService = {
     return restored;
   },
 
-  async reopenAnnualPrepayCoveredInvoicesForTerm(termId, conn = db) {
+  // strict: an operator action that must never half-complete (the admin
+  // remove-flag cancel) gets a per-invoice failure thrown instead of logged,
+  // so its transaction rolls back whole. Every other caller keeps the
+  // best-effort reopen.
+  async reopenAnnualPrepayCoveredInvoicesForTerm(termId, conn = db, { strict = false } = {}) {
     if (!termId) return 0;
     let reopened = 0;
     const reopenedIds = [];
@@ -9825,6 +9852,7 @@ const InvoiceService = {
           reopenedIds.push(inv.id);
         }
       } catch (err) {
+        if (strict) throw err;
         logger.warn(`[invoice] annual-prepay coverage reopen skipped for ${inv.invoice_number || inv.id}: ${err.message}`);
       }
     }
@@ -10253,6 +10281,7 @@ InvoiceService.lineIsBaseApplication = lineIsBaseApplication;
 InvoiceService.rodentSetupRebillMarker = rodentSetupRebillMarker;
 module.exports = InvoiceService;
 module.exports.prepaySwitchSupersededByMarker = prepaySwitchSupersededByMarker;
+module.exports.prepayReplacedCharges = prepayReplacedCharges;
 module.exports.prepaySwitchRestoreMarker = prepaySwitchRestoreMarker;
 module.exports.stripPrepaySwitchSupersededMarkers = stripPrepaySwitchSupersededMarkers;
 module.exports.prepaySwitchRestoreAssertDate = prepaySwitchRestoreAssertDate;

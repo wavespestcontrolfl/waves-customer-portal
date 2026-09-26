@@ -66,7 +66,14 @@ const ACTIVE_STATUSES = ['active', 'renewal_pending'];
 // Each is fed exclusively by the notice/payment-reminder column helpers,
 // which are behaviorally pinned below to never return 'status'. Any other
 // identifier ([statusCol], [column], …) fails closed.
-const SANCTIONED_KEY_IDENTIFIERS = ['noticeCol', 'claimCol', 'sentCol'];
+// lateCol / escalatedCol (Codex #4921 r3): fed by
+// termiteLateColumnForDaysOut / termiteLateEscalationColumnForDaysOut,
+// pinned below to return only notice_45_late_sent_at / notice_30_late_sent_at
+// and notice_45_late_escalated_at / notice_30_late_escalated_at (or null) —
+// never 'status'.
+// missedClaimCol (Codex #4921 r7): the combined send's other-rung claim,
+// fed by noticeClaimColumnForDaysOut — pinned below to never be 'status'.
+const SANCTIONED_KEY_IDENTIFIERS = ['noticeCol', 'claimCol', 'sentCol', 'lateCol', 'escalatedCol', 'missedClaimCol'];
 
 // Non-literal `status:` expressions the scanner accepts, each one a pass-
 // through of a value that is itself CHECK-valid: a constant pinned below, the
@@ -611,12 +618,16 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
     // (`orWhere` branches are pinned behaviorally in the notice-claim test
     // below; this list covers the where/whereIn/whereNull/whereNotIn guards.)
     expect(statusWriteSites(read('server/services/annual-prepay-renewals.js'))).toEqual([
+      // Moves 9 & 13 (ADMIN-BUG-R16): both the void/refund cancel
+      // (syncTermForInvoicePayment) and the invoice "remove annual-prepay
+      // flag" route (admin-invoices.js, listed separately below since it
+      // only CALLS this function) now share ONE write site — undecided
+      // only (a decided lapse keeps coverage).
+      { expr: "'cancelled'", guards: ['where({ id: termId })', "whereNull('renewal_decision')"] },
       // Move 2: payment_pending → active on invoice paid.
       { expr: "'active'", guards: ['where({ id: term.id, status: PAYMENT_PENDING_STATUS })'] },
       // Move 11: lost-dispute revival — undecided cancelled only.
       { expr: "'active'", guards: ["where({ id: term.id, status: 'cancelled' })", "whereNull('renewal_decision')"] },
-      // Move 9: void/refund cancels — undecided only (decided lapse keeps coverage).
-      { expr: "'cancelled'", guards: ['where({ id: term.id })', "whereNull('renewal_decision')"] },
       // Move 10: dispute demotion — active statuses only.
       { expr: 'PAYMENT_PENDING_STATUS', guards: ['where({ prepay_invoice_id: invoiceId })', "whereIn('status', ACTIVE_STATUSES)"] },
       // Move 1 (existing row): decided terms keep their status via the ternary itself.
@@ -627,11 +638,36 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
       {
         expr: "term.status === 'active' ? 'renewal_pending' : term.status",
         guards: ['where({ id: term.id })', "whereIn('status', ACTIVE_STATUSES)", "whereNull('renewal_decision')",
-          'whereNull(noticeCol)', 'where(function noticeClaimAvailable()', 'whereNull(claimCol)',
+          'whereNull(noticeCol)', 'where(lateTermiteSendAbsent(daysOut, term, baseline)', 'where(function noticeClaimAvailable()', 'whereNull(claimCol)',
           "orWhere(claimCol, '<', staleClaimCutoff)"],
       },
-      // Move 5: claim release — undecided + still unsent.
-      { expr: 'previousStatus', guards: ['where({ id: claimedTerm.id })', "whereNull('renewal_decision')", 'whereNull(noticeCol)'] },
+      // Move 4 (combined, Codex #4921 r7): a 30-day send that also discharges
+      // the 45 claims BOTH rungs in one UPDATE — active, undecided, both
+      // rungs wholly unrecorded, both claims available.
+      {
+        expr: "term.status === 'active' ? 'renewal_pending' : term.status",
+        guards: ['where({ id: term.id })', "whereIn('status', ACTIVE_STATUSES)", "whereNull('renewal_decision')",
+          "whereNull('notice_30_sent_at')", "whereNull('notice_30_late_sent_at')",
+          "whereNull('notice_45_sent_at')", "whereNull('notice_45_late_sent_at')",
+          'where(function claim30Available()', "whereNull('notice_30_claimed_at')", "orWhere('notice_30_claimed_at', '<', staleClaimCutoff)",
+          'where(function claim45Available()', "whereNull('notice_45_claimed_at')", "orWhere('notice_45_claimed_at', '<', staleClaimCutoff)"],
+      },
+      // Move 5 (combined): release of both claims — undecided, the 30 still
+      // unsent, AND still exactly what THIS attempt wrote (Codex #4921 r8:
+      // status renewal_pending + both claims at this attempt's timestamp),
+      // so a refund/dispute that moved the status meanwhile is never undone.
+      {
+        expr: 'previousStatus',
+        guards: ['where({ id: claimedTerm.id })', "whereNull('renewal_decision')", "whereNull('notice_30_sent_at')",
+          "where('status', 'renewal_pending')", "where('notice_30_claimed_at', claimedAt30)", "where('notice_45_claimed_at', claimedAt45)"],
+      },
+      // Move 5: claim release — undecided + still unsent + still this
+      // attempt's own state (status renewal_pending, claim at its timestamp).
+      {
+        expr: 'previousStatus',
+        guards: ['where({ id: claimedTerm.id })', "whereNull('renewal_decision')", 'whereNull(noticeCol)',
+          "where('status', 'renewal_pending')", 'where(claimCol, claimedAt)'],
+      },
       // Move 3: contacted.
       { expr: "'renewal_pending'", guards: ['where({ id: termId })', "whereIn('status', ACTIVE_STATUSES)", "whereNull('renewal_decision')"] },
       // Moves 6–8: decisions.
@@ -645,8 +681,9 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
     );
 
     expect(statusWriteSites(read('server/routes/admin-invoices.js'))).toEqual([
-      // Move 13: DELETE /:id/annual-prepay — deliberately unguarded (documented residue).
-      { expr: "'cancelled'", guards: ['where({ id: termId })'] },
+      // Move 13's own write moved into the shared cancelTermWithRestorations
+      // (pinned above, in annual-prepay-renewals.js) — ADMIN-BUG-R16. This
+      // file's only remaining direct write is move 12.
       // Move 12: reverse-prepaid un-pay — undecided, non-cancelled only.
       { expr: "'payment_pending'", guards: ['where({ id: locked.annual_prepay_term_id })', "whereNull('renewal_decision')", "whereNotIn('status', ['cancelled', 'canceled'])"] },
     ]);
@@ -691,6 +728,34 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
         if (col !== null) expect(col).toMatch(/^(notice|payment_reminder)_/);
         expect(col).not.toBe('status');
       }
+    }
+    // sentCol in the notice mark-sent write comes from noticeWitnessColumn:
+    // the rung's own column, or the rung's own late column (45 or 30 —
+    // isTermiteAnnualPlanTerm gates whether the late branch is even reachable).
+    for (const days of [45, 30, 15, 7]) {
+      for (const today of ['2026-01-01', '2026-12-20']) {
+        for (const term of [{ term_end: '2026-12-31' }, { term_end: '2026-12-31', annual_plan_version: 'v3' }]) {
+          const col = _private.noticeWitnessColumn(days, term, today);
+          expect(col).toMatch(/^notice_/);
+          expect(col).not.toBe('status');
+        }
+      }
+    }
+    // missedClaimCol (the combined send's other-rung claim) is
+    // noticeClaimColumnForDaysOut of the 45 or 30 rung.
+    expect(_private.noticeClaimColumnForDaysOut(45)).toBe('notice_45_claimed_at');
+    expect(_private.noticeClaimColumnForDaysOut(30)).toBe('notice_30_claimed_at');
+    // lateCol (sendCustomerTermNotice's combined-send stamp) / escalatedCol
+    // (fileTermiteLateNoticeException) — Codex #4921 r3: only ever
+    // notice_45_late_sent_at / notice_30_late_sent_at and
+    // notice_45_late_escalated_at / notice_30_late_escalated_at, or null.
+    for (const days of [45, 30, 15, 7, 99, null]) {
+      const lateCol = _private.termiteLateColumnForDaysOut(days);
+      if (lateCol !== null) expect(lateCol).toMatch(/^notice_(45|30)_late_sent_at$/);
+      expect(lateCol).not.toBe('status');
+      const escalatedCol = _private.termiteLateEscalationColumnForDaysOut(days);
+      if (escalatedCol !== null) expect(escalatedCol).toMatch(/^notice_(45|30)_late_escalated_at$/);
+      expect(escalatedCol).not.toBe('status');
     }
   });
 
@@ -737,7 +802,7 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
       10: { from: st(['active', 'renewal_pending']), to: st(['payment_pending']), where: 'suspendActiveTermsForDisputedInvoice' },
       11: { from: st(['cancelled']), to: st(['active']), where: 'syncTermForInvoicePayment' },
       12: { from: st(['active', 'renewal_pending', 'payment_pending']), to: st(['payment_pending']), where: 'POST /:id/reverse-prepaid' },
-      13: { from: [], fromText: '*any*', to: st(['cancelled']), where: 'DELETE /:id/annual-prepay' },
+      13: { from: st(['payment_pending', 'cancelled']), to: st(['cancelled']), where: 'DELETE /:id/annual-prepay' },
     };
     const states = (cell) => [...cell.matchAll(/`([a-z_]+)`/g)].map((x) => x[1]).sort();
     for (const r of rows) {
@@ -761,7 +826,7 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
       10: 'ACTIVE_STATUSES',
       11: 'dispute_suspended_at IS NOT NULL',
       12: "NOT IN ('cancelled','canceled')",
-      13: 'none',
+      13: 'renewal_decision IS NULL',
     };
     for (const r of rows) expect(r.guard).toContain(guardFrag[r.n]);
   });
@@ -790,6 +855,8 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
         whereNull: jest.fn().mockReturnThis(),
         update: jest.fn().mockReturnThis(),
         returning: jest.fn().mockResolvedValue([{ id: 'term-1' }]),
+        // The strict cancel_disposition probe (ADMIN-BUG-R18): a pre-migration schema.
+        columnInfo: jest.fn().mockResolvedValue({}),
       };
       db.mockReturnValue(chain);
     });

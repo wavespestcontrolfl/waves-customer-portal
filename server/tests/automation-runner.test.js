@@ -314,6 +314,50 @@ describe('automation runner suppression guardrails', () => {
     await expect(sendStep('enrollment-1')).resolves.toMatchObject({ sent: true, done: true });
     expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
   });
+
+  // service_renewal is termite-bond renewal copy: an enrollment queued before
+  // the enrollment gate existed (or whose bond was cleared since) must be
+  // cancelled at delivery, never sent.
+  function renewalQueues({ bondRow, sendUpdate = chain(), enrollmentUpdate = chain() }) {
+    const enrollment = {
+      id: 'enrollment-r', template_key: 'service_renewal', customer_id: 'cust-r', status: 'active',
+      current_step: 0, email: 'customer@example.com', first_name: 'Sam', last_name: 'Customer',
+    };
+    setDbQueues({
+      automation_enrollments: [chain({ first: enrollment }), chain({ first: enrollment }), enrollmentUpdate],
+      automation_templates: [chain({ first: { key: 'service_renewal', name: 'Service Renewal Reminder', asm_group: 'service' } })],
+      automation_steps: [chain({ result: [{ id: 'step-1', step_order: 0, subject: 'Your termite bond is coming up for renewal',
+        html_body: '<p>Renew your bond.</p>', text_body: 'Renew your bond.',
+        from_email: 'automations@wavespestcontrol.com', enabled: true }] })],
+      automation_step_sends: [chain({ returning: [{ id: 'send-r' }] }), sendUpdate],
+      email_suppressions: [chain({ result: [] })],
+      customers: [chain({ first: bondRow })],
+    });
+    return { sendUpdate, enrollmentUpdate };
+  }
+
+  test('a queued service_renewal for a customer with no bond is cancelled, not sent', async () => {
+    const { sendUpdate, enrollmentUpdate } = renewalQueues({ bondRow: { termite_renewal_date: null } });
+
+    await expect(sendStep('enrollment-r')).resolves.toEqual({
+      sent: false, blocked: true, reason: 'No termite bond on file',
+    });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(sendUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'blocked', failure_reason: 'No termite bond on file',
+    }));
+    expect(enrollmentUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'cancelled', next_send_at: null,
+    }));
+  });
+
+  test('a queued service_renewal for a bond customer still sends', async () => {
+    renewalQueues({ bondRow: { termite_renewal_date: '2026-11-01' } });
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-renewal' });
+
+    await expect(sendStep('enrollment-r')).resolves.toMatchObject({ sent: true, done: true });
+    expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('automation runner prep sequence delivery stamp', () => {
@@ -536,6 +580,97 @@ describe('automation runner enrollment reactivation', () => {
       customer: { id: 'cust-1', email: 'tenant@example.com', first_name: 'Tessa' },
     });
     expect(result).toEqual({ enrolled: true, enrollmentId: 'enr-2' });
+  });
+});
+
+// Owner ruling (2026-07-13, renewal-reminder.js): "renewal" language is
+// reserved for termite bonds. The Automations-tab service_renewal template
+// (Codex #4874 r2 P1) now renders a termite-bond renewal ask, so every
+// enrollment path (manual trigger, segment send, executeAutomation) must
+// refuse it for a customer with no termite_renewal_date on file.
+describe('enrollCustomer — service_renewal is restricted to termite-bond customers', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+  });
+
+  test('a termite-bond customer enrolls', async () => {
+    // Customer-linked inserts are an ON CONFLICT upsert (see the
+    // customer-only new_lead describe block below for the same shape).
+    const insertChain = chain();
+    insertChain.returning = jest.fn(() => insertChain);
+    insertChain.onConflict = jest.fn(() => insertChain);
+    insertChain.merge = jest.fn(async () => [{ id: 'enr-bond' }]);
+    setDbQueues({
+      automation_templates: [chain({ first: { key: 'service_renewal', name: 'Termite Bond Renewal', enabled: true } })],
+      automation_steps: [chain({ result: [{ id: 'step-1', step_order: 0, delay_hours: 0, enabled: true }] })],
+      // Post-lock re-read carries the column — a bond customer has it set.
+      customers: [chain({ first: { id: 'cust-bond', email: 'bond@example.com', first_name: 'Robin', last_name: null, deleted_at: null, termite_renewal_date: '2026-11-01' } })],
+      automation_enrollments: [
+        chain({ first: undefined }),
+        insertChain,
+      ],
+    });
+
+    const result = await enrollCustomer({
+      templateKey: 'service_renewal',
+      customer: { id: 'cust-bond', email: 'bond@example.com', first_name: 'Robin' },
+    });
+
+    expect(result).toEqual({ enrolled: true, enrollmentId: 'enr-bond' });
+  });
+
+  test('a non-bond customer is refused with reason not_termite_bond', async () => {
+    setDbQueues({
+      automation_templates: [chain({ first: { key: 'service_renewal', name: 'Termite Bond Renewal', enabled: true } })],
+      automation_steps: [chain({ result: [{ id: 'step-1', step_order: 0, delay_hours: 0, enabled: true }] })],
+      // No termite_renewal_date on the post-lock row — refused before any
+      // automation_enrollments query runs.
+      customers: [chain({ first: { id: 'cust-nobond', email: 'nobond@example.com', first_name: 'Jamie', last_name: null, deleted_at: null, termite_renewal_date: null } })],
+    });
+
+    const result = await enrollCustomer({
+      templateKey: 'service_renewal',
+      customer: { id: 'cust-nobond', email: 'nobond@example.com', first_name: 'Jamie' },
+    });
+
+    expect(result).toEqual({ enrolled: false, reason: 'not_termite_bond' });
+  });
+
+  test('a lead-email-only enrollment (no customer row) is refused too', async () => {
+    setDbQueues({
+      automation_templates: [chain({ first: { key: 'service_renewal', name: 'Termite Bond Renewal', enabled: true } })],
+    });
+
+    const result = await enrollCustomer({
+      templateKey: 'service_renewal',
+      customer: { email: 'lead@example.com', first_name: 'Sam' },
+    });
+
+    expect(result).toEqual({ enrolled: false, reason: 'not_termite_bond' });
+  });
+
+  test('a different template is unaffected by the restriction', async () => {
+    const insertChain = chain();
+    insertChain.returning = jest.fn(() => insertChain);
+    insertChain.onConflict = jest.fn(() => insertChain);
+    insertChain.merge = jest.fn(async () => [{ id: 'enr-other' }]);
+    setDbQueues({
+      automation_templates: [chain({ first: { key: 'new_lead', name: 'New Lead', enabled: true } })],
+      automation_steps: [chain({ result: [{ id: 'step-1', step_order: 0, delay_hours: 0, enabled: true }] })],
+      customers: [chain({ first: { id: 'cust-other', email: 'noterm@example.com', first_name: 'Dee', last_name: null, deleted_at: null, termite_renewal_date: null } })],
+      automation_enrollments: [
+        chain({ first: undefined }),
+        insertChain,
+      ],
+    });
+
+    const result = await enrollCustomer({
+      templateKey: 'new_lead',
+      customer: { id: 'cust-other', email: 'noterm@example.com', first_name: 'Dee' },
+    });
+
+    expect(result).toEqual({ enrolled: true, enrollmentId: 'enr-other' });
   });
 });
 
