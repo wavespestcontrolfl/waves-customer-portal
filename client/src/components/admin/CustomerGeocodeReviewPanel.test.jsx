@@ -238,11 +238,11 @@ describe("CustomerGeocodeReviewPanel", () => {
     expect(screen.queryByText("No addresses need review.")).not.toBeInTheDocument();
   });
 
-  it("preserves an open draft but requires acknowledgment after an external revision change", async () => {
+  it("shows a changed saved pin while preserving the old draft until acknowledgment", async () => {
     const original = record();
     const latest = record({
       revision: "revision-2",
-      customer: { ...record().customer, address_line1: "200 Newly Saved Ave" },
+      customer: { ...record().customer, latitude: 27.55, longitude: -82.65 },
     });
     const pendingRefresh = deferred();
     const bodies = [];
@@ -275,8 +275,10 @@ describe("CustomerGeocodeReviewPanel", () => {
     expect(screen.getByRole("button", { name: "Verify pin" })).toBeDisabled();
 
     fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
-    expect(await screen.findByText("200 Newly Saved Ave, Bradenton, FL, 34205")).toBeInTheDocument();
+    expect(await screen.findByText("Latest saved pin: 27.55, -82.65")).toBeInTheDocument();
     expect(screen.getByLabelText("Address")).toHaveValue("100 Test Ave");
+    expect(screen.getByLabelText("Latitude")).toHaveValue("27.49");
+    expect(screen.getByLabelText("Longitude")).toHaveValue("-82.57");
     expect(screen.getByLabelText("Evidence")).toHaveValue("Preserve this customer confirmation.");
     expect(screen.getByRole("button", { name: "Verify pin" })).toBeDisabled();
 
@@ -286,6 +288,53 @@ describe("CustomerGeocodeReviewPanel", () => {
     await waitFor(() => expect(bodies).toHaveLength(1));
     expect(bodies[0].revision).toBe("revision-2");
     expect(bodies[0].evidence).toBe("Preserve this customer confirmation.");
+  });
+
+  it("keeps row actions isolated while another row has a draft or pending save", async () => {
+    const first = record({
+      customer: { ...record().customer, latitude: null, longitude: null },
+      review: { status: "provider_unavailable" },
+    });
+    const second = record({
+      customer: {
+        ...record().customer,
+        id: "customer-2",
+        first_name: "Other",
+        last_name: "Queue",
+        latitude: null,
+        longitude: null,
+      },
+      review: { status: "provider_unavailable" },
+      revision: "revision-2",
+    });
+    const pendingSave = deferred();
+    let posts = 0;
+    vi.stubGlobal("fetch", vi.fn((url, options = {}) => {
+      if (options.method === "POST") {
+        posts += 1;
+        return pendingSave.promise;
+      }
+      return response({ enabled: true, records: [first, second], total: 2 });
+    }));
+
+    render(<CustomerGeocodeReviewPanel />);
+    fireEvent.click(await screen.findByRole("button", { name: /Address review queue/ }));
+    fireEvent.click(screen.getAllByRole("button", { name: "Retry saved address" })[0]);
+
+    expect(screen.getAllByRole("button", { name: "Review location" })[1]).toBeDisabled();
+    expect(screen.getAllByRole("button", { name: "Retry saved address" })[1]).toBeDisabled();
+    fireEvent.click(screen.getAllByRole("button", { name: "Retry saved address" })[1]);
+    expect(posts).toBe(1);
+
+    await act(async () => pendingSave.resolve(await response({ enabled: true, ...first })));
+    await waitFor(() => expect(screen.getAllByRole("button", { name: "Review location" })[0]).toBeEnabled());
+    fireEvent.click(screen.getAllByRole("button", { name: "Review location" })[0]);
+    fireEvent.change(screen.getByLabelText("Evidence"), { target: { value: "Keep this row's draft." } });
+
+    expect(screen.getByText("Latest saved pin: No saved pin")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Review location" })).toBeDisabled();
+    expect(screen.getAllByRole("button", { name: "Retry saved address" }).at(-1)).toBeDisabled();
+    expect(screen.getByLabelText("Evidence")).toHaveValue("Keep this row's draft.");
   });
 
   it("preserves a directory draft while external refresh blocks stale rows and pagination", async () => {

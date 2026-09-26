@@ -62,7 +62,7 @@ function addressText(customer) {
   ].filter(Boolean).join(", ");
 }
 
-function ReviewRecord({ record, active, saving, error, conflicted, unavailable, onAcknowledgeConflict, onEdit, onResolve, onSelectCustomer }) {
+function ReviewRecord({ record, active, actionsDisabled, saving, error, conflicted, unavailable, onAcknowledgeConflict, onEdit, onResolve, onSelectCustomer }) {
   const status = record.review?.status || "pending";
   const reviewedOutsideArea = status === "outside_area" && Boolean(record.review?.reviewed_at);
   const statusLabel = reviewedOutsideArea ? "Confirmed outside service area" : STATUS_LABELS[status] || "Needs review";
@@ -98,12 +98,17 @@ function ReviewRecord({ record, active, saving, error, conflicted, unavailable, 
           {record.next_visit_date && <div className="mt-1 text-14 text-ink-tertiary">Next visit: {formatETDateOnly(record.next_visit_date, { month: "short", day: "numeric", year: "numeric" })}</div>}
           {!active && (
             <div className="flex flex-wrap gap-2 mt-2">
-              <Button variant="secondary" onClick={onEdit}>Review location</Button>
-              {retryAvailable && <Button variant="secondary" loading={saving} onClick={() => onResolve({ revision: record.revision, action: "retry" })}>Retry saved address</Button>}
-              {canRevokePin(record) && <Button variant="secondary" loading={saving} onClick={() => onResolve({ revision: record.revision, action: "revoke" })}>Revoke verification</Button>}
+              <Button variant="secondary" disabled={actionsDisabled} onClick={onEdit}>Review location</Button>
+              {retryAvailable && <Button variant="secondary" disabled={actionsDisabled} loading={saving} onClick={() => onResolve({ revision: record.revision, action: "retry" })}>Retry saved address</Button>}
+              {canRevokePin(record) && <Button variant="secondary" disabled={actionsDisabled} loading={saving} onClick={() => onResolve({ revision: record.revision, action: "revoke" })}>Revoke verification</Button>}
             </div>
           )}
         </>
+      )}
+      {active && !unavailable && (
+        <div className="mt-2 text-14 text-ink-secondary">
+          Latest saved pin: {hasCompletePin(record.customer) ? `${record.customer.latitude}, ${record.customer.longitude}` : "No saved pin"}
+        </div>
       )}
       {active && <CustomerGeocodeReviewForm record={record} saving={saving} error={error} conflicted={conflicted} unavailable={unavailable} onAcknowledgeConflict={onAcknowledgeConflict} onResolve={onResolve} onCancel={onEdit} />}
     </div>
@@ -224,9 +229,9 @@ export default function CustomerGeocodeReviewPanel({ customerId = null, onSelect
   }, [load]);
 
   const resolve = async (record, body) => {
+    if (saveAbortRef.current) return;
     const scope = scopeRef.current;
     const controller = new AbortController();
-    saveAbortRef.current?.abort();
     saveAbortRef.current = controller;
     const current = () => mountedRef.current && scope === scopeRef.current && !controller.signal.aborted;
     setSavingId(record.customer.id);
@@ -307,6 +312,7 @@ export default function CustomerGeocodeReviewPanel({ customerId = null, onSelect
               key={record.customer.id}
               record={record}
               active={activeId === record.customer.id}
+              actionsDisabled={Boolean(savingId) || Boolean(activeId && activeId !== record.customer.id)}
               saving={savingId === record.customer.id}
               error={activeId === record.customer.id ? error : ""}
               conflicted={conflictId === record.customer.id}
