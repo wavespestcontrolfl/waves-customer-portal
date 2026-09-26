@@ -15297,7 +15297,7 @@ const CallRecordingProcessor = {
                       });
                   });
                 } catch (e) {
-                  logger.warn(`[call-proc] start-before-call triage insert failed for ${maskSid(callSid)}: ${e.message}`);
+                  logger.warn(`[call-proc] start-before-call triage insert failed for ${maskSid(callSid)}: ${e.code || e.name || 'db_error'}`);
                 }
               }
             }
