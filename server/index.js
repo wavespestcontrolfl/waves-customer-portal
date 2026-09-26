@@ -208,6 +208,11 @@ const websiteEstimateHelmet = helmet({
 // raw body. Dark until GATE_POSTHOG_INGEST_PROXY=true (404 otherwise).
 app.use('/ingest', require('./routes/posthog-ingest'));
 
+// Report ask privacy headers (no-store / noindex) before ANY response-producing
+// middleware — CORS preflights, the global /api limiter, body-parser errors —
+// so every response on those token routes carries them.
+app.use('/api/reports', reportsPublicRoutes.reportsAskPrivacyHeaders);
+
 app.use((req, res, next) => {
   // Only the /book HTML document needs frame-ancestors loosened
   // (query string is not part of req.path; handle trailing slash too)
@@ -410,6 +415,22 @@ app.use('/api/public/inspection', (req, res, next) => {
   const live = req.method === 'GET' ? verifyLeadConsultationToken(token, 0) : verifyLeadConsultationToken(token);
   if (!token || !live) {
     return res.status(404).json({ error: 'not_found' });
+  }
+  next();
+});
+// Appointment and re-service links: dark application requests must reach
+// their 404 before the shared API limiter or body parsers can answer. Keep
+// CORS and the Staff maintenance interlock above these guards; the routers
+// retain their own gates and all enabled-feature rate limits.
+app.use('/api/public/appointment', require('./middleware/no-store').noStore, (req, res, next) => {
+  if (process.env.GATE_APPOINTMENT_PAGE !== 'true') {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  next();
+});
+app.use('/api/public/reservice', require('./middleware/no-store').noStore, (req, res, next) => {
+  if (!require('./config/feature-gates').isEnabled('reserviceSelfServe')) {
+    return res.status(404).json({ error: 'Not found' });
   }
   next();
 });
@@ -658,6 +679,7 @@ app.use('/api/admin/customers/intelligence', adminCustomerIntelRoutes);
 app.use('/api/admin/customers', require('./routes/admin-customer-turf-profile'));
 app.use('/api/admin/customers', adminCustomerRoutes);
 app.use('/api/admin/customer-duplicates', require('./routes/admin-customer-duplicates'));
+app.use('/api/admin/customer-geocodes', require('./routes/admin-customer-geocodes'));
 app.use('/api/admin/dashboard', adminDashboardRoutes);
 app.use('/api/admin/kpi-targets', require('./routes/admin-kpi-targets'));
 app.use('/api/admin/usage', require('./routes/admin-usage'));

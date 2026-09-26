@@ -265,7 +265,7 @@ describe('completion charge accepted-amount cap — frozen at booking, never col
       'billing',
       expect.stringContaining('above accepted amount'),
       expect.stringContaining('NOT charged'),
-      expect.objectContaining({ link: '/admin/customers/cust-1' }),
+      expect.objectContaining({ link: '/admin/customers?customerId=cust-1' }),
     );
     // The hold is never claimed or moved — it stays 'held' (un-charged,
     // reviewable), so no status write of any kind lands.
@@ -1347,7 +1347,7 @@ describe('chargeNoShowFee — staleness guard (fee only for a FRESH missed visit
       'billing',
       expect.stringContaining('No-show fee not charged'),
       expect.stringContaining('NOT charged'),
-      expect.objectContaining({ link: '/admin/customers/cust1' }),
+      expect.objectContaining({ link: '/admin/customers?customerId=cust1' }),
     );
   });
 
@@ -1781,7 +1781,7 @@ describe('reschedule-orphan DETECTION at completion (GATE_CARD_HOLD_RESCHEDULE_A
       expect.stringContaining('Stranded card hold'),
       expect.stringContaining('proceeded on the pay-link flow'),
       expect.objectContaining({
-        link: '/admin/customers/cust-1',
+        link: '/admin/customers?customerId=cust-1',
         metadata: expect.objectContaining({ holdId: 'hold-1', fromScheduledServiceId: 'svc-old', scheduledServiceId: 'svc-new' }),
       }),
     );

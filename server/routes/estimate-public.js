@@ -4993,8 +4993,8 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
                 finalBody: 'No payment today.',
               }
             : {
-              // #2969 parity (owner 2026-07-23): the standalone risk-free /
-              // 90-day line was removed from the React page as a duplicate —
+              // #2969 parity (owner 2026-07-23): the standalone risk-free
+              // guarantee line was removed from the React page as a duplicate —
               // the plan-terms strip below already carries the money-back
               // guarantee. Factual assurance copy, matching the other
               // categories' recurringAssurance lines.
@@ -5589,7 +5589,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // Cancel / refund / guarantee terms — surfaced on the SSR estimate so a
   // high-consideration buyer sees exactly where they stand before approving.
   // Policy (owner-confirmed): setup fully refundable, annual prepay prorated
-  // on unused visits, cancel anytime with no contract, 90-day money-back +
+  // on unused visits, cancel anytime with no contract, money-back guarantee +
   // free re-service. Gated to recurring plans (same condition as the billing
   // card) and mode-aware so it hides in one-time mode.
   const planTermsCardHtml = showBillingCard ? `
@@ -5610,8 +5610,8 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
         <span class="plan-terms-detail">On the 12-month prepay plan, cancel anytime and we refund every application you haven&rsquo;t used yet, prorated.</span>
       </li>` : ''}
       <li class="plan-terms-item">
-        <span class="plan-terms-term">90-day money-back guarantee</span>
-        <span class="plan-terms-detail">Not satisfied? We re-treat between visits free &mdash; and you&rsquo;re backed by a 90-day money-back guarantee.</span>
+        <span class="plan-terms-term">Money-back guarantee</span>
+        <span class="plan-terms-detail">If a covered problem comes back between visits, we re-treat free. If we can&rsquo;t solve it, we refund your most recent service payment.</span>
       </li>
     </ul>
   </section>` : '';
@@ -8743,7 +8743,7 @@ async function handleEstimateView(req, res, next) {
 
       try {
         const NotificationService = require('../services/notification-service');
-        await NotificationService.notifyAdmin('estimate', `Estimate viewed: ${estimate.customer_name}`, `${estimate.address || 'no address'} \u2014 ${proposalPriceLabel(estimate)}`, { icon: '\u{1F4CB}', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id } });
+        await NotificationService.notifyAdmin('estimate', `Estimate viewed: ${estimate.customer_name}`, `${estimate.address || 'no address'} \u2014 ${proposalPriceLabel(estimate)}`, { icon: '\u{1F4CB}', link: `/admin/estimates?estimateId=${estimate.id}`, metadata: { estimateId: estimate.id, customerId: estimate.customer_id } });
       } catch (e) { logger.error(`[notifications] Estimate viewed notification failed: ${e.message}`); }
     }
 
@@ -12341,7 +12341,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             'billing',
             'Recurring accept: saved-card Auto Pay enrollment skipped',
             'A recurring accept auto-satisfied with a saved card, but the accept resolved a different customer than the card owner — Auto Pay was NOT enrolled. Review the account and re-add a payment method or the visits will invoice unprotected.',
-            { link: `/admin/customers/${customerId}`, metadata: { customerId, estimateId: estimate.id, savedMethodRowId: recurringCardPolicy.savedMethodRowId } },
+            { link: `/admin/customers?customerId=${customerId}`, metadata: { customerId, estimateId: estimate.id, savedMethodRowId: recurringCardPolicy.savedMethodRowId } },
           ).catch(() => {});
           throw Object.assign(new Error('saved-method owner mismatch'), { alreadyAlerted: true });
         }
@@ -12368,7 +12368,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             'billing',
             'Recurring accept: saved-card Auto Pay enrollment refused',
             `A recurring accept auto-satisfied with a saved card but enrollment was refused (${enrollment.reason}) — re-add a payment method or the visits will invoice unprotected.`,
-            { link: `/admin/customers/${customerId}`, metadata: { customerId, estimateId: estimate.id, reason: enrollment.reason } },
+            { link: `/admin/customers?customerId=${customerId}`, metadata: { customerId, estimateId: estimate.id, reason: enrollment.reason } },
           ).catch(() => {});
         }
       } catch (err) {
@@ -12379,7 +12379,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             'billing',
             'Recurring accept: saved-card Auto Pay enrollment failed',
             `A recurring accept auto-satisfied with a saved card but enrollment errored (${err.message}) — re-add a payment method or the visits will invoice unprotected.`,
-            { link: `/admin/customers/${customerId}`, metadata: { customerId, estimateId: estimate.id } },
+            { link: `/admin/customers?customerId=${customerId}`, metadata: { customerId, estimateId: estimate.id } },
           ).catch(() => {});
         }
       }
@@ -12523,7 +12523,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               // bell:true — an office exception that must ring under the
               // admin bell policy, exactly like the converter's deferred
               // per-application bell it stands in for.
-              { link: `/admin/customers/${customerId}`, bell: true, metadata: { estimateId: estimate.id, scheduledServiceIds: unpriced.map((a) => a.id) } },
+              { link: `/admin/customers?customerId=${customerId}`, bell: true, metadata: { estimateId: estimate.id, scheduledServiceIds: unpriced.map((a) => a.id) } },
             );
             // Fired = a ROW exists. notifyAdmin resolves null on a failed
             // create and a truthy { id: null, suppressed: true } sentinel on
@@ -13389,7 +13389,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
                 : prepayAutoCharge.reason === 'authentication_required'
                   ? 'The card requires customer authentication (3DS), which an off-session charge cannot complete — the intent was canceled and the recovery sweep will deliver the pay link so the customer can authenticate by paying online.'
                   : `The prepay auto-charge ended ambiguous (${prepayAutoCharge.reason}). No pay link was sent — reconcile the attempt before any further collection.`,
-          { link: customerId ? `/admin/customers/${customerId}` : '/admin/invoices', metadata: { estimateId: estimate.id, customerId, invoiceId, reason: prepayAutoCharge.reason || null } },
+          { link: invoiceId ? `/admin/invoices?invoice=${invoiceId}` : customerId ? `/admin/customers?customerId=${customerId}` : '/admin/invoices', metadata: { estimateId: estimate.id, customerId, invoiceId, reason: prepayAutoCharge.reason || null } },
         ).catch(() => {});
       } else if (!['paid', 'processing'].includes(prepayAutoCharge.status)) {
         // The booking stands with a card on file but the year isn't
@@ -13398,7 +13398,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           'billing',
           'Annual prepay accepted — auto-charge did not complete',
           `Prepay invoice ${prepayAutoCharge.status === 'skipped' ? 'was not auto-charged' : 'auto-charge failed'} (${prepayAutoCharge.reason || 'declined'}). Card on file is saved; the pay link ${prepayAutoCharge.status === 'skipped' && prepayAutoCharge.reason === 'payer_billed' ? 'routes to the payer' : 'is being sent to the customer'} — follow up if it goes unpaid.`,
-          { link: customerId ? `/admin/customers/${customerId}` : '/admin/invoices', metadata: { estimateId: estimate.id, customerId, invoiceId, reason: prepayAutoCharge.reason || null } },
+          { link: invoiceId ? `/admin/invoices?invoice=${invoiceId}` : customerId ? `/admin/customers?customerId=${customerId}` : '/admin/invoices', metadata: { estimateId: estimate.id, customerId, invoiceId, reason: prepayAutoCharge.reason || null } },
         ).catch(() => {});
       }
       // Resolve the durable job stamp with the in-flow outcome — the
@@ -14354,7 +14354,7 @@ router.put('/:token/select-tier', estimateToggleLimiter, async (req, res, next) 
         await NotificationService.notifyAdmin('estimate',
           `Tier upgrade: ${estimate.customer_name}`,
           `Selected ${selectedTier} (was ${previousTier}) \u2014 $${monthlyTotal}/mo`,
-          { icon: '\u2B06\uFE0F', link: '/admin/estimates', metadata: { estimateId: estimate.id } }
+          { icon: '\u2B06\uFE0F', link: `/admin/estimates?estimateId=${estimate.id}`, metadata: { estimateId: estimate.id } }
         );
       } catch (e) { logger.error(`[estimate] Tier selection notification failed: ${e.message}`); }
     }
@@ -16400,9 +16400,8 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
     // row-existence oracle; docs/public-route-contracts.md). The admin
     // extension keeps extendEstimate's explicit 409.
     {
-      const { gatedSendAuthorityPredicateApplies } = require('../services/pricing-authority-gate');
       const { extensionDeliverableUnderGate } = require('../services/estimate-extension');
-      if (gatedSendAuthorityPredicateApplies() && !(await extensionDeliverableUnderGate(db, estimate))) {
+      if (!(await extensionDeliverableUnderGate(db, estimate))) {
         return res.status(404).json({ error: 'Estimate not found' });
       }
     }
@@ -16490,7 +16489,7 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
         // office must hear about every self-serve grant). Under
         // GATE_ADMIN_BELL_POLICY a suppression would return a truthy
         // sentinel that the retry/claim logic below reads as delivered.
-        { icon: '⏳', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id }, bell: true },
+        { icon: '⏳', link: `/admin/estimates?estimateId=${estimate.id}`, metadata: { estimateId: estimate.id, customerId: estimate.customer_id }, bell: true },
       );
       const autoNotification = (await notifyAutoGrant()) || (await notifyAutoGrant());
       if (!autoNotification) {
@@ -16546,7 +16545,7 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
       // bell: true — here the notification IS the deliverable: a policy
       // suppression's truthy sentinel would keep the 24h claim and 201
       // "request sent" with nothing delivered to anyone.
-      { icon: '⏳', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id }, bell: true },
+      { icon: '⏳', link: `/admin/estimates?estimateId=${estimate.id}`, metadata: { estimateId: estimate.id, customerId: estimate.customer_id }, bell: true },
     );
     if (!notification) {
       await db('estimates').where({ id: estimate.id }).update({ extension_requested_at: null })
@@ -16785,7 +16784,7 @@ router.put('/:token/decline', acceptDeclineLimiter, async (req, res, next) => {
       const reasonSuffix = customerReason
         ? ` \u2014 ${customerReason.decline_reason}${customerReason.competitor_name ? ` (${customerReason.competitor_name}${customerReason.competitor_price != null ? ` at $${customerReason.competitor_price}` : ''})` : ''}`
         : '';
-      await NotificationService.notifyAdmin('estimate', `Estimate declined: ${estimate.customer_name}`, `${estimate.address || 'no address'} \u2014 $${estimate.monthly_total || 0}/mo${reasonSuffix}`, { icon: '\u274C', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id, reason: customerReason?.disposition || null } });
+      await NotificationService.notifyAdmin('estimate', `Estimate declined: ${estimate.customer_name}`, `${estimate.address || 'no address'} \u2014 $${estimate.monthly_total || 0}/mo${reasonSuffix}`, { icon: '\u274C', link: `/admin/estimates?estimateId=${estimate.id}`, metadata: { estimateId: estimate.id, customerId: estimate.customer_id, reason: customerReason?.disposition || null } });
     } catch (e) { logger.error(`[notifications] Estimate declined notification failed: ${e.message}`); }
 
     res.json({ success: true });
@@ -18916,6 +18915,12 @@ function buildAcceptSuccessPayload({
   // Signed, but the plan is still being set up (activation running, or
   // held for staff) — the signing link is burned, so never ask again.
   else if (invoiceKind === 'annual_prepay_activation_pending') nextStep = 'activation_pending';
+  // Slice 3b: the customer never signed within the abandon window — the
+  // offer closed automatically, nothing was billed or booked. Checked
+  // alongside the other annual sign-before-pay outcomes, before the generic
+  // 'prepay_invoice' branch below could otherwise claim it (billingTerm is
+  // still 'prepay_annual' here). Never 'sign_agreement' — that link is dead.
+  else if (invoiceKind === 'annual_prepay_signature_expired') nextStep = 'offer_closed';
   // A payer-billed annual-prepay accept also has no homeowner step — the prepay
   // invoice went to the payer AP inbox, so don't surface prepay follow-up copy.
   else if (!payerBilled && !treatAsOneTime && billingTerm === 'prepay_annual') nextStep = 'prepay_invoice';
@@ -18998,6 +19003,13 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
   // losing the prepay_annual context and reporting the generic 'confirmed'
   // outcome instead of pointing the customer back at the signature step.
   const awaitingAnnualSignature = !prepayTerm && estimate.annual_plan_activation_status === 'awaiting_signature';
+  // Slice 3b: the customer never signed within the abandon window — the
+  // offer closed automatically (termite-annual-activation.js
+  // expireAbandonedSignatures). This is a TERMINAL outcome distinct from
+  // "awaiting signature": the signing link (if it still resolves at all) no
+  // longer leads anywhere, so the retry must show an honest closed state,
+  // never re-offer 'sign_agreement'.
+  const annualSignatureExpired = !prepayTerm && estimate.annual_plan_activation_status === 'signature_expired';
   // Codex round-3 P2: once the customer HAS signed, "sign your agreement"
   // is impossible (signing burned the link) — while activation is still
   // running, or failed and sits with the retry sweep / staff, report that
@@ -19006,7 +19018,7 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
     .where({ document_template_key: require('../services/termite-annual-activation').ANNUAL_TEMPLATE_KEY, status: 'signed' })
     .whereRaw("document_variables_snapshot -> 'estimate' ->> 'id' = ?", [String(estimate.id)])
     .first('id'));
-  const billingTerm = (prepayTerm || awaitingAnnualSignature) ? 'prepay_annual' : 'standard';
+  const billingTerm = (prepayTerm || awaitingAnnualSignature || annualSignatureExpired) ? 'prepay_annual' : 'standard';
 
   // Invoice reconstruction is SETTLED-aware (audit P1): 'void' still means a
   // dead pay link the office re-bills manually (skip / fall through), but any
@@ -19160,11 +19172,13 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
     ? 'annual_prepay'
     : awaitingAnnualSignature
       ? (annualAgreementSigned ? 'annual_prepay_activation_pending' : 'annual_prepay_deferred')
-      : invoiceNotes.includes('(invoice-mode one-time)')
-        ? 'one_time'
-        : invoiceNotes.includes('(invoice-mode recurring)')
-          ? 'recurring_first_visit'
-          : null;
+      : annualSignatureExpired
+        ? 'annual_prepay_signature_expired'
+        : invoiceNotes.includes('(invoice-mode one-time)')
+          ? 'one_time'
+          : invoiceNotes.includes('(invoice-mode recurring)')
+            ? 'recurring_first_visit'
+            : null;
   // Explicit payment outcome from the LIVE invoice status (Codex r5 P1):
   // only paid/prepaid may say "payment went through", only an INITIATED
   // bank debit may say "processing". But 'processing' is ALSO how an
@@ -19225,7 +19239,9 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
         ? 'Annual prepay'
         : awaitingAnnualSignature
           ? (annualAgreementSigned ? 'Annual prepay — signed, setting up' : 'Annual prepay — awaiting signature')
-          : (invoice?.title || null),
+          : annualSignatureExpired
+            ? 'Annual prepay — signing window closed'
+            : (invoice?.title || null),
       billingTerm,
       prepayInvoiceAmount: prepayTerm ? invoiceAmount : null,
       bookingUrl,
@@ -25644,8 +25660,8 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
     // row — or group link — the shared verdict refuses answers the family's
     // generic 404, before either provider path.
     {
-      const { gatedSendAuthorityPredicateApplies, estimateDeliverableUnderGate } = require('../services/pricing-authority-gate');
-      if (gatedSendAuthorityPredicateApplies() && !(await estimateDeliverableUnderGate(db, estimate))) {
+      const { estimateDeliverableUnderGate } = require('../services/pricing-authority-gate');
+      if (!(await estimateDeliverableUnderGate(db, estimate))) {
         return res.status(404).json({ error: 'Estimate not found' });
       }
     }
@@ -26615,12 +26631,9 @@ async function composeEstimateDataPayload(estimate, {
     // builder itself fails soft (never throws) on any ineligibility or error.
     const consultationOffer = includeConsultationOffer && !isInternalRefresh
       ? await buildEstimateConsultationOffer({
-        leadId: estimateDataForIntelligence?.lead_id,
-        leadLinkage: estimateDataForIntelligence?.lead_linkage,
+        estimate,
+        estimateData: estimateDataForIntelligence,
         acceptActive: !adminDraftPreview && !verifiedStaffPreview && !isPdfRenderPass && isEstimateAcceptActive(estimate),
-        estimateAddress: estimate.address,
-        fromVisit: Boolean(estimateDataForIntelligence?.scheduled_service_id),
-        grouped: Boolean(estimate.estimate_group_id),
       })
       : null;
 
@@ -26920,6 +26933,12 @@ async function composeEstimateDataPayload(estimate, {
         // derived mode/frequency when null.
         acceptedServiceMode: estimate.accepted_service_mode || null,
         acceptedFrequencyKey: estimate.accepted_frequency_key || null,
+        // Slice 3b: the termite annual offer closed unsigned (the estimate's
+        // status stays 'accepted') — the page must render the honest closed
+        // state on a normal reload, never the "booked" terminal page
+        // (Codex #4922 r3 P1). Present only then, so every other response
+        // stays byte-identical.
+        ...(estimate.annual_plan_activation_status === 'signature_expired' ? { annualPlanOfferClosed: true } : {}),
         // Effective (incl. derived guarantee-only) — the React view's accept
         // copy and payment buttons key off this, and accept resolves the same
         // derived value server-side.
@@ -27222,7 +27241,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
           'estimate',
           `Estimate viewed: ${estimate.customer_name}`,
           `${estimate.address || 'no address'} — ${proposalPriceLabel(estimate)}`,
-          { icon: '\u{1F4CB}', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id } }
+          { icon: '\u{1F4CB}', link: `/admin/estimates?estimateId=${estimate.id}`, metadata: { estimateId: estimate.id, customerId: estimate.customer_id } }
         );
       } catch (e) { logger.error(`[notifications] Estimate viewed notification failed: ${e.message}`); }
     }

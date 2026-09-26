@@ -1,6 +1,7 @@
 const express = require('express');
 const Sentry = require('@sentry/node');
 const { safeErrorToken } = require('../utils/sentry-scrub');
+const { REPLAY_HOLD_CODES } = require('../services/messaging/billing-channel-routing');
 const router = express.Router();
 const Stripe = require('stripe');
 const db = require('../models/db');
@@ -21,7 +22,7 @@ const { triggerNotification } = require('../services/notification-triggers');
 const NotificationService = require('../services/notification-service');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
-const { etDateString, etParts, addETDays } = require('../utils/datetime-et');
+const { etDateString, addETBusinessDays } = require('../utils/datetime-et');
 const {
   assertInvoicePaymentIntentTenderMatches,
   isAchPaymentIntent,
@@ -222,7 +223,7 @@ async function sendBillingSms(customer, body, metadata = {}, { customerInitiated
   // so callers log deferred, not lost; a failed enqueue falls through and
   // returns the block unchanged (loudly logged).
   if (!result.sent
-    && ['QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT', 'APP_DELIVERY_HOLD', 'APP_PROVIDER_RETRY'].includes(result.code)
+    && REPLAY_HOLD_CODES.includes(result.code)
     && result.deferred
     && result.nextAllowedAt) {
     try {
@@ -280,25 +281,6 @@ async function sendBillingSms(customer, body, metadata = {}, { customerInitiated
     }
   }
   return result;
-}
-
-// Advance `from` by `days` ET weekdays (Mon–Fri). Used to render the
-// "expected to clear" date in the ACH-processing acknowledgment so the
-// copy ("3–5 business days") doesn't surface a weekend date when the
-// payment was initiated late in the week.
-//
-// Uses ET calendar helpers because Railway runs TZ=UTC: a Sunday-evening-ET
-// payment is already Monday UTC, so native getDay()/getDate() would count
-// the wrong weekday and shift the "expected to clear" date by a day.
-function addBusinessDays(from, days) {
-  let cursor = from;
-  let added = 0;
-  while (added < days) {
-    cursor = addETDays(cursor, 1);
-    const dow = etParts(cursor).dayOfWeek;
-    if (dow !== 0 && dow !== 6) added += 1;
-  }
-  return cursor;
 }
 
 /**
@@ -5000,7 +4982,7 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
             'billing',
             'Auto Pay bank enrollment refused at recovery',
             'An accepted recurring plan captured a bank account, but bank capture is no longer offered for this customer — Auto Pay was NOT enrolled. Add a card or re-enable bank capture, then re-enroll from the customer page.',
-            { link: `/admin/customers/${estimate.customer_id}`, metadata: { estimateId: estimate.id, setupIntentId: setupIntent.id } },
+            { link: `/admin/customers?customerId=${estimate.customer_id}`, metadata: { estimateId: estimate.id, setupIntentId: setupIntent.id } },
           );
         } catch (alertErr) {
           logger.warn(`[stripe-webhook] recovery refusal alert failed: ${alertErr.message}`);
@@ -5370,7 +5352,7 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
           'billing',
           'Card saved without Auto Pay (payer-billed)',
           'A portal card save (webhook completion) skipped Auto Pay enrollment because this account’s invoices route to a third-party payer — enrolling the saved card would charge the wrong party on self-pay invoices.',
-          { link: `/admin/customers/${wavesCustomerId}`, metadata: { customerId: wavesCustomerId, paymentMethodId: saved.id } },
+          { link: `/admin/customers?customerId=${wavesCustomerId}`, metadata: { customerId: wavesCustomerId, paymentMethodId: saved.id } },
         ).catch(() => {});
         return;
       }
@@ -6302,7 +6284,12 @@ async function dispatchAchProcessingAcknowledgment({ invoiceId, piId, amount, ev
   const initiatedAt = eventCreated
     ? new Date(eventCreated * 1000)
     : new Date();
-  const expectedClearDate = addBusinessDays(initiatedAt, 5);
+  // "expected to clear" date for the ACH-processing acknowledgment copy
+  // ("3–5 business days") — never a weekend date when initiated late in
+  // the week. Shared with routes/booking.js's re-service latency guard
+  // (server/utils/datetime-et.js's addETBusinessDays), which is why it
+  // lives there rather than as a local helper here.
+  const expectedClearDate = addETBusinessDays(initiatedAt, 5);
   const emailResult = await PaymentLifecycleEmail.sendAchProcessing({
     customerId: freshInvoice.customer_id,
     invoiceId: freshInvoice.id,
@@ -6462,7 +6449,7 @@ async function handlePaymentIntentRequiresAction(paymentIntent, eventId) {
       if (customer?.phone) {
         const body = await renderRequiredSmsTemplate('bank_verification_incomplete', {
           first_name: customer.first_name || 'there',
-          billing_url: `${publicPortalUrl()}/billing`,
+          billing_url: `${publicPortalUrl()}/?tab=billing`,
         }, {
           workflow: 'bank_verification_incomplete',
           entity_type: 'payment_intent',
@@ -8289,7 +8276,7 @@ async function handleSetupIntentFailed(setupIntent, eventId) {
       if (customer?.phone) {
         const body = await renderRequiredSmsTemplate('bank_verification_failed', {
           first_name: customer.first_name || 'there',
-          billing_url: `${publicPortalUrl()}/billing`,
+          billing_url: `${publicPortalUrl()}/?tab=billing`,
         }, {
           workflow: 'bank_verification_failed',
           entity_type: 'setup_intent',

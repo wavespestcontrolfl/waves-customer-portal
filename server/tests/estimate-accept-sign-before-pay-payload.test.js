@@ -44,6 +44,13 @@ describe('estimate accept — sign-before-pay payloads', () => {
     expect(buildAcceptSuccessPayload({ billingTerm: 'prepay_annual', invoiceKind: 'annual_prepay_activation_pending' }).nextStep).toBe('activation_pending');
   });
 
+  // Slice 3b: the customer never signed within the abandon window — the
+  // offer closed automatically. Never 'sign_agreement' (that link is dead).
+  test('buildAcceptSuccessPayload: signature_expired → offer_closed, never sign_agreement', () => {
+    const { buildAcceptSuccessPayload } = require('../routes/estimate-public');
+    expect(buildAcceptSuccessPayload({ billingTerm: 'prepay_annual', invoiceKind: 'annual_prepay_signature_expired' }).nextStep).toBe('offer_closed');
+  });
+
   test('buildAcceptNotificationPayload: a deferred accept tells the customer to sign — never "approved" with invoice follow-up', () => {
     const { buildAcceptNotificationPayload } = require('../routes/estimate-public');
     const payload = buildAcceptNotificationPayload({
@@ -88,6 +95,24 @@ describe('estimate accept — sign-before-pay payloads', () => {
     expect(contractLookup.find((c) => c.method === 'where').args[0])
       .toEqual({ document_template_key: 'service_agreement.termite_annual_protection', status: 'signed' });
     expect(contractLookup.find((c) => c.method === 'whereRaw').args[1]).toEqual(['est-1']);
+  });
+
+  test('slice 3b: retry builder — signature_expired → offer_closed, never re-offers sign_agreement, no total reported', async () => {
+    const db = fakeDb({ customer_contracts: null, invoices: null, annual_prepay_terms: null });
+    jest.doMock('../models/db', () => db);
+    const { buildAlreadyAcceptedSuccessPayload } = require('../routes/estimate-public');
+    const expiredEstimate = { ...parkedEstimate, annual_plan_activation_status: 'signature_expired' };
+
+    const payload = await buildAlreadyAcceptedSuccessPayload(expiredEstimate);
+
+    expect(payload.nextStep).toBe('offer_closed');
+    expect(payload.invoiceKind).toBe('annual_prepay_signature_expired');
+    expect(payload.billingTerm).toBe('prepay_annual');
+    expect(payload.invoiceAmount).toBeNull();
+    expect(payload.invoiceServiceLabel).toBe('Annual prepay — signing window closed');
+    // The "signed?" contract lookup only ever fires for awaiting_signature —
+    // a closed offer never queries it.
+    expect(db.calls.filter((c) => c.table === 'customer_contracts')).toHaveLength(0);
   });
 
   test('codex round-3 P1: a sign-before-pay accept commits no reservation and adopts no appointment — the pick is only a preference', () => {

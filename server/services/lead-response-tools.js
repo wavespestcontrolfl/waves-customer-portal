@@ -7,7 +7,7 @@ const db = require('../models/db');
 const { randomUUID } = require('node:crypto');
 const logger = require('./logger');
 const { shortenOrPassthrough } = require('./short-url');
-const { gatedSendAuthorityPredicateApplies, estimateDeliverableUnderGate } = require('./pricing-authority-gate');
+const { estimateDeliverableUnderGate } = require('./pricing-authority-gate');
 const {
   blockIfAutomatedEstimateDuplicate,
   withAutomatedEstimatePhoneLock,
@@ -190,7 +190,7 @@ async function executeLeadTool(toolName, input, context) {
         hasEstimates: true,
         ...(hiddenCount ? { unviewableEstimates: hiddenCount } : {}),
         estimates: await Promise.all(viewable.map(async (e) => {
-          const authorityOk = !gatedSendAuthorityPredicateApplies() || await estimateDeliverableUnderGate(db, e);
+          const authorityOk = await estimateDeliverableUnderGate(db, e);
           const linkable = authorityOk && !!e.token;
           // A row the verdict refuses shows NO price either (uncapped codex P0
           // r25): the agent quotes what it is given, and an unverified

@@ -702,6 +702,16 @@ function isAnnualPlanEstimate(estData) {
 // after activation), or the sign-before-pay deferral stamp on the estimate
 // (exists from the accept transaction on; column-guarded because it ships in
 // a later slice). true / false / 'error' like isAnnualPrepayAccept.
+// Slice 3b: only these two deferral-stamp values are DURABLE evidence of a
+// live (or completed) sign-before-pay park. 'signature_expired' is a
+// PERSISTED annual_plan_activation_status too, but it means the offer
+// closed unsigned — it must never license issuing or reissuing an annual
+// agreement, or prepaid auto-renewal wording, for this estimate again. A
+// bare truthy check here would treat 'signature_expired' the same as
+// 'awaiting_signature', which would let the reconciliation sweeps keep
+// drafting v3 agreements for an estimate whose plan already closed.
+const DURABLE_ANNUAL_PLAN_STAMPS = ['awaiting_signature', 'activated'];
+
 async function annualPlanDurableEvidence(estimate, conn = db) {
   if (!estimate?.id) return false;
   try {
@@ -714,10 +724,10 @@ async function annualPlanDurableEvidence(estimate, conn = db) {
       .whereNotIn('status', TERMINAL_PREPAY_TERM_STATUSES)
       .first('id');
     if (term) return true;
-    if (estimate.annual_plan_activation_status) return true;
+    if (DURABLE_ANNUAL_PLAN_STAMPS.includes(estimate.annual_plan_activation_status)) return true;
     if (await conn.schema.hasColumn('estimates', 'annual_plan_activation_status')) {
       const row = await conn('estimates').where({ id: estimate.id }).first('annual_plan_activation_status');
-      return !!row?.annual_plan_activation_status;
+      return DURABLE_ANNUAL_PLAN_STAMPS.includes(row?.annual_plan_activation_status);
     }
     return false;
   } catch (err) {
@@ -811,6 +821,11 @@ async function retireSamePropertyOpenAgreements(customerId, estimate) {
   let keptReplacement = false;
   await db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [lockKey]);
+    // Customer row before any contract row: the event inserts below take a
+    // key lock on the customer, so contract-first cycled with the paths that
+    // lock customer → contract (/:token/sign, /:id/cancel, createShareLink,
+    // expireDocumentRequests, the annual close-out).
+    await trx('customers').where({ id: customerId }).forUpdate().first('id');
     // Active-version truth is read UNDER the lock (both template rows
     // FOR UPDATE) — a v3 published after the caller's snapshot can't get a
     // freshly issued current request branded stale and cancelled here.
@@ -987,7 +1002,7 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
         'estimate',
         'Termite agreement needs manual prep (commercial)',
         `${estimate.customer_name || 'Customer'} accepted a commercial termite estimate — commercial and multi-unit structures need a tailored agreement (different statutory retreat windows, tenant considerations), so prepare it manually from the document library.${propertyClause}`,
-        { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId, ...propertyMeta, ...(reissueSourceContractId ? { reissueContractId: reissueSourceContractId } : {}) } },
+        { icon: '\u{1F4DD}', link: `/admin/customers?customerId=${customerId}`, metadata: { estimateId: estimate.id, customerId, ...propertyMeta, ...(reissueSourceContractId ? { reissueContractId: reissueSourceContractId } : {}) } },
       ], `manual-prep (commercial) for estimate ${estimate.id}`);
       return { ok: false, skipped: 'commercial', belled, retireFailed: commercialRetireFailed };
     }
@@ -1023,7 +1038,7 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
         'estimate',
         'Termite agreement needs manual prep (annual plan billing)',
         `${estimate.customer_name || 'Customer'} accepted the Waves Subterranean Termite Protection annual plan under '${explicitBillingTerm}' billing instead of annual prepay — the v3 agreement states prepaid terms, so prepare the agreement manually.${propertyClause}`,
-        { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId, ...propertyMeta, ...(reissueSourceContractId ? { reissueContractId: reissueSourceContractId } : {}) } },
+        { icon: '\u{1F4DD}', link: `/admin/customers?customerId=${customerId}`, metadata: { estimateId: estimate.id, customerId, ...propertyMeta, ...(reissueSourceContractId ? { reissueContractId: reissueSourceContractId } : {}) } },
       ], `manual-prep (annual plan billing mismatch) for estimate ${estimate.id}`);
       return { ok: false, skipped: 'annual_plan_billing_mismatch', belled: mismatchBelled, retireFailed: mismatchRetireFailed };
     }
@@ -1066,7 +1081,7 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
           'estimate',
           'Termite agreement needs manual prep (annual plan billing)',
           `${estimate.customer_name || 'Customer'} accepted the Waves Subterranean Termite Protection annual plan, but no annual prepay record exists for the estimate — confirm billing before preparing the agreement manually.${propertyClause}`,
-          { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId, ...propertyMeta, ...(reissueSourceContractId ? { reissueContractId: reissueSourceContractId } : {}) } },
+          { icon: '\u{1F4DD}', link: `/admin/customers?customerId=${customerId}`, metadata: { estimateId: estimate.id, customerId, ...propertyMeta, ...(reissueSourceContractId ? { reissueContractId: reissueSourceContractId } : {}) } },
         ], `manual-prep (annual plan billing unverified) for estimate ${estimate.id}`);
         return { ok: false, skipped: 'annual_plan_billing_unverified', belled: unverifiedBelled, retireFailed: unverifiedRetireFailed };
       }
@@ -1097,7 +1112,7 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
         'estimate',
         'Termite agreement needs manual prep (annual prepay)',
         `${estimate.customer_name || 'Customer'} accepted a termite estimate on annual prepay — the standard program agreement states per-application billing, so prepare the agreement manually with the prepay terms.${propertyClause}`,
-        { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId, ...propertyMeta, ...(reissueSourceContractId ? { reissueContractId: reissueSourceContractId } : {}) } },
+        { icon: '\u{1F4DD}', link: `/admin/customers?customerId=${customerId}`, metadata: { estimateId: estimate.id, customerId, ...propertyMeta, ...(reissueSourceContractId ? { reissueContractId: reissueSourceContractId } : {}) } },
       ], `manual-prep (annual prepay) for estimate ${estimate.id}`);
       return { ok: false, skipped: 'annual_prepay', belled: prepayBelled, retireFailed: prepayRetireFailed };
     }
@@ -1145,7 +1160,7 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
         'estimate',
         'Termite agreement needs manual prep',
         `${estimate.customer_name || 'Customer'} accepted a termite estimate, but the program agreement couldn't be prefilled from the estimate figures. Prepare and send it from the document library.${propertyClause}`,
-        { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId, ...propertyMeta, ...(reissueSourceContractId ? { reissueContractId: reissueSourceContractId } : {}) } },
+        { icon: '\u{1F4DD}', link: `/admin/customers?customerId=${customerId}`, metadata: { estimateId: estimate.id, customerId, ...propertyMeta, ...(reissueSourceContractId ? { reissueContractId: reissueSourceContractId } : {}) } },
       ], `manual-prep (figures unresolved) for estimate ${estimate.id}`);
       return { ok: false, skipped: 'figures_unresolved', belled: figuresBelled, retireFailed: figuresRetireFailed };
     }
@@ -1184,7 +1199,7 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
           'estimate',
           'Termite agreement needs manual prep (annual plan)',
           `${estimate.customer_name || 'Customer'} accepted the Waves Subterranean Termite Protection annual plan, but the v3 agreement template is not active yet — prepare and send the agreement manually.${propertyClause}`,
-          { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId, ...propertyMeta, ...(reissueSourceContractId ? { reissueContractId: reissueSourceContractId } : {}) } },
+          { icon: '\u{1F4DD}', link: `/admin/customers?customerId=${customerId}`, metadata: { estimateId: estimate.id, customerId, ...propertyMeta, ...(reissueSourceContractId ? { reissueContractId: reissueSourceContractId } : {}) } },
         ], `manual-prep (annual template not active) for estimate ${estimate.id}`);
         return { ok: false, skipped: 'annual_template_not_active', belled: annualBelled, retireFailed: annualRetireFailed };
       }
@@ -1241,6 +1256,11 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
       // duplicate drafts — the advisory xact lock + in-transaction re-check
       // make the dedupe atomic (pre-push P1).
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [dedupeLockKey]);
+      // Customer row before any contract row: the event inserts below take a
+      // key lock on the customer, so contract-first cycled with the paths that
+      // lock customer → contract (/:token/sign, /:id/cancel, createShareLink,
+      // expireDocumentRequests, the annual close-out).
+      await trx('customers').where({ id: customerId }).forUpdate().first('id');
       // Revalidate the template's active version under the lock: an admin
       // publish/reactivation between the pre-transaction reads and here
       // must not let us insert (and autosend) an agreement rendered from a
@@ -1259,6 +1279,16 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
       // not have us insert (and autosend) from a just-disabled template —
       // the version pointer alone doesn't move on pause/archive.
       if (!liveTemplate || liveTemplate.status !== 'active' || liveTemplate.active_version_id !== version.id) return 'version_changed';
+      // Slice 3b: never draft an ANNUAL agreement for an estimate whose
+      // offer closed unsigned. Re-read under the lock above, which the
+      // close-out (termite-annual-activation.js expireAbandonedSignature)
+      // also takes: an evidence check done before this transaction can be
+      // stale by the time a close-out commits.
+      if (prepared.templateKey === ANNUAL_TEMPLATE_KEY && estimate?.id
+        && await trx.schema.hasColumn('estimates', 'annual_plan_activation_status')) {
+        const current = await trx('estimates').where({ id: estimate.id }).first('annual_plan_activation_status');
+        if (current?.annual_plan_activation_status === 'signature_expired') return 'offer_closed';
+      }
       // FOR UPDATE: the status re-read must be current when we cancel — a
       // customer signing the older agreement concurrently would otherwise
       // commit 'signed' between our unlocked read and an unconditional
@@ -1371,6 +1401,10 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
       // Retryable: the next sweep re-reads the fresh active version.
       return { ok: false, skipped: 'version_changed' };
     }
+    if (contract === 'offer_closed') {
+      // Terminal: the plan offer closed unsigned (slice 3b) — re-quote.
+      return { ok: false, skipped: 'annual_plan_offer_closed' };
+    }
     if (!contract) {
       const winner = await existingBlockingProgramAgreement(customerId, estimate);
       return { ok: true, skipped: 'already_exists', contractId: winner?.id || null };
@@ -1398,7 +1432,7 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
       'estimate',
       autosent ? 'Termite agreement sent for signature' : 'Termite agreement drafted',
       `${estimate.customer_name || 'Customer'} accepted the ${OWNERSHIP_BELL_LABELS[prepared.ownership] || OWNERSHIP_BELL_LABELS.own} termite program — the agreement is ${autosent ? 'on its way for e-signature' : 'prefilled and ready to send from the document library'}.`,
-      { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId, contractId: contract.id } },
+      { icon: '\u{1F4DD}', link: `/admin/customers?customerId=${customerId}`, metadata: { estimateId: estimate.id, customerId, contractId: contract.id } },
     ];
     await ringAdminBell(NotificationService, bellArgs, `drafted bell for contract ${contract.id} (estimate ${estimate.id}) — draft remains in the open document-requests queue`);
 
@@ -1432,6 +1466,15 @@ async function cancelStaleSource(row, conn = db) {
   // our transaction commits (the cancel already applied to a genuinely
   // stale request). No MVCC-snapshot window remains.
   return conn.transaction(async (trx) => {
+    // The same order every program-agreement writer holds: the per-customer
+    // advisory lock, then the customer row, then templates, then contracts
+    // (issuance, the manual admin issue, the annual close-out); the cancel
+    // event below takes the customer FK key lock (Codex #4922 r4). Callers
+    // never hold this advisory lock across the call.
+    if (row.customer_id) {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`termite-agreement:${row.customer_id}`]);
+      await trx('customers').where({ id: row.customer_id }).forUpdate().first('id');
+    }
     if (row.document_template_version_id && row.document_template_key) {
       const template = await trx('document_templates')
         .where({ template_key: row.document_template_key })
@@ -1697,7 +1740,7 @@ async function reconcileSupersededProgramAgreements({ limit = 50 } = {}) {
         'estimate',
         'Termite agreement signed on superseded wording',
         `${row.recipient_name || 'A customer'} signed a termite program agreement rendered from a superseded template version during a rollout window. The executed contract stays signed as-is — review it and issue corrected paperwork if the wording differences matter.`,
-        { icon: '\u{1F4DD}', link: `/admin/customers/${row.customer_id}`, metadata: { contractId: row.id, customerId: row.customer_id } },
+        { icon: '\u{1F4DD}', link: `/admin/customers?customerId=${row.customer_id}`, metadata: { contractId: row.id, customerId: row.customer_id } },
       ], `signed-on-superseded audit for contract ${row.id}`);
       if (auditBelled) {
         await markSupersededHandled(row, 'signed_superseded_belled');
@@ -1750,7 +1793,7 @@ async function reconcileSupersededProgramAgreements({ limit = 50 } = {}) {
         'estimate',
         'Re-issue termite agreement (wording updated)',
         `The open termite program agreement for ${row.recipient_name || 'a customer'} was cancelled because its wording was superseded by the v2 compliance templates. It was issued manually, so re-issue it from the document library on the updated template.`,
-        { icon: '\u{1F4DD}', link: `/admin/customers/${row.customer_id}`, metadata: { contractId: row.id, customerId: row.customer_id } },
+        { icon: '\u{1F4DD}', link: `/admin/customers?customerId=${row.customer_id}`, metadata: { contractId: row.id, customerId: row.customer_id } },
       ], `manual stale-version re-issue for contract ${row.id}`);
       if (belled) await markSupersededHandled(row, 'manual_reissue_belled');
       else results.failed += 1;
@@ -1871,7 +1914,7 @@ async function reconcileSupersededProgramAgreements({ limit = 50 } = {}) {
         'estimate',
         'Re-issue termite agreement (wording updated)',
         `The cancelled termite program agreement for ${row.recipient_name || 'a customer'} referenced an estimate that does not belong to that customer, so it could not be replaced automatically. Re-issue it from the document library.`,
-        { icon: '\u{1F4DD}', link: `/admin/customers/${row.customer_id}`, metadata: { contractId: row.id, customerId: row.customer_id } },
+        { icon: '\u{1F4DD}', link: `/admin/customers?customerId=${row.customer_id}`, metadata: { contractId: row.id, customerId: row.customer_id } },
       ], `estimate-customer mismatch for contract ${row.id}`);
       if (mismatchBelled) {
         await markSupersededHandled(row, 'estimate_customer_mismatch');
