@@ -308,6 +308,30 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['commercial_requires_quote']));
   });
 
+  // codex #4919 r5 P1: the v11 prompt keeps "sometime between 6 and 9"
+  // confirmed, so the closed evidence grammar must admit "sometime" too.
+  test('a loosely phrased committed window ("sometime between 6 and 9 PM Sunday") demotes commercial_requires_quote', () => {
+    const turn = "We'll be there sometime between 6 and 9 PM Sunday.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const ex = agentCommitted(['commercial_requires_quote'], { quote: turn });
+    ex.caller = { relationship_to_property: 'owner', on_site_authorization: true };
+    ex.scheduling.confirmed_start_at = '2026-08-02T18:00:00-04:00';
+    const r = canAutoRoute(ex, opts({ transcript }));
+    expect(r.allowed).toBe(true);
+    expect(r.appointmentBlockingFlags || []).not.toContain('commercial_requires_quote');
+  });
+
+  test('"sometime" never waives the slot match: a mismatched first bound still hard-blocks', () => {
+    const turn = "We'll be there sometime between 7 and 9 PM Sunday.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const ex = agentCommitted(['commercial_requires_quote'], { quote: turn });
+    ex.caller = { relationship_to_property: 'owner', on_site_authorization: true };
+    ex.scheduling.confirmed_start_at = '2026-08-02T18:00:00-04:00';
+    const r = canAutoRoute(ex, opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('commercial_requires_quote');
+  });
+
   // codex #4919 r1 P1: a range whose FIRST bound does NOT match
   // confirmed_start_at must still fail closed — the exception binds on the
   // first bound, it does not waive the match entirely.

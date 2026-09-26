@@ -899,6 +899,11 @@ const COMMITMENT_TURN_VOCAB = new Set([
   // round-4 P1s, non-converging) — see the day-binding SLOT_BINDING_CHECKS
   // entry below.
   'between',
+  // codex #4919 r5 P1: the v11 prompt keeps a loosely phrased committed
+  // window confirmed ("we'll be there sometime between 6 and 9"), so the
+  // closed vocabulary admits "sometime"; the slot binder still requires the
+  // range's first bound to match confirmed_start_at.
+  'sometime',
 ]);
 function turnVocabularyTokenOk(tok, extraSets) {
   if (!tok) return true;
@@ -970,6 +975,9 @@ const SLOT_WORDS = new Set([
   // set already gates (collapseRangeToFirstBound / parseSpokenSlot enforce
   // the actual binding; this only lets the sentence FORM through).
   'between', 'and', 'to',
+  // codex #4919 r5 P1: "sometime between 6 and 9" (the v11 prompt's loose
+  // committed-window phrasing) — a filler modifier; binding is unchanged.
+  'sometime',
 ]);
 const BENIGN_CLOSERS = [
   'and just let us know if anything changes',
