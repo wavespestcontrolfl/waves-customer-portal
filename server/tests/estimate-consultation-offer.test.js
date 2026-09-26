@@ -21,9 +21,14 @@ const mockDb = jest.fn((table) => mockBuilders[table]);
 jest.mock('../models/db', () => mockDb);
 
 const mockComputeConsultationSlotsForLead = jest.fn();
+// The inputs the page's booking address resolves from, fingerprinted by the
+// probe and re-read by the final check (Codex #4918 r17) — unchanged unless
+// a test moves them.
+const mockCurrentBookingAddressInputs = jest.fn();
 jest.mock('../routes/inspection-public', () => ({
   _internals: {
     computeConsultationSlotsForLead: (...args) => mockComputeConsultationSlotsForLead(...args),
+    currentBookingAddressInputs: (...args) => mockCurrentBookingAddressInputs(...args),
   },
 }));
 
@@ -127,7 +132,10 @@ beforeEach(() => {
   process.env.GATE_ESTIMATE_CONSULTATION_OFFER = 'true';
   process.env.GATE_LEAD_INSPECTION_LINK = 'true';
   process.env.LEAD_PREFILL_SECRET = 'test-prefill-secret';
-  mockComputeConsultationSlotsForLead.mockResolvedValue({ ok: true, slots: [{ date: '2026-10-01', start_time: '09:00' }], needsAddress: false, address: PAGE_ADDRESS });
+  mockComputeConsultationSlotsForLead.mockResolvedValue({
+    ok: true, slots: [{ date: '2026-10-01', start_time: '09:00' }], needsAddress: false, address: PAGE_ADDRESS, addressInputs: 'INPUTS-A',
+  });
+  mockCurrentBookingAddressInputs.mockResolvedValue('INPUTS-A');
 });
 
 afterEach(() => {
@@ -433,7 +441,7 @@ describe('estimateConsultationLead context + reconfirmConsultationLead', () => {
     const args = baseArgs();
     const lead = await estimateConsultationLead({ ...args, context });
     expect(lead).toBeTruthy();
-    expect(context).toEqual({ estimateId: ESTIMATE_ID, leadId: LEAD_ID, probedAddress: PAGE_ADDRESS });
+    expect(context).toEqual({ estimateId: ESTIMATE_ID, leadId: LEAD_ID, probedAddress: PAGE_ADDRESS, addressInputs: 'INPUTS-A' });
     const probes = mockComputeConsultationSlotsForLead.mock.calls.length;
     expect(await reconfirmConsultationLead(context)).toBeTruthy();
     expect(mockComputeConsultationSlotsForLead.mock.calls.length).toBe(probes);
@@ -447,10 +455,39 @@ describe('estimateConsultationLead context + reconfirmConsultationLead', () => {
     expect(await reconfirmConsultationLead(context)).toBeNull();
   });
 
+  test('the lead\'s booking address inputs moved after the build (lead or customer address edited, customer relinked) → the reconfirm returns null (Codex #4918 r17)', async () => {
+    const context = {};
+    await estimateConsultationLead({ ...baseArgs(), context });
+    mockCurrentBookingAddressInputs.mockResolvedValue('INPUTS-B');
+    expect(await reconfirmConsultationLead(context)).toBeNull();
+    expect(mockCurrentBookingAddressInputs).toHaveBeenLastCalledWith(LEAD_ID);
+  });
+
   test('the estimate goes off-surface after the build → the reconfirm returns null', async () => {
     const context = {};
     await estimateConsultationLead({ ...baseArgs(), context });
     mockIsEstimateAcceptActive.mockReturnValue(false);
     expect(await reconfirmConsultationLead(context)).toBeNull();
+  });
+});
+
+// Codex #4918 r17: the property the probe resolved must still be the one the
+// /inspection page would book — its address inputs are re-read, never
+// re-geocoded.
+describe('buildEstimateConsultationOffer — the booking address inputs after the probe', () => {
+  test('the lead\'s address (or its trusted customer\'s) moved during the probe → no offer, even though the estimate still matches the probed property', async () => {
+    mockCurrentBookingAddressInputs.mockResolvedValue('INPUTS-B');
+    expect(await buildEstimateConsultationOffer(baseArgs())).toBeNull();
+  });
+
+  test('a probe result without its address inputs fails closed → no offer', async () => {
+    mockComputeConsultationSlotsForLead.mockResolvedValue({
+      ok: true, slots: [{ date: '2026-10-01', start_time: '09:00' }], needsAddress: false, address: PAGE_ADDRESS,
+    });
+    expect(await buildEstimateConsultationOffer(baseArgs())).toBeNull();
+  });
+
+  test('unchanged inputs → the offer stands', async () => {
+    expect((await buildEstimateConsultationOffer(baseArgs()))?.url).toContain('/inspection/');
   });
 });

@@ -3341,3 +3341,31 @@ describe('provenance across a customer merge (round-10 P1 :347)', () => {
     expect(eligibility).toEqual({ state: 'already_booked', visit: null, rescheduleUrl: null });
   });
 });
+
+// The consultation offer re-reads these after its slot probe (Codex #4918
+// r17): any change to what the page's booking address resolves from must
+// change the fingerprint, and nothing else may.
+describe('bookingAddressInputs — what the booking address resolves from', () => {
+  const { bookingAddressInputs } = inspectionPublicRouter._internals;
+  const lead = { address: '123 Palm St', city: 'Bradenton', zip: '34205' };
+  const cust = {
+    id: 'cust-1', latitude: '27.4989', longitude: '-82.5748',
+    address_line1: '123 Palm St', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34205',
+  };
+
+  test('identical inputs → the same fingerprint', () => {
+    expect(bookingAddressInputs({ ...lead }, { ...cust })).toBe(bookingAddressInputs(lead, cust));
+  });
+
+  test.each([
+    ['the lead\'s own address', { ...lead, address: '9 Other Rd' }, cust],
+    ['the lead\'s zip', { ...lead, zip: '34203' }, cust],
+    ['the customer\'s street', lead, { ...cust, address_line1: '9 Other Rd' }],
+    ['the customer\'s unit', lead, { ...cust, address_line2: 'Unit 4' }],
+    ['the customer\'s stored coordinates', lead, { ...cust, latitude: '27.6' }],
+    ['a different trusted customer', lead, { ...cust, id: 'cust-2' }],
+    ['no trusted customer any more', lead, null],
+  ])('%s changing → a different fingerprint', (_label, nextLead, nextCust) => {
+    expect(bookingAddressInputs(nextLead, nextCust)).not.toBe(bookingAddressInputs(lead, cust));
+  });
+});

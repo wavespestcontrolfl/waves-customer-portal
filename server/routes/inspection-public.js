@@ -594,6 +594,28 @@ function storedAddressCandidates(lead, custRow) {
   return candidates;
 }
 
+// Everything the page's own booking address resolves from when no address
+// is typed (storedCoordsResolution + storedAddressCandidates): the trusted
+// customer's identity, stored coordinates and address, and the lead's own
+// address — as one comparable string, never geocoded. The estimate
+// consultation offer re-reads it after its slot probe (Codex #4918 r17): if
+// these inputs moved, the page would now book somewhere other than the
+// property the probe resolved.
+function bookingAddressInputs(lead, custRow) {
+  return JSON.stringify([
+    custRow?.id || null, custRow?.latitude ?? null, custRow?.longitude ?? null,
+    custRow?.address_line1 || null, custRow?.address_line2 || null,
+    custRow?.city || null, custRow?.state || null, custRow?.zip || null,
+    lead?.address || null, lead?.city || null, lead?.zip || null,
+  ]);
+}
+
+async function currentBookingAddressInputs(leadId) {
+  const lead = await loadLead(db, leadId);
+  if (!lead) return null;
+  return bookingAddressInputs(lead, await loadTrustedCustomer(db, lead, undefined));
+}
+
 // Street-level geocode of one address, or null. requireInServiceArea:false —
 // quality filtering stays (partial matches, ZIP/city centroids, no-match all
 // reject), but an out-of-box address is not discarded here as "unresolved":
@@ -780,7 +802,10 @@ async function computeConsultationSlotsForLead(leadId, { count = 3 } = {}) {
     const config = await booking._internals.loadBookingConfig();
     const range = bookingRange(config);
     const built = await buildAvailabilityForLead(resolved.location, { ...range, config, duration: catalog.durationMinutes });
-    return { ok: true, slots: flattenNextSlots(built, count), needsAddress: false, address: resolved.address };
+    return {
+      ok: true, slots: flattenNextSlots(built, count), needsAddress: false, address: resolved.address,
+      addressInputs: bookingAddressInputs(lead, custRow),
+    };
   } catch (err) {
     logger.warn(`[inspection-public] consultation slot compute failed for lead ${leadId}: ${err.message}`);
     return { ok: false };
@@ -2406,6 +2431,8 @@ router.post('/:token/waitlist', findSlotsLimiter, async (req, res, next) => {
 // automation email), not test introspection.
 router._internals = {
   computeConsultationSlotsForLead,
+  currentBookingAddressInputs,
+  bookingAddressInputs,
 };
 
 router._test = {

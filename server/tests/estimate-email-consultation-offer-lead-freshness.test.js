@@ -20,9 +20,14 @@ const mockDb = jest.fn((table) => mockBuilders[table]);
 jest.mock('../models/db', () => mockDb);
 
 const mockComputeConsultationSlotsForLead = jest.fn();
+// The inputs the page's booking address resolves from, fingerprinted by the
+// probe and re-read by the final check (Codex #4918 r17) — unchanged unless
+// a test moves them.
+const mockCurrentBookingAddressInputs = jest.fn();
 jest.mock('../routes/inspection-public', () => ({
   _internals: {
     computeConsultationSlotsForLead: (...args) => mockComputeConsultationSlotsForLead(...args),
+    currentBookingAddressInputs: (...args) => mockCurrentBookingAddressInputs(...args),
   },
 }));
 
@@ -128,7 +133,9 @@ beforeEach(() => {
     slots: [{ date: '2026-10-01', start_time: '09:00' }],
     needsAddress: false,
     address: { line1: '123 Palm Street', line2: null, city: 'Bradenton', state: 'FL', zip: '34205' },
+    addressInputs: 'INPUTS-A',
   });
+  mockCurrentBookingAddressInputs.mockResolvedValue('INPUTS-A');
 });
 
 afterEach(() => {
@@ -223,6 +230,15 @@ describe('a change AFTER the probe, before the send (Codex #4918 r9/r12) — the
     mockBuilders.estimates = estimatesBuilder([
       estimateRow(), estimateRow(), estimateRow({ estimate_data: JSON.stringify({ lead_id: 'another-lead', lead_linkage: 'sid' }) }),
     ]);
+    const { context, url } = await offerFor();
+    expect(context).not.toBeNull();
+    expect(url).toBe('');
+  });
+
+  test("the lead's booking address moved between the probe and the send → \"\" (Codex #4918 r17)", async () => {
+    mockCurrentBookingAddressInputs
+      .mockResolvedValueOnce('INPUTS-A') // the probe step's own post-probe check
+      .mockResolvedValue('INPUTS-B'); // the final check before the send
     const { context, url } = await offerFor();
     expect(context).not.toBeNull();
     expect(url).toBe('');

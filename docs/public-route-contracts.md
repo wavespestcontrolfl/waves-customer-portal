@@ -1479,7 +1479,10 @@ ones counted until their work settles — past the cap no probe starts).
 After the probe the estimate and the lead are re-read and every row-level
 rule above is re-judged on the fresh rows (`finalEligibility`), so a status
 change, hold, re-link or contact edit that lands during the probe omits the
-field.
+field — and so does a change to what the page's booking address resolves
+from (the lead's own address, its trusted customer's stored address or
+coordinates, or which customer that is: `inspection-public.js`
+`bookingAddressInputs`, compared, never re-geocoded).
 Quote-first only: never on an estimate drafted from a visit
 (`estimate_data.scheduled_service_id`) or on a grouped estimate
 (`estimate_group_id`). Composed on the page's own first `/data` load only —

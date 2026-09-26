@@ -169,8 +169,12 @@ async function estimateConsultationLead({ estimate, estimateData, acceptActive, 
   // this. The email runs this once a gone-quiet job has passed the engine's
   // own checks, records `context`, and re-runs finalEligibility after the
   // engine's claim (reconfirmConsultationLead).
-  const fresh = await finalEligibility(estimate.id, leadId, result.address);
-  if (fresh && context) Object.assign(context, { estimateId: estimate.id, leadId, probedAddress: result.address });
+  const fresh = await finalEligibility(estimate.id, leadId, result.address, result.addressInputs);
+  if (fresh && context) {
+    Object.assign(context, {
+      estimateId: estimate.id, leadId, probedAddress: result.address, addressInputs: result.addressInputs,
+    });
+  }
   return fresh;
 }
 
@@ -179,7 +183,7 @@ async function estimateConsultationLead({ estimate, estimateData, acceptActive, 
 // estimateConsultationLead applies above. Kept single-sourced so a rule
 // added to either check never drifts between the pre-probe and post-probe
 // passes.
-async function finalEligibility(estimateId, leadId, probedAddress) {
+async function finalEligibility(estimateId, leadId, probedAddress, probedAddressInputs) {
   const { isEstimateAcceptActive } = require('../routes/estimate-public');
   const freshEstimate = await db('estimates').where({ id: estimateId }).first();
   if (!freshEstimate || !isEstimateAcceptActive(freshEstimate)) return null;
@@ -205,6 +209,14 @@ async function finalEligibility(estimateId, leadId, probedAddress) {
   if (!leadMatchesEstimateContact(freshLead, freshEstimate)) return null;
   if (await leadLinkRefusal(freshLead)) return null;
   if (!leadWantsRecurringPlan(freshLead)) return null;
+  // The booking property itself can move during the probe too (Codex #4918
+  // r17): staff editing the lead's address, or its trusted customer's, or
+  // relinking that customer, would send /inspection/:token to a property
+  // other than the one the probe resolved — even while the estimate still
+  // matches it. The inputs the page resolves its address from must be the
+  // ones the probe used; compared, never re-geocoded.
+  const { currentBookingAddressInputs } = require('../routes/inspection-public')._internals;
+  if (!probedAddressInputs || (await currentBookingAddressInputs(leadId)) !== probedAddressInputs) return null;
   return freshLead;
 }
 
@@ -235,7 +247,7 @@ async function buildEstimateConsultationOffer({ estimate, estimateData, acceptAc
 // estimateConsultationLead recorded.
 async function reconfirmConsultationLead(context) {
   if (!context?.leadId || !leadInspectionLinkLive()) return null;
-  return finalEligibility(context.estimateId, context.leadId, context.probedAddress);
+  return finalEligibility(context.estimateId, context.leadId, context.probedAddress, context.addressInputs);
 }
 
 module.exports = {
