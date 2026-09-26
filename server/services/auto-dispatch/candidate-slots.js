@@ -38,7 +38,7 @@ const { resolveGeo, driveMin, HQ } = require('./geo');
 const { toDateStr, shiftDateStr } = require('./dates');
 const { autoDispatchSharedModelLive } = require('../../config/feature-gates');
 const { candidateHasOverlap, isActiveRouteStop } = require('./overlap-predicate');
-const { routeCost, clusterShare } = require('./route-model');
+const { routeCost, clusterShare, stopPlanningMinutes } = require('./route-model');
 
 const DAY_OPEN = 8 * 60;
 const DAY_CLOSE = 17 * 60;
@@ -104,8 +104,8 @@ function rowToDayStop(r) {
   };
 }
 
-// One technician-day's OTHER stops (never `excludeId`), shaped for the
-// shared model and filtered to ACTIVE stops only (overlap-predicate.js's
+// One technician-day's OTHER stops (never one of `excludeIds`), shaped for
+// the shared model and filtered to ACTIVE stops only (overlap-predicate.js's
 // isActiveRouteStop — the SAME status/expiry rule the writer's occupancy
 // probe applies): cancelled/completed/skipped/rescheduled are excluded at
 // the query level, and a no_show row or an expired estimate-slot hold
@@ -115,34 +115,73 @@ function rowToDayStop(r) {
 // but still counted as real stops for route-cost/cluster scoring — near-zero
 // detour and full cluster credit for a day that is actually empty (Codex
 // pre-push P1).
-async function loadDayStops(db, { technicianId, dateStr, excludeId }) {
+//
+// technician_id = `technicianId` OR NULL (Codex pre-push P1): the writer's
+// own move-conflict probe (rebooker.js probeMoveConflicts -> scheduling/
+// occupancy.js findConflictingVisits) is occupancy-blind to which row an
+// unassigned committed visit carries — "Waves runs exactly ONE active field
+// technician, so any time overlap ... is a real-world clash whether the
+// rows carry a technician_id, carry different ones, or carry none"
+// (occupancy.js header; AGENTS.md's "tech-scoped conflict WHEREs are blind
+// to technician-NULL rows" mirror rule). A tech-scoped-only query here
+// missed a real double-booking the writer would refuse.
+async function loadDayStops(db, { technicianId, dateStr, excludeIds }) {
   if (!technicianId) return [];
-  const rows = await db('scheduled_services')
+  const ids = [...(excludeIds || [])].map(String);
+  const query = db('scheduled_services')
     .where('scheduled_services.scheduled_date', dateStr)
-    .where('scheduled_services.technician_id', technicianId)
-    .whereNot('scheduled_services.id', excludeId)
+    .where((q) => {
+      q.where('scheduled_services.technician_id', technicianId).orWhereNull('scheduled_services.technician_id');
+    })
     .whereNotIn('scheduled_services.status', ['cancelled', 'completed', 'skipped', 'rescheduled'])
-    .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
-    .select(...DAY_STOP_COLUMNS);
+    .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id');
+  if (ids.length) query.whereNotIn('scheduled_services.id', ids);
+  const rows = await query.select(...DAY_STOP_COLUMNS);
   return rows.map(rowToDayStop).filter(isActiveRouteStop);
 }
 
-// Visit-group members moving together are never a conflict for each other
-// (mirrors the rebooker's excludeServiceIds for a unit move). Best-effort:
-// an unreadable group read still excludes the visit's own id, same as a
-// standalone (non-grouped) visit.
-async function loadOverlapExcludeIds(db, service) {
+// Visit-group context for the moving visit (Codex pre-push P1): the ids
+// moving together (self + every open group member — mirrors the rebooker's
+// excludeServiceIds for a unit move, so they are never a conflict for each
+// other, and never counted as a stationary "other stop" for route-cost/
+// cluster scoring either — a group alone on its own day must not earn
+// cluster credit from itself) and the sibling rows' fields needed to charge
+// the group's OWN combined footprint (unitPlanningMinutes below). ONE
+// `openMembers` read for the id list (the SAME accessor the rebooker's own
+// unit-move machinery uses for group membership — reused, not re-derived);
+// a second, only when there ARE siblings, for their planning-minutes
+// inputs. Best-effort: an unreadable group read degrades to a standalone
+// visit (no siblings), same as a plain (non-grouped) visit.
+async function loadGroupContext(db, service) {
   const selfId = String(service.id);
-  if (!service.visit_id) return new Set([selfId]);
+  if (!service.visit_id) return { excludeIds: new Set([selfId]), siblings: [] };
   try {
     // Required lazily (not at module load) to avoid a require cycle: visit-groups
     // requires scheduling modules that touch this file's siblings.
     const { openMembers } = require('../visit-groups');
     const members = await openMembers(db, service.visit_id);
-    return new Set([selfId, ...members.map((m) => String(m.id))]);
+    const siblingIds = members.map((m) => String(m.id)).filter((id) => id !== selfId);
+    const excludeIds = new Set([selfId, ...siblingIds]);
+    if (!siblingIds.length) return { excludeIds, siblings: [] };
+    const siblings = await db('scheduled_services')
+      .whereIn('id', siblingIds)
+      .select('id', 'service_type', 'is_recurring', 'is_callback', 'estimated_duration_minutes');
+    return { excludeIds, siblings };
   } catch (_) {
-    return new Set([selfId]);
+    return { excludeIds: new Set([selfId]), siblings: [] };
   }
+}
+
+// The moving UNIT's true occupied minutes — route-model.js's owner
+// planning-minutes table charged to the tapped visit AND every group
+// sibling, summed (Codex pre-push P1: "charge the group as the moving unit
+// consistently"). A grouped visit's real combined on-site time can run
+// longer than the tapped row's own reported window; callers widen the
+// occupancy check to at least this span (never shrinking it) so a
+// multi-member group can't clear the overlap probe on a slot too short for
+// the whole group.
+function unitPlanningMinutes(service, siblings) {
+  return stopPlanningMinutes(service) + (siblings || []).reduce((sum, m) => sum + stopPlanningMinutes(m), 0);
 }
 
 /**
@@ -155,12 +194,13 @@ async function loadOverlapExcludeIds(db, service) {
  * (technician, date) pair among the candidates (cached).
  */
 async function filterAndScoreSharedModelCandidates(service, geo, candidates, ctx, drops) {
-  const excludeIds = await loadOverlapExcludeIds(ctx.db, service);
+  const { excludeIds, siblings } = await loadGroupContext(ctx.db, service);
+  const minUnitMinutes = unitPlanningMinutes(service, siblings);
   const cache = new Map();
   const dayStopsFor = async (technicianId, dateStr) => {
     const key = `${technicianId}|${dateStr}`;
     if (!cache.has(key)) {
-      cache.set(key, await loadDayStops(ctx.db, { technicianId, dateStr, excludeId: service.id }));
+      cache.set(key, await loadDayStops(ctx.db, { technicianId, dateStr, excludeIds }));
     }
     return cache.get(key);
   };
@@ -168,7 +208,11 @@ async function filterAndScoreSharedModelCandidates(service, geo, candidates, ctx
   for (const cand of candidates) {
     const stops = await dayStopsFor(cand.technician_id, cand.date);
     const startMin = hhmmToMin(cand.start_time);
-    const endMin = hhmmToMin(cand.end_time);
+    // Never SHRINK the candidate's own reported window — only widen it to
+    // at least the moving unit's true combined footprint (Codex pre-push
+    // P1), so a standalone visit (minUnitMinutes <= its own duration in the
+    // common case) is unaffected.
+    const endMin = Math.max(hhmmToMin(cand.end_time), startMin + minUnitMinutes);
     if (candidateHasOverlap(stops, { startMin, endMin, excludeIds })) {
       if (drops) drops.slot_taken = (drops.slot_taken || 0) + 1;
       continue;
@@ -295,14 +339,18 @@ async function computeCurrentPlacement(service, prefs, ctx) {
   // associative — routing through the shared function ONLY when the gate is
   // on keeps gate-off byte-for-byte the legacy computation.
   const sharedModelOn = autoDispatchSharedModelLive();
-  // Active-only neighbors for the shared model (Codex pre-push P1): `neighbors`
-  // above still carries a no_show row or an expired estimate-slot hold (the
-  // legacy detour formula above always has, and gate-off must stay
-  // byte-for-byte) — but routeCost/clusterShare have no overlap check of
-  // their own, so without this filter a day whose only neighbors were
-  // expired holds scored a near-zero detour and full cluster credit, same
-  // bug loadDayStops had for candidates.
-  const activeNeighbors = sharedModelOn ? neighbors.filter(isActiveRouteStop) : neighbors;
+  // Shared-model neighbors (Codex pre-push P1): reuse loadDayStops — the
+  // SAME fetch+filter the candidate side uses (tech-or-unassigned
+  // occupancy, active stops only, the visit's OWN group siblings excluded)
+  // — rather than deriving a second, slightly different list from the
+  // legacy `neighbors` above. `neighbors` itself is untouched (still
+  // tech-scoped, still carries a no_show/expired hold, still includes group
+  // siblings) so the legacy formula above, and gate-off, stay byte-for-byte.
+  let activeNeighbors = [];
+  if (sharedModelOn) {
+    const { excludeIds } = await loadGroupContext(ctx.db, service);
+    activeNeighbors = await loadDayStops(ctx.db, { technicianId: techId, dateStr, excludeIds });
+  }
   if (sharedModelOn && geo) {
     const shared = routeCost(activeNeighbors, { geo, startMin: myStart });
     detour = shared.detourMinutes;
@@ -499,5 +547,7 @@ module.exports = {
   inBlackout,
   violatesPreferredDay,
   violatesPreferredTime,
-  _internals: { hhmmToMin, weekdayOf, isSaturday },
+  _internals: {
+    hhmmToMin, weekdayOf, isSaturday, loadDayStops, loadGroupContext, unitPlanningMinutes, filterAndScoreSharedModelCandidates,
+  },
 };

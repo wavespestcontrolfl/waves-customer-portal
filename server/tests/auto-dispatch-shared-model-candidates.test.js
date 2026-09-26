@@ -10,9 +10,16 @@ jest.mock('../services/route-optimizer', () => ({
   haversine: () => 1,
   milesToDriveMinutes: jest.requireActual('../services/route-optimizer').milesToDriveMinutes,
 }));
+jest.mock('../services/visit-groups', () => ({ openMembers: jest.fn() }));
 
 const { findAvailableSlots } = require('../services/scheduling/find-time');
-const { findValidCandidateSlots } = require('../services/auto-dispatch/candidate-slots');
+const { openMembers } = require('../services/visit-groups');
+const {
+  findValidCandidateSlots,
+  _internals: {
+    loadDayStops, loadGroupContext, unitPlanningMinutes, filterAndScoreSharedModelCandidates,
+  },
+} = require('../services/auto-dispatch/candidate-slots');
 
 const ORIGINAL_DRIVE_GATE = process.env.GATE_DRIVE_TIME_CALIBRATION;
 const ORIGINAL_SHARED_GATE = process.env.GATE_AUTO_DISPATCH_SHARED_MODEL;
@@ -209,4 +216,219 @@ test('computeCurrentPlacement: a current-day expired hold / no_show does not cou
   expect(withInactive.total_drive_minutes).toBe(empty.total_drive_minutes);
   expect(withInactive.same_area_share).toBe(0);
   expect(empty.same_area_share).toBe(0);
+});
+
+// Codex pre-push P1 (2026-09-26): loadDayStops was tech-scoped ONLY — the
+// writer's own move-conflict probe (rebooker.js probeMoveConflicts ->
+// scheduling/occupancy.js findConflictingVisits) is occupancy-blind to
+// which row an unassigned committed visit carries (AGENTS.md's "tech-scoped
+// conflict WHEREs are blind to technician-NULL rows" mirror rule; Waves
+// runs one active field technician, so ANY overlap is a real clash whether
+// the row names this tech, a different one, or none). A tech-scoped-only
+// pre-filter missed a real double-booking the writer would refuse.
+describe('loadDayStops: technician-NULL occupancy (Codex pre-push P1)', () => {
+  test('queries technician_id = the candidate tech OR NULL, never narrower', async () => {
+    let capturedTechOrNullFn = null;
+    const db = () => {
+      const c = {};
+      c.where = (fieldOrFn) => {
+        if (typeof fieldOrFn === 'function') capturedTechOrNullFn = fieldOrFn;
+        return c;
+      };
+      ['whereNot', 'whereNotIn', 'leftJoin'].forEach((m) => { c[m] = () => c; });
+      c.select = async () => [];
+      return c;
+    };
+    await loadDayStops(db, { technicianId: 't1', dateStr: '2026-08-06', excludeIds: new Set(['s1']) });
+
+    expect(typeof capturedTechOrNullFn).toBe('function');
+    const recorded = { where: [], orWhereNull: [] };
+    const subChain = {
+      where(field, val) { recorded.where.push([field, val]); return this; },
+      orWhereNull(field) { recorded.orWhereNull.push(field); return this; },
+    };
+    capturedTechOrNullFn(subChain);
+    // Exactly technician_id = 't1' (never a different tech's rows)...
+    expect(recorded.where).toEqual([['scheduled_services.technician_id', 't1']]);
+    // ...OR technician_id IS NULL (the writer's tech-blind occupancy rule).
+    expect(recorded.orWhereNull).toEqual(['scheduled_services.technician_id']);
+  });
+
+  test('a falsy technicianId still short-circuits to [] (no query at all)', async () => {
+    const db = jest.fn();
+    const result = await loadDayStops(db, { technicianId: null, dateStr: '2026-08-06', excludeIds: new Set() });
+    expect(result).toEqual([]);
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('excludes every id in excludeIds via whereNotIn', async () => {
+    let capturedExcludeArgs = null;
+    const db = () => {
+      const c = {};
+      ['where'].forEach((m) => { c[m] = () => c; });
+      c.whereNotIn = (field, ids) => {
+        if (field === 'scheduled_services.id') capturedExcludeArgs = ids;
+        return c;
+      };
+      c.leftJoin = () => c;
+      c.select = async () => [];
+      return c;
+    };
+    await loadDayStops(db, { technicianId: 't1', dateStr: '2026-08-06', excludeIds: new Set(['s1', 'sib']) });
+    expect(new Set(capturedExcludeArgs)).toEqual(new Set(['s1', 'sib']));
+  });
+});
+
+// Codex pre-push P1: a visit-group's own siblings (moving together with the
+// tapped visit) must never be counted as a stationary "other stop" for
+// EITHER side of the current-vs-candidate comparison, and the group's
+// combined footprint (owner planning minutes, summed) must be what gets
+// checked for occupancy — not just the tapped row's own reported duration.
+describe('visit-group exclusion + unit planning minutes (Codex pre-push P1)', () => {
+  const ORIGINAL_CAPACITY_GATE = process.env.GATE_SCHEDULING_CAPACITY;
+  afterEach(() => {
+    if (ORIGINAL_CAPACITY_GATE === undefined) delete process.env.GATE_SCHEDULING_CAPACITY; else process.env.GATE_SCHEDULING_CAPACITY = ORIGINAL_CAPACITY_GATE;
+  });
+
+  test('unitPlanningMinutes sums the tapped visit + every sibling', () => {
+    delete process.env.GATE_SCHEDULING_CAPACITY; // legacy rule: falls back to each row's own estimate
+    const tapped = { estimated_duration_minutes: 60 };
+    const siblings = [{ estimated_duration_minutes: 90 }, { estimated_duration_minutes: 30 }];
+    expect(unitPlanningMinutes(tapped, siblings)).toBe(180);
+    expect(unitPlanningMinutes(tapped, [])).toBe(60);
+    expect(unitPlanningMinutes(tapped, undefined)).toBe(60);
+  });
+
+  test('loadGroupContext: no visit_id -> standalone visit, zero db calls', async () => {
+    const db = jest.fn();
+    const result = await loadGroupContext(db, { id: 's1' });
+    expect(result.excludeIds).toEqual(new Set(['s1']));
+    expect(result.siblings).toEqual([]);
+    expect(db).not.toHaveBeenCalled();
+    expect(openMembers).not.toHaveBeenCalled();
+  });
+
+  test('loadGroupContext: a visit group resolves excludeIds (self + siblings) and the siblings\' planning-minutes fields', async () => {
+    openMembers.mockResolvedValueOnce([{ id: 's1' }, { id: 'sib1' }, { id: 'sib2' }]);
+    const db = () => {
+      const c = {};
+      c.whereIn = () => c;
+      c.select = async () => [
+        { id: 'sib1', service_type: 'One-Time Pest Control', is_recurring: false, estimated_duration_minutes: 90 },
+        { id: 'sib2', service_type: 'One-Time Pest Control', is_recurring: false, estimated_duration_minutes: 30 },
+      ];
+      return c;
+    };
+    const result = await loadGroupContext(db, { id: 's1', visit_id: 'v1' });
+    expect(result.excludeIds).toEqual(new Set(['s1', 'sib1', 'sib2']));
+    expect(result.siblings.map((s) => s.id).sort()).toEqual(['sib1', 'sib2']);
+  });
+
+  test('loadGroupContext: an unreadable group degrades to standalone (fail-safe)', async () => {
+    openMembers.mockRejectedValueOnce(new Error('boom'));
+    const result = await loadGroupContext(jest.fn(), { id: 's1', visit_id: 'v1' });
+    expect(result.excludeIds).toEqual(new Set(['s1']));
+    expect(result.siblings).toEqual([]);
+  });
+
+  test('filterAndScoreSharedModelCandidates: excludes group siblings from loadDayStops (never a stationary "other stop")', async () => {
+    openMembers.mockResolvedValueOnce([{ id: 's1' }, { id: 'sib1' }]);
+    let call = 0;
+    let capturedDayStopExcludeIds = null;
+    const db = () => {
+      call += 1;
+      const n = call;
+      const c = {};
+      if (n === 1) {
+        // loadGroupContext's sibling-fields query
+        c.whereIn = () => c;
+        c.select = async () => [{ id: 'sib1', service_type: 'One-Time Pest Control', is_recurring: false, estimated_duration_minutes: 90 }];
+      } else {
+        // loadDayStops for the candidate's (tech, date)
+        c.where = () => c;
+        c.whereNotIn = (field, ids) => {
+          if (field === 'scheduled_services.id') capturedDayStopExcludeIds = ids;
+          return c;
+        };
+        c.leftJoin = () => c;
+        c.select = async () => [];
+      }
+      return c;
+    };
+    const service = { id: 's1', visit_id: 'v1', estimated_duration_minutes: 60, lat: 27.4, lng: -82.5 };
+    const geo = { lat: 27.4, lng: -82.5 };
+    const candidates = [{ technician_id: 't1', date: '2026-08-06', start_time: '08:00', end_time: '09:00' }];
+    await filterAndScoreSharedModelCandidates(service, geo, candidates, { db }, {});
+
+    expect(new Set(capturedDayStopExcludeIds)).toEqual(new Set(['s1', 'sib1']));
+  });
+
+  test('a grouped visit whose COMBINED planning minutes exceed the candidate\'s own reported window is checked against its true footprint, not just the tapped row\'s duration', async () => {
+    delete process.env.GATE_SCHEDULING_CAPACITY; // legacy rule: full estimate per row
+    openMembers.mockResolvedValueOnce([{ id: 's1' }, { id: 'sib1' }]);
+    let call = 0;
+    const db = () => {
+      call += 1;
+      const n = call;
+      const c = {};
+      if (n === 1) {
+        // loadGroupContext's sibling-fields query — a 90-minute sibling.
+        c.whereIn = () => c;
+        c.select = async () => [{ id: 'sib1', service_type: 'One-Time Pest Control', is_recurring: false, estimated_duration_minutes: 90 }];
+      } else {
+        // loadDayStops: one real stop at 10:00-10:30 — AFTER the candidate's
+        // own reported 08:00-09:00 window, but INSIDE the group's true
+        // combined footprint (60 + 90 = 150 min from 08:00 -> 10:30).
+        c.where = () => c;
+        c.whereNotIn = () => c;
+        c.leftJoin = () => c;
+        c.select = async () => [{
+          id: 'blocker', window_start: '10:00', window_end: '10:30', status: 'confirmed',
+          estimated_duration_minutes: 30, svc_lat: 27.4, svc_lng: -82.5,
+        }];
+      }
+      return c;
+    };
+    const service = { id: 's1', visit_id: 'v1', estimated_duration_minutes: 60, lat: 27.4, lng: -82.5 };
+    const geo = { lat: 27.4, lng: -82.5 };
+    const candidates = [{ technician_id: 't1', date: '2026-08-06', start_time: '08:00', end_time: '09:00' }];
+    const drops = { slot_taken: 0 };
+
+    const kept = await filterAndScoreSharedModelCandidates(service, geo, candidates, { db }, drops);
+
+    expect(kept).toHaveLength(0); // dropped — the group's TRUE footprint collides
+    expect(drops.slot_taken).toBe(1);
+  });
+
+  test('computeCurrentPlacement: excludes the visit\'s own group siblings from the shared-model neighbor list', async () => {
+    process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
+    const { computeCurrentPlacement } = require('../services/auto-dispatch/candidate-slots');
+    openMembers.mockResolvedValueOnce([{ id: 's1' }, { id: 'sib1' }]);
+    const grouped = { ...SERVICE, visit_id: 'v1' };
+    let call = 0;
+    let capturedExcludeIds = null;
+    const db = () => {
+      call += 1;
+      const n = call;
+      const c = {};
+      if (n === 1) {
+        // The legacy (unconditional) neighbor query — irrelevant here.
+        ['where', 'whereNot', 'whereNotIn', 'leftJoin'].forEach((m) => { c[m] = () => c; });
+        c.select = async () => [];
+      } else if (n === 2) {
+        // loadGroupContext's sibling-fields query
+        c.whereIn = () => c;
+        c.select = async () => [{ id: 'sib1', service_type: 'One-Time Pest Control', is_recurring: false, estimated_duration_minutes: 90 }];
+      } else {
+        // loadDayStops for the CURRENT day/tech (the shared-model branch)
+        c.where = () => c;
+        c.whereNotIn = (field, ids) => { if (field === 'scheduled_services.id') capturedExcludeIds = ids; return c; };
+        c.leftJoin = () => c;
+        c.select = async () => [];
+      }
+      return c;
+    };
+    await computeCurrentPlacement(grouped, prefs, { ...ctxBase(), db });
+    expect(new Set(capturedExcludeIds)).toEqual(new Set(['s1', 'sib1']));
+  });
 });
