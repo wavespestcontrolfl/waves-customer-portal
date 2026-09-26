@@ -78,6 +78,7 @@ const DAY_STOP_COLUMNS = [
   'scheduled_services.customer_id',
   'scheduled_services.route_order',
   'scheduled_services.created_at',
+  'scheduled_services.reservation_policy_version',
   'scheduled_services.time_window',
   'scheduled_services.window_start',
   'scheduled_services.window_end',
@@ -102,6 +103,15 @@ const DAY_STOP_COLUMNS = [
   'customers.longitude as customer_longitude',
 ];
 
+// A version-2 reservation keeps the planning minutes it was offered under
+// even if GATE_SCHEDULING_CAPACITY is rolled back — the mapping every
+// canonical planning-minutes caller applies (slot-reservation.js:
+// `preserveCapacity: row.reservation_policy_version === 2`, read by
+// planning-minutes.js plannedWorkMinutes). Codex r7.
+function preservesCapacity(row) {
+  return row.reservation_policy_version === 2;
+}
+
 // Shapes a DAY_STOP_COLUMNS row into the plain {geo, startMin, ...} object
 // route-model.js and overlap-predicate.js read. `visit_id` travels through
 // unchanged (Codex pre-push P1) so route-model.js's clusterShare can collapse
@@ -117,6 +127,7 @@ function rowToDayStop(r) {
     route_order: r.route_order,
     created_at: r.created_at,
     time_window: r.time_window,
+    preserveCapacity: preservesCapacity(r),
     // The co-visit merge (isCoVisitPair) reads the stop's coordinates and
     // premise under the canonical column names.
     lat: geo ? geo.lat : null,
@@ -165,6 +176,7 @@ function serviceToRouteStop(service, geo, startMin, siblings = [], routeOrder = 
     estimated_duration_minutes: service.estimated_duration_minutes,
     window_start: service.window_start,
     window_end: service.window_end,
+    preserveCapacity: preservesCapacity(service),
     unitMembers: siblings,
   };
 }
@@ -225,16 +237,30 @@ async function loadDayStops(db, { technicianId, dateStr, excludeIds }) {
 // which would score a well-clustered unassigned visit as a lone HQ round
 // trip and let any candidate clear the threshold. Waves runs one active
 // field technician: the only assignable one (technician-eligibility.js's
-// applyAssignable). Anything else (none, several, an unreadable table)
-// resolves to null — the unassigned rows alone, no guessed technician.
+// applyAssignable). Anything else — none, several, an unreadable table —
+// FAILS CLOSED (Codex r7): scoring the current day on the unassigned rows
+// alone would understate it the same way, so the evaluation is skipped
+// (CURRENT_DAY_TECH_UNRESOLVED), never guessed.
+const CURRENT_DAY_TECH_UNRESOLVED = 'CURRENT_DAY_TECH_UNRESOLVED';
 async function resolveCurrentDayTech(db, service) {
   if (service.technician_id) return service.technician_id;
+  let techs;
   try {
-    const techs = await applyAssignable(db('technicians')).select('technicians.id');
-    return Array.isArray(techs) && techs.length === 1 ? techs[0].id : null;
-  } catch {
-    return null;
+    techs = await applyAssignable(db('technicians')).select('technicians.id');
+  } catch (err) {
+    throw skipEvaluation(CURRENT_DAY_TECH_UNRESOLVED, 'Assignable technicians could not be read for an unassigned visit', err);
   }
+  if (!Array.isArray(techs) || techs.length !== 1) {
+    throw skipEvaluation(CURRENT_DAY_TECH_UNRESOLVED, 'No single assignable technician for an unassigned visit\'s day');
+  }
+  return techs[0].id;
+}
+
+// An error that abandons ONE visit's evaluation (the orchestrator records a
+// no-change row with `code`, ids-only) instead of failing it: the shared
+// model could not establish what it would be comparing, so it moves nothing.
+function skipEvaluation(code, message, cause) {
+  return Object.assign(new Error(message), { code, skipEvaluation: true, ...(cause ? { cause } : {}) });
 }
 
 // The moving unit: its ids (self + every open group member — the rebooker's
@@ -265,13 +291,17 @@ async function loadGroupContext(db, service) {
         .whereIn('id', siblingIds)
         .select(
           'id', 'scheduled_date', 'technician_id', 'window_start', 'window_end', 'route_order', 'created_at',
-          'estimated_duration_minutes', 'service_type', 'is_recurring', 'is_callback',
+          'estimated_duration_minutes', 'service_type', 'is_recurring', 'is_callback', 'reservation_policy_version',
         ),
       db('service_visits').where({ id: service.visit_id }).first('window_start'),
     ]);
-    return { excludeIds, siblings, visitWindowStart: (visit && visit.window_start) || null };
+    return {
+      excludeIds,
+      siblings: siblings.map((sib) => ({ ...sib, preserveCapacity: preservesCapacity(sib) })),
+      visitWindowStart: (visit && visit.window_start) || null,
+    };
   } catch (err) {
-    throw Object.assign(new Error('Visit group could not be read'), { code: GROUP_CONTEXT_UNAVAILABLE, cause: err });
+    throw skipEvaluation(GROUP_CONTEXT_UNAVAILABLE, 'Visit group could not be read', err);
   }
 }
 
@@ -778,6 +808,7 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
 module.exports = {
   SCORE_CAP,
   GROUP_CONTEXT_UNAVAILABLE,
+  CURRENT_DAY_TECH_UNRESOLVED,
   findValidCandidateSlots,
   computeCurrentPlacement,
   inBlackout,

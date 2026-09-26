@@ -793,7 +793,7 @@ describe('SLOT_TAKEN parity with the writer (Codex r1)', () => {
       return c;
     });
     await loadGroupContext(db, { id: 's1', visit_id: 'v1' });
-    expect(cols).toEqual(expect.arrayContaining(['route_order', 'created_at', 'technician_id', 'window_start', 'window_end']));
+    expect(cols).toEqual(expect.arrayContaining(['route_order', 'created_at', 'technician_id', 'window_start', 'window_end', 'reservation_policy_version']));
   });
 
 
@@ -831,6 +831,60 @@ test('openMembers is read exactly once per evaluation; the current placement and
   await findValidCandidateSlots(grouped, prefs, { ...ctxBase(), db });
   expect(openMembers).toHaveBeenCalledTimes(2);
   openMembers.mockReset();
+});
+
+// Codex r7 (PRRT_kwDOR3YQi86mRfE_): an unassigned visit whose day cannot be
+// pinned to exactly one technician is skipped, never scored on the
+// unassigned rows alone.
+describe('unassigned visit, day technician unresolved: fail closed', () => {
+  const techlessDb = (techs) => (table) => {
+    const c = {};
+    ['where', 'whereIn', 'whereNot', 'whereNotIn', 'whereNotNull', 'leftJoin'].forEach((m) => { c[m] = () => c; });
+    c.select = async () => {
+      if (table !== 'technicians') return [];
+      if (techs instanceof Error) throw techs;
+      return techs;
+    };
+    return c;
+  };
+  const unassigned = { ...SERVICE, technician_id: null };
+
+  test.each([
+    ['no assignable technician', []],
+    ['several assignable technicians', [{ id: 't1' }, { id: 't2' }]],
+    ['an unreadable technicians table', new Error('boom')],
+  ])('%s -> CURRENT_DAY_TECH_UNRESOLVED (skip)', async (_label, techs) => {
+    process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
+    await expect(computeCurrentPlacement(unassigned, prefs, { ...ctxBase(), db: techlessDb(techs) }))
+      .rejects.toMatchObject({ code: 'CURRENT_DAY_TECH_UNRESOLVED', skipEvaluation: true });
+  });
+
+  test('exactly one assignable technician still resolves the day', async () => {
+    process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
+    const current = await computeCurrentPlacement(unassigned, prefs, { ...ctxBase(), db: techlessDb([{ id: 't1' }]) });
+    expect(current.model).toBe('shared_v1');
+  });
+});
+
+// Codex r7 (PRRT_kwDOR3YQi86mRfFG): a version-2 reservation keeps its planning
+// minutes (preserveCapacity) even with GATE_SCHEDULING_CAPACITY rolled back.
+test('a reservation_policy_version 2 day stop keeps its planning minutes with the capacity gate off', async () => {
+  delete process.env.GATE_SCHEDULING_CAPACITY;
+  const pest = (version) => ({
+    id: 'p1', status: 'confirmed', window_start: '10:00', window_end: '11:00', service_type: 'Quarterly Pest Control Service',
+    is_recurring: true, estimated_duration_minutes: 60, reservation_policy_version: version, svc_lat: 27.4, svc_lng: -82.5, ...SLOT_KEY,
+  });
+  const dbWith = (rows) => () => {
+    const c = {};
+    ['where', 'whereIn', 'whereNotIn', 'whereNotNull', 'leftJoin'].forEach((m) => { c[m] = () => c; });
+    c.select = async () => rows;
+    return c;
+  };
+  const cand = [{ technician_id: 't1', date: '2026-08-06', start_time: '08:00', end_time: '09:00' }];
+  const service = { id: 's1', estimated_duration_minutes: 60 };
+  const [v2] = await filterAndScoreSharedModelCandidates(service, { lat: 27.4, lng: -82.5 }, cand, { db: dbWith([pest(2)]) }, {});
+  const [v1] = await filterAndScoreSharedModelCandidates(service, { lat: 27.4, lng: -82.5 }, cand, { db: dbWith([pest(1)]) }, {});
+  expect(v1.route_minutes - v2.route_minutes).toBeCloseTo(60 - 25, 5); // v2 plans at the table's 25, v1 at its 60 estimate
 });
 
 // Codex pre-push P1: group siblings are excluded from the day's stops because

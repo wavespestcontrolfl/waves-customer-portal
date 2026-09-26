@@ -13,7 +13,7 @@ jest.mock('../services/auto-dispatch/preferences', () => ({
     blackout: null, service_category: 'general', has_explicit_prefs: false, raw_snapshot: null,
   })),
 }));
-jest.mock('../services/auto-dispatch/candidate-slots', () => ({ findValidCandidateSlots: jest.fn(), GROUP_CONTEXT_UNAVAILABLE: 'GROUP_CONTEXT_UNAVAILABLE' }));
+jest.mock('../services/auto-dispatch/candidate-slots', () => ({ findValidCandidateSlots: jest.fn() }));
 jest.mock('../services/auto-dispatch/apply', () => ({ applyAutoDispatchMove: jest.fn(), unitMoveSize: jest.fn(async () => 1), revalidatePlacement: jest.fn(async () => ({ ok: true })) }));
 jest.mock('../services/geocoder', () => ({ ensureCustomerGeocoded: jest.fn() }));
 jest.mock('../services/auto-dispatch/audit', () => ({
@@ -588,7 +588,7 @@ describe('shared-model apply path (Codex r1)', () => {
     const prev = process.env.AUTO_DISPATCH_ALLOW_APPLY;
     process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
     try {
-      candidateSlots.findValidCandidateSlots.mockRejectedValue(Object.assign(new Error('Visit group could not be read'), { code: 'GROUP_CONTEXT_UNAVAILABLE' }));
+      candidateSlots.findValidCandidateSlots.mockRejectedValue(Object.assign(new Error('Visit group could not be read'), { code: 'GROUP_CONTEXT_UNAVAILABLE', skipEvaluation: true }));
       const result = await _internals.evaluatePlacement(svc(), PREFS, {}, CONFIG, '2026-06-20');
       expect(result).toMatchObject({ kind: 'no_change', reason_code: 'GROUP_CONTEXT_UNAVAILABLE' });
 
@@ -599,6 +599,16 @@ describe('shared-model apply path (Codex r1)', () => {
     } finally {
       process.env.AUTO_DISPATCH_ALLOW_APPLY = prev;
     }
+  });
+
+  // Codex r7 (PRRT_kwDOR3YQi86mRfE_): the same no-change skip for an
+  // unassigned visit whose day technician cannot be resolved.
+  test('an unresolved day technician skips the visit with CURRENT_DAY_TECH_UNRESOLVED', async () => {
+    candidateSlots.findValidCandidateSlots.mockRejectedValueOnce(Object.assign(new Error('No single assignable technician for an unassigned visit\'s day'), {
+      code: 'CURRENT_DAY_TECH_UNRESOLVED', skipEvaluation: true,
+    }));
+    const result = await _internals.evaluatePlacement(svc(), PREFS, {}, CONFIG, '2026-06-20');
+    expect(result).toMatchObject({ kind: 'no_change', reason_code: 'CURRENT_DAY_TECH_UNRESOLVED' });
   });
 
   test('any other slot-finder error still fails the visit as before', async () => {

@@ -17,7 +17,7 @@ const { getAutoDispatchConfig } = require('./config');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { isEligibleForAutoDispatch, isRecurringPlanActive } = require('./eligibility');
 const { getCustomerSchedulingPreferences } = require('./preferences');
-const { findValidCandidateSlots, SCORE_CAP, GROUP_CONTEXT_UNAVAILABLE } = require('./candidate-slots');
+const { findValidCandidateSlots, SCORE_CAP } = require('./candidate-slots');
 const { scoreAppointmentPlacement } = require('./scoring');
 const { applyAutoDispatchMove, revalidatePlacement, unitMoveSize } = require('./apply');
 const { toDateStr, shiftDateStr } = require('./dates');
@@ -202,15 +202,19 @@ function buildPlacementAudit({
  * `current`/`currentScore` let a caller re-audit a different (fallback)
  * candidate later with buildPlacementAudit.
  */
-// findValidCandidateSlots, failing closed on an unreadable visit group
-// (GATE_AUTO_DISPATCH_SHARED_MODEL, Codex r3 P1): the visit is not evaluated
-// at all — `skipped` carries the reason code — rather than scored as if it
-// stood alone. Any other error propagates as before.
+// findValidCandidateSlots, failing closed where the shared model cannot
+// establish what it would compare (GATE_AUTO_DISPATCH_SHARED_MODEL — an
+// unreadable visit group, Codex r3 P1; no single technician for an
+// unassigned visit's day, r7): the visit is not evaluated at all —
+// `skipped` carries the ids-only reason — rather than scored on a guess.
+// Any other error propagates as before.
 async function findSlotsOrSkip(service, prefs, ctx) {
   try {
     return await findValidCandidateSlots(service, prefs, ctx);
   } catch (err) {
-    if (err && err.code && err.code === GROUP_CONTEXT_UNAVAILABLE) return { current: null, candidates: [], drops: null, skipped: err.code };
+    if (err && err.skipEvaluation === true) {
+      return { current: null, candidates: [], drops: null, skipped: { code: err.code, description: `${err.message} — not evaluated` } };
+    }
     throw err;
   }
 }
@@ -219,7 +223,7 @@ async function findSlotsOrSkip(service, prefs, ctx) {
 // reason, say so — a HARD preferred-day/time filter dropping every feasible
 // slot is the override working as designed, not a failure to optimize.
 function noSlotReason(drops, skipped) {
-  if (skipped) return { code: skipped, description: 'Visit group could not be read — not evaluated' };
+  if (skipped) return skipped;
   const prefDropped = !!drops && (drops.preferred_day > 0 || drops.preferred_time > 0);
   return prefDropped
     ? { code: 'NO_SLOT_MATCHING_PREFERENCE', description: 'No candidate slot honored the customer\'s explicit day/time preference' }
