@@ -615,6 +615,11 @@ function resolvePrepay(input, term, wholeAccount) {
 // processor and the case write, released in the caller's finally. Busy or
 // unacquirable = refuse, never proceed unlocked (money path fails closed).
 const CANCEL_LOCK_NS = 'admin-cancel-plan';
+// Written into the term's renewal note in the SAME statement that records an
+// end-now decision (recordDecision), and only after the wind-down ran — the
+// one piece of end-now evidence that can't be lost after the fact. The
+// annual-prepay decided-lapse refresh reads it; the wording is load-bearing.
+const END_NOW_DECISION_NOTE = 'ended now; unused-value refund owed';
 // The same key, transaction-scoped, for a writer that must not interleave
 // with a cancel commit (the annual-prepay decided-lapse reseed). Advisory
 // session and transaction locks share one key space: while a commit runs this
@@ -1089,6 +1094,21 @@ async function commitCancelPlan({ customerId, actor = null, ...raw } = {}) {
     return await commitCancelPlanLocked({ customerId, actor, ...raw });
   } finally {
     await release();
+    await refreshPrepayCoverageAfterCommit(customerId);
+  }
+}
+
+// A schedule edit that refreshed this customer's annual-prepay coverage while
+// the commit held its key skipped the decided-lapse reseed
+// (tryHoldCancelCommitLockForTransaction) — nothing else retries it. Re-run
+// the refresh once the key is released, whatever the commit's outcome:
+// an end_at_term lapse gets its replacement / stamps, an end-now refund is
+// left alone by the refresh's own disposition check. Best-effort.
+async function refreshPrepayCoverageAfterCommit(customerId) {
+  try {
+    await require('./annual-prepay-renewals').refreshActiveTermsForCustomer(customerId);
+  } catch (err) {
+    logger.warn(`[admin-cancellation] post-commit prepay coverage refresh failed for ${customerId}: ${err.message}`);
   }
 }
 
@@ -1967,7 +1987,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
           // note says OWED, never "recorded": a lost task/case write leaves
           // refundRecorded false and bells the office, and a durable
           // renewal note claiming the record exists would contradict it.
-          `Cancel plan (${actorLabel}) — ended now; unused-value refund owed to the customer (office refund task + cancellation case follow).`);
+          `Cancel plan (${actorLabel}) — ${END_NOW_DECISION_NOTE} to the customer (office refund task + cancellation case follow).`);
         if (!decision.verified) {
           // A racing renew/switch_plan decision means the term is NOT
           // cancelled — recording a refund task for it would promise money
@@ -2320,6 +2340,7 @@ module.exports = {
   // The same key, transaction-scoped: the annual-prepay decided-lapse reseed
   // serializes with a cancel commit through it.
   tryHoldCancelCommitLockForTransaction,
+  END_NOW_DECISION_NOTE,
   // Portal replay guard (requests.js dedupe + inactive retry): never re-run
   // a portal cancellation without the boundary an admin end-of-coverage
   // decision holds.

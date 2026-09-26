@@ -2793,36 +2793,29 @@ function isDecidedLapseInWindow(term, today = etDateString()) {
 
 // Cancel plan records that same decided-lapse shape for "end now + refund",
 // which pulls every visit first and owes the unused value back, so it must
-// never be reseeded or stamped. Its disposition is durable twice: on the
-// cancellation service request, written before anything destructive (it
-// survives a lost case write), and on the cancellation case after. Either
-// one, from a cancellation opened since this term began, stops the reseed —
-// fail closed. Every other decided lapse — "end of paid coverage", or a
-// renewal-time lapse, which has neither — keeps its guarantees, but only
-// while the read side still reports it as paid coverage today
-// (coveredTermsAsOf): a dispute clears a decided lapse's stamps and suspends
-// it through that paid-invoice gate, and a refresh must not hand the stamps
-// back while the money is contested or refunded.
+// never be reseeded or stamped. Only an end-now that actually reached the
+// term counts: its decision note (written in the same statement as the
+// decision, after the wind-down ran — admin-cancellation
+// END_NOW_DECISION_NOTE), or a cancellation case recording the end-now
+// disposition with a reached outcome (the case also covers an end-at-term
+// lapse later switched to end-now, whose decision was already recorded). A
+// failed attempt proves nothing. Every other decided lapse — "end of paid
+// coverage", or a renewal-time lapse — keeps its guarantees, but only while
+// the read side still reports it as paid coverage today (coveredTermsAsOf):
+// a dispute clears a decided lapse's stamps and suspends it through that
+// paid-invoice gate, and a refresh must not hand the stamps back while the
+// money is contested or refunded.
 async function decidedLapseKeepsCoverage(term, conn = db) {
   const stillPaid = await coveredTermsAsOf(conn, etDateString()).where('t.id', term.id).first('t.id');
   if (!stillPaid) return false;
+  const { END_NOW_DECISION_NOTE } = require('./admin-cancellation');
+  if (String(term.renewal_notes || '').includes(END_NOW_DECISION_NOTE)) return false;
   const endedNow = await conn('cancellation_cases')
     .where({ customer_id: term.customer_id })
     .whereRaw("snapshot->>'prepayTermId' = ?", [String(term.id)])
     .whereRaw("snapshot->>'prepayDisposition' = 'end_now_refund'")
-    .first('id')
-    || await conn('service_requests')
-      .where({ customer_id: term.customer_id, category: 'cancellation' })
-      .where('created_at', '>=', term.created_at || term.term_start)
-      // Stated, or derived the way admin-cancellation resolvePrepay derives
-      // it when the request left it blank: a whole-account cancel (empty
-      // scope) that is not "end of coverage".
-      .whereRaw(`(metadata->'cancel_plan'->>'prepayDisposition' = 'end_now_refund'
-        OR (metadata->'cancel_plan' IS NOT NULL
-          AND coalesce(metadata->'cancel_plan'->>'prepayDisposition', '') = ''
-          AND coalesce(metadata->'cancel_plan'->'scope', '[]'::jsonb) = '[]'::jsonb
-          AND coalesce(metadata->'cancel_plan'->>'effectiveDate', 'now') <> 'end_of_coverage'))`)
-      .first('id');
+    .whereRaw("snapshot->>'prepayTermOutcome' IN ('ended_now', 'decision_already_recorded')")
+    .first('id');
   return !endedNow;
 }
 
@@ -2884,7 +2877,17 @@ async function refreshTermSnapshot(termOrId, conn = db) {
     const reseed = async (t) => {
       const { tryHoldCancelCommitLockForTransaction } = require('./admin-cancellation');
       if (!(await tryHoldCancelCommitLockForTransaction(t, term.customer_id))) return;
-      if (await decidedLapseKeepsCoverage(term, t)) await seedCoverage(t);
+      // The paid verdict and the writes it allows commit together: a void or
+      // dispute rewriting the prepay invoice waits for this transaction (or
+      // lands first and is read below). The term is re-read for the same
+      // reason — its decision note may have been written since.
+      if (term.prepay_invoice_id) {
+        await t('invoices').where({ id: term.prepay_invoice_id }).forShare().first('id');
+      }
+      const current = await t('annual_prepay_terms').where({ id: term.id }).first();
+      if (current && isDecidedLapseInWindow(current) && await decidedLapseKeepsCoverage(current, t)) {
+        await seedCoverage(t);
+      }
     };
     await (conn.isTransaction ? reseed(conn) : conn.transaction(reseed));
   }

@@ -14,6 +14,7 @@ jest.mock('../models/db', () => {
   db.transaction = (...args) => db.connection.transaction(...args);
   Object.defineProperty(db, 'schema', { get: () => db.connection.schema });
   Object.defineProperty(db, 'fn', { get: () => db.connection.fn });
+  Object.defineProperty(db, 'client', { get: () => db.connection.client });
   return db;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
@@ -96,13 +97,13 @@ postgres('decided-lapse annual-prepay terms keep their coverage guarantees throu
     return id;
   }
 
-  async function cancelCase(t, prepayDisposition) {
+  async function cancelCase(t, prepayDisposition, prepayTermOutcome) {
     await trx('cancellation_cases').insert({
-      customer_id: t.customerId, snapshot: JSON.stringify({ prepayTermId: t.termId, prepayDisposition }),
+      customer_id: t.customerId, snapshot: JSON.stringify({ prepayTermId: t.termId, prepayDisposition, prepayTermOutcome }),
     });
   }
 
-  const decideCancel = (t) => AnnualPrepayRenewals.recordDecision({ termId: t.termId, action: 'cancel' });
+  const decideCancel = (t, notes = null) => AnnualPrepayRenewals.recordDecision({ termId: t.termId, action: 'cancel', notes });
 
   test('an end-at-term lapse still replaces a skipped kept visit', async () => {
     const t = await seededTerm();
@@ -134,7 +135,7 @@ postgres('decided-lapse annual-prepay terms keep their coverage guarantees throu
   test('the recorded end_at_term case keeps coverage after every kept visit is skipped', async () => {
     const t = await seededTerm();
     await decideCancel(t);
-    await cancelCase(t, 'end_at_term');
+    await cancelCase(t, 'end_at_term', 'ends_at_term');
     for (const visit of await coverage(t)) await skip(visit);
     await AnnualPrepayRenewals.refreshActiveTermsForCustomer(t.customerId, trx);
     expect((await coverage(t)).length).toBeGreaterThan(0);
@@ -186,32 +187,21 @@ postgres('decided-lapse annual-prepay terms keep their coverage guarantees throu
     expect((await coverage(t)).every((row) => row.prepaid_method === null)).toBe(true);
   });
 
-  test.each([
-    ['stated on the request', { scope: [], prepayDisposition: 'end_now_refund', effectiveDate: 'now' }],
-    ['derived from a whole-account "now" with the disposition left blank', { scope: [], prepayDisposition: null, effectiveDate: 'now' }],
-  ])('an end-now-refund cancel whose case write failed is still never reseeded (%s)', async (_label, cancelPlan) => {
+  test('an end-now refund whose case write failed is still never reseeded (its decision note carries it)', async () => {
+    const { END_NOW_DECISION_NOTE } = require('../services/admin-cancellation');
     const t = await seededTerm();
-    // The cancellation request carries the plan from before the processor
-    // ran; the case that would repeat it was never written.
-    await trx('service_requests').insert({
-      customer_id: t.customerId, category: 'cancellation', subject: 'Cancel plan', source: 'admin', status: 'new',
-      metadata: JSON.stringify({ cancel_plan: cancelPlan }),
-    });
     const pulled = await coverage(t);
     await trx('scheduled_services').whereIn('id', pulled.map((v) => v.id)).update({ status: 'cancelled', updated_at: new Date() });
-    await decideCancel(t);
+    await decideCancel(t, `Cancel plan (Admin) — ${END_NOW_DECISION_NOTE} to the customer (office refund task + cancellation case follow).`);
 
     await AnnualPrepayRenewals.refreshActiveTermsForCustomer(t.customerId, trx);
     await AnnualPrepayRenewals.refreshTermSnapshot(t.termId, trx);
     expect(await coverage(t)).toHaveLength(0);
   });
 
-  test('an end-of-coverage request with the disposition left blank does not block the reseed', async () => {
+  test('a failed end-now attempt does not block a later renewal lapse', async () => {
     const t = await seededTerm();
-    await trx('service_requests').insert({
-      customer_id: t.customerId, category: 'cancellation', subject: 'Cancel plan', source: 'admin', status: 'new',
-      metadata: JSON.stringify({ cancel_plan: { scope: [], prepayDisposition: null, effectiveDate: 'end_of_coverage' } }),
-    });
+    await cancelCase(t, 'end_now_refund', 'skipped_processor_failed');
     await decideCancel(t);
     const kept = await upcoming(t);
     await skip(kept[kept.length - 1]);
@@ -219,12 +209,28 @@ postgres('decided-lapse annual-prepay terms keep their coverage guarantees throu
     expect(await upcoming(t)).toHaveLength(kept.length);
   });
 
+  test('a cancel commit re-runs the customer\'s coverage refresh when it releases its key, even when it fails', async () => {
+    const previousGate = process.env.GATE_CANCEL_FLOW_V2;
+    process.env.GATE_CANCEL_FLOW_V2 = 'true';
+    const refresh = jest.spyOn(AnnualPrepayRenewals, 'refreshActiveTermsForCustomer');
+    try {
+      const customerId = randomUUID();
+      await expect(require('../services/admin-cancellation').commitCancelPlan({ customerId, effectiveDate: 'someday' }))
+        .rejects.toMatchObject({ code: 'invalid_effective_date' });
+      expect(refresh).toHaveBeenCalledWith(customerId);
+    } finally {
+      refresh.mockRestore();
+      if (previousGate === undefined) delete process.env.GATE_CANCEL_FLOW_V2;
+      else process.env.GATE_CANCEL_FLOW_V2 = previousGate;
+    }
+  });
+
   test('an end-now-refund cancel is never reseeded or stamped', async () => {
     const t = await seededTerm();
     const pulled = await coverage(t);
     await trx('scheduled_services').whereIn('id', pulled.map((v) => v.id)).update({ status: 'cancelled', updated_at: new Date() });
     await decideCancel(t);
-    await cancelCase(t, 'end_now_refund');
+    await cancelCase(t, 'end_now_refund', 'ended_now');
     const replacementId = await handAdded(t, pulled[pulled.length - 1]);
     const liveVisits = async () => (await trx('scheduled_services')
       .where({ customer_id: t.customerId }).whereNot('status', 'cancelled').pluck('id')).sort();

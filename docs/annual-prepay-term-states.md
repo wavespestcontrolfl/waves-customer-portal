@@ -81,14 +81,15 @@ These constants in `R` decide what each stage *means* to the rest of billing:
   skipped after an "end of paid coverage" cancel or a renewal-time lapse is
   still replaced and a hand-added replacement is still stamped. Cancel plan
   records the same shape for "end now + refund", which pulls every visit
-  first; its disposition (`end_now_refund`, on the cancellation service
-  request written before anything destructive and on the cancellation case
-  after) keeps that term from ever being reseeded or stamped
-  (`decidedLapseKeepsCoverage`, fail closed). Only while
-  `coveredTermsAsOf` still reports the term as paid coverage today (a
-  dispute's cleared stamps are not handed back), and under Cancel plan's
-  commit key (`tryHoldCancelCommitLockForTransaction`) so a cancellation
-  being committed is never interleaved with.
+  first; an end-now that reached the term (its decision note,
+  `END_NOW_DECISION_NOTE`, written with the decision, or a cancellation case
+  with a reached `prepayTermOutcome`) keeps that term from ever being
+  reseeded or stamped (`decidedLapseKeepsCoverage`); a failed attempt proves
+  nothing. Only while `coveredTermsAsOf` still reports the term as paid
+  coverage (re-checked with the prepay invoice locked, so a dispute's cleared
+  stamps are not handed back), and under Cancel plan's commit key
+  (`tryHoldCancelCommitLockForTransaction`); a refresh skipped while a commit
+  holds the key is re-run when the commit releases it.
 - `PAYMENT_PENDING_STATUS = 'payment_pending'` — payment reminders (3d/1d),
   card-expiry exemptions, `getPaymentPendingCustomerIds`.
 
