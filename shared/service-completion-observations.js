@@ -1,4 +1,5 @@
 const catalog = require('./service-completion-observations.json');
+const lawnCatalog = require('./lawn-condition-findings.json');
 
 const EMPTY_OBSERVATIONS = new Set();
 const STRUCTURED_OBSERVATION_FINDING_DETAIL = 'Recorded during the structured service closeout.';
@@ -31,13 +32,40 @@ const TREE_SHRUB_VISIBLE_STRESS_IDS = new Set([
   'abnormal-new-growth',
 ]);
 
+const LAWN_DEFINITE_LIVE_PEST_LABELS = new Set([
+  'Chinch bugs — observed',
+  'Tropical sod webworms',
+  'Armyworms',
+  'White grubs',
+  'Mole crickets',
+  'Fire ants',
+  'Turf scale or mealybugs',
+]);
+const LAWN_PEST_OBSERVATION_SCOPE = new Map();
+const lawnPestFindings = lawnCatalog.groups
+  .flatMap(({ findings }) => findings)
+  .filter(({ label }) => label === 'No live pests detected' || LAWN_DEFINITE_LIVE_PEST_LABELS.has(label));
+for (const { label, statement } of lawnPestFindings) {
+  for (const location of lawnCatalog.locations) {
+    for (const extent of ['', ...lawnCatalog.extents]) {
+      const observation = `${statement} Location: ${location}.${extent ? ` Extent: ${extent}.` : ''}`;
+      LAWN_PEST_OBSERVATION_SCOPE.set(observation, {
+        location,
+        state: label === 'No live pests detected' ? 'absent' : 'present',
+      });
+    }
+  }
+}
+const routineLiveLawnPests = catalog.lawn.find(([id]) => id === 'live-pests')?.[1];
+LAWN_PEST_OBSERVATION_SCOPE.set(routineLiveLawnPests, { location: null, state: 'present' });
+
 function observationsForRoutineService(family) {
   return Object.prototype.hasOwnProperty.call(ROUTINE_SERVICE_OBSERVATIONS, family)
     ? ROUTINE_SERVICE_OBSERVATIONS[family]
     : EMPTY_OBSERVATIONS;
 }
 
-function conflictingRoutineObservations(observations = []) {
+function conflictingRoutineObservations(observations = [], { treeShrubLandscapeCondition = null } = {}) {
   const selected = new Set(observations);
   for (const scope of ['interior', 'exterior']) {
     const labels = catalog.recurring_pest
@@ -59,6 +87,22 @@ function conflictingRoutineObservations(observations = []) {
     .find(([, label]) => selected.has(label));
   if (selected.has(noVisiblePlantStress) && visiblePlantStress) {
     return 'Choose either no visible plant stress or a visible plant stress or symptom finding for the inspected plants.';
+  }
+  if (selected.has(noVisiblePlantStress) && ['Poor', 'Declining'].includes(treeShrubLandscapeCondition)) {
+    return 'Choose a plant-stress finding when the overall landscape condition is poor or declining.';
+  }
+  const lawnPestStates = observations
+    .map((observation) => LAWN_PEST_OBSERVATION_SCOPE.get(observation))
+    .filter(Boolean);
+  const noLiveLawnPests = lawnPestStates.filter(({ state }) => state === 'absent');
+  const liveLawnPests = lawnPestStates.filter(({ state }) => state === 'present');
+  const throughout = 'Throughout inspected lawn';
+  if (noLiveLawnPests.some(({ location: noLiveLocation }) => liveLawnPests.some(({ location: liveLocation }) => (
+    noLiveLocation === throughout
+      || liveLocation === throughout
+      || (liveLocation && liveLocation === noLiveLocation)
+  )))) {
+    return 'Choose either no live lawn pests or a live lawn-pest finding for the same inspected area.';
   }
   return null;
 }

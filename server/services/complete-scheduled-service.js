@@ -3693,7 +3693,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // from a stale or direct API client (codex P2 r8 #3701 + local audit).
     const structuredObservationConflict = invalidStructuredObservation
       ? null
-      : conflictingRoutineObservations(formObservations) || validateSpecialtyClosureCombination(
+      : conflictingRoutineObservations(formObservations, {
+        treeShrubLandscapeCondition: typedFindingsType === 'tree_shrub'
+          ? structuredFindings?.values?.landscape_condition
+          : null,
+      }) || validateSpecialtyClosureCombination(
         resolvedSpecialtyServiceKey,
         {
           observations: formObservations,

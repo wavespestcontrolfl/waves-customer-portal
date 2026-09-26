@@ -34,6 +34,8 @@ const {
   completionStructuredObservationAllowlist,
 } = require('../services/complete-scheduled-service');
 const completionObservationCatalog = require('../../shared/service-completion-observations.json');
+const lawnConditionCatalog = require('../../shared/lawn-condition-findings.json');
+const { conflictingRoutineObservations } = require('../../shared/service-completion-observations');
 const { etDateString } = require('../utils/datetime-et');
 
 const TREE_SHRUB_VISIBLE_STRESS_IDS = [
@@ -43,6 +45,17 @@ const TREE_SHRUB_VISIBLE_STRESS_IDS = [
   'trunk-damage', 'bark-cracking', 'frond-discoloration', 'dead-fronds',
   'abnormal-new-growth',
 ];
+const DEFINITE_LIVE_LAWN_PEST_LABELS = [
+  'Chinch bugs — observed', 'Tropical sod webworms', 'Armyworms', 'White grubs',
+  'Mole crickets', 'Fire ants', 'Turf scale or mealybugs',
+];
+
+const lawnObservation = (label, location = 'Throughout inspected lawn', extent = '') => {
+  const finding = lawnConditionCatalog.groups
+    .flatMap(({ findings }) => findings)
+    .find((row) => row.label === label);
+  return `${finding.statement} Location: ${location}.${extent ? ` Extent: ${extent}.` : ''}`;
+};
 
 const SERVICE_ID = '00000000-0000-4000-8000-000000000101';
 const TECH_ID = '00000000-0000-4000-8000-000000000102';
@@ -180,6 +193,90 @@ describe('customer-safe routine completion observations', () => {
         .filter(([id]) => ['no-visible-stress', conditionId].includes(id)).map(([, label]) => label),
     });
     expect(result.body?.code).not.toBe('conflicting_structured_observations');
+  });
+
+  test.each(['Poor', 'Declining'])('rejects no visible plant stress with the typed %s landscape condition', async (landscapeCondition) => {
+    service.service_type = 'Every 6 Weeks Tree & Shrub Care Service';
+    attempts.claimCompletionAttempt.mockResolvedValue({ action: 'proceed', attempt: { id: 'fixture-attempt' } });
+    resolveCompletionProfileForScheduledService.mockResolvedValueOnce({
+      findingsType: 'tree_shrub',
+      serviceKey: 'tree_shrub_6week',
+      completionMode: 'service_report',
+      deliveryMode: 'auto_send',
+    });
+
+    const result = await complete({
+      structuredObservations: [completionObservationCatalog.tree_shrub.find(([id]) => id === 'no-visible-stress')[1]],
+      structuredFindings: {
+        type: 'tree_shrub',
+        values: { plant_groups: ['Shrubs'], landscape_condition: landscapeCondition },
+      },
+      nextStepChips: ['Continue Tree & Shrub program'],
+    });
+
+    expect(result).toMatchObject({ status: 422, body: { code: 'conflicting_structured_observations' } });
+  });
+
+  test.each(['Excellent', 'Good', 'Fair', 'Recovering'])('allows no visible plant stress with the typed %s landscape condition', async (landscapeCondition) => {
+    service.service_type = 'Every 6 Weeks Tree & Shrub Care Service';
+    attempts.claimCompletionAttempt.mockResolvedValue({ action: 'proceed', attempt: { id: 'fixture-attempt' } });
+    resolveCompletionProfileForScheduledService.mockResolvedValueOnce({
+      findingsType: 'tree_shrub',
+      serviceKey: 'tree_shrub_6week',
+      completionMode: 'service_report',
+      deliveryMode: 'auto_send',
+    });
+
+    const result = await complete({
+      structuredObservations: [completionObservationCatalog.tree_shrub.find(([id]) => id === 'no-visible-stress')[1]],
+      structuredFindings: {
+        type: 'tree_shrub',
+        values: { plant_groups: ['Shrubs'], landscape_condition: landscapeCondition },
+      },
+      nextStepChips: ['Continue Tree & Shrub program'],
+    });
+
+    expect(result.body?.code).not.toBe('conflicting_structured_observations');
+  });
+
+  test.each(['', ...lawnConditionCatalog.extents])('rejects routine live pests with a throughout-lawn absence claim (extent %s)', async (extent) => {
+    service.service_type = 'Lawn Care';
+    attempts.claimCompletionAttempt.mockResolvedValue({ action: 'proceed', attempt: { id: 'fixture-attempt' } });
+    resolveCompletionProfileForScheduledService.mockResolvedValueOnce({ serviceKey: 'lawn', completionMode: 'service_report' });
+
+    const result = await complete({
+      structuredObservations: [
+        completionObservationCatalog.lawn.find(([id]) => id === 'live-pests')[1],
+        lawnObservation('No live pests detected', 'Throughout inspected lawn', extent),
+      ],
+    });
+
+    expect(result).toMatchObject({ status: 422, body: { code: 'conflicting_structured_observations' } });
+  });
+
+  test.each(DEFINITE_LIVE_LAWN_PEST_LABELS)('rejects no live lawn pests with the definite legacy %s finding in the same area', async (findingLabel) => {
+    service.service_type = 'Lawn Care';
+    attempts.claimCompletionAttempt.mockResolvedValue({ action: 'proceed', attempt: { id: 'fixture-attempt' } });
+    resolveCompletionProfileForScheduledService.mockResolvedValueOnce({ serviceKey: 'lawn', completionMode: 'service_report' });
+
+    const result = await complete({
+      structuredObservations: [
+        lawnObservation('No live pests detected', 'Back yard'),
+        lawnObservation(findingLabel, 'Back yard'),
+      ],
+    });
+
+    expect(result).toMatchObject({ status: 422, body: { code: 'conflicting_structured_observations' } });
+  });
+
+  test.each([
+    ['a suspected pest injury', lawnObservation('Chinch bug injury — suspected', 'Back yard')],
+    ['live pests in a different area', lawnObservation('Chinch bugs — observed', 'Front yard')],
+  ])('allows no live pests in one area with %s', (_case, otherFinding) => {
+    expect(conflictingRoutineObservations([
+      lawnObservation('No live pests detected', 'Back yard'),
+      otherFinding,
+    ])).toBeNull();
   });
 
   test('the completion path rejects a routine observation on typed and specialty closeouts', async () => {
