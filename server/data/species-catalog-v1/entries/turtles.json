@@ -1,0 +1,116 @@
+[
+  {
+    "kind": "organism",
+    "aka": [],
+    "stages": [
+      "juvenile",
+      "adult"
+    ],
+    "sign_of": [],
+    "safety_line": "Gopher tortoises and their burrows are protected by Florida law. Do not disturb, handle, or fill a burrow — a permit is required even for construction work nearby.",
+    "legacy_slugs": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": ""
+    },
+    "slug": "gopher-tortoise",
+    "common_name": "Gopher Tortoise",
+    "aliases": [
+      "gopher tortoise",
+      "gopher tortoises"
+    ],
+    "scientific_name": "Gopherus polyphemus",
+    "rank": "species",
+    "group": "turtles",
+    "subgroup": null,
+    "site_category": "Wildlife neighbors",
+    "traits": [
+      "Half-moon-shaped burrow entrance with a sandy apron in front",
+      "Stumpy, elephant-like back legs and shovel-shaped front feet",
+      "Grazes on grass and low plants by day, 9-11 inches shell length",
+      "Burrow shared by more than 350 other species"
+    ],
+    "look_alikes": [
+      {
+        "slug": "southeastern-pocket-gopher",
+        "difference": "Gopher tortoise burrows have a half-moon entrance and sandy apron; pocket gopher mounds are small volcano-shaped soil piles with no open entrance.",
+        "next_photo": "A wide photo of the burrow or mound shape, plus the shell if the tortoise is visible.",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "armadillo",
+        "difference": "Gopher tortoise burrows are one wide half-moon opening with a sandy apron; armadillo digging is many small, scattered cone-shaped holes.",
+        "next_photo": "A wide photo of the hole or burrow shape — one wide half-moon opening versus several small round holes.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "large",
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "lizard-frog"
+    ],
+    "verdict": "ally",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": true,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      3,
+      4,
+      5,
+      6
+    ],
+    "service": {
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
+      "inspection_first": false,
+      "referral": "protected_leave_alone"
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "Its burrow shelters more than 350 other species — Florida’s original landlord, and a protected species you’re lucky to host. Mow around the burrow apron and enjoy the neighbor; disturbing the burrow requires an FWC permit.",
+      "fact": "Its burrow shelters 350+ other species — Florida’s original landlord, and a protected species you’re lucky to host.",
+      "blurb": "Protected by law — burrows can’t be disturbed. Mow around the apron and enjoy the neighbor."
+    },
+    "tech_notes": "Threatened species under Florida law; burrow disturbance within 25 ft requires an FWC permit. Never treat, fill, or disturb a burrow — refer to FWC gopher tortoise program if relocation is requested.",
+    "sources": [
+      "https://myfwc.com/wildlifehabitats/wildlife/gopher-tortoise/",
+      "https://myfwc.com/education/wildlife/gopher-tortoise/burrow-id/"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/gopher-tortoise/",
+      "guides": []
+    },
+    "role": "protected_wildlife",
+    "risk": "low",
+    "action": "leave_alone",
+    "season_basis": "year_round",
+    "verification": []
+  }
+]
