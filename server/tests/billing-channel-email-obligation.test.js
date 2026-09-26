@@ -8,7 +8,8 @@ jest.mock('../models/db', () => {
     let sibling;
     let siblingState;
     const q = {
-      where: jest.fn((values) => { Object.assign(filters, values); return q; }),
+      where: jest.fn((values) => { if (typeof values === 'object' && values) Object.assign(filters, values); return q; }),
+      whereIn: jest.fn(() => q),
       whereRaw: jest.fn((sql, bindings) => {
         if (sql.includes('billing_channel_email_key')) eventKey = bindings[0];
         if (sql.includes('billing_email_siblings')) [sibling, siblingState] = bindings;
@@ -62,6 +63,7 @@ const db = require('../models/db');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { getChargeableAutopayMethod } = require('../services/autopay-eligibility');
+const { getCardExpiryExemptions } = require('../services/annual-prepay-renewals');
 const obligation = require('../services/messaging/billing-channel-email-obligation');
 const customerId = '11111111-1111-4111-8111-111111111111';
 
@@ -191,3 +193,121 @@ test.each(['autopay_card_expiry_warning', 'payment_expiry_workflow'])(
     expect(getChargeableAutopayMethod.mock.calls.at(-1)[2].ignoreCardExpiry).toBeUndefined();
   },
 );
+
+describe('producerEligible refusal codes', () => {
+  test('autopay_pre_charge_reminder refuses a malformed or missing charge date', async () => {
+    await expect(obligation.producerEligible({ source_entry_point: 'autopay_pre_charge_reminder',
+      customer_id: customerId, charge_date: 'not-a-date' }))
+      .resolves.toEqual({ eligible: false, reason: 'charge-date-missing', retryable: false });
+  });
+
+  test('autopay_pre_charge_reminder refuses a charge date that is no longer three days out', async () => {
+    await expect(obligation.producerEligible({ source_entry_point: 'autopay_pre_charge_reminder',
+      customer_id: customerId, charge_date: '2000-01-01' }))
+      .resolves.toEqual({ eligible: false, reason: 'charge-date-passed', retryable: false });
+  });
+
+  test.each(['autopay_card_expiry_warning', 'payment_expiry_workflow'])(
+    '%s refuses when the expiry pin is incomplete', async (source) => {
+      await expect(obligation.producerEligible({ source_entry_point: source, customer_id: customerId,
+        payment_method_id: 'card-1', expiry_month: '6' }))
+        .resolves.toEqual({ eligible: false, reason: 'expiry-pin-missing', retryable: false });
+    },
+  );
+
+  test.each(['autopay_card_expiry_warning', 'payment_expiry_workflow'])(
+    '%s refuses when the customer record is gone or inactive', async (source) => {
+      await expect(obligation.producerEligible({ source_entry_point: source, customer_id: customerId,
+        payment_method_id: 'card-1', expiry_month: '6', expiry_year: '2027' }))
+        .resolves.toEqual({ eligible: false, reason: 'customer-no-longer-active', retryable: false });
+    },
+  );
+
+  test('autopay_card_expiry_warning refuses when autopay has been turned off', async () => {
+    db._customers.set(customerId, { id: customerId, active: true, autopay_enabled: false });
+    await expect(obligation.producerEligible({ source_entry_point: 'autopay_card_expiry_warning',
+      customer_id: customerId, payment_method_id: 'card-1', expiry_month: '6', expiry_year: '2027' }))
+      .resolves.toEqual({ eligible: false, reason: 'autopay-disabled', retryable: false });
+  });
+
+  test.each(['autopay_card_expiry_warning', 'payment_expiry_workflow'])(
+    '%s refuses when the pinned payment method is gone or no longer matches', async (source) => {
+      db._customers.set(customerId, { id: customerId, active: true, autopay_enabled: true });
+      await expect(obligation.producerEligible({ source_entry_point: source, customer_id: customerId,
+        payment_method_id: 'card-missing', expiry_month: '6', expiry_year: '2027' }))
+        .resolves.toEqual({ eligible: false, reason: 'expiry-method-changed', retryable: false });
+    },
+  );
+
+  test('payment_expiry_workflow refuses a card whose expiry window has passed', async () => {
+    const [year, month] = etDateString().split('-').map(Number);
+    const farMonth = ((month + 5 - 1) % 12) + 1;
+    const farYear = month + 5 > 12 ? year + 1 : year;
+    db._customers.set(customerId, { id: customerId, active: true, pipeline_stage: 'active_customer' });
+    db._methods.set('card-1', { id: 'card-1', customer_id: customerId, processor: 'stripe', autopay_enabled: true,
+      stripe_payment_method_id: 'pm_1', method_type: 'card', exp_month: String(farMonth), exp_year: String(farYear) });
+    getChargeableAutopayMethod.mockResolvedValue({ id: 'card-1' });
+    await expect(obligation.producerEligible({ source_entry_point: 'payment_expiry_workflow', customer_id: customerId,
+      payment_method_id: 'card-1', expiry_month: String(farMonth), expiry_year: String(farYear) }))
+      .resolves.toEqual({ eligible: false, reason: 'expiry-window-passed', retryable: false });
+  });
+
+  test('payment_expiry_workflow refuses a former customer even inside the expiry window', async () => {
+    const [year, month] = etDateString().split('-').map(Number);
+    db._customers.set(customerId, { id: customerId, active: true, pipeline_stage: 'lost' });
+    db._methods.set('card-1', { id: 'card-1', customer_id: customerId, processor: 'stripe', autopay_enabled: true,
+      stripe_payment_method_id: 'pm_1', method_type: 'card', exp_month: String(month), exp_year: String(year) });
+    getChargeableAutopayMethod.mockResolvedValue({ id: 'card-1' });
+    await expect(obligation.producerEligible({ source_entry_point: 'payment_expiry_workflow', customer_id: customerId,
+      payment_method_id: 'card-1', expiry_month: String(month), expiry_year: String(year) }))
+      .resolves.toEqual({ eligible: false, reason: 'former-customer', retryable: false });
+  });
+
+  test('payment_expiry_workflow refuses a lapsed pipeline stage with no paid history or upcoming visit', async () => {
+    const [year, month] = etDateString().split('-').map(Number);
+    db._customers.set(customerId, { id: customerId, active: true, pipeline_stage: 'nurture' });
+    db._methods.set('card-1', { id: 'card-1', customer_id: customerId, processor: 'stripe', autopay_enabled: true,
+      stripe_payment_method_id: 'pm_1', method_type: 'card', exp_month: String(month), exp_year: String(year) });
+    getChargeableAutopayMethod.mockResolvedValue({ id: 'card-1' });
+    await expect(obligation.producerEligible({ source_entry_point: 'payment_expiry_workflow', customer_id: customerId,
+      payment_method_id: 'card-1', expiry_month: String(month), expiry_year: String(year) }))
+      .resolves.toEqual({ eligible: false, reason: 'payment-relationship-ended', retryable: false });
+  });
+
+  test('autopay_card_expiry_warning refuses a card outside its 60-day warning horizon', async () => {
+    const [year, month] = etDateString().split('-').map(Number);
+    const farMonth = ((month + 5 - 1) % 12) + 1;
+    const farYear = month + 5 > 12 ? year + 1 : year;
+    db._customers.set(customerId, { id: customerId, active: true, autopay_enabled: true });
+    db._methods.set('card-1', { id: 'card-1', customer_id: customerId, processor: 'stripe', autopay_enabled: true,
+      stripe_payment_method_id: 'pm_1', method_type: 'card', exp_month: String(farMonth), exp_year: String(farYear) });
+    getChargeableAutopayMethod.mockResolvedValue({ id: 'card-1' });
+    await expect(obligation.producerEligible({ source_entry_point: 'autopay_card_expiry_warning', customer_id: customerId,
+      payment_method_id: 'card-1', expiry_month: String(farMonth), expiry_year: String(farYear), expiry_stage: 'soon' }))
+      .resolves.toEqual({ eligible: false, reason: 'expiry-window-passed', retryable: false });
+  });
+
+  test('autopay_card_expiry_warning refuses when the expired/soon stage no longer matches the card', async () => {
+    const [year, month] = etDateString().split('-').map(Number);
+    db._customers.set(customerId, { id: customerId, active: true, autopay_enabled: true });
+    db._methods.set('card-1', { id: 'card-1', customer_id: customerId, processor: 'stripe', autopay_enabled: true,
+      stripe_payment_method_id: 'pm_1', method_type: 'card', exp_month: String(month), exp_year: String(year) });
+    getChargeableAutopayMethod.mockResolvedValue({ id: 'card-1' });
+    // The current month has not expired yet, but the stamped stage claims it already has.
+    await expect(obligation.producerEligible({ source_entry_point: 'autopay_card_expiry_warning', customer_id: customerId,
+      payment_method_id: 'card-1', expiry_month: String(month), expiry_year: String(year), expiry_stage: 'expired' }))
+      .resolves.toEqual({ eligible: false, reason: 'expiry-stage-changed', retryable: false });
+  });
+
+  test('autopay_card_expiry_warning honors an annual-prepay card-expiry exemption', async () => {
+    const [year, month] = etDateString().split('-').map(Number);
+    db._customers.set(customerId, { id: customerId, active: true, autopay_enabled: true });
+    db._methods.set('card-1', { id: 'card-1', customer_id: customerId, processor: 'stripe', autopay_enabled: true,
+      stripe_payment_method_id: 'pm_1', method_type: 'card', exp_month: String(month), exp_year: String(year) });
+    getChargeableAutopayMethod.mockResolvedValue({ id: 'card-1' });
+    getCardExpiryExemptions.mockResolvedValueOnce({ customerIds: new Set([customerId]), chargeMethodIdsByCustomer: new Map() });
+    await expect(obligation.producerEligible({ source_entry_point: 'autopay_card_expiry_warning', customer_id: customerId,
+      payment_method_id: 'card-1', expiry_month: String(month), expiry_year: String(year), expiry_stage: 'soon' }))
+      .resolves.toEqual({ eligible: false, reason: 'prepay-covered', retryable: false });
+  });
+});
