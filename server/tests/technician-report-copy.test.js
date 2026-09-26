@@ -21,6 +21,7 @@ const {
   technicianReportCustomerCopy,
   summaryCopySignature,
   MAX_REPORT_CHARS,
+  customerCopyViolations,
 } = require('../services/service-report/technician-report-copy');
 const {
   buildTodaysResult,
@@ -39,6 +40,31 @@ const AI_REPORT = [
 ].join('\n');
 
 const AI_BODY = 'A full exterior perimeter application targeted the foundation line, door thresholds, and garage entry where ant trailing was documented. A non-repellent residual was applied to the plumbing penetrations under the kitchen sink. Ant activity was concentrated along the front walkway expansion joint, with light trailing near the garage. Activity typically tapers over the next one to two weeks as the product transfers through the colony.';
+
+describe('custom action credential screening', () => {
+  test.each([
+    'Opened side gate with 2468',
+    'Unlocked rear door using 2468',
+    'Accessed garage with 2468',
+    'rear gate 2468',
+    'side gate: 2468',
+    'Open side gate with 2468 in the morning',
+    'Opened side gate with 2468 in the morning',
+    'rear gate 2468 in the morning',
+  ])('rejects recorded access credentials: %s', (action) => {
+    expect(customerCopyViolations(action)).toContain('access_code');
+  });
+
+  test.each([
+    'Inspected 120 linear feet around the garage',
+    'Inspected the rear gate 120 feet from the lanai',
+    'Opened the gate onto 400 square feet of treated turf',
+    'Opened the gate onto 400.5 square feet of treated turf',
+    'Inspected the rear gate 120.5 feet from the lanai',
+  ])('preserves dimensional work details: %s', (action) => {
+    expect(customerCopyViolations(action)).toEqual([]);
+  });
+});
 
 describe('technicianReportCustomerCopy — shape parsing', () => {
   test('parses the generate-report two-section shape into a single customer body', () => {

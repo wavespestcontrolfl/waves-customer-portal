@@ -28,14 +28,29 @@ test('the customer payload preserves submitted lawn findings, work, quantities a
   };
   knex.schema = { hasTable: async () => false, hasColumn: async () => false };
   const tips = freezeTechTips({ ids: [], custom: 'Monitor the affected patch and contact us if it spreads.' }).tips;
+  const persistedActions = [
+    'Tested irrigation coverage',
+    'Used gate code [redacted] for access',
+    'Opened side gate with 2468',
+    'rear gate 2468',
+  ];
   const data = await buildReportV1Data({
     id: 'test-lawn-record', customer_id: 'test-property', service_line: 'lawn', service_type: 'Every 6 Weeks Lawn Care Service', service_date: '2026-09-05', status: 'completed',
     areas_serviced: ['Front yard', 'Side yards'], technician_notes: '[Found] Internal access instruction',
-    structured_notes: { formObservations: [finding], observations: [finding, 'Internal access instruction'], protocolActionsCompleted: ['Tested irrigation coverage'], techTips: tips },
-    service_data: {},
+    structured_notes: { formObservations: [finding], observations: [finding, 'Internal access instruction'], protocolActionsCompleted: persistedActions, techTips: tips },
+    service_data: { protocol: { actions: ['Used gate code 4417 for access'] } },
   }, 'test-preview-token', knex);
   expect(data.protocol.structuredObservations).toEqual([finding]);
-  expect(data.protocol.actions).toContain('Tested irrigation coverage');
+  expect(data.protocol.actions).toEqual(['Tested irrigation coverage']);
+  expect(JSON.stringify(data)).not.toMatch(/4417|2468|\[redacted\]|gate code/i);
+  // The report projection filters at customer egress; stored/replay inputs
+  // remain intact for internal completion evidence.
+  expect(persistedActions).toEqual([
+    'Tested irrigation coverage',
+    'Used gate code [redacted] for access',
+    'Opened side gate with 2468',
+    'rear gate 2468',
+  ]);
   expect(data.findings.map((item) => item.title)).toContain(finding);
   expect(data.findings.map((item) => item.title).join(' ')).not.toContain('Internal access');
   expect(data.applications[0]).toMatchObject({ rate: 3, totalAmount: 12, areaValue: 4000, applicationArea: 'Front yard, Side yards' });

@@ -21,7 +21,7 @@ const { buildTreeShrubReportV2 } = require('./tree-shrub-report-v2');
 const { applyLawnReportNarrative } = require('./lawn-report-narrative');
 const { applyVisitSummaryNarrative } = require('./visit-summary-narrative');
 const { applyRodentReportNarrative, applyTypedReportNarrative } = require('./rodent-report-narrative');
-const { technicianReportCustomerCopy } = require('./technician-report-copy');
+const { technicianReportCustomerCopy, customerCopyViolations } = require('./technician-report-copy');
 const { getTurfHeightForVisit, getTurfHeightTrend } = require('../turf-height-service');
 const { resolveZoneRowsImageDrift } = require('./zone-drift');
 const { buildStationMapReportContext } = require('../termite-stations');
@@ -1683,11 +1683,15 @@ function buildProtocolPayload(record) {
   const serviceData = parseJsonObject(record.service_data);
   const protocol = parseJsonObject(serviceData.protocol);
   return {
+    // Persisted actions are internal completion evidence. This projection is
+    // public report JSON, so legacy unsafe values are screened at read time
+    // without rewriting the stored record or replay inputs.
     actions: uniqueStrings([
       ...parseJsonArray(protocol.actions),
       ...parseJsonArray(structured.protocolActionsCompleted),
       ...taggedNoteLines(record.technician_notes, ['protocol', 'protocol optional', 'action']),
-    ]),
+    ]).filter((action) => !/\[redacted\]/i.test(action)
+      && customerCopyViolations(action).length === 0),
     observations: uniqueStrings([
       ...parseJsonArray(protocol.observations),
       ...parseJsonArray(structured.observations),

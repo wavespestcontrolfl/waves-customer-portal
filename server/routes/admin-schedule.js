@@ -71,7 +71,11 @@ const { detectServiceLine } = require('../services/service-report/service-line-c
 const { validateTreeShrubReviewForReport } = require('../services/tree-shrub-assessment');
 const ActivityIndicators = require('../services/service-report/activity-indicators');
 const { redactAccessCodes } = require('../services/context-aggregator');
-const { technicianReportCustomerCopy, containsReportAccessCode } = require('../services/service-report/technician-report-copy');
+const {
+  technicianReportCustomerCopy,
+  containsReportAccessCode,
+  customerCopyViolations,
+} = require('../services/service-report/technician-report-copy');
 const CompletionRecap = require('../services/completion-recap');
 const {
   stampSeriesPrepaid,
@@ -22124,7 +22128,11 @@ function buildDeterministicReportCopy({ serviceType, areas, actions, observation
   const cleanItems = (items) => (Array.isArray(items) ? items : [])
     .map((item) => String(item || '').trim())
     .filter(Boolean)
-    .filter((item) => ActivityIndicators.findBannedCustomerCopy(item).length === 0)
+    // redactAccessCodes runs before this fallback. Drop the complete item
+    // when it contains a redaction marker so "Gate code [redacted]" cannot
+    // evade the credential detector or become awkward customer copy.
+    .filter((item) => !/\[redacted\]/i.test(item))
+    .filter((item) => customerCopyViolations(item).length === 0)
     .slice(0, 4);
   const cleanAreas = cleanItems(areas);
   const cleanActions = cleanItems(actions);

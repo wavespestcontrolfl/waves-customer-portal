@@ -56,17 +56,15 @@ describe('global delivery kill switch and generation authorization (r74)', () =>
 });
 
 describe('deterministic fallback parser approval (r16)', () => {
-  test('echoed typed free text with parser-only terms degrades to the generic template', () => {
+  test('entirely rejected typed detail cannot become a completed-service claim', () => {
     const report = buildDeterministicReportCopy({
       serviceType: 'Termite Inspection Service',
       areas: [], actions: [],
       observations: ['Infestation extent: localized infestation at the garage sill'],
       recommendations: [], ratingLabel: null,
     });
-    // parser-only 'infestation' nulls the body — the fallback must degrade
-    // to the generic template rather than hand back undeliverable copy
-    expect(report).toContain('We completed the scheduled service');
-    expect(report).not.toContain('Infestation extent');
+    // With no accepted fact remaining, there is no customer copy to publish.
+    expect(report).toBeNull();
   });
 });
 
@@ -205,9 +203,31 @@ describe('deterministic report fallback', () => {
     expect(reportCopyRejection(report)).toBeNull();
   });
 
+  test('drops raw and prompt-redacted access actions while preserving clean custom actions', () => {
+    const report = buildDeterministicReportCopy({
+      serviceType: 'General Pest Control',
+      areas: ['Exterior'],
+      actions: [
+        'Swept exterior cobwebs',
+        'Used gate code 4417 for access',
+        'Used gate code [redacted] for access',
+      ],
+    });
+
+    expect(report).toContain('Swept exterior cobwebs');
+    expect(report).not.toMatch(/4417|\[redacted\]|gate code/i);
+    expect(reportCopyRejection(report)).toBeNull();
+  });
+
   test('returns no fallback when only unstructured notes could be preserved', () => {
     expect(buildDeterministicReportCopy({ serviceType: 'General Pest Control' })).toBeNull();
   });
+
+  test.each(['Used gate code 4417 for access', 'Used gate code [redacted] for access'])(
+    'returns no completed-work claim when the only action is private: %s', (action) => {
+      expect(buildDeterministicReportCopy({ actions: [action] })).toBeNull();
+    },
+  );
 
   test.each([
     ['Fire Ant Treatment', 'Front lawn', 'Individual mound treatment', 'Active mounds observed'],
