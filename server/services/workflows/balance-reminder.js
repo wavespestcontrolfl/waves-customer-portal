@@ -9,7 +9,7 @@ const { publicPortalUrl } = require("../../utils/portal-url");
 const EmailTemplateLibrary = require("../email-template-library");
 const { currency } = require("../email-template");
 const { getInvoiceEmailRecipients } = require("../customer-contact");
-const { formatDateOnly } = require("../../utils/date-only");
+const { dateOnlyString, formatDateOnly } = require("../../utils/date-only");
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require("../../constants/business");
 const { collectionsChannelPermitted } = require("../collections/rail-guard");
 const ContactLedger = require("../collections/contact-ledger");
@@ -331,6 +331,8 @@ class BalanceReminder {
       day: "numeric",
       year: undefined,
     });
+    const appointmentDate = dateOnlyString(service.scheduled_date);
+    const appointmentServiceType = service.service_type || "service";
     const link = await shortenOrPassthrough(balance.oldestInvoiceUrl, {
       kind: "invoice",
       entityType: "invoices",
@@ -338,11 +340,12 @@ class BalanceReminder {
       customerId: service.cust_id,
     });
 
+    const appointmentRenderedOn = etDateString();
     const serviceTiming = daysUntil === 0 ? "today" : daysUntil === 1 ? "tomorrow" : `in ${daysUntil} days`;
     const message = await renderSmsTemplate(`balance_reminder_${tier}`, {
       first_name: service.first_name || "there",
       service_date: datePretty,
-      service_type: service.service_type || "service",
+      service_type: appointmentServiceType,
       service_timing: serviceTiming,
       pay_url: link,
     }, {
@@ -364,13 +367,17 @@ class BalanceReminder {
         send: (channel, ledger) => sendCustomerMessage({
           to: service.phone, body: message, channel,
           audience: 'customer', purpose: 'payment_link', customerId: service.cust_id,
-          invoiceId: balance.oldestInvoiceId, entryPoint: 'balance_reminder_workflow',
+          invoiceId: balance.oldestInvoiceId, appointmentId: service.id,
+          entryPoint: 'balance_reminder_workflow',
           metadata: { original_message_type: 'balance_reminder', billingDeliveryCategory: 'billing',
             notificationEventKey: eventKey, billingDeliveryLeg: channel,
+            appointment_date: appointmentDate,
+            appointment_service_type: appointmentServiceType,
+            appointment_rendered_on: appointmentRenderedOn,
             ...(channel === 'push' ? { appOnly: true } : {}),
             // A queued Email retry re-checks the collections rail excluding
             // this leg's own reservation, then marks it delivered.
-            ...(channel === 'email' && ledger?.id ? { collections_ledger_id: String(ledger.id) } : {}) },
+            ...(channel === 'email' && ledger?.id ? { collections_ledger_id: ledger.id } : {}) },
           preDispatchCheck: require('../invoice-helpers').selfPayAtDispatch(balance.oldestInvoiceId, db),
         }),
       });
@@ -658,7 +665,7 @@ class BalanceReminder {
     const result = await sendReminderChannels({
       customerId: customer.id, invoiceId: invoice.id, source, purpose: 'late_payment', eventKey, channels,
       metadata: { invoiceId: invoice.id, templateKey, template_key: templateKey, days_overdue: balance.daysOverdue },
-      send: (channel) => channel === 'email'
+      send: (channel, ledger) => channel === 'email'
         ? this.sendLatePaymentEmail({ customer, invoice, balance, smsTemplateKey: templateKey,
           invoiceTitle, serviceDateClause: dateClause, payUrl: link, initialPrefs: prefs })
         : sendCustomerMessage({
@@ -666,6 +673,7 @@ class BalanceReminder {
           customerId: customer.id, invoiceId: invoice.id, entryPoint: 'balance_reminder_late_payment_check',
           metadata: { original_message_type: 'late_payment', billingDeliveryCategory: 'billing',
             notificationEventKey: eventKey, billingDeliveryLeg: channel,
+            ...(ledger?.id ? { collections_ledger_id: ledger.id } : {}),
             ...(channel === 'push' ? { appOnly: true } : {}) },
           hasEmailLeg: true, preDispatchCheck: require('../invoice-helpers').selfPayAtDispatch(invoice.id, db),
         }),
@@ -892,6 +900,7 @@ class BalanceReminder {
           original_message_type: "late_payment",
           billingDeliveryCategory: 'billing',
           notificationEventKey: `balance-late-payment:${oldestInvoice.id}:${balance.daysOverdue}`,
+          collections_ledger_id: smsLedger.id,
         },
         hasEmailLeg: true,
         // Same provider-boundary ownership guard as the balance leg.

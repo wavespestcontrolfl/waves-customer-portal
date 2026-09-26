@@ -335,6 +335,11 @@ function checkTcpaConsent(extraction, opts = {}) {
 // v2-1.43.0 (codex round 32): "a.m."/"p.m." collapse keeps the sentence
 // break before a new capitalized non-calendar word ("10 a.m. Okay.") —
 // grounds a booking v2-1.42.0 held.
+// v2-1.44.0: a real_estate_agent/lender arranging a WDO inspection with a
+// confirmed time is an authorized caller (owner ruling 2026-09-26,
+// isAuthorizedWdoArrangerBooking) — caller_not_authorized is no longer raised
+// for that shape, so a force-reprocess of such a call can move from review to
+// auto-route and must write a fresh decision row.
 // v2-1.45.0: fail-open booking applies to OUTBOUND calls too (owner
 // directive 2026-09-26: every call-agent rule works the same for both
 // directions), so a force-reprocess of an outbound call can move from

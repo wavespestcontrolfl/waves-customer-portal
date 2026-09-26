@@ -132,6 +132,93 @@ describe('billing reminder per-channel delivery progress', () => {
     expect(email.delivered).toBeUndefined();
   });
 
+  test.each([
+    'NO_EMAIL_RECIPIENT',
+    'BILLING_EMAIL_NOT_SELECTED',
+    'BILLING_EMAIL_DISABLED',
+    'EMAIL_SUPPRESSED',
+  ])('canonical permanent Email refusal %s resolves without claiming delivery', async (code) => {
+    const send = jest.fn(async (channel) => (channel === 'email'
+      ? { sent: false, blocked: true, code, deliveryOutcome: 'not_sent' }
+      : { sent: true, deliveryOutcome: 'accepted', auditLogId: 'audit-sms' }));
+
+    await expect(deliver(['email', 'sms'], send, `canonical:${code}`))
+      .resolves.toMatchObject({ complete: true, deliveredNow: ['sms'] });
+    await expect(deliver(['email', 'sms'], send, `canonical:${code}`))
+      .resolves.toMatchObject({ complete: true, deliveredNow: [] });
+
+    expect(send.mock.calls.map(([channel]) => channel)).toEqual(['email', 'sms']);
+    const email = rows.find((row) => row.channel === 'email').metadata;
+    expect(email).toMatchObject({ send_failed: true, resolved: true, resolution: 'email_terminal_refusal' });
+    expect(email.delivered).toBeUndefined();
+  });
+
+  test('held Email with accepted App and Text keeps Email pending without repeating it', async () => {
+    const held = Object.assign(new Error('provider retry owns this message'), {
+      providerOutcome: {
+        sent: false,
+        held: true,
+        retryable: true,
+        deliveryOutcome: 'uncertain',
+        code: 'EMAIL_PROVIDER_RETRY_HELD',
+      },
+    });
+    const send = jest.fn(async (channel) => {
+      if (channel === 'email') throw held;
+      return { sent: true, deliveryOutcome: 'accepted', auditLogId: `audit-${channel}` };
+    });
+
+    await expect(deliver(['email', 'push', 'sms'], send, 'held-email'))
+      .resolves.toMatchObject({ complete: false, deliveredNow: ['push', 'sms'] });
+    await expect(deliver(['email', 'push', 'sms'], send, 'held-email')).resolves.toMatchObject({
+      complete: false,
+      deliveredNow: [],
+      results: { email: expect.objectContaining({ deliveryHeld: true }) },
+    });
+
+    expect(send.mock.calls.map(([channel]) => channel)).toEqual(['email', 'push', 'sms']);
+    expect(rows.find((row) => row.channel === 'email').metadata).toEqual(expect.not.objectContaining({
+      delivered: expect.anything(), resolved: expect.anything(), send_failed: expect.anything(),
+    }));
+  });
+
+  test.each(['held', 'deliveryHeld'])('%s not-sent Email outcome cannot release or resolve its reservation', async (marker) => {
+    const send = jest.fn(async (channel) => (channel === 'email'
+      ? {
+        sent: false,
+        blocked: true,
+        code: 'EMAIL_SUPPRESSED',
+        deliveryOutcome: 'not_sent',
+        [marker]: true,
+      }
+      : { sent: true, deliveryOutcome: 'accepted', auditLogId: 'audit-sms' }));
+
+    await expect(deliver(['email', 'sms'], send, `held-marker:${marker}`))
+      .resolves.toMatchObject({ complete: false, deliveredNow: ['sms'] });
+    await expect(deliver(['email', 'sms'], send, `held-marker:${marker}`))
+      .resolves.toMatchObject({ complete: false, deliveredNow: [] });
+
+    expect(send.mock.calls.map(([channel]) => channel)).toEqual(['email', 'sms']);
+    expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
+    expect(rows.find((row) => row.channel === 'email').metadata)
+      .toEqual(expect.not.objectContaining({ resolved: expect.anything(), delivered: expect.anything() }));
+  });
+
+  test('canonical retryable Email refusal stays unresolved and retries after Text delivers', async () => {
+    const send = jest.fn(async (channel) => (channel === 'email'
+      ? { sent: false, blocked: true, retryable: true, code: 'BILLING_PREFS_UNAVAILABLE', deliveryOutcome: 'not_sent' }
+      : { sent: true, deliveryOutcome: 'accepted', auditLogId: 'audit-sms' }));
+
+    await expect(deliver(['email', 'sms'], send, 'retryable-email'))
+      .resolves.toMatchObject({ complete: false, deliveredNow: ['sms'] });
+    await expect(deliver(['email', 'sms'], send, 'retryable-email'))
+      .resolves.toMatchObject({ complete: false, deliveredNow: [] });
+
+    expect(send.mock.calls.map(([channel]) => channel)).toEqual(['email', 'sms', 'email']);
+    expect(rows.find((row) => row.channel === 'email').metadata)
+      .toEqual(expect.not.objectContaining({ resolved: expect.anything(), delivered: expect.anything() }));
+  });
+
   test('an uncertain Email outcome keeps its reservation held rather than retryable', async () => {
     const send = jest.fn(async (channel) => (channel === 'email'
       ? { ok: false, deliveryOutcome: 'uncertain', error: 'socket hang up' }
