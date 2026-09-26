@@ -1,6 +1,7 @@
 const logger = require('./logger');
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('./llm/call');
+const { stripTrailingSignature } = require('./messaging/sms-signoff');
 
 class ResponseDrafter {
   async draftResponse(inboundMessage, context, intent) {
@@ -37,8 +38,11 @@ class ResponseDrafter {
         text: `CUSTOMER: ${context.summary}\n\nLAST SERVICE: ${context.lastService ? `${context.lastService.type} on ${new Date(context.lastService.date).toLocaleDateString('en-US', { timeZone: 'America/New_York' })} — "${(context.lastService.notes || '').slice(0, 150)}"` : 'None'}\n\nNEXT: ${context.upcomingServices?.[0] ? `${context.upcomingServices[0].type} ${new Date(context.upcomingServices[0].date).toLocaleDateString('en-US', { timeZone: 'America/New_York' })}` : 'Nothing'}\n\nBALANCE: ${context.billing?.outstandingBalance > 0 ? `$${context.billing.outstandingBalance.toFixed(2)} overdue` : 'Current'}\n\nRECENT SMS:\n${conversation}\n\nINTENT: ${intent?.intent || 'UNKNOWN'}\n\nNEW MESSAGE: "${inboundMessage}"\n\nDraft reply as Adam:`,
       },
     );
-    if (!result.ok || !String(result.text || '').trim()) return null;
-    return { draft: result.text, context: context.summary, flags: context.flags, intent: intent?.intent };
+    // The prompt forbids a sign-off, but a model can still copy one from the
+    // signed history it is shown — strip it deterministically.
+    const draft = result.ok ? stripTrailingSignature(result.text) : '';
+    if (!draft) return null;
+    return { draft, context: context.summary, flags: context.flags, intent: intent?.intent };
   }
 
   draftFromTemplate(inboundMessage, context, intent) {

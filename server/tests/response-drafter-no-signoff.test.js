@@ -21,6 +21,8 @@ const context = {
 };
 
 describe('response drafter — drafts carry no sign-off', () => {
+  beforeEach(() => mockDispatch.mockReset());
+
   test.each([
     'SCHEDULE_INQUIRY', 'PEST_REPORT', 'SERVICE_REQUEST', 'BILLING_INQUIRY', 'CANCEL_REQUEST',
     'COMPLAINT', 'POSITIVE_FEEDBACK', 'CONFIRMATION', 'GENERAL',
@@ -35,6 +37,18 @@ describe('response drafter — drafts carry no sign-off', () => {
     const balanceDue = ResponseDrafter.draftFromTemplate('bill?', { ...context, billing: { outstandingBalance: 42.5 } }, { intent: 'BILLING_INQUIRY' });
     expect(noSchedule.draft).not.toMatch(SIGNOFF);
     expect(balanceDue.draft).not.toMatch(SIGNOFF);
+  });
+
+  test('a signed AI draft is stripped before it is parked', async () => {
+    mockDispatch.mockResolvedValue({ ok: true, text: 'Your next visit is Tuesday. - Adam' });
+    const result = await ResponseDrafter.draftWithAI('synthetic inbound', context, { intent: 'GENERAL' });
+    expect(result.draft).toBe('Your next visit is Tuesday.');
+  });
+
+  test('an AI draft that is only a sign-off falls back to the template', async () => {
+    mockDispatch.mockResolvedValue({ ok: true, text: '— Adam, Waves Pest Control' });
+    const result = await ResponseDrafter.draftResponse('synthetic inbound', context, { intent: 'GENERAL' });
+    expect(result.draft).toBe('Hi Sam, thanks for reaching out! Let me look into this and get back to you shortly.');
   });
 
   test('the AI draft prompt forbids signing off', async () => {
