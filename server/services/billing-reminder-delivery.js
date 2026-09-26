@@ -110,7 +110,12 @@ async function recordLegOutcome(entry, channel, result, results) {
 // Each selected method owns a keyed reservation before provider handoff.
 // Completed methods never re-enter a provider; a reused ambiguous reservation
 // is held, while a confirmed failed attempt can claim a retry atomically.
-async function sendReminderChannels({ customerId, invoiceId, source, purpose, eventKey, channels, metadata = {}, send }) {
+// offLedgerBalanceCents: debt the ledger does not hold (e.g. late monthly dues
+// on the previsit reminder) that the producer's own policy check counted; the
+// per-leg recheck must count it too or a dues-only reminder reads as no debt.
+async function sendReminderChannels({
+  customerId, invoiceId, source, purpose, eventKey, channels, metadata = {}, send, offLedgerBalanceCents = 0,
+}) {
   const progress = await reminderProgress(customerId, source, channels);
   const existing = progress.find((event) => event.metadata.notificationEventKey === eventKey);
   const entries = existing?.entries || [];
@@ -121,7 +126,7 @@ async function sendReminderChannels({ customerId, invoiceId, source, purpose, ev
   const pending = ['email', 'push', 'sms'].filter((channel) => channels.includes(channel)
     && !delivered.has(channel) && !resolved.has(channel));
   const permitted = await Promise.all(pending.map((channel) => collectionsChannelPermitted({
-    customerId, invoiceId, channel, purpose, excludeLedgerIds: entries.map((entry) => entry.id), logTag: 'billing-reminder',
+    customerId, invoiceId, channel, purpose, offLedgerBalanceCents, excludeLedgerIds: entries.map((entry) => entry.id), logTag: 'billing-reminder',
     detail: true,
   })));
   const digest = crypto.createHash('sha256').update(`${customerId}:${eventKey}`).digest('hex');

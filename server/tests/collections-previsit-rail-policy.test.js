@@ -94,13 +94,17 @@ const OVERDUE_INVOICE = {
 };
 
 // { claimChain } so tests can assert the claim was or wasn't attempted.
-function armOneVisit() {
+// No explicit billing_channels array ⇒ explicitBillingChannels(...) reads
+// null and the legacy sms+email path runs byte-identical to before this
+// lane (default for every test in this file unless overridden).
+function armOneVisit({ notificationPrefs = {} } = {}) {
   const claimChain = chain({ result: 1 });
   setDbQueues({
     sms_templates: [chain({ first: { is_active: true } })],
     scheduled_services: [chain({ result: [VISIT] }), claimChain],
     invoices: [chain({ result: [OVERDUE_INVOICE] })],
     activity_log: [chain({ result: [] })],
+    notification_prefs: [chain({ first: notificationPrefs })],
   });
   return { claimChain };
 }
@@ -194,6 +198,7 @@ test('dues-only visit (monthly membership, no overdue invoices) supplies offLedg
     ],
     invoices: [chain({ result: [] })], // dues-only: ZERO overdue invoices
     activity_log: [chain({ result: [] })],
+    notification_prefs: [chain({ first: {} })],
   });
   const result = await runSweep({ now: new Date('2026-08-14T15:00:00Z') });
   expect(result).toMatchObject({ sent: 1 });
@@ -225,6 +230,7 @@ test('a policy-excluded invoice is filtered out of the quoted amount and the led
       ],
     })],
     activity_log: [chain({ result: [] })],
+    notification_prefs: [chain({ first: {} })],
   });
   const { renderSmsTemplate } = require('../services/sms-template-renderer');
   const result = await runSweep({ now: new Date('2026-08-14T15:00:00Z') });

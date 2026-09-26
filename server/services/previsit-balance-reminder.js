@@ -34,6 +34,8 @@ const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { collectionsChannelVerdict } = require('./collections/rail-guard');
 const ContactLedger = require('./collections/contact-ledger');
+const { explicitBillingChannels } = require('./billing-delivery-channels');
+const { reminderProgress, sendReminderChannels } = require('./billing-reminder-delivery');
 
 const TEMPLATE_KEY = 'previsit_balance_reminder';
 const EMAIL_TEMPLATE_KEY = 'billing.previsit_balance';
@@ -287,19 +289,66 @@ async function runSweep({ now = new Date() } = {}) {
         offLedgerBalanceCents: duesCents,
         logTag: 'previsit-balance',
       };
-      const smsVerdict = await collectionsChannelVerdict({ ...consult, channel: 'sms' });
-      const emailVerdict = await collectionsChannelVerdict({ ...consult, channel: 'email' });
-      const smsPolicyPermitted = smsVerdict.permitted;
-      const emailPolicyPermitted = emailVerdict.permitted;
-      if (!smsPolicyPermitted && !emailPolicyPermitted) { skipped++; continue; }
+      // Explicit per-channel billing delivery choice (PR #4843 router core),
+      // read BEFORE the policy gate so the gate judges the channels the
+      // customer actually selected (an App-only customer with Text and Email
+      // both denied is still reachable). A stored choice is enforced whether
+      // or not GATE_BILLING_NOTIFICATION_CHANNELS is live (same read-side
+      // contract as balance-reminder.js's latePaymentCheck). An unreadable
+      // choice must not fall through to the legacy SMS+Email path (that
+      // would ignore a stored selection): skip, and the next sweep in the
+      // window retries (no claim is held yet).
+      let notifPrefs = null;
+      try {
+        notifPrefs = await db('notification_prefs').where({ customer_id: visit.customer_id }).first();
+      } catch (prefsErr) {
+        logger.warn(`[previsit-balance] notification_prefs lookup failed for customer ${visit.customer_id}: ${prefsErr.message}`);
+        skipped++;
+        continue;
+      }
+      const explicitChannels = explicitBillingChannels(notifPrefs || {}, 'billing');
 
-      // Gate-on: the reminder may only QUOTE debt the policy holds eligible
-      // (codex r8 — an invoice the policy excludes, e.g. re-resolved as
-      // payer-billed or dunning-stopped, must not ride an allowed
-      // aggregate). Gate-off (null) = no filtering.
-      const eligibleIds = smsPolicyPermitted && smsVerdict.eligibleInvoiceIds !== null
-        ? smsVerdict.eligibleInvoiceIds
-        : emailVerdict.eligibleInvoiceIds;
+      let eligibleIds;
+      let smsPolicyPermitted = false;
+      let emailPolicyPermitted = false;
+      if (explicitChannels !== null) {
+        // This appointment's own earlier reservations (a released-claim
+        // retry) must not trip the policy's recent-contact spacing against
+        // the very episode being resumed; unrelated contacts still count.
+        let episodeLedgerIds;
+        try {
+          const progress = await reminderProgress(visit.customer_id, 'previsit_balance_reminder', explicitChannels);
+          const episode = progress.find((event) => event.metadata.notificationEventKey === `previsit-balance:${visit.id}`);
+          episodeLedgerIds = (episode?.entries || []).map((entry) => entry.id);
+        } catch (progressErr) {
+          logger.warn(`[previsit-balance] reminder progress read failed for visit ${visit.id}: ${progressErr.message}`);
+          skipped++;
+          continue;
+        }
+        const verdicts = [];
+        for (const channel of explicitChannels) {
+          verdicts.push(await collectionsChannelVerdict({ ...consult, channel, excludeLedgerIds: episodeLedgerIds }));
+        }
+        const permittedVerdicts = verdicts.filter((v) => v.permitted);
+        if (!permittedVerdicts.length) { skipped++; continue; }
+        // Quote only debt a permitted selected channel holds eligible.
+        const filtering = permittedVerdicts.find((v) => v.eligibleInvoiceIds !== null && v.eligibleInvoiceIds !== undefined);
+        eligibleIds = filtering ? filtering.eligibleInvoiceIds : null;
+      } else {
+        const smsVerdict = await collectionsChannelVerdict({ ...consult, channel: 'sms' });
+        const emailVerdict = await collectionsChannelVerdict({ ...consult, channel: 'email' });
+        smsPolicyPermitted = smsVerdict.permitted;
+        emailPolicyPermitted = emailVerdict.permitted;
+        if (!smsPolicyPermitted && !emailPolicyPermitted) { skipped++; continue; }
+
+        // Gate-on: the reminder may only QUOTE debt the policy holds eligible
+        // (codex r8 — an invoice the policy excludes, e.g. re-resolved as
+        // payer-billed or dunning-stopped, must not ride an allowed
+        // aggregate). Gate-off (null) = no filtering.
+        eligibleIds = smsPolicyPermitted && smsVerdict.eligibleInvoiceIds !== null
+          ? smsVerdict.eligibleInvoiceIds
+          : emailVerdict.eligibleInvoiceIds;
+      }
       const fresh = eligibleIds === null || eligibleIds === undefined
         ? freshAll
         : freshAll.filter((inv) => eligibleIds.map(String).includes(String(inv.id)));
@@ -328,6 +377,100 @@ async function runSweep({ now = new Date() } = {}) {
         .whereNull('balance_reminder_sent_at')
         .update({ balance_reminder_sent_at: new Date() });
       if (!claimed) { skipped++; continue; }
+
+      if (explicitChannels !== null) {
+        // One episode per appointment (stable across a released-claim
+        // retry): the key is deterministic from the visit alone, so a rerun
+        // under the SAME eventKey resumes the same reservation set instead
+        // of opening a new one (billing-reminder-delivery.js's
+        // reminderProgress finds it by customer_id + source + this key).
+        const eventKey = `previsit-balance:${visit.id}`;
+        const releaseClaim = () => db('scheduled_services')
+          .where({ id: visit.id })
+          .update({ balance_reminder_sent_at: null })
+          .catch(() => {});
+        let result;
+        try {
+          result = await sendReminderChannels({
+          customerId: visit.customer_id,
+          offLedgerBalanceCents: duesCents,
+          invoiceId: null, // aggregate balance rail, no single target invoice (rail-guard.js)
+          source: 'previsit_balance_reminder',
+          purpose: 'balance_reminder',
+          eventKey,
+          channels: explicitChannels,
+          metadata: { scheduled_service_id: visit.id, amount },
+          send: async (channel, ledger) => {
+            if (channel === 'email') {
+              const AccountMembershipEmail = require('./account-membership-email');
+              return AccountMembershipEmail.sendPrevisitBalanceReminder({
+                customerId: visit.customer_id,
+                amount: `$${amount.toFixed(2)}`,
+                serviceType: visit.service_type || 'service',
+                visitDate: friendlyVisitDate(visit.scheduled_date),
+                billingUrl: BILLING_PORTAL_URL,
+                idempotencyKey: `${EMAIL_TEMPLATE_KEY}:${visit.id}`,
+              });
+            }
+            const body = await renderSmsTemplate(TEMPLATE_KEY, {
+              first_name: visit.first_name || 'there',
+              amount: amount.toFixed(2),
+              service_type: visit.service_type || 'service',
+              visit_date: friendlyVisitDate(visit.scheduled_date),
+              billing_url: BILLING_PORTAL_URL,
+            });
+            if (!body) {
+              return {
+                sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'TEMPLATE_UNAVAILABLE',
+                reason: 'template rendered empty (inactive or missing)',
+              };
+            }
+            return sendCustomerMessage({
+              to: visit.phone,
+              body,
+              channel,
+              audience: 'customer',
+              purpose: 'billing',
+              customerId: visit.customer_id,
+              entryPoint: 'previsit_balance_reminder',
+              // Explicit routing already decided the channel set — never the
+              // legacy hasEmailLeg suppression heuristic (balance-reminder.js's
+              // sendExplicitLatePaymentReminder contract).
+              hasEmailLeg: true,
+              metadata: {
+                original_message_type: 'balance_reminder',
+                billingDeliveryCategory: 'billing',
+                notificationEventKey: eventKey,
+                billingDeliveryLeg: channel,
+                scheduled_service_id: visit.id,
+                amount,
+                ...(ledger?.id ? { collections_ledger_id: ledger.id } : {}),
+                ...(channel === 'push' ? { appOnly: true } : {}),
+              },
+            });
+          },
+          });
+        } catch (helperErr) {
+          // A progress read or reservation write failed: release the claim so
+          // the next sweep retries under the same eventKey (its reservations
+          // still guard any leg whose outcome is uncertain).
+          logger.warn(`[previsit-balance] explicit-channel send failed for visit ${visit.id}: ${helperErr.message}`);
+          await releaseClaim();
+          skipped++;
+          continue;
+        }
+        // Release the claim while the episode is still open (a replay hold,
+        // an uncertain outcome, or a transient policy/provider denial on ANY
+        // selected leg — even when a sibling leg delivered now) so the next
+        // sweep in the window retries only the pending leg(s) under the same
+        // eventKey; sendReminderChannels never re-sends a delivered or
+        // resolved leg. A COMPLETE episode keeps the claim: every leg is
+        // delivered or terminally resolved.
+        if (!result.complete) await releaseClaim();
+        if (result.deliveredNow.length) sent++;
+        else skipped++;
+        continue;
+      }
 
       // The email sidecar routes through billing prefs + the billing
       // recipient (Codex r10 P1). Declare the email leg to the SMS channel
