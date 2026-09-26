@@ -673,6 +673,15 @@ const REGISTRY = {
   },
 
   stripe_webhook_billing_deferred: {
+    // A phone-less customer with an explicit Email/App billing selection
+    // still gets a held ACH-failure / bank-verification notice queued here
+    // (stripe-webhook.js sendBillingSms) — it stamps
+    // requires_registered_dispatch so the scheduler's phone-required retry
+    // rail (canReplayBillingWithoutPhone, services/scheduler.js) lets the
+    // row through instead of retrying toward a phone that will never
+    // resolve. A phone-bearing row never carries that stamp and keeps
+    // refreshing/retrying its phone exactly as before.
+    replayWithoutPhone: true,
     async recheck(meta) {
       // An ACH failure / action-required notice queued at night can resolve
       // before 8:00 AM (the customer retried and the success webhook
@@ -757,6 +766,19 @@ const REGISTRY = {
       } catch (err) {
         return failClosed('stripe-billing', meta.stripe_payment_intent_id || meta.invoice_id, err);
       }
+    },
+    // A pure pass-through for every row under this entry point — the vast
+    // majority (phone-bearing holds) must behave exactly as if no dispatch
+    // hook existed at all. This hook exists only because
+    // dispatchDeferredReplay refuses a requires_registered_dispatch row
+    // with no registered dispatch fn (DEFERRED_DISPATCH_UNAVAILABLE); the
+    // registration itself is the auditable opt-in for phone-less replay
+    // (replayWithoutPhone above). defaultDispatch already resolves `to`
+    // from the row's CURRENT customer phone (resolveScheduledRecipient) —
+    // null for a still-phone-less customer, which sendCustomerMessage
+    // routes through the same central billing router the live send used.
+    async dispatch(meta, defaultDispatch) {
+      return defaultDispatch();
     },
   },
 
@@ -1489,7 +1511,12 @@ async function recheckDeferredReplay(entryPoint, claimMeta = {}) {
 // protects rows produced during a rolling deploy until their entry is loaded.
 async function dispatchDeferredReplay(entryPoint, claimMeta = {}, defaultDispatch) {
   const entry = entryFor(entryPoint);
-  if (entry && typeof entry.dispatch === 'function') return entry.dispatch(claimMeta);
+  // defaultDispatch rides along as a second argument so an entry that only
+  // needs to opt into requires_registered_dispatch (see replaysWithoutPhone)
+  // can hand its ordinary rows straight back to the same replay the
+  // executor would have run with no dispatch hook at all, instead of
+  // reconstructing it — existing hooks that don't take it are unaffected.
+  if (entry && typeof entry.dispatch === 'function') return entry.dispatch(claimMeta, defaultDispatch);
   if (claimMeta.requires_registered_dispatch === true) {
     return {
       sent: false,
