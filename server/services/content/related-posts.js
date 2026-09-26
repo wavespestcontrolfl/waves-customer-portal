@@ -41,6 +41,7 @@ const { HUB_SITE_KEYS } = require('../content-astro/spoke-sites');
 // exceed this cap.
 const RELATED_POSTS_DEFAULT_LIMIT = 12;
 const RELATED_POSTS_TARGET_MIN = 8;
+const MIN_SUBSTANTIVE_TOKEN_OVERLAP = 2;
 
 const STOP_WORDS = new Set([
   'the', 'a', 'an', 'and', 'or', 'in', 'on', 'at', 'to', 'for', 'with',
@@ -151,7 +152,13 @@ function scoreCandidate(c, { targetEntities, targetTokens, targetCity }) {
     if (GENERIC_TOPIC_TOKENS.has(t) || cityTokens.has(t)) continue;
     if (candidateTokens.has(t)) overlap += 1;
   }
-  const keywordScore = Math.min(overlap * 10, 60);
+  // One shared word is too weak to make a candidate mandatory downstream:
+  // even a non-generic word such as "damage" can occur across unrelated
+  // services. Require two substantive shared tokens unless the structured
+  // service/category entity already establishes the relationship.
+  const keywordScore = overlap >= MIN_SUBSTANTIVE_TOKEN_OVERLAP
+    ? Math.min(overlap * 10, 60)
+    : 0;
 
   const topicallyRelated = entityScore > 0 || keywordScore > 0;
   const sameCity = targetCity && c.city && String(c.city).trim().toLowerCase() === targetCity;

@@ -34,10 +34,20 @@ describe('rankRelatedPosts — ranking', () => {
     const target = { keyword: 'termite swarmers in spring', service: 'termite' };
     const candidates = [
       candidate({ id: 'a', title: 'Termite Swarmer Season Guide', path: '/termite/swarmer-season/', keyword: 'termite swarmers', service: 'termite' }),
-      candidate({ id: 'b', title: 'Spring Lawn Fertilizer Timing', path: '/lawn-care/spring-fertilizer-timing/', keyword: 'spring lawn fertilizer', service: 'lawn' }),
+      candidate({ id: 'b', title: 'Spring Swarmer Identification', path: '/pest-control/spring-swarmers/', keyword: 'spring swarmers' }),
     ];
     const out = rankRelatedPosts(target, candidates);
-    expect(out.map((r) => r.path)).toEqual(['/termite/swarmer-season/', '/lawn-care/spring-fertilizer-timing/']);
+    expect(out.map((r) => r.path)).toEqual(['/termite/swarmer-season/', '/pest-control/spring-swarmers/']);
+  });
+
+  test('keyword-only admission requires at least two substantive shared tokens', () => {
+    const target = { keyword: 'termite damage from mud tubes' };
+    const candidates = [
+      candidate({ id: 'a', title: 'Termite Mud Tubes on Foundations', path: '/termite/mud-tubes/', keyword: 'termite mud tubes' }),
+      candidate({ id: 'b', title: 'Hurricane Damage Cleanup', path: '/home/hurricane-cleanup/', keyword: 'hurricane damage cleanup' }),
+    ];
+
+    expect(rankRelatedPosts(target, candidates).map((r) => r.path)).toEqual(['/termite/mud-tubes/']);
   });
 
   test('a same-city candidate with ZERO entity/keyword overlap is dropped — city alone never admits a candidate', () => {
