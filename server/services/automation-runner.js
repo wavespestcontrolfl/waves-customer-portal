@@ -126,6 +126,17 @@ async function automationDeliveryBlock({ enrollment, template, recipient, sendId
     const reason = automationSuppressionReason(suppression);
     return blockSendAndCancelEnrollment({ enrollment, sendId, reason, cancelReason: 'email_suppressed' });
   }
+  if (template.key === 'service_renewal') {
+    // Same termite-bond rule as enrollCustomer, re-read at delivery: an
+    // enrollment queued before that gate, or a bond cleared since, is
+    // cancelled here instead of sent.
+    const bond = enrollment.customer_id
+      ? await db('customers').where({ id: enrollment.customer_id }).first('termite_renewal_date')
+      : null;
+    if (bond?.termite_renewal_date) return null;
+    return blockSendAndCancelEnrollment({ enrollment, sendId,
+      reason: 'No termite bond on file', cancelReason: 'not_termite_bond' });
+  }
   if (template.key !== 'payment_failed' || !enrollment.customer_id) return null;
   // SELECT * keeps this consumer deployable before the additive foundation
   // migration; an absent column is the same legacy NULL behavior.

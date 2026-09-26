@@ -314,6 +314,50 @@ describe('automation runner suppression guardrails', () => {
     await expect(sendStep('enrollment-1')).resolves.toMatchObject({ sent: true, done: true });
     expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
   });
+
+  // service_renewal is termite-bond renewal copy: an enrollment queued before
+  // the enrollment gate existed (or whose bond was cleared since) must be
+  // cancelled at delivery, never sent.
+  function renewalQueues({ bondRow, sendUpdate = chain(), enrollmentUpdate = chain() }) {
+    const enrollment = {
+      id: 'enrollment-r', template_key: 'service_renewal', customer_id: 'cust-r', status: 'active',
+      current_step: 0, email: 'customer@example.com', first_name: 'Sam', last_name: 'Customer',
+    };
+    setDbQueues({
+      automation_enrollments: [chain({ first: enrollment }), chain({ first: enrollment }), enrollmentUpdate],
+      automation_templates: [chain({ first: { key: 'service_renewal', name: 'Service Renewal Reminder', asm_group: 'service' } })],
+      automation_steps: [chain({ result: [{ id: 'step-1', step_order: 0, subject: 'Your termite bond is coming up for renewal',
+        html_body: '<p>Renew your bond.</p>', text_body: 'Renew your bond.',
+        from_email: 'automations@wavespestcontrol.com', enabled: true }] })],
+      automation_step_sends: [chain({ returning: [{ id: 'send-r' }] }), sendUpdate],
+      email_suppressions: [chain({ result: [] })],
+      customers: [chain({ first: bondRow })],
+    });
+    return { sendUpdate, enrollmentUpdate };
+  }
+
+  test('a queued service_renewal for a customer with no bond is cancelled, not sent', async () => {
+    const { sendUpdate, enrollmentUpdate } = renewalQueues({ bondRow: { termite_renewal_date: null } });
+
+    await expect(sendStep('enrollment-r')).resolves.toEqual({
+      sent: false, blocked: true, reason: 'No termite bond on file',
+    });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(sendUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'blocked', failure_reason: 'No termite bond on file',
+    }));
+    expect(enrollmentUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'cancelled', next_send_at: null,
+    }));
+  });
+
+  test('a queued service_renewal for a bond customer still sends', async () => {
+    renewalQueues({ bondRow: { termite_renewal_date: '2026-11-01' } });
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-renewal' });
+
+    await expect(sendStep('enrollment-r')).resolves.toMatchObject({ sent: true, done: true });
+    expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('automation runner prep sequence delivery stamp', () => {
