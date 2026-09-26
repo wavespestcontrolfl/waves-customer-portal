@@ -3080,6 +3080,7 @@ describe('lineIsRetiredSale drives the customer-switch effect end to end (codex 
       scheduleEstimatesByCustomer: {
         'customer-a': [{
           id: 'est-1',
+          customerId: 'customer-a',
           status: 'accepted',
           acceptedAt: '2026-09-01',
           lines: [{
@@ -3176,6 +3177,40 @@ describe('a pinned quote owned by another customer is unlinked on a customer swi
     await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([u]) => String(u).includes('/estimates/est-9/schedule-source'))).toBe(true));
     await new Promise((resolve) => { setTimeout(resolve, 100); });
     expect(screen.queryByLabelText('Repeats for Bi-Monthly Tree & Shrub Care')).toBeNull();
+  });
+
+  it('keeps the retired line of a pinned, accepted lead quote when its customer is set (codex r2 on #4855)', async () => {
+    const leadQuote = {
+      id: 'est-lead',
+      customerId: null,
+      status: 'accepted',
+      acceptedAt: '2026-09-01',
+      lines: [{ name: 'Tree & Shrub Care', serviceKey: null, serviceId: null, price: 150, cadence: 'quarterly', duration: 30 }],
+    };
+    installModalFetch({
+      scheduleEstimatesByCustomer: { 'customer-a': [leadQuote] },
+      scheduleSourceById: { 'est-lead': { estimate: leadQuote, customerId: null, contact: {} } },
+      customerSearchResults: {
+        Grace: [{ id: 'customer-b', firstName: 'Grace', lastName: 'Hopper', address: '200 Test Ave', phone: '555-0002' }],
+      },
+    });
+    render(<CreateAppointmentModal
+      defaultCustomer={CUSTOMER}
+      defaultEstimateId="est-lead"
+      defaultDate={futureDate()}
+      defaultWindowStart="09:00"
+      onClose={vi.fn()}
+      onCreated={vi.fn()}
+      onChange={vi.fn()}
+    />);
+    await waitFor(() => expect(screen.getByLabelText('Repeats for Tree & Shrub Care').value).toBe('quarterly'));
+    fireEvent.click(screen.getByRole('button', { name: 'Clear selected customer' }));
+    fireEvent.change(screen.getByPlaceholderText('Search by name or phone...'), { target: { value: 'Grace' } });
+    fireEvent.click(await screen.findByText('Grace Hopper'));
+    await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([u]) => String(u).includes('/customers/customer-b/schedule-estimates'))).toBe(true));
+    await new Promise((resolve) => { setTimeout(resolve, 100); });
+    // The accepted quote still rides the booking and vouches for its line.
+    expect(screen.getByLabelText('Repeats for Tree & Shrub Care').value).toBe('quarterly');
   });
 
   it('keeps an unowned lead quote pinned across the switch', async () => {

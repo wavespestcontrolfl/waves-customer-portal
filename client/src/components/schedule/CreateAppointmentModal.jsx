@@ -1561,7 +1561,18 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     const customerId = selectedCustomer?.id || null;
     if (retiredLinesCustomerRef.current === customerId) return;
     retiredLinesCustomerRef.current = customerId;
-    setServices((arr) => (arr.some(lineIsRetiredSale) ? arr.filter((line) => !lineIsRetiredSale(line)) : arr));
+    // An ACCEPTED quote that stays pinned through this switch (a lead quote
+    // with no owner yet, e.g. its customer being quick-added, or one owned by
+    // the new customer) vouches for its own retired lines on the server
+    // (retiredSaleKeysVouchedByAcceptedEstimate), so they stay. A quote owned
+    // by another customer is unlinked, lines and all, by the estimate effect
+    // below (codex r2 on #4855).
+    const keptQuote = defaultEstimateId && linkedEstimate?.status === 'accepted'
+      && (!linkedEstimate.customerId || String(linkedEstimate.customerId) === String(customerId || ''))
+      ? String(linkedEstimate.id)
+      : null;
+    const drops = (line) => lineIsRetiredSale(line) && !(keptQuote && String(line.sourceEstimateId ?? '') === keptQuote);
+    setServices((arr) => (arr.some(drops) ? arr.filter((line) => !drops(line)) : arr));
     // The previous customer's search results (a retired row among them) are
     // not offered to the next one while their own search is in flight.
     setServiceResults([]);
