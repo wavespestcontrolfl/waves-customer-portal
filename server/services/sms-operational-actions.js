@@ -883,9 +883,11 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
   // holds back a row whose event has not been seen at all.
   // The unseen-activity scan runs ONCE per candidate row (a LATERAL join)
   // and is reused by the filter, the backoff override and the watermark,
-  // instead of being re-evaluated in each.
+  // instead of being re-evaluated in each. OFFSET 0 is the optimization
+  // fence: without it Postgres flattens the one-column subquery and inlines
+  // the scan back into every reference.
   const eventRows = await openRows()
-    .joinRaw(`CROSS JOIN LATERAL (SELECT ${UNSEEN_VISIT_ACTIVITY} AS unseen_at) ev`, tickBound)
+    .joinRaw(`CROSS JOIN LATERAL (SELECT ${UNSEEN_VISIT_ACTIVITY} AS unseen_at OFFSET 0) ev`, tickBound)
     .whereNotNull('ev.unseen_at')
     // A stored failure reached for another owner (sms_context.customer_id is
     // rewritten with every persisted verdict) says nothing about the current
