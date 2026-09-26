@@ -32,6 +32,7 @@ const migration = require('../models/migrations/20260926000200_email_message_pro
 const tokenMigration = require('../models/migrations/20260926000201_email_provider_handoff_attempt_token');
 const retry = require('../services/transactional-email-provider-retry');
 const sendgrid = require('../services/sendgrid-mail');
+const NotificationService = require('../services/notification-service');
 
 const connection = process.env.APP_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
@@ -104,10 +105,17 @@ postgres('transactional provider send phase (PostgreSQL)', () => {
       table.timestamp('created_at');
       table.timestamp('updated_at');
     });
+    await mockDatabase.schema.createTable('notifications', (table) => {
+      table.uuid('id').primary().defaultTo(mockDatabase.raw('gen_random_uuid()'));
+      table.string('recipient_type');
+      table.jsonb('metadata');
+    });
   }, 30000);
 
   afterEach(async () => {
     sendgrid.sendOne.mockReset();
+    NotificationService.notifyAdmin.mockReset();
+    await mockDatabase('notifications').del();
     await mockDatabase('email_messages').del();
   });
 
@@ -151,6 +159,11 @@ postgres('transactional provider send phase (PostgreSQL)', () => {
     const legacy = row({ status: 'queued', provider_retry_count: 2, provider_retry_next_at: null,
       queued_at: old, provider_handoff_phase: null });
     await mockDatabase('email_messages').insert([pending, started, rollingDeploy, legacy]);
+    const notifiedRows = [];
+    NotificationService.notifyAdmin.mockImplementation(async (_level, _title, _body, options) => {
+      notifiedRows.push(await mockDatabase('email_messages')
+        .where({ id: options.metadata.email_message_id }).first());
+    });
 
     await expect(retry.recoverStaleClaims(new Date())).resolves.toBe(4);
     const rows = await mockDatabase('email_messages').whereIn('id', [pending.id, started.id, rollingDeploy.id, legacy.id]);
@@ -162,6 +175,14 @@ postgres('transactional provider send phase (PostgreSQL)', () => {
       expect(byId[id].provider_retry_next_at).toBeNull();
       expect(byId[id].provider_retry_exhausted_at).not.toBeNull();
     }
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(3);
+    expect(notifiedRows).toHaveLength(3);
+    for (const settled of notifiedRows) {
+      expect(settled).toMatchObject({ status: 'failed', provider_retry_next_at: null });
+      expect(settled.provider_retry_exhausted_at).not.toBeNull();
+    }
+    await expect(retry.recoverStaleClaims(new Date())).resolves.toBe(0);
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(3);
   });
 
   test('safe failures can cycle, while an ambiguous final request preserves started and consumes the claim', async () => {

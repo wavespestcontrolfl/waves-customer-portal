@@ -23,6 +23,7 @@ const retry = require('../services/transactional-email-provider-retry');
 const db = require('../models/db');
 const sendgrid = require('../services/sendgrid-mail');
 const emailTemplates = require('../services/email-template-library');
+const NotificationService = require('../services/notification-service');
 
 const message = (overrides = {}) => ({
   id: 'message-1',
@@ -381,6 +382,24 @@ describe('transactional email provider retry classification', () => {
       provider_retry_next_at: now,
       provider_retry_count: 'GREATEST(provider_retry_count - 1, 0)',
     }));
+  });
+
+  test('stale recovery emits no exhaustion alert when its settlement CAS is lost', async () => {
+    const chain = {};
+    chain.where = jest.fn(() => chain);
+    chain.whereNull = jest.fn(() => chain);
+    chain.whereRaw = jest.fn(() => chain);
+    chain.whereNotNull = jest.fn(() => chain);
+    chain.update = jest.fn(() => chain);
+    chain.returning = jest.fn(async () => []);
+    chain.select = jest.fn()
+      .mockResolvedValueOnce([{ id: 'lost-claim', send_attempt_token: 'old-token' }])
+      .mockResolvedValueOnce([]);
+    chain.then = (resolve, reject) => Promise.resolve(0).then(resolve, reject);
+    db.mockReturnValue(chain);
+
+    await expect(retry.recoverStaleClaims(new Date())).resolves.toBe(0);
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 
   test.each([400, 429])('a definite provider rejection (%s) records rejected and keeps bounded retry', async (status) => {
