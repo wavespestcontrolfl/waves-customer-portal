@@ -32,7 +32,7 @@ jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({ messa
 // of an HTTP round trip) but node-fetch v3 is ESM-only and throws under
 // Jest's CJS require, which would fail every test below before it reached
 // the code under test. Stub it out; nothing in this file exercises it.
-jest.mock('node-fetch', () => jest.fn(), { virtual: true });
+jest.mock('node-fetch', () => jest.fn());
 
 // Keep the real ledgerCall (GATE_LLM_CALL_LEDGER is unset in tests) but spy
 // on ledgerCallRejected.
