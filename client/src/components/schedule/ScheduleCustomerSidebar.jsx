@@ -139,23 +139,23 @@ export default function ScheduleCustomerSidebar({
   const payments = data?.payments || [];
   const cards = data?.cards || [];
 
-  // Display-only preview (nothing here feeds a charge or invoice mint) —
-  // but suppress the monthlyRate fallback only for an EXPLICIT non-monthly
-  // lane, mirroring the Charge Now mint endpoint's own gate
-  // (resolveScheduledServiceCharge, server/routes/admin-schedule.js: raw
-  // `billing_mode && billing_mode !== 'monthly_membership'`): a legacy
-  // customer with no billing_mode set at all still falls back to
-  // monthlyRate there regardless of tier, so this preview must too, or it
-  // understates what completing the visit will actually bill. Prefers the
-  // visit's own resolved billingLane (source distinguishes explicit from
-  // inferred); c.billingMode is the customer record's raw column, used only
-  // when the visit payload carries no billingLane at all.
-  const explicitNonMonthlyLane = service?.billingLane
-    ? (service.billingLane.source === 'explicit' && service.billingLane.mode !== 'monthly_membership')
-    : (!!c.billingMode && c.billingMode !== 'monthly_membership');
+  // Display-only preview (nothing here feeds a charge or invoice mint). For
+  // an unpriced visit, monthlyRate is only ever the right fallback for a
+  // monthly-membership customer — everywhere else (per_application's own
+  // acceptance fee, a plain per_visit/one_time lane, sibling-covered
+  // first-application visits…) the AUTHORITATIVE amount is the visit's own
+  // resolved billingLane.prediction, computed server-side by the exact same
+  // predictCompletionBilling / completionInvoiceAmount (billing-lane.js)
+  // completion itself uses — never re-derived locally, so this can't drift
+  // from what completion actually bills (mirrors the CompletionPanel /
+  // detail-sheet / checkout-sheet fix). c.billingMode is the customer
+  // record's raw column, used only as a last-resort fallback when the visit
+  // payload carries no billingLane at all (older cached payloads).
   const basePrice = service?.estimatedPrice != null
     ? Number(service.estimatedPrice)
-    : (explicitNonMonthlyLane ? 0 : Number(service?.monthlyRate || c.monthlyRate || 0));
+    : service?.billingLane
+      ? (Number(service.billingLane?.prediction?.amount) || 0)
+      : (!!c.billingMode && c.billingMode !== 'monthly_membership' ? 0 : Number(c.monthlyRate || 0));
   const appointmentAddons = Array.isArray(service?.serviceAddons) ? service.serviceAddons : [];
   const appointmentAddonTotal = Math.round(
     appointmentAddons.reduce((sum, addon) => sum + (Number(addon.estimatedPrice) || 0), 0) * 100

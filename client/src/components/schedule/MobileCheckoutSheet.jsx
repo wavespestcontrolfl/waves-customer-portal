@@ -92,22 +92,23 @@ export default function MobileCheckoutSheet({
   // Callbacks (re-services) are free by definition for recurring/WaveGuard
   // customers — the server zeroes the visit and won't bill monthly dues, so the
   // checkout preview must not fall back to monthlyRate (which would show a
-  // "Charge $<rate>" button that the mint endpoint then rejects as $0).
-  // Suppress the fallback only for an EXPLICIT non-monthly lane — byte-exact
-  // mirror of the mint endpoint's OWN gate (resolveScheduledServiceCharge,
-  // server/routes/admin-schedule.js: `billingMode && billingMode !==
-  // 'monthly_membership'`), which reads the RAW billing_mode column: a
-  // legacy customer with no billing_mode set at all (billingLane.source ===
-  // 'inferred') still falls back to monthlyRate there regardless of tier, so
-  // this preview must too, or it can UNDER-state what Charge will actually
-  // mint (a real prod case for the explicit-lane half: a $56.40/app lawn
-  // visit whose invoice is covered by a same-day sibling previewed $74.70 —
-  // the annual/12 equivalent — here, then minted $0 on tap).
-  const explicitNonMonthlyLane = service.billingLane?.source === 'explicit'
-    && service.billingLane?.mode !== 'monthly_membership';
+  // "Charge $<rate>" button that the mint endpoint then rejects as $0). For an
+  // unpriced visit, monthlyRate is only ever the right fallback for a
+  // monthly-membership customer — everywhere else the AUTHORITATIVE amount is
+  // the schedule payload's own billingLane.prediction, the same
+  // predictCompletionBilling / completionInvoiceAmount (billing-lane.js) both
+  // completion and the Charge Now mint endpoint's own amount ultimately trace
+  // back to — never re-derived locally, so this can't drift (mirrors the
+  // CompletionPanel/detail-sheet fix; a real prod case for the old
+  // explicit-lane gate: a $56.40/app lawn visit whose invoice is covered by a
+  // same-day sibling previewed $74.70 — the annual/12 equivalent — here). A
+  // sibling-covered or otherwise fully-covered visit still previews $0 here
+  // (nothingToCharge disables Charge) — the covering invoice is on the
+  // SIBLING row, never this one's own attached invoice, so there is nothing
+  // for this sheet to mint regardless of the prediction amount.
   const price = rawPrice != null
     ? rawPrice
-    : (service.isCallback || explicitNonMonthlyLane ? 0 : Number(service.monthlyRate || 0));
+    : (service.isCallback ? 0 : Number(service.billingLane?.prediction?.amount) || 0);
   const appointmentAddons = Array.isArray(service.serviceAddons) ? service.serviceAddons : [];
   const appointmentAddonTotal = Math.round(
     appointmentAddons.reduce((sum, addon) => sum + (Number(addon.estimatedPrice) || 0), 0) * 100
