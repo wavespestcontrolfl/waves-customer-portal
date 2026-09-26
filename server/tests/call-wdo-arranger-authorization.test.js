@@ -17,6 +17,11 @@ const {
   canAutoRoute,
 } = require('../services/call-triage-flags');
 
+// The predicate requires the agreed slot to still be ahead (codex #4890 r5
+// P1), so pin "now" to the day after the live miss — before the fixture slot.
+beforeAll(() => { jest.useFakeTimers({ now: new Date('2026-09-25T12:00:00Z') }); });
+afterAll(() => { jest.useRealTimers(); });
+
 const AV_CLEAN = { status: 'validated_accept', inServiceArea: true, county: 'Manatee County' };
 const ANI = '+19415550100';
 
@@ -237,10 +242,9 @@ describe('canAutoRoute — the pipeline decision for a 17ed9362-shaped call', ()
 });
 
 // Codex #4890 r1 follow-ups.
-describe('codex #4890 r1 — audit trail, shadow bridge, and superseded lead reasons', () => {
+describe('codex #4890 r1 — audit trail and shadow bridge', () => {
   const {
     suppressUnsupportedModelFlags,
-    mergeNeedsConfirmation,
     deriveCallReviewBridge,
   } = require('../services/call-triage-flags');
   const { V2_DECISION_VERSION, V2_DECISION_VERSIONS } = require('../services/call-routing-gates');
@@ -281,19 +285,23 @@ describe('codex #4890 r1 — audit trail, shadow bridge, and superseded lead rea
     });
     expect(out.needsConfirmation).not.toContain('caller_not_authorized');
   });
+});
 
-  test('a superseded reason leaves the standing lead union', () => {
-    expect(mergeNeedsConfirmation(['caller_not_authorized', 'email_unverified'], [], { superseded: ['caller_not_authorized'] }))
-      .toEqual(['email_unverified']);
+describe('codex #4890 r5 — an elapsed slot never newly authorizes a reprocessed call', () => {
+  test('a slot already in the past is not authorized, and caller_not_authorized stays', () => {
+    const past = wdoExtraction({ scheduling: { status: 'confirmed', confirmed_start_at: '2026-09-21T10:00:00-04:00' } });
+    expect(isAuthorizedWdoArrangerBooking(past)).toBe(false);
+    expect(computeDeterministicTriageFlags(past, { contactPhone: ANI, addressValidation: AV_CLEAN })).toContain('caller_not_authorized');
   });
 
-  test('a reason this very pass re-raised is never dropped as superseded', () => {
-    expect(mergeNeedsConfirmation(['caller_not_authorized'], ['caller_not_authorized'], { superseded: ['caller_not_authorized'] }))
-      .toEqual(['caller_not_authorized']);
+  test('an explicit clock is honored (reprocess after the appointment date)', () => {
+    const e = wdoExtraction();
+    expect(isAuthorizedWdoArrangerBooking(e, { now: Date.parse('2026-09-25T12:00:00Z') })).toBe(true);
+    expect(isAuthorizedWdoArrangerBooking(e, { now: Date.parse('2026-09-29T12:00:00Z') })).toBe(false);
   });
 
-  test('no superseded option keeps the old union behavior', () => {
-    expect(mergeNeedsConfirmation(['caller_not_authorized'], ['email_unverified']))
-      .toEqual(['caller_not_authorized', 'email_unverified']);
+  test('an unparseable slot fails closed', () => {
+    const bad = wdoExtraction({ scheduling: { status: 'confirmed', confirmed_start_at: 'Monday at ten' } });
+    expect(isAuthorizedWdoArrangerBooking(bad)).toBe(false);
   });
 });

@@ -3859,40 +3859,7 @@ function canonicalizeInlineUnits(streetKey) {
 // reassert consumes can be nulled — its WHERE is self-guarded, but the
 // label must tell the truth). Runs AFTER dropFilledLeadColumns, so a
 // dropped identity key means the locked value is the live one.
-// True when a call OTHER than callId, linked to this lead (call_log.metadata
-// lead_id) or its customer, still has an open caller_not_authorized card —
-// that call's lead-level reminder must survive until its own card resolves
-// (codex #4890 r2 P2). Run inside the lead-row-locked transaction so the
-// verdict the locked reconcile applies is never stale (codex #4890 r3 P2).
-//
-// "Linked" is deliberately BROAD (codex #4890 r4 P2 — a customer-less lead
-// created by a call is linked only through leads.twilio_call_sid, with no
-// metadata.lead_id stamp): the lead_id stamp, the customer, the lead's own
-// creating call SID, or the lead's phone on either leg. Over-matching only
-// keeps a reminder a little longer; under-matching would drop one another
-// call still owns.
-async function otherOpenCallerAuthorizationCard(dbh, { callId, leadId, customerId }) {
-  const lead = await dbh('leads').where({ id: leadId }).first('twilio_call_sid', 'phone');
-  const leadPhoneKey = String(lead?.phone || '').replace(/\D/g, '').slice(-10);
-  const row = await dbh('triage_items as t')
-    .join('call_log as c', 'c.id', 't.call_log_id')
-    .where('t.reason_code', 'caller_not_authorized')
-    .whereIn('t.status', ['open', 'in_progress'])
-    .whereNot('t.call_log_id', callId)
-    .where(function linkedToThisLead() {
-      this.whereRaw("c.metadata->>'lead_id' = ?", [String(leadId)]);
-      if (customerId) this.orWhere('c.customer_id', customerId);
-      if (lead?.twilio_call_sid) this.orWhere('c.twilio_call_sid', lead.twilio_call_sid);
-      if (leadPhoneKey.length === 10) {
-        this.orWhereRaw("RIGHT(regexp_replace(COALESCE(c.from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [leadPhoneKey])
-          .orWhereRaw("RIGHT(regexp_replace(COALESCE(c.to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [leadPhoneKey]);
-      }
-    })
-    .first('t.id');
-  return !!row;
-}
-
-function reconcileConditionalLeadFieldsUnderLock(updates, lockedLead, { bridgeNeedsConfirmation = [], supersededNeedsConfirmation = [], leadQuality = null, extractedDataDelta = null } = {}) {
+function reconcileConditionalLeadFieldsUnderLock(updates, lockedLead, { bridgeNeedsConfirmation = [], leadQuality = null, extractedDataDelta = null } = {}) {
   if (!lockedLead || !updates) return { updates, contact: null, serviceInterestDropped: false };
   const stillEmpty = (v) => v === null || v === undefined || v === '';
   const out = { ...updates };
@@ -3932,7 +3899,7 @@ function reconcileConditionalLeadFieldsUnderLock(updates, lockedLead, { bridgeNe
           return Array.isArray(data.needs_confirmation) ? data.needs_confirmation : [];
         } catch { return []; }
       })();
-      const remergedNeedsConfirmation = mergeNeedsConfirmation(lockedPriorNeedsConfirmation, bridgeNeedsConfirmation, { superseded: supersededNeedsConfirmation });
+      const remergedNeedsConfirmation = mergeNeedsConfirmation(lockedPriorNeedsConfirmation, bridgeNeedsConfirmation);
       contact = leadContactCompleteness({
         first_name: out.first_name ?? lockedLead.first_name,
         last_name: out.last_name ?? lockedLead.last_name,
@@ -9234,14 +9201,13 @@ const CallRecordingProcessor = {
     // Address/identity bridge (populated below in shadow mode): "confirm before
     // dispatch" reasons that flag the call for a human without blocking writes.
     const bridgeNeedsConfirmation = [];
-    // Standing lead reasons this pass SETTLES (codex #4890 r1 P1): lead
-    // needs_confirmation is a union across calls, so an earlier pass's
-    // caller_not_authorized would outlive the owner ruling (2026-09-26) that a
-    // lender/realtor arranging a confirmed WDO inspection is authorized — and
-    // the finalizer below retires that pass's open card. Schema-valid V2 only.
-    const supersededNeedsConfirmation = (v2Result?.status === 'valid' && isAuthorizedWdoArrangerBooking(v2Result.extraction))
-      ? ['caller_not_authorized']
-      : [];
+    // An earlier pass's caller_not_authorized card on THIS call is settled by
+    // this pass when the owner ruling (2026-09-26) authorizes the caller — a
+    // lender/realtor arranging a confirmed WDO inspection (codex #4890 r1
+    // P1). Call-scoped only: the lead's needs_confirmation list is a standing
+    // union of read-back reminders the office clears, never edited across
+    // calls (no per-reason provenance). Schema-valid V2 only.
+    const wdoArrangerAuthorizedThisPass = v2Result?.status === 'valid' && isAuthorizedWdoArrangerBooking(v2Result.extraction);
     let schedulingChangeHeld = false;
     // Set by WHICHEVER lane files the missing_unit_number card (enforce
     // advisory loop or the shadow bridge) — the completed-call clarify ask
@@ -12792,21 +12758,6 @@ const CallRecordingProcessor = {
         // empty-only rule is equivalent to "fill everything" anyway.
         if (leadId) {
           let current = existingLead || (await db('leads').where({ id: leadId }).first());
-          // The lead-level reason may belong to ANOTHER call on this lead
-          // (codex #4890 r2 P2): settle it only when no other call linked to
-          // the lead or its customer still has an open caller_not_authorized
-          // card — that call's reminder must survive until its own card does.
-          let leadSupersededNeedsConfirmation = [];
-          if (supersededNeedsConfirmation.length) {
-            try {
-              const otherOpen = await otherOpenCallerAuthorizationCard(db, { callId: call.id, leadId, customerId });
-              leadSupersededNeedsConfirmation = otherOpen ? [] : supersededNeedsConfirmation;
-            } catch (settleErr) {
-              // Fail toward keeping the reminder: a failed check settles nothing.
-              leadSupersededNeedsConfirmation = [];
-              logger.warn(`[call-proc] superseded-reason check failed for ${maskSid(callSid)}: ${settleErr.message}`);
-            }
-          }
           const isEmpty = (v) => v === null || v === undefined || v === '';
           // leads.address is ONE free-text varchar(255) (migration
           // 20260401000095): compose the unit in, or the lead card / pipeline
@@ -12997,7 +12948,7 @@ const CallRecordingProcessor = {
             const priorNeedsConfirmation = Array.isArray(priorExtractedData.needs_confirmation)
               ? priorExtractedData.needs_confirmation
               : [];
-            const mergedNeedsConfirmation = mergeNeedsConfirmation(priorNeedsConfirmation, bridgeNeedsConfirmation, { superseded: leadSupersededNeedsConfirmation });
+            const mergedNeedsConfirmation = mergeNeedsConfirmation(priorNeedsConfirmation, bridgeNeedsConfirmation);
             // MERGED over the lead's prior payload, never rebuilt wholesale
             // (server/utils/lead-extracted-data-merge.js): a follow-up call
             // that doesn't restate the pest problem or the promised quote must
@@ -13413,17 +13364,10 @@ const CallRecordingProcessor = {
                 // field this call never wrote must never be restored by its
                 // rejection. The conditional (non-identity) decisions are
                 // re-made the same way (pre-push P1 r22).
-                // Re-decide the settle under the lead row lock (codex #4890 r3
-                // P2): another call may have opened its own authorization card
-                // and updated this lead since the unlocked pre-check.
-                const lockedSupersededNeedsConfirmation = leadSupersededNeedsConfirmation.length
-                  && await otherOpenCallerAuthorizationCard(trx, { callId: call.id, leadId, customerId })
-                  ? []
-                  : leadSupersededNeedsConfirmation;
                 const reconciled = reconcileConditionalLeadFieldsUnderLock(
                   dropFilledLeadColumns(leadUpdates, lockedLead),
                   lockedLead,
-                  { bridgeNeedsConfirmation, supersededNeedsConfirmation: lockedSupersededNeedsConfirmation, leadQuality: extracted.lead_quality, extractedDataDelta },
+                  { bridgeNeedsConfirmation, leadQuality: extracted.lead_quality, extractedDataDelta },
                 );
                 if (reconciled.serviceInterestDropped) {
                   persistedServiceInterestLabel = null;
@@ -18945,7 +18889,7 @@ const CallRecordingProcessor = {
       // must retire that card here — the finalizer only ever OPENS review
       // state — or the visit books while the office still sees a "confirm the
       // account holder" task. Same transaction and fence as the repairs above.
-      if (written > 0 && finalStatus === 'processed' && supersededNeedsConfirmation.includes('caller_not_authorized')) {
+      if (written > 0 && finalStatus === 'processed' && wdoArrangerAuthorizedThisPass) {
         const retired = await trx('triage_items')
           .where({ call_log_id: call.id, reason_code: 'caller_not_authorized' })
           .whereIn('status', ['open', 'in_progress'])

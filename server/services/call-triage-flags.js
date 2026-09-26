@@ -267,12 +267,18 @@ function isWdoInspectionRequest(serviceRequest = {}) {
 // an outbound call with the identical extraction shape is authorized the
 // same way an inbound one is.
 const WDO_ARRANGER_RELATIONSHIPS = new Set(['real_estate_agent', 'lender']);
-function isAuthorizedWdoArrangerBooking(extraction) {
+function isAuthorizedWdoArrangerBooking(extraction, { now = Date.now() } = {}) {
   const relationship = String(extraction?.caller?.relationship_to_property || '').trim().toLowerCase();
   if (!WDO_ARRANGER_RELATIONSHIPS.has(relationship)) return false;
   if (!isWdoInspectionRequest(extraction?.service_request || {})) return false;
   const scheduling = extraction?.scheduling || {};
-  return scheduling.status === 'confirmed' && !!scheduling.confirmed_start_at;
+  if (scheduling.status !== 'confirmed' || !scheduling.confirmed_start_at) return false;
+  // The agreed slot must still be ahead (codex #4890 r5 P1): a call
+  // force-reprocessed after its appointment elapsed must not newly authorize
+  // a backdated visit — the downstream past-date guard compares against the
+  // CALL date, not today. Unparseable → not authorized (fail closed).
+  const slotMs = Date.parse(String(scheduling.confirmed_start_at));
+  return Number.isFinite(slotMs) && slotMs > now;
 }
 
 function computeDeterministicTriageFlags(extraction, opts = {}) {
@@ -2343,15 +2349,9 @@ function applyEmailDisagreementHold(extracted, dictationEmailPayload) {
  * extraction has no unit to tie the acceptance to. See the owed-confirmation
  * doctrine in triage-auto-resolve.js.
  */
-function mergeNeedsConfirmation(prior, next, { superseded = [] } = {}) {
+function mergeNeedsConfirmation(prior, next) {
   const nextArr = Array.isArray(next) ? next : [];
-  // Reasons THIS pass settled (codex #4890 r1 P1): a standing reason from an
-  // earlier call that the current pass determined no longer applies — e.g.
-  // caller_not_authorized once a confirmed lender/realtor WDO arranger is
-  // authorized (owner ruling 2026-09-26) — leaves the union, unless this very
-  // pass re-raised it.
-  const drop = new Set((Array.isArray(superseded) ? superseded : []).filter((r) => !nextArr.includes(r)));
-  const merged = [...new Set([...(Array.isArray(prior) ? prior : []), ...nextArr])].filter((r) => !drop.has(r));
+  const merged = [...new Set([...(Array.isArray(prior) ? prior : []), ...nextArr])];
   return nextArr.includes('address_recovered')
     ? merged.filter((r) => r !== 'address_unverified')
     : merged;
