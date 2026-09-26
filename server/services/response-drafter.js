@@ -33,7 +33,7 @@ class ResponseDrafter {
         laneId: highStakes ? 'response_drafter_high_stakes' : 'response_drafter',
         maxTokens: 500,
         jsonMode: false,
-        system: `You are Adam Benetti's AI assistant for Waves Pest Control. Draft SMS replies Adam will review before sending. Write as Adam — direct, knowledgeable, friendly. Keep under 300 chars when possible. Reference actual service data. Sign off "- Adam" or "- Waves". Plain keyboard punctuation only: straight quotes and hyphens, never curly quotes, em dashes, or the ellipsis character (they force UCS-2 encoding and multiply SMS segments). FLAGS:\n${flagsSummary}`,
+        system: `You are Adam Benetti's AI assistant for Waves Pest Control. Draft SMS replies Adam will review before sending. Write as Adam — direct, knowledgeable, friendly. Keep under 300 chars when possible. Reference actual service data. Never sign off: no "- Adam", no "- Waves", no name at the end. The message just ends. Plain keyboard punctuation only: straight quotes and hyphens, never curly quotes, em dashes, or the ellipsis character (they force UCS-2 encoding and multiply SMS segments). FLAGS:\n${flagsSummary}`,
         text: `CUSTOMER: ${context.summary}\n\nLAST SERVICE: ${context.lastService ? `${context.lastService.type} on ${new Date(context.lastService.date).toLocaleDateString('en-US', { timeZone: 'America/New_York' })} — "${(context.lastService.notes || '').slice(0, 150)}"` : 'None'}\n\nNEXT: ${context.upcomingServices?.[0] ? `${context.upcomingServices[0].type} ${new Date(context.upcomingServices[0].date).toLocaleDateString('en-US', { timeZone: 'America/New_York' })}` : 'Nothing'}\n\nBALANCE: ${context.billing?.outstandingBalance > 0 ? `$${context.billing.outstandingBalance.toFixed(2)} overdue` : 'Current'}\n\nRECENT SMS:\n${conversation}\n\nINTENT: ${intent?.intent || 'UNKNOWN'}\n\nNEW MESSAGE: "${inboundMessage}"\n\nDraft reply as Adam:`,
       },
     );
@@ -50,43 +50,43 @@ class ResponseDrafter {
       case 'SCHEDULE_INQUIRY':
         if (context.upcomingServices?.length) {
           const next = context.upcomingServices[0];
-          draft = `Hi ${name}! Your next ${next.type} is scheduled for ${new Date(next.date).toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'America/New_York' })}${next.window ? ` ${next.window}` : ''}. Anything else? — Adam`;
+          draft = `Hi ${name}! Your next ${next.type} is scheduled for ${new Date(next.date).toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'America/New_York' })}${next.window ? ` ${next.window}` : ''}. Anything else?`;
         } else {
-          draft = `Hi ${name}! Let me check your schedule and get back to you shortly. — Adam`;
+          draft = `Hi ${name}! Let me check your schedule and get back to you shortly.`;
         }
         break;
 
       case 'PEST_REPORT':
       case 'SERVICE_REQUEST':
-        draft = `Hi ${name}, thanks for letting us know. I'll get a callback scheduled for you — your WaveGuard ${context.customer?.tier || ''} plan covers this at no extra charge. When's a good time this week? — Adam`;
+        draft = `Hi ${name}, thanks for letting us know. I'll get a callback scheduled for you — your WaveGuard ${context.customer?.tier || ''} plan covers this at no extra charge. When's a good time this week?`;
         break;
 
       case 'BILLING_INQUIRY':
         if (context.billing?.outstandingBalance > 0) {
-          draft = `Hi ${name}! Your current balance is $${context.billing.outstandingBalance.toFixed(2)}. I can help sort that out — want me to look into it? — Adam`;
+          draft = `Hi ${name}! Your current balance is $${context.billing.outstandingBalance.toFixed(2)}. I can help sort that out — want me to look into it?`;
         } else {
-          draft = `Hi ${name}! Your account is current. Let me know what billing question you have and I'll look into it. — Adam`;
+          draft = `Hi ${name}! Your account is current. Let me know what billing question you have and I'll look into it.`;
         }
         break;
 
       case 'CANCEL_REQUEST':
-        draft = `Hi ${name}, I understand — I want to make sure we've explored all options. Would you be open to a quick chat? Just reply here or I'll give you a call. — Adam`;
+        draft = `Hi ${name}, I understand — I want to make sure we've explored all options. Would you be open to a quick chat? Just reply here or I'll give you a call.`;
         break;
 
       case 'COMPLAINT':
-        draft = `Hi ${name}, I'm sorry to hear that. Your satisfaction is my top priority. Can you tell me more about what's going on so I can make it right? — Adam`;
+        draft = `Hi ${name}, I'm sorry to hear that. Your satisfaction is my top priority. Can you tell me more about what's going on so I can make it right?`;
         break;
 
       case 'POSITIVE_FEEDBACK':
-        draft = `${name}, thank you so much — that really means a lot! We love serving your property. If you ever have a neighbor looking for pest control, we'd be happy to take care of them too. 🌊 — Adam`;
+        draft = `${name}, thank you so much — that really means a lot! We love serving your property. If you ever have a neighbor looking for pest control, we'd be happy to take care of them too.`;
         break;
 
       case 'CONFIRMATION':
-        draft = `Got it, ${name}! You're all confirmed. See you then! — Waves`;
+        draft = `Got it, ${name}! You're all confirmed. See you then!`;
         break;
 
       default:
-        draft = `Hi ${name}, thanks for reaching out! Let me look into this and get back to you shortly. — Adam`;
+        draft = `Hi ${name}, thanks for reaching out! Let me look into this and get back to you shortly.`;
     }
 
     return { draft, context: context.summary, flags: context.flags, intent: intentType };
