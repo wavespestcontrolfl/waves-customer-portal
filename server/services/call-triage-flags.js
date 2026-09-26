@@ -1446,6 +1446,14 @@ function etWallClockOfConfirmedStart(value) {
 // call's ET date: same-day is rejected (a "Sunday" spoken on a Sunday is
 // ambiguous between today and next week) and day 7 is rejected (same
 // weekday again). Within 1–6 days every weekday names exactly one date.
+// codex #4919 r1 P1 / review round: this function has exactly ONE call site
+// (quoteBindsConfirmedSlot, below) — NOT exported, and this file's only
+// confirmedSlotFacts( call. dayDiff 0 (today) is now also RETURNED (widened
+// from the 1–6 range) so a RELATIVE-day word can bind a same-day slot; the
+// bare-weekday same-day ambiguity this comment describes is enforced by the
+// day-binding SLOT_BINDING_CHECKS entry reading slot.dayDiff, not by this
+// function returning null. If a second call site is ever added, it must
+// handle dayDiff 0 explicitly rather than relying on null-on-same-day.
 function confirmedSlotFacts(confirmedStartAt, callStartedAt) {
   const wall = etWallClockOfConfirmedStart(confirmedStartAt);
   const call = new Date(String(callStartedAt || ''));

@@ -364,6 +364,22 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     expect(r.appointmentBlockingFlags).toContain('commercial_requires_quote');
   });
 
+  // codex #4919 review round P1 (:1465): confirmedSlotFacts now returns a
+  // populated slot for dayDiff 0 (needed so "tonight" can bind) — a BARE
+  // weekday name on that same ambiguous day must still fail END TO END
+  // through the full hasAgentCommittedEvidence/canAutoRoute pipeline, not
+  // just the lower-level quoteBindsConfirmedSlot unit check.
+  test('a bare weekday name on the call\'s own day still hard-blocks commercial_requires_quote end to end', () => {
+    const turn = "We'll be there Thursday at 6 pm.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const ex = agentCommitted(['commercial_requires_quote'], { quote: turn });
+    ex.caller = { relationship_to_property: 'owner', on_site_authorization: true };
+    ex.scheduling.confirmed_start_at = '2026-07-30T18:00:00-04:00'; // the call's OWN day (Thursday)
+    const r = canAutoRoute(ex, opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('commercial_requires_quote');
+  });
+
   test('an agreed price WITHOUT an agent commitment does not clear commercial_requires_quote', () => {
     const ex = agentCommitted(['commercial_requires_quote'], { claim: false, quote: null });
     ex.caller = { relationship_to_property: 'owner', on_site_authorization: true };
