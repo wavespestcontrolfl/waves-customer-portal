@@ -19,6 +19,7 @@ const logger = require('./logger');
 const { sendCustomerMessage, normalizeRecipient, classifyDeliveryCertainty } = require('./messaging/send-customer-message');
 const { renderRequiredSmsTemplate } = require('./sms-template-renderer');
 const { withSmsConsentLock } = require('../utils/customer-comms-lock');
+const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 
 /**
  * The lead auto-reply (lead_auto_reply_biz) is sent AT MOST ONCE per
@@ -178,7 +179,8 @@ async function delayedLeadReplyStillEligible(customerId, phoneDigits, conn = db,
     // Outbound counts only when Twilio actually accepted it (a real SM/MM
     // sid, not scheduled/cancelled/failed): a reply staff merely scheduled
     // has reached nobody.
-    const exchanged = await conn('sms_log')
+    // An unresolved send reservation (a 'sending' placeholder) is not a text.
+    const exchanged = await excludeUnresolvedSendReservations(conn('sms_log'))
       .where((q) => q.where({ direction: 'inbound' })
         .orWhere((out) => out.where({ direction: 'outbound' })
           .whereRaw("COALESCE(twilio_sid, '') ~ '^(SM|MM)'")
