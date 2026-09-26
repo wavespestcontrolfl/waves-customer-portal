@@ -428,7 +428,7 @@ describe.each([
     expect(sendAppointmentReminderEmail).not.toHaveBeenCalled();
     expect(notifyAdmin).toHaveBeenCalledTimes(2);
     expect(notifyAdmin).toHaveBeenLastCalledWith('comms', expect.any(String), expect.stringContaining('email consent'), expect.objectContaining({
-      bell: true, link: `/admin/customers/${customerId}`,
+      bell: true, link: `/admin/customers?customerId=${customerId}`,
       metadata: { customerId, scheduledServiceId: reminder.appointmentId, kind: tier, reason: 'reminder_preferences_unavailable' },
     }));
   });

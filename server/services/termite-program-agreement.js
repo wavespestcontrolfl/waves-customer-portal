@@ -987,7 +987,7 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
         'estimate',
         'Termite agreement needs manual prep (commercial)',
         `${estimate.customer_name || 'Customer'} accepted a commercial termite estimate — commercial and multi-unit structures need a tailored agreement (different statutory retreat windows, tenant considerations), so prepare it manually from the document library.${propertyClause}`,
-        { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId, ...propertyMeta, ...(reissueSourceContractId ? { reissueContractId: reissueSourceContractId } : {}) } },
+        { icon: '\u{1F4DD}', link: `/admin/customers?customerId=${customerId}`, metadata: { estimateId: estimate.id, customerId, ...propertyMeta, ...(reissueSourceContractId ? { reissueContractId: reissueSourceContractId } : {}) } },
       ], `manual-prep (commercial) for estimate ${estimate.id}`);
       return { ok: false, skipped: 'commercial', belled, retireFailed: commercialRetireFailed };
     }
@@ -1023,7 +1023,7 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
         'estimate',
         'Termite agreement needs manual prep (annual plan billing)',
         `${estimate.customer_name || 'Customer'} accepted the Waves Subterranean Termite Protection annual plan under '${explicitBillingTerm}' billing instead of annual prepay — the v3 agreement states prepaid terms, so prepare the agreement manually.${propertyClause}`,
-        { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId, ...propertyMeta, ...(reissueSourceContractId ? { reissueContractId: reissueSourceContractId } : {}) } },
+        { icon: '\u{1F4DD}', link: `/admin/customers?customerId=${customerId}`, metadata: { estimateId: estimate.id, customerId, ...propertyMeta, ...(reissueSourceContractId ? { reissueContractId: reissueSourceContractId } : {}) } },
       ], `manual-prep (annual plan billing mismatch) for estimate ${estimate.id}`);
       return { ok: false, skipped: 'annual_plan_billing_mismatch', belled: mismatchBelled, retireFailed: mismatchRetireFailed };
     }
@@ -1066,7 +1066,7 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
           'estimate',
           'Termite agreement needs manual prep (annual plan billing)',
           `${estimate.customer_name || 'Customer'} accepted the Waves Subterranean Termite Protection annual plan, but no annual prepay record exists for the estimate — confirm billing before preparing the agreement manually.${propertyClause}`,
-          { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId, ...propertyMeta, ...(reissueSourceContractId ? { reissueContractId: reissueSourceContractId } : {}) } },
+          { icon: '\u{1F4DD}', link: `/admin/customers?customerId=${customerId}`, metadata: { estimateId: estimate.id, customerId, ...propertyMeta, ...(reissueSourceContractId ? { reissueContractId: reissueSourceContractId } : {}) } },
         ], `manual-prep (annual plan billing unverified) for estimate ${estimate.id}`);
         return { ok: false, skipped: 'annual_plan_billing_unverified', belled: unverifiedBelled, retireFailed: unverifiedRetireFailed };
       }
@@ -1097,7 +1097,7 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
         'estimate',
         'Termite agreement needs manual prep (annual prepay)',
         `${estimate.customer_name || 'Customer'} accepted a termite estimate on annual prepay — the standard program agreement states per-application billing, so prepare the agreement manually with the prepay terms.${propertyClause}`,
-        { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId, ...propertyMeta, ...(reissueSourceContractId ? { reissueContractId: reissueSourceContractId } : {}) } },
+        { icon: '\u{1F4DD}', link: `/admin/customers?customerId=${customerId}`, metadata: { estimateId: estimate.id, customerId, ...propertyMeta, ...(reissueSourceContractId ? { reissueContractId: reissueSourceContractId } : {}) } },
       ], `manual-prep (annual prepay) for estimate ${estimate.id}`);
       return { ok: false, skipped: 'annual_prepay', belled: prepayBelled, retireFailed: prepayRetireFailed };
     }
@@ -1145,7 +1145,7 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
         'estimate',
         'Termite agreement needs manual prep',
         `${estimate.customer_name || 'Customer'} accepted a termite estimate, but the program agreement couldn't be prefilled from the estimate figures. Prepare and send it from the document library.${propertyClause}`,
-        { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId, ...propertyMeta, ...(reissueSourceContractId ? { reissueContractId: reissueSourceContractId } : {}) } },
+        { icon: '\u{1F4DD}', link: `/admin/customers?customerId=${customerId}`, metadata: { estimateId: estimate.id, customerId, ...propertyMeta, ...(reissueSourceContractId ? { reissueContractId: reissueSourceContractId } : {}) } },
       ], `manual-prep (figures unresolved) for estimate ${estimate.id}`);
       return { ok: false, skipped: 'figures_unresolved', belled: figuresBelled, retireFailed: figuresRetireFailed };
     }
@@ -1184,7 +1184,7 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
           'estimate',
           'Termite agreement needs manual prep (annual plan)',
           `${estimate.customer_name || 'Customer'} accepted the Waves Subterranean Termite Protection annual plan, but the v3 agreement template is not active yet — prepare and send the agreement manually.${propertyClause}`,
-          { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId, ...propertyMeta, ...(reissueSourceContractId ? { reissueContractId: reissueSourceContractId } : {}) } },
+          { icon: '\u{1F4DD}', link: `/admin/customers?customerId=${customerId}`, metadata: { estimateId: estimate.id, customerId, ...propertyMeta, ...(reissueSourceContractId ? { reissueContractId: reissueSourceContractId } : {}) } },
         ], `manual-prep (annual template not active) for estimate ${estimate.id}`);
         return { ok: false, skipped: 'annual_template_not_active', belled: annualBelled, retireFailed: annualRetireFailed };
       }
@@ -1398,7 +1398,7 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
       'estimate',
       autosent ? 'Termite agreement sent for signature' : 'Termite agreement drafted',
       `${estimate.customer_name || 'Customer'} accepted the ${OWNERSHIP_BELL_LABELS[prepared.ownership] || OWNERSHIP_BELL_LABELS.own} termite program — the agreement is ${autosent ? 'on its way for e-signature' : 'prefilled and ready to send from the document library'}.`,
-      { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId, contractId: contract.id } },
+      { icon: '\u{1F4DD}', link: `/admin/customers?customerId=${customerId}`, metadata: { estimateId: estimate.id, customerId, contractId: contract.id } },
     ];
     await ringAdminBell(NotificationService, bellArgs, `drafted bell for contract ${contract.id} (estimate ${estimate.id}) — draft remains in the open document-requests queue`);
 
@@ -1697,7 +1697,7 @@ async function reconcileSupersededProgramAgreements({ limit = 50 } = {}) {
         'estimate',
         'Termite agreement signed on superseded wording',
         `${row.recipient_name || 'A customer'} signed a termite program agreement rendered from a superseded template version during a rollout window. The executed contract stays signed as-is — review it and issue corrected paperwork if the wording differences matter.`,
-        { icon: '\u{1F4DD}', link: `/admin/customers/${row.customer_id}`, metadata: { contractId: row.id, customerId: row.customer_id } },
+        { icon: '\u{1F4DD}', link: `/admin/customers?customerId=${row.customer_id}`, metadata: { contractId: row.id, customerId: row.customer_id } },
       ], `signed-on-superseded audit for contract ${row.id}`);
       if (auditBelled) {
         await markSupersededHandled(row, 'signed_superseded_belled');
@@ -1750,7 +1750,7 @@ async function reconcileSupersededProgramAgreements({ limit = 50 } = {}) {
         'estimate',
         'Re-issue termite agreement (wording updated)',
         `The open termite program agreement for ${row.recipient_name || 'a customer'} was cancelled because its wording was superseded by the v2 compliance templates. It was issued manually, so re-issue it from the document library on the updated template.`,
-        { icon: '\u{1F4DD}', link: `/admin/customers/${row.customer_id}`, metadata: { contractId: row.id, customerId: row.customer_id } },
+        { icon: '\u{1F4DD}', link: `/admin/customers?customerId=${row.customer_id}`, metadata: { contractId: row.id, customerId: row.customer_id } },
       ], `manual stale-version re-issue for contract ${row.id}`);
       if (belled) await markSupersededHandled(row, 'manual_reissue_belled');
       else results.failed += 1;
@@ -1871,7 +1871,7 @@ async function reconcileSupersededProgramAgreements({ limit = 50 } = {}) {
         'estimate',
         'Re-issue termite agreement (wording updated)',
         `The cancelled termite program agreement for ${row.recipient_name || 'a customer'} referenced an estimate that does not belong to that customer, so it could not be replaced automatically. Re-issue it from the document library.`,
-        { icon: '\u{1F4DD}', link: `/admin/customers/${row.customer_id}`, metadata: { contractId: row.id, customerId: row.customer_id } },
+        { icon: '\u{1F4DD}', link: `/admin/customers?customerId=${row.customer_id}`, metadata: { contractId: row.id, customerId: row.customer_id } },
       ], `estimate-customer mismatch for contract ${row.id}`);
       if (mismatchBelled) {
         await markSupersededHandled(row, 'estimate_customer_mismatch');

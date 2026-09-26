@@ -714,7 +714,7 @@ async function fileCoverageException(term, reason, body) {
       'Annual prepay: promised first visit needs attention',
       body,
       {
-        link: term?.customer_id ? `/admin/customers/${term.customer_id}` : '/admin/dispatch',
+        link: term?.customer_id ? `/admin/customers?customerId=${term.customer_id}` : '/admin/dispatch',
         metadata: {
           dedupeKey,
           customer_id: term?.customer_id || null,

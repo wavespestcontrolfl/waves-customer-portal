@@ -514,7 +514,7 @@ class CollectionsConversation {
         'billing',
         'Follow-up needed after automated billing call',
         detail,
-        { link: `/admin/customers/${this._ctx?.customer?.id}`, metadata: { source: 'collections_voice', callLogId: this._ctx?.callLogId } },
+        { link: `/admin/customers?customerId=${this._ctx?.customer?.id}`, metadata: { source: 'collections_voice', callLogId: this._ctx?.callLogId } },
       );
       return card && card.id ? card : null;
     } catch (cardErr) {
@@ -607,7 +607,7 @@ class CollectionsConversation {
           'billing',
           'Opt-out needs manual action',
           `A customer asked to stop ${broad ? 'ALL calls' : 'automated calls'} on a billing follow-up call, and a durable flag write failed. Please set ${flagsNeeded} by hand.`,
-          { link: `/admin/customers/${this._ctx.customer.id}`, metadata: { source: 'collections_voice', callLogId: this._ctx.callLogId } },
+          { link: `/admin/customers?customerId=${this._ctx.customer.id}`, metadata: { source: 'collections_voice', callLogId: this._ctx.callLogId } },
         );
       } catch (cardErr) {
         logger.error(`[collections-voice] spoken opt-out fallback card failed: ${cardErr.message}`);
@@ -942,7 +942,7 @@ class CollectionsConversation {
         'billing',
         'Follow-up needed after automated billing call',
         'An automated billing follow-up call could not complete its last action (tool rounds exhausted). Please follow up with the customer.',
-        { link: `/admin/customers/${this._ctx.customer.id}`, metadata: { source: 'collections_voice', callLogId: this._ctx.callLogId } },
+        { link: `/admin/customers?customerId=${this._ctx.customer.id}`, metadata: { source: 'collections_voice', callLogId: this._ctx.callLogId } },
       );
     } catch (cardErr) {
       logger.error(`[collections-voice] tool-exhaustion follow-up card failed: ${cardErr.message}`);
@@ -1071,7 +1071,7 @@ class CollectionsConversation {
                 'billing',
                 'Wrong-number report needs manual action',
                 'An outbound billing follow-up call reached a number where the customer is not known, and BOTH the wrong_number flag and the collection_hold fallback failed to write. Please flag the number by hand before any further outreach.',
-                { link: `/admin/customers/${this._ctx.customer.id}`, metadata: { source: 'collections_voice', callLogId: this._ctx.callLogId } },
+                { link: `/admin/customers?customerId=${this._ctx.customer.id}`, metadata: { source: 'collections_voice', callLogId: this._ctx.callLogId } },
               );
               if (!card || !card.id) throw new Error('notifyAdmin returned no persisted card');
             } catch (cardErr) {
@@ -1382,7 +1382,7 @@ class CollectionsConversation {
           'billing',
           'Dispute needs manual action',
           `A customer disputed a bill on a billing follow-up call, but the durable hold write failed. Summary: ${summary || 'dispute raised'}. Please place the hold by hand.`,
-          { link: `/admin/customers/${this._ctx.customer.id}`, metadata: { source: 'collections_voice', callLogId: this._ctx.callLogId } },
+          { link: `/admin/customers?customerId=${this._ctx.customer.id}`, metadata: { source: 'collections_voice', callLogId: this._ctx.callLogId } },
         );
       } catch (cardErr) {
         logger.error(`[collections-voice] dispute fallback card failed: ${cardErr.message}`);
@@ -1423,7 +1423,7 @@ class CollectionsConversation {
             res.ok
               ? 'A customer asked for NO calls of any kind during a billing follow-up call. The automated-voice stop recorded, but the all-calls flag write failed — please set it by hand.'
               : 'A customer asked for NO calls of any kind during a billing follow-up call, and BOTH the automated-voice stop and the all-calls flag failed to write. Please set automated_voice_consent_revoked AND do_not_call by hand.',
-            { link: `/admin/customers/${this._ctx.customer.id}`, metadata: { source: 'collections_voice', callLogId: this._ctx.callLogId } },
+            { link: `/admin/customers?customerId=${this._ctx.customer.id}`, metadata: { source: 'collections_voice', callLogId: this._ctx.callLogId } },
           );
         } catch (cardErr) {
           logger.warn(`[collections-voice] do-not-call fallback card failed: ${cardErr.message}`);
@@ -1452,7 +1452,7 @@ class CollectionsConversation {
             'billing',
             'Opt-out needs manual action',
             'A customer asked to stop automated billing calls during a call, but the durable flag write failed. Please set automated_voice_consent_revoked by hand.',
-            { link: `/admin/customers/${this._ctx.customer.id}`, metadata: { source: 'collections_voice', callLogId: this._ctx.callLogId } },
+            { link: `/admin/customers?customerId=${this._ctx.customer.id}`, metadata: { source: 'collections_voice', callLogId: this._ctx.callLogId } },
           );
         } catch (cardErr) {
           logger.error(`[collections-voice] spoken opt-out fallback card failed: ${cardErr.message}`);
@@ -1755,7 +1755,7 @@ class CollectionsConversation {
         'Callback requested on billing follow-up call',
         `A customer on an automated billing follow-up call asked for a person outside office hours. Please call them back.${this._captures.humanEscapeUtterance ? ` They said: "${this._captures.humanEscapeUtterance}"` : ''}`,
         {
-          link: this._ctx ? `/admin/customers/${this._ctx.customer.id}` : undefined,
+          link: this._ctx ? `/admin/customers?customerId=${this._ctx.customer.id}` : undefined,
           metadata: { source: 'collections_voice', callLogId: this._ctx?.callLogId },
         },
       );

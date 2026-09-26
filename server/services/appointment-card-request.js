@@ -1670,7 +1670,7 @@ async function alertCaptureNeedsReview({ customerId, scheduledServiceId, reason 
       'billing',
       'Secure-appointment card not enrolled',
       `A customer saved a card from the secure-appointment link but it could not be enrolled (${reason}) — re-add a payment method or the visit will invoice unprotected.`,
-      { link: customerId ? `/admin/customers/${customerId}` : '/admin/dashboard', metadata: { customerId, scheduledServiceId, reason } },
+      { link: customerId ? `/admin/customers?customerId=${customerId}` : '/admin/dashboard', metadata: { customerId, scheduledServiceId, reason } },
     );
   } catch (e) { logger.warn(`[appt-card-request] capture review alert failed: ${e.message}`); }
 }
@@ -2432,7 +2432,7 @@ async function loadSecureCardPageData(token) {
         'Secure page rendered without a price — visit is manual-collect only',
         'The /secure card page displayed no price for this visit, so no completion amount was accepted (accepted_amount pinned to 0 — permanent for this link). Auto-charge will never run for this visit; collect manually at completion.',
         {
-          link: request.customer_id ? `/admin/customers/${request.customer_id}` : '/admin/dispatch',
+          link: request.customer_id ? `/admin/customers?customerId=${request.customer_id}` : '/admin/dispatch',
           metadata: {
             // customerId feeds the internal-test-account suppression in
             // notification-service.js — without it the demo account rings.
@@ -2669,7 +2669,7 @@ async function chargeAppointmentNoShowFee({ scheduledServiceId, reason = 'no_sho
         'No-show fee not charged — marked before start',
         'A visit was marked no-show before its scheduled start time — the saved-card fee was NOT charged. Re-mark the visit after its start if the customer no-shows.',
         {
-          link: request.customer_id ? `/admin/customers/${request.customer_id}` : '/admin/dispatch',
+          link: request.customer_id ? `/admin/customers?customerId=${request.customer_id}` : '/admin/dispatch',
           metadata: { scheduledServiceId, reason: 'no_show_before_start' },
         },
       );
@@ -2687,7 +2687,7 @@ async function chargeAppointmentNoShowFee({ scheduledServiceId, reason = 'no_sho
           ? 'A visit was marked no-show but its scheduled time could not be resolved — the saved-card fee was NOT charged. Bill manually if the fee applies.'
           : `A visit was marked no-show more than ${Math.round(NO_SHOW_FEE_MAX_AGE_MS / 3600000)} hours after its scheduled time — the saved-card fee was NOT charged. Bill manually if the fee applies.`,
         {
-          link: request.customer_id ? `/admin/customers/${request.customer_id}` : '/admin/dispatch',
+          link: request.customer_id ? `/admin/customers?customerId=${request.customer_id}` : '/admin/dispatch',
           metadata: { scheduledServiceId, reason: staleReason },
         },
       );
@@ -2760,7 +2760,7 @@ async function chargeAppointmentNoShowFee({ scheduledServiceId, reason = 'no_sho
           'No-show fee not charged — card removed',
           'The customer removed the saved card before the no-show/late-cancel fee could be charged. Bill manually if the fee applies.',
           {
-            link: request.customer_id ? `/admin/customers/${request.customer_id}` : '/admin/dispatch',
+            link: request.customer_id ? `/admin/customers?customerId=${request.customer_id}` : '/admin/dispatch',
             metadata: { scheduledServiceId, reason: 'payment_method_revoked' },
           },
         );
@@ -3145,7 +3145,7 @@ async function alertUnresolvedCancellationFee({ scheduledServiceId, outcome }) {
       'Cancellation fee needs review',
       `A cancelled visit's saved-card fee state is unresolved (${outcome.reason}) — review the customer's billing before assuming no fee was (or will be) charged.`,
       {
-        link: row?.customer_id ? `/admin/customers/${row.customer_id}` : '/admin/dispatch',
+        link: row?.customer_id ? `/admin/customers?customerId=${row.customer_id}` : '/admin/dispatch',
         metadata: { scheduledServiceId, reason: outcome.reason },
       },
     );
@@ -3301,7 +3301,7 @@ async function alertRecapApptCardNeedsReview({ scheduledServiceId, customerId, r
       'Recap completion needs billing review (saved card)',
       `A recap-completed visit whose card was saved through the appointment link was not auto-charged (${reason}). Review the visit's billing and collect manually if appropriate.`,
       {
-        link: customerId ? `/admin/customers/${customerId}` : '/admin/dispatch',
+        link: customerId ? `/admin/customers?customerId=${customerId}` : '/admin/dispatch',
         metadata: { scheduledServiceId, reason, lane: 'appointment_card' },
       },
     );

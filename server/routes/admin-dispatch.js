@@ -2637,7 +2637,7 @@ router.put('/:serviceId/status', async (req, res, next) => {
               'billing',
               'No-show fee needs review',
               'The no-show fee did not settle cleanly (declined or parked) — review the customer\'s billing; a retry may still charge.',
-              { link: `/admin/customers/${svc.customer_id}`, metadata: { scheduledServiceId: svc.id, reason: 'fee_unsettled' } },
+              { link: `/admin/customers?customerId=${svc.customer_id}`, metadata: { scheduledServiceId: svc.id, reason: 'fee_unsettled' } },
             );
           } catch (notifyErr) { logger.warn(`[admin-dispatch] no-show fee review alert failed: ${notifyErr.message}`); }
         }
@@ -2653,7 +2653,7 @@ router.put('/:serviceId/status', async (req, res, next) => {
             'billing',
             'No-show fee needs review',
             'The no-show fee step errored before lane ownership was resolved — review the customer\'s billing; a fee may still apply.',
-            { link: `/admin/customers/${svc.customer_id}`, metadata: { scheduledServiceId: svc.id, reason: 'fee_step_error' } },
+            { link: `/admin/customers?customerId=${svc.customer_id}`, metadata: { scheduledServiceId: svc.id, reason: 'fee_step_error' } },
           );
         } catch (notifyErr) { logger.warn(`[admin-dispatch] no-show fee review alert failed: ${notifyErr.message}`); }
       }

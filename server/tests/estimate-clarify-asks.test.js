@@ -1050,7 +1050,7 @@ describe('bedroom_count ask (unit-band lane)', () => {
       'lead',
       expect.stringMatching(/re-price the unit draft/i),
       expect.stringMatching(/2 bedrooms/),
-      expect.objectContaining({ link: '/admin/estimates/est-1', metadata: expect.objectContaining({ reprice_pending: true, estimateId: 'est-1' }) }),
+      expect.objectContaining({ link: '/admin/estimates?estimateId=est-1', metadata: expect.objectContaining({ reprice_pending: true, estimateId: 'est-1' }) }),
     );
   });
 
@@ -1185,7 +1185,7 @@ describe('bedroom_count ask (unit-band lane)', () => {
     await result.repricePromise;
     expect(mockMaybeDraftEstimateForCall).not.toHaveBeenCalled();
     expect(mockStartSmsThreadDraft).not.toHaveBeenCalled();
-    expect(mockNotifyAdmin).toHaveBeenCalledWith('lead', expect.stringMatching(/re-price the unit draft/i), expect.any(String), expect.objectContaining({ link: '/admin/estimates/est-1' }));
+    expect(mockNotifyAdmin).toHaveBeenCalledWith('lead', expect.stringMatching(/re-price the unit draft/i), expect.any(String), expect.objectContaining({ link: '/admin/estimates?estimateId=est-1' }));
   });
 
   test('a bare number answers only a DELIVERED bedroom-only prompt — an unsent draft leaves an unrelated "2" alone', async () => {
