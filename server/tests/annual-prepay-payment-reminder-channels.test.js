@@ -117,6 +117,7 @@ const { _private } = AnnualPrepayRenewals;
 const REMINDER_COLS = {
   payment_reminder_3d_sent_at: {},
   payment_reminder_3d_claimed_at: {},
+  payment_reminder_3d_attempted_for: {},
   payment_reminder_1d_sent_at: {},
   payment_reminder_1d_claimed_at: {},
 };
@@ -133,6 +134,8 @@ function query({ first, returning, columnInfo, rows = [] } = {}) {
   });
   q.orWhere = jest.fn(() => q);
   q.orWhereNotNull = jest.fn(() => q);
+  q.whereRaw = jest.fn(() => q);
+  q.modify = jest.fn((callback) => { callback(q); return q; });
   q.update = jest.fn(() => q);
   q.insert = jest.fn(() => q);
   q.first = jest.fn(async () => first);
@@ -449,15 +452,36 @@ describe('annual prepay payment reminder — explicit billing-channel selection'
     expect(typeof sendCustomerMessage.mock.calls[0][0].preDispatchCheck).toBe('function');
   });
 
-  test('an App leg that persisted the in-app bell keeps the credit', async () => {
+  test('an App bell settles the stage, records canonical app history, and is not retried', async () => {
     sendCustomerMessage.mockResolvedValueOnce({
       sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'APP_UNAVAILABLE', bellPersisted: true,
     });
     autoApplyAccountCreditIfEnabled.mockResolvedValueOnce({ applied: 40 });
-    setDbQueues(standardQueues({ prefs: { billing_channels: ['push'] } }));
+    const settleQ = query();
+    const interactionQ = query();
+    setDbQueues({
+      ...standardQueues({ prefs: { billing_channels: ['push'] }, extraTermRows: [settleQ] }),
+      customer_interactions: [interactionQ],
+    });
     const result = await AnnualPrepayRenewals.sendPaymentPendingReminder({ ...BASE_TERM }, 1);
+
     expect(reverseAppliedCredit).not.toHaveBeenCalled();
-    expect(result).toMatchObject({ sent: true });
+    expect(result).toEqual({ sent: true, termId: 'term-1', complete: true });
+    expect(global.__ledgerStore[0].metadata.delivered).toBe(true);
+    expect(settleQ.update).toHaveBeenCalledWith(expect.objectContaining({
+      payment_reminder_1d_sent_at: expect.any(Date),
+      payment_reminder_1d_claimed_at: null,
+    }));
+    expect(interactionQ.insert).toHaveBeenCalledWith(expect.objectContaining({
+      interaction_type: 'app_outbound',
+      channel: 'push',
+    }));
+
+    _private.resetCachesForTests();
+    setDbQueues(standardQueues({ prefs: { billing_channels: ['push'] } }));
+    const replay = await AnnualPrepayRenewals.sendPaymentPendingReminder({ ...BASE_TERM }, 1);
+    expect(replay).toEqual({ sent: true, termId: 'term-1', complete: true });
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
   });
 });
 

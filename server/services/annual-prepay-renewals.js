@@ -7673,6 +7673,15 @@ function paymentReminderClaimColumnForDaysOut(daysOut) {
   return null;
 }
 
+// A released claim cannot prove that a stage was previously attempted. Keep
+// the promised first-visit date from the actual 3-day claim so the 2-day
+// resume scan can distinguish a real open episode from a term created after
+// the 3-day window. Storing the date (instead of a boolean) also invalidates
+// the evidence when staff move the promised first visit.
+function paymentReminderAttemptForColumn(daysOut) {
+  return Number(daysOut) === 3 ? 'payment_reminder_3d_attempted_for' : null;
+}
+
 // Shared by the legacy (implicit-SMS) and explicit-channel payment-reminder
 // paths so the two can never drift on copy: the pay link, quoted amount, and
 // rendered SMS body are computed exactly once per attempt.
@@ -7844,7 +7853,7 @@ async function sendExplicitPaymentReminderChannels({
     for (const channel of result.deliveredNow) {
       await db('customer_interactions').insert({
         customer_id: customer.id,
-        interaction_type: `${channel}_outbound`,
+        interaction_type: channel === 'push' ? 'app_outbound' : `${channel}_outbound`,
         channel,
         subject: `Annual prepay payment - ${daysOut}-day pre-visit reminder`,
         body: `Automated unpaid-prepay payment reminder sent (${daysOut} day(s) before term start) via ${channel}`,
@@ -8055,6 +8064,7 @@ async function sendPaymentPendingReminder(termOrId, daysOut, opts = {}) {
   if (!(await annualPrepayTableExists())) return { sent: false, reason: 'table_missing' };
   const sentCol = paymentReminderColumnForDaysOut(daysOut);
   const claimCol = paymentReminderClaimColumnForDaysOut(daysOut);
+  const attemptForCol = paymentReminderAttemptForColumn(daysOut);
   if (!sentCol || !claimCol) return { sent: false, reason: 'unsupported_days_out' };
   const cols = await annualPrepayColumns();
   if (!cols[sentCol] || !cols[claimCol]) return { sent: false, reason: 'columns_missing' };
@@ -8094,13 +8104,24 @@ async function sendPaymentPendingReminder(termOrId, daysOut, opts = {}) {
 
   const now = new Date();
   const staleClaimCutoff = new Date(now.getTime() - NOTICE_CLAIM_TTL_MS);
+  const attemptedFor = effectiveFirstVisitDate(term);
+  const claimUpdate = { [claimCol]: now, updated_at: now };
+  if (attemptForCol && cols[attemptForCol]) claimUpdate[attemptForCol] = attemptedFor;
   const [claimedTerm] = await db('annual_prepay_terms')
     .where({ id: term.id, status: PAYMENT_PENDING_STATUS })
     .whereNull(sentCol)
+    // Bind the durable attempt evidence to the same promised date this
+    // invocation selected. If staff move the visit between the scan and the
+    // claim, this attempt loses cleanly and cannot authorize a later resume
+    // for the new date.
+    .where(function promisedFirstVisitUnchanged() {
+      if (cols.first_visit_date) this.whereRaw('COALESCE(first_visit_date, term_start) = ?', [attemptedFor]);
+      else this.where('term_start', attemptedFor);
+    })
     .where(function paymentClaimAvailable() {
       this.whereNull(claimCol).orWhere(claimCol, '<', staleClaimCutoff);
     })
-    .update({ [claimCol]: now, updated_at: now })
+    .update(claimUpdate)
     .returning('*');
   if (!claimedTerm) return { sent: false, reason: 'already_claimed' };
 
@@ -8194,16 +8215,18 @@ async function sendPaymentPendingReminder(termOrId, daysOut, opts = {}) {
 // and only for customers with a stored billing channel choice: legacy SMS
 // reminders are never resumed. A settled stage is stamped sent and so is
 // never selected again.
-async function pendingExplicitEpisodeTerms({ today, daysOut, stageTerms }) {
+async function pendingExplicitEpisodeTerms({ today, daysOut, stageTerms, attemptForCol }) {
   const nextStage = Math.max(0, ...PAYMENT_REMINDER_DAYS.filter((days) => days < daysOut));
   const resumeDates = [];
   for (let days = nextStage + 1; days < daysOut; days++) resumeDates.push(addDaysYmd(today, days));
-  if (!resumeDates.length) return [];
+  // Without the additive evidence column, fail closed: selecting every term
+  // in the date window would catch up terms that did not exist at stage due.
+  if (!resumeDates.length || !attemptForCol) return [];
   // A resume read failure only skips resumption today; it must never take
   // down the regular stage sends in the same scan.
   let candidates;
   try {
-    candidates = await stageTerms(resumeDates);
+    candidates = await stageTerms(resumeDates, { attemptForCol });
   } catch (err) {
     logger.warn(`[annual-prepay] payment reminder resume scan skipped for the ${daysOut}-day stage: ${err.message}`);
     return [];
@@ -8234,7 +8257,7 @@ async function checkAndSendPaymentReminders({ today = etDateString() } = {}) {
     const cols = await annualPrepayColumns();
     if (!cols[sentCol] || !cols[claimCol]) continue; // migration not run yet
     const target = addDaysYmd(today, daysOut);
-    const stageTerms = (dates) => db('annual_prepay_terms')
+    const stageTerms = (dates, { attemptForCol = null } = {}) => db('annual_prepay_terms')
       .where({ status: PAYMENT_PENDING_STATUS })
       .whereNotNull('prepay_invoice_id')
       .whereNull(sentCol)
@@ -8250,9 +8273,23 @@ async function checkAndSendPaymentReminders({ today = etDateString() } = {}) {
         } else if (dates.length === 1) this.where('term_start', dates[0]);
         else this.whereIn('term_start', dates);
       })
+      .modify((query) => {
+        if (!attemptForCol) return;
+        // Resume only the episode attempted for the CURRENT promised date.
+        // A null marker excludes terms created after the 3-day stage; a
+        // mismatched marker excludes terms whose first visit was moved.
+        query.whereRaw(`${attemptForCol} = ${cols.first_visit_date ? 'COALESCE(first_visit_date, term_start)' : 'term_start'}`);
+      })
       .select('*');
     const terms = await stageTerms([target]);
-    terms.push(...(await pendingExplicitEpisodeTerms({ today, daysOut, stageTerms })));
+    terms.push(...(await pendingExplicitEpisodeTerms({
+      today,
+      daysOut,
+      stageTerms,
+      attemptForCol: cols[paymentReminderAttemptForColumn(daysOut)]
+        ? paymentReminderAttemptForColumn(daysOut)
+        : null,
+    })));
 
     for (const term of terms) {
       try {
@@ -9288,6 +9325,7 @@ module.exports = {
     TERMITE_NOTICE_MISSED_ESCALATION_COLUMN,
     paymentReminderColumnForDaysOut,
     paymentReminderClaimColumnForDaysOut,
+    paymentReminderAttemptForColumn,
     invoiceDunningActiveToday,
     shouldAlertTerm,
     isLastServiceNearTermEnd,

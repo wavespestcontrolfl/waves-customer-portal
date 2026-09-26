@@ -68,6 +68,7 @@ const REMINDER_COLS = {
   ...TERMITE_NOTICE_COLS,
   payment_reminder_3d_sent_at: {},
   payment_reminder_3d_claimed_at: {},
+  payment_reminder_3d_attempted_for: {},
   payment_reminder_1d_sent_at: {},
   payment_reminder_1d_claimed_at: {},
 };
@@ -83,6 +84,7 @@ function query({ first, returning, columnInfo, rows = [] } = {}) {
     'orderBy',
     'select',
     'join',
+    'whereRaw',
   ].forEach((method) => {
     q[method] = jest.fn(() => q);
   });
@@ -92,6 +94,7 @@ function query({ first, returning, columnInfo, rows = [] } = {}) {
   });
   q.orWhere = jest.fn(() => q);
   q.orWhereNotNull = jest.fn(() => q);
+  q.modify = jest.fn((callback) => { callback(q); return q; });
   q.update = jest.fn(() => q);
   q.insert = jest.fn(() => q);
   q.first = jest.fn(async () => first);
@@ -142,6 +145,35 @@ describe('annual prepay pre-visit payment reminders', () => {
     expect(_private.paymentReminderColumnForDaysOut(7)).toBe(null);
     expect(_private.paymentReminderClaimColumnForDaysOut(3)).toBe('payment_reminder_3d_claimed_at');
     expect(_private.paymentReminderClaimColumnForDaysOut(1)).toBe('payment_reminder_1d_claimed_at');
+    expect(_private.paymentReminderAttemptForColumn(3)).toBe('payment_reminder_3d_attempted_for');
+    expect(_private.paymentReminderAttemptForColumn(1)).toBe(null);
+  });
+
+  test('the 3-day claim durably records the promised date before fallible delivery work', async () => {
+    const movedTerm = { ...BASE_TERM, first_visit_date: '2026-07-12' };
+    const claimQ = query({ returning: [movedTerm] });
+    const releaseQ = query();
+    setDbQueues({
+      annual_prepay_terms: [query({ columnInfo: { ...REMINDER_COLS, first_visit_date: {} } }), claimQ, releaseQ],
+      invoices: [query({ first: { ...UNPAID_INVOICE } }), query({ first: { ...UNPAID_INVOICE } })],
+      invoice_followup_sequences: [query({ first: undefined })],
+      customers: [query({ first: { ...CUSTOMER } })],
+    });
+    renderSmsTemplate.mockRejectedValueOnce(new Error('renderer unavailable'));
+
+    await expect(AnnualPrepayRenewals.sendPaymentPendingReminder(movedTerm, 3))
+      .rejects.toThrow('renderer unavailable');
+
+    expect(claimQ.whereRaw).toHaveBeenCalledWith(
+      'COALESCE(first_visit_date, term_start) = ?',
+      ['2026-07-12'],
+    );
+    expect(claimQ.update).toHaveBeenCalledWith(expect.objectContaining({
+      payment_reminder_3d_claimed_at: expect.any(Date),
+      payment_reminder_3d_attempted_for: '2026-07-12',
+    }));
+    expect(claimQ.update.mock.invocationCallOrder[0]).toBeLessThan(renderSmsTemplate.mock.invocationCallOrder[0]);
+    expect(releaseQ.update).toHaveBeenCalledWith(expect.objectContaining({ payment_reminder_3d_claimed_at: null }));
   });
 
   test('happy path: claims, renders the template with amount/visit/pay link, sends payment_link SMS, marks sent', async () => {
@@ -506,12 +538,13 @@ describe('annual prepay pre-visit payment reminders', () => {
     expect(result).toEqual({ sent: 0 });
     expect(candidateQ3.where).toHaveBeenCalledWith('term_start', '2026-07-11');
     expect(resumeQ3.where).toHaveBeenCalledWith('term_start', '2026-07-10');
+    expect(resumeQ3.whereRaw).toHaveBeenCalledWith('payment_reminder_3d_attempted_for = term_start');
     expect(candidateQ1.where).toHaveBeenCalledWith('term_start', '2026-07-09');
   });
 
   test('the scan resumes an open 3-day stage 2 days out only for customers with a stored channel choice', async () => {
-    const explicitTerm = { ...BASE_TERM, id: 'term-explicit', customer_id: 'cust-explicit', term_start: '2026-07-10' };
-    const legacyTerm = { ...BASE_TERM, id: 'term-legacy', customer_id: 'cust-legacy', term_start: '2026-07-10' };
+    const explicitTerm = { ...BASE_TERM, id: 'term-explicit', customer_id: 'cust-explicit', term_start: '2026-07-10', payment_reminder_3d_attempted_for: '2026-07-10' };
+    const legacyTerm = { ...BASE_TERM, id: 'term-legacy', customer_id: 'cust-legacy', term_start: '2026-07-10', payment_reminder_3d_attempted_for: '2026-07-10' };
     const { storedBillingChannels } = require('../services/billing-delivery-channels');
     storedBillingChannels
       .mockResolvedValueOnce(['email']) // cust-explicit
@@ -524,7 +557,7 @@ describe('annual prepay pre-visit payment reminders', () => {
       annual_prepay_terms: [
         query({ columnInfo: REMINDER_COLS }),
         query({ rows: [] }), // 3-day target date: none
-        query({ rows: [explicitTerm, legacyTerm] }), // 3-day resume window candidates
+        query({ rows: [explicitTerm, legacyTerm] }), // prior-attempt evidence admits these resume candidates
         query({ rows: [] }), // 1-day target date: none
       ],
       invoices: [explicitInvoiceQ, unexpectedInvoiceQ],
@@ -537,6 +570,25 @@ describe('annual prepay pre-visit payment reminders', () => {
     // Only the explicit-choice term reaches the sender; the legacy term does not.
     expect(explicitInvoiceQ.where).toHaveBeenCalledWith({ id: 'inv-1' });
     expect(unexpectedInvoiceQ.where).not.toHaveBeenCalled();
+  });
+
+  test('the 2-day resume query excludes never-attempted and moved-date terms in SQL', async () => {
+    const resumeQ = query({ rows: [] });
+    setDbQueues({
+      'annual_prepay_terms as t': [query({ rows: [] })],
+      annual_prepay_terms: [
+        query({ columnInfo: { ...REMINDER_COLS, first_visit_date: {} } }),
+        query({ rows: [] }),
+        resumeQ,
+        query({ rows: [] }),
+      ],
+    });
+
+    await AnnualPrepayRenewals.checkAndSendPaymentReminders({ today: '2026-07-08' });
+
+    expect(resumeQ.whereRaw).toHaveBeenCalledWith(
+      'payment_reminder_3d_attempted_for = COALESCE(first_visit_date, term_start)',
+    );
   });
 
   test('a failed resume lookup skips resumption but still runs the 1-day stage', async () => {
