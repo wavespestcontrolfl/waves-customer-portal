@@ -7,10 +7,11 @@
  *     eligibility + slot probe), once a job has passed every engine check.
  *     A context for an eligible lead, else null. Never mints, and never
  *     judges a recipient from its pre-probe row.
- *   - finalizeGoneQuietConsultationUrl(context, recipientEmail): the last
- *     await before the send — mint, then the probe-free re-judge and the
- *     lead's-own-inbox rule against the send's recipient. The short URL,
- *     else ''.
+ *   - mintGoneQuietConsultationUrl(context): after the engine's claim — the
+ *     short URL, else ''.
+ *   - goneQuietConsultationStillValid(context, recipientEmail): the
+ *     probe-free re-judge and the lead's-own-inbox rule against the send's
+ *     recipient, run by the engine together with its own final reads.
  *
  * Both fail closed and never throw: the caller sends the email either way.
  */
@@ -27,6 +28,7 @@ const mockReconfirmConsultationLead = jest.fn();
 jest.mock('../services/estimate-consultation-offer', () => ({
   estimateConsultationLead: (...args) => mockEstimateConsultationLead(...args),
   reconfirmConsultationLead: (...args) => mockReconfirmConsultationLead(...args),
+  PROBE_BUDGET_MS: 3000,
 }));
 
 const mockConsultationUrlForLead = jest.fn();
@@ -61,7 +63,9 @@ jest.mock('../models/db', () => jest.fn((table) => {
 const logger = require('../services/logger');
 const {
   probeGoneQuietConsultation,
-  finalizeGoneQuietConsultationUrl,
+  mintGoneQuietConsultationUrl,
+  goneQuietConsultationStillValid,
+  PROBE_BUDGET_MS,
 } = require('../services/estimate-email-consultation-offer');
 
 const LEAD = { id: 'lead-1', email: 'taylor@example.com' };
@@ -172,9 +176,9 @@ describe('probeGoneQuietConsultation — the slow step, once the engine\'s check
   });
 });
 
-describe('finalizeGoneQuietConsultationUrl — the last step before the send', () => {
-  test('happy path: an email-channel, short-wrapped URL with the 14-day TTL; re-judged against the send\'s recipient', async () => {
-    const url = await finalizeGoneQuietConsultationUrl(CONTEXT, 'taylor@example.com');
+describe('mintGoneQuietConsultationUrl — after the engine\'s claim', () => {
+  test('an email-channel, short-wrapped URL with the 14-day TTL; no eligibility read of its own', async () => {
+    const url = await mintGoneQuietConsultationUrl(CONTEXT);
 
     expect(url).toBe(SHORT_URL);
     // Channel 'email', never 'sms' — an email send is not phone-delivery evidence.
@@ -183,73 +187,69 @@ describe('finalizeGoneQuietConsultationUrl — the last step before the send', (
     const days = (mockShortWrap.mock.calls[0][2].getTime() - Date.now()) / 86400000;
     expect(days).toBeGreaterThan(13.9);
     expect(days).toBeLessThanOrEqual(14);
+    expect(mockReconfirmConsultationLead).not.toHaveBeenCalled();
+  });
+
+  test('no context, gate off, or no signed URL → "", nothing minted', async () => {
+    expect(await mintGoneQuietConsultationUrl(null)).toBe('');
+    expect(await mintGoneQuietConsultationUrl({})).toBe('');
+    mockEstimateEmailConsultationOfferLive.mockReturnValue(false);
+    expect(await mintGoneQuietConsultationUrl(CONTEXT)).toBe('');
+    mockEstimateEmailConsultationOfferLive.mockReturnValue(true);
+    mockConsultationUrlForLead.mockReturnValue(null);
+    expect(await mintGoneQuietConsultationUrl(CONTEXT)).toBe('');
+    expect(mockShortWrap).not.toHaveBeenCalled();
+  });
+
+  test('createShortCode throwing or returning nothing → "" — the long bearer URL never rides the email; logged without the message', async () => {
+    mockShortWrap.mockRejectedValue(new Error('insert failed for 123 Palm St'));
+    expect(await mintGoneQuietConsultationUrl(CONTEXT)).toBe('');
+    expect(logger.warn.mock.calls[0][0]).not.toMatch(/Palm/);
+    mockShortWrap.mockResolvedValue(null);
+    expect(await mintGoneQuietConsultationUrl(CONTEXT)).toBe('');
+  });
+
+  test('only the short URL is ever returned — never the long bearer URL', async () => {
+    mockConsultationUrlForLead.mockReturnValue('https://portal.wavespestcontrol.com/inspection/long-token-with-secret-bearer');
+    const url = await mintGoneQuietConsultationUrl(CONTEXT);
+    expect(url).toBe(SHORT_URL);
+    expect(url).not.toContain('/inspection/');
+  });
+});
+
+describe('goneQuietConsultationStillValid — run by the engine together with its final reads', () => {
+  test('still eligible and still the lead\'s own inbox → true', async () => {
+    expect(await goneQuietConsultationStillValid(CONTEXT, 'taylor@example.com')).toBe(true);
     expect(mockReconfirmConsultationLead).toHaveBeenCalledWith(CONTEXT);
     expect(mockRecipientIsLead).toHaveBeenCalledWith('taylor@example.com', LEAD);
   });
 
-  test('minted FIRST, re-judged LAST — nothing of this step awaits after the re-judge (Codex #4918 r9)', async () => {
-    const order = [];
-    mockShortWrap.mockImplementation(async () => { order.push('mint'); return SHORT_URL; });
-    mockReconfirmConsultationLead.mockImplementation(async () => { order.push('reconfirm'); return LEAD; });
-    await finalizeGoneQuietConsultationUrl(CONTEXT, 'taylor@example.com');
-    expect(order).toEqual(['mint', 'reconfirm']);
-  });
-
-  test('eligibility lost since the probe (hold, linkage change, lead edit) → "" — the minted code is never returned', async () => {
+  test('eligibility lost since the probe (hold, linkage change, lead edit) → false', async () => {
     mockReconfirmConsultationLead.mockResolvedValue(null);
-    expect(await finalizeGoneQuietConsultationUrl(CONTEXT, 'taylor@example.com')).toBe('');
+    expect(await goneQuietConsultationStillValid(CONTEXT, 'taylor@example.com')).toBe(false);
   });
 
-  test('the send\'s recipient is no longer the lead\'s own inbox → ""', async () => {
+  test('the send\'s recipient is not the lead\'s own inbox, or is missing → false (judged, never assumed)', async () => {
     mockRecipientIsLead.mockReturnValue(false);
-    expect(await finalizeGoneQuietConsultationUrl(CONTEXT, 'new-owner@example.com')).toBe('');
-    expect(mockRecipientIsLead).toHaveBeenCalledWith('new-owner@example.com', LEAD);
-  });
-
-  test('a missing recipient is judged, never assumed → ""', async () => {
-    mockRecipientIsLead.mockReturnValue(false); // the real recipientIsLead(undefined, lead) is false
-    expect(await finalizeGoneQuietConsultationUrl(CONTEXT, undefined)).toBe('');
+    expect(await goneQuietConsultationStillValid(CONTEXT, 'new-owner@example.com')).toBe(false);
+    expect(await goneQuietConsultationStillValid(CONTEXT, undefined)).toBe(false);
     expect(mockRecipientIsLead).toHaveBeenCalledWith(undefined, LEAD);
   });
 
-  test('no context (the probe found no offer) → "", nothing minted', async () => {
-    expect(await finalizeGoneQuietConsultationUrl(null, 'taylor@example.com')).toBe('');
-    expect(await finalizeGoneQuietConsultationUrl({}, 'taylor@example.com')).toBe('');
-    expect(mockShortWrap).not.toHaveBeenCalled();
-  });
-
-  test('gate turned off since the probe → "", nothing minted', async () => {
+  test('no context or gate off → false, nothing re-read', async () => {
+    expect(await goneQuietConsultationStillValid(null, 'taylor@example.com')).toBe(false);
     mockEstimateEmailConsultationOfferLive.mockReturnValue(false);
-    expect(await finalizeGoneQuietConsultationUrl(CONTEXT, 'taylor@example.com')).toBe('');
-    expect(mockShortWrap).not.toHaveBeenCalled();
-  });
-
-  test('no signed URL (no secret configured) → "", nothing minted', async () => {
-    mockConsultationUrlForLead.mockReturnValue(null);
-    expect(await finalizeGoneQuietConsultationUrl(CONTEXT, 'taylor@example.com')).toBe('');
-    expect(mockShortWrap).not.toHaveBeenCalled();
-  });
-
-  test('createShortCode throwing or returning nothing → "" — the long bearer URL never rides the email', async () => {
-    mockShortWrap.mockRejectedValue(new Error('short-wrap failed'));
-    expect(await finalizeGoneQuietConsultationUrl(CONTEXT, 'taylor@example.com')).toBe('');
-    mockShortWrap.mockResolvedValue(null);
-    expect(await finalizeGoneQuietConsultationUrl(CONTEXT, 'taylor@example.com')).toBe('');
+    expect(await goneQuietConsultationStillValid(CONTEXT, 'taylor@example.com')).toBe(false);
     expect(mockReconfirmConsultationLead).not.toHaveBeenCalled();
   });
 
-  test('the re-judge throwing fails closed → "", logged without the message', async () => {
+  test('the re-judge throwing fails closed → false, logged without the message', async () => {
     mockReconfirmConsultationLead.mockRejectedValue(new Error('lookup failed for 123 Palm St'));
-    expect(await finalizeGoneQuietConsultationUrl(CONTEXT, 'taylor@example.com')).toBe('');
+    expect(await goneQuietConsultationStillValid(CONTEXT, 'taylor@example.com')).toBe(false);
     expect(logger.warn.mock.calls[0][0]).not.toMatch(/Palm/);
   });
+});
 
-  test('only the short URL is ever returned — never the long bearer URL', async () => {
-    const longUrl = 'https://portal.wavespestcontrol.com/inspection/long-token-with-secret-bearer';
-    mockConsultationUrlForLead.mockReturnValue(longUrl);
-    const url = await finalizeGoneQuietConsultationUrl(CONTEXT, 'taylor@example.com');
-    expect(url).toBe(SHORT_URL);
-    expect(url).not.toContain('long-token-with-secret-bearer');
-    expect(url).not.toContain('/inspection/');
-  });
+test('the per-probe ceiling is passed through for the engine\'s batch budget', () => {
+  expect(PROBE_BUDGET_MS).toBe(3000);
 });

@@ -73,15 +73,18 @@ jest.mock('../services/estimate-follow-up', () => ({
   },
 }));
 // gone_quiet's own consultation-offer link (owner ruling 2026-09-26) — its
-// own suites (estimate-email-consultation-offer*.test.js) pin the two steps
+// own suites (estimate-email-consultation-offer*.test.js) pin the steps
 // themselves; this suite pins WHERE the engine runs them (the probe only
 // after every check passes, then a second pass from the top on post-probe
-// state; finalize after the claim, then one last read of the estimate and
-// the opt-out right before the send), for the RIGHT rule only, with the
-// offer's gate on only, and that the result threads into the payload.
+// state; after the claim the link's mint, then its offer check, the
+// estimate row and the opt-out together right before the send), for the
+// RIGHT rule only, with the offer's gate on only, and that the result
+// threads into the payload.
 jest.mock('../services/estimate-email-consultation-offer', () => ({
   probeGoneQuietConsultation: jest.fn(async () => null),
-  finalizeGoneQuietConsultationUrl: jest.fn(async () => ''),
+  mintGoneQuietConsultationUrl: jest.fn(async () => ''),
+  goneQuietConsultationStillValid: jest.fn(async () => true),
+  PROBE_BUDGET_MS: 3000,
 }));
 
 const db = require('../models/db');
@@ -93,7 +96,9 @@ const { sessionsForEstimate } = require('../services/estimate-engagement-session
 const { leadIdForEstimate } = require('../services/estimate-lead-linkage');
 const { leadConvertedSince, phoneConvertedSince } = require('../services/click-followup-gate');
 const followupShared = require('../services/estimate-follow-up')._private;
-const { probeGoneQuietConsultation, finalizeGoneQuietConsultationUrl } = require('../services/estimate-email-consultation-offer');
+const {
+  probeGoneQuietConsultation, mintGoneQuietConsultationUrl, goneQuietConsultationStillValid,
+} = require('../services/estimate-email-consultation-offer');
 const Engine = require('../services/estimate-engagement-engine');
 
 // Builder stub — chain methods return the builder; awaiting resolves by
@@ -235,7 +240,8 @@ beforeEach(() => {
   followupShared.bumpFollowupCounters.mockResolvedValue(undefined);
   followupShared.repairFollowupCounters.mockResolvedValue(null);
   probeGoneQuietConsultation.mockResolvedValue(null);
-  finalizeGoneQuietConsultationUrl.mockResolvedValue('');
+  mintGoneQuietConsultationUrl.mockResolvedValue('');
+  goneQuietConsultationStillValid.mockResolvedValue(true);
   estimateEmailConsultationOfferLive.mockReturnValue(false);
 });
 
@@ -480,7 +486,7 @@ describe('processDueJobs', () => {
     // the steps these mocks mark.
     const step = (name, value) => async () => { reads.push({ step: name }); return value; };
     const order = () => reads.map((r) => r.step || r.table)
-      .filter((n) => ['estimates', 'notification_prefs', 'probe', 'claim', 'finalize', 'send'].includes(n));
+      .filter((n) => ['estimates', 'notification_prefs', 'probe', 'claim', 'mint', 'recheck', 'send'].includes(n));
     // A probed job's SECOND pass re-reads the estimate and the opt-out.
     const enqueueSecondPass = (est = baseEstimate()) => {
       enqueue('estimates', { first: est });
@@ -497,10 +503,11 @@ describe('processDueJobs', () => {
       estimateEmailConsultationOfferLive.mockReturnValue(true);
     });
 
-    test('probed only after every check passes, then judged again from the top on post-probe state; finalize after the claim, one last read, then the send (Codex #4918 r7–r14)', async () => {
+    test('probed only after every check passes, then judged again from the top on post-probe state; after the claim the mint, then the final checks together, then the send (Codex #4918 r7–r16)', async () => {
       probeGoneQuietConsultation.mockImplementation(step('probe', CONTEXT));
       followupShared.claimFollowupSend.mockImplementation(step('claim', true));
-      finalizeGoneQuietConsultationUrl.mockImplementation(step('finalize', OFFER_URL));
+      mintGoneQuietConsultationUrl.mockImplementation(step('mint', OFFER_URL));
+      goneQuietConsultationStillValid.mockImplementation(step('recheck', true));
       followupShared.sendDualChannel.mockImplementation(step('send', true));
       // Reassigned to a new contact while the probe ran: the second pass,
       // the send and the link's final re-judge all use the post-probe row.
@@ -515,11 +522,11 @@ describe('processDueJobs', () => {
       expect(order()).toEqual([
         'estimates', 'notification_prefs', 'probe', // pass 1: every check, then the probe
         'estimates', 'notification_prefs', 'claim', // pass 2: every check again, post-probe
-        'finalize', 'estimates', 'notification_prefs', 'send', // the link, the last read, the send
+        'mint', 'recheck', 'estimates', 'notification_prefs', 'send', // the link, then the final checks together, then the send
       ]);
       expect(probeGoneQuietConsultation).toHaveBeenCalledTimes(1);
       expect(probeGoneQuietConsultation).toHaveBeenCalledWith('est-1');
-      expect(finalizeGoneQuietConsultationUrl).toHaveBeenCalledWith(CONTEXT, 'jordan@example.com');
+      expect(goneQuietConsultationStillValid).toHaveBeenCalledWith(CONTEXT, 'jordan@example.com');
       expect(followupShared.sendDualChannel.mock.calls[0][0]).toEqual(expect.objectContaining({ customer_email: 'jordan@example.com' }));
       expect(followupShared.estimateEmailPayload.mock.calls[0][1]).toBe('Jordan');
       expect(followupShared.estimateEmailPayload.mock.calls[0][3]).toEqual(expect.objectContaining({ consultation_url: OFFER_URL }));
@@ -550,7 +557,7 @@ describe('processDueJobs', () => {
       expect(result.sent).toBe(0);
       expect(probeGoneQuietConsultation).toHaveBeenCalledTimes(1);
       expect(followupShared.claimFollowupSend).not.toHaveBeenCalled();
-      expect(finalizeGoneQuietConsultationUrl).not.toHaveBeenCalled();
+      expect(mintGoneQuietConsultationUrl).not.toHaveBeenCalled();
       expect(lastJobUpdate().payload).toEqual(expect.objectContaining({ due_at: expect.any(Date) }));
       expect(lastJobUpdate().payload).not.toHaveProperty('status');
     });
@@ -567,7 +574,7 @@ describe('processDueJobs', () => {
       expect(followupShared.estimateEmailPayload.mock.calls[0][3]).toEqual(expect.objectContaining({ consultation_url: '' }));
     });
 
-    test('no offer from the probe → the second pass sends without finalize or the last read; consultation_url ""', async () => {
+    test('no offer from the probe → the second pass sends without the mint or the final checks; consultation_url ""', async () => {
       enqueueProcessorHappyPath();
       enqueueSecondPass();
 
@@ -575,14 +582,14 @@ describe('processDueJobs', () => {
 
       expect(result.sent).toBe(1);
       expect(probeGoneQuietConsultation).toHaveBeenCalledTimes(1);
-      expect(finalizeGoneQuietConsultationUrl).not.toHaveBeenCalled();
+      expect(mintGoneQuietConsultationUrl).not.toHaveBeenCalled();
       expect(reads.filter((r) => r.table === 'estimates')).toHaveLength(2);
       expect(followupShared.estimateEmailPayload.mock.calls[0][3]).toEqual(expect.objectContaining({ consultation_url: '' }));
     });
 
-    test('once a batch has spent its probe budget, its remaining gone-quiet sends go out without the offer — one pass, no probe', async () => {
+    test('a probe starts only if the batch budget still covers its full 3 s ceiling — otherwise the send goes out without the offer, one pass, no probe (Codex #4918 r16)', async () => {
       const now = jest.spyOn(Date, 'now');
-      now.mockReturnValueOnce(0).mockReturnValueOnce(11000); // the first probe takes 11 s of wall clock
+      now.mockReturnValueOnce(0).mockReturnValueOnce(8000); // the first probe takes 8 s: 8 s + a 3 s ceiling > 10 s
       try {
         enqueue('estimate_followup_jobs', { rows: [pendingJob(), pendingJob({ id: 'job-2', estimate_id: 'est-2' })] });
         enqueue('estimate_followup_rules', { rows: [QUIET_RULE, HOT_RULE] });
@@ -605,7 +612,7 @@ describe('processDueJobs', () => {
       }
     });
 
-    test('a lost claim never mints the link — finalize runs only after the claim is won', async () => {
+    test('a lost claim never mints the link — the mint runs only after the claim is won', async () => {
       probeGoneQuietConsultation.mockResolvedValue(CONTEXT);
       followupShared.claimFollowupSend.mockResolvedValue(false);
       enqueueProcessorHappyPath();
@@ -614,11 +621,13 @@ describe('processDueJobs', () => {
       const result = await Engine.processDueJobs(NOW);
 
       expect(result.sent).toBe(0);
-      expect(finalizeGoneQuietConsultationUrl).not.toHaveBeenCalled();
+      expect(mintGoneQuietConsultationUrl).not.toHaveBeenCalled();
     });
 
-    test('eligibility lost between the probe and the send (finalize → "") → the email still sends, without the link', async () => {
+    test('eligibility lost between the probe and the send (the final offer check fails) → the email still sends, without the link', async () => {
       probeGoneQuietConsultation.mockResolvedValue(CONTEXT);
+      mintGoneQuietConsultationUrl.mockResolvedValue(OFFER_URL);
+      goneQuietConsultationStillValid.mockResolvedValue(false);
       enqueueProcessorHappyPath();
       enqueueSecondPass();
       enqueueLastRead();
@@ -654,7 +663,7 @@ describe('processDueJobs', () => {
       expect(probeGoneQuietConsultation).not.toHaveBeenCalled();
     });
 
-    test('every other rule never probes or finalizes, and its payload never gets consultation_url', async () => {
+    test('every other rule never probes or mints, and its payload never gets consultation_url', async () => {
       enqueueProcessorHappyPath({
         job: pendingJob({ rule_key: 'return_visit_hot' }),
         est: baseEstimate({ last_viewed_at: new Date(NOW.getTime() - 5 * MIN) }),
@@ -664,16 +673,17 @@ describe('processDueJobs', () => {
 
       expect(result.sent).toBe(1);
       expect(probeGoneQuietConsultation).not.toHaveBeenCalled();
-      expect(finalizeGoneQuietConsultationUrl).not.toHaveBeenCalled();
+      expect(mintGoneQuietConsultationUrl).not.toHaveBeenCalled();
       expect(followupShared.estimateEmailPayload.mock.calls[0][3]).not.toHaveProperty('consultation_url');
     });
 
-    // finalize's awaits sit between the second pass's reads and the send —
-    // the estimate row and the opt-out are read once more, last.
-    describe('the last read before the send (after finalize)', () => {
+    // The mint sits between the second pass's reads and the send — the
+    // offer check, the estimate row and the opt-out are judged once more,
+    // together, last.
+    describe('the final checks before the send (after the mint)', () => {
       const offerPath = (lastEst, lastPrefs) => {
         probeGoneQuietConsultation.mockResolvedValue(CONTEXT);
-        finalizeGoneQuietConsultationUrl.mockResolvedValue(OFFER_URL);
+        mintGoneQuietConsultationUrl.mockResolvedValue(OFFER_URL);
         enqueueProcessorHappyPath();
         enqueueSecondPass();
         enqueueLastRead(lastEst, lastPrefs);
@@ -691,26 +701,38 @@ describe('processDueJobs', () => {
         ['the estimate moved to another customer', { customer_id: 'cust-2', customer_name: 'Jordan Reyes' }],
         ['the estimate was accepted — the top-of-loop checks then decide it on fresh state', { status: 'accepted' }],
         ['a price, address or service edit (the email would carry the old copy)', { address: '9 Other Rd, Bradenton, FL 34205' }],
-      ])('%s while finalize ran → claim given back, the whole job retried, nothing sent', async (_label, overrides) => {
+        ['a follow-up counter moved (a concurrent send, e.g. a manual follow-up — the cap and spacing checks must see it) (Codex #4918 r16)', { follow_up_count: 1, last_follow_up_at: new Date(NOW.getTime() - 20 * H) }],
+      ])('%s after the checks → claim given back, the whole job retried, nothing sent', async (_label, overrides) => {
         offerPath(baseEstimate(overrides));
 
         expectRetried(await Engine.processDueJobs(NOW));
       });
 
-      test('the customer opted out of email while finalize ran → claim given back, retried (the top-of-loop opt-out check then skips it) (Codex #4918 r14)', async () => {
+      test('the customer opted out of email after the checks → claim given back, retried (the top-of-loop opt-out check then skips it) (Codex #4918 r14)', async () => {
         offerPath(baseEstimate(), { email_enabled: false });
 
         expectRetried(await Engine.processDueJobs(NOW));
       });
 
-      test('the job\'s own counter heal and an updated_at bump are not changes — the send goes', async () => {
-        offerPath(baseEstimate({ follow_up_count: 1, last_follow_up_at: new Date(NOW.getTime() - 20 * H), updated_at: new Date(NOW.getTime()) }));
+      test('an updated_at bump alone is not a change — the send goes, with the link', async () => {
+        offerPath(baseEstimate({ updated_at: new Date(NOW.getTime()) }));
 
         const result = await Engine.processDueJobs(NOW);
 
         expect(result.sent).toBe(1);
         expect(followupShared.releaseFollowupSend).not.toHaveBeenCalled();
         expect(followupShared.estimateEmailPayload.mock.calls[0][3]).toEqual(expect.objectContaining({ consultation_url: OFFER_URL }));
+      });
+
+      test('the job\'s own counter heal, already overlaid on its snapshot, is not a change — the send goes', async () => {
+        const healed = { follow_up_count: 1, last_follow_up_at: new Date(NOW.getTime() - 20 * H) };
+        followupShared.repairFollowupCounters.mockResolvedValue(healed);
+        offerPath(baseEstimate(healed));
+
+        const result = await Engine.processDueJobs(NOW);
+
+        expect(result.sent).toBe(1);
+        expect(followupShared.releaseFollowupSend).not.toHaveBeenCalled();
       });
     });
   });

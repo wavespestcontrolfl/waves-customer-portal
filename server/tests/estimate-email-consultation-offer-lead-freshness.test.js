@@ -6,9 +6,10 @@
  *
  * Reads, in order: probeGoneQuietConsultation reads the estimate, the lead
  * (pre-probe), runs the slot probe, then re-reads the estimate and lead
- * (post-probe, Codex #4918 r5). finalizeGoneQuietConsultationUrl — after the
- * engine's claim, right before its send — mints, then re-reads both once
- * more (Codex #4918 r9/r12). A change in either window drops the link.
+ * (post-probe, Codex #4918 r5). After the engine's claim the link is minted
+ * and goneQuietConsultationStillValid re-reads both once more, together with
+ * the engine's own final reads (Codex #4918 r9–r16). A change in either
+ * window drops the link.
  */
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -43,7 +44,8 @@ jest.mock('../services/lead-consultation-email-block', () => {
 
 const {
   probeGoneQuietConsultation,
-  finalizeGoneQuietConsultationUrl,
+  mintGoneQuietConsultationUrl,
+  goneQuietConsultationStillValid,
 } = require('../services/estimate-email-consultation-offer');
 
 const LEAD_ID = 'lead-fresh-1';
@@ -138,9 +140,12 @@ afterEach(() => {
   else process.env.LEAD_PREFILL_SECRET = originalSecret;
 });
 
+// The engine's sequence: probe, then (after its claim) mint, then the final
+// check — the URL rides the email only if that check still passes.
 async function offerFor(recipientEmail = 'original@example.com') {
   const context = await probeGoneQuietConsultation(ESTIMATE_ID);
-  const url = await finalizeGoneQuietConsultationUrl(context, recipientEmail);
+  const minted = await mintGoneQuietConsultationUrl(context);
+  const url = minted && (await goneQuietConsultationStillValid(context, recipientEmail)) ? minted : '';
   return { context, url };
 }
 

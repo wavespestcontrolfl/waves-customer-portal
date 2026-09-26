@@ -11,21 +11,24 @@
  * r7–r14). The shared eligibility includes a slot probe that can take up to
  * 3 s: the engine probes a job only once it has passed every check, then
  * judges the whole job again from the top on state read after the probe,
- * and only fast, probe-free work (this link's mint and re-judge, then the
- * engine's own last re-read) sits between its claim and its send:
+ * and only fast, probe-free work (this link's mint, then the final checks)
+ * sits between its claim and its send:
  *
  *   - probeGoneQuietConsultation(estimateId) — the slow step, once a
  *     gone-quiet job has passed every engine check. Returns the context the
  *     second step needs (the eligible lead and the property its probe
  *     resolved), or null for no offer. Mints nothing and judges no
  *     recipient.
- *   - finalizeGoneQuietConsultationUrl(context, recipientEmail) — after the
- *     engine's claim, right before its send (only the engine's own final
- *     re-read of the estimate follows): mints the short link, then re-runs
- *     the probe-free shared eligibility (reconfirmConsultationLead) and the
+ *   - mintGoneQuietConsultationUrl(context) — after the engine's claim:
+ *     mints the short link (the one write the offer adds). Returns the short
+ *     URL, or '' for no link.
+ *   - goneQuietConsultationStillValid(context, recipientEmail) — the
+ *     probe-free shared eligibility (reconfirmConsultationLead) and the
  *     lead's-own-inbox rule (the bearer goes ONLY to the lead's own inbox,
  *     as in the new_lead consultation email) against the recipient this
- *     email is about to go to. Returns the short URL, or '' to drop the link.
+ *     email is about to go to. The engine runs it TOGETHER with its own last
+ *     reads of the estimate and the opt-out, as the final step before its
+ *     send; false drops the link.
  *
  * '' is what the estimate.engage_gone_quiet template's `consultation_url`
  * CTA block treats as "render nothing" — so a dark gate or an ineligible
@@ -34,14 +37,14 @@
  * never calls either step.
  *
  * Fail-closed and never throws: any ineligibility or error (including
- * createShortCode failing) yields null / '' — the caller sends the email
- * either way; this only ever adds or omits a link.
+ * createShortCode failing) yields null / '' / false — the caller sends the
+ * email either way; this only ever adds or omits a link.
  */
 
 const db = require('../models/db');
 const logger = require('./logger');
 const { estimateEmailConsultationOfferLive } = require('../config/feature-gates');
-const { estimateConsultationLead, reconfirmConsultationLead } = require('./estimate-consultation-offer');
+const { estimateConsultationLead, reconfirmConsultationLead, PROBE_BUDGET_MS } = require('./estimate-consultation-offer');
 const { consultationUrlForLead } = require('./lead-consultation-link');
 const { parseEstimateData } = require('./estimate-service-lines');
 // shortWrap (the same createShortCode-or-throw helper the new_lead
@@ -84,7 +87,7 @@ async function probeGoneQuietConsultation(estimateId) {
   }
 }
 
-async function finalizeGoneQuietConsultationUrl(context, recipientEmail) {
+async function mintGoneQuietConsultationUrl(context) {
   try {
     if (!context?.leadId || !estimateEmailConsultationOfferLive()) return '';
     // Channel 'email', never 'sms' — an email send is not phone-delivery
@@ -94,21 +97,32 @@ async function finalizeGoneQuietConsultationUrl(context, recipientEmail) {
     // FAIL CLOSED (same rule as the new_lead consultation email block and
     // lead-consultation-link.js): the long URL carries the bearer token, so
     // it must never ride an email raw. shortWrap throws on any
-    // createShortCode failure; the catch below turns that into ''.
+    // createShortCode failure; the catch below turns that into ''. A code
+    // minted for a send whose final checks then drop the link is never sent
+    // (it expires with the token).
     const expiresAt = new Date(Date.now() + TTL_SECONDS * 1000);
-    const shortUrl = await shortWrap(longUrl, context.leadId, expiresAt);
-    if (!shortUrl) return '';
-    // Minted FIRST, re-judged LAST (Codex #4918 r9): nothing of this step
-    // awaits after the re-judge — only the engine's own final re-read of the
-    // estimate follows before its send. A failed check leaves one unsent
-    // short code behind (it expires with the token) — never a sent link.
-    const lead = await reconfirmConsultationLead(context);
-    if (!lead || !recipientIsLead(recipientEmail, lead)) return '';
-    return shortUrl;
+    return (await shortWrap(longUrl, context.leadId, expiresAt)) || '';
   } catch (err) {
-    logger.warn(`[estimate-email-consultation-offer] finalize failed for estimate ${context?.estimateId} (${err?.name || 'Error'})`);
+    logger.warn(`[estimate-email-consultation-offer] mint failed for estimate ${context?.estimateId} (${err?.name || 'Error'})`);
     return '';
   }
 }
 
-module.exports = { probeGoneQuietConsultation, finalizeGoneQuietConsultationUrl };
+async function goneQuietConsultationStillValid(context, recipientEmail) {
+  try {
+    if (!context?.leadId || !estimateEmailConsultationOfferLive()) return false;
+    const lead = await reconfirmConsultationLead(context);
+    return Boolean(lead) && recipientIsLead(recipientEmail, lead);
+  } catch (err) {
+    logger.warn(`[estimate-email-consultation-offer] final check failed for estimate ${context?.estimateId} (${err?.name || 'Error'})`);
+    return false;
+  }
+}
+
+module.exports = {
+  probeGoneQuietConsultation,
+  mintGoneQuietConsultationUrl,
+  goneQuietConsultationStillValid,
+  // The per-probe ceiling, so the engine can reserve it against its batch budget.
+  PROBE_BUDGET_MS,
+};

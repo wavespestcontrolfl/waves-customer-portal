@@ -242,5 +242,6 @@ module.exports = {
   buildEstimateConsultationOffer,
   estimateConsultationLead,
   reconfirmConsultationLead,
+  PROBE_BUDGET_MS,
   _test: { sameProperty, linkedLeadIdFor, finalEligibility, PROBE_BUDGET_MS, MAX_PROBES_IN_FLIGHT, probesInFlight: () => probesInFlight },
 };
