@@ -398,6 +398,15 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
     expect(out.reply).not.toContain('911');
   });
 
+  test.each([
+    'It is not safe to touch the spray. Seek urgent veterinary care immediately.',
+    'It is not safe for dogs. Seek emergency veterinary care.',
+  ])('a veterinary-care referral takes the veterinary path: %s', (reply) => {
+    const out = scrubUnsafeClaims({ reply, intent: 'question', service_keys: [], ready_for_quote: true });
+    expect(out.reply).toMatch(/veterinarian or an emergency animal hospital/);
+    expect(out.reply).not.toContain('911');
+  });
+
   test('an Animal Poison Control referral takes only the veterinary path', () => {
     const out = scrubUnsafeClaims({ reply: 'This treatment is not safe for dogs; call Animal Poison Control now.', intent: 'question', service_keys: [], ready_for_quote: true });
     expect(out.reply).toMatch(/veterinarian or an emergency animal hospital/);
