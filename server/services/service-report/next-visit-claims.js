@@ -11,7 +11,7 @@ const APPOINTMENT_CLAIM_RE = new RegExp(
   `\\b(?:(?:(?:your|the)\\s+)?(?:next|upcoming)\\s+(?:visit|appointment|service)(?:\\s*:\\s*|\\s+(?:is|has\\s+been|will\\s+be|scheduled|booked|set|on|for)\\b)|(?:we(?:\\s+will|[’']ll)?\\s+)?see\\s+you\\b|we(?:\\s+will|[’']ll)\\s+(?:return|arrive|be\\s+back)\\b|(?:appointment|visit|follow[-\\s]?up)\\s+(?:is\\s+)?(?:scheduled|booked|set)\\b)`,
   'i',
 );
-const NEGATED_APPOINTMENT_RE = /\b(?:is|has\s+been|will\s+be)\s+(?:not|never)\b|\b(?:not|never)\s+(?:scheduled|booked|set)\b/i;
+const NON_AFFIRMATIVE_APPOINTMENT_RE = /\b(?:is|has\s+been|will\s+be)\s+(?:not|never)\b|\b(?:not|never)\s+(?:scheduled|booked|set)\b|\bcancell?ed\b/i;
 
 function normalizeWindowText(value) {
   return String(value || '').replace(/[–—-]/g, '–').replace(/\s+/g, ' ').trim().toUpperCase();
@@ -77,7 +77,7 @@ function appointmentClaimProblems(text, facts) {
   const problems = claims.length > 1 ? ['duplicate_appointment_claim'] : [];
   for (const claim of claims) {
     problems.push(...nextVisitProblems(claim, facts));
-    if (NEGATED_APPOINTMENT_RE.test(claim)) problems.push('negated_appointment_claim');
+    if (NON_AFFIRMATIVE_APPOINTMENT_RE.test(claim)) problems.push('negated_appointment_claim');
     if (!claim.toLowerCase().includes(String(facts.nextVisit.date).toLowerCase())) {
       problems.push('unsupported_appointment_date');
     }

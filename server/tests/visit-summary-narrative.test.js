@@ -281,9 +281,14 @@ test('each appointment promise must independently match the authoritative slot',
   expect(out).toBe(deterministicSummary(groundingFacts(args)));
 });
 
-test('a negated statement of the authoritative slot falls back', async () => {
+test.each([
+  'Your next visit is not scheduled for Friday, October 2, arriving 8–10 AM.',
+  'Your next visit is cancelled for Friday, October 2, arriving 8–10 AM.',
+  'Your next visit is canceled for Friday, October 2, arriving 8–10 AM.',
+  'Your next visit has been cancelled for Friday, October 2, arriving 8–10 AM.',
+])('a non-affirmative statement of the authoritative slot falls back: %s', async (appointment) => {
   const args = input();
-  const summary = 'We refreshed the perimeter today. Your next visit is not scheduled for Friday, October 2, arriving 8–10 AM.';
+  const summary = `We refreshed the perimeter today. ${appointment}`;
   expect(appointmentClaimProblems(summary, groundingFacts(args))).toContain('negated_appointment_claim');
   const out = await applyVisitSummaryNarrative(args, {
     callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary } }),

@@ -225,6 +225,31 @@ function buildUserMessage(facts) {
   return `Grounding facts:\n${JSON.stringify(facts, null, 2)}\n\nReturn only the JSON object.`;
 }
 
+function reviewNarrativeResponse(res, facts) {
+  const text = cleanText(res && res.ok && res.json ? res.json.summary : '');
+  if (!text || text.length < 40 || text.length > 900) {
+    return {
+      text: '',
+      warning: res && !res.ok
+        ? `[visit-summary] narrative miss (${res.reason}); using deterministic summary`
+        : null,
+    };
+  }
+
+  const problems = [
+    ...findBannedCustomerCopy(text),
+    ...EXTRA_FORBIDDEN.map((rx) => text.match(rx)?.[0] || null).filter(Boolean),
+    ...appointmentClaimProblems(text, facts),
+  ];
+  if (problems.length) {
+    return {
+      text: '',
+      warning: `[visit-summary] narrative hit guard (${problems.join(', ')}); using deterministic summary`,
+    };
+  }
+  return { text, warning: null };
+}
+
 /**
  * Returns the enriched Visit Summary string for a pest report, or the
  * deterministic fallback (recap + next-visit sentence). Never throws; never
@@ -239,22 +264,17 @@ async function applyVisitSummaryNarrative(input = {}, deps = {}) {
   }
 
   const fallback = deterministicSummary(facts);
+  if (facts.pressure?.isZero) return fallback;
+
   const cacheKey = crypto.createHash('sha256').update(`${PROMPT_VERSION}|${stableStringify(facts)}`).digest('hex');
   const hit = _cache.get(cacheKey);
   if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.value;
 
-  const generateNarrative = deps.callModel
+  const callModel = deps.callModel
     || ((payload) => dispatchWithFallback(
       MODELS.TEXT_POLICIES.customerCopy,
       { laneId: 'lawn_visit_narratives', jsonMode: true, maxTokens: 400, ...payload },
     ));
-  // A zero reading supports only assessed-scope wording. Keep its output on
-  // the fixed fallback path rather than trying to enumerate every broad
-  // property-wide absence claim a provider could phrase.
-  const callModel = [
-    generateNarrative,
-    async () => ({ ok: true, json: null }),
-  ][Number(Boolean(facts.pressure?.isZero))];
 
   let value = fallback;
   try {
@@ -265,21 +285,9 @@ async function applyVisitSummaryNarrative(input = {}, deps = {}) {
       jsonMode: true,
       maxTokens: 400,
     });
-    const text = cleanText(res && res.ok && res.json ? res.json.summary : '');
-    if (text && text.length >= 40 && text.length <= 900) {
-      const banned = [
-        ...findBannedCustomerCopy(text),
-        ...EXTRA_FORBIDDEN.map((rx) => text.match(rx)?.[0] || null).filter(Boolean),
-        ...appointmentClaimProblems(text, facts),
-      ];
-      if (!banned.length) {
-        value = text;
-      } else {
-        logger.warn(`[visit-summary] narrative hit guard (${banned.join(', ')}); using deterministic summary`);
-      }
-    } else if (res && !res.ok) {
-      logger.warn(`[visit-summary] narrative miss (${res.reason}); using deterministic summary`);
-    }
+    const reviewed = reviewNarrativeResponse(res, facts);
+    if (reviewed.text) value = reviewed.text;
+    if (reviewed.warning) logger.warn(reviewed.warning);
   } catch (err) {
     logger.warn(`[visit-summary] narrative failed: ${err.message}; using deterministic summary`);
   }
