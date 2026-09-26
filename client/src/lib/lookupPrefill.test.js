@@ -146,6 +146,12 @@ describe("reopened estimate scrub (legacy-reopen follow-up to #4862 / #4871)", (
       lotSqFt: "1500", _lotSqFtEdited: true, bedArea: "200", _manualFields: ["lotSqFt", "bedArea"],
       fleaExteriorAreaSqFt: "300", fleaExteriorAreaSource: "MANUAL_OVERRIDE",
     }, UNIT_PARCEL);
+    // A typed flea area keeps the AI_ESTIMATE source; _manualFields marks it (codex r4 P2).
+    const typedFlea = scrubReopenedEstimateForm({
+      fleaExteriorAreaSqFt: "900", fleaExteriorAreaSource: "AI_ESTIMATE", _manualFields: ["fleaExteriorAreaSqFt"],
+    }, UNIT_PARCEL);
+    expect(typedFlea.form.fleaExteriorAreaSqFt).toBe("900");
+    expect(typedFlea.cleared).toEqual([]);
     expect(typed.form).toMatchObject({ lotSqFt: "1500", bedArea: "200", fleaExteriorAreaSqFt: "300" });
     expect(typed.cleared).toEqual([]);
   });

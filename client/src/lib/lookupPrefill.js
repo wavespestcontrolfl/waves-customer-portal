@@ -173,7 +173,10 @@ export function scrubReopenedEstimateForm(form, engineProfile) {
       next.bedArea = "";
       cleared.push("bed area");
     }
-    if (form.fleaExteriorAreaSource === "AI_ESTIMATE" && Number(form.fleaExteriorAreaSqFt) > 0) {
+    // The field setter records a typed area in _manualFields without
+    // changing its source (codex r4 P2).
+    if (form.fleaExteriorAreaSource === "AI_ESTIMATE" && !typed("fleaExteriorAreaSqFt")
+      && Number(form.fleaExteriorAreaSqFt) > 0) {
       next.fleaExteriorAreaSqFt = "0";
       next.fleaExteriorAreaSource = "UNKNOWN";
       cleared.push("flea exterior area");

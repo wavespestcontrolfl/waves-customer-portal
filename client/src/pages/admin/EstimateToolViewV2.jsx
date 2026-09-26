@@ -3029,6 +3029,8 @@ export default function EstimateToolViewV2({
     setSavedId(null);
     setSavedViewUrl(null);
     setPriceRecomputeNotice(null);
+    // The reopen alert belongs to the previous estimate (codex r4 P2).
+    setReopenNotice("");
   }
 
   function toggleServiceSpecificDiscount(key) {
