@@ -360,6 +360,14 @@ describe('lead-response-agent — a status_idle event is not terminal on its own
     global.fetch = fetchFor([leadTool('tool-1', 'get_lead_details'), leadTool('tool-1', 'get_lead_details'), idle('end_turn')]);
     await run(load(path));
     expect(mockExecuteLeadTool).toHaveBeenCalledTimes(1);
+    // ...but the repeat is answered again with the cached result, so the
+    // session is never left waiting on it (as bi-agent.js does).
+    const answers = global.fetch.mock.calls
+      .filter(([url, opts = {}]) => opts.method === 'POST' && /\/events$/.test(String(url)))
+      .flatMap(([, opts]) => JSON.parse(opts.body).events)
+      .filter(e => e.type === 'user.custom_tool_result' && e.custom_tool_use_id === 'tool-1');
+    expect(answers).toHaveLength(2);
+    expect(answers[1]).toEqual(answers[0]);
   });
 
   it('a lead gets at most ONE text per run — a second send_lead_response is answered as skipped', async () => {

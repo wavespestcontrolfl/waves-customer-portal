@@ -349,15 +349,19 @@ async function* readOpenedStream({ sessionId, deadline, res, timer }) {
   }
 }
 
-// Reads one lead run to its end: collects the agent's report text and answers
-// each tool use once — a repeated request for a call already answered is
-// ignored, and the run ends at MAX_TOOL_CALLS. Returns the run's failure, if
+// Reads one lead run to its end: collects the agent's report text and runs
+// each tool use once. A repeated request for a call already answered gets
+// its cached result event again (the session is waiting on it; the tool is
+// never re-run, as in bi-agent.js), and the run ends at MAX_TOOL_CALLS. Returns the run's failure, if
 // any: an error event, or a stream that closed before the session ended.
 async function readLeadRun(run, openedStream) {
   for await (const { event, data } of readOpenedStream(openedStream)) {
     const kind = leadFrameKind(event, data);
     if (kind === 'text') run.report += frameText(data);
-    else if (kind === 'tool_use' && !run.answeredToolUseIds.has(data.id)) {
+    else if (kind === 'tool_use' && run.answeredToolUseIds.has(data.id)) {
+      const cached = run.answeredResults.get(data.id);
+      if (cached) await sendSessionEvents(run.sessionId, [cached], run.deadline);
+    } else if (kind === 'tool_use') {
       run.answeredToolUseIds.add(data.id);
       if (run.answeredToolUseIds.size > MAX_TOOL_CALLS) {
         throw Object.assign(new Error(`session ${run.sessionId} exceeded ${MAX_TOOL_CALLS} tool calls`), { code: 'max_tool_calls' });
@@ -366,12 +370,14 @@ async function readLeadRun(run, openedStream) {
       run.actionTaken = leadActionTaken(data.name, outcome.toolResult) || run.actionTaken;
       run.toolsExecuted.push(data.name);
 
-      await sendSessionEvents(run.sessionId, [{
+      const resultEvent = {
         type: 'user.custom_tool_result',
         custom_tool_use_id: data.id,
         content: [{ type: 'text', text: JSON.stringify(outcome.toolResult) }],
         ...(outcome.failed ? { is_error: true } : {}),
-      }], run.deadline);
+      };
+      run.answeredResults.set(data.id, resultEvent);
+      await sendSessionEvents(run.sessionId, [resultEvent], run.deadline);
     }
     // session.status_idle is NOT terminal on its own (it arrives with
     // requires_action while the agent waits for the tool result sent
@@ -476,6 +482,7 @@ const LeadResponseAgent = {
         actionTaken: null,
         criticalFailures: [],
         answeredToolUseIds: new Set(),
+        answeredResults: new Map(),
         completedSideEffects: new Set(),
       };
       failure = await readLeadRun(run, openedStream);
