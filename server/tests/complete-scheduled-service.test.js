@@ -138,6 +138,20 @@ describe('customer-safe routine completion observations', () => {
     expect(result).toMatchObject({ status: 422, body: { code: 'invalid_structured_observation' } });
   });
 
+  test.each([false, true])('rejects contradictory tree stress observations before claiming completion: typed=%s', async (typed) => {
+    service.service_type = 'Every 6 Weeks Tree & Shrub Care Service';
+    resolveCompletionProfileForScheduledService.mockResolvedValueOnce({
+      serviceKey: 'tree_shrub_6week', ...(typed ? { findingsType: 'tree_shrub' } : {}),
+    });
+    const result = await complete({
+      structuredObservations: completionObservationCatalog.tree_shrub
+        .filter(([id]) => ['no-visible-stress', 'wilted-foliage'].includes(id)).map(([, label]) => label),
+      ...(typed ? { structuredFindings: { type: 'tree_shrub', values: { plant_groups: ['Shrubs'], landscape_condition: 'Good' } } } : {}),
+    });
+    expect(result).toMatchObject({ status: 422, body: { code: 'conflicting_structured_observations' } });
+    expect(attempts.claimCompletionAttempt).not.toHaveBeenCalled();
+  });
+
   test('the completion path rejects a routine observation on typed and specialty closeouts', async () => {
     const routineObservation = completionObservationCatalog.recurring_pest[0][1];
     attempts.claimCompletionAttempt.mockResolvedValue({ action: 'proceed', attempt: { id: 'fixture-attempt' } });

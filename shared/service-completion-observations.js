@@ -30,6 +30,12 @@ function conflictingRoutineObservations(observations = []) {
   if (trends.every((label) => selected.has(label))) {
     return 'Choose either reduced or increased activity compared with the previous documented visit.';
   }
+  const plantStress = catalog.tree_shrub
+    .filter(([id]) => id === 'no-visible-stress' || id === 'wilted-foliage')
+    .map(([, label]) => label);
+  if (plantStress.every((label) => selected.has(label))) {
+    return 'Choose either no visible plant stress or wilted foliage for the inspected plants.';
+  }
   return null;
 }
 
