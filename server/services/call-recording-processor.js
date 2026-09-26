@@ -15203,17 +15203,25 @@ const CallRecordingProcessor = {
           // card must be filed HERE — the triage-flag path only raises
           // missing_last_name for hot/warm leads with an extracted first
           // name. Same partial unique index as the flag path, so a card that
-          // path already filed is not duplicated.
+          // path already filed is not duplicated. The snapshot mirrors the
+          // flag path's heard_name_v1 so triage-auto-resolve's name_moot
+          // rule can close the card once staff add the surname (codex #4991
+          // r2). Also re-run under the comms fence below (a merge-undo can
+          // remove an inherited surname while the booking waits).
+          const fileLastNameAdvisoryCard = (conn) => conn('triage_items')
+            .insert(buildTriageItem({
+              callLogId: call.id,
+              flag: 'missing_last_name',
+              extraction: v2ApprovedExtraction || undefined,
+              severity: 'advisory',
+              extraPayload: {
+                heard_name_v1: { first_name: extracted?.first_name ?? null, last_name: extracted?.last_name ?? null },
+              },
+            }))
+            .onConflict(conn.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+            .ignore();
           if (customerValidation.advisory?.includes('last_name')) {
-            await db('triage_items')
-              .insert(buildTriageItem({
-                callLogId: call.id,
-                flag: 'missing_last_name',
-                extraction: v2ApprovedExtraction || undefined,
-                severity: 'advisory',
-              }))
-              .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
-              .ignore()
+            await fileLastNameAdvisoryCard(db)
               .catch((e) => logger.warn(`[call-proc] last-name advisory insert failed for ${maskSid(callSid)}: ${e.message}`));
           }
           // Email-less bookings in SHADOW/LEGACY mode still require a
@@ -15704,6 +15712,13 @@ const CallRecordingProcessor = {
                     : { ok: false, missing: ['customer_row'] };
                   if (!freshValidation.ok) {
                     throw new Error(`customer record changed while waiting on the comms fence (merge-undo in flight?) — missing ${freshValidation.missing.join(', ')}; booking held for office review`);
+                  }
+                  // The fresh row may have LOST an inherited surname the
+                  // pre-fence validation saw — file the advisory card in
+                  // this transaction so it commits with the booking
+                  // (codex #4991 r2).
+                  if (freshValidation.advisory?.includes('last_name')) {
+                    await fileLastNameAdvisoryCard(trx);
                   }
                   customer = freshCallCustomer;
                   // Call OWNERSHIP re-reads too (r40): a journaled

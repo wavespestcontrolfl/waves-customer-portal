@@ -2164,16 +2164,22 @@ describe('round-13: extraction anchor and skipped-card snapshot', () => {
 // the triage-flag path only raises missing_last_name for hot/warm leads with
 // an extracted first name — so the booking site itself must file the
 // advisory "get the full name" card, deduped on the same partial index.
-describe('booking site files the missing_last_name advisory card (codex #4991 r1 P2)', () => {
+describe('booking site files the missing_last_name advisory card (codex #4991 r1+r2)', () => {
   const processorSrc = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
 
-  test('a last_name advisory from the booking validator inserts an advisory missing_last_name card', () => {
-    const gateAt = processorSrc.indexOf("if (customerValidation.advisory?.includes('last_name')) {");
-    expect(gateAt).toBeGreaterThan(-1);
-    const section = processorSrc.slice(gateAt, gateAt + 700);
+  test('the card helper inserts an advisory missing_last_name card with the heard_name_v1 snapshot, deduped', () => {
+    const helperAt = processorSrc.indexOf('const fileLastNameAdvisoryCard = (conn) =>');
+    expect(helperAt).toBeGreaterThan(-1);
+    const section = processorSrc.slice(helperAt, helperAt + 800);
     expect(section).toContain("flag: 'missing_last_name'");
     expect(section).toContain("severity: 'advisory'");
-    expect(section).toContain(".onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\\'open\\', \\'in_progress\\')'))");
+    // name_moot auto-resolve needs the filing-time V1 name snapshot.
+    expect(section).toContain('heard_name_v1: { first_name: extracted?.first_name ?? null, last_name: extracted?.last_name ?? null }');
     expect(section).toContain('.ignore()');
+  });
+
+  test('it fires on the pre-fence validation AND on the under-fence revalidation, in the booking transaction', () => {
+    expect(processorSrc).toContain("if (customerValidation.advisory?.includes('last_name')) {\n            await fileLastNameAdvisoryCard(db)");
+    expect(processorSrc).toContain("if (freshValidation.advisory?.includes('last_name')) {\n                    await fileLastNameAdvisoryCard(trx);");
   });
 });
