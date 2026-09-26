@@ -1294,8 +1294,21 @@ when both LLM providers miss) read English AND Spanish — the prompt answers
 Spanish visitors in Spanish. Each turn has a wall-clock budget across both
 providers (`ASK_WAVES_TURN_BUDGET_MS`, default 22000) after which the
 deterministic fallback is returned; the conversation log never delays the
-reply. NOT CORS-open — credentialed allowlist origins
-only (hub site)).
+reply. Any reply — from either provider, on any intent — that carries
+safety wording, an EPA-approval claim, or a fixed re-entry/drying time
+(duration or clock time) is replaced wholesale with a reviewed "follow the
+product label" answer, in English or Spanish matching the reply's own language
+(a reply with emergency direction keeps the 911 / veterinary script instead;
+a non-emergency reply that carries both a claim and price talk gets the
+reviewed price redirect, which is also claim-free). The safety/emergency check
+reads the model's original reply before the price scrub, so a price mention
+never erases emergency direction.
+The check is the intake-local topic chokepoint in `ask-waves-intake.js`
+(`intakeSafetyClaimSupplement`), run on typography-folded text; the shared
+`reentrySafetyClaimFinding` is deliberately NOT called on this per-turn path
+(its worst case blocks the event loop, #4905). Safety wording is judged by
+topic, not grammatical subject, so it over-blocks by design. NOT CORS-open — credentialed allowlist
+origins only (hub site)).
 `/api/public/experiments` (`GET /status` + `POST /exposure`) (client-side
 GrowthBook experimentation surface — no auth, anonymous visitors are the
 unit. **POST /exposure is gated behind GATE_GROWTHBOOK** (404 when off) with
