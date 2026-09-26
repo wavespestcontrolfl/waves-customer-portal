@@ -173,6 +173,21 @@ describe('customer notification native push dispatch', () => {
     expect(result.push).not.toHaveProperty('accepted');
   });
 
+  test.each([false, true])('a failed push preserves whether the current bell was reused: %s', async (deduped) => {
+    const existing = deduped ? { id: 'old-bell', body: 'Earlier quoted balance' } : null;
+    const { notifQ } = setupDb({ existing, inserted: { id: 'new-bell', body: 'Current quoted balance' } });
+    PushService.sendToCustomer.mockRejectedValue(new Error('offline'));
+
+    const result = await NotificationService.notifyCustomer('customer-1', 'billing', 'Balance', 'Current quoted balance', {
+      dedupeKey: 'previsit:visit-1', awaitPush: true,
+    });
+
+    expect(result).toMatchObject({ deduped, push: { error: 'dispatch_failed' } });
+    expect(result.body).toBe(deduped ? 'Earlier quoted balance' : 'Current quoted balance');
+    expect(notifQ.insert).toHaveBeenCalledTimes(deduped ? 0 : 1);
+    expect(require('../services/messaging/push-channel-routing').bellReachedThisAttempt(result)).toBe(!deduped);
+  });
+
   test.each(['refused', 'throws'])('a guard %s after waiting for the dedupe lock prevents bell and push', async (mode) => {
     const { notifQ, trx } = setupDb();
     let releaseLock;
