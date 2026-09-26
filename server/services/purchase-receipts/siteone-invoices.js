@@ -89,7 +89,7 @@ async function invoiceExtraction(emailId, conn) {
  *   null: the email names no invoice number (nothing to key it by).
  *   pending: not read into lines yet, still inside the grace window.
  *   problem: null (use the lines), 'unreadable' (never read, or read with
- *   no usable lines), or the failed check.
+ *   no usable lines or a quantity that isn't a number), or the failed check.
  *   lines: [{ title, quantity, lineNo, uom }] — lineNo is the invoice line's
  *   own position, so both copies of an invoice key the same line the same
  *   way; uom is the line's unit of measure, upper-cased, or null.
@@ -101,12 +101,22 @@ async function readSiteOneInvoice(email, now = Date.now(), conn = db) {
   if (!extracted) {
     return now - new Date(email.received_at).getTime() < EXTRACTION_GRACE_MS ? { pending: true } : { number, problem: 'unreadable', lines: [] };
   }
-  if (!Array.isArray(extracted.line_items) || !extracted.line_items.length) return { number, problem: 'unreadable', lines: [] };
+  const items = extracted.line_items;
+  // A blank or null quantity would read as 0 and look like a backordered line.
+  if (!Array.isArray(items) || !items.length || !items.every((line) => isQuantity(line?.quantity))) {
+    return { number, problem: 'unreadable', lines: [] };
+  }
   const problem = verificationProblem(extracted, number);
-  const lines = extracted.line_items.map((line, index) => ({
+  const lines = items.map((line, index) => ({
     title: String(line.description || ''), quantity: Number(line.quantity), lineNo: index + 1, uom: lineUom(line),
   }));
   return { number, problem, lines };
+}
+
+// A real number (the extraction's own, or numeric text), never a coerced blank.
+function isQuantity(value) {
+  if (typeof value === 'number') return Number.isFinite(value);
+  return typeof value === 'string' && /^\s*-?\d+(?:\.\d+)?\s*$/.test(value);
 }
 
 // The extracted unit of measure, else the "UOM:EA" a description carries.

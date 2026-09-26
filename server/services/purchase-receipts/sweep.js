@@ -130,7 +130,7 @@ async function ringLoggedBell(notifyAdmin, { receipt, email, item, outcome, trx 
 // "SiteOne invoice N: Taurus SC ×1", an itemless Amazon email's subject
 // ("Delivered: 1 Lawn & Garden item"), or the receipt alone.
 function heldSubject({ receipt, item, outcome }) {
-  if (outcome.product) return `${receipt.label}: ${outcome.product.name} ×${Math.abs(item.quantity)}`;
+  if (outcome.product) return `${receipt.label}: ${outcome.product.name}${item.quantity ? ` ×${Math.abs(item.quantity)}` : ''}`;
   if (outcome.status === 'no_items') return `${receipt.label} "${item.title.replace(/^delivered:\s*/i, '')}"`;
   return receipt.label;
 }
@@ -237,8 +237,10 @@ async function siteOneInvoiceLines(email, now) {
   if (invoice.problem === 'unreadable') {
     return { invoice, lines: [{ item: { title: email.subject, quantity: 1 }, lineNo: 1, forcedStatus: 'unreadable' }] };
   }
-  // A zero line (backordered, nothing shipped) has nothing to record.
-  const lines = invoice.lines.filter((line) => line.quantity !== 0).map(({ title, quantity, lineNo, uom }) => ({
+  // A zero line (backordered, nothing shipped) has nothing to record — on an
+  // invoice that reconciles. On one that doesn't, a 0 may be the misread, so
+  // every line is recorded and a stocked one still gets its bell.
+  const lines = invoice.lines.filter((line) => invoice.problem || line.quantity !== 0).map(({ title, quantity, lineNo, uom }) => ({
     item: { title, quantity }, lineNo, holdAs: siteOneHold(invoice.problem, quantity, uom),
   }));
   return { invoice, lines };

@@ -334,6 +334,16 @@ describe('SiteOne invoices in the sweep', () => {
     expect(notify.mock.calls[0][2]).toBe("SiteOne invoice 900000001-001: Taurus SC ×1 wasn't added. The invoice line couldn't be checked (its numbers or unit of measure), so log it by hand.");
   });
 
+  test('on an invoice that doesn\'t reconcile, a 0 line is kept (it may be the misread) and held', async () => {
+    mockState.siteOneEmails = [siteOneEmail];
+    mockState.siteOneInvoice = { number: '900000001-001', problem: 'line_math', lines: [{ ...lines[0], quantity: 0 }] };
+    mockState.outcomes = [{ status: 'unverified', product: taurus, inserted: true, lineId: 'line-s1' }];
+    const notify = jest.fn(async () => ({}));
+    await runPurchaseReceiptRestockSweep({ notify });
+    expect(processReceiptLine.mock.calls[0][0]).toMatchObject({ lineNo: 1, holdAs: 'unverified' });
+    expect(notify.mock.calls[0][2]).toBe("SiteOne invoice 900000001-001: Taurus SC wasn't added. The invoice line couldn't be checked (its numbers or unit of measure), so log it by hand.");
+  });
+
   test.each([
     ['no unit of measure', null],
     ['sold by the case', 'CS'],

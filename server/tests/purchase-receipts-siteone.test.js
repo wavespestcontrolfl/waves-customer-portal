@@ -92,7 +92,9 @@ describe('readSiteOneInvoice', () => {
   test.each([
     ['empty', []],
     ['not a list', { description: 'Taurus SC' }],
-  ])('read, but its lines are %s: one unreadable placeholder, never a crash', async (_label, lineItems) => {
+    ['missing a quantity', [{ description: 'Taurus SC 78 fl oz. UOM:EA', quantity: null, unit_price: 95, total: 95 }]],
+    ['a blank quantity', [{ description: 'Taurus SC 78 fl oz. UOM:EA', quantity: '', unit_price: 95, total: 95 }]],
+  ])('read, but its lines are %s: one unreadable placeholder, never a crash or a silent 0', async (_label, lineItems) => {
     expect(await readSiteOneInvoice(storeEmail, now, conn({ ...extracted(), line_items: lineItems })))
       .toEqual({ number: INVOICE, problem: 'unreadable', lines: [] });
   });
