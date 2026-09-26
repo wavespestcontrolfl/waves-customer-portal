@@ -722,6 +722,76 @@ describe('dispatchWithFallback', () => {
     }, { text: 'write' });
     expect(result).toEqual({ ok: false, reason: 'same_provider_fallback', failures: [] });
   });
+
+  // hardDeadline (opt-in, default false): every adapter already asks its own
+  // transport to abort at timeoutMs (fetch AbortSignal / the Anthropic SDK's
+  // timeout+maxRetries:0), but that guarantee lives in the adapter, not the
+  // chain. A caller with a hard, user-facing wait budget (ask-waves-intake.js:
+  // a synchronous chat reply) opts into hardDeadline so the chain itself races
+  // each leg against its own share, bounding a stalled leg even when the
+  // adapter (a test double, or a future adapter bug) never honors the timeout
+  // it was handed at all.
+  describe('hardDeadline', () => {
+    test('bounds a leg whose adapter ignores its own timeoutMs entirely, and still reaches the fallback', async () => {
+      // A fetch double that never settles and never even looks at the abort
+      // signal — exactly what an adapter bug or a badly-behaved test double
+      // ignoring `timeoutMs` looks like from the chain's side.
+      jest.spyOn(global, 'fetch').mockImplementation(() => new Promise(() => {}));
+      mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: 'backup copy' }] });
+      const result = await dispatchWithFallback({
+        primary: { provider: PROVIDER.OPENAI, model: 'openai-primary' },
+        fallback: { provider: PROVIDER.ANTHROPIC, model: 'claude-backup' },
+      }, { text: 'write', jsonMode: false, timeoutMs: 200 }, { reserveFallbackBudget: true, hardDeadline: true });
+      expect(result).toMatchObject({ ok: true, provider: PROVIDER.ANTHROPIC, fallbackUsed: true, text: 'backup copy' });
+      // The stalled leg fails as the SAME code an adapter's own deadline
+      // would produce, so it classifies and reports identically either way.
+      expect(result.failures[0]).toMatchObject({ provider: PROVIDER.OPENAI, reason: 'openai_timeout' });
+    });
+
+    test('a single-leg (no fallback) policy still resolves — never hangs — when its only leg never settles', async () => {
+      jest.spyOn(global, 'fetch').mockImplementation(() => new Promise(() => {}));
+      const result = await dispatchWithFallback(
+        { primary: { provider: PROVIDER.OPENAI, model: 'openai-pinned' } },
+        { text: 'write', jsonMode: false, timeoutMs: 100 },
+        { hardDeadline: true },
+      );
+      expect(result).toMatchObject({ ok: false, reason: 'all_providers_failed', failures: [{ provider: PROVIDER.OPENAI, reason: 'openai_timeout' }] });
+    });
+
+    test('does not change the happy path: a normally-answering leg still wins on the first try', async () => {
+      jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true, json: async () => ({ output_text: 'provider copy' }) });
+      const result = await dispatchWithFallback({
+        primary: { provider: PROVIDER.OPENAI, model: 'openai-primary' },
+        fallback: { provider: PROVIDER.ANTHROPIC, model: 'claude-backup' },
+      }, { text: 'write', jsonMode: false, timeoutMs: 5000 }, { hardDeadline: true });
+      expect(result).toMatchObject({ ok: true, provider: PROVIDER.OPENAI, fallbackUsed: false, text: 'provider copy' });
+      expect(mockAnthropicCreate).not.toHaveBeenCalled();
+    });
+
+    test('a raced-away leg that later rejects never surfaces as an unhandled rejection', async () => {
+      let rejectLate;
+      jest.spyOn(global, 'fetch').mockImplementation(() => new Promise((_resolve, reject) => { rejectLate = reject; }));
+      mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: 'backup copy' }] });
+      const unhandled = [];
+      const onUnhandledRejection = (reason) => unhandled.push(reason);
+      process.on('unhandledRejection', onUnhandledRejection);
+      try {
+        const result = await dispatchWithFallback({
+          primary: { provider: PROVIDER.OPENAI, model: 'openai-primary' },
+          fallback: { provider: PROVIDER.ANTHROPIC, model: 'claude-backup' },
+        }, { text: 'write', jsonMode: false, timeoutMs: 100 }, { reserveFallbackBudget: true, hardDeadline: true });
+        expect(result.ok).toBe(true);
+        // The abandoned primary attempt finally rejects well after the chain
+        // moved on — must be swallowed, not leaked.
+        rejectLate(new Error('adapter blew up late'));
+        await new Promise((resolve) => setImmediate(resolve));
+        await new Promise((resolve) => setImmediate(resolve));
+      } finally {
+        process.off('unhandledRejection', onUnhandledRejection);
+      }
+      expect(unhandled).toEqual([]);
+    });
+  });
 });
 
 describe('geminiText — the one parser for callGemini and the direct-fetch photo services', () => {

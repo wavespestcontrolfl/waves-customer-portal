@@ -11,13 +11,15 @@
  *   4. route validation + the GATE_ASK_WAVES fail-closed 503,
  *   5. public-quote's entry-channel allowlist (ai_chat cohort marker).
  *
- * No DB, no network: llm/call is mocked; logIntakeExchange is skipped by not
- * passing a sessionId (it requires a well-formed one).
+ * No DB, no network: llm/call is mocked (dispatchWithFallback — the shared
+ * chain that owns budget splitting, provider-failure handling, and the hard
+ * wall-clock backstop; its own behavior is covered by llm-call.test.js, not
+ * re-tested here); logIntakeExchange is skipped by not passing a sessionId
+ * (it requires a well-formed one).
  */
 
 jest.mock('../services/llm/call', () => ({
-  dispatch: jest.fn(),
-  callAnthropic: jest.fn(),
+  dispatchWithFallback: jest.fn(),
 }));
 // Only the never-resolving-DB-log test (AW-09) exercises this; every other
 // test omits sessionId so logIntakeExchange's identifier check short-circuits
@@ -25,13 +27,26 @@ jest.mock('../services/llm/call', () => ({
 jest.mock('../models/db', () => jest.fn());
 
 const db = require('../models/db');
-const { dispatch, callAnthropic } = require('../services/llm/call');
+const { dispatchWithFallback } = require('../services/llm/call');
 const { processIntakeMessage, _internals } = require('../services/ask-waves-intake');
 const {
   normalizeIntakeResult, sanitizeHistory, scrubPriceTalk,
   QUOTABLE_SERVICES, FALLBACK_RESULT, EMERGENCY_FALLBACK_RESULT,
   SUPPORT_FALLBACK_RESULT, looksLikeEmergency, PRICE_TALK_RE,
+  ASK_WAVES_TURN_BUDGET_MS, turnBudgetMs,
 } = _internals;
+
+// dispatchWithFallback's own shape for an answered chain: { ok, provider,
+// json, fallbackUsed, failures }. Helpers build the two outcomes this suite
+// exercises at this layer — "some leg answered" and "the whole chain missed"
+// — since which provider is tried and how the budget is split is
+// dispatchWithFallback's job, not this service's (tested in llm-call.test.js).
+const chainOk = (json, provider = 'openai', extra = {}) => ({
+  ok: true, provider, json, fallbackUsed: provider !== 'openai', failures: [], ...extra,
+});
+const chainMiss = (failures = [{ provider: 'openai', reason: 'no_key' }, { provider: 'anthropic', reason: 'no_key' }]) => ({
+  ok: false, reason: 'all_providers_failed', failures,
+});
 
 afterEach(() => jest.clearAllMocks());
 
@@ -276,47 +291,41 @@ describe('sanitizeHistory', () => {
 describe('processIntakeMessage provider ladder', () => {
   const goodJson = { reply: 'Sounds like roof rats.', intent: 'quote', service_keys: ['rodentBait'], ready_for_quote: true };
 
-  test('live route answers → source openai, fallback never called', async () => {
-    dispatch.mockResolvedValue({ ok: true, json: goodJson });
+  test('chain answers on the primary → source openai', async () => {
+    dispatchWithFallback.mockResolvedValue(chainOk(goodJson, 'openai'));
     const out = await processIntakeMessage({ message: 'rats in my attic' });
     expect(out.source).toBe('openai');
     expect(out.service_keys).toEqual(['rodentBait']);
-    expect(callAnthropic).not.toHaveBeenCalled();
   });
 
-  test('live miss → Claude fallback answers with source anthropic', async () => {
-    dispatch.mockResolvedValue({ ok: false, reason: 'openai_500' });
-    callAnthropic.mockResolvedValue({ ok: true, json: goodJson });
+  test('chain falls back to the Anthropic leg → source anthropic', async () => {
+    dispatchWithFallback.mockResolvedValue(chainOk(goodJson, 'anthropic', { fallbackUsed: true, failures: [{ provider: 'openai', reason: 'openai_500' }] }));
     const out = await processIntakeMessage({ message: 'rats in my attic' });
     expect(out.source).toBe('anthropic');
   });
 
-  test('both providers miss → deterministic fallback, never throws', async () => {
-    dispatch.mockResolvedValue({ ok: false, reason: 'no_key' });
-    callAnthropic.mockResolvedValue({ ok: false, reason: 'no_key' });
+  test('chain reports every provider missed → deterministic fallback, never throws', async () => {
+    dispatchWithFallback.mockResolvedValue(chainMiss());
     const out = await processIntakeMessage({ message: 'help' });
     expect(out).toEqual(FALLBACK_RESULT);
   });
 
-  test('both providers miss on an emergency message → emergency-safe fallback, no quote CTA', async () => {
-    dispatch.mockResolvedValue({ ok: false, reason: 'no_key' });
-    callAnthropic.mockResolvedValue({ ok: false, reason: 'no_key' });
+  test('chain miss on an emergency message → emergency-safe fallback, no quote CTA', async () => {
+    dispatchWithFallback.mockResolvedValue(chainMiss());
     const out = await processIntakeMessage({ message: 'My son got stung and his throat is swelling' });
     expect(out).toEqual(EMERGENCY_FALLBACK_RESULT);
     expect(out.reply).toContain('911');
     expect(out.ready_for_quote).toBe(false);
   });
 
-  test('both providers miss on a Spanish emergency → emergency-safe fallback', async () => {
-    dispatch.mockResolvedValue({ ok: false, reason: 'no_key' });
-    callAnthropic.mockResolvedValue({ ok: false, reason: 'no_key' });
+  test('chain miss on a Spanish emergency → emergency-safe fallback', async () => {
+    dispatchWithFallback.mockResolvedValue(chainMiss());
     const out = await processIntakeMessage({ message: 'mi hijo fue picado por una avispa y no puede respirar' });
     expect(out).toEqual(EMERGENCY_FALLBACK_RESULT);
   });
 
-  test('both providers miss on an account/support message → portal fallback, no quote CTA', async () => {
-    dispatch.mockResolvedValue({ ok: false, reason: 'no_key' });
-    callAnthropic.mockResolvedValue({ ok: false, reason: 'no_key' });
+  test('chain miss on an account/support message → portal fallback, no quote CTA', async () => {
+    dispatchWithFallback.mockResolvedValue(chainMiss());
     const out = await processIntakeMessage({ message: 'I need to reschedule my appointment for Tuesday' });
     expect(out).toEqual(SUPPORT_FALLBACK_RESULT);
     expect(out.intent).toBe('existing_customer');
@@ -324,8 +333,7 @@ describe('processIntakeMessage provider ladder', () => {
   });
 
   test('emergency in a PRIOR turn still gets the emergency fallback on a follow-up', async () => {
-    dispatch.mockResolvedValue({ ok: false, reason: 'no_key' });
-    callAnthropic.mockResolvedValue({ ok: false, reason: 'no_key' });
+    dispatchWithFallback.mockResolvedValue(chainMiss());
     const out = await processIntakeMessage({
       message: 'what should I do now?',
       history: [
@@ -337,8 +345,7 @@ describe('processIntakeMessage provider ladder', () => {
   });
 
   test('assistant turns in history do not poison the fallback guard', async () => {
-    dispatch.mockResolvedValue({ ok: false, reason: 'no_key' });
-    callAnthropic.mockResolvedValue({ ok: false, reason: 'no_key' });
+    dispatchWithFallback.mockResolvedValue(chainMiss());
     const out = await processIntakeMessage({
       message: 'ants in my kitchen',
       history: [
@@ -348,346 +355,324 @@ describe('processIntakeMessage provider ladder', () => {
     expect(out).toEqual(FALLBACK_RESULT);
   });
 
-  test('live returns unusable JSON (no reply) → falls through the ladder', async () => {
-    dispatch.mockResolvedValue({ ok: true, json: { intent: 'quote' } });
-    callAnthropic.mockResolvedValue({ ok: true, json: goodJson });
-    const out = await processIntakeMessage({ message: 'ants' });
-    expect(out.source).toBe('anthropic');
+  test('a rejecting chain (thrown, contrary to its documented contract) falls through to the deterministic fallback instead of throwing', async () => {
+    dispatchWithFallback.mockRejectedValue(new Error('adapter blew up'));
+    const out = await processIntakeMessage({ message: 'ants in my kitchen' });
+    expect(out).toEqual(FALLBACK_RESULT);
   });
 
   test('a price in the model reply is scrubbed before it reaches the wire', async () => {
-    dispatch.mockResolvedValue({ ok: true, json: { ...goodJson, reply: 'Rodent plans run $79/mo.' } });
+    dispatchWithFallback.mockResolvedValue(chainOk({ ...goodJson, reply: 'Rodent plans run $79/mo.' }));
     const out = await processIntakeMessage({ message: 'how much for rats?' });
     expect(out.reply).not.toMatch(PRICE_TALK_RE);
     expect(out.ready_for_quote).toBe(true);
   });
 
-  // AW-09: the whole customer turn gets a short, explicit wall-clock budget
-  // covering BOTH the primary and fallback provider — and the "best-effort"
-  // conversation log is truly non-blocking, so a stalled provider AND a
-  // stalled DB read together can never hold up the reply past that budget.
-  describe('AW-09 — turn budget + non-blocking log', () => {
-    const prevBudgetEnv = process.env.ASK_WAVES_TURN_BUDGET_MS;
-
-    afterEach(() => {
-      if (prevBudgetEnv === undefined) delete process.env.ASK_WAVES_TURN_BUDGET_MS;
-      else process.env.ASK_WAVES_TURN_BUDGET_MS = prevBudgetEnv;
+  // Codex round 1 P1: this service used to run its own provider-chain +
+  // deadline implementation instead of the shared dispatchWithFallback chain.
+  // Pinning the actual call args is what proves the local copy is gone and
+  // the shared chain — not a bespoke one — owns budget splitting, provider
+  // failures, and the hard wall-clock guarantee (llm-call.test.js covers
+  // dispatchWithFallback's own behavior, including hardDeadline).
+  test('dispatches through the shared TEXT_POLICIES.askWaves chain with the turn budget, reserveFallbackBudget, and hardDeadline', async () => {
+    dispatchWithFallback.mockResolvedValue(chainOk(goodJson));
+    await processIntakeMessage({ message: 'rats in my attic' });
+    expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
+    const [policy, payload, options] = dispatchWithFallback.mock.calls[0];
+    expect(policy).toBe(_internals.askWavesPolicy());
+    expect(payload).toMatchObject({
+      laneId: 'ask_waves', jsonMode: true, maxTokens: 400, timeoutMs: turnBudgetMs(),
     });
+    expect(options).toMatchObject({ reserveFallbackBudget: true, hardDeadline: true, validate: _internals.hasUsableReply });
+  });
 
-    test('a never-resolving provider AND a never-resolving DB log still resolve within the injected budget', async () => {
-      process.env.ASK_WAVES_TURN_BUDGET_MS = '40';
-      // Neither provider ever settles — mirrors the audit's "primary adapter
-      // can wait 10 minutes" finding without actually waiting 10 minutes.
-      dispatch.mockImplementation(() => new Promise(() => {}));
-      callAnthropic.mockImplementation(() => new Promise(() => {}));
-      // A pending DB read that never resolves, exactly like the audit's
-      // controlled reproduction (backend-reproductions.cjs `db().first()`).
-      let releaseLog;
-      const pendingLog = new Promise((resolve) => { releaseLog = resolve; });
-      db.mockImplementation(() => ({
-        where() { return this; },
-        orderBy() { return this; },
-        first: () => pendingLog,
-        update: async () => 1,
-        insert: () => ({ returning: async () => [{ id: 'audit-never-resolving-session', message_count: 0 }] }),
-      }));
+  test('ASK_WAVES_MODEL overrides only the Anthropic fallback leg; the OpenAI primary is untouched', () => {
+    const prev = process.env.ASK_WAVES_MODEL;
+    try {
+      delete process.env.ASK_WAVES_MODEL;
+      const defaultPolicy = _internals.askWavesPolicy();
+      expect(defaultPolicy).toBe(require('../config/models').TEXT_POLICIES.askWaves);
 
-      const start = Date.now();
-      const out = await processIntakeMessage({
-        message: 'ants in my kitchen',
-        sessionId: 'audit-never-resolving-session',
+      process.env.ASK_WAVES_MODEL = 'claude-pinned-test-model';
+      const overridden = _internals.askWavesPolicy();
+      expect(overridden.primary).toBe(require('../config/models').TEXT_POLICIES.askWaves.primary);
+      expect(overridden.fallback).toEqual({ provider: 'anthropic', model: 'claude-pinned-test-model' });
+    } finally {
+      if (prev === undefined) delete process.env.ASK_WAVES_MODEL; else process.env.ASK_WAVES_MODEL = prev;
+    }
+  });
+});
+
+describe('hasUsableReply — the chain validate hook (Codex round 1 P1)', () => {
+  // A syntactically valid JSON answer with no usable reply field must still
+  // be a miss so the chain moves to the next leg — this replaces the old
+  // "live returns unusable JSON → falls through the ladder" integration
+  // test now that the ladder itself lives inside dispatchWithFallback.
+  test.each([
+    [{ json: { intent: 'quote' } }],
+    [{ json: { reply: '   ' } }],
+    [{ json: null }],
+    [{}],
+  ])('rejects a leg with no usable reply: %j', (result) => {
+    expect(_internals.hasUsableReply(result)).toBe('no_usable_reply');
+  });
+
+  test('accepts a leg with a usable reply', () => {
+    expect(_internals.hasUsableReply({ json: { reply: 'Sounds like roof rats.' } })).toBeNull();
+  });
+});
+
+describe('turnBudgetMs — bad/huge budget env falls back to the default (Codex round 1 P2)', () => {
+  const prev = process.env.ASK_WAVES_TURN_BUDGET_MS;
+  afterEach(() => {
+    if (prev === undefined) delete process.env.ASK_WAVES_TURN_BUDGET_MS; else process.env.ASK_WAVES_TURN_BUDGET_MS = prev;
+  });
+
+  test.each([
+    ['non-numeric string', 'not-a-number'],
+    ['zero', '0'],
+    ['negative', '-500'],
+    ['empty string', ''],
+    ['Infinity', 'Infinity'],
+    ['NaN literal', 'NaN'],
+    // Codex round 1 P2: Node clamps an out-of-range setTimeout to 1ms and
+    // AbortSignal.timeout can throw above its ceiling — a huge-but-finite
+    // value must not reach the dispatcher as a real budget either.
+    ['past the sane ceiling (200000)', '200000'],
+    ['at Node/V8 setTimeout int32 overflow (2^31)', String(2 ** 31)],
+  ])('%s falls back to the %ims default', (_label, envVal) => {
+    process.env.ASK_WAVES_TURN_BUDGET_MS = envVal;
+    expect(turnBudgetMs()).toBe(ASK_WAVES_TURN_BUDGET_MS);
+  });
+
+  test('a valid in-range override is honored', () => {
+    process.env.ASK_WAVES_TURN_BUDGET_MS = '5000';
+    expect(turnBudgetMs()).toBe(5000);
+  });
+
+  test('the max ceiling itself is still honored (inclusive)', () => {
+    process.env.ASK_WAVES_TURN_BUDGET_MS = String(_internals.ASK_WAVES_TURN_BUDGET_MAX_MS);
+    expect(turnBudgetMs()).toBe(_internals.ASK_WAVES_TURN_BUDGET_MAX_MS);
+  });
+
+});
+
+// AW-09: the whole customer turn gets a short, explicit wall-clock budget
+// covering BOTH the primary and fallback provider — now dispatchWithFallback's
+// job (turnBudgetMs() is the timeoutMs passed to it, reserveFallbackBudget +
+// hardDeadline own splitting it and bounding a stalled adapter; that
+// machinery is exercised in llm-call.test.js). What stays meaningful at this
+// layer: the "best-effort" conversation log is truly non-blocking, so a
+// stalled DB read can never hold up an already-computed reply.
+describe('AW-09 — non-blocking conversation log', () => {
+  const goodJson = { reply: 'Sounds like roof rats.', intent: 'quote', service_keys: ['rodentBait'], ready_for_quote: true };
+
+  test('the conversation log is fire-and-forget: the reply does not await it', async () => {
+    dispatchWithFallback.mockResolvedValue(chainOk(goodJson));
+    let releaseLog;
+    const pendingLog = new Promise((resolve) => { releaseLog = resolve; });
+    db.mockImplementation(() => ({
+      where() { return this; },
+      orderBy() { return this; },
+      first: () => pendingLog,
+      update: async () => 1,
+      insert: () => ({ returning: async () => [{ id: 'audit-log-session', message_count: 0 }] }),
+    }));
+
+    const start = Date.now();
+    const out = await processIntakeMessage({ message: 'rats in my attic', sessionId: 'audit-log-session' });
+    expect(Date.now() - start).toBeLessThan(500); // the pending log is still pending
+    expect(out.source).toBe('openai');
+    releaseLog({ id: 'audit-log-session', message_count: 0 });
+  });
+
+  test('a never-resolving DB log still lets the reply resolve normally', async () => {
+    dispatchWithFallback.mockResolvedValue(chainOk(goodJson));
+    // A pending DB read that never resolves, exactly like the audit's
+    // controlled reproduction (backend-reproductions.cjs `db().first()`).
+    let releaseLog;
+    const pendingLog = new Promise((resolve) => { releaseLog = resolve; });
+    db.mockImplementation(() => ({
+      where() { return this; },
+      orderBy() { return this; },
+      first: () => pendingLog,
+      update: async () => 1,
+      insert: () => ({ returning: async () => [{ id: 'audit-never-resolving-session', message_count: 0 }] }),
+    }));
+
+    const start = Date.now();
+    const out = await processIntakeMessage({
+      message: 'ants in my kitchen',
+      sessionId: 'audit-never-resolving-session',
+    });
+    const elapsedMs = Date.now() - start;
+
+    expect(elapsedMs).toBeLessThan(500);
+    expect(out.source).toBe('openai');
+    // Let the background log settle so it can't leak into another test (the
+    // in-flight set is module-level state shared across this whole suite).
+    releaseLog({ id: 'audit-never-resolving-session', message_count: 0 });
+  });
+
+  // Codex round 1 P2 (L437): two turns for the SAME session must not log
+  // concurrently — the second turn's background log should not even START
+  // its own DB work until the first turn's log has fully settled.
+  test('an overlapping turn for a session whose log is still running is skipped, not queued', async () => {
+    dispatchWithFallback.mockResolvedValue(chainOk(goodJson));
+    let releaseFirstLookup;
+    const firstLookupPending = new Promise((resolve) => { releaseFirstLookup = resolve; });
+    let lookups = 0;
+    db.mockImplementation(() => ({
+      where() { return this; },
+      orderBy() { return this; },
+      first: () => {
+        lookups += 1;
+        return lookups === 1 ? firstLookupPending : Promise.resolve({ id: 'overlap-session', message_count: 0 });
+      },
+      update: async () => 1,
+      insert: () => ({ returning: async () => [{ id: 'overlap-session', message_count: 0 }] }),
+    }));
+
+    const out1 = await processIntakeMessage({ message: 'ants', sessionId: 'overlap-session' });
+    const out2 = await processIntakeMessage({ message: 'more ants', sessionId: 'overlap-session' });
+    expect(out1.source).toBe('openai');
+    expect(out2.source).toBe('openai');
+
+    releaseFirstLookup({ id: 'overlap-session', message_count: 0 });
+    for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve));
+    // Only the first turn's log ever looked up the session.
+    expect(lookups).toBe(1);
+
+    // Once it settled, the next turn logs normally again.
+    await processIntakeMessage({ message: 'still ants', sessionId: 'overlap-session' });
+    for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve));
+    expect(lookups).toBe(2);
+  });
+
+  // live-verify edge probe: two turns for the SAME session that are truly
+  // concurrent (no await between them, not just fired-and-immediately-
+  // resolved in sequence) must still only log once, exercising the actual
+  // race the Codex round 1 P2 fix targets rather than a sequential proxy.
+  test('two genuinely concurrent turns for the same session (Promise.all) still log only once', async () => {
+    dispatchWithFallback.mockResolvedValue(chainOk(goodJson));
+    let releaseFirstLookup;
+    const firstLookupPending = new Promise((resolve) => { releaseFirstLookup = resolve; });
+    let lookups = 0;
+    db.mockImplementation(() => ({
+      where() { return this; },
+      orderBy() { return this; },
+      first: () => {
+        lookups += 1;
+        return lookups === 1 ? firstLookupPending : Promise.resolve({ id: 'concurrent-session', message_count: 0 });
+      },
+      update: async () => 1,
+      insert: () => ({ returning: async () => [{ id: 'concurrent-session', message_count: 0 }] }),
+    }));
+
+    const [out1, out2] = await Promise.all([
+      processIntakeMessage({ message: 'ants', sessionId: 'concurrent-session' }),
+      processIntakeMessage({ message: 'more ants', sessionId: 'concurrent-session' }),
+    ]);
+    expect(out1.source).toBe('openai');
+    expect(out2.source).toBe('openai');
+
+    releaseFirstLookup({ id: 'concurrent-session', message_count: 0 });
+    for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve));
+    expect(lookups).toBe(1);
+  });
+
+  // live-verify edge probe: the in-flight set is capped at 500 (source
+  // comment, INTAKE_LOG_IN_FLIGHT_MAX) so a client that spins up unbounded
+  // distinct sessionIds against a stalled DB can't grow it forever.
+  test('the in-flight log set is capped at 500: the 501st distinct session is skipped outright', async () => {
+    dispatchWithFallback.mockResolvedValue(chainOk(goodJson));
+    const releases = [];
+    let dbCalls = 0;
+    db.mockImplementation(() => ({
+      where() { return this; },
+      orderBy() { return this; },
+      first: () => {
+        dbCalls += 1;
+        return new Promise((resolve) => { releases.push(resolve); });
+      },
+      update: async () => 1,
+      insert: () => ({ returning: async () => [{ id: 'cap-session', message_count: 0 }] }),
+    }));
+
+    for (let i = 0; i < 500; i += 1) {
+      await processIntakeMessage({ message: 'ants', sessionId: `cap-session-${String(i).padStart(4, '0')}` });
+    }
+    expect(dbCalls).toBe(500);
+
+    // A 501st distinct session's log is skipped outright — no DB lookup.
+    await processIntakeMessage({ message: 'ants', sessionId: 'cap-session-over-0001' });
+    expect(dbCalls).toBe(500);
+
+    // Drain every pending lookup so the shared in-flight set (module-level
+    // state, not reset between tests) is empty again for later tests.
+    releases.forEach((resolve) => resolve({ id: 'cap-session', message_count: 0 }));
+    for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve));
+
+    // The set has drained: a fresh session now logs normally again.
+    await processIntakeMessage({ message: 'ants', sessionId: 'cap-session-drained-01' });
+    expect(dbCalls).toBe(501);
+  });
+
+  // live-verify edge probe: a client-supplied sessionId that is malformed,
+  // oversized, or the wrong type must never reach the DB and must never
+  // block/throw — logIntakeExchange's own regex gate is the safety net,
+  // and logIntakeExchangeOnce must not choke on a non-string key either.
+  describe('malformed / oversized / wrong-type sessionId', () => {
+    test.each([
+      ['too short (7 chars)', 'abcdefg'],
+      ['too long (200 chars)', 'x'.repeat(200)],
+      ['invalid chars (spaces)', 'session id with spaces'],
+      ['empty string', ''],
+      ['numeric (wrong type)', 12345],
+      ['object (wrong type)', { id: 'nope' }],
+      ['null', null],
+    ])('%s never reaches the DB and the turn still resolves normally', async (_label, sessionId) => {
+      dispatchWithFallback.mockResolvedValue(chainOk(goodJson));
+      let dbCalled = false;
+      db.mockImplementation(() => {
+        dbCalled = true;
+        return {
+          where() { return this; },
+          orderBy() { return this; },
+          first: async () => null,
+          update: async () => 1,
+          insert: () => ({ returning: async () => [{ id: 'x', message_count: 0 }] }),
+        };
       });
-      const elapsedMs = Date.now() - start;
 
-      // Two legs at ~half the 40ms budget each, plus scheduling slack — well
-      // under the adapter's old 10-minute ceiling and under the real 22s
-      // default budget. The DB read never resolved at all.
-      expect(elapsedMs).toBeLessThan(2000);
-      expect(out).toEqual(FALLBACK_RESULT);
-      releaseLog({ id: 'audit-never-resolving-session', message_count: 0 }); // let the background log settle so it can't leak into another test
-    });
+      const out = await processIntakeMessage({ message: 'ants', sessionId });
+      for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve));
 
-    test('the conversation log is fire-and-forget: the reply does not await it', async () => {
-      dispatch.mockResolvedValue({ ok: true, json: goodJson });
-      let releaseLog;
-      const pendingLog = new Promise((resolve) => { releaseLog = resolve; });
-      db.mockImplementation(() => ({
-        where() { return this; },
-        orderBy() { return this; },
-        first: () => pendingLog,
-        update: async () => 1,
-        insert: () => ({ returning: async () => [{ id: 'audit-log-session', message_count: 0 }] }),
-      }));
-
-      const start = Date.now();
-      const out = await processIntakeMessage({ message: 'rats in my attic', sessionId: 'audit-log-session' });
-      expect(Date.now() - start).toBeLessThan(500); // the pending log is still pending
       expect(out.source).toBe('openai');
-      releaseLog({ id: 'audit-log-session', message_count: 0 });
+      expect(dbCalled).toBe(false);
     });
+  });
 
-    // Codex round 1 P1 (L388): the primary leg used to get the WHOLE
-    // remaining budget, so a primary that stalls all the way to its timeout
-    // left nothing for the Anthropic fallback (fallbackTimeoutMs computed
-    // AFTER the primary consumed the whole deadline). Capping the primary's
-    // share means the fallback leg still gets a real window, and answers.
-    test('a never-resolving primary leaves the fallback a real window within budget', async () => {
-      process.env.ASK_WAVES_TURN_BUDGET_MS = '300';
-      dispatch.mockImplementation(() => new Promise(() => {})); // primary never resolves
-      callAnthropic.mockResolvedValue({ ok: true, json: goodJson }); // fallback answers immediately
+  // live-verify edge probe: an exception thrown from inside the log's own
+  // DB work (sync OR via a rejected sub-call) must never escape as an
+  // unhandled rejection and must never affect the already-computed reply —
+  // logIntakeExchange's internal try/catch is the primary net, and the
+  // outer .catch in processIntakeMessage is the documented defensive one.
+  test('an exception inside the background log is swallowed; the reply is unaffected', async () => {
+    dispatchWithFallback.mockResolvedValue(chainOk(goodJson));
+    db.mockImplementation(() => ({
+      where() { return this; },
+      orderBy() { return this; },
+      first: async () => null,
+      update: async () => 1,
+      insert: () => { throw new Error('insert exploded'); },
+    }));
 
-      const start = Date.now();
-      const out = await processIntakeMessage({ message: 'rats in my attic' });
-      const elapsedMs = Date.now() - start;
-
-      expect(out.source).toBe('anthropic');
-      // The primary leg is capped well under the full 300ms budget (it never
-      // gets to consume the whole thing), so the whole turn resolves quickly
-      // — under the old bug this either took the full budget with NO
-      // fallback leg reached, or (worse) the fallback got ~0ms and missed.
-      expect(elapsedMs).toBeLessThan(300);
-    });
-
-    test('a provider that rejects falls through the ladder instead of throwing', async () => {
-      dispatch.mockRejectedValue(new Error('adapter blew up'));
-      callAnthropic.mockRejectedValue(new Error('fallback blew up'));
-      const out = await processIntakeMessage({ message: 'ants in my kitchen' });
-      expect(out).toEqual(FALLBACK_RESULT);
-    });
-
-    // Codex round 1 P2 (L437): two turns for the SAME session must not log
-    // concurrently — the second turn's background log should not even START
-    // its own DB work until the first turn's log has fully settled.
-    test('an overlapping turn for a session whose log is still running is skipped, not queued', async () => {
-      dispatch.mockResolvedValue({ ok: true, json: goodJson });
-      let releaseFirstLookup;
-      const firstLookupPending = new Promise((resolve) => { releaseFirstLookup = resolve; });
-      let lookups = 0;
-      db.mockImplementation(() => ({
-        where() { return this; },
-        orderBy() { return this; },
-        first: () => {
-          lookups += 1;
-          return lookups === 1 ? firstLookupPending : Promise.resolve({ id: 'overlap-session', message_count: 0 });
-        },
-        update: async () => 1,
-        insert: () => ({ returning: async () => [{ id: 'overlap-session', message_count: 0 }] }),
-      }));
-
-      const out1 = await processIntakeMessage({ message: 'ants', sessionId: 'overlap-session' });
-      const out2 = await processIntakeMessage({ message: 'more ants', sessionId: 'overlap-session' });
-      expect(out1.source).toBe('openai');
-      expect(out2.source).toBe('openai');
-
-      releaseFirstLookup({ id: 'overlap-session', message_count: 0 });
-      for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve));
-      // Only the first turn's log ever looked up the session.
-      expect(lookups).toBe(1);
-
-      // Once it settled, the next turn logs normally again.
-      await processIntakeMessage({ message: 'still ants', sessionId: 'overlap-session' });
-      for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve));
-      expect(lookups).toBe(2);
-    });
-
-    // live-verify edge probe: two turns for the SAME session that are truly
-    // concurrent (no await between them, not just fired-and-immediately-
-    // resolved in sequence) must still only log once, exercising the actual
-    // race the Codex round 1 P2 fix targets rather than a sequential proxy.
-    test('two genuinely concurrent turns for the same session (Promise.all) still log only once', async () => {
-      dispatch.mockResolvedValue({ ok: true, json: goodJson });
-      let releaseFirstLookup;
-      const firstLookupPending = new Promise((resolve) => { releaseFirstLookup = resolve; });
-      let lookups = 0;
-      db.mockImplementation(() => ({
-        where() { return this; },
-        orderBy() { return this; },
-        first: () => {
-          lookups += 1;
-          return lookups === 1 ? firstLookupPending : Promise.resolve({ id: 'concurrent-session', message_count: 0 });
-        },
-        update: async () => 1,
-        insert: () => ({ returning: async () => [{ id: 'concurrent-session', message_count: 0 }] }),
-      }));
-
-      const [out1, out2] = await Promise.all([
-        processIntakeMessage({ message: 'ants', sessionId: 'concurrent-session' }),
-        processIntakeMessage({ message: 'more ants', sessionId: 'concurrent-session' }),
-      ]);
-      expect(out1.source).toBe('openai');
-      expect(out2.source).toBe('openai');
-
-      releaseFirstLookup({ id: 'concurrent-session', message_count: 0 });
-      for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve));
-      expect(lookups).toBe(1);
-    });
-
-    // live-verify edge probe: the in-flight set is capped at 500 (source
-    // comment, INTAKE_LOG_IN_FLIGHT_MAX) so a client that spins up unbounded
-    // distinct sessionIds against a stalled DB can't grow it forever.
-    test('the in-flight log set is capped at 500: the 501st distinct session is skipped outright', async () => {
-      dispatch.mockResolvedValue({ ok: true, json: goodJson });
-      const releases = [];
-      let dbCalls = 0;
-      db.mockImplementation(() => ({
-        where() { return this; },
-        orderBy() { return this; },
-        first: () => {
-          dbCalls += 1;
-          return new Promise((resolve) => { releases.push(resolve); });
-        },
-        update: async () => 1,
-        insert: () => ({ returning: async () => [{ id: 'cap-session', message_count: 0 }] }),
-      }));
-
-      for (let i = 0; i < 500; i += 1) {
-        await processIntakeMessage({ message: 'ants', sessionId: `cap-session-${String(i).padStart(4, '0')}` });
-      }
-      expect(dbCalls).toBe(500);
-
-      // A 501st distinct session's log is skipped outright — no DB lookup.
-      await processIntakeMessage({ message: 'ants', sessionId: 'cap-session-over-0001' });
-      expect(dbCalls).toBe(500);
-
-      // Drain every pending lookup so the shared in-flight set (module-level
-      // state, not reset between tests) is empty again for later tests.
-      releases.forEach((resolve) => resolve({ id: 'cap-session', message_count: 0 }));
-      for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve));
-
-      // The set has drained: a fresh session now logs normally again.
-      await processIntakeMessage({ message: 'ants', sessionId: 'cap-session-drained-01' });
-      expect(dbCalls).toBe(501);
-    });
-
-    // live-verify edge probe: a client-supplied sessionId that is malformed,
-    // oversized, or the wrong type must never reach the DB and must never
-    // block/throw — logIntakeExchange's own regex gate is the safety net,
-    // and logIntakeExchangeOnce must not choke on a non-string key either.
-    describe('malformed / oversized / wrong-type sessionId', () => {
-      test.each([
-        ['too short (7 chars)', 'abcdefg'],
-        ['too long (200 chars)', 'x'.repeat(200)],
-        ['invalid chars (spaces)', 'session id with spaces'],
-        ['empty string', ''],
-        ['numeric (wrong type)', 12345],
-        ['object (wrong type)', { id: 'nope' }],
-        ['null', null],
-      ])('%s never reaches the DB and the turn still resolves normally', async (_label, sessionId) => {
-        dispatch.mockResolvedValue({ ok: true, json: goodJson });
-        let dbCalled = false;
-        db.mockImplementation(() => {
-          dbCalled = true;
-          return {
-            where() { return this; },
-            orderBy() { return this; },
-            first: async () => null,
-            update: async () => 1,
-            insert: () => ({ returning: async () => [{ id: 'x', message_count: 0 }] }),
-          };
-        });
-
-        const out = await processIntakeMessage({ message: 'ants', sessionId });
-        for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve));
-
-        expect(out.source).toBe('openai');
-        expect(dbCalled).toBe(false);
-      });
-    });
-
-    // live-verify edge probe: an exception thrown from inside the log's own
-    // DB work (sync OR via a rejected sub-call) must never escape as an
-    // unhandled rejection and must never affect the already-computed reply —
-    // logIntakeExchange's internal try/catch is the primary net, and the
-    // outer .catch in processIntakeMessage is the documented defensive one.
-    test('an exception inside the background log is swallowed; the reply is unaffected', async () => {
-      dispatch.mockResolvedValue({ ok: true, json: goodJson });
-      db.mockImplementation(() => ({
-        where() { return this; },
-        orderBy() { return this; },
-        first: async () => null,
-        update: async () => 1,
-        insert: () => { throw new Error('insert exploded'); },
-      }));
-
-      const out = await processIntakeMessage({ message: 'ants', sessionId: 'throwing-log-session' });
-      expect(out.source).toBe('openai');
-      // Give the background log's (internally caught) error a chance to
-      // settle; a leaked unhandled rejection would fail the test run.
-      for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve));
-    });
-
-    // live-verify edge probe: a primary that resolves OK just AFTER its own
-    // capped share must be discarded (withDeadline already declared it a
-    // miss) — the fallback must still be the one that answers, not the late
-    // primary result.
-    test('a primary that resolves ok just after its own capped share is discarded; fallback answers', async () => {
-      process.env.ASK_WAVES_TURN_BUDGET_MS = '200'; // primary share ~120ms
-      dispatch.mockImplementation(() => new Promise((resolve) => {
-        setTimeout(() => resolve({ ok: true, json: goodJson }), 150); // after its ~120ms share
-      }));
-      callAnthropic.mockResolvedValue({ ok: true, json: { ...goodJson, reply: 'Sounds like fleas.' } });
-
-      const out = await processIntakeMessage({ message: 'ants' });
-      expect(out.source).toBe('anthropic');
-    });
-
-    // live-verify edge probe: a fallback that would eventually resolve OK,
-    // but only after the WHOLE turn deadline has passed, must be discarded —
-    // the visitor gets the deterministic fallback on time, never a reply that
-    // waits out a slow Anthropic response past the budget.
-    test('a fallback resolving after the total deadline is discarded; deterministic fallback wins on time', async () => {
-      process.env.ASK_WAVES_TURN_BUDGET_MS = '60';
-      dispatch.mockImplementation(() => new Promise(() => {})); // never resolves -> times out at ~36ms
-      callAnthropic.mockImplementation(() => new Promise((resolve) => {
-        setTimeout(() => resolve({ ok: true, json: goodJson }), 300); // well past the ~24ms left for it
-      }));
-
-      const start = Date.now();
-      const out = await processIntakeMessage({ message: 'ants' });
-      const elapsedMs = Date.now() - start;
-
-      expect(out).toEqual(FALLBACK_RESULT);
-      // Resolved on its own deadline, not by waiting for the late Anthropic
-      // resolve (which would have pushed this past ~300ms).
-      expect(elapsedMs).toBeLessThan(200);
-    });
-
-    // live-verify edge probe: a garbage/zero/negative/non-finite env value
-    // must fall back to the real 22000ms default, not a runaway wait and not
-    // an immediate (0ms) fallback either. Fakes both Date and timers so the
-    // assertion doesn't cost 22 real seconds per case.
-    describe('garbage turn-budget env values fall back to the 22000ms default', () => {
-      beforeEach(() => { jest.useFakeTimers(); });
-      afterEach(() => { jest.useRealTimers(); });
-
-      test.each([
-        ['non-numeric string', 'not-a-number'],
-        ['zero', '0'],
-        ['negative', '-500'],
-        ['empty string', ''],
-        ['Infinity', 'Infinity'],
-        ['NaN literal', 'NaN'],
-      ])('%s env value still waits out the real ~22000ms default before falling back', async (_label, envVal) => {
-        process.env.ASK_WAVES_TURN_BUDGET_MS = envVal;
-        dispatch.mockImplementation(() => new Promise(() => {}));
-        callAnthropic.mockImplementation(() => new Promise(() => {}));
-
-        let settled = false;
-        const promise = processIntakeMessage({ message: 'ants' }).then((out) => {
-          settled = true;
-          return out;
-        });
-
-        // Well under the ~22000ms default combined ladder — still pending.
-        await jest.advanceTimersByTimeAsync(21000);
-        expect(settled).toBe(false);
-
-        // Past the default — now resolved with the deterministic fallback.
-        await jest.advanceTimersByTimeAsync(2000);
-        expect(settled).toBe(true);
-        expect(await promise).toEqual(FALLBACK_RESULT);
-      });
-    });
+    const out = await processIntakeMessage({ message: 'ants', sessionId: 'throwing-log-session' });
+    expect(out.source).toBe('openai');
+    // Give the background log's (internally caught) error a chance to
+    // settle; a leaked unhandled rejection would fail the test run.
+    for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve));
   });
 });
 
@@ -739,7 +724,7 @@ describe('POST /api/public/ai-intake routes', () => {
   });
 
   test('POST /message returns the service result', async () => {
-    dispatch.mockResolvedValue({ ok: true, json: { reply: 'Ghost ants, most likely.', intent: 'question', service_keys: ['pest'], ready_for_quote: false } });
+    dispatchWithFallback.mockResolvedValue(chainOk({ reply: 'Ghost ants, most likely.', intent: 'question', service_keys: ['pest'], ready_for_quote: false }));
     const res = await fetch(`${base}/message`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

@@ -14,15 +14,15 @@
  *   2. scrubPriceTalk() replaces any reply containing a dollar figure,
  *   3. this service has no access to the pricing engine at all.
  *
- * Model ladder (house pattern, mirrors estimate-assistant.js):
- *   ROUTES.askWaves (live) → Claude fallback (ASK_WAVES_MODEL || VOICE)
- *   → deterministic canned reply. Never throws.
+ * Model ladder — the two-provider TEXT_POLICIES.askWaves entry (OpenAI
+ * balanced primary, Claude VOICE-tier fallback), through the shared
+ * dispatchWithFallback chain → deterministic canned reply. Never throws.
  */
 
 const db = require('../models/db');
 const logger = require('./logger');
 const MODELS = require('../config/models');
-const { dispatch, callAnthropic } = require('./llm/call');
+const { dispatchWithFallback } = require('./llm/call');
 
 const COMPANY = {
   name: 'Waves Pest Control',
@@ -326,35 +326,46 @@ function logIntakeExchangeOnce({ sessionId, message, reply, intent }) {
 // a visitor waiting minutes for a reply that could be the deterministic
 // fallback in milliseconds. Env-overridable for tests / tuning; read at call
 // time, never cached, so a change needs no restart-sensitive module reload.
+// Codex round 1 P2: a garbage-but-"finite" value (e.g. a value past Node's
+// setTimeout/AbortSignal.timeout int32 ceiling) must not reach the dispatcher
+// as a real budget — Node silently clamps an out-of-range setTimeout to 1ms
+// and AbortSignal.timeout can throw — so anything above a sane ceiling falls
+// back to the default exactly like a non-finite or non-positive value does.
 const ASK_WAVES_TURN_BUDGET_MS = 22000;
+const ASK_WAVES_TURN_BUDGET_MAX_MS = 120000;
 function turnBudgetMs() {
   const n = Number(process.env.ASK_WAVES_TURN_BUDGET_MS);
-  return Number.isFinite(n) && n > 0 ? n : ASK_WAVES_TURN_BUDGET_MS;
+  return Number.isFinite(n) && n > 0 && n <= ASK_WAVES_TURN_BUDGET_MAX_MS ? n : ASK_WAVES_TURN_BUDGET_MS;
 }
 
-// The primary (OpenAI) leg's share of the remaining turn budget — see the
-// Codex round 1 P1 note at its call site below.
-const PRIMARY_LEG_BUDGET_SHARE = 0.6;
+// Codex round 1 P1: this service used to run its own provider-chain +
+// deadline implementation (withDeadline, a fixed PRIMARY_LEG_BUDGET_SHARE,
+// sequential dispatch()/callAnthropic() calls) instead of the shared
+// dispatchWithFallback chain — duplicating budget splitting, provider-failure
+// handling, and chain telemetry (recordDispatchOutcome) that every other
+// cross-provider lane already gets for free. TEXT_POLICIES.askWaves
+// (config/models.js) is the two-provider policy; ASK_WAVES_MODEL overrides
+// only the Anthropic fallback leg, same convention as MODEL_FACTCHECK /
+// MODEL_COMPLIANCE overriding one leg of TEXT_POLICIES.deepAnalysis
+// (content/fact-check-gate.js, content/compliance-gate.js) — read fresh on
+// every call, never cached, so the override stays live with no restart.
+function askWavesPolicy() {
+  const override = process.env.ASK_WAVES_MODEL || null;
+  if (!override) return MODELS.TEXT_POLICIES.askWaves;
+  return {
+    name: 'askWavesOverride',
+    primary: MODELS.TEXT_POLICIES.askWaves.primary,
+    fallback: { provider: MODELS.PROVIDER.ANTHROPIC, model: override },
+  };
+}
 
-// Races a provider call against the remaining turn budget. Passing
-// `timeoutMs` down to dispatch()/callAnthropic() already asks the REAL
-// adapter (fetch AbortSignal / Anthropic SDK `timeout`+`maxRetries:0`) to
-// abort itself at that mark — but this wrapper is the actual guarantee: it
-// bounds the awaited call from ask-waves-intake's own side even if the
-// adapter (or a test double) ignores the budget entirely, so a stalled leg
-// can never hold up the turn past its share. The raced-away promise is left
-// to settle on its own; its rejection is swallowed so it can never surface
-// as an unhandled rejection later.
-function withDeadline(promise, ms) {
-  // A rejection becomes a miss, so the caller's ladder (and the never-throws
-  // contract) holds even if an adapter rejects.
-  const settled = Promise.resolve(promise).catch(() => ({ ok: false, reason: 'provider_error' }));
-  if (!(ms > 0)) return Promise.resolve({ ok: false, reason: 'timeout_budget_exhausted' });
-  let timer;
-  const timedOut = new Promise((resolve) => {
-    timer = setTimeout(() => resolve({ ok: false, reason: 'timeout_budget_exhausted' }), ms);
-  });
-  return Promise.race([settled, timedOut]).finally(() => clearTimeout(timer));
+// The chain's validate hook: a syntactically valid JSON answer with no usable
+// reply field must still be treated as a miss so the chain moves to the next
+// leg (mirrors normalizeIntakeResult's own "no reply" check) instead of
+// being accepted as this leg's answer.
+function hasUsableReply(result) {
+  const reply = result && result.json ? cleanText(result.json.reply, REPLY_MAX_LEN) : '';
+  return reply ? null : 'no_usable_reply';
 }
 
 /**
@@ -365,47 +376,33 @@ async function processIntakeMessage({ message, history, sessionId } = {}) {
   const text = buildTranscript(message, history);
   let result = null;
 
-  const deadline = Date.now() + turnBudgetMs();
-
-  // Codex round 1 P1 (L388): the primary leg used to get the WHOLE remaining
-  // budget, so a primary that stalls all the way to its own timeout consumes
-  // the entire turn budget and the Anthropic fallback below is skipped
-  // outright (fallbackTimeoutMs lands at ~0). Capping the primary's share
-  // leaves the fallback leg a REAL window even in that worst case; a primary
-  // that answers quickly still leaves the fallback whatever time is actually
-  // left over (not just its capped share) if it's ever reached. withDeadline
-  // remains the hard local guarantee on top either way.
-  const liveRemainingMs = deadline - Date.now();
-  if (liveRemainingMs > 0) {
-    const liveTimeoutMs = Math.max(1, Math.floor(liveRemainingMs * PRIMARY_LEG_BUDGET_SHARE));
-    const live = await withDeadline(dispatch(MODELS.ROUTES.askWaves, {
+  // The shared chain owns budget splitting, provider-failure handling, and
+  // chain telemetry (recordDispatchOutcome) — the whole customer-turn
+  // wall-clock budget covers BOTH legs combined (reserveFallbackBudget: true
+  // splits it across whichever legs are actually reached, never handing the
+  // primary the entire budget and starving the fallback). hardDeadline: true
+  // is this lane's hard, user-facing wait ceiling: a synchronous chat box
+  // can't leave a visitor waiting on a stalled adapter, so the chain races
+  // each leg against its own share from its own side rather than trusting an
+  // adapter (or a misbehaving future one) to honor timeoutMs on its own.
+  let dispatched;
+  try {
+    dispatched = await dispatchWithFallback(askWavesPolicy(), {
       laneId: 'ask_waves',
       system: SYSTEM_PROMPT,
       text,
       jsonMode: true,
       jsonSchema: INTAKE_SCHEMA,
       maxTokens: 400,
-      timeoutMs: liveTimeoutMs,
-    }), liveTimeoutMs);
-    if (live.ok) result = normalizeIntakeResult(live.json, 'openai');
+      timeoutMs: turnBudgetMs(),
+    }, { reserveFallbackBudget: true, hardDeadline: true, validate: hasUsableReply });
+  } catch (err) {
+    // dispatchWithFallback is documented never to throw; this is a defensive
+    // second net so the never-throws contract holds even if that changes.
+    logger.error(`[ask-waves] dispatch chain threw unexpectedly: ${err.message}`);
+    dispatched = { ok: false, reason: 'error' };
   }
-
-  if (!result) {
-    const fallbackTimeoutMs = deadline - Date.now();
-    if (fallbackTimeoutMs > 0) {
-      const fallback = await withDeadline(callAnthropic({
-        laneId: 'ask_waves',
-        model: process.env.ASK_WAVES_MODEL || MODELS.VOICE,
-        system: SYSTEM_PROMPT,
-        text,
-        jsonMode: true,
-        jsonSchema: INTAKE_SCHEMA,
-        maxTokens: 400,
-        timeoutMs: fallbackTimeoutMs,
-      }), fallbackTimeoutMs);
-      if (fallback.ok) result = normalizeIntakeResult(fallback.json, 'anthropic');
-    }
-  }
+  if (dispatched.ok) result = normalizeIntakeResult(dispatched.json, dispatched.provider);
 
   if (!result) {
     logger.warn('[ask-waves] both providers missed; serving deterministic fallback');
@@ -451,6 +448,9 @@ module.exports = {
     looksLikeEmergency,
     MESSAGE_MAX_LEN,
     ASK_WAVES_TURN_BUDGET_MS,
-    PRIMARY_LEG_BUDGET_SHARE,
+    ASK_WAVES_TURN_BUDGET_MAX_MS,
+    turnBudgetMs,
+    askWavesPolicy,
+    hasUsableReply,
   },
 };
