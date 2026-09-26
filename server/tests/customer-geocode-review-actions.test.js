@@ -54,7 +54,10 @@ function visit(overrides = {}) {
   };
 }
 
-function fakeConnection({ reviewStatus = 'verified', customerOverrides = {}, primaryOverrides = {}, reviewOverrides = {} } = {}) {
+function fakeConnection({
+  reviewStatus = 'verified', customerOverrides = {}, primaryOverrides = {}, reviewOverrides = {},
+  scheduledCandidates = null,
+} = {}) {
   const customerRow = { ...customer, ...customerOverrides };
   const primaryRow = {
     ...customerRow, id: 'property-1', customer_id: customer.id, active: true, is_primary: true, ...primaryOverrides,
@@ -65,12 +68,15 @@ function fakeConnection({ reviewStatus = 'verified', customerOverrides = {}, pri
     ...reviewOverrides,
   };
   const updates = [];
+  let candidateRead = 0;
   function conn(table) {
     const state = { table, where: [] };
     const builder = {
       where(...args) { state.where.push(args); return builder; },
       whereIn(...args) { state.where.push(['whereIn', ...args]); return builder; },
+      whereNull(...args) { state.where.push(['whereNull', ...args]); return builder; },
       whereRaw(...args) { state.where.push(['whereRaw', ...args]); return builder; },
+      orderBy(...args) { state.where.push(['orderBy', ...args]); return builder; },
       select() { return builder; },
       forUpdate() { return builder; },
       first() { state.first = true; return builder; },
@@ -80,7 +86,12 @@ function fakeConnection({ reviewStatus = 'verified', customerOverrides = {}, pri
         if (table === 'customers') value = state.first ? { ...customerRow } : [{ ...customerRow }];
         else if (table === 'customer_properties') value = state.first ? primaryRow : [primaryRow];
         else if (table === 'customer_geocode_reviews') value = state.first ? reviewRow : [reviewRow];
-        else if (table === 'scheduled_services') value = [];
+        else if (table === 'scheduled_services') {
+          const candidate = state.where.some(args => args[0] === 'whereIn' && args[1] === 'status');
+          value = candidate && scheduledCandidates
+            ? scheduledCandidates[Math.min(candidateRead++, scheduledCandidates.length - 1)].map(row => ({ ...row }))
+            : [];
+        }
         return Promise.resolve(value).then(resolve, reject);
       },
     };
@@ -241,6 +252,26 @@ test('pre-existing null and empty mirror fields are equivalent without hiding no
   await expect(resolveCustomerGeocodeReview(customer.id, {
     revision: 'rev-1', action: 'revoke',
   }, 'actor-1', divergent.conn)).rejects.toMatchObject({ statusCode: 409, code: 'primary_location_mismatch' });
+});
+
+test.each([
+  ['a newly inserted visit', [
+    [],
+    [{ id: 'visit-2', technician_id: 'tech-1', scheduled_date: '2099-10-01', status: 'confirmed' }],
+  ]],
+  ['a visit moved into a recurring series', [
+    [{ id: 'visit-1', technician_id: 'tech-1', scheduled_date: '2099-10-01', status: 'confirmed' }],
+    [{ id: 'visit-1', technician_id: 'tech-1', scheduled_date: '2099-10-01', status: 'confirmed',
+      recurring_parent_id: 'series-1' }],
+  ]],
+])('visit fencing rejects %s after the tech-day snapshot', async (_label, scheduledCandidates) => {
+  const { conn } = fakeConnection({ scheduledCandidates });
+  await expect(resolveCustomerGeocodeReview(customer.id, {
+    revision: 'rev-1', action: 'verify_pin', latitude: 27.4, longitude: -82.4,
+    source: 'site_visit', evidence: 'Marker observed', confirmed: true,
+  }, 'actor-1', conn)).rejects.toMatchObject({ statusCode: 409, code: 'visit_changed' });
+  expect(reviewStore.saveReview).not.toHaveBeenCalled();
+  expect(auditLog.recordAuditEvent).not.toHaveBeenCalled();
 });
 
 test('revoke preserves the review pin as evidence and only clears exact matching live mirrors', async () => {

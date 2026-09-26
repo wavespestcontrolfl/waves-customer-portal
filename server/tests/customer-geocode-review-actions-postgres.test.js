@@ -122,7 +122,7 @@ postgres('customer geocode review actions in PostgreSQL', () => {
         ...SECONDARY_ADDRESS, address_key: addressKey(SECONDARY_ADDRESS) },
     ]);
     visitIds = Object.fromEntries([
-      'matching', 'started', 'completed', 'frozen', 'excluded', 'divergent', 'individual',
+      'matching', 'started', 'completed', 'independentRoot', 'frozen', 'excluded', 'divergent', 'individual',
       'zeroLatitude', 'zeroLongitude', 'zeroBoth',
     ]
       .map(name => [name, randomUUID()]));
@@ -141,6 +141,12 @@ postgres('customer geocode review actions in PostgreSQL', () => {
           service_address_line2: ADDRESS.address_line2, service_address_city: ADDRESS.city,
           service_address_state: ADDRESS.state, service_address_zip: ADDRESS.zip, lat: null, lng: null,
           zone: 'legacy-zone',
+        } } },
+      { ...baseVisit, id: visitIds.independentRoot, status: 'completed', is_recurring: true, recurring_ongoing: true,
+        recurring_template_overrides: { appointment_address: {
+          property_id: PRIMARY, service_address_line1: ADDRESS.address_line1,
+          service_address_line2: ADDRESS.address_line2, service_address_city: ADDRESS.city,
+          service_address_state: ADDRESS.state, service_address_zip: ADDRESS.zip, lat: 27.4, lng: -82.4,
         } } },
       { ...baseVisit, id: visitIds.frozen, auto_dispatch_locked: true },
       { ...baseVisit, id: visitIds.excluded, auto_dispatch_excluded: true },
@@ -195,7 +201,7 @@ postgres('customer geocode review actions in PostgreSQL', () => {
       pre_service_brief_type: null, pre_service_brief_generated_at: null,
     });
     expect(Number(matching.lat)).toBe(Number(PIN.latitude.toFixed(6)));
-    for (const name of ['started', 'completed', 'frozen', 'excluded', 'divergent']) {
+    for (const name of ['started', 'completed', 'independentRoot', 'frozen', 'excluded', 'divergent']) {
       expect((await visit(visitIds[name])).lat).toBeNull();
     }
     const recurringParent = await visit(visitIds.completed);
@@ -205,6 +211,7 @@ postgres('customer geocode review actions in PostgreSQL', () => {
       property_id: PRIMARY, service_address_line1: corrected.address_line1,
       service_address_line2: null, lat: PIN.latitude, lng: PIN.longitude, zone: null,
     });
+    expect(recurringServiceAddress(await visit(visitIds.independentRoot))).toMatchObject({ lat: 27.4, lng: -82.4 });
     expect(Number((await visit(visitIds.individual)).lat)).toBe(27.4);
     for (const name of ['zeroLatitude', 'zeroLongitude', 'zeroBoth']) {
       expect(Number((await visit(visitIds[name])).lat)).toBe(Number(PIN.latitude.toFixed(6)));
@@ -221,6 +228,8 @@ postgres('customer geocode review actions in PostgreSQL', () => {
     await verify();
     await mockConnection('scheduled_services').whereIn('id', [visitIds.frozen, visitIds.excluded])
       .update({ lat: PIN.latitude, lng: PIN.longitude });
+    await mockConnection('scheduled_services').where({ id: visitIds.completed })
+      .update({ lat: PIN.latitude, lng: PIN.longitude });
     await resolveCustomerGeocodeReview(CUSTOMER, {
       revision: (await detail()).revision, action: 'revoke',
     }, ACTOR, mockConnection);
@@ -231,6 +240,11 @@ postgres('customer geocode review actions in PostgreSQL', () => {
     expect((await visit(visitIds.frozen)).lat).toBeNull();
     expect((await visit(visitIds.excluded)).lat).toBeNull();
     expect(Number((await visit(visitIds.individual)).lat)).toBe(27.4);
+    const recurringParent = await visit(visitIds.completed);
+    expect(recurringParent.service_address_line1).toBe(ADDRESS.address_line1);
+    expect(Number(recurringParent.lat)).toBe(Number(PIN.latitude.toFixed(6)));
+    expect(recurringServiceAddress(recurringParent)).toMatchObject({ lat: null, lng: null });
+    expect(recurringServiceAddress(await visit(visitIds.independentRoot))).toMatchObject({ lat: 27.4, lng: -82.4 });
     const saved = await review();
     expect(saved).toMatchObject({ status: 'needs_pin', reason: 'verification_revoked', reviewed_by: null });
     expect(Number(saved.latitude)).toBe(PIN.latitude);
@@ -277,6 +291,49 @@ postgres('customer geocode review actions in PostgreSQL', () => {
     expect(rows[0]).toMatchObject({ ...ADDRESS, source: 'backfill' });
   });
 
+  test('a complete first-address verification creates the missing primary and resolves the blank customer', async () => {
+    await mockConnection('customer_properties').where({ id: PRIMARY }).del();
+    await mockConnection('customers').where({ id: CUSTOMER }).update({
+      address_line1: null, address_line2: null, city: null, state: null, zip: null,
+    });
+    await mockConnection('scheduled_services').update({ property_id: null });
+    const recurringParent = await visit(visitIds.completed);
+    await mockConnection('scheduled_services').where({ id: visitIds.completed }).update({
+      recurring_template_overrides: {
+        ...recurringParent.recurring_template_overrides,
+        appointment_address: {
+          ...recurringParent.recurring_template_overrides.appointment_address, property_id: null,
+        },
+      },
+    });
+
+    await verify({ address: ADDRESS });
+
+    const savedCustomer = await customer();
+    const rows = await mockConnection('customer_properties')
+      .where({ customer_id: CUSTOMER, active: true, is_primary: true });
+    expect(savedCustomer).toMatchObject(ADDRESS);
+    expect(Number(savedCustomer.latitude)).toBe(PIN.latitude);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject(ADDRESS);
+    expect(Number(rows[0].latitude)).toBe(PIN.latitude);
+    expect(await visit(visitIds.matching)).toMatchObject({ property_id: rows[0].id });
+  });
+
+  test('verify corrects an ongoing completed root even when it has no eligible future child', async () => {
+    await mockConnection('scheduled_services').where({ id: visitIds.matching }).del();
+    const corrected = { ...ADDRESS, address_line1: '103 Fixture Way' };
+
+    await verify({ address: corrected });
+
+    const parent = await visit(visitIds.completed);
+    expect(parent.service_address_line1).toBe(ADDRESS.address_line1);
+    expect(recurringServiceAddress(parent)).toMatchObject({
+      property_id: PRIMARY, service_address_line1: corrected.address_line1,
+      lat: PIN.latitude, lng: PIN.longitude,
+    });
+  });
+
   test('a duplicate active property address is an operational conflict and rolls back verification', async () => {
     await expect(verify({ address: SECONDARY_ADDRESS })).rejects.toMatchObject({
       statusCode: 409, code: 'address_matches_existing_property', isOperational: true,
@@ -293,6 +350,16 @@ postgres('customer geocode review actions in PostgreSQL', () => {
       .update({ lat: PIN.latitude, lng: PIN.longitude });
     await mockConnection('scheduled_services').where({ id: visitIds.frozen })
       .update({ lat: PIN.latitude, lng: PIN.longitude });
+    const recurringParent = await visit(visitIds.completed);
+    await mockConnection('scheduled_services').where({ id: visitIds.completed }).update({
+      recurring_template_overrides: {
+        ...recurringParent.recurring_template_overrides,
+        appointment_address: {
+          ...recurringParent.recurring_template_overrides.appointment_address,
+          lat: PIN.latitude, lng: PIN.longitude,
+        },
+      },
+    });
     await resolveCustomerGeocodeReview(CUSTOMER, {
       revision: (await detail()).revision, action: 'outside_service_area', source: 'county_records',
       evidence: 'Synthetic county boundary confirmation', confirmed: true,
@@ -302,6 +369,7 @@ postgres('customer geocode review actions in PostgreSQL', () => {
     expect((await primary()).latitude).toBeNull();
     expect((await visit(visitIds.matching)).lat).toBeNull();
     expect((await visit(visitIds.frozen)).lat).toBeNull();
+    expect(recurringServiceAddress(await visit(visitIds.completed))).toMatchObject({ lat: null, lng: null });
     const saved = await review();
     expect(saved).toMatchObject({ status: 'outside_area', reason: 'staff_confirmed_outside_area', reviewed_by: ACTOR });
     expect(Number(saved.latitude)).toBe(PIN.latitude);
