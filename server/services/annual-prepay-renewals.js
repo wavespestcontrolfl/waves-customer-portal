@@ -5672,6 +5672,17 @@ async function sendCustomerTermNotice(termOrId, daysOut, opts = {}) {
         });
       noticeRecorded = true;
       if (sentCol === termiteLateColumnForDaysOut(daysOut)) await fileTermiteLateNoticeException(claimedTerm, daysOut);
+      // Pre-push audit P1: the combined-send case (both rungs due at once —
+      // see processTermiteNoticeObligations) records the OTHER rung as
+      // missed/late ONLY here, after THIS rung's send is confirmed
+      // delivered — never before attempting the send. Recording it earlier
+      // would tell staff "the customer has been told" (and suppress the
+      // eventual missed-notice escalation, and clear the campaign cooldown)
+      // on a rung that may never actually reach the customer if the
+      // cancel-flow guard blocks it or delivery fails; a failed combined
+      // send now leaves BOTH rungs' columns untouched and simply retries
+      // tomorrow, same as any other failed send.
+      if (opts.alsoRecordMissedRung) await recordTermiteRungMissedLate(claimedTerm, opts.alsoRecordMissedRung);
     };
     // Email-only delivery: the witness lands only on a confirmed email send.
     const deliverByEmail = async (reason, extra = {}) => {
@@ -5820,19 +5831,33 @@ async function recordTermiteRungMissedLate(term, daysOut) {
 // outcome a genuinely missed 45-day rung gets once day 30 arrives, just
 // recognized a few days earlier instead of silently carried forward.
 //
-// coverageAwaitsInstallation (checked here before the missed-late stamp, and
-// again inside sendCustomerTermNotice's own preflight for the rung actually
-// sent) blocks EVERY rung — an unanchored original's term_end is only a
-// provisional placeholder, so nothing about it should be recorded as missed,
-// late, or sent.
+// Pre-push audit P1: the 45-day missed/late record is passed to
+// sendCustomerTermNotice as alsoRecordMissedRung rather than written here,
+// UP FRONT, before the 30-day send is even attempted. Stamping it here
+// unconditionally would tell staff "the customer has been told" and
+// suppress the missed-notice escalation / clear the campaign cooldown on
+// a rung the customer may never actually receive (a disabled cancel flow,
+// a missing renewal fee, or a delivery failure all block the send AFTER
+// this point) — false delivery evidence. sendCustomerTermNotice now stamps
+// it in the SAME confirmed-delivery step (markNoticeSent) that records the
+// 30-day witness, so both land together on success and NEITHER lands on
+// failure — a failed combined send retries both tomorrow, exactly like any
+// other failed send.
+//
+// coverageAwaitsInstallation blocks EVERY rung (checked here so the
+// combined-send option is never even offered for an unanchored original;
+// sendCustomerTermNotice's own preflight blocks the send itself the same
+// way for a direct single-rung call) — an unanchored original's term_end is
+// only a provisional placeholder, so nothing about it should be recorded as
+// missed, late, or sent.
 async function processTermiteNoticeObligations(term, today) {
   const due45 = termiteRungDue(term, TERMITE_EXTRA_NOTICE_DAYS, today);
   const due30 = termiteRungDue(term, 30, today);
   if (!due45 && !due30) return { sent: false, reason: 'not_due' };
 
   if (due45 && due30) {
-    if (!coverageAwaitsInstallation(term)) await recordTermiteRungMissedLate(term, TERMITE_EXTRA_NOTICE_DAYS);
-    return sendCustomerTermNotice(term, 30);
+    const alsoRecordMissedRung = coverageAwaitsInstallation(term) ? null : TERMITE_EXTRA_NOTICE_DAYS;
+    return sendCustomerTermNotice(term, 30, { alsoRecordMissedRung });
   }
   if (due30) return sendCustomerTermNotice(term, 30);
   return sendCustomerTermNotice(term, TERMITE_EXTRA_NOTICE_DAYS);
@@ -5923,31 +5948,45 @@ async function checkAndSend({ today = etDateString() } = {}) {
   // a separate pass rather than folding into CUSTOMER_NOTICE_DAYS so the
   // shared loop right below stays byte-identical for every non-termite
   // term (termite terms still get 15/7 there — see the loop's own
-  // annual_plan_version filter at daysOut===30). Guarded on every column
-  // the pass touches existing (the new migrations) so a DB mid-rollback/
-  // rollout never 500s here.
+  // annual_plan_version filter at daysOut===30).
+  //
+  // Pre-push audit P1 (Codex #4921 r3 structural fix): the readiness check
+  // MUST require every column ANY part of this pass queries — including the
+  // two late-escalation retry columns and the missed-notice column — not
+  // just the ones the main candidate query touches. termiteLateNoticeEscalationCandidates()
+  // references notice_30_late_escalated_at unconditionally in raw SQL; on a
+  // database that had only run through 000106 (before 000107 added that
+  // column), that threw "column does not exist" and — uncaught — aborted
+  // checkAndSend entirely, taking the unrelated generic 30/15/7 loop down
+  // with it. The whole pass is ALSO now wrapped in its own try/catch so a
+  // mid-rollout gap (or any other unexpected failure here) can never skip
+  // the shared loop below.
   const termCols = await annualPrepayColumns();
   const termiteNoticeColsReady = termCols.annual_plan_version && termCols.notice_45_sent_at
     && termCols.notice_45_claimed_at && termCols[TERMITE_LATE_NOTICE_COLUMN]
-    && termCols.notice_30_sent_at && termCols.notice_30_claimed_at && termCols[TERMITE_30_LATE_NOTICE_COLUMN];
+    && termCols.notice_45_late_escalated_at
+    && termCols.notice_30_sent_at && termCols.notice_30_claimed_at && termCols[TERMITE_30_LATE_NOTICE_COLUMN]
+    && termCols[TERMITE_30_LATE_ESCALATION_COLUMN]
+    && termCols[TERMITE_NOTICE_MISSED_ESCALATION_COLUMN];
   if (termiteNoticeColsReady) {
-    const terms = await termiteNoticeObligationCandidates({ today });
-    for (const term of terms) {
-      try {
-        const result = await processTermiteNoticeObligations(term, today);
-        if (result.sent) sent++;
-      } catch (err) {
-        logger.error(`[annual-prepay] termite notice-obligation pass failed for term ${term.id}: ${err.message}`);
+    try {
+      const terms = await termiteNoticeObligationCandidates({ today });
+      for (const term of terms) {
+        try {
+          const result = await processTermiteNoticeObligations(term, today);
+          if (result.sent) sent++;
+        } catch (err) {
+          logger.error(`[annual-prepay] termite notice-obligation pass failed for term ${term.id}: ${err.message}`);
+        }
       }
-    }
 
-    // Retry every LATE 45- or 30-day notice whose admin-bell escalation
-    // never got a confirmed insert (fileTermiteLateNoticeException's
-    // notifyAdmin call returned null) — otherwise a transient
-    // notification-insert failure loses that bell for good, since each
-    // rung's own late-sent column already blocks the send itself from
-    // ever retrying.
-    if (termCols.notice_45_late_escalated_at || termCols[TERMITE_30_LATE_ESCALATION_COLUMN]) {
+      // Retry every LATE 45- or 30-day notice whose admin-bell escalation
+      // never got a confirmed insert (fileTermiteLateNoticeException's
+      // notifyAdmin call returned null) — otherwise a transient
+      // notification-insert failure loses that bell for good, since each
+      // rung's own late-sent column already blocks the send itself from
+      // ever retrying. All columns this query needs are already guaranteed
+      // by termiteNoticeColsReady above.
       const lateUnescalated = await termiteLateNoticeEscalationCandidates();
       for (const term of lateUnescalated) {
         try {
@@ -5961,12 +6000,10 @@ async function checkAndSend({ today = etDateString() } = {}) {
           logger.error(`[annual-prepay] termite late-notice escalation retry failed for term ${term.id}: ${err.message}`);
         }
       }
-    }
 
-    // Terms that reached their OWN term_end with a rung never delivered at
-    // all — durable staff escalation, atomically deduped via notifyAdmin's
-    // own dedupeKey (never a standalone SELECT).
-    if (termCols[TERMITE_NOTICE_MISSED_ESCALATION_COLUMN]) {
+      // Terms that reached their OWN term_end with a rung never delivered at
+      // all — durable staff escalation, atomically deduped via notifyAdmin's
+      // own dedupeKey (never a standalone SELECT).
       const missed = await termiteMissedNoticeEscalationCandidates({ today });
       for (const term of missed) {
         try {
@@ -5975,6 +6012,12 @@ async function checkAndSend({ today = etDateString() } = {}) {
           logger.error(`[annual-prepay] termite missed-notice escalation failed for term ${term.id}: ${err.message}`);
         }
       }
+    } catch (err) {
+      // Isolation boundary: a failure anywhere in the termite pass (a
+      // genuinely unexpected error, not just a missing column — that's
+      // already excluded by termiteNoticeColsReady) must never skip the
+      // unrelated generic 30/15/7 loop below.
+      logger.error(`[annual-prepay] termite notice-obligation pass aborted: ${err.message}`);
     }
   }
 

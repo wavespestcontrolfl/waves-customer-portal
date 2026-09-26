@@ -3007,41 +3007,87 @@ describe('annual prepay renewal helpers', () => {
       };
     }
 
-    // A term first discovered at 20 days out (inside BOTH rungs' windows):
-    // ONE customer message (the 30-day rung) is attempted; the 45-day rung
-    // is recorded missed/late with its OWN staff escalation — never a
-    // second customer-facing send in the same run.
-    test('both rungs due at once (found <=30 days out): records the 45-day rung missed/late (own escalation), then attempts ONLY the 30-day send', async () => {
+    // Pre-push audit P1 on the r3 structural fix: the 45-day rung's
+    // missed/late record — and its "the customer has been told" staff
+    // bell — must land ONLY after the combined 30-day send is CONFIRMED
+    // delivered, in the very same step that records the 30-day witness
+    // (markNoticeSent). Recording it up front, before the send is even
+    // attempted, would leave false delivery evidence (a disabled cancel
+    // flow, a missing renewal fee, or a delivery failure can all still
+    // block the send after this point) and would wrongly suppress the
+    // missed-notice escalation / clear the campaign cooldown.
+    test('both rungs due at once: a FAILED combined send (customer not found) leaves BOTH rungs unstamped and never bells staff "the customer has been told"', async () => {
       pinTermiteToday(); // 2026-09-26
-      const term = baseTermiteTerm('2026-10-16'); // 20 days out
-      const missedLateUpdate = query({ returning: [{ ...term, notice_45_late_sent_at: new Date() }] });
-      const columnInfoQuery = query({ columnInfo: { notice_45_late_escalated_at: {} } });
-      const escalatedUpdate = query();
+      const term = baseTermiteTerm('2026-10-16'); // 20 days out — both due
       const refreshQuery = query({ returning: [{ ...term, last_scheduled_service_id: null, last_scheduled_service_date: null }] });
       const claimQuery = query({ returning: [{ ...term, status: 'renewal_pending' }] });
       const releaseQuery = query();
       setDbQueues({
-        annual_prepay_terms: [missedLateUpdate, columnInfoQuery, escalatedUpdate, refreshQuery, claimQuery, releaseQuery],
+        // Only the refresh/claim/release entries — NOT a fourth or fifth
+        // entry for a missed-late stamp or its escalation. If the
+        // implementation still recorded the 45 rung before delivery, this
+        // queue would run dry and throw "Unexpected db table", failing
+        // the test.
+        annual_prepay_terms: [refreshQuery, claimQuery, releaseQuery],
         scheduled_services: [query({ first: null }), query({ columnInfo: {} })],
-        customers: [query({ first: null })], // customer not found → release claim (shortest path through sendCustomerTermNotice)
+        customers: [query({ first: null })], // customer not found → release claim, delivery never confirmed
       });
+      NotificationService.notifyAdmin.mockClear();
+
+      const result = await _private.processTermiteNoticeObligations(term, '2026-09-26');
+
+      expect(result).toMatchObject({ sent: false, reason: 'customer_not_found' });
+      expect(releaseQuery.update).toHaveBeenCalledWith(expect.objectContaining({ notice_30_claimed_at: null }));
+      expect(releaseQuery.update).not.toHaveBeenCalledWith(expect.objectContaining({ notice_30_sent_at: expect.anything() }));
+      // No "the customer has been told" bell for the 45 rung — nothing was
+      // ever delivered.
+      expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    });
+
+    // Same combined-send case, but delivery succeeds: BOTH the 30-day
+    // witness and the 45-day missed/late record (+ its own escalation
+    // bell) land together, in that order — never before the send.
+    test('both rungs due at once: a SUCCESSFUL combined send stamps the 30-day witness AND the 45-day missed/late record, with its own late escalation', async () => {
+      pinTermiteToday(); // 2026-09-26
+      const term = baseTermiteTerm('2026-10-26'); // exactly 30 days out — 30-day send is ON TIME, 45 still due too
+      const refreshedTerm = { ...term, last_scheduled_service_id: null, last_scheduled_service_date: null };
+      const refreshQuery = query({ returning: [refreshedTerm] });
+      const claimQuery = query({ returning: [{ ...refreshedTerm, status: 'renewal_pending' }] });
+      const markNoticeQuery = query(); // the 30-day witness update
+      const missedLateUpdate = query({ returning: [{ ...refreshedTerm, notice_45_late_sent_at: new Date() }] });
+      const columnInfoQuery45 = query({ columnInfo: { notice_45_late_escalated_at: {} } });
+      const escalatedUpdate45 = query();
+      setDbQueues({
+        annual_prepay_terms: [refreshQuery, claimQuery, markNoticeQuery, missedLateUpdate, columnInfoQuery45, escalatedUpdate45],
+        scheduled_services: [query({ first: null }), query({ columnInfo: {} })],
+        customers: [
+          query({ first: { id: 'customer-1', first_name: 'Stan', address_line1: '123 Bayshore Rd', city: 'Bradenton', email: 'stan@example.com', phone: '+19415550100' } }),
+        ],
+        customer_interactions: [query()],
+      });
+      CancellationResolution.cancelFlowV2Enabled.mockReturnValue(true);
+      renderSmsTemplate.mockResolvedValue('rendered termite sms');
+      sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted' });
+      AccountMembershipEmail.sendTermiteRenewalReminder.mockResolvedValue({ ok: true });
       NotificationService.notifyAdmin.mockResolvedValue({ id: 'notif-late-45' });
 
       const result = await _private.processTermiteNoticeObligations(term, '2026-09-26');
 
-      // The 30-day send was the one actually attempted (and released, since
-      // the customer lookup missed) — never a second 45-day claim/send.
-      expect(result).toMatchObject({ sent: false, reason: 'customer_not_found' });
+      expect(result).toMatchObject({ sent: true, termId: 'term-1' });
+      // The 30-day witness is the on-time column (exactly 30 days out).
+      expect(markNoticeQuery.update).toHaveBeenCalledWith(expect.objectContaining({ notice_30_sent_at: expect.any(Date) }));
+      // The 45-day rung lands as missed/late in the SAME confirmed-delivery
+      // step — never before it.
       expect(missedLateUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ notice_45_late_sent_at: expect.any(Date) }));
+      expect(markNoticeQuery.update.mock.invocationCallOrder[0])
+        .toBeLessThan(missedLateUpdate.update.mock.invocationCallOrder[0]);
       expect(NotificationService.notifyAdmin).toHaveBeenCalledWith(
         'alert',
         'Termite annual renewal notice went out late',
         expect.any(String),
         expect.objectContaining({ metadata: expect.objectContaining({ reason: 'notice_45_late', days_out: 45, annual_prepay_term_id: 'term-1' }) }),
       );
-      expect(escalatedUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ notice_45_late_escalated_at: expect.any(Date) }));
-      expect(claimQuery.update).toHaveBeenCalledWith(expect.objectContaining({ notice_30_claimed_at: expect.any(Date) }));
-      expect(claimQuery.whereNull).toHaveBeenCalledWith('notice_30_sent_at');
+      expect(escalatedUpdate45.update).toHaveBeenCalledWith(expect.objectContaining({ notice_45_late_escalated_at: expect.any(Date) }));
     });
 
     // coverageAwaitsInstallation must block the missed-late stamp too — an

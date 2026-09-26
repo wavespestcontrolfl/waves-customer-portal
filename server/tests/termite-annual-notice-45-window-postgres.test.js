@@ -221,3 +221,145 @@ describeOrSkip('termite annual-plan notice obligations — unified 45/30 candida
     expect(_private.noticeWitnessColumn(30, { term_end: '2026-11-10' }, '2026-10-12')).toBe('notice_30_sent_at');
   });
 });
+
+// Pre-push audit P1 on the r3 structural fix: termiteLateNoticeEscalationCandidates
+// (and the readiness gate in checkAndSend) must be verified against a schema
+// built by ACTUALLY RUNNING migrations 000101–000107, not a hand-made
+// CREATE TABLE — a hand-made table can silently define a column no real
+// migration adds (exactly how 000106 shipped without notice_30_late_escalated_at,
+// which 000107 now adds). This describe block starts from a minimal
+// PRE-000101 baseline (the columns 20260514000001_annual_prepay_terms.js +
+// 20260924030001_termite_annual_plan_stamps.js already established before
+// this ladder began — reproduced directly rather than run, since the base
+// migration's customers/estimates/invoices/scheduled_services FKs are
+// orthogonal to this bug and already covered elsewhere) and then requires +
+// runs the REAL 000101–000107 migration files' up() in order.
+describeOrSkip('termite annual-plan notice obligations — against a schema built by running migrations 000101–000107 (real Postgres)', () => {
+  let fixture;
+
+  async function createPre101Db() {
+    const url = new URL(process.env.REPAIR_TEST_DATABASE_URL);
+    const schema = `termite_notice_migrated_${randomUUID().replace(/-/g, '')}`;
+    const db = knexLib({ client: 'pg', connection: url.toString(), searchPath: [schema], pool: { min: 0, max: 4 } });
+    await db.raw('CREATE SCHEMA ??', [schema]);
+    // The pre-000101 baseline: 20260514000001 (base table + notice_30/15/7
+    // sent/claimed) + 20260924030001 (annual_plan_version, notice_45_sent_at).
+    await db.raw(`CREATE TABLE annual_prepay_terms (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      customer_id uuid NOT NULL,
+      term_start date NOT NULL,
+      term_end date NOT NULL,
+      status text NOT NULL DEFAULT 'payment_pending',
+      renewal_decision text,
+      annual_plan_version text,
+      notice_45_sent_at timestamptz,
+      notice_30_sent_at timestamptz,
+      notice_30_claimed_at timestamptz,
+      notice_15_sent_at timestamptz,
+      notice_15_claimed_at timestamptz,
+      notice_7_sent_at timestamptz,
+      notice_7_claimed_at timestamptz,
+      updated_at timestamptz
+    )`);
+    return { db, async destroy() { await db.raw('DROP SCHEMA ?? CASCADE', [schema]); await db.destroy(); } };
+  }
+
+  beforeEach(async () => { fixture = await createPre101Db(); });
+  afterEach(async () => { if (fixture) await fixture.destroy(); });
+
+  const MIGRATION_FILES_101_TO_107 = [
+    '20260926000101_termite_annual_notice_45_claim_column',
+    '20260926000102_termite_annual_renewal_notice_sms_template',
+    '20260926000103_termite_annual_renewal_reminder_email_template',
+    '20260926000104_termite_annual_notice_45_late_column',
+    '20260926000105_termite_annual_notice_45_late_escalated_column',
+    '20260926000106_termite_annual_notice_30_late_and_missed_columns',
+    '20260926000107_termite_annual_notice_30_late_escalated_column',
+  ];
+
+  test('running 000101 through 000107 in order adds every column the termite pass and its readiness gate query, with no hand-made shortcuts', async () => {
+    const { db } = fixture;
+    for (const file of MIGRATION_FILES_101_TO_107) {
+      await require(`../models/migrations/${file}`).up(db);
+    }
+    const cols = await db('annual_prepay_terms').columnInfo();
+    for (const col of ['notice_45_claimed_at', 'notice_45_late_sent_at', 'notice_45_late_escalated_at',
+      'notice_30_late_sent_at', 'notice_missed_escalated_at', 'notice_30_late_escalated_at']) {
+      expect(cols[col]).toBeTruthy();
+    }
+  });
+
+  test('termiteLateNoticeEscalationCandidates and termiteMissedNoticeEscalationCandidates run without a "column does not exist" error against the fully-migrated schema, and select the right rows', async () => {
+    const { db } = fixture;
+    for (const file of [
+      '20260926000101_termite_annual_notice_45_claim_column',
+      '20260926000104_termite_annual_notice_45_late_column',
+      '20260926000105_termite_annual_notice_45_late_escalated_column',
+      '20260926000106_termite_annual_notice_30_late_and_missed_columns',
+      '20260926000107_termite_annual_notice_30_late_escalated_column',
+    ]) {
+      await require(`../models/migrations/${file}`).up(db);
+    }
+
+    jest.doMock('../models/db', () => db);
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    const { _private } = require('../services/annual-prepay-renewals');
+
+    const term = (label, fields) => ({
+      label, customer_id: randomUUID(), term_start: '2025-10-01', term_end: '2026-11-15', status: 'active', annual_plan_version: 'v3', ...fields,
+    });
+    const rows = [
+      term('late30Unescalated', { notice_30_late_sent_at: new Date() }),
+      term('late30Escalated', { notice_30_late_sent_at: new Date(), notice_30_late_escalated_at: new Date() }),
+      term('late45Unescalated', { notice_45_late_sent_at: new Date() }),
+    ];
+    const ids = {};
+    for (const { label, ...fields } of rows) {
+      const [row] = await db('annual_prepay_terms').insert(fields).returning('id');
+      ids[row.id] = label;
+    }
+
+    // Before 000107 this threw "column notice_30_late_escalated_at does not
+    // exist" (uncaught in checkAndSend, taking the generic loop down with
+    // it) — proven here by simply not throwing, plus correct selection.
+    const lateCandidates = await _private.termiteLateNoticeEscalationCandidates({ conn: db });
+    expect(lateCandidates.map((row) => ids[row.id]).sort()).toEqual(['late30Unescalated', 'late45Unescalated'].sort());
+
+    const missedCandidates = await _private.termiteMissedNoticeEscalationCandidates({ today: '2026-09-26', conn: db });
+    expect(missedCandidates).toEqual([]); // term_end is in the future for every row above
+  });
+
+  test('a database that ran only through 000106 (pre-000107) — checkAndSend\'s readiness gate skips the ENTIRE termite pass instead of throwing, and the generic 30/15/7 loop still runs', async () => {
+    const { db } = fixture;
+    for (const file of [
+      '20260926000101_termite_annual_notice_45_claim_column',
+      '20260926000104_termite_annual_notice_45_late_column',
+      '20260926000105_termite_annual_notice_45_late_escalated_column',
+      '20260926000106_termite_annual_notice_30_late_and_missed_columns',
+      // Deliberately NOT running 000107 — the exact mid-rollout gap the
+      // pre-push audit found.
+    ]) {
+      await require(`../models/migrations/${file}`).up(db);
+    }
+
+    jest.doMock('../models/db', () => db);
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    jest.doMock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn(), classifyDeliveryCertainty: jest.fn() }));
+    jest.doMock('../services/sms-template-renderer', () => ({ renderSmsTemplate: jest.fn() }));
+    jest.doMock('../services/account-membership-email', () => ({ sendMembershipRenewalReminder: jest.fn(), sendTermiteRenewalReminder: jest.fn() }));
+    jest.doMock('../services/cancellation-resolution', () => ({ cancelFlowV2Enabled: jest.fn(() => true) }));
+    jest.doMock('../services/notification-service', () => ({ notifyAdmin: jest.fn().mockResolvedValue({ id: 'n' }) }));
+    const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+
+    // A termite term whose 45-day rung is due — if the readiness gate were
+    // wrong (only checking the main candidate query's columns, as before
+    // this fix), checkAndSend would throw inside the termite pass and never
+    // reach the generic loop below at all.
+    await db('annual_prepay_terms').insert({
+      customer_id: randomUUID(), term_start: '2025-10-01', term_end: '2026-11-10',
+      status: 'active', annual_plan_version: 'v3',
+    });
+
+    await expect(AnnualPrepayRenewals.checkAndSend({ today: '2026-09-26' })).resolves.toEqual({ sent: 0 });
+  });
+});
