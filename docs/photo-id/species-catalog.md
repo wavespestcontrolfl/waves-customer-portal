@@ -29,7 +29,9 @@ ant; we can't yet tell you which kind"):
   entry, for groups where that middle rung matters. Also has its own
   `generic` label and `next_photo`.
 - **Entry** — a specific species (or a `sign`, like mud tubes or droppings,
-  which points back at the organism it's a sign of via `sign_of`).
+  which points back at the organism entries it's a sign of via `sign_of`;
+  a sign made by an animal with no catalog entry, such as woodpecker damage
+  or hog rooting, has an empty `sign_of`).
 
 `server/services/species-catalog.js` exposes `lineage(id)` to walk this
 ladder for any id, and `nextPhoto(id)` to get the one photo that would narrow

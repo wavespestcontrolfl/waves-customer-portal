@@ -43,6 +43,12 @@ describe('real-catalog answer guards (Codex #4974 r2)', () => {
     expect(built.answer.wording).not.toBe('pretty_sure');
   });
 
+  test('a lone southern house spider never reads pretty sure either: the reverse recluse veto applies with one candidate (Codex #4974 r4)', () => {
+    const built = buildAnswer(ctx([cand('southern-house-spider', 0.95)]));
+    expect(built.answer.wording).not.toBe('pretty_sure');
+    expect(built.nextPhoto.photo_can_confirm).toBe(false);
+  });
+
   test('bats get the exclusion-only referral, never a trapper', () => {
     expect(catalog.getEntry('brazilian-free-tailed-bat').service.referral).toBe('bat_exclusion');
     expect(REFERRAL_TEMPLATES.bat_exclusion).toMatch(/never trapped or handled/);

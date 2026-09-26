@@ -697,12 +697,43 @@ const NO_PHOTO_CONFIRMS = Object.freeze({
  * is a fact about the pair, not about whether the other side's page is
  * published yet (Codex round-0 P1, round 19: bed bug vs a still-planned
  * bat bug). Callers must not surface an unapproved target's identity. */
+/** Every look-alike relationship `entry` has, from EITHER side: its own
+ * edges, plus edges other entries point at it with. Each is normalized by
+ * `pairBetween`, so a "no photo can settle this" on either side wins.
+ * Every single-entry fallback reads this one list, so a reverse-only veto
+ * (brown recluse -> southern house spider) can't be missed on any path
+ * (Codex #4974 r2-r4). Own edges come first, in authored order. */
+function lookAlikeEdges(entry) {
+  if (!entry) return [];
+  const others = [
+    ...(entry.look_alikes || []).map((la) => la.slug),
+    ...catalog.listEntries().filter((o) => (o.look_alikes || []).some((la) => la.slug === entry.slug)).map((o) => o.slug),
+  ];
+  const seen = new Set();
+  const edges = [];
+  for (const slug of others) {
+    if (seen.has(slug) || slug === entry.slug) continue;
+    seen.add(slug);
+    const pair = pairBetween(entry, catalog.getEntry(slug) || { slug, look_alikes: [] });
+    if (pair) edges.push(pair);
+  }
+  return edges;
+}
+
 function governingPair(top, second) {
-  return (second?.entry && pairBetween(top?.entry, second.entry)) || (top?.entry?.look_alikes || [])[0] || null;
+  if (second?.entry) {
+    const pair = pairBetween(top?.entry, second.entry);
+    if (pair) return pair;
+  }
+  // No pair with the runner-up: an unconfirmable relationship on either
+  // side governs first, else the entry's first look-alike.
+  const edges = lookAlikeEdges(top?.entry);
+  return edges.find((e) => e.photo_can_confirm === false) || edges[0] || null;
 }
 
 function firstApprovedLookAlike(entry) {
-  return (entry.look_alikes || []).find((la) => isApproved(catalog.getEntry(la.slug))) || null;
+  const edges = lookAlikeEdges(entry).filter((e) => isApproved(catalog.getEntry(e.slug)));
+  return edges.find((e) => e.photo_can_confirm === false) || edges[0] || null;
 }
 
 function nextPhotoFor(wording, candidates, level, nodeId) {

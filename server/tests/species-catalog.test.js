@@ -100,8 +100,16 @@ describe('species-catalog-v1 entries — schema (ported from validate.js)', () =
 
     expect(Array.isArray(e.stages)).toBe(true);
     expect(Array.isArray(e.sign_of)).toBe(true);
-    if (e.kind === 'sign') expect(e.sign_of.length).toBeGreaterThan(0);
-    for (const s of e.sign_of) expect(knownSlugs.has(s)).toBe(true);
+    // A sign points at the organism entries that make it — never itself or
+    // another sign. Woodpecker damage and hog rooting are made by animals
+    // with no catalog entry, so they (only) carry an empty list (Codex #4974 r4).
+    const SIGN_ONLY = new Set(['woodpecker-damage', 'feral-hog-rooting']);
+    if (e.kind === 'sign' && !SIGN_ONLY.has(e.slug)) expect(e.sign_of.length).toBeGreaterThan(0);
+    for (const s of e.sign_of) {
+      expect(knownSlugs.has(s)).toBe(true);
+      expect(s).not.toBe(e.slug);
+      expect(catalog.getEntry(s)?.kind).toBe('organism');
+    }
 
     expect(Array.isArray(e.traits)).toBe(true);
     expect(e.traits.length).toBeGreaterThanOrEqual(3);
