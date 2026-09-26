@@ -2840,6 +2840,17 @@ const gates = {
   // estimateConsultationOfferLive() below, same leadInspectionLinkLive()
   // convention.
   estimateConsultationOffer: process.env.GATE_ESTIMATE_CONSULTATION_OFFER === 'true',
+  // "Rather have us come look first?" consultation-offer LINK inside the
+  // estimate.engage_gone_quiet follow-up EMAIL (owner ruling 2026-09-26,
+  // decision 2 of the estimate-email consultation-offer lane) — a separate
+  // gate from the estimate PAGE's own GATE_ESTIMATE_CONSULTATION_OFFER
+  // above, since the two surfaces (a page a customer already opened vs an
+  // automated send) ship independently. Ships DARK: off unless exactly
+  // 'true', and requires GATE_LEAD_INSPECTION_LINK on as well (checked by
+  // estimateConsultationLead, the same shared eligibility the page uses).
+  // This entry is for logGateStatus only — the canonical CALL-TIME reader is
+  // estimateEmailConsultationOfferLive() below, same convention.
+  estimateEmailConsultationOffer: process.env.GATE_ESTIMATE_EMAIL_CONSULTATION_OFFER === 'true',
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks
@@ -2907,6 +2918,18 @@ function estimateConsultationOfferLive() {
   return process.env.GATE_ESTIMATE_CONSULTATION_OFFER === 'true';
 }
 
+// GATE_ESTIMATE_EMAIL_CONSULTATION_OFFER read at CALL time — strict
+// `=== 'true'`, same convention as estimateConsultationOfferLive(). The
+// `estimateEmailConsultationOffer` gates-map entry above is for
+// logGateStatus only; this is the one canonical reader
+// server/services/estimate-email-consultation-offer.js uses. Like the page
+// offer, this additionally requires leadInspectionLinkLive() (checked
+// inside the shared estimateConsultationLead eligibility, not duplicated
+// here).
+function estimateEmailConsultationOfferLive() {
+  return process.env.GATE_ESTIMATE_EMAIL_CONSULTATION_OFFER === 'true';
+}
+
 // Self-booking day cap (owner ruling 2026-09-23) — the canonical reader
 // every day-cap call site uses (routes/booking.js buildBookingAvailability
 // + createSelfBooking, services/availability.js getAvailableSlots +
@@ -2966,5 +2989,5 @@ function logGateStatus() {
   }
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, customerIntelAiLive, selfBookDayCapEnabled, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, estimateConsultationOfferLive };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, customerIntelAiLive, selfBookDayCapEnabled, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive };
 // gates 1775330914

@@ -30,6 +30,11 @@ jest.mock('../services/logger', () => ({
 }));
 jest.mock('../services/estimate-service-lines', () => ({
   inferEstimateServiceLines: jest.fn(() => [{ key: 'pest' }]),
+  parseEstimateData: jest.fn((raw) => {
+    if (!raw) return null;
+    if (typeof raw === 'string') { try { return JSON.parse(raw); } catch { return null; } }
+    return typeof raw === 'object' ? raw : null;
+  }),
 }));
 jest.mock('../services/estimate-conversion-guard', () => ({
   customerConvertedSince: jest.fn(async () => ({ converted: false })),
@@ -64,6 +69,13 @@ jest.mock('../services/estimate-follow-up', () => ({
     repairFollowupCounters: jest.fn(async () => null),
   },
 }));
+// gone_quiet's own consultation-offer link (owner ruling 2026-09-26) — its
+// own suite (estimate-email-consultation-offer.test.js) pins the builder
+// itself; this suite only pins that the engine calls it for the RIGHT rule
+// with the RIGHT arguments and threads the result into the payload.
+jest.mock('../services/estimate-email-consultation-offer', () => ({
+  buildGoneQuietConsultationUrl: jest.fn(async () => ''),
+}));
 
 const db = require('../models/db');
 const { isEnabled } = require('../config/feature-gates');
@@ -74,6 +86,7 @@ const { sessionsForEstimate } = require('../services/estimate-engagement-session
 const { leadIdForEstimate } = require('../services/estimate-lead-linkage');
 const { leadConvertedSince, phoneConvertedSince } = require('../services/click-followup-gate');
 const followupShared = require('../services/estimate-follow-up')._private;
+const { buildGoneQuietConsultationUrl } = require('../services/estimate-email-consultation-offer');
 const Engine = require('../services/estimate-engagement-engine');
 
 // Builder stub — chain methods return the builder; awaiting resolves by
@@ -207,6 +220,7 @@ beforeEach(() => {
   followupShared.hasRepliedRecently.mockResolvedValue(false);
   followupShared.bumpFollowupCounters.mockResolvedValue(undefined);
   followupShared.repairFollowupCounters.mockResolvedValue(null);
+  buildGoneQuietConsultationUrl.mockResolvedValue('');
 });
 
 describe('onEstimateViewed (view-event rules)', () => {
@@ -441,6 +455,73 @@ describe('processDueJobs', () => {
     const jobUpdate = writes.filter((w) => w.table === 'estimate_followup_jobs' && w.op === 'update').pop();
     expect(jobUpdate.payload).toEqual(expect.objectContaining({ status: 'done' }));
     expect(followupShared.bumpFollowupCounters).toHaveBeenCalledWith('est-1', 'viewed_gone_quiet_72h');
+  });
+
+  describe('gone_quiet consultation-offer link (owner ruling 2026-09-26)', () => {
+    test('viewed_gone_quiet_72h calls the builder with the engine\'s own verified state and threads a non-blank result into the payload', async () => {
+      buildGoneQuietConsultationUrl.mockResolvedValue('https://portal.wavespestcontrol.com/l/abc123');
+      enqueueProcessorHappyPath();
+
+      const result = await Engine.processDueJobs(NOW);
+
+      expect(result.sent).toBe(1);
+      expect(buildGoneQuietConsultationUrl).toHaveBeenCalledWith({
+        estimate: expect.objectContaining({ id: 'est-1' }),
+        estimateData: null, // baseEstimate() carries no estimate_data
+        acceptActive: true,
+        recipientEmail: 'taylor@example.com',
+      });
+      expect(followupShared.estimateEmailPayload.mock.calls[0][3]).toEqual(
+        expect.objectContaining({ consultation_url: 'https://portal.wavespestcontrol.com/l/abc123' }),
+      );
+    });
+
+    test('a blank builder result still sends the email with consultation_url === "" (gate off / ineligible / build error)', async () => {
+      buildGoneQuietConsultationUrl.mockResolvedValue('');
+      enqueueProcessorHappyPath();
+
+      const result = await Engine.processDueJobs(NOW);
+
+      expect(result.sent).toBe(1);
+      expect(followupShared.estimateEmailPayload.mock.calls[0][3]).toEqual(
+        expect.objectContaining({ consultation_url: '' }),
+      );
+    });
+
+    test('the builder throwing (a regression in its own fail-closed contract) releases the claim and hits the existing poison-guard retry, never a broken send', async () => {
+      // The builder's own contract is "never throws" (see its unit suite);
+      // this pins that a regression there is caught by the SAME poison-job
+      // guard every other unexpected error in this loop already uses. The
+      // claim already landed by this point in the loop (claimFollowupSend
+      // runs before the payload is built), so the guard must release it —
+      // never leaves a phantom claim behind for a real send that never sent.
+      buildGoneQuietConsultationUrl.mockRejectedValue(new Error('should never happen'));
+      enqueueProcessorHappyPath();
+
+      const result = await Engine.processDueJobs(NOW);
+
+      expect(result).toEqual({ sent: 0, shadow: 0 });
+      expect(followupShared.claimFollowupSend).toHaveBeenCalled();
+      expect(followupShared.releaseFollowupSend).toHaveBeenCalledWith('est-1', 'viewed_gone_quiet_72h');
+      expect(followupShared.sendDualChannel).not.toHaveBeenCalled();
+      const defer = writes.filter((w) => w.table === 'estimate_followup_jobs' && w.op === 'update').pop();
+      expect(defer.payload.status).toBeUndefined(); // still pending, bounded retry
+      expect(defer.payload.attempts).toBeDefined();
+      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('should never happen'));
+    });
+
+    test('every other rule\'s payload never gets consultation_url — the builder is never even called for them', async () => {
+      enqueueProcessorHappyPath({
+        job: pendingJob({ rule_key: 'return_visit_hot' }),
+        est: baseEstimate({ last_viewed_at: new Date(NOW.getTime() - 5 * MIN) }),
+      });
+
+      const result = await Engine.processDueJobs(NOW);
+
+      expect(result.sent).toBe(1);
+      expect(buildGoneQuietConsultationUrl).not.toHaveBeenCalled();
+      expect(followupShared.estimateEmailPayload.mock.calls[0][3]).not.toHaveProperty('consultation_url');
+    });
   });
 
   test('an engagement-opted-out estimate skips at the SEND choke point — covers jobs enqueued before the marker', async () => {

@@ -122,4 +122,9 @@ async function buildEstimateConsultationOffer({ estimate, estimateData, acceptAc
   }
 }
 
-module.exports = { buildEstimateConsultationOffer, _test: { sameProperty, linkedLeadIdFor } };
+// estimateConsultationLead is exported for its SECOND caller
+// (server/services/estimate-email-consultation-offer.js, the
+// estimate.engage_gone_quiet follow-up email's own consultation-offer
+// link, owner ruling 2026-09-26) — the same shared eligibility this
+// module's own page offer above already uses, never re-derived.
+module.exports = { buildEstimateConsultationOffer, estimateConsultationLead, _test: { sameProperty, linkedLeadIdFor } };

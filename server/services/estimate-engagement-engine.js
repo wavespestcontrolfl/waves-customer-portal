@@ -41,11 +41,17 @@ const { gatedSendAuthorityPredicateApplies, estimateDeliverableUnderGate } = req
 // re-evaluation would never come).
 const PRICING_AUTHORITY_RECHECK_MS = 6 * 60 * 60 * 1000;
 const { sessionsForEstimate, SESSION_GAP_MINUTES } = require('./estimate-engagement-sessions');
-const { inferEstimateServiceLines } = require('./estimate-service-lines');
+const { inferEstimateServiceLines, parseEstimateData } = require('./estimate-service-lines');
 const { customerConvertedSince } = require('./estimate-conversion-guard');
 const { followupEmailVars } = require('./estimate-followup-copy');
+// gone_quiet's own "Rather have us come look first?" link (owner ruling
+// 2026-09-26) — the ONLY rule whose payload calls this; every other rule's
+// payload never references it.
+const { buildGoneQuietConsultationUrl } = require('./estimate-email-consultation-offer');
 // Shared lane mechanics from the stage engine (see module doc above).
 const followupShared = require('./estimate-follow-up')._private;
+
+const GONE_QUIET_RULE_KEY = 'viewed_gone_quiet_72h';
 
 const ACTIVE_STATUSES = ['sent', 'viewed'];
 const TERMINAL_STATUSES = new Set(['declined', 'accepted', 'expired', 'void']);
@@ -757,6 +763,22 @@ async function processDueBatch(now = new Date()) {
       const { emailUrl: acceptUrl } = await followupShared.mintStageLinks(
         est, `estimate_engage_${rule.rule_key}_accept`, { query: 'intent=accept', emailOnly: true },
       );
+      // ONE new variable, ONE rule (owner ruling 2026-09-26): every other
+      // rule's payload is byte-identical — this never even calls the
+      // builder for them. acceptActive is `true` here, not re-derived: by
+      // this point processDueBatch has already verified est is active and
+      // sendable (not archived, ACTIVE_STATUSES, not expired — the same
+      // verdict isEstimateAcceptActive computes for the public page) for
+      // THIS exact send.
+      const isGoneQuiet = rule.rule_key === GONE_QUIET_RULE_KEY;
+      const consultationUrl = isGoneQuiet
+        ? await buildGoneQuietConsultationUrl({
+          estimate: est,
+          estimateData: parseEstimateData(est.estimate_data),
+          acceptActive: true,
+          recipientEmail: est.customer_email,
+        })
+        : '';
       const ok = await followupShared.sendDualChannel(est, {
         email: {
           templateKey: rule.template_key,
@@ -770,6 +792,7 @@ async function processDueBatch(now = new Date()) {
           payload: followupShared.estimateEmailPayload(est, firstName, emailUrl, {
             ...followupEmailVars(est),
             estimate_accept_url: acceptUrl,
+            ...(isGoneQuiet ? { consultation_url: consultationUrl } : {}),
             ...(expiringLifecycle ? {
               expires_date: expiringLifecycle.toLocaleDateString('en-US', {
                 month: 'long', day: 'numeric', timeZone: 'America/New_York',
