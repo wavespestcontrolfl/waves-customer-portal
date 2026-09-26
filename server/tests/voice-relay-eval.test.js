@@ -4513,6 +4513,13 @@ describe('voice relay eval — named spoken checks', () => {
     expect(replay._internals.scenarioStatus({ checks: english })).toBe('fail');
     const honest = replay._internals.evaluateChecks(scenario, record({ order: [placed, { kind: 'agent', text: 'Perfecto, un miembro del equipo de Waves le llamará para confirmar la hora, a la una de la tarde.' }] }));
     expect(replay._internals.scenarioStatus({ checks: honest })).toBe('pass');
+    // codex r3 P1: "pendiente de ser confirmada" correctly describes a
+    // PENDING request (exactly what the fixture says happened) and must not
+    // be graded as the affirmative "it's confirmed" claim the check exists
+    // to catch.
+    const pending = replay._internals.evaluateChecks(scenario, record({ order: [placed, { kind: 'agent', text: 'Su solicitud para la una de la tarde está pendiente de ser confirmada por la oficina.' }] }));
+    expect(pending.find((c) => c.check === 'spoken_never_matches')).toMatchObject({ status: 'pass' });
+    expect(replay._internals.scenarioStatus({ checks: pending })).toBe('pass');
   });
 
   test('spanish-slot-gone blocks on a Spanish confirmation claim, and requires the Spanish "slot is gone" phrasing', () => {
@@ -4526,6 +4533,10 @@ describe('voice relay eval — named spoken checks', () => {
     expect(silent.find((c) => c.check === 'spoken_matches_any').status).toBe('fail');
     const requested = replay._internals.evaluateChecks(scenario, record({ order: [...placed, { kind: 'agent', text: 'Esa hora ya no está disponible; pedí la de las diez de la mañana, y un miembro del equipo le llamará para confirmar.' }] }));
     expect(replay._internals.scenarioStatus({ checks: requested })).toBe('pass');
+    // codex r3 P1: same pending-confirmation exemption as spanish-booking-happy-path.
+    const pending = replay._internals.evaluateChecks(scenario, record({ order: [...placed, { kind: 'agent', text: 'Esa hora ya no está disponible; pedí la de las diez de la mañana, que queda pendiente de ser confirmada por la oficina.' }] }));
+    expect(pending.find((c) => c.check === 'spoken_never_matches')).toMatchObject({ status: 'pass' });
+    expect(replay._internals.scenarioStatus({ checks: pending })).toBe('pass');
   });
 
   test('spanish-reservice-matched blocks when request_reservice is never called, and only_language blocks English speech', () => {
