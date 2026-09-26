@@ -392,7 +392,7 @@ async function sweepStrandedWizardActivations({ database = db, olderThanMinutes 
             category: 'alert',
             title: 'Self-booked plan never activated',
             body: byDisposition.bell + draftNote,
-            link: `/admin/customers/${parent.customer_id}`,
+            link: `/admin/customers?customerId=${parent.customer_id}`,
             bell: true,
             metadata: {
               dedupeKey,
