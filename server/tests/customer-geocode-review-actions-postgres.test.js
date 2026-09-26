@@ -21,6 +21,7 @@ const migration = require('../models/migrations/20260926000030_customer_geocode_
 const reviewStore = require('../services/customer-geocode-review');
 const { addressKey } = require('../services/customer-properties');
 const { resolveCustomerGeocodeReview } = require('../services/customer-geocode-review-actions');
+const { recurringServiceAddress } = require('../services/booking/visit-financial-stamps');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 
 const connection = process.env.SERVICE_GEOCODE_TEST_DATABASE_URL;
@@ -62,15 +63,22 @@ postgres('customer geocode review actions in PostgreSQL', () => {
     await mockConnection.schema.createTable('customers', table => {
       table.uuid('id').primary();
       table.string('first_name'); table.string('last_name');
+      table.string('profile_label'); table.string('contact_role');
       table.string('address_line1', 200); table.string('address_line2', 100);
       table.string('city', 50); table.string('state', 2); table.string('zip', 10);
       table.decimal('latitude', 10, 7); table.decimal('longitude', 10, 7);
+      table.string('property_type'); table.string('lawn_type'); table.integer('property_sqft'); table.integer('lot_sqft');
+      table.integer('bed_sqft'); table.integer('linear_ft_perimeter'); table.integer('palm_count'); table.string('canopy_type');
       table.timestamp('updated_at', { useTz: true }); table.timestamp('deleted_at', { useTz: true });
     });
     await mockConnection.schema.createTable('customer_properties', table => {
-      table.uuid('id').primary(); table.uuid('customer_id'); table.boolean('is_primary'); table.boolean('active');
+      table.uuid('id').primary().defaultTo(mockConnection.raw('gen_random_uuid()'));
+      table.uuid('customer_id'); table.boolean('is_primary'); table.boolean('active');
+      table.string('label'); table.string('occupancy_type'); table.string('relationship'); table.string('source');
       table.string('address_line1', 200); table.string('address_line2', 100);
       table.string('city', 50); table.string('state', 2); table.string('zip', 10); table.string('address_key');
+      table.string('property_type'); table.string('lawn_type'); table.integer('property_sqft'); table.integer('lot_sqft');
+      table.integer('bed_sqft'); table.integer('linear_ft_perimeter'); table.integer('palm_count'); table.string('canopy_type');
       table.decimal('latitude', 10, 7); table.decimal('longitude', 10, 7); table.timestamp('updated_at', { useTz: true });
     });
     await mockConnection.raw('CREATE UNIQUE INDEX customer_properties_customer_address_uniq ON customer_properties (customer_id, address_key) WHERE active');
@@ -80,6 +88,11 @@ postgres('customer geocode review actions in PostgreSQL', () => {
       table.string('service_address_line1', 200); table.string('service_address_line2', 100);
       table.string('service_address_city', 50); table.string('service_address_state', 2); table.string('service_address_zip', 10);
       table.decimal('lat', 10, 6); table.decimal('lng', 10, 6);
+      table.string('zone'); table.integer('route_order');
+      table.text('pre_service_brief'); table.string('pre_service_brief_type');
+      table.timestamp('pre_service_brief_generated_at', { useTz: true });
+      table.boolean('is_recurring').defaultTo(false); table.uuid('recurring_parent_id');
+      table.boolean('recurring_ongoing').defaultTo(false); table.jsonb('recurring_template_overrides');
       table.boolean('auto_dispatch_locked').defaultTo(false); table.boolean('auto_dispatch_excluded').defaultTo(false);
       table.timestamp('updated_at', { useTz: true });
     });
@@ -109,7 +122,8 @@ postgres('customer geocode review actions in PostgreSQL', () => {
         ...SECONDARY_ADDRESS, address_key: addressKey(SECONDARY_ADDRESS) },
     ]);
     visitIds = Object.fromEntries([
-      'matching', 'started', 'completed', 'frozen', 'divergent', 'individual', 'zeroLatitude', 'zeroLongitude', 'zeroBoth',
+      'matching', 'started', 'completed', 'frozen', 'excluded', 'divergent', 'individual',
+      'zeroLatitude', 'zeroLongitude', 'zeroBoth',
     ]
       .map(name => [name, randomUUID()]));
     const tomorrow = etDateString(addETDays(new Date(), 1));
@@ -117,10 +131,19 @@ postgres('customer geocode review actions in PostgreSQL', () => {
       service_address_line1: ADDRESS.address_line1, service_address_line2: ADDRESS.address_line2,
       service_address_city: ADDRESS.city, service_address_state: ADDRESS.state, service_address_zip: ADDRESS.zip };
     await mockConnection('scheduled_services').insert([
-      { ...baseVisit, id: visitIds.matching },
+      { ...baseVisit, id: visitIds.matching, recurring_parent_id: visitIds.completed,
+        zone: 'legacy-zone', route_order: 7, pre_service_brief: 'Old location brief',
+        pre_service_brief_type: 'route', pre_service_brief_generated_at: new Date() },
       { ...baseVisit, id: visitIds.started, status: 'en_route' },
-      { ...baseVisit, id: visitIds.completed, status: 'completed' },
+      { ...baseVisit, id: visitIds.completed, status: 'completed', is_recurring: true, recurring_ongoing: true,
+        recurring_template_overrides: { visit_count: 4, appointment_address: {
+          property_id: PRIMARY, service_address_line1: ADDRESS.address_line1,
+          service_address_line2: ADDRESS.address_line2, service_address_city: ADDRESS.city,
+          service_address_state: ADDRESS.state, service_address_zip: ADDRESS.zip, lat: null, lng: null,
+          zone: 'legacy-zone',
+        } } },
       { ...baseVisit, id: visitIds.frozen, auto_dispatch_locked: true },
+      { ...baseVisit, id: visitIds.excluded, auto_dispatch_excluded: true },
       { ...baseVisit, id: visitIds.divergent, property_id: SECONDARY, service_address_line1: '900 Other Ave',
         service_address_city: 'Sarasota', service_address_zip: '34236' },
       { ...baseVisit, id: visitIds.individual, lat: 27.4, lng: -82.4 },
@@ -166,11 +189,22 @@ postgres('customer geocode review actions in PostgreSQL', () => {
     expect(Number(savedReview.longitude)).toBe(PIN.longitude);
 
     const matching = await visit(visitIds.matching);
-    expect(matching).toMatchObject({ property_id: PRIMARY, service_address_line1: corrected.address_line1 });
+    expect(matching).toMatchObject({
+      property_id: PRIMARY, service_address_line1: corrected.address_line1,
+      zone: null, route_order: null, pre_service_brief: null,
+      pre_service_brief_type: null, pre_service_brief_generated_at: null,
+    });
     expect(Number(matching.lat)).toBe(Number(PIN.latitude.toFixed(6)));
-    for (const name of ['started', 'completed', 'frozen', 'divergent']) {
+    for (const name of ['started', 'completed', 'frozen', 'excluded', 'divergent']) {
       expect((await visit(visitIds[name])).lat).toBeNull();
     }
+    const recurringParent = await visit(visitIds.completed);
+    expect(recurringParent.service_address_line1).toBe(ADDRESS.address_line1);
+    expect(recurringParent.recurring_template_overrides.visit_count).toBe(4);
+    expect(recurringServiceAddress(recurringParent)).toMatchObject({
+      property_id: PRIMARY, service_address_line1: corrected.address_line1,
+      service_address_line2: null, lat: PIN.latitude, lng: PIN.longitude, zone: null,
+    });
     expect(Number((await visit(visitIds.individual)).lat)).toBe(27.4);
     for (const name of ['zeroLatitude', 'zeroLongitude', 'zeroBoth']) {
       expect(Number((await visit(visitIds[name])).lat)).toBe(Number(PIN.latitude.toFixed(6)));
@@ -185,6 +219,8 @@ postgres('customer geocode review actions in PostgreSQL', () => {
 
   test('revoke retains provenance while guarded-clearing only matching live primary pins', async () => {
     await verify();
+    await mockConnection('scheduled_services').whereIn('id', [visitIds.frozen, visitIds.excluded])
+      .update({ lat: PIN.latitude, lng: PIN.longitude });
     await resolveCustomerGeocodeReview(CUSTOMER, {
       revision: (await detail()).revision, action: 'revoke',
     }, ACTOR, mockConnection);
@@ -192,6 +228,8 @@ postgres('customer geocode review actions in PostgreSQL', () => {
     expect((await customer()).latitude).toBeNull();
     expect((await primary()).latitude).toBeNull();
     expect((await visit(visitIds.matching)).lat).toBeNull();
+    expect((await visit(visitIds.frozen)).lat).toBeNull();
+    expect((await visit(visitIds.excluded)).lat).toBeNull();
     expect(Number((await visit(visitIds.individual)).lat)).toBe(27.4);
     const saved = await review();
     expect(saved).toMatchObject({ status: 'needs_pin', reason: 'verification_revoked', reviewed_by: null });
@@ -210,6 +248,35 @@ postgres('customer geocode review actions in PostgreSQL', () => {
     expect((await primary()).address_line2).toBeNull();
   });
 
+  test('an omitted unit and unrelated customer fields are preserved while an address correction is applied', async () => {
+    const withUnit = { ...ADDRESS, address_line2: 'Unit 7' };
+    await mockConnection('customers').where({ id: CUSTOMER }).update({ address_line2: withUnit.address_line2 });
+    await mockConnection('customer_properties').where({ id: PRIMARY }).update({
+      address_line2: withUnit.address_line2, address_key: addressKey(withUnit),
+    });
+    await verify({ address: {
+      address_line1: '102 Fixture Way', city: ADDRESS.city, state: ADDRESS.state, zip: ADDRESS.zip,
+      first_name: 'Unexpected overwrite', deleted_at: new Date(),
+    } });
+
+    expect(await customer()).toMatchObject({
+      first_name: 'Synthetic', deleted_at: null, address_line1: '102 Fixture Way', address_line2: 'Unit 7',
+    });
+    expect(await primary()).toMatchObject({ address_line1: '102 Fixture Way', address_line2: 'Unit 7' });
+  });
+
+  test('a review lazily initializes a missing primary property under the customer lock', async () => {
+    await mockConnection('customer_properties').where({ id: PRIMARY }).del();
+    await resolveCustomerGeocodeReview(CUSTOMER, {
+      revision: (await detail()).revision, action: 'retry',
+    }, ACTOR, mockConnection);
+
+    const rows = await mockConnection('customer_properties')
+      .where({ customer_id: CUSTOMER, active: true, is_primary: true });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ ...ADDRESS, source: 'backfill' });
+  });
+
   test('a duplicate active property address is an operational conflict and rolls back verification', async () => {
     await expect(verify({ address: SECONDARY_ADDRESS })).rejects.toMatchObject({
       statusCode: 409, code: 'address_matches_existing_property', isOperational: true,
@@ -224,6 +291,8 @@ postgres('customer geocode review actions in PostgreSQL', () => {
     await mockConnection('customer_properties').where({ id: PRIMARY }).update(PIN);
     await mockConnection('scheduled_services').where({ id: visitIds.matching })
       .update({ lat: PIN.latitude, lng: PIN.longitude });
+    await mockConnection('scheduled_services').where({ id: visitIds.frozen })
+      .update({ lat: PIN.latitude, lng: PIN.longitude });
     await resolveCustomerGeocodeReview(CUSTOMER, {
       revision: (await detail()).revision, action: 'outside_service_area', source: 'county_records',
       evidence: 'Synthetic county boundary confirmation', confirmed: true,
@@ -232,6 +301,7 @@ postgres('customer geocode review actions in PostgreSQL', () => {
     expect((await customer()).latitude).toBeNull();
     expect((await primary()).latitude).toBeNull();
     expect((await visit(visitIds.matching)).lat).toBeNull();
+    expect((await visit(visitIds.frozen)).lat).toBeNull();
     const saved = await review();
     expect(saved).toMatchObject({ status: 'outside_area', reason: 'staff_confirmed_outside_area', reviewed_by: ACTOR });
     expect(Number(saved.latitude)).toBe(PIN.latitude);

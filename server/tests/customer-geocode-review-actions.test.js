@@ -169,6 +169,44 @@ test('verify releases a protected review before atomically saving address, pin, 
   expect(detail.revision).toBe('rev-2');
 });
 
+test('verify allowlists address fields, preserves an omitted unit and permits an explicit clear', async () => {
+  const preserved = fakeConnection();
+  await resolveCustomerGeocodeReview(customer.id, {
+    revision: 'rev-1', action: 'verify_pin',
+    address: {
+      address_line1: '101 Main St', city: 'Sarasota', state: 'FL', zip: '34236',
+      deleted_at: new Date('2026-09-01T00:00:00Z'), payer_id: 'unexpected',
+    },
+    latitude: 27.4, longitude: -82.4, source: 'site_visit', evidence: 'Marker observed', confirmed: true,
+  }, 'actor-1', preserved.conn);
+
+  expect(preserved.updates).toContainEqual(expect.objectContaining({
+    table: 'customers',
+    patch: expect.objectContaining({ address_line1: '101 Main St', latitude: 27.4, longitude: -82.4 }),
+  }));
+  const customerPatch = preserved.updates.find(update => update.table === 'customers').patch;
+  expect(customerPatch).not.toHaveProperty('address_line2');
+  expect(customerPatch).not.toHaveProperty('deleted_at');
+  expect(customerPatch).not.toHaveProperty('payer_id');
+  expect(customerProperties.syncPrimaryAddress).toHaveBeenCalledWith(
+    expect.objectContaining({ address_line2: 'Apt 4' }), preserved.conn, { explicitLine2: false },
+  );
+
+  jest.clearAllMocks();
+  reviewStore.reviewEnabled.mockReturnValue(true);
+  reviewStore.reviewRevision.mockReturnValue('rev-1');
+  reviewStore.getReviewDetail.mockResolvedValue({ revision: 'rev-2' });
+  const cleared = fakeConnection();
+  await resolveCustomerGeocodeReview(customer.id, {
+    revision: 'rev-1', action: 'verify_pin',
+    address: { address_line1: '101 Main St', address_line2: '', city: 'Sarasota', state: 'FL', zip: '34236' },
+    latitude: 27.4, longitude: -82.4, source: 'site_visit', evidence: 'Marker observed', confirmed: true,
+  }, 'actor-1', cleared.conn);
+  expect(customerProperties.syncPrimaryAddress).toHaveBeenCalledWith(
+    expect.objectContaining({ address_line2: null }), cleared.conn, { explicitLine2: true },
+  );
+});
+
 test('only the active-property address uniqueness conflict becomes an operational review conflict', async () => {
   const input = {
     revision: 'rev-1', action: 'verify_pin', latitude: 27.4, longitude: -82.4,
