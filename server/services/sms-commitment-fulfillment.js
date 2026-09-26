@@ -81,7 +81,9 @@ const VISIT_STATUSES = { schedule_visit: ['confirmed', 'rescheduled', 'en_route'
 // En Route tap, which proves nobody came.
 const MOVED_STATUSES = ['confirmed', 'rescheduled'];
 function visitStatusAdmits(record, kind) {
-  if (VISIT_STATUSES[kind].includes(record.status)) return true;
+  // admissibleWitness's witnessTypes gate already keeps visits from other
+  // kinds; the fallback keeps this helper total on its own.
+  if ((VISIT_STATUSES[kind] || []).includes(record.status)) return true;
   return ['other', 'callback'].includes(kind) && MOVED_STATUSES.includes(record.status) && !!record.moved_at;
 }
 
@@ -101,7 +103,15 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
     sms: excludeUnresolvedSendReservations(conn('sms_log').where({ customer_id: customerId, direction: 'outbound' }))
       .whereRaw("RIGHT(regexp_replace(to_phone, '[^0-9]', '', 'g'), 10) = ?", [phone(peer)])
       .where('created_at', '>', after).where('created_at', '<=', now).orderBy('created_at', 'desc').limit(LIMIT + 1)
-      .select('id', 'status', 'message_type', 'message_body', 'created_at'),
+      .select('id', 'status', 'message_type', 'message_body', 'created_at', 'from_phone',
+        conn.raw("(sms_log.metadata->>'providerAccepted') = 'true' as provider_accepted"),
+        // The visit an automated notice was about: the sender's metadata
+        // stamp, else the audit row for the same provider message (Codex
+        // #4816 r39). Null when neither links it.
+        conn.raw(`(SELECT v.property_id FROM scheduled_services v WHERE v.id::text = COALESCE(
+          sms_log.metadata->>'scheduled_service_id',
+          (SELECT a.appointment_id FROM messaging_audit_log a
+            WHERE sms_log.twilio_sid IS NOT NULL AND a.provider_message_id = sms_log.twilio_sid LIMIT 1))) as linked_property_id`)),
     call: conn('call_log').where({ customer_id: customerId, direction: 'outbound' })
       .modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b))
       .whereRaw("RIGHT(regexp_replace(to_phone, '[^0-9]', '', 'g'), 10) = ?", [phone(peer)])
@@ -220,6 +230,24 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
   return { records, failures };
 }
 
+// A push-only send stays 'sent' forever: its proof is the provider
+// acceptance the routing layer stamps (push-channel-routing.js). Codex
+// #4816 r39: customers on the app confirmation channel get the notice as
+// push, and it must answer the promise like a delivered text.
+function smsDelivered(record) {
+  return record.status === 'delivered' || (record.from_phone === 'push' && record.provider_accepted === true);
+}
+
+// An automated notice names a service and time, not a property. On a
+// property-scoped promise it counts only when its linked visit is at that
+// property; an unlinked notice cannot vouch for it (Codex #4816 r39).
+// Human texts stay with the model, which reads their words.
+function automatedNoticeInScope(record, commitment) {
+  const propertyId = commitment.sms_context?.property_id;
+  if (!propertyId || HUMAN_SMS_TYPES.includes(record.message_type)) return true;
+  return !!record.linked_property_id && String(record.linked_property_id) === String(propertyId);
+}
+
 function visitWitnessAt(record, commitment) {
   const after = new Date(commitment.sms_context?.source_at);
   // An "are you still coming" (other) or "call me back" (callback) ask is
@@ -288,8 +316,9 @@ function admissibleWitness(record, commitment, records = []) {
   const after = new Date(commitment.sms_context?.source_at);
   const deliveredEstimate = () => !!linkedEstimate(record, commitment, records) && new Date(record.sent_at) > after;
   const witnesses = {
-    sms: () => record.status === 'delivered'
-      && (SMS_TYPES[commitment.kind] || HUMAN_SMS_TYPES).includes(record.message_type),
+    sms: () => smsDelivered(record)
+      && (SMS_TYPES[commitment.kind] || HUMAN_SMS_TYPES).includes(record.message_type)
+      && automatedNoticeInScope(record, commitment),
     call: () => record.status === 'completed' && Number(record.duration_seconds) >= 60,
     // The SendGrid writer records an open or click as a timestamp without
     // moving status past 'sent'; engagement proves receipt even when the

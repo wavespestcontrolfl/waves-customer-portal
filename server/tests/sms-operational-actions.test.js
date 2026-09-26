@@ -731,7 +731,8 @@ describe('R5 owner ruling 2026-09-24: per-kind default deadlines', () => {
     'Call in 1-2 hours', 'Call me in a bit', 'Call in a few', 'Call me in about 2 hours', 'Give me like 20 mins then call',
     'Call me over the weekend', 'Anytime through the week', 'Sometime in the next few days', 'At the next visit please call',
     'Call me in a year', 'Contact me within 2 yrs', 'Check back next year', 'Follow up in 6 mos', 'Over the next 2 years please check in',
-    'Call early next year', 'Reach out by end of the year', 'Call me this month', 'Call me tomorrow, about the invoice'])(
+    'Call early next year', 'Reach out by end of the year', 'Call me this month', 'Call me tomorrow, about the invoice',
+    'Call me about the invoice. Tomorrow works', 'At the next visit please call about the bait'])(
     'Codex #4816 r20: timing stated in the quote keeps the row undated even when due_text is empty (%s)', (quote) => {
       expect(resolveDueDeadline({ party: 'waves', kind: 'callback', basis: 'request', due_at: null, due_text: null, quote }, at))
         .toEqual({ due_at: null, due_basis: null });
@@ -762,7 +763,8 @@ describe('R5 owner ruling 2026-09-24: per-kind default deadlines', () => {
     'The tech spent 2 hours here and it still failed, call me', 'Had ants all this year, please call',
     'Please call me about 2 years of invoices', 'The tech was here for like 2 hours and it failed; call me',
     "Please call me about this month's invoice", "Call me about tomorrow's appointment", "Can someone call about Friday's visit?",
-    "Call me about next week's service"])(
+    "Call me about next week's service", 'Please call me about my next visit', 'Can you call regarding the next appointment?',
+    'Call me about tomorrow and the treatment plan'])(
     'Codex #4816 r20: a quote with no stated timing still gets the per-kind default (%s)', (quote) => {
       expect(resolveDueDeadline({ party: 'waves', kind: 'callback', basis: 'request', due_at: null, due_text: null, quote }, at).due_basis)
         .toBe('default_kind');
@@ -834,6 +836,25 @@ describe('fulfillment proof', () => {
     for (const status of ['sent', 'failed', 'undelivered']) {
       expect(admissibleWitness({ ...record, status }, { kind: 'send_appointment_confirmation' })).toBe(false);
     }
+  });
+
+  test('Codex #4816 r39: a push-only confirmation the provider accepted answers the promise; an SMS left at sent does not', () => {
+    const push = { type: 'sms', status: 'sent', message_type: 'confirmation', from_phone: 'push', provider_accepted: true };
+    expect(admissibleWitness(push, { kind: 'send_appointment_confirmation' })).toBe(true);
+    expect(admissibleWitness({ ...push, provider_accepted: false }, { kind: 'send_appointment_confirmation' })).toBe(false);
+    expect(admissibleWitness({ ...push, from_phone: '+19415550100' }, { kind: 'send_appointment_confirmation' })).toBe(false);
+  });
+
+  test('Codex #4816 r39: on a property-scoped promise an automated notice counts only for a visit at that property', () => {
+    const scoped = { kind: 'send_appointment_confirmation', sms_context: { property_id: 'home' } };
+    const notice = { type: 'sms', status: 'delivered', message_type: 'appointment_rescheduled', linked_property_id: 'home' };
+    expect(admissibleWitness(notice, scoped)).toBe(true);
+    expect(admissibleWitness({ ...notice, linked_property_id: 'rental' }, scoped)).toBe(false);
+    // Unlinked: cannot vouch for the scoped property.
+    expect(admissibleWitness({ ...notice, linked_property_id: null }, scoped)).toBe(false);
+    // Unscoped promise, or a human-typed text (the model reads its words): unchanged.
+    expect(admissibleWitness({ ...notice, linked_property_id: null }, { kind: 'send_appointment_confirmation' })).toBe(true);
+    expect(admissibleWitness({ ...notice, message_type: 'manual', linked_property_id: null }, scoped)).toBe(true);
   });
 
   test('provider acceptance or a SENT label cannot close an answer before delivery succeeds', () => {

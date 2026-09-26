@@ -105,6 +105,18 @@ const TEMPORARY_INSTRUCTION = new RegExp([
 // the past, and a false match would drop a real follow-up's bell.
 const OFFSET_UNIT = String.raw`(?:secs?|seconds?|mins?|minutes?|hrs?|hours?|days?|weeks?|wks?|months?|mos?|years?|yrs?)`;
 const SPAN_UNIT = String.raw`(?:days?|weeks?|months?|years?)`;
+// What the customer asks ABOUT is the topic, not the deadline: "call me
+// about my next visit", "about this month's invoice", "regarding Friday's
+// service" (Codex #4816 r37–r39 kept finding one topical form per round).
+// The clause after about/regarding/concerning, up to the next punctuation,
+// is dropped before the timing test; "in/within/after/give me about 2
+// hours" is an offset, not a topic, and stays. Erring toward the default
+// deadline is the safe side: a missed bell is the worse failure.
+const TOPIC_CLAUSE = /(?<!\b(?:in|within|after|give me) )\b(?:about|regarding|concerning|re:|in regards? to|with regards? to)\s+[^,.;!?]*/gi;
+function withoutTopics(quote) {
+  return String(quote || '').replace(TOPIC_CLAUSE, ' ');
+}
+
 // A possessive period names the topic, not the deadline: "about this
 // month's invoice", "tomorrow's appointment", "Friday's visit" (Codex #4816
 // r38). NOT_POSSESSIVE follows each bare period form.
@@ -373,7 +385,7 @@ function resolveDueDeadline(item, messageCreatedAt) {
   // this obligation only when its own quote states a clock ("Call me at 3
   // and send the estimate" leaves the estimate its default — Codex #4816 r31).
   const unresolvedClock = item.timing_unverified && statesClock(item.quote);
-  if (item.due_text || unresolvedClock || STATED_TIMING.test(item.quote || '')) return { due_at: null, due_basis: null };
+  if (item.due_text || unresolvedClock || STATED_TIMING.test(withoutTopics(item.quote))) return { due_at: null, due_basis: null };
   const hours = item.basis === 'promise' ? PROMISE_DEFAULT_DEADLINE_HOURS : DEFAULT_DEADLINE_HOURS[item.kind];
   if (hours == null) return { due_at: null, due_basis: null };
   return { due_at: new Date(new Date(messageCreatedAt).getTime() + hours * 3600000).toISOString(), due_basis: 'default_kind' };
