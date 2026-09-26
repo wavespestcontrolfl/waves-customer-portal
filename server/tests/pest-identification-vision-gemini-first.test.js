@@ -193,6 +193,8 @@ describe('merging the ladder\'s results', () => {
   it('two different species of one group keep only the group, at low confidence', () => {
     const merged = mergeModelResults(OPENAI_ID, { ...GEMINI_ID, confidence: 'moderate' });
     expect(merged.agreement).toBe('group');
+    expect(merged.entry).toBeNull();
+    expect(merged.group).toBe('ants');
     expect(merged.confidence).toBe('low');
   });
 });

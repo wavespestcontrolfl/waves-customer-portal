@@ -563,11 +563,13 @@ function mergeModelResults(openai, gemini) {
       return { ...base, entry: a.match, confidence: lowerConfidenceOf(a.confidence, b.confidence), category: a.match.category, agreement: 'match' };
     }
     if (a.match && b.match) {
-      // Same group (e.g. two different ant species) keeps the group at reduced
-      // confidence; different groups entirely collapse to category-generic.
+      // Same group (e.g. two different ant species) keeps ONLY the group: no
+      // species entry, so neither disputed species' safety flags, urgency or
+      // service reach the report (Codex #4865 r1). Different groups entirely
+      // collapse to category-generic.
       if (a.match.group === b.match.group) {
-        const preferred = CONFIDENCE_RANK[a.confidence] >= CONFIDENCE_RANK[b.confidence] ? a.match : b.match;
-        return { ...base, entry: preferred, confidence: 'low', category: preferred.category, agreement: 'group' };
+        const category = a.match.category === b.match.category ? a.match.category : 'other';
+        return { ...base, entry: null, group: a.match.group, confidence: 'low', category, agreement: 'group' };
       }
       const category = a.category === b.category ? a.category : 'other';
       return { ...base, entry: null, confidence: 'low', category, agreement: 'conflict' };
@@ -612,8 +614,14 @@ function aggregateIdentification(perPhoto) {
   if (!votes.size) {
     const categories = perPhoto.map((r) => r.category);
     const notAPest = categories.every((c) => c === 'not_a_pest');
+    // A group survives only when every photo agrees on it (or showed nothing
+    // usable): two models that split on the species still agree it's an ant.
+    const groups = [...new Set(perPhoto.map((r) => r.group).filter(Boolean))];
+    const group = groups.length === 1 && perPhoto.every((r) => r.group === groups[0] || r.category === 'other')
+      ? groups[0] : null;
     return {
       entry: null,
+      group,
       confidence: 'low',
       category: notAPest ? 'not_a_pest' : (categories.find((c) => c !== 'other') || 'other'),
       contested: false,
@@ -624,7 +632,8 @@ function aggregateIdentification(perPhoto) {
   const winner = ranked[0];
   const unmatched = perPhoto.filter((result) => !result.entry);
   const contradicting = unmatched.some((result) => result.category === 'not_a_pest'
-    || (result.category !== 'other' && result.category !== winner.entry.category));
+    || (result.category !== 'other' && result.category !== winner.entry.category)
+    || (result.group && result.group !== winner.entry.group));
   const inconclusive = unmatched.length > 0 && !contradicting;
   const contested = ranked.length > 1 || contradicting;
   return {
@@ -687,7 +696,7 @@ function buildPestReportContract(result) {
     identification: {
       slug: item ? item.slug : null,
       label: item ? item.label : null,
-      group: item ? item.group : null,
+      group: item ? item.group : (identification.group || null),
       category: identification.category,
       confidence: identification.confidence,
       contested: !!identification.contested,
@@ -721,7 +730,7 @@ function publicIdentificationLabel(contract) {
   const ident = (contract && contract.identification) || {};
   const item = ident.slug ? LIBRARY_BY_SLUG.get(ident.slug) : null;
   if (!item) {
-    return { label: CATEGORY_GENERIC[ident.category] || CATEGORY_GENERIC.other, hedged: true, specificity: 'generic' };
+    return { label: GROUP_GENERIC[ident.group] || CATEGORY_GENERIC[ident.category] || CATEGORY_GENERIC.other, hedged: true, specificity: 'generic' };
   }
   // Conflicting cross-photo IDs never name a species, whatever the confidence.
   if (ident.contested) {
@@ -824,7 +833,7 @@ function buildPestTeaser(contract = {}) {
   const category = clampEnum(ident.category, CATEGORIES, 'other');
   const generic = item
     ? (GROUP_GENERIC[item.group] || CATEGORY_GENERIC[item.category])
-    : (CATEGORY_GENERIC[category] || CATEGORY_GENERIC.other);
+    : (GROUP_GENERIC[ident.group] || CATEGORY_GENERIC[category] || CATEGORY_GENERIC.other);
   return {
     identified_teaser: `We identified ${generic}.`,
     identified_specific: Boolean(item && ident.confidence !== 'low'),

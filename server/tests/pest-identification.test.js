@@ -66,11 +66,42 @@ describe('mergeModelResults', () => {
     expect(merged.agreement).toBe('match');
   });
 
-  test('same-group disagreement keeps the group at low confidence', () => {
+  test('same-group disagreement keeps ONLY the group at low confidence, no species entry', () => {
     const merged = mergeModelResults(claude(), claude({ best_match: 'fire ant' }));
-    expect(merged.entry.group).toBe('ants');
+    expect(merged.entry).toBeNull();
+    expect(merged.group).toBe('ants');
+    expect(merged.category).toBe('insect');
     expect(merged.confidence).toBe('low');
     expect(merged.agreement).toBe('group');
+  });
+
+  // Codex #4865 r1: a ghost-ant/fire-ant split between Gemini and OpenAI must
+  // not publish either species' safety flags, urgency or service.
+  test('a same-group split reaches egress as the group only, with no disputed species facts', () => {
+    const merged = mergeModelResults(claude({ confidence: 'moderate' }), claude({ best_match: 'fire ant', confidence: 'high' }));
+    const contract = buildPestReportContract({ ...merged, identification: _test.aggregateIdentification([merged]) });
+    expect(contract.identification).toMatchObject({ slug: null, group: 'ants', category: 'insect', confidence: 'low' });
+    expect(contract.safety).toEqual({ stinging: false, venomous: false, disease_vector: false, structural_threat: false });
+    expect(contract.urgency).toBe('low');
+    expect(contract.service).toMatchObject({ key: null, inspection_required: true });
+    expect(publicIdentificationLabel(contract)).toEqual({ label: 'an ant species', hedged: true, specificity: 'generic' });
+    expect(buildPestTeaser(contract)).toMatchObject({ identified_teaser: 'We identified an ant species.', identified_specific: false, safety_flag: false });
+  });
+
+  test('a group survives cross-photo aggregation only when every photo agrees on it', () => {
+    const split = mergeModelResults(claude(), claude({ best_match: 'fire ant' }));
+    const blurry = { entry: null, group: undefined, confidence: 'low', category: 'other' };
+    const roachSplit = mergeModelResults(claude({ best_match: 'american cockroach' }), claude({ best_match: 'german cockroach' }));
+    expect(_test.aggregateIdentification([split, blurry]).group).toBe('ants');
+    expect(_test.aggregateIdentification([split, roachSplit]).group).toBeNull();
+  });
+
+  test('a group-only photo from another group disputes a species winner', () => {
+    const ghost = mergeModelResults(null, claude());
+    const roachSplit = mergeModelResults(claude({ best_match: 'american cockroach' }), claude({ best_match: 'german cockroach' }));
+    const antSplit = mergeModelResults(claude(), claude({ best_match: 'fire ant' }));
+    expect(_test.aggregateIdentification([ghost, roachSplit]).contested).toBe(true);
+    expect(_test.aggregateIdentification([ghost, antSplit])).toMatchObject({ contested: false, confidence: 'moderate' });
   });
 
   test('cross-group disagreement collapses to category-generic', () => {
