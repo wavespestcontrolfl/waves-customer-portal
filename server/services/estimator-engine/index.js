@@ -2664,8 +2664,12 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
               businessNameHint: null,
               commercialRiskType: intent.commercial_risk_type || null,
               // Intent wins when present; else the lookup's county-derived
-              // subtype, so a medical suite keeps its default.
-              commercialSubtype: intent.commercial_subtype || effectiveSignals.enriched?.commercialSubtype || null,
+              // subtype, so a medical suite keeps its default — but only
+              // when the lookup describes the gathered address (a wrong-
+              // premise lookup's subtype belongs to another parcel).
+              commercialSubtype: intent.commercial_subtype
+                || (effectiveParcelOk ? effectiveSignals.enriched?.commercialSubtype : null)
+                || null,
             });
             if (suiteSize && Number(suiteSize.value) > 0) {
               propertyFacts.home = {

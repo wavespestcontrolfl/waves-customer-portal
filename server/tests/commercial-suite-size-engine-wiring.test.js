@@ -165,8 +165,8 @@ describe('engine resolves the suite size itself, with the call context', () => {
     expect(block).toMatch(/businessNameHint:\s*null,/);
     expect(block).not.toMatch(/businessNameHint:\s*intent\.customer_name/);
   });
-  test('falls back to the lookup commercialSubtype when the intent has none', () => {
-    expect(block).toMatch(/commercialSubtype: intent\.commercial_subtype \|\| effectiveSignals\.enriched\?\.commercialSubtype \|\| null/);
+  test('falls back to the lookup commercialSubtype only when the lookup describes the gathered address', () => {
+    expect(block).toMatch(/commercialSubtype: intent\.commercial_subtype\s*\|\| \(effectiveParcelOk \? effectiveSignals\.enriched\?\.commercialSubtype : null\)\s*\|\| null/);
   });
 });
 
