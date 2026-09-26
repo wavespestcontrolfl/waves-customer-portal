@@ -18,6 +18,223 @@ function mondayThisWeek() { return etWeekStart(); }
 
 const { DRAFT_REPLY_PREFIX, whereNeedsRealReply: whereNeedsRealReviewReply } = require('./review-reply/draft-prefix');
 const { getExperimentResultsSummary } = require('./intelligence-bar/growthbook-tools');
+const { SNAPSHOT_METRICS, toFiniteOrNull } = require('./kpi-snapshot');
+const { DEFAULT_KPI_TARGETS, kpiTargetTone } = require('../../shared/kpi-targets.cjs');
+
+// Ops KPIs for the Weekly BI Briefing: last 7 days vs a rolling 30-day
+// baseline vs the owner's kpi_targets — the SAME metrics, accessor paths
+// (SNAPSHOT_METRICS), defaults, and tone rule (shared/kpi-targets.cjs) the
+// /admin dashboard tiles use, so the SMS can never disagree with a tile.
+const OPERATIONS_KPI_KEYS = [
+  'completion_rate', 'callback_rate', 'response_speed_min', 'lead_conversion',
+  'stops_per_hour', 'revenue_per_man_hour', 'gross_margin', 'ar_days',
+  'retention_pct', 'collection_rate',
+];
+const OPERATIONS_KPI_LABELS = {
+  completion_rate: 'Completion rate (%)',
+  callback_rate: 'Callback rate (%)',
+  response_speed_min: 'Response speed (min)',
+  lead_conversion: 'Lead conversion (%)',
+  stops_per_hour: 'Stops per hour',
+  revenue_per_man_hour: 'Revenue per man-hour ($)',
+  gross_margin: 'Gross margin (%)',
+  ar_days: 'AR days',
+  retention_pct: 'Retention (%)',
+  collection_rate: 'Collection rate (%)',
+};
+const SNAPSHOT_GETTERS_BY_METRIC = new Map(SNAPSHOT_METRICS);
+
+// Window classification: does the metric's value actually depend on the
+// requested computeCoreKpis period start, or is it a current-state snapshot
+// that reads the same regardless of period? (Codex P1, bi-agent-tools.js:239
+// pre-fix — ar.days is computed over ALL currently-unpaid invoices with no
+// period filter at all: routes/admin-dashboard.js's arAgg query never
+// references `start`, so last_7 and last_30 always return the identical
+// number.) Every other metric's underlying query DOES filter on `start`
+// (scheduled_date/service_date/first_contact_at/issueDateET/member_since —
+// see routes/admin-dashboard.js computeCoreKpis), so they get a real rolling
+// last7-vs-last30 comparison. retention_pct is its own 'cohort' window: the
+// cohort is bounded by `CONVERSION_DATE_SQL < start`, but "still active" is
+// read from customer state TODAY, so range.to never closes it and it must not
+// be worded as ending yesterday (Codex P1, bi-agent-tools.js:69). A 'current'
+// metric is reported once, "as of today", with no fabricated 30-day baseline.
+const OPERATIONS_KPI_WINDOW = {
+  completion_rate: 'rolling',
+  callback_rate: 'rolling',
+  response_speed_min: 'rolling',
+  lead_conversion: 'rolling',
+  stops_per_hour: 'rolling',
+  revenue_per_man_hour: 'rolling',
+  gross_margin: 'rolling',
+  ar_days: 'current',
+  retention_pct: 'cohort',
+  collection_rate: 'rolling',
+};
+
+// Below this many issued invoices, collection_rate is noise, not a verdict —
+// mirrors the dashboard tile's own small-N fade (client/src/pages/admin/
+// dashboard/KpiTile.jsx MIN_CONFIDENT_N = 5, fed by CashSection.jsx's
+// `n={kpis.billing?.issuedCount}`). Codex P2 (bi-agent-tools.js:111): with 1-4
+// issued invoices this graded collection_rate normally and let buildOpsLine
+// report it as a target miss, displacing a meaningful outlier — the dashboard
+// never lets that happen. Keep this in sync with KpiTile's MIN_CONFIDENT_N.
+const MIN_CONFIDENT_ISSUED_INVOICES = 5;
+
+// Ops KPI targets: a kpi_targets row wins over DEFAULT_KPI_TARGETS, same
+// precedence as the client's resolveTargetDef — but read here directly since
+// resolveTargetDef itself stays client-only. A failed table read degrades to
+// the defaults, exactly as the dashboard does when its /admin/kpi-targets
+// fetch fails, so the briefing's tone still matches the tiles.
+async function loadOperationsKpiTargets() {
+  try {
+    const rows = await db('kpi_targets').select('metric', 'target', 'amber_band_pct', 'lower_is_better');
+    const byMetric = {};
+    for (const r of rows) {
+      byMetric[r.metric] = {
+        target: parseFloat(r.target),
+        lowerIsBetter: !!r.lower_is_better,
+        amberBandPct: r.amber_band_pct == null ? 10 : parseFloat(r.amber_band_pct),
+      };
+    }
+    return byMetric;
+  } catch (err) {
+    logger.warn(`[bi-agent] kpi_targets read failed, ops KPIs fall back to the default targets: ${err.message}`);
+    return {};
+  }
+}
+
+function buildKpiRow(metric, { last7, last30, storeTargets, n = null }) {
+  const window = OPERATIONS_KPI_WINDOW[metric] || 'rolling';
+  const def = storeTargets[metric] || DEFAULT_KPI_TARGETS[metric] || null;
+  // `n` is only wired up for collection_rate today (its issued-invoice count);
+  // every other metric passes null and lowSample is always false for them.
+  const lowSample = n != null && Number.isFinite(Number(n)) && Number(n) < MIN_CONFIDENT_ISSUED_INVOICES;
+  return {
+    metric,
+    label: OPERATIONS_KPI_LABELS[metric],
+    last7,
+    // A 'current' metric (ar_days) is a single live snapshot — computeCoreKpis
+    // has no period filter for it at all, so last_7 and last_30 would always
+    // be the identical number. Reporting that as a "baseline" would fabricate
+    // a comparison that never happened. null makes the absence explicit.
+    last30: window === 'current' ? null : last30,
+    n,
+    target: def?.target ?? null,
+    lowerIsBetter: def?.lowerIsBetter ?? null,
+    // A too-small sample never paints a verdict — same rule as the dashboard
+    // tile (KpiTile.jsx lowConfidence) — withheld here rather than graded and
+    // then displayed faded, since the SMS/report have no "faded tile" concept.
+    tone: lowSample ? null : (def ? kpiTargetTone(last7, def) : null),
+    lowSample,
+    window,
+  };
+}
+
+async function buildOperationsKpis() {
+  // Lazy require (like the forecast-analyzer require below) — admin-dashboard.js
+  // is a large route module and this tool needs only the one already-exported
+  // computeCoreKpis accessor, not a load-time dependency on it.
+  const { computeCoreKpis } = require('../routes/admin-dashboard');
+  // Windows END YESTERDAY (ET), not today (Codex P1, bi-agent-tools.js:121).
+  // The briefing runs Monday 05:00 ET (scheduler.js); computeCoreKpis's default
+  // "ends today" window would put Monday's not-yet-run appointments into
+  // completion_rate's denominator as an incomplete before the day's work has
+  // even started, producing a false completion miss every single week. Passing
+  // an explicit range.to = yesterday closes every window the day before this
+  // runs, so a run that happens to land LATER than 05:00 ET still reports the
+  // same numbers a 05:00 run would have.
+  const yesterday = daysAgo(1);
+  const [k7, k30, storeTargets] = await Promise.all([
+    computeCoreKpis('last_7', { from: daysAgo(7), to: yesterday }),
+    computeCoreKpis('last_30', { from: daysAgo(30), to: yesterday }),
+    loadOperationsKpiTargets(),
+  ]);
+  return OPERATIONS_KPI_KEYS.map((metric) => {
+    const getter = SNAPSHOT_GETTERS_BY_METRIC.get(metric);
+    const last7 = getter ? toFiniteOrNull(getter(k7)) : null;
+    const last30 = getter ? toFiniteOrNull(getter(k30)) : null;
+    // The 7-day issued-invoice count backs collection_rate's small-sample
+    // fade (see MIN_CONFIDENT_ISSUED_INVOICES) — null for every other metric.
+    // Only a query that ran supplies a count: a failed collection query leaves
+    // issuedCount at 0, which is an outage, not a small sample, so n stays
+    // null and the metric reads as unavailable (pre-push audit P1).
+    const n = metric === 'collection_rate' && !k7?.billing?.collectionFailed
+      ? toFiniteOrNull(k7?.billing?.issuedCount)
+      : null;
+    return buildKpiRow(metric, { last7, last30, storeTargets, n });
+  });
+}
+
+// Short label + display formatter per metric for the deterministic "Ops 7d"
+// SMS line (Codex P1, bi-agent-config.js:34 — an LLM-composed line satisfied
+// "no bad/warn -> all on target" even when the underlying computation failed
+// or returned nulls). Values are pre-rounded upstream; roundOne just clamps
+// display to 1 decimal (an already-whole number prints with none: 78, not
+// 78.0, because 78.0 === 78 as a JS Number).
+function roundOne(v) {
+  return Math.round(Number(v) * 10) / 10;
+}
+const OPS_LINE_METRIC_META = {
+  completion_rate: { short: 'completion', fmt: (v) => `${roundOne(v)}%` },
+  callback_rate: { short: 'callbacks', fmt: (v) => `${roundOne(v)}%` },
+  response_speed_min: { short: 'resp', fmt: (v) => `${roundOne(v)}m` },
+  lead_conversion: { short: 'conversion', fmt: (v) => `${roundOne(v)}%` },
+  stops_per_hour: { short: 'stops/hr', fmt: (v) => `${roundOne(v)}` },
+  revenue_per_man_hour: { short: 'rev/hr', fmt: (v) => `$${roundOne(v)}` },
+  gross_margin: { short: 'margin', fmt: (v) => `${roundOne(v)}%` },
+  ar_days: { short: 'AR days', fmt: (v) => `${roundOne(v)}d` },
+  retention_pct: { short: 'retention', fmt: (v) => `${roundOne(v)}%` },
+  collection_rate: { short: 'collections', fmt: (v) => `${roundOne(v)}%` },
+};
+
+// Deterministic "Ops 7d: ..." SMS line — the model copies this verbatim
+// (bi-agent-config.js) instead of composing it, so a computation failure or a
+// null value can never be reported as "all on target". `window` ('current'
+// vs 'rolling') doesn't change the on/off-target logic here — ar_days is
+// graded against its target exactly like any rolling metric.
+function buildOpsLine(kpis) {
+  // "Targeted" = has a resolvable target (store row or DEFAULT_KPI_TARGETS)
+  // AND a big enough sample to grade; an untargeted metric (e.g. stops_per_hour
+  // with no store row) or a lowSample one (collection_rate under
+  // MIN_CONFIDENT_ISSUED_INVOICES) is neither on-target nor unavailable —
+  // there's nothing to grade it against, so it's silently withheld rather
+  // than landing in the "; n/a: ..." bucket that's reserved for a real
+  // computation failure.
+  const targeted = kpis.filter((k) => k.target != null && !k.lowSample && OPS_LINE_METRIC_META[k.metric]);
+  if (targeted.length === 0) return 'Ops 7d: no targets set';
+
+  // Unavailable = has a target but no usable value (null last7, or a null
+  // tone — a computeCoreKpis failure, an empty window, or a partial query
+  // failure all land here). Never reported as "on target".
+  const unavailable = targeted.filter((k) => k.last7 == null || k.tone == null);
+  if (unavailable.length === targeted.length) return 'Ops 7d: KPIs unavailable';
+
+  const offTarget = targeted.filter((k) => k.tone === 'bad' || k.tone === 'warn');
+  offTarget.sort((a, b) => {
+    if (a.tone !== b.tone) return a.tone === 'bad' ? -1 : 1; // bad before warn
+    const missRatio = (k) => {
+      const t = Number(k.target);
+      return t !== 0 ? Math.abs(k.last7 - t) / Math.abs(t) : Math.abs(k.last7 - t);
+    };
+    return missRatio(b) - missRatio(a); // larger relative miss first
+  });
+
+  const top = offTarget.slice(0, 4).map((k) => {
+    const meta = OPS_LINE_METRIC_META[k.metric];
+    return `${meta.short} ${meta.fmt(k.last7)} (tgt ${meta.fmt(k.target)})`;
+  });
+
+  // "all on target" only when every targeted metric was graded 'good'; with
+  // an unavailable metric the claim narrows to "rest on target" and the
+  // "; n/a: ..." suffix names what could not be graded.
+  const onTarget = unavailable.length > 0 ? 'rest on target' : 'all on target';
+  let line = `Ops 7d: ${top.length > 0 ? top.join(', ') : onTarget}`;
+  if (unavailable.length > 0) {
+    const names = unavailable.map((k) => OPS_LINE_METRIC_META[k.metric].short);
+    line += `; n/a: ${names.join(', ')}`;
+  }
+  return line;
+}
 
 async function executeBITool(toolName, input) {
   switch (toolName) {
@@ -138,6 +355,27 @@ async function executeBITool(toolName, input) {
       const total = parseInt(weekServices?.total || 0);
       const completed = parseInt(weekServices?.completed || 0);
 
+      // Ops KPIs: 7 days ending yesterday vs a rolling 30-day baseline ending
+      // yesterday (or, for a 'current'-window metric like ar_days, a single
+      // live snapshot) vs owner targets. Windows end YESTERDAY (ET), not
+      // today — this briefing runs Monday morning, and a window ending today
+      // would count Monday's not-yet-run appointments as incomplete before
+      // the day's work has even started (see buildOperationsKpis). computeCoreKpis
+      // has no historical-window replay, so this is still a rolling "as of
+      // yesterday" comparison — never described as "last week vs the week
+      // before" (see kpiWindow below). A computation failure still resolves
+      // targets (independent of computeCoreKpis) so every targeted metric
+      // reads as UNAVAILABLE, never as "all on target".
+      let kpis = [];
+      try {
+        kpis = await buildOperationsKpis();
+      } catch (err) {
+        logger.warn(`[bi-agent] operations KPI computation failed: ${err.message}`);
+        const storeTargets = await loadOperationsKpiTargets();
+        kpis = OPERATIONS_KPI_KEYS.map((metric) => buildKpiRow(metric, { last7: null, last30: null, storeTargets }));
+      }
+      const opsLine = buildOpsLine(kpis);
+
       return {
         servicesThisWeek: total,
         completedThisWeek: completed,
@@ -146,6 +384,14 @@ async function executeBITool(toolName, input) {
         unassigned: parseInt(unassigned?.count || 0),
         tomorrowRescheduleCount: tomorrowForecast?.needsReschedule?.length || 0,
         tomorrowWeather: tomorrowForecast?.needsReschedule?.length > 0 ? 'Weather impact expected' : 'Clear',
+        kpis,
+        opsLine,
+        kpiWindow: {
+          last7: '7 days ending yesterday (ET)',
+          baseline: '30 days ending yesterday (ET)',
+          current: 'a live snapshot as of today (ET) — no 30-day baseline (e.g. AR days)',
+          cohort: 'customers who joined before the 7- / 30-day window began, counted as still active if they are active today (ET) (e.g. retention)',
+        },
       };
     }
 
@@ -423,6 +669,13 @@ async function executeBITool(toolName, input) {
     }
 
     case 'save_weekly_report': {
+      // The operations_section carries the ops KPI table (Codex P2,
+      // bi-agent-config.js:151) — reject a missing/blank value instead of
+      // silently saving a report with no ops record. Checked before the
+      // insert so a bad call never creates a partial row.
+      if (!input.operations_section || !String(input.operations_section).trim()) {
+        return { error: 'operations_section is required', validationError: true };
+      }
       const [report] = await db('weekly_bi_reports').insert({
         summary: input.summary,
         revenue_section: input.revenue_section,
