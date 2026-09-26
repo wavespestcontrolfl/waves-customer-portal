@@ -51,22 +51,27 @@ afterEach(() => {
 
 describe('ProjectReportViewPage theme gate', () => {
   it('WDO inspection reports render as the paper document (no glass scene)', async () => {
-    const { findAllByText } = renderProjectReport(payload('wdo_inspection'));
+    const { findAllByText, queryByRole } = renderProjectReport(payload('wdo_inspection'));
     await findAllByText(/wdo inspection/i);
     expect(document.documentElement).not.toHaveAttribute('data-glass-theme');
+    expect(queryByRole('region', { name: 'Share feedback' })).not.toBeInTheDocument();
   });
 
   it('the pre-construction certificate stays the paper document', async () => {
-    const { findAllByText } = renderProjectReport(payload('pre_treatment_termite_certificate'));
+    const { findAllByText, queryByRole } = renderProjectReport(payload('pre_treatment_termite_certificate'));
     await findAllByText(/Certificate of Compliance/i);
     expect(document.documentElement).not.toHaveAttribute('data-glass-theme');
+    expect(queryByRole('region', { name: 'Share feedback' })).not.toBeInTheDocument();
   });
 
   it('a regular termite treatment report keeps the glass theme', async () => {
-    renderProjectReport(payload('termite_treatment'));
+    const { findByRole } = renderProjectReport(payload('termite_treatment'));
     await waitFor(() => {
       expect(document.documentElement).toHaveAttribute('data-glass-theme');
     });
+    expect(await findByRole('heading', { level: 3, name: "How did today's visit go?" })).toBeInTheDocument();
+    expect(await findByRole('region', { name: 'Share feedback' }))
+      .toHaveAttribute('data-section', 'review-request-project');
   });
 });
 

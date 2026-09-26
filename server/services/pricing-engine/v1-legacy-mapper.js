@@ -59,7 +59,18 @@ const effectiveOneTimePrice = (li = {}) => {
   );
 };
 
-const TREE_SHRUB_LEGACY_TIERS = ['light', 'standard', 'enhanced'];
+// Light (4x/quarterly) is retired for new sales (owner directive 2026-09-24:
+// "remove quarterly tree and shrub care from the estimates and services") —
+// dropped from this ladder entirely, mirroring how LAWN_TIERS.standard.hidden
+// drops 6x from priceLawnCare's `tiers` array (which R.lawn reads directly
+// above; T&S has no equivalent array on priceTreeShrub's single-tier output,
+// so this file builds its own ladder and needs its own filter). A stored
+// estimate that still selects 'light' falls back to 'standard' here on
+// replay — same as a reopened 6x lawn estimate defaults to enhanced — and
+// the retired-cadence requote gate (estimate-public.js) is what actually
+// protects accept, not this preview ladder. priceTreeShrub itself still
+// prices 'light' correctly when called explicitly (grandfathered plans).
+const TREE_SHRUB_LEGACY_TIERS = ['standard', 'enhanced'];
 
 function treeShrubTierLabel(tier) {
   if (tier === 'light') return 'Light';
@@ -132,13 +143,24 @@ function roundedTreeShrubTierQuote(v1Result = {}, tsLI = {}, tier = 'standard') 
 }
 
 function treeShrubLegacyTierRows(v1Result = {}, tsLI = {}) {
-  const selectedTier = TREE_SHRUB_LEGACY_TIERS.includes(tsLI.tier) ? tsLI.tier : 'standard';
+  // priceableTier is the tier tsLI's raw pa/v/ann/mo fields ACTUALLY price —
+  // only true when tsLI.tier is still on this (now standard/enhanced-only)
+  // ladder. selectedTier is the DISPLAY fallback when it isn't (a replayed
+  // grandfathered Light line: tsLI.tier === 'light', frequency 4, priced at
+  // Light's rate) — it must NEVER also gate reusing tsLI's raw fields, or a
+  // Light-priced replay would render as a "Standard" row still carrying 4
+  // visits and Light's (lower) dollars under the Standard label (codex P1
+  // pre-push). Falling back to 'standard' for the SELECTED flag alone
+  // mirrors the lawn ladder's "no matching option" precedent; every row's
+  // PRICE is always freshly computed for its own tier either way.
+  const priceableTier = TREE_SHRUB_LEGACY_TIERS.includes(tsLI.tier) ? tsLI.tier : null;
+  const selectedTier = priceableTier || 'standard';
   const recommendedTier = TREE_SHRUB_LEGACY_TIERS.includes(tsLI.recommendedTier)
     ? tsLI.recommendedTier
     : (tsLI.recommended ? selectedTier : selectedTier);
 
   return TREE_SHRUB_LEGACY_TIERS.map((tier) => {
-    const values = tier === selectedTier
+    const values = tier === priceableTier
       ? {
           pa: tsLI.perApp,
           v: tsLI.frequency,
@@ -1452,4 +1474,4 @@ function estimateDataCarriesBermudaSuppression(estimateDataRaw) {
     || !!d.result?.lawnMeta?.bermudaSuppression;
 }
 
-module.exports = { mapV1ToLegacyShape, estimateDataCarriesBermudaSuppression };
+module.exports = { mapV1ToLegacyShape, estimateDataCarriesBermudaSuppression, treeShrubLegacyTierRows };

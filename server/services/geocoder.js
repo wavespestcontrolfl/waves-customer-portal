@@ -198,9 +198,11 @@ async function ensureCustomerGeocoded(customerId) {
  * them with coordinates for the obsolete address). A raced write is a no-op;
  * the sweep re-geocodes the survivor address later. The customer write and
  * the primary-property coord mirror share one transaction (repo convention
- * for every re-geocode path).
+ * for every re-geocode path). A bulk caller may pass a Set through
+ * scheduleQualityCustomerIds to collect successful coordinate commits and
+ * coalesce route-quality refreshes after those commits.
  */
-async function regeocodeCustomerAddressGuarded(customerId) {
+async function regeocodeCustomerAddressGuarded(customerId, { scheduleQualityCustomerIds = null } = {}) {
   const c = await db('customers').where({ id: customerId }).first();
   if (!c) return null;
   // Locality-only rows never geocode (round-10): with no street the
@@ -218,7 +220,10 @@ async function regeocodeCustomerAddressGuarded(customerId) {
     }
     return count;
   });
-  if (written) await require('./scheduling/quality-after-change').refreshScheduleQualityAfterChange({ customerIds: [customerId] });
+  if (written) {
+    if (scheduleQualityCustomerIds) scheduleQualityCustomerIds.add(customerId);
+    else await require('./scheduling/quality-after-change').refreshScheduleQualityAfterChange({ customerIds: [customerId] });
+  }
   return written ? result : null;
 }
 

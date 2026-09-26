@@ -136,8 +136,8 @@ describe('combined visit booking capacity', () => {
   test.each([
     ['lawn_care', 'lawn', 'enhanced', 9],
     ['lawn_care', 'lawn', 'premium', 12],
-    ['tree_shrub', 'ts', 'light', 4],
     ['tree_shrub', 'ts', 'standard', 6],
+    ['tree_shrub', 'ts', 'enhanced', 9],
   ])('the selected %s %s tier %s overrides stored cadence before capacity validation', (service, resultKey, tier, visits) => {
     process.env.GATE_VISIT_COMBINED_CAPACITY = 'true';
     const estimate = estimateFor(['pest_control', service]);
@@ -173,6 +173,24 @@ describe('combined visit booking capacity', () => {
     ] };
     expect(() => resolveEstimateSlotProfile(estimate, {
       selectedFrequency: 'quarterly', serviceCadences: { lawn_care: 'standard' },
+    })).toThrow(expect.objectContaining({ code: 'COMBINED_VISIT_UNAVAILABLE' }));
+  });
+
+  test('a tree & shrub light (4x/quarterly) selection is no longer offered and is refused before capacity validation', () => {
+    // light/4x is retired for new sales (owner directive 2026-09-24: stop
+    // offering quarterly tree & shrub care): the offered T&S ladder drops
+    // it, so a stale/crafted selection cannot pick it — the same refusal
+    // any unoffered tier key gets (mirrors the lawn standard/6x case above).
+    process.env.GATE_VISIT_COMBINED_CAPACITY = 'true';
+    const estimate = estimateFor(['pest_control', 'tree_shrub']);
+    estimate.estimate_data.result.recurring.services[1].visitsPerYear = 9;
+    estimate.estimate_data.result.results = { ts: [
+      { name: 'Light', v: 4, mo: 40, ann: 480, pa: 120 },
+      { name: 'Standard', v: 6, mo: 60, ann: 720, pa: 120 },
+      { name: 'Enhanced', v: 9, mo: 90, ann: 1080, pa: 120 },
+    ] };
+    expect(() => resolveEstimateSlotProfile(estimate, {
+      selectedFrequency: 'quarterly', serviceCadences: { tree_shrub: 'light' },
     })).toThrow(expect.objectContaining({ code: 'COMBINED_VISIT_UNAVAILABLE' }));
   });
 

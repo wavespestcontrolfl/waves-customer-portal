@@ -34,8 +34,10 @@ function tsInput(overrides = {}) {
 const tsAnnual = (input) => {
   const rows = calculateEstimate(input)?.results?.ts;
   expect(Array.isArray(rows) && rows.length).toBeTruthy();
-  // Standard (6x) row — index 1 is the engine's recommended standard tier.
-  return rows[1].ann;
+  // Standard (6x) row — Light (4x/quarterly) is retired for new sales
+  // (owner directive 2026-09-24) and no longer on this ladder, so Standard
+  // is index 0, found by its `recommended` flag rather than a fixed index.
+  return rows.find((t) => t.recommended).ann;
 };
 
 describe("tree & shrub lot-derived bed area — server parity", () => {

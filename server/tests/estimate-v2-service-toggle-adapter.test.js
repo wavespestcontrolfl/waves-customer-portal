@@ -288,7 +288,7 @@ describe('estimate v2 service toggle adapter', () => {
     expect(mosquito.detail).toContain('4 Bti dunk tablets (+$16/yr)');
   });
 
-  test('persists both tree and shrub tiers for the public estimate slider', () => {
+  test('persists the sold tree & shrub tiers for the public estimate slider (Light/4x retired 2026-09-24)', () => {
     const input = translateV2CallToV1Input(
       {
         ...baseProfile(),
@@ -302,15 +302,11 @@ describe('estimate v2 service toggle adapter', () => {
 
     const mapped = mapV1ToLegacyShape(generateEstimate(input));
 
-    expect(mapped.results.ts.map((row) => row.name)).toEqual(['Light', 'Standard', 'Enhanced']);
+    // Light (4x/quarterly) is retired for new sales — dropped from this
+    // ladder entirely, same as the 6x lawn tier's retirement dropped it from
+    // R.lawn. Only Standard (mandated default) and Enhanced (upsell) remain.
+    expect(mapped.results.ts.map((row) => row.name)).toEqual(['Standard', 'Enhanced']);
     expect(mapped.results.ts).toEqual([
-      expect.objectContaining({
-        name: 'Light',
-        tier: 'light',
-        selected: false,
-        isSelected: false,
-        v: 4,
-      }),
       expect.objectContaining({
         name: 'Standard',
         tier: 'standard',
@@ -327,10 +323,8 @@ describe('estimate v2 service toggle adapter', () => {
         v: 9,
       }),
     ]);
-    // Standard (6x, mandated default) outprices the Light 4x downsell, and
-    // the Enhanced 9x upsell outprices Standard (offered, never recommended).
+    // The Enhanced 9x upsell outprices Standard (offered, never recommended).
     expect(mapped.results.ts[1].mo).toBeGreaterThan(mapped.results.ts[0].mo);
-    expect(mapped.results.ts[2].mo).toBeGreaterThan(mapped.results.ts[1].mo);
   });
 
   test('does not double-bill recurring German roach initial when standalone German roach is also selected', () => {

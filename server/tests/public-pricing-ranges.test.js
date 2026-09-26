@@ -167,6 +167,27 @@ describe('public pricing ranges', () => {
     expect(lawn.notes).not.toMatch(/\b6x\b/);
   });
 
+  test('tree & shrub notes name only the sold cadences (4x/quarterly retired 2026-09-24)', () => {
+    const ts = payload.services.find((s) => s.key === 'tree_shrub_care');
+    expect(ts.notes).toMatch(/6 or 9 applications per year by tier/);
+    expect(ts.notes).not.toMatch(/\b4,?\s*6,?\s*or\s*9\b/);
+  });
+
+  test('tree & shrub published LOW never reflects the retired Light tier (codex pre-push P1)', () => {
+    // Light's own (pre-retirement) discounted floor was ~$18/mo — well below
+    // Standard's. The bundle sweep's "cheapest combo" input used to pin T&S
+    // to tier:'light' (waveGuardBundleValues), which alone could pull the
+    // published low that far down even though the direct per-tier sweep
+    // above it was already standard/enhanced-only. Both paths must now
+    // agree: the published low reflects Standard's discounted floor, not
+    // Light's.
+    const ts = payload.services.find((s) => s.key === 'tree_shrub_care');
+    const constants = require('../services/pricing-engine/constants');
+    const lightDiscountedFloor = constants.TREE_SHRUB.tiers.light.monthlyFloor * 0.8;
+    expect(ts.low).toBeGreaterThan(lightDiscountedFloor);
+    expect(ts.low).toBeGreaterThanOrEqual(constants.TREE_SHRUB.tiers.standard.monthlyFloor * 0.8);
+  });
+
   test('no lawn or pest combined monthly totals are published', () => {
     const lawn = payload.services.find((s) => s.key === 'lawn_care_program');
     const pest = payload.services.find((s) => s.key === 'general_pest_quarterly');
