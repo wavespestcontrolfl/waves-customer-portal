@@ -80,6 +80,10 @@ async function fetchFawnWeather() {
     temp_f: snapshot.temp_f,
     humidity_pct: snapshot.humidity_pct,
     rainfall_in: snapshot.rainfall_in,
+    // Period-specific rainfall (getCurrent): the station's last complete-day
+    // total and the current hour's reading. FAWN publishes no 7-day total.
+    rain_24h_in: snapshot.rain_24h_in ?? null,
+    rainfall_1h_in: snapshot.rainfall_1h_in ?? null,
     soil_temp_f: snapshot.soil_temp_f,
     station: snapshot.station,
     timestamp: snapshot.timestamp,
@@ -269,7 +273,11 @@ const LawnIntelligence = {
     await db('lawn_assessments').where({ id: assessmentId }).update({
       fawn_temp_f: weather.temp_f,
       fawn_humidity_pct: weather.humidity_pct,
-      fawn_rainfall_7d: weather.rainfall_in,
+      // FAWN has no 7-day rainfall feed (only lastHour / lastDay), so a
+      // 1-day total must not be stored as a 7-day one. The 24h/1h values
+      // stay in fawn_snapshot with their real periods (Codex review,
+      // 2026-09-26).
+      fawn_rainfall_7d: null,
       fawn_soil_temp_f: weather.soil_temp_f,
       fawn_station: weather.station,
       fawn_snapshot: JSON.stringify(weather),

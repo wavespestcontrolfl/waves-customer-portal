@@ -196,25 +196,41 @@ async function fetchStationRows(period) {
   }
 }
 
+// Fort Myers/Cape Coral (Lee Co.) are 40-47mi from the nearest known SWFL
+// station (North Port/Arcadia) — too far for a station's rainfall or
+// current conditions to meaningfully represent that location. Every other
+// tracked SWFL city is <=31.3mi (Parrish, the farthest) from one of the two,
+// so 35mi keeps every real match with margin while cleanly excluding Lee
+// County (Codex review, 2026-09-26).
+const MAX_STATION_DISTANCE_MILES = 35;
+
 function selectStation(stations = [], { latitude, longitude } = {}) {
+  // Only ever select a recognized SWFL station — never fall back to an
+  // arbitrary statewide row. The live feed carries no name/coords, so an
+  // unrecognized row can't even be distance-checked; treating it as a
+  // candidate risks silently attaching a random Florida station's reading
+  // to the SWFL forecast/current-conditions consumers (Codex review,
+  // 2026-09-26).
   const swflStations = stations.filter((station) => !!hintForStation(station));
-  const candidates = swflStations.length ? swflStations : stations;
+  if (!swflStations.length) return null;
+
   const target = Number.isFinite(Number(latitude)) && Number.isFinite(Number(longitude))
     ? { latitude: Number(latitude), longitude: Number(longitude) }
     : null;
 
   if (target) {
-    const nearest = candidates
+    const nearest = swflStations
       .map((station) => ({
         station,
         distance: distanceMiles(target, stationCoordinates(station)),
       }))
       .filter((entry) => entry.distance != null)
       .sort((a, b) => a.distance - b.distance)[0];
-    if (nearest) return nearest.station;
+    if (!nearest || nearest.distance > MAX_STATION_DISTANCE_MILES) return null;
+    return nearest.station;
   }
 
-  return candidates[0] || null;
+  return swflStations[0] || null;
 }
 
 function normalizeStationSnapshot(station) {
@@ -242,7 +258,21 @@ const FawnWeather = {
    * Get current (near-real-time, ~15-45min old) FAWN observation for the
    * nearest SWFL station. This is "current conditions" — application
    * snapshots, lawn assessments, seasonal displays.
-   * Returns: { temp_f, humidity_pct, rainfall_in, soil_temp_f, station, timestamp }
+   *
+   * `rainfall_1h_in` is the genuinely hourly `rain_sum` from this same
+   * lastHour row (almost always 0 unless it's raining right now).
+   * `rain_24h_in` is a best-effort lookup of the SAME station's most recent
+   * COMPLETE day total from lastDay — a meaningful accumulation, not an
+   * hourly blip. `rainfall_in` (the pre-existing generic name several
+   * callers already read, e.g. application-conditions.js's
+   * `rain_24h_in ?? rainfall_in`, lawn-intelligence.js's persisted
+   * fawn_snapshot) is now an ALIAS for `rain_24h_in`, never the hourly
+   * value — those callers already treat it as a longer accumulation, and an
+   * hourly reading under that name was reporting rain as 0 far too often
+   * (Codex review, 2026-09-26). The 24h lookup is best-effort: its failure
+   * only nulls the rainfall fields, never the hourly temp/humidity/wind
+   * snapshot.
+   * Returns: { temp_f, humidity_pct, rainfall_in, rainfall_1h_in, rain_24h_in, soil_temp_f, wind_mph, station, timestamp }
    */
   async getCurrent(options = {}) {
     try {
@@ -252,13 +282,27 @@ const FawnWeather = {
       if (!station) throw new Error('No FAWN station found');
 
       const snapshot = normalizeStationSnapshot(station);
+      snapshot.rainfall_1h_in = snapshot.rainfall_in;
+
+      let rain24h = null;
+      try {
+        const dayRows = await fetchStationRows('lastDay');
+        const dayStation = selectStation(dayRows, options);
+        if (dayStation) rain24h = rainfallInches(dayStation);
+      } catch (_e) {
+        // Best-effort only — the hourly "current conditions" snapshot
+        // (temp/humidity/wind) still stands even if the 24h lookup fails.
+      }
+      snapshot.rain_24h_in = rain24h;
+      snapshot.rainfall_in = rain24h;
+
       _lastSnapshot = snapshot;
 
       return snapshot;
     } catch (err) {
       logger.error(`[fawn-weather] Fetch failed: ${err.message}`);
       return _lastSnapshot || {
-        temp_f: null, humidity_pct: null, rainfall_in: null,
+        temp_f: null, humidity_pct: null, rainfall_in: null, rainfall_1h_in: null, rain_24h_in: null,
         soil_temp_f: null, wind_mph: null, station: 'unavailable', timestamp: new Date().toISOString(),
         error: err.message,
       };
@@ -283,9 +327,18 @@ const FawnWeather = {
 
       if (!station) throw new Error('No FAWN station found');
 
+      const rainfall_in = rainfallInches(station);
+      // A missing/non-numeric rain_sum on the selected row (a FAWN schema
+      // change, an incomplete station row) is an enrichment failure, not a
+      // valid "0 inches" reading — never cache it as last-good, so a later
+      // failure can't silently replay it and pest-forecast/weather.js's
+      // logging (which only fires on a resolved `error`) actually sees the
+      // problem (Codex review, 2026-09-26).
+      if (rainfall_in == null) throw new Error(`Selected station's rain_sum missing/non-numeric: ${JSON.stringify(station.rain_sum)}`);
+
       const hint = hintForStation(station);
       const snapshot = {
-        rainfall_in: rainfallInches(station),
+        rainfall_in,
         station: stationName(station) || hint?.label || 'FAWN SWFL',
         station_key: hint?.key || null,
         observation_time: firstDefined(station.ObservationTime, station.observation_time, station.startTime, station.DateTime, station.datetime, station.timestamp),

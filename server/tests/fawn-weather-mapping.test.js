@@ -41,12 +41,38 @@ describe('FawnWeather — real API shape', () => {
   });
 
   describe('getCurrent (lastHour — current conditions)', () => {
-    test('fetches the real lastHour/summary/json endpoint, not the old 400ing lastObservation URL', async () => {
+    test('fetches lastHour for current conditions, then lastDay for the 24h rainfall — never the old 400ing lastObservation URL', async () => {
       global.fetch = jest.fn(() => Promise.resolve({ ok: true, json: async () => [realShapedRow()] }));
       await FawnWeather.getCurrent({ latitude: 27.45, longitude: -82.57 });
-      expect(global.fetch).toHaveBeenCalledTimes(1);
-      const [url] = global.fetch.mock.calls[0];
-      expect(String(url)).toBe('https://fawn.ifas.ufl.edu/controller.php/lastHour/summary/json');
+      expect(global.fetch.mock.calls.map(([url]) => String(url))).toEqual([
+        'https://fawn.ifas.ufl.edu/controller.php/lastHour/summary/json',
+        'https://fawn.ifas.ufl.edu/controller.php/lastDay/summary/json',
+      ]);
+    });
+
+    test('rainfall_in is the last complete-day total (aliased to rain_24h_in), with the hourly reading kept separately', async () => {
+      global.fetch = jest.fn((url) => Promise.resolve({
+        ok: true,
+        json: async () => [realShapedRow({
+          StationID: '480',
+          rain_sum: String(url).includes('lastDay') ? '2.54' : '0',
+        })],
+      }));
+      const snap = await FawnWeather.getCurrent({ latitude: 27.45, longitude: -82.57 });
+      expect(snap.rain_24h_in).toBeCloseTo(1, 5);
+      expect(snap.rainfall_in).toBeCloseTo(1, 5);
+      expect(snap.rainfall_1h_in).toBe(0);
+    });
+
+    test('a failed 24h lookup nulls only the rainfall fields — the hourly temp snapshot still stands', async () => {
+      global.fetch = jest.fn((url) => (String(url).includes('lastDay')
+        ? Promise.resolve({ ok: false, status: 500 })
+        : Promise.resolve({ ok: true, json: async () => [realShapedRow({ StationID: '480', t2m_avg: '25' })] })));
+      const snap = await FawnWeather.getCurrent({ latitude: 27.45, longitude: -82.57 });
+      expect(snap.error).toBeUndefined();
+      expect(snap.temp_f).toBeCloseTo(77, 5);
+      expect(snap.rain_24h_in).toBeNull();
+      expect(snap.rainfall_in).toBeNull();
     });
 
     test('an HTTP failure degrades to an error snapshot with rainfall_in null — never throws', async () => {
@@ -113,14 +139,34 @@ describe('FawnWeather — real API shape', () => {
       expect(snap.rainfall_in).toBeCloseTo(1.27 / 2.54, 5);
     });
 
-    test('no known SWFL StationID in the payload still resolves rainfall via the fallback candidate, with no phantom station label', async () => {
+    test('no known SWFL StationID in the payload is an enrichment failure — never an arbitrary statewide station', async () => {
       global.fetch = jest.fn(() => Promise.resolve({
         ok: true,
         json: async () => [realShapedRow({ StationID: '110', rain_sum: '0.5' })],
       }));
       const snap = await FawnWeather.getRecentRainfall({ latitude: 27.45, longitude: -82.57 });
-      expect(snap.station_key).toBeNull();
-      expect(snap.rainfall_in).toBeCloseTo(0.5 / 2.54, 5);
+      expect(snap.rainfall_in).toBeNull();
+      expect(snap.error).toMatch(/No FAWN station/);
+    });
+
+    test('Lee County (Fort Myers) is too far from North Port/Arcadia — no rainfall rather than a distant gauge', async () => {
+      global.fetch = jest.fn(() => Promise.resolve({
+        ok: true,
+        json: async () => [realShapedRow({ StationID: '480', rain_sum: '1.27' }), realShapedRow({ StationID: '490', rain_sum: '1.27' })],
+      }));
+      const snap = await FawnWeather.getRecentRainfall({ latitude: 26.6406, longitude: -81.8723 });
+      expect(snap.rainfall_in).toBeNull();
+      expect(snap.error).toBeTruthy();
+    });
+
+    test('a selected station with a missing/non-numeric rain_sum is an enrichment failure, not a cached null reading', async () => {
+      global.fetch = jest.fn(() => Promise.resolve({
+        ok: true,
+        json: async () => [realShapedRow({ StationID: '480', rain_sum: '' })],
+      }));
+      const snap = await FawnWeather.getRecentRainfall({ latitude: 27.45, longitude: -82.57 });
+      expect(snap.rainfall_in).toBeNull();
+      expect(snap.error).toMatch(/rain_sum/);
     });
 
     test('an HTTP failure degrades to an error snapshot with rainfall_in null — never throws', async () => {
