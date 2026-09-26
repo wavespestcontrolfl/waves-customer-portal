@@ -387,6 +387,20 @@ describe('lead-response-agent — a status_idle event is not terminal on its own
     expect(result).toMatchObject({ actionTaken: 'queued_for_adam' });
   });
 
+  it('a draft saved for the owner counts as the reply even when the owner alert failed', async () => {
+    mockExecuteLeadTool.mockImplementation(async (name) => (name === 'queue_for_adam'
+      ? { queued: true, failed: true, error: 'Owner alert delivery failed' }
+      : { sent: true }));
+    global.fetch = fetchFor([
+      leadTool('tool-1', 'queue_for_adam', { draft_response: 'Draft' }),
+      leadTool('tool-2', 'queue_for_adam', { draft_response: 'Draft again' }),
+      leadTool('tool-3', 'send_lead_response', { message: 'Text' }),
+      idle('end_turn'),
+    ]);
+    await run(load(path));
+    expect(mockExecuteLeadTool.mock.calls.map(([name]) => name)).toEqual(['queue_for_adam']);
+  });
+
   it('a session that asks for more than 20 tool calls is stopped (max_tool_calls)', async () => {
     mockExecuteLeadTool.mockResolvedValue({ ok: true });
     global.fetch = fetchFor([

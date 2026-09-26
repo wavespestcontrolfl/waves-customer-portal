@@ -93,11 +93,14 @@ function sendSessionEvents(sessionId, events, deadline) {
 // send_lead_response / queue_for_adam is answered as skipped — a looping
 // session must never text a lead twice or alert the owner twice. The other
 // writes (estimate flag, saved report) likewise complete at most once. A
-// side effect counts as done only when it actually happened.
+// side effect counts as done only when it actually happened — a draft saved
+// for the owner counts even if the alert to the owner then failed, and a
+// send converted into a queued draft counts as the reply.
 const MAX_TOOL_CALLS = 20;
+const replyDecided = (result) => result?.sent === true || result?.queued === true;
 const SIDE_EFFECTS = {
-  send_lead_response: { key: 'reply', done: (result) => result?.sent === true },
-  queue_for_adam: { key: 'reply', done: (result) => result?.queued === true },
+  send_lead_response: { key: 'reply', done: replyDecided },
+  queue_for_adam: { key: 'reply', done: replyDecided },
   flag_for_estimate: { key: 'flag_for_estimate', done: (result) => Boolean(result) && !result.error },
   save_lead_response_report: { key: 'save_lead_response_report', done: (result) => Boolean(result) && !result.error },
 };
@@ -428,8 +431,7 @@ const LeadResponseAgent = {
             alreadyDone: Boolean(sideEffect) && completedSideEffects.has(sideEffect.key),
           });
           if (outcome.actionTaken) actionTaken = outcome.actionTaken;
-          if (!outcome.failed && sideEffect?.done(outcome.toolResult)) completedSideEffects.add(sideEffect.key);
-          if (outcome.actionTaken === 'auto_send_suppressed_queued') completedSideEffects.add('reply');
+          if (sideEffect?.done(outcome.toolResult)) completedSideEffects.add(sideEffect.key);
           toolsExecuted.push(toolName);
 
           await sendSessionEvents(sessionId, [{
