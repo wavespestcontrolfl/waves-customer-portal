@@ -340,6 +340,13 @@ describe('buildAnswer — look-alike identities respect the review gate (Codex r
     expect(built.nextPhoto).toEqual({ ask: 'Ant group node photo', why: 'Ant group why', photo_can_confirm: true });
   });
 
+  test('a reverse-edge veto brings its own safe wording, not the forward tip (Codex #4974 r6)', () => {
+    const { pairBetween } = engine._test;
+    const top = { slug: 'a', look_alikes: [{ slug: 'b', difference: 'Forward diff', next_photo: 'A close-up of the marking', photo_can_confirm: true }] };
+    const other = { slug: 'b', look_alikes: [{ slug: 'a', difference: 'Reverse diff', next_photo: 'Needs magnification; do not handle it', photo_can_confirm: false }] };
+    expect(pairBetween(top, other)).toEqual({ slug: 'b', difference: 'Reverse diff', next_photo: 'Needs magnification; do not handle it', photo_can_confirm: false });
+  });
+
   test('a one-way curated pair is found from the runner-up\'s side (Codex #4916 r3)', () => {
     const built = buildAnswer(baseCtx({ candidates: [cand('fire-ant', 0.6, { traitsVisible: [1] }), cand('one-way-ant', 0.3)] }));
     expect(built.nextPhoto).toEqual({

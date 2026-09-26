@@ -668,9 +668,13 @@ function pairBetween(entry, other) {
   // If EITHER direction says no photo can settle the pair, it can't — from
   // whichever side is on top (southern house spider over brown recluse must
   // not read "pretty sure"; Codex #4974 r2).
-  const unconfirmable = own?.photo_can_confirm === false || reverse?.photo_can_confirm === false;
-  const pair = own || { ...reverse, slug: other.slug };
-  return unconfirmable ? { ...pair, photo_can_confirm: false } : pair;
+  // The edge that supplies the veto also supplies the wording: its
+  // next_photo/difference carry the "a photo can't settle this" guidance,
+  // which the other side's tip (e.g. "a close-up of the violin marking")
+  // would contradict (Codex #4974 r6).
+  const vetoing = own?.photo_can_confirm === false ? own : (reverse?.photo_can_confirm === false ? reverse : null);
+  if (vetoing) return { ...vetoing, slug: other.slug, photo_can_confirm: false };
+  return own || { ...reverse, slug: other.slug };
 }
 
 function pairIfBothApproved(entry, other) {
@@ -1380,5 +1384,5 @@ module.exports = {
   REFERRAL_TEMPLATES,
   escalateBelow,
   toImages,
-  _test: { candidateContextFor, mergeVerify, combineEscalation, showsConflict, V2_TO_V1_SLUG, v1SlugFor },
+  _test: { candidateContextFor, mergeVerify, combineEscalation, showsConflict, V2_TO_V1_SLUG, v1SlugFor, pairBetween },
 };
