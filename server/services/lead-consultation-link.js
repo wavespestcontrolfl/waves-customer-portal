@@ -49,8 +49,11 @@ function consultationSmsLineFor(url) {
 // default), a link is UNVERIFIED delivery; an SMS send passes `'sms'` to
 // buildLeadConsultationLink, which signs it as smsChannelFor(lead.phone) so
 // inspection-public.js's leadContactVerified can trust that this exact link
-// reached the lead's CURRENT phone. Never set it for an email send —
-// only an SMS send is evidence the phone itself received the link.
+// reached the lead's CURRENT phone. Never mint the sms claim for an email
+// send — only an SMS send is evidence the phone itself received the link.
+// The email sends (the new_lead block and the gone-quiet estimate offer)
+// pass `'email'`: signed into the token like any claim, it never verifies
+// contact — leadContactVerified trusts only the phone-bound sms claim.
 function consultationUrlForLead(leadId, channel) {
   const token = mintLeadConsultationToken(leadId, undefined, channel);
   if (!token) return null;
@@ -72,13 +75,15 @@ function isUsPhone(phone) {
 // (Codex #4709 r17 + r18 P2s): open lead, a US phone, and a linked customer
 // (if any) that is live and still on the lead's phone. Nothing is minted
 // that the send would refuse.
-async function leadLinkRefusal(lead) {
+// `conn` lets a caller judge inside its own read snapshot (the estimate
+// consultation offer's final check); every other caller keeps the pool.
+async function leadLinkRefusal(lead, conn = db) {
   if (!lead) return 'Lead not found';
   if (!isOpenLeadRow(lead)) return 'That lead has already converted or closed';
   if (!lead.phone) return 'Lead has no phone number';
   if (!isUsPhone(lead.phone)) return 'Consultation links go to US numbers only';
   if (!lead.customer_id) return null;
-  const owner = await db('customers').where({ id: lead.customer_id }).whereNull('deleted_at').first('phone');
+  const owner = await conn('customers').where({ id: lead.customer_id }).whereNull('deleted_at').first('phone');
   if (!owner) return "This lead's customer record is archived — update the lead first";
   // Full phone identity, never a last-10 suffix (Codex #4709 r19 P1): an
   // international number sharing a US number's last ten digits is not it.
