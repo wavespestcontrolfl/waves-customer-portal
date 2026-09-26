@@ -53,11 +53,15 @@
  *
  * Duplicate-receipt guard: the claim only catches the SAME email twice. If
  * staff already put the box on the shelf by hand, the line is held as
- * 'possible_duplicate' (no movement) when the product has a 'restock'
- * movement from any other source since 48h before the email's received_at,
- * or a 'correction' at or after received_at (a count taken once the box had
- * landed already includes it). A correction BEFORE received_at never holds:
- * routine morning counts precede that day's deliveries.
+ * 'possible_duplicate' (no movement) when the product has, since 48h before
+ * the email's received_at, a 'restock' movement from any other source or a
+ * 'correction' that raised the count; or any 'correction' at or after
+ * received_at (a count taken once the box had landed already includes it).
+ * A raised count before the email is a purchase entered by hand ahead of
+ * it: SiteOne emails its invoice minutes after checkout, so a bottle set on
+ * the shelf at the counter is on the ledger first. A count that lowered
+ * stock before received_at never holds: routine counts that settle usage
+ * precede that day's deliveries.
  */
 const db = require('../../models/db');
 const logger = require('../logger');
@@ -280,19 +284,25 @@ async function processReceiptLine({ vendor, email, orderNumber, shipmentKey, ite
   });
 }
 
-// A movement already on the ledger that may be this same box: a restock
-// from any source but these automatic lanes (a hand entry, a received
-// restock request) since 48h before the email, or a count/correction at or
-// after it (see the header).
+// A movement already on the ledger that may be this same box: since 48h
+// before the email, a restock from any source but these automatic lanes (a
+// hand entry, a received restock request) or a count that went up (a
+// correction's quantity is its signed change); or any count/correction at
+// or after it (see the header).
 function findPossibleDuplicateMovement(trx, productId, receivedAt) {
   const received = new Date(receivedAt);
+  const lookback = new Date(received.getTime() - DUPLICATE_RESTOCK_LOOKBACK_MS);
   return trx('product_inventory_movements')
     .where({ product_id: productId })
     .where((either) => either
       .where((restock) => restock
         .where('movement_type', 'restock')
         .whereRaw(`COALESCE(metadata ->> 'source', '') NOT IN (${Object.values(SOURCES).map(() => '?').join(', ')})`, Object.values(SOURCES))
-        .where('created_at', '>=', new Date(received.getTime() - DUPLICATE_RESTOCK_LOOKBACK_MS)))
+        .where('created_at', '>=', lookback))
+      .orWhere((raised) => raised
+        .where('movement_type', 'correction')
+        .where('quantity', '>', 0)
+        .where('created_at', '>=', lookback))
       .orWhere((correction) => correction
         .where('movement_type', 'correction')
         .where('created_at', '>=', received)))
