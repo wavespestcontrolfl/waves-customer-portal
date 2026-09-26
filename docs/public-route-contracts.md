@@ -1801,7 +1801,12 @@ count; it must never grow beyond that single bounded metadata write).
 confirmation texts link to. Gated by `scheduled_services.reschedule_token`
 — the SAME secret /reschedule uses, deliberately reused rather than
 minting a second one — plus a 60 req/min router limit and 10 req/min on
-the confirm. **Every route 404s unless `GATE_APPOINTMENT_PAGE=true`.**
+the confirm. **Anonymous application GET/POST requests return 404 unless
+`GATE_APPOINTMENT_PAGE` is exactly `true`.** A prefix-scoped noStore + gate
+runs before the global API limiter and body parsers; the router retains
+its gate before its local limits. Earlier shared controls keep precedence:
+CORS can finish OPTIONS requests, and signed Staff requests receive 503
+while Staff maintenance is enabled.
 GET returns the visit summary (service type, date + window_start, the
 server-derived arrival range, plan/one-time flag, confirmed flag, and
 `vanScene` — a boolean that is exactly `GATE_VAN_SCENE` in production
@@ -1932,7 +1937,12 @@ or commit path as security-critical).
 customer self-serve FREE re-service (callback) scheduler — the standing
 customer link texted by the office/comms composer and surfaced on the
 portal Visits tab. Whole surface is dark behind GATE_RESERVICE_SELF_SERVE
-(fail-closed `==='true'` in every env — every route 404s while off).
+(fail-closed `==='true'` in every env — anonymous application GET/POST
+requests return 404 while off). Prefix-scoped noStore + gate precedes the
+global API limiter and body parsers; the router also gates before its local
+limits and retains its handler checks. Earlier CORS handling of OPTIONS
+and the Staff maintenance interlock (503 for signed Staff requests while
+enabled) keep precedence.
 `customers.reservice_token` (64-hex, `TOKEN_RE` format gate; standing for
 the life of the customer like the /card token) is the ONLY gate, plus
 60 req/min router limit, 10 req/min on the commit POST, 15 req/min on
