@@ -4362,7 +4362,7 @@
      "value": {
       "address_line1": "88B Palm Harbor"
      },
-     "severity": "major"
+     "severity": "critical"
     },
     {
      "check": "tools_called_at_most",
@@ -4501,6 +4501,17 @@
      "value": [
       "get_pricing"
      ],
+     "severity": "critical"
+    },
+    {
+     "check": "tool_input_includes",
+     "value": {
+      "tool": "get_pricing",
+      "input": {
+       "service": "lawn_care"
+      },
+      "fromTurn": 2
+     },
      "severity": "critical"
     },
     {

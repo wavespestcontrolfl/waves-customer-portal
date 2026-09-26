@@ -81,20 +81,28 @@ script, cron job, or CI check — nothing runs it automatically. It writes one
 combined JSON report (`voice-relay-benchmark-<timestamp>.json` by default,
 or `--out=<path>`) and prints a summary table.
 
-### Interleaving and warm/cold separation
+### Interleaving, rotation, and why there is no cold/warm label
 
 The runner's outer loop is trial index, inner loop is condition — one trial
 of every condition before the next trial of any condition — matching the
 brief's "interleave repeated trials" instruction rather than blocking all of
 condition A's trials before condition B's (which would confound any
 time-of-day or provider-load drift with the model/renderer comparison).
-**Trial 0 of each condition is the only one worth treating as a
-cold/cache-miss observation**; trials 1..N-1 are `cacheHypothesis: "warm"` in
-the report. This is a hypothesis label, not a measurement: the harness does
-not currently surface Anthropic's own prompt-cache read/write token counts
-per turn, so a real warm/cold split needs reading `usage.cache_read_input_tokens`
-/ `cache_creation_input_tokens` off the raw API response — not exposed by
-`runVoiceRelayEval` today. Treat the label as a rough proxy, not proof.
+WITHIN a trial, the four conditions' own order is rotated Latin-square-style
+by trial index (`rotateConditions`): trial 0 runs them in their natural
+order, trial 1 starts from the second condition and wraps, and so on, so no
+one condition systematically runs first across every trial (and thus
+systematically absorbs whatever a fixed first-run slot costs).
+
+Every run's `cacheHypothesis` field is always `"unknown"` — never a
+cold/warm label by trial position. Two reasons: rotation above already
+removes "trial 0 == first" as even a positional proxy, and the eval JSON
+does not surface Anthropic's own prompt-cache read/write token counts
+anywhere today — a real warm/cold split needs reading
+`usage.cache_read_input_tokens` / `cache_creation_input_tokens` off the raw
+API response, which `runVoiceRelayEval` does not expose. If a future PR
+threads real per-scenario usage data through the eval harness, this label
+should read those fields directly instead of guessing from trial index.
 
 ### Inconclusive runs are missing data, never a completed run
 
@@ -103,12 +111,40 @@ valid JSON on stdout: `0`/`1` (`status: 'pass'`/`'fail'` — the eval evaluated
 the fixture, one way or the other) and `3` (`status: 'inconclusive'` — it
 could not evaluate anything at all, e.g. no scenario completed a model
 round). The runner treats ONLY `'pass'`/`'fail'` as a completed run
-(`ranOk`); an inconclusive run — however well-formed its JSON — is counted in
+(`ranOk`) — and only when the child also exited normally: a completed run
+additionally requires exit code 0/1/3 with no timeout or signal
+(`runOnce` mirrors `runVoiceRelayEvalProcess()` in voice-relay-replay.js
+exactly for this — `execFile`'s own `err.code` is never a number for a
+killed/timed-out child, so a stray, stale write that happens to look like
+valid JSON on stdout can never be read as a trustworthy result). An
+inconclusive run — however well-formed its JSON — is counted in
 `inconclusiveRuns`, its `error` is carried into `crashError` in the per-run
 detail, and it makes the whole benchmark's exit code non-zero, exactly like a
-real crash (`crashedRuns`, no JSON / exit 2 / a timeout). A candidate that
-merely could not be evaluated must never look like a clean pass, and its
-sample count must never be silently padded into `scenarioSamples`.
+real crash (`crashedRuns`, no JSON / exit 2 / a timeout/signal). A candidate
+that merely could not be evaluated must never look like a clean pass, and its
+sample count must never be silently padded into `scenarioAttemptSamples`.
+
+### Model-stamp verification (candidate conditions only)
+
+`--candidate-model` is checked against the relay's OWN allowlist
+(`relay-conversation.js`'s `ALLOWED_OVERRIDE_MODEL_IDS`, derived from
+`config/models.js` `MODEL_CATALOG`) before any condition runs at all — an
+unrecognized id is a usage error (exit 2), not four wasted API-billed
+conditions. That check alone does not prove the candidate model actually ran,
+though: each condition's run is also checked AFTER it completes. Every
+scenario record in a completed run's `results[]` carries the resolved
+session model it actually pinned (`record.model`, from
+`relay-conversation.js`'s `resolveSessionModel`) — for the two `candidate-*`
+conditions, the runner compares every scenario's `results[].model` against
+the requested `--candidate-model` value and flags the run `modelMismatch:
+true` if any of them differ (an unknown/rejected override id falls back down
+the chain to the current model with one logged warning, which would
+otherwise let a "candidate" condition silently re-run the CURRENT model
+without anyone noticing). A condition with any `modelMismatchRuns > 0` — see
+`summarizeCondition`'s per-condition field — makes the whole benchmark's exit
+code non-zero, the same as a crash or an inconclusive run: a candidate
+comparison that silently tested the wrong model is missing data, not a
+result.
 
 ### Retry accounting
 
@@ -120,20 +156,40 @@ wasn't itself inconclusive). Reading only `result.summary` would silently
 drop a first attempt's critical miss the moment the retry happened to pass.
 The runner instead sums every entry of `result.attempts` (the eval CLI's own
 compact `{status, summary, error}` list — one entry, or two when the first
-attempt failed) into `scenarioSamples` / `scenarioPasses` / `scenarioFailures`
-/ `replayErrors` / `criticalMisses`, and reports `retriedRuns` (how many
-completed runs needed the retry) and `flakyRuns` (how many of those retries
-flipped to a pass) as their own fields, never folded into the pass/fail sums.
-This runner has no single-attempt mode to fall back to instead: neither the
-eval CLI nor `runVoiceRelayEval` exposes a flag to disable the retry-once
-wrapper, so aggregating every attempt is the only way to keep a first-attempt
-miss visible.
+attempt failed) into `scenarioAttemptSamples` / `scenarioPasses` /
+`scenarioFailures` / `replayErrors` / `criticalMisses`, and reports
+`retriedRuns` (how many completed runs needed the retry) and `flakyRuns`
+(how many of those retries flipped to a pass) as their own fields, never
+folded into the pass/fail sums. This runner has no single-attempt mode to
+fall back to instead: neither the eval CLI nor `runVoiceRelayEval` exposes a
+flag to disable the retry-once wrapper, so aggregating every attempt is the
+only way to keep a first-attempt miss visible.
 
-**Consequence for the sample-size denominator**: `attemptSamples` (attempts ×
-trials × scenarios) is the true sample size behind `scenarioSamples` /
-`scenarioPasses` / `criticalMisses` once any run in the condition retried —
-it can be larger than `completedRuns × scenarios`. Report `attemptSamples`
-next to any rate computed from these fields.
+**Consequence for the sample-size denominator**: `scenarioAttemptSamples`
+(the sum of every attempt's own scenario count — attempts × scenarios, not
+just trials × scenarios) is the true sample size behind `scenarioPasses` /
+`scenarioFailures` / `criticalMisses` once any run in the condition retried —
+it can be larger than `completedRuns × scenarios`. Report
+`scenarioAttemptSamples` next to any rate computed from these fields — NOT
+`attemptCount`, which only counts how many attempts ran (1 per trial, plus
+one more per retried trial) and is never itself multiplied by
+scenarios-per-attempt; `attemptCount` was named `attemptSamples` before this
+PR, which invited exactly that confusion (reading it as if it already were
+the scenario-level denominator it never was). `scenarioSamples` is kept as an
+alias of `scenarioAttemptSamples`, identical value, for anything still
+reading the pre-existing name.
+
+**Judge aggregates, and the one figure that is final-attempt-only**: with
+`--judge`, `judgedCount` / `judgeFallbackCount` / `judgeErrorCount` sum
+across every attempt of every trial, same as the scenario counts above
+(`voice-relay-replay.js`'s `summarize()` output survives unstripped into each
+attempt's compact summary). A judge PASS count does not: no attempt summary
+carries a pass/fail split, only the FINAL (selected) attempt's full
+`results[].judge.verdict.pass` does, so `judgePassCountFinalAttemptOnly` is
+computed from the final attempt only, across trials — never summed with the
+others, and labeled by name as such. Report it next to `judgedCount` from the
+final attempt's trials, not as a rate over the full `judgedCount` sum, since
+the two draw from different sample sizes.
 
 ## What text replay measures vs. what needs a sandbox call
 
@@ -155,12 +211,15 @@ placed while producing this document.
 For each condition, report all of the following — never a favorable average
 alone:
 
-- **Sample counts**: `attemptSamples` (every attempt of every completed run,
-  including a first-attempt retry — see "Retry accounting" above) is the true
-  denominator behind `scenarioSamples` / `scenarioPasses` / `criticalMisses`;
-  report it alongside `trials` requested — a crashed OR inconclusive trial
-  must show as missing data, not vanish from the denominator or get folded
-  into a "completed" count.
+- **Sample counts**: `scenarioAttemptSamples` (the sum of every attempt's own
+  scenario count, including a first-attempt retry — see "Retry accounting"
+  above) is the true denominator behind `scenarioPasses` / `criticalMisses`;
+  report it alongside `trials` requested — a crashed, inconclusive, OR
+  model-mismatched trial must show as missing data, not vanish from the
+  denominator or get folded into a "completed" count. `attemptCount` (how
+  many attempts ran, never multiplied by scenarios-per-attempt) is a
+  different, smaller number — report both, never one standing in for the
+  other.
 - **Failures**: `scenarioFailures` (a scenario's own checks failed) and
   `replayErrors` (the harness itself could not run the scenario) — these are
   different failure modes and must not be summed into one number.
@@ -170,24 +229,32 @@ alone:
   reliability signal even when every run ultimately "passed".
 - **Missing-data rate**: the fraction of runs where `ranOk` is false —
   broken down into `crashedRuns` / `trials` (the harness itself never
-  produced a result) and `inconclusiveRuns` / `trials` (it produced a result,
-  but the result says it could not evaluate the fixture) — and, within
-  completed runs, the fraction of turns with a null audio-latency field and
-  its `audio_metrics_reason` (only meaningful on a real sandbox call — see the
-  table above; the text-replay harness never writes this field at all).
+  produced a result, including a timeout/signal — see "Inconclusive runs"
+  above), `inconclusiveRuns` / `trials` (it produced a result, but the result
+  says it could not evaluate the fixture), and `modelMismatchRuns` / `trials`
+  for the two `candidate-*` conditions (it produced a result, but the
+  resolved session model was not the one requested — see "Model-stamp
+  verification" above) — and, within completed runs, the fraction of turns
+  with a null audio-latency field and its `audio_metrics_reason` (only
+  meaningful on a real sandbox call — see the table above; the text-replay
+  harness never writes this field at all).
 - **Latency**: median and p90 of `durationMsMedian` / `durationMsP90` per
   condition, **with the sample-size caveat already built into the runner**
   (`durationMsP90` is `null`/"n/a" below 3 completed runs — a p90 over 1-2
   points is not a percentile). This is whole-scenario wall clock from real
   API calls, not a per-turn first-token breakdown; get that from a real
   sandbox call.
-- **Task accuracy**: `scenarioPasses` / `scenarioSamples`, and separately
-  `criticalMisses` (an unauthorized action, a false completion, a duplicate
-  effect, or a sandbox-suppression breach — see the five new scenario
-  families' `expect` blocks for exactly what is checked).
-- **Naturalness**: the optional judge's verdict (`--judge`), reported as its
-  own pass rate and fallback-leg rate — advisory, never used to override a
-  critical deterministic miss.
+- **Task accuracy**: `scenarioPasses` / `scenarioAttemptSamples`, and
+  separately `criticalMisses` (an unauthorized action, a false completion, a
+  duplicate effect, or a sandbox-suppression breach — see the five new
+  scenario families' `expect` blocks for exactly what is checked).
+- **Naturalness**: the optional judge's verdict (`--judge`) — `judgedCount` /
+  `judgeFallbackCount` / `judgeErrorCount` sum across every attempt, but
+  `judgePassCountFinalAttemptOnly` is drawn from the final attempt only (see
+  "Judge aggregates" above); report a judge pass RATE over the final
+  attempt's own `judgedCount` for that trial, never over the full summed
+  `judgedCount` — advisory either way, never used to override a critical
+  deterministic miss.
 - **Cost**: sum of Anthropic token usage across the run (not currently
   aggregated by the runner or the harness — read it from
   `llm_dispatch_log` if `GATE_LLM_CALL_LEDGER` is on in the environment the

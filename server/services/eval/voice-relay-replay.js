@@ -84,7 +84,7 @@ const SEVERITIES = Object.freeze(['critical', 'major', 'quality']);
 const SEVERITY_WEIGHT = Object.freeze({ critical: 3, major: 2, quality: 1 });
 const CHECKS = Object.freeze([
   'tools_called_include', 'tools_never_called', 'tools_called_subset_of',
-  'spoken_never_matches', 'spoken_matches_any', 'capture_lead_input_includes',
+  'spoken_never_matches', 'spoken_matches_any', 'capture_lead_input_includes', 'tool_input_includes',
   'end_session_called', 'no_model_text_before_tool',
   'commitment_requires_receipt', 'tools_performed_include', 'tools_performed_any_of', 'tools_called_at_most',
   // The named spoken-content checks (voice-relay-spoken-checks): one
@@ -342,6 +342,18 @@ const CHECK_VALUE_RULES = Object.freeze({
   spoken_never_matches: () => regexList,
   spoken_matches_any: () => regexList,
   capture_lead_input_includes: () => (v) => (!v || typeof v !== 'object' || Array.isArray(v) || !Object.keys(v).length ? 'value must be an object of capture_lead fields' : null),
+  // capture_lead_input_includes' generic sibling: any allowed tool, not just
+  // capture_lead. { tool: "<name>", input: { <field>: <expected> }, fromTurn?: <caller turn> }.
+  tool_input_includes: (knownTools) => (v) => {
+    if (!isPlainObject(v)) return 'value must be { tool: "<name>", input: {...}, fromTurn?: <caller turn> }';
+    const unknown = Object.keys(v).find((k) => !['tool', 'input', 'fromTurn'].includes(k));
+    if (unknown) return `unknown key "${unknown}" (tool, input, fromTurn)`;
+    if (typeof v.tool !== 'string' || !v.tool) return 'tool must be a non-empty tool name';
+    if (!knownTools.has(v.tool)) return `unknown tool "${v.tool}"`;
+    if (!isPlainObject(v.input) || !Object.keys(v.input).length) return 'input must be a non-empty object of expected fields';
+    if (v.fromTurn !== undefined && (!Number.isInteger(v.fromTurn) || v.fromTurn < 1)) return 'fromTurn must be a caller turn number (1 is the first)';
+    return null;
+  },
   end_session_called: () => (v) => (END_SESSION_SCHEMA.validate(v, { convert: false }).error ? 'value must be boolean or exactly { reason: "<non-empty>" }' : null),
   no_model_text_before_tool: (knownTools) => (v) => (v === true || (Array.isArray(v) && v.length && v.every((n) => WRITE_TOOLS.includes(n) || knownTools.has(n))) ? null : 'value must be true or a tool list'),
   commitment_requires_receipt: () => (v) => (v === true ? null : 'value must be true'),
@@ -491,6 +503,9 @@ function lintScenario(s, knownTools) {
   for (const e of expects) {
     if (e && ['tools_called_include', 'tools_performed_include', 'tools_performed_any_of'].includes(e.check) && Array.isArray(e.value)) {
       for (const name of e.value) if (!allowed.has(name)) problems.push(`expect ${e.check} names "${name}", which allowedTools does not allow`);
+    }
+    if (e && e.check === 'tool_input_includes' && isPlainObject(e.value) && typeof e.value.tool === 'string' && !allowed.has(e.value.tool)) {
+      problems.push(`expect ${e.check} names "${e.value.tool}", which allowedTools does not allow`);
     }
   }
   return problems;
@@ -1292,6 +1307,22 @@ const CHECK_RUNNERS = Object.freeze({
     // only the missing field completed the request live, and does here.
     const best = captures.map((c) => inputIncludes(c.accumulated || c.input, value)).reduce((a, b) => (b.length < a.length ? b : a));
     return best.length ? ['fail', `no capture_lead input satisfied: ${best.join('; ')}`] : ['pass', 'capture_lead input includes every expected field'];
+  },
+  // Any tool, not just capture_lead: only a call the fixture actually ran
+  // (ok === true — a refused/invalid call did nothing) can satisfy this, and
+  // an optional fromTurn scopes it to a call at or after a given caller turn
+  // (e.g. "the corrected lookup, not the pre-correction one").
+  tool_input_includes(value, record) {
+    const { tool, input, fromTurn } = value;
+    const calls = record.toolCalls.filter((t) => t.name === tool && t.ok === true && (fromTurn == null || t.turn >= fromTurn));
+    if (!calls.length) {
+      const anyCall = record.toolCalls.some((t) => t.name === tool);
+      return ['fail', anyCall
+        ? `${tool} was never called successfully${fromTurn != null ? ` from caller turn ${fromTurn} on` : ''} (every call was rejected, failed, or came before that turn)`
+        : `${tool} was never called`];
+    }
+    const best = calls.map((c) => inputIncludes(c.input, input)).reduce((a, b) => (b.length < a.length ? b : a));
+    return best.length ? ['fail', `no ${tool} call satisfied: ${best.join('; ')}`] : ['pass', `${tool} input includes every expected field`];
   },
   end_session_called(value, record) {
     const want = typeof value === 'boolean' ? value : true;

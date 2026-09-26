@@ -217,7 +217,7 @@ unset/removed (or, for a gate, set to anything other than the exact
 | Booking tool | unset `GATE_VOICE_AI_BOOKING` |
 | Tuning profile | unset `VOICE_RELAY_PROFILE` → untuned relay, no `events` attribute, no provider-derived latency fields (expected, not a bug) |
 | Sandbox line entirely | unset `VOICE_RELAY_SANDBOX_NUMBER`; optionally release the Twilio number |
-| Everything above at once | unset `GATE_VOICE_AI_AGENT` (already off) — production inbound was never touched |
+| Everything above at once | unset `GATE_VOICE_AI_AGENT` (already off) — production inbound was never touched. That alone does NOT also stop the sandbox test path: `GATE_VOICE_AI_AGENT` only gates the production overflow-answering front door (`server/config/feature-gates.js:778`'s `voiceAiAgent`, read at `server/routes/twilio-voice-webhook.js:1449`) and is independent of the sandbox route. To genuinely stop everything, including sandbox test calls, ALSO unset `VOICE_RELAY_SANDBOX_NUMBER` (the sandbox webhook path is only reachable for that exact E.164 number — `server/routes/twilio-voice-webhook.js:2082-2083`'s `sandboxNumber()`) and/or `VOICE_RELAY_ENABLED` (the single source of truth for whether the relay's WebSocket endpoint attaches at all, production or sandbox — `server/services/voice-agent/relay-protocol.js:60-61`'s `isRelayEnabled()`, read by `server/services/voice-agent/relay-server.js:148-150`'s `attachVoiceRelay`) |
 
 **Confirming a change on a call row** (no admin UI needed): read the row's
 `call_log.transcription_metadata.versions` / `.latency`. It carries the
@@ -237,7 +237,7 @@ change — never a silently different, unstamped behavior.
 | PR B model isolation (inbound-only override, collections untouched, allowlist, fallback stamp) | **Implemented / tested** — `voice-relay-model-override.test.js` |
 | PR C streaming renderer (hold policy, interrupt/failure races) | **Implemented / tested** — `voice-relay-stream-renderer.test.js`, 169/169 passing |
 | 5 new eval scenario families (this PR) | **Implemented / untested against the live model** — fixture lints clean and the shipped-fixture regression suite passes; no live Anthropic call was made in this session to actually run them (see `docs/sandy-benchmark.md`) |
-| Queued-turn race test (delayed tool response + changed instructions) | **Implemented / tested** — new test in `voice-relay-stream-renderer.test.js` |
+| Queued-turn race test (already-dispatched write, serialized turns) | **Implemented / tested** — new test in `voice-relay-stream-renderer.test.js`. Covers the relay's serialization MECHANIC only (a second caller turn queues behind a still-open first turn; a write already dispatched before a change of mind completes once, never duplicated). It does NOT cover whether the model recognizes changed instructions and avoids the stale booking in the first place — that is the `delayed-tool-response-changed-instructions` eval fixture's own contract, exercised in `voice-relay-eval-new-scenario-checks.test.js` |
 | Redacted sandbox-call event fixtures (brief §3A) | **Access-blocked** — no authorized sandbox call was placed in this session; no such fixture exists in the repo today |
 | Four-condition benchmark comparison run | **Owner-approval-pending** — the runner script (`server/scripts/run-voice-relay-benchmark.js`) is implemented and untested-by-execution; running it spends real Anthropic API cost and needs `ANTHROPIC_API_KEY` |
 | Candidate model (Haiku 4.5) live-call access/cost at scale | **Owner-approval-pending / untested** |

@@ -73,14 +73,69 @@ function buildConditions(candidateModel) {
 }
 
 /**
- * One condition × trial, as its own child process. Only a parsed result
- * whose status is 'pass' or 'fail' is a COMPLETED run (ranOk) — those are
- * the eval CLI's own two "the eval evaluated something" outcomes (exit 0 / 1;
- * see run-voice-relay-eval.js). 'inconclusive' (exit 3, "the eval could not
- * run") is valid JSON but NOT a completed run: it must never be silently
- * folded into ranOk, and its error must survive into the report. Anything
- * else (no JSON, exit 2, a signal, a timeout) is a plain crash.
+ * Latin-square-style rotation of the condition list by trial index: trial 0
+ * runs them in their natural order, trial 1 starts from the second
+ * condition and wraps, and so on — every condition gets every "slot"
+ * (including first) across enough trials, so no one condition systematically
+ * absorbs whatever a fixed first-run slot costs (e.g. any provider-side
+ * warm-up). The set of conditions run in a trial is unchanged; only their
+ * order is.
  */
+function rotateConditions(conditions, trial) {
+  const n = conditions.length;
+  if (!n) return conditions;
+  const offset = ((trial % n) + n) % n;
+  return [...conditions.slice(offset), ...conditions.slice(0, offset)];
+}
+
+/**
+ * Classifies one child process outcome. Only a parsed result whose status
+ * is 'pass' or 'fail' AND whose child exited normally is a COMPLETED run
+ * (ranOk) — those are the eval CLI's own two "the eval evaluated something"
+ * outcomes (exit 0 / 1; see run-voice-relay-eval.js). 'inconclusive' (exit 3,
+ * "the eval could not run") is valid JSON but NOT a completed run: it must
+ * never be silently folded into ranOk, and its error must survive into the
+ * report. "Exited normally" means exit 0/1/3 with no signal/timeout,
+ * mirroring runVoiceRelayEvalProcess() in voice-relay-replay.js: execFile
+ * hands back a non-null `err` for any non-zero exit code AND for a
+ * killed/timed-out child; `err.code` is a number only for a plain exit code,
+ * never for a signal kill, so a timeout/signal always falls through to
+ * `code = null` here even if a stray, stale write left something
+ * JSON-parseable on stdout — that stdout can never be trusted as a result.
+ * Anything else (no JSON, exit 2, a signal, a timeout) is a plain crash.
+ */
+function signalCrashError(err) {
+  return `child ${err.killed ? 'timed out' : `received signal ${err.signal || 'unknown'}`} before producing a trustworthy result`;
+}
+
+function classifyChildResult(err, parsed) {
+  const code = err && typeof err.code === 'number' ? err.code : (err ? null : 0);
+  const signaled = !!(err && (err.killed === true || err.signal));
+  const exitOk = !signaled && (code === 0 || code === 1 || code === 3);
+  const completed = !!(parsed && exitOk && (parsed.status === 'pass' || parsed.status === 'fail'));
+  const inconclusive = !!(parsed && exitOk && parsed.status === 'inconclusive');
+  if (completed) return { code, completed, inconclusive, crashError: null };
+  if (inconclusive) return { code, completed, inconclusive, crashError: (parsed.error && parsed.error.message) || 'eval reported inconclusive with no error detail' };
+  const crashError = signaled ? signalCrashError(err) : (err ? err.message : 'no JSON on stdout');
+  return { code, completed, inconclusive, crashError };
+}
+
+/**
+ * P1: a candidate condition's requested model must be the one the session
+ * actually pinned. `results[].model` is the resolved session model stamp
+ * (voice-relay-replay.js: `record.model = convo.model`) — an
+ * unknown/rejected override id silently falls back down the chain
+ * (relay-conversation.js resolveSessionModel), which would otherwise make a
+ * "candidate" run silently re-run the CURRENT model instead. Only checked
+ * for a completed run against an expected (non-null) model — the two
+ * "current" conditions have no override to verify.
+ */
+function checkModelStamp(completed, expectedModel, parsed) {
+  if (!completed || !expectedModel) return { modelMismatch: false, resolvedModels: [] };
+  const resolvedModels = [...new Set((parsed.results || []).map((s) => s && s.model).filter(Boolean))];
+  return { modelMismatch: resolvedModels.some((m) => m !== expectedModel), resolvedModels };
+}
+
 function runOnce(condition, trial, { cliArgs = {}, scriptPath = SCRIPT_PATH, execFileImpl = execFile, timeoutMs = CHILD_TIMEOUT_MS } = {}) {
   return new Promise((resolve) => {
     const args = [scriptPath, '--json'];
@@ -95,26 +150,30 @@ function runOnce(condition, trial, { cliArgs = {}, scriptPath = SCRIPT_PATH, exe
       ...(condition.env.VOICE_RELAY_INBOUND_MODEL ? {} : { VOICE_RELAY_INBOUND_MODEL: '' }),
       ...(condition.env.VOICE_RELAY_RENDERER ? {} : { VOICE_RELAY_RENDERER: '' }),
     };
+    // The one model this condition actually requested via the override env
+    // (unset for the two "current" conditions) — used below to catch the
+    // relay silently falling back to a different model than the one asked
+    // for (an unknown/rejected override id, or a stale allowlist).
+    const expectedModel = condition.env.VOICE_RELAY_INBOUND_MODEL || null;
     const startedAt = Date.now();
     execFileImpl(process.execPath, args, { env, timeout: timeoutMs, maxBuffer: 1024 * 1024 * 64 }, (err, stdout) => {
       const wallMs = Date.now() - startedAt;
       let parsed = null;
       try { parsed = JSON.parse(stdout); } catch { /* fall through with parsed = null below */ }
 
-      const completed = !!(parsed && (parsed.status === 'pass' || parsed.status === 'fail'));
-      const inconclusive = !!(parsed && parsed.status === 'inconclusive');
+      const { code, completed, inconclusive, crashError } = classifyChildResult(err, parsed);
+      const { modelMismatch, resolvedModels } = checkModelStamp(completed, expectedModel, parsed);
+
       resolve({
         condition: condition.id,
         trial,
         wallMs,
         ranOk: completed,
         inconclusive,
-        exitCode: err && typeof err.code === 'number' ? err.code : (err ? null : 0),
-        crashError: completed
-          ? null
-          : inconclusive
-            ? ((parsed.error && parsed.error.message) || 'eval reported inconclusive with no error detail')
-            : (err ? err.message : 'no JSON on stdout'),
+        exitCode: code,
+        modelMismatch,
+        resolvedModels,
+        crashError,
         result: parsed,
       });
     });
@@ -147,6 +206,34 @@ function summarizeCondition(id, runs) {
   const sumAttempts = (key) => attemptSummaries.reduce((n, s) => n + (s[key] || 0), 0);
   const retriedRuns = completed.filter((r) => (r.result.attempts || []).length > 1).length;
   const flakyRuns = completed.filter((r) => r.result.flaky === true).length;
+  // A candidate run whose resolved session model didn't match what was
+  // requested (see runOnce's modelMismatch) — never rolled into
+  // completedRuns/crashedRuns; a benchmark that silently re-ran the current
+  // model under the "candidate" label is missing data, not a clean pass.
+  const modelMismatchRuns = completed.filter((r) => r.modelMismatch === true).length;
+  // Every attempt's summary carries `judged` / `judgeFallbacks` / `judgeErrors`
+  // (voice-relay-replay.js's `summarize()` output, unstripped by
+  // `compactAttempt` — see call site), so these three sum cleanly across every
+  // attempt, same as the scenario counts above. A judge PASS count is a
+  // different story: no attempt summary carries a pass/fail split, only the
+  // FINAL (selected) attempt's full `results[].judge.verdict.pass` does — so
+  // that one figure is drawn from the final attempt only, across trials,
+  // and is labeled accordingly (see `judgePassCountFinalAttemptOnly` below and
+  // docs/sandy-benchmark.md "Metrics to report").
+  const judgedCount = sumAttempts('judged');
+  const judgeFallbackCount = sumAttempts('judgeFallbacks');
+  const judgeErrorCount = sumAttempts('judgeErrors');
+  const judgePassCountFinalAttemptOnly = completed.reduce(
+    (n, r) => n + (r.result.results || []).filter((s) => s && s.judge && s.judge.ok && s.judge.verdict && s.judge.verdict.pass === true).length,
+    0,
+  );
+  // sumAttempts('scenarios') — the sum of scenario counts across every
+  // attempt — is the true per-scenario denominator (a retried trial
+  // contributes both its failed first attempt AND its retry). Exposed under
+  // an unambiguous name distinct from attemptCount (attempts only, never
+  // multiplied by scenarios-per-attempt): report THIS, not attemptCount,
+  // next to scenarioPasses/scenarioFailures/criticalMisses.
+  const scenarioAttemptSamples = sumAttempts('scenarios');
 
   return {
     condition: id,
@@ -154,22 +241,31 @@ function summarizeCondition(id, runs) {
     completedRuns: completed.length,
     inconclusiveRuns: inconclusiveRuns.length,
     crashedRuns: crashedRuns.length,
+    modelMismatchRuns,
     // How many completed runs needed the eval CLI's own retry-once (a failed
     // first attempt), and how many of those retries flipped to a pass
     // (flaky — see voice-relay-replay.js's attemptWithRetry). Reported
     // separately from the pass/fail/miss sums below, never folded into them.
     retriedRuns,
     flakyRuns,
-    // Per-condition scenario pass/fail/misses is summed ACROSS every attempt
-    // of every trial — a retried trial contributes twice (its first, failed
-    // attempt AND its retry), so this is a sample of attempts × scenarios,
-    // not trials × scenarios; attemptSamples below is the true denominator.
-    attemptSamples: attemptSummaries.length,
-    scenarioSamples: sumAttempts('scenarios'),
+    // How many attempts ran in total (trials × 1, plus one more per retried
+    // trial) — a COUNT of attempts, never itself a scenario-level
+    // denominator (an attempt may carry more than one scenario). Renamed
+    // from the old, misleading `attemptSamples` name: see
+    // scenarioAttemptSamples below for the true per-scenario denominator.
+    attemptCount: attemptSummaries.length,
+    scenarioAttemptSamples,
+    // Kept identical to scenarioAttemptSamples, same value, for anything
+    // still reading the pre-existing name.
+    scenarioSamples: scenarioAttemptSamples,
     scenarioPasses: sumAttempts('passed'),
     scenarioFailures: sumAttempts('failed'),
     replayErrors: sumAttempts('replayErrors'),
     criticalMisses: sumAttempts('criticalMisses'),
+    judgedCount,
+    judgeFallbackCount,
+    judgeErrorCount,
+    judgePassCountFinalAttemptOnly,
     // durationMs here is the TEXT-REPLAY harness's own end-to-end wall clock
     // for the SELECTED final attempt only (real Anthropic API calls, no
     // telephony) — see the file header and docs/sandy-benchmark.md for what
@@ -196,23 +292,51 @@ async function runBenchmark({ argv = process.argv.slice(2), execFileImpl = execF
     );
   }
   const candidateModel = ARGS['candidate-model'];
+  // Reuse the relay's OWN allowlist (config/models.js MODEL_CATALOG, derived
+  // — never a locally hand-typed list) BEFORE any child runs: an id this
+  // repo does not recognize would otherwise run four full conditions only to
+  // have the relay silently reject the override on every "candidate" call and
+  // fall back to the current model, making two of the four conditions secretly
+  // duplicate the other two. See relay-conversation.js's own file header for
+  // why the allowlist is Anthropic text models excluding `requires: 'deep'`.
+  // Required here, not at module top-level, so runOnce/summarizeCondition's
+  // own unit tests never need this heavier module graph loaded.
+  const { isAllowedOverrideModel, ALLOWED_OVERRIDE_MODEL_IDS } = require('../services/voice-agent/relay-conversation');
+  if (!isAllowedOverrideModel(candidateModel)) {
+    throw new Error(
+      `--candidate-model="${candidateModel}" is not an allowlisted model id. `
+      + 'Allowed (server/config/models.js MODEL_CATALOG, Anthropic text models, '
+      + `excluding requires:"deep" ids): ${[...ALLOWED_OVERRIDE_MODEL_IDS].join(', ')}`,
+    );
+  }
   const trials = Math.max(1, parseInt(ARGS.trials, 10) || DEFAULT_TRIALS);
   const CONDITIONS = buildConditions(candidateModel);
 
   const runs = [];
   // Interleaved order: one trial of every condition before the next trial of
   // any condition, per the brief — never all of condition A's trials, then
-  // all of B's. Trial index 0 of each condition is the ONLY one to treat as
-  // a cold/cache-miss observation candidate; trials 1..N-1 are warm.
+  // all of B's. WITHIN a trial, the four conditions' own order is rotated
+  // Latin-square-style by trial index (rotateConditions below) rather than
+  // fixed, so no one condition systematically runs first (and thus
+  // systematically absorbs whatever a fixed first slot costs — a cold
+  // provider-side cache, warm-up jitter, etc.) across every trial.
   for (let trial = 0; trial < trials; trial += 1) {
-    for (const condition of CONDITIONS) {
+    const rotated = rotateConditions(CONDITIONS, trial);
+    for (const condition of rotated) {
       // Deliberately sequential: this is a benchmark, not a load test —
       // concurrent children would contend for the same rate limit and
       // confound latency across conditions.
       const r = await runOnce(condition, trial, { cliArgs: ARGS, scriptPath, execFileImpl, timeoutMs });
-      r.cacheHypothesis = trial === 0 ? 'cold' : 'warm';
+      // Cache-state hypothesis: the eval JSON does not expose Anthropic's own
+      // prompt-cache usage fields (cache_read_input_tokens /
+      // cache_creation_input_tokens) anywhere today (see
+      // docs/sandy-benchmark.md "Interleaving and warm/cold separation"), and
+      // condition order is now rotated per trial rather than fixed, so
+      // "trial 0 == cold" is no longer even a positional proxy. Always
+      // 'unknown' until the harness threads real usage data through.
+      r.cacheHypothesis = 'unknown';
       runs.push(r);
-      log(`[benchmark] ${condition.id} trial=${trial} ranOk=${r.ranOk}${r.inconclusive ? ' inconclusive=true' : ''} wallMs=${r.wallMs}\n`);
+      log(`[benchmark] ${condition.id} trial=${trial} ranOk=${r.ranOk}${r.inconclusive ? ' inconclusive=true' : ''}${r.modelMismatch ? ' modelMismatch=true' : ''} wallMs=${r.wallMs}\n`);
     }
   }
 
@@ -224,19 +348,21 @@ async function runBenchmark({ argv = process.argv.slice(2), execFileImpl = execF
     only: ARGS.only || null,
     judge: !!ARGS.judge,
     conditions: byCondition,
-    runs, // full per-trial detail, including any crash/inconclusive error
+    runs, // full per-trial detail, including any crash/inconclusive/model-mismatch error
   };
 
-  // Missing data — a crash OR an inconclusive eval run — makes the whole
-  // benchmark exit non-zero: neither is a scenario-level miss inside a
-  // completed run, so neither is allowed to look like a clean pass.
-  const anyIncomplete = byCondition.some((c) => c.crashedRuns > 0 || c.inconclusiveRuns > 0);
+  // Missing data — a crash, an inconclusive eval run, OR a candidate
+  // condition whose resolved model didn't match what was requested — makes
+  // the whole benchmark exit non-zero: none of the three is a scenario-level
+  // miss inside a completed run, so none is allowed to look like a clean pass.
+  const anyIncomplete = byCondition.some((c) => c.crashedRuns > 0 || c.inconclusiveRuns > 0 || c.modelMismatchRuns > 0);
   return { report, outPath: ARGS.out || null, exitCode: anyIncomplete ? 1 : 0 };
 }
 
 module.exports = {
   parseArgs,
   buildConditions,
+  rotateConditions,
   runOnce,
   percentile,
   summarizeCondition,
@@ -257,8 +383,9 @@ if (require.main === module) {
       console.log(`\nWrote ${outPath}\n`);
       console.table(report.conditions.map((c) => ({
         condition: c.condition, trials: c.trials, completed: c.completedRuns,
-        inconclusive: c.inconclusiveRuns, crashed: c.crashedRuns, retried: c.retriedRuns,
-        scenarios: c.scenarioSamples, passed: c.scenarioPasses, failed: c.scenarioFailures, critical: c.criticalMisses,
+        inconclusive: c.inconclusiveRuns, crashed: c.crashedRuns, modelMismatch: c.modelMismatchRuns, retried: c.retriedRuns,
+        scenarios: c.scenarioAttemptSamples, passed: c.scenarioPasses, failed: c.scenarioFailures, critical: c.criticalMisses,
+        judged: c.judgedCount, judgePass: `${c.judgePassCountFinalAttemptOnly} (final attempt only)`, judgeFallback: c.judgeFallbackCount,
         'durationMs p50': c.durationMsMedian, 'durationMs p90': c.durationMsP90 ?? 'n/a (n<3)',
       })));
       process.exitCode = exitCode;

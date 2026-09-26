@@ -1650,19 +1650,31 @@ describe('write-tool turn ownership recheck (block parity)', () => {
   });
 });
 
-// Sandy slice 1, PR D — targeted race test for the "delayed tool response
-// with changed instructions" eval family (server/fixtures/voice-relay-eval/
-// scenarios.json: delayed-tool-response-changed-instructions). The eval
-// fixture grades the conversation-level outcome (never re-book a stale slot);
-// this test pins the underlying relay MECHANIC that outcome depends on:
-// handlePrompt's serialized `_chain` (relay-conversation.js ~1938-1957) must
-// queue a second caller turn behind a still-open first turn — including its
-// pending write tool AND its post-tool continuation round — rather than ever
-// letting the two turns' model rounds or messages interleave.
-describe('queued next-turn race: delayed tool response with changed instructions', () => {
+// Sandy slice 1, PR D — targeted race test for handlePrompt's serialized
+// `_chain` (relay-conversation.js ~1938-1957). This is a MECHANIC test, not
+// a model-behavior test: it scripts the FIRST turn's pending write tool to
+// go on and complete normally (the model "books" the abandoned slot) — an
+// "already-dispatched write" case, standing in for any write that was
+// already in flight before a second caller turn (a change of mind, a
+// correction) arrives. It proves two things about the serialization
+// mechanic ONLY:
+//   1. the second turn queues behind the WHOLE first turn — including its
+//      pending write tool and its post-tool continuation round — never
+//      interleaving rounds or messages with it;
+//   2. a write already dispatched before the change lands completes exactly
+//      once and is never duplicated or re-triggered by the second turn.
+// It does NOT exercise, and must never be read as covering, whether the
+// MODEL recognizes changed instructions and avoids booking the abandoned
+// slot in the first place — that is the eval fixture's own contract
+// (server/fixtures/voice-relay-eval/scenarios.json:
+// delayed-tool-response-changed-instructions, graded by its deterministic
+// `expect` checks against a real or scripted model) and is covered by
+// voice-relay-eval-new-scenario-checks.test.js's own describe block for that
+// scenario, not by this file.
+describe('queued next-turn race: an already-dispatched write completes once, never duplicated', () => {
   afterEach(() => { delete process.env.VOICE_RELAY_RENDERER; });
 
-  test('a second prompt (changed instructions) arriving while the first turn\'s write tool is still pending queues behind the WHOLE turn — no round overlap, no duplicate write', async () => {
+  test('a second prompt arriving while the first turn\'s write tool is still pending queues behind the WHOLE turn — no round overlap, and the already-dispatched write is never duplicated', async () => {
     const { IsolatedConvo, captured } = isolatedConvoFactory();
     const send = jest.fn();
     const convo = new IsolatedConvo({ callSid: 'CA-queue-race', from: '+19415551234', send });
@@ -1714,8 +1726,11 @@ describe('queued next-turn race: delayed tool response with changed instructions
     round2.resolve({ content: [{ type: 'text', text: 'Sure, I can get that filed for you.' }], stop_reason: 'end_turn' });
     await secondPrompt;
 
-    // The abandoned booking was placed exactly once — the changed instruction
-    // never re-triggers or duplicates the stale write.
+    // The already-dispatched booking write completed exactly once — the
+    // second turn's changed instruction never re-triggers or duplicates it.
+    // (Whether the MODEL should have placed this booking at all given the
+    // changed instruction is the eval fixture's own question, not this
+    // mechanic test's — see the file-header note above.)
     expect(executeToolBoundedSpy).toHaveBeenCalledTimes(1);
   });
 });
