@@ -94,7 +94,8 @@ jobs:
                   'tests/customer360-workspace-postgres.test.js', 'tests/admin-billing-recovery-postgres.test.js'],
                   { cwd: 'server', env: { ...process.env, C360_TEST_DATABASE_URL: `${base}${name}` } });
                 run(['../node_modules/jest/bin/jest.js', '--ci', '--runInBand', '--no-coverage',
-                  'tests/customer-geocode-review-postgres.test.js'],
+                  'tests/customer-geocode-review-postgres.test.js',
+                  'tests/customer-geocode-review-visits-postgres.test.js'],
                   { cwd: 'server', env: { ...process.env, SERVICE_GEOCODE_TEST_DATABASE_URL: `${base}${name}` } });
               } finally { await client.query(`DROP DATABASE "${name}" WITH (FORCE)`); }
             } finally { await client.end(); }
@@ -169,7 +170,8 @@ jobs:
         run: npx jest --ci --silent --runInBand tests/billing-email-provider-connection-postgres.test.js
       - name: Server tests (no DB — golden masters keep in-memory semantics)
         working-directory: server
-        run: npx jest --ci --silent --maxWorkers=2
+        # Recycle cumulative worker heaps between suites before V8 exhausts its limit.
+        run: npx jest --ci --silent --maxWorkers=2 --config='{"workerIdleMemoryLimit":"2GB"}'
       - name: Customer backend coverage floor
         # A focused, measured threshold for customer-app auth, pricing,
         # autopay, notification, and upload-validation logic. The broad suite
