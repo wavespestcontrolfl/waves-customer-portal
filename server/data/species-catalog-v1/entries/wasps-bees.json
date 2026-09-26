@@ -552,7 +552,7 @@
     "safety_line": "Females can sting if handled but rarely do; males cannot sting at all. See a doctor for signs of an allergic reaction, and call 911 if someone has trouble breathing.",
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
+      "status": "owner_approved",
       "notes": "structural changed to true: they drill new tunnels into sound fascia/trim (not just nesting in existing damage), which fits the brief's structural-damage definition. Resolved 2026-09-26: EENY-100/IN257 (Grissell, Sanford & Fasulo, UF/IFAS) loaded directly via the FLVC/EDIS journal host (the ask.ifas.ufl.edu short link still errors). It confirms round drilled entry holes with sawdust below, boring into unpainted back-face trim/fascia under eaves, the shiny bare abdomen that distinguishes Xylocopa from fuzzy bumble bees, \"weakening of structural timbers\" as a recognized economic damage type, and that only females may sting (rarely) while males hover/dart at people near the nest. (Only females possess a stinger in Hymenoptera generally, which is why males cannot sting -- basic, undisputed apidology, not separately sourced.) Source URL added."
     },
     "slug": "carpenter-bee",

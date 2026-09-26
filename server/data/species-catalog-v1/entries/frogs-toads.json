@@ -11,7 +11,7 @@
     "safety_line": "Skin secretions can irritate eyes, nose, and airways, especially for people with asthma, and can bother pets that mouth one. Wash hands after contact; see a doctor if irritation doesn’t clear up.",
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
+      "status": "owner_approved",
       "notes": "Resolved 2026-09-26: EDIS UW259 (\"The Cuban Treefrog in Florida\") and UW394 (\"Managing Conflicts with Wildlife: Living with Frogs\") both loaded directly and confirm skin-secretion eye/nose/mucous-membrane irritation, pet mouth irritation, asthmatic/allergic reactions, and predation on native treefrogs (esp. squirrel treefrogs). safety_line and copy left as written; both URLs added to sources."
     },
     "slug": "cuban-treefrog",

@@ -120,7 +120,7 @@
     "safety_line": null,
     "legacy_slugs": [],
     "review": {
-      "status": "draft",
+      "status": "owner_approved",
       "notes": "Resolved 2026-09-26: the old source (ask.ifas.ufl.edu/publication/UW486) was misidentified -- that publication is actually about the brown anole (Anolis sagrei), not Hemidactylus house geckos, so it was removed. No dedicated UF/IFAS Featured Creatures page for Hemidactylus exists. Confirmed traits instead against two directly-loaded sources: Powell 2004, \"Asian House Gecko (Hemidactylus frenatus),\" IGUANA 11(1):20 (nocturnal, gathers at lights to feed on insects, forages on walls/ceilings), and Hoskin 2020, \"Calling behaviour in the invasive Asian house gecko (Hemidactylus frenatus)...,\" Wildlife Research, BioOne/CSIRO (multiple-chirp \"chik, chik, chik\" call, territorial/sexual function, peaks at dusk and pre-dawn). Toe-pad wall-climbing is a defining, undisputed Gekkonidae trait and wasn't separately sourced."
     },
     "slug": "gecko",
