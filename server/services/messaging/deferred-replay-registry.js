@@ -719,10 +719,19 @@ const REGISTRY = {
           if (meta.original_message_type === 'payment_failed' && meta.payment_id) {
             const payment = await db('payments')
               .where({ id: meta.payment_id, customer_id: meta.customer_id })
-              .first('status');
-            return payment?.status === 'failed'
-              ? { eligible: true }
-              : { eligible: false, reason: payment ? `payment-${payment.status}` : 'payment-missing' };
+              .first('status', 'superseded_by_payment_id');
+            if (!payment) return { eligible: false, reason: 'payment-missing' };
+            if (payment.status !== 'failed') return { eligible: false, reason: `payment-${payment.status}` };
+            // A failure resolved by a separate retry payment stays
+            // status='failed' with superseded_by_payment_id pointing at the
+            // row that actually collected (see billing-cron.js) — a
+            // self-pointing id is the sweep's own "parked" marker and is
+            // still eligible, matching the retry sweep's own convention
+            // (retry-collectibility.js).
+            if (payment.superseded_by_payment_id && String(payment.superseded_by_payment_id) !== String(meta.payment_id)) {
+              return { eligible: false, reason: 'payment-superseded' };
+            }
+            return { eligible: true };
           }
           // A notice that CARRIED a PaymentIntent but resolves to no
           // invoice is a superseded association, not an invoice-less

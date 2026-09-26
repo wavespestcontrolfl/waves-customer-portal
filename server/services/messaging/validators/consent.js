@@ -181,11 +181,23 @@ async function checkConsentForPurpose(input, policy, contactState) {
   }
   const explicitChannels = usesExplicitBilling
     ? explicitBillingChannels(prefs, billingDeliveryCategory(input)) : null;
+  // Both refusals below can fire only because selectedLegs() snapshotted the
+  // customer's explicit channels before this per-leg check re-reads them
+  // fresh — the customer changed their billing channel choice mid-dispatch,
+  // not a permanent block. Retryable so the caller's retry re-runs the
+  // fan-out (under the same notificationEventKey, so already-accepted legs
+  // dedupe) against the NEW choice instead of dropping the notice.
   if (input.metadata?.billingDeliveryLeg && explicitChannels === null) {
-    return { ok: false, code: 'BILLING_PREFERENCES_CHANGED', reason: 'Billing delivery choices changed before delivery' };
+    return {
+      ok: false, code: 'BILLING_PREFERENCES_CHANGED', reason: 'Billing delivery choices changed before delivery',
+      retryable: true, deliveryOutcome: 'not_sent',
+    };
   }
   if (explicitChannels && !explicitChannels.includes(input.channel)) {
-    return { ok: false, code: 'CHANNEL_NOT_SELECTED', reason: 'Recipient has not selected this billing delivery channel' };
+    return {
+      ok: false, code: 'CHANNEL_NOT_SELECTED', reason: 'Recipient has not selected this billing delivery channel',
+      retryable: true, deliveryOutcome: 'not_sent',
+    };
   }
   if (input.channel === 'email' && prefs.email_enabled === false) {
     return { ok: false, code: 'EMAIL_OPTED_OUT', reason: 'Recipient has disabled email notifications' };

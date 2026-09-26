@@ -320,6 +320,38 @@ describe('billing / payment-confirmation delivery channel (SMS leg gating)', () 
   });
 });
 
+describe('explicit billing channel refusals mid-dispatch are retryable', () => {
+  // selectedLegs() snapshots the customer's explicit channel choice before
+  // dispatch; these per-leg checks re-read it fresh. A customer who changed
+  // their choice between the snapshot and this recheck gets a transient
+  // refusal, not a terminal one — the caller's retry re-runs the fan-out
+  // under the same notificationEventKey (Codex r1 P1 on #4843).
+  const billingLegInput = (overrides = {}) => ({
+    ...smsInput('billing'),
+    metadata: { billingDeliveryLeg: 'sms', ...overrides.metadata },
+    ...overrides,
+  });
+  const billingContactState = (prefs) => contactState(prefs, { id: 'c1', phone: '+19415550100' });
+
+  test('BILLING_PREFERENCES_CHANGED (explicit array cleared) is retryable on an explicit Text leg', async () => {
+    const res = await checkConsentForPurpose(
+      billingLegInput(),
+      resolvePolicy('customer', 'billing'),
+      billingContactState({ sms_enabled: true }), // no billing_channels array anymore
+    );
+    expect(res).toMatchObject({ ok: false, code: 'BILLING_PREFERENCES_CHANGED', retryable: true, deliveryOutcome: 'not_sent' });
+  });
+
+  test('CHANNEL_NOT_SELECTED (Text dropped from the array) is retryable on an explicit Text leg', async () => {
+    const res = await checkConsentForPurpose(
+      billingLegInput(),
+      resolvePolicy('customer', 'billing'),
+      billingContactState({ sms_enabled: true, billing_channels: ['email'] }),
+    );
+    expect(res).toMatchObject({ ok: false, code: 'CHANNEL_NOT_SELECTED', retryable: true, deliveryOutcome: 'not_sent' });
+  });
+});
+
 describe('Comms send_sms schema exposes billing_reminder', () => {
   test('the model can actually select the type that activates the billing channel gate', () => {
     // The opt-in gate only fires for message_type='billing_reminder' — if the

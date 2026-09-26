@@ -1,11 +1,13 @@
 const crypto = require('crypto');
 const { explicitBillingChannels } = require('../billing-delivery-channels');
+const { etDateString } = require('../../utils/datetime-et');
 
 const BILLING_MESSAGE_CATEGORIES = Object.freeze({
   invoice: 'invoice', payment_link: 'invoice', invoice_followup: 'invoice',
   receipt: 'payment_receipt', deposit_receipt: 'payment_receipt',
   billing_reminder: 'billing', late_payment: 'billing', payment_expiry: 'billing',
   autopay: 'billing', autopay_pre_charge: 'billing',
+  balance_reminder: 'billing', annual_prepay_payment_reminder: 'billing',
   payment_failure: 'payment_issue', payment_failed: 'payment_issue',
   autopay_charge_failed: 'payment_issue', autopay_retry_failed: 'payment_issue',
   autopay_retry_final_failed: 'payment_issue', ach_retry_notice: 'payment_issue',
@@ -52,7 +54,12 @@ function billingNotificationEventKey(input) {
   if (input.metadata?.notificationEventKey) return input.metadata.notificationEventKey;
   const eventId = input.metadata?.scheduled_sms_log_id || input.metadata?.stripe_event_id
     || input.metadata?.attempt_payment_id || input.metadata?.payment_id || input.paymentId;
-  const identity = eventId || [input.invoiceId, input.appointmentId, input.estimateId, input.body].filter(Boolean).join(':');
+  // With no event id, an identical recurring reminder (e.g. payment_expiry
+  // repeated after 30 days) hashes to the same body forever. Folding in the
+  // ET calendar day lets the same notice recur on a later day while still
+  // deduping resends within the same day.
+  const identity = eventId
+    || [input.invoiceId, input.appointmentId, input.estimateId, etDateString(), input.body].filter(Boolean).join(':');
   return `billing:${input.customerId}:${input.metadata?.original_message_type || input.purpose}:${crypto.createHash('sha256').update(String(identity)).digest('hex')}`;
 }
 

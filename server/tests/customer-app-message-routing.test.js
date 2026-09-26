@@ -612,6 +612,18 @@ describe('explicit billing channel combinations', () => {
     expect(appOptions.notificationEventKey).toBe('receipt:queue-1');
   });
 
+  test.each(['balance_reminder', 'annual_prepay_payment_reminder'])(
+    "%s is classified as 'billing' so it honors the Billing Reminder Delivery channel (Codex r1 P1 on #4843)",
+    (originalMessageType) => {
+      const { billingDeliveryCategory, BILLING_MESSAGE_CATEGORIES } = require('../services/messaging/billing-channel-routing');
+      expect(BILLING_MESSAGE_CATEGORIES[originalMessageType]).toBe('billing');
+      expect(billingDeliveryCategory({
+        purpose: 'payment_link',
+        metadata: { original_message_type: originalMessageType },
+      })).toBe('billing');
+    },
+  );
+
   test('separate payments with identical receipt copy have separate event identities', () => {
     const { billingNotificationEventKey } = require('../services/messaging/billing-channel-routing');
     expect(billingNotificationEventKey({ ...input, paymentId: 'payment-one' }))
@@ -624,6 +636,37 @@ describe('explicit billing channel combinations', () => {
     expect(billingNotificationEventKey(numeric)).toBe(billingNotificationEventKey({
       ...input, metadata: { ...input.metadata, scheduled_sms_log_id: '4242' },
     }));
+  });
+
+  test('with no event or entity id, an identical body on two different ET days gets different keys (Codex r1 P1 on #4843)', () => {
+    // Without an eventId, a recurring identical reminder (e.g. payment_expiry
+    // repeated 30 days later) used to hash on body alone and dedupe forever.
+    const { billingNotificationEventKey } = require('../services/messaging/billing-channel-routing');
+    const noEventId = { customerId: 'cust-1', body: 'Your card on file could not be charged.',
+      purpose: 'payment_failure', metadata: { original_message_type: 'payment_expiry' } };
+    jest.useFakeTimers().setSystemTime(new Date('2026-01-05T12:00:00-05:00'));
+    const day1 = billingNotificationEventKey(noEventId);
+    jest.setSystemTime(new Date('2026-01-05T23:59:00-05:00'));
+    const day1Again = billingNotificationEventKey(noEventId);
+    jest.setSystemTime(new Date('2026-02-04T12:00:00-05:00'));
+    const day2 = billingNotificationEventKey(noEventId);
+    jest.useRealTimers();
+    expect(day1).toBe(day1Again);
+    expect(day1).not.toBe(day2);
+  });
+
+  test('an explicit eventId or notificationEventKey is unaffected by the ET day (no drift for real events)', () => {
+    const { billingNotificationEventKey } = require('../services/messaging/billing-channel-routing');
+    const withEventId = { customerId: 'cust-1', body: 'x', purpose: 'payment_failure',
+      metadata: { original_message_type: 'payment_expiry', stripe_event_id: 'evt_1' } };
+    jest.useFakeTimers().setSystemTime(new Date('2026-01-05T12:00:00-05:00'));
+    const day1 = billingNotificationEventKey(withEventId);
+    jest.setSystemTime(new Date('2026-02-04T12:00:00-05:00'));
+    const day2 = billingNotificationEventKey(withEventId);
+    jest.useRealTimers();
+    expect(day1).toBe(day2);
+    const explicitKey = { ...withEventId, metadata: { ...withEventId.metadata, notificationEventKey: 'stable-key' } };
+    expect(billingNotificationEventKey(explicitKey)).toBe('stable-key');
   });
 
   test('unlisted receipt types forward their saved billing category to the App provider', async () => {
@@ -664,6 +707,38 @@ describe('explicit billing channel combinations', () => {
       return { success: false, preSendBlocked: true, code: verdict.code, error: verdict.reason };
     });
     expect(await sendCustomerMessage(input)).toMatchObject({ sent: false, blocked: true, code: 'CHANNEL_NOT_SELECTED' });
+  });
+
+  test('a mid-dispatch preference change makes the Text leg retryable, not terminal (Codex r1 P1 on #4843)', async () => {
+    // Same race as above, but forwarding the boundary verdict's `retryable`
+    // flag the way the real Twilio adapter does — the caller's retry must
+    // re-run the fan-out under the same notificationEventKey rather than
+    // treating the customer's mid-dispatch channel change as a dead end.
+    prefs.payment_receipt_channels = ['sms'];
+    Twilio.sendSMS.mockImplementation(async (_to, _body, options) => {
+      prefs.payment_receipt_channels = ['email'];
+      const verdict = await options.preSendCheck();
+      expect(verdict).toMatchObject({ ok: false, code: 'CHANNEL_NOT_SELECTED', retryable: true });
+      return { success: false, preSendBlocked: true, code: verdict.code, error: verdict.reason, retryable: verdict.retryable };
+    });
+    expect(await sendCustomerMessage(input)).toMatchObject({ sent: false, blocked: true, code: 'CHANNEL_NOT_SELECTED', retryable: true });
+  });
+
+  test('an accepted Email cannot hide a Text leg refused by a mid-dispatch preference change', async () => {
+    // billingDispatchOutcome precedence: an unfinished/refused Text
+    // outranks an earlier acceptance so the caller retries it (Codex r1 P1
+    // on #4843 — the retryable BILLING_PREFERENCES_CHANGED/CHANNEL_NOT_SELECTED
+    // refusals must not be masked by Email already having gone out).
+    const { dispatchBillingChannels } = require('../services/messaging/billing-channel-routing');
+    const result = await dispatchBillingChannels(input, { payment_receipt_channels: ['email', 'sms'] }, async (leg) =>
+      leg.metadata.billingDeliveryLeg === 'sms'
+        ? { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'CHANNEL_NOT_SELECTED',
+          reason: 'Recipient has not selected this billing delivery channel', retryable: true }
+        : { sent: true, deliveryOutcome: 'accepted', channel: 'email' });
+    expect(result).toMatchObject({
+      sent: false, retryable: true, code: 'CHANNEL_NOT_SELECTED',
+      channelResults: { email: { sent: true }, sms: { sent: false, code: 'CHANNEL_NOT_SELECTED' } },
+    });
   });
 
   test('billing choices cannot copy a secondary contact’s text to the account holder', async () => {

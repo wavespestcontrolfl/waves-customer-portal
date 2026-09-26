@@ -847,6 +847,48 @@ describe('deferred-replay registry', () => {
     expect(setupFailure.eligible).toBe(true);
   });
 
+  test('invoice-less payment_failed replay (Codex r1 P1 on #4843): a retry payment settling the failure supersedes the row', async () => {
+    // A failure resolved by a SEPARATE retry payment stays status='failed'
+    // with superseded_by_payment_id pointing at the row that actually
+    // collected (billing-cron.js) — replaying the frozen failure notice
+    // over a settled obligation must be refused, not just re-read status.
+    db.mockReturnValueOnce(firstChain({ status: 'failed', superseded_by_payment_id: 'pay-2' }));
+    const superseded = await recheckDeferredReplay('stripe_webhook_billing_deferred', {
+      original_message_type: 'payment_failed', payment_id: 'pay-1', customer_id: 'cust-1',
+    });
+    expect(superseded).toEqual({ eligible: false, reason: 'payment-superseded' });
+
+    // A self-pointing id is the sweep's own "parked" marker (matching
+    // retry-collectibility.js's convention), not a different collecting
+    // payment — still eligible.
+    db.mockReturnValueOnce(firstChain({ status: 'failed', superseded_by_payment_id: 'pay-1' }));
+    const selfParked = await recheckDeferredReplay('stripe_webhook_billing_deferred', {
+      original_message_type: 'payment_failed', payment_id: 'pay-1', customer_id: 'cust-1',
+    });
+    expect(selfParked).toEqual({ eligible: true });
+
+    // No supersession recorded — unchanged behavior.
+    db.mockReturnValueOnce(firstChain({ status: 'failed', superseded_by_payment_id: null }));
+    const stillFailed = await recheckDeferredReplay('stripe_webhook_billing_deferred', {
+      original_message_type: 'payment_failed', payment_id: 'pay-1', customer_id: 'cust-1',
+    });
+    expect(stillFailed).toEqual({ eligible: true });
+
+    // Settled by a status change directly (no supersession row) — unchanged.
+    db.mockReturnValueOnce(firstChain({ status: 'paid', superseded_by_payment_id: null }));
+    const paidDirect = await recheckDeferredReplay('stripe_webhook_billing_deferred', {
+      original_message_type: 'payment_failed', payment_id: 'pay-1', customer_id: 'cust-1',
+    });
+    expect(paidDirect).toEqual({ eligible: false, reason: 'payment-paid' });
+
+    // Row gone entirely — unchanged.
+    db.mockReturnValueOnce(firstChain(null));
+    const missing = await recheckDeferredReplay('stripe_webhook_billing_deferred', {
+      original_message_type: 'payment_failed', payment_id: 'pay-1', customer_id: 'cust-1',
+    });
+    expect(missing).toEqual({ eligible: false, reason: 'payment-missing' });
+  });
+
   test('card request recheck (r24): a passed appointment instant suppresses the bearer link', async () => {
     const { scheduledServiceApptTime } = require('../services/appointment-reminders');
 
