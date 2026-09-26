@@ -90,6 +90,8 @@ async function processVendorInvoice(email, classification) {
 
       parsedInvoice = parseClaudeJson(anthropicText(parseResponse));
       if (!parsedInvoice) ledgerCallRejected(parseResponse, 'invalid_json');
+      else if (typeof parsedInvoice !== 'object' || Array.isArray(parsedInvoice)
+        || (parsedInvoice.total == null && !parsedInvoice.invoice_number)) ledgerCallRejected(parseResponse, 'schema_invalid');
 
       if (parsedInvoice) {
         await db('email_attachments').where({ id: pdfAttachment.id }).update({

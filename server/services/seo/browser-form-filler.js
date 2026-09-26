@@ -183,7 +183,14 @@ async function boundedShot(page) {
   }
 }
 
-async function callVision(anthropic, screenshotB64, text) {
+// The callers' own gates, so the ledger fails exactly what the lane rejects
+// (Codex r5 on #4884): the plan gate before any page interaction, and the
+// verifier's strict booleans.
+const planShapeInvalid = (plan) => !(plan && typeof plan === 'object' && BLOCKED_VALUES.has(plan.blocked)
+  && typeof plan.form_present === 'boolean' && Array.isArray(plan.actions));
+const verifyShapeInvalid = (v) => !(v && typeof v === 'object' && ['success', 'pending', 'rejected'].every((k) => typeof v[k] === 'boolean'));
+
+async function callVision(anthropic, screenshotB64, text, shapeInvalid = null) {
   const resp = await ledgerCall('anthropic', MODEL, () => anthropic.messages.create({
     model: MODEL, ...anthropicEffortConfig(MODEL), max_tokens: anthropicMaxTokens(MODEL, 2048),
     messages: [{ role: 'user', content: [
@@ -193,6 +200,7 @@ async function callVision(anthropic, screenshotB64, text) {
   }), { laneId: 'form_filler' });
   const parsed = parseJson((resp.content || []).map((b) => b.text || '').join(''));
   if (!parsed) ledgerCallRejected(resp, 'invalid_json');
+  else if (shapeInvalid && shapeInvalid(parsed)) ledgerCallRejected(resp, 'schema_invalid');
   return parsed;
 }
 
@@ -315,7 +323,7 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
     const shot1 = await boundedShot(page);
     let plan;
     try {
-      plan = await callVision(client, shot1.toString('base64'), planPrompt(nap));
+      plan = await callVision(client, shot1.toString('base64'), planPrompt(nap), planShapeInvalid);
     } catch (e) {
       // The planning LLM call failed BEFORE any form interaction (timeout/5xx/outage/bad
       // model override) — environmental, not this prospect's fault. RUN-LEVEL so the
@@ -423,7 +431,7 @@ async function fillCitationForm({ submitUrl, nap, expectedHost = null }, { launc
     try {
       shot2 = await boundedShot(page);
       verify = await callVision(client, shot2.toString('base64'),
-        'Did the previous business-listing submission SUCCEED? success=a confirmation/thank-you or a moderation/"pending review" notice; rejected=a clear error/rejection OR a next-step gate that wasn\'t completed (validation error, "required field", a login/CAPTCHA/payment wall, a phone/SMS verification step, "try again"). Return ONLY JSON: {"success":bool,"pending":bool,"rejected":bool,"live_url":"url or null","notes":"≤15 words"}');
+        'Did the previous business-listing submission SUCCEED? success=a confirmation/thank-you or a moderation/"pending review" notice; rejected=a clear error/rejection OR a next-step gate that wasn\'t completed (validation error, "required field", a login/CAPTCHA/payment wall, a phone/SMS verification step, "try again"). Return ONLY JSON: {"success":bool,"pending":bool,"rejected":bool,"live_url":"url or null","notes":"≤15 words"}', verifyShapeInvalid);
     } catch (e) {
       logger.warn(`[form-filler] post-submit verification failed for ${expectedHost}: ${e.message}`);
     }

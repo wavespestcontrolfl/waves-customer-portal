@@ -91,6 +91,9 @@ Return ONLY valid JSON, no markdown.`;
     const text = stripThinkingBlocks(response).content?.[0]?.text || '';
     let triage;
     try { triage = JSON.parse(text); } catch (err) { ledgerCallRejected(response, 'invalid_json'); throw err; }
+    if (!triage || typeof triage !== 'object' || Array.isArray(triage) || !TRIAGE_SCHEMA.required.every((k) => k in triage)) {
+      ledgerCallRejected(response, 'schema_invalid');
+    }
     return mapTriage(triage);
   } catch (err) {
     logger.error(`[lead-triage] AI triage failed: ${err.message}`);

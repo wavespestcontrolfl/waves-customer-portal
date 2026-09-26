@@ -619,6 +619,7 @@ async function extractEventsWithClaude(source, content, { mode, maxEvents }) {
     );
     parsed = { events: recovered };
   }
+  if (!Array.isArray(parsed.events)) ledgerCallRejected(response, 'schema_invalid');
   return Array.isArray(parsed.events) ? parsed.events.slice(0, maxEvents) : [];
 }
 

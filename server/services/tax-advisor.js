@@ -26,6 +26,13 @@ try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 let TwilioService;
 try { TwilioService = require('./twilio'); } catch { TwilioService = null; }
 
+// The weekly report's one required field: storeReport persists
+// executive_summary, and a report without it is a blank row.
+function isUsableTaxReport(report) {
+  return !!report && typeof report === 'object' && !Array.isArray(report)
+    && typeof report.executive_summary === 'string' && report.executive_summary.trim().length > 0;
+}
+
 class TaxAdvisor {
 
   async generateWeeklyReport() {
@@ -174,11 +181,21 @@ Please search for current FL and federal tax changes, then provide your analysis
       // Parse JSON from response
       const cleaned = rawText.replace(/```json\s*/g, '').replace(/```/g, '').trim();
       let report;
+      let parsedOk = true;
       try {
         report = JSON.parse(cleaned);
       } catch (parseErr) {
+        parsedOk = false;
         ledgerCallRejected(response, 'invalid_json');
         logger.error(`[TaxAdvisor] Failed to parse AI response: ${parseErr.message}`);
+        report = this.generateFallbackReport(analysisData);
+        report.raw_ai_response = rawText;
+      }
+      // Valid JSON of the wrong shape ({}, [], no summary) used to be stored as
+      // a blank report; it takes the parse-failure path instead (Codex r5 on #4884).
+      if (parsedOk && !isUsableTaxReport(report)) {
+        ledgerCallRejected(response, 'schema_invalid');
+        logger.error('[TaxAdvisor] AI response had the wrong shape — using the fallback report');
         report = this.generateFallbackReport(analysisData);
         report.raw_ai_response = rawText;
       }
@@ -495,3 +512,4 @@ Please search for current FL and federal tax changes, then provide your analysis
 }
 
 module.exports = new TaxAdvisor();
+module.exports.isUsableTaxReport = isUsableTaxReport;
