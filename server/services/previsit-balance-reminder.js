@@ -195,9 +195,12 @@ async function explicitChannelPolicyGate({ visit, consult, explicitChannels }) {
   }
   const permitted = verdicts.filter((v) => v.permitted);
   if (!permitted.length) return { skip: true };
-  // Quote only debt a permitted selected channel holds eligible.
-  const filtering = permitted.find((v) => v.eligibleInvoiceIds !== null && v.eligibleInvoiceIds !== undefined);
-  return { eligibleIds: filtering ? filtering.eligibleInvoiceIds : null };
+  // Every permitted leg sends the same copy, so quote only debt that EVERY
+  // permitted selected channel holds eligible (null = no filtering).
+  const lists = permitted.map((v) => v.eligibleInvoiceIds).filter((ids) => ids !== null && ids !== undefined);
+  if (!lists.length) return { eligibleIds: null };
+  const eligibleIds = lists.reduce((acc, ids) => acc.filter((id) => ids.map(String).includes(String(id))));
+  return { eligibleIds };
 }
 
 // One episode per appointment, stable across a released-claim retry, so a
