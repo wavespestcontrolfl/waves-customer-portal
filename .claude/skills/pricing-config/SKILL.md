@@ -49,7 +49,7 @@ environment that carries the row (prod does), **editing
   `cd server && CAPTURE_BASELINE=1 npx jest tests/pricing-engine.regression.test.js`
   (the suite lives in the `server` workspace), then hand-apply the delta
   to `pricing-engine.baseline.json`.
-- Known client-mirror sites beyond TechEstimatorPage:
+- Known client-mirror sites:
   `client/src/lib/estimateEngine.js` (mosquito ×2 blocks),
   `EstimateToolViewV2.jsx` (approx preview), `PortalPage`, `EstimatePage.jsx`.
   Mosquito price changes must sync ALL of them in the SAME PR, and the

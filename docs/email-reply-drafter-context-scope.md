@@ -344,10 +344,13 @@ reply never claims an estimate was created/sent without committed evidence.
 | `GATE_EMAIL_VOICE_PROFILE` | off | Sanitized approved profile used by the new email path; independent of existing SMS/phone consumers. |
 | `GATE_VOICE_CORPUS_EMAIL_SOURCE` | off | Miner ingests `email_human_reply` rows. |
 
-**Update 2026-09-26:** `GATE_EMAIL_VOICE_PROFILE` and `GATE_VOICE_CORPUS_EMAIL_SOURCE`
-are registered in `server/config/feature-gates.js` and already read by
-`server/services/email/email-reply-style.js` — but no drafter calls that module
-yet, so they have no live effect. `GATE_EMAIL_REPLY_CONTEXT` is still unbuilt —
+**Update 2026-09-26:** two of these gates now exist. `GATE_VOICE_CORPUS_EMAIL_SOURCE`
+is live: the nightly voice-corpus miner (`mineEmailPairs` in
+`server/services/sms-voice-corpus-miner.js`) reads it and ingests
+`email_human_reply` rows into `voice_corpus_examples`. `GATE_EMAIL_VOICE_PROFILE`
+is registered in `server/config/feature-gates.js` and read by
+`server/services/email/email-reply-style.js`, but no drafter calls that module
+yet, so it has no live effect. `GATE_EMAIL_REPLY_CONTEXT` is still unbuilt —
 register it in `server/config/feature-gates.js` during implementation. Context off
 must skip new context/example/profile reads and preserve the existing callers'
 behavior; profile on alone must not activate the new path. Corpus ingestion off
