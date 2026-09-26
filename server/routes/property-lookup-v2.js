@@ -4244,11 +4244,22 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
       );
       if (Number.isInteger(fallbackPalm) && fallbackPalm > 0 && fallbackPalm <= 200) tsPalmCount = fallbackPalm;
     }
+    // Of those palms, the operator's count of LARGE ones (canopy wider than
+    // ~15 ft) — admin estimate only; public quotes and the AI intake never
+    // ask (owner ruling 2026-09-26). Whole number, at most the palm count;
+    // meaningless without palms.
+    let tsLargePalmCount;
+    if (tsPalmCount !== undefined && !isBlankInput(p.largePalmCount)) {
+      const n = strictWholeNumber(p.largePalmCount);
+      if (!(n >= 0 && n <= tsPalmCount)) throw treeShrubInputError('Large palms must be a whole number no greater than the palm count.');
+      if (n > 0) tsLargePalmCount = n;
+    }
     services.treeShrub = {
       tier: tsTier,
       access: tsAccess,
       ...(resolvedTreeCount !== undefined ? { treeCount: resolvedTreeCount } : {}),
       ...(tsPalmCount !== undefined ? { palmCount: tsPalmCount } : {}),
+      ...(tsLargePalmCount !== undefined ? { largePalmCount: tsLargePalmCount } : {}),
     };
   }
   if (sel.has('PALM_INJECTION')) {

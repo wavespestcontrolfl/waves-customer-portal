@@ -945,6 +945,9 @@ function generateEstimate(input) {
         // reserve — a caller's "10 palms" must reach the reserve terms, not
         // masquerade as 10 generic trees. treeCount stays NON-palm.
         palmCount: services.treeShrub.palmCount,
+        // Of those, the admin estimate's large palms (canopy wider than
+        // ~15 ft) — each prices as TREE_SHRUB largePalmFactor palms.
+        largePalmCount: services.treeShrub.largePalmCount,
         // Quote-time knob snapshot replayed from a stored estimate (see
         // estimate-public#savedFloorReplayOverrides). Absent on fresh
         // quotes, which resolve the live pricing_config values.

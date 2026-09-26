@@ -188,6 +188,19 @@ describe('admin tree & shrub service-line inputs (audit INP-001/002/004)', () =>
     expect(untrusted.services.treeShrub).not.toHaveProperty('palmCount');
   });
 
+  test('the operator\'s large palms ride the service line as a validated subset of the palm count', () => {
+    const translate = (extra) => translateV2CallToV1Input(baseProfile(extra), ['TREE_SHRUB'], {});
+    expect(translate({ palmCount: 10, largePalmCount: 3 }).services.treeShrub).toMatchObject({ palmCount: 10, largePalmCount: 3 });
+    expect(translate({ palmCount: 10, largePalmCount: 10 }).services.treeShrub.largePalmCount).toBe(10);
+    for (const blank of [0, '', undefined]) {
+      expect(translate({ palmCount: 10, largePalmCount: blank }).services.treeShrub).not.toHaveProperty('largePalmCount');
+    }
+    // Meaningless without palms.
+    expect(translate({ largePalmCount: 3 }).services.treeShrub).not.toHaveProperty('largePalmCount');
+    expect(() => translate({ palmCount: 4, largePalmCount: 5 })).toThrow(/Large palms/);
+    expect(() => translate({ palmCount: 4, largePalmCount: 1.5 })).toThrow(/Large palms/);
+  });
+
   describe('replaying a persisted engineRequest keeps the sold palm terms (pre-push r2 P0)', () => {
     const legacyRequest = () => ({
       profile: baseProfile({ palmCount: 30 }),
@@ -233,6 +246,10 @@ describe('admin tree & shrub service-line inputs (audit INP-001/002/004)', () =>
       // Tier, access and the property-level palm inventory are untouched.
       const stripped = applyTreeShrubPalmReplay(translated(), stored({}));
       expect(stripped.services.treeShrub).toMatchObject({ tier: 'standard', access: 'easy' });
+      // Large palms are a subset of the count: they leave with it and stay with it.
+      const withLarge = () => translateV2CallToV1Input(baseProfile({ palmCount: 30, largePalmCount: 5 }), ['TREE_SHRUB'], {});
+      expect(applyTreeShrubPalmReplay(withLarge(), stored({ palmCountSource: 'property' })).services.treeShrub).not.toHaveProperty('largePalmCount');
+      expect(applyTreeShrubPalmReplay(withLarge(), stored({ palmCountSource: 'service_line' })).services.treeShrub.largePalmCount).toBe(5);
     });
 
     test('the server-authoritative recompute strips it on a DECLARED replay and prices the legacy job unchanged', async () => {
