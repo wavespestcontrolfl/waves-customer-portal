@@ -147,7 +147,11 @@ const FIXTURE = buildFixtureCatalog({
       safety: { stings: true, venomous: false, structural: false, toxic_to_pets: false, disease_vector: false, irritant: false },
       range: 'common', active_months: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
       traits: ['Reddish-brown mound builders', 'Aggressive when disturbed', 'Two-node waist'],
-      look_alikes: [],
+      // One look-alike deliberately points at an UNAPPROVED entry, to
+      // exercise the review-approval gate on look-alike identities too
+      // (Codex round-0 P1: an approved entry's look_alikes must not out an
+      // unapproved species by name/slug).
+      look_alikes: [{ slug: 'unreviewed-ant', difference: 'Unreviewed ants are smaller and lack the two-node waist.', next_photo: 'A close-up of the waist.', photo_can_confirm: true }],
       copy: { what_it_means: 'Fire ants build mounds and sting in numbers.', fact: 'A single mound can hold hundreds of thousands of ants.' },
       links: { site_page: '/pest-identifier/fire-ant/' },
       service: { line: 'pest', key: 'pest', label: 'General Pest Control', inspection_first: false, referral: null },

@@ -227,6 +227,23 @@ describe('buildAnswer — next_photo', () => {
     const built = buildAnswer(baseCtx({ candidates: [cand('unreviewed-ant', 0.95)] }));
     expect(built.nextPhoto).toEqual({ ask: 'Ant group node photo', why: 'Ant group why', photo_can_confirm: true });
   });
+
+  test('a single entry-level candidate (no second candidate) preserves its own first look-alike\'s photo_can_confirm:false — Codex round-0 P1', () => {
+    const built = buildAnswer(baseCtx({ candidates: [cand('no-photo-pair-a', 0.60)] }));
+    expect(built.answer.level).toBe('entry');
+    expect(built.nextPhoto.photo_can_confirm).toBe(false);
+    expect(built.tier).toBe('needs_more_evidence');
+  });
+});
+
+describe('buildAnswer — look-alike identities respect the review gate (Codex round-0 P1)', () => {
+  test('an approved entry\'s look_alikes never names an UNAPPROVED look-alike', () => {
+    const built = buildAnswer(baseCtx({ candidates: [cand('fire-ant', 0.85)] }));
+    expect(built.entry.look_alikes).toHaveLength(1);
+    expect(built.entry.look_alikes[0].slug).toBeNull();
+    expect(built.entry.look_alikes[0].common_name).toBeNull();
+    expect(JSON.stringify(built.entry)).not.toContain('Unreviewed Ant');
+  });
 });
 
 describe('buildAnswer — referral', () => {
@@ -489,6 +506,19 @@ describe('identifyPestV2 — escalation triggers', () => {
 
     const result = await identifyPestV2([PHOTO]);
     expect(result.internal.escalation_reasons).toContain('consequential_lookalike_close');
+  });
+
+  test('a verify call that answers ok but omits a requested candidate is treated as gemini_missed, not a silent unverified confidence — Codex round-0 P1', async () => {
+    dispatch
+      .mockResolvedValueOnce(candidatesReply([{ slug: 'fire-ant', confidence: 0.95 }]))
+      .mockResolvedValueOnce({ ok: true, json: { candidates: [] } }) // verify answered ok, but verified nothing
+      .mockResolvedValueOnce({ ok: false, reason: 'openai_timeout' }); // escalation unavailable
+
+    const result = await identifyPestV2([PHOTO]);
+    expect(result.internal.escalation_reasons).toContain('gemini_missed');
+    // The unverified 0.95 can never read pretty_sure once a trigger fired
+    // with no OpenAI answer.
+    expect(result.v2.answer.wording).toBe('likely');
   });
 
   test('no trigger fires on a clean, confident, uncontested read — no escalation call at all', async () => {

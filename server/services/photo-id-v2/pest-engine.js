@@ -259,6 +259,17 @@ async function callEscalationModel(images, catalogEntries, candidateContext) {
 
 // ── escalation triggers (V2-CONTRACT.md engine step 3) ────────────────────
 
+/** Codex round-0 P1: a verify call that came back `ok: true` but omitted one
+ * of the candidates it was asked to check (empty `candidates: []`, or just
+ * missing that slug) must NOT leave that candidate's original candidates-
+ * call confidence standing unverified — that is exactly the "empty or
+ * invalid JSON" miss the contract already treats as `gemini_missed`. */
+function verifyCoversAllCandidates(verifyResult, catalogCandidates) {
+  if (!verifyResult?.ok || !Array.isArray(verifyResult.json?.candidates)) return false;
+  const verifiedSlugs = new Set(verifyResult.json.candidates.filter((v) => v?.slug).map((v) => String(v.slug)));
+  return catalogCandidates.every((c) => verifiedSlugs.has(c.slug));
+}
+
 function mergeVerify(candidates, verifyResult) {
   const bySlug = new Map();
   if (verifyResult?.ok && Array.isArray(verifyResult.json?.candidates)) {
@@ -379,9 +390,13 @@ function buildEntryBlock(entry) {
     what_it_means: entry.copy?.what_it_means || null,
     fact: entry.copy?.fact || null,
     site_url: entry.links?.site_page ? `${SITE_BASE_URL}${entry.slug}/` : null,
+    // Codex round-0 P1: a look-alike's own catalog identity is gated by ITS
+    // OWN review approval, same as any other candidate — an approved
+    // entry's page must not out an unapproved look-alike by name/slug just
+    // because it happens to be listed here.
     look_alikes: catalog.lookAlikes(entry.slug).map((la) => ({
-      slug: la.slug,
-      common_name: la.node ? la.node.common_name : null,
+      slug: la.node && isApproved(la.node) ? la.slug : null,
+      common_name: la.node && isApproved(la.node) ? la.node.common_name : null,
       difference: la.difference || null,
     })),
   };
@@ -442,15 +457,29 @@ function nextPhotoFor(wording, candidates, level, nodeId) {
   if (wording === 'pretty_sure') return null;
   const top = candidates[0] || null;
   const second = candidates[1] || null;
+  // A curated pair between the top two candidates. Read the raw
+  // `look_alikes` entry directly (not the `lookAlikes()` convenience
+  // wrapper, which does not pass through `photo_can_confirm`) so a pair
+  // explicitly marked unconfirmable-by-photo is honored.
   if (top?.entry && second?.entry) {
-    // Read the raw `look_alikes` entry directly (not the `lookAlikes()`
-    // convenience wrapper, which does not pass through `photo_can_confirm`)
-    // so a pair explicitly marked unconfirmable-by-photo is honored.
     const pair = (top.entry.look_alikes || []).find((l) => l.slug === second.entry.slug);
     if (pair) return { ask: pair.next_photo || null, why: pair.difference || null, photo_can_confirm: pair.photo_can_confirm !== false };
   }
-  const id = level === 'entry' && top?.entry ? top.entry.slug : nodeId;
-  const np = id ? catalog.nextPhoto(id) : null;
+  // Entry level with no second-candidate pair match: the SAME fallback
+  // `catalog.nextPhoto` uses internally for a bare entry (its own first
+  // look-alike) — read directly, same reason as above (Codex round-0 P1:
+  // `catalog.nextPhoto`'s wrapper was silently dropping `photo_can_confirm`
+  // here too, always reading as confirmable).
+  if (level === 'entry' && top?.entry) {
+    const fallbackPair = (top.entry.look_alikes || [])[0];
+    return fallbackPair
+      ? { ask: fallbackPair.next_photo || null, why: fallbackPair.difference || null, photo_can_confirm: fallbackPair.photo_can_confirm !== false }
+      : null;
+  }
+  // Node level (group/subgroup/category): the catalog's own authored
+  // prompt has no per-pair confirmability of its own — always
+  // photo_can_confirm: true (contract delta #3).
+  const np = nodeId ? catalog.nextPhoto(nodeId) : null;
   return np ? { ask: np.ask || null, why: np.why || null, photo_can_confirm: true } : null;
 }
 
@@ -699,7 +728,8 @@ async function identifyPestV2(photos = []) {
     verifiedCandidates = mergeVerify(candidatesFromCall1, verifyResult);
   }
 
-  const geminiMissed = !candidatesResult.ok || (catalogCandidates1.length > 0 && !verifyResult?.ok);
+  const geminiMissed = !candidatesResult.ok
+    || (catalogCandidates1.length > 0 && !verifyCoversAllCandidates(verifyResult, catalogCandidates1));
   const contradicted = catalogCandidates1.length > 0 && detectSelfContradiction(candidatesJson, verifiedCandidates);
   const lookAlikeClose = consequentialLookAlikeClose(verifiedCandidates);
   const verifiedTop = dedupeCandidates(verifiedCandidates)[0] || null;
