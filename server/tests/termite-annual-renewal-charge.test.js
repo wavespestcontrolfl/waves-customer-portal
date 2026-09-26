@@ -1401,10 +1401,19 @@ describe('termite annual renewal charge', () => {
     // — a genuine conflict". Default: undefined (no test exercises the
     // guard-miss re-read unless it passes this).
     parentAfterGuardMiss = undefined,
+    // Codex #4971 post-push audit round-5 (item 2): processGraceLapseSequence
+    // now re-verifies its own retrieval task's row exists (mirroring #4940's
+    // actOnDueDeclineRetrieval) before letting the lapse complete. Default:
+    // a row DOES exist, so every EXISTING test's happy path is unaffected
+    // unless it explicitly passes `notificationsTaskRow: null`.
+    notificationsTaskRow = { id: 'notif-1' },
   } = {}) {
     const startedUpdate = jest.fn().mockResolvedValue(1);
     const completedUpdate = jest.fn().mockResolvedValue(1);
     const conn = jest.fn((table) => {
+      if (table === 'notifications') {
+        return { where: jest.fn(() => ({ whereRaw: jest.fn(() => ({ first: jest.fn().mockResolvedValue(notificationsTaskRow) })) })) };
+      }
       if (table !== 'annual_prepay_terms') throw new Error(`unexpected table ${table}`);
       return {
         where: jest.fn(() => ({
@@ -1455,7 +1464,14 @@ describe('termite annual renewal charge', () => {
     const voidInvoice = jest.fn(voidInvoiceImpl || (async () => ({})));
     jest.doMock('../services/invoice', () => ({ voidInvoice }));
     const raiseTermiteRetrievalTask = jest.fn(raiseTermiteRetrievalTaskImpl || (async () => ({ raised: true })));
-    jest.doMock('../services/cancellation-processor', () => ({ raiseTermiteRetrievalTask }));
+    // The REAL termRetrievalDedupeKey format (a pure string formatter, no
+    // DB access) — inlined rather than required, since jest.doMock below
+    // replaces this exact module and a require here could race against
+    // module-registry resets between tests.
+    const termRetrievalDedupeKey = (termId, episodeKey, retrieveAfter) => (
+      `termite_station_retrieval:term:${termId}:${episodeKey}:${retrieveAfter ? `dated:${retrieveAfter}` : 'immediate'}`
+    );
+    jest.doMock('../services/cancellation-processor', () => ({ raiseTermiteRetrievalTask, termRetrievalDedupeKey }));
     const recordDecision = jest.fn(recordDecisionImpl || (async () => ({ id: 'parent-1' })));
     // Codex round-7 P1 (2nd audit round): processGraceLapseForTerm now
     // wraps its whole sequence (eligibility re-check through the final
@@ -1801,6 +1817,127 @@ describe('termite annual renewal charge', () => {
       expect(raiseTermiteRetrievalTask).toHaveBeenCalledTimes(1);
       expect(recordDecision).toHaveBeenCalledTimes(1);
       expect(completedUpdate).toHaveBeenCalledTimes(1);
+    });
+
+    // Codex #4971 post-push audit round-5 (item 2): a request-less raise
+    // (the portal has no service request behind it) needs eventAt to place
+    // itself correctly in the account's retrieval chronology — #4940's own
+    // raiseTermiteRetrievalTask ranks a request-less raise as the OLDEST
+    // event without it, yielding to any earlier request-keyed row even one
+    // staff already acted on.
+    test('P1 (item 2): the retrieval raise passes eventAt = this lapse\'s own renewal_lapse_started_at', async () => {
+      mockCommon();
+      const { raiseTermiteRetrievalTask } = mockLapseDeps();
+      const { conn } = makeLapseConn();
+
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      const startedAt = new Date('2026-10-01T00:00:00Z');
+      const term = {
+        id: 'succ-term-1', customer_id: 'cust-1', prepay_invoice_id: 'succ-invoice-1', renewed_from_term_id: 'parent-1',
+        renewal_lapse_started_at: startedAt,
+      };
+      await _private.processGraceLapseForTerm(term, conn);
+
+      expect(raiseTermiteRetrievalTask).toHaveBeenCalledWith('cust-1', null, expect.objectContaining({
+        termId: 'succ-term-1', episodeKey: 'renewal_grace_lapse', eventAt: startedAt,
+      }));
+    });
+
+    // A newer retrieval instruction already stands on the account —
+    // nothing was raised or reopened for THIS lapse. Confirming the bell
+    // itself persists lets the lapse proceed to complete anyway (staff
+    // have now been told to check the newer instruction).
+    test('P1 (item 2): supersededByNewer, confirmation bell persists — the lapse still completes', async () => {
+      mockCommon();
+      const notifyAdmin = jest.fn(async () => ({ id: 'n1', deduped: false, suppressed: false }));
+      jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
+      const { recordDecision } = mockLapseDeps({
+        raiseTermiteRetrievalTaskImpl: async () => ({ raised: true, supersededByNewer: 'req-42' }),
+      });
+      const { conn, completedUpdate } = makeLapseConn();
+
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      const term = {
+        id: 'succ-term-1', customer_id: 'cust-1', prepay_invoice_id: 'succ-invoice-1', renewed_from_term_id: 'parent-1',
+        renewal_lapse_started_at: new Date('2026-10-01T00:00:00Z'),
+      };
+      const outcome = await _private.processGraceLapseForTerm(term, conn);
+
+      expect(outcome).toBe('lapsed');
+      expect(notifyAdmin).toHaveBeenCalledWith('billing', expect.any(String), expect.stringMatching(/req-42/), expect.objectContaining({
+        dedupeKey: 'termite-renewal-charge:succ-term-1:lapse_retrieval_superseded',
+      }));
+      expect(recordDecision).toHaveBeenCalledTimes(1); // still decides the parent
+      expect(completedUpdate).toHaveBeenCalledWith(expect.objectContaining({ renewal_lapse_completed_at: expect.any(Date) }));
+    });
+
+    // The SAME supersession, but the confirmation bell itself fails to
+    // persist (notifyAdmin returns null) — staff were never actually told,
+    // so this lapse must stay retryable, never marked complete.
+    test('P1 (item 2): supersededByNewer, confirmation bell fails to persist — stays deferred, never completes', async () => {
+      mockCommon();
+      jest.doMock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => null) }));
+      const { recordDecision } = mockLapseDeps({
+        raiseTermiteRetrievalTaskImpl: async () => ({ raised: true, supersededByNewer: 'req-42' }),
+      });
+      const { conn, completedUpdate } = makeLapseConn();
+
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      const term = {
+        id: 'succ-term-1', customer_id: 'cust-1', prepay_invoice_id: 'succ-invoice-1', renewed_from_term_id: 'parent-1',
+        renewal_lapse_started_at: new Date('2026-10-01T00:00:00Z'),
+      };
+      const outcome = await _private.processGraceLapseForTerm(term, conn);
+
+      expect(outcome).toBe('deferred');
+      expect(recordDecision).not.toHaveBeenCalled(); // never decides the parent on an unconfirmed supersession
+      expect(completedUpdate).not.toHaveBeenCalled();
+    });
+
+    // Mirrors #4940's own actOnDueDeclineRetrieval verification: an
+    // ordinary "raised: true" is not itself proof — this lapse's own task
+    // row must actually exist in `notifications` before the lapse may
+    // complete. A missing row (a replication lag, or a genuinely lost
+    // insert the caller's own try/catch swallowed) must not silently pass.
+    test('P1 (item 2): raised true but this lapse\'s own task row is missing — stays deferred, never completes', async () => {
+      mockCommon();
+      const { recordDecision } = mockLapseDeps({
+        raiseTermiteRetrievalTaskImpl: async () => ({ raised: true }),
+      });
+      const { conn, completedUpdate } = makeLapseConn({ notificationsTaskRow: null });
+
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      const term = {
+        id: 'succ-term-1', customer_id: 'cust-1', prepay_invoice_id: 'succ-invoice-1', renewed_from_term_id: 'parent-1',
+        renewal_lapse_started_at: new Date('2026-10-01T00:00:00Z'),
+      };
+      const outcome = await _private.processGraceLapseForTerm(term, conn);
+
+      expect(outcome).toBe('deferred');
+      expect(recordDecision).not.toHaveBeenCalled();
+      expect(completedUpdate).not.toHaveBeenCalled();
+    });
+
+    // A term with no rented stations at all (raised: false, reason:
+    // 'no_rented_stations') needs no task-row verification — there is
+    // nothing to verify, and this must complete exactly as before.
+    test('P1 (item 2): no rented stations at all — needs no task-row check, still completes normally', async () => {
+      mockCommon();
+      const { recordDecision } = mockLapseDeps({
+        raiseTermiteRetrievalTaskImpl: async () => ({ raised: false, reason: 'no_rented_stations' }),
+      });
+      const { conn, completedUpdate } = makeLapseConn({ notificationsTaskRow: null });
+
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      const term = {
+        id: 'succ-term-1', customer_id: 'cust-1', prepay_invoice_id: 'succ-invoice-1', renewed_from_term_id: 'parent-1',
+        renewal_lapse_started_at: new Date('2026-10-01T00:00:00Z'),
+      };
+      const outcome = await _private.processGraceLapseForTerm(term, conn);
+
+      expect(outcome).toBe('lapsed');
+      expect(recordDecision).toHaveBeenCalledTimes(1);
+      expect(completedUpdate).toHaveBeenCalledWith(expect.objectContaining({ renewal_lapse_completed_at: expect.any(Date) }));
     });
 
     test('a term with no prepay_invoice_id skips the reconciliation check and the void, but still raises retrieval + decides the parent', async () => {

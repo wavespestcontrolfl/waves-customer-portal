@@ -307,7 +307,7 @@ const WDO_ARRANGER_RELATIONSHIPS = new Set(['real_estate_agent', 'lender']);
 // Pure (no clock): the route decision must stay a function of the call so a
 // force-reprocess under the same decision version reproduces it (codex #4890
 // r6 P1). An elapsed agreed day is refused where the visit is WRITTEN — see
-// arrangerSlotElapsed in call-recording-processor.js (codex #4890 r5 P1).
+// slotElapsedAtBookingTime in call-recording-processor.js (codex #4890 r5 P1).
 function isAuthorizedWdoArrangerBooking(extraction) {
   const relationship = String(extraction?.caller?.relationship_to_property || '').trim().toLowerCase();
   if (!WDO_ARRANGER_RELATIONSHIPS.has(relationship)) return false;

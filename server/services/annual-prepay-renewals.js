@@ -2396,6 +2396,7 @@ async function reconcilePendingWindowCompletions(term, conn = db) {
           const res = await require('./invoice').settleInvoiceAsAnnualPrepayCovered(invoice.id, term.id);
           if (res?.settled) { summary.settled += 1; settledHere = true; }
         } catch (err) {
+          summary.failed = true;
           logger.warn(`[annual-prepay] pending-completion settle failed for invoice ${invoice.id}: ${err.message}`);
         }
       }
@@ -2436,6 +2437,7 @@ async function reconcilePendingWindowCompletions(term, conn = db) {
           continue;
         }
       } catch (err) {
+        summary.failed = true;
         logger.warn(`[annual-prepay] pending-completion refund check failed for invoice ${invoice.id}: ${err.message} — slice left unresolved`);
         continue;
       }
@@ -2469,12 +2471,16 @@ async function reconcilePendingWindowCompletions(term, conn = db) {
         const credited = conn === db ? await db.transaction(creditOnce) : await creditOnce(conn);
         if (credited) summary.credited += 1;
       } catch (err) {
+        summary.failed = true;
         logger.warn(`[annual-prepay] pending-completion credit skipped for visit ${row.id}: ${err.message}`);
       }
     }
   } catch (err) {
+    summary.failed = true;
     logger.warn(`[annual-prepay] pending-window completion reconcile skipped for term ${term?.id}: ${err.message}`);
   }
+  // `failed` (set only on an error, never on a deliberately-unresolved
+  // in-flight slice) lets a caller that must finish this work retry it.
   return summary;
 }
 
@@ -3196,6 +3202,94 @@ async function termiteGraceCoversVisit(scheduledService, conn, { throwOnError = 
   }
 }
 
+// Codex pre-push P1 (follows from the round-1 "decline before install"
+// reversal): a decided-lapse term (status 'cancelled', renewal_decision
+// 'cancel') that anchors to a LATER-completed installation must still get
+// its coverage year seeded/attached/prepaid-stamped — the decline only
+// refuses the FUTURE renewal, the coverage year already paid for is
+// untouched. This is the SAME "is this decided-lapse term's coverage still
+// live" test coveredTermsAsOf uses (paid invoice, not cancelled/refunded) —
+// scoped to one row, reused rather than re-derived, so the anchor path can
+// never disagree with the completion-billing gate about whether this term
+// is covered. A void/refund 'cancelled' term (renewal_decision NULL) is
+// never this shape and always returns false.
+async function isPaidDecidedLapseTerm(term, conn = db) {
+  if (!term?.id || term.status !== 'cancelled' || term.renewal_decision !== 'cancel') return false;
+  return isCoveredTerm(term.id, conn);
+}
+
+// The same paid/not-refunded/not-disputed coverage test, for any term
+// shape (no date window).
+async function isCoveredTerm(termId, conn = db) {
+  if (!termId) return false;
+  const row = await coveredTermsAsOf(conn).where('t.id', termId).first('t.id');
+  return !!row;
+}
+
+// Has this term's renewal been PROCESSED — a successor term minted from it
+// (renewed_from_term_id)? A staff 'renew' decision with no successor yet is
+// still supersedable by the customer's own online decline (Codex #4940 r4).
+async function hasSuccessorTerm(termId, conn = db) {
+  if (!termId) return false;
+  const row = await conn('annual_prepay_terms').where({ renewed_from_term_id: termId }).first('id');
+  return !!row;
+}
+
+// Pre-push audit P1 (slice 6a): a customer with several termite annual
+// terms (one per property) needs each portal renewal card — and its decline
+// confirmation — to name WHICH property it covers. Returns Map(termId ->
+// { label, termTied }) for the given terms, OWNERSHIP-SCOPED to customerId
+// at every hop:
+// the term itself, its source estimate (e.customer_id), and the estimate's
+// linked property (cp.customer_id) must all belong to that customer, so a
+// mislinked estimate/property can never leak another account's address.
+// Fallback chain per term: the estimate's quoted address SNAPSHOT
+// (estimates.address — authoritative for what was quoted, per the estimates
+// property-linkage migration; a linked customer_properties row is NOT, since
+// syncPrimaryAddress rewrites a primary property when the customer moves)
+// -> the linked customer_properties row, only for a legacy estimate with no
+// snapshot -> the customer's own address.
+// termTied is true only for the first two: the customer's own address says
+// nothing about WHICH of several plans this is (Codex #4940 r7), so a
+// multi-term caller must treat a profile-address label as unresolved.
+// A term with none of those gets no entry (the caller shows no label).
+function formatStructuredAddress(line1, line2, city, state, zip) {
+  const street = [line1, line2].map((v) => (v == null ? '' : String(v).trim())).filter(Boolean).join(', ');
+  if (!street) return null;
+  const stateZip = [state, zip].map((v) => (v == null ? '' : String(v).trim())).filter(Boolean).join(' ');
+  return [street, city == null ? '' : String(city).trim(), stateZip].filter(Boolean).join(', ');
+}
+
+async function termPropertyLabelsForCustomer(customerId, termIds, conn = db) {
+  const ids = [...new Set((termIds || []).filter(Boolean))];
+  const labels = new Map();
+  if (!customerId || !ids.length) return labels;
+  const rows = await conn('annual_prepay_terms as t')
+    .leftJoin('estimates as e', function ownEstimate() {
+      this.on('e.id', '=', 't.source_estimate_id').andOn('e.customer_id', '=', 't.customer_id');
+    })
+    .leftJoin('customer_properties as cp', function ownProperty() {
+      this.on('cp.id', '=', 'e.property_id').andOn('cp.customer_id', '=', 't.customer_id');
+    })
+    .leftJoin('customers as c', 'c.id', 't.customer_id')
+    .where('t.customer_id', customerId)
+    .whereIn('t.id', ids)
+    .select(
+      't.id as term_id',
+      'cp.address_line1 as cp_line1', 'cp.address_line2 as cp_line2', 'cp.city as cp_city', 'cp.state as cp_state', 'cp.zip as cp_zip',
+      'e.address as estimate_address',
+      'c.address_line1 as c_line1', 'c.address_line2 as c_line2', 'c.city as c_city', 'c.state as c_state', 'c.zip as c_zip',
+    );
+  for (const row of rows) {
+    const estimateAddress = row.estimate_address == null ? '' : String(row.estimate_address).trim();
+    const termLabel = estimateAddress
+      || formatStructuredAddress(row.cp_line1, row.cp_line2, row.cp_city, row.cp_state, row.cp_zip);
+    const label = termLabel || formatStructuredAddress(row.c_line1, row.c_line2, row.c_city, row.c_state, row.c_zip);
+    if (label) labels.set(row.term_id, { label, termTied: !!termLabel });
+  }
+  return labels;
+}
+
 // Fail-closed coverage test for completion billing. An annual-prepay-stamped
 // visit is COVERED when its explicit stamp (prepaid_method === annual_prepay_invoice)
 // is backed by a term whose paid coverage is STILL LIVE on the visit date
@@ -3419,6 +3513,16 @@ async function refreshTermSnapshot(termOrId, conn = db) {
   if (term.status !== PAYMENT_PENDING_STATUS) {
     await detachCallbacksFromTerm(term, conn);
   }
+  // A decided-lapse term (status 'cancelled', renewal_decision 'cancel') is
+  // still a PAID coverage year through term_end — including a termite
+  // annual plan the customer declined online (#4940), whose decline goes
+  // through recordDecision / supersedeRenewWithCustomerCancel and so is
+  // recorded cancel_disposition 'end_at_term'. ONE mechanism keeps its
+  // visits: the ADMIN-BUG-R18 end-at-term upkeep below
+  // (isEndAtTermLapseInWindow → keepEndAtTermLapseCoverage — attach +
+  // stamp here under the paid-coverage / dispute / end-now guards, and the
+  // nightly sweep replaces a skipped visit). A void/refund 'cancelled' row
+  // (renewal_decision NULL) or an end_now_refund lapse is never touched.
   if (ACTIVE_STATUSES.includes(term.status)) {
     const ensured = await ensureCoverageRowsForTerm({ ...term, term_start: termStart, term_end: termEnd, coverage_cadence: coverageCadence }, conn);
     if (ensured?.effectiveTermEnd) windowEnd = ensured.effectiveTermEnd;
@@ -3714,6 +3818,159 @@ async function cancelTermWithRestorations(termId, conn = db, { throwOnError = fa
     : runCancel(conn);
 }
 
+// Move 15 (docs/annual-prepay-term-states.md): a payment_pending term the
+// customer already DECLINED online (renewal_decision 'cancel', recorded
+// without a status change) whose prepay invoice resolves becomes the
+// decided-lapse shape — never 'active', so it never renews:
+//   - paid: covered through term_end by coveredTermsAsOf's decided-lapse
+//     branch; the paid follow-through (attach + stamp through the end-at-term
+//     upkeep, pending-window reconcile, dispute recovery) runs as it would
+//     for an activated term — the billing-mode stamp only while the term
+//     covers today (paid after term_end: the mode is left as it was);
+//   - voided / refunded: nothing was ever covered — it simply leaves the
+//     pending rails.
+// Kept out of syncTermForInvoicePayment's own loop (which only walks
+// undecided terms), so that loop's activation/cancel moves stay the
+// undecided ones they always were.
+async function settleDecidedPendingTerms(decided, nextStatus, conn) {
+  if (!decided.length || (nextStatus !== 'active' && nextStatus !== 'cancelled')) return [];
+  const settled = [];
+  for (const { id } of decided) {
+    const [lapse] = await conn('annual_prepay_terms')
+      .where({ id, status: PAYMENT_PENDING_STATUS, renewal_decision: 'cancel' })
+      .update({ status: 'cancelled', updated_at: new Date() })
+      .returning('*');
+    if (!lapse) continue;
+    settled.push(nextStatus === 'active' ? await followThroughPaidDecidedLapse(lapse, conn) : lapse);
+  }
+  return settled;
+}
+
+// Paid coverage live TODAY (billing's own test, dated) — the condition for
+// stamping billing_mode 'annual_prepay' on a path whose coverage year may
+// already have ended (#4940 pre-push P1s): on expired coverage the stamp is
+// the nothing-bills limbo (the monthly cron skips the mode).
+async function termCoversToday(termId, conn) {
+  return !!(await coveredTermsAsOf(conn, etDateString()).where('t.id', termId).first('t.id'));
+}
+
+// The pending -> active stamp, skipped when the paid year has already ENDED
+// (#4940 pre-push P1: an installation anchor can move a pending term to an
+// expired year before the late payment lands) — the stamp there is the
+// nothing-bills limbo. A not-yet-started year keeps its stamp, as before.
+async function stampUnlessYearEnded(term, conn) {
+  if (dateOnly(term.term_end) < etDateString()) return;
+  await stampAnnualPrepayBillingMode(term.customer_id, conn, term.id);
+}
+
+const PAID_LAPSE_RECONCILED_ACTION = 'annual_prepay_paid_lapse_reconciled';
+// One row per term, re-dated on every retry attempt (Codex #4940 r12 P2): the
+// retry leg rotates least-recently-attempted first, never-attempted ahead.
+const PAID_LAPSE_RECONCILE_ATTEMPT_ACTION = 'annual_prepay_paid_lapse_reconcile_attempt';
+
+// Move 15's historical reconcile (#4940 pre-push P1): settle / credit the
+// visits billed per application before the late annual payment. Runs
+// whenever the term is PAID (isCoveredTerm — no date window, so an expired
+// year still counts), never gated on today's coverage, and records
+// PAID_LAPSE_RECONCILED_ACTION only once a run completes with no error. The
+// covered-terms sweep retries unmarked ones (retryPaidLapseReconciles).
+// Idempotent: settled invoices are skipped (annual_prepay_covered_term_id)
+// and credits dedupe on their ledger marker under the customer lock.
+//
+// Codex #4940 r12 P1: an in-window visit still non-terminal when the late
+// payment lands (paid after term_end) must be stamped prepaid too, or its
+// later completion bills separately — the end-at-term upkeep
+// (keepEndAtTermLapseCoverage) stamps it, evaluated as of the year's own
+// last day once that day has passed (its window and paid checks are dated).
+// Anything but a kept result withholds the marker, so the sweep retries.
+async function reconcilePaidDecidedLapse(term, conn) {
+  if (!(await isCoveredTerm(term.id, conn))) return false;
+  const asOf = [etDateString(), dateOnly(term.term_end)].sort()[0];
+  const kept = await keepEndAtTermLapseCoverage(term.id, conn, { today: asOf });
+  if (!kept?.kept) return false;
+  const summary = await reconcilePendingWindowCompletions(term, conn);
+  if (summary.failed) return false;
+  await conn('activity_log').insert({
+    customer_id: term.customer_id,
+    action: PAID_LAPSE_RECONCILED_ACTION,
+    description: 'Annual prepay paid after the online renewal decline: visits billed before the payment reconciled.',
+    metadata: { term_id: term.id, settled: summary.settled, credited: summary.credited },
+  });
+  return true;
+}
+
+// The retry leg: paid, portal-declined-while-UNPAID terms (move 15 — the
+// decline row carries unpaid) with no completion marker, expired or not.
+// Bounded; least-recently-attempted first (the attempt row's created_at,
+// never-attempted first), then oldest end, so a term that keeps failing
+// rotates instead of starving the others.
+async function retryPaidLapseReconciles(conn = db, limit = 50) {
+  let done = 0;
+  try {
+    const lastAttempt = conn('activity_log')
+      .where('action', PAID_LAPSE_RECONCILE_ATTEMPT_ACTION)
+      .groupByRaw("metadata->>'term_id'")
+      .select(conn.raw("metadata->>'term_id' as term_id"), conn.raw('max(created_at) as attempted_at'))
+      .as('att');
+    const terms = await coveredTermsAsOf(conn, null)
+      .leftJoin(lastAttempt, 'att.term_id', conn.raw('t.id::text'))
+      .where({ 't.status': 'cancelled', 't.renewal_decision': 'cancel' })
+      .whereExists(function unpaidPortalDecline() {
+        this.select(conn.raw('1')).from('activity_log as a')
+          .where('a.action', CUSTOMER_DECLINE_ACTIVITY_ACTION)
+          .whereRaw("a.metadata->>'term_id' = t.id::text")
+          .whereRaw("a.metadata->>'unpaid' = 'true'");
+      })
+      .whereNotExists(function reconciled() {
+        this.select(conn.raw('1')).from('activity_log as r')
+          .where('r.action', PAID_LAPSE_RECONCILED_ACTION)
+          .whereRaw("r.metadata->>'term_id' = t.id::text");
+      })
+      .orderByRaw('att.attempted_at asc nulls first')
+      .orderBy('t.term_end', 'asc')
+      .limit(limit)
+      .select('t.*');
+    for (const term of terms) {
+      await stampPaidLapseReconcileAttempt(term, conn);
+      if (await reconcilePaidDecidedLapse(term, conn)) done += 1;
+    }
+    if (done) logger.info(`[annual-prepay] paid-lapse reconcile retry leg completed ${done} term(s)`);
+  } catch (err) {
+    logger.warn(`[annual-prepay] paid-lapse reconcile retry leg failed: ${err.message}`);
+  }
+  return done;
+}
+
+// Stamped BEFORE the attempt, so a failing term rotates to the back.
+async function stampPaidLapseReconcileAttempt(term, conn) {
+  const redated = await conn('activity_log')
+    .where({ action: PAID_LAPSE_RECONCILE_ATTEMPT_ACTION })
+    .whereRaw("metadata->>'term_id' = ?", [String(term.id)])
+    .update({ created_at: new Date() });
+  if (redated) return;
+  await conn('activity_log').insert({
+    customer_id: term.customer_id,
+    action: PAID_LAPSE_RECONCILE_ATTEMPT_ACTION,
+    description: 'Retrying the historical reconcile of an annual prepay paid after the online renewal decline.',
+    metadata: { term_id: term.id },
+  });
+}
+
+async function followThroughPaidDecidedLapse(lapse, conn) {
+  const refreshed = await refreshTermSnapshot(lapse, conn);
+  await reconcilePaidDecidedLapse(refreshed || lapse, conn);
+  // #4940 pre-push P1: the billing-mode stamp only while the term covers
+  // TODAY — the decided-coverage restore's coveredToday rule. Paid after
+  // term_end, 'annual_prepay' on expired coverage is the nothing-bills limbo
+  // (the monthly cron skips the mode); the historical payment is still
+  // reconciled above, retried by the sweep until it completes. A pending term was never stamped, so the mode is left.
+  if (await termCoversToday(lapse.id, conn)) {
+    await stampAnnualPrepayBillingMode(lapse.customer_id, conn, lapse.id);
+  }
+  if (lapse.dispute_suspended_at) await finishDisputeRecoveryForTerm(lapse, conn);
+  return refreshed || lapse;
+}
+
 async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
   if (!(await annualPrepayTableExists())) return [];
   const invoice = typeof invoiceOrId === 'object'
@@ -3722,10 +3979,16 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
   if (!invoice?.id) return [];
 
   const nextStatus = invoiceTermStatus(invoice);
-  const terms = await conn('annual_prepay_terms')
+  const linkedTerms = await conn('annual_prepay_terms')
     .where({ prepay_invoice_id: invoice.id })
     .whereIn('status', [PAYMENT_PENDING_STATUS, ...ACTIVE_STATUSES])
     .select('*');
+  // A payment_pending term the customer already declined online settles
+  // separately (move 15) — never through activation below.
+  const terms = linkedTerms.filter((term) => !term.renewal_decision);
+  const decidedPendingResults = await settleDecidedPendingTerms(
+    linkedTerms.filter((term) => term.renewal_decision === 'cancel' && term.status === PAYMENT_PENDING_STATUS), nextStatus, conn,
+  );
 
   if (nextStatus === 'active') {
     // Lost-dispute revival (Codex #2533 round-4 P1): losing the dispute
@@ -3752,7 +4015,7 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
     }
   }
 
-  const results = [];
+  const results = [...decidedPendingResults];
   for (const term of terms) {
     let current = term;
     if (nextStatus === 'active' && term.status === PAYMENT_PENDING_STATUS) {
@@ -3770,6 +4033,7 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
       const reviveFromPending = async (t) => {
         const [updated] = await t('annual_prepay_terms')
           .where({ id: term.id, status: PAYMENT_PENDING_STATUS })
+          .whereNull('renewal_decision')
           .update({ status: 'active', updated_at: new Date() })
           .returning('*');
         if (updated) {
@@ -3778,7 +4042,7 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
           // duplicate of the revived coverage (codex #3591 r54 P1).
           await require('./invoice')._retireSwitchRestoredInvoicesForRevivedPrepay(t, invoice.id);
           // Termite renewal successor, freshly paid: stamp the PARENT
-          // 'renewed' now (move 14) — see stampParentRenewedForSuccessor's
+          // 'renewed' now (move 16) — see stampParentRenewedForSuccessor's
           // own comment. Codex round-2 P1: runs on THIS SAME transaction/
           // savepoint (`t`), not the global `db` handle, so it can never
           // commit out of order with, or survive a rollback of, this exact
@@ -3850,7 +4114,8 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
       // (pre-payment completions bill per application), so this transition
       // is where the pending case picks up its stamp. Idempotent re-stamp
       // for already-active terms; best-effort + column-guarded inside.
-      await stampAnnualPrepayBillingMode(current.customer_id, conn, current.id);
+      // Never on a year that has already ended (stampUnlessYearEnded).
+      await stampUnlessYearEnded(current, conn);
       // Dispute-suspended term returning to life (won dispute /
       // re-collection): monthly dues the cron collected during the open
       // dispute double-charge the reinstated coverage — claw them back,
@@ -4592,6 +4857,9 @@ async function reconcileCoveredTermsSweep({ today = etDateString(), conn = db } 
   } catch (err) {
     logger.warn(`[annual-prepay] sweep WaveGuard extension-credit restore recovery failed: ${err.message}`);
   }
+  // Paid-late declined terms whose historical reconcile has not completed —
+  // expired ones too (they are outside the dated loop above).
+  await retryPaidLapseReconciles(conn);
   if (summary.settled || summary.credited || summary.reversed || summary.disputeRecovered) {
     logger.info(`[annual-prepay] covered-term sweep recovered work: ${JSON.stringify(summary)}`);
   }
@@ -5539,6 +5807,28 @@ function renewalCarryForwardColumns(termCols, existing, renewedFromTermId, renew
   return out;
 }
 
+// Whether createTermForAnnualPrepay's result is a paid term that needs the
+// born-paid follow-through (renewal-date sync, pending-window reconcile,
+// annual_prepay billing stamp): ACTIVE — or, on the installation-anchor
+// path only (anchorInstallation), a decided-lapse term (declined before its
+// installation) that is still PAID. Its coverage year is untouched by the
+// decline; isPaidDecidedLapseTerm applies billing's own paid test.
+// The born-paid billing-mode stamp. On the installation-anchor path the
+// anchored year can ALREADY have ended (a delayed anchor, #4940 pre-push P1):
+// stamp only while the term covers TODAY (the anchored year starts at a
+// completed installation, so this only ever skips an expired year). Other
+// creates stamp as before (a future-start prepay is stamped at creation).
+async function stampBornPaidBillingMode(term, anchorInstallation, conn) {
+  if (anchorInstallation && !(await termCoversToday(term.id, conn))) return;
+  await stampAnnualPrepayBillingMode(term.customer_id, conn, term.id);
+}
+
+async function termCountsAsPaidAfterCreate(term, anchorInstallation, conn) {
+  if (!term) return false;
+  if (ACTIVE_STATUSES.includes(term.status)) return true;
+  return !!anchorInstallation && isPaidDecidedLapseTerm(term, conn);
+}
+
 async function createTermForAnnualPrepay({
   customerId,
   sourceEstimateId = null,
@@ -5575,6 +5865,12 @@ async function createTermForAnnualPrepay({
   // year over year (a year-2 successor's own renewalChargeConsentAt is set
   // here too, so its OWN eventual year-3 mint carries it forward again).
   renewalChargeConsentAt = undefined,
+  // Codex pre-push P1: set only by anchorTermToInstallation's window-move
+  // call — lets a decided-lapse (declined-before-install) term's paid
+  // coverage year reconcile/re-stamp exactly like a normal anchored term
+  // (termCountsAsPaidAfterCreate). Every other caller leaves it unset
+  // (byte-identical to before this option existed).
+  anchorInstallation,
   conn = db,
 } = {}) {
   if (!(await annualPrepayTableExists())) return null;
@@ -5780,23 +6076,24 @@ async function createTermForAnnualPrepay({
     }
     await syncInvoiceTerm(prepayInvoiceId, existing.id, conn);
     const refreshed = await refreshTermSnapshot(existing.id, conn);
-    if (refreshed && ACTIVE_STATUSES.includes(refreshed.status)) {
+    if (await termCountsAsPaidAfterCreate(refreshed, anchorInstallation, conn)) {
       await syncCustomerRenewalDate(customerId, dateOnly(refreshed.term_end), conn);
-      // A term that is ACTIVE here was born (or re-anchored) already paid —
-      // the Customer 360 flow records the invoice payment BEFORE creating the
-      // term, so syncTermForInvoicePayment never fires for it and its
-      // pending-window completed visits would stay double-billed. Run the
-      // same reconcile the payment sync runs (post-commit when inside a
-      // caller trx); idempotent, so terms that DID arrive through the
-      // payment sync are unaffected.
+      // A term that is ACTIVE (or a paid decided-lapse) here was born (or
+      // re-anchored) already paid — the Customer 360 flow records the
+      // invoice payment BEFORE creating the term, so syncTermForInvoicePayment
+      // never fires for it and its pending-window completed visits would
+      // stay double-billed. Run the same reconcile the payment sync runs
+      // (post-commit when inside a caller trx); idempotent, so terms that
+      // DID arrive through the payment sync are unaffected.
       await reconcileBornPaidTerm(refreshed, conn);
-      // Stamp only once the term is genuinely ACTIVE (paid). A
-      // payment_pending term must leave the customer 'per_application':
-      // pending-window completions bill per application until the annual
-      // invoice is paid, and the annual_prepay stamp would divert them to
-      // the monthly-membership dispatch path (Codex round-2). The payment
-      // sync (syncTermForInvoicePayment) stamps on pending→active.
-      await stampAnnualPrepayBillingMode(customerId, conn, refreshed.id);
+      // Stamp only once the term is genuinely paid (ACTIVE, or a paid
+      // decided-lapse anchoring its coverage year). A payment_pending term
+      // must leave the customer 'per_application': pending-window
+      // completions bill per application until the annual invoice is paid,
+      // and the annual_prepay stamp would divert them to the
+      // monthly-membership dispatch path (Codex round-2). The payment sync
+      // (syncTermForInvoicePayment) stamps on pending→active.
+      await stampBornPaidBillingMode(refreshed, anchorInstallation, conn);
     }
     return refreshed;
   }
@@ -5838,7 +6135,9 @@ async function createTermForAnnualPrepay({
 
   await syncInvoiceTerm(prepayInvoiceId, term.id, conn);
   const refreshed = await refreshTermSnapshot(term.id, conn);
-  if (refreshed && ACTIVE_STATUSES.includes(refreshed.status)) {
+  // A brand-new insert never carries a renewal_decision, so this stays
+  // ACTIVE-only in practice (same rule as the "existing" branch above).
+  if (await termCountsAsPaidAfterCreate(refreshed, anchorInstallation, conn)) {
     await syncCustomerRenewalDate(customerId, normalizedEnd, conn);
     // Born already paid (Customer 360 records the payment before creating the
     // term), so the payment sync's reconcile never fires for this term — run
@@ -5848,7 +6147,7 @@ async function createTermForAnnualPrepay({
     // ACTIVE (born-paid) only — a payment_pending term keeps the customer
     // 'per_application' so pre-payment completions bill per application; the
     // payment sync stamps when the invoice pays (Codex round-2).
-    await stampAnnualPrepayBillingMode(customerId, conn, refreshed.id);
+    await stampBornPaidBillingMode(refreshed, anchorInstallation, conn);
   }
   return refreshed;
 }
@@ -8304,8 +8603,808 @@ async function recordCancelDisposition({ termId, disposition } = {}, conn = db) 
   return { changed: false, disposition: stored ? stored.cancel_disposition : null };
 }
 
+// Move 14 (docs/annual-prepay-term-states.md): the CUSTOMER's online
+// decline supersedes an UNPROCESSED staff 'renew' decision (Codex #4940 r4
+// P1). Agreement v3 lets the customer decline online "at any time before
+// the renewal date"; a staff-recorded renew whose successor term has not
+// been minted yet (no annual_prepay_terms row with renewed_from_term_id =
+// this id) has not happened yet, so it must not strip that right. Guarded
+// conditional UPDATE: only a 'renewed'/'renew' row with no successor moves,
+// to the same decided-lapse shape recordDecision('cancel') writes; a
+// switch_plan decision, or a renew whose successor exists, never moves.
+async function supersedeRenewWithCustomerCancel({ termId, conn = db } = {}) {
+  const now = new Date();
+  const supersede = {
+    status: 'cancelled',
+    renewal_decision: 'cancel',
+    renewal_decision_at: now,
+    renewal_decision_by: null,
+    updated_at: now,
+  };
+  // The same disposition recordDecision('cancel') writes for a renewal-time
+  // lapse (ADMIN-BUG-R18): the paid year keeps its visits through term_end
+  // via the end-at-term upkeep.
+  if (await cancelDispositionSupported()) supersede.cancel_disposition = 'end_at_term';
+  const [term] = await conn('annual_prepay_terms')
+    .where({ id: termId, status: 'renewed', renewal_decision: 'renew' })
+    .whereNotExists(function noSuccessorTerm() {
+      this.select(conn.raw('1')).from('annual_prepay_terms as successor').whereRaw('successor.renewed_from_term_id = annual_prepay_terms.id');
+    })
+    .update(supersede)
+    .returning('*');
+  return term || null;
+}
+
+// The CUSTOMER's online decline of a signed plan still payment_pending — an
+// unpaid original invoice, or a dispute-suspended one (Codex #4940 r9/r10).
+// The decision is recorded WITHOUT touching status: the term stays
+// payment_pending, so every pending rail keeps working — the billing cron's
+// payment-pending exclusion (getPaymentPendingCustomerIds) and the pre-visit
+// payment reminders (checkAndSendPaymentReminders) both select by status.
+// Guarded: only an undecided payment_pending row takes the decision. When
+// the prepay invoice later RESOLVES, settleDecidedPendingTermsForInvoice
+// (move 15) turns it into the decided-lapse shape — paid: covered through
+// term_end, never renewing; voided/refunded: nothing covered.
+async function declinePaymentPendingWithCustomerCancel({ termId, conn = db } = {}) {
+  const now = new Date();
+  const decision = {
+    renewal_decision: 'cancel',
+    renewal_decision_at: now,
+    renewal_decision_by: null,
+    updated_at: now,
+  };
+  if (await cancelDispositionSupported()) decision.cancel_disposition = 'end_at_term';
+  const [term] = await conn('annual_prepay_terms')
+    .where({ id: termId, status: PAYMENT_PENDING_STATUS })
+    .whereNull('renewal_decision')
+    .update(decision)
+    .returning('*');
+  return term || null;
+}
+
+// The customer's decline, by the term's current shape: an unprocessed staff
+// renew (move 14), an unpaid payment_pending plan (decision only — see
+// declinePaymentPendingWithCustomerCancel), or a live term
+// (recordDecision('cancel'), move 8). No `notes`: recordDecision would
+// OVERWRITE renewal_notes, which may hold staff's own renewal notes (Codex
+// r2 P2) — the activity_log row is the record of the online decline.
+function recordCustomerDecline(term, { renewDecided, unpaid }, trx) {
+  if (renewDecided) return supersedeRenewWithCustomerCancel({ termId: term.id, conn: trx });
+  if (unpaid) return declinePaymentPendingWithCustomerCancel({ termId: term.id, conn: trx });
+  return recordDecision({ termId: term.id, action: 'cancel', conn: trx });
+}
+
+// Slice 6a (termite annual plan, agreement v3 §-decline-online): let the
+// CUSTOMER decline renewal for their own termite annual term from the
+// portal — "The customer may decline renewal at any time before the
+// renewal date online through their customer portal ... never only by
+// phone."
+//
+// NOT gated (Codex r3 P0): GATE_TERMITE_ANNUAL_PLAN + GATE_CANCEL_FLOW_V2
+// (termiteAnnualPlanSelectionEnabled) control only the ISSUING of new
+// plans. A customer who already holds a termite annual term
+// (annual_plan_version NOT NULL) signed an agreement promising online
+// nonrenewal, so that promise outlives any later gate flip. The existence
+// of such a term IS the eligibility check below — a customer with none
+// gets `no_term` / `not_found` (or `disabled` while the gates are off, the
+// same not-available answer as before).
+//
+// Reuses recordDecision's own semantics (status -> 'cancelled',
+// renewal_decision -> 'cancel') — it does NOT end coverage early.
+// coveredTermsAsOf's decided-lapse branch (status 'cancelled' AND
+// renewal_decision set, ~line 2662) and the disputed-invoice decided-shape
+// branches (~3193, ~3437) already treat a cancel decision as riding out its
+// PAID window through term_end; this is the exact same state an admin's
+// "end at term" cancellation puts a term into (admin-cancellation.js
+// decideTermCancel). Nothing here touches coverage directly.
+//
+// Row lock: the eligible term is SELECT ... FOR UPDATE'd inside our own
+// transaction before recordDecision's own atomic
+// (status IN ACTIVE_STATUSES AND renewal_decision IS NULL) UPDATE runs, so
+// a concurrent decide (staff recording the same decision, or a second
+// portal tab) can't race past the eligibility checks below (customer
+// ownership, term_end, "already decided") that recordDecision itself
+// doesn't know how to make.
+//
+// Idempotent: a repeat call against an already-declined term (status
+// 'cancelled', renewal_decision 'cancel') returns the SAME success shape
+// (alreadyDeclined: true) instead of erroring — as long as that year is
+// still paid (isPaidDecidedLapseTerm). A decline followed by a refund or
+// dispute answers `not_covered` instead (Codex r3 P2), so the portal never
+// says "Coverage continues through …" for a year billing no longer covers.
+const CUSTOMER_DECLINE_ACTIVITY_ACTION = 'termite_annual_renewal_declined';
+
+function declineResultFromRow(term, { alreadyDeclined }) {
+  return {
+    ok: true,
+    termId: term.id,
+    termEnd: dateOnly(term.term_end),
+    // An un-anchored original term's termEnd is provisional (Codex r3 P2):
+    // staff/customer copy says "12 months from installation" instead.
+    awaitsInstallation: coverageAwaitsInstallation(term),
+    prepayAmount: term.prepay_amount != null ? Number(term.prepay_amount) : null,
+    alreadyDeclined,
+  };
+}
+
+// Station retrieval for a portal renewal decline — evaluated at DUE TIME
+// (Codex #4940 r9). The termite program ends when the paid year does, so the
+// Waves-owned stations come out then — but nothing is decided early: the
+// decline (and a later installation anchor) raise NOTHING; the decline's own
+// staff bell only says the stations will be retrieved after the paid year.
+// The daily reconcile sweep (raisePendingDeclineRetrievalTasks) evaluates a
+// portal-declined, installed (or renewal) term once its retrieval is DUE:
+//   - its paid-through term_end has passed, or
+//   - its prepay was fully refunded / voided (coverage revoked — due now).
+// At that moment, with fresh facts:
+//   - other live termite coverage on the account (another plan, a live
+//     termite service, an active bond — otherLiveTermiteCoverage): the task
+//     would count EVERY station on the account, so staff are belled to
+//     confirm which stations to pull;
+//   - otherwise the retrieval task is raised through the SAME helper an
+//     admin cancel uses (cancellation-processor raiseTermiteRetrievalTask),
+//     keyed on the term + portal-decline episode, dated to the due date
+//     (term_end) or immediate after a refund, with the decline's own time as
+//     its place in the account's retrieval chronology (eventAt — other
+//     request-keyed retrieval rows can still exist).
+// The settled marker (activity_log DECLINE_RETRIEVAL_ACTIVITY_ACTION,
+// metadata.term_id) is written ONLY once the durable action is confirmed:
+// this decline's own task row exists, or the staff bell insert came back
+// non-null. Anything else stays a candidate, rotated least-recently-
+// attempted first (decline_retrieval_attempted_at). Once settled, the term
+// is done: a term_end correction or a refund AFTER the due action is out of
+// scope — the stations are already scheduled out. A term_end correction
+// BEFORE the due date needs nothing (nothing was raised yet).
+// Scope: only PORTAL declines (a termite_annual_renewal_declined activity
+// row for the term). An admin-recorded cancel raises its own retrieval task
+// through the admin cancellation flow and is never touched here.
+const DECLINE_RETRIEVAL_ACTIVITY_ACTION = 'termite_annual_decline_retrieval';
+const DECLINE_RETRIEVAL_EPISODE = 'portal_renewal_decline';
+const DECLINE_RETRIEVAL_IMMEDIATE = 'immediate';
+// A decided lapse, or a plan declined while unpaid whose invoice never
+// resolved (payment_pending + 'cancel' — bells staff only).
+const DECLINE_RETRIEVAL_STATUSES = ['cancelled', PAYMENT_PENDING_STATUS];
+// Outcomes settled WITHOUT a staff bell: a confirmed task row, or an account
+// the helper treats as internal test data (nothing is ever raised there).
+const DECLINE_RETRIEVAL_SELF_SETTLING = new Set(['raised', 'internal_test_customer']);
+
+// Columns declineRetrievalEnd (and the anchor's installation rule) reads.
+const DECLINE_RETRIEVAL_TERM_COLUMNS = [
+  'id', 'customer_id', 'source_estimate_id', 'term_start', 'term_end', 'created_at',
+  'annual_plan_version', 'renewed_from_term_id', 'installation_anchored_at',
+];
+
+// Every read/write here uses the ROOT pool: raiseTermiteRetrievalTask writes
+// on its own connection, so it must only ever see committed state.
+async function evaluateDueDeclineRetrieval(termId, today = etDateString()) {
+  let retrieval = null;
+  try {
+    const term = await db('annual_prepay_terms').where({ id: termId })
+      .first(...DECLINE_RETRIEVAL_TERM_COLUMNS, 'prepay_invoice_id', 'status', 'renewal_decision');
+    const due = await dueDeclineRetrieval(term, today);
+    if (due.reason) return { raised: false, reason: due.reason };
+    retrieval = { termEnd: due.retrievalEnd, retrieveAfterKey: due.key, customerId: term.customer_id };
+    // A failed action is belled (settleDeclineRetrieval) but never settled.
+    Object.assign(retrieval, await actOnDueDeclineRetrieval(term, due, today).catch((actErr) => {
+      logger.error(`[annual-prepay] renewal-decline retrieval action failed for term ${termId}: ${actErr.message}`);
+      return { raised: false, reason: 'failed' };
+    }));
+    await settleDeclineRetrieval(term.id, retrieval);
+    return retrieval;
+  } catch (err) {
+    logger.error(`[annual-prepay] renewal-decline retrieval failed for term ${termId}: ${err.message}`);
+    return { ...(retrieval || {}), raised: false, reason: 'failed' };
+  }
+}
+
+// Whether this term's retrieval is due now — { portalDecline, retrieveAfter,
+// key, retrievalEnd, unpaid } — or why not — { reason }. Due = an
+// installed, PORTAL-declined decided lapse, not yet settled, whose prepay
+// was refunded/voided (immediate: no coverage owed) or whose paid-through
+// end (declineRetrievalEnd) has passed (dated). Also due, once that end has
+// passed: a plan declined while UNPAID whose invoice never resolved (still
+// payment_pending + 'cancel', #4940 pre-push P1) — `unpaid`, which only
+// ever bells staff (actOnDueDeclineRetrieval), never raises a task.
+async function dueDeclineRetrieval(term, today) {
+  if (!term) return { reason: 'not_found' };
+  if (!DECLINE_RETRIEVAL_STATUSES.includes(term.status) || term.renewal_decision !== 'cancel') return { reason: 'not_declined' };
+  const retrievalEnd = await declineRetrievalEnd(term);
+  if (!retrievalEnd) return { reason: 'not_installed' };
+  const termIdText = String(term.id);
+  const portalDecline = await db('activity_log')
+    .where({ action: CUSTOMER_DECLINE_ACTIVITY_ACTION })
+    .whereRaw("metadata->>'term_id' = ?", [termIdText])
+    .orderBy('created_at', 'asc')
+    .first('id', 'created_at', 'metadata');
+  if (!portalDecline) return { reason: 'not_portal_decline' };
+  const settled = await db('activity_log')
+    .where({ action: DECLINE_RETRIEVAL_ACTIVITY_ACTION })
+    .whereRaw("metadata->>'term_id' = ?", [termIdText])
+    .first('id');
+  if (settled) return { reason: 'already_settled' };
+  const unpaid = term.status === PAYMENT_PENDING_STATUS;
+  if (!unpaid && await isTermPrepayRefunded(term)) return { portalDecline, retrieveAfter: null, key: DECLINE_RETRIEVAL_IMMEDIATE, retrievalEnd };
+  if (retrievalEnd < today) {
+    return {
+      portalDecline, retrieveAfter: retrievalEnd, key: retrievalEnd, retrievalEnd, unpaid,
+    };
+  }
+  return { reason: 'not_due' };
+}
+
+// The date a declined term's stations wait for. An anchored or renewal term:
+// its term_end. An original term the anchor never landed on still carries a
+// PROVISIONAL term_end (#4940 pre-push P1) — if its installation completed
+// (stations in the ground, e.g. the anchor was refused), the real end is
+// derived by the anchor's own rule (installation date + 12 months, inclusive);
+// with no completed installation there is nothing to retrieve (null).
+async function declineRetrievalEnd(term) {
+  if (!coverageAwaitsInstallation(term)) return dateOnly(term.term_end);
+  const { installationTermWindowForTerm } = require('./termite-annual-activation');
+  const window = await installationTermWindowForTerm(term, db);
+  return window ? window.termEnd : null;
+}
+
+async function isTermPrepayRefunded(term) {
+  if (!term.prepay_invoice_id) return false;
+  const row = await whereTermPrepayRefunded(db('annual_prepay_terms as rt').where('rt.id', term.id), 'rt').first('rt.id');
+  return !!row;
+}
+
+// A term whose prepay invoice was voided/refunded, or whose payment was fully
+// refunded — billing's revocation evidence (coveredTermsAsOf), minus the
+// merely-unpaid case a dispute produces (a dispute can still be won, so it
+// waits for term_end like any other declined year).
+function whereTermPrepayRefunded(builder, alias) {
+  const statuses = [...INVOICE_CANCELLED_STATUSES];
+  return builder.whereExists(function refundedPrepay() {
+    this.select(db.raw('1')).from('invoices as ri')
+      .whereRaw('ri.id = ??', [`${alias}.prepay_invoice_id`])
+      .where(function revoked() {
+        this.whereRaw(`lower(coalesce(ri.status, '')) in (${statuses.map(() => '?').join(', ')})`, statuses)
+          .orWhereExists(function fullRefund() {
+            this.select(db.raw('1')).from('payments as rp')
+              .whereRaw("(rp.status = 'refunded' or rp.refund_status = 'full')")
+              .whereRaw(`((rp.stripe_payment_intent_id is not null and rp.stripe_payment_intent_id = ri.stripe_payment_intent_id)
+                or (rp.stripe_charge_id is not null and rp.stripe_charge_id = ri.stripe_charge_id))`);
+          });
+      });
+  });
+}
+
+// Codex #4940 r4/r7 P1: raiseTermiteRetrievalTask counts EVERY Waves-owned
+// termite station on the ACCOUNT (no property or term key), so an automatic
+// "pull the stations" task is only safe when this declined plan is the
+// account's ONLY live termite coverage. Anything else — another termite
+// annual term, a live termite service still on the calendar (a quarterly
+// series, a one-off treatment), or an active termite bond, at any property —
+// and staff confirm which stations to pull by hand instead. Returns the
+// reason (the staff bell's wording) or null. Visits of THIS plan (linked to
+// the term, or booked from its estimate) don't count.
+async function otherLiveTermiteCoverage(term, today = etDateString()) {
+  const otherPlan = await db('annual_prepay_terms')
+    .where({ customer_id: term.customer_id })
+    .whereNot({ id: term.id })
+    .whereNotNull('annual_plan_version')
+    .where(function stillCovering() {
+      this.whereIn('status', [...ACTIVE_STATUSES, PAYMENT_PENDING_STATUS, ...DECIDED_COVERED_STATUSES])
+        .orWhere(function decidedLapse() { this.where('status', 'cancelled').andWhere('renewal_decision', 'cancel'); });
+    })
+    .where((current) => whereTermCurrentOrAwaitingInstallation(current, today))
+    .first('id');
+  if (otherPlan) return 'other_termite_plan';
+  const liveService = await db('scheduled_services')
+    .where({ customer_id: term.customer_id })
+    .whereRaw("LOWER(COALESCE(service_type, '')) LIKE '%termite%'")
+    .whereNotIn('status', [...PREPAID_UPDATE_EXCLUDED_STATUSES])
+    .where('scheduled_date', '>=', today)
+    .whereRaw('annual_prepay_term_id IS DISTINCT FROM ?', [term.id])
+    .modify((q) => { if (term.source_estimate_id) q.whereRaw('source_estimate_id IS DISTINCT FROM ?', [term.source_estimate_id]); })
+    .first('id');
+  if (liveService) return 'other_termite_service';
+  const bond = await db('termite_bonds').where({ customer_id: term.customer_id, status: 'active' }).first('id');
+  return bond ? 'termite_bond' : null;
+}
+
+// The due action, with fresh facts: bell staff when other termite coverage
+// remains, otherwise raise the task and classify what actually happened —
+// { raised: true } only once THIS decline's own task row exists.
+async function actOnDueDeclineRetrieval(term, due, today) {
+  // Never paid: whether to collect and whether to pull the stations is a
+  // staff decision — no automatic task (the bell settles it).
+  if (due.unpaid) return { raised: false, reason: 'unpaid_plan' };
+  const otherCoverage = await otherLiveTermiteCoverage(term, today);
+  if (otherCoverage) return { raised: false, reason: otherCoverage };
+  const { raiseTermiteRetrievalTask, termRetrievalDedupeKey } = require('./cancellation-processor');
+  // Codex #4940 r6 P1: the decline has no service request, so it passes its
+  // real event time — without it the helper ranks it as the OLDEST event
+  // and yields to any earlier request-keyed retrieval row (even one staff
+  // already acted on), raising nothing.
+  const declineMeta = parseActivityMetadata(due.portalDecline.metadata);
+  const raised = await raiseTermiteRetrievalTask(term.customer_id, null, {
+    retrieveAfter: due.retrieveAfter, termId: term.id, episodeKey: DECLINE_RETRIEVAL_EPISODE, eventAt: declineMeta.decided_at || due.portalDecline.created_at,
+  });
+  // A NEWER retrieval instruction stands on the account — nothing was
+  // created or reopened for THIS decline; staff confirm it covers these.
+  if (raised?.supersededByNewer) return { raised: false, reason: 'superseded_by_newer' };
+  if (!raised?.raised) return { raised: false, reason: raised?.reason || 'not_raised' };
+  const taskRow = await db('notifications')
+    .where({ recipient_type: 'admin' })
+    .whereRaw("metadata->>'dedupeKey' = ?", [termRetrievalDedupeKey(term.id, DECLINE_RETRIEVAL_EPISODE, due.retrieveAfter)])
+    .first('id');
+  return taskRow ? { raised: true } : { raised: false, reason: 'not_raised' };
+}
+
+function parseActivityMetadata(metadata) {
+  if (typeof metadata !== 'string') return metadata || {};
+  try { return JSON.parse(metadata); } catch { return {}; }
+}
+
+// Settle ONLY on a confirmed durable action: this decline's task row, or a
+// staff bell whose insert came back non-null (every manual outcome). A
+// retryable failure (failed / not_raised) is belled at most once per day
+// (the bell's dedupe) but never settles — the sweep retries it.
+async function settleDeclineRetrieval(termId, retrieval) {
+  const outcome = retrieval.raised ? 'raised' : retrieval.reason;
+  if (DECLINE_RETRIEVAL_SELF_SETTLING.has(outcome)) {
+    await writeDeclineRetrievalMarker(termId, retrieval, outcome);
+    return;
+  }
+  const belled = await ringDeclineRetrievalStaffBell(termId, retrieval);
+  if (belled && RETRIEVAL_SENTENCES[outcome]?.manual) await writeDeclineRetrievalMarker(termId, retrieval, outcome);
+}
+
+// The staff bell for a due retrieval that could not be raised automatically.
+// Returns true only when notifyAdmin confirms a stored row.
+async function ringDeclineRetrievalStaffBell(termId, retrieval) {
+  const sentence = retrievalSentence(retrieval, formatDateLabel(retrieval.termEnd));
+  if (!sentence) return false;
+  try {
+    const NotificationService = require('./notification-service');
+    const bell = await NotificationService.notifyAdmin(
+      'service',
+      'Termite annual plan — station retrieval needs staff',
+      `A termite annual plan declined online has reached its station retrieval. ${sentence}`,
+      {
+        icon: '🪵',
+        link: `/admin/customers?customerId=${retrieval.customerId}`,
+        bell: true,
+        dedupeKey: `termite-annual-decline-retrieval:${termId}:${retrieval.retrieveAfterKey}:${retrieval.reason}`,
+        metadata: {
+          customerId: retrieval.customerId,
+          termId,
+          termEnd: retrieval.termEnd,
+          retrieveAfter: retrieval.retrieveAfterKey,
+          reason: retrieval.reason,
+          source: 'customer_portal',
+        },
+      },
+    );
+    return !!(bell && bell.id);
+  } catch (bellErr) {
+    logger.error(`[annual-prepay] decline retrieval staff bell failed for term ${termId}: ${bellErr.message}`);
+    return false;
+  }
+}
+
+async function writeDeclineRetrievalMarker(termId, retrieval, outcomeKey) {
+  const when = retrieval.retrieveAfterKey === DECLINE_RETRIEVAL_IMMEDIATE
+    ? 'immediately (prepay refunded)'
+    : `after ${retrieval.retrieveAfterKey}`;
+  await db('activity_log').insert({
+    customer_id: retrieval.customerId,
+    action: DECLINE_RETRIEVAL_ACTIVITY_ACTION,
+    description: `Station retrieval after the online renewal decline: ${outcomeKey} (retrieve ${when}).`,
+    metadata: {
+      term_id: termId,
+      term_end: retrieval.termEnd,
+      retrieve_after: retrieval.retrieveAfterKey,
+      outcome: outcomeKey,
+      source: 'customer_portal',
+    },
+  }).catch((markerErr) => {
+    // The task itself is idempotent on its key — a lost marker costs one
+    // deduped re-evaluation on the next sweep, never a second task.
+    logger.warn(`[annual-prepay] decline retrieval marker not written for term ${termId}: ${markerErr.message}`);
+  });
+}
+
+// Daily sweep (reconcileTermiteAnnualActivations): every portal-declined,
+// installed (or renewal) termite term whose retrieval is DUE (term_end
+// passed, or prepay refunded/voided) and not yet settled — plus a plan
+// declined while unpaid whose invoice never resolved (staff bell only,
+// once its installation-derived end has passed). No upper date
+// bound — an action that keeps failing is retried until it is confirmed.
+// Bounded; least-recently-attempted first (decline_retrieval_attempted_at,
+// never-attempted ahead of all), then oldest end, so a term whose action
+// keeps failing rotates instead of starving the others.
+async function raisePendingDeclineRetrievalTasks({ limit = 50, today = etDateString() } = {}) {
+  const attemptTracked = !!(await annualPrepayColumns()).decline_retrieval_attempted_at;
+  const candidates = await db('annual_prepay_terms as dt')
+    .whereNotNull('dt.annual_plan_version')
+    .whereIn('dt.status', DECLINE_RETRIEVAL_STATUSES)
+    .where('dt.renewal_decision', 'cancel')
+    .where(function installed() {
+      // Anchored, a renewal term, or a completed installation visit on file
+      // (stations in the ground even when the anchor never landed).
+      const { whereTermHasCompletedInstallation } = require('./termite-annual-activation');
+      this.whereNotNull('dt.installation_anchored_at').orWhereNotNull('dt.renewed_from_term_id')
+        .orWhere((evidence) => whereTermHasCompletedInstallation(evidence, 'dt', db));
+    })
+    .where(function due() {
+      this.where('dt.term_end', '<', today).orWhere((refunded) => whereTermPrepayRefunded(refunded, 'dt'));
+    })
+    .whereExists(function portalDecline() {
+      this.select(db.raw('1')).from('activity_log as a')
+        .where('a.action', CUSTOMER_DECLINE_ACTIVITY_ACTION)
+        .whereRaw("a.metadata->>'term_id' = dt.id::text");
+    })
+    .whereNotExists(function alreadySettled() {
+      this.select(db.raw('1')).from('activity_log as m')
+        .where('m.action', DECLINE_RETRIEVAL_ACTIVITY_ACTION)
+        .whereRaw("m.metadata->>'term_id' = dt.id::text");
+    })
+    .modify((q) => { if (attemptTracked) q.orderBy('dt.decline_retrieval_attempted_at', 'asc', 'first'); })
+    .orderBy('dt.term_end', 'asc')
+    .limit(limit)
+    .select('dt.id');
+  let raised = 0;
+  for (const row of candidates) {
+    if (attemptTracked) {
+      // Stamped before the attempt so a failing term rotates to the back.
+      await db('annual_prepay_terms').where({ id: row.id }).update({ decline_retrieval_attempted_at: new Date() })
+        .catch((stampErr) => logger.warn(`[annual-prepay] decline retrieval attempt stamp failed for term ${row.id}: ${stampErr.message}`));
+    }
+    const retrieval = await evaluateDueDeclineRetrieval(row.id, today);
+    if (retrieval.raised) raised += 1;
+  }
+  await correctDeclineRetrievalDates(today).catch((err) => {
+    logger.error(`[annual-prepay] decline retrieval date correction pass failed: ${err.message}`);
+  });
+  return { scanned: candidates.length, raised };
+}
+
+// Codex #4940 r10 P1: a staff correction to term_end AFTER the due-time task
+// was raised. Every dated portal-decline task is checked, READ ones too
+// (Codex r11: opening the bell marks it read — that is not the retrieval),
+// bounded to tasks dated within the last six months or later. Per term, only
+// the LATEST task is compared with the term's current retrieval end
+// (declineRetrievalEnd); the same date means it is current — nothing done:
+//   - end moved LATER than the task's date: the stations must wait —
+//     re-raise dated to the new end through the same helper (its dedupe key
+//     includes the date, and it retires the obsolete open row); the marker
+//     records the new date, and staff are belled with the correction (they
+//     may already have read the old task);
+//   - end moved EARLIER: the stations are due sooner and a task already
+//     stands — staff are belled with the correction (once per new date).
+async function correctDeclineRetrievalDates(today) {
+  const rows = await db('notifications')
+    .where({ recipient_type: 'admin' })
+    .whereRaw("metadata->>'kind' = 'termite_station_retrieval'")
+    .whereRaw("metadata->>'churnEpisode' = ?", [DECLINE_RETRIEVAL_EPISODE])
+    .whereRaw("metadata->>'retrieveAfter' >= ?", [addMonthsSameDayShared(today, -6)])
+    .orderBy('created_at', 'desc')
+    .select('metadata');
+  const latestByTerm = new Map();
+  for (const row of rows) {
+    const meta = parseActivityMetadata(row.metadata);
+    if (meta.termId && !latestByTerm.has(meta.termId)) latestByTerm.set(meta.termId, meta);
+  }
+  for (const latest of latestByTerm.values()) await correctDeclineRetrievalDate(latest, today);
+}
+
+async function correctDeclineRetrievalDate(meta, today) {
+  const term = await db('annual_prepay_terms').where({ id: meta.termId }).first(...DECLINE_RETRIEVAL_TERM_COLUMNS);
+  // The same end the due check used — never a provisional term_end.
+  const termEnd = term ? await declineRetrievalEnd(term) : null;
+  if (!termEnd || termEnd === meta.retrieveAfter) return;
+  const retrieval = { termEnd, customerId: term.customer_id, retrieveAfterKey: termEnd };
+  if (termEnd < meta.retrieveAfter) {
+    await ringDeclineRetrievalStaffBell(term.id, { ...retrieval, raised: false, reason: 'date_moved_earlier', previousRetrieveAfter: meta.retrieveAfter });
+    return;
+  }
+  const portalDecline = await db('activity_log')
+    .where({ action: CUSTOMER_DECLINE_ACTIVITY_ACTION })
+    .whereRaw("metadata->>'term_id' = ?", [String(term.id)])
+    .orderBy('created_at', 'asc')
+    .first('id', 'created_at', 'metadata');
+  if (!portalDecline) return;
+  Object.assign(retrieval, await actOnDueDeclineRetrieval(term, { portalDecline, retrieveAfter: termEnd, key: termEnd }, today));
+  // Re-raised: record the new date and bell the correction. Otherwise (other
+  // coverage now, a newer instruction, a failure) staff are belled — once per
+  // new date, the bell's dedupe — and the stale row is left for them.
+  if (retrieval.raised) {
+    await writeDeclineRetrievalMarker(term.id, retrieval, 'raised');
+    await ringDeclineRetrievalStaffBell(term.id, { ...retrieval, reason: 'date_moved_later', previousRetrieveAfter: meta.retrieveAfter });
+  } else {
+    await ringDeclineRetrievalStaffBell(term.id, retrieval);
+  }
+}
+
+// Staff-facing sentence per due-time outcome. `when` is "after <date>" for a
+// retrieval due at term_end, "now" after a refund. `manual` marks outcomes
+// that settle once the staff bell is stored (staff now own the action);
+// failed / not_raised are belled but retried.
+const RETRIEVAL_SENTENCES = {
+  unpaid_plan: {
+    manual: true,
+    text: (_when, retrieval) => `The customer declined renewal and the plan was never paid; its installation-derived end ${formatDateLabel(retrieval.termEnd)} has passed — decide on collection and station retrieval. No retrieval task was raised automatically.`,
+  },
+  no_rented_stations: { manual: true, text: () => 'No Waves-owned termite stations are on file, so no retrieval task was raised — confirm none need collecting.' },
+  other_termite_plan: { manual: true, text: (when) => `This customer has another termite annual plan, so no retrieval task was raised automatically — confirm which stations to pull ${when}.` },
+  other_termite_service: { manual: true, text: (when) => `This customer still has termite service on the calendar, so no retrieval task was raised automatically — confirm which stations to pull ${when}.` },
+  termite_bond: { manual: true, text: (when) => `This customer has an active termite bond, so no retrieval task was raised automatically — confirm which stations to pull ${when}.` },
+  superseded_by_newer: { manual: true, text: (when) => `A newer station-retrieval instruction already stands on this account, so no separate task was raised for this decline — confirm it covers pulling the stations ${when}.` },
+  failed: { manual: false, text: (when) => `The station-retrieval task could not be raised yet — it is retried automatically each day; create it by hand ${when === 'now' ? 'now' : `for ${when}`} if it does not appear.` },
+  date_moved_later: {
+    manual: false,
+    text: (when, retrieval) => `Its paid-through date was corrected to ${formatDateLabel(retrieval.termEnd)}, later than the earlier station-retrieval task said (after ${formatDateLabel(retrieval.previousRetrieveAfter)}) — a replacement task was raised: the stations come out ${when}, not before.`,
+  },
+  date_moved_earlier: {
+    manual: false,
+    text: (when, retrieval) => `Its paid-through date was corrected to ${formatDateLabel(retrieval.termEnd)}, earlier than the open station-retrieval task says (after ${formatDateLabel(retrieval.previousRetrieveAfter)}) — the stations can come out ${when}.`,
+  },
+};
+RETRIEVAL_SENTENCES.not_raised = RETRIEVAL_SENTENCES.failed;
+
+function retrievalSentence(retrieval, termEndLabel) {
+  const entry = RETRIEVAL_SENTENCES[retrieval?.reason];
+  if (!entry) return '';
+  return entry.text(retrieval.retrieveAfterKey === DECLINE_RETRIEVAL_IMMEDIATE ? 'now' : `after ${termEndLabel}`, retrieval);
+}
+
+// The decline bell's retrieval line: nothing is raised now — the stations
+// come out once the paid year ends (or at once if the prepay is refunded).
+function declineRetrievalPlanSentence(result, formatEnd) {
+  const whenEnds = result.awaitsInstallation
+    ? 'the 12-month coverage year from the station installation ends'
+    : `coverage ends ${formatEnd(result.termEnd)}`;
+  return `The stations will be retrieved after ${whenEnds}: a retrieval task is raised then (or staff are asked to confirm which stations, if other termite coverage remains).`;
+}
+
+// "Coverage continues through <date>" — or, for an original term not yet
+// anchored to its station installation (its term_end is provisional),
+// installation-relative wording that quotes no date.
+function declineCoverageSentence(awaitsInstallation, termEnd, formatEnd = (d) => d, unpaid = false) {
+  // Declined before the prepay was paid (move 15): coverage only if it is.
+  if (unpaid) {
+    return `The prepay is not paid yet; if it is paid, coverage runs ${awaitsInstallation ? '12 months from the station installation' : `through ${formatEnd(termEnd)}`}`;
+  }
+  return awaitsInstallation
+    ? 'Coverage runs 12 months from the station installation (not yet installed)'
+    : `Coverage continues through ${formatEnd(termEnd)}`;
+}
+
+async function ringTermiteAnnualDeclineBell(result, customerId, conn) {
+  try {
+    const NotificationService = require('./notification-service');
+    const customer = await conn('customers').where({ id: customerId }).first('first_name', 'last_name').catch(() => null);
+    const name = customer ? `${customer.first_name || ''} ${customer.last_name || ''}`.trim() : null;
+    await NotificationService.notifyAdmin(
+      'estimate',
+      'Termite annual plan — renewal declined online',
+      [
+        `${name || 'A customer'} declined renewal for their termite annual plan through the customer portal${result.supersededRenew ? ', replacing the renewal staff had recorded' : ''}.`,
+        `${declineCoverageSentence(result.awaitsInstallation, result.termEnd, formatDateLabel, result.unpaid)}.`,
+        declineRetrievalPlanSentence(result, formatDateLabel),
+      ].filter(Boolean).join(' '),
+      {
+        icon: '📋',
+        link: `/admin/customers?customerId=${customerId}`,
+        bell: true,
+        dedupeKey: `termite-annual-renewal-decline:${result.termId}`,
+        metadata: {
+          customerId,
+          termId: result.termId,
+          // A provisional end date is never recorded as the coverage end.
+          termEnd: result.awaitsInstallation ? null : result.termEnd,
+          awaitsInstallation: result.awaitsInstallation === true,
+          source: 'customer_portal',
+        },
+        // Only a real caller transaction rides along: on the root pool
+        // notifyAdmin must open its own, so its dedupe advisory lock spans
+        // the lookup + insert (concurrent retries can't double-bell).
+        ...(conn === db ? {} : { trx: conn }),
+      },
+    );
+  } catch (bellErr) {
+    logger.error(`[annual-prepay] renewal-decline bell failed for term ${result.termId}: ${bellErr.message}`);
+  }
+}
+
+// Why an undeclined termite annual term can't be declined online right now
+// (null = it can). Shared by the portal GET's canDecline and the decline
+// write so the control is never offered for a POST that will refuse:
+// - a different decision already on file is never overwritten;
+// - a live term (ACTIVE_STATUSES) or a signed plan still payment_pending
+//   (an unpaid original invoice, or a dispute-suspended one — Codex #4940
+//   r9: agreement v3 lets the customer decline "at any time before the
+//   renewal date", paid or not). A declined payment_pending term becomes a
+//   decided lapse (move 15): paid later, it covers the paid year and never
+//   renews; never paid, nothing is covered;
+// - strictly BEFORE the renewal date (agreement v3: "decline renewal at any
+//   time before the renewal date") — a term ending today has already
+//   reached its renewal date, so it is `term_ended`, not declinable.
+// `today` defaults to the ET calendar day so a caller inside an existing
+// transaction can still pass the same `today` it resolved once itself.
+// Online decline is available BEFORE installation too (codex round-1 P1,
+// reversing the earlier "paid, installed plan only" restriction) —
+// anchorTermToInstallation / anchorInstalledTerms (termite-annual-
+// activation.js) now anchor a decided-lapse original term the same as an
+// undecided one, so a decline no longer strands the coverage year.
+function termiteDeclineBlockedReason(term, today = etDateString(), { hasSuccessor = true } = {}) {
+  // Codex #4940 r4 P1: a staff 'renew' not yet processed (no successor
+  // term) is superseded by the customer's decline — the date rule below
+  // still applies. The conservative default treats every renew as
+  // processed; callers that checked for a successor pass hasSuccessor.
+  const supersedableRenew = term.status === 'renewed' && term.renewal_decision === 'renew' && !hasSuccessor;
+  if (!supersedableRenew) {
+    if (term.renewal_decision) return 'already_decided';
+    if (!ACTIVE_STATUSES.includes(term.status) && term.status !== PAYMENT_PENDING_STATUS) return 'not_active';
+  }
+  // Codex r3 P1: an original term not yet anchored to its installation has
+  // a PROVISIONAL term_end — its real renewal date doesn't exist yet, so it
+  // is never cut off by that placeholder.
+  if (coverageAwaitsInstallation(term)) return null;
+  const termEnd = dateOnly(term.term_end);
+  if (!termEnd || termEnd <= today) return 'term_ended';
+  return null;
+}
+
+// The portal's "current term" rule, shared by the GET (property.js) and the
+// no-selector decline path: a term not yet past its end date, OR an
+// original termite term still awaiting installation (coverageAwaitsInstallation
+// — its term_end is a placeholder, never a cutoff). Column names are bare
+// unless the caller's query aliases annual_prepay_terms (pass `alias`).
+function whereTermCurrentOrAwaitingInstallation(builder, today, alias = null) {
+  const col = (name) => (alias ? `${alias}.${name}` : name);
+  return builder.where(col('term_end'), '>=', today)
+    .orWhere(function awaitingInstallation() {
+      this.whereNotNull(col('annual_plan_version')).whereNull(col('renewed_from_term_id')).whereNull(col('installation_anchored_at'));
+    });
+}
+
+// Replay of an already-declined term: the same success shape only while the
+// year is still PAID (billing's own test) — a later refund/dispute answers
+// not_covered, never "coverage continues".
+async function alreadyDeclinedResult(term, conn) {
+  if (!(await isPaidDecidedLapseTerm(term, conn))) {
+    return { ok: false, reason: 'not_covered', termId: term.id };
+  }
+  return declineResultFromRow(term, { alreadyDeclined: true });
+}
+
+// A term already declined answers the same success shape: the decided-lapse
+// shape (cancelled + cancel, re-checked still paid), or an unpaid plan
+// already declined (decision on a payment_pending term, status unchanged —
+// Codex #4940 r10). null = not declined yet.
+async function declineReplayResult(term, trx) {
+  if (term.renewal_decision !== 'cancel') return null;
+  if (term.status === 'cancelled') return alreadyDeclinedResult(term, trx);
+  if (term.status === PAYMENT_PENDING_STATUS) return { ...declineResultFromRow(term, { alreadyDeclined: true }), unpaid: true };
+  return null;
+}
+
+// The refusal shape for each termiteDeclineBlockedReason.
+function declineRefusal(term, reason) {
+  const detail = {
+    already_decided: { decision: term.renewal_decision },
+    not_active: { status: term.status },
+    term_ended: { termEnd: dateOnly(term.term_end) },
+  }[reason];
+  return { ok: false, reason, ...detail, termId: term.id };
+}
+
+async function declineTermiteAnnualRenewal({ customerId, termId = null, today = etDateString(), conn = db } = {}) {
+  if (!customerId) return { ok: false, reason: 'missing_customer' };
+  if (!(await annualPrepayTableExists())) return { ok: false, reason: 'disabled' };
+  // Not gated — see the header: the gates only control issuing new plans.
+  const notFound = () => {
+    const { termiteAnnualPlanSelectionEnabled } = require('../config/feature-gates');
+    if (!termiteAnnualPlanSelectionEnabled()) return { ok: false, reason: 'disabled' };
+    return { ok: false, reason: termId ? 'not_found' : 'no_term' };
+  };
+
+  const work = async (trx) => {
+    const term = await trx('annual_prepay_terms')
+      .where({ customer_id: customerId })
+      .whereNotNull('annual_plan_version')
+      // No explicit term (internal callers only — the portal POST always
+      // names one): the CURRENT term (earliest one not yet ended, or one
+      // still awaiting installation, whose term_end is only provisional),
+      // never a historical row — the same filter the portal GET uses.
+      .modify((q) => {
+        if (termId) q.where({ id: termId });
+        else q.where((current) => whereTermCurrentOrAwaitingInstallation(current, today));
+      })
+      .orderBy('term_end', 'asc')
+      .forUpdate()
+      .first('*');
+    if (!term) return notFound();
+
+    // Idempotent replay first — even once its term_end has since passed,
+    // rather than a confusing term_ended.
+    const replay = await declineReplayResult(term, trx);
+    if (replay) return replay;
+    const renewDecided = term.status === 'renewed' && term.renewal_decision === 'renew';
+    const hasSuccessor = renewDecided ? await hasSuccessorTerm(term.id, trx) : true;
+    const blocked = termiteDeclineBlockedReason(term, today, { hasSuccessor });
+    if (blocked) return declineRefusal(term, blocked);
+
+    // A superseded staff renew must still be a PAID year — never turn a
+    // refunded/disputed renewed term into "coverage continues".
+    if (renewDecided && !(await isCoveredTerm(term.id, trx))) {
+      return { ok: false, reason: 'not_active', status: term.status, termId: term.id };
+    }
+
+    const unpaid = term.status === PAYMENT_PENDING_STATUS;
+    const decided = await recordCustomerDecline(term, { renewDecided, unpaid }, trx);
+    if (!decided) {
+      // The guarded write (recordDecision / move 14 / move 15) didn't match
+      // despite our lock — re-read for the idempotent shape rather than
+      // report a false failure.
+      const reread = await trx('annual_prepay_terms').where({ id: term.id }).first('*');
+      if (reread && reread.status === 'cancelled' && reread.renewal_decision === 'cancel') {
+        return alreadyDeclinedResult(reread, trx);
+      }
+      return { ok: false, reason: 'conflict', termId: term.id };
+    }
+
+    await trx('activity_log').insert({
+      customer_id: customerId,
+      action: CUSTOMER_DECLINE_ACTIVITY_ACTION,
+      description: `Declined renewal online through the customer portal. ${declineCoverageSentence(coverageAwaitsInstallation(decided), dateOnly(decided.term_end), undefined, unpaid)}.`,
+      metadata: {
+        term_id: decided.id,
+        source: 'customer_portal',
+        decided_at: new Date().toISOString(),
+        ...(renewDecided ? { superseded_decision: 'renew' } : {}),
+        ...(unpaid ? { unpaid: true } : {}),
+      },
+    });
+
+    return {
+      ...declineResultFromRow(decided, { alreadyDeclined: false }),
+      ...(renewDecided ? { supersededRenew: true } : {}),
+      // Declined before the prepay was paid: the portal says only that the
+      // plan will not renew — there is no paid coverage to quote yet.
+      ...(unpaid ? { unpaid: true } : {}),
+    };
+  };
+
+  const result = conn === db ? await db.transaction((trx) => work(trx)) : await work(conn);
+  if (!result.ok) return result;
+  // Nothing is raised at decline time (Codex #4940 r9): the staff bell says
+  // when the stations come out, and the daily sweep evaluates the station
+  // retrieval once it is due.
+  await ringTermiteAnnualDeclineBell(result, customerId, conn);
+  const { supersededRenew: _supersededRenew, ...publicResult } = result;
+  return publicResult;
+}
+
 module.exports = {
   createTermForAnnualPrepay,
+  termiteDeclineBlockedReason,
+  whereTermCurrentOrAwaitingInstallation,
+  // Codex pre-push P1: the portal GET (property.js) and /api/auth/me's
+  // paid-through badge (auth.js) both re-check a decided-lapse row
+  // (cancelled + renewal_decision 'cancel') with this before ever
+  // displaying it as covered — the SAME test coveredTermsAsOf uses, so a
+  // refunded or disputed invoice can never leave display and billing
+  // disagreeing about whether the term is actually covered.
+  isPaidDecidedLapseTerm,
+  isCoveredTerm,
+  hasSuccessorTerm,
+  // Station retrieval for a portal renewal decline — the installation
+  // anchor and the daily reconcile raise it (termite-annual-activation.js).
+  raisePendingDeclineRetrievalTasks,
+  // The portal renewal card's per-term property label (property.js GET
+  // /termite-annual-plan) — ownership-scoped, see its definition.
+  termPropertyLabelsForCustomer,
+  // "Is this term_end still provisional?" (an un-anchored original termite
+  // annual term) — the portal card and /me read it so a provisional date
+  // is never quoted to the customer.
+  coverageAwaitsInstallation,
   refreshTermSnapshot,
   refreshActiveTermsForCustomer,
   // ADMIN-BUG-R18: Cancel plan annotates an already-decided cancel through
@@ -8348,6 +9447,7 @@ module.exports = {
   clearPrepaidStampsForTerm,
   annualPrepayCoversVisit,
   coveredTermsAsOf,
+  retryPaidLapseReconciles,
   ANNUAL_PREPAY_PREPAID_METHOD,
   recordDecision,
   // Codex round-7 P1: the per-term advisory lock recordDecision itself
@@ -8365,6 +9465,7 @@ module.exports = {
   // stampParentRenewedForSuccessor's own savepoint, swallowed to protect
   // the successor's own activation).
   reconcileParentRenewedStamps,
+  declineTermiteAnnualRenewal,
   // ADMIN-BUG-R16/R17: the canonical term-cancel pipeline and its
   // billing_mode restore, both now shared by callers OUTSIDE this module
   // (admin-invoices.js's remove-flag and reverse-prepaid routes) so no
@@ -8405,6 +9506,8 @@ module.exports = {
   // suspendActiveTermsForDisputedInvoice stamps (ADMIN-BUG-R17-FINDING-1).
   annualPrepayColumns,
   _private: {
+    supersedeRenewWithCustomerCancel,
+    declinePaymentPendingWithCustomerCancel,
     runTermiteNoticePass,
     noticeWitnessColumn,
     PENDING_COMPLETION_REVERSAL_IDENTITIES,

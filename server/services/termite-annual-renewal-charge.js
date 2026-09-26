@@ -125,8 +125,8 @@
 //     invoice is genuinely paid — annual-prepay-renewals.js's
 //     syncTermForInvoicePayment (pending→active path for a row with
 //     renewed_from_term_id) calls the canonical recordDecision('renew') on
-//     the parent (docs/annual-prepay-term-states.md move 14) — or
-//     recordDecision('cancel') on a grace lapse (move 15). Both reuse the
+//     the parent (docs/annual-prepay-term-states.md move 16) — or
+//     recordDecision('cancel') on a grace lapse (move 17). Both reuse the
 //     SAME writer an operator's manual decision uses, so neither is a new
 //     status-write site in THIS file. Codex round-2 P1: the parent stamp
 //     itself runs as a SAVEPOINT on the successor's OWN activation
@@ -1172,6 +1172,16 @@ const RENEWAL_BELL_COPY = {
     title: 'Termite annual renewal — grace lapse deferred, parent already decided',
     body: `The termite annual renewal for customer ${successor.customer_id} (invoice for $${Number(successor.prepay_amount).toFixed(2)}) reached its grace deadline, but ${reason} — voiding it now could contradict a decision an operator already made. It was NOT voided; check the account and resolve it by hand.`,
   }),
+  // Codex #4971 post-push audit round-5 (item 2, #4940's eventAt/
+  // supersededByNewer): this lapse's own retrieval raise found a NEWER
+  // retrieval instruction already standing on the account — nothing was
+  // raised or reopened for THIS lapse's stations. Never silently treated
+  // as handled: staff must confirm the newer instruction actually covers
+  // this term's stations before the lapse itself is allowed to complete.
+  lapse_retrieval_superseded: (successor, reason) => ({
+    title: 'Termite annual renewal — grace lapse retrieval superseded, confirm coverage',
+    body: `The termite annual renewal for customer ${successor.customer_id} (invoice for $${Number(successor.prepay_amount).toFixed(2)}) reached its grace deadline, but its station-retrieval task was not raised: ${reason}. Confirm the newer instruction actually covers this term's stations before treating this lapse as fully handled.`,
+  }),
 };
 
 // Returns the underlying notifyAdmin result (or null on failure) so
@@ -1647,6 +1657,60 @@ async function processGraceLapseForTerm(term, conn = db) {
   );
 }
 
+// Extracted from processGraceLapseSequence (Codex #4971 post-push audit
+// round-5 self-review, AGENTS.md L412-418: a genuinely self-contained
+// sub-decision, same shape as writeDecisionUnderTermiteLock's own
+// extraction above) — item 2: this lapse's own station-retrieval raise,
+// and whether its outcome lets the lapse proceed to complete. Returns
+// true when the caller may continue (raise the retrieval, decide the
+// parent, stamp completed_at); false when it must return 'deferred'
+// immediately, leaving this lapse exactly as started-but-not-completed.
+async function raiseGraceLapseRetrievalTask(term, conn) {
+  const { raiseTermiteRetrievalTask, termRetrievalDedupeKey } = require('./cancellation-processor');
+  // This raise has no service request behind it, so without eventAt
+  // #4940's helper ranks it as the OLDEST event in the account's
+  // retrieval chronology and yields to ANY earlier request-keyed row —
+  // even one staff already acted on — completing this lapse as if the
+  // stations were covered when they were never actually raised for THIS
+  // lapse. eventAt = this lapse's own event time (renewal_lapse_started_at,
+  // stamped at the top of processGraceLapseForTerm) places it correctly
+  // in that chronology.
+  const raised = await raiseTermiteRetrievalTask(term.customer_id, null, {
+    retrieveAfter: null,
+    termId: term.id,
+    // No real churn episode backs a non-payment lapse — a stable literal
+    // keeps this raise's dedupe key scoped to THIS term (see the
+    // function's own termKeyed contract), distinct from any
+    // cancellation-request-driven retrieval task for the same customer.
+    episodeKey: 'renewal_grace_lapse',
+    eventAt: term.renewal_lapse_started_at,
+  });
+  // A newer retrieval instruction already stands on the account — nothing
+  // was raised or reopened for THIS lapse. Never silently treat that as
+  // "handled": bell staff to confirm the newer instruction actually covers
+  // these stations, and only once THAT confirmation itself is durably
+  // persisted may this lapse proceed to complete — a bell that fails to
+  // persist leaves it exactly as started-but-not-completed, retried next
+  // tick (mirrors #4940's own settleDeclineRetrieval: never settle on an
+  // unconfirmed outcome).
+  if (raised?.supersededByNewer) {
+    return !!(await ringRenewalBell(
+      term,
+      'lapse_retrieval_superseded',
+      `a newer retrieval instruction (${raised.supersededByNewer}) already stands on this account`,
+    ));
+  }
+  if (!raised?.raised) return true; // e.g. no_rented_stations — nothing to verify
+  // Mirror #4940's own actOnDueDeclineRetrieval verification: "raised"
+  // alone is not proof — confirm THIS lapse's own task row actually
+  // landed before letting the retrieval count as handled.
+  const taskRow = await conn('notifications')
+    .where({ recipient_type: 'admin' })
+    .whereRaw("metadata->>'dedupeKey' = ?", [termRetrievalDedupeKey(term.id, 'renewal_grace_lapse', null)])
+    .first('id');
+  return !!taskRow;
+}
+
 async function processGraceLapseSequence(term, conn) {
   const eligibility = await resolveLapseVoidEligibility(term, conn);
   if (eligibility.outcome === 'deferred') {
@@ -1717,16 +1781,7 @@ async function processGraceLapseSequence(term, conn) {
       throw err;
     }
   }
-  const { raiseTermiteRetrievalTask } = require('./cancellation-processor');
-  await raiseTermiteRetrievalTask(term.customer_id, null, {
-    retrieveAfter: null,
-    termId: term.id,
-    // No real churn episode backs a non-payment lapse — a stable literal
-    // keeps this raise's dedupe key scoped to THIS term (see the function's
-    // own termKeyed contract), distinct from any cancellation-request-driven
-    // retrieval task for the same customer.
-    episodeKey: 'renewal_grace_lapse',
-  });
+  if (!(await raiseGraceLapseRetrievalTask(term, conn))) return 'deferred';
   let parentDecided = true;
   if (term.renewed_from_term_id) {
     try {
