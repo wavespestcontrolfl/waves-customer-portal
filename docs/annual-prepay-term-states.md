@@ -75,6 +75,22 @@ These constants in `R` decide what each stage *means* to the rest of billing:
   holds only while the prepay invoice reads paid).
 - `cancelled` + `renewal_decision = 'cancel'` — treated like
   `DECIDED_COVERED_STATUSES` for coverage (decided lapse keeps its window).
+  The decision carries `cancel_disposition` (ADMIN-BUG-R18), written by
+  `recordDecision` in the same statement: `end_now_refund` for Cancel plan's
+  "end now + refund" (it pulled every visit and owes the unused value back),
+  `end_at_term` for "End of paid coverage" and a renewal-time lapse. An
+  end-at-term lapse later ended now is upgraded in place by
+  `recordCancelDisposition` (never back — Cancel plan refuses end-now →
+  end-at-term). The WRITE side keeps an `end_at_term` lapse's paid visits
+  owed through `term_end` (`isEndAtTermLapseInWindow`,
+  `keepEndAtTermLapseCoverage`), only while `coveredTermsAsOf` still reports
+  it as paid coverage (re-checked with the prepay invoice locked, so a
+  dispute's cleared stamps are not handed back): a per-edit refresh
+  attaches and stamps visits that exist, and the nightly
+  `reconcileCoveredTermsSweep` also replaces a skipped one, under Cancel
+  plan's commit key (`tryHoldCancelCommitLockForTransaction`; a busy key
+  waits for the next night). An `end_now_refund` lapse is never reseeded or
+  stamped.
 - `PAYMENT_PENDING_STATUS = 'payment_pending'` — payment reminders (3d/1d),
   card-expiry exemptions, `getPaymentPendingCustomerIds`.
 

@@ -615,6 +615,19 @@ function resolvePrepay(input, term, wholeAccount) {
 // processor and the case write, released in the caller's finally. Busy or
 // unacquirable = refuse, never proceed unlocked (money path fails closed).
 const CANCEL_LOCK_NS = 'admin-cancel-plan';
+// The same key, transaction-scoped, for a writer that must not interleave
+// with a cancel commit (ADMIN-BUG-R18: the nightly reseed of an end-at-term
+// lapse — an end-now commit pulls every visit before it records the
+// disposition). Session and transaction advisory locks share one key space:
+// while a commit holds the key this returns false, and while it is held the
+// commit's try-lock refuses as "in progress" until the transaction ends.
+async function tryHoldCancelCommitLockForTransaction(trx, customerId) {
+  const res = await trx.raw(
+    'SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS locked',
+    [CANCEL_LOCK_NS, String(customerId)],
+  );
+  return res?.rows?.[0]?.locked === true;
+}
 async function acquireCancelCommitLock(customerId) {
   let conn = null;
   let locked = false;
@@ -841,14 +854,24 @@ async function echoResolvedCase(customerId, resolved) {
   };
 }
 
-async function decideTermCancel(term, actorUserId, notes) {
-  const { recordDecision } = require('./annual-prepay-renewals');
+// `disposition` ('end_at_term' | 'end_now_refund', ADMIN-BUG-R18) lands on
+// the term with the decision (recordDecision writes both in one statement).
+// An already-decided term — an end-at-term lapse now ended early, or a
+// retry — still takes this run's disposition: the renewals module upgrades
+// it to end_now_refund (never back), so the decided-lapse upkeep never
+// reseeds or stamps visits this run pulled. A failed write throws into the
+// caller's prepay_term_disposition error, and the retry re-runs it.
+async function decideTermCancel(term, actorUserId, notes, disposition) {
+  const { recordDecision, recordCancelDisposition } = require('./annual-prepay-renewals');
   const decided = term.renewal_decision === 'cancel'
     ? null
-    : await recordDecision({ termId: term.id, action: 'cancel', adminUserId: actorUserId, notes });
+    : await recordDecision({ termId: term.id, action: 'cancel', adminUserId: actorUserId, notes, disposition });
   if (decided) return { verified: true, fresh: true };
   const reread = await db('annual_prepay_terms').where({ id: term.id }).first('renewal_decision');
-  if (reread && reread.renewal_decision === 'cancel') return { verified: true, fresh: false };
+  if (reread && reread.renewal_decision === 'cancel') {
+    await recordCancelDisposition({ termId: term.id, disposition });
+    return { verified: true, fresh: false };
+  }
   return { verified: false, fresh: false, conflictingDecision: reread ? reread.renewal_decision || null : null };
 }
 
@@ -1931,7 +1954,7 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
     try {
       if (prepayPlan.prepayDisposition === 'end_at_term') {
         const decision = await decideTermCancel(term, actorUserId,
-          `Cancel plan (${actorLabel}) — coverage kept through ${dateOnly(term.term_end)}; no renewal.`);
+          `Cancel plan (${actorLabel}) — coverage kept through ${dateOnly(term.term_end)}; no renewal.`, 'end_at_term');
         if (!decision.verified) {
           termOutcome = 'decision_conflict';
           errors.push('prepay_term_decision_conflict');
@@ -1954,7 +1977,8 @@ async function commitCancelPlanLocked({ customerId, actor = null, ...raw } = {})
           // note says OWED, never "recorded": a lost task/case write leaves
           // refundRecorded false and bells the office, and a durable
           // renewal note claiming the record exists would contradict it.
-          `Cancel plan (${actorLabel}) — ended now; unused-value refund owed to the customer (office refund task + cancellation case follow).`);
+          `Cancel plan (${actorLabel}) — ended now; unused-value refund owed to the customer (office refund task + cancellation case follow).`,
+          'end_now_refund');
         if (!decision.verified) {
           // A racing renew/switch_plan decision means the term is NOT
           // cancelled — recording a refund task for it would promise money
@@ -2304,6 +2328,9 @@ module.exports = {
   // a term's renewal decision serializes on this lock so a renew can never
   // land between the cancel's destructive wind-down and its term decision.
   acquireCancelCommitLock,
+  // The same key, transaction-scoped: the annual-prepay end-at-term reseed
+  // serializes with a cancel commit through it (ADMIN-BUG-R18).
+  tryHoldCancelCommitLockForTransaction,
   // Portal replay guard (requests.js dedupe + inactive retry): never re-run
   // a portal cancellation without the boundary an admin end-of-coverage
   // decision holds.
@@ -2313,4 +2340,6 @@ module.exports = {
   // cancelled if paid afterwards (syncTermForInvoicePayment) — the same
   // refusal this engine applies before its own wind-down.
   findPendingPrepayInvoice,
+  // Tests only: the term-decision step with its disposition (ADMIN-BUG-R18).
+  _private: { decideTermCancel },
 };
