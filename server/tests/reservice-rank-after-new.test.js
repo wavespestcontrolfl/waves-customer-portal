@@ -267,4 +267,18 @@ describe('buildBookingAvailability — rankProfile: reservice (end to end)', () 
     const stripped = (days) => days.map((d) => ({ date: d.date, starts: d.slots.map((s) => s.start_time).sort() }));
     expect(stripped(on.days)).toEqual(stripped(off.days));
   });
+
+  test('competing technicians at the same date+start: the packed tech-day beats an empty one with a better raw score (penalty applies before the dedupe)', async () => {
+    const date = dayOffset(10);
+    const emptyTech = { ...capacitySlot(date, { score: 1, stopsThatDay: 0 }), technician: { id: 'tech-empty' } };
+    const packedTech = { ...capacitySlot(date, { score: 2, stopsThatDay: 3, rank: 2 }), technician: { id: 'tech-packed' } };
+    const off = await build([emptyTech, packedTech], { rankProfile: 'reservice' });
+    const on = await withGate('true', () => build([emptyTech, packedTech], { rankProfile: 'reservice' }));
+    const techAt = (res) => res.days.find((d) => d.date === date).slots.map((s) => s.technician_id);
+    // Gate off: first (lowest raw score) claim wins, exactly as before.
+    expect(off.slots.map((s) => s.technician_id)).toEqual(['tech-empty']);
+    expect(on.slots.map((s) => s.technician_id)).toEqual(['tech-packed']);
+    // Still one offered slot at that date+start either way — nothing added or hidden.
+    expect(techAt(on)).toHaveLength(techAt(off).length);
+  });
 });

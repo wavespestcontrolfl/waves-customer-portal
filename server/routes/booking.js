@@ -1362,6 +1362,18 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
   // /confirm gate, which re-derives a non-empty funnel key.
   const offerLocationKey = bookingOfferLocationKey(lat, lng);
   const candidateMap = new Map();
+  const reserviceRankActive = rankProfile === 'reservice' && reserviceRankAfterNewLive();
+  // Gate off (and every non-reservice caller): the first — lowest raw score —
+  // technician to claim a date+time keeps it, exactly as before. With the
+  // re-service profile live, a later technician whose ADJUSTED score is lower
+  // (e.g. a packed day beating an empty one at the same start) displaces it,
+  // so the empty-day penalty applies before this dedupe, not after.
+  const keepsFirstClaim = (existing) => Boolean(existing) && !reserviceRankActive;
+  const claimSlot = (key, candidate) => {
+    const existing = candidateMap.get(key);
+    if (existing && reserviceAdjustedScore(existing) <= reserviceAdjustedScore(candidate)) return;
+    candidateMap.set(key, candidate);
+  };
 
   const addCandidate = (slot, startMin) => {
     const endMin = startMin + duration;
@@ -1410,10 +1422,10 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     if (!inTimeOfDay(startTime, timeOfDay)) return;
     const key = `${slot.date}|${startTime}`;
     // result.slots is score-sorted, so the first candidate to claim a date+time
-    // is the most route-efficient one — keep it.
-    if (candidateMap.has(key)) return;
+    // is the most route-efficient one — keep it (claimSlot: re-service profile).
+    if (keepsFirstClaim(candidateMap.get(key))) return;
     const labels = dateLabels(slot.date);
-    candidateMap.set(key, {
+    claimSlot(key, {
       date: slot.date,
       ...labels,
       start_time: startTime,
@@ -1517,7 +1529,6 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
   // Re-service rank profile (GATE_RESERVICE_RANK_AFTER_NEW): diagnostics run
   // whenever a profile is passed (reservice-public.js only), gate on or off,
   // so "before" and "after" are the byte-for-byte proof when it's dark.
-  const reserviceRankActive = rankProfile === 'reservice' && reserviceRankAfterNewLive();
   let reserviceBeforeDates = null;
   if (rankProfile) {
     const baseline = [...candidateMap.values()].sort(compareRankedSlots);
