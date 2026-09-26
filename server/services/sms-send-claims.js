@@ -8,13 +8,15 @@
  * delivered text. The Monday BI briefing's claim covers a whole ET WEEK
  * (bi-briefing-sms.js). Pruning it on Tuesday would let a re-run text the
  * owner a second briefing that week, so weekly claims are kept for 8 days.
- * Every prune goes through here so no route deletes another lane's
- * longer-lived claims.
+ * The missed-call text-back's claim is one text per number EVER
+ * (missed-call-text-back.js), so it is never pruned. Every prune goes
+ * through here so no route deletes another lane's longer-lived claims.
  */
 
 const db = require('../models/db');
 
 const WEEKLY_CLAIM_PREFIXES = ['bi_briefing_sms:'];
+const PERMANENT_CLAIM_PREFIXES = ['missed_call_text:'];
 
 // async: a sync throw while building the query becomes a rejection, which
 // the routes' fire-and-forget `.catch(() => {})` already swallows.
@@ -23,7 +25,7 @@ async function pruneSmsSendClaims(conn = db) {
     .where((q) => {
       q.where((daily) => {
         daily.where('created_at', '<', conn.raw("NOW() - interval '1 day'"));
-        for (const prefix of WEEKLY_CLAIM_PREFIXES) daily.whereRaw('left(claim_key, ?) <> ?', [prefix.length, prefix]);
+        for (const prefix of [...WEEKLY_CLAIM_PREFIXES, ...PERMANENT_CLAIM_PREFIXES]) daily.whereRaw('left(claim_key, ?) <> ?', [prefix.length, prefix]);
       });
       for (const prefix of WEEKLY_CLAIM_PREFIXES) {
         q.orWhere((weekly) => {
@@ -35,4 +37,4 @@ async function pruneSmsSendClaims(conn = db) {
     .del();
 }
 
-module.exports = { pruneSmsSendClaims, WEEKLY_CLAIM_PREFIXES };
+module.exports = { pruneSmsSendClaims, WEEKLY_CLAIM_PREFIXES, PERMANENT_CLAIM_PREFIXES };
