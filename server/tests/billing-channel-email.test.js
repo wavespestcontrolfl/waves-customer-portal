@@ -99,6 +99,29 @@ describe('billing channel email adapter', () => {
     }));
   });
 
+  test('routes a payment_receipt-category send through billing.receipt_notice', async () => {
+    mockLoadBillingEmailContext.mockResolvedValue(baseContext({
+      category: 'payment_receipt', categoryLabel: 'Payment receipt',
+    }));
+    await sendBillingChannelEmail(input({
+      metadata: { billingDeliveryCategory: 'payment_receipt', notificationEventKey: 'deposit-receipt:inv-1' },
+    }));
+    expect(mockSendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      templateKey: 'billing.receipt_notice',
+    }));
+  });
+
+  test.each(['invoice', 'payment_issue', 'billing'])(
+    'keeps the %s category on billing.notice',
+    async (category) => {
+      mockLoadBillingEmailContext.mockResolvedValue(baseContext({ category }));
+      await sendBillingChannelEmail(input());
+      expect(mockSendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+        templateKey: 'billing.notice',
+      }));
+    },
+  );
+
   test('removes the SMS opt-out footer while preserving the billing copy', async () => {
     await sendBillingChannelEmail(input({
       body: 'Your invoice is ready: https://waves.example/pay/1 Reply STOP to opt out.',
@@ -212,6 +235,15 @@ describe('billing channel email adapter', () => {
     }));
     await expect(sendBillingChannelEmail(input())).resolves.toMatchObject({
       sent: false, deliveryOutcome: 'not_sent', retryable: true, code: 'EMAIL_SEND_IN_PROGRESS',
+    });
+  });
+
+  test('classifies SENDGRID_NOT_CONFIGURED as not sent even after handoff started (no provider request was ever made)', async () => {
+    mockSendTemplate.mockImplementation(async (opts) => opts.withProviderHandoff(async () => {
+      throw Object.assign(new Error('SENDGRID_API_KEY not configured'), { code: 'SENDGRID_NOT_CONFIGURED' });
+    }));
+    await expect(sendBillingChannelEmail(input())).resolves.toMatchObject({
+      sent: false, deliveryOutcome: 'not_sent', retryable: true, code: 'SENDGRID_NOT_CONFIGURED',
     });
   });
 

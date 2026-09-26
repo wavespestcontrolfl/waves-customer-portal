@@ -55,7 +55,15 @@ function isConfigured() {
 
 function authHeaders() {
   const key = process.env.SENDGRID_API_KEY;
-  if (!key) throw new Error('SENDGRID_API_KEY not configured');
+  if (!key) {
+    const err = new Error('SENDGRID_API_KEY not configured');
+    // Thrown before any provider request (no fetch has happened yet), so a
+    // caller classifying delivery outcome by handoff state can tell this
+    // apart from a failure that occurred mid-request — see billing-channel
+    // -email.js's providerFailure.
+    err.code = 'SENDGRID_NOT_CONFIGURED';
+    throw err;
+  }
   return { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' };
 }
 

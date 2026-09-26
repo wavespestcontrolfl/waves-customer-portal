@@ -3,6 +3,7 @@ const { publicPortalUrl } = require('../utils/portal-url');
 const {
   loadBillingEmailContext,
   dispatchUnderBillingEmailAuthority,
+  billingEmailTemplateKey,
   blocked,
 } = require('./billing-channel-email-authority');
 
@@ -29,9 +30,14 @@ function acceptedResult(result) {
 // sendgrid-mail.isDefiniteRejection statuses) accepted nothing, so the
 // outcome is `not_sent` and retryable; a 408, other 4xx, 5xx or network
 // error may have gone out before the response and stays `uncertain`.
+// SENDGRID_NOT_CONFIGURED is thrown from sendgrid-mail's authHeaders()
+// before fetch is ever called, so even though the authority already
+// flipped handoffStarted, no provider request occurred — same "definitely
+// not sent" bucket as the pre-handoff and EMAIL_SEND_IN_PROGRESS cases.
 function providerFailure(err, handoffStarted) {
   const definitelyNotSent = !handoffStarted
     || err.code === 'EMAIL_SEND_IN_PROGRESS'
+    || err.code === 'SENDGRID_NOT_CONFIGURED'
     || require('./sendgrid-mail').isDefiniteRejection(err);
   return {
     sent: false,
@@ -65,7 +71,7 @@ async function sendBillingChannelEmail(input, { preSendCheck } = {}) {
   const state = { boundaryBlock: null, handoffStarted: false, providerAccepted: false };
   try {
     const result = await EmailTemplateLibrary.sendTemplate({
-      templateKey: 'billing.notice',
+      templateKey: billingEmailTemplateKey(context.category),
       to: recipientEmail,
       payload: {
         first_name: clean(context.recipient.name) || clean(context.customer.first_name) || 'there',

@@ -186,6 +186,21 @@ describe('billing channel email authority', () => {
     expect(dispatch).not.toHaveBeenCalled();
   });
 
+  test('the locked suppression recheck loads billing.notice for a non-receipt category', async () => {
+    const { outcome } = await runAuthority();
+    expect(outcome.ok).toBe(true);
+    expect(mockLoadTemplateByKey).toHaveBeenCalledWith('billing.notice', mockDb);
+  });
+
+  test('the locked suppression recheck loads billing.receipt_notice for the payment_receipt category', async () => {
+    rows.notification_prefs = { customer_id: 'cust-1', payment_receipt_channels: ['email'] };
+    const { outcome } = await runAuthority({
+      metadata: { billingDeliveryCategory: 'payment_receipt', notificationEventKey: 'deposit-receipt:inv-1' },
+    });
+    expect(outcome.ok).toBe(true);
+    expect(mockLoadTemplateByKey).toHaveBeenCalledWith('billing.receipt_notice', mockDb);
+  });
+
   test('refuses an invoice that does not belong to the selected customer', async () => {
     rows.invoices = { id: 'inv-1', customer_id: 'cust-other', status: 'sent' };
     const { context } = await runAuthority({ invoiceId: 'inv-1' });
