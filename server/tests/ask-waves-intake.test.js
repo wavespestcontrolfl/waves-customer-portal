@@ -281,6 +281,7 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
     ['It takes about 30 minutes.', 'How long after treatment can I re-enter?'],
     ['It usually takes two hours.', 'How long does the spray take to dry?'],
     ['Your technician recommends waiting 30 minutes.', 'How long after treatment can I re-enter?'],
+    ['About 30 minutes after the visit.', 'How long after treatment can I re-enter?'],
   ])('flags: %s', (reply, context) => {
     expect(intakeSafetyClaimSupplement(reply, context)).toBe(true);
   });
@@ -312,6 +313,21 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
   test('a scheduling word elsewhere in the reply does not exempt a re-entry duration', () => {
     expect(intakeSafetyClaimSupplement('Your technician says you can use the lawn after 30 minutes.', 'Can I let my dog on the grass after treatment?')).toBe(true);
     expect(intakeSafetyClaimSupplement('Your technician arrives in a 2 hour window.', 'When will the tech arrive for my treatment?')).toBe(false);
+  });
+
+  test("doctor direction and the visitor's own emergency keep the emergency script", () => {
+    const doctor = scrubUnsafeClaims({
+      reply: 'The pesticide is not safe to swallow. Contact a doctor immediately.',
+      intent: 'question', service_keys: [], ready_for_quote: true, source: 'openai',
+    });
+    expect(doctor.intent).toBe('emergency');
+    expect(doctor.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
+    const visitor = scrubUnsafeClaims(
+      { reply: 'Our spray is safe.', intent: 'question', service_keys: ['pest'], ready_for_quote: true, source: 'openai' },
+      'My child swallowed some bait and cannot breathe',
+    );
+    expect(visitor.intent).toBe('emergency');
+    expect(visitor.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
   });
 
   test('hospital direction keeps the emergency script', () => {

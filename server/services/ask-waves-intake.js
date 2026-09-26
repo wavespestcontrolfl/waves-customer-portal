@@ -121,7 +121,7 @@ const FALLBACK_RESULT = Object.freeze({
 // paired with a reaction word (plain "ants bite" stays a normal fallback).
 // English + Spanish — the surface explicitly supports Spanish visitors, so
 // every deterministic guard reads both languages.
-const EMERGENCY_RE = /\b(?:911|can'?t\s+breathe|trouble\s+breathing|difficulty\s+breathing|short(?:ness)?\s+of\s+breath|anaphyla\w*|anafila\w*|allergic(?:\s+reaction)?|al[eé]rgic\w*|reacci[oó]n\s+al[eé]rgica|epi\s?pen|throat\s+(?:is\s+)?(?:closing|swelling)|chest\s+pain|passed?\s+out|unconscious|inconsciente|desmay\w*|emergency\s+room|\be\.?r\.?\b|hospital|urgencias|sala\s+de\s+emergencias?|poison(?:ed|ing)?|envenen\w*|veneno|no\s+pued[eo]\s+respirar|dificultad\s+para\s+respirar|falta\s+de\s+aire|dolor\s+de\s+pecho)\b/i;
+const EMERGENCY_RE = /\b(?:911|(?:can'?t|cannot|can\s+not)\s+breathe|swallow(?:ed|ing)|ingest(?:ed|ing)|trag[oó]|ingiri[oó]|trouble\s+breathing|difficulty\s+breathing|short(?:ness)?\s+of\s+breath|anaphyla\w*|anafila\w*|allergic(?:\s+reaction)?|al[eé]rgic\w*|reacci[oó]n\s+al[eé]rgica|epi\s?pen|throat\s+(?:is\s+)?(?:closing|swelling)|chest\s+pain|passed?\s+out|unconscious|inconsciente|desmay\w*|emergency\s+room|\be\.?r\.?\b|hospital|urgencias|sala\s+de\s+emergencias?|poison(?:ed|ing)?|envenen\w*|veneno|no\s+pued[eo]\s+respirar|dificultad\s+para\s+respirar|falta\s+de\s+aire|dolor\s+de\s+pecho)\b/i;
 const BITE_STING_RE = /\b(?:stung|sting(?:s|ing)?|bit(?:e|es|ten)?|picad(?:o|a|ura|uras)|pic[oó]|mordedura?s?|mordi[dó]\w*|mordi[oó])\b/i;
 const REACTION_RE = /\b(?:swell\w*|swoll\w*|hives|rash|dizzy|faint\w*|vomit\w*|nause\w*|fever|reaction|breath\w*|baby|infant|toddler|hincha\w*|ronchas|urticaria|mare[oa]\w*|v[oó]mit\w*|n[aá]usea\w*|fiebre|sarpullido|reacci[oó]n|respir\w*|beb[eé])\b/i;
 
@@ -363,9 +363,13 @@ function fixedTimingClaim(reply, contextText, treatmentContext) {
       if (!digitalOnly && ACCESS_SIGNAL_RE.test(near)) return true;
       // "waiting 30 minutes" / "espere 30 minutos" is itself a timing instruction.
       if (/\bwait(?:ing|s)?\b|\besper\w*/i.test(tight)) return true;
-      if (SCHEDULING_DURATION_RE.test(tight) || digitalOnly) continue;
-      if (!visitorAskedTiming && GENERIC_LENGTH_RE.test(tight)) continue;
-      if (visitorAskedTiming || treatmentContext) return true;
+      if (digitalOnly) continue;
+      // The visitor asked when they can re-enter / let pets out / how long it
+      // takes to dry: any duration in the answer is a timing claim — no
+      // scheduling word exempts it ("About 30 minutes after the visit.").
+      if (visitorAskedTiming) return true;
+      if (SCHEDULING_DURATION_RE.test(tight) || GENERIC_LENGTH_RE.test(tight)) continue;
+      if (treatmentContext) return true;
     }
   }
   return false;
@@ -386,7 +390,7 @@ function intakeSafetyClaimSupplement(reply, contextText = '') {
 // guidance (the reviewed emergency script) regardless of the model's intent
 // label — "This product is not safe to ingest; call Poison Control now."
 // must not be replaced with copy that only says to call Waves.
-const HUMAN_EMERGENCY_DIRECTION_RE = /\b(?:(?<!animal\s)hospital|(?:go|get|head|take\s+\S+)\s+to\s+(?:the\s+)?(?:er|e\.r\.)|urgencias|call(?:ing)?\s+911|dial\s+911|911\s+(?:right\s+away|immediately|now)|poison\s+(?:control|help)|emergency\s+(?:room|care|services?|department)|urgent\s+care|seek\s+(?:immediate\s+)?(?:medical|emergency)|medical\s+(?:attention|care|help|emergency)|call\s+(?:a|your)\s+(?:doctor|physician)|centro\s+de\s+(?:toxicolog[ií]a|envenenamientos?)|control\s+de\s+(?:envenenamientos?|intoxicaciones)|sala\s+de\s+emergencias?|atenci[oó]n\s+m[eé]dica|llam[ea]\s+al\s+911)\b/i;
+const HUMAN_EMERGENCY_DIRECTION_RE = /\b(?:(?:call|contact|see|consult|reach|phone|ask)\s+(?:a\s+|your\s+|the\s+)?(?:doctor|physician|pediatrician|nurse|medical\s+(?:provider|professional)|health\s*care\s+provider)|(?:llame|consulte|contacte|vea|acuda)\s+(?:a|al)\s+(?:su\s+)?(?:m[eé]dico|doctor|pediatra)|(?<!animal\s)hospital|(?:go|get|head|take\s+\S+)\s+to\s+(?:the\s+)?(?:er|e\.r\.)|urgencias|call(?:ing)?\s+911|dial\s+911|911\s+(?:right\s+away|immediately|now)|poison\s+(?:control|help)|emergency\s+(?:room|care|services?|department)|urgent\s+care|seek\s+(?:immediate\s+)?(?:medical|emergency)|medical\s+(?:attention|care|help|emergency)|call\s+(?:a|your)\s+(?:doctor|physician)|centro\s+de\s+(?:toxicolog[ií]a|envenenamientos?)|control\s+de\s+(?:envenenamientos?|intoxicaciones)|sala\s+de\s+emergencias?|atenci[oó]n\s+m[eé]dica|llam[ea]\s+al\s+911)\b/i;
 const VET_DIRECTION_RE = /\b(?:vets?|veterinarian|veterinary|animal\s+(?:hospital|poison|emergency|er)|veterinari[oa]s?|cl[ií]nica\s+veterinaria|hospital\s+veterinario)\b/i;
 const ANIMAL_EMERGENCY_REPLY = ' If a pet may have been exposed or seems unwell, call your veterinarian or an emergency animal hospital right away. / Si una mascota pudo haber estado expuesta o no se siente bien, llame a su veterinario o a un hospital veterinario de emergencia de inmediato.';
 const POISON_MENTION_RE = /\b(?:poison\s+(?:control|help)|swallow\w*|ingest\w*|control\s+de\s+envenenamientos?|centro\s+de\s+toxicolog[ií]a|ingiri\w*|ingerir|trag[oó]\w*)\b/i;
@@ -409,7 +413,9 @@ function scrubUnsafeClaims(result, contextText = '') {
   // redirect is not a re-entry time.
   if (REVIEWED_REPLIES.has(result.reply)) return result;
   if (!intakeSafetyClaimSupplement(result.reply, contextText)) return result;
-  const human = HUMAN_EMERGENCY_DIRECTION_RE.test(result.reply);
+  // The visitor's own words count too: a flagged reply to an emergency message
+  // gets the emergency script even if the model's reply names no direction.
+  const human = HUMAN_EMERGENCY_DIRECTION_RE.test(result.reply) || looksLikeEmergency(contextText);
   const vet = VET_DIRECTION_RE.test(result.reply);
   if (result.intent === 'emergency' || human || vet) {
     // Emergency guidance wins — human and/or veterinary, whichever the model
