@@ -1706,6 +1706,395 @@ describe('attachCandidateMatchesProperty (attach evidence gate)', () => {
   });
 });
 
+// codex #4919 round-9: completion now comes from call-commitments' own
+// EXPORTED callEndedAt (inbound -> created_at + duration_seconds, bridged ->
+// bridged_at + duration_seconds, else -> created_at alone) instead of a
+// second, provider-timestamp/bridged-aware implementation in
+// call-timeline.js that duplicated it. callRow() below defaults
+// direction: 'inbound' — the realistic case for a phone booking.
+describe('startPrecedesCall — an accepted window that had already begun is never booked at its stale start (codex #4919 r1/r2/round-9)', () => {
+  const { startPrecedesCall } = CallRecordingProcessor._test;
+  // 2026-09-26 18:30 EDT = 22:30Z. A plain /voice row: created_at IS the
+  // call's start, and with no duration_seconds set the call is treated as
+  // ending the instant it started (a short call).
+  const CALL_AT = '2026-09-26T22:30:00Z';
+  const callRow = (overrides = {}) => ({ created_at: CALL_AT, duration_seconds: 0, direction: 'inbound', metadata: null, ...overrides });
+
+  test('a same-day start earlier than the call time precedes the call', () => {
+    expect(startPrecedesCall({ scheduledDate: '2026-09-26', windowStart: '18:00', call: callRow() })).toBe(true);
+  });
+
+  test('a same-day start at or after the call time does not', () => {
+    expect(startPrecedesCall({ scheduledDate: '2026-09-26', windowStart: '19:00', call: callRow() })).toBe(false);
+  });
+
+  test('a later day never precedes the call', () => {
+    expect(startPrecedesCall({ scheduledDate: '2026-09-27', windowStart: '08:00', call: callRow() })).toBe(false);
+  });
+
+  test('missing inputs fail open to the existing date guard', () => {
+    expect(startPrecedesCall({ scheduledDate: '2026-09-26', windowStart: null, call: callRow() })).toBe(false);
+    expect(startPrecedesCall({ scheduledDate: '2026-09-26', windowStart: '18:00', call: null })).toBe(false);
+  });
+
+  test('a long call crossing the window start compares against completion, not created_at (codex #4919 r2 P1)', () => {
+    // Call STARTS at 17:55 ET (created_at) and runs 10 minutes, ending at
+    // 18:05 ET — after the caller accepted "6 to 9 tonight" (window start
+    // 18:00). created_at alone (17:55) would wrongly say the window had NOT
+    // yet begun; the call's actual completion (18:05) says it had.
+    const startedAt = '2026-09-26T21:55:00Z'; // 17:55 ET
+    const longCall = callRow({ created_at: startedAt, duration_seconds: 600 });
+    expect(startPrecedesCall({ scheduledDate: '2026-09-26', windowStart: '18:00', call: longCall })).toBe(true);
+    // A window starting after the call actually ended (18:10) is still bookable.
+    expect(startPrecedesCall({ scheduledDate: '2026-09-26', windowStart: '18:10', call: longCall })).toBe(false);
+  });
+
+  // codex #4919 round-9: call-commitments' callEndedAt doesn't know a
+  // status_callback row's created_at can already BE the call's end — for an
+  // inbound row it always adds duration_seconds on top, so a post-call
+  // fallback row's completion is now OVERESTIMATED by roughly one call's
+  // length. That's the accepted, documented tradeoff (a shared, simpler
+  // mechanism over a second implementation) and it is conservative for
+  // THIS guard specifically: it can only make startPrecedesCall MORE
+  // willing to hold a booking for review, never book a truly-stale one.
+  test('a post-call fallback row: completion is overestimated (created_at + duration, not created_at alone), which only holds MORE windows for review, never fewer', () => {
+    const postCallRow = callRow({
+      created_at: '2026-09-26T22:30:00Z', // 18:30 ET, already the call's true end
+      duration_seconds: 3600, // one hour — added on top despite created_at already being the end
+      metadata: { source: 'status_callback' },
+    });
+    // The true end (18:30) already precedes this window's start (18:00 is
+    // before 18:30) — both the old and new mechanisms agree here.
+    expect(startPrecedesCall({ scheduledDate: '2026-09-26', windowStart: '18:00', call: postCallRow })).toBe(true);
+    // A window at 19:00 — genuinely AFTER the call's true 18:30 end, so a
+    // real customer booking a future slot — is INCORRECTLY held for review
+    // under the overestimated 19:30 completion. This is the accepted
+    // conservative tradeoff, not a silent auto-booking-a-stale-slot bug.
+    expect(startPrecedesCall({ scheduledDate: '2026-09-26', windowStart: '19:00', call: postCallRow })).toBe(true);
+    // A window genuinely after even the overestimate (19:30) is still bookable.
+    expect(startPrecedesCall({ scheduledDate: '2026-09-26', windowStart: '19:30', call: postCallRow })).toBe(false);
+  });
+
+  test('a call that itself crosses ET midnight still catches a stale start on the earlier date (codex #4919 r5 P1)', () => {
+    // Call STARTS 11:55 PM ET on the 26th and runs 10 minutes, ending
+    // 12:05 AM ET on the 27th. A same-calendar-day-only comparison would
+    // see scheduledDate (26th) != the completion's ET date (27th) and wave
+    // through an 11 PM start that is unambiguously already past by the time
+    // the call ends — this compares full ET timestamps instead, so the
+    // crossed midnight never exempts it.
+    const crossesMidnight = callRow({ created_at: '2026-09-27T03:55:00Z', duration_seconds: 600 }); // 23:55 ET 9/26
+    expect(startPrecedesCall({ scheduledDate: '2026-09-26', windowStart: '23:00', call: crossesMidnight })).toBe(true);
+    // A window on the NEXT date (the 27th) is still genuinely in the future
+    // relative to the call's completion and must not be flagged.
+    expect(startPrecedesCall({ scheduledDate: '2026-09-27', windowStart: '08:00', call: crossesMidnight })).toBe(false);
+    // A window right at/after the actual completion (12:05 AM) on the 27th
+    // is also still bookable.
+    expect(startPrecedesCall({ scheduledDate: '2026-09-27', windowStart: '00:05', call: crossesMidnight })).toBe(false);
+  });
+
+  // codex #4919 round-9: startPrecedesCall now sources completion from
+  // call-commitments' callEndedAt, not a call-timeline.js copy.
+  test('gets its completion time from call-commitments\' exported callEndedAt', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    const fnAt = src.indexOf('function startPrecedesCall(');
+    expect(fnAt).toBeGreaterThan(-1);
+    const fnEnd = src.indexOf('\n}', fnAt);
+    const body = src.slice(fnAt, fnEnd);
+    expect(body).toContain("require('./call-commitments')");
+    expect(body).not.toContain("require('../utils/call-timeline')");
+  });
+});
+
+// codex #4919 round-8 P2: startPrecedesCall's own call site cleared
+// scheduledDate (and opened a review card) BEFORE ever checking whether the
+// call's visit was already booked on an earlier pass — a reprocess of a call
+// whose visit exists would record it as unbooked and open a needless card.
+// The wall-clock elapsed guard right below it already carries this same
+// findExistingCallAppointment exemption; this pins that the stale-start
+// guard's own call site now carries it too.
+describe('startPrecedesCall\'s call site is exempted by an existing call appointment, same as the elapsed guard below it (codex #4919 round-8 P2)', () => {
+  const processorSrc = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+
+  test('the startPrecedesCall condition ANDs in a negated findExistingCallAppointment lookup', () => {
+    const gateAt = processorSrc.indexOf('startPrecedesCall({ scheduledDate, windowStart, call })');
+    expect(gateAt).toBeGreaterThan(-1);
+    const section = processorSrc.slice(gateAt, gateAt + 200);
+    expect(section).toContain(
+      '&& !(await findExistingCallAppointment({ customerId, call, scheduledDate, windowStart, serviceType }))',
+    );
+  });
+
+  test('the same exemption call, with the same argument shape, is what the elapsed guard right below already uses', () => {
+    const startPrecedesGateAt = processorSrc.indexOf('startPrecedesCall({ scheduledDate, windowStart, call })');
+    const elapsedGateAt = processorSrc.indexOf('slotElapsedAtBookingTime(scheduledDate, windowStart)', startPrecedesGateAt);
+    expect(elapsedGateAt).toBeGreaterThan(startPrecedesGateAt);
+    const elapsedSection = processorSrc.slice(elapsedGateAt, elapsedGateAt + 200);
+    expect(elapsedSection).toContain(
+      '&& !(await findExistingCallAppointment({ customerId, call, scheduledDate, windowStart, serviceType }))',
+    );
+  });
+});
+
+// codex #4919 round-8 push-review P1: extractCallData's own hand-written
+// prompt (the field names are appointment_confirmed/preferred_date_time,
+// not confirmed_start_at, so it's a separate hardcoded copy, not a template
+// call into prompts/call-extraction-v1.js) carries its own ARRIVAL WINDOW
+// EXCEPTION text and had the same "Tuesday, 2 to 4" ambiguous-period gap the
+// sibling v1 prompt was just fixed for. Fixed here with the identical rule.
+describe('extractCallData\'s own ARRIVAL WINDOW EXCEPTION requires an unambiguous period, same as the sibling v1 prompt (codex #4919 round-8 P1)', () => {
+  const processorSrc = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+
+  test('the rule requires UNAMBIGUOUS period and gives "Tuesday, 2 to 4 PM" as the qualifying example, not the bare "Tuesday, 2 to 4"', () => {
+    const ruleAt = processorSrc.indexOf('ARRIVAL WINDOW EXCEPTION:');
+    expect(ruleAt).toBeGreaterThan(-1);
+    const section = processorSrc.slice(ruleAt, ruleAt + 1600);
+    expect(section).toContain('UNAMBIGUOUS period for that start');
+    expect(section).toContain('"Tuesday, 2 to 4 PM"');
+    expect(section).toContain('"Tuesday, 2 to 4", "between 2 and 4"');
+    expect(section).toContain('does NOT count as confirmed');
+    expect(section).not.toMatch(/"Tuesday, 2 to 4"\)\s*DOES count as confirmed/);
+    // The already-unambiguous examples still qualify unchanged.
+    expect(section).toContain('"between 6 and 9 tonight"');
+    expect(section).toContain('"between 10 and noon tomorrow"');
+  });
+});
+
+// codex #4919 round-9 P2: start_before_call and slot_elapsed_at_booking_time
+// used to each carry their OWN copy-pasted shadow/legacy-mode review-card
+// writer (lock, ownership check, upsert-merge, dispute-field-clearing,
+// bridgeNeedsConfirmation push) differing only in their skippedReason
+// string — consolidated into ONE module-level helper, fileSkippedBookingCard,
+// called from both sites. A live DB round-trip for this helper is heavy
+// (full processRecording pipeline); the codebase's established pattern for
+// these hard-to-integration-test branches (see
+// call-onfile-house-number-conflict.test.js) is a source assertion plus a
+// knex-compiled SQL/bindings check, used here too.
+describe('fileSkippedBookingCard — the shared shadow/legacy-mode "approved but unbooked" review-card writer (codex #4919 round-9 P2)', () => {
+  const processorSrc = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+  const { fnAt, fnEnd, body } = (() => {
+    const at = processorSrc.indexOf('async function fileSkippedBookingCard(');
+    const end = processorSrc.indexOf('\nfunction isLiveLeadConversation', at);
+    return { fnAt: at, fnEnd: end, body: processorSrc.slice(at, end) };
+  })();
+
+  test('the function exists exactly once, outside processRecording, and is exported for testing', () => {
+    expect(fnAt).toBeGreaterThan(-1);
+    expect(fnEnd).toBeGreaterThan(fnAt);
+    expect(processorSrc.indexOf('async function fileSkippedBookingCard(', fnAt + 1)).toBe(-1);
+    expect(typeof CallRecordingProcessor._test.fileSkippedBookingCard).toBe('function');
+  });
+
+  // codex #4919 round-10 P2: a superseded worker files no card, so it must
+  // not push the review marker (the lead-activity refresh reads it unfenced).
+  test('pushes the review marker only when this worker still owned the call and filed the card', () => {
+    expect(body).toContain('if (!stillOwner) return false;');
+    expect(body).toContain('return true;');
+    const gate = body.indexOf('if (!filed) return;');
+    const push = body.indexOf("bridgeNeedsConfirmation.push('auto_booking_skipped_after_approval')");
+    expect(gate).toBeGreaterThan(-1);
+    expect(push).toBeGreaterThan(gate);
+  });
+
+  // codex #4919 round-12 P1: a failed card write still leaves the call in
+  // review, since the booking was already dropped.
+  test('a failed card write still pushes the review marker in the catch path', () => {
+    const catchAt = body.indexOf('} catch (e) {');
+    expect(catchAt).toBeGreaterThan(-1);
+    expect(body.slice(catchAt)).toContain("bridgeNeedsConfirmation.push('auto_booking_skipped_after_approval')");
+  });
+
+  // codex #4919 round-12 P2: the late lead-activity refresh only lands while
+  // this worker still owns the call.
+  test('the late lead-activity refresh is fenced on processing ownership', () => {
+    const at = processorSrc.indexOf("await db('lead_activities').where({ id: aiTriageActivityId })");
+    expect(at).toBeGreaterThan(-1);
+    const stmt = processorSrc.slice(at, processorSrc.indexOf('.update({', at));
+    expect(stmt).toContain(".whereExists(db('call_log').select(db.raw('1')).where({ id: call.id, processing_token: procToken }))");
+  });
+
+  // codex #4919 round-13 P2: the claim check and the card merge are atomic.
+  test('locks the processing claim (forUpdate) before merging the card', () => {
+    expect(body).toContain("ttrx('call_log').where({ id: call.id, processing_token: procToken }).forUpdate().first('id')");
+  });
+
+  test('takes the call lock, checks ownership under the claim fence, and MERGES instead of .ignore()-ing', () => {
+    expect(body).toContain('await lockTriageCall(ttrx, call.id)');
+    expect(body).toContain("ttrx('call_log').where({ id: call.id, processing_token: procToken }).forUpdate().first('id')");
+    expect(body).toContain("COALESCE(triage_items.payload, '{}'::jsonb) || EXCLUDED.payload");
+    expect(body).not.toContain('.ignore()');
+  });
+
+  // codex #4919 round-4 P1 (carried into the consolidated helper): the merge
+  // re-binds this SHARED reason-code card ('auto_booking_skipped_after_
+  // approval') to the call's current customer and clears the two
+  // house-number-dispute-specific fields, or a card the merge reuses
+  // (opened for a DIFFERENT reason, on a different customer/visit) keeps
+  // that old dispute's retained_service_id / retained_scheduled_date riding
+  // alongside this one.
+  test('rebinds dispute_customer_id and clears retained_service_id/retained_scheduled_date', () => {
+    expect(body).toContain('dispute_customer_id: customerId ? String(customerId) : null');
+    expect(body).toContain('retained_service_id: null');
+    expect(body).toContain('retained_scheduled_date: null');
+  });
+
+  // codex #4919 round-7 P2 (carried into the consolidated helper): the
+  // transaction succeeding is not enough by itself — review_status and the
+  // lead's confirm-before-dispatch note derive from bridgeNeedsConfirmation,
+  // not from open triage rows.
+  test('pushes onto bridgeNeedsConfirmation AFTER the transaction succeeds, inside the same try, guarded against duplicates', () => {
+    const txEndAt = body.indexOf('});', body.indexOf("COALESCE(triage_items.payload, '{}'::jsonb) || EXCLUDED.payload"));
+    const catchAt = body.indexOf('} catch (e) {', txEndAt);
+    expect(txEndAt).toBeGreaterThan(-1);
+    expect(catchAt).toBeGreaterThan(txEndAt);
+    const betweenTxAndCatch = body.slice(txEndAt, catchAt);
+    expect(betweenTxAndCatch).toContain(
+      "if (!bridgeNeedsConfirmation.includes('auto_booking_skipped_after_approval')) bridgeNeedsConfirmation.push('auto_booking_skipped_after_approval');",
+    );
+  });
+
+  test('the refresh SQL compiles and binds the refreshed payload/summary (knex, no live DB)', () => {
+    const knex = require('knex')({ client: 'pg' });
+    const compiled = knex('triage_items')
+      .insert({ call_log_id: 'call-1', reason_code: 'auto_booking_skipped_after_approval', payload: JSON.stringify({ skipped_reason: 'start_before_call' }) })
+      .onConflict(knex.raw("(call_log_id, reason_code) WHERE status IN ('open', 'in_progress')"))
+      .merge({
+        payload: knex.raw("COALESCE(triage_items.payload, '{}'::jsonb) || EXCLUDED.payload"),
+        summary: knex.raw('EXCLUDED.summary'),
+        updated_at: new Date('2026-09-26T00:00:00Z'),
+      })
+      .toSQL();
+    expect(compiled.sql).toContain('on conflict');
+    expect(compiled.sql).toContain('do update set');
+    expect(compiled.sql).not.toContain('do nothing');
+    knex.destroy();
+  });
+
+  // Both call sites in processRecording delegate to the shared helper with
+  // their own skippedReason, rather than each carrying their own writer.
+  test('both start_before_call and slot_elapsed_at_booking_time call the shared helper with their own skippedReason', () => {
+    const startBeforeCallAt = processorSrc.indexOf("skippedReason: 'start_before_call',");
+    expect(startBeforeCallAt).toBeGreaterThan(-1);
+    const startBeforeCallSection = processorSrc.slice(startBeforeCallAt, startBeforeCallAt + 1600);
+    expect(startBeforeCallSection).toContain('await fileSkippedBookingCard({');
+    expect(startBeforeCallSection).toContain("skippedReason: 'start_before_call',");
+
+    const slotElapsedAt = processorSrc.indexOf("skippedReason: 'slot_elapsed_at_booking_time',");
+    expect(slotElapsedAt).toBeGreaterThan(startBeforeCallAt);
+    const slotElapsedSection = processorSrc.slice(slotElapsedAt, slotElapsedAt + 1000);
+    expect(slotElapsedSection).toContain('await fileSkippedBookingCard({');
+    expect(slotElapsedSection).toContain("skippedReason: 'slot_elapsed_at_booking_time',");
+  });
+});
+
+// codex #4919 round-9 P2: the lead's ai_triage activity is written BEFORE
+// scheduling (start_before_call / slot_elapsed_at_booking_time / the
+// generic __held handler / the enforce-mode approved-but-unbooked
+// fallback all push onto bridgeNeedsConfirmation AFTER that point), so a
+// late hold never reached the lead timeline. A snapshot + row-id capture
+// at write time lets a length check near the end of processing detect a
+// late push and refresh THAT SAME row instead of leaving it stale.
+describe('a late scheduling hold refreshes the ai_triage lead activity instead of being silently dropped (codex #4919 round-9 P2)', () => {
+  const processorSrc = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+
+  test('the ai_triage insert captures its own row id via .returning(\'id\') and snapshots bridgeNeedsConfirmation first', () => {
+    const snapshotAt = processorSrc.indexOf('bridgeConfirmationsAtTriageWrite = [...bridgeNeedsConfirmation];');
+    expect(snapshotAt).toBeGreaterThan(-1);
+    const insertAt = processorSrc.indexOf("activity_type: 'ai_triage'", snapshotAt);
+    expect(insertAt).toBeGreaterThan(snapshotAt);
+    const section = processorSrc.slice(insertAt, insertAt + 900);
+    expect(section).toContain(".returning('id')");
+    expect(section).toContain('aiTriageActivityId = row?.id || null');
+  });
+
+  test('the refresh runs after writeLegacyShadowRouteDecision, guarded on a real length increase, and updates the SAME row by id (never a second insert)', () => {
+    const afterRouteDecisionAt = processorSrc.indexOf('await writeLegacyShadowRouteDecision({');
+    expect(afterRouteDecisionAt).toBeGreaterThan(-1);
+    const refreshGateAt = processorSrc.indexOf(
+      'if (aiTriageActivityId && bridgeConfirmationsAtTriageWrite\n      && bridgeNeedsConfirmation.length > bridgeConfirmationsAtTriageWrite.length) {',
+      afterRouteDecisionAt,
+    );
+    expect(refreshGateAt).toBeGreaterThan(afterRouteDecisionAt);
+    const section = processorSrc.slice(refreshGateAt, refreshGateAt + 1100);
+    expect(section).toContain("db('lead_activities').where({ id: aiTriageActivityId })");
+    expect(section).toContain('.update({');
+    expect(section).not.toContain('.insert(');
+    expect(section).toContain('needs_confirmation: bridgeNeedsConfirmation');
+  });
+
+  test('the refresh site is AFTER every scheduling-related bridgeNeedsConfirmation push (fileSkippedBookingCard sites, the generic __held handler, the enforce-mode fallback)', () => {
+    const refreshGateAt = processorSrc.indexOf('if (aiTriageActivityId && bridgeConfirmationsAtTriageWrite');
+    expect(refreshGateAt).toBeGreaterThan(-1);
+    const lastSchedulingPushAt = processorSrc.lastIndexOf(
+      "if (!bridgeNeedsConfirmation.includes('auto_booking_skipped_after_approval')) bridgeNeedsConfirmation.push('auto_booking_skipped_after_approval');",
+    );
+    const heldHandlerPushAt = processorSrc.indexOf('if (!bridgeNeedsConfirmation.includes(svc.__held.reason)) bridgeNeedsConfirmation.push(svc.__held.reason);');
+    expect(lastSchedulingPushAt).toBeGreaterThan(-1);
+    expect(heldHandlerPushAt).toBeGreaterThan(-1);
+    expect(refreshGateAt).toBeGreaterThan(lastSchedulingPushAt);
+    expect(refreshGateAt).toBeGreaterThan(heldHandlerPushAt);
+  });
+
+  test('a refresh failure is caught and logged, never thrown — a non-critical op like the original insert', () => {
+    const refreshGateAt = processorSrc.indexOf('if (aiTriageActivityId && bridgeConfirmationsAtTriageWrite');
+    const section = processorSrc.slice(refreshGateAt, refreshGateAt + 1400);
+    expect(section).toContain('.catch((e) => logger.warn(');
+  });
+});
+
+// codex #4919 round-8 P2: the generic __held handler files a review card for
+// every held reason it sees (existing_appointment_same_date,
+// ambiguous_existing_appointment, auto_booking_previously_cancelled,
+// open_reservice_callback_exists, reservice_eligibility_lapsed,
+// reservice_property_uncovered, on_file_proof_customer_mismatch,
+// arranger_slot_elapsed_pre_insert — every reason INSIDE the earlier
+// `heldReasons` exclusion Set built for the enforce fallback) but never told
+// review_status to open for any of them. Fixed once, in the shared handler,
+// for all of them — checked and reported as the right scope, per the task's
+// own escape clause, since none of these reasons was pushed anywhere else.
+describe('the generic __held handler pushes its reason onto bridgeNeedsConfirmation for every held reason (codex #4919 round-8 P2)', () => {
+  const processorSrc = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+
+  test('the push is inside the `if (svc && svc.__held)` branch, after the card insert, deduped', () => {
+    const heldAt = processorSrc.indexOf('if (svc && svc.__held) {');
+    expect(heldAt).toBeGreaterThan(-1);
+    const insertCatchAt = processorSrc.indexOf('held-booking triage insert failed', heldAt);
+    expect(insertCatchAt).toBeGreaterThan(heldAt);
+    const elseAt = processorSrc.indexOf('} else {', insertCatchAt);
+    expect(elseAt).toBeGreaterThan(insertCatchAt);
+    const section = processorSrc.slice(insertCatchAt, elseAt);
+    expect(section).toContain(
+      'if (!bridgeNeedsConfirmation.includes(svc.__held.reason)) bridgeNeedsConfirmation.push(svc.__held.reason);',
+    );
+  });
+
+  test('every held reason reachable at that handler is covered by pushing the generic svc.__held.reason, not a hardcoded list', () => {
+    // The fix keys off svc.__held.reason itself (whatever it is), not a
+    // reason-by-reason allowlist — so it automatically covers every one of
+    // these without a matching entry needed here for each.
+    const heldReasons = [
+      'existing_appointment_same_date',
+      'ambiguous_existing_appointment',
+      'auto_booking_previously_cancelled',
+      'open_reservice_callback_exists',
+      'reservice_eligibility_lapsed',
+      'reservice_property_uncovered',
+      'on_file_proof_customer_mismatch',
+      'arranger_slot_elapsed_pre_insert',
+      'on_file_house_number_conflict',
+    ];
+    const bridgeNeedsConfirmation = [];
+    for (const reason of heldReasons) {
+      if (!bridgeNeedsConfirmation.includes(reason)) bridgeNeedsConfirmation.push(reason);
+    }
+    expect(bridgeNeedsConfirmation).toEqual(heldReasons);
+    // Re-running the same push for a reason already present (e.g.
+    // on_file_house_number_conflict, which also has its own dedicated push
+    // at its fenced writer) is a no-op, never a duplicate entry.
+    if (!bridgeNeedsConfirmation.includes('on_file_house_number_conflict')) bridgeNeedsConfirmation.push('on_file_house_number_conflict');
+    expect(bridgeNeedsConfirmation.filter((r) => r === 'on_file_house_number_conflict')).toHaveLength(1);
+  });
+});
+
 describe('clarify-draft target phone (owner directive 2026-09-26: both directions)', () => {
   const { clarifyAskTargetPhone } = CallRecordingProcessor._test;
 
@@ -1727,5 +2116,33 @@ describe('clarify-draft target phone (owner directive 2026-09-26: both direction
       to_phone: '+19415550123',
       metadata: { type: 'lead_auto_bridge', leadPhone: '+19145234413' },
     })).toBe('+19145234413');
+  });
+});
+
+// codex #4919 round-9: the callStartedAt(call) anchoring at the extraction,
+// canAutoRoute, and callDateET call sites was removed with the
+// provider-timestamp/call-timeline work it was introduced alongside — this
+// pins that callDateET is back to reading call.created_at directly, main's
+// original behavior, with no call-timeline import in this function at all.
+describe('call-date guard is back to reading call.created_at directly (codex #4919 round-9)', () => {
+  const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+  test('callDateET reads call.created_at directly, not callStartedAt(call)', () => {
+    expect(src).toContain('const callDateET = etDateString(call.created_at || new Date());');
+    expect(src).not.toContain('const callDateET = etDateString(callStartedAt(call)');
+  });
+});
+
+// codex #4919 round-13: extraction reads the call's own start, and the
+// shadow/legacy skipped cards carry the legacy booking snapshot.
+describe('round-13: extraction anchor and skipped-card snapshot', () => {
+  const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+  test('both extraction calls anchor on callStartedAt(call), not raw created_at', () => {
+    expect(src).toContain('extractCallData(transcription, contactPhone, { callStartedAt: callStartedAt(call) || call.created_at,');
+    const v2 = src.indexOf('v2Result = await extractCallDataV2(transcription, contactPhone, {');
+    expect(src.slice(v2, v2 + 400)).toContain('callStartedAt: callStartedAt(call) || call.created_at,');
+  });
+  test('both fileSkippedBookingCard sites pass the legacy booking-authority snapshot first', () => {
+    const n = src.split('extraction: disputeSchedulingAuthority || v2ApprovedExtraction || v2CanonicalExtraction,').length - 1;
+    expect(n).toBe(2);
   });
 });
