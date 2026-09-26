@@ -273,6 +273,80 @@ describe('billing reminder per-channel delivery progress', () => {
     expect(send).toHaveBeenCalledTimes(2);
   });
 
+  test('a prior-run delivered leg is named as a sibling alongside this run\'s fresh reservation', async () => {
+    const send = jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted', auditLogId: 'audit-sms' }));
+    // Run 1: only Text is selected and it delivers, becoming a prior episode row.
+    await expect(deliver(['sms'], send)).resolves.toMatchObject({ complete: true, deliveredNow: ['sms'] });
+    const priorSmsId = rows.find((row) => row.channel === 'sms').id;
+
+    // Run 2: the same episode now also selects Email — the only pending leg,
+    // since Text is already delivered — and it must see the prior Text row
+    // as its sibling, not just legs reserved this run.
+    send.mockClear();
+    await expect(deliver(['email', 'sms'], send)).resolves.toMatchObject({ complete: true, deliveredNow: ['email'] });
+    expect(send).toHaveBeenCalledWith('email', expect.anything(), [String(priorSmsId)]);
+  });
+
+  test('a policy-denied leg is never reserved and never appears in anyone\'s siblingIds', async () => {
+    const send = jest.fn(async (channel) => ({ sent: true, deliveryOutcome: 'accepted', auditLogId: `audit-${channel}` }));
+    collectionsChannelPermitted.mockImplementation(async ({ channel }) => channel !== 'sms');
+
+    await expect(deliver(['email', 'push', 'sms'], send)).resolves.toMatchObject({ complete: false, deliveredNow: ['email', 'push'] });
+
+    const emailId = rows.find((row) => row.channel === 'email').id;
+    const pushId = rows.find((row) => row.channel === 'push').id;
+    expect(rows.find((row) => row.channel === 'sms')).toBeUndefined();
+    expect(send).toHaveBeenCalledWith('email', expect.anything(), [String(pushId)]);
+    expect(send).toHaveBeenCalledWith('push', expect.anything(), [String(emailId)]);
+  });
+
+  test('a leg claimed as already delivered is skipped without a send, but still counted as a sibling', async () => {
+    const send = jest.fn(async (channel) => ({ sent: true, deliveryOutcome: 'accepted', auditLogId: `audit-${channel}` }));
+    // Simulate a concurrent process landing delivery on the Email reservation
+    // between its recordContact and this run's claimAttempt.
+    ContactLedger.claimAttempt.mockImplementationOnce(async () => ({ allowed: false, delivered: true }));
+
+    await expect(deliver(['email', 'sms'], send)).resolves.toMatchObject({ complete: true, deliveredNow: ['sms'] });
+
+    const emailId = rows.find((row) => row.channel === 'email').id;
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledWith('sms', expect.anything(), [String(emailId)]);
+  });
+
+  test('a leg claimed as held (ambiguous, not yet retryable) is skipped without a send, but still counted as a sibling', async () => {
+    const send = jest.fn(async (channel) => ({ sent: true, deliveryOutcome: 'accepted', auditLogId: `audit-${channel}` }));
+    // An ambiguous reused reservation (ContactLedger.claimAttempt's own held
+    // shape: allowed:false, delivered:false/undefined) is neither delivered
+    // nor safe to retry yet — it must still be excluded from its own siblings
+    // and included in everyone else's.
+    ContactLedger.claimAttempt.mockImplementationOnce(async () => ({ allowed: false }));
+
+    await expect(deliver(['email', 'sms'], send)).resolves.toMatchObject({
+      complete: false, deliveredNow: ['sms'], results: { email: expect.objectContaining({ deliveryHeld: true }) },
+    });
+
+    const emailId = rows.find((row) => row.channel === 'email').id;
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledWith('sms', expect.anything(), [String(emailId)]);
+  });
+
+  test('a reused-first, new-second, throw-third reservation sequence releases only the new row', async () => {
+    const record = ContactLedger.recordContact.getMockImplementation();
+    ContactLedger.recordContact
+      .mockImplementationOnce(async () => ({ id: 'ledger-prior-email', metadata: {}, reused: true }))
+      .mockImplementationOnce(record)
+      .mockImplementationOnce(async () => { throw new Error('connection terminated'); });
+
+    await expect(deliver(['email', 'push', 'sms'], jest.fn())).rejects.toThrow('connection terminated');
+
+    const releasedRow = rows.find((row) => row.channel === 'push');
+    expect(releasedRow.metadata).toMatchObject({ send_failed: true, code: 'RESERVATION_INCOMPLETE' });
+    expect(ContactLedger.markSendFailed).toHaveBeenCalledTimes(1);
+    expect(ContactLedger.markSendFailed).not.toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'ledger-prior-email' }), expect.anything(),
+    );
+  });
+
   test('a Text-specific denial preserves selected Email and App; a global hold sends nothing', async () => {
     const send = jest.fn(async (channel) => ({ sent: true, deliveryOutcome: 'accepted', auditLogId: `audit-${channel}` }));
     collectionsChannelPermitted.mockImplementation(async ({ channel }) => channel !== 'sms');

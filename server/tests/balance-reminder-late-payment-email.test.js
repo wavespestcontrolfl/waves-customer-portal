@@ -468,6 +468,36 @@ describe('collections policy + ledger on latePaymentCheck', () => {
     }));
   });
 
+  test('an Email+Text balance reminder names the Text reservation as the Email leg\'s only sibling', async () => {
+    const service = customer({ cust_id: 'cust-1', scheduled_date: '2026-05-25', service_type: 'Pest Control' });
+    const balance = { oldestInvoiceId: 'inv-1', oldestInvoiceUrl: 'https://portal/pay/token-1', totalBalance: 129, daysOverdue: 8 };
+    setDbQueues({
+      notification_prefs: [chain({ first: { billing_channels: ['email', 'sms'] } })],
+      collections_contact_ledger: [chain({ result: [] })],
+      customer_interactions: [chain(), chain()],
+    });
+    // The shared top-of-file mock returns a single fixed id for every call;
+    // give email and sms distinct ids so a real sibling id can be told apart
+    // from "my own reservation, filtered out of my own sibling list".
+    ContactLedger.recordContact
+      .mockImplementationOnce(async () => ({ id: 'led-email-42', metadata: {} }))
+      .mockImplementationOnce(async () => ({ id: 'led-sms-42', metadata: {} }));
+
+    await expect(BalanceReminder.sendReminder(service, balance, 'gentle', 5)).resolves.toBe(true);
+
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+      channel: 'email',
+      metadata: expect.objectContaining({
+        collections_ledger_id: 'led-email-42', collections_sibling_ledger_ids: ['led-sms-42'],
+      }),
+    }));
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ channel: 'sms' }));
+    // The Text leg's own metadata never grows a sibling-id field of its own —
+    // only the Email leg's queued retry needs to re-check the collections rail.
+    expect(sendCustomerMessage.mock.calls.find(([args]) => args.channel === 'sms')[0].metadata)
+      .not.toHaveProperty('collections_sibling_ledger_ids');
+  });
+
   test.each(['direct', 'daily', 'late payment'])('%s reminder holds when channel preferences cannot be read', async (entry) => {
     const failedPrefs = chain();
     failedPrefs.first.mockRejectedValue(new Error('preferences temporarily unavailable'));
