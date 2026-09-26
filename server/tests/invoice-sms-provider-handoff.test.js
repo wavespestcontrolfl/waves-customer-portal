@@ -451,7 +451,7 @@ describe('invoice SMS provider handoff', () => {
   // log / info line must name the channel(s) that actually accepted, never
   // hardcode "SMS".
   describe('Codex #4963 round 2: a partially-accepted fan-out is finalized, never restored; activity log names the real channel(s)', () => {
-    function invoiceQueryDb({ activityInserts } = {}) {
+    function invoiceQueryDb({ activityInserts, smsLogInserts, smsLogExisting = undefined } = {}) {
       const invoiceQueries = [];
       return {
         invoiceQueries,
@@ -467,7 +467,11 @@ describe('invoice SMS provider handoff', () => {
             if (activityInserts) q.insert = jest.fn((row) => { activityInserts.push(row); return q; });
             return q;
           }
-          if (table === 'sms_log') return query({ returning: [] });
+          if (table === 'sms_log') {
+            const q = query({ first: smsLogExisting, returning: [] });
+            if (smsLogInserts) q.insert = jest.fn((row) => { smsLogInserts.push(row); return q; });
+            return q;
+          }
           throw new Error(`Unexpected table: ${table}`);
         },
       };
@@ -618,6 +622,203 @@ describe('invoice SMS provider handoff', () => {
       await expect(InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' }))
         .resolves.toMatchObject({ sent: true });
       expect(activityInserts[0]?.description).toBe('Invoice WPC-2026-1234 sent via SMS: $100');
+    });
+  });
+
+  // Codex round-3 P1 on PR #4963 (the pre-push audit): the round-2 fix
+  // surfaced a pending leg on the result but never actually retried it —
+  // "any such caller will treat the send as fully sent:true and silently
+  // never deliver the pending channel". Fixed by queueing exactly one
+  // invoice_send_deferred replay row (the SAME rail sendViaSMSAndEmail's
+  // own held-SMS-leg queue uses) whenever the pending leg is genuinely
+  // retryable or a deferred hold — never for `uncertain` (a retry could
+  // double-send) and never for a permanently blocked leg (no
+  // retryable/deferred flag — retrying it would just fail the same way).
+  describe('Codex #4963 round 3: a pending leg after a partial accept is queued for retry, not silently dropped', () => {
+    function invoiceQueryDb({ smsLogInserts, smsLogExisting } = {}) {
+      const invoiceQueries = [];
+      return {
+        invoiceQueries,
+        mock: (table) => {
+          if (table === 'invoices') {
+            const q = query({ first: invoiceReads.shift() || invoice });
+            invoiceQueries.push(q);
+            return q;
+          }
+          if (table === 'customers') return query({ first: { id: 'cust-1', first_name: 'Pat', phone: '+19415550101' } });
+          if (table === 'activity_log') return query();
+          if (table === 'sms_log') {
+            const q = query({ first: smsLogExisting, returning: [] });
+            if (smsLogInserts) q.insert = jest.fn((row) => { smsLogInserts.push(row); return q; });
+            return q;
+          }
+          throw new Error(`Unexpected table: ${table}`);
+        },
+      };
+    }
+
+    test('a retryable pending Text leg is queued as one invoice_send_deferred row; invoice finalized; no claim restore', async () => {
+      const smsLogInserts = [];
+      const { mock } = invoiceQueryDb({ smsLogInserts });
+      db.mockImplementation(mock);
+      sendCustomerMessage.mockImplementation(async () => ({
+        sent: false, blocked: false, deliveryOutcome: 'not_sent',
+        code: 'BILLING_CHANNEL_FAILED', reason: 'twilio unavailable', retryable: true,
+        channelResults: {
+          email: { sent: true, deliveryOutcome: 'accepted' },
+          sms: { sent: false, blocked: false, deliveryOutcome: 'not_sent',
+            code: 'BILLING_CHANNEL_FAILED', reason: 'twilio unavailable', retryable: true },
+        },
+      }));
+
+      const before = Date.now();
+      const result = await InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' });
+      expect(result).toMatchObject({
+        sent: true, pendingChannel: 'sms', pendingChannelCode: 'BILLING_CHANNEL_FAILED', pendingChannelQueued: true,
+      });
+
+      expect(smsLogInserts).toHaveLength(1);
+      const row = smsLogInserts[0];
+      expect(row.to_phone).toBe('+19415550101');
+      expect(row.status).toBe('scheduled');
+      expect(row.message_body).toEqual(expect.any(String));
+      expect(row.message_body.length).toBeGreaterThan(0);
+      const meta = JSON.parse(row.metadata);
+      expect(meta).toMatchObject({
+        entry_point: 'invoice_send_deferred',
+        invoice_id: 'inv-1',
+        billingDeliveryCategory: 'invoice',
+        notificationEventKey: 'invoice:inv-1:sent',
+        hasEmailLeg: true,
+        original_block_code: 'BILLING_CHANNEL_FAILED',
+        replay_purpose: 'payment_link',
+        refresh_customer_phone: true,
+        resolve_from_by_customer: true,
+        requires_registered_dispatch: true,
+      });
+      // No explicit nextAllowedAt on a plain retryable — falls back to the
+      // ~5-minute default backoff, not immediate and not indefinitely far.
+      const scheduledForMs = new Date(row.scheduled_for).getTime();
+      expect(scheduledForMs).toBeGreaterThan(before);
+      expect(scheduledForMs).toBeLessThanOrEqual(before + 6 * 60 * 1000);
+    });
+
+    test('an Email-accepted + deferred-hold Text leg queues the row at nextAllowedAt', async () => {
+      const smsLogInserts = [];
+      const { mock } = invoiceQueryDb({ smsLogInserts });
+      db.mockImplementation(mock);
+      const nextAllowedAt = new Date('2026-09-27T12:00:00.000Z').toISOString();
+      sendCustomerMessage.mockImplementation(async () => ({
+        sent: false, blocked: true, deliveryOutcome: 'not_sent',
+        code: 'QUIET_HOURS_HOLD', reason: 'Automated SMS is limited to 8:00 AM-8:00 PM ET',
+        retryable: true, deferred: true, nextAllowedAt,
+        channelResults: {
+          email: { sent: true, deliveryOutcome: 'accepted' },
+          sms: { sent: false, blocked: true, deliveryOutcome: 'not_sent',
+            code: 'QUIET_HOURS_HOLD', reason: 'Automated SMS is limited to 8:00 AM-8:00 PM ET',
+            retryable: true, deferred: true, nextAllowedAt },
+        },
+      }));
+
+      const result = await InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' });
+      expect(result).toMatchObject({ sent: true, pendingChannel: 'sms', pendingChannelQueued: true });
+      expect(smsLogInserts).toHaveLength(1);
+      expect(new Date(smsLogInserts[0].scheduled_for).toISOString()).toBe(nextAllowedAt);
+    });
+
+    test('an uncertain pending Text leg is surfaced but never queued (no double-send)', async () => {
+      const smsLogInserts = [];
+      const { mock } = invoiceQueryDb({ smsLogInserts });
+      db.mockImplementation(mock);
+      sendCustomerMessage.mockImplementation(async () => ({
+        sent: false, blocked: false, deliveryOutcome: 'uncertain',
+        code: 'INVOICE_PROVIDER_OUTCOME_UNCERTAIN', reason: 'provider socket closed',
+        channelResults: {
+          email: { sent: true, deliveryOutcome: 'accepted' },
+          sms: { sent: false, blocked: false, deliveryOutcome: 'uncertain',
+            code: 'INVOICE_PROVIDER_OUTCOME_UNCERTAIN', reason: 'provider socket closed' },
+        },
+      }));
+
+      const result = await InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' });
+      expect(result).toMatchObject({ sent: true, pendingChannel: 'sms' });
+      expect(result.pendingChannelQueued).not.toBe(true);
+      expect(smsLogInserts).toHaveLength(0);
+    });
+
+    test('a permanently blocked pending leg (no retryable/deferred flag) is surfaced but never queued', async () => {
+      const smsLogInserts = [];
+      const { mock } = invoiceQueryDb({ smsLogInserts });
+      db.mockImplementation(mock);
+      sendCustomerMessage.mockImplementation(async () => ({
+        sent: false, blocked: true, deliveryOutcome: 'not_sent',
+        code: 'MISSING_SMS_RECIPIENT', reason: 'Text is selected but no phone recipient is available',
+        channelResults: {
+          email: { sent: true, deliveryOutcome: 'accepted' },
+          sms: { sent: false, blocked: true, deliveryOutcome: 'not_sent',
+            code: 'MISSING_SMS_RECIPIENT', reason: 'Text is selected but no phone recipient is available' },
+        },
+      }));
+
+      const result = await InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' });
+      expect(result).toMatchObject({ sent: true, pendingChannel: 'sms', pendingChannelCode: 'MISSING_SMS_RECIPIENT' });
+      expect(result.pendingChannelQueued).not.toBe(true);
+      expect(smsLogInserts).toHaveLength(0);
+    });
+
+    test('an already-queued row is adopted, never duplicated', async () => {
+      const smsLogInserts = [];
+      // claimInvoiceForSend runs its OWN live-queue pre-check against
+      // sms_log first (entry_point = ANY(...), a DIFFERENT query shape) —
+      // only the pending-channel dedup check itself (a single entry_point
+      // equality on invoice_send_deferred) should find the existing row, or
+      // the claim step above it would see a false live-queue conflict.
+      db.mockImplementation((table) => {
+        if (table === 'invoices') return query({ first: invoiceReads.shift() || invoice });
+        if (table === 'customers') return query({ first: { id: 'cust-1', first_name: 'Pat', phone: '+19415550101' } });
+        if (table === 'activity_log') return query();
+        if (table === 'sms_log') {
+          const whereRawCalls = [];
+          const q = query({ returning: [] });
+          q.whereRaw = jest.fn((sql, params) => { whereRawCalls.push({ sql, params }); return q; });
+          q.first = jest.fn(async () => {
+            const isPendingChannelDedupCheck = whereRawCalls.some(
+              (c) => c.sql.includes("entry_point' = ?") && c.params?.[0] === 'invoice_send_deferred',
+            );
+            return isPendingChannelDedupCheck ? { id: 'sms-log-existing-1' } : undefined;
+          });
+          q.insert = jest.fn((row) => { smsLogInserts.push(row); return q; });
+          return q;
+        }
+        throw new Error(`Unexpected table: ${table}`);
+      });
+      sendCustomerMessage.mockImplementation(async () => ({
+        sent: false, blocked: false, deliveryOutcome: 'not_sent',
+        code: 'BILLING_CHANNEL_FAILED', reason: 'twilio unavailable', retryable: true,
+        channelResults: {
+          email: { sent: true, deliveryOutcome: 'accepted' },
+          sms: { sent: false, blocked: false, deliveryOutcome: 'not_sent',
+            code: 'BILLING_CHANNEL_FAILED', reason: 'twilio unavailable', retryable: true },
+        },
+      }));
+
+      const result = await InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' });
+      expect(result).toMatchObject({ sent: true, pendingChannel: 'sms', pendingChannelQueued: true });
+      expect(smsLogInserts).toHaveLength(0);
+    });
+
+    test('SMS-only paths are unchanged: no pending channel, nothing queued', async () => {
+      const smsLogInserts = [];
+      const { mock } = invoiceQueryDb({ smsLogInserts });
+      db.mockImplementation(mock);
+      const dispatch = jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted' }));
+      sendCustomerMessage.mockImplementation(async ({ withProviderHandoff }) => withProviderHandoff(dispatch));
+      withInvoiceDepositSettlement.mockImplementation(async (_invoiceId, callback) => callback(db, invoice));
+
+      const result = await InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' });
+      expect(result).toMatchObject({ sent: true });
+      expect(result.pendingChannel).toBeUndefined();
+      expect(smsLogInserts).toHaveLength(0);
     });
   });
 

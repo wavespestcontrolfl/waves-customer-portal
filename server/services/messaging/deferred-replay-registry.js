@@ -249,6 +249,16 @@ const REGISTRY = {
   },
 
   invoice_send_deferred: {
+    // The row's own recipient is only ever the SMS/App sub-leg's — the
+    // replay re-enters the canonical billing router (billingDeliveryCategory
+    // 'invoice'), which already falls back to the customer's explicit
+    // Email/App selection with no phone, exactly like an immediate send.
+    // A queued row for a phone-less customer's pending App leg (invoice.js
+    // sendViaSMS, Codex round-3 P1 #4963) is queued blank on purpose
+    // (requires_registered_dispatch marks that intent) — the executor's
+    // recipient gate must not read the blank phone as a failed lookup and
+    // park the row on the bounded retry-then-blocked ladder forever.
+    replayWithoutPhone: true,
     async recheck(meta) {
       return invoiceStillCollectible(meta);
     },
