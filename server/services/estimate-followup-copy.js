@@ -16,7 +16,7 @@
  * same fallback rule as glassEstimateCopyFor).
  *
  * Truth scope (mirrors the glass packs — no new claims):
- * - Callbacks / 90-day / no-contract lines render ONLY for the recurring
+ * - Callbacks / money-back / no-contract lines render ONLY for the recurring
  *   residential lanes that already make those claims on the estimate page
  *   (pest, lawn, mosquito, tree & shrub, palm injection).
  * - rodent, termite (the service-lines lane folds bait AND the one-time
@@ -33,7 +33,7 @@ const { inferEstimateServiceLines } = require('./estimate-service-lines');
 const logger = require('./logger');
 
 const RECURRING_TERMS_BENEFIT =
-  'No long-term contract, unlimited free callbacks, and a 90-day money-back guarantee.';
+  'No long-term contract, unlimited free callbacks, and a money-back guarantee.';
 const NEUTRAL_BENEFIT =
   'Licensed and insured, satisfaction guaranteed — and a real person answers when you reply.';
 
@@ -62,9 +62,10 @@ const FAQ_PRICE =
 // produces — pest/lawn/tree_shrub their own, palm injection folds into the
 // tree & shrub report (its visits are documented on that report). The
 // REPORT tours state the recurring-terms benefits on camera (callbacks /
-// no-contract / 90-day), so ONLY packs carrying RECURRING_TERMS_BENEFIT
-// may reference one — bundle/mosquito/rodent/termite/commercial/unknown
-// get empty slots and the renderer drops the blocks (v2 owner round
+// no-contract / the retired 90-day money-back wording), so ONLY packs
+// carrying RECURRING_TERMS_BENEFIT may reference one —
+// bundle/mosquito/rodent/termite/commercial/unknown get empty slots and
+// the renderer drops the blocks (v2 owner round
 // 2026-07-23: benefit-forward re-cut). The APP tour (static block in the
 // 20260723300000 migration, all categories) is deliberately TERMS-NEUTRAL
 // on camera — its claims are app facts (visits/reports/reschedule; Auto
@@ -72,6 +73,12 @@ const FAQ_PRICE =
 // — so it stays safe for termite/commercial/bundle recipients. Any future
 // re-cut that adds recurring-terms claims to the app tour must move it
 // behind per-pack gating like the report tours.
+//
+// RETIRED from emails 2026-09-26: the report tours say "90-day money-back
+// guarantee" on camera, and the owner removed that promise. The per-pack
+// `video` config stays so a re-cut without the 90-day claim can be switched
+// back on here; until then every pack emits empty slots and the module drops.
+const REPORT_TOUR_VIDEOS_LIVE = false;
 const VIDEO_BASE = 'https://portal.wavespestcontrol.com/app-email/videos';
 
 // smsHook completes the phrase "your Waves {smsHook}" so brand
@@ -217,8 +224,8 @@ const PACKS = {
   // One-time-only quotes (structural: no recurring dollars anywhere on the
   // estimate) carry NONE of the recurring-terms promises — #2969 built the
   // terms-neutral one-time hero for exactly this reason (30-day callback,
-  // not unlimited callbacks / 90-day MBG), and the report-tour videos state
-  // the recurring terms on camera, so the video slots stay empty. Claims
+  // not unlimited callbacks / the money-back guarantee), and the report-tour
+  // videos state the recurring terms on camera, so the video slots stay empty. Claims
   // echo the shipped one-time hero ("One visit, priced from your actual
   // property") and the unknown pack's documentation line only.
   one_time: {
@@ -306,6 +313,7 @@ function packForEstimate(estimate) {
  */
 function followupEmailVars(estimate) {
   const pack = packForEstimate(estimate);
+  const video = REPORT_TOUR_VIDEOS_LIVE ? pack.video : null;
   return {
     service_label: pack.label,
     category_headline: pack.headline,
@@ -318,11 +326,12 @@ function followupEmailVars(estimate) {
     faq_terms: pack.faq.terms,
     faq_between_visits: pack.faq.betweenVisits,
     faq_price: pack.faq.price,
-    // Video slots are empty strings off-scope — the email image/small_note
-    // blocks drop on blank src/content, so the module vanishes cleanly.
-    report_video_preview: pack.video ? `${VIDEO_BASE}/waves-${pack.video.slug}-tour-preview.gif` : '',
-    report_video_url: pack.video ? `${VIDEO_BASE}/waves-${pack.video.slug}-tour.mp4` : '',
-    report_video_caption: pack.video ? pack.video.caption : '',
+    // Video slots are empty strings off-scope (or while the tours are
+    // retired) — the email image/small_note blocks drop on blank
+    // src/content, so the module vanishes cleanly.
+    report_video_preview: video ? `${VIDEO_BASE}/waves-${video.slug}-tour-preview.gif` : '',
+    report_video_url: video ? `${VIDEO_BASE}/waves-${video.slug}-tour.mp4` : '',
+    report_video_caption: video ? video.caption : '',
   };
 }
 
@@ -338,5 +347,5 @@ module.exports = {
   copyCategoryForEstimate,
   followupEmailVars,
   followupSmsHook,
-  _private: { PACKS, RECURRING_TERMS_BENEFIT, NEUTRAL_BENEFIT },
+  _private: { PACKS, RECURRING_TERMS_BENEFIT, NEUTRAL_BENEFIT, REPORT_TOUR_VIDEOS_LIVE },
 };
