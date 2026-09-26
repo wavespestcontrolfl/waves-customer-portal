@@ -3,6 +3,10 @@ const db = require('../../models/db');
 const gmailClient = require('./gmail-client');
 const logger = require('../logger');
 const MODELS = require('../../config/models');
+const { anthropicMaxTokens, anthropicEffortConfig } = require('../llm/anthropic-wire');
+// First TEXT block of a Message — a thinking block leads the content on
+// always-thinking models (Opus 5.5, Fable), so content[0] is not the answer.
+const { anthropicText } = require('../llm/call');
 const { etDateString } = require('../../utils/datetime-et');
 const { taxPeriodFor } = require('../../utils/tax-period');
 
@@ -53,7 +57,8 @@ async function processVendorInvoice(email, classification) {
 
       const parseResponse = await anthropic.messages.create({
         model: MODELS.FLAGSHIP,
-        max_tokens: 1024,
+        ...anthropicEffortConfig(MODELS.FLAGSHIP),
+        max_tokens: anthropicMaxTokens(MODELS.FLAGSHIP, 1024),
         messages: [{
           role: 'user',
           content: [
@@ -74,7 +79,7 @@ async function processVendorInvoice(email, classification) {
   "total": number,
   "payment_terms": "NET 30, etc.",
   "line_items": [
-    { "description": "string", "quantity": number, "unit_price": number, "total": number, "product_name": "if identifiable" }
+    { "description": "string", "quantity": number, "unit_price": number, "total": number, "uom": "the line's unit of measure exactly as printed (EA, CS, ...) or null", "product_name": "if identifiable" }
   ]
 }`,
             },
@@ -82,7 +87,7 @@ async function processVendorInvoice(email, classification) {
         }],
       });
 
-      parsedInvoice = parseClaudeJson(parseResponse.content[0].text);
+      parsedInvoice = parseClaudeJson(anthropicText(parseResponse));
 
       if (parsedInvoice) {
         await db('email_attachments').where({ id: pdfAttachment.id }).update({

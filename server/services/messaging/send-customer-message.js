@@ -161,10 +161,14 @@ function annualOfferGuardEstimateIds(input) {
 // annual-guard.js's estimateIdsFromContent runs no query at all when
 // neither an explicit id nor a link is present, so this costs nothing on
 // the vast majority of sends that carry no estimate content whatsoever.
-async function annualOfferGuardVerdict(input) {
+async function annualOfferGuardVerdict(input, trx) {
   try {
     const { annualHandoffGuard } = require('../estimate-annual-guard');
-    const db = require('../../models/db');
+    // Codex r2 P1: reuse the caller's locked transaction when one is
+    // supplied (the billing-email boundary check below, inside
+    // withCustomerCommsLock) instead of opening a second root-pool
+    // connection for this same read while that lock is held.
+    const db = trx || require('../../models/db');
     const verdict = await annualHandoffGuard({
       db, estimateIds: annualOfferGuardEstimateIds(input), texts: [input.body],
     })();
@@ -364,7 +368,7 @@ async function sendCustomerMessageCore(input) {
   const sendInput = { ...inputRest, to: normalizedTo };
   // Request lifecycle email companions have no text leg. Keep their App
   // intent even when the saved choice or gate changes before dispatch.
-  if (sendInput.metadata?.appOnly === true) sendInput.channel = 'push';
+  if (sendInput.metadata?.appOnly === true || sendInput.metadata?.billingDeliveryLeg === 'push') sendInput.channel = 'push';
   // The locked handoff holds a caller's authority rows through the actual
   // provider request. Immediate lead replies and the visit-summary bearer
   // link (its immediate send and its scheduled replay), plus promised
@@ -410,7 +414,7 @@ async function sendCustomerMessageCore(input) {
   // use the stronger recipient/consent handoffs above, whose transaction is
   // also threaded into their fresh suppression reads.
   const providerHandoffAllowed = input.audience === 'customer'
-    && sendInput.channel === 'sms'
+    && (sendInput.channel === 'sms' || (sendInput.channel === 'push' && input.metadata?.billingDeliveryLeg === 'push'))
     && input.purpose === 'payment_link'
     && input.entryPoint === 'invoice_send_via_sms';
   if (withProviderHandoff
@@ -511,7 +515,42 @@ async function sendCustomerMessageCore(input) {
 
   // 4. Load contact state once (consent + suppression share the lookup)
   let contactState = await loadContactState(sendInput);
-  contactState = await loadSuppressionState(sendInput, contactState);
+  const suppressionInput = !sendInput.to && sendInput.metadata?.billingDeliveryLeg
+    && String(contactState.customer?.id) === String(sendInput.customerId)
+    ? { ...sendInput, to: contactState.customer.phone || null }
+    : sendInput;
+  contactState = await loadSuppressionState(suppressionInput, contactState);
+  if (!suppressionInput.to && sendInput.metadata?.billingDeliveryLeg) contactState.suppressionLoaded = true;
+  const BillingRouting = require('./billing-channel-routing');
+  const { explicitBillingChannels } = require('../billing-delivery-channels');
+  const billingCategory = BillingRouting.billingDeliveryCategory(sendInput);
+  if (!sendInput.metadata?.billingDeliveryLeg && !contactState.lookupFailed
+    && BillingRouting.usesBillingDeliveryPreferences(sendInput, contactState)
+    && explicitBillingChannels(contactState.prefs, billingCategory) !== null) {
+    // Codex r2 P1: carry the withheld-link rewrite's transformed receipt
+    // state (rewritten body + cleared estimateId/estimateIds — the
+    // SMS-shaped pass above) into every fanned-out leg, not just this
+    // SMS-shaped call. dispatchBillingChannels still fans out the ORIGINAL
+    // caller `input` — never sendInput wholesale — so a caller's
+    // withProviderHandoff/preSendCheck/preDispatchCheck/withSmsHandoff hooks
+    // (stripped out of sendInput above) still reach each per-leg recursive
+    // sendCustomerMessageCore call exactly as before; only the transformed
+    // receipt fields are merged in. Without this, the recursive App leg
+    // (channel 'push') never gets the rewrite and the original estimateId
+    // reaches annualOfferGuardVerdict, refusing an owed receipt when its
+    // offer is withheld.
+    return BillingRouting.dispatchBillingChannels(
+      { ...input, body: sendInput.body, estimateId: sendInput.estimateId, estimateIds: sendInput.estimateIds },
+      contactState.prefs, sendCustomerMessageCore,
+    );
+  }
+  if (!sendInput.to && !sendInput.metadata?.billingDeliveryLeg
+    && BillingRouting.isBillingDeliveryCandidate(sendInput)) {
+    return {
+      sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'MISSING_BILLING_RECIPIENT',
+      reason: 'Billing delivery requires an explicit Email, Text, or App selection when no phone recipient is available',
+    };
+  }
   const PushRouting = require('./push-channel-routing');
   if (await PushRouting.wantsAppFirst(sendInput)) {
     if (!validateNoCustomerEmoji({ ...sendInput, channel: 'push' }, policy).ok) {
@@ -785,7 +824,29 @@ async function sendCustomerMessageCore(input) {
       };
     }
   };
-  const providerPreparationCheck = async () => {
+  const providerPreparationCheck = async ({ database: billingEmailTrx } = {}) => {
+    if (sendInput.metadata?.billingDeliveryLeg) {
+      // Settings can change while a provider prepares its request. Never
+      // send a leg the customer removed after the initial preference read.
+      // Codex r2 P1: an explicit Email leg's caller
+      // (billing-channel-email-authority.js) already holds
+      // withCustomerCommsLock's transaction for this exact recheck and
+      // threads it through as `database` — reuse it for these reads instead of
+      // opening a second root-pool connection (DB_POOL_MAX=2 deadlock risk
+      // under two concurrent billing emails). Push/SMS callers never supply
+      // a trx here, so they keep reading through the plain pool unchanged.
+      let latest = await loadContactState(sendInput, billingEmailTrx);
+      const latestSuppressionInput = !sendInput.to
+        && String(latest.customer?.id) === String(sendInput.customerId)
+        ? { ...sendInput, to: latest.customer.phone || null }
+        : sendInput;
+      latest = await loadSuppressionState(latestSuppressionInput, latest, billingEmailTrx);
+      if (!latestSuppressionInput.to) latest.suppressionLoaded = true;
+      const suppressionVerdict = await checkSuppression(sendInput, policy, latest);
+      if (!suppressionVerdict.ok) return rememberBoundaryBlock(suppressionVerdict, 'check_suppression_boundary');
+      const consentVerdict = await checkConsentForPurpose(sendInput, policy, latest);
+      if (!consentVerdict.ok) return rememberBoundaryBlock(consentVerdict, 'check_consent_boundary');
+    }
     const windowVerdict = checkSendWindow(sendInput, policy, contactState);
     if (!windowVerdict || windowVerdict.ok !== true) {
       return rememberBoundaryBlock(windowVerdict, 'check_send_window_boundary');
@@ -812,7 +873,7 @@ async function sendCustomerMessageCore(input) {
     if (!callerVerdict.ok) return rememberBoundaryBlock(callerVerdict, 'pre_send_check_boundary');
     const providerVerdict = await runCallerPreProviderCheck();
     if (!providerVerdict.ok) return rememberBoundaryBlock(providerVerdict, 'pre_provider_check_boundary');
-    const annualVerdict = await annualOfferGuardVerdict(sendInput);
+    const annualVerdict = await annualOfferGuardVerdict(sendInput, billingEmailTrx);
     if (!annualVerdict.ok) return rememberBoundaryBlock(annualVerdict, 'annual_offer_guard_boundary');
     // The awaited caller guard may itself straddle 20:00 ET. Keep this pure
     // clock check as the final operation before returning to the provider.
@@ -983,7 +1044,26 @@ async function sendCustomerMessageCore(input) {
   }
 
   if (!providerOutcome.sent && sendInput.channel === 'push' && providerOutcome.appUnavailable) {
-    if (sendInput.metadata?.appOnly === true) {
+    // Codex r2 P1: pushEligibleRuntime's LATE re-read (push-channel-
+    // routing.js, immediately before the provider handoff) can catch a
+    // billing preference switch away from App that landed after this leg
+    // was selected. That is the SAME race the consent-layer
+    // BILLING_PREFERENCES_CHANGED/CHANNEL_NOT_SELECTED refusals cover for
+    // Email/Text — a mid-dispatch choice change, not a dead App — so it
+    // gets the identical SCHEDULABLE hold (Codex r3 P1 on PR #4843: deferred
+    // + nextAllowedAt, the same ONE code, via the shared preferenceChangeHold()
+    // helper) instead of falling into the terminal APP_UNAVAILABLE branch
+    // below — a one-shot producer can now persist a retry row for this leg
+    // exactly like it already does for the consent-layer refusals. The
+    // caller's retry re-fans-out under the same notificationEventKey against
+    // whatever the customer now has selected. Checked BEFORE the generic
+    // appOnly/billingDeliveryLeg branch, which stays terminal for every
+    // other appUnavailable reason (no fresh device, app gate off, …).
+    if (sendInput.metadata?.billingDeliveryLeg === 'push' && providerOutcome.error === 'preference_changed') {
+      const { preferenceChangeHold } = require('./billing-channel-routing');
+      return { sent: false, blocked: true, ...preferenceChangeHold(), auditLogId: audit.id };
+    }
+    if (sendInput.metadata?.appOnly === true || sendInput.metadata?.billingDeliveryLeg === 'push') {
       return { sent: false, blocked: true, deliveryOutcome: providerOutcome.deliveryOutcome, code: 'APP_UNAVAILABLE', reason: providerOutcome.error, auditLogId: audit.id };
     }
     if (providerOutcome.error === 'preference_changed'
@@ -1119,7 +1199,10 @@ function validateContract(input) {
   if (!input || typeof input !== 'object') {
     return { ok: false, reason: 'input must be an object' };
   }
-  if (!input.to || typeof input.to !== 'string') {
+  const missingRecipient = input.to == null || (typeof input.to === 'string' && !input.to.trim());
+  const billingRecipientCanResolve = missingRecipient
+    && require('./billing-channel-routing').isBillingDeliveryCandidate(input);
+  if ((!input.to || typeof input.to !== 'string') && !billingRecipientCanResolve) {
     return { ok: false, reason: 'to (recipient) is required' };
   }
   const hasMedia = Array.isArray(input.metadata?.mediaUrls) && input.metadata.mediaUrls.length > 0;
@@ -1162,6 +1245,9 @@ function validateContract(input) {
  * portal_chat dispatchers land when the corresponding call sites migrate.
  */
 async function dispatchToProvider(input, hooks = {}) {
+  if (input.channel === 'email' && input.metadata?.billingDeliveryLeg === 'email') {
+    return require('../billing-channel-email').sendBillingChannelEmail(input, hooks);
+  }
   if (input.channel === 'sms' || input.channel === 'push') {
     return sendViaTwilio(input, hooks);
   }

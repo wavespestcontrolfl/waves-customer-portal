@@ -50,7 +50,7 @@ describe('sendMicrodepositVerificationEmail', () => {
         first_name: 'Taylor',
         invoice_title: 'Quarterly Pest Control',
         amount_due: '$129.00',
-        billing_url: 'https://portal.wavespestcontrol.com/billing',
+        billing_url: 'https://portal.wavespestcontrol.com/?tab=billing',
       }),
     }));
     expect(result.ok).toBe(true);
