@@ -53,15 +53,23 @@ const roundCents = (n) => Math.round(n * 100) / 100;
 // The visit's add-on rows, read strictly — the canonical line builder
 // swallows a failed read into "no add-ons", which here would silently skip a
 // bill. A priced row is one the builder turns into a line (its base_price
-// when set, else its estimated_price, above zero).
+// when set, else its estimated_price, above zero); an explicit zero is free.
+// An unpriced row (both prices blank) is a quote still awaiting its price —
+// owed, but nothing here can bill it.
 async function annualPrepayAddonRows(svc) {
   const rows = await db('scheduled_service_addons')
     .where({ scheduled_service_id: svc.id })
     .select('id', 'base_price', 'estimated_price');
-  const price = (row) => Number(row.base_price != null && row.base_price !== '' ? row.base_price : row.estimated_price) || 0;
+  const set = (value) => value != null && value !== '';
+  const price = (row) => Number(set(row.base_price) ? row.base_price : row.estimated_price) || 0;
+  const priced = rows.some((row) => price(row) > 0);
+  const unpriced = rows.some((row) => !set(row.base_price) && !set(row.estimated_price));
   return {
     clientIds: new Set(rows.map((row) => `scheduled_${svc.id}_addon_${row.id}`)),
-    priced: rows.some((row) => price(row) > 0),
+    priced,
+    unpriced,
+    // Something is owed for the add-ons: a bill, or the office's price.
+    owed: priced || unpriced,
   };
 }
 
@@ -114,7 +122,8 @@ function classifyCoveredVisitInvoice(invoice, addons) {
 // stale price, or a remainder the builder cannot vouch for (a visit-wide
 // discount) is not, and must never stand in for it.
 function invoiceBillsExactExtras(invoice, addons, extras) {
-  if (!extras || extras.ambiguous || !extras.lines.length) return false;
+  // An add-on awaiting its price is owed too: nothing bills all of them yet.
+  if (!extras || extras.ambiguous || !extras.lines.length || addons.unpriced) return false;
   if (!classifyCoveredVisitInvoice(invoice, addons).billsOnlyAddons) return false;
   const InvoiceService = require('./invoice');
   const onAddons = (li) => addons.clientIds.has(li.client_id) || addons.clientIds.has(li.discount_for);
@@ -166,6 +175,9 @@ async function mintAnnualPrepayExtrasInvoice(svc, record, extras, addons, { serv
       // Backfill: the backdated visit day would mint the bill already
       // overdue; due today instead, like the main backfill mint.
       dueDate: quietBackfill ? etDateString() : serviceDate,
+      // …and off a NET-terms payer's open statement, like the main backfill
+      // invoice: a quiet closeout leaves it for review.
+      skipAccrual: quietBackfill,
       notes: 'Add-ons beyond your annual prepay coverage. The covered visit itself is already paid.',
       lineItems: extras.lines,
       trustedStoredDiscountSources: ['scheduled_service'],
@@ -214,7 +226,9 @@ class CoveredVisitCloseout {
       try {
         await this.ctx.mergeRecordNotesKeys(this.record.id, { annualPrepayAddonBilling: true });
       } catch (err) {
-        logger.warn(`[dispatch] annual-prepay add-on billing freeze write FAILED for visit ${this.svc.id}: ${err.message}`);
+        // No gated money work without its retry fence: hold for the retry.
+        this.lookupError = err;
+        logger.error(`[dispatch] annual-prepay add-on billing freeze write FAILED for visit ${this.svc.id}: ${err.message}`);
       }
     }
     this.live = live || this.frozenLive;
@@ -260,6 +274,10 @@ class CoveredVisitCloseout {
       await this.alert('the add-on lines could not be read', { ...meta, error: String(err.message).slice(0, 200) });
       return null;
     }
+    if (read.addons.unpriced) {
+      // The priced add-ons still bill below; the unpriced one is the office's.
+      await this.alert('an add-on has no price yet — price it and bill it', meta);
+    }
     if (!read.extras.lines.length) return null;
     if (read.extras.ambiguous) {
       await this.alert('a visit-wide discount applies, so the add-ons\' share is unclear', { ...meta, addonTotal: read.extras.total });
@@ -286,8 +304,7 @@ class CoveredVisitCloseout {
       if (minted.conflict) {
         return this.alert(`invoice ${minted.conflict.invoice_number || minted.conflict.id}, saved on this visit by another writer, does not bill exactly its add-ons`, { ...meta, conflictInvoiceId: minted.conflict.id, addonTotal: extras.total });
       }
-      const invoice = minted.invoice;
-      const settled = ['paid', 'prepaid'].includes(invoice.status);
+      const { invoice, settled } = await this.settleIfNothingDue(minted.invoice);
       this.invoice = invoice;
       // An adopted unpaid bill is delivered like every other reused unpaid
       // completion invoice (the pay link rides the completion text).
@@ -303,6 +320,24 @@ class CoveredVisitCloseout {
       return this.alert('the add-ons invoice could not be created', { ...meta, addonTotal: extras.total, error: String(err.message).slice(0, 200) });
     }
     return undefined;
+  }
+
+  // An add-ons bill with nothing due — paid, prepaid, or an estimate deposit
+  // covering all of it — is settled for the completion: no pay link, no
+  // collection prompt. A zero-due draft is closed the canonical way
+  // (settleZeroBalance → non-cash prepaid); a refused or failed close leaves
+  // it for the send pipeline's own zero-due settlement.
+  async settleIfNothingDue(bill) {
+    if (['paid', 'prepaid'].includes(bill.status)) return { invoice: bill, settled: true };
+    if (require('./invoice-helpers').invoiceAmountDue(bill) > 0) return { invoice: bill, settled: false };
+    try {
+      const settlement = await require('./invoice').settleZeroBalance(bill.id);
+      if (settlement?.settled) return { invoice: settlement.invoice, settled: true };
+      logger.warn(`[dispatch] annual-prepay add-ons bill ${bill.id} has nothing due but was not settled (${settlement?.reason || 'refused'})`);
+    } catch (err) {
+      logger.warn(`[dispatch] annual-prepay add-ons bill ${bill.id} zero-due settle failed: ${err.message}`);
+    }
+    return { invoice: bill, settled: true };
   }
 
   // After this closeout voided the covered visit's office invoice — in this
@@ -388,7 +423,7 @@ class CoveredVisitCloseout {
       // Neither settled nor voided (a payment in flight, a concurrent
       // change): the invoice stays for normal handling, and nothing here
       // billed the visit's own add-ons — the office decides.
-      if (!this.lookupError && addons?.priced) {
+      if (!this.lookupError && addons?.owed) {
         await this.alert(`invoice ${this.invoice?.invoice_number || this.invoice?.id} could not be reconciled with the annual prepay: ${String(settleErr.message).slice(0, 160)}`, { invoiceId: this.invoice?.id || null });
       }
       return undefined;
@@ -402,8 +437,14 @@ class CoveredVisitCloseout {
   // add-on at the visit's net; otherwise it keeps its pay link and the
   // office reconciles the rest.
   async keepAddonsBill(addons) {
-    this.extrasCollectible = true;
-    this.alreadyPaid = false;
+    const { invoice, settled } = await this.settleIfNothingDue(this.invoice);
+    this.invoice = invoice;
+    this.extrasCollectible = !settled;
+    this.alreadyPaid = settled;
+    if (settled) {
+      this.payUrl = null;
+      this.invoiceCreated = false;
+    }
     let extras = null;
     try {
       ({ extras } = await this.currentExtras());
@@ -476,7 +517,7 @@ class CoveredVisitCloseout {
         this.lookupError = lookupErr;
         logger.error(`[dispatch] annual-prepay add-on rows unreadable for visit ${svc.id} (refunded invoice ${terminal.id}): ${lookupErr.message}`);
       }
-      if (addons?.priced) {
+      if (addons?.owed) {
         await this.alert(`invoice ${terminal.invoice_number || terminal.id} on the visit is ${terminal.status}; bill them once that refund is final`, { terminalInvoiceId: terminal.id });
       }
       return;
@@ -526,7 +567,7 @@ class CoveredVisitCloseout {
       if (!addons) this.lookupError = lookupErr;
       logger.warn(`[dispatch] annual-prepay add-ons unreadable against settled invoice ${this.invoice.id} for visit ${svc.id}: ${lookupErr.message}`);
     }
-    if (addons?.priced && !invoiceBillsExactExtras(this.invoice, addons, extras)) {
+    if (addons?.owed && !invoiceBillsExactExtras(this.invoice, addons, extras)) {
       await this.alert(`invoice ${this.invoice.invoice_number || this.invoice.id} is already ${status} but does not bill exactly the visit's add-ons${extras && !extras.ambiguous ? ` (the visit prices them at $${extras.total.toFixed(2)})` : ''} — check what is still owed`, { invoiceId: this.invoice.id, addonTotal: extras?.total ?? null });
     }
   }
@@ -553,6 +594,7 @@ class CoveredVisitCloseout {
     // issued-closeout lane; a replacement would contradict the closeout).
     if (this.ctx.issuedInvoiceCloseout) return this.outcome();
     await this.resolveGate();
+    if (this.lookupError) return this.outcome();
     // A void invoice bills nothing: it is the same as none. (The completion's
     // lookups exclude void rows today; the dispatch stays total regardless.)
     const status = String(this.invoice?.status || '').toLowerCase();
@@ -572,7 +614,7 @@ class CoveredVisitCloseout {
     let hold = null;
     if (this.lookupError) {
       hold = { code: 'annual_prepay_addons_lookup_failed', error: this.lookupError,
-        summary: 'This visit\'s add-ons could not be checked against its invoice' };
+        summary: 'This visit\'s add-ons could not be checked or prepared for billing' };
     } else if (this.alertError) {
       hold = { code: 'annual_prepay_addons_alert_failed', error: this.alertError,
         summary: 'This visit\'s add-ons need the office\'s attention and the office alert could not be recorded' };

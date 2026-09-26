@@ -761,6 +761,78 @@ postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
     expect(outcome.extrasCollectible).toBe(true);
   });
 
+  test('an estimate deposit covering the whole add-ons bill settles it — no $0 pay link or collection prompt (GitHub r3 P1)', async () => {
+    const f = await coveredVisit({ depositDollars: 60 });
+    const out = await complete(f, { sendCompletionSms: true });
+    expect(out).toMatchObject({ status: 200 });
+    const [bill] = await liveInvoices(f);
+    expect(Number(bill.total)).toBe(0);
+    expect(bill.status).toBe('prepaid');
+    expect(out.body?.invoicePaymentActionRequired).not.toBe(true);
+    expect(out.body?.completionSmsType || '').not.toMatch(/with_invoice$/);
+  });
+
+  test('a gate freeze that cannot be saved holds the closeout before any billing (GitHub r3 P1)', async () => {
+    const f = await coveredVisit();
+    const idempotencyKey = randomUUID();
+    const dbMock = require('../models/db');
+    const real = dbMock.connection;
+    dbMock.connection = new Proxy(real, {
+      apply(target, thisArg, args) {
+        if (args[0] === 'service_records' && /resolveGate/.test(new Error().stack)) throw new Error('synthetic freeze write failure');
+        return Reflect.apply(target, thisArg, args);
+      },
+    });
+    let held;
+    try {
+      held = await complete(f, {}, { idempotencyKey });
+    } finally {
+      dbMock.connection = real;
+    }
+    expect(held).toMatchObject({ status: 503, body: { code: 'annual_prepay_addons_lookup_failed' } });
+    expect(await liveInvoices(f)).toHaveLength(0);
+    const retry = await complete(f, {}, { idempotencyKey });
+    expect(retry).toMatchObject({ status: 200 });
+    expect(Number((await liveInvoices(f))[0].total)).toBe(ADDON);
+  });
+
+  test('a quiet backfill mints the add-ons bill off any payer statement (skipAccrual), like the main backfill invoice (GitHub r3 P1)', async () => {
+    const f = await coveredVisit({ daysAgo: 3 });
+    const InvoiceService = require('../services/invoice');
+    const create = jest.spyOn(InvoiceService, 'create');
+    let calls;
+    try {
+      expect(await complete(f, { backfill: true, timeOnSite: 45 })).toMatchObject({ status: 200 });
+      calls = create.mock.calls.map(([args]) => args);
+    } finally {
+      create.mockRestore();
+    }
+    const addonsCreate = calls.find((args) => String(args?.notes || '').startsWith('Add-ons beyond'));
+    expect(addonsCreate).toMatchObject({ skipAccrual: true });
+  });
+
+  test('an add-on still awaiting its price is flagged to the office, never read as free — the priced one still bills (GitHub r3 P1)', async () => {
+    const f = await coveredVisit({ secondAddon: true });
+    await trx('scheduled_service_addons').where({ id: f.addon2Id }).update({ base_price: null, estimated_price: null });
+    await trx('scheduled_services').where({ id: f.serviceId }).update({ estimated_price: BASE + ADDON });
+    const out = await complete(f, { sendCompletionSms: true });
+    expect(out).toMatchObject({ status: 200 });
+    expect((await liveInvoices(f)).map((i) => Number(i.total))).toEqual([ADDON]);
+    expect(await addonsAlert(f)).toBeTruthy();
+    expect(PAID_TEXTS).not.toContain(out.body?.completionSmsType);
+  });
+
+  test('a covered visit whose only add-on awaits its price bills nothing and alerts the office', async () => {
+    const f = await coveredVisit();
+    await trx('scheduled_service_addons').where({ id: f.addonId }).update({ base_price: null, estimated_price: null });
+    await trx('scheduled_services').where({ id: f.serviceId }).update({ estimated_price: BASE });
+    const out = await complete(f, { sendCompletionSms: true });
+    expect(out).toMatchObject({ status: 200 });
+    expect(await liveInvoices(f)).toHaveLength(0);
+    expect(await addonsAlert(f)).toBeTruthy();
+    expect(PAID_TEXTS).not.toContain(out.body?.completionSmsType);
+  });
+
   describe('dark (GATE_ANNUAL_PREPAY_ADDON_BILLING off): today\'s behavior', () => {
     beforeEach(() => { delete process.env.GATE_ANNUAL_PREPAY_ADDON_BILLING; });
     afterEach(() => { process.env.GATE_ANNUAL_PREPAY_ADDON_BILLING = 'true'; });
