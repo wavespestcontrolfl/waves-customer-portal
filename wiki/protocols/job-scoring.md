@@ -77,8 +77,7 @@ Job Score (0–100) =
 | 85–100 | Critical | Protect — never move or compress |
 | 70–84 | High | Flag before moving |
 | 55–69 | Standard | Normal route placement |
-| 40–54 | Low | Can compress or move to adjacent day |
-| < 40 | Deprioritize | Consider rescheduling |
+| < 55 | Low | Can compress or move to adjacent day |
 
 ## Special Adjustments
 

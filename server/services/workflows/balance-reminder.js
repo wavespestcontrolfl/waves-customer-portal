@@ -9,13 +9,14 @@ const { publicPortalUrl } = require("../../utils/portal-url");
 const EmailTemplateLibrary = require("../email-template-library");
 const { currency } = require("../email-template");
 const { getInvoiceEmailRecipients } = require("../customer-contact");
-const { formatDateOnly } = require("../../utils/date-only");
+const { dateOnlyString, formatDateOnly } = require("../../utils/date-only");
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require("../../constants/business");
 const { collectionsChannelPermitted } = require("../collections/rail-guard");
 const ContactLedger = require("../collections/contact-ledger");
 const { billingChannelAllowed, explicitBillingChannels } = require('../billing-delivery-channels');
 const { reminderProgress, sendReminderChannels } = require('../billing-reminder-delivery');
 const { isDefiniteRejection } = require('../sendgrid-mail');
+const { withCustomerCommsLock } = require('../../utils/customer-comms-lock');
 
 const LATE_PAYMENT_EMAIL_BY_SMS_TEMPLATE = {
   late_payment_7d: { templateKey: "billing_late_payment_7_day", stageDays: 7 },
@@ -58,6 +59,39 @@ function smsLogMetadata(row) {
     return (typeof row.metadata === "string" ? JSON.parse(row.metadata) : row.metadata) || {};
   } catch {
     return {};
+  }
+}
+
+// Account-level reminders stop if ANY invoice behind the balance is held.
+// Read failures skip this run; late-payment-checker owns verification nudges.
+async function customerDunningStopped(balance, selectedInvoiceId) {
+  try {
+    const ids = [...new Set([
+      ...(balance.invoiceIds || []), balance.oldestInvoiceId, selectedInvoiceId,
+    ].filter(Boolean).map(String))];
+    if (!ids.length) return false;
+    const InvoiceFollowUps = require('../invoice-followups');
+    for (const id of ids) {
+      if (await InvoiceFollowUps.hasActiveSequence(id)) return true;
+      if (await InvoiceFollowUps.isDunningStopped(id)) return true;
+    }
+    const activePlan = await db('payment_plans')
+      .whereIn('invoice_id', ids)
+      .where({ status: 'active' })
+      .first('id');
+    if (activePlan) return true;
+    const rows = await db('invoices')
+      .whereIn('id', ids)
+      .whereNotNull('stripe_payment_intent_id')
+      .select('id', 'stripe_payment_intent_id');
+    const StripeService = require('../stripe');
+    for (const inv of rows) {
+      if (await StripeService.isInvoiceAwaitingMicrodepositVerification(inv, { throwOnError: true })) return true;
+    }
+    return false;
+  } catch (err) {
+    logger.warn(`[balance-reminder] dunning-stop check failed — skipping this customer's reminder this run (fail closed): ${err.message}`);
+    return true;
   }
 }
 
@@ -248,14 +282,17 @@ class BalanceReminder {
       .select("id")
       .catch(() => []);
     const payerInvoiceIds = new Set(payerInvRows.map((r) => String(r.id)));
-    const isPayerPayment = (p) => {
+    const paymentInvoiceId = (p) => {
       try {
         const m = typeof p.metadata === "string" ? JSON.parse(p.metadata) : p.metadata;
-        const invId = m && m.invoice_id != null ? String(m.invoice_id) : null;
-        return !!(invId && payerInvoiceIds.has(invId));
+        return m && m.invoice_id != null ? String(m.invoice_id) : null;
       } catch {
-        return false;
+        return null;
       }
+    };
+    const isPayerPayment = (p) => {
+      const invId = paymentInvoiceId(p);
+      return !!(invId && payerInvoiceIds.has(invId));
     };
     const outstanding = payerInvoiceIds.size === 0
       ? allOutstanding
@@ -286,22 +323,32 @@ class BalanceReminder {
       .orderByRaw("COALESCE(due_date::timestamp, created_at) asc")
       .first();
 
+    // Include payment-linked debt as well as the invoice chosen for the link.
+    const invoiceIds = [...new Set([
+      ...outstanding.map((p) => paymentInvoiceId(p)).filter(Boolean),
+      ...(oldestInvoice?.id ? [String(oldestInvoice.id)] : []),
+    ])];
+
     return {
       totalBalance,
+      invoiceIds,
       invoiceCount: outstanding.length,
       oldestInvoiceId: oldestInvoice?.id || null,
+      // /pay/ is keyed by the invoice token only — a customer id there opens a
+      // "not found" pay page, so a tokenless invoice gets no link at all.
       oldestInvoiceUrl: oldestInvoice?.token
         ? `${publicPortalUrl()}/pay/${oldestInvoice.token}`
-        : `${publicPortalUrl()}/pay/${customerId}`,
+        : null,
       oldestDueDate: oldest.payment_date,
       daysOverdue,
     };
   }
 
   async sendReminder(service, balance, tier, daysUntil) {
-    if (!balance.oldestInvoiceId) {
+    if (await customerDunningStopped(balance)) return false;
+    if (!balance.oldestInvoiceId || !balance.oldestInvoiceUrl) {
       throw new Error(
-        "balance reminder payment-link SMS skipped: no unpaid invoice id found",
+        "balance reminder payment-link SMS skipped: no unpaid invoice id/token found",
       );
     }
     // Collections policy (gate off ⇒ permitted without consulting — this
@@ -331,6 +378,8 @@ class BalanceReminder {
       day: "numeric",
       year: undefined,
     });
+    const appointmentDate = dateOnlyString(service.scheduled_date);
+    const appointmentServiceType = service.service_type || "service";
     const link = await shortenOrPassthrough(balance.oldestInvoiceUrl, {
       kind: "invoice",
       entityType: "invoices",
@@ -338,11 +387,12 @@ class BalanceReminder {
       customerId: service.cust_id,
     });
 
+    const appointmentRenderedOn = etDateString();
     const serviceTiming = daysUntil === 0 ? "today" : daysUntil === 1 ? "tomorrow" : `in ${daysUntil} days`;
     const message = await renderSmsTemplate(`balance_reminder_${tier}`, {
       first_name: service.first_name || "there",
       service_date: datePretty,
-      service_type: service.service_type || "service",
+      service_type: appointmentServiceType,
       service_timing: serviceTiming,
       pay_url: link,
     }, {
@@ -364,13 +414,17 @@ class BalanceReminder {
         send: (channel, ledger) => sendCustomerMessage({
           to: service.phone, body: message, channel,
           audience: 'customer', purpose: 'payment_link', customerId: service.cust_id,
-          invoiceId: balance.oldestInvoiceId, entryPoint: 'balance_reminder_workflow',
+          invoiceId: balance.oldestInvoiceId, appointmentId: service.id,
+          entryPoint: 'balance_reminder_workflow',
           metadata: { original_message_type: 'balance_reminder', billingDeliveryCategory: 'billing',
             notificationEventKey: eventKey, billingDeliveryLeg: channel,
+            appointment_date: appointmentDate,
+            appointment_service_type: appointmentServiceType,
+            appointment_rendered_on: appointmentRenderedOn,
             ...(channel === 'push' ? { appOnly: true } : {}),
             // A queued Email retry re-checks the collections rail excluding
             // this leg's own reservation, then marks it delivered.
-            ...(channel === 'email' && ledger?.id ? { collections_ledger_id: String(ledger.id) } : {}) },
+            ...(channel === 'email' && ledger?.id ? { collections_ledger_id: ledger.id } : {}) },
           preDispatchCheck: require('../invoice-helpers').selfPayAtDispatch(balance.oldestInvoiceId, db),
         }),
       });
@@ -506,6 +560,9 @@ class BalanceReminder {
         prefs = null;
       }
     }
+    if (prefs?.email_enabled === false) {
+      return { ok: false, skipped: true, reason: 'email_disabled' };
+    }
     if (billingChannelAllowed(prefs || {}, 'billing', 'email') === false) {
       return { ok: false, skipped: true, reason: 'billing_email_not_selected' };
     }
@@ -533,6 +590,7 @@ class BalanceReminder {
     const triggerEventId = `late_payment:${latestInvoice.id}:${config.stageDays}`;
     const idempotencyKey = `late_payment_email:${latestInvoice.id}:${config.stageDays}`;
     let providerHandoffStarted = false;
+    let emailDisabledAtHandoff = false;
     try {
       const result = await EmailTemplateLibrary.sendTemplate({
         templateKey: config.templateKey,
@@ -551,20 +609,29 @@ class BalanceReminder {
         // …and again at the provider boundary, inside the library's handoff:
         // the recipient resolution and payload render are awaited after the
         // read above. Fail-closed, like the follow-up engine's email leg.
-        withProviderHandoff: async (dispatch) => {
-          const verdict = await require("../invoice-helpers").selfPayAtDispatch(invoice.id, db)();
+        // Same customer-comms lock as the follow-up engine and preference saves.
+        withProviderHandoff: async (dispatch) => withCustomerCommsLock(db, customer.id, async (trx) => {
+          const verdict = await require("../invoice-helpers").selfPayAtDispatch(invoice.id, trx)();
           if (verdict.ok !== true) return verdict;
-          const freshPrefs = await db('notification_prefs').where({ customer_id: customer.id }).first();
+          const freshPrefs = await trx('notification_prefs').where({ customer_id: customer.id }).first();
+          if (freshPrefs?.email_enabled === false) {
+            emailDisabledAtHandoff = true;
+            return { ok: false };
+          }
           if (billingChannelAllowed(freshPrefs || {}, 'billing', 'email') === false) return { ok: false };
-          const freshCustomer = await db('customers').where({ id: customer.id }).first();
+          const freshCustomer = await trx('customers').where({ id: customer.id }).first();
           const [freshRecipient] = getInvoiceEmailRecipients(freshCustomer, freshPrefs || {})
             .filter((entry) => isEmailLike(entry.email));
           if (cleanEmail(freshRecipient?.email) !== cleanEmail(recipient.email)) return { ok: false };
           providerHandoffStarted = true;
-          await dispatch();
+          await dispatch(trx);
           return { ok: true };
-        },
+        }),
       });
+
+      if (emailDisabledAtHandoff && !result.sent) {
+        return { ok: false, skipped: true, reason: 'email_disabled' };
+      }
 
       if (result.deduped) {
         return {
@@ -631,6 +698,7 @@ class BalanceReminder {
         this.whereNull('scheduled_send_error').orWhereNot('scheduled_send_error', 'like', 'payer_billed:%');
       }).orderByRaw('COALESCE(due_date::timestamp, created_at) asc').first();
     if (!invoice?.id || !invoice.token) return false;
+    if (await customerDunningStopped(balance, invoice.id)) return false;
     const source = 'balance_reminder_late_payment_check';
     const progress = await reminderProgress(customer.id, source, channels);
     const pending = progress.find((event) => !event.complete && event.metadata.invoiceId === invoice.id);
@@ -658,7 +726,7 @@ class BalanceReminder {
     const result = await sendReminderChannels({
       customerId: customer.id, invoiceId: invoice.id, source, purpose: 'late_payment', eventKey, channels,
       metadata: { invoiceId: invoice.id, templateKey, template_key: templateKey, days_overdue: balance.daysOverdue },
-      send: (channel) => channel === 'email'
+      send: (channel, ledger) => channel === 'email'
         ? this.sendLatePaymentEmail({ customer, invoice, balance, smsTemplateKey: templateKey,
           invoiceTitle, serviceDateClause: dateClause, payUrl: link, initialPrefs: prefs })
         : sendCustomerMessage({
@@ -666,6 +734,7 @@ class BalanceReminder {
           customerId: customer.id, invoiceId: invoice.id, entryPoint: 'balance_reminder_late_payment_check',
           metadata: { original_message_type: 'late_payment', billingDeliveryCategory: 'billing',
             notificationEventKey: eventKey, billingDeliveryLeg: channel,
+            ...(ledger?.id ? { collections_ledger_id: ledger.id } : {}),
             ...(channel === 'push' ? { appOnly: true } : {}) },
           hasEmailLeg: true, preDispatchCheck: require('../invoice-helpers').selfPayAtDispatch(invoice.id, db),
         }),
@@ -741,6 +810,7 @@ class BalanceReminder {
         );
         continue;
       }
+      if (await customerDunningStopped(balance, oldestInvoice.id)) continue;
       const link = await shortenOrPassthrough(
         `${publicPortalUrl()}/pay/${oldestInvoice.token}`,
         {
@@ -892,6 +962,7 @@ class BalanceReminder {
           original_message_type: "late_payment",
           billingDeliveryCategory: 'billing',
           notificationEventKey: `balance-late-payment:${oldestInvoice.id}:${balance.daysOverdue}`,
+          collections_ledger_id: smsLedger.id,
         },
         hasEmailLeg: true,
         // Same provider-boundary ownership guard as the balance leg.

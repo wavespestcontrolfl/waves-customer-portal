@@ -48,7 +48,7 @@ function TypeScale() {
     <Section id="type" title="Type roles · one system stack">
       <h1 style={{ marginTop: 12 }}>Hello Pat, your pest-free Parrish plan is ready!</h1>
       <p style={{ fontSize: FS.lead, lineHeight: LH.body, color: '#3F4A65', margin: '12px 0 0', maxWidth: '62ch' }}>
-        Body prose at 16px: we can start protecting your home as soon as Tuesday. Your plan includes exterior and interior pest protection, unlimited free callbacks, and a 90-day money-back guarantee.
+        Body prose at 16px: we can start protecting your home as soon as Tuesday. Your plan includes exterior and interior pest protection, unlimited free callbacks, and a money-back guarantee.
       </p>
       <h2 style={{ marginTop: 20 }}>Section heading (h2, 26px)</h2>
       <h3 style={{ marginTop: 12 }}>Card title (h3, 20px)</h3>

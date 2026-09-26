@@ -270,6 +270,70 @@ describe('estimate converter termite annual-plan sign-before-pay (slice 3a restr
       expect(estimateUpdate).not.toHaveBeenCalled();
     });
 
+    test('slice 3b: signature_expired (closed unsigned) — no-ops entirely, never re-parks, never re-opens, no total reported', async () => {
+      const estimateUpdate = jest.fn().mockResolvedValue(1);
+      const customerUpdate = jest.fn().mockResolvedValue(1);
+      const { EstimateConverter, invoiceService, renewals } = setup(termiteAnnualLine, {
+        gateOn: true,
+        estimateUpdate,
+        customerUpdate,
+        priorActivationStatus: 'signature_expired',
+        // Even a lingering deferred-invoice snapshot (the closed estimate
+        // keeps its historical frozen figures) must not be replayed as a
+        // total — the offer is closed, there is nothing left to quote.
+        priorDeferredInvoice: { version: 1, parkedAt: '2026-08-01T00:00:00.000Z', frozenFinancials: { total: 449 } },
+      });
+
+      const result = await EstimateConverter.convertEstimate('estimate-1', convertOpts);
+
+      expect(result).toEqual({ annualPlanActivationStatus: 'signature_expired', annualPlanDeferredTotal: null });
+      expect(renewals.createTermForAnnualPrepay).not.toHaveBeenCalled();
+      expect(invoiceService.create).not.toHaveBeenCalled();
+      expect(customerUpdate).not.toHaveBeenCalled();
+      expect(estimateUpdate).not.toHaveBeenCalled();
+    });
+
+    test.each([
+      ['signature_expired', null, { annualPlanActivationStatus: 'signature_expired', annualPlanDeferredTotal: null }],
+      ['awaiting_signature', { version: 1, parkedAt: '2026-08-01T00:00:00.000Z', frozenFinancials: { total: 449 } }, { annualPlanActivationStatus: 'awaiting_signature', annualPlanDeferredTotal: 449 }],
+      ['activated', null, { annualPlanActivationStatus: 'activated', annualPlanDeferredTotal: null }],
+    ])('a retry that OMITS billingTerm (default standard) on a %s estimate still no-ops — never an ordinary conversion beside the plan', async (status, deferred, expected) => {
+      const estimateUpdate = jest.fn().mockResolvedValue(1);
+      const customerUpdate = jest.fn().mockResolvedValue(1);
+      const { EstimateConverter, invoiceService, renewals } = setup(termiteAnnualLine, {
+        gateOn: true,
+        estimateUpdate,
+        customerUpdate,
+        priorActivationStatus: status,
+        ...(deferred ? { priorDeferredInvoice: deferred } : {}),
+      });
+
+      const result = await EstimateConverter.convertEstimate('estimate-1', { skipAutoSchedule: true });
+
+      expect(result).toEqual(expected);
+      expect(renewals.createTermForAnnualPrepay).not.toHaveBeenCalled();
+      expect(invoiceService.create).not.toHaveBeenCalled();
+      expect(customerUpdate).not.toHaveBeenCalled();
+      expect(estimateUpdate).not.toHaveBeenCalled();
+    });
+
+    test('slice 3b: signature_expired still routes here even with the live gate OFF and no delivered-offer stamp — never falls through to an ordinary re-accept', async () => {
+      const estimateUpdate = jest.fn().mockResolvedValue(1);
+      const { EstimateConverter, invoiceService, renewals } = setup(termiteAnnualLine, {
+        gateOn: false,
+        hasDeliveredOffer: false,
+        estimateUpdate,
+        priorActivationStatus: 'signature_expired',
+      });
+
+      const result = await EstimateConverter.convertEstimate('estimate-1', convertOpts);
+
+      expect(result).toEqual({ annualPlanActivationStatus: 'signature_expired', annualPlanDeferredTotal: null });
+      expect(renewals.createTermForAnnualPrepay).not.toHaveBeenCalled();
+      expect(invoiceService.create).not.toHaveBeenCalled();
+      expect(estimateUpdate).not.toHaveBeenCalled();
+    });
+
     test('pre-push P1: re-run while still awaiting_signature keeps the ORIGINAL accept-context — no re-park, no term, no invoice', async () => {
       const estimateUpdate = jest.fn().mockResolvedValue(1);
       const original = {
@@ -390,20 +454,49 @@ describe('estimate converter termite annual-plan sign-before-pay (slice 3a restr
       expect(invoiceService.create).toHaveBeenCalled();
     });
 
-    test('non-prepay billingTerm: annual-plan rows present but standard accept — the park never engages', async () => {
+    test('slice 4 — prepay-only enforcement holds with the gate OFF too (Codex #4937 r1 P1: an undelivered draft marked won with standard billing)', async () => {
+      const { renewals, invoiceService, EstimateConverter } = setup(termiteAnnualLine, { gateOn: false });
+
+      await expect(EstimateConverter.convertEstimate('estimate-1', { billingTerm: 'standard', skipAutoSchedule: true }))
+        .rejects.toMatchObject({ code: 'TERMITE_ANNUAL_PLAN_REQUIRES_PREPAY', status: 422 });
+      expect(renewals.createTermForAnnualPrepay).not.toHaveBeenCalled();
+      expect(invoiceService.create).not.toHaveBeenCalled();
+    });
+
+    test('slice 4 — prepay-only enforcement: non-prepay billingTerm on a termite annual-plan estimate is refused outright, never falls through to the ordinary per-application path', async () => {
       const estimateUpdate = jest.fn().mockResolvedValue(1);
-      const { renewals, estimateUpdate: updateSpy, EstimateConverter } = setup(termiteAnnualLine, {
+      const {
+        renewals, invoiceService, estimateUpdate: updateSpy, EstimateConverter,
+      } = setup(termiteAnnualLine, {
         gateOn: true,
         estimateUpdate,
       });
-      await EstimateConverter.convertEstimate('estimate-1', { billingTerm: 'standard', skipAutoSchedule: true })
-        .catch(() => {}); // Standard-path completion details are out of scope here.
 
+      await expect(EstimateConverter.convertEstimate('estimate-1', { billingTerm: 'standard', skipAutoSchedule: true }))
+        .rejects.toMatchObject({ code: 'TERMITE_ANNUAL_PLAN_REQUIRES_PREPAY', status: 422 });
+
+      // The park never engages either — this is a refusal, not a park.
       expect(renewals.createTermForAnnualPrepay).not.toHaveBeenCalled();
+      expect(invoiceService.create).not.toHaveBeenCalled();
       const stampCalls = updateSpy.mock.calls.filter(
         (call) => call[0] && call[0].annual_plan_activation_status,
       );
       expect(stampCalls.length).toBe(0);
+    });
+
+    test('slice 4 — prepay-only enforcement is a no-op for a quarterly termite line (not the annual plan) under a standard accept', async () => {
+      const { EstimateConverter, renewals } = setup(termiteAnnualLine, {
+        gateOn: true,
+        annualPlanRows: [],
+      });
+
+      // Standard-path completion details beyond this guard are out of scope
+      // here (no full mock for the ordinary conversion pipeline) — only that
+      // it is NOT refused as a termite-annual-plan mismatch.
+      const err = await EstimateConverter.convertEstimate('estimate-1', { billingTerm: 'standard', skipAutoSchedule: true })
+        .catch((e) => e);
+      expect(err?.code).not.toBe('TERMITE_ANNUAL_PLAN_REQUIRES_PREPAY');
+      expect(renewals.createTermForAnnualPrepay).not.toHaveBeenCalled();
     });
   });
 
@@ -550,6 +643,72 @@ describe('estimate converter termite annual-plan sign-before-pay (slice 3a restr
       expect(activationStampCall[0].annual_plan_activated_at).toBeInstanceOf(Date);
     });
 
+    test('slice 4 — naming: activation invoice title/line/notes and the term planLabel use the catalog\'s Subterranean Termite Protection name — never WaveGuard Membership, never "setup fee waived"', async () => {
+      const createTermForAnnualPrepay = jest.fn().mockResolvedValue({ id: 'term-1' });
+      const estimateUpdate = jest.fn().mockResolvedValue(1);
+      const { EstimateConverter, invoiceService, renewals } = setup(termiteAnnualLine, {
+        gateOn: true, createTermForAnnualPrepay, estimateUpdate, ...awaiting(),
+      });
+
+      await EstimateConverter.convertEstimate('estimate-1', activationOpts);
+
+      const createArgs = invoiceService.create.mock.calls[0][0];
+      expect(createArgs.title).toBe('Subterranean Termite Protection — Annual Prepay (12 months)');
+      expect(createArgs.lineItems[0].description).toBe('Subterranean Termite Protection — 12 months prepaid');
+      expect(createArgs.notes).toContain('Subterranean Termite Protection');
+      // The false claims this slice removes.
+      expect(createArgs.title).not.toMatch(/WaveGuard/i);
+      expect(createArgs.lineItems[0].description).not.toMatch(/WaveGuard|setup fee waived/i);
+      expect(createArgs.notes).not.toMatch(/WaveGuard|setup fee waived/i);
+
+      const termArgs = renewals.createTermForAnnualPrepay.mock.calls[0][0];
+      expect(termArgs.planLabel).toBe('Subterranean Termite Protection Annual Prepay');
+      expect(termArgs.planLabel).not.toMatch(/WaveGuard/i);
+    });
+
+    test('slice 4 — naming: reads the catalog label the estimate stamped at quote time (planLabel on the mapped row), never a hardcoded string', async () => {
+      const annualPlanRows = [
+        { plan: 'annual_protection', service: 'termite_bait', annual: 250, planLabel: 'Subterranean Termite Protection (Custom Label)' },
+      ];
+      const { EstimateConverter, invoiceService } = setup(termiteAnnualLine, {
+        gateOn: true, annualPlanRows, ...awaiting(),
+      });
+
+      await expect(EstimateConverter.convertEstimate('estimate-1', activationOpts))
+        .rejects.toThrow('Annual prepay term was not created');
+
+      const createArgs = invoiceService.create.mock.calls[0][0];
+      expect(createArgs.title).toBe('Subterranean Termite Protection (Custom Label) — Annual Prepay (12 months)');
+    });
+
+    test('slice 4 — naming: a stamped label too long for plan_label varchar(120) with the " Annual Prepay" suffix falls back to the catalog name (Codex #4937 r1 P2)', async () => {
+      const longLabel = `Subterranean Termite Protection ${'X'.repeat(80)}`; // 112 chars
+      const annualPlanRows = [{ plan: 'annual_protection', service: 'termite_bait', annual: 250, planLabel: longLabel }];
+      const { EstimateConverter, renewals } = setup(termiteAnnualLine, {
+        gateOn: true, annualPlanRows, ...awaiting(),
+      });
+
+      await expect(EstimateConverter.convertEstimate('estimate-1', activationOpts))
+        .rejects.toThrow('Annual prepay term was not created');
+
+      const termArgs = renewals.createTermForAnnualPrepay.mock.calls[0][0];
+      expect(termArgs.planLabel).toBe('Subterranean Termite Protection Annual Prepay');
+      expect(termArgs.planLabel.length).toBeLessThanOrEqual(120);
+    });
+
+    test('slice 4 — naming: a prepay discount keeps the effective-rate label on the termite annual line (never the WaveGuard waiver wording)', async () => {
+      const { EstimateConverter, invoiceService } = setup(termiteAnnualLine, {
+        gateOn: true, ...awaiting(parkedContext({ discountApplied: true, discountRate: 0.05 })),
+      });
+
+      await expect(EstimateConverter.convertEstimate('estimate-1', activationOpts))
+        .rejects.toThrow('Annual prepay term was not created');
+
+      const createArgs = invoiceService.create.mock.calls[0][0];
+      expect(createArgs.lineItems[0].description).toBe('Subterranean Termite Protection — 12 months prepaid (5% prepay discount)');
+      expect(createArgs.notes).toContain('5% annual-prepay discount applied');
+    });
+
     test('codex round-3 P0: gate turned OFF between accept and signature — the persisted awaiting_signature stamp still activates (never falls into the ordinary un-stamped path)', async () => {
       const estimateUpdate = jest.fn().mockResolvedValue(1);
       const createTermForAnnualPrepay = jest.fn().mockResolvedValue({ id: 'term-7' });
@@ -613,6 +772,24 @@ describe('estimate converter termite annual-plan sign-before-pay (slice 3a restr
       const createArgs = invoiceService.create.mock.calls[0][0];
       expect(createArgs.lineItems.length).toBe(1); // no rodent setup, no annual-plan setup
     });
+
+    // Regression (slice 4): the WaveGuard membership prepay copy this lane
+    // touches is scoped by isTermiteAnnualPlanAccept alone — a solo pest
+    // (MEMBERSHIP_FEE_SOLO_KEYS) prepay_annual accept with NO termite
+    // annual-plan rows at all must still get the ORIGINAL "WaveGuard
+    // Membership" title/line/notes, byte-identical to before this lane.
+    const pestControlLine = [{ service: 'pest_control', name: 'Pest Control', frequency: 'quarterly', visitsPerYear: 4 }];
+    test('regression: a solo-pest prepay_annual accept (no termite annual-plan rows) keeps the ORIGINAL WaveGuard Membership title/line/notes untouched', async () => {
+      const { EstimateConverter, invoiceService } = setup(pestControlLine, { gateOn: true, annualPlanRows: [] });
+
+      await expect(EstimateConverter.convertEstimate('estimate-1', activationOpts))
+        .rejects.toThrow('Annual prepay term was not created');
+
+      const createArgs = invoiceService.create.mock.calls[0][0];
+      expect(createArgs.title).toBe('WaveGuard Bronze — Annual Prepay (12 months)');
+      expect(createArgs.lineItems[0].description).toBe('WaveGuard Membership — 12 months prepaid (setup fee waived)');
+      expect(createArgs.notes).toContain('setup fee waived per WaveGuard membership policy');
+    });
   });
 
   test('isTermiteAnnualSignBeforePayAccept is exported and matches the same rule the converter applies internally', () => {
@@ -630,5 +807,13 @@ describe('estimate converter termite annual-plan sign-before-pay (slice 3a restr
     expect(typeof EstimateConverter.isTermiteAnnualSignBeforePayAccept).toBe('function');
     expect(EstimateConverter.isTermiteAnnualSignBeforePayAccept({}, {}, 'prepay_annual')).toBe(true);
     expect(EstimateConverter.isTermiteAnnualSignBeforePayAccept({}, {}, 'standard')).toBe(false);
+    // Slice 3b: the persisted 'signature_expired' stamp is authoritative
+    // exactly like 'awaiting_signature' / 'activated' — even with the live
+    // gate on (irrelevant here either way), a closed estimate must always
+    // route to parkTermiteAnnualPlanAccept's terminal no-op, never the
+    // ordinary conversion body.
+    expect(EstimateConverter.isTermiteAnnualSignBeforePayAccept(
+      { annual_plan_activation_status: 'signature_expired' }, {}, 'prepay_annual',
+    )).toBe(true);
   });
 });

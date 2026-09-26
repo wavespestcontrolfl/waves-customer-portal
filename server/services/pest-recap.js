@@ -1291,7 +1291,7 @@ async function submitRecap({
         'Recap completion needs billing review (saved card)',
         `A recap-completed visit's saved-card billing step errored before it could resolve (${err.message}). Review the visit's billing and collect manually if appropriate.`,
         {
-          link: svc?.customer_id ? `/admin/customers/${svc.customer_id}` : '/admin/dispatch',
+          link: svc?.customer_id ? `/admin/customers?customerId=${svc.customer_id}` : '/admin/dispatch',
           metadata: { scheduledServiceId: serviceId, reason: 'recap_billing_error' },
         },
       );

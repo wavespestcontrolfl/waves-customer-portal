@@ -30,7 +30,7 @@ async function main() {
       .where('processing_status', 'processed')
       .orderBy('created_at', 'desc')
       .limit(N)
-      .select('id', 'transcription', 'from_phone', 'to_phone', 'direction', 'created_at', 'ai_address_validation', 'ai_extraction_enriched', 'ai_extraction', 'customer_id', 'ai_validation',
+      .select('id', 'transcription', 'from_phone', 'to_phone', 'direction', 'source', 'metadata', 'created_at', 'ai_address_validation', 'ai_extraction_enriched', 'ai_extraction', 'customer_id', 'ai_validation',
         // The linked customer's fail-open inputs (codex round-21 P2 + the
         // local pre-push audit P1). An established customer who confirms
         // without restating their address normally has a `not_attempted`
@@ -67,7 +67,9 @@ async function main() {
   let valid = 0;
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i];
-    const contactPhone = String(r.direction || '').startsWith('outbound') ? r.to_phone : r.from_phone;
+    // Production's resolver (codex #4912 r1 P2): bridge calls carry the
+    // customer leg in metadata, not to_phone.
+    const contactPhone = CRP._test.resolveCallContactPhone(r);
     const t0 = Date.now();
     const res = await CRP._test.extractCallDataV2(r.transcription, contactPhone, {
       callId: r.id,

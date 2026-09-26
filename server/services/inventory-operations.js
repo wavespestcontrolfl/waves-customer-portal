@@ -3,6 +3,19 @@
  * Bar. These record staff actions; vendor checkout remains in order-dispatch.
  * Product locks serialize adjustments/creation. Request actions retain the
  * dispatcher's ledger -> request -> product lock order.
+ *
+ * options.extraMetadata (adjustStock only): merged onto the written
+ * product_inventory_movements.metadata, after the fields this module always
+ * sets — an automated writer's own provenance (e.g. the Amazon delivery
+ * auto-restock lane's { source: 'amazon_delivery', orderNumber, emailId,
+ * rawTitle }) without inventing a second movement-writing path.
+ *
+ * options.trx (adjustStock only): an already-open knex transaction to run
+ * on, instead of opening a new one — lets a caller that itself needs to be
+ * atomic with the movement (e.g. the Amazon delivery lane's claim-insert ->
+ * movement -> claim-update) wrap both in ONE db.transaction. Omitted (every
+ * other caller), behavior is byte-for-byte unchanged: a fresh db.transaction
+ * is opened here exactly as before.
  */
 const crypto = require('crypto');
 const Joi = require('joi');
@@ -136,7 +149,7 @@ async function previewStockAdjustment(productId, raw, options = {}) {
 
 async function adjustStock(productId, raw, options = {}) {
   const input = validated(adjustmentSchema, raw);
-  return db.transaction(async trx => {
+  const run = async (trx) => {
     const product = await loadProduct(productId, trx, true);
     const preview = adjustmentPreview(product, input, options);
     assertVersion(preview._version, options.expectedVersion);
@@ -151,7 +164,8 @@ async function adjustStock(productId, raw, options = {}) {
       lot_number: input.lotNumber || null,
       metadata: { source: options.source || 'admin_manual_adjustment', adjustedBy: options.actorId || null,
         reason: input.reason || null, note: input.note || null, delta: plan.delta, setTotal: input.setTotal ?? null,
-        enteredQuantity: plan.enteredQuantity, enteredUnit: plan.enteredUnit, conversionConfidence: plan.conversionConfidence },
+        enteredQuantity: plan.enteredQuantity, enteredUnit: plan.enteredUnit, conversionConfidence: plan.conversionConfidence,
+        ...(options.extraMetadata || {}) },
     }).returning('*');
     const saved = await trx('products_catalog').where({ id: productId }).first();
     if (!movement?.id || numberOrNull(saved?.inventory_on_hand) !== plan.stockAfter || saved.inventory_unit !== plan.inventoryUnit) {
@@ -159,7 +173,8 @@ async function adjustStock(productId, raw, options = {}) {
     }
     return { success: true, product: updated, movement,
       verification: { persisted: true, product_id: productId, movement_id: movement.id, stock_match: true }, href: `/admin/inventory?tab=products&search=${encodeURIComponent(product.name)}&productId=${productId}` };
-  });
+  };
+  return options.trx ? run(options.trx) : db.transaction(run);
 }
 
 function restockPlan(product, input, { source = 'intelligence_bar' } = {}) {

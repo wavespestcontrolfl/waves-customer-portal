@@ -73,7 +73,7 @@ describe('notify({ updateOnly: true }) — retiring a stale estimator bell (code
       body: 'Jane Doe: a price ($300.00) was agreed on this call, so the AI estimate draft was retired. No quote is owed — the price is already set.',
       estimateId: null,
       quotePromised: false,
-      link: '/admin/customers/cust-1',
+      link: '/admin/customers?customerId=cust-1',
       forceUpdate: true,
       updateOnly: true,
     });
@@ -83,7 +83,7 @@ describe('notify({ updateOnly: true }) — retiring a stale estimator bell (code
     const update = mockNotificationUpdates[0];
     expect(update.title).toBe('Price agreed on call — draft retired');
     expect(update.body).toContain('$300.00');
-    expect(update.link).toBe('/admin/customers/cust-1');
+    expect(update.link).toBe('/admin/customers?customerId=cust-1');
     expect(update.read_at).toBeNull();
     const metadata = JSON.parse(update.metadata);
     // No stale estimate link — the archived draft's id must not survive.

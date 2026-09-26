@@ -69,6 +69,20 @@ describe('sendgrid-mail sendOne: annual-offer guard at the provider boundary', (
     expect(annualHandoffGuard).toHaveBeenCalledWith(expect.objectContaining({ estimateIds: ['est-solo'] }));
   });
 
+  test.each(['refuse', 'rewrite'])('uses the held connection for %s link checks', async (policy) => {
+    const database = jest.fn();
+    withheldLinkPolicyForTemplate.mockReturnValue(policy);
+    await require('../services/sendgrid-mail').sendOne({
+      to: 'customer@example.test', fromEmail: 'contact@example.test', subject: 'S',
+      html: '<p>Frozen billing content</p>', text: 'Frozen billing content', database,
+    });
+    expect(annualHandoffGuard).toHaveBeenCalledWith(expect.objectContaining({ db: database }));
+    if (policy === 'rewrite') {
+      expect(rewriteWithheldEstimateLinks).toHaveBeenCalledWith(expect.objectContaining({ db: database }));
+    } else expect(rewriteWithheldEstimateLinks).not.toHaveBeenCalled();
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
   test('no estimateIds at all defaults to an empty explicit-id list', async () => {
     const sendgrid = require('../services/sendgrid-mail');
     await sendgrid.sendOne({ to: 'customer@example.test', fromEmail: 'contact@example.test', subject: 'S', html: 'h', text: 't' });

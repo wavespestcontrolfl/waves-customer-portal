@@ -140,6 +140,13 @@ describe('PaymentExpiry.checkExpiringCards routing outcome', () => {
     });
 
     await expect(paymentExpiry.checkExpiringCards()).resolves.toMatchObject({ notified: 1 });
+    expect(require('../services/messaging/send-customer-message').sendCustomerMessage)
+      .toHaveBeenCalledWith(expect.objectContaining({
+        entryPoint: 'payment_expiry_workflow',
+        metadata: expect.objectContaining({
+          payment_method_id: 'pm-1', expiry_month: '9', expiry_year: '2026', expiry_stage: '7_day',
+        }),
+      }));
     expect(db.raw).toHaveBeenCalledWith("NOW() - (? * INTERVAL '1 day')", [7]);
     expect(cooldownQuery.whereIn).toHaveBeenCalledWith('status', ['sent', 'delivered']);
     expect(cooldownQuery.whereRaw).toHaveBeenCalledWith("metadata->>'notificationEventKey' = ?", ['payment-expiry:pm-1:9:2026:7_day']);

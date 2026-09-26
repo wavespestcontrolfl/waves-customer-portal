@@ -872,6 +872,51 @@ describe('Customer360ProfileV2 profile state', () => {
     await waitFor(() => expect(propertyFetches()).toBe(2));
   });
 
+  it('refreshes the primary address review after a profile save for the same customer', async () => {
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+    let geocodeReads = 0;
+    const geocodeRecord = (address, status) => ({
+      enabled: true,
+      customer: {
+        id: 'customer-a', first_name: 'Avery', last_name: 'Customer', address_line1: address,
+        address_line2: '', city: 'Naples', state: 'FL', zip: '34102', latitude: 27.49, longitude: -82.57,
+      },
+      review: status === 'verified'
+        ? { status, source: 'site_visit', reviewed_at: '2026-09-24T15:30:00.000Z' }
+        : { status, reason: 'address_changed', source: 'automatic' },
+      revision: `revision-${geocodeReads}`,
+    });
+    const fetchMock = vi.fn((url, options = {}) => {
+      const path = String(url);
+      if (path.includes('/admin/customer-geocodes/customer-a')) {
+        geocodeReads += 1;
+        return response(geocodeReads === 1
+          ? geocodeRecord('100 Old Address', 'verified')
+          : geocodeRecord('200 Current Address', 'needs_pin'));
+      }
+      if (path.endsWith('/admin/payers')) return response({ payers: [] });
+      if (path.split('?')[0].endsWith('/admin/customers/customer-a/timeline')) return response({ timeline: [] });
+      if (path.endsWith('/admin/customers/customer-a') && options.method === 'PUT') return response({ success: true });
+      if (path.endsWith('/admin/customers/customer-a')) return response(customerDetail('customer-a', 'Avery'));
+      return response({});
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    expect(await screen.findAllByText('Avery Customer')).toHaveLength(2);
+    fireEvent.click(await screen.findByRole('button', { name: /Primary service location review/ }));
+    expect(await screen.findByText('100 Old Address, Naples, FL, 34102')).toBeInTheDocument();
+    expect(screen.getByText('Verified')).toBeInTheDocument();
+
+    fireEvent.click(screen.getAllByRole('button', { name: 'Edit' })[0]);
+    fireEvent.click(await screen.findByRole('button', { name: 'Save' }));
+
+    expect(await screen.findByText('200 Current Address, Naples, FL, 34102')).toBeInTheDocument();
+    expect(geocodeReads).toBe(2);
+    expect(screen.getByText('Pin needs review')).toBeInTheDocument();
+    expect(screen.queryByText('100 Old Address, Naples, FL, 34102')).not.toBeInTheDocument();
+    expect(screen.queryByText('Verified')).not.toBeInTheDocument();
+  });
+
   it('saves a city correction without resubmitting unchanged shared contacts or billing settings', async () => {
     localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
     const detail = customerDetail('customer-a', 'Avery');

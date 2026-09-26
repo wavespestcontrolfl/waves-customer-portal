@@ -78,6 +78,12 @@ describe('models registry — cross-provider routing', () => {
     expect(M.TEXT_POLICIES.visionAnalysis.primary).toEqual({ provider: 'anthropic', model: M.VISION });
   });
 
+  test('photoIdVision runs Gemini first and ChatGPT\'s best vision model second, no Claude (owner 2026-09-26)', () => {
+    const M = require('../config/models');
+    expect(M.TEXT_POLICIES.photoIdVision.primary).toEqual({ provider: 'gemini', model: M.GEMINI_VISION_BEST });
+    expect(M.TEXT_POLICIES.photoIdVision.fallback).toEqual({ provider: 'openai', model: M.OPENAI_FRONTIER });
+  });
+
   test('photoCaptions honors the shared GEMINI_VISION_MODEL override like the other photo lanes', () => {
     const prev = process.env.GEMINI_VISION_MODEL;
     process.env.GEMINI_VISION_MODEL = 'gemini-pinned-rollback';

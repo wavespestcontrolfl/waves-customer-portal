@@ -34,7 +34,9 @@ server/            Express API — routes/ (160+), services/ (business logic,
                    intelligence-bar/, pricing-engine/, content/, dispatch/, …),
                    models/migrations/ (Knex), middleware/, utils/, tests/
 client/            React app (all three portals)
-packages/          Workspaces: blog-schema, lawn-cost-floor
+packages/          Workspaces: affiliate-registry, blog-schema, irrigation-runtime,
+                   lawn-cost-floor, report-redaction (editorial-evidence is a
+                   shared module, not a workspace — no package.json)
 ios/WavesPay       Stripe Terminal companion app (xcodegen; project.yml is SoT)
 ops/twilio/        Studio flow contract (legacy rollback path)
 scripts/           Operational scripts + git hooks (hooks/pre-push = Codex audit)

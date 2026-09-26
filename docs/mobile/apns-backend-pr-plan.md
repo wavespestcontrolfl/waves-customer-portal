@@ -1,5 +1,11 @@
 # PR plan — APNs push delivery for the native iOS app
 
+**Shipped.** The APNs sender (`server/services/apns.js`), the
+`push_subscriptions` migration (`20260621000000_push_apns.js`), and the
+`/api/push/native-subscribe` endpoint (`server/routes/push.js`) all shipped,
+plus Android FCM support alongside iOS. The plan below is kept as the design
+record.
+
 **Goal:** deliver push to the Capacitor iOS app via Apple Push Notification
 service (APNs), reusing the existing `push_subscriptions` table and the existing
 `sendToCustomer` / `sendToAdmins` call sites. Web push (VAPID) is untouched.
@@ -33,7 +39,18 @@ exports.up = async (knex) => {
      ON push_subscriptions (device_token) WHERE device_token IS NOT NULL`
   );
 };
+```
 
+**Update 2026-09-26:** the shipped index (`20260621000000_push_apns.js`) is
+NON-partial on purpose — a partial index (`WHERE device_token IS NOT NULL`)
+can't be inferred by the plain `ON CONFLICT (device_token)` upsert in
+`routes/push.js` without repeating the predicate, which would make every
+native-subscribe fail with "no unique or exclusion constraint matching the
+ON CONFLICT". Postgres's default `NULLS DISTINCT` already keeps the many
+web rows (`device_token IS NULL`) from colliding, so the plain unique index
+works without the `WHERE` clause.
+
+```js
 exports.down = async (knex) => {
   await knex.schema.raw('DROP INDEX IF EXISTS push_subscriptions_device_token_uniq');
   await knex.schema.alterTable('push_subscriptions', (t) => {

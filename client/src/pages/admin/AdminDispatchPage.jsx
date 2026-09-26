@@ -27,6 +27,7 @@ import React, {
   Suspense,
   useState,
   useRef,
+  useEffect,
   useCallback,
 } from "react";
 import { useSearchParams } from "react-router-dom";
@@ -34,6 +35,7 @@ import {
   CalendarDays,
   CalendarPlus,
   ClipboardList,
+  Gauge,
   Headphones,
   Lightbulb,
   Map,
@@ -42,8 +44,10 @@ import {
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import { getAdminUser } from "../../lib/adminAuth";
+import { adminFetch } from "../../lib/adminFetch";
 import AdminTabRedirect from "../../components/admin/AdminTabRedirect";
 import DispatchBoardPage from "./DispatchBoardPage";
+import DayScorecardPanel from "../../components/dispatch/DayScorecardPanel";
 
 const DispatchPageV2 = React.lazy(() => import("./DispatchPageV2"));
 
@@ -56,6 +60,7 @@ const TABS = {
   CSR: "csr",
   REVENUE: "revenue",
   INSIGHTS: "insights",
+  SCORECARD: "scorecard",
 };
 const TAB_LIST = [
   { key: TABS.BOARD, label: "Board", Icon: Map },
@@ -82,6 +87,10 @@ const TAB_LIST = [
     Icon: Lightbulb,
   },
 ];
+// GATE_ROUTE_SCORECARD (admin-only, read-only): appended only once the
+// gate's own /status endpoint confirms it's on — never rendered as a dead
+// tab for a customer-visible build with the gate off.
+const SCORECARD_TAB = { key: TABS.SCORECARD, label: "Scorecard", Icon: Gauge };
 
 // Top-level tab → DispatchPageV2 internal activeTab. The schedule grid
 // inside DispatchPageV2 is keyed as 'board' (legacy), while every other
@@ -92,10 +101,38 @@ const innerActiveTabFor = (topTab) =>
 export default function AdminDispatchPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const isAdmin = getAdminUser()?.role === "admin";
-  const validTabKeys = TAB_LIST.map((t) => t.key);
-  const tab = validTabKeys.includes(searchParams.get(TAB_KEY))
+
+  // GATE_ROUTE_SCORECARD: admin-only, so a technician never fires the
+  // request. Off (or the request fails) simply keeps the tab absent —
+  // byte-identical to this page before the scorecard existed.
+  const [scorecardStatus, setScorecardStatus] = useState("pending");
+  useEffect(() => {
+    if (!isAdmin) return undefined;
+    let active = true;
+    adminFetch("/admin/route-scorecard/status")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => { if (active) setScorecardStatus(data?.enabled ? "on" : "off"); })
+      .catch(() => { if (active) setScorecardStatus("off"); });
+    return () => { active = false; };
+  }, [isAdmin]);
+  const scorecardEnabled = scorecardStatus === "on";
+  // A direct ?tab=scorecard load stays unresolved until /status settles
+  // (Codex P2): resolving it to Board first would render the wrong
+  // workspace and fire an authoritative Board beacon that can flush before
+  // the enabled response switches to Scorecard — two page views. Only an
+  // admin ever resolves the gate; anyone else falls back as before.
+  const scorecardDeepLinkPending = isAdmin && scorecardStatus === "pending"
+    && searchParams.get(TAB_KEY) === TABS.SCORECARD;
+  const tabList = scorecardEnabled ? [...TAB_LIST, SCORECARD_TAB] : TAB_LIST;
+  const navGridClassName = `grid-cols-2 md:grid-cols-4 ${scorecardEnabled ? "xl:grid-cols-8" : "xl:grid-cols-7"}`;
+
+  const validTabKeys = tabList.map((t) => t.key);
+  const resolvedTab = validTabKeys.includes(searchParams.get(TAB_KEY))
     ? searchParams.get(TAB_KEY)
     : TABS.BOARD;
+  // null while a scorecard deep link is unresolved = nothing rendered yet
+  // (no active section, no beacon, a loading placeholder below).
+  const tab = scorecardDeepLinkPending ? null : resolvedTab;
   const setTab = (nextTab) => {
     const next = new URLSearchParams(searchParams);
     next.set(TAB_KEY, nextTab);
@@ -137,11 +174,11 @@ export default function AdminDispatchPage() {
         <AdminCommandHeader
           title="Schedule"
           icon={CalendarDays}
-          sections={TAB_LIST}
+          sections={tabList}
           activeKey={tab}
           onSectionChange={setTab}
           ariaLabel="Schedule section"
-          navGridClassName="grid-cols-2 md:grid-cols-4 xl:grid-cols-7"
+          navGridClassName={navGridClassName}
           actions={[
             ...(tab === TABS.SCHEDULE ? [{
                   label: "Add Appointment",
@@ -156,8 +193,16 @@ export default function AdminDispatchPage() {
         aria-label="Schedule content"
         className="flex-1 min-h-0 flex flex-col"
       >
-        {tab === TABS.BOARD ? (
+        {tab == null ? (
+          <div role="status" className="text-14 text-ink-tertiary p-10 text-center">
+            Loading schedule…
+          </div>
+        ) : tab === TABS.BOARD ? (
           <DispatchBoardPage />
+        ) : tab === TABS.SCORECARD ? (
+          <div className="p-4">
+            <DayScorecardPanel />
+          </div>
         ) : (
           <Suspense
             fallback={
