@@ -16,7 +16,7 @@ const {
   buildDateRange, buildBackupRows, applyRollback, parseLedgerResult, recoveryInstruction,
   collectEntries, reportAndBackup, groupRowsByTechDay, readLiveTechDay, mismatchedIdsForDay,
   buildRollbackTargetOrder, rollbackWindowConflict, previewRollback, printRollbackPlan, printRollbackResult,
-  buildRunOpts, writeBackupFile,
+  buildRunOpts, writeBackupFile, outOfHorizonDates, runIsUnhealthy,
 } = require('../../scripts/route-order-cleanup');
 const {
   ROUTE_WRITE_GUARD_COLUMNS, CUSTOMER_PREMISE_ALIASES, classifyWriteError, _internals: reorderInternals,
@@ -156,46 +156,72 @@ describe('mismatchedIdsForDay (the pure "does the backup still match" check)', (
 });
 
 describe('buildRollbackTargetOrder', () => {
-  test('rows are returned to an earlier "before" position, others keep relative order', () => {
-    // Live (canonicalized): X=1, A=2, B=3, Y=4. Backup: A moved 1->2, B moved
-    // 2->3 (X was inserted ahead of both). Restoring returns A and B to the
-    // front, in their original relative order.
-    const live = [
-      { id: 'X', route_order: 1 }, { id: 'A', route_order: 2 },
-      { id: 'B', route_order: 3 }, { id: 'Y', route_order: 4 },
+  // codex pre-push P1 repro, verbatim: original A=2,B=3,C=null → cleanup
+  // wrote B=1,C=2,A=3 → the OLD (splice-by-index) implementation restored
+  // C,A,B — the previously-null-before row landed at the FRONT just
+  // because it was excluded from reinsertion and happened to sit there in
+  // the CURRENT live order, instead of the "no original position — sorts
+  // LAST" that a null before/route_order means everywhere else.
+  test('the coordinator repro: original A=2,B=3,C=null restores to A,B,C — never C,A,B', () => {
+    const live = [ // current, after cleanup wrote B=1, C=2, A=3
+      { id: 'A', route_order: 3 }, { id: 'B', route_order: 1 }, { id: 'C', route_order: 2 },
     ];
-    const backup = [{ id: 'A', before: 1 }, { id: 'B', before: 2 }];
-    expect(buildRollbackTargetOrder(live, backup).map((r) => r.id)).toEqual(['A', 'B', 'X', 'Y']);
-  });
-
-  test('a null "before" leaves the row exactly where it sits live — never moved, never dropped', () => {
-    const live = [{ id: 'A', route_order: 1 }, { id: 'B', route_order: 2 }, { id: 'C', route_order: 3 }];
-    const backup = [{ id: 'B', before: null }];
+    const backup = [
+      { id: 'A', before: 2, after: 3 }, { id: 'B', before: 3, after: 1 }, { id: 'C', before: null, after: 2 },
+    ];
     expect(buildRollbackTargetOrder(live, backup).map((r) => r.id)).toEqual(['A', 'B', 'C']);
   });
 
-  test('a non-numeric "before" is treated the same as null', () => {
+  test('backed-up rows return to their original position; a non-backed-up row keeps ITS original position too (its own current route_order, since cleanup never touched it)', () => {
+    // Original: P=1, Q=2, R=3, S=4. Cleanup swaps only Q and S (P, R never
+    // touched): live now is P=1, S=2, R=3, Q=4. Backup: Q(before=2,after=4),
+    // S(before=4,after=2).
+    const live = [
+      { id: 'P', route_order: 1 }, { id: 'S', route_order: 2 },
+      { id: 'R', route_order: 3 }, { id: 'Q', route_order: 4 },
+    ];
+    const backup = [{ id: 'Q', before: 2, after: 4 }, { id: 'S', before: 4, after: 2 }];
+    expect(buildRollbackTargetOrder(live, backup).map((r) => r.id)).toEqual(['P', 'Q', 'R', 'S']);
+  });
+
+  test('a null "before" sorts the row LAST — the same "no position" convention route_order uses everywhere else', () => {
+    // Original: P=1, Q=2. Cleanup appended two previously-unpositioned rows
+    // (R, S) at the end: live is P=1, Q=2, R=3, S=4. Backup: R and S both
+    // before=null — restoring must put them back at the END, in their
+    // current relative order (the tie-break), never at the front.
+    const live = [
+      { id: 'P', route_order: 1 }, { id: 'Q', route_order: 2 },
+      { id: 'R', route_order: 3 }, { id: 'S', route_order: 4 },
+    ];
+    const backup = [{ id: 'R', before: null, after: 3 }, { id: 'S', before: null, after: 4 }];
+    expect(buildRollbackTargetOrder(live, backup).map((r) => r.id)).toEqual(['P', 'Q', 'R', 'S']);
+  });
+
+  test('a non-numeric "before" is treated the same as null — sorts last, never first', () => {
     const live = [{ id: 'A', route_order: 1 }, { id: 'B', route_order: 2 }];
     const backup = [{ id: 'B', before: 'oops' }];
     expect(buildRollbackTargetOrder(live, backup).map((r) => r.id)).toEqual(['A', 'B']);
   });
 
-  test('an out-of-range "before" clamps to the nearest valid position instead of throwing', () => {
+  test('a "before" far beyond the day\'s current size still just sorts after everything else — never throws, never clamps to a wrong index', () => {
     const live = [{ id: 'A', route_order: 1 }, { id: 'B', route_order: 2 }];
     const backup = [{ id: 'A', before: 99 }];
     expect(buildRollbackTargetOrder(live, backup).map((r) => r.id)).toEqual(['B', 'A']);
   });
 
-  test('a live row with no route_order (null) sorts last in the current-order baseline', () => {
+  test('a live row with no route_order (null) sorts last in the current-order baseline (the tie-break for two non-backed-up rows)', () => {
     const live = [{ id: 'A', route_order: null }, { id: 'B', route_order: 1 }];
     expect(buildRollbackTargetOrder(live, []).map((r) => r.id)).toEqual(['B', 'A']);
   });
 
   test('multiple restored rows land in ascending "before" order regardless of the backup array\'s own order', () => {
-    const live = [{ id: 'X', route_order: 1 }, { id: 'A', route_order: 2 }, { id: 'B', route_order: 3 }];
-    // Backup array lists B before A, but B's "before" (1) precedes A's (2).
-    const backup = [{ id: 'B', before: 1 }, { id: 'A', before: 2 }];
-    expect(buildRollbackTargetOrder(live, backup).map((r) => r.id)).toEqual(['B', 'A', 'X']);
+    const live = [
+      { id: 'P', route_order: 1 }, { id: 'S', route_order: 2 },
+      { id: 'R', route_order: 3 }, { id: 'Q', route_order: 4 },
+    ];
+    // Backup array lists S before Q, but Q's "before" (2) precedes S's (4).
+    const backup = [{ id: 'S', before: 4, after: 2 }, { id: 'Q', before: 2, after: 4 }];
+    expect(buildRollbackTargetOrder(live, backup).map((r) => r.id)).toEqual(['P', 'Q', 'R', 'S']);
   });
 });
 
@@ -392,15 +418,16 @@ describe('applyRollback — hands each eligible tech-day to the SAME fenced writ
   });
 
   test('an eligible tech-day hands the writer the live snapshot and the restored target order, and counts it restored', async () => {
-    // Live (canonicalized): X=1, A=2, B=3. Backup: A moved 1->2, B moved 2->3.
+    // Original: A=1, B=2, X=3. Cleanup swapped A and B (X untouched): live
+    // is now B=1, A=2, X=3.
     const liveRows = [
-      { id: 'X', route_order: 1 }, { id: 'A', route_order: 2 }, { id: 'B', route_order: 3 },
+      { id: 'B', route_order: 1 }, { id: 'A', route_order: 2 }, { id: 'X', route_order: 3 },
     ];
     const conn = fakeLiveConn({ 't1:2026-10-05': liveRows });
     const writeTechDayOrder = jest.fn(async () => {});
     const rows = [
       { id: 'A', date: '2026-10-05', technician_id: 't1', before: 1, after: 2 },
-      { id: 'B', date: '2026-10-05', technician_id: 't1', before: 2, after: 3 },
+      { id: 'B', date: '2026-10-05', technician_id: 't1', before: 2, after: 1 },
     ];
     const result = await applyRollback(conn, rows, NOW, rollbackDeps({ writeTechDayOrder }));
     expect(writeTechDayOrder).toHaveBeenCalledTimes(1);
@@ -643,9 +670,12 @@ describe('collectEntries', () => {
     expect(entries).toEqual([{ date: '2026-10-05', technicianId: 't1', route_order_changes: [{ id: 'a', before: 2, after: 1 }] }]);
   });
 
-  test('appliedChanges (primary) wins over the ledger even when the ledger read succeeds', async () => {
-    // Same underlying evidence in practice (both are written from the same
-    // in-memory summary), but this proves precedence, not just fallback.
+  test('appliedChanges (primary) wins over the ledger even when the ledger read succeeds — but its canonicalized/source detail is still merged in for reporting', async () => {
+    // Same underlying row evidence in practice (both are written from the
+    // same in-memory summary), but this proves precedence for the actual
+    // route_order_changes AND that the richer canonicalized/source detail
+    // (which primary's own shape never carries) still reaches the printed
+    // plan by (date, technician) match, not just a blind fallback.
     const ledgerReorders = [{ date: '2026-10-05', technician_id: 't1', canonicalized: { reasons: ['gap'], source: 'google' }, route_order_changes: [{ id: 'a', before: 2, after: 1 }] }];
     const db = jest.fn(() => ({ where: () => ({ first: async () => ({ result: { reorders: ledgerReorders } }) }) }));
     const result = {
@@ -654,6 +684,37 @@ describe('collectEntries', () => {
     };
     const { entries, error } = await collectEntries(db, true, result);
     expect(error).toBeNull();
+    expect(entries).toEqual([{
+      date: '2026-10-05', technicianId: 't1', route_order_changes: [{ id: 'a', before: 2, after: 1 }],
+      canonicalized: { reasons: ['gap'], source: 'google' },
+    }]);
+  });
+
+  test('the ledger metadata merge never touches route_order_changes even when the ledger disagrees on the row detail', async () => {
+    const ledgerReorders = [{
+      date: '2026-10-05', technician_id: 't1', source: 'window_constrained',
+      route_order_changes: [{ id: 'z', before: 9, after: 9 }], // deliberately different from primary's own evidence
+    }];
+    const db = jest.fn(() => ({ where: () => ({ first: async () => ({ result: { reorders: ledgerReorders } }) }) }));
+    const result = {
+      status: 'completed', ledgerId: 'ledger-1', applied: 1, skipped: 0, failed: 0,
+      appliedChanges: [{ date: '2026-10-05', technicianId: 't1', changes: [{ id: 'a', before: 2, after: 1 }] }],
+    };
+    const { entries } = await collectEntries(db, true, result);
+    expect(entries).toEqual([{
+      date: '2026-10-05', technicianId: 't1', route_order_changes: [{ id: 'a', before: 2, after: 1 }],
+      source: 'window_constrained',
+    }]);
+  });
+
+  test('no matching ledger entry for a primary day leaves it unmerged, never crashing', async () => {
+    const ledgerReorders = [{ date: '2026-10-09', technician_id: 't9', canonicalized: { reasons: ['gap'], source: 'google' }, route_order_changes: [] }];
+    const db = jest.fn(() => ({ where: () => ({ first: async () => ({ result: { reorders: ledgerReorders } }) }) }));
+    const result = {
+      status: 'completed', ledgerId: 'ledger-1', applied: 1, skipped: 0, failed: 0,
+      appliedChanges: [{ date: '2026-10-05', technicianId: 't1', changes: [{ id: 'a', before: 2, after: 1 }] }],
+    };
+    const { entries } = await collectEntries(db, true, result);
     expect(entries).toEqual([{ date: '2026-10-05', technicianId: 't1', route_order_changes: [{ id: 'a', before: 2, after: 1 }] }]);
   });
 
@@ -804,5 +865,58 @@ describe('buildRunOpts', () => {
   test('dry run keeps `now` — nothing commits, so one consistent preview clock across the whole range is safe', () => {
     const opts = buildRunOpts({ execute: false, dates: ['2026-10-05'], now, runType: 'route_order_cleanup' });
     expect(opts).toEqual({ canonicalizeStale: true, dates: ['2026-10-05'], dryRun: true, runType: 'route_order_cleanup', now });
+  });
+});
+
+describe('outOfHorizonDates', () => {
+  const TODAY = '2026-10-01';
+  const LAST_DATE = '2026-10-31'; // D+30 from an imagined "now" of 10-01
+
+  test('every date strictly inside (today, lastDate] is in-horizon — nothing reported', () => {
+    expect(outOfHorizonDates(['2026-10-02', '2026-10-31'], TODAY, LAST_DATE)).toEqual([]);
+  });
+
+  test('today itself is out of horizon (runRouteReorder never touches today)', () => {
+    expect(outOfHorizonDates(['2026-10-01', '2026-10-05'], TODAY, LAST_DATE)).toEqual(['2026-10-01']);
+  });
+
+  test('a past date is out of horizon', () => {
+    expect(outOfHorizonDates(['2026-09-15'], TODAY, LAST_DATE)).toEqual(['2026-09-15']);
+  });
+
+  test('a date past D+30 is out of horizon', () => {
+    expect(outOfHorizonDates(['2026-11-01', '2026-10-31'], TODAY, LAST_DATE)).toEqual(['2026-11-01']);
+  });
+
+  test('every date out of range is reported, not just the first', () => {
+    expect(outOfHorizonDates(['2026-09-01', '2026-10-15', '2026-12-01'], TODAY, LAST_DATE))
+      .toEqual(['2026-09-01', '2026-12-01']);
+  });
+});
+
+describe('runIsUnhealthy', () => {
+  test('a completed run with no failures is healthy', () => {
+    expect(runIsUnhealthy({ status: 'completed', applied: 2, skipped: 1, failed: 0 })).toBe(false);
+  });
+
+  test('a dry-run plan shape (no failed count at all) is healthy', () => {
+    expect(runIsUnhealthy({ status: 'completed', plan: [] })).toBe(false);
+  });
+
+  test('status "failed" (a fatal error) is unhealthy', () => {
+    expect(runIsUnhealthy({ status: 'failed' })).toBe(true);
+  });
+
+  test('status "completed_with_errors" is unhealthy even with failed: 0 on the summary count', () => {
+    expect(runIsUnhealthy({ status: 'completed_with_errors', applied: 1, skipped: 0, failed: 0 })).toBe(true);
+  });
+
+  test('a nonzero failed count is unhealthy even if status somehow still reads "completed"', () => {
+    expect(runIsUnhealthy({ status: 'completed', applied: 1, skipped: 0, failed: 2 })).toBe(true);
+  });
+
+  test('gate_off / outside_planning_horizon are legitimate no-ops, not unhealthy', () => {
+    expect(runIsUnhealthy({ status: 'gate_off' })).toBe(false);
+    expect(runIsUnhealthy({ status: 'outside_planning_horizon' })).toBe(false);
   });
 });

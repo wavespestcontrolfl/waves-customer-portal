@@ -857,6 +857,20 @@ describe('staleOrderReasons — canonicalization ledger evidence', () => {
     expect(staleOrderReasons([at('a', '09:00', 4), at('b', '11:00', 5)])).toEqual([]);
   });
 
+  // codex pre-push P2: a FUTURE tech-day numbered 4,5,6 with nothing before
+  // it (a leading gap) has no legitimate "resumed prefix" excuse the way
+  // TODAY's already-in-progress day does — only adjacent positions were
+  // ever compared, so this read as a perfectly fine sequence. `futureDay`
+  // is opt-in: the default (false, arrival-route.js's current-day caller)
+  // stays byte-identical to the "resumed prefix is not a gap" case above.
+  test('gap: opts.futureDay also flags a LEADING gap (positions starting above 1, nothing before them) — arrival-route.js\'s resumed-prefix case never passes this', () => {
+    expect(staleOrderReasons([at('a', '09:00', 4), at('b', '11:00', 5)], undefined, { futureDay: true })).toEqual(['gap']);
+    // A normal 1..N future day is still not stale under the new option.
+    expect(staleOrderReasons([at('a', '09:00', 1), at('b', '11:00', 2)], undefined, { futureDay: true })).toEqual([]);
+    // futureDay never MASKS the existing adjacent-gap check either.
+    expect(staleOrderReasons([at('a', '09:00', 1), at('b', '11:00', 3)], undefined, { futureDay: true })).toEqual(['gap']);
+  });
+
   test('gap: a visit group\'s members hold consecutive positions, checked over the ungrouped members', () => {
     const members = [at('g1', '09:00', 1), at('g2', '09:00', 2), at('b', '11:00', 3)];
     expect(staleOrderReasons([members[0], members[2]], members)).toEqual([]);

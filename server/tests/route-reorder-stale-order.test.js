@@ -329,6 +329,31 @@ describe('mode ON — canonicalization', () => {
     });
   });
 
+  test('a leading gap (future day numbered 4,5,6, nothing before) is now recognized as stale — codex pre-push P2', async () => {
+    // Fully numbered, no duplicates, no ADJACENT gap between 4-5-6, and
+    // already chronological — the OLD adjacent-only gap check found nothing
+    // wrong with this at all (it looks exactly like a resumed prefix on a
+    // day already in progress). This is a FUTURE day, which has no such
+    // excuse — canonicalizeStale mode now passes `futureDay: true` and
+    // flags the leading gap.
+    stopsByDate[DAY] = [
+      stop('a', { window_start: '09:00', route_order: 4, lat: null, lng: null }),
+      stop('b', { window_start: '11:00', route_order: 5, lat: null, lng: null }),
+      stop('c', { window_start: '13:00', route_order: 6, lat: null, lng: null }),
+    ];
+    const res = await runRouteReorder({ now: NOW, canonicalizeStale: true });
+    expect(res.applied).toBe(1);
+    expect(RouteOptimizer.optimizeRoute).not.toHaveBeenCalled();
+    expect(trxUpdates).toEqual([
+      { id: 'a', route_order: 1 },
+      { id: 'b', route_order: 2 },
+      { id: 'c', route_order: 3 },
+    ]);
+    expect(ledger().reorders[0]).toMatchObject({
+      source: 'promised_window', canonicalized: { reasons: ['gap'], source: 'promised_window' },
+    });
+  });
+
   test('too few geocoded stops on a stale day still gets the baseline written', async () => {
     stopsByDate[DAY] = [
       stop('a', { window_start: '09:00', route_order: null, lat: null, lng: null }),

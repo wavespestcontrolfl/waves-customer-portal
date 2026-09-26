@@ -409,18 +409,34 @@ function advanceSim(RouteOptimizer, effectiveWindowRange, state, stop, {
  *     non-null values only — two null rows are already 'null', not a second,
  *     coincidental 'duplicate').
  *   - 'gap': a numeric gap in `members`' positions (1, 3 with no 2) — leftover
- *     numbering from a stop that left the day. A resumed prefix (4, 5) is
- *     NOT a gap, and a visit group's members hold consecutive positions as
- *     one grouped row — checked on the ungrouped `members`, exactly as
- *     storedOrderStale's own callers pass the pre-grouping rows.
+ *     numbering from a stop that left the day. A resumed prefix (4, 5, with
+ *     no 1-3 at all) is NOT a gap on a day already in progress — TODAY's
+ *     remaining stops after earlier ones completed and dropped out of the
+ *     set legitimately start above 1 — so `opts.futureDay` (default false)
+ *     must stay off for that caller. A visit group's members hold
+ *     consecutive positions as one grouped row — checked on the ungrouped
+ *     `members`, exactly as storedOrderStale's own callers pass the
+ *     pre-grouping rows.
  *   - 'inversion': a later promised arrival (effectiveWindowRange /
  *     arrivalRange) numbered ahead of an earlier one, read in board order
  *     (currentOrder) over `rows`.
  * `members` defaults to `rows` — callers that already grouped visit_id
  * members into one representative row (arrival-route.js's groupRouteStops)
  * pass the ungrouped originals separately, same as storedOrderStale.
+ * `opts.futureDay` (default false): a FUTURE tech-day (the nightly/cleanup
+ * canonicalization paths — today is never in that band) has no legitimate
+ * "resumed prefix" excuse, so on a FULLY numbered `members` set (no nulls —
+ * a set with a null member already reads as stale via 'null', and its
+ * numbered subset legitimately starts above 1: that gap is the null row's
+ * own eventual position, not a genuinely distinct defect) a first position
+ * greater than 1 is ALSO a 'gap' (a leading gap, e.g. stored positions
+ * 4,5,6 with nothing before them, previously read as a perfectly fine
+ * sequence since only ADJACENT positions were compared). Callers that can
+ * run on today's already-in-progress day (arrival-route.js) must never
+ * pass this — those leading numbers are exactly the legitimate
+ * remaining-stops case.
  */
-function staleOrderReasons(rows, members = rows) {
+function staleOrderReasons(rows, members = rows, { futureDay = false } = {}) {
   const reasons = [];
   const positions = rows.map((row) => row.route_order);
   if (positions.some((p) => p == null)) reasons.push('null');
@@ -432,7 +448,15 @@ function staleOrderReasons(rows, members = rows) {
   // its own 'null' reason above).
   const numbered = members.filter((row) => row.route_order != null)
     .map((row) => Number(row.route_order)).filter(Number.isFinite).sort((a, b) => a - b);
-  if (numbered.some((p, i) => i > 0 && p !== numbered[i - 1] + 1)) reasons.push('gap');
+  // The leading-gap check only applies to a FULLY numbered `members` set —
+  // when some member is null, the numbered subset legitimately starts
+  // above 1 (that null row's own eventual position), already covered by
+  // the 'null' reason above; layering a redundant 'gap' on top of it there
+  // would be a second reason for the same underlying incompleteness, not a
+  // genuinely distinct defect.
+  const leadingGap = futureDay && numbered.length > 0 && numbered.length === members.length
+    && numbered[0] !== 1;
+  if (leadingGap || numbered.some((p, i) => i > 0 && p !== numbered[i - 1] + 1)) reasons.push('gap');
   const starts = currentOrder(rows).map((row) => (row.arrivalRange || effectiveWindowRange(row))?.startMin)
     .filter(Number.isFinite);
   if (starts.some((start, i) => i > 0 && start < starts[i - 1])) reasons.push('inversion');

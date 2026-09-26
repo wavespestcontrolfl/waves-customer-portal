@@ -156,6 +156,31 @@ function buildRunOpts({ execute, dates, now, runType }) {
   };
 }
 
+/**
+ * The dates a --from/--to range would have runRouteReorder's own
+ * boundedDateList SILENTLY DROP: canonicalize mode only ever honors D+1..
+ * D+30 ET (today exclusive, `lastDate` inclusive) — a wider or
+ * today-or-earlier request previously just vanished from the run with no
+ * indication anything was skipped (codex pre-push P2). Checked here so the
+ * script refuses with a clear error instead of quietly doing less than
+ * asked.
+ */
+function outOfHorizonDates(dates, today, lastDate) {
+  return dates.filter((date) => !(date > today && date <= lastDate));
+}
+
+/** True when runRouteReorder's own result signals a problem — a hard
+ *  failure, a degraded run (some tech-day tripped a fail-closed guard), or
+ *  a nonzero failed count — independent of whether the backup/report stage
+ *  afterward succeeds (codex pre-push P2: the script only ever went
+ *  nonzero for a lost backup, never for the run itself reporting
+ *  unhealthy). Both a dry run and an --execute run carry `status`; only
+ *  --execute's result shape also carries the `failed` COUNT (a dry run
+ *  attempts no writes to fail). */
+function runIsUnhealthy(result) {
+  return result.status === 'failed' || result.status === 'completed_with_errors' || (result.failed || 0) > 0;
+}
+
 /** Flatten runRouteReorder's per-tech-day entries (the dry-run `plan` array,
  *  or reorder rows read back from the ledger after --execute) into the
  *  backup file's per-ROW shape: {id, date, technician_id, before, after}.
@@ -250,18 +275,30 @@ function mismatchedIdsForDay(dayRows, liveRows) {
 }
 
 /**
- * The write target for one eligible tech-day: the LIVE order with every
- * backed-up row returned to its backup `before` position, non-backed-up
- * rows keeping their current relative order around them. Live rows are
- * first sorted by their CURRENT route_order (nulls last) to establish that
- * baseline sequence. A row whose `before` is null or not a finite number
- * (e.g. it was freshly appended with no prior position) is left exactly
- * where it already sits in that live sequence — never moved, never
- * dropped. Every row WITH a usable `before` is pulled out and reinserted,
- * in ascending `before` order, at a `before`-1 index clamped into the
- * remaining sequence — an out-of-range `before` (the day has fewer stops
- * now than it did) lands at the nearest valid position instead of
- * throwing.
+ * Reconstructs the day's ORIGINAL (pre-cleanup) order — a pure SORT by each
+ * row's original position, never a splice-by-index (codex pre-push P1: the
+ * previous version treated a backed-up row's `before` as a literal array
+ * position to insert at, and left a NULL-before row wherever it happened to
+ * sit in the CURRENT live order instead of the "no original position —
+ * unpositioned, sorts LAST" that a null route_order means everywhere else
+ * in this codebase, e.g. `COALESCE(route_order, 999)`. Repro: original
+ * A=2,B=3,C=null → cleanup wrote B=1,C=2,A=3 → the old code restored
+ * C,A,B instead of A,B,C).
+ *
+ * Every row's original position is knowable with NO backup-format change:
+ *   - a BACKED-UP row's (one in `dayRows`) original position is its
+ *     recorded `before` — or, `before: null`/non-numeric, "no original
+ *     position", sorting after every numbered one.
+ *   - a NON-backed-up row's original position is simply its CURRENT
+ *     route_order: cleanup never wrote it, so before-the-run and now are
+ *     the same value by definition (and if some OTHER writer moved it
+ *     since the backup, the fenced writer's own fresh re-read/signature
+ *     compare catches that drift at commit time, exactly like any other
+ *     row — this function only has to get the TARGET order right).
+ * Sorting the whole day by that one key reconstructs the exact original
+ * sequence in one pass; ties (including several null-before rows) break on
+ * the CURRENT live order — a stable, deterministic fallback, never a
+ * clamped guess at an array index.
  */
 function buildRollbackTargetOrder(liveRows, dayRows) {
   const liveSorted = [...liveRows].sort((a, b) => {
@@ -269,22 +306,16 @@ function buildRollbackTargetOrder(liveRows, dayRows) {
     const bo = b.route_order == null ? Infinity : Number(b.route_order);
     return ao - bo;
   });
-  const validBeforeById = new Map();
-  for (const row of dayRows) {
-    const before = row.before == null ? NaN : Number(row.before);
-    if (Number.isFinite(before)) validBeforeById.set(row.id, before);
-  }
-  const others = liveSorted.filter((row) => !validBeforeById.has(row.id));
-  const toRestore = liveSorted
-    .filter((row) => validBeforeById.has(row.id))
-    .map((row) => ({ row, before: validBeforeById.get(row.id) }))
-    .sort((a, b) => a.before - b.before);
-  const target = [...others];
-  for (const { row, before } of toRestore) {
-    const idx = Math.max(0, Math.min(before - 1, target.length));
-    target.splice(idx, 0, row);
-  }
-  return target;
+  const beforeById = new Map(dayRows.map((row) => [row.id, row.before]));
+  const originalPosition = (row) => {
+    const raw = beforeById.has(row.id) ? beforeById.get(row.id) : row.route_order;
+    const n = raw == null ? NaN : Number(raw);
+    return Number.isFinite(n) ? n : Infinity;
+  };
+  return liveSorted
+    .map((row, liveIdx) => ({ row, key: originalPosition(row), liveIdx }))
+    .sort((a, b) => (a.key - b.key) || (a.liveIdx - b.liveIdx))
+    .map((entry) => entry.row);
 }
 
 /**
@@ -488,8 +519,10 @@ function totalChanges(entries) {
  *  evidence is PRIMARY and is what the backup is built from; the ledger row
  *  is read only as a best-effort CROSS-CHECK (it is written from the exact
  *  same in-memory evidence, so a mismatch here would mean something is
- *  actually wrong, not a normal race) and, when it agrees, supplies the
- *  richer per-day reasons/source detail the printed plan shows. A ledger
+ *  actually wrong, not a normal race) and, for every (date, technician) it
+ *  also recorded, supplies the richer canonicalized-reasons/source detail
+ *  the printed plan shows — primary's own row_order_changes are never
+ *  replaced by this merge, only the reporting-only fields. A ledger
  *  insert failure, a read-back failure, or a null ledgerId (codex pre-push
  *  P1: previously read as "nothing applied" and silently produced an empty
  *  backup) never blocks the backup as long as `appliedChanges` has it —
@@ -516,10 +549,28 @@ async function collectEntries(db, execute, result) {
   if (primary.length > 0 && ledgerEntries.length > 0 && totalChanges(primary) !== totalChanges(ledgerEntries)) {
     console.error(`Warning: the run's own result reports ${totalChanges(primary)} row change(s) but the ledger reports ${totalChanges(ledgerEntries)} — using the run's own result for the backup.`);
   }
-  // Primary wins whenever it has anything; the ledger is used only when
-  // primary is empty (an older/unexpected result shape) and the ledger
-  // still has real evidence.
-  const entries = primary.length > 0 ? primary : ledgerEntries;
+  // Primary wins whenever it has anything (its route_order_changes are the
+  // backup's row evidence, never overwritten) — but primary's own shape
+  // carries no `canonicalized`/`source` detail, only the raw changes, so
+  // printPlan would otherwise report every day as a bare "reordered
+  // (source=unknown)" even though the ledger recorded richer per-day
+  // evidence for the SAME run. Merge that reporting-only metadata in by
+  // (date, technician) match; the ledger is used only when primary is
+  // empty (an older/unexpected result shape) and it still has real
+  // evidence.
+  const ledgerKey = (e) => `${e.date}:${e.technicianId ?? e.technician_id}`;
+  const ledgerByKey = new Map(ledgerEntries.map((e) => [ledgerKey(e), e]));
+  const entries = primary.length > 0
+    ? primary.map((entry) => {
+      const match = ledgerByKey.get(ledgerKey(entry));
+      if (!match) return entry;
+      return {
+        ...entry,
+        ...(match.canonicalized !== undefined ? { canonicalized: match.canonicalized } : {}),
+        ...(match.source !== undefined ? { source: match.source } : {}),
+      };
+    })
+    : ledgerEntries;
   if ((result.applied || 0) > 0 && !entries.some(hasChanges)) {
     return {
       entries: [],
@@ -634,6 +685,18 @@ async function main() {
     process.exit(1);
   }
 
+  // runRouteReorder's canonicalize mode only ever honors D+1..D+30 ET —
+  // anything outside that (today/past, or past D+30) is silently dropped
+  // BY THE WRITER, not rejected; refuse it here instead of quietly running
+  // a narrower range than what was asked for.
+  const horizonToday = etDateString(now);
+  const horizonLastDate = etDateString(addETDays(now, 30));
+  const outOfHorizon = outOfHorizonDates(range.dates, horizonToday, horizonLastDate);
+  if (outOfHorizon.length) {
+    console.error(`--from/--to includes date(s) outside the runnable D+1..${horizonLastDate} ET horizon (would be silently dropped otherwise): ${outOfHorizon.join(', ')}.`);
+    process.exit(1);
+  }
+
   console.log(`${EXECUTE ? 'EXECUTING' : 'DRY RUN'} — route-order cleanup ${from}..${to} (${range.dates.length} day${range.dates.length === 1 ? '' : 's'})\n`);
 
   const { runRouteReorder } = require('../server/services/route-reorder');
@@ -661,6 +724,17 @@ async function main() {
     ? `status=${result.status} applied=${result.applied} skipped=${result.skipped} failed=${result.failed} ledger=${result.ledgerId ?? 'none'}\n`
     : `status=${result.status}\n`);
 
+  // The run itself may report a problem independent of whether the
+  // backup/report stage below succeeds — a fatal error, a fail-closed
+  // guard tripping on some tech-day (REMINDER_STATUS_UNKNOWN), or any other
+  // path that leaves the result degraded. Checked either way (dry run or
+  // --execute): silently exiting 0 here previously left an operator with no
+  // signal that something needs attention (codex pre-push P2).
+  const unhealthy = runIsUnhealthy(result);
+  if (unhealthy) {
+    console.error(`Run reported an unhealthy result (status=${result.status}${result.failed ? `, failed=${result.failed}` : ''}) — see the log above for the failed tech-day(s)' reasons.`);
+  }
+
   // The writes (if any) have ALREADY COMMITTED by this point — everything
   // from here is reporting/backup only, and collectEntries/reportAndBackup
   // never let a failure in it look like the writes themselves were lost.
@@ -671,6 +745,7 @@ async function main() {
   }
 
   await db.destroy();
+  if (unhealthy) process.exitCode = 1;
   // A --execute run's writes already committed by this point — a lost
   // backup (ledger unreadable, or the backup file itself failed to write)
   // must never exit 0 (codex pre-push P1).
@@ -694,4 +769,5 @@ module.exports = {
   buildDateRange, buildBackupRows, applyRollback, parseLedgerResult, recoveryInstruction, collectEntries, reportAndBackup,
   groupRowsByTechDay, readLiveTechDay, mismatchedIdsForDay, buildRollbackTargetOrder, rollbackWindowConflict,
   previewRollback, printRollbackPlan, printRollbackResult, buildRunOpts, writeBackupFile,
+  outOfHorizonDates, runIsUnhealthy,
 };

@@ -1335,7 +1335,13 @@ async function runRouteReorder(opts = {}, conn = db) {
           // whatever coordinates or freeze state this day turns out to have —
           // the promised-window baseline needs neither Google nor an
           // unfrozen clock to COMPUTE, only to WRITE.
-          const staleReasons = canonicalizeStaleEnabled ? staleOrderReasons(techStops) : [];
+          // futureDay: true — this loop only ever runs on future dates
+          // (today is never in the nightly band nor a valid
+          // route-order-cleanup.js date), so a leading gap (stored
+          // positions starting at 4 with nothing before them) is ALSO
+          // stale here, unlike arrival-route.js's current-day resumed-
+          // prefix caller, which never passes this (codex pre-push P2).
+          const staleReasons = canonicalizeStaleEnabled ? staleOrderReasons(techStops, techStops, { futureDay: true }) : [];
           // Only attempted when unfrozen (freeze wins even under repairEnabled
           // — mirrors the per-tech freeze check below) and under the same
           // per-run apply cap every other write respects.
