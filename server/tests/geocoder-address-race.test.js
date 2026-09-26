@@ -71,6 +71,23 @@ describe('customer address geocode completion order', () => {
     expect(refreshScheduleQualityAfterChange).toHaveBeenCalledWith({ customerIds: [customer.id] });
   });
 
+  it('collects a successful coordinate commit for a caller-coalesced refresh', async () => {
+    const customer = { id: 'customer-collected', address_line1: '300 Synthetic Race Lane',
+      address_line2: null, city: 'Bradenton', state: 'FL', zip: '34211', latitude: null, longitude: null };
+    const property = { customer_id: customer.id, is_primary: true, active: true, latitude: null, longitude: null };
+    installDb(customer, property);
+    global.fetch = jest.fn().mockResolvedValueOnce(geocodeResponse({ lat: 27.6, lng: -82.5 }));
+    const scheduleQualityCustomerIds = new Set();
+
+    await expect(regeocodeCustomerAddressGuarded(customer.id, { scheduleQualityCustomerIds }))
+      .resolves.toEqual({ lat: 27.6, lng: -82.5 });
+
+    expect(scheduleQualityCustomerIds).toEqual(new Set([customer.id]));
+    expect(refreshScheduleQualityAfterChange).not.toHaveBeenCalled();
+    expect(customer).toMatchObject({ latitude: 27.6, longitude: -82.5 });
+    expect(property).toMatchObject({ latitude: 27.6, longitude: -82.5 });
+  });
+
   it('leaves coordinates empty when the address changes while its geocode is pending', async () => {
     const customer = { id: 'customer-pending', address_line1: '300 Synthetic Pending Lane',
       address_line2: null, city: 'Bradenton', state: 'FL', zip: '34211', latitude: null, longitude: null };
@@ -79,7 +96,8 @@ describe('customer address geocode completion order', () => {
     const response = deferred();
     const started = deferred();
     global.fetch = jest.fn(() => { started.resolve(); return response.promise; });
-    const pending = regeocodeCustomerAddressGuarded(customer.id);
+    const scheduleQualityCustomerIds = new Set();
+    const pending = regeocodeCustomerAddressGuarded(customer.id, { scheduleQualityCustomerIds });
     await started.promise;
     customer.address_line1 = '400 Synthetic Pending Lane';
     response.resolve(geocodeResponse({ lat: 27.4, lng: -82.3 }));
@@ -87,6 +105,7 @@ describe('customer address geocode completion order', () => {
     expect(await pending).toBeNull();
     expect(customer.latitude).toBeNull();
     expect(property.latitude).toBeNull();
+    expect(scheduleQualityCustomerIds).toEqual(new Set());
     expect(refreshScheduleQualityAfterChange).not.toHaveBeenCalled();
   });
 });

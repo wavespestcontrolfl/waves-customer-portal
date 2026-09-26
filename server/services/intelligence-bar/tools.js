@@ -1855,6 +1855,8 @@ async function bulkUpdateCustomers(customerIds, updates) {
   // saved-method rails (already churned, customer-level billing already
   // off) — reported separately from churnWoundDownCount below.
   let railsRepairedCount = 0;
+  const geocodedCustomerIds = new Set();
+  let qualityRefreshTimer = null;
   for (const customerId of customerIds) {
     const before = await db('customers').where('id', customerId).first();
     if (!before) {
@@ -1980,10 +1982,23 @@ async function bulkUpdateCustomers(customerIds, updates) {
         .catch((err) => logger.error(`[ib] bulk DOI re-send failed: ${err.code || err.name || 'resend_failed'}`));
     }
     if (addressSubmitted) {
-      // lat/lng cleared in-transaction (gh-r46) — guarded re-geocode also
-      // mirrors the primary property and refreshes route-quality warnings.
-      void require('../geocoder').regeocodeCustomerAddressGuarded(customerId)
-        .catch(() => {});
+      // Coalesce coordinate commits for one second from the first success.
+      // A stalled sibling or later row error cannot hold successful IDs back;
+      // a late completion starts a fresh window. The edit response stays detached.
+      void require('../geocoder').regeocodeCustomerAddressGuarded(
+        customerId,
+        { scheduleQualityCustomerIds: geocodedCustomerIds },
+      ).then(() => {
+        if (qualityRefreshTimer || !geocodedCustomerIds.size) return;
+        qualityRefreshTimer = setTimeout(() => {
+          qualityRefreshTimer = null;
+          const customerIds = [...geocodedCustomerIds];
+          geocodedCustomerIds.clear();
+          void require('../scheduling/quality-after-change').refreshScheduleQualityAfterChange({ customerIds })
+            .catch((err) => logger.error(`[ib] deferred bulk route-quality refresh failed: ${err.code || err.name || 'refresh_failed'}`));
+        }, 1000);
+        qualityRefreshTimer.unref();
+      }).catch(() => null);
     }
     if (rowLaneStamp) perRowLaneStampIds.push(customerId);
     // Reaching here means the per-row transaction committed — a blocked
