@@ -547,6 +547,9 @@ postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
     expect(out.body?.invoiceId).toBe(siblingId);
     expect(out.body?.completionSmsType).toMatch(/with_invoice$/);
     expect(await addonsAlert(f)).toBeUndefined();
+    // Back-linked to this completion record like every adoption path, so
+    // its payment reads as the visit's completion invoice (GitHub r4 P1).
+    expect((await trx('invoices').where({ id: siblingId }).first('service_record_id')).service_record_id).toBe(out.body.serviceRecordId);
     expect((await liveInvoices(f)).map((i) => i.id).sort()).toEqual([f.invoiceId, siblingId].sort());
   });
 
@@ -856,6 +859,25 @@ postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
     expect(retry).toMatchObject({ status: 200 });
     expect(Number((await liveInvoices(f))[0].total)).toBe(ADDON);
     expect(await addonsAlert(f)).toBeUndefined();
+  });
+
+  test('a paid office invoice that billed the covered base and every add-on flags only the base overpayment — never a second bill for the add-ons (GitHub r4 P1)', async () => {
+    const f = await coveredVisit({ invoiceLines: (x) => [baseLine(x), addonLine(x)], invoiceStatus: 'paid' });
+    const out = await complete(f);
+    expect(out).toMatchObject({ status: 200 });
+    expect((await liveInvoices(f)).map((i) => i.id)).toEqual([f.invoiceId]);
+    expect(await addonsAlert(f)).toBeUndefined();
+    expect(await trx('notifications').where({ recipient_type: 'admin' })
+      .whereRaw("metadata->>'dedupeKey' = ?", [`annual_prepay_covered_base_paid:${f.serviceId}`]).first()).toBeTruthy();
+  });
+
+  test('a base-only invoice whose payment is in flight leaves the add-ons with the office, not unbilled and unflagged (GitHub r4 P1)', async () => {
+    const f = await coveredVisit({ invoiceLines: (x) => [baseLine(x)], invoiceStatus: 'processing' });
+    const out = await complete(f, { sendCompletionSms: true });
+    expect(out).toMatchObject({ status: 200 });
+    expect((await liveInvoices(f)).map((i) => i.id)).toEqual([f.invoiceId]);
+    expect(await addonsAlert(f)).toBeTruthy();
+    expect(PAID_TEXTS).not.toContain(out.body?.completionSmsType);
   });
 
   describe('dark (GATE_ANNUAL_PREPAY_ADDON_BILLING off): today\'s behavior', () => {

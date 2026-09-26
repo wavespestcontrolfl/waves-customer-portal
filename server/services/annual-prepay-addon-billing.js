@@ -49,6 +49,8 @@ function parseNotes(value) {
 }
 
 const roundCents = (n) => Math.round(n * 100) / 100;
+// How an invoice is named in an office alert.
+const invoiceLabel = (invoice) => invoice?.invoice_number || invoice?.id || 'unknown';
 // Money is compared in integer cents, never as float dollars.
 const toCents = (n) => Math.round((Number(n) || 0) * 100);
 
@@ -125,9 +127,15 @@ function classifyCoveredVisitInvoice(invoice, addons) {
 // stale price, or a remainder the builder cannot vouch for (a visit-wide
 // discount) is not, and must never stand in for it.
 function invoiceBillsExactExtras(invoice, addons, extras) {
+  return classifyCoveredVisitInvoice(invoice, addons).billsOnlyAddons && invoiceCoversExtras(invoice, addons, extras);
+}
+
+// Do an invoice's add-on lines bill every priced add-on at the canonical
+// net — whatever else the invoice carries (a paid office invoice may also
+// have charged the covered base)?
+function invoiceCoversExtras(invoice, addons, extras) {
   // An add-on awaiting its price is owed too: nothing bills all of them yet.
   if (!extras || extras.ambiguous || !extras.lines.length || addons.unpriced) return false;
-  if (!classifyCoveredVisitInvoice(invoice, addons).billsOnlyAddons) return false;
   const InvoiceService = require('./invoice');
   const onAddons = (li) => addons.clientIds.has(li.client_id) || addons.clientIds.has(li.discount_for);
   const invoiceAddonLines = InvoiceService._parseInvoiceLineItems(invoice?.line_items).filter(onAddons);
@@ -311,7 +319,15 @@ class CoveredVisitCloseout {
         serviceDate: this.ctx.serviceDate, coveredInvoiceId, quietBackfill: this.ctx.quietBackfill,
       });
       if (minted.conflict) {
-        return this.alert(`invoice ${minted.conflict.invoice_number || minted.conflict.id}, saved on this visit by another writer, does not bill exactly its add-ons`, { ...meta, conflictInvoiceId: minted.conflict.id, addonTotal: extras.total });
+        return this.alert(`invoice ${invoiceLabel(minted.conflict)}, saved on this visit by another writer, does not bill exactly its add-ons`, { ...meta, conflictInvoiceId: minted.conflict.id, addonTotal: extras.total });
+      }
+      // An adopted sibling may carry only its visit link: tie it to this
+      // completion record like every other adoption path, or its payment
+      // never reads as this visit's completion invoice (review enrollment).
+      if (minted.reused && !minted.invoice.service_record_id && this.record?.id) {
+        await db('invoices').where({ id: minted.invoice.id }).whereNull('service_record_id')
+          .update({ service_record_id: this.record.id, updated_at: new Date() });
+        minted.invoice.service_record_id = this.record.id;
       }
       const { invoice, settled } = await this.settleIfNothingDue(minted.invoice);
       this.invoice = invoice;
@@ -386,7 +402,7 @@ class CoveredVisitCloseout {
     if (!read) return;
     const repriced = voidedInvoiceRepricing(voidedInvoice, read.addons, read.extras, svc.id);
     if (repriced) {
-      await this.alert(`invoice ${voidedInvoice.invoice_number || voidedInvoice.id} priced the add-ons differently (it billed $${repriced.voidedAddonTotal.toFixed(2)}${repriced.otherCredit ? ' and carried another credit' : ''}; the visit prices them at $${read.extras.total.toFixed(2)})`, { ...meta, addonTotal: read.extras.total, voidedAddonTotal: repriced.voidedAddonTotal });
+      await this.alert(`invoice ${invoiceLabel(voidedInvoice)} priced the add-ons differently (it billed $${repriced.voidedAddonTotal.toFixed(2)}${repriced.otherCredit ? ' and carried another credit' : ''}; the visit prices them at $${read.extras.total.toFixed(2)})`, { ...meta, addonTotal: read.extras.total, voidedAddonTotal: repriced.voidedAddonTotal });
       return;
     }
     await this.mint(read, { meta });
@@ -425,7 +441,12 @@ class CoveredVisitCloseout {
       if (['has_add_ons', 'has_applied_credit', 'has_deposit_credit'].includes(settleRes.reason)) {
         return await this.voidMixedInvoice(invoiceLines);
       }
-      // else (payer_billed / already_settled / processing): normal handling.
+      // Left for normal handling (a payment in flight, a payer-billed
+      // invoice…): nothing here bills the add-ons beside it, so the office
+      // does once its money resolves.
+      if (addons.owed) {
+        await this.alert(`invoice ${invoiceLabel(this.invoice)} on the visit is ${this.invoice.status} (${settleRes.reason}); bill them once its payment resolves`, { invoiceId: this.invoice.id });
+      }
       return undefined;
     } catch (settleErr) {
       logger.warn(`[dispatch] annual-prepay covered visit ${svc.id}: could not settle pre-existing invoice ${this.invoice?.id}: ${settleErr.message}`);
@@ -433,7 +454,7 @@ class CoveredVisitCloseout {
       // change): the invoice stays for normal handling, and nothing here
       // billed the visit's own add-ons — the office decides.
       if (!this.lookupError && addons?.owed) {
-        await this.alert(`invoice ${this.invoice?.invoice_number || this.invoice?.id} could not be reconciled with the annual prepay: ${String(settleErr.message).slice(0, 160)}`, { invoiceId: this.invoice?.id || null });
+        await this.alert(`invoice ${invoiceLabel(this.invoice)} could not be reconciled with the annual prepay: ${String(settleErr.message).slice(0, 160)}`, { invoiceId: this.invoice?.id || null });
       }
       return undefined;
     }
@@ -461,7 +482,7 @@ class CoveredVisitCloseout {
       logger.warn(`[dispatch] annual-prepay add-on lines unreadable for visit ${this.svc.id}: ${err.message}`);
     }
     if (!invoiceBillsExactExtras(this.invoice, addons, extras)) {
-      await this.alert(`invoice ${this.invoice.invoice_number || this.invoice.id} bills only some of the add-ons or prices them differently${extras && !extras.ambiguous ? ` (the visit prices them at $${extras.total.toFixed(2)})` : ''}`, { invoiceId: this.invoice.id, addonTotal: extras?.total ?? null });
+      await this.alert(`invoice ${invoiceLabel(this.invoice)} bills only some of the add-ons or prices them differently${extras && !extras.ambiguous ? ` (the visit prices them at $${extras.total.toFixed(2)})` : ''}`, { invoiceId: this.invoice.id, addonTotal: extras?.total ?? null });
     }
   }
 
@@ -477,7 +498,7 @@ class CoveredVisitCloseout {
         await this.ctx.mergeRecordNotesKeys(this.record.id, { annualPrepayVoidedInvoiceId: voidedInvoiceId });
       } catch (markErr) {
         logger.error(`[dispatch] annual-prepay void marker write FAILED for visit ${svc.id} (invoice ${voidedInvoiceId}): ${markErr.message}`);
-        return this.alert(`invoice ${voidedInvoice.invoice_number || voidedInvoiceId} bills the covered visit together with other charges and was left as is`, { invoiceId: voidedInvoiceId });
+        return this.alert(`invoice ${invoiceLabel(voidedInvoice)} bills the covered visit together with other charges and was left as is`, { invoiceId: voidedInvoiceId });
       }
     }
     try {
@@ -527,7 +548,7 @@ class CoveredVisitCloseout {
         logger.error(`[dispatch] annual-prepay add-on rows unreadable for visit ${svc.id} (refunded invoice ${terminal.id}): ${lookupErr.message}`);
       }
       if (addons?.owed) {
-        await this.alert(`invoice ${terminal.invoice_number || terminal.id} on the visit is ${terminal.status}; bill them once that refund is final`, { terminalInvoiceId: terminal.id });
+        await this.alert(`invoice ${invoiceLabel(terminal)} on the visit is ${terminal.status}; bill them once that refund is final`, { terminalInvoiceId: terminal.id });
       }
       return;
     }
@@ -576,8 +597,30 @@ class CoveredVisitCloseout {
       if (!addons) this.lookupError = lookupErr;
       logger.warn(`[dispatch] annual-prepay add-ons unreadable against settled invoice ${this.invoice.id} for visit ${svc.id}: ${lookupErr.message}`);
     }
-    if (addons?.owed && !invoiceBillsExactExtras(this.invoice, addons, extras)) {
-      await this.alert(`invoice ${this.invoice.invoice_number || this.invoice.id} is already ${status} but does not bill exactly the visit's add-ons${extras && !extras.ambiguous ? ` (the visit prices them at $${extras.total.toFixed(2)})` : ''} — check what is still owed`, { invoiceId: this.invoice.id, addonTotal: extras?.total ?? null });
+    if (!addons?.owed) return;
+    if (!invoiceCoversExtras(this.invoice, addons, extras)) {
+      await this.alert(`invoice ${invoiceLabel(this.invoice)} is already ${status} but does not bill exactly the visit's add-ons${extras && !extras.ambiguous ? ` (the visit prices them at $${extras.total.toFixed(2)})` : ''} — check what is still owed`, { invoiceId: this.invoice.id, addonTotal: extras?.total ?? null });
+      return;
+    }
+    // The add-ons are paid. If it also charged the covered base (or other
+    // lines), that overpayment is the office's to reconcile — never a
+    // second bill for the add-ons.
+    if (!classifyCoveredVisitInvoice(this.invoice, addons).billsOnlyAddons) await this.flagCoveredBasePaid(status);
+  }
+
+  async flagCoveredBasePaid(status) {
+    const { svc } = this;
+    try {
+      const NotificationService = require('./notification-service');
+      const bell = await NotificationService.notifyAdmin('billing', 'Annual-prepay visit invoice paid with the covered visit on it — reconcile',
+        `Completing ${svc.service_type} for customer ${svc.customer_id}: invoice ${invoiceLabel(this.invoice)} is already ${status} and billed the add-ons, but it also charged work the annual prepay covers. Refund or credit the covered part; the add-ons need no second bill.`,
+        { link: `/admin/customers/${svc.customer_id}`, bell: true, dedupeKey: `annual_prepay_covered_base_paid:${svc.id}`,
+          refreshOnDedupe: true,
+          metadata: { customerId: svc.customer_id, scheduledServiceId: svc.id, invoiceId: this.invoice.id } });
+      if (!bell) throw new Error('the office notification was not recorded');
+    } catch (bellErr) {
+      this.alertError = this.alertError || bellErr;
+      logger.error(`[dispatch] annual-prepay covered-base overpayment alert FAILED for ${svc.id}: ${bellErr.message}`);
     }
   }
 
