@@ -40,15 +40,32 @@ describe('rankRelatedPosts — ranking', () => {
     expect(out.map((r) => r.path)).toEqual(['/termite/swarmer-season/', '/lawn-care/spring-fertilizer-timing/']);
   });
 
-  test('keyword-token overlap ranks above a same-city-only match', () => {
+  test('a same-city candidate with ZERO entity/keyword overlap is dropped — city alone never admits a candidate', () => {
+    // Codex #4984 r2 P1: this list is enforced by a hard link-count gate, so
+    // a city-only false positive could force an unrelated link into the
+    // draft. "Sarasota Mosquito Season" shares no entity or keyword tokens
+    // with a chinch-bug/lawn-care target — same city is not enough.
     const target = { keyword: 'chinch bug damage st augustine grass', service: null, city: 'Sarasota' };
     const candidates = [
       candidate({ id: 'a', title: 'Chinch Bug Damage Identification', path: '/lawn-care/chinch-bug-damage/', keyword: 'chinch bug damage' }),
       candidate({ id: 'b', title: 'Sarasota Mosquito Season', path: '/mosquito/sarasota-season/', keyword: 'mosquito season', city: 'Sarasota' }),
     ];
     const out = rankRelatedPosts(target, candidates);
-    expect(out[0].path).toBe('/lawn-care/chinch-bug-damage/');
-    expect(out[1].path).toBe('/mosquito/sarasota-season/');
+    expect(out.map((r) => r.path)).toEqual(['/lawn-care/chinch-bug-damage/']);
+  });
+
+  test('city is a TIE-BREAKER between two ALREADY topically-related candidates, never the sole admission reason', () => {
+    const target = { keyword: 'termite swarmers', service: 'termite', city: 'Bradenton' };
+    const candidates = [
+      candidate({ id: 'a', title: 'Termite Swarmer Season Elsewhere', path: '/termite/swarmer-season/', service: 'termite', keyword: 'termite swarmers' }),
+      candidate({ id: 'b', title: 'Termite Swarmer Season in Bradenton', path: '/termite/swarmer-season-bradenton/', service: 'termite', keyword: 'termite swarmers', city: 'Bradenton' }),
+    ];
+    const out = rankRelatedPosts(target, candidates);
+    // Both share entity + identical keyword overlap; b additionally matches
+    // the target's city, so it ranks first — the city nudge only breaks a
+    // tie between candidates that already earned inclusion on their own.
+    expect(out[0].path).toBe('/termite/swarmer-season-bradenton/');
+    expect(out[1].path).toBe('/termite/swarmer-season/');
   });
 
   test('a candidate sharing neither entity nor keyword nor city is dropped, never force-filled', () => {

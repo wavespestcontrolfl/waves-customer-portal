@@ -115,7 +115,12 @@ function isEligibleCandidate(c, { excludeId, excludePath, domains }) {
 
 // Ranking score for one eligible candidate: pest/service entity match first
 // (binary, outranks everything), then keyword-token overlap (capped), then
-// a small same-city nudge as a tie-breaker.
+// a small same-city nudge — but ONLY as a tie-breaker between candidates
+// that are already topically related. City alone must never admit a
+// candidate: a same-city post sharing neither entity nor keyword overlap
+// with the target is not "related" just because it's local (Codex #4984
+// r2 P1 — this list is now enforced by a hard link-count gate, so a
+// city-only false positive could force an unrelated link into the draft).
 function scoreCandidate(c, { targetEntities, targetTokens, targetCity }) {
   const candidateEntities = entityCandidates([c.service, c.category]);
   let entityScore = 0;
@@ -128,7 +133,9 @@ function scoreCandidate(c, { targetEntities, targetTokens, targetCity }) {
   for (const t of targetTokens) if (candidateTokens.has(t)) overlap += 1;
   const keywordScore = Math.min(overlap * 10, 60);
 
-  const cityScore = (targetCity && c.city && String(c.city).trim().toLowerCase() === targetCity) ? 5 : 0;
+  const topicallyRelated = entityScore > 0 || keywordScore > 0;
+  const sameCity = targetCity && c.city && String(c.city).trim().toLowerCase() === targetCity;
+  const cityScore = (topicallyRelated && sameCity) ? 5 : 0;
 
   return entityScore + keywordScore + cityScore;
 }

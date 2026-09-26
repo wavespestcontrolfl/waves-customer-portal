@@ -495,6 +495,40 @@ describe('supporting-blog: hub link / cities / faq / voice', () => {
       expect(result.reason).toMatch(/linked 2 so far/);
     });
 
+    // Codex round-2 P1 on #4984: a naive body.includes(path) substring search
+    // would have let a code-fenced example, an HTML comment, or an image src
+    // satisfy the requirement without a real clickable anchor. This pins the
+    // fix (reused content-guardrails destination extraction).
+    test('a mention in a code fence, HTML comment, or image src does NOT count as a link', () => {
+      const body = [
+        'Prose about termites here.',
+        '',
+        '```',
+        '[A](/termite/a/)',
+        '```',
+        '',
+        '<!-- [B](/termite/b/) -->',
+        '',
+        '![alt text](/termite/c/)',
+        '',
+        'Plain mention of /termite/d/ with no markdown link syntax at all.',
+      ].join('\n');
+      const result = checkRelatedPostsLinked({ body }, { voice_constraints: { related_posts: relatedPosts } });
+      expect(result.ok).toBe(false);
+      expect(result.reason).toMatch(/linked 0 so far/);
+    });
+
+    test('a REAL markdown link to a candidate counts even alongside a fenced/commented mention of ANOTHER candidate', () => {
+      const body = [
+        'See [A](/termite/a/), [B](/termite/b/), and [C](/termite/c/) for background.',
+        '```',
+        '[D](/termite/d/)',
+        '```',
+      ].join('\n');
+      const result = checkRelatedPostsLinked({ body }, { voice_constraints: { related_posts: relatedPosts } });
+      expect(result.ok).toBe(true);
+    });
+
     test('a full evaluate() run: fewer than required HARD-FAILS (ok:false) but never moves total_score', () => {
       const passingBody = 'Termite swarmers show up after rain in Bradenton and Sarasota. See our [pest control services](/pest-control-services/) for treatment options.\n\nFAQ\n- Do swarmers bite?\n- No.';
       const baseline = evaluate(

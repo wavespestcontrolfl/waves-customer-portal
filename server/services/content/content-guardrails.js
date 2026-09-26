@@ -6654,6 +6654,15 @@ module.exports = {
   SAFE_MDX_COMPONENTS,
   ALLOWED_INTERNAL_LINKS,
   isKnownGoodInternalRoute,
+  // The internal-route gate's own destination extraction + normalization —
+  // consumed by content-quality-gate's related_posts_linked check so it
+  // counts REAL rendered link destinations (masking non-rendered markdown
+  // and expression-string prose first) instead of a naive body substring
+  // search, which a comment, an image src, or a longer URL sharing a prefix
+  // could satisfy without an actual clickable anchor (Codex #4984 r2 P1).
+  collectInternalDestinations,
+  blankExpressionStringLiterals,
+  normalizeInternalPath,
   // deterministic pre-gate repair for unambiguous citation artifacts —
   // consumed by brief-driven-tools emit_draft; kept here beside
   // CITATION_RESIDUE_RE so stripper and detector can never drift.

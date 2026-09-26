@@ -34,7 +34,16 @@
 
 const { THRESHOLDS } = require('./scoring-config');
 const { evaluateTitleMetaSpam, renderMetaTokens, PHONE_TOKEN_RE, CITY_PHONE_TOKEN_RE, SALESY_META_RE, endsWithSoftCta, metaHasSalesCopy, BARE_PHONE_DIGITS_RE } = require('./title-meta-spam-gate');
-const { isFaqBlockedService } = require('./content-guardrails');
+const {
+  isFaqBlockedService,
+  // Reused for related_posts_linked so it counts REAL rendered link
+  // destinations (comments/code fences/attribute display text masked first)
+  // instead of a naive body substring search (Codex #4984 r2 P1).
+  collectInternalDestinations,
+  blankExpressionStringLiterals,
+  blankNonRenderedMarkdown,
+  normalizeInternalPath,
+} = require('./content-guardrails');
 
 // Compute the achievable maximum score PER PAGE TYPE so the pass
 // threshold is always a reachable fraction of that page type's own
@@ -1040,24 +1049,38 @@ function checkFaqSectionPresent(draft, brief) {
 const RELATED_POSTS_LINK_MINIMUM = 3;
 
 // HARD check (see PAGE_TYPE_CHECKS['supporting-blog'] above, weight 0 —
-// blocks without moving score/threshold math): counts DISTINCT links to the
-// brief's voice_constraints.related_posts allowance (related-posts.js) —
-// the writer prompt asks for at least min(3, N) natural in-text links to
-// them. Plain substring match on each candidate's path, same style as
-// checkHubLinkPresent's body.includes(h); a post linked twice (or via two
-// different anchors) still counts once, since the loop below visits each
-// RELATED POST once, not each occurrence in the body. No related_posts on
-// the brief (older/non-blog briefs, or a topic with no candidates) passes
-// trivially — not applicable, not a miss.
+// blocks without moving score/threshold math): counts DISTINCT REAL link
+// destinations against the brief's voice_constraints.related_posts
+// allowance (related-posts.js) — the writer prompt asks for at least
+// min(3, N) natural in-text links to them.
+//
+// Reuses content-guardrails' own internal-route destination extraction
+// (collectInternalDestinations, over text with non-rendered markdown and
+// expression-string prose masked first — the exact pipeline
+// internalRouteFinding runs) rather than a naive body.includes(path) —
+// which a code-fenced example, an HTML comment, an image src, or a longer
+// URL merely sharing a path prefix could satisfy without a real clickable
+// anchor (Codex #4984 r2 P1). A post linked twice, or via two different
+// anchors, still counts once — the Set below dedupes by normalized path.
+// No related_posts on the brief (older/non-blog briefs, or a topic with no
+// candidates) passes trivially — not applicable, not a miss.
 function checkRelatedPostsLinked(draft, brief) {
   const related = Array.isArray(brief?.voice_constraints?.related_posts) ? brief.voice_constraints.related_posts : [];
   if (!related.length) return { ok: true, reason: 'no_related_posts_on_brief' };
   const body = String(draft.body || '');
+  const rendered = blankExpressionStringLiterals(blankNonRenderedMarkdown(body), { attrValues: false });
+  // collectInternalDestinations' destination pattern matches ANY "](/path)"
+  // or src="/path" — a real destination for the dead-route gate's purposes,
+  // but an <img>/![alt](path) is never a CLICKABLE anchor a reader can
+  // follow to the related post, so it must not satisfy this check (Codex
+  // #4984 r2 P1). Blank image syntax first so only true anchors remain.
+  const withoutImages = rendered.replace(/!\[[^\]]*\]\([^)]*\)/g, '').replace(/<img\b[^>]*>/gi, '');
+  const linkedPaths = new Set(collectInternalDestinations(withoutImages).map((d) => d.norm));
   let linked = 0;
   const unlinked = [];
   for (const post of related) {
-    const p = String(post?.path || '').trim();
-    if (p && body.includes(p)) linked++;
+    const norm = normalizeInternalPath(post?.path);
+    if (norm && linkedPaths.has(norm)) linked++;
     else unlinked.push(post);
   }
   const required = Math.min(RELATED_POSTS_LINK_MINIMUM, related.length);
