@@ -14,13 +14,15 @@ const mockLockCalls = [];
 jest.mock('../models/db', () => {
   const tableChain = (table) => {
     const chain = {
-      where: jest.fn(() => chain),
+      where: jest.fn((arg) => { if (typeof arg === 'function') arg(chain); return chain; }),
       whereIn: jest.fn(() => chain),
       whereNull: jest.fn(() => chain),
       whereNotNull: jest.fn(() => chain),
       whereRaw: jest.fn(() => chain),
       forNoKeyUpdate: jest.fn(() => { chain.locked = true; return chain; }),
       orWhereRaw: jest.fn(() => chain),
+      orWhere: jest.fn((fn) => { if (typeof fn === 'function') fn(chain); return chain; }),
+      orWhereNotIn: jest.fn(() => chain),
       first: jest.fn(async () => (table === 'customers' ? mockCustomerRow : table === 'sms_log' ? mockInbound : null)),
       select: jest.fn(async () => (table === 'leads' ? mockLeads : [])),
       insert: jest.fn(() => chain),
@@ -156,6 +158,17 @@ describe('delayedLeadReplyStillEligible', () => {
     mockInbound = { id: 'sms-out-1' }; // an outbound row to this phone since the form
     await expect(delayedLeadReplyStillEligible('cust-1', '9415551234', undefined, { since: new Date() }))
       .resolves.toMatchObject({ ok: false, code: 'LEAD_CONVERSATION_STARTED' });
+  });
+
+  test('outbound evidence must be a provider-accepted send (a scheduled reply reached nobody)', async () => {
+    const db = require('../models/db');
+    const chains = [];
+    const trx = jest.fn((table) => { const c = db.__tableChain(table); chains.push([table, c]); return c; });
+    await delayedLeadReplyStillEligible('cust-1', '9415551234', trx, { since: new Date() });
+    const [, smsChain] = chains.find(([table]) => table === 'sms_log');
+    expect(smsChain.whereRaw).toHaveBeenCalledWith("COALESCE(twilio_sid, '') ~ '^(SM|MM)'");
+    expect(smsChain.whereNull).toHaveBeenCalledWith('status');
+    expect(smsChain.orWhereNotIn).toHaveBeenCalledWith('status', ['scheduled', 'cancelled', 'canceled', 'failed', 'undelivered']);
   });
 
   test('inside the handoff the lead rows are locked through dispatch', async () => {

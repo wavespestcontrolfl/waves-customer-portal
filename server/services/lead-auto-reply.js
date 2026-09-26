@@ -175,8 +175,15 @@ async function delayedLeadReplyStillEligible(customerId, phoneDigits, conn = db,
   if (since) {
     // Any text either way since the form: the customer replied, or staff
     // already answered from the Inbox (which leaves lead status untouched).
+    // Outbound counts only when Twilio actually accepted it (a real SM/MM
+    // sid, not scheduled/cancelled/failed): a reply staff merely scheduled
+    // has reached nobody.
     const exchanged = await conn('sms_log')
-      .whereIn('direction', ['inbound', 'outbound'])
+      .where((q) => q.where({ direction: 'inbound' })
+        .orWhere((out) => out.where({ direction: 'outbound' })
+          .whereRaw("COALESCE(twilio_sid, '') ~ '^(SM|MM)'")
+          .where((st) => st.whereNull('status')
+            .orWhereNotIn('status', ['scheduled', 'cancelled', 'canceled', 'failed', 'undelivered']))))
       .where('created_at', '>=', since)
       .where((q) => q.where({ customer_id: customerId })
         .orWhereRaw("RIGHT(regexp_replace(COALESCE(from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [phoneDigits])
