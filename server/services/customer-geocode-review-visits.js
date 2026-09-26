@@ -59,18 +59,20 @@ function visitMatchesPrimary(row, customer, primary) {
   return !stampedState || stampedState === String(customer.state || '').trim().toLowerCase();
 }
 
-function visitPinIsSafeToReplace(row, customer) {
+function visitPinIsSafeToReplace(row, customer, primary) {
   if (row.lat == null || row.lng == null) return true;
-  const priorLat = Number(customer.latitude);
-  const priorLng = Number(customer.longitude);
   const rowLat = Number(row.lat);
   const rowLng = Number(row.lng);
   const rowHasPair = Number.isFinite(rowLat) && Number.isFinite(rowLng) && rowLat !== 0 && rowLng !== 0;
-  const customerHasPair = customer.latitude != null && customer.longitude != null
-    && Number.isFinite(priorLat) && Number.isFinite(priorLng) && priorLat !== 0 && priorLng !== 0;
-  return !rowHasPair || (customerHasPair
-    && pinAtScale(rowLat, 6) === pinAtScale(priorLat, 6)
-    && pinAtScale(rowLng, 6) === pinAtScale(priorLng, 6));
+  if (!rowHasPair) return true;
+  return [customer, primary].some(reference => {
+    if (reference?.latitude == null || reference?.longitude == null) return false;
+    const priorLat = Number(reference.latitude);
+    const priorLng = Number(reference.longitude);
+    return Number.isFinite(priorLat) && Number.isFinite(priorLng) && priorLat !== 0 && priorLng !== 0
+      && pinAtScale(rowLat, 6) === pinAtScale(priorLat, 6)
+      && pinAtScale(rowLng, 6) === pinAtScale(priorLng, 6);
+  });
 }
 
 function candidateVisits(conn, customerId, { lock = false } = {}) {
@@ -128,7 +130,7 @@ function sameVisitFence(before, after) {
 
 function rowIsEligible(row, customer, primary, verifyPin) {
   return visitMatchesPrimary(row, customer, primary)
-    && (!verifyPin || visitPinIsSafeToReplace(row, customer));
+    && (!verifyPin || visitPinIsSafeToReplace(row, customer, primary));
 }
 
 async function groupedPlans(trx, prelocked, { customer, primary, verifyPin }) {
