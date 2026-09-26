@@ -818,7 +818,7 @@ Required modules (22 seeded — `what_to_expect` and `faq` are deferred, see not
 
 ## AI Architecture
 
-Use a rules-first composer with AI-assisted tone.
+Use a rules-first composer with AI-assisted tone. (As built, the composer is rules-only; the AI step below was never added.)
 
 1. Data collection: pull estimate, customer, property, turf, address, month, tier, local rules, protocol modules, seasonal modules, product facts, and prior service summaries.
 2. Deterministic eligibility: rules engine decides allowed turf module, seasonal module, local rule language, allowed product categories, allowed product cards, blocked facts, warnings, and exclusions.
@@ -1198,7 +1198,7 @@ Deliverables:
 - product transparency module
 - post-service report module
 - what-this-does-not-include module
-- FAQ module
+- FAQ module (not seeded in the shipped build; see the Deferred note above)
 
 Exit criteria:
 
@@ -1271,6 +1271,8 @@ Exit criteria:
 - AI is not required for core output
 
 ### Phase 5: AI-Assisted Polish
+
+**Update 2026-09-26:** not built. The shipped composer is fully deterministic (`generation_mode` is `rules_only`).
 
 Deliverables:
 
