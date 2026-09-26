@@ -400,24 +400,18 @@ function whereDueForRenewal(query, today) {
     });
 }
 
-// P1-4: the renewal-notice witness is ONLY the termite-specific, on-time
+// P1-4: the renewal-notice witness is ONLY the termite-specific, ON-TIME
 // 45-day rung (slice A2) — the v3 agreement's auto-charge authorization
 // presumes the customer got THAT notice. The generic notice_30_sent_at rung
 // every annual-prepay term (termite or not) already carries is deliberately
-// NOT an accepted alternative: a notice sent LATE (PR #4921's
-// notice_45_late_sent_at column — not live on main yet, so it is never
-// referenced here) leaves notice_45_sent_at NULL and must fall into
-// bellNoWitnessTerms below, not slip through on the 30-day rung.
-//
-// Codex round-7 P1 (merge-order dependency, not a code bug): the RUNTIME
-// WRITER of notice_45_sent_at ships in PR #4921 (slice 5,
-// sendCustomerTermNotice) — this file reads the column but never writes
-// it. #4921 merges to main first; this PR's coordinator merges main into
-// it afterward, before this sweep goes live behind its own gate. Until
-// then every term reads NULL here by construction (no writer exists yet),
-// which correctly and safely falls into bellNoWitnessTerms — never a
-// silent bypass — so no code change is needed on this side; this comment
-// only names the dependency for the next reader.
+// NOT an accepted alternative, and neither is a LATE 45-day send: PR #4921
+// (slice 5, sendCustomerTermNotice / noticeWitnessColumn in
+// annual-prepay-renewals.js) writes EXACTLY ONE of notice_45_sent_at
+// (daysLeft >= 45, on-time) or notice_45_late_sent_at (daysLeft < 45,
+// late) per send — never both. A late send therefore leaves
+// notice_45_sent_at NULL by construction and must fall into
+// bellNoWitnessTerms below for staff to handle by hand, not slip through
+// as if the on-time authorization had been given.
 function whereNoticeWitnessed(query) {
   return query.whereNotNull('t.notice_45_sent_at');
 }
