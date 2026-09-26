@@ -203,6 +203,8 @@ describe('annual prepay payment reminder — explicit billing-channel selection'
     global.__ledgerSeq = 1;
     _private.resetCachesForTests();
     renderSmsTemplate.mockResolvedValue('pay reminder body');
+    // clearAllMocks keeps implementations: undo any per-test policy denial.
+    require('../services/collections/rail-guard').collectionsChannelPermitted.mockResolvedValue(true);
   });
 
   test('(a) no explicit selection (no notification_prefs row) — byte-identical legacy SMS send', async () => {
@@ -359,5 +361,19 @@ describe('annual prepay payment reminder — explicit billing-channel selection'
     for (const [args] of railGuard.collectionsChannelPermitted.mock.calls) {
       expect(args).toMatchObject({ invoiceId: null, offLedgerBalanceCents: 39204 });
     }
+  });
+
+  test('an accepted Text whose ledger stamp fails keeps the credit (the customer saw the post-credit amount)', async () => {
+    const ContactLedger = require('../services/collections/contact-ledger');
+    ContactLedger.markDelivered.mockResolvedValueOnce(false);
+    sendCustomerMessage.mockResolvedValueOnce({ sent: true, deliveryOutcome: 'accepted' });
+    autoApplyAccountCreditIfEnabled.mockResolvedValueOnce({ applied: 40 });
+    setDbQueues(standardQueues({ prefs: { billing_channels: ['sms'] } }));
+
+    const result = await AnnualPrepayRenewals.sendPaymentPendingReminder({ ...BASE_TERM }, 1);
+
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(reverseAppliedCredit).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ sent: true, complete: false });
   });
 });

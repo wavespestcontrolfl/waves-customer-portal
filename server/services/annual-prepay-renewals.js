@@ -5439,55 +5439,85 @@ async function sendExplicitPaymentReminderChannels({
   const priorProgress = await reminderProgress(customer.id, source, explicitChannels);
   const priorEvent = priorProgress.find((event) => event.metadata.notificationEventKey === eventKey);
   const hadPriorDelivery = !!(priorEvent && priorEvent.delivered.size > 0);
-  const result = await sendReminderChannels({
-    customerId: customer.id,
-    invoiceId: null,
-    source,
-    purpose: 'balance_reminder',
-    eventKey,
-    channels: explicitChannels,
-    offLedgerBalanceCents: Math.round(amountDue * 100),
-    metadata: {
-      original_message_type: source,
-      annual_prepay_term_id: claimedTerm.id,
-      days_out: daysOut,
-    },
-    send: (channel, ledger) => {
-      if (channel === 'email') {
-        // No email template exists for this reminder (billing.previsit_balance
-        // is documented as never sent for one-time invoice debt, which an
-        // annual prepay invoice is). Settle the leg as a terminal
-        // template_unavailable refusal rather than inventing customer-facing
-        // copy or retrying a leg that can never send; the invoice email
-        // already carries the pay link.
-        logger.warn(`[annual-prepay] payment reminder has no email template; Email leg resolved for term ${claimedTerm.id}`);
-        return Promise.resolve({ ok: false, skipped: true, reason: 'template_unavailable' });
-      }
-      return sendCustomerMessage({
-        to: customer.phone,
-        body,
-        channel,
-        audience: 'customer',
-        purpose: 'payment_link',
-        customerId: customer.id,
-        invoiceId: invoice.id,
-        identityTrustLevel: 'phone_matches_customer',
-        entryPoint: 'annual_prepay_payment_reminder',
-        metadata: {
-          original_message_type: source,
-          annual_prepay_term_id: claimedTerm.id,
-          days_out: daysOut,
-          billingDeliveryLeg: channel,
-          notificationEventKey: eventKey,
-          ...(ledger?.id ? { collections_ledger_id: ledger.id } : {}),
-          ...(channel === 'push' ? { appOnly: true } : {}),
-          ...(opts.metadata || {}),
-        },
-      });
-    },
-  });
+  const sendLeg = (channel, ledger) => {
+    if (channel === 'email') {
+      // No email template exists for this reminder (billing.previsit_balance
+      // is documented as never sent for one-time invoice debt, which an
+      // annual prepay invoice is). Settle the leg as a terminal
+      // template_unavailable refusal rather than inventing customer-facing
+      // copy or retrying a leg that can never send; the invoice email
+      // already carries the pay link.
+      logger.warn(`[annual-prepay] payment reminder has no email template; Email leg resolved for term ${claimedTerm.id}`);
+      return Promise.resolve({ ok: false, skipped: true, reason: 'template_unavailable' });
+    }
+    return sendCustomerMessage({
+      to: customer.phone,
+      body,
+      channel,
+      audience: 'customer',
+      purpose: 'payment_link',
+      customerId: customer.id,
+      invoiceId: invoice.id,
+      identityTrustLevel: 'phone_matches_customer',
+      entryPoint: 'annual_prepay_payment_reminder',
+      metadata: {
+        original_message_type: source,
+        annual_prepay_term_id: claimedTerm.id,
+        days_out: daysOut,
+        billingDeliveryLeg: channel,
+        notificationEventKey: eventKey,
+        ...(ledger?.id ? { collections_ledger_id: ledger.id } : {}),
+        ...(channel === 'push' ? { appOnly: true } : {}),
+        ...(opts.metadata || {}),
+      },
+    });
+  };
 
-  const anyDelivered = hadPriorDelivery || result.deliveredNow.length > 0;
+  // Provider acceptance is customer-visible even when its ledger stamp later
+  // fails (sendReminderChannels then holds the leg as
+  // REMINDER_ACCEPTANCE_UNSTAMPED and leaves it out of deliveredNow), or when
+  // the helper throws after an accepted leg: the customer saw the post-credit
+  // amount, so the credit must stand.
+  // An uncertain outcome (or a throwing send) may also have reached the
+  // customer, so it keeps the credit too.
+  let acceptedNow = false;
+  let result;
+  try {
+    result = await sendReminderChannels({
+      customerId: customer.id,
+      invoiceId: null,
+      source,
+      purpose: 'balance_reminder',
+      eventKey,
+      channels: explicitChannels,
+      offLedgerBalanceCents: Math.round(amountDue * 100),
+      metadata: {
+        original_message_type: source,
+        annual_prepay_term_id: claimedTerm.id,
+        days_out: daysOut,
+      },
+      send: async (channel, ledger) => {
+        let outcome;
+        try {
+          outcome = await sendLeg(channel, ledger);
+        } catch (sendErr) {
+          acceptedNow = true;
+          throw sendErr;
+        }
+        if (['accepted', 'uncertain'].includes(outcome?.deliveryOutcome)) acceptedNow = true;
+        return outcome;
+      },
+    });
+  } catch (err) {
+    if (!acceptedNow) throw err;
+    // A leg already reached the customer: keep the credit, leave the stage
+    // unstamped so a pending leg can resume, and report the touch.
+    logger.warn(`[annual-prepay] payment reminder rail failed after an accepted leg for term ${claimedTerm.id}: ${err.message}`);
+    await releaseClaim();
+    return { sent: true, termId: claimedTerm.id, complete: false };
+  }
+
+  const anyDelivered = hadPriorDelivery || acceptedNow || result.deliveredNow.length > 0;
   if (result.deliveredNow.length) {
     for (const channel of result.deliveredNow) {
       await db('customer_interactions').insert({
@@ -5817,6 +5847,32 @@ async function sendPaymentPendingReminder(termOrId, daysOut, opts = {}) {
   }
 }
 
+// Resume window for an explicit-channel reminder episode that is still open
+// (a held or retryable leg — the scan runs once a day, so a released claim is
+// otherwise never re-selected once its target date passes). A stage resumes
+// only on the days after its own target and before the next smaller stage's
+// target (e.g. the 3-day stage resumes 2 days out; the 1-day stage has no
+// window), and only for terms whose episode already has explicit-rail ledger
+// rows — legacy SMS reminders carry no event key and are never resumed.
+async function pendingExplicitEpisodeTerms({ today, daysOut, stageTerms }) {
+  const nextStage = Math.max(0, ...PAYMENT_REMINDER_DAYS.filter((days) => days < daysOut));
+  const resumeDates = [];
+  for (let days = nextStage + 1; days < daysOut; days++) resumeDates.push(addDaysYmd(today, days));
+  if (!resumeDates.length) return [];
+  const candidates = await stageTerms(resumeDates);
+  if (!candidates.length) return [];
+  const keys = candidates.map((term) => paymentReminderEventKey(term.id, daysOut));
+  const rows = await db('collections_contact_ledger')
+    .where({ source: 'annual_prepay_payment_reminder' })
+    .whereIn(db.raw("metadata->>'notificationEventKey'"), keys)
+    .select('metadata');
+  const openKeys = new Set(rows.map((row) => {
+    const metadata = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
+    return metadata.notificationEventKey;
+  }));
+  return candidates.filter((term) => openKeys.has(paymentReminderEventKey(term.id, daysOut)));
+}
+
 async function checkAndSendPaymentReminders({ today = etDateString() } = {}) {
   if (!(await annualPrepayTableExists())) return { sent: 0 };
   // Flip any paid-but-pending terms first so they never remind.
@@ -5829,7 +5885,7 @@ async function checkAndSendPaymentReminders({ today = etDateString() } = {}) {
     const cols = await annualPrepayColumns();
     if (!cols[sentCol] || !cols[claimCol]) continue; // migration not run yet
     const target = addDaysYmd(today, daysOut);
-    const terms = await db('annual_prepay_terms')
+    const stageTerms = (dates) => db('annual_prepay_terms')
       .where({ status: PAYMENT_PENDING_STATUS })
       .whereNotNull('prepay_invoice_id')
       .whereNull(sentCol)
@@ -5839,10 +5895,15 @@ async function checkAndSendPaymentReminders({ today = etDateString() } = {}) {
       .where(function firstVisitOn() {
         // Match the date the customer was actually promised. COALESCE keeps
         // legacy terms (no first_visit_date) firing off term_start.
-        if (cols.first_visit_date) this.whereRaw('COALESCE(first_visit_date, term_start) = ?', [target]);
-        else this.where('term_start', target);
+        if (cols.first_visit_date) {
+          if (dates.length === 1) this.whereRaw('COALESCE(first_visit_date, term_start) = ?', dates);
+          else this.whereIn(db.raw('COALESCE(first_visit_date, term_start)'), dates);
+        } else if (dates.length === 1) this.where('term_start', dates[0]);
+        else this.whereIn('term_start', dates);
       })
       .select('*');
+    const terms = await stageTerms([target]);
+    terms.push(...(await pendingExplicitEpisodeTerms({ today, daysOut, stageTerms })));
 
     for (const term of terms) {
       try {
