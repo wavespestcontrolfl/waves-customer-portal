@@ -159,8 +159,17 @@ function contactPhone(row) {
 // a staff member typed. Evidence counts only after the promise's call ENDED
 // (promisedAt) and is matched by customer — or, for a caller with no
 // customer record yet, by the number the promise was made on.
+// Evidence for a promise counts from when it became actionable: the call's
+// end, or — for a floor (or untyped) stated time — that later time, so
+// unrelated activity before "after the inspection" never keeps it.
+function evidenceFrom(r) {
+  const at = promisedAt(r);
+  const stated = r.due_at && r.due_type !== 'deadline' ? new Date(r.due_at) : null;
+  return stated && !Number.isNaN(stated.getTime()) && (!at || stated > at) ? stated : at;
+}
+
 async function followedUpIds(conn, rows) {
-  const scoped = (rows || []).map((r) => ({ r, since: promisedAt(r), phone: r.customer_id ? null : contactPhone(r) }))
+  const scoped = (rows || []).map((r) => ({ r, since: evidenceFrom(r), phone: r.customer_id ? null : contactPhone(r) }))
     .filter((x) => x.since && (x.r.customer_id || x.phone));
   const done = new Set();
   if (!scoped.length) return done;
@@ -215,7 +224,7 @@ async function followedUpIds(conn, rows) {
   // A text a person typed that actually went out: the staff send paths stamp
   // BOTH message_type 'manual' and admin_user_id (either alone admits
   // automated texts), and only queued/sent/delivered rows reached anyone.
-  const texts = await byContact(conn('sms_log'))
+  const texts = await require('./messaging/review-ask-reservation').excludeUnresolvedSendReservations(byContact(conn('sms_log')))
     .whereRaw("direction LIKE 'out%'").where('created_at', '>', floor)
     .whereIn('message_type', HUMAN_TEXT_TYPES).whereNotNull('admin_user_id')
     .whereIn('status', ['queued', 'sent', 'delivered'])
@@ -339,7 +348,13 @@ async function pagerHealthy(conn, now = new Date()) {
 
 async function runFollowUpSlaWatcher({ now = new Date() } = {}) {
   const { isEnabled } = require('../config/feature-gates');
-  if (!isEnabled('followupSlaAlerts') || !isEnabled('callCommitments')) return { skipped: true, reason: 'gated_off' };
+  if (!isEnabled('followupSlaAlerts') || !isEnabled('callCommitments')) {
+    // Switched off: no standing list may outlive the pager that kept it true.
+    await db('notifications').where({ recipient_type: 'admin' }).whereNull('read_at')
+      .whereRaw("metadata->>'dedupeKey' LIKE ?", [`${ROLLING_KEY}:%`])
+      .update({ read_at: now }).catch((err) => logger.warn(`[followup-sla] retiring the list while gated off failed: ${err.message}`));
+    return { skipped: true, reason: 'gated_off' };
+  }
   const { runExclusive } = require('../utils/cron-lock');
   return runExclusive('followup-sla-watcher', async () => {
     const result = await runInner({ now });

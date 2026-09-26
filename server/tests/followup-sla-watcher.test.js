@@ -150,10 +150,12 @@ beforeEach(() => {
 const rollingCall = () => NotificationService.notifyAdmin.mock.calls.find((c) => c[3].dedupeKey.startsWith(`${ROLLING_KEY}:`));
 const posted = (ids, extra = {}) => ({ id: 'n0', read_at: null, metadata: { dedupeKey: `${ROLLING_KEY}:2026-09-26T19:00:00.000Z`, missed_commitment_ids: ids, ...extra } });
 
-test('gated off → no-op', async () => {
+test('gated off → no scan, and any standing list is retired', async () => {
+  const updates = mockDb();
   isEnabled.mockReturnValue(false);
   expect(await runFollowUpSlaWatcher({ now: NOW })).toEqual({ skipped: true, reason: 'gated_off' });
   expect(listOpenCommitments).not.toHaveBeenCalled();
+  expect(updates).toEqual([{ table: 'notifications', patch: { read_at: NOW } }]);
 });
 
 test('a new miss posts the rolling list fresh, unread, at the top of the feed', async () => {
@@ -525,4 +527,12 @@ test('an ordinary connected outbound call (no callback card, 60 s+) counts as fo
   const raws = argsOf('call_log', 'whereRaw').map(([sql]) => sql).join(' ');
   expect(raws).toMatch(/relatedCommitmentId' IS NULL/);
   expect(raws).toMatch(/COALESCE\(duration_seconds, 0\) >= 60/);
+});
+
+test('evidence for a floor promise counts only from its stated time — earlier activity does not keep it', async () => {
+  mockDb();
+  listOpenCommitments.mockResolvedValue([row('f', { due_at: et('14:30').toISOString(), due_type: 'floor', call_started_at: et('13:00').toISOString() })]);
+  await runFollowUpSlaWatcher({ now: NOW });
+  const since = argsOf('sms_log', 'where').filter(([col]) => col === 'created_at').map(([, , v]) => new Date(v).toISOString());
+  expect(new Set(since)).toEqual(new Set([et('14:30').toISOString()]));
 });
