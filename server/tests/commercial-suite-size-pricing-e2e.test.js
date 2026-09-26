@@ -247,6 +247,40 @@ describe('manual admin-tool path — buildEnrichedProfile -> applyCommercialSuit
       expect(v1Input.footprintSqFt).toBe(900);
     });
 
+    // Codex #4840 r13 P1s: a stale suite profile is refused, not priced.
+    test('the suite gate switched off after the lookup: translation refuses the suite profile', async () => {
+      resolveViaDbprLicense.mockResolvedValue(null);
+      const profile = buildEnrichedProfile(plazaSuiteRecord(), null, 27.5, -82.45, null, null, SUITE_ADDRESS, { commercialSuiteSizing: true });
+      await routePrivate.applyCommercialSuiteSize(profile);
+      const prior = process.env.GATE_COMMERCIAL_SUITE_SIZING;
+      process.env.GATE_COMMERCIAL_SUITE_SIZING = 'false';
+      try {
+        expect(() => translateV2CallToV1Input(profile, ['PEST'], {})).toThrow(expect.objectContaining({ statusCode: 409, code: 'SUITE_SIZING_OFF', failClosed: true }));
+        // The save-time recompute refuses too, never falling back to the
+        // browser's suite price.
+        const { serverRecomputeFromEstimateData } = require('../services/admin-estimate-persistence');
+        await expect(serverRecomputeFromEstimateData({
+          engineRequest: { profile, selectedServices: ['PEST'], options: {} },
+          engineInputs: { homeSqFt: 1500 },
+        })).rejects.toMatchObject({ code: 'SUITE_SIZING_OFF' });
+      } finally {
+        process.env.GATE_COMMERCIAL_SUITE_SIZING = prior;
+      }
+    });
+
+    test.each(['hoa_common_area', 'multifamily'])('an association (%s) job on a suite profile is refused — it prices the whole property', async (riskType) => {
+      resolveViaDbprLicense.mockResolvedValue(null);
+      const profile = buildEnrichedProfile(plazaSuiteRecord(), null, 27.5, -82.45, null, null, SUITE_ADDRESS, { commercialSuiteSizing: true });
+      await routePrivate.applyCommercialSuiteSize(profile);
+      expect(() => translateV2CallToV1Input(profile, ['PEST'], { commercialRiskType: riskType }))
+        .toThrow(expect.objectContaining({ statusCode: 409, code: 'SUITE_LOOKUP_ASSOCIATION_SCOPE' }));
+    });
+
+    test('the admin lookup route skips suite sizing when the operator asks for the whole property', () => {
+      const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/property-lookup-v2.js'), 'utf8');
+      expect(src).toMatch(/commercialSuiteSizing: wholeProperty !== true/);
+    });
+
     test('license_seats / verified suite sizes are real measurements — never recomputed off risk type', async () => {
       resolveViaDbprLicense.mockResolvedValue({
         value: 1400, businessName: 'Test Taco Shop', seats: 25,

@@ -3132,7 +3132,14 @@ export default function EstimateToolViewV2({
       const r = await fetch("/api/admin/estimator/property-lookup", {
         method: "POST",
         headers: authHeaders,
-        body: JSON.stringify({ address, refresh }),
+        // An association's common-area job is priced on the whole property,
+        // never one suite of it, even at an office "Suite" address (Codex
+        // #4840 r13 P1) — the server then skips suite sizing.
+        body: JSON.stringify({
+          address,
+          refresh,
+          ...(["hoa_common_area", "multifamily"].includes(form.commercialRiskType) ? { wholeProperty: true } : {}),
+        }),
         signal: lookupController.signal,
       });
       if (!r.ok) throw new Error("API " + r.status);

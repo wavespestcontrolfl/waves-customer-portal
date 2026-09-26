@@ -1098,7 +1098,7 @@ function buildSatelliteUrlSet(lat, lng) {
 // MAIN ROUTE — admin/tech-gated thin wrapper over performPropertyLookup
 // ─────────────────────────────────────────────
 router.post('/property-lookup', async (req, res) => {
-  const { address, refresh } = req.body;
+  const { address, refresh, wholeProperty } = req.body;
   if (!address || address.trim().length < 5) {
     return res.status(400).json({ error: 'Address required' });
   }
@@ -1108,7 +1108,9 @@ router.post('/property-lookup', async (req, res) => {
     // commercialSuiteSizing: true — this IS the admin estimate tool's own
     // lookup route (opt-in per the primary review of PR #4840); the public
     // routes (public-property-lookup.js, public-quote.js) never pass it.
-    const result = await performPropertyLookup(address, { refresh: refresh === true, prioritizeAccuracy: true, commercialSuiteSizing: true });
+    // wholeProperty: the operator's association (HOA / common-area) job at an
+    // office "Suite" address — size the whole property, never the suite.
+    const result = await performPropertyLookup(address, { refresh: refresh === true, prioritizeAccuracy: true, commercialSuiteSizing: wholeProperty !== true });
     result.meta.providerStatus ||= buildProviderStatus();
     res.json(result);
   } catch (err) {
@@ -4520,6 +4522,28 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
   // Risk-type bucket (drives commercial pest/rodent cadence). Admin-set; persisted
   // on the raw engineRequest options/profile → replays on re-price.
   const commercialRiskType = commercialProfile ? (o.commercialRiskType || p.commercialRiskType || null) : null;
+  // A suite-scoped profile (its lot, grounds and building size were cleared
+  // for one tenant) is refused, never priced, when (a) the suite gate has
+  // since been switched off — the kill switch must stop new calculations and
+  // save-time recomputes too, not only new lookups; or (b) the job is an
+  // association's common areas, which the shared scope classifier rules
+  // whole-property even at an office "Suite" address. Either way a fresh
+  // lookup is required (Codex #4840 r13 P1s).
+  if (p.suiteSize) {
+    const associationJob = ['hoa_common_area', 'multifamily'].includes(commercialRiskType)
+      || /^(?:hoa|multifamily)/.test(String(commercialSubtype || ''));
+    if (!commercialSuiteSizingLive() || associationJob) {
+      const err = new Error(associationJob
+        ? 'HOA and common-area service prices the whole property, not one suite. Run Property Lookup again with this business type selected; it sizes the whole property.'
+        : 'Commercial suite sizing is off. Re-run the property lookup before pricing this address.');
+      err.statusCode = 409;
+      err.code = associationJob ? 'SUITE_LOOKUP_ASSOCIATION_SCOPE' : 'SUITE_SIZING_OFF';
+      // A rejection, not engine breakage: the save-time recompute rethrows
+      // it rather than falling back to the browser's suite price.
+      err.failClosed = true;
+      throw err;
+    }
+  }
   // A type-default suite size (server/services/commercial-suite-size/type-defaults.js)
   // resolves BEFORE the admin operator has necessarily set commercialRiskType/
   // commercialSubtype — the resolver runs once, off whatever the lookup's own
