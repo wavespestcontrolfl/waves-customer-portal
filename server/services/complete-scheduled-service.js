@@ -590,120 +590,6 @@ function toETNoonServiceDate(value) {
   return Number.isNaN(parsed.getTime()) ? parseETDateTime(`${etDateString()}T12:00`) : parsed;
 }
 
-// ADMIN-BUG-R13: the visit's add-on rows, read strictly — the canonical line
-// builder swallows a failed read into "no add-ons", which here would silently
-// skip a bill. A priced row is one the builder turns into a line (its
-// base_price when set, else its estimated_price, above zero).
-async function annualPrepayAddonRows(svc) {
-  const rows = await db('scheduled_service_addons')
-    .where({ scheduled_service_id: svc.id })
-    .select('id', 'base_price', 'estimated_price');
-  const price = (row) => Number(row.base_price != null && row.base_price !== '' ? row.base_price : row.estimated_price) || 0;
-  return {
-    clientIds: new Set(rows.map((row) => `scheduled_${svc.id}_addon_${row.id}`)),
-    priced: rows.some((row) => price(row) > 0),
-  };
-}
-
-// ADMIN-BUG-R13: what an annual-prepay-covered visit owes beyond its coverage
-// — its add-on lines. Built by the canonical line builder, so each add-on
-// carries its own gross price and its own discount exactly as a normal
-// completion invoice would; the covered base line and the discount parented
-// to it drop out. A document-level credit (an appointment discount, the
-// builder's "Scheduled price adjustment") spans base and add-ons alike and
-// nothing here can say which share is the add-ons', so it makes the amount
-// `ambiguous` — the caller alerts the office instead of guessing.
-async function annualPrepayExtrasForVisit(svc, addons) {
-  if (!addons.priced) return { lines: [], total: 0, ambiguous: false };
-  const InvoiceService = require('../services/invoice');
-  const { lineItems } = await InvoiceService.buildLineItemsForScheduledService(svc.id, {
-    fallbackDescription: svc.service_type,
-  });
-  const primaryId = `scheduled_${svc.id}_primary`;
-  const lines = lineItems.filter((li) => addons.clientIds.has(li.client_id) || addons.clientIds.has(li.discount_for));
-  if (!lines.some((li) => Number(li.amount) > 0)) {
-    throw new Error('the visit has priced add-ons but no add-on invoice lines were built');
-  }
-  const ambiguous = lineItems.some((li) => Number(li.amount) < 0
-    && li.discount_for !== primaryId && !addons.clientIds.has(li.discount_for));
-  const total = Math.round(lines.reduce((sum, li) => sum + (Number(li.amount) || 0), 0) * 100) / 100;
-  return { lines: total > 0 ? lines : [], total, ambiguous };
-}
-
-// Sort an existing invoice's lines against this visit: the covered base, the
-// visit's own add-ons (and discounts parented to them), and anything else.
-function classifyCoveredVisitInvoice(invoice, svc, addons) {
-  const InvoiceService = require('../services/invoice');
-  const lines = InvoiceService._parseInvoiceLineItems(invoice?.line_items);
-  const isAddon = (li) => addons.clientIds.has(li.client_id) || addons.clientIds.has(li.discount_for);
-  // Ledger-backed estimate deposit credit the shared mint rolls onto the
-  // add-ons bill — a payment toward it, not a charge of its own.
-  const isDepositCredit = (li) => String(li.category || '') === 'deposit_credit' && Number(li.amount) < 0;
-  const positive = lines.filter((li) => Number(li.amount) > 0);
-  return {
-    // Positive evidence only: every line is one of this visit's add-ons (or
-    // a discount / deposit credit on them) and at least one bills something.
-    billsOnlyAddons: positive.length > 0 && lines.every((li) => isAddon(li) || isDepositCredit(li)),
-    unknownCharges: positive.some((li) => !isAddon(li) && !InvoiceService.lineIsBaseApplication(li)),
-  };
-}
-
-// ADMIN-BUG-R13: is this invoice the WHOLE remainder the visit owes — only
-// add-on charges (classifyCoveredVisitInvoice: never the covered base or any
-// other line), every priced add-on, netting to the canonical extras total?
-// A mixed invoice, a subset of the add-ons, a stale price, or a remainder the
-// builder cannot vouch for (a visit-wide discount) is not, and must never
-// stand in for it.
-function invoiceBillsExactExtras(invoice, addons, extras) {
-  if (!extras || extras.ambiguous || !extras.lines.length) return false;
-  if (!classifyCoveredVisitInvoice(invoice, null, addons).billsOnlyAddons) return false;
-  const InvoiceService = require('../services/invoice');
-  const onAddons = (li) => addons.clientIds.has(li.client_id) || addons.clientIds.has(li.discount_for);
-  const invoiceAddonLines = InvoiceService._parseInvoiceLineItems(invoice?.line_items).filter(onAddons);
-  const billedIds = (lines) => new Set(lines.filter((li) => Number(li.amount) > 0).map((li) => li.client_id));
-  const want = billedIds(extras.lines);
-  const have = billedIds(invoiceAddonLines);
-  const net = Math.round(invoiceAddonLines.reduce((sum, li) => sum + (Number(li.amount) || 0), 0) * 100) / 100;
-  return want.size === have.size && [...want].every((id) => have.has(id)) && net === extras.total;
-}
-
-// ADMIN-BUG-R13: bill a covered visit's add-ons through the ONE shared
-// scheduled-invoice mint (lock chain, packet-ownership check, in-lock
-// adoption, deposit roll-forward). An invoice another writer committed first
-// is adopted only when it provably bills exactly this visit's add-ons
-// (invoiceBillsExactExtras); anything else comes back as a conflict for the
-// office rather than as this bill.
-async function mintAnnualPrepayExtrasInvoice(svc, record, extras, addons, { coveredInvoiceId = null, quietBackfill = false } = {}) {
-  const { mintScheduledServiceInvoiceWithDeposit } = require('../services/scheduled-invoice-mint');
-  const serviceDate = serviceDateOnly(record?.service_date);
-  const minted = await mintScheduledServiceInvoiceWithDeposit({
-    svc,
-    // The covered-base settlement this completion just made is the bill's
-    // sibling, not a replay of it.
-    excludeFromAdoption: coveredInvoiceId ? [coveredInvoiceId] : [],
-    // Quiet backfill closeout: the same posture as its main invoice mint —
-    // the estimate deposit stays on its ledger for the reviewer.
-    skipDepositCredit: quietBackfill,
-    buildCreateParams: () => ({
-      customerId: svc.customer_id,
-      serviceRecordId: record?.id || null,
-      scheduledServiceId: svc.id,
-      title: svc.service_type,
-      serviceDate,
-      // Backfill: the backdated visit day would mint the bill already
-      // overdue; due today instead, like the main backfill mint.
-      dueDate: quietBackfill ? etDateString() : serviceDate,
-      notes: 'Add-ons beyond your annual prepay coverage. The covered visit itself is already paid.',
-      lineItems: extras.lines,
-      trustedStoredDiscountSources: ['scheduled_service'],
-    }),
-  });
-  if (minted.reused && !invoiceBillsExactExtras(minted.invoice, addons, extras)) {
-    return { conflict: minted.invoice };
-  }
-  return minted;
-}
-
 function serviceDateOnly(value) {
   return value ? String(value instanceof Date ? value.toISOString() : value).slice(0, 10) : etDateString();
 }
@@ -8518,6 +8404,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // visit's add-ons. prepaidCovered stays true for the covered base, so this
     // is what keeps the pay link and the unpaid completion text for that bill.
     let annualPrepayExtrasCollectible = false;
+    // Add-ons owed but only alerted to the office, or a voided office
+    // invoice's other charges awaiting its re-bill: the completion text must
+    // not say "all paid" (ADMIN-BUG-R13).
+    let annualPrepayOwedUnbilled = false;
     let paymentCollectionSuppressed = false;
     let paymentReconciliationRequired = false;
     // Suppressor-lookup health (pre-push Codex P0, gate-removal round 2):
@@ -10830,396 +10720,58 @@ async function completeScheduledService(completionInput, packetContext = null) {
       else invoiceCreated = true;
     }
 
-    // ADMIN-BUG-R13 (owner ruling 2026-09-26: auto-bill): add-ons on an
-    // annual-prepay-covered visit are owed on top of the coverage. Bill them
-    // alone through the shared mint, or park an office alert when the amount
-    // is unclear or the invoice can't be cut here. `voidedInvoice` is an
-    // office invoice this block just voided (its base was covered).
-    // Add-ons are owed but only alerted: the completion text must not say
-    // "all paid" (the plain report-ready text goes instead).
-    let annualPrepayAddonsUnbilled = false;
-    // A voided office invoice carried charges that are neither the covered
-    // base nor its add-ons: the office re-bills them, so they are owed and
-    // the completion text must not say "all paid" either.
-    let annualPrepayOtherChargesOwed = false;
-    // Dark (off): no add-on read, bill or alert — a covered visit's invoice
-    // settles or voids exactly as it did before R13.
-    const annualPrepayAddonBilling = require('../config/feature-gates').gateEnvValue('GATE_ANNUAL_PREPAY_ADDON_BILLING');
-    // An office alert that did not land leaves the add-ons neither billed
-    // nor flagged; the closeout then stays unfinalized (the release/503
-    // after these blocks) and the retry re-derives the same alert.
-    let annualPrepayAlertError = null;
-    const alertAnnualPrepayAddons = async (reason, extra = {}) => {
-      annualPrepayAddonsUnbilled = true;
-      try {
-        const NotificationService = require('../services/notification-service');
-        const bell = await NotificationService.notifyAdmin('billing', 'Annual-prepay add-ons not billed — bill by hand',
-          `Completing ${svc.service_type} for customer ${svc.customer_id}: the visit is covered by the annual prepay, but its add-ons were not billed automatically (${reason}). Bill the add-ons by hand.`,
-          { link: `/admin/customers/${svc.customer_id}`, bell: true, dedupeKey: `annual_prepay_addons_unbilled:${svc.id}`,
-            // One bell per visit, kept CURRENT: a later pass that hits a
-            // different reason or amount rewrites it and surfaces it unread.
-            refreshOnDedupe: true,
-            metadata: { customerId: svc.customer_id, scheduledServiceId: svc.id, reason, ...extra } });
-        // notifyAdmin returns null when its insert fails.
-        if (!bell) throw new Error('the office notification was not recorded');
-      } catch (bellErr) {
-        annualPrepayAlertError = annualPrepayAlertError || bellErr;
-        logger.error(`[dispatch] annual-prepay add-ons alert FAILED for ${svc.id} (${reason}): ${bellErr.message}`);
-      }
-    };
-    const billAnnualPrepayAddons = async ({ voidedInvoice = null, coveredInvoiceId = null } = {}) => {
-      const voidedInvoiceId = voidedInvoice?.id || null;
-      // One fresh read of the visit feeds both the add-on lines and the
-      // mint's stale-price guard, so they agree with each other.
-      let current;
-      let addons;
-      let extras;
-      try {
-        current = { ...svc, ...(await db('scheduled_services').where({ id: svc.id }).first()) };
-        addons = await annualPrepayAddonRows(current);
-        extras = await annualPrepayExtrasForVisit(current, addons);
-      } catch (err) {
-        logger.warn(`[dispatch] annual-prepay add-on lines unreadable for visit ${svc.id}: ${err.message}`);
-        return alertAnnualPrepayAddons('the add-on lines could not be read', { voidedInvoiceId, error: String(err.message).slice(0, 200) });
-      }
-      if (!extras.lines.length) return undefined;
-      if (extras.ambiguous) {
-        return alertAnnualPrepayAddons('a visit-wide discount applies, so the add-ons\' share is unclear', { voidedInvoiceId, addonTotal: extras.total });
-      }
-      // A voided office invoice may have priced the add-ons its own way (a
-      // discount typed on the invoice, a credit spanning its lines). Re-bill
-      // automatically only when it carried no other credit and billed the
-      // add-ons exactly as the visit prices them.
-      if (voidedInvoice) {
-        const InvoiceService = require('../services/invoice');
-        const primaryId = `scheduled_${svc.id}_primary`;
-        const voidedLines = InvoiceService._parseInvoiceLineItems(voidedInvoice.line_items);
-        const onAddons = (li) => addons.clientIds.has(li.client_id) || addons.clientIds.has(li.discount_for);
-        const voidedAddonLines = voidedLines.filter(onAddons);
-        const otherCredit = voidedLines.some((li) => Number(li.amount) < 0 && !onAddons(li) && li.discount_for !== primaryId);
-        const voidedAddonTotal = Math.round(voidedAddonLines.reduce((sum, li) => sum + (Number(li.amount) || 0), 0) * 100) / 100;
-        if (otherCredit || (voidedAddonLines.length && voidedAddonTotal !== extras.total)) {
-          return alertAnnualPrepayAddons(`invoice ${voidedInvoice.invoice_number || voidedInvoiceId} priced the add-ons differently (it billed $${voidedAddonTotal.toFixed(2)}${otherCredit ? ' and carried another credit' : ''}; the visit prices them at $${extras.total.toFixed(2)})`, { voidedInvoiceId, addonTotal: extras.total, voidedAddonTotal });
+    // An annual-prepay-COVERED visit's invoice and its add-ons — the covered
+    // base settled or voided, never collectible; the add-ons billed alone or
+    // alerted (ADMIN-BUG-R13, GATE_ANNUAL_PREPAY_ADDON_BILLING) — decided in
+    // services/annual-prepay-addon-billing.js.
+    if (annualPrepayCovered) {
+      const { reconcileCoveredVisitInvoice } = require('../services/annual-prepay-addon-billing');
+      const covered = await reconcileCoveredVisitInvoice({
+        svc, record, invoice, payUrl, alreadyPaid, invoiceCreated,
+        issuedInvoiceCloseout, recapReviewOnly, visitPerformed, terminalCompletionInvoice, packetEffects,
+        quietBackfill: isBackfillCompletion,
+        serviceDate: serviceDateOnly(record?.service_date),
+        portalUrl,
+        mergeRecordNotesKeys,
+      });
+      ({ invoice, payUrl, alreadyPaid, invoiceCreated } = covered);
+      annualPrepayExtrasCollectible = covered.extrasCollectible;
+      annualPrepayOwedUnbilled = covered.owedUnbilled;
+      // A failed add-on read, or an office alert that did not land, keeps
+      // the closeout unfinalized — same release/503 shape as the
+      // manual-billing alert — so the retry reads and decides again before
+      // anything is sent.
+      if (covered.hold) {
+        logger.error(`[dispatch] ${covered.hold.code} for ${svc.id} — closeout NOT finalized: ${covered.hold.error.message}`);
+        const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, covered.hold.error);
+        if (!released) {
+          logger.error(`[dispatch] release-for-resume did NOT release attempt ${completionAttempt?.id} for ${svc.id} — retry blocked until the ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)}-minute stale window reclaims it`);
         }
-      }
-      if (packetEffects) {
-        return alertAnnualPrepayAddons('this visit is billed on its grouped closeout', { voidedInvoiceId, addonTotal: extras.total });
-      }
-      try {
-        const minted = await mintAnnualPrepayExtrasInvoice(current, record, extras, addons, { coveredInvoiceId, quietBackfill: isBackfillCompletion });
-        if (minted.conflict) {
-          return alertAnnualPrepayAddons(`invoice ${minted.conflict.invoice_number || minted.conflict.id}, saved on this visit by another writer, does not bill exactly its add-ons`, { voidedInvoiceId, conflictInvoiceId: minted.conflict.id, addonTotal: extras.total });
+        const heldError = released
+          ? `${covered.hold.summary} — the closeout is saved but NOT finalized. Retry the closeout.`
+          : `${covered.hold.summary} — the closeout is saved but NOT finalized. It will become retryable within about ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)} minutes — retry the closeout then.`;
+        // Literal codes: the admin client resumes every committed-but-not-
+        // finalized 503 by code (COMPLETION_RESUME_OWED_CODES), and its
+        // contract test reads each code off these objects.
+        if (covered.hold.code === 'annual_prepay_addons_lookup_failed') {
+          return ({ status: 503, body: {
+            error: heldError,
+            code: 'annual_prepay_addons_lookup_failed',
+            ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
+            serviceRecordId: record.id,
+          } });
         }
-        invoice = minted.invoice;
-        const settled = ['paid', 'prepaid'].includes(String(invoice.status || '').toLowerCase());
-        // An adopted unpaid bill is delivered like every other reused unpaid
-        // completion invoice (the pay link rides the completion text).
-        invoiceCreated = !settled;
-        alreadyPaid = settled;
-        annualPrepayExtrasCollectible = !settled;
-        payUrl = settled ? null : await shortenOrPassthrough(`${portalUrl}/pay/${invoice.token}`, {
-          kind: 'invoice', entityType: 'invoices', entityId: invoice.id, customerId: invoice.customer_id,
-          codePrefix: invoiceShortCodePrefix(invoice),
-        });
-      } catch (err) {
-        logger.error(`[dispatch] annual-prepay add-ons invoice FAILED for visit ${svc.id}: ${err.message}`);
-        return alertAnnualPrepayAddons('the add-ons invoice could not be created', { voidedInvoiceId, addonTotal: extras.total, error: String(err.message).slice(0, 200) });
-      }
-      return undefined;
-    };
-
-    // After this completion voided the covered visit's office invoice — in
-    // this pass, or in an earlier one a crash cut short (the no-invoice
-    // branch below) — flag the lines that were neither the covered base nor
-    // this visit's add-ons (the office's to re-bill; nothing here can name
-    // them), then bill the add-ons against that invoice's own pricing. The
-    // flag goes first: a retry that finds the add-ons bill already minted
-    // adopts it and never comes back here.
-    const afterCoveredInvoiceVoided = async (voidedInvoice, voidedLines = null) => {
-      let unknownCharges = true;
-      try {
-        unknownCharges = (voidedLines || classifyCoveredVisitInvoice(voidedInvoice, svc, await annualPrepayAddonRows(svc))).unknownCharges;
-      } catch (err) {
-        logger.warn(`[dispatch] annual-prepay voided invoice ${voidedInvoice.id} unreadable for visit ${svc.id}: ${err.message}`);
-      }
-      if (unknownCharges) {
-        annualPrepayOtherChargesOwed = true;
-        try {
-          const NotificationService = require('../services/notification-service');
-          const bell = await NotificationService.notifyAdmin('billing', 'Annual-prepay visit invoice voided — check its other charges',
-            `Completing ${svc.service_type} for customer ${svc.customer_id}: invoice ${voidedInvoice.id} was voided because the annual prepay covers the visit, but it also carried charges that are neither the covered visit nor its add-ons. Re-bill any that are owed.`,
-            { link: `/admin/customers/${svc.customer_id}`, bell: true, dedupeKey: `annual_prepay_invoice_reconcile:${svc.id}`,
-              refreshOnDedupe: true,
-              metadata: { customerId: svc.customer_id, scheduledServiceId: svc.id, voidedInvoiceId: voidedInvoice.id } });
-          if (!bell) throw new Error('the office notification was not recorded');
-        } catch (bellErr) {
-          annualPrepayAlertError = annualPrepayAlertError || bellErr;
-          logger.error(`[dispatch] annual-prepay voided-invoice reconcile alert FAILED for ${svc.id}: ${bellErr.message}`);
-          // No bill yet: the retry must come back through here (no live
-          // invoice → the saved void) to raise this alert before billing.
-          return;
-        }
-      }
-      if (visitPerformed && !recapReviewOnly) await billAnnualPrepayAddons({ voidedInvoice });
-    };
-
-    let annualPrepayAddonsHandled = false;
-    // An invoice this closeout could not read against the visit's add-ons
-    // is left untouched and unjudged: the closeout stays unfinalized (the
-    // release/503 below) and the retry classifies it again.
-    let annualPrepayLookupError = null;
-    // A live annual-prepay-COVERED visit never carries a collectible invoice
-    // for the covered BASE work: it's already paid on the annual prepay
-    // invoice. The suppression gate stops NEW invoices; a pre-existing /
-    // pre-minted invoice with NO add-ons is SETTLED here as non-cash
-    // annual-prepay coverage → 'prepaid' (non-collectible, no pay link, books
-    // no payments row → no revenue double-count). An invoice that bills only
-    // add-ons (this visit's add-ons bill from an earlier pass, or the
-    // office's own) is the collectible remainder and is kept as is. One that
-    // mixes the covered base with add-ons, or carries applied account /
-    // deposit credit, is voided (voidInvoice restores any credit and cancels
-    // the PI) and the add-ons are billed alone (ADMIN-BUG-R13). Fails closed:
-    // a cash-paid / in-flight invoice is left for normal handling.
-    // Invoice-issued closeout: the issued invoice is the customer-facing
-    // artifact the office chose to send — it is never settled or voided here
-    // (pre-push P0: a covered visit whose SENT invoice carried add-ons would
-    // have been voided outright, dropping collectible AR right after
-    // delivery). Coverage questions on such an invoice are the office's.
-    if (annualPrepayCovered && invoice?.id && !issuedInvoiceCloseout
-      && !['paid', 'prepaid', 'void'].includes(String(invoice.status || '').toLowerCase())) {
-      annualPrepayAddonsHandled = true;
-      let coveredAddons = null;
-      try {
-        const InvoiceService = require('../services/invoice');
-        coveredAddons = annualPrepayAddonBilling
-          ? await annualPrepayAddonRows(svc).catch((lookupErr) => {
-            annualPrepayLookupError = lookupErr;
-            throw lookupErr;
-          })
-          : { clientIds: new Set(), priced: false };
-        const invoiceLines = classifyCoveredVisitInvoice(invoice, svc, coveredAddons);
-        if (invoiceLines.billsOnlyAddons) {
-          annualPrepayExtrasCollectible = true;
-          // This open bill is owed. The paid-invoice lookup above also sees
-          // the covered base settled beside it (a resumed completion links
-          // both to the record) — that is not "all paid".
-          alreadyPaid = false;
-          // It stands for the whole remainder only when it bills every
-          // priced add-on at the visit's net; otherwise it is still owed
-          // (and keeps its pay link) and the office reconciles the rest.
-          let extras = null;
-          try {
-            extras = await annualPrepayExtrasForVisit({ ...svc, ...(await db('scheduled_services').where({ id: svc.id }).first()) }, coveredAddons);
-          } catch (err) {
-            logger.warn(`[dispatch] annual-prepay add-on lines unreadable for visit ${svc.id}: ${err.message}`);
-          }
-          if (!invoiceBillsExactExtras(invoice, coveredAddons, extras)) {
-            await alertAnnualPrepayAddons(`invoice ${invoice.invoice_number || invoice.id} bills only some of the add-ons or prices them differently${extras && !extras.ambiguous ? ` (the visit prices them at $${extras.total.toFixed(2)})` : ''}`, { invoiceId: invoice.id, addonTotal: extras?.total ?? null });
-          }
-        } else {
-          // Named settleRes, NOT res — `res` here would shadow the Express response
-          // for the rest of this block (the isOutboundCall TDZ-shadow failure class).
-          const settleRes = await InvoiceService.settleInvoiceAsAnnualPrepayCovered(
-            invoice.id, svc.annual_prepay_term_id, { recordedBy: 'system:annual_prepay_completion' },
-          );
-          if (settleRes.settled) {
-            // Fully covered → settled non-cash 'prepaid' (invoice + service record kept,
-            // no revenue double-count) — non-collectible, no pay link.
-            invoice = settleRes.invoice;
-            invoiceCreated = false;
-            payUrl = null;
-            alreadyPaid = true;
-            // An office invoice that predates the visit's add-ons settles as
-            // covered; the add-ons it never carried are still owed.
-            if (annualPrepayAddonBilling && visitPerformed && !recapReviewOnly) await billAnnualPrepayAddons({ coveredInvoiceId: settleRes.invoice?.id || null });
-          } else if (['has_add_ons', 'has_applied_credit', 'has_deposit_credit'].includes(settleRes.reason)) {
-            const voidedInvoice = invoice;
-            const voidedInvoiceId = voidedInvoice.id;
-            // Saved BEFORE the void: a retry after a crash past the void
-            // finds no live invoice, and must still judge the add-ons bill
-            // against this invoice's own pricing (afterCoveredInvoiceVoided).
-            // Unsaved → no void: the office reconciles the invoice instead.
-            let voidRecorded = !annualPrepayAddonBilling;
-            if (annualPrepayAddonBilling) {
-              try {
-                await mergeRecordNotesKeys(record.id, { annualPrepayVoidedInvoiceId: voidedInvoiceId });
-                voidRecorded = true;
-              } catch (markErr) {
-                logger.error(`[dispatch] annual-prepay void marker write FAILED for visit ${svc.id} (invoice ${voidedInvoiceId}): ${markErr.message}`);
-              }
-            }
-            if (!voidRecorded) {
-              await alertAnnualPrepayAddons(`invoice ${voidedInvoice.invoice_number || voidedInvoiceId} bills the covered visit together with other charges and was left as is`, { invoiceId: voidedInvoiceId });
-            } else {
-              try {
-                await InvoiceService.voidInvoice(voidedInvoiceId);
-              } catch (voidErr) {
-                // voidInvoice can throw AFTER its void committed (the
-                // annual-prepay / follow-up steps that run past the
-                // transaction); only a void that did not land is a failure.
-                const after = await db('invoices').where({ id: voidedInvoiceId }).first('status');
-                if (String(after?.status || '').toLowerCase() !== 'void') throw voidErr;
-                logger.warn(`[dispatch] annual-prepay covered visit ${svc.id}: invoice ${voidedInvoiceId} voided, then: ${voidErr.message}`);
-              }
-              invoice = null;
-              invoiceCreated = false;
-              payUrl = null;
-              alreadyPaid = true;
-              if (annualPrepayAddonBilling) await afterCoveredInvoiceVoided(voidedInvoice, invoiceLines);
-            }
-          }
-          // else (payer_billed / already_settled / processing): leave for normal handling.
-        }
-      } catch (settleErr) {
-        logger.warn(`[dispatch] annual-prepay covered visit ${svc.id}: could not settle pre-existing invoice ${invoice?.id}: ${settleErr.message}`);
-        // Neither settled nor voided (a payment in flight, a concurrent
-        // change): the invoice stays for normal handling, and nothing here
-        // billed the visit's own add-ons — the office decides, and the text
-        // never says "all paid" over them.
-        if (!annualPrepayLookupError && coveredAddons?.priced) {
-          await alertAnnualPrepayAddons(`invoice ${invoice?.invoice_number || invoice?.id} could not be reconciled with the annual prepay: ${String(settleErr.message).slice(0, 160)}`, { invoiceId: invoice?.id || null });
-        }
-      }
-    }
-    // No invoice on the covered visit at all (the common case): bill its
-    // add-ons, if any. Not over a refunded invoice (terminalCompletionInvoice
-    // — that money may bounce back; the manual-billing lane owns it), and not
-    // for a visit that performed no application (visitPerformed mirrors the
-    // main auto-invoice gate). Not for an invoice-issued closeout either: it
-    // never mints — the issued invoice is reused or, voided since, the visit
-    // closes without one (shouldAutoInvoiceCompletion). A retry whose earlier
-    // pass voided the office invoice (its id saved before the void) finishes
-    // that void's work instead — a plain bill would skip the office-pricing
-    // check.
-    // The office invoice an earlier pass of this closeout voided (its id is
-    // saved before the void); null on a first pass.
-    const priorVoidedId = annualPrepayAddonBilling
-      ? parseJsonObject(record?.structured_notes)?.annualPrepayVoidedInvoiceId || null
-      : null;
-    let priorVoidRevisited = false;
-    if (annualPrepayAddonBilling && !annualPrepayAddonsHandled && annualPrepayCovered && !invoice?.id
-      && !issuedInvoiceCloseout) {
-      if (terminalCompletionInvoice) {
-        // A refunded invoice on the visit: nothing is minted beside it while
-        // its money can still come back, and the manual-billing alert skips
-        // a covered visit (prepaidCovered) — so priced add-ons get their own.
-        if (visitPerformed && !recapReviewOnly) {
-          let refundAddons = null;
-          try {
-            refundAddons = await annualPrepayAddonRows(svc);
-          } catch (lookupErr) {
-            annualPrepayLookupError = lookupErr;
-            logger.error(`[dispatch] annual-prepay add-on rows unreadable for visit ${svc.id} (refunded invoice ${terminalCompletionInvoice.id}): ${lookupErr.message}`);
-          }
-          if (refundAddons?.priced) {
-            await alertAnnualPrepayAddons(`invoice ${terminalCompletionInvoice.invoice_number || terminalCompletionInvoice.id} on the visit is ${terminalCompletionInvoice.status}; bill them once that refund is final`, { terminalInvoiceId: terminalCompletionInvoice.id });
-          }
-        }
-      } else if (priorVoidedId) {
-        let priorVoided = null;
-        try {
-          priorVoided = await db('invoices').where({ id: priorVoidedId }).first();
-        } catch (err) {
-          logger.warn(`[dispatch] annual-prepay voided invoice ${priorVoidedId} re-read failed for visit ${svc.id}: ${err.message}`);
-        }
-        priorVoidRevisited = true;
-        if (priorVoided) await afterCoveredInvoiceVoided(priorVoided);
-        else await alertAnnualPrepayAddons(`invoice ${priorVoidedId}, voided by this closeout, could not be re-read`, { voidedInvoiceId: priorVoidedId });
-      } else if (visitPerformed && !recapReviewOnly) {
-        await billAnnualPrepayAddons();
-      }
-    }
-    // Resume after a crash between settling the covered base and minting its
-    // add-ons sibling: the retry reloads the base, already 'prepaid' as this
-    // term's coverage. Bill the add-ons beside it (the mint adopts a sibling
-    // an earlier pass did commit, and never the base itself).
-    if (annualPrepayAddonBilling && !annualPrepayAddonsHandled && annualPrepayCovered && invoice?.id && !issuedInvoiceCloseout
-      && !recapReviewOnly && visitPerformed && !terminalCompletionInvoice
-      && String(invoice.status || '').toLowerCase() === 'prepaid'
-      && svc.annual_prepay_term_id
-      && String(invoice.annual_prepay_covered_term_id || '') === String(svc.annual_prepay_term_id)) {
-      await billAnnualPrepayAddons({ coveredInvoiceId: invoice.id });
-    }
-    // A settled invoice on the covered visit — paid, or prepaid other than
-    // this term's covered-base settlement (the resume branch above bills
-    // beside that one) — keeps its settlement, but it stands for the
-    // visit's add-ons only when it bills exactly them (invoiceBillsExactExtras).
-    // An office invoice paid for some of the add-ons, or for the covered
-    // base with them, leaves a remainder nobody else bills: the office is
-    // told, and the text never says "all paid".
-    const settledStatus = String(invoice?.status || '').toLowerCase();
-    if (annualPrepayAddonBilling && !annualPrepayAddonsHandled && annualPrepayCovered && invoice?.id && !issuedInvoiceCloseout
-      && !recapReviewOnly && visitPerformed && !terminalCompletionInvoice
-      && ['paid', 'prepaid'].includes(settledStatus)
-      && !(settledStatus === 'prepaid' && svc.annual_prepay_term_id
-        && String(invoice.annual_prepay_covered_term_id || '') === String(svc.annual_prepay_term_id))) {
-      let settledAddons = null;
-      let settledExtras = null;
-      try {
-        settledAddons = await annualPrepayAddonRows(svc);
-        if (settledAddons.priced) {
-          settledExtras = await annualPrepayExtrasForVisit({ ...svc, ...(await db('scheduled_services').where({ id: svc.id }).first()) }, settledAddons);
-        }
-      } catch (lookupErr) {
-        if (!settledAddons) annualPrepayLookupError = lookupErr;
-        logger.warn(`[dispatch] annual-prepay add-ons unreadable against settled invoice ${invoice.id} for visit ${svc.id}: ${lookupErr.message}`);
-      }
-      if (settledAddons?.priced && !invoiceBillsExactExtras(invoice, settledAddons, settledExtras)) {
-        await alertAnnualPrepayAddons(`invoice ${invoice.invoice_number || invoice.id} is already ${settledStatus} but does not bill exactly the visit's add-ons${settledExtras && !settledExtras.ambiguous ? ` (the visit prices them at $${settledExtras.total.toFixed(2)})` : ''} — check what is still owed`, { invoiceId: invoice.id, addonTotal: settledExtras?.total ?? null });
-      }
-    }
-    // A retry that found an invoice on the visit (the add-ons bill an earlier
-    // pass minted, perhaps paid or credited since) never revisited that
-    // void: its other charges still await the office's re-bill, so they are
-    // re-derived here — never "all paid" over them. An unreadable voided
-    // invoice counts as owed.
-    if (priorVoidedId && !priorVoidRevisited && !annualPrepayOtherChargesOwed) {
-      try {
-        const priorVoided = await db('invoices').where({ id: priorVoidedId }).first();
-        annualPrepayOtherChargesOwed = !priorVoided
-          || classifyCoveredVisitInvoice(priorVoided, svc, await annualPrepayAddonRows(svc)).unknownCharges;
-      } catch (err) {
-        annualPrepayOtherChargesOwed = true;
-        logger.warn(`[dispatch] annual-prepay voided invoice ${priorVoidedId} re-read failed for visit ${svc.id}: ${err.message}`);
-      }
-    }
-    // The alerts above are the ONLY follow-up for add-ons this closeout did
-    // not bill, and for charges on an invoice it voided; the add-on read is
-    // what every decision above rests on. Either failing keeps the closeout
-    // unfinalized — same release/503 shape as the manual-billing alert — so
-    // the retry reads and decides again before anything is sent.
-    if (annualPrepayLookupError || annualPrepayAlertError) {
-      const lookupFailed = !!annualPrepayLookupError;
-      const holdErr = annualPrepayLookupError || annualPrepayAlertError;
-      logger.error(`[dispatch] annual-prepay add-ons ${lookupFailed ? 'lookup' : 'alert'} FAILED for ${svc.id} — closeout NOT finalized: ${holdErr.message}`);
-      const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, holdErr);
-      if (!released) {
-        logger.error(`[dispatch] release-for-resume did NOT release attempt ${completionAttempt?.id} for ${svc.id} — retry blocked until the ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)}-minute stale window reclaims it`);
-      }
-      const held = lookupFailed
-        ? 'This visit\'s add-ons could not be checked against its invoice'
-        : 'This visit\'s add-ons need the office\'s attention and the office alert could not be recorded';
-      const heldError = released
-        ? `${held} — the closeout is saved but NOT finalized. Retry the closeout.`
-        : `${held} — the closeout is saved but NOT finalized. It will become retryable within about ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)} minutes — retry the closeout then.`;
-      // Literal codes: the admin client resumes every committed-but-not-
-      // finalized 503 by code (COMPLETION_RESUME_OWED_CODES), and its
-      // contract test reads each code off these objects.
-      if (lookupFailed) {
         return ({ status: 503, body: {
           error: heldError,
-          code: 'annual_prepay_addons_lookup_failed',
+          code: 'annual_prepay_addons_alert_failed',
           ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
           serviceRecordId: record.id,
         } });
       }
-      return ({ status: 503, body: {
-        error: heldError,
-        code: 'annual_prepay_addons_alert_failed',
-        ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
-        serviceRecordId: record.id,
-      } });
     }
+    // Collectible on a covered visit means the add-ons bill; anywhere else
+    // the visit's own invoice (ADMIN-BUG-R13).
+    const coveredVisitCollectible = !prepaidCovered || annualPrepayExtrasCollectible;
 
     // Auto-apply available account credit (e.g. the referral reward) to the
     // residual collectible bill — runs for BOTH the freshly-created (shouldInvoice)
@@ -12528,7 +12080,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
         const allowCompletionInvoiceLinkBase = !suppressCompletionInvoiceLink
           && includePayLink !== false
           // ADMIN-BUG-R13: the covered base needs no link, the add-ons bill does.
-          && (!prepaidCovered || annualPrepayExtrasCollectible)
+          && coveredVisitCollectible
           && !alreadyPaid
           && !autopayCoversVisit
           // Collectible statuses only: a crash-resumed completion reloads the
@@ -12550,8 +12102,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // open (account credit can still settle it above → alreadyPaid), while
         // add-ons are owed but only alerted to the office, or while a voided
         // invoice's other charges wait for the office to re-bill them.
-        const usePaidCompletionTemplate = !(annualPrepayExtrasCollectible && !alreadyPaid) && !annualPrepayAddonsUnbilled
-          && !annualPrepayOtherChargesOwed && (alreadyPaid
+        const usePaidCompletionTemplate = !(annualPrepayExtrasCollectible && !alreadyPaid) && !annualPrepayOwedUnbilled
+          && (alreadyPaid
           || prepaidCovered
           || autopayCoversVisit
           || ['paid', 'prepaid'].includes(String(invoice?.status || '').toLowerCase()));
@@ -13586,7 +13138,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // paid/prepaid/void/refunded via the shared helper.
       && require('../services/invoice-helpers').isInvoiceCollectibleStatus(invoice.status)
       // ADMIN-BUG-R13: the add-ons bill on a covered visit is collectible.
-      && (!prepaidCovered || annualPrepayExtrasCollectible)
+      && coveredVisitCollectible
       && !alreadyPaid
       && !autopayCoversVisit
       && !suppressCompletionInvoiceLink

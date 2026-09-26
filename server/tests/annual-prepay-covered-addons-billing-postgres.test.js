@@ -665,6 +665,60 @@ postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
     expect(await liveInvoices(f)).toHaveLength(0);
   });
 
+  test('a retry resumes a gate-on attempt\'s add-ons bill even after the gate is turned off — never voided (GitHub r2 P1)', async () => {
+    const f = await coveredVisit();
+    const idempotencyKey = randomUUID();
+    expect(await complete(f, {}, { idempotencyKey })).toMatchObject({ status: 200 });
+    const [bill] = await liveInvoices(f);
+    expect(Number(bill.total)).toBe(ADDON);
+    // A later step handed the attempt back for a retry; the kill switch is
+    // flipped before it runs.
+    await releaseForResume(f);
+    delete process.env.GATE_ANNUAL_PREPAY_ADDON_BILLING;
+    let retry;
+    try {
+      retry = await complete(f, {}, { idempotencyKey });
+    } finally {
+      process.env.GATE_ANNUAL_PREPAY_ADDON_BILLING = 'true';
+    }
+    expect(retry).toMatchObject({ status: 200 });
+    expect((await trx('invoices').where({ id: bill.id }).first('status')).status).not.toBe('void');
+    expect(retry.body?.invoiceId).toBe(bill.id);
+  });
+
+  test('a retry that cannot re-read the invoice it voided holds the closeout instead of losing its other charges (GitHub r2 P1)', async () => {
+    const f = await coveredVisit({ invoiceLines: (x) => [baseLine(x), addonLine(x),
+      { description: 'Synthetic trip charge', amount: 15, quantity: 1, unit_price: 15 }] });
+    const idempotencyKey = randomUUID();
+    expect(await complete(f, {}, { idempotencyKey })).toMatchObject({ status: 200 });
+    // The crash: the void committed; no alert, no add-ons bill yet.
+    await trx('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`annual_prepay_invoice_reconcile:${f.serviceId}`]).del();
+    await trx('invoices').where({ customer_id: f.customerId }).whereNot({ id: f.invoiceId }).del();
+    await releaseForResume(f);
+    // The retry's re-read of the voided invoice fails once.
+    const dbMock = require('../models/db');
+    const real = dbMock.connection;
+    dbMock.connection = new Proxy(real, {
+      apply(target, thisArg, args) {
+        if (args[0] === 'invoices' && /reconcileNoInvoice/.test(new Error().stack)) throw new Error('synthetic invoice read failure');
+        return Reflect.apply(target, thisArg, args);
+      },
+    });
+    let held;
+    try {
+      held = await complete(f, {}, { idempotencyKey });
+    } finally {
+      dbMock.connection = real;
+    }
+    expect(held).toMatchObject({ status: 503, body: { code: 'annual_prepay_addons_lookup_failed' } });
+    expect(await liveInvoices(f)).toHaveLength(0);
+    const retry = await complete(f, {}, { idempotencyKey });
+    expect(retry).toMatchObject({ status: 200 });
+    expect(await trx('notifications').where({ recipient_type: 'admin' })
+      .whereRaw("metadata->>'dedupeKey' = ?", [`annual_prepay_invoice_reconcile:${f.serviceId}`]).first()).toBeTruthy();
+    expect(Number((await liveInvoices(f))[0].total)).toBe(ADDON);
+  });
+
   describe('dark (GATE_ANNUAL_PREPAY_ADDON_BILLING off): today\'s behavior', () => {
     beforeEach(() => { delete process.env.GATE_ANNUAL_PREPAY_ADDON_BILLING; });
     afterEach(() => { process.env.GATE_ANNUAL_PREPAY_ADDON_BILLING = 'true'; });
