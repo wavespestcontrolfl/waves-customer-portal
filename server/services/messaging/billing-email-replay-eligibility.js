@@ -144,6 +144,12 @@ async function balanceReminderVisitRefusal(meta, database) {
     || String(visit.service_type || 'service') !== meta.appointment_service_type) {
     return refused('balance-reminder-visit-changed');
   }
+  if (meta.source_entry_point === 'previsit_balance_reminder') {
+    const payer = await require('../payer').resolveForInvoice({
+      database, customerId: meta.customer_id, scheduledServiceId: meta.appointment_id, throwOnError: true,
+    });
+    if (payer.payerId) return refused('previsit-visit-payer-billed');
+  }
   return null;
 }
 
@@ -156,6 +162,39 @@ async function invoiceRefusal(meta, database) {
   const ownership = await require('../invoice-helpers').selfPayAtDispatch(meta.invoice_id, database)();
   if (ownership.ok === true) return null;
   return refused(ownership.code || 'invoice-not-self-pay', ownership.code === 'INVOICE_UNREADABLE');
+}
+
+// A previsit email quotes an aggregate rather than one invoice. Its saved
+// context pins this rendering's invoice set, since a reused reservation can
+// predate a new quote. Payment must invalidate the old quote even with policy dark.
+async function previsitQuoteRefusal(meta, database) {
+  if (meta.source_entry_point !== 'previsit_balance_reminder') return null;
+  if (!/^\d+\.\d{2}$/.test(meta.rendered_amount || '') || !(Number(meta.rendered_amount) > 0)) {
+    return refused('previsit-quote-missing');
+  }
+  const reservation = await database('collections_contact_ledger')
+    .where({ id: meta.collections_ledger_id, customer_id: meta.customer_id,
+      source: 'previsit_balance_reminder', channel: 'email' })
+    .whereRaw("metadata->>'notificationEventKey' = ?", [meta.notificationEventKey]).first('id');
+  const ids = meta.invoice_ids;
+  if (!reservation || !Array.isArray(ids) || ids.some((id) => typeof id !== 'string' || !id)
+    || new Set(ids).size !== ids.length) return refused('previsit-quote-missing');
+  const invoices = ids.length ? await database('invoices').whereIn('id', ids).select('*') : [];
+  if (invoices.length !== ids.length) return refused('previsit-quote-changed');
+  const { isInvoiceCollectibleStatus, invoiceWithdrawnFromCustomer, invoiceAmountDue } = require('../invoice-helpers');
+  let cents = await require('../previsit-balance-reminder').currentDuesAllowanceCents(meta.customer_id, database);
+  for (const invoice of invoices) {
+    const due = Math.round(invoiceAmountDue(invoice) * 100);
+    if (String(invoice.customer_id) !== String(meta.customer_id) || !isInvoiceCollectibleStatus(invoice.status)
+      || invoice.payer_id || invoiceWithdrawnFromCustomer(invoice) || !(due > 0)) {
+      return refused('previsit-quote-changed');
+    }
+    if (await require('../invoice-followups').isDunningStopped(invoice.id, database)) {
+      return refused('previsit-quote-changed');
+    }
+    cents += due;
+  }
+  return cents === Math.round(Number(meta.rendered_amount) * 100) ? null : refused('previsit-quote-changed');
 }
 
 async function persistedLedgerExclusions(meta, database) {
@@ -181,6 +220,7 @@ async function collectionsPolicyRefusal(meta, database) {
     excludeLedgerIds: await persistedLedgerExclusions(meta, database),
     // A previsit reminder may be dues-only: count the dues still unpaid now.
     ...(meta.source_entry_point === 'previsit_balance_reminder' ? {
+      invoiceIds: meta.invoice_ids,
       offLedgerBalanceCents: await require('../previsit-balance-reminder')
         .currentDuesAllowanceCents(meta.customer_id, database),
     } : {}),
@@ -192,7 +232,8 @@ async function collectionsPolicyRefusal(meta, database) {
 
 async function billingEmailReplayEligible(meta, database = db) {
   try {
-    const checks = [prechargeRefusal, expiryRefusal, balanceReminderVisitRefusal, invoiceRefusal, collectionsPolicyRefusal];
+    const checks = [prechargeRefusal, expiryRefusal, balanceReminderVisitRefusal, invoiceRefusal,
+      previsitQuoteRefusal, collectionsPolicyRefusal];
     for (const check of checks) {
       const refusal = await check(meta || {}, database);
       if (refusal) return refusal;

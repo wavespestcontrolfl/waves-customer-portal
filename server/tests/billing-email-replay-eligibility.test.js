@@ -5,9 +5,13 @@ jest.mock('../services/autopay-eligibility', () => ({
 }));
 jest.mock('../services/annual-prepay-renewals', () => ({ getCardExpiryExemptions: jest.fn() }));
 jest.mock('../services/messaging/deferred-replay-registry', () => ({ invoiceStillCollectible: jest.fn() }));
-jest.mock('../services/invoice-helpers', () => ({ selfPayAtDispatch: jest.fn() }));
+jest.mock('../services/invoice-helpers', () => ({
+  ...jest.requireActual('../services/invoice-helpers'), selfPayAtDispatch: jest.fn(),
+}));
 jest.mock('../services/collections/rail-guard', () => ({ collectionsChannelPermitted: jest.fn() }));
 jest.mock('../services/previsit-balance-reminder', () => ({ currentDuesAllowanceCents: jest.fn(async () => 0) }));
+jest.mock('../services/payer', () => ({ resolveForInvoice: jest.fn() }));
+jest.mock('../services/invoice-followups', () => ({ isDunningStopped: jest.fn() }));
 
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { getChargeableAutopayMethod } = require('../services/autopay-eligibility');
@@ -82,6 +86,9 @@ beforeEach(() => {
   invoiceStillCollectible.mockResolvedValue({ eligible: true });
   selfPayAtDispatch.mockReturnValue(async () => ({ ok: true }));
   collectionsChannelPermitted.mockResolvedValue({ allowed: true, durable: false });
+  require('../services/previsit-balance-reminder').currentDuesAllowanceCents.mockResolvedValue(0);
+  require('../services/payer').resolveForInvoice.mockResolvedValue({ payerId: null });
+  require('../services/invoice-followups').isDunningStopped.mockResolvedValue(false);
 });
 
 afterAll(() => jest.useRealTimers());
@@ -205,9 +212,18 @@ describe('balance-reminder visit identity', () => {
 describe('previsit balance reminder replay (aggregate, visit-pinned)', () => {
   const meta = { customer_id: customerId, source_entry_point: 'previsit_balance_reminder', appointment_id: 'visit-1',
     appointment_date: '2026-09-28', appointment_service_type: 'General Pest Control', appointment_rendered_on: '2026-09-26',
-    notificationEventKey: 'previsit-balance:visit-1', collections_ledger_id: 'own-email' };
+    notificationEventKey: 'previsit-balance:visit-1', collections_ledger_id: 'own-email', rendered_amount: '100.00',
+    invoice_ids: ['invoice-1', 'invoice-2'] };
   const visit = { id: 'visit-1', customer_id: customerId, status: 'confirmed',
     scheduled_date: new Date('2026-09-28T00:00:00Z'), service_type: 'General Pest Control' };
+  const invoices = [
+    { id: 'invoice-1', customer_id: customerId, status: 'sent', total: '40.00' },
+    { id: 'invoice-2', customer_id: customerId, status: 'sent', total: '60.00' },
+  ];
+  const reservation = { id: 'own-email', customer_id: customerId, source: 'previsit_balance_reminder',
+    channel: 'email', invoice_ids: ['invoice-1', 'invoice-2'], metadata: { notificationEventKey: meta.notificationEventKey } };
+  const quoteDatabase = (overrides = {}) => databaseWith({ scheduled_services: [visit], invoices,
+    collections_contact_ledger: [reservation], ...overrides });
 
   test('shares the balance-reminder visit pin: missing pin, stale copy and a moved visit are refused', async () => {
     await expect(billingEmailReplayEligible({ ...meta, appointment_id: null }, databaseWith()))
@@ -216,28 +232,27 @@ describe('previsit balance reminder replay (aggregate, visit-pinned)', () => {
       .resolves.toMatchObject({ eligible: false, reason: 'balance-reminder-copy-stale' });
     await expect(billingEmailReplayEligible(meta, databaseWith({ scheduled_services: [{ ...visit, status: 'cancelled' }] })))
       .resolves.toMatchObject({ eligible: false, reason: 'balance-reminder-visit-changed' });
-    await expect(billingEmailReplayEligible(meta, databaseWith({ scheduled_services: [visit] })))
+    await expect(billingEmailReplayEligible(meta, quoteDatabase()))
       .resolves.toEqual({ eligible: true });
   });
 
   test('gate-on rechecks the collections policy as a balance reminder with no single invoice', async () => {
     process.env.GATE_COLLECTIONS_POLICY = 'true';
-    const database = databaseWith({ scheduled_services: [visit], collections_contact_ledger: [
-      { id: 'own-email', customer_id: customerId, source: 'previsit_balance_reminder',
-        metadata: { notificationEventKey: meta.notificationEventKey } },
-    ] });
+    const database = quoteDatabase();
     await expect(billingEmailReplayEligible(meta, database)).resolves.toEqual({ eligible: true });
     expect(collectionsChannelPermitted).toHaveBeenCalledWith(expect.objectContaining({
       customerId, invoiceId: null, channel: 'email', purpose: 'balance_reminder', excludeLedgerIds: ['own-email'],
+      invoiceIds: meta.invoice_ids, database,
     }));
   });
 
   test('a dues-only previsit replay counts the dues still unpaid now as off-ledger debt', async () => {
     process.env.GATE_COLLECTIONS_POLICY = 'true';
     const { currentDuesAllowanceCents } = require('../services/previsit-balance-reminder');
-    currentDuesAllowanceCents.mockResolvedValueOnce(4900);
-    const database = databaseWith({ scheduled_services: [visit], collections_contact_ledger: [] });
-    await billingEmailReplayEligible(meta, database);
+    currentDuesAllowanceCents.mockResolvedValue(4900);
+    const database = quoteDatabase({ collections_contact_ledger: [{ ...reservation, invoice_ids: [] }] });
+    await expect(billingEmailReplayEligible({ ...meta, rendered_amount: '49.00', invoice_ids: [] }, database))
+      .resolves.toEqual({ eligible: true });
     expect(currentDuesAllowanceCents).toHaveBeenCalledWith(customerId, database);
     expect(collectionsChannelPermitted).toHaveBeenCalledWith(expect.objectContaining({ offLedgerBalanceCents: 4900 }));
   });
@@ -246,7 +261,85 @@ describe('previsit balance reminder replay (aggregate, visit-pinned)', () => {
     process.env.GATE_COLLECTIONS_POLICY = 'true';
     const { currentDuesAllowanceCents } = require('../services/previsit-balance-reminder');
     currentDuesAllowanceCents.mockRejectedValueOnce(new Error('customers read failed'));
-    await expect(billingEmailReplayEligible(meta, databaseWith({ scheduled_services: [visit] })))
+    await expect(billingEmailReplayEligible(meta, quoteDatabase()))
+      .resolves.toEqual({ eligible: false, reason: 'billing-email-eligibility-unavailable', retryable: true });
+  });
+
+  test.each(['true', 'false'])('refuses a partially paid aggregate even with another debt open (policy=%s)', async (gate) => {
+    process.env.GATE_COLLECTIONS_POLICY = gate;
+    const database = quoteDatabase({ invoices: [{ ...invoices[0], total: '20.00' }, invoices[1]] });
+    await expect(billingEmailReplayEligible(meta, database))
+      .resolves.toEqual({ eligible: false, reason: 'previsit-quote-changed', retryable: false });
+  });
+
+  test.each([{ status: 'paid' }, { status: 'void' }, { payer_id: 'payer-1' }, { customer_id: 'other' }])(
+    'refuses a quoted invoice that stopped being collectible for this customer: %j', async (change) => {
+      await expect(billingEmailReplayEligible(meta,
+        quoteDatabase({ invoices: [{ ...invoices[0], ...change }, invoices[1]] })))
+        .resolves.toMatchObject({ eligible: false, reason: 'previsit-quote-changed' });
+    },
+  );
+
+  test('refuses missing debt, missing reservations, and reservations for another event or customer', async () => {
+    await expect(billingEmailReplayEligible(meta, quoteDatabase({ invoices: [invoices[1]] })))
+      .resolves.toMatchObject({ eligible: false, reason: 'previsit-quote-changed' });
+    for (const rows of [[], [{ ...reservation, customer_id: 'other' }],
+      [{ ...reservation, metadata: { notificationEventKey: 'different' } }]]) {
+      await expect(billingEmailReplayEligible(meta, quoteDatabase({ collections_contact_ledger: rows })))
+        .resolves.toMatchObject({ eligible: false, reason: 'previsit-quote-missing' });
+    }
+  });
+
+  test('refuses a paid dues-only reminder without depending on the policy gate', async () => {
+    await expect(billingEmailReplayEligible({ ...meta, rendered_amount: '49.00', invoice_ids: [] },
+      quoteDatabase({ collections_contact_ledger: [{ ...reservation, invoice_ids: [] }] })))
+      .resolves.toMatchObject({ eligible: false, reason: 'previsit-quote-changed' });
+  });
+
+  test('holds unreadable invoices for retry and refuses missing historical quote evidence', async () => {
+    await expect(billingEmailReplayEligible(meta, quoteDatabase({ invoices: new Error('read unavailable') })))
+      .resolves.toEqual({ eligible: false, reason: 'billing-email-eligibility-unavailable', retryable: true });
+    await expect(billingEmailReplayEligible({ ...meta, rendered_amount: undefined }, quoteDatabase()))
+      .resolves.toMatchObject({ eligible: false, reason: 'previsit-quote-missing' });
+  });
+
+  test('a fresh quote on a reused reservation retries only the invoices named by that rendering', async () => {
+    const database = quoteDatabase({ invoices: [{ ...invoices[0], status: 'paid' }, invoices[1]] });
+    // The reservation still lists both invoices from the failed first attempt.
+    await expect(billingEmailReplayEligible({ ...meta, rendered_amount: '60.00', invoice_ids: ['invoice-2'] }, database))
+      .resolves.toEqual({ eligible: true });
+    await expect(billingEmailReplayEligible(meta, database))
+      .resolves.toMatchObject({ eligible: false, reason: 'previsit-quote-changed' });
+  });
+
+  test('a dues-only reminder refuses a newly assigned visit payer on the held connection', async () => {
+    const { resolveForInvoice } = require('../services/payer');
+    resolveForInvoice.mockResolvedValueOnce({ payerId: 'payer-1' });
+    require('../services/previsit-balance-reminder').currentDuesAllowanceCents.mockResolvedValue(4900);
+    const database = quoteDatabase();
+    await expect(billingEmailReplayEligible({ ...meta, invoice_ids: [], rendered_amount: '49.00' }, database))
+      .resolves.toEqual({ eligible: false, reason: 'previsit-visit-payer-billed', retryable: false });
+    expect(resolveForInvoice).toHaveBeenCalledWith({
+      database, customerId, scheduledServiceId: meta.appointment_id, throwOnError: true,
+    });
+  });
+
+  test.each(['true', 'false'])('refuses a stopped quoted invoice with policy=%s', async (gate) => {
+    process.env.GATE_COLLECTIONS_POLICY = gate;
+    const { isDunningStopped } = require('../services/invoice-followups');
+    isDunningStopped.mockImplementation(async (id) => id === 'invoice-1');
+    const database = quoteDatabase();
+    await expect(billingEmailReplayEligible(meta, database))
+      .resolves.toEqual({ eligible: false, reason: 'previsit-quote-changed', retryable: false });
+    expect(isDunningStopped).toHaveBeenCalledWith('invoice-1', database);
+  });
+
+  test.each([
+    ['payer', () => require('../services/payer').resolveForInvoice],
+    ['dunning stop', () => require('../services/invoice-followups').isDunningStopped],
+  ])('an unreadable %s decision fails closed for retry', async (_label, mockedRead) => {
+    mockedRead().mockRejectedValueOnce(new Error('database unavailable'));
+    await expect(billingEmailReplayEligible(meta, quoteDatabase()))
       .resolves.toEqual({ eligible: false, reason: 'billing-email-eligibility-unavailable', retryable: true });
   });
 });

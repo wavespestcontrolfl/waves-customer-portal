@@ -144,6 +144,8 @@ describe('billing channel email adapter', () => {
         appointment_date: '2026-09-29',
         appointment_service_type: 'Pest Control',
         appointment_rendered_on: '2026-09-26',
+        rendered_amount: '96.60',
+        invoice_ids: ['invoice-1'],
       },
     }));
     expect(mockSendTemplate).toHaveBeenCalledWith(expect.objectContaining({
@@ -154,6 +156,8 @@ describe('billing channel email adapter', () => {
         collections_ledger_id: 'ledger-email-1',
         appointment_id: 'visit-1',
         appointment_rendered_on: '2026-09-26',
+        rendered_amount: '96.60',
+        invoice_ids: ['invoice-1'],
       }),
     }));
   });
@@ -162,10 +166,15 @@ describe('billing channel email adapter', () => {
     const complete = { schema_version: 1, customer_id: 'cust-1', category: 'billing',
       source_entry_point: 'previsit_balance_reminder', notificationEventKey: 'previsit-balance:visit-1',
       appointment_id: 'visit-1', appointment_date: '2026-09-29', appointment_service_type: 'Pest Control',
-      appointment_rendered_on: '2026-09-28', collections_ledger_id: 'ledger-email-1' };
+      appointment_rendered_on: '2026-09-28', collections_ledger_id: 'ledger-email-1', rendered_amount: '96.60', invoice_ids: ['invoice-1'] };
     expect(sanitizeBillingReplayContext(complete)).toMatchObject({ appointment_id: 'visit-1' });
     expect(sanitizeBillingReplayContext({ ...complete, appointment_id: null })).toBeNull();
     expect(sanitizeBillingReplayContext({ ...complete, collections_ledger_id: null })).toBeNull();
+    expect(sanitizeBillingReplayContext({ ...complete, rendered_amount: null })).toBeNull();
+    for (const invoiceIds of [null, 'invoice-1', [null], ['invoice-1', 'invoice-1']]) {
+      expect(sanitizeBillingReplayContext({ ...complete, invoice_ids: invoiceIds })).toBeNull();
+    }
+    expect(sanitizeBillingReplayContext({ ...complete, invoice_ids: [] })).toMatchObject({ invoice_ids: [] });
   });
 
   test.each([{ customer_id: null }, { notificationEventKey: null }, { rendered_amount: 'not-an-amount' }])(

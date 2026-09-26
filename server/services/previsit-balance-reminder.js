@@ -223,7 +223,7 @@ async function releasePrevisitClaim(visitId) {
 // billing_channel_email:<eventKey>:email and bound to this leg's reservation
 // (collections_ledger_id), so an acceptance whose stamp is lost is repaired
 // by reminderProgress.
-async function sendPrevisitLeg({ visit, amount, eventKey, channel, ledger, preDispatchCheck }) {
+async function sendPrevisitLeg({ visit, amount, invoiceIds, eventKey, channel, ledger, preDispatchCheck }) {
   const body = await renderSmsTemplate(TEMPLATE_KEY, {
     first_name: visit.first_name || 'there',
     amount: amount.toFixed(2),
@@ -260,6 +260,8 @@ async function sendPrevisitLeg({ visit, amount, eventKey, channel, ledger, preDi
       billingDeliveryLeg: channel,
       scheduled_service_id: visit.id,
       amount,
+      rendered_amount: amount.toFixed(2),
+      invoice_ids: invoiceIds,
       // Visit pin for a retried Email (billing-email-replay-eligibility):
       // refused once the visit moves or the copy is from an earlier day.
       appointment_date: dateOnlyString(visit.scheduled_date),
@@ -297,7 +299,7 @@ async function deliverExplicitPrevisitReminder({ visit, amount, duesCents, expli
       eventKey,
       channels: explicitChannels,
       metadata: { scheduled_service_id: visit.id, amount },
-      send: (channel, ledger) => sendPrevisitLeg({ visit, amount, eventKey, channel, ledger, preDispatchCheck }),
+      send: (channel, ledger) => sendPrevisitLeg({ visit, amount, invoiceIds, eventKey, channel, ledger, preDispatchCheck }),
     });
   } catch (helperErr) {
     logger.warn(`[previsit-balance] explicit-channel send failed for visit ${visit.id}: ${helperErr.message}`);
