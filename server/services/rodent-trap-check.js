@@ -35,67 +35,173 @@ const TRAPPING_VISIT_KEYS = [
   'rodent_trapping_followup',
   TRAP_CHECK_ADDITIONAL_KEY,
 ];
-// Program checks stretch across weeks; an opener older than this starts a
-// fresh job rather than extending the old one.
-const JOB_LOOKBACK_DAYS = 60;
+// Rows that are checks by catalog definition, never an opener.
+const TRAP_CHECK_KEYS = ['rodent_trapping_followup', TRAP_CHECK_ADDITIONAL_KEY];
+// The combo packages are conclusive openers (review-request.js does the
+// same). Plain rodent_trapping is NOT: it has also been booked for trap
+// checks, so it opens a job only on series evidence (below).
+const CONCLUSIVE_OPENER_KEYS = TRAPPING_OPENER_KEYS.filter((k) => k !== 'rodent_trapping');
+// Consecutive visits further apart than this belong to different jobs.
+const JOB_GAP_DAYS = 60;
 const INACTIVE_STATUSES = ['cancelled', 'rescheduled', 'skipped'];
+const HISTORY_LIMIT = 500;
 
-function dateOnly(value) {
-  if (!value) return null;
-  if (typeof value === 'string') return value.slice(0, 10);
-  const d = new Date(value);
-  if (Number.isNaN(d.getTime())) return null;
-  return d.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+// Today's ET calendar date. Stored DATE columns never pass through here —
+// the query returns them as 'YYYY-MM-DD' text so no host timezone can
+// shift them a day.
+function etToday() {
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+}
+
+function dayNumber(ymd) {
+  const [y, m, d] = String(ymd).split('-').map(Number);
+  return Date.UTC(y, m - 1, d) / 86400000;
 }
 
 function isGrandfathered({ acceptedAt, openerDate }) {
-  const basis = dateOnly(acceptedAt) || dateOnly(openerDate);
+  const basis = acceptedAt || openerDate;
   if (!basis) return false;
-  return basis < TRAP_CHECK_FEE_EFFECTIVE_DATE;
+  return String(basis).slice(0, 10) < TRAP_CHECK_FEE_EFFECTIVE_DATE;
+}
+
+// The tech's declared trap_visit_type on the visit's report ('initial' |
+// 'followup' | null) — the same typed-report fields review-request.js
+// reads. Parse problems read as undeclared.
+function declaredVisitType(serviceData) {
+  let data = serviceData;
+  try {
+    if (typeof data === 'string') data = JSON.parse(data);
+  } catch { return null; }
+  const snapshots = [
+    data?.typedReportSnapshot,
+    ...(Array.isArray(data?.companionReportSnapshots) ? data.companionReportSnapshots : []),
+  ];
+  for (const snap of snapshots) {
+    const t = String(snap?.values?.trap_visit_type || '').trim();
+    if (t === 'Initial setup') return 'initial';
+    if (t === 'Follow-up check') return 'followup';
+  }
+  return null;
+}
+
+async function declaredTypes(db, scheduledIds) {
+  if (!scheduledIds.length) return new Map();
+  const records = await db('service_records')
+    .whereIn('scheduled_service_id', scheduledIds)
+    .orderBy('created_at', 'asc')
+    .select('scheduled_service_id', 'service_data');
+  const out = new Map();
+  // Latest report per visit wins (ascending order, later rows overwrite).
+  for (const r of records) {
+    const t = declaredVisitType(r.service_data);
+    if (t) out.set(r.scheduled_service_id, t);
+  }
+  return out;
+}
+
+// Split the customer's trapping visits (ascending) into jobs. A visit opens
+// a new job when it is a conclusive opener, or a plain rodent_trapping row
+// with opener evidence (tech-declared "Initial setup", or a source estimate
+// different from the running job's), or when the gap from the previous
+// visit exceeds JOB_GAP_DAYS. Check evidence — a check-only SKU, a
+// dispatched follow-up link, or a declared "Follow-up check" — never
+// opens a job, so a plain rodent_trapping check cannot reset the count.
+function sliceJobs(visits, declared) {
+  const jobs = [];
+  let current = null;
+  for (const v of visits) {
+    const declaredType = declared.get(v.id) || null;
+    const checkEvidence = TRAP_CHECK_KEYS.includes(v.service_key)
+      || Boolean(v.followup_source_service_id)
+      || declaredType === 'followup';
+    const prev = current && current.visits[current.visits.length - 1];
+    const gapBreak = !prev || dayNumber(v.scheduled_day) - dayNumber(prev.scheduled_day) > JOB_GAP_DAYS;
+    const openerEvidence = !checkEvidence && (
+      CONCLUSIVE_OPENER_KEYS.includes(v.service_key)
+      || (v.service_key === 'rodent_trapping' && (
+        declaredType === 'initial'
+        || !prev
+        || gapBreak
+        || (v.source_estimate_id && current?.estimateId && v.source_estimate_id !== current.estimateId)
+      ))
+    );
+    if (gapBreak || openerEvidence) {
+      current = { opener: openerEvidence ? v : null, estimateId: v.source_estimate_id || null, visits: [] };
+      jobs.push(current);
+    }
+    if (!current.estimateId && v.source_estimate_id) current.estimateId = v.source_estimate_id;
+    current.visits.push(v);
+  }
+  return jobs;
 }
 
 /**
- * Current trapping job for a customer: the most recent opener inside the
- * lookback window, and every active (not cancelled/rescheduled/skipped)
- * trapping visit on or after it. Read-only.
+ * Current trapping job for a customer: the latest job (see sliceJobs)
+ * whose last active visit is within JOB_GAP_DAYS of today, with its visit
+ * count and grandfathering. Reads the full trapping history, so an opener
+ * of any age still anchors its job. When the job's opener cannot be
+ * identified, the answer is openerUnknown — never "billable". Read-only.
  */
 async function trappingJobStatus(db, customerId, { today } = {}) {
-  const anchor = today || dateOnly(new Date());
-  const floor = new Date(`${anchor}T12:00:00Z`);
-  floor.setUTCDate(floor.getUTCDate() - JOB_LOOKBACK_DAYS);
-  const floorStr = floor.toISOString().slice(0, 10);
+  const anchor = today || etToday();
 
   const visits = await db('scheduled_services as ss')
     .join('services as sv', 'ss.service_id', 'sv.id')
     .leftJoin('estimates as e', 'ss.source_estimate_id', 'e.id')
     .where('ss.customer_id', customerId)
-    .where('ss.scheduled_date', '>=', floorStr)
     .whereIn('sv.service_key', TRAPPING_VISIT_KEYS)
     .whereNotIn('ss.status', INACTIVE_STATUSES)
     .orderBy('ss.scheduled_date', 'asc')
-    .select('ss.id', 'ss.scheduled_date', 'ss.status', 'sv.service_key', 'e.accepted_at');
+    .orderBy('ss.created_at', 'asc')
+    .limit(HISTORY_LIMIT)
+    .select(
+      'ss.id',
+      'ss.status',
+      'ss.source_estimate_id',
+      'ss.followup_source_service_id',
+      'sv.service_key',
+      db.raw("to_char(ss.scheduled_date, 'YYYY-MM-DD') as scheduled_day"),
+      db.raw("to_char(e.accepted_at AT TIME ZONE 'America/New_York', 'YYYY-MM-DD') as accepted_day"),
+    );
 
-  const openers = visits.filter((v) => TRAPPING_OPENER_KEYS.includes(v.service_key));
-  const opener = openers[openers.length - 1] || null;
-  const jobVisits = opener
-    ? visits.filter((v) => dateOnly(v.scheduled_date) >= dateOnly(opener.scheduled_date))
-    : visits;
-  const visitCount = jobVisits.length;
-  const grandfathered = opener
-    ? isGrandfathered({ acceptedAt: opener.accepted_at, openerDate: opener.scheduled_date })
-    : false;
+  const plainIds = visits.filter((v) => v.service_key === 'rodent_trapping').map((v) => v.id);
+  const jobs = sliceJobs(visits, await declaredTypes(db, plainIds));
+  const last = jobs[jobs.length - 1];
+  const lastDay = last && last.visits[last.visits.length - 1].scheduled_day;
+  const job = last && dayNumber(anchor) - dayNumber(lastDay) <= JOB_GAP_DAYS ? last : null;
 
-  return {
-    hasJob: visitCount > 0,
-    openerDate: opener ? dateOnly(opener.scheduled_date) : null,
-    visitCount,
+  const base = {
     includedVisits: INCLUDED_TRAPPING_VISITS,
-    grandfathered,
     additionalCheckKey: TRAP_CHECK_ADDITIONAL_KEY,
     additionalCheckPrice: TRAP_CHECK_ADDITIONAL_PRICE,
+  };
+  if (!job) {
+    return { ...base, hasJob: false, openerDate: null, openerUnknown: false, visitCount: 0, grandfathered: false, nextVisitBillable: false };
+  }
+
+  const visitCount = job.visits.length;
+  const firstDay = job.visits[0].scheduled_day;
+  let grandfathered;
+  if (job.opener) {
+    grandfathered = isGrandfathered({ acceptedAt: job.opener.accepted_day, openerDate: job.opener.scheduled_day });
+  } else {
+    // No identifiable opener: a job already running before the rule is
+    // grandfathered for certain; otherwise the office has to look.
+    grandfathered = firstDay < TRAP_CHECK_FEE_EFFECTIVE_DATE;
+  }
+  const openerUnknown = !job.opener && !grandfathered;
+
+  return {
+    ...base,
+    hasJob: true,
+    openerDate: job.opener ? job.opener.scheduled_day : null,
+    openerUnknown,
+    visitCount,
+    grandfathered,
     // The next booking is visit visitCount+1; it is billable once the
-    // included visits are used, unless the job predates the rule.
-    nextVisitBillable: !grandfathered && visitCount >= INCLUDED_TRAPPING_VISITS,
+    // included visits are used, unless the job predates the rule or its
+    // opener can't be established.
+    nextVisitBillable: !grandfathered && !openerUnknown && visitCount >= INCLUDED_TRAPPING_VISITS,
   };
 }
 
@@ -107,5 +213,7 @@ module.exports = {
   TRAPPING_OPENER_KEYS,
   TRAPPING_VISIT_KEYS,
   isGrandfathered,
+  declaredVisitType,
+  sliceJobs,
   trappingJobStatus,
 };

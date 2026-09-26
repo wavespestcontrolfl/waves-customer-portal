@@ -2666,6 +2666,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     if (!t || t.customerId !== selectedCustomer?.id || t.status !== 'ready' || !t.hasJob) return null;
     const key = svc?.service_key ?? svc?.serviceKey;
     const visitNo = t.visitCount + 1;
+    if (t.openerUnknown) {
+      return `Visit ${visitNo} of a trapping job with no setup visit on file. Check the history before choosing the free check or the $${t.additionalCheckPrice} one.`;
+    }
     if (t.grandfathered) {
       return key === 'rodent_trap_check_additional'
         ? `Trapping job sold before 9/27 — checks are included. Book the no-charge Trap Follow-Up instead.`
