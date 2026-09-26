@@ -537,6 +537,16 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
         ...extra,
       }),
     });
+    // One proof per accepted notice: the first write and any deduplicated
+    // retry's repair take the same per-notice advisory lock and look the
+    // proof up by the notification id or event key (Codex #4816 r46/r47).
+    const lockNoticeProof = (trx, notificationId) => trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`push-proof:${notificationId}`]);
+    const findNoticeProof = (conn, notificationId) => conn('sms_log').where({ customer_id: customerId, from_phone: 'push' })
+      .where(function sameNotice() {
+        this.whereRaw("metadata->>'push_notification_id' = ?", [notificationId])
+          .modify((q) => { if (notificationEventKey) q.orWhereRaw("metadata->>'notificationEventKey' = ?", [notificationEventKey]); });
+      })
+      .first('id');
     if (appNotification?.push?.deduped) {
       // A retry of an accepted push repairs a proof row the first attempt
       // failed to write, so readers of sms_log (SMS commitment evidence,
@@ -550,13 +560,8 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
         // Check and insert under one transaction-scoped lock per notice, so
         // overlapping retries of the same accepted push write one proof.
         await db.transaction(async (trx) => {
-          await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`push-proof:${notificationId}`]);
-          const existing = await trx('sms_log').where({ customer_id: customerId, from_phone: 'push' })
-            .where(function sameNotice() {
-              this.whereRaw("metadata->>'push_notification_id' = ?", [notificationId])
-                .modify((q) => { if (notificationEventKey) q.orWhereRaw("metadata->>'notificationEventKey' = ?", [notificationEventKey]); });
-            })
-            .first('id');
+          await lockNoticeProof(trx, notificationId);
+          const existing = await findNoticeProof(trx, notificationId);
           // The proof must state what was delivered: the stored notification
           // is the accepted payload. A retry whose body differs from it
           // (template changed since) repairs nothing (Codex #4816 r46). The
@@ -590,15 +595,28 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
     try {
       // One immediate retry: a transient write failure here would leave an
       // accepted, non-scheduled push with no durable proof (Codex #4816 r44).
-      const insertProof = () => db('sms_log').insert(proofRow()).returning('id');
-      const inserted = await insertProof().catch(async (firstErr) => {
-        logger.warn(`[push-routing] sms_log proof insert failed, retrying once: ${firstErr.message}`);
-        // The first write may have committed before the error reached us:
-        // the same customer, channel, type and acceptance instant identify it.
-        const committed = await db('sms_log').where({ customer_id: customerId, from_phone: 'push', message_type: messageType, created_at: acceptedAt })
-          .first('id');
-        return committed ? [committed] : insertProof();
-      });
+      const writeProof = async (conn) => {
+        const insertProof = () => conn('sms_log').insert(proofRow()).returning('id');
+        return insertProof().catch(async (firstErr) => {
+          logger.warn(`[push-routing] sms_log proof insert failed, retrying once: ${firstErr.message}`);
+          // The first write may have committed before the error reached us:
+          // the same customer, channel, type and acceptance instant identify it.
+          const committed = await conn('sms_log').where({ customer_id: customerId, from_phone: 'push', message_type: messageType, created_at: acceptedAt })
+            .first('id');
+          return committed ? [committed] : insertProof();
+        });
+      };
+      // A retry on another worker may already have repaired this notice's
+      // proof while this worker's fan-out ran: write under its lock, and
+      // reuse that row instead of adding a second.
+      const inserted = appNotification?.id
+        ? await db.transaction(async (trx) => {
+          const noticeId = String(appNotification.id);
+          await lockNoticeProof(trx, noticeId);
+          const repaired = await findNoticeProof(trx, noticeId);
+          return repaired ? [repaired] : writeProof(trx);
+        })
+        : await writeProof(db);
       proofRowId = inserted && inserted[0] ? (inserted[0].id || inserted[0]) : null;
     } catch (logErr) {
       logger.error(`[push-routing] sms_log record failed: ${logErr.message}`);

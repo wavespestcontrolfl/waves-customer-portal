@@ -988,6 +988,22 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     expect(await mockPg('sms_log').where({ from_phone: 'push' })).toHaveLength(1);
   });
 
+  test('Codex #4816 r47: a first write that finds a repaired proof for its notice reuses it', async () => {
+    await device();
+    await put({ invoiceChannel: 'push' });
+    const invoiceId = randomUUID();
+    await mockPg('invoices').insert({ id: invoiceId, customer_id: property, token: randomUUID(), invoice_number: 'QA-INVOICE-8', status: 'sent' });
+    const eventKey = `qa:${invoiceId}:first-vs-repair`;
+    // Another worker's retry repaired this notice before the original worker's proof write.
+    await mockPg('sms_log').insert({ customer_id: property, direction: 'outbound', from_phone: 'push', to_phone: '+19415550101',
+      message_body: 'Your invoice is ready.', status: 'sent', message_type: 'invoice_followup', created_at: new Date(),
+      metadata: JSON.stringify({ channel: 'push', providerAccepted: true, notificationEventKey: eventKey, proof_repaired: true }) });
+    const routing = require('../services/messaging/push-channel-routing');
+    expect(await routing.attemptPushFirst({ customerId: property, to: '+19415550101', body: 'Your invoice is ready.',
+      messageType: 'invoice_followup', explicitPushOnly: true, invoiceId, notificationEventKey: eventKey })).toMatchObject({ delivered: true });
+    expect(await mockPg('sms_log').where({ from_phone: 'push' })).toHaveLength(1);
+  });
+
   test('Codex #4816 r46: a retry whose payload differs from the delivered notice repairs nothing', async () => {
     await device();
     await put({ invoiceChannel: 'push' });
