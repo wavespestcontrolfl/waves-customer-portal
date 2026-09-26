@@ -4,7 +4,7 @@ jest.mock('../services/llm/call', () => ({ callOpenAI: (...args) => mockProvider
 jest.mock('../services/pest-pressure/store', () => ({ loadActiveConfig: async () => null }));
 jest.mock('../services/service-completion-profiles', () => ({
   ...jest.requireActual('../services/service-completion-profiles'),
-  resolveCompletionProfileForScheduledService: async () => ({ serviceKey: 'tree_shrub_program', findingsType: null }),
+  resolveCompletionProfileForScheduledService: async () => ({ serviceKey: 'tree_shrub_program', findingsType: 'tree_shrub' }),
 }));
 jest.mock('../services/service-report/report-copy-context', () => ({
   buildReportCopyContext: async ({ treeShrubReviewGrounding }) => ({
