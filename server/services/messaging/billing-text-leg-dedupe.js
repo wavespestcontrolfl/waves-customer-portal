@@ -40,11 +40,20 @@
  *      key (also BILLING_TEXT_LEG_IN_FLIGHT), else write our own claim row
  *      and commit.
  *   2. `send()` runs with NO connection held.
- *   3. The claim is cleared (best-effort, logged) once send() returns an
- *      outcome, accepted or refused — a future replay's step 1 lookup then
- *      finds either the real accepted row (dedupe) or nothing (sends). If
- *      send() THROWS, the claim stays: delivery is unknown, so it ages into
- *      the stale-claim operator hold below rather than a resend.
+ *   3. The claim is cleared (best-effort, logged) ONLY on a definite
+ *      outcome (settleClaim):
+ *        - 'not_sent': nothing reached Twilio, so a replay may send.
+ *        - 'accepted' AND a durable accepted row for this key is already
+ *          visible (findAcceptedBillingTextLeg) — a replay's step 1 lookup
+ *          dedupes on that row instead.
+ *      'accepted' with no durable row yet (twilio.js's primary log insert
+ *      failed, or the provider-handoff reservation is promoted by
+ *      send-customer-message.js only after this wrapper returns) keeps the
+ *      claim and stamps the accepted SID on it; step 1 treats a stamped
+ *      claim as a dedupe hit, never a resend. Anything else — 'uncertain'
+ *      (a Twilio timeout the adapter RETURNS rather than throws), a missing
+ *      outcome, or send() THROWING — keeps the claim unstamped: delivery is
+ *      unknown, so it ages into the stale-claim operator hold below.
  *
  * The claim is a plain sms_log row (no new table, no index) — the SAME
  * table the reply/review-ask send reservations already use for exactly
@@ -147,7 +156,21 @@ async function findLiveClaim(conn, customerId, notificationEventKey) {
     .whereRaw(`metadata->>'${CLAIM_MARKER}' = 'true'`)
     .whereRaw("metadata->>'notificationEventKey' = ?", [notificationEventKey])
     .orderBy('created_at', 'desc')
-    .first(['id', 'created_at']);
+    .first(['id', 'created_at', 'metadata']);
+}
+
+function claimMetadata(claim) {
+  const raw = claim?.metadata;
+  if (!raw) return {};
+  if (typeof raw === 'object') return raw;
+  try { return JSON.parse(raw) || {}; } catch { return {}; }
+}
+
+// A claim settleClaim stamped after Twilio accepted the send (see step 3
+// in the file header). Returns the accepted SID, or null.
+function acceptedClaimSid(claim) {
+  const sid = claimMetadata(claim).acceptedProviderMessageId;
+  return typeof sid === 'string' && sid ? sid : null;
 }
 
 async function insertClaim(conn, customerId, notificationEventKey, input) {
@@ -184,6 +207,58 @@ async function releaseClaim(claimId) {
   } catch (err) {
     logger.warn(`[billing-text-leg-dedupe] claim release failed for claim ${claimId}: ${err.message}`);
   }
+}
+
+// Twilio accepted, but no durable accepted row is visible yet: keep the
+// claim and record the acceptance on it so a replay dedupes off the claim
+// itself. Metadata only — never twilio_sid: the Twilio status webhook
+// matches sms_log rows by SID and would settle this claim into a visible
+// history row. If even this write fails, the unstamped claim still ages into
+// staleClaimHold (operator review) — never a resend.
+async function stampAcceptedClaim(claimId, result) {
+  const sid = result?.providerMessageId || '';
+  if (!claimId || !sid) return false;
+  try {
+    const updated = await db('sms_log')
+      .where({ id: claimId, status: 'sending' })
+      .whereRaw(`metadata->>'${CLAIM_MARKER}' = 'true'`)
+      .update({
+        metadata: db.raw("metadata || ?::jsonb", [JSON.stringify({
+          acceptedProviderMessageId: String(sid),
+          acceptedAt: result.sentAt || new Date().toISOString(),
+        })]),
+      });
+    return Number(updated) > 0;
+  } catch (err) {
+    logger.error(`[billing-text-leg-dedupe] could not record acceptance on claim ${claimId}: ${err.message}`);
+    return false;
+  }
+}
+
+// Step 3 of the file header: release the claim only on a definite outcome.
+async function settleClaim(claimId, customerId, notificationEventKey, result) {
+  const outcome = result?.deliveryOutcome;
+  if (outcome === 'not_sent') {
+    await releaseClaim(claimId);
+    return;
+  }
+  if (outcome === 'accepted' && result?.sent === true) {
+    let durable = null;
+    try {
+      durable = await findAcceptedBillingTextLeg(db, customerId, notificationEventKey);
+    } catch (err) {
+      logger.warn(`[billing-text-leg-dedupe] durable-acceptance check failed for claim ${claimId}: ${err.message}`);
+    }
+    if (durable) {
+      await releaseClaim(claimId);
+      return;
+    }
+    if (await stampAcceptedClaim(claimId, result)) return;
+  }
+  logger.warn(
+    `[billing-text-leg-dedupe] keeping claim ${claimId} for customer ${customerId}, key ${notificationEventKey} `
+    + `(outcome ${outcome || 'missing'}) — delivery not proven either way, never auto-resent`,
+  );
 }
 
 function isStaleClaim(claim, now = Date.now()) {
@@ -254,6 +329,8 @@ async function claimOrResolve(trx, customerId, notificationEventKey, input) {
 
   const liveClaim = await findLiveClaim(trx, customerId, notificationEventKey);
   if (liveClaim) {
+    const acceptedSid = acceptedClaimSid(liveClaim);
+    if (acceptedSid) return { outcome: dedupedAcceptance({ twilio_sid: acceptedSid, created_at: liveClaim.created_at }) };
     return { outcome: isStaleClaim(liveClaim) ? staleClaimHold(liveClaim, customerId, notificationEventKey) : inFlightHold() };
   }
 
@@ -295,12 +372,10 @@ async function withBillingTextLegLock(input, send) {
     };
   }
 
-  // Released only once send() RETURNS a settled outcome (accepted rows are
-  // already durable in sms_log by then). A throw means we cannot tell
-  // whether Twilio took the message, so the claim is deliberately left in
-  // place: it ages into staleClaimHold (operator review), never a resend.
+  // A throw skips settleClaim entirely: delivery is unknown, so the claim
+  // stays and ages into staleClaimHold (operator review), never a resend.
   const result = await send();
-  await releaseClaim(claimId);
+  await settleClaim(claimId, customerId, notificationEventKey, result);
   return result;
 }
 

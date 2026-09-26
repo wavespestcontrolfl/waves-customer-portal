@@ -152,12 +152,18 @@ describe('billing-text-leg-dedupe', () => {
       });
     });
 
-    test('no prior row and no live claim: claims, calls send() with no connection held, then releases the claim', async () => {
+    test('no prior row and no live claim: claims, calls send() with no connection held, then releases the claim once the accepted row is durable', async () => {
       let insertedRow = null;
       const trx = makeTrx({ insertedId: 'claim-42', onInsert: (row) => { insertedRow = row; } });
       db.transaction = jest.fn(async (cb) => cb(trx));
       let deletedWhere = null;
-      const releaseTable = makeSmsLogTable();
+      let deleted = 0;
+      // After send(), settleClaim's durable-acceptance lookup finds the row
+      // twilio.js wrote — only then is the claim deleted.
+      const releaseTable = makeSmsLogTable({
+        acceptedRow: { twilio_sid: 'SM-new', created_at: new Date() },
+        onDel: () => { deleted += 1; },
+      });
       db.mockImplementation((name) => {
         const q = releaseTable(name);
         const originalWhere = q.where;
@@ -184,7 +190,49 @@ describe('billing-text-leg-dedupe', () => {
       expect(insertedRow.scheduled_for).toBeUndefined();
       // The claim is released (deleted) by its own id after send() settles —
       // on the plain db pool, not inside the (already-committed) claim trx.
+      expect(deleted).toBe(1);
       expect(deletedWhere).toEqual({ id: 'claim-42', status: 'sending' });
+    });
+
+    test('accepted with no durable row: the claim is stamped with the SID, never deleted', async () => {
+      const trx = makeTrx({ insertedId: 'claim-43' });
+      db.transaction = jest.fn(async (cb) => cb(trx));
+      let deleted = 0;
+      let updatedWith = null;
+      const table = makeSmsLogTable({ acceptedRow: null, onDel: () => { deleted += 1; } });
+      db.mockImplementation((name) => {
+        const q = table(name);
+        q.update = async (patch) => { updatedWith = patch; return 1; };
+        return q;
+      });
+      db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+      const send = jest.fn(async () => ({ sent: true, provider: 'twilio', deliveryOutcome: 'accepted', providerMessageId: 'SM-late' }));
+
+      await withBillingTextLegLock(baseInput(), send);
+
+      expect(deleted).toBe(0);
+      expect(updatedWith.twilio_sid).toBeUndefined();
+      expect(JSON.parse(updatedWith.metadata.bindings[0])).toMatchObject({ acceptedProviderMessageId: 'SM-late' });
+    });
+
+    test('an adapter-returned uncertain outcome keeps the claim — no delete, no stamp', async () => {
+      const trx = makeTrx({ insertedId: 'claim-44' });
+      db.transaction = jest.fn(async (cb) => cb(trx));
+      let deleted = 0;
+      let updated = 0;
+      const table = makeSmsLogTable({ onDel: () => { deleted += 1; } });
+      db.mockImplementation((name) => {
+        const q = table(name);
+        q.update = async () => { updated += 1; return 1; };
+        return q;
+      });
+      const send = jest.fn(async () => ({ sent: false, provider: 'twilio', deliveryOutcome: 'uncertain', error: 'ETIMEDOUT' }));
+
+      const result = await withBillingTextLegLock(baseInput(), send);
+
+      expect(result.deliveryOutcome).toBe('uncertain');
+      expect(deleted).toBe(0);
+      expect(updated).toBe(0);
     });
 
     test('a live, fresh claim for the same key is an in-flight hold — schedulable, never a send', async () => {

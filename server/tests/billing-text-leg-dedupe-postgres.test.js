@@ -158,15 +158,55 @@ postgres('billing text leg dedupe (private PostgreSQL)', () => {
     expect(stillVisible.status).toBe('sent');
   });
 
-  test('withBillingTextLegLock end to end: no prior row sends once, then leaves nothing behind (the claim is released)', async () => {
+  test('accepted with no durable row yet: the claim stays, stamped with the SID, and a replay dedupes off it', async () => {
+    const input = { customerId, metadata: { billingDeliveryLeg: 'sms', notificationEventKey: 'billing:key:1' } };
     const send = jest.fn(async () => ({ sent: true, provider: 'twilio', deliveryOutcome: 'accepted', providerMessageId: 'SM-live' }));
-    const result = await withBillingTextLegLock(
-      { customerId, metadata: { billingDeliveryLeg: 'sms', notificationEventKey: 'billing:key:1' } },
-      send,
-    );
+    const result = await withBillingTextLegLock(input, send);
     expect(send).toHaveBeenCalledTimes(1);
     expect(result.providerMessageId).toBe('SM-live');
+
+    const rows = await mockPg('sms_log').select('status', 'twilio_sid', 'metadata');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe('sending');
+    // Never on twilio_sid — the status webhook matches rows by SID.
+    expect(rows[0].twilio_sid).toBeNull();
+    expect(rows[0].metadata).toMatchObject({ billing_text_leg_claim: true, acceptedProviderMessageId: 'SM-live' });
+
+    const replaySend = jest.fn();
+    const replay = await withBillingTextLegLock(input, replaySend);
+    expect(replaySend).not.toHaveBeenCalled();
+    expect(replay).toMatchObject({ sent: true, deliveryOutcome: 'accepted', deduped: true, providerMessageId: 'SM-live' });
+  });
+
+  test('an adapter-RETURNED uncertain outcome (e.g. a Twilio timeout) keeps the claim unstamped — a replay is held, never resent', async () => {
+    const input = { customerId, metadata: { billingDeliveryLeg: 'sms', notificationEventKey: 'billing:key:timeout' } };
+    const send = jest.fn(async () => ({ sent: false, provider: 'twilio', deliveryOutcome: 'uncertain', error: 'ETIMEDOUT' }));
+    await withBillingTextLegLock(input, send);
+
+    const rows = await mockPg('sms_log').select('status', 'metadata');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe('sending');
+    expect(rows[0].metadata.acceptedProviderMessageId).toBeUndefined();
+
+    const replaySend = jest.fn();
+    const replay = await withBillingTextLegLock(input, replaySend);
+    expect(replaySend).not.toHaveBeenCalled();
+    expect(replay).toMatchObject({ sent: false, code: 'BILLING_TEXT_LEG_IN_FLIGHT' });
+
+    // Once the claim ages past CLAIM_STALE_MS it becomes the operator hold.
+    await mockPg('sms_log').update({ created_at: new Date(Date.now() - CLAIM_STALE_MS - 1000) });
+    const later = await withBillingTextLegLock(input, replaySend);
+    expect(replaySend).not.toHaveBeenCalled();
+    expect(later).toMatchObject({ sent: false, code: 'BILLING_TEXT_LEG_CLAIM_STALE', retryable: false });
+  });
+
+  test('a definite not_sent refusal releases the claim, so a replay may send', async () => {
+    const input = { customerId, metadata: { billingDeliveryLeg: 'sms', notificationEventKey: 'billing:key:refused' } };
+    const send = jest.fn(async () => ({ sent: false, provider: 'twilio', deliveryOutcome: 'not_sent', code: 'DELIVERY_SUPPRESSED' }));
+    await withBillingTextLegLock(input, send);
     expect(await mockPg('sms_log').count('* as n').first()).toEqual({ n: '0' });
+    await withBillingTextLegLock(input, send);
+    expect(send).toHaveBeenCalledTimes(2);
   });
 
   test('withBillingTextLegLock end to end: a prior accepted row dedupes without calling send', async () => {
