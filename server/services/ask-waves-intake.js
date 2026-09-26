@@ -407,6 +407,8 @@ function durationWindow(sentence, index, length) {
 }
 // Once access is the topic, any number or time word in the reply is a fixed
 // window — units or not ("until four o'clock", "hasta las cuatro", "in 2").
+// NUM_WORD / NUM_WORD_ES are the spelled-number lists defined with the price
+// matchers near the top of this file (EN and ES number words).
 const ANY_TIME_FIGURE_RE = new RegExp(`\\d|\\b(?!once\\b)(?:${NUM_WORD}|${NUM_WORD_ES}|half|quarter|o'?clock|media|cuarto)\\b`, 'i');
 // Digital re-entry ("re-enter the portal", "volver a entrar a su cuenta") is a
 // login, not a room. Only the digital phrase itself is removed before the
