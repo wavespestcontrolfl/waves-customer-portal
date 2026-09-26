@@ -74,7 +74,7 @@ const HELD_REASONS = {
   no_items: "The email doesn't name the item. If it's stock, log it by hand.",
   no_order_number: "The email's order number couldn't be read, so log it by hand.",
   returned: "It's a return, so take it out of stock by hand.",
-  unverified: "The invoice's numbers don't add up, so log it by hand.",
+  unverified: "The invoice line couldn't be checked (its numbers or unit of measure), so log it by hand.",
   unreadable: "The invoice couldn't be read. If it has stock, log it by hand.",
 };
 
@@ -238,16 +238,18 @@ async function siteOneInvoiceLines(email, now) {
     return { invoice, lines: [{ item: { title: email.subject, quantity: 1 }, lineNo: 1, forcedStatus: 'unreadable' }] };
   }
   // A zero line (backordered, nothing shipped) has nothing to record.
-  const lines = invoice.lines.filter((line) => line.quantity !== 0).map(({ title, quantity, lineNo }) => ({
-    item: { title, quantity }, lineNo, holdAs: siteOneHold(invoice.problem, quantity),
+  const lines = invoice.lines.filter((line) => line.quantity !== 0).map(({ title, quantity, lineNo, uom }) => ({
+    item: { title, quantity }, lineNo, holdAs: siteOneHold(invoice.problem, quantity, uom),
   }));
   return { invoice, lines };
 }
 
-// What a stocked SiteOne line is held as instead of moving stock, if anything.
-function siteOneHold(problem, quantity) {
-  if (problem) return 'unverified';
-  return quantity < 0 ? 'returned' : undefined;
+// What a stocked SiteOne line is held as instead of moving stock, if
+// anything: a return, or a line whose totals or unit (only EA — each — is a
+// container count) can't be trusted.
+function siteOneHold(problem, quantity, uom) {
+  if (quantity < 0) return 'returned';
+  return problem || uom !== 'EA' ? 'unverified' : undefined;
 }
 
 async function processSiteOneInvoices({ floor, now, notifyAdmin, totals }) {

@@ -13,6 +13,10 @@
  * subtotal plus tax is the total — and its invoice number is the one the
  * email itself names (the store email's subject, the billing email's body).
  * Any other invoice holds each line that would move stock as 'unverified'.
+ * A line also moves stock only when its unit of measure is EA (each): the
+ * pipeline extracts it (`uom`), or the description carries it ("UOM:EA").
+ * A quantity of cases would reconcile just as well and still read as one
+ * container per case, so a missing or other unit is held 'unverified' too.
  * An invoice never read into lines within EXTRACTION_GRACE_MS gets one
  * 'unreadable' placeholder line. Matching and sizing are the Amazon lane's
  * (receipt-processor.js); SiteOne descriptions carry the container size
@@ -86,8 +90,9 @@ async function invoiceExtraction(emailId, conn) {
  *   pending: not read into lines yet, still inside the grace window.
  *   problem: null (use the lines), 'unreadable' (never read, or read with
  *   no usable lines), or the failed check.
- *   lines: [{ title, quantity, lineNo }] — lineNo is the invoice line's own
- *   position, so both copies of an invoice key the same line the same way.
+ *   lines: [{ title, quantity, lineNo, uom }] — lineNo is the invoice line's
+ *   own position, so both copies of an invoice key the same line the same
+ *   way; uom is the line's unit of measure, upper-cased, or null.
  */
 async function readSiteOneInvoice(email, now = Date.now(), conn = db) {
   const number = emailInvoiceNumber(email);
@@ -99,9 +104,15 @@ async function readSiteOneInvoice(email, now = Date.now(), conn = db) {
   if (!Array.isArray(extracted.line_items) || !extracted.line_items.length) return { number, problem: 'unreadable', lines: [] };
   const problem = verificationProblem(extracted, number);
   const lines = extracted.line_items.map((line, index) => ({
-    title: String(line.description || ''), quantity: Number(line.quantity), lineNo: index + 1,
+    title: String(line.description || ''), quantity: Number(line.quantity), lineNo: index + 1, uom: lineUom(line),
   }));
   return { number, problem, lines };
+}
+
+// The extracted unit of measure, else the "UOM:EA" a description carries.
+function lineUom(line) {
+  const uom = line.uom || (String(line.description || '').match(/\buom:\s*([a-z]+)/i) || [])[1];
+  return uom ? String(uom).trim().toUpperCase() : null;
 }
 
 module.exports = { VENDOR, isSiteOneInvoiceEmail, findSiteOneInvoiceEmails, readSiteOneInvoice, verificationProblem, emailInvoiceNumber };

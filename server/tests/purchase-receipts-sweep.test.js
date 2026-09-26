@@ -300,9 +300,9 @@ describe('SiteOne invoices in the sweep', () => {
     received_at: new Date('2026-09-27T12:00:00Z'), authentication_results: 'dkim=pass header.i=@siteone.com; spf=pass smtp.mailfrom=siteone.com',
   };
   const lines = [
-    { title: 'CSI-Pest Taurus SC Broad Spectrum Liquid Concentrate Termiticide/Insecticide 78 fl oz. Bottle (QGCY)', quantity: 1, lineNo: 1 },
-    { title: 'Flowzone Cyclone 3 Variable Pressure 18V Battery Powered Sprayer (4-Gallon)', quantity: 0, lineNo: 2 },
-    { title: 'LESCO 18V Variable Flow Zero Pump 4 gal. Battery Powered Backpack Sprayer', quantity: -1, lineNo: 3 },
+    { title: 'CSI-Pest Taurus SC Broad Spectrum Liquid Concentrate Termiticide/Insecticide 78 fl oz. Bottle (QGCY)', quantity: 1, lineNo: 1, uom: 'EA' },
+    { title: 'Flowzone Cyclone 3 Variable Pressure 18V Battery Powered Sprayer (4-Gallon)', quantity: 0, lineNo: 2, uom: 'EA' },
+    { title: 'LESCO 18V Variable Flow Zero Pump 4 gal. Battery Powered Backpack Sprayer', quantity: -1, lineNo: 3, uom: 'EA' },
   ];
   const run = () => runPurchaseReceiptRestockSweep({ notify: jest.fn(async () => ({})) });
 
@@ -331,7 +331,18 @@ describe('SiteOne invoices in the sweep', () => {
     const notify = jest.fn(async () => ({}));
     await runPurchaseReceiptRestockSweep({ notify });
     expect(processReceiptLine.mock.calls[0][0]).toMatchObject({ holdAs: 'unverified' });
-    expect(notify.mock.calls[0][2]).toBe("SiteOne invoice 900000001-001: Taurus SC ×1 wasn't added. The invoice's numbers don't add up, so log it by hand.");
+    expect(notify.mock.calls[0][2]).toBe("SiteOne invoice 900000001-001: Taurus SC ×1 wasn't added. The invoice line couldn't be checked (its numbers or unit of measure), so log it by hand.");
+  });
+
+  test.each([
+    ['no unit of measure', null],
+    ['sold by the case', 'CS'],
+  ])('a reconciled line with %s is held unverified, never counted as containers', async (_label, uom) => {
+    mockState.siteOneEmails = [siteOneEmail];
+    mockState.siteOneInvoice = { number: '900000001-001', problem: null, lines: [{ ...lines[0], uom }] };
+    mockState.outcomes = [{ status: 'unverified', product: taurus, inserted: true, lineId: 'line-s1' }];
+    await run();
+    expect(processReceiptLine.mock.calls[0][0]).toMatchObject({ lineNo: 1, holdAs: 'unverified' });
   });
 
   test('an invoice never read into lines gets one unreadable placeholder and a bell', async () => {

@@ -82,6 +82,13 @@ describe('readSiteOneInvoice', () => {
     expect(invoice.lines.map(({ quantity, lineNo }) => [quantity, lineNo])).toEqual([[1, 1], [1, 2], [1, 3], [-1, 4]]);
   });
 
+  test('each line\'s unit of measure: the extracted field, else a "UOM:EA" in its description, else null', async () => {
+    const data = extracted();
+    data.line_items[1].uom = 'cs';
+    const invoice = await readSiteOneInvoice(storeEmail, now, conn(data));
+    expect(invoice.lines.map(({ uom }) => uom)).toEqual(['EA', 'CS', null, null]);
+  });
+
   test.each([
     ['empty', []],
     ['not a list', { description: 'Taurus SC' }],
