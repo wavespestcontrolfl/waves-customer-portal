@@ -289,19 +289,53 @@ async function runSweep({ now = new Date() } = {}) {
         offLedgerBalanceCents: duesCents,
         logTag: 'previsit-balance',
       };
-      const smsVerdict = await collectionsChannelVerdict({ ...consult, channel: 'sms' });
-      const emailVerdict = await collectionsChannelVerdict({ ...consult, channel: 'email' });
-      const smsPolicyPermitted = smsVerdict.permitted;
-      const emailPolicyPermitted = emailVerdict.permitted;
-      if (!smsPolicyPermitted && !emailPolicyPermitted) { skipped++; continue; }
+      // Explicit per-channel billing delivery choice (PR #4843 router core),
+      // read BEFORE the policy gate so the gate judges the channels the
+      // customer actually selected (an App-only customer with Text and Email
+      // both denied is still reachable). A stored choice is enforced whether
+      // or not GATE_BILLING_NOTIFICATION_CHANNELS is live (same read-side
+      // contract as balance-reminder.js's latePaymentCheck). An unreadable
+      // choice must not fall through to the legacy SMS+Email path (that
+      // would ignore a stored selection): skip, and the next sweep in the
+      // window retries (no claim is held yet).
+      let notifPrefs = null;
+      try {
+        notifPrefs = await db('notification_prefs').where({ customer_id: visit.customer_id }).first();
+      } catch (prefsErr) {
+        logger.warn(`[previsit-balance] notification_prefs lookup failed for customer ${visit.customer_id}: ${prefsErr.message}`);
+        skipped++;
+        continue;
+      }
+      const explicitChannels = explicitBillingChannels(notifPrefs || {}, 'billing');
 
-      // Gate-on: the reminder may only QUOTE debt the policy holds eligible
-      // (codex r8 — an invoice the policy excludes, e.g. re-resolved as
-      // payer-billed or dunning-stopped, must not ride an allowed
-      // aggregate). Gate-off (null) = no filtering.
-      const eligibleIds = smsPolicyPermitted && smsVerdict.eligibleInvoiceIds !== null
-        ? smsVerdict.eligibleInvoiceIds
-        : emailVerdict.eligibleInvoiceIds;
+      let eligibleIds;
+      let smsPolicyPermitted = false;
+      let emailPolicyPermitted = false;
+      if (explicitChannels !== null) {
+        const verdicts = [];
+        for (const channel of explicitChannels) {
+          verdicts.push(await collectionsChannelVerdict({ ...consult, channel }));
+        }
+        const permittedVerdicts = verdicts.filter((v) => v.permitted);
+        if (!permittedVerdicts.length) { skipped++; continue; }
+        // Quote only debt a permitted selected channel holds eligible.
+        const filtering = permittedVerdicts.find((v) => v.eligibleInvoiceIds !== null && v.eligibleInvoiceIds !== undefined);
+        eligibleIds = filtering ? filtering.eligibleInvoiceIds : null;
+      } else {
+        const smsVerdict = await collectionsChannelVerdict({ ...consult, channel: 'sms' });
+        const emailVerdict = await collectionsChannelVerdict({ ...consult, channel: 'email' });
+        smsPolicyPermitted = smsVerdict.permitted;
+        emailPolicyPermitted = emailVerdict.permitted;
+        if (!smsPolicyPermitted && !emailPolicyPermitted) { skipped++; continue; }
+
+        // Gate-on: the reminder may only QUOTE debt the policy holds eligible
+        // (codex r8 — an invoice the policy excludes, e.g. re-resolved as
+        // payer-billed or dunning-stopped, must not ride an allowed
+        // aggregate). Gate-off (null) = no filtering.
+        eligibleIds = smsPolicyPermitted && smsVerdict.eligibleInvoiceIds !== null
+          ? smsVerdict.eligibleInvoiceIds
+          : emailVerdict.eligibleInvoiceIds;
+      }
       const fresh = eligibleIds === null || eligibleIds === undefined
         ? freshAll
         : freshAll.filter((inv) => eligibleIds.map(String).includes(String(inv.id)));
@@ -330,26 +364,6 @@ async function runSweep({ now = new Date() } = {}) {
         .whereNull('balance_reminder_sent_at')
         .update({ balance_reminder_sent_at: new Date() });
       if (!claimed) { skipped++; continue; }
-
-      // Explicit per-channel billing delivery choice (PR #4843 router core).
-      // A stored choice is enforced whether or not GATE_BILLING_NOTIFICATION_
-      // CHANNELS is live (same read-side contract as balance-reminder.js's
-      // latePaymentCheck). An unreadable choice must not fall through to the
-      // legacy SMS+Email path (that would ignore a stored selection): release
-      // the claim and let the next sweep in the window retry.
-      let notifPrefs = null;
-      try {
-        notifPrefs = await db('notification_prefs').where({ customer_id: visit.customer_id }).first();
-      } catch (prefsErr) {
-        logger.warn(`[previsit-balance] notification_prefs lookup failed for customer ${visit.customer_id}: ${prefsErr.message}`);
-        await db('scheduled_services')
-          .where({ id: visit.id })
-          .update({ balance_reminder_sent_at: null })
-          .catch(() => {});
-        skipped++;
-        continue;
-      }
-      const explicitChannels = explicitBillingChannels(notifPrefs || {}, 'billing');
 
       if (explicitChannels !== null) {
         // One episode per appointment (stable across a released-claim

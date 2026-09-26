@@ -266,11 +266,10 @@ test('a failed sms leg does not prevent an independently delivered email leg fro
 });
 
 // An unreadable channel choice must not fall through to the legacy SMS+Email
-// path (that would ignore a stored selection): nothing sends, the claim is
-// released, and the next sweep in the window retries.
-test('a notification_prefs lookup failure sends nothing and releases the claim', async () => {
-  armOneVisit();
-  const releaseChain = armReleaseChain();
+// path (that would ignore a stored selection): nothing sends and no claim is
+// taken, so the next sweep in the window retries.
+test('a notification_prefs lookup failure sends nothing and takes no claim', async () => {
+  const { claimChain } = armOneVisit();
   const originalImpl = db.getMockImplementation();
   db.mockImplementation((table) => {
     if (table === 'notification_prefs') {
@@ -284,8 +283,37 @@ test('a notification_prefs lookup failure sends nothing and releases the claim',
   expect(sendReminderChannels).not.toHaveBeenCalled();
   expect(sendCustomerMessage).not.toHaveBeenCalled();
   expect(AccountMembershipEmail.sendPrevisitBalanceReminder).not.toHaveBeenCalled();
-  expect(releaseChain.update).toHaveBeenCalledWith({ balance_reminder_sent_at: null });
+  expect(claimChain.update).not.toHaveBeenCalled();
   expect(result).toMatchObject({ sent: 0, skipped: 1 });
+});
+
+// The policy gate judges the SELECTED channels: an App-only customer whose
+// Text and Email are both denied is still reached on App.
+test('an App-only selection is reachable when Text and Email are policy-denied', async () => {
+  const { collectionsChannelVerdict } = require('../services/collections/rail-guard');
+  collectionsChannelVerdict.mockImplementation(async ({ channel }) => (channel === 'push'
+    ? { permitted: true, eligibleInvoiceIds: ['inv-9'] }
+    : { permitted: false, eligibleInvoiceIds: [] }));
+  armOneVisit({ notificationPrefs: { billing_channels: ['push'] } });
+  sendReminderChannels.mockResolvedValueOnce({ complete: true, deliveredNow: ['push'], results: {} });
+  const result = await runSweep({ now: new Date('2026-08-14T15:00:00Z') });
+  expect(collectionsChannelVerdict).toHaveBeenCalledWith(expect.objectContaining({ channel: 'push' }));
+  expect(collectionsChannelVerdict).not.toHaveBeenCalledWith(expect.objectContaining({ channel: 'sms' }));
+  expect(sendReminderChannels.mock.calls[0][0].channels).toEqual(['push']);
+  expect(result).toMatchObject({ sent: 1, skipped: 0 });
+  collectionsChannelVerdict.mockImplementation(async () => ({ permitted: true, eligibleInvoiceIds: null }));
+});
+
+// A selection whose every channel is policy-denied sends nothing.
+test('an explicit selection with every channel denied is skipped before the claim', async () => {
+  const { collectionsChannelVerdict } = require('../services/collections/rail-guard');
+  collectionsChannelVerdict.mockImplementation(async () => ({ permitted: false, eligibleInvoiceIds: [] }));
+  const { claimChain } = armOneVisit({ notificationPrefs: { billing_channels: ['email', 'push'] } });
+  const result = await runSweep({ now: new Date('2026-08-14T15:00:00Z') });
+  expect(sendReminderChannels).not.toHaveBeenCalled();
+  expect(claimChain.update).not.toHaveBeenCalled();
+  expect(result).toMatchObject({ sent: 0, skipped: 1 });
+  collectionsChannelVerdict.mockImplementation(async () => ({ permitted: true, eligibleInvoiceIds: null }));
 });
 
 // One leg delivered while a sibling is still held: count it sent, but release
