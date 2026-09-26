@@ -51,7 +51,6 @@ function parseNotes(value) {
 }
 
 const roundCents = (n) => Math.round(n * 100) / 100;
-const UNPRICED_REASON = 'an add-on has no price yet — price it and bill it';
 // How an invoice is named in an office alert.
 const invoiceLabel = (invoice) => invoice?.invoice_number || invoice?.id || 'unknown';
 
@@ -107,6 +106,17 @@ async function annualPrepayExtrasForVisit(svc, addons, database = null) {
     && li.discount_for !== primaryId && !addons.clientIds.has(li.discount_for));
   const total = roundCents(lines.reduce((sum, li) => sum + (Number(li.amount) || 0), 0));
   return { lines: total > 0 ? lines : [], total, ambiguous };
+}
+
+// The add-on charges a set of lines makes — each add-on line and each
+// discount parented to one, by client id and amount — as a comparable key.
+function addonCharges(lines, svcId) {
+  const prefix = `scheduled_${svcId}_addon_`;
+  return lines
+    .filter((li) => [li.client_id, li.discount_for].some((v) => String(v || '').startsWith(prefix)))
+    .map((li) => `${li.client_id || ''}>${li.discount_for || ''}=${roundCents(Number(li.amount) || 0)}`)
+    .sort()
+    .join('|');
 }
 
 // Sort an office invoice's lines against this visit: does it bill only this
@@ -248,7 +258,7 @@ class CoveredVisitCloseout {
       await this.alert('the add-on lines could not be built', { error: String(err.message).slice(0, 200) });
       return null;
     }
-    if (addons.unpriced) await this.alert(UNPRICED_REASON);
+    if (addons.unpriced) await this.alert('an add-on has no price yet — price it and bill it');
     if (!extras.lines.length) return null;
     if (extras.ambiguous) {
       await this.alert(`a visit-wide discount applies, so the add-ons' share of it is unclear (they list at $${extras.total.toFixed(2)})`, { addonTotal: extras.total });
@@ -257,20 +267,20 @@ class CoveredVisitCloseout {
     return { current, addons, extras };
   }
 
-  // This closeout's own add-ons bill, found again on a retry: collected
-  // again, and an add-on still awaiting its price is alerted again (the
-  // earlier pass's alert may not have landed).
+  // This closeout's own add-ons bill, found again on a retry. The add-ons
+  // are read again as for a first bill (an earlier pass's alert may not have
+  // landed, so it is raised again). The bill is collected only while it
+  // still charges exactly the add-ons as they stand; changed since (an
+  // add-on priced, repriced or removed), the office adjusts it.
   async resumeOwnBill(own) {
-    let addons;
-    try {
-      addons = await annualPrepayAddonRows(this.svc);
-    } catch (err) {
-      this.lookupError = err;
-      logger.error(`[dispatch] annual-prepay add-on rows unreadable for visit ${this.svc.id}: ${err.message}`);
+    const read = await this.billableExtras();
+    if (this.lookupError) return;
+    const lines = require('./invoice')._parseInvoiceLineItems(own.line_items);
+    if (addonCharges(lines, this.svc.id) === addonCharges(read ? read.extras.lines : [], this.svc.id)) {
+      await this.takeBill(own);
       return;
     }
-    if (addons.unpriced) await this.alert(UNPRICED_REASON);
-    await this.takeBill(own);
+    await this.alert(`the add-ons changed since bill ${invoiceLabel(own)} (${own.status}) was made; adjust it before it is collected`, { invoiceId: own.id });
   }
 
   // Bill the add-ons on a visit with no invoice history. The mint re-checks
