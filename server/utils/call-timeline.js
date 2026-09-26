@@ -13,6 +13,17 @@
  * future by that same length, delaying the alert on a stuck call.
  *
  * The rows say which they are: the insert stamps metadata.source.
+ *
+ * codex #4919 finding D: those same three fallback paths ALSO stamp the
+ * PROVIDER's own instant when they have one — a fetched Twilio Call
+ * resource's startTime/endTime, or the webhook body's Timestamp/
+ * RecordingStartTime — as metadata.provider_started_at / provider_ended_at
+ * (twilio-voice-webhook.js). When either is present and parses, it is
+ * authoritative over the duration-backed-out estimate below; the other end
+ * is derived from duration_seconds when only one provider time landed.
+ * Missing/invalid on a row (an older row, or a fetch that failed with no
+ * RecordingStartTime either) falls back to this file's original logic,
+ * unchanged.
  */
 
 // metadata.source values written by the three POST-CALL insert paths
@@ -46,8 +57,34 @@ function createdAfterTheCall(row) {
   return POST_CALL_ROW_SOURCES.has(parseMetadata(row?.metadata).source);
 }
 
+function parseProviderInstant(value) {
+  if (!value) return null;
+  const d = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+// The row's PROVIDER-supplied start/end, if metadata carries either (codex
+// #4919 finding D). Both valid: used as-is. Exactly one valid: the other is
+// DERIVED from duration_seconds (0 means "not yet known" — see
+// callDurationSeconds — so the derived value then just equals the known
+// one, same convention as everywhere else in this file). Neither
+// present/parseable: both null, and callers fall back to the original
+// duration-backed-out logic unchanged.
+function providerTimes(row) {
+  const meta = parseMetadata(row?.metadata);
+  const started = parseProviderInstant(meta.provider_started_at);
+  const ended = parseProviderInstant(meta.provider_ended_at);
+  if (started && ended) return { started, ended };
+  const durationMs = callDurationSeconds(row) * 1000;
+  if (started) return { started, ended: new Date(started.getTime() + durationMs) };
+  if (ended) return { started: new Date(ended.getTime() - durationMs), ended };
+  return { started: null, ended: null };
+}
+
 /** When the CUSTOMER placed the call. Null if the row carries no usable time. */
 function callStartedAt(row) {
+  const provided = providerTimes(row).started;
+  if (provided) return provided;
   const created = row?.created_at ? new Date(row.created_at) : null;
   if (!created || Number.isNaN(created.getTime())) return null;
   if (!createdAfterTheCall(row)) return created;
@@ -72,8 +109,14 @@ function callStartedAt(row) {
  * exists to fix, and one that could reject a genuinely bookable start as
  * "already past". There is no genuinely bridge-relative duration this
  * codebase writes today, so `bridged_at` needs no special case here.
+ *
+ * codex #4919 finding D: a provider-supplied end (metadata.provider_ended_at,
+ * or one derived from provider_started_at + duration — see providerTimes)
+ * takes precedence over this start-plus-duration estimate when present.
  */
 function callEndedAt(row) {
+  const provided = providerTimes(row).ended;
+  if (provided) return provided;
   const started = callStartedAt(row);
   if (!started) return null;
   return new Date(started.getTime() + callDurationSeconds(row) * 1000);

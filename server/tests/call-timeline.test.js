@@ -54,6 +54,75 @@ describe('callDurationSeconds — largest positive of duration_seconds / recordi
   });
 });
 
+// codex #4919 finding D: twilio-voice-webhook.js's fallback inserts stamp
+// the PROVIDER's own instant (a fetched Twilio Call resource's startTime/
+// endTime, or the webhook body's Timestamp/RecordingStartTime) into
+// metadata.provider_started_at / provider_ended_at. When present and valid
+// it is authoritative over the duration-backed-out estimate; the missing
+// half is derived from duration_seconds when only one lands; missing or
+// invalid keeps this file's original behavior unchanged.
+describe('provider-supplied times (metadata.provider_started_at / provider_ended_at) take precedence (codex #4919 finding D)', () => {
+  test('a fallback row with a LATE created_at but an EARLIER provider_ended_at: callEndedAt uses the provider time', () => {
+    const row = {
+      created_at: '2026-09-26T23:00:00Z', // callback receipt, long after the call actually ended
+      duration_seconds: 300,
+      metadata: { source: 'status_callback', provider_ended_at: '2026-09-26T18:05:00Z' },
+    };
+    expect(callEndedAt(row).toISOString()).toBe('2026-09-26T18:05:00.000Z');
+    // Only provider_ended_at was given — the start is DERIVED from it minus duration.
+    expect(callStartedAt(row).toISOString()).toBe('2026-09-26T18:00:00.000Z');
+  });
+
+  test('a post-midnight callback whose provider_started_at is BEFORE midnight: callStartedAt lands on the prior day', () => {
+    // Row lands (created_at) at 00:05 ET on the 27th; the call actually
+    // started 23:50 ET on the 26th, and metadata carries that real start.
+    const row = {
+      created_at: '2026-09-27T04:05:00Z', // 00:05 ET 9/27 — callback receipt
+      duration_seconds: 900,
+      metadata: { source: 'status_callback', provider_started_at: '2026-09-26T23:50:00-04:00' },
+    };
+    const started = callStartedAt(row);
+    expect(started.toISOString()).toBe('2026-09-27T03:50:00.000Z'); // 23:50 ET 9/26
+    // Only provider_started_at was given — the end is DERIVED from it plus duration.
+    expect(callEndedAt(row).toISOString()).toBe('2026-09-27T04:05:00.000Z'); // 00:05 ET 9/27
+  });
+
+  test('BOTH provider times present: used as-is, duration_seconds ignored entirely', () => {
+    const row = {
+      created_at: '2026-09-26T18:10:00Z',
+      duration_seconds: 999999, // deliberately wrong/huge — must be ignored
+      metadata: { provider_started_at: '2026-09-26T18:00:00Z', provider_ended_at: '2026-09-26T18:05:00Z' },
+    };
+    expect(callStartedAt(row).toISOString()).toBe('2026-09-26T18:00:00.000Z');
+    expect(callEndedAt(row).toISOString()).toBe('2026-09-26T18:05:00.000Z');
+  });
+
+  test('an INVALID provider_started_at is omitted — falls back to today\'s duration-backed-out behavior unchanged', () => {
+    const row = {
+      created_at: '2026-09-26T18:10:00Z',
+      duration_seconds: 600,
+      metadata: { source: 'status_callback', provider_started_at: 'not-a-date' },
+    };
+    expect(callStartedAt(row).toISOString()).toBe('2026-09-26T18:00:00.000Z');
+    expect(callEndedAt(row).toISOString()).toBe('2026-09-26T18:10:00.000Z');
+  });
+
+  test('MISSING provider metadata entirely — falls back to today\'s behavior unchanged (a normal row)', () => {
+    const row = { created_at: '2026-09-26T18:00:00Z', duration_seconds: 300 };
+    expect(callStartedAt(row).toISOString()).toBe('2026-09-26T18:00:00.000Z');
+    expect(callEndedAt(row).toISOString()).toBe('2026-09-26T18:05:00.000Z');
+  });
+
+  test('an empty-string provider value is omitted, same as missing', () => {
+    const row = {
+      created_at: '2026-09-26T18:10:00Z',
+      duration_seconds: 600,
+      metadata: { source: 'status_callback', provider_started_at: '', provider_ended_at: '' },
+    };
+    expect(callStartedAt(row).toISOString()).toBe('2026-09-26T18:00:00.000Z');
+  });
+});
+
 describe('callEndedAt — start + duration always, including a bridged (outbound-connect) row (codex #4919 round-4 P1)', () => {
   test('a normal row: created_at + duration', () => {
     const row = { created_at: '2026-09-26T18:00:00Z', duration_seconds: 300 };
