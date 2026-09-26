@@ -33,6 +33,18 @@ describe('alertAfter', () => {
   });
 
   test('no promised day: 3 days after the Shipped email', () => {
-    expect(at('Order #\n900-1\n* Thing\n', '2026-09-13T17:12:00Z')).toEqual({ at: new Date('2026-09-16T17:12:00Z'), promised: null });
+    expect(at('Order #\n900-1\n* Thing\n', '2026-09-13T17:12:00Z')).toEqual({ at: new Date('2026-09-16T17:12:00Z'), promised: null, dueBeforeCount: false });
+  });
+
+  // The physical count at PURCHASE_RECEIPT_SINCE covers what was due before
+  // its day, whatever day it shipped.
+  test.each([
+    ['shipped before the count, due after it', 'Arriving Monday', '2026-09-25T14:00:00Z', false],
+    ['due the day before the count', 'Arriving tomorrow', '2026-09-24T14:00:00Z', true],
+    ['due on the count day itself (a count is taken before that day\'s deliveries)', 'Arriving today', '2026-09-26T11:00:00Z', false],
+    ['no promised day, 3-day fallback after the count', 'Order # 900-1', '2026-09-24T14:00:00Z', false],
+  ])('%s -> dueBeforeCount %s', (_label, text, shippedAt, expected) => {
+    const since = new Date('2026-09-26T05:49:45Z');
+    expect(alertAfter({ body_text: text, received_at: new Date(shippedAt) }, since).dueBeforeCount).toBe(expected);
   });
 });

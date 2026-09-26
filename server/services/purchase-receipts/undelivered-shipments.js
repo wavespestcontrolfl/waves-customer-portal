@@ -5,8 +5,11 @@
  * Amazon skips the Delivered email for about 1 in 6 shipments (5 of 29
  * since April; the Sep 13 Gentrol was one), and the Delivered lane can't
  * see those deliveries. Each sweep (sweep.js, after its Delivered pass)
- * looks at authenticated "Shipped:" emails up to SHIPPED_LOOKBACK_MS old
- * (never before PURCHASE_RECEIPT_SINCE). A shipment still unconfirmed once
+ * looks at authenticated "Shipped:" emails up to SHIPPED_LOOKBACK_MS old. A
+ * shipment belongs before or after the physical count at
+ * PURCHASE_RECEIPT_SINCE by when it was DUE, not when it shipped: one due
+ * before the count day is in that count; one shipped before it but due
+ * after is not, and is still flagged. A shipment still unconfirmed once
  * its promised arrival day ("Arriving today" / "tomorrow" / "Wednesday" /
  * "June 16 - June 18" -> the last day, read on the ET calendar) and the day
  * after have both passed is treated as one whose email was skipped: every
@@ -15,11 +18,11 @@
  * shipped-to-delivered gap is 56 hours).
  *
  * A shipment is settled once purchase_receipt_lines has any row for its
- * shipmentId: its Delivered email was processed (every authenticated one
- * leaves at least one row; sweep.js runs its Delivered pass first), or it
- * was already alerted. A Delivered email the lane never processed (it fell
- * outside that pass's window) added no stock, so asking for a hand log is
- * still right. Otherwise,
+ * shipmentId (its Delivered email was processed — every authenticated one
+ * leaves at least one row, and sweep.js runs its Delivered pass first — or it
+ * was already alerted), or once any Delivered email names it (one received
+ * before the count, which the lane never processes, still proves it
+ * arrived). Otherwise,
  * when the shipment carries at least one stocked product, its stocked items
  * are recorded as 'no_delivery_email' and ONE bell asks for a hand log, in
  * one transaction (the bell via notifyAdmin's trx option): a re-run never
@@ -37,7 +40,7 @@ const logger = require('../logger');
 const { hasAlignedAuth } = require('../email/inbox-hygiene');
 const { domainFromAddress } = require('../email/spam-blocker');
 const { formatETDate, etParts, etDateString, addETDays, parseETDateTime } = require('../../utils/datetime-et');
-const { parseAmazonShippedEmail, extractText, AMAZON_SHIPPED_FROM } = require('./amazon-delivery-parser');
+const { parseAmazonShippedEmail, extractText, AMAZON_SHIPPED_FROM, AMAZON_DELIVERY_FROM } = require('./amazon-delivery-parser');
 const { matchTitleToProduct } = require('./product-matcher');
 const { UNKNOWN_ORDER, lockShipment } = require('./receipt-processor');
 
@@ -78,18 +81,29 @@ function promisedArrivalDay(text, shippedAt) {
 
 // When an unconfirmed shipment counts as one whose Delivered email was
 // skipped: ET midnight once its promised day and the day after have
-// passed, else SHIPPED_GRACE_MS after the Shipped email.
-function alertAfter(email) {
+// passed, else SHIPPED_GRACE_MS after the Shipped email. dueBeforeCount:
+// the shipment was due before the physical count at `since` (its promised
+// ET day is an earlier day, or with no promise its fallback falls before
+// the count), so that count already includes it.
+function alertAfter(email, since) {
   const shippedAt = new Date(email.received_at);
   const promised = promisedArrivalDay(extractText(email), shippedAt);
-  const at = promised
-    ? parseETDateTime(`${etDateString(addETDays(promised, 2))}T00:00`)
-    : new Date(shippedAt.getTime() + SHIPPED_GRACE_MS);
-  return { at, promised };
+  const fallback = new Date(shippedAt.getTime() + SHIPPED_GRACE_MS);
+  const at = promised ? parseETDateTime(`${etDateString(addETDays(promised, 2))}T00:00`) : fallback;
+  const dueBeforeCount = Boolean(since) && (promised ? etDateString(promised) < etDateString(since) : fallback < since);
+  return { at, promised, dueBeforeCount };
 }
 
-function shipmentSettled(conn, shipmentId) {
-  return conn('purchase_receipt_lines').where({ vendor: VENDOR, shipment_key: shipmentId }).first('id');
+// A LIKE pattern matching the literal text.
+const likeLiteral = (text) => text.replace(/[\\%_]/g, '\\$&');
+
+async function shipmentSettled(conn, shipmentId) {
+  if (await conn('purchase_receipt_lines').where({ vendor: VENDOR, shipment_key: shipmentId }).first('id')) return true;
+  const id = likeLiteral(shipmentId);
+  const delivered = await conn('emails').whereRaw('LOWER(from_address) = ?', [AMAZON_DELIVERY_FROM]).whereRaw('subject ILIKE ?', ['Delivered:%'])
+    .where((named) => named.whereRaw('body_text LIKE ?', [`%shipmentId=${id}%`]).orWhereRaw('body_html LIKE ?', [`%shipmentId\\%3D${id}%`]))
+    .first('id');
+  return Boolean(delivered);
 }
 
 async function stockedItems(items, conn) {
@@ -118,9 +132,9 @@ async function ringUndeliveredBell(notifyAdmin, { email, parsed, stocked, promis
 // One Shipped email -> the alerted shipment, or null when there is nothing
 // to alert (not due yet, not one we can check, already settled, or no
 // stocked item).
-async function alertIfUndelivered(email, { notifyAdmin, now }, conn) {
-  const { at, promised } = alertAfter(email);
-  if (now < at.getTime()) return null;
+async function alertIfUndelivered(email, { notifyAdmin, now, since }, conn) {
+  const { at, promised, dueBeforeCount } = alertAfter(email, since);
+  if (dueBeforeCount || now < at.getTime()) return null;
   const parsed = parseAmazonShippedEmail(email);
   if (!parsed?.shipmentId || !parsed.items.length) return null;
   if (!hasAlignedAuth(email.authentication_results, domainFromAddress(email.from_address))) return null;
@@ -149,13 +163,13 @@ async function alertUndeliveredShipments({ since, now = Date.now(), notifyAdmin 
     .select('id', 'gmail_id', 'from_address', 'subject', 'body_text', 'body_html', 'received_at', 'authentication_results')
     .whereRaw('LOWER(from_address) = ?', [AMAZON_SHIPPED_FROM])
     .whereRaw('subject ILIKE ?', ['Shipped:%'])
-    .where('received_at', '>=', new Date(Math.max(since.getTime(), now - SHIPPED_LOOKBACK_MS)))
+    .where('received_at', '>=', new Date(now - SHIPPED_LOOKBACK_MS))
     .where('received_at', '<=', new Date(now - MIN_ALERT_AGE_MS))
     .orderBy('received_at', 'asc');
   const result = { undelivered: [], errors: [] };
   for (const email of emails) {
     try {
-      const alerted = await alertIfUndelivered(email, { notifyAdmin, now }, conn);
+      const alerted = await alertIfUndelivered(email, { notifyAdmin, now, since }, conn);
       if (alerted) result.undelivered.push({ ...alerted, emailId: email.id });
     } catch (err) {
       logger.error(`[purchase-receipts] undelivered check for email ${email.id} failed: ${err.message}`);

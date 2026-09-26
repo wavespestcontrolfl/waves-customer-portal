@@ -233,6 +233,22 @@ jest.setTimeout(30000);
       expect(bell.body).toBe("Amazon shipped Taurus SC ×1 on September 13 (due September 16) but never sent a delivery confirmation, so it wasn't added. If it arrived, log it by hand.");
     });
 
+    test('around the physical count: flagged by when it was due, and any Delivered email settles it', async () => {
+      const since = new Date(NOW - 5 * DAY); // the count
+      const beforeCount = new Date(since.getTime() - DAY); // shipped the day before it
+      const dueAfterCount = new Date(beforeCount.getTime() + 3 * DAY).toLocaleDateString('en-US', { weekday: 'long', timeZone: 'America/New_York' });
+      const body = (shipmentId, arriving) => `Arriving ${arriving}\nOrder #\n900-1000001-1000001\nhttps://www.amazon.com/x?shipmentId=${shipmentId}\n\n* ${TITLE}\n  Quantity: 1\n`;
+      await shipped('ship-due-after', { received_at: beforeCount, body_text: body('ship-due-after', dueAfterCount) }); // not in the count: flagged
+      await shipped('ship-due-before', { received_at: beforeCount, body_text: body('ship-due-before', 'today') }); // due before the count: in it
+      await shipped('ship-delivered', { received_at: beforeCount, body_text: body('ship-delivered', dueAfterCount) });
+      await mockConn('emails').insert({ // a Delivered email from before the count names it: it arrived
+        gmail_id: `gm-${randomUUID()}`, gmail_thread_id: 'thread', from_address: 'order-update@amazon.com', subject: 'Delivered: "Control Solutions Taurus..."',
+        body_text: 'Order #\n900-1000001-1000001\nhttps://www.amazon.com/x?shipmentId=ship-delivered\n', received_at: new Date(since.getTime() - HOUR),
+      });
+      const { undelivered } = await alertUndeliveredShipments({ since, now: NOW, notifyAdmin: (...args) => notifications.notifyAdmin(...args) });
+      expect(undelivered.map((row) => row.shipmentId)).toEqual(['ship-due-after']);
+    });
+
     test('too recent, unauthenticated, personal items only, or outside the lookback: no bell', async () => {
       await shipped('ship-2', { received_at: new Date(NOW - 2 * DAY) });
       await shipped('ship-3', { authentication_results: 'dkim=pass header.i=@evil.example; spf=fail' });
