@@ -848,9 +848,8 @@
     {
      "check": "spoken_matches_any",
      "value": [
-      "\\b(?:written|e-?mailed|e-?mail)\\s+(?:estimate|quote)\\b",
-      "\\b(?:estimate|quote)\\b(?:(?!\\b(?:not|never|no|won['\u2019]t|can['\u2019]t|cannot|don['\u2019]t)\\b)[\\s\\S]){0,200}?(?<!\\b(?:not|never|no)\\s+)(?<!n['\u2019]t\\s+)\\b(?:send|sent|sending|e-?mail(?:ed)?|inbox|queued?|prepar\\w*|put together|get (?:it|that|this|one) (?:over|to you|sent)|sent over|on its way|follow(?:s|ing)?\\s+up)\\b",
-      "(?<!\\b(?:not|never|no)\\s+)(?<!n['\u2019]t\\s+)\\b(?:send|sending|e-?mail|prepar\\w*|put together|queued? up)\\b[\\s\\S]{0,200}?\\b(?:estimate|quote)\\b"
+      "\\b(?:estimate|quote)\\b(?:(?!\\b(?:not|never|no|won['\u2019]t|can['\u2019]t|cannot|don['\u2019]t)\\b)[\\s\\S]){0,200}?(?<!\\b(?:not|never|no|cannot)\\s+)(?<!n['\u2019]t\\s+)(?<!\\bunable to\\s+)\\b(?:send|sent|sending|e-?mail(?:ed)?|inbox|queued?|prepar\\w*|put together|get (?:it|that|this|one) (?:over|to you|sent)|sent over|on its way|follow(?:s|ing)?\\s+up)\\b",
+      "(?<!\\b(?:not|never|no|cannot)\\s+)(?<!n['\u2019]t\\s+)(?<!\\bunable to\\s+)\\b(?:send|sending|e-?mail|prepar\\w*|put together|queued? up|get you|receive)\\b[\\s\\S]{0,200}?\\b(?:estimate|quote)\\b"
      ],
      "severity": "critical"
     },
@@ -1258,7 +1257,7 @@
      "check": "spoken_matches_any",
      "value": [
       "\\b(?:will|['\u2019]ll|shall|going to|gonna)\\s+(?!not\\b|never\\b)(?:\\w+\\s+){0,3}?(?:follow up|reach out|call|contact|be in touch|get back|give you a call|touch base|be calling|confirm)\\b",
-      "(?<!\\b(?:not|never|no)\\s+)(?<!n['\u2019]t\\s+)\\b(?:expect a call|get a call|hear (?:back )?from)\\b"
+      "(?<!\\b(?:not|never|no|cannot)\\s+)(?<!n['\u2019]t\\s+)(?<!\\bunable to\\s+)\\b(?:expect a call|get a call|hear (?:back )?from)\\b"
      ],
      "severity": "critical"
     }
@@ -1626,9 +1625,8 @@
     {
      "check": "spoken_matches_any",
      "value": [
-      "(?:presupuesto|cotizaci[o\u00f3]n|estimado)\\s+(?:por\\s+escrito|escrit[oa])",
       "(?:presupuesto|cotizaci[o\u00f3]n|estimado)(?:(?!\\b(?:no|nunca|jam[a\u00e1]s)\\b)[\\s\\S]){0,200}?(?<!\\bno\\s+(?:se\\s+|le\\s+|te\\s+)?)\\b(?:envi\\w*|mand\\w*|recib\\w*|prepar\\w*|llegar\\w*|correo|e-?mail)",
-      "(?<!\\bno\\s+(?:se\\s+|le\\s+|te\\s+)?)\\b(?:envi\\w*|mand\\w*|prepar\\w*|le hac\\w+ llegar)[\\s\\S]{0,200}?(?:presupuesto|cotizaci[o\u00f3]n|estimado)"
+      "(?<!\\bno\\s+(?:se\\s+|le\\s+|te\\s+)?)\\b(?:envi\\w*|mand\\w*|prepar\\w*|recib\\w*|le hac\\w+ llegar)[\\s\\S]{0,200}?(?:presupuesto|cotizaci[o\u00f3]n|estimado)"
      ],
      "severity": "critical"
     },

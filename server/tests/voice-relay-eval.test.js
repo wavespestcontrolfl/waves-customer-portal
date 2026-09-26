@@ -932,8 +932,8 @@ describe('voice relay eval — each expect key', () => {
   // transcripts: "…get that sent over", "va a llamarte", "se pondrá en
   // contacto") while still rejecting a missing or NEGATED promise.
   const REQUIRED_FACTS = [
-    ['pricing-gate-off', 0, ["I've queued up the written estimate and a Waves team member will follow up to confirm the details and get that sent over.", 'The office will email you a written estimate.', "You'll have the quote in your inbox shortly."], ['Thanks for calling!', "We won't send an estimate.", 'An estimate is not something we send.']],
-    ['spanish-pricing-gate-off', 0, ['Le enviaremos un presupuesto por escrito.', 'La oficina le va a mandar la cotización a su correo.'], ['Gracias por llamar.', 'No le enviamos presupuestos.', 'El presupuesto no se lo podemos enviar.']],
+    ['pricing-gate-off', 0, ["I've queued up the written estimate and a Waves team member will follow up to confirm the details and get that sent over.", 'The office will email you a written estimate.', "You'll have the quote in your inbox shortly.", "We'll get you a written estimate."], ['Thanks for calling!', "We won't send an estimate.", 'An estimate is not something we send.', 'We cannot send a written estimate.', "We're unable to send an estimate."]],
+    ['spanish-pricing-gate-off', 0, ['Le enviaremos un presupuesto por escrito.', 'La oficina le va a mandar la cotización a su correo.', 'Recibirá un presupuesto por escrito.'], ['Gracias por llamar.', 'No le enviamos presupuestos.', 'El presupuesto no se lo podemos enviar.', 'No le enviaremos un presupuesto por escrito.']],
     ['reservice-matched', 0, ['The office will be in touch.', "We'll give you a call to set that up.", "You'll get a call from the office."], ['Okay, thanks.', 'We will not call you.', "We won't be calling you."]],
     ['spanish-reservice-matched', 0, ['Un miembro del equipo de Waves va a llamarte para programar la visita de re-servicio.', 'La oficina se pondrá en contacto con usted.', 'Le devolverán la llamada hoy.'], ['Gracias.', 'No le vamos a llamar.', 'No daremos seguimiento.']],
     ['spanish-capture', 0, ['Le daremos seguimiento.', 'Nos pondremos en contacto con usted.', 'La oficina llamará mañana.'], ['Gracias.', 'No vamos a llamarte.']],
@@ -4390,6 +4390,17 @@ describe('voice relay eval — named spoken checks', () => {
   // street or brand) is neutral even as Sandy's first word — "Will, su cita…"
   // for a caller named Will — while the same word the caller never said as a
   // name is still English evidence.
+  // PR #4946 review (pre-push Codex): only Title-case words in a tool result
+  // are names — ALL-CAPS emphasis in a tool's own instructions ("NOTHING IS
+  // BOOKED YET") must not exempt "Booked." from the language check.
+  test('only_language es: ALL-CAPS tool instructions are not names', () => {
+    const { SPOKEN_CHECK_RUNNERS } = require('../services/eval/voice-relay-spoken-checks');
+    const slots = { kind: 'tool', ok: true, text: 'Open times: Saturday October 3 at 9 AM (slot_ref: S1). NOTHING IS BOOKED YET — read the caller two or three.' };
+    expect(SPOKEN_CHECK_RUNNERS.only_language('es', { events: [slots] }, { spoken: ['Booked.'] })[0]).toBe('fail');
+    const account = { kind: 'tool', ok: true, text: 'Account holder: Grace Ortiz, 52 Lemon Bay Drive.' };
+    expect(SPOKEN_CHECK_RUNNERS.only_language('es', { events: [account] }, { spoken: ['Le escribí a Grace.'] })[0]).toBe('pass');
+  });
+
   test('only_language es: a name the caller gave is neutral, even sentence-initial', () => {
     const caller = { text: 'Hola, me llamo Will Carter y vivo en Venice.', from: '+19415550100' };
     expect(run('only_language', 'es', 'Will, su visita queda pendiente.', caller).status).toBe('pass');

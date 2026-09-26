@@ -2471,6 +2471,7 @@ function hasEnglishEvidence(sentence, groundedProperNouns = new Set()) {
 // from a lookup, e.g. get_account_overview) — names, streets, brands — as
 // lowercase keys. Sandy’s OWN speech is never a source: her own
 // capitalized invention is exactly what hasEnglishEvidence must still catch.
+const TITLE_CASE_WORD_RE = /^[A-ZÁÉÍÓÚÑ][a-záéíóúñü'’-]+$/;
 function groundedProperNounsOf(record) {
   const out = new Set();
   const collect = (text) => {
@@ -2479,7 +2480,10 @@ function groundedProperNounsOf(record) {
       let seenFirst = false;
       for (const m of sentence.matchAll(WORD_RE)) {
         const w = m[0];
-        if (seenFirst && /^[A-ZÁÉÍÓÚÑ]/.test(w)) out.add(w.toLowerCase());
+        // Title-case only ("Rosa", "Bradenton"): an ALL-CAPS word is
+        // emphasis in a tool's own instructions ("NOTHING IS BOOKED YET"),
+        // never a name — exempting it let "Booked." pass (PR #4946 review).
+        if (seenFirst && TITLE_CASE_WORD_RE.test(w)) out.add(w.toLowerCase());
         seenFirst = true;
       }
     }
