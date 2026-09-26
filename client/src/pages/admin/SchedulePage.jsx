@@ -7045,6 +7045,21 @@ function JobCardTab({ card, loading, error, D }) {
   );
 }
 
+// The appointment's month ("Jan".."Dec", ET) for protocol visit lookup —
+// month-keyed protocols (lawn tracks, tree & shrub) show that month's visit.
+function protocolMonthForService(service) {
+  const serviceDate =
+    service?.scheduledDate || service?.scheduled_date || service?.date;
+  if (!serviceDate) return null;
+  const dateOnly = String(serviceDate).split("T")[0];
+  const monthDate = new Date(`${dateOnly}T12:00:00`);
+  if (Number.isNaN(monthDate.getTime())) return null;
+  return monthDate.toLocaleString("en-US", {
+    month: "short",
+    timeZone: "America/New_York",
+  });
+}
+
 export function ProtocolPanel({ service, onClose }) {
   // Reactive (rotation-safe) — the module-level snapshot never recomputes.
   const isMobile = useIsMobile(640);
@@ -7225,6 +7240,7 @@ export function ProtocolPanel({ service, onClose }) {
           })
         : null;
 
+      const visitMonth = protocolMonthForService(service);
       const results = await Promise.allSettled([
         adminFetch(
           // The photos endpoint derives its line from literal tokens
@@ -7257,7 +7273,9 @@ export function ProtocolPanel({ service, onClose }) {
           : Promise.resolve(null),
         !isLawn && protocolProgram
           ? adminFetch(
-              `/admin/protocols/match?serviceType=${encodeURIComponent(panelServiceType)}`,
+              `/admin/protocols/match?serviceType=${encodeURIComponent(panelServiceType)}${
+                visitMonth ? `&month=${visitMonth}` : ""
+              }`,
             )
           : Promise.resolve(null),
       ]);
@@ -14306,22 +14324,11 @@ export function CompletionPanel({
       const track = protocolTrackForLawnType(service.lawnType);
       if (track) params.set("track", track);
       if (service.lawnType) params.set("lawnType", service.lawnType);
-      const serviceDate =
-        service.scheduledDate || service.scheduled_date || service.date;
-      if (serviceDate) {
-        const dateOnly = String(serviceDate).split("T")[0];
-        const monthDate = new Date(`${dateOnly}T12:00:00`);
-        if (!Number.isNaN(monthDate.getTime())) {
-          params.set(
-            "month",
-            monthDate.toLocaleString("en-US", {
-              month: "short",
-              timeZone: "America/New_York",
-            }),
-          );
-        }
-      }
     }
+    // Lawn and month-keyed programs (tree & shrub) pick the visit for the
+    // appointment's month; the server ignores it for 'Any'-month programs.
+    const serviceMonth = protocolMonthForService(service);
+    if (serviceMonth) params.set("month", serviceMonth);
     setProtocolActionsLoading(true);
     setProtocolActionsLoaded(false);
     adminFetch(`/admin/protocols/completion-actions?${params.toString()}`)

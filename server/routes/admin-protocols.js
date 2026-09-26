@@ -774,7 +774,10 @@ router.get('/match', async (req, res, next) => {
   try {
     const protocols = require('../config/protocols.json');
     const serviceType = req.query.serviceType || req.query.service_type || '';
-    const result = matchServiceProtocol(protocols, serviceType);
+    // Month-keyed programs (tree & shrub) pick the appointment month's visit;
+    // no month keeps the rule visit (monthAbbr would default to today).
+    const month = req.query.month ? monthAbbr(req.query.month) : null;
+    const result = matchServiceProtocol(protocols, serviceType, { month });
 
     if (!result.program) return res.status(404).json({ error: 'Protocol program not found' });
 
@@ -1153,7 +1156,8 @@ router.get('/completion-actions', async (req, res, next) => {
       month = monthAbbr(req.query.month);
       visit = program?.visits?.find((v) => v.month === month) || program?.visits?.[0] || null;
     } else {
-      const matched = matchServiceProtocol(protocols, serviceType);
+      month = req.query.month ? monthAbbr(req.query.month) : null;
+      const matched = matchServiceProtocol(protocols, serviceType, { month });
       programKey = matched.programKey;
       program = matched.program;
       visit = matched.matchedVisit || program?.visits?.[0] || null;

@@ -75,4 +75,25 @@ describe('10/10 SWFL tree and shrub protocol config', () => {
     ]));
     expect(addOns.products.join('\n')).toMatch(/IMA-jet.*4A\/neonic pressure/i);
   });
+
+  test('palm care: dose by canopy size, scouting, and diagnosis-only guidance', () => {
+    const program = protocols.tree_shrub;
+    const notes = program.notes.join('\n');
+
+    expect(program.calibration.palm_size_tiers).toHaveLength(3);
+    expect(program.calibration.palm_size_tiers.join('\n')).toMatch(/Small.*0\.75 lb/);
+    expect(notes).toMatch(/1\.5 lb per 100 sq ft of canopy/);
+    expect(notes).toMatch(/Palm scout every visit/);
+    expect(notes).toMatch(/never a disease name without a diagnosis/);
+    expect(notes).toMatch(/lethal bronzing, Ganoderma butt rot, and Fusarium wilt have no cure/);
+    // Every visit that carries palm fertilizer tells the tech the dose by size.
+    const palmVisits = program.visits.filter((row) => /8-2-12/.test(`${row.primary}\n${row.secondary}`));
+    expect(palmVisits.map((row) => row.month)).toEqual(['Jan', 'Apr', 'May', 'Oct', 'Dec']);
+    for (const row of palmVisits) expect(row.notes).toMatch(/Palm dose by canopy/);
+  });
+
+  test('documents the 9x every-6-weeks program without fixed months', () => {
+    expect(protocols.tree_shrub.tiers.nine_x).toMatch(/Every 6 weeks/);
+    expect(protocols.tree_shrub.tiers.nine_x).toMatch(/month it lands in/);
+  });
 });

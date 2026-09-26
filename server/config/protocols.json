@@ -855,7 +855,10 @@
       "Snapshot 2.5TG remains the quarterly visual differentiator: visits 1, 4, 7, and 10. Apply to beds only and water in with irrigation or rainfall.",
       "CRM ordinance zone is required. Sarasota/Venice and Manatee/Parrish landscape N/P blackout runs June 1-Sept. 30. North Port turf blackout starts April 1, but landscape plants are route-gated separately. Unknown zone defaults to Sarasota/Manatee conservative.",
       "Palm/tree injections are add-ons only. Minimum $35/palm, not included in Tree & Shrub tiers.",
-      "Do not make oil + copper, oil + broad-spectrum pyrethroid, or neonic systemics a default production tank. Use plant safety, pollinator status, pest ID, and life stage gates."
+      "Do not make oil + copper, oil + broad-spectrum pyrethroid, or neonic systemics a default production tank. Use plant safety, pollinator status, pest ID, and life stage gates.",
+      "Palm fertilizer dose goes by canopy size (1.5 lb per 100 sq ft of canopy): small palm, canopy up to 8 ft across (pygmy date, Christmas, young palms) about 0.75 lb; medium, 10-14 ft (queen, sabal, foxtail, Sylvester) about 1.7 lb; large, 16-20 ft (royal, Canary, Bismarck, Medjool) about 4 lb. Spread it evenly under the whole canopy, never piled at the trunk, off hardscape, and not within 10 ft of water. Palm granular goes on no closer than about 3 months apart (4 per year at most); check Fertilizer applied YTD first.",
+      "Palm scout every visit, and record only what you see (symptom + photo, never a disease name without a diagnosis): oldest fronds with translucent yellow-orange spots or dead tips (potassium) or a broad yellow band (magnesium); newest fronds small and frizzled (manganese, mainly queen, royal, pygmy date); a collapsed spear or bronzing from the oldest fronds up; a hard shelf/conk on the lower 4-5 ft of trunk; fronds dying down one side; royal palm bug, spiraling whitefly, scale, or sooty mold; over-pruning.",
+      "Palm diagnosis-only issues: lethal bronzing, Ganoderma butt rot, and Fusarium wilt have no cure. Photo it, tell the owner it needs a diagnosis, and quote the diagnostic or injection add-on; never promise the fertilizer program prevents them. Do not cut off potassium-yellowed fronds (it speeds decline; old fronds never re-green, new growth recovers over 1-2+ years), and never prune above the 9-to-3 o'clock line."
     ],
     "safety_rules": [
       "CRM ordinance zone required before fertilizer",
@@ -904,7 +907,12 @@
         "Heavy pressure: 4.6 lb/1,000 sq ft only where label/site permits"
       ],
       "palm_fertilizer_rate": "8-2-12 palm fertilizer at 1.5 lb per 100 sq ft canopy/root-zone area where ordinance allows.",
-      "ornamental_fertilizer_rate": "13-0-13 at 0.25-0.50 lb N/1,000 sq ft equivalent unless site, plant type, and timing justify otherwise."
+      "ornamental_fertilizer_rate": "13-0-13 at 0.25-0.50 lb N/1,000 sq ft equivalent unless site, plant type, and timing justify otherwise.",
+      "palm_size_tiers": [
+        "Small: canopy up to 8 ft across (~50 sq ft) = about 0.75 lb per application",
+        "Medium: canopy 10-14 ft across (~113 sq ft at 12 ft) = about 1.7 lb per application",
+        "Large: canopy 16-20 ft across (~200-314 sq ft) = about 3-4.7 lb per application; measure the canopy instead of guessing"
+      ]
     },
     "mixing_order": [
       "Fill tank 25-50% with clean water.",
@@ -977,7 +985,8 @@
     ],
     "tiers": {
       "four_x": "Jan, Apr/May, Jul/Aug, Oct/Nov. Best for cleaner properties with low pest history.",
-      "six_x": "Jan, Mar, May, Jul, Sep, Oct/Nov. Best for SWFL estates, palms, ficus, ixora, crotons, and whitefly/scale-prone landscapes."
+      "six_x": "Jan, Mar, May, Jul, Sep, Oct/Nov. Best for SWFL estates, palms, ficus, ixora, crotons, and whitefly/scale-prone landscapes.",
+      "nine_x": "Every 6 weeks (about 9 visits a year). No fixed months: each visit runs the protocol for the month it lands in. Palm granular still stays about 3 months apart (4 per year at most), so skip it on a visit that comes too soon after the last one; the other visits scout palms."
     },
     "final_operating_sentence": "Every tree/shrub visit must be legal by ordinance zone, safe for pollinators and plant stress, justified by pest life stage or seasonal nutrition, completed in one production mode when possible, and documented by product, rate, IRAC/FRAC group, target pest, plant group, and customer-facing note.",
     "visits": [
@@ -992,7 +1001,7 @@
         "labor_cost": "standard",
         "tier_4x": true,
         "tier_6x": true,
-        "notes": "Spreader-first visit. Do not apply neonicotinoids to blooming plants or where bees are actively foraging. New accounts require plant inventory, bed sq ft, palm canopy sq ft, and photos.",
+        "notes": "Spreader-first visit. Do not apply neonicotinoids to blooming plants or where bees are actively foraging. New accounts require plant inventory, bed sq ft, palm canopy sq ft, and photos. Palm dose by canopy: small (up to 8 ft) ~0.75 lb, medium (10-14 ft) ~1.7 lb, large (16-20 ft) ~4 lb; spread under the whole canopy, not at the trunk.",
         "conditional_cost": "8.09"
       },
       {
@@ -1034,7 +1043,7 @@
         "labor_cost": "standard",
         "tier_4x": true,
         "tier_6x": false,
-        "notes": "Do not make oil plus pyrethroid a default combo. Broad-spectrum insecticide requires documented pest pressure and mite/beneficial risk review.",
+        "notes": "Do not make oil plus pyrethroid a default combo. Broad-spectrum insecticide requires documented pest pressure and mite/beneficial risk review. Palm dose by canopy: small (up to 8 ft) ~0.75 lb, medium (10-14 ft) ~1.7 lb, large (16-20 ft) ~4 lb; spread under the whole canopy, not at the trunk.",
         "conditional_cost": "8.70"
       },
       {
@@ -1048,7 +1057,7 @@
         "labor_cost": "standard",
         "tier_4x": false,
         "tier_6x": true,
-        "notes": "Last clean nutrition window before June 1 for Sarasota/Manatee landscape accounts. North Port landscape fertility must be route-tagged and not confused with turf.",
+        "notes": "Last clean nutrition window before June 1 for Sarasota/Manatee landscape accounts. North Port landscape fertility must be route-tagged and not confused with turf. Palm dose by canopy: small (up to 8 ft) ~0.75 lb, medium (10-14 ft) ~1.7 lb, large (16-20 ft) ~4 lb; spread under the whole canopy, not at the trunk.",
         "conditional_cost": "11.09"
       },
       {
@@ -1118,7 +1127,7 @@
         "labor_cost": "standard",
         "tier_4x": true,
         "tier_6x": true,
-        "notes": "Visible fall reset: Snapshot + legal fertility + fall inspection. Keep this as a granular-first production visit whenever possible.",
+        "notes": "Visible fall reset: Snapshot + legal fertility + fall inspection. Keep this as a granular-first production visit whenever possible. Palm dose by canopy: small (up to 8 ft) ~0.75 lb, medium (10-14 ft) ~1.7 lb, large (16-20 ft) ~4 lb; spread under the whole canopy, not at the trunk.",
         "conditional_cost": "9.76"
       },
       {
@@ -1146,7 +1155,7 @@
         "labor_cost": "report",
         "tier_4x": false,
         "tier_6x": false,
-        "notes": "Retention month. The annual report should read like an agronomic plant-health-care program, not random spraying.",
+        "notes": "Retention month. The annual report should read like an agronomic plant-health-care program, not random spraying. Palm dose by canopy: small (up to 8 ft) ~0.75 lb, medium (10-14 ft) ~1.7 lb, large (16-20 ft) ~4 lb; spread under the whole canopy, not at the trunk.",
         "conditional_cost": "6.17"
       }
     ],

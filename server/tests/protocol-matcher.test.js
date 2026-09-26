@@ -312,3 +312,27 @@ describe('mosquito misting SYSTEM is a consultation, not the barrier protocol', 
     expect(byKey('Mosquito Event Service', 'mosquito_event')).toEqual(['mosquito', 3, 'mosquito_event_service']);
   });
 });
+
+describe('protocol matcher appointment month', () => {
+  const withMonth = (serviceType, month) => {
+    const r = matchServiceProtocol(protocols, serviceType, { month });
+    return [r.programKey, r.matchedVisit?.visit, r.matchedVisit?.month];
+  };
+
+  test('tree & shrub resolves the visit for the appointment month, not always visit 1', () => {
+    expect(withMonth('Tree & Shrub Care', 'Apr')).toEqual(['tree_shrub', 4, 'Apr']);
+    expect(withMonth('Tree and Shrub 6x', 'oct')).toEqual(['tree_shrub', 10, 'Oct']);
+    expect(withMonth('Tree & Shrub Care', 'September')).toEqual(['tree_shrub', 9, 'Sep']);
+  });
+
+  test('tree & shrub without a usable month keeps the visit-1 fallback', () => {
+    expect(withMonth('Tree & Shrub Care', null)).toEqual(['tree_shrub', 1, 'Jan']);
+    expect(withMonth('Tree & Shrub Care', 'xyz')).toEqual(['tree_shrub', 1, 'Jan']);
+  });
+
+  test("'Any'-month programs keep their rule-picked visit when a month is passed", () => {
+    const roach = match('German Roach Cleanout');
+    expect(withMonth('German Roach Cleanout', 'Apr')).toEqual([roach.programKey, roach.visit, 'Any']);
+    expect(withMonth('Palm Tree Injections', 'Apr')).toEqual(['palm_injection', 2, 'Any']);
+  });
+});
