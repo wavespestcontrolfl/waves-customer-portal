@@ -27,6 +27,14 @@ jest.mock('../routes/inspection-public', () => ({
   },
 }));
 
+// The post-probe recheck (Codex #4918 r5 P2) reuses the public page's own
+// accept-active predicate — mocked here like every other DB-adjacent
+// dependency so this stays a fast, isolated unit suite.
+const mockIsEstimateAcceptActive = jest.fn(() => true);
+jest.mock('../routes/estimate-public', () => ({
+  isEstimateAcceptActive: (...args) => mockIsEstimateAcceptActive(...args),
+}));
+
 // `pointing` = ids of live leads whose leads.estimate_id names the estimate.
 function chainBuilder({ firstRow = null, throwOn = false, pointing = [] } = {}) {
   const b = {};
@@ -86,10 +94,35 @@ function baseArgs(overrides = {}) {
   };
 }
 
+// The post-probe recheck (finalEligibility, Codex #4918 r5 P2) re-reads
+// `estimates` fresh. This is the "nothing changed" fresh row — open,
+// unarchived, unexpired, no off-surface markers, quote-first, not grouped,
+// and matching OPEN_RECURRING_LEAD's contact — so every test that doesn't
+// deliberately simulate a mid-probe change reaches the same result it did
+// before this recheck existed.
+function freshOpenEstimate(overrides = {}) {
+  return {
+    id: ESTIMATE_ID,
+    archived_at: null,
+    status: 'viewed',
+    expires_at: null,
+    estimate_data: JSON.stringify({}),
+    estimate_group_id: null,
+    customer_id: null,
+    customer_phone: '(941) 555-1234',
+    customer_email: null,
+    ...overrides,
+  };
+}
+
 beforeEach(() => {
   mockCreateShortCode.mockClear();
   jest.clearAllMocks();
-  mockBuilders = { leads: chainBuilder({ firstRow: OPEN_RECURRING_LEAD }) };
+  mockIsEstimateAcceptActive.mockReturnValue(true);
+  mockBuilders = {
+    leads: chainBuilder({ firstRow: OPEN_RECURRING_LEAD }),
+    estimates: chainBuilder({ firstRow: freshOpenEstimate() }),
+  };
   process.env.GATE_ESTIMATE_CONSULTATION_OFFER = 'true';
   process.env.GATE_LEAD_INSPECTION_LINK = 'true';
   process.env.LEAD_PREFILL_SECRET = 'test-prefill-secret';
@@ -296,5 +329,41 @@ describe('buildEstimateConsultationOffer — happy path', () => {
   test('eligible but nothing to pick (out of area, retired catalog, no open times) → null', async () => {
     mockComputeConsultationSlotsForLead.mockResolvedValue({ ok: true, slots: [], needsAddress: false });
     expect(await buildEstimateConsultationOffer(baseArgs())).toBeNull();
+  });
+});
+
+// Post-probe recheck (Codex #4918 r5 P2, finding 1): the probe above can
+// take up to PROBE_BUDGET_MS, during which the estimate can turn
+// accepted/declined/expired or gain an off-customer-surface marker.
+// finalEligibility re-reads the estimate fresh and re-runs
+// isEstimateAcceptActive AFTER the probe, before the page ever mints a URL.
+describe('buildEstimateConsultationOffer — post-probe estimate freshness', () => {
+  test('the estimate turns accept-inactive (accepted/declined/off-surface) by the time the probe returns → null, no mint', async () => {
+    mockIsEstimateAcceptActive.mockReturnValue(false);
+    const result = await buildEstimateConsultationOffer(baseArgs());
+    expect(result).toBeNull();
+    expect(mockComputeConsultationSlotsForLead).toHaveBeenCalledTimes(1); // the probe still ran; only the post-probe recheck failed
+  });
+
+  test('the estimate gains a quote-first disqualifier (scheduled_service_id) during the probe → null', async () => {
+    mockBuilders.estimates = chainBuilder({
+      firstRow: freshOpenEstimate({ estimate_data: JSON.stringify({ scheduled_service_id: 'svc-mid-probe' }) }),
+    });
+    expect(await buildEstimateConsultationOffer(baseArgs())).toBeNull();
+  });
+
+  test('the estimate becomes grouped during the probe → null', async () => {
+    mockBuilders.estimates = chainBuilder({ firstRow: freshOpenEstimate({ estimate_group_id: 'grp-mid-probe' }) });
+    expect(await buildEstimateConsultationOffer(baseArgs())).toBeNull();
+  });
+
+  test('the fresh estimate row is missing entirely (deleted mid-probe) → null', async () => {
+    mockBuilders.estimates = chainBuilder({ firstRow: null });
+    expect(await buildEstimateConsultationOffer(baseArgs())).toBeNull();
+  });
+
+  test('nothing changes during the probe → still eligible, same URL contract as before this recheck existed', async () => {
+    const result = await buildEstimateConsultationOffer(baseArgs());
+    expect(result?.url).toContain('/inspection/');
   });
 });

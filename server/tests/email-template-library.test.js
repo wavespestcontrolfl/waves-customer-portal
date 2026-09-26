@@ -48,6 +48,7 @@ function chain({ result = [], first, returning } = {}) {
     'select',
     'orderBy',
     'limit',
+    'forUpdate',
   ].forEach((method) => {
     q[method] = jest.fn(() => q);
   });
@@ -1923,5 +1924,73 @@ describe('email template library rendering', () => {
       expect(result).toEqual(expect.objectContaining({ sent: true }));
       expect(result.withheldLinksRewritten).toBeUndefined();
     });
+  });
+});
+
+// publishVersion's transaction must lock the email_templates row FOR UPDATE
+// as its FIRST statement, before any email_template_versions status write
+// (Codex #4918 r5 P2): the four 20260926* migrations that also mutate
+// email_templates/email_template_versions already take that same row lock
+// first, so a concurrent admin publish must serialize with them (and with
+// itself) the same way — archiving/activating versions before the lock let
+// a concurrent publish interleave and leave two active versions.
+describe('publishVersion — template row lock ordering (Codex #4918 r5 P2)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('locks email_templates FOR UPDATE before archiving the old active version, activating the new one, or updating the template row', async () => {
+    const templateRow = { id: 'tmpl-1', allowed_variables: [], required_variables: [] };
+    const loadedVersionRow = {
+      id: 'ver-1', template_id: 'tmpl-1', subject: 'Hi', preview_text: '', text_body: '', blocks: [], template: templateRow,
+    };
+    const order = [];
+
+    const lockQuery = chain({ first: templateRow });
+    lockQuery.forUpdate = jest.fn(() => { order.push('email_templates.forUpdate'); return lockQuery; });
+    const lockFirst = lockQuery.first;
+    lockQuery.first = jest.fn(async () => { order.push('email_templates.first'); return lockFirst(); });
+
+    const archiveVersionsQuery = chain({});
+    archiveVersionsQuery.update = jest.fn(async () => { order.push('email_template_versions.archive'); return 1; });
+
+    const activateVersionQuery = chain({});
+    activateVersionQuery.update = jest.fn(async () => { order.push('email_template_versions.activate'); return 1; });
+
+    const templateUpdateQuery = chain({});
+    templateUpdateQuery.update = jest.fn(async () => { order.push('email_templates.update'); return 1; });
+
+    setDbQueues({
+      'email_template_versions as v': [chain({ first: loadedVersionRow })],
+      email_templates: [lockQuery, templateUpdateQuery],
+      email_template_versions: [archiveVersionsQuery, activateVersionQuery],
+    });
+
+    const result = await EmailTemplates.publishVersion('ver-1', 'tech-1');
+
+    expect(result).toEqual(expect.objectContaining({ published: true }));
+    expect(order).toEqual([
+      'email_templates.forUpdate',
+      'email_templates.first',
+      'email_template_versions.archive',
+      'email_template_versions.activate',
+      'email_templates.update',
+    ]);
+  });
+
+  test('runs inside a single db.transaction — the lock and every version/template write share one connection', async () => {
+    const templateRow = { id: 'tmpl-1', allowed_variables: [], required_variables: [] };
+    const loadedVersionRow = {
+      id: 'ver-1', template_id: 'tmpl-1', subject: 'Hi', preview_text: '', text_body: '', blocks: [], template: templateRow,
+    };
+    setDbQueues({
+      'email_template_versions as v': [chain({ first: loadedVersionRow })],
+      email_templates: [chain({ first: templateRow }), chain({})],
+      email_template_versions: [chain({}), chain({})],
+    });
+
+    await EmailTemplates.publishVersion('ver-1', 'tech-1');
+
+    expect(db.transaction).toHaveBeenCalledTimes(1);
   });
 });

@@ -96,7 +96,11 @@ async function linkedLeadIdFor(estimateId, estimateData) {
 //   - an unambiguous linked lead (linkedLeadIdFor) that is still the
 //     estimate's contact, passes leadLinkRefusal and wants a recurring plan;
 //   - the page's probe finds an open slot (#4853 r1 P2) at the address it
-//     resolved, which must be this estimate's property (r2 P1, r3 P0).
+//     resolved, which must be this estimate's property (r2 P1, r3 P0);
+//   - AFTER the probe (up to PROBE_BUDGET_MS), a fresh re-read of the
+//     estimate and lead re-judged against the same rules (finalEligibility,
+//     Codex #4918 r5 P2) — the caller's acceptActive and every row read
+//     above can go stale during the probe.
 // Throws on unexpected errors — callers fail soft.
 async function estimateConsultationLead({ estimate, estimateData, acceptActive } = {}) {
   if (!leadInspectionLinkLive() || !acceptActive || !estimate) return null;
@@ -124,7 +128,46 @@ async function estimateConsultationLead({ estimate, estimateData, acceptActive }
   }
   if (!result.ok || result.slots.length === 0) return null;
   if (!sameProperty(estimate.address, result.address)) return null;
-  return lead;
+
+  // Recheck estimate state after the availability probe (Codex #4918 r5
+  // P2): the probe above can take up to PROBE_BUDGET_MS, during which the
+  // estimate can be accepted/declined/expired, or gain a linkage/reprice/
+  // address hold (estimateOffCustomerSurface markers), and the lead's own
+  // contact fields (email included) can change — every snapshot this
+  // function was handed or has read so far (`estimate`, `estimateData`,
+  // `acceptActive`, `lead`) is now stale. Re-read the estimate and lead
+  // fresh and re-run the SAME eligibility this function already checked
+  // above, single-sourced in finalEligibility, before returning anything a
+  // caller will mint a bearer token for (the page) or email one (the
+  // gone-quiet follow-up) — both consultation surfaces share this helper
+  // and never re-derive eligibility themselves. No further await runs
+  // between this check and the mint/send that follows in either caller.
+  return finalEligibility(estimate.id, leadId);
+}
+
+// The final, post-probe eligibility re-check — a fresh read of the
+// estimate and lead rows, re-judged against the same rules
+// estimateConsultationLead applies above. Kept single-sourced so a rule
+// added to either check never drifts between the pre-probe and post-probe
+// passes.
+async function finalEligibility(estimateId, leadId) {
+  const { isEstimateAcceptActive } = require('../routes/estimate-public');
+  const freshEstimate = await db('estimates').where({ id: estimateId }).first();
+  if (!freshEstimate || !isEstimateAcceptActive(freshEstimate)) return null;
+  let freshEstimateData = freshEstimate.estimate_data;
+  if (typeof freshEstimateData === 'string') {
+    try { freshEstimateData = JSON.parse(freshEstimateData); } catch { freshEstimateData = null; }
+  }
+  if (freshEstimateData?.scheduled_service_id || freshEstimate.estimate_group_id) return null;
+
+  const freshLead = await db('leads').where({ id: leadId }).whereNull('deleted_at')
+    .first('id', 'phone', 'email', 'service_interest', 'status', 'converted_at', 'customer_id');
+  if (!freshLead) return null;
+  const { leadMatchesEstimateContact } = require('./lead-estimate-link');
+  if (!leadMatchesEstimateContact(freshLead, freshEstimate)) return null;
+  if (await leadLinkRefusal(freshLead)) return null;
+  if (!leadWantsRecurringPlan(freshLead)) return null;
+  return freshLead;
 }
 
 // The estimate page's offer: its own gate, then the shared eligibility. The
@@ -148,4 +191,8 @@ async function buildEstimateConsultationOffer({ estimate, estimateData, acceptAc
 // estimate.engage_gone_quiet follow-up email's own consultation-offer
 // link, owner ruling 2026-09-26) — the same shared eligibility this
 // module's own page offer above already uses, never re-derived.
-module.exports = { buildEstimateConsultationOffer, estimateConsultationLead, _test: { sameProperty, linkedLeadIdFor, PROBE_BUDGET_MS } };
+module.exports = {
+  buildEstimateConsultationOffer,
+  estimateConsultationLead,
+  _test: { sameProperty, linkedLeadIdFor, finalEligibility, PROBE_BUDGET_MS },
+};

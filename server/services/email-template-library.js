@@ -829,6 +829,13 @@ async function publishVersion(versionId, technicianId) {
     throw err;
   }
   await db.transaction(async (trx) => {
+    // Lock the template row FIRST (Codex #4918 r5 P2): the four
+    // 20260926* migrations that touch email_templates/email_template_versions
+    // all take `FOR UPDATE` on the template row before writing a version, so
+    // a concurrent publish must serialize with them the same way — and with
+    // itself. Archiving/activating versions BEFORE this lock let a
+    // concurrent admin publish interleave and leave two active versions.
+    await trx('email_templates').where({ id: row.template_id }).forUpdate().first();
     await trx('email_template_versions')
       .where({ template_id: row.template_id, status: 'active' })
       .update({ status: 'archived', updated_at: new Date() });
