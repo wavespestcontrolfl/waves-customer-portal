@@ -1636,6 +1636,18 @@ function resolveRangeStartPeriod(hour1, endClock24) {
   if (durAm === 0 || durPm === 0 || durAm === durPm) return null;
   return durAm < durPm ? 'am' : 'pm';
 }
+// "tonight" is an evening-only word (unlike "today"/"tomorrow", which carry
+// no time-of-day signal on their own) — when NEITHER bound resolves a
+// period any other way, the generic business-hours table's morning half
+// (7-11) is overridden to PM under "tonight" (codex review round 3 P1:
+// "tonight between 8 and 10" is 8-10 PM, never the inferred 8 AM). Scoped to
+// this range fallback only, not the shared business-hours table itself,
+// which many already-hardened non-range SLOT_BINDING_CHECKS paths rely on.
+function inferRangeStartFallbackPeriod(hour, ns) {
+  const businessHours = inferPeriodFromBusinessHours(Number(hour));
+  if (businessHours === 'am' && / tonight /.test(` ${ns} `)) return 'pm';
+  return businessHours;
+}
 function collapseRangeToFirstBound(ns) {
   const m = RANGE_RE.exec(ns);
   if (!m) return ns;
@@ -1655,7 +1667,7 @@ function collapseRangeToFirstBound(ns) {
     );
     const period = explicitPeriod
       || resolveRangeStartPeriod(hour, endClock24)
-      || inferPeriodFromBusinessHours(Number(hour));
+      || inferRangeStartFallbackPeriod(hour, ns);
     if (!period) return ns;
     replacement = `${hour} ${period}`;
   }
