@@ -70,6 +70,7 @@ describe('real-catalog answer guards (Codex #4974 r2)', () => {
     const built = buildAnswer({ ...ctx([cand('subterranean-termite', 0.9), cand('termite-mud-tubes', 0.5)]), signOnly: true });
     expect(built.entry?.kind).not.toBe('organism');
     expect(built.candidatesBlock.map((c) => c.slug)).not.toContain('subterranean-termite');
+    expect(built.evidence.matches.join(' ')).not.toMatch(/soldier|worker|body/i);
   });
 
   test('bats get the exclusion-only referral, never a trapper', () => {

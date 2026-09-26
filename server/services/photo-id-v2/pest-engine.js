@@ -910,10 +910,14 @@ function buildAnswer(ctx) {
   const { level, wording, nodeId, subhead, headline, entry } = picked;
 
   const group = groupBlockFor(level, nodeId, entry);
-  const evidence = evidenceFor(candidatesSupporting(candidates, level, nodeId));
+  // On a sign-only read the photos show no animal: nothing a customer sees
+  // (evidence, other possibilities) comes from an organism candidate
+  // (Codex #4974 r8-r9).
+  const shownCandidates = signOnly ? candidates.filter((c) => c.entry?.kind !== 'organism') : candidates;
+  const evidence = evidenceFor(candidatesSupporting(shownCandidates, level, nodeId));
   // On a sign-only read the photos show no animal, so no organism is listed
   // as another possibility either (Codex #4974 r8).
-  const candidatesBlock = candidatesBlockFor(signOnly ? candidates.filter((c) => c.entry?.kind !== 'organism') : candidates, currentMonth);
+  const candidatesBlock = candidatesBlockFor(shownCandidates, currentMonth);
   const nextPhoto = nextPhotoFor(wording, candidates, level, nodeId);
 
   // Contract delta 2026-09-26 #3: a chosen pair no single photo can settle

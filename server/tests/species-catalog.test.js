@@ -252,7 +252,9 @@ describe('species-catalog-v1 entries — schema (ported from validate.js)', () =
     }
     // "Leave it alone" never comes with a removal referral on the same card
     // (Codex #4974 r8).
-    if (e.action === 'leave_alone') expect([null, 'protected_leave_alone']).toContain(s.referral);
+    // Nor does "keep an eye on it": a standing trapper referral can't carry
+    // "only if it gets inside" (Codex #4974 r9).
+    if (e.action === 'leave_alone' || e.action === 'monitor') expect([null, 'protected_leave_alone']).toContain(s.referral);
     if (e.subgroup === 'venomous-snakes') {
       expect(e.verdict).toBe('call');
       expect(e.safety.venomous).toBe(true);

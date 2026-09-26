@@ -804,7 +804,7 @@
       "The largest venomous snake in North America, often 4 to 6 feet or more, heavy-bodied",
       "Bold, dark diamond-shaped blotches outlined in cream or yellowish scales down the back",
       "Broad, triangular head clearly wider than the neck, with a rattle at the tip of the tail",
-      "Coils and rattles loudly as a warning before striking, rather than fleeing immediately"
+      "May coil and rattle loudly as a warning, but can stay silent or move away; silence doesn't rule it out"
     ],
     "look_alikes": [
       {
@@ -1031,7 +1031,7 @@
     "traits": [
       "Heavy-bodied, olive-brown to black with 10 to 17 dark crossbands, often looking almost solid black with age",
       "Blocky head clearly wider than the neck, with dark vertical stripes at the tip of the snout and a dark cheek stripe",
-      "Gapes its mouth wide open to show a pale white interior when threatened, often standing its ground rather than fleeing",
+      "May gape to show a pale white mouth when threatened, but not every one does; a closed mouth doesn't rule it out",
       "Found at the water's edge, on logs, or in shallow water in ponds, ditches, canals and wetlands",
       "Vertical, cat-like pupils and eyes hidden from above by a heavy brow ridge; a deep pit between eye and nostril"
     ],
@@ -1109,7 +1109,7 @@
       "https://myfwc.com/wildlifehabitats/profiles/reptiles/snakes/cottonmouth/"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": "Per audit item 18: removed head-shape-alone as the confirming tell (UF/IFAS UW229 notes water snakes are commonly mistaken for cottonmouths and recommends leaving all water snakes alone rather than sorting them visually, since both flatten/widen the head defensively). Added FWC-confirmed cues (myfwc.com cottonmouth profile, loaded this session): vertical pupil, eyes hidden from directly above by the brow ridge, and a facial pit that water snakes lack. look_alikes.photo_can_confirm set to false since a homeowner cannot safely get close enough for a clear pupil/facial-pit photo; next_photo instead tells them to keep distance and treat an uncertain sighting as this species."
     },
     "role": "wildlife",

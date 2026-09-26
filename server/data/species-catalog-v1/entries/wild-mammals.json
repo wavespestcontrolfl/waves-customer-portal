@@ -186,7 +186,7 @@
       "key": null,
       "label": "Wildlife Referral",
       "inspection_first": false,
-      "referral": "wildlife_trapper"
+      "referral": null
     },
     "urgency": "low",
     "copy": {
@@ -526,7 +526,7 @@
       "key": null,
       "label": "Wildlife Referral",
       "inspection_first": false,
-      "referral": "wildlife_trapper"
+      "referral": null
     },
     "urgency": "low",
     "copy": {
@@ -750,7 +750,7 @@
       "key": null,
       "label": "Wildlife Referral",
       "inspection_first": false,
-      "referral": "wildlife_trapper"
+      "referral": null
     },
     "urgency": "low",
     "copy": {
@@ -768,7 +768,7 @@
       "https://ask.ifas.ufl.edu/publication/UW080"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": "Peak months partly confirmed this session: UF/IFAS \"Wildlife of Florida Factsheet: Eastern Mole\" (UW080) states young \"are born in March after a 45-day gestation period,\" which places mating around mid-January -- consistent with this entry's Jan-Mar peak window. The source doesn't separately address general tunneling-activity peaks (as opposed to breeding), so the Nov-Dec portion of peak_months remains a reasonable but not separately source-confirmed estimate tied to cooler/moister soil conditions. Per audit item 7 / BRIEF Revision 3 wildlife routing: service.line changed from lawn to none with a wildlife_trapper referral (site_category stays \"Lawn\" per slugs.tsv, which only governs the website category)."
     },
     "role": "wildlife",
@@ -861,7 +861,7 @@
       "key": null,
       "label": "Wildlife Referral",
       "inspection_first": false,
-      "referral": "wildlife_trapper"
+      "referral": null
     },
     "urgency": "low",
     "copy": {
@@ -879,7 +879,7 @@
       "https://myfwc.com/wildlifehabitats/profiles/mammals/land/pocket-gopher/"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": "Contradicted and corrected this session: FWC's own Land Mammals profile page states plainly, \"Southeastern pocket gophers are found in the northern half of the state,\" with range extending north into Alabama and Georgia -- it does not name Southwest Florida or central Florida as part of the range. This contradicts the draft's 'occasional' range (which implied at least patchy SWFL presence); range corrected to 'rare' and copy/tech_notes reworded to flag it as mainly a north/central Florida species included here as a look-alike for eastern mole damage, not as a species commonly expected in SWFL yards. Per audit item 7 / BRIEF Revision 3 wildlife routing: service.line changed from lawn to none with a wildlife_trapper referral (site_category stays \"Lawn\" per slugs.tsv, which only governs the website category)."
     },
     "role": "wildlife",
