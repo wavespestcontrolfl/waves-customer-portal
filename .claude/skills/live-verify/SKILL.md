@@ -1,14 +1,14 @@
 ---
 name: live-verify
-description: Independent live verification of a finished change — an agent that did not write it runs the changed behavior on a dev/preview stack, compares it with main, and posts a PASS / PASS+NOTES / FAIL / BLOCKED verdict. Required before merging a Full-tier PR (waves-ship CHECKLIST.md). Not a substitute for tests, ui-verify, or Codex.
+description: Independent live verification of a finished change — an agent that did not write it runs the changed behavior (on a dev/preview stack where one exists), compares it with the merge-base, and posts a PASS / PASS+NOTES / FAIL / BLOCKED verdict. Required before merging a Full-tier PR (waves-ship CHECKLIST.md). Not a substitute for tests, ui-verify, or Codex.
 ---
 
 # Live verify
 
 CI proves the tests pass. Codex reads the diff. Neither one runs the change.
 This skill is the check that does: someone who did not write the code
-exercises the changed behavior on a running stack, compares it with `main`,
-and records what actually happened.
+exercises the changed behavior, on a running stack wherever the surface has
+one, compares it with the merge-base, and records what actually happened.
 
 ## Who and when
 
@@ -71,7 +71,7 @@ for the surface. Rungs 2 and 3 are not end-to-end database evidence; say so.
 | Migration or raw SQL | `dev:migrate` on this worktree's QA database, plus the waves-db verification | the schema or rows read back; a second `dev:migrate` is a no-op |
 | Background job or cron | run the job's function once against the QA database from `.tmp/live-verify/` | rows before and after; a second run converges (idempotent) |
 | Inbound webhook (Stripe, Twilio, SendGrid, Resend, Bouncie, ElevenLabs) | replay a signed synthetic payload at the local route, the way `qa:e2e` settles its webhook | response, resulting rows, and a replay that changes nothing |
-| Intelligence Bar tool | `npm run test:contracts`, then `executeTool` against the QA database | tool output and any rows it wrote |
+| Intelligence Bar tool | `npm run test:contracts -- --skip-exec` (the full suite executes every read tool, and some call live provider APIs when credentials are loaded), then `executeTool` for the changed tool only, against the QA database, in a process with provider credentials cleared | tool output and any rows it wrote |
 | LLM call site or prompt | the lane's eval if one exists (`eval:voice-relay`, `eval:call-replay`, `eval:lawn-diagnostic`), else one direct call with synthetic input. Evals need the model API key in that one process and contact no customer | the eval report, or input and output |
 | Voice relay (Sandy) | `eval:voice-relay`. Live calls only through the sandbox number (CLAUDE.md), only when the owner has arranged one | eval report |
 | Email or SMS template | rung 3: call the server render function with synthetic variables. The composing UI via `admin-email*.cjs` or `communications-sms-reliability.cjs`. Never send | rendered HTML screenshot or the final text |
@@ -81,9 +81,15 @@ for the surface. Rungs 2 and 3 are not end-to-end database evidence; say so.
 
 Run the same scenario on the PR's merge-base as well as the head, so the
 verdict shows a change and not just a state. Use a throwaway worktree at
-`$(git merge-base origin/main HEAD)` under `.tmp/live-verify/base` with its
-own `npm ci` (never share `node_modules`). For a bug fix, the base must show
-the bug. For a new capability absent on `main`, record "not on main" and
+`$(git merge-base origin/main HEAD)` under `.tmp/live-verify/base`, set up
+like any checkout: `npm ci` (never share `node_modules`), then
+`npm run worktree:setup`, since every managed command refuses to start
+without it. A rung-1 base run also needs its own `.tmp/dev/database.env`
+pointing at the same verified dev cluster and its own `npm run qa:database`,
+`dev:migrate`, and `dev:doctor` (`docs/development.md`); never reuse the
+head worktree's private database. When that setup cannot be done, run the
+base scenario on the highest rung it can reach and say which. For a bug fix,
+the base must show the bug. For a new capability absent on `main`, record "not on main" and
 verify the end state the user waits for instead.
 
 ## Patch-id
@@ -91,13 +97,14 @@ verify the end state the user waits for instead.
 A verdict describes a patch, not a SHA. Record, after `git fetch origin`:
 
 ```sh
-git diff "$(git merge-base origin/main HEAD)" HEAD | git patch-id --stable | cut -d' ' -f1
+git diff "$(git merge-base origin/main HEAD)" HEAD | git patch-id --verbatim | cut -d' ' -f1
 ```
 
 Before merge, recompute on the final head. The same patch-id means the
 verdict stands, for example after a merge of `main` that did not touch the
-PR's own changes. CI and Codex still run on the new head. A different
-patch-id needs a fresh verdict for the scenarios whose files changed. Never
+PR's own changes. `--verbatim` keeps whitespace, so a whitespace-only edit
+inside a string or markup still changes the id (`--stable` would hide it).
+CI and Codex still run on the new head. A different patch-id needs a fresh verdict for the scenarios whose files changed. Never
 carry a verdict across on matching commit messages or an older green check.
 
 ## Verdict

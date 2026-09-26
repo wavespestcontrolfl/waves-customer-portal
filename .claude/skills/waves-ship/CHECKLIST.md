@@ -37,7 +37,7 @@ Run top to bottom before merging any portal/astro PR. Every unchecked item is a 
 
 ## Live verification gate (Full tier)
 - [ ] A `live-verify` verdict comment on the PR, from an agent that did not write the change: `PASS` or `PASS+NOTES`. `FAIL` and `BLOCKED` block. CI green and a clean Codex round are not a verdict. Procedure and comment format: `.claude/skills/live-verify/SKILL.md`
-- [ ] The verdict exercised the changed behavior on a running dev/preview stack (not only tests), ran the same scenario on `origin/main` as the regression lane, and cites its evidence
+- [ ] The verdict exercised the changed behavior on the highest evidence rung the surface allows (`live-verify` §Evidence ladder: a running dev/preview stack where one exists, direct execution only where it does not), ran the same scenario on the merge-base as the regression lane, and cites its evidence
 - [ ] The verdict describes the FINAL patch: its recorded patch-id equals the final head's (`live-verify` §Patch-id). A head that only merged main with an unchanged patch-id keeps its verdict; a changed patch-id needs a fresh verdict on the affected scenarios
 - [ ] Every `NOTES` item is fixed, or listed under `Deferred P2s` with the verifier's evidence
 
