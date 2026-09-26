@@ -4687,6 +4687,13 @@ describe('voice relay eval — named spoken checks', () => {
     // A real Spanish sentence — including one with a mid-sentence English
     // brand/place name — must still pass.
     ['Anoté 88B Palm Harbor Drive. Gracias.', 'pass'],
+    // Pre-push Codex on #4946: Spanish letter names that are also English
+    // words ("be" = B, "i" = I) spell a letter here, not English...
+    ['Correcto, ochenta y ocho be, Palm Harbor Drive.', 'pass'], ['Es el 88 be, no el 88.', 'pass'],
+    ['El apellido se escribe con i latina.', 'pass'], ['Se escribe eme, a, erre, i, a.', 'pass'],
+    ['Se escribe be de burro.', 'pass'],
+    // ...while the same words used as English are still English evidence.
+    ['Be careful.', 'fail'], ['I.', 'fail'], ['Can I help?', 'fail'],
     ['Un miembro del equipo de Waves le llamará desde Bradenton.', 'pass'],
     ['Envié el enlace por correo.', 'pass'],
     // Codex round-4 P1 structural fix: round 3's design REQUIRED positive

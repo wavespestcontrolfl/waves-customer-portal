@@ -2490,9 +2490,32 @@ function hasEnglishEvidence(sentence, groundedProperNouns = new Set()) {
     const w = m[0].replace(/\u2019/g, "'");
     if (groundedProperNouns.has(w.toLowerCase())) continue;
     if (NEUTRAL_WORDS_RE.test(w)) continue;
+    if (SPANISH_LETTER_NAME_RE.test(w) && spellsALetter(sentence, m.index, m[0].length)) continue;
     if (ENGLISH_EVIDENCE_RE.test(w)) return true;
   }
   return false;
+}
+
+// Pre-push Codex on #4946: "be" (B) and "i" (I) are Spanish letter names as
+// well as English words. They read as letters when the sentence spells or
+// names one: right after a number ("ochenta y ocho be", "88 be", a unit
+// letter), after "letra/con/la/una" ("con i latina"), before a letter
+// qualifier ("i latina", "be larga", "be de burro"), or beside another
+// spelled letter ("eme, a, erre, i, a"). "I will", "be there" stay English.
+const SPANISH_LETTER_NAME_RE = /^(?:be|i)$/i;
+const SPANISH_NUMBER_WORD_SOURCE = '(?:uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce|trece|catorce|quince|diecis[eé]is|diecisiete|dieciocho|diecinueve|veinte|veinti[a-záéíóúñ]+|treinta|cuarenta|cincuenta|sesenta|setenta|ochenta|noventa|cien|ciento|[a-z]+cientos|quinientos|mil)';
+const LETTER_LEAD_RE = new RegExp(`(?:\\d|\\b(?:${SPANISH_NUMBER_WORD_SOURCE}|letra|con|la|una))[\\s,-]*$`, 'i');
+const LETTER_QUALIFIER_RE = /^[\s,-]*(?:latina|griega|may[uú]scula|min[uú]scula|grande|larga|chica|corta|alta|baja|de\s+[a-záéíóúñ]+)(?![a-záéíóúñ])/i;
+// A spelled neighbor: an unambiguous Spanish letter name, or a lone letter
+// joined by a comma or hyphen ("A, R, I", "eme-a-erre").
+const SPELLED_LETTER_SOURCE = '(?:be|ce|efe|ge|hache|i|jota|ka|ele|eme|ene|eñe|pe|cu|erre|uve|equis|ye|zeta)';
+const SPELLED_BEFORE_RE = new RegExp(`(?:(?:^|[^a-záéíóúñ])${SPELLED_LETTER_SOURCE}[\\s,.-]+|(?:^|[^a-záéíóúñ])[a-zñ]\\s*[,-]\\s*)$`, 'i');
+const SPELLED_AFTER_RE = new RegExp(`^(?:[\\s,.-]+${SPELLED_LETTER_SOURCE}|\\s*[,-]\\s*[a-zñ])(?![a-záéíóúñ])`, 'i');
+function spellsALetter(sentence, index, length) {
+  const before = sentence.slice(0, index);
+  const after = sentence.slice(index + length);
+  return LETTER_LEAD_RE.test(before) || LETTER_QUALIFIER_RE.test(after)
+    || SPELLED_BEFORE_RE.test(before) || SPELLED_AFTER_RE.test(after);
 }
 
 // Capitalized words seen as NOT-that-text’s-own-first-word in the CALLER’s
