@@ -79,8 +79,10 @@ const SIGNATURE_TAIL_RES = { '': buildSignatureTailRes('') };
 for (const key of Object.keys(PEOPLE)) SIGNATURE_TAIL_RES[key] = buildSignatureTailRes(key);
 
 // Opt-in `anySigner`: a sign-off by a name the patterns above do not know
-// ("— Sarah", "Thanks,\nSarah", a bare "Sarah Jones" line), for callers whose
-// text a model writes from arbitrary input. Only the unambiguous shapes count:
+// ("— Sarah", "Thanks,\nSarah", "Talk soon!\nSarah"), for callers whose text a
+// model writes from arbitrary input. A bare capitalized final line is not
+// enough on its own — "Call Today", "Schedule Online" and "Reply YES" have the
+// same shape as "Sarah Jones" — so only sign-off-marked shapes count:
 //  - a dash-set name: the dash starts its own line (not under a value word,
 //    trailing spaces included: "Your technician is \n— Sarah" is an answer),
 //    follows a sentence ending in . or ! on the same line, or is the whole
@@ -89,12 +91,13 @@ for (const key of Object.keys(PEOPLE)) SIGNATURE_TAIL_RES[key] = buildSignatureT
 //  - a known closer on its own line with the name under it ("Thanks,\nSarah")
 //    — a closer from CLOSER, never any comma-ended line ("Here are the
 //    options,\nLawn Care" is a list);
-//  - a capitalized name alone on the last line under a FINISHED sentence
-//    ("We can help.\nSarah Jones"); after a question, a colon or an
-//    unfinished sentence the name is the answer.
-// A name that is the customer's own first name is the addressee in the last
-// two shapes, so it stays. A closer + name on one line, and a dash after a
-// question on the same line, may address or answer, so they stay too.
+//  - a name alone on the last line right under a closer line ("Talk
+//    soon!\nSarah"): the closer line stays, the name goes;
+//  - a closer and the name on one line ("We can help. Thanks, Sarah") only
+//    when the customer's first name is known and is not that name — thanking
+//    the customer by name looks the same.
+// A name that is the customer's own first name is the addressee, so it stays;
+// a dash after a question on the same line may be the answer, so it stays too.
 const ANY_TOKEN = "\\p{L}[\\p{L}'\\u2019-]*";
 const CAP_TOKEN = "\\p{Lu}[\\p{L}'\\u2019-]*";
 const CAP_COMPANY = `(?:\\s*,\\s*${CAP_TOKEN}(?:\\s+${CAP_TOKEN}){0,3})?`;
@@ -113,20 +116,27 @@ function anyCase(source) {
   return out;
 }
 const VALUE_WORD = anyCase('(?:is|are|was|were|be|as|named|called|by)');
+const ANY_CLOSER = anyCase(CLOSER);
+// mode: 'always' strips regardless of the customer; 'keepAddressee' keeps the
+// customer's own first name; 'otherThanAddressee' strips only when the
+// customer's first name is known and differs.
 const ANY_SIGNER_RES = [
   // (?<![ \t]) starts the line-break alternative at the first trailing space,
   // so the value-word lookbehind sees the word itself, not a space after it.
-  { re: new RegExp(`(?:^|(?<=[.!]["'\\u201D\\u2019]?)[ \\t]*|(?<!\\b${VALUE_WORD}[ \\t]*)(?<![ \\t])[ \\t]*\\n\\s*)${DASH}\\s*${DASH_NAME}${TAIL}`, 'u'), addresseeKept: false },
-  { re: new RegExp(`(?:^|(?<=[.!?])\\s+|${OWN_LINE})${anyCase(CLOSER)},?[ \\t]*\\n\\s*${CAP_NAME}${TAIL}`, 'u'), addresseeKept: true },
-  { re: new RegExp(`${AFTER_SENTENCE_LINE}${CAP_NAME}${TAIL}`, 'u'), addresseeKept: true },
+  { re: new RegExp(`(?:^|(?<=[.!]["'\\u201D\\u2019]?)[ \\t]*|(?<!\\b${VALUE_WORD}[ \\t]*)(?<![ \\t])[ \\t]*\\n\\s*)${DASH}\\s*${DASH_NAME}${TAIL}`, 'u'), mode: 'always' },
+  { re: new RegExp(`(?:^|(?<=[.!?])\\s+|${OWN_LINE})${ANY_CLOSER},?[ \\t]*\\n\\s*${CAP_NAME}${TAIL}`, 'u'), mode: 'keepAddressee' },
+  { re: new RegExp(`(?<=(?:^|[.!?\\n])\\s*${ANY_CLOSER}[!.]?)[ \\t]*\\n\\s*${CAP_NAME}${TAIL}`, 'u'), mode: 'keepAddressee' },
+  { re: new RegExp(`(?:^|(?<=[.!?])\\s+|${OWN_LINE})${ANY_CLOSER},?[ \\t]+${CAP_NAME}${TAIL}`, 'u'), mode: 'otherThanAddressee' },
 ];
 
 function stripAnySignerOnce(text, addresseeFirstName) {
   const addressee = String(addresseeFirstName || '').trim().toLowerCase();
-  return ANY_SIGNER_RES.reduce((current, { re, addresseeKept }) => current.replace(re, (...args) => {
+  return ANY_SIGNER_RES.reduce((current, { re, mode }) => current.replace(re, (...args) => {
     const { name } = args[args.length - 1];
-    const first = String(name || '').split(/\s+/)[0].toLowerCase();
-    return addresseeKept && addressee && first === addressee ? args[0] : '';
+    const isAddressee = Boolean(addressee) && String(name || '').split(/\s+/)[0].toLowerCase() === addressee;
+    if (mode === 'keepAddressee' && isAddressee) return args[0];
+    if (mode === 'otherThanAddressee' && (!addressee || isAddressee)) return args[0];
+    return '';
   }), text).trim();
 }
 

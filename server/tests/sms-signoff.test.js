@@ -158,11 +158,11 @@ describe('stripTrailingSignature — anySigner', () => {
     ['We can help. — sarah', 'We can help.'],
     ['We can help. — Élodie', 'We can help.'],
     ['We can help.\n\n— Sarah Jones, Waves Team', 'We can help.'],
-    // Codex r4 on #4975: non-dash sign-offs by any name.
+    // Codex r4 + r5 on #4975: closer-marked sign-offs by any name.
     ['We can help.\nThanks,\nSarah', 'We can help.'],
-    ['We can help.\nSarah Jones', 'We can help.'],
-    ['We can help.\n\nSarah', 'We can help.'],
     ['We can help.\nBest regards,\nSarah Jones, Waves Team', 'We can help.'],
+    ['Talk soon!\nSarah', 'Talk soon!'],
+    ['We can help.\nThanks!\nSarah Jones', 'We can help.\nThanks!'],
   ])('%j → %j', (text, expected) => {
     expect(any(text)).toBe(expected);
   });
@@ -178,6 +178,12 @@ describe('stripTrailingSignature — anySigner', () => {
     'Your technician this week:\nSarah',
     'Who will be coming?\nSarah Jones',
     'Here are the options,\nLawn Care',
+    // Codex r5 on #4975: a bare capitalized final line is not enough —
+    // short calls to action have the same shape as a name.
+    'We can help with ants.\nReply YES',
+    'We can help with ants.\nCall Today',
+    'We can help with ants.\nSchedule Online',
+    'We can help.\nSarah Jones',
     'Thanks, Sarah!',
     'See you Tuesday — Mike will be your tech.',
   ])('%j is not a sign-off and is kept', (text) => {
@@ -188,10 +194,14 @@ describe('stripTrailingSignature — anySigner', () => {
     expect(stripTrailingSignature('We can help. — Sarah')).toBe('We can help. — Sarah');
   });
 
-  test('a bare name or closer block that is the customer\'s own first name is the addressee and stays', () => {
-    const opts = { anySigner: true, addresseeFirstName: 'Sarah' };
-    expect(stripTrailingSignature('Great to hear from you.\nSarah', opts)).toBe('Great to hear from you.\nSarah');
-    expect(stripTrailingSignature('We can help.\nSarah', { anySigner: true, addresseeFirstName: 'Tom' })).toBe('We can help.');
+  test('the customer\'s own first name is the addressee and stays; a closer + other name on one line goes only when the customer is known', () => {
+    const as = (addresseeFirstName) => ({ anySigner: true, addresseeFirstName });
+    expect(stripTrailingSignature('Talk soon!\nSarah', as('Sarah'))).toBe('Talk soon!\nSarah');
+    expect(stripTrailingSignature('Talk soon!\nSarah', as('Tom'))).toBe('Talk soon!');
+    // Codex r5 on #4975: same-line closer + name.
+    expect(stripTrailingSignature('We can help. Thanks, Sarah', as('Pat'))).toBe('We can help.');
+    expect(stripTrailingSignature('We can help. Thanks, Sarah', as('Sarah'))).toBe('We can help. Thanks, Sarah');
+    expect(stripTrailingSignature('We can help. Thanks, Sarah', as(undefined))).toBe('We can help. Thanks, Sarah');
   });
 });
 

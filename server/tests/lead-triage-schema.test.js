@@ -148,9 +148,10 @@ describe('aiTriageLead — a sign-off by any name is removed', () => {
     ['We can help. — sarah', 'We can help.'],
     // Codex r3 on #4975: a question with the signer on its own dash line.
     ['Would you like to schedule?\n— Sarah', 'Would you like to schedule?'],
-    // Codex r4 on #4975: non-dash sign-offs by any name.
+    // Codex r4 + r5 on #4975: closer-marked sign-offs by any name.
     ['We can help.\nThanks,\nSarah', 'We can help.'],
-    ['We can help.\nSarah Jones', 'We can help.'],
+    ['Talk soon!\nSarah', 'Talk soon!'],
+    ['We can help. Thanks, Sarah', 'We can help.'],
     ['We can help. — Élodie', 'We can help.'],
   ])('%j is stripped to %j and the triage kept', async (suggestedReply, expected) => {
     mockCreate.mockResolvedValue(reply({ ...VALID, suggestedReply }));
@@ -174,7 +175,6 @@ describe('aiTriageLead — a sign-off by any name is removed', () => {
     'We can help — call us at (941) 318-7612.',
     'See you Tuesday — Mike will be your tech.',
     'Hi! — Mike from Waves will call you.',
-    'Thanks, Sarah!',
     'We can help with:\nLawn Care',
     'Your technician will be\nAdam',
     'Who will be coming?\nAdam',
@@ -186,8 +186,22 @@ describe('aiTriageLead — a sign-off by any name is removed', () => {
     'Your technician is — Sarah',
     'Your technician is:\nSarah',
     'Totally. — Tuesday works.',
+    // Codex r5 on #4975: a bare capitalized final line is not enough.
+    'We can help with ants.\nCall Today',
+    'We can help.\nSarah Jones',
   ])('ordinary text is kept as written: %j', async (suggestedReply) => {
     mockCreate.mockResolvedValue(reply({ ...VALID, suggestedReply }));
     expect((await aiTriageLead(LEAD)).suggestedReply).toBe(suggestedReply);
   });
+});
+
+// A closer + name on one line is a sign-off only when it is not the lead's own
+// first name (thanking the customer by name looks the same).
+test('"Thanks, Sarah!" to a lead named Sarah is kept', async () => {
+  process.env.ANTHROPIC_API_KEY = 'test-key';
+  dispatch.mockReset();
+  dispatch.mockResolvedValue({ ok: false, reason: 'openai_timeout' });
+  mockCreate.mockReset();
+  mockCreate.mockResolvedValue(reply({ ...VALID, suggestedReply: 'We can help. Thanks, Sarah!' }));
+  expect((await aiTriageLead({ ...LEAD, name: 'Sarah Smith' })).suggestedReply).toBe('We can help. Thanks, Sarah!');
 });
