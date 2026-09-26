@@ -39,6 +39,38 @@
  * moment any of those skips fires; the scan excludes on the column
  * directly in SQL instead. Additive, nullable.
  *
+ * annual_prepay_terms.renewal_lapse_outcome — Codex round-5 P0: what a
+ * COMPLETED lapse (renewal_lapse_completed_at set) actually was —
+ * 'lapsed' (the invoice was genuinely voided and station retrieval was
+ * requested) or 'retired_settled' (the invoice/successor turned out to
+ * already be settled — by account credit, which voidInvoice's own
+ * assertInvoiceVoidable deliberately allows voiding, or by a card
+ * payment landing in the gap between the lapse starting and the void
+ * actually running — so NO void and NO retrieval happened; the
+ * settlement's own sync already decided the parent correctly). Additive,
+ * nullable; only ever read for reporting/audit, never branched on by any
+ * sweep pass (renewal_lapse_completed_at alone is what excludes a row
+ * from recovery, regardless of which outcome it carries).
+ *
+ * annual_prepay_terms.renewal_exception_belled_at /
+ * annual_prepay_terms.renewal_exception_kind — Codex round-5 P1: the SAME
+ * persisted-exclusion principle applied to the three exception-bell scans
+ * (bellNoWitnessTerms / bellUnanchoredOriginalTerms / bellStaleOverdueTerms).
+ * Each scan orders by term_end and takes the oldest LIMIT rows; a bell's own
+ * dedupeKey suppresses a REPEAT notification but does nothing to shrink the
+ * scan's own candidate set, so once more than LIMIT terms sit in one
+ * exception bucket, the oldest LIMIT keep being reselected and skipped
+ * (via dedupe) every tick while any NEWER term past LIMIT never gets
+ * scanned, hence never gets its required staff alert. Stamped once a
+ * term's exception bell has actually been asked for (whether it fired
+ * fresh or deduped from a prior tick — either way staff has been told),
+ * and excluded on the column directly in each scan's SQL. A term whose
+ * underlying condition is later fixed (e.g. staff anchors the
+ * installation) simply stops matching that scan's OWN where-clauses on
+ * the next tick regardless of this stamp — the stamp only suppresses
+ * re-scanning the SAME still-broken condition, never a term's eligibility
+ * for minting/charging once fixed. Additive, nullable.
+ *
  * sms_templates row `termite_annual_renewal_charge_failed` — the customer
  * notice queued when the renewal charge declines or the outcome is
  * ambiguous (never for a no-consent/no-method skip, where nothing was ever
@@ -75,6 +107,21 @@ exports.up = async function up(knex) {
     if (!(await knex.schema.hasColumn('annual_prepay_terms', 'renewal_charge_skip_reason'))) {
       await knex.schema.alterTable('annual_prepay_terms', (t) => {
         t.text('renewal_charge_skip_reason');
+      });
+    }
+    if (!(await knex.schema.hasColumn('annual_prepay_terms', 'renewal_lapse_outcome'))) {
+      await knex.schema.alterTable('annual_prepay_terms', (t) => {
+        t.text('renewal_lapse_outcome');
+      });
+    }
+    if (!(await knex.schema.hasColumn('annual_prepay_terms', 'renewal_exception_belled_at'))) {
+      await knex.schema.alterTable('annual_prepay_terms', (t) => {
+        t.timestamp('renewal_exception_belled_at', { useTz: true });
+      });
+    }
+    if (!(await knex.schema.hasColumn('annual_prepay_terms', 'renewal_exception_kind'))) {
+      await knex.schema.alterTable('annual_prepay_terms', (t) => {
+        t.text('renewal_exception_kind');
       });
     }
   }
@@ -139,6 +186,21 @@ exports.down = async function down(knex) {
     if (await knex.schema.hasColumn('annual_prepay_terms', 'renewal_charge_skip_reason')) {
       await knex.schema.alterTable('annual_prepay_terms', (t) => {
         t.dropColumn('renewal_charge_skip_reason');
+      });
+    }
+    if (await knex.schema.hasColumn('annual_prepay_terms', 'renewal_lapse_outcome')) {
+      await knex.schema.alterTable('annual_prepay_terms', (t) => {
+        t.dropColumn('renewal_lapse_outcome');
+      });
+    }
+    if (await knex.schema.hasColumn('annual_prepay_terms', 'renewal_exception_belled_at')) {
+      await knex.schema.alterTable('annual_prepay_terms', (t) => {
+        t.dropColumn('renewal_exception_belled_at');
+      });
+    }
+    if (await knex.schema.hasColumn('annual_prepay_terms', 'renewal_exception_kind')) {
+      await knex.schema.alterTable('annual_prepay_terms', (t) => {
+        t.dropColumn('renewal_exception_kind');
       });
     }
   }

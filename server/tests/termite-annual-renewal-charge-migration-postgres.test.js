@@ -105,6 +105,32 @@ describeOrSkip('20260926050000_termite_annual_renewal_charge — real Postgres D
     expect(stillExcluded).toBeUndefined();
   });
 
+  // Codex round-5 P0/P1.
+  test('up() adds renewal_lapse_outcome, renewal_exception_belled_at, and renewal_exception_kind — nullable', async () => {
+    const { db } = fixture;
+    await migration.up(db);
+
+    const cols = await db('annual_prepay_terms').columnInfo();
+    expect(cols).toHaveProperty('renewal_lapse_outcome');
+    expect(cols.renewal_lapse_outcome.nullable).toBe(true);
+    expect(cols.renewal_lapse_outcome.type).toBe('text');
+    expect(cols).toHaveProperty('renewal_exception_belled_at');
+    expect(cols.renewal_exception_belled_at.nullable).toBe(true);
+    expect(cols.renewal_exception_belled_at.type).toBe('timestamp with time zone');
+    expect(cols).toHaveProperty('renewal_exception_kind');
+    expect(cols.renewal_exception_kind.nullable).toBe(true);
+    expect(cols.renewal_exception_kind.type).toBe('text');
+
+    // The exclusion query the three exception-bell scans actually run.
+    const rowId = randomUUID();
+    await db('annual_prepay_terms').insert({ id: rowId });
+    const claimed = await db('annual_prepay_terms').where({ id: rowId }).whereNull('renewal_exception_belled_at')
+      .update({ renewal_exception_belled_at: new Date(), renewal_exception_kind: 'no_witness' });
+    expect(claimed).toBe(1);
+    const stillExcluded = await db('annual_prepay_terms').where({ id: rowId }).whereNull('renewal_exception_belled_at').first();
+    expect(stillExcluded).toBeUndefined();
+  });
+
   test('up() seeds the termite_annual_renewal_charge_failed sms template with its variables', async () => {
     const { db } = fixture;
     await migration.up(db);
@@ -142,6 +168,9 @@ describeOrSkip('20260926050000_termite_annual_renewal_charge — real Postgres D
     expect(cols).not.toHaveProperty('renewal_lapse_completed_at');
     expect(cols).not.toHaveProperty('renewal_charge_skipped_at');
     expect(cols).not.toHaveProperty('renewal_charge_skip_reason');
+    expect(cols).not.toHaveProperty('renewal_lapse_outcome');
+    expect(cols).not.toHaveProperty('renewal_exception_belled_at');
+    expect(cols).not.toHaveProperty('renewal_exception_kind');
     expect(cols).toHaveProperty('id');
 
     const row = await db('sms_templates').where({ template_key: 'termite_annual_renewal_charge_failed' }).first();

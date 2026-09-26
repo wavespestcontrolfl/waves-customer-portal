@@ -60,8 +60,9 @@ class RenewalReminder {
       if (renewalCharge.minted || renewalCharge.charged || renewalCharge.failed || renewalCharge.graceLapsed
         || renewalCharge.noWitnessBelled || renewalCharge.unanchoredBelled || renewalCharge.staleOverdueBelled
         || renewalCharge.lapseEffectsReconciled || renewalCharge.reconcileNeverReachedStripeBelled
-        || renewalCharge.graceReconciliationDeferred || renewalCharge.parentRenewedStamped) {
-        logger.info(`Termite annual renewal charge: ${renewalCharge.candidatesScanned} scanned, ${renewalCharge.minted} minted, ${renewalCharge.charged} charged, ${renewalCharge.failed} failed, ${renewalCharge.graceLapsed} grace-lapsed, ${renewalCharge.graceReconciliationDeferred} grace-deferred (charge reconciliation pending), ${renewalCharge.noWitnessBelled} no-witness bells, ${renewalCharge.unanchoredBelled} unanchored bells, ${renewalCharge.staleOverdueBelled} stale-overdue bells, ${renewalCharge.lapseEffectsReconciled} lapse-effects reconciled, ${renewalCharge.reconcileNeverAttemptedScanned} never-attempted scanned, ${renewalCharge.reconcileNeverReachedStripeBelled} never-reached-Stripe bells, ${renewalCharge.parentRenewedStamped} parent-renewed backstop stamps`);
+        || renewalCharge.graceReconciliationDeferred || renewalCharge.parentRenewedStamped
+        || renewalCharge.graceRetiredSettled) {
+        logger.info(`Termite annual renewal charge: ${renewalCharge.candidatesScanned} scanned, ${renewalCharge.minted} minted, ${renewalCharge.charged} charged, ${renewalCharge.failed} failed, ${renewalCharge.graceLapsed} grace-lapsed, ${renewalCharge.graceRetiredSettled} grace-retired (already settled), ${renewalCharge.graceReconciliationDeferred} grace-deferred (charge reconciliation pending), ${renewalCharge.noWitnessBelled} no-witness bells, ${renewalCharge.unanchoredBelled} unanchored bells, ${renewalCharge.staleOverdueBelled} stale-overdue bells, ${renewalCharge.lapseEffectsReconciled} lapse-effects reconciled, ${renewalCharge.reconcileNeverAttemptedScanned} never-attempted scanned, ${renewalCharge.reconcileNeverReachedStripeBelled} never-reached-Stripe bells, ${renewalCharge.parentRenewedStamped} parent-renewed backstop stamps`);
       }
     } catch (err) {
       logger.error(`Termite annual renewal charge sweep failed: ${err.message}`);
