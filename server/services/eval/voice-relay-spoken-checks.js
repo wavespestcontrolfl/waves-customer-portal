@@ -192,6 +192,18 @@ const BANNED_TOTAL_RE = new RegExp(`(?:\\$\\s?${TOTAL_NUMBER}|${TOTAL_NUMBER}\\s
 // ("one hundred AND twenty-nine" is one number, not two clauses).
 const PRICE_CLAUSE_SPLIT_RE = /,|\b(?:or|but|while|whereas)\b|(?<!\b(?:hundred|thousand)\s)\band\b/i;
 const unitRe = (unit) => new RegExp(`\\b(?:per|an?|each|every|for each|for every|por|cada)\\s+${unit}s?\\b`, 'i');
+// The harness marks the words a caller interrupted as `<heard> [interrupted]`
+// (voice-relay-replay.js). A figure at that tail, followed by nothing or only
+// the start of a unit ("per", "por", "cada"), had its unit cut off.
+const INTERRUPTED_TAIL_RE = /\s*\[interrupted\]\s*$/;
+const UNIT_LEAD_ONLY_RE = /^\s*(?:(?:per|por|cada|each|every|for|an?)\s*)*$/i;
+function cutOffBeforeUnit(clause, price) {
+  if (!INTERRUPTED_TAIL_RE.test(clause)) return false;
+  const body = clause.replace(INTERRUPTED_TAIL_RE, '');
+  price.lastIndex = 0;
+  const last = [...body.matchAll(price)].pop();
+  return Boolean(last) && UNIT_LEAD_ONLY_RE.test(body.slice(last.index + last[0].length));
+}
 
 /**
  * value: { amount: 129, unit: 'application' } (or { amount: [119, 99], unit:
@@ -221,7 +233,15 @@ function amount_requires_unit(value, record, { spoken }) {
         price.lastIndex = 0;
         const amounts = [...clause.matchAll(price)].map((m) => parseAmount(m[1] || m[2] || m[3]));
         if (!amounts.length) continue;
-        if (!unit.test(clause)) return ['fail', `${amounts[0]} quoted without "per ${value.unit}": "${clip(clause.trim(), 160)}"`];
+        if (!unit.test(clause)) {
+          // The caller cut Sandy off right after the figure, before its unit
+          // could be spoken ("runs $129 per [interrupted]"): words she never
+          // got to say are not an omission. Only a single figure at the very
+          // tail of an interrupted utterance qualifies — any other unit-less
+          // figure was followed by words that were not its unit.
+          if (amounts.length === 1 && cutOffBeforeUnit(clause, price)) continue;
+          return ['fail', `${amounts[0]} quoted without "per ${value.unit}": "${clip(clause.trim(), 160)}"`];
+        }
         if (amounts.some((a) => approved.includes(a))) quoted = quoted || sentence;
       }
     }

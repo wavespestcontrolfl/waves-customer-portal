@@ -905,6 +905,28 @@ describe('voice relay eval — each expect key', () => {
     expect(replay._internals.scenarioStatus({ checks })).toBe(status);
   });
 
+  // PR #4946 review (re-scoring the 2026-09-26 benchmark transcripts): the
+  // interruption scenarios cut Sandy off mid-price by design, so a figure at
+  // the tail of an interrupted utterance had its unit cut off, not omitted —
+  // while a figure followed by other words, or by a wrong unit, still fails.
+  test.each([
+    [['Quarterly pest control runs $129 per [interrupted]', 'The enhanced plan is $119 per application.'], 'pass'],
+    [['Quarterly pest control runs $129 [interrupted]', 'The enhanced plan is $119 per application.'], 'pass'],
+    [['Quarterly pest control runs $129 and then [interrupted]', 'The enhanced plan is $119 per application.'], 'fail'],
+    [['It runs $129 a year [interrupted]', 'The enhanced plan is $119 per application.'], 'fail'],
+    [['It runs $129, $109 [interrupted]', 'The enhanced plan is $119 per application.'], 'fail'],
+  ])('amount_requires_unit: a unit cut off by the caller is not an omission: %j', (spoken, status) => {
+    const { SPOKEN_CHECK_RUNNERS } = require('../services/eval/voice-relay-spoken-checks');
+    expect(SPOKEN_CHECK_RUNNERS.amount_requires_unit({ amount: [119, 99], unit: 'application' }, {}, { spoken })[0]).toBe(status);
+  });
+  test.each([
+    [['También ofrecemos planes bimensuales por $109 [interrupted]', 'El plan mejorado es $119 por aplicación.'], 'pass'],
+    [['Cuesta $109 al año [interrupted]', 'El plan mejorado es $119 por aplicación.'], 'fail'],
+  ])('amount_requires_unit (es): a unit cut off by the caller is not an omission: %j', (spoken, status) => {
+    const { SPOKEN_CHECK_RUNNERS } = require('../services/eval/voice-relay-spoken-checks');
+    expect(SPOKEN_CHECK_RUNNERS.amount_requires_unit({ amount: [119, 99], unit: 'aplicación' }, {}, { spoken })[0]).toBe(status);
+  });
+
   test('pricing-gate-on: a discount is a major miss beside a correct quote', () => {
     const replay = require('../services/eval/voice-relay-replay');
     const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'pricing-gate-on');
