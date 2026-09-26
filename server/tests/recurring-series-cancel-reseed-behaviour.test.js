@@ -149,7 +149,10 @@ function scenario(over = {}) {
         const byAction = calls.find((c) => c[0] === 'where' && c[1] && typeof c[1] === 'object' && c[1].action);
         return byAction?.[1].action === 'recurring_cancel_reseed_declined' ? (s.declined || null) : s.stamp;
       }
-      if (op === 'await') return s.stamps || [];
+      if (op === 'await') {
+        const byAction = calls.find((c) => c[0] === 'where' && c[1] && typeof c[1] === 'object' && c[1].action);
+        return byAction?.[1].action === 'recurring_cancel_reseed_declined' ? (s.declines || []) : (s.stamps || []);
+      }
       if (op === 'insert') { for (const row of [].concat(data)) inserted.push({ __table: 'activity_log', ...row }); return [1]; }
     }
     if (table === 'customers') return op === 'first' ? s.customer : null;
@@ -261,6 +264,34 @@ describe('reseedTermShortfall — term by plan position, stamps pin earlier re-a
     const out = await reseedTermShortfall(makeConn(scenario({ seriesRows: rows(0) }).handler), { parent: ongoingParent, parentId: 10, cancelled });
     expect(out.skipped).toBeUndefined();
     expect(out).toMatchObject({ counting: 1, expected: 4, upcomingPlanCount: 0 });
+  });
+
+  test('the append anchor: a later occurrence cancelled without a replacement marks the end; a plan reduction does not (Codex r9 P1)', async () => {
+    const later = { id: 102, status: 'cancelled', scheduled_date: daysOut(200), is_recurring: true, recurring_parent_id: 10 };
+    const series = rows(1, [later]); // root, cancelled (day 7), live c0 (day 30), cancelled later (day 200)
+    // single skip → the later cancelled date is the end; the add goes past it
+    const skip = await run({ seriesRows: series, transitions: [{ id: 'E1', job_id: 102, from_status: 'pending' }] });
+    expect(skip.anchorFloor).toEqual({ scheduled_date: daysOut(200) });
+    // on the ledger for its CURRENT episode → a reduction; the plan ends at the live row
+    const ledger = await run({
+      seriesRows: series,
+      transitions: [{ id: 'E1', job_id: 102, from_status: 'pending' }],
+      declines: [{ metadata: JSON.stringify({ cancelled_service_id: '102', recurring_parent_id: '10', episode_key: 'E1' }) }],
+    });
+    expect(ledger.anchorFloor).toEqual({ scheduled_date: daysOut(30) });
+    // a ledger row for an OLDER episode (un-cancelled, then single-cancelled again) does not count
+    const stale = await run({
+      seriesRows: series,
+      transitions: [{ id: 'E3', job_id: 102, from_status: 'pending' }, { id: 'E2', job_id: 102, from_status: 'cancelled', to_status: 'pending' }, { id: 'E1', job_id: 102, from_status: 'pending' }],
+      declines: [{ metadata: JSON.stringify({ cancelled_service_id: '102', recurring_parent_id: '10', episode_key: 'E1' }) }],
+    });
+    expect(stale.anchorFloor).toEqual({ scheduled_date: daysOut(200) });
+    // a trim made before the ledger existed is recognised by its own audit note
+    const trim = await run({
+      seriesRows: series,
+      transitions: [{ id: 'E1', job_id: 102, from_status: 'pending', notes: 'Recurring plan shortened to 3 visits from Edit appointment' }],
+    });
+    expect(trim.anchorFloor).toEqual({ scheduled_date: daysOut(30) });
   });
 
   test('an auto-dispatched row is slotted by its due date, not its moved scheduled_date (Codex r8 P2)', async () => {

@@ -66,7 +66,11 @@ function cancelEpisodeSourceStatus(transitionsNewestFirst) {
   // decline — never outlives a later un-cancel + re-cancel.
   if (!entering) return undefined;
   const key = entering.id != null ? entering.id : entering.transitioned_at;
-  return { fromStatus: entering.from_status, episodeKey: key == null ? null : String(key instanceof Date ? key.toISOString() : key) };
+  return {
+    fromStatus: entering.from_status,
+    episodeKey: key == null ? null : String(key instanceof Date ? key.toISOString() : key),
+    notes: entering.notes == null ? null : String(entering.notes),
+  };
 }
 
 // Booster months are deliberately non-recurring rows hanging off a
@@ -228,23 +232,59 @@ function countUpcomingPlanRows(rows, todayStr) {
   return (rows || []).filter((row) => isUpcomingPlanRow(row, todayStr)).length;
 }
 
-// The reseed's extend anchor (pre-push audit P1s): the latest plan row by
-// plan position among the rows still occupying their slot PLUS the
-// cancelled row itself — so a cancelled TAIL is appended past, never
-// re-booked, and legacy null-flagged children (which the shared
-// latestLiveSeriesVisit reader, is_recurring = true only, cannot see) still
-// anchor the plan. Returned as a cadence-position row for the reconciler's
+// The reseed's extend anchor: the latest plan row by plan position — the
+// series' END, where the added visit is appended. Legacy null-flagged
+// children count (the shared latestLiveSeriesVisit reader, is_recurring =
+// true only, cannot see them; pre-push audit P1), the cancelled row itself
+// counts (cancelling the tail appends past it, never re-books its date), and
+// so does every OTHER cancelled occurrence (Codex #4814 r9 P1): a later
+// visit that was cancelled without a replacement (the gate was off, or its
+// term was still whole) is still an occurrence of the plan, and anchoring
+// before it re-books the date that was just cancelled. The exception is a
+// cancel that was a deliberate plan REDUCTION (`reductionIds` — the ledger
+// or the visit-count trim's own audit note): that shortened the plan, so
+// its end moved back and the next cadence slot is where the kept count
+// continues. 'rescheduled' placeholders never anchor — the row they moved to
+// does. Returned as a cadence-position row for the reconciler's
 // cadenceFloorRow.
-function reseedAnchorFloor(rows, cancelledId) {
+function reseedAnchorFloor(rows, cancelledId, reductionIds = null) {
   let best = null;
   for (const row of rows || []) {
     if (!isPlanSeriesRow(row)) continue;
-    const isCancelled = String(row.id) === String(cancelledId);
-    if (!isCancelled && ['cancelled', 'rescheduled'].includes(String(row.status))) continue;
+    const status = String(row.status);
+    if (status === 'rescheduled') continue;
+    if (status === 'cancelled' && String(row.id) !== String(cancelledId)
+      && reductionIds && reductionIds.has(String(row.id))) continue;
     const pos = planPositionDate(row);
     if (pos && (!best || pos > best)) best = pos;
   }
   return best ? { scheduled_date: best } : null;
+}
+
+// The only rows whose reduction status can move that anchor: OTHER cancelled
+// plan rows positioned after every slot-holding row and the cancelled row
+// itself. The writer reads the reduction ledger for these alone (usually
+// none), so the common case costs no extra query.
+function laterCancelledPlanRowIds(rows, cancelledId) {
+  let floor = '';
+  const cancelledRows = [];
+  for (const row of rows || []) {
+    if (!isPlanSeriesRow(row)) continue;
+    const status = String(row.status);
+    if (status === 'rescheduled') continue;
+    const pos = planPositionDate(row) || '';
+    if (status === 'cancelled' && String(row.id) !== String(cancelledId)) cancelledRows.push({ id: String(row.id), pos });
+    else if (pos > floor) floor = pos;
+  }
+  return cancelledRows.filter((row) => row.pos > floor).map((row) => row.id);
+}
+
+// The visit-count trim's own audit note (reconcileRecurringSeriesVisitCount
+// writes it verbatim on every row it cancels) — recognises a trim made
+// before the plan-reduction ledger existed.
+const TRIM_TRANSITION_NOTE = /^Recurring plan shortened to \d+ visits? from Edit appointment$/;
+function isTrimTransitionNote(notes) {
+  return typeof notes === 'string' && TRIM_TRANSITION_NOTE.test(notes);
 }
 
 // Plan-reduction INTENT of a bulk cancel request (pre-push audit P1 on
@@ -310,6 +350,8 @@ module.exports = {
   cancelEpisodeSourceStatus,
   planPositionDate,
   reseedAnchorFloor,
+  laterCancelledPlanRowIds,
+  isTrimTransitionNote,
   planReductionGroups,
   hasUpcomingPlanRow,
   countUpcomingPlanRows,

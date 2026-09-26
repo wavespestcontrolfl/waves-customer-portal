@@ -18331,13 +18331,44 @@ async function reseedRefusal(trx, { parent, parentId, cancelledServiceId, cols, 
   return topupSeriesSkipReason(trx, parent, parentId, cols);
 }
 
+// Which of `candidateIds` (cancelled plan rows) were cancelled as a deliberate
+// plan REDUCTION in their CURRENT cancellation episode: on the ledger
+// (recordReseedDeclines — id + episode key, so an un-cancel + single
+// re-cancel is not mistaken for the old reduction), or entered through the
+// visit-count trim's own audit note (a trim made before the ledger existed).
+async function readPlanReductionIds(trx, { customerId, parentId, candidateIds }) {
+  const ids = [...new Set((candidateIds || []).map(String))];
+  if (!ids.length) return new Set();
+  const { cancelEpisodeSourceStatus, isTrimTransitionNote } = require('../services/recurring-series-cancel-reseed');
+  const declines = await trx('activity_log')
+    .where({ customer_id: customerId, action: 'recurring_cancel_reseed_declined' })
+    .whereRaw("metadata->>'recurring_parent_id' = ?", [String(parentId)])
+    .select('metadata');
+  const declined = new Set();
+  for (const row of declines || []) {
+    const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
+    if (meta.cancelled_service_id != null) declined.add(`${meta.cancelled_service_id}|${meta.episode_key == null ? '' : meta.episode_key}`);
+  }
+  const history = await trx('job_status_history')
+    .whereIn('job_id', ids)
+    .orderBy('transitioned_at', 'desc')
+    .select('id', 'job_id', 'from_status', 'to_status', 'transitioned_at', 'notes');
+  const out = new Set();
+  for (const id of ids) {
+    const episode = cancelEpisodeSourceStatus((history || []).filter((row) => String(row.job_id) === id));
+    if (!episode) continue;
+    if (declined.has(`${id}|${episode.episodeKey == null ? '' : episode.episodeKey}`) || isTrimTransitionNote(episode.notes)) out.add(id);
+  }
+  return out;
+}
+
 // Step 3 — is the cancelled visit's plan term now short? Terms are one plan
 // year anchored on the series root; the cancelled row's PLAN position (a
 // moved exception keeps its cadence date) picks the term, and the count
 // reads plan rows only (no boosters) by the same position.
 async function reseedTermShortfall(trx, { parent, parentId, cancelled, cols = {} }) {
   const {
-    plannedVisitsPerYearForSeries, termWindowAtIndex, assignPlanTerms, countTermVisits, planPositionDate, hasUpcomingPlanRow, countUpcomingPlanRows, reseedAnchorFloor,
+    plannedVisitsPerYearForSeries, termWindowAtIndex, assignPlanTerms, countTermVisits, planPositionDate, hasUpcomingPlanRow, countUpcomingPlanRows, reseedAnchorFloor, laterCancelledPlanRowIds,
   } = require('../services/recurring-series-cancel-reseed');
   const expected = plannedVisitsPerYearForSeries(parent);
   if (!expected) return { skipped: 'no_planned_count' };
@@ -18386,7 +18417,12 @@ async function reseedTermShortfall(trx, { parent, parentId, cancelled, cols = {}
   // a single-moved root keeps its cadence date) rides on the stamp for
   // humans; membership itself is by slot.
   const window = termWindowAtIndex(planPositionDate(parent), termIndex) || { index: termIndex, start: null, end: null };
-  return { window, counting, expected, upcomingPlanCount, anchorFloor: reseedAnchorFloor(seriesRows, cancelled.id) };
+  // The append anchor: later cancelled occurrences still mark the series'
+  // end unless they were a plan reduction (Codex r9 P1; see reseedAnchorFloor).
+  const reductionIds = await readPlanReductionIds(trx, {
+    customerId: parent.customer_id, parentId, candidateIds: laterCancelledPlanRowIds(seriesRows, cancelled.id),
+  });
+  return { window, counting, expected, upcomingPlanCount, anchorFloor: reseedAnchorFloor(seriesRows, cancelled.id, reductionIds) };
 }
 
 // Step 4 — tech-blind occupancy probe on each added row (Codex #4814 P1),
