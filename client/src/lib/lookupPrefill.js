@@ -98,7 +98,7 @@ export const EMPTY_PROPERTY_MEASUREMENTS = {
   trenchingPerimeterLF: "", trenchingConcreteLF: "", trenchingDirtLF: "", trenchingConcretePct: "",
   trenchingEstimateFromFootprint: false, topDressArea: "", plugArea: "",
   fleaExteriorAreaSqFt: "0", fleaExteriorAreaSource: "UNKNOWN", fleaExteriorZones: [],
-  _termiteFootprintAuto: false, _footprintUnknownLookup: false,
+  _termiteFootprintAuto: false, _footprintUnknownLookup: false, _unitLookup: false,
   _trenchingPerimeterAuto: false, _boracareSqftAuto: false, _preslabSqftAuto: false,
   _palmCountAuto: false, _homeSqFtEdited: false, _lotSqFtEdited: false,
   _storiesEdited: false, _poolCageSizeEdited: false, _unitCountEdited: false,

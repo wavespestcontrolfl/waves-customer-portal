@@ -70,6 +70,10 @@ export default function useModalFocus(active = true, onEscape = null) {
     const onKeyDown = (event) => {
       if (modalStack[modalStack.length - 1] !== modalEntry) return;
       if (event.key === 'Escape' && onEscapeRef.current) {
+        // An explicitly opted-in choice widget dismisses its popup first.
+        // Static listboxes, such as calendar days, still close the modal.
+        if (event.target instanceof Element && dialog.contains(event.target)
+          && event.target.closest('[data-modal-escape-owned="true"]')) return;
         event.preventDefault();
         event.stopImmediatePropagation();
         onEscapeRef.current();
