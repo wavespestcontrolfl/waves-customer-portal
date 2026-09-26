@@ -70,6 +70,17 @@ node server/scripts/run-voice-relay-benchmark.js --candidate-model=claude-haiku-
 node server/scripts/run-voice-relay-benchmark.js --candidate-model=claude-haiku-4-5-20251001 --trials=5 --judge
 ```
 
+`--only`, when passed, must name at least one real scenario id: an empty
+value (`--only=`) or one that is only commas/whitespace (`--only=,`,
+`--only= , `) is a usage error (exit 2), caught before any child process
+runs — the eval CLI's own comma-split reduces either of those to an EMPTY
+ids array, and `voice-relay-replay.js`'s `selectScenarios` treats an empty
+(or absent) ids array as "no filter", running every scenario in the
+fixture. Left unchecked, a delimiter-only `--only` would silently run the
+FULL fixture on all four conditions instead of the narrowed set actually
+intended, for up to `CHILD_TIMEOUT_MS` each, before anyone noticed the
+filter never took effect.
+
 `server/scripts/run-voice-relay-benchmark.js` (new, this PR) is a thin
 wrapper: for each condition × trial it shells out to the existing
 `run-voice-relay-eval.js --json` as its own child process with that
@@ -194,6 +205,21 @@ alias — migrate any reader still using that pre-existing name to
 `scenarioAttemptSamples` directly (same-PR code carries no compat shim per
 AGENTS.md's "no compat shims for code changed in the same PR").
 
+**Task accuracy's own denominator — `scenarioEvaluatedSamples`**:
+`scenarioAttemptSamples` counts every scenario the harness *attempted*,
+including a `replayErrors` entry (status `'error'` — the harness itself broke
+on that scenario, e.g. a tool-schema mismatch, and never delivered a
+pass/fail verdict either way). That is missing data, not an evaluated
+scenario that happened to fail, so computing task accuracy over
+`scenarioAttemptSamples` understates a candidate for a harness problem that
+has nothing to do with the model's behavior. `scenarioEvaluatedSamples` (each
+attempt's own `scenarios - replayErrors`, summed the same per-attempt way
+`scenarioPasses` is) is the correct denominator: compute task accuracy as
+`scenarioPasses / scenarioEvaluatedSamples`, and report `replayErrors`
+separately as its own missing-data figure — never folded into a passing or
+failing count. (35 passes + 1 replay error out of 36 attempted scenarios is
+35/35 evaluated, 1 missing — not 35/36.)
+
 **Judge aggregates, and the two figures that are final-attempt-only**: with
 `--judge`, `judgedCount` / `judgeFallbackCount` / `judgeErrorCount` sum
 across every attempt of every trial, same as the scenario counts above
@@ -208,6 +234,22 @@ attempt-summed figures above, and labeled by name as such. Compute the
 naturalness RATE as `judgePassCountFinalAttemptOnly /
 judgedCountFinalAttemptOnly` — never as a rate over the attempt-summed
 `judgedCount`, since that draws from a different (larger) sample size.
+
+**A fallback-leg judge verdict is excluded from both of those figures.**
+`voice-relay-judge.js` dispatches the judge through a two-provider policy and
+stamps a verdict the FALLBACK leg produced with `judge_fallback: true`; its
+own contract (mirrored in `voice-relay-replay.js`'s `judgeChecks`, which marks
+such a verdict's checks `"advisory"` rather than pass/fail) treats it as
+advisory ONLY — it can never flip a scenario's pass/fail, so it must not sit
+in the primary judge's naturalness-rate population either. The runner
+excludes any final-attempt result with `judge_fallback: true` from both
+`judgedCountFinalAttemptOnly` and `judgePassCountFinalAttemptOnly`, and
+reports the fallback-leg population separately and by name:
+`judgeFallbackVerdictCountFinalAttemptOnly` (how many final-attempt results
+got an advisory verdict at all) and `judgeFallbackPassCountFinalAttemptOnly`
+(how many of those said "pass" — advisory, never counted toward the real
+rate). A condition leaning on the fallback leg a lot is a reliability signal
+about the judge call itself, not about Sandy — report it, never discard it.
 
 ## What text replay measures vs. what needs a sandbox call
 
@@ -257,26 +299,48 @@ alone:
   with a null audio-latency field and its `audio_metrics_reason` (only
   meaningful on a real sandbox call — see the table above; the text-replay
   harness never writes this field at all).
-- **Latency**: median and p90 of `durationMsMedian` / `durationMsP90` per
-  condition, **with the sample-size caveat already built into the runner**
-  (`durationMsP90` is `null`/"n/a" below 3 completed runs — a p90 over 1-2
-  points is not a percentile). This is whole-scenario wall clock from real
-  API calls, not a per-turn first-token breakdown; get that from a real
-  sandbox call.
-- **Task accuracy**: `scenarioPasses` / `scenarioAttemptSamples`, and
-  separately `criticalMisses` (an unauthorized action, a false completion, or
-  a duplicate effect — see the five new scenario families' `expect` blocks
-  for exactly what is checked). Sandbox write suppression is NOT among these:
-  the text-replay harness never constructs a `sandbox: true` session, so it
-  cannot exercise or verify `SANDBOX_DRY_RUN_TOOLS` at all — see "What text
-  replay measures vs. what needs a sandbox call" above.
+- **Latency**: the runner aggregates `durationMs` from EVERY entry of
+  `result.attempts` (each attempt's own `summary.durationMs`), never just
+  `result.summary` (the retry wrapper's SELECTED finalAttempt) — reading only
+  that field would silently swap in the retry's duration for a retried run
+  and hide the failed first attempt's real cost. It reports two SEPARATE
+  distributions, never blended: `durationMsFirstAttemptMedian` /
+  `durationMsFirstAttemptP90` / `durationMsFirstAttemptSampleCount` (this
+  run's FIRST attempt only — every completed run has exactly one, retried or
+  not) and `durationMsTotalRunMedian` / `durationMsTotalRunP90` /
+  `durationMsTotalRunSampleCount` (the SUM of every attempt the run made,
+  i.e. the real wall-clock cost including a retry). **Compare
+  first-attempt p50/p90 across conditions** — it is the apples-to-apples
+  figure, since a retry can never inflate or deflate it; total-run is for
+  seeing a retried condition's true cost, not for cross-condition comparison.
+  Both carry the same sample-size caveat already built into the runner (a
+  p90 is `null`/"n/a" below 3 samples — a p90 over 1-2 points is not a
+  percentile). This is whole-scenario wall clock from real API calls, not a
+  per-turn first-token breakdown; get that from a real sandbox call.
+- **Task accuracy**: `scenarioPasses` / `scenarioEvaluatedSamples` — NOT
+  `scenarioAttemptSamples`, which still includes any `replayErrors` entries
+  (the harness itself broke on that scenario, never evaluated either way;
+  see "Retry accounting" above's "Task accuracy's own denominator" note) —
+  and separately `criticalMisses` (an unauthorized action, a false
+  completion, or a duplicate effect — see the five new scenario families'
+  `expect` blocks for exactly what is checked). Report `replayErrors` next to
+  it as its own missing-data figure, never summed into a pass or fail count.
+  Sandbox write suppression is NOT among these: the text-replay harness
+  never constructs a `sandbox: true` session, so it cannot exercise or verify
+  `SANDBOX_DRY_RUN_TOOLS` at all — see "What text replay measures vs. what
+  needs a sandbox call" above.
 - **Naturalness**: the optional judge's verdict (`--judge`) — `judgedCount` /
   `judgeFallbackCount` / `judgeErrorCount` sum across every attempt, but
   `judgePassCountFinalAttemptOnly` and `judgedCountFinalAttemptOnly` are both
-  drawn from the same final-attempt population (see "Judge aggregates"
+  drawn from the same final-attempt population, EXCLUDING any fallback-leg
+  (`judge_fallback: true`, advisory-only) verdict (see "Judge aggregates"
   above); report the naturalness RATE as `judgePassCountFinalAttemptOnly /
   judgedCountFinalAttemptOnly`, never over the attempt-summed `judgedCount`
-  — advisory either way, never used to override a critical deterministic miss.
+  — advisory either way, never used to override a critical deterministic
+  miss. Report the excluded fallback-leg population too, by its own name:
+  `judgeFallbackVerdictCountFinalAttemptOnly` /
+  `judgeFallbackPassCountFinalAttemptOnly` — a condition leaning on the
+  fallback leg a lot is a reliability signal about the judge call itself.
 - **Cost**: **benchmark-wide only, never per-condition** — the eval JSON
   (`result.summary` / `result.attempts[].summary` / `result.results[]`)
   carries no token-usage field anywhere; `runVoiceRelayEval` never surfaces

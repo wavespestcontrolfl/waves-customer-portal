@@ -25,6 +25,7 @@ const {
   runBenchmark,
   rotateConditions,
   buildConditions,
+  assertOnlyHasIds,
   CHILD_TIMEOUT_MS,
 } = require('../scripts/run-voice-relay-benchmark');
 
@@ -272,7 +273,7 @@ describe('summarizeCondition — model-mismatch runs are surfaced, never silentl
         // on the clean-only totals would catch it.
         result: {
           summary: { scenarios: 100, passed: 0, failed: 100, criticalMisses: 100, durationMs: 999999, judged: 100, judgeFallbacks: 100, judgeErrors: 100 },
-          attempts: [{ status: 'fail', summary: { scenarios: 100, passed: 0, failed: 100, criticalMisses: 100, judged: 100, judgeFallbacks: 100, judgeErrors: 100 } }],
+          attempts: [{ status: 'fail', summary: { scenarios: 100, passed: 0, failed: 100, criticalMisses: 100, judged: 100, judgeFallbacks: 100, judgeErrors: 100, durationMs: 999999 } }],
           results: [{ id: 'a', model: 'claude-sonnet-5', judge: { ok: true, verdict: { pass: false } } }],
         },
       },
@@ -280,7 +281,7 @@ describe('summarizeCondition — model-mismatch runs are surfaced, never silentl
         condition: 'x', ranOk: true, inconclusive: false, modelMismatch: false,
         result: {
           summary: { scenarios: 2, passed: 2, durationMs: 500, judged: 1, judgeFallbacks: 0, judgeErrors: 0 },
-          attempts: [{ status: 'pass', summary: { scenarios: 2, passed: 2, judged: 1, judgeFallbacks: 0, judgeErrors: 0 } }],
+          attempts: [{ status: 'pass', summary: { scenarios: 2, passed: 2, judged: 1, judgeFallbacks: 0, judgeErrors: 0, durationMs: 500 } }],
           results: [{ id: 'b', model: 'claude-haiku-4-5-20251001', judge: { ok: true, verdict: { pass: true } } }],
         },
       },
@@ -297,7 +298,10 @@ describe('summarizeCondition — model-mismatch runs are surfaced, never silentl
     expect(s.judgeErrorCount).toBe(0);
     expect(s.judgedCountFinalAttemptOnly).toBe(1);
     expect(s.judgePassCountFinalAttemptOnly).toBe(1);
-    expect(s.durationMsMedian).toBe(500);
+    // Only the clean run's own attempt duration (500) — the mismatch run's
+    // 999999 never leaks into either latency figure.
+    expect(s.durationMsFirstAttemptMedian).toBe(500);
+    expect(s.durationMsTotalRunMedian).toBe(500);
   });
 
   test('no mismatch field on a run (e.g. the "current" conditions) never counts as a mismatch', () => {
@@ -353,6 +357,221 @@ describe('summarizeCondition — judge aggregates: summed across attempts, excep
     const s = summarizeCondition('x', runs);
     expect(s.judgedCountFinalAttemptOnly).toBe(1);
     expect(s.judgePassCountFinalAttemptOnly).toBe(1);
+  });
+});
+
+describe('summarizeCondition — a fallback-leg (advisory) judge verdict is excluded from the primary judge rate (Codex r5 finding 3)', () => {
+  test('a final-attempt result with judge_fallback: true is excluded from judgedCountFinalAttemptOnly / judgePassCountFinalAttemptOnly, and counted separately', () => {
+    const runs = [{
+      condition: 'x', ranOk: true, inconclusive: false,
+      result: {
+        summary: { scenarios: 2, passed: 2, judged: 2, judgeFallbacks: 1, judgeErrors: 0 },
+        attempts: [{ status: 'pass', summary: { scenarios: 2, passed: 2, judged: 2, judgeFallbacks: 1, judgeErrors: 0 } }],
+        results: [
+          // 'a' — a genuine primary-leg verdict.
+          { id: 'a', judge: { ok: true, judge_fallback: false, verdict: { pass: true } } },
+          // 'b' — the fallback leg answered (advisory only, per
+          // voice-relay-judge.js's own contract and voice-relay-replay.js's
+          // judgeChecks, which marks its checks "advisory" — never pass/fail).
+          { id: 'b', judge: { ok: true, judge_fallback: true, verdict: { pass: true } } },
+        ],
+      },
+    }];
+    const s = summarizeCondition('x', runs);
+    // Primary-judge population: 'a' only.
+    expect(s.judgedCountFinalAttemptOnly).toBe(1);
+    expect(s.judgePassCountFinalAttemptOnly).toBe(1);
+    // Fallback-leg population, reported separately: 'b' only, and it passed.
+    expect(s.judgeFallbackVerdictCountFinalAttemptOnly).toBe(1);
+    expect(s.judgeFallbackPassCountFinalAttemptOnly).toBe(1);
+    // The attempt-summed figures are unaffected — they come from
+    // voice-relay-replay.js's own summarize() output, unstripped, and are a
+    // different (larger) population than either final-attempt figure above.
+    expect(s.judgedCount).toBe(2);
+    expect(s.judgeFallbackCount).toBe(1);
+  });
+
+  test('a fallback-leg verdict that FAILED is never counted toward judgePassCountFinalAttemptOnly, only judgeFallbackPassCountFinalAttemptOnly (which also stays 0)', () => {
+    const runs = [{
+      condition: 'x', ranOk: true, inconclusive: false,
+      result: {
+        summary: { scenarios: 1, passed: 1, judged: 1, judgeFallbacks: 1, judgeErrors: 0 },
+        attempts: [{ status: 'pass', summary: { scenarios: 1, passed: 1, judged: 1, judgeFallbacks: 1, judgeErrors: 0 } }],
+        results: [{ id: 'a', judge: { ok: true, judge_fallback: true, verdict: { pass: false } } }],
+      },
+    }];
+    const s = summarizeCondition('x', runs);
+    expect(s.judgedCountFinalAttemptOnly).toBe(0);
+    expect(s.judgePassCountFinalAttemptOnly).toBe(0);
+    expect(s.judgeFallbackVerdictCountFinalAttemptOnly).toBe(1);
+    expect(s.judgeFallbackPassCountFinalAttemptOnly).toBe(0);
+  });
+
+  test('no fallback verdicts at all ⇒ both fallback fields are 0, primary fields unaffected', () => {
+    const runs = [{
+      condition: 'x', ranOk: true, inconclusive: false,
+      result: {
+        summary: { scenarios: 1, passed: 1, judged: 1, judgeFallbacks: 0, judgeErrors: 0 },
+        attempts: [{ status: 'pass', summary: { scenarios: 1, passed: 1, judged: 1, judgeFallbacks: 0, judgeErrors: 0 } }],
+        results: [{ id: 'a', judge: { ok: true, judge_fallback: false, verdict: { pass: true } } }],
+      },
+    }];
+    const s = summarizeCondition('x', runs);
+    expect(s.judgeFallbackVerdictCountFinalAttemptOnly).toBe(0);
+    expect(s.judgeFallbackPassCountFinalAttemptOnly).toBe(0);
+    expect(s.judgedCountFinalAttemptOnly).toBe(1);
+    expect(s.judgePassCountFinalAttemptOnly).toBe(1);
+  });
+});
+
+describe('summarizeCondition — task-accuracy denominator excludes replay errors (Codex r5 finding 4)', () => {
+  test('35 pass + 1 replay error across two trials ⇒ 35/35 evaluated, 1 reported separately as missing data', () => {
+    const runs = [
+      {
+        condition: 'x', ranOk: true, inconclusive: false,
+        result: {
+          summary: { scenarios: 18, passed: 18, failed: 0, replayErrors: 0, criticalMisses: 0 },
+          attempts: [{ status: 'pass', summary: { scenarios: 18, passed: 18, failed: 0, replayErrors: 0, criticalMisses: 0 } }],
+        },
+      },
+      {
+        condition: 'x', ranOk: true, inconclusive: false,
+        // 18 scenarios this trial too, but one of them errored during
+        // replay (the harness itself broke on it — never evaluated either
+        // way), so only 17 passed and 1 is a replay error, not a scenario
+        // failure. 18 (first trial) + 17 (second, evaluated) = 35 passes;
+        // 18 + 18 = 36 attempted; 36 - 1 replay error = 35 evaluated.
+        result: {
+          summary: { scenarios: 18, passed: 17, failed: 0, replayErrors: 1, criticalMisses: 0 },
+          attempts: [{ status: 'pass', summary: { scenarios: 18, passed: 17, failed: 0, replayErrors: 1, criticalMisses: 0 } }],
+        },
+      },
+    ];
+    const s = summarizeCondition('x', runs);
+    expect(s.scenarioPasses).toBe(35);
+    expect(s.replayErrors).toBe(1);
+    expect(s.scenarioAttemptSamples).toBe(36); // the raw attempted denominator, unaffected
+    expect(s.scenarioEvaluatedSamples).toBe(35); // attempted minus the 1 replay error
+    // Task accuracy computed from the evaluated denominator: 35/35, not
+    // 35/36 (which would understate accuracy for a harness problem, not a
+    // model behavior problem).
+    expect(s.scenarioPasses / s.scenarioEvaluatedSamples).toBe(1);
+  });
+
+  test('a run with no replay errors leaves scenarioEvaluatedSamples equal to scenarioAttemptSamples', () => {
+    const runs = [{
+      condition: 'x', ranOk: true, inconclusive: false,
+      result: {
+        summary: { scenarios: 5, passed: 5, failed: 0, replayErrors: 0 },
+        attempts: [{ status: 'pass', summary: { scenarios: 5, passed: 5, failed: 0, replayErrors: 0 } }],
+      },
+    }];
+    const s = summarizeCondition('x', runs);
+    expect(s.scenarioAttemptSamples).toBe(5);
+    expect(s.scenarioEvaluatedSamples).toBe(5);
+  });
+
+  test('replay errors sum per attempt across a retried run, consistently with scenarioPasses', () => {
+    const runs = [{
+      condition: 'x', ranOk: true, inconclusive: false,
+      result: {
+        status: 'pass',
+        flaky: true,
+        summary: { scenarios: 5, passed: 5, failed: 0, replayErrors: 0 },
+        attempts: [
+          { status: 'fail', summary: { scenarios: 5, passed: 3, failed: 1, replayErrors: 1 } }, // first attempt: 1 replay error
+          { status: 'pass', summary: { scenarios: 5, passed: 5, failed: 0, replayErrors: 0 } },  // retry: clean
+        ],
+      },
+    }];
+    const s = summarizeCondition('x', runs);
+    expect(s.scenarioAttemptSamples).toBe(10); // 5 + 5, both attempts
+    expect(s.replayErrors).toBe(1);
+    expect(s.scenarioEvaluatedSamples).toBe(9); // 10 attempted - 1 replay error
+  });
+});
+
+describe('summarizeCondition — latency: first-attempt vs. total-run, aggregated from every entry of result.attempts (Codex r5 finding 5)', () => {
+  test('a non-retried run: first-attempt and total-run latency are identical (one attempt, so nothing to sum)', () => {
+    const runs = [{
+      condition: 'x', ranOk: true, inconclusive: false,
+      result: {
+        summary: { scenarios: 3, passed: 3, durationMs: 900 },
+        attempts: [{ status: 'pass', summary: { scenarios: 3, passed: 3, durationMs: 900 } }],
+      },
+    }];
+    const s = summarizeCondition('x', runs);
+    expect(s.durationMsFirstAttemptMedian).toBe(900);
+    expect(s.durationMsTotalRunMedian).toBe(900);
+    expect(s.durationMsFirstAttemptSampleCount).toBe(1);
+    expect(s.durationMsTotalRunSampleCount).toBe(1);
+  });
+
+  test('a retried run: first-attempt latency is the FIRST attempt alone; total-run latency is first + retry summed — so the retried run does not look artificially faster', () => {
+    const runs = [{
+      condition: 'x', ranOk: true, inconclusive: false,
+      result: {
+        status: 'pass',
+        flaky: true,
+        summary: { scenarios: 5, passed: 5, durationMs: 600 }, // the retry wrapper's SELECTED finalAttempt duration alone
+        attempts: [
+          { status: 'fail', summary: { scenarios: 5, passed: 4, failed: 1, durationMs: 700 } }, // first attempt: 700ms
+          { status: 'pass', summary: { scenarios: 5, passed: 5, durationMs: 600 } },              // retry: 600ms
+        ],
+      },
+    }];
+    const s = summarizeCondition('x', runs);
+    // First-attempt latency reads the FIRST attempt's own duration (700),
+    // never the retry wrapper's selected finalAttempt (600) that
+    // result.summary.durationMs alone would have surfaced.
+    expect(s.durationMsFirstAttemptMedian).toBe(700);
+    // Total-run latency is the SUM of every attempt this run made: 700 + 600
+    // = 1300 — the real wall-clock cost, not hidden behind the retry alone.
+    expect(s.durationMsTotalRunMedian).toBe(1300);
+  });
+
+  test('mixing a retried run with two non-retried runs: first-attempt and total-run are two genuinely different distributions, not the same numbers relabeled', () => {
+    const runs = [
+      {
+        // Retried: first attempt 100ms, retry 400ms — total run 500ms.
+        condition: 'x', ranOk: true, inconclusive: false,
+        result: {
+          summary: { scenarios: 5, passed: 5, durationMs: 400 },
+          attempts: [
+            { status: 'fail', summary: { scenarios: 5, passed: 4, durationMs: 100 } },
+            { status: 'pass', summary: { scenarios: 5, passed: 5, durationMs: 400 } },
+          ],
+        },
+      },
+      {
+        // Non-retried: 300ms, one attempt — first-attempt and total-run agree.
+        condition: 'x', ranOk: true, inconclusive: false,
+        result: {
+          summary: { scenarios: 5, passed: 5, durationMs: 300 },
+          attempts: [{ status: 'pass', summary: { scenarios: 5, passed: 5, durationMs: 300 } }],
+        },
+      },
+      {
+        // Non-retried: 900ms, one attempt.
+        condition: 'x', ranOk: true, inconclusive: false,
+        result: {
+          summary: { scenarios: 5, passed: 5, durationMs: 900 },
+          attempts: [{ status: 'pass', summary: { scenarios: 5, passed: 5, durationMs: 900 } }],
+        },
+      },
+    ];
+    const s = summarizeCondition('x', runs);
+    expect(s.durationMsFirstAttemptSampleCount).toBe(3);
+    expect(s.durationMsTotalRunSampleCount).toBe(3);
+    // First-attempt samples: [100, 300, 900] → median 300 (run 1's REAL first
+    // attempt, 100ms, not its selected/retry duration).
+    expect(s.durationMsFirstAttemptMedian).toBe(300);
+    // Total-run samples: [500 (100+400), 300, 900] → median 500 — the
+    // retried run's real wall-clock cost, distinct from its own
+    // first-attempt figure and from what result.summary.durationMs alone
+    // (400) would have reported.
+    expect(s.durationMsTotalRunMedian).toBe(500);
+    expect(s.durationMsFirstAttemptMedian).not.toBe(s.durationMsTotalRunMedian);
   });
 });
 
@@ -625,6 +844,54 @@ describe('runBenchmark — --out and --only must carry a value, before any child
     }]);
     await expect(runBenchmark({
       argv: ['--candidate-model=claude-haiku-4-5-20251001', '--trials=1', '--out=/tmp/x.json', '--only=booking-happy-path'],
+      execFileImpl,
+    })).resolves.toBeDefined();
+  });
+});
+
+describe('assertOnlyHasIds / runBenchmark — --only must name at least one real scenario id (Codex r5 finding 2)', () => {
+  test('an empty --only= is rejected, before any child process runs', async () => {
+    expect(() => assertOnlyHasIds({ only: '' })).toThrow(/--only must name at least one scenario id/);
+    const execFileImpl = jest.fn();
+    await expect(runBenchmark({ argv: ['--candidate-model=claude-haiku-4-5-20251001', '--only='], execFileImpl }))
+      .rejects.toThrow(/--only must name at least one scenario id/);
+    expect(execFileImpl).not.toHaveBeenCalled();
+  });
+
+  test('a lone delimiter --only=, is rejected', async () => {
+    expect(() => assertOnlyHasIds({ only: ',' })).toThrow(/--only must name at least one scenario id/);
+    const execFileImpl = jest.fn();
+    await expect(runBenchmark({ argv: ['--candidate-model=claude-haiku-4-5-20251001', '--only=,'], execFileImpl }))
+      .rejects.toThrow(/--only must name at least one scenario id/);
+    expect(execFileImpl).not.toHaveBeenCalled();
+  });
+
+  test('whitespace-and-delimiters-only --only= , is rejected', async () => {
+    expect(() => assertOnlyHasIds({ only: ' , ' })).toThrow(/--only must name at least one scenario id/);
+    const execFileImpl = jest.fn();
+    await expect(runBenchmark({ argv: ['--candidate-model=claude-haiku-4-5-20251001', '--only= , '], execFileImpl }))
+      .rejects.toThrow(/--only must name at least one scenario id/);
+    expect(execFileImpl).not.toHaveBeenCalled();
+  });
+
+  test('--only with no value at all is still caught by the earlier bare-flag check, not this one (no false positive, no double-throw confusion)', async () => {
+    const execFileImpl = jest.fn();
+    await expect(runBenchmark({ argv: ['--candidate-model=claude-haiku-4-5-20251001', '--only'], execFileImpl }))
+      .rejects.toThrow(/--only requires a value/);
+    expect(execFileImpl).not.toHaveBeenCalled();
+  });
+
+  test('--only absent entirely is not rejected by this check', () => {
+    expect(() => assertOnlyHasIds({})).not.toThrow();
+  });
+
+  test('a real --only value with extra commas/whitespace around real ids is accepted', async () => {
+    const execFileImpl = stubChild([{
+      code: 0,
+      stdout: JSON.stringify({ status: 'pass', summary: { scenarios: 1, passed: 1 }, attempts: [{ status: 'pass', summary: { scenarios: 1, passed: 1 } }] }),
+    }]);
+    await expect(runBenchmark({
+      argv: ['--candidate-model=claude-haiku-4-5-20251001', '--trials=1', '--only= booking-happy-path , slot-gone '],
       execFileImpl,
     })).resolves.toBeDefined();
   });

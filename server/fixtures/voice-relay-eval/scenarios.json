@@ -4279,6 +4279,13 @@
       "turn": 2
      },
      "severity": "critical"
+    },
+    {
+     "check": "tools_performed_include",
+     "value": [
+      "capture_lead"
+     ],
+     "severity": "critical"
     }
    ],
    "judge": {

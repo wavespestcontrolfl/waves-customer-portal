@@ -191,6 +191,28 @@ function assertValueOptions(ARGS) {
 }
 
 /**
+ * --only, once it has passed assertValueOptions above (so it is a real
+ * string, not the bare-flag `true`), must still name at least one actual
+ * scenario id. `--only=`, `--only=,`, and `--only= , ` all pass a non-empty
+ * STRING through to every child's own `--only=<value>` (runOnce) that
+ * run-voice-relay-eval.js's own comma-split reduces to an EMPTY ids array —
+ * and voice-relay-replay.js's `selectScenarios` treats an empty (or absent)
+ * ids array as "no filter" and returns every scenario in the fixture. A
+ * delimiter-only value would therefore silently run the FULL fixture on
+ * every condition instead of the narrowed set actually intended, for up to
+ * CHILD_TIMEOUT_MS each, before anyone noticed the filter never took
+ * effect. Checked before any child runs, same as the other usage checks in
+ * this file.
+ */
+function assertOnlyHasIds(ARGS) {
+  if (ARGS.only === undefined || ARGS.only === true) return; // absent, or already rejected above
+  const ids = String(ARGS.only).split(',').map((s) => s.trim()).filter(Boolean);
+  if (!ids.length) {
+    throw new Error(`--only must name at least one scenario id (got "${ARGS.only}")`);
+  }
+}
+
+/**
  * --trials, when given at all, must be an explicit positive integer — no
  * value (`--trials` alone, parseArgs hands back `true`), a non-numeric
  * string, zero, or a negative number all used to fall through
@@ -277,7 +299,30 @@ function summarizeCondition(id, runs) {
   const modelMismatchRuns = ranOk.filter((r) => r.modelMismatch === true).length;
   const inconclusiveRuns = runs.filter((r) => r.inconclusive);
   const crashedRuns = runs.filter((r) => !r.ranOk && !r.inconclusive);
-  const durations = completed.map((r) => r.result.summary?.durationMs).filter((n) => Number.isFinite(n)).sort((a, b) => a - b);
+  // Latency: aggregate durationMs from EVERY entry of result.attempts (each
+  // attempt's own summary.durationMs — voice-relay-replay.js's tallyRecord
+  // sums it per attempt, and compactAttempt carries the whole run summary
+  // through unstripped), never just result.summary (the retry wrapper's
+  // SELECTED finalAttempt) — reading only that field would silently swap in
+  // the RETRY's duration for a retried run, discarding the failed first
+  // attempt's real cost and making a flaky condition look no slower than a
+  // clean one. Reported as two SEPARATE distributions, never blended (see
+  // docs/sandy-benchmark.md "Latency" for which one to compare):
+  //   - first-attempt: this run's FIRST attempt only. Every completed run
+  //     has exactly one, retried or not, so this is the apples-to-apples
+  //     figure across conditions — a retry can never inflate or deflate it.
+  //   - total-run: the SUM of every attempt this run made (first + retry,
+  //     when retried) — the real wall-clock cost of the run as it actually
+  //     happened, so a retried run's true cost stays visible instead of
+  //     hiding behind the selected attempt alone.
+  const firstAttemptDurations = completed
+    .map((r) => (r.result.attempts || [])[0] && (r.result.attempts || [])[0].summary && (r.result.attempts || [])[0].summary.durationMs)
+    .filter((n) => Number.isFinite(n))
+    .sort((a, b) => a - b);
+  const totalRunDurations = completed
+    .map((r) => (r.result.attempts || []).reduce((n, a) => n + ((a.summary && a.summary.durationMs) || 0), 0))
+    .filter((n) => Number.isFinite(n))
+    .sort((a, b) => a - b);
 
   // Aggregate EVERY attempt the eval CLI made (result.attempts, its own
   // compact {status, summary, error} list — 1 entry, or 2 when a first
@@ -311,12 +356,34 @@ function summarizeCondition(id, runs) {
   // judgePassCountFinalAttemptOnly / judgedCountFinalAttemptOnly without
   // mixing it with the attempt-summed judgedCount above, which is a
   // different, larger sample (every attempt, not just the final one).
+  //
+  // A FALLBACK-LEG verdict (`judge.judge_fallback === true`) is excluded from
+  // both figures below: voice-relay-judge.js's own contract (and
+  // voice-relay-replay.js's judgeChecks, which marks such a verdict's checks
+  // "advisory" rather than pass/fail) treats a fallback-leg verdict as
+  // advisory ONLY — it can never flip a scenario's pass/fail, so it must not
+  // be folded into the naturalness rate's primary-judge population either.
+  // Reported separately, under its own name, so a fallback-heavy run is
+  // visible rather than silently blended into the rate.
+  const finalAttemptJudgeResults = (r) => (r.result.results || []).filter((s) => s && s.judge && s.judge.ok === true && s.judge.verdict);
   const judgedCountFinalAttemptOnly = completed.reduce(
-    (n, r) => n + (r.result.results || []).filter((s) => s && s.judge && s.judge.ok === true && s.judge.verdict).length,
+    (n, r) => n + finalAttemptJudgeResults(r).filter((s) => s.judge.judge_fallback !== true).length,
     0,
   );
   const judgePassCountFinalAttemptOnly = completed.reduce(
-    (n, r) => n + (r.result.results || []).filter((s) => s && s.judge && s.judge.ok && s.judge.verdict && s.judge.verdict.pass === true).length,
+    (n, r) => n + finalAttemptJudgeResults(r).filter((s) => s.judge.judge_fallback !== true && s.judge.verdict.pass === true).length,
+    0,
+  );
+  // The fallback-leg population, kept separate and labeled as such: how many
+  // final-attempt results got an advisory (fallback-leg) verdict at all, and
+  // how many of those advisory verdicts said "pass" — never mixed into the
+  // primary-judge figures above.
+  const judgeFallbackVerdictCountFinalAttemptOnly = completed.reduce(
+    (n, r) => n + finalAttemptJudgeResults(r).filter((s) => s.judge.judge_fallback === true).length,
+    0,
+  );
+  const judgeFallbackPassCountFinalAttemptOnly = completed.reduce(
+    (n, r) => n + finalAttemptJudgeResults(r).filter((s) => s.judge.judge_fallback === true && s.judge.verdict.pass === true).length,
     0,
   );
   // sumAttempts('scenarios') — the sum of scenario counts across every
@@ -326,6 +393,19 @@ function summarizeCondition(id, runs) {
   // multiplied by scenarios-per-attempt): report THIS, not attemptCount,
   // next to scenarioPasses/scenarioFailures/criticalMisses.
   const scenarioAttemptSamples = sumAttempts('scenarios');
+  // Task-accuracy's own denominator: scenarios the harness actually
+  // EVALUATED. A replay error (`replayErrors`, status 'error' — the harness
+  // itself broke on that scenario, e.g. a tool-schema mismatch, never
+  // delivering a verdict either way) is missing data, not an evaluated
+  // scenario that happened to fail — folding it into scenarioAttemptSamples
+  // would understate a candidate's task accuracy for a harness problem that
+  // has nothing to do with the model's behavior. Summed PER ATTEMPT (each
+  // attempt's own scenarios minus its own replayErrors), the same way
+  // scenarioPasses is summed above, rather than subtracting two
+  // independently-computed totals. Report this, not scenarioAttemptSamples,
+  // as task accuracy's denominator; replayErrors stays its own reported
+  // figure (missing data), same as today.
+  const scenarioEvaluatedSamples = attemptSummaries.reduce((n, s) => n + Math.max(0, (s.scenarios || 0) - (s.replayErrors || 0)), 0);
 
   return {
     condition: id,
@@ -347,6 +427,7 @@ function summarizeCondition(id, runs) {
     // scenarioAttemptSamples below for the true per-scenario denominator.
     attemptCount: attemptSummaries.length,
     scenarioAttemptSamples,
+    scenarioEvaluatedSamples,
     scenarioPasses: sumAttempts('passed'),
     scenarioFailures: sumAttempts('failed'),
     replayErrors: sumAttempts('replayErrors'),
@@ -356,13 +437,23 @@ function summarizeCondition(id, runs) {
     judgeErrorCount,
     judgedCountFinalAttemptOnly,
     judgePassCountFinalAttemptOnly,
+    // The fallback-leg (advisory-only) verdict population, kept OUT of the
+    // two figures above — see the comment where these are computed. Report
+    // both when non-zero: a condition leaning on the fallback judge a lot is
+    // a reliability signal about the judge call itself, not about Sandy.
+    judgeFallbackVerdictCountFinalAttemptOnly,
+    judgeFallbackPassCountFinalAttemptOnly,
     // durationMs here is the TEXT-REPLAY harness's own end-to-end wall clock
-    // for the SELECTED final attempt only (real Anthropic API calls, no
-    // telephony) — see the file header and docs/sandy-benchmark.md for what
-    // this does and does not measure.
-    durationMsMedian: percentile(durations, 50),
-    durationMsP90: durations.length >= 3 ? percentile(durations, 90) : null, // suppress a p90 the sample is too small to support
-    durationMsSampleCount: durations.length,
+    // (real Anthropic API calls, no telephony) — see the file header and
+    // docs/sandy-benchmark.md "Latency" for what this does and does not
+    // measure, and which of the two figures below to compare across
+    // conditions (first-attempt p50/p90 is the apples-to-apples one).
+    durationMsFirstAttemptMedian: percentile(firstAttemptDurations, 50),
+    durationMsFirstAttemptP90: firstAttemptDurations.length >= 3 ? percentile(firstAttemptDurations, 90) : null, // suppress a p90 the sample is too small to support
+    durationMsFirstAttemptSampleCount: firstAttemptDurations.length,
+    durationMsTotalRunMedian: percentile(totalRunDurations, 50),
+    durationMsTotalRunP90: totalRunDurations.length >= 3 ? percentile(totalRunDurations, 90) : null,
+    durationMsTotalRunSampleCount: totalRunDurations.length,
   };
 }
 
@@ -382,6 +473,7 @@ async function runBenchmark({ argv = process.argv.slice(2), execFileImpl = execF
     );
   }
   assertValueOptions(ARGS);
+  assertOnlyHasIds(ARGS);
   if (!ARGS['candidate-model'] || ARGS['candidate-model'] === true) {
     throw new Error(
       "--candidate-model is required (e.g. --candidate-model=claude-haiku-4-5-20251001). "
@@ -462,6 +554,7 @@ module.exports = {
   buildConditions,
   rotateConditions,
   resolveTrials,
+  assertOnlyHasIds,
   runOnce,
   percentile,
   summarizeCondition,
@@ -483,9 +576,20 @@ if (require.main === module) {
       console.table(report.conditions.map((c) => ({
         condition: c.condition, trials: c.trials, completed: c.completedRuns,
         inconclusive: c.inconclusiveRuns, crashed: c.crashedRuns, modelMismatch: c.modelMismatchRuns, retried: c.retriedRuns,
-        scenarios: c.scenarioAttemptSamples, passed: c.scenarioPasses, failed: c.scenarioFailures, critical: c.criticalMisses,
+        scenarios: c.scenarioAttemptSamples, evaluated: c.scenarioEvaluatedSamples, replayErrors: c.replayErrors,
+        // Task accuracy's own denominator is scenarioEvaluatedSamples (replay
+        // errors excluded — see the field's own comment and
+        // docs/sandy-benchmark.md "Task accuracy"), never scenarioAttemptSamples.
+        taskAccuracy: c.scenarioEvaluatedSamples ? `${c.scenarioPasses}/${c.scenarioEvaluatedSamples}` : 'n/a (0 evaluated)',
+        critical: c.criticalMisses,
         judged: c.judgedCount, judgePass: `${c.judgePassCountFinalAttemptOnly}/${c.judgedCountFinalAttemptOnly} (final attempt only)`, judgeFallback: c.judgeFallbackCount,
-        'durationMs p50': c.durationMsMedian, 'durationMs p90': c.durationMsP90 ?? 'n/a (n<3)',
+        judgeFallbackPass: `${c.judgeFallbackPassCountFinalAttemptOnly}/${c.judgeFallbackVerdictCountFinalAttemptOnly} (advisory only)`,
+        // first-attempt is the apples-to-apples figure across conditions — a
+        // retry never inflates or deflates it; total-run is the real
+        // wall-clock cost of the run as it happened (first + retry, when
+        // retried). See docs/sandy-benchmark.md "Latency".
+        'durationMs p50 (first attempt)': c.durationMsFirstAttemptMedian, 'durationMs p90 (first attempt)': c.durationMsFirstAttemptP90 ?? 'n/a (n<3)',
+        'durationMs p50 (total run)': c.durationMsTotalRunMedian, 'durationMs p90 (total run)': c.durationMsTotalRunP90 ?? 'n/a (n<3)',
       })));
       process.exitCode = exitCode;
     } catch (err) {

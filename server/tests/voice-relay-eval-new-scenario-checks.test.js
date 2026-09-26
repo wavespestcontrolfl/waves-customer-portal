@@ -265,6 +265,85 @@ describe('mid-thought-pause — capture_lead_input_includes can fail on WRONG da
   });
 });
 
+describe('mid-thought-pause — tools_performed_include catches a valid-looking call the fixture never receipted (Codex r5 finding 1)', () => {
+  test('capture_lead is called with the right name and street but an email the fixture "when" clause rejects ⇒ the fixture answers "not enough to save yet" (no receipt), and the new critical check fails even though every input-shape check still passes', async () => {
+    mockSdk();
+    const { replay, scenario } = loadScenario('mid-thought-pause');
+    const performedCheck = scenario.expect.find((e) => e.check === 'tools_performed_include');
+    expect(performedCheck).toBeTruthy();
+    expect(performedCheck.value).toEqual(['capture_lead']);
+    expect(performedCheck.severity).toBe('critical');
+    const inputCheck = scenario.expect.find((e) => e.check === 'capture_lead_input_includes');
+    const calledCheck = scenario.expect.find((e) => e.check === 'tools_called_include');
+
+    // Turn 1: wait through the pause, no tool. Turn 2: the model calls
+    // capture_lead with the right first/last name and street, but an email
+    // domain that does NOT contain "example" — the fixture's ONE conditioned
+    // entry requires `email` to match "example" (server/fixtures/voice-relay-eval/
+    // scenarios.json's capture_lead `when`), so this call falls through to
+    // the fallback entry ("IMPORTANT: not enough to save yet"), which sets
+    // no `capture` field and therefore produces no receipt — exactly the gap
+    // Codex r5 finding 1 named: a schema-valid, correctly-addressed call that
+    // never actually saved anything. Turn 3: ack.
+    script.push(
+      say('Take your time.'),
+      toolUse('capture_lead', {
+        call_summary: 'Wasp problem out back',
+        first_name: 'Priya',
+        last_name: 'Fenn',
+        address_line1: '210 Oak Terrace',
+        city: 'Nokomis',
+        email: 'priya.fenn@test.com',
+      }),
+      say('Thanks, a Waves team member will follow up.'),
+      say('You are welcome, take care.'),
+    );
+    const result = await replay.runScenario({ ...scenario, expect: [performedCheck, inputCheck, calledCheck] });
+
+    expect(result.error).toBeUndefined();
+    const captured = result.toolCalls.find((t) => t.name === 'capture_lead');
+    expect(captured).toBeTruthy();
+    // The call itself is schema-valid ("ok") — the two pre-existing checks
+    // this scenario already had would both still report a pass on their own.
+    expect(captured.ok).toBe(true);
+    expect(captured.receipt).toBe(false);
+    expect(result.checks.find((c) => c.check === 'tools_called_include').status).toBe('pass');
+    expect(result.checks.find((c) => c.check === 'capture_lead_input_includes').status).toBe('pass');
+
+    const performed = result.checks.find((c) => c.check === 'tools_performed_include');
+    expect(performed.status).toBe('fail');
+    expect(performed.detail).toMatch(/capture_lead/);
+    expect(result.status).toBe('fail');
+  });
+
+  test('capture_lead called with a matching email is receipted and the new check passes', async () => {
+    mockSdk();
+    const { replay, scenario } = loadScenario('mid-thought-pause');
+    const performedCheck = scenario.expect.find((e) => e.check === 'tools_performed_include');
+
+    script.push(
+      say('Take your time.'),
+      toolUse('capture_lead', {
+        call_summary: 'Wasp problem out back',
+        first_name: 'Priya',
+        last_name: 'Fenn',
+        address_line1: '210 Oak Terrace',
+        city: 'Nokomis',
+        email: 'priya.fenn@example.com',
+      }),
+      say('Thanks, a Waves team member will follow up.'),
+      say('You are welcome, take care.'),
+    );
+    const result = await replay.runScenario({ ...scenario, expect: [performedCheck] });
+
+    expect(result.error).toBeUndefined();
+    const captured = result.toolCalls.find((t) => t.name === 'capture_lead');
+    expect(captured.receipt).toBe(true);
+    expect(result.checks.find((c) => c.check === 'tools_performed_include').status).toBe('pass');
+    expect(result.status).toBe('pass');
+  });
+});
+
 describe('backchannel-vs-explicit-correction — capture_lead_input_includes can fail on WRONG data, not just a missing call', () => {
   test('capture_lead is called validly, but with the pre-correction address ⇒ the real critical check fails, and blocks the scenario', async () => {
     mockSdk();
