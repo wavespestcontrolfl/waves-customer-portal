@@ -139,8 +139,9 @@ describe('invalidatePdfCacheForServiceRecord', () => {
 describe('reportPdfStorageKey: visibilitySignature embedding', () => {
   test.each(['', 'existing-visibility-signature'])('cached documents from before action privacy screening miss (%s)', (visibilitySignature) => {
     const suffix = visibilitySignature ? `-pp${visibilitySignature}` : '';
-    const legacyKey = `reports/svc-1/report-p8-product-identity-20260829${suffix}.pdf`;
-    expect(reportPdfStorageKey('svc-1', { visibilitySignature })).not.toBe(legacyKey);
+    const currentKey = reportPdfStorageKey('svc-1', { visibilitySignature });
+    expect(currentKey).not.toBe(`reports/svc-1/report-p8-product-identity-20260829${suffix}.pdf`);
+    expect(currentKey).not.toBe(`reports/svc-1/report-p9-action-privacy-20260926${suffix}.pdf`);
   });
 
   test('omits the signature suffix when not supplied (back-compat)', () => {

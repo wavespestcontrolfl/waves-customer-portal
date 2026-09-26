@@ -396,6 +396,12 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(reportCopyRejection('The rear gate #2468 was used for access.')).toBe('access_code');
     expect(reportCopyRejection('The rear gate *2468 was used for access.')).toBe('access_code');
     expect(reportCopyRejection('The rear gate A2468 was used for access.')).toBe('access_code');
+    expect(reportCopyRejection('Opened side gate with A2468.')).toBe('access_code');
+    expect(reportCopyRejection('The rear gate 2468A was used for access.')).toBe('access_code');
+    expect(reportCopyRejection('The rear gate: AB2468 was used for access.')).toBe('access_code');
+    expect(reportCopyRejection('The rear gate: 2-4-6-8 was used for access.')).toBe('access_code');
+    expect(reportCopyRejection('Opened the gate onto 400 sqft of treated turf.')).toBeNull();
+    expect(reportCopyRejection('Opened rear gate, applied 100 ml around hinges.')).toBeNull();
     // alphabetic / quoted credentials after a code noun reject too (r34)
     expect(reportCopyRejection('We entered using the gate code BLUE and treated the perimeter.')).toBe('access_code');
     expect(reportCopyRejection('The keypad code is "sunset7" for the side door.')).toBe('access_code');

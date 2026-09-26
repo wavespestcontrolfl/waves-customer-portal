@@ -169,8 +169,36 @@ const REPORT_ACCESS_CODE_RES = [
   /\b(?:gate|garage|door|lock\s?box|keypad|alarm|entry|access)\s+(?:code|combo|combination|pin)\b\s*:?\s*(?!(?:is|was|were|for|the|we|to|that|this|will|should|of|and|or|in|on|at|has|have|had|used|works?|worked|changed|updated|remains?|stays?|near|by)\b)[a-z][a-z0-9#*]{1,11}\b/i,
   /\b(?:passphrase|passcode|password|keypad|lock\s?box)\b\s*:?\s*(?!(?:is|was|were|for|the|we|to|that|this|will|should|of|and|or|in|on|at|has|have|had|used|works?|worked|changed|updated|remains?|stays?|near|by)\b)[a-z][a-z0-9#*]{1,11}\b/i,
 ];
+
+// Remove explicit measurements before looking for device-adjacent numbers.
+// The access patterns intentionally treat bare numbers near a gate as private,
+// so the unit is the evidence that quantities such as "400 sqft" and "100 ml"
+// are treatment details. Bare "in" stays out because it is commonly a
+// preposition ("2468 in the morning"), not reliable evidence of inches.
+const REPORT_MEASUREMENT_QUANTITY_RE = new RegExp(
+  String.raw`\b(?:\d+(?:\.\d+)?|\d(?:[\s-]+\d){2,7})\s*(?:feet|foot|ft|inch(?:es)?|yards?|yds?|meters?|metres?|acres?|linear\s+(?:feet|foot|ft|yards?|yds?|meters?|metres?)|square\s+(?:feet|foot|ft|yards?|yds?|meters?|metres?)|sqft|sq\.?\s*(?:ft|feet|foot|yds?|yards?|meters?|metres?)|percent|min(?:utes?)?|h(?:ou)?rs?|days?|weeks?|months?|years?|dollars?|gallons?|gal|ml|millilit(?:er|re)s?|lit(?:er|re)s?|fl\.?\s*oz|oz|ounces?|pounds?|lbs?|grams?|kg)(?=\s|[.,;:!?)]|$)`,
+  'gi',
+);
+
+// Normalize numeric credential tokens to the digit-only shape already handled
+// by every contextual detector above. This covers compact alphanumeric tokens
+// on either side of the digits and individually separated digits without
+// teaching each gate/action/shorthand branch another token spelling.
+const REPORT_CREDENTIAL_TOKEN_RE = /(^|[^A-Za-z0-9])(\d(?:[\s-]+\d){2,7}|[#*]?[A-Za-z0-9#*]{3,16})(?=$|[^A-Za-z0-9])/g;
+
+function accessCodeDetectionText(text) {
+  return String(text || '')
+    .replace(REPORT_MEASUREMENT_QUANTITY_RE, '[measurement]')
+    .replace(REPORT_CREDENTIAL_TOKEN_RE, (match, prefix, token) => {
+      const digits = token.replace(/\D/g, '');
+      const credentialShape = /[A-Za-z#*]/.test(token) || /[\s-]/.test(token);
+      if (!credentialShape || digits.length < 3 || digits.length > 8) return match;
+      return `${prefix}${digits}`;
+    });
+}
+
 function containsReportAccessCode(text) {
-  const value = String(text || '');
+  const value = accessCodeDetectionText(text);
   return REPORT_ACCESS_CODE_RES.some((re) => re.test(value));
 }
 const { validateCustomerCopy } = require('./premium-experience');

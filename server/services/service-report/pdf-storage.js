@@ -47,8 +47,9 @@ const MIN_EXPECTED_REPORT_BYTES = 50000;
 // product/EPA/precaution content, so they re-render on next open.
 // Supersedes p7, whose bust it subsumes.
 // Customer action screening now removes credentials from legacy report data.
-// Cached documents must re-render through that boundary on their next read.
-const SERVICE_REPORT_PDF_STORAGE_VERSION = 'p9-action-privacy-20260926';
+// p10 extends the initial p9 screen to normalized alphanumeric and separated-
+// digit credentials, so any p9 preview artifact must re-render too.
+const SERVICE_REPORT_PDF_STORAGE_VERSION = 'p10-action-token-privacy-20260926';
 
 const s3 = new S3Client({
   region: config.s3?.region,

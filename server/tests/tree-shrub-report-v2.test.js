@@ -338,6 +338,8 @@ describe('buildTreeShrubReportV2 — aggregator', () => {
       treeShrubAssessment: assessment(),
       actions: [
         'Pruned dead fronds',
+        'Opened the gate onto 400 sqft of treated turf',
+        'Opened rear gate, applied 100 ml around hinges',
         'Used gate code 4417 for access',
         'Used gate code [redacted] for access',
         'Opened side gate with 2468',
@@ -345,12 +347,21 @@ describe('buildTreeShrubReportV2 — aggregator', () => {
         'rear gate #2468',
         'rear gate *2468',
         'rear gate A2468',
+        'Opened side gate with A2468',
+        'rear gate 2468A',
+        'rear gate: AB2468',
+        'Rear gate: 2-4-6-8',
       ],
     });
 
-    expect(v2.treatment.focus).toEqual(['Pruned dead fronds']);
-    expect(v2.snapshot.todaysFocus).toEqual(['Pruned dead fronds']);
-    expect(JSON.stringify(v2)).not.toMatch(/4417|2468|\[redacted\]|gate code/i);
+    const safeActions = [
+      'Pruned dead fronds',
+      'Opened the gate onto 400 sqft of treated turf',
+      'Opened rear gate, applied 100 ml around hinges',
+    ];
+    expect(v2.treatment.focus).toEqual(safeActions);
+    expect(v2.snapshot.todaysFocus).toEqual(safeActions);
+    expect(JSON.stringify(v2)).not.toMatch(/4417|2468|2-4-6-8|\[redacted\]|gate code/i);
   });
 
   it('peace-of-mind keeps the treatment copy when products were actually applied', () => {

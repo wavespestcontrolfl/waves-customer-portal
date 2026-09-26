@@ -36,6 +36,12 @@ test('the customer payload preserves submitted lawn findings, work, quantities a
     'rear gate #2468',
     'rear gate *2468',
     'rear gate A2468',
+    'Opened side gate with A2468',
+    'rear gate 2468A',
+    'rear gate: AB2468',
+    'Rear gate: 2-4-6-8',
+    'Opened the gate onto 400 sqft of treated turf',
+    'Opened rear gate, applied 100 ml around hinges',
   ];
   const data = await buildReportV1Data({
     id: 'test-lawn-record', customer_id: 'test-property', service_line: 'lawn', service_type: 'Every 6 Weeks Lawn Care Service', service_date: '2026-09-05', status: 'completed',
@@ -44,8 +50,12 @@ test('the customer payload preserves submitted lawn findings, work, quantities a
     service_data: { protocol: { actions: ['Used gate code 4417 for access'] } },
   }, 'test-preview-token', knex);
   expect(data.protocol.structuredObservations).toEqual([finding]);
-  expect(data.protocol.actions).toEqual(['Tested irrigation coverage']);
-  expect(JSON.stringify(data)).not.toMatch(/4417|2468|\[redacted\]|gate code/i);
+  expect(data.protocol.actions).toEqual([
+    'Tested irrigation coverage',
+    'Opened the gate onto 400 sqft of treated turf',
+    'Opened rear gate, applied 100 ml around hinges',
+  ]);
+  expect(JSON.stringify(data)).not.toMatch(/4417|2468|2-4-6-8|\[redacted\]|gate code/i);
   // The report projection filters at customer egress; stored/replay inputs
   // remain intact for internal completion evidence.
   expect(persistedActions).toEqual([
@@ -56,6 +66,12 @@ test('the customer payload preserves submitted lawn findings, work, quantities a
     'rear gate #2468',
     'rear gate *2468',
     'rear gate A2468',
+    'Opened side gate with A2468',
+    'rear gate 2468A',
+    'rear gate: AB2468',
+    'Rear gate: 2-4-6-8',
+    'Opened the gate onto 400 sqft of treated turf',
+    'Opened rear gate, applied 100 ml around hinges',
   ]);
   expect(data.findings.map((item) => item.title)).toContain(finding);
   expect(data.findings.map((item) => item.title).join(' ')).not.toContain('Internal access');
