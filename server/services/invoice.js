@@ -143,28 +143,21 @@ function parseInvoiceLineItems(raw) {
 // route this scenario into.
 async function explicitBillingAppSelected(customerId, category, { includeEmail = false } = {}) {
   if (!customerId) return false;
-  // Billing channel arrays are account-level, saved only on the account's
-  // PRIMARY profile (routes/notifications.js ~804/893) — a sibling
-  // property's own notification_prefs row never carries them. Mirror
-  // push-channel-routing.js's readChannelPreference: resolve the primary
-  // profile first, then read ITS prefs, so a phone-less sibling still sees
-  // the account's explicit Email/App choice. Fail CLOSED on a resolution
-  // error (never route a phone-less customer on a guessed profile) — the
-  // caller still throws "no phone number" when this returns false.
-  let prefsOwnerId = customerId;
-  try {
-    const customer = await db("customers").where({ id: customerId }).first("account_id");
-    if (customer?.account_id) {
-      const { resolvePrimaryProfileId } = require("./account-properties");
-      prefsOwnerId = await resolvePrimaryProfileId(
-        { customerId, accountId: customer.account_id }, db, { onError: "throw" },
-      );
-    }
-  } catch (err) {
-    logger.warn(`[invoice] Could not resolve the primary profile for ${customerId}'s billing channel selection: ${err.message}`);
-    return false;
-  }
-  const prefs = await db("notification_prefs").where({ customer_id: prefsOwnerId }).first();
+  // Codex round-4 P2 (#4963): billing channel arrays are actually
+  // account-level, saved only on the account's PRIMARY profile
+  // (routes/notifications.js) — reading them off a sibling property's own
+  // notification_prefs row (as this deliberately still does) can miss an
+  // explicit choice recorded on the primary. Resolving the primary profile
+  // HERE without the rest of the router doing the same would be worse than
+  // this gap, not better: the actual fan-out still reloads
+  // notification_prefs by this same input.customerId (messaging/validators/
+  // consent.js, billing-channel-email-authority.js), so a "yes, phone-less
+  // routing is allowed" verdict from a primary-profile lookup here would
+  // promise a sibling-property send the rest of the path cannot deliver.
+  // Primary-profile resolution across the WHOLE router is a shared core fix
+  // (tracked separately) — this file does not claim it alone. Byte-identical
+  // to the invoice's own customer_id, single-profile customers included.
+  const prefs = await db("notification_prefs").where({ customer_id: customerId }).first();
   const channels = explicitBillingChannels(prefs || {}, category);
   if (!Array.isArray(channels)) return false;
   return channels.includes("push") || (includeEmail && channels.includes("email"));

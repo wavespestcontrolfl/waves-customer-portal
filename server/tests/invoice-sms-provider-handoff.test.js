@@ -1052,85 +1052,18 @@ describe('invoice SMS provider handoff', () => {
     });
   });
 
-  // Codex round-3 P1 add-on (invoice.js:144): billing channel arrays are
-  // account-level, saved only on the account's PRIMARY profile
-  // (routes/notifications.js). explicitBillingAppSelected read
-  // notification_prefs by the INVOICE's own customer_id, so a phone-less
-  // sibling property whose choice lives on the primary profile still threw
-  // "Customer has no phone number". Mirrors push-channel-routing.js's
-  // readChannelPreference: resolve the primary profile first, then read its
-  // prefs.
-  describe('Codex #4963 round 3 add-on: explicit App/Email selection resolves through the account PRIMARY profile', () => {
-    // A customers-table double that answers differently depending on the
-    // WHERE shape: a plain {id} lookup (the invoice's own customer, or
-    // explicitBillingAppSelected's own read) returns the SIBLING row; the
-    // {account_id, is_primary_profile: true} lookup (resolvePrimaryProfileId)
-    // returns the primary profile's id.
-    function siblingCustomersTable({ resolutionError = false } = {}) {
-      const q = {};
-      for (const m of ['whereIn', 'whereRaw', 'whereNull', 'forUpdate', 'clone', 'update', 'insert']) q[m] = jest.fn(() => q);
-      let lastWhere = {};
-      q.where = jest.fn((criteria) => { lastWhere = criteria || {}; return q; });
-      q.first = jest.fn(async () => {
-        if (lastWhere.account_id && lastWhere.is_primary_profile) {
-          if (resolutionError) throw new Error('synthetic primary-profile lookup failure');
-          return { id: 'cust-primary-1' };
-        }
-        return { id: 'cust-sibling-1', account_id: 'acct-1', first_name: 'Sib', phone: null };
-      });
-      q.then = (resolve, reject) => Promise.resolve(1).then(resolve, reject);
-      q.catch = (reject) => Promise.resolve(1).catch(reject);
-      return q;
-    }
-    function notificationPrefsTable(queriesSeen) {
-      const q = query();
-      let lastWhere = {};
-      q.where = jest.fn((criteria) => { lastWhere = criteria || {}; return q; });
-      q.first = jest.fn(async () => {
-        queriesSeen.push(lastWhere);
-        return lastWhere.customer_id === 'cust-primary-1' ? { invoice_channels: ['email'] } : undefined;
-      });
-      return q;
-    }
-
-    test('a phone-less sibling property routes on the account PRIMARY profile\'s explicit Email selection', async () => {
-      const prefsQueries = [];
-      db.mockImplementation((table) => {
-        if (table === 'invoices') return query({ first: invoiceReads.shift() || invoice });
-        if (table === 'customers') return siblingCustomersTable();
-        if (table === 'notification_prefs') return notificationPrefsTable(prefsQueries);
-        if (table === 'activity_log') return query();
-        if (table === 'sms_log') return query({ returning: [] });
-        throw new Error(`Unexpected table: ${table}`);
-      });
-      sendCustomerMessage.mockImplementation(async () => ({
-        sent: true, deliveryOutcome: 'accepted',
-        channelResults: { email: { sent: true, deliveryOutcome: 'accepted' } },
-      }));
-
-      await expect(InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' }))
-        .resolves.toMatchObject({ sent: true });
-      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
-      // The prefs read that actually decided the routing targeted the
-      // PRIMARY profile's id, never the sibling's own.
-      expect(prefsQueries.some((w) => w.customer_id === 'cust-primary-1')).toBe(true);
-    });
-
-    test('a primary-profile resolution error still throws "no phone number" (fail closed, never a guess)', async () => {
-      db.mockImplementation((table) => {
-        if (table === 'invoices') return query({ first: invoiceReads.shift() || invoice });
-        if (table === 'customers') return siblingCustomersTable({ resolutionError: true });
-        if (table === 'activity_log') return query();
-        if (table === 'sms_log') return query({ returning: [] });
-        throw new Error(`Unexpected table: ${table}`);
-      });
-
-      await expect(InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' }))
-        .rejects.toThrow('Customer has no phone number');
-      expect(sendCustomerMessage).not.toHaveBeenCalled();
-    });
-
-    test('a single-profile (no account grouping) phone-less customer is unchanged: still routes on their own explicit Email selection', async () => {
+  // Codex #4963 round 4 P2: a primary-profile lookup here (round-3 add-on)
+  // let this check pass for a phone-less SIBLING property, but the actual
+  // fan-out (messaging/validators/consent.js, billing-channel-email-
+  // authority.js) still reloads notification_prefs by the invoice's own
+  // customer_id, so the sibling send it "supported" here still delivered
+  // nothing. Primary-profile resolution across the whole router is a shared
+  // core fix tracked separately (session a8's accountBillingChannels
+  // helper) — this file does not claim it alone. Reverted to reading the
+  // invoice customer's own notification_prefs, byte-identical to before the
+  // round-3 add-on.
+  describe('explicit App/Email selection reads the invoice customer\'s own notification_prefs', () => {
+    test('a phone-less customer still routes on their own explicit Email selection', async () => {
       db.mockImplementation((table) => {
         if (table === 'invoices') return query({ first: invoiceReads.shift() || invoice });
         if (table === 'customers') return query({ first: { id: 'cust-1', first_name: 'Pat', phone: null } });
@@ -1147,6 +1080,21 @@ describe('invoice SMS provider handoff', () => {
       await expect(InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' }))
         .resolves.toMatchObject({ sent: true });
       expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    });
+
+    test('a phone-less customer with no explicit Email/App selection still throws "no phone number"', async () => {
+      db.mockImplementation((table) => {
+        if (table === 'invoices') return query({ first: invoiceReads.shift() || invoice });
+        if (table === 'customers') return query({ first: { id: 'cust-1', first_name: 'Pat', phone: null } });
+        if (table === 'notification_prefs') return query({ first: { customer_id: 'cust-1', invoice_channels: ['sms'] } });
+        if (table === 'activity_log') return query();
+        if (table === 'sms_log') return query({ returning: [] });
+        throw new Error(`Unexpected table: ${table}`);
+      });
+
+      await expect(InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' }))
+        .rejects.toThrow('Customer has no phone number');
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
     });
   });
 
