@@ -620,7 +620,7 @@ const PROPERTY_FORM_FIELDS = [
   "homeSqFt", "lotSqFt", "stories", "unitCount", "propertyType", "isCommercial",
   "commercialSubtype", "commercialRiskType", "hasPool", "hasPoolCage", "poolCageSize",
   "shrubDensity", "treeDensity", "landscapeComplexity", "nearWater", "bedArea",
-  "palmCount", "palmTreatmentCount", "palmDbhInches", "treeCount", "measuredTurfSf",
+  "palmCount", "largePalmCount", "palmTreatmentCount", "palmDbhInches", "treeCount", "measuredTurfSf",
   "termiteFootprintSqFt", "termitePerimeterLF", "trenchingPerimeterLF",
   "trenchingConcreteLF", "trenchingDirtLF", "boracareSqft", "boracareSurfaceLinearFt",
   "trenchingConcretePct", "trenchingEstimateFromFootprint", "trenchingLabelConfirmed",
@@ -1329,6 +1329,7 @@ export default function EstimateToolViewV2({
     isRecurringCustomer: "NO",
     bedArea: "",
     palmCount: "",
+    largePalmCount: "",
     palmTreatmentCount: "",
     palmTreatmentType: "combo",
     palmSize: "medium",
@@ -3502,6 +3503,14 @@ export default function EstimateToolViewV2({
         alert("Palm count must be a whole number between 1 and 200.");
         return null;
       }
+      // Large palms (canopy wider than ~15 ft) are a subset of the palms
+      // above; the server rejects a count past them, so say so here.
+      const largePalmRaw = String(form.largePalmCount ?? "").trim();
+      if (form.svcTs && largePalmRaw !== ""
+        && !(/^\d+$/.test(largePalmRaw) && Number(largePalmRaw) <= (propertyPalmCount || 0))) {
+        alert("Large palms must be a whole number no greater than the palm count.");
+        return null;
+      }
       // Tree count: a typed value must be a whole number (0 allowed — an
       // explicit zero is a real answer); the server rejects anything else
       // with a 400, so surface it here before the request.
@@ -3832,6 +3841,11 @@ export default function EstimateToolViewV2({
           }
         }
       }
+      // Large palms ride along (the translator ignores them without a T&S
+      // palm count); a blank field clears a revision's saved value.
+      const largePalmCount = parsePositiveInteger(form.largePalmCount);
+      if (largePalmCount) profile.largePalmCount = largePalmCount;
+      else delete profile.largePalmCount;
       if (treeCount !== undefined) {
         profile.estimatedTreeCount = treeCount;
         profile.treeCount = treeCount;
@@ -5460,6 +5474,11 @@ export default function EstimateToolViewV2({
                       <InputV2 k="palmCount" type="number" placeholder="Manual override" />
                     </Field>{" "}
                   </div>{" "}
+                  {form.svcTs && !commercialDetected && (
+                    <Field label="Large palms (canopy over ~15 ft)" id="estimate-largePalmCount" className="mb-4">
+                      <InputV2 k="largePalmCount" type="number" placeholder="None" />
+                    </Field>
+                  )}{" "}
                   {form.svcTs && (
                     <Field label="Tree Count" id="estimate-treeCount" className="mb-4">
                       <InputV2 k="treeCount" type="number" placeholder="Auto" />

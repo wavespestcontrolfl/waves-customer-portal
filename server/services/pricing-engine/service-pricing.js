@@ -2776,10 +2776,21 @@ function priceTreeShrub(property, options = {}) {
   const liveReserve = TREE_SHRUB.routinePalmCareReserve || {};
   const snapshotPerPalmAnnual = knobNumber(knobs.perPalmAnnual, 0, 200);
   const snapshotPalmMinutes = knobNumber(knobs.minutesPerPalmVisit, 0, 10);
+  const snapshotLargePalmFactor = knobNumber(knobs.largePalmFactor, 1, 5);
   const palmReserve = {
     perPalmAnnual: snapshotPerPalmAnnual !== null ? snapshotPerPalmAnnual : (liveReserve.perPalmAnnual ?? 0),
     minutesPerPalmVisit: snapshotPalmMinutes !== null ? snapshotPalmMinutes : (liveReserve.minutesPerPalmVisit ?? 0),
+    largePalmFactor: snapshotLargePalmFactor !== null ? snapshotLargePalmFactor : (liveReserve.largePalmFactor ?? 1),
   };
+  // Of those palms, the admin estimate's count of LARGE ones (canopy wider
+  // than ~15 ft; owner ruling 2026-09-26 — never asked of customers). Each
+  // counts as largePalmFactor regular palms in the ARMED reserve terms
+  // below; the unarmed legacy fold, the review gate and every displayed
+  // palm count stay physical palms. More large palms than palms clamps.
+  const largePalmParsed = Number(options.largePalmCount);
+  const largePalmCount = Number.isInteger(largePalmParsed) && largePalmParsed > 0
+    ? Math.min(largePalmParsed, palmCount) : 0;
+  const palmUnits = palmCount + largePalmCount * (palmReserve.largePalmFactor - 1);
   // Neutral-rollout bridge (pre-push P0): before v4.7 the intent prompt
   // classified stated palms INTO treeCount, so they priced the generic
   // per-tree material + 1.5 min/visit. The producers now split the counts,
@@ -2823,7 +2834,7 @@ function priceTreeShrub(property, options = {}) {
   // replacement is still unarmed.
   const materialTreeCount = materialBaseTreeCount + (palmMaterialArmed ? 0 : foldablePalmCount);
   const laborTreeCount = laborBaseTreeCount + (palmLaborArmed ? 0 : foldablePalmCount);
-  const palmMinutesPerVisit = Math.round((palmLaborArmed ? palmCount : 0) * (palmReserve.minutesPerPalmVisit ?? 0));
+  const palmMinutesPerVisit = Math.round((palmLaborArmed ? palmUnits : 0) * (palmReserve.minutesPerPalmVisit ?? 0));
 
   const accessMin = TREE_SHRUB.accessMinutes[access] || 0;
   const onSiteMin = Math.max(
@@ -2844,7 +2855,7 @@ function priceTreeShrub(property, options = {}) {
   // foliar visits — the per-visit palm labor already scales with frequency.
   // While the MATERIAL leg is unarmed, service-line palms ride the per-tree
   // term inside the tier factor instead (materialTreeCount — pre-split).
-  const palmReserveAnnual = (palmReserve.perPalmAnnual ?? 0) * (palmMaterialArmed ? palmCount : 0);
+  const palmReserveAnnual = (palmReserve.perPalmAnnual ?? 0) * (palmMaterialArmed ? palmUnits : 0);
   const modeledMaterialCost = (
     (materialModel.fixedAnnual ?? 15)
     + (materialModel.perTreeAnnual ?? 4) * materialTreeCount
@@ -2952,6 +2963,7 @@ function priceTreeShrub(property, options = {}) {
     shrubDensity,
     densityFactor,
     palmCount,
+    largePalmCount,
     palmCountSource,
     palmReserveActive,
     palmMaterialArmed,
@@ -2963,6 +2975,7 @@ function priceTreeShrub(property, options = {}) {
       densityFactor,
       perPalmAnnual: palmReserve.perPalmAnnual ?? 0,
       minutesPerPalmVisit: palmReserve.minutesPerPalmVisit ?? 0,
+      largePalmFactor: palmReserve.largePalmFactor,
       callbackReservePerVisit,
     },
     access,

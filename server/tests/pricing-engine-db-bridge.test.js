@@ -941,7 +941,7 @@ describe('ts_material_rates v4.7 knobs', () => {
   // Standalone describe: restore the knobs itself — the main describe's
   // afterEach doesn't cover this block, and syncs mutate constants in place.
   const neutralDensity = { light: 1, moderate: 1, heavy: 1 };
-  const neutralReserve = { perPalmAnnual: 0, minutesPerPalmVisit: 0 };
+  const neutralReserve = { perPalmAnnual: 0, minutesPerPalmVisit: 0, largePalmFactor: 1 };
   beforeEach(() => {
     constants.TREE_SHRUB.densityFactors = { ...neutralDensity };
     constants.TREE_SHRUB.routinePalmCareReserve = { ...neutralReserve };
@@ -959,11 +959,12 @@ describe('ts_material_rates v4.7 knobs', () => {
       data: {
         density_light: 0.85, density_moderate: 1, density_heavy: 1.3,
         palm_per_palm_annual: 6, palm_minutes_per_visit: 1,
+        palm_large_factor: 2.5,
         callback_reserve_per_visit: 2,
       },
     }]))).resolves.toBe(true);
     expect(constants.TREE_SHRUB.densityFactors).toEqual({ light: 0.85, moderate: 1, heavy: 1.3 });
-    expect(constants.TREE_SHRUB.routinePalmCareReserve).toEqual({ perPalmAnnual: 6, minutesPerPalmVisit: 1 });
+    expect(constants.TREE_SHRUB.routinePalmCareReserve).toEqual({ perPalmAnnual: 6, minutesPerPalmVisit: 1, largePalmFactor: 2.5 });
     expect(constants.TREE_SHRUB.callbackReservePerVisit).toBe(2);
   });
 
@@ -975,12 +976,13 @@ describe('ts_material_rates v4.7 knobs', () => {
         density_light: 0.9,
         palm_per_palm_annual: 500,     // palm_injection-scale money in the wrong box
         palm_minutes_per_visit: 45,    // 12 palms would book 9h/visit
+        palm_large_factor: 7,          // past 5 regular palms is a typo, not a canopy
         callback_reserve_per_visit: 400,
       },
     }]))).resolves.toBe(true);
     expect(constants.TREE_SHRUB.densityFactors.heavy).toBe(1);
     expect(constants.TREE_SHRUB.densityFactors.light).toBe(0.9);
-    expect(constants.TREE_SHRUB.routinePalmCareReserve).toEqual({ perPalmAnnual: 0, minutesPerPalmVisit: 0 });
+    expect(constants.TREE_SHRUB.routinePalmCareReserve).toEqual({ perPalmAnnual: 0, minutesPerPalmVisit: 0, largePalmFactor: 1 });
     expect(constants.TREE_SHRUB.callbackReservePerVisit).toBe(0);
   });
 
@@ -990,7 +992,7 @@ describe('ts_material_rates v4.7 knobs', () => {
       data: { per_sqft: 0.055 },
     }]))).resolves.toBe(true);
     expect(constants.TREE_SHRUB.densityFactors).toEqual({ light: 1, moderate: 1, heavy: 1 });
-    expect(constants.TREE_SHRUB.routinePalmCareReserve).toEqual({ perPalmAnnual: 0, minutesPerPalmVisit: 0 });
+    expect(constants.TREE_SHRUB.routinePalmCareReserve).toEqual({ perPalmAnnual: 0, minutesPerPalmVisit: 0, largePalmFactor: 1 });
     expect(constants.TREE_SHRUB.callbackReservePerVisit).toBe(0);
   });
 
@@ -999,10 +1001,11 @@ describe('ts_material_rates v4.7 knobs', () => {
     // reset between these syncs — the bridge itself must rebase.
     await expect(syncConstantsFromDB(pricingConfigDb([{
       config_key: 'ts_material_rates',
-      data: { density_heavy: 1.3, palm_per_palm_annual: 6, callback_reserve_per_visit: 2 },
+      data: { density_heavy: 1.3, palm_per_palm_annual: 6, palm_large_factor: 2.5, callback_reserve_per_visit: 2 },
     }]))).resolves.toBe(true);
     expect(constants.TREE_SHRUB.densityFactors.heavy).toBe(1.3);
     expect(constants.TREE_SHRUB.routinePalmCareReserve.perPalmAnnual).toBe(6);
+    expect(constants.TREE_SHRUB.routinePalmCareReserve.largePalmFactor).toBe(2.5);
     expect(constants.TREE_SHRUB.callbackReservePerVisit).toBe(2);
 
     // Keys removed from the row → neutral reasserts on the next sync.
@@ -1012,6 +1015,7 @@ describe('ts_material_rates v4.7 knobs', () => {
     }]))).resolves.toBe(true);
     expect(constants.TREE_SHRUB.densityFactors.heavy).toBe(1);
     expect(constants.TREE_SHRUB.routinePalmCareReserve.perPalmAnnual).toBe(0);
+    expect(constants.TREE_SHRUB.routinePalmCareReserve.largePalmFactor).toBe(1);
     expect(constants.TREE_SHRUB.callbackReservePerVisit).toBe(0);
 
     // A valid value replaced by an out-of-range one degrades to NEUTRAL,

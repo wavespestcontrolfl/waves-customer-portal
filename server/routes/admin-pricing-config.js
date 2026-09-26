@@ -481,7 +481,7 @@ function validatePricingConfigData(configKey, data, oldConfig) {
       ['fixed', 0, 500, true], ['per_tree', 0, 100, true], ['per_sqft', 0, 5, true],
       ['light_factor', 0.1, 1], ['enhanced_factor', 1, 3],
       ['density_light', 0.5, 2], ['density_moderate', 0.5, 2], ['density_heavy', 0.5, 2],
-      ['palm_per_palm_annual', 0, 200], ['palm_minutes_per_visit', 0, 10],
+      ['palm_per_palm_annual', 0, 200], ['palm_minutes_per_visit', 0, 10], ['palm_large_factor', 1, 5],
       ['callback_reserve_per_visit', 0, 50],
     ];
     for (const [key, min, max, exclusiveMin] of checks) {
