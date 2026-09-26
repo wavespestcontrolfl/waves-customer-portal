@@ -249,7 +249,10 @@ function isWdoInspectionRequest(serviceRequest = {}) {
   // be the WDO row — the coarse category cannot override a contradictory pick
   // like "Termite Inspection Service" (codex #4890 r6 P1).
   const specific = String(serviceRequest?.specific_service_name || '').trim();
-  if (specific) return /\bWDO\b/i.test(specific);
+  // The acronym or the spelled-out form ("Wood-Destroying Organism
+  // Inspection"), the same equivalence service-normalizer.js uses (codex
+  // #4890 r7 P2).
+  if (specific) return /\bWDO\b|wood[-\s]*destroy/i.test(specific);
   return serviceRequest?.primary_service_category === 'wdo';
 }
 

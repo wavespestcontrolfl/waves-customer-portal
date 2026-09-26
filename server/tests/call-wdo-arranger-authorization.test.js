@@ -304,15 +304,33 @@ describe('codex #4890 r5/r6 — WDO identity and elapsed agreed days', () => {
   });
 
   test('the booking write refuses an arranger booking whose agreed ET day has passed', () => {
-    expect(arrangerSlotElapsed({ authorized: true, scheduledDate: '2026-09-28', todayET: '2026-09-29' })).toBe(true);
+    expect(arrangerSlotElapsed({ authorized: true, scheduledDate: '2026-09-28', windowStart: '10:00', todayET: '2026-09-29' })).toBe(true);
   });
 
-  test('a same-day or future agreed day still books', () => {
-    expect(arrangerSlotElapsed({ authorized: true, scheduledDate: '2026-09-28', todayET: '2026-09-28' })).toBe(false);
-    expect(arrangerSlotElapsed({ authorized: true, scheduledDate: '2026-09-28', todayET: '2026-09-25' })).toBe(false);
+  test('a future agreed day still books', () => {
+    expect(arrangerSlotElapsed({ authorized: true, scheduledDate: '2026-09-28', windowStart: '10:00', todayET: '2026-09-25' })).toBe(false);
+  });
+
+  describe('same ET day (clock pinned)', () => {
+    // 2026-09-28 13:30 EDT = 17:30Z.
+    beforeAll(() => { jest.useFakeTimers({ now: new Date('2026-09-28T17:30:00Z') }); });
+    afterAll(() => { jest.useRealTimers(); });
+
+    test('a same-day slot whose start has passed on the ET wall clock is refused (codex #4890 r7 P1)', () => {
+      expect(arrangerSlotElapsed({ authorized: true, scheduledDate: '2026-09-28', windowStart: '10:00', todayET: '2026-09-28' })).toBe(true);
+    });
+
+    test('a later same-day slot still books', () => {
+      expect(arrangerSlotElapsed({ authorized: true, scheduledDate: '2026-09-28', windowStart: '16:00', todayET: '2026-09-28' })).toBe(false);
+    });
   });
 
   test('bookings that did not need the arranger rule are untouched by this guard', () => {
-    expect(arrangerSlotElapsed({ authorized: false, scheduledDate: '2026-09-28', todayET: '2026-09-29' })).toBe(false);
+    expect(arrangerSlotElapsed({ authorized: false, scheduledDate: '2026-09-28', windowStart: '10:00', todayET: '2026-09-29' })).toBe(false);
+  });
+
+  test('the spelled-out WDO service name is recognized (codex #4890 r7 P2)', () => {
+    const spelled = wdoExtraction({ service_request: { primary_service_category: 'wdo', specific_service_name: 'Wood-Destroying Organism Inspection' } });
+    expect(isAuthorizedWdoArrangerBooking(spelled)).toBe(true);
   });
 });

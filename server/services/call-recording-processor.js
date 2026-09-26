@@ -44,7 +44,7 @@ function recordedPartOfComposite(text) {
   const m = t.match(/\n\n\[(?:Staff|Voicemail) segment\]\n([\s\S]*)$/);
   return m && m[1].trim() ? m[1] : null;
 }
-const { parseETDateTime, formatETDate, formatETTime, etDateString, etParts } = require('../utils/datetime-et');
+const { parseETDateTime, formatETDate, formatETTime, etDateString, etParts, sameDayWindowElapsed } = require('../utils/datetime-et');
 const { promoteCustomerOnBooking } = require('./customer-stages');
 const { normalizeCallExtraction, applyContactNormalization } = require('../utils/intake-normalize');
 const { composeServiceInterest, composeWordsForV2Category, v2PrimaryLabelForCategory, labelIsSpecialtyPestFamily, hasTermiteWorkCue, v2InexpressibleFamilyWords } = require('../utils/lead-service-interest');
@@ -1032,11 +1032,15 @@ function resolveCallContactPhone(call = {}, extractedPhone = null) {
   return firstExternalPhone(call.from_phone, extracted, call.to_phone);
 }
 
-// True when an arranger-authorized WDO booking's agreed ET date (YYYY-MM-DD,
-// the wall date the visit row gets) is before today's ET date. Same-day slots
-// still book; only a whole elapsed day refuses (codex #4890 r5/r6).
-function arrangerSlotElapsed({ authorized, scheduledDate, todayET }) {
-  return !!authorized && !!scheduledDate && !!todayET && String(scheduledDate) < String(todayET);
+// True when an arranger-authorized WDO booking's agreed ET slot has already
+// started on the ET wall clock: its date (YYYY-MM-DD, the wall date the visit
+// row gets) is before today's ET date, or it is today and its window start
+// (HH:MM) has passed (codex #4890 r5/r6/r7). Uses the shared
+// sameDayWindowElapsed so the cutoff matches every other mover.
+function arrangerSlotElapsed({ authorized, scheduledDate, windowStart = null, todayET = etDateString(new Date()) }) {
+  if (!authorized || !scheduledDate) return false;
+  if (String(scheduledDate) < String(todayET)) return true;
+  return sameDayWindowElapsed(scheduledDate, windowStart);
 }
 
 function isLiveLeadConversation({ call, extracted, leadId, finalStatus, nonLeadCall, voicemailLeadPath, transcription }) {
@@ -15249,14 +15253,16 @@ const CallRecordingProcessor = {
 
             const callDateET = etDateString(call.created_at || new Date());
             // An arranger-authorized WDO booking (owner ruling 2026-09-26) is
-            // refused once its agreed ET calendar day has passed — checked
-            // HERE, when the visit is written, on the same ET wall date the
-            // row gets (codex #4890 r5 P1 + r6: time-of-use, wall clock). A
-            // force-reprocess after the day must not create a backdated visit;
-            // routing itself stays clock-free. Same skip shape as below.
-            if (scheduledDate && arrangerSlotElapsed({
-              authorized: wdoArrangerAuthorizedThisPass, scheduledDate, todayET: etDateString(new Date()),
-            })) {
+            // refused once its agreed ET slot has started — checked HERE, when
+            // the visit is written, on the ET wall clock the row gets (codex
+            // #4890 r5 P1, r6, r7 P1: time-of-use, wall clock, same-day start
+            // time). A force-reprocess of an old blocked call must not create
+            // a backdated visit; routing itself stays clock-free.
+            // A reprocess of a call whose visit already exists keeps the
+            // existing-booking reuse below (codex #4890 r7 P2) — only a
+            // not-yet-booked elapsed slot is refused.
+            if (scheduledDate && arrangerSlotElapsed({ authorized: wdoArrangerAuthorizedThisPass, scheduledDate, windowStart })
+              && !(await findExistingCallAppointment({ customerId, call, scheduledDate, windowStart, serviceType }))) {
               logger.warn(`[call-proc] Arranger-authorized WDO date ${scheduledDate} has already passed; skipping schedule + SMS for ${maskSid(callSid)}`);
               appointmentResult = {
                 service: serviceType,
