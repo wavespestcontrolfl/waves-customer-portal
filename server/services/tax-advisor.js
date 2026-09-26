@@ -18,12 +18,147 @@ const logger = require('./logger');
 const MODELS = require('../config/models');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('./llm/anthropic-wire');
 const { etDateString } = require('../utils/datetime-et');
+const { ledgerCall, ledgerCallRejected } = require('./llm-dispatch-metrics');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
 let TwilioService;
 try { TwilioService = require('./twilio'); } catch { TwilioService = null; }
+
+// The weekly report's shape: storeReport persists executive_summary (a report
+// without it is a blank row), stringifies financial_snapshot, and storeReport /
+// the SMS summary iterate every list below and read fields off each entry
+// (Codex r5 + r6 on #4884).
+const TAX_REPORT_LISTS = ['regulation_changes', 'savings_opportunities', 'deduction_gaps', 'compliance_alerts', 'equipment_recommendations', 'procurement_insights', 'action_items'];
+const isPlainObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+function isUsableTaxReport(report) {
+  if (!isPlainObject(report)) return false;
+  if (typeof report.executive_summary !== 'string' || !report.executive_summary.trim()) return false;
+  if (report.financial_snapshot != null && !isPlainObject(report.financial_snapshot)) return false;
+  return TAX_REPORT_LISTS.every((key) => report[key] == null || (Array.isArray(report[key]) && report[key].every(isPlainObject)));
+}
+
+// The three alert lists: each item's label is the tax_advisor_alerts row's
+// NOT NULL title (varchar 300) and what the Tax page and SMS print, and
+// storeReport writes priority (varchar 10), a decimal savings amount and a
+// date into typed columns. One bad field used to fail the single multi-row
+// alerts insert for EVERY alert, swallowed by the catch after the report row
+// was stored (Codex r15 on #4884). A present off-contract value is cleaned
+// (and the answer counted as degraded); an item without a label is dropped.
+const TAX_ALERT_LISTS = {
+  savings_opportunities: { label: 'title', priority: 'priority', amount: 'estimated_annual_savings', text: ['action', 'category', 'deadline'] },
+  compliance_alerts: { label: 'alert', priority: 'severity', amount: null, text: ['action', 'deadline'] },
+  deduction_gaps: { label: 'deduction', priority: null, amount: 'estimated_value', text: ['how_to_claim', 'irs_reference'] },
+};
+// The other two stored lists (JSON columns): regulation_changes is rendered
+// field by field on the Tax page (rc.change / impact / action_required /
+// source / effective_date as React children — an object throws there), and
+// action_items is stored alongside it (Codex r19 on #4884).
+const TAX_DISPLAY_LISTS = {
+  regulation_changes: { label: 'change', text: ['impact', 'action_required', 'source', 'effective_date', 'url'] },
+  action_items: { label: 'action', text: ['priority', 'deadline', 'estimated_impact', 'category'] },
+};
+const TAX_PRIORITIES = new Set(['high', 'medium', 'low']);
+const MONTHS = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
+
+// A dollar amount for a decimal(10,2) column, or null (absent/invalid).
+function taxAmount(v) {
+  const n = typeof v === 'number' ? v
+    : (typeof v === 'string' && /^\s*\d+(\.\d+)?\s*$/.test(v) ? Number(v) : NaN);
+  return Number.isFinite(n) && n >= 0 && n < 1e8 ? n : null;
+}
+
+// A date column value (YYYY-MM-DD) from an ISO date or "Month D, YYYY"; any
+// other text ("before Q4") is null — the prompt allows free-text deadlines,
+// which stay in the report JSON but cannot go in a date column.
+function taxDate(v) {
+  if (typeof v !== 'string') return null;
+  const t = v.trim();
+  let y, m, d;
+  const iso = t.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T\s].*)?$/);
+  const long = t.toLowerCase().match(/^([a-z]+)\.?\s+(\d{1,2}),?\s+(\d{4})$/);
+  if (iso) [y, m, d] = [Number(iso[1]), Number(iso[2]), Number(iso[3])];
+  else if (long) {
+    const month = MONTHS.findIndex((name) => name === long[1] || name.slice(0, 3) === long[1]);
+    if (month < 0) return null;
+    [y, m, d] = [Number(long[3]), month + 1, Number(long[2])];
+  } else return null;
+  const date = new Date(Date.UTC(y, m - 1, d));
+  if (date.getUTCFullYear() !== y || date.getUTCMonth() !== m - 1 || date.getUTCDate() !== d) return null;
+  return date.toISOString().slice(0, 10);
+}
+
+// The report row's typed header columns: report_date is a NOT NULL date,
+// period varchar(30), grade varchar(5). A present value that cannot go in its
+// column is replaced by storeReport's own default (today, "Week of …", "N/A")
+// and degrades the answer — an invalid date used to fail the whole report
+// insert after the call was accepted (Codex r18 on #4884). The normalized
+// values are written back so the stored row and the SMS agree.
+function taxReportPeriodDefault() {
+  return `Week of ${new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' })}`;
+}
+function normalizeTaxReportHeader(report) {
+  let degraded = false;
+  const text = (v, max) => (typeof v === 'string' && v.trim() && v.trim().length <= max ? v.trim() : null);
+  const date = report.report_date == null ? null : taxDate(report.report_date);
+  if (report.report_date != null && !date) degraded = true;
+  report.report_date = date || etDateString();
+  const period = report.period == null ? null : text(report.period, 30);
+  if (report.period != null && !period) degraded = true;
+  report.period = period || taxReportPeriodDefault();
+  const grade = report.grade == null ? null : text(report.grade, 5);
+  if (report.grade != null && !grade) degraded = true;
+  report.grade = grade || 'N/A';
+  return degraded;
+}
+
+// Cleans the three alert lists and the two display lists in place; returns true when anything present
+// was off-contract (the caller fails the row but keeps the usable report).
+function normalizeTaxAlerts(report) {
+  let degraded = false;
+  for (const [key, spec] of Object.entries(TAX_ALERT_LISTS)) {
+    if (!Array.isArray(report[key])) continue;
+    report[key] = report[key].flatMap((item) => {
+      const label = typeof item[spec.label] === 'string' ? item[spec.label].trim() : '';
+      if (!label || label.length > 300) { degraded = true; return []; }
+      const out = { ...item, [spec.label]: label };
+      if (spec.priority) {
+        const raw = item[spec.priority];
+        const p = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
+        if (raw !== undefined && raw !== null && !TAX_PRIORITIES.has(p)) degraded = true;
+        out[spec.priority] = TAX_PRIORITIES.has(p) ? p : 'medium';
+      }
+      if (spec.amount && item[spec.amount] !== undefined && item[spec.amount] !== null) {
+        out[spec.amount] = taxAmount(item[spec.amount]);
+        if (out[spec.amount] === null) degraded = true;
+      }
+      for (const field of spec.text) {
+        const v = item[field];
+        if (v === undefined || v === null || typeof v === 'string' || typeof v === 'number') continue;
+        out[field] = null;
+        degraded = true;
+      }
+      return [out];
+    });
+  }
+  for (const [key, spec] of Object.entries(TAX_DISPLAY_LISTS)) {
+    if (!Array.isArray(report[key])) continue;
+    report[key] = report[key].flatMap((item) => {
+      const label = typeof item[spec.label] === 'string' ? item[spec.label].trim() : '';
+      if (!label) { degraded = true; return []; }
+      const out = { ...item, [spec.label]: label };
+      for (const field of spec.text) {
+        const v = item[field];
+        if (v === undefined || v === null || typeof v === 'string' || typeof v === 'number') continue;
+        out[field] = null;
+        degraded = true;
+      }
+      return [out];
+    });
+  }
+  return degraded;
+}
 
 class TaxAdvisor {
 
@@ -59,7 +194,7 @@ class TaxAdvisor {
     try {
       const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-      const response = await anthropic.messages.create({
+      const response = await ledgerCall('anthropic', MODELS.FLAGSHIP, () => anthropic.messages.create({
         model: MODELS.FLAGSHIP,
         ...anthropicEffortConfig(MODELS.FLAGSHIP),
         max_tokens: anthropicMaxTokens(MODELS.FLAGSHIP, 6000),
@@ -158,7 +293,7 @@ ${JSON.stringify(analysisData, null, 2)}
 Please search for current FL and federal tax changes, then provide your analysis as JSON.`,
           },
         ],
-      });
+      }), { laneId: 'tax_advisor' });
 
       // Process response — handle tool use (web search may produce multiple content blocks)
       let rawText = '';
@@ -173,12 +308,26 @@ Please search for current FL and federal tax changes, then provide your analysis
       // Parse JSON from response
       const cleaned = rawText.replace(/```json\s*/g, '').replace(/```/g, '').trim();
       let report;
+      let parsedOk = true;
       try {
         report = JSON.parse(cleaned);
       } catch (parseErr) {
+        parsedOk = false;
+        ledgerCallRejected(response, 'invalid_json');
         logger.error(`[TaxAdvisor] Failed to parse AI response: ${parseErr.message}`);
         report = this.generateFallbackReport(analysisData);
         report.raw_ai_response = rawText;
+      }
+      // Valid JSON of the wrong shape ({}, [], no summary) used to be stored as
+      // a blank report; it takes the parse-failure path instead (Codex r5 on #4884).
+      if (parsedOk && !isUsableTaxReport(report)) {
+        ledgerCallRejected(response, 'schema_invalid');
+        logger.error('[TaxAdvisor] AI response had the wrong shape — using the fallback report');
+        report = this.generateFallbackReport(analysisData);
+        report.raw_ai_response = rawText;
+      } else if (parsedOk && [normalizeTaxReportHeader(report), normalizeTaxAlerts(report)].some(Boolean)) {
+        ledgerCallRejected(response, 'schema_invalid');
+        logger.warn('[TaxAdvisor] AI report had malformed header fields or alert entries — cleaned them');
       }
 
       await this.storeReport(report, analysisData, rawText);
@@ -390,7 +539,7 @@ Please search for current FL and federal tax changes, then provide your analysis
     try {
       const [saved] = await db('tax_advisor_reports').insert({
         report_date: report.report_date || etDateString(),
-        period: report.period || `Week of ${new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' })}`,
+        period: report.period || taxReportPeriodDefault(),
         grade: report.grade || 'N/A',
         executive_summary: report.executive_summary || '',
         financial_snapshot: JSON.stringify(report.financial_snapshot || {}),
@@ -404,24 +553,28 @@ Please search for current FL and federal tax changes, then provide your analysis
       }).returning('*');
 
       // Create alert records for action items
+      // Typed columns get typed values: every report (AI or fallback) reaches
+      // this insert, and one bad row fails it for all alerts.
+      const priority = (v) => (TAX_PRIORITIES.has(v) ? v : 'medium');
+      const text = (v) => (typeof v === 'string' || typeof v === 'number' ? String(v) : null);
       const allAlerts = [
         ...(report.savings_opportunities || []).map(s => ({
-          report_id: saved.id, alert_type: 'savings', priority: s.priority || 'medium',
-          title: s.title, description: s.action,
-          estimated_savings: s.estimated_annual_savings,
-          action_by_date: s.deadline || null,
+          report_id: saved.id, alert_type: 'savings', priority: priority(s.priority),
+          title: s.title, description: text(s.action),
+          estimated_savings: taxAmount(s.estimated_annual_savings),
+          action_by_date: taxDate(s.deadline),
         })),
         ...(report.compliance_alerts || []).map(a => ({
-          report_id: saved.id, alert_type: 'compliance', priority: a.severity || 'medium',
-          title: a.alert, description: a.action,
-          action_by_date: a.deadline || null,
+          report_id: saved.id, alert_type: 'compliance', priority: priority(a.severity),
+          title: a.alert, description: text(a.action),
+          action_by_date: taxDate(a.deadline),
         })),
         ...(report.deduction_gaps || []).map(d => ({
           report_id: saved.id, alert_type: 'deduction', priority: 'medium',
-          title: d.deduction, description: d.how_to_claim,
-          estimated_savings: d.estimated_value,
+          title: d.deduction, description: text(d.how_to_claim),
+          estimated_savings: taxAmount(d.estimated_value),
         })),
-      ];
+      ].filter((alert) => typeof alert.title === 'string' && alert.title.trim() && alert.title.length <= 300);
 
       if (allAlerts.length > 0) {
         await db('tax_advisor_alerts').insert(allAlerts);
@@ -441,7 +594,7 @@ Please search for current FL and federal tax changes, then provide your analysis
     try {
       const savings = (report.savings_opportunities || [])
         .filter(s => s.priority === 'high')
-        .map(s => `• ${s.title}: ~$${s.estimated_annual_savings}/yr`)
+        .map(s => (taxAmount(s.estimated_annual_savings) === null ? `• ${s.title}` : `• ${s.title}: ~$${taxAmount(s.estimated_annual_savings)}/yr`))
         .join('\n');
 
       const alerts = (report.compliance_alerts || [])
@@ -493,3 +646,7 @@ Please search for current FL and federal tax changes, then provide your analysis
 }
 
 module.exports = new TaxAdvisor();
+module.exports.isUsableTaxReport = isUsableTaxReport;
+module.exports.normalizeTaxAlerts = normalizeTaxAlerts;
+module.exports.normalizeTaxReportHeader = normalizeTaxReportHeader;
+module.exports.taxDate = taxDate;

@@ -24,6 +24,20 @@ const OUTREACH_SCHEMA = {
 let TwilioService;
 try { TwilioService = require('../twilio'); } catch { TwilioService = null; }
 
+// dispatchWithFallback validate hook: a blank message would park a
+// pending_approval row that could text the owner nothing actionable; a
+// blank or >255-char strategy fails the varchar(255) outreach_strategy
+// insert (migration 20260401000037) and would abort the nightly loop. The
+// schema doesn't enum-bound `strategy` (it's a short free-text label per the
+// system prompt's own named strategies), so an over-long value is treated as
+// off-contract and the row is rejected rather than silently truncated.
+function invalidOutreachJson(json) {
+  if (!json || typeof json !== 'object') return 'schema_invalid';
+  if (typeof json.message !== 'string' || !json.message.trim()) return 'schema_invalid';
+  if (typeof json.strategy !== 'string' || !json.strategy.trim() || json.strategy.length > 255) return 'schema_invalid';
+  return null;
+}
+
 class RetentionEngine {
 
   async generateRetentionOutreach(customerId) {
@@ -89,6 +103,7 @@ class RetentionEngine {
     // templates were retired 2026-07-06; without a draft there is no outreach
     // copy to propose, so a two-leg miss skips drafting below.
     const res = await dispatchWithFallback(MODELS.TEXT_POLICIES.customerCopy, {
+      laneId: 'retention_drafts',
       maxTokens: 500,
       jsonMode: true,
       jsonSchema: OUTREACH_SCHEMA,
@@ -119,7 +134,7 @@ ${lastServiceNote}
 
 Recent SMS:
 ${recentSMS || 'None'}`,
-    });
+    }, { validate: (result) => invalidOutreachJson(result.json) });
 
     if (!res.ok || !res.json) {
       // No usable draft — skip rather than fall back to the retired

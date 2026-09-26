@@ -1,7 +1,8 @@
 const logger = require('./logger');
 const MODELS = require('../config/models');
-const { dispatch } = require('./llm/call');
+const { dispatch, rejectCall } = require('./llm/call');
 const { stripThinkingBlocks } = require('./llm/deep');
+const { ledgerCall, ledgerCallRejected } = require('./llm-dispatch-metrics');
 
 // Structured-output contract for the live (dispatcher) leg. The direct-SDK
 // Claude fallback below has no schema path, so the prompt keeps its field
@@ -26,6 +27,25 @@ const TRIAGE_SCHEMA = {
     suggestedReply: { type: 'string', description: 'A warm, personalized SMS reply under 300 characters signed "Adam, Waves Pest Control"' },
   },
 };
+
+// TRIAGE_SCHEMA's own types — the Claude fallback is not schema-constrained
+// the way the structured-output leg is, so its answer is checked here.
+const strOrNull = (v) => v === null || typeof v === 'string';
+// serviceInterest and suggestedReply are the answer: mapTriage turns a blank
+// one into null, leaving the lead with no classification or reply while the
+// row read success (Codex r16 on #4884) — so they must be non-blank.
+const nonBlank = (v) => typeof v === 'string' && v.trim() !== '';
+function triageMatchesSchema(t) {
+  if (!t || typeof t !== 'object' || Array.isArray(t)) return false;
+  const x = t.extractedData;
+  // serviceInterest is written to leads.service_interest varchar(255); a
+  // longer one failed the async lead update after acceptance (Codex r20).
+  return nonBlank(t.serviceInterest) && t.serviceInterest.trim().length <= 255
+    && TRIAGE_SCHEMA.properties.urgency.enum.includes(t.urgency)
+    && nonBlank(t.suggestedReply)
+    && !!x && typeof x === 'object' && !Array.isArray(x)
+    && strOrNull(x.pestType) && strOrNull(x.location) && strOrNull(x.propertyType);
+}
 
 function mapTriage(parsed) {
   return {
@@ -68,8 +88,14 @@ Return ONLY valid JSON, no markdown.`;
 
   // Live model — GPT-5.5. On any miss, fall through to Claude below (never a gap).
   {
-    const r = await dispatch(MODELS.ROUTES.leadClassify, { text: prompt, jsonMode: true, jsonSchema: TRIAGE_SCHEMA, maxTokens: 300 });
-    if (r.ok && r.json) return mapTriage(r.json);
+    const r = await dispatch(MODELS.ROUTES.leadClassify, { laneId: 'lead_triage', text: prompt, jsonMode: true, jsonSchema: TRIAGE_SCHEMA, maxTokens: 300 });
+    if (r.ok && r.json) {
+      // The structured-output schema cannot forbid blank strings, so the
+      // primary gets the same check as the fallback; a miss fails its row
+      // and Claude gets a turn.
+      if (triageMatchesSchema(r.json)) return mapTriage(r.json);
+      rejectCall(r, 'schema_invalid');
+    }
   }
 
   // Fallback — Claude (FLAGSHIP).
@@ -78,17 +104,27 @@ Return ONLY valid JSON, no markdown.`;
   try {
     const Anthropic = require('@anthropic-ai/sdk');
     const client = new Anthropic({ apiKey });
-    const response = await client.messages.create({
+    const response = await ledgerCall('anthropic', MODELS.FAST, () => client.messages.create({
       model: MODELS.FAST,
       max_tokens: 300,
       messages: [{ role: 'user', content: prompt }],
-    });
+    }), { laneId: 'lead_triage' });
     // Thinking-block guard: FAST resolves to a model that can lead with a
     // thinking block (no .text). A blind content[0] read returned '', and
     // JSON.parse('') threw straight into the catch below — AI lead triage
     // silently returned null on every lead. See event-ingestion.js.
     const text = stripThinkingBlocks(response).content?.[0]?.text || '';
-    return mapTriage(JSON.parse(text));
+    let triage;
+    try { triage = JSON.parse(text); } catch (err) { ledgerCallRejected(response, 'invalid_json'); throw err; }
+    // An off-schema answer (e.g. urgency "critical") is a failed triage, not
+    // one to map: its values used to be written onto the lead anyway while
+    // only the ledger row said it failed (review on #4884). Same null the
+    // caller already handles for any AI failure.
+    if (!triageMatchesSchema(triage)) {
+      ledgerCallRejected(response, 'schema_invalid');
+      return null;
+    }
+    return mapTriage(triage);
   } catch (err) {
     logger.error(`[lead-triage] AI triage failed: ${err.message}`);
     return null;

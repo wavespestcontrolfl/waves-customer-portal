@@ -127,3 +127,108 @@ describe('llm call-ledger coverage', () => {
     });
   });
 });
+
+// Every `<x>.messages.create(...)` / `<x>.messages.stream(...)` call in server
+// code runs inside ledgerCall, or is listed here with the count and the reason
+// its lane stays `unrecordable`. Structural on both axes (Codex on #4884): not
+// import-based, so a call through an injected client (llm/deep.js's shape) is
+// covered and the one non-Anthropic client with the same method name (Twilio)
+// is listed explicitly; and parsed, not line-matched, so a call split across
+// lines (`client.messages` / `.create(`) is still seen.
+// Two-sided like UNLABELLED_LANES: a file whose unwrapped count drops below
+// its entry fails (shrink the entry), and a new unwrapped call fails (wrap it:
+// `await ledgerCall('anthropic', model, () => client.messages.create({...}),
+// { laneId: '<lane>' })`, then set the lane's policy to ledger: 'call').
+const KNOWN_UNWRAPPED = {
+  'services/llm/call.js': [2, 'the adapter itself — records each leg through recordCall'],
+  'services/voice-agent/relay-conversation.js': [1, 'voice_relay streams; ledgerCall takes a resolved Message'],
+  'services/collections/outbound-voice/collections-conversation.js': [1, 'voice_relay_collections streams'],
+  'services/lawn-assessment.js': [1, 'lawn_assess: its Gemini primary is a raw fetch, unrecorded'],
+  'services/pest-identification.js': [1, 'pest_id: Gemini primary is a raw fetch'],
+  'services/tree-shrub-assessment.js': [1, 'tree_shrub: Gemini primary is a raw fetch'],
+  'services/treatment-zone-suggest.js': [1, 'treatment_zone: Gemini primary is a raw fetch'],
+  'services/turf-height-ocr.js': [1, 'turf_ocr: Gemini primary is a raw fetch'],
+  'services/property-lookup/ai-property-lookup.js': [2, 'property_trio: OpenAI and Gemini legs are raw fetches'],
+  'services/seo/llm-mention-prober.js': [1, 'mentions_prober: a measurement probe (search), recorded by design as unrecordable'],
+  'services/twilio.js': [1, "Twilio's SMS client — its messages.create is Twilio's API, not Anthropic"],
+};
+
+// A declared dependency (package.json), so the guard never rides a transitive one.
+const acorn = require('acorn');
+
+// Direct SDK calls in `src` that no enclosing ledgerCall(...) wraps.
+function unwrappedSdkCalls(src) {
+  const ast = acorn.parse(src, { ecmaVersion: 'latest', sourceType: 'script', allowReturnOutsideFunction: true, allowHashBang: true });
+  let count = 0;
+  const isNamed = (node, name) => node && !node.computed && node.property && node.property.name === name;
+  (function walk(node, insideLedger) {
+    if (!node || typeof node.type !== 'string') return;
+    if (node.type === 'CallExpression') {
+      const callee = node.callee;
+      const sdk = callee.type === 'MemberExpression' && (isNamed(callee, 'create') || isNamed(callee, 'stream'))
+        && callee.object.type === 'MemberExpression' && isNamed(callee.object, 'messages');
+      if (sdk && !insideLedger) count += 1;
+      if ((callee.type === 'Identifier' && callee.name === 'ledgerCall') || (callee.type === 'MemberExpression' && isNamed(callee, 'ledgerCall'))) {
+        // Only a function argument defers the request into the wrapper; an
+        // eager `ledgerCall(p, m, client.messages.create(req))` has already run
+        // the request, so it stays unwrapped (Codex r4 on #4884).
+        walk(callee, insideLedger);
+        node.arguments.forEach((arg) => walk(arg, insideLedger || arg.type === 'ArrowFunctionExpression' || arg.type === 'FunctionExpression'));
+        return;
+      }
+    }
+    for (const key of Object.keys(node)) {
+      const value = node[key];
+      if (Array.isArray(value)) value.forEach((child) => walk(child, insideLedger));
+      else if (value && typeof value.type === 'string') walk(value, insideLedger);
+    }
+  })(ast, false);
+  return count;
+}
+
+function jsFiles(dir) {
+  return fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) return entry.name === 'tests' || entry.name === 'node_modules' ? [] : jsFiles(full);
+    return entry.name.endsWith('.js') ? [full] : [];
+  });
+}
+
+describe('direct Anthropic SDK calls are on the call ledger', () => {
+  const counts = {};
+  const unparsed = [];
+  for (const file of jsFiles(SERVER_DIR)) {
+    const src = read(file);
+    // Cheap prefilter; whitespace-tolerant so a line break cannot hide a call.
+    if (!/\bmessages\s*\??\.\s*(create|stream)\b/.test(src)) continue;
+    let unwrapped;
+    try { unwrapped = unwrappedSdkCalls(src); } catch (err) { unparsed.push(`${path.relative(SERVER_DIR, file)}: ${err.message}`); continue; }
+    if (unwrapped) counts[path.relative(SERVER_DIR, file)] = unwrapped;
+  }
+
+  test('the scan is structural: a call split across lines counts, one inside ledgerCall does not', () => {
+    expect(unwrappedSdkCalls('client.messages\n  .create({ model: m });')).toBe(1);
+    expect(unwrappedSdkCalls('client.messages?.stream({ model: m });')).toBe(1);
+    expect(unwrappedSdkCalls("ledgerCall('anthropic', m, () => client.messages\n  .create({ model: m }), { laneId: 'x' });")).toBe(0);
+    expect(unwrappedSdkCalls("metrics.ledgerCall('anthropic', m, () => client.messages.create(req));")).toBe(0);
+    expect(unwrappedSdkCalls("ledgerCall('anthropic', m, async function () { return client.messages.create(req); });")).toBe(0);
+    // Eager: the request runs before ledgerCall exists — still unwrapped.
+    expect(unwrappedSdkCalls("ledgerCall('anthropic', m, client.messages.create(req));")).toBe(1);
+  });
+
+  test('every candidate file parses', () => {
+    expect(unparsed).toEqual([]);
+  });
+
+  test('no unlisted file makes an unwrapped call', () => {
+    const unlisted = Object.keys(counts).filter((file) => !KNOWN_UNWRAPPED[file]);
+    expect(unlisted).toEqual([]);
+  });
+
+  test('each listed file has exactly its recorded number of unwrapped calls', () => {
+    const drift = Object.entries(KNOWN_UNWRAPPED)
+      .filter(([file, [expected]]) => (counts[file] || 0) !== expected)
+      .map(([file, [expected]]) => `${file}: expected ${expected}, found ${counts[file] || 0}`);
+    expect(drift).toEqual([]);
+  });
+});

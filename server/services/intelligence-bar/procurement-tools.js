@@ -17,6 +17,7 @@ const logger = require('../logger');
 const MODELS = require('../../config/models');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('../llm/anthropic-wire');
 const inventory = require('../inventory-operations');
+const { ledgerCall, ledgerCallRejected } = require('../llm-dispatch-metrics');
 
 const PROCUREMENT_TOOLS = [
   {
@@ -543,30 +544,33 @@ VENDORS: ${vendorList}
 Search vendor websites for exact prices. Return JSON only:
 {"product":"${product.name}","results":[{"vendor":"Name","price":99.99,"quantity":"32 oz","url":"https://...","pricePerOz":3.12}],"cheapest":"Vendor","summary":"Brief findings"}`;
 
-    const msg = await anthropic.messages.create({
+    const msg = await ledgerCall('anthropic', MODELS.FLAGSHIP, () => anthropic.messages.create({
       model: MODELS.FLAGSHIP,
       ...anthropicEffortConfig(MODELS.FLAGSHIP),
       max_tokens: anthropicMaxTokens(MODELS.FLAGSHIP, 2000),
       tools: [{ type: 'web_search_20250305', name: 'web_search' }],
       messages: [{ role: 'user', content: prompt }],
-    });
+    }), { laneId: 'ib_tools' });
 
-    // Handle tool use loop
+    // Handle tool use loop. Every fetched turn's text is read before the cap
+    // is checked — the old `while (loops < 8)` exited right after fetching
+    // the 9th turn, so a final answer arriving there was never read and the
+    // valid call was failed as invalid_json (Codex r15 on #4884).
     let currentMsg = msg;
     let responseText = '';
     let loops = 0;
-    while (loops < 8) {
+    for (;;) {
       for (const block of currentMsg.content) {
         if (block.type === 'text') responseText += block.text;
       }
-      if (currentMsg.stop_reason !== 'tool_use') break;
+      if (currentMsg.stop_reason !== 'tool_use' || loops >= 8) break;
       loops++;
       const toolUseBlocks = currentMsg.content.filter(b => b.type === 'tool_use');
       const toolResults = toolUseBlocks.map(tb => ({
         type: 'tool_result', tool_use_id: tb.id,
         content: 'Search completed. Provide final JSON response.',
       }));
-      currentMsg = await anthropic.messages.create({
+      currentMsg = await ledgerCall('anthropic', MODELS.FLAGSHIP, () => anthropic.messages.create({
         model: MODELS.FLAGSHIP,
         ...anthropicEffortConfig(MODELS.FLAGSHIP),
         max_tokens: anthropicMaxTokens(MODELS.FLAGSHIP, 2000),
@@ -576,8 +580,12 @@ Search vendor websites for exact prices. Return JSON only:
           { role: 'assistant', content: currentMsg.content },
           { role: 'user', content: toolResults },
         ],
-      });
+      }), { laneId: 'ib_tools' });
     }
+
+    // Still asking for tools at the cap: the model never gave its answer.
+    const exhausted = currentMsg.stop_reason === 'tool_use';
+    if (exhausted) ledgerCallRejected(currentMsg, 'tool_loop_exhausted');
 
     // Parse JSON
     let parsed;
@@ -586,38 +594,44 @@ Search vendor websites for exact prices. Return JSON only:
       const jsonMatch = clean.match(/\{[\s\S]*\}/);
       parsed = JSON.parse(jsonMatch ? jsonMatch[0] : clean);
     } catch {
+      if (!exhausted) ledgerCallRejected(currentMsg, 'invalid_json');
       return { success: true, raw_response: responseText, note: 'AI returned non-JSON. See raw_response.' };
     }
 
+    // Only usable results are queued or handed back to the Intelligence Bar
+    // (which would otherwise present an invented vendor's price); a missing
+    // or partially unusable `results` fails the row (Codex r8, r14, r15 on
+    // #4884). readPriceLookupReply is admin-inventory.js's ai-price-lookup
+    // route's own read of the identical reply shape; shared, not duplicated.
+    const { readPriceLookupReply } = require('../../routes/admin-inventory');
+    const reply = readPriceLookupReply(parsed, vendors);
+    if (!exhausted && !reply.complete) ledgerCallRejected(currentMsg, 'schema_invalid');
+
     // Create approval queue entries
     let approvalsCreated = 0;
-    if (parsed.results && parsed.results.length > 0) {
-      for (const result of parsed.results) {
-        const vendor = vendors.find(v => v.name.toLowerCase() === result.vendor?.toLowerCase());
-        if (!vendor || !result.price) continue;
-        try {
-          await db('price_approvals').insert({
-            product_id: product.id, vendor_id: vendor.id,
-            new_price: result.price, new_quantity: result.quantity || product.container_size,
-            source_url: result.url || null, status: 'pending',
-          });
-          approvalsCreated++;
-        } catch (insertErr) {
-          if (!insertErr.message?.includes('duplicate') && !insertErr.message?.includes('unique')) {
-            logger.warn(`[intelligence-bar:procurement] Price approval insert failed: ${insertErr.message}`);
-          }
+    for (const result of reply.usable) {
+      try {
+        await db('price_approvals').insert({
+          product_id: product.id, vendor_id: result.vendor.id,
+          new_price: result.price, new_quantity: result.quantity || product.container_size,
+          source_url: result.url, status: 'pending',
+        });
+        approvalsCreated++;
+      } catch (insertErr) {
+        if (!insertErr.message?.includes('duplicate') && !insertErr.message?.includes('unique')) {
+          logger.warn(`[intelligence-bar:procurement] Price approval insert failed: ${insertErr.message}`);
         }
       }
     }
 
-    logger.info(`[intelligence-bar:procurement] Price lookup for ${product.name}: ${parsed.results?.length || 0} results, ${approvalsCreated} approvals created`);
+    logger.info(`[intelligence-bar:procurement] Price lookup for ${product.name}: ${reply.results.length} results, ${approvalsCreated} approvals created`);
 
     return {
       success: true,
       product: product.name,
-      results: parsed.results || [],
-      cheapest: parsed.cheapest,
-      summary: parsed.summary,
+      results: reply.results,
+      cheapest: reply.cheapest,
+      summary: reply.summary,
       approvals_created: approvalsCreated,
       note: approvalsCreated > 0 ? `${approvalsCreated} prices sent to approval queue` : 'No prices found to queue',
     };

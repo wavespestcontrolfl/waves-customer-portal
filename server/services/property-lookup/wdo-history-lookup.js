@@ -14,6 +14,7 @@
 
 const logger = require('../logger');
 const MODELS = require('../../config/models');
+const { ledgerCall, ledgerCallRejected } = require('../llm-dispatch-metrics');
 
 const DEFAULT_TIMEOUT_MS = 60000;
 const DEFAULT_MAX_SEARCHES = 8;
@@ -84,11 +85,51 @@ function isHttpUrl(value) {
   }
 }
 
+// The two verdict fields every answer must carry. Without them (e.g. `{}`)
+// normalizeHistory would synthesize an all-unknown result that gets cached as
+// a resolved lookup — that is a failed answer, not "nothing found".
+function hasHistoryVerdict(parsed) {
+  return !!parsed
+    && ['yes', 'no', 'unknown'].includes(String(parsed.previousTreatment || '').trim().toLowerCase())
+    && ['high', 'medium', 'low'].includes(String(parsed.confidence || '').trim().toLowerCase());
+}
+
+// Nested evidence is copied into the FDACS-13645 Section 4 fields, so it must
+// be text as given: str() used to turn an object into "[object Object]" on the
+// legal form, and any number > 1800 passed as a roof permit year (Codex r21 on
+// #4884). A present off-contract value fails the lookup (retryable).
+const isEvidenceText = (v) => v === undefined || v === null || typeof v === 'string'
+  || (typeof v === 'number' && Number.isFinite(v));
+const isPlainObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+function permitYear(value) {
+  if (value === undefined || value === null || value === '') return null;
+  const year = typeof value === 'number' || typeof value === 'string' ? Number(value) : NaN;
+  return Number.isInteger(year) && year >= 1900 && year <= new Date().getUTCFullYear() + 1 ? year : undefined;
+}
+function nestedEvidenceValid(parsed) {
+  if (!isEvidenceText(parsed.treatmentNotes)) return false;
+  if (parsed.fumigation != null && !(isPlainObject(parsed.fumigation)
+    && ['date', 'fumigant', 'company', 'notes'].every((k) => isEvidenceText(parsed.fumigation[k])))) return false;
+  if (parsed.permits != null && !(Array.isArray(parsed.permits)
+    && parsed.permits.every((p) => isPlainObject(p) && ['type', 'date', 'description'].every((k) => isEvidenceText(p[k]))))) return false;
+  return permitYear(parsed.roofPermitYear) !== undefined;
+}
+
 function normalizeHistory(parsed) {
-  if (!parsed) return null;
-  const pt = String(parsed.previousTreatment || '').toLowerCase();
-  const conf = String(parsed.confidence || '').toLowerCase();
+  if (!hasHistoryVerdict(parsed)) return null;
+  if (!nestedEvidenceValid(parsed)) return null;
+  const pt = String(parsed.previousTreatment || '').trim().toLowerCase();
+  const conf = String(parsed.confidence || '').trim().toLowerCase();
   const fum = parsed.fumigation && typeof parsed.fumigation === 'object' ? parsed.fumigation : null;
+  const sources = Array.isArray(parsed.sources)
+    ? parsed.sources.map((s) => str(s, 300)).filter(isHttpUrl).slice(0, 8)
+    : [];
+  // The prompt allows "yes" ONLY with a concrete source and "no" only when a
+  // source affirmatively shows no prior treatment; an uncited verdict would be
+  // cached and pre-fill the legal FDACS-13645 filing, so it is a failed
+  // lookup (retryable), not a verdict. "unknown" is the evidence-free result
+  // (Codex r20 on #4884).
+  if ((pt === 'yes' || pt === 'no') && !sources.length) return null;
   return {
     previousTreatment: ['yes', 'no'].includes(pt) ? pt : 'unknown',
     treatmentNotes: str(parsed.treatmentNotes, 1000),
@@ -100,9 +141,7 @@ function normalizeHistory(parsed) {
         notes: str(fum.notes, 300),
       }
       : null,
-    roofPermitYear: Number.isFinite(Number(parsed.roofPermitYear)) && Number(parsed.roofPermitYear) > 1800
-      ? Number(parsed.roofPermitYear)
-      : null,
+    roofPermitYear: permitYear(parsed.roofPermitYear),
     permits: Array.isArray(parsed.permits)
       ? parsed.permits.slice(0, 10).map((p) => ({
         type: str(p?.type, 60),
@@ -110,9 +149,7 @@ function normalizeHistory(parsed) {
         description: str(p?.description, 200),
       })).filter((p) => p.type || p.description)
       : [],
-    sources: Array.isArray(parsed.sources)
-      ? parsed.sources.map((s) => str(s, 300)).filter(isHttpUrl).slice(0, 8)
-      : [],
+    sources,
     confidence: ['high', 'medium', 'low'].includes(conf) ? conf : 'low',
   };
 }
@@ -142,20 +179,27 @@ async function lookupWdoHistory(address, options = {}) {
     // so the default of 2 could fan one lookup out to 3x the searches + wall-clock
     // on a transient 429/5xx. The single attempt already degrades to null on error.
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, maxRetries: 0 });
-    const resp = await client.messages.create({
+    const resp = await ledgerCall('anthropic', MODELS.WORKHORSE, () => client.messages.create({
       model: MODELS.WORKHORSE,
       max_tokens: 1500,
       tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: maxSearches }],
       messages: [{ role: 'user', content: buildHistoryPrompt(address) }],
-    }, { timeout: timeoutMs });
+    }, { timeout: timeoutMs }), { laneId: 'wdo_history' });
 
     const textBlock = (resp.content || []).filter((b) => b.type === 'text').pop();
     if (!textBlock?.text) {
+      ledgerCallRejected(resp, 'empty_text');
       throw new Error('no text block in lookup response');
     }
-    const normalized = normalizeHistory(parseJson(textBlock.text));
-    if (!normalized) {
+    const parsed = parseJson(textBlock.text);
+    if (!parsed) {
+      ledgerCallRejected(resp, 'invalid_json');
       throw new Error('unparseable lookup response');
+    }
+    const normalized = normalizeHistory(parsed);
+    if (!normalized) {
+      ledgerCallRejected(resp, 'schema_invalid');
+      throw new Error('lookup response broke its contract (missing verdict, or "yes" without a source)');
     }
     logger.info('[wdo-history] resolved', {
       elapsedMs: Date.now() - t0,

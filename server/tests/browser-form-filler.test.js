@@ -504,6 +504,99 @@ describe('fillCitationForm', () => {
   test('only fill/select/check/submit are allowed actions (no click/upload)', () => {
     expect([..._internals.ALLOWED_ACTIONS].sort()).toEqual(['check', 'fill', 'select', 'submit']);
   });
+
+  // Review on #4884: an object/array/boolean `value` on a fill/select action would
+  // type "[object Object]" / "true" into a live directory form (the consumer does
+  // page.fill(sel, String(act.value ?? '')) / selectOption(...)) — fail closed before
+  // touching the page.
+  test.each([
+    ['fill', { foo: 'bar' }],
+    ['fill', ['a']],
+    ['fill', true],
+    ['select', { foo: 'bar' }],
+    ['select', ['a']],
+  ])('P3 (#4884): a %s action with a non-text value (%p) → field_action_failed, never dispatched to the page', async (action, value) => {
+    const log = [];
+    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
+      launchBrowser: async () => fakeBrowser(log),
+      anthropic: fakeAnthropic({ form_present: true, blocked: null, actions: [{ action, selector: '#f', value }, { action: 'submit', selector: '#go' }] }, { success: true }),
+    }));
+    expect(r.outcome).toBe('failed');
+    expect(r.errorCode).toBe('field_action_failed');
+    expect(log.find((a) => a[0] === 'click')).toBeUndefined(); // never submitted
+    expect(log.find((a) => a[0] === action)).toBeUndefined(); // never dispatched to the page
+  });
+
+  // "NEVER invent values": an empty or absent value is the model leaving a field it
+  // has no data for — it types nothing, as it always did; a number types its digits.
+  test.each([
+    ['an empty string', ''],
+    ['an absent value', undefined],
+    ['a numeric ZIP', 34202],
+  ])('P3 (#4884): a fill with %s is still dispatched and the form is submitted', async (_label, value) => {
+    const log = [];
+    const act = value === undefined ? { action: 'fill', selector: '#f' } : { action: 'fill', selector: '#f', value };
+    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
+      launchBrowser: async () => fakeBrowser(log),
+      anthropic: fakeAnthropic({ form_present: true, blocked: null, actions: [act, { action: 'submit', selector: '#go' }] }, { success: true }),
+    }));
+    expect(r.errorCode).not.toBe('field_action_failed');
+    expect(log.find((a) => a[0] === 'fill')).toEqual(['fill', '#f', value === undefined ? '' : String(value)]);
+  });
+
+  // Codex r18 on #4884: a detected form with an empty plan used to read as
+  // skipped/no_form, which the signup runner turns into a permanent 'skip'.
+  test('P3 (#4884): form_present with no actions is a retryable failure, not skipped/no_form', async () => {
+    const log = [];
+    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
+      launchBrowser: async () => fakeBrowser(log),
+      anthropic: fakeAnthropic({ form_present: true, blocked: null, actions: [] }, {}),
+    }));
+    expect(r.outcome).toBe('failed');
+    expect(r.errorCode).toBe('empty_plan');
+    expect(log.find((a) => a[0] === 'click')).toBeUndefined();
+  });
+
+  test('P3 (#4884): form_present:false with no actions is still skipped/no_form', async () => {
+    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
+      launchBrowser: async () => fakeBrowser([]),
+      anthropic: fakeAnthropic({ form_present: false, blocked: null, actions: [] }, {}),
+    }));
+    expect(r).toMatchObject({ outcome: 'skipped', errorCode: 'no_form' });
+  });
+
+  test('P3 (#4884): a check action needs no value (unaffected by the fill/select guard)', async () => {
+    const log = [];
+    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
+      launchBrowser: async () => fakeBrowser(log),
+      anthropic: fakeAnthropic({ form_present: true, blocked: null, actions: [{ action: 'check', selector: '#agree' }, { action: 'submit', selector: '#go' }] }, { success: true }),
+    }));
+    expect(log).toContainEqual(['check', '#agree']);
+    expect(r.outcome).not.toBe('failed');
+  });
+
+  test('P3 (#4884): a non-string plan.notes on a blocked verdict is dropped, never surfaced as "[object Object]"', async () => {
+    const log = [];
+    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
+      launchBrowser: async () => fakeBrowser(log),
+      anthropic: fakeAnthropic({ form_present: true, blocked: 'captcha', actions: [], notes: { weird: true } }, {}),
+    }));
+    expect(r.outcome).toBe('blocked_captcha');
+    expect(r.notes).toBeUndefined();
+  });
+
+  test('P3 (#4884): a non-string verify.notes on a rejection is dropped, never surfaced as "[object Object]"', async () => {
+    const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
+      launchBrowser: async () => fakeBrowser([], { submitReq: { method: 'POST', url: 'https://x.com/submit' } }),
+      anthropic: fakeAnthropic(
+        { form_present: true, blocked: null, actions: [{ action: 'fill', selector: '#n', value: 'W' }, { action: 'submit', selector: '#go' }] },
+        { success: false, pending: false, rejected: true, live_url: null, notes: { weird: true } },
+      ),
+    }));
+    expect(r.outcome).toBe('failed');
+    expect(r.errorCode).toBe('submit_rejected');
+    expect(r.notes).toBe('directory rejected the submission');
+  });
 });
 
 describe('requestAllowed (egress lock — EXACTLY the pinned host set)', () => {
@@ -597,4 +690,20 @@ test('a delayed JavaScript submit POST remains authorized after DOM load is alre
   expect(requestLog).toEqual(['continued']);
   expect(actions.filter(a => a[0] === 'click')).toHaveLength(1);
   expect(result).toMatchObject({ outcome: 'placed', pending: true });
+});
+
+// Codex r21 on #4884: Playwright takes a selector string.
+describe('planShapeInvalid — selectors', () => {
+  const { planShapeInvalid } = require('../services/seo/browser-form-filler')._internals;
+  const plan = (actions) => ({ form_present: true, blocked: null, actions });
+  test.each([
+    ['an object submit selector', [{ action: 'fill', selector: '#n', value: 'W' }, { action: 'submit', selector: {} }]],
+    ['an object field selector', [{ action: 'fill', selector: { css: '#n' }, value: 'W' }, { action: 'submit', selector: '#go' }]],
+    ['a blank selector', [{ action: 'check', selector: '  ' }, { action: 'submit', selector: '#go' }]],
+  ])('%s makes the plan invalid', (_label, actions) => {
+    expect(planShapeInvalid(plan(actions))).toBe(true);
+  });
+  test('string selectors are a valid plan', () => {
+    expect(planShapeInvalid(plan([{ action: 'fill', selector: '#n', value: 'W' }, { action: 'submit', selector: '#go' }]))).toBe(false);
+  });
 });

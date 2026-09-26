@@ -10,6 +10,7 @@ jest.mock('../services/llm/call', () => ({ dispatchWithFallback: (...args) => mo
 const MODELS = require('../config/models');
 const { describeHeroForAlt, sanitizeAlt } = require('../services/content/hero-alt-vision');
 
+
 const PNG_BUFFER = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
   'base64',
@@ -221,6 +222,26 @@ describe('screenGeneratedImage: uniform logo (owner directive 2026-09-24 — req
     expect(await screenGeneratedImage({ buffer: PNG_BUFFER })).toMatchObject({ ok: true, checked: true });
   });
 
+  // Codex r10-class gap on #4884: each ask() carries a validate hook, so an
+  // answer that parses but is the wrong shape fails that leg's ledger row
+  // inside the chain (and lets the next provider try) instead of being
+  // recorded as a successful check and then discarded fail-open.
+  test('the screen validate hook rejects an unusable verdict and accepts clean or failing ones', async () => {
+    const validateFor = async (opts) => {
+      mockDispatch.mockClear();
+      mockDispatch.mockResolvedValue(answer({ readable_text: [], logos_or_brand_marks: [], forbidden_scenes: [], notes: '' }));
+      await screenGeneratedImage({ buffer: PNG_BUFFER, ...opts });
+      return mockDispatch.mock.calls[0][2].validate;
+    };
+    const withLogo = await validateFor({ allowUniformLogo: true });
+    // the logo allowance requires technicians[]; a bare verdict is unusable
+    expect(withLogo(answer({ readable_text: [], logos_or_brand_marks: [], forbidden_scenes: [], notes: '' }))).toBe('invalid_output');
+    expect(withLogo({ ok: true, text: 'not json' })).toBe('invalid_output');
+    const plain = await validateFor({});
+    expect(plain(answer({ readable_text: [], logos_or_brand_marks: [], forbidden_scenes: [], notes: '' }))).toBeNull();
+    expect(plain(answer({ readable_text: ['ORKIN'], logos_or_brand_marks: ['Orkin logo'], forbidden_scenes: [], notes: '' }))).toBeNull();
+  });
+
   test('without the allowance the uniform logo is still a violation (a logo-free generation must not carry one)', async () => {
     mockDispatch.mockResolvedValue(answer({ readable_text: ['WAVES'], logos_or_brand_marks: ['Waves logo on cap'], forbidden_scenes: [], notes: '' }));
     const r = await screenGeneratedImage({ buffer: PNG_BUFFER });
@@ -427,6 +448,21 @@ describe('screenGeneratedImage: van wrap (owner ruling 2026-09-24 — wrap marks
     for (const vanAnswer of [{}, { van: van() }, { van_count: 1.5, van: van() }, { van_count: -1, van: van() }, { van_count: 0, van: van() }, { van_count: 2, van: null }, { van: { wrapped: true } }, { van: van({ body: 'sprinter' }) }, { van: van({ body: undefined }) }, { van: van({ phone_numbers: '941-241-2459' }) }, { van: van({ web_addresses: undefined }) }, { van: 'none' }]) {
       expect(await screen({ vanAnswer })).toMatchObject({ ok: true, checked: false });
     }
+  });
+
+  // Codex r10-class gap on #4884: the van leg has its own validate hook, so
+  // an unusable van answer fails the van leg's ledger row specifically.
+  test('the van validate hook rejects an unusable van answer and accepts any usable verdict', async () => {
+    await withVan({});
+    const vanCall = mockDispatch.mock.calls.find(([, req]) => isVanQuestion(req));
+    const mainCall = mockDispatch.mock.calls.find(([, req]) => !isVanQuestion(req));
+    const validateVan = vanCall[2].validate;
+    expect(validateVan(answer({ van_count: 1.5, van: van() }))).toBe('invalid_output');
+    expect(validateVan(answer({}))).toBe('invalid_output');
+    expect(validateVan(answer({ van_count: 1, van: van({ body: 'mercedes_sprinter' }) }))).toBeNull();
+    expect(validateVan(answer({ van_count: 1, van: van() }))).toBeNull();
+    // the hooks are per leg: the main screen's does not judge van answers
+    expect(mainCall[2].validate).not.toBe(validateVan);
   });
 
   test('either dispatch failing fails the screen open', async () => {

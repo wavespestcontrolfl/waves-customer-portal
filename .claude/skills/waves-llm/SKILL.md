@@ -61,7 +61,12 @@ it alone everywhere else; `anthropicEffortConfig(model)` spreads the
 models that accept every effort level (Opus 4.7+, Sonnet 5+, Fable, Mythos).
 The adapter and the DEEP helper apply both; **a new direct SDK call on an Opus
 tier must too** (`max_tokens: anthropicMaxTokens(MODELS.X, n)` plus
-`...anthropicEffortConfig(MODELS.X)`). `thinking: { type: 'disabled' }` and
+`...anthropicEffortConfig(MODELS.X)`), and it runs inside the call ledger:
+`await ledgerCall('anthropic', MODELS.X, () => client.messages.create({...}),
+{ laneId: '<switchboard lane>' })` with the lane's policy at `ledger: 'call'`.
+`tests/llm-call-ledger-coverage.test.js` fails on an unwrapped direct call
+outside its short, counted list of known exceptions (streaming voice, and lanes
+whose Gemini / OpenAI legs are still raw fetches). `thinking: { type: 'disabled' }` and
 forced `tool_choice` any/tool are 400s on 5.5 — only the two VOICE lanes send
 the former (VOICE is Sonnet) and nothing sends the latter. Flip order in the
 registry header.

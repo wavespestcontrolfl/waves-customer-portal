@@ -43,6 +43,24 @@ describe('parseDraft', () => {
     expect(parseDraft('no json at all')).toBeNull();
     expect(parseDraft('{"subject":"S"}')).toBeNull(); // missing body
   });
+
+  // Codex r13 on #4884: "   " passed the old truthiness check and parked an
+  // empty draft as 'drafted'; numbers/objects were String()-coerced into a
+  // meaningless one. Both legs read parseDraft, so both now reject these.
+  test.each([
+    ['blank subject and body', { subject: '   ', body: '   ' }],
+    ['blank body', { subject: 'Quick idea', body: '\n\t ' }],
+    ['numeric subject', { subject: 42, body: 'Body' }],
+    ['object body', { subject: 'Quick idea', body: { text: 'Body' } }],
+    ['array body', { subject: 'Quick idea', body: ['Body'] }],
+  ])('%s is not a usable draft', (_label, draft) => {
+    expect(parseDraft(JSON.stringify(draft))).toBeNull();
+  });
+
+  test('surrounding whitespace is trimmed from a real draft', () => {
+    const text = JSON.stringify({ subject: '  Quick idea ', body: '\n Hello there \n' });
+    expect(parseDraft(text)).toEqual({ subject: 'Quick idea', body: 'Hello there' });
+  });
 });
 
 describe('pickLocation', () => {

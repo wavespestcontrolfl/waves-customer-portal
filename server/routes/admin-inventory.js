@@ -73,6 +73,7 @@ const labelExtractLimiter = require('express-rate-limit')({
   keyGenerator: (req) => String(req.technicianId),
   message: { error: 'Too many label reads. Try again in ten minutes.' },
 });
+const { ledgerCall, ledgerCallRejected } = require('../services/llm-dispatch-metrics');
 router.get('/label-pipeline', (req, res) => res.json({ enabled: gateEnvValue('GATE_LABEL_PIPELINE') }));
 router.use('/:id/label-review', (req, res, next) => {
   if (!gateEnvValue('GATE_LABEL_PIPELINE')) return res.status(404).json({ enabled: false, error: 'Label pipeline is unavailable.' });
@@ -1760,6 +1761,40 @@ function buildAutoMapRow({ product, proposal, vendorId, vendorName, connectionId
   return { matched: true, row };
 }
 
+// A proposal the route can act on: an object for a product in this batch with
+// a boolean `found` — and, when found, an identifier (vendor SKU or product
+// URL) buildAutoMapRow can map. found:true with neither is contradictory, not
+// a "no match" decision, so it must not be persisted as one.
+function isUsableAutoMapProposal(m, requestedIds) {
+  if (!m || typeof m !== 'object' || Array.isArray(m)) return false;
+  if (!requestedIds.has(String(m.productId))) return false;
+  // Every other field the route writes must be on-contract when present:
+  // `confidence: "high"` was stored as the 0.50 default and `-1` failed
+  // applyMappingRow after the leg was accepted; an object name/unit/notes
+  // was stored as "[object Object]" (review on #4884).
+  const textOrAbsent = (v) => v == null || typeof v === 'string' || typeof v === 'number';
+  if (!['notes', 'vendorProductName', 'packageSizeUnit', 'purchaseUom', 'packageSizeValue'].every((k) => textOrAbsent(m[k]))) return false;
+  // distributor_product_map limits: distributor_sku varchar(100), source_url
+  // varchar(700), package_size_unit / purchase_uom varchar(30),
+  // package_size_value decimal(12,4) — an oversized value failed the whole
+  // auto-map request after earlier products were written (Codex r20 on #4884).
+  const fits = (v, max) => v == null || String(v).trim().length <= max;
+  if (!fits(m.vendorSku, 100) || !fits(m.productUrl, 700) || !fits(m.packageSizeUnit, 30) || !fits(m.purchaseUom, 30)) return false;
+  // A non-numeric size ("32 oz") is stored as no size (parseDecimalOrNull),
+  // as before; only a number the column cannot hold is off-contract.
+  const size = parseDecimalOrNull(m.packageSizeValue);
+  if (size !== null && (size < 0 || size >= 1e8)) return false;
+  if (m.confidence != null && !(typeof m.confidence === 'number' && m.confidence >= 0 && m.confidence <= 1)) return false;
+  if (m.price != null && priceResultNumber(m.price) === null) return false;
+  if (m.found === false) return true;
+  if (m.found !== true) return false;
+  // A real SKU (string or number, not the word "null") or an http(s) URL —
+  // cleanString alone would count {} as "[object Object]" and "null" as text.
+  const sku = typeof m.vendorSku === 'string' || typeof m.vendorSku === 'number' ? cleanString(m.vendorSku) : null;
+  const url = typeof m.productUrl === 'string' && /^https?:\/\/\S+$/i.test(m.productUrl.trim());
+  return !!(sku && sku.toLowerCase() !== 'null') || url;
+}
+
 // AI research pass: ask Claude (FLAGSHIP + web_search) to locate each internal product
 // on a single vendor's website and return that vendor's catalog identity for it.
 // Returns an array of proposal objects keyed by productId. Never throws — returns [] on
@@ -1804,13 +1839,13 @@ RESPOND WITH ONLY valid JSON (no markdown fences, no preamble):
 
   const tools = [{ type: 'web_search_20250305', name: 'web_search' }];
   let responseText = '';
-  let msg = await anthropic.messages.create({
+  let msg = await ledgerCall('anthropic', MODELS.FLAGSHIP, () => anthropic.messages.create({
     model: MODELS.FLAGSHIP,
     ...anthropicEffortConfig(MODELS.FLAGSHIP),
     max_tokens: anthropicMaxTokens(MODELS.FLAGSHIP, 4000),
     tools,
     messages: [{ role: 'user', content: prompt }],
-  });
+  }), { laneId: 'inventory_research' });
   for (const block of msg.content) if (block.type === 'text') responseText += block.text;
 
   let loops = 0;
@@ -1822,7 +1857,7 @@ RESPOND WITH ONLY valid JSON (no markdown fences, no preamble):
       tool_use_id: tb.id,
       content: 'Search completed. Continue analyzing results and provide your final JSON response.',
     }));
-    msg = await anthropic.messages.create({
+    msg = await ledgerCall('anthropic', MODELS.FLAGSHIP, () => anthropic.messages.create({
       model: MODELS.FLAGSHIP,
       ...anthropicEffortConfig(MODELS.FLAGSHIP),
       max_tokens: anthropicMaxTokens(MODELS.FLAGSHIP, 4000),
@@ -1832,15 +1867,32 @@ RESPOND WITH ONLY valid JSON (no markdown fences, no preamble):
         { role: 'assistant', content: msg.content },
         { role: 'user', content: toolResults },
       ],
-    });
+    }), { laneId: 'inventory_research' });
     for (const block of msg.content) if (block.type === 'text') responseText += block.text;
   }
 
   const mappings = parseAutoMapResponse(responseText);
-  if (!mappings.length && responseText.trim()) {
+  // Only a real decision for a requested product may reach the route: the
+  // route persists an inactive "no match" marker for any product that has a
+  // proposal, dropping it from every later batch — so a malformed member of
+  // an otherwise good reply (e.g. {"productId": "<requested id>"}) must be
+  // dropped here and leave its product retryable, not be returned unfiltered
+  // (Codex r13 on #4884). The call itself fails unless the model finished and
+  // every requested product got exactly such a decision.
+  const requestedIds = new Set(products.map((p) => String(p.id)));
+  const usable = mappings.filter((m) => isUsableAutoMapProposal(m, requestedIds));
+  const decided = new Set(usable.map((m) => String(m.productId)));
+  if (msg.stop_reason === 'tool_use') {
+    ledgerCallRejected(msg, 'tool_loop_exhausted');
+    logger.warn(`[auto-map] Tool loop exhausted before a final answer for ${vendor.name}`);
+  } else if (!mappings.length) {
+    ledgerCallRejected(msg, responseText.trim() ? 'invalid_json' : 'empty_text');
     logger.warn(`[auto-map] No parseable mappings in AI response for ${vendor.name}`);
+  } else if (usable.length < mappings.length || decided.size < requestedIds.size) {
+    ledgerCallRejected(msg, 'schema_invalid');
+    logger.warn(`[auto-map] AI response for ${vendor.name}: ${mappings.length - usable.length} unusable entr(ies), ${requestedIds.size - decided.size} product(s) without a decision`);
   }
-  return mappings;
+  return usable;
 }
 
 // Count active products that still have NO mapping row (of any status) to this vendor —
@@ -3530,6 +3582,63 @@ router.put('/:id', async (req, res, next) => {
   }
 });
 
+// A price may arrive as a number or a strictly numeric string ("42.50" —
+// the old loop accepted it and Postgres coerced it); anything else is null.
+// Bounded to the decimal(10,2) price columns (Codex r20 on #4884).
+function priceResultNumber(price) {
+  const n = typeof price === 'number' ? price
+    : (typeof price === 'string' && /^\s*\d+(\.\d+)?\s*$/.test(price) ? Number(price) : NaN);
+  return Number.isFinite(n) && n > 0 && n < 1e8 ? n : null;
+}
+
+// The requested vendor a result names (trimmed, any case), or undefined. The
+// prompt lists the vendors to check, and an approval needs the vendor's id.
+function findPriceVendor(vendors, name) {
+  if (typeof name !== 'string' || !name.trim()) return undefined;
+  const key = name.trim().toLowerCase();
+  return (vendors || []).find((v) => String(v.name || '').trim().toLowerCase() === key);
+}
+
+// One parse of a web-search price result, shared by both approval loops and
+// their ledger checks: a requested vendor and a real price are required (an
+// invented or misspelled vendor can never become an approval — Codex r14 on
+// #4884); quantity, url and notes are optional and cleaned so they cannot
+// fail the insert. Returns { vendor, price, quantity, url, notes } or null.
+function parsePriceResult(r, vendors) {
+  if (!r || typeof r !== 'object' || Array.isArray(r)) return null;
+  const vendor = findPriceVendor(vendors, r.vendor);
+  const price = priceResultNumber(r.price);
+  if (!vendor || price === null) return null;
+  const quantity = typeof r.quantity === 'number' && Number.isFinite(r.quantity) ? String(r.quantity)
+    : (typeof r.quantity === 'string' && r.quantity.trim() ? r.quantity.trim() : null);
+  const url = typeof r.url === 'string' && /^https?:\/\/\S+$/i.test(r.url.trim()) ? r.url.trim() : null;
+  // price_approvals.new_quantity is varchar(50) and source_url varchar(500):
+  // a longer value failed the approval insert after the call was accepted
+  // (Codex r20 on #4884), so the result is not usable as given.
+  if ((quantity && quantity.length > 50) || (url && url.length > 500)) return null;
+  const notes = typeof r.notes === 'string' ? r.notes.trim() : '';
+  return { vendor, price, quantity, url, notes, pricePerOz: priceResultNumber(r.pricePerOz) };
+}
+
+// One read of a whole price-lookup reply, shared by both endpoints: only
+// parsed, usable results are queued, returned to the caller, or named as the
+// cheapest vendor — a mixed batch used to hand its invented or malformed
+// members back unfiltered (Codex r15 on #4884). `complete` is false when
+// `results` is missing or any member is unusable, so a partial answer fails
+// the row; an explicit [] ("nothing found") is complete.
+function readPriceLookupReply(parsed, vendors) {
+  const raw = parsed && typeof parsed === 'object' && Array.isArray(parsed.results) ? parsed.results : null;
+  const usable = (raw || []).map((r) => parsePriceResult(r, vendors)).filter(Boolean);
+  const cheapest = findPriceVendor(usable.map((u) => u.vendor), parsed?.cheapest);
+  return {
+    complete: raw !== null && usable.length === raw.length,
+    usable,
+    results: usable.map((u) => ({ vendor: u.vendor.name, price: u.price, quantity: u.quantity, url: u.url, pricePerOz: u.pricePerOz, notes: u.notes || null })),
+    cheapest: cheapest ? cheapest.name : null,
+    summary: typeof parsed?.summary === 'string' ? parsed.summary.trim() : '',
+  };
+}
+
 // =========================================================================
 // POST /ai-price-lookup — AI agent: search vendor prices for a product
 // =========================================================================
@@ -3580,13 +3689,13 @@ RESPOND WITH ONLY valid JSON (no markdown fences, no preamble):
   "summary": "Brief summary of findings"
 }`;
 
-    const msg = await anthropic.messages.create({
+    const msg = await ledgerCall('anthropic', MODELS.FLAGSHIP, () => anthropic.messages.create({
       model: MODELS.FLAGSHIP,
       ...anthropicEffortConfig(MODELS.FLAGSHIP),
       max_tokens: anthropicMaxTokens(MODELS.FLAGSHIP, 2000),
       tools: [{ type: 'web_search_20250305', name: 'web_search' }],
       messages: [{ role: 'user', content: prompt }],
-    });
+    }), { laneId: 'inventory_research' });
 
     // Extract text from response (may have multiple content blocks from tool use)
     let responseText = '';
@@ -3606,7 +3715,7 @@ RESPOND WITH ONLY valid JSON (no markdown fences, no preamble):
         content: 'Search completed. Continue analyzing results and provide your final JSON response.',
       }));
 
-      currentMsg = await anthropic.messages.create({
+      currentMsg = await ledgerCall('anthropic', MODELS.FLAGSHIP, () => anthropic.messages.create({
         model: MODELS.FLAGSHIP,
         ...anthropicEffortConfig(MODELS.FLAGSHIP),
         max_tokens: anthropicMaxTokens(MODELS.FLAGSHIP, 2000),
@@ -3616,12 +3725,16 @@ RESPOND WITH ONLY valid JSON (no markdown fences, no preamble):
           { role: 'assistant', content: currentMsg.content },
           { role: 'user', content: toolResults },
         ],
-      });
+      }), { laneId: 'inventory_research' });
 
       for (const block of currentMsg.content) {
         if (block.type === 'text') responseText += block.text;
       }
     }
+
+    // Still asking for tools at the cap: the model never gave its answer.
+    const exhausted = currentMsg.stop_reason === 'tool_use';
+    if (exhausted) ledgerCallRejected(currentMsg, 'tool_loop_exhausted');
 
     // Parse the JSON response
     let parsed;
@@ -3631,38 +3744,45 @@ RESPOND WITH ONLY valid JSON (no markdown fences, no preamble):
       const jsonMatch = clean.match(/\{[\s\S]*\}/);
       parsed = JSON.parse(jsonMatch ? jsonMatch[0] : clean);
     } catch (parseErr) {
+      if (!exhausted) ledgerCallRejected(currentMsg, 'invalid_json');
       logger.warn(`[AI Price Lookup] Failed to parse JSON: ${parseErr.message}`);
       return res.json({ success: true, raw: responseText, results: [], summary: 'AI returned non-JSON response. See raw field.' });
     }
 
+    // Only usable results are queued or returned; a missing, empty-shaped or
+    // partially unusable `results` fails the row (Codex r8, r14, r15 on #4884).
+    const reply = readPriceLookupReply(parsed, vendors);
+    if (!exhausted && !reply.complete) ledgerCallRejected(currentMsg, 'schema_invalid');
+
     // If we have a productId, create approval queue entries for found prices
-    if (productId && parsed.results && parsed.results.length > 0) {
-      for (const result of parsed.results) {
-        // Find vendor by name
-        const vendor = vendors.find(v => v.name.toLowerCase() === result.vendor?.toLowerCase());
-        if (!vendor || !result.price) continue;
+    let approvalsCreated = 0;
+    if (productId) {
+      for (const result of reply.usable) {
+        const { vendor } = result;
 
         // Check existing price
         const existing = await db('vendor_pricing')
           .where({ product_id: productId, vendor_id: vendor.id }).first();
 
+        const newPrice = result.price;
         // Create approval entry
         try {
           await db('price_approvals').insert({
             product_id: productId,
             vendor_id: vendor.id,
             old_price: existing?.price || null,
-            new_price: result.price,
-            new_quantity: result.quantity || null,
-            source_url: result.url || null,
+            new_price: newPrice,
+            new_quantity: result.quantity,
+            source_url: result.url,
             price_change_pct: existing?.price
-              ? Math.round(((result.price - existing.price) / existing.price) * 10000) / 100
+              ? Math.round(((newPrice - existing.price) / existing.price) * 10000) / 100
               : null,
             status: 'pending',
-            notes: `AI agent lookup — ${result.notes || ''}`,
+            notes: `AI agent lookup — ${result.notes}`,
           });
+          approvalsCreated += 1;
         } catch (e) {
-          logger.warn(`[AI Price Lookup] Failed to create approval for ${result.vendor}: ${e.message}`);
+          logger.warn(`[AI Price Lookup] Failed to create approval for ${vendor.name}: ${e.message}`);
         }
       }
     }
@@ -3670,10 +3790,10 @@ RESPOND WITH ONLY valid JSON (no markdown fences, no preamble):
     res.json({
       success: true,
       product: productName,
-      results: parsed.results || [],
-      cheapest: parsed.cheapest || null,
-      summary: parsed.summary || '',
-      approvalsCreated: parsed.results?.length || 0,
+      results: reply.results,
+      cheapest: reply.cheapest,
+      summary: reply.summary,
+      approvalsCreated,
     });
   } catch (err) {
     logger.error(`[AI Price Lookup] Error: ${err.message}`);
@@ -3703,6 +3823,7 @@ router.post('/ai-price-lookup/bulk', async (req, res, next) => {
 router._test = {
   parseAutoMapResponse,
   buildAutoMapRow,
+  aiProposeVendorMappings,
   calculateMappingConfidenceCap,
   findOpenLoginDiscoveryConnection,
   hasTerminalLoginDiscoveryResult,
@@ -3733,5 +3854,8 @@ router.vendorRowPricePerOz = vendorRowPricePerOz;
 router.scoreVendorRows = scoreVendorRows;
 router.storedUnitCostPerOz = storedUnitCostPerOz;
 router.quantityToOz = quantityToOz;
+// Shared web-search-result usability check (Codex r8 on #4884) —
+// procurement-tools.js's own price lookup applies the same validation.
+router.readPriceLookupReply = readPriceLookupReply;
 
 module.exports = router;

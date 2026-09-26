@@ -28,7 +28,8 @@ try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 const MODEL = require('../config/models').FLAGSHIP;
 const { ROUTES } = require('../config/models');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('./llm/anthropic-wire');
-const { dispatch, anthropicText } = require('./llm/call');
+const { dispatch, anthropicText, rejectCall } = require('./llm/call');
+const { ledgerCall, ledgerCallRejected } = require('./llm-dispatch-metrics');
 
 // ══════════════════════════════════════════════════════════════
 // HELPERS
@@ -38,6 +39,17 @@ function slugify(text) {
   return text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').substring(0, 190);
 }
 
+// callClaude's sole caller needs a JSON object and fails the run as
+// ungrounded on anything else (codex P1 r32 there). Such an answer is a failed
+// call in the ledger on whichever leg produced it; what callClaude returns is
+// unchanged (codex r2 on #4884).
+function objectAnswerProblem(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return 'invalid_output';
+  // The caller's nested rule (codex P1 r37 there), so both fail the same answers.
+  if (!recommendationPayloadShapeValid(value)) return 'schema_invalid';
+  return recommendationPayloadHasContent(value) ? null : 'schema_invalid';
+}
+
 async function callClaude(systemPrompt, userPrompt, maxTokens = 2048) {
   // Live model — GPT-5.5 (ROUTES.knowledgeAnswer). callClaude's sole caller
   // (generateAssessmentRecommendations) strict-JSON.parses the result, so require
@@ -45,22 +57,36 @@ async function callClaude(systemPrompt, userPrompt, maxTokens = 2048) {
   // Invalid/preamble OpenAI output → { ok:false } → fall through to the Claude
   // fallback below rather than returning text the caller can't parse.
   {
-    const r = await dispatch(ROUTES.knowledgeAnswer, { system: systemPrompt, text: userPrompt, jsonMode: true, maxTokens });
-    if (r.ok && r.json) return JSON.stringify(r.json);
+    const r = await dispatch(ROUTES.knowledgeAnswer, { laneId: 'knowledge_qa', system: systemPrompt, text: userPrompt, jsonMode: true, maxTokens });
+    if (r.ok && r.json) {
+      const problem = objectAnswerProblem(r.json);
+      if (!problem) return JSON.stringify(r.json);
+      // The caller would reject this answer at the same gate and return null,
+      // so returning it here denied the Claude fallback its turn (Codex r16 on
+      // #4884): fail the row and fall through instead.
+      rejectCall(r, problem);
+    }
   }
   // Fallback — Claude (FLAGSHIP).
   if (!Anthropic) return null;
   try {
     const client = new Anthropic();
-    const response = await client.messages.create({
+    const response = await ledgerCall('anthropic', MODEL, () => client.messages.create({
       model: MODEL,
       ...anthropicEffortConfig(MODEL),
       max_tokens: anthropicMaxTokens(MODEL, maxTokens),
       system: systemPrompt,
       messages: [{ role: 'user', content: userPrompt }],
-    });
+    }), { laneId: 'knowledge_qa' });
     // First TEXT block — a thinking block leads the content on Opus 5.5.
-    return anthropicText(response) || null;
+    const text = anthropicText(response) || null;
+    if (text) {
+      // The caller's own parse, so the ledger fails exactly what it will reject.
+      let problem;
+      try { problem = objectAnswerProblem(JSON.parse(text.replace(/```json|```/g, '').trim())); } catch { problem = 'invalid_json'; }
+      if (problem) ledgerCallRejected(response, problem);
+    }
+    return text;
   } catch (err) {
     logger.error(`[knowledge-bridge] Claude call failed: ${err.message}`);
     return null;
@@ -173,12 +199,24 @@ function recommendationPayloadShapeValid(raw) {
     if (!Array.isArray(raw.recommendations)) return false;
     for (const rec of raw.recommendations) {
       if (!rec || typeof rec !== 'object' || Array.isArray(rec)) return false;
-      if (!optionalString(rec.action) || !optionalString(rec.reason) || !optionalString(rec.timeframe)) return false;
+      // A recommendation that is present must say what to do: `[{}]` used to
+      // count as grounded and render a blank line (review on #4884). Absent
+      // scalar fields elsewhere stay allowed (r37).
+      if (typeof rec.action !== 'string' || !rec.action.trim()) return false;
+      if (!optionalString(rec.reason) || !optionalString(rec.timeframe)) return false;
       if (rec.priority !== undefined && rec.priority !== null
         && typeof rec.priority !== 'number' && typeof rec.priority !== 'string') return false;
     }
   }
   return true;
+}
+
+// Shape (above) and content are separate rules: the r37 shape check keeps
+// accepting absent fields, but a payload with no summary answered nothing —
+// `{}` was persisted with grounded provenance, replacing the assessment's
+// recommendations and blocking the Claude fallback (Codex r21 on #4884).
+function recommendationPayloadHasContent(raw) {
+  return typeof raw.summary === 'string' && raw.summary.trim() !== '';
 }
 
 function parseStoredRecommendations(value) {
@@ -1248,6 +1286,10 @@ Return a JSON object with:
           logger.warn(`[knowledge-bridge] recommendation payload for ${assessmentId} had malformed nested fields — failing run as ungrounded`);
           return null;
         }
+        if (!recommendationPayloadHasContent(raw)) {
+          logger.warn(`[knowledge-bridge] recommendation payload for ${assessmentId} had no summary — failing run as ungrounded`);
+          return null;
+        }
 
         // Model output advising against a product class applied today must
         // never persist (codex P1 r5) — the prompt rule is not a guarantee.
@@ -1513,7 +1555,7 @@ Return a JSON object with:
 };
 
 module.exports = KnowledgeBridge;
-module.exports._test = { sanitizeRecommendationsAgainstTreatment, contradictsAppliedTreatment, contradictsAppliedProducts, appliedTreatmentClasses, generationInFlight, activeGenerationRuns, recommendationPayloadShapeValid, sendSealActive };
+module.exports._test = { callClaude, recommendationPayloadHasContent, sanitizeRecommendationsAgainstTreatment, contradictsAppliedTreatment, contradictsAppliedProducts, appliedTreatmentClasses, generationInFlight, activeGenerationRuns, recommendationPayloadShapeValid, sendSealActive };
 // Pure render-time guard surface (no DB, no LLM) — consumed by report-data
 // as the last line of defense for instantly opened report links.
 module.exports.sealRecommendationsForSend = sealForSend;

@@ -14,6 +14,7 @@ const MODELS = require('../../config/models');
 const logger = require('../logger');
 const db = require('../../models/db');
 const { fetchPageText } = require('./contact-finder');
+const { ledgerCall, ledgerCallRejected } = require('../llm-dispatch-metrics');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -94,8 +95,9 @@ Return ONLY JSON with ALL fields:
 - requires_account=false ONLY if a free public "add your business / submit listing" form with no login is offered.
 - detected_price_usd = null if no price is shown.`;
   let o;
+  let resp;
   try {
-    const resp = await anthropic.messages.create({ model: MODEL, max_tokens: 400, messages: [{ role: 'user', content: prompt }] });
+    resp = await ledgerCall('anthropic', MODEL, () => anthropic.messages.create({ model: MODEL, max_tokens: 400, messages: [{ role: 'user', content: prompt }] }), { laneId: 'signup_classifier' });
     o = parseJson((resp.content || []).map((b) => b.text || '').join(''));
   } catch (err) {
     logger.warn(`[signup-classifier] LLM failed for ${host}: ${err.message}`);
@@ -108,12 +110,17 @@ Return ONLY JSON with ALL fields:
   // detected_price_usd must satisfy the prompt's number|null contract EXACTLY:
   // present, and either null or a finite number. Reject omitted/undefined and any
   // string (Number('') and Number('  ') are a finite 0 that would fake a $0 price
-  // on a paid listing) → fail safe to needs_account.
-  const priceOk = o && (o.detected_price_usd === null || (typeof o.detected_price_usd === 'number' && Number.isFinite(o.detected_price_usd)));
+  // on a paid listing) → fail safe to needs_account. Also bound it to what the
+  // detected_price_usd numeric(8,2) column can hold (max 999999.99) — an
+  // in-range-but-overflowing value would abort the whole classifier run at the
+  // DB write, so treat it as off-contract here instead (Codex on #4884).
+  const priceOk = o && (o.detected_price_usd === null || (typeof o.detected_price_usd === 'number' && Number.isFinite(o.detected_price_usd)
+    && o.detected_price_usd >= 0 && o.detected_price_usd < 1e6));
   const valid = o && CATEGORIES.has(o.directory_category) && RELS.has(o.offered_link_rel)
     && isBool(o.requires_account) && isBool(o.requires_email_verification)
     && isBool(o.requires_captcha) && isBool(o.requires_payment) && isBool(o.recurring) && priceOk;
   if (!valid) {
+    ledgerCallRejected(resp, o ? 'schema_invalid' : 'invalid_json');
     logger.warn(`[signup-classifier] incomplete/invalid classification for ${host} — failing safe to needs_account`);
     return fallback;
   }

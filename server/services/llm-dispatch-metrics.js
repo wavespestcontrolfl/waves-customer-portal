@@ -413,6 +413,38 @@ function failCall(callIdPromise, errorCode, { validator = false } = {}) {
   }
 }
 
+// ledgerCall's recorded row per returned object, so a direct SDK caller whose
+// own parse or schema check rejects the answer can flip that row — the
+// adapter's rejectLedgerCall, for sites outside llm/call.js (Codex on #4884).
+const ledgerCallIdOf = new WeakMap();
+
+// A finished turn (end_turn / stop_sequence) with no non-empty text block
+// answered nothing; the adapter files the same case as `empty_text`. A
+// tool_use or pause_turn stop is a tool round, never an empty answer.
+function endedWithoutText(message) {
+  if (!['end_turn', 'stop_sequence'].includes(message?.stop_reason)) return false;
+  const content = Array.isArray(message?.content) ? message.content : [];
+  return !content.some((block) => block?.type === 'text' && String(block.text || '').trim());
+}
+
+/**
+ * Flip the row ledgerCall recorded for `value` (the object it returned) to a
+ * failure with the caller's own reason — `invalid_json`, `schema_invalid`,
+ * `invalid_output`. Only a row ledgerCall filed as ok is flipped: a refusal,
+ * truncation or empty answer keeps its own classification, so the failure
+ * class still says why the caller could not parse (Codex r3 on #4884). Same
+ * fire-and-forget contract as failCall: never throws, no-op off-gate or for
+ * a value ledgerCall did not return.
+ */
+function ledgerCallRejected(value, errorCode) {
+  try {
+    if (!value || typeof value !== 'object' || !ledgerCallIdOf.has(value)) return;
+    failCall(ledgerCallIdOf.get(value), errorCode, { validator: true });
+  } catch (err) {
+    logger.debug(`[llm-dispatch-metrics] ledgerCallRejected skipped: ${err.message}`);
+  }
+}
+
 /**
  * Run one raw provider call under the ledger. `fn` resolves the provider's
  * own value — an SDK Message or a parsed JSON body — which is returned
@@ -425,6 +457,12 @@ function failCall(callIdPromise, errorCode, { validator = false } = {}) {
 async function ledgerCall(provider, requestedModel, fn, { promptVersion = null, laneId = null, policyLabel: label = null, trace = null } = {}) {
   // Monotonic clock: callers' own budget math uses Date.now (and tests pin it).
   const t0 = performance.now();
+  // Inside runAsReplay a direct call is filed under `<policy>:replay`, the
+  // way dispatch chains are (recordedPolicyLabel) — a fixed-fixture replay of
+  // a live code path (e.g. the lawn naming gate running runChallenge) must
+  // not dilute the live lane's failure rate or keep a silent live lane
+  // looking active (Codex r15 on #4884).
+  const policy = applyReplayLane(label || laneId || agentContext.current().laneId || `${provider}/${requestedModel}`);
   let value;
   try {
     value = await fn();
@@ -433,7 +471,7 @@ async function ledgerCall(provider, requestedModel, fn, { promptVersion = null, 
     // llm/call.js requires this module, so its require is lazy.
     let errorCode = 'error';
     try { errorCode = require('./llm/call').providerErrorReason(provider, err); } catch { /* keep the generic code */ }
-    const failedId = recordCall({ provider, requestedModel, ok: false, errorCode, latencyMs: Math.round(performance.now() - t0), promptVersion, laneId, policyLabel: label });
+    const failedId = recordCall({ provider, requestedModel, ok: false, errorCode, latencyMs: Math.round(performance.now() - t0), promptVersion, laneId, policyLabel: policy });
     // The calls most worth debugging are the ones that failed: an opted-in
     // lane keeps the request bodies of a rejected call too (no response).
     if (trace) recordTrace(failedId, { system: trace.system, prompt: trace.prompt, laneId });
@@ -449,6 +487,7 @@ async function ledgerCall(provider, requestedModel, fn, { promptVersion = null, 
   const errorCode = provider !== 'anthropic' ? null
     : value?.stop_reason === 'refusal' ? 'anthropic_refusal'
     : value?.stop_reason === 'max_tokens' ? 'anthropic_incomplete'
+    : endedWithoutText(value) ? 'empty_text'
     : null;
   const callId = recordCall({
     provider,
@@ -461,9 +500,10 @@ async function ledgerCall(provider, requestedModel, fn, { promptVersion = null, 
     providerRef: value?.id,
     promptVersion,
     laneId,
-    policyLabel: label,
+    policyLabel: policy,
   });
   if (trace) recordTrace(callId, { system: trace.system, prompt: trace.prompt, response: messageText(value), laneId });
+  if (value && typeof value === 'object' && !errorCode) ledgerCallIdOf.set(value, callId);
   return value;
 }
 
@@ -1115,6 +1155,7 @@ module.exports = {
   recordCall,
   failCall,
   ledgerCall,
+  ledgerCallRejected,
   recordSessionUsage,
   recordTrace,
   extractUsage,

@@ -145,6 +145,7 @@ try {
 
 const MODELS = require('../config/models');
 const { stripThinkingBlocks } = require('./llm/deep');
+const { ledgerCall, ledgerCallRejected } = require('./llm-dispatch-metrics');
 
 const HTTP_TIMEOUT_MS = 15000;
 const MAX_ITEMS_PER_FEED = 200;
@@ -562,7 +563,7 @@ function recoverEventObjectsFromTruncatedJson(text) {
   return events.length ? events : null;
 }
 
-async function extractEventsWithClaude(source, content, { mode, maxEvents }) {
+async function extractEventsWithClaude(source, content, { mode, maxEvents, requireStart = false }) {
   if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
     throw new Error('Anthropic API key not configured (ANTHROPIC_API_KEY)');
   }
@@ -575,7 +576,7 @@ async function extractEventsWithClaude(source, content, { mode, maxEvents }) {
   const systemPrompt = buildExtractionSystemPrompt(source, maxEvents, mode, todayIso);
   const wrapped = mode === 'articles' ? `<articles>\n${content}\n</articles>` : `<html>\n${content}\n</html>`;
 
-  const response = await anthropic.messages.create({
+  const response = await ledgerCall('anthropic', MODELS.WORKHORSE, () => anthropic.messages.create({
     model: MODELS.WORKHORSE,
     // Headroom for the full maxEvents (≤30) list. The old 2000-token cap
     // truncated event-dense feeds mid-array (~4KB of JSON), which then
@@ -584,7 +585,7 @@ async function extractEventsWithClaude(source, content, { mode, maxEvents }) {
     max_tokens: 8000,
     system: systemPrompt,
     messages: [{ role: 'user', content: wrapped }],
-  });
+  }), { laneId: 'events' });
   // WORKHORSE resolves to a model that can lead with a thinking block on
   // real feed-sized inputs (#2814 moved it opus-4-8 → sonnet-5 on 2026-07-18).
   // A thinking block has no .text, so reading content[0] blind yielded '' and
@@ -609,13 +610,46 @@ async function extractEventsWithClaude(source, content, { mode, maxEvents }) {
     // against an outer object that never closed): salvage the complete
     // event objects instead of dropping the whole pull.
     const recovered = recoverEventObjectsFromTruncatedJson(text);
-    if (!recovered) throw new Error('Claude did not return parseable JSON for event extraction');
+    if (!recovered) {
+      ledgerCallRejected(response, 'invalid_json');
+      throw new Error('Claude did not return parseable JSON for event extraction');
+    }
     logger.warn(
       `[event-ingestion] recovered ${recovered.length} event(s) from truncated JSON for source ${source.id} (${source.name || source.feed_url})`,
     );
     parsed = { events: recovered };
   }
-  return Array.isArray(parsed.events) ? parsed.events.slice(0, maxEvents) : [];
+  if (!Array.isArray(parsed.events)) {
+    ledgerCallRejected(response, 'schema_invalid');
+    return [];
+  }
+  const events = parsed.events.slice(0, maxEvents);
+  // Malformed members (not an object, no string title, a non-text field, an
+  // unparseable startAt) never reach the caller: a null member used to throw
+  // inside the usability check or mid-upsert after the call was accepted, and
+  // a non-string title/description was stored as "[object Object]"; any such
+  // member fails the row (Codex r8 + review on #4884). A nonempty batch where
+  // every well-formed entry still fails normalizeExtractedEvent (e.g. all out
+  // of the date window) answered nothing usable either. An intentionally
+  // empty array ({"events":[]}) stays a success.
+  const wellFormed = events.filter(isWellFormedExtractedEvent);
+  const nowMs = Date.now();
+  if (wellFormed.length < events.length
+    || (events.length && !wellFormed.some((ev) => normalizeExtractedEvent(source, ev, nowMs, { requireStart }) !== null))) {
+    ledgerCallRejected(response, 'schema_invalid');
+  }
+  return wellFormed;
+}
+
+// An extracted event in the prompt's shape: an object with a non-blank
+// string title; every other field a string or null; a startAt, when given,
+// that parses as a date.
+const EXTRACTED_EVENT_TEXT_FIELDS = ['startAt', 'venueName', 'city', 'description', 'eventUrl', 'imageUrl'];
+function isWellFormedExtractedEvent(ev) {
+  if (!ev || typeof ev !== 'object' || Array.isArray(ev)) return false;
+  if (typeof ev.title !== 'string' || !ev.title.trim()) return false;
+  if (!EXTRACTED_EVENT_TEXT_FIELDS.every((k) => ev[k] === undefined || ev[k] === null || typeof ev[k] === 'string')) return false;
+  return !(typeof ev.startAt === 'string' && ev.startAt.trim() && !parseDateOrNull(ev.startAt));
 }
 
 /**
@@ -633,7 +667,8 @@ async function extractEventsWithClaude(source, content, { mode, maxEvents }) {
 function normalizeExtractedEvent(source, ev, nowMs, opts = {}) {
   const cutoffMs = nowMs + FORWARD_WINDOW_DAYS * 24 * 60 * 60 * 1000;
 
-  const title = (ev.title || '').toString().trim().slice(0, 512);
+  if (!ev || typeof ev !== 'object' || Array.isArray(ev)) return null;
+  const title = typeof ev.title === 'string' ? ev.title.trim().slice(0, 512) : '';
   if (!title) return null;
 
   const start = parseDateOrNull(ev.startAt);
@@ -646,10 +681,13 @@ function normalizeExtractedEvent(source, ev, nowMs, opts = {}) {
   // drift between runs (different timezone formatting, trailing
   // slashes, etc) — the parsed Date's toISOString() and the
   // safeHttpUrl() canonical form don't.
-  const description = ev.description ? String(ev.description).slice(0, 2000) : null;
-  const venueName = ev.venueName ? String(ev.venueName).slice(0, 256) : null;
-  const eventUrl = safeHttpUrl(ev.eventUrl);
-  const imageUrl = safeHttpUrl(ev.imageUrl);
+  const description = typeof ev.description === 'string' && ev.description ? ev.description.slice(0, 2000) : null;
+  const venueName = typeof ev.venueName === 'string' && ev.venueName ? ev.venueName.slice(0, 256) : null;
+  // events_raw.event_url / image_url are varchar(1024); a longer URL would
+  // fail the upsert and abort the pull, so it is dropped like an unsafe one.
+  const fitUrl = (u) => (u && u.length <= 1024 ? u : null);
+  const eventUrl = fitUrl(safeHttpUrl(ev.eventUrl));
+  const imageUrl = fitUrl(safeHttpUrl(ev.imageUrl));
 
   // Synthesize a stable dedup key from canonical title+date+url.
   // Extracted events don't have a UID/guid, so we key on the
@@ -733,9 +771,10 @@ async function pullNewsRssItems(source, items) {
   const { text, bundled } = buildArticleBundle(items);
   if (!text.trim()) return { upserted: 0, dropped: 0, total: 0 };
 
-  const claudeEvents = await extractEventsWithClaude(source, text, { mode: 'articles', maxEvents });
   // requireStart: the articles contract is "no stated event date → no
-  // event" — enforce it even when the model ignores the prompt rule.
+  // event" — enforce it even when the model ignores the prompt rule (also
+  // forwarded into extractEventsWithClaude's own usability check above).
+  const claudeEvents = await extractEventsWithClaude(source, text, { mode: 'articles', maxEvents, requireStart: true });
   const { upserted, dropped } = await upsertExtractedEvents(source, claudeEvents, { requireStart: true });
   return { upserted, dropped, total: claudeEvents.length, articlesBundled: bundled };
 }
