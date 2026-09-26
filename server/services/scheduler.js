@@ -1653,6 +1653,52 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // While the follow-up pager is live, the overdue watchdog takes each
+  // promise over the moment it ages off the pager's 24-hour list; with
+  // callback cards off its own cadence is daily, which would leave a gap of
+  // up to a day, so it also sweeps every 15 minutes (its bells dedupe per
+  // promise per ET day). With cards on, the 5-minute tick already covers it.
+  cron.schedule('0 10,25,40,55 * * * *', async () => {
+    const { isEnabled } = require('../config/feature-gates');
+    if (!isEnabled('followupSlaAlerts') || require('./callback-cards').enabled()) return;
+    try {
+      const { runCallCommitmentsWatchdog } = require('./call-commitments-watchdog');
+      // Takeover scope only: the promises that just aged off the pager's
+      // list, not a refresh of the whole backlog every 15 minutes.
+      const result = await runCallCommitmentsWatchdog({ scope: 'sla_takeover' });
+      if (result?.skipped && result.reason !== 'gated_off' && result.reason !== 'lease_held') {
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const t0 = Date.now();
+        await recordJobStart('call-commitments-watchdog').catch(() => {});
+        await recordJobEnd('call-commitments-watchdog', t0, new Error(`tick skipped: ${result.reason || 'no_connection'}`)).catch(() => {});
+        throw new Error(`Overdue-promise takeover tick skipped: ${result.reason || 'no_connection'}`);
+      }
+    } catch (err) {
+      logger.error(`[followup-sla] watchdog takeover tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // One-hour follow-up pager: every 15 minutes through the 8 AM–8 PM ET
+  // window (the 8:00–8:45 PM ticks catch deadlines that land at the close).
+  cron.schedule('0 */15 8-20 * * *', async () => {
+    try {
+      const { runFollowUpSlaWatcher } = require('./followup-sla-watcher');
+      const result = await runFollowUpSlaWatcher();
+      // A skip before runExclusive's own bookkeeping (no_connection: pool
+      // exhausted) is a MISSED tick and job_health must say so, as the
+      // adjacent commitment watchers record it.
+      if (result?.skipped && result.reason !== 'gated_off' && result.reason !== 'lease_held') {
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const t0 = Date.now();
+        await recordJobStart('followup-sla-watcher').catch(() => {});
+        await recordJobEnd('followup-sla-watcher', t0, new Error(`tick skipped: ${result.reason || 'no_connection'}`)).catch(() => {});
+        throw new Error(`Follow-up pager tick skipped: ${result.reason || 'no_connection'}`);
+      }
+    } catch (err) {
+      logger.error(`[followup-sla] tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   cron.schedule('0 20 7 * * *', async () => {
     try {
       const { runCallCommitmentsWatchdog } = require('./call-commitments-watchdog');
