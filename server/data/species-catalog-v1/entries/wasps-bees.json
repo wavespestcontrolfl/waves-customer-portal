@@ -41,7 +41,7 @@
       {
         "slug": "yellowjacket",
         "difference": "Paper wasps build an open, exposed umbrella comb; yellowjackets build enclosed paper-covered nests, often underground or in a wall void.",
-        "next_photo": "A photo of the whole nest shape from a few feet away.",
+        "next_photo": "From a safe distance, photograph the whole nest shape.",
         "photo_can_confirm": true
       }
     ],
@@ -127,7 +127,7 @@
     "safety_line": "Can sting repeatedly and become aggressive as a colony once disturbed. See a doctor if swelling spreads, and call 911 if someone has trouble breathing.",
     "legacy_slugs": [],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": ""
     },
     "slug": "yellowjacket",
@@ -154,7 +154,7 @@
       {
         "slug": "paper-wasp",
         "difference": "Yellowjackets build enclosed, paper-covered nests (often in the ground); paper wasps build a small, open, exposed umbrella comb.",
-        "next_photo": "A photo of the whole nest shape from a few feet away.",
+        "next_photo": "From a safe distance, photograph the whole nest shape.",
         "photo_can_confirm": true
       }
     ],
@@ -233,7 +233,7 @@
     "safety_line": "Almost never stings; venom lacks the pain compounds of social wasps. See a doctor if you have an unusual allergic reaction, and call 911 if someone has trouble breathing.",
     "legacy_slugs": [],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": "Verdict changed from harmless to ally: it actively preys on spiders (including widows), which is a beneficial service, not just a neutral visitor."
     },
     "slug": "mud-dauber",
@@ -257,7 +257,7 @@
       {
         "slug": "cicada-killer",
         "difference": "Mud daubers are slender-waisted and build mud tube nests on walls; cicada killers are much larger, dig burrows in bare soil, and have a thicker body.",
-        "next_photo": "A photo of the nest type (mud tube on a wall vs. a burrow in soil) and overall body size next to a coin.",
+        "next_photo": "From a safe distance, photograph the nest type (mud tube on a wall vs. a burrow in soil) and overall body size.",
         "photo_can_confirm": true
       }
     ],
@@ -441,7 +441,7 @@
     "safety_line": "Never seal the entrance while bees are active — that traps them and can leak honey into the wall. See a doctor for a serious allergic reaction. Call 911 if someone has trouble breathing.",
     "legacy_slugs": [],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": "role set to stinging_pest rather than beneficial even though honey bees are ecologically beneficial: verdict here is call (specialist removal, not leave-alone), and the validator ties role beneficial to verdict ally."
     },
     "slug": "honey-bee-wall-colony",
@@ -470,7 +470,7 @@
       {
         "slug": "honey-bee-swarm",
         "difference": "A wall colony has steady traffic in and out of one gap for weeks with comb inside; a swarm is a temporary, comb-free cluster hanging in the open.",
-        "next_photo": "A photo from the same spot a day or two apart to see if the activity is ongoing.",
+        "next_photo": "From a safe distance, photograph the same spot a day or two apart to see if the activity is ongoing.",
         "photo_can_confirm": true
       }
     ],
@@ -552,7 +552,7 @@
     "safety_line": "Females can sting if handled but rarely do; males cannot sting at all. See a doctor for signs of an allergic reaction, and call 911 if someone has trouble breathing.",
     "legacy_slugs": [],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": "structural changed to true: they drill new tunnels into sound fascia/trim (not just nesting in existing damage), which fits the brief's structural-damage definition. Resolved 2026-09-26: EENY-100/IN257 (Grissell, Sanford & Fasulo, UF/IFAS) loaded directly via the FLVC/EDIS journal host (the ask.ifas.ufl.edu short link still errors). It confirms round drilled entry holes with sawdust below, boring into unpainted back-face trim/fascia under eaves, the shiny bare abdomen that distinguishes Xylocopa from fuzzy bumble bees, \"weakening of structural timbers\" as a recognized economic damage type, and that only females may sting (rarely) while males hover/dart at people near the nest. (Only females possess a stinger in Hymenoptera generally, which is why males cannot sting -- basic, undisputed apidology, not separately sourced.) Source URL added."
     },
     "slug": "carpenter-bee",
@@ -577,13 +577,13 @@
       {
         "slug": "bumble-bee",
         "difference": "Carpenter bees have a shiny, mostly bare black abdomen; bumble bees are fuzzy over the whole body, including the abdomen.",
-        "next_photo": "A close-up of the abdomen — shiny and bare versus fuzzy all over.",
+        "next_photo": "From a safe distance, zoom in on the abdomen — shiny and bare versus fuzzy all over.",
         "photo_can_confirm": true
       },
       {
         "slug": "woodpecker-damage",
         "difference": "Carpenter bee holes are a single, round, pencil-width hole with a dark stain below; woodpecker holes are larger, rougher-edged and often clustered in a row.",
-        "next_photo": "A close-up of one hole: perfectly round and stained (bee) versus larger, ragged-edged and clustered (woodpecker).",
+        "next_photo": "From a safe distance, zoom in on one hole: perfectly round and stained (bee) versus larger, ragged-edged and clustered (woodpecker).",
         "photo_can_confirm": true
       }
     ],
@@ -783,7 +783,7 @@
       {
         "slug": "bald-faced-hornet",
         "difference": "Cicada killer is solitary and digs single ground burrows in bare soil; bald-faced hornet lives in a large colony inside one hanging aerial paper nest",
-        "next_photo": "A photo of where the insect is coming from: a hole in bare ground versus a paper nest hanging in a tree or eave",
+        "next_photo": "From a safe distance, photograph where the insect is coming from: a hole in bare ground versus a paper nest hanging in a tree or eave.",
         "photo_can_confirm": true
       }
     ],
@@ -841,7 +841,7 @@
       "https://en.wikipedia.org/wiki/Sphecius_speciosus"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": ""
     }
   },
@@ -882,7 +882,7 @@
       {
         "slug": "blue-winged-scoliid-wasp",
         "difference": "Velvet ant females have no wings at all and only run on the ground; scoliid wasp has wings and flies low over the lawn",
-        "next_photo": "A photo from the side showing whether the insect has wings",
+        "next_photo": "From a safe distance, photograph the insect from the side showing whether it has wings.",
         "photo_can_confirm": true
       }
     ],
@@ -946,7 +946,7 @@
       "https://en.wikipedia.org/wiki/Dasymutilla_occidentalis"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": "Per audit item 53: traits[3] previously described the audible squeak it makes 'if picked up' -- since this is one of the most painful stings around, that phrasing invited handling; replaced with a visible feature."
     }
   },
@@ -984,7 +984,7 @@
       {
         "slug": "velvet-ant",
         "difference": "Scoliid wasp has wings and flies low over the lawn; velvet ant females have no wings at all and only walk or run across the ground",
-        "next_photo": "A photo from the side showing whether the insect has wings",
+        "next_photo": "From a safe distance, photograph the insect from the side showing whether it has wings.",
         "photo_can_confirm": true
       }
     ],
@@ -1045,7 +1045,7 @@
       "https://en.wikipedia.org/wiki/Scolia_dubia"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": ""
     }
   },
@@ -1083,7 +1083,7 @@
       {
         "slug": "mud-dauber",
         "difference": "Potter wasp builds small, rounded, jug-shaped mud pots one at a time; mud dauber builds longer tube-shaped mud cells lined up side by side",
-        "next_photo": "A close-up of the mud structure showing whether it is a small rounded pot or a row of tube shapes",
+        "next_photo": "From a safe distance, zoom in on the mud structure showing whether it is a small rounded pot or a row of tube shapes.",
         "photo_can_confirm": true
       }
     ],
@@ -1149,7 +1149,7 @@
       "https://en.wikipedia.org/wiki/Eumeninae"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": ""
     }
   },
@@ -1187,7 +1187,7 @@
       {
         "slug": "cicada-killer",
         "difference": "Great golden digger wasp is smaller with golden fuzz and an orange-and-black body; cicada killer is much larger with pale yellow abdominal bands",
-        "next_photo": "A photo with a coin next to the wasp for a size comparison",
+        "next_photo": "From a safe distance, zoom in to compare overall body size and coloring to a typical wasp.",
         "photo_can_confirm": true
       }
     ],
@@ -1245,7 +1245,7 @@
       "https://en.wikipedia.org/wiki/Sphex_ichneumoneus"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": ""
     }
   },
@@ -1286,7 +1286,7 @@
       {
         "slug": "carpenter-bee",
         "difference": "Bumble bee has a fully fuzzy abdomen; carpenter bee looks almost identical up front but has a shiny, hairless, black abdomen",
-        "next_photo": "A close-up of the abdomen showing whether it is fuzzy all over or shiny and bare on top",
+        "next_photo": "From a safe distance, zoom in on the abdomen showing whether it is fuzzy all over or shiny and bare on top.",
         "photo_can_confirm": true
       }
     ],
@@ -1354,7 +1354,7 @@
       "https://en.wikipedia.org/wiki/Bumblebee"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": ""
     }
   },
@@ -1392,7 +1392,7 @@
       {
         "slug": "leaf-footed-bug",
         "difference": "Leafcutter bee leaves clean round holes clipped from the leaf edge; leaf-footed bug causes stippled, wilted spots and has flared, leaf-like hind legs",
-        "next_photo": "A close-up of the leaf damage showing whether it is a clean round cutout or a discolored, wilted patch",
+        "next_photo": "From a safe distance, zoom in on the leaf damage showing whether it is a clean round cutout or a discolored, wilted patch.",
         "photo_can_confirm": true
       }
     ],
@@ -1457,7 +1457,7 @@
       "https://en.wikipedia.org/wiki/Megachile"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": "Per audit item 54 (flagged as a low-value pair): kept the leaf-footed-bug look-alike rather than replacing it, since it answers a real customer question (a beneficial bee's clean leaf cutout vs. a pest bug's stippled/wilted damage) even though the insects themselves don't look alike; no better candidate among this catalog's other bee/wasp slugs (carpenter-bee, bumble-bee) is closer to this genus in size/behavior."
     }
   }

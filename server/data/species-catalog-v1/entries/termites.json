@@ -16,7 +16,7 @@
     "safety_line": null,
     "legacy_slugs": [],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": ""
     },
     "slug": "subterranean-termite",
@@ -43,7 +43,7 @@
       {
         "slug": "carpenter-ant",
         "difference": "Termite swarmers have a straight waist and straight antennae; carpenter ant swarmers have a pinched waist and elbowed antennae.",
-        "next_photo": "A close-up from the side of the waist and antennae of a winged individual, next to a coin.",
+        "next_photo": "From a safe distance, zoom in from the side on the waist and antennae of a winged individual.",
         "photo_can_confirm": true
       }
     ],
@@ -230,7 +230,7 @@
     "safety_line": null,
     "legacy_slugs": [],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": ""
     },
     "slug": "drywood-termite",
@@ -257,7 +257,7 @@
       {
         "slug": "carpenter-ant",
         "difference": "Drywood termite pellets are hard, six-sided, and uniform; carpenter ant frass is fibrous sawdust mixed with insect parts.",
-        "next_photo": "A close-up of the pellet or debris pile next to a coin, on a light-colored surface.",
+        "next_photo": "From a safe distance, zoom in on the pellet or debris pile on a light-colored surface.",
         "photo_can_confirm": true
       }
     ],
@@ -818,7 +818,7 @@
       {
         "slug": "roach-droppings-egg-cases",
         "difference": "Termite pellets are uniform, ridged ovals with rounded ends; roach droppings vary in size and shape and are often mixed with egg cases",
-        "next_photo": "A macro close-up of the pile showing whether the pieces are all the same uniform shape",
+        "next_photo": "From a safe distance, zoom in on the pile showing whether the pieces are all the same uniform shape.",
         "photo_can_confirm": true
       },
       {

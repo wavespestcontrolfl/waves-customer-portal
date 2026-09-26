@@ -36,7 +36,7 @@
       {
         "slug": "florida-blue-centipede",
         "difference": "House centipedes have extremely long, thread-like legs and blur when moving; Florida blue centipedes have short legs and move deliberately.",
-        "next_photo": "A close-up from the side showing leg length relative to body width.",
+        "next_photo": "From a safe distance, zoom in from the side showing leg length relative to body width.",
         "photo_can_confirm": true
       }
     ],
@@ -144,7 +144,7 @@
       {
         "slug": "house-centipede",
         "difference": "Millipedes have two short leg pairs per segment and coil when touched; house centipedes have one very long leg pair per segment and move fast.",
-        "next_photo": "A close-up from the side counting legs per body segment, next to a coin.",
+        "next_photo": "From a safe distance, zoom in from the side, counting legs per body segment.",
         "photo_can_confirm": true
       }
     ],
@@ -356,7 +356,7 @@
       {
         "slug": "greenhouse-millipede",
         "difference": "Centipede has one pair of legs per segment, moves fast, and can bite; millipede has two pairs per segment, moves slowly, and doesn't bite",
-        "next_photo": "A close-up of the underside or side profile counting leg pairs per segment, from a safe distance",
+        "next_photo": "From a safe distance, zoom in on the underside or side profile counting leg pairs per segment.",
         "photo_can_confirm": true
       }
     ],
@@ -468,7 +468,7 @@
       {
         "slug": "florida-blue-centipede",
         "difference": "Millipede has two pairs of legs per segment, moves slowly, and doesn't bite; centipede has one pair per segment, moves fast, and can bite",
-        "next_photo": "A close-up of the underside or side profile counting leg pairs per segment",
+        "next_photo": "From a safe distance, zoom in on the underside or side profile counting leg pairs per segment.",
         "photo_can_confirm": true
       }
     ],
@@ -540,7 +540,7 @@
       "https://ask.ifas.ufl.edu/publication/IG093"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": ""
     },
     "role": "harmless_visitor",

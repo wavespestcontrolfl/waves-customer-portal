@@ -149,7 +149,7 @@
       {
         "slug": "corn-snake",
         "difference": "Rat snake is yellow to olive with four long stripes; corn snake is orange to tan with large reddish-brown blotches outlined in black",
-        "next_photo": "A whole-body photo checking for long stripes versus large outlined blotches",
+        "next_photo": "From a safe distance, photograph the whole body checking for long stripes versus large outlined blotches.",
         "photo_can_confirm": true
       }
     ],
@@ -219,7 +219,7 @@
       "https://www.floridamuseum.ufl.edu/florida-snake-id/snake/eastern-ratsnake/"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": "Color-form claim confirmed directly: the Florida Museum of Natural History (University of Florida) species-ID page states adults in the Florida peninsula \"can be yellow, orange, tan, or gray with four dark longitudinal stripes\" and lists 'Yellow Ratsnake' and 'Everglades Ratsnake' among the accepted common names, matching this entry's traits/aka."
     },
     "role": "wildlife",
@@ -258,7 +258,7 @@
       {
         "slug": "eastern-rat-snake",
         "difference": "Corn snake is orange to tan with large outlined blotches; rat snake is yellow to olive with four long stripes",
-        "next_photo": "A whole-body photo checking for large outlined blotches versus long stripes",
+        "next_photo": "From a safe distance, photograph the whole body checking for large outlined blotches versus long stripes.",
         "photo_can_confirm": true
       },
       {

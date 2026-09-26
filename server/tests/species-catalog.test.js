@@ -151,6 +151,27 @@ describe('species-catalog-v1 entries — schema (ported from validate.js)', () =
         expect(la.next_photo).toMatch(/never approach/i);
         expect(la.next_photo).not.toMatch(/close-up/i);
       }
+      // Any pair where either side stings, is venomous, carries a medical or
+      // defensive bite risk, or is a nest/mound/colony sign of one of those
+      // (fire ant mounds, wasp/hornet/yellowjacket nests, bee colonies and
+      // swarms, stinging caterpillars): no coin/ruler size check, no
+      // close-up, and never touch, poke or disturb it — zoom in from a safe
+      // distance instead (Codex #4974 r6).
+      const stingsVenomousOrMedical = (x) => !!x
+        && (x.safety.stings === true || x.safety.venomous === true || ['medical', 'defensive'].includes(x.risk));
+      const riskySign = (x) => !!x && x.kind === 'sign'
+        && x.sign_of.some((s) => stingsVenomousOrMedical(catalog.getEntry(s)));
+      const isRiskyPair = (slug) => {
+        const x = catalog.getEntry(slug);
+        return stingsVenomousOrMedical(x) || riskySign(x);
+      };
+      if (isRiskyPair(e.slug) || isRiskyPair(la.slug)) {
+        // "don't disturb it" / "never disturb the mound" is the safe form —
+        // only a bare instruction to disturb it is forbidden.
+        const UNSAFE_PHOTO_TIP = /close-up|up close|\bcoin\b|\bruler\b|next to (it|the)|\btouch\b|\bpoke\b|(?<!don't |do not |never )disturb (it|the)/i;
+        expect(la.next_photo).not.toMatch(UNSAFE_PHOTO_TIP);
+        expect(la.next_photo).toMatch(/safe distance/i);
+      }
     }
 
     expect(ENUMS.size).toContain(e.size);

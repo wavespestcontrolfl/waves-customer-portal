@@ -134,13 +134,13 @@
       {
         "slug": "rodent-gnaw-marks",
         "difference": "Woodpecker holes are round, drilled straight in, often high in a row; rodent gnaw marks are irregular gouges with tooth grooves, usually low",
-        "next_photo": "A close-up of the hole shape (round/drilled vs. an irregular gouge) and its height/location on the structure",
+        "next_photo": "From a safe distance, zoom in on the hole shape (round/drilled vs. an irregular gouge) and its height/location on the structure.",
         "photo_can_confirm": true
       },
       {
         "slug": "carpenter-bee",
         "difference": "Carpenter bee holes are a single, round, pencil-width hole with a dark stain below; woodpecker holes are larger, rougher-edged and often clustered in a row.",
-        "next_photo": "A close-up of one hole: perfectly round and stained (bee) versus larger, ragged-edged and clustered (woodpecker).",
+        "next_photo": "From a safe distance, zoom in on one hole: perfectly round and stained (bee) versus larger, ragged-edged and clustered (woodpecker).",
         "photo_can_confirm": true
       }
     ],
@@ -212,7 +212,7 @@
       "https://www.fws.gov/law/migratory-bird-treaty-act-1918"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": "No standalone woodpecker organism slug exists anywhere in the 239-entry master list, only this damage sign, so sign_of self-references this slug; flagging for the owner in case a woodpecker organism entry should exist (audit item 56, acceptable for now). Federal protection confirmed directly: USFWS's official 2023 list of birds protected under the Migratory Bird Treaty Act (50 CFR 10.13) includes the woodpecker family Picidae; USFWS's own MBTA summary page confirms the Act prohibits take/possession without a permit. Per audit item 36: added a look-alike to carpenter-bee (A entry) since woodpeckers sometimes drill right at a bee hole to reach the larvae inside, a real and common confusion; A-side (carpenter-bee) should add the reciprocal look-alike."
     },
     "role": "protected_wildlife",

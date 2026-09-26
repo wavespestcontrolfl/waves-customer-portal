@@ -113,7 +113,7 @@
     "safety_line": null,
     "legacy_slugs": [],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": ""
     },
     "slug": "earwig",
@@ -139,7 +139,7 @@
       {
         "slug": "silverfish",
         "difference": "Earwigs have rear pincers and a beetle-like body; silverfish have three tail bristles instead of pincers and a tapered, scaly body.",
-        "next_photo": "A close-up of the tail end — pincers versus bristles.",
+        "next_photo": "From a safe distance, zoom in on the tail end — pincers versus bristles.",
         "photo_can_confirm": true
       }
     ],
@@ -584,7 +584,7 @@
       {
         "slug": "golden-silk-orbweaver",
         "difference": "Bark lice webbing lies flat on the bark with no spider present; an orb-weaver's web is large and open, strung between branches with a spider in it",
-        "next_photo": "A wider shot showing whether the webbing lies flat against the bark or hangs open in the air, and whether a spider is visible in it",
+        "next_photo": "From a safe distance, photograph whether the webbing lies flat against the bark or hangs open in the air, and whether a spider is visible in it.",
         "photo_can_confirm": true
       }
     ],
@@ -653,7 +653,7 @@
       "https://edis.ifas.ufl.edu/publication/IN553"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": "Found and confirmed a dedicated UF/IFAS Featured Creatures page this session: EENY275/IN553, \"A Webbing Barklouse, A Psocid, Archipsocus nomas Gurney\" (Donald W. Hall, Entomology & Nematology Dept.). It directly states \"the webs are unsightly, but neither the barklice nor the webs cause any harm to the trees\" and that they feed primarily on lichens (bark grazers, not tree feeders) — confirming both the webbing behavior and the harmless-to-the-tree claim. It also gives real Florida phenology: colonies rare Dec-Feb (central FL), more frequent March-June, rapidly increasing July-October; peak_months tightened to 7-10 and season_basis changed to observed accordingly."
     },
     "role": "beneficial",

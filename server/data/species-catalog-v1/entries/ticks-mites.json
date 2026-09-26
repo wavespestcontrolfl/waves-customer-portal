@@ -16,7 +16,7 @@
     "safety_line": "Can spread disease to dogs and, less commonly, to people. See a doctor if a bite site develops a rash or fever follows.",
     "legacy_slugs": [],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": ""
     },
     "slug": "brown-dog-tick",
@@ -41,7 +41,7 @@
       {
         "slug": "american-dog-tick",
         "difference": "Brown dog tick is plain reddish-brown and can live entirely indoors; American dog tick has pale mottling on the back and needs to go back outdoors.",
-        "next_photo": "A close-up from above of the back for any pale mottling, next to a coin.",
+        "next_photo": "From a safe distance, zoom in from above on the back for any pale mottling.",
         "photo_can_confirm": true
       }
     ],
@@ -146,7 +146,7 @@
       {
         "slug": "lone-star-tick",
         "difference": "American dog tick has a mottled gray-white pattern on its back; lone star tick has a single solid silvery-white dot (females) or scattered white streaks (males)",
-        "next_photo": "A close-up straight down on the tick's back showing whether the pale marking is a mottled pattern or one solid spot",
+        "next_photo": "From a safe distance, zoom in straight down on the tick's back showing whether the pale marking is mottled or one solid spot.",
         "photo_can_confirm": true
       }
     ],
@@ -218,7 +218,7 @@
       "https://www.cdc.gov/rocky-mountain-spotted-fever/about/index.html"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": ""
     }
   },
@@ -258,7 +258,7 @@
       {
         "slug": "american-dog-tick",
         "difference": "Lone star tick has one solid white dot (female) or scattered edge spots (male); American dog tick has an even, mottled gray-white pattern across its back",
-        "next_photo": "A close-up straight down on the tick's back showing whether the pale marking is one solid spot or a mottled pattern",
+        "next_photo": "From a safe distance, zoom in straight down on the tick's back showing whether the pale marking is one solid spot or mottled.",
         "photo_can_confirm": true
       }
     ],
@@ -330,7 +330,7 @@
       "https://www.mayoclinic.org/diseases-conditions/alpha-gal-syndrome/in-depth/tick-species/art-20546861"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": ""
     }
   },
@@ -371,7 +371,7 @@
       {
         "slug": "american-dog-tick",
         "difference": "Blacklegged tick is small and plain dark reddish-brown to black; American dog tick is larger with an obvious mottled gray-white back pattern",
-        "next_photo": "A close-up straight down on the tick's back showing whether there is any pale marking at all",
+        "next_photo": "From a safe distance, zoom in straight down on the tick's back showing whether there is any pale marking at all.",
         "photo_can_confirm": true
       }
     ],
@@ -482,13 +482,13 @@
       {
         "slug": "bird-rodent-mites",
         "difference": "Chigger bites cluster at sock lines and waistbands after time in grass; bird/rodent mite bites scatter over the upper body and follow a nest indoors",
-        "next_photo": "A technician judges this from bite pattern, location, timing and any pets/nest nearby, not from a photo of the welts alone.",
+        "next_photo": "Keep a safe distance from any nest; a technician judges this from bite pattern, location, timing and any pets/nest nearby, not a photo of welts alone.",
         "photo_can_confirm": false
       },
       {
         "slug": "cat-flea",
         "difference": "Chigger bites cluster at sock lines and waistbands after time in tall grass; flea bites cluster low on the legs and ankles, often with pets in the home.",
-        "next_photo": "A technician judges this from bite pattern, location, timing and any pets/nest nearby, not from a photo of the welts alone.",
+        "next_photo": "A technician judges this from bite pattern, location, timing and any pets/nest nearby, not from a photo of the welts alone; keep a safe distance from any nest.",
         "photo_can_confirm": false
       }
     ],
@@ -560,7 +560,7 @@
       "https://ask.ifas.ufl.edu/publication/IG085"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": "Per audit item 26: removed the 'yard treatment ... helps a lot' effectiveness claim (BRIEF Revision 2 rule 3, no treatment promises). Per BRIEF Revision 3 (bite-pattern look-alikes): both look_alikes set to photo_can_confirm false, since a photo of welts can't say what bit; added a second look-alike to cat-flea (A/fleas)."
     }
   },
@@ -603,7 +603,7 @@
       {
         "slug": "chiggers",
         "difference": "Bird/rodent mite bites scatter over the upper body indoors near a nest; chigger bites cluster at sock lines and waistbands after time in grass outdoors",
-        "next_photo": "A technician judges this from bite pattern, location, timing and any nest nearby, not from a photo of the welts alone.",
+        "next_photo": "Keep a safe distance from any nest; a technician judges this from bite pattern, location, timing and any nest nearby, not a photo of the welts alone.",
         "photo_can_confirm": false
       }
     ],
@@ -675,7 +675,7 @@
       "https://en.wikipedia.org/wiki/Rodent_mite_dermatitis"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": "Could not load the UF/IFAS EDIS 'Mites That Attack Humans' (IG086) page directly in this session (server returned 410); facts cross-checked against Wikipedia's rodent mite dermatitis summary and general search results citing that same IFAS publication and a UF tropical fowl mite Featured Creatures page. Per audit item 26 / BRIEF Revision 3: look_alikes[0].photo_can_confirm set to false (bite-pattern comparison); softened a 'removing the source is what stops the bites' method-outcome claim in copy."
     }
   }

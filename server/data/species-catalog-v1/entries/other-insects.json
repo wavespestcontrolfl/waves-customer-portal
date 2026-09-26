@@ -142,7 +142,7 @@
       {
         "slug": "two-striped-walkingstick",
         "difference": "Mantis has enlarged, spiny front legs held up for grabbing prey; walkingstick's legs are all thin and equal, made only for walking",
-        "next_photo": "A close-up of the front legs, checking for an enlarged, spiny grabbing pair",
+        "next_photo": "From a safe distance, zoom in on the front legs, checking for an enlarged, spiny grabbing pair.",
         "photo_can_confirm": true
       }
     ],
@@ -207,7 +207,7 @@
       "https://en.wikipedia.org/wiki/Stagmomantis_carolina"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": "Per audit item 44: safety.bites changed from false to true (capability, not danger, per rule 5, which names mantises explicitly)."
     },
     "role": "beneficial",
@@ -246,7 +246,7 @@
       {
         "slug": "gallinipper",
         "difference": "Dragonfly holds its wings flat out at rest and isn't a biting pest; gallinipper is a large mosquito that folds its wings over its back and bites painfully.",
-        "next_photo": "A close-up of the wing position at rest (flat out vs. folded over the back)",
+        "next_photo": "From a safe distance, zoom in on the wing position at rest (flat out vs. folded over the back).",
         "photo_can_confirm": true
       }
     ],
@@ -314,7 +314,7 @@
       "https://en.wikipedia.org/wiki/Dragonfly"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": "Per audit item 44: safety.bites changed from false to true (capability, not danger, per rule 5, which names large dragonflies explicitly)."
     },
     "role": "beneficial",
@@ -472,7 +472,7 @@
       {
         "slug": "cicada-killer",
         "difference": "Cicada is thick-bodied with clear wings, no stinger, and stays on tree trunks; cicada killer is a large wasp with a stinger that digs burrows in bare soil",
-        "next_photo": "A close-up checking for a wasp-like waist and stinger, or a burrow with loose soil, versus a round-bodied insect on bark",
+        "next_photo": "From a safe distance, zoom in checking for a wasp-like waist and stinger, or a burrow with loose soil, versus a round-bodied insect on bark.",
         "photo_can_confirm": true
       }
     ],
@@ -535,7 +535,7 @@
       "https://en.wikipedia.org/wiki/Cicada"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": ""
     },
     "role": "harmless_visitor",
@@ -577,7 +577,7 @@
       {
         "slug": "cicada-killer",
         "difference": "Antlion pit is a smooth sand funnel with no tunnel or insect visible; cicada killer burrow is a mounded tunnel with a wasp coming and going",
-        "next_photo": "A close-up of the hole's shape (smooth funnel vs. mounded tunnel) and whether a wasp is seen using it",
+        "next_photo": "From a safe distance, zoom in on the hole's shape (smooth funnel vs. mounded tunnel) and whether a wasp is seen using it.",
         "photo_can_confirm": true
       }
     ],
@@ -648,7 +648,7 @@
       "https://en.wikipedia.org/wiki/Antlion"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": "Bite risk to people is extremely rare per the source (one documented case); flagged bites:true for honesty but framed as low-concern in copy/safety_line."
     },
     "role": "beneficial",

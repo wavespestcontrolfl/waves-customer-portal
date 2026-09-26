@@ -1054,7 +1054,7 @@
       {
         "slug": "american-cockroach",
         "difference": "Ground beetles have hard wing covers meeting in a straight line; cockroaches have softer, overlapping wings and longer antennae",
-        "next_photo": "A close-up from above of the back and the antennae length",
+        "next_photo": "From a safe distance, zoom in from above on the back and the antennae length.",
         "photo_can_confirm": true
       }
     ],
@@ -1125,7 +1125,7 @@
       "https://ask.ifas.ufl.edu/topics/carabidae"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": "Generic family-level entry; Florida hosts many ground beetle species with varied size/color, so traits describe the common pattern homeowners see rather than one species. Per audit item 44: safety.bites changed from false to true (capability, not danger, per rule 5); risk changed from low to defensive to match."
     },
     "role": "beneficial",

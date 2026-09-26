@@ -241,7 +241,7 @@
     "safety_line": "German roach infestations can trigger allergies and asthma and can adulterate food with feces and shed skins. Keep food sealed and surfaces clean while treatment is underway.",
     "legacy_slugs": [],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": ""
     },
     "slug": "german-cockroach",
@@ -266,7 +266,7 @@
       {
         "slug": "brown-banded-cockroach",
         "difference": "German cockroaches have two straight parallel stripes on the pronotum; brown-banded cockroaches have bands across the wings and a more mottled look.",
-        "next_photo": "A close-up from above of the stripe or band pattern, next to a coin.",
+        "next_photo": "From a safe distance, zoom in from above on the stripe or band pattern.",
         "photo_can_confirm": true
       }
     ],
@@ -714,7 +714,7 @@
       {
         "slug": "german-cockroach",
         "difference": "Asian cockroach flies readily and is drawn outdoors to light at dusk; German cockroach looks nearly identical but rarely flies and stays hidden indoors",
-        "next_photo": "A short video or photo of the roach's behavior when disturbed, showing whether it takes flight",
+        "next_photo": "From a safe distance, take a short video showing whether it takes flight when approached.",
         "photo_can_confirm": true
       }
     ],
@@ -782,7 +782,7 @@
       "https://blogs.ifas.ufl.edu/pestalert/2020/04/17/which-roach-is-around-your-yard/"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": ""
     }
   },
@@ -821,7 +821,7 @@
       {
         "slug": "german-cockroach",
         "difference": "Brown-banded has two pale crossbands and stays up high in dry areas; German cockroach has two dark stripes behind the head and stays low near water",
-        "next_photo": "A close-up from above showing whether the pale marks are crossbands on the wings or stripes behind the head",
+        "next_photo": "From a safe distance, zoom in from above showing whether the pale marks are crossbands on the wings or stripes behind the head.",
         "photo_can_confirm": true
       }
     ],
@@ -900,7 +900,7 @@
       "https://www.fws.gov/species/brownbanded-cockroach-supella-longipalpa"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": ""
     }
   },
@@ -1171,13 +1171,13 @@
       {
         "slug": "drywood-termite-frass",
         "difference": "Roach droppings vary in size and are often smeared or mixed with irregular egg cases; drywood termite pellets are uniform, ridged ovals with no smearing",
-        "next_photo": "A macro close-up of the pile showing whether the pieces are uniform in shape or mixed and smeared",
+        "next_photo": "From a safe distance, zoom in on the pile showing whether the pieces are uniform in shape or mixed and smeared.",
         "photo_can_confirm": true
       },
       {
         "slug": "bed-bug-signs",
         "difference": "Roach droppings show up in cabinets and along baseboards; bed bug signs (dark spotting, shed skins) cluster on mattress seams and bed frames",
-        "next_photo": "A close-up of the mattress seam or bed frame instead of the kitchen or pantry area",
+        "next_photo": "From a safe distance, zoom in on the mattress seam or bed frame instead of the kitchen or pantry area.",
         "photo_can_confirm": true
       }
     ],
@@ -1255,7 +1255,7 @@
       "https://journals.flvc.org/edis/article/view/119483"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": ""
     }
   }

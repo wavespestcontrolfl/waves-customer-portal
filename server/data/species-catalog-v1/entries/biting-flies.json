@@ -16,7 +16,7 @@
     "safety_line": "Bites itch and burn but are not known to spread disease locally. See a doctor if a bite site becomes increasingly red, swollen, or painful days later.",
     "legacy_slugs": [],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": ""
     },
     "slug": "no-see-um",
@@ -44,7 +44,7 @@
       {
         "slug": "chiggers",
         "difference": "Both leave itchy welts. No-see-ums bite near water at dawn/dusk; chiggers come from vegetation and bite at sock lines and skin folds.",
-        "next_photo": "A technician judges from the site, timing, and any insect actually caught — a photo of the bite pattern alone can't confirm which one bit.",
+        "next_photo": "Keep a safe distance from any nest; a technician judges from the site, timing, and any insect actually caught.",
         "photo_can_confirm": false
       }
     ],
@@ -146,7 +146,7 @@
       {
         "slug": "deer-fly",
         "difference": "Yellow fly has a solid yellow-orange body; deer fly is smaller with dark patterned wings and a mottled brown-and-yellow body",
-        "next_photo": "A close-up in good light showing the overall body color and wing pattern",
+        "next_photo": "From a safe distance, zoom in under good light showing the overall body color and wing pattern.",
         "photo_can_confirm": true
       }
     ],
@@ -251,7 +251,7 @@
       {
         "slug": "horse-fly",
         "difference": "Deer fly is smaller with patterned, banded wings; horse fly is larger and stockier with clear or evenly smoky wings and no wing pattern",
-        "next_photo": "A close-up of the wings showing whether they have a dark banded pattern or are clear/uniformly smoky",
+        "next_photo": "From a safe distance, zoom in on the wings showing whether they have a dark banded pattern or are clear/uniformly smoky.",
         "photo_can_confirm": true
       }
     ],
@@ -315,7 +315,7 @@
       "https://ask.ifas.ufl.edu/publication/IN155"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": ""
     }
   },
@@ -353,7 +353,7 @@
       {
         "slug": "deer-fly",
         "difference": "Horse fly is larger and stockier with plain clear or smoky wings; deer fly is smaller with dark banded patterns on the wings",
-        "next_photo": "A close-up of the wings showing whether they have a dark banded pattern or are clear/uniformly smoky",
+        "next_photo": "From a safe distance, zoom in on the wings showing whether they have a dark banded pattern or are clear/uniformly smoky.",
         "photo_can_confirm": true
       }
     ],
@@ -419,7 +419,7 @@
       "https://ask.ifas.ufl.edu/publication/IN155"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": ""
     }
   },
@@ -461,7 +461,7 @@
       {
         "slug": "house-fly",
         "difference": "Stable fly holds a forward-pointing, needle-like mouthpart and bites ankles; house fly has a soft sponging mouthpart built only for sipping",
-        "next_photo": "A close-up straight on at the front of the head showing the shape of the mouthpart",
+        "next_photo": "From a safe distance, zoom in straight on at the front of the head showing the shape of the mouthpart.",
         "photo_can_confirm": true
       }
     ],
@@ -532,7 +532,7 @@
       "https://edis.ifas.ufl.edu/publication/in1114"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": ""
     }
   }

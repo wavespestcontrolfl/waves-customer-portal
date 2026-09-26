@@ -33,7 +33,7 @@
       {
         "slug": "hentz-striped-scorpion",
         "difference": "Bark scorpion is larger with variable solid coloring; Hentz striped scorpion is small, light mottled brown, with a yellow stripe down the back",
-        "next_photo": "A photo with a coin next to the scorpion for a size comparison",
+        "next_photo": "From a safe distance, zoom in on overall size and whether a pale yellow center stripe is present.",
         "photo_can_confirm": true
       },
       {
@@ -111,7 +111,7 @@
       "https://en.wikipedia.org/wiki/Centruroides_gracilis"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": ""
     }
   },
@@ -149,7 +149,7 @@
       {
         "slug": "florida-bark-scorpion",
         "difference": "Hentz striped scorpion is small with a pale yellow center stripe; Florida bark scorpion is larger with variable solid coloring and no stripe",
-        "next_photo": "A photo with a coin next to the scorpion for a size comparison",
+        "next_photo": "From a safe distance, zoom in on overall size and whether a pale yellow center stripe is present.",
         "photo_can_confirm": true
       }
     ],
@@ -221,7 +221,7 @@
       "https://en.wikipedia.org/wiki/Centruroides_hentzi"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": ""
     }
   },
@@ -262,7 +262,7 @@
       {
         "slug": "cellar-spider",
         "difference": "Harvestman has one fused, oval-looking body and no web; cellar spider has a small, clearly two-part body and hangs in a messy web",
-        "next_photo": "A photo showing whether the body looks like one oval blob or two separate parts, and whether there is a web",
+        "next_photo": "From a safe distance, photograph whether the body looks like one oval blob or two separate parts, and whether there is a web.",
         "photo_can_confirm": true
       }
     ],
@@ -334,7 +334,7 @@
       "https://en.wikipedia.org/wiki/Opiliones"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": ""
     }
   },

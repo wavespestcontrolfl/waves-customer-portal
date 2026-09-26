@@ -353,13 +353,13 @@
       {
         "slug": "milkweed-assassin-bug",
         "difference": "Leaf-footed bug has flared, leaf-shaped hind legs and feeds on plants/fruit; milkweed assassin bug has plain thin legs and hunts other insects",
-        "next_photo": "A close-up of the back legs showing whether they are flared and leaf-shaped or plain and thin",
+        "next_photo": "From a safe distance, zoom in on the back legs showing whether they are flared and leaf-shaped or plain and thin.",
         "photo_can_confirm": true
       },
       {
         "slug": "kissing-bug",
         "difference": "Leaf-footed bug has a blunt head and flared, leaf-shaped hind legs, and does not bite people; kissing bug has a slim cone head and thin folded beak.",
-        "next_photo": "A close-up of the head (blunt vs. slim cone) and the back legs (flared and leaf-shaped vs. plain)",
+        "next_photo": "From a safe distance, zoom in on the head (blunt vs. slim cone) and the back legs (flared and leaf-shaped vs. plain).",
         "photo_can_confirm": true
       }
     ],
@@ -429,7 +429,7 @@
       "https://en.wikipedia.org/wiki/Leptoglossus"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": "Per audit item 34: added a reciprocal look-alike to kissing-bug, the most common false-alarm pairing for that species (this one is harmless, feeds on plants)."
     },
     "role": "plant_pest",
@@ -468,7 +468,7 @@
       {
         "slug": "kissing-bug",
         "difference": "Wheel bug has a jagged cog-shaped back crest and hunts garden pests by day; kissing bug has a slim cone head and red-orange side spots, and bites at night",
-        "next_photo": "A photo from above showing whether there is a wheel-shaped ridge on the back, or red-orange spots along the abdomen edge",
+        "next_photo": "From a safe distance, photograph from above showing whether there is a wheel-shaped ridge on the back, or red-orange spots along the abdomen edge.",
         "photo_can_confirm": true
       }
     ],
@@ -532,7 +532,7 @@
       "https://en.wikipedia.org/wiki/Arilus_cristatus"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": ""
     },
     "role": "beneficial",
@@ -570,7 +570,7 @@
       {
         "slug": "leaf-footed-bug",
         "difference": "Milkweed assassin bug has plain thin legs and hunts other insects; leaf-footed bug has flared, leaf-shaped hind legs and feeds directly on plants and fruit",
-        "next_photo": "A close-up of the back legs showing whether they are flared and leaf-shaped or plain and thin",
+        "next_photo": "From a safe distance, zoom in on the back legs showing whether they are flared and leaf-shaped or plain and thin.",
         "photo_can_confirm": true
       }
     ],
@@ -636,7 +636,7 @@
       "https://en.wikipedia.org/wiki/Zelus_longipes"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": ""
     },
     "role": "beneficial",
@@ -678,13 +678,13 @@
       {
         "slug": "wheel-bug",
         "difference": "Kissing bug has a slim cone head and red-orange side spots, and bites people at night; wheel bug has a cog-shaped back crest and hunts garden pests by day",
-        "next_photo": "A photo from above showing whether there is a wheel-shaped ridge on the back, or red-orange spots along the abdomen edge",
+        "next_photo": "From a safe distance, photograph from above showing whether there is a wheel-shaped ridge on the back, or red-orange spots along the abdomen edge.",
         "photo_can_confirm": true
       },
       {
         "slug": "leaf-footed-bug",
         "difference": "Kissing bug has a slim cone head and thin folded beak; leaf-footed bug has a blunt head and flared, leaf-shaped hind legs, and does not bite people.",
-        "next_photo": "A close-up of the head (slim cone vs. blunt) and the back legs (plain vs. flared and leaf-shaped)",
+        "next_photo": "From a safe distance, zoom in on the head (slim cone vs. blunt) and the back legs (plain vs. flared and leaf-shaped).",
         "photo_can_confirm": true
       }
     ],
@@ -751,7 +751,7 @@
       "https://en.wikipedia.org/wiki/Triatoma_sanguisuga"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": "Per audit item 42: service.inspection_first changed from false to true (and key from \"pest\" to null) to match action: \"inspection\", consistent with the tech_notes advice to save a specimen for ID before treatment. Traits[3] (biting on the face while sleeping) replaced with a visible size/wing trait, since it described behavior rather than something visible in a photo of the insect itself. Per audit item 34: added a reciprocal look-alike to leaf-footed-bug, the most common false alarm for this species."
     },
     "role": "health_pest",

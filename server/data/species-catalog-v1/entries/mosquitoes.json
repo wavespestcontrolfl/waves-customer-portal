@@ -17,7 +17,7 @@
     "safety_line": "Can spread dengue, Zika, and chikungunya locally. See a doctor if you develop fever, rash, or joint pain after being bitten.",
     "legacy_slugs": [],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": ""
     },
     "slug": "aedes-mosquito",
@@ -42,7 +42,7 @@
       {
         "slug": "asian-tiger-mosquito",
         "difference": "Yellow fever mosquito has a lyre-shaped mark on the thorax; Asian tiger mosquito has a single straight white stripe down the center of the back.",
-        "next_photo": "A close-up of the back (thorax) while it rests on skin or a wall.",
+        "next_photo": "From a safe distance, zoom in on the back (thorax) while it rests on skin or a wall.",
         "photo_can_confirm": true
       }
     ],
@@ -127,7 +127,7 @@
     "safety_line": "Capable of spreading dengue, chikungunya, and other viruses. See a doctor if you develop fever, rash, or joint pain after being bitten.",
     "legacy_slugs": [],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": ""
     },
     "slug": "asian-tiger-mosquito",
@@ -152,7 +152,7 @@
       {
         "slug": "aedes-mosquito",
         "difference": "Asian tiger mosquito has one straight white stripe down the back; yellow fever mosquito has a lyre-shaped mark instead.",
-        "next_photo": "A close-up of the back (thorax) while it rests on skin or a wall.",
+        "next_photo": "From a safe distance, zoom in on the back (thorax) while it rests on skin or a wall.",
         "photo_can_confirm": true
       }
     ],
@@ -255,7 +255,7 @@
       {
         "slug": "asian-tiger-mosquito",
         "difference": "Southern house mosquito is plain brown and bites at night; Asian tiger mosquito has bold black-and-white stripes and bites during the day",
-        "next_photo": "A close-up showing whether the legs and body have bold white stripes or are plain brown",
+        "next_photo": "From a safe distance, zoom in showing whether the legs and body have bold white stripes or are plain brown.",
         "photo_can_confirm": true
       }
     ],
@@ -326,7 +326,7 @@
       "https://ask.ifas.ufl.edu/publication/IN837"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": ""
     }
   },
@@ -369,7 +369,7 @@
       {
         "slug": "asian-tiger-mosquito",
         "difference": "Gallinipper is much bigger, roughly the size of a small fly, with shaggy legs; Asian tiger mosquito is normal mosquito size with clean, sharp white stripes",
-        "next_photo": "A photo with a coin or fingertip next to the mosquito for a size comparison",
+        "next_photo": "From a safe distance, zoom in to compare overall size and leg thickness to a typical mosquito.",
         "photo_can_confirm": true
       }
     ],
@@ -433,7 +433,7 @@
       "https://blogs.ifas.ufl.edu/news/2013/03/04/huge-aggressive-mosquito-may-be-abundant-in-florida-this-summer-ufifas-expert-warns"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": ""
     }
   },
@@ -474,7 +474,7 @@
       {
         "slug": "asian-tiger-mosquito",
         "difference": "Salt marsh mosquito is dark with faint leg bands and swarms near coastal marshes; Asian tiger mosquito has one bold white back stripe and is common well inland",
-        "next_photo": "A close-up of the top of the thorax showing whether there is one bold white center stripe",
+        "next_photo": "From a safe distance, zoom in on the top of the thorax showing whether there is one bold white center stripe.",
         "photo_can_confirm": true
       }
     ],
@@ -545,7 +545,7 @@
       "https://ask.ifas.ufl.edu/publication/IN1035"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": "Confirmed against UF/IFAS EDIS IN1035: it explicitly says this species \"is not a primary vector of major concern\" for human disease, acting only as a secondary/bridge vector for EEE and VEE, and is \"a nuisance in Florida\" mainly through aggressive biting after rain and flooding. disease_vector stays true for its documented dog-heartworm vectoring; copy and tech_notes already frame it as a nuisance/pet-risk mosquito rather than a major human-disease threat, matching the source."
     }
   },
@@ -585,7 +585,7 @@
       {
         "slug": "non-biting-midge",
         "difference": "Mosquito larvae hang near the surface and dive down when disturbed; midge larvae are thin and stay down in sediment or algae, rarely at the surface",
-        "next_photo": "A close-up of the water surface right after disturbing it, showing whether anything dives down and re-surfaces to breathe",
+        "next_photo": "From a safe distance, zoom in on the water surface showing whether anything dives down and re-surfaces to breathe.",
         "photo_can_confirm": true
       }
     ],
@@ -658,7 +658,7 @@
       "https://edis.ifas.ufl.edu/publication/in594"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": ""
     }
   }

@@ -232,7 +232,7 @@
     "safety_line": "The most venomous caterpillar in the US — hidden spines under the fur cause intense pain. Never touch it. See a doctor if pain or swelling worsens. Call 911 if someone has trouble breathing.",
     "legacy_slugs": [],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": ""
     },
     "slug": "puss-caterpillar",
@@ -257,7 +257,7 @@
       {
         "slug": "io-moth-caterpillar",
         "difference": "Puss caterpillars are uniformly fuzzy with no visible spines; Io moth caterpillars are bright green with a red-and-white stripe and obvious branched spines.",
-        "next_photo": "From a few feet away, zoom in on the body surface without touching it — fuzzy all over versus spiny with visible stripes.",
+        "next_photo": "From a safe distance, zoom in on the body surface without touching it — fuzzy all over versus spiny with visible stripes.",
         "photo_can_confirm": true
       }
     ],
@@ -334,7 +334,7 @@
     "safety_line": "Spines sting like nettles and can cause a burning, itchy welt. See a doctor for a strong allergic reaction. Call 911 if someone has trouble breathing.",
     "legacy_slugs": [],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": ""
     },
     "slug": "io-moth-caterpillar",
@@ -359,7 +359,7 @@
       {
         "slug": "puss-caterpillar",
         "difference": "Io moth caterpillars are green with branched spines and a red-white stripe; puss caterpillars are uniformly furry with no visible spines.",
-        "next_photo": "From a few feet away, zoom in on the body surface without touching it — spiny with a stripe versus uniformly fuzzy.",
+        "next_photo": "From a safe distance, zoom in on the body surface without touching it — spiny with a stripe versus uniformly fuzzy.",
         "photo_can_confirm": true
       }
     ],
@@ -452,7 +452,7 @@
       {
         "slug": "io-moth-caterpillar",
         "difference": "Saddleback has an oval brown saddle patch on plain green skin; io moth caterpillar has a pale stripe along each side and even rows of spines with no saddle mark",
-        "next_photo": "A close-up from directly above showing whether there is a distinct brown saddle-shaped patch",
+        "next_photo": "From a safe distance, zoom in from directly above showing whether there is a distinct brown saddle-shaped patch.",
         "photo_can_confirm": true
       }
     ],
@@ -515,7 +515,7 @@
       "https://en.wikipedia.org/wiki/Acharia_stimulea"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": ""
     },
     "role": "stinging_pest",
@@ -555,7 +555,7 @@
       {
         "slug": "puss-caterpillar",
         "difference": "Hag moth caterpillar is flattened with curly, uneven arm-like projections; puss caterpillar is a solid teardrop of long, silky fur with no projections",
-        "next_photo": "A close-up showing whether the shape is flat with curly projections or a smooth, solid furry teardrop",
+        "next_photo": "From a safe distance, zoom in showing whether the shape is flat with curly projections or a smooth, solid furry teardrop.",
         "photo_can_confirm": true
       }
     ],
@@ -616,7 +616,7 @@
       "https://en.wikipedia.org/wiki/Phobetron_pithecium"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": ""
     },
     "role": "stinging_pest",
@@ -653,7 +653,7 @@
       {
         "slug": "tussock-moth-caterpillar",
         "difference": "Buck moth caterpillar is black to pale with even spines and feeds in groups on oaks; tussock moth has raised hair tufts and pencils and feeds on many trees",
-        "next_photo": "A close-up showing whether the hairs are even spines all over or distinct raised tufts and long pencil-like hairs",
+        "next_photo": "From a safe distance, zoom in showing whether the hairs are even spines all over or distinct raised tufts and long pencil-like hairs.",
         "photo_can_confirm": true
       }
     ],
@@ -751,7 +751,7 @@
       {
         "slug": "buck-moth-caterpillar",
         "difference": "Tussock moth has raised hair tufts and long pencil hairs at the head/tail; buck moth caterpillar has even, branching spines all over with no tufts",
-        "next_photo": "A close-up showing whether the hairs are even spines all over or distinct raised tufts and long pencil-like hairs",
+        "next_photo": "From a safe distance, zoom in showing whether the hairs are even spines all over or distinct raised tufts and long pencil-like hairs.",
         "photo_can_confirm": true
       }
     ],
@@ -1389,7 +1389,7 @@
       {
         "slug": "paper-wasp",
         "difference": "Wasp moth has scale-covered, white-dotted wings, a red-tipped abdomen and no narrow waist or stinger; paper wasp has clear wings, a narrow waist and a stinger.",
-        "next_photo": "A close-up of the wing surface (scaled and dotted versus clear) and the waist/abdomen tip, showing whether there's a narrow waist or a visible stinger.",
+        "next_photo": "From a safe distance, zoom in on the wing surface (scaled and dotted versus clear) and whether there's a narrow waist or a visible stinger.",
         "photo_can_confirm": true
       }
     ],
@@ -1459,7 +1459,7 @@
       "https://en.wikipedia.org/wiki/Syntomeida_epilais"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": ""
     },
     "role": "harmless_visitor",

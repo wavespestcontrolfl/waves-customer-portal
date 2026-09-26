@@ -131,7 +131,7 @@
     "safety_line": null,
     "legacy_slugs": [],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": ""
     },
     "slug": "bigheaded-ant",
@@ -157,7 +157,7 @@
       {
         "slug": "fire-ant",
         "difference": "Bigheaded ant majors have a squarish head and aren't known to sting; fire ant workers are more uniform and sting readily when the mound is disturbed.",
-        "next_photo": "A close-up from above of a major worker next to a coin, showing the head shape.",
+        "next_photo": "From a safe distance, zoom in from above on a major worker showing the head shape.",
         "photo_can_confirm": true
       }
     ],
@@ -245,7 +245,7 @@
     "safety_line": "Stings burn immediately and can trigger allergic reactions. Keep kids and pets away from mounds, and do not kick or disturb one. Call 911 if someone has trouble breathing.",
     "legacy_slugs": [],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": ""
     },
     "slug": "fire-ant",
@@ -272,7 +272,7 @@
       {
         "slug": "tropical-fire-ant",
         "difference": "Tropical fire ant major workers have a head much wider than the body; red imported fire ant majors have a normal-proportioned head.",
-        "next_photo": "A close-up from a few feet away of the largest workers from the mound, next to a coin.",
+        "next_photo": "From a safe distance, zoom in on the largest workers from the mound.",
         "photo_can_confirm": true
       }
     ],
@@ -357,7 +357,7 @@
     "safety_line": "Not considered medically dangerous, but it can pinch/bite if handled. Leave it undisturbed and let a technician check the wood it came from.",
     "legacy_slugs": [],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": "Verdict kept as call because a carpenter-ant trail is a moisture/damage clue worth an inspection, not because the ant itself is dangerous or structural."
     },
     "slug": "carpenter-ant",
@@ -383,7 +383,7 @@
       {
         "slug": "subterranean-termite",
         "difference": "Carpenter ant swarmers have a pinched waist and elbowed antennae; termite swarmers have a straight waist, straight antennae, and four equal wings.",
-        "next_photo": "A close-up from the side of the waist and antennae of a winged individual, next to a coin.",
+        "next_photo": "From a safe distance, zoom in from the side on the waist and antennae of a winged individual.",
         "photo_can_confirm": true
       }
     ],
@@ -471,7 +471,7 @@
     "safety_line": null,
     "legacy_slugs": [],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": ""
     },
     "slug": "tawny-crazy-ant",
@@ -498,7 +498,7 @@
       {
         "slug": "longhorn-crazy-ant",
         "difference": "Tawny crazy ants are uniformly reddish-brown and slightly larger; longhorn crazy ants are dark with noticeably long legs and antennae.",
-        "next_photo": "A close-up from above showing body color and leg/antenna length next to a coin.",
+        "next_photo": "From a safe distance, zoom in from above showing body color and leg/antenna length.",
         "photo_can_confirm": true
       }
     ],
@@ -717,7 +717,7 @@
       {
         "slug": "fire-ant",
         "difference": "Red imported fire ant majors have a normal-sized head; tropical fire ant majors have a head much wider than the body",
-        "next_photo": "A close-up from above of the largest ants from the mound, next to a coin",
+        "next_photo": "From a safe distance, zoom in from above on the largest ants from the mound.",
         "photo_can_confirm": true
       }
     ],
@@ -787,7 +787,7 @@
       "https://entnemdept.ufl.edu/creatures/urban/ants/tropical_fire_ant.htm"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": ""
     }
   },
@@ -828,13 +828,13 @@
       {
         "slug": "tropical-fire-ant",
         "difference": "Little fire ant is far smaller (about 1.5 mm) and slow-moving; tropical fire ant workers are larger and dash along trails",
-        "next_photo": "A photo with a coin next to the ants for scale, taken from a few inches away",
+        "next_photo": "From a safe distance, zoom in on the ants' size and how quickly they move.",
         "photo_can_confirm": true
       },
       {
         "slug": "pharaoh-ant",
         "difference": "Pharaoh ant is pale yellow-red with a darker abdomen tip and runs in fast trails; little fire ant is more golden and moves sluggishly",
-        "next_photo": "A close-up macro shot of a single ant on a light background, taken with the camera as steady as possible",
+        "next_photo": "From a safe distance, zoom in macro on a single ant on a light background, camera as steady as possible.",
         "photo_can_confirm": true
       }
     ],
@@ -907,7 +907,7 @@
       "https://pmc.ncbi.nlm.nih.gov/articles/PMC12754576/"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": "Confirmed against two UF/IFAS EDIS pages (IN296, IN1351): neither mentions any FDACS regulated/reportable designation for this species, so regulated stays false rather than asserting a formal duty that isn't documented. IN296 lists established, overwintering colonies as of 2000 in several Southwest Florida counties including Collier, Hardee, Hendry, Manatee and Sarasota; IN1351 describes the established range as spanning the Florida Keys north to Gainesville, tied to human-modified habitat (roadsides, residential areas) rather than blanket coverage. Range kept at 'occasional' since establishment is documented but patchy/localized, not a yard-by-yard certainty. Pet-eye-irritation claim resolved this session: the condition is actually named 'Florida keratopathy' / 'Florida spots' and has long been reported specifically in Florida cats and dogs (per Wikipedia's Florida keratopathy entry and prior veterinary literature), so it is not purely a Pacific-island phenomenon as the earlier note assumed — but a peer-reviewed 2021-2024 clinical case series (Veterinary Ophthalmology, 100 dogs/cats, PMC12754576) states directly that the causal link to little fire ant stings 'remains speculative and has not been confirmed by rigorous academic research,' citing lesions inconsistent with actual envenomation. safety_line rewritten accordingly: the eye condition is real and Florida-associated, but LFA causation is suspected, not proven."
     }
   },
@@ -1070,7 +1070,7 @@
       {
         "slug": "tawny-crazy-ant",
         "difference": "Tawny crazy ant is a uniform reddish-tan color and appears in huge, dense masses outdoors; longhorn crazy ant is darker and usually seen in smaller numbers",
-        "next_photo": "A photo of the ants against a white background showing overall body color",
+        "next_photo": "From a safe distance, photograph the ants against a white background showing overall body color.",
         "photo_can_confirm": true
       }
     ],
@@ -1144,7 +1144,7 @@
       "https://journals.flvc.org/edis/article/download/108996/104134"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": "Per audit item 23: removed an outcome promise ('numbers usually drop once ... are in place') per BRIEF Revision 2 rule 3 (no treatment promises)."
     }
   },
@@ -1182,7 +1182,7 @@
       {
         "slug": "fire-ant",
         "difference": "Acrobat ant lifts its heart-shaped abdomen straight up over its body; fire ant's abdomen stays low and rounded and it does not raise it that way",
-        "next_photo": "A side-on close-up while the ant is moving, showing whether the abdomen tip points up or trails behind",
+        "next_photo": "From a safe distance, zoom in on the ant from the side while it is moving, showing whether the abdomen tip points up or trails behind.",
         "photo_can_confirm": true
       }
     ],
@@ -1254,7 +1254,7 @@
       "https://ask.ifas.ufl.edu/in610"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": "Per audit item 44: safety.bites changed from false to true (capability, not danger, per rule 5 -- ants generally can bite with their mandibles, often gripping before or while stinging)."
     }
   },
@@ -1407,7 +1407,7 @@
       {
         "slug": "trap-jaw-ant",
         "difference": "Twig ant is slim, wasp-shaped and climbs plants; trap-jaw ant is stockier with long straight open jaws and is usually on the ground",
-        "next_photo": "A side-on close-up showing the shape of the jaws and whether the ant is on a plant or on the ground",
+        "next_photo": "From a safe distance, zoom in from the side on the shape of the jaws and whether the ant is on a plant or on the ground.",
         "photo_can_confirm": true
       }
     ],
@@ -1480,7 +1480,7 @@
       "https://journals.flvc.org/edis/article/download/116996/115141"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": ""
     }
   },
@@ -1518,7 +1518,7 @@
       {
         "slug": "graceful-twig-ant",
         "difference": "Trap-jaw ant has long straight jaws held open and is usually found in mulch or leaf litter; graceful twig ant has normal short jaws and climbs on plants",
-        "next_photo": "A close, front-on photo of the head showing whether the jaws are long and straight or short",
+        "next_photo": "From a safe distance, zoom in front-on at the head showing whether the jaws are long and straight or short.",
         "photo_can_confirm": true
       }
     ],
@@ -1634,7 +1634,7 @@
       {
         "slug": "fire-ant",
         "difference": "Harvester ant mounds are flat, bare sand disks; fire ant mounds are fluffy, dome-shaped and have no obvious single entrance",
-        "next_photo": "A photo of the whole mound from a few feet away showing its shape and surface",
+        "next_photo": "From a safe distance, photograph the whole mound showing its shape and surface.",
         "photo_can_confirm": true
       }
     ],
@@ -1698,7 +1698,7 @@
       "https://ask.ifas.ufl.edu/in536"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": ""
     }
   },
@@ -1854,7 +1854,7 @@
       {
         "slug": "fire-ant",
         "difference": "Pyramid ant mounds are small, cone-shaped craters around one hole; fire ant mounds are larger, fluffy domes without a single obvious opening",
-        "next_photo": "A photo of the mound from directly above showing its shape and whether there is one central hole",
+        "next_photo": "From a safe distance, photograph the mound from directly above showing its shape and whether there is one central hole.",
         "photo_can_confirm": true
       }
     ],
@@ -1918,7 +1918,7 @@
       "https://blogs.ifas.ufl.edu/charlotteco/2026/04/26/a-good-ant/"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": ""
     }
   },
@@ -2071,13 +2071,13 @@
       {
         "slug": "pyramid-ant",
         "difference": "Fire ant mounds are fluffy domes with no clear opening; pyramid ant mounds are small, cone-shaped craters around one central hole",
-        "next_photo": "A photo of the mound from directly above showing its shape and whether there is one central hole",
+        "next_photo": "From a safe distance, photograph the mound from directly above showing its shape and whether there is one central hole; don't disturb it.",
         "photo_can_confirm": true
       },
       {
         "slug": "florida-harvester-ant",
         "difference": "Fire ant mounds are dome-shaped and fluffy; harvester ant mounds are flat, bare sand disks often ringed with pebbles or seed husks",
-        "next_photo": "A photo of the mound from a few feet away showing whether it is domed or flat",
+        "next_photo": "From a safe distance, photograph the mound showing whether it is domed or flat; don't disturb it.",
         "photo_can_confirm": true
       }
     ],
@@ -2149,7 +2149,7 @@
       "https://entnemdept.ufl.edu/creatures/urban/ants/"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": ""
     }
   }
