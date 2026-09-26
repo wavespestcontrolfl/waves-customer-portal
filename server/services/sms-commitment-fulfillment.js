@@ -86,6 +86,11 @@ function visitStatusAdmits(record, kind) {
 }
 
 
+// Status transitions that can witness an obligation. The watcher's event
+// page filters on the same list so a skipped/no_show write never holds a
+// page slot the loader cannot use (Codex #4816 r38).
+const WITNESS_TRANSITION_STATUSES = Object.freeze(['confirmed', 'rescheduled', 'en_route', 'on_site', 'completed', 'cancelled']);
+
 async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
   const after = new Date(message.created_at);
   const customerId = message.customer_id;
@@ -131,7 +136,7 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
           .orWhere((q) => q.where('completed_at', '>', after).where('completed_at', '<=', now))
           .orWhereExists(conn('job_status_history as h').select(conn.raw('1'))
             .whereRaw('h.job_id = scheduled_services.id')
-            .whereIn('h.to_status', ['confirmed', 'rescheduled', 'en_route', 'on_site', 'completed', 'cancelled'])
+            .whereIn('h.to_status', WITNESS_TRANSITION_STATUSES)
             .where('h.transitioned_at', '>', after).where('h.transitioned_at', '<=', now))
           // A same-status move writes no status transition; reschedule_log
           // holds the authoritative before/after dates and windows for it.
@@ -508,4 +513,4 @@ ${stringifySmsEvidence({ obligation: commitment, records, witness_refs: witnessR
   return groundFulfillment(result.json, evidence, commitment, { eventOnly });
 }
 
-module.exports = { loadSmsFulfillmentEvidence, admissibleWitness, groundFulfillment, verifySmsFulfillment, revalidateSmsFulfillment, fulfillmentFingerprint, FULFILLMENT_POLICY, SYSTEM_EVENT_TYPES, PROVIDER_RETRY_MS };
+module.exports = { loadSmsFulfillmentEvidence, admissibleWitness, groundFulfillment, verifySmsFulfillment, revalidateSmsFulfillment, fulfillmentFingerprint, FULFILLMENT_POLICY, SYSTEM_EVENT_TYPES, PROVIDER_RETRY_MS, WITNESS_TRANSITION_STATUSES };

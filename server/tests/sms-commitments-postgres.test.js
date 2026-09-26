@@ -1277,6 +1277,46 @@ postgres('SMS commitments on PostgreSQL', () => {
   },
   );
 
+  test('Codex #4816 r38: a skipped/no_show transition is not an event the page picks up', async () => {
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', basis: 'request', due_at: null, due_text: 'sometime soon',
+      quote: 'You still coming?', description: 'You still coming?' };
+    await recordMessageOperations(mockPg, message, result, context);
+    await mockPg('call_commitments').update({ due_at: null });
+    const minutes = (m) => new Date(message.created_at.getTime() + m * 60000);
+    const [visit] = await mockPg('scheduled_services').insert({
+      customer_id: message.customer_id, property_id: context.properties[0].id, service_type: 'Quarterly Pest Control',
+      scheduled_date: etDateString(minutes(5)), window_start: '09:00:00', status: 'no_show',
+      created_at: new Date(message.created_at.getTime() - 86400000), updated_at: minutes(5),
+    }).returning('id');
+    await mockPg('job_status_history').insert({ job_id: visit.id, from_status: 'confirmed', to_status: 'no_show', transitioned_at: minutes(5) });
+    const verify = jest.fn(async () => ({ verdict: 'open', reason: 'no_answer', evidence_hash: 'x', retry_after: null }));
+    const tick = async (at) => {
+      await mockPg('system_settings').insert({ key: 'sms_operations.fulfillment_cursor', value: 'ffffffff-ffff-4fff-bfff-ffffffffffff', category: 'sms_operations' })
+        .onConflict('key').merge({ value: 'ffffffff-ffff-4fff-bfff-ffffffffffff' });
+      return refreshSmsCommitments({ conn: mockPg, verify, now: at });
+    };
+    expect(await tick(minutes(20))).toMatchObject({ scanned: 0 });
+    // A witness status on the same visit is an event.
+    await mockPg('job_status_history').insert({ job_id: visit.id, from_status: 'no_show', to_status: 'rescheduled', transitioned_at: minutes(21) });
+    expect(await tick(minutes(40))).toMatchObject({ scanned: 1 });
+  });
+
+  test('Codex #4816 r38: an uncertain pet report still rings its safety review when the batch repeats the field', async () => {
+    const body = 'We have a cat. Not sure whether the dog will be out.';
+    message.message_body = body;
+    await mockPg('sms_log').where({ id: message.id }).update({ message_body: body });
+    result.obligations = [];
+    result.facts = [
+      { field: 'pet_details', quote: 'We have a cat.', value: 'cat', property_id: context.properties[0].id, duration: 'visit_only' },
+      { field: 'pet_details', quote: 'Not sure whether the dog will be out.', value: 'dog', property_id: context.properties[0].id, duration: 'visit_only' },
+    ];
+    await recordMessageOperations(mockPg, message, result, context);
+    const outcomes = (await mockPg('sms_log').first()).operational_analysis.facts.map((f) => f.outcome);
+    expect(outcomes).toEqual(['pet_needs_review', 'pet_needs_review']);
+    expect(NotificationService.notifyAdmin).toHaveBeenCalled();
+  });
+
   test('Codex #4816 r27: the event page counts activity from the effective source time, not the queue row', async () => {
     result.facts = [];
     result.obligations[0] = { ...result.obligations[0], kind: 'other', basis: 'request', due_at: null, due_text: 'sometime soon',

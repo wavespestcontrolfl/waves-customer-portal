@@ -19,7 +19,7 @@ const { VERSION, extractSmsOperations, explicitContactPreference, matchesExplici
 const { IRRIGATION_INPUT_FIELDS } = require('./irrigation-schedule-confirmation');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
 const { isSmsReaction } = require('./sms-intent');
-const { loadSmsFulfillmentEvidence, verifySmsFulfillment, revalidateSmsFulfillment, admissibleWitness, SYSTEM_EVENT_TYPES, PROVIDER_RETRY_MS } = require('./sms-commitment-fulfillment');
+const { loadSmsFulfillmentEvidence, verifySmsFulfillment, revalidateSmsFulfillment, admissibleWitness, SYSTEM_EVENT_TYPES, PROVIDER_RETRY_MS, WITNESS_TRANSITION_STATUSES } = require('./sms-commitment-fulfillment');
 
 const { hashSensitiveValue } = require('./data-hygiene/sensitive-vault');
 const REPLAY_VERSION = `${VERSION}:replay`;
@@ -105,8 +105,12 @@ const TEMPORARY_INSTRUCTION = new RegExp([
 // the past, and a false match would drop a real follow-up's bell.
 const OFFSET_UNIT = String.raw`(?:secs?|seconds?|mins?|minutes?|hrs?|hours?|days?|weeks?|wks?|months?|mos?|years?|yrs?)`;
 const SPAN_UNIT = String.raw`(?:days?|weeks?|months?|years?)`;
+// A possessive period names the topic, not the deadline: "about this
+// month's invoice", "tomorrow's appointment", "Friday's visit" (Codex #4816
+// r38). NOT_POSSESSIVE follows each bare period form.
+const NOT_POSSESSIVE = String.raw`(?!['’]s\b)`;
 const STATED_TIMING = new RegExp([
-  String.raw`\b(?:today|tomorrow|tmrw|tonight|this (?:morning|afternoon|evening|week(?:end)?|month)|next (?:week(?:end)?|month|year)|later (?:today|this week)|end of (?:the )?(?:day|week|month|year)|eod|eow)\b`,
+  String.raw`\b(?:today|tomorrow|tmrw|tonight|this (?:morning|afternoon|evening|week(?:end)?|month)|next (?:week(?:end)?|month|year)|later (?:today|this week)|end of (?:the )?(?:day|week|month|year)|eod|eow)\b${NOT_POSSESSIVE}`,
   // Day parts after a timing preposition ("call me in the morning", "after
   // work"), or plural as a standing preference ("evenings are best"). A bare
   // "good morning" is a greeting, not timing (Codex #4816 r24).
@@ -115,9 +119,9 @@ const STATED_TIMING = new RegExp([
   // The period forms TEMPORARY_INSTRUCTION already knows (Codex #4816 r27).
   String.raw`\bover the (?:weekend|summer|winter|holidays?|next (?:${COUNT} )?${SPAN_UNIT})\b`,
   String.raw`\b(?:through|thru) the (?:weekend|week|month)\b`,
-  String.raw`\b(?:next|coming|following) (?:${COUNT} )?${SPAN_UNIT}\b|\bnext (?:visit|appointment|service|time)\b`,
+  String.raw`\b(?:next|coming|following) (?:${COUNT} )?${SPAN_UNIT}\b${NOT_POSSESSIVE}|\bnext (?:visit|appointment|service|time)\b`,
   String.raw`\b(?:after|before) (?:work|school|lunch|dinner|noon)\b|\b(?:at )?lunch ?time\b`,
-  String.raw`\b${WEEKDAY}`,
+  String.raw`\b${WEEKDAY}${NOT_POSSESSIVE}`,
   // Undotted abbreviations ("call me Fri"). Wed/sat/sun double as ordinary
   // words, so they count only after a day preposition (Codex #4816 r21).
   String.raw`\b(?:mon|tue|tues|thu|thur|thurs|fri)\b`,
@@ -228,7 +232,10 @@ async function applyFacts(trx, message, facts, context) {
     const duplicateField = facts.filter((f) => f.field === fact.field).length > 1;
     const negatedReview = REVIEW_ON_NEGATION[fact.field];
     const negated = negatedReview && NEGATED_OR_UNCERTAIN.test(message.message_body);
-    const verdict = duplicateField ? 'conflicting_facts' : negated ? negatedReview
+    // The safety review outranks the duplicate-field conflict: a cat plus
+    // "not sure about the dog" is two pet_details facts, and the uncertain
+    // one must still ring (Codex #4816 r38).
+    const verdict = negated ? negatedReview : duplicateField ? 'conflicting_facts'
       : mixedTopics && !AUTO_APPLY_FIELDS.has(fact.field) ? 'mixed_topics' : factVerdict(fact, context);
     if (verdict !== 'apply') { outcomes.push({ ...fact, outcome: verdict }); continue; }
     // An explicit replay can offer new facts to staff but cannot refill a
@@ -666,6 +673,7 @@ const UNSEEN_VISIT_ACTIVITY = `(SELECT MAX(a.at) FROM (
     UNION ALL SELECT v.completed_at FROM scheduled_services v WHERE v.customer_id = s.customer_id AND ${unseen('v.completed_at')}
     UNION ALL SELECT h.transitioned_at FROM job_status_history h JOIN scheduled_services v ON v.id = h.job_id
       WHERE v.customer_id = s.customer_id AND ${unseen('h.transitioned_at')}
+        AND h.to_status IN (${WITNESS_TRANSITION_STATUSES.map((v) => `'${v}'`).join(', ')})
     UNION ALL SELECT r.created_at FROM reschedule_log r JOIN scheduled_services v ON v.id = r.scheduled_service_id
       WHERE v.customer_id = s.customer_id AND ${unseen('r.created_at')}
   ) a)`;
