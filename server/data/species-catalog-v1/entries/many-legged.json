@@ -78,9 +78,9 @@
     ],
     "peak_months": [],
     "service": {
-      "line": "pest",
-      "key": "pest",
-      "label": "General Pest Control",
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
       "inspection_first": false,
       "referral": null
     },
@@ -102,7 +102,12 @@
     "risk": "defensive",
     "action": "leave_alone",
     "season_basis": "year_round",
-    "verification": []
+    "verification": [
+      {
+        "claim": "Range in Southwest Florida specifically (vs. common statewide/nationally)",
+        "note": "House centipedes are well documented as common indoor arthropods across Florida generally; density specific to Southwest Florida was not separately verified this pass."
+      }
+    ]
   },
   {
     "kind": "organism",
@@ -234,9 +239,7 @@
       "pillbug",
       "pillbugs",
       "roly poly",
-      "roly polies",
-      "sowbug",
-      "sowbugs"
+      "roly polies"
     ],
     "scientific_name": "Armadillidium vulgare",
     "rank": "species",

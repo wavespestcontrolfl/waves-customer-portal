@@ -86,9 +86,9 @@
     },
     "urgency": "high",
     "copy": {
-      "what_it_means": "Florida's aerialist — it runs fences and branches like a tightrope walker and enters at roofline, not floor level. Attic noise plus chewed wires is urgent; sealing entry points (exclusion) is the permanent fix, done after an inspection finds them.",
+      "what_it_means": "Florida's aerialist — it runs fences and branches like a tightrope walker and enters at roofline, not floor level. Attic noise plus chewed wires is worth an inspection; sealing entry points (exclusion) is the standard approach once the entries are found.",
       "fact": "It runs fences and branches like a tightrope walker and enters buildings at roofline, not floor level.",
-      "blurb": "Attic noise + chewed wires is an urgent combination. Exclusion (sealing entries) is the permanent fix."
+      "blurb": "Attic noise + chewed wires is worth an inspection. Exclusion (sealing entry points) is the standard approach, done after the entries are located."
     },
     "tech_notes": "Confirm tail-longer-than-body + roofline entry signs. Full exclusion walk (roof returns, AC chase, garage corners); quote trapping + exclusion after inspection.",
     "sources": [
@@ -195,9 +195,9 @@
     },
     "urgency": "high",
     "copy": {
-      "what_it_means": "Where roof rats take the high road, Norway rats dig in at the foundation. A burrow plus droppings means an established population — trapping paired with sealing entry points, in that order, after an inspection.",
+      "what_it_means": "Where roof rats take the high road, Norway rats dig in at the foundation. A burrow plus droppings suggests an established population; an inspection confirms the extent, then trapping paired with sealing entry points, in that order.",
       "fact": "Ground-floor specialist — where roof rats take the high road, Norway rats dig in at the foundation.",
-      "blurb": "Burrow + droppings = established. Trapping plus entry sealing, in that order."
+      "blurb": "Burrow + droppings suggest an established population. An inspection confirms it, then trapping plus entry sealing, in that order."
     },
     "tech_notes": "Confirm burrow entrances + tail-shorter-than-body. Ground-level exclusion focus (foundation gaps, slab penetrations); quote trapping + exclusion after inspection.",
     "sources": [
@@ -305,9 +305,9 @@
     },
     "urgency": "high",
     "copy": {
-      "what_it_means": "A mouse nibbles at 20-30 food sites a night rather than eating one big meal, which is why droppings show up in many places at once. One mouse is rarely just one — sealing dime-sized gaps stops the next one from using the same door.",
+      "what_it_means": "A mouse nibbles at 20-30 food sites a night rather than eating one big meal, which is why droppings show up in many places at once. One mouse is rarely just one — sealing dime-sized gaps helps keep the next one from using the same door.",
       "fact": "A mouse nibbles at 20-30 food sites a night rather than one big meal, which is why droppings show up everywhere at once.",
-      "blurb": "One mouse is rarely one mouse. Seal dime-sized gaps or the next one uses the same door."
+      "blurb": "One mouse is rarely one mouse. Sealing dime-sized gaps helps keep the next one from using the same door."
     },
     "tech_notes": "Confirm rice-grain dropping size vs. rat. Full exclusion walk for dime-sized gaps; quote trapping + exclusion after inspection.",
     "sources": [

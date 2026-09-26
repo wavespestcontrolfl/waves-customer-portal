@@ -104,7 +104,7 @@
     "copy": {
       "what_it_means": "The classic Florida \"palmetto bug\" lives outdoors in mulch, palms, and sewers — one indoors is usually a visitor, not an infestation. Occasional wanderers are weather-driven; nightly sightings point to an entry point or moisture source worth fixing.",
       "fact": "It lives outdoors in mulch, palms, and sewers — one in the house is a visitor, not necessarily an infestation.",
-      "blurb": "The classic Florida \"palmetto bug\" — a large outdoor roach that wanders inside from mulch, palms, and drains. Occasional sightings respond very well to an exterior program."
+      "blurb": "The classic Florida \"palmetto bug\" — a large outdoor roach that wanders inside from mulch, palms, and drains. Occasional sightings are usually weather-driven; frequent ones point to an entry point or moisture source worth checking."
     },
     "tech_notes": "Reddish, yellow pronotum band, strong flier. Source: mulch beds, palm boots, sewer/drain lines. Exterior-first program + dewebbing entry points.",
     "sources": [
@@ -259,8 +259,8 @@
     "traits": [
       "Small, tan, with two dark parallel racing stripes behind the head",
       "Found near appliances, under sinks, and in cabinet hinges",
-      "Never survives outdoors in Florida — arrives via bags, boxes, or used appliances",
-      "Seeing them in daylight means a heavy, established population"
+      "Rarely survives outdoors in Florida — arrives via bags, boxes, or used appliances",
+      "Seeing them in daylight often suggests a heavy, established population"
     ],
     "look_alikes": [
       {
@@ -323,15 +323,15 @@
     "service": {
       "line": "pest",
       "key": null,
-      "label": "German Roach Cleanout Service",
+      "label": "General Pest Control",
       "inspection_first": true,
       "referral": null
     },
     "urgency": "high",
     "copy": {
-      "what_it_means": "German roaches breed indoors — kitchens and bathrooms — and multiply fast with overlapping generations. This is one to treat with a dedicated cleanout program rather than store-bought sprays, which tend to scatter rather than solve it.",
-      "fact": "This species never lives outdoors in Florida — it arrives in bags, boxes, and used appliances. It's a hitchhiker, not a cleanliness verdict.",
-      "blurb": "German roaches breed indoors — kitchens and bathrooms — and multiply fast. This is one to treat quickly with a dedicated cleanout, not store-bought sprays that scatter them."
+      "what_it_means": "German roaches breed indoors — kitchens and bathrooms — and multiply fast with overlapping generations. A technician typically starts with an inspection to scope a cleanout approach suited to how far it's spread.",
+      "fact": "This species rarely lives outdoors in Florida — it arrives in bags, boxes, and used appliances. It's a hitchhiker, not a cleanliness verdict.",
+      "blurb": "German roaches breed indoors — kitchens and bathrooms — and multiply fast. Worth having looked at quickly; a technician scopes a cleanout after inspecting the extent."
     },
     "tech_notes": "Two pronotum stripes, nymphs banded. Gel bait + IGR cleanout, no repellents. Grade infestation level for cleanout scope — quote after inspection.",
     "sources": [

@@ -42,9 +42,9 @@
     "look_alikes": [
       {
         "slug": "chiggers",
-        "difference": "Cat fleas are visible jumpers on pets and carpet; chiggers are outdoor-picked-up and too small to see, causing itchy welts at sock lines.",
-        "next_photo": "A close-up of the biting insect if visible, versus just the bite pattern on skin.",
-        "photo_can_confirm": true
+        "difference": "Cat fleas are visible jumpers on pets and carpet; chiggers are picked up outdoors and too small to see, causing welts at sock lines.",
+        "next_photo": "A technician judges from the site (pets/carpet vs. outdoor vegetation) and whether a jumping insect is caught — a bite pattern alone can't confirm which insect caused it.",
+        "photo_can_confirm": false
       }
     ],
     "size": "tiny",

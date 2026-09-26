@@ -40,7 +40,7 @@
       "Pencil-width mud tubes climbing a foundation, pier, or garage wall",
       "Swarmers have a straight waist, straight antennae, and four equal-length wings",
       "Daytime swarms, typically on warm afternoons in late winter and spring",
-      "Colonies can hold 100,000 to over a million termites, foraging up to 150 feet from the nest"
+      "Discarded wings (four, all equal length) scattered on windowsills or the attic floor after a swarm"
     ],
     "look_alikes": [
       {
@@ -158,7 +158,7 @@
     "look_alikes": [
       {
         "slug": "subterranean-termite",
-        "difference": "Formosan swarmers are slightly larger and more uniformly yellowish-brown; colonies are far larger and swarm in bigger numbers over a shorter spring window.",
+        "difference": "Formosan swarmers are slightly larger, more uniformly yellowish-brown, and swarm in far bigger numbers over a shorter spring window.",
         "next_photo": "A close-up of several swarmers next to a coin, plus the time of evening and date.",
         "photo_can_confirm": true
       }

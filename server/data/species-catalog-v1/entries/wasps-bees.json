@@ -230,7 +230,7 @@
     "action": "leave_alone",
     "season_basis": "observed",
     "verification": [],
-    "safety_line": "Almost never stings; venom lacks the pain compounds of social wasps. See a doctor if you have an unusual allergic reaction.",
+    "safety_line": "Almost never stings; venom lacks the pain compounds of social wasps. See a doctor if you have an unusual allergic reaction, and call 911 if someone has trouble breathing.",
     "legacy_slugs": [],
     "review": {
       "status": "draft",
@@ -274,7 +274,7 @@
     "safety": {
       "stings": true,
       "bites": false,
-      "venomous": false,
+      "venomous": true,
       "disease_vector": false,
       "structural": false,
       "allergen": false,
@@ -332,7 +332,7 @@
     "action": "specialist",
     "season_basis": "swarming",
     "verification": [],
-    "safety_line": "A resting swarm is calm and temporary — don’t spray it. See a doctor for signs of a serious allergic reaction to a sting.",
+    "safety_line": "A resting swarm is calm and temporary — don’t spray it. See a doctor for signs of a serious allergic reaction to a sting, and call 911 if someone has trouble breathing.",
     "legacy_slugs": [],
     "review": {
       "status": "draft",
@@ -380,7 +380,7 @@
     "safety": {
       "stings": true,
       "bites": false,
-      "venomous": false,
+      "venomous": true,
       "disease_vector": false,
       "structural": false,
       "allergen": true,
@@ -438,7 +438,7 @@
     "action": "specialist",
     "season_basis": "year_round",
     "verification": [],
-    "safety_line": "Never seal the entrance while bees are active — that traps them and can leak honey into the wall. See a doctor for a serious allergic reaction to a sting.",
+    "safety_line": "Never seal the entrance while bees are active — that traps them and can leak honey into the wall. See a doctor for a serious allergic reaction. Call 911 if someone has trouble breathing.",
     "legacy_slugs": [],
     "review": {
       "status": "draft",
@@ -485,7 +485,7 @@
     "safety": {
       "stings": true,
       "bites": false,
-      "venomous": false,
+      "venomous": true,
       "disease_vector": false,
       "structural": false,
       "allergen": true,
@@ -554,7 +554,7 @@
         "note": "That page returned errors (410/403) during this research pass; facts here are drawn from search-result summaries of that same publication plus the already-published website copy. Worth a follow-up direct verification."
       }
     ],
-    "safety_line": "Females can sting if handled but rarely do; males cannot sting at all. See a doctor for signs of an allergic reaction.",
+    "safety_line": "Females can sting if handled but rarely do; males cannot sting at all. See a doctor for signs of an allergic reaction, and call 911 if someone has trouble breathing.",
     "legacy_slugs": [],
     "review": {
       "status": "draft",
@@ -598,7 +598,7 @@
     "safety": {
       "stings": true,
       "bites": false,
-      "venomous": false,
+      "venomous": true,
       "disease_vector": false,
       "structural": true,
       "allergen": false,

@@ -129,8 +129,8 @@
       "moth fly",
       "moth flies"
     ],
-    "scientific_name": "Psychoda spp.",
-    "rank": "genus",
+    "scientific_name": "Psychodidae",
+    "rank": "family",
     "group": "flies-gnats",
     "subgroup": null,
     "site_category": "Occasional invaders",
@@ -194,9 +194,9 @@
     },
     "urgency": "low",
     "copy": {
-      "what_it_means": "The larvae live in the gel film that builds up inside drains, which is why sprays fail and a stiff brush plus an enzyme cleaner succeeds. Clearing the drain film usually stops new flies from emerging; a technician can confirm the source if they keep coming back.",
-      "fact": "The larvae live in the gel film inside drains — which is why sprays fail and a stiff brush plus enzyme cleaner succeeds.",
-      "blurb": "Clean the drain film (brush + enzyme cleaner) and new flies usually stop emerging; a technician can confirm the source if they keep coming back."
+      "what_it_means": "The larvae live in the gel film that builds up inside drains, which is why a surface spray often misses the source. Clearing the drain film with a stiff brush and an enzyme-based cleaner is the usual approach; a technician can confirm the source if they keep coming back.",
+      "fact": "The larvae live in the gel film inside drains, not in the water itself — that's why the fix targets the film rather than the drain water.",
+      "blurb": "Cleaning the drain film (brush + enzyme cleaner) targets where the larvae actually live; a technician can confirm the source if they keep coming back."
     },
     "tech_notes": "Non-biting, no known disease transmission. Recommend mechanical drain cleaning; treatment is rarely needed if the source is addressed.",
     "sources": [

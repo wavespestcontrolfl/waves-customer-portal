@@ -43,9 +43,9 @@
     "look_alikes": [
       {
         "slug": "chiggers",
-        "difference": "No-see-ums bite and leave scattered welts; chiggers come from vegetation and bite around sock lines, waistbands, and skin folds.",
-        "next_photo": "A close-up of the bite pattern and where on the body it appears.",
-        "photo_can_confirm": true
+        "difference": "Both leave itchy welts. No-see-ums bite near water at dawn/dusk; chiggers come from vegetation and bite at sock lines and skin folds.",
+        "next_photo": "A technician judges from the site, timing, and any insect actually caught — a photo of the bite pattern alone can't confirm which one bit.",
+        "photo_can_confirm": false
       }
     ],
     "size": "tiny",
@@ -91,9 +91,9 @@
       10
     ],
     "service": {
-      "line": "pest",
-      "key": "pest",
-      "label": "General Pest Control",
+      "line": "none",
+      "key": null,
+      "label": "No Treatment Needed",
       "inspection_first": false,
       "referral": null
     },

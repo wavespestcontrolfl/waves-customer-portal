@@ -421,9 +421,9 @@
     },
     "urgency": "low",
     "copy": {
-      "what_it_means": "Terrifying-looking, essentially harmless, and genuinely useful — it actively hunts and eats cockroaches. One on patrol is a roach’s worst night; there is no need to treat for it.",
+      "what_it_means": "Terrifying-looking and not considered dangerous, but genuinely useful — it actively hunts and eats cockroaches. One on patrol is a roach’s worst night; there is no need to treat for it.",
       "fact": "A dedicated cockroach hunter — one huntsman on patrol is a roach’s worst night.",
-      "blurb": "Terrifying-looking, essentially harmless, genuinely useful. The scream is optional."
+      "blurb": "Terrifying-looking, not considered dangerous, genuinely useful. The scream is optional."
     },
     "tech_notes": "Beneficial predator of roaches; no treatment needed. Relocate outdoors if the customer prefers it gone.",
     "sources": [

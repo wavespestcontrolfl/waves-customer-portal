@@ -36,6 +36,12 @@
         "difference": "Gopher tortoise burrows have a half-moon entrance and sandy apron; pocket gopher mounds are small volcano-shaped soil piles with no open entrance.",
         "next_photo": "A wide photo of the burrow or mound shape, plus the shell if the tortoise is visible.",
         "photo_can_confirm": true
+      },
+      {
+        "slug": "armadillo",
+        "difference": "Gopher tortoise burrows are one wide half-moon opening with a sandy apron; armadillo digging is many small, scattered cone-shaped holes.",
+        "next_photo": "A wide photo of the hole or burrow shape — one wide half-moon opening versus several small round holes.",
+        "photo_can_confirm": true
       }
     ],
     "size": "large",

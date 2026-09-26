@@ -30,7 +30,7 @@
       "Large warty treefrog, up to about 5 inches — the largest treefrog in the US",
       "Oversized toe pads compared to native treefrogs",
       "Common around porch lights at night hunting insects",
-      "Skin secretions can irritate eyes and airways — wash hands after contact"
+      "Grayish, brownish, or greenish with variable blotching, and rough, warty skin"
     ],
     "look_alikes": [
       {
@@ -84,13 +84,13 @@
       9
     ],
     "service": {
-      "line": "pest",
+      "line": "none",
       "key": null,
-      "label": "General Pest Control",
+      "label": "No Treatment Needed",
       "inspection_first": false,
       "referral": null
     },
-    "urgency": "moderate",
+    "urgency": "low",
     "copy": {
       "what_it_means": "An invasive species that eats Florida's smaller native treefrogs — one reason a porch chorus may have gone quiet. Wash hands after contact, and turning porch lights off (or switching to amber) removes the insect buffet that draws them in.",
       "fact": "An invasive that eats Florida’s smaller native treefrogs — one reason your porch chorus may have gone quiet.",

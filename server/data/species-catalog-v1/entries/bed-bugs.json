@@ -92,9 +92,9 @@
     },
     "urgency": "high",
     "copy": {
-      "what_it_means": "They follow luggage and furniture, not filth — five-star hotels get them too, and a clean home is not immune. DIY sprays tend to scatter them into neighboring rooms, so an inspection first, then targeted treatment, works far better.",
+      "what_it_means": "They follow luggage and furniture, not filth — five-star hotels get them too, and a clean home is not immune. An inspection determines the scope before any treatment; DIY sprays can scatter them into neighboring rooms if used first.",
       "fact": "They follow luggage and furniture, not filth — five-star hotels get them too. Clean homes are not immune.",
-      "blurb": "DIY sprays scatter them to neighboring rooms. Inspection first, then targeted treatment."
+      "blurb": "An inspection determines the scope before treatment. DIY sprays can scatter them into neighboring rooms."
     },
     "tech_notes": "Confirm live bug/eggs/fecal spotting at seams. Grade rooms for treatment scope; quote after inspection only.",
     "sources": [

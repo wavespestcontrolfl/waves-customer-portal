@@ -130,7 +130,7 @@
     "subgroup": null,
     "site_category": "Occasional invaders",
     "traits": [
-      "Rear pincers (harmless to people), 12-16 mm, dark brown",
+      "Rear pincers can pinch but rarely break skin, 12-16 mm, dark brown",
       "Hides under pots, mats, and mulch during the day",
       "Wanders indoors after heavy rain",
       "Voracious predator of caterpillars, aphids, and other small insects"
@@ -155,7 +155,7 @@
     "verdict": "harmless",
     "safety": {
       "stings": false,
-      "bites": false,
+      "bites": true,
       "venomous": false,
       "disease_vector": false,
       "structural": false,
@@ -195,7 +195,7 @@
     },
     "urgency": "low",
     "copy": {
-      "what_it_means": "The pincers look dramatic but are harmless to people — they’re for folding wings and courtship, not attacking. Earwigs are voracious predators of other garden insects; fixing door sweeps and drainage usually stops indoor wandering.",
+      "what_it_means": "The pincers look dramatic but rarely break skin — they’re for folding wings and courtship, not attacking. Earwigs are voracious predators of other garden insects; fixing door sweeps and drainage usually stops indoor wandering.",
       "fact": "The pincers are for folding its wings and courtship — the ear-crawling myth is pure medieval legend.",
       "blurb": "Fix door sweeps and drainage; the visitors stop themselves."
     },
@@ -208,7 +208,7 @@
       "guides": []
     },
     "role": "harmless_visitor",
-    "risk": "low",
+    "risk": "defensive",
     "action": "fix_conditions",
     "season_basis": "year_round",
     "verification": []

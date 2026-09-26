@@ -202,9 +202,9 @@
     },
     "urgency": "high",
     "copy": {
-      "what_it_means": "The moths do zero damage — it's their caterpillars feeding at night that shear the lawn. This is a late-summer classic; treated early, St. Augustine typically regrows well.",
+      "what_it_means": "The moths do zero damage — it's their caterpillars feeding at night that shear the lawn. This is a late-summer classic; a technician can evaluate how far the damage has spread and whether the lawn needs overseeding to recover.",
       "fact": "The moths do zero damage — it’s their caterpillars feeding at night that shear the lawn.",
-      "blurb": "Late-summer classic. Treated early, the lawn regrows quickly."
+      "blurb": "Late-summer classic. A technician evaluates the extent of the damage and the best path to recovery."
     },
     "tech_notes": "Moths flush when disturbed; larvae feed at night (window-feeding first 4 instars, then full blade). Treat late afternoon; re-check 10-14 days.",
     "sources": [
@@ -229,7 +229,7 @@
       "larva"
     ],
     "sign_of": [],
-    "safety_line": "The most venomous caterpillar in the US — hidden spines under the fur cause intense pain. Never touch it. See a doctor if pain, swelling, or nausea gets worse rather than better.",
+    "safety_line": "The most venomous caterpillar in the US — hidden spines under the fur cause intense pain. Never touch it. See a doctor if pain or swelling worsens. Call 911 if someone has trouble breathing.",
     "legacy_slugs": [],
     "review": {
       "status": "draft",
@@ -284,6 +284,9 @@
     },
     "range": "occasional",
     "active_months": [
+      4,
+      5,
+      6,
       9,
       10,
       11,
@@ -317,8 +320,13 @@
     "role": "stinging_pest",
     "risk": "medical",
     "action": "leave_alone",
-    "season_basis": "observed",
-    "verification": []
+    "season_basis": "unverified",
+    "verification": [
+      {
+        "claim": "Puss caterpillars have a spring generation (roughly April-June) in Southwest Florida in addition to the fall peak",
+        "note": "UF/IFAS Featured Creatures describes generation timing that varies by region; the presence and exact timing of a spring generation specifically in Southwest Florida was not directly confirmed this pass."
+      }
+    ]
   },
   {
     "kind": "organism",
@@ -328,7 +336,7 @@
       "adult"
     ],
     "sign_of": [],
-    "safety_line": "Spines sting like nettles and can cause a burning, itchy welt. See a doctor if you have a strong allergic reaction or the welt keeps getting worse instead of easing up.",
+    "safety_line": "Spines sting like nettles and can cause a burning, itchy welt. See a doctor for a strong allergic reaction. Call 911 if someone has trouble breathing.",
     "legacy_slugs": [],
     "review": {
       "status": "draft",
@@ -371,7 +379,7 @@
     "safety": {
       "stings": true,
       "bites": false,
-      "venomous": false,
+      "venomous": true,
       "disease_vector": false,
       "structural": false,
       "allergen": false,
