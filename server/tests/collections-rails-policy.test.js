@@ -164,7 +164,7 @@ const LP_EXPECTED_SEND = {
   invoiceId: 'inv-1',
   entryPoint: 'late_payment_checker',
   metadata: { original_message_type: 'late_payment', billingDeliveryCategory: 'billing',
-    notificationEventKey: 'late-payment:inv-1:14' },
+    notificationEventKey: 'late-payment:inv-1:14', collections_ledger_id: 'led-1' },
   hasEmailLeg: true,
   // The last ownership check, run by the canonical sender immediately before
   // provider preparation — a Bill-To change during the render/ledger awaits
@@ -529,7 +529,8 @@ const FU_EXPECTED_SEND = {
   invoiceId: 'inv-1',
   entryPoint: 'invoice_followup_sequence',
   metadata: { original_message_type: 'invoice_followup', notificationEventKey: 'invoice-followup:seq-1:d3_friendly',
-    billingDeliveryCategory: 'invoice' },
+    billingDeliveryCategory: 'invoice', collections_ledger_id: 'led-1',
+    followup_sequence_id: 'seq-1', rendered_amount: '129.00' },
   hasEmailLeg: true,
   // The last ownership check, run by the canonical sender immediately before
   // provider preparation — the short-link round-trip and the ledger writes
