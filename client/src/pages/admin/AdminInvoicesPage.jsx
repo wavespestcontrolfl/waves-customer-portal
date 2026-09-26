@@ -5329,7 +5329,7 @@ function AnnualPrepayModal({
     if (removing) return;
     if (
       !confirm(
-        "Remove the annual prepay flag from this invoice? The coverage banner will stop showing.",
+        "Remove the annual prepay flag from this invoice?\n\nUse this only for an invoice marked by mistake. It cancels the prepay coverage, not just the banner: visit invoices it covered are owed again and their payment reminders restart, and the customer goes back to regular billing. To end a paid prepay, refund it instead.",
       )
     )
       return;
