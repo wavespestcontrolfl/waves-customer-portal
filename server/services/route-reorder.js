@@ -1058,6 +1058,17 @@ async function writeTechDayOrder(conn, { dateStr, techId, techStops, finalOrdere
       lng: num(s.lng),
     }]));
     if (live.length !== techStops.length) throw stale('tech-day membership changed during the run');
+    // Every OTHER caller (the forward per-tech loop in runRouteReorder)
+    // already refuses a locked tech-day before ever reaching this writer —
+    // this check is provably a no-op for it (a locked day never gets this
+    // far there). It exists so a caller with no equivalent pre-check of its
+    // own (route-order-cleanup.js's --rollback, which hands this writer an
+    // ordinary write with no separate guard logic of its own) gets the SAME
+    // staff-lock protection for free, checked against the FRESHEST possible
+    // read rather than a second, drift-prone copy of the check.
+    if (live.some((row) => row.auto_dispatch_locked || row.auto_dispatch_excluded)) {
+      throw Object.assign(new Error('a stop on this tech-day is staff-locked'), { code: 'LOCKED_STOP' });
+    }
     for (const row of live) {
       const snap = snapshot.get(row.id);
       if (!snap) throw stale(`stop ${row.id} joined the tech-day during the run`);
@@ -1113,6 +1124,11 @@ function classifyWriteError(writeErr, { summary, entryBase }) {
   if (writeErr.code === 'STALE_TECH_DAY') {
     summary.skipped.push({ ...entryBase, reason: 'STALE_TECH_DAY', detail: writeErr.message });
     logger.warn(`[route-reorder] ${entryBase.date} tech ${entryBase.technician_id}: superseded during the run — rolled back (${writeErr.message})`);
+    return false;
+  }
+  if (writeErr.code === 'LOCKED_STOP') {
+    summary.skipped.push({ ...entryBase, reason: 'LOCKED_STOP', detail: writeErr.message });
+    logger.warn(`[route-reorder] ${entryBase.date} tech ${entryBase.technician_id}: staff-locked — rolled back`);
     return false;
   }
   throw writeErr;
@@ -1843,6 +1859,13 @@ module.exports = {
   // re-validation reuses this SAME signature the shared decision was
   // evaluated against (codex GitHub round P2) rather than re-deriving it.
   windowGuardSignature,
-  _internals: { currentOrder, modelDriveMinutes, effectiveWindowStart, effectiveWindowRange, violatesWindowFeasibility, withinFreezeClock, violatesWindowChronology, modelDistanceMeters, loadAutoDispatchSummary, EXCLUDE_STATUSES, GOOGLE_WAYPOINT_CAP,
+  // The SAME fenced writer (advisory lock, SERIALIZABLE, FOR UPDATE re-read,
+  // snapshot compare, commit-time freeze/lock re-check with a fresh clock,
+  // per-row CAS) and its error classifier — exported so a caller with no
+  // route_order writer of its own (route-order-cleanup.js's --rollback)
+  // hands it an ordinary write instead of re-implementing any of its guards.
+  writeTechDayOrder,
+  classifyWriteError,
+  _internals: { currentOrder, modelDriveMinutes, effectiveWindowStart, effectiveWindowRange, violatesWindowFeasibility, withinFreezeClock, violatesWindowChronology, modelDistanceMeters, loadAutoDispatchSummary, EXCLUDE_STATUSES, GOOGLE_WAYPOINT_CAP, LIVE_HOLD_SQL,
     boundedDateList, canonicalizeBaselineOrder, routeOrderChanges, canonicalSourceLabel, buildDryRunPlan },
 };
