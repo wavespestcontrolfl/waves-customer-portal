@@ -100,7 +100,7 @@ const REFERRAL_TEMPLATES = {
   protected_leave_alone: 'This animal and its burrow are protected by Florida law. Please leave it undisturbed — no treatment is needed here.',
   // Bats are never trapped or handled; only exclusion is lawful, and not in
   // the FWC maternity season (Codex #4974 r2).
-  bat_exclusion: 'Bats are protected in Florida and are never trapped or handled. We refer you to a licensed wildlife professional who can exclude them legally; exclusion is not permitted during the April 15 to August 15 maternity season.',
+  bat_exclusion: 'Bats are protected in Florida and are never trapped or handled. We refer you to a licensed wildlife professional who can exclude them legally, outside the spring and summer maternity season when exclusion is not allowed.',
 };
 
 function escalateBelow() {

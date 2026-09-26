@@ -123,6 +123,17 @@ describe('species-catalog-v1 entries — schema (ported from validate.js)', () =
       expect(la.next_photo.trim().length).toBeGreaterThan(0);
       expect(la.next_photo.length).toBeLessThanOrEqual(180);
       expect(typeof la.photo_can_confirm).toBe('boolean');
+      // Any pair with a venomous snake on either side: no photo settles it
+      // and the tip never brings anyone closer (Codex #4974 r3).
+      const venomousSnake = (slug) => {
+        const x = catalog.getEntry(slug);
+        return !!x && x.group === 'snakes' && x.safety.venomous === true;
+      };
+      if (venomousSnake(e.slug) || venomousSnake(la.slug)) {
+        expect(la.photo_can_confirm).toBe(false);
+        expect(la.next_photo).toMatch(/never approach/i);
+        expect(la.next_photo).not.toMatch(/close-up/i);
+      }
     }
 
     expect(ENUMS.size).toContain(e.size);

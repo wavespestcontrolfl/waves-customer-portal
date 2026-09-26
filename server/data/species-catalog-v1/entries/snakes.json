@@ -32,14 +32,14 @@
       {
         "slug": "florida-cottonmouth",
         "difference": "Racer is slim with a narrow head and moves fast in the open; cottonmouth is thick-bodied with a blocky head, stays near water, and may gape its white mouth",
-        "next_photo": "A photo of the body shape (slim vs. thick) and head shape (narrow vs. blocky) from a safe distance",
-        "photo_can_confirm": true
+        "next_photo": "From a safe distance (never approach): zoom in on the whole snake. If you can't tell, treat it as venomous and keep away.",
+        "photo_can_confirm": false
       },
       {
         "slug": "dusky-pygmy-rattlesnake",
         "difference": "Juvenile racers are gray-blotched, round-pupiled and darken to solid black with age; pygmy rattlesnake keeps rounded spots for life and has a tiny tail rattle.",
-        "next_photo": "A close-up of the tail tip for a rattle segment and the eye for pupil shape, taken from a safe distance.",
-        "photo_can_confirm": true
+        "next_photo": "From a safe distance (never approach): zoom in on the whole snake. If you can't tell, treat it as venomous and keep away.",
+        "photo_can_confirm": false
       }
     ],
     "size": "medium",
@@ -107,7 +107,7 @@
       "https://en.wikipedia.org/wiki/Coluber_constrictor"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": ""
     },
     "role": "wildlife",
@@ -264,8 +264,8 @@
       {
         "slug": "dusky-pygmy-rattlesnake",
         "difference": "Corn snake has large reddish-brown blotches outlined in black and no rattle; pygmy rattlesnake has rounded gray spots and a tiny tail rattle.",
-        "next_photo": "A close-up of the tail tip for a rattle segment, plus the overall blotch shape and color, from a safe distance.",
-        "photo_can_confirm": true
+        "next_photo": "From a safe distance (never approach): zoom in on the whole snake. If you can't tell, treat it as venomous and keep away.",
+        "photo_can_confirm": false
       }
     ],
     "size": "medium",
@@ -330,7 +330,7 @@
       "https://en.wikipedia.org/wiki/Corn_snake"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": ""
     },
     "role": "wildlife",
@@ -703,8 +703,8 @@
       {
         "slug": "eastern-coral-snake",
         "difference": "Kingsnake has a red, pointed snout and red bands bordered by black, never yellow; coral snake has a blunt black snout and red bands touching yellow bands",
-        "next_photo": "A close-up of just the head/snout color, taken from a safe distance, since band order can be hard to judge quickly",
-        "photo_can_confirm": true
+        "next_photo": "From a safe distance (never approach): zoom in on the whole snake. If you can't tell, treat it as venomous and keep away.",
+        "photo_can_confirm": false
       }
     ],
     "size": "small",
@@ -770,7 +770,7 @@
       "https://www.floridamuseum.ufl.edu/florida-snake-id/snake/scarlet-kingsnake/"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": "Corrected a dangerous band-pattern inversion: an earlier draft had this kingsnake's red bands touching yellow and the coral snake's touching black, backwards from UF/IFAS EDIS UW229 (\"in the two non-venomous species, the red bands touch only black bands, but in coral snakes the red bands only touch yellow bands\"; coral snake has a blunt black snout followed by yellow, this kingsnake has a pointed red snout). Traits, look_alikes, safety_line and tech_notes now correctly say red touches black here, red touches yellow on the coral snake. Range 'occasional' confirmed directly: the Florida Museum of Natural History Snake ID guide states scarlet kingsnakes \"can be locally abundant\" but \"are not commonly seen due to their secretive nature,\" matching a statewide-common-but-rarely-encountered profile rather than a species you'd expect to spot often; no SWFL-county-specific sighting count exists, but this settles the qualitative claim."
     },
     "role": "wildlife",
@@ -810,8 +810,8 @@
       {
         "slug": "dusky-pygmy-rattlesnake",
         "difference": "Diamondback is much larger (4+ feet) with bold diamonds and a loud rattle; pygmy rattlesnake is under 2 feet with round spots and a barely audible rattle",
-        "next_photo": "A photo showing overall size next to a known object, taken from a safe distance",
-        "photo_can_confirm": true
+        "next_photo": "From a safe distance (never approach): zoom in on the whole snake. If you can't tell, treat it as venomous and keep away.",
+        "photo_can_confirm": false
       }
     ],
     "size": "large",
@@ -876,7 +876,7 @@
       "https://www.federalregister.gov/documents/2025/10/31/2025-19732/endangered-and-threatened-wildlife-and-plants-review-of-species-that-are-candidates-for-listing-as"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": "Range set to 'occasional' given documented steep population decline (source cites ~3% of historical numbers) and its preference for scrub/flatwoods over developed yards. Protected-status confirmed this session with two live, current, authoritative sources: (1) Florida Administrative Code 68A-27.003, the state's current Endangered and Threatened Species List (effective 2026), does not include Crotalus adamanteus among its listed reptiles — confirming no state threatened/endangered designation. (2) The Federal Register's Oct 31, 2025 FWS candidate-species notice (2025-19732) lists 'Eastern diamondback rattlesnake' with pending action '12-month finding' — i.e. its 2012 ESA petition is still open/under review with no final listing decision as of this notice, so it is not currently federally listed either. safety.protected: false is correct; tech_notes updated to reflect the confirmed (not just assumed) status."
     },
     "role": "wildlife",
@@ -919,20 +919,20 @@
       {
         "slug": "corn-snake",
         "difference": "Pygmy rattlesnake has a tiny tail rattle and rounded gray spots; corn snake has no rattle and large reddish-brown blotches outlined in black",
-        "next_photo": "A close-up of the tail tip for a small rattle segment, plus the overall blotch shape and color",
-        "photo_can_confirm": true
+        "next_photo": "From a safe distance (never approach): zoom in on the whole snake. If you can't tell, treat it as venomous and keep away.",
+        "photo_can_confirm": false
       },
       {
         "slug": "eastern-diamondback-rattlesnake",
         "difference": "Pygmy rattlesnake is under 2 feet with round spots and a barely audible rattle; diamondback is much larger with bold diamonds and a loud rattle",
-        "next_photo": "A photo showing overall size next to a known object, taken from a safe distance",
-        "photo_can_confirm": true
+        "next_photo": "From a safe distance (never approach): zoom in on the whole snake. If you can't tell, treat it as venomous and keep away.",
+        "photo_can_confirm": false
       },
       {
         "slug": "southern-black-racer",
         "difference": "Pygmy rattlesnake keeps rounded spots, a vertical pupil and tiny tail rattle for life; young racers are gray-blotched and darken to solid black.",
-        "next_photo": "A close-up of the tail tip for a rattle segment and the eye for pupil shape, taken from a safe distance.",
-        "photo_can_confirm": true
+        "next_photo": "From a safe distance (never approach): zoom in on the whole snake. If you can't tell, treat it as venomous and keep away.",
+        "photo_can_confirm": false
       }
     ],
     "size": "small",
@@ -996,7 +996,7 @@
       "https://en.wikipedia.org/wiki/Sistrurus_miliarius"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": ""
     },
     "role": "wildlife",
@@ -1148,8 +1148,8 @@
       {
         "slug": "scarlet-kingsnake",
         "difference": "Coral snake has a blunt black snout and red bands touching yellow bands; scarlet kingsnake has a pointed red snout and red bands bordered by black, never yellow",
-        "next_photo": "A close-up of just the head/snout color, taken from a safe distance, since band order can be hard to judge quickly",
-        "photo_can_confirm": true
+        "next_photo": "From a safe distance (never approach): zoom in on the whole snake. If you can't tell, treat it as venomous and keep away.",
+        "photo_can_confirm": false
       }
     ],
     "size": "medium",
@@ -1215,7 +1215,7 @@
       "https://www.floridamuseum.ufl.edu/florida-snake-id/snake/harlequin-coralsnake/"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": "Corrected an inverted look_alikes.difference that contradicted this entry's own traits/fact: it had said this coral snake's red touches black and the scarlet kingsnake's red touches yellow, backwards. Confirmed against UF/IFAS EDIS UW229: coral snake has a blunt black snout with red bands touching yellow; the kingsnake has a pointed red snout with red bordered by black. Range 'occasional' and the 'rarely aggressive/mostly stays hidden' copy are now confirmed directly by the Florida Museum of Natural History Snake ID guide: \"Harlequin Coralsnakes are extremely secretive and rarely seen\" and \"Bites from this species are extremely rare,\" occurring almost only when the snake is deliberately handled — matching this entry's low encounter/bite framing. No SWFL-county-specific sighting count exists, but the qualitative claim is settled."
     },
     "role": "wildlife",
