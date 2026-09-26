@@ -1123,7 +1123,9 @@ function draftPostType(draft) {
 // SOURCE-attribution list, not a brand list: PRO_PRODUCT_TERMS stay banned in
 // recommendation context and competitor names live only inside the
 // ComparisonTable, so neither may count toward this nudge.
-const NAMED_SOURCE_RE = /\b(?:UF\s*\/\s*IFAS|IFAS|University of Florida|USDA|NOAA|National Weather Service|(?:[A-Z][\w&.]+ )+(?:State )?University Extension|Cooperative Extension|FDACS|Florida Department of Agriculture|Florida Department of Health|(?:U\.?S\.? )?EPA\b|Environmental Protection Agency|CDC\b|Centers for Disease Control|National Pesticide Information Center|NPIC|Florida Statutes?|(?:[A-Z][a-z]+ County )?Mosquito (?:Control|Management)|(?:[Pp]er|[Oo]n|[Uu]nder|[Aa]ccording to|[Rr]ead|[Ff]ollow) the (?:product )?label)\b/;
+// The county prefix is REQUIRED: a bare "Mosquito Control" is our own
+// service name and must not count as an external authority (fallback P2).
+const NAMED_SOURCE_RE = /\b(?:UF\s*\/\s*IFAS|IFAS|University of Florida|USDA|NOAA|National Weather Service|(?:[A-Z][\w&.]+ )+(?:State )?University Extension|Cooperative Extension|FDACS|Florida Department of Agriculture|Florida Department of Health|(?:U\.?S\.? )?EPA\b|Environmental Protection Agency|CDC\b|Centers for Disease Control|National Pesticide Information Center|NPIC|Florida Statutes?|[A-Z][a-z]+ County Mosquito (?:Control|Management)|Mosquito Control District|(?:[Pp]er|[Oo]n|[Uu]nder|[Aa]ccording to|[Rr]ead|[Ff]ollow) the (?:product )?label)\b/;
 
 // Refresh lane: the runner stamps target_page_type 'page' for non-blog
 // targets (service/city pages), where the blog citability contract does not

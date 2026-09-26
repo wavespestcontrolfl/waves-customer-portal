@@ -1393,6 +1393,9 @@ describe('citability nudges (weight-0, signal-only)', () => {
     expect(checkCitabilityNamedSources({ body: 'The Texas A&M University Extension notes fire ants mound after rain.' }).ok).toBe(true);
     expect(checkCitabilityNamedSources({ body: 'According to Waves Pest Control, ants are common.' }).ok).toBe(false);
     expect(checkCitabilityNamedSources({ body: 'According to experts, ants are common.' }).ok).toBe(false);
+    // Our own service name is not an authority; a county program or district is.
+    expect(checkCitabilityNamedSources({ body: '## Mosquito Control in Venice\nWe treat yards monthly.' }).ok).toBe(false);
+    expect(checkCitabilityNamedSources({ body: 'The Manatee County Mosquito Control District runs aerial sprays.' }).ok).toBe(true);
   });
 
   test('concrete_specifics counts numbers with units, ignores dollars, years, and bare counts', () => {
