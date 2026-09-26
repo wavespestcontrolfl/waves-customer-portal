@@ -352,7 +352,7 @@ const INTAKE_TREATMENT_CONTEXT_RE = /\b(?:treat\w*|products?|spray\w*|pesticid\w
 const EPA_MENTION_RE = /\b(?:epa|e\.\s?p\.\s?a\.?|environmental\s+protection\s+agency|agencia\s+de\s+protecci[oó]n\s+ambiental)(?![a-z])/i;
 const APPROVAL_WORD_RE = /\b(?:accept\w*|acept\w*|okay(?:ed|s)?|ok'?d|green[-\s]?light\w*|signed\s+off|sign[-\s]?off|blessed|blessing|seal\s+of\s+approval|stamp\s+of\s+approval|thumbs[-\s]up|visto\s+bueno|luz\s+verde|approv\w*|endors\w*|certif\w*|sanction\w*|authoriz\w*|clear(?:ed|ance)|aprob\w*|avalad\w*|respaldad\w*|autoriz\w*)\b/i;
 
-const POSITIVE_SAFETY_RE = /\b(?:safe(?:r|st|ly|ty)?|harmless|gentle|non-?toxic|risk[-\s]?free|hazard[-\s]?free|worry[-\s]?free|(?:pet|kid|child|children|family|people|eco)[-\s]?(?:safe|friendly)|seguros?|seguras?|seguridad|inofensiv\w*|inocu[oa]s?|sin\s+riesgos?|no\s+t[oó]xic\w*)\b/i;
+const POSITIVE_SAFETY_RE = /\b(?:safe(?:r|st|ly|ty)?|harmless|gentle|non[-\s]?toxic|non[-\s]?hazardous|non[-\s]?poisonous|risk[-\s]?free|hazard[-\s]?free|worry[-\s]?free|(?:pet|kid|child|children|family|people|eco)[-\s]?(?:safe|friendly)|seguros?|seguras?|seguridad|inofensiv\w*|inocu[oa]s?|sin\s+riesgos?|no\s+t[oó]xic\w*)\b/i;
 // Negation directly governing a hazard, allowing only filler words between
 // ("doesn't pose any risk", "will not cause any harm") — so "We can't treat
 // dangerous wasp nests at height" is not a claim.

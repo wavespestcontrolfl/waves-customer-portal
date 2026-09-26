@@ -256,6 +256,8 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ['It will never under any circumstances harm anyone.', ''],
     ['This is the safest treatment for pets.', ''],
     ['Our safest pesticide for children.', ''],
+    ['This spray is non toxic.', ''],
+    ['The product is non hazardous to pets.', ''],
     ['No tiene ningún efecto en sus mascotas.', ''],
     ['Our solution is completely harmless.', ''],
     ['Completely family-safe.', 'I have children'],
