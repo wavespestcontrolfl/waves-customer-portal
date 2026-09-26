@@ -452,7 +452,7 @@ async function performPropertyLookupCore(address, options = {}) {
       // attempt stamps the row", and counting only live lookups
       // undercounts served traffic (codex r36 P1). Respects persist:false.
       if (persist) await stampLookupAttempt(address, 'cache_hit');
-      return await buildResultFromCachedLookup(address, cached, verifiedOverrides, t0);
+      return await buildResultFromCachedLookup(address, cached, verifiedOverrides, t0, options);
     }
   }
 
@@ -879,7 +879,7 @@ async function performPropertyLookupCore(address, options = {}) {
   if (verifiedOverrides?.stories && result.propertyRecord) {
     result.propertyRecord._storiesSource = 'verified';
   }
-  result.enriched = buildEnrichedProfile(result.propertyRecord, result.aiAnalysis, lat, lng, result.avm, result.addressAudit, address);
+  result.enriched = buildEnrichedProfile(result.propertyRecord, result.aiAnalysis, lat, lng, result.avm, result.addressAudit, address, { commercialSuiteSizing: options.commercialSuiteSizing === true });
   // Commercial suite sizing (owner ruling 2026-09-25,
   // server/services/commercial-suite-size/): buildEnrichedProfile stays
   // synchronous (it is called directly, unawaited, by dozens of existing
@@ -982,14 +982,14 @@ async function performPropertyLookupCore(address, options = {}) {
 // are never stored), enriched is recomputed live (modifier logic evolves —
 // enriched_snapshot is lead-history only), and verified overrides re-apply
 // on every hit because they never expire.
-async function buildResultFromCachedLookup(address, row, verifiedOverrides, t0) {
+async function buildResultFromCachedLookup(address, row, verifiedOverrides, t0, options = {}) {
   const record = applyVerifiedOverrides(row.property_record, verifiedOverrides);
   const aiAnalysis = row.ai_analysis || null;
   const lat = row.lat == null ? null : Number(row.lat);
   const lng = row.lng == null ? null : Number(row.lng);
   if (verifiedOverrides?.stories && record) record._storiesSource = 'verified';
 
-  const enriched = buildEnrichedProfile(record, aiAnalysis, lat, lng, null, null, address);
+  const enriched = buildEnrichedProfile(record, aiAnalysis, lat, lng, null, null, address, { commercialSuiteSizing: options.commercialSuiteSizing === true });
   // If the cached property_record already carries a resolved suite size
   // (persisted by a prior fresh lookup — see performPropertyLookupCore),
   // buildEnrichedProfile just reused it synchronously above and
@@ -1000,9 +1000,16 @@ async function buildResultFromCachedLookup(address, row, verifiedOverrides, t0) 
   // already warm — a cold/expired district skips DBPR for this response
   // and kicks a background warm-up instead of awaiting a download) both
   // keep this path fast; a fully cold cache falls through to the type
-  // default. The FRESH lookup path (performPropertyLookupCore) runs the
-  // full leg with neither restriction.
-  await applyCommercialSuiteSize(enriched, { skipWebSearch: true, requireWarmCache: true });
+  // default. options.cacheOnly (the public-quote latency-bound path)
+  // tightens this further: reuse a persisted stamp only, never spend so
+  // much as a synchronous DBPR match — see applyCommercialSuiteSize.
+  // The FRESH lookup path (performPropertyLookupCore) runs the full leg
+  // with none of these restrictions.
+  await applyCommercialSuiteSize(enriched, {
+    skipWebSearch: true,
+    requireWarmCache: true,
+    cacheOnly: options.cacheOnly === true,
+  });
 
   const result = {
     address: String(address).trim(),
@@ -1053,7 +1060,10 @@ router.post('/property-lookup', async (req, res) => {
   try {
     // The estimator needs the evidence to price the property. A slow record
     // search must not skip vision/stories; each provider still has a timeout.
-    const result = await performPropertyLookup(address, { refresh: refresh === true, prioritizeAccuracy: true });
+    // commercialSuiteSizing: true — this IS the admin estimate tool's own
+    // lookup route (opt-in per the primary review of PR #4840); the public
+    // routes (public-property-lookup.js, public-quote.js) never pass it.
+    const result = await performPropertyLookup(address, { refresh: refresh === true, prioritizeAccuracy: true, commercialSuiteSizing: true });
     result.meta.providerStatus ||= buildProviderStatus();
     res.json(result);
   } catch (err) {
@@ -1595,6 +1605,28 @@ function subdivisionMedianEstimate(rc) {
 // (buildEnrichedProfile, a cache hit whose row already carries a resolved
 // suite size) and the async fresh-resolution path (applyCommercialSuiteSize)
 // so the two can never disagree about the same suite.
+// A persisted suite-size stamp is trusted only while it is FRESH — source-
+// specific, since the sources carry different staleness risk. A DBPR
+// license (a real record, but tenants and menus turn over) is good for 30
+// days; sources with no entry here never expire on their own (a type
+// default is deterministic off commercialRiskType/commercialSubtype, which
+// don't change for this address, so re-deriving it would yield the same
+// number — there is nothing to go stale). An older/unrecognized-age stamp
+// is treated as absent: the caller falls back to the normal pending-
+// candidate path and re-resolves.
+const DAY_MS = 24 * 60 * 60 * 1000;
+const SUITE_SIZE_STAMP_MAX_AGE_MS = {
+  license_seats: 30 * DAY_MS,
+};
+function commercialSuiteSizeStampIsFresh(stamp, now = Date.now()) {
+  if (!stamp || !(Number(stamp.value) > 0)) return false;
+  const maxAge = SUITE_SIZE_STAMP_MAX_AGE_MS[stamp.source];
+  if (!maxAge) return true;
+  const resolvedAt = Date.parse(stamp.resolvedAt);
+  if (!Number.isFinite(resolvedAt)) return false;
+  return (now - resolvedAt) < maxAge;
+}
+
 function reconcileCommercialSuiteSubtype(subtype, suiteSize) {
   if (!suiteSize || subtype !== 'office_retail') return subtype;
   const isFoodService = suiteSize.source === 'license_seats'
@@ -1602,7 +1634,7 @@ function reconcileCommercialSuiteSubtype(subtype, suiteSize) {
   return isFoodService ? 'restaurant' : subtype;
 }
 
-function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = null, lookupAddress = null) {
+function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = null, lookupAddress = null, options = {}) {
   // Association aggregate dimensions survive in _parcel even when a
   // same-weight PAO record (a single condo unit) won the merge — prefer them
   // for EVERY downstream read (footprint, turf ceiling, termite boxes), not
@@ -1721,9 +1753,17 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   let resolvedCommercialSuiteSize = null;
   // The building's own total, captured before the zeroing below — needed by
   // BOTH the pending-candidate and the already-resolved-stamp branches for
-  // the profile's buildingSqFt display field.
+  // the profile's suiteBuildingTotalSqFt display field.
   let commercialSuiteResolvedBuildingSqft = null;
-  if (commercialProfile) {
+  // Opt-in (owner ruling on primary review of PR #4840): this whole lane is
+  // OFF by default. Public/unauthenticated callers (public-property-lookup,
+  // public-quote) never pass commercialSuiteSizing, so they get byte-
+  // identical behavior to before this feature existed — no candidate, no
+  // rc.squareFootage zeroing, no stamp reuse, no resolver, no network, and
+  // no suiteSize/suiteBuildingTotalSqFt fields on the profile at all. Only
+  // the admin estimate tool's own lookup route and the estimator engine's
+  // gatherPropertySignals opt in.
+  if (commercialProfile && options.commercialSuiteSizing === true) {
     const suiteSubpremiseSignal = shadowHasSubpremiseSignal({ address: lookupAddress });
     // subpremiseSignal:false on purpose — the shared predicate counts a
     // Suite/Unit suffix as part-building evidence by itself, which would make
@@ -1747,7 +1787,8 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     if (suiteSubpremiseSignal && suitePartBuildingEvidence && !sqftVerified) {
       const commercialSuiteBuildingSqft = rc?.squareFootage || null;
       const stamp = rc?._commercialSuiteSize;
-      if (stamp && Number(stamp.value) > 0 && stamp.unitKey && stamp.unitKey === suiteUnitKey(lookupAddress)) {
+      if (stamp && Number(stamp.value) > 0 && stamp.unitKey && stamp.unitKey === suiteUnitKey(lookupAddress)
+        && commercialSuiteSizeStampIsFresh(stamp)) {
         resolvedCommercialSuiteSize = stamp;
       } else {
         commercialSuiteCandidate = {
@@ -2069,13 +2110,17 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     // (resolvedCommercialSuiteSize — a cache hit reusing a prior lookup's
     // answer, zero network) already has the real value. A still-pending
     // candidate is filled in by applyCommercialSuiteSize once the async
-    // resolver runs; buildingSqFt (captured BEFORE the zeroing, either way)
-    // keeps the whole-building total available for display. A non-suite
-    // lookup (residential, or a whole-building commercial tenant/owner) is
-    // byte-identical to before.
+    // resolver runs; suiteBuildingTotalSqFt (captured BEFORE the zeroing,
+    // either way) keeps the whole-building total available for DISPLAY
+    // only — deliberately NOT named `buildingSqFt`, which is a genuine
+    // pricing alias elsewhere (resolvePestFootprint's explicit-footprint
+    // override, several IB agent-tool/proposal fields) that must never pick
+    // up this unverified whole-building total as if it were a measured
+    // footprint. A non-suite lookup (residential, or a whole-building
+    // commercial tenant/owner) is byte-identical to before.
     homeSqFt: resolvedCommercialSuiteSize ? resolvedCommercialSuiteSize.value : (rc?.squareFootage || 0),
     ...((commercialSuiteCandidate || resolvedCommercialSuiteSize) ? {
-      buildingSqFt: commercialSuiteResolvedBuildingSqft || 0,
+      suiteBuildingTotalSqFt: commercialSuiteResolvedBuildingSqft || 0,
       suiteSize: resolvedCommercialSuiteSize || null,
     } : {}),
     // Internal only — never read by a consumer; applyCommercialSuiteSize
@@ -2512,13 +2557,21 @@ function suiteUnitKey(address) {
   }
 }
 
-const PERSISTED_SUITE_SIZE_SOURCES = new Set(['license_seats', 'commercial_listing']);
+// Only SOURCED sizes are pinned to the cache row — a type default is a
+// guess (cold DBPR cache, resolver miss) and pinning it would stop every
+// later cache hit from upgrading to a license size until the row expires.
+const PERSISTED_SUITE_SIZE_SOURCES = new Set(['license_seats']);
 
 async function applyCommercialSuiteSize(profile, opts = {}) {
   if (!profile) return profile;
   const candidate = profile._commercialSuiteCandidate;
   delete profile._commercialSuiteCandidate;
   if (!candidate) return profile;
+  // cacheOnly (the public-quote latency-bound path): reuse a persisted
+  // stamp only — buildEnrichedProfile already did that synchronously above;
+  // a candidate surviving to here means the cached row carries none (or an
+  // expired one). Never spend so much as a synchronous DBPR match here.
+  if (opts.cacheOnly) return profile;
   try {
     const { resolveCommercialSuiteSize } = require('../services/commercial-suite-size');
     const { parseRawAddress, splitStreetLineUnitParts } = require('../utils/address-normalizer');
@@ -2532,7 +2585,6 @@ async function applyCommercialSuiteSize(profile, opts = {}) {
       businessNameHint: null,
       commercialRiskType: null,
       commercialSubtype: candidate.commercialSubtype,
-      buildingSqft: candidate.buildingSqft,
     }, opts);
     if (suiteSize && Number(suiteSize.value) > 0) {
       profile.homeSqFt = suiteSize.value;
@@ -2555,6 +2607,9 @@ async function applyCommercialSuiteSize(profile, opts = {}) {
         businessName: suiteSize.businessName || null,
         evidence: suiteSize.evidence || [],
         ...(suiteSize.seats != null ? { seats: suiteSize.seats } : {}),
+        // When this was resolved, so a persisted stamp can be aged out
+        // (see commercialSuiteSizeStampIsFresh) rather than trusted forever.
+        resolvedAt: new Date().toISOString(),
       };
       // Same rule the synchronous stamp-reuse path applies (see
       // reconcileCommercialSuiteSubtype) — shared so the two can never

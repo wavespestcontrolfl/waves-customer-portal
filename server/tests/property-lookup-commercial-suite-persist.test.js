@@ -69,14 +69,14 @@ afterEach(() => {
 });
 
 test('persist:false resolves and stamps the suite size in-memory but never calls saveLookup', async () => {
-  const result = await performPropertyLookup(ADDRESS, { persist: false, prioritizeAccuracy: true });
+  const result = await performPropertyLookup(ADDRESS, { persist: false, prioritizeAccuracy: true, commercialSuiteSizing: true });
   expect(result.enriched.suiteSize).toEqual(expect.objectContaining({ value: 1400, source: 'license_seats' }));
   expect(result.propertyRecord._commercialSuiteSize).toEqual(expect.objectContaining({ value: 1400 }));
   expect(saveLookup).not.toHaveBeenCalled();
 });
 
 test('a persisting run (default) stamps the SAME suite size onto the cached property_record before saveLookup runs', async () => {
-  const result = await performPropertyLookup(ADDRESS, { prioritizeAccuracy: true });
+  const result = await performPropertyLookup(ADDRESS, { prioritizeAccuracy: true, commercialSuiteSizing: true });
   expect(result.enriched.suiteSize).toEqual(expect.objectContaining({ value: 1400, source: 'license_seats' }));
   expect(saveLookup).toHaveBeenCalledTimes(1);
   const [, savedResult] = saveLookup.mock.calls[0];
@@ -91,7 +91,7 @@ test('a type-default guess is NOT pinned to the cache row, so a later lookup can
   resolveCommercialSuiteSize.mockResolvedValueOnce({
     value: 1800, source: 'suite_type_default', confidence: 'low', businessName: null, evidence: [],
   });
-  const result = await performPropertyLookup(ADDRESS, { prioritizeAccuracy: true });
+  const result = await performPropertyLookup(ADDRESS, { prioritizeAccuracy: true, commercialSuiteSizing: true });
   expect(result.enriched.suiteSize).toEqual(expect.objectContaining({ value: 1800, source: 'suite_type_default' }));
   expect(saveLookup).toHaveBeenCalledTimes(1);
   const [, savedResult] = saveLookup.mock.calls[0];

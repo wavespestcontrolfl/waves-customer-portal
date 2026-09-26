@@ -64,7 +64,7 @@ test('a cold DBPR cache on a cache-hit request falls back to the type default wi
   const pending = new Promise((resolve) => { releaseFetch = resolve; });
   const fetchText = jest.fn().mockReturnValue(pending);
 
-  const profile = buildEnrichedProfile(plazaSuiteRecord(), null, 27.5, -82.45, null, null, SUITE_ADDRESS);
+  const profile = buildEnrichedProfile(plazaSuiteRecord(), null, 27.5, -82.45, null, null, SUITE_ADDRESS, { commercialSuiteSizing: true });
   await routePrivate.applyCommercialSuiteSize(profile, { skipWebSearch: true, requireWarmCache: true, fetchText });
 
   expect(profile.suiteSize.source).toBe('suite_type_default');
@@ -90,14 +90,14 @@ test('a warm DBPR cache on a cache-hit request resolves the real match with zero
   const warmFetch = jest.fn().mockResolvedValue(warmupText);
   // Simulates a prior FRESH lookup that already warmed DBPR's in-process
   // cache (no requireWarmCache/skipWebSearch restriction on that call).
-  const warmupProfile = buildEnrichedProfile(plazaSuiteRecord(), null, 27.5, -82.45, null, null, SUITE_ADDRESS);
+  const warmupProfile = buildEnrichedProfile(plazaSuiteRecord(), null, 27.5, -82.45, null, null, SUITE_ADDRESS, { commercialSuiteSizing: true });
   await routePrivate.applyCommercialSuiteSize(warmupProfile, { fetchText: warmFetch });
   expect(warmupProfile.suiteSize.source).toBe('license_seats');
 
   // A SEPARATE cache-hit request for the same address, on a record with no
   // stamp of its own (a pre-existing cached row from before this feature).
   const fetchText = jest.fn(); // must never be called
-  const cacheHitProfile = buildEnrichedProfile(plazaSuiteRecord(), null, 27.5, -82.45, null, null, SUITE_ADDRESS);
+  const cacheHitProfile = buildEnrichedProfile(plazaSuiteRecord(), null, 27.5, -82.45, null, null, SUITE_ADDRESS, { commercialSuiteSizing: true });
   await routePrivate.applyCommercialSuiteSize(cacheHitProfile, { skipWebSearch: true, requireWarmCache: true, fetchText });
 
   expect(cacheHitProfile.suiteSize.source).toBe('license_seats');

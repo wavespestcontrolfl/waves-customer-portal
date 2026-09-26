@@ -89,8 +89,12 @@ function publicEnrichedProfile(enriched) {
   if (!enriched || typeof enriched !== 'object') return enriched ?? null;
   // addressVerdict is a server-owned trust marker (the lead's verdict is
   // derived from it server-side) — never part of the public payload
-  // (codex #4667 r11 P0).
-  const { subdivisionMedian, addressVerdict, ...rest } = enriched;
+  // (codex #4667 r11 P0). suiteSize/suiteBuildingTotalSqFt are defensive:
+  // this route never opts into commercialSuiteSizing (performPropertyLookup
+  // opt-in, primary review of PR #4840), so buildEnrichedProfile never sets
+  // them here today — stripped anyway so a future caller of this function
+  // can never leak them by accident.
+  const { subdivisionMedian, addressVerdict, suiteSize: _suiteSize, suiteBuildingTotalSqFt: _suiteBuildingTotalSqFt, ...rest } = enriched;
   if (!subdivisionMedian || !Array.isArray(rest.fieldVerifyFlags)) return rest;
   // The homeSqFt verify flag spells the same figures out in prose — swap in
   // the median-free vacant-parcel copy (one shared string, never a regex).

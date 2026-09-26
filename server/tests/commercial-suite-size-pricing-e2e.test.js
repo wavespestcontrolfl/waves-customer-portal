@@ -64,7 +64,7 @@ describe('manual admin-tool path — buildEnrichedProfile -> applyCommercialSuit
       evidence: [{ source: 'license_seats', detail: '25 seats -> 1,400 sq ft' }],
     });
 
-    const profile = buildEnrichedProfile(plazaSuiteRecord(), null, 27.5, -82.45, null, null, SUITE_ADDRESS);
+    const profile = buildEnrichedProfile(plazaSuiteRecord(), null, 27.5, -82.45, null, null, SUITE_ADDRESS, { commercialSuiteSizing: true });
     await routePrivate.applyCommercialSuiteSize(profile);
 
     // The bug this test guards: homeSqFt alone was corrected in the first
@@ -72,7 +72,7 @@ describe('manual admin-tool path — buildEnrichedProfile -> applyCommercialSuit
     // from rc.squareFootage) was not.
     expect(profile.homeSqFt).toBe(1400);
     expect(profile.footprint).toBe(1400);
-    expect(profile.buildingSqFt).toBe(46031);
+    expect(profile.suiteBuildingTotalSqFt).toBe(46031);
     // The building's ground-geometry boxes must be empty, not carried
     // forward — trenching/Bora-Care/preslab must never auto-fill off the
     // whole plaza either.
@@ -102,7 +102,7 @@ describe('manual admin-tool path — buildEnrichedProfile -> applyCommercialSuit
 
   test('control: the SAME building record with no suite signal still prices off the whole building (unaffected)', async () => {
     const buildingAddress = '4400 Test Commons Pkwy E, Bradenton, FL 00000';
-    const profile = buildEnrichedProfile(plazaSuiteRecord(), null, 27.5, -82.45, null, null, buildingAddress);
+    const profile = buildEnrichedProfile(plazaSuiteRecord(), null, 27.5, -82.45, null, null, buildingAddress, { commercialSuiteSizing: true });
     await routePrivate.applyCommercialSuiteSize(profile); // no candidate — no-op
     expect(resolveViaDbprLicense).not.toHaveBeenCalled();
     expect(profile.homeSqFt).toBe(46031);

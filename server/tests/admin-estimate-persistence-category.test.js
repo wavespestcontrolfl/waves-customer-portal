@@ -79,6 +79,32 @@ describe('buildEstimatePersistenceFields — category', () => {
     expect('category' in fields).toBe(false);
   });
 
+  test('a commercial termite-only payload from the V2 form (string isCommercial "YES", no commercial_* line) persists COMMERCIAL', () => {
+    // EstimateToolViewV2 stores its commercial toggle as the STRING "YES"/
+    // "NO" (never a boolean), and a termite-only estimate has no
+    // commercial_pest/commercial_* line item to key off of at all — this is
+    // exactly the shape that slipped through as RESIDENTIAL before the fix.
+    const fields = buildEstimatePersistenceFields({
+      ...baseBody,
+      estimateData: {
+        inputs: { isCommercial: 'YES', address: '4400 Test Commons Pkwy E #102' },
+        result: { recurring: { services: [{ service: 'termite_bait', name: 'Termite Baiting', mo: 45 }] } },
+      },
+    });
+    expect(fields.category).toBe('COMMERCIAL');
+  });
+
+  test('a payload whose propertyType is the string "Commercial" (no isCommercial flag, no commercial_* line) persists COMMERCIAL', () => {
+    const fields = buildEstimatePersistenceFields({
+      ...baseBody,
+      estimateData: {
+        inputs: { propertyType: 'Commercial', address: '4400 Test Commons Pkwy E #102' },
+        result: { recurring: { services: [{ service: 'termite_bait', name: 'Termite Baiting', mo: 45 }] } },
+      },
+    });
+    expect(fields.category).toBe('COMMERCIAL');
+  });
+
   test('a revise whose incremental payload carries no commercial markers omits category — the row keeps whatever it already had (never downgraded)', () => {
     // Simulates reviseAdminEstimate: the operator edited an unrelated field
     // (e.g. a discount) on an already-commercial estimate, and the payload

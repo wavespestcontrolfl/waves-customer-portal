@@ -10,20 +10,24 @@
  * manual property-lookup tool, the same way a residential estimate is
  * auto-sized from county/subdivision data.
  *
- * Three sources, tried in priority order, each fail-open (an error or a
+ * Two SIZE sources, tried in priority order, each fail-open (an error or a
  * miss just falls through to the next):
  *   1. license_seats     — an active FL DBPR food-service license naming
  *                           this suite (server/services/commercial-suite-size/dbpr-food-license.js).
- *   2. commercial_listing — a bounded Claude web-search leg reading
- *                           LoopNet/Crexi/county condo records/the
- *                           business's own site (./web-search-leg.js).
- *   3. suite_type_default — a business-type-keyed rough default
- *                           (./type-defaults.js) — always resolves, so this
- *                           function effectively never returns null.
+ *   2. suite_type_default — a business-type-keyed rough default
+ *                           (./type-defaults.js), keyed OFF
+ *                           commercialRiskType/commercialSubtype ONLY —
+ *                           always resolves, so this function effectively
+ *                           never returns null.
  *
- * A caller/tech-stated size always outranks all three — that rule already
- * lives in source-arbitration.js's resolveHomeSqft and is unchanged; this
- * module is only ever consulted when the caller-stated size is absent.
+ * A caller/tech-stated size always outranks both — that rule already lives
+ * in source-arbitration.js's resolveHomeSqft and is unchanged; this module
+ * is only ever consulted when the caller-stated size is absent.
+ *
+ * The web-search leg (./web-search-leg.js) is NOT a size source (AGENTS.md:
+ * an LLM proposes intent, it never reaches a price/size field) — it only
+ * finds the business name/type for display/notes when DBPR has nothing,
+ * and is consulted between the two size rungs above for that reason alone.
  */
 
 const logger = require('../logger');
@@ -33,7 +37,6 @@ const { defaultSuiteSqftFor } = require('./type-defaults');
 
 const SOURCES = {
   LICENSE_SEATS: 'license_seats',
-  COMMERCIAL_LISTING: 'commercial_listing',
   SUITE_TYPE_DEFAULT: 'suite_type_default',
 };
 
@@ -47,12 +50,10 @@ const SOURCES = {
  *                         address", not "require it to be typed in first")
  *   commercialRiskType  — intent-schema commercial_risk_type, or null
  *   commercialSubtype   — property-lookup commercialSubtype, or null
- *   buildingSqft        — the WHOLE building's sqft if known, or null (used
- *                         only to reject a web-search figure that is
- *                         actually the building total)
  * @param {object} opts   — timeouts/injection for tests: districts,
- *                         fetchText, now (DBPR leg), timeoutMs, maxSearches,
- *                         anthropicClient (web-search leg)
+ *                         fetchText, now, requireWarmCache (DBPR leg),
+ *                         timeoutMs, maxSearches, anthropicClient
+ *                         (web-search leg), skipWebSearch
  * @returns {Promise<{value:number, source:string, confidence:string,
  *   businessName:string|null, businessType:string|null, evidence:array,
  *   seats?:number}|null>}
@@ -60,7 +61,7 @@ const SOURCES = {
 async function resolveCommercialSuiteSize(input = {}, opts = {}) {
   const {
     address = {}, phone = null, businessNameHint = null,
-    commercialRiskType = null, commercialSubtype = null, buildingSqft = null,
+    commercialRiskType = null, commercialSubtype = null,
   } = input;
 
   let businessName = businessNameHint || null;
@@ -87,38 +88,26 @@ async function resolveCommercialSuiteSize(input = {}, opts = {}) {
   }
 
   // skipWebSearch: the manual lookup tool's fast CACHED-rebuild path uses
-  // this to keep a cache hit cheap — the DBPR leg is fine there (cached
-  // in-process for 24h), but a multi-second Claude web-search call on every
+  // this to keep a cache hit cheap — a Claude web-search call on every
   // cache hit would defeat the point of caching. The FRESH lookup (already
   // a multi-second, multi-provider call) and the estimator engine both run
-  // the full leg.
+  // this leg (name-only; see web-search-leg.js — it never returns a size).
   if (!opts.skipWebSearch) {
     try {
-      const web = await resolveViaWebSearch({
-        address, businessNameHint, buildingSqft, commercialRiskType, commercialSubtype,
-      }, opts);
+      const web = await resolveViaWebSearch({ address, businessNameHint }, opts);
       if (web) {
         businessName = businessName || web.businessName || null;
         businessType = businessType || web.businessType || null;
-        if (Number(web.value) > 0) {
-          return {
-            value: web.value,
-            source: SOURCES.COMMERCIAL_LISTING,
-            // Medium, not high: the size rests on a quote the MODEL reports
-            // from a page we did not fetch ourselves.
-            confidence: 'medium',
-            businessName: web.businessName || businessName,
-            businessType: web.businessType || businessType,
-            evidence: web.evidence,
-          };
-        }
       }
     } catch (err) {
       logger.warn(`[commercial-suite-size] web-search leg errored: ${err.message}`);
     }
   }
 
-  const value = defaultSuiteSqftFor({ commercialRiskType, commercialSubtype, businessType });
+  // Type default keys OFF commercialRiskType/commercialSubtype ONLY — a
+  // web-search-reported businessType never chooses the size (AGENTS.md); it
+  // still rides the RESULT for display/notes and subtype reconciliation.
+  const value = defaultSuiteSqftFor({ commercialRiskType, commercialSubtype });
   const businessTypeLabel = businessType || commercialRiskType || commercialSubtype || 'this business type';
   return {
     value,

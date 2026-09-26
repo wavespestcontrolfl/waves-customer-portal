@@ -1,8 +1,8 @@
 /**
- * Last-resort suite-size defaults, keyed off whatever business-type signal
- * is available (commercialRiskType, commercialSubtype, or a business type
- * string a resolver leg reported). Used only when neither the DBPR license
- * extract nor the web-search leg found a real measurement — a rough number
+ * Last-resort suite-size defaults, keyed OFF commercialRiskType /
+ * commercialSubtype ONLY — never a model-reported businessType (AGENTS.md:
+ * an LLM proposes intent, it never picks a price/size field). Used only
+ * when the DBPR license extract found no real measurement — a rough number
  * beats a $0 manual quote, and the LOW confidence + yellow lane tell the
  * operator to confirm on site.
  */
@@ -15,8 +15,8 @@ const SUITE_TYPE_DEFAULT_SQFT = {
   other: 1500,
 };
 
-function defaultSuiteSqftFor({ commercialRiskType, commercialSubtype, businessType } = {}) {
-  const text = [commercialRiskType, commercialSubtype, businessType]
+function defaultSuiteSqftFor({ commercialRiskType, commercialSubtype } = {}) {
+  const text = [commercialRiskType, commercialSubtype]
     .filter(Boolean).join(' ').toLowerCase();
   if (/restaurant|food/.test(text)) return SUITE_TYPE_DEFAULT_SQFT.restaurant;
   if (/salon|spa|barber|personal.?service/.test(text)) return SUITE_TYPE_DEFAULT_SQFT.salon;

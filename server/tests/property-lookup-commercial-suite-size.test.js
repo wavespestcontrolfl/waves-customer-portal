@@ -6,6 +6,12 @@
  * synchronous (dozens of existing tests call it directly, un-awaited) and
  * only stashes a candidate; applyCommercialSuiteSize (the async half) is
  * what this file exercises.
+ *
+ * The whole lane is OPT-IN (primary review of PR #4840): buildEnrichedProfile
+ * only looks for a suite at all when passed `{ commercialSuiteSizing: true }`
+ * as its 8th argument — the flag `performPropertyLookup` threads through
+ * from the admin lookup route and the estimator engine's
+ * gatherPropertySignals. Public callers never pass it.
  */
 
 jest.mock('../services/logger', () => ({
@@ -17,6 +23,8 @@ jest.mock('../services/commercial-suite-size');
 
 const { resolveCommercialSuiteSize } = require('../services/commercial-suite-size');
 const { _private: routePrivate, buildEnrichedProfile } = require('../routes/property-lookup-v2');
+
+const SUITE_SIZING_ON = { commercialSuiteSizing: true };
 
 function plazaSuiteRecord(overrides = {}) {
   return {
@@ -40,36 +48,61 @@ beforeEach(() => {
   jest.clearAllMocks();
 });
 
-describe('buildEnrichedProfile stashes a candidate but never leaks building sqft as homeSqFt', () => {
-  test('suite address on a commercial record: homeSqFt is 0 pending resolution, buildingSqFt carries the total', () => {
+describe('opt-in gating — the whole lane is OFF unless commercialSuiteSizing:true', () => {
+  test('a suite address with the flag OMITTED: no candidate, no zeroing, homeSqFt stays the (wrong, but byte-identical-to-before-this-feature) building total', () => {
     const profile = buildEnrichedProfile(plazaSuiteRecord(), null, 27.5, -82.45, null, null, SUITE_ADDRESS);
+    expect(profile.homeSqFt).toBe(46031);
+    expect(profile.suiteBuildingTotalSqFt).toBeUndefined();
+    expect(profile.suiteSize).toBeUndefined();
+    expect(profile._commercialSuiteCandidate).toBeNull();
+  });
+
+  test('the same address WITH the flag: candidate is created and homeSqFt is zeroed pending resolution', () => {
+    const profile = buildEnrichedProfile(plazaSuiteRecord(), null, 27.5, -82.45, null, null, SUITE_ADDRESS, SUITE_SIZING_ON);
+    expect(profile.homeSqFt).toBe(0);
+    expect(profile._commercialSuiteCandidate).toEqual(expect.objectContaining({ buildingSqft: 46031 }));
+  });
+
+  test('a stamped record is ignored entirely when the flag is off — no sync reuse, no suiteSize field at all', () => {
+    const stamp = { value: 1400, source: 'license_seats', unitKey: '102', resolvedAt: new Date().toISOString() };
+    const profile = buildEnrichedProfile(
+      plazaSuiteRecord({ _commercialSuiteSize: stamp }), null, 27.5, -82.45, null, null, SUITE_ADDRESS,
+    );
+    expect(profile.homeSqFt).toBe(46031);
+    expect(profile.suiteSize).toBeUndefined();
+  });
+});
+
+describe('buildEnrichedProfile (flag on) stashes a candidate but never leaks building sqft as homeSqFt', () => {
+  test('suite address on a commercial record: homeSqFt is 0 pending resolution, suiteBuildingTotalSqFt carries the total', () => {
+    const profile = buildEnrichedProfile(plazaSuiteRecord(), null, 27.5, -82.45, null, null, SUITE_ADDRESS, SUITE_SIZING_ON);
     expect(profile.isCommercial).toBe(true);
     expect(profile.homeSqFt).toBe(0);
-    expect(profile.buildingSqFt).toBe(46031);
+    expect(profile.suiteBuildingTotalSqFt).toBe(46031);
     expect(profile._commercialSuiteCandidate).toEqual(expect.objectContaining({ buildingSqft: 46031 }));
   });
 
   test('bare building address (no suite/unit): unaffected, homeSqFt is the building total as before', () => {
-    const profile = buildEnrichedProfile(plazaSuiteRecord(), null, 27.5, -82.45, null, null, BUILDING_ADDRESS);
+    const profile = buildEnrichedProfile(plazaSuiteRecord(), null, 27.5, -82.45, null, null, BUILDING_ADDRESS, SUITE_SIZING_ON);
     expect(profile.isCommercial).toBe(true);
     expect(profile.homeSqFt).toBe(46031);
-    expect(profile.buildingSqFt).toBeUndefined();
+    expect(profile.suiteBuildingTotalSqFt).toBeUndefined();
     expect(profile._commercialSuiteCandidate).toBeNull();
   });
 
   test('freestanding building whose address carries a suite: no multi-tenant evidence, keeps the county building size', () => {
     const record = plazaSuiteRecord({ _parcel: { landUseDescription: 'Stores, One Story (1100)' } });
-    const profile = buildEnrichedProfile(record, null, 27.5, -82.45, null, null, SUITE_ADDRESS);
+    const profile = buildEnrichedProfile(record, null, 27.5, -82.45, null, null, SUITE_ADDRESS, SUITE_SIZING_ON);
     expect(profile.isCommercial).toBe(true);
     expect(profile.homeSqFt).toBe(46031);
-    expect(profile.buildingSqFt).toBeUndefined();
+    expect(profile.suiteBuildingTotalSqFt).toBeUndefined();
     expect(profile._commercialSuiteCandidate).toBeNull();
   });
 
   test('residential lookup (no commercial signal): no candidate at all', () => {
     const profile = buildEnrichedProfile(
       { formattedAddress: SUITE_ADDRESS, propertyType: 'Single Family', squareFootage: 1800, _source: 'county' },
-      null, 27.5, -82.45, null, null, SUITE_ADDRESS,
+      null, 27.5, -82.45, null, null, SUITE_ADDRESS, SUITE_SIZING_ON,
     );
     expect(profile.isCommercial).toBe(false);
     expect(profile._commercialSuiteCandidate).toBeNull();
@@ -79,24 +112,65 @@ describe('buildEnrichedProfile stashes a candidate but never leaks building sqft
     const stamp = {
       value: 1400, source: 'license_seats', confidence: 'medium', unitKey: '102',
       businessName: 'Test Taco Shop', evidence: [{ source: 'license_seats', detail: '25 seats -> 1,400 sq ft' }], seats: 25,
+      resolvedAt: new Date().toISOString(),
     };
     const profile = buildEnrichedProfile(
-      plazaSuiteRecord({ _commercialSuiteSize: stamp }), null, 27.5, -82.45, null, null, SUITE_ADDRESS,
+      plazaSuiteRecord({ _commercialSuiteSize: stamp }), null, 27.5, -82.45, null, null, SUITE_ADDRESS, SUITE_SIZING_ON,
     );
     expect(profile.homeSqFt).toBe(1400);
     expect(profile.footprint).toBe(1400);
-    expect(profile.buildingSqFt).toBe(46031);
+    expect(profile.suiteBuildingTotalSqFt).toBe(46031);
     expect(profile.suiteSize).toEqual(stamp);
     // Already resolved — nothing pending for applyCommercialSuiteSize.
     expect(profile._commercialSuiteCandidate).toBeNull();
   });
 
   test('a stamped office_retail plaza reconciles to restaurant synchronously, same as a fresh resolution', () => {
-    const stamp = { value: 1400, source: 'license_seats', businessName: 'Test Taco Shop', unitKey: '102' };
+    const stamp = { value: 1400, source: 'license_seats', businessName: 'Test Taco Shop', unitKey: '102', resolvedAt: new Date().toISOString() };
     const profile = buildEnrichedProfile(
-      plazaSuiteRecord({ _commercialSuiteSize: stamp }), null, 27.5, -82.45, null, null, SUITE_ADDRESS,
+      plazaSuiteRecord({ _commercialSuiteSize: stamp }), null, 27.5, -82.45, null, null, SUITE_ADDRESS, SUITE_SIZING_ON,
     );
     expect(profile.commercialSubtype).toBe('restaurant');
+  });
+});
+
+describe('a stamp expires after its source-specific max age (license_seats: 30 days)', () => {
+  test('a fresh (1-day-old) license_seats stamp is reused', () => {
+    const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const stamp = { value: 1400, source: 'license_seats', unitKey: '102', resolvedAt: oneDayAgo };
+    const profile = buildEnrichedProfile(
+      plazaSuiteRecord({ _commercialSuiteSize: stamp }), null, 27.5, -82.45, null, null, SUITE_ADDRESS, SUITE_SIZING_ON,
+    );
+    expect(profile.homeSqFt).toBe(1400);
+    expect(profile._commercialSuiteCandidate).toBeNull();
+  });
+
+  test('a 31-day-old license_seats stamp is ignored — falls back to a pending candidate (re-resolve)', () => {
+    const thirtyOneDaysAgo = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000).toISOString();
+    const stamp = { value: 1400, source: 'license_seats', unitKey: '102', resolvedAt: thirtyOneDaysAgo };
+    const profile = buildEnrichedProfile(
+      plazaSuiteRecord({ _commercialSuiteSize: stamp }), null, 27.5, -82.45, null, null, SUITE_ADDRESS, SUITE_SIZING_ON,
+    );
+    expect(profile.homeSqFt).toBe(0);
+    expect(profile._commercialSuiteCandidate).toEqual(expect.objectContaining({ buildingSqft: 46031 }));
+  });
+
+  test('a stamp with no resolvedAt at all (a pre-fix legacy row) is treated as stale for a max-aged source', () => {
+    const stamp = { value: 1400, source: 'license_seats', unitKey: '102' };
+    const profile = buildEnrichedProfile(
+      plazaSuiteRecord({ _commercialSuiteSize: stamp }), null, 27.5, -82.45, null, null, SUITE_ADDRESS, SUITE_SIZING_ON,
+    );
+    expect(profile.homeSqFt).toBe(0);
+  });
+
+  test('a suite_type_default stamp (no max age defined) is reused however old', () => {
+    const tenYearsAgo = new Date(Date.now() - 10 * 365 * 24 * 60 * 60 * 1000).toISOString();
+    const stamp = { value: 1500, source: 'suite_type_default', unitKey: '102', resolvedAt: tenYearsAgo };
+    const profile = buildEnrichedProfile(
+      plazaSuiteRecord({ _commercialSuiteSize: stamp }), null, 27.5, -82.45, null, null, SUITE_ADDRESS, SUITE_SIZING_ON,
+    );
+    expect(profile.homeSqFt).toBe(1500);
+    expect(profile._commercialSuiteCandidate).toBeNull();
   });
 });
 
@@ -107,14 +181,16 @@ describe('applyCommercialSuiteSize — the async resolution', () => {
       businessName: 'Test Taco Shop', businessType: 'restaurant_food', seats: 25,
       evidence: [{ source: 'license_seats', detail: '25 seats -> 1,400 sq ft' }],
     });
-    const profile = buildEnrichedProfile(plazaSuiteRecord(), null, 27.5, -82.45, null, null, SUITE_ADDRESS);
+    const profile = buildEnrichedProfile(plazaSuiteRecord(), null, 27.5, -82.45, null, null, SUITE_ADDRESS, SUITE_SIZING_ON);
     await routePrivate.applyCommercialSuiteSize(profile);
 
     expect(profile.homeSqFt).toBe(1400);
-    expect(profile.buildingSqFt).toBe(46031); // the building total is never dropped, only not double-counted as homeSqFt
+    expect(profile.suiteBuildingTotalSqFt).toBe(46031); // the building total is never dropped, only not double-counted as homeSqFt
     expect(profile.suiteSize).toEqual(expect.objectContaining({
       value: 1400, source: 'license_seats', businessName: 'Test Taco Shop', seats: 25,
     }));
+    // Stamped with a resolution timestamp for the freshness check.
+    expect(Number.isFinite(Date.parse(profile.suiteSize.resolvedAt))).toBe(true);
     expect(profile._commercialSuiteCandidate).toBeUndefined();
   });
 
@@ -123,23 +199,23 @@ describe('applyCommercialSuiteSize — the async resolution', () => {
       value: 1400, source: 'license_seats', confidence: 'medium', businessName: 'Test Taco Shop', businessType: 'restaurant_food',
       evidence: [],
     });
-    const profile = buildEnrichedProfile(plazaSuiteRecord(), null, 27.5, -82.45, null, null, SUITE_ADDRESS);
+    const profile = buildEnrichedProfile(plazaSuiteRecord(), null, 27.5, -82.45, null, null, SUITE_ADDRESS, SUITE_SIZING_ON);
     expect(profile.commercialSubtype).toBe('office_retail'); // the plaza's generic pre-resolution subtype
     await routePrivate.applyCommercialSuiteSize(profile);
     expect(profile.commercialSubtype).toBe('restaurant');
   });
 
   test('a non-suite profile (no candidate) is a no-op and never calls the resolver', async () => {
-    const profile = buildEnrichedProfile(plazaSuiteRecord(), null, 27.5, -82.45, null, null, BUILDING_ADDRESS);
+    const profile = buildEnrichedProfile(plazaSuiteRecord(), null, 27.5, -82.45, null, null, BUILDING_ADDRESS, SUITE_SIZING_ON);
     await routePrivate.applyCommercialSuiteSize(profile);
     expect(resolveCommercialSuiteSize).not.toHaveBeenCalled();
     expect(profile.homeSqFt).toBe(46031);
   });
 
   test('a profile whose suite was already resolved via a persisted stamp never calls the resolver either — zero network on reuse', async () => {
-    const stamp = { value: 1400, source: 'license_seats', businessName: 'Test Taco Shop', unitKey: '102' };
+    const stamp = { value: 1400, source: 'license_seats', businessName: 'Test Taco Shop', unitKey: '102', resolvedAt: new Date().toISOString() };
     const profile = buildEnrichedProfile(
-      plazaSuiteRecord({ _commercialSuiteSize: stamp }), null, 27.5, -82.45, null, null, SUITE_ADDRESS,
+      plazaSuiteRecord({ _commercialSuiteSize: stamp }), null, 27.5, -82.45, null, null, SUITE_ADDRESS, SUITE_SIZING_ON,
     );
     await routePrivate.applyCommercialSuiteSize(profile);
     expect(resolveCommercialSuiteSize).not.toHaveBeenCalled();
@@ -148,19 +224,38 @@ describe('applyCommercialSuiteSize — the async resolution', () => {
 
   test('a resolver failure is fail-open: the profile keeps its pending (0) homeSqFt rather than throwing', async () => {
     resolveCommercialSuiteSize.mockRejectedValue(new Error('boom'));
-    const profile = buildEnrichedProfile(plazaSuiteRecord(), null, 27.5, -82.45, null, null, SUITE_ADDRESS);
+    const profile = buildEnrichedProfile(plazaSuiteRecord(), null, 27.5, -82.45, null, null, SUITE_ADDRESS, SUITE_SIZING_ON);
     await expect(routePrivate.applyCommercialSuiteSize(profile)).resolves.toBe(profile);
     expect(profile.homeSqFt).toBe(0);
   });
 
-  test('passes skipWebSearch through to the resolver (cached-lookup fast path)', async () => {
+  test('passes skipWebSearch through to the resolver (cached-lookup fast path), and never a buildingSqft param', async () => {
     resolveCommercialSuiteSize.mockResolvedValue(null);
-    const profile = buildEnrichedProfile(plazaSuiteRecord(), null, 27.5, -82.45, null, null, SUITE_ADDRESS);
+    const profile = buildEnrichedProfile(plazaSuiteRecord(), null, 27.5, -82.45, null, null, SUITE_ADDRESS, SUITE_SIZING_ON);
     await routePrivate.applyCommercialSuiteSize(profile, { skipWebSearch: true });
     expect(resolveCommercialSuiteSize).toHaveBeenCalledWith(
       expect.any(Object),
       expect.objectContaining({ skipWebSearch: true }),
     );
+    const resolveArg = resolveCommercialSuiteSize.mock.calls[0][0];
+    expect(resolveArg.buildingSqft).toBeUndefined();
+  });
+
+  test('cacheOnly: never calls the resolver even with a pending candidate — reuse a persisted stamp only', async () => {
+    const profile = buildEnrichedProfile(plazaSuiteRecord(), null, 27.5, -82.45, null, null, SUITE_ADDRESS, SUITE_SIZING_ON);
+    await routePrivate.applyCommercialSuiteSize(profile, { cacheOnly: true });
+    expect(resolveCommercialSuiteSize).not.toHaveBeenCalled();
+    expect(profile.homeSqFt).toBe(0);
+  });
+
+  test('cacheOnly with an already-reused stamp: still a no-op (nothing pending to resolve)', async () => {
+    const stamp = { value: 1400, source: 'license_seats', unitKey: '102', resolvedAt: new Date().toISOString() };
+    const profile = buildEnrichedProfile(
+      plazaSuiteRecord({ _commercialSuiteSize: stamp }), null, 27.5, -82.45, null, null, SUITE_ADDRESS, SUITE_SIZING_ON,
+    );
+    await routePrivate.applyCommercialSuiteSize(profile, { cacheOnly: true });
+    expect(resolveCommercialSuiteSize).not.toHaveBeenCalled();
+    expect(profile.homeSqFt).toBe(1400);
   });
 });
 
@@ -174,7 +269,7 @@ describe('a tech-verified sqft outranks the suite resolver', () => {
         squareFootage: { value: 1650, confidence: 'high', sourceType: 'verified' },
       },
     });
-    const profile = buildEnrichedProfile(record, null, 27.5, -82.45, null, null, SUITE_ADDRESS);
+    const profile = buildEnrichedProfile(record, null, 27.5, -82.45, null, null, SUITE_ADDRESS, SUITE_SIZING_ON);
     expect(profile.homeSqFt).toBe(1650);
     expect(profile._commercialSuiteCandidate).toBeNull();
   });
@@ -182,17 +277,17 @@ describe('a tech-verified sqft outranks the suite resolver', () => {
 
 describe('a cached suite stamp is reused only for the unit it sized', () => {
   test('a stamp from #104 is not reused for #102 — the resolver runs again', () => {
-    const stamp = { value: 2200, source: 'license_seats', businessName: 'Other Shop', unitKey: '104' };
+    const stamp = { value: 2200, source: 'license_seats', businessName: 'Other Shop', unitKey: '104', resolvedAt: new Date().toISOString() };
     const profile = buildEnrichedProfile(
-      plazaSuiteRecord({ _commercialSuiteSize: stamp }), null, 27.5, -82.45, null, null, SUITE_ADDRESS,
+      plazaSuiteRecord({ _commercialSuiteSize: stamp }), null, 27.5, -82.45, null, null, SUITE_ADDRESS, SUITE_SIZING_ON,
     );
     expect(profile.homeSqFt).toBe(0);
     expect(profile._commercialSuiteCandidate).toEqual(expect.objectContaining({ buildingSqft: 46031 }));
   });
   test('an untagged legacy stamp is not reused', () => {
-    const stamp = { value: 2200, source: 'license_seats' };
+    const stamp = { value: 2200, source: 'license_seats', resolvedAt: new Date().toISOString() };
     const profile = buildEnrichedProfile(
-      plazaSuiteRecord({ _commercialSuiteSize: stamp }), null, 27.5, -82.45, null, null, SUITE_ADDRESS,
+      plazaSuiteRecord({ _commercialSuiteSize: stamp }), null, 27.5, -82.45, null, null, SUITE_ADDRESS, SUITE_SIZING_ON,
     );
     expect(profile._commercialSuiteCandidate).not.toBeNull();
   });

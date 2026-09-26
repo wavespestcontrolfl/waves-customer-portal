@@ -3,21 +3,20 @@ const { applyUnitScopeToPropertyFacts } = require('../services/estimator-engine/
 const { buildEngineInput, classifyLane, LANES } = require('../services/estimator-engine/draft-builder');
 
 describe('commercial-suite-size sources in source-arbitration', () => {
-  test('the three new sources exist and are never in FALLBACK_SQFT_SOURCES', () => {
+  test('the two sizing sources exist and are never in FALLBACK_SQFT_SOURCES; the web-search rung is gone', () => {
     expect(SQFT_SOURCES.LICENSE_SEATS).toBe('license_seats');
-    expect(SQFT_SOURCES.COMMERCIAL_LISTING).toBe('commercial_listing');
     expect(SQFT_SOURCES.SUITE_TYPE_DEFAULT).toBe('suite_type_default');
+    expect(SQFT_SOURCES.COMMERCIAL_LISTING).toBeUndefined();
     // If these were fallback sources, buildEngineInput's
     // buildingSizeMeasured check would go false and priceCommercialPest
     // would fall back to manual_quote — defeating the whole feature.
     expect(FALLBACK_SQFT_SOURCES.has(SQFT_SOURCES.LICENSE_SEATS)).toBe(false);
-    expect(FALLBACK_SQFT_SOURCES.has(SQFT_SOURCES.COMMERCIAL_LISTING)).toBe(false);
     expect(FALLBACK_SQFT_SOURCES.has(SQFT_SOURCES.SUITE_TYPE_DEFAULT)).toBe(false);
   });
 });
 
-describe('applyUnitScopeToPropertyFacts — the three sources survive a commercial_suite scope', () => {
-  test.each([SQFT_SOURCES.LICENSE_SEATS, SQFT_SOURCES.COMMERCIAL_LISTING, SQFT_SOURCES.SUITE_TYPE_DEFAULT])(
+describe('applyUnitScopeToPropertyFacts — the sizing sources survive a commercial_suite scope', () => {
+  test.each([SQFT_SOURCES.LICENSE_SEATS, SQFT_SOURCES.SUITE_TYPE_DEFAULT])(
     '%s is not cleared on a part-building commercial suite', (source) => {
       const propertyFacts = {
         home: { value: 1400, source, confidence: 'medium', rejected: [] },
@@ -56,8 +55,8 @@ describe('applyUnitScopeToPropertyFacts — the three sources survive a commerci
   });
 });
 
-describe('buildEngineInput — buildingSizeMeasured true for the three new sources', () => {
-  test.each([SQFT_SOURCES.LICENSE_SEATS, SQFT_SOURCES.COMMERCIAL_LISTING, SQFT_SOURCES.SUITE_TYPE_DEFAULT])(
+describe('buildEngineInput — buildingSizeMeasured true for the sizing sources', () => {
+  test.each([SQFT_SOURCES.LICENSE_SEATS, SQFT_SOURCES.SUITE_TYPE_DEFAULT])(
     '%s auto-prices (buildingSizeMeasured: true, footprintSqFt set)', (source) => {
       const intent = {
         is_commercial: true,
@@ -120,18 +119,6 @@ describe('classifyLane — commercial-suite-size review reasons', () => {
     });
     expect(out.lane).toBe(LANES.YELLOW);
     expect(out.reasons.some((r) => /suite size not found.*defaulted to 1,800 sq ft.*confirm on site/.test(r))).toBe(true);
-  });
-
-  test('commercial_listing parks yellow too: the size rests on a model-reported quote', () => {
-    const propertyFacts = {
-      home: { value: 1400, source: SQFT_SOURCES.COMMERCIAL_LISTING, confidence: 'medium', rejected: [] },
-      commercialSuiteSize: { value: 1400, source: SQFT_SOURCES.COMMERCIAL_LISTING, confidence: 'medium', businessName: 'Test Taco Shop' },
-    };
-    const out = classifyLane({
-      intent: baseIntent(), propertyFacts, engineResult: { lineItems: [commercialPestLine(1400)] }, totals, comps: null, calibration: [],
-    });
-    expect(out.lane).toBe(LANES.YELLOW);
-    expect(out.reasons.some((r) => /suite size 1,400 sq ft from a web listing.*confirm on site/.test(r))).toBe(true);
   });
 });
 

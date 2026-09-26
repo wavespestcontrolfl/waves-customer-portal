@@ -340,9 +340,10 @@ function buildAiProviderWarnings({ sources, errors = [], providerStatus = {} } =
 // Home Sq Ft field when the lookup sized a suite instead of the whole
 // building — where the number came from, and the building total for
 // context. Returns null when the lookup carries no suite-size result.
+// Only two sizing sources exist (a web-search leg is never a size source —
+// AGENTS.md: an LLM proposes intent, it never picks a price/size field).
 const COMMERCIAL_SUITE_SOURCE_LABELS = {
   license_seats: "state restaurant license",
-  commercial_listing: "commercial listing",
   suite_type_default: "typical size for this business type",
 };
 
@@ -351,19 +352,11 @@ function commercialSuiteSizeNote(enrichedProfile) {
   if (!suite || !(Number(suite.value) > 0)) return null;
   const sourceLabel = COMMERCIAL_SUITE_SOURCE_LABELS[suite.source] || suite.source;
   const seatsNote = suite.source === "license_seats" && suite.seats != null ? ` (${suite.seats} seats)` : "";
-  const buildingNote = Number(enrichedProfile?.buildingSqFt) > 0
-    ? ` Building total ${Number(enrichedProfile.buildingSqFt).toLocaleString()} sq ft.`
+  const buildingNote = Number(enrichedProfile?.suiteBuildingTotalSqFt) > 0
+    ? ` Building total ${Number(enrichedProfile.suiteBuildingTotalSqFt).toLocaleString()} sq ft.`
     : "";
   const nameNote = suite.businessName ? ` — ${suite.businessName}` : "";
-  // A web-found listing size is model-reported: tell the operator to open
-  // the listing before sending, and where it is.
-  const listingUrl = suite.source === "commercial_listing"
-    ? (suite.evidence || []).map((e) => e && e.url).find(Boolean)
-    : null;
-  const verifyNote = suite.source === "commercial_listing"
-    ? ` Verify the listing before sending${listingUrl ? `: ${listingUrl}` : ""}.`
-    : "";
-  return `Suite size ${Number(suite.value).toLocaleString()} sq ft — from ${sourceLabel}${seatsNote}.${buildingNote}${nameNote}${verifyNote}`;
+  return `Suite size ${Number(suite.value).toLocaleString()} sq ft — from ${sourceLabel}${seatsNote}.${buildingNote}${nameNote}`;
 }
 
 function adminFetch(path, options = {}) {
@@ -422,8 +415,16 @@ function buildTurfRequestProfile(baseProfile, form) {
     Number(form.stories) >= 1
   )
     profile.footprintUnknown = false;
-  if (profile.homeSqFt && profile.footprintUnknown !== true)
+  // A suite-sized profile (server/services/commercial-suite-size/): the
+  // suite's own footprint is homeSqFt AS-IS — dividing by the BUILDING's
+  // story count (profile.stories still reads the building, since a suite
+  // has none of its own) would price a 1,400 sq ft suite in a 2-story plaza
+  // as a 700 sq ft footprint.
+  if (baseProfile.suiteSize) {
+    profile.footprint = profile.homeSqFt;
+  } else if (profile.homeSqFt && profile.footprintUnknown !== true) {
     profile.footprint = Math.round(profile.homeSqFt / (profile.stories || 1));
+  }
   profile.pool = form.hasPool === "YES" ? "YES" : "NO";
   profile.poolCage = form.hasPoolCage === "YES" ? "YES" : "NO";
   profile.poolCageSize =
@@ -457,6 +458,12 @@ function buildTurfRequestProfile(baseProfile, form) {
   profile.mosquitoPressure = formIsCommercial ? form.mosquitoPressure || null : null;
   return profile;
 }
+
+// Named export purely for direct unit testing (see
+// EstimateToolViewV2.commercial-suite-size.test.jsx) — the component's
+// default export is unaffected and every other consumer keeps importing it
+// the same way.
+export { buildTurfRequestProfile };
 
 async function summarizeEstimateResponseFailure(response, fallbackLabel) {
   try {

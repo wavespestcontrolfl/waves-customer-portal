@@ -35,9 +35,11 @@ const SQFT_SOURCES = {
   // arbitration + the unit-scope apply, when a commercial_suite tenant has
   // no stated unit size — never produced by resolveHomeSqft itself. Suite-
   // scoped by construction, so applyUnitScopeToPropertyFacts's
-  // BUILDING_SCOPE_HOME_SOURCES set must never include them.
+  // BUILDING_SCOPE_HOME_SOURCES set must never include them. A web-search
+  // rung was removed (AGENTS.md: an LLM proposes intent, never a price
+  // field) — the ladder is caller/tech-stated -> DBPR license seats ->
+  // type default.
   LICENSE_SEATS: 'license_seats',
-  COMMERCIAL_LISTING: 'commercial_listing',
   SUITE_TYPE_DEFAULT: 'suite_type_default',
   NONE: 'unresolved',
 };

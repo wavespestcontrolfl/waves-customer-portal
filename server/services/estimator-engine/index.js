@@ -508,6 +508,10 @@ async function gatherPropertySignals(context, { refreshLookup = false, persistLo
         ...(refreshLookup ? { refresh: true } : {}),
         // dryRun replays are documented read-only — no cache rows behind.
         ...(persistLookup ? {} : { persist: false }),
+        // Opt-in (primary review of PR #4840): the engine adopts
+        // lookup.enriched.suiteSize below when present instead of resolving
+        // again — this flag is what makes the lookup resolve it at all.
+        commercialSuiteSizing: true,
       });
       propertyRecord = lookup?.propertyRecord || null;
       // The normalized profile carries the pricing feature modifiers the raw
@@ -2635,20 +2639,29 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
           && unitScope.serviceScope === 'commercial_suite'
           && propertyFacts.home?.source === SQFT_SOURCES.NONE) {
           try {
-            const { resolveCommercialSuiteSize } = require('../commercial-suite-size');
-            const { parseRawAddress, splitStreetLineUnitParts } = require('../../utils/address-normalizer');
-            const quotedAddressLine = intent.address || result.addressUsed || address;
-            const parsedAddr = parseRawAddress(quotedAddressLine) || {};
-            const { street, unit } = splitStreetLineUnitParts(parsedAddr.line1 || quotedAddressLine || '');
-            const buildingSqftRaw = Number(effectiveSignals.propertyRecord?.squareFootage);
-            const suiteSize = await resolveCommercialSuiteSize({
-              address: { street, unit, city: parsedAddr.city, zip: parsedAddr.zip },
-              phone: context?.phone || null,
-              businessNameHint: intent.customer_name || null,
-              commercialRiskType: intent.commercial_risk_type || null,
-              commercialSubtype: intent.commercial_subtype || null,
-              buildingSqft: Number.isFinite(buildingSqftRaw) && buildingSqftRaw > 0 ? buildingSqftRaw : null,
-            });
+            // gatherPropertySignals already ran performPropertyLookup with
+            // commercialSuiteSizing:true, which resolved (and, on a fresh
+            // lookup, persisted) THIS suite's size — adopt it instead of
+            // running DBPR/web-search a second time for the same address.
+            // Only resolve directly when the lookup didn't (no lookup
+            // record, or its own classifier didn't see the suite signal the
+            // call/SMS extraction did).
+            const lookupSuiteSize = effectiveSignals.enriched?.suiteSize || null;
+            let suiteSize = (lookupSuiteSize && Number(lookupSuiteSize.value) > 0) ? lookupSuiteSize : null;
+            if (!suiteSize) {
+              const { resolveCommercialSuiteSize } = require('../commercial-suite-size');
+              const { parseRawAddress, splitStreetLineUnitParts } = require('../../utils/address-normalizer');
+              const quotedAddressLine = intent.address || result.addressUsed || address;
+              const parsedAddr = parseRawAddress(quotedAddressLine) || {};
+              const { street, unit } = splitStreetLineUnitParts(parsedAddr.line1 || quotedAddressLine || '');
+              suiteSize = await resolveCommercialSuiteSize({
+                address: { street, unit, city: parsedAddr.city, zip: parsedAddr.zip },
+                phone: context?.phone || null,
+                businessNameHint: intent.customer_name || null,
+                commercialRiskType: intent.commercial_risk_type || null,
+                commercialSubtype: intent.commercial_subtype || null,
+              });
+            }
             if (suiteSize && Number(suiteSize.value) > 0) {
               propertyFacts.home = {
                 value: suiteSize.value,

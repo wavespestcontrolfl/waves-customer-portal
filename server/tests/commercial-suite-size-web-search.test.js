@@ -1,9 +1,24 @@
+/**
+ * The web-search leg is DISPLAY ONLY (owner ruling on primary review of PR
+ * #4840, AGENTS.md: an LLM proposes intent, never a price/size field) — it
+ * finds a business name/type for the operator's notes, never a suite size.
+ * Routed through the shared LLM dispatcher (server/services/llm/call.js
+ * callAnthropic).
+ */
+
+jest.mock('../services/llm/call');
+
+const { callAnthropic } = require('../services/llm/call');
 const {
   acceptWebSearchResult,
   webSearchLegEnabled,
   resolveViaWebSearch,
-  parseJson,
+  buildPrompt,
 } = require('../services/commercial-suite-size/web-search-leg');
+
+beforeEach(() => {
+  jest.clearAllMocks();
+});
 
 describe('webSearchLegEnabled (COMMERCIAL_SUITE_WEB_SEARCH kill switch)', () => {
   const ORIGINAL = process.env.COMMERCIAL_SUITE_WEB_SEARCH;
@@ -23,187 +38,93 @@ describe('webSearchLegEnabled (COMMERCIAL_SUITE_WEB_SEARCH kill switch)', () => 
   });
 });
 
-describe('parseJson', () => {
-  test('strips markdown fences', () => {
-    expect(parseJson('```json\n{"a":1}\n```')).toEqual({ a: 1 });
+describe('acceptWebSearchResult', () => {
+  test('accepts a name + type', () => {
+    expect(acceptWebSearchResult({ businessName: 'Test Taco Shop', businessType: 'restaurant' }))
+      .toEqual({ businessName: 'Test Taco Shop', businessType: 'restaurant' });
   });
-  test('returns null on unparsable text', () => {
-    expect(parseJson('not json at all')).toBeNull();
+
+  test('accepts a name alone, or a type alone', () => {
+    expect(acceptWebSearchResult({ businessName: 'Test Taco Shop', businessType: null }))
+      .toEqual({ businessName: 'Test Taco Shop', businessType: null });
+    expect(acceptWebSearchResult({ businessName: null, businessType: 'restaurant' }))
+      .toEqual({ businessName: null, businessType: 'restaurant' });
+  });
+
+  test('returns null when neither field is present, or the input is malformed', () => {
+    expect(acceptWebSearchResult({ businessName: null, businessType: null })).toBeNull();
+    expect(acceptWebSearchResult(null)).toBeNull();
+    expect(acceptWebSearchResult('not an object')).toBeNull();
+  });
+
+  // The old schema (suiteSqft/suiteSqftQuote/suiteSqftUrl) is gone — a
+  // response still carrying those legacy fields must never resurrect a
+  // size; only businessName/businessType are ever read.
+  test('ignores a legacy-shaped response with a size field — no size output exists to read', () => {
+    const result = acceptWebSearchResult({
+      businessName: 'Test Taco Shop', suiteSqft: 1400, suiteSqftQuote: 'Suite 102 is 1,400 sq ft.',
+    });
+    expect(result).toEqual({ businessName: 'Test Taco Shop', businessType: null });
+    expect(result.value).toBeUndefined();
   });
 });
 
-describe('acceptWebSearchResult — acceptance rules', () => {
-  test('accepts "Suite 102 … 1,450 SF" when 102 is the target unit', () => {
-    const result = acceptWebSearchResult({
-      businessName: 'Test Taco Shop',
-      businessType: 'restaurant',
-      suiteSqft: 1450,
-      suiteSqftQuote: 'Suite 102 is a 1,450 SF restaurant space available for lease.',
-      suiteSqftUrl: 'https://www.loopnet.com/example',
-    }, { buildingSqft: 46031, unit: '102' });
-    expect(result).toEqual(expect.objectContaining({ value: 1450, businessName: 'Test Taco Shop', businessType: 'restaurant' }));
-    expect(result.evidence[0].url).toBe('https://www.loopnet.com/example');
-  });
-
-  test('no unit known at all -> never accepts a sqft, even with no building size and a plausible-looking quote', () => {
-    const result = acceptWebSearchResult({
-      businessName: 'Test Taco Shop',
-      suiteSqft: 1400,
-      suiteSqftQuote: 'The shopping plaza is a 46,000 sq ft retail center with retail space available.', suiteSqftUrl: 'https://www.loopnet.com/example',
-    }, { buildingSqft: null }); // no unit passed
-    // businessName still comes through — discovering the tenant is useful
-    // even when the size figure is rejected.
-    expect(result).toEqual({ value: null, businessName: 'Test Taco Shop', businessType: null });
-  });
-
-  test('rejects a quote naming a DIFFERENT suite number than the target unit', () => {
-    const result = acceptWebSearchResult({
-      businessName: 'Test Taco Shop',
-      suiteSqft: 1400,
-      suiteSqftQuote: 'Suite 104 leases at 1,400 sq ft.', suiteSqftUrl: 'https://www.loopnet.com/example',
-    }, { buildingSqft: 46031, unit: '102' });
-    expect(result.value).toBeNull();
-  });
-
-  test('a bare "space" mention with no bound unit number is not accepted (the fixed overquote class)', () => {
-    const result = acceptWebSearchResult({
-      suiteSqft: 40000,
-      suiteSqftQuote: '40,000 sq ft of retail space available in this shopping plaza.', suiteSqftUrl: 'https://www.loopnet.com/example',
-    }, { buildingSqft: 46031, unit: '102' });
-    expect(result).toBeNull();
-  });
-
-  test('rejects a figure that is actually the whole-building total (>50% of known building size), even when it names the right suite', () => {
-    const result = acceptWebSearchResult({
-      businessName: 'Test Plaza LLC',
-      suiteSqft: 40000,
-      suiteSqftQuote: 'Suite 102 spans 40,000 sq ft.', suiteSqftUrl: 'https://www.loopnet.com/example',
-    }, { buildingSqft: 46031, unit: '102' });
-    expect(result.value).toBeNull();
-  });
-
-  test('rejects an out-of-range suite figure (too small / too large), returning null with nothing else to report', () => {
-    expect(acceptWebSearchResult({
-      suiteSqft: 50, suiteSqftQuote: 'Suite 102 is 50 sq ft.', suiteSqftUrl: 'https://www.loopnet.com/example',
-    }, { unit: '102' })).toBeNull();
-    expect(acceptWebSearchResult({
-      suiteSqft: 50000, suiteSqftQuote: 'Suite 102 is 50,000 sq ft.', suiteSqftUrl: 'https://www.loopnet.com/example',
-    }, { unit: '102' })).toBeNull();
-  });
-
-  test('returns null outright when nothing at all was found', () => {
-    expect(acceptWebSearchResult({ suiteSqft: null, suiteSqftQuote: '' }, { unit: '102' })).toBeNull();
-  });
-
-  test('accepts a suite figure with no known building size to compare against', () => {
-    const result = acceptWebSearchResult({
-      suiteSqft: 1400, suiteSqftQuote: 'Unit 102 leases at 1,400 sq ft.', suiteSqftUrl: 'https://www.loopnet.com/example',
-    }, { buildingSqft: null, unit: '102' });
-    expect(result.value).toBe(1400);
-  });
-
-  test('the target unit itself may carry a designator ("#102", "Suite 102") — address-normalizer never hands over a bare number', () => {
-    expect(acceptWebSearchResult({
-      suiteSqft: 1400, suiteSqftQuote: 'Suite 102 is 1,400 sq ft.', suiteSqftUrl: 'https://www.loopnet.com/example',
-    }, { unit: '#102' }).value).toBe(1400);
-    expect(acceptWebSearchResult({
-      suiteSqft: 1400, suiteSqftQuote: 'Suite 102 is 1,400 sq ft.', suiteSqftUrl: 'https://www.loopnet.com/example',
-    }, { unit: 'Suite 102' }).value).toBe(1400);
-    expect(acceptWebSearchResult({
-      suiteSqft: 1400, suiteSqftQuote: 'Suite 104 is 1,400 sq ft.', suiteSqftUrl: 'https://www.loopnet.com/example', // wrong suite
-    }, { unit: '#102' })).toBeNull();
-  });
-
-  test('matches "Ste. 102", "#102", and reversed "102 Suite" phrasing, all bound to the target unit', () => {
-    expect(acceptWebSearchResult({
-      suiteSqft: 1400, suiteSqftQuote: 'Ste. 102 is 1,400 sq ft.', suiteSqftUrl: 'https://www.loopnet.com/example',
-    }, { unit: '102' }).value).toBe(1400);
-    expect(acceptWebSearchResult({
-      suiteSqft: 1400, suiteSqftQuote: 'Unit #102 leases at 1,400 sq ft.', suiteSqftUrl: 'https://www.loopnet.com/example',
-    }, { unit: '102' }).value).toBe(1400);
-    expect(acceptWebSearchResult({
-      suiteSqft: 1400, suiteSqftQuote: 'The 102 Suite space is 1,400 sq ft.', suiteSqftUrl: 'https://www.loopnet.com/example',
-    }, { unit: '102' }).value).toBe(1400);
+describe('buildPrompt', () => {
+  test('asks only for businessName/businessType, never a size', () => {
+    const prompt = buildPrompt({ address: { street: '4400 Test Commons Pkwy E', unit: '102', zip: '00000' } });
+    expect(prompt).toContain('businessName');
+    expect(prompt).toContain('businessType');
+    expect(prompt).not.toMatch(/suiteSqft|square feet|sq ft.*lease/i);
   });
 });
 
 describe('resolveViaWebSearch — gating', () => {
-  test('skipped when the kill switch is off, without calling any client', async () => {
+  test('skipped when the kill switch is off, without calling the LLM dispatcher', async () => {
     process.env.COMMERCIAL_SUITE_WEB_SEARCH = 'false';
-    const anthropicClient = { messages: { create: jest.fn() } };
-    const result = await resolveViaWebSearch(
-      { address: { street: '4400 Test Commons Pkwy E', zip: '00000' } },
-      { anthropicClient },
-    );
+    const result = await resolveViaWebSearch({ address: { street: '4400 Test Commons Pkwy E', zip: '00000' } });
     expect(result).toBeNull();
-    expect(anthropicClient.messages.create).not.toHaveBeenCalled();
+    expect(callAnthropic).not.toHaveBeenCalled();
     delete process.env.COMMERCIAL_SUITE_WEB_SEARCH;
   });
 
   test('skipped with no street address', async () => {
-    const anthropicClient = { messages: { create: jest.fn() } };
-    const result = await resolveViaWebSearch({ address: {} }, { anthropicClient });
+    const result = await resolveViaWebSearch({ address: {} });
     expect(result).toBeNull();
-    expect(anthropicClient.messages.create).not.toHaveBeenCalled();
+    expect(callAnthropic).not.toHaveBeenCalled();
   });
 
-  test('a model/network failure resolves null, never throws', async () => {
-    const anthropicClient = { messages: { create: jest.fn().mockRejectedValue(new Error('boom')) } };
-    await expect(resolveViaWebSearch(
-      { address: { street: '4400 Test Commons Pkwy E', zip: '00000' } },
-      { anthropicClient },
-    )).resolves.toBeNull();
+  test('a dispatcher failure (any reason) resolves null, never throws', async () => {
+    callAnthropic.mockResolvedValue({ ok: false, reason: 'anthropic_timeout' });
+    await expect(resolveViaWebSearch({ address: { street: '4400 Test Commons Pkwy E', zip: '00000' } }))
+      .resolves.toBeNull();
   });
 
-  test('parses a successful model response into an accepted result', async () => {
-    const anthropicClient = {
-      messages: {
-        create: jest.fn().mockResolvedValue({
-          content: [{ type: 'text', text: JSON.stringify({
-            businessName: 'Test Taco Shop', businessType: 'restaurant', suiteSqft: 1400,
-            suiteSqftQuote: 'Suite 102 is 1,400 sq ft.', suiteSqftUrl: 'https://www.loopnet.com/x',
-          }) }],
-        }),
-      },
-    };
-    const result = await resolveViaWebSearch(
-      { address: { street: '4400 Test Commons Pkwy E', unit: '102', zip: '00000' }, buildingSqft: 46031 },
-      { anthropicClient },
-    );
-    expect(result.value).toBe(1400);
-    expect(anthropicClient.messages.create).toHaveBeenCalledTimes(1);
-    const call = anthropicClient.messages.create.mock.calls[0][0];
+  test('parses a successful dispatcher response into an accepted result', async () => {
+    callAnthropic.mockResolvedValue({ ok: true, json: { businessName: 'Test Taco Shop', businessType: 'restaurant' } });
+    const result = await resolveViaWebSearch({ address: { street: '4400 Test Commons Pkwy E', unit: '102', zip: '00000' } });
+    expect(result).toEqual({ businessName: 'Test Taco Shop', businessType: 'restaurant' });
+  });
+
+  test('calls callAnthropic with the web_search tool, WORKHORSE model, and an 8192 token budget', async () => {
+    callAnthropic.mockResolvedValue({ ok: true, json: { businessName: null, businessType: null } });
+    await resolveViaWebSearch({ address: { street: '4400 Test Commons Pkwy E', unit: '102', zip: '00000' } });
+    expect(callAnthropic).toHaveBeenCalledTimes(1);
+    const call = callAnthropic.mock.calls[0][0];
     expect(call.tools[0].type).toBe('web_search_20250305');
+    // 8192, not 1536/1024 — WORKHORSE's adaptive thinking spends from the
+    // same budget as the text (ai-property-lookup.js's own documented trap).
+    expect(call.maxTokens).toBe(8192);
   });
-});
 
-describe('source URL requirement', () => {
-  const { acceptWebSearchResult } = require('../services/commercial-suite-size/web-search-leg');
-  test('a unit-bound quote with no source URL keeps the business name but no size', () => {
-    const out = acceptWebSearchResult({
-      businessName: 'Test Taco Shop', businessType: 'restaurant', suiteSqft: 1400,
-      suiteSqftQuote: 'Suite 102 is 1,400 sq ft.', suiteSqftUrl: '',
-    }, { unit: '#102', buildingSqft: 46000 });
-    expect(out == null || out.value == null).toBe(true);
-  });
-});
-
-describe('quote must state the number, from a listing or records host', () => {
-  const { acceptWebSearchResult } = require('../services/commercial-suite-size/web-search-leg');
-  const accepted = (o) => {
-    const out = acceptWebSearchResult({ businessName: 'Test Taco Shop', ...o }, { unit: '#102' });
-    return out != null && Number(out.value) > 0;
-  };
-  test('a size the quote never states is rejected (building total in the quote, suite size invented)', () => {
-    expect(accepted({ suiteSqft: 1400, suiteSqftQuote: 'Suite 102 is in a 46,000 sq ft center.', suiteSqftUrl: 'https://www.loopnet.com/x' })).toBe(false);
-  });
-  test('comma-formatted figures back the number', () => {
-    expect(accepted({ suiteSqft: 1450, suiteSqftQuote: 'Suite 102: 1,450 SF available.', suiteSqftUrl: 'https://www.crexi.com/x' })).toBe(true);
-  });
-  test('a business website or directory is not a size source', () => {
-    expect(accepted({ suiteSqft: 1450, suiteSqftQuote: 'Suite 102: 1,450 SF.', suiteSqftUrl: 'https://www.yelp.com/biz/x' })).toBe(false);
-  });
-  test('a county records (.gov) page is a size source', () => {
-    expect(accepted({ suiteSqft: 1450, suiteSqftQuote: 'Unit 102 1,450 SF', suiteSqftUrl: 'https://www.manatee.gov/x' })).toBe(true);
+  test('threads timeoutMs and anthropicClient through to the dispatcher', async () => {
+    callAnthropic.mockResolvedValue({ ok: true, json: { businessName: null, businessType: null } });
+    const anthropicClient = { fake: true };
+    await resolveViaWebSearch(
+      { address: { street: '4400 Test Commons Pkwy E', zip: '00000' } },
+      { timeoutMs: 5000, anthropicClient },
+    );
+    const call = callAnthropic.mock.calls[0][0];
+    expect(call.timeoutMs).toBe(5000);
+    expect(call.anthropicClient).toBe(anthropicClient);
   });
 });
