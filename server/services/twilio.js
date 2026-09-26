@@ -843,6 +843,8 @@ const TwilioService = {
         applies: providerCoordination.directCoordinationApplies({
           messageType: options.messageType,
           reservationOwner: options.providerReservationOwner,
+          to,
+          explicitPushOnly: options.explicitPushOnly === true,
         }),
         reservation: {
           to: providerCoordination.normalizeRecipient(to),
