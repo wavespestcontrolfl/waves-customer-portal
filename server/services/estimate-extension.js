@@ -120,8 +120,9 @@ function revivableSiblingsQuery(database, estimate) {
 // row, the siblings its link shows, AND the siblings the extension would
 // revive be put back in front of the customer? Fails closed on a read error.
 async function extensionDeliverableUnderGate(database, estimate) {
-  const { gatedSendAuthorityPredicateApplies, estimateDeliverableUnderGate, rowPassesGatedSendAuthority } = require('./pricing-authority-gate');
-  if (!gatedSendAuthorityPredicateApplies()) return true;
+  const { gatedSendAuthorityPredicateApplies, estimateDeliverableUnderGate, rowPassesGatedSendAuthority, rowClearOfLegacyAutofillHold } = require('./pricing-authority-gate');
+  // Gate off: read-free, the row's own legacy autofill hold only (#4941).
+  if (!gatedSendAuthorityPredicateApplies()) return rowClearOfLegacyAutofillHold(estimate);
   if (!(await estimateDeliverableUnderGate(database, estimate))) return false;
   if (!estimate?.estimate_group_id) return true;
   let revivable;
@@ -178,8 +179,7 @@ async function extendEstimate({ estimate, days, silent = false, entryPoint, work
   // the engine first. Customer-safe copy: the public route returns it
   // verbatim (it preflights the same verdict to answer a generic 404 first).
   {
-    const { gatedSendAuthorityPredicateApplies } = require('./pricing-authority-gate');
-    if (gatedSendAuthorityPredicateApplies() && !(await extensionDeliverableUnderGate(db, estimate))) {
+    if (!(await extensionDeliverableUnderGate(db, estimate))) {
       const err = new Error('This estimate can\'t be extended online right now — please call the office and we\'ll refresh it for you.');
       err.statusCode = 409;
       err.code = 'PRICING_AUTHORITY_NOT_SERVER';
