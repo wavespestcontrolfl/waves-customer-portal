@@ -861,7 +861,18 @@ function splitSentences(turn) {
     .replace(UNICODE_QUESTION_MARKS_RE, '?')
     .replace(UNICODE_STOPS_RE, '.')
     .replace(/\uFF01/g, '!');
-  const chunks = (folded.replace(/\b([ap])\.\s?m\.?/gi, '$1m').match(/[^.!?;]+[.!?;]*/g) || []);
+  // Codex round 32, P2: collapsing "a.m."/"p.m." used to eat the period that
+  // also ENDS the sentence ("… at 10 a.m. Okay." became one sentence ending
+  // "am okay" and held a real booking). The final dot stays a sentence break
+  // when a new capitalized word follows that is not a weekday/month (so "10
+  // a.m. Sunday" still stays one sentence).
+  const collapsed = folded.replace(/\b([ap])\.\s?m(\.?)(?=(\s+)(\S+)|)/gi, (_m, ap, dot, _gap, next) => {
+    const nextWord = String(next || '').replace(/[^A-Za-z]/g, '');
+    const newSentence = dot && /^[A-Z]/.test(nextWord)
+      && !WEEKDAY_NAMES.includes(nextWord.toLowerCase()) && !MONTH_NAMES.includes(nextWord.toLowerCase());
+    return `${ap.toLowerCase()}m${newSentence ? '.' : ''}`;
+  });
+  const chunks = (collapsed.match(/[^.!?;]+[.!?;]*/g) || []);
   return chunks
     .map((c) => ({ raw: c, ns: normalizeCommitmentText(c), interrogative: /[?\u00BF]/.test(c) }))
     .filter((s) => s.ns);

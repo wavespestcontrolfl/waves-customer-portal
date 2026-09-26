@@ -1893,6 +1893,19 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
   });
 
   test.each([
+    "We'll see you Sunday at 10 a.m. Okay.",
+    "Okay. We'll see you Sunday at 10 A.M. Thank you.",
+    "We'll see you at 10 a.m. Sunday.",
+  ])('Codex round-32: a punctuated day period keeps its sentence break before a new sentence — %s', (turn) => {
+    const quote = turn.includes('Sunday.') ? "We'll see you at 10 a.m. Sunday." : "We'll see you Sunday at 10 a.m.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const ex = agentCommitted(['caller_not_authorized'], { quote });
+    ex.scheduling.confirmed_start_at = '2026-08-02T10:00:00-04:00';
+    const r = canAutoRoute(ex, opts({ transcript }));
+    expect(r.allowed).toBe(true);
+  });
+
+  test.each([
     'Caller: Okay, never mind.',
     'Caller: Okay, thank you, but I have to ask my husband.',
     'Caller: Okay will come in the email.',
