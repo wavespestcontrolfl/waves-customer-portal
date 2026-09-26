@@ -231,6 +231,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       serviceKey,
       timeline,
       leadSource,
+      signHost,
     } = intake;
     // The visitor's declared timeline sets urgency directly; null when the
     // form didn't ask (older cached pages) so the AI triage may still guess.
@@ -247,6 +248,13 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
     // to arrive as free text in the unit box and vanish).
     const additionalPropertiesNote = additionalProperties.length
       ? `Visitor also asked to cover ${additionalProperties.length > 1 ? 'additional properties' : 'an additional property'}: ${additionalProperties.map(p => formatAddress({ line1: p.address_line1, line2: p.address_line2, city: p.city, state: p.state, zip: p.zip })).join('; ')}`
+      : '';
+    // "Which home had the sign?" from the neighbor page (/neighbor/ on the
+    // Astro site). Staff-only: it rides on the Customer 360 note and the lead's
+    // extracted_data so the office can credit the sign host, and is never part
+    // of the prose the AI triage or the Lead Response Agent read.
+    const signHostNote = signHost
+      ? `Saw our yard sign at: ${signHost} (neighbor page; that home gets a $25 thank-you credit after a new customer's first service)`
       : '';
 
     // Inline street unit and dedicated unit field disagree — ambiguous. Fail
@@ -422,6 +430,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
         // to 200 chars, and a long UTM-laden pageUrl would push it out of view.
         body: `Submitted contact (not applied to profile): email ${email || '—'}; address ${fullAddress || '—'}`
           + (additionalPropertiesNote ? `\n${additionalPropertiesNote}` : '')
+          + (signHostNote ? `\n${signHostNote}` : '')
           + `\nSubmitted form from ${leadSource.detail || leadSource.source}. Page: ${pageUrl || 'unknown'}`,
         metadata: JSON.stringify({
           formId, formName, utmSource, utmMedium, utmCampaign,
@@ -488,7 +497,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       await db('customer_interactions').insert({
         customer_id: customer.id, interaction_type: 'note',
         subject: `New lead from ${leadSource.detail || leadSource.source}`,
-        body: `Form: ${formName || formId || 'unknown'}. Page: ${pageUrl || 'unknown'}. Address: ${fullAddress || 'not provided'}.${additionalPropertiesNote ? ` ${additionalPropertiesNote}.` : ''}`,
+        body: `${signHostNote ? `${signHostNote}. ` : ''}Form: ${formName || formId || 'unknown'}. Page: ${pageUrl || 'unknown'}. Address: ${fullAddress || 'not provided'}.${additionalPropertiesNote ? ` ${additionalPropertiesNote}.` : ''}`,
         metadata: JSON.stringify({ leadSource, formId, address: normalizedAddress }),
       });
 
@@ -535,6 +544,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       },
       address: normalizedAddress,
       ...(additionalProperties.length ? { additional_properties: additionalProperties } : {}),
+      ...(signHost ? { sign_host: signHost } : {}),
     };
     const buildPrefillAttachFields = () => ({
       first_name: firstName, last_name: lastName,
@@ -1091,14 +1101,15 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
               // On an attached call-pipeline lead, MERGE — a wholesale replace
               // here would clobber the voicemail provenance and the text-back
               // one-shot stamp the attach just preserved. The replace branch
-              // still carries forward additional_properties and the declared
-              // timeline captured at intake (jsonb_strip_nulls drops a key the
-              // row never had) so the triage snapshot — whose schema has neither
-              // — can't erase the extra-property ask or the "Wants service" line.
+              // still carries forward additional_properties, the declared
+              // timeline and the neighbor page's sign_host captured at intake
+              // (jsonb_strip_nulls drops a key the row never had) so the triage
+              // snapshot — whose schema has none of them — can't erase the
+              // extra-property ask, the "Wants service" line or the sign host.
               updates.extracted_data = attachedCallLead
                 ? db.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify(triageResult.extractedData)])
                 : db.raw(
-                  "jsonb_strip_nulls(jsonb_build_object('additional_properties', COALESCE(extracted_data, '{}'::jsonb)->'additional_properties', 'timeline', COALESCE(extracted_data, '{}'::jsonb)->'timeline')) || ?::jsonb",
+                  "jsonb_strip_nulls(jsonb_build_object('additional_properties', COALESCE(extracted_data, '{}'::jsonb)->'additional_properties', 'timeline', COALESCE(extracted_data, '{}'::jsonb)->'timeline', 'sign_host', COALESCE(extracted_data, '{}'::jsonb)->'sign_host')) || ?::jsonb",
                   [JSON.stringify(triageResult.extractedData)]
                 );
             }
@@ -1586,6 +1597,21 @@ function truncateClickId(value) {
   return value ? String(value).slice(0, 255) : '';
 }
 
+// The neighbor page's optional "Which home had the sign?" answer: printable
+// text only, whitespace collapsed, capped so a pasted blob can't flood the
+// Customer 360 note.
+const SIGN_HOST_MAX_LENGTH = 120;
+
+function normalizeSignHost(value) {
+  if (typeof value !== 'string') return '';
+  return value
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, SIGN_HOST_MAX_LENGTH)
+    .trim();
+}
+
 function buildLeadWebhookIntake(body = {}) {
   // Map raw form field names (garbled -> clean)
   const email = cleanEmail(body.email || body['Whats Your Best Email'] || findField(body, /email/i) || '');
@@ -1646,6 +1672,8 @@ function buildLeadWebhookIntake(body = {}) {
     serviceKey,
     timeline,
     leadSource,
+    // Exact key only, like `message` below — and kept OUT of `message`.
+    signHost: normalizeSignHost(body.sign_host),
     // Free-prose message body — the readiness gate's commercial-signal scan
     // reads it (a residential form whose own words describe a commercial
     // premises must park, not auto-price).
@@ -2018,6 +2046,8 @@ module.exports._test = {
   scrubLeadAlertProviderError,
   markLeadAlertCallLogFailed,
   buildLeadWebhookIntake,
+  normalizeSignHost,
+  SIGN_HOST_MAX_LENGTH,
   getLeadWebhookAttribution,
   normalizeLeadServiceInterest,
   normalizeLeadServiceKey,
