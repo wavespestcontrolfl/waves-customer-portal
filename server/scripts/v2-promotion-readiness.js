@@ -34,6 +34,7 @@ const {
 // audit cannot drift from the live contract (local pre-push audit P1).
 const {
   buildFailOpenRoutingContext, demoteFailOpenOnV1AddressConflict, resolveCallContactPhone,
+  resolveKnownCallerCustomer,
 } = require('../services/call-recording-processor');
 const { checkTcpaConsent } = require('../services/call-routing-gates');
 const { isV2Extraction } = require('../utils/extraction-compat');
@@ -123,7 +124,10 @@ async function main() {
     // lead-webhook-auto-bridge outbound row to the prospect (metadata.leadPhone)
     // rather than the staff cell that dialed out — buildFailOpenRoutingContext
     // now derives identity through that resolver (Codex #4933 r1 P2).
-    .select('id', 'twilio_call_sid', 'ai_extraction', 'ai_extraction_enriched', 'ai_extraction_validation_errors', 'v2_extraction_status', 'created_at', 'from_phone', 'to_phone', 'direction', 'metadata', 'source', 'ai_extraction_model', 'ai_extraction_prompt_version', 'ai_address_validation', 'customer_id', 'ai_validation');
+    // customer_id is no longer selected (Codex #4933 r3 P2): the linked
+    // customer is resolved per row via resolveKnownCallerCustomer, which
+    // never reads that column (see the comment at its call site below).
+    .select('id', 'twilio_call_sid', 'ai_extraction', 'ai_extraction_enriched', 'ai_extraction_validation_errors', 'v2_extraction_status', 'created_at', 'from_phone', 'to_phone', 'direction', 'metadata', 'source', 'ai_extraction_model', 'ai_extraction_prompt_version', 'ai_address_validation', 'ai_validation');
 
   // Cohort boundary: rows are attributed by MODEL, so after a route change
   // a previous primary's rows could masquerade as current-route executions
@@ -209,11 +213,17 @@ async function main() {
   // summarizeKnownCaller reads the pipeline stage and every address
   // component.
   const auditFailOpen = process.env.GATE_CALL_FAIL_OPEN_BOOKING === 'true';
-  const linkedCustomerIds = [...new Set(boundedRouteRows.map((r) => r.customer_id).filter(Boolean))];
-  const customerById = new Map((linkedCustomerIds.length
-    ? await db('customers').whereIn('id', linkedCustomerIds)
-      .select('id', 'pipeline_stage', 'address_line1', 'address_line2', 'city', 'state', 'zip')
-    : []).map((c) => [c.id, c]));
+  // Codex #4933 r3 P2: the linked customer is resolved PER ROW below via
+  // resolveKnownCallerCustomer — the SAME selection production's Step 2
+  // pre-lookup uses (an operator relink outranks the phone lookup; an
+  // explicit unlink is no known caller at all). Replaces the bulk
+  // customer_id → row prefetch this used to do: that column is not what
+  // production's own selection reads, and could disagree with it (an
+  // operator relink since the row was fetched, or — the concrete miss this
+  // round found — a lead-webhook-auto-bridge row whose contactPhone comes
+  // back null from broken metadata: production has NO knownCaller and
+  // holds; reading customer_id kept using the stale link and reported an
+  // auto-route).
 
   // The GATE scores the PRIMARY leg alone — pooling both legs would let a
   // healthy primary mask a small failing fallback cohort, or pass a route
@@ -312,9 +322,10 @@ async function main() {
     // resolveCallContactPhone(r) too (Codex #4933 r1 P2) — same value as
     // `contactPhone` above (r2 P1 fix), computed independently since
     // neither side has a genuine extractedPhone signal to pass.
+    const linkedCustomer = await resolveKnownCallerCustomer(r, contactPhone).catch(() => null);
     const { knownCaller, options: failOpenOptions } = buildFailOpenRoutingContext({
       call: r,
-      customer: r.customer_id ? customerById.get(r.customer_id) || null : null,
+      customer: linkedCustomer,
       failOpenEnabled: auditFailOpen,
     });
     const knownCustomer = failOpenOptions.knownCustomer;

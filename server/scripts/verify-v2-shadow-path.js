@@ -34,19 +34,7 @@ async function main() {
       // lead-webhook-auto-bridge outbound row to the prospect (metadata.leadPhone)
       // rather than the staff cell that dialed out — buildFailOpenRoutingContext
       // now derives identity through that resolver (Codex #4933 r1 P2).
-      .select('id', 'transcription', 'from_phone', 'to_phone', 'direction', 'metadata', 'source', 'created_at', 'ai_address_validation', 'ai_extraction_enriched', 'ai_extraction', 'customer_id', 'ai_validation',
-        // The linked customer's fail-open inputs (codex round-21 P2 + the
-        // local pre-push audit P1). An established customer who confirms
-        // without restating their address normally has a `not_attempted`
-        // verdict — production dispatches to the address verified when it was
-        // saved, so a verifier without this context reports
-        // address_not_validated for a call production auto-created. The row
-        // goes through production's OWN summarizeKnownCaller, so the pipeline
-        // stage governs eligibility exactly as it does live; only the fields
-        // that helper reads are carried, no names.
-        db.raw("(select json_build_object('pipeline_stage', c.pipeline_stage, 'address_line1', c.address_line1,"
-          + " 'address_line2', c.address_line2, 'city', c.city, 'state', c.state, 'zip', c.zip)"
-          + ' from customers c where c.id = call_log.customer_id) as linked_customer'),
+      .select('id', 'transcription', 'from_phone', 'to_phone', 'direction', 'metadata', 'source', 'created_at', 'ai_address_validation', 'ai_extraction_enriched', 'ai_extraction', 'ai_validation',
         // Scoped to the CURRENT extraction pass (codex final-round P2) — a
         // card left from an earlier pass must not vouch for a reprocess where
         // recovery failed. NULL on either side yields NULL (not true), so an
@@ -54,6 +42,28 @@ async function main() {
         db.raw("exists(select 1 from triage_items ti where ti.call_log_id = call_log.id and ti.reason_code = 'address_recovered'"
           + " and ti.payload->>'extraction_model' = call_log.ai_extraction_model"
           + " and ti.payload->>'extraction_prompt_version' = call_log.ai_extraction_prompt_version) as has_address_recovered"));
+    // Codex #4933 r3 P2: resolve the linked customer the SAME way
+    // production's Step 2 pre-lookup does (an operator relink outranks the
+    // phone lookup; an explicit unlink is no known caller at all) — done
+    // HERE, in the Postgres-env phase, so Phase B (which is designed to run
+    // with NO DB access at all — see the file docstring) stays DB-free.
+    // Replaces the raw call_log.customer_id-keyed subquery this used to run:
+    // that column is not what production's own selection reads, and could
+    // disagree with it (an operator relink since the row was fetched, or —
+    // the concrete miss this round found — a lead-webhook-auto-bridge row
+    // whose contactPhone comes back null from broken metadata: production
+    // has NO knownCaller and holds; reading customer_id kept using the
+    // stale link and reported an auto-route). Only the fields the live
+    // summarizeKnownCaller reads are carried — no names, matching the prior
+    // subquery's PII minimization.
+    const KNOWN_CUSTOMER_FIELDS = ['pipeline_stage', 'address_line1', 'address_line2', 'city', 'state', 'zip'];
+    for (const row of rows) {
+      const contactPhone = CRP.resolveCallContactPhone(row);
+      const resolved = await CRP.resolveKnownCallerCustomer(row, contactPhone).catch(() => null);
+      row.linked_customer = resolved
+        ? Object.fromEntries(KNOWN_CUSTOMER_FIELDS.map((k) => [k, resolved[k] ?? null]))
+        : null;
+    }
     await db.destroy();
     fs.writeFileSync(process.env.DUMP_TO, JSON.stringify(rows));
     console.log(`Dumped ${rows.length} real transcripts to ${process.env.DUMP_TO}`);

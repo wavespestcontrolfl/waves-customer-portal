@@ -1450,6 +1450,43 @@ function buildFailOpenRoutingContext({
   };
 }
 
+// Codex #4933 r3 P2: the SAME known-caller selection contract production's
+// Step 2 pre-lookup uses (call-recording-processor.js's own knownCustomer
+// assignment, ~L8589) — an operator relink (call.metadata.customer_link_override)
+// outranks the phone lookup entirely; an EXPLICIT unlink (an override present
+// with customer_id: null) means NO known caller at all, regardless of what the
+// phone would otherwise resolve to. The offline audit scripts used to pass
+// the persisted call.customer_id straight into buildFailOpenRoutingContext —
+// wrong whenever that column disagrees with the live selection (an operator
+// relink since the row was fetched, or a lead-webhook-auto-bridge row whose
+// resolveCallContactPhone comes back null because of broken metadata: with
+// no override, findCustomerForCallContact(null, {}) correctly returns null,
+// where reading call.customer_id would have kept using the persisted link
+// and reported an auto-route production would have held instead).
+//
+// Deliberately NOT wired into the live pass itself: production derives its
+// customerLinkOverride once, early (~L7907), from a call.metadata that a
+// later step (the claim/seal check, ~L8056) can reassign for the rest of
+// that pass — re-deriving it here from the (by-then-possibly-mutated)
+// call.metadata at the live call site risks reading a DIFFERENT override
+// than the one production actually decided on for that pass. The offline
+// scripts instead read one frozen row straight from the DB with no such
+// in-pass mutation, so recomputing the override from it here is safe and
+// matches exactly what production computed at ITS pre-lookup time for that
+// same row. Read-only (whereNull('deleted_at') selects, no writes).
+async function resolveKnownCallerCustomer(call = {}, contactPhone = null) {
+  let metadata = call.metadata || {};
+  try { if (typeof metadata === 'string') metadata = JSON.parse(metadata); } catch { metadata = {}; }
+  const override = metadata?.customer_link_override;
+  const customerLinkOverride = (override && typeof override === 'object' && 'customer_id' in override) ? override : null;
+  if (customerLinkOverride) {
+    return customerLinkOverride.customer_id
+      ? db('customers').where({ id: customerLinkOverride.customer_id }).whereNull('deleted_at').first()
+      : null;
+  }
+  return findCustomerForCallContact(contactPhone, {});
+}
+
 function persistedOnFileAddressVerdict(call) {
   let av = call?.ai_validation;
   if (typeof av === 'string') { try { av = JSON.parse(av); } catch { av = null; } }
@@ -20142,6 +20179,7 @@ CallRecordingProcessor._test = {
   demoteFailOpenOnV1AddressConflict,
   resolveOnFileAddressAuthority,
   buildFailOpenRoutingContext,
+  resolveKnownCallerCustomer,
   v2IsoToEtWallClock,
   phoneNearMissOfAni,
   isUsableContactPhone,
@@ -20173,6 +20211,12 @@ CallRecordingProcessor.updateUnifiedVoiceMessage = updateUnifiedVoiceMessage;
 // changing the gate. Deliberately on the module surface, not `_test`.
 CallRecordingProcessor.buildFailOpenRoutingContext = buildFailOpenRoutingContext;
 CallRecordingProcessor.demoteFailOpenOnV1AddressConflict = demoteFailOpenOnV1AddressConflict;
+// Codex #4933 r3 P2: the customer the audits pass INTO buildFailOpenRoutingContext
+// must be selected the same way production's Step 2 pre-lookup selects it
+// (operator override outranks the phone lookup; an explicit unlink is no
+// known caller at all) — not read straight off the persisted call.customer_id
+// column, which can disagree with the live selection.
+CallRecordingProcessor.resolveKnownCallerCustomer = resolveKnownCallerCustomer;
 
 // Production contract for the VOICE-RELAY booking path (NOT test-only): the
 // relay must decide WHICH PREMISE a voice booking lands on with the exact

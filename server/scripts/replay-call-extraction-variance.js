@@ -1166,8 +1166,9 @@ async function loadCandidateCalls(db, options) {
     'transcription_provider',
     'transcription_model',
     'recording_url',
-    // Feeds the on-file fail-open context the live gate receives (round-21 P2).
-    'customer_id',
+    // customer_id is no longer selected (Codex #4933 r3 P2): the linked
+    // customer is now resolved via resolveKnownCallerCustomer (contactPhone
+    // + operator override), which never reads that column.
     // The persisted on-file address verdict a new lead was judged by
     // (buildFailOpenRoutingContext replays it — #4685 r3 P1).
     'ai_validation',
@@ -1278,11 +1279,16 @@ async function replayCall(call, context) {
   // pipeline stages, so a local "has an address" test over-granted it (local
   // pre-push audit P1; owner ruling 2026-09-26 + Codex #4933 r1 widened/
   // rescoped outbound — see buildFailOpenRoutingContext).
-  const linkedCustomer = call.customer_id
-    ? await db('customers').where({ id: call.customer_id })
-      .first('id', 'pipeline_stage', 'address_line1', 'address_line2', 'city', 'state', 'zip')
-      .catch(() => null)
-    : null;
+  // Codex #4933 r3 P2: the linked customer is now selected the SAME way
+  // production's Step 2 pre-lookup selects it — an operator relink outranks
+  // the phone lookup, an explicit unlink is no known caller at all — never
+  // read straight off call.customer_id, which can disagree with that live
+  // selection (a relink since the row was fetched, or — the concrete miss
+  // this round found — a lead-webhook-auto-bridge row whose contactPhone
+  // came back null from broken metadata: production has NO knownCaller and
+  // holds; the old call.customer_id shortcut kept using the stale link and
+  // reported an auto-route).
+  const linkedCustomer = await CRP.resolveKnownCallerCustomer(call, contactPhone).catch(() => null);
   // buildFailOpenRoutingContext resolves its OWN identity internally via
   // resolveCallContactPhone(call) too (Codex #4933 r1 P2) — same value as
   // `contactPhone` above (r2 P1 fix), computed independently since neither
