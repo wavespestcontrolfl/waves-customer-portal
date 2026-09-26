@@ -235,7 +235,7 @@ const READ_ONLY = [
   'intent_routing_report', 'seo_action_queue', 'seo_experiment_results', 'internal_link_graph',
   'query_products', 'query_vendors', 'compare_vendor_pricing', 'find_cheapest_vendor',
   'get_approval_queue', 'analyze_margins', 'get_price_trends', 'get_unpriced_summary',
-  'query_stock', 'get_stock_movements', 'get_restock_queue',
+  'query_stock', 'get_stock_movements', 'get_restock_queue', 'list_unlogged_purchases',
   'get_revenue_overview', 'get_service_line_pnl', 'get_ad_attribution',
   'get_tech_revenue_performance', 'compare_revenue_periods', 'get_top_revenue_customers',
   'get_my_route', 'get_stop_details', 'get_service_history', 'get_product_info', 'get_protocol',
