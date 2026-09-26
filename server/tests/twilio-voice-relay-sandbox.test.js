@@ -19,7 +19,7 @@ const voiceRouter = require('../routes/twilio-voice-webhook');
 const { isSandboxCall, sandboxRelayXml, stampRelayProfile, RELAY_COMPLETE_ACTION_SANDBOX, RELAY_SANDBOX_CELL_ACTION } = voiceRouter._test;
 const { recordTouchpoint } = require('../services/conversations');
 const { recoverRecordingForCall } = require('../services/call-recording-processor');
-const { VOICE_RELAY_SANDBOX_SOURCE } = require('../services/voice-agent/relay-protocol');
+const { VOICE_RELAY_SANDBOX_SOURCE, spanishWelcomeGreeting } = require('../services/voice-agent/relay-protocol');
 
 // An UNREGISTERED number: a registered Waves line is refused as the sandbox target.
 const SANDBOX = '+19415550199';
@@ -277,13 +277,16 @@ describe('POST /relay-sandbox', () => {
     const { update, where } = primeInsert();
     await stampRelayProfile('CA-prod-1', { relayProfileId: 'flux_balanced_v1', relayAttrs: { speechModel: 'flux' } });
     expect(where).toHaveBeenCalledWith({ twilio_call_sid: 'CA-prod-1' });
-    expect(JSON.parse(update.mock.calls[0][0].metadata.bindings[0])).toEqual({ relay_profile_id: 'flux_balanced_v1', relay_attrs: { speechModel: 'flux' } });
+    // relay_language is always written (null when the profile has none —
+    // codex r2 P2 on #4947), never omitted: an omitted key would leave a
+    // STALE language from an earlier stamp in place after the jsonb merge.
+    expect(JSON.parse(update.mock.calls[0][0].metadata.bindings[0])).toEqual({ relay_profile_id: 'flux_balanced_v1', relay_attrs: { speechModel: 'flux' }, relay_language: null });
     update.mockClear();
     await stampRelayProfile('CA-prod-2', {});
     expect(update).not.toHaveBeenCalled();
     // The Spanish leg clears a pre-stamped English profile when its own options resolve empty (codex r14 P2).
     await stampRelayProfile('CA-prod-2', {}, { clearWhenEmpty: true });
-    expect(JSON.parse(update.mock.calls[0][0].metadata.bindings[0])).toEqual({ relay_profile_id: null, relay_attrs: null });
+    expect(JSON.parse(update.mock.calls[0][0].metadata.bindings[0])).toEqual({ relay_profile_id: null, relay_attrs: null, relay_language: null });
     db.mockImplementation(() => { throw new Error('pool down'); });
     await expect(stampRelayProfile('CA-prod-3', { relayProfileId: 'nova_hints_v1' })).resolves.toBeUndefined(); // fail-soft
   });
@@ -337,7 +340,67 @@ describe('POST /relay-sandbox/cell', () => {
     expect(JSON.parse(patch.metadata.bindings[0])).toEqual({
       relay_profile_id: 'flux_partials_probe_v1',
       relay_attrs: expect.objectContaining({ speechModel: 'flux', partialPrompts: 'true' }),
+      relay_language: null,
     });
+  });
+
+  // Codex r1 P1 on #4947: language="multi" alone carries no Spanish signal
+  // into RelayConversation.language — cell 10 must ALSO carry the same
+  // <Parameter lang=es> marker the Spanish-menu vestibule uses, and the row
+  // stamp must persist the language for the one permitted reconnect.
+  test('cell "10" (Flux Multilingual) renders language="multi" AND the <Parameter lang=es> marker, and stamps relay_language', async () => {
+    const { update } = primeStamp();
+    const res = mockRes();
+    await handlerFor('/relay-sandbox/cell')({ body: { CallSid: 'CA-sb-10', To: SANDBOX, Digits: '10' } }, res);
+    expect(res.body).toContain('speechModel="flux"');
+    expect(res.body).toContain('language="multi"');
+    expect(res.body).toContain('<Parameter name="lang" value="es" />');
+    expect(res.body).toContain('<Parameter name="relay_profile" value="flux_multilingual_es_v1" />');
+    // Codex r2 P2 on #4947: the Spanish welcome opener, not the English
+    // default (buildRelayTwiML's welcomeGreeting default is English).
+    expect(res.body).toContain(`welcomeGreeting="${spanishWelcomeGreeting().replace(/&/g, '&amp;').replace(/"/g, '&quot;')}"`);
+    const patch = update.mock.calls[0][0];
+    expect(JSON.parse(patch.metadata.bindings[0])).toEqual({
+      relay_profile_id: 'flux_multilingual_es_v1',
+      relay_attrs: expect.objectContaining({ speechModel: 'flux', transcriptionProvider: 'Deepgram' }),
+      relay_language: 'multi',
+    });
+  });
+
+  // Codex r2 P2 on #4947: without writing `null` (never omitting the key),
+  // moving a CallSid from a Flux Multilingual cell onto a plain profile
+  // would leave the earlier "multi" stuck in metadata via the jsonb merge.
+  test('re-stamping the SAME CallSid from cell "10" onto a plain profile overwrites relay_language with null, never leaving it stale', async () => {
+    const { update } = primeStamp();
+    const res1 = mockRes();
+    await handlerFor('/relay-sandbox/cell')({ body: { CallSid: 'CA-sb-10b', To: SANDBOX, Digits: '10' } }, res1);
+    expect(JSON.parse(update.mock.calls[0][0].metadata.bindings[0]).relay_language).toBe('multi');
+    update.mockClear();
+    const res2 = mockRes();
+    await handlerFor('/relay-sandbox/cell')({ body: { CallSid: 'CA-sb-10b', To: SANDBOX, Digits: '03' } }, res2);
+    expect(JSON.parse(update.mock.calls[0][0].metadata.bindings[0])).toEqual({
+      relay_profile_id: 'flux_balanced_v1',
+      relay_attrs: expect.objectContaining({ speechModel: 'flux' }),
+      relay_language: null,
+    });
+  });
+
+  // Codex r3 P2 on #4947: with recovery on, an EMPTY stamp (e.g. a retried
+  // /relay-sandbox after the cell-10 continuation) takes the clearing branch,
+  // which must wipe relay_language too — the jsonb merge keeps omitted keys.
+  test('clearing a cell-10 stamp (recovery on, empty options) also clears relay_language', async () => {
+    const saved = process.env.GATE_VOICE_RELAY_RECOVERY;
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    try {
+      const { update } = primeInsert();
+      await stampRelayProfile('CA-sb-10c', { relayProfileId: 'flux_multilingual_es_v1', relayAttrs: { speechModel: 'flux' }, language: 'multi' });
+      expect(JSON.parse(update.mock.calls[0][0].metadata.bindings[0]).relay_language).toBe('multi');
+      update.mockClear();
+      await stampRelayProfile('CA-sb-10c', {});
+      expect(JSON.parse(update.mock.calls[0][0].metadata.bindings[0])).toEqual({ relay_profile_id: null, relay_attrs: null, relay_language: null });
+    } finally {
+      if (saved === undefined) delete process.env.GATE_VOICE_RELAY_RECOVERY; else process.env.GATE_VOICE_RELAY_RECOVERY = saved;
+    }
   });
 
   test('a stamp failure never costs the caller the call', async () => {
@@ -371,7 +434,7 @@ describe('POST /relay-sandbox/cell', () => {
     await handlerFor('/relay-sandbox/cell')({ body: { CallSid: 'CA-sb-8', To: SANDBOX, Digits: '77' } }, res);
     expect(res.body).toContain('<Parameter name="relay_profile" value="nova_hints_v1" />');
     expect(JSON.parse(update.mock.calls[0][0].metadata.bindings[0])).toEqual({
-      relay_profile_id: 'nova_hints_v1', relay_attrs: expect.objectContaining({ speechModel: 'nova-3-general' }),
+      relay_profile_id: 'nova_hints_v1', relay_attrs: expect.objectContaining({ speechModel: 'nova-3-general' }), relay_language: null,
     });
   });
 
@@ -388,6 +451,26 @@ describe('sandboxRelayXml', () => {
     expect(xml).toContain('<Connect action="/api/webhooks/twilio/relay-complete?sandbox=1" method="POST">');
     expect(xml).toContain('speechModel="flux"');
     expect(xml).toContain('welcomeGreeting=');
+  });
+
+  // Codex r1 P1 on #4947.
+  test('a cell carrying language: "multi" (Flux Multilingual) ALSO gets the <Parameter lang=es> Spanish marker', () => {
+    const xml = sandboxRelayXml({ callSid: 'CA-sb-multi', cell: { relayAttrs: { speechModel: 'flux' }, relayProfileId: 'flux_multilingual_es_v1', language: 'multi' } });
+    expect(xml).toContain('language="multi"');
+    expect(xml).toContain('<Parameter name="lang" value="es" />');
+  });
+
+  // Codex r2 P2 on #4947.
+  test('a cell carrying language: "multi" gets the Spanish welcome opener, not buildRelayTwiML\'s English default', () => {
+    const xml = sandboxRelayXml({ callSid: 'CA-sb-multi-greeting', cell: { relayAttrs: { speechModel: 'flux' }, relayProfileId: 'flux_multilingual_es_v1', language: 'multi' } });
+    const escaped = spanishWelcomeGreeting().replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+    expect(xml).toContain(`welcomeGreeting="${escaped}"`);
+  });
+
+  test('a cell with no `language` key renders no lang parameter and the English default greeting — byte-identical to before this profile existed', () => {
+    const xml = sandboxRelayXml({ callSid: 'CA-sb-plain', cell: { relayAttrs: { speechModel: 'flux' }, relayProfileId: 'flux_balanced_v1' } });
+    expect(xml).not.toContain('<Parameter name="lang"');
+    expect(xml).not.toContain(spanishWelcomeGreeting());
   });
 });
 
