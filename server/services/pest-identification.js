@@ -616,9 +616,12 @@ function aggregateIdentification(perPhoto) {
   // A photo whose risky runner-up was never ruled out leaves the whole upload
   // unresolved: no species is named and the report is the generic,
   // inspection-first consultation (buildPestReportContract).
+  // Never benign: a harmless pick with an open hazardous runner-up reads as
+  // "something we want a closer look at", with the inspection recommendation.
   const open = perPhoto.find((result) => result.agreement === 'unresolved');
   if (open) {
-    return { entry: null, confidence: 'low', category: open.category, contested: true, unresolved: true };
+    const category = open.category === 'not_a_pest' ? 'other' : open.category;
+    return { entry: null, confidence: 'low', category, contested: true, unresolved: true };
   }
 
   const votes = new Map();

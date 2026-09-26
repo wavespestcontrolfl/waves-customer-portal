@@ -20,7 +20,7 @@ jest.mock('../services/llm/call', () => ({
 }));
 
 const MODELS = require('../config/models');
-const { analyzePhoto, mergeModelResults, identifyPest, _test } = require('../services/pest-identification');
+const { analyzePhoto, identifyPest, _test } = require('../services/pest-identification');
 
 const GEMINI_ID = {
   best_match: 'ghost ant', alternates: [], category: 'insect', confidence: 'high', confidence_score: 0.92,

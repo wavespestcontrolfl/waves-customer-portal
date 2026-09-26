@@ -68,6 +68,17 @@ describe('an unresolved risky runner-up (owner ruling 2026-09-26)', () => {
     expect(photo.alternate_slugs).toEqual(expect.arrayContaining(['ghost-ant', 'subterranean-termite']));
   });
 
+  test('a harmless pick with an open hazardous runner-up is never "nothing to worry about"', () => {
+    const ladybug = pick({ best_match: 'ladybug', alternates: ['fire ant'], category: 'not_a_pest', not_a_pest: true });
+    const open = _test.resolvePhoto({ openai: null, gemini: ladybug, unresolved: _test.riskyRunnerUps(ladybug) });
+    const identification = _test.aggregateIdentification([open]);
+    expect(identification.category).not.toBe('not_a_pest');
+    const report = buildPublicPestReport({ report_contract: JSON.stringify(buildPestReportContract({ ...open, identification })) });
+    expect(report.not_a_pest).toBe(false);
+    expect(report.identified.label).not.toBe('nothing to worry about');
+    expect(report.recommendation).toMatchObject({ inspection_required: true });
+  });
+
   test('one unresolved photo makes the whole upload a generic, inspection-first consultation', () => {
     const clean = mergeModelResults(null, pick({ alternates: [] }));
     const open = _test.resolvePhoto({ openai: null, gemini: pick(), unresolved: _test.riskyRunnerUps(pick()) });
