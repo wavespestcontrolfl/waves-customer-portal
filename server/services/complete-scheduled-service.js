@@ -11217,8 +11217,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // it's called whenever an invoice exists, even if alreadyPaid/payer, to
     // avoid leaving a completed job's hold stuck in 'held'. On a real charge it
     // marks the invoice already-paid so the completion SMS sends a receipt, not
-    // a pay link. Best-effort — never blocks completion.
-    if (invoice?.id) {
+    // a pay link. Best-effort — never blocks completion. An invoice left for
+    // the office (ADMIN-BUG-R13) keeps its hold for the office to capture or
+    // release.
+    if (invoice?.id && !annualPrepayOfficeReview) {
       if (paymentCollectionSuppressed) {
         // A fresh in-progress collision suppresses this request's card-hold
         // rail without mutating the hold: the owning request may still decline

@@ -176,20 +176,36 @@ postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
   // a method as "[as <method>]"); every other query runs as usual. The failed
   // query is a builder whose promise rejects, like a real query error, so a
   // caller's own .catch() sees it (a synchronous throw would skip it).
+  function rejectingQuery(table) {
+    const failure = Promise.reject(new Error(`synthetic ${table} failure`));
+    failure.catch(() => {});
+    const builder = new Proxy(() => {}, {
+      get: (_, prop) => (['then', 'catch', 'finally'].includes(prop) ? failure[prop].bind(failure) : () => builder),
+    });
+    return builder;
+  }
   function failQuery(table, frame) {
     const dbMock = require('../models/db');
     const real = dbMock.connection;
-    const rejecting = () => {
-      const failure = Promise.reject(new Error(`synthetic ${table} failure`));
-      failure.catch(() => {});
-      const builder = new Proxy(() => {}, {
-        get: (_, prop) => (['then', 'catch', 'finally'].includes(prop) ? failure[prop].bind(failure) : () => builder),
-      });
-      return builder;
-    };
     dbMock.connection = new Proxy(real, {
       apply(target, thisArg, args) {
-        if (args[0] === table && frame.test(new Error().stack)) return rejecting();
+        if (args[0] === table && frame.test(new Error().stack)) return rejectingQuery(table);
+        return Reflect.apply(target, thisArg, args);
+      },
+    });
+    return () => { dbMock.connection = real; };
+  }
+  // The NEXT query on the table fails, once, whoever makes it.
+  function failNextQuery(table) {
+    const dbMock = require('../models/db');
+    const real = dbMock.connection;
+    let armed = true;
+    dbMock.connection = new Proxy(real, {
+      apply(target, thisArg, args) {
+        if (armed && args[0] === table) {
+          armed = false;
+          return rejectingQuery(table);
+        }
         return Reflect.apply(target, thisArg, args);
       },
     });
@@ -737,6 +753,27 @@ postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
       expect((await addonsAlert(f)).body).toMatch(/as they stand now/);
     });
 
+    test('a voided invoice that cannot be re-read holds the closeout; the retry judges the voided row (GitHub r10 P1)', async () => {
+      const f = await coveredVisit({ invoiceLines: (x) => [baseLine(x), tripCharge] });
+      await trx('scheduled_service_addons').where({ id: f.addonId }).del();
+      await trx('scheduled_services').where({ id: f.serviceId }).update({ estimated_price: BASE });
+      const InvoiceService = require('../services/invoice');
+      const realVoid = InvoiceService.voidInvoice.bind(InvoiceService);
+      let restoreRead = () => {};
+      // The void lands; the closeout's read of the voided row right after it fails.
+      const voidSpy = jest.spyOn(InvoiceService, 'voidInvoice').mockImplementation(async (id) => {
+        const out = await realVoid(id);
+        restoreRead = failNextQuery('invoices');
+        return out;
+      });
+      const idempotencyKey = randomUUID();
+      const held = await withFailure(() => { voidSpy.mockRestore(); restoreRead(); }, () => complete(f, {}, { idempotencyKey }));
+      expect(held).toMatchObject({ status: 503, body: { code: 'annual_prepay_addons_lookup_failed' } });
+      expect(await settledCovered(f)).toBe('void');
+      expect(await complete(f, {}, { idempotencyKey })).toMatchObject({ status: 200 });
+      expect((await addonsAlert(f)).body).toMatch(/charged more than the covered visit/);
+    });
+
     test('a visit not performed still alerts a voided invoice\'s other charges — they may be owed either way', async () => {
       const f = await coveredVisit({ invoiceLines: (x) => [baseLine(x), tripCharge] });
       const out = await complete(f, { visitOutcome: 'inspection_only', sendCompletionSms: true });
@@ -783,15 +820,23 @@ postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
       }
     });
 
-    test('an invoice left for the office is never delivered to a payer\'s AP inbox — the completion presents no invoice (GitHub r9 P1)', async () => {
+    test('an invoice left for the office is never delivered to a payer\'s AP inbox or charged from a card hold — the completion presents no invoice (GitHub r9 P1, r10 P1)', async () => {
       const f = await coveredVisit({ invoiceLines: (x) => [addonLine(x)] });
       const [payer] = await trx('payers').insert({ display_name: 'Synthetic payer', ap_email: 'ap@example.invalid' }).returning('id');
       await trx('invoices').where({ id: f.invoiceId }).update({ payer_id: payer.id ?? payer });
       const InvoiceEmail = require('../services/invoice-email');
+      const CardHolds = require('../services/estimate-card-holds');
       const send = jest.spyOn(InvoiceEmail, 'sendInvoiceEmail').mockResolvedValue({ ok: true });
-      const out = await withFailure(() => send.mockRestore(), () => complete(f, { sendCompletionSms: true }));
+      const holdCharge = jest.spyOn(CardHolds, 'chargeCardHoldOnCompletion').mockResolvedValue({ charged: false, reason: 'no_hold' });
+      // Counted before the restore: mockRestore() also clears a spy's calls.
+      let calls;
+      const out = await withFailure(() => {
+        calls = { payerSend: send.mock.calls.length, holdCharge: holdCharge.mock.calls.length };
+        send.mockRestore();
+        holdCharge.mockRestore();
+      }, () => complete(f, { sendCompletionSms: true }));
       expect(out).toMatchObject({ status: 200 });
-      expect(send).not.toHaveBeenCalled();
+      expect(calls).toEqual({ payerSend: 0, holdCharge: 0 });
       expect(await settledCovered(f)).toBe('draft');
       expect((await addonsAlert(f)).body).toMatch(/collected none/);
     });

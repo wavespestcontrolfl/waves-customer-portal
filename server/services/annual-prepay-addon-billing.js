@@ -382,10 +382,17 @@ class CoveredVisitCloseout {
     // charges decide the office's follow-up. voidInvoice can throw AFTER its
     // void committed (the follow-up steps past its transaction); only a void
     // that did not land is a failure.
-    const after = await db('invoices').where({ id: office.id }).first().catch(() => null);
+    let after;
+    try {
+      after = await db('invoices').where({ id: office.id }).first();
+    } catch (err) {
+      // What was voided (or whether the void landed) is unknown: hold, and
+      // the retry decides from the row as it then reads.
+      throw Object.assign(err, { holdCloseout: true });
+    }
     if (voidErr && after?.status !== 'void') throw voidErr;
     if (voidErr) logger.warn(`[dispatch] annual-prepay covered visit ${svc.id}: invoice ${office.id} voided, then: ${voidErr.message}`);
-    const voided = after?.status === 'void' ? after : office;
+    const voided = after || office;
     this.invoice = null;
     this.invoiceCreated = false;
     this.payUrl = null;
@@ -413,6 +420,10 @@ class CoveredVisitCloseout {
       try {
         outcome = await this.reconcileOpenOfficeInvoice(addons);
       } catch (err) {
+        if (err.holdCloseout) {
+          this.hold(err, 'voided invoice');
+          return;
+        }
         logger.warn(`[dispatch] annual-prepay covered visit ${svc.id}: could not settle invoice ${this.invoice?.id}: ${err.message}`);
         outcome = { kind: 'left', invoice: this.invoice };
       }
