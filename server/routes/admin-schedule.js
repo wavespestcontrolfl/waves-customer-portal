@@ -22200,6 +22200,11 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
             retryable: true,
           });
         }
+        // Notes-only generation remains useful during a transient appointment
+        // lookup outage. The canonical identity is unavailable in this branch,
+        // so preserve the established label fallback instead of treating the
+        // unresolved service id as a canonical mismatch.
+        reportPromptContext = { requireCanonical: false };
       } else if (!svc && substantiveTypedFacts) {
         // The row is GONE (deleted concurrently — admins pass the ownership
         // check without an existence check). Typed facts can't be
