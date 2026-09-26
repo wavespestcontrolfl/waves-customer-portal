@@ -234,7 +234,7 @@ async function followedUpIds(conn, rows) {
   // (fulfillment kind estimate_sent, status still open) — its ownership rules
   // (customer FK, lead mirror, caller phone) are the Owed queue's own.
   const quoteIds = scoped.filter((x) => x.r.kind === 'send_estimate').map((x) => x.r.id);
-  const hints = quoteIds.length ? await conn('call_commitments').whereIn('id', quoteIds).select('id', 'fulfillment') : [];
+  const hints = await conn('call_commitments').whereIn('id', quoteIds).select('id', 'fulfillment');
   const sinceById = new Map(scoped.map((x) => [String(x.r.id), x.since]));
   for (const h of hints) {
     const f = typeof h.fulfillment === 'string' ? JSON.parse(h.fulfillment) : h.fulfillment;
