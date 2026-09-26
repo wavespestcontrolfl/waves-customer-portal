@@ -10,7 +10,8 @@ const db = require('../models/db');
 const EmailTemplateLibrary = require('./email-template-library');
 const { getInvoiceEmailRecipients } = require('./customer-contact');
 const { billingChannelAllowed } = require('./billing-delivery-channels');
-const { withCustomerCommsLock, lockCustomerEmail } = require('../utils/customer-comms-lock');
+const { withCustomerCommsLock, lockCustomerEmail, lockSmsPhone } = require('../utils/customer-comms-lock');
+const { toE164 } = require('../utils/phone');
 const { preferenceChangeHold } = require('./messaging/billing-channel-routing');
 const { loadSuppressionState, checkSuppression } = require('./messaging/validators/suppression');
 
@@ -180,9 +181,13 @@ async function suppressionBlock(trx, recipientEmail, category, customer) {
   return blocked('EMAIL_SUPPRESSED', `Suppressed: ${detail || 'active suppression'}`);
 }
 
-async function verifyAndDispatch({ input, trx, invoice, recipientEmail, preSendCheck, dispatch, state }) {
+async function verifyAndDispatch({ input, trx, invoice, phone, recipientEmail, preSendCheck, dispatch, state }) {
   const fresh = await loadBillingEmailContext(input, trx, { lockRecipients: true, invoice });
   if (fresh.error) state.boundaryBlock = fresh.error;
+  else if (toE164(clean(fresh.customer.phone)) !== phone) {
+    state.boundaryBlock = blocked('BILLING_EMAIL_RECHECK_FAILED',
+      'Billing contact changed before delivery', { retryable: true });
+  }
   else if (fresh.recipientEmail !== recipientEmail) {
     state.boundaryBlock = blocked(
       'EMAIL_RECIPIENT_CHANGED',
@@ -203,14 +208,19 @@ async function verifyAndDispatch({ input, trx, invoice, recipientEmail, preSendC
 
 async function dispatchUnderBillingEmailAuthority({ input, recipientEmail, preSendCheck, dispatch, state }) {
   try {
-    const verifiedDispatch = (trx, invoice) => verifyAndDispatch({
-      input, trx, invoice, recipientEmail, preSendCheck, dispatch, state,
-    });
-    const outcome = await withCustomerCommsLock(db, input.customerId, (trx) => (
-      input.invoiceId
+    const outcome = await withCustomerCommsLock(db, input.customerId, async (trx) => {
+      // Suppression writers take phone before recipient rows. Resolve it
+      // without a row lock, then verify it again under the customer lock.
+      const customer = await trx('customers').where({ id: input.customerId }).first('phone');
+      const phone = toE164(clean(customer?.phone));
+      if (phone) await lockSmsPhone(trx, phone);
+      const verifiedDispatch = (database, invoice) => verifyAndDispatch({
+        input, trx: database, invoice, phone, recipientEmail, preSendCheck, dispatch, state,
+      });
+      return input.invoiceId
         ? require('./estimate-deposits').withInvoiceDepositSettlement(input.invoiceId, verifiedDispatch, trx)
-        : verifiedDispatch(trx, null)
-    ));
+        : verifiedDispatch(trx, null);
+    });
     if (!outcome && input.invoiceId) {
       state.boundaryBlock = blocked('INVOICE_CUSTOMER_MISMATCH', 'Invoice does not belong to this customer');
       return { ok: false };
