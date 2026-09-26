@@ -201,6 +201,37 @@ describe('balance-reminder visit identity', () => {
   });
 });
 
+describe('previsit balance reminder replay (aggregate, visit-pinned)', () => {
+  const meta = { customer_id: customerId, source_entry_point: 'previsit_balance_reminder', appointment_id: 'visit-1',
+    appointment_date: '2026-09-28', appointment_service_type: 'General Pest Control', appointment_rendered_on: '2026-09-26',
+    notificationEventKey: 'previsit-balance:visit-1', collections_ledger_id: 'own-email' };
+  const visit = { id: 'visit-1', customer_id: customerId, status: 'confirmed',
+    scheduled_date: new Date('2026-09-28T00:00:00Z'), service_type: 'General Pest Control' };
+
+  test('shares the balance-reminder visit pin: missing pin, stale copy and a moved visit are refused', async () => {
+    await expect(billingEmailReplayEligible({ ...meta, appointment_id: null }, databaseWith()))
+      .resolves.toMatchObject({ eligible: false, reason: 'balance-reminder-visit-pin-missing' });
+    await expect(billingEmailReplayEligible({ ...meta, appointment_rendered_on: '2026-09-25' }, databaseWith()))
+      .resolves.toMatchObject({ eligible: false, reason: 'balance-reminder-copy-stale' });
+    await expect(billingEmailReplayEligible(meta, databaseWith({ scheduled_services: [{ ...visit, status: 'cancelled' }] })))
+      .resolves.toMatchObject({ eligible: false, reason: 'balance-reminder-visit-changed' });
+    await expect(billingEmailReplayEligible(meta, databaseWith({ scheduled_services: [visit] })))
+      .resolves.toEqual({ eligible: true });
+  });
+
+  test('gate-on rechecks the collections policy as a balance reminder with no single invoice', async () => {
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    const database = databaseWith({ scheduled_services: [visit], collections_contact_ledger: [
+      { id: 'own-email', customer_id: customerId, source: 'previsit_balance_reminder',
+        metadata: { notificationEventKey: meta.notificationEventKey } },
+    ] });
+    await expect(billingEmailReplayEligible(meta, database)).resolves.toEqual({ eligible: true });
+    expect(collectionsChannelPermitted).toHaveBeenCalledWith(expect.objectContaining({
+      customerId, invoiceId: null, channel: 'email', purpose: 'balance_reminder', excludeLedgerIds: ['own-email'],
+    }));
+  });
+});
+
 describe('collections-policy replay eligibility', () => {
   const meta = { customer_id: customerId, source_entry_point: 'invoice_followup_sequence',
     notificationEventKey: 'invoice-followup:seq-1:day-3', collections_ledger_id: 'own-email' };

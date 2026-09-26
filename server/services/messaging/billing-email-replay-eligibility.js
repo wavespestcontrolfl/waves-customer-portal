@@ -9,6 +9,10 @@ const INVOICE_GUARDS = new Set([
   'balance_reminder_late_payment_check', 'late_payment_checker',
 ]);
 const EXPIRY_ENTRY_POINTS = new Set(['autopay_card_expiry_warning', 'payment_expiry_workflow']);
+// Reminders whose copy quotes one visit: a replay is refused once the visit
+// changed or the copy was rendered on an earlier day.
+const VISIT_PINNED_SOURCES = new Set(['balance_reminder_workflow', 'previsit_balance_reminder']);
+const BALANCE_REMINDER_SOURCES = new Set(['balance_reminder_workflow', 'previsit_balance_reminder']);
 
 function refused(reason, retryable = false) {
   return { eligible: false, reason, retryable };
@@ -125,7 +129,7 @@ async function expiryRefusal(meta, database) {
 }
 
 async function balanceReminderVisitRefusal(meta, database) {
-  if (meta.source_entry_point !== 'balance_reminder_workflow') return null;
+  if (!VISIT_PINNED_SOURCES.has(meta.source_entry_point)) return null;
   if (!meta.appointment_id || !/^\d{4}-\d{2}-\d{2}$/.test(meta.appointment_date || '')
     || !String(meta.appointment_service_type || '').trim()
     || !/^\d{4}-\d{2}-\d{2}$/.test(meta.appointment_rendered_on || '')) {
@@ -166,12 +170,13 @@ async function persistedLedgerExclusions(meta, database) {
 }
 
 async function collectionsPolicyRefusal(meta, database) {
-  if (!INVOICE_GUARDS.has(meta.source_entry_point) || process.env.GATE_COLLECTIONS_POLICY !== 'true') return null;
+  if (!(INVOICE_GUARDS.has(meta.source_entry_point) || meta.source_entry_point === 'previsit_balance_reminder')
+    || process.env.GATE_COLLECTIONS_POLICY !== 'true') return null;
   const permitted = await require('../collections/rail-guard').collectionsChannelPermitted({
     customerId: meta.customer_id,
     invoiceId: meta.invoice_id || null,
     channel: 'email',
-    purpose: meta.source_entry_point === 'balance_reminder_workflow' ? 'balance_reminder' : 'late_payment',
+    purpose: BALANCE_REMINDER_SOURCES.has(meta.source_entry_point) ? 'balance_reminder' : 'late_payment',
     logTag: 'billing-email-obligation-replay',
     excludeLedgerIds: await persistedLedgerExclusions(meta, database),
     detail: true,

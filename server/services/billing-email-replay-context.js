@@ -8,6 +8,7 @@ const SOURCES = new Set([
   'invoice_followup_sequence',
   'balance_reminder_late_payment_check',
   'late_payment_checker',
+  'previsit_balance_reminder',
 ]);
 const CATEGORIES = new Set(['invoice', 'payment_issue', 'billing', 'payment_receipt']);
 const EXPIRY_STAGES = new Set(['expired', '7_day', '30_day', '60_day']);
@@ -66,6 +67,11 @@ function complete(context) {
   }
   if (context.source_entry_point === 'balance_reminder_workflow') {
     return has('invoice_id', 'appointment_id', 'appointment_date',
+      'appointment_service_type', 'appointment_rendered_on', 'collections_ledger_id');
+  }
+  // Aggregate previsit dues reminder: pinned to its visit, no single invoice.
+  if (context.source_entry_point === 'previsit_balance_reminder') {
+    return has('appointment_id', 'appointment_date',
       'appointment_service_type', 'appointment_rendered_on', 'collections_ledger_id');
   }
   if (context.source_entry_point === 'invoice_followup_sequence') {

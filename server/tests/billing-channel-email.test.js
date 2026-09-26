@@ -131,6 +131,43 @@ describe('billing channel email adapter', () => {
     }));
   });
 
+  test('binds a previsit reminder Email to its reservation and visit pin (aggregate, no invoice)', async () => {
+    mockLoadBillingEmailContext.mockResolvedValue(baseContext());
+    await sendBillingChannelEmail(input({
+      appointmentId: 'visit-1',
+      entryPoint: 'previsit_balance_reminder',
+      metadata: {
+        billingDeliveryCategory: 'billing',
+        notificationEventKey: 'previsit-balance:visit-1',
+        billingDeliveryLeg: 'email',
+        collections_ledger_id: 'ledger-email-1',
+        appointment_date: '2026-09-29',
+        appointment_service_type: 'Pest Control',
+        appointment_rendered_on: '2026-09-26',
+      },
+    }));
+    expect(mockSendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      idempotencyKey: 'billing_channel_email:previsit-balance:visit-1:email',
+      billingReplayContext: expect.objectContaining({
+        source_entry_point: 'previsit_balance_reminder',
+        notificationEventKey: 'previsit-balance:visit-1',
+        collections_ledger_id: 'ledger-email-1',
+        appointment_id: 'visit-1',
+        appointment_rendered_on: '2026-09-26',
+      }),
+    }));
+  });
+
+  test('refuses a previsit replay context without its visit pin or reservation', () => {
+    const complete = { schema_version: 1, customer_id: 'cust-1', category: 'billing',
+      source_entry_point: 'previsit_balance_reminder', notificationEventKey: 'previsit-balance:visit-1',
+      appointment_id: 'visit-1', appointment_date: '2026-09-29', appointment_service_type: 'Pest Control',
+      appointment_rendered_on: '2026-09-28', collections_ledger_id: 'ledger-email-1' };
+    expect(sanitizeBillingReplayContext(complete)).toMatchObject({ appointment_id: 'visit-1' });
+    expect(sanitizeBillingReplayContext({ ...complete, appointment_id: null })).toBeNull();
+    expect(sanitizeBillingReplayContext({ ...complete, collections_ledger_id: null })).toBeNull();
+  });
+
   test.each([{ customer_id: null }, { notificationEventKey: null }, { rendered_amount: 'not-an-amount' }])(
     'refuses replay context with missing identity or malformed amount: %j', (change) => {
       expect(sanitizeBillingReplayContext({ schema_version: 1, customer_id: 'cust-1', category: 'billing',

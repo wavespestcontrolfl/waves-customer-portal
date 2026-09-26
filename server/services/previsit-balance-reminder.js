@@ -28,6 +28,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
+const { dateOnlyString } = require('../utils/date-only');
 const { resolveBillingLane, monthlyDuesCollected } = require('./billing-lane');
 const { invoiceAmountDue } = require('./invoice-helpers');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
@@ -240,6 +241,7 @@ async function sendPrevisitLeg({ visit, amount, eventKey, channel, ledger }) {
     audience: 'customer',
     purpose: 'billing',
     customerId: visit.customer_id,
+    appointmentId: visit.id,
     entryPoint: 'previsit_balance_reminder',
     // Explicit routing already decided the channel set — never the legacy
     // hasEmailLeg suppression heuristic (balance-reminder.js's
@@ -252,6 +254,11 @@ async function sendPrevisitLeg({ visit, amount, eventKey, channel, ledger }) {
       billingDeliveryLeg: channel,
       scheduled_service_id: visit.id,
       amount,
+      // Visit pin for a retried Email (billing-email-replay-eligibility):
+      // refused once the visit moves or the copy is from an earlier day.
+      appointment_date: dateOnlyString(visit.scheduled_date),
+      appointment_service_type: visit.service_type || 'service',
+      appointment_rendered_on: etDateString(),
       ...(ledger?.id ? { collections_ledger_id: ledger.id } : {}),
       ...(channel === 'push' ? { appOnly: true } : {}),
     },
