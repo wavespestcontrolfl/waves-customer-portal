@@ -802,6 +802,39 @@ describe('SLOT_TAKEN parity with the writer (Codex r1)', () => {
 
 });
 
+// Codex pre-push P1: the visit group is read ONCE per evaluation, so the
+// current placement and the candidates score the same unit even if the
+// membership changes mid-evaluation; a later evaluation reads it afresh.
+test('openMembers is read exactly once per evaluation; the current placement and the candidates share its excludeIds', async () => {
+  process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
+  findAvailableSlots.mockResolvedValue({
+    slots: [{ date: '2026-08-06', technician: { id: 't1', name: 'A' }, start_time: '13:00', end_time: '14:00', detour_minutes: 1, total_drive_minutes: 5, stops_that_day: 0, score: 1 }],
+  });
+  // A second read would see a different unit (sib2 joined).
+  openMembers.mockResolvedValueOnce([{ id: 's1' }, { id: 'sib1' }]).mockResolvedValue([{ id: 's1' }, { id: 'sib1' }, { id: 'sib2' }]);
+  const dayStopExcludes = [];
+  const db = withVisit(() => {
+    const c = {};
+    ['where', 'whereIn', 'whereNot', 'whereNotNull', 'whereBetween', 'orWhere', 'leftJoin', 'orderBy', 'first'].forEach((m) => { c[m] = () => c; });
+    c.whereNotIn = (field, ids) => { if (field === 'scheduled_services.id') dayStopExcludes.push([...ids].sort()); return c; };
+    c.select = async (...cols) => (cols[0] === 'id' ? [{ id: 'sib1', window_start: '10:00', window_end: '11:00', estimated_duration_minutes: 60 }] : []);
+    return c;
+  });
+  const grouped = { ...SERVICE, visit_id: 'v1', window_start: '09:00', window_end: '10:00' };
+
+  await findValidCandidateSlots(grouped, prefs, { ...ctxBase(), db });
+  expect(openMembers).toHaveBeenCalledTimes(1);
+  // Both sides' day-stop reads (the candidates' batch and the current day)
+  // exclude the same unit.
+  expect(dayStopExcludes).toEqual([['s1', 'sib1'], ['s1', 'sib1']]);
+  expect([...probeMoveConflicts.mock.calls[0][0].excludeServiceIds].sort()).toEqual(['s1', 'sib1']);
+
+  // A later evaluation (the retry re-evaluation) reads the group afresh, once.
+  await findValidCandidateSlots(grouped, prefs, { ...ctxBase(), db });
+  expect(openMembers).toHaveBeenCalledTimes(2);
+  openMembers.mockReset();
+});
+
 // Codex pre-push P1: group siblings are excluded from the day's stops because
 // they move with the visit, so both the current placement and every candidate
 // must charge their work as part of the moving unit.

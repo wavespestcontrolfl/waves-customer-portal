@@ -275,6 +275,23 @@ async function loadGroupContext(db, service) {
   }
 }
 
+// ONE group read per evaluation (Codex pre-push P1): the current placement
+// and the candidates must score the SAME unit — two separate, non-atomic
+// openMembers reads could straddle a membership change and compare a
+// current placement for one unit against candidates for another. Gate on,
+// findValidCandidateSlots reads the group once into an evaluation-scoped
+// copy of ctx (never the caller's ctx, which a later re-evaluation reuses
+// and must read afresh); gate off, nothing is read and ctx passes through.
+async function withGroupContext(service, ctx) {
+  if (!autoDispatchSharedModelLive()) return ctx;
+  return { ...ctx, groupContext: await loadGroupContext(ctx.db, service) };
+}
+
+// The evaluation's group context, or a fresh read for a direct caller.
+async function groupContextFor(service, ctx) {
+  return ctx.groupContext || loadGroupContext(ctx.db, service);
+}
+
 // A full-day window: auto-dispatch never passes the probe's `travel` or admin
 // `arrivalWindow` options, so probeMoveConflicts takes findConflictingVisits'
 // plain overlap path, where the window is only a WHERE bound — a full day
@@ -431,7 +448,7 @@ function scoreOnSharedModel(service, geo, cand, stops, siblings, placement) {
  * (one batched day-stop read). Nothing here writes.
  */
 async function filterAndScoreSharedModelCandidates(service, geo, candidates, ctx, drops) {
-  const { excludeIds, siblings, visitWindowStart } = await loadGroupContext(ctx.db, service);
+  const { excludeIds, siblings, visitWindowStart } = await groupContextFor(service, ctx);
   const group = { members: unitMembers(service, siblings), visitWindowStart };
   const dates = candidates.map((c) => c.date);
   const [occupiedByDate, dayStops] = await Promise.all([
@@ -574,7 +591,7 @@ async function computeCurrentPlacement(service, prefs, ctx) {
 // legacy object is byte-for-byte unchanged.
 async function sharedModelCurrentPlacement(service, geo, ctx, dateStr) {
   if (!autoDispatchSharedModelLive()) return {};
-  const { excludeIds, siblings } = await loadGroupContext(ctx.db, service);
+  const { excludeIds, siblings } = await groupContextFor(service, ctx);
   const dayTech = await resolveCurrentDayTech(ctx.db, service);
   const stops = await loadDayStops(ctx.db, { technicianId: dayTech, dateStr, excludeIds });
   // The unit as it stands: every member at its stored window and route_order
@@ -588,9 +605,12 @@ async function sharedModelCurrentPlacement(service, geo, ctx, dateStr) {
   };
 }
 
-async function findValidCandidateSlots(service, prefs, ctx) {
+async function findValidCandidateSlots(service, prefs, baseCtx) {
   const geo = resolveGeo(service);
   if (!geo) return { current: null, candidates: [], note: 'no_geo' };
+  // The visit group is read ONCE for this evaluation and shared by the
+  // current placement and every candidate (see withGroupContext).
+  const ctx = await withGroupContext(service, baseCtx);
 
   // Search within ± tolerance days of the visit's CURRENT date (clamped to the
   // lock floor and lookahead horizon) so optimization tightens the route without
