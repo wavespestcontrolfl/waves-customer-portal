@@ -120,6 +120,23 @@ describe('schedule-tie-proximity', () => {
       expect(ids(result)).toEqual(['geo', 'ungeo-a', 'ungeo-b']);
     });
 
+    it('uses stable order for the next tie group when the immediately previous stop is ungeocoded', () => {
+      const knownAt900 = stop('known-0900', { windowStart: '09:00', lat: 1, lng: 1 });
+      const unknownAt900 = stop('unknown-0900', { windowStart: '09:00' });
+      const farFirstAt1000 = stop('far-first-1000', { windowStart: '10:00', lat: 10, lng: 10 });
+      const nearSecondAt1000 = stop('near-second-1000', { windowStart: '10:00', lat: 1.1, lng: 1.1 });
+
+      const result = orderStopsByTieProximity([
+        knownAt900, unknownAt900, farFirstAt1000, nearSecondAt1000,
+      ]);
+
+      // The 09:00 unknown stop is the actual previous stop. Its missing point
+      // must not let the stale 09:00 known point reverse the 10:00 pair.
+      expect(ids(result)).toEqual([
+        'known-0900', 'unknown-0900', 'far-first-1000', 'near-second-1000',
+      ]);
+    });
+
     it('the first stop of the day measures from HQ (default origin) when none is passed', () => {
       const near = stop('near', { windowStart: '08:00', lat: 1, lng: 2 });
       const far = stop('far', { windowStart: '08:00', lat: 50, lng: 1 });
