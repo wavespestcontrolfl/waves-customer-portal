@@ -19,6 +19,7 @@ const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const {
   VOICE_AGENT_BOOKING_SOURCE_ACTION,
   CALL_OUTBOUND_REVIEW_SOURCE_ACTION,
+  isPendingOutboundReviewBooking,
 } = require('./call-booking-source-actions');
 const { selectPlanningSnapshots } = require('./scheduling/route-performance');
 
@@ -67,6 +68,12 @@ function resolveWindow({ from, to } = {}) {
 
 function shareOf(numerator, denominator) {
   return denominator > 0 ? numerator / denominator : null;
+}
+
+// A DATE column arrives as a Date at UTC midnight (Railway runs TZ=UTC) or
+// as a 'YYYY-MM-DD' string; either way the calendar date is its first 10 chars.
+function dateOnly(value) {
+  return value instanceof Date ? value.toISOString().slice(0, 10) : String(value || '').slice(0, 10);
 }
 
 // ─── 1. drive_minutes_per_stop ──────────────────────────────────────────
@@ -172,6 +179,11 @@ async function computeAiCallShare({ from, to }, conn) {
 //
 // ai = source_action IN ('ai_call_pipeline', 'voice_agent',
 // 'ai_call_outbound_review') (see the constants imported/reproduced above).
+// An AI-created booking still awaiting office review
+// (isPendingOutboundReviewBooking — pending, not customer-confirmed) is not
+// a booking yet: it is left out of every bucket and reported as
+// aiPendingReview. Once the office confirms it, it counts as ai — the AI did
+// the booking; staff approved it.
 //
 // customer_self_serve = self_booking_id IS NOT NULL (the public /book wizard
 // stamps this — server/routes/booking.js sets `source: source || 'self_booked'`
@@ -213,9 +225,13 @@ async function computeBookingsWithoutStaff({ from, to }, conn) {
     'created_at',
     from,
     to,
-  ).select('source_action', 'self_booking_id', 'source');
+  ).select('source_action', 'self_booking_id', 'source', 'status', 'customer_confirmed');
   const counts = { ai: 0, customer_self_serve: 0, staff: 0 };
-  for (const row of rows) counts[classifyBooking(row)] += 1;
+  let aiPendingReview = 0;
+  for (const row of rows) {
+    if (isPendingOutboundReviewBooking(row)) aiPendingReview += 1;
+    else counts[classifyBooking(row)] += 1;
+  }
   const total = counts.ai + counts.customer_self_serve + counts.staff;
   const withoutStaff = counts.ai + counts.customer_self_serve;
   return {
@@ -225,6 +241,7 @@ async function computeBookingsWithoutStaff({ from, to }, conn) {
     ai: counts.ai,
     customerSelfServe: counts.customer_self_serve,
     staff: counts.staff,
+    aiPendingReview,
   };
 }
 
@@ -245,13 +262,20 @@ async function computeBookingsWithoutStaff({ from, to }, conn) {
 //
 // A tech-day is "followed" when its completed stops' actual arrival order
 // (arrived_at, falling back to check_in_time) matches the plannedStops order
-// restricted to those completed stops. Fewer than 2 completed-and-timed
-// stops can't violate an order, so those days score as followed (nothing to
-// contradict the plan) — documented rather than silently assumed.
+// restricted to those completed stops. Only stops still on the plan's own
+// date and technician count, as in route-performance.js — a stop moved to
+// another day or reassigned says nothing about this route. A tech-day with
+// no such completed stop is not scored (null). Fewer than 2 completed-and-
+// timed stops can't violate an order, so those days score as followed
+// (nothing contradicts the plan) — documented rather than silently assumed.
 function planFollowed(plan, rowsById) {
+  const onThisRoute = (row) => row?.status === 'completed'
+    && dateOnly(row.scheduled_date) === plan.date
+    && row.technician_id === plan.technician_id;
   const completedIds = plan.plannedStops
     .map((stop) => stop.id)
-    .filter((id) => rowsById.get(id)?.status === 'completed');
+    .filter((id) => onThisRoute(rowsById.get(id)));
+  if (completedIds.length === 0) return null;
   const timed = completedIds
     .map((id) => {
       const row = rowsById.get(id);
@@ -288,12 +312,16 @@ async function computeAiRouteDays({ from, to }, conn) {
   const rowsById = new Map(rows.map((row) => [row.id, row]));
 
   let followed = 0;
+  let scored = 0;
   let reordered = 0;
   const coveredTechDays = new Set();
   for (const plan of plans) {
     coveredTechDays.add(`${plan.date}|${plan.technician_id}`);
-    if (planFollowed(plan, rowsById)) followed += 1;
     if (plan.snapshot_phase === 'applied_reorder') reordered += 1;
+    const verdict = planFollowed(plan, rowsById);
+    if (verdict === null) continue;
+    scored += 1;
+    if (verdict) followed += 1;
   }
 
   // Completed tech-days with no matching plan snapshot at all — reported
@@ -306,9 +334,7 @@ async function computeAiRouteDays({ from, to }, conn) {
   const seenTechDays = new Set();
   let completedTechDaysWithNoSnapshot = 0;
   for (const row of completedWork) {
-    const date = row.scheduled_date instanceof Date
-      ? row.scheduled_date.toISOString().slice(0, 10)
-      : String(row.scheduled_date).slice(0, 10);
+    const date = dateOnly(row.scheduled_date);
     if (date >= today || !row.technician_id) continue;
     const key = `${date}|${row.technician_id}`;
     if (seenTechDays.has(key)) continue;
@@ -318,10 +344,11 @@ async function computeAiRouteDays({ from, to }, conn) {
 
   return {
     numerator: followed,
-    denominator: plans.length,
-    share: shareOf(followed, plans.length),
+    denominator: scored,
+    share: shareOf(followed, scored),
     daysFollowed: followed,
     totalTechDaysWithSnapshot: plans.length,
+    techDaysWithNoCompletedPlannedStop: plans.length - scored,
     daysWithAppliedReorder: reordered,
     completedTechDaysWithNoSnapshot,
   };
