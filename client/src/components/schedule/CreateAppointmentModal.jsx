@@ -2683,7 +2683,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         : `Visit ${visitNo} of this trapping job — sold before 9/27, checks included.`;
     }
     if (t.nextVisitBillable && key !== 'rodent_trap_check_additional') {
-      return `Visit ${visitNo} of this trapping job — the 2 included visits are used. Book "Rodent Trap Check - Additional" ($${t.additionalCheckPrice}).`;
+      return `Visit ${visitNo} of this trapping job — the ${t.includedVisits} included visits are used. Book "Rodent Trap Check - Additional" ($${t.additionalCheckPrice}).`;
     }
     if (!t.nextVisitBillable && key === 'rodent_trap_check_additional') {
       return `Visit ${visitNo} of this trapping job — still included. Book the no-charge Trap Follow-Up instead.`;

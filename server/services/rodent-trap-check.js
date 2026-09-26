@@ -22,13 +22,18 @@ const TRAP_CHECK_ADDITIONAL_KEY = 'rodent_trap_check_additional';
 // Code default only — the live price is the catalog row's base_price
 // (catalogAdditionalCheckPrice), the same number booking stamps.
 const TRAP_CHECK_ADDITIONAL_PRICE = 95;
+// Code default only — the live allowance is pricing_config.rodent_trapping
+// (liveIncludedVisits), the same setting the estimate copy is built from.
 const INCLUDED_TRAPPING_VISITS = 2;
 // ET calendar date the 2-visit rule starts applying to newly sold jobs.
 const TRAP_CHECK_FEE_EFFECTIVE_DATE = '2026-09-27';
 
-// Rows that OPEN a trapping job (the sold program).
+// Rows that OPEN a trapping job (the sold program). rodent_exclusion is
+// the legacy "Rodent Exclusion & Trapping" row — review-request.js counts it
+// in the trapping series too.
 const TRAPPING_OPENER_KEYS = [
   'rodent_trapping',
+  'rodent_exclusion',
   'rodent_trapping_exclusion',
   'rodent_trapping_sanitation',
   'rodent_trapping_exclusion_sanitation',
@@ -195,6 +200,60 @@ async function trappingVisits(db, customerId) {
   ));
 }
 
+// Setup visit + the included checks, from the same pricing_config row the
+// engine's estimate copy uses (db-bridge overlays it). 'unlimited' → null:
+// every check is included, nothing is ever advised as billable.
+async function liveIncludedVisits(db) {
+  let value;
+  try {
+    const row = await db('pricing_config').where({ config_key: 'rodent_trapping' }).first('data');
+    const data = row && (typeof row.data === 'string' ? JSON.parse(row.data) : row.data);
+    value = data?.included_followups;
+  } catch {
+    value = undefined;
+  }
+  if (value == null) value = require('./pricing-engine/constants').RODENT.trapping.includedFollowUps;
+  if (String(value).toLowerCase() === 'unlimited') return null;
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? 1 + n : INCLUDED_TRAPPING_VISITS;
+}
+
+const TRAP_SOLD_KEYS = new Set(TRAPPING_OPENER_KEYS);
+const LINE_KEY_FIELDS = ['service', 'serviceKey', 'service_key', 'key'];
+
+// What the opener's estimate froze about trapping: whether it sold a
+// trapping program at all (a linked estimate may be for an unrelated
+// service), and the per-check price it quoted, if any. Bounded deep walk of
+// estimate_data; parse problems read as "not sold".
+function estimateTrappingTerms(estimateData) {
+  let data = estimateData;
+  try {
+    if (typeof data === 'string') data = JSON.parse(data);
+  } catch { return { sold: false, additionalCheckPrice: null }; }
+  let sold = false;
+  let price = null;
+  const walk = (node, depth) => {
+    if (!node || typeof node !== 'object' || depth > 8) return;
+    if (Array.isArray(node)) { node.forEach((n) => walk(n, depth + 1)); return; }
+    if (node.svcRodentTrap === true) sold = true;
+    const isTrapLine = LINE_KEY_FIELDS.some((f) => TRAP_SOLD_KEYS.has(node[f]));
+    if (isTrapLine) {
+      sold = true;
+      const quoted = Number(node.additionalCheckPrice ?? node.pricingBasis?.additionalCheckPrice);
+      if (price == null && Number.isFinite(quoted) && quoted > 0) price = quoted;
+    }
+    for (const child of Object.values(node)) walk(child, depth + 1);
+  };
+  walk(data, 0);
+  return { sold, additionalCheckPrice: price };
+}
+
+async function openerEstimateTerms(db, opener) {
+  if (!opener?.source_estimate_id) return { sold: false, additionalCheckPrice: null };
+  const row = await db('estimates').where({ id: opener.source_estimate_id }).first('estimate_data');
+  return estimateTrappingTerms(row?.estimate_data);
+}
+
 // The price booking will actually stamp: the active catalog row's
 // base_price, falling back to the code default when the row is absent.
 async function catalogAdditionalCheckPrice(db) {
@@ -232,10 +291,14 @@ async function trappingJobStatus(db, customerId, { date, today, propertyId = nul
   const lastDay = last && last.visits[last.visits.length - 1].scheduled_day;
   const job = last && dayNumber(anchor) - dayNumber(lastDay) <= JOB_GAP_DAYS ? last : null;
 
+  const includedVisits = await liveIncludedVisits(db);
+  const terms = job?.opener ? await openerEstimateTerms(db, job.opener) : { sold: false, additionalCheckPrice: null };
   const base = {
-    includedVisits: INCLUDED_TRAPPING_VISITS,
+    includedVisits,
     additionalCheckKey: TRAP_CHECK_ADDITIONAL_KEY,
-    additionalCheckPrice: await catalogAdditionalCheckPrice(db),
+    // The per-check price the opener's estimate quoted, else the live
+    // catalog price (manually sold jobs, or estimates from before the fee).
+    additionalCheckPrice: terms.additionalCheckPrice ?? await catalogAdditionalCheckPrice(db),
   };
   if (!job) {
     return { ...base, hasJob: false, openerDate: null, openerUnknown: false, visitCount: 0, grandfathered: false, nextVisitBillable: false };
@@ -245,7 +308,12 @@ async function trappingJobStatus(db, customerId, { date, today, propertyId = nul
   const firstDay = job.visits[0].scheduled_day;
   let grandfathered;
   if (job.opener) {
-    grandfathered = isGrandfathered({ estimateDate: job.opener.estimate_day, bookedDate: job.opener.booked_day });
+    // The estimate's date counts only when that estimate sold trapping; a
+    // linked estimate for an unrelated service falls back to the booking.
+    grandfathered = isGrandfathered({
+      estimateDate: terms.sold ? job.opener.estimate_day : null,
+      bookedDate: job.opener.booked_day,
+    });
   } else {
     // No identifiable opener: a job already running (or booked) before the
     // rule is grandfathered for certain; otherwise the office has to look.
@@ -264,7 +332,7 @@ async function trappingJobStatus(db, customerId, { date, today, propertyId = nul
     // The next booking is visit visitCount+1; it is billable once the
     // included visits are used, unless the job predates the rule or its
     // opener can't be established.
-    nextVisitBillable: !grandfathered && !openerUnknown && visitCount >= INCLUDED_TRAPPING_VISITS,
+    nextVisitBillable: !grandfathered && !openerUnknown && includedVisits != null && visitCount >= includedVisits,
   };
 }
 
@@ -276,6 +344,7 @@ module.exports = {
   TRAPPING_OPENER_KEYS,
   TRAPPING_VISIT_KEYS,
   isGrandfathered,
+  estimateTrappingTerms,
   declaredVisitType,
   sliceJobs,
   trappingJobStatus,

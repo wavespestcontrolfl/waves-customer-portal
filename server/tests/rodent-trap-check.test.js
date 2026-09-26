@@ -16,21 +16,36 @@ const { RODENT } = require('../services/pricing-engine/constants');
 // Returns the given rows per table; the SQL filters (customer, keys,
 // active statuses) are the database's job — this pins the job slicing and
 // grandfathering that run on the returned rows.
-function fakeDb(rows, records = [], addons = null, catalogPrice = 95) {
-  const make = (result) => {
+// `estimates` answers every opener lookup with estimateData (default: a
+// sold trapping line), `pricing_config` with the allowance, `services` with
+// the catalog price. Rows carrying an estimate_day get an estimate link.
+function fakeDb(rows, records = [], addons = null, catalogPrice = 95, {
+  estimateData = { oneTime: [{ service: 'rodent_trapping' }] },
+  includedFollowups = 1,
+} = {}) {
+  const linked = (list) => list.map((r) => (r.estimate_day && !('source_estimate_id' in r)
+    ? { ...r, source_estimate_id: `est-${r.id}` }
+    : r));
+  const firstFor = (table) => {
+    if (table === 'services') return catalogPrice == null ? undefined : { base_price: String(catalogPrice) };
+    if (table === 'estimates') return { estimate_data: estimateData };
+    if (table === 'pricing_config') return { data: { included_followups: includedFollowups } };
+    return undefined;
+  };
+  const make = (table, result) => {
     const q = {
       join: () => q, leftJoin: () => q, where: () => q, whereIn: () => q, whereNotIn: () => q,
       orderBy: () => q, limit: () => q,
       select: async () => result,
-      first: async () => (catalogPrice == null ? undefined : { base_price: String(catalogPrice) }),
+      first: async () => firstFor(table),
     };
     return q;
   };
   const db = (table) => {
-    if (table === 'service_records') return make(records);
+    if (table === 'service_records') return make(table, records);
     // Add-on query returns the same visits by default — dedupe must hold.
-    if (String(table).startsWith('scheduled_service_addons')) return make(addons ?? rows);
-    return make(rows);
+    if (String(table).startsWith('scheduled_service_addons')) return make(table, linked(addons ?? rows));
+    return make(String(table).split(' ')[0], linked(rows));
   };
   db.raw = (sql) => sql;
   return db;
@@ -227,6 +242,46 @@ describe('rodent trap check allowance', () => {
     ];
     const status = await trappingJobStatus(fakeDb(rows), 'c', { premiseMatcher: everyPremise, today: '2026-10-13' });
     expect(status).toMatchObject({ grandfathered: true, nextVisitBillable: false });
+  });
+
+  test('a linked estimate that never sold trapping does not grandfather the job', async () => {
+    const rows = [
+      { id: 'a', scheduled_day: '2026-10-05', service_key: 'rodent_trapping', estimate_day: '2026-09-10', booked_day: '2026-10-02' },
+      { id: 'b', scheduled_day: '2026-10-12', service_key: 'rodent_trapping_followup', estimate_day: null },
+    ];
+    const lawnOnly = { recurring: [{ service: 'lawn_care' }] };
+    const status = await trappingJobStatus(fakeDb(rows, [], null, 95, { estimateData: lawnOnly }), 'c', { premiseMatcher: everyPremise, today: '2026-10-13' });
+    expect(status).toMatchObject({ grandfathered: false, nextVisitBillable: true });
+  });
+
+  test('the per-check price the estimate quoted wins over a later catalog edit', async () => {
+    const rows = [
+      { id: 'a', scheduled_day: '2026-10-05', service_key: 'rodent_trapping', estimate_day: '2026-10-01' },
+      { id: 'b', scheduled_day: '2026-10-12', service_key: 'rodent_trapping_followup', estimate_day: null },
+    ];
+    const quoted = { oneTime: [{ service: 'rodent_trapping', pricingBasis: { additionalCheckPrice: 95 } }] };
+    const status = await trappingJobStatus(fakeDb(rows, [], null, 120, { estimateData: quoted }), 'c', { premiseMatcher: everyPremise, today: '2026-10-13' });
+    expect(status.additionalCheckPrice).toBe(95);
+  });
+
+  test('the allowance follows the live pricing setting', async () => {
+    const rows = [
+      { id: 'a', scheduled_day: '2026-10-05', service_key: 'rodent_trapping', estimate_day: '2026-10-01' },
+      { id: 'b', scheduled_day: '2026-10-12', service_key: 'rodent_trapping_followup', estimate_day: null },
+    ];
+    const two = await trappingJobStatus(fakeDb(rows, [], null, 95, { includedFollowups: 2 }), 'c', { premiseMatcher: everyPremise, today: '2026-10-13' });
+    expect(two).toMatchObject({ includedVisits: 3, nextVisitBillable: false });
+    const unlimited = await trappingJobStatus(fakeDb(rows, [], null, 95, { includedFollowups: 'unlimited' }), 'c', { premiseMatcher: everyPremise, today: '2026-10-13' });
+    expect(unlimited).toMatchObject({ includedVisits: null, nextVisitBillable: false });
+  });
+
+  test('legacy rodent_exclusion ("Exclusion & Trapping") opens a trapping job', async () => {
+    const rows = [
+      { id: 'a', scheduled_day: '2026-09-01', service_key: 'rodent_exclusion', estimate_day: '2026-08-28' },
+      { id: 'b', scheduled_day: '2026-09-08', service_key: 'rodent_trapping_followup', estimate_day: null },
+    ];
+    const status = await trappingJobStatus(fakeDb(rows, [], null, 95, { estimateData: { oneTime: [{ service: 'rodent_exclusion' }] } }), 'c', { premiseMatcher: everyPremise, today: '2026-09-10' });
+    expect(status).toMatchObject({ openerDate: '2026-09-01', openerUnknown: false, grandfathered: true });
   });
 
   test('the $95 check is excluded from every % discount', () => {
