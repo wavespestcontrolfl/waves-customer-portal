@@ -6641,9 +6641,11 @@ const InvoiceService = {
       // native-backoff branch below via nativeRetryMs) — REPLAY_HOLD_CODES
       // now also carries BILLING_PREFERENCES_CHANGED/BILLING_LEG_RETRY, so
       // this can't switch to a bare `REPLAY_HOLD_CODES.has(...)` without
-      // also re-admitting that exclusion explicitly.
-      const smsHeld =
-        REPLAY_HOLD_CODES.has(result.sms?.code) && result.sms?.code !== "APP_PROVIDER_RETRY" && result.sms?.nextAllowedAt;
+      // also re-admitting that exclusion explicitly. BILLING_LEG_RETRY is
+      // excluded too: it wraps any retryable leg failure, which has no clock
+      // bound, so it must spend an attempt and stay capped.
+      const smsHeld = REPLAY_HOLD_CODES.has(result.sms?.code)
+        && !["APP_PROVIDER_RETRY", "BILLING_LEG_RETRY"].includes(result.sms?.code) && result.sms?.nextAllowedAt;
       const durableSendError = result.sms?.ok && result.email?.code === "billing_prefs_unavailable"
         ? BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED
         : error;

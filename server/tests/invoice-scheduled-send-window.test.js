@@ -410,6 +410,21 @@ describe('processScheduledSends send-window handling', () => {
     expect(updateArgs.scheduled_send_attempts).toBeUndefined();
   });
 
+  test('a BILLING_LEG_RETRY hold spends an attempt so a persistent leg failure stays capped', async () => {
+    isWithinSendWindowET.mockReturnValue(true);
+    const update = chain();
+    db.mockReturnValueOnce(chain())
+      .mockReturnValueOnce(chain({ rows: [{ ...dueRow, scheduled_send_attempts: 1 }] }))
+      .mockReturnValueOnce(chain({ returning: [claimedRow()] }))
+      .mockReturnValueOnce(update);
+    sendSpy.mockResolvedValue({ ok: false, creditApplied: 0,
+      sms: { code: 'BILLING_LEG_RETRY', originalCode: 'PROVIDER_FAILURE', deferred: true, retryable: true,
+        nextAllowedAt: new Date(Date.now() + 300000).toISOString() },
+    });
+    expect(await InvoiceService.processScheduledSends()).toEqual({ sent: 0, failed: 1, deferred: 0 });
+    expect(update.update.mock.calls[0][0]).toMatchObject({ scheduled_send_attempts: 2 });
+  });
+
   test.each([0, 2, 4])('a temporary App failure after %s attempts spends an attempt and applies backoff', async (attempts) => {
     isWithinSendWindowET.mockReturnValue(true);
     const update = chain();
