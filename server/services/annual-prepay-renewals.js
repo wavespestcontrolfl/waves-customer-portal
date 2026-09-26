@@ -1719,6 +1719,48 @@ async function fileTermiteCancelLinkException(term, daysOut) {
   }
 }
 
+// Fail-closed admin bell for a termite rung that could not be sent because
+// the term has no renewal fee to disclose (prepay_amount NULL/blank) —
+// formatCurrencyLabel's Number(amount || 0) fallback would otherwise render
+// a live "$0.00" renewal-fee promise in the SMS/email, which is a false
+// statement to the customer, not a safe default. Same
+// one-open-alert-per-reason-per-week dedupe shape as
+// fileTermiteCancelLinkException, keyed per term+rung.
+async function fileTermiteMissingFeeException(term, daysOut) {
+  try {
+    const dedupeKey = `termite-annual-notice:${term?.id}:${daysOut}:missing_prepay_amount`;
+    const existing = await db('notifications')
+      .where({ recipient_type: 'admin' })
+      .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
+      .where('created_at', '>=', db.raw("now() - interval '7 days'"))
+      .first('id')
+      .catch(() => null);
+    if (existing) return;
+    const NotificationService = require('./notification-service');
+    await NotificationService.notifyAdmin(
+      'alert',
+      'Termite annual renewal notice skipped: no renewal fee on file',
+      `The ${daysOut}-day termite renewal notice for term ${term?.id} was skipped because the term has no prepay_amount recorded — sending would state a renewal fee of $0.00 instead of the real amount. Set the term's renewal fee or handle this renewal manually.`,
+      {
+        link: term?.customer_id ? `/admin/customers/${term.customer_id}` : '/admin/dispatch',
+        // bell:true — same rationale as fileTermiteCancelLinkException: a
+        // skipped termite notice leaves the renewal without its notice
+        // witness, so this must ring even under GATE_ADMIN_BELL_POLICY.
+        bell: true,
+        metadata: {
+          dedupeKey,
+          customer_id: term?.customer_id || null,
+          annual_prepay_term_id: term?.id || null,
+          days_out: daysOut,
+          reason: 'missing_prepay_amount',
+        },
+      },
+    );
+  } catch (err) {
+    logger.warn(`[annual-prepay] termite missing-fee exception notification failed for term ${term?.id}: ${err.message}`);
+  }
+}
+
 function formatDateLabel(ymd) {
   if (!ymd) return '';
   return new Date(`${dateOnly(ymd)}T12:00:00Z`).toLocaleDateString('en-US', {
@@ -5188,6 +5230,15 @@ async function sendCustomerTermNotice(termOrId, daysOut, opts = {}) {
   if (termiteRung && !CancellationResolution.cancelFlowV2Enabled()) {
     await fileTermiteCancelLinkException(term, daysOut);
     return { sent: false, reason: 'cancel_flow_disabled' };
+  }
+  // A termite rung discloses a real dollar renewal fee — formatCurrencyLabel
+  // treats a missing amount as 0 (Number(amount || 0)), which would send a
+  // customer a live "$0.00" renewal notice instead of failing closed. Fail
+  // closed here instead: skip the rung and ring the admin bell so the term's
+  // renewal fee gets set (or the renewal handled manually).
+  if (termiteRung && (term.prepay_amount == null || term.prepay_amount === '')) {
+    await fileTermiteMissingFeeException(term, daysOut);
+    return { sent: false, reason: 'missing_prepay_amount' };
   }
 
   const previousStatus = term.status;
