@@ -40,6 +40,7 @@ const { shortenOrPassthrough, invoiceShortCodePrefix } = require('./short-url');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { customerOnAutopay } = require('./autopay-eligibility');
 const { publicPortalUrl } = require('../utils/portal-url');
+const { withCustomerCommsLock } = require('../utils/customer-comms-lock');
 const EmailTemplateLibrary = require('./email-template-library');
 const { isDefiniteRejection } = require('./sendgrid-mail');
 const { getInvoiceEmailRecipients } = require('./customer-contact');
@@ -124,7 +125,7 @@ async function currentStepLedgerIds(row, step, channels) {
 function terminalFollowupEmailRefusal(result) {
   return result?.ok === false && result.retryable !== true && result.deferred !== true
     && result.deliveryOutcome !== 'uncertain' && (
-      ['billing_email_not_selected', 'missing_email', 'template_unavailable'].includes(result.reason)
+      ['billing_email_not_selected', 'email_disabled', 'missing_email', 'template_unavailable'].includes(result.reason)
       || (result.blocked === true && /^Suppressed: /.test(result.reason || ''))
     );
 }
@@ -227,6 +228,9 @@ async function sendFollowupEmail({ row, customer, step, ctx, enforceBillingPrefe
       logger.warn(`[invoice-followups] notification_prefs lookup failed for ${customer.id}: ${err.message}`);
       return null;
     });
+  if (enforceBillingPreference && prefs?.email_enabled === false) {
+    return { ok: false, skipped: true, reason: 'email_disabled' };
+  }
   if (enforceBillingPreference && billingChannelAllowed(prefs || {}, 'invoice', 'email') === false) {
     return { ok: false, skipped: true, reason: 'billing_email_not_selected' };
   }
@@ -247,6 +251,7 @@ async function sendFollowupEmail({ row, customer, step, ctx, enforceBillingPrefe
   };
 
   let providerHandoffStarted = false;
+  let emailDisabledAtHandoff = false;
   try {
     const result = await EmailTemplateLibrary.sendTemplate({
       templateKey,
@@ -263,17 +268,34 @@ async function sendFollowupEmail({ row, customer, step, ctx, enforceBillingPrefe
       // awaited after the read above. Fail-closed — an unreadable invoice
       // aborts before dispatch, like every other ownership guard here.
       withProviderHandoff: async (dispatch) => {
+        if (enforceBillingPreference) {
+          // Order the final check after any in-flight preference save and
+          // hold the same customer-comms lock through provider dispatch.
+          return withCustomerCommsLock(db, customer.id, async (trx) => {
+            const verdict = await invoiceHelpers.selfPayAtDispatch(row.invoice_id, trx)();
+            if (verdict.ok !== true) return verdict;
+            const freshPrefs = await trx('notification_prefs').where({ customer_id: customer.id }).first();
+            if (freshPrefs?.email_enabled === false) {
+              emailDisabledAtHandoff = true;
+              return { ok: false };
+            }
+            if (billingChannelAllowed(freshPrefs || {}, 'invoice', 'email') === false) return { ok: false };
+            providerHandoffStarted = true;
+            await dispatch(trx);
+            return { ok: true };
+          });
+        }
         const verdict = await invoiceHelpers.selfPayAtDispatch(row.invoice_id, db)();
         if (verdict.ok !== true) return verdict;
-        if (enforceBillingPreference) {
-          const freshPrefs = await db('notification_prefs').where({ customer_id: customer.id }).first();
-          if (billingChannelAllowed(freshPrefs || {}, 'invoice', 'email') === false) return { ok: false };
-        }
         providerHandoffStarted = true;
         await dispatch();
         return { ok: true };
       },
     });
+
+    if (emailDisabledAtHandoff && !result.sent) {
+      return { ok: false, skipped: true, reason: 'email_disabled' };
+    }
 
     if (result.deduped) {
       return {
