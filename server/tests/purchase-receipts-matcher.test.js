@@ -2,7 +2,7 @@
  * purchase-receipts/product-matcher.js — title -> exactly one active
  * product, via alias exact-match, then whole-word catalog-name containment.
  */
-const { matchAmazonTitleToProduct } = require('../services/purchase-receipts/product-matcher');
+const { matchTitleToProduct } = require('../services/purchase-receipts/product-matcher');
 
 // Mimics the real query's server-side filtering (`.where('pc.active', true)`
 // on the alias join, `.where({ active: true })` on the catalog scan) so a
@@ -24,13 +24,13 @@ function makeConn({ aliases = [], products = [] }) {
   };
 }
 
-describe('matchAmazonTitleToProduct', () => {
+describe('matchTitleToProduct', () => {
   test('exact alias match (case/space-insensitive), active product only', async () => {
     const conn = makeConn({
       aliases: [{ alias_name: 'Atticus Talak 7.9 F Bifenthrin Insecticide Concentrate (96oz)', id: 'p-talak', name: 'Talak 96 oz', active: true, container_size: '96 fl oz' }],
       products: [],
     });
-    const result = await matchAmazonTitleToProduct('  atticus talak 7.9 f bifenthrin insecticide concentrate (96OZ)  ', conn);
+    const result = await matchTitleToProduct('  atticus talak 7.9 f bifenthrin insecticide concentrate (96OZ)  ', conn);
     expect(result).toMatchObject({ matched: true, matchType: 'alias', product: { id: 'p-talak' } });
   });
 
@@ -42,13 +42,13 @@ describe('matchAmazonTitleToProduct', () => {
         { id: 'p-other', name: 'Termidor SC', active: true, container_size: '78 fl oz' },
       ],
     });
-    const result = await matchAmazonTitleToProduct('Control Solutions Taurus SC Termiticide 78 oz', conn);
+    const result = await matchTitleToProduct('Control Solutions Taurus SC Termiticide 78 oz', conn);
     expect(result).toMatchObject({ matched: true, matchType: 'containment', product: { id: 'p-taurus' } });
   });
 
   test('containment never matches a substring of a longer word ("SC" must not match "Scatter")', async () => {
     const conn = makeConn({ aliases: [], products: [{ id: 'p-sc', name: 'SC', active: true }] });
-    const result = await matchAmazonTitleToProduct('Scatter Granules 5 lb Bag', conn);
+    const result = await matchTitleToProduct('Scatter Granules 5 lb Bag', conn);
     expect(result.matched).toBe(false);
   });
 
@@ -60,7 +60,7 @@ describe('matchAmazonTitleToProduct', () => {
         { id: 'p2', name: 'Bifen IT', active: true },
       ],
     });
-    const result = await matchAmazonTitleToProduct('Generic Bifen IT Insecticide 32oz', conn);
+    const result = await matchTitleToProduct('Generic Bifen IT Insecticide 32oz', conn);
     expect(result).toMatchObject({ matched: false, reason: 'ambiguous' });
   });
 
@@ -69,7 +69,7 @@ describe('matchAmazonTitleToProduct', () => {
       aliases: [], // the join already filters pc.active = true, so a retired product's alias never appears here
       products: [{ id: 'p-retired', name: 'Taurus SC', active: false }],
     });
-    const result = await matchAmazonTitleToProduct('Control Solutions Taurus SC Termiticide 78 oz', conn);
+    const result = await matchTitleToProduct('Control Solutions Taurus SC Termiticide 78 oz', conn);
     expect(result.matched).toBe(false);
   });
 
@@ -78,13 +78,13 @@ describe('matchAmazonTitleToProduct', () => {
       aliases: [],
       products: [{ id: 'p-taurus', name: 'Taurus SC', active: true }],
     });
-    expect((await matchAmazonTitleToProduct('Lenovo Chromebook Duet 11 inch', conn)).matched).toBe(false);
-    expect((await matchAmazonTitleToProduct('Dove Shampoo 12 oz', conn)).matched).toBe(false);
-    expect((await matchAmazonTitleToProduct('Brass Fittings Assortment Kit', conn)).matched).toBe(false);
+    expect((await matchTitleToProduct('Lenovo Chromebook Duet 11 inch', conn)).matched).toBe(false);
+    expect((await matchTitleToProduct('Dove Shampoo 12 oz', conn)).matched).toBe(false);
+    expect((await matchTitleToProduct('Brass Fittings Assortment Kit', conn)).matched).toBe(false);
   });
 
   test('empty title is unmatched without querying', async () => {
-    const result = await matchAmazonTitleToProduct('   ', makeConn({}));
+    const result = await matchTitleToProduct('   ', makeConn({}));
     expect(result).toEqual({ matched: false, reason: 'empty_title' });
   });
 });

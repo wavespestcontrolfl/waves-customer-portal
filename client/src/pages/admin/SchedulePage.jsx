@@ -310,6 +310,20 @@ export function labelsPresentInMarkerNotes(notes, labels) {
     markerValues.has(String(label || "").trim().toLowerCase())
   ));
 }
+// The completion route reads [Protocol] / [Protocol optional] / [Action]
+// marker lines back out of the technician notes as completed actions, so a
+// dropped label must leave the notes too. Only the markers for `labels` go;
+// every other line (a free-typed action included) stays.
+function withoutProtocolMarkerLines(notes, labels) {
+  const drop = new Set(labels.map((label) => String(label || "").trim().toLowerCase()));
+  return String(notes || "")
+    .split("\n")
+    .filter((line) => {
+      const match = line.trim().match(/^\[(?:protocol|protocol optional|action)\]\s*(.+)$/i);
+      return !match || !drop.has(match[1].trim().toLowerCase());
+    })
+    .join("\n");
+}
 // Specialty preset actions carry a default scope, but the treated areas say
 // where the work actually happened: when every classified area sits on one
 // side (shared/treatment-area-scopes.json), the action follows it, so an
@@ -7045,6 +7059,16 @@ function JobCardTab({ card, loading, error, D }) {
   );
 }
 
+// The appointment's month ("Jan".."Dec", ET; "" when unknown) for protocol
+// visit lookup — month-keyed protocols (lawn tracks, tree & shrub) show that
+// month's visit.
+function protocolMonthForService(service) {
+  return formatETDateOnly(
+    service?.scheduledDate || service?.scheduled_date || service?.date,
+    { month: "short" },
+  );
+}
+
 export function ProtocolPanel({ service, onClose }) {
   // Reactive (rotation-safe) — the module-level snapshot never recomputes.
   const isMobile = useIsMobile(640);
@@ -7225,6 +7249,7 @@ export function ProtocolPanel({ service, onClose }) {
           })
         : null;
 
+      const visitMonth = protocolMonthForService(service);
       const results = await Promise.allSettled([
         adminFetch(
           // The photos endpoint derives its line from literal tokens
@@ -7257,7 +7282,9 @@ export function ProtocolPanel({ service, onClose }) {
           : Promise.resolve(null),
         !isLawn && protocolProgram
           ? adminFetch(
-              `/admin/protocols/match?serviceType=${encodeURIComponent(panelServiceType)}`,
+              // An unknown date sends an empty month, which the route reads
+              // as none (the rule visit).
+              `/admin/protocols/match?serviceType=${encodeURIComponent(panelServiceType)}&month=${visitMonth}`,
             )
           : Promise.resolve(null),
       ]);
@@ -14306,22 +14333,11 @@ export function CompletionPanel({
       const track = protocolTrackForLawnType(service.lawnType);
       if (track) params.set("track", track);
       if (service.lawnType) params.set("lawnType", service.lawnType);
-      const serviceDate =
-        service.scheduledDate || service.scheduled_date || service.date;
-      if (serviceDate) {
-        const dateOnly = String(serviceDate).split("T")[0];
-        const monthDate = new Date(`${dateOnly}T12:00:00`);
-        if (!Number.isNaN(monthDate.getTime())) {
-          params.set(
-            "month",
-            monthDate.toLocaleString("en-US", {
-              month: "short",
-              timeZone: "America/New_York",
-            }),
-          );
-        }
-      }
     }
+    // Lawn and month-keyed programs (tree & shrub) pick the visit for the
+    // appointment's month; the server ignores it for 'Any'-month programs.
+    const serviceMonth = protocolMonthForService(service);
+    if (serviceMonth) params.set("month", serviceMonth);
     setProtocolActionsLoading(true);
     setProtocolActionsLoaded(false);
     adminFetch(`/admin/protocols/completion-actions?${params.toString()}`)
@@ -14365,6 +14381,31 @@ export function CompletionPanel({
     treatmentPlanMixItems,
     lawnCompletionDefaults,
   ]);
+  // A month-keyed program (tree & shrub) serves the appointment month's own
+  // action list. Once it has loaded, a selected action it doesn't offer came
+  // from another list (a draft saved before the visit moved months or the
+  // protocol changed): drop it with its marker lines, and invalidate a
+  // report written from it (untouched → the pre-generation notes; edited →
+  // kept as the technician's text). An empty or unloaded list leaves the
+  // fallback chips as the selector, and "Any" programs never change by month.
+  useEffect(() => {
+    const listMonth = protocolActionMeta?.visit?.month;
+    if (isLawn || generating || !protocolActionsLoaded || !protocolActions.length || !listMonth || listMonth === "Any") return;
+    const offered = new Set(protocolActions.map((action) => (action.label || action.note || action.raw || "").trim()));
+    const stale = selectedProtocolActionLabels.filter((label) => !offered.has(String(label).trim()));
+    if (!stale.length) return;
+    if (typeof preGenerationNotesRef.current === "string") {
+      preGenerationNotesRef.current = withoutProtocolMarkerLines(preGenerationNotesRef.current, stale);
+    }
+    invalidateGeneratedReportOnTypedEdit();
+    setNotes((current) => withoutProtocolMarkerLines(current, stale));
+    setSelectedProtocolActionLabels((current) => current.filter((label) => !stale.includes(label)));
+    setActionScopeByLabel((current) => {
+      const next = { ...current };
+      stale.forEach((label) => { delete next[label]; });
+      return next;
+    });
+  }, [isLawn, generating, protocolActionsLoaded, protocolActions, protocolActionMeta, selectedProtocolActionLabels]);
 
   useEffect(() => {
     // The flag decides whether this request carries completion defaults; a

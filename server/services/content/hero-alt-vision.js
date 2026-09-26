@@ -74,11 +74,16 @@ async function describeHeroForAlt({ buffer, mimeType = 'image/webp', title, keyw
     // VISION first, OpenAI Terra on a miss; a two-leg miss (no key, provider
     // error) keeps the writer alt below.
     const res = await dispatchWithFallback(MODELS.TEXT_POLICIES.visionAnalysis, {
+      laneId: 'hero_alt',
       text: buildAltPrompt({ title, keyword }),
       images: [{ data: buffer.toString('base64'), mimeType }],
       jsonMode: false,
       maxTokens: 300,
       ...(timeoutMs > 0 ? { timeoutMs } : {}),
+    }, {
+      // An alt the sanitizer rejects fails the leg in the chain: the backup
+      // provider gets its turn and the ledger row is not filed as ok (Codex r4 on #4884).
+      validate: (result) => (sanitizeAlt(result.text) ? null : 'invalid_output'),
     });
     if (!res.ok) {
       logger.warn(`[hero-alt-vision] vision call failed (${res.reason}) — keeping writer alt (fail-open)`);
@@ -487,7 +492,12 @@ async function screenGeneratedImage({ buffer, mimeType = 'image/webp', allowedTe
     return open;
   }
   try {
-    const ask = (text, maxTokens) => dispatchWithFallback(MODELS.TEXT_POLICIES.imageScreen, {
+    // `usable` runs inside the chain as its validate hook: an answer that
+    // parses but is the wrong shape fails that leg's ledger row and lets the
+    // next provider try, instead of being recorded as a successful check and
+    // then discarded (Codex r10-class gap on #4884; rejectCall on the chain's
+    // returned copy would not reach the row).
+    const ask = (text, maxTokens, usable) => dispatchWithFallback(MODELS.TEXT_POLICIES.imageScreen, {
       text,
       images: [{ data: buffer.toString('base64'), mimeType }],
       jsonMode: true,
@@ -495,22 +505,23 @@ async function screenGeneratedImage({ buffer, mimeType = 'image/webp', allowedTe
       reasoningEffort: SCREEN_REASONING_EFFORT,
       laneId: 'image_screen',
       ...(timeoutMs > 0 ? { timeoutMs } : {}),
-    });
+    }, { validate: (result) => (usable(result.text) ? null : 'invalid_output') });
+    const screenOpts = { requireForbidden: avoidDepicting.some((t) => String(t || '').trim()), requirePlacements: allowUniformLogo };
     // The van question runs beside the main one, inside the same deadline.
     // Either answer failing or unusable fails the whole screen open.
     const [res, vanRes] = await Promise.all([
       // The per-technician answer (technicians[], placements, lettering) is
       // several times the plain one; a truncated JSON would fail OPEN as
       // unusable, so give it room (pre-push fallback P1 on 8860b77737).
-      ask(buildScreenPrompt({ allowedText, avoidDepicting, allowUniformLogo, allowVanWrap }), allowUniformLogo ? SCREEN_MAX_TOKENS_WITH_LOGO : SCREEN_MAX_TOKENS),
-      allowVanWrap ? ask(buildVanScreenPrompt(), VAN_SCREEN_MAX_TOKENS) : null,
+      ask(buildScreenPrompt({ allowedText, avoidDepicting, allowUniformLogo, allowVanWrap }), allowUniformLogo ? SCREEN_MAX_TOKENS_WITH_LOGO : SCREEN_MAX_TOKENS, (text) => !!parseScreen(text, screenOpts)),
+      allowVanWrap ? ask(buildVanScreenPrompt(), VAN_SCREEN_MAX_TOKENS, (text) => !!parseVanScreen(text)) : null,
     ]);
     const failed = [res, vanRes].find((r) => r && !r.ok);
     if (failed) {
       logger.warn(`[hero-alt-vision] image screen failed (${failed.reason}) — accepting image (fail-open)`);
       return open;
     }
-    const parsed = parseScreen(res.text, { requireForbidden: avoidDepicting.some((t) => String(t || '').trim()), requirePlacements: allowUniformLogo });
+    const parsed = parseScreen(res.text, screenOpts);
     const vanAnswer = vanRes ? parseVanScreen(vanRes.text) : { van: null };
     if (!parsed || !vanAnswer) {
       logger.warn('[hero-alt-vision] image screen returned unusable output — accepting image (fail-open)');

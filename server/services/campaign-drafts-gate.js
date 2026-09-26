@@ -152,17 +152,38 @@ async function campaignCooldownReason(customerId, { excludeDraftId = null } = {}
     .first('id');
   if (recentCampaignSms) return 'recent_campaign_sms';
 
+  const noticeCols = await prepayNoticeCooldownColumns();
   const recentPrepayNotice = await db('annual_prepay_terms')
     .where({ customer_id: customerId })
     .where(function () {
-      this.where('notice_30_sent_at', '>', db.raw(COOLDOWN_INTERVAL))
-        .orWhere('notice_15_sent_at', '>', db.raw(COOLDOWN_INTERVAL))
-        .orWhere('notice_7_sent_at', '>', db.raw(COOLDOWN_INTERVAL));
+      for (const col of noticeCols) this.orWhere(col, '>', db.raw(COOLDOWN_INTERVAL));
     })
     .first('id');
   if (recentPrepayNotice) return 'recent_prepay_notice';
 
   return null;
+}
+
+// Renewal-notice witness columns that count as a customer-facing renewal
+// touch. The base 30/15/7 columns always exist; the termite annual-plan
+// columns (45-day rung + both late catch-ups, Codex #4921 r3) are added by
+// newer migrations, so they are only queried once present — a rolling
+// deploy that runs this code before those migrations must not throw for
+// every customer's cooldown check. Only a complete probe is cached. A probe
+// FAILURE propagates (Codex #4921 r8): evaluateCampaignSendGate maps a
+// thrown lookup to guard_error, so the gate fails CLOSED rather than
+// quietly checking only the base columns and missing a termite notice.
+const BASE_NOTICE_COLUMNS = ['notice_30_sent_at', 'notice_15_sent_at', 'notice_7_sent_at'];
+const TERMITE_NOTICE_COLUMNS = ['notice_45_sent_at', 'notice_45_late_sent_at', 'notice_30_late_sent_at'];
+let cachedNoticeColumns = null;
+async function prepayNoticeCooldownColumns() {
+  if (cachedNoticeColumns) return cachedNoticeColumns;
+  const present = await Promise.all(TERMITE_NOTICE_COLUMNS.map((c) => db.schema.hasColumn('annual_prepay_terms', c)));
+  const cols = [...BASE_NOTICE_COLUMNS, ...TERMITE_NOTICE_COLUMNS.filter((c, i) => present[i])];
+  // Cache only the complete set: a partial result (mid rolling deploy)
+  // is re-probed next call so a column added moments later is picked up.
+  if (present.every(Boolean)) cachedNoticeColumns = cols;
+  return cols;
 }
 
 /**
@@ -237,6 +258,7 @@ async function evaluateCampaignSendGate({
 }
 
 module.exports = {
+  _resetNoticeColumnCacheForTests: () => { cachedNoticeColumns = null; },
   evaluateCampaignSendGate,
   campaignCooldownReason,
   prefsAllowMarketingSms,

@@ -2182,11 +2182,17 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // WEEKLY MONDAY 5:00AM — BI Briefing Agent (Monday morning SMS to Adam)
+  // runExclusive: a Railway deploy overlap fires this tick on both
+  // instances; the second skips (lease_held) instead of starting a second
+  // paid session and saving a second report. The owner text is also claimed
+  // once per ET week inside the tool (bi-briefing-sms.js).
   cron.schedule('0 5 * * 1', async () => {
     logger.info('Running: Weekly BI Briefing Agent');
     try {
-      const BIAgent = require('./bi-agent');
-      await BIAgent.run();
+      await runExclusive('bi-weekly-briefing', async () => {
+        const BIAgent = require('./bi-agent');
+        await BIAgent.run();
+      });
     } catch (err) {
       logger.error(`BI Briefing Agent failed: ${err.message}`);
     }
@@ -2464,7 +2470,8 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // EVERY 15 MIN — Amazon "Delivered" email → auto-restock safety net. The
+  // EVERY 15 MIN — purchase receipts → stock (Amazon Delivered emails and
+  // SiteOne invoices). For Amazon the
   // post-email-sync hook (email-sync.js) handles the common case right when
   // the email lands; this sweep scans `emails` directly (from_address +
   // subject, never LLM classification) for anything it missed — a process
@@ -2478,12 +2485,12 @@ function initScheduledJobs() {
     if (!gateEnvValue('GATE_PURCHASE_RECEIPT_RESTOCK')) return;
     try {
       await runExclusive('purchase-receipt-restock', async () => {
-        const { runPurchaseReceiptRestockSweep } = require('./purchase-receipts/sweep');
+        const { runPurchaseReceiptRestockSweep, summarize } = require('./purchase-receipts/sweep');
         const result = await runPurchaseReceiptRestockSweep();
         if (result.skipped) return;
-        const held = result.possibleDuplicate.length + result.sizeMismatch.length + result.needsSize.length + result.noItems.length + result.noOrderNumber.length;
-        if (result.logged.length || held || result.errors.length) {
-          logger.info(`[purchase-receipt-restock] ${result.logged.length} logged, ${held} held for a person, ${result.errors.length} error(s)`);
+        const { logged, held, errors } = summarize(result);
+        if (logged || held || errors) {
+          logger.info(`[purchase-receipt-restock] ${logged} logged, ${held} held for a person, ${errors} error(s)`);
         }
       });
     } catch (err) {
@@ -4674,7 +4681,7 @@ function initScheduledJobs() {
           // the attempts ran out; parked as send_failed with no due time it
           // is inert, as the sibling release leaves a held row (pre-push
           // codex P1 on #3750; codex r18 P2 on #3804).
-          const deterministicRefusal = !!(e && ['CLIENT_FALLBACK_PRICING', 'PRICING_AUTHORITY_NOT_SERVER', 'REPRICE_PENDING', 'ESTIMATE_REVIEW_STALE', 'SEND_OUTCOME_UNCERTAIN', 'BID_VALIDITY_EXPIRED'].includes(e.code));
+          const deterministicRefusal = !!(e && ['CLIENT_FALLBACK_PRICING', 'PRICING_AUTHORITY_NOT_SERVER', 'REPRICE_PENDING', 'ESTIMATE_REVIEW_STALE', 'SEND_OUTCOME_UNCERTAIN', 'BID_VALIDITY_EXPIRED', 'LEGACY_AUTOFILL_PRICE'].includes(e.code));
           // A reviewed attempt cannot be retimed: its receipt and pinned
           // offer belong to the original schedule. Even a bookkeeping throw
           // can follow provider acceptance, so stop for explicit staff review.

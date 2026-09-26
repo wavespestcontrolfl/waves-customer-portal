@@ -857,7 +857,15 @@ async function handleEmailMessageEvent(ev, message, client = db) {
     // timestamps make their row update a no-op, not proof of attempt ownership.
     attemptMatched = Boolean(await attempt.forUpdate().first('id'));
   }
-  if (attemptMatched) await reconcileSummaryForEmailEvent(ev, message, updates, client);
+  if (attemptMatched) {
+    // Reconcile only the current attempt; an old callback cannot settle a
+    // newer billing Email reservation even when its address signal is valid.
+    if (String(ev.event || '').toLowerCase() === 'delivered') {
+      await require('../services/billing-email-reservation')
+        .markBillingEmailReservationDelivered({ ...message, ...updates }, client);
+    }
+    await reconcileSummaryForEmailEvent(ev, message, updates, client);
+  }
   // Address-level provider signals remain valid even when this event lost the
   // attempt race. Record them while the existing address lock is held; the
   // attempt verdict only gates row-scoped reconciliation/recovery.

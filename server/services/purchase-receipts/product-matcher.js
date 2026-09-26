@@ -1,6 +1,7 @@
 /**
- * purchase-receipts/product-matcher.js — resolves an Amazon item title to
- * exactly one active catalog product, or declines to guess.
+ * purchase-receipts/product-matcher.js — resolves a purchase line title (an
+ * Amazon item, a SiteOne invoice line) to exactly one active catalog product,
+ * or declines to guess.
  *
  * Order:
  *   1. Exact alias match (case/space-insensitive) against product_aliases,
@@ -39,7 +40,7 @@ function containsWholeWords(haystackNorm, needleNorm) {
   return pattern.test(haystackNorm);
 }
 
-async function matchAmazonTitleToProduct(title, conn = db) {
+async function matchTitleToProduct(title, conn = db) {
   const normTitle = normalizeForMatch(title);
   if (!normTitle) return { matched: false, reason: 'empty_title' };
 
@@ -62,4 +63,4 @@ async function matchAmazonTitleToProduct(title, conn = db) {
   return { matched: false, reason: 'unmatched' };
 }
 
-module.exports = { matchAmazonTitleToProduct, normalizeForMatch, containsWholeWords };
+module.exports = { matchTitleToProduct, normalizeForMatch, containsWholeWords };

@@ -196,9 +196,22 @@ async function readReconnectState(db, callSid, { timeoutMs = RESUME_STATE_TIMEOU
     if (!meta || typeof meta !== 'object') meta = {};
     // The relay profile the first leg was stamped with (id + validated
     // attrs) — the resumed leg opens with the SAME one, so a sandbox cell
-    // or a production profile is attributed to the whole call.
+    // or a production profile is attributed to the whole call. `language`
+    // (Flux Multilingual's `multi` today) rides alongside ONLY when the
+    // first leg actually stamped one — a profile with none keeps the exact
+    // prior shape ({ relayProfileId, relayAttrs }, no extra key) so a
+    // reconnect for any other profile is byte-identical to before this
+    // field existed (codex r1 P2 on #4947: without it, the resumed leg
+    // defaulted to en-US).
     const profile = Object.hasOwn(meta, 'relay_profile_id')
-      ? { relayProfileId: meta.relay_profile_id ? String(meta.relay_profile_id) : null, relayAttrs: (meta.relay_attrs && typeof meta.relay_attrs === 'object') ? meta.relay_attrs : {} }
+      ? {
+          relayProfileId: meta.relay_profile_id ? String(meta.relay_profile_id) : null,
+          relayAttrs: (meta.relay_attrs && typeof meta.relay_attrs === 'object') ? meta.relay_attrs : {},
+          // Only alongside a stamped profile: a language is a property of
+          // the profile that set it, so a leftover one on a cleared stamp
+          // (relay_profile_id null) is never restored (codex r3 P2 on #4947).
+          ...(meta.relay_profile_id && meta.relay_language ? { language: String(meta.relay_language) } : {}),
+        }
       : null;
     return {
       reconnects: Number(meta.relay_reconnects) || 0,
