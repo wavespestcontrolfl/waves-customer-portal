@@ -33,7 +33,8 @@ async function createScratchDb() {
     annual_plan_version text,
     notice_45_sent_at timestamptz,
     notice_45_claimed_at timestamptz,
-    notice_45_late_sent_at timestamptz
+    notice_45_late_sent_at timestamptz,
+    notice_45_late_escalated_at timestamptz
   )`);
   return { db, async destroy() { await db.raw('DROP SCHEMA ?? CASCADE', [schema]); await db.destroy(); } };
 }
@@ -95,5 +96,35 @@ describeOrSkip('termite 45-day renewal notice — catch-up window (real Postgres
     expect(_private.noticeWitnessColumn(45, t, '2026-09-27')).toBe('notice_45_late_sent_at'); // 44 days
     expect(_private.noticeWitnessColumn(45, t, '2026-10-10')).toBe('notice_45_late_sent_at'); // 31 days
     expect(_private.noticeWitnessColumn(30, t, '2026-10-20')).toBe('notice_30_sent_at');
+  });
+
+  // Codex #4921 r2 P1: the durable-escalation retry point. A late-45 term
+  // whose admin bell never got a confirmed insert (notifyAdmin returning
+  // null) must resurface here on every sweep until it does — notice_45_
+  // late_sent_at already blocks the SEND itself from ever retrying, so
+  // this is the ONLY path back to a bell for it.
+  test('termiteLateNoticeEscalationCandidates: every late-sent termite term missing its escalation stamp, and only those', async () => {
+    const { db } = fixture;
+    jest.doMock('../models/db', () => db);
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    const { _private } = require('../services/annual-prepay-renewals');
+    const term = (label, fields) => ({
+      label, customer_id: randomUUID(), term_start: '2025-10-01', term_end: '2026-11-15', status: 'active', annual_plan_version: 'v3', ...fields,
+    });
+    const rows = [
+      term('lateUnescalated', { notice_45_late_sent_at: new Date() }),
+      term('lateEscalated', { notice_45_late_sent_at: new Date(), notice_45_late_escalated_at: new Date() }),
+      term('onTimeSent', { notice_45_sent_at: new Date() }), // never late — nothing to escalate
+      term('nonTermite', { notice_45_late_sent_at: new Date(), annual_plan_version: null }),
+      term('neverSent', {}),
+    ];
+    const ids = {};
+    for (const { label, ...fields } of rows) {
+      const [row] = await db('annual_prepay_terms').insert(fields).returning('id');
+      ids[row.id] = label;
+    }
+
+    const candidates = await _private.termiteLateNoticeEscalationCandidates({ conn: db });
+    expect(candidates.map((row) => ids[row.id])).toEqual(['lateUnescalated']);
   });
 });

@@ -2177,6 +2177,7 @@ describe('annual prepay renewal helpers', () => {
       term_start: '2026-05-20',
       term_end: '2027-05-20',
       annual_plan_version: 'v3',
+      installation_anchored_at: '2026-05-20T00:00:00.000Z',
       // prepay_amount already excludes the one-time Station Setup fee
       // (estimate-converter.js subtracts annualPlanSetupFeeAmount before
       // it is ever written here) — renewal_fee must render this figure
@@ -2249,8 +2250,12 @@ describe('annual prepay renewal helpers', () => {
       renewalDate: '2027-05-20',
       renewalFee: 650,
       // term_end is inclusive coverage: the successor starts the day after.
+      // newEnd is +12mo SAME-DAY FROM newStart (2027-05-21), not from
+      // term_end — matching createTermForAnnualPrepay's own default so the
+      // notice and the successor slice 6b mints never disagree (Codex
+      // #4921 r2 P2).
       newStart: '2027-05-21',
-      newEnd: '2028-05-20',
+      newEnd: '2028-05-21',
       cancelLink: 'https://portal.wavespestcontrol.com/?tab=plan',
       // No source estimate → no plan property → the email falls back to
       // the customer's address.
@@ -2278,6 +2283,7 @@ describe('annual prepay renewal helpers', () => {
       term_start: '2026-05-20',
       term_end: termEnd,
       annual_plan_version: 'v3',
+      installation_anchored_at: '2026-05-20T00:00:00.000Z',
       prepay_amount: 650,
       notice_45_sent_at: null,
       notice_45_claimed_at: null,
@@ -2299,6 +2305,39 @@ describe('annual prepay renewal helpers', () => {
     renderSmsTemplate.mockResolvedValue('rendered termite sms');
     return { term, secondQuery };
   }
+
+  // newEnd must be derived from newStart (term_end + 1 day), never from
+  // term_end directly — createTermForAnnualPrepay defaults a fresh term's
+  // end the same way (start + 12mo same-day), so the notice and the
+  // successor slice 6b actually mints must never disagree (Codex #4921 r2
+  // P2).
+  test('newEnd derives from newStart across a Feb 28 term_end: newStart 2027-03-01, newEnd 2028-03-01 — NOT the term_end-anchored 2028-02-28', async () => {
+    pinTermiteToday();
+    const { term } = termiteNoticeHarness({ termEnd: '2027-02-28' });
+    sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted' });
+    AccountMembershipEmail.sendTermiteRenewalReminder.mockResolvedValue({ ok: true });
+
+    await expect(AnnualPrepayRenewals.sendCustomerTermNotice(term, 45)).resolves.toMatchObject({ sent: true });
+
+    expect(AccountMembershipEmail.sendTermiteRenewalReminder).toHaveBeenCalledWith(expect.objectContaining({
+      newStart: '2027-03-01',
+      newEnd: '2028-03-01',
+    }));
+  });
+
+  test('newEnd derives from newStart across a month-end term_end: term_end 2027-04-30 → newStart 2027-05-01 → newEnd 2028-05-01', async () => {
+    pinTermiteToday();
+    const { term } = termiteNoticeHarness({ termEnd: '2027-04-30' });
+    sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted' });
+    AccountMembershipEmail.sendTermiteRenewalReminder.mockResolvedValue({ ok: true });
+
+    await expect(AnnualPrepayRenewals.sendCustomerTermNotice(term, 45)).resolves.toMatchObject({ sent: true });
+
+    expect(AccountMembershipEmail.sendTermiteRenewalReminder).toHaveBeenCalledWith(expect.objectContaining({
+      newStart: '2027-05-01',
+      newEnd: '2028-05-01',
+    }));
+  });
 
   test('an owner-silenced termite SMS (sent:true, deliveryOutcome not_sent) is NOT a witness — the email must confirm, else the claim is released', async () => {
     pinTermiteToday();
@@ -2348,6 +2387,45 @@ describe('annual prepay renewal helpers', () => {
     );
   });
 
+  describe('fileTermiteLateNoticeException — durable escalation (Codex #4921 r2 P1)', () => {
+    test('a confirmed admin-bell insert stamps notice_45_late_escalated_at', async () => {
+      const term = { id: 'term-late-1', customer_id: 'customer-1', term_end: '2027-05-20' };
+      const updateQuery = query();
+      setDbQueues({
+        // annualPrepayColumns() columnInfo probe, then the escalation update.
+        annual_prepay_terms: [query({ columnInfo: { notice_45_late_escalated_at: {} } }), updateQuery],
+      });
+      NotificationService.notifyAdmin.mockResolvedValue({ id: 'notif-late-1', deduped: false });
+
+      await expect(_private.fileTermiteLateNoticeException(term, 45)).resolves.toBe(true);
+
+      expect(updateQuery.update).toHaveBeenCalledWith(expect.objectContaining({ notice_45_late_escalated_at: expect.any(Date) }));
+    });
+
+    // notifyAdmin returns null on an INSERT failure rather than throwing
+    // (notification-service.js) — the exact failure mode this escalation
+    // column exists to survive. Nothing must be stamped, so the term stays
+    // a candidate for termiteLateNoticeEscalationCandidates() on the next
+    // sweep instead of being silently dropped.
+    test('a failed admin-bell insert (notifyAdmin returns null) leaves the escalation unstamped and reports false, so the next sweep retries it', async () => {
+      const term = { id: 'term-late-2', customer_id: 'customer-1', term_end: '2027-05-20' };
+      // No further 'annual_prepay_terms' queue entries: the failure path
+      // returns before ever probing annualPrepayColumns() or writing.
+      setDbQueues({ annual_prepay_terms: [] });
+      NotificationService.notifyAdmin.mockResolvedValue(null);
+
+      await expect(_private.fileTermiteLateNoticeException(term, 45)).resolves.toBe(false);
+    });
+
+    test('notifyAdmin throwing is caught and also reports false (never crashes the sweep)', async () => {
+      const term = { id: 'term-late-3', customer_id: 'customer-1', term_end: '2027-05-20' };
+      setDbQueues({ annual_prepay_terms: [] });
+      NotificationService.notifyAdmin.mockRejectedValue(new Error('db unavailable'));
+
+      await expect(_private.fileTermiteLateNoticeException(term, 45)).resolves.toBe(false);
+    });
+  });
+
   test('the termite notice names the PLAN\'s property (source estimate), not a different billing address', async () => {
     pinTermiteToday();
     const term = {
@@ -2358,6 +2436,7 @@ describe('annual prepay renewal helpers', () => {
       term_start: '2026-05-20',
       term_end: '2027-05-20',
       annual_plan_version: 'v3',
+      installation_anchored_at: '2026-05-20T00:00:00.000Z',
       prepay_amount: 650,
       notice_45_sent_at: null,
       notice_45_claimed_at: null,
@@ -2374,7 +2453,10 @@ describe('annual prepay renewal helpers', () => {
       customers: [
         query({ first: { id: 'customer-1', first_name: 'Stan', address_line1: '1 Billing Way', city: 'Tampa', email: 'stan@example.com', phone: '+19415550100' } }),
       ],
-      'estimates as e': [
+      estimates: [
+        query({ first: { property_id: 'property-9', address: '9 Palm Ave Fallback, Sarasota' } }),
+      ],
+      customer_properties: [
         query({ first: { address_line1: '9 Palm Ave', address_line2: null, city: 'Sarasota', state: 'FL', zip: '34236' } }),
       ],
       customer_interactions: [query()],
@@ -2403,6 +2485,7 @@ describe('annual prepay renewal helpers', () => {
       term_start: '2026-05-20',
       term_end: '2027-05-20',
       annual_plan_version: 'v3',
+      installation_anchored_at: '2026-05-20T00:00:00.000Z',
       prepay_amount: 650,
       notice_45_sent_at: null,
       notice_45_claimed_at: null,
@@ -2448,6 +2531,7 @@ describe('annual prepay renewal helpers', () => {
       term_start: '2026-05-20',
       term_end: '2027-05-20',
       annual_plan_version: 'v3',
+      installation_anchored_at: '2026-05-20T00:00:00.000Z',
       prepay_amount: 650,
       notice_45_sent_at: null,
       notice_45_claimed_at: null,
@@ -2475,6 +2559,88 @@ describe('annual prepay renewal helpers', () => {
       expect.stringContaining('term-1'),
       expect.objectContaining({ metadata: expect.objectContaining({ reason: 'cancel_flow_disabled', days_out: 45, annual_prepay_term_id: 'term-1' }) }),
     );
+  });
+
+  // An ORIGINAL termite term still awaiting its installation anchor
+  // (coverageAwaitsInstallation) must never get a renewal notice — its
+  // term_end is only a provisional placeholder, and a notice would let
+  // claimTermNotice flip an 'active' term to renewal_pending, which the
+  // installation sweep's ANCHORABLE_TERM_STATUSES (payment_pending/active
+  // only) would then never anchor (Codex #4921 r2 P1).
+  test('a termite annual-plan term still awaiting installation skips EVERY rung (not just 45/30) and rings an admin bell instead', async () => {
+    const term = {
+      id: 'term-1',
+      customer_id: 'customer-1',
+      status: 'active',
+      term_start: '2026-05-20',
+      term_end: '2027-05-20',
+      annual_plan_version: 'v3',
+      renewed_from_term_id: null,
+      installation_anchored_at: null, // never anchored — installation hasn't happened
+      prepay_amount: 650,
+      notice_45_sent_at: null,
+      notice_45_claimed_at: null,
+      renewal_decision: null,
+    };
+    setDbQueues({
+      scheduled_services: [query({ first: null }), query({ columnInfo: {} })],
+      annual_prepay_terms: [query({ returning: [{ ...term, last_scheduled_service_id: null, last_scheduled_service_date: null }] })],
+      notifications: [query({ first: undefined })], // dedupe probe: no open alert yet
+    });
+    NotificationService.notifyAdmin.mockClear();
+
+    // Even a 15-day (generic-copy) rung is blocked — the guard is not
+    // limited to the termite-copy days (45/30).
+    await expect(AnnualPrepayRenewals.sendCustomerTermNotice(term, 15)).resolves.toMatchObject({
+      sent: false,
+      reason: 'awaiting_installation',
+    });
+
+    expect(renderSmsTemplate).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith(
+      'alert',
+      expect.stringMatching(/installation never completed/i),
+      expect.stringContaining('term-1'),
+      expect.objectContaining({ bell: true, metadata: expect.objectContaining({ reason: 'awaiting_installation', days_out: 15, annual_prepay_term_id: 'term-1' }) }),
+    );
+  });
+
+  describe('termiteNoticePreflight — the awaiting-installation guard directly (unit-level, every rung)', () => {
+    beforeEach(() => {
+      setDbQueues({ notifications: [query({ first: undefined }), query({ first: undefined }), query({ first: undefined }), query({ first: undefined })] });
+      NotificationService.notifyAdmin.mockClear();
+    });
+
+    test('blocks 45, 30, 15, AND 7 alike for an unanchored original', async () => {
+      const term = {
+        id: 'term-await', customer_id: 'customer-await', annual_plan_version: 'v3',
+        renewed_from_term_id: null, installation_anchored_at: null, term_end: '2027-05-20', prepay_amount: 650,
+      };
+      for (const daysOut of [45, 30, 15, 7]) {
+        await expect(_private.termiteNoticePreflight(term, daysOut)).resolves.toEqual({ blocked: 'awaiting_installation' });
+      }
+      expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(4);
+    });
+
+    test('does NOT block a renewal successor (renewed_from_term_id set) — it is not "awaiting installation"', async () => {
+      const term = {
+        id: 'term-successor', customer_id: 'customer-1', annual_plan_version: 'v3',
+        renewed_from_term_id: 'term-original', installation_anchored_at: null, term_end: '2027-05-20', prepay_amount: 650,
+      };
+      await expect(_private.termiteNoticePreflight(term, 15)).resolves.toEqual({ termiteRung: false });
+      expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    });
+
+    test('does NOT block an already-anchored original', async () => {
+      const term = {
+        id: 'term-anchored', customer_id: 'customer-1', annual_plan_version: 'v3',
+        renewed_from_term_id: null, installation_anchored_at: '2026-05-20T00:00:00.000Z', term_end: '2027-05-20', prepay_amount: 650,
+      };
+      CancellationResolution.cancelFlowV2Enabled.mockReturnValue(true);
+      await expect(_private.termiteNoticePreflight(term, 45)).resolves.toEqual({ termiteRung: true });
+      expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    });
   });
 
   test('a 45-day rung is refused outright for a non-termite term even when called directly', async () => {
@@ -2512,6 +2678,7 @@ describe('annual prepay renewal helpers', () => {
       term_start: '2026-05-20',
       term_end: '2026-11-05',
       annual_plan_version: 'v3',
+      installation_anchored_at: '2026-05-20T00:00:00.000Z',
       prepay_amount: 650,
       notice_15_sent_at: null,
       notice_15_claimed_at: null,
@@ -2562,6 +2729,7 @@ describe('annual prepay renewal helpers', () => {
       term_start: '2026-05-20',
       term_end: '2027-05-20',
       annual_plan_version: 'v3',
+      installation_anchored_at: '2026-05-20T00:00:00.000Z',
       prepay_amount: null,
       notice_45_sent_at: null,
       notice_45_claimed_at: null,
@@ -2600,6 +2768,7 @@ describe('annual prepay renewal helpers', () => {
       term_start: '2026-05-20',
       term_end: '2027-05-20',
       annual_plan_version: 'v3',
+      installation_anchored_at: '2026-05-20T00:00:00.000Z',
       prepay_amount: 0,
       notice_45_sent_at: null,
       notice_45_claimed_at: null,

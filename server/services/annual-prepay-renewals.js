@@ -1659,16 +1659,33 @@ function isTermiteAnnualPlanTerm(term) {
 
 // The plan's OWN property (the source estimate's property) — a
 // multi-property customer's billing address can be a different site, and
-// the termite notice names the protected property. Falls back to the
-// customer's address when the estimate has no property recorded.
+// the termite notice names the protected property. Three-step fallback
+// (Codex #4921 r2 P1): the estimate's linked customer_properties row when
+// one resolves, else the estimate's OWN free-text address snapshot
+// (`estimates.address` — always authoritative for what was quoted, see
+// 20260806200000_estimates_property_linkage.js; carries no separate
+// city/state/zip, so it lands whole in address_line1), and the customer's
+// primary address is used ONLY when the estimate has neither — never as a
+// substitute for a still-quoted, still-real property just because its
+// `property_id` link is missing or its property row is gone (a hard
+// delete, or a customer_properties join miss for any other reason).
 async function planPropertyForTerm(term, conn = db) {
   if (!term?.source_estimate_id) return null;
   try {
-    const row = await conn('estimates as e')
-      .join('customer_properties as cp', 'cp.id', 'e.property_id')
-      .where('e.id', term.source_estimate_id)
-      .first('cp.address_line1', 'cp.address_line2', 'cp.city', 'cp.state', 'cp.zip');
-    return row?.address_line1 ? row : null;
+    const estimate = await conn('estimates')
+      .where('id', term.source_estimate_id)
+      .first('property_id', 'address');
+    if (!estimate) return null;
+    if (estimate.property_id) {
+      const property = await conn('customer_properties')
+        .where('id', estimate.property_id)
+        .first('address_line1', 'address_line2', 'city', 'state', 'zip');
+      if (property?.address_line1) return property;
+    }
+    if (estimate.address) {
+      return { address_line1: estimate.address, address_line2: null, city: null, state: null, zip: null };
+    }
+    return null;
   } catch (err) {
     logger.warn(`[annual-prepay] plan property lookup failed for term ${term?.id}: ${err.message}`);
     return null;
@@ -1680,6 +1697,54 @@ async function planPropertyForTerm(term, conn = db) {
 function formatCurrencyLabel(amount) {
   const value = Number(amount || 0);
   return `$${value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+// Fail-closed admin bell for a termite rung skipped because the ORIGINAL
+// term is still awaiting its installation anchor (coverageAwaitsInstallation
+// — annual_plan_version set, no renewed_from_term_id, no
+// installation_anchored_at). Its term_end is only a PROVISIONAL date
+// (signature day + 12mo, seeded so the term can exist for the invoice)
+// until the installation visit completes and anchorTermToInstallation
+// re-anchors it, so a notice here would both quote the wrong renewal
+// date/fee and (for an 'active' term) let claimTermNotice flip status to
+// renewal_pending — which termite-annual-activation.js's installation sweep
+// (ANCHORABLE_TERM_STATUSES: payment_pending/active only) would then never
+// anchor, permanently losing the real coverage window. Safer to skip the
+// notice entirely and tell staff the install never happened than to send
+// one off a date that is not real yet. Same one-open-alert-per-reason-per-
+// week dedupe shape as the sibling exceptions below, keyed per term+rung.
+async function fileTermiteAwaitingInstallationException(term, daysOut) {
+  try {
+    const dedupeKey = `termite-annual-notice:${term?.id}:${daysOut}:awaiting_installation`;
+    const existing = await db('notifications')
+      .where({ recipient_type: 'admin' })
+      .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
+      .where('created_at', '>=', db.raw("now() - interval '7 days'"))
+      .first('id')
+      .catch(() => null);
+    if (existing) return;
+    const NotificationService = require('./notification-service');
+    await NotificationService.notifyAdmin(
+      'alert',
+      'Termite annual renewal notice skipped: installation never completed',
+      `The ${daysOut}-day termite renewal notice for term ${term?.id} was skipped because the plan's installation visit has never completed — its term_end is only a provisional placeholder until then. Complete the installation (or fix the term) rather than letting this renew on the wrong date.`,
+      {
+        link: term?.customer_id ? `/admin/customers/${term.customer_id}` : '/admin/dispatch',
+        // bell:true — same rationale as the sibling termite exceptions: a
+        // skipped notice must ring even under GATE_ADMIN_BELL_POLICY.
+        bell: true,
+        metadata: {
+          dedupeKey,
+          customer_id: term?.customer_id || null,
+          annual_prepay_term_id: term?.id || null,
+          days_out: daysOut,
+          reason: 'awaiting_installation',
+        },
+      },
+    );
+  } catch (err) {
+    logger.warn(`[annual-prepay] termite awaiting-installation exception notification failed for term ${term?.id}: ${err.message}`);
+  }
 }
 
 // Fail-closed admin bell for a termite rung that could not be sent because
@@ -1768,10 +1833,22 @@ async function fileTermiteMissingFeeException(term, daysOut) {
 // days before term_end). The customer was told, but the signed agreement's
 // "at least 45 days" promise was missed, so notice_45_sent_at stays empty
 // and the renewal must be handled by staff rather than auto-charged.
+//
+// notifyAdmin returns null on an INSERT failure rather than throwing
+// (notification-service.js: "create() returns null on an insert failure …
+// spreading that null would report {deduped:false} as if a row landed" —
+// it throws inside its own transaction and the outer catch turns that into
+// null too). notice_45_sent_at is already permanently empty and
+// notice_45_late_sent_at already blocks every retry of the SEND itself, so
+// swallowing a null result here would lose the escalation bell for good
+// with no way even to notice, let alone retry, it. The escalated stamp is
+// therefore written ONLY on a confirmed (non-null) result; a null result
+// leaves it unset so termiteLateNoticeEscalationCandidates() retries this
+// same call on the next daily sweep (Codex #4921 r2 P1).
 async function fileTermiteLateNoticeException(term, daysOut) {
   try {
     const NotificationService = require('./notification-service');
-    await NotificationService.notifyAdmin(
+    const result = await NotificationService.notifyAdmin(
       'alert',
       'Termite annual renewal notice went out late',
       `The ${daysOut}-day termite renewal notice for term ${term?.id} (renews ${formatDateLabel(term?.term_end)}) was sent fewer than 45 days before the renewal date, so the agreement's 45-day notice promise was missed. The customer has been told; this renewal will not be auto-charged — handle it manually.`,
@@ -1787,9 +1864,36 @@ async function fileTermiteLateNoticeException(term, daysOut) {
         },
       },
     );
+    if (!result) {
+      logger.warn(`[annual-prepay] termite late-notice admin bell insert failed for term ${term?.id}; will retry on the next sweep`);
+      return false;
+    }
+    if (term?.id) {
+      const cols = await annualPrepayColumns();
+      if (cols.notice_45_late_escalated_at) {
+        await db('annual_prepay_terms')
+          .where({ id: term.id })
+          .whereNull('notice_45_late_escalated_at')
+          .update({ notice_45_late_escalated_at: new Date(), updated_at: new Date() });
+      }
+    }
+    return true;
   } catch (err) {
     logger.warn(`[annual-prepay] termite late-notice notification failed for term ${term?.id}: ${err.message}`);
+    return false;
   }
+}
+
+// Retry point for fileTermiteLateNoticeException's admin-bell insert
+// failing (notifyAdmin returning null): every term whose 45-day rung went
+// out LATE but never got a confirmed escalation stamp. Guarded on the new
+// column existing so a DB mid-rollout never 500s here — see checkAndSend.
+async function termiteLateNoticeEscalationCandidates({ conn = db } = {}) {
+  return conn('annual_prepay_terms')
+    .whereNotNull('annual_plan_version')
+    .whereNotNull(TERMITE_LATE_NOTICE_COLUMN)
+    .whereNull('notice_45_late_escalated_at')
+    .select('*');
 }
 
 function formatDateLabel(ymd) {
@@ -5247,6 +5351,13 @@ async function termiteNoticePreflight(term, daysOut) {
   const n = Number(daysOut);
   const termite = isTermiteAnnualPlanTerm(term);
   if (n === TERMITE_EXTRA_NOTICE_DAYS && !termite) return { blocked: 'not_termite_plan' };
+  // Blocks EVERY rung (45/30/15/7), not just the termite-copy ones — see
+  // fileTermiteAwaitingInstallationException for why an unanchored original
+  // must never get a renewal notice of any shape.
+  if (termite && coverageAwaitsInstallation(term)) {
+    await fileTermiteAwaitingInstallationException(term, daysOut);
+    return { blocked: 'awaiting_installation' };
+  }
   const termiteRung = TERMITE_COPY_NOTICE_DAYS.includes(n) && termite;
   if (!termiteRung) return { termiteRung: false };
   if (!CancellationResolution.cancelFlowV2Enabled()) {
@@ -5331,6 +5442,15 @@ async function sendTermNoticeEmail({
   termiteRung, customer, term, daysOut, cancelLink, planAddress,
 }) {
   try {
+    // newEnd is derived from newStart, not from term_end directly — exactly
+    // how createTermForAnnualPrepay defaults a fresh term's end (start +
+    // 12mo same-day) — so the notice's stated coverage window never
+    // disagrees with the successor slice 6b actually mints. Deriving it
+    // from term_end instead would drift by a day whenever the +12mo
+    // same-day clamp lands differently for the two start dates (e.g.
+    // term_end 2027-02-28 → newStart 2027-03-01: newStart+12mo is
+    // 2028-03-01, but term_end+12mo clamps to 2028-02-28 — a full day off).
+    const newStart = addDaysYmd(dateOnly(term.term_end), 1);
     const result = termiteRung
       ? await AccountMembershipEmail.sendTermiteRenewalReminder({
         customerId: customer.id,
@@ -5338,8 +5458,8 @@ async function sendTermNoticeEmail({
         daysOut,
         renewalDate: term.term_end,
         renewalFee: term.prepay_amount,
-        newStart: addDaysYmd(dateOnly(term.term_end), 1),
-        newEnd: addMonthsSameDay(term.term_end, 12),
+        newStart,
+        newEnd: addMonthsSameDay(newStart, 12),
         cancelLink,
         address: planAddress,
         // No annual-inspection date is tracked anywhere yet (the signed
@@ -5605,6 +5725,22 @@ async function checkAndSend({ today = etDateString() } = {}) {
         logger.error(`[annual-prepay] termite 45-day reminder failed for term ${term.id}: ${err.message}`);
       }
     }
+
+    // Retry every LATE 45-day notice whose admin-bell escalation never got
+    // a confirmed insert (fileTermiteLateNoticeException's notifyAdmin
+    // call returned null) — otherwise a transient notification-insert
+    // failure loses that bell for good, since notice_45_late_sent_at
+    // already blocks the send itself from ever retrying.
+    if (termCols.notice_45_late_escalated_at) {
+      const lateUnescalated = await termiteLateNoticeEscalationCandidates();
+      for (const term of lateUnescalated) {
+        try {
+          await fileTermiteLateNoticeException(term, TERMITE_EXTRA_NOTICE_DAYS);
+        } catch (err) {
+          logger.error(`[annual-prepay] termite late-notice escalation retry failed for term ${term.id}: ${err.message}`);
+        }
+      }
+    }
   }
 
   for (const daysOut of CUSTOMER_NOTICE_DAYS) {
@@ -5635,7 +5771,18 @@ async function checkAndSend({ today = etDateString() } = {}) {
       // term end (the effective end); a term matched solely by an early
       // last-service date still reminds on term_end instead.
       const onTermEnd = dateOnly(term.term_end) === target;
-      if (!onTermEnd && !isLastServiceNearTermEnd(term)) continue;
+      // TERMITE annual-plan terms' 30-day rung is the exception (Codex
+      // #4921 r2 P1): it is the LAST chance before the 45-day rung's own
+      // catch-up window closes and the copy discloses a real charge date,
+      // so it must anchor on term_end ONLY — an early completed visit
+      // (last_scheduled_service_date within 120 days of term_end,
+      // isLastServiceNearTermEnd) must never stamp notice_30_sent_at ahead
+      // of the true 30-days-before-renewal point. Every other rung (15/7,
+      // any daysOut for a non-termite term) keeps the shared last-service
+      // anchor untouched — generic prepay behavior stays byte-identical.
+      if (daysOut === 30 && isTermiteAnnualPlanTerm(term)) {
+        if (!onTermEnd) continue;
+      } else if (!onTermEnd && !isLastServiceNearTermEnd(term)) continue;
       try {
         const result = await sendCustomerTermNotice(term, daysOut);
         if (result.sent) sent++;
@@ -6181,5 +6328,10 @@ module.exports = {
     detachCallbacksFromTerm,
     fileCoverageExceptionAfterCommit,
     resetCachesForTests,
+    coverageAwaitsInstallation,
+    termiteNoticePreflight,
+    fileTermiteAwaitingInstallationException,
+    fileTermiteLateNoticeException,
+    termiteLateNoticeEscalationCandidates,
   },
 };
