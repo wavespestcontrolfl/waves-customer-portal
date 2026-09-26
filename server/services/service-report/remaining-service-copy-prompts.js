@@ -369,7 +369,9 @@ function resolveRemainingServiceModules({ serviceKey = null, findingsType = null
   // Shared schemas such as termite_treatment need a canonical service key.
   if (serviceKey && !byServiceKey) return null;
   if (findingsType && !byFindingsType) return null;
-  if (byServiceKey && byFindingsType && !byFindingsType.some((module) => byServiceKey.includes(module))) return null;
+  // Bundles keep their primary form first; companion modules do not change
+  // the canonical findings schema that captures the visit (trapping for rodents).
+  if (byServiceKey && byFindingsType && !byFindingsType.includes(byServiceKey[0])) return null;
   if (byServiceKey) return byServiceKey;
   return byFindingsType?.length === 1 ? byFindingsType : null;
 }

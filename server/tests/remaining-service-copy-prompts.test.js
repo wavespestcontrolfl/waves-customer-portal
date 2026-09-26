@@ -51,6 +51,16 @@ describe('remaining service copy prompt registry', () => {
     expect(prompt).not.toContain('SERVICE MODULE — RODENT BAIT STATIONS');
   });
 
+  test.each(['rodent_trapping_exclusion', 'rodent_trapping_sanitation', 'rodent_trapping_exclusion_sanitation'])(
+    '%s requires the trapping form even when a companion module overlaps', (serviceKey) => {
+      for (const findingsType of ['rodent_exclusion', 'rodent_sanitation']) {
+        expect(selectRemainingServicePrompt({ serviceKey, findingsType }, 'typed')).toBeNull();
+      }
+      expect(selectRemainingServicePrompt({ serviceKey, findingsType: 'rodent_trapping' }, 'typed'))
+        .toContain('SERVICE MODULE — RODENT TRAPPING');
+    },
+  );
+
   test('adds only requested modifiers and deduplicates explicit and inferred selection', () => {
     const prompt = selectRemainingServicePrompt({
       serviceKey: 'mosquito_one_time',
