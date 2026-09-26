@@ -259,7 +259,11 @@ export function PhotoIdFab({ onOpen, hasBottomNav }) {
       style={{
         position: 'fixed',
         right: 14,
-        bottom: hasBottomNav ? 82 : 20,
+        // The mobile nav includes the home-indicator inset in its height.
+        // Keep the whole button above that bar, including its bottom gap.
+        bottom: hasBottomNav
+          ? 'calc(90px + env(safe-area-inset-bottom, 0px))'
+          : 'calc(20px + env(safe-area-inset-bottom, 0px))',
         zIndex: 97,
         minHeight: 48,
         padding: '0 18px 0 14px',
