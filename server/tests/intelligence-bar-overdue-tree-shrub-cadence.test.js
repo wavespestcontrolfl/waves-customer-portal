@@ -317,3 +317,61 @@ test('a weekly T&S plan is reported at its own cadence, not held back to 42 days
   const result = await executeTool('find_overdue_customers', { service_category: 'tree_shrub' });
   expect(result.overdue_customers.map((c) => [c.id, c.expected_frequency_days, c.days_overdue])).toEqual([['weekly-due', 7, 1]]);
 });
+
+// Edge cases below are a live-verification pass on codex r35 (this session
+// did not author the r35 fix). Backed by a real PostgreSQL run against a
+// migrated schema (see the handback report) that exercised the actual
+// active-plan LEFT JOIN/label SQL directly — bypassing this file's mocked
+// db, which only exercises the JS cadence-resolution side below — plus a
+// direct comparison against the merge-base's INNER JOIN text.
+test('a generic ID-less row with NO recurrence at all (pattern and interval both null) falls back to the label default, not a crash', async () => {
+  db.__state.rows = [
+    // 65 days since last service: overdue at the label default (60) but
+    // would NOT be overdue at any real T&S cadence shorter than that.
+    { ...row('generic-no-recurrence', 'Tree & Shrub Care', 65), active_plan: { service_key: null, recurring_pattern: null, recurring_interval_days: null } },
+  ];
+  const result = await executeTool('find_overdue_customers', { service_category: 'tree_shrub' });
+  expect(result.overdue_customers.map((c) => [c.id, c.expected_frequency_days])).toEqual([['generic-no-recurrence', 60]]);
+});
+
+test('a generic ID-less row on an unrecognized cadence string (e.g. "every_3_months") falls to the seeder\'s ~quarterly fallback, not a crash', async () => {
+  // The seeder's canonical name is 'quarterly' (-> 90); 'every_3_months' is
+  // not in its pattern tables, so intervalDaysForPattern returns the
+  // 91-day FALLBACK_RECURRENCE_GAP_DAYS — a plausible free-text/legacy
+  // value on a generic row, and a real behavior difference from 'quarterly'
+  // worth pinning explicitly (not a bug in this PR; recurring-appointment-
+  // seeder.js's fallback predates it).
+  db.__state.rows = [
+    { ...row('not-due-at-91', 'Tree & Shrub Care', 88), active_plan: { service_key: null, recurring_pattern: 'every_3_months', recurring_interval_days: null } },
+    { ...row('due-at-91', 'Tree & Shrub Care', 92), active_plan: { service_key: null, recurring_pattern: 'every_3_months', recurring_interval_days: null } },
+  ];
+  const result = await executeTool('find_overdue_customers', { service_category: 'tree_shrub' });
+  expect(result.overdue_customers.map((c) => [c.id, c.expected_frequency_days])).toEqual([['due-at-91', 91]]);
+});
+
+test('the active_plan JSON is read by snake_case service_key only; a stray camelCase serviceKey field is ignored, not crashed on', async () => {
+  // row_to_json() always emits snake_case column names, so a real SQL
+  // response can never carry a camelCase serviceKey — this pins that the
+  // JS reader (planIntervalDays) does not accidentally accept one, which
+  // would silently pick up the wrong (shorter) catalog cadence.
+  db.__state.rows = [
+    { ...row('camel-key-ignored', 'Tree & Shrub Care', 65), active_plan: { serviceKey: 'tree_shrub_6week', service_key: null, recurring_pattern: null, recurring_interval_days: null } },
+  ];
+  const result = await executeTool('find_overdue_customers', { service_category: 'tree_shrub' });
+  // Falls to the label-text default (60), NOT the camelCase field's 42.
+  expect(result.overdue_customers.map((c) => [c.id, c.expected_frequency_days])).toEqual([['camel-key-ignored', 60]]);
+});
+
+test('the generic-label fallback pattern is literal "tree...shrub" text, not the "ornamental" alias the client-side retired-sale matcher also accepts (documents an existing, unchanged boundary)', () => {
+  // This regex (patterns.tree_shrub in findOverdueCustomers) is shared with
+  // the category prefilter elsewhere in this same function — this fix
+  // reuses it as-is rather than introducing a second definition, so an
+  // "Ornamental Care" free-text row (no literal tree/shrub substring) was
+  // never covered by the category scan at all, before or after this PR.
+  // (Contrast client/src/constants/retiredSaleLabels.js's TREE_SHRUB_LABEL_RE,
+  // an unrelated matcher for a different feature, which DOES special-case
+  // \bornamentals?\b.)
+  const label = 'tree.*shrub';
+  expect('Tree & Shrub Care').toMatch(new RegExp(label, 'i'));
+  expect('Ornamental Care').not.toMatch(new RegExp(label, 'i'));
+});
