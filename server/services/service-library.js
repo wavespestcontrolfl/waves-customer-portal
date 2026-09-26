@@ -303,33 +303,16 @@ function assertOperationalConsistency(merged) {
  */
 // The new-sale catalog filter shared by every booking picker and the
 // annual-prepay plan selector (codex r29 on #4786): retired-for-sale rows are
-// dropped unless the customer already holds the plan.
-function applySellableFilter(query, sellableCustomerId = null) {
+// dropped unless the customer already holds the plan — `heldKeys` from
+// retiredSaleKeysHeldBy, the same holder test the write gate reads (codex r34).
+function applySellableFilter(query, heldKeys = new Set()) {
   const { RETIRED_SALE_SERVICE_KEYS } = require('./pricing-engine/retired-sale-catalog');
   const retiredKeys = [...RETIRED_SALE_SERVICE_KEYS];
-  const customerId = UUID_RE.test(String(sellableCustomerId || '')) ? String(sellableCustomerId) : null;
+  const held = retiredKeys.filter((key) => heldKeys.has(key));
   return query.where(function () {
     // NULL-key rows are not retired; NOT IN alone would drop them.
     this.whereNull('service_key').orWhereNotIn('service_key', retiredKeys);
-    if (customerId) {
-      this.orWhereExists(function () {
-        whereCustomerHoldsService(
-          this.select(db.raw('1')).from('scheduled_services').whereRaw(HOLDER_VISIT_IS_SERVICE_SQL),
-          customerId,
-        );
-      }).orWhereExists(function () {
-        // Held as an add-on line of a combined recurring visit (a one_time
-        // add-on line is not a plan — the same predicate the write gate
-        // applies, so the picker never offers what the save refuses).
-        whereCustomerHoldsService(
-          this.select(db.raw('1')).from('scheduled_service_addons')
-            .join('scheduled_services', 'scheduled_services.id', 'scheduled_service_addons.scheduled_service_id')
-            .whereRaw(HOLDER_ADDON_IS_SERVICE_SQL)
-            .whereRaw(ADDON_LINE_IS_PLAN_SQL),
-          customerId,
-        );
-      });
-    }
+    if (held.length) this.orWhereIn('service_key', held);
   });
 }
 
@@ -349,7 +332,7 @@ async function getServices({ category, billingType, isActive, isArchived, includ
   // grandfathered plans but must not be offered for a new appointment —
   // except to a customer who already has visits on that service (the
   // grandfathered plan's catch-up / one-off visits).
-  if (sellable === true || sellable === 'true') query = applySellableFilter(query, sellableCustomerId);
+  if (sellable === true || sellable === 'true') query = applySellableFilter(query, await retiredSaleKeysHeldBy(sellableCustomerId));
   if (search) {
     // Token-AND across the searchable text columns. Splitting on
     // whitespace and requiring each token to match somewhere lets the
@@ -464,6 +447,68 @@ function recurrenceWords(recurrence) {
   ].filter(Boolean).join(' ');
 }
 
+// The ONE "customer is still on this retired plan" test (codex r34 on
+// #4786), read by the write gate and the sellable pickers alike: the
+// retired-for-sale keys this customer holds through a live recurring visit,
+// as its primary line or a plan add-on line. Each row is identified the way
+// a request is: catalog id, key snapshot, exact catalog label, or the shared
+// retired-sale matcher over its label plus the cadence it actually runs at
+// (an add-on with no pattern rides the parent's) — so a legacy
+// "Quarterly Trees & Shrubs" or "Tree & Shrub Care" booked quarterly still
+// grandfathers its customer. Rows are per customer, so matching runs in JS.
+async function retiredSaleKeysHeldBy(customerId, retiredRows = null) {
+  if (!customerId || !UUID_RE.test(String(customerId))) return new Set();
+  const { RETIRED_SALE_SERVICE_KEYS, retiredSaleKeyForLabel, labelMayNameRetiredSale } = require('./pricing-engine/retired-sale-catalog');
+  const retired = retiredRows || await db('services')
+    .whereIn('service_key', [...RETIRED_SALE_SERVICE_KEYS])
+    .select('id', 'service_key', 'name', 'short_name');
+  if (!Array.isArray(retired) || !retired.length) return new Set();
+  const cid = String(customerId);
+  const rows = [
+    ...await whereCustomerHoldsService(db('scheduled_services'), cid).select(
+      'scheduled_services.service_id as service_id',
+      'scheduled_services.service_key_snapshot as service_key_snapshot',
+      'scheduled_services.service_type as label',
+      'scheduled_services.recurring_pattern as pattern',
+      'scheduled_services.recurring_interval_days as interval_days',
+    ),
+    // A one_time add-on line is not a plan (codex r17).
+    ...await whereCustomerHoldsService(
+      db('scheduled_service_addons')
+        .join('scheduled_services', 'scheduled_services.id', 'scheduled_service_addons.scheduled_service_id')
+        .whereRaw(ADDON_LINE_IS_PLAN_SQL),
+      cid,
+    ).select(
+      'scheduled_service_addons.service_id as service_id',
+      'scheduled_service_addons.service_key_snapshot as service_key_snapshot',
+      'scheduled_service_addons.service_name as label',
+      'scheduled_service_addons.recurring_pattern as own_pattern',
+      'scheduled_service_addons.recurring_interval_days as own_interval_days',
+      'scheduled_services.recurring_pattern as pattern',
+      'scheduled_services.recurring_interval_days as interval_days',
+    ),
+  ];
+  const lower = (v) => String(v || '').trim().toLowerCase();
+  const retiredKeys = new Set(retired.map((r) => r.service_key));
+  const keyOf = (row) => {
+    const label = lower(row.label);
+    const hit = retired.find((r) => (row.service_id && String(row.service_id) === String(r.id))
+      || (row.service_key_snapshot && row.service_key_snapshot === r.service_key)
+      || (label && [lower(r.name), lower(r.short_name)].filter(Boolean).includes(label)));
+    if (hit) return hit.service_key;
+    if (!label) return null;
+    const cadence = recurrenceWords(row.own_pattern
+      ? { pattern: row.own_pattern, intervalDays: row.own_interval_days }
+      : { pattern: row.pattern, intervalDays: row.interval_days });
+    for (const text of [label, ...(cadence ? [`${label} ${cadence}`] : [])]) {
+      const key = labelMayNameRetiredSale(text) ? retiredSaleKeyForLabel(text) : null;
+      if (key && retiredKeys.has(key)) return key;
+    }
+    return null;
+  };
+  return new Set((Array.isArray(rows) ? rows : []).map(keyOf).filter(Boolean));
+}
+
 /**
  * Write-boundary twin of getServices' sellable exception, shared by every
  * booking write (create, edit): of the given service ids, the
@@ -506,35 +551,8 @@ async function retiredServicesNotHeldBy({ customerId, serviceIds, serviceTypes, 
     || [...names].some((n) => n.replace(/\s+/g, '_') === r.service_key)
     || labelKeys.has(r.service_key));
   if (!retired.length) return [];
-  const retiredIds = retired.map((r) => r.id);
-  const retiredKeys = retired.map((r) => r.service_key);
-  const retiredLabels = retired.flatMap((r) => [lower(r.name), lower(r.short_name)]).filter(Boolean);
-  // A live row identified by catalog id, key snapshot or label (codex r24).
-  const holderIdentity = (table, labelCol) => (row) => row
-    .whereIn(`${table}.service_id`, retiredIds)
-    .orWhereIn(`${table}.service_key_snapshot`, retiredKeys)
-    .orWhereRaw(`lower(${table}.${labelCol}) = ANY(?)`, [retiredLabels]);
-  const held = customerId && UUID_RE.test(String(customerId))
-    ? [
-      ...await whereCustomerHoldsService(
-        db('scheduled_services').where(holderIdentity('scheduled_services', 'service_type')),
-        String(customerId),
-      ).select('scheduled_services.service_id as service_id', 'scheduled_services.service_key_snapshot as service_key_snapshot', 'scheduled_services.service_type as label'),
-      // Held as an add-on line of a combined recurring visit (a one_time
-      // add-on line is not a plan — codex r17 on #4786).
-      ...await whereCustomerHoldsService(
-        db('scheduled_service_addons')
-          .join('scheduled_services', 'scheduled_services.id', 'scheduled_service_addons.scheduled_service_id')
-          .where(holderIdentity('scheduled_service_addons', 'service_name'))
-          .whereRaw(ADDON_LINE_IS_PLAN_SQL),
-        String(customerId),
-      ).select('scheduled_service_addons.service_id as service_id', 'scheduled_service_addons.service_key_snapshot as service_key_snapshot', 'scheduled_service_addons.service_name as label'),
-    ]
-    : [];
-  const holds = (r) => held.some((row) => (row.service_id && String(row.service_id) === String(r.id))
-    || (row.service_key_snapshot && row.service_key_snapshot === r.service_key)
-    || [lower(r.name), lower(r.short_name)].filter(Boolean).includes(lower(row.label)));
-  return retired.filter((r) => !holds(r));
+  const held = await retiredSaleKeysHeldBy(customerId, retired);
+  return retired.filter((r) => !held.has(r.service_key));
 }
 
 /**
@@ -823,7 +841,7 @@ async function getDropdown({ sellable = false, sellableCustomerId = null } = {})
   // A plan selector (annual prepay) offers only what its save accepts: the
   // same sellable, customer-scoped filter the booking pickers read.
   const filtered = sellable === true || sellable === 'true';
-  if (filtered) query = applySellableFilter(query, sellableCustomerId);
+  if (filtered) query = applySellableFilter(query, await retiredSaleKeysHeldBy(sellableCustomerId));
   const rows = await query
     .orderBy('sort_order', 'asc')
     .orderBy('name', 'asc');
@@ -985,6 +1003,7 @@ module.exports = {
   ADDON_LINE_IS_PLAN_SQL,
   HOLDER_VISIT_IS_SERVICE_SQL,
   HOLDER_ADDON_IS_SERVICE_SQL,
+  retiredSaleKeysHeldBy,
   terminalHistoryStatuses,
   getServiceById,
   getServiceByKey,

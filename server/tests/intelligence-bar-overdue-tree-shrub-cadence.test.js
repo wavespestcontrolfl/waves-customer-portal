@@ -129,13 +129,14 @@ test('every supported recurrence resolves through the seeder\'s own table (codex
     { ...row('semiannual-due', 'Tree & Shrub', 181), active_plan: { service_key: 'tree_shrub_program', recurring_pattern: 'semiannual', recurring_interval_days: null } },
     { ...row('triannual-not-due', 'Tree & Shrub', 100), active_plan: { service_key: 'tree_shrub_6week', recurring_pattern: 'triannual', recurring_interval_days: null } },
     { ...row('biweekly-due', 'Tree & Shrub', 15), active_plan: { service_key: 'tree_shrub_program', recurring_pattern: 'biweekly', recurring_interval_days: null } },
-    // The Feb–Oct season runs monthly in season, not at the catalog's 42 (codex r33).
+    // The Feb–Oct season runs monthly in season on its nth-weekday anchor
+    // (Aug 11, a 2nd Tuesday, is next due Sep 8), not at the catalog's 42 (codex r33/r34).
     { ...row('seasonal-in-season', 'Tree & Shrub', 45), active_plan: { service_key: 'tree_shrub_6week', recurring_pattern: 'seasonal_feb_oct', recurring_interval_days: null } },
     // monthly_nth_weekday is due at 30, not the program row's 60 (codex r32).
     { ...row('nth-weekday-due', 'Tree & Shrub', 40), active_plan: { service_key: 'tree_shrub_program', recurring_pattern: 'monthly_nth_weekday', recurring_interval_days: null } },
   ];
   const result = await executeTool('find_overdue_customers', { service_category: 'tree_shrub' });
-  expect(result.overdue_customers.map((c) => [c.id, c.expected_frequency_days]).sort()).toEqual([['biweekly-due', 14], ['nth-weekday-due', 30], ['seasonal-in-season', 30], ['semiannual-due', 180]]);
+  expect(result.overdue_customers.map((c) => [c.id, c.expected_frequency_days]).sort()).toEqual([['biweekly-due', 14], ['nth-weekday-due', 30], ['seasonal-in-season', 28], ['semiannual-due', 180]]);
   const { intervalDaysForPattern } = require('../services/recurring-appointment-seeder');
   expect([['custom', 45], [null, 42], ['quarterly', 42], ['bimonthly', null], ['every_6_weeks', null], ['weekly', null], ['annual', null], ['seasonal_feb_oct', null], ['one_time', 90]]
     .map(([pattern, interval]) => intervalDaysForPattern(pattern, interval))).toEqual([45, null, 90, 60, 42, 7, 360, null, null]);
@@ -146,17 +147,26 @@ test('every supported recurrence resolves through the seeder\'s own table (codex
     .map(([pattern, interval]) => intervalDaysForPattern(pattern, interval))).toEqual([30, 91, 91]);
 });
 
-test('a Feb–Oct seasonal plan is not overdue across the winter gap (codex r33)', async () => {
-  jest.setSystemTime(new Date('2026-12-15T17:00:00Z'));
-  const seasonal = { service_key: 'tree_shrub_program', recurring_pattern: 'seasonal_feb_oct', recurring_interval_days: null };
-  db.__state.rows = [
-    // Last visit Oct 20: due Nov 19 falls in the gap, so the next one is Feb 1.
-    { id: 'october-visit', first_name: 'october-visit', last_name: '', active: true, last_service_date: '2026-10-20', last_service_type: 'Tree & Shrub', next_scheduled: null, active_plan: seasonal },
-    // Last visit Sep 20: due Oct 20, in season, so it is overdue now.
-    { id: 'missed-october', first_name: 'missed-october', last_name: '', active: true, last_service_date: '2026-09-20', last_service_type: 'Tree & Shrub', next_scheduled: null, active_plan: seasonal },
-  ];
-  const result = await executeTool('find_overdue_customers', { service_category: 'tree_shrub' });
-  expect(result.overdue_customers.map((c) => [c.id, c.expected_frequency_days])).toEqual([['missed-october', 30]]);
+test('a Feb–Oct seasonal plan is due on the scheduler\'s next seasonal slot (codex r33/r34)', async () => {
+  const seasonal = (extra = {}) => ({ service_key: 'tree_shrub_program', recurring_pattern: 'seasonal_feb_oct', recurring_interval_days: null, recurring_nth: null, recurring_weekday: null, ...extra });
+  const visit = (id, date, plan) => ({ id, first_name: id, last_name: '', active: true, last_service_date: date, last_service_type: 'Tree & Shrub', next_scheduled: null, active_plan: plan });
+  const overdue = async (now, rows) => {
+    jest.setSystemTime(new Date(now));
+    db.__state.rows = rows;
+    const result = await executeTool('find_overdue_customers', { service_category: 'tree_shrub' });
+    return result.overdue_customers.map((c) => [c.id, c.expected_frequency_days]);
+  };
+  // Dec 15: an Oct 20 (3rd Tuesday) visit waits for its February slot; a
+  // Sep 20 visit missed its Oct 18 slot; a series stored on the 3rd Tuesday
+  // keeps that anchor (Sep 1 -> Oct 20) rather than the visit's own weekday.
+  expect(await overdue('2026-12-15T17:00:00Z', [
+    visit('october-visit', '2026-10-20', seasonal()),
+    visit('missed-october', '2026-09-20', seasonal()),
+    visit('anchored', '2026-09-01', seasonal({ recurring_nth: 3, recurring_weekday: 2 })),
+  ])).toEqual([['missed-october', 28], ['anchored', 49]]);
+  // Feb 10: the Oct 20 visit's next slot is the 3rd Tuesday, Feb 16 — not Feb 1.
+  expect(await overdue('2027-02-10T17:00:00Z', [visit('october-visit', '2026-10-20', seasonal())])).toEqual([]);
+  expect(await overdue('2027-02-17T17:00:00Z', [visit('october-visit', '2026-10-20', seasonal())])).toEqual([['october-visit', 119]]);
 });
 
 test('other categories keep their fixed interval', async () => {

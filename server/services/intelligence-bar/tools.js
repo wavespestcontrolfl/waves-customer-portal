@@ -579,19 +579,17 @@ async function findOverdueCustomers(input) {
     return intervalDaysForPattern(plan.recurring_pattern, plan.recurring_interval_days)
       || TREE_SHRUB_KEY_INTERVAL[plan.service_key] || null;
   };
-  // A Feb–Oct seasonal plan runs monthly in season and skips Nov–Jan
-  // (seeder seasonalFebOctDate — codex r33 on #4786): due a month after the
-  // last visit, and a due date that lands in the winter gap moves to the
-  // following February 1, so an October visit is not overdue until spring.
-  const seasonalFebOctGapDays = (lastServiceDate) => {
+  // A Feb–Oct seasonal plan runs monthly in season and skips Nov–Jan: it
+  // is due on the scheduler's next seasonal occurrence after the last visit,
+  // on the series' own nth-weekday anchors (codex r33/r34 on #4786), so an
+  // October visit is not overdue until its February slot.
+  const { nextSeasonalFebOctDue } = require('../recurring-appointment-seeder');
+  const seasonalFebOctGapDays = (lastServiceDate, plan) => {
     if (!lastServiceDate) return 30;
-    const last = Date.parse(`${dateOnlyString(lastServiceDate)}T00:00:00Z`);
-    if (Number.isNaN(last)) return 30;
-    const due = new Date(last + 30 * 86400000);
-    const month = due.getUTCMonth() + 1;
-    if (month >= 2 && month <= 10) return 30;
-    const febYear = due.getUTCFullYear() + (month > 10 ? 1 : 0);
-    return Math.round((Date.UTC(febYear, 1, 1) - last) / 86400000);
+    const last = dateOnlyString(lastServiceDate);
+    const due = nextSeasonalFebOctDue(last, { nth: plan?.recurring_nth, weekday: plan?.recurring_weekday });
+    const gap = due ? Math.round((Date.parse(`${due}T00:00:00Z`) - Date.parse(`${last}T00:00:00Z`)) / 86400000) : NaN;
+    return Number.isFinite(gap) && gap > 0 ? gap : 30;
   };
   const treeShrubIntervalDays = (serviceType, plan) => {
     const fromPlan = planIntervalDays(plan);
@@ -645,7 +643,8 @@ async function findOverdueCustomers(input) {
         // value (the line's cadence outranks the catalog default — codex r28).
         db.raw(`(SELECT row_to_json(plan) FROM (
           SELECT services.service_key, scheduled_services.scheduled_date,
-              scheduled_services.recurring_pattern, scheduled_services.recurring_interval_days
+              scheduled_services.recurring_pattern, scheduled_services.recurring_interval_days,
+              scheduled_services.recurring_nth, scheduled_services.recurring_weekday
             FROM scheduled_services
             JOIN services ON ${require('../service-library').HOLDER_VISIT_IS_SERVICE_SQL}
             WHERE scheduled_services.customer_id = customers.id AND services.service_key IN (${tsKeySql})
@@ -660,7 +659,8 @@ async function findOverdueCustomers(input) {
               CASE WHEN scheduled_service_addons.recurring_pattern IS NULL
                 THEN scheduled_services.recurring_pattern ELSE scheduled_service_addons.recurring_pattern END AS recurring_pattern,
               CASE WHEN scheduled_service_addons.recurring_pattern IS NULL
-                THEN scheduled_services.recurring_interval_days ELSE scheduled_service_addons.recurring_interval_days END AS recurring_interval_days
+                THEN scheduled_services.recurring_interval_days ELSE scheduled_service_addons.recurring_interval_days END AS recurring_interval_days,
+              scheduled_services.recurring_nth, scheduled_services.recurring_weekday
             FROM scheduled_service_addons
             JOIN scheduled_services ON scheduled_services.id = scheduled_service_addons.scheduled_service_id
             JOIN services ON ${require('../service-library').HOLDER_ADDON_IS_SERVICE_SQL}
@@ -712,7 +712,7 @@ async function findOverdueCustomers(input) {
       const activePlan = typeof c.active_plan === 'string' ? JSON.parse(c.active_plan) : c.active_plan;
       const freq = cat === 'tree_shrub'
         ? (activePlan?.recurring_pattern === 'seasonal_feb_oct'
-          ? seasonalFebOctGapDays(c.last_service_date)
+          ? seasonalFebOctGapDays(c.last_service_date, activePlan)
           : treeShrubIntervalDays(c.active_plan_service_type || c.last_service_type, activePlan))
         : baseFreq;
       if (daysSince != null && daysSince < freq + overdue_days) continue;

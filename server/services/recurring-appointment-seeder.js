@@ -291,6 +291,16 @@ function recurrenceOrdinalOptions(baseDateStr, opts = {}) {
   };
 }
 
+// The next Feb–Oct seasonal occurrence after a visit, on the series' own
+// ordinal-weekday anchors (stored nth/weekday, else the visit's) — the date
+// the scheduler would place, for readers that ask "when is this plan due"
+// (the Intelligence Bar overdue scan — codex r34 on #4786).
+function nextSeasonalFebOctDue(lastDateStr, { nth = null, weekday = null } = {}) {
+  const last = dateOnly(lastDateStr);
+  if (!last) return null;
+  return seasonalFebOctDate(last, 1, recurrenceOrdinalOptions(last, { nth, weekday }));
+}
+
 function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
   const safe = dateOnly(baseDateStr) || etDateString();
   const base = parseETDateTime(`${safe}T12:00`);
@@ -1498,6 +1508,7 @@ module.exports = {
   FALLBACK_RECURRENCE_GAP_DAYS,
   SEASONAL_FEB_OCT,
   seasonalFebOctDate,
+  nextSeasonalFebOctDue,
   clampDateToSeason,
   firstInSeasonDate,
   markParentRecurring,
