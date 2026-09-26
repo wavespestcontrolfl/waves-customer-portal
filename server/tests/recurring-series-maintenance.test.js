@@ -1507,7 +1507,10 @@ describe('runRecurringAlertAction — locked + idempotent alert actions (P0)', (
     expect(src).toContain("['recurring-series-maintenance', String(parentId)],");
     // 3rd consumer: topUpRecurringSeries' own runLocked (the nightly top-up
     // wrapper) takes the exact same per-parent lock before its horizon loop.
-    expect((src.match(/await acquireRecurringSeriesMaintenanceLock\(trx, parentId\);/g) || []).length).toBe(3);
+    // 4th: reseedRecurringSeriesAfterCancelLocked (post-cancel counted-plan
+    // reseed, owner ruling 2026-09-24) takes it before its comms lock +
+    // customers FOR UPDATE — same order, same key.
+    expect((src.match(/await acquireRecurringSeriesMaintenanceLock\(trx, parentId\);/g) || []).length).toBe(4);
   });
 });
 

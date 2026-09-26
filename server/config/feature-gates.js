@@ -2837,6 +2837,13 @@ const gates = {
   // exactly `true`**; canonical CALL-TIME reader commercialSuiteSizingLive().
   // Off = byte-identical to before (the building size flows through).
   commercialSuiteSizing: process.env.GATE_COMMERCIAL_SUITE_SIZING === 'true',
+  // Post-cancel recurring-series reseed (owner ruling 2026-09-24): a
+  // single-visit cancel inside a counted plan adds one visit back at the
+  // END of the series (services/recurring-series-cancel-reseed.js →
+  // routes/admin-schedule.js#reseedRecurringSeriesAfterCancel). Ships DARK:
+  // off unless exactly 'true'. Read live per call by
+  // cancelReseedsRecurringLive(); this entry is for logGateStatus only.
+  cancelReseedsRecurring: process.env.GATE_CANCEL_RESEEDS_RECURRING === 'true',
   // Public estimate-page consultation offer ("Want us to come look first?",
   // consultation-first lane, owner ruling 2026-09-23): the same
   // /inspection/:token self-booking link the recurring-lead email offers,
@@ -2898,6 +2905,12 @@ function customerIntelAiLive() {
 // on what "on" means.
 function recurringSeriesTopUpLive() {
   return process.env.GATE_RECURRING_SERIES_TOPUP === 'true';
+}
+
+// Same live-read contract as recurringSeriesTopUpLive: a flip is a live
+// kill/enable with no redeploy. Kill = unset GATE_CANCEL_RESEEDS_RECURRING.
+function cancelReseedsRecurringLive() {
+  return process.env.GATE_CANCEL_RESEEDS_RECURRING === 'true';
 }
 
 // GATE_COMMERCIAL_SUITE_SIZING read at CALL time — strict `=== 'true'`,
@@ -2981,5 +2994,5 @@ function logGateStatus() {
   }
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, customerIntelAiLive, selfBookDayCapEnabled, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, estimateConsultationOfferLive, commercialSuiteSizingLive };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, customerIntelAiLive, selfBookDayCapEnabled, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, commercialSuiteSizingLive };
 // gates 1775330914
