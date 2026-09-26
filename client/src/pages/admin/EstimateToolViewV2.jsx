@@ -2031,8 +2031,10 @@ export default function EstimateToolViewV2({
         // confirmation reset (it fires on identity change vs this ref).
         rgIdentityRef.current = `${seeded.address || ""}|${seeded.customerId || ""}|${seeded.customerName || ""}|${seeded.customerEmail || ""}`;
         previousAddressRef.current = seeded.address;
-        // Against the SAVED form: a scrubbed reopen reads as unsaved edits.
-        savedFormRef.current = JSON.stringify(restored);
+        // Against the SAVED form when the scrub refused the stored price (it
+        // reads as unsaved edits); otherwise the seeded form, so a bare
+        // _unitLookup seed never leaves a clean reopen dirty (pre-push P1).
+        savedFormRef.current = JSON.stringify(stale ? restored : seeded);
         setForm(seeded);
         setEnrichedProfile(scopeUnitParcelProfile(d.engineProfile) || null);
         setLookupMeta(null);
@@ -4308,7 +4310,7 @@ export default function EstimateToolViewV2({
       const { restored, seeded, stale, notice } = reopenEditSource(source);
       previousAddressRef.current = seeded.address;
       rgIdentityRef.current = `${seeded.address || ""}|${seeded.customerId || ""}|${seeded.customerName || ""}|${seeded.customerEmail || ""}`;
-      savedFormRef.current = JSON.stringify(restored);
+      savedFormRef.current = JSON.stringify(stale ? restored : seeded);
       setForm(seeded);
       setEnrichedProfile(scopeUnitParcelProfile(source.engineProfile) || null);
       setExistingCustomerMatch(source.customer || null);
