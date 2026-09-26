@@ -25,9 +25,12 @@ const {
 const { DEFAULT_TEMPLATES } = require('../models/migrations/20260729000001_seed_termite_program_agreements');
 const { TEMPLATE_V2 } = require('../models/migrations/20260730000001_termite_program_agreements_v2');
 const { TEMPLATE_V3_ANNUAL } = require('../models/migrations/20260924030002_termite_annual_protection_agreement_v3');
-const { TEMPLATE_V3_ANNUAL_R2_BODY, ORIGINAL_SIGNATURE_BLOCK } = require('../models/migrations/20260924030003_termite_annual_v3_signature_block');
-// The body as it stands after every migration in this branch (030002 seed + 030003 revision).
-const V3_BODY = TEMPLATE_V3_ANNUAL_R2_BODY;
+const { ORIGINAL_SIGNATURE_BLOCK } = require('../models/migrations/20260924030003_termite_annual_v3_signature_block');
+const { TEMPLATE_V3_ANNUAL_R3_BODY, COUNTERSIGNATURE_BLOCK } = require('../models/migrations/20260925030002_termite_annual_v3_countersignature_and_billing_clause');
+// The body as it stands after every migration in this branch (030002 seed +
+// 030003 signature-block revision + 20260925030002 countersignature/billing
+// clause revision).
+const V3_BODY = TEMPLATE_V3_ANNUAL_R3_BODY;
 const {
   buildCustomerDocumentContext,
   renderDocumentTemplate,
@@ -691,6 +694,31 @@ describe('Annual Protection plan selection (buildTermiteProgramAgreementValues)'
     expect(await annualPlanDurableEvidence({ id: 'e1' }, fakeConn(null, true, { annual_plan_activation_status: null }))).toBe(false);
   });
 
+  // Slice 3b: a closed, never-signed offer is NOT durable evidence — it must
+  // never license issuing/reissuing a v3 annual agreement or prepaid
+  // auto-renewal wording for this estimate again. Covered both from the
+  // in-memory estimate row (the common maybeCreateTermiteProgramAgreement
+  // path) and via the column-guarded re-read (the reconcileSupersededProgramAgreements
+  // path), and confirmed a live term still overrides it (a signature that
+  // won a concurrent race must still count as durable).
+  test('durable evidence: signature_expired is NOT durable — only awaiting_signature/activated are (slice 3b)', async () => {
+    const fakeConn = (termRow, hasColumn = false, stampRow = null) => {
+      const conn = (table) => ({
+        where: () => ({
+          whereNotIn: (_col, statuses) => ({ first: async () => (termRow && !statuses.includes(termRow.status) ? termRow : undefined) }),
+          first: async () => stampRow,
+        }),
+      });
+      conn.schema = { hasColumn: async () => hasColumn };
+      return conn;
+    };
+    expect(await annualPlanDurableEvidence({ id: 'e1', annual_plan_activation_status: 'signature_expired' }, fakeConn(null))).toBe(false);
+    expect(await annualPlanDurableEvidence({ id: 'e1' }, fakeConn(null, true, { annual_plan_activation_status: 'signature_expired' }))).toBe(false);
+    // A live term for the same estimate still counts — a signature that won
+    // a concurrent race against the expiry sweep is never overridden.
+    expect(await annualPlanDurableEvidence({ id: 'e1', annual_plan_activation_status: 'signature_expired' }, fakeConn({ id: 't', status: 'active' }))).toBe(true);
+  });
+
   test('PROGRAM_TEMPLATE_KEYS includes the annual key for customer-scoped lookups (existing-agreement checks span all three)', () => {
     expect(PROGRAM_TEMPLATE_KEYS).toEqual(expect.arrayContaining([PURCHASE_TEMPLATE_KEY, RENTAL_TEMPLATE_KEY, ANNUAL_TEMPLATE_KEY]));
     expect(PROGRAM_TEMPLATE_KEYS).toHaveLength(3);
@@ -738,6 +766,28 @@ describe('Annual v3 template body (seeded DRAFT — owner review pending, plan �
     expect(V3_BODY).toContain('AUTOMATIC RENEWAL (Section 501.165, Florida Statutes)');
     expect(V3_BODY).toContain('authorizes Waves to charge the renewal fee');
     expect(V3_BODY).toContain('not paid within 30 days coverage lapses');
+  });
+
+  test('states the certified-operator countersignature as a record step that never delays coverage/billing/scheduling (A-14, owner ruling 2026-09-25)', () => {
+    expect(V3_BODY).toContain('certified operator in charge countersigns this agreement as a');
+    expect(V3_BODY).toContain('record after the customer signs');
+    expect(V3_BODY).toContain('does not delay');
+    expect(V3_BODY).toContain('coverage, billing, or scheduling.');
+    // Its own block, set off by one blank line, at the end of the body — the
+    // signed PDF then stamps "Certified Operator: <name>, <date>" beneath the
+    // customer's signature once countersigned (contract-pdf.js).
+    expect(V3_BODY.endsWith(`intend to sign it electronically.\n\n${COUNTERSIGNATURE_BLOCK}`)).toBe(true);
+    expect(COUNTERSIGNATURE_BLOCK.startsWith('CERTIFIED OPERATOR COUNTERSIGNATURE\n')).toBe(true);
+    // Still no blank operator ink line — the countersignature is recorded
+    // after the fact, never solicited on the document itself.
+    expect(V3_BODY).not.toContain('License: ________');
+  });
+
+  test('states the first-year fee is charged to the card on file at signing, or a payment link if none is on file (A-14 follow-up)', () => {
+    expect(V3_BODY).toContain('Waves charges them to the payment');
+    expect(V3_BODY).toContain('method on file at signing');
+    expect(V3_BODY).toContain('sends a payment link');
+    expect(V3_BODY).toContain('to complete before installation');
   });
 
   test('carries no leftover editor scaffolding — no unresolved {…} notes, no Option 1 / invoice-and-wait text', () => {

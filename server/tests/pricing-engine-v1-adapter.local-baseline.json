@@ -102,11 +102,6 @@
       ],
       "ts": [
         {
-          "mo": 40.33,
-          "recommended": false,
-          "name": "Light"
-        },
-        {
           "mo": 54,
           "recommended": true,
           "name": "Standard"
@@ -524,11 +519,6 @@
         }
       ],
       "ts": [
-        {
-          "mo": 36.42,
-          "recommended": false,
-          "name": "Light"
-        },
         {
           "mo": 48.42,
           "recommended": true,

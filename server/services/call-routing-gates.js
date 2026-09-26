@@ -97,8 +97,256 @@ function checkTcpaConsent(extraction, opts = {}) {
 // dictating the booking on the recording), so a commercial call that used to
 // land in review can auto-route; a force-reprocess must write a fresh
 // decision row rather than onConflict-ignore into the stale needs_review one.
-const V2_DECISION_VERSION = 'v2-1.8.0';
-const V2_DECISION_VERSIONS = ['v2-1.0.0', 'v2-1.1.0', 'v2-1.2.0', 'v2-1.3.0', 'v2-1.4.0', 'v2-1.5.0', 'v2-1.6.0', 'v2-1.7.0', 'v2-1.8.0'];
+// v2-1.9.0: the grounded-agent-commitment sentence scan
+// (hasAgentCommittedEvidence / agentCommitmentSentenceVerified in
+// call-triage-flags.js) closed three false-positive gaps a local+Codex
+// audit found — a sentence's SECOND (and later) conditional clause is now
+// inspected instead of only the first, a declarative unavailability
+// statement ("The technician is unavailable.") now poisons like an unmet-
+// authorization one already did, and the "N o'clock" time matcher now
+// honors an explicit trailing am/pm instead of always inferring one from
+// business hours. A call whose old pass demoted caller_not_authorized or
+// commercial_requires_quote on one of these shapes now stays blocked
+// instead — strictly MORE conservative, never less — so a force-reprocess
+// must write a fresh decision row rather than onConflict-ignore into the
+// stale auto-routed one.
+// v2-1.10.0: the other-sentence poisoning screen inside
+// agentCommitmentSentenceVerified (call-triage-flags.js) converted from a
+// blacklist to a WHITELIST (otherSentenceIsClean) — every sentence other
+// than the pinned commitment must now be built entirely from the closed
+// COMMITMENT_TURN_VOCAB (with a narrow conditional-clause carve-out), which
+// closed three more false-positive gaps a local+Codex audit found: a
+// comma-less clause whose consequent verb swallowed the real condition
+// ("If we have space I'll email you."), a declarative cancellation
+// ("Actually, we have to cancel."), and an implicit condition with no
+// trigger word at all ("Weather permitting.", "Contingent on the
+// weather."). A call whose old pass demoted caller_not_authorized or
+// commercial_requires_quote on one of these shapes now stays blocked
+// instead — again strictly MORE conservative, never less — so a
+// force-reprocess must write a fresh decision row rather than
+// onConflict-ignore into the stale auto-routed one.
+// v2-1.11.0: round 3's whitelist inversion assumed a declarative naming an
+// unmet authorization requirement would always fail the base vocabulary
+// check on its own — but "I need him to confirm the appointment." is built
+// entirely from ordinary COMMITMENT_TURN_VOCAB words (i/need/him/to/
+// confirm/the/appointment), so the vocabulary early return short-circuited
+// past every authorization check before it ever ran. The declarative
+// poison screen (sentenceHasDeclarativePoisonVocabulary, now including the
+// anchored AUTHORIZATION_NEED_RE "need <party> to <authorize>" shape) now
+// runs FIRST in otherSentenceIsClean, ahead of the vocabulary early return,
+// and also guards the pinned commitment sentence itself. A call whose old
+// pass demoted caller_not_authorized or commercial_requires_quote on this
+// shape now stays blocked instead — again strictly MORE conservative, never
+// less — so a force-reprocess must write a fresh decision row rather than
+// onConflict-ignore into the stale auto-routed one.
+// v2-1.12.0: otherSentenceIsClean (call-triage-flags.js) converged from
+// vocabulary-membership screening onto a single rule — OTHER sentences may
+// not talk about scheduling AT ALL. Rounds 3-4 grew COMMITMENT_TURN_VOCAB
+// to keep specific benign asides passing, and that growth itself opened
+// new holes ("should"/"confirmation" happening to be vocabulary let "We
+// should confirm the appointment." pass whole). A new SCHEDULING_PREDICATE_TERMS
+// screen (confirm/appointment/book/schedule/visit/see-you/weekday/month/
+// time-of-day/technician/available/quote/…, checked after benign topic
+// phrases are stripped) now poisons any other sentence that talks about
+// scheduling, independent of vocabulary membership or conditional
+// structure. A call whose old pass demoted caller_not_authorized or
+// commercial_requires_quote on one of these three shapes ("We should
+// confirm the appointment.", "We need your confirmation of the
+// appointment.", "If you need it, we will book the appointment.") now
+// stays blocked instead — again strictly MORE conservative, never less —
+// so a force-reprocess must write a fresh decision row rather than
+// onConflict-ignore into the stale auto-routed one.
+// v2-1.13.0: otherSentenceIsClean (call-triage-flags.js) picked up three
+// codex round-6 fixes that change canAutoRoute's decision surface both
+// ways. STRICTER: AUTHORIZATION_NEED_RE gained a second anchored
+// alternative for the direct-object authorization shape ("need your okay"/
+// "waiting on his approval" — no third-party "to <verb>" infinitive), so a
+// call that used to demote caller_not_authorized/commercial_requires_quote
+// on that shape now stays blocked. MORE PERMISSIVE (both narrow, anchored
+// shapes, never open vocabulary growth): (1) REINFORCING_AFFIRMATION_RE
+// recognizes a purely reinforcing other-sentence ("You're confirmed.") as
+// clean before the scheduling-predicate screen, since it states no new
+// scheduling fact; (2) the bare ' may ' entry in SCHEDULING_PREDICATE_TERMS
+// (colliding with the modal verb) is replaced by MAY_DATE_RE, which
+// recognizes "May" only in genuine date-shaped usage, so a benign aside
+// using "may" as a modal ("it may go to him") no longer poisons the turn.
+// A force-reprocess must write a fresh decision row rather than
+// onConflict-ignore into the stale one either way.
+// v2-1.14.0: otherSentenceIsClean (call-triage-flags.js) picked up two
+// codex round-7 fixes. STRICTER: "should" is no longer a free token in
+// BENIGN_CONDITIONAL_GLUE_WORDS (it now grounds a sentence only through
+// the anchored NOTIFICATION_ROUTING_RE shape), and a new APPROVAL_REQUEST_RE
+// ("get/have/wait for <possessive> okay/approval/sign off/…") joins the
+// declarative-poison screen, so a call that used to demote
+// caller_not_authorized/commercial_requires_quote on "We should get your
+// okay." or "have to get his sign off." now stays blocked. MORE
+// PERMISSIVE (a narrow, anchored extension, never open vocabulary):
+// REINFORCING_AFFIRMATION_RE gained a second alternative for a direct
+// past-tense reinforcement in the agent's own voice ("We confirmed your
+// appointment.") — states no new scheduling fact, same as "You're
+// confirmed." already covered, so it no longer poisons on "confirmed"/
+// "appointment". A force-reprocess must write a fresh decision row rather
+// than onConflict-ignore into the stale one either way.
+// v2-1.15.0: AUTHORIZATION_NEED_RE's infinitive branch (call-triage-flags.js)
+// covered only THIRD-PARTY authorization parties (him/her/them/someone/the
+// owner/…); the caller themself needing to grant authorization is the same
+// shape with a different pronoun. "I need YOU to okay it." named no party
+// from the original list and no verb match either (a trailing object like
+// "it" wasn't accounted for). Widened the party group to include
+// you/us/me/you guys/y'all and added an optional trailing object after the
+// verb group, same anchored shape. A call whose old pass demoted
+// caller_not_authorized/commercial_requires_quote on this shape now stays
+// blocked, so a force-reprocess must write a fresh decision row rather than
+// onConflict-ignore into the stale one.
+// v2-1.16.0: two codex round-9 P1s (call-triage-flags.js). (1) Neither
+// AUTHORIZATION_NEED_RE nor APPROVAL_REQUEST_RE covered a DIRECTIVE to a
+// third party to grant approval — "I will tell him to okay it." named no
+// "need"/"waiting"/"get...your" trigger, and "tell" only reached the
+// sentence because BENIGN_CONDITIONAL_GLUE_WORDS is consulted for every
+// OTHER sentence, not just a conditional one. Added
+// THIRD_PARTY_APPROVAL_DIRECTIVE_RE, the same anchored "(tell/ask/have/get)
+// <party> (to)? <authorization verb> (<object>)?" shape. (2) Ordinal date
+// tokens ("3rd") were admitted by the final vocabulary whitelist but never
+// recognized as scheduling CONTENT by sentenceHasSchedulingPredicate, so
+// "We're set for the 3rd." (a bare date, no weekday/month/"confirm" term)
+// cleared every OTHER-sentence screen; the bare-digit fallback now also
+// matches an ordinal suffix. MAY_DATE_RE also widened to accept "May the
+// 3rd" (an optional "the" between month and day), the other common spoken
+// order. Both are MORE RESTRICTIVE — they poison shapes the previous
+// version let ground — so a call whose old pass demoted
+// caller_not_authorized on either shape now stays blocked, and a
+// force-reprocess must write a fresh decision row rather than
+// onConflict-ignore into the stale one.
+// v2-1.17.0 (codex round 9, 86991f9bdc): subject-led approval needs ("You
+// need to okay it."), "yeah but no" reversals, and a conditional consequent
+// that commits the agent ("…we'll have you down") now poison — MORE
+// RESTRICTIVE.
+// v2-1.18.0 (codex round 10): non-possessive approval requirements ("We
+// need the okay.") now poison — MORE RESTRICTIVE; "No problem." no longer
+// trips the bare-"no" screen — restores grounding the previous version lost.
+// v2-1.19.0 (codex round 11): first-person approval requirements ("I need
+// to okay it."), "We are (all) booked." capacity statements, and a cardinal
+// date in date position ("Sunday the 10") that disagrees with the slot day
+// now poison / fail binding — all MORE RESTRICTIVE, so a force-reprocess
+// must write a fresh decision row rather than onConflict-ignore.
+// v2-1.20.0 (codex round 12): modal subject-led approval requirements
+// ("You'll need to okay it.") now poison — MORE RESTRICTIVE.
+// v2-1.21.0 (codex round 13): a conditional whose consequent commits the
+// agent ("If the email goes to you, we'll put you down."), "yes"/"green
+// light" as approval nouns ("We need your yes."), and a standalone period
+// on a bare hour ("Sunday PM at 10" binds 22:00, not the inferred 10:00)
+// — the first two MORE RESTRICTIVE, the third re-binds the stated slot, so a
+// force-reprocess must write a fresh decision row rather than onConflict-ignore.
+// v2-1.22.0 (codex round 14): a conditional consequent is guilty unless it is
+// a known-benign anchored shape ("If the email goes to you, then we are all
+// set."), a delegated decision ("It's up to him."), and agent/caller-side
+// modal uncertainty ("We may get you in.") now poison — all MORE
+// RESTRICTIVE, so a force-reprocess must write a fresh decision row rather
+// than onConflict-ignore.
+// v2-1.23.0 (codex round 15): a month named by context ("We are set for
+// May."), a 3-4 digit number ("set for 2027", "set for 1030"), a dangling
+// conditional antecedent ("If the email goes to you." then "We're all
+// set."), and a modal coordinated onto a benign routing modal ("It may go
+// to him and may put you down.") now poison — all MORE RESTRICTIVE, so a
+// force-reprocess must write a fresh decision row rather than onConflict-ignore.
+// v2-1.24.0 (codex round 16): demonstrative approval requirements ("We need
+// that okay.") and spoken day periods ("set for the morning") in OTHER
+// sentences now poison — MORE RESTRICTIVE.
+// v2-1.25.0 (codex round 17): a pending approval as a sentence subject ("The
+// okay will come in the email.") poisons, and a lone period initial after
+// the hour ("10 o'clock p.") fails binding — MORE RESTRICTIVE.
+// v2-1.26.0 (codex round 18): "confirming"/"inspection" in OTHER sentences,
+// a booking consequent appended after a benign "let us know if…" closer, an
+// article-less pending approval ("Okay will come in the email."), and a
+// topic-less pronoun routing sentence ("It should go to him.") now poison —
+// MORE RESTRICTIVE.
+// v2-1.27.0 (codex round 19): a subjectless ("Need to okay it.") or
+// coordinated ("…get a text and need to okay it.") approval need, and a
+// second conditional trigger with no consequent of its own, now poison —
+// MORE RESTRICTIVE.
+// v2-1.28.0 (codex round 20): an approval directive sent through a
+// channel ("We'll text him to okay it.") now poisons — MORE RESTRICTIVE.
+// v2-1.29.0 (codex round 21): any authorization verb after an infinitive
+// "to" or a modal/future auxiliary ("…to him to okay it", "You will okay
+// it.") and pending booking idioms ("Need to put you down.") now poison —
+// MORE RESTRICTIVE.
+// v2-1.30.0 (codex round 22): determiner-less "We need yes.", any
+// "<party> in" booking idiom, a compound antecedent with a non-benign
+// component, and the bare "We'll see." hedge now poison — MORE RESTRICTIVE.
+// v2-1.31.0 (owner ruling 2026-09-26, after codex round 22): a non-
+// conditional OTHER sentence grounds only if it is an allowlisted whole-
+// sentence shape (acknowledgement, courtesy closer, let-us-know closer,
+// benign document/notification send, notification routing) — vocabulary
+// membership no longer clears it. Net MORE RESTRICTIVE (a few courtesy
+// words outside the old vocabulary, e.g. "Have a good one.", now ground),
+// so a force-reprocess must write a fresh decision row.
+// v2-1.32.0 (codex round 23): a condition clause is benign only as a
+// WHOLE benign routing shape (not on any topic word), and a later agent
+// turn that retracts/caveats the commitment (negation, poison, change
+// marker, or scheduling content not binding the same slot) holds the call
+// — MORE RESTRICTIVE.
+// v2-1.33.0 (codex round 24): a later same-slot sentence must be a full
+// affirmative restatement ("Sunday at noon is off." holds) — MORE RESTRICTIVE.
+// v2-1.34.0 (codex round 25): later CALLER turns get a rejection/caveat
+// screen too ("No, Sunday does not work for me." holds) — MORE RESTRICTIVE.
+// v2-1.35.0 (codex round 26): direct caller refusals ("I decline.", "I
+// have to pass.") in a later turn hold the call — MORE RESTRICTIVE.
+// v2-1.36.0 (codex round 27): a later caller sentence referring to the
+// time/day/date must be a plain same-slot acknowledgement, and refusal verb
+// stems (reject/object/refuse/decline/cancel…) hold — MORE RESTRICTIVE.
+// v2-1.37.0 (owner ruling 2026-09-25, SINGLE-SENTENCE RULE, final): after 18
+// Codex rounds each finding a new OTHER-sentence phrasing that slipped past
+// the closed-vocabulary/allowlist screen of the round before it, a
+// committing agent turn now grounds ONLY when the pinned commitment
+// sentence stands ALONE in that turn — any other sentence holds the call
+// for a human, with one narrow allowance for a whole OTHER sentence that
+// exactly matches a tiny acknowledgement list (yes/yeah/okay/ok/alright/all
+// right/perfect/great/awesome/sounds good/thank you/thanks/no problem).
+// Replaces the round 3-27 other-sentence whitelist entirely — MORE
+// RESTRICTIVE (a real booking with any other non-acknowledgement sentence
+// in the committing turn — e.g. "Yep, it should go to him, the
+// notification. We'll see you Sunday at noon." — no longer auto-books; the
+// owner explicitly accepts that cost).
+// v2-1.38.0 (owner ruling 2026-09-25, round 28 extension): the SAME
+// single-sentence rule now applies to every turn AFTER the committing one,
+// from either speaker — every later sentence must be an exact
+// acknowledgement/closer match (the committing-turn list plus bye/goodbye/
+// have a good day/have a great day/you too/thank you so much/talk to you
+// then/see you then) or the call holds for a human. Replaces the round
+// 23-27 later-turn term lists and same-slot-restatement carve-out entirely
+// — MORE RESTRICTIVE (ordinary wrap-up like "Can I get your email address?"
+// or "Our technician will text you when he's on the way." in a later turn
+// no longer grounds; only a bare acknowledgement/closer does).
+// v2-1.39.0: an acknowledgement/closer sentence may be SEVERAL listed
+// phrases back to back ("Okay, thank you.", "Alright, bye.") — LESS
+// restrictive than v2-1.38.0's single-exact-phrase match (every token must
+// still be a listed phrase, so no withdrawal/condition can ride along); a
+// force-reprocess writes a fresh decision row.
+// v2-1.40.0 (codex round 29): a question-marked acknowledgement ("Okay?",
+// "Yes?") around the commitment or in a later turn never qualifies — MORE
+// RESTRICTIVE.
+// v2-1.41.0 (codex round 30): Unicode question marks mark a sentence
+// interrogative; "for"/"on" put a lone cardinal in date position (both MORE
+// restrictive); "in the morning"/"in the afternoon" are parsed as the
+// stated period (grounds an explicit booking v2-1.40.0 held).
+// v2-1.42.0 (codex round 31): a lone number must sit in hour or date
+// position to bind; a spoken day period must contain the slot hour — MORE
+// RESTRICTIVE.
+// v2-1.43.0 (codex round 32): "a.m."/"p.m." collapse keeps the sentence
+// break before a new capitalized non-calendar word ("10 a.m. Okay.") —
+// grounds a booking v2-1.42.0 held.
+// v2-1.44.0: a real_estate_agent/lender arranging a WDO inspection with a
+// confirmed time is an authorized caller (owner ruling 2026-09-26,
+// isAuthorizedWdoArrangerBooking) — caller_not_authorized is no longer raised
+// for that shape, so a force-reprocess of such a call can move from review to
+// auto-route and must write a fresh decision row.
+// v2-1.45.0: fail-open booking applies to OUTBOUND calls too (owner
+// directive 2026-09-26: every call-agent rule works the same for both
+// directions), so a force-reprocess of an outbound call can move from
+// review to auto-route and must write a fresh decision row. (v2-1.44.0 is
+// the lender/realtor WDO arranger contract, #4890.)
+const V2_DECISION_VERSION = 'v2-1.45.0';
+const V2_DECISION_VERSIONS = ['v2-1.0.0', 'v2-1.1.0', 'v2-1.2.0', 'v2-1.3.0', 'v2-1.4.0', 'v2-1.5.0', 'v2-1.6.0', 'v2-1.7.0', 'v2-1.8.0', 'v2-1.9.0', 'v2-1.10.0', 'v2-1.11.0', 'v2-1.12.0', 'v2-1.13.0', 'v2-1.14.0', 'v2-1.15.0', 'v2-1.16.0', 'v2-1.17.0', 'v2-1.18.0', 'v2-1.19.0', 'v2-1.20.0', 'v2-1.21.0', 'v2-1.22.0', 'v2-1.23.0', 'v2-1.24.0', 'v2-1.25.0', 'v2-1.26.0', 'v2-1.27.0', 'v2-1.28.0', 'v2-1.29.0', 'v2-1.30.0', 'v2-1.31.0', 'v2-1.32.0', 'v2-1.33.0', 'v2-1.34.0', 'v2-1.35.0', 'v2-1.36.0', 'v2-1.37.0', 'v2-1.38.0', 'v2-1.39.0', 'v2-1.40.0', 'v2-1.41.0', 'v2-1.42.0', 'v2-1.43.0', 'v2-1.44.0', 'v2-1.45.0'];
 
 function buildRouteDecision({
   callLogId,

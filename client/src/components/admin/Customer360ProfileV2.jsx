@@ -136,6 +136,7 @@ const INVOICE_STATUS_TEXT = {
 };
 import CallBridgeLink, { callViaBridge } from "./CallBridgeLink";
 import CustomerRequestsPanel from "./CustomerRequestsPanel";
+import CustomerGeocodeReviewPanel from "./CustomerGeocodeReviewPanel";
 import CustomerPropertiesPanelV2 from "./CustomerPropertiesPanelV2";
 import CancelPlanDialog from "./CancelPlanDialog";
 import { CONTACT_ROLE_OPTIONS, contactRoleLabel, contactRoleTitle } from "../../lib/contact-roles";
@@ -147,6 +148,7 @@ import {
   CONSENT_VERSION,
 } from "../../lib/paymentMethodConsentText";
 import { archiveConfirmMessage } from "../../lib/customerArchiveCopy";
+import { labelNamesRetiredSale } from "../../constants/retiredSaleLabels";
 
 // Reuse the Communications composer without loading the whole Messages page
 // until a profile opens Comms. Its send, attachment, and AI guards stay shared.
@@ -3762,19 +3764,34 @@ export function estimateSuggestionMatchesService(suggestion, serviceType, covera
 
 // Both prepay paths use the service library for label selection only; prices
 // and coverage still come from their existing, independently guarded handlers.
-function AnnualPrepayServiceFields({ serviceOptions, serviceType, onChange }) {
+function AnnualPrepayServiceFields({ serviceOptions, serviceType, onChange, customerId = null }) {
   const listId = useId();
   const [catalog, setCatalog] = useState([]);
   const [catalogError, setCatalogError] = useState(false);
   useEffect(() => {
     let cancelled = false;
-    adminFetch("/admin/services/dropdown")
+    // Drop the previous customer's rows first: until this customer's list
+    // arrives (or if it fails), a holder's retired_for_sale row must not keep
+    // offering the retired plan to someone else (codex r32 on #4786).
+    setCatalog([]);
+    setCatalogError(false);
+    // Sellable rows only, scoped to this customer: a retired-for-sale plan
+    // (quarterly T&S) is offered just to the customer already on it — the
+    // same filter the booking pickers read, so every choice here saves.
+    const params = new URLSearchParams({ sellable: "true" });
+    if (customerId) params.set("sellable_customer_id", String(customerId));
+    adminFetch(`/admin/services/dropdown?${params}`)
       .then((rows) => { if (!cancelled) setCatalog(rows); })
       .catch(() => { if (!cancelled) setCatalogError(true); });
     return () => { cancelled = true; };
-  }, []);
+  }, [customerId]);
 
-  const options = [...serviceOptions];
+  // Locally derived options (history, prior plans, old terms) can still name
+  // the retired plan for a customer who no longer holds it; the sellable
+  // catalog carries the retired row only for a holder (retired_for_sale), so
+  // drop those labels unless it does (codex r30 on #4786).
+  const holdsRetired = catalog.some((service) => service?.retired_for_sale === true);
+  const options = serviceOptions.filter((option) => holdsRetired || !labelNamesRetiredSale(option.value));
   for (const service of catalog) {
     if (service.name && !options.some((option) => option.value === service.name)) {
       options.push({ value: service.name, label: service.name });
@@ -4113,6 +4130,7 @@ export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], ann
             serviceOptions={serviceOptions}
             serviceType={serviceType}
             onChange={handleServiceTypeChange}
+            customerId={customer?.id}
           />
           <label className="block">
             <div className="ui-label text-ink-secondary mb-1">Cadence</div>
@@ -4578,6 +4596,7 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
             serviceOptions={serviceOptions}
             serviceType={serviceType}
             onChange={handleServiceTypeChange}
+            customerId={customer?.id}
           />
           <label className="block">
             <div className="ui-label text-ink-secondary mb-1">Cadence</div>
@@ -5914,6 +5933,7 @@ function CustomerProfileOverview({
   setData,
   setProfileActionErr,
   billingSummary,
+  addressReview,
 }) {
   return (
     <div className="c360-overview-content">
@@ -5939,6 +5959,7 @@ function CustomerProfileOverview({
           referral={referral}
         />
       )}
+      {addressReview}
       <CustomerRequestsPanel customerId={customerId} />
       {/* both customer-scoped zone endpoints are requireAdmin — a
                   technician session would only 403 on expand */}
@@ -6601,8 +6622,13 @@ function CustomerProfileProperty({
   c,
   profileVersion,
   reloadCustomer,
+  onCustomerMutation,
   prefs,
 }) {
+  const handlePropertyChanged = async () => {
+    onCustomerMutation?.({ customerId, action: "update" });
+    await reloadCustomer();
+  };
   return (
     <div className="c360-details-content">
       {embedded && recipientDetails}
@@ -6626,7 +6652,7 @@ function CustomerProfileProperty({
           // not) re-syncs the primary customer_properties row server-side
           // — refetch on the reload counter, never on the address tuple.
           refreshToken={profileVersion}
-          onChanged={reloadCustomer}
+          onChanged={handlePropertyChanged}
           canEdit
         />
       )}
@@ -7229,6 +7255,7 @@ function CustomerProfileEditor({
   setEditErr,
   customerId,
   onClose,
+  onCustomerMutation,
   setSavingEdit,
   initialEditForm,
   reloadCustomer,
@@ -7439,6 +7466,7 @@ function CustomerProfileEditor({
                   await adminFetch(`/admin/customers/${customerId}`, {
                     method: "DELETE",
                   });
+                  onCustomerMutation?.({ customerId, action: "delete" });
                   setEditOpen(false);
                   onClose?.();
                 } catch (e) {
@@ -7497,6 +7525,7 @@ function CustomerProfileEditor({
                       method: "PUT",
                       body: JSON.stringify(payload),
                     });
+                    onCustomerMutation?.({ customerId, action: "update" });
                     await reloadCustomer();
                     setEditOpen(false);
                   } catch (e) {
@@ -9580,6 +9609,7 @@ function CustomerProfilePending({
 export default function Customer360ProfileV2({
   customerId,
   onClose,
+  onCustomerMutation,
   onSelectCustomer,
   initialTab = "overview",
   initialScheduledServiceId = null,
@@ -9910,6 +9940,13 @@ export default function Customer360ProfileV2({
         setData={setData}
         setProfileActionErr={setProfileActionErr}
         billingSummary={billingSummary}
+        addressReview={isAdmin ? (
+          <CustomerGeocodeReviewPanel
+            key={customerId}
+            customerId={customerId}
+            refreshToken={profileVersion}
+          />
+        ) : null}
       />
     ),
     billing: (
@@ -9950,6 +9987,7 @@ export default function Customer360ProfileV2({
         c={c}
         profileVersion={profileVersion}
         reloadCustomer={reloadCustomer}
+        onCustomerMutation={onCustomerMutation}
         prefs={prefs}
       />
     ),
@@ -10120,6 +10158,7 @@ export default function Customer360ProfileV2({
             setEditErr={setEditErr}
             customerId={customerId}
             onClose={onClose}
+            onCustomerMutation={onCustomerMutation}
             setSavingEdit={setSavingEdit}
             initialEditForm={initialEditForm}
             reloadCustomer={reloadCustomer}

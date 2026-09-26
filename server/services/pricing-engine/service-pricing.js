@@ -310,7 +310,10 @@ function resolveTermiteFootprint(property = {}, options = {}) {
     manualValue,
     missingReason: 'missing_termite_footprint',
     invalidReason: 'invalid_termite_footprint',
-    propertySources: [
+    // A unit-scoped profile's footprint/homeSqFt is one unit's interior
+    // floor area — only a measurement the operator entered may price
+    // termite work (codex r3 P1 #4862).
+    propertySources: property.unitScoped === true ? [] : [
       ['property_footprint', property.footprint],
       ['property_footprint', property.footprintSqFt],
       ['property_alias', property.buildingFootprintSqFt],
@@ -387,7 +390,10 @@ function resolvePropertyPerimeter(property = {}, options = {}) {
     options.useComputedPerimeter
   );
   const perimeterSourceIsComputed = property.perimeterSource === 'computed_from_footprint';
-  const propertyPerimeter = perimeterSourceIsComputed && !allowComputedPerimeter
+  // "Estimate from footprint" cannot apply to one unit inside a building:
+  // its footprint is interior floor area, not the structure's exterior
+  // (codex r3 P1 #4862).
+  const propertyPerimeter = perimeterSourceIsComputed && (!allowComputedPerimeter || property.unitScoped === true)
     ? undefined
     : property.perimeter;
   return resolvePositiveMeasurement({
@@ -2598,15 +2604,15 @@ function resolveTreeShrubBedArea(property = {}, warnings = []) {
 // Internal: full recommendation result with reason codes. The recommended
 // tier is always the mandated 6-visit Standard; the reason codes are advisory
 // signals (admin UI, customer proposal) that the property warrants the full
-// program rather than the Light downsell. `recommendTreeShrubTier` is the
+// program (Light 4x is retired for new sales — grandfathered replay only). `recommendTreeShrubTier` is the
 // back-compat string-returning wrapper used by older callers and tests.
 function evaluateTreeShrubTierRecommendation(property = {}) {
   // 6-visit Standard is the MANDATED default program (protocol six_x). We
-  // always recommend it — the 4-visit Light tier (protocol four_x) is an
-  // available downsell for clean / low-pest-history landscapes but is never
-  // auto-recommended. The reason codes below are retained for admin/customer
-  // surfaces as "signals the property warrants the full 6x program" (i.e.
-  // reasons NOT to downsell to Light); they no longer change the tier.
+  // always recommend it. The 4-visit Light tier (protocol four_x) was retired
+  // for new sales 2026-09-24 and is priced only to replay the grandfathered
+  // quarterly plan. The reason codes below are retained for admin/customer
+  // surfaces as "signals the property warrants the full 6x program"; they
+  // never change the tier.
   let bedArea = 0;
   let bedAreaFromFallback = false;
   if (hasPositivePricingNumber(property.bedArea)) {
@@ -2920,7 +2926,15 @@ function priceTreeShrub(property, options = {}) {
     recommendedTier,
     recommendationReasons,
     recommended: tier === recommendedTier,
-    availableTiers: Object.keys(TREE_SHRUB.tiers),
+    // Light (4x/quarterly) is hidden:true (owner directive 2026-09-24) — out
+    // of the default offered list, same as priceLawnCare's customer-facing
+    // tiers array. options.includeHiddenTiers (the internal/legacy escape
+    // hatch, mirroring priceLawnCare's) restores the full key set for a
+    // caller that genuinely needs it (e.g. rendering the one grandfathered
+    // quarterly customer's existing plan).
+    availableTiers: options.includeHiddenTiers
+      ? Object.keys(TREE_SHRUB.tiers)
+      : Object.keys(TREE_SHRUB.tiers).filter((k) => !TREE_SHRUB.tiers[k].hidden),
     frequency,
     // Expose visitsPerYear (mirrors `frequency`) so cost/audit consumers that
     // key off visits — admin-pricing-config margin preview, estimate-pricing
@@ -3183,7 +3197,11 @@ function priceCommercialPest(property = {}, options = {}) {
   // perimeter, so that override stays absolute). The one auto-priceable
   // exception: an EXTERIOR-ONLY program with an explicit measured perimeter —
   // its buildup never reads the footprint.
-  if (options.buildingSizeMeasured === false || (defaulted && (interiorSelected || !perimeterExplicit))) {
+  // allowEstimatedFootprint: a commercial suite sized off the business-type
+  // default (estimator engine) — not measured, but a real footprint the
+  // owner wants priced; generateEstimate grades the line LOW.
+  const unmeasured = options.buildingSizeMeasured === false && options.allowEstimatedFootprint !== true;
+  if (unmeasured || (defaulted && (interiorSelected || !perimeterExplicit))) {
     return {
       service: 'commercial_pest',
       name: 'Commercial Pest Control',

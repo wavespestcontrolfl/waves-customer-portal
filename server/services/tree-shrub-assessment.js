@@ -18,9 +18,11 @@
  */
 
 const crypto = require('crypto');
+const Ajv = require('ajv');
 const db = require('../models/db');
 const logger = require('./logger');
 const MODELS = require('../config/models');
+const { anthropicMaxTokens, anthropicEffortConfig } = require('./llm/anthropic-wire');
 const { anthropicText, geminiText } = require('./llm/call');
 
 // Order-independent content hash of a set of photo data URLs (each hashed, then
@@ -45,6 +47,101 @@ function treeShrubReviewSignature(scores = {}, scoredCount, serviceId, photosHas
     .map((k) => (scores && scores[k] != null ? scores[k] : '')).join(',')
     + `|${scoredCount == null ? '' : scoredCount}|${serviceId || ''}|${photosHash || ''}|${obsHash}`;
   return crypto.createHmac('sha256', process.env.JWT_SECRET || 'tree-shrub-review-key').update(canon).digest('hex');
+}
+
+const TREE_SHRUB_REVIEW_SCORE_KEYS = [
+  'foliageFullness',
+  'leafColorVigor',
+  'pestActivity',
+  'diseaseLeafSpot',
+  'waterHeatStress',
+  'overallScore',
+];
+const TREE_SHRUB_REVIEW_SCORE_KEYSET = [...TREE_SHRUB_REVIEW_SCORE_KEYS].sort().join('|');
+
+const TREE_SHRUB_REVIEW_DECISION_KEYS = {
+  foliage_fullness: 'foliageFullness',
+  leaf_color_vigor: 'leafColorVigor',
+  pest_activity: 'pestActivity',
+  disease_leaf_spot: 'diseaseLeafSpot',
+  water_heat_mechanical_stress: 'waterHeatStress',
+};
+const validateReviewDecisions = new Ajv().compile({
+  type: 'array', maxItems: 5,
+  items: {
+    type: 'object', required: ['key', 'action'],
+    properties: {
+      key: { enum: Object.keys(TREE_SHRUB_REVIEW_DECISION_KEYS) },
+      action: { enum: ['monitor', 'confirmed', 'hidden', 'edit'] },
+    },
+  },
+});
+
+// Validate the signed preview contract used by Generate. The HMAC proves only
+// that these photo-model scores and observations came from this server's
+// preview for this service and photo-set hash. It never converts a visual
+// signal into a technician-confirmed pest, disease, deficiency, or diagnosis.
+function validateTreeShrubReviewForReport(review, { serviceId } = {}) {
+  const invalid = (reason) => ({ ok: false, reason });
+  if (Object.prototype.toString.call(review) !== '[object Object]') return invalid('review_shape');
+  if (review.confirmed !== true) return invalid('review_not_confirmed');
+  if (!serviceId) return invalid('service_id_missing');
+
+  const scoredCount = review.scoredCount;
+  const photoCount = review.photoCount;
+  if (scoredCount !== photoCount || ![1, 2, 3, 4, 5].includes(photoCount)) return invalid('photo_count_mismatch');
+  if (!/^[a-f0-9]{64}$/.test(String(review.photosHash))) return invalid('photos_hash_invalid');
+  if (!/^[a-f0-9]{64}$/.test(String(review.signature))) return invalid('signature_invalid');
+  if (typeof review.observations !== 'string') return invalid('observations_invalid');
+
+  const scores = review.scores;
+  if (Object.prototype.toString.call(scores) !== '[object Object]') return invalid('scores_invalid');
+  if (Object.keys(scores).sort().join('|') !== TREE_SHRUB_REVIEW_SCORE_KEYSET) return invalid('score_keys_invalid');
+  if (!TREE_SHRUB_REVIEW_SCORE_KEYS.every((key) => (
+    Number.isFinite(scores[key]) && scores[key] >= 0 && scores[key] <= 100
+  ))) return invalid('score_values_invalid');
+
+  const decisions = review.decisions;
+  if (!validateReviewDecisions(decisions)
+    || new Set(decisions.map((decision) => decision.key)).size !== decisions.length) {
+    return invalid('decisions_invalid');
+  }
+
+  const expected = treeShrubReviewSignature(
+    scores,
+    scoredCount,
+    serviceId,
+    review.photosHash,
+    review.observations,
+  );
+  if (review.signature !== expected) return invalid('signature_mismatch');
+
+  const hiddenScoreKeys = new Set(decisions
+    .filter((decision) => decision.action === 'hidden')
+    .map((decision) => TREE_SHRUB_REVIEW_DECISION_KEYS[decision.key]));
+  const includedScores = {};
+  // The original overall includes every category, including a hidden false
+  // read. Omit that aggregate whenever anything was hidden rather than
+  // presenting a score still influenced by the rejected signal.
+  const includedKeys = hiddenScoreKeys.size
+    ? TREE_SHRUB_REVIEW_SCORE_KEYS.filter((key) => key !== 'overallScore' && !hiddenScoreKeys.has(key))
+    : TREE_SHRUB_REVIEW_SCORE_KEYS;
+  for (const key of includedKeys) includedScores[key] = scores[key];
+
+  return {
+    ok: true,
+    grounding: {
+      source: 'reviewed_photo_signals',
+      scores: includedScores,
+      scoredCount,
+      photoCount,
+      photosHash: review.photosHash,
+      // Any hidden signal can make the aggregate prose contradict the
+      // technician's review, so drop it whole.
+      observations: hiddenScoreKeys.size ? '' : review.observations.trim(),
+      hasHidden: hiddenScoreKeys.size > 0,
+    },
+  };
 }
 
 let Anthropic;
@@ -232,7 +329,8 @@ async function callClaudeVision(base64Image, mimeType) {
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
     const response = await anthropic.messages.create({
       model: MODELS.VISION,
-      max_tokens: 500,
+      ...anthropicEffortConfig(MODELS.VISION),
+      max_tokens: anthropicMaxTokens(MODELS.VISION, 500),
       messages: [{
         role: 'user',
         content: [
@@ -633,22 +731,25 @@ const REVIEW_CAT_KEY = {
 // keep-vs-hide review, NOT a formal pest/disease identification — so "Confirm
 // monitor" deliberately does NOT escalate the report to confirmed-diagnosis
 // language (guardrail: signals, never confirmed pest/disease). It only keeps the
-// finding as a monitored signal; "hide" lifts a false-read category out of the
-// flagging band. Every decision is preserved in composite_scores for audit.
-//  - hide    → false read; lift that category so the report doesn't surface it.
+// finding as a monitored signal; "hide" leaves the category unassessed.
+// A rejected signal is not evidence of healthy plants. Every decision and the
+// original scores are preserved in composite_scores for audit.
+//  - hide    → omit that score and its influenced overall.
 //  - confirm → keep monitoring (no report escalation, no confirmed-diagnosis copy).
 //  - edit    → captured (detail) for audit; customer copy stays system-generated.
 function applyReviewDecisions(scores = {}, decisions = []) {
   const s = { ...scores };
+  let hasHidden = false;
   for (const d of Array.isArray(decisions) ? decisions : []) {
-    const k = REVIEW_CAT_KEY[d && d.key];
-    if (!k) continue;
+    if (!d || !Object.hasOwn(REVIEW_CAT_KEY, d.key)) continue;
+    const k = REVIEW_CAT_KEY[d.key];
     if (d.action === 'hidden') {
-      const v = num(s[k]);
-      if (v != null && v < 70) s[k] = 78; // out of watch/attention → healthy
+      s[k] = null;
+      hasHidden = true;
     }
   }
-  return { scores: s };
+  if (hasHidden) s.overallScore = null;
+  return { scores: s, hasHidden };
 }
 
 /**
@@ -676,14 +777,13 @@ async function storeTreeShrubAssessmentFromReview({
     if (!service.customer_id) return null;
     const existing = await findExistingAssessment(service, knex);
     if (existing) return { assessmentId: existing, alreadyExists: true };
-    const final = applyReviewDecisions(scores, decisions).scores;
-    const overall = calculateOverall(final);
+    const { scores: final, hasHidden } = applyReviewDecisions(scores, decisions);
+    const overall = hasHidden ? null : calculateOverall(final);
     const now = new Date();
 
     // If the tech HID any finding, the AI free-text observation was generated from
     // signals that include the hidden one — drop it so the photo summary can't
     // contradict the hide. The deterministic diagnosis/insight copy still carries the report.
-    const hasHidden = (Array.isArray(decisions) ? decisions : []).some((d) => d && d.action === 'hidden');
     const safeObs = hasHidden ? '' : (observations || '');
 
     const [inserted] = await knex('tree_shrub_assessments').insert({
@@ -781,21 +881,21 @@ async function photoUrl(photo) {
 
 function formatAssessmentScores(row) {
   if (!row) return null;
-  return {
+  let composite = row.composite_scores;
+  if (typeof composite === 'string') {
+    try { composite = JSON.parse(composite); } catch { composite = null; }
+  }
+  // Reapply stored decisions for older assessments whose hidden metrics were
+  // saved as healthy scores. This also governs every historical trend point.
+  const { scores, hasHidden } = applyReviewDecisions({
     foliageFullness: tsScoreValue(row.foliage_fullness),
     leafColorVigor: tsScoreValue(row.leaf_color_vigor),
     pestActivity: tsScoreValue(row.pest_activity),
     diseaseLeafSpot: tsScoreValue(row.disease_leaf_spot),
     waterHeatStress: tsScoreValue(row.water_heat_stress),
-    overallScore: tsScoreValue(row.overall_score)
-      ?? calculateOverall({
-        foliageFullness: tsScoreValue(row.foliage_fullness),
-        leafColorVigor: tsScoreValue(row.leaf_color_vigor),
-        pestActivity: tsScoreValue(row.pest_activity),
-        diseaseLeafSpot: tsScoreValue(row.disease_leaf_spot),
-        waterHeatStress: tsScoreValue(row.water_heat_stress),
-      }),
-  };
+    overallScore: tsScoreValue(row.overall_score),
+  }, composite?.reviewed);
+  return { ...scores, overallScore: hasHidden ? null : scores.overallScore ?? calculateOverall(scores) };
 }
 
 // Link an assessment to THIS visit (by service record, then scheduled service).
@@ -906,6 +1006,7 @@ module.exports = {
   analyzePhoto,
   treeShrubReviewSignature,
   treeShrubPhotosHash,
+  validateTreeShrubReviewForReport,
   buildTreeShrubTechFindings,
   mergePhotoComposites,
   buildCustomerTreeShrubReport,

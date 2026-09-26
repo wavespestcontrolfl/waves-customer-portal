@@ -92,7 +92,7 @@ function makeKnex(resolve, calls) {
   const builder = (table) => {
     const state = { table, ops: [], terminal: null };
     const q = {};
-    const chain = ['where', 'whereNull', 'whereNotNull', 'whereNotIn', 'whereRaw', 'orWhereRaw', 'orWhereNot', 'orderBy', 'forUpdate', 'forNoKeyUpdate', 'noWait', 'onConflict', 'ignore', 'returning', 'select'];
+    const chain = ['where', 'whereIn', 'whereNull', 'whereNotNull', 'whereNotIn', 'whereRaw', 'orWhereRaw', 'orWhereNot', 'orderBy', 'forUpdate', 'forNoKeyUpdate', 'noWait', 'onConflict', 'ignore', 'returning', 'select'];
     for (const m of chain) {
       q[m] = jest.fn((...args) => { state.ops.push({ op: m, args }); return q; });
     }
@@ -147,6 +147,8 @@ function occupancyConflicts(state, existingVisits) {
 function makeResolver({ preLead, lockedLead, emailMatch = null, convertedRows = 1, existingVisits = [], linkedCustomer = existingLinked }) {
   return (table, state) => {
     const t = state.terminal;
+    // Retired-for-sale catalog lookup (quarterly T&S gate, #4786): none.
+    if (table === 'services' && !t) return [];
     if (table === 'scheduled_services' && !t && isOccupancyProbe(state)) return occupancyConflicts(state, existingVisits);
     if (table === 'customers' && !t && opsOf(state, 'whereRaw').some((o) => /LOWER\(TRIM/.test(o.args[0]))) {
       return emailMatch ? (Array.isArray(emailMatch) ? emailMatch : [emailMatch]) : [];

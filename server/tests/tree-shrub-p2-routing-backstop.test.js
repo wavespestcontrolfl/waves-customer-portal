@@ -60,7 +60,7 @@ describe('service-line routing — tree/shrub tokens beat fertil/weed', () => {
   });
 });
 
-describe('recurringTreeShrubRowAtRetiredCadence — premium-only backstop (9x un-retired 2026-07-23)', () => {
+describe('recurringTreeShrubRowAtRetiredCadence — premium + light backstop (9x un-retired 2026-07-23; light retired 2026-09-24)', () => {
   const estData = (svc) => ({ recurring: { services: [svc] } });
 
   test('restamped Enhanced selection (tree_shrub_6week key) is a live cadence', () => {
@@ -79,13 +79,13 @@ describe('recurringTreeShrubRowAtRetiredCadence — premium-only backstop (9x un
     expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Premium (12 visits)' }))).toBe(true);
   });
 
-  test('current 6x Standard and 4x Light rows pass', () => {
+  test('current 6x Standard rows pass; 4x Light rows are retired (owner directive 2026-09-24)', () => {
     expect(recurringTreeShrubRowAtRetiredCadence(estData({
       name: 'Bi-Monthly Tree & Shrub Care Service', serviceKey: 'tree_shrub_program', visitsPerYear: 6,
     }))).toBe(false);
     expect(recurringTreeShrubRowAtRetiredCadence(estData({
       name: 'Quarterly Tree & Shrub Care Service', serviceKey: 'tree_shrub_quarterly', visitsPerYear: 4,
-    }))).toBe(false);
+    }))).toBe(true);
   });
 
   test('legacy cadence-less T&S rows and non-T&S rows pass (converter defaults them to the current program)', () => {
@@ -102,17 +102,77 @@ describe('recurringTreeShrubRowAtRetiredCadence — premium-only backstop (9x un
     expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', frequency: 'monthly' }))).toBe(true);
     expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', recurringPattern: 'custom' }))).toBe(true);
     expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', frequencyKey: 'semiannual' }))).toBe(true);
-    // The two live tiers' field cadences still pass.
+    // The live 6x tier's field cadence still passes; 'quarterly' (4x Light,
+    // retired 2026-09-24) no longer does.
     expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Bi-Monthly Tree & Shrub Care Service', frequency: 'bi_monthly', visitsPerYear: 6 }))).toBe(false);
-    expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Quarterly Tree & Shrub Care Service', frequency: 'quarterly', visitsPerYear: 4 }))).toBe(false);
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Quarterly Tree & Shrub Care Service', frequency: 'quarterly', visitsPerYear: 4 }))).toBe(true);
   });
 
-  test('every converter visit-count alias is checked (codex P2 r2)', () => {
+  test('every converter visit-count alias is checked (codex P2 r2); 4-visit aliases are retired 2026-09-24', () => {
     expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', appsPerYear: 9 }))).toBe(false);
     expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', apps: 12 }))).toBe(true);
     expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', treatmentsPerYear: 9 }))).toBe(false);
-    expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', appsPerYear: 4 }))).toBe(false);
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', appsPerYear: 4 }))).toBe(true);
     expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', apps: 6 }))).toBe(false);
+  });
+
+  test('off-count visit-count aliases (7/8/10/11) are retired even though the converter\'s generic bucketing would call them "bimonthly" (codex P1 r3 regression)', () => {
+    // explicitServiceCadence's own visits fallback
+    // (RecurringAppointmentSeeder.patternFromVisitsPerYear) buckets ANY
+    // count in [6,11] as 'bimonthly' — only 6 and 9 are real T&S programs,
+    // so 7/8/10/11 must stay retired across every alias spelling, not just
+    // `visitsPerYear`.
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', visitsPerYear: 7 }))).toBe(true);
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', visitsPerYear: 8 }))).toBe(true);
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', visitsPerYear: 10 }))).toBe(true);
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', visitsPerYear: 11 }))).toBe(true);
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', appsPerYear: 8 }))).toBe(true);
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', apps: 10 }))).toBe(true);
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', treatmentsPerYear: 11 }))).toBe(true);
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', v: 7 }))).toBe(true);
+    // The exact live counts (6, 9) still pass through every alias spelling.
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', visitsPerYear: 6 }))).toBe(false);
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', visitsPerYear: 9 }))).toBe(false);
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care', v: 9 }))).toBe(false);
+  });
+
+  test('a legacy abbreviated label with NO numeric alias still resolves through the converter\'s text reader (codex P0 r2, reconfirmed r3)', () => {
+    // "4x applications/yr" has no whitespace directly before "applications"
+    // (the "x" sits in the way), so the manual regex here used to miss it;
+    // normalizeRecurringPattern matches the bare "4x" substring anywhere in
+    // the text and maps it to 'quarterly'. No visit-count alias is present
+    // on this row, so the r3 exact-count guard must not intercept it —
+    // it has to fall through to the converter's cadence reader.
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care — 4x applications/yr' }))).toBe(true);
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care — 6x applications/yr' }))).toBe(false);
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({ name: 'Tree & Shrub Care — 9x applications/yr' }))).toBe(false);
+  });
+
+  test('the retired catalog key alone proves the retired cadence, even with a generic name and no cadence/count fields (codex P0 pre-push)', () => {
+    // A row shaped { serviceKey: 'tree_shrub_quarterly', name: 'Tree & Shrub
+    // Care' } used to pass this backstop: the final check only searched
+    // name/label/displayName text, never service/serviceKey/service_key —
+    // so a row whose ONLY retired-identity signal is its catalog key slipped
+    // through. The converter's remainingUnitCatalogKey preserves that exact
+    // key verbatim, so the accepted row could still link to the retired
+    // quarterly catalog service. Mirrors the lawn backstop's keyText check
+    // (lawn_care_recurring) exactly.
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({
+      serviceKey: 'tree_shrub_quarterly', name: 'Tree & Shrub Care',
+    }))).toBe(true);
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({
+      service_key: 'tree_shrub_quarterly', name: 'Tree & Shrub Care',
+    }))).toBe(true);
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({
+      service: 'tree_shrub_quarterly', name: 'Tree & Shrub Care',
+    }))).toBe(true);
+    // The live catalog keys stay unaffected.
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({
+      serviceKey: 'tree_shrub_program', name: 'Tree & Shrub Care',
+    }))).toBe(false);
+    expect(recurringTreeShrubRowAtRetiredCadence(estData({
+      serviceKey: 'tree_shrub_6week', name: 'Tree & Shrub Care',
+    }))).toBe(false);
   });
 });
 
@@ -143,6 +203,13 @@ describe('retiredTreeShrubRequoteNeeded — shared quote gate (deposit mirror co
     expect(retiredTreeShrubRequoteNeeded({
       results: { ts: [{ name: '12x Premium Tree & Shrub' }] },
       recurring: { services: [{ name: 'Tree & Shrub Care' }] },
+    })).toBe(true);
+  });
+
+  test('a Light-only (4x/quarterly) ladder requotes too (owner directive 2026-09-24)', () => {
+    expect(retiredTreeShrubRequoteNeeded({
+      results: { ts: [{ key: 'light', ann: 300 }] },
+      recurring: { services: [{ name: 'Quarterly Tree & Shrub Care Service' }] },
     })).toBe(true);
   });
 
@@ -267,6 +334,74 @@ describe('rewriteTreeShrubRecurringServices — palm rows are never tier-rewritt
     expect(services[1].serviceKey).toBe('tree_shrub_program');
     expect(services[1].name).toBe('Bi-Monthly Tree & Shrub Care Service');
     expect(changed).toBe(true);
+  });
+
+  // codex P0 round 4: a customer re-selecting the current Standard tier on
+  // an in-flight estimate whose stored T&S row still carries a stale
+  // snake_case visits_per_year: 4 (from some earlier, now-superseded state)
+  // must have the restamp clear that alias too — otherwise the retired-
+  // cadence gate's own all-alias scan still sees a retired 4x row on data
+  // the customer just fixed, and a valid accept 409s.
+  test('restamping onto Standard clears a stale snake_case visits_per_year alias (codex P0 r4)', () => {
+    const frequency = { key: 'standard', monthly: 51.75, annual: 621, perTreatment: 103.5, visitsPerYear: 6, billingFrequencyKey: 'monthly' };
+    const staleRow = { name: 'Tree & Shrub Care', visits_per_year: 4, mo: 40 };
+
+    const { services } = rewriteTreeShrubRecurringServices([staleRow], frequency);
+    const restamped = services[0];
+
+    // Every alias the gate reads now agrees with the newly selected tier —
+    // the stale snake_case value did not survive the restamp.
+    expect(restamped.visits_per_year).toBe(6);
+    expect(restamped.visitsPerYear).toBe(6);
+    expect(restamped.v).toBe(6);
+
+    expect(recurringTreeShrubRowAtRetiredCadence({
+      recurring: { services: [restamped] },
+    })).toBe(false);
+
+    // The SAME stale row, left un-restamped (no tier re-selection), must
+    // still be caught as retired — this isn't a case where the gate went
+    // blind, only one where a genuine restamp now actually clears it.
+    expect(recurringTreeShrubRowAtRetiredCadence({
+      recurring: { services: [staleRow] },
+    })).toBe(true);
+  });
+
+  // codex P0 round 5: a valid 6/9 count must not short-circuit the other
+  // retired signals, and the restamp must clear every stale one.
+  test('a valid count does not excuse a retired cadence field or catalog key (codex P0 r5)', () => {
+    const gate = (svc) => recurringTreeShrubRowAtRetiredCadence({ recurring: { services: [svc] } });
+    expect(gate({ name: 'Tree & Shrub Care', serviceKey: 'tree_shrub_quarterly', visitsPerYear: 6 })).toBe(true);
+    expect(gate({ name: 'Tree & Shrub Care', frequency: 'quarterly', visitsPerYear: 6 })).toBe(true);
+    expect(gate({ name: 'Tree & Shrub Care', recurring_pattern: 'quarterly', visitsPerYear: 9 })).toBe(true);
+    // Live rows still pass.
+    expect(gate({ name: 'Bi-Monthly Tree & Shrub Care Service', serviceKey: 'tree_shrub_program', frequency: 'bi_monthly', visitsPerYear: 6 })).toBe(false);
+    expect(gate({ name: 'Every 6 Weeks Tree & Shrub Care Service', serviceKey: 'tree_shrub_6week', frequency: 'every_6_weeks', visitsPerYear: 9 })).toBe(false);
+  });
+
+  test('an explicit retired tier field is retired even with no cadence wording (codex P0 r10)', () => {
+    const gate = (svc) => recurringTreeShrubRowAtRetiredCadence({ recurring: { services: [svc] } });
+    expect(gate({ service: 'tree_shrub', name: 'Tree & Shrub Care', tier: 'light' })).toBe(true);
+    expect(gate({ service: 'tree_shrub', name: 'Tree & Shrub Care', tierKey: 'Light' })).toBe(true);
+    expect(gate({ service: 'tree_shrub', name: 'Tree & Shrub Care', serviceTier: '4x' })).toBe(true);
+    expect(gate({ service: 'tree_shrub', name: 'Tree & Shrub Care', selected_tier: 'premium' })).toBe(true);
+    // Current tiers, and a valid 6x count, pass.
+    expect(gate({ service: 'tree_shrub', name: 'Tree & Shrub Care', tier: 'standard', visitsPerYear: 6 })).toBe(false);
+    expect(gate({ service: 'tree_shrub', name: 'Tree & Shrub Care', selectedTier: 'enhanced' })).toBe(false);
+  });
+
+  test.each(['standard', 'enhanced'])('restamping a fully-stale Light row onto %s clears every retired signal (codex P0 r5)', (key) => {
+    const staleLight = {
+      name: 'Quarterly Tree & Shrub Care Service', serviceKey: 'tree_shrub_quarterly', service_key: 'tree_shrub_quarterly',
+      frequency: 'quarterly', frequency_key: 'quarterly', recurringPattern: 'quarterly', recurring_pattern: 'quarterly',
+      planFrequency: 'quarterly', visitsPerYear: 4, visits: 4, v: 4, mo: 30,
+      tier: 'light', tier_key: 'light', selectedTier: 'light', service_tier: 'light',
+    };
+    expect(recurringTreeShrubRowAtRetiredCadence({ recurring: { services: [staleLight] } })).toBe(true);
+    // No visitsPerYear on the selection: the tier's own count must win over the stale 4.
+    const { services } = rewriteTreeShrubRecurringServices([staleLight], { key });
+    expect(recurringTreeShrubRowAtRetiredCadence({ recurring: { services } })).toBe(false);
+    expect(services[0].visitsPerYear).toBe(key === 'standard' ? 6 : 9);
   });
 });
 

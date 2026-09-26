@@ -224,7 +224,7 @@ function ctaBand(doc, estimateUrl, micro) {
   doc.link(pillX, pillY, pillW, pillH, estimateUrl);
 
   doc.font('Helvetica').fontSize(8.5).fillColor(MUTED)
-    .text(micro || 'Month-to-month plan · Unlimited no-charge re-services for covered pests · 90-day money-back guarantee', L, top + H - 17, { width: W, align: 'center' });
+    .text(micro || 'Month-to-month plan · Unlimited no-charge re-services for covered pests · Money-back guarantee', L, top + H - 17, { width: W, align: 'center' });
   doc.restore();
   doc.y = top + H + 10;
 }

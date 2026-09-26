@@ -25,6 +25,9 @@
 #                                         (LLM audit only — the migration
 #                                         guard's baseline is always origin/main)
 #   CODEX_REVIEW_TIMEOUT=300           — per-ref codex budget in seconds (default 180)
+#   CODEX_REVIEW_EFFORT=high           — codex reasoning effort for the audit
+#                                         (default medium; never inherits
+#                                         ~/.codex/config.toml's effort)
 #   CODEX_REVIEW_MAX_DIFF_BYTES=0      — disable the diff-size cap (default 500000)
 #   SKIP_CLAUDE_FALLBACK=1             — Codex only; no Claude fallback auditor
 #   CLAUDE_REVIEW_TIMEOUT=900          — per-ref claude budget in seconds, BOTH
@@ -325,6 +328,11 @@ fi
 SCHEMA=".github/codex-review-schema.json"
 AGENTS_MD="AGENTS.md"
 CODEX_TIMEOUT="${CODEX_REVIEW_TIMEOUT:-180}"
+# Pinned, not inherited: the audit budget above was sized for medium effort.
+# A personal ~/.codex/config.toml at `max` (set 2026-09-24 for interactive
+# use) made nearly every audit time out and fall back to Claude — 2 of 33
+# pushes on 2026-09-25 got a Codex verdict, against 54 of 62 the day before.
+CODEX_EFFORT="${CODEX_REVIEW_EFFORT:-medium}"
 MAX_DIFF_BYTES="${CODEX_REVIEW_MAX_DIFF_BYTES:-500000}"
 # 300s was not enough once the AGENTS.md rubric joined the prompt: a real
 # push of this branch timed out and went UN-AUDITED, which is the failure
@@ -1259,6 +1267,7 @@ for i in "${!REF_SHAS[@]}"; do
   # just the leader PID (orphans under pid 1 otherwise outlive the hook).
   set -m
   codex exec \
+        -c model_reasoning_effort="\"$CODEX_EFFORT\"" \
         --sandbox read-only \
         --skip-git-repo-check \
         --output-schema "$SCHEMA" \

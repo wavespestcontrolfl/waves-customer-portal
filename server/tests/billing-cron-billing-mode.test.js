@@ -74,7 +74,7 @@ beforeEach(() => {
 });
 
 describe('processMonthlyBilling — billing_mode guard', () => {
-  test.each(['PUSH_IN_FLIGHT', 'QUIET_HOURS_HOLD', 'APP_DELIVERY_HOLD', 'APP_PROVIDER_RETRY'])('a %s failure notice keeps a durable retry and the attempt identity', async (code) => {
+  test.each(['PUSH_IN_FLIGHT', 'QUIET_HOURS_HOLD', 'APP_DELIVERY_HOLD', 'APP_PROVIDER_RETRY', 'BILLING_PREFERENCES_CHANGED', 'SUPPRESSION_LOOKUP_FAILED', 'BILLING_EMAIL_PREPARATION_HOLD'])('a %s failure notice keeps a durable retry and the attempt identity', async (code) => {
     mockCustomers = [{ ...baseCustomer, id: 'cust-MM', billing_mode: 'monthly_membership' }];
     StripeService.chargeMonthly.mockRejectedValue(Object.assign(new Error('declined'), {
       paymentRecord: { id: 'attempt-1', amount: 55.3 },
@@ -87,6 +87,7 @@ describe('processMonthlyBilling — billing_mode guard', () => {
     const meta = JSON.parse(mockScheduledNotices[0].metadata);
     expect(meta).toMatchObject({ payment_id: 'attempt-1', retry_count: 0,
       entry_point: 'billing_failure_deferred', notificationEventKey: 'payment-problem:attempt:attempt-1:autopay_charge_failed',
+      billingDeliveryCategory: 'payment_issue',
     });
     expect(sender).toHaveBeenCalledWith(expect.objectContaining({
       metadata: expect.objectContaining({ notificationEventKey: meta.notificationEventKey }),
@@ -210,5 +211,9 @@ describe('monthly payment settlement reporting', () => {
     expect(logAutopay).toHaveBeenCalledWith('cust-state', status === 'paid' ? 'charge_success' : 'charge_processing', expect.objectContaining({ amountCents: 10290, paymentId: 'pay-state' }));
     const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
     expect(sendCustomerMessage).toHaveBeenCalledTimes(status === 'paid' ? 1 : 0);
+    if (status === 'paid') expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+      purpose: 'payment_receipt',
+      metadata: expect.objectContaining({ billingDeliveryCategory: 'payment_receipt' }),
+    }));
   });
 });

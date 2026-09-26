@@ -51,7 +51,7 @@ for new data**.
   provenance and these rows are untouched.
 
 Service: `server/services/customer-properties.js` (pure helpers `normStreet` /
-`normalizeOccupancy` / `isNewStreet` are unit-tested in
+`normalizeOccupancy` / `isNewAddress` are unit-tested in
 `tests/customer-properties.test.js`).
 
 ## Deferred — needs owner decisions before building

@@ -373,6 +373,17 @@ function wizardDraftSelfServeBookable(row) {
       && !lineItems.some((l) => l && RECURRING_FUNNEL_MAPPABLE_SERVICES.has(l.service))) {
     return false;
   }
+  // A recurring Tree & Shrub line at a retired cadence or tier (Light 4x,
+  // legacy 12x) is not self-bookable (codex r28 on #4786): /calculate
+  // refuses a NEW Light quote, but a draft priced before the retirement
+  // keeps a valid 14-day handoff, and the converter's T&S branch still
+  // seeds quarterly (the grandfathered customer's accepted plan needs it).
+  // The standing refusal's quote CTA re-runs the wizard on the current
+  // tiers — the same accept-time gate manual acceptance reads.
+  if (recurringAnnual > 0) {
+    const { recurringTreeShrubRowAtRetiredCadence } = require('../routes/estimate-public');
+    if (recurringTreeShrubRowAtRetiredCadence(data)) return false;
+  }
   return true;
 }
 

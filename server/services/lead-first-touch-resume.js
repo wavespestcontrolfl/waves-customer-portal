@@ -227,12 +227,16 @@ function fencedHoldWrite(qb, claimStamp) {
 // every caller treats an unverifiable card state as fail-closed.
 async function emailReviewBlocksRelease(callLogId, dbh = db) {
   if (!callLogId) return null;
-  // A live name/email mismatch card is an unanswered identity question
-  // about this very address (codex #4622 r3 P1): it blocks the release
-  // exactly like a live read-back card, on every path through this guard.
+  // EMAIL_REVIEW_REASON_CODES only — these concern the ADDRESS itself
+  // (unverified/invalid, i.e. genuinely doubted digits/spelling) and hold the
+  // release exactly like a live read-back card. Owner ruling 2026-09-26: a
+  // live name_email_mismatch card no longer holds the first-touch email — it
+  // is advisory (name_review card for the office), not a hold, on every path
+  // through this guard. (It used to ride here too — codex #4622 r3 P1 — but
+  // that predates the ruling.)
   const live = await dbh('triage_items')
     .where({ call_log_id: callLogId })
-    .whereIn('reason_code', [...EMAIL_REVIEW_REASON_CODES, 'name_email_mismatch'])
+    .whereIn('reason_code', EMAIL_REVIEW_REASON_CODES)
     .whereIn('status', ['open', 'in_progress'])
     .first('id');
   if (live) return 'email_review_live';
