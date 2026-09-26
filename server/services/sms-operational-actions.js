@@ -109,8 +109,11 @@ const STATED_TIMING = new RegExp([
   String.raw`\b(?:mid|early|late)[- ]?(?:${MONTH}\b|next (?:week|month)\b)`,
   String.raw`\b${MONTH}\.? ?(?:${ORDINAL_DAY}|\d{1,2})\b`,
   String.raw`\b(?:${ORDINAL_DAY}|\d{1,2}) (?:of )?${MONTH}\b`,
-  String.raw`\b(?:on|by|before|after|around) the ${ORDINAL_DAY}\b`,
+  // The calendar-date forms match TEMPORARY_INSTRUCTION's, ISO included
+  // (Codex #4816 r23).
+  String.raw`\b(?:on|by|until|till|before|after|around|starting) the ${ORDINAL_DAY}\b`,
   String.raw`\b\d{1,2}/\d{1,2}(?:/\d{2,4})?\b`,
+  String.raw`\b\d{4}-\d{2}-\d{2}\b`,
 ].join('|'), 'i');
 
 // A negated or uncertain report does not establish an active system or a

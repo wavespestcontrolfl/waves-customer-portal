@@ -721,7 +721,8 @@ describe('R5 owner ruling 2026-09-24: per-kind default deadlines', () => {
 
   test.each(['Can you call me tomorrow?', 'Please send it this afternoon', 'Can someone come out Friday?', 'Schedule me mid Oct',
     'Call me back in 2 hours', 'Can you come on 10/14?', 'Need someone out by the 15th', 'Send it by end of the week',
-    'Call me Fri', 'Can you come next Tues', 'Can someone come on Sat?', 'Send it by Wed'])(
+    'Call me Fri', 'Can you come next Tues', 'Can someone come on Sat?', 'Send it by Wed',
+    'Call me on 2027-01-15', 'Hold off until the 20th', 'Starting the 3rd please call'])(
     'Codex #4816 r20: timing stated in the quote keeps the row undated even when due_text is empty (%s)', (quote) => {
       expect(resolveDueDeadline({ party: 'waves', kind: 'callback', basis: 'request', due_at: null, due_text: null, quote }, at))
         .toEqual({ due_at: null, due_basis: null });
