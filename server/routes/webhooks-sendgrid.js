@@ -251,6 +251,7 @@ async function handleEvent(ev) {
       })
       .first()
     : null;
+  let suppressionOnlyEmailMessage = null;
   // Fallback: tracked sends carry custom_args.email_message_id (+ send_attempt_token),
   // echoed on every event. If the X-Message-Id isn't bound yet (a webhook can race
   // the post-send provider_message_id write), resolve the row by that id and backfill.
@@ -260,13 +261,18 @@ async function handleEvent(ev) {
   // send_attempt_token matches the row's current token. Otherwise a delayed event
   // from a prior attempt could mis-terminalize the row or mis-trigger recovery.
   if (!emailMessage && !newsletterDelivery && !automationSend && ev.email_message_id) {
-    const candidate = await db('email_messages')
+    const candidateById = await db('email_messages')
       .where({ id: String(ev.email_message_id) })
-      .modify((q) => {
-        if (email) q.whereRaw('LOWER(recipient_email_snapshot) = ?', [String(email).toLowerCase()]);
-      })
       .first()
       .catch(() => null);
+    // A signed event's own custom-arg id plus provider-evidenced email remain
+    // trustworthy address-level evidence even after a newer retry has rebound
+    // this row or changed its recipient snapshot. The event email is required
+    // so suppression can never fall back to that newer destination.
+    suppressionOnlyEmailMessage = candidateById && email ? candidateById : null;
+    const candidateEmailMatches = candidateById && (!email
+      || String(candidateById.recipient_email_snapshot || '').toLowerCase() === String(email).toLowerCase());
+    const candidate = candidateEmailMatches ? candidateById : null;
     const boundHere = candidate?.provider_message_id
       && String(candidate.provider_message_id) === String(messageId || '');
     const tokenMatches = candidate?.send_attempt_token && ev.send_attempt_token
@@ -357,7 +363,10 @@ async function handleEvent(ev) {
     return;
   }
   if (emailMessage) {
-    const processedNew = await processWebhookEvent(ev, messageId, email, (trx) => handleEmailMessageEvent(ev, emailMessage, trx));
+    let attemptMatched = true;
+    const processedNew = await processWebhookEvent(ev, messageId, email, async (trx) => {
+      attemptMatched = await handleEmailMessageEvent(ev, emailMessage, trx);
+    });
     // Bounce recovery runs AFTER the event transaction commits, only when the
     // event was newly processed (so a SendGrid redelivery can't re-trigger it).
     // It does a network re-send (sendgrid.sendOne), so dispatch it WITHOUT
@@ -366,7 +375,7 @@ async function handleEvent(ev) {
     // though this event is already marked processed). Best-effort, fire-and-forget.
     // Tracked bounces are NOT routed through alertBouncedContactAddress —
     // attemptRecovery has its own richer alert (alertUnrecoverableBounce).
-    if (processedNew) {
+    if (processedNew && attemptMatched) {
       if (providerRetry.isProviderBlockedEvent(ev)) {
         providerRetry.alertIfProviderRetriesExhausted(emailMessage, ev)
           .catch((err) => logger.error(`[sendgrid-webhook] provider-retry alert failed for ${messageId}: ${err.message}`));
@@ -388,6 +397,14 @@ async function handleEvent(ev) {
           .catch((err) => logger.error(`[sendgrid-webhook] recovery commit failed for ${messageId}: ${err.message}`));
       }
     }
+    return;
+  }
+  if (suppressionOnlyEmailMessage) {
+    await processWebhookEvent(ev, messageId, email, async (trx) => {
+      const snapshotGroup = await groupKeyForEmailMessage(suppressionOnlyEmailMessage, trx);
+      const groupKey = staleEmailSuppressionGroupKey(ev, snapshotGroup);
+      await recordEmailSuppressionForEvent(ev, suppressionOnlyEmailMessage, groupKey, eventOccurredAt(ev), trx);
+    });
     return;
   }
   // Fully untracked send (direct sendgrid.sendOne callers) — no ledger row to
@@ -701,6 +718,18 @@ function automationSuppressionGroupKeyForEvent(ev) {
   return null;
 }
 
+function staleEmailSuppressionGroupKey(ev, snapshotGroup) {
+  const precise = String(snapshotGroup || '').trim().toLowerCase() || null;
+  const asmGroup = automationSuppressionGroupKeyForEvent(ev);
+  if (!asmGroup) return precise;
+  // transactional_required is sent with ASM group 0, so a signed service ASM
+  // event cannot belong to that snapshot. Other precise keys remain valid
+  // only within the same broad marketing/service lane.
+  if (!precise || precise === 'transactional_required') return asmGroup;
+  const sameLane = precise.startsWith('marketing_') === asmGroup.startsWith('marketing_');
+  return sameLane ? precise : asmGroup;
+}
+
 async function groupKeyForEmailMessage(message, client = db) {
   if (
     Object.prototype.hasOwnProperty.call(message || {}, 'suppression_group_key_snapshot') &&
@@ -811,10 +840,38 @@ async function handleEmailMessageEvent(ev, message, client = db) {
   });
 
   const updates = computeEmailMessageEventUpdates(ev, message, now);
-  if (updates) await client('email_messages').where({ id: message.id }).update(updates);
-  await reconcileSummaryForEmailEvent(ev, message, updates, client);
+  const attempt = client('email_messages').where({ id: message.id });
+  if (message.send_attempt_token == null) attempt.whereNull('send_attempt_token');
+  else attempt.where({ send_attempt_token: message.send_attempt_token });
+  let attemptMatched;
+  if (updates) {
+    // The row was resolved before the event transaction began. A direct retry
+    // or provider-retry claim can replace its attempt token in that gap; fence
+    // this mutation to the resolved attempt so the stale event cannot fail or
+    // schedule the new attempt. Legacy rows with no token remain compatible,
+    // but only while the current row is still null-tokened.
+    const matched = await attempt.update(updates);
+    attemptMatched = Number(matched) > 0;
+  } else {
+    // Repeated bounce/delivery events can still trigger recovery. Retained
+    // timestamps make their row update a no-op, not proof of attempt ownership.
+    attemptMatched = Boolean(await attempt.forUpdate().first('id'));
+  }
+  if (attemptMatched) {
+    // Reconcile only the current attempt; an old callback cannot settle a
+    // newer billing Email reservation even when its address signal is valid.
+    if (String(ev.event || '').toLowerCase() === 'delivered') {
+      await require('../services/billing-email-reservation')
+        .markBillingEmailReservationDelivered({ ...message, ...updates }, client);
+    }
+    await reconcileSummaryForEmailEvent(ev, message, updates, client);
+  }
+  // Address-level provider signals remain valid even when this event lost the
+  // attempt race. Record them while the existing address lock is held; the
+  // attempt verdict only gates row-scoped reconciliation/recovery.
   const groupKey = await groupKeyForEmailMessage(message, client);
   await recordEmailSuppressionForEvent(ev, message, groupKey, now, client);
+  return attemptMatched;
 }
 
 async function handleNewsletterEvent(ev, delivery, client = db) {
@@ -1049,5 +1106,7 @@ module.exports.bindNewsletterDeliveryMessageId = bindNewsletterDeliveryMessageId
 module.exports.reconcileNewsletterSendStatus = reconcileNewsletterSendStatus;
 module.exports.handleNewsletterEvent = handleNewsletterEvent;
 module.exports.handleEmailMessageEvent = handleEmailMessageEvent;
+module.exports.handleEvent = handleEvent;
+module.exports.staleEmailSuppressionGroupKey = staleEmailSuppressionGroupKey;
 module.exports.newsletterSuppressionGroupKeyForEvent = newsletterSuppressionGroupKeyForEvent;
 module.exports.shouldRecordNewsletterSuppression = shouldRecordNewsletterSuppression;

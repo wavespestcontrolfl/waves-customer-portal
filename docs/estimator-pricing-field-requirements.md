@@ -18,7 +18,7 @@ Conventions: **UI-A** = admin builder (`client/src/pages/admin/EstimateToolViewV
 | Callback reserve | lawn $2/visit; commercial $3/visit; residential T&S/pest/mosquito/rodent 0 (`constants.js:308,631,657`) | n/a | seed pest with the observed 2.6% callback rate × the recorded 28-min `pest_re_service` span (check-in → check-out, drive already inside it — no separate drive allowance, the same `callbackDriveMinutes: 0` the calculator uses) ≈ $0.43/visit at $35/h (28 ÷ 60 × $35 × 8 ÷ 307), report-only; refine to true on-site timing + drive once check-out-before-driving is enforced (MON-004) |
 | Card processing | 2.9% credit-only surcharge at checkout (`server/services/stripe-pricing.js:24`), never in the engine price | n/a | include in contribution-margin reporting only |
 | Margin floor | `GLOBAL.MARGIN_FLOOR` 0.35, **report-only** since the 2026-07-17 owner ruling (`discount-engine.js applyMarginGuard`) | below-floor lines are flagged, never lifted | owner decision: keep report-only or re-arm per service |
-| Inventory cost per product | `products_catalog.best_price` / `cost_per_unit` (173 of 192 active products have no `cost_per_unit`) | pre-slab only: fail-open to constants (`db-bridge.js:762-811`); every other service uses literals | every product-driven service reads the catalog; missing cost → warning on the line, never silent $0 |
+| Inventory cost per product | `products_catalog.best_price` / `cost_per_unit` (173 of 192 active products have no `cost_per_unit`) | pre-slab and termite bait stations (since 2026-09-09): fail-open to constants (`db-bridge.js:762-811, 899, 2153`); every other service uses literals | every product-driven service reads the catalog; missing cost → warning on the line, never silent $0 |
 | Protocol version | `server/config/protocols.json` (prose) + `lawn_protocols` rows; never stamped on an estimate | n/a | stamp `protocolKey@version` on each line |
 | Equipment calibration | `equipment_calibrations.carrier_gal_per_1000` (3 rows, all `estimated_not_field_verified`) | never read by pricing | field-verify, then feed material quantities |
 | Override audit | manual discount `internalReason` (required for custom presets only); no user id, no timestamp, no original price on the estimate row | n/a | `overridden_by`, `overridden_at`, `original_price`, `override_reason` per line |
@@ -54,7 +54,7 @@ Same property fields as §1 (the price is `max($199, round(quarterly base × 2.2
 |---|---|---|---|---|---|
 | Treatable lawn sq ft | yes — bracket lookup (`lookupLawnBracket`) | UI-A (`measuredTurfSf`, number + slider; `TURF_CONFIRMATION_REQUIRED` 400 when a whole-lawn service has no manual turf), UI-P (lot-derived), AI/LEAD (lot × 0.68 fallback, `turfBasis: lotFallback`, LOW confidence) | UI-A: negative → dropped silently to the AI/lot estimate; 0 accepted and priced (audit run: 0 sf → $45.33/app, no flag) | lot-derived turf with `FIELD_VERIFY_TURF_SQFT` (review) | 0/negative fail closed; lot-derived turf always parks (it does on the LEAD path) |
 | Grass track | yes (4 bracket tables) | UI-A, AI, LEAD (default st_augustine) | unknown string → st_augustine + `unknown_grass_type_priced_st_augustine` | default track | keep; require on UI-A |
-| Cadence (6/9/12) | yes | UI-A (menu no longer offers 4), AI (`tier`), LEAD (default enhanced 9x) | `lawnFreq=4` / `tier=basic` → **enhanced 9x silently** (`resolveLawnTier`) | 9x default | reject 4x or add a 4x column (catalog still sells `lawn_care_quarterly`) |
+| Cadence (sold for new quotes: 9/12; 6x hidden since 2026-09-24, 4x retired) | yes | UI-A (menu no longer offers 4), AI (`tier`), LEAD (default enhanced 9x) | `lawnFreq=4` / `tier=basic` → **enhanced 9x silently** (`resolveLawnTier`) | 9x default | reject 4x or add a 4x column (catalog still sells `lawn_care_quarterly`) |
 | Bermuda suppression | optional adder (+$15 + $2/1,000 sf per app) | UI-A (st_augustine only; gate on in prod) | fail-closed when the gate or knobs are invalid | — | keep |
 | Route density | cost model only | — | — | DENSE (5 min) | expose as a knob or measure |
 | Inventory fields | none read | — | — | `LAWN_MATERIAL_BUDGETS` hand-derived (`packages/lawn-cost-floor/index.js:54-59`) | derive budgets from `lawn_protocol_products` × catalog cost per window, automatically |
@@ -69,15 +69,15 @@ One-time lawn additionally needs `treatmentType` (fert/weed/pest/fungicide multi
 | Field | Required | Collected by | Validation today | Missing-data behaviour | Required behaviour |
 |---|---|---|---|---|---|
 | Ornamental bed sq ft | yes (material $0.055/sf; labor bed/500 min) | UI-A (`bedArea` → sent as `estimatedBedAreaSf`, stamped `bedAreaSource: estimated` even when hand-measured), UI-P/AI (lot × density %), lookup vision | no clamp (owner ruling 2026-08-10); ≥ 8,000 → review | lot-based estimate (`medium` confidence, not parked); no lot → 2,000 fallback + review | a typed bed area must be `explicit`; lot-based must carry a review reason |
-| **Non-palm tree count** | yes (1.5 min/tree; $4/tree/yr) | UI-A (`treeCount`), UI-P, AI (`treeCount` 1–200), lookup vision | UI-A: blank → explicit **0** (suppresses the density fallback; audit run: $45.25/mo vs $58.75/mo with density estimate), negative accepted | density fallback {light 3, moderate 6, heavy 10} only when truly absent | blank must be absent, not 0; require ≥0 integer |
-| **Palm count** | yes when armed; today folds into per-tree terms **only when supplied on the service line** (`service-pricing.js:2745-2770`) | UI-P and AI send `services.treeShrub.palmCount` (priced); **UI-A sends `profile.palmCount` (property level) → $0 effect** (audit run: 30 palms $53.08/mo vs $95.17/mo) | UI-A guards 1–200 when a T&S line is selected | property-level palms ignored silently (P1) | translator passes `palmCount` on the service line; engine treats property palms as a source when no line value |
+| **Non-palm tree count** | yes (1.5 min/tree; $4/tree/yr) | UI-A (`treeCount`), UI-P, AI (`treeCount` 1–200), lookup vision | **Fixed in v4.8** (INP-002, `property-lookup-v2.js` `firstNonNegativeIntegerOrThrow`): a blank UI-A field now stays absent instead of a fabricated explicit 0; negative rejected | density fallback {light 3, moderate 6, heavy 10} only when truly absent | blank must be absent, not 0; require ≥0 integer |
+| **Palm count** | yes when armed; today folds into per-tree terms **only when supplied on the service line** (`service-pricing.js:2745-2770`) | UI-P and AI send `services.treeShrub.palmCount` (priced); **Fixed in v4.8** (INP-001, `property-lookup-v2.js` `translateV2CallToV1Input`): UI-A now forwards palm count on the service line too, falling back to the property-level count only when the operator supplies none | UI-A guards 1–200 when a T&S line is selected | resolved — see Fixed in v4.8 note | translator passes `palmCount` on the service line; engine treats property palms as a source when no line value |
 | Palm size / height / method | not modeled in T&S (only in `palm_injection`) | — | — | — | owner decision: add palm size to the routine reserve when armed |
 | Shrub count / shrub size | **not modeled** (density enum only) | — | — | — | owner decision |
-| Access difficulty | yes (0/8/15 min) | UI-P/AI (`access`); **UI-A does not collect it** (translator sends `{tier:'standard'}` only) | enum | easy | add to UI-A |
-| Tier (4/6/9) | yes | UI-P/AI; **UI-A hardcodes standard** | enum | standard | add to UI-A |
+| Access difficulty | yes (0/8/15 min) | UI-P/AI (`access`); **Fixed in v4.8** (INP-004, `property-lookup-v2.js` `translateV2CallToV1Input`): UI-A now collects and forwards it | enum | easy | done (v4.8) |
+| Tier (sold for new quotes: 6/9; 4x Light retired 2026-09-24) | yes | UI-P/AI; **Fixed in v4.8** (INP-004, `property-lookup-v2.js` `translateV2CallToV1Input`): UI-A now forwards the selected tier instead of hardcoding `standard` | enum | standard | done (v4.8) |
 | Initial vs maintenance | not modeled (no corrective/initial visit) | — | — | — | owner decision |
 | Inventory | none read (June-2026 catalog prices baked into `materialModel`) | — | — | — | re-derive from catalog |
-| Protocol | `protocols.json` T&S (6 visits); pricing sells 4/6/9 | — | — | — | align protocol cadence with sold cadence |
+| Protocol | `protocols.json` T&S (6 visits); pricing sells 6/9 (4x Light retired 2026-09-24) | — | — | — | align protocol cadence with sold cadence |
 
 ## 5. Palm injection (`palm_injection`)
 
@@ -147,7 +147,7 @@ Required: offer key (single vs 2-visit package), `fleaComplexity` (light/moderat
 
 ## 14. Stinging insects (`stinging`)
 
-Required: species, tier (1–3), removal option; optional aggressiveness/height/confined. **UI-A collects none of them** — every admin wasp quote is a tier-2 paper wasp with no removal (`property-lookup-v2.js:4232-4241`). Add the fields to the builder.
+Required: species, tier (1–4), removal option; optional aggressiveness/height/confined. **Fixed:** UI-A now collects species, scope tier and removal (`EstimateToolViewV2.jsx` `stingSpecies` / `stingTier` / `stingRemoval`; `property-lookup-v2.js` `translateV2CallToV1Input`); the paper-wasp/tier-2/no-removal defaults apply only when a field is left blank.
 
 ## 15. Lawn specialty (`plugging`, `top_dressing`, `dethatching`)
 
