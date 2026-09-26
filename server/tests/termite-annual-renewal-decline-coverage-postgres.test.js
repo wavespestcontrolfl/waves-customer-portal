@@ -1017,5 +1017,62 @@ describeOrSkip('termite annual renewal decline — coverage, renew supersession,
     expect((await db('annual_prepay_terms').where({ id: current.term.id }).first()).status).toBe('active');
     expect(await billingModeOf(db, current.customerId)).toBe('annual_prepay');
   });
+  // Codex #4940 r11 P1: opening the bell marks the task READ — that is not
+  // the retrieval. A read task still gets the date correction.
+  test('a READ task, then term_end extended: a replacement task at the new date plus a correction bell; once only', async () => {
+    const { db, Renewals, raiseTermiteRetrievalTask, notifyAdmin } = await load();
+    const fx = await dueDeclinedTerm(db);
+    expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 1, raised: 1 });
+    // Staff open the bell (NotificationBell marks it read) — stations still in.
+    await db('notifications').whereRaw("metadata->>'churnEpisode' = 'portal_renewal_decline'").update({ read_at: new Date() });
+
+    const later = dayOffset(fx.today, 20);
+    await db('annual_prepay_terms').where({ id: fx.term.id }).update({ term_end: later });
+    await Renewals.raisePendingDeclineRetrievalTasks();
+
+    expect(raiseTermiteRetrievalTask).toHaveBeenCalledTimes(2);
+    expect(raiseTermiteRetrievalTask).toHaveBeenLastCalledWith(fx.customerId, null, expect.objectContaining({ retrieveAfter: later, termId: fx.term.id }));
+    const tasks = await db('notifications').whereRaw("metadata->>'churnEpisode' = 'portal_renewal_decline'").orderBy('created_at', 'asc').select('metadata', 'read_at');
+    expect(tasks.map((r) => r.metadata.retrieveAfter)).toEqual([fx.termEnd, later]);
+    expect(tasks[1].read_at).toBeNull();
+    const laterBells = notifyAdmin.mock.calls.filter((c) => String(c[3]?.dedupeKey || '').endsWith(':date_moved_later'));
+    expect(laterBells).toHaveLength(1);
+    expect(laterBells[0][2]).toContain('later than the earlier station-retrieval task said');
+    const latestMarker = await db('activity_log').where({ action: 'termite_annual_decline_retrieval' }).orderBy('created_at', 'desc').first();
+    expect(latestMarker.metadata).toEqual(expect.objectContaining({ outcome: 'raised', retrieve_after: later }));
+
+    // The latest task now matches the end: nothing more.
+    await Renewals.raisePendingDeclineRetrievalTasks();
+    expect(raiseTermiteRetrievalTask).toHaveBeenCalledTimes(2);
+    expect(notifyAdmin.mock.calls.filter((c) => String(c[3]?.dedupeKey || '').endsWith(':date_moved_later'))).toHaveLength(1);
+  });
+
+  test('a READ task whose date still matches the retrieval end: nothing is re-raised or belled', async () => {
+    const { db, Renewals, raiseTermiteRetrievalTask, notifyAdmin } = await load();
+    await dueDeclinedTerm(db);
+    expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 1, raised: 1 });
+    await db('notifications').whereRaw("metadata->>'churnEpisode' = 'portal_renewal_decline'").update({ read_at: new Date() });
+    const bellsBefore = notifyAdmin.mock.calls.length;
+
+    await Renewals.raisePendingDeclineRetrievalTasks();
+    await Renewals.raisePendingDeclineRetrievalTasks();
+    expect(raiseTermiteRetrievalTask).toHaveBeenCalledTimes(1);
+    expect(notifyAdmin.mock.calls.length).toBe(bellsBefore);
+  });
+
+  test('a READ task dated more than six months back is outside the correction scan', async () => {
+    const { db, Renewals, raiseTermiteRetrievalTask, notifyAdmin } = await load();
+    const fx = await dueDeclinedTerm(db);
+    const old = addMonths(fx.today, -7);
+    await db('annual_prepay_terms').where({ id: fx.term.id }).update({ term_end: old });
+    expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 1, raised: 1 });
+    await db('notifications').whereRaw("metadata->>'churnEpisode' = 'portal_renewal_decline'").update({ read_at: new Date() });
+    const bellsBefore = notifyAdmin.mock.calls.length;
+
+    await db('annual_prepay_terms').where({ id: fx.term.id }).update({ term_end: dayOffset(old, 30) });
+    await Renewals.raisePendingDeclineRetrievalTasks();
+    expect(raiseTermiteRetrievalTask).toHaveBeenCalledTimes(1);
+    expect(notifyAdmin.mock.calls.length).toBe(bellsBefore);
+  });
 });
 

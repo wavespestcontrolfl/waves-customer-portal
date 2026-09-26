@@ -8466,29 +8466,36 @@ async function raisePendingDeclineRetrievalTasks({ limit = 50, today = etDateStr
 }
 
 // Codex #4940 r10 P1: a staff correction to term_end AFTER the due-time task
-// was raised. Only this decline's still-OPEN dated tasks are checked (read_at
-// null — once staff act on one, it is history):
-//   - term_end moved LATER than the task's date: the stations must wait —
-//     re-raise dated to the new term_end through the same helper (its dedupe
-//     key includes the date, and it retires the obsolete open row); the
-//     marker records the new date;
-//   - term_end moved EARLIER: the stations are due sooner and a task already
+// was raised. Every dated portal-decline task is checked, READ ones too
+// (Codex r11: opening the bell marks it read — that is not the retrieval),
+// bounded to tasks dated within the last six months or later. Per term, only
+// the LATEST task is compared with the term's current retrieval end
+// (declineRetrievalEnd); the same date means it is current — nothing done:
+//   - end moved LATER than the task's date: the stations must wait —
+//     re-raise dated to the new end through the same helper (its dedupe key
+//     includes the date, and it retires the obsolete open row); the marker
+//     records the new date, and staff are belled with the correction (they
+//     may already have read the old task);
+//   - end moved EARLIER: the stations are due sooner and a task already
 //     stands — staff are belled with the correction (once per new date).
 async function correctDeclineRetrievalDates(today) {
-  const open = await db('notifications')
+  const rows = await db('notifications')
     .where({ recipient_type: 'admin' })
-    .whereNull('read_at')
     .whereRaw("metadata->>'kind' = 'termite_station_retrieval'")
     .whereRaw("metadata->>'churnEpisode' = ?", [DECLINE_RETRIEVAL_EPISODE])
-    .whereRaw("metadata->>'retrieveAfter' is not null")
+    .whereRaw("metadata->>'retrieveAfter' >= ?", [addMonthsSameDayShared(today, -6)])
+    .orderBy('created_at', 'desc')
     .select('metadata');
-  for (const row of open) await correctDeclineRetrievalDate(parseActivityMetadata(row.metadata), today);
+  const latestByTerm = new Map();
+  for (const row of rows) {
+    const meta = parseActivityMetadata(row.metadata);
+    if (meta.termId && !latestByTerm.has(meta.termId)) latestByTerm.set(meta.termId, meta);
+  }
+  for (const latest of latestByTerm.values()) await correctDeclineRetrievalDate(latest, today);
 }
 
 async function correctDeclineRetrievalDate(meta, today) {
-  const term = meta.termId
-    ? await db('annual_prepay_terms').where({ id: meta.termId }).first(...DECLINE_RETRIEVAL_TERM_COLUMNS)
-    : null;
+  const term = await db('annual_prepay_terms').where({ id: meta.termId }).first(...DECLINE_RETRIEVAL_TERM_COLUMNS);
   // The same end the due check used — never a provisional term_end.
   const termEnd = term ? await declineRetrievalEnd(term) : null;
   if (!termEnd || termEnd === meta.retrieveAfter) return;
@@ -8504,11 +8511,15 @@ async function correctDeclineRetrievalDate(meta, today) {
     .first('id', 'created_at', 'metadata');
   if (!portalDecline) return;
   Object.assign(retrieval, await actOnDueDeclineRetrieval(term, { portalDecline, retrieveAfter: termEnd, key: termEnd }, today));
-  // Re-raised: record the new date. Otherwise (other coverage now, a newer
-  // instruction, a failure) staff are belled — once per new date, the bell's
-  // dedupe — and the stale open row is left for them.
-  if (retrieval.raised) await writeDeclineRetrievalMarker(term.id, retrieval, 'raised');
-  else await ringDeclineRetrievalStaffBell(term.id, retrieval);
+  // Re-raised: record the new date and bell the correction. Otherwise (other
+  // coverage now, a newer instruction, a failure) staff are belled — once per
+  // new date, the bell's dedupe — and the stale row is left for them.
+  if (retrieval.raised) {
+    await writeDeclineRetrievalMarker(term.id, retrieval, 'raised');
+    await ringDeclineRetrievalStaffBell(term.id, { ...retrieval, reason: 'date_moved_later', previousRetrieveAfter: meta.retrieveAfter });
+  } else {
+    await ringDeclineRetrievalStaffBell(term.id, retrieval);
+  }
 }
 
 // Staff-facing sentence per due-time outcome. `when` is "after <date>" for a
@@ -8526,6 +8537,10 @@ const RETRIEVAL_SENTENCES = {
   termite_bond: { manual: true, text: (when) => `This customer has an active termite bond, so no retrieval task was raised automatically — confirm which stations to pull ${when}.` },
   superseded_by_newer: { manual: true, text: (when) => `A newer station-retrieval instruction already stands on this account, so no separate task was raised for this decline — confirm it covers pulling the stations ${when}.` },
   failed: { manual: false, text: (when) => `The station-retrieval task could not be raised yet — it is retried automatically each day; create it by hand ${when === 'now' ? 'now' : `for ${when}`} if it does not appear.` },
+  date_moved_later: {
+    manual: false,
+    text: (when, retrieval) => `Its paid-through date was corrected to ${formatDateLabel(retrieval.termEnd)}, later than the earlier station-retrieval task said (after ${formatDateLabel(retrieval.previousRetrieveAfter)}) — a replacement task was raised: the stations come out ${when}, not before.`,
+  },
   date_moved_earlier: {
     manual: false,
     text: (when, retrieval) => `Its paid-through date was corrected to ${formatDateLabel(retrieval.termEnd)}, earlier than the open station-retrieval task says (after ${formatDateLabel(retrieval.previousRetrieveAfter)}) — the stations can come out ${when}.`,
