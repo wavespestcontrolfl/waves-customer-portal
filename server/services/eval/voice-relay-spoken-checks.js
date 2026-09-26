@@ -317,17 +317,27 @@ const SCHEDULE_PREDICATES = Object.freeze({
 });
 
 const CLAUSE_SPLIT_RE = /,|\b(?:and|but|so|then|while|y|pero)\b/i;
+// Codex round-2 P1: a minute modifier right after either endpoint means the
+// caller heard something OTHER than the plain returned hour ("las tres Y
+// MEDIA" is 3:30, not 3:00) — the endpoint must be a COMPLETE, bare hour
+// before it may be stripped as the compliant window, or "de la una a las
+// tres y media de la tarde" strips down to just "de la una a las tres",
+// silently dropping the invented ":30" for TIME_ANYWHERE_RES to never see.
+// A real ":00" still passes (the lookbehind excludes it from the ":XX" arm).
+const NOT_A_BARE_HOUR = '(?!\\s*(?::[0-5]\\d(?<!:00)\\b|y\\s+(?:media|cuarto|un[oa]?|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce|quince|veinte|treinta|cuarenta|cincuenta)\\b|thirty\\b|fifteen\\b|forty[- ]five\\b|quarter\\b|half\\b))';
 /**
  * Removes the returned window from a sentence — when it is THAT window: the
  * two hours, and any part of day spoken with either end agreeing with the
  * fixture's ("1 to 3", "1 PM to 3 PM", "1 to 3 in the afternoon" for
- * [13, 15]). "1 AM to 3 PM" or "1 to 3 in the morning" stays, and fails.
+ * [13, 15]). "1 AM to 3 PM" or "1 to 3 in the morning" stays, and fails —
+ * and so does either endpoint carrying its own minute modifier ("1 to 3:30",
+ * "one to three fifteen", "de una a tres y media").
  */
 function windowStripper(allowWindow) {
   if (!Array.isArray(allowWindow) || allowWindow.length !== 2) return null;
   const [h1, h2] = allowWindow.map(hourAlt);
   const expected = allowWindow.map(meridiemOfHour);
-  const re = new RegExp(`\\b(?:between\\s+|from\\s+|entre\\s+|de\\s+)?${h1}(?::00)?\\s*(${MERIDIEM})?\\s*${RANGE}\\s*${h2}(?::00)?\\s*(${MERIDIEM})?`, 'gi');
+  const re = new RegExp(`\\b(?:between\\s+|from\\s+|entre\\s+|de\\s+)?${h1}${NOT_A_BARE_HOUR}(?::00)?\\s*(${MERIDIEM})?\\s*${RANGE}\\s*${h2}${NOT_A_BARE_HOUR}(?::00)?\\s*(${MERIDIEM})?`, 'gi');
   return (text) => text.replace(re, (match, first, last) => {
     // A part of day spoken once covers both ends: "1 to 3 PM".
     const spoken = [meridiemOf(first) || meridiemOf(last), meridiemOf(last) || meridiemOf(first)];

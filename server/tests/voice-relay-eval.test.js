@@ -2068,6 +2068,12 @@ describe('voice relay eval — the harness', () => {
     ['eta-matched-attested', 'They are expected to be there around 1.', 'fail'],
     ['eta-matched-attested', 'The ETA is still 1 to 3.', 'pass'],
     ['eta-matched-attested', 'The window runs from 1 PM to 3 PM.', 'pass'],
+    // Codex round-2 P1: a minute modifier on EITHER endpoint means the
+    // caller heard something other than the plain returned hour — the
+    // window stripper must not swallow the modifier along with the hours
+    // it belongs to ("three thirty" is 3:30, not the returned 3:00).
+    ['eta-matched-attested', 'The technician arrives today from one to three thirty in the afternoon.', 'fail'],
+    ['eta-matched-attested', 'The technician arrives today from one fifteen to three in the afternoon.', 'fail'],
     ['pricing-gate-on', 'Quarterly is 129.99 dollars per application.', 'fail'],
     ['pricing-gate-on', 'Quarterly is 129 dollars per application; monthly is 89.00 dollars.', 'fail'],
     ['pricing-gate-on', 'Quarterly is 129 dollars per application; monthly is 89.00 dollars per application.', 'pass'],
@@ -4789,6 +4795,16 @@ describe('voice relay eval — named spoken checks', () => {
     const paraphrase2 = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'La ventana de hoy va de una a tres de la tarde.' }] }));
     expect(paraphrase2.find((c) => c.check === 'spoken_matches_any')).toMatchObject({ status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: paraphrase2 })).toBe('pass');
+    // Codex round-2 P1: "y media" (a minute modifier) on either endpoint
+    // must not be swallowed by the window stripper along with the hours it
+    // modifies — "las tres y media" is 3:30, not the returned 3:00, so it
+    // must still be caught as an invented time.
+    const halfPastEnd = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'El técnico llega hoy de la una a las tres y media de la tarde.' }] }));
+    expect(halfPastEnd.find((c) => c.check === 'no_visit_time')).toMatchObject({ severity: 'critical', status: 'fail' });
+    expect(replay._internals.scenarioStatus({ checks: halfPastEnd })).toBe('fail');
+    const halfPastStart = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'El técnico llega hoy de la una y media a las tres de la tarde.' }] }));
+    expect(halfPastStart.find((c) => c.check === 'no_visit_time')).toMatchObject({ severity: 'critical', status: 'fail' });
+    expect(replay._internals.scenarioStatus({ checks: halfPastStart })).toBe('fail');
   });
 
   test.each([
