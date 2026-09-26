@@ -82,7 +82,7 @@ export function useCommercialGlassActive() {
 export const GLASS_COPY = {
   ctaMain: 'Approve my plan and schedule',
   ctaBook: 'Book my first visit',
-  ctaMicro: 'No long-term contract · Unlimited free callbacks · 90-day money-back guarantee',
+  ctaMicro: 'No long-term contract · Unlimited free callbacks · Money-back guarantee',
   askTitle: 'Still deciding? Ask anything — instant answers',
   askExcerpt: 'Ask about pricing, treatments, scheduling, pets, kids, or what happens after approval — straight answers in seconds.',
   schedExcerpt: 'Our soonest openings — and if we’re already on your street that day, snag it and skip the line.',
@@ -125,7 +125,7 @@ export const GLASS_FOOTER_CITY_LINKS = [
 // or numbers are introduced here.
 const GLASS_PEST = {
   heroH1: 'Hello {first}, your pest-free {city} plan is ready!',
-  heroSub: 'We can start protecting your home as soon as {date}. Your plan includes exterior/interior pest protection, unlimited free callbacks, and a 90-day money-back guarantee \u2014 so you\u2019re not paying and praying the bugs stay gone in {city}.',
+  heroSub: 'We can start protecting your home as soon as {date}. Your plan includes exterior/interior pest protection, unlimited free callbacks, and a money-back guarantee \u2014 so you\u2019re not paying and praying the bugs stay gone in {city}.',
   eyebrow: 'Your pest-free home plan',
   aiTitle: 'Your price was built from your {city} home — not somebody else’s',
   aiBody: 'We didn’t guess. We measured your home, lot, roofline, and access points so your plan fits your actual property — not a generic average.',
@@ -157,7 +157,7 @@ const NEUTRAL_CTA_MICRO = 'Licensed & insured · Satisfaction guaranteed · No p
 // keeps or removes it), tenant re-services included in the plan, tenants can
 // join the portal/app for notifications, no-contract terms, and
 // satellite/county-records pricing (the same methodology the residential
-// aiBody claims). The residential-only promises (90-day money-back, waived
+// aiBody claims). The residential-only promises (money-back guarantee, waived
 // setup, "unlimited callbacks 100% guaranteed") are deliberately absent —
 // they are not established commercial terms, so this pack must not inherit
 // them (which is why commercial needed its own pack at all).
@@ -210,7 +210,7 @@ const GLASS_PACKS = {
   commercial_neutral: GLASS_COMMERCIAL_NEUTRAL,
   lawn_care: {
     heroH1: 'Hello {first}, your greener-lawn game plan is ready!',
-    heroSub: 'Built for your actual turf — feeding, weed control, and fungus watch on a program that fits your lawn, backed by a 90-day money-back guarantee.',
+    heroSub: 'Built for your actual turf — feeding, weed control, and fungus watch on a program that fits your lawn, backed by our money-back guarantee.',
     eyebrow: 'Your custom lawn program',
     // Lawn CTA terms drop "Unlimited free callbacks" (owner copy ruling
     // 2026-08-04): the shared default's callback claim sits directly under
@@ -219,7 +219,7 @@ const GLASS_PACKS = {
     // issue; it cannot replay the applications a lower tier didn't buy.
     // Mixed pest+lawn bundles demote to the neutral line via the existing
     // distinct-micros rule in glassCtaMicroForKeys.
-    ctaMicro: 'No long-term contract · Free between-visit service calls · 90-day money-back guarantee',
+    ctaMicro: 'No long-term contract · Free between-visit service calls · Money-back guarantee',
     aiTitle: 'Your price was built from your lawn — not somebody else’s',
     aiBody: 'We reviewed your lawn size, turf type, and current condition before pricing this program — your lawn, your price, nothing generic.',
     askChips: [
@@ -386,10 +386,10 @@ export function glassEstimateCopyFor(serviceCategory) {
 }
 
 // One-time-only estimates carry different terms than recurring plans — no
-// recurring callback promise, no 90-day money-back guarantee (the one-time
+// recurring callback promise, no money-back guarantee (the one-time
 // price card states its own 30-day callback period). The category packs
 // above all speak recurring-plan language ("unlimited free callbacks",
-// "90-day money-back guarantee"), so a one-time-only estimate overlays a
+// "money-back guarantee"), so a one-time-only estimate overlays a
 // terms-neutral hero (owner directive 2026-07-23). Every claim here is
 // already shipped: "Licensed & insured · Satisfaction guaranteed" is the
 // ONE_TIME_CTA_MICRO / GuaranteeStrip line, and the property-priced claim
@@ -519,7 +519,7 @@ export function glassPestInclusions(visitsPerYear, includeSetupBullet = false) {
     `Protected ${visits}× a year — full perimeter, entry points, eaves & harborage zones, every visit`,
     'Interior treatment included — no awkward upsell, no surprise charge',
     'If pests come back, so do we — unlimited free callbacks, 100% guaranteed',
-    '90-day money-back guarantee — if you don’t love it, you don’t pay',
+    'Money-back guarantee — if we can’t solve a covered problem, we refund your last service payment',
     'No long-term contract — stay because it works, not because you’re trapped',
   ];
   if (includeSetupBullet) {
@@ -553,7 +553,7 @@ const GLASS_SERVICE_INCLUSIONS = {
     'Barrier treatment where mosquitoes actually rest — shaded foliage and harborage, not a fog-and-go',
     'Standing-water and breeding-pressure checks every visit — we cut the problem at its source',
     'Weather-aware timing so treatments work instead of washing away',
-    '90-day money-back guarantee — if you don’t love it, you don’t pay',
+    'Money-back guarantee — if we can’t solve a covered problem, we refund your last service payment',
     'No long-term contract — cancel anytime',
   ],
   tree_shrub: [

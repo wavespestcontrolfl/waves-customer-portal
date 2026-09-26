@@ -407,6 +407,17 @@ const TEXT_POLICIES = Object.freeze({
     primary: Object.freeze({ provider: PROVIDER.GEMINI, model: GEMINI_VISION_BEST }),
     fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_FRONTIER }),
   }),
+  photoIdVision: Object.freeze({
+    name: 'photoIdVision',
+    // Photo ID (pest-identification.js: website funnel, SMS photo triage,
+    // admin assessments, the customer app). Owner ruling 2026-09-26: Gemini
+    // 3.8 Flash reads the photo; a miss, an unsure answer
+    // (PHOTO_ID_ESCALATE_BELOW) or a risky runner-up goes to ChatGPT's best
+    // vision model, the same OpenAI leg as lawnVisitAssessment. Sequential,
+    // no Claude leg (DECISIONS.md 2026-09-26). Honors GEMINI_VISION_MODEL.
+    primary: Object.freeze({ provider: PROVIDER.GEMINI, model: process.env.GEMINI_VISION_MODEL || GEMINI_VISION_BEST }),
+    fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_FRONTIER }),
+  }),
   visitBrief: Object.freeze({
     name: 'visitBrief',
     // Per-visit pocket-reference brief (previsit-brief.js) — summarization
