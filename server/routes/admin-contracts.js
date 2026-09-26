@@ -723,12 +723,33 @@ router.post('/:id/countersign', async (req, res, next) => {
     }
 
     await db.transaction(async (trx) => {
+      // Shared lock order (codex #4842 r2 P2): CUSTOMER row FOR UPDATE
+      // first, then the contract — the event insert below takes the
+      // customer FK lock, and customer merge / merge-undo lock customer
+      // before contract, so contract-first could deadlock with them. Same
+      // peek → customer lock → re-verify shape as /:id/cancel and
+      // /:token/sign.
+      const peek = await trx('customer_contracts')
+        .where({ id: req.params.id })
+        .first('id', 'customer_id');
+      if (!peek) {
+        response = { status: 404, body: { error: 'Contract not found' } };
+        return;
+      }
+      if (peek.customer_id) {
+        await trx('customers').where({ id: peek.customer_id }).forUpdate().first('id');
+      }
       const contract = await trx('customer_contracts')
         .where({ id: req.params.id })
         .forUpdate()
         .first();
       if (!contract) {
         response = { status: 404, body: { error: 'Contract not found' } };
+        return;
+      }
+      if (String(contract.customer_id || '') !== String(peek.customer_id || '')) {
+        // Repointed while we waited (a merge-undo) — retry under the right lock.
+        response = { status: 409, body: { error: 'This contract was just updated — reload and try again.' } };
         return;
       }
       if (contract.contract_type !== 'document_template' || contract.document_template_key !== ANNUAL_TEMPLATE_KEY) {

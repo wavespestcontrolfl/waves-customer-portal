@@ -524,6 +524,7 @@ async function reconcileTermiteAnnualActivations({ conn = db, limit = 200 } = {}
     deliveryScanned: 0, delivered: 0, deliveryFailed: 0, charged: 0, collectionHeld: 0,
     anchorScanned: 0, anchored: 0, anchorFailed: 0,
     handoffScanned: 0, handedOff: 0, handoffFailed: 0,
+    countersignScanned: 0, countersignReminded: 0,
   };
   await retryAwaitingActivations({ conn, limit, counts });
   await retryUndeliveredInvoices({ conn, limit, counts });
@@ -531,7 +532,54 @@ async function reconcileTermiteAnnualActivations({ conn = db, limit = 200 } = {}
   // happened needs no "schedule the installation" bell.
   await anchorInstalledTerms({ conn, limit, counts });
   await retryInstallHandoffs({ conn, limit, counts });
+  await remindPendingCountersignatures({ conn, limit, counts });
   return counts;
+}
+
+// The admin bell is one shared, recipient-less feed with a single read
+// state, so any admin opening the sign-time "countersign needed" prompt, or
+// using Mark all read, consumes it before the certified operator (the only
+// account POST /countersign accepts) sees it. The durable prompt is this
+// daily reminder: while a signed annual agreement stays un-countersigned
+// past a day, it re-rings at most once per rolling day (codex #4842 r2 P2).
+// Oldest signature first, bounded. Countersigning is a record step, so this
+// never touches activation, billing, or scheduling.
+const COUNTERSIGN_REMINDER_WINDOW_MS = 23 * 60 * 60 * 1000;
+
+async function remindPendingCountersignatures({ conn, limit, counts }) {
+  try {
+    const pending = await conn('customer_contracts')
+      .where({ document_template_key: ANNUAL_TEMPLATE_KEY, status: 'signed' })
+      .whereNull('countersigned_at')
+      .whereRaw("signed_at < now() - interval '1 day'")
+      .orderBy('signed_at', 'asc')
+      .select('id', 'customer_id', 'signed_name', 'signed_at')
+      .limit(limit);
+    counts.countersignScanned = pending.length;
+    const NotificationService = require('./notification-service');
+    for (const row of pending) {
+      try {
+        const bell = await NotificationService.notifyAdmin(
+          'customer',
+          'Termite annual agreement still needs your countersignature',
+          `${row.signed_name || 'The customer'} signed the Waves Subterranean Termite Protection annual agreement on ${dateOnlyString(row.signed_at) || 'an earlier day'}; it has not been countersigned yet. Only the certified operator in charge can countersign, on the Contracts page.`,
+          {
+            link: '/admin/contracts?tab=requests&status=signed',
+            bell: true,
+            dedupeKey: `termite-annual-countersign-reminder:${row.id}`,
+            dedupeWindowMs: COUNTERSIGN_REMINDER_WINDOW_MS,
+            metadata: { customerId: row.customer_id, contractId: row.id },
+          },
+        );
+        if (bell && !bell.deduped) counts.countersignReminded += 1;
+      } catch (err) {
+        logger.warn(`[termite-annual-activation] countersign reminder failed for contract ${row.id}: ${err.message}`);
+      }
+    }
+  } catch (err) {
+    logger.error(`[termite-annual-activation] countersign reminder scan failed: ${err.message}`);
+    counts.countersignScanError = err.message;
+  }
 }
 
 // The minimal retry for a failed activation. Signing burns the contract's

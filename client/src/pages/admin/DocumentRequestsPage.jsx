@@ -151,7 +151,7 @@ export default function DocumentRequestsPage({ embedded = false, onSecondaryNav 
   const [countersignTarget, setCountersignTarget] = useState(null);
   // ?status=<tab> preselects a tab (the countersign-needed bell links to
   // ?tab=requests&status=signed); anything unrecognised falls back to Open.
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const requestedStatus = searchParams.get("status");
   const [status, setStatus] = useState(() => (
     STATUS_TABS.some((tab) => tab.key === requestedStatus) ? requestedStatus : "open"
@@ -162,6 +162,19 @@ export default function DocumentRequestsPage({ embedded = false, onSecondaryNav 
   useEffect(() => {
     if (STATUS_TABS.some((tab) => tab.key === requestedStatus)) setStatus(requestedStatus);
   }, [requestedStatus]);
+  // A tab click mirrors itself into ?status= (other params kept, history
+  // replaced), so the URL never holds a stale status. Otherwise a later bell
+  // link to the SAME ?status=signed would be no change and the effect above
+  // wouldn't fire (codex #4842 r2 P2).
+  const selectStatus = useCallback((key) => {
+    setStatus(key);
+    setSearchParams((prev) => {
+      if (prev.get("status") === key) return prev;
+      const next = new URLSearchParams(prev);
+      next.set("status", key);
+      return next;
+    }, { replace: true });
+  }, [setSearchParams]);
   const [search, setSearch] = useState("");
   const [requests, setRequests] = useState([]);
   const [stats, setStats] = useState(null);
@@ -306,7 +319,7 @@ export default function DocumentRequestsPage({ embedded = false, onSecondaryNav 
   };
 
   const hubNavRef = useRef({});
-  hubNavRef.current = { setStatus };
+  hubNavRef.current = { setStatus: selectStatus };
   useEffect(() => {
     if (!embedded || !onSecondaryNav) return undefined;
     onSecondaryNav({
@@ -329,7 +342,7 @@ export default function DocumentRequestsPage({ embedded = false, onSecondaryNav 
         icon={FileClock}
         sections={STATUS_TABS}
         activeKey={status}
-        onSectionChange={setStatus}
+        onSectionChange={selectStatus}
         navGridClassName="grid-cols-2 md:grid-cols-6"
       />
       )}

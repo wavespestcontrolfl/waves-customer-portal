@@ -168,9 +168,10 @@ describe('POST /api/admin/contracts/:id/countersign — admin', () => {
   });
 
   test('happy path: signed annual agreement gets countersigned under the row lock, stamps the admin identity, and the event lands', async () => {
-    let served = false;
+    let reads = 0;
     mockRows.customer_contracts = (b) => {
-      if (!served) { served = true; return BASE_CONTRACT; }
+      // peek + locked read see the pre-countersign row; the post-write re-read sees the stamp.
+      if (reads++ < 2) return BASE_CONTRACT;
       // loadContract's post-write re-read (contractQuery aliases the table as cc).
       return { ...BASE_CONTRACT, countersigned_at: new Date(), countersigned_by: ADMIN.id, countersigner_name: 'Adam Owner' };
     };
@@ -183,8 +184,13 @@ describe('POST /api/admin/contracts/:id/countersign — admin', () => {
       expect(body.contract.countersignerName).toBe('Adam Owner');
     });
 
-    const contractBuilder = db.mock.results.map((r) => r.value).find((v) => v.table === 'customer_contracts' && v.forUpdate.mock.calls.length);
+    const builders = db.mock.results.map((r) => r.value);
+    const contractBuilder = builders.find((v) => v.table === 'customer_contracts' && v.forUpdate.mock.calls.length);
     expect(contractBuilder.forUpdate).toHaveBeenCalled();
+    // Customer row locked BEFORE the contract row (codex #4842 r2 P2).
+    const customerLock = builders.findIndex((v) => v.table === 'customers' && v.forUpdate.mock.calls.length);
+    expect(customerLock).toBeGreaterThanOrEqual(0);
+    expect(customerLock).toBeLessThan(builders.indexOf(contractBuilder));
 
     const [update] = mockWrites.filter((w) => w.op === 'update' && w.table === 'customer_contracts');
     expect(update.payload.countersigned_by).toBe(ADMIN.id);
@@ -215,9 +221,10 @@ describe('POST /api/admin/contracts/:id/countersign — admin', () => {
   });
 
   test('the recorded name is the verified operator\'s printed name — the typed name only has to match it', async () => {
-    let served = false;
+    let reads = 0;
     mockRows.customer_contracts = () => {
-      if (!served) { served = true; return BASE_CONTRACT; }
+      // peek + locked read see the pre-countersign row; the post-write re-read sees the stamp.
+      if (reads++ < 2) return BASE_CONTRACT;
       return { ...BASE_CONTRACT, countersigned_at: new Date(), countersigner_name: 'Adam Owner' };
     };
     await withServer(async (baseUrl) => {
@@ -344,9 +351,10 @@ test('the applicator license is valid THROUGH its expiry day in ET (not expired 
       const filter = b.filters.find((f) => f && f.id);
       return filter?.id === ADMIN.id ? lastDay : null;
     };
-    let served = false;
+    let reads = 0;
     mockRows.customer_contracts = () => {
-      if (!served) { served = true; return BASE_CONTRACT; }
+      // peek + locked read see the pre-countersign row; the post-write re-read sees the stamp.
+      if (reads++ < 2) return BASE_CONTRACT;
       return { ...BASE_CONTRACT, countersigned_at: new Date(), countersigner_name: 'Adam Owner' };
     };
     await withServer(async (baseUrl) => {
@@ -356,4 +364,14 @@ test('the applicator license is valid THROUGH its expiry day in ET (not expired 
   } finally {
     jest.useRealTimers();
   }
+});
+
+test('a contract repointed to another customer while waiting on the customer lock 409s and writes nothing', async () => {
+  let reads = 0;
+  mockRows.customer_contracts = () => (reads++ === 0 ? BASE_CONTRACT : { ...BASE_CONTRACT, customer_id: 'cust-merged' });
+  await withServer(async (baseUrl) => {
+    const res = await fetch(`${baseUrl}/api/admin/contracts/${CONTRACT_ID}/countersign`, { method: 'POST', headers: adminHdrs, body: JSON.stringify({ name: 'Adam Owner' }) });
+    expect(res.status).toBe(409);
+  });
+  expect(mockWrites).toHaveLength(0);
 });

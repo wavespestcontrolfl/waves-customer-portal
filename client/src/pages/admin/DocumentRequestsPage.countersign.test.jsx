@@ -86,6 +86,25 @@ it("follows ?status= when the bell link navigates to the already-mounted page (c
   await waitFor(() => expect(listPaths.at(-1)).toContain("status=signed"));
 });
 
+it("a tab click clears the stale ?status= so the SAME bell link works again (codex #4842 r2 P2)", async () => {
+  function GoToSigned() {
+    const navigate = useNavigate();
+    return <button type="button" onClick={() => navigate("/admin/contracts?tab=requests&status=signed")}>open bell link</button>;
+  }
+  render(
+    <MemoryRouter initialEntries={["/admin/contracts?tab=requests&status=signed"]}>
+      <GoToSigned />
+      <DocumentRequestsPage />
+    </MemoryRouter>,
+  );
+  await screen.findByText("Annual agreement");
+  expect(listPaths.at(-1)).toContain("status=signed");
+  fireEvent.click(screen.getByRole("button", { name: /^Open/ }));
+  await waitFor(() => expect(listPaths.at(-1)).toContain("status=open"));
+  fireEvent.click(screen.getByRole("button", { name: "open bell link" }));
+  await waitFor(() => expect(listPaths.at(-1)).toContain("status=signed"));
+});
+
 it("offers Countersign only on a signed, not-yet-countersigned annual agreement", async () => {
   render(<MemoryRouter><DocumentRequestsPage /></MemoryRouter>);
   await screen.findByText("Annual agreement");

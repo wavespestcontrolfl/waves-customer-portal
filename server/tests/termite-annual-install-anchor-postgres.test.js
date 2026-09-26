@@ -31,6 +31,7 @@ const MIGRATIONS = [
   '20260925000005_termite_annual_signature_charge',
   '20260925000006_termite_annual_install_anchor',
   '20260925000007_termite_annual_anchor_attempt',
+  '20260925030001_termite_annual_countersignature_columns',
 ];
 
 async function createScratchDb() {
@@ -52,12 +53,15 @@ async function createScratchDb() {
     email_sent_at timestamptz,
     created_at timestamptz NOT NULL DEFAULT now()
   )`);
+  // 20260925030001's countersigned_by FK target.
+  await db.raw('CREATE TABLE technicians (id uuid PRIMARY KEY DEFAULT gen_random_uuid())');
   await db.raw(`CREATE TABLE customer_contracts (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     customer_id uuid,
     document_template_key text,
     status text,
     signed_at timestamptz,
+    signed_name text,
     document_variables_snapshot jsonb
   )`);
   await db.raw('CREATE TABLE payment_method_consents (id uuid PRIMARY KEY DEFAULT gen_random_uuid())');
@@ -499,5 +503,56 @@ describeOrSkip('termite annual installation anchor + install handoff — real Po
       expect(await sweep()).toMatchObject({ handoffScanned: 1, handedOff: 1 });
       expect(notifyAdmin).not.toHaveBeenCalledWith('estimate', expect.stringContaining('schedule the installation'), expect.anything(), expect.anything());
     }
+  });
+});
+
+describeOrSkip('termite annual countersign reminder — real Postgres (codex #4842 r2 P2)', () => {
+  let fixture;
+  beforeEach(async () => { fixture = await createScratchDb(); });
+  afterEach(async () => {
+    jest.resetModules();
+    jest.clearAllMocks();
+    if (fixture) await fixture.destroy();
+  });
+
+  function load() {
+    const { db } = fixture;
+    const notifyAdmin = jest.fn(async () => ({ id: randomUUID(), deduped: false }));
+    jest.doMock('../models/db', () => db);
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
+    jest.doMock('../services/annual-prepay-renewals', () => ({ createTermForAnnualPrepay: jest.fn(), refreshTermSnapshot: jest.fn() }));
+    const { reconcileTermiteAnnualActivations } = require('../services/termite-annual-activation');
+    return { sweep: () => reconcileTermiteAnnualActivations({ conn: db }), notifyAdmin, db };
+  }
+
+  test('re-rings a signed annual agreement left un-countersigned past a day; never a countersigned, fresh, or other-template one', async () => {
+    const { sweep, notifyAdmin, db } = load();
+    const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+    const [pending] = await db('customer_contracts').insert({
+      customer_id: randomUUID(), document_template_key: ANNUAL_TEMPLATE_KEY, status: 'signed', signed_at: twoDaysAgo, signed_name: 'Sam Customer',
+    }).returning('*');
+    await db('customer_contracts').insert([
+      { customer_id: randomUUID(), document_template_key: ANNUAL_TEMPLATE_KEY, status: 'signed', signed_at: twoDaysAgo, countersigned_at: new Date() },
+      { customer_id: randomUUID(), document_template_key: ANNUAL_TEMPLATE_KEY, status: 'signed', signed_at: new Date() },
+      { customer_id: randomUUID(), document_template_key: 'service_agreement.termite_bait_program_purchase', status: 'signed', signed_at: twoDaysAgo },
+    ]);
+
+    const counts = await sweep();
+
+    expect(Object.keys(counts).filter((key) => key.endsWith('ScanError'))).toEqual([]);
+    expect(counts).toMatchObject({ countersignScanned: 1, countersignReminded: 1 });
+    const reminders = notifyAdmin.mock.calls.filter(([, , , opts]) => String(opts?.dedupeKey || '').startsWith('termite-annual-countersign-reminder:'));
+    expect(reminders).toHaveLength(1);
+    const [category, title, body, opts] = reminders[0];
+    expect(category).toBe('customer');
+    expect(title).toMatch(/still needs your countersignature/i);
+    expect(body).toMatch(/Sam Customer/);
+    expect(opts).toMatchObject({
+      bell: true,
+      dedupeKey: `termite-annual-countersign-reminder:${pending.id}`,
+      dedupeWindowMs: 23 * 60 * 60 * 1000,
+      link: '/admin/contracts?tab=requests&status=signed',
+    });
   });
 });
