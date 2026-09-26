@@ -269,8 +269,9 @@ router.post('/sms', async (req, res, next) => {
     }
     if (out.status !== 200 && !out.ambiguous) await releaseClaim(claimKey);
     if (out.status === 200) {
-      // One row per delivered text — a daily horizon keeps the table trivial.
-      void db('sms_send_claims').where('created_at', '<', db.raw("NOW() - interval '1 day'")).del().catch(() => {});
+      // One row per delivered text — a daily horizon keeps the table trivial
+      // (weekly claims such as the BI briefing's are kept: sms-send-claims.js).
+      void require('../services/sms-send-claims').pruneSmsSendClaims().catch(() => {});
     }
     res.status(out.status).json(out.json);
   } catch (err) { next(sanitized(err, 'text')); }

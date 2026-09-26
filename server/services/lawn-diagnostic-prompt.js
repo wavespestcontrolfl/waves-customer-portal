@@ -31,6 +31,7 @@ const { anthropicText, geminiText } = require('./llm/call');
 // BEFORE the narrative LLM sees them, so no raw/injected finding text can echo into
 // the published customer_summary (the output is scrubbed again at the public route).
 const { safeConditionLabel, scrubCustomerText, NO_VISIBLE_STRESS_FINDING } = require('./lawn-diagnostic-report');
+const { ledgerCall, ledgerCallRejected } = require('./llm-dispatch-metrics');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -353,13 +354,65 @@ function parseJsonResponse(response) {
   return JSON.parse(text.replace(/```json|```/g, '').trim());
 }
 
+// Finding-level contract (DIAGNOSIS_SYSTEM_PROMPT / CHALLENGE_SYSTEM_PROMPT
+// OUTPUT, ~194-212 / ~294-313): `name` is required; `confidence` / `severity`
+// / `urgency` are each gated to their documented enum ONLY WHEN PRESENT — an
+// absent optional field keeps its documented downstream default
+// (lawn-diagnostic-report.js's normalizeConfidence/normalizeSeverity/
+// normalizeUrgency). A PRESENT off-contract value (an object for `name`,
+// "certain" for confidence, "critical" for severity) is never silently
+// rewritten to that default — the whole finding is dropped instead.
+// Accepted values are exactly the keys lawn-diagnostic-report.js's
+// normalizeConfidence / normalizeSeverity / normalizeUrgency recognise
+// (synonyms included — "medium" confidence and "high" severity were always
+// read correctly there), compared through the same key normalisation; null
+// counts as absent (the normalizers default it).
+const FINDING_CONFIDENCE_KEYS = ['low', 'moderate', 'high', 'medium', 'unknown'];
+const FINDING_SEVERITY_KEYS = ['low', 'minor', 'mild', 'medium', 'moderate', 'high', 'severe'];
+const FINDING_URGENCY_KEYS = ['monitor', 'follow_up', 'immediate_callback'];
+const findingKey = (value) => String(value).trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+const onEnum = (value, keys) => value === undefined || value === null
+  || (typeof value === 'string' && keys.includes(findingKey(value)));
+
+// Every other field lawn-diagnostic-report.js's normalizeFindings reads
+// (the contract's snake_case names and the camelCase aliases it also
+// accepts): the text fields pass straight through to the report and the tech
+// page, which renders them as React children — an object there crashed the
+// diagnostic view — and list items are String()-ed into "[object Object]",
+// so each must be absent or text (lists: text items); spread_risk is keyed
+// like the other enums (Codex r17 on #4884).
+const FINDING_TEXT_FIELDS = ['finding_id', 'findingId', 'id', 'primary_finding', 'primaryFinding', 'estimated_area_affected', 'estimatedAreaAffected', 'confirmation_step', 'confirmationStep', 'customer_wording', 'customerWording'];
+const FINDING_LIST_FIELDS = ['observed_evidence', 'observedEvidence', 'evidence', 'inferred_context', 'inferredContext', 'negative_evidence', 'negativeEvidence'];
+const FINDING_SPREAD_KEYS = ['low', 'moderate', 'medium', 'high', 'unknown'];
+const isFindingText = (value) => value === undefined || value === null || typeof value === 'string'
+  || (typeof value === 'number' && Number.isFinite(value));
+const isFindingTextList = (value) => isFindingText(value) || (Array.isArray(value) && value.every(isFindingText));
+
+function isOnContractFinding(finding) {
+  if (!finding || typeof finding !== 'object' || Array.isArray(finding)) return false;
+  if (typeof finding.name !== 'string' || !finding.name.trim()) return false;
+  return onEnum(finding.confidence, FINDING_CONFIDENCE_KEYS)
+    && onEnum(finding.severity, FINDING_SEVERITY_KEYS)
+    && onEnum(finding.urgency, FINDING_URGENCY_KEYS)
+    && onEnum(finding.spread_risk, FINDING_SPREAD_KEYS)
+    && onEnum(finding.spreadRisk, FINDING_SPREAD_KEYS)
+    && FINDING_TEXT_FIELDS.every((field) => isFindingText(finding[field]))
+    && FINDING_LIST_FIELDS.every((field) => isFindingTextList(finding[field]));
+}
+
 function normalizeDiagnosisJson(json = {}) {
+  const rawCount = Array.isArray(json.findings) ? json.findings.length : 0;
   const findings = Array.isArray(json.findings)
-    ? json.findings.filter((finding) => finding && typeof finding === 'object')
+    ? json.findings.filter(isOnContractFinding)
     : [];
   return {
     findings,
     customer_summary: typeof json.customer_summary === 'string' ? json.customer_summary : '',
+    // >0 whenever a candidate member was dropped as off-contract (not an
+    // object, no name, a present-but-off-enum confidence/severity/urgency/
+    // spread_risk, or a non-text field) — callers fail the ledger row on this
+    // even when enough on-contract findings remain to keep going.
+    droppedFindings: rawCount - findings.length,
   };
 }
 
@@ -419,7 +472,7 @@ async function runDiagnosis(context = {}) {
       type: 'image',
       source: { type: 'base64', media_type: photo.mimeType || 'image/jpeg', data: photo.data },
     }));
-    const response = await client.messages.create({
+    const response = await ledgerCall('anthropic', MODELS.VISION, () => client.messages.create({
       model: MODELS.VISION,
       ...anthropicEffortConfig(MODELS.VISION),
       max_tokens: anthropicMaxTokens(MODELS.VISION, 1600),
@@ -431,10 +484,19 @@ async function runDiagnosis(context = {}) {
           { type: 'text', text: `Diagnose the lawn in the ${photos.length} photo(s) above. Context (JSON):\n${buildDiagnosisContext(context)}` },
         ],
       }],
-    });
-    const parsed = parseJsonResponse(response);
-    if (!parsed) return { ok: false, reason: 'empty_response' };
+    }), { laneId: 'lawn_diag_vision' });
+    let parsed;
+    try { parsed = parseJsonResponse(response); } catch { parsed = null; }
+    if (!parsed) {
+      // A refusal is already a failed row; only an answered-but-unparseable
+      // one flips here (mirrors runChallenge below).
+      if (response?.stop_reason !== 'refusal') ledgerCallRejected(response, 'invalid_json');
+      return { ok: false, reason: 'empty_response' };
+    }
     const normalized = normalizeDiagnosisJson(parsed);
+    if (!normalized.findings.length || normalized.droppedFindings > 0) {
+      ledgerCallRejected(response, 'schema_invalid');
+    }
     if (!normalized.findings.length) return { ok: false, reason: 'no_findings' };
     return { ok: true, findings: normalized.findings };
   } catch (err) {
@@ -583,7 +645,7 @@ async function runChallenge(perception = {}, context = {}) {
       overall_notes: perception.overall_notes || null,
       ...diagnosisContextObject(context),
     }, null, 2);
-    const response = await client.messages.create({
+    const response = await ledgerCall('anthropic', LAWN_CHALLENGE_MODEL, () => client.messages.create({
       model: LAWN_CHALLENGE_MODEL,
       ...anthropicEffortConfig(LAWN_CHALLENGE_MODEL),
       max_tokens: anthropicMaxTokens(LAWN_CHALLENGE_MODEL, 1800),
@@ -592,14 +654,19 @@ async function runChallenge(perception = {}, context = {}) {
         role: 'user',
         content: `Photo observations + context (JSON):\n${payload}\n\nChallenge each implied cause, then return the findings JSON now.`,
       }],
-    });
+    }), { laneId: 'lawn_challenge' });
     let parsed;
     try { parsed = parseJsonResponse(response); } catch { parsed = null; }
     if (!parsed) {
       const failureType = response?.stop_reason === 'refusal' ? 'policy_refusal' : 'invalid_json';
+      // A refusal is already a failed row; only an answered-but-unparseable one flips here.
+      if (failureType === 'invalid_json') ledgerCallRejected(response, 'invalid_json');
       return { ok: false, reason: 'empty_response', findings: [], challenge: challengeMeta({ attempted: true, degraded: true, failureType }) };
     }
     const normalized = normalizeDiagnosisJson(parsed);
+    if (!normalized.findings.length || normalized.droppedFindings > 0) {
+      ledgerCallRejected(response, 'schema_invalid');
+    }
     if (!normalized.findings.length) {
       return { ok: false, reason: 'no_findings', findings: [], challenge: challengeMeta({ attempted: true, degraded: true, failureType: 'empty_findings' }) };
     }
@@ -654,7 +721,7 @@ async function runNarrative(contract = {}, context = {}) {
   if (!client) return { ok: false, reason: 'no_api' };
 
   try {
-    const response = await client.messages.create({
+    const response = await ledgerCall('anthropic', MODELS.FLAGSHIP, () => client.messages.create({
       model: MODELS.FLAGSHIP,
       ...anthropicEffortConfig(MODELS.FLAGSHIP),
       max_tokens: anthropicMaxTokens(MODELS.FLAGSHIP, 600),
@@ -663,10 +730,17 @@ async function runNarrative(contract = {}, context = {}) {
         role: 'user',
         content: `Reconciled diagnostic contract (JSON):\n${buildNarrativeContext(contract)}\n\nWrite the customer_summary now.`,
       }],
-    });
-    const parsed = parseJsonResponse(response);
+    }), { laneId: 'lawn_diag_writer' });
+    let parsed;
+    try { parsed = parseJsonResponse(response); } catch { parsed = null; }
     const summary = parsed && typeof parsed.customer_summary === 'string' ? parsed.customer_summary.trim() : '';
-    if (!summary) return { ok: false, reason: 'empty_summary' };
+    if (!summary) {
+      // A refusal is already a failed row; an answered reply with no usable
+      // summary — unparseable JSON, or JSON missing/blank customer_summary —
+      // flips the row the same way runChallenge's rejection does.
+      if (response?.stop_reason !== 'refusal') ledgerCallRejected(response, parsed ? 'invalid_output' : 'invalid_json');
+      return { ok: false, reason: 'empty_summary' };
+    }
     return { ok: true, customer_summary: summary };
   } catch (err) {
     logger.error(`[lawn-diagnostic-prompt] runNarrative failed: ${err.message}`);

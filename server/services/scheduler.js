@@ -1653,6 +1653,50 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // While the follow-up pager is live, the overdue watchdog takes each
+  // promise over once it ages off the pager's 24-hour list. With callback
+  // cards on it already runs every 5 minutes; with cards off its cadence is
+  // daily, so it also runs — unmodified — once an hour, keeping that handoff
+  // gap under an hour (its bells dedupe per promise per ET day).
+  cron.schedule('0 25 * * * *', async () => {
+    const { isEnabled } = require('../config/feature-gates');
+    if (!isEnabled('followupSlaAlerts') || require('./callback-cards').enabled()) return;
+    try {
+      const { runCallCommitmentsWatchdog } = require('./call-commitments-watchdog');
+      const result = await runCallCommitmentsWatchdog();
+      if (result?.skipped && result.reason !== 'gated_off' && result.reason !== 'lease_held') {
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const t0 = Date.now();
+        await recordJobStart('call-commitments-watchdog').catch(() => {});
+        await recordJobEnd('call-commitments-watchdog', t0, new Error(`tick skipped: ${result.reason || 'no_connection'}`)).catch(() => {});
+        throw new Error(`Hourly overdue-promise tick skipped: ${result.reason || 'no_connection'}`);
+      }
+    } catch (err) {
+      logger.error(`[followup-sla] hourly watchdog tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // One-hour follow-up pager: every 15 minutes through the 8 AM–8 PM ET
+  // window (the 8:00–8:45 PM ticks catch deadlines that land at the close).
+  cron.schedule('0 */15 8-20 * * *', async () => {
+    try {
+      const { runFollowUpSlaWatcher } = require('./followup-sla-watcher');
+      const result = await runFollowUpSlaWatcher();
+      // A skip before runExclusive's own bookkeeping (no_connection: pool
+      // exhausted) is a MISSED tick and job_health must say so, as the
+      // adjacent commitment watchers record it.
+      if (result?.skipped && result.reason !== 'gated_off' && result.reason !== 'lease_held') {
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const t0 = Date.now();
+        await recordJobStart('followup-sla-watcher').catch(() => {});
+        await recordJobEnd('followup-sla-watcher', t0, new Error(`tick skipped: ${result.reason || 'no_connection'}`)).catch(() => {});
+        throw new Error(`Follow-up pager tick skipped: ${result.reason || 'no_connection'}`);
+      }
+    } catch (err) {
+      logger.error(`[followup-sla] tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   cron.schedule('0 20 7 * * *', async () => {
     try {
       const { runCallCommitmentsWatchdog } = require('./call-commitments-watchdog');
@@ -2138,11 +2182,17 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // WEEKLY MONDAY 5:00AM — BI Briefing Agent (Monday morning SMS to Adam)
+  // runExclusive: a Railway deploy overlap fires this tick on both
+  // instances; the second skips (lease_held) instead of starting a second
+  // paid session and saving a second report. The owner text is also claimed
+  // once per ET week inside the tool (bi-briefing-sms.js).
   cron.schedule('0 5 * * 1', async () => {
     logger.info('Running: Weekly BI Briefing Agent');
     try {
-      const BIAgent = require('./bi-agent');
-      await BIAgent.run();
+      await runExclusive('bi-weekly-briefing', async () => {
+        const BIAgent = require('./bi-agent');
+        await BIAgent.run();
+      });
     } catch (err) {
       logger.error(`BI Briefing Agent failed: ${err.message}`);
     }
@@ -4631,7 +4681,7 @@ function initScheduledJobs() {
           // the attempts ran out; parked as send_failed with no due time it
           // is inert, as the sibling release leaves a held row (pre-push
           // codex P1 on #3750; codex r18 P2 on #3804).
-          const deterministicRefusal = !!(e && ['CLIENT_FALLBACK_PRICING', 'PRICING_AUTHORITY_NOT_SERVER', 'REPRICE_PENDING', 'ESTIMATE_REVIEW_STALE', 'SEND_OUTCOME_UNCERTAIN', 'BID_VALIDITY_EXPIRED'].includes(e.code));
+          const deterministicRefusal = !!(e && ['CLIENT_FALLBACK_PRICING', 'PRICING_AUTHORITY_NOT_SERVER', 'REPRICE_PENDING', 'ESTIMATE_REVIEW_STALE', 'SEND_OUTCOME_UNCERTAIN', 'BID_VALIDITY_EXPIRED', 'LEGACY_AUTOFILL_PRICE'].includes(e.code));
           // A reviewed attempt cannot be retimed: its receipt and pinned
           // offer belong to the original schedule. Even a bookkeeping throw
           // can follow provider acceptance, so stop for explicit staff review.

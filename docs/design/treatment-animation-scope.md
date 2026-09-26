@@ -1,6 +1,6 @@
 # Termite Foam — Marked-Photo Treatment Visual
 
-**Date:** 2026-08-08, revised 2026-08-09 · **Status:** scope for owner sign-off. No code changes in this doc.
+**Date:** 2026-08-08, revised 2026-08-09 · **Status:** historical scope — the marked-photo build shipped 2026-08-10 in #3301, dark behind `GATE_PHOTO_MARKS`; the remaining work is the gate rollout. Sections below record the original proposal; see the dated updates for what shipped.
 
 **Visual mock — the build:** https://claude.ai/code/artifact/042796a8-3fdd-43e4-8ae6-ab65e467c0d3
 — the marked-photo card as the customer sees it, the count rule shown side by side, the
@@ -30,9 +30,11 @@ shipped the same day** — PR #3306, "Termite foam: full service identity," merg
   and only enters the schedule when an estimate carrying a foam line is accepted.
 
 **So the trigger is the catalog service key, not a method-select value.** No change to the
-termite `treatment_method` options is needed, and none should be made — the options list stays
-`Spot treatment · Liquid perimeter · Trenching · Bait station setup · Cartridge replacement ·
-Wood treatment · Other`, with `percent_solution` required for the liquid-dilution ones.
+termite `treatment_method` options is needed, and none should be made — the options list is now
+`Spot treatment · Liquid perimeter · Trenching · Rodding · Foam / void injection ·
+Drill-and-inject · Bait station setup · Cartridge replacement · Wood treatment · Other`
+(Rodding, Foam / void injection and Drill-and-inject were added in #3701), with
+`percent_solution` required for the liquid-dilution ones.
 
 Two facts from that PR shape everything below:
 
@@ -67,8 +69,10 @@ termite_treatment: { eligible: true, variant: 'spray',
 registry's default is ineligible — and it does **not** break the coverage contract test, which
 enumerates only the generic lanes the completion-lane registry names, and foam is typed rather
 than generic. But it does mean foam has no positive classification of its own yet.
+**Update 2026-09-26:** since #3301 both keys are in `SERVICE_KEY_RULES` as eligible `photo`
+variants (`server/services/service-report/trace-eligibility.js`).
 
-### The routing this needs
+### The routing this needed (shipped in #3301)
 
 Typed lanes are evaluated first, and the module is explicit that *a typed lane's verdict must
 not depend on which catalog key routed to it*. Since foam shares `termite_treatment` with the
@@ -122,6 +126,9 @@ caption.
 ---
 
 ## 5. The build
+
+**Update 2026-09-26:** shipped 2026-08-10 in #3301, dark behind `GATE_PHOTO_MARKS`
+(`server/services/service-report/trace-eligibility.js`, `client/src/components/report/MarkedPhotoCard.jsx`).
 
 ### 5.1 Marks storage
 

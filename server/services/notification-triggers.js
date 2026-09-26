@@ -436,7 +436,7 @@ const TRIGGER_REGISTRY = {
     build: (p) => ({
       title: 'Deposit paid but not credited',
       body: `Estimate ${String(p.estimateId || 'unknown').slice(0, 40)}: deposit is on the ledger but the first-invoice credit failed — reconcile manually`,
-      link: '/admin/estimates',
+      link: p.estimateId ? `/admin/estimates?estimateId=${encodeURIComponent(p.estimateId)}` : '/admin/estimates',
     }),
   },
   // Fired by the service-report delivery queue when an email report has

@@ -86,10 +86,39 @@ describe('isAuthorizedWdoArrangerBooking (predicate)', () => {
     }))).toBe(false);
   });
 
+  // codex #4966 r1 P1: a treatment (or any non-inspection) intent fails
+  // closed even with a catalog-looking "WDO Inspection Service" name.
+  test.each(['active_infestation_treatment', 'preventative_one_time', 'quote_only', undefined])(
+    'service_intent %s never qualifies, even named "WDO Inspection Service"',
+    (intent) => {
+      expect(isWdoInspectionRequest({ service_intent: intent, primary_service_category: 'wdo', specific_service_name: 'WDO Inspection Service' })).toBe(false);
+      const sr = { ...wdoExtraction().service_request, service_intent: intent, specific_service_name: 'WDO Inspection Service' };
+      expect(isAuthorizedWdoArrangerBooking(wdoExtraction({ service_request: sr }))).toBe(false);
+      expect(computeDeterministicTriageFlags(wdoExtraction({ service_request: sr }))).toContain('caller_not_authorized');
+    }
+  );
+
+  // codex #4966 r2 P1: the name is an exact-name ALLOWLIST, so inflected or
+  // extra treatment wording can never slip past a blocklist.
+  test.each([
+    'WDO inspection and treatments', 'WDO Retreatment', 'WDO inspection (tented)',
+    'WDO inspection, baited', 'WDO fumigated inspection', 'WDO Inspection + Termite Treatment',
+    'WDO Inspection and Repair', 'Termite Inspection Service', 'WDO Inspection Service for treatment',
+  ])('name %p never qualifies', (name) => {
+    expect(isWdoInspectionRequest({ service_intent: 'inspection_only', primary_service_category: 'wdo', specific_service_name: name })).toBe(false);
+  });
+  test.each([
+    'WDO', 'WDO Inspection', 'WDO Inspection Service', 'wdo inspection report',
+    'Wood-Destroying Organism Inspection', 'Wood Destroying Organisms (WDO) Inspection',
+    'WDO clearance letter', 'WDO Inspection Certificate',
+  ])('name %p qualifies', (name) => {
+    expect(isWdoInspectionRequest({ service_intent: 'inspection_only', primary_service_category: 'wdo', specific_service_name: name })).toBe(true);
+  });
+
   test('isWdoInspectionRequest matches on category or specific name', () => {
-    expect(isWdoInspectionRequest({ primary_service_category: 'wdo', specific_service_name: null })).toBe(true);
-    expect(isWdoInspectionRequest({ primary_service_category: 'inspection_only', specific_service_name: 'WDO Inspection Service' })).toBe(true);
-    expect(isWdoInspectionRequest({ primary_service_category: 'pest_general', specific_service_name: 'General Pest Control' })).toBe(false);
+    expect(isWdoInspectionRequest({ service_intent: 'inspection_only', primary_service_category: 'wdo', specific_service_name: null })).toBe(true);
+    expect(isWdoInspectionRequest({ service_intent: 'inspection_only', primary_service_category: 'inspection_only', specific_service_name: 'WDO Inspection Service' })).toBe(true);
+    expect(isWdoInspectionRequest({ service_intent: 'inspection_only', primary_service_category: 'pest_general', specific_service_name: 'General Pest Control' })).toBe(false);
   });
 });
 
@@ -285,18 +314,16 @@ describe('codex #4890 r1 — audit trail and shadow bridge', () => {
 });
 
 describe('codex #4890 r5/r6 — WDO identity and elapsed agreed days', () => {
-  const { arrangerSlotElapsed } = require('../services/call-recording-processor')._test;
-
   test('a named non-WDO service is not a WDO request even when the category says wdo', () => {
     const contradictory = wdoExtraction({
-      service_request: { primary_service_category: 'wdo', specific_service_name: 'Termite Inspection Service' },
+      service_request: { service_intent: 'inspection_only', primary_service_category: 'wdo', specific_service_name: 'Termite Inspection Service' },
     });
     expect(isAuthorizedWdoArrangerBooking(contradictory)).toBe(false);
     expect(computeDeterministicTriageFlags(contradictory, { contactPhone: ANI, addressValidation: AV_CLEAN })).toContain('caller_not_authorized');
   });
 
   test('the category alone identifies a WDO when no specific service was named', () => {
-    const categoryOnly = wdoExtraction({ service_request: { primary_service_category: 'wdo', specific_service_name: null } });
+    const categoryOnly = wdoExtraction({ service_request: { service_intent: 'inspection_only', primary_service_category: 'wdo', specific_service_name: null } });
     expect(isAuthorizedWdoArrangerBooking(categoryOnly)).toBe(true);
   });
 
@@ -305,38 +332,74 @@ describe('codex #4890 r5/r6 — WDO identity and elapsed agreed days', () => {
     expect(isAuthorizedWdoArrangerBooking(past)).toBe(true);
   });
 
-  describe('arrangerSlotElapsed (clock pinned to 2026-09-28 13:30 EDT)', () => {
+  // The generalized check itself (codex #4919 round-7 P1) — no
+  // `authorized` concept at all, since it now applies to every fresh call
+  // booking regardless of arranger status or mode.
+  describe('slotElapsedAtBookingTime (clock pinned to 2026-09-28 13:30 EDT) — applies to every booking, not just arranger-authorized ones', () => {
+    const { slotElapsedAtBookingTime } = require('../services/call-recording-processor')._test;
     beforeAll(() => { jest.useFakeTimers({ now: new Date('2026-09-28T17:30:00Z') }); });
     afterAll(() => { jest.useRealTimers(); });
 
-    test('an agreed ET day that has already passed is refused', () => {
-      expect(arrangerSlotElapsed({ authorized: true, scheduledDate: '2026-09-27', windowStart: '16:00' })).toBe(true);
+    test('an ORDINARY (non-arranger) booking whose agreed ET day has already passed is refused', () => {
+      expect(slotElapsedAtBookingTime('2026-09-27', '16:00')).toBe(true);
     });
 
-    test('a same-day slot whose start has passed on the ET wall clock is refused (codex #4890 r7 P1)', () => {
-      expect(arrangerSlotElapsed({ authorized: true, scheduledDate: '2026-09-28', windowStart: '10:00' })).toBe(true);
+    test('an ORDINARY same-day slot whose start has passed on the ET wall clock is refused', () => {
+      expect(slotElapsedAtBookingTime('2026-09-28', '10:00')).toBe(true);
+    });
+
+    test('an ORDINARY later same-day slot still books', () => {
+      expect(slotElapsedAtBookingTime('2026-09-28', '16:00')).toBe(false);
+    });
+
+    test('an ORDINARY future agreed day still books', () => {
+      expect(slotElapsedAtBookingTime('2026-09-29', '10:00')).toBe(false);
     });
 
     test('a midnight start rendered as "24:00" counts as the start of the day (codex #4890 r8 P2)', () => {
-      expect(arrangerSlotElapsed({ authorized: true, scheduledDate: '2026-09-28', windowStart: '24:00' })).toBe(true);
+      expect(slotElapsedAtBookingTime('2026-09-28', '24:00')).toBe(true);
     });
 
-    test('a later same-day slot still books', () => {
-      expect(arrangerSlotElapsed({ authorized: true, scheduledDate: '2026-09-28', windowStart: '16:00' })).toBe(false);
+    test('no scheduledDate at all is never elapsed (nothing to refuse)', () => {
+      expect(slotElapsedAtBookingTime(null, '10:00')).toBe(false);
+      expect(slotElapsedAtBookingTime(undefined, '10:00')).toBe(false);
     });
 
-    test('a future agreed day still books', () => {
-      expect(arrangerSlotElapsed({ authorized: true, scheduledDate: '2026-09-29', windowStart: '10:00' })).toBe(false);
-    });
-
-    test('bookings that did not need the arranger rule are untouched by this guard', () => {
-      expect(arrangerSlotElapsed({ authorized: false, scheduledDate: '2026-09-27', windowStart: '10:00' })).toBe(false);
-    });
   });
 
   test('the spelled-out WDO service name is recognized (codex #4890 r7 P2)', () => {
-    const spelled = wdoExtraction({ service_request: { primary_service_category: 'wdo', specific_service_name: 'Wood-Destroying Organism Inspection' } });
+    const spelled = wdoExtraction({ service_request: { service_intent: 'inspection_only', primary_service_category: 'wdo', specific_service_name: 'Wood-Destroying Organism Inspection' } });
     expect(isAuthorizedWdoArrangerBooking(spelled)).toBe(true);
+  });
+});
+
+// Codex #4890 post-merge review P1: specific_service_name is free text, so a
+// lender/realtor call labelled "WDO Treatment Service" matched the bare
+// \bWDO\b identity regex and, through isAuthorizedWdoArrangerBooking,
+// stripped caller_not_authorized from a third party's TREATMENT request.
+// The owner ruling covers only an inspection/report arranged for a lender or
+// realtor — never a treatment.
+describe('codex #4890 post-merge review P1 — arranger authorization requires INSPECTION identity, never treatment', () => {
+  test('"WDO Inspection Service" binds (inspection identity, no treatment wording)', () => {
+    expect(isWdoInspectionRequest({ service_intent: 'inspection_only', primary_service_category: 'wdo', specific_service_name: 'WDO Inspection Service' })).toBe(true);
+    const bound = wdoExtraction({ service_request: { service_intent: 'inspection_only', primary_service_category: 'wdo', specific_service_name: 'WDO Inspection Service' } });
+    expect(isAuthorizedWdoArrangerBooking(bound)).toBe(true);
+  });
+
+  test.each([
+    ['WDO Treatment Service'],
+    ['WDO Treatment'],
+    ['Wood-Destroying Organism Treatment'],
+    ['termite treatment'],
+    ['WDO inspection and treatment'],
+  ])('%s does NOT bind — not an inspection/report request', (specificServiceName) => {
+    expect(isWdoInspectionRequest({ service_intent: 'inspection_only', primary_service_category: 'wdo', specific_service_name: specificServiceName })).toBe(false);
+    const notBound = wdoExtraction({ service_request: { service_intent: 'inspection_only', primary_service_category: 'wdo', specific_service_name: specificServiceName } });
+    expect(isAuthorizedWdoArrangerBooking(notBound)).toBe(false);
+    // Fails closed all the way through: the deterministic pass still raises
+    // caller_not_authorized for a lender/realtor arranging a TREATMENT, even
+    // with a confirmed slot.
+    expect(computeDeterministicTriageFlags(notBound, { contactPhone: ANI, addressValidation: AV_CLEAN })).toContain('caller_not_authorized');
   });
 });
 
@@ -348,7 +411,7 @@ describe('codex #4890 r5/r6 — WDO identity and elapsed agreed days', () => {
 // that entire pass. The finalization transaction's lock-then-transition
 // contract is already pinned this way elsewhere in this codebase (see
 // call-processor-ownership-fences.test.js's regex-scan style for the same
-// function), and arrangerSlotElapsed's own logic is already exhaustively
+// function), and slotElapsedAtBookingTime's own logic is already exhaustively
 // unit-tested above — what these two pin is that the fix is actually wired
 // in, in the right place, relative to the writes it must run before.
 describe('codex #4890 P2 — the card-retirement finalization transaction takes the triage lock first', () => {
@@ -395,13 +458,17 @@ describe('codex #4890 P2 — the arranger slot-elapsed guard is rechecked inside
     expect(insertMarker).toBeGreaterThan(txStart);
   });
 
-  test('the elapsed check is re-run immediately before the fresh insert, gated the same way as the early (pre-transaction) check', () => {
+  // codex #4919 round-7 P1: generalized from arranger-only to every fresh
+  // booking — the pre-insert recheck now calls slotElapsedAtBookingTime
+  // directly (no `authorized`/arranger gate at this call site; every
+  // booking reaches this same insert, in both enforce and shadow/legacy
+  // mode) — see call-timeline.test.js / call-recording-processor-guards.test.js
+  // for slotElapsedAtBookingTime's own unit coverage.
+  test('the elapsed check is re-run immediately before the fresh insert, ungated by arranger status — every booking gets this recheck now', () => {
     const body = source.slice(txStart, insertMarker);
-    const idx = body.lastIndexOf('arrangerSlotElapsed({');
+    const idx = body.lastIndexOf('slotElapsedAtBookingTime(');
     expect(idx).toBeGreaterThan(-1);
     const recheck = body.slice(idx, idx + 500);
-    // Same authorization gate (enforce mode only) as the early check.
-    expect(recheck).toContain('CALL_EXTRACTION_V2_DRIVES_ROUTING && wdoArrangerAuthorizedThisPass');
     // Same call-linked-visit exemption as the early check, now read through
     // this transaction's own connection.
     expect(recheck).toContain('findExistingCallAppointment({ customerId, call, scheduledDate, windowStart, serviceType, trx }');
@@ -412,7 +479,8 @@ describe('codex #4890 P2 — the arranger slot-elapsed guard is rechecked inside
 
   test('nothing between the recheck and the insert can move scheduledDate/windowStart out from under it', () => {
     const body = source.slice(txStart, insertMarker);
-    const idx = body.lastIndexOf('arrangerSlotElapsed({');
+    const idx = body.lastIndexOf('slotElapsedAtBookingTime(');
+    expect(idx).toBeGreaterThan(-1);
     const between = body.slice(idx, body.length);
     // The only statement between the recheck and the insert is the insert
     // call itself (plus the recheck's own guard body) — no re-assignment of
@@ -431,12 +499,79 @@ describe('codex #4890 P2 — the arranger slot-elapsed guard is rechecked inside
   });
 
   test('the in-transaction hold reason is distinct from the early (pre-transaction) check\'s skippedReason, so the early check keeps its own auto_booking_skipped_after_approval fallback card', () => {
-    // Regression guard: if the in-transaction reason were ever changed back
-    // to 'past_extracted_date' (the early check's own skippedReason) and
-    // added to heldReasons, the early check's refusal would silently stop
-    // filing ANY review card (pre-push audit P1 the early check's own
-    // comment relies on).
+    // Regression guard: if the in-transaction reason were ever changed to
+    // 'slot_elapsed_at_booking_time' (the early check's own skippedReason,
+    // codex #4919 round-7 P1 — was 'past_extracted_date' before the
+    // generalization) and added to heldReasons, the early check's refusal
+    // would silently stop filing ANY review card in enforce mode (its
+    // shadow-mode card is separate and unaffected either way).
     const heldReasonsMatch = source.match(/const heldReasons = new Set\(\[[^\]]*\]\);/)[0];
+    expect(heldReasonsMatch).not.toContain("'slot_elapsed_at_booking_time'");
     expect(heldReasonsMatch).not.toContain("'past_extracted_date'");
+  });
+});
+
+// Codex #4890 post-merge review P2: buildTriageItem left
+// 'arranger_slot_elapsed_pre_insert' out of flagToCategoryMap AND
+// SCHEDULING_PAYLOAD_FLAGS, so the card filed as service_unknown with no
+// scheduling-window snapshot for the office to re-book against.
+describe('codex #4890 post-merge review P2 — arranger_slot_elapsed_pre_insert files in the scheduling lane', () => {
+  const { buildTriageItem } = require('../services/call-routing-gates');
+
+  test('buildTriageItem gives it the scheduling (time_ambiguous) category and carries the scheduling_window payload', () => {
+    const item = buildTriageItem({
+      callLogId: 42,
+      flag: 'arranger_slot_elapsed_pre_insert',
+      extraction: wdoExtraction(),
+      severity: 'advisory',
+    });
+    expect(item.category).toBe('time_ambiguous');
+    const payload = JSON.parse(item.payload);
+    expect(payload.scheduling_window).toEqual(expect.objectContaining({
+      status: 'confirmed',
+      confirmed_start_at: '2026-09-28T10:00:00-04:00',
+    }));
+  });
+});
+
+// codex #4919 round-7 P1: the EARLY (pre-transaction) elapsed-slot check —
+// generalized the same way as the pre-insert recheck above, from
+// arranger-only to every fresh booking. Source-pinned for the same reason
+// as the pre-insert recheck's own P2 tests: a live run needs standing up
+// almost the whole processRecording pass.
+describe('codex #4919 round-7 P1 — the early elapsed-slot check is generalized and files a shadow-mode card', () => {
+  const fs = require('fs');
+  const source = fs.readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+
+  const checkAt = source.indexOf('if (scheduledDate && slotElapsedAtBookingTime(scheduledDate, windowStart)');
+
+  test('the early check calls slotElapsedAtBookingTime directly — no arranger/authorized gate', () => {
+    expect(checkAt).toBeGreaterThan(-1);
+    const section = source.slice(checkAt, checkAt + 700);
+    expect(section).toContain("findExistingCallAppointment({ customerId, call, scheduledDate, windowStart, serviceType }");
+    expect(section).toContain("skippedReason: 'slot_elapsed_at_booking_time'");
+    expect(section).not.toContain('wdoArrangerAuthorizedThisPass');
+  });
+
+  // codex #4919 round-9 P2: this used to carry its own inline lock + merge +
+  // dispute-field-clearing writer (byte-for-byte identical to
+  // start_before_call's own copy); both now delegate to the shared
+  // module-level fileSkippedBookingCard helper (its own lock/merge/
+  // dispute-clearing/bridgeNeedsConfirmation-push shape is pinned once, in
+  // call-recording-processor-guards.test.js's fileSkippedBookingCard suite,
+  // not duplicated here).
+  test('shadow/legacy mode delegates to the shared fileSkippedBookingCard helper for this skip — same as start_before_call', () => {
+    const gateAt = source.indexOf('if (!(CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED)) {', checkAt);
+    expect(gateAt).toBeGreaterThan(checkAt);
+    const section = source.slice(gateAt, gateAt + 400);
+    expect(section).toContain('await fileSkippedBookingCard({');
+    expect(section).toContain("skippedReason: 'slot_elapsed_at_booking_time',");
+    expect(section).not.toContain('.ignore()');
+  });
+
+  test('"slot_elapsed_at_booking_time" is NOT in the enforce-mode fallback\'s heldReasons — it relies on that generic fallback for its enforce-mode card, same as start_before_call', () => {
+    const heldReasonsMatch = source.match(/const heldReasons = new Set\(\[[^\]]*\]\);/)[0];
+    expect(heldReasonsMatch).not.toContain("'slot_elapsed_at_booking_time'");
+    expect(heldReasonsMatch).not.toContain("'start_before_call'");
   });
 });

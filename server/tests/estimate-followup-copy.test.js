@@ -144,6 +144,14 @@ describe('truth scope — recurring-terms claims only where the estimate page ma
     expect(benefit).not.toMatch(/contract/i);
   });
 
+  test('termite makes no guarantee claim (owner ruling: guarantees stay off termite)', () => {
+    expect(PACKS.termite.benefit).not.toMatch(/guarantee/i);
+  });
+
+  test('no pack promises a reply time', () => {
+    for (const pack of Object.values(PACKS)) expect(pack.question).not.toMatch(/in minutes/i);
+  });
+
   test.each(['pest', 'lawn', 'mosquito', 'tree_shrub', 'palm_injection'])(
     '%s keeps the recurring-terms line', (category) => {
       expect(PACKS[category].benefit).toBe(RECURRING_TERMS_BENEFIT);
@@ -285,5 +293,49 @@ describe('one-time-only demotion (estimator audit 2026-07-24)', () => {
     };
     expect(copyCategoryForEstimate(est)).toBe('pest');
     expect(followupEmailVars(est).category_benefit).toBe(RECURRING_TERMS_BENEFIT);
+  });
+
+  // Owner ruling: no guarantee of any kind on termite. Termite folds into
+  // three packs that carry "satisfaction guaranteed", so the benefit line
+  // has to follow the lane, not the pack.
+  test.each([
+    ['a one-time trenching / pre-slab / Bora-Care quote', ['termite'], 'one_time'],
+    ['a termite + pest quote', ['pest', 'termite'], 'one_time'],
+  ])('%s makes no guarantee', (_, keys, category) => {
+    lanes(...keys);
+    expect(copyCategoryForEstimate(oneTimeOnlyEstimate())).toBe(category);
+    expect(followupEmailVars(oneTimeOnlyEstimate()).category_benefit).not.toMatch(/guarantee/i);
+  });
+
+  test('a one-time pest quote keeps its satisfaction guarantee', () => {
+    lanes('pest');
+    expect(followupEmailVars(oneTimeOnlyEstimate()).category_benefit).toMatch(/satisfaction guaranteed/i);
+  });
+});
+
+describe('no guarantee wherever termite may be quoted', () => {
+  const recurring = {
+    id: 'e-rec', monthly_total: 95, annual_total: 1140, onetime_total: 0,
+    estimate_data: { result: { recurring: { monthlyTotal: 95, services: [{ name: 'Pest Control', mo: 95 }] } } },
+  };
+
+  test.each([
+    ['a recurring termite + pest bundle', ['pest', 'termite'], 'bundle'],
+    ['commercial termite bait monitoring', ['commercial_termite_bait'], 'commercial'],
+    ['an estimate with no classifiable lane', ['unknown'], 'unknown'],
+  ])('%s', (_, keys, category) => {
+    lanes(...keys);
+    expect(copyCategoryForEstimate(recurring)).toBe(category);
+    expect(followupEmailVars(recurring).category_benefit).not.toMatch(/guarantee/i);
+  });
+
+  test('a lane-inference failure fails soft to the guarantee-free line', () => {
+    inferEstimateServiceLines.mockImplementation(() => { throw new Error('boom'); });
+    expect(followupEmailVars(recurring).category_benefit).not.toMatch(/guarantee/i);
+  });
+
+  test('a recurring pest + lawn bundle keeps its satisfaction guarantee', () => {
+    lanes('pest', 'lawn');
+    expect(followupEmailVars(recurring).category_benefit).toMatch(/satisfaction guaranteed/i);
   });
 });
