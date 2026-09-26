@@ -230,6 +230,8 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ["You don't have to worry about your pets with this treatment.", ''],
     ['There is nothing to worry about around children.', ''],
     ['No need to worry about pets after we spray.', ''],
+    ['This treatment does not cause illness in children.', ''],
+    ['It cannot cause health problems.', ''],
     ['No tiene ningún efecto en sus mascotas.', ''],
     ['Our solution is completely harmless.', ''],
     ['Completely family-safe.', 'I have children'],
@@ -267,6 +269,7 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ['Stay off the treated lawn until Friday.', ''],
     ['You can re-enter next Monday.', ''],
     ['Mantenga a los niños dentro hasta el viernes.', ''],
+    ['Puede volver a entrar a las once.', '¿Cuándo puedo volver a entrar después del tratamiento?'],
     ['Keep the kids indoors until the sun goes down after treatment.', ''],
     ['Mantenga a los niños dentro hasta las cuatro después del tratamiento.', ''],
   ])('a clock-time re-entry instruction is replaced: %s', (reply, context) => {
@@ -411,6 +414,18 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
     const out = scrubUnsafeClaims({ reply, intent: 'question', service_keys: [], ready_for_quote: true });
     expect(out.reply).toMatch(/veterinarian or an emergency animal hospital/);
     expect(out.reply).not.toContain('911');
+  });
+
+  test('routine "consult your doctor before use" is not escalated to 911', () => {
+    const out = scrubUnsafeClaims({ reply: 'This product may not be safe during pregnancy; consult your doctor before use.', intent: 'question', service_keys: [], ready_for_quote: false }, 'Is it ok while pregnant?');
+    expect(out.reply).toMatch(/label directions/);
+    expect(out.intent).toBe('question');
+  });
+
+  test('"bitten by my dog" adds no vet copy (the dog is the agent, not the patient)', () => {
+    const out = scrubUnsafeClaims({ reply: 'It is completely safe.', intent: 'question', service_keys: [], ready_for_quote: false }, 'I was bitten by my dog and now have swelling');
+    expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
+    expect(out.reply).not.toMatch(/veterinarian/);
   });
 
   test('an Animal Poison Control referral takes only the veterinary path', () => {
@@ -703,6 +718,9 @@ describe('normalizeIntakeResult', () => {
     ["We don't treat bees, but we can refer you.", ''],
     ["We won't service your lawn today because of rain.", ''],
     ["We don't remove birds from attics.", ''],
+    ['Nuestro técnico no hace visitas los domingos.', ''],
+    ['No hace falta preparar la casa.', ''],
+    ['You can re-enter once your technician confirms the product is dry.', ''],
     ["The EPA doesn't approve pesticides; it registers them.", ''],
     ["The EPA didn't approve this product; it is EPA-registered.", ''],
     ['This product is not EPA-approved; it is EPA-registered.', ''],
@@ -1618,6 +1636,9 @@ describe('looksLikeEmergency', () => {
     'I am not allergic; I just need the wasp nest removed',
     'There was no allergic reaction after the sting',
     "I don't need a doctor; I just need the wasp nest removed",
+    'I sprayed with Raid but the roaches are still here',
+    'The invoice was sent to the hospital',
+    'My house is next to a hospital',
     'No necesito un médico, solo control de plagas',
     'I ate lunch\nWhich bug spray do you use?',
   ])('does not flag routine pest talk: %s', (text) => {
