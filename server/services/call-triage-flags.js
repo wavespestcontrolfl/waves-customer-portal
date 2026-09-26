@@ -266,6 +266,10 @@ function suppressUnsupportedModelFlags(modelFlags, extraction) {
 const WDO_TREATMENT_WORDING_RE = /\btreat(?:ment|ed|ing)?\b|\btent(?:ing)?\b|\bfumigat(?:e|ion|ing)\b|\bbait(?:ing)?\b|\btermidor\b|\bremediat(?:e|ion|ing)\b/i;
 const WDO_INSPECTION_WORDING_RE = /\binspect(?:ion)?\b|\breport\b|\bletter\b|\bcertif(?:y|icate|ication)\b|\bclearance\b/i;
 function isWdoInspectionRequest(serviceRequest = {}) {
+  // The extraction's own intent must be an inspection: a treatment (or any
+  // other) intent paired with a catalog-looking "WDO Inspection Service" name
+  // is a model-field inconsistency and fails closed (codex #4966 r1 P1).
+  if (serviceRequest?.service_intent !== 'inspection_only') return false;
   // A named specific service is the booking's final choice
   // (resolveCallBookingCatalogService), so when one is present it must itself
   // be the WDO row — the coarse category cannot override a contradictory pick
