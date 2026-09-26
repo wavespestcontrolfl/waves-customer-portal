@@ -22,7 +22,7 @@ this page in the same PR.
 | `payment_pending` | Term exists, prepay invoice not paid (default at birth; also the *dispute-suspended* stage — see `dispute_suspended_at`). Coverage is not applied. | yes |
 | `active` | Prepay invoice paid, coverage window live. Renewal notices go out from here. | yes |
 | `renewal_pending` | Active term whose customer has been contacted about renewal — by an operator (`renewal_contacted_at`) or by the automated 30/15/7-day notice (`notice_*_sent_at`). Still covered — behaves as `active` everywhere (`ACTIVE_STATUSES = ['active','renewal_pending']`). | yes |
-| `renewed` | Decided: customer renews. Coverage for the paid window stays. Terminal. | yes |
+| `renewed` | Decided: customer renews. Coverage for the paid window stays. Terminal once processed (a successor term minted from it); until then the customer's online decline can supersede it (move 14). | yes |
 | `switch_plan` | Decided: customer moves to another plan at term end. Coverage stays. Terminal. | yes |
 | `cancelled` | Two shapes, told apart by `renewal_decision`: **(a)** `renewal_decision IS NULL` = the prepay invoice was voided / refunded / lost a dispute — coverage revoked, prepaid stamps cleared, billing mode reset; **(b)** `renewal_decision = 'cancel'` = a decided renewal lapse — the paid window keeps its coverage. Shape (b) is terminal; shape (a) can revive (move 11). | yes |
 | `canceled` | US spelling. Allowed by the CHECK, tolerated by readers (`whereNotIn ['cancelled','canceled']`), **never written**. Legacy name. | no |
@@ -31,11 +31,13 @@ this page in the same PR.
 "Decided" = `renewal_decision IS NOT NULL` (one of `renew` / `cancel` /
 `switch_plan`, also CHECK-enforced). The decision column is the **intended**
 terminal latch: every status-mutating path below guards on
-`renewal_decision IS NULL` or on `status IN ACTIVE_STATUSES`, with one known
-exception — move 1's existing-row re-run, whose decided-status preservation
-is a snapshot read, not a DB guard (the TOCTOU residue below; a decided row
+`renewal_decision IS NULL` or on `status IN ACTIVE_STATUSES`, with two known
+exceptions — move 14 (a guarded `renewed` → `cancelled` supersession by the
+customer's own online decline, only while no successor term exists), and
+move 1's existing-row re-run, whose decided-status preservation is a
+snapshot read, not a DB guard (the TOCTOU residue below; a decided row
 overwritten in that window could then re-activate through move 2's
-`payment_pending`-only guard). Move 13 used to be the other exception
+`payment_pending`-only guard). Move 13 used to be another exception
 (deliberately unguarded) until ADMIN-BUG-R16 routed it through the same
 `renewal_decision IS NULL` guard as move 9.
 
@@ -61,10 +63,12 @@ replay-idempotent), never an error.
 | 11 | `cancelled` **(a)** | `active` | Lost-dispute revival: the dispute-cancelled term's invoice is re-paid in dunning. Restores extension credits. | `R` `syncTermForInvoicePayment` | `status = 'cancelled' AND renewal_decision IS NULL AND dispute_suspended_at IS NOT NULL` |
 | 12 | `active` / `renewal_pending` / `payment_pending` | `payment_pending` | Admin reverses an applied credit on a prepaid invoice — the term is "un-paid"; stamps cleared, and (ADMIN-BUG-R17) `customers.billing_mode` is reset to the recorded prior mode via `resetBillingModeAfterTermCancel`, pairing the demotion exactly like move 10's dispute-suspend does — the customer no longer stays stranded in `annual_prepay` (serviced free / no monthly dues) until the reopened invoice is actually repaid. (The guard's `NOT IN` shape would also admit an undecided legacy `refunded` row — the only move that can touch a legacy row: move 9's upstream select is limited to `payment_pending`/`active`/`renewal_pending`. Code never writes the legacy names, but the 20260614 migration kept them in the CHECK and only normalized values *outside* it, so pre-existing rows may survive; see residue.) | `AI` `POST /:id/reverse-prepaid` (apply-credit reversal) | `renewal_decision IS NULL AND status NOT IN ('cancelled','canceled')` |
 | 13 | `payment_pending` / `cancelled` (undecided) | `cancelled` **(a)** | Admin removes the annual-prepay flag from an invoice marked by mistake (`DELETE /:id/annual-prepay`). The invoice survives as an ordinary invoice, so the route refuses (409) whenever the cancel could double-bill: a decided term, a PAID prepay (`status IN ACTIVE_STATUSES` — refund it instead, owner ruling 2026-09-26), and a prepay a flow owns — born from an accepted estimate (`source_estimate_id`, whose card auto-charge job could still collect it), a switch-superseded marker or a setup-fee claim — void it instead. Otherwise it runs the SAME `cancelTermWithRestorations` pipeline as move 9 (ADMIN-BUG-R16): stamps cleared (`throwOnError`), covered visit invoices reopened with their reminders re-armed after commit, credits reversed, `customers.billing_mode` reset to the recorded prior mode; only non-terminal attached visits are detached. Re-marking the invoice later re-derives the status via move 1. | `R` `cancelTermWithRestorations`, called from `AI` `DELETE /:id/annual-prepay` | `renewal_decision IS NULL`; the route refuses `ACTIVE_STATUSES` first |
+| 14 | `renewed` | `cancelled` **(b)** | The customer declines renewal online (termite annual plan, agreement v3: "at any time before the renewal date") while a staff-recorded `renew` is still UNPROCESSED — no successor term has been minted from it. Sets `renewal_decision = 'cancel'` and `cancel_disposition = 'end_at_term'` (the decline supersedes the renew); coverage for the paid window is kept. The caller also requires today before `term_end` (or a term still awaiting its installation) and a still-paid year. `switch_plan`, and a `renew` whose successor exists, never move. | `R` `supersedeRenewWithCustomerCancel` (from `declineTermiteAnnualRenewal`) | `status = 'renewed' AND renewal_decision = 'renew' AND NOT EXISTS (successor: renewed_from_term_id = id)` |
 
 Everything not in the table is not a move. In particular there is **no**
-`renewed → *`, `switch_plan → *`, or `cancelled(b) → *` (other than move 13),
-and nothing ever writes `canceled` or `refunded`.
+`switch_plan → *` or `cancelled(b) → *` (move 13 now refuses a decided
+term), `renewed → *` only through the customer's unprocessed-renew
+supersession (move 14), and nothing ever writes `canceled` or `refunded`.
 
 ## Read-side groupings
 
@@ -78,7 +82,8 @@ These constants in `R` decide what each stage *means* to the rest of billing:
 - `cancelled` + `renewal_decision = 'cancel'` — treated like
   `DECIDED_COVERED_STATUSES` for coverage (decided lapse keeps its window).
   The decision carries `cancel_disposition` (ADMIN-BUG-R18), written by
-  `recordDecision` in the same statement: `end_now_refund` for Cancel plan's
+  `recordDecision` (and by move 14's `supersedeRenewWithCustomerCancel`,
+  always `end_at_term`) in the same statement: `end_now_refund` for Cancel plan's
   "end now + refund" (it pulled every visit and owes the unused value back),
   `end_at_term` for "End of paid coverage" and a renewal-time lapse. An
   end-at-term lapse later ended now is upgraded in place by

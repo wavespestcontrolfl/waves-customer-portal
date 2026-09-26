@@ -608,7 +608,7 @@ router.get('/station-map', async (req, res, next) => {
 // termite_bonds.started_at / renews_at are ET business-calendar DATEs;
 // dateOnlyString handles the pg string/UTC-midnight-Date duality and
 // returns null on anything malformed (never throws — fail-soft).
-const { gateEnvValue } = require('../config/feature-gates');
+const { gateEnvValue, termiteAnnualPlanSelectionEnabled } = require('../config/feature-gates');
 const { activeTermiteBondsForCustomer, TERMITE_BOND_GATE } = require('../services/termite-bonds');
 
 router.get('/termite-bond', async (req, res, next) => {
@@ -624,6 +624,240 @@ router.get('/termite-bond', async (req, res, next) => {
       return res.json({ available: false, reason: 'no_bond', bonds: [] });
     }
     return res.json({ available: true, bonds });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/property/termite-annual-plan — the authenticated customer's own
+// APPLICABLE termite annual plan terms (My Plan tab renewal card(s)):
+// renewal date (term_end), renewal fee (prepay_amount), and whether a
+// decline is already on file, for EVERY term still worth showing — a
+// multi-property account can carry more than one overlapping termite annual
+// term (docs/design/DECISIONS.md), each with its own independent renewal
+// and its own decline control (codex round-1 P1). NOT gated (Codex r3 P0):
+// GATE_TERMITE_ANNUAL_PLAN + GATE_CANCEL_FLOW_V2 control only the issuing
+// of NEW plans — a customer who already holds a termite annual term
+// (annual_plan_version NOT NULL) signed an agreement promising online
+// nonrenewal, so their card and decline outlive any later gate flip. With
+// no such term the answer is 200 {available:false} (reason 'disabled'
+// while the gates are off, 'no_term' otherwise); the client renders
+// nothing.
+// Read-only: no row lock, no write. Ordered by term_end ascending (soonest
+// renewal first). A term whose renewal date has already passed today is no
+// longer offered — its row simply stops matching the term_end >= today
+// filter, the same edge the write side (declineTermiteAnnualRenewal /
+// termiteDeclineBlockedReason) treats as `term_ended` — EXCEPT an original
+// term still awaiting its installation (Codex r3 P1): its term_end is only
+// a placeholder, so it is never cut off by it
+// (whereTermCurrentOrAwaitingInstallation).
+// Status filter keeps active/renewal_pending/payment_pending (an unpaid
+// payment_pending term still shows — see canDecline below — but only a
+// paid, live term is declinable) PLUS the decided-lapse shape (cancelled +
+// renewal_decision 'cancel', still covered through term_end) — and drops
+// every other terminal shape: a refund/void 'cancelled' row with
+// renewal_decision NULL, 'refunded', or 'canceled' never had its coverage
+// happen and is never shown here (codex round-1 P2). The decided-lapse
+// shape is STATUS-ONLY at the SQL level, though — a declined term whose
+// invoice was later refunded or disputed still reads 'cancelled' +
+// 'cancel', so every such row is re-checked in JS against
+// isPaidDecidedLapseTerm (the same live-coverage test coveredTermsAsOf
+// uses) before it is ever shown as covered (codex pre-push P1).
+const { etDateString } = require('../utils/datetime-et');
+const { dateOnlyString } = require('../utils/date-only');
+const { validate: isUuid } = require('uuid');
+const {
+  declineTermiteAnnualRenewal, termiteDeclineBlockedReason, isPaidDecidedLapseTerm, isCoveredTerm, termPropertyLabelsForCustomer,
+  coverageAwaitsInstallation, whereTermCurrentOrAwaitingInstallation,
+} = require('../services/annual-prepay-renewals');
+
+// Codex r2 P1: on a multi-term account every card must name a DISTINCT
+// property, or the customer can't tell which plan a decline applies to.
+// Two terms resolving to the same label are told apart by their renewal
+// date when that date is real (installation-anchored), or marked
+// "awaiting installation" when it is still provisional — a provisional
+// date is never shown (see awaitsInstallation below). A term still
+// unlabeled or still colliding after that maps to null, and the caller
+// withholds its decline control (fail closed). A single term keeps
+// whatever label it has — there is nothing to confuse it with.
+function renewalDateText(ymd) {
+  return new Date(`${ymd}T12:00:00Z`).toLocaleDateString('en-US', {
+    timeZone: 'UTC', month: 'long', day: 'numeric', year: 'numeric',
+  });
+}
+
+function distinctTermLabels(rows, labels) {
+  // Codex #4940 r7 P1: on a multi-term account only a TERM-TIED label (the
+  // estimate's quoted address, or its linked property) can tell cards apart
+  // — the customer's own profile address is the same fallback for every
+  // term, so it counts as unresolved there (never "disambiguated" by date).
+  // A single term may keep the profile fallback.
+  const labelFor = (entry) => (entry && (rows.length < 2 || entry.termTied) ? entry.label : null);
+  const out = new Map(rows.map((term) => [term.id, labelFor(labels.get(term.id))]));
+  if (rows.length < 2) return out;
+  const tally = () => {
+    const counts = new Map();
+    for (const label of out.values()) if (label) counts.set(label, (counts.get(label) || 0) + 1);
+    return counts;
+  };
+  const first = tally();
+  for (const term of rows) {
+    const label = out.get(term.id);
+    const termEnd = dateOnlyString(term.term_end);
+    if (!label || !(first.get(label) > 1)) continue;
+    if (coverageAwaitsInstallation(term)) out.set(term.id, `${label} (awaiting installation)`);
+    else if (termEnd) out.set(term.id, `${label} (renews ${renewalDateText(termEnd)})`);
+  }
+  const second = tally();
+  for (const term of rows) {
+    const label = out.get(term.id);
+    if (!label || second.get(label) > 1) out.set(term.id, null);
+  }
+  return out;
+}
+
+router.get('/termite-annual-plan', async (req, res, next) => {
+  res.set('Cache-Control', 'private, no-store');
+  try {
+    const today = etDateString();
+    const notAvailable = () => res.json({ available: false, reason: termiteAnnualPlanSelectionEnabled() ? 'no_term' : 'disabled' });
+    const rows = await db('annual_prepay_terms')
+      .where({ customer_id: req.customerId })
+      .whereNotNull('annual_plan_version')
+      .where((current) => whereTermCurrentOrAwaitingInstallation(current, today))
+      .where(function applicableTermState() {
+        this.whereIn('status', ['active', 'renewal_pending', 'payment_pending'])
+          .orWhere(function decidedLapse() {
+            this.where('status', 'cancelled').andWhere('renewal_decision', 'cancel');
+          })
+          // Codex #4940 r4 P1: a staff 'renew' not yet PROCESSED (no
+          // successor term minted from it) is still declinable online —
+          // the customer's decline supersedes it before the renewal date.
+          .orWhere(function unprocessedRenew() {
+            this.where('status', 'renewed').andWhere('renewal_decision', 'renew')
+              .whereNotExists(function noSuccessorTerm() {
+                this.select(db.raw('1')).from('annual_prepay_terms as successor')
+                  .whereRaw('successor.renewed_from_term_id = annual_prepay_terms.id');
+              });
+          });
+      })
+      .orderBy('term_end', 'asc')
+      .select('id', 'term_end', 'prepay_amount', 'status', 'renewal_decision', 'annual_plan_version', 'renewed_from_term_id', 'installation_anchored_at');
+    // Codex pre-push P1: the decidedLapse branch above is status-only — a
+    // declined term whose invoice was later refunded or disputed still
+    // reads 'cancelled' + 'cancel' even though billing (coveredTermsAsOf)
+    // has already revoked its coverage. Re-check EVERY decided-lapse row
+    // against the same live-coverage test billing uses, so this card can
+    // never say "Coverage continues through …" for a term billing no
+    // longer covers. Active/renewal_pending/payment_pending rows are
+    // unaffected — they never go through this check.
+    // An unprocessed renewed term gets the same paid re-check (a refunded
+    // or disputed renewed year is never offered or shown as covered).
+    const applicableRows = [];
+    for (const term of rows) {
+      if (term.status === 'cancelled' && term.renewal_decision === 'cancel') {
+        if (!(await isPaidDecidedLapseTerm(term, db))) continue;
+      } else if (term.status === 'renewed') {
+        if (!(await isCoveredTerm(term.id, db))) continue;
+      }
+      applicableRows.push(term);
+    }
+    if (!applicableRows.length) return notAvailable();
+    // Pre-push audit P1: a multi-property account's cards were otherwise
+    // indistinguishable — each term names its property (the estimate's
+    // quoted address snapshot -> its linked property for a legacy estimate
+    // with no snapshot -> the customer's own address), scoped
+    // to req.customerId at every join. A single term is fail-soft (a lookup
+    // failure only drops its label). Codex r2 P1: with SEVERAL terms a
+    // lookup failure fails closed — 503, which the portal renders as its
+    // error + Retry state — never a set of declinable look-alike cards.
+    let propertyLabels = new Map();
+    try {
+      propertyLabels = await termPropertyLabelsForCustomer(req.customerId, applicableRows.map((term) => term.id), db);
+    } catch (labelErr) {
+      logger.warn(`[property] termite annual plan property labels failed for customer ${req.customerId}: ${labelErr.message}`);
+      if (applicableRows.length > 1) {
+        return res.status(503).json({
+          available: false,
+          reason: 'labels_unavailable',
+          error: 'Your termite annual plans couldn’t be loaded. Please try again.',
+        });
+      }
+    }
+    const labels = distinctTermLabels(applicableRows, propertyLabels);
+    const terms = applicableRows.map((term) => {
+      const declined = term.status === 'cancelled' && term.renewal_decision === 'cancel';
+      const propertyLabel = labels.get(term.id);
+      // The write side's own eligibility (decision on file, unpaid, or
+      // the renewal date already passed) — never offer a decline the
+      // POST refuses. Same `today` this request already resolved.
+      // hasSuccessor:false — the query above only returns a renewed term
+      // when no successor exists (the write side re-checks under its lock).
+      const eligible = !declined && !termiteDeclineBlockedReason(term, today, { hasSuccessor: false });
+      // Several terms but THIS one can't be told apart from the others:
+      // withhold its decline control (fail closed) and say why.
+      const propertyUnclear = eligible && applicableRows.length > 1 && !propertyLabel;
+      return {
+        id: term.id,
+        propertyLabel,
+        termEnd: dateOnlyString(term.term_end),
+        // Codex r2 P1: an original term not yet anchored to its station
+        // installation has a PROVISIONAL term_end (the signature day + 12
+        // months) — the portal must describe it relative to installation,
+        // never quote that date.
+        awaitsInstallation: coverageAwaitsInstallation(term),
+        prepayAmount: term.prepay_amount != null ? Number(term.prepay_amount) : null,
+        declined,
+        canDecline: eligible && !propertyUnclear,
+        ...(propertyUnclear ? { propertyUnclear: true } : {}),
+      };
+    });
+    return res.json({ available: true, terms });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/property/termite-annual-plan/decline — records the customer's
+// own online decision NOT to renew (agreement v3: "may decline renewal at
+// any time before the renewal date online through their customer portal —
+// the same way this agreement was accepted"). Coverage through term_end is
+// untouched — see declineTermiteAnnualRenewal. Idempotent: a repeat call
+// on an already-declined term answers 200 with the same shape.
+const DECLINE_REFUSAL_MESSAGES = {
+  disabled: 'This feature is not available right now.',
+  no_term: 'No termite annual plan was found on your account.',
+  not_found: 'No termite annual plan was found on your account.',
+  term_ended: 'This plan’s renewal window has already passed.',
+  already_decided: 'A renewal decision is already on file for this plan.',
+  not_active: 'This plan is not currently eligible to decline renewal.',
+  conflict: 'Something changed while we were saving this. Please refresh and try again.',
+  not_covered: 'This plan will not renew, and its coverage is no longer active.',
+};
+
+router.post('/termite-annual-plan/decline', async (req, res, next) => {
+  try {
+    // The body's termId picks WHICH of a multi-property account's
+    // overlapping terms to decline — it can never target another
+    // customer's term: declineTermiteAnnualRenewal always re-matches it
+    // against customer_id = req.customerId (never trusted from the body)
+    // AND annual_plan_version IS NOT NULL. Codex r2 P2: it is REQUIRED and
+    // must be a UUID — the service's no-selector "earliest current term"
+    // fallback is for internal callers only; a customer's decline must
+    // always name the exact card they confirmed.
+    const termId = req.body?.termId;
+    if (typeof termId !== 'string' || !isUuid(termId)) {
+      return res.status(400).json({ available: false, reason: 'invalid_term', error: 'Please choose which plan to decline.' });
+    }
+    const result = await declineTermiteAnnualRenewal({ customerId: req.customerId, termId });
+    if (!result.ok) {
+      const status = (result.reason === 'disabled' || result.reason === 'no_term' || result.reason === 'not_found') ? 404 : 409;
+      const error = DECLINE_REFUSAL_MESSAGES[result.reason] || 'This request could not be completed.';
+      // `code` is the portal client's machine-readable discriminator
+      // (api.request copies it onto the thrown error).
+      return res.status(status).json({ available: false, error, code: result.reason, ...result });
+    }
+    return res.json({ available: true, ...result });
   } catch (err) {
     next(err);
   }

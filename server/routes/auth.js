@@ -199,39 +199,91 @@ function dateOnlyForApi(value) {
   return String(value).slice(0, 10);
 }
 
+const { isPaidDecidedLapseTerm, coverageAwaitsInstallation, whereTermCurrentOrAwaitingInstallation } = require('../services/annual-prepay-renewals');
+
 async function annualPrepayForCustomer(customerId) {
   if (!customerId) return null;
   const hasTable = await db.schema.hasTable('annual_prepay_terms').catch(() => false);
   if (!hasTable) return null;
-  const term = await db('annual_prepay_terms as apt')
+  const today = etDateString();
+  // Codex round-1 P2: a decided-lapse term (status 'cancelled' AND
+  // renewal_decision 'cancel', still covered through term_end — e.g. a
+  // termite annual plan declined online, slice 6a) keeps the paid-through
+  // badge showing until its term_end, same as every other live status.
+  // A void/refund 'cancelled' row (renewal_decision NULL) is excluded
+  // either way — its coverage never happened.
+  //
+  // codex pre-push P1: that decided-lapse branch is STATUS-only at the SQL
+  // level — a declined term whose invoice was later refunded or disputed
+  // still reads 'cancelled' + 'cancel' even though billing
+  // (coveredTermsAsOf) has already revoked its coverage. Fetching a
+  // bounded candidate LIST (rather than `.first()`) and re-checking every
+  // decided-lapse candidate against isPaidDecidedLapseTerm — the SAME
+  // live-coverage test billing uses — before accepting it lets the badge
+  // fall through to the next-best candidate (or drop entirely) instead of
+  // showing "Paid through …" for a term billing no longer covers.
+  // Active/renewal_pending/payment_pending candidates are accepted as-is.
+  const candidates = await db('annual_prepay_terms as apt')
     .leftJoin('invoices as inv', 'apt.prepay_invoice_id', 'inv.id')
     .where('apt.customer_id', customerId)
-    .whereIn('apt.status', ['active', 'renewal_pending', 'payment_pending'])
+    .where(function applicableStatus() {
+      this.whereIn('apt.status', ['active', 'renewal_pending', 'payment_pending'])
+        .orWhere(function decidedLapse() {
+          this.where('apt.status', 'cancelled').andWhere('apt.renewal_decision', 'cancel')
+            // Codex r3 P1: a term still awaiting its installation has only a
+            // provisional term_end — never a cutoff (the shared portal rule).
+            .andWhere((current) => whereTermCurrentOrAwaitingInstallation(current, today, 'apt'));
+        });
+    })
     .orderByRaw(`
       CASE apt.status
         WHEN 'active' THEN 1
         WHEN 'renewal_pending' THEN 2
         WHEN 'payment_pending' THEN 3
-        ELSE 4
+        WHEN 'cancelled' THEN 4
+        ELSE 5
       END
     `)
     .orderBy('apt.term_end', 'desc')
-    .first(
+    .limit(20)
+    .select(
       'apt.id',
       'apt.status',
+      'apt.renewal_decision',
       'apt.plan_label',
       'apt.monthly_rate',
       'apt.prepay_amount',
       'apt.term_start',
       'apt.term_end',
+      'apt.annual_plan_version',
+      'apt.renewed_from_term_id',
+      'apt.installation_anchored_at',
       'apt.prepay_invoice_id',
       'inv.status as prepay_invoice_status',
       'inv.total as prepay_invoice_total',
     )
     .catch((err) => {
       logger.warn(`[auth] annual prepay lookup skipped for customer ${customerId}: ${err.message}`);
-      return null;
+      return [];
     });
+  let term = null;
+  // Codex r3 P2: the paid re-check is inside the same fail-soft posture as
+  // the lookup above — a thrown error drops the annualPrepay payload (and
+  // logs), never 500s /api/auth/me.
+  try {
+    for (const candidate of candidates) {
+      if (candidate.status === 'cancelled' && candidate.renewal_decision === 'cancel') {
+        // Bounded (limit 20) and sequential by design — the FIRST covered
+        // candidate wins, so this can't be parallelized with Promise.all.
+        if (!(await isPaidDecidedLapseTerm(candidate, db))) continue;
+      }
+      term = candidate;
+      break;
+    }
+  } catch (err) {
+    logger.warn(`[auth] annual prepay coverage check skipped for customer ${customerId}: ${err.message}`);
+    return null;
+  }
   if (!term) return null;
   return {
     id: term.id,
@@ -244,6 +296,13 @@ async function annualPrepayForCustomer(customerId) {
     prepayInvoiceId: term.prepay_invoice_id,
     prepayInvoiceStatus: term.prepay_invoice_status,
     prepayInvoiceTotal: term.prepay_invoice_total != null ? Number(term.prepay_invoice_total) : null,
+    // Codex r2 P1: billing_mode stays 'annual_prepay' after a portal
+    // decline, so the Billing tab's "your saved method is used at renewal"
+    // copy reads these instead: a decided-lapse term won't renew, and an
+    // un-anchored original termite term's termEnd is provisional (coverage
+    // runs 12 months from the station installation).
+    renewalDeclined: term.status === 'cancelled' && term.renewal_decision === 'cancel',
+    awaitsInstallation: coverageAwaitsInstallation(term),
   };
 }
 
@@ -649,3 +708,4 @@ router.delete('/account', authenticate, async (req, res, next) => {
 });
 
 module.exports = router;
+module.exports._private = { annualPrepayForCustomer };

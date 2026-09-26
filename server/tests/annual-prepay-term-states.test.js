@@ -516,13 +516,22 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
       // could write this table's status invisibly — fail closed unless the
       // file is on the audited allowlist above.
       let dynamicSites = 0;
+      // Only a call in real CODE is a builder: a textual match inside a
+      // string or comment (e.g. raw SQL `… AS t(v))`) is not a call, and
+      // starting chainAfter mid-string walks the rest of the file out of
+      // phase (it once swept a later route's READ predicates into a
+      // phantom "mutation").
+      const codePositions = new Set();
+      walkSyntax(src, 0, (ch, i) => { codePositions.add(i); return true; });
       // Direct chains plus SPLIT dynamic builders (`const q = trx(x); … q.update()`),
       // whose later chains within the declaring function are scanned too.
       const dynamicChains = [];
       for (const m of src.matchAll(/(?<![.\w])(?:db|trx|conn|knex|t)\(\s*([A-Za-z_$][\w$.[\]()]*)\s*\)/g)) {
+        if (!codePositions.has(m.index)) continue;
         dynamicChains.push({ index: m.index, via: m[1], chain: chainAfter(src, m.index + m[0].length) });
       }
       for (const d of src.matchAll(/(?:const|let|var)\s+([\w$]+)\s*=\s*(?:db|trx|conn|knex|t)\(\s*([A-Za-z_$][\w$.[\]()]*)\s*\)/g)) {
+        if (!codePositions.has(d.index)) continue;
         const restStart = d.index + d[0].length;
         const rest = src.slice(restStart);
         const scopeEnd = rest.search(/\n\}\n/);
@@ -606,7 +615,7 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
     ]);
   });
 
-  test('every write site keeps its documented WHERE guard (moves 1–13) — loosening a guard fails here', () => {
+  test('every write site keeps its documented WHERE guard (moves 1–14) — loosening a guard fails here', () => {
     // Exact source-level pin of each write's guard chain, in scan order.
     // (`orWhere` branches are pinned behaviorally in the notice-claim test
     // below; this list covers the where/whereIn/whereNull/whereNotIn guards.)
@@ -640,6 +649,14 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
       { expr: "'renewal_pending'", guards: ['where({ id: termId })', "whereIn('status', ACTIVE_STATUSES)", "whereNull('renewal_decision')"] },
       // Moves 6–8: decisions.
       { expr: 'statusAfterDecision(action)', guards: ['where({ id: termId })', "whereIn('status', ACTIVE_STATUSES)", "whereNull('renewal_decision')"] },
+      // Move 14: the customer's online decline supersedes an UNPROCESSED
+      // staff renew — renewed/renew only, and only with no successor term.
+      {
+        expr: "'cancelled'",
+        guards: ["where({ id: termId, status: 'renewed', renewal_decision: 'renew' })",
+          'whereNotExists(function noSuccessorTerm()',
+          "whereRaw('successor.renewed_from_term_id = annual_prepay_terms.id')"],
+      },
     ]);
     // Move 11's third predicate lives on the upstream revival SELECT, not the
     // conditional UPDATE — pin it there: only dispute-marked, undecided
@@ -717,11 +734,11 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
     expect(src).toContain("const PAYMENT_PENDING_STATUS = 'payment_pending';");
   });
 
-  test('the doc moves table has 13 rows with CHECK-valid targets and each row names its documented guard', () => {
+  test('the doc moves table has 14 rows with CHECK-valid targets and each row names its documented guard', () => {
     const doc = read(DOC);
     const rows = [...doc.matchAll(/^\| (\d+) \| (.+?) \| (.+?) \| (.+?) \| (.+?) \| (.+?) \|$/gm)]
       .map((m) => ({ n: Number(m[1]), from: m[2], to: m[3], trigger: m[4], where: m[5], guard: m[6] }));
-    expect(rows.map((r) => r.n)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+    expect(rows.map((r) => r.n)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
     const valid = new Set([...WRITTEN_STATUSES, ...LEGACY_ONLY_STATUSES]);
     for (const r of rows) {
       for (const s of r.to.matchAll(/`([a-z_]+)`/g)) expect(valid.has(s[1])).toBe(true);
@@ -743,6 +760,7 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
       11: { from: st(['cancelled']), to: st(['active']), where: 'syncTermForInvoicePayment' },
       12: { from: st(['active', 'renewal_pending', 'payment_pending']), to: st(['payment_pending']), where: 'POST /:id/reverse-prepaid' },
       13: { from: st(['payment_pending', 'cancelled']), to: st(['cancelled']), where: 'DELETE /:id/annual-prepay' },
+      14: { from: st(['renewed']), to: st(['cancelled']), where: 'supersedeRenewWithCustomerCancel' },
     };
     const states = (cell) => [...cell.matchAll(/`([a-z_]+)`/g)].map((x) => x[1]).sort();
     for (const r of rows) {
@@ -767,6 +785,7 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
       11: 'dispute_suspended_at IS NOT NULL',
       12: "NOT IN ('cancelled','canceled')",
       13: 'renewal_decision IS NULL',
+      14: "renewal_decision = 'renew' AND NOT EXISTS",
     };
     for (const r of rows) expect(r.guard).toContain(guardFrag[r.n]);
   });
