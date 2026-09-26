@@ -113,10 +113,10 @@ describe('voice relay eval — fixture lint', () => {
     expect(replay._internals.officeHoursFixture(fixture.scenarios[0])).toEqual(officeHours);
   });
 
-  test('the shipped fixture lints clean, has 31 scenarios and a spec on each', () => {
+  test('the shipped fixture lints clean, has 36 scenarios and a spec on each', () => {
     const fixture = replay.loadFixture(FIXTURE_PATH);
     expect(fixture.schemaVersion).toBe(replay.SCHEMA_VERSION);
-    expect(fixture.scenarios).toHaveLength(31);
+    expect(fixture.scenarios).toHaveLength(36);
     expect(replay.lintFixture(fixture)).toEqual([]);
     // A recording or a wrong number never earns a scheduling lookup.
     for (const id of ['robocall', 'wrong-number']) expect(fixture.scenarios.find((s) => s.id === id).allowedTools).toEqual(['capture_lead']);
