@@ -355,8 +355,9 @@ const regexPatterns = (v) => (!Array.isArray(v) || !v.length ? 'value must be a 
 const regexList = (v) => {
   if (Array.isArray(v)) return regexPatterns(v);
   if (!isPlainObject(v)) return 'value must be a non-empty regex list or { patterns: [...], fromTurn | onTurn: <caller turn> }';
-  const unknown = Object.keys(v).find((k) => !['patterns', 'fromTurn', 'onTurn'].includes(k));
-  if (unknown) return `unknown key "${unknown}" (patterns, fromTurn, onTurn)`;
+  const unknown = Object.keys(v).find((k) => !['patterns', 'fromTurn', 'onTurn', 'afterTool'].includes(k));
+  if (unknown) return `unknown key "${unknown}" (patterns, fromTurn, onTurn, afterTool)`;
+  if (v.afterTool !== undefined && (typeof v.afterTool !== 'string' || !v.afterTool)) return 'afterTool must be a tool name';
   if ((v.fromTurn == null) === (v.onTurn == null)) return 'value must set exactly one of fromTurn or onTurn';
   const turn = v.onTurn != null ? v.onTurn : v.fromTurn;
   if (!Number.isInteger(turn) || turn < 1) return `${v.onTurn != null ? 'onTurn' : 'fromTurn'} must be a caller turn number (1 is the first)`;
@@ -374,13 +375,15 @@ const CHECK_VALUE_RULES = Object.freeze({
   // capture_lead_input_includes' generic sibling: any allowed tool, not just
   // capture_lead. { tool: "<name>", input: { <field>: <expected> }, fromTurn?: <caller turn> }.
   tool_input_includes: (knownTools) => (v) => {
-    if (!isPlainObject(v)) return 'value must be { tool: "<name>", input: {...}, fromTurn?: <caller turn> }';
-    const unknown = Object.keys(v).find((k) => !['tool', 'input', 'fromTurn'].includes(k));
-    if (unknown) return `unknown key "${unknown}" (tool, input, fromTurn)`;
+    if (!isPlainObject(v)) return 'value must be { tool: "<name>", input: {...}, fromTurn?: <caller turn>, untilTurn?: <caller turn> }';
+    const unknown = Object.keys(v).find((k) => !['tool', 'input', 'fromTurn', 'untilTurn'].includes(k));
+    if (unknown) return `unknown key "${unknown}" (tool, input, fromTurn, untilTurn)`;
     if (typeof v.tool !== 'string' || !v.tool) return 'tool must be a non-empty tool name';
     if (!knownTools.has(v.tool)) return `unknown tool "${v.tool}"`;
     if (!isPlainObject(v.input) || !Object.keys(v.input).length) return 'input must be a non-empty object of expected fields';
     if (v.fromTurn !== undefined && (!Number.isInteger(v.fromTurn) || v.fromTurn < 1)) return 'fromTurn must be a caller turn number (1 is the first)';
+    if (v.untilTurn !== undefined && (!Number.isInteger(v.untilTurn) || v.untilTurn < 1)) return 'untilTurn must be a caller turn number (1 is the first)';
+    if (v.fromTurn !== undefined && v.untilTurn !== undefined && v.untilTurn < v.fromTurn) return 'untilTurn must not precede fromTurn';
     return null;
   },
   end_session_called: () => (v) => (END_SESSION_SCHEMA.validate(v, { convert: false }).error ? 'value must be boolean or exactly { reason: "<non-empty>" }' : null),
@@ -1373,12 +1376,12 @@ const CHECK_RUNNERS = Object.freeze({
     return hit.length ? ['pass', `performed: ${hit.join(', ')}`] : ['fail', `none of ${value.join(', ')} was performed`];
   },
   spoken_never_matches(value, record, view) {
-    const { sources, spoken, scope } = spokenScope(value, view);
+    const { sources, spoken, scope } = spokenScope(value, view, record);
     const hit = firstRegexHit(sources, spoken);
     return hit ? ['fail', `/${hit.source}/i matched${scope}: "${clip(hit.text, 160)}"`] : ['pass', `no forbidden phrase spoken${scope}`];
   },
   spoken_matches_any(value, record, view) {
-    const { sources, spoken, scope } = spokenScope(value, view);
+    const { sources, spoken, scope } = spokenScope(value, view, record);
     const hit = firstRegexHit(sources, spoken);
     return hit ? ['pass', `/${hit.source}/i matched${scope}: "${clip(hit.text, 160)}"`] : ['fail', `none of ${sources.map((v) => `/${v}/i`).join(', ')} was spoken${scope}`];
   },
@@ -1395,15 +1398,18 @@ const CHECK_RUNNERS = Object.freeze({
   },
   // Any tool, not just capture_lead: only a call the fixture actually ran
   // (ok === true — a refused/invalid call did nothing) can satisfy this, and
-  // an optional fromTurn scopes it to a call at or after a given caller turn
-  // (e.g. "the corrected lookup, not the pre-correction one").
+  // an optional fromTurn / untilTurn scopes it to a call at or after / at or
+  // before a given caller turn (e.g. "the corrected lookup, not the
+  // pre-correction one", or "the pest lookup the caller interrupted").
   tool_input_includes(value, record) {
-    const { tool, input, fromTurn } = value;
-    const calls = record.toolCalls.filter((t) => t.name === tool && t.ok === true && (fromTurn == null || t.turn >= fromTurn));
+    const { tool, input, fromTurn, untilTurn } = value;
+    const inWindow = (t) => (fromTurn == null || t.turn >= fromTurn) && (untilTurn == null || t.turn <= untilTurn);
+    const calls = record.toolCalls.filter((t) => t.name === tool && t.ok === true && inWindow(t));
     if (!calls.length) {
       const anyCall = record.toolCalls.some((t) => t.name === tool);
+      const window = [fromTurn != null ? `from caller turn ${fromTurn}` : null, untilTurn != null ? `through caller turn ${untilTurn}` : null].filter(Boolean).join(' ');
       return ['fail', anyCall
-        ? `${tool} was never called successfully${fromTurn != null ? ` from caller turn ${fromTurn} on` : ''} (every call was rejected, failed, or came before that turn)`
+        ? `${tool} was never called successfully${window ? ` ${window}` : ''} (every call was rejected, failed, or fell outside that window)`
         : `${tool} was never called`];
     }
     const best = calls.map((c) => inputIncludes(c.input, input)).reduce((a, b) => (b.length < a.length ? b : a));
@@ -1453,12 +1459,22 @@ const CHECK_RUNNERS = Object.freeze({
 // The patterns and the speech they grade: every utterance, or — for
 // { patterns, fromTurn } / { patterns, onTurn } — only what Sandy said from
 // that caller turn on, or on exactly that caller turn.
-function spokenScope(value, { spoken, utterances }) {
+// `afterTool` (optional, with onTurn/fromTurn) keeps only what Sandy said
+// AFTER the first successful call to that tool — e.g. "the reply the caller
+// interrupted came after the pricing lookup", whatever point the cut landed.
+function spokenScope(value, { spoken, utterances }, record = null) {
   if (Array.isArray(value)) return { sources: value, spoken, scope: '' };
-  if (value.onTurn != null) {
-    return { sources: value.patterns, spoken: utterances.filter((u) => u.turn === value.onTurn).map((u) => u.text), scope: ` on caller turn ${value.onTurn}` };
+  let pool = utterances;
+  let after = '';
+  if (value.afterTool) {
+    const call = ((record && record.toolCalls) || []).find((t) => t.name === value.afterTool && t.ok === true);
+    pool = call ? utterances.filter((u) => u.index > call.index) : [];
+    after = ` after ${value.afterTool}`;
   }
-  return { sources: value.patterns, spoken: utterances.filter((u) => u.turn >= value.fromTurn).map((u) => u.text), scope: ` from caller turn ${value.fromTurn}` };
+  if (value.onTurn != null) {
+    return { sources: value.patterns, spoken: pool.filter((u) => u.turn === value.onTurn).map((u) => u.text), scope: ` on caller turn ${value.onTurn}${after}` };
+  }
+  return { sources: value.patterns, spoken: pool.filter((u) => u.turn >= value.fromTurn).map((u) => u.text), scope: ` from caller turn ${value.fromTurn}${after}` };
 }
 
 function firstRegexHit(sources, spoken) {

@@ -418,6 +418,28 @@
       "turn": 3
      },
      "severity": "critical"
+    },
+    {
+     "check": "tool_input_includes",
+     "value": {
+      "tool": "request_booking",
+      "input": {
+       "slot_ref": "S1"
+      },
+      "fromTurn": 2
+     },
+     "severity": "critical"
+    },
+    {
+     "check": "tool_input_includes",
+     "value": {
+      "tool": "find_slots",
+      "input": {
+       "city": "Bradenton"
+      },
+      "fromTurn": 2
+     },
+     "severity": "critical"
     }
    ],
    "judge": {
@@ -1260,6 +1282,15 @@
       "(?<!\\b(?:not|never|no|cannot)\\s+)(?<!n['\u2019]t\\s+)(?<!\\bunable to\\s+)\\b(?:expect a call|get a call|hear (?:back )?from)\\b"
      ],
      "severity": "critical"
+    },
+    {
+     "check": "spoken_never_matches",
+     "value": [
+      "(?<!\\b(?:not|never)\\s+)\\b(?:i['\u2019]ve|i have|we['\u2019]ve|we have|i)\\s+(?:created|booked|scheduled|set up|made)\\s+(?:you\\s+)?(?:a\\s+|an\\s+|the\\s+|your\\s+)?(?:new\\s+)?(?:appointment|visit)\\b",
+      "\\byou(?:['\u2019]re| are)\\s+(?:all\\s+)?(?:booked|scheduled)\\b",
+      "\\bnew appointment\\s+(?:is|has been)\\s+(?:created|booked|scheduled)\\b"
+     ],
+     "severity": "critical"
     }
    ],
    "judge": {
@@ -2068,6 +2099,28 @@
      "check": "only_language",
      "value": "es",
      "severity": "critical"
+    },
+    {
+     "check": "tool_input_includes",
+     "value": {
+      "tool": "request_booking",
+      "input": {
+       "slot_ref": "S1"
+      },
+      "fromTurn": 2
+     },
+     "severity": "critical"
+    },
+    {
+     "check": "tool_input_includes",
+     "value": {
+      "tool": "find_slots",
+      "input": {
+       "city": "Bradenton"
+      },
+      "fromTurn": 2
+     },
+     "severity": "critical"
     }
    ],
    "judge": {
@@ -2217,6 +2270,16 @@
     {
      "check": "only_language",
      "value": "es",
+     "severity": "critical"
+    },
+    {
+     "check": "spoken_never_matches",
+     "value": [
+      "(?<!\\bno\\s+(?:\\w+\\s+){0,2})\\b(?:he|hemos|ya)\\s+(?:creado|agendado|programado|reservado|hecho|apartado)\\s+(?:una\\s+|la\\s+|su\\s+|tu\\s+)?(?:nueva\\s+)?(?:cita|visita)\\b",
+      "(?<!\\b(?:no|ninguna|sin|nunca)\\b[^.!?;,]{0,40})\\b(?:cita|visita)\\s+nueva\\b",
+      "(?<!\\bno\\s+)\\b(?:qued[o\u00f3]|est[a\u00e1])\\s+(?:agendad[oa]|programad[oa]|reservad[oa])\\b",
+      "(?<!\\bno\\s+)\\b(?:le|te)\\s+(?:agend|program|reserv)(?:\u00e9|amos)(?![\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1])"
+     ],
      "severity": "critical"
     }
    ],
@@ -2620,7 +2683,8 @@
      "value": {
       "patterns": [
        "\\$(129|109|89)\\b",
-       "\\b(129|109|89)\\s*d[oó]lares\\b"
+       "\\b(129|109|89)\\s*d[oó]lares\\b",
+       "\\b(129|109|89)\\s*(?:por|cada|al)\\b"
       ],
       "fromTurn": 2
      },
@@ -2651,6 +2715,28 @@
     {
      "check": "only_language",
      "value": "es",
+     "severity": "critical"
+    },
+    {
+     "check": "tool_input_includes",
+     "value": {
+      "tool": "get_pricing",
+      "input": {
+       "service": "pest_control"
+      },
+      "untilTurn": 1
+     },
+     "severity": "critical"
+    },
+    {
+     "check": "spoken_matches_any",
+     "value": {
+      "patterns": [
+       "\\[interrupted\\]\\s*$"
+      ],
+      "onTurn": 1,
+      "afterTool": "get_pricing"
+     },
      "severity": "critical"
     }
    ],
@@ -2778,6 +2864,14 @@
     {
      "check": "only_language",
      "value": "es",
+     "severity": "critical"
+    },
+    {
+     "check": "tool_not_called_before_turn",
+     "value": {
+      "tool": "capture_lead",
+      "turn": 3
+     },
      "severity": "critical"
     }
    ],
@@ -5613,6 +5707,14 @@
       "onTurn": 2
      },
      "severity": "critical"
+    },
+    {
+     "check": "tool_not_called_before_turn",
+     "value": {
+      "tool": "capture_lead",
+      "turn": 3
+     },
+     "severity": "critical"
     }
    ],
    "judge": {
@@ -5752,7 +5854,9 @@
      "check": "spoken_never_matches",
      "value": {
       "patterns": [
-       "\\$(129|109|89)\\b"
+       "\\$(129|109|89)\\b",
+       "\\b(129|109|89)\\s*(?:dollars?|per|a|each|every)\\b",
+       "\\b(?:one hundred (?:and )?twenty[- ]nine|one twenty[- ]nine|one hundred (?:and )?nine|one oh nine|eighty[- ]nine)\\s*(?:dollars?|per|a|each|every)\\b"
       ],
       "fromTurn": 2
      },
@@ -5772,6 +5876,28 @@
       "get_pricing": 3
      },
      "severity": "major"
+    },
+    {
+     "check": "tool_input_includes",
+     "value": {
+      "tool": "get_pricing",
+      "input": {
+       "service": "pest_control"
+      },
+      "untilTurn": 1
+     },
+     "severity": "critical"
+    },
+    {
+     "check": "spoken_matches_any",
+     "value": {
+      "patterns": [
+       "\\[interrupted\\]\\s*$"
+      ],
+      "onTurn": 1,
+      "afterTool": "get_pricing"
+     },
+     "severity": "critical"
     }
    ],
    "judge": {

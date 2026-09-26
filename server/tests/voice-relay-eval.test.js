@@ -981,6 +981,92 @@ describe('voice relay eval — each expect key', () => {
     expect(replay._internals.scenarioStatus({ checks: grounded })).toBe('pass');
   });
 
+  // PR #4946 review (r8): scenario structure — each named behavior must
+  // actually be exercised, not passed vacuously.
+  describe('r8 scenario structure', () => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const load = (id) => replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === id);
+    const status = (id, order) => replay._internals.scenarioStatus({ checks: replay._internals.evaluateChecks(load(id), record({ order })) });
+    const failing = (id, order) => replay._internals.evaluateChecks(load(id), record({ order })).filter((c) => c.status === 'fail' && c.severity === 'critical').map((c) => c.check);
+
+    test('tool_input_includes: untilTurn scopes to calls at or before a turn, and is validated', () => {
+      const run = replay._internals.runCheck;
+      const rec = record({ order: [{ kind: 'tool', name: 'get_pricing', input: { service: 'pest_control' }, turn: 2 }] });
+      expect(run({ check: 'tool_input_includes', value: { tool: 'get_pricing', input: { service: 'pest_control' }, untilTurn: 1 }, severity: 'critical' }, rec).status).toBe('fail');
+      expect(run({ check: 'tool_input_includes', value: { tool: 'get_pricing', input: { service: 'pest_control' }, untilTurn: 2 }, severity: 'critical' }, rec).status).toBe('pass');
+      const lint = (value) => replay._internals.lintScenario({
+        id: 'x', language: 'en', gates: {}, allowedTools: ['get_pricing'], caller: { from: '+19415550100', verified: true, context: null }, fixtures: {},
+        turns: [{ caller: 'hi' }], spec: { required_facts: [] }, expect: [exp('tool_input_includes', value, 'critical')],
+      }, replay.knownToolNames()).join('\n');
+      expect(lint({ tool: 'get_pricing', input: { service: 'x' }, untilTurn: 0 })).toMatch(/untilTurn must be a caller turn/);
+      expect(lint({ tool: 'get_pricing', input: { service: 'x' }, fromTurn: 3, untilTurn: 2 })).toMatch(/untilTurn must not precede fromTurn/);
+      expect(lint({ tool: 'get_pricing', input: { service: 'x' }, untilTurn: 1 })).not.toMatch(/tool_input_includes/);
+    });
+
+    test('spoken checks: afterTool is validated and scopes to what was said after that tool ran', () => {
+      const lintSpoken = (value) => replay._internals.lintScenario({
+        id: 'x', language: 'en', gates: {}, allowedTools: ['get_pricing'], caller: { from: '+19415550100', verified: true, context: null }, fixtures: {},
+        turns: [{ caller: 'hi' }], spec: { required_facts: [] }, expect: [exp('spoken_matches_any', value, 'critical')],
+      }, replay.knownToolNames()).join('\n');
+      expect(lintSpoken({ patterns: ['x'], onTurn: 1, afterTool: '' })).toMatch(/afterTool must be a tool name/);
+      expect(lintSpoken({ patterns: ['x'], onTurn: 1, afterTool: 'get_pricing' })).not.toMatch(/spoken_matches_any/);
+      const run = replay._internals.runCheck;
+      const value = { patterns: ['\\[interrupted\\]\\s*$'], onTurn: 1, afterTool: 'get_pricing' };
+      const before = record({ order: [{ kind: 'agent', turn: 1, text: 'One moment [interrupted]' }, { kind: 'tool', name: 'get_pricing', turn: 1 }] });
+      const after = record({ order: [{ kind: 'tool', name: 'get_pricing', turn: 1 }, { kind: 'agent', turn: 1, text: 'That runs [interrupted]' }] });
+      expect(run({ check: 'spoken_matches_any', value, severity: 'critical' }, before).status).toBe('fail');
+      expect(run({ check: 'spoken_matches_any', value, severity: 'critical' }, after).status).toBe('pass');
+    });
+
+    test.each(['interruption-inside-amount-or-date', 'spanish-interruption-inside-amount-or-date'])('%s: the turn-1 pest quote must be what the caller interrupted', (id) => {
+      const es = id.startsWith('spanish');
+      const pest = { kind: 'tool', name: 'get_pricing', input: { service: 'pest_control' }, ok: true, turn: 1, text: 'Pest control: quarterly $129 per application, bimonthly $109, monthly $89.' };
+      const lawn = { kind: 'tool', name: 'get_pricing', input: { service: 'lawn_care' }, ok: true, turn: 2, text: 'Lawn care: enhanced $119 per application (9x/yr), premium $99 per application (12x/yr).' };
+      const quote = { kind: 'agent', turn: 1, text: es ? 'El servicio trimestral cuesta 129 dólares por aplicación. ¿Le [interrupted]' : 'Quarterly pest control is $129 per application. [interrupted]' };
+      const filler = { kind: 'agent', turn: 1, text: es ? 'Déjeme revisar [interrupted]' : 'Let me check [interrupted]' };
+      const good = { kind: 'agent', turn: 2, text: es ? 'Para el césped, el mejorado cuesta 119 dólares por aplicación y el premium 99 dólares por aplicación.' : 'For lawn care, enhanced is $119 per application and premium is $99 per application.' };
+      const stale = { kind: 'agent', turn: 2, text: es ? 'El control de plagas cuesta ciento veintinueve por aplicación, y el césped cuesta ciento diecinueve por aplicación.' : 'Pest control is 129 per application, and lawn care is $119 per application.' };
+      expect(status(id, [pest, quote, lawn, good])).toBe('pass');
+      // The cut may land before the figure — the readback still began after the lookup.
+      const cutEarly = { kind: 'agent', turn: 1, text: es ? 'Para una casa de dos mil pies cuadrados con servicio [interrupted]' : 'For a 2,000 square foot home, quarterly service [interrupted]' };
+      expect(status(id, [pest, cutEarly, lawn, good])).toBe('pass');
+      // Filler interrupted BEFORE any pest lookup (Codex r8's case): the premise never ran.
+      expect(failing(id, [filler, lawn, good])).toEqual(expect.arrayContaining(['tool_input_includes', 'spoken_matches_any']));
+      // Nothing interrupted at all on turn 1.
+      const uncut = { kind: 'agent', turn: 1, text: es ? 'El servicio trimestral cuesta 129 dólares por aplicación.' : 'Quarterly pest control is $129 per application.' };
+      expect(failing(id, [pest, uncut, lawn, good])).toContain('spoken_matches_any');
+      expect(failing(id, [quote, lawn, good])).toContain('tool_input_includes'); // no turn-1 pest lookup
+      expect(failing(id, [pest, quote, lawn, stale])).toContain('spoken_never_matches'); // stale pest figure without "$"
+    });
+
+    test.each(['slot-gone', 'spanish-slot-gone'])('%s: the S1 attempt and the refreshed lookup must both happen', (id) => {
+      const es = id.startsWith('spanish');
+      const find1 = { kind: 'tool', name: 'find_slots', input: { when: 'next week', city: 'Bradenton' }, ok: true, turn: 1 };
+      const s1 = { kind: 'tool', name: 'request_booking', input: { slot_ref: 'S1' }, ok: true, turn: 2 };
+      const find2 = { kind: 'tool', name: 'find_slots', input: { when: 'next week', city: 'Bradenton' }, ok: true, turn: 2 };
+      const s3 = { kind: 'tool', name: 'request_booking', input: { slot_ref: 'S3' }, ok: true, receipt: true, turn: 3 };
+      const gone = { kind: 'agent', turn: 2, text: es ? 'Ese horario ya no está disponible. Le ofrezco el lunes a las 10 de la mañana.' : 'Sorry, that one just got taken. I have Monday at 10 AM.' };
+      expect(failing(id, [find1, find2, gone, s3])).toContain('tool_input_includes'); // S1 never attempted
+      expect(failing(id, [find1, s1, gone, s3])).toContain('tool_input_includes'); // no refreshed lookup
+    });
+
+    test.each(['backchannel-vs-explicit-correction', 'spanish-backchannel-vs-explicit-correction'])('%s: no lead captured before the correction turn', (id) => {
+      const early = { kind: 'tool', name: 'capture_lead', input: { address_line1: '88B Palm Harbor Drive' }, ok: true, receipt: true, turn: 1 };
+      expect(failing(id, [early])).toContain('tool_not_called_before_turn');
+    });
+
+    test.each([
+      ['spanish-reservice-matched', ['He creado una cita nueva. El equipo le llamará.', 'Ya quedó agendada su visita.', 'Le agendé para el lunes.'], ['Un miembro del equipo va a llamarle para programar la visita.', 'No he creado ninguna cita nueva; la oficina le llamará.']],
+      ['reservice-matched', ["I've booked you a new appointment.", "You're all scheduled.", 'I scheduled a new visit for you.'], ['The office will schedule the visit and call you.', "I haven't booked anything yet; the office will call you."]],
+    ])('%s: a claimed new appointment is banned, negation-aware', (id, claims, fine) => {
+      const check = load(id).expect.filter((c) => c.check === 'spoken_never_matches').find((c) => Array.isArray(c.value) && c.value.some((p) => /cita|appointment/.test(p)));
+      expect(check.severity).toBe('critical');
+      const hits = (text) => check.value.some((p) => new RegExp(p, 'i').test(text));
+      for (const text of claims) expect([text, hits(text)]).toEqual([text, true]);
+      for (const text of fine) expect([text, hits(text)]).toEqual([text, false]);
+    });
+  });
+
   test('pricing-gate-on: a discount is a major miss beside a correct quote', () => {
     const replay = require('../services/eval/voice-relay-replay');
     const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'pricing-gate-on');
@@ -4888,9 +4974,12 @@ describe('voice relay eval — named spoken checks', () => {
     expect(scenario.expect.find((c) => c.check === 'spoken_never_matches').severity).toBe('critical');
     // turn: 2/3 — S1 on the caller's first pick, S3 on the second, after S1
     // was refused (see the tool_not_called_before_turn test below).
+    // The fixture answers S1 with "that time is gone" — a valid call (ok),
+    // no receipt — and the refreshed lookup follows it (r8: both required).
     const placed = [
-      { kind: 'tool', name: 'find_slots', ok: true, turn: 1 },
-      { kind: 'tool', name: 'request_booking', input: { slot_ref: 'S1' }, ok: false, turn: 2 },
+      { kind: 'tool', name: 'find_slots', input: { city: 'Bradenton' }, ok: true, turn: 1 },
+      { kind: 'tool', name: 'request_booking', input: { slot_ref: 'S1' }, ok: true, turn: 2 },
+      { kind: 'tool', name: 'find_slots', input: { city: 'Bradenton' }, ok: true, turn: 2 },
       { kind: 'tool', name: 'request_booking', input: { slot_ref: 'S3' }, ok: true, receipt: true, turn: 3 },
     ];
     const confirmed = replay._internals.evaluateChecks(scenario, record({ order: [...placed, { kind: 'agent', text: 'That slot was just taken, but your appointment is confirmed for the next one.' }] }));
@@ -5093,9 +5182,12 @@ describe('voice relay eval — named spoken checks', () => {
     const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'spanish-slot-gone');
     // turn: 2/3 — S1 on the caller's first pick, S3 on the second, after S1
     // was refused (see the tool_not_called_before_turn test below).
+    // The fixture answers S1 with "that time is gone" — a valid call (ok),
+    // no receipt — and the refreshed lookup follows it (r8: both required).
     const placed = [
-      { kind: 'tool', name: 'find_slots', ok: true, turn: 1 },
-      { kind: 'tool', name: 'request_booking', input: { slot_ref: 'S1' }, ok: false, turn: 2 },
+      { kind: 'tool', name: 'find_slots', input: { city: 'Bradenton' }, ok: true, turn: 1 },
+      { kind: 'tool', name: 'request_booking', input: { slot_ref: 'S1' }, ok: true, turn: 2 },
+      { kind: 'tool', name: 'find_slots', input: { city: 'Bradenton' }, ok: true, turn: 2 },
       { kind: 'tool', name: 'request_booking', input: { slot_ref: 'S3' }, ok: true, receipt: true, turn: 3 },
     ];
     const confirmed = replay._internals.evaluateChecks(scenario, record({ order: [...placed, { kind: 'agent', text: 'Esa hora ya no está disponible, pero su cita quedó confirmada para las diez de la mañana.' }] }));
@@ -5459,19 +5551,21 @@ describe('voice relay eval — named spoken checks', () => {
     // 'returned'}) below can tell a grounded figure from a hallucinated one.
     const pestPricing = { kind: 'tool', name: 'get_pricing', input: { service: 'pest_control', home_sqft: 2000 }, ok: true, turn: 1, text: pricingResponses[0].text };
     const lawnPricing = { kind: 'tool', name: 'get_pricing', input: { service: 'lawn_care', lawn_sqft: 5000 }, ok: true, turn: 2, text: pricingResponses[1].text };
+    // r8: the turn-1 pest quote is what the caller interrupted.
+    const interruptedQuote = { kind: 'agent', turn: 1, text: 'El servicio trimestral cuesta 129 dólares por aplicación. ¿Le [interrupted]' };
     const resurfaced = replay._internals.evaluateChecks(scenario, record({ order: [
-      pestPricing, { kind: 'agent', text: 'El control de plagas trimestral son $129 por aplicación.', turn: 1 },
+      pestPricing, { kind: 'agent', text: 'El control de plagas trimestral son $129 por aplicación. [interrupted]', turn: 1 },
       lawnPricing, { kind: 'agent', text: 'Entendido, césped. Como le decía, el control de plagas es $129, y el programa de césped mejorado es $119 por aplicación.', turn: 2 },
     ] }));
     expect(resurfaced.some((c) => c.check === 'spoken_never_matches' && c.status === 'fail' && c.severity === 'critical')).toBe(true);
     expect(replay._internals.scenarioStatus({ checks: resurfaced })).toBe('fail');
     const monthly = replay._internals.evaluateChecks(scenario, record({ order: [
-      pestPricing, lawnPricing, { kind: 'agent', text: 'El programa mejorado sería 119 dólares al mes.', turn: 2 },
+      pestPricing, interruptedQuote, lawnPricing, { kind: 'agent', text: 'El programa mejorado sería 119 dólares al mes.', turn: 2 },
     ] }));
     expect(monthly.find((c) => c.check === 'amount_requires_unit')).toMatchObject({ severity: 'critical', status: 'fail' });
     expect(replay._internals.scenarioStatus({ checks: monthly })).toBe('fail');
     const missingUnit = replay._internals.evaluateChecks(scenario, record({ order: [
-      pestPricing, lawnPricing, { kind: 'agent', text: 'El programa mejorado cuesta $119, y el premium $99.', turn: 2 },
+      pestPricing, interruptedQuote, lawnPricing, { kind: 'agent', text: 'El programa mejorado cuesta $119, y el premium $99.', turn: 2 },
     ] }));
     expect(missingUnit.find((c) => c.check === 'amount_requires_unit')).toMatchObject({ severity: 'critical', status: 'fail' });
     expect(replay._internals.scenarioStatus({ checks: missingUnit })).toBe('fail');
@@ -5480,12 +5574,12 @@ describe('voice relay eval — named spoken checks', () => {
     // instead of enumerating bad ones, so the $99 side can no longer hide
     // behind the $119 side's correct "por aplicación".
     const perYear = replay._internals.evaluateChecks(scenario, record({ order: [
-      pestPricing, lawnPricing, { kind: 'agent', text: 'Para césped, el programa mejorado es $119 por aplicación y el premium es $99 por año.', turn: 2 },
+      pestPricing, interruptedQuote, lawnPricing, { kind: 'agent', text: 'Para césped, el programa mejorado es $119 por aplicación y el premium es $99 por año.', turn: 2 },
     ] }));
     expect(perYear.find((c) => c.check === 'amount_requires_unit')).toMatchObject({ severity: 'critical', status: 'fail' });
     expect(replay._internals.scenarioStatus({ checks: perYear })).toBe('fail');
     const correct = replay._internals.evaluateChecks(scenario, record({ order: [
-      pestPricing, lawnPricing, { kind: 'agent', text: 'Para césped, el programa mejorado es $119 por aplicación, nueve veces al año; el premium es $99 por aplicación, doce veces al año.', turn: 2 },
+      pestPricing, interruptedQuote, lawnPricing, { kind: 'agent', text: 'Para césped, el programa mejorado es $119 por aplicación, nueve veces al año; el premium es $99 por aplicación, doce veces al año.', turn: 2 },
     ] }));
     expect(correct.find((c) => c.check === 'no_price_disclosure')).toMatchObject({ status: 'pass' });
     expect(correct.find((c) => c.check === 'amount_requires_unit')).toMatchObject({ status: 'pass' });
@@ -5494,7 +5588,7 @@ describe('voice relay eval — named spoken checks', () => {
     // satisfies it) — proving the OR side still passes on its own, not just
     // when both figures happen to appear together.
     const onlyPremium = replay._internals.evaluateChecks(scenario, record({ order: [
-      pestPricing, lawnPricing, { kind: 'agent', text: 'Para césped, el programa premium es $99 por aplicación, doce veces al año.', turn: 2 },
+      pestPricing, interruptedQuote, lawnPricing, { kind: 'agent', text: 'Para césped, el programa premium es $99 por aplicación, doce veces al año.', turn: 2 },
     ] }));
     expect(onlyPremium.find((c) => c.check === 'amount_requires_unit')).toMatchObject({ status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: onlyPremium })).toBe('pass');
@@ -5504,7 +5598,7 @@ describe('voice relay eval — named spoken checks', () => {
     // — the second price silently borrowed the first one's unit and passed
     // even though it never carried its own.
     const yNotSplitting = replay._internals.evaluateChecks(scenario, record({ order: [
-      pestPricing, lawnPricing, { kind: 'agent', text: 'El programa mejorado cuesta $119 por aplicación y el premium cuesta $99', turn: 2 },
+      pestPricing, interruptedQuote, lawnPricing, { kind: 'agent', text: 'El programa mejorado cuesta $119 por aplicación y el premium cuesta $99', turn: 2 },
     ] }));
     expect(yNotSplitting.find((c) => c.check === 'amount_requires_unit')).toMatchObject({ severity: 'critical', status: 'fail' });
     expect(replay._internals.scenarioStatus({ checks: yNotSplitting })).toBe('fail');
@@ -5514,14 +5608,14 @@ describe('voice relay eval — named spoken checks', () => {
     // immediately before "dólares"/"pesos". amount_requires_unit then saw
     // only word text and reported the price "never quoted".
     const spelledNoUnitWord = replay._internals.evaluateChecks(scenario, record({ order: [
-      pestPricing, lawnPricing, { kind: 'agent', text: 'El programa mejorado cuesta ciento diecinueve por aplicación y el premium noventa y nueve por aplicación.', turn: 2 },
+      pestPricing, interruptedQuote, lawnPricing, { kind: 'agent', text: 'El programa mejorado cuesta ciento diecinueve por aplicación y el premium noventa y nueve por aplicación.', turn: 2 },
     ] }));
     expect(spelledNoUnitWord.find((c) => c.check === 'amount_requires_unit')).toMatchObject({ status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: spelledNoUnitWord })).toBe('pass');
     // Codex round-1 P1: a hallucinated EXTRA price no tool ever returned must
     // fail even standing right beside the two compliant, grounded figures.
     const invented = replay._internals.evaluateChecks(scenario, record({ order: [
-      pestPricing, lawnPricing, { kind: 'agent', text: 'Para césped, el programa mejorado es $119 por aplicación; también hay una opción de $150 por aplicación.', turn: 2 },
+      pestPricing, interruptedQuote, lawnPricing, { kind: 'agent', text: 'Para césped, el programa mejorado es $119 por aplicación; también hay una opción de $150 por aplicación.', turn: 2 },
     ] }));
     expect(invented.find((c) => c.check === 'no_price_disclosure')).toMatchObject({ severity: 'critical', status: 'fail' });
     expect(replay._internals.scenarioStatus({ checks: invented })).toBe('fail');
@@ -5530,7 +5624,7 @@ describe('voice relay eval — named spoken checks', () => {
     // check is existential, so it must not be satisfied by a DIFFERENT price
     // in the same sentence carrying the right unit.
     const perVisit = replay._internals.evaluateChecks(scenario, record({ order: [
-      pestPricing, lawnPricing, { kind: 'agent', text: 'Para césped, el programa mejorado es $119 por aplicación y el premium es $99 por visita.', turn: 2 },
+      pestPricing, interruptedQuote, lawnPricing, { kind: 'agent', text: 'Para césped, el programa mejorado es $119 por aplicación y el premium es $99 por visita.', turn: 2 },
     ] }));
     expect(perVisit.find((c) => c.check === 'amount_requires_unit')).toMatchObject({ severity: 'critical', status: 'fail' });
     expect(replay._internals.scenarioStatus({ checks: perVisit })).toBe('fail');
@@ -5538,11 +5632,11 @@ describe('voice relay eval — named spoken checks', () => {
     // — the required price+unit check must accept that spelling too, and the
     // prohibited pest-figure check must still catch it in that spelling.
     const correctDolares = replay._internals.evaluateChecks(scenario, record({ order: [
-      pestPricing, lawnPricing, { kind: 'agent', text: 'Para césped, el programa mejorado cuesta 119 dólares por aplicación, nueve veces al año; el premium es 99 dólares por aplicación, doce veces al año.', turn: 2 },
+      pestPricing, interruptedQuote, lawnPricing, { kind: 'agent', text: 'Para césped, el programa mejorado cuesta 119 dólares por aplicación, nueve veces al año; el premium es 99 dólares por aplicación, doce veces al año.', turn: 2 },
     ] }));
     expect(replay._internals.scenarioStatus({ checks: correctDolares })).toBe('pass');
     const resurfacedDolares = replay._internals.evaluateChecks(scenario, record({ order: [
-      pestPricing, lawnPricing, { kind: 'agent', text: 'Como le decía, el control de plagas cuesta 129 dólares; para césped el programa mejorado es 119 dólares por aplicación.', turn: 2 },
+      pestPricing, interruptedQuote, lawnPricing, { kind: 'agent', text: 'Como le decía, el control de plagas cuesta 129 dólares; para césped el programa mejorado es 119 dólares por aplicación.', turn: 2 },
     ] }));
     expect(resurfacedDolares.some((c) => c.check === 'spoken_never_matches' && c.status === 'fail' && c.severity === 'critical')).toBe(true);
     expect(replay._internals.scenarioStatus({ checks: resurfacedDolares })).toBe('fail');
@@ -5558,29 +5652,31 @@ describe('voice relay eval — named spoken checks', () => {
     const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'interruption-inside-amount-or-date');
     const pestPricing = { kind: 'tool', name: 'get_pricing', input: { service: 'pest_control', home_sqft: 2000 }, ok: true, turn: 1 };
     const lawnPricing = { kind: 'tool', name: 'get_pricing', input: { service: 'lawn_care', lawn_sqft: 5000 }, ok: true, turn: 2 };
+    // r8: the turn-1 pest quote is what the caller interrupted.
+    const interruptedQuote = { kind: 'agent', turn: 1, text: 'Quarterly pest control is $129 per application. [interrupted]' };
     const perYear = replay._internals.evaluateChecks(scenario, record({ order: [
-      pestPricing, lawnPricing, { kind: 'agent', text: 'For lawn care, the enhanced program is $119 per application and the premium is $99 per year.', turn: 2 },
+      pestPricing, interruptedQuote, lawnPricing, { kind: 'agent', text: 'For lawn care, the enhanced program is $119 per application and the premium is $99 per year.', turn: 2 },
     ] }));
     expect(perYear.find((c) => c.check === 'amount_requires_unit')).toMatchObject({ severity: 'critical', status: 'fail' });
     expect(replay._internals.scenarioStatus({ checks: perYear })).toBe('fail');
     const perVisit = replay._internals.evaluateChecks(scenario, record({ order: [
-      pestPricing, lawnPricing, { kind: 'agent', text: 'For lawn care, the enhanced program is $119 per application and the premium is $99 per visit.', turn: 2 },
+      pestPricing, interruptedQuote, lawnPricing, { kind: 'agent', text: 'For lawn care, the enhanced program is $119 per application and the premium is $99 per visit.', turn: 2 },
     ] }));
     expect(perVisit.find((c) => c.check === 'amount_requires_unit')).toMatchObject({ severity: 'critical', status: 'fail' });
     expect(replay._internals.scenarioStatus({ checks: perVisit })).toBe('fail');
     const missingUnit = replay._internals.evaluateChecks(scenario, record({ order: [
-      pestPricing, lawnPricing, { kind: 'agent', text: 'For lawn care, the enhanced program is $119 and the premium is $99.', turn: 2 },
+      pestPricing, interruptedQuote, lawnPricing, { kind: 'agent', text: 'For lawn care, the enhanced program is $119 and the premium is $99.', turn: 2 },
     ] }));
     expect(missingUnit.find((c) => c.check === 'amount_requires_unit')).toMatchObject({ severity: 'critical', status: 'fail' });
     expect(replay._internals.scenarioStatus({ checks: missingUnit })).toBe('fail');
     const correct = replay._internals.evaluateChecks(scenario, record({ order: [
-      pestPricing, lawnPricing, { kind: 'agent', text: 'For lawn care, the enhanced program is $119 per application, nine times a year; the premium is $99 per application, twelve times a year.', turn: 2 },
+      pestPricing, interruptedQuote, lawnPricing, { kind: 'agent', text: 'For lawn care, the enhanced program is $119 per application, nine times a year; the premium is $99 per application, twelve times a year.', turn: 2 },
     ] }));
     expect(correct.find((c) => c.check === 'amount_requires_unit')).toMatchObject({ status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: correct })).toBe('pass');
     // Either amount alone (the OR side of the array) still passes on its own.
     const onlyPremium = replay._internals.evaluateChecks(scenario, record({ order: [
-      pestPricing, lawnPricing, { kind: 'agent', text: 'For lawn care, the premium program is $99 per application, twelve times a year.', turn: 2 },
+      pestPricing, interruptedQuote, lawnPricing, { kind: 'agent', text: 'For lawn care, the premium program is $99 per application, twelve times a year.', turn: 2 },
     ] }));
     expect(onlyPremium.find((c) => c.check === 'amount_requires_unit')).toMatchObject({ status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: onlyPremium })).toBe('pass');
