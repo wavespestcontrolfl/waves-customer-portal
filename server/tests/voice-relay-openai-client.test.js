@@ -224,9 +224,20 @@ describe('mapResponseToMessage — Responses response -> Anthropic Message shape
     expect(msg.stop_reason).toBe('max_tokens');
   });
 
-  test('an incomplete response for a different reason does NOT map to max_tokens', () => {
-    const msg = mapResponseToMessage({ status: 'incomplete', incomplete_details: { reason: 'content_filter' }, output: [] }, 'gpt-6-sol');
-    expect(msg.stop_reason).toBe('end_turn');
+  // Codex r2 P1: an incomplete response for any reason OTHER than
+  // max_output_tokens (content_filter, or anything else) is a genuine
+  // failure, not a silent end_turn — see mapResponseToMessage's own comment.
+  // A silent end_turn here would end the caller's turn with nothing spoken,
+  // reset the relay's failure streak, and count as a clean completed round
+  // in benchmark telemetry.
+  test('an incomplete response for content_filter rejects rather than mapping to end_turn', () => {
+    expect(() => mapResponseToMessage({ status: 'incomplete', incomplete_details: { reason: 'content_filter' }, output: [] }, 'gpt-6-sol'))
+      .toThrow(/incomplete response \(content_filter\)/);
+  });
+
+  test('an incomplete response with no incomplete_details at all still rejects, never silently end_turn', () => {
+    expect(() => mapResponseToMessage({ status: 'incomplete', output: [] }, 'gpt-6-sol'))
+      .toThrow(/incomplete response \(unknown\)/);
   });
 });
 

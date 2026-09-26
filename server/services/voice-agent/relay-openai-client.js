@@ -202,9 +202,21 @@ function mapResponseToMessage(response, requestedModel) {
       content.push({ type: 'tool_use', id: item.call_id || item.id, name: item.name, input });
     }
   }
-  const incompleteMaxTokens = response.status === 'incomplete'
-    && (response.incomplete_details || {}).reason === 'max_output_tokens';
-  const stop_reason = hasFunctionCall ? 'tool_use' : (incompleteMaxTokens ? 'max_tokens' : 'end_turn');
+  // `incomplete` for max_output_tokens is a legitimate, non-error stop (the
+  // Anthropic 'max_tokens' equivalent — the relay already knows what that
+  // means). Any OTHER incomplete reason (content_filter, or anything else
+  // OpenAI ever adds here) is a genuine failure: the model did not actually
+  // finish, and letting it fall through as a silent 'end_turn' with
+  // whatever partial content happened to exist (often none at all) would
+  // reset the relay's failure streak and end the turn without speaking,
+  // while the benchmark counts it as a clean completed round. Reject here so
+  // finalMessage() surfaces it through the SAME model-failure/telemetry path
+  // a real provider error already takes.
+  const incompleteReason = response.status === 'incomplete' ? (response.incomplete_details || {}).reason || 'unknown' : null;
+  if (incompleteReason && incompleteReason !== 'max_output_tokens') {
+    throw new Error(`OpenAI Responses API returned an incomplete response (${incompleteReason}).`);
+  }
+  const stop_reason = hasFunctionCall ? 'tool_use' : (incompleteReason === 'max_output_tokens' ? 'max_tokens' : 'end_turn');
   return {
     id: response.id || null,
     model: response.model || requestedModel,
