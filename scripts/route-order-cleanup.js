@@ -394,8 +394,58 @@ function rollbackWindowConflict(targetOrder, liveRows, deps) {
   return null;
 }
 
-/** Operator-facing explanation for a rollbackWindowConflict verdict. */
-function rollbackConflictDetail(conflict) {
+/**
+ * Ids of every live row that would SHARE a non-null route_order once the
+ * restore commits, where that sharing was not already in the backup's
+ * before-state (codex PRRT_kwDOR3YQi86mQfEB). The mismatch check only
+ * covers BACKED-UP rows; an unbacked row can be moved since the backup (an
+ * admin single-row reorder) onto a slot a backed-up row is about to be
+ * restored to — restore A→2 while unbacked X is now 2 leaves both at 2,
+ * and the window guard can still approve that order. A shared position is
+ * accepted only when every row in it is backed up AND their recorded
+ * `before` values were equal (a duplicate the day genuinely had before the
+ * cleanup); any group containing an unbacked row, or restored rows whose
+ * shared value was not a before-state duplicate, collides. Empty = none.
+ */
+function restorePositionCollisions(liveRows, dayRows, positions) {
+  const backedUp = new Set(dayRows.map((row) => row.id));
+  const byPosition = new Map();
+  for (const row of liveRows) {
+    const pos = positions.get(row.id);
+    if (pos == null) continue;
+    if (!byPosition.has(pos)) byPosition.set(pos, []);
+    byPosition.get(pos).push(row.id);
+  }
+  // Every value in `positions` for a backed-up row IS its recorded before,
+  // so an all-backed-up group sharing a position was a before-state duplicate.
+  const collides = (ids) => ids.length > 1 && ids.some((id) => !backedUp.has(id));
+  return [...byPosition.values()].filter(collides).flat().sort();
+}
+
+/**
+ * The full pre-write verdict for one backed-up tech-day whose rows all still
+ * match the backup — shared by the dry-run preview and the real rollback so
+ * both report the same thing: the exact positions to restore, and why the
+ * day must be skipped (null = restorable): RESTORE_POSITION_COLLISION first
+ * (with `collisionIds`), then the shared guard's verdict on the order
+ * dispatch will read (rollbackWindowConflict).
+ */
+function restoreVerdict(liveRows, dayRows, deps) {
+  const positions = buildRollbackPositions(liveRows, dayRows);
+  const collisionIds = restorePositionCollisions(liveRows, dayRows, positions);
+  if (collisionIds.length) return { positions, conflict: 'RESTORE_POSITION_COLLISION', collisionIds };
+  // Legality is checked on the order dispatch will READ after the commit
+  // (restoredDispatchOrder) — with explicit positions the writer's row
+  // sequence never decides how ties are read back.
+  const conflict = rollbackWindowConflict(restoredDispatchOrder(liveRows, positions, deps), liveRows, deps);
+  return { positions, conflict, collisionIds };
+}
+
+/** Operator-facing explanation for a restoreVerdict conflict. */
+function rollbackConflictDetail(conflict, collisionIds = []) {
+  if (conflict === 'RESTORE_POSITION_COLLISION') {
+    return `restored positions would collide with rows moved since the backup (ids only): ${collisionIds.join(', ')}`;
+  }
   return conflict.startsWith('WINDOW_')
     ? 'the restored order would violate a promised window — windows likely changed since the backup'
     : 'the shared route guard cannot certify the restored order (e.g. a stop without usable coordinates)';
@@ -417,11 +467,8 @@ async function previewRollback(conn, rows, deps) {
   for (const day of days) {
     const liveRows = await readLiveTechDay(conn, { dateStr: day.date, techId: day.technician_id }, deps);
     const mismatchedIds = mismatchedIdsForDay(day.rows, liveRows);
-    let conflict = null;
-    if (!mismatchedIds.length) {
-      const dispatchOrder = restoredDispatchOrder(liveRows, buildRollbackPositions(liveRows, day.rows), deps);
-      conflict = rollbackWindowConflict(dispatchOrder, liveRows, deps);
-    }
+    const verdict = mismatchedIds.length ? { conflict: null, collisionIds: [] } : restoreVerdict(liveRows, day.rows, deps);
+    const { conflict } = verdict;
     const wouldRestore = mismatchedIds.length === 0 && !conflict;
     plan.push({
       technician_id: day.technician_id,
@@ -430,6 +477,7 @@ async function previewRollback(conn, rows, deps) {
       would_restore: wouldRestore,
       mismatched_ids: mismatchedIds,
       conflict,
+      ...(verdict.collisionIds.length ? { collision_ids: verdict.collisionIds } : {}),
       note: wouldRestore ? 'eligibility (freeze/lock/today-past) re-checked at write time' : null,
     });
   }
@@ -484,16 +532,13 @@ async function applyRollback(conn, rows, now, deps) {
       continue;
     }
     const finalOrdered = buildRollbackTargetOrder(liveRows, day.rows);
-    const positions = buildRollbackPositions(liveRows, day.rows);
-    // Legality is checked on the order dispatch will READ after the commit
-    // (restoredDispatchOrder), not on finalOrdered — with explicit positions
-    // the writer's row sequence never decides how ties are read back.
-    const conflict = rollbackWindowConflict(restoredDispatchOrder(liveRows, positions, deps), liveRows, deps);
+    const { positions, conflict, collisionIds } = restoreVerdict(liveRows, day.rows, deps);
     if (conflict) {
       summary.skipped.push({
         ...entryBase,
         reason: conflict,
-        detail: rollbackConflictDetail(conflict),
+        detail: rollbackConflictDetail(conflict, collisionIds),
+        ...(collisionIds.length ? { collision_ids: collisionIds } : {}),
       });
       continue;
     }
@@ -516,7 +561,7 @@ function printRollbackPlan(plan) {
     if (day.would_restore) {
       console.log(`${day.date} tech ${day.technician_id}: would restore ${day.row_count} row(s) (${day.note})`);
     } else if (day.conflict) {
-      console.log(`${day.date} tech ${day.technician_id}: WOULD SKIP — ${day.conflict} (${rollbackConflictDetail(day.conflict)})`);
+      console.log(`${day.date} tech ${day.technician_id}: WOULD SKIP — ${day.conflict} (${rollbackConflictDetail(day.conflict, day.collision_ids)})`);
     } else {
       console.log(`${day.date} tech ${day.technician_id}: WOULD SKIP (${day.mismatched_ids.length} row(s) no longer match, ids only): ${day.mismatched_ids.join(', ')}`);
     }
@@ -860,6 +905,6 @@ if (require.main === module) {
 module.exports = {
   buildDateRange, buildBackupRows, applyRollback, parseLedgerResult, recoveryInstruction, collectEntries, reportAndBackup,
   groupRowsByTechDay, readLiveTechDay, mismatchedIdsForDay, buildRollbackTargetOrder, buildRollbackPositions,
-  restoredDispatchOrder, rollbackWindowConflict, runRollback, rollbackIsIncomplete, previewRollback, printRollbackPlan, printRollbackResult, buildRunOpts, writeBackupFile,
+  restoredDispatchOrder, restorePositionCollisions, restoreVerdict, rollbackWindowConflict, runRollback, rollbackIsIncomplete, previewRollback, printRollbackPlan, printRollbackResult, buildRunOpts, writeBackupFile,
   outOfHorizonDates, runIsUnhealthy,
 };

@@ -15,7 +15,7 @@ const { wasLockSkipped } = require('../utils/cron-lock');
 const {
   buildDateRange, buildBackupRows, applyRollback, parseLedgerResult, recoveryInstruction,
   collectEntries, reportAndBackup, groupRowsByTechDay, readLiveTechDay, mismatchedIdsForDay,
-  buildRollbackTargetOrder, buildRollbackPositions, restoredDispatchOrder, rollbackWindowConflict, previewRollback, printRollbackPlan, printRollbackResult,
+  buildRollbackTargetOrder, buildRollbackPositions, restoredDispatchOrder, restorePositionCollisions, rollbackWindowConflict, previewRollback, printRollbackPlan, printRollbackResult,
   buildRunOpts, writeBackupFile, outOfHorizonDates, runIsUnhealthy, runRollback, rollbackIsIncomplete,
 } = require('../../scripts/route-order-cleanup');
 const {
@@ -1141,5 +1141,78 @@ describe('runRollback --execute: run-level lock (PRRT_kwDOR3YQi86mQTC6) and exit
     expect(rollbackIsIncomplete({ restored: 1, summary: clean }, 2)).toBe(true);
     expect(rollbackIsIncomplete({ restored: 2, summary: { skipped: [{}], failed: [] } }, 2)).toBe(true);
     expect(rollbackIsIncomplete({ restored: 2, summary: { skipped: [], failed: [{}] } }, 2)).toBe(true);
+  });
+});
+
+describe('restore position collisions (codex PRRT_kwDOR3YQi86mQfEB)', () => {
+  const NOW = new Date('2026-09-27T12:00:00Z');
+  // Original A=2, B=1, X=3. Cleanup swapped A/B (A=1, B=2; X untouched, so
+  // not in the backup). An admin single-row reorder then moved X to 2.
+  // Restoring A→2 would leave A and X both at 2 — the backup-match check
+  // (backed-up rows only) and the window guard both still pass.
+  const axLive = () => [
+    { id: 'A', route_order: 1, window_start: '09:00' },
+    { id: 'B', route_order: 2, window_start: '09:00' },
+    { id: 'X', route_order: 2, window_start: '09:00' },
+  ];
+  const axBackup = [
+    { id: 'A', date: '2026-10-05', technician_id: 't1', before: 2, after: 1 },
+    { id: 'B', date: '2026-10-05', technician_id: 't1', before: 1, after: 2 },
+  ];
+
+  test('the A/X repro: execute skips the day with RESTORE_POSITION_COLLISION and the colliding ids — the writer is never called', async () => {
+    const conn = fakeLiveConn({ 't1:2026-10-05': axLive() });
+    const writeTechDayOrder = jest.fn();
+    const result = await applyRollback(conn, axBackup, NOW, rollbackDeps({ writeTechDayOrder }));
+    expect(writeTechDayOrder).not.toHaveBeenCalled();
+    expect(result.restored).toBe(0);
+    expect(result.summary.skipped).toEqual([{
+      date: '2026-10-05', technician_id: 't1', reason: 'RESTORE_POSITION_COLLISION',
+      detail: 'restored positions would collide with rows moved since the backup (ids only): A, X',
+      collision_ids: ['A', 'X'],
+    }]);
+  });
+
+  test('the A/X repro: the preview shows the same verdict', async () => {
+    const conn = fakeLiveConn({ 't1:2026-10-05': axLive() });
+    const plan = await previewRollback(conn, axBackup, rollbackDeps());
+    expect(plan[0]).toMatchObject({
+      would_restore: false, conflict: 'RESTORE_POSITION_COLLISION', collision_ids: ['A', 'X'], mismatched_ids: [],
+    });
+    const logs = [];
+    const spy = jest.spyOn(console, 'log').mockImplementation((m) => logs.push(m));
+    printRollbackPlan(plan);
+    spy.mockRestore();
+    expect(logs.some((l) => /WOULD SKIP — RESTORE_POSITION_COLLISION/.test(l) && /A, X/.test(l))).toBe(true);
+  });
+
+  test('a duplicate the day genuinely had before the cleanup (two backed-up rows with the same "before") is restored, not rejected', async () => {
+    const live = [
+      { id: 'A', route_order: 1, window_start: '09:00' },
+      { id: 'B', route_order: 2, window_start: '09:00' },
+    ];
+    const backup = [
+      { id: 'A', date: '2026-10-05', technician_id: 't1', before: 3, after: 1 },
+      { id: 'B', date: '2026-10-05', technician_id: 't1', before: 3, after: 2 },
+    ];
+    const writeTechDayOrder = jest.fn(async () => {});
+    const result = await applyRollback(fakeLiveConn({ 't1:2026-10-05': live }), backup, NOW, rollbackDeps({ writeTechDayOrder }));
+    expect(writeTechDayOrder).toHaveBeenCalledTimes(1);
+    expect(writeTechDayOrder.mock.calls[0][1].opts.positions).toEqual(new Map([['A', 3], ['B', 3]]));
+    expect(result.restored).toBe(2);
+  });
+
+  test('restorePositionCollisions: unbacked rows now sharing a slot collide; nulls never do; a distinct restore is clean', () => {
+    const backed = [{ id: 'A', before: 1 }];
+    const pos = (entries) => new Map(entries);
+    expect(restorePositionCollisions(
+      [{ id: 'A' }, { id: 'X' }, { id: 'Y' }], backed, pos([['A', 1], ['X', 4], ['Y', 4]]),
+    )).toEqual(['X', 'Y']);
+    expect(restorePositionCollisions(
+      [{ id: 'A' }, { id: 'X' }], [{ id: 'A', before: null }], pos([['A', null], ['X', null]]),
+    )).toEqual([]);
+    expect(restorePositionCollisions(
+      [{ id: 'A' }, { id: 'X' }], backed, pos([['A', 1], ['X', 2]]),
+    )).toEqual([]);
   });
 });
