@@ -24,7 +24,7 @@ const knex = require('knex');
 const sendgrid = require('../services/sendgrid-mail');
 const { dispatchUnderBillingEmailAuthority } = require('../services/billing-channel-email-authority');
 const { etDateString, addETDays } = require('../utils/datetime-et');
-const { retryOne } = require('../services/transactional-email-provider-retry');
+const { claimDueRetries, retryOne } = require('../services/transactional-email-provider-retry');
 const connection = process.env.APP_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
 const schema = `billing_provider_connection_${randomUUID().replaceAll('-', '')}`;
@@ -32,6 +32,23 @@ const customerId = randomUUID();
 const originalApiKey = process.env.SENDGRID_API_KEY;
 const originalFetch = global.fetch;
 let admin;
+
+function billingReplayRow(chargeDate, overrides = {}) {
+  const event = `precharge:${customerId}:${chargeDate}`;
+  const attempt = randomUUID();
+  return {
+    id: randomUUID(), template_key: 'billing.notice', recipient_type: 'customer', recipient_id: customerId,
+    recipient_email_snapshot: 'qa@example.invalid', trigger_event_id: event,
+    idempotency_key: `billing_channel_email:${event}:email`, subject_snapshot: 'Synthetic precharge',
+    html_snapshot: '<p>Synthetic precharge</p>', text_snapshot: 'Synthetic precharge',
+    suppression_group_key_snapshot: 'transactional_required',
+    payload_snapshot: { __billing_replay_context: { schema_version: 1, customer_id: customerId,
+      category: 'billing', source_entry_point: 'autopay_pre_charge_reminder', notificationEventKey: event, charge_date: chargeDate } },
+    categories: JSON.stringify(['email_template', 'billing']), send_attempt_token: attempt,
+    provider_handoff_attempt_token: attempt, provider_handoff_phase: 'pending', status: 'queued', provider_retry_count: 1,
+    ...overrides,
+  };
+}
 
 postgres('billing Email provider preparation on its held connection', () => {
   beforeAll(async () => {
@@ -71,7 +88,8 @@ postgres('billing Email provider preparation on its held connection', () => {
         'suppression_group_key_snapshot', 'send_attempt_token', 'provider_handoff_attempt_token',
         'provider_handoff_phase', 'status', 'provider_message_id', 'error_message']) table.text(key);
       table.jsonb('payload_snapshot'); table.jsonb('categories'); table.integer('provider_retry_count');
-      for (const key of ['sent_at', 'updated_at', 'provider_retry_next_at', 'provider_retry_exhausted_at']) table.timestamp(key);
+      table.boolean('has_attachments').notNullable().defaultTo(false);
+      for (const key of ['sent_at', 'queued_at', 'updated_at', 'provider_retry_next_at', 'provider_retry_exhausted_at']) table.timestamp(key);
     });
     await mockPg('customers').insert({ id: customerId, email: 'qa@example.invalid' });
     await mockPg('notification_prefs').insert({ customer_id: customerId,
@@ -176,19 +194,10 @@ postgres('billing Email provider preparation on its held connection', () => {
     await mockPg('notification_prefs').where({ customer_id: customerId }).update({ email_enabled: emailEnabled });
     const estimateToken = randomUUID().replaceAll('-', '');
     await mockPg('estimates').insert({ id: randomUUID(), token: estimateToken, status: 'accepted', estimate_data: {} });
-    const event = `precharge:${customerId}:${chargeDate}`;
-    const attempt = randomUUID();
-    const stored = {
-      id: randomUUID(), template_key: 'billing.notice', recipient_type: 'customer', recipient_id: customerId,
-      recipient_email_snapshot: 'qa@example.invalid', trigger_event_id: event,
-      idempotency_key: `billing_channel_email:${event}:email`, subject_snapshot: 'Synthetic precharge',
+    const stored = billingReplayRow(chargeDate, {
       html_snapshot: `<a href="https://example.invalid/estimate/${estimateToken}">Review</a>`,
-      text_snapshot: 'Synthetic precharge', suppression_group_key_snapshot: 'transactional_required',
-      payload_snapshot: { __billing_replay_context: { schema_version: 1, customer_id: customerId,
-        category: 'billing', source_entry_point: 'autopay_pre_charge_reminder', notificationEventKey: event, charge_date: chargeDate } },
-      categories: JSON.stringify(['email_template', 'billing']), send_attempt_token: attempt,
-      provider_handoff_attempt_token: attempt, provider_handoff_phase: 'pending', status: 'queued', provider_retry_count: 1,
-    };
+    });
+    const attempt = stored.send_attempt_token;
     await mockPg('email_messages').insert(stored);
     global.fetch.mockImplementation(async (_url, options) => {
       if (options.method === 'POST') {
@@ -208,6 +217,62 @@ postgres('billing Email provider preparation on its held connection', () => {
       expect(outcome).toMatchObject({ sent: false, stopped: true });
       expect(saved).toMatchObject({ status: 'blocked', provider_retry_next_at: null });
       expect(global.fetch).not.toHaveBeenCalled();
+    }
+  }, 15000);
+
+  test('a Text-only billing choice defers the same row until Email is selected again', async () => {
+    const chargeDate = etDateString(addETDays(new Date(), 1));
+    await mockPg('customers').where({ id: customerId }).update({ active: true, autopay_enabled: true,
+      monthly_rate: 100, billing_day: Number(chargeDate.slice(-2)), billing_mode: 'monthly_membership' });
+    await mockPg('notification_prefs').where({ customer_id: customerId }).update({
+      email_enabled: true, billing_channels: ['sms'],
+    });
+    const stored = billingReplayRow(chargeDate);
+    const attempt = stored.send_attempt_token;
+    await mockPg('email_messages').insert(stored);
+
+    const deferred = await retryOne(stored);
+    const scheduled = await mockPg('email_messages').where({ id: stored.id }).first();
+    expect(deferred).toMatchObject({ sent: false, error: { code: 'BILLING_PREFERENCES_CHANGED' } });
+    expect(scheduled).toMatchObject({ status: 'failed', provider_retry_next_at: expect.any(Date),
+      provider_retry_exhausted_at: null, provider_handoff_phase: 'pending' });
+    expect(global.fetch).not.toHaveBeenCalled();
+
+    await mockPg('notification_prefs').where({ customer_id: customerId }).update({ billing_channels: ['email'] });
+    await mockPg('email_messages').where({ id: stored.id }).update({ provider_retry_next_at: new Date(0) });
+    const [claimed] = await claimDueRetries(1, new Date());
+    expect(claimed).toMatchObject({ id: stored.id, status: 'queued', provider_retry_count: 2,
+      provider_handoff_phase: 'pending' });
+    expect(claimed.send_attempt_token).not.toBe(attempt);
+    expect(claimed.provider_handoff_attempt_token).toBe(claimed.send_attempt_token);
+
+    await expect(retryOne(claimed)).resolves.toMatchObject({ sent: true });
+    await expect(mockPg('email_messages').where({ id: stored.id }).first()).resolves.toMatchObject({
+      status: 'sent', sent_at: expect.any(Date), provider_message_id: 'synthetic-provider-id',
+    });
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+  }, 15000);
+
+  test('an all-channel DNC added after the first attempt blocks replay before provider work', async () => {
+    const phone = '+19415550100';
+    const chargeDate = etDateString(addETDays(new Date(), 1));
+    await mockPg('customers').where({ id: customerId }).update({ active: true, autopay_enabled: true,
+      monthly_rate: 100, billing_day: Number(chargeDate.slice(-2)), billing_mode: 'monthly_membership', phone });
+    await mockPg('notification_prefs').where({ customer_id: customerId }).update({
+      email_enabled: true, billing_channels: ['email'],
+    });
+    await mockPg('messaging_suppression').insert({ phone, reason: 'manual_dnc', active: true, created_at: new Date() });
+    const stored = billingReplayRow(chargeDate);
+    await mockPg('email_messages').insert(stored);
+    try {
+      await expect(retryOne(stored)).resolves.toMatchObject({ sent: false, stopped: true });
+      await expect(mockPg('email_messages').where({ id: stored.id }).first()).resolves.toMatchObject({
+        status: 'blocked', provider_retry_next_at: null, provider_retry_exhausted_at: expect.any(Date),
+      });
+      expect(global.fetch).not.toHaveBeenCalled();
+    } finally {
+      await mockPg('messaging_suppression').where({ phone }).delete();
+      await mockPg('customers').where({ id: customerId }).update({ phone: null });
     }
   }, 15000);
 });
