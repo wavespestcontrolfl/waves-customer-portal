@@ -317,6 +317,14 @@ describe('billing channel email adapter', () => {
     });
   });
 
+  test('holds a template-library throw before any delivery row for replay', async () => {
+    mockSendTemplate.mockRejectedValue(new Error('template lookup failed'));
+    await expect(sendBillingChannelEmail(input())).resolves.toMatchObject({
+      sent: false, blocked: true, deliveryOutcome: 'not_sent', retryable: true, deferred: true,
+      code: 'BILLING_EMAIL_PREPARATION_HOLD', originalCode: 'EMAIL_PREPARATION_ERROR',
+    });
+  });
+
   test('classifies a pre-handoff provider failure as not sent', async () => {
     mockDispatchUnderBillingEmailAuthority.mockRejectedValue(new Error('pre-handoff failure'));
     mockSendTemplate.mockImplementation(async (opts) => opts.withProviderHandoff(async () => {}));

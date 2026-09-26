@@ -51,8 +51,13 @@ function templateNotSent(result) {
 // flipped handoffStarted, no provider request occurred — same "definitely
 // not sent" bucket as the pre-handoff and EMAIL_SEND_IN_PROGRESS cases.
 function providerFailure(err, handoffStarted) {
-  const definitelyNotSent = !handoffStarted
-    || err.code === 'EMAIL_SEND_IN_PROGRESS'
+  // A throw before the handoff (template lookup, delivery-row insert) never
+  // reached the provider: report it as a pre-handoff refusal so the
+  // preparation hold below schedules its replay.
+  if (!handoffStarted) {
+    return blocked(err.code || 'EMAIL_PREPARATION_ERROR', EmailTemplateLibrary.redactEmailAddresses(err.message), { retryable: true });
+  }
+  const definitelyNotSent = err.code === 'EMAIL_SEND_IN_PROGRESS'
     || err.code === 'SENDGRID_NOT_CONFIGURED'
     || require('./sendgrid-mail').isDefiniteRejection(err);
   return {
