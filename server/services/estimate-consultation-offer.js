@@ -76,7 +76,11 @@ function startBoundedProbe(run) {
   if (probesInFlight >= MAX_PROBES_IN_FLIGHT) return null;
   probesInFlight += 1;
   const probe = Promise.resolve().then(run);
-  probe.finally(() => { probesInFlight -= 1; }).catch(() => {});
+  // Deliberate fire-and-forget: frees the slot when the work settles. The
+  // caller observes the result itself; this only logs a rejection (never its
+  // message — a geocoder error can carry an address).
+  void probe.finally(() => { probesInFlight -= 1; })
+    .catch((err) => logger.warn(`[estimate-consultation-offer] slot probe rejected (${err?.name || 'Error'})`));
   return probe;
 }
 

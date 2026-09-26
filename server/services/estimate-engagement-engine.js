@@ -74,6 +74,10 @@ const ENGINE_LIMITS = {
   retryDelayMinutes: 30,
   deferDelayMinutes: 15,
   jobBatchSize: 50,
+  // Wall-clock a batch may spend on gone-quiet consultation-offer slot
+  // probes (each capped at 3 s) while it holds the follow-up lock; past it,
+  // the batch's remaining gone-quiet sends go out without the offer.
+  offerProbeBatchBudgetMs: 10000,
 };
 
 // Code defaults per rule — the DB row's params override key-by-key, so an
@@ -528,6 +532,7 @@ async function processDueBatch(now = new Date()) {
   // check in the loop, then judged once more from the top on state read
   // after the probe — the second pass reuses the result, never re-probes.
   const probedOffers = new Map();
+  let offerProbeMs = 0;
   const queue = [...jobs];
   while (queue.length) {
     const job = queue.shift();
@@ -743,11 +748,19 @@ async function processDueBatch(now = new Date()) {
       // #4918 r14) — and the job is then judged once more from the top, on
       // state read AFTER the probe (r7–r12): every check and every payload
       // field of the send is post-probe. Shadow jobs never reach this point;
-      // with the offer's gate off, no job probes or takes a second pass.
+      // with the offer's gate off, no job probes or takes a second pass. Once
+      // the batch has spent its probe budget, a gone-quiet send goes out
+      // without the offer in this single pass (nothing probed, nothing stale).
       if (isGoneQuiet && estimateEmailConsultationOfferLive() && !probedOffers.has(job.id)) {
-        probedOffers.set(job.id, await probeGoneQuietConsultation(job.estimate_id));
-        queue.unshift(job);
-        continue;
+        if (offerProbeMs >= ENGINE_LIMITS.offerProbeBatchBudgetMs) {
+          probedOffers.set(job.id, null);
+        } else {
+          const probeStartedMs = Date.now();
+          probedOffers.set(job.id, await probeGoneQuietConsultation(job.estimate_id));
+          offerProbeMs += Date.now() - probeStartedMs;
+          queue.unshift(job);
+          continue;
+        }
       }
       const consultationContext = probedOffers.get(job.id) || null;
       if (!(await followupShared.claimFollowupSend(est.id, rule.rule_key, rule.template_key, {

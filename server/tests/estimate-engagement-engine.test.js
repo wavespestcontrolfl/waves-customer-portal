@@ -580,6 +580,31 @@ describe('processDueJobs', () => {
       expect(followupShared.estimateEmailPayload.mock.calls[0][3]).toEqual(expect.objectContaining({ consultation_url: '' }));
     });
 
+    test('once a batch has spent its probe budget, its remaining gone-quiet sends go out without the offer — one pass, no probe', async () => {
+      const now = jest.spyOn(Date, 'now');
+      now.mockReturnValueOnce(0).mockReturnValueOnce(11000); // the first probe takes 11 s of wall clock
+      try {
+        enqueue('estimate_followup_jobs', { rows: [pendingJob(), pendingJob({ id: 'job-2', estimate_id: 'est-2' })] });
+        enqueue('estimate_followup_rules', { rows: [QUIET_RULE, HOT_RULE] });
+        enqueue('estimates', { first: baseEstimate() }); // job-1, pass 1
+        enqueue('notification_prefs', { first: { email_enabled: true } });
+        enqueue('estimates', { first: baseEstimate() }); // job-1, pass 2 (its probe found no offer)
+        enqueue('notification_prefs', { first: { email_enabled: true } });
+        enqueue('estimates', { first: baseEstimate({ id: 'est-2' }) }); // job-2, its only pass
+        enqueue('notification_prefs', { first: { email_enabled: true } });
+
+        const result = await Engine.processDueJobs(NOW);
+
+        expect(result.sent).toBe(2);
+        expect(probeGoneQuietConsultation).toHaveBeenCalledTimes(1);
+        expect(probeGoneQuietConsultation).toHaveBeenCalledWith('est-1');
+        expect(reads.filter((r) => r.table === 'estimates')).toHaveLength(3);
+        expect(followupShared.estimateEmailPayload.mock.calls[1][3]).toEqual(expect.objectContaining({ consultation_url: '' }));
+      } finally {
+        now.mockRestore();
+      }
+    });
+
     test('a lost claim never mints the link — finalize runs only after the claim is won', async () => {
       probeGoneQuietConsultation.mockResolvedValue(CONTEXT);
       followupShared.claimFollowupSend.mockResolvedValue(false);
