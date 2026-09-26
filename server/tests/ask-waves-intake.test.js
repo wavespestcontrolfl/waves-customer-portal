@@ -154,6 +154,19 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     expect(scrubUnsafeClaims({ ...base, reply }, 'When will the tech arrive?').reply).toBe(reply);
   });
 
+  test.each([
+    ['Puede volver a entrar en veintidós minutos.', ''],
+    ['Se seca en veintitrés minutos.', ''],
+    ['It takes one and a half hours to dry.', 'How long does your spray take to dry?'],
+    ['Nuestro control de plagas es seguro para mascotas.', ''],
+  ])('unit-word durations and Spanish service wording are caught: %s', (reply, context) => {
+    expect(scrubUnsafeClaims({ ...base, reply }, context).reply).toMatch(/label directions|instrucciones de la etiqueta/);
+  });
+
+  test('a lone ñ does not make an English reply Spanish', () => {
+    expect(scrubUnsafeClaims({ ...base, reply: 'Even during El Niño, the treatment is safe for pets.' }).reply).toMatch(/label directions/);
+  });
+
   test('the visitor\'s own words supply treatment context', () => {
     const reply = 'Yes — safe for your dog.';
     expect(scrubUnsafeClaims({ ...base, reply }, 'Is your spray okay for my dog?').reply).toMatch(/label directions|instrucciones de la etiqueta/);

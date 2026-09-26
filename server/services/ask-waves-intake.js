@@ -244,7 +244,12 @@ const UNSAFE_CLAIM_REPLY_ES = `No puedo dar una garantía general de seguridad n
 const SPANISH_WORD_RE = /\b(?:el|los|las|para|puede|pueden|usted|seguro|segura|seguros|producto|productos|tratamiento|mascotas|niños|horas|minutos|está|están|también|después|hora|salir|volver|entrar|seco|seca|secarse|tarda)\b/gi;
 function looksSpanish(text) {
   const t = String(text || '');
-  return /[ñ¿¡]/.test(t) || (t.match(SPANISH_WORD_RE) || []).length >= 2;
+  // ¿/¡ are unambiguous; otherwise two distinctly Spanish words. A lone ñ
+  // (a proper noun like "El Niño") is not evidence.
+  if (/[¿¡]/.test(t)) return true;
+  const words = new Set((t.match(SPANISH_WORD_RE) || []).map((w) => w.toLowerCase()));
+  words.delete('el');
+  return words.size >= 2;
 }
 const UNSAFE_CLAIM_REPLY = `I can't make a blanket safety claim or give a fixed re-entry time — that depends on the exact product used and your home. Your technician follows the product label directions and can walk you through specifics for your property. For anything urgent, call us at ${COMPANY.phone}.`;
 
@@ -257,21 +262,21 @@ const UNSAFE_CLAIM_REPLY = `I can't make a blanket safety claim or give a fixed 
 // with no treatment context ("house geckos are safe around pets") is left
 // alone. reentrySafetyClaimFinding (the shared rule set) still runs first.
 const INTAKE_SAFETY_WORD_RE = /\b(?:safe|safer|safely|safety|harmless|non-?toxic|seguro|segura|seguros|seguras|seguridad|inofensiv\w*)\b|\b(?:pet|kid|family|child)-safe\b|\bno\s+(?:es\s+)?t[óo]xic\w*/i;
-const INTAKE_TREATMENT_CONTEXT_RE = /\b(?:treat\w*|products?|spray\w*|pesticid\w*|insecticid\w*|herbicid\w*|fungicid\w*|chemicals?|applications?|applied|apply|bait\w*|fertiliz\w*|granul\w*|repellent\w*|tratamiento\w*|productos?|qu[íi]mic\w*|pesticida\w*|insecticida\w*|fumig\w*|rociad\w*|aplicaci[óo]n\w*|cebos?)\b/i;
+const INTAKE_TREATMENT_CONTEXT_RE = /\b(?:treat\w*|products?|spray\w*|pesticid\w*|insecticid\w*|herbicid\w*|fungicid\w*|chemicals?|applications?|applied|apply|bait\w*|fertiliz\w*|granul\w*|repellent\w*|pest\s+control|lawn\s+care|extermin\w*|mosquito\s+(?:service|control|barrier)|tratamiento\w*|productos?|qu[íi]mic\w*|pesticida\w*|insecticida\w*|fumig\w*|rociad\w*|aplicaci[óo]n\w*|cebos?|control\s+de\s+plagas|servicio\s+de\s+(?:plagas|mosquitos|c[ée]sped)|extermin\w*)\b/i;
 // Spanish forms the shared (English) rule set can't see: fixed re-entry /
 // drying times in minutes or hours, and "aprobado por la EPA".
-const ES_DURATION = `(?:\\d+|${NUM_WORD_ES}(?:[-\\s]+(?:y[-\\s]+)?${NUM_WORD_ES})*|media)`;
-// Chokepoint, not grammar: any Spanish duration in minutes/hours plus any
-// drying or re-entry word anywhere in the reply ("se seca en dos horas",
-// "tarda cinco minutos en secarse", "puede volver en media hora").
-const ES_DURATION_RE = new RegExp(`\\b${ES_DURATION}\\s+(?:minutos?|horas?)\\b`, 'i');
+// Chokepoint, not number grammar (accents, fractions and word numbers kept
+// opening holes): any minutes/hours unit word plus any drying or re-entry
+// word anywhere in the reply ("se seca en dos horas", "tarda veintidós
+// minutos en secarse", "puede volver en media hora").
+const ES_DURATION_RE = /\b(?:minutos?|horas?)\b/i;
 const ES_DRY_OR_REENTRY_RE = /\b(?:sec[oa]s?|seca(?:r|rse|do|da)?|se\s+seca|volver|regresar|entrar|reingres\w*|salir|re-?entrada)\b/i;
 const INTAKE_REENTRY_MINUTES_ES_RE = { test: (t) => ES_DURATION_RE.test(t) && ES_DRY_OR_REENTRY_RE.test(t) };
 // English counterpart of the Spanish chokepoint: a duration in minutes/hours
 // plus drying or re-entry wording ("It dries in 30 minutes.", "You can go
 // inside after 30 minutes.") — only with treatment context in the reply or
 // the visitor's words, so an appointment-window reply isn't caught.
-const EN_DURATION_RE = new RegExp(`\\b(?:\\d+(?:\\.\\d+)?|${NUM_WORD}|half\\s+an?|an?)\\s*-?\\s*(?:minutes?|mins?|hours?|hrs?)\\b`, 'i');
+const EN_DURATION_RE = /\b(?:minutes?|mins?|hours?|hrs?)\b/i;
 const EN_DRY_OR_REENTRY_RE = /\b(?:dr(?:y|ies|ied|ying)|re-?ent\w*|go\s+(?:back\s+)?(?:inside|outside|in|out)|come\s+(?:back\s+)?in(?:side)?|let\s+\w+\s+(?:out|in|back)|walk\s+on|play\s+(?:outside|in))\b/i;
 const INTAKE_EPA_APPROVED_ES_RE = /\baprobad[oa]s?\s+por\s+la\s+epa\b/i;
 
