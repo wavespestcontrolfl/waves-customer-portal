@@ -81,11 +81,12 @@ const ANTHROPIC_EFFORT_LEVELS = new Set(['low', 'medium', 'high', 'xhigh', 'max'
 const ANTHROPIC_EFFORT = ANTHROPIC_EFFORT_LEVELS.has(process.env.MODEL_ANTHROPIC_EFFORT)
   ? process.env.MODEL_ANTHROPIC_EFFORT
   : undefined;
-// Only the models that accept output_config.effort get it: the Opus line
-// (4.5+), Sonnet 5, and the Fable / Mythos line. Haiku 4.5 and older Sonnets
-// 400 on the field, and the admin picker can pin those on a lane, so the pin
-// must never reach them. Returns the pinned level or undefined.
-const EFFORT_CAPABLE_RE = /^claude-(opus|fable|mythos)-|^claude-sonnet-5(?![0-9])/;
+// Only the models that accept output_config.effort get it: Opus 4.5 and
+// later (4-5 … 4-9, then 5, 5-5 …), Sonnet 5, and the Fable / Mythos line.
+// Opus 4 / 4.1, Haiku 4.5 and pre-5 Sonnets 400 on the field, and the admin
+// picker can pin those on a lane, so the pin must never reach them. Returns
+// the pinned level or undefined.
+const EFFORT_CAPABLE_RE = /^claude-opus-(4-[5-9]|[5-9])(?![0-9])|^claude-sonnet-[5-9](?![0-9])|^claude-(fable|mythos)-/;
 // Reads the exported value at call time (not the const) so a test can pin
 // the level on the registry object without re-loading every consumer.
 function anthropicEffortFor(model) {

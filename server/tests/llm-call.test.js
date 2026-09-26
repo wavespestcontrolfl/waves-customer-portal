@@ -257,6 +257,14 @@ describe('callAnthropic prompt caching', () => {
       expect(mockAnthropicCreate.mock.calls.at(-1)[0].output_config).toBeUndefined();
       await callAnthropic({ model: 'claude-sonnet-4-6', text: 'hi', jsonMode: false });
       expect(mockAnthropicCreate.mock.calls.at(-1)[0].output_config).toBeUndefined();
+      for (const noEffort of ['claude-opus-4-20250514', 'claude-opus-4-1-20250805', 'claude-opus-4-1']) {
+        await callAnthropic({ model: noEffort, text: 'hi', jsonMode: false });
+        expect(mockAnthropicCreate.mock.calls.at(-1)[0].output_config).toBeUndefined();
+      }
+      for (const withEffort of ['claude-opus-4-5', 'claude-opus-4-7', 'claude-opus-5', 'claude-opus-5-5', 'claude-fable-5-1', 'claude-mythos-5-1']) {
+        await callAnthropic({ model: withEffort, text: 'hi', jsonMode: false });
+        expect(mockAnthropicCreate.mock.calls.at(-1)[0].output_config).toEqual({ effort: 'high' });
+      }
     } finally {
       delete MODELS.ANTHROPIC_EFFORT;
     }

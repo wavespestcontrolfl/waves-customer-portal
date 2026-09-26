@@ -17,7 +17,7 @@ jest.mock('../config/models', () => ({
   DEEP: 'deep-model',
   anthropicEffortFor(model) {
     const pinned = require('../config/models').ANTHROPIC_EFFORT;
-    return pinned && /^claude-(opus|fable|mythos)-|^claude-sonnet-5(?![0-9])/.test(String(model || '')) ? pinned : undefined;
+    return pinned && /^claude-opus-(4-[5-9]|[5-9])(?![0-9])|^claude-sonnet-[5-9](?![0-9])|^claude-(fable|mythos)-/.test(String(model || '')) ? pinned : undefined;
   },
   TEXT_POLICIES: {
     deepAnalysis: {
