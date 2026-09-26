@@ -840,7 +840,7 @@ async function deactivateService(id, { audit } = {}) {
     const [row] = await trx('services').where({ id }).update({ is_active: false, is_archived: true, updated_at: new Date() }).returning('*');
     if (row) await writeCatalogAudit('archive', { before, after: row, references, audit, trx });
     return row;
-  });
+  }).then(refreshAfterCatalogWrite);
 }
 
 /**

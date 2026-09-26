@@ -5332,6 +5332,10 @@ function _bracketLookup(value, brackets, key) {
 function priceRodentTrapping(property, options = {}) {
   const cfg = RODENT.trapping;
   const { emergency = false } = options;
+  const catalogAdditionalCheckPrice = Number(options.additionalCheckPrice);
+  const additionalCheckPrice = Number.isFinite(catalogAdditionalCheckPrice) && catalogAdditionalCheckPrice > 0
+    ? Math.round(catalogAdditionalCheckPrice * 100) / 100
+    : cfg.additionalCheckPrice;
   const callbacksUsed = Math.max(0, Math.floor(Number(options.callbacksUsed) || 0));
   const requestedExtraCallbacks = Math.max(0, Math.floor(Number(options.extraCallbackCount) || 0));
   const trappingBasePrice = cfg.standardPrice;
@@ -5345,12 +5349,12 @@ function priceRodentTrapping(property, options = {}) {
   const price = Math.round(trappingBasePrice + emergencySurcharge);
   const name = 'Rodent Trapping - Standard';
   const warnings = [
-    `Includes the setup visit and ${cfg.includedFollowUps} trap check for the same active trapping job; book any further check as "Rodent Trap Check - Additional" ($${cfg.additionalCheckPrice}).`,
+    `Includes the setup visit and ${cfg.includedFollowUps} trap check for the same active trapping job; book any further check as "Rodent Trap Check - Additional" ($${additionalCheckPrice}).`,
   ];
   if (requestedExtraCallbacks > 0) {
     warnings.push('Extra trap checks are not priced on the estimate — book them as "Rodent Trap Check - Additional" when needed.');
   }
-  const detail = cfg.invoiceDescriptions.standard(cfg.additionalCheckPrice);
+  const detail = cfg.invoiceDescriptions.standard(additionalCheckPrice);
 
   return {
     service: 'rodent_trapping',
@@ -5381,7 +5385,7 @@ function priceRodentTrapping(property, options = {}) {
     extraCallbackCount: 0,
     extraCallbackPrice: 0,
     extraCallbackAllowed: false,
-    additionalCheckPrice: cfg.additionalCheckPrice,
+    additionalCheckPrice,
     unlimitedCallbacks: false,
     emergency,
     emergencySurcharge: Math.round(emergencySurcharge),
@@ -5404,7 +5408,7 @@ function priceRodentTrapping(property, options = {}) {
     pricingBasis: {
       standardPrice: cfg.standardPrice,
       includedFollowUps: cfg.includedFollowUps,
-      additionalCheckPrice: cfg.additionalCheckPrice,
+      additionalCheckPrice,
       emergencyMultiplier: cfg.emergencyMultiplier,
       emergencyMinimumSurcharge: cfg.emergencyMinimumSurcharge,
     },

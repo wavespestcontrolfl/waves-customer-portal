@@ -1430,6 +1430,10 @@ function generateEstimate(input) {
       callbacksUsed: opts.callbacksUsed,
       extraCallbackCount: opts.extraCallbackCount,
       upgradeToUnlimited: !!opts.upgradeToUnlimited,
+      // Server quote replays inject this from the active catalog row. Keeping
+      // it request-scoped avoids relying on another process's mutable bridge
+      // cache after a Service Library price edit.
+      additionalCheckPrice: input.catalogPricing?.rodentAdditionalCheckPrice,
     });
     lineItems.push(result);
   }

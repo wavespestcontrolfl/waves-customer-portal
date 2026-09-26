@@ -116,6 +116,28 @@ describe('service library guardrails', () => {
     }
   });
 
+  test('refreshes the pricing bridge when the additional trap-check row is deactivated', async () => {
+    const before = serviceRow({
+      service_key: 'rodent_trap_check_additional',
+      category: 'rodent',
+      billing_type: 'one_time',
+      base_price: '110.00',
+    });
+    const after = { ...before, is_active: false, is_archived: true };
+    mockServiceDb({ before, after });
+    const invalidate = jest.spyOn(pricingBridge, 'invalidatePricingConfigCache').mockImplementation(() => {});
+    const sync = jest.spyOn(pricingBridge, 'syncConstantsFromDB').mockResolvedValue(true);
+    try {
+      await expect(serviceLibrary.deactivateService(before.id)).resolves.toEqual(after);
+
+      expect(invalidate).toHaveBeenCalledTimes(1);
+      expect(sync).toHaveBeenCalledWith(db);
+    } finally {
+      invalidate.mockRestore();
+      sync.mockRestore();
+    }
+  });
+
   test.each([['true', 45, false], ['false', 60, true], ['false', 90, true]])('validates edits against the effective bounds (gate %s, duration %i)', async (gate, duration, valid) => {
     const previousGate = process.env.GATE_SCHEDULING_CAPACITY;
     process.env.GATE_SCHEDULING_CAPACITY = gate;

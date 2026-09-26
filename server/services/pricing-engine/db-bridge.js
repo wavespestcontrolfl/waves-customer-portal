@@ -29,6 +29,23 @@ const RODENT_BRACKET_DEFAULTS = JSON.parse(JSON.stringify({
 const r = (val) => Math.round(val * constants.PROCESSING_ADJUSTMENT);
 const money = (val) => Math.round(Number(val) * constants.PROCESSING_ADJUSTMENT * 100) / 100;
 
+async function readRodentAdditionalCheckPriceFromCatalog(dbInstance) {
+  const db = dbInstance || require('../../models/db');
+  try {
+    if (!(await db.schema.hasTable('services'))) return RODENT_ADDITIONAL_CHECK_DEFAULT;
+    const extraCheck = await db('services')
+      .where({ service_key: 'rodent_trap_check_additional', is_active: true })
+      .first('base_price');
+    const price = Number(extraCheck?.base_price);
+    return Number.isFinite(price) && price > 0
+      ? money(price)
+      : RODENT_ADDITIONAL_CHECK_DEFAULT;
+  } catch (err) {
+    console.warn('[pricing-engine] rodent extra-check catalog price read skipped:', err.message);
+    return RODENT_ADDITIONAL_CHECK_DEFAULT;
+  }
+}
+
 function readFiniteNumber(value) {
   if (value === null || value === undefined || value === '') return undefined;
   const parsed = Number(value);
@@ -2127,18 +2144,7 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
     // A failed catalog read keeps the code default rather than failing the
     // whole pricing sync — this number only feeds customer copy; booking
     // stamps the catalog price itself.
-    constants.RODENT.trapping.additionalCheckPrice = RODENT_ADDITIONAL_CHECK_DEFAULT;
-    try {
-      if (await db.schema.hasTable('services')) {
-        const extraCheck = await db('services')
-          .where({ service_key: 'rodent_trap_check_additional', is_active: true })
-          .first('base_price');
-        const price = Number(extraCheck?.base_price);
-        if (Number.isFinite(price) && price > 0) constants.RODENT.trapping.additionalCheckPrice = money(price);
-      }
-    } catch (err) {
-      console.warn('[pricing-engine] rodent extra-check catalog price read skipped:', err.message);
-    }
+    constants.RODENT.trapping.additionalCheckPrice = await readRodentAdditionalCheckPriceFromCatalog(db);
 
     // ── Lawn Care Brackets (all 4 grass tracks) ──────────────
     // Table: lawn_pricing_brackets (grass_track, sqft_bracket, tier, monthly_price)
@@ -2208,6 +2214,7 @@ module.exports = {
   getLastSyncAt,
   isSyncInFlight,
   syncConstantsFromDB,
+  readRodentAdditionalCheckPriceFromCatalog,
   needsSync,
   invalidatePricingConfigCache,
   validatePestPricingConfig,

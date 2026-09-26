@@ -24989,6 +24989,26 @@ async function buildPricingBundleInner(estimate) {
     })), estimate, estData), treeShrubPalmCountForEstData(estData) ?? stampedTreeShrubPalmCountInBundle(snapshotBundle));
   }
 
+  // A sent snapshot above is a frozen customer promise. Recomputed engine
+  // quotes below are live, so a trapping replay reads the active catalog row
+  // on this request instead of trusting this process's pricing singleton.
+  // This also closes the 10-minute estimate-cache window when another server
+  // process handled the Service Library edit.
+  const v1 = readV1Shape(estData);
+  let engineInputs = v1 ? null : extractEngineInputs(estData);
+  if (engineInputs?.services?.rodentTrapping) {
+    const { readRodentAdditionalCheckPriceFromCatalog } = require('../services/pricing-engine/db-bridge');
+    const rodentAdditionalCheckPrice = await readRodentAdditionalCheckPriceFromCatalog(db);
+    engineInputs = {
+      ...engineInputs,
+      catalogPricing: {
+        ...(engineInputs.catalogPricing || {}),
+        rodentAdditionalCheckPrice,
+      },
+    };
+    clearEstimatePricingCache(estimate);
+  }
+
   const cached = getEstimatePricingCache(estimate);
   // Same missing-fee guard as the snapshot fast path: a cached bundle built
   // before the fee rule (or restored oddly) must not serve a first-visit
@@ -25007,7 +25027,6 @@ async function buildPricingBundleInner(estimate) {
 
   // v1 shape (admin UI estimates) — read pre-computed pestTiers directly.
   // This is the dominant path until Session 11 retires the client engine.
-  const v1 = readV1Shape(estData);
   if (v1) {
     const pestOnlyChoice = !!estimate.show_one_time_option && v1.pestTiers.length > 0;
     // v1 shapes cannot carry an operator floor breach today (the operator
@@ -25198,8 +25217,6 @@ async function buildPricingBundleInner(estimate) {
   // Otherwise: engine-invocation path (modular-engine inputs / IB-sourced
   // estimates with engineInputs.services.pest shape). Runs generateEstimate
   // 3x with varied pest frequency.
-  const engineInputs = extractEngineInputs(estData);
-
   // No engine inputs saved → fall back to the single-frequency view using
   // stored totals. Not ideal but safer than fabricating a multi-frequency
   // ladder from nothing. React renders a simplified PriceCard.

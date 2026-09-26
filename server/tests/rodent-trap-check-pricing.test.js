@@ -71,3 +71,70 @@ describe('a new trapping quote renders the 1-check copy on the public page path'
     expect(page.hero.sub).not.toMatch(/until the activity stops/);
   });
 });
+
+describe('public trapping quote catalog freshness', () => {
+  const bridge = require('../services/pricing-engine/db-bridge');
+  const { buildPricingBundle } = require('../routes/estimate-public');
+  const { attachRodentAdditionalCheckCatalogPrice } = require('../routes/public-quote')._internals;
+  const { clearAllEstimatePricingCache } = require('../services/estimate-pricing-cache');
+
+  function liveRodentEstimate(id) {
+    return {
+      id,
+      estimate_data: {
+        engineInputs: {
+          homeSqFt: 2000,
+          stories: 1,
+          lotSqFt: 10000,
+          propertyType: 'single_family',
+          zone: 'A',
+          features: { shrubs: 'moderate', trees: 'moderate', complexity: 'standard' },
+          services: { rodentTrapping: { plan: 'standard' } },
+        },
+      },
+    };
+  }
+
+  function trappingRow(bundle) {
+    return bundle.oneTimeBreakdown.items.find((row) => row.service === 'rodent_trapping');
+  }
+
+  afterEach(() => {
+    clearAllEstimatePricingCache();
+    jest.restoreAllMocks();
+  });
+
+  test('quote creation attaches the catalog price as a request-scoped engine input', async () => {
+    jest.spyOn(bridge, 'readRodentAdditionalCheckPriceFromCatalog').mockResolvedValue(110.25);
+    const input = { services: { rodentTrapping: { plan: 'standard' } } };
+
+    await expect(attachRodentAdditionalCheckCatalogPrice(input, {})).resolves.toBe(input);
+
+    expect(input.catalogPricing).toEqual({ rodentAdditionalCheckPrice: 110.25 });
+  });
+
+  test('a quote reads the catalog even when this process still holds the old bridge price', async () => {
+    RODENT.trapping.additionalCheckPrice = 95;
+    jest.spyOn(bridge, 'readRodentAdditionalCheckPriceFromCatalog').mockResolvedValue(110.25);
+
+    const bundle = await buildPricingBundle(liveRodentEstimate('rodent-other-process-price'), { monthlyBilled: false });
+
+    expect(trappingRow(bundle).detail).toContain('$110.25');
+    expect(trappingRow(bundle).reason).toContain('$110.25');
+  });
+
+  test('a second request discards its cached bundle after another process changes the catalog', async () => {
+    const readCatalog = jest.spyOn(bridge, 'readRodentAdditionalCheckPriceFromCatalog')
+      .mockResolvedValueOnce(95)
+      .mockResolvedValueOnce(110);
+    const estimate = liveRodentEstimate('rodent-stale-estimate-cache');
+
+    const first = await buildPricingBundle(estimate, { monthlyBilled: false });
+    const second = await buildPricingBundle(estimate, { monthlyBilled: false });
+
+    expect(trappingRow(first).detail).toContain('$95');
+    expect(trappingRow(second).detail).toContain('$110');
+    expect(readCatalog).toHaveBeenCalledTimes(2);
+    expect(second.cacheHit).not.toBe(true);
+  });
+});
