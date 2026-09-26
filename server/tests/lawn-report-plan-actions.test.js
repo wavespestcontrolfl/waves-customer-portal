@@ -289,7 +289,13 @@ describe('multi-product aftercare keeps compatible catalog constraints (codex PR
     'No irrigation for 24 hours after application.',
     'No watering for 24 hours.',
     'Refrain from watering until tomorrow.',
-  ])('noun-form restriction is a hold and cannot earn water-in credit: %s', (irrigationNotes) => {
+    'Irrigation should be delayed for 24 hours.',
+    'Watering must be avoided for 24 hours.',
+    'Irrigation is temporarily prohibited for 24 hours.',
+    'Watering needs to be postponed until tomorrow.',
+    'Irrigation is not permitted for 24 hours.',
+    'Watering must not be allowed for 24 hours.',
+  ])('recorded restriction is a hold and cannot earn water-in credit: %s', (irrigationNotes) => {
     expect(buildAftercare([{ product: { irrigation_required: true, irrigation_notes: irrigationNotes } }]))
       .toMatchObject({
         wateringHold: true,
@@ -302,6 +308,8 @@ describe('multi-product aftercare keeps compatible catalog constraints (codex PR
   test.each([
     'No irrigation is required after application.',
     'No watering is needed after application.',
+    'Watering must not be delayed after application.',
+    'Irrigation should be applied within 24 hours.',
   ])('absence-of-requirement copy is not misread as a watering hold: %s', (irrigationNotes) => {
     expect(buildAftercare([{ product: { irrigation_required: false, irrigation_notes: irrigationNotes } }]))
       .toMatchObject({ wateringHold: false, waterInRequired: false, creditableWaterIn: false });
