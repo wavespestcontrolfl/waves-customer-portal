@@ -3859,6 +3859,25 @@ function canonicalizeInlineUnits(streetKey) {
 // reassert consumes can be nulled — its WHERE is self-guarded, but the
 // label must tell the truth). Runs AFTER dropFilledLeadColumns, so a
 // dropped identity key means the locked value is the live one.
+// True when a call OTHER than callId, linked to this lead (call_log.metadata
+// lead_id) or its customer, still has an open caller_not_authorized card —
+// that call's lead-level reminder must survive until its own card resolves
+// (codex #4890 r2 P2). Run inside the lead-row-locked transaction so the
+// verdict the locked reconcile applies is never stale (codex #4890 r3 P2).
+async function otherOpenCallerAuthorizationCard(dbh, { callId, leadId, customerId }) {
+  const row = await dbh('triage_items as t')
+    .join('call_log as c', 'c.id', 't.call_log_id')
+    .where('t.reason_code', 'caller_not_authorized')
+    .whereIn('t.status', ['open', 'in_progress'])
+    .whereNot('t.call_log_id', callId)
+    .where(function linkedToThisLead() {
+      this.whereRaw("c.metadata->>'lead_id' = ?", [String(leadId)]);
+      if (customerId) this.orWhere('c.customer_id', customerId);
+    })
+    .first('t.id');
+  return !!row;
+}
+
 function reconcileConditionalLeadFieldsUnderLock(updates, lockedLead, { bridgeNeedsConfirmation = [], supersededNeedsConfirmation = [], leadQuality = null, extractedDataDelta = null } = {}) {
   if (!lockedLead || !updates) return { updates, contact: null, serviceInterestDropped: false };
   const stillEmpty = (v) => v === null || v === undefined || v === '';
@@ -12766,17 +12785,8 @@ const CallRecordingProcessor = {
           let leadSupersededNeedsConfirmation = [];
           if (supersededNeedsConfirmation.length) {
             try {
-              const otherOpenAuthorizationCard = await db('triage_items as t')
-                .join('call_log as c', 'c.id', 't.call_log_id')
-                .where('t.reason_code', 'caller_not_authorized')
-                .whereIn('t.status', ['open', 'in_progress'])
-                .whereNot('t.call_log_id', call.id)
-                .where(function linkedToThisLead() {
-                  this.whereRaw("c.metadata->>'lead_id' = ?", [String(leadId)]);
-                  if (customerId) this.orWhere('c.customer_id', customerId);
-                })
-                .first('t.id');
-              leadSupersededNeedsConfirmation = otherOpenAuthorizationCard ? [] : supersededNeedsConfirmation;
+              const otherOpen = await otherOpenCallerAuthorizationCard(db, { callId: call.id, leadId, customerId });
+              leadSupersededNeedsConfirmation = otherOpen ? [] : supersededNeedsConfirmation;
             } catch (settleErr) {
               // Fail toward keeping the reminder: a failed check settles nothing.
               leadSupersededNeedsConfirmation = [];
@@ -13389,10 +13399,17 @@ const CallRecordingProcessor = {
                 // field this call never wrote must never be restored by its
                 // rejection. The conditional (non-identity) decisions are
                 // re-made the same way (pre-push P1 r22).
+                // Re-decide the settle under the lead row lock (codex #4890 r3
+                // P2): another call may have opened its own authorization card
+                // and updated this lead since the unlocked pre-check.
+                const lockedSupersededNeedsConfirmation = leadSupersededNeedsConfirmation.length
+                  && await otherOpenCallerAuthorizationCard(trx, { callId: call.id, leadId, customerId })
+                  ? []
+                  : leadSupersededNeedsConfirmation;
                 const reconciled = reconcileConditionalLeadFieldsUnderLock(
                   dropFilledLeadColumns(leadUpdates, lockedLead),
                   lockedLead,
-                  { bridgeNeedsConfirmation, supersededNeedsConfirmation: leadSupersededNeedsConfirmation, leadQuality: extracted.lead_quality, extractedDataDelta },
+                  { bridgeNeedsConfirmation, supersededNeedsConfirmation: lockedSupersededNeedsConfirmation, leadQuality: extracted.lead_quality, extractedDataDelta },
                 );
                 if (reconciled.serviceInterestDropped) {
                   persistedServiceInterestLabel = null;
