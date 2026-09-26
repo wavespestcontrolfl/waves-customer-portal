@@ -337,8 +337,9 @@ function estimateMakesNoGuaranteeClaim(estimate, keys = laneKeysFor(estimate)) {
   if (!keys || !keys.length) return true;
   if (keys.some((k) => TERMITE_LANES.has(k))) return true;
   try {
+    // A one-time row no lane matches ('unknown') might be termite work too.
     const oneTime = oneTimeServiceKeys(estimate);
-    return Array.isArray(oneTime) && oneTime.some((k) => TERMITE_LANES.has(k));
+    return Array.isArray(oneTime) && oneTime.some((k) => k === 'unknown' || TERMITE_LANES.has(k));
   } catch (err) {
     logger.warn(`[estimate-followup-copy] one-time lane read failed: ${err.message}`);
     return true;

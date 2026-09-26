@@ -363,6 +363,12 @@ describe('no guarantee wherever termite may be quoted', () => {
     expect(estimateMakesNoGuaranteeClaim(recurring)).toBe(false);
   });
 
+  test('a pest plan beside an unclassifiable one-time row makes no guarantee claim', () => {
+    lanes('pest');
+    oneTimeServiceKeys.mockReturnValueOnce(['unknown']);
+    expect(estimateMakesNoGuaranteeClaim(recurring)).toBe(true);
+  });
+
   test('a failed one-time read counts as termite, never as a guarantee', () => {
     lanes('pest');
     oneTimeServiceKeys.mockImplementationOnce(() => { throw new Error('bad data'); });

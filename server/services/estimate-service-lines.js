@@ -405,13 +405,13 @@ function inferEstimateServiceLines(estimate = {}) {
   }));
 }
 
-// Lane keys of the estimate's one-time rows. inferEstimateServiceLines reports
-// only the recurring plan when there is one, so a reader that must see every
-// kind of work quoted (the guarantee rule in estimate-followup-copy.js) reads
-// these too.
+// Lane keys of the estimate's one-time rows, 'unknown' included for a row no
+// lane matches. inferEstimateServiceLines reports only the recurring plan when
+// there is one, so a reader that must see every kind of work quoted (the
+// guarantee rule in estimate-followup-copy.js) reads these too.
 function oneTimeServiceKeys(estimate = {}) {
   const data = parseEstimateData(estimate.estimateData ?? estimate.estimate_data);
-  return unique(oneTimeServicesFromData(data).map((line) => line.key).filter((key) => key && key !== 'unknown'));
+  return unique(oneTimeServicesFromData(data).map((line) => line.key).filter(Boolean));
 }
 
 function inferEstimateServiceInterest(estimate = {}) {
