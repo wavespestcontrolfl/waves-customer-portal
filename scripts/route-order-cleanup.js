@@ -20,11 +20,19 @@
  * --out <path> writes a backup JSON of every row this run changed (or
  * would change, in dry run): {generated_at, rows:[{id, date,
  * technician_id, before, after}]}. --rollback <path> restores exactly
- * those rows from a PRIOR --execute run's backup file: per tech-day under
- * the same tech-day advisory fence every route_order writer takes
- * (scheduling/tech-day-lock.js), a compare-and-swap UPDATE (route_order =
- * before WHERE route_order = after) so a row moved again since the backup
- * is reported, never silently overwritten.
+ * those rows from a PRIOR --execute run's backup file — DRY RUN BY
+ * DEFAULT, same convention as the rest of the script: it prints the
+ * would-restore plan and any per-day mismatches and opens no write
+ * transaction; --rollback <path> --execute performs it. All-or-nothing
+ * PER TECH-DAY under the same tech-day advisory fence every route_order
+ * writer takes (scheduling/tech-day-lock.js): every backed-up row for a
+ * (technician_id, date) is re-read FOR UPDATE first, and only if EVERY one
+ * of them still matches the backup's "after" (route_order, date AND
+ * technician_id — a row moved to a different tech-day since the backup is
+ * a mismatch too, never silently overwritten) does the whole day's
+ * compare-and-swap UPDATEs commit, in one savepoint; any mismatch, or a
+ * CAS somehow affecting 0 rows, skips/rolls back that WHOLE day (reported
+ * with the mismatching ids) — never a partial day.
  *
  * Serializes with the 4:20 ET nightly pass by taking its OWN lock
  * (runExclusive('auto-dispatch-recurring') — server/utils/cron-lock.js is a
@@ -45,7 +53,8 @@
  *   railway run node scripts/route-order-cleanup.js --execute
  *   railway run node scripts/route-order-cleanup.js --from 2026-10-01 --to 2026-10-15
  *   railway run node scripts/route-order-cleanup.js --execute --out backup.json
- *   railway run node scripts/route-order-cleanup.js --rollback backup.json
+ *   railway run node scripts/route-order-cleanup.js --rollback backup.json            # dry run
+ *   railway run node scripts/route-order-cleanup.js --rollback backup.json --execute
  *
  * Under `railway run`, Railway injects the linked (portal) service's env
  * before the process starts — dotenv.config() below is a no-op then and
@@ -129,35 +138,136 @@ function printPlan(entries) {
   }
 }
 
+/** `YYYY-MM-DD` for either a Date (pg's typical date-column shape) or a
+ *  string — self-contained rather than importing a date util, since the
+ *  comparison here is a plain string slice, not ET wall-clock logic. */
+function dateOnly(value) {
+  return value instanceof Date ? value.toISOString().slice(0, 10) : String(value ?? '').slice(0, 10);
+}
+
+/** Backup rows grouped into one entry per (technician_id, date) — the unit
+ *  the all-or-nothing rollback (and its dry-run preview) both operate on. */
+function groupRowsByTechDay(rows) {
+  const byKey = new Map();
+  for (const row of rows) {
+    const key = `${row.technician_id}:${row.date}`;
+    if (!byKey.has(key)) byKey.set(key, { technician_id: row.technician_id, date: row.date, rows: [] });
+    byKey.get(key).rows.push(row);
+  }
+  return [...byKey.values()];
+}
+
+/** Re-reads the CURRENT state of one tech-day's backed-up rows and returns
+ *  the ids that no longer match the backup's "after" — id missing entirely,
+ *  or its route_order/date/technician_id isn't EXACTLY what the backup
+ *  recorded (a row reassigned to a different tech-day since the backup can
+ *  carry the SAME numeric route_order there by coincidence — id +
+ *  route_order alone would silently overwrite a position that belongs to a
+ *  different day's sequence, codex pre-push P1). `forUpdate: true` locks
+ *  the rows (the real rollback, inside its transaction); the dry-run
+ *  preview reads unlocked, since it opens no transaction at all. */
+async function mismatchedIdsForDay(conn, dayRows) {
+  const ids = dayRows.map((row) => row.id);
+  const live = await conn('scheduled_services').whereIn('id', ids)
+    .select('id', 'route_order', 'scheduled_date', 'technician_id');
+  const liveById = new Map(live.map((row) => [row.id, row]));
+  return dayRows.filter((row) => {
+    const liveRow = liveById.get(row.id);
+    return !liveRow
+      || Number(liveRow.route_order) !== Number(row.after)
+      || dateOnly(liveRow.scheduled_date) !== row.date
+      || String(liveRow.technician_id) !== String(row.technician_id);
+  }).map((row) => row.id);
+}
+
+/**
+ * Read-only preview for `--rollback <file>` WITHOUT --execute: the exact
+ * same per-tech-day mismatch check the real rollback runs, but with no
+ * lock and no transaction — nothing here can ever write. One plan entry
+ * per tech-day: `would_restore` (every row still matches) or the list of
+ * `mismatched_ids` that would skip the whole day.
+ */
+async function previewRollback(conn, rows) {
+  const days = groupRowsByTechDay(rows);
+  const plan = [];
+  for (const day of days) {
+    const mismatchedIds = await mismatchedIdsForDay(conn, day.rows);
+    plan.push({
+      technician_id: day.technician_id, date: day.date, row_count: day.rows.length,
+      would_restore: mismatchedIds.length === 0, mismatched_ids: mismatchedIds,
+    });
+  }
+  return plan;
+}
+
 /**
  * Rollback: restore every backed-up row's route_order under the SAME
- * tech-day advisory fence every route_order writer takes, one
- * compare-and-swap UPDATE per row (route_order = before WHERE id = ? AND
- * route_order = after) so a row that moved again since the backup is
- * reported as a mismatch, never blindly overwritten. `conn` is a knex
- * connection/transaction with `('scheduled_services')` query-builder access
- * — the caller opens the transaction so this stays a single unit of work.
+ * tech-day advisory fence every route_order writer takes — ALL-OR-NOTHING
+ * per (technician_id, date): every row for that tech-day is re-read FOR
+ * UPDATE first (mismatchedIdsForDay), and only when every one of them
+ * still matches does the whole day's compare-and-swap UPDATEs run, inside
+ * a SAVEPOINT (a nested knex transaction) so a same-transaction anomaly —
+ * a CAS somehow affecting 0 rows despite the FOR UPDATE check just having
+ * passed — rolls back only that day's writes, not the other tech-days'.
+ * `trx` is the outer transaction the caller opened; this stays a single
+ * unit of work at the OUTER level (every day's savepoint is nested inside
+ * it), so a fatal error before the caller commits still discards
+ * everything.
  */
 async function applyRollback(trx, lockTechDays, rows) {
-  if (!rows.length) return { restored: 0, mismatched: [] };
-  await lockTechDays(trx, rows.map((row) => ({ techId: row.technician_id, date: row.date })));
-  const mismatched = [];
+  if (!rows.length) return { restored: 0, mismatched: [], skippedDays: [] };
+  const days = groupRowsByTechDay(rows);
+  await lockTechDays(trx, days.map((day) => ({ techId: day.technician_id, date: day.date })));
   let restored = 0;
-  for (const row of rows) {
-    // The CAS pins the row to the BACKED-UP tech-day too (not just id +
-    // route_order): a row reassigned to a different technician or moved to
-    // a different date since the backup can carry the SAME numeric
-    // route_order there by coincidence — id + route_order alone would
-    // silently overwrite a position that belongs to a different day's
-    // sequence (codex pre-push P1). scheduled_date/technician_id are the
-    // exact columns lockTechDays just locked above.
-    const updated = await trx('scheduled_services')
-      .where({ id: row.id, route_order: row.after, scheduled_date: row.date, technician_id: row.technician_id })
-      .update({ route_order: row.before });
-    if (updated === 1) restored += 1;
-    else mismatched.push({ id: row.id, expected_after: row.after });
+  const skippedDays = [];
+  for (const day of days) {
+    const mismatchedIds = await mismatchedIdsForDay(trx, day.rows);
+    if (mismatchedIds.length) {
+      skippedDays.push({ technician_id: day.technician_id, date: day.date, mismatched_ids: mismatchedIds });
+      continue;
+    }
+    try {
+      restored += await trx.transaction(async (sp) => {
+        let count = 0;
+        for (const row of day.rows) {
+          const updated = await sp('scheduled_services')
+            .where({ id: row.id, route_order: row.after, scheduled_date: row.date, technician_id: row.technician_id })
+            .update({ route_order: row.before });
+          if (updated !== 1) throw new Error(`CAS affected ${updated} row(s) for ${row.id} — rolling back the whole tech-day`);
+          count += 1;
+        }
+        return count;
+      });
+    } catch {
+      // The savepoint already rolled back every write this day attempted —
+      // report the whole day as mismatched (ids only), matching the
+      // all-or-nothing contract exactly as the FOR UPDATE check would have.
+      skippedDays.push({ technician_id: day.technician_id, date: day.date, mismatched_ids: day.rows.map((row) => row.id) });
+    }
   }
-  return { restored, mismatched };
+  return { restored, mismatched: skippedDays.flatMap((day) => day.mismatched_ids), skippedDays };
+}
+
+/** One line per tech-day for the dry-run --rollback preview, ids only. */
+function printRollbackPlan(plan) {
+  for (const day of plan) {
+    if (day.would_restore) {
+      console.log(`${day.date} tech ${day.technician_id}: would restore ${day.row_count} row(s)`);
+    } else {
+      console.log(`${day.date} tech ${day.technician_id}: WOULD SKIP (${day.mismatched_ids.length} row(s) no longer match, ids only): ${day.mismatched_ids.join(', ')}`);
+    }
+  }
+}
+
+/** One line per tech-day for the real --rollback --execute outcome, ids only. */
+function printRollbackResult(result, totalRows) {
+  console.log(`Restored ${result.restored}/${totalRows} row(s).`);
+  if (result.skippedDays.length) {
+    console.log(`${result.skippedDays.length} tech-day(s) skipped whole (all-or-nothing) — a row no longer matched the backup:`);
+    for (const day of result.skippedDays) {
+      console.log(`  ${day.date} tech ${day.technician_id}: ${day.mismatched_ids.join(', ')}`);
+    }
+  }
 }
 
 /** route_optimization_planner_runs.result is jsonb — pg/knex hands back an
@@ -272,7 +382,7 @@ function reportAndBackup({ execute, result, entries, error, outPath }) {
   }
 }
 
-async function runRollback(db, lockTechDays, backupPath) {
+async function runRollback(db, lockTechDays, backupPath, execute) {
   const raw = fs.readFileSync(path.resolve(backupPath), 'utf8');
   const backup = JSON.parse(raw);
   const rows = Array.isArray(backup.rows) ? backup.rows : [];
@@ -280,13 +390,17 @@ async function runRollback(db, lockTechDays, backupPath) {
     console.log('Backup file has no rows — nothing to roll back.');
     return;
   }
-  console.log(`Rolling back ${rows.length} row(s) from ${backupPath} (generated_at=${backup.generated_at || 'unknown'})\n`);
-  const result = await db.transaction((trx) => applyRollback(trx, lockTechDays, rows));
-  console.log(`Restored ${result.restored}/${rows.length} row(s).`);
-  if (result.mismatched.length) {
-    console.log(`${result.mismatched.length} row(s) no longer matched the backed-up "after" value and were left alone (ids only):`);
-    for (const m of result.mismatched) console.log(`  ${m.id} (expected route_order=${m.expected_after})`);
+  if (!execute) {
+    // Dry run by default, same convention as the rest of the script — no
+    // lock, no transaction, nothing here can write.
+    console.log(`DRY RUN — would roll back ${rows.length} row(s) from ${backupPath} (generated_at=${backup.generated_at || 'unknown'})\n`);
+    printRollbackPlan(await previewRollback(db, rows));
+    console.log('\nDry run only — nothing was written. Pass --rollback <file> --execute to commit.');
+    return;
   }
+  console.log(`EXECUTING — rolling back ${rows.length} row(s) from ${backupPath} (generated_at=${backup.generated_at || 'unknown'})\n`);
+  const result = await db.transaction((trx) => applyRollback(trx, lockTechDays, rows));
+  printRollbackResult(result, rows.length);
 }
 
 async function main() {
@@ -295,7 +409,7 @@ async function main() {
 
   if (ROLLBACK_PATH) {
     const { lockTechDays } = require('../server/services/scheduling/tech-day-lock');
-    await runRollback(db, lockTechDays, ROLLBACK_PATH);
+    await runRollback(db, lockTechDays, ROLLBACK_PATH, EXECUTE);
     await db.destroy();
     return;
   }
@@ -369,4 +483,5 @@ if (require.main === module) {
 
 module.exports = {
   buildDateRange, buildBackupRows, applyRollback, parseLedgerResult, recoveryInstruction, collectEntries, reportAndBackup,
+  groupRowsByTechDay, mismatchedIdsForDay, previewRollback, printRollbackPlan, printRollbackResult,
 };

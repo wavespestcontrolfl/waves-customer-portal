@@ -14,7 +14,8 @@ const { addETDays, etDateString, parseETDateTime } = require('../utils/datetime-
 const { wasLockSkipped } = require('../utils/cron-lock');
 const {
   buildDateRange, buildBackupRows, applyRollback, parseLedgerResult, recoveryInstruction,
-  collectEntries, reportAndBackup,
+  collectEntries, reportAndBackup, groupRowsByTechDay, mismatchedIdsForDay, previewRollback,
+  printRollbackPlan, printRollbackResult,
 } = require('../../scripts/route-order-cleanup');
 
 const deps = { addETDays, etDateString, parseETDateTime };
@@ -59,81 +60,246 @@ describe('buildBackupRows', () => {
   });
 });
 
-describe('applyRollback', () => {
-  // Keyed on the FULL CAS tuple (id, route_order, scheduled_date,
-  // technician_id) — a fake DB that only matched id+route_order would hide
-  // exactly the bug this rollback fixes (a row reassigned to a different
-  // tech-day since the backup, coincidentally sharing the same route_order
-  // number, silently overwritten instead of reported).
-  function fakeTrx(updateResults) {
-    const calls = [];
-    return {
-      calls,
-      trx: (table) => ({
-        where: (filter) => ({
-          update: async (patch) => {
-            calls.push({ table, filter, patch });
-            const key = `${filter.id}:${filter.route_order}:${filter.scheduled_date}:${filter.technician_id}`;
-            return updateResults[key] ?? 0;
-          },
-        }),
+describe('groupRowsByTechDay', () => {
+  test('groups rows into one entry per (technician_id, date)', () => {
+    const rows = [
+      { id: 'a', date: '2026-10-05', technician_id: 't1' },
+      { id: 'b', date: '2026-10-05', technician_id: 't1' },
+      { id: 'c', date: '2026-10-05', technician_id: 't2' },
+      { id: 'd', date: '2026-10-06', technician_id: 't1' },
+    ];
+    const groups = groupRowsByTechDay(rows);
+    expect(groups).toHaveLength(3);
+    expect(groups.find((g) => g.technician_id === 't1' && g.date === '2026-10-05').rows.map((r) => r.id)).toEqual(['a', 'b']);
+    expect(groups.find((g) => g.technician_id === 't2').rows.map((r) => r.id)).toEqual(['c']);
+    expect(groups.find((g) => g.date === '2026-10-06').rows.map((r) => r.id)).toEqual(['d']);
+  });
+});
+
+describe('mismatchedIdsForDay', () => {
+  function fakeConn(liveRows) {
+    return (table) => ({
+      whereIn: (col, ids) => ({
+        select: async () => liveRows.filter((r) => ids.includes(r.id)),
       }),
-    };
+    });
   }
 
-  test('restores every row whose CURRENT route_order, date AND technician still match the backup', async () => {
-    const { trx, calls } = fakeTrx({ 'a:1:2026-10-05:t1': 1, 'b:2:2026-10-05:t1': 1 });
-    const lockTechDays = jest.fn(async () => ['t1:2026-10-05']);
+  test('a row missing entirely is a mismatch', async () => {
+    const conn = fakeConn([]);
+    const ids = await mismatchedIdsForDay(conn, [{ id: 'a', date: '2026-10-05', technician_id: 't1', after: 1 }]);
+    expect(ids).toEqual(['a']);
+  });
+
+  test('a route_order that no longer matches "after" is a mismatch', async () => {
+    const conn = fakeConn([{ id: 'a', route_order: 9, scheduled_date: '2026-10-05', technician_id: 't1' }]);
+    const ids = await mismatchedIdsForDay(conn, [{ id: 'a', date: '2026-10-05', technician_id: 't1', after: 1 }]);
+    expect(ids).toEqual(['a']);
+  });
+
+  test('a row moved to a DIFFERENT tech-day since the backup is a mismatch — even with the same route_order', async () => {
+    // The original codex P1: id + route_order alone would match.
+    const conn = fakeConn([{ id: 'a', route_order: 1, scheduled_date: '2026-10-06', technician_id: 't2' }]);
+    const ids = await mismatchedIdsForDay(conn, [{ id: 'a', date: '2026-10-05', technician_id: 't1', after: 1 }]);
+    expect(ids).toEqual(['a']);
+  });
+
+  test('a row that still matches exactly is not a mismatch', async () => {
+    const conn = fakeConn([{ id: 'a', route_order: 1, scheduled_date: '2026-10-05', technician_id: 't1' }]);
+    const ids = await mismatchedIdsForDay(conn, [{ id: 'a', date: '2026-10-05', technician_id: 't1', after: 1 }]);
+    expect(ids).toEqual([]);
+  });
+});
+
+describe('previewRollback (dry run — read-only, no lock, no transaction)', () => {
+  function fakeConn(liveRows) {
+    return (table) => ({
+      whereIn: (col, ids) => ({
+        select: async () => liveRows.filter((r) => ids.includes(r.id)),
+      }),
+    });
+  }
+
+  test('a fully-matching tech-day would be restored', async () => {
+    const conn = fakeConn([
+      { id: 'a', route_order: 1, scheduled_date: '2026-10-05', technician_id: 't1' },
+      { id: 'b', route_order: 2, scheduled_date: '2026-10-05', technician_id: 't1' },
+    ]);
     const rows = [
       { id: 'a', date: '2026-10-05', technician_id: 't1', before: 2, after: 1 },
       { id: 'b', date: '2026-10-05', technician_id: 't1', before: null, after: 2 },
     ];
-    const result = await applyRollback(trx, lockTechDays, rows);
-    expect(result).toEqual({ restored: 2, mismatched: [] });
-    // Locked BEFORE any write, one call, deduped/sorted by lockTechDays itself.
-    expect(lockTechDays).toHaveBeenCalledWith(trx, [
-      { techId: 't1', date: '2026-10-05' },
-      { techId: 't1', date: '2026-10-05' },
-    ]);
-    expect(calls).toEqual([
-      { table: 'scheduled_services', filter: { id: 'a', route_order: 1, scheduled_date: '2026-10-05', technician_id: 't1' }, patch: { route_order: 2 } },
-      { table: 'scheduled_services', filter: { id: 'b', route_order: 2, scheduled_date: '2026-10-05', technician_id: 't1' }, patch: { route_order: null } },
+    expect(await previewRollback(conn, rows)).toEqual([
+      { technician_id: 't1', date: '2026-10-05', row_count: 2, would_restore: true, mismatched_ids: [] },
     ]);
   });
 
-  test('a row whose route_order no longer matches "after" is reported, not overwritten', async () => {
-    // 'a' updates fine; 'b' was moved again since the backup (its CURRENT
-    // route_order is not what the backup's "after" says), so the CAS
-    // WHERE clause matches nothing and the update returns 0.
-    const { trx } = fakeTrx({ 'a:1:2026-10-05:t1': 1 });
+  test('one mismatching row marks the WHOLE day as would-skip, listing every id in that day', async () => {
+    const conn = fakeConn([
+      { id: 'a', route_order: 1, scheduled_date: '2026-10-05', technician_id: 't1' },
+      { id: 'b', route_order: 9, scheduled_date: '2026-10-05', technician_id: 't1' }, // moved again
+    ]);
+    const rows = [
+      { id: 'a', date: '2026-10-05', technician_id: 't1', before: 2, after: 1 },
+      { id: 'b', date: '2026-10-05', technician_id: 't1', before: null, after: 2 },
+    ];
+    expect(await previewRollback(conn, rows)).toEqual([
+      { technician_id: 't1', date: '2026-10-05', row_count: 2, would_restore: false, mismatched_ids: ['b'] },
+    ]);
+  });
+});
+
+describe('applyRollback — all-or-nothing per tech-day', () => {
+  // Simulates the FOR UPDATE re-read (`liveRows`, the current state) and the
+  // CAS UPDATE outcome (`updateResults`, keyed on the full CAS tuple) as two
+  // independent inputs — a savepoint's writes only land in the shared
+  // `calls` log if its callback resolves; a thrown callback discards them,
+  // exactly like a real Postgres SAVEPOINT rollback.
+  function fakeTrx({ liveRows = [], updateResults = {} } = {}) {
+    const calls = [];
+    function queryBuilder(table, sink) {
+      return {
+        whereIn: (col, ids) => ({ select: async () => liveRows.filter((r) => ids.includes(r.id)) }),
+        where: (filter) => ({
+          update: async (patch) => {
+            const key = `${filter.id}:${filter.route_order}:${filter.scheduled_date}:${filter.technician_id}`;
+            const affected = updateResults[key] ?? 0;
+            sink.push({ table, filter, patch, affected });
+            return affected;
+          },
+        }),
+      };
+    }
+    const trx = (table) => queryBuilder(table, calls);
+    trx.transaction = async (cb) => {
+      const pending = [];
+      const result = await cb((table) => queryBuilder(table, pending));
+      calls.push(...pending); // "commit" the savepoint — only reached if cb didn't throw
+      return result;
+    };
+    return { trx, calls };
+  }
+
+  test('two fully-matching tech-days each restore in their own savepoint', async () => {
+    const { trx, calls } = fakeTrx({
+      liveRows: [
+        { id: 'a', route_order: 1, scheduled_date: '2026-10-05', technician_id: 't1' },
+        { id: 'b', route_order: 1, scheduled_date: '2026-10-06', technician_id: 't2' },
+      ],
+      updateResults: { 'a:1:2026-10-05:t1': 1, 'b:1:2026-10-06:t2': 1 },
+    });
     const lockTechDays = jest.fn(async () => []);
     const rows = [
       { id: 'a', date: '2026-10-05', technician_id: 't1', before: 2, after: 1 },
-      { id: 'b', date: '2026-10-05', technician_id: 't1', before: 3, after: 2 },
+      { id: 'b', date: '2026-10-06', technician_id: 't2', before: 3, after: 1 },
     ];
     const result = await applyRollback(trx, lockTechDays, rows);
-    expect(result).toEqual({ restored: 1, mismatched: [{ id: 'b', expected_after: 2 }] });
+    expect(result).toEqual({ restored: 2, mismatched: [], skippedDays: [] });
+    expect(lockTechDays).toHaveBeenCalledWith(trx, [
+      { techId: 't1', date: '2026-10-05' },
+      { techId: 't2', date: '2026-10-06' },
+    ]);
+    expect(calls.map((c) => c.filter.id)).toEqual(['a', 'b']);
   });
 
-  test('a row moved to a DIFFERENT tech-day since the backup is reported, never overwritten, even with the same id + route_order', async () => {
-    // The exact codex P1: a row backed up as tech t1's #1 on 10-05 is now
-    // tech t2's #1 on 10-06 (a legitimate later reassignment) — id +
-    // route_order alone would match it and clobber t2's #1 with t1's old
-    // "before" value. The full CAS (date + technician_id too) must refuse.
-    const updateResults = {}; // nothing matches the OLD tech-day/date tuple
-    const { trx, calls } = fakeTrx(updateResults);
+  test('one mismatching row skips the WHOLE tech-day — its sibling row is never written, and a separate day is unaffected', async () => {
+    const { trx, calls } = fakeTrx({
+      liveRows: [
+        { id: 'a', route_order: 1, scheduled_date: '2026-10-05', technician_id: 't1' }, // matches
+        { id: 'b', route_order: 9, scheduled_date: '2026-10-05', technician_id: 't1' }, // moved again — mismatch
+        { id: 'c', route_order: 1, scheduled_date: '2026-10-06', technician_id: 't2' }, // separate day, matches
+      ],
+      updateResults: { 'a:1:2026-10-05:t1': 1, 'c:1:2026-10-06:t2': 1 },
+    });
+    const lockTechDays = jest.fn(async () => []);
+    const rows = [
+      { id: 'a', date: '2026-10-05', technician_id: 't1', before: 2, after: 1 },
+      { id: 'b', date: '2026-10-05', technician_id: 't1', before: null, after: 2 },
+      { id: 'c', date: '2026-10-06', technician_id: 't2', before: 4, after: 1 },
+    ];
+    const result = await applyRollback(trx, lockTechDays, rows);
+    expect(result).toEqual({
+      restored: 1,
+      // The WHOLE day 10-05 is skipped (its matching row 'a' is never
+      // written either), but only the GENUINELY mismatching id is reported
+      // — the pre-check never even attempted 'a's write.
+      mismatched: ['b'],
+      skippedDays: [{ technician_id: 't1', date: '2026-10-05', mismatched_ids: ['b'] }],
+    });
+    // 'a' (day 10-05) must NOT appear among the committed writes — only 'c' (day 10-06) does.
+    expect(calls.map((c) => c.filter.id)).toEqual(['c']);
+  });
+
+  test('a row moved to a DIFFERENT tech-day since the backup skips its whole (single-row) day', async () => {
+    const { trx, calls } = fakeTrx({
+      liveRows: [{ id: 'a', route_order: 1, scheduled_date: '2026-10-06', technician_id: 't2' }], // reassigned since backup
+      updateResults: {},
+    });
     const lockTechDays = jest.fn(async () => []);
     const rows = [{ id: 'a', date: '2026-10-05', technician_id: 't1', before: 2, after: 1 }];
     const result = await applyRollback(trx, lockTechDays, rows);
-    expect(result).toEqual({ restored: 0, mismatched: [{ id: 'a', expected_after: 1 }] });
-    expect(calls[0].filter).toEqual({ id: 'a', route_order: 1, scheduled_date: '2026-10-05', technician_id: 't1' });
+    expect(result).toEqual({
+      restored: 0,
+      mismatched: ['a'],
+      skippedDays: [{ technician_id: 't1', date: '2026-10-05', mismatched_ids: ['a'] }],
+    });
+    expect(calls).toEqual([]);
+  });
+
+  test('a CAS somehow affecting 0 rows despite the pre-check rolls back the WHOLE day, not just that row', async () => {
+    // Pre-check (liveRows) says both rows still match — but the UPDATE for
+    // 'b' is wired to affect 0 rows anyway (a same-transaction anomaly).
+    // The savepoint must roll back 'a's write too.
+    const { trx, calls } = fakeTrx({
+      liveRows: [
+        { id: 'a', route_order: 1, scheduled_date: '2026-10-05', technician_id: 't1' },
+        { id: 'b', route_order: 2, scheduled_date: '2026-10-05', technician_id: 't1' },
+      ],
+      updateResults: { 'a:1:2026-10-05:t1': 1 }, // 'b's CAS key is absent -> affected 0
+    });
+    const lockTechDays = jest.fn(async () => []);
+    const rows = [
+      { id: 'a', date: '2026-10-05', technician_id: 't1', before: 3, after: 1 },
+      { id: 'b', date: '2026-10-05', technician_id: 't1', before: 4, after: 2 },
+    ];
+    const result = await applyRollback(trx, lockTechDays, rows);
+    expect(result).toEqual({
+      restored: 0,
+      mismatched: ['a', 'b'],
+      skippedDays: [{ technician_id: 't1', date: '2026-10-05', mismatched_ids: ['a', 'b'] }],
+    });
+    // 'a's write was attempted but never committed — the savepoint rolled it back.
+    expect(calls).toEqual([]);
   });
 
   test('an empty backup takes no lock and touches nothing', async () => {
     const lockTechDays = jest.fn();
     const result = await applyRollback({}, lockTechDays, []);
-    expect(result).toEqual({ restored: 0, mismatched: [] });
+    expect(result).toEqual({ restored: 0, mismatched: [], skippedDays: [] });
     expect(lockTechDays).not.toHaveBeenCalled();
+  });
+});
+
+describe('printRollbackPlan / printRollbackResult', () => {
+  let logs;
+  let logSpy;
+  beforeEach(() => { logs = []; logSpy = jest.spyOn(console, 'log').mockImplementation((msg) => logs.push(msg)); });
+  afterEach(() => logSpy.mockRestore());
+
+  test('printRollbackPlan reports a would-restore day and a would-skip day with its mismatching ids', () => {
+    printRollbackPlan([
+      { technician_id: 't1', date: '2026-10-05', row_count: 2, would_restore: true, mismatched_ids: [] },
+      { technician_id: 't2', date: '2026-10-06', row_count: 1, would_restore: false, mismatched_ids: ['x'] },
+    ]);
+    expect(logs.some((l) => /would restore 2 row/.test(l))).toBe(true);
+    expect(logs.some((l) => /WOULD SKIP/.test(l) && /x/.test(l))).toBe(true);
+  });
+
+  test('printRollbackResult reports the restored count and every skipped day', () => {
+    printRollbackResult({ restored: 3, mismatched: ['b'], skippedDays: [{ technician_id: 't1', date: '2026-10-05', mismatched_ids: ['b'] }] }, 5);
+    expect(logs.some((l) => /Restored 3\/5/.test(l))).toBe(true);
+    expect(logs.some((l) => /1 tech-day\(s\) skipped whole/.test(l))).toBe(true);
+    expect(logs.some((l) => /2026-10-05 tech t1: b/.test(l))).toBe(true);
   });
 });
 
