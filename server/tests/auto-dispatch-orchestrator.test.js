@@ -606,6 +606,25 @@ describe('shared-model apply path (Codex r1)', () => {
     await expect(_internals.evaluatePlacement(svc(), PREFS, {}, CONFIG, '2026-06-20')).rejects.toThrow('db down');
   });
 
+  // Codex pre-push P1 (staff control): a lock landing between attempts
+  // surfaces exactly like a first-attempt lock — no move, the guard's reason.
+  test('a visit locked between retry attempts is audited as the guard\'s STALE_PLACEMENT refusal, with no move', async () => {
+    const prev = process.env.AUTO_DISPATCH_ALLOW_APPLY;
+    process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
+    try {
+      candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_BIG, CAND_MODERATE], drops: {} });
+      apply.applyAutoDispatchMove.mockRejectedValueOnce(Object.assign(new Error('Visit was locked/excluded from auto-dispatch after scoring'), { code: 'STALE_PLACEMENT' }));
+      const res = await runAutoDispatch({ mode: 'apply' });
+      expect(res).toMatchObject({ changed: 0 });
+      const failed = lastDecision('failed');
+      expect(failed.reason_description).toBe('Visit was locked/excluded from auto-dispatch after scoring');
+      expect(failed.newPlacement).toMatchObject({ date: CAND_BIG.date, window_start: CAND_BIG.start_time }); // the fresh evaluation's row, as for a first-attempt lock
+      expect(lastDecision('changed')).toBeUndefined();
+    } finally {
+      process.env.AUTO_DISPATCH_ALLOW_APPLY = prev;
+    }
+  });
+
   test('a failure whose error names no attempted candidate (gate off) keeps the fresh placement audit', async () => {
     const prev = process.env.AUTO_DISPATCH_ALLOW_APPLY;
     process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';

@@ -268,11 +268,10 @@ function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
 /**
  * One placement attempt against a specific candidate `best` — the ENTIRE
  * original applyAutoDispatchMove body, parameterized on the candidate and
- * the already-revalidated `fresh` row (so a bounded retry over several
- * candidates re-reads the row once, not once per attempt: the rebooker's own
- * atomic `expect` CAS re-asserts the row's state inside the move transaction
- * on every attempt regardless, so re-reading it here first would not close
- * any additional race). Throws SLOT_TAKEN (or any other rebooker refusal)
+ * the `fresh` row the caller revalidated immediately before THIS attempt
+ * (revalidatePlacement's lock/exclude/drift guard runs before every attempt;
+ * the rebooker's atomic `expect` CAS re-asserts the row inside the move
+ * transaction as well). Throws SLOT_TAKEN (or any other rebooker refusal)
  * exactly as before this lane's retry wrapper was added.
  */
 async function attemptApplyAutoDispatchMove(service, best, fresh, runId, config = {}) {
@@ -535,19 +534,6 @@ async function attemptsAfterSlotTaken(config, attempts, triedCount, serviceId, a
  * actually tried last, not always `best` (Codex r1).
  */
 async function applyAutoDispatchMove(service, best, runId, config = {}) {
-  // Stale-recommendation guard: the row was loaded + scored earlier this run.
-  // reschedule() reloads it but only guards status — if staff locked/excluded it
-  // or moved its date/window/tech since, do NOT overwrite that newer state. Same
-  // re-read the orchestrator's pass-2 reporting uses, so apply + report agree.
-  // Read ONCE for every attempt (see attemptApplyAutoDispatchMove's doc) —
-  // the rebooker's own atomic `expect` is what actually re-checks the row on
-  // each attempt.
-  const check = await revalidatePlacement(service);
-  if (!check.ok) {
-    throw Object.assign(new Error(check.reason), { code: check.code });
-  }
-  const fresh = check.fresh;
-
   const sharedModelOn = autoDispatchSharedModelLive();
   const alternates = sharedModelOn && Array.isArray(config.alternateCandidates)
     ? config.alternateCandidates.filter((c) => c && c !== best)
@@ -558,10 +544,23 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
   const authorizedBy = new Map();
 
   for (let i = 0; i < attempts.length; i += 1) {
+    // Stale-recommendation guard, re-run before EVERY attempt (Codex pre-push
+    // P1 — staff control): the row was loaded + scored earlier this run.
+    // reschedule() reloads it but only guards status — if staff locked/
+    // excluded it or moved its date/window/tech since (including between a
+    // SLOT_TAKEN and the next fallback), do NOT overwrite that newer state.
+    // Same re-read the orchestrator's pass-2 reporting uses, so apply +
+    // report agree; a refusal ends the attempts with the same error the
+    // first attempt's guard throws. Gate off there is only one attempt, so
+    // this is the one read it always made.
+    const check = await revalidatePlacement(service);
+    if (!check.ok) {
+      throw Object.assign(new Error(check.reason), { code: check.code });
+    }
     try {
       // Bounded (MAX_APPLY_ATTEMPTS): each attempt must complete or fail
       // before trying the next, so a sequential await here is intentional.
-      const applied = await attemptApplyAutoDispatchMove(service, attempts[i], fresh, runId, config);
+      const applied = await attemptApplyAutoDispatchMove(service, attempts[i], check.fresh, runId, config);
       // attempts (ids/numbers only): how many candidates were tried before
       // this one landed — 1 when the first attempt succeeded, so a caller
       // never has to infer it from `applied === best`.
