@@ -78,7 +78,7 @@ function ReviewRecord({ record, onSelectCustomer }) {
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           {onSelectCustomer ? (
-            <button type="button" className="text-14 font-medium text-zinc-900 hover:underline u-focus-ring" onClick={() => onSelectCustomer(record.customer.id)}>{customerName(record.customer)}</button>
+            <button type="button" className="p-0 border-0 bg-transparent text-left text-14 font-medium text-zinc-900 hover:underline cursor-pointer u-focus-ring" onClick={() => onSelectCustomer(record.customer.id)}>{customerName(record.customer)}</button>
           ) : <div className="text-14 font-medium text-zinc-900">Primary service location</div>}
           <div className="text-14 text-ink-secondary break-words">{addressText(record.customer) || "No complete address on file"}</div>
         </div>
