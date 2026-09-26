@@ -6286,7 +6286,7 @@ async function ringDeclineRetrievalFollowupBell(termId, retrieval) {
   if (!sentence) return;
   try {
     const NotificationService = require('./notification-service');
-    await NotificationService.notifyAdmin(
+    const bell = await NotificationService.notifyAdmin(
       'service',
       'Termite annual plan — station retrieval needs staff',
       `A customer who declined renewal online now has installed stations. ${sentence}`,
@@ -6300,9 +6300,29 @@ async function ringDeclineRetrievalFollowupBell(termId, retrieval) {
         },
       },
     );
+    // A decline superseded by a NEWER retrieval instruction is a final
+    // answer once staff are told to confirm it covers these stations —
+    // settle it then (only on a confirmed bell), so the sweep stops
+    // re-checking it daily and it can never hold one of its bounded slots.
+    if (bell && retrieval.reason === 'superseded_by_newer') {
+      await writeDeclineRetrievalMarker(termId, retrieval, 'superseded_by_newer');
+    }
   } catch (bellErr) {
     logger.error(`[annual-prepay] decline retrieval follow-up bell failed for term ${termId}: ${bellErr.message}`);
   }
+}
+
+async function writeDeclineRetrievalMarker(termId, retrieval, outcomeKey) {
+  await db('activity_log').insert({
+    customer_id: retrieval.customerId,
+    action: DECLINE_RETRIEVAL_ACTIVITY_ACTION,
+    description: `Station retrieval after the online renewal decline: ${outcomeKey} (paid coverage through ${retrieval.termEnd}).`,
+    metadata: {
+      term_id: termId, term_end: retrieval.termEnd, outcome: outcomeKey, source: 'customer_portal',
+    },
+  }).catch((markerErr) => {
+    logger.warn(`[annual-prepay] decline retrieval marker not written for term ${termId}: ${markerErr.message}`);
+  });
 }
 
 // After an installation anchor commits (termite-annual-activation.js): a

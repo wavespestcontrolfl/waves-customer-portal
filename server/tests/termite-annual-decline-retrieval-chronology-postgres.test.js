@@ -132,20 +132,20 @@ postgres('portal renewal decline — station-retrieval chronology (real helper, 
     expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 0, raised: 0 });
   });
 
-  test('a NEWER request-keyed instruction (opened after the decline) wins: nothing raised, NO marker, and the sweep keeps re-checking', async () => {
+  test('a NEWER request-keyed instruction (opened after the decline) wins: nothing raised; settled only once staff are belled to confirm', async () => {
     const t = await portalDeclinedTerm({ declinedDaysAgo: 10 });
     await requestKeyedRetrievalRow(t.customerId, { openedDaysAgo: 2, read: false });
 
     expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 1, raised: 0 });
     expect(await ownTaskRow(t)).toBeUndefined();
-    expect(await marker(t)).toBeUndefined();
     const bell = await trx('notifications')
       .whereRaw("metadata->>'dedupeKey' = ?", [`termite-annual-decline-retrieval:${t.termId}:superseded_by_newer`])
       .first('body');
     expect(bell.body).toContain('A newer station-retrieval instruction already stands on this account');
 
-    // Not settled: the next sweep re-checks it (and still raises nothing).
-    expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 1, raised: 0 });
-    expect(await marker(t)).toBeUndefined();
+    // The confirmed bell settles it (outcome superseded_by_newer), so the
+    // sweep stops re-checking it and it never holds a bounded slot.
+    expect((await marker(t)).metadata).toEqual(expect.objectContaining({ outcome: 'superseded_by_newer' }));
+    expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 0, raised: 0 });
   });
 });
