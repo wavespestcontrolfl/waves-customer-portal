@@ -340,6 +340,36 @@ describe('codex #4890 r5/r6 — WDO identity and elapsed agreed days', () => {
   });
 });
 
+// Codex #4890 post-merge review P1: specific_service_name is free text, so a
+// lender/realtor call labelled "WDO Treatment Service" matched the bare
+// \bWDO\b identity regex and, through isAuthorizedWdoArrangerBooking,
+// stripped caller_not_authorized from a third party's TREATMENT request.
+// The owner ruling covers only an inspection/report arranged for a lender or
+// realtor — never a treatment.
+describe('codex #4890 post-merge review P1 — arranger authorization requires INSPECTION identity, never treatment', () => {
+  test('"WDO Inspection Service" binds (inspection identity, no treatment wording)', () => {
+    expect(isWdoInspectionRequest({ primary_service_category: 'wdo', specific_service_name: 'WDO Inspection Service' })).toBe(true);
+    const bound = wdoExtraction({ service_request: { primary_service_category: 'wdo', specific_service_name: 'WDO Inspection Service' } });
+    expect(isAuthorizedWdoArrangerBooking(bound)).toBe(true);
+  });
+
+  test.each([
+    ['WDO Treatment Service'],
+    ['WDO Treatment'],
+    ['Wood-Destroying Organism Treatment'],
+    ['termite treatment'],
+    ['WDO inspection and treatment'],
+  ])('%s does NOT bind — not an inspection/report request', (specificServiceName) => {
+    expect(isWdoInspectionRequest({ primary_service_category: 'wdo', specific_service_name: specificServiceName })).toBe(false);
+    const notBound = wdoExtraction({ service_request: { primary_service_category: 'wdo', specific_service_name: specificServiceName } });
+    expect(isAuthorizedWdoArrangerBooking(notBound)).toBe(false);
+    // Fails closed all the way through: the deterministic pass still raises
+    // caller_not_authorized for a lender/realtor arranging a TREATMENT, even
+    // with a confirmed slot.
+    expect(computeDeterministicTriageFlags(notBound, { contactPhone: ANI, addressValidation: AV_CLEAN })).toContain('caller_not_authorized');
+  });
+});
+
 // codex #4890 review, P2 round 2 — two source-contract pins on
 // call-recording-processor.js. Both fixes touch code deep inside a single
 // giant transaction closure that processRecording builds up (Twilio,
@@ -438,5 +468,28 @@ describe('codex #4890 P2 — the arranger slot-elapsed guard is rechecked inside
     // comment relies on).
     const heldReasonsMatch = source.match(/const heldReasons = new Set\(\[[^\]]*\]\);/)[0];
     expect(heldReasonsMatch).not.toContain("'past_extracted_date'");
+  });
+});
+
+// Codex #4890 post-merge review P2: buildTriageItem left
+// 'arranger_slot_elapsed_pre_insert' out of flagToCategoryMap AND
+// SCHEDULING_PAYLOAD_FLAGS, so the card filed as service_unknown with no
+// scheduling-window snapshot for the office to re-book against.
+describe('codex #4890 post-merge review P2 — arranger_slot_elapsed_pre_insert files in the scheduling lane', () => {
+  const { buildTriageItem } = require('../services/call-routing-gates');
+
+  test('buildTriageItem gives it the scheduling (time_ambiguous) category and carries the scheduling_window payload', () => {
+    const item = buildTriageItem({
+      callLogId: 42,
+      flag: 'arranger_slot_elapsed_pre_insert',
+      extraction: wdoExtraction(),
+      severity: 'advisory',
+    });
+    expect(item.category).toBe('time_ambiguous');
+    const payload = JSON.parse(item.payload);
+    expect(payload.scheduling_window).toEqual(expect.objectContaining({
+      status: 'confirmed',
+      confirmed_start_at: '2026-09-28T10:00:00-04:00',
+    }));
   });
 });

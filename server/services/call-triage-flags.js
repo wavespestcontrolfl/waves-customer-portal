@@ -243,16 +243,42 @@ function suppressUnsupportedModelFlags(modelFlags, extraction) {
 // rephrasing ("WDO Inspection", "WDO Report") without matching an unrelated
 // service that merely mentions "wdo" mid-word (there is none in the catalog,
 // but \b keeps this future-proof).
+//
+// specific_service_name is free-text model output, not a catalog key — a
+// lender/realtor call the model itself labels "WDO Treatment Service" or
+// "Wood-Destroying Organism Treatment" matched the bare identity regex below
+// and, through isAuthorizedWdoArrangerBooking, cleared caller_not_authorized
+// on a third party's TREATMENT request (codex #4890 post-merge review P1).
+// The owner ruling covers only an INSPECTION/report arranged for a lender or
+// closing, so a name must clear the identity check AND read as an
+// inspection/report/letter/certificate/clearance AND carry NONE of the
+// treatment/remediation wording below — the treatment veto runs first and
+// wins over any co-occurring inspection word ("WDO inspection and
+// treatment" is a treatment call, not an inspection one). There is no
+// catalog service_key available here (this predicate is pure over the
+// extraction only, by design — see isAuthorizedWdoArrangerBooking's
+// no-clock note), so this stays a closed-vocabulary text check rather than a
+// DB lookup; the coarse 'wdo' category below is schema-enumerated
+// (call-extraction.persisted.schema.json), not free text, and that enum has
+// no separate WDO-treatment value (WDO treatment work is always categorized
+// under 'termite', never 'wdo'), so it stays a safe, inspection-only signal
+// on its own. Ambiguous text fails closed — not authorized.
+const WDO_TREATMENT_WORDING_RE = /\btreat(?:ment|ed|ing)?\b|\btent(?:ing)?\b|\bfumigat(?:e|ion|ing)\b|\bbait(?:ing)?\b|\btermidor\b|\bremediat(?:e|ion|ing)\b/i;
+const WDO_INSPECTION_WORDING_RE = /\binspect(?:ion)?\b|\breport\b|\bletter\b|\bcertif(?:y|icate|ication)\b|\bclearance\b/i;
 function isWdoInspectionRequest(serviceRequest = {}) {
   // A named specific service is the booking's final choice
   // (resolveCallBookingCatalogService), so when one is present it must itself
   // be the WDO row — the coarse category cannot override a contradictory pick
   // like "Termite Inspection Service" (codex #4890 r6 P1).
   const specific = String(serviceRequest?.specific_service_name || '').trim();
-  // The acronym or the spelled-out form ("Wood-Destroying Organism
-  // Inspection"), the same equivalence service-normalizer.js uses (codex
-  // #4890 r7 P2).
-  if (specific) return /\bWDO\b|wood[-\s]*destroy/i.test(specific);
+  if (specific) {
+    // The acronym or the spelled-out form ("Wood-Destroying Organism
+    // Inspection"), the same equivalence service-normalizer.js uses (codex
+    // #4890 r7 P2).
+    if (!/\bWDO\b|wood[-\s]*destroy/i.test(specific)) return false;
+    if (WDO_TREATMENT_WORDING_RE.test(specific)) return false;
+    return WDO_INSPECTION_WORDING_RE.test(specific);
+  }
   return serviceRequest?.primary_service_category === 'wdo';
 }
 
