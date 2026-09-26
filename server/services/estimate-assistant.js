@@ -711,11 +711,12 @@ function activeIngredientsFromSupport(context = {}, question = '') {
 // say nothing about safety and must not force-route to the fallback on their
 // own when the estimate's support lookups came back empty (a lawn-scheduling
 // question with database: null must still reach the live model).
-const LABEL_SAFETY_QUESTION_PATTERN = /\b(safe|pets?|dogs?|cats?|kids?|child|children|precautions?|irrigat\w*|sprinkl\w*|rain[-\s]?fast|rain[-\s]?proof|re-?ent(?:er|ry|ering)\w*)\b|\bkeep\s+(?:people|pets?|kids?|children|dogs?|cats?|everyone|family)\s+off\b|\bkeep\s+off\b|\b(?<!standing\s)(?<!breeding\s)water(?:ing|ed|s)?\b(?!\s+bugs?\b)(?=[^.?!]{0,40}\b(?:after|before|until|lawn|turf|grass|yard|plants?|treat\w*|appl\w*|spray\w*|dry|dries|dried)\b)|\b(?:after|before|until|once|when|how\s+soon|how\s+long)\b[^.?!]{0,40}\b(?<!standing\s)(?<!breeding\s)water(?:ing|ed|s)?\b(?!\s+bugs?\b)|\brains?\s+(?:right\s+)?after\s+(?:(?:the|my|a|an|our|your|you|we)\s+)?(?:(?:lawn|turf|grass|yard|pest|bug|mosquito|termite|rodent|flea|tick|tree|shrub|weed|fungus|perimeter|barrier|care|control|quarterly|monthly|first|next|initial)\s+){0,3}(?:treat\w*|appl\w*|spray\w*|services?|visits?)\b|\bafter\s+(?:(?:the|my|a|an|our|your|you|we)\s+)?(?:(?:lawn|turf|grass|yard|pest|bug|mosquito|termite|rodent|flea|tick|tree|shrub|weed|fungus|perimeter|barrier|care|control|quarterly|monthly|first|next|initial)\s+){0,3}(?:treat\w*|appl\w*|spray\w*|services?|visits?)\b[^.?!]{0,40}\brains?\b|\b(?:treat|appl|spray)\w*\b[^.?!]{0,40}\bafter\s+(?:it\s+|the\s+)?rains?\b|\brain\s+wash\w*\b/i;
+const LABEL_SAFETY_QUESTION_PATTERN = /\b(safe|precautions?|irrigat\w*|sprinkl\w*|rain[-\s]?fast|rain[-\s]?proof|re-?ent(?:er|ry|ering)\w*)\b|\bkeep\s+(?:people|pets?|kids?|children|dogs?|cats?|everyone|family)\s+off\b|\bkeep\s+off\b|\b(?<!standing\s)(?<!breeding\s)water(?:ing|ed|s)?\b(?!\s+bugs?\b)(?=[^.?!]{0,40}\b(?:after|before|until|lawn|turf|grass|yard|plants?|treat\w*|appl\w*|spray\w*|dry|dries|dried)\b)|\b(?:after|before|until|once|when|how\s+soon|how\s+long)\b[^.?!]{0,40}\b(?<!standing\s)(?<!breeding\s)water(?:ing|ed|s)?\b(?!\s+bugs?\b)|\brains?\s+(?:right\s+)?after\s+(?:(?:the|my|a|an|our|your|you|we)\s+)?(?:(?:lawn|turf|grass|yard|pest|bug|mosquito|termite|rodent|flea|tick|tree|shrub|weed|fungus|perimeter|barrier|care|control|quarterly|monthly|first|next|initial)\s+){0,3}(?:treat\w*|appl\w*|spray\w*|services?|visits?)\b|\bafter\s+(?:(?:the|my|a|an|our|your|you|we)\s+)?(?:(?:lawn|turf|grass|yard|pest|bug|mosquito|termite|rodent|flea|tick|tree|shrub|weed|fungus|perimeter|barrier|care|control|quarterly|monthly|first|next|initial)\s+){0,3}(?:treat\w*|appl\w*|spray\w*|services?|visits?)\b[^.?!]{0,40}\brains?\b|\b(?:treat|appl|spray)\w*\b[^.?!]{0,40}\bafter\s+(?:it\s+|the\s+)?rains?\b|\brain\s+wash\w*\b/i;
 // Bare product/treatment nouns count as a safety cue only inside the fallback
 // once support rows exist — at the empty-support gate they are too often
 // scheduling, coverage or lawn-condition words ("When is my application?",
-// "Do you spray inside?", "Why is my lawn dry?").
+// "Do you spray inside?", "Why is my lawn dry?", "Do you treat fleas on
+// dogs?"). "safe" / "keep pets off" still catch the real safety questions.
 // Payment / account security questions ("Is it safe to enter my credit card
 // here?") use "safe" too, but are not pesticide-safety questions — they must
 // not be force-routed to the label-safety fallback at the empty-support gate.
@@ -723,7 +724,7 @@ const PAYMENT_SECURITY_PATTERN = /\b(?:credit|debit|card|cards|payment|payments|
 // A payment question that also names a pesticide subject ("Is it safe for my
 // kids? I already paid") stays on the safety route.
 const PESTICIDE_SUBJECT_PATTERN = /\b(?:pets?|dogs?|cats?|kids?|child\w*|babies|baby|spray\w*|pesticid\w*|chemicals?|products?|treat\w*|re-?ent\w*|dry|drying|label)\b/i;
-const APPLICATION_WORD_PATTERN = /\b(?:applied|application|chemicals?|products?|spray|label|dry|dries|dried|drying)\b/i;
+const APPLICATION_WORD_PATTERN = /\b(?:applied|application|chemicals?|products?|spray|label|dry|dries|dried|drying|pets?|dogs?|cats?|kids?|child|children)\b/i;
 // Broadens LABEL_SAFETY_QUESTION_PATTERN with generic service-family words
 // (lawn/pest/inside/outside/etc.) that name a topic but not a safety intent
 // on their own. Still force-routes to the fallback when support rows exist

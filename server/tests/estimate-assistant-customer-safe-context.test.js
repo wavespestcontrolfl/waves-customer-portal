@@ -212,4 +212,20 @@ describe('estimate assistant model prompt — customer-safe context boundary (AW
     expect(dispatch).not.toHaveBeenCalled();
     expect(result.source).toBe('fallback');
   });
+
+  test('"Do you treat fleas on dogs?" with empty support reaches the model; "Is this safe for my dog?" does not', async () => {
+    dispatch.mockResolvedValue({ ok: true, provider: 'openai', text: 'Flea treatment covers the home and yard; your vet treats the pet.' });
+    const base = {
+      database: null,
+      estimate: { id: 'synthetic-estimate-9', token: 'synthetic-token-9', status: 'sent', customer_name: 'Synthetic Customer', address: 'Synthetic Address' },
+      estData: { services: [{ service: 'pest_control', label: 'Pest Control' }] },
+      pricingBundle: { waveGuardTier: 'WaveGuard' },
+    };
+    const coverage = await answerEstimateQuestion({ ...base, question: 'Do you treat fleas on dogs?' });
+    expect(coverage.source).toBe('openai');
+    dispatch.mockClear();
+    const safety = await answerEstimateQuestion({ ...base, question: 'Is this safe for my dog?' });
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(safety.source).toBe('fallback');
+  });
 });
