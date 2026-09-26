@@ -974,6 +974,24 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     expect(await mockPg('sms_log').where({ from_phone: 'push' })).toHaveLength(1);
   });
 
+  test('Codex #4816 r45: another push of the same type near acceptance does not stand in for a missing proof', async () => {
+    await device();
+    await put({ invoiceChannel: 'push' });
+    const invoiceId = randomUUID();
+    await mockPg('invoices').insert({ id: invoiceId, customer_id: property, token: randomUUID(), invoice_number: 'QA-INVOICE-4', status: 'sent' });
+    const routing = require('../services/messaging/push-channel-routing');
+    const notice = { customerId: property, to: '+19415550101', body: 'Your invoice is ready.', messageType: 'invoice_followup',
+      explicitPushOnly: true, invoiceId, notificationEventKey: `qa:${invoiceId}:a` };
+    expect(await routing.attemptPushFirst(notice)).toMatchObject({ delivered: true });
+    // This notice's proof is lost; a different same-type notice sits inside any time window.
+    const [first] = await mockPg('sms_log').where({ from_phone: 'push' });
+    await mockPg('sms_log').where({ id: first.id }).update({ message_body: 'A different invoice notice.',
+      metadata: JSON.stringify({ channel: 'push', providerAccepted: true, notificationEventKey: `qa:${invoiceId}:b` }) });
+    expect(await routing.attemptPushFirst(notice)).toMatchObject({ delivered: true });
+    expect((await mockPg('sms_log').where({ from_phone: 'push' })).map((r) => r.message_body).sort())
+      .toEqual(['A different invoice notice.', 'Your invoice is ready.']);
+  });
+
   test('Codex #4816 r40: a push proof row names the visit its notice was about', async () => {
     await device();
     await put({ invoiceChannel: 'push' });

@@ -540,19 +540,17 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
     if (appNotification?.push?.deduped) {
       // A retry of an accepted push repairs a proof row the first attempt
       // failed to write, so readers of sms_log (SMS commitment evidence,
-      // history) still see the delivered notice (Codex #4816 r44). Match on
-      // the notification id, the event key, or the same notice within five
-      // minutes of acceptance so a proof written before the id back-fill is
-      // never duplicated.
+      // history) still see the delivered notice (Codex #4816 r44). A
+      // deduplicated push always has its event key (the dedupe key), and
+      // every proof row carries it, so the notification id or that key
+      // identify this notice's proof exactly; no time-window guess that
+      // another same-type push could satisfy (Codex #4816 r45).
       try {
         const notificationId = String(appNotification.id);
-        const windowMs = 5 * 60 * 1000;
         const existing = await db('sms_log').where({ customer_id: customerId, from_phone: 'push' })
           .where(function sameNotice() {
             this.whereRaw("metadata->>'push_notification_id' = ?", [notificationId])
-              .modify((q) => { if (notificationEventKey) q.orWhereRaw("metadata->>'notificationEventKey' = ?", [notificationEventKey]); })
-              .orWhere((q) => q.where({ message_type: messageType })
-                .whereBetween('created_at', [new Date(acceptedAt.getTime() - windowMs), new Date(acceptedAt.getTime() + windowMs)]));
+              .modify((q) => { if (notificationEventKey) q.orWhereRaw("metadata->>'notificationEventKey' = ?", [notificationEventKey]); });
           })
           .first('id');
         // A scheduled send's queue row is its durable proof (settled below).
