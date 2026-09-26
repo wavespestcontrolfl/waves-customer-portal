@@ -419,7 +419,14 @@ advice retains its `area_estimated` label.
 Without either signal, observation/summary wording cannot trigger sprinkler
 advice or an unqualified "no action needed" reassurance. Measured water
 deficits/surpluses and eligible stored water snapshots
-retain their existing behavior. A current watering snapshot can originate from
+retain their existing behavior.
+Lawn `reportV2.aftercare` distinguishes explicit, unopposed product water-in
+directions (`creditableWaterIn`) from conditional notes, missing directions,
+watering holds, or conflicting product instructions (`needsReview`). Report
+watering plans and assistant answers preserve those conditions without inventing
+an amount or deadline; hold/review cases make the plan conditional on resolving
+the directions and observing the recorded restrictions.
+A current watering snapshot can originate from
 Monday app publication independently of email delivery; `sent_at` remains an
 email outcome. Signed `plan` render pins bind to the stable publication time
 (or the original email timestamp on older snapshots), with the same policy,

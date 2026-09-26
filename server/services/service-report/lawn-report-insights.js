@@ -29,9 +29,14 @@ function catByKey(categories, key) {
  * @param {string} input.customerConcern
  * @returns {Array} prioritized LawnInsightCard[]
  */
-function buildLawnInsightCards({ categories = [], water = {}, mowing = null, grassLabel = 'lawn', customerConcern = '', treatmentKinds = [], waterInRequired = false } = {}) {
+function buildLawnInsightCards({ categories = [], water = {}, mowing = null, grassLabel = 'lawn', customerConcern = '', treatmentKinds = [], waterInRequired = false, aftercare = {} } = {}) {
   const cards = [];
   const has = (kind) => Array.isArray(treatmentKinds) && treatmentKinds.includes(kind);
+  const aftercareWaterAction = aftercare.needsReview === true
+    ? 'Confirm the product watering directions with your technician before changing irrigation.'
+    : aftercare.wateringHold === true
+      ? 'Follow the product-specific watering restriction in Aftercare before making any other irrigation changes.'
+      : null;
 
   // ── Water ───────────────────────────────────────────────────────────────────
   const waterCat = catByKey(categories, 'water_moisture_stress');
@@ -53,13 +58,13 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
       wavesAction: has('fungicide')
         ? 'Applied a fungicide and adjusted today’s plan toward drying things out.'
         : 'Documented the moisture and adjusted today’s plan toward drying things out.',
-      customerAction: hasPlan
+      customerAction: aftercareWaterAction || (hasPlan
         ? (waterInRequired
           ? 'Water in today’s application as directed, then follow this week’s watering plan below — it already accounts for the extra water.'
           : 'Follow this week’s watering plan below — it already accounts for the extra water. Let us know if it stays soggy.')
         : (waterInRequired
           ? 'Water in today’s application as directed, then ease back on irrigation by one cycle.'
-          : 'Ease back on irrigation by one cycle and let us know if it stays soggy.'),
+          : 'Ease back on irrigation by one cycle and let us know if it stays soggy.')),
       nextVisitPlan: hasPlan
         ? 'Recheck moisture and fungus signs next visit against this week’s watering plan.'
         : 'Recheck moisture and fungus signs next visit to confirm the drier schedule is working.',
@@ -77,11 +82,11 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
       // The sentence must agree with the plan card below it — a hold /
       // conditional plan is never described as "setting runs" (gh-r44,
       // same rule as buildRootCause).
-      customerAction: hasPlan
+      customerAction: aftercareWaterAction || (hasPlan
         ? (water.weekPlan.action === 'run' && water.weekPlan.conditionalOnForecast !== true
           ? 'Follow this week’s watering plan below — it sets this week’s runs from the forecast and your area’s watering rules.'
           : 'Follow this week’s watering plan below — it weighs the shortfall against the forecast and your area’s watering rules.')
-        : `Add a little irrigation time to reach the seasonal target for your ${grassLabel}.`,
+        : `Add a little irrigation time to reach the seasonal target for your ${grassLabel}.`),
       nextVisitPlan: hasPlan
         ? 'Recheck moisture and color next visit.'
         : 'Recheck moisture and color next visit to confirm the added water is landing.',
@@ -99,7 +104,8 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
         : 'One area reads drier than the rest of the lawn in today’s photos.',
       whyItMatters: 'That pattern usually points to uneven sprinkler coverage, not the whole lawn needing more water.',
       wavesAction: 'Flagged the area and will recheck it next visit.',
-      customerAction: 'Check sprinkler coverage in that area rather than watering the whole yard more.',
+      customerAction: aftercareWaterAction
+        || 'Check sprinkler coverage in that area rather than watering the whole yard more.',
       nextVisitPlan: 'Recheck the flagged area next visit to see whether coverage evened out.',
     });
   } else if (waterCat && (waterCat.status === 'watch' || waterCat.status === 'needs_attention')) {
@@ -124,7 +130,7 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
       // With a weekly plan on the card the plan is the sole watering
       // instruction — never "keep your current schedule" / "ease back a
       // cycle" beside a hold or run plan (codex #3565 gh-r29).
-      customerAction: hasPlan
+      customerAction: aftercareWaterAction || (hasPlan
         ? (damp
           ? (waterInRequired
             ? 'Water in today’s application as directed first, then let the damp areas dry out between waterings — this week’s watering plan below already accounts for it.'
@@ -138,7 +144,7 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
             : 'Let the damp areas dry out between waterings, and ease back an irrigation cycle if they stay soggy.')
           : (water && water.scheduleOnFile
             ? 'Keep your current watering schedule unless we flag a change.'
-            : 'We’ll keep watching moisture balance at upcoming visits.'),
+            : 'We’ll keep watching moisture balance at upcoming visits.')),
       nextVisitPlan: 'Recheck the moisture balance next visit.',
     });
   }

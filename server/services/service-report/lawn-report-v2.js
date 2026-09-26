@@ -427,47 +427,133 @@ function buildRootCause({ effectiveWaterStatus, coverageWatch, overwatering, mow
   return null;
 }
 
+function isDeferredWateringInstruction(note) {
+  const text = String(note || '').trim();
+  // Conditional and report-referential clauses never become an instruction
+  // merely because they mention a number or timing word.
+  if (/\b(?:may be needed|when directed|follow (?:the )?(?:service )?report)\b/i.test(text)) return true;
+  if (!/\bas directed\b/i.test(text)) return false;
+  const affirmativeWateringAction = /\b(?:water|irrigate|apply|give)\b/i.test(text);
+  const specificAmountOrTiming = /\b\d+(?:\.\d+)?\s*(?:inches?|in\.?|minutes?|hours?|days?|cycles?)\b/i.test(text)
+    || /\b(?:immediately|today|tomorrow)\b/i.test(text);
+  return !affirmativeWateringAction || !specificAmountOrTiming;
+}
+
+function isWateringHoldInstruction(note) {
+  const text = String(note || '').trim();
+  return /\b(?:do not|don't|avoid|delay|hold)\b[^.]{0,48}\b(?:water|watering|irrigat\w*)\b/i.test(text)
+    || /\bkeep\s+(?:the\s+)?(?:water|irrigation)\s+off\b/i.test(text)
+    || /\bkeep\s+(?:off|from)\s+(?:watering|irrigating)\b/i.test(text);
+}
+
+function isActionableWateringInstruction(note) {
+  const text = String(note || '').trim();
+  if (!text) return false;
+  return isWateringHoldInstruction(text)
+    || /\b(?:water|irrigat\w*)\s+in\b/i.test(text)
+    || /\b(?:water|watering|irrigat\w*)\b[^.]{0,48}\b(?:within|after|before|for|until|immediately|today|tomorrow|\d+(?:\.\d+)?\s*(?:inches?|in\.?|minutes?|hours?|days?|cycles?))\b/i.test(text)
+    || /\b(?:add|apply|give)\b[^.]{0,32}\b\d+(?:\.\d+)?\s*(?:inches?|in\.?|minutes?|hours?|days?|cycles?)\b[^.]{0,24}\b(?:water|watering|irrigation)\b/i.test(text);
+}
+
+function isCompleteWaterInInstruction(note) {
+  const text = String(note || '').trim();
+  if (!isActionableWateringInstruction(text) || isWateringHoldInstruction(text)) return false;
+  const positiveWaterAction = /\b(?:water(?:ing)?|irrigat\w*)\b/i.test(text)
+    || /\b(?:add|apply|give)\b[^.]{0,48}\b(?:water|watering|irrigation)\b/i.test(text);
+  const amountOrTiming = /\b(?:within|after|before|for|until|immediately|today|tomorrow)\b/i.test(text)
+    || /\b\d+(?:\.\d+)?\s*(?:inches?|in\.?|minutes?|hours?|days?|cycles?)\b/i.test(text);
+  return positiveWaterAction && amountOrTiming;
+}
+
+function recordedWateringInstruction(note) {
+  // Circular placeholder sentences provide no direction. A separate explicit
+  // restriction still belongs in aftercare, including its recorded duration.
+  return String(note || '').trim().split(/(?<=[.!?;])\s+/)
+    .filter((clause) => !isDeferredWateringInstruction(clause) || isWateringHoldInstruction(clause))
+    .join(' ');
+}
+
 // Aftercare watering/re-entry from the manufacturer LABEL on the applied products.
 // Surfaces a real label watering-in note when present; otherwise a safe default that
 // invents no number. Re-entry text comes from the label when available.
 function buildAftercare(applications) {
   const apps = Array.isArray(applications) ? applications : [];
-  let productNote = null;
-  let reentry = null;
-  // Whether ANY product applied today must be watered IN (fertilizer). true = a
-  // product requires watering-in; false = watering-in is simply not required for
-  // the product(s) seen (NOT that watering is prohibited); null = unknown.
-  let waterInRequired = null;
-  for (const a of apps) {
+  const applicationWaterEvidence = apps.map((a) => {
     const p = (a && a.product) || a || {};
     const facts = (a && a.approved_report_product_facts) || {};
     const req = p.irrigation_required ?? facts.irrigationRequired ?? null;
-    if (req === true) waterInRequired = true;
-    else if (req === false && waterInRequired == null) waterInRequired = false;
-    if (!productNote) productNote = (p.irrigation_notes || facts.irrigationNotes || '').trim() || null;
-    if (!reentry) reentry = (p.reentry_text || p.reentry_summary || facts.reentrySummary || '').trim() || null;
-  }
-  // A REQUIRED water-in is the strongest signal — it wins over a product's generic
-  // irrigation note. Otherwise prefer the product's own label note. irrigation_required
-  // false only means watering-in isn't required (not that watering is prohibited), so
-  // it and the unknown case both fall to the neutral "keep your normal schedule" copy —
-  // we never publish a do-not-water instruction the label doesn't back.
-  let watering;
-  let neutral = false;
-  if (waterInRequired === true) {
-    watering = 'Water in today’s application — give the lawn a normal watering within the next 24 hours to move the product into the soil, unless your technician advised otherwise.';
-  } else if (productNote) {
-    watering = productNote;
-  } else {
-    // Non-label fallback — the report rewrites it to defer to the weekly
-    // plan when one is on the card (see buildLawnReportV2).
-    watering = NEUTRAL_AFTERCARE;
-    neutral = true;
-  }
-  return { watering, reentry, waterInRequired, neutral };
+    const note = (p.irrigation_notes || facts.irrigationNotes || '').trim();
+    const recordedNote = recordedWateringInstruction(note);
+    return {
+      required: req,
+      note,
+      recordedNote,
+      reentry: (p.reentry_text || p.reentry_summary || facts.reentrySummary || '').trim() || null,
+      hasActionableInstruction: isActionableWateringInstruction(recordedNote),
+      hasCompleteWaterInInstruction: isCompleteWaterInInstruction(recordedNote),
+      hasWateringHold: isWateringHoldInstruction(recordedNote),
+    };
+  });
+  const unique = (values) => [...new Set(values.filter(Boolean))];
+  const productNotes = unique(applicationWaterEvidence.map((entry) => entry.note));
+  const displayableProductNotes = unique(applicationWaterEvidence.map((entry) => entry.recordedNote));
+  const reentry = applicationWaterEvidence.map((entry) => entry.reentry).find(Boolean) || null;
+  // true = a product requires watering-in; false = watering-in is not required
+  // for the products seen (not a prohibition); null = no requirement evidence.
+  const waterInRequired = applicationWaterEvidence.some((entry) => entry.required === true)
+    ? true
+    : (applicationWaterEvidence.some((entry) => entry.required === false) ? false : null);
+  // A requirement boolean proves water-in is required, but establishes no
+  // amount or timing. Opposing or incomplete product instructions need review.
+  const wateringHold = applicationWaterEvidence.some((entry) => entry.hasWateringHold);
+  const positiveWaterDirection = applicationWaterEvidence.some(
+    (entry) => entry.hasActionableInstruction && !entry.hasWateringHold,
+  );
+  const opposingDirections = [wateringHold, positiveWaterDirection].every(Boolean);
+  // Distinct positive directions may disagree on timing or amount. Without a
+  // compatibility check they cannot establish a completed watering-in credit.
+  const distinctPositiveDirections = displayableProductNotes.filter(
+    (note) => isActionableWateringInstruction(note) && !isWateringHoldInstruction(note),
+  ).length > 1;
+  const recordedInstructions = displayableProductNotes.join(' ');
+  const preservedRecordedInstructions = recordedInstructions ? `${recordedInstructions} ` : '';
+  const requiredWithoutInstruction = applicationWaterEvidence.some(
+    (entry) => entry.required === true && !entry.note,
+  );
+  const requiredWithIncompleteInstruction = applicationWaterEvidence.some(
+    (entry) => entry.required === true && entry.note && !entry.hasCompleteWaterInInstruction,
+  );
+  const onlyDeferredNotes = [productNotes.length > 0, displayableProductNotes.length === 0].every(Boolean);
+  const incompleteRecordedInstruction = [requiredWithIncompleteInstruction, onlyDeferredNotes].some(Boolean);
+  // Ordered table makes the precedence reviewable: conflicts first, then missing
+  // or incomplete requirements, then a usable instruction, requirement-only,
+  // and finally the neutral fallback.
+  const state = [
+    { when: opposingDirections, watering: `${recordedInstructions} These recorded product directions oppose each other. Confirm the directions with your technician before changing irrigation.`, evidenceSource: 'conflicting_product_instructions', needsReview: true },
+    { when: distinctPositiveDirections, watering: `${recordedInstructions} These recorded product directions differ. Confirm the directions with your technician before changing irrigation.`, evidenceSource: 'conflicting_product_instructions', needsReview: true },
+    { when: requiredWithoutInstruction && productNotes.length > 0, watering: `${preservedRecordedInstructions}A required product watering instruction is missing. Confirm the directions with your technician before changing irrigation.`, evidenceSource: 'incomplete_product_instructions', needsReview: true },
+    { when: incompleteRecordedInstruction, watering: `${preservedRecordedInstructions}A product watering note was recorded, but it does not include a specific amount or timing. Confirm the directions with your technician before changing irrigation.`, evidenceSource: 'incomplete_product_instruction', needsReview: true },
+    { when: productNotes.length > 0, watering: recordedInstructions, evidenceSource: 'product_instruction', needsReview: false },
+    { when: waterInRequired === true, watering: 'Today’s application is recorded as requiring water-in; the exact amount and timing are not recorded in this report. Confirm the directions with your technician before changing irrigation.', evidenceSource: 'irrigation_requirement', needsReview: true },
+    { when: true, watering: NEUTRAL_AFTERCARE, evidenceSource: 'neutral_fallback', needsReview: false, neutral: true },
+  ].find((candidate) => candidate.when);
+  const creditableWaterIn = waterInRequired === true
+    && state.evidenceSource === 'product_instruction'
+    && state.needsReview !== true
+    && wateringHold !== true;
+  return {
+    watering: state.watering,
+    wateringHold,
+    reentry,
+    waterInRequired,
+    creditableWaterIn,
+    neutral: state.neutral === true,
+    evidenceSource: state.evidenceSource,
+    needsReview: state.needsReview,
+  };
 }
-const NEUTRAL_AFTERCARE = 'No special watering is needed because of today’s treatment — keep your normal schedule unless your technician advised otherwise.';
-const NEUTRAL_AFTERCARE_WITH_PLAN = 'No special watering is needed because of today’s treatment — follow this week’s watering plan.';
+const NEUTRAL_AFTERCARE = 'No product-specific watering instruction was recorded for this report.';
+const NEUTRAL_AFTERCARE_WITH_PLAN = 'No product-specific watering instruction was recorded for this report. Follow this week’s approved watering plan.';
 
 // Short topic phrase for the headline, from the top issue card's category.
 const ISSUE_TOPIC = {
@@ -595,7 +681,8 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
     grassLabel,
     customerConcern,
     treatmentKinds: treatment ? treatment.kinds : [],
-    waterInRequired: aftercare.waterInRequired === true,
+    waterInRequired: aftercare.creditableWaterIn === true,
+    aftercare,
   });
 
   // Field photos for the horizontal strip (best photo first), plus ONE consolidated
@@ -683,26 +770,16 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
       { label: beforeAfter.after.label, url: beforeAfter.after.url, score: beforeAfter.after.score },
     ]
     : null;
-  // Reconcile watering-in with the water story: when the weekly total is already
-  // above target the report tells the customer to EASE BACK on irrigation, and a
-  // bare "give the lawn a normal watering" instruction two cards later reads like a
-  // contradiction. Name the exception explicitly so both instructions survive.
   // Neutral (non-label) aftercare never tells a customer to "keep your normal
   // schedule" under a plan — a hold plan may be lower than, or the order may
   // forbid, that schedule (codex #3565 gh-r28). Label instructions stay.
   if (aftercare.neutral && water && water.weekPlan && water.weekPlan.title) {
     aftercare.watering = NEUTRAL_AFTERCARE_WITH_PLAN;
   }
-  // SURPLUS only: an overwatering photo signal can coexist with a deficit weekly
-  // balance, where the insight says to ADD water — "return to the reduced
-  // schedule" would reintroduce the contradiction (codex P1 #3038).
-  if (aftercare.waterInRequired === true && effectiveWaterStatus === 'surplus') {
-    // Beside a plan the wording stays action-neutral — a hot week's RUN plan
-    // can follow a historical surplus, and "exception to easing back" would
-    // contradict the card (codex gh-r47).
-    aftercare.watering += (water && water.weekPlan && water.weekPlan.title)
-      ? ' This one watering-in is required by today’s application — after it, follow this week’s watering plan.'
-      : ' This one watering-in is the exception to easing back on irrigation — after it, return to the reduced schedule.';
+  if (aftercare.creditableWaterIn === true
+    && effectiveWaterStatus === 'surplus'
+    && water && water.weekPlan && water.weekPlan.title) {
+    aftercare.watering += ' After completing that product-specific instruction, follow this week’s approved watering plan.';
   }
 
   const trends = buildTrends(lawnAssessment, mowingHeight, waterGapHistory, mowingTrendFallback);
