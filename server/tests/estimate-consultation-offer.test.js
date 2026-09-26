@@ -108,6 +108,7 @@ function freshOpenEstimate(overrides = {}) {
     expires_at: null,
     estimate_data: JSON.stringify({}),
     estimate_group_id: null,
+    address: '123 Palm St, Bradenton, FL 34205',
     customer_id: null,
     customer_phone: '(941) 555-1234',
     customer_email: null,
@@ -354,6 +355,11 @@ describe('buildEstimateConsultationOffer — post-probe estimate freshness', () 
 
   test('the estimate becomes grouped during the probe → null', async () => {
     mockBuilders.estimates = chainBuilder({ firstRow: freshOpenEstimate({ estimate_group_id: 'grp-mid-probe' }) });
+    expect(await buildEstimateConsultationOffer(baseArgs())).toBeNull();
+  });
+
+  test('the estimate address changes to a different property during the probe → null', async () => {
+    mockBuilders.estimates = chainBuilder({ firstRow: freshOpenEstimate({ address: '9 Other Rd, Bradenton, FL 34205' }) });
     expect(await buildEstimateConsultationOffer(baseArgs())).toBeNull();
   });
 

@@ -142,7 +142,7 @@ async function estimateConsultationLead({ estimate, estimateData, acceptActive }
   // gone-quiet follow-up) — both consultation surfaces share this helper
   // and never re-derive eligibility themselves. No further await runs
   // between this check and the mint/send that follows in either caller.
-  return finalEligibility(estimate.id, leadId);
+  return finalEligibility(estimate.id, leadId, result.address);
 }
 
 // The final, post-probe eligibility re-check — a fresh read of the
@@ -150,7 +150,7 @@ async function estimateConsultationLead({ estimate, estimateData, acceptActive }
 // estimateConsultationLead applies above. Kept single-sourced so a rule
 // added to either check never drifts between the pre-probe and post-probe
 // passes.
-async function finalEligibility(estimateId, leadId) {
+async function finalEligibility(estimateId, leadId, probedAddress) {
   const { isEstimateAcceptActive } = require('../routes/estimate-public');
   const freshEstimate = await db('estimates').where({ id: estimateId }).first();
   if (!freshEstimate || !isEstimateAcceptActive(freshEstimate)) return null;
@@ -159,6 +159,9 @@ async function finalEligibility(estimateId, leadId) {
     try { freshEstimateData = JSON.parse(freshEstimateData); } catch { freshEstimateData = null; }
   }
   if (freshEstimateData?.scheduled_service_id || freshEstimate.estimate_group_id) return null;
+  // The estimate's address can change during the probe too; the slot the
+  // probe found must still be at the estimate's own property.
+  if (!sameProperty(freshEstimate.address, probedAddress)) return null;
 
   const freshLead = await db('leads').where({ id: leadId }).whereNull('deleted_at')
     .first('id', 'phone', 'email', 'service_interest', 'status', 'converted_at', 'customer_id');
