@@ -5775,7 +5775,10 @@ async function ringTermiteAnnualDeclineBell(result, customerId, conn) {
         bell: true,
         dedupeKey: `termite-annual-renewal-decline:${result.termId}`,
         metadata: { customerId, termId: result.termId, termEnd: result.termEnd, source: 'customer_portal' },
-        trx: conn,
+        // Only a real caller transaction rides along: on the root pool
+        // notifyAdmin must open its own, so its dedupe advisory lock spans
+        // the lookup + insert (concurrent retries can't double-bell).
+        ...(conn === db ? {} : { trx: conn }),
       },
     );
   } catch (bellErr) {
@@ -5793,7 +5796,9 @@ async function declineTermiteAnnualRenewal({ customerId, termId = null, today = 
     const term = await trx('annual_prepay_terms')
       .where({ customer_id: customerId })
       .whereNotNull('annual_plan_version')
-      .modify((q) => { if (termId) q.where({ id: termId }); })
+      // No explicit term: the CURRENT term (earliest one not yet ended),
+      // never a historical row — the same filter the portal GET uses.
+      .modify((q) => { if (termId) q.where({ id: termId }); else q.where('term_end', '>=', today); })
       .orderBy('term_end', 'asc')
       .forUpdate()
       .first('*');

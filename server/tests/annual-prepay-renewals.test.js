@@ -2342,6 +2342,12 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
       expect.any(String),
       expect.objectContaining({ bell: true, dedupeKey: 'termite-annual-renewal-decline:term-1' }),
     );
+    // Root pool → notifyAdmin opens its own transaction (its dedupe lock
+    // must span lookup + insert), so no trx is passed through.
+    expect(NotificationService.notifyAdmin.mock.calls[0][3]).not.toHaveProperty('trx');
+    // No explicit termId → only the CURRENT term is eligible, never a
+    // historical one that ended before today.
+    expect(termSelectQuery.where).toHaveBeenCalledWith('term_end', '>=', '2026-09-26');
   });
 
   test('is idempotent — a repeat call on an already-declined term returns the same result and writes nothing new', async () => {
