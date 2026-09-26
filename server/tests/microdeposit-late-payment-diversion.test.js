@@ -348,6 +348,7 @@ describe('late-payment micro-deposit diversion', () => {
   test.each([
     ['missing address', { ok: false, skipped: true, reason: 'missing_email' }],
     ['unavailable template', { ok: false, skipped: true, reason: 'template_unavailable' }],
+    ['email opt-out', { ok: false, skipped: true, reason: 'email_disabled' }],
   ])('resolves a verification Email with %s and advances Text from day 14 to day 30 once', async (_label, refusal) => {
     StripeService.isInvoiceAwaitingMicrodepositVerification.mockResolvedValue(true);
     ContactLedger.recordContact.mockImplementation(async ({ idempotencyKey }) => ({

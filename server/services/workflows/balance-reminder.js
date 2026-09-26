@@ -513,6 +513,9 @@ class BalanceReminder {
         prefs = null;
       }
     }
+    if (prefs?.email_enabled === false) {
+      return { ok: false, skipped: true, reason: 'email_disabled' };
+    }
     if (billingChannelAllowed(prefs || {}, 'billing', 'email') === false) {
       return { ok: false, skipped: true, reason: 'billing_email_not_selected' };
     }
@@ -540,6 +543,7 @@ class BalanceReminder {
     const triggerEventId = `late_payment:${latestInvoice.id}:${config.stageDays}`;
     const idempotencyKey = `late_payment_email:${latestInvoice.id}:${config.stageDays}`;
     let providerHandoffStarted = false;
+    let emailDisabledAtHandoff = false;
     try {
       const result = await EmailTemplateLibrary.sendTemplate({
         templateKey: config.templateKey,
@@ -562,6 +566,10 @@ class BalanceReminder {
           const verdict = await require("../invoice-helpers").selfPayAtDispatch(invoice.id, db)();
           if (verdict.ok !== true) return verdict;
           const freshPrefs = await db('notification_prefs').where({ customer_id: customer.id }).first();
+          if (freshPrefs?.email_enabled === false) {
+            emailDisabledAtHandoff = true;
+            return { ok: false };
+          }
           if (billingChannelAllowed(freshPrefs || {}, 'billing', 'email') === false) return { ok: false };
           const freshCustomer = await db('customers').where({ id: customer.id }).first();
           const [freshRecipient] = getInvoiceEmailRecipients(freshCustomer, freshPrefs || {})
@@ -572,6 +580,10 @@ class BalanceReminder {
           return { ok: true };
         },
       });
+
+      if (emailDisabledAtHandoff && !result.sent) {
+        return { ok: false, skipped: true, reason: 'email_disabled' };
+      }
 
       if (result.deduped) {
         return {

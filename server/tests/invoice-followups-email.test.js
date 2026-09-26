@@ -220,6 +220,77 @@ describe('invoice follow-up email sidecar', () => {
     }));
   });
 
+  test.each([
+    ['enabled', { email_enabled: true }, {}, true],
+    ['missing row', undefined, {}, true],
+    ['missing flag', {}, {}, true],
+    ['disabled legacy', { email_enabled: false }, {}, false],
+    ['disabled selected Email and Text', { email_enabled: false, invoice_channels: ['email', 'sms'] }, {}, false],
+    ['disabled Email only', { email_enabled: false, invoice_channels: ['email'] }, { noSms: true }, false],
+    ['operator-initiated', { email_enabled: false, invoice_channels: ['sms'] }, { operator: true }, true],
+    ['initial email prefs read failure', {}, { readFailure: true }, true],
+    ['opt-out at handoff', { email_enabled: true, invoice_channels: ['email', 'sms'] }, { handoffOptOut: true }, false],
+  ])('%s preserves email opt-out, SMS delivery, and sequence progress', async (_label, prefs, options, emailSent) => {
+    const interaction = chain();
+    const sequenceUpdate = chain();
+    const emailPrefs = chain({ first: prefs });
+    if (options.readFailure) emailPrefs.first.mockRejectedValueOnce(new Error('prefs unavailable'));
+    const sequence = followupRow();
+    setDbQueues({
+      'invoice_followup_sequences as s': [chain({ result: [sequence], first: sequence })],
+      customers: [chain({ first: customer() })],
+      invoices: Array.from({ length: options.operator ? 6 : 5 }, () => chain({ first: invoice() })),
+      notification_prefs: [
+        ...(!options.operator ? [chain({ first: prefs })] : []),
+        emailPrefs,
+        ...(options.handoffOptOut ? [chain({ first: { ...prefs, email_enabled: false } })] : []),
+      ],
+      customer_interactions: emailSent ? [chain(), interaction] : [interaction],
+      invoice_followup_sequences: [
+        ...(options.operator ? [chain({ first: sequence }), chain()] : []),
+        chain({ first: sequence }), chain({ result: 1 }), sequenceUpdate, chain({ result: 1 }),
+      ],
+    });
+    const dispatch = jest.fn();
+    const invoiceHelpers = require('../services/invoice-helpers');
+    const ownership = jest.spyOn(invoiceHelpers, 'selfPayAtDispatch').mockReturnValue(async () => ({ ok: true }));
+    if (options.handoffOptOut || options.operator) {
+      EmailTemplates.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) => {
+        const verdict = await withProviderHandoff(dispatch);
+        return verdict.ok ? { sent: true } : { sent: false, aborted: true, reason: 'aborted_before_dispatch' };
+      });
+    }
+    try {
+      if (options.operator) await InvoiceFollowUps.sendNextTouchNow('inv-1', { operatorInitiated: true });
+      else await InvoiceFollowUps.runPending();
+    } finally {
+      ownership.mockRestore();
+    }
+
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledTimes(emailSent || options.handoffOptOut ? 1 : 0);
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(options.noSms ? 0 : 1);
+    if (options.handoffOptOut) expect(dispatch).not.toHaveBeenCalled();
+    if (options.operator) expect(dispatch).toHaveBeenCalledTimes(1);
+    if (options.noSms) {
+      expect(sequenceUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'paused' }));
+      expect(sequenceUpdate.update.mock.calls[0][0]).not.toHaveProperty('step_index');
+      expect(interaction.insert).not.toHaveBeenCalled();
+    } else {
+      expect(sequenceUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ step_index: 1 }));
+      expect(JSON.parse(interaction.insert.mock.calls[0][0].metadata)).toMatchObject({
+        email_sent: emailSent, sms_sent: true, ...(!emailSent ? { email_reason: 'email_disabled' } : {}),
+      });
+    }
+    if (!emailSent) {
+      expect(require('../services/collections/contact-ledger').markSendFailed).toHaveBeenCalledWith(
+        expect.anything(), expect.objectContaining({
+          reason: 'email_disabled',
+          ...(prefs.invoice_channels ? { resolved: true, resolution: 'email_terminal_refusal' } : {}),
+        }),
+      );
+    }
+  });
+
   test('skips a touch whose sequence was postponed between the batch select and the claim', async () => {
     // A delivered-invoice due-date edit (rescheduleForInvoiceEdit) can move
     // next_touch_at into the future after runPending materialized its batch —

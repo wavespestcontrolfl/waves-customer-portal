@@ -17,10 +17,13 @@ const invoiceHelpers = require('../services/invoice-helpers');
 const { getInvoiceEmailRecipients } = require('../services/customer-contact');
 const { sendMicrodepositVerificationEmail } = require('../services/microdeposit-verification-email');
 
-function prefsChain() {
+function prefsChain(value, error = null) {
   const q = {};
   q.where = jest.fn(() => q);
-  q.first = jest.fn(async () => ({}));
+  q.first = jest.fn(async () => {
+    if (error) throw error;
+    return value;
+  });
   q.catch = (cb) => Promise.resolve({}).catch(cb);
   return q;
 }
@@ -32,7 +35,7 @@ describe('sendMicrodepositVerificationEmail', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     db.mockImplementation((table) => {
-      if (table === 'notification_prefs') return prefsChain();
+      if (table === 'notification_prefs') return prefsChain({});
       throw new Error(`Unexpected db table ${table}`);
     });
   });
@@ -62,6 +65,75 @@ describe('sendMicrodepositVerificationEmail', () => {
 
     expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
     expect(result).toMatchObject({ ok: false, skipped: true, reason: 'missing_email' });
+  });
+
+  test('preference-enforced send skips when Email Messages is disabled', async () => {
+    db.mockImplementation((table) => {
+      if (table === 'notification_prefs') return prefsChain({ email_enabled: false });
+      throw new Error(`Unexpected db table ${table}`);
+    });
+
+    const result = await sendMicrodepositVerificationEmail({
+      invoice, customer, touchKey: '14d', enforceBillingPreference: true,
+    });
+
+    expect(result).toEqual({ ok: false, skipped: true, reason: 'email_disabled' });
+    expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['enabled preference', { email_enabled: true }, null],
+    ['missing preference row', undefined, null],
+    ['failed initial preference read', undefined, new Error('preferences unavailable')],
+  ])('preference-enforced send proceeds with %s', async (_label, prefs, error) => {
+    db.mockImplementation((table) => {
+      if (table === 'notification_prefs') return prefsChain(prefs, error);
+      throw new Error(`Unexpected db table ${table}`);
+    });
+
+    const result = await sendMicrodepositVerificationEmail({
+      invoice, customer, touchKey: '14d', enforceBillingPreference: true,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(1);
+  });
+
+  test('unenforced send proceeds when Email Messages is disabled', async () => {
+    db.mockImplementation((table) => {
+      if (table === 'notification_prefs') return prefsChain({ email_enabled: false });
+      throw new Error(`Unexpected db table ${table}`);
+    });
+
+    const result = await sendMicrodepositVerificationEmail({
+      invoice, customer, touchKey: '14d', enforceBillingPreference: false,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(1);
+  });
+
+  test('fresh Email Messages opt-out refuses provider dispatch', async () => {
+    const prefs = [{ email_enabled: true }, { email_enabled: false }];
+    db.mockImplementation((table) => {
+      if (table === 'notification_prefs') return prefsChain(prefs.shift());
+      throw new Error(`Unexpected db table ${table}`);
+    });
+    jest.spyOn(invoiceHelpers, 'selfPayAtDispatch').mockReturnValue(async () => ({ ok: true }));
+    const dispatch = jest.fn();
+    let handoffResult;
+    EmailTemplateLibrary.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) => {
+      handoffResult = await withProviderHandoff(dispatch);
+      return { sent: false, aborted: true, reason: 'aborted_before_dispatch' };
+    });
+
+    const result = await sendMicrodepositVerificationEmail({
+      invoice, customer, touchKey: '14d', enforceBillingPreference: true,
+    });
+
+    expect(handoffResult).toEqual({ ok: false });
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ ok: false, skipped: true, reason: 'email_disabled' });
   });
 
   test('returns ok:false (never throws) when the email send errors', async () => {

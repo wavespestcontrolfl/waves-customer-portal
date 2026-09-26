@@ -124,7 +124,7 @@ async function currentStepLedgerIds(row, step, channels) {
 function terminalFollowupEmailRefusal(result) {
   return result?.ok === false && result.retryable !== true && result.deferred !== true
     && result.deliveryOutcome !== 'uncertain' && (
-      ['billing_email_not_selected', 'missing_email', 'template_unavailable'].includes(result.reason)
+      ['billing_email_not_selected', 'email_disabled', 'missing_email', 'template_unavailable'].includes(result.reason)
       || (result.blocked === true && /^Suppressed: /.test(result.reason || ''))
     );
 }
@@ -227,6 +227,9 @@ async function sendFollowupEmail({ row, customer, step, ctx, enforceBillingPrefe
       logger.warn(`[invoice-followups] notification_prefs lookup failed for ${customer.id}: ${err.message}`);
       return null;
     });
+  if (enforceBillingPreference && prefs?.email_enabled === false) {
+    return { ok: false, skipped: true, reason: 'email_disabled' };
+  }
   if (enforceBillingPreference && billingChannelAllowed(prefs || {}, 'invoice', 'email') === false) {
     return { ok: false, skipped: true, reason: 'billing_email_not_selected' };
   }
@@ -247,6 +250,7 @@ async function sendFollowupEmail({ row, customer, step, ctx, enforceBillingPrefe
   };
 
   let providerHandoffStarted = false;
+  let emailDisabledAtHandoff = false;
   try {
     const result = await EmailTemplateLibrary.sendTemplate({
       templateKey,
@@ -267,6 +271,10 @@ async function sendFollowupEmail({ row, customer, step, ctx, enforceBillingPrefe
         if (verdict.ok !== true) return verdict;
         if (enforceBillingPreference) {
           const freshPrefs = await db('notification_prefs').where({ customer_id: customer.id }).first();
+          if (freshPrefs?.email_enabled === false) {
+            emailDisabledAtHandoff = true;
+            return { ok: false };
+          }
           if (billingChannelAllowed(freshPrefs || {}, 'invoice', 'email') === false) return { ok: false };
         }
         providerHandoffStarted = true;
@@ -274,6 +282,10 @@ async function sendFollowupEmail({ row, customer, step, ctx, enforceBillingPrefe
         return { ok: true };
       },
     });
+
+    if (emailDisabledAtHandoff && !result.sent) {
+      return { ok: false, skipped: true, reason: 'email_disabled' };
+    }
 
     if (result.deduped) {
       return {

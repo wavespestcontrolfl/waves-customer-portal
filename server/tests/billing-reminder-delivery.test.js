@@ -118,9 +118,11 @@ describe('billing reminder per-channel delivery progress', () => {
       .toMatchObject({ send_failed: false, delivered: true });
   });
 
-  test('a terminal Email refusal resolves its leg without claiming delivery', async () => {
+  test.each([
+    'missing_email', 'billing_email_not_selected', 'email_disabled',
+  ])('terminal Email refusal %s resolves its leg without claiming delivery', async (reason) => {
     const send = jest.fn(async (channel) => (channel === 'email'
-      ? { ok: false, skipped: true, reason: 'missing_email', deliveryOutcome: 'not_sent' }
+      ? { ok: false, skipped: true, reason, deliveryOutcome: 'not_sent' }
       : { sent: true, deliveryOutcome: 'accepted', auditLogId: 'audit-sms' }));
 
     await expect(deliver(['email', 'sms'], send)).resolves.toMatchObject({ complete: true, deliveredNow: ['sms'] });

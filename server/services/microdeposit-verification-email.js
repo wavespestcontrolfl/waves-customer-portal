@@ -40,6 +40,9 @@ async function sendMicrodepositVerificationEmail({ invoice, customer, touchKey, 
       logger.warn(`[microdeposit-email] notification_prefs lookup failed for ${customer.id}: ${err.message}`);
       return null;
     });
+  if (enforceBillingPreference && prefs?.email_enabled === false) {
+    return { ok: false, skipped: true, reason: 'email_disabled' };
+  }
   if (enforceBillingPreference && billingChannelAllowed(prefs || {}, 'payment_issue', 'email') === false) {
     return { ok: false, skipped: true, reason: 'billing_email_not_selected' };
   }
@@ -49,6 +52,7 @@ async function sendMicrodepositVerificationEmail({ invoice, customer, touchKey, 
   const amountDue = invoiceAmountDue(invoice);
   const touch = String(touchKey || 'default');
   let providerHandoffStarted = false;
+  let emailDisabledAtHandoff = false;
   try {
     const result = await EmailTemplateLibrary.sendTemplate({
       templateKey: 'payment.microdeposit_verification',
@@ -70,6 +74,10 @@ async function sendMicrodepositVerificationEmail({ invoice, customer, touchKey, 
           const ownership = await require('./invoice-helpers').selfPayAtDispatch(invoice.id, db)();
           if (ownership.ok !== true) return ownership;
           const freshPrefs = await db('notification_prefs').where({ customer_id: customer.id }).first();
+          if (freshPrefs?.email_enabled === false) {
+            emailDisabledAtHandoff = true;
+            return { ok: false };
+          }
           if (billingChannelAllowed(freshPrefs || {}, 'payment_issue', 'email') === false) return { ok: false };
           providerHandoffStarted = true;
           await dispatch();
@@ -77,6 +85,10 @@ async function sendMicrodepositVerificationEmail({ invoice, customer, touchKey, 
         },
       } : {}),
     });
+    if (emailDisabledAtHandoff && !result.sent) {
+      return { ok: false, skipped: true, reason: 'email_disabled' };
+    }
+
     return {
       ok: !!result.sent,
       blocked: !!result.blocked,
