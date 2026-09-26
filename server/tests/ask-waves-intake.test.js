@@ -265,6 +265,8 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ['Your children should be all right.', ''],
     ['Your dog is going to be fine.', ''],
     ['This treatment is friendly to pets and children.', ''],
+    ['The treatment leaves pets unharmed.', ''],
+    ['Our spray keeps your kids safe.', ''],
     ['Sus mascotas van a estar bien.', ''],
     ['Tu perro va a estar bien.', ''],
     ['This treatment is benign for pets.', ''],
@@ -972,6 +974,8 @@ describe('normalizeIntakeResult', () => {
     ['You may re-enter once your technician confirms the product is dry.', ''],
     ['We will return in two weeks for the follow-up.', ''],
     ['We place dry bait in 2 stations.', 'How do you treat for roaches?'],
+    ['You may still see roaches for 7 days after treatment.', 'How fast does the treatment work?'],
+    ['Flea eggs can keep hatching for two weeks after treatment.', 'How fast does the flea treatment work?'],
     ['They can deliver a painful bite.', 'Are black widows dangerous?'],
     ['Yes.', 'Are wasps dangerous?'],
     ['No.', 'Are chinch bugs harmful to this lawn?'],
@@ -1983,6 +1987,9 @@ describe('looksLikeEmergency', () => {
     'My dog licked residue from the pesticide',
     'Mi hijo tiene convulsiones después del pesticida',
     'Mi hijo está convulsionando después del tratamiento',
+    'My child may have gotten poisoned',
+    'Mi hijo pudo haber sido envenenado',
+    'My child was stung\nNow she is swelling',
     "I'm at the hospital",
     'We are on our way to the hospital now',
     'My husband is on his way to the hospital',
@@ -2067,6 +2074,7 @@ describe('looksLikeEmergency', () => {
     'My child ate dinner after the lawn treatment',
     'My dog ate dinner next to the bait station',
     "Pesticide didn't get in my eyes",
+    'Do ants bite?\nMy child has a question about the lawn',
   ])('does not flag routine pest talk: %s', (text) => {
     expect(looksLikeEmergency(text)).toBe(false);
   });
