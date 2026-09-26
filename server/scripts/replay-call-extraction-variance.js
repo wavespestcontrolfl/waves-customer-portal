@@ -1261,9 +1261,10 @@ async function replayCall(call, context) {
   // same env gate, the caller ANI, and whether the linked customer has a
   // verified on-file address (codex round-21 P2). Read-only; a lookup failure
   // degrades to no context, which is the pre-existing (stricter) behavior.
-  // Production's own builder, not an approximation: fail-open is inbound-only
-  // and the on-file lane is limited to actively-served pipeline stages, so a
-  // local "has an address" test over-granted it (local pre-push audit P1).
+  // Production's own builder, not an approximation: fail-open works the same
+  // for both call directions (owner directive 2026-09-26) and the on-file
+  // lane is limited to actively-served pipeline stages, so a local "has an
+  // address" test over-granted it (local pre-push audit P1).
   const linkedCustomer = call.customer_id
     ? await db('customers').where({ id: call.customer_id })
       .first('id', 'pipeline_stage', 'address_line1', 'address_line2', 'city', 'state', 'zip')

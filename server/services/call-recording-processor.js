@@ -1404,9 +1404,16 @@ function buildFailOpenRoutingContext({
   return {
     knownCaller,
     options: {
-      // Fail-open is INBOUND-only: an outbound callback is our own dial, not
-      // a customer volunteering their identity by calling the office.
-      failOpen: !!failOpenEnabled && !isOutboundCall(call),
+      // Fail-open works the same for both call directions (owner directive
+      // 2026-09-26): a confirmed booking isn't held on recoverable contact
+      // flags whether the office dialed out or the customer dialed in. The
+      // guards that keep it safe are unchanged — CONFIRMED bookings only, a
+      // new spoken address still needs Google Address Validation, and hard
+      // blocks (out_of_service_area, do_not_contact, spam, unauthorized
+      // caller with no commitment) still hold. `contactPhone` is resolved by
+      // resolveCallContactPhone before this is called, so on an outbound
+      // call it is already the dialed customer number, never our own line.
+      failOpen: !!failOpenEnabled,
       callerAni: contactPhone,
       knownCustomer: failOpenKnownCustomer(knownCaller),
     },
@@ -8641,13 +8648,16 @@ const CallRecordingProcessor = {
 
     // Owner rule: recurring interest beats the single presenting pest — a
     // deterministic backstop on top of the same instruction in the prompt.
-    // INBOUND ONLY (all three call sites): diarization label assignment is
-    // inconsistent on outbound calls — observed live 2026-07-11, the Copeman
-    // outbound call labeled the WAVES AGENT as "Caller:" — so the caller-text
-    // scan could read the agent's own plan pitch as customer intent. The
-    // prompt-driven model, which sees the whole conversation, still applies
-    // the rule on outbound calls.
-    if (!isOutboundCall(call)) extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames);
+    // Direction-independent (owner directive 2026-09-26, all four call
+    // sites): this used to run inbound-only because diarization label
+    // assignment was observed inconsistent on outbound calls (2026-07-11,
+    // the Copeman call labeled the WAVES AGENT as "Caller:"), which could
+    // read the agent's own plan pitch as customer intent on the caller-text
+    // scan. The owner weighed that residual mislabel risk against every
+    // agent rule applying the same way on both directions and chose parity;
+    // the prompt-driven model (which sees the whole conversation either way)
+    // remains the primary signal regardless.
+    extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames);
 
     // ── Shadow v2 extraction (records alongside v1, no side effects) ──
     let v2Result = null;
@@ -8795,7 +8805,7 @@ const CallRecordingProcessor = {
         // fields (a stub call had nothing to upgrade). Re-assert it over the
         // adopted service labels BEFORE any lead write consumes them, exactly
         // like the enforce path's approved-booking re-assert (codex P2).
-        if (!isOutboundCall(call)) extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames);
+        extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames);
       }
     }
 
@@ -8872,7 +8882,7 @@ const CallRecordingProcessor = {
       // promotion — a "wasp nest, and I'd like the quarterly package"
       // voicemail was still is_lead=false then. Re-run it now that the
       // deterministic signals made this a lead (idempotent, no-op otherwise).
-      if (!isOutboundCall(call)) extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames);
+      extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames);
     }
 
     // Skip spam and non-workable voicemail
@@ -9521,7 +9531,12 @@ const CallRecordingProcessor = {
           // isn't held over recoverable contact-field flags — the ANI satisfies
           // caller_phone_missing, an existing customer's on-file address clears
           // address flags, a garbled email (name_email_mismatch) is advisory.
-          const failOpenBooking = isEnabled('callFailOpenBooking') && !isOutboundCall(call);
+          // Direction-independent (owner directive 2026-09-26): the same
+          // recoverable flags hold an outbound confirmed booking exactly as
+          // long as they hold an inbound one — `contactPhone`/`callerAni`
+          // below is already the dialed customer number on an outbound call
+          // (resolveCallContactPhone), never our own line.
+          const failOpenBooking = isEnabled('callFailOpenBooking');
           // A new lead's on-file address is validated HERE, once, and only
           // when this call does not state its own (codex #4685 r2 P2).
           knownCaller = await trustValidatedNewLeadAddress(knownCaller, { extraction: v2Extraction, failOpen: failOpenBooking });
@@ -9533,7 +9548,10 @@ const CallRecordingProcessor = {
             // does, and the unit ask the same way the merge point does.
             canonicalRecord: extracted,
             failOpen: failOpenBooking, callerAni: contactPhone, knownCustomer: knownCustomerForFailOpen,
-            agentCommitFailOpen: isEnabled('callAgentCommitBooking') && !isOutboundCall(call),
+            // Agent-commitment authorization is direction-independent too
+            // (owner directive 2026-09-26): a spoken agreement on an outbound
+            // call authorizes the booking the same way it does inbound.
+            agentCommitFailOpen: isEnabled('callAgentCommitBooking'),
             // Grounds the agent-commitment evidence quote against the labeled
             // source transcript — evidence objects are untrusted model output.
             transcript: transcription,
@@ -14195,10 +14213,12 @@ const CallRecordingProcessor = {
         // 2026-09-03 after a tenant's roach-treatment lead at a 358-unit
         // complex sat on a bare street address). Never sends: the draft
         // row is the terminal artifact; the send runs through the full
-        // consent pipeline at approval. Same eligibility posture as the
-        // dropped-call text: inbound, not spam/voicemail, no
-        // do-not-contact, the inbound ANI only (implied consent is
-        // personal to it — a dictated callback number never receives it).
+        // consent pipeline at approval. Direction-independent (owner
+        // directive 2026-09-26): not spam/voicemail, no do-not-contact,
+        // either direction now — the target number is the customer's own
+        // number either way (the inbound ANI, or the dialed `to_phone` on
+        // an outbound call — never a dictated callback number, which is
+        // never personal enough to receive an unconfirmed clarifying ask).
         // A DROPPED call stays on its own one-shot text above — parking a
         // second address question for the same run would let the owner
         // send the same ask twice (codex r1 P1). The street judgment reads
@@ -14209,11 +14229,14 @@ const CallRecordingProcessor = {
         // Both DNC shapes gate it — the V2 consent object AND the legacy
         // flat extractor field (V2 off / unavailable / schema-failed still
         // sets the flat one) (codex r5 P1).
-        if (leadId && !droppedMidIntake && !extracted.is_spam && !extracted.is_voicemail && !isOutboundCall(call)
+        if (leadId && !droppedMidIntake && !extracted.is_spam && !extracted.is_voicemail
           && v2Result?.extraction?.consent?.do_not_contact_request !== true
           && extracted.do_not_contact_request !== true) {
           try {
-            const clarifyAni = firstExternalPhone(call.from_phone);
+            // The customer's own number either way — the inbound ANI, or
+            // the dialed number on an outbound call (never call.from_phone,
+            // which on outbound is one of our own lines).
+            const clarifyAni = firstExternalPhone(isOutboundCall(call) ? call.to_phone : call.from_phone);
             const hasStreet = !!String(extracted.address_line1 || '').trim();
             // The ACTIVE missing_unit_number card is the source of truth for
             // the unit ask (codex post-trim r2 P1 ×2): on a reprocess the
@@ -14673,7 +14696,7 @@ const CallRecordingProcessor = {
       // the merged fields; no-op when nothing singular survived.
       const preReassertMatched = extracted.matched_service;
       const preReassertSpecific = extracted.specific_service_name;
-      if (!isOutboundCall(call)) extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames);
+      extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames);
       if (extracted.matched_service !== preReassertMatched
         || extracted.specific_service_name !== preReassertSpecific) {
         // ai_extraction and the lead's service_interest were persisted BEFORE
@@ -14784,15 +14807,19 @@ const CallRecordingProcessor = {
     // only resolved to the legacy generic "Waves Appointment" placeholder
     // (ok:true but not a real catalog row, e.g. "come out Tuesday" with no
     // service named), and fail-open is active, fall back to "Waves Assessment"
-    // (assess on-site) — a real catalog row, not an invented label. Gated so it
-    // NEVER fires on a hard veto (unsupported/out-of-scope call, admin-only),
-    // which returns ok:false WITHOUT noMatch and must stay un-bookable, and
-    // never overrides a service that DID resolve to a real specific service.
+    // (assess on-site) — a real catalog row, not an invented label.
+    // Direction-independent (owner directive 2026-09-26): an outbound
+    // "service unclear" call with a confirmed time resolves the same
+    // "Waves Assessment" fallback an inbound one would — it's a real
+    // catalog row, not a generic placeholder. Gated so it NEVER fires on a hard veto
+    // (unsupported/out-of-scope call, admin-only), which returns ok:false
+    // WITHOUT noMatch and must stay un-bookable, and never overrides a
+    // service that DID resolve to a real specific service.
     const resolvedGenericOnly = serviceResolution.ok
       && serviceResolution.service === GENERIC_CALL_APPOINTMENT_SERVICE;
     let genericBookingUnbookable = false;
     if (!callBookingCatalogRow && (serviceResolution.noMatch === true || resolvedGenericOnly)
-        && isEnabled('callFailOpenBooking') && !isOutboundCall(call)) {
+        && isEnabled('callFailOpenBooking')) {
       const wavesAssessment = bookableCallServices.find((s) => /^waves assessment$/i.test(String(s.name || '')));
       if (wavesAssessment) {
         callBookingCatalogRow = wavesAssessment;
@@ -14823,9 +14850,12 @@ const CallRecordingProcessor = {
     // booking on an OUTBOUND call creates the appointment live, same as an
     // inbound one (owner directive 2026-08-11 — the office-review hold was
     // removed). It requires a REAL resolved service (a catalog row, or ok on a
-    // non-generic service): the Waves-Assessment generic fallback is
-    // inbound-only (see above), so an unclear/generic outbound call stays
-    // unbooked for the office. It ALSO requires V2 routing to actually run in
+    // non-generic service): the Waves-Assessment generic fallback above now
+    // runs the same for both directions (owner directive 2026-09-26), so an
+    // outbound call whose service was unclear still books the Waves
+    // Assessment catalog row instead of staying unbooked — outboundCanCreate
+    // below already counts that fallback row as a real service, exactly like
+    // inboundCanCreate does. It ALSO requires V2 routing to actually run in
     // ENFORCE mode: outside enforce the confidence / address-validation /
     // HOA-commercial gates never evaluate and v2RoutingBlocked stays false,
     // so a call those gates would have vetoed books live — containment the
@@ -18639,16 +18669,19 @@ const CallRecordingProcessor = {
           canonicalRecord: extracted,
         });
         finalFlags = mergeTriageFlags(modelFlags, deterministicFlags);
-        knownCaller = await trustValidatedNewLeadAddress(knownCaller, { extraction: v2ExtractionForAudit, failOpen: isEnabled('callFailOpenBooking') && !isOutboundCall(call) });
+        // Direction-independent, mirroring the enforce path (owner directive
+        // 2026-09-26) — `contactPhone` here is already the dialed customer
+        // number on an outbound call, never our own line.
+        knownCaller = await trustValidatedNewLeadAddress(knownCaller, { extraction: v2ExtractionForAudit, failOpen: isEnabled('callFailOpenBooking') });
         routingResult = canAutoRoute(v2ExtractionForAudit, {
           contactPhone,
           addressValidation: v2AddressValidation,
           canonicalRecord: extracted,
           // Keep the audit/shadow decision consistent with the enforce path.
-          failOpen: isEnabled('callFailOpenBooking') && !isOutboundCall(call),
+          failOpen: isEnabled('callFailOpenBooking'),
           callerAni: contactPhone,
           knownCustomer: failOpenKnownCustomer(knownCaller),
-          agentCommitFailOpen: isEnabled('callAgentCommitBooking') && !isOutboundCall(call),
+          agentCommitFailOpen: isEnabled('callAgentCommitBooking'),
           transcript: transcription,
           transcriptLabelsTrusted: isEnabled('callAgentCommitTrustedLabels'),
           callStartedAt: call.created_at,

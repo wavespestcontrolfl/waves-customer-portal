@@ -44,7 +44,8 @@ async function runSelfAudit(depsIn = {}) {
   }
 
   const calls = await db('call_log')
-    .where('direction', 'inbound')
+    // Both directions are sampled (owner directive 2026-09-26: every
+    // call-agent rule is audited the same way regardless of who dialed).
     .modify((qb) => require('./voice-agent/relay-protocol').whereNotSandboxCall(qb)) // bake-off calls are not audited
     .whereIn('processing_status', ['processed', 'voicemail', 'spam'])
     .whereRaw("LENGTH(COALESCE(transcription, '')) > 200")

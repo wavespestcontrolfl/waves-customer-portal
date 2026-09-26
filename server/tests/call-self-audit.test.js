@@ -14,11 +14,11 @@ const SAMPLE = (over = {}) => ({
   ai_extraction: JSON.stringify({ is_lead: true }), disposition: null, ...over,
 });
 
-function mockDb({ calls, onInsert = () => {} }) {
+function mockDb({ calls, onInsert = () => {}, whereCalls = [] }) {
   db.raw = (sql) => sql;
   db.mockImplementation((table) => {
     const b = {
-      where() { return b; }, whereIn() { return b; }, whereRaw() { return b; }, modify(fn) { fn(b); return b; },
+      where(...args) { whereCalls.push(args); return b; }, whereIn() { return b; }, whereRaw() { return b; }, modify(fn) { fn(b); return b; },
       orderBy() { return b; }, limit() { return b; },
       select: async () => (table === 'call_log' ? calls : []),
       insert: (row) => { onInsert(table, row); return { onConflict: () => ({ merge: async () => {}, catch: () => {} }) }; },
@@ -55,4 +55,14 @@ test('a lead stamped vendor_logged counts as a disposition mismatch', async () =
   mockDb({ calls: [SAMPLE({ disposition: 'vendor_logged', ai_extraction: JSON.stringify({ is_lead: true }) })] });
   const res = await runSelfAudit({ createMessage: async () => ({ content: [{ type: 'text', text: '{"is_lead":true,"is_spam":false,"is_voicemail":false,"appointment_agreed":false,"quote_promised":false,"complaint":false,"excerpt":"wants service"}' }] }) });
   expect(res.dispositionRate).toBeGreaterThan(0);
+});
+
+// Owner directive 2026-09-26: every call-agent rule is audited the same way
+// regardless of who dialed — the nightly sample must not filter to inbound only.
+test('an outbound call is sampled and audited, not filtered out by direction', async () => {
+  const whereCalls = [];
+  mockDb({ calls: [SAMPLE({ id: 'call-outbound', direction: 'outbound' })], whereCalls });
+  const res = await runSelfAudit({ createMessage: async () => ({ content: [{ type: 'text', text: '{"is_lead":true,"is_spam":false,"is_voicemail":false,"appointment_agreed":false,"quote_promised":false,"complaint":false,"excerpt":"outbound booked"}' }] }) });
+  expect(res.audited).toBe(1);
+  expect(whereCalls.some(([field, value]) => field === 'direction' && value === 'inbound')).toBe(false);
 });
