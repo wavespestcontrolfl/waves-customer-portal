@@ -1,0 +1,114 @@
+[
+  {
+    "kind": "organism",
+    "aka": [],
+    "stages": [
+      "larva",
+      "nymph",
+      "adult"
+    ],
+    "sign_of": [],
+    "role": "health_pest",
+    "risk": "medical",
+    "action": "specialist",
+    "season_basis": "year_round",
+    "verification": [],
+    "safety_line": "Can spread disease to dogs and, less commonly, to people. See a doctor if a bite site develops a rash or fever follows.",
+    "legacy_slugs": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": ""
+    },
+    "slug": "brown-dog-tick",
+    "common_name": "Brown Dog Tick",
+    "aliases": [
+      "brown dog tick",
+      "dog tick",
+      "dog ticks"
+    ],
+    "scientific_name": "Rhipicephalus sanguineus",
+    "rank": "species",
+    "group": "ticks-mites",
+    "subgroup": "ticks",
+    "site_category": "Biting",
+    "traits": [
+      "Ticks crawling up walls or in baseboard gaps — yes, indoors",
+      "Flat reddish-brown before feeding, gray-blue and raisin-sized after",
+      "Dog kennel and bedding hotspots",
+      "The only tick able to complete its entire life cycle indoors"
+    ],
+    "look_alikes": [
+      {
+        "slug": "american-dog-tick",
+        "difference": "Brown dog tick is plain reddish-brown and can live entirely indoors; American dog tick has pale mottling on the back and needs to go back outdoors.",
+        "next_photo": "A close-up from above of the back for any pale mottling, next to a coin.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "on-pets",
+      "living-areas",
+      "garage-storage"
+    ],
+    "looks": [
+      "crawler"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": true,
+      "venomous": false,
+      "disease_vector": true,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "pest",
+      "key": "flea",
+      "label": "Flea & Tick Treatment",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "The only tick that can complete its entire life cycle indoors — an infestation can live in the house itself, not just come in from the yard. This is a program, not a one-off spray, coordinated with your vet on pet treatment.",
+      "fact": "The only tick that can complete its entire life cycle indoors — an infestation can live in the house itself.",
+      "blurb": "Indoor ticks are a program, not a one-off spray. Coordinate with your vet on pet treatment."
+    },
+    "tech_notes": "Confirm hexagonal basis capituli, plain reddish-brown. Treat kennel/bedding hotspots + baseboard cracks; coordinate with vet on pet-side treatment.",
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN378"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/brown-dog-tick/",
+      "guides": []
+    }
+  }
+]

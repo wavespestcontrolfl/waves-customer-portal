@@ -5,12 +5,16 @@ jest.mock('../services/collections/contact-ledger', () => ({
   markDelivered: jest.fn(),
   markSendFailed: jest.fn(),
 }));
+jest.mock('../services/billing-email-reservation', () => ({
+  repairAcceptedBillingEmailReservations: jest.fn(async () => new Set()),
+}));
 jest.mock('../services/collections/rail-guard', () => ({
   collectionsChannelPermitted: jest.fn(),
 }));
 
 const db = require('../models/db');
 const ContactLedger = require('../services/collections/contact-ledger');
+const BillingEmailReservation = require('../services/billing-email-reservation');
 const { collectionsChannelPermitted } = require('../services/collections/rail-guard');
 const { sendReminderChannels } = require('../services/billing-reminder-delivery');
 
@@ -36,6 +40,7 @@ describe('billing reminder per-channel delivery progress', () => {
     });
     db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
     collectionsChannelPermitted.mockResolvedValue(true);
+    BillingEmailReservation.repairAcceptedBillingEmailReservations.mockResolvedValue(new Set());
     ContactLedger.recordContact.mockImplementation(async (input) => {
       let row = rows.find((candidate) => candidate.idempotency_key === input.idempotencyKey);
       if (row) return { id: row.id, metadata: { ...row.metadata }, reused: true };
@@ -230,6 +235,24 @@ describe('billing reminder per-channel delivery progress', () => {
     });
     expect(send.mock.calls.map(([channel]) => channel)).toEqual(['email', 'sms']);
     expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
+  });
+
+  test('progress heals a missed Email stamp without changing its sibling', async () => {
+    rows.push(
+      { id: 'email-1', customer_id: 'customer-1', channel: 'email', source: 'balance_reminder_workflow',
+        occurred_at: new Date(), metadata: { notificationEventKey: 'invoice-1:gentle', selectedChannels: ['email', 'sms'] } },
+      { id: 'sms-1', customer_id: 'customer-1', channel: 'sms', source: 'balance_reminder_workflow',
+        occurred_at: new Date(), metadata: { notificationEventKey: 'invoice-1:gentle', selectedChannels: ['email', 'sms'] } },
+    );
+    BillingEmailReservation.repairAcceptedBillingEmailReservations.mockResolvedValue(new Set(['email-1']));
+
+    await expect(require('../services/billing-reminder-delivery')
+      .reminderProgress('customer-1', 'balance_reminder_workflow', ['email', 'sms']))
+      .resolves.toEqual([expect.objectContaining({
+        complete: false,
+        delivered: new Set(['email']),
+      })]);
+    expect(rows.find((row) => row.id === 'sms-1').metadata.delivered).toBeUndefined();
   });
 
   test('a spacing-window Email denial stays owed after Text delivers', async () => {
