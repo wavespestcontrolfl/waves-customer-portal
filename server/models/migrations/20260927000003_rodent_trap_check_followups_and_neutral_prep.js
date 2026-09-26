@@ -56,7 +56,8 @@ async function saveState(knex, state) {
 
 async function upPricing(knex) {
   if (!(await knex.schema.hasTable('pricing_config'))) return null;
-  const row = await knex('pricing_config').where({ config_key: 'rodent_trapping' }).first();
+  // Locked: serializes with the admin Pricing Logic PUT (same row lock).
+  const row = await knex('pricing_config').where({ config_key: 'rodent_trapping' }).forUpdate().first();
   const data = parseData(row);
   if (!data || typeof data !== 'object') return null;
   if (data.included_followups == null || Number(data.included_followups) === 1) return null;
@@ -79,7 +80,9 @@ async function upPricing(knex) {
 
 async function upPrep(knex) {
   if (!(await knex.schema.hasTable('email_templates')) || !(await knex.schema.hasTable('email_template_versions'))) return;
-  const template = await knex('email_templates').where({ template_key: TEMPLATE_KEY }).first();
+  // Locked: a concurrent publish can't repoint the template between our
+  // read of its active version and our swap (version numbering included).
+  const template = await knex('email_templates').where({ template_key: TEMPLATE_KEY }).forUpdate().first();
   if (!template?.active_version_id) return;
   const prior = await knex('email_template_versions').where({ id: template.active_version_id }).first();
   if (!prior) return;
@@ -137,7 +140,8 @@ exports.up = async function up(knex) {
 exports.down = async function down(knex) {
   const state = await loadState(knex);
   if (state?.pricing && await knex.schema.hasTable('pricing_config')) {
-    const row = await knex('pricing_config').where({ config_key: 'rodent_trapping' }).first();
+    // Locked: serializes with the admin Pricing Logic PUT (same row lock).
+    const row = await knex('pricing_config').where({ config_key: 'rodent_trapping' }).forUpdate().first();
     const data = parseData(row);
     if (data && Number(data.included_followups) === 1) {
       const restored = { ...data, included_followups: state.pricing.priorIncludedFollowups };
@@ -161,7 +165,9 @@ exports.down = async function down(knex) {
   }
 
   if (!(await knex.schema.hasTable('email_templates')) || !(await knex.schema.hasTable('email_template_versions'))) return;
-  const template = await knex('email_templates').where({ template_key: TEMPLATE_KEY }).first();
+  // Locked: a concurrent publish can't repoint the template between our
+  // read of its active version and our swap (version numbering included).
+  const template = await knex('email_templates').where({ template_key: TEMPLATE_KEY }).forUpdate().first();
   if (!template?.active_version_id) return;
   const current = await knex('email_template_versions').where({ id: template.active_version_id }).first();
   if (!current || snapshotSource(current) !== MIGRATION_MARKER) return;

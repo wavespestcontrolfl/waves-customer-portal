@@ -23,6 +23,7 @@ function fakeKnex(db) {
         else filters.push((r) => Object.entries(cond).every(([k, v]) => r[k] === v));
         return q;
       },
+      forUpdate() { return q; },
       whereIn(col, vals) { filters.push((r) => vals.includes(r[col])); return q; },
       first: async () => { const hit = rowsNow().find(match); return hit ? { ...hit } : undefined; },
       pluck: async (col) => rowsNow().filter(match).map((r) => r[col]),
@@ -159,5 +160,16 @@ describe('20260927000001 rodent trap check additional', () => {
     db.services.push({ id: 'svc-admin', service_key: 'rodent_trap_check_additional', is_active: false });
     await migration.up(fakeKnex(db));
     expect(svc(db, 'rodent_trap_check_additional')).toMatchObject({ id: 'svc-admin', is_active: false });
+  });
+
+  test('a profile cloned onto a pre-existing row is removed on rollback', async () => {
+    const db = seedDb();
+    db.services.push({ id: 'svc-pre', service_key: 'rodent_trap_check_additional', is_active: true });
+    const knex = fakeKnex(db);
+    await migration.up(knex);
+    expect(db.service_completion_profiles.some((p) => p.service_key === 'rodent_trap_check_additional')).toBe(true);
+    await migration.down(knex);
+    expect(db.service_completion_profiles.some((p) => p.service_key === 'rodent_trap_check_additional')).toBe(false);
+    expect(svc(db, 'rodent_trap_check_additional')).toMatchObject({ id: 'svc-pre', is_active: true });
   });
 });

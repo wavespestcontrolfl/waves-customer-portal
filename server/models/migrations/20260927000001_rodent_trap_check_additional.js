@@ -117,7 +117,9 @@ exports.up = async function up(knex) {
 
   // 1. pricing_config.rodent_trapping
   if (await knex.schema.hasTable('pricing_config')) {
-    const row = await knex('pricing_config').where({ config_key: 'rodent_trapping' }).first();
+    // Locked: the admin Pricing Logic PUT locks this row too, so the two
+    // read-modify-writes serialize instead of one erasing the other.
+    const row = await knex('pricing_config').where({ config_key: 'rodent_trapping' }).forUpdate().first();
     const data = row && (typeof row.data === 'string' ? JSON.parse(row.data) : row.data);
     if (row && data && typeof data === 'object' && data.included_followups === 'unlimited') {
       const newData = { ...data, included_followups: 1 };
@@ -232,12 +234,15 @@ exports.down = async function down(knex) {
         await knex('services').where({ id: row.id }).update({ is_active: false, updated_at: knex.fn.now() });
         await writeSetting(knex, KEPT_KEY, String(row.id));
       } else {
-        if (state.profileInserted && await knex.schema.hasTable('service_completion_profiles')) {
-          await knex('service_completion_profiles').where({ service_key: NEW_KEY }).del();
-        }
         await knex('services').where({ id: row.id }).del();
       }
     }
+  }
+  // The cloned completion profile is owned by up() whether or not up()
+  // created the service row (a pre-existing row without a profile gets one
+  // cloned): remove it unless the kept, referenced row still needs it.
+  if (state.profileInserted && !keepInsertedRow && await knex.schema.hasTable('service_completion_profiles')) {
+    await knex('service_completion_profiles').where({ service_key: NEW_KEY }).del();
   }
 
   if (await knex.schema.hasTable('services')) {
@@ -254,7 +259,9 @@ exports.down = async function down(knex) {
   }
 
   if (state.pricing?.includedFollowupsChanged && await knex.schema.hasTable('pricing_config')) {
-    const row = await knex('pricing_config').where({ config_key: 'rodent_trapping' }).first();
+    // Locked: the admin Pricing Logic PUT locks this row too, so the two
+    // read-modify-writes serialize instead of one erasing the other.
+    const row = await knex('pricing_config').where({ config_key: 'rodent_trapping' }).forUpdate().first();
     const data = row && (typeof row.data === 'string' ? JSON.parse(row.data) : row.data);
     if (row && data && Number(data.included_followups) === 1) {
       const restored = { ...data, included_followups: 'unlimited' };

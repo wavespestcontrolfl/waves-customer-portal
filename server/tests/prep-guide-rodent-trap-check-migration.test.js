@@ -18,6 +18,7 @@ function fakeKnex(db) {
     let order = null;
     const q = {
       where(cond) { filters.push((r) => Object.entries(cond).every(([k, v]) => r[k] === v)); return q; },
+      forUpdate() { return q; },
       whereNot(cond) { filters.push((r) => !Object.entries(cond).every(([k, v]) => r[k] === v)); return q; },
       orderBy(col, dir) { order = { col, dir }; return q; },
       first: async () => {
