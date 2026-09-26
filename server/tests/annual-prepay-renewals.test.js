@@ -2495,6 +2495,31 @@ describe('annual prepay renewal helpers', () => {
       expect(sendLeg.mock.calls.map((c) => c[0])).not.toContain('email');
     });
 
+    // Pre-push audit P1: the witness rule keys off the REAL router's result
+    // shape — push-only acceptance is not written notice; SMS + push is.
+    test('real dispatchBillingChannels results: an App-only selection never yields an SMS witness; App + Text keys the witness off the text leg', async () => {
+      const input = await captureTermiteSmsInput();
+      const { dispatchBillingChannels, billingDeliveryCategory } = jest.requireActual('../services/messaging/billing-channel-routing');
+      const { classifyDeliveryCertainty } = jest.requireActual('../services/messaging/send-customer-message');
+      const category = billingDeliveryCategory(input);
+      const smsAt = '2026-09-26T15:58:00.000Z';
+      // Each leg as sendCustomerMessageCore reports it: the App leg arrives
+      // with billingDeliveryLeg 'push' and is delivered as channel 'push'.
+      const sendLeg = jest.fn(async (leg) => (leg.metadata.billingDeliveryLeg === 'push'
+        ? { sent: true, deliveryOutcome: 'accepted', channel: 'push', providerMessageId: 'push:delivered' }
+        : { sent: true, deliveryOutcome: 'accepted', channel: 'sms', providerMessageId: `SM${'d'.repeat(32)}`, sentAt: smsAt }));
+
+      const pushOnly = await dispatchBillingChannels(input, { [`${category}_channels`]: ['push'] }, sendLeg);
+      expect(pushOnly).toMatchObject({ sent: true, channel: 'push' });
+      expect(classifyDeliveryCertainty(pushOnly)).toBe('sent'); // what used to become the witness
+      expect(_private.smsLegOf(pushOnly)).toBeNull();
+      expect(_private.smsEmailFallback(true, pushOnly, 'term-1')).toEqual({ reason: 'sms_push_only', keepClaim: false });
+
+      const pushAndText = await dispatchBillingChannels(input, { [`${category}_channels`]: ['push', 'sms'] }, sendLeg);
+      expect(_private.smsLegOf(pushAndText)).toMatchObject({ channel: 'sms', sentAt: smsAt });
+      expect(_private.smsEmailFallback(true, pushAndText, 'term-1')).toBeNull();
+    });
+
     test('a STOP\'d number is still blocked — by the sms_enabled master switch and by the suppression list', async () => {
       const input = await captureTermiteSmsInput();
       await expect(runValidators(input, { ...NO_SEASONAL, sms_enabled: false }))
@@ -3311,6 +3336,82 @@ describe('annual prepay renewal helpers', () => {
       expect(zeroRowStamp.update).toHaveBeenCalledWith(expect.objectContaining({ notice_45_sent_at: DAY45 }));
       expect(bells('Termite annual renewal notice record conflict', 45)).toHaveLength(conflictBells);
       expect(bells(LATE)).toHaveLength(0);
+    });
+
+    // ---- Pre-push audit P1: an app PUSH is not written notice ----
+    // Result shapes as sendCustomerMessage reports them: a billing fan-out
+    // (dispatchBillingChannels) spreads the chosen leg and lists every leg
+    // under channelResults; the push router's in-place delivery reports
+    // channel 'push'.
+    const pushLeg = { sent: true, deliveryOutcome: 'accepted', channel: 'push', providerMessageId: 'push:delivered' };
+    const PUSH_ONLY_SHAPES = [
+      ['a billing fan-out with only the App leg selected', { ...pushLeg, channelResults: { push: pushLeg } }],
+      ['a push-router delivery in place of the text', pushLeg],
+    ];
+
+    test.each(PUSH_ONLY_SHAPES)('push-only accepted (%s): no witness until the EMAIL confirms, stamped at the email\'s acceptance time', async (_label, smsResult) => {
+      pinTermiteToday();
+      const emailAt = new Date('2026-09-26T15:59:00Z'); // day 45 (on time)
+      const stamp = query();
+      setDbQueues({
+        scheduled_services: [query({ first: null }), query({ columnInfo: {} })],
+        annual_prepay_terms: [query({ returning: [refreshed] }), claimed(), stamp],
+        customers: [query({ first: customerRow })],
+      });
+      sendCustomerMessage.mockResolvedValueOnce(smsResult);
+      AccountMembershipEmail.sendTermiteRenewalReminder.mockResolvedValueOnce({ ok: true, messageId: 'sg-1', sentAt: emailAt.toISOString() });
+
+      await expect(AnnualPrepayRenewals.sendCustomerTermNotice(termFields, 45))
+        .resolves.toMatchObject({ sent: true, channel: 'email', reason: 'sms_push_only' });
+      expect(stamp.update).toHaveBeenCalledWith(expect.objectContaining({ notice_45_sent_at: emailAt }));
+      expect(AccountMembershipEmail.sendTermiteRenewalReminder).toHaveBeenCalledTimes(1);
+    });
+
+    test.each(PUSH_ONLY_SHAPES)('push-only accepted (%s) and the email FAILS: nothing is stamped and the claim is released for the retry', async (_label, smsResult) => {
+      pinTermiteToday();
+      const release = query();
+      setDbQueues({
+        scheduled_services: [query({ first: null }), query({ columnInfo: {} })],
+        annual_prepay_terms: [query({ returning: [refreshed] }), claimed(), release],
+        customers: [query({ first: customerRow })],
+      });
+      sendCustomerMessage.mockResolvedValueOnce(smsResult);
+      AccountMembershipEmail.sendTermiteRenewalReminder.mockResolvedValueOnce({ ok: false, reason: 'email_opted_out' });
+
+      await expect(AnnualPrepayRenewals.sendCustomerTermNotice(termFields, 45))
+        .resolves.toEqual({ sent: false, reason: 'sms_push_only' });
+      expect(release.update).toHaveBeenCalledWith(expect.objectContaining({ notice_45_claimed_at: null, status: 'active' }));
+      expect(release.update).not.toHaveBeenCalledWith(expect.objectContaining({ notice_45_sent_at: expect.anything() }));
+    });
+
+    test('SMS AND push accepted (billing fan-out): the TEXT leg is the witness, at the text\'s own acceptance time', async () => {
+      pinTermiteToday();
+      const smsAt = new Date('2026-09-26T15:58:00Z');
+      const smsLeg = { sent: true, deliveryOutcome: 'accepted', channel: 'sms', providerMessageId: `SM${'c'.repeat(32)}`, sentAt: smsAt.toISOString() };
+      const stamp = query();
+      setDbQueues({
+        scheduled_services: [query({ first: null }), query({ columnInfo: {} })],
+        annual_prepay_terms: [query({ returning: [refreshed] }), claimed(), stamp],
+        customers: [query({ first: customerRow })],
+        customer_interactions: [query()],
+      });
+      // dispatchBillingChannels spreads the accepted text as the outcome.
+      sendCustomerMessage.mockResolvedValueOnce({ ...smsLeg, channelResults: { push: pushLeg, sms: smsLeg } });
+      AccountMembershipEmail.sendTermiteRenewalReminder.mockResolvedValue({ ok: true });
+
+      await expect(AnnualPrepayRenewals.sendCustomerTermNotice(termFields, 45)).resolves.toEqual({ sent: true, termId: 'term-recover' });
+      expect(stamp.update).toHaveBeenCalledWith(expect.objectContaining({ notice_45_sent_at: smsAt }));
+    });
+
+    test('smsLegOf keys off the reported channels: channelResults.sms for a fan-out, the result itself unless it was delivered as push', () => {
+      const sms = { sent: true, deliveryOutcome: 'accepted', channel: 'sms' };
+      expect(_private.smsLegOf({ ...pushLeg, channelResults: { push: pushLeg } })).toBeNull();
+      expect(_private.smsLegOf({ ...sms, channelResults: { push: pushLeg, sms } })).toBe(sms);
+      expect(_private.smsLegOf(pushLeg)).toBeNull();
+      expect(_private.smsLegOf(sms)).toBe(sms);
+      // A non-termite reminder keeps its old behavior (no push rule).
+      expect(_private.smsEmailFallback(false, pushLeg, 't')).toBeNull();
+      expect(_private.smsEmailFallback(true, pushLeg, 't')).toEqual({ reason: 'sms_push_only', keepClaim: false });
     });
 
     test('priorTermiteNoticeAcceptance: the EARLIEST of SMS and email, each covered rung at its earliest covering time; future/invalid times ignored', async () => {

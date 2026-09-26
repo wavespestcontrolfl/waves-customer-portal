@@ -6665,6 +6665,13 @@ function termNoticeSmsMetadata(ctx) {
 //    proof the provider accepted it (the owner SMS kill switch returns
 //    sent:true with deliveryOutcome 'not_sent' — Codex #4921 r1 P1). Only
 //    an ACCEPTED SMS stamps the witness; an uncertain one keeps its claim.
+//  - Pre-push audit P1: under 'billing' delivery preferences the notice can
+//    be routed to App PUSH. A push is NOT written notice under the
+//    agreement, so for a termite rung only the TEXT leg's own result counts
+//    (smsLegOf): a push-only acceptance is treated like an SMS that never
+//    went out — the email must confirm (stamped at the email's acceptance
+//    time), and if it fails nothing is stamped and the claim is released for
+//    the retry (the text was never handed to Twilio, so it is not uncertain).
 function smsEmailFallback(termiteRung, smsResult, termId) {
   if (!smsResult.sent) {
     const failure = smsResult.code || smsResult.reason;
@@ -6673,10 +6680,25 @@ function smsEmailFallback(termiteRung, smsResult, termId) {
     return { reason: failure || 'send_failed', keepClaim: uncertain };
   }
   if (!termiteRung) return null;
-  const certainty = classifyDeliveryCertainty(smsResult);
+  const smsLeg = smsLegOf(smsResult);
+  if (!smsLeg) {
+    logger.warn(`[annual-prepay] termite renewal notice for term ${termId} was accepted only as an app push (not written notice); requiring email confirmation`);
+    return { reason: 'sms_push_only', keepClaim: false };
+  }
+  const certainty = classifyDeliveryCertainty(smsLeg);
   if (certainty === 'sent') return null;
   logger.warn(`[annual-prepay] termite renewal SMS for term ${termId} not confirmed (${certainty}); requiring email confirmation`);
   return { reason: `sms_${certainty}`, keepClaim: certainty === 'unknown' };
+}
+
+// The TEXT leg of a send result, keyed off how sendCustomerMessage reports
+// channels (never a guess): a billing fan-out (dispatchBillingChannels)
+// reports each leg under channelResults — only channelResults.sms is the
+// text; a single send reports its delivered `channel` ('push' when the push
+// router delivered it in place of the text). Null when no text leg exists.
+function smsLegOf(smsResult) {
+  if (smsResult.channelResults) return smsResult.channelResults.sms || null;
+  return smsResult.channel === 'push' ? null : smsResult;
 }
 
 // An ACCEPTED SMS is the witness, at the SMS provider's own acceptance time
@@ -6687,7 +6709,9 @@ function smsEmailFallback(termiteRung, smsResult, termId) {
 // path is unchanged (stamp first, email in the background).
 async function recordAcceptedTermNoticeSms(ctx, smsResult) {
   const { claimedTerm, termiteRung, daysOut } = ctx;
-  let witnessAt = acceptanceTimeFrom(smsResult.sentAt) || new Date();
+  // The TEXT leg's own acceptance time (a billing fan-out's top-level result
+  // may be another leg's).
+  let witnessAt = acceptanceTimeFrom((smsLegOf(smsResult) || smsResult).sentAt) || new Date();
   let emailAlreadyAttempted = false;
   if (termiteRung && !ctx.baseline && noticeWitnessColumn(daysOut, claimedTerm, etDateString(witnessAt)) !== noticeColumnForDaysOut(daysOut)) {
     const email = await sendTermNoticeEmailFor(ctx);
@@ -7903,6 +7927,8 @@ module.exports = {
     ownsNoticeClaims,
     ensureTermNoticeLease,
     termNoticeSmsPolicy,
+    smsLegOf,
+    smsEmailFallback,
     recoveryPlan,
     recoveredBeforeEscalation,
     fileTermiteUndeliveredNoticeException,
