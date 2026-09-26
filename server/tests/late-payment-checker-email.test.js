@@ -453,6 +453,7 @@ describe('late-payment checker email sidecar', () => {
   });
 
   test.each([
+    ['email opt-out', { ok: false, skipped: true, reason: 'email_disabled' }, true],
     ['missing address with an activity row', { ok: false, skipped: true, reason: 'missing_email' }, true],
     ['suppressed address without an activity row', { ok: false, blocked: true, reason: 'Suppressed: bounce' }, false],
     ['unavailable template with an activity row', { ok: false, skipped: true, reason: 'template_unavailable' }, true],
