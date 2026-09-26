@@ -141,14 +141,14 @@ function buildPersistedShape({ index, intake, readiness, draft }) {
   };
 }
 
-function runCase(testCase, index) {
+async function runCase(testCase, index) {
   const intake = buildLeadWebhookIntake(testCase.payload);
   const readiness = evaluateLeadEstimateAutomationReadiness({
     intake,
     phone: phoneFor(index + 1),
     serviceInterest: intake.serviceInterest,
   });
-  const draft = buildAutomatedLeadDraftEstimate({
+  const draft = await buildAutomatedLeadDraftEstimate({
     intake,
     body: testCase.payload,
     readiness,
@@ -190,6 +190,16 @@ function runCase(testCase, index) {
   };
 }
 
-const results = cases.map(runCase);
-console.table(results);
-console.log(`Lead estimate automation smoke passed: ${results.length} payloads`);
+async function main() {
+  const results = [];
+  for (let index = 0; index < cases.length; index += 1) {
+    results.push(await runCase(cases[index], index));
+  }
+  console.table(results);
+  console.log(`Lead estimate automation smoke passed: ${results.length} payloads`);
+}
+
+main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});
