@@ -174,13 +174,33 @@ describe('landline suppression on delivery bounce', () => {
 });
 
 describe('checkSuppression non_mobile branch', () => {
-  test('blocks a recipient flagged as non_mobile with a dedicated code', async () => {
+  test.each(['sms', undefined, 'unknown'])('blocks non_mobile for %s with a dedicated code', async (channel) => {
     const result = await checkSuppression(
-      { to: '+18777175476' },
+      { to: '+18777175476', channel },
       {},
       { suppression: { reason: 'non_mobile', created_at: '2026-06-20T10:00:00Z' } },
     );
     expect(result.ok).toBe(false);
     expect(result.code).toBe('SUPPRESSED_NON_MOBILE');
+  });
+
+  test.each(['email', 'push'])('non_mobile allows verified %s delivery', async (channel) => {
+    expect(await checkSuppression({ channel }, {}, {
+      suppressionLoaded: true, suppression: { reason: 'non_mobile' },
+    })).toEqual({ ok: true });
+  });
+
+  test.each(['email', 'push'])('non_mobile never authorizes %s with an unverified suppression read', async (channel) => {
+    expect(await checkSuppression({ channel }, {}, {
+      suppression: { reason: 'non_mobile' },
+    })).toMatchObject({ ok: false, code: 'SUPPRESSION_LOOKUP_FAILED' });
+  });
+
+  test.each(['email', 'push'].flatMap(channel => [
+    'manual_dnc', 'opt_out_keyword', 'opt_out_natural_language', 'wrong_number', 'unknown',
+  ].map(reason => [channel, reason])))('%s still refuses hard suppression %s', async (channel, reason) => {
+    expect(await checkSuppression({ channel }, {}, {
+      suppressionLoaded: true, suppression: { reason },
+    })).toMatchObject({ ok: false });
   });
 });
