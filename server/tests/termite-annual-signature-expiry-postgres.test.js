@@ -209,6 +209,10 @@ describeOrSkip('termite annual signature expiry (slice 3b) — real Postgres', (
       const firstKey = reminderDedupeKeys(notifyAdmin)[0];
 
       expect(firstKey).toContain(new Date(daysAgo(1)).toISOString().slice(0, 10));
+      // customerId rides in metadata so NotificationService can silence
+      // internal-test customers' bells.
+      const nudgeCall = notifyAdmin.mock.calls.find(([, title]) => /signing link expired/i.test(title));
+      expect(nudgeCall[3].metadata).toMatchObject({ customerId });
 
       notifyAdmin.mockClear();
       const second = await sweep();
@@ -218,6 +222,19 @@ describeOrSkip('termite annual signature expiry (slice 3b) — real Postgres', (
       expect(reminderDedupeKeys(notifyAdmin)).toEqual([]);
       const nudgeEvents = await db('customer_contract_events').where({ event_type: 'signature_link_expired_nudged' });
       expect(nudgeEvents).toHaveLength(1);
+    });
+
+    test('a SUPPRESSED nudge (internal-test customer) is still marked, so it never crowds real lapses out of the batch', async () => {
+      const { sweep, notifyAdmin, db } = load({ notifyAdminImpl: async () => ({ id: null, suppressed: true }) });
+      const { estimateId, customerId } = await makeParkedEstimate(db);
+      await makeAgreement(db, { estimateId, customerId, shareTokenExpiresAt: daysAgo(1) });
+
+      const first = await sweep();
+      expect(first).toMatchObject({ signatureNudgeScanned: 1, signatureNudged: 0 });
+      notifyAdmin.mockClear();
+      const second = await sweep();
+      expect(second.signatureNudgeScanned).toBe(0);
+      expect(reminderDedupeKeys(notifyAdmin)).toEqual([]);
     });
 
     test('never nudges while the signing link is still valid', async () => {
@@ -318,7 +335,7 @@ describeOrSkip('termite annual signature expiry (slice 3b) — real Postgres', (
       expect(events[0].metadata.reason).toBe('annual_plan_signature_expired');
 
       expect(closedBellCalls(notifyAdmin)).toHaveLength(1);
-      expect(closedBellCalls(notifyAdmin)[0][3]).toMatchObject({ dedupeKey: `termite-annual-signature-expiry:${estimateId}` });
+      expect(closedBellCalls(notifyAdmin)[0][3]).toMatchObject({ dedupeKey: `termite-annual-signature-expiry:${estimateId}`, metadata: { customerId } });
 
       // Idempotent: a second sweep finds nothing left to expire (guarded by
       // the status no longer being 'awaiting_signature').

@@ -1193,13 +1193,16 @@ async function remindExpiredSignatureLinks({ conn, limit, counts }) {
             link: '/admin/contracts?tab=requests',
             bell: true,
             dedupeKey: `termite-annual-signature-expiry-nudge:${row.contract_id}:${expiresAtKey}`,
-            metadata: { estimateId: row.estimate_id, contractId: row.contract_id },
+            metadata: { customerId: row.contract_customer_id, estimateId: row.estimate_id, contractId: row.contract_id },
           },
         );
-        if (bell && !bell.suppressed) {
-          if (!bell.deduped) counts.signatureNudged += 1;
-          // Delivered (or already standing under this key): mark this lapse
-          // nudged so later sweeps stop selecting it.
+        if (bell) {
+          if (!bell.suppressed && !bell.deduped) counts.signatureNudged += 1;
+          // Delivered, already standing under this key, or deliberately
+          // suppressed (internal-test customer, bell policy): mark this lapse
+          // nudged so later sweeps stop selecting it — an unmarked suppressed
+          // row would be re-scanned forever and crowd real lapses out of the
+          // oldest-first batch.
           await conn('customer_contract_events').insert({
             contract_id: row.contract_id,
             customer_id: row.contract_customer_id,
@@ -1323,7 +1326,7 @@ async function expireAbandonedSignature({ estimateId, conn = db }) {
         link: `/admin/estimates?estimateId=${estimateId}`,
         bell: true,
         dedupeKey: `termite-annual-signature-expiry:${estimateId}`,
-        metadata: { estimateId },
+        metadata: { customerId: estimate.customer_id, estimateId },
         trx,
       },
     );
