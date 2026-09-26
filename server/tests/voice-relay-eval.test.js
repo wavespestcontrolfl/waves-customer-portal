@@ -4624,6 +4624,18 @@ describe('voice relay eval — named spoken checks', () => {
       pestPricing, lawnPricing, { kind: 'agent', text: 'Para césped, el programa mejorado es $119 por aplicación, nueve veces al año; el premium es $99 por aplicación, doce veces al año.', turn: 2 },
     ] }));
     expect(replay._internals.scenarioStatus({ checks: correct })).toBe('pass');
+    // codex r2 P1: natural Spanish speech says "119 dólares", not only "$119"
+    // — the required price+unit check must accept that spelling too, and the
+    // prohibited pest-figure check must still catch it in that spelling.
+    const correctDolares = replay._internals.evaluateChecks(scenario, record({ order: [
+      pestPricing, lawnPricing, { kind: 'agent', text: 'Para césped, el programa mejorado cuesta 119 dólares por aplicación, nueve veces al año; el premium es 99 dólares por aplicación, doce veces al año.', turn: 2 },
+    ] }));
+    expect(replay._internals.scenarioStatus({ checks: correctDolares })).toBe('pass');
+    const resurfacedDolares = replay._internals.evaluateChecks(scenario, record({ order: [
+      pestPricing, lawnPricing, { kind: 'agent', text: 'Como le decía, el control de plagas cuesta 129 dólares; para césped el programa mejorado es 119 dólares por aplicación.', turn: 2 },
+    ] }));
+    expect(resurfacedDolares.some((c) => c.check === 'spoken_never_matches' && c.status === 'fail' && c.severity === 'critical')).toBe(true);
+    expect(replay._internals.scenarioStatus({ checks: resurfacedDolares })).toBe('fail');
   });
 
   test('spanish-backchannel-vs-explicit-correction blocks on the wrong address after the correction, a double capture, or a restart cue on the backchannel turn', () => {

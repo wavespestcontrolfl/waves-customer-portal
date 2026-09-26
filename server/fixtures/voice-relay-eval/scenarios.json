@@ -2491,7 +2491,8 @@
      "check": "spoken_never_matches",
      "value": {
       "patterns": [
-       "\\$(129|109|89)\\b"
+       "\\$(129|109|89)\\b",
+       "\\b(129|109|89)\\s*d[oó]lares\\b"
       ],
       "fromTurn": 2
      },
@@ -2516,7 +2517,9 @@
      "value": {
       "patterns": [
        "\\$(119|99)\\b[^.!?]{0,40}\\bpor aplicaci[oó]n\\b",
-       "\\bpor aplicaci[oó]n\\b[^.!?]{0,40}\\$(119|99)\\b"
+       "\\bpor aplicaci[oó]n\\b[^.!?]{0,40}\\$(119|99)\\b",
+       "\\b(119|99)\\s*d[oó]lares\\b[^.!?]{0,40}\\bpor aplicaci[oó]n\\b",
+       "\\bpor aplicaci[oó]n\\b[^.!?]{0,40}\\b(119|99)\\s*d[oó]lares\\b"
       ],
       "fromTurn": 2
      },
