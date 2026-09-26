@@ -26,6 +26,10 @@ jest.mock('../services/auto-dispatch/route-tiers', () => ({
   ...jest.requireActual('../services/auto-dispatch/route-tiers'),
   loadReminderFreeze: jest.fn(),
 }));
+// Only reached when GATE_SCHEDULE_QUALITY_* are set (the alert-refresh
+// scoping tests below); lazily required by runRouteReorder.
+jest.mock('../services/scheduling/quality-alerts', () => ({ refreshScheduleQualityAlerts: jest.fn() }));
+jest.mock('../services/scheduling/day-quality', () => ({ measureDayQuality: jest.fn(() => ({})) }));
 jest.mock('../models/db', () => {
   const fn = jest.fn();
   fn.transaction = jest.fn();
@@ -179,16 +183,19 @@ describe('opts.repairOnly excludes canonicalization entirely, even with the gate
     expect(skip.canonicalized).toBeUndefined();
   });
 
-  test('the same stale day WITHOUT repairOnly (nightly band) DOES canonicalize — proving the gate genuinely works outside repairOnly', async () => {
-    stopsByDate[DAY] = [
-      stop('a', { window_start: '09:00', route_order: null }),
-      stop('b', { window_start: '11:00', route_order: 2 }),
-      stop('c', { window_start: '13:00', route_order: 3, lat: null, lng: null }),
-    ];
+  test('a certifiable Google-cannot-run stale day DOES canonicalize without repairOnly (nightly band) but not under it — proving the gate genuinely works outside repairOnly', async () => {
+    // One geocoded stop numbered 4 (a leading gap): TOO_FEW_GEOCODED_STOPS
+    // for Google, but the shared guard certifies the baseline. (A coordless
+    // day never canonicalizes at all since PRRT_kwDOR3YQi86mQTCw.)
+    stopsByDate[DAY] = [stop('a', { window_start: '09:00', route_order: 4 })];
+    const repairRun = await runRouteReorder({ now: NOW, repairOnly: true, dates: [DAY] });
+    expect(repairRun.applied).toBe(0);
+    expect(trxUpdates).toEqual([]);
+    ledgerInserts = [];
     const res = await runRouteReorder({ now: NOW });
     expect(res.applied).toBe(1);
-    expect(RouteOptimizer.optimizeRoute).not.toHaveBeenCalled(); // still coordless — baseline needs no Google either
-    expect(trxUpdates.length).toBeGreaterThan(0);
+    expect(RouteOptimizer.optimizeRoute).not.toHaveBeenCalled();
+    expect(trxUpdates).toEqual([{ id: 'a', route_order: 1 }]);
     const applied = ledger().reorders.find((r) => r.date === DAY);
     expect(applied).toMatchObject({ source: 'promised_window' });
   });
@@ -313,25 +320,30 @@ describe('mode ON — canonicalization', () => {
     });
   });
 
-  test('a coordless stale day gets the baseline written — Google is never called', async () => {
+  test('PRRT_kwDOR3YQi86mQTCw: a mixed geocoded + coordless stale day keeps COORDLESS_STOPS — the shared guard cannot certify it, nothing written', async () => {
+    // The old private check counted c's missing travel as zero and wrote
+    // a,b,c; the shared guard (uncertifiableReason) refuses any coordless stop.
     stopsByDate[DAY] = [
       stop('a', { window_start: '09:00', route_order: null }),
       stop('b', { window_start: '11:00', route_order: 2 }),
       stop('c', { window_start: '13:00', route_order: 3, lat: null, lng: null }),
     ];
     const res = await runRouteReorder({ now: NOW, canonicalizeStale: true });
-    expect(res.applied).toBe(1);
+    expect(res.applied).toBe(0);
     expect(RouteOptimizer.optimizeRoute).not.toHaveBeenCalled();
-    expect(trxUpdates).toEqual([
-      { id: 'a', route_order: 1 },
-      { id: 'b', route_order: 2 },
-      { id: 'c', route_order: 3 },
-    ]);
-    expect(ledger().reorders[0]).toMatchObject({
-      // 'a' is chronologically first (09:00) but its null position sorts it
-      // LAST in the board's default order — a real inversion, not a quirk.
-      source: 'promised_window', canonicalized: { reasons: ['null', 'inversion'], source: 'promised_window' },
-    });
+    expect(trxUpdates).toEqual([]);
+    const skip = ledger().skips.find((s) => s.date === DAY);
+    expect(skip).toMatchObject({ reason: 'COORDLESS_STOPS' });
+    expect(skip.canonicalized).toBeUndefined();
+  });
+
+  test('PRRT_kwDOR3YQi86mQTCw: canonicalizeBaselineOrder refuses (null) any day with a coordless stop, fully coordless included', () => {
+    const mixed = [stop('a', { route_order: null }), stop('b', { route_order: 2, lat: null, lng: null })];
+    const coordless = [stop('a', { route_order: null, lat: null, lng: null }), stop('b', { route_order: 2, lat: null, lng: null })];
+    expect(_internals.canonicalizeBaselineOrder(RouteOptimizer, mixed)).toBeNull();
+    expect(_internals.canonicalizeBaselineOrder(RouteOptimizer, coordless)).toBeNull();
+    expect(_internals.canonicalizeBaselineOrder(RouteOptimizer, [stop('a', { route_order: null }), stop('b', { route_order: 2 })]))
+      .toMatchObject({ orderedStops: [expect.objectContaining({ id: 'a' }), expect.objectContaining({ id: 'b' })] });
   });
 
   test('a leading gap (future day numbered 4,5,6, nothing before) is now recognized as stale — codex pre-push P2', async () => {
@@ -342,13 +354,12 @@ describe('mode ON — canonicalization', () => {
     // excuse — canonicalizeStale mode now passes `futureDay: true` and
     // flags the leading gap.
     stopsByDate[DAY] = [
-      stop('a', { window_start: '09:00', route_order: 4, lat: null, lng: null }),
-      stop('b', { window_start: '11:00', route_order: 5, lat: null, lng: null }),
-      stop('c', { window_start: '13:00', route_order: 6, lat: null, lng: null }),
+      stop('a', { window_start: '09:00', route_order: 4 }),
+      stop('b', { window_start: '11:00', route_order: 5 }),
+      stop('c', { window_start: '13:00', route_order: 6 }),
     ];
     const res = await runRouteReorder({ now: NOW, canonicalizeStale: true });
     expect(res.applied).toBe(1);
-    expect(RouteOptimizer.optimizeRoute).not.toHaveBeenCalled();
     expect(trxUpdates).toEqual([
       { id: 'a', route_order: 1 },
       { id: 'b', route_order: 2 },
@@ -359,15 +370,23 @@ describe('mode ON — canonicalization', () => {
     });
   });
 
-  test('too few geocoded stops on a stale day still gets the baseline written', async () => {
+  test('too few geocoded stops (one geocoded, stale) still gets the baseline written', async () => {
+    stopsByDate[DAY] = [stop('a', { window_start: '09:00', route_order: null })];
+    const res = await runRouteReorder({ now: NOW, canonicalizeStale: true });
+    expect(res.applied).toBe(1);
+    expect(RouteOptimizer.optimizeRoute).not.toHaveBeenCalled();
+    expect(trxUpdates).toEqual([{ id: 'a', route_order: 1 }]);
+  });
+
+  test('PRRT_kwDOR3YQi86mQTCw: a fully coordless stale day keeps TOO_FEW_GEOCODED_STOPS — nothing written', async () => {
     stopsByDate[DAY] = [
       stop('a', { window_start: '09:00', route_order: null, lat: null, lng: null }),
       stop('b', { window_start: '11:00', route_order: 2, lat: null, lng: null }),
     ];
     const res = await runRouteReorder({ now: NOW, canonicalizeStale: true });
-    expect(res.applied).toBe(1);
-    expect(RouteOptimizer.optimizeRoute).not.toHaveBeenCalled();
-    expect(trxUpdates).toEqual([{ id: 'a', route_order: 1 }, { id: 'b', route_order: 2 }]);
+    expect(res.applied).toBe(0);
+    expect(trxUpdates).toEqual([]);
+    expect(ledger().skips.find((s) => s.date === DAY)).toMatchObject({ reason: 'TOO_FEW_GEOCODED_STOPS' });
   });
 
   test('a non-stale day is completely unaffected — no canonicalized tag, ordinary floor applies', async () => {
@@ -424,8 +443,8 @@ describe('mode ON — canonicalization', () => {
   test('the GATE_ROUTE_REORDER_STALE_ORDER env gate is equivalent to opts.canonicalizeStale', async () => {
     process.env.GATE_ROUTE_REORDER_STALE_ORDER = 'true';
     stopsByDate[DAY] = [
-      stop('a', { window_start: '09:00', route_order: null, lat: null, lng: null }),
-      stop('b', { window_start: '11:00', route_order: 2, lat: null, lng: null }),
+      stop('a', { window_start: '09:00', route_order: null }),
+      stop('b', { window_start: '11:00', route_order: 2 }),
     ];
     const res = await runRouteReorder({ now: NOW });
     expect(res.applied).toBe(1);
@@ -494,13 +513,13 @@ describe('promised-window baseline chronology (codex pre-push P1)', () => {
       .toEqual({ conflict: 'WINDOW_ORDER_CONFLICT' });
   });
 
-  test('a coordless stale day skips WINDOW_ORDER_CONFLICT and writes nothing — never the 09→11→10 baseline', async () => {
+  test('a coordless stale day writes nothing — the shared guard\'s COORDLESS_STOPS verdict wins over the chronology conflict', async () => {
     stopsByDate[DAY] = groupedDay({ c: { lat: null, lng: null } });
     const res = await runRouteReorder({ now: NOW, canonicalizeStale: true });
     expect(res.applied).toBe(0);
     expect(trxUpdates).toEqual([]);
     expect(RouteOptimizer.optimizeRoute).not.toHaveBeenCalled();
-    expect(ledger().skips.find((s) => s.date === DAY)).toMatchObject({ reason: 'WINDOW_ORDER_CONFLICT', source: 'promised_window' });
+    expect(ledger().skips.find((s) => s.date === DAY)).toMatchObject({ reason: 'COORDLESS_STOPS' });
   });
 
   test('a geocoded stale day where Google saves nothing skips WINDOW_ORDER_CONFLICT instead of writing the baseline', async () => {
@@ -514,7 +533,15 @@ describe('promised-window baseline chronology (codex pre-push P1)', () => {
 });
 
 describe('MAX_APPLIES_REACHED outranks the coordinate skips on a canonicalize day (codex pre-push P2)', () => {
-  test('a coordless stale day at the cap reports MAX_APPLIES_REACHED, not COORDLESS_STOPS', async () => {
+  test('a writable stale day at the cap (one geocoded stop numbered 4) reports MAX_APPLIES_REACHED, not TOO_FEW_GEOCODED_STOPS', async () => {
+    stopsByDate[DAY] = [stop('a', { window_start: '09:00', route_order: 4 })];
+    const res = await runRouteReorder({ now: NOW, canonicalizeStale: true, maxAppliesPerRun: 0 });
+    expect(res.applied).toBe(0);
+    expect(trxUpdates).toEqual([]);
+    expect(ledger().skips.find((s) => s.date === DAY)).toMatchObject({ reason: 'MAX_APPLIES_REACHED' });
+  });
+
+  test('a stale day the shared guard could never certify (coordless) keeps COORDLESS_STOPS at the cap — the cap is not why it was skipped', async () => {
     stopsByDate[DAY] = [
       stop('a', { window_start: '09:00', route_order: null }),
       stop('b', { window_start: '11:00', route_order: 2 }),
@@ -522,18 +549,7 @@ describe('MAX_APPLIES_REACHED outranks the coordinate skips on a canonicalize da
     ];
     const res = await runRouteReorder({ now: NOW, canonicalizeStale: true, maxAppliesPerRun: 0 });
     expect(res.applied).toBe(0);
-    expect(trxUpdates).toEqual([]);
-    expect(ledger().skips.find((s) => s.date === DAY)).toMatchObject({ reason: 'MAX_APPLIES_REACHED' });
-  });
-
-  test('a too-few-geocoded stale day at the cap reports MAX_APPLIES_REACHED, not TOO_FEW_GEOCODED_STOPS', async () => {
-    stopsByDate[DAY] = [
-      stop('a', { window_start: '09:00', route_order: null, lat: null, lng: null }),
-      stop('b', { window_start: '11:00', route_order: 2, lat: null, lng: null }),
-    ];
-    const res = await runRouteReorder({ now: NOW, canonicalizeStale: true, maxAppliesPerRun: 0 });
-    expect(res.applied).toBe(0);
-    expect(ledger().skips.find((s) => s.date === DAY)).toMatchObject({ reason: 'MAX_APPLIES_REACHED' });
+    expect(ledger().skips.find((s) => s.date === DAY)).toMatchObject({ reason: 'COORDLESS_STOPS' });
   });
 
   test('mode off: the same coordless day at the cap still reports COORDLESS_STOPS (unchanged precedence)', async () => {
@@ -645,5 +661,39 @@ describe('writeTechDayOrder explicit positions (rollback) — persisted values',
       opts: {}, now: new Date(), repairGates: [],
     });
     expect(trxUpdates).toEqual([{ id: 'B', route_order: 1 }, { id: 'A', route_order: 2 }]);
+  });
+});
+
+describe('schedule-quality alert reconciliation is the nightly band\'s alone (codex PRRT_kwDOR3YQi86mQTC2)', () => {
+  const { refreshScheduleQualityAlerts } = jest.requireMock('../services/scheduling/quality-alerts');
+  const GATES = ['GATE_SCHEDULE_QUALITY_MEASUREMENTS', 'GATE_SCHEDULE_QUALITY_ALERTS'];
+  beforeEach(() => {
+    for (const g of GATES) process.env[g] = 'true';
+    refreshScheduleQualityAlerts.mockResolvedValue({ status: 'reconciled' });
+  });
+  afterEach(() => { for (const g of GATES) delete process.env[g]; });
+
+  test('a route_order_cleanup --execute run never refreshes the alert cards', async () => {
+    const farDay = '2026-08-30';
+    stopsByDate[farDay] = [stop('a', { route_order: null }), stop('b', { route_order: 2 })];
+    const res = await runRouteReorder({ now: NOW, canonicalizeStale: true, dates: [farDay], dryRun: false, runType: 'route_order_cleanup' });
+    expect(res.applied).toBe(1);
+    expect(refreshScheduleQualityAlerts).not.toHaveBeenCalled();
+  });
+
+  test('a canonicalize run over caller-named dates (no run_type) does not refresh either', async () => {
+    await runRouteReorder({ now: NOW, canonicalizeStale: true, dates: ['2026-08-30'] });
+    expect(refreshScheduleQualityAlerts).not.toHaveBeenCalled();
+  });
+
+  test('the ordinary nightly pass (canonicalize gate on or off) still refreshes its own D+1..D+6 band', async () => {
+    const BAND = ['2026-08-14', '2026-08-15', '2026-08-16', '2026-08-17', '2026-08-18', '2026-08-19'];
+    await runRouteReorder({ now: NOW });
+    expect(refreshScheduleQualityAlerts).toHaveBeenCalledWith({ dates: BAND, now: NOW }, db);
+    refreshScheduleQualityAlerts.mockClear();
+    process.env.GATE_ROUTE_REORDER_STALE_ORDER = 'true';
+    await runRouteReorder({ now: NOW });
+    delete process.env.GATE_ROUTE_REORDER_STALE_ORDER;
+    expect(refreshScheduleQualityAlerts).toHaveBeenCalledWith({ dates: BAND, now: NOW }, db);
   });
 });

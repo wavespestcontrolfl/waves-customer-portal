@@ -674,25 +674,51 @@ function reportAndBackup({ execute, result, entries, error, outPath }) {
   }
 }
 
+/** True when an executed rollback did not restore everything it was asked
+ *  to: fewer rows restored than the backup holds, or any tech-day skipped or
+ *  failed. The script then exits nonzero (codex PRRT_kwDOR3YQi86mQTCz) — a
+ *  partial rollback must never read as success to an operator or a wrapper. */
+function rollbackIsIncomplete(result, totalRows) {
+  return result.restored < totalRows
+    || result.summary.skipped.length > 0
+    || result.summary.failed.length > 0;
+}
+
+/**
+ * `--rollback <file>`: returns the process exit code (0 = clean). A dry run
+ * (the default) previews with no lock, no transaction, nothing that can
+ * write. `--execute` runs under the SAME run-level lock the forward cleanup
+ * and the nightly auto-dispatch/route-reorder pass hold —
+ * runExclusive('auto-dispatch-recurring'), fail-fast (codex
+ * PRRT_kwDOR3YQi86mQTC6): a rollback racing the nightly pass could restore
+ * a day's old positions while that pass is mid-way through rewriting its
+ * neighbors. A held lock refuses the whole rollback (exit 1, nothing
+ * written); wasLockSkipped reads only the lock machinery's own refusal
+ * shape, never applyRollback's result.
+ */
 async function runRollback(db, backupPath, execute, now, deps) {
   const raw = fs.readFileSync(path.resolve(backupPath), 'utf8');
   const backup = JSON.parse(raw);
   const rows = Array.isArray(backup.rows) ? backup.rows : [];
   if (!rows.length) {
     console.log('Backup file has no rows — nothing to roll back.');
-    return;
+    return 0;
   }
   if (!execute) {
-    // Dry run by default, same convention as the rest of the script — no
-    // lock, no transaction, nothing here can write.
     console.log(`DRY RUN — would roll back ${rows.length} row(s) from ${backupPath} (generated_at=${backup.generated_at || 'unknown'})\n`);
     printRollbackPlan(await previewRollback(db, rows, deps));
     console.log('\nDry run only — nothing was written. Pass --rollback <file> --execute to commit.');
-    return;
+    return 0;
   }
   console.log(`EXECUTING — rolling back ${rows.length} row(s) from ${backupPath} (generated_at=${backup.generated_at || 'unknown'})\n`);
-  const result = await applyRollback(db, rows, now, deps);
+  const result = await deps.runExclusive('auto-dispatch-recurring', () => applyRollback(db, rows, now, deps),
+    { recordHealth: false, waitForSlot: false });
+  if (deps.wasLockSkipped(result)) {
+    console.error(`Refused to roll back — the nightly auto-dispatch/route-reorder lock is held (${result.reason}). Nothing was written. Try again shortly.`);
+    return 1;
+  }
   printRollbackResult(result, rows.length);
+  return rollbackIsIncomplete(result, rows.length) ? 1 : 0;
 }
 
 async function main() {
@@ -715,8 +741,9 @@ async function main() {
       ROUTE_WRITE_GUARD_COLUMNS, CUSTOMER_PREMISE_ALIASES, guardedCoordSelects,
       EXCLUDE_STATUSES, LIVE_HOLD_SQL,
       RouteOptimizer, violatesWindowChronology, violatesWindowFeasibility, currentOrder,
+      runExclusive, wasLockSkipped,
     };
-    await runRollback(db, ROLLBACK_PATH, EXECUTE, new Date(), rollbackDeps);
+    process.exitCode = await runRollback(db, ROLLBACK_PATH, EXECUTE, new Date(), rollbackDeps);
     await db.destroy();
     return;
   }
@@ -818,6 +845,6 @@ if (require.main === module) {
 module.exports = {
   buildDateRange, buildBackupRows, applyRollback, parseLedgerResult, recoveryInstruction, collectEntries, reportAndBackup,
   groupRowsByTechDay, readLiveTechDay, mismatchedIdsForDay, buildRollbackTargetOrder, buildRollbackPositions,
-  restoredDispatchOrder, rollbackWindowConflict, previewRollback, printRollbackPlan, printRollbackResult, buildRunOpts, writeBackupFile,
+  restoredDispatchOrder, rollbackWindowConflict, runRollback, rollbackIsIncomplete, previewRollback, printRollbackPlan, printRollbackResult, buildRunOpts, writeBackupFile,
   outOfHorizonDates, runIsUnhealthy,
 };

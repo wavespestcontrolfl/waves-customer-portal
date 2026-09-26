@@ -16,7 +16,7 @@ const {
   buildDateRange, buildBackupRows, applyRollback, parseLedgerResult, recoveryInstruction,
   collectEntries, reportAndBackup, groupRowsByTechDay, readLiveTechDay, mismatchedIdsForDay,
   buildRollbackTargetOrder, buildRollbackPositions, restoredDispatchOrder, rollbackWindowConflict, previewRollback, printRollbackPlan, printRollbackResult,
-  buildRunOpts, writeBackupFile, outOfHorizonDates, runIsUnhealthy,
+  buildRunOpts, writeBackupFile, outOfHorizonDates, runIsUnhealthy, runRollback, rollbackIsIncomplete,
 } = require('../../scripts/route-order-cleanup');
 const {
   ROUTE_WRITE_GUARD_COLUMNS, CUSTOMER_PREMISE_ALIASES, classifyWriteError, _internals: reorderInternals,
@@ -1022,5 +1022,78 @@ describe('runIsUnhealthy', () => {
   test('gate_off / outside_planning_horizon are legitimate no-ops, not unhealthy', () => {
     expect(runIsUnhealthy({ status: 'gate_off' })).toBe(false);
     expect(runIsUnhealthy({ status: 'outside_planning_horizon' })).toBe(false);
+  });
+});
+
+describe('runRollback --execute: run-level lock (PRRT_kwDOR3YQi86mQTC6) and exit code (PRRT_kwDOR3YQi86mQTCz)', () => {
+  const NOW = new Date('2026-09-27T12:00:00Z');
+  const BACKUP_PATH = '/nonexistent/route-order-backup.json';
+  const backupRows = [
+    { id: 'A', date: '2026-10-05', technician_id: 't1', before: 1, after: 2 },
+    { id: 'B', date: '2026-10-05', technician_id: 't1', before: 2, after: 1 },
+  ];
+  let readSpy;
+  let logSpy;
+  let errSpy;
+  beforeEach(() => {
+    readSpy = jest.spyOn(fs, 'readFileSync').mockReturnValue(JSON.stringify({ generated_at: 'x', rows: backupRows }));
+    logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+    errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+  });
+  afterEach(() => { readSpy.mockRestore(); logSpy.mockRestore(); errSpy.mockRestore(); });
+
+  const liveConn = () => fakeLiveConn({ 't1:2026-10-05': [{ id: 'B', route_order: 1 }, { id: 'A', route_order: 2 }] });
+  // Runs the callback like the real lock does when it wins the lease.
+  const lockWon = () => jest.fn(async (_name, fn) => fn());
+
+  test('--execute runs applyRollback INSIDE runExclusive(auto-dispatch-recurring), fail-fast, no health record', async () => {
+    const runExclusive = lockWon();
+    const writeTechDayOrder = jest.fn(async () => {});
+    const code = await runRollback(liveConn(), BACKUP_PATH, true, NOW, rollbackDeps({ writeTechDayOrder, runExclusive, wasLockSkipped }));
+    expect(runExclusive).toHaveBeenCalledTimes(1);
+    expect(runExclusive.mock.calls[0][0]).toBe('auto-dispatch-recurring');
+    expect(runExclusive.mock.calls[0][2]).toEqual({ recordHealth: false, waitForSlot: false });
+    expect(writeTechDayOrder).toHaveBeenCalledTimes(1);
+    expect(code).toBe(0);
+  });
+
+  test('a held lock refuses the whole rollback — the writer is never called, exit 1', async () => {
+    const runExclusive = jest.fn(async () => ({ skipped: true, reason: 'lease_held' }));
+    const writeTechDayOrder = jest.fn();
+    const code = await runRollback(liveConn(), BACKUP_PATH, true, NOW, rollbackDeps({ writeTechDayOrder, runExclusive, wasLockSkipped }));
+    expect(writeTechDayOrder).not.toHaveBeenCalled();
+    expect(code).toBe(1);
+    expect(errSpy.mock.calls.some(([m]) => /lock is held \(lease_held\)/.test(m))).toBe(true);
+  });
+
+  test('the dry-run preview takes no lock at all', async () => {
+    const runExclusive = jest.fn();
+    const code = await runRollback(liveConn(), BACKUP_PATH, false, NOW, rollbackDeps({ runExclusive, wasLockSkipped }));
+    expect(runExclusive).not.toHaveBeenCalled();
+    expect(code).toBe(0);
+  });
+
+  test('an executed rollback with a skipped tech-day exits nonzero', async () => {
+    const writeTechDayOrder = jest.fn(async () => {
+      throw Object.assign(new Error('stop A changed during the run'), { code: 'STALE_TECH_DAY' });
+    });
+    const code = await runRollback(liveConn(), BACKUP_PATH, true, NOW, rollbackDeps({ writeTechDayOrder, runExclusive: lockWon(), wasLockSkipped }));
+    expect(code).toBe(1);
+  });
+
+  test('an executed rollback with a failed tech-day (reminder status unreadable) exits nonzero', async () => {
+    const writeTechDayOrder = jest.fn(async () => {
+      throw Object.assign(new Error('boom'), { code: 'REMINDER_GUARD_OUTAGE' });
+    });
+    const code = await runRollback(liveConn(), BACKUP_PATH, true, NOW, rollbackDeps({ writeTechDayOrder, runExclusive: lockWon(), wasLockSkipped }));
+    expect(code).toBe(1);
+  });
+
+  test('rollbackIsIncomplete: restored < rows, or any skip/failure, is incomplete; a full clean restore is not', () => {
+    const clean = { skipped: [], failed: [] };
+    expect(rollbackIsIncomplete({ restored: 2, summary: clean }, 2)).toBe(false);
+    expect(rollbackIsIncomplete({ restored: 1, summary: clean }, 2)).toBe(true);
+    expect(rollbackIsIncomplete({ restored: 2, summary: { skipped: [{}], failed: [] } }, 2)).toBe(true);
+    expect(rollbackIsIncomplete({ restored: 2, summary: { skipped: [], failed: [{}] } }, 2)).toBe(true);
   });
 });

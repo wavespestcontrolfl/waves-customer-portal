@@ -433,6 +433,12 @@ function gateOffReason() {
  *  - a pass without LIVE road durations rests on the in-house model, which
  *    the fallback's owner ruling requires to be calibrated.
  */
+/** Every reason uncertifiableReason can return — how a caller of
+ *  chooseWindowSafeOrder tells "this day cannot be certified at all" apart
+ *  from its post-conflict refusals (WINDOW_FIT_GATE_OFF /
+ *  NO_FEASIBLE_IMPROVEMENT). Keep in sync with the function below. */
+const UNCERTIFIABLE_REASONS = new Set(['LIVE_STOP_IN_PROGRESS', 'COORDLESS_STOPS', 'MODEL_UNCALIBRATED']);
+
 function uncertifiableReason({ sourceStops, startMin, googleSource, legs, requireCalibratedModel, googleOrder, sourceById }) {
   if (startMin != null && sourceStops.some(isLiveStop)) return 'LIVE_STOP_IN_PROGRESS';
   if (sourceStops.some((s) => !(parseFloat(s.lat) && parseFloat(s.lng)))) return 'COORDLESS_STOPS';
@@ -930,33 +936,46 @@ function boundedDateList(rawDates, today, lastDate) {
 
 /**
  * The promised-window baseline for a stale tech-day (route-reorder-window-fit's
- * promisedWindowOrder) plus the two checks that matter for a baseline
- * written with no Google call:
+ * promisedWindowOrder), certified by the SAME shared guard every other
+ * candidate order goes through — chooseWindowSafeOrder, called exactly as
+ * the forward pass calls it (no legs: nothing here asked Google) — never a
+ * separate, weaker check of its own (codex PRRT_kwDOR3YQi86mQTCw: the
+ * earlier private simulateArrivalRoute check counted a coordless stop's
+ * travel as zero and so "certified" mixed geocoded + coordless days the
+ * forward pass itself refuses as COORDLESS_STOPS). Outcomes:
+ *   - the guard cannot certify the day at all (uncertifiableReason —
+ *     COORDLESS_STOPS for ANY stop without usable coordinates, fully
+ *     coordless days included): plain `null` — no baseline write, the day
+ *     keeps its ORIGINAL skip reason.
  *   - CHRONOLOGY: promisedWindowOrder pulls a co-visit/visit_id sibling
  *     adjacent to its chain wherever it sits in the sorted list, which can
  *     jump it PAST an unrelated stop whose own window sits chronologically
  *     between the two siblings (09:00 + 11:00 grouped, a 10:00 stop pulled
- *     after both instead of between them — codex pre-push P1). The SAME
- *     violatesWindowChronology guard the forward pass runs on every other
- *     candidate order is run on this one too, before it is ever accepted —
- *     a fail here returns the distinguishable `{ conflict:
- *     'WINDOW_ORDER_CONFLICT' }` shape (never `orderedStops`/`meters`) so
- *     the caller reports the SAME reason the forward pass does for an
- *     illegal order, instead of silently falling through to whatever this
- *     tech-day's original skip reason would have been.
- *   - FEASIBILITY: can the day actually be driven in this order at all
- *     (untimed stops interleaved around fixed promises can still make a day
- *     undriveable even though every promise is in the right relative
- *     order). Returns plain `null` when the baseline is chronological but
- *     still not drivable — fail closed, no baseline write, the day keeps
- *     its ORIGINAL skip reason (unchanged from before this fix).
+ *     after both — codex pre-push P1): `{ conflict: 'WINDOW_ORDER_CONFLICT' }`
+ *     (never `orderedStops`/`meters`), so the caller reports the SAME reason
+ *     the forward pass does for an illegal order.
+ *   - FEASIBILITY (WINDOW_FIT_CONFLICT — chronological but not drivable):
+ *     plain `null`, fail closed, the day keeps its original skip reason.
+ * Only an order the guard accepts AS IS is returned; its window-fit repair
+ * (when the gates run one) is never substituted for the baseline.
  */
 function canonicalizeBaselineOrder(RouteOptimizer, techStops) {
   const orderedStops = promisedWindowOrder(techStops);
-  if (violatesWindowChronology(orderedStops, techStops)) return { conflict: 'WINDOW_ORDER_CONFLICT' };
-  const simulation = simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, orderedStops, { startMin: 8 * 60 });
-  if (!simulation) return null;
-  return { orderedStops, meters: modelDistanceMeters(RouteOptimizer, orderedStops) };
+  const guard = chooseWindowSafeOrder({
+    RouteOptimizer, googleOrder: orderedStops, sourceStops: techStops, googleSource: 'promised_window',
+  });
+  if (UNCERTIFIABLE_REASONS.has(guard.reason)) return null;
+  if (guard.conflict === 'WINDOW_ORDER_CONFLICT') return { conflict: 'WINDOW_ORDER_CONFLICT' };
+  if (guard.conflict || !guard.orderedStops) return null;
+  return { orderedStops: guard.orderedStops, meters: guard.afterMeters };
+}
+
+/** True when the promised-window baseline would actually be written for this
+ *  tech-day (certified, and different from what is stored) — how a capped
+ *  run tells a day it had to pass over from one it could never write. */
+function baselineWritable(RouteOptimizer, techStops) {
+  const baseline = canonicalizeBaselineOrder(RouteOptimizer, techStops);
+  return !!baseline?.orderedStops && routeOrderChanges(techStops, baseline.orderedStops).length > 0;
 }
 
 /** {id, before, after} for every stop whose position actually moves between
@@ -1221,6 +1240,30 @@ function runTypeFor(opts) {
   return opts.runType || (opts.repairOnly ? 'route_repair_change' : 'route_tiers_nightly');
 }
 
+/**
+ * Whether this run reconciles the schedule-quality alert cards afterwards.
+ * Only the ordinary nightly pass over its own D+1..D+6 band does, exactly as
+ * before: change-triggered repairs are followed by this check in their
+ * caller; a dry run never does (that also writes dispatch-card rows); and a
+ * route_order_cleanup run — or any canonicalize run over caller-named
+ * dates — never does either (codex PRRT_kwDOR3YQi86mQTC2: the cleanup
+ * script's D+3..D+30 range would otherwise open/resolve dispatch cards far
+ * outside the band the nightly reconciler owns, as a side effect of a
+ * one-off route_order cleanup).
+ */
+function refreshesQualityAlerts(opts, { qualityEnabled, runType, canonicalizeStaleEnabled }) {
+  if (opts.dryRun || opts.repairOnly || !qualityEnabled) return false;
+  if (runType !== 'route_tiers_nightly' || hasCustomDates(opts, canonicalizeStaleEnabled)) return false;
+  return gateEnvValue('GATE_SCHEDULE_QUALITY_ALERTS');
+}
+
+/** Caller-named dates are honored: repairOnly, or canonicalize mode with a
+ *  non-empty opts.dates (see runDates). */
+function hasCustomDates(opts, canonicalizeStaleEnabled) {
+  return !!opts.repairOnly
+    || (canonicalizeStaleEnabled && Array.isArray(opts.dates) && opts.dates.length > 0);
+}
+
 /** Stale-order canonicalization mode for this run — see the comment at its
  *  one call site in runRouteReorder. Unset/false = today's behavior. */
 function canonicalizeStaleMode(opts) {
@@ -1231,9 +1274,7 @@ function canonicalizeStaleMode(opts) {
 /** The run's date list: caller-named dates (repairOnly, or canonicalize mode
  *  with explicit opts.dates) bounded to D+1..D+30, else the nightly band. */
 function runDates(opts, { canonicalizeStaleEnabled, now, today, lastDate }) {
-  const customDates = opts.repairOnly
-    || (canonicalizeStaleEnabled && Array.isArray(opts.dates) && opts.dates.length > 0);
-  return customDates
+  return hasCustomDates(opts, canonicalizeStaleEnabled)
     ? boundedDateList(opts.dates, today, lastDate)
     : Array.from({ length: TIER2_MIN_DAYS_OUT - 1 }, (_, index) => etDateString(addETDays(now, index + 1)));
 }
@@ -1500,10 +1541,12 @@ async function runRouteReorder(opts = {}, conn = db) {
             summary.skipped.push(skipEntry);
           };
           // The Google-can't-run exits (too few geocoded / coordless / over
-          // the waypoint cap): a stale day whose write the per-run cap
-          // blocks reports MAX_APPLIES_REACHED first — same precedence the
-          // forward pass gives the cap — never a coordinate reason.
-          const canonicalizeOnlyOrSkip = (skipEntry, onSkip) => (canon.capped
+          // the waypoint cap): a stale day whose baseline WOULD be written
+          // but for the per-run cap reports MAX_APPLIES_REACHED first — same
+          // precedence the forward pass gives the cap. A day the shared
+          // guard would never certify (any coordless stop) keeps its own
+          // coordinate reason — the cap is not why it was skipped.
+          const canonicalizeOnlyOrSkip = (skipEntry, onSkip) => (canon.capped && baselineWritable(RouteOptimizer, techStops)
             ? canonicalizeOrSkip(false, { ...entryBase, reason: 'MAX_APPLIES_REACHED' })
             : canonicalizeOrSkip(canon.eligible, skipEntry, onSkip));
           const withCoords = techStops.filter((s) => parseFloat(s.lat) && parseFloat(s.lng));
@@ -1751,10 +1794,9 @@ async function runRouteReorder(opts = {}, conn = db) {
     logger.error(`[route-reorder] run fatal: ${fatal.message}`);
   }
 
-  // The existing nightly pass refreshes unresolved future-route cards.
-  // Change-triggered repairs are followed by this check in their caller.
-  // Never in dry-run mode — that also writes dispatch-card rows.
-  if (!opts.dryRun && !opts.repairOnly && qualityEnabled && gateEnvValue('GATE_SCHEDULE_QUALITY_ALERTS')) {
+  // The existing nightly pass refreshes unresolved future-route cards (see
+  // refreshesQualityAlerts for which runs do).
+  if (refreshesQualityAlerts(opts, { qualityEnabled, runType: summary.run_type, canonicalizeStaleEnabled })) {
     const alerts = await require('./scheduling/quality-alerts').refreshScheduleQualityAlerts({ dates, now: opts.now }, conn);
     if (alerts.status === 'failed') {
       if (status === 'completed') status = 'completed_with_errors';
