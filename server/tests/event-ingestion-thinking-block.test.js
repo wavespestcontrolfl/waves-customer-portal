@@ -22,15 +22,25 @@ jest.mock('../services/logger', () => ({
   info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(),
 }));
 jest.mock('../models/db', () => jest.fn());
+// Keep the real ledgerCall (GATE_LLM_CALL_LEDGER is unset in tests, so it's
+// already a real no-DB no-op) but spy on ledgerCallRejected so the "answered
+// nothing usable" tests below can assert the ledger row gets flipped.
+jest.mock('../services/llm-dispatch-metrics', () => {
+  const actual = jest.requireActual('../services/llm-dispatch-metrics');
+  return { ...actual, ledgerCallRejected: jest.fn() };
+});
 
 const { extractEventsWithClaude } = require('../services/event-ingestion');
+const { ledgerCallRejected } = require('../services/llm-dispatch-metrics');
 
 const SOURCE = { id: 'src-1', name: 'Manatee Chamber — Upcoming Events', coverage_geo: ['bradenton'] };
 const OPTS = { mode: 'articles', maxEvents: 15 };
+// In the prompt's own event shape (title / startAt / city) — malformed
+// members are filtered out of the extraction since Codex review on #4884.
 const EVENTS_JSON = JSON.stringify({
   events: [
-    { name: 'Business After Hours', start_date: '2026-08-05', city: 'Bradenton' },
-    { name: 'Chamber Breakfast', start_date: '2026-08-12', city: 'Bradenton' },
+    { title: 'Business After Hours', startAt: '2026-08-05T17:30:00-04:00', city: 'bradenton' },
+    { title: 'Chamber Breakfast', startAt: '2026-08-12T07:30:00-04:00', city: 'bradenton' },
   ],
 });
 
@@ -50,7 +60,7 @@ describe('event extraction: thinking-block tolerance', () => {
 
     const events = await extractEventsWithClaude(SOURCE, '<item>…</item>', OPTS);
     expect(events).toHaveLength(2);
-    expect(events[0].name).toBe('Business After Hours');
+    expect(events[0].title).toBe('Business After Hours');
   });
 
   test('redacted_thinking is tolerated the same way', async () => {
@@ -85,5 +95,81 @@ describe('event extraction: thinking-block tolerance', () => {
     });
 
     await expect(extractEventsWithClaude(SOURCE, '<item>…</item>', OPTS)).resolves.toEqual([]);
+    expect(ledgerCallRejected).not.toHaveBeenCalled();
+  });
+
+  // Codex r8 on #4884: {"events":[{}]} used to pass as a successful ledger
+  // call even though upsertExtractedEvents (event-ingestion.js ~705) drops
+  // every entry that fails normalizeExtractedEvent — a nonempty batch that
+  // answers nothing usable must record a failure, not a success.
+  describe('nonempty-but-unusable batches (Codex r8 on #4884)', () => {
+    test('a batch of bare objects normalizes to nothing and is flagged as a failure', async () => {
+      mockCreate.mockResolvedValue({ content: [{ type: 'text', text: '{"events":[{},{}]}' }] });
+
+      const events = await extractEventsWithClaude(SOURCE, '<item>…</item>', OPTS);
+      // Malformed members never reach the caller.
+      expect(events).toEqual([]);
+      expect(ledgerCallRejected).toHaveBeenCalledWith(expect.anything(), 'schema_invalid');
+    });
+
+    test('junk members are dropped and fail the row; the usable entry is still returned', async () => {
+      mockCreate.mockResolvedValue({
+        content: [{ type: 'text', text: '{"events":[{},{"title":"Sunset Market"}]}' }],
+      });
+
+      const events = await extractEventsWithClaude(SOURCE, '<item>…</item>', OPTS);
+      expect(events).toEqual([{ title: 'Sunset Market' }]);
+      expect(ledgerCallRejected).toHaveBeenCalledWith(expect.anything(), 'schema_invalid');
+    });
+
+    // A null member used to throw inside the usability check / mid-upsert
+    // after the call was accepted; a non-string title or description was
+    // stored as "[object Object]".
+    test.each([
+      ['a null member', null],
+      ['an object title', { title: { en: 'Boat Parade' } }],
+      ['an object description', { title: 'Boat Parade', description: {} }],
+      ['an unparseable startAt', { title: 'Boat Parade', startAt: 'next-ish Tuesday' }],
+    ])('%s is dropped (no throw) and fails the row', async (_label, member) => {
+      mockCreate.mockResolvedValue({ content: [{ type: 'text', text: JSON.stringify({ events: [member, { title: 'Sunset Market' }] }) }] });
+      const events = await extractEventsWithClaude(SOURCE, '<item>…</item>', OPTS);
+      expect(events).toEqual([{ title: 'Sunset Market' }]);
+      expect(ledgerCallRejected).toHaveBeenCalledWith(expect.anything(), 'schema_invalid');
+    });
+
+    test('a batch of only well-formed entries is not flagged', async () => {
+      mockCreate.mockResolvedValue({ content: [{ type: 'text', text: '{"events":[{"title":"Sunset Market","venueName":null,"description":"Fresh produce."}]}' }] });
+      const events = await extractEventsWithClaude(SOURCE, '<item>…</item>', OPTS);
+      expect(events).toHaveLength(1);
+      expect(ledgerCallRejected).not.toHaveBeenCalled();
+    });
+
+    test('requireStart (news-RSS contract): a title-only entry with no date is unusable under that contract', async () => {
+      mockCreate.mockResolvedValue({ content: [{ type: 'text', text: '{"events":[{"title":"Some Article"}]}' }] });
+
+      const events = await extractEventsWithClaude(SOURCE, '<item>…</item>', { ...OPTS, requireStart: true });
+      expect(events).toHaveLength(1); // still returned — the caller's upsertExtractedEvents drops it
+      expect(ledgerCallRejected).toHaveBeenCalledWith(expect.anything(), 'schema_invalid');
+    });
+
+    test('requireStart: the SAME title-only entry is usable in page mode (no requireStart)', async () => {
+      mockCreate.mockResolvedValue({ content: [{ type: 'text', text: '{"events":[{"title":"Some Article"}]}' }] });
+
+      const events = await extractEventsWithClaude(SOURCE, '<item>…</item>', { mode: 'page', maxEvents: 15 });
+      expect(events).toHaveLength(1);
+      expect(ledgerCallRejected).not.toHaveBeenCalled();
+    });
+  });
+});
+
+// events_raw.event_url / image_url are varchar(1024): a longer URL would fail
+// the upsert and abort the pull, so it is dropped like an unsafe one.
+describe('normalizeExtractedEvent — URL column limits', () => {
+  const { normalizeExtractedEvent } = require('../services/event-ingestion');
+  test('an over-long event / image URL is dropped; a normal one is kept', () => {
+    const long = `https://example.com/${'e'.repeat(1100)}`;
+    const out = normalizeExtractedEvent(SOURCE, { title: 'Sunset Market', eventUrl: long, imageUrl: 'https://example.com/i.jpg' }, Date.now());
+    expect(out.row.event_url).toBeNull();
+    expect(out.row.image_url).toBe('https://example.com/i.jpg');
   });
 });

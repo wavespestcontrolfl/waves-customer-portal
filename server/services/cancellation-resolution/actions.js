@@ -47,7 +47,7 @@ async function ownerTask({ customerId, caseId, kind, title, body, link = null, m
   const row = await notifyAdmin('customer_retention', title, body, {
     icon: 'user-check',
     bell: true,
-    link: link || `/admin/customers/${customerId}`,
+    link: link || `/admin/customers?customerId=${customerId}`,
     dedupeKey: `cancel_resolution:${kind}:${caseId}`,
     metadata: { kind, customerId, cancellationCaseId: caseId, ...metadata },
   });

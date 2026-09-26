@@ -350,6 +350,24 @@ function findVisit(program, visitNumber) {
   return (program?.visits || []).find((visit) => Number(visit.visit) === Number(visitNumber)) || null;
 }
 
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+// Month-keyed programs (tree & shrub: one visit per calendar month) resolve
+// by the appointment's month, not the matcher rule's fixed visit — the
+// tree_shrub rule's `visit: 1` is only the no-month fallback, so without a
+// month every T&S appointment would show the January protocol. Programs
+// whose visits are 'Any' (pest, termite, …) return null and keep their
+// rule-picked visit.
+// Shared with job-card.js seasonalVisit so every protocol surface agrees.
+// `month` is "Apr"/"april"/4; anything else resolves no month (null).
+function monthVisit(program, month) {
+  const n = /^\d{1,2}$/.test(String(month ?? '').trim()) ? Number(month) : NaN;
+  const abbr = String(month || '').slice(0, 3).toLowerCase();
+  const key = n >= 1 && n <= 12 ? MONTHS[n - 1] : MONTHS.find((m) => m.toLowerCase() === abbr);
+  if (!key) return null;
+  return (program?.visits || []).find((visit) => visit?.month === key) || null;
+}
+
 // Consultation/equipment service, not a treatment — no program, no visit,
 // by design. Every caller already treats a null program as "no protocol"
 // (admin-protocols.js's /match and /completion-actions 404; job-card.js's
@@ -382,7 +400,7 @@ function mistingSystemMatchOverride(serviceType, serviceKey) {
   return null;
 }
 
-function matchServiceProtocol(protocols, serviceType, { serviceKey = null } = {}) {
+function matchServiceProtocol(protocols, serviceType, { serviceKey = null, month = null } = {}) {
   const override = mistingSystemMatchOverride(serviceType, serviceKey);
   if (override) return override;
   const normalized = normalize(serviceType);
@@ -400,7 +418,9 @@ function matchServiceProtocol(protocols, serviceType, { serviceKey = null } = {}
   if (!program) return { programKey, program: null, matchedVisit: null, matched: false, reason: 'program_missing' };
 
   const fallbackVisit = program.visits?.[0] || null;
-  const matchedVisit = matchedRule ? findVisit(program, matchedRule.visit) || fallbackVisit : fallbackVisit;
+  const ruleVisit = matchedRule ? findVisit(program, matchedRule.visit) || fallbackVisit : fallbackVisit;
+  const seasonal = monthVisit(program, month);
+  const matchedVisit = seasonal || ruleVisit;
 
   return {
     programKey,
@@ -414,5 +434,6 @@ function matchServiceProtocol(protocols, serviceType, { serviceKey = null } = {}
 module.exports = {
   MATCH_RULES,
   matchServiceProtocol,
+  monthVisit,
   programKeyForService,
 };

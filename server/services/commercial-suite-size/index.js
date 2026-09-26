@@ -6,8 +6,9 @@
  * footage, never the whole building, and never left as a $0 manual quote.
  * source-arbitration.js gives a commercial tenant with no stated unit size
  * `sizeBasis: 'unresolved'` by design (county sqft describes the building) —
- * this module is what fills that gap for the estimator engine, the same
- * way a residential estimate is auto-sized from county/subdivision data.
+ * this module is what fills that gap for the estimator engine and the
+ * admin estimate tool's property lookup, the same way a residential
+ * estimate is auto-sized from county/subdivision data.
  *
  * Two SIZE sources, tried in priority order, each fail-open (an error or a
  * miss just falls through to the next):
@@ -39,6 +40,18 @@ const SOURCES = {
   SUITE_TYPE_DEFAULT: 'suite_type_default',
 };
 
+// Admin-lookup budget (property-lookup-v2.js passes opts.deadlineAt, an
+// absolute Date.now()-comparable timestamp): each leg's timeout is capped to
+// the time left, and a leg isn't started at all under MIN_LEG_REMAINING_MS.
+// Absent (the estimator engine), every leg keeps its own default.
+const DBPR_DEFAULT_TIMEOUT_MS = 15000;
+const WEB_SEARCH_DEFAULT_TIMEOUT_MS = 20000;
+const MIN_LEG_REMAINING_MS = 2000;
+
+function remainingBudgetMs(deadlineAt) {
+  return Number.isFinite(deadlineAt) ? (deadlineAt - Date.now()) : Infinity;
+}
+
 /**
  * @param {object} input
  *   address            — { street, unit, city, zip }
@@ -49,9 +62,11 @@ const SOURCES = {
  *                         address", not "require it to be typed in first")
  *   commercialRiskType  — intent-schema commercial_risk_type, or null
  *   commercialSubtype   — property-lookup commercialSubtype, or null
- * @param {object} opts   — injection for tests: districts, fetchText, now
- *                         (DBPR leg); timeoutMs, maxSearches,
- *                         anthropicClient (web-search leg)
+ * @param {object} opts   — districts, fetchText, now, requireWarmCache,
+ *                         minRows (DBPR leg); timeoutMs, maxSearches,
+ *                         anthropicClient (web-search leg); skipWebSearch
+ *                         (the admin lookup's cache-hit path); deadlineAt
+ *                         (the admin lookup's remaining budget)
  * @returns {Promise<{value:number, source:string, confidence:string,
  *   businessName:string|null, businessType:string|null, evidence:array,
  *   seats?:number}|null>}
@@ -65,35 +80,54 @@ async function resolveCommercialSuiteSize(input = {}, opts = {}) {
   let businessName = businessNameHint || null;
   let businessType = null;
 
-  try {
-    const dbpr = await resolveViaDbprLicense({ address, phone, businessNameHint }, opts);
-    if (dbpr) {
-      businessName = businessName || dbpr.businessName || null;
-      if (Number(dbpr.value) > 0) {
-        return {
-          value: dbpr.value,
-          source: SOURCES.LICENSE_SEATS,
-          confidence: 'medium',
-          businessName: dbpr.businessName || businessName,
-          businessType: 'restaurant_food',
-          evidence: dbpr.evidence,
-          seats: dbpr.seats,
-        };
+  const dbprRemaining = remainingBudgetMs(opts.deadlineAt);
+  if (dbprRemaining < MIN_LEG_REMAINING_MS) {
+    logger.warn(`[commercial-suite-size] skipping DBPR leg — ${Math.max(0, Math.round(dbprRemaining))}ms left in the lookup budget`);
+  } else {
+    try {
+      const dbprOpts = Number.isFinite(dbprRemaining)
+        ? { ...opts, timeoutMs: Math.min(DBPR_DEFAULT_TIMEOUT_MS, dbprRemaining) }
+        : opts;
+      const dbpr = await resolveViaDbprLicense({ address, phone, businessNameHint }, dbprOpts);
+      if (dbpr) {
+        businessName = businessName || dbpr.businessName || null;
+        if (Number(dbpr.value) > 0) {
+          return {
+            value: dbpr.value,
+            source: SOURCES.LICENSE_SEATS,
+            confidence: 'medium',
+            businessName: dbpr.businessName || businessName,
+            businessType: 'restaurant_food',
+            evidence: dbpr.evidence,
+            seats: dbpr.seats,
+          };
+        }
       }
+    } catch (err) {
+      logger.warn(`[commercial-suite-size] DBPR leg errored: ${err.message}`);
     }
-  } catch (err) {
-    logger.warn(`[commercial-suite-size] DBPR leg errored: ${err.message}`);
   }
 
   // Name-only leg (see web-search-leg.js — it never returns a size).
-  try {
-    const web = await resolveViaWebSearch({ address, businessNameHint }, opts);
-    if (web) {
-      businessName = businessName || web.businessName || null;
-      businessType = businessType || web.businessType || null;
+  // skipWebSearch: the admin lookup's cache-hit path, which must stay fast.
+  const webRemaining = remainingBudgetMs(opts.deadlineAt);
+  if (opts.skipWebSearch) {
+    // skipped by the caller
+  } else if (webRemaining < MIN_LEG_REMAINING_MS) {
+    logger.warn(`[commercial-suite-size] skipping web-search leg — ${Math.max(0, Math.round(webRemaining))}ms left in the lookup budget`);
+  } else {
+    try {
+      const webOpts = Number.isFinite(webRemaining)
+        ? { ...opts, timeoutMs: Math.min(opts.timeoutMs || WEB_SEARCH_DEFAULT_TIMEOUT_MS, webRemaining) }
+        : opts;
+      const web = await resolveViaWebSearch({ address, businessNameHint }, webOpts);
+      if (web) {
+        businessName = businessName || web.businessName || null;
+        businessType = businessType || web.businessType || null;
+      }
+    } catch (err) {
+      logger.warn(`[commercial-suite-size] web-search leg errored: ${err.message}`);
     }
-  } catch (err) {
-    logger.warn(`[commercial-suite-size] web-search leg errored: ${err.message}`);
   }
 
   // Type default keys OFF commercialRiskType/commercialSubtype ONLY — a
