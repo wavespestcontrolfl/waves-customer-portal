@@ -36,6 +36,20 @@ test('accepted delivery stamps only the fully bound Email reservation', async ()
   );
 });
 
+test('invoice follow-up replay matches the producer ledger source', async () => {
+  const database = jest.fn();
+  readStoredBillingReplayContext.mockReturnValueOnce({
+    ...context,
+    source_entry_point: 'invoice_followup_sequence',
+  });
+  await expect(Reservation.markBillingEmailReservationDelivered({ sent_at: new Date() }, database))
+    .resolves.toBe(true);
+  expect(ContactLedger.markDelivered).toHaveBeenCalledWith(
+    { id: 'email-ledger-1' },
+    { database, match: expect.objectContaining({ source: 'invoice_followups' }) },
+  );
+});
+
 test('terminal refusal resolves the Email reservation without claiming delivery', async () => {
   const database = jest.fn();
   await expect(Reservation.resolveBillingEmailReservationRefusal({ id: 'message-1' }, database))
