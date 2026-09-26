@@ -6028,6 +6028,25 @@ router.get('/', async (req, res, next) => {
       byTech[key].zones[s.zone] = (byTech[key].zones[s.zone] || 0) + 1;
     });
 
+    // Schedule tie-proximity display order (owner ruling 2026-09-26, dark by
+    // default): DISPLAY ONLY — attaches a `displayOrder` index to each of a
+    // tech's stops so the mobile day list and the desktop day board's route-
+    // order badge can break a window-start tie by drive-time proximity to
+    // the previous stop, instead of booking order. Nothing is written to the
+    // DB and no stop is physically reordered here — `enriched` (and every
+    // response field built from it) keeps its DB-query order; only the new
+    // `displayOrder` field is added, in place, on the SAME objects `enriched`
+    // holds. Off = no field, byte-identical to before this gate existed.
+    if (require('../config/feature-gates').gateEnvValue('GATE_SCHEDULE_TIE_PROXIMITY')) {
+      const { orderStopsByTieProximity } = require('../services/schedule-tie-proximity');
+      Object.values(byTech).forEach((tech) => {
+        const orderById = new Map(
+          orderStopsByTieProximity(tech.services).map((o) => [o.id, o.displayOrder]),
+        );
+        tech.services.forEach((s) => { s.displayOrder = orderById.get(s.id); });
+      });
+    }
+
     // Calculate tech summaries
     Object.values(byTech).forEach(tech => {
       tech.totalServices = tech.services.length;

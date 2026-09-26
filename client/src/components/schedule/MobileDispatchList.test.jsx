@@ -132,3 +132,71 @@ describe('MobileDispatchList protocol opener', () => {
     expect(focusedAtOpen).toBe(trigger);
   });
 });
+
+describe('MobileDispatchList tie-proximity display order', () => {
+  it('shows the server displayOrder ahead of raw booking order for a same-tech tie', () => {
+    fetch.mockResolvedValue({ ok: true, json: async () => ({}) });
+    // Booked (array) order is Far-then-Near; GATE_SCHEDULE_TIE_PROXIMITY's
+    // server-computed displayOrder says Near is actually closer to the
+    // previous stop, so it must render FIRST despite being booked second.
+    const bookedFirstButFarther = {
+      ...SERVICE, id: 'svc-far', customerName: 'Far Customer',
+      technicianId: 'tech-1', windowStart: '12:00', displayOrder: 1,
+    };
+    const bookedSecondButNearer = {
+      ...SERVICE, id: 'svc-near', customerName: 'Near Customer',
+      technicianId: 'tech-1', windowStart: '12:00', displayOrder: 0,
+    };
+    render(
+      <MobileDispatchList
+        mode="day"
+        date="2026-07-15"
+        services={[bookedFirstButFarther, bookedSecondButNearer]}
+        technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
+      />,
+    );
+    const names = screen.getAllByText(/Customer$/).map((el) => el.textContent);
+    expect(names).toEqual(['Near Customer', 'Far Customer']);
+  });
+
+  it('ignores displayOrder across two different technicians (falls back to windowStart)', () => {
+    fetch.mockResolvedValue({ ok: true, json: async () => ({}) });
+    // displayOrder is a per-technician index, never comparable across techs
+    // — an earlier windowStart must still win even if the OTHER tech's
+    // displayOrder happens to be smaller.
+    const techATenAM = {
+      ...SERVICE, id: 'svc-a', customerName: 'Tech A Customer',
+      technicianId: 'tech-a', windowStart: '10:00', displayOrder: 5,
+    };
+    const techBNoon = {
+      ...SERVICE, id: 'svc-b', customerName: 'Tech B Customer',
+      technicianId: 'tech-b', windowStart: '12:00', displayOrder: 0,
+    };
+    render(
+      <MobileDispatchList
+        mode="day"
+        date="2026-07-15"
+        services={[techBNoon, techATenAM]}
+        technicians={[{ id: 'tech-a', name: 'Tech A' }, { id: 'tech-b', name: 'Tech B' }]}
+      />,
+    );
+    const names = screen.getAllByText(/Customer$/).map((el) => el.textContent);
+    expect(names).toEqual(['Tech A Customer', 'Tech B Customer']);
+  });
+
+  it('falls back to plain windowStart order when displayOrder is absent (gate off)', () => {
+    fetch.mockResolvedValue({ ok: true, json: async () => ({}) });
+    const first = { ...SERVICE, id: 'svc-1', customerName: 'First Customer', technicianId: 'tech-1', windowStart: '08:00' };
+    const second = { ...SERVICE, id: 'svc-2', customerName: 'Second Customer', technicianId: 'tech-1', windowStart: '09:00' };
+    render(
+      <MobileDispatchList
+        mode="day"
+        date="2026-07-15"
+        services={[second, first]}
+        technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
+      />,
+    );
+    const names = screen.getAllByText(/Customer$/).map((el) => el.textContent);
+    expect(names).toEqual(['First Customer', 'Second Customer']);
+  });
+});

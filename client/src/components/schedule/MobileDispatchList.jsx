@@ -97,6 +97,18 @@ function sortByWindow(services) {
     if (ax == null && bx == null) return 0;
     if (ax == null) return 1;
     if (bx == null) return -1;
+    // Tie-proximity display order (server, GATE_SCHEDULE_TIE_PROXIMITY):
+    // `displayOrder` is a 0-based index within ONE technician's day, not
+    // comparable across techs, so it only overrides the raw windowStart
+    // comparison between two stops on the SAME tech — that's exactly what
+    // lets a nearer stop within the 30-minute tie window show before one
+    // whose window starts slightly earlier. Absent (gate off, or either
+    // stop unassigned/on a different tech) falls back to today's plain
+    // windowStart order.
+    if (a.technicianId && a.technicianId === b.technicianId
+      && a.displayOrder != null && b.displayOrder != null) {
+      return a.displayOrder - b.displayOrder;
+    }
     return ax - bx;
   });
 }
