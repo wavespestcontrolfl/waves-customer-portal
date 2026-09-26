@@ -78,10 +78,11 @@ function billingNotificationEventKey(input) {
 // refusal on an explicit billing leg now returns (Codex r3 P1 on PR #4843):
 // without it here too, a producer's copy of the old 4-code list would never
 // persist a retry for it and an Email-only -> Text-only race would drop the
-// notice.
+// notice. SUPPRESSION_LOOKUP_FAILED is the same kind of schedulable hold for
+// an explicit Email/App leg whose suppression state could not be read.
 const REPLAY_HOLD_CODES = Object.freeze([
   'QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT', 'APP_DELIVERY_HOLD', 'APP_PROVIDER_RETRY',
-  'BILLING_PREFERENCES_CHANGED',
+  'BILLING_PREFERENCES_CHANGED', 'SUPPRESSION_LOOKUP_FAILED',
 ]);
 
 function isReplayHold(result) {

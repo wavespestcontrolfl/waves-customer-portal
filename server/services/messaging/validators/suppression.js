@@ -35,6 +35,8 @@ const { toE164 } = require('../../../utils/phone');
 // Email leg while SMS stays protected. Every place this module (or a
 // caller) decides whether a leg may proceed on unverified suppression
 // state should route through this one predicate.
+const SUPPRESSION_RETRY_MS = 5 * 60 * 1000;
+
 function requiresVerifiedSuppression(channel) {
   return channel === 'push' || channel === 'email';
 }
@@ -47,7 +49,13 @@ function requiresVerifiedSuppression(channel) {
  */
 async function checkSuppression(input, _policy, contactState) {
   if (requiresVerifiedSuppression(input.channel) && contactState?.suppressionLoaded !== true) {
-    return { ok: false, code: 'SUPPRESSION_LOOKUP_FAILED', reason: `Suppression state unavailable for ${input.channel} delivery` };
+    const unavailable = { ok: false, code: 'SUPPRESSION_LOOKUP_FAILED', reason: `Suppression state unavailable for ${input.channel} delivery` };
+    // An explicit billing leg is often a one-shot notice: still send nothing
+    // now, but return a schedulable hold its producer can queue for replay.
+    return input.metadata?.billingDeliveryLeg ? {
+      ...unavailable, retryable: true, deferred: true, deliveryOutcome: 'not_sent',
+      nextAllowedAt: new Date(Date.now() + SUPPRESSION_RETRY_MS).toISOString(),
+    } : unavailable;
   }
   const suppression = contactState && contactState.suppression;
   if (!suppression) return { ok: true };

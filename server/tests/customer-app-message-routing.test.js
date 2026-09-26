@@ -153,7 +153,10 @@ test.each(['opt_out_keyword', 'wrong_number', 'manual_dnc', 'non_mobile'])('hard
 
 test('unknown suppression and category off both fail closed', async () => {
   suppressionError = true;
-  expect((await sendCustomerMessage(input)).code).toBe('SUPPRESSION_LOOKUP_FAILED');
+  const unknown = await sendCustomerMessage(input);
+  expect(unknown.code).toBe('SUPPRESSION_LOOKUP_FAILED');
+  // Outside an explicit billing leg the App-first block stays terminal, as on main.
+  expect(unknown.deferred).toBeUndefined();
   suppressionError = false;
   prefs.payment_receipt = false;
   expect((await sendCustomerMessage(input)).code).toBe('PURPOSE_OPTED_OUT');
@@ -538,24 +541,24 @@ describe('explicit billing channel combinations', () => {
     const result = await sendCustomerMessage(input);
     expect(result.channelResults.email).toMatchObject({ sent: false, code: 'SUPPRESSION_LOOKUP_FAILED' });
     expect(sendBillingChannelEmail).not.toHaveBeenCalled();
+    // A one-shot producer must be able to queue it: a schedulable hold, not a drop.
+    expect(result).toMatchObject({ sent: false, code: 'SUPPRESSION_LOOKUP_FAILED', deferred: true, retryable: true,
+      deliveryOutcome: 'not_sent', nextAllowedAt: expect.any(String) });
+    expect(require('../services/messaging/billing-channel-routing').isReplayHold(result)).toBe(true);
   });
 
-  test('a suppression lookup failure fails CLOSED for the selected App leg but stays fail-OPEN for the selected Text leg in the same dispatch (requiresVerifiedSuppression)', async () => {
-    // validators/suppression.js's requiresVerifiedSuppression() draws the
-    // line at push/email — SMS keeps its own independent kill switch
-    // (sms_enabled) as a backstop and is allowed to fail open on an
-    // unresolved phone-keyed suppression read. Run both legs through ONE
-    // real dispatch (not two separate single-leg tests) so a regression
-    // that accidentally makes them agree (both open or both closed) is
-    // caught even if each leg's own single-channel test still passes.
+  test('a suppression lookup failure holds the selected App leg and defers the Text leg with the notice instead of sending it alone', async () => {
+    // App fails closed on unknown suppression (requiresVerifiedSuppression);
+    // the hold stops later legs so the replay cannot duplicate a Text sent now.
     prefs.payment_receipt_channels = ['push', 'sms'];
     suppressionError = true;
     const result = await sendCustomerMessage(input);
-    expect(result.channelResults.push).toMatchObject({ sent: false, code: 'SUPPRESSION_LOOKUP_FAILED' });
-    expect(result.channelResults.sms).toMatchObject({ sent: true, deliveryOutcome: 'accepted' });
-    expect(Twilio.sendSMS).toHaveBeenCalledTimes(1);
-    expect(Twilio.sendSMS.mock.calls[0][2].explicitPushOnly).toBe(false);
+    expect(result.channelResults.push).toMatchObject({ sent: false, code: 'SUPPRESSION_LOOKUP_FAILED', deferred: true });
+    expect(result.channelResults.sms).toBeUndefined();
+    expect(result).toMatchObject({ code: 'SUPPRESSION_LOOKUP_FAILED', deferred: true, retryable: true });
+    expect(Twilio.sendSMS).not.toHaveBeenCalled();
   });
+
 
   test('an operator-initiated send stays on the plain Text path even when the customer has an explicit multi-channel billing selection on file', async () => {
     // isBillingDeliveryCandidate excludes operatorInitiated sends (unless
