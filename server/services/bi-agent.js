@@ -136,8 +136,17 @@ async function openSessionStream(sessionId, deadline) {
     throw err;
   }
   if (!res.ok || !res.body) {
-    clearTimeout(timer);
-    const errText = res.body ? await res.text() : '';
+    // The deadline stays armed through the error-body read — a non-2xx
+    // response that stalls mid-body must still end as session_timeout.
+    let errText = '';
+    try {
+      errText = res.body ? await res.text() : '';
+    } catch (err) {
+      if (err?.name === 'AbortError') throw deadlineError(sessionId, deadline);
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
     throw Object.assign(new Error(`Stream ${res.status}: ${errText}`), { status: res.status, code: `anthropic_${res.status}` });
   }
   return { res, timer, controller };
