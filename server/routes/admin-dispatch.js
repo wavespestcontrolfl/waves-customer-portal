@@ -25,7 +25,7 @@ const { isTechnicianRequest, technicianCurrentVisitFilter, lockOwnedLiveVisit, t
 const smsTemplatesRouter = require('./admin-sms-templates');
 const logger = require('../services/logger');
 
-const { etDateString, addETDays, parseETDateTime, validScheduleDate, validCalendarDate } = require('../utils/datetime-et');
+const { etDateString, addETDays, parseETDateTime, validScheduleDate, validCalendarDate, dateOnlyString } = require('../utils/datetime-et');
 const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
 const trackTransitions = require('../services/track-transitions');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
@@ -70,6 +70,7 @@ const {
   resolveCompletionDeliveryPosture,
 } = require('../services/service-completion-profiles');
 const ActivityIndicators = require('../services/service-report/activity-indicators');
+const { gateEnvValue } = require('../config/feature-gates');
 
 // The follow-up override chain (German knockdown windows, two-treatment
 // package rules, species gating) lives in ONE place — the obligation module
@@ -284,19 +285,123 @@ function irrigationSettingsOnFile(prefs) {
     || parseConfirmedFields(prefs.irrigation_confirmed_fields).some((f) => IRRIGATION_ON_FILE_CONFIRMED.has(f));
 }
 
+const PREVIOUS_RECOMMENDATION_VISIT_LIMIT = 3;
+const PREVIOUS_RECOMMENDATION_ITEM_LIMIT = 12;
+const PREVIOUS_RECOMMENDATION_SCAN_LIMIT = 500;
+
+function recommendationTextValues(value) {
+  const values = Array.isArray(value) ? value : [value];
+  return values
+    .filter((item) => typeof item === 'string' || typeof item === 'number')
+    .map((item) => String(item).replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+}
+
+function recommendationTextsFromSnapshot(snapshot = null) {
+  const texts = recommendationTextValues(snapshot?.nextStepChips);
+  const values = snapshot?.values && typeof snapshot.values === 'object' && !Array.isArray(snapshot.values)
+    ? snapshot.values : {};
+  for (const [key, value] of Object.entries(values)) {
+    if (!/(^|_)(?:recommendation|recommendations|recommended)(?:_|$)/i.test(key)) continue;
+    for (const raw of recommendationTextValues(value)) {
+      if (/^(?:no|false|none|not recommended)$/i.test(raw)) continue;
+      const mapped = ActivityIndicators.customerLabelForValue(key, raw);
+      texts.push(mapped === raw && /^(?:yes|true)$/i.test(raw)
+        ? `${ActivityIndicators.customerLabelForField(key)}: ${raw}`
+        : mapped);
+    }
+  }
+  return texts;
+}
+
+function recommendationHistoryFromRecord(record = {}, visitLine = '') {
+  const structured = parseJsonObject(record.structured_notes);
+  if (structured.backfill || String(structured.visitOutcome || '') === 'incomplete') {
+    return { eligible: false, texts: [] };
+  }
+  const serviceData = parseJsonObject(record.service_data);
+  const primaryLine = String(record.service_line || '').trim() || detectServiceLine(record.service_type);
+  const primaryVisible = primaryLine === visitLine
+    && String(structured.typedReportDelivery || 'auto_send') === 'auto_send';
+  const snapshots = [];
+  if (primaryVisible && serviceData.typedReportSnapshot
+    && typeof serviceData.typedReportSnapshot === 'object') {
+    snapshots.push(serviceData.typedReportSnapshot);
+  }
+  const companionSnapshots = Array.isArray(serviceData.companionReportSnapshots)
+    ? serviceData.companionReportSnapshots.filter((snapshot) => snapshot
+      && typeof snapshot === 'object'
+      && snapshot.delivery === 'auto_send'
+      && detectServiceLine(snapshot.type) === visitLine)
+    : [];
+  const texts = [
+    ...(primaryVisible ? recommendationTextValues(structured.formRecommendations) : []),
+    ...snapshots.flatMap(recommendationTextsFromSnapshot),
+    ...companionSnapshots.flatMap(recommendationTextsFromSnapshot),
+  ];
+  const seen = new Set();
+  return {
+    eligible: primaryVisible || companionSnapshots.length > 0,
+    texts: texts.filter((text) => {
+      const key = text.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    }),
+  };
+}
+
+async function loadPreviousRecommendations({ customerId, serviceType, serviceId, visitDay }) {
+  if (!customerId || !/^\d{4}-\d{2}-\d{2}$/.test(String(visitDay || ''))) return [];
+  const visitLine = detectServiceLine(serviceType);
+  const output = [];
+  let eligibleVisits = 0;
+  let offset = 0;
+  while (eligibleVisits < PREVIOUS_RECOMMENDATION_VISIT_LIMIT) {
+    const rows = await db('service_records')
+      .where({ customer_id: customerId, status: 'completed' })
+      .where('service_date', '<=', visitDay)
+      .orderBy('service_date', 'desc')
+      .orderBy('created_at', 'desc')
+      .orderBy('id', 'desc')
+      .limit(PREVIOUS_RECOMMENDATION_SCAN_LIMIT)
+      .offset(offset)
+      .select(
+        'id', 'scheduled_service_id', 'service_type', 'service_line', 'service_date',
+        'structured_notes', 'service_data',
+      )
+      .catch(() => []);
+    for (const row of rows) {
+      if (String(row.scheduled_service_id || '') === String(serviceId || '')) continue;
+      const history = recommendationHistoryFromRecord(row, visitLine);
+      // Apply customer visibility before the three-visit bound so backfills,
+      // incomplete/suppressed primary reports, and internal-only companions
+      // cannot consume one of the customer's visible-history slots.
+      if (!history.eligible) continue;
+      eligibleVisits += 1;
+      const serviceDate = dateOnlyString(row.service_date) || '';
+      for (const text of history.texts) {
+        output.push({ text, serviceDate, serviceRecordId: row.id });
+        if (output.length >= PREVIOUS_RECOMMENDATION_ITEM_LIMIT) return output;
+      }
+      if (eligibleVisits >= PREVIOUS_RECOMMENDATION_VISIT_LIMIT) break;
+    }
+    if (rows.length < PREVIOUS_RECOMMENDATION_SCAN_LIMIT) break;
+    offset += rows.length;
+  }
+  return output;
+}
+
 // GET /api/admin/dispatch/:serviceId/tech-tips — the completion screen's
-// tip-picker payload (tips-from-your-tech PR 2). Gate-off answers
-// { available: false } and the client keeps the free-text Observations /
-// Recommendations boxes. Gate-on returns the whole registry grouped for the
-// visit's service line and season (tip-library.tipsForVisit — nothing is
-// hidden, the client searches), plus two per-customer facts the picker
-// renders as marks: when each tip was last frozen into one of this
-// customer's reports in the last 90 days (so a repeat is deliberate), and
-// whether the property already has irrigation on file (the portal tip's
-// condition). Read-only.
+// tip-picker payload plus the independently gated completion-choice history.
+// When both gates are off this remains a no-read availability probe. Read-only.
 router.get('/:serviceId/tech-tips', async (req, res, next) => {
   try {
-    if (!techTipsGateOn()) return res.json({ available: false });
+    const completionChoicesEnabled = gateEnvValue('GATE_SERVICE_REPORT_COMPLETION_CHOICES');
+    const tipsEnabled = techTipsGateOn();
+    if (!tipsEnabled && !completionChoicesEnabled) {
+      return res.json({ available: false, completionChoicesEnabled: false });
+    }
     const svc = await db('scheduled_services')
       .where({ id: req.params.serviceId })
       .first('id', 'customer_id', 'service_type', 'scheduled_date', 'technician_id');
@@ -313,9 +418,22 @@ router.get('/:serviceId/tech-tips', async (req, res, next) => {
     // The visit's calendar day as YYYY-MM-DD (same derivation the rest of
     // this file uses for scheduled_date) — never `new Date('YYYY-MM-DD')`,
     // which is UTC midnight, i.e. the previous ET evening.
-    const visitDay = svc.scheduled_date
-      ? String(svc.scheduled_date instanceof Date ? svc.scheduled_date.toISOString() : svc.scheduled_date).slice(0, 10)
-      : null;
+    const visitDay = dateOnlyString(svc.scheduled_date) || null;
+    const previousRecommendations = completionChoicesEnabled
+      ? await loadPreviousRecommendations({
+        customerId: svc.customer_id,
+        serviceType: svc.service_type,
+        serviceId: svc.id,
+        visitDay,
+      })
+      : [];
+    if (!tipsEnabled) {
+      return res.json({
+        available: false,
+        completionChoicesEnabled: true,
+        previousRecommendations,
+      });
+    }
     const library = tipsForVisit({
       serviceLine: detectServiceLine(svc.service_type),
       date: /^\d{4}-\d{2}-\d{2}$/.test(visitDay || '') ? visitDay : new Date(),
@@ -325,9 +443,11 @@ router.get('/:serviceId/tech-tips', async (req, res, next) => {
     // cutoff a day early through the Eastern evening. service_date is a
     // DATE column, so the bound is the ET day string itself.
     const sentSinceDay = etDateString(addETDays(new Date(), -90));
-    const [sentRows, prefs] = await Promise.all([
-      svc.customer_id
-        ? db('service_records')
+    let sentRows = [];
+    let prefs = null;
+    if (svc.customer_id) {
+      [sentRows, prefs] = await Promise.all([
+        db('service_records')
           .where({ customer_id: svc.customer_id })
           .whereRaw("structured_notes->'techTips' IS NOT NULL")
           // "sent" means the customer could open it: typedReportDelivery is
@@ -339,33 +459,31 @@ router.get('/:serviceId/tech-tips', async (req, res, next) => {
           .where('service_date', '>=', sentSinceDay)
           .orderBy('service_date', 'desc')
           .select('service_date', db.raw("structured_notes->'techTips' AS tech_tips"))
-          .catch(() => [])
-        : [],
-      // The real settings, never irrigation_system (defaults on since
-      // 20260828000002 — proves nothing about the schedule the tip asks for).
-      svc.customer_id
-        ? db('property_preferences').where({ customer_id: svc.customer_id })
+          .catch(() => []),
+        // The real settings, never irrigation_system (defaults on since
+        // 20260828000002 — proves nothing about the schedule the tip asks for).
+        db('property_preferences').where({ customer_id: svc.customer_id })
           .first('watering_days', 'irrigation_run_minutes', 'irrigation_inches_per_week', 'irrigation_system_type', 'irrigation_zones', 'rain_sensor', 'irrigation_confirmed_fields')
-          .catch(() => null)
-        : null,
-    ]);
+          .catch(() => null),
+      ]);
+    }
     // Newest first, so the first date seen per id is the most recent send.
     // Values are YYYY-MM-DD calendar days (service_date is a DATE column;
     // pg hands it back as a Date at UTC midnight) — the client formats the
     // day from its components, never through new Date().
-    const lastSent = {};
-    for (const row of sentRows) {
-      const day = String(row.service_date instanceof Date ? row.service_date.toISOString() : row.service_date || '').slice(0, 10);
-      const tips = Array.isArray(row.tech_tips) ? row.tech_tips : [];
-      for (const tip of tips) {
-        if (tip?.id && day && !lastSent[tip.id]) lastSent[tip.id] = day;
-      }
-    }
+    const lastSent = Object.fromEntries(sentRows.flatMap((row) => {
+      const day = dateOnlyString(row.service_date) || '';
+      return (Array.isArray(row.tech_tips) ? row.tech_tips : [])
+        .filter((tip) => tip?.id && day)
+        .map((tip) => [tip.id, day]);
+    }).reverse());
     res.json({
       available: true,
+      completionChoicesEnabled,
       ...library,
       lastSent,
       conditions: { irrigation_on_file: irrigationSettingsOnFile(prefs) },
+      ...(completionChoicesEnabled ? { previousRecommendations } : {}),
     });
   } catch (err) { next(err); }
 });
