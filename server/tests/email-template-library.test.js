@@ -879,6 +879,96 @@ describe('email template library rendering', () => {
     });
   });
 
+  test('replaces a payload-injected billing context with the explicit allowlisted context', () => {
+    const explicit = {
+      schema_version: 1,
+      customer_id: 'cust-1',
+      category: 'billing',
+      source_entry_point: 'autopay_pre_charge_reminder',
+      notificationEventKey: 'precharge:cust-1:2026-09-29',
+      charge_date: '2026-09-29',
+      token: 'must-not-persist',
+      recipient_email: 'must-not-persist@example.com',
+    };
+    const snapshot = EmailTemplates.payloadSnapshotForSend({
+      first_name: 'Taylor',
+      __billing_replay_context: { customer_id: 'attacker', raw_metadata: { token: 'secret' } },
+    }, explicit, {
+      templateKey: 'billing.notice', recipientType: 'customer', recipientId: 'cust-1',
+      triggerEventId: explicit.notificationEventKey,
+      idempotencyKey: `billing_channel_email:${explicit.notificationEventKey}:email`,
+      categories: ['billing'],
+    });
+    expect(snapshot).toEqual({
+      first_name: 'Taylor',
+      __billing_replay_context: {
+        schema_version: 1,
+        customer_id: 'cust-1',
+        category: 'billing',
+        source_entry_point: 'autopay_pre_charge_reminder',
+        notificationEventKey: explicit.notificationEventKey,
+        charge_date: '2026-09-29',
+      },
+    });
+  });
+
+  test('omits explicit context whose event and idempotency key do not agree', () => {
+    const snapshot = EmailTemplates.payloadSnapshotForSend({ __billing_replay_context: { customer_id: 'payload' } }, {
+      schema_version: 1, customer_id: 'cust-1', category: 'billing',
+      source_entry_point: 'autopay_pre_charge_reminder', notificationEventKey: 'event-1', charge_date: '2026-09-29',
+    }, {
+      templateKey: 'billing.notice', recipientType: 'customer', recipientId: 'cust-1', triggerEventId: 'event-1',
+      idempotencyKey: 'billing_channel_email:different-event:email', categories: ['billing'],
+    });
+    expect(snapshot).toEqual({});
+  });
+
+  test('a reclaimed send persists fresh rendered content and replay context from the same attempt', async () => {
+    const eventKey = 'precharge:cust-1:2026-09-29';
+    const idempotencyKey = `billing_channel_email:${eventKey}:email`;
+    const failedMessage = {
+      id: 'msg-billing-retry', status: 'failed', idempotency_key: idempotencyKey,
+      subject_snapshot: 'Old billing copy', payload_snapshot: JSON.stringify({ notification_body: 'Old body' }),
+    };
+    const queuedMessage = { ...failedMessage, status: 'queued', subject_snapshot: 'Billing Billing reminder' };
+    const sentMessage = { ...queuedMessage, status: 'sent', provider_message_id: 'sg-billing-retry' };
+    const queueUpdate = chain({ returning: [queuedMessage] });
+    setDbQueues({
+      email_templates: [chain({ first: serviceTemplate({
+        active_version_id: 'ver-billing', template_key: 'billing.notice',
+        allowed_variables: ['first_name', 'category_label', 'notification_body', 'billing_url'],
+        required_variables: ['first_name', 'category_label', 'notification_body'],
+      }) })],
+      email_template_versions: [chain({ first: version({
+        id: 'ver-billing', subject: 'Billing {{category_label}}', preview_text: '',
+        blocks: [{ type: 'paragraph', content: '{{notification_body}}' }],
+      }) })],
+      email_messages: [chain({ first: failedMessage }), queueUpdate, chain({ returning: [sentMessage] })],
+      email_suppressions: [chain({ result: [] })],
+    });
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-billing-retry' });
+
+    await EmailTemplates.sendTemplate({
+      templateKey: 'billing.notice', to: 'casey@example.com', recipientType: 'customer', recipientId: 'cust-1',
+      triggerEventId: eventKey, idempotencyKey, categories: ['billing'],
+      payload: { first_name: 'Casey', category_label: 'Billing reminder',
+        notification_body: 'Fresh pre-charge reminder', billing_url: 'https://example.com/billing' },
+      billingReplayContext: {
+        schema_version: 1, customer_id: 'cust-1', category: 'billing',
+        source_entry_point: 'autopay_pre_charge_reminder', notificationEventKey: eventKey,
+        charge_date: '2026-09-29',
+      },
+    });
+
+    const persisted = queueUpdate.update.mock.calls[0][0];
+    expect(persisted.html_snapshot).toContain('Fresh pre-charge reminder');
+    expect(persisted.html_snapshot).not.toContain('Old billing copy');
+    expect(JSON.parse(persisted.payload_snapshot)).toMatchObject({
+      notification_body: 'Fresh pre-charge reminder',
+      __billing_replay_context: { notificationEventKey: eventKey, charge_date: '2026-09-29' },
+    });
+  });
+
   test('dedupe preserves terminal messages and retries unfinished messages', () => {
     expect(EmailTemplates.shouldRetryExistingMessage({ status: 'failed' })).toBe(true);
     expect(EmailTemplates.shouldRetryExistingMessage({ status: 'queued' })).toBe(true);
