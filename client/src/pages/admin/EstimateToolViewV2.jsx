@@ -3823,7 +3823,14 @@ export default function EstimateToolViewV2({
       if (guessedLines.length > 0) {
         setEstimate(null);
         const names = [...new Set(guessedLines.map((line) => line.name || line.service))].join(", ");
-        alert(`Enter home sq ft. ${names} ${guessedLines.length === 1 ? "is" : "are"} priced by the home's size, and without it the price is a guess at a 2,000 sq ft house.`);
+        const verb = guessedLines.length === 1 ? "is" : "are";
+        // An association aggregate's Home Sq Ft is the summed building
+        // total with an unknown story count (footprintUnknown): what is
+        // missing is the story count, which is what unlocks the footprint
+        // (buildTurfRequestProfile) — ask for that (codex r2 P2).
+        alert(profile.footprintUnknown === true
+          ? `Enter the number of stories. ${names} ${verb} priced by the home's footprint, and this property's home size is a building total with an unknown story count.`
+          : `Enter home sq ft. ${names} ${verb} priced by the home's size, and without it the price is a guess at a 2,000 sq ft house.`);
         return null;
       }
 

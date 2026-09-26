@@ -28,14 +28,16 @@ function jsonResponse(body) {
 
 let fetchMock;
 let calculated;
+let lookupEnriched;
 beforeEach(() => {
   localStorage.setItem('waves_admin_token', 'qa-token');
   vi.spyOn(window, 'confirm').mockReturnValue(true);
   vi.spyOn(window, 'alert').mockImplementation(() => {});
+  lookupEnriched = { homeSqFt: 0, lotSqFt: 9000, stories: 1 };
   fetchMock = vi.fn((url) => {
     const path = String(url);
     if (path.endsWith('/estimator/property-lookup')) {
-      return Promise.resolve(jsonResponse({ enriched: { homeSqFt: 0, lotSqFt: 9000, stories: 1 }, errors: [] }));
+      return Promise.resolve(jsonResponse({ enriched: structuredClone(lookupEnriched), errors: [] }));
     }
     if (path.endsWith('/calculate-estimate')) return Promise.resolve(jsonResponse(structuredClone(calculated)));
     if (path.includes('/discounts')) return Promise.resolve(jsonResponse([]));
@@ -89,6 +91,15 @@ describe('home-size guard on a generated estimate', () => {
     await lookUpAndGenerate();
     expect(await screen.findByRole('button', { name: 'Save draft', exact: true })).toBeInTheDocument();
     expect(window.alert).not.toHaveBeenCalledWith(expect.stringMatching(/^Enter home sq ft/));
+  });
+
+  it('asks for the story count when the home size is an association total with unknown stories', async () => {
+    lookupEnriched = { homeSqFt: 120000, lotSqFt: 300000, stories: 1, footprintUnknown: true };
+    calculated = resultWith(pestLine({ footprintWasDefaulted: true }));
+    await lookUpAndGenerate();
+    await waitFor(() => expect(window.alert).toHaveBeenCalledWith(
+      expect.stringMatching(/^Enter the number of stories\. Pest Control is priced by the home's footprint/),
+    ));
   });
 
   it('lets a quote-required line through — it is not a price', async () => {
