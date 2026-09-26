@@ -521,7 +521,9 @@ describe('cancel surfaces wire the hook (source guards)', () => {
     expect(noRecord).toBeGreaterThan(history);
     expect(nonCounting).toBeGreaterThan(noRecord);
     // the CURRENT cancellation episode decides (Codex r7): full history, newest first, episode helper
-    expect(c).toMatch(/\.where\(\{ job_id: cancelledServiceId \}\)[\s\S]*?\.orderBy\('transitioned_at', 'desc'\)[\s\S]*?\.select\('id', 'from_status', 'to_status', 'transitioned_at'\)/);
+    expect(c).toMatch(/\.where\(\{ job_id: cancelledServiceId \}\)[\s\S]*?\.orderBy\('transitioned_at', 'desc'\)[\s\S]*?\.select\('id', 'from_status', 'to_status', 'transitioned_at', 'notes'\)/);
+    // a visit-count trim's own audit note refuses the candidate (pre-ledger trims; pre-push audit P1)
+    expect(c).toMatch(/if \(isTrimTransitionNote\(episode\.notes\)\) return \{ skipped: 'visit_count_trim' \};/);
     expect(c).toMatch(/const episode = cancelEpisodeSourceStatus\(transitions\);/);
     expect(c).toMatch(/isCountingSourceStatus\(episode\.fromStatus\)/);
     expect(c).not.toMatch(/to_status: 'cancelled'/);

@@ -176,6 +176,11 @@ describe('readReseedCandidate — the audited transition decides', () => {
     ] }],
     // newest row is not a cancel at all (compensated) → no current episode
     ['no_transition_record', { transitions: [{ job_id: 22, from_status: 'cancelled', to_status: 'pending' }, { job_id: 22, from_status: 'confirmed', to_status: 'cancelled' }] }],
+    // a historical visit-count TRIM (its own audit note, no ledger row) replayed through dispatch / the Intelligence Bar
+    ['visit_count_trim', { transitions: [
+      { job_id: 22, from_status: 'cancelled', notes: 'Cancelled from the Intelligence Bar' },
+      { job_id: 22, from_status: 'pending', notes: 'Recurring plan shortened to 3 visits from Edit appointment' },
+    ] }],
   ])('%s', async (skipped, over) => {
     const { handler } = scenario(over);
     const trx = makeConn(handler);
@@ -190,6 +195,12 @@ describe('readReseedCandidate — the audited transition decides', () => {
       { cancelled: { ...CANCELLED, is_recurring: null } },
       // dispatch same-status retry: cancelled→cancelled replay row is newest, the real pending→cancelled sits under it
       { transitions: [{ job_id: 22, from_status: 'cancelled' }, { job_id: 22, from_status: 'pending' }] },
+      // an OLDER trim compensated back to live, then a genuine single cancel: only the current episode's note counts
+      { transitions: [
+        { job_id: 22, from_status: 'confirmed', notes: 'Cancelled by office' },
+        { job_id: 22, from_status: 'cancelled', to_status: 'pending' },
+        { job_id: 22, from_status: 'pending', notes: 'Recurring plan shortened to 3 visits from Edit appointment' },
+      ] },
     ]) {
       const { handler } = scenario(over);
       const out = await readReseedCandidate(makeConn(handler), CANCELLED.id);

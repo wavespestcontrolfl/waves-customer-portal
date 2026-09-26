@@ -18262,7 +18262,9 @@ async function topUpRecurringSeries(conn, parentId, opts = {}) {
 // no audit row at all was not cancelled by a wired surface; a legacy NULL
 // status counted (Codex r2 P1) and so does its audit row.
 async function readReseedCandidate(trx, cancelledServiceId) {
-  const { isPlanSeriesRow, isCountingSourceStatus, cancelEpisodeSourceStatus } = require('../services/recurring-series-cancel-reseed');
+  const {
+    isPlanSeriesRow, isCountingSourceStatus, cancelEpisodeSourceStatus, isTrimTransitionNote,
+  } = require('../services/recurring-series-cancel-reseed');
   const cancelled = await trx('scheduled_services').where({ id: cancelledServiceId }).first();
   if (!cancelled) return { skipped: 'not_found' };
   if (cancelled.status !== 'cancelled') return { skipped: 'not_cancelled' };
@@ -18277,10 +18279,16 @@ async function readReseedCandidate(trx, cancelledServiceId) {
   const transitions = await trx('job_status_history')
     .where({ job_id: cancelledServiceId })
     .orderBy('transitioned_at', 'desc')
-    .select('id', 'from_status', 'to_status', 'transitioned_at');
+    .select('id', 'from_status', 'to_status', 'transitioned_at', 'notes');
   const episode = cancelEpisodeSourceStatus(transitions);
   if (!episode) return { skipped: 'no_transition_record' };
   if (!isCountingSourceStatus(episode.fromStatus)) return { skipped: 'non_counting_transition', fromStatus: episode.fromStatus };
+  // A visit-count TRIM cancelled this visit (its own audit note) — a
+  // deliberate plan reduction, so a replay of it must never add the visit
+  // back (pre-push audit P1). Trims since the ledger also carry a ledger row
+  // (reseedRefusal); this covers trims made before the ledger existed, with
+  // the same note test the append anchor uses.
+  if (isTrimTransitionNote(episode.notes)) return { skipped: 'visit_count_trim' };
   return { cancelled, episodeKey: episode.episodeKey };
 }
 
