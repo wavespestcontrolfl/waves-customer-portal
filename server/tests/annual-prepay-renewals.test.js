@@ -2131,6 +2131,153 @@ describe('annual prepay renewal helpers', () => {
       notice_30_claimed_at: null,
     }));
   });
+
+  // ---- termite annual plan: coverage waits for the installation (codex #4819 r6 P1)
+
+  const TERMITE_COVERAGE_COLUMNS = {
+    scheduled_date: {}, service_type: {}, annual_prepay_term_id: {},
+    is_recurring: {}, recurring_pattern: {}, recurring_parent_id: {},
+    recurring_ongoing: {}, technician_id: {}, window_start: {},
+    window_end: {}, time_window: {}, customer_notes: {}, zone: {},
+    notes: {}, estimated_duration_minutes: {},
+  };
+  const termiteTerm = (overrides = {}) => ({
+    id: 'term-termite',
+    customer_id: 'customer-termite',
+    source_estimate_id: 'est-termite',
+    term_start: '2026-09-25',
+    term_end: '2027-09-25',
+    coverage_service_type: 'Termite Bait',
+    coverage_visit_count: 1,
+    coverage_cadence: 'annual',
+    annual_plan_version: 'v3',
+    renewed_from_term_id: null,
+    installation_anchored_at: null,
+    installation_anchor_visit_id: null,
+    ...overrides,
+  });
+
+  test('a PAID termite annual term seeds NOTHING before its installation anchors — no db access at all', async () => {
+    // No queues: any table access throws.
+    setDbQueues({});
+    await expect(_private.ensureCoverageRowsForTerm(termiteTerm(), undefined, { today: '2026-09-25' }))
+      .resolves.toEqual({
+        createdCount: 0, targetDates: [], effectiveTermEnd: '2027-09-25', reason: 'awaiting_installation',
+      });
+  });
+
+  test('the termite installation deferral holds through refreshTermSnapshot for an ACTIVE (paid) term: attach runs, nothing is inserted', async () => {
+    const insertQuery = query({ returning: [{ id: 'never' }] });
+    setDbQueues({
+      annual_prepay_terms: [query({ first: termiteTerm({ status: 'active' }) }), query({ returning: [termiteTerm({ status: 'active' })] })],
+      scheduled_services: [
+        query({ columnInfo: TERMITE_COVERAGE_COLUMNS }),
+        // detachCallbacksFromTerm + attach/stamp read in-window rows — none.
+        ...Array.from({ length: 6 }, () => query({ rows: [] })),
+        insertQuery,
+      ],
+    });
+    await AnnualPrepayRenewals.refreshTermSnapshot('term-termite');
+    expect(insertQuery.insert).not.toHaveBeenCalled();
+  });
+
+  test('codex #4819 r7 P1: a term CREATED with annualPlanVersion carries the marker into its first refresh — no signature-day visit is seeded', async () => {
+    const termInsert = query({ returning: [termiteTerm({ status: 'payment_pending' })] });
+    const seedInsert = query({ returning: [{ id: 'never' }] });
+    setDbQueues({
+      annual_prepay_terms: [
+        query({ columnInfo: { annual_plan_version: {}, coverage_service_type: {}, coverage_visit_count: {}, coverage_cadence: {} } }),
+        query({ first: undefined }), // existing lookup by source estimate
+        query({ first: undefined }), // existing lookup by customer + window
+        termInsert,
+        query({ first: termiteTerm({ status: 'payment_pending' }) }), // refreshTermSnapshot term read
+        query({ returning: [termiteTerm({ status: 'payment_pending' })] }),
+      ],
+      scheduled_services: [
+        query({ columnInfo: TERMITE_COVERAGE_COLUMNS }),
+        ...Array.from({ length: 6 }, () => query({ rows: [] })),
+        seedInsert,
+      ],
+    });
+
+    await AnnualPrepayRenewals.createTermForAnnualPrepay({
+      customerId: 'customer-termite',
+      sourceEstimateId: 'est-termite',
+      termStart: '2026-09-25',
+      coverageServiceType: 'Termite Bait',
+      coverageVisitCount: 1,
+      coverageCadence: 'annual',
+      annualPlanVersion: 'v3',
+    });
+
+    expect(termInsert.insert).toHaveBeenCalledWith(expect.objectContaining({ annual_plan_version: 'v3' }));
+    expect(seedInsert.insert).not.toHaveBeenCalled();
+  });
+
+  test('renewal successors and unstamped terms are never deferred — they reach the seeding path', async () => {
+    const run = (t) => _private.ensureCoverageRowsForTerm(t, undefined, { today: '2026-01-01' });
+    for (const term of [termiteTerm({ renewed_from_term_id: 'term-prior' }), termiteTerm({ annual_plan_version: null })]) {
+      _private.resetCachesForTests();
+      const insertQuery = query({ returning: [{ id: 'svc-seeded', scheduled_date: term.term_start }] });
+      setDbQueues({
+        scheduled_services: [query({ columnInfo: TERMITE_COVERAGE_COLUMNS }), query({ rows: [] }), query({ first: undefined }), insertQuery],
+      });
+      await expect(run(term)).resolves.toMatchObject({ createdCount: 1 });
+    }
+  });
+
+  test('once anchored, the installation visit itself is the coverage year\'s visit — even under an installation label — and the anchored window never slides', async () => {
+    const installRow = {
+      id: 'v-install',
+      customer_id: 'customer-termite',
+      scheduled_date: '2026-10-14',
+      service_type: 'Termite Station Install',
+      status: 'completed',
+    };
+    const insertQuery = query({ returning: [{ id: 'never' }] });
+    setDbQueues({
+      scheduled_services: [
+        query({ columnInfo: TERMITE_COVERAGE_COLUMNS }),
+        query({ rows: [installRow] }),
+        query({ first: undefined }), // no row linked to the term yet
+        insertQuery,
+      ],
+      // No annual_prepay_terms queue: a term_end slide write would throw.
+    });
+    const result = await _private.ensureCoverageRowsForTerm(termiteTerm({
+      term_start: '2026-10-14',
+      term_end: '2027-10-14',
+      installation_anchored_at: new Date('2026-10-15T10:10:00Z'),
+      installation_anchor_visit_id: 'v-install',
+    }), undefined, { today: '2026-10-15' });
+
+    expect(result).toMatchObject({ createdCount: 0, existingCount: 1, effectiveTermEnd: '2027-10-14' });
+    expect(insertQuery.insert).not.toHaveBeenCalled();
+  });
+
+  test('once anchored, a term with no installation row in its window seeds its visit inside the anchored window (never past-dated, never slid)', async () => {
+    const insertQuery = query({ returning: [{ id: 'svc-seeded', scheduled_date: '2026-10-20' }] });
+    setDbQueues({
+      scheduled_services: [
+        query({ columnInfo: TERMITE_COVERAGE_COLUMNS }),
+        query({ rows: [] }),
+        query({ first: undefined }),
+        insertQuery,
+      ],
+    });
+    const result = await _private.ensureCoverageRowsForTerm(termiteTerm({
+      term_start: '2026-10-14',
+      term_end: '2027-10-14',
+      installation_anchored_at: new Date('2026-10-20T10:10:00Z'),
+      installation_anchor_visit_id: 'v-gone',
+    }), undefined, { today: '2026-10-20' });
+
+    expect(result).toMatchObject({ createdCount: 1, targetDates: ['2026-10-20'], effectiveTermEnd: '2027-10-14' });
+    expect(insertQuery.insert).toHaveBeenCalledWith(expect.objectContaining({
+      scheduled_date: '2026-10-20', service_type: 'Termite Bait', annual_prepay_term_id: 'term-termite',
+    }));
+  });
+
 });
 
 describe('reconcilePendingWindowCompletions (pending-window double-bill guard)', () => {

@@ -924,6 +924,30 @@ function prepayChargeMethodKey(stripePaymentMethodId) {
   return require('crypto').createHash('sha256').update(String(stripePaymentMethodId)).digest('hex').slice(0, 16);
 }
 
+// Shared reading of a committed saved-method charge — the estimate accept
+// route's in-flow annual prepay charge and the termite annual plan's
+// signature-time charge (termite-annual-signature-charge.js) classify the
+// same two signals the same way, so neither can drift into opening a pay
+// link beside money that may be moving.
+// An attempt that may have reached Stripe (in progress, outcome unknown,
+// or charged-but-unrecorded) is AMBIGUOUS: no pay link, no retry.
+const AMBIGUOUS_SAVED_METHOD_CHARGE_CODES = ['STRIPE_CHARGE_IN_PROGRESS', 'STRIPE_AMBIGUOUS_OUTCOME', 'STRIPE_CHARGED_DB_FAILED'];
+function isAmbiguousSavedMethodChargeError(err) {
+  return AMBIGUOUS_SAVED_METHOD_CHARGE_CODES.includes(err?.code) || !!err?.reconciliationRequired;
+}
+// Post-charge verification from a fresh invoice read: 'paid' (paid, or
+// 'prepaid' when account credit covered it), 'bank_processing' (an
+// initiated ACH debit — the webhook rails own the outcome), 'card_incomplete'
+// (a non-bank 'processing' is an unfinished CARD intent, never collected
+// money), or 'unexpected' (anything else — treated as a decline).
+function classifySavedMethodChargeInvoice(freshInvoice) {
+  const status = String(freshInvoice?.status || '').toLowerCase();
+  if (['paid', 'prepaid'].includes(status)) return 'paid';
+  if (status === 'processing' && String(freshInvoice?.payment_method || '') === 'us_bank_account') return 'bank_processing';
+  if (status === 'processing') return 'card_incomplete';
+  return 'unexpected';
+}
+
 // Crash-recovery sweep (pre-push Codex P0 r3): the accept transaction
 // stamps a durable prepayAutoChargeJob (invoice, bound method, the exact
 // acknowledged cents) BEFORE it commits; the in-flow executor resolves the
@@ -1626,6 +1650,8 @@ module.exports = {
   resolveGroupedEstimateOwnerId,
   resolvePrepayChargeMethod,
   prepayChargeMethodKey,
+  isAmbiguousSavedMethodChargeError,
+  classifySavedMethodChargeInvoice,
   sweepStrandedPrepayAutoCharges,
   createRecurringCardSetupIntentForEstimate,
   replaceRecurringCardIntent,

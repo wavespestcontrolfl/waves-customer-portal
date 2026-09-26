@@ -5918,6 +5918,27 @@ function initScheduledJobs() {
         } catch (err) {
           logger.error(`Termite agreement reconciliation failed: ${err.message}`);
         }
+        // Termite ANNUAL PLAN activation reconciliation (slice 3a, codex
+        // P1-B): the sign-before-pay activation runs once, right after
+        // signature — signing burns the share token, so a failed
+        // activation (bell + estimate left 'awaiting_signature') has no
+        // "sign again" retry path without this sweep. Same slot, right
+        // after the (unrelated) termite program agreement reconciliation
+        // above. Deliberately NOT gated on GATE_TERMITE_ANNUAL_PLAN: the
+        // gate controls whether NEW annual accepts defer, but a customer
+        // who already signed must still be activated and billed if the
+        // gate is later turned off (pre-push P1). Cheap when nothing is
+        // awaiting: both scans are indexed lookups on stamped rows.
+        try {
+          const { reconcileTermiteAnnualActivations } = require('./termite-annual-activation');
+          const annualRecon = await reconcileTermiteAnnualActivations();
+          if (annualRecon.activated || annualRecon.failed || annualRecon.delivered || annualRecon.deliveryFailed || annualRecon.charged || annualRecon.collectionHeld
+            || annualRecon.anchored || annualRecon.anchorFailed || annualRecon.handedOff || annualRecon.handoffFailed) {
+            logger.info(`Termite annual plan activation reconciliation: ${annualRecon.scanned} scanned, ${annualRecon.activated} activated, ${annualRecon.failed} failed, ${annualRecon.delivered || 0} delivered, ${annualRecon.deliveryFailed || 0} delivery failed, ${annualRecon.charged || 0} charged, ${annualRecon.collectionHeld || 0} held, ${annualRecon.anchored || 0} anchored to installation, ${annualRecon.anchorFailed || 0} anchor failed, ${annualRecon.handedOff || 0} install handoffs, ${annualRecon.handoffFailed || 0} handoff failed`);
+          }
+        } catch (err) {
+          logger.error(`Termite annual plan activation reconciliation failed: ${err.message}`);
+        }
         // Reminders run INSIDE the same exclusive section, strictly after
         // reconciliation: on a skipped tick (another dyno holds the lock)
         // a non-holder must not nudge customers to sign requests the

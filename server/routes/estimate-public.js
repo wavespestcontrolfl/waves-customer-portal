@@ -284,6 +284,20 @@ async function registerAcceptedEstimateAppointmentReminder({
   );
 }
 
+// Sign-before-pay accept (termite annual plan): the slot the customer
+// picked, recorded as a preference only — nothing is booked until they sign.
+function requestedFirstVisitFromRow(row) {
+  const date = scheduledDateOnly(row?.scheduled_date);
+  if (!date) return null;
+  return {
+    date,
+    windowStart: row.window_start || null,
+    windowEnd: row.window_end || null,
+    technicianId: row.technician_id || null,
+    existingAppointmentId: isReservationHeldAppointment(row) ? null : (row.id || null),
+  };
+}
+
 // View-count hygiene. We surface view_count + last_viewed_at on the admin
 // estimates dashboard, so the count needs to mean "the customer opened it"
 // — not "iMessage unfurled the link" or "Virginia previewed it from the
@@ -9950,8 +9964,16 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // client renders it and re-submits with prepayChargeAcknowledgedTotalCents,
     // and the post-commit charge freezes to the acknowledged cents
     // (maxAuthorizedTotalCents — the charge refuses anything above it).
+    // Sign-before-pay (termite annual-plan restructure, P1): this accept is
+    // going to PARK — no card capture, no charge, no "due today" — so the
+    // in-lane prepay charge quote (and its 402 round-trip) must never apply
+    // to it. Computed once, using the SAME shared rule estimate-
+    // converter.js applies internally to decide the park itself, so this
+    // bypass can never drift from the actual money decision.
+    const isTermiteAnnualSignBeforePay = annualPrepaySelected
+      && require('../services/estimate-converter').isTermiteAnnualSignBeforePayAccept(estimate, estData, billingTerm);
     let prepayChargePlan = null; // { method, quote } once acknowledged
-    if (annualPrepaySelected && recurringCardLaneActive && RecurringCards.isPrepayCardAndChargeEnabled()) {
+    if (annualPrepaySelected && !isTermiteAnnualSignBeforePay && recurringCardLaneActive && RecurringCards.isPrepayCardAndChargeEnabled()) {
       // Resolved once above (with the tax-rate hoist) — the quote's method
       // fallback and credit projections use the SAME customer the accept
       // transaction will link.
@@ -11020,7 +11042,14 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // Runs inside the same trx so either everything lands or nothing
       // does — a mid-flight failure here won't leave a committed customer
       // paired with an un-committed reservation (or vice versa).
-      if (reservationRow && customerId) {
+      // Sign-before-pay (codex round-3 P1 on #4819): a termite annual-plan
+      // accept books NOTHING until the customer signs — a committed row
+      // here would be a serviceable visit for an unsigned, unpaid plan.
+      // The pick rides the accept context as a preference for staff (see
+      // requestedFirstVisit below) and the hold is released post-commit;
+      // an adopted existing appointment is left untouched for the same
+      // reason.
+      if (reservationRow && customerId && !isTermiteAnnualSignBeforePay) {
         try {
           const committedAppointment = await slotReservation.commitReservation({
             scheduledServiceId: reservationRow.id,
@@ -11083,7 +11112,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           throw commitErr;
         }
       }
-      if (existingAppointmentRow && customerId) {
+      if (existingAppointmentRow && customerId && !isTermiteAnnualSignBeforePay) {
         if (
           existingAppointmentRow.customer_id
           && String(existingAppointmentRow.customer_id) !== String(customerId)
@@ -11547,6 +11576,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             overlapTermStart,
             false,
             'Customer already has an annual prepay term through',
+            estimate.id,
           );
         } catch (overlapErr) {
           if (overlapErr && overlapErr.annualPrepayOverlap) {
@@ -11633,20 +11663,53 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // Genuinely ADOPTED pre-existing appointment (not a reservation
           // hold): the converter's add-on classification re-admits it BY ID
           // so it stands on its own billed-plan evidence (codex #3241 r4/r5).
+          // A sign-before-pay accept adopts nothing (see the commit skip
+          // above).
           adoptedExistingAppointmentId: (existingAppointmentRow
-            && !isReservationHeldAppointment(existingAppointmentRow))
+            && !isReservationHeldAppointment(existingAppointmentRow)
+            && !isTermiteAnnualSignBeforePay)
             ? existingAppointmentRow.id
             : null,
+          // The customer's pick, kept only as a scheduling preference for
+          // staff once the plan is signed (nothing was booked).
+          ...(isTermiteAnnualSignBeforePay && (reservationRow || existingAppointmentRow)
+            ? { requestedFirstVisit: requestedFirstVisitFromRow(reservationRow || existingAppointmentRow) }
+            : {}),
         });
-        if (!annualPrepayConversionResult?.draftInvoiceId) {
-          throw new Error('Annual prepay invoice was not created');
+        if (annualPrepayConversionResult?.annualPlanActivationStatus) {
+          // Sign-before-pay (slice 3a restructure): a termite annual-plan
+          // accept intentionally defers its invoice + prepay term until the
+          // customer e-signs the annual agreement — no draftInvoiceId here
+          // is the EXPECTED outcome, not a failure. Report a no-invoice
+          // result rather than throwing (which would roll back an accept
+          // that in fact succeeded). Any truthy status is a park outcome
+          // (fallback P1: 'awaiting_signature' the common case, 'activated'
+          // on an idempotent replay, or whatever a concurrent write's
+          // guarded-update re-read reports) — never narrowed to one exact
+          // string. invoiceKindResult deliberately does NOT reuse
+          // 'annual_prepay' — every money-touching branch further down
+          // (e.g. the prepay auto-charge fence) keys on that exact string,
+          // and there is no invoice yet for any of them to act on.
+          invoiceModeResult = false;
+          invoiceIdResult = null;
+          // Codex #4819 r6 P2: the total the park FROZE (Station Setup +
+          // annual fee + tax) — the figure the signature-time invoice bills —
+          // never annualPrepayDisplayAmount, which omits the setup line.
+          invoiceAmountResult = annualPrepayConversionResult.annualPlanDeferredTotal ?? null;
+          invoicePayUrlResult = null;
+          invoiceServiceLabelResult = 'Annual prepay — awaiting signature';
+          invoiceKindResult = 'annual_prepay_deferred';
+        } else {
+          if (!annualPrepayConversionResult?.draftInvoiceId) {
+            throw new Error('Annual prepay invoice was not created');
+          }
+          invoiceModeResult = true;
+          invoiceIdResult = annualPrepayConversionResult.draftInvoiceId;
+          invoiceAmountResult = annualPrepayConversionResult.draftInvoiceAmount || annualPrepayDisplayAmount || null;
+          invoicePayUrlResult = annualPrepayConversionResult.draftInvoicePayUrl || null;
+          invoiceServiceLabelResult = 'Annual prepay';
+          invoiceKindResult = 'annual_prepay';
         }
-        invoiceModeResult = true;
-        invoiceIdResult = annualPrepayConversionResult.draftInvoiceId;
-        invoiceAmountResult = annualPrepayConversionResult.draftInvoiceAmount || annualPrepayDisplayAmount || null;
-        invoicePayUrlResult = annualPrepayConversionResult.draftInvoicePayUrl || null;
-        invoiceServiceLabelResult = 'Annual prepay';
-        invoiceKindResult = 'annual_prepay';
         // FENCE the projected credits atomically with the acceptance
         // (Codex r16/r17): the revalidation above only READ them.
         if (prepayChargePlan && invoiceIdResult
@@ -12116,6 +12179,16 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     });
 
     const { customerId, reservationCommitted } = txResult;
+    // Sign-before-pay: the slot hold this accept did not commit is released
+    // now rather than left to block the slot until its TTL sweep.
+    if (isTermiteAnnualSignBeforePay) {
+      const heldRowId = reservationRow?.id
+        || (existingAppointmentRow && isReservationHeldAppointment(existingAppointmentRow) ? existingAppointmentRow.id : null);
+      if (heldRowId) {
+        void slotReservation.releaseReservation({ scheduledServiceId: heldRowId, estimateId: estimate.id })
+          .catch((e) => logger.warn(`[estimate-accept] sign-before-pay hold release failed for estimate ${estimate.id}: ${e.message}`));
+      }
+    }
     // Multi-property linkage (post-commit, best-effort, gated on
     // GATE_CUSTOMER_PROPERTIES): resolve/create the customer_properties row
     // for the accepted address, link estimates.property_id, stamp the booked
@@ -12379,7 +12452,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // applied — so every quoted amount matches what the pay link collects.
     // annualPrepayDisplayAmount (pre-credit) only survives as the fallback for
     // a conversion that produced no amount.
-    const annualPrepayQuotedAmount = annualPrepaySelected && invoiceAmount != null
+    // A deferred (sign-before-pay) accept quotes only its frozen total — a
+    // missing one stays null rather than falling back to the display figure.
+    const annualPrepayQuotedAmount = annualPrepaySelected && (invoiceAmount != null || invoiceKind === 'annual_prepay_deferred')
       ? invoiceAmount
       : annualPrepayDisplayAmount;
     let acceptedAppointmentsToRegister = txResult.acceptedAppointmentsToRegister || [];
@@ -13074,10 +13149,11 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             logger.error(`[estimate-accept] post-charge invoice read failed for ${invoiceId} (estimate ${estimate.id}) — classifying ambiguous: ${readErr.message}`);
           }
           const freshStatus = String(freshInvoice?.status || '').toLowerCase();
+          const postChargeOutcome = RecurringCards.classifySavedMethodChargeInvoice(freshInvoice);
           if (freshReadFailed) {
             prepayAutoCharge = { status: 'ambiguous', reason: 'post_charge_status_unverified' };
             invoicePayUrl = null;
-          } else if (['paid', 'prepaid'].includes(freshStatus)) {
+          } else if (postChargeOutcome === 'paid') {
             // covered_by_credit / 'prepaid' = account credit covered the
             // whole quoted amount and NO card charge ran (Codex r9): the
             // charge service enqueues no receipt on that early return, so
@@ -13088,7 +13164,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             prepayAutoCharge = { status: 'paid', ...(coveredByCredit ? { coveredByCredit: true } : {}) };
             invoicePayUrl = null; // nothing left to pay — never advertise a pay link
             logger.info(`[estimate-accept] prepay invoice ${invoiceId} auto-charged at accept for customer ${customerId} (estimate ${estimate.id})`);
-          } else if (freshStatus === 'processing' && String(freshInvoice?.payment_method || '') === 'us_bank_account') {
+          } else if (postChargeOutcome === 'bank_processing') {
             // A saved BANK method (autopay-active customers can be
             // ACH-enrolled) debits asynchronously — 'processing' is a
             // successfully INITIATED collection, not a decline (pre-push
@@ -13103,7 +13179,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             prepayAutoCharge = { status: 'processing' };
             invoicePayUrl = null;
             logger.info(`[estimate-accept] prepay invoice ${invoiceId} ACH debit initiated at accept for customer ${customerId} (estimate ${estimate.id})`);
-          } else if (freshStatus === 'processing') {
+          } else if (postChargeOutcome === 'card_incomplete') {
             // A non-bank 'processing' is an incomplete CARD intent — never
             // a pay link beside it and never a resolved job. A 3DS
             // requires_action park can NEVER complete off-session (Codex
@@ -13165,7 +13241,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             prepayAutoCharge = { status: 'ambiguous', reason: 'job_not_owned' };
             invoicePayUrl = null;
             logger.warn(`[estimate-accept] prepay charge ceded for invoice ${invoiceId} (estimate ${estimate.id}): job claim superseded`);
-          } else if (['STRIPE_CHARGE_IN_PROGRESS', 'STRIPE_AMBIGUOUS_OUTCOME', 'STRIPE_CHARGED_DB_FAILED'].includes(chargeErr.code) || chargeErr.reconciliationRequired) {
+          } else if (RecurringCards.isAmbiguousSavedMethodChargeError(chargeErr)) {
             prepayAutoCharge = { status: 'ambiguous', reason: chargeErr.code || chargeErr.message };
             invoicePayUrl = null;
             logger.warn(`[estimate-accept] prepay auto-charge outcome ambiguous for invoice ${invoiceId} (estimate ${estimate.id}): ${chargeErr.message}`);
@@ -13978,6 +14054,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           ? prepayAutoCharge.status
           : null,
         prepayCoveredByCredit: prepayAutoCharge?.coveredByCredit === true,
+        invoiceKind,
       });
       // bell: true \u2014 accepted estimates must ring the admin bell even under
       // GATE_ADMIN_BELL_POLICY (category 'estimate' is otherwise silenced).
@@ -18743,6 +18820,15 @@ function buildAcceptSuccessPayload({
   // homeowner has no pay-invoice step (the invoice went to the payer AP inbox).
   else if (!payerBilled && (invoiceMode || (!treatAsOneTime && invoiceId && invoicePayUrl))) nextStep = 'pay_invoice';
   else if (treatAsOneTime && !reservationCommitted) nextStep = 'book_one_time';
+  // Sign-before-pay (termite annual-plan restructure, P2): a deferred
+  // annual-plan accept has no invoice yet at all — money and the plan
+  // itself wait on the customer's signature. Checked BEFORE the generic
+  // 'prepay_invoice' branch below (billingTerm is still 'prepay_annual'
+  // here, so that branch would otherwise claim it first).
+  else if (invoiceKind === 'annual_prepay_deferred') nextStep = 'sign_agreement';
+  // Signed, but the plan is still being set up (activation running, or
+  // held for staff) — the signing link is burned, so never ask again.
+  else if (invoiceKind === 'annual_prepay_activation_pending') nextStep = 'activation_pending';
   // A payer-billed annual-prepay accept also has no homeowner step — the prepay
   // invoice went to the payer AP inbox, so don't surface prepay follow-up copy.
   else if (!payerBilled && !treatAsOneTime && billingTerm === 'prepay_annual') nextStep = 'prepay_invoice';
@@ -18818,7 +18904,22 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
     .where({ source_estimate_id: estimate.id })
     .orderBy('created_at', 'desc')
     .first();
-  const billingTerm = prepayTerm ? 'prepay_annual' : 'standard';
+  // Sign-before-pay (termite annual-plan restructure, P2): a parked accept
+  // has no annual_prepay_terms row at all — money and the term wait on the
+  // customer's signature. Without this, a retry of exactly this accept
+  // rebuilt as a bare 'standard' billing term (no term exists to detect),
+  // losing the prepay_annual context and reporting the generic 'confirmed'
+  // outcome instead of pointing the customer back at the signature step.
+  const awaitingAnnualSignature = !prepayTerm && estimate.annual_plan_activation_status === 'awaiting_signature';
+  // Codex round-3 P2: once the customer HAS signed, "sign your agreement"
+  // is impossible (signing burned the link) — while activation is still
+  // running, or failed and sits with the retry sweep / staff, report that
+  // the plan is being set up instead. Same contract match activation uses.
+  const annualAgreementSigned = awaitingAnnualSignature && !!(await db('customer_contracts')
+    .where({ document_template_key: require('../services/termite-annual-activation').ANNUAL_TEMPLATE_KEY, status: 'signed' })
+    .whereRaw("document_variables_snapshot -> 'estimate' ->> 'id' = ?", [String(estimate.id)])
+    .first('id'));
+  const billingTerm = (prepayTerm || awaitingAnnualSignature) ? 'prepay_annual' : 'standard';
 
   // Invoice reconstruction is SETTLED-aware (audit P1): 'void' still means a
   // dead pay link the office re-bills manually (skip / fall through), but any
@@ -18970,11 +19071,13 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
   const invoiceNotes = String(invoice?.notes || '');
   const invoiceKind = prepayTerm
     ? 'annual_prepay'
-    : invoiceNotes.includes('(invoice-mode one-time)')
-      ? 'one_time'
-      : invoiceNotes.includes('(invoice-mode recurring)')
-        ? 'recurring_first_visit'
-        : null;
+    : awaitingAnnualSignature
+      ? (annualAgreementSigned ? 'annual_prepay_activation_pending' : 'annual_prepay_deferred')
+      : invoiceNotes.includes('(invoice-mode one-time)')
+        ? 'one_time'
+        : invoiceNotes.includes('(invoice-mode recurring)')
+          ? 'recurring_first_visit'
+          : null;
   // Explicit payment outcome from the LIVE invoice status (Codex r5 P1):
   // only paid/prepaid may say "payment went through", only an INITIATED
   // bank debit may say "processing". But 'processing' is ALSO how an
@@ -19031,7 +19134,11 @@ async function buildAlreadyAcceptedSuccessPayload(estimate) {
       invoicePayUrl,
       payerBilled,
       invoiceKind,
-      invoiceServiceLabel: prepayTerm ? 'Annual prepay' : (invoice?.title || null),
+      invoiceServiceLabel: prepayTerm
+        ? 'Annual prepay'
+        : awaitingAnnualSignature
+          ? (annualAgreementSigned ? 'Annual prepay — signed, setting up' : 'Annual prepay — awaiting signature')
+          : (invoice?.title || null),
       billingTerm,
       prepayInvoiceAmount: prepayTerm ? invoiceAmount : null,
       bookingUrl,
@@ -19162,7 +19269,26 @@ function buildAcceptNotificationPayload({
   // no receipt job) — the copy must confirm the coverage, never promise
   // a receipt (Codex r9).
   prepayCoveredByCredit = false,
+  // 'annual_prepay_deferred' = a termite annual-plan accept parked for the
+  // customer's signature — nothing is billed, booked or approved yet.
+  invoiceKind = null,
 } = {}) {
+  // Sign-before-pay (codex round-3 P2 on #4819): the durable notifications
+  // must send the customer to the signature, never read as "approved,
+  // invoice to follow". Checked first — no invoice, payer, or credit state
+  // exists yet for any branch below to describe.
+  if (invoiceKind === 'annual_prepay_deferred') {
+    const amountText = annualPrepayAmount != null ? ` (${fmtMoney(annualPrepayAmount)})` : '';
+    return {
+      adminTitle: `Estimate accepted — signature pending: ${customerName}`,
+      adminBody: `Termite annual protection plan${amountText} accepted, waiting on the customer's signature on the annual agreement. Nothing is billed or booked until they sign; at signature the saved payment method is charged, or the pay link sent. The 12-month coverage year begins on the installation date.`,
+      customerTitle: 'Next step: sign your plan agreement',
+      // Codex #4819 r6: signing starts the plan and its billing; the
+      // 12-month coverage year begins on the installation date.
+      customerBody: "Next step: sign your plan agreement. We'll send you the signing link. Signing starts your plan; your 12-month coverage begins on your installation date.",
+      customerLink: '/?tab=billing',
+    };
+  }
   // Third-party Bill-To: the invoice + pay link went to the payer's AP inbox;
   // the homeowner gets the report and owes nothing, so never advertise a
   // customer pay link. This must precede every billing-term branch below — the
@@ -27142,6 +27268,7 @@ module.exports.pestMonthlyBaseForFrequency = pestMonthlyBaseForFrequency;
 module.exports.buildAcceptSuccessPayload = buildAcceptSuccessPayload;
 module.exports.estimateReferralCardFor = estimateReferralCardFor;
 module.exports.buildAlreadyAcceptedSuccessPayload = buildAlreadyAcceptedSuccessPayload;
+module.exports.requestedFirstVisitFromRow = requestedFirstVisitFromRow;
 module.exports.commercialAcceptDepositExempt = commercialAcceptDepositExempt;
 module.exports.isCommercialAutoAcceptEstimate = isCommercialAutoAcceptEstimate;
 module.exports.isCommercialOneTimePricedEstimate = isCommercialOneTimePricedEstimate;

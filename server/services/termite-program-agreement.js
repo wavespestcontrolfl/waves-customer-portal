@@ -83,6 +83,25 @@ const SYSTEM_LABELS = {
 const GENERIC_SYSTEM_LABEL = 'in-ground termite bait stations';
 const START_DATE_FALLBACK = 'To be confirmed at installation';
 
+// Codex round-4 P1 on #4819 (owner ruling: the setup fee + first annual fee
+// are charged to the card on file at signing). The signature charge
+// (termite-annual-signature-charge.js) proceeds ONLY when the SIGNED
+// agreement's own snapshotted text carries this explicit initial-charge
+// authorization — compared after collapsing every whitespace run to one
+// space, so the template's line wrapping never matters. The v3 annual
+// agreement's BILLING clause MUST carry this phrase verbatim; an agreement
+// signed without it only authorizes renewal charges, so its initial invoice
+// goes out as a pay link instead of being charged.
+const ANNUAL_INITIAL_CHARGE_AUTHORIZATION = 'Waves charges them to the payment method on file at signing';
+
+function normalizeAgreementWhitespace(text) {
+  return String(text || '').replace(/\s+/g, ' ').trim();
+}
+
+function agreementAuthorizesInitialCharge(contractText) {
+  return normalizeAgreementWhitespace(contractText).includes(ANNUAL_INITIAL_CHARGE_AUTHORIZATION);
+}
+
 // Recent-bell existence check — the single source of exactly-once bell
 // semantics: every path (accept-time, superseded pass, main sweep) rings
 // IFF no matching bell landed within the window. A lost bell self-heals on
@@ -2007,6 +2026,8 @@ module.exports = {
   RENTAL_TEMPLATE_KEY,
   ANNUAL_TEMPLATE_KEY,
   ANNUAL_SERVICE_NAME,
+  ANNUAL_INITIAL_CHARGE_AUTHORIZATION,
+  agreementAuthorizesInitialCharge,
   PROGRAM_TEMPLATE_KEYS,
   START_DATE_FALLBACK,
   buildTermiteProgramAgreementValues,

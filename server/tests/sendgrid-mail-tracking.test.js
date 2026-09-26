@@ -46,3 +46,28 @@ describe('SendGrid security-email tracking controls', () => {
     );
   });
 });
+
+describe('SendGrid unconfigured error classification', () => {
+  const originalApiKey = process.env.SENDGRID_API_KEY;
+
+  beforeEach(() => {
+    jest.resetModules();
+    delete process.env.SENDGRID_API_KEY;
+    global.fetch = jest.fn();
+  });
+
+  afterEach(() => {
+    delete global.fetch;
+    if (originalApiKey === undefined) delete process.env.SENDGRID_API_KEY;
+    else process.env.SENDGRID_API_KEY = originalApiKey;
+  });
+
+  test('a pre-request auth failure carries SENDGRID_NOT_CONFIGURED and never calls fetch', async () => {
+    const sendgrid = require('../services/sendgrid-mail');
+    await expect(sendgrid.clearBlockedAddress('customer@example.test')).rejects.toMatchObject({
+      message: 'SENDGRID_API_KEY not configured',
+      code: 'SENDGRID_NOT_CONFIGURED',
+    });
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+});
