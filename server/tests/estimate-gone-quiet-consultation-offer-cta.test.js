@@ -162,7 +162,7 @@ const knexLib = require('knex');
       t.integer('version_number').notNullable(); t.unique(['template_id', 'version_number']);
       t.string('status'); t.string('subject').notNullable(); t.string('preview_text');
       t.jsonb('blocks'); t.text('text_body'); t.jsonb('validation_snapshot');
-      t.timestamp('published_at');
+      t.timestamp('published_at'); t.timestamp('updated_at'); // real table: timestamps(true, true)
     });
     await db.schema.createTable('email_template_fixtures', (t) => {
       t.uuid('id').primary().defaultTo(db.raw('gen_random_uuid()'));
@@ -225,6 +225,10 @@ const knexLib = require('knex');
       expect(linkIdx).toBe(ctaIdx + 1);
       expect(afterFirstUp.allowed_variables).toContain(NEW_VARIABLE);
       expect(published.validation_snapshot).toMatchObject({ ok: true, migration: MIGRATION, prior_version_id: seededVersion.id });
+      // The same hand-off the library's publish makes: exactly one active
+      // version — the replaced one is archived.
+      expect(published.status).toBe('active');
+      expect((await trx('email_template_versions').where({ id: seededVersion.id }).first()).status).toBe('archived');
 
       // A later staff/admin publish supersedes ours — down() must NOT touch
       // an active_version_id that is no longer the version we published.
@@ -244,6 +248,8 @@ const knexLib = require('knex');
       await migration.down(trx);
       const afterRealDown = await trx('email_templates').where({ id: seededTemplate.id }).first();
       expect(afterRealDown.active_version_id).toBe(seededVersion.id);
+      expect((await trx('email_template_versions').where({ id: seededVersion.id }).first()).status).toBe('active');
+      expect((await trx('email_template_versions').where({ id: published.id }).first()).status).toBe('archived');
       // History retained — nothing deleted.
       expect(await trx('email_template_versions').where({ template_id: seededTemplate.id }).count('* as n').first())
         .toEqual({ n: '3' });

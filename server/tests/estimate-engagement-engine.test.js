@@ -476,6 +476,16 @@ describe('processDueJobs', () => {
       );
     });
 
+    test('an estimate held off the customer surface (lead linkage invalidated) passes acceptActive: false — never a consultation bearer', async () => {
+      buildGoneQuietConsultationUrl.mockResolvedValue('');
+      const estimate_data = JSON.stringify({ estimatorEngine: { linkage_invalidated_at: new Date(NOW.getTime() - H).toISOString() } });
+      enqueueProcessorHappyPath({ est: baseEstimate({ estimate_data }) });
+
+      await Engine.processDueJobs(NOW);
+
+      expect(buildGoneQuietConsultationUrl).toHaveBeenCalledWith(expect.objectContaining({ acceptActive: false }));
+    });
+
     test('a blank builder result still sends the email with consultation_url === "" (gate off / ineligible / build error)', async () => {
       buildGoneQuietConsultationUrl.mockResolvedValue('');
       enqueueProcessorHappyPath();

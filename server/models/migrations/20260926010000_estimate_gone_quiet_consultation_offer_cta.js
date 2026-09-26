@@ -23,8 +23,9 @@
  * (never required) — a dark gate or an ineligible send must never fail
  * validation or block the send on a missing variable.
  *
- * down() reverts active_version_id to the version this migration replaced
- * (recorded in the published version's own validation_snapshot), but ONLY
+ * up() archives the version it replaces, the same hand-off the library's
+ * own publish makes. down() reverts to that version (recorded in the
+ * published version's own validation_snapshot) and archives this one, but ONLY
  * while that inserted version is STILL the active one — a version
  * published since (a staff edit, or a later migration) is never discarded
  * by this rollback. The version row this migration inserted is never
@@ -111,6 +112,12 @@ exports.up = async function up(knex) {
     versionFields.validation_snapshot = JSON.stringify({ ...validation, migration: MIGRATION, prior_version_id: active.id });
 
     const latest = await trx('email_template_versions').where({ template_id: template.id }).max('version_number as max').first();
+    // Same hand-off the library's own publish makes (email-template-library.js
+    // publishVersion): the version being replaced is archived, so the admin
+    // version list never shows two active versions.
+    await trx('email_template_versions')
+      .where({ template_id: template.id, status: 'active' })
+      .update({ status: 'archived', updated_at: new Date() });
     const [version] = await trx('email_template_versions').insert({
       ...versionFields,
       template_id: template.id,
@@ -168,6 +175,8 @@ exports.down = async function down(knex) {
     if (!priorId) return;
     const prior = await trx('email_template_versions').where({ id: priorId, template_id: template.id }).first('id');
     if (!prior) return;
+    await trx('email_template_versions').where({ id: published.id }).update({ status: 'archived', updated_at: new Date() });
+    await trx('email_template_versions').where({ id: prior.id }).update({ status: 'active', updated_at: new Date() });
     await trx('email_templates').where({ id: template.id }).update({
       active_version_id: prior.id,
       updated_at: new Date(),

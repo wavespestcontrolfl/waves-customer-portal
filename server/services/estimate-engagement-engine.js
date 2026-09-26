@@ -765,17 +765,18 @@ async function processDueBatch(now = new Date()) {
       );
       // ONE new variable, ONE rule (owner ruling 2026-09-26): every other
       // rule's payload is byte-identical — this never even calls the
-      // builder for them. acceptActive is `true` here, not re-derived: by
-      // this point processDueBatch has already verified est is active and
-      // sendable (not archived, ACTIVE_STATUSES, not expired — the same
-      // verdict isEstimateAcceptActive computes for the public page) for
-      // THIS exact send.
+      // builder for them. acceptActive: processDueBatch has already checked
+      // archived / ACTIVE_STATUSES / expiry for THIS send; the one part of
+      // the page's isEstimateAcceptActive verdict it does not check is
+      // estimateOffCustomerSurface (linkage invalidated or pending, reprice
+      // hold, unverified address) — an estimate held off the customer
+      // surface must never carry a consultation bearer.
       const isGoneQuiet = rule.rule_key === GONE_QUIET_RULE_KEY;
       const consultationUrl = isGoneQuiet
         ? await buildGoneQuietConsultationUrl({
           estimate: est,
           estimateData: parseEstimateData(est.estimate_data),
-          acceptActive: true,
+          acceptActive: !require('../utils/estimate-claim-sql').estimateOffCustomerSurface(est),
           recipientEmail: est.customer_email,
         })
         : '';
