@@ -96,10 +96,15 @@ padding, hairline 1–3px offsets) are allowed but must be deliberate.
 
 ## Color roles
 
-`DOC.*` roles are CSS-var references **on purpose**: warm brand navy
-`#1B2C5B` in print/PDF/non-glass renders, canonical glass navy `#04395E`
-while a glass scene is mounted. `DOC.navyLiteral` (#1B2C5B) pins chrome that
-must not shift (e.g. DocumentActionBar fills). Semantic roles: `danger`,
+`DOC.*` roles are CSS-var references **on purpose**: canonical navy
+`#04395E` everywhere — print, PDF, non-glass and glass renders alike
+(owner rulings 2026-07-05 and 2026-07-12). `#1B2C5B` is reserved for
+marketing-mirror surfaces, not customer docs. Some PDF generators have not
+migrated yet and still hard-code `#1B2C5B`, among them `server/services/pdf/contract-pdf.js`,
+`estimate-pdf.js`, `payer-statement-pdf.js`, and the service-report PDFs in
+`server/routes/documents.js` and `server/routes/reports-public.js`; search the server
+for `1B2C5B` to find the rest. `DOC.navyLiteral` (#04395E)
+pins chrome that must not shift (e.g. DocumentActionBar fills). Semantic roles: `danger`,
 `success` (+ `successBg/successBorder`), `soft/softBorder` washes,
 `border/borderStrong`, `page` (#FAF8F3 warm).
 

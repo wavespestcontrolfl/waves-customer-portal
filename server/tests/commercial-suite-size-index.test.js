@@ -92,6 +92,81 @@ describe('resolveCommercialSuiteSize — priority order (caller/tech-stated -> l
     expect(dbprCallArg.buildingSqft).toBeUndefined();
     expect(webCallArg.buildingSqft).toBeUndefined();
   });
+
+  test('skipWebSearch option bypasses the web-search leg entirely (PR #4840 admin lookup cache-hit path)', async () => {
+    resolveViaDbprLicense.mockResolvedValue(null);
+
+    const result = await resolveCommercialSuiteSize({ address: ADDRESS, commercialRiskType: 'office_low' }, { skipWebSearch: true });
+    expect(resolveViaWebSearch).not.toHaveBeenCalled();
+    expect(result.source).toBe(SOURCES.SUITE_TYPE_DEFAULT);
+  });
+});
+
+describe('opts.deadlineAt — the lookup budget, not each leg\'s own full timeout (primary review PR #4840 r5 P2)', () => {
+  test('no deadlineAt (the default): both legs run with no timeoutMs override — unaffected callers keep today\'s behavior', async () => {
+    resolveViaDbprLicense.mockResolvedValue(null);
+    resolveViaWebSearch.mockResolvedValue(null);
+    await resolveCommercialSuiteSize({ address: ADDRESS });
+    expect(resolveViaDbprLicense.mock.calls[0][1].timeoutMs).toBeUndefined();
+    expect(resolveViaWebSearch.mock.calls[0][1].timeoutMs).toBeUndefined();
+  });
+
+  test('plenty of budget left: each leg\'s timeoutMs is capped to the remaining budget, not shortened below its own default', async () => {
+    resolveViaDbprLicense.mockResolvedValue(null);
+    resolveViaWebSearch.mockResolvedValue(null);
+    const deadlineAt = Date.now() + 60000; // way more than either leg's own default (15s / 20s)
+    await resolveCommercialSuiteSize({ address: ADDRESS }, { deadlineAt });
+    expect(resolveViaDbprLicense.mock.calls[0][1].timeoutMs).toBe(15000);
+    expect(resolveViaWebSearch.mock.calls[0][1].timeoutMs).toBe(20000);
+  });
+
+  test('a short remaining budget shortens each leg\'s timeoutMs below its own default', async () => {
+    resolveViaDbprLicense.mockResolvedValue(null);
+    resolveViaWebSearch.mockResolvedValue(null);
+    const deadlineAt = Date.now() + 5000; // less than either leg's own default
+    await resolveCommercialSuiteSize({ address: ADDRESS }, { deadlineAt });
+    expect(resolveViaDbprLicense.mock.calls[0][1].timeoutMs).toBeLessThanOrEqual(5000);
+    expect(resolveViaWebSearch.mock.calls[0][1].timeoutMs).toBeLessThanOrEqual(5000);
+  });
+
+  test('under ~2s remaining, the DBPR leg is skipped entirely — falls straight through to web search / type default', async () => {
+    resolveViaWebSearch.mockResolvedValue(null);
+    const deadlineAt = Date.now() + 1000;
+    const result = await resolveCommercialSuiteSize({ address: ADDRESS, commercialRiskType: 'office_low' }, { deadlineAt });
+    expect(resolveViaDbprLicense).not.toHaveBeenCalled();
+    expect(result.source).toBe(SOURCES.SUITE_TYPE_DEFAULT);
+  });
+
+  test('under ~2s remaining after DBPR consumed most of the budget, the web-search leg is skipped too — never blocks past the deadline', async () => {
+    resolveViaDbprLicense.mockResolvedValue(null);
+    const start = Date.now();
+    // Deterministic clock: the first remainingBudgetMs() read (before DBPR)
+    // sees plenty left, so DBPR runs; the second (before web search) sees
+    // DBPR "consumed" all but 500ms — under MIN_LEG_REMAINING_MS (2000).
+    const nowSpy = jest.spyOn(Date, 'now')
+      .mockReturnValueOnce(start)
+      .mockReturnValueOnce(start + 9500);
+    try {
+      const result = await resolveCommercialSuiteSize(
+        { address: ADDRESS, commercialRiskType: 'office_low' },
+        { deadlineAt: start + 10000 },
+      );
+      expect(resolveViaDbprLicense).toHaveBeenCalledTimes(1); // budget was fine at the first check
+      expect(resolveViaWebSearch).not.toHaveBeenCalled(); // budget was thin at the second
+      expect(result.source).toBe(SOURCES.SUITE_TYPE_DEFAULT);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  test('an already-past deadline skips both legs and resolves straight to the type default', async () => {
+    const deadlineAt = Date.now() - 1000;
+    const result = await resolveCommercialSuiteSize({ address: ADDRESS, commercialRiskType: 'retail_standard' }, { deadlineAt });
+    expect(resolveViaDbprLicense).not.toHaveBeenCalled();
+    expect(resolveViaWebSearch).not.toHaveBeenCalled();
+    expect(result.source).toBe(SOURCES.SUITE_TYPE_DEFAULT);
+    expect(result.value).toBe(1500);
+  });
 });
 
 describe('suiteAddressParts', () => {

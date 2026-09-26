@@ -335,6 +335,31 @@ function buildAiProviderWarnings({ sources, errors = [], providerStatus = {} } =
 // A dwelling unit designator anywhere in a typed address (the server's
 // unit-scope model reads the same forms; "#" alone counts).
 
+// Commercial suite sizing (owner ruling 2026-09-25,
+// server/services/commercial-suite-size/): one-line operator note for the
+// Home Sq Ft field when the lookup sized a suite instead of the whole
+// building — where the number came from, and the building total for
+// context. Returns null when the lookup carries no suite-size result.
+// Only two sizing sources exist (a web-search leg is never a size source —
+// AGENTS.md: an LLM proposes intent, it never picks a price/size field).
+const COMMERCIAL_SUITE_SOURCE_LABELS = {
+  license_seats: "state restaurant license",
+  verified: "tech-verified measurement",
+  suite_type_default: "typical size for this business type",
+};
+
+function commercialSuiteSizeNote(enrichedProfile) {
+  const suite = enrichedProfile?.suiteSize;
+  if (!suite || !(Number(suite.value) > 0)) return null;
+  const sourceLabel = COMMERCIAL_SUITE_SOURCE_LABELS[suite.source] || suite.source;
+  const seatsNote = suite.source === "license_seats" && suite.seats != null ? ` (${suite.seats} seats)` : "";
+  const buildingNote = Number(enrichedProfile?.suiteBuildingTotalSqFt) > 0
+    ? ` Building total ${Number(enrichedProfile.suiteBuildingTotalSqFt).toLocaleString()} sq ft.`
+    : "";
+  const nameNote = suite.businessName ? ` — ${suite.businessName}` : "";
+  return `Suite size ${Number(suite.value).toLocaleString()} sq ft — from ${sourceLabel}${seatsNote}.${buildingNote}${nameNote}`;
+}
+
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
     ...options,
@@ -356,6 +381,26 @@ function adminFetch(path, options = {}) {
 // densities/complexity (turf-factor score), and propertyType (hardscape
 // brackets). Service-specific fields (palms, trenching, Bora-Care, slab,
 // commercial) stay in doGenerate — they don't feed turf.
+// Bait-station footprint prefill from the home sqft. A suite-sized lookup's
+// homeSqFt is the suite's own single-story area while the stories box still
+// reads the BUILDING, so it is never divided by the building's floors.
+// A suite's Stories box is confirmed once the operator typed a count, or it
+// still holds a count verified on this address; until then the suite is one
+// floor of its own (the lookup's 1 is a default nobody observed).
+function suiteStoriesAreConfirmed(form) {
+  const stories = Number(form?.stories);
+  if (!(stories >= 1)) return false;
+  if (form._storiesEdited) return true;
+  return Number(form._suiteStoriesVerified) === stories;
+}
+
+export function termiteFootprintFromHome(homeSqFt, stories, suiteSized) {
+  const sqft = Number(homeSqFt) || 0;
+  if (sqft <= 0) return 0;
+  const st = suiteSized ? 1 : Math.max(1, Number(stories) || 1);
+  return Math.round(sqft / st);
+}
+
 // The dimensions the form prices — a blank box is 0 sq ft / 1 story. One
 // definition for the priced profile and every reader that must agree with it.
 function formDimensions(form) {
@@ -410,6 +455,14 @@ function buildTurfRequestProfile(baseProfile, form) {
     ),
     bedAreaSource: form._manualFields?.includes("bedArea") && parseNonNegativeNumber(form.bedArea) !== undefined
       ? "manual" : baseProfile.bedAreaSource,
+    // Provenance for the server's footprintSizeEstimated flag (primary
+    // review of PR #4840 r7 P2) — an operator who typed into the Home Sq Ft
+    // box has entered or CONFIRMED the size, even when the number they
+    // typed happens to equal the suite's business-type default. The old
+    // server-side check compared the priced value to the default NUMBER,
+    // which stayed "estimated" for a confirmed-equal value; this flag
+    // survives that case because it tracks the EDIT, not the number.
+    _homeSqFtManuallyEdited: !!form._homeSqFtEdited,
   };
   // The translator reads `homeSqFt || squareFootage`: a legacy profile's
   // alias must not re-price a cleared Home Sq Ft box (codex r1 P1 #4871).
@@ -439,12 +492,36 @@ function buildTurfRequestProfile(baseProfile, form) {
     Number(form.stories) >= 1
   )
     profile.footprintUnknown = false;
-  // The footprint follows the Home Sq Ft box too: a cleared box must not
-  // leave the lookup's own footprint (spread in above) pricing pest.
-  if (profile.footprintUnknown !== true)
+  // Commercial classification follows the FORM, exactly like the pricing
+  // request — a lookup-classified commercial corrected to residential (or
+  // vice versa) must preview through the same branch it will price through
+  // (commercial changes the hardscape model; pre-push P1 #3098). Computed
+  // here (before the suite-footprint rule below) rather than only at the
+  // bottom of this function, since the footprint rule needs it too.
+  const formIsCommercial = isCommercialEstimateInput(form);
+  // A suite-sized profile (server/services/commercial-suite-size/): the
+  // suite's own footprint is homeSqFt AS-IS — dividing by the BUILDING's
+  // story count (profile.stories still reads the building, since a suite
+  // has none of its own) would price a 1,400 sq ft suite in a 2-story plaza
+  // as a 700 sq ft footprint. Gated on the form STILL being commercial
+  // (primary review of PR #4840 r7 P1) — an operator who corrects a
+  // false-positive suite lookup to residential must get the ordinary
+  // homeSqFt/stories derivation, not the single-story suite rule frozen
+  // from the original (wrong) classification.
+  // Only while Stories is the untouched lookup default: a confirmed story
+  // count divides like any building (Codex #4840 r11 P1).
+  // A count verified on this suite address (and still in the box) is
+  // confirmed too (Codex #4840 r14 P1).
+  const suiteStoriesConfirmed = suiteStoriesAreConfirmed(form);
+  if (baseProfile.suiteSize && formIsCommercial && !suiteStoriesConfirmed) {
+    profile.footprint = profile.homeSqFt;
+  } else if (profile.footprintUnknown !== true) {
+    // The footprint follows the Home Sq Ft box too: a cleared box must not
+    // leave the lookup's own footprint (spread in above) pricing pest.
     profile.footprint = profile.homeSqFt
       ? Math.round(profile.homeSqFt / (profile.stories || 1))
       : 0;
+  }
   profile.pool = form.hasPool === "YES" ? "YES" : "NO";
   profile.poolCage = form.hasPoolCage === "YES" ? "YES" : "NO";
   profile.poolCageSize =
@@ -468,11 +545,7 @@ function buildTurfRequestProfile(baseProfile, form) {
     form.landscapeComplexity || profile.landscapeComplexity;
   profile.nearWater = form.nearWater === "YES" ? "YES" : "NO";
   profile.propertyType = form.propertyType || profile.propertyType;
-  // Commercial classification follows the FORM, exactly like the pricing
-  // request — a lookup-classified commercial corrected to residential (or
-  // vice versa) must preview through the same branch it will price through
-  // (commercial changes the hardscape model; pre-push P1 #3098).
-  const formIsCommercial = isCommercialEstimateInput(form);
+  // formIsCommercial computed earlier, above the suite-footprint rule.
   profile.isCommercial = formIsCommercial;
   profile.commercialSubtype = formIsCommercial ? form.commercialSubtype || null : null;
   profile.commercialRiskType = formIsCommercial ? form.commercialRiskType || null : null;
@@ -483,6 +556,12 @@ function buildTurfRequestProfile(baseProfile, form) {
   profile.mosquitoPressure = formIsCommercial ? form.mosquitoPressure || null : null;
   return profile;
 }
+
+// Named export purely for direct unit testing (see
+// EstimateToolViewV2.commercial-suite-size.test.jsx) — the component's
+// default export is unaffected and every other consumer keeps importing it
+// the same way.
+export { buildTurfRequestProfile };
 
 // Services sized off the home (pest, cockroach, one-time pest, bed bug,
 // flea) fall back to a 2,000 sq ft house when no home size reaches the
@@ -627,7 +706,7 @@ const PROPERTY_FORM_FIELDS = [
   "boracareSurfaceHeightFt", "preslabSqft", "preslabLabelConfirmed", "plugArea",
   "topDressArea", "fleaExteriorAreaSqFt", "fleaExteriorAreaSource", "fleaExteriorZones",
   "palmDiagnosisConfirmed", "palmLicensedApplicator", "palmHighDose", "palmLargeDiameter",
-  "palmNonstandardProduct", "_termiteFootprintAuto", "_trenchingPerimeterAuto",
+  "palmNonstandardProduct", "_termiteFootprintAuto", "_suiteSizedLookup", "_suiteStoriesVerified", "_trenchingPerimeterAuto",
   "_boracareSqftAuto", "_preslabSqftAuto", "_palmCountAuto",
   "stingSpecies", "stingTier", "stingRemoval", "stingAggressive", "stingHeight", "stingConfined",
 ];
@@ -2257,9 +2336,15 @@ export default function EstimateToolViewV2({
     // edits clear savedId before this effect runs.
     if (!form.svcTermiteBait || savedId) return;
     const sqft = Number(form.homeSqFt) || 0;
-    const st = Math.max(1, Number(form.stories) || 1);
     if (sqft > 0) {
-      const fp = Math.round(sqft / st);
+      // Gated on the form STILL being commercial (primary review of PR
+      // #4840 r7 P1) — an operator who corrects a false-positive suite
+      // lookup to residential must get the ordinary per-story derivation,
+      // not the single-story suite rule frozen from the original (wrong)
+      // classification.
+      const suiteSized = form._suiteSizedLookup && isCommercialEstimateInput(form)
+        && !suiteStoriesAreConfirmed(form);
+      const fp = termiteFootprintFromHome(sqft, form.stories, suiteSized);
       setForm((f) => {
         // footprintUnknown lookup (association aggregate, story count
         // unknown): homeSqFt is the summed living area and stories a
@@ -2284,7 +2369,7 @@ export default function EstimateToolViewV2({
         return { ...f, ...upd, _termiteFootprintAuto: true };
       });
     }
-  }, [form.homeSqFt, form.stories, form.svcTermiteBait]);
+  }, [form.homeSqFt, form.stories, form._storiesEdited, form.svcTermiteBait, form._suiteSizedLookup, form.isCommercial, form.propertyType, form._suiteStoriesVerified]);
 
   useEffect(() => {
     const q = customerSearch.trim();
@@ -2624,6 +2709,13 @@ export default function EstimateToolViewV2({
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       if (formAddressRef.current.trim() !== address || verificationVersionRef.current !== version) return;
       setVerifySaveState((s) => ({ ...s, [field]: "saved" }));
+      // A verified size or story count is the operator's measurement, same
+      // as typing it: the next Generate prices it as measured, not as the
+      // lookup's estimate (Codex #4840 r12 P2).
+      const editedFlag = { squareFootage: "_homeSqFtEdited", stories: "_storiesEdited" }[field];
+      if (editedFlag) {
+        setForm((f) => (Number(f[key]) === value ? { ...f, [editedFlag]: true } : f));
+      }
     } catch {
       if (formAddressRef.current.trim() !== address || verificationVersionRef.current !== version) return;
       setVerifySaveState((s) => ({ ...s, [field]: "error" }));
@@ -3085,7 +3177,18 @@ export default function EstimateToolViewV2({
       const r = await fetch("/api/admin/estimator/property-lookup", {
         method: "POST",
         headers: authHeaders,
-        body: JSON.stringify({ address, refresh }),
+        // An association's common-area job is priced on the whole property,
+        // never one suite of it, even at an office "Suite" address (Codex
+        // #4840 r13 P1) — the server then skips suite sizing.
+        body: JSON.stringify({
+          address,
+          refresh,
+          // Mirrors the server's isAssociationCommercialJob: the business
+          // type OR the subtype (Codex #4840 r14 P1).
+          ...((["hoa_common_area", "multifamily"].includes(form.commercialRiskType)
+            || /^(?:hoa|multifamily)/.test(String(form.commercialSubtype || "")))
+            ? { wholeProperty: true } : {}),
+        }),
         signal: lookupController.signal,
       });
       if (!r.ok) throw new Error("API " + r.status);
@@ -3114,7 +3217,7 @@ export default function EstimateToolViewV2({
         errors: data.errors || [],
       });
       setVerifySaveState({});
-      unitLookupAddressRef.current = ep.residentialUnitLookup ? address : "";
+      unitLookupAddressRef.current = ep.unitScopedLookup ? address : "";
 
       const upd = {};
       if (ep.stories) upd.stories = String(ep.stories);
@@ -3122,15 +3225,18 @@ export default function EstimateToolViewV2({
         Object.assign(upd, resolveLookupPropertyTypeAutofill(ep.propertyType, ep.category));
       }
       if (ep.commercialSubtype) upd.commercialSubtype = ep.commercialSubtype;
-      if (ep.residentialUnitLookup) {
-        // One unit inside a building: the server already blanked the
-        // parcel's dims and dropped its parcel-wide reads, but the copies
-        // above only land TRUTHY values — so a bare-building lookup run a
-        // moment earlier (the usual sequence: address first, then "which
-        // apartment?") would keep the complex's sqft / lot / stories /
-        // pool / landscape in the form through the spread below and price
-        // the whole property anyway (codex r1 P1). Reset those to the form
-        // defaults; the operator supplies the unit's own figures.
+      if (ep.unitScopedLookup) {
+        // One unit/suite inside a building: the server already blanked the
+        // parcel's dims and dropped its parcel-wide reads (residential unit
+        // OR commercial suite — primary review of PR #4840 r5 P1, same flag
+        // for both), but the copies above only land TRUTHY values — so a
+        // bare-building lookup run a moment earlier (the usual sequence:
+        // address first, then "which apartment/suite?") would keep the
+        // complex's sqft / lot / stories / pool / landscape in the form
+        // through the spread below and price the whole property anyway
+        // (codex r1 P1). Reset those to the form defaults; the operator
+        // supplies the unit's own figures (a suite's homeSqFt is restored
+        // right after by ep.homeSqFt below, once the resolver has run).
         Object.assign(upd, {
           homeSqFt: ep.homeSqFt ? String(ep.homeSqFt) : "",
           lotSqFt: "",
@@ -3202,12 +3308,15 @@ export default function EstimateToolViewV2({
           // The development's lot (unit_parcel flag) is never prefilled — the
           // flag asks the operator to enter the unit's own area, or the
           // whole property's lot for an association quote.
-          lotSqFt: ep.residentialUnitLookup ? "" : f._lotSqFtEdited ? f.lotSqFt : (ep.lotSqFt && !lookupLotIsUnitParcel(ep) ? String(ep.lotSqFt) : ""),
+          lotSqFt: (ep.residentialUnitLookup || ep.unitScopedLookup) ? "" : f._lotSqFtEdited ? f.lotSqFt : (ep.lotSqFt && !lookupLotIsUnitParcel(ep) ? String(ep.lotSqFt) : ""),
           stories: f._storiesEdited ? f.stories : (ep.stories ? String(ep.stories) : "1"),
           ...(termiteFootprintNumber ? { _termiteFootprintAuto: true } : {}),
           // Rides the form so the homeSqFt/stories effect can't re-derive a
           // footprint the lookup refused to claim (codex P1 #2721).
           _footprintUnknownLookup: ep.footprintUnknown === true,
+          _suiteSizedLookup: Boolean(ep.suiteSize),
+          // A story count verified on this suite address (0 = none).
+          _suiteStoriesVerified: ep.suiteSize && ep.storiesSource === "verified" ? Number(ep.stories) || 0 : 0,
           _unitLookup: !!ep.residentialUnitLookup,
           _poolCageSizeEdited: false,
           _storiesEdited: !!f._storiesEdited,
@@ -3470,7 +3579,19 @@ export default function EstimateToolViewV2({
         presets: serviceCreditPresets,
       });
       const formIsCommercial = isCommercialEstimateInput(form);
-      const termiteFootprintSqFt = parsePositiveNumber(form.termiteFootprintSqFt);
+      // A footprint auto-filled from a suite's business-type default is that
+      // same guess, not a measurement: sent as one it would price termite
+      // past the unmeasured-building manual quote (Codex #4840 r11 P1). A
+      // typed footprint, or one from a license/verified size, still counts.
+      // Only a positive operator-entered home size makes an auto-filled
+      // footprint a measurement; a cleared box leaves the old default-derived
+      // value, which must not price either (Codex #4840 r12 P1).
+      const termiteFootprintFromSuiteDefault = form._termiteFootprintAuto
+        && enrichedProfile?.suiteSize?.source === "suite_type_default"
+        && !(form._homeSqFtEdited && Number(form.homeSqFt) > 0);
+      const termiteFootprintSqFt = termiteFootprintFromSuiteDefault
+        ? undefined
+        : parsePositiveNumber(form.termiteFootprintSqFt);
       const termitePerimeterLF = parsePositiveNumber(form.termitePerimeterLF);
       const trenchingPerimeterLF = parsePositiveNumber(form.trenchingPerimeterLF);
       const trenchingConcreteLF = parseNonNegativeNumber(form.trenchingConcreteLF);
@@ -3969,6 +4090,26 @@ export default function EstimateToolViewV2({
           : `Enter home sq ft. ${names} ${verb} priced by the home's size, and without it the price is a guess at a 2,000 sq ft house.`);
         return null;
       }
+      // The server (translateV2CallToV1Input) recomputes an untouched
+      // suite-type-default size off whatever commercialRiskType/
+      // commercialSubtype is CURRENTLY selected (codex P2 #4840) — it can
+      // now differ from the lookup-time value still sitting in the Home Sq
+      // Ft box. Sync the box (and the remembered suite-size note) to what
+      // was actually priced so the displayed size and the priced size never
+      // disagree. A manually edited/confirmed box (_homeSqFtEdited) is
+      // never touched — same provenance gate the server checks.
+      if (
+        profile.suiteSize?.source === "suite_type_default" &&
+        !form._homeSqFtEdited &&
+        Number(result.property?.homeSqFt) > 0 &&
+        Number(result.property.homeSqFt) !== Number(form.homeSqFt)
+      ) {
+        const resolvedSuiteSqFt = Number(result.property.homeSqFt);
+        setForm((f) => ({ ...f, homeSqFt: String(resolvedSuiteSqFt) }));
+        setEnrichedProfile((ep) =>
+          ep?.suiteSize ? { ...ep, suiteSize: { ...ep.suiteSize, value: resolvedSuiteSqFt } } : ep
+        );
+      }
       setEstimate(result);
       setSavedId(null);
       setSavedViewUrl(null);
@@ -4000,7 +4141,15 @@ export default function EstimateToolViewV2({
     saveInFlightRef.current = true;
     setSaving(true);
     setSaveError("");
-    const savingForm = JSON.stringify(form);
+    // The suite default the server just priced (recomputed off the current
+    // business type) is what the inputs record, even when a same-turn save
+    // runs before setForm's sync lands (Codex #4840 r12 P1).
+    const pricedSuiteSqFt = Number(estimateToSave.property?.homeSqFt);
+    const savingInputs = enrichedProfile?.suiteSize?.source === "suite_type_default"
+      && !form._homeSqFtEdited && pricedSuiteSqFt > 0 && pricedSuiteSqFt !== Number(form.homeSqFt)
+      ? { ...form, homeSqFt: String(pricedSuiteSqFt) }
+      : form;
+    const savingForm = JSON.stringify(savingInputs);
     try {
       const E = estimateToSave;
       const quoteRequired = estimateRequiresQuote(E);
@@ -4021,7 +4170,7 @@ export default function EstimateToolViewV2({
         customerEmail: form.customerEmail || "",
         leadId: isEditRevision ? null : form.leadId || null,
         customerId: form.customerId || existingCustomerMatch?.id || null,
-        estimateData: { inputs: form, result: E, summary: estimateSummary, engineRequest: E.engineRequest || null },
+        estimateData: { inputs: savingInputs, result: E, summary: estimateSummary, engineRequest: E.engineRequest || null },
         monthlyTotal,
         annualTotal: monthlyTotal * 12,
         onetimeTotal,
@@ -4260,6 +4409,8 @@ export default function EstimateToolViewV2({
       serviceSpecificDiscountKeys: [],
       _termiteFootprintAuto: false,
       _footprintUnknownLookup: false,
+      _suiteSizedLookup: false,
+      _suiteStoriesVerified: 0,
       _unitLookup: false,
       _trenchingPerimeterAuto: false,
       _boracareSqftAuto: false,
@@ -4874,6 +5025,8 @@ export default function EstimateToolViewV2({
                       trenchingEstimateFromFootprint: false,
                       _termiteFootprintAuto: false,
                       _footprintUnknownLookup: false,
+                      _suiteSizedLookup: false,
+                      _suiteStoriesVerified: 0,
                       _unitLookup: false,
                       _trenchingPerimeterAuto: false,
                       _boracareSqftAuto: false,
@@ -5401,7 +5554,7 @@ export default function EstimateToolViewV2({
               )}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 {" "}
-                <Field label="Home Sq Ft" id="estimate-homeSqFt" className="mb-4">
+                <Field label="Home Sq Ft" id="estimate-homeSqFt" className="mb-4" help={commercialSuiteSizeNote(enrichedProfile)}>
                   <InputV2 k="homeSqFt" type="number" placeholder="2000" />
                 </Field>{" "}
                 <Field label="Stories" id="estimate-stories" className="mb-4" help={enrichedProfile?.storiesSource === "default" && (
