@@ -1521,6 +1521,16 @@ async function assertGroupAssignmentAllowed(dbc, groupId, identity = {}, selfId 
   }
 }
 
+// The V2 admin form's isCommercial select saves the string "YES", which the
+// shared isCommercialEstimateData (strict boolean; other readers depend on
+// that) does not read. Recognized HERE only, for the category column, so a
+// commercial termite-only estimate with no commercial_* line still saves
+// COMMERCIAL without widening the shared detector's other callers.
+function v2FormMarkedCommercial(estimateData) {
+  const flag = estimateData?.inputs?.isCommercial;
+  return typeof flag === 'string' && flag.trim().toUpperCase() === 'YES';
+}
+
 function buildEstimatePersistenceFields(body, context = {}) {
   const estimateData = normalizeEstimateDethatchingManagerApproval(body.estimateData, context);
   if (estimateData) {
@@ -1579,7 +1589,7 @@ function buildEstimatePersistenceFields(body, context = {}) {
     // omitted leaves that column untouched (never downgrades); one row's
     // ONLY path to COMMERCIAL, from either create or revise, is a payload
     // this detector positively reads as commercial.
-    ...(isCommercialEstimateData(estimateData) ? { category: 'COMMERCIAL' } : {}),
+    ...(isCommercialEstimateData(estimateData) || v2FormMarkedCommercial(estimateData) ? { category: 'COMMERCIAL' } : {}),
     // Always emitted: a non-SERVER rewrite RESETS the column to its migration
     // default, so a draft first stamped by a server price can't keep claiming
     // that version after a CLIENT_FALLBACK/quote-required rewrite replaced

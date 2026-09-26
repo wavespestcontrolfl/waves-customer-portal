@@ -2826,6 +2826,13 @@ const gates = {
   // it would insert, inside a transaction it rolls back, and logs the count
   // only — no writes). This entry is for logGateStatus only.
   recurringSeriesTopUp: process.env.GATE_RECURRING_SERIES_TOPUP === 'true',
+  // Commercial suite sizing (PR #4840): a commercial tenant in a
+  // multi-tenant building is sized by the SUITE (state food-license seats,
+  // else a type default) instead of the whole building, in the admin
+  // estimate lookup and the estimator engine. **Ships DARK: off unless
+  // exactly `true`**; canonical CALL-TIME reader commercialSuiteSizingLive().
+  // Off = byte-identical to before (the building size flows through).
+  commercialSuiteSizing: process.env.GATE_COMMERCIAL_SUITE_SIZING === 'true',
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks
@@ -2877,6 +2884,14 @@ function customerIntelAiLive() {
 // on what "on" means.
 function recurringSeriesTopUpLive() {
   return process.env.GATE_RECURRING_SERIES_TOPUP === 'true';
+}
+
+// GATE_COMMERCIAL_SUITE_SIZING read at CALL time — strict `=== 'true'`,
+// same convention as recurringSeriesTopUpLive(). The one reader for both
+// suite-sizing entry points (performPropertyLookup's opt-in and the
+// estimator engine's own resolve), so a flip is a live kill/enable.
+function commercialSuiteSizingLive() {
+  return process.env.GATE_COMMERCIAL_SUITE_SIZING === 'true';
 }
 
 function leadInspectionLinkLive() {
@@ -2942,5 +2957,5 @@ function logGateStatus() {
   }
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, customerIntelAiLive, selfBookDayCapEnabled, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, customerIntelAiLive, selfBookDayCapEnabled, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, commercialSuiteSizingLive };
 // gates 1775330914

@@ -7,6 +7,9 @@
  * property-lookup-accuracy-analysis.test.js's mocking pattern.
  */
 
+// Suite sizing ships dark behind GATE_COMMERCIAL_SUITE_SIZING; these tests exercise it ON.
+process.env.GATE_COMMERCIAL_SUITE_SIZING = 'true';
+
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/property-lookup/lookup-cache', () => ({
   getVerifiedOverrides: jest.fn(async () => null),
@@ -122,5 +125,22 @@ describe('cache hit on an older row with no suite stamp', () => {
     await buildResultFromCachedLookup(ADDRESS, row(), null, Date.now(), { commercialSuiteSizing: true, persist: false });
     await buildResultFromCachedLookup(ADDRESS, row(), null, Date.now(), { commercialSuiteSizing: true, cacheOnly: true });
     expect(attachCommercialSuiteSizeToCachedLookup).not.toHaveBeenCalled();
+  });
+});
+
+describe('GATE_COMMERCIAL_SUITE_SIZING off', () => {
+  test('an opt-in caller gets the ordinary lookup: building size, no suite fields, no resolver', async () => {
+    const { resolveCommercialSuiteSize } = require('../services/commercial-suite-size');
+    const saved = process.env.GATE_COMMERCIAL_SUITE_SIZING;
+    delete process.env.GATE_COMMERCIAL_SUITE_SIZING;
+    try {
+      const result = await performPropertyLookup(ADDRESS, { persist: false, prioritizeAccuracy: true, commercialSuiteSizing: true });
+      expect(result.enriched.homeSqFt).toBe(46031);
+      expect(result.enriched.suiteSize).toBeUndefined();
+      expect(result.enriched.suiteBuildingTotalSqFt).toBeUndefined();
+      expect(resolveCommercialSuiteSize).not.toHaveBeenCalled();
+    } finally {
+      process.env.GATE_COMMERCIAL_SUITE_SIZING = saved;
+    }
   });
 });

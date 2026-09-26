@@ -2636,6 +2636,7 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
         // caller-stated size, or a non-aggregated condo's own per-unit
         // folio, both survive the apply and always outrank this.
         if (intent.is_commercial === true
+          && require('../../config/feature-gates').commercialSuiteSizingLive()
           && unitScope.serviceScope === 'commercial_suite'
           && propertyFacts.home?.source === SQFT_SOURCES.NONE) {
           try {

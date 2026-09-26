@@ -292,22 +292,11 @@ function selectsRecurringPestOrRodent(value, depth = 0) {
   return Object.values(value).some((item) => selectsRecurringPestOrRodent(item, depth + 1));
 }
 
-// The V2 admin form's isCommercial select stores the string "YES"/"NO"
-// (EstimateToolViewV2.jsx), not a boolean — mirrors
-// client/src/lib/estimateEngine.js's isCommercialEstimateInput so the two
-// can never disagree about the same saved payload (a strict `=== true`
-// check missed every V2 form save, e.g. a commercial termite-only estimate
-// with no commercial_* line item, and persisted it RESIDENTIAL).
-function isCommercialFlagValue(value) {
-  if (value === true) return true;
-  return typeof value === 'string' && ['yes', 'true', 'commercial'].includes(value.trim().toLowerCase());
-}
-
 function isCommercialEstimateData(value, depth = 0) {
   if (!value || depth > 12) return false;
   if (Array.isArray(value)) return value.some((item) => isCommercialEstimateData(item, depth + 1));
   if (typeof value !== 'object') return false;
-  if (value.commercialEstimatedPricing === true || isCommercialFlagValue(value.isCommercial)) return true;
+  if (value.commercialEstimatedPricing === true || value.isCommercial === true) return true;
   if (typeof value.propertyType === 'string' && value.propertyType.toLowerCase() === 'commercial') return true;
   if (typeof value.category === 'string' && value.category.toLowerCase() === 'commercial') return true;
   if (typeof value.commercialSubtype === 'string' && value.commercialSubtype.trim()) return true;

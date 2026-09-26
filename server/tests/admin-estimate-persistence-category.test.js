@@ -119,3 +119,10 @@ describe('buildEstimatePersistenceFields — category', () => {
     expect('category' in fields).toBe(false);
   });
 });
+
+describe('shared detector stays strict; YES is read for the category only', () => {
+  test('isCommercialEstimateData still ignores the string "YES" (other readers depend on it)', () => {
+    const { isCommercialEstimateData } = require('../services/estimate-delivery-options');
+    expect(isCommercialEstimateData({ inputs: { isCommercial: 'YES' } })).toBe(false);
+  });
+});

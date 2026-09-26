@@ -8,6 +8,9 @@
  * level.
  */
 
+// Suite sizing ships dark behind GATE_COMMERCIAL_SUITE_SIZING; these tests exercise it ON.
+process.env.GATE_COMMERCIAL_SUITE_SIZING = 'true';
+
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
   warn: jest.fn(),

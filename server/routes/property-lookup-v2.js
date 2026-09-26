@@ -23,6 +23,7 @@ const { isInServiceAreaBox } = require('../services/service-area');
 const { lookupPoolPermitsByParcel } = require('../services/property-lookup/county-permits');
 const { lookupSubdivisionMedianLivingSqft, SUBDIVISION_MEDIAN_MIN_SAMPLES } = require('../services/property-lookup/county-parcel-gis');
 const { outerRing, simplifyRing } = require('../services/property-lookup/parcel-gis');
+const { commercialSuiteSizingLive } = require('../config/feature-gates');
 const {
   attachFloodZoneToCachedLookup,
   attachPoolPermitsToCachedLookup,
@@ -233,6 +234,12 @@ function lookupCoalesceKey(address, options) {
 // (codex r9 P2). The wrapper stamps a terminal 'error' outcome and
 // rethrows; behavior toward callers is unchanged.
 async function performPropertyLookup(address, options = {}) {
+  // Suite sizing is opt-in per caller AND dark behind its gate: gate off,
+  // an opt-in caller gets exactly the ordinary lookup (same coalescing key
+  // too), so the flip is the single on/off for the whole feature.
+  if (options.commercialSuiteSizing === true && !commercialSuiteSizingLive()) {
+    options = { ...options, commercialSuiteSizing: false };
+  }
   const key = lookupCoalesceKey(address, options);
   const existing = key ? inFlightLookups.get(key) : null;
   if (existing) {
