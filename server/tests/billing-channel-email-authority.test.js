@@ -6,6 +6,7 @@ const rows = {
 
 const defaultDbImplementation = (table) => ({
   where: jest.fn().mockReturnThis(),
+  whereIn: jest.fn().mockReturnThis(),
   forUpdate: jest.fn().mockReturnThis(),
   first: jest.fn(async () => rows[table] || null),
 });
@@ -125,6 +126,28 @@ describe('billing channel email authority', () => {
     const { state } = await runAuthority();
     expect(state.boundaryBlock).toBeNull();
     expect(mockLockSmsPhone).toHaveBeenCalledWith(expect.anything(), '+19415550100');
+  });
+
+  test.each(['SUPPRESSED_MANUAL_DNC', 'SUPPRESSED_OPT_OUT', 'SUPPRESSED_OTHER'])(
+    'a %s phone suppression is a terminal EMAIL_SUPPRESSED refusal', async (code) => {
+      mockCheckSuppression.mockResolvedValueOnce({ ok: false, code, reason: 'Recipient is suppressed' });
+      const { state } = await runAuthority();
+      expect(state.boundaryBlock).toMatchObject({ blocked: true, code: 'EMAIL_SUPPRESSED', deliveryOutcome: 'not_sent' });
+      expect(state.boundaryBlock.retryable).toBeUndefined();
+      expect(state.boundaryBlock.reason).toMatch(/^Suppressed: /);
+    },
+  );
+
+  test.each(['SUPPRESSED_WRONG_NUMBER', 'SUPPRESSED_NON_MOBILE'])('a %s phone fact never blocks the Email', async (code) => {
+    mockCheckSuppression.mockResolvedValueOnce({ ok: false, code, reason: 'phone-line fact' });
+    const { state } = await runAuthority();
+    expect(state.boundaryBlock).toBeNull();
+  });
+
+  test('an unreadable suppression store stays a retryable hold', async () => {
+    mockCheckSuppression.mockResolvedValueOnce({ ok: false, code: 'SUPPRESSION_LOOKUP_FAILED', reason: 'unavailable', retryable: true });
+    const { state } = await runAuthority();
+    expect(state.boundaryBlock).toMatchObject({ code: 'SUPPRESSION_LOOKUP_FAILED', retryable: true });
   });
 
   test('does not allow dispatch when Email is absent from the explicit category selection', async () => {

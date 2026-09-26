@@ -151,6 +151,10 @@ async function preSendBlock(preSendCheck, database) {
   );
 }
 
+// Facts about the phone line itself (the number belongs to someone else, or
+// can't take texts) say nothing about the customer's Email and never block it.
+const PHONE_ONLY_SUPPRESSIONS = new Set(['SUPPRESSED_WRONG_NUMBER', 'SUPPRESSED_NON_MOBILE']);
+
 // phone: already locked by verifyAndDispatch (lockCustomerPhone).
 async function suppressionBlock(trx, recipientEmail, category, phone) {
   await lockCustomerEmail(trx, recipientEmail);
@@ -161,9 +165,15 @@ async function suppressionBlock(trx, recipientEmail, category, phone) {
   const suppressionState = await loadSuppressionState(suppressionInput, {}, trx);
   if (!suppressionInput.to) suppressionState.suppressionLoaded = true;
   const messagingSuppression = await checkSuppression(suppressionInput, null, suppressionState);
-  if (!messagingSuppression.ok) {
-    return blocked(messagingSuppression.code, messagingSuppression.reason,
-      { retryable: messagingSuppression.retryable === true });
+  if (!messagingSuppression.ok && !PHONE_ONLY_SUPPRESSIONS.has(messagingSuppression.code)) {
+    // A person-level suppression (opt-out, manual DNC, unknown reason) is a
+    // hard stop for billing Email too: surfaced as EMAIL_SUPPRESSED so the
+    // reminder rail resolves the leg terminally instead of re-claiming it.
+    // An unreadable store stays its own retryable code.
+    if (messagingSuppression.retryable === true) {
+      return blocked(messagingSuppression.code, messagingSuppression.reason, { retryable: true });
+    }
+    return blocked('EMAIL_SUPPRESSED', `Suppressed: ${messagingSuppression.reason}`);
   }
   const loaded = await EmailTemplateLibrary.loadTemplateByKey(billingEmailTemplateKey(category), trx);
   if (!loaded?.template) {
