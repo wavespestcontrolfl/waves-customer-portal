@@ -4547,8 +4547,20 @@ function computePriceServiceGroupChanges(before, updates) {
 }
 
 // Non-edit provenance keys stored beside the edit overrides (see
-// recurring-appointment-seeder markParentRecurring).
-const PROVENANCE_OVERRIDE_KEYS = new Set(['anchored_split_per_visit', 'appointment_address']);
+// recurring-appointment-seeder markParentRecurring). first_application_split_invoice_id
+// (first-application-sibling-split.js) is the same kind of stamp — it must
+// survive a later price/service "apply to this and following" edit on the
+// SAME row exactly like anchored_split_per_visit / appointment_address do,
+// or stampRecurringTemplateOverrides's wholesale JSON.stringify(merged)
+// rewrite below would silently erase it and reopen the sibling-invoice
+// double-coverage gap this key exists to close (completion would fall back
+// to the date-keyed lookup for a row that was already split off its shared
+// invoice).
+const PROVENANCE_OVERRIDE_KEYS = new Set([
+  'anchored_split_per_visit',
+  'appointment_address',
+  require('../services/first-application-sibling-split').SPLIT_PROVENANCE_KEY,
+]);
 function readProvenanceOverrides(raw) {
   let value = raw;
   if (typeof value === 'string') {

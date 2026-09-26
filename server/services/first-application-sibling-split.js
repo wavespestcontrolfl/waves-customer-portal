@@ -30,6 +30,27 @@
 // coverage to reason about.
 const logger = require('./logger');
 
+// recurring_template_overrides key stamped on a row THIS module actually
+// split off a shared first-application invoice, alongside its new
+// estimated_price, in the SAME write. Its presence is what completion
+// (complete-scheduled-service.js) checks before ever treating a row as no
+// longer covered by a sibling's invoice — never estimated_price alone,
+// which an unrelated price edit could set without the shared invoice ever
+// having been reduced.
+const SPLIT_PROVENANCE_KEY = 'first_application_split_invoice_id';
+
+// The invoice id this row was split off of, or null if it never was (or the
+// field is unreadable). Exported for complete-scheduled-service.js's
+// completion-coverage guard.
+function splitFromSharedInvoiceId(row) {
+  let raw = row?.recurring_template_overrides;
+  if (typeof raw === 'string') {
+    try { raw = JSON.parse(raw); } catch { return null; }
+  }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  return raw[SPLIT_PROVENANCE_KEY] || null;
+}
+
 function dateOnly(value) {
   if (!value) return null;
   if (value instanceof Date) return value.toISOString().slice(0, 10);
@@ -157,13 +178,33 @@ async function reconcileFirstApplicationSplitOnDateChange(trx, scheduledServiceI
   }
 
   const { lineIsBaseApplication } = InvoiceService;
-  const lineIndex = lineItems.findIndex((li) => {
+  const isPositiveBaseApplicationLine = (li) => {
     if (!lineIsBaseApplication(li)) return false;
     const qty = li?.quantity != null ? Number(li.quantity) : 1;
     const amt = li?.amount != null ? Number(li.amount) : Number(li?.unit_price) * qty;
     return Number.isFinite(amt) && amt > 0;
-  });
-  if (lineIndex === -1) return { action: 'skipped', reason: 'no_first_application_line', invoiceId: invoice.id };
+  };
+  const baseApplicationLineIndexes = lineItems.reduce((acc, li, index) => {
+    if (isPositiveBaseApplicationLine(li)) acc.push(index);
+    return acc;
+  }, []);
+  if (baseApplicationLineIndexes.length === 0) {
+    return { action: 'skipped', reason: 'no_first_application_line', invoiceId: invoice.id };
+  }
+  // itemizeFirstApplication (estimate-first-application-invoice.js, live
+  // under GATE_VISIT_CLOSEOUT) can mint this SAME invoice already broken
+  // into one line PER member (each tagged client_id `scheduled_<id>_primary`
+  // — lineIsBaseApplication matches every one of them). That invoice is
+  // already itemized, not a single combined line to peel a share off of:
+  // picking "the first match" would treat one member's own line as the
+  // whole combined total and corrupt both lines. Decline rather than guess
+  // which line is whose — an itemized invoice needs its OWN per-member
+  // resplit, not this single-line one.
+  if (baseApplicationLineIndexes.length > 1) {
+    logger.warn(`[first-application-sibling-split] estimate ${moved.source_estimate_id}: declining resplit — invoice ${invoice.id} already carries ${baseApplicationLineIndexes.length} itemized base-application lines`);
+    return { action: 'declined', reason: 'itemized_invoice', invoiceId: invoice.id };
+  }
+  const [lineIndex] = baseApplicationLineIndexes;
 
   const invoiceDate = dateOnly(invoiceRow.scheduled_date);
   const siblings = members
@@ -234,7 +275,24 @@ async function reconcileFirstApplicationSplitOnDateChange(trx, scheduledServiceI
 
   await trx('scheduled_services').where({ id: invoiceRow.id }).update({ estimated_price: remaining });
   for (const split of splits) {
-    await trx('scheduled_services').where({ id: split.id }).update({ estimated_price: split.amount });
+    // Stamp explicit provenance ALONGSIDE the price, not the price alone:
+    // completion (complete-scheduled-service.js) must never infer "this row
+    // was split off a sibling's invoice" from estimated_price being non-null
+    // by itself — an unrelated price edit through some other flow (a manual
+    // reprice) could set estimated_price on a row that was never actually
+    // carved out of anything, while the shared invoice still carries its
+    // full uncollapsed amount; treating that as "already split" would let
+    // the row bill on its own AND leave the still-collectible shared invoice
+    // double-covering it. This marker is written ONLY here, in the same
+    // transaction as the real reduction, so its presence is proof the
+    // reduction actually happened.
+    await trx('scheduled_services').where({ id: split.id }).update({
+      estimated_price: split.amount,
+      recurring_template_overrides: trx.raw(
+        "COALESCE(recurring_template_overrides, '{}'::jsonb) || ?::jsonb",
+        [JSON.stringify({ [SPLIT_PROVENANCE_KEY]: invoice.id })],
+      ),
+    });
   }
 
   const splitDescription = splits.map((s) => `visit ${s.id} → $${s.amount.toFixed(2)}`).join(', ');
@@ -293,5 +351,7 @@ module.exports = {
   reconcileFirstApplicationSplitOnDateChange,
   reconcileFirstApplicationSplitOnDateChangeSafely,
   anchoredSplitPerVisit,
+  splitFromSharedInvoiceId,
+  SPLIT_PROVENANCE_KEY,
   dateOnly,
 };

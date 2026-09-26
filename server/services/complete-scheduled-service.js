@@ -8521,17 +8521,23 @@ async function completeScheduledService(completionInput, packetContext = null) {
     }
     if (!packetEffects) {
       try {
-        // The sibling-invoice lookup below is a DATE match only — it does
-        // not know whether this row was later split off its own-price (see
-        // first-application-sibling-split.js): a promoted parent is left
-        // covered by the reserved row's invoice ONLY while it stays
-        // estimated_price NULL (estimate-converter.js reservedAcceptPerVisitSplit).
-        // Once this row has its OWN estimated_price — split off at a
-        // reschedule, or priced any other way — it must bill through the
-        // normal per-application path below, never be treated as covered by
-        // a sibling's (possibly already-reduced) invoice just because the
-        // two visits happen to share a date again.
-        if (!existingCompletionInvoice && !terminalCompletionInvoice && svc.estimated_price == null) {
+        // The sibling-invoice lookup below is a DATE match only — it does not
+        // know whether this row was later split off its own price (see
+        // first-application-sibling-split.js). A promoted parent is covered
+        // by the reserved row's invoice ONLY while it stays estimated_price
+        // NULL (estimate-converter.js reservedAcceptPerVisitSplit) — but a
+        // non-null estimated_price alone does NOT prove the shared invoice
+        // was ever reduced (an unrelated price edit through some other flow
+        // could set it on a row nobody split, while the shared invoice still
+        // carries its full uncollapsed amount — checking estimated_price
+        // here would then let this row bill on its own AND leave that
+        // invoice collectible for the same charge). Check the explicit
+        // provenance stamp first-application-sibling-split.js writes ONLY in
+        // the same transaction it actually reduces the shared invoice —
+        // that marker's presence is proof the reduction happened, not an
+        // inference from a price the row happens to carry.
+        const splitFromSharedInvoice = require('./first-application-sibling-split').splitFromSharedInvoiceId(svc);
+        if (!existingCompletionInvoice && !terminalCompletionInvoice && !splitFromSharedInvoice) {
           const siblingFirstApplication = await findFirstApplicationInvoiceForEstimateService(svc, db);
           existingCompletionInvoice = siblingFirstApplication.invoice;
           if (!recapReviewOnly) {

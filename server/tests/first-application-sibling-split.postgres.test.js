@@ -30,7 +30,9 @@ const suite = local || managed || ci ? describe : describe.skip;
 
 suite('first-application-sibling-split — same-trip resplit on date change', () => {
   let db;
-  const { reconcileFirstApplicationSplitOnDateChange, reconcileFirstApplicationSplitOnDateChangeSafely } = require('../services/first-application-sibling-split');
+  const {
+    reconcileFirstApplicationSplitOnDateChange, reconcileFirstApplicationSplitOnDateChangeSafely, splitFromSharedInvoiceId,
+  } = require('../services/first-application-sibling-split');
 
   beforeAll(() => { db = require('knex')({ client: 'pg', connection: testUrl }); });
   afterAll(async () => { await db?.destroy(); await require('../models/db').destroy(); });
@@ -109,6 +111,11 @@ suite('first-application-sibling-split — same-trip resplit on date change', ()
     const line = state.lineItems.find((li) => li.description === 'First service application');
     expect(Number(line.amount)).toBe(97.2);
     expect(Number(line.unit_price)).toBe(97.2);
+    // Explicit provenance is stamped on the SPLIT sibling, not the
+    // invoice-holding row — completion checks this, never estimated_price
+    // alone, before treating the row as no longer covered by a sibling.
+    expect(splitFromSharedInvoiceId(state.lawn)).toBe(ids.invoiceId);
+    expect(splitFromSharedInvoiceId(state.pest)).toBeNull();
   }));
 
   test('the invoice-holding (reserved) row moves instead → same split, from the other direction', () => rollbackTest(async (trx) => {
@@ -219,6 +226,29 @@ suite('first-application-sibling-split — same-trip resplit on date change', ()
     expect(result.reason).toBe('setup_fee_present');
     const state = await readState(trx, ids);
     expect(state.lawn.estimated_price).toBeNull();
+  }));
+
+  test('an already-itemized invoice (per-member lines from itemizeFirstApplication) declines rather than treating one member line as the combined total', () => rollbackTest(async (trx) => {
+    const ids = await fixture(trx);
+    // What itemizeFirstApplication (GATE_VISIT_CLOSEOUT) produces: one line
+    // PER member, each tagged client_id `scheduled_<id>_primary` — every one
+    // of them matches lineIsBaseApplication. Picking "the first match" here
+    // would treat the pest row's own $97.20 line as the WHOLE combined
+    // total and wrongly peel $56.40 off it down to $40.80.
+    const itemized = [
+      { description: 'Quarterly Pest Control', client_id: `scheduled_${ids.pestId}_primary`, quantity: 1, unit_price: 97.20, amount: 97.20 },
+      { description: 'Lawn Care', client_id: `scheduled_${ids.lawnId}_primary`, quantity: 1, unit_price: 56.40, amount: 56.40 },
+    ];
+    await trx('invoices').where({ id: ids.invoiceId }).update({ line_items: JSON.stringify(itemized) });
+    await trx('scheduled_services').where({ id: ids.lawnId }).update({ scheduled_date: '2026-10-02' });
+    const result = await reconcileFirstApplicationSplitOnDateChange(trx, ids.lawnId);
+    expect(result.action).toBe('declined');
+    expect(result.reason).toBe('itemized_invoice');
+    const state = await readState(trx, ids);
+    // Untouched — neither the invoice nor either row's price moved.
+    expect(state.lawn.estimated_price).toBeNull();
+    expect(Number(state.pest.estimated_price)).toBe(153.6);
+    expect(state.lineItems.find((li) => li.client_id === `scheduled_${ids.pestId}_primary`).amount).toBe(97.2);
   }));
 
   test('a non-anchor (recurring child) row moving is a no-op — only top-of-series rows are resplit candidates', () => rollbackTest(async (trx) => {
