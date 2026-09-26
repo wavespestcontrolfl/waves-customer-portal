@@ -193,7 +193,9 @@ function planShapeInvalid(plan) {
   if (plan.blocked || !plan.form_present || !plan.actions.length) return false;
   if (!plan.actions.every((a) => a && ALLOWED_ACTIONS.has(a.action))) return true;
   const last = plan.actions[plan.actions.length - 1];
-  return plan.actions.filter((a) => a.action === 'submit').length !== 1 || last.action !== 'submit' || !last.selector;
+  if (plan.actions.filter((a) => a.action === 'submit').length !== 1 || last.action !== 'submit' || !last.selector) return true;
+  // The caller fails closed on a pre-submit fill / select / check with no selector (Codex r7 on #4884).
+  return plan.actions.slice(0, -1).some((a) => a.action !== 'submit' && !a.selector);
 }
 const verifyShapeInvalid = (v) => !(v && typeof v === 'object' && ['success', 'pending', 'rejected'].every((k) => typeof v[k] === 'boolean'));
 

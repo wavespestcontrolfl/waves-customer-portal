@@ -726,6 +726,10 @@ async function extractCommitmentsWithModel(transcript, { callStartedAt = null, c
     return { items: [], skipped: 'schema_failed', errors: validate.errors, model: MODELS.FLAGSHIP, ms: Date.now() - startedAt };
   }
   const grounded = groundModelCommitments(parsed.commitments, transcript, callStartedAt ? new Date(callStartedAt) : null);
+  // Claims returned but every one discarded (ungrounded, below the confidence
+  // floor, wrong party) is an answer that produced nothing usable; an empty
+  // commitments array stays a successful "nothing promised" (Codex r7 on #4884).
+  if (Array.isArray(parsed.commitments) && parsed.commitments.length && !grounded.kept.length) ledgerCallRejected(response, 'invalid_output');
   return { items: grounded.kept.slice(0, MAX_COMMITMENTS), droppedUngrounded: grounded.droppedUngrounded, droppedLowConfidence: grounded.droppedLowConfidence, droppedMismatched: grounded.droppedMismatched, malformedDueAt: grounded.malformedDueAt, model: MODELS.FLAGSHIP, ms: Date.now() - startedAt };
 }
 

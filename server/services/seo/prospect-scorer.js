@@ -145,6 +145,12 @@ function parseJsonArray(text) {
   try { return JSON.parse(cleaned.slice(start, end + 1)); } catch { return null; }
 }
 
+// The classification fields the mapper reads; an entry without them has not classified anything.
+function isClassifiedEntry(o) {
+  return typeof o.intent_class === 'string' && o.intent_class.trim() !== ''
+    && o.relevance_0_100 != null && Number.isFinite(Number(o.relevance_0_100));
+}
+
 async function classifyChunk(chunk, { anthropic }) {
   const list = chunk.map((c, i) => ({
     i,
@@ -188,7 +194,10 @@ ${JSON.stringify(list)}`;
   let hits = 0;
   const scored = chunk.map((c, idx) => {
     const hit = arr.find((o) => o && (o.i === idx || String(o.domain).toLowerCase() === String(c.domain).toLowerCase()));
-    if (!hit) return heuristicClassify(c);
+    // A matched entry without its classification (e.g. {"i":0}) would map to
+    // unknown / 0 / false and depress the prospect's score; the heuristic
+    // stands in instead, and it does not count as a hit (Codex r7 on #4884).
+    if (!hit || !isClassifiedEntry(hit)) return heuristicClassify(c);
     hits += 1;
     return {
       domain: c.domain,
