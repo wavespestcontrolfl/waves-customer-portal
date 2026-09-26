@@ -6,8 +6,7 @@ description: Verify rendered Waves UI changes locally or before PR review — re
 # Vision-verify UI changes before review
 
 Tests and a clean build do not prove a UI change looks right. Before tagging
-Codex on a UI-touching PR, the author runs this check. It does not replace
-the independent `live-verify` verdict a Full-tier PR needs before merge.
+Codex on a UI-touching PR:
 
 ## Inputs and tool availability
 

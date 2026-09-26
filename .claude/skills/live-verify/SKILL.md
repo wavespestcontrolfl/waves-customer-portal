@@ -1,6 +1,6 @@
 ---
 name: live-verify
-description: Independent live verification of a finished change — an agent that did not write it runs the changed behavior (on a dev/preview stack where one exists), compares it with the merge-base, and posts a PASS / PASS+NOTES / FAIL / BLOCKED verdict. Required before merging a Full-tier PR (waves-ship CHECKLIST.md). Not a substitute for tests, ui-verify, or Codex.
+description: Independent live verification of a finished change — an agent that did not write it runs the changed behavior (on a dev/preview stack where one exists), compares it with the merge-base, and posts a PASS / PASS+NOTES / FAIL / BLOCKED verdict. On trial since 2026-09-26: not a merge gate. Not a substitute for tests, ui-verify, or Codex.
 ---
 
 # Live verify
@@ -9,6 +9,15 @@ CI proves the tests pass. Codex reads the diff. Neither one runs the change.
 This skill is the check that does: someone who did not write the code
 exercises the changed behavior, on a running stack wherever the surface has
 one, compares it with the merge-base, and records what actually happened.
+
+## Trial status
+
+Owner ruling 2026-09-26: this is a trial, not a merge requirement. Run it
+on Full-tier PRs the owner or the lane picks, roughly the next five. Each
+verdict records whether it caught something Codex did not (§Verdict), so
+the trial is scored by searching PR comments for `<!-- live-verify -->`.
+It becomes a gate in waves-ship only if it earns one. Until then, merge
+gates are unchanged.
 
 ## Who and when
 
@@ -19,9 +28,9 @@ one, compares it with the merge-base, and records what actually happened.
   intended behavior in plain words. Derive the claims to test from the diff
   as well; do not take the PR body's account of what the code does on trust.
 - **When:** once the head is code-ready, before the first `@codex` tag, so
-  behavior bugs surface before review rounds are spent. Again before merge
-  only when the patch-id changed (§Patch-id), and then only the scenarios
-  whose files changed.
+  behavior bugs surface before review rounds are spent. A later run is
+  needed only when the patch-id changed (§Patch-id), and then only for the
+  scenarios whose files changed.
 - **Scope:** the verifier writes only under `.tmp/live-verify/` and test
   files. It never edits source, commits, pushes, comments on the PR, or tags
   Codex. The owning session posts the verdict file verbatim (§Verdict).
@@ -172,7 +181,7 @@ with `BASE` resolved as in §Regression lane:
 git diff "$(git merge-base "$BASE" HEAD)" HEAD | git patch-id --verbatim | cut -d' ' -f1
 ```
 
-Before merge, recompute on the final head. The same patch-id means the
+On a later head, recompute. The same patch-id means the
 verdict stands, for example after a merge of `main` that did not touch the
 PR's own changes. `--verbatim` keeps whitespace, so a whitespace-only edit
 inside a string or markup still changes the id (`--stable` would hide it).
@@ -196,15 +205,16 @@ Head `<sha>` · patch-id `<id>` · verifier `<agent / model>`, did not write thi
 
 **Notes:** one line each, with file:line and how to reproduce.
 **Not exercised:** the path, why, and the substitute used.
+**Caught beyond Codex:** yes or no. If yes, what, and which Codex round missed it.
 ```
 
 - **PASS.** Every scenario from the review map behaved as intended on the
   highest available rung, and the regression lane shows the change.
-- **PASS+NOTES.** Works. Each note is fixed, or deferred under
-  `Deferred P2s` with the verifier's evidence.
+- **PASS+NOTES.** Works. Each note is handled like a Codex P2: fixed, or
+  deferred under `Deferred P2s` with the verifier's evidence.
 - **FAIL.** A scenario misbehaved. The author fixes it with a red-first test
   covering every site of the same defect, and the new head gets a fresh
   verdict. A note describing a defect is a FAIL, not a note.
 - **BLOCKED.** No rung could run, for example no verified dev cluster and no
-  way to execute the code directly. Name the missing prerequisite. It blocks
-  merge until it is resolved or Adam decides.
+  way to execute the code directly. Name the missing prerequisite. During
+  the trial this does not hold a merge; it is a finding about the tooling.
