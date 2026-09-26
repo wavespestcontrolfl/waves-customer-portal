@@ -1556,6 +1556,20 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
   });
 
+  // Codex round 20 (review of c65ffa5423): P1 (:1138) — an approval
+  // directive sent through a communication channel.
+  test.each([
+    "We'll text him to okay it. We'll see you Sunday at noon.",
+    "We'll email her to approve it. We'll see you Sunday at noon.",
+    "We'll send him a link to okay it. We'll see you Sunday at noon.",
+    "I'll call the owner to sign off on it. We'll see you Sunday at noon.",
+  ])('Codex round-21 regression: approval directives through a channel poison — %s', (turn) => {
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
   test.each([
     "We need that okay. We'll see you Sunday at noon.",
     "We need this approval. We'll see you Sunday at noon.",

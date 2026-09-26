@@ -1135,7 +1135,12 @@ const NON_POSSESSIVE_APPROVAL_RE = new RegExp(`\\b(?:need|needs|needed|require|r
 // approve it", "have him sign off on it". "to" is optional because the
 // causative forms ("have"/"get") read naturally without it ("have him sign
 // off"); being lenient here only widens what poisons, never what grounds.
-const THIRD_PARTY_APPROVAL_DIRECTIVE_RE = new RegExp(`\\b(?:tell|ask|have|get) ${APPROVAL_PARTY_ALT} (?:to )?(?:confirm|approve|sign off|sign|okay|ok|authorize)(?: it| on it)?\\b`);
+// Codex round 20, P1 (:1138): the directive can go through a CHANNEL —
+// "We'll text him to okay it." / "We'll send him a link to approve it." —
+// and stripBenignTopicPhrases later removes the channel verb, leaving only
+// whitelisted words. Channel verbs join the directive set, and up to three
+// object words ("a link", "the email") may sit between the party and "to".
+const THIRD_PARTY_APPROVAL_DIRECTIVE_RE = new RegExp(`\\b(?:tell|ask|have|get|text|txt|email|e mail|message|call|phone|ring|remind|ping|contact|send|shoot) ${APPROVAL_PARTY_ALT} (?:(?:[a-z]+ ){0,3}to )?(?:confirm|approve|sign off|sign|okay|ok|authorize)(?: it| on it)?\\b`);
 // Codex round 9, P1 (:1048): AUTHORIZATION_NEED_RE's shape (a) only covers
 // "need(s) <PARTY> to <verb>" where the party needing to act is the OBJECT
 // of "need" — it never matches a SUBJECT-LED phrasing where the party

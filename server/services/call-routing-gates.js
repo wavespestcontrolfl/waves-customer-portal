@@ -260,8 +260,10 @@ function checkTcpaConsent(extraction, opts = {}) {
 // coordinated ("…get a text and need to okay it.") approval need, and a
 // second conditional trigger with no consequent of its own, now poison —
 // MORE RESTRICTIVE.
-const V2_DECISION_VERSION = 'v2-1.27.0';
-const V2_DECISION_VERSIONS = ['v2-1.0.0', 'v2-1.1.0', 'v2-1.2.0', 'v2-1.3.0', 'v2-1.4.0', 'v2-1.5.0', 'v2-1.6.0', 'v2-1.7.0', 'v2-1.8.0', 'v2-1.9.0', 'v2-1.10.0', 'v2-1.11.0', 'v2-1.12.0', 'v2-1.13.0', 'v2-1.14.0', 'v2-1.15.0', 'v2-1.16.0', 'v2-1.17.0', 'v2-1.18.0', 'v2-1.19.0', 'v2-1.20.0', 'v2-1.21.0', 'v2-1.22.0', 'v2-1.23.0', 'v2-1.24.0', 'v2-1.25.0', 'v2-1.26.0', 'v2-1.27.0'];
+// v2-1.28.0 (codex round 20): an approval directive sent through a
+// channel ("We'll text him to okay it.") now poisons — MORE RESTRICTIVE.
+const V2_DECISION_VERSION = 'v2-1.28.0';
+const V2_DECISION_VERSIONS = ['v2-1.0.0', 'v2-1.1.0', 'v2-1.2.0', 'v2-1.3.0', 'v2-1.4.0', 'v2-1.5.0', 'v2-1.6.0', 'v2-1.7.0', 'v2-1.8.0', 'v2-1.9.0', 'v2-1.10.0', 'v2-1.11.0', 'v2-1.12.0', 'v2-1.13.0', 'v2-1.14.0', 'v2-1.15.0', 'v2-1.16.0', 'v2-1.17.0', 'v2-1.18.0', 'v2-1.19.0', 'v2-1.20.0', 'v2-1.21.0', 'v2-1.22.0', 'v2-1.23.0', 'v2-1.24.0', 'v2-1.25.0', 'v2-1.26.0', 'v2-1.27.0', 'v2-1.28.0'];
 
 function buildRouteDecision({
   callLogId,
