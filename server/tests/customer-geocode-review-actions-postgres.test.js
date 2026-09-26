@@ -15,6 +15,13 @@ jest.mock('../services/scheduling/quality-after-change', () => ({
 jest.mock('../services/appointment-address', () => ({
   ...jest.requireActual('../services/appointment-address'), refreshAppointmentAddressBriefs: jest.fn().mockResolvedValue(),
 }));
+jest.mock('../services/dispatch-assignment', () => ({
+  emitDispatchJobUpdate: jest.fn(async ({ jobId, qualityDates }) => {
+    qualityDates.add(`date-${jobId}`);
+    return { id: jobId };
+  }),
+  flushDispatchQualityDates: jest.fn(async () => null),
+}));
 const knex = require('knex');
 const { randomUUID } = require('node:crypto');
 const createActionSchema = require('./fixtures/customer-geocode-review-actions-postgres');
@@ -22,6 +29,7 @@ const { CUSTOMER_ID, PRIMARY_ID, ACTOR_ID, ADDRESS, CORRECTED, seedLocation, vis
 const reviewStore = require('../services/customer-geocode-review');
 const { addressKey } = require('../services/customer-properties');
 const { resolveCustomerGeocodeReview } = require('../services/customer-geocode-review-actions');
+const dispatch = require('../services/dispatch-assignment');
 const PIN = { latitude: 27.4981235, longitude: -82.5748125 };
 const connection = process.env.SERVICE_GEOCODE_TEST_DATABASE_URL;
 
@@ -41,6 +49,7 @@ const connection = process.env.SERVICE_GEOCODE_TEST_DATABASE_URL;
     await database?.destroy();
   });
   beforeEach(async () => {
+    jest.clearAllMocks();
     mockConnection = await database.transaction();
     const schema = `geocode_decisions_${randomUUID().replaceAll('-', '')}`;
     await mockConnection.raw('CREATE SCHEMA ??', [schema]);
@@ -159,6 +168,124 @@ const connection = process.env.SERVICE_GEOCODE_TEST_DATABASE_URL;
     expect((await customer()).latitude).toBeNull();
     expect((await primary()).latitude).toBeNull();
     expect(await visit()).toMatchObject({ lat: null, lng: null, route_order: null });
+  });
+
+  test('outside-area clears the live primary pin, recurring template, and visits when the customer mirror is missing', async () => {
+    const parentId = randomUUID();
+    const independentId = randomUUID();
+    await mockConnection('customer_properties').update(PIN);
+    await mockConnection('scheduled_services').where({ id: visitId })
+      .update({ lat: PIN.latitude, lng: PIN.longitude, route_order: 7 });
+    await mockConnection('scheduled_services').insert([
+      visitRow(parentId, {
+        property_id: PRIMARY_ID, status: 'completed', is_recurring: true, recurring_ongoing: true,
+        recurring_template_overrides: { appointment_address: {
+          property_id: PRIMARY_ID,
+          service_address_line1: ADDRESS.address_line1,
+          service_address_line2: ADDRESS.address_line2,
+          service_address_city: ADDRESS.city,
+          service_address_state: ADDRESS.state,
+          service_address_zip: ADDRESS.zip,
+          lat: PIN.latitude, lng: PIN.longitude, zone: 'legacy',
+        } },
+      }),
+      visitRow(independentId, { property_id: null, lat: 27.4, lng: -82.4, route_order: 8 }),
+    ]);
+
+    await act({ action: 'outside_service_area', source: 'county_records' });
+
+    expect(await review()).toMatchObject({ status: 'outside_area', latitude: String(PIN.latitude), longitude: String(PIN.longitude) });
+    expect((await customer()).latitude).toBeNull();
+    expect((await primary()).latitude).toBeNull();
+    expect(await visit()).toMatchObject({ lat: null, lng: null, route_order: null });
+    expect(require('../services/booking/visit-financial-stamps')
+      .recurringServiceAddress(await mockConnection('scheduled_services').where({ id: parentId }).first()))
+      .toMatchObject({ lat: null, lng: null, zone: null });
+    expect(await mockConnection('scheduled_services').where({ id: independentId }).first()).toMatchObject({
+      lat: '27.400000', lng: '-82.400000', route_order: 8,
+    });
+  });
+
+  test('outside-area chooses the live primary pin over stale customer and review mirrors', async () => {
+    const staleCustomerPin = { latitude: 27.41, longitude: -82.41 };
+    const staleReviewPin = { latitude: 27.42, longitude: -82.42 };
+    await mockConnection('customers').update(staleCustomerPin);
+    await mockConnection('customer_properties').update(PIN);
+    await mockConnection('scheduled_services').update({ lat: PIN.latitude, lng: PIN.longitude, route_order: 6 });
+    await reviewStore.saveReview(mockConnection, await customer(), {
+      status: 'needs_pin', reason: 'pin_changed', source: 'county_records', evidence: 'Stale fixture evidence',
+      ...staleReviewPin,
+    });
+
+    await act({ action: 'outside_service_area', source: 'county_records' });
+
+    expect(Number((await review()).latitude)).toBe(PIN.latitude);
+    expect(Number((await customer()).latitude)).toBe(staleCustomerPin.latitude);
+    expect(Number((await customer()).longitude)).toBe(staleCustomerPin.longitude);
+    expect((await primary()).latitude).toBeNull();
+    expect(await visit()).toMatchObject({ lat: null, lng: null, route_order: null });
+  });
+
+  test('outside-area does not bind a previous address review pin to the current address', async () => {
+    await reviewStore.saveReview(mockConnection, await customer(), {
+      status: 'needs_pin', reason: 'pin_changed', source: 'county_records', evidence: 'Previous address evidence',
+      ...PIN,
+    });
+    await mockConnection('customers').update({ ...CORRECTED, latitude: null, longitude: null });
+    await mockConnection('customer_properties').update({
+      ...CORRECTED, address_key: addressKey(CORRECTED), latitude: null, longitude: null,
+    });
+    await mockConnection('scheduled_services').update({ lat: PIN.latitude, lng: PIN.longitude, route_order: 6 });
+
+    await act({ action: 'outside_service_area', source: 'county_records' });
+
+    expect(await review()).toMatchObject({ status: 'outside_area', latitude: null, longitude: null });
+    expect((await review()).address_snapshot).toEqual([
+      CORRECTED.address_line1, CORRECTED.address_line2, CORRECTED.city, CORRECTED.state, CORRECTED.zip,
+    ]);
+    expect(await visit()).toMatchObject({ lat: null, lng: null, route_order: null });
+  });
+
+  test.each(['outside_service_area', 'revoke'])('%s broadcasts every cleared visit after commit', async action => {
+    await act();
+    dispatch.emitDispatchJobUpdate.mockClear();
+    dispatch.flushDispatchQualityDates.mockClear();
+
+    await act({ action, source: 'county_records' });
+
+    expect(dispatch.emitDispatchJobUpdate).toHaveBeenCalledWith(expect.objectContaining({
+      jobId: visitId, actorId: ACTOR_ID,
+    }));
+    expect(dispatch.flushDispatchQualityDates).toHaveBeenCalledTimes(1);
+  });
+
+  test('verify broadcasts standalone and recurring visit changes through one shared batch', async () => {
+    const parentId = randomUUID();
+    const childId = randomUUID();
+    await mockConnection('scheduled_services').insert([
+      visitRow(parentId, {
+        property_id: PRIMARY_ID, status: 'completed', is_recurring: true, recurring_ongoing: true,
+        recurring_template_overrides: { appointment_address: {
+          property_id: PRIMARY_ID,
+          service_address_line1: ADDRESS.address_line1,
+          service_address_line2: ADDRESS.address_line2,
+          service_address_city: ADDRESS.city,
+          service_address_state: ADDRESS.state,
+          service_address_zip: ADDRESS.zip,
+          lat: null, lng: null, zone: null,
+        } },
+      }),
+      visitRow(childId, { property_id: PRIMARY_ID, recurring_parent_id: parentId }),
+    ]);
+
+    await act();
+
+    const calls = dispatch.emitDispatchJobUpdate.mock.calls.map(([options]) => options);
+    expect(calls.map(options => options.jobId).sort()).toEqual([childId, visitId].sort());
+    expect(calls.every(options => options.actorId === ACTOR_ID)).toBe(true);
+    expect(calls[0].qualityDates).toBe(calls[1].qualityDates);
+    expect(dispatch.flushDispatchQualityDates).toHaveBeenCalledTimes(1);
+    expect(dispatch.flushDispatchQualityDates).toHaveBeenCalledWith(calls[0].qualityDates);
   });
 
   test('stale revisions and a failed critical audit preserve the complete previously verified state', async () => {
