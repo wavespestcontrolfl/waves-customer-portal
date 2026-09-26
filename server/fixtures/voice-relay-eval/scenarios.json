@@ -447,7 +447,48 @@
        "city": "Bradenton"
       },
       "fromTurn": 2,
-      "untilTurn": 2
+      "untilTurn": 2,
+      "after": {
+       "tool": "request_booking",
+       "input": {
+        "slot_ref": "S1"
+       }
+      }
+     },
+     "severity": "critical"
+    },
+    {
+     "check": "spoken_matches_any",
+     "value": {
+      "patterns": [
+       "\\b(?:10|ten)(?::00)?\\s*(?:a\\.?\\s?m\\.?|am|in the morning|o['\u2019]clock)\\b",
+       "\\bat\\s+(?:10|ten)(?::00)?\\b(?!\\s*(?:p\\.?\\s?m\\b|pm\\b|in the (?:afternoon|evening)))",
+       "\\b(?:{{dow+9}}|{{monthday+9}})\\b"
+      ],
+      "fromTurn": 1,
+      "afterTool": {
+       "tool": "request_booking",
+       "input": {
+        "slot_ref": "S3"
+       }
+      }
+     },
+     "severity": "critical"
+    },
+    {
+     "check": "spoken_matches_any",
+     "value": {
+      "patterns": [
+       "\\b(?:will|['\u2019]ll|shall|going to|gonna)\\s+(?!not\\b|never\\b)(?:\\w+\\s+){0,4}?(?:follow up|reach out|call|text|contact|be in touch|get back|give you a call|touch base|confirm|lock it in)\\b",
+       "\\bnot (?:yet )?confirmed\\b|\\bpending\\b"
+      ],
+      "fromTurn": 1,
+      "afterTool": {
+       "tool": "request_booking",
+       "input": {
+        "slot_ref": "S3"
+       }
+      }
      },
      "severity": "critical"
     }
@@ -2151,7 +2192,52 @@
        "city": "Bradenton"
       },
       "fromTurn": 2,
-      "untilTurn": 2
+      "untilTurn": 2,
+      "after": {
+       "tool": "request_booking",
+       "input": {
+        "slot_ref": "S1"
+       }
+      }
+     },
+     "severity": "critical"
+    },
+    {
+     "check": "spoken_matches_any",
+     "value": {
+      "patterns": [
+       "(?:\\b(?:10|diez)\\b.{0,25}\\b(?:ma\u00f1ana|am)\\b|\\ba\\s+las\\s+(?:diez|10)\\b(?!\\s*(?:de\\s+la\\s+(?:tarde|noche)|pm\\b)))",
+       "(?:{{dow_es+9}}|{{monthday_es+9}})"
+      ],
+      "fromTurn": 1,
+      "afterTool": {
+       "tool": "request_booking",
+       "input": {
+        "slot_ref": "S3"
+       }
+      }
+     },
+     "severity": "critical"
+    },
+    {
+     "check": "spoken_matches_any",
+     "value": {
+      "patterns": [
+       "(?<!\\bno\\s+(?:(?:le|te|lo|la|los|las|les|se|nos)\\s+)?)\\bva(?:mos|n)?\\s+a\\s+(?:llam|contact|comunic|escrib|confirm)[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*",
+       "(?<!\\bno\\s+(?:\\w+\\s+){0,2})\\bseguimiento\\b",
+       "(?<!\\bno\\s+)\\b(?:se|nos)\\s+(?:pondr[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]+|va(?:mos|n)?\\s+a\\s+poner)\\s+en\\s+contacto",
+       "(?<!\\bno\\s+)\\b(?:le|te|lo|la|los|las)\\s+(?:va(?:mos|n)?\\s+a\\s+)?(?:llam[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|contact[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|devolver[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*\\s+la\\s+llamada|escrib[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|comunic[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|confirm[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|mand[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*\\s+un\\s+(?:mensaje|texto))",
+       "(?<!\\bno\\s+)\\bse\\s+(?:comunicar[\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1]*|va(?:n)?\\s+a\\s+comunicar)",
+       "(?<!\\bno\\s+)\\b(?:llamar|contactar|comunicar|confirmar)(?:[a\u00e1]n?|emos)(?![\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1])",
+       "\\b(?:todav[i\u00ed]a\\s+)?no\\s+(?:est[a\u00e1]\\s+)?confirmad[ao]\\b|\\bpendiente\\b|\\bpara\\s+confirmar\\b"
+      ],
+      "fromTurn": 1,
+      "afterTool": {
+       "tool": "request_booking",
+       "input": {
+        "slot_ref": "S3"
+       }
+      }
      },
      "severity": "critical"
     }
@@ -2915,7 +3001,13 @@
       "patterns": [
        "\\b(?:empezar de nuevo|desde el principio|repetir eso|repita (?:eso|por favor)|puede repetir|otra vez desde|volvamos a empezar)\\b",
        "\\bcu[aá]l es su nombre\\b",
-       "\\bme (?:puede |)da su (?:nombre|direcci[oó]n)(?: de nuevo| otra vez)?\\b"
+       "\\bme (?:puede |)da su (?:nombre|direcci[oó]n)(?: de nuevo| otra vez)?\\b",
+       "\\bno (?:le |te |lo |la )?(?:entend[i\u00ed]|escuch[e\u00e9]|o[i\u00ed]|capt[e\u00e9])(?![\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1])",
+       "\\brepet[i\u00ed]r(?:me|nos|lo|la|melo|mela|noslo)?(?![\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1])",
+       "\\bdec[i\u00ed]r(?:lo|la|melo|mela|noslo)(?![\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1])",
+       "\\bdecir(?:me|nos)?\\s+(?:eso|otra\\s+vez|de\\s+nuevo)\\b",
+       "\u00bf\\s*(?:c[o\u00f3]mo|qu[e\u00e9])\\s+(?:dijo|dice)\\s*\\?",
+       "\u00bf\\s*perd[o\u00f3]n\\s*\\?"
       ],
       "onTurn": 2
      },
@@ -5775,7 +5867,10 @@
       "patterns": [
        "\\b(?:start(?:ing)? over|from the (?:top|beginning)|say (?:that|it) again|repeat (?:that|yourself|it)|come again|one more time|could you repeat that)\\b",
        "\\bwhat(?:'s| is| was) your (?:name|address)\\b",
-       "\\bcan (?:i|we) get your (?:name|address)(?: again)?\\b"
+       "\\bcan (?:i|we) get your (?:name|address)(?: again)?\\b",
+       "\\bi (?:didn['\u2019]t|did not|couldn['\u2019]t|could not) (?:quite )?(?:catch|get|hear|understand) (?:that|you|what you said)\\b",
+       "\\b(?:could|can|would) you (?:please )?(?:say|explain|tell me) (?:that|it|this) (?:again|one more time)\\b",
+       "\\bsorry,? (?:what was that|what did you say)\\b"
       ],
       "onTurn": 2
      },

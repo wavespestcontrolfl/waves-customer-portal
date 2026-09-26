@@ -351,6 +351,10 @@ const toolList = (knownTools) => (v) => (!Array.isArray(v) || !v.length ? 'value
 const writeToolList = () => (v) => (!Array.isArray(v) || !v.length ? 'value must be a non-empty write-tool list'
   : (v.find((n) => !WRITE_TOOLS.includes(n)) ? `"${v.find((n) => !WRITE_TOOLS.includes(n))}" is not a write tool (${WRITE_TOOLS.join(', ')})` : null));
 const isPlainObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+// A { tool, input? } reference to one particular call (afterTool / after).
+const isCallRef = (v) => isPlainObject(v) && typeof v.tool === 'string' && v.tool.length > 0
+  && Object.keys(v).every((k) => k === 'tool' || k === 'input')
+  && (v.input === undefined || (isPlainObject(v.input) && Object.keys(v.input).length > 0));
 const regexPatterns = (v) => (!Array.isArray(v) || !v.length ? 'value must be a non-empty regex list'
   : (v.find((re) => !compileRegex(re)) !== undefined ? `invalid regex ${JSON.stringify(v.find((re) => !compileRegex(re)))}` : null));
 // A regex list, or the same list graded over a caller-turn window —
@@ -363,7 +367,9 @@ const regexList = (v) => {
   if (!isPlainObject(v)) return 'value must be a non-empty regex list or { patterns: [...], fromTurn | onTurn: <caller turn> }';
   const unknown = Object.keys(v).find((k) => !['patterns', 'fromTurn', 'onTurn', 'afterTool'].includes(k));
   if (unknown) return `unknown key "${unknown}" (patterns, fromTurn, onTurn, afterTool)`;
-  if (v.afterTool !== undefined && (typeof v.afterTool !== 'string' || !v.afterTool)) return 'afterTool must be a tool name';
+  if (v.afterTool !== undefined && !(typeof v.afterTool === 'string' && v.afterTool) && !isCallRef(v.afterTool)) {
+    return 'afterTool must be a tool name or { tool, input? }';
+  }
   if ((v.fromTurn == null) === (v.onTurn == null)) return 'value must set exactly one of fromTurn or onTurn';
   const turn = v.onTurn != null ? v.onTurn : v.fromTurn;
   if (!Number.isInteger(turn) || turn < 1) return `${v.onTurn != null ? 'onTurn' : 'fromTurn'} must be a caller turn number (1 is the first)`;
@@ -382,8 +388,9 @@ const CHECK_VALUE_RULES = Object.freeze({
   // capture_lead. { tool: "<name>", input: { <field>: <expected> }, fromTurn?: <caller turn> }.
   tool_input_includes: (knownTools) => (v) => {
     if (!isPlainObject(v)) return 'value must be { tool: "<name>", input: {...}, fromTurn?: <caller turn>, untilTurn?: <caller turn> }';
-    const unknown = Object.keys(v).find((k) => !['tool', 'input', 'fromTurn', 'untilTurn'].includes(k));
-    if (unknown) return `unknown key "${unknown}" (tool, input, fromTurn, untilTurn)`;
+    const unknown = Object.keys(v).find((k) => !['tool', 'input', 'fromTurn', 'untilTurn', 'after'].includes(k));
+    if (unknown) return `unknown key "${unknown}" (tool, input, fromTurn, untilTurn, after)`;
+    if (v.after !== undefined && !isCallRef(v.after)) return 'after must be { tool, input? }';
     if (typeof v.tool !== 'string' || !v.tool) return 'tool must be a non-empty tool name';
     if (!knownTools.has(v.tool)) return `unknown tool "${v.tool}"`;
     if (!isPlainObject(v.input) || !Object.keys(v.input).length) return 'input must be a non-empty object of expected fields';
@@ -1430,8 +1437,12 @@ const CHECK_RUNNERS = Object.freeze({
   // before a given caller turn (e.g. "the corrected lookup, not the
   // pre-correction one", or "the pest lookup the caller interrupted").
   tool_input_includes(value, record) {
-    const { tool, input, fromTurn, untilTurn } = value;
-    const inWindow = (t) => (fromTurn == null || t.turn >= fromTurn) && (untilTurn == null || t.turn <= untilTurn);
+    const { tool, input, fromTurn, untilTurn, after } = value;
+    // `after`: the call must also come after that reference's first
+    // successful call — e.g. the refreshed slot lookup after the refused S1.
+    const afterIndex = after ? firstCallIndex(record, after) : null;
+    if (after && afterIndex == null) return ['fail', `${after.tool}${after.input ? ` ${JSON.stringify(after.input)}` : ''} never succeeded, so no ${tool} call can follow it`];
+    const inWindow = (t) => (fromTurn == null || t.turn >= fromTurn) && (untilTurn == null || t.turn <= untilTurn) && (afterIndex == null || t.index > afterIndex);
     const calls = record.toolCalls.filter((t) => t.name === tool && t.ok === true && inWindow(t));
     if (!calls.length) {
       const anyCall = record.toolCalls.some((t) => t.name === tool);
@@ -1487,6 +1498,16 @@ const CHECK_RUNNERS = Object.freeze({
 // The patterns and the speech they grade: every utterance, or — for
 // { patterns, fromTurn } / { patterns, onTurn } — only what Sandy said from
 // that caller turn on, or on exactly that caller turn.
+// The first successful call a reference names: a tool name, or { tool,
+// input } to pin one particular call (the S3 booking, not the refused S1).
+function firstCallIndex(record, ref) {
+  const tool = typeof ref === 'string' ? ref : ref && ref.tool;
+  const input = ref && typeof ref === 'object' ? ref.input : null;
+  const call = ((record && record.toolCalls) || []).find((t) => t.name === tool && t.ok === true
+    && (!input || inputIncludes(t.input || {}, input).length === 0));
+  return call ? call.index : null;
+}
+
 // `afterTool` (optional, with onTurn/fromTurn) keeps only what Sandy said
 // AFTER the first successful call to that tool — e.g. "the reply the caller
 // interrupted came after the pricing lookup", whatever point the cut landed.
@@ -1495,9 +1516,9 @@ function spokenScope(value, { spoken, utterances }, record = null) {
   let pool = utterances;
   let after = '';
   if (value.afterTool) {
-    const call = ((record && record.toolCalls) || []).find((t) => t.name === value.afterTool && t.ok === true);
-    pool = call ? utterances.filter((u) => u.index > call.index) : [];
-    after = ` after ${value.afterTool}`;
+    const at = firstCallIndex(record, value.afterTool);
+    pool = at == null ? [] : utterances.filter((u) => u.index > at);
+    after = ` after ${typeof value.afterTool === 'string' ? value.afterTool : `${value.afterTool.tool}${value.afterTool.input ? ` ${JSON.stringify(value.afterTool.input)}` : ''}`}`;
   }
   if (value.onTurn != null) {
     return { sources: value.patterns, spoken: pool.filter((u) => u.turn === value.onTurn).map((u) => u.text), scope: ` on caller turn ${value.onTurn}${after}` };
