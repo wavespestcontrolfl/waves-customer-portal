@@ -1118,7 +1118,9 @@ async function fileSkippedBookingCard({ call, procToken, customerId, extraction,
     const filed = await db.transaction(async (ttrx) => {
       await lockTriageCall(ttrx, call.id);
       // A superseded worker leaves the current task untouched (codex r38 P1).
-      const stillOwner = await ttrx('call_log').where({ id: call.id, processing_token: procToken }).first('id');
+      // forUpdate makes the claim check and the card merge atomic against a
+      // force-reprocess reclaim (codex #4919 round-13 P2).
+      const stillOwner = await ttrx('call_log').where({ id: call.id, processing_token: procToken }).forUpdate().first('id');
       if (!stillOwner) return false;
       await ttrx('triage_items')
         .insert(buildTriageItem({
@@ -8749,7 +8751,7 @@ const CallRecordingProcessor = {
     let extracted;
     try {
       const extractStartedAt = Date.now();
-      extracted = await extractCallData(transcription, contactPhone, { callStartedAt: call.created_at, knownCaller, bookableServiceNames, priorCall, callDirection: isOutboundCall(call) ? 'outbound' : 'inbound' });
+      extracted = await extractCallData(transcription, contactPhone, { callStartedAt: callStartedAt(call) || call.created_at, knownCaller, bookableServiceNames, priorCall, callDirection: isOutboundCall(call) ? 'outbound' : 'inbound' });
       stageTimings.extraction_v1_ms = Date.now() - extractStartedAt;
     } catch (err) {
       logger.error(`[call-proc] AI extraction failed: ${err.message}`);
@@ -8799,7 +8801,10 @@ const CallRecordingProcessor = {
       try {
         const v2StartedAt = Date.now();
         v2Result = await extractCallDataV2(transcription, contactPhone, {
-          callStartedAt: call.created_at,
+          // The call's own start, not created_at: a fallback row inserted
+          // after ET midnight would otherwise resolve "tomorrow" a day late
+          // (codex #4919 round-13 P1).
+          callStartedAt: callStartedAt(call) || call.created_at,
           callId: call.id,
           bookableServiceNames,
           knownCaller,
@@ -15470,7 +15475,7 @@ const CallRecordingProcessor = {
               // file (e.g. `enforceModeActive` below) reuses.
               if (!(CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED)) {
                 await fileSkippedBookingCard({
-                  call, procToken, customerId, extraction: v2ApprovedExtraction,
+                  call, procToken, customerId, extraction: disputeSchedulingAuthority || v2ApprovedExtraction || v2CanonicalExtraction,
                   skippedReason: 'start_before_call',
                   preferredDateTime: extracted.preferred_date_time,
                   serviceType, bridgeNeedsConfirmation, callSid,
@@ -15510,7 +15515,7 @@ const CallRecordingProcessor = {
               // round-7 P1, consolidated round-9 P2).
               if (!(CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED)) {
                 await fileSkippedBookingCard({
-                  call, procToken, customerId, extraction: v2ApprovedExtraction,
+                  call, procToken, customerId, extraction: disputeSchedulingAuthority || v2ApprovedExtraction || v2CanonicalExtraction,
                   skippedReason: 'slot_elapsed_at_booking_time',
                   preferredDateTime: extracted.preferred_date_time,
                   serviceType, bridgeNeedsConfirmation, callSid,

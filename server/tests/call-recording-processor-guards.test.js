@@ -1883,9 +1883,14 @@ describe('fileSkippedBookingCard — the shared shadow/legacy-mode "approved but
     expect(stmt).toContain(".whereExists(db('call_log').select(db.raw('1')).where({ id: call.id, processing_token: procToken }))");
   });
 
+  // codex #4919 round-13 P2: the claim check and the card merge are atomic.
+  test('locks the processing claim (forUpdate) before merging the card', () => {
+    expect(body).toContain("ttrx('call_log').where({ id: call.id, processing_token: procToken }).forUpdate().first('id')");
+  });
+
   test('takes the call lock, checks ownership under the claim fence, and MERGES instead of .ignore()-ing', () => {
     expect(body).toContain('await lockTriageCall(ttrx, call.id)');
-    expect(body).toContain("ttrx('call_log').where({ id: call.id, processing_token: procToken }).first('id')");
+    expect(body).toContain("ttrx('call_log').where({ id: call.id, processing_token: procToken }).forUpdate().first('id')");
     expect(body).toContain("COALESCE(triage_items.payload, '{}'::jsonb) || EXCLUDED.payload");
     expect(body).not.toContain('.ignore()');
   });
@@ -2095,5 +2100,20 @@ describe('call-date guard is back to reading call.created_at directly (codex #49
   test('callDateET reads call.created_at directly, not callStartedAt(call)', () => {
     expect(src).toContain('const callDateET = etDateString(call.created_at || new Date());');
     expect(src).not.toContain('const callDateET = etDateString(callStartedAt(call)');
+  });
+});
+
+// codex #4919 round-13: extraction reads the call's own start, and the
+// shadow/legacy skipped cards carry the legacy booking snapshot.
+describe('round-13: extraction anchor and skipped-card snapshot', () => {
+  const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+  test('both extraction calls anchor on callStartedAt(call), not raw created_at', () => {
+    expect(src).toContain('extractCallData(transcription, contactPhone, { callStartedAt: callStartedAt(call) || call.created_at,');
+    const v2 = src.indexOf('v2Result = await extractCallDataV2(transcription, contactPhone, {');
+    expect(src.slice(v2, v2 + 400)).toContain('callStartedAt: callStartedAt(call) || call.created_at,');
+  });
+  test('both fileSkippedBookingCard sites pass the legacy booking-authority snapshot first', () => {
+    const n = src.split('extraction: disputeSchedulingAuthority || v2ApprovedExtraction || v2CanonicalExtraction,').length - 1;
+    expect(n).toBe(2);
   });
 });
