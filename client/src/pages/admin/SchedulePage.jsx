@@ -13421,7 +13421,9 @@ export function CompletionPanel({
     const method = String(p?.applicationMethod || p?.method || "").toLowerCase().replace(/[^a-z0-9]+/g, "_");
     return (!!method && !["bait_placement", "station_check", "trunk_injection"].includes(method))
       || isNonBaitPesticideSelection(p);
-  }) || Object.values(actionScopeByLabel).some((meta) => meta?.treatmentApplied === true);
+  }) || activeSelectedLabels(selectedProtocolActionLabels).some((label) => (
+    actionScopeByLabel[label]?.treatmentApplied === true && actionScopeByLabel[label]?.dryDown !== false
+  ));
   // Re-entry stepper seeds (owner rule 2026-08-11): what a hands-off
   // completion would persist for this visit. Re-fetched whenever spray
   // evidence appears/disappears so a bait/inspection identity that gains a
@@ -15995,7 +15997,7 @@ export function CompletionPanel({
     // the same metadata, and the product is already on the visit — so it
     // must not clear a valid untouched report (codex r80).
     if (
-      selectedProtocolActionLabels.includes(noteText)
+      activeSelectedLabels(selectedProtocolActionLabels).includes(noteText)
       && (!action.product?.id
         || selectedProducts.find((p) => p.productId === action.product.id))
     ) {
@@ -16828,7 +16830,16 @@ export function CompletionPanel({
     // first).
     {
       const freeTextProblems = [];
+      const completedActions = uniqueLines([
+        ...activeSelectedLabels(selectedProtocolActionLabels),
+        ...taggedNoteLines("protocol"), ...taggedNoteLines("protocol optional"), ...taggedNoteLines("action"),
+      ]);
       const mergedCounts = [
+        [
+          "Completed actions",
+          completedActions.length,
+          completedActions,
+        ],
         [
           "Observations",
           activeSelectedLabels(selectedObservationLabels).length +
@@ -17469,7 +17480,7 @@ export function CompletionPanel({
         observations: reportObservations,
         structuredObservations: specialtyCompletion
           ? activeSelectedLabels(selectedObservationLabels)
-          : reportObservations.filter((observation) => (
+          : [...activeSelectedLabels(selectedObservationLabels), ...freeTextLines(observationsText)].filter((observation) => (
             (completionImprovements && isLawn && isLawnFindingSelection(observation))
             || governedCompletionObservationLabels.has(observation)
           )),
@@ -18254,6 +18265,7 @@ export function CompletionPanel({
         <SearchableCompletionChoices
           label="Completed actions"
           options={searchableProtocolActions}
+          maxSelections={20}
           values={activeSelectedLabels(selectedProtocolActionLabels)}
           onChange={(next) => {
             const current = activeSelectedLabels(selectedProtocolActionLabels);

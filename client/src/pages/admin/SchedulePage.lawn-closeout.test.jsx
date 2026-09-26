@@ -25,7 +25,9 @@ let completionChoicesEnabled;
 let techTipsAvailable;
 let techTipsFailure;
 let previousRecommendations;
+let reentryDefaultsFromEvidence;
 beforeEach(async () => {
+  reentryDefaultsFromEvidence = false;
   delayFlags = false;
   flagResolvers = [];
   history = [{ confirmed_by_tech: true, service_date: '2026-07-10', overall_score: 81 }];
@@ -88,6 +90,8 @@ beforeEach(async () => {
     if (url.includes('generate-report')) data = { report: 'WHAT WE DID:\nApplied the old products.\nWHAT WE FOUND:\nLawn looked fine.' };
     if (url.includes('completion-actions')) data = { actions: [] };
     if (url.includes('property-map')) data = { available: false, stationsLoaded: true };
+    if (reentryDefaultsFromEvidence && url.includes('reentry-defaults')) data = url.includes('applicationsRecorded=1')
+      ? { exteriorMinutes: 30, interiorMinutes: 120 } : { exteriorMinutes: 0, interiorMinutes: 0 };
     return { ok: true, json: async () => data };
   }));
   await refetchFlags();
@@ -172,6 +176,11 @@ it.each([
   />);
 
   const search = await screen.findByRole('combobox', { name: 'Search observations' });
+  fireEvent.change(screen.getByPlaceholderText(/Notes about this service/), { target: { value: `[Found] ${observation}` } });
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  expect(submit.mock.calls[0][1].structuredObservations).toEqual([]);
+  submit.mockClear();
   fireEvent.change(search, { target: { value: observation } });
   fireEvent.click(await screen.findByRole('option', { name: observation }));
   fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
@@ -217,6 +226,7 @@ it.each([
   ['Applied gel bait in the recorded locations.', { dryDown: false }],
   ['Applied dust to the recorded accessible voids.', { dryDown: false }],
 ])('records treatment scope and drying evidence for a searchable pest application: %s', async (action, dryingEvidence) => {
+  reentryDefaultsFromEvidence = true;
   completionChoicesEnabled = true;
   techTipsAvailable = false;
   render(<CompletionPanel
@@ -229,6 +239,10 @@ it.each([
   const search = await screen.findByRole('combobox', { name: 'Search completed actions' });
   fireEvent.change(search, { target: { value: action } });
   fireEvent.click(await screen.findByRole('option', { name: action }));
+  await waitFor(() => expect(fetch.mock.calls.filter(([url]) => url.includes('reentry-defaults')).at(-1)[0])
+    .toContain(`applicationsRecorded=${dryingEvidence.dryDown === false ? 0 : 1}`));
+  if (dryingEvidence.dryDown === false) expect(screen.queryByText('Re-entry countdown')).toBeNull();
+  else expect(await screen.findByText('Re-entry countdown')).toBeTruthy();
   fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
   await waitFor(() => expect(submit).toHaveBeenCalledOnce());
   expect(submit.mock.calls[0][1].protocolActionScopesCompleted).toContainEqual({
@@ -236,7 +250,7 @@ it.each([
   });
 });
 
-it('removes a gated completed action from both selection state and marker notes before submit', async () => {
+it.each([false, true])('honors action removal and marker re-selection: reselect=%s', async (reselect) => {
   completionChoicesEnabled = true;
   techTipsAvailable = false;
   mount();
@@ -247,12 +261,38 @@ it('removes a gated completed action from both selection state and marker notes 
   fireEvent.click(await screen.findByRole('option', { name: action }));
   expect(screen.getByPlaceholderText(/Notes about this service/).value).toContain(`[Protocol] ${action}`);
 
-  fireEvent.click(screen.getByRole('button', { name: `Remove ${action}` }));
+  if (reselect) {
+    fireEvent.change(screen.getByPlaceholderText(/Notes about this service/), { target: { value: '' } });
+    fireEvent.change(actionSearch, { target: { value: action } });
+    fireEvent.click(await screen.findByRole('option', { name: action }));
+  } else fireEvent.click(screen.getByRole('button', { name: `Remove ${action}` }));
   fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
   await waitFor(() => expect(submit).toHaveBeenCalledOnce());
   const body = submit.mock.calls[0][1];
-  expect(body.protocolActionsCompleted).not.toContain(action);
-  expect(body.technicianNotes).not.toContain(action);
+  expect(body.protocolActionsCompleted.includes(action)).toBe(reselect);
+  expect(body.technicianNotes.includes(action)).toBe(reselect);
+});
+
+it.each([
+  [Array.from({ length: 21 }, (_, i) => `Recorded action ${i + 1}.`), 'at most 20 entries'],
+  [Array.from({ length: 20 }, (_, i) => `Recorded action ${i + 1}.`), 'at most 20 entries', '[Action] Another recorded action.'],
+  [['Recorded action '.repeat(17)], 'keep each line under 240 characters'],
+])('blocks completed actions the server would truncate: %s', async (actions, message, extraMarker = '') => {
+  completionChoicesEnabled = true;
+  localStorage.setItem(`waves_completion_draft_${service.id}`, JSON.stringify({
+    serviceId: service.id, savedAt: Date.now(), notes: `${actions.map((label) => `[Protocol] ${label}`).join('\n')}\n${extraMarker}`,
+    selectedProducts: [{ productId: 'test-k', rate: 3, rateUnit: 'fl_oz', totalAmount: 15, amountUnit: 'fl_oz', areaValue: 5000, areaUnit: 'sqft' }],
+    selectedProtocolActionLabels: actions, actionScopeByLabel: Object.fromEntries(actions.map((label) => [label, { completionChoice: true }])),
+  }));
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  if (actions.length >= 20) {
+    fireEvent.focus(screen.getByRole('combobox', { name: 'Search completed actions' }));
+    expect(screen.getByText('Up to 20 selections.')).toBeTruthy();
+  }
+  fireEvent.click(await screen.findByRole('button', { name: /complete & send recap/i }));
+  expect(alert).toHaveBeenCalledWith(expect.stringContaining(message));
+  expect(submit).not.toHaveBeenCalled();
 });
 
 it.each([['gate off', true], ['API error', true], ['gate off', false], ['API error', false]])('preserves unscoped searchable actions after choices are unavailable: %s, generated=%s', async (mode, generated) => {
