@@ -1,0 +1,325 @@
+[
+  {
+    "kind": "organism",
+    "aka": [],
+    "stages": [
+      "worker",
+      "soldier",
+      "swarmer"
+    ],
+    "sign_of": [],
+    "role": "structural_pest",
+    "risk": "low",
+    "action": "inspection",
+    "season_basis": "swarming",
+    "verification": [],
+    "safety_line": null,
+    "legacy_slugs": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": ""
+    },
+    "slug": "subterranean-termite",
+    "common_name": "Subterranean Termite",
+    "aliases": [
+      "subterranean termite",
+      "subterranean termites",
+      "termite",
+      "termites",
+      "mud tube",
+      "mud tubes",
+      "termite swarmer",
+      "swarmers"
+    ],
+    "scientific_name": "Reticulitermes flavipes",
+    "rank": "complex",
+    "group": "termites",
+    "subgroup": "subterranean-termites",
+    "site_category": "Termites",
+    "traits": [
+      "Pencil-width mud tubes climbing a foundation, pier, or garage wall",
+      "Swarmers have a straight waist, straight antennae, and four equal-length wings",
+      "Daytime swarms, typically on warm afternoons in late winter and spring",
+      "Discarded wings (four, all equal length) scattered on windowsills or the attic floor after a swarm"
+    ],
+    "look_alikes": [
+      {
+        "slug": "carpenter-ant",
+        "difference": "Termite swarmers have a straight waist and straight antennae; carpenter ant swarmers have a pinched waist and elbowed antennae.",
+        "next_photo": "A close-up from the side of the waist and antennae of a winged individual, next to a coin.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "attic-walls",
+      "garage-storage",
+      "lights-windows"
+    ],
+    "looks": [
+      "winged-swarmer",
+      "ant-like"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": true,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      1,
+      2,
+      3,
+      4
+    ],
+    "service": {
+      "line": "termite",
+      "key": null,
+      "label": "Termite Protection",
+      "inspection_first": true,
+      "referral": null
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "Mud tubes or swarmers suggest subterranean termite activity, but they don't prove it on their own — other insects and debris can look similar. An inspection is what confirms active termites and how far they've spread.",
+      "fact": "The mud tubes are climate-controlled highways — termites dry out fast, so they build covered roads between soil and wood.",
+      "blurb": "What's in the photo is consistent with subterranean termite activity — mud tubes, swarmers, or wings. A photo can't confirm termites; an in-person inspection can."
+    },
+    "tech_notes": "Photo ID is SUGGESTIVE ONLY — never report as a WDO finding. Verify tubes/frass/wings on-site; distinguish ant vs. termite swarmer (waist, wing pairs, antennae).",
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN369"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/subterranean-termite/",
+      "guides": []
+    }
+  },
+  {
+    "kind": "organism",
+    "aka": [],
+    "stages": [
+      "worker",
+      "soldier",
+      "swarmer"
+    ],
+    "sign_of": [],
+    "role": "structural_pest",
+    "risk": "low",
+    "action": "inspection",
+    "season_basis": "swarming",
+    "verification": [],
+    "safety_line": null,
+    "legacy_slugs": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": ""
+    },
+    "slug": "formosan-termite",
+    "common_name": "Formosan Termite",
+    "aliases": [
+      "formosan termite",
+      "formosan termites",
+      "super termite",
+      "coptotermes formosanus"
+    ],
+    "scientific_name": "Coptotermes formosanus",
+    "rank": "species",
+    "group": "termites",
+    "subgroup": "subterranean-termites",
+    "site_category": "Termites",
+    "traits": [
+      "Big dusk swarms around lights, concentrated in a few weeks each spring",
+      "Swarmers yellowish-brown, slightly larger than native subterranean swarmers",
+      "Soldiers exude a white glue-like defensive substance when disturbed",
+      "Carton nest material (looks like packed cardboard) sometimes visible in walls or trees"
+    ],
+    "look_alikes": [
+      {
+        "slug": "subterranean-termite",
+        "difference": "Formosan swarmers are slightly larger, more uniformly yellowish-brown, and swarm in far bigger numbers over a shorter spring window.",
+        "next_photo": "A close-up of several swarmers next to a coin, plus the time of evening and date.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "attic-walls",
+      "lights-windows",
+      "lawn-garden"
+    ],
+    "looks": [
+      "winged-swarmer"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": true,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "range": "occasional",
+    "active_months": [
+      4,
+      5,
+      6
+    ],
+    "peak_months": [
+      5
+    ],
+    "service": {
+      "line": "termite",
+      "key": null,
+      "label": "Termite Protection",
+      "inspection_first": true,
+      "referral": null
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "Swarms like this near lights in late spring are consistent with Formosan termites, among the most destructive termites in Florida — but a photo doesn't confirm the species or how far a colony has spread. An inspection does, and scopes any treatment.",
+      "fact": "A mature Formosan colony can hold millions of termites — they’re called \"super termites\" for colony size, not for how they bite.",
+      "blurb": "A mature Formosan colony can hold millions — they’re called \"super termites\" for colony size, not bite."
+    },
+    "tech_notes": "Photo ID is SUGGESTIVE ONLY. Confirm via soldier defensive secretion + swarmer size vs. native Reticulitermes. Check for carton nests in trees/walls.",
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN278"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/formosan-termite/",
+      "guides": []
+    }
+  },
+  {
+    "kind": "organism",
+    "aka": [],
+    "stages": [
+      "worker",
+      "soldier",
+      "swarmer"
+    ],
+    "sign_of": [],
+    "role": "structural_pest",
+    "risk": "low",
+    "action": "inspection",
+    "season_basis": "swarming",
+    "verification": [],
+    "safety_line": null,
+    "legacy_slugs": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": ""
+    },
+    "slug": "drywood-termite",
+    "common_name": "Drywood Termite",
+    "aliases": [
+      "drywood termite",
+      "drywood termites",
+      "frass",
+      "termite pellets",
+      "kick out holes",
+      "kick-out holes"
+    ],
+    "scientific_name": "Cryptotermes brevis / Incisitermes snyderi",
+    "rank": "complex",
+    "group": "termites",
+    "subgroup": "drywood-termites",
+    "site_category": "Termites",
+    "traits": [
+      "Tiny six-sided pellets in neat piles under a pinhole-sized opening in wood",
+      "No mud tubes — the colony lives entirely inside dry wood, no soil contact",
+      "Swarms at dusk, often after a warm rain, mainly in spring",
+      "Blistered or peeling paint over wood that sounds hollow when tapped"
+    ],
+    "look_alikes": [
+      {
+        "slug": "carpenter-ant",
+        "difference": "Drywood termite pellets are hard, six-sided, and uniform; carpenter ant frass is fibrous sawdust mixed with insect parts.",
+        "next_photo": "A close-up of the pellet or debris pile next to a coin, on a light-colored surface.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "attic-walls",
+      "bedroom",
+      "garage-storage"
+    ],
+    "looks": [
+      "winged-swarmer"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": true,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "range": "common",
+    "active_months": [
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "peak_months": [
+      4,
+      5,
+      6
+    ],
+    "service": {
+      "line": "termite",
+      "key": null,
+      "label": "Termite Protection",
+      "inspection_first": true,
+      "referral": null
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "Pellet piles under a pinhole in wood are the classic drywood termite \"kick-out\" sign. Pellets are evidence of drywood termite activity — they don't confirm whether the colony is still active or how far it's spread through that wood. An inspection determines that and scopes any treatment.",
+      "fact": "Those pellet piles are \"kick-out\" debris — the colony sweeps its gallery and pushes the pellets out a hole the size of a pin.",
+      "blurb": "The photo shows signs consistent with drywood termites — often the tell is small piles of pellet-like frass. Only an inspection can confirm whether the colony is active."
+    },
+    "tech_notes": "Photo ID is SUGGESTIVE ONLY. Six-sided pellets vs. carpenter-ant frass (fibrous). Map kick-out holes; check fascia, window frames, furniture.",
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN236"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/drywood-termite/",
+      "guides": []
+    }
+  }
+]
