@@ -2595,14 +2595,19 @@ export function calculateEstimate(inputs) {
     const TS_ADMIN_ANNUAL = 51;
     // Tier names are application counts (owner 2026-08-04: no Standard/
     // Enhanced/Premium naming) — mirrors server TREE_SHRUB.tiers labels.
+    // Light (4x/quarterly) is retired for new sales (owner directive
+    // 2026-09-24: "remove quarterly tree and shrub care from the estimates
+    // and services") — dropped from this ladder entirely, mirroring
+    // TREE_SHRUB.tiers.light.hidden server-side. The one existing quarterly
+    // customer's booked visits are untouched by this client-side estimator;
+    // this only stops a NEW estimate from offering/pricing it.
     const tst = [
-      { n: 'Light', v: 4, f: 22, mf: 0.75 },
       { n: '6x applications/yr', v: 6, f: 35, mf: 1 },
       { n: '9x applications/yr', v: 9, f: 48, mf: 1.25 },
     ];
     R.ts = [];
     R.tsMeta = { eb, et, bedAreaIsEstimated };
-    tst.forEach((t, i) => {
+    tst.forEach((t) => {
       const mc = Math.max(t.v * 10, (15 + 4 * et + 0.055 * eb) * t.mf);
       const lc = lpv * t.v;
       // Mirror server rounding exactly: round monthly first, annual = mo*12.
@@ -2610,11 +2615,12 @@ export function calculateEstimate(inputs) {
       const mo = Math.max(t.f, Math.round(baseAnn / 12 * 100) / 100);
       const ann = Math.round(mo * 12 * 100) / 100;
       const pa = Math.round(ann / t.v * 100) / 100;
-      // Standard (index 1) is the mandated default recommendation.
-      const rec = i === 1, dim = i !== 1;
+      // Standard (6x) is the mandated default recommendation.
+      const rec = t.v === 6, dim = t.v !== 6;
       R.ts.push({ pa, v: t.v, ann, mo, name: t.n, recommended: rec, dimmed: dim });
     });
-    wgServices.push({ name: 'Tree & Shrub', service: 'tree_shrub', mo: R.ts[1].mo, perTreatment: R.ts[1].pa, visitsPerYear: R.ts[1].v });
+    const tsStandard = R.ts.find(t => t.recommended) || R.ts.find(t => t.v === 6) || R.ts[0];
+    wgServices.push({ name: 'Tree & Shrub', service: 'tree_shrub', mo: tsStandard.mo, perTreatment: tsStandard.pa, visitsPerYear: tsStandard.v });
   }
 
   /* ── PALM INJECTION ──────────────────────────────────────── */
@@ -3615,7 +3621,8 @@ export function calculateEstimate(inputs) {
   const selectedRecurringLawn = R.lawn ? (R.lawn.find(t => t.recommended) || R.lawn.find(t => t.v === 9) || R.lawn[1]) : null;
   if (selectedRecurringLawn) { ac++; ra += selectedRecurringLawn.ann; lineItems.push({ name: 'Lawn Care', service: 'lawn_care', ann: selectedRecurringLawn.ann, discountable: true }); }
   if (R.pest) { ac++; ra += R.pest.ann; lineItems.push({ name: 'Pest Control', service: 'pest_control', ann: R.pest.ann, discountable: true }); }
-  if (R.ts) { ac++; ra += R.ts[1].ann; lineItems.push({ name: 'Tree & Shrub', service: 'tree_shrub', ann: R.ts[1].ann, discountable: true }); }
+  const selectedRecurringTs = R.ts ? (R.ts.find(t => t.recommended) || R.ts.find(t => t.v === 6) || R.ts[0]) : null;
+  if (selectedRecurringTs) { ac++; ra += selectedRecurringTs.ann; lineItems.push({ name: 'Tree & Shrub', service: 'tree_shrub', ann: selectedRecurringTs.ann, discountable: true }); }
   // Palm Injection intentionally excluded from WaveGuard tier count + discounted total —
   // not a qualifying service, not eligible for percent bundle discount.
   if (R.mq) {

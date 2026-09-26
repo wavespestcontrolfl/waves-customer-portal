@@ -16,7 +16,7 @@ const logger = require('../logger');
 const { applyAssignable, assertAssignableTechnician } = require('../technician-eligibility');
 const { createDefaultCustomerRows } = require('../customer-default-rows');
 const {
-  etDateString, addETDays, validScheduleDate, sameDayWindowElapsed,
+  etDateString, addETDays, validScheduleDate, sameDayWindowElapsed, dateOnlyString,
   windowDurationMinutes, deriveWindowEnd,
 } = require('../../utils/datetime-et');
 const { FORMER_CUSTOMER_STAGES, ALL_PIPELINE_STAGES, stageLifecycleStamps } = require('../customer-stages');
@@ -24,7 +24,7 @@ const { scheduledServiceTrackTokenExpiry } = require('../track-token-expiry');
 const { effectiveServiceAddress } = require('../stamped-address');
 const { formatAddress } = require('../../utils/address-normalizer');
 const { EMAIL_FANOUT_DISCLOSURE } = require('../customer-email-fanout');
-const { CONTACT_FANOUT_DISCLOSURE } = require('../customer-contact-fanout');
+const { CONTACT_FANOUT_DISCLOSURE, CONTACT_FANOUT_PHONE_HOLD_CLAUSE } = require('../customer-contact-fanout');
 const {
   normalizeContactName,
   normalizeContactPhone,
@@ -99,7 +99,7 @@ Supports SQL-like conditions via the filters parameter.`,
   {
     name: 'find_overdue_customers',
     description: `Find customers who are overdue for service based on their expected frequency.
-service_category: "pest" (quarterly = 90 days), "lawn" (monthly = 30 days), "mosquito" (21 days), "tree_shrub" (quarterly), "termite" (annual).
+service_category: "pest" (quarterly = 90 days), "lawn" (monthly = 30 days), "mosquito" (21 days), "tree_shrub" (per customer: bi-monthly 60 days, every 6 weeks 42 days, grandfathered quarterly 90 days), "termite" (annual).
 overdue_days: how many days past their expected service date to flag (e.g. 0 = due now, 30 = a month overdue).
 Only returns active customers with prior service history in that category.`,
     input_schema: {
@@ -204,7 +204,7 @@ Your call returns a PREVIEW; the operator approves or rejects it on the confirma
   {
     name: 'update_customer',
     description: `Update one or more fields on a single customer. Updatable fields: first_name, last_name, email, phone, city, state, zip, address_line1, address_line2, waveguard_tier, pipeline_stage, lead_source, monthly_rate, active, notes.
-Changing the email also ripples automatically: ${EMAIL_FANOUT_DISCLOSURE}. Likewise ${CONTACT_FANOUT_DISCLOSURE}. Mention the ripple when proposing an email, name, or phone change.
+Changing the email also ripples automatically: ${EMAIL_FANOUT_DISCLOSURE}. Likewise, a name or phone change ripples: ${CONTACT_FANOUT_DISCLOSURE}; a phone change also ${CONTACT_FANOUT_PHONE_HOLD_CLAUSE}. Mention the ripple when proposing an email, name, or phone change.
 Billing-lane side effect: if the update gives the customer a WaveGuard membership tier plus a positive monthly_rate while no billing lane is set, billing_mode is stamped 'monthly_membership' in the same write (that is the lane such rows already bill under) and the owner is notified to verify it — mention this when proposing a tier or monthly_rate change.
 IMPORTANT: When asked to update, call this tool immediately once the required facts are known to prepare a preview. The operator approves execution on the confirmation card; do not ask for conversational permission to prepare it.`,
     input_schema: {
@@ -296,7 +296,7 @@ The first call returns a PREVIEW (before/after facts) and nothing changes; the o
   {
     name: 'create_appointment',
     description: `Create a new scheduled service appointment.
-service_type examples (catalog names): "Quarterly Pest Control Service", "Bi-Monthly Lawn Care Service", "Seasonal Mosquito Control Service", "Quarterly Tree & Shrub Care Service", "Waves Assessment".
+service_type examples (catalog names): "Quarterly Pest Control Service", "Bi-Monthly Lawn Care Service", "Seasonal Mosquito Control Service", "Bi-Monthly Tree & Shrub Care Service", "Waves Assessment". Quarterly Tree & Shrub is retired for new sales (existing quarterly plans only).
 time_window: "morning" (8-12), "afternoon" (12-5), or specific like "9:00 AM".`,
     input_schema: {
       type: 'object',
@@ -548,8 +548,56 @@ async function findOverdueCustomers(input) {
     pest: 90,        // quarterly
     lawn: 30,        // monthly
     mosquito: 21,    // every 3 weeks
-    tree_shrub: 90,  // quarterly
+    tree_shrub: 42,  // catalog-key floor only; the SQL prefilter uses the shortest cadence a plan line can run at (below)
     termite: 365,    // annual
+  };
+  // T&S runs at the customer's own cadence (6x default, 9x upsell,
+  // grandfathered 4x) — read from their ACTIVE recurring T&S plan, falling
+  // back to their latest completed T&S service_type (codex r13: history lags
+  // a plan switch until the first new-cadence visit completes).
+  // Catalog identity first: engine-converted plans keep the generic
+  // "Tree & Shrub" label while linking the cadence-specific service_id.
+  const TREE_SHRUB_KEY_INTERVAL = { tree_shrub_quarterly: 90, tree_shrub_6week: 42, tree_shrub_program: 60 };
+  const tsKeySql = Object.keys(TREE_SHRUB_KEY_INTERVAL).map(() => '?').join(', ');
+  // The active-plan lookups read OWNERSHIP statuses (an open 'rescheduled'
+  // row is still the customer's plan — service-library's
+  // terminalHistoryStatuses, the list the holder gate and the picker read;
+  // codex r26 on #4786). Last-visit history reads service_records, not
+  // scheduled_services statuses.
+  const PLAN_TERMINAL_STATUSES = require('../service-library').terminalHistoryStatuses();
+  const terminalSql = PLAN_TERMINAL_STATUSES.map(() => '?').join(', ');
+  // The live plan line's OWN recurrence outranks its catalog default (codex
+  // r28/r29 on #4786): a tree_shrub_program row customized to every 42 days
+  // is due at 42, not the row's 60, and a semiannual one at 180. Every
+  // supported pattern resolves through the seeder's own recurrence table
+  // (intervalDaysForPattern: custom / bare interval, month patterns, day-gap
+  // patterns); only a pattern it cannot place falls back to the catalog key,
+  // then the label.
+  const { intervalDaysForPattern } = require('../recurring-appointment-seeder');
+  const planIntervalDays = (plan) => {
+    if (!plan) return null;
+    return intervalDaysForPattern(plan.recurring_pattern, plan.recurring_interval_days)
+      || TREE_SHRUB_KEY_INTERVAL[plan.service_key] || null;
+  };
+  // A Feb–Oct seasonal plan runs monthly in season and skips Nov–Jan: it
+  // is due on the scheduler's next seasonal occurrence after the last visit,
+  // on the series' own nth-weekday anchors (codex r33/r34 on #4786), so an
+  // October visit is not overdue until its February slot.
+  const { nextSeasonalFebOctDue } = require('../recurring-appointment-seeder');
+  const seasonalFebOctGapDays = (lastServiceDate, plan) => {
+    if (!lastServiceDate) return 30;
+    const last = dateOnlyString(lastServiceDate);
+    const due = nextSeasonalFebOctDue(last, { nth: plan?.recurring_nth, weekday: plan?.recurring_weekday });
+    const gap = due ? Math.round((Date.parse(`${due}T00:00:00Z`) - Date.parse(`${last}T00:00:00Z`)) / 86400000) : NaN;
+    return Number.isFinite(gap) && gap > 0 ? gap : 30;
+  };
+  const treeShrubIntervalDays = (serviceType, plan) => {
+    const fromPlan = planIntervalDays(plan);
+    if (fromPlan) return fromPlan;
+    const t = String(serviceType || '').toLowerCase();
+    if (/quarterly/.test(t)) return 90;
+    if (/6\s*weeks?|six\s*weeks?/.test(t)) return 42;
+    return 60;
   };
 
   // Service type patterns for matching. Case-insensitive POSIX regex (~*) so the
@@ -571,16 +619,66 @@ async function findOverdueCustomers(input) {
   const results = [];
 
   for (const cat of categories) {
-    const freq = frequencies[cat] || 90;
-    const cutoff = new Date();
-    cutoff.setDate(cutoff.getDate() - freq - overdue_days);
+    const baseFreq = frequencies[cat] || 90;
+    // The prefilter boundary on the same Eastern calendar the per-customer
+    // filter below uses, INCLUSIVE: a customer served exactly
+    // baseFreq + overdue_days days ago is due today (codex r23 on #4786).
+    // T&S plan lines run at any supported recurrence (daily is the shortest —
+    // codex r30 on #4786), so the prefilter must not drop a row the
+    // per-customer cadence check below can mark overdue.
+    const prefilterDays = cat === 'tree_shrub' ? intervalDaysForPattern('daily') : baseFreq;
+    const cutoffEt = etDateString(addETDays(new Date(), -(prefilterDays + overdue_days)));
 
-    const customers = await db('customers')
+    let customersQuery = db('customers')
       .select(
         'customers.id', 'customers.first_name', 'customers.last_name',
         'customers.phone', 'customers.city', 'customers.waveguard_tier',
         'customers.monthly_rate', 'customers.active',
         db.raw("(SELECT MAX(service_date) FROM service_records WHERE service_records.customer_id = customers.id AND service_type ~* ?) as last_service_date", [patterns[cat]]),
+        db.raw("(SELECT service_type FROM service_records WHERE service_records.customer_id = customers.id AND service_type ~* ? ORDER BY service_date DESC LIMIT 1) as last_service_type", [patterns[cat]]),
+        // The plan row is matched to its catalog row by id, key snapshot or
+        // label (service-library's holder identity predicates — an ID-less
+        // legacy row still resolves its cadence, codex r25 on #4786). A row
+        // no catalog row claims but whose label is a T&S plan ("Tree & Shrub
+        // Care" booked quarterly) is the plan too: its service_key is null
+        // and its own recurrence decides the cadence (codex r35 on #4786).
+        // Only a row with NO catalog match takes that path, so a label that
+        // names some other catalog row never reads as T&S.
+        // The plan row's catalog key AND its own recurrence, as one JSON
+        // value (the line's cadence outranks the catalog default — codex r28).
+        db.raw(`(SELECT row_to_json(plan) FROM (
+          SELECT services.service_key, scheduled_services.scheduled_date,
+              scheduled_services.recurring_pattern, scheduled_services.recurring_interval_days,
+              scheduled_services.recurring_nth, scheduled_services.recurring_weekday
+            FROM scheduled_services
+            LEFT JOIN services ON ${require('../service-library').HOLDER_VISIT_IS_SERVICE_SQL}
+            WHERE scheduled_services.customer_id = customers.id
+              AND (services.service_key IN (${tsKeySql}) OR (services.id IS NULL AND scheduled_services.service_type ~* ?))
+              AND scheduled_services.is_recurring = true AND scheduled_services.status NOT IN (${terminalSql})
+          UNION ALL
+          -- Plan carried as an add-on line of a combined recurring visit (a
+          -- one_time add-on line is not a plan — service-library's
+          -- ADDON_LINE_IS_PLAN_SQL, codex r18 on #4786). A line with no
+          -- pattern of its own rides the parent's, whatever its interval
+          -- column says (lineDueOnRecurringDate — codex r30).
+          SELECT services.service_key, scheduled_services.scheduled_date,
+              CASE WHEN scheduled_service_addons.recurring_pattern IS NULL
+                THEN scheduled_services.recurring_pattern ELSE scheduled_service_addons.recurring_pattern END AS recurring_pattern,
+              CASE WHEN scheduled_service_addons.recurring_pattern IS NULL
+                THEN scheduled_services.recurring_interval_days ELSE scheduled_service_addons.recurring_interval_days END AS recurring_interval_days,
+              scheduled_services.recurring_nth, scheduled_services.recurring_weekday
+            FROM scheduled_service_addons
+            JOIN scheduled_services ON scheduled_services.id = scheduled_service_addons.scheduled_service_id
+            LEFT JOIN services ON ${require('../service-library').HOLDER_ADDON_IS_SERVICE_SQL}
+            WHERE scheduled_services.customer_id = customers.id
+              AND (services.service_key IN (${tsKeySql}) OR (services.id IS NULL AND scheduled_service_addons.service_name ~* ?))
+              AND scheduled_services.is_recurring = true AND scheduled_services.status NOT IN (${terminalSql})
+              AND ${require('../service-library').ADDON_LINE_IS_PLAN_SQL}
+        ) plan ORDER BY plan.scheduled_date ASC LIMIT 1) as active_plan`, [
+          ...Object.keys(TREE_SHRUB_KEY_INTERVAL), patterns.tree_shrub, ...PLAN_TERMINAL_STATUSES,
+          ...Object.keys(TREE_SHRUB_KEY_INTERVAL), patterns.tree_shrub, ...PLAN_TERMINAL_STATUSES,
+        ]),
+        db.raw(`(SELECT service_type FROM scheduled_services WHERE scheduled_services.customer_id = customers.id AND service_type ~* ? AND is_recurring = true AND status NOT IN (${terminalSql}) ORDER BY scheduled_date ASC LIMIT 1) as active_plan_service_type`, [patterns[cat], ...PLAN_TERMINAL_STATUSES]),
         db.raw("(SELECT MIN(scheduled_date) FROM scheduled_services WHERE scheduled_services.customer_id = customers.id AND scheduled_date >= CURRENT_DATE AND status NOT IN ('cancelled','completed') AND service_type ~* ?) as next_scheduled", [patterns[cat]]),
       )
       .where('customers.active', true)
@@ -590,14 +688,44 @@ async function findOverdueCustomers(input) {
           .whereRaw('service_records.customer_id = customers.id')
           .whereRaw('service_type ~* ?', [patterns[cat]]);
       })
-      .havingRaw("(SELECT MAX(service_date) FROM service_records WHERE service_records.customer_id = customers.id AND service_type ~* ?) < ?", [patterns[cat], cutoff.toISOString().split('T')[0]])
-      .orderByRaw("(SELECT MAX(service_date) FROM service_records WHERE service_records.customer_id = customers.id AND service_type ~* ?) ASC", [patterns[cat]])
-      .limit(limit);
+      // A WHERE, not a HAVING: the query has no GROUP BY, and Postgres
+      // rejects HAVING over plain columns ("customers.id must appear in the
+      // GROUP BY clause"), which failed this tool for every category.
+      .whereRaw("(SELECT MAX(service_date) FROM service_records WHERE service_records.customer_id = customers.id AND service_type ~* ?) <= ?", [patterns[cat], cutoffEt])
+      // customers.id breaks last-service-date ties so the paged read below
+      // sees each row exactly once (codex r21 on #4786).
+      .orderByRaw("(SELECT MAX(service_date) FROM service_records WHERE service_records.customer_id = customers.id AND service_type ~* ?) ASC, customers.id ASC", [patterns[cat]]);
+    // T&S: the 42-day prefilter admits not-yet-due 60/90-day customers, and
+    // they sort oldest-first — ANY SQL cap would let them crowd out a truly
+    // overdue 6-week customer with a newer last visit (codex r11/r19 on
+    // #4786). Page through every prefiltered row, filter per customer, and
+    // let the final slice below apply the limit; total_found stays exact.
+    const pageSize = cat === 'tree_shrub' ? 500 : limit;
+    const customers = [];
+    for (let offset = 0; ; offset += pageSize) {
+      const page = await customersQuery.clone().limit(pageSize).offset(offset);
+      customers.push(...page);
+      if (cat !== 'tree_shrub' || page.length < pageSize) break;
+    }
 
+    // Days on the Eastern calendar (codex r21 on #4786): service_date is a
+    // date-only column, so the count is between two calendar days — never
+    // Date.now() in the process's UTC clock, which runs a day ahead of the
+    // office every evening and returned a 60/90-day customer a day early.
+    const todayEt = etDateString();
+    const calendarDaysSince = (dateOnly) => Math.round(
+      (Date.parse(`${todayEt}T00:00:00Z`) - Date.parse(`${dateOnlyString(dateOnly)}T00:00:00Z`)) / 86400000,
+    );
     for (const c of customers) {
-      const daysSince = c.last_service_date
-        ? Math.floor((Date.now() - new Date(c.last_service_date)) / 86400000)
-        : null;
+      const daysSince = c.last_service_date ? calendarDaysSince(c.last_service_date) : null;
+      if (daysSince != null && Number.isNaN(daysSince)) continue;
+      const activePlan = typeof c.active_plan === 'string' ? JSON.parse(c.active_plan) : c.active_plan;
+      const freq = cat === 'tree_shrub'
+        ? (activePlan?.recurring_pattern === 'seasonal_feb_oct'
+          ? seasonalFebOctGapDays(c.last_service_date, activePlan)
+          : treeShrubIntervalDays(c.active_plan_service_type || c.last_service_type, activePlan))
+        : baseFreq;
+      if (daysSince != null && daysSince < freq + overdue_days) continue;
 
       results.push({
         id: c.id,
@@ -1737,6 +1865,8 @@ async function bulkUpdateCustomers(customerIds, updates) {
   // saved-method rails (already churned, customer-level billing already
   // off) — reported separately from churnWoundDownCount below.
   let railsRepairedCount = 0;
+  const geocodedCustomerIds = new Set();
+  let qualityRefreshTimer = null;
   for (const customerId of customerIds) {
     const before = await db('customers').where('id', customerId).first();
     if (!before) {
@@ -1862,10 +1992,23 @@ async function bulkUpdateCustomers(customerIds, updates) {
         .catch((err) => logger.error(`[ib] bulk DOI re-send failed: ${err.code || err.name || 'resend_failed'}`));
     }
     if (addressSubmitted) {
-      // lat/lng cleared in-transaction (gh-r46) — guarded re-geocode also
-      // mirrors the primary property and refreshes route-quality warnings.
-      void require('../geocoder').regeocodeCustomerAddressGuarded(customerId)
-        .catch(() => {});
+      // Coalesce coordinate commits for one second from the first success.
+      // A stalled sibling or later row error cannot hold successful IDs back;
+      // a late completion starts a fresh window. The edit response stays detached.
+      void require('../geocoder').regeocodeCustomerAddressGuarded(
+        customerId,
+        { scheduleQualityCustomerIds: geocodedCustomerIds },
+      ).then(() => {
+        if (qualityRefreshTimer || !geocodedCustomerIds.size) return;
+        qualityRefreshTimer = setTimeout(() => {
+          qualityRefreshTimer = null;
+          const customerIds = [...geocodedCustomerIds];
+          geocodedCustomerIds.clear();
+          void require('../scheduling/quality-after-change').refreshScheduleQualityAfterChange({ customerIds })
+            .catch((err) => logger.error(`[ib] deferred bulk route-quality refresh failed: ${err.code || err.name || 'refresh_failed'}`));
+        }, 1000);
+        qualityRefreshTimer.unref();
+      }).catch(() => null);
     }
     if (rowLaneStamp) perRowLaneStampIds.push(customerId);
     // Reaching here means the per-row transaction committed — a blocked
@@ -2318,6 +2461,14 @@ async function createAppointment(input, actionContext = {}) {
 
   const customer = await db('customers').where('id', customer_id).first();
   if (!customer) return { error: 'Customer not found' };
+  // Retired-for-sale catalog rows (quarterly T&S) book only for a customer
+  // already on that plan — the shared admin write gate (codex r13 on #4786).
+  const notHeldRetired = await require('../service-library').retiredServicesNotHeldBy({
+    customerId: customer_id, serviceTypes: [service_type],
+  });
+  if (notHeldRetired.length) {
+    return { error: `${notHeldRetired.map((r) => r.name).join(', ')} is retired for new sales and this customer is not on that plan — nothing was booked.` };
+  }
   // Same live-customer bar as update_customer (GH r9 P1): a profile
   // merged/soft-deleted while the card was pending must not receive a new
   // appointment after its records were repointed.

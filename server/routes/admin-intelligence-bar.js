@@ -400,7 +400,13 @@ function summarizeProposal(toolName, params, displayParams = params) {
   }
   if (toolName === 'update_customer'
     && (params?.updates?.first_name !== undefined || params?.updates?.last_name !== undefined || params?.updates?.phone !== undefined)) {
-    rippleParts.push(require('../services/customer-contact-fanout').CONTACT_FANOUT_DISCLOSURE);
+    const ContactFanout = require('../services/customer-contact-fanout');
+    // codex round-5 P2: the hold-clear clause only describes what a PHONE
+    // edit does — appending it for a name-only update promised a hold lift
+    // that never happens.
+    rippleParts.push(params?.updates?.phone !== undefined
+      ? `${ContactFanout.CONTACT_FANOUT_DISCLOSURE} ${ContactFanout.CONTACT_FANOUT_PHONE_HOLD_CLAUSE}`
+      : ContactFanout.CONTACT_FANOUT_DISCLOSURE);
   }
   const ripple = rippleParts.length ? ` — ${rippleParts.join('; ')}` : '';
   // The ripple is long by design (it names every synced surface) and sits
@@ -2068,7 +2074,7 @@ const SYSTEM_PROMPT = `You are the Waves Intelligence Bar — a natural language
 BUSINESS CONTEXT:
 - Waves Pest Control & Lawn Care serves Southwest Florida (Manatee, Sarasota, Charlotte counties)
 - Markets: Bradenton/Parrish, Sarasota/Lakewood Ranch, Venice/North Port, Port Charlotte
-- Service types: Pest Control (quarterly), Lawn Care (monthly), Mosquito Barrier (every 3 weeks), Tree & Shrub Care (quarterly), Termite (annual), Rodent Control, WDO Inspections
+- Service types: Pest Control (quarterly), Lawn Care (monthly), Mosquito Barrier (every 3 weeks), Tree & Shrub Care (6x/yr bi-monthly default; 9x every-6-weeks upsell — quarterly is retired for new sales, existing quarterly plans only), Termite (annual), Rodent Control, WDO Inspections
 - WaveGuard loyalty tiers: Bronze (1 service), Silver (2 services), Gold (3 services), Platinum (4+ services)
 - Resolve active technicians from live tool results; never assume a historic roster is current.
 - Scheduling zones by city: Parrish, Palmetto, Lakewood Ranch, Bradenton, Sarasota, Venice/North Port

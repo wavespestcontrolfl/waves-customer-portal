@@ -89,19 +89,14 @@ describe('model-switchboard', () => {
       expect(balanced.overrideEnv).toBe('MODEL_OPENAI_BEST');
       expect(balanced.current).toBe('gpt-9.9-alias');
       expect(balanced.unpinnedModel).toBe(require('../config/models').DEFAULTS.OPENAI_BALANCED);
-      // Both aliases set: deleting the active one lands on the next, not the code default.
-      // Satellite's OpenAI leg is the ladder's last-resort `retry` rung (owner
-      // ruling 2026-09-24: Gemini → Claude → OpenAI, no more parallel `also`).
-      const sat = lanes.find((l) => l.id === 'satellite').retry;
-      expect(sat.pinEnv).toBe('OPENAI_VISION_MODEL');
-      expect(sat.setEnv).toBe('OPENAI_VISION_MODEL');
-      expect(sat.unpinnedModel).toBe('gpt-9.9-generic');
-      delete process.env.OPENAI_VISION_MODEL;
-      jest.resetModules();
-      const sat2 = require('../services/model-switchboard').getSwitchboard().lanes.find((l) => l.id === 'satellite').retry;
-      expect(sat2.pinned).toBe(true);
-      expect(sat2.setEnv).toBe('OPENAI_MODEL');
-      expect(sat2.unpinnedModel).toBe('gpt-5-mini');
+      // Estimate imagery follows its dedicated Sol selector, unaffected by
+      // legacy OPENAI_MODEL / OPENAI_VISION_MODEL pins.
+      for (const id of ['satellite', 'property_v2_vision']) {
+        const lane = lanes.find((l) => l.id === id);
+        expect(lane.fallback.selector).toBe('OPENAI_ESTIMATE_VISION');
+        expect(lane.fallback.model).toBe(require('../config/models').OPENAI_ESTIMATE_VISION);
+        expect(lane.retry).toBeNull();
+      }
     } finally {
       for (const [k, v] of Object.entries(prev)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
     }
@@ -222,21 +217,23 @@ describe('model-switchboard', () => {
     }
   });
 
-  it('photo ladders hide the Gemini retry leg while it resolves to the same model; satellite\'s OpenAI rung is a last resort, not a fan-out arm', () => {
+  it('photo ladders hide duplicate retries; estimate imagery has only Gemini and Sol', () => {
     // Registry default: GEMINI_VISION_FALLBACK equals GEMINI_VISION_BEST, and every
     // ladder skips the retry rung when the two ids match — the card must not
     // show Gemini 3.8 as its own retry.
     expect(MODELS.GEMINI_VISION_FALLBACK).toBe(MODELS.GEMINI_VISION_BEST);
     const { lanes } = sb.getSwitchboard();
-    const sat = lanes.find((l) => l.id === 'satellite');
-    // Owner ruling 2026-09-24: Gemini → Claude → OpenAI, stopping at the
-    // first schema-valid result — no more three-way parallel fan-out.
-    expect(sat.fanout).toBe(false);
-    expect(sat.primary.provider).toBe('gemini');
-    expect(sat.fallback.selector).toBe('FLAGSHIP');
-    expect(sat.also).toEqual([]);
-    expect(sat.retry.pinEnv).toBe('OPENAI_VISION_MODEL');
-    expect(sat.retry.provider).toBe('openai');
+    for (const id of ['satellite', 'property_v2_vision']) {
+      const lane = lanes.find((l) => l.id === id);
+      expect(lane.fanout).toBe(false);
+      expect(lane.primary.provider).toBe('gemini');
+      expect(lane.primary.model).toBe(MODELS.TEXT_POLICIES.estimateVision.primary.model);
+      expect(lane.fallback.selector).toBe('OPENAI_ESTIMATE_VISION');
+      expect(lane.fallback.provider).toBe('openai');
+      expect(lane.fallback.model).toBe(MODELS.OPENAI_ESTIMATE_VISION);
+      expect(lane.retry).toBeNull();
+      expect(lane.also).toEqual([]);
+    }
     expect(lanes.find((l) => l.id === 'property_trio').also[0].pinEnv).toBe('OPENAI_PROPERTY_MODEL');
     // pest_id, tree_shrub, the caption read, and the treatment-zone map are all
     // sequential ladders in execution order (Gemini → the prior Gemini model →
@@ -247,6 +244,31 @@ describe('model-switchboard', () => {
       const ladder = lanes.find((l) => l.id === id);
       expect({ id, fanout: ladder.fanout, primary: ladder.primary.provider, fallback: ladder.fallback.selector, fallbackSkipped: ladder.fallback.skipped, retry: ladder.retry.selector })
         .toEqual({ id, fanout: false, primary: 'gemini', fallback: 'GEMINI_VISION_FALLBACK', fallbackSkipped: true, retry: 'VISION' });
+    }
+  });
+
+  it('estimate image overrides retain the Gemini base and dedicated Sol selector', () => {
+    const prev = { GEMINI_VISION_MODEL: process.env.GEMINI_VISION_MODEL, MODEL_OPENAI_ESTIMATE_VISION: process.env.MODEL_OPENAI_ESTIMATE_VISION };
+    try {
+      process.env.GEMINI_VISION_MODEL = 'gemini-9.9-pinned';
+      process.env.MODEL_OPENAI_ESTIMATE_VISION = 'gpt-9.9-sol';
+      jest.resetModules();
+      const registry = require('../config/models');
+      const { lanes } = require('../services/model-switchboard').getSwitchboard();
+      for (const id of ['satellite', 'property_v2_vision']) {
+        const lane = lanes.find((l) => l.id === id);
+        expect(lane.primary.model).toBe(registry.TEXT_POLICIES.estimateVision.primary.model);
+        expect(lane.primary.selector).toBe('GEMINI_VISION_BEST');
+        expect(lane.primary.unpinnedModel).toBe(registry.GEMINI_VISION_BEST);
+        expect(lane.primary.accepts).toEqual({ providers: ['gemini'], cap: 'vision' });
+        expect(lane.fallback.model).toBe(registry.TEXT_POLICIES.estimateVision.fallback.model);
+        expect(lane.fallback.selector).toBe('OPENAI_ESTIMATE_VISION');
+      }
+    } finally {
+      for (const [key, value] of Object.entries(prev)) {
+        if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      }
+      jest.resetModules();
     }
   });
 

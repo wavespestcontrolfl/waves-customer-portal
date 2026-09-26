@@ -17,6 +17,9 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/recurring-appointment-seeder', () => ({
   serviceKeyFor: (v) => v?.service || v?.service_type || null,
+  // The real visit-count bucketer: the draft gate's retired-T&S check reads
+  // the converter's cadence resolver (codex r28 on #4786).
+  patternFromVisitsPerYear: jest.requireActual('../services/recurring-appointment-seeder').patternFromVisitsPerYear,
   normalizeRecurringPattern: (v) => {
     const s = String(v ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
     if (s === 'quarterly') return 'quarterly';
@@ -32,6 +35,9 @@ jest.mock('../services/estimate-converter', () => ({
   visitCountAliasValues: jest.requireActual('../services/estimate-converter').visitCountAliasValues,
   visitCountFieldsConflict: jest.requireActual('../services/estimate-converter').visitCountFieldsConflict,
   visitCountFieldsInvalid: jest.requireActual('../services/estimate-converter').visitCountFieldsInvalid,
+  // The real cadence reader: the draft gate's retired-T&S check (codex r28
+  // on #4786) reads it through estimate-public's shared accept-time gate.
+  explicitServiceCadence: jest.requireActual('../services/estimate-converter').explicitServiceCadence,
   // Real-enough mirror of the fee-mix rule (solo pest / solo mosquito only)
   // so estimate-public's breakdown/fee gates work under this module mock.
   recurringMixHasMembershipFeeService: (services = []) => {
@@ -226,6 +232,22 @@ describe('wizardDraftSelfServeBookable — current-shape re-check for stored han
   test('a draft flagged by the county-roll house-number audit → not eligible until cleared', () => {
     expect(wizardDraftSelfServeBookable(draft({}, { addressUnverified: true }))).toBe(false);
     expect(wizardDraftSelfServeBookable(draft({}, { addressUnverified: false }))).toBe(true);
+  });
+
+  test('a recurring Tree & Shrub draft at the retired cadence or tier → not eligible (codex r28 on #4786)', () => {
+    const treeShrub = (svc) => ({
+      annual: 480,
+      engineResult: {
+        summary: { recurringAnnualAfterDiscount: 480, oneTimeTotal: 0 },
+        lineItems: [{ service: 'tree_shrub', annual: 480, ...svc }],
+      },
+    });
+    // A Light draft priced before the retirement still carries a valid handoff token.
+    expect(wizardDraftSelfServeBookable(draft({}, treeShrub({ tier: 'light', visitsPerYear: 4, frequency: 'quarterly' })))).toBe(false);
+    expect(wizardDraftSelfServeBookable(draft({}, treeShrub({ visitsPerYear: 4 })))).toBe(false);
+    // The sold programs stay self-bookable.
+    expect(wizardDraftSelfServeBookable(draft({}, treeShrub({ tier: 'standard', visitsPerYear: 6, frequency: 'bimonthly' })))).toBe(true);
+    expect(wizardDraftSelfServeBookable(draft({}, treeShrub({ tier: 'enhanced', visitsPerYear: 9, frequency: 'every_6_weeks' })))).toBe(true);
   });
 
   test('mixed recurring + one-time → not eligible (summary first, top-level fallback)', () => {

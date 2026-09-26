@@ -1446,6 +1446,8 @@ const ADMIN_NOTIFICATION_PREF_BOOLEAN_FIELDS = [
 
 const ANNUAL_PREPAY_PAYMENT_METHODS = new Set(['cash', 'check', 'zelle', 'venmo', 'paypal', 'card_present', 'other']);
 
+const { ANNUAL_TEMPLATE_KEY: TERMITE_ANNUAL_TEMPLATE_KEY } = require('../services/termite-annual-activation');
+
 // Advisory-lock namespace for serializing per-customer annual-prepay creation,
 // so hashtext(customerId) can't collide with locks taken elsewhere.
 const ANNUAL_PREPAY_LOCK_NS = 0x4150;
@@ -1472,7 +1474,7 @@ function annualPrepayOverlapStatusClause() {
 // concurrent submissions (double-click, or two admins) can both pass that check
 // and create duplicate invoices/terms/payments. Throws a tagged error the route
 // translates to a 409. Statuses mirror the pre-flight overlap query.
-async function lockAndAssertNoAnnualPrepayOverlap(trx, customerId, termStart, allowOverlap, errorPrefix) {
+async function lockAndAssertNoAnnualPrepayOverlap(trx, customerId, termStart, allowOverlap, errorPrefix, excludeEstimateId = null) {
   await trx.raw('SELECT pg_advisory_xact_lock(?, hashtext(?))', [ANNUAL_PREPAY_LOCK_NS, String(customerId)]);
   if (allowOverlap === true) return;
   const activeTerm = await trx('annual_prepay_terms')
@@ -1485,6 +1487,50 @@ async function lockAndAssertNoAnnualPrepayOverlap(trx, customerId, termStart, al
     const message = `${errorPrefix} ${activeTermEnd}. Use a start date after ${activeTermEnd}.`;
     const err = new Error(message);
     err.annualPrepayOverlap = { error: message, activeTermId: activeTerm.id, activeTermEnd };
+    throw err;
+  }
+  // Sign-before-pay overlap (termite annual-plan restructure): a termite
+  // annual-plan estimate parked awaiting the customer's signature is a
+  // binding commitment too, even though it has no annual_prepay_terms row
+  // yet (estimate-converter.js's parkTermiteAnnualPlanAccept defers that
+  // row until signature) — without this check, under the SAME per-customer
+  // lock this function already holds, a second annual estimate for the
+  // same customer could park while the first is still awaiting signature,
+  // and signing BOTH would double-bill the year. excludeEstimateId lets a
+  // retry of the SAME estimate (already awaiting_signature) pass through
+  // rather than self-block.
+  // Codex round-3 P2: the commitment lasts only while it can still turn
+  // into a plan — its annual agreement is signed (activation pending), or
+  // still signable (draft/sent/viewed with an open or not-yet-minted share
+  // window), or not drafted yet at all (agreement prep runs just after the
+  // accept). Once every agreement drafted for it is cancelled, voided or
+  // expired, the abandoned park no longer blocks a new annual plan.
+  let awaitingSignatureQuery = trx('estimates as e')
+    .where({ 'e.customer_id': customerId, 'e.annual_plan_activation_status': 'awaiting_signature' })
+    .where(function liveAnnualAgreement() {
+      const linkedAgreements = (q) => q.select(trx.raw('1'))
+        .from('customer_contracts as cc')
+        .where('cc.document_template_key', TERMITE_ANNUAL_TEMPLATE_KEY)
+        .whereRaw("cc.document_variables_snapshot -> 'estimate' ->> 'id' = e.id::text");
+      this.whereNotExists(function noAgreementYet() { linkedAgreements(this); })
+        .orWhereExists(function signedOrSignable() {
+          linkedAgreements(this).where(function liveStatus() {
+            this.where('cc.status', 'signed')
+              .orWhere(function openShareWindow() {
+                this.whereIn('cc.status', ['draft', 'sent', 'viewed'])
+                  .where(function unexpired() {
+                    this.whereNull('cc.share_token_expires_at').orWhere('cc.share_token_expires_at', '>', trx.fn.now());
+                  });
+              });
+          });
+        });
+    });
+  if (excludeEstimateId) awaitingSignatureQuery = awaitingSignatureQuery.whereNot('e.id', excludeEstimateId);
+  const awaitingSignatureEstimate = await awaitingSignatureQuery.first('e.id');
+  if (awaitingSignatureEstimate) {
+    const message = `This account already has a termite annual agreement (estimate #${awaitingSignatureEstimate.id}) awaiting the customer's signature. Sign or cancel it before accepting another annual plan.`;
+    const err = new Error(message);
+    err.annualPrepayOverlap = { error: message, awaitingSignatureEstimateId: awaitingSignatureEstimate.id };
     throw err;
   }
 }
@@ -1503,6 +1549,29 @@ function parseAnnualPrepayVisitCount(value) {
     return { error: 'visitCount must be greater than 0' };
   }
   return { visitCount: Math.min(count, 24) };
+}
+
+// Retired-for-sale plans (quarterly T&S) prepay only for a customer already
+// on that plan — the shared booking gate (codex r16 on #4786). The labels
+// handed to it: the posted service type and plan label, plus the plan AS THE
+// TERM WILL RUN IT — inferCoverageCadence over the same three fields
+// createTermForAnnualPrepay stores. An omitted visitCount defaults to 4 and
+// four stored "Tree & Shrub Care" visits infer a quarterly schedule, so the
+// effective count and cadence must reach the gate, never only the posted
+// ones (codex r17 P1). Both prepay endpoints (invoice and recorded payment)
+// read this one helper.
+function annualPrepayRetiredPlanLabels({ coverageServiceType, planLabel, coverageCadence, visitCount }) {
+  const { inferCoverageCadence } = require('../services/annual-prepay-renewals');
+  const effectiveCadence = inferCoverageCadence({
+    coverage_cadence: coverageCadence,
+    coverage_service_type: coverageServiceType,
+    coverage_visit_count: visitCount,
+  });
+  // The synthesized label carries the cadence the term will actually run at
+  // (explicit, else the label's, else the visit count's — a defaulted
+  // four-visit T&S term reads quarterly), never the raw count token: "4x"
+  // under an explicit bimonthly override is not the retired plan (codex r27).
+  return [coverageServiceType, planLabel, `${coverageServiceType} ${effectiveCadence}`];
 }
 
 function parseDateOnlyInput(value, field) {
@@ -2762,6 +2831,9 @@ router.get('/:id/schedule-estimates', requireAdmin, async (req, res, next) => {
         // The quoted property (estimates.property_id, nullable) — the New
         // Appointment modal narrows the estimate list to the address being
         // booked; an unlinked quote stays offered at every property.
+        // The quote's owner (null = an unowned lead quote), so the modal can
+        // drop a pinned quote owned by a different customer on a switch.
+        customerId: estimate.customer_id || null,
         propertyId: estimate.property_id || null,
         status: estimate.status,
         serviceInterest: estimate.service_interest,
@@ -4825,6 +4897,20 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
     const coverageCadence = cleanOptionalText(req.body?.coverageCadence || req.body?.cadence) || null;
     const coverageServiceType = cleanOptionalText(req.body?.serviceType) || 'Quarterly Pest Control';
     const planLabel = cleanOptionalText(req.body?.planLabel) || `${coverageServiceType} Annual Prepay`;
+    // Retired-for-sale plans prepay only for a customer already on that plan
+    // (annualPrepayRetiredPlanLabels — the effective count/cadence included).
+    {
+      const notHeldRetired = await require('../services/service-library').retiredServicesNotHeldBy({
+        customerId: req.params.id,
+        serviceTypes: annualPrepayRetiredPlanLabels({ coverageServiceType, planLabel, coverageCadence, visitCount }),
+      });
+      if (notHeldRetired.length) {
+        return res.status(409).json({
+          error: `${notHeldRetired.map((r) => r.name).join(', ')} is retired for new sales and this customer is not on that plan.`,
+          code: 'RETIRED_SERVICE_NOT_SELLABLE',
+        });
+      }
+    }
     // Omission is not a waiver (codex #3591 r37 P1): whenever no setup is
     // BILLED — including an anchor supplied with a zero/absent amount (codex
     // #3591 r43 P2) — derive the setup a LIVE direct rodent series matching
@@ -5343,6 +5429,20 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
     const coverageCadence = cleanOptionalText(req.body?.coverageCadence || req.body?.cadence) || null;
     const coverageServiceType = cleanOptionalText(req.body?.serviceType) || 'Quarterly Pest Control';
     const planLabel = cleanOptionalText(req.body?.planLabel) || `${coverageServiceType} Annual Prepay`;
+    // Retired-for-sale plans prepay only for a customer already on that plan
+    // (annualPrepayRetiredPlanLabels — the effective count/cadence included).
+    {
+      const notHeldRetired = await require('../services/service-library').retiredServicesNotHeldBy({
+        customerId: req.params.id,
+        serviceTypes: annualPrepayRetiredPlanLabels({ coverageServiceType, planLabel, coverageCadence, visitCount }),
+      });
+      if (notHeldRetired.length) {
+        return res.status(409).json({
+          error: `${notHeldRetired.map((r) => r.name).join(', ')} is retired for new sales and this customer is not on that plan.`,
+          code: 'RETIRED_SERVICE_NOT_SELLABLE',
+        });
+      }
+    }
 
     const method = cleanText(req.body?.method || 'card_present').toLowerCase();
     if (!ANNUAL_PREPAY_PAYMENT_METHODS.has(method)) {
@@ -5919,6 +6019,10 @@ router._private = {
   isSchedulableOneTimeEstimateLine,
   isValidStage,
   lockAndAssertNoAnnualPrepayOverlap,
+  // The status set every annual-prepay overlap check shares — the termite
+  // annual plan's installation re-anchor (termite-annual-activation.js)
+  // checks a moved window against the same set.
+  annualPrepayOverlapStatusClause,
   stageLifecycleStamps,
   mapCustomerListRow,
   mapPipelineCustomer,
@@ -5926,6 +6030,7 @@ router._private = {
   normalizeAdminAddressInput,
   parseAnnualPrepayAmount,
   parseAnnualPrepayVisitCount,
+  annualPrepayRetiredPlanLabels,
   deliverySettledLiveCredit,
   scheduleLinesFromEstimate,
   serviceCatalogMatch,

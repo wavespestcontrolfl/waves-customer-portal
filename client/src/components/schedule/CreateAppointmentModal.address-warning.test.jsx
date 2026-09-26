@@ -87,6 +87,16 @@ function installModalFetch({
   // discountStackingLive() on every /preview call). Optional and unused
   // by default so every other test's fixed regime: true is unchanged.
   previewRegime,
+  // Per-customer /schedule-estimates fixtures, keyed by customer id (codex
+  // r35 lineIsRetiredSale live-verification lane). Unset customers fall back
+  // to the pre-existing empty-array default so no other test is affected.
+  scheduleEstimatesByCustomer,
+  // /admin/customers?search= results, keyed by the literal search string.
+  // Unset -> empty results (no existing test hits this endpoint).
+  customerSearchResults,
+  // /admin/estimates/:id/schedule-source responses keyed by estimate id
+  // (codex r1 on #4855). Unset -> 404, the modal's best-effort fallback.
+  scheduleSourceById,
 } = {}) {
   let addressRequests = 0;
   let prepayPreviews = 0;
@@ -98,7 +108,27 @@ function installModalFetch({
       if (addressRequests === 2 && submitAddressRequest) return submitAddressRequest.promise;
       return Promise.resolve(jsonResponse({ items: [] }));
     }
+    if (url.includes('/admin/customers?search=')) {
+      const term = new URL(url, 'http://test').searchParams.get('search') || '';
+      return Promise.resolve(jsonResponse({ customers: customerSearchResults?.[term] || [] }));
+    }
     if (url.includes('/admin/services?')) {
+      // A dedicated bi-monthly T&S catalog match (codex r35 live-verification
+      // lane) — checked before the generic 'Monthly' branch below so an
+      // existing test's plain "Monthly" search is unaffected.
+      if (url.includes('Bi-Monthly+Tree') || url.includes('Bi-Monthly%20Tree')) {
+        return Promise.resolve(jsonResponse({
+          services: [{
+            id: 'service-ts-6x',
+            service_key: 'tree_shrub_program',
+            name: 'Bi-Monthly Tree & Shrub Care Service',
+            billing_type: 'recurring',
+            frequency: 'bimonthly',
+            base_price: 120,
+            default_duration_minutes: 45,
+          }],
+        }));
+      }
       // 'Monthly'/'Quarterly' return YEAR-ROUND recurring services (merge
       // into ONE submit group together, unlike the seasonal First/Second
       // pair below, each of which always books its own separate group).
@@ -143,7 +173,17 @@ function installModalFetch({
     if (url.includes('/properties?context=appointment_address')) {
       return Promise.resolve(jsonResponse({ properties: [], canChangeAppointmentAddress: false }));
     }
-    if (url.includes('/schedule-estimates')) return Promise.resolve(jsonResponse({ estimates: [] }));
+    if (url.includes('/schedule-source')) {
+      const match = url.match(/\/admin\/estimates\/([^/?]+)\/schedule-source/);
+      const source = match && scheduleSourceById?.[decodeURIComponent(match[1])];
+      return Promise.resolve(source ? jsonResponse(source) : jsonResponse({ error: 'not found' }, { ok: false, status: 404 }));
+    }
+    if (url.includes('/schedule-estimates')) {
+      const match = url.match(/\/admin\/customers\/([^/?]+)\/schedule-estimates/);
+      const customerId = match ? decodeURIComponent(match[1]) : null;
+      const estimates = (customerId && scheduleEstimatesByCustomer?.[customerId]) || [];
+      return Promise.resolve(jsonResponse({ estimates }));
+    }
     if (url.endsWith('/admin/technicians')) return Promise.resolve(jsonResponse({ technicians: [] }));
     if (url.endsWith('/admin/discounts')) return Promise.resolve(jsonResponse(discounts));
     if (url.endsWith('/admin/schedule/services-dropdown')) {
@@ -3025,6 +3065,160 @@ describe('GitHub round 7 P2 :5372 (Codex, blocked push 11 on PR #4656) — appoi
     await waitFor(() => expect(screen.queryByText(/not eligible for this customer/)).toBeNull());
     const submit = screen.getByRole('button', { name: 'Schedule appointment' });
     await waitFor(() => expect(submit.disabled).toBe(false));
+  });
+});
+
+describe('lineIsRetiredSale drives the customer-switch effect end to end (codex r35 on #4786) — live-verification lane, not authored by this session', () => {
+  // The regression this guards: a holder's pre-retirement quarterly T&S
+  // quote applied through applyScheduleEstimate (Section 1 "Apply quote"),
+  // then the operator switches to a different, non-holder customer. The
+  // quote line carries no retiredForSale flag and no catalog id/key, so the
+  // pre-fix filter (`line.retiredForSale`) never caught it and the save
+  // later failed server-side with RETIRED_SERVICE_NOT_SELLABLE.
+  it('drops a quote-derived retired T&S line on a real customer switch, while a current 6x catalog line survives', async () => {
+    const { fetcher } = installModalFetch({
+      scheduleEstimatesByCustomer: {
+        'customer-a': [{
+          id: 'est-1',
+          customerId: 'customer-a',
+          status: 'accepted',
+          acceptedAt: '2026-09-01',
+          lines: [{
+            name: 'Tree & Shrub Care',
+            serviceKey: null,
+            serviceId: null,
+            price: 150,
+            cadence: 'quarterly',
+            duration: 30,
+          }],
+        }],
+      },
+      customerSearchResults: {
+        Grace: [{ id: 'customer-b', firstName: 'Grace', lastName: 'Hopper', address: '200 Test Ave', phone: '555-0002' }],
+      },
+    });
+
+    render(<CreateAppointmentModal
+      defaultCustomer={CUSTOMER}
+      defaultEstimateId="est-1"
+      defaultDate={futureDate()}
+      defaultWindowStart="09:00"
+      onClose={vi.fn()}
+      onCreated={vi.fn()}
+      onChange={vi.fn()}
+    />);
+
+    // The quote's quarterly T&S line applies automatically (defaultEstimateId).
+    // The line's own "Repeats for <name>" select is unique to the editable
+    // service row (the estimate-source summary above it repeats the label
+    // as plain text, so a bare getByText/findByText match is ambiguous).
+    await waitFor(() => expect(screen.getByLabelText('Repeats for Tree & Shrub Care').value).toBe('quarterly'));
+
+    // A current (non-retired) 6x plan line, added the ordinary way.
+    fireEvent.click(screen.getByRole('button', { name: /Add service/ }));
+    fireEvent.change(screen.getByPlaceholderText('Search to add service'), { target: { value: 'Bi-Monthly Tree' } });
+    fireEvent.click(await screen.findByRole('button', { name: /Bi-Monthly Tree & Shrub Care Service/ }));
+    expect(screen.getByLabelText('Repeats for Bi-Monthly Tree & Shrub Care Service')).toBeTruthy();
+
+    // Switch customers through the real UI path: clear, search, select.
+    fireEvent.click(screen.getByRole('button', { name: 'Clear selected customer' }));
+    fireEvent.change(screen.getByPlaceholderText('Search by name or phone...'), { target: { value: 'Grace' } });
+    fireEvent.click(await screen.findByText('Grace Hopper'));
+
+    // The retired quarterly line is gone; the current 6x line survives.
+    await waitFor(() => expect(screen.queryByLabelText('Repeats for Tree & Shrub Care')).toBeNull());
+    expect(screen.getByLabelText('Repeats for Bi-Monthly Tree & Shrub Care Service')).toBeTruthy();
+    // Nothing was ever submitted in this test — the drop is a pure client
+    // effect, with no server round trip.
+    expect(schedulePosts(fetcher)).toHaveLength(0);
+  });
+});
+
+describe('a pinned quote owned by another customer is unlinked on a customer switch (codex r1 on #4855)', () => {
+  const quote = (customerId) => ({
+    id: 'est-9',
+    customerId,
+    status: 'accepted',
+    acceptedAt: '2026-09-01',
+    lines: [{ name: 'Bi-Monthly Tree & Shrub Care', serviceKey: null, serviceId: null, price: 95, cadence: 'bimonthly', duration: 30 }],
+  });
+  const run = async (ownerId) => {
+    installModalFetch({
+      scheduleEstimatesByCustomer: { 'customer-a': [quote(ownerId)] },
+      // After the switch, customer B's list lacks the pinned quote, so the
+      // modal re-reads it through schedule-source (owner beside it).
+      scheduleSourceById: { 'est-9': { estimate: { ...quote(undefined), customerId: undefined }, customerId: ownerId, contact: {} } },
+      customerSearchResults: {
+        Grace: [{ id: 'customer-b', firstName: 'Grace', lastName: 'Hopper', address: '200 Test Ave', phone: '555-0002' }],
+      },
+    });
+    render(<CreateAppointmentModal
+      defaultCustomer={CUSTOMER}
+      defaultEstimateId="est-9"
+      defaultDate={futureDate()}
+      defaultWindowStart="09:00"
+      onClose={vi.fn()}
+      onCreated={vi.fn()}
+      onChange={vi.fn()}
+    />);
+    await waitFor(() => expect(screen.getByLabelText('Repeats for Bi-Monthly Tree & Shrub Care').value).toBe('bimonthly'));
+    fireEvent.click(screen.getByRole('button', { name: 'Clear selected customer' }));
+    fireEvent.change(screen.getByPlaceholderText('Search by name or phone...'), { target: { value: 'Grace' } });
+    fireEvent.click(await screen.findByText('Grace Hopper'));
+  };
+
+  it('drops the quote and the lines it filled when the quote belongs to the previous customer', async () => {
+    await run('customer-a');
+    await waitFor(() => expect(screen.queryByLabelText('Repeats for Bi-Monthly Tree & Shrub Care')).toBeNull());
+    // Final state after customer B's reload (schedule-source included)
+    // settles: the previous customer's quote is not re-offered and the
+    // auto-apply does not relink it (codex pre-push P1).
+    await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([u]) => String(u).includes('/customers/customer-b/schedule-estimates'))).toBe(true));
+    await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([u]) => String(u).includes('/estimates/est-9/schedule-source'))).toBe(true));
+    await new Promise((resolve) => { setTimeout(resolve, 100); });
+    expect(screen.queryByLabelText('Repeats for Bi-Monthly Tree & Shrub Care')).toBeNull();
+  });
+
+  it('keeps the retired line of a pinned, accepted lead quote when its customer is set (codex r2 on #4855)', async () => {
+    const leadQuote = {
+      id: 'est-lead',
+      customerId: null,
+      status: 'accepted',
+      acceptedAt: '2026-09-01',
+      lines: [{ name: 'Tree & Shrub Care', serviceKey: null, serviceId: null, price: 150, cadence: 'quarterly', duration: 30 }],
+    };
+    installModalFetch({
+      scheduleEstimatesByCustomer: { 'customer-a': [leadQuote] },
+      scheduleSourceById: { 'est-lead': { estimate: leadQuote, customerId: null, contact: {} } },
+      customerSearchResults: {
+        Grace: [{ id: 'customer-b', firstName: 'Grace', lastName: 'Hopper', address: '200 Test Ave', phone: '555-0002' }],
+      },
+    });
+    render(<CreateAppointmentModal
+      defaultCustomer={CUSTOMER}
+      defaultEstimateId="est-lead"
+      defaultDate={futureDate()}
+      defaultWindowStart="09:00"
+      onClose={vi.fn()}
+      onCreated={vi.fn()}
+      onChange={vi.fn()}
+    />);
+    await waitFor(() => expect(screen.getByLabelText('Repeats for Tree & Shrub Care').value).toBe('quarterly'));
+    fireEvent.click(screen.getByRole('button', { name: 'Clear selected customer' }));
+    fireEvent.change(screen.getByPlaceholderText('Search by name or phone...'), { target: { value: 'Grace' } });
+    fireEvent.click(await screen.findByText('Grace Hopper'));
+    await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([u]) => String(u).includes('/customers/customer-b/schedule-estimates'))).toBe(true));
+    await new Promise((resolve) => { setTimeout(resolve, 100); });
+    // The accepted quote still rides the booking and vouches for its line.
+    expect(screen.getByLabelText('Repeats for Tree & Shrub Care').value).toBe('quarterly');
+  });
+
+  it('keeps an unowned lead quote pinned across the switch', async () => {
+    await run(null);
+    // Give the customer-change effect and the schedule-source re-read time to settle.
+    await waitFor(() => expect(screen.getByText('Grace Hopper')).toBeTruthy());
+    await new Promise((resolve) => { setTimeout(resolve, 50); });
+    expect(screen.getByLabelText('Repeats for Bi-Monthly Tree & Shrub Care').value).toBe('bimonthly');
   });
 });
 

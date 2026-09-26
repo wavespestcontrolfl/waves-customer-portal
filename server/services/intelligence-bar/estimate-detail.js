@@ -29,7 +29,9 @@ const lazy = {
 //   satelliteUrl / licenseNumber — page chrome.
 //   notes     — already reported as customer_notes at the top level.
 // Other priced sections pass through so the reader tracks the page composer.
-const DROPPED_PAYLOAD_KEYS = new Set(['intelligence', 'showYourWork', 'propertyGroup']);
+// consultationOffer.url is a live 14-day /inspection bearer that can book
+// a visit (Codex #4853 r1 P1) — never handed to the model.
+const DROPPED_PAYLOAD_KEYS = new Set(['intelligence', 'showYourWork', 'propertyGroup', 'consultationOffer']);
 const DROPPED_ESTIMATE_KEYS = new Set([
   'askToken', 'token', 'intelligence', 'satelliteUrl', 'licenseNumber', 'notes',
 ]);
@@ -231,7 +233,7 @@ async function estimateLinks(row, data) {
   let blocked = false;
   try {
     const { estimateOffCustomerSurface, callSideBlockForEstimateData } = lazy.claimSql();
-    blocked = estimateOffCustomerSurface(row) || !!(await callSideBlockForEstimateData(db, data));
+    blocked = estimateOffCustomerSurface(row) || !!(await callSideBlockForEstimateData(db, data, { estimateStatus: row?.status }));
   } catch {
     blocked = true; // fail closed: an unverifiable block is not a link
   }

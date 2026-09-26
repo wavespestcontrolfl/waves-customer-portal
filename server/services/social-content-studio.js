@@ -14,6 +14,7 @@ const { runExclusive } = require('../utils/cron-lock');
 const logger = require('./logger');
 const { deliverOpsDigest } = require('./ops-digest');
 const { etParts } = require('../utils/datetime-et');
+const { RETIRED_SALE_SERVICE_KEYS } = require('./pricing-engine/retired-sale-catalog');
 
 const FASTEST_RISER_PROFILES = [
   {
@@ -991,6 +992,14 @@ async function getCampaignContext({ topic, city, service }) {
         .where(function visibleServices() {
           this.where('customer_visible', true).orWhereNull('customer_visible');
         })
+        // customer_visible alone is NOT enough (codex P1 round 2 pre-push,
+        // 2026-09-24): tree_shrub_quarterly keeps customer_visible=true on
+        // purpose (20260924020010 — it feeds the one grandfathered
+        // customer's tracking-page summary), so a campaign could otherwise
+        // advertise the retired quarterly program. Exclude the shared
+        // retired-sale-catalog.js set explicitly — the same chokepoint
+        // every other new-sale/advertising boundary reads.
+        .whereNotIn('service_key', [...RETIRED_SALE_SERVICE_KEYS])
         .limit(8);
       query = applySearch(query, ['name', 'short_name', 'description', 'category', 'subcategory'], [topic, service]);
       context.services = await query;

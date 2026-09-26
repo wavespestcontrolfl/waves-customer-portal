@@ -157,6 +157,7 @@ const {
   reportPdfStorageKey,
   timeOnSiteAdjustedPdfSignature,
   reentryAdjustedPdfSignature,
+  treeShrubReviewPdfSignature,
 } = require('../services/service-report/pdf-storage');
 const { summaryCopySignature, technicianReportCustomerCopy } = require('../services/service-report/technician-report-copy');
 const {
@@ -178,7 +179,6 @@ const { safePdfRenderError } = require('../services/service-report/pdf-events');
 const { buildServiceReportDynamicContext } = require('../services/service-report/dynamic-context');
 const {
   answerServiceReportQuestion,
-  loadReportAssistantProductContext,
 } = require('../services/service-report/report-assistant');
 const {
   WAVES_SUPPORT_PHONE_DISPLAY,
@@ -1726,12 +1726,15 @@ router.post('/:token/ask', async (req, res, next) => {
       }
       : null;
 
-    const productContext = await loadReportAssistantProductContext(data).catch(() => ({ byApplicationId: {}, byProductName: {} }));
+    // AW-03: answers are built from data.applications[].product, the same
+    // approved/frozen product facts buildServiceReportV1ResponseData already
+    // resolved for the report display (report-data.js's
+    // attachApprovedReportProductFacts) — never a second, ungated live
+    // products_catalog lookup.
     const answer = answerServiceReportQuestion({
       question,
       data,
       nextAppointment,
-      productContext,
     });
     await recordServiceReportEvent(service, 'report_question_asked', 'public_report', req, {
       question_length: question.length,
@@ -1910,7 +1913,7 @@ router.get('/:token', async (req, res, next) => {
       // bypassing it into a generic 500.
       const laSignature = await lawnAssessmentPdfSignature(service, db);
       const expectedPdfStorageKey = reportPdfStorageKey(service.id, {
-        visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachV2Signature + reserviceV2Signature + reserviceTrendsSignature + photoSetSignature + tzSignature + smSignature + tnSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + laSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
+        visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachV2Signature + reserviceV2Signature + reserviceTrendsSignature + photoSetSignature + tzSignature + smSignature + tnSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + treeShrubReviewPdfSignature(service) + laSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
       });
       const storedPdf = service.pdf_storage_key === expectedPdfStorageKey
         ? await getHealthyStoredReportPdf(service.pdf_storage_key)
@@ -2044,7 +2047,7 @@ router.get('/:token', async (req, res, next) => {
           logger.warn(`[reports-public] ${unreachablePhotos} report photo(s) unreachable for ${service.id} — serving without storing`);
         } else {
           const key = await putReportPdf(service.id, pdf, {
-            visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachRenderedSignature + reserviceRenderedSignature + reserviceTrendsSignature + photoSetSignature + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + laRenderSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
+            visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachRenderedSignature + reserviceRenderedSignature + reserviceTrendsSignature + photoSetSignature + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + treeShrubReviewPdfSignature(service) + laRenderSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
           });
           await db('service_records').where({ id: service.id }).update({ pdf_storage_key: key });
         }

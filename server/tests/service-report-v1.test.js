@@ -993,10 +993,19 @@ describe('service report v1', () => {
         rain_24h_in: 0.02,
         source: 'FAWN - Myakka River',
       },
+      // AW-03: active ingredient / EPA reg ride on app.product
+      // directly — the same approved/frozen facts report-data.js's
+      // attachApprovedReportProductFacts attaches for the report display —
+      // not a separate live productContext lookup (removed).
       applications: [
         {
           id: 'app-taurus',
-          product: { name: 'Taurus SC', catalogId: 'cat-taurus' },
+          product: {
+            name: 'Taurus SC',
+            catalogId: 'cat-taurus',
+            active_ingredient: 'Fipronil 9.1%',
+            epa_reg: '53883-279',
+          },
           method: 'perimeter_spray',
           methodLabel: 'Perimeter spray',
           applicationArea: 'Exterior perimeter',
@@ -1004,7 +1013,10 @@ describe('service report v1', () => {
         },
         {
           id: 'app-bifen',
-          product: { name: 'Bifen XTS' },
+          product: {
+            name: 'Bifen XTS',
+            active_ingredient: 'Bifenthrin 25.1%',
+          },
           method: 'perimeter_spray',
           methodLabel: 'Perimeter spray',
           applicationArea: 'Exterior perimeter',
@@ -1019,24 +1031,10 @@ describe('service report v1', () => {
         },
       ],
     };
-    const productContext = {
-      byApplicationId: {
-        'app-taurus': {
-          active_ingredient: 'Fipronil 9.1%',
-          epa_reg_number: '53883-279',
-        },
-        'app-bifen': {
-          active_ingredient: 'Bifenthrin 25.1%',
-          rainfast_minutes: 60,
-        },
-      },
-      byProductName: {},
-    };
 
     const answer = answerServiceReportQuestion({
       question: 'What was applied today?',
       data,
-      productContext,
     });
 
     expect(answer).toContain('Quarterly Pest Control Service');

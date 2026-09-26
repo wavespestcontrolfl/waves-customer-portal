@@ -1126,6 +1126,11 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
             duplicateBlock: {
               blocked: true,
               reason: 'call_rejected',
+              // The verdict that refused the insert (codex #4815 r9 P2): the
+              // processor re-runs a Waves Assessment pre-draft that a QUEUED
+              // agreed-price verdict blocked, once its own sweep lands and
+              // clears that entry.
+              rejectedBy: rejected,
               message: `This call was rejected by the pipeline (${rejected}) — no draft is created.`,
             },
           };

@@ -48,6 +48,7 @@ const { resolveBillingLane, predictCompletionBilling, monthlyDuesCollected, atta
 const { isAlwaysFreeServiceType } = require('../services/no-cost-visit-types');
 const DiscountEngine = require('../services/discount-engine');
 const { serviceExcludedFromPercentDiscount } = require('../services/pricing-engine/discount-engine');
+const { RETIRED_SALE_SERVICE_KEYS } = require('../services/pricing-engine/retired-sale-catalog');
 const { isReService } = require('../services/re-service');
 const { hasMembership } = require('../services/project-completion');
 const { assignDispatchJob, emitDispatchJobUpdate, flushDispatchQualityDates } = require('../services/dispatch-assignment');
@@ -7246,6 +7247,50 @@ router.post('/', requireAdmin, async (req, res, next) => {
           });
         }
       }
+      // A not-yet-accepted quote on the retired 4x/quarterly T&S cadence
+      // (retired 2026-09-24) must not be booked-and-accepted here: the
+      // appointment commits BEFORE the best-effort acceptance, which would
+      // then refuse it (codex P1 r9). Already-accepted plans still book.
+      if (linkedEstimate.status !== 'accepted') {
+        const { recurringTreeShrubRowAtRetiredCadence } = require('./estimate-public');
+        let data = linkedEstimate.estimate_data || {};
+        if (typeof data === 'string') { try { data = JSON.parse(data); } catch { data = {}; } }
+        if (recurringTreeShrubRowAtRetiredCadence(data)) {
+          return res.status(409).json({
+            error: 'This estimate’s tree & shrub plan uses a retired schedule. Requote it with the 6x or 9x program before booking from it.',
+            code: 'RETIRED_TREE_SHRUB_CADENCE',
+          });
+        }
+      }
+    }
+    // Retired-for-sale catalog rows (quarterly T&S, retired 2026-09-24) book
+    // only for a customer already on that plan — the same exception the
+    // new-appointment picker applies (service-library getServices sellable).
+    // Runs AFTER the linked estimate is loaded (codex r18 P1): an ACCEPTED
+    // quote carrying the retired plan is grandfathering evidence in its own
+    // right (retiredSaleKeysVouchedByAcceptedEstimate) — "Mark Won, then
+    // book" has no live visit yet for the holder test to find.
+    const vouchedByQuote = retiredSaleKeysVouchedByAcceptedEstimate(linkedEstimate);
+    const notHeldRetired = (await require('../services/service-library').retiredServicesNotHeldBy({
+      customerId,
+      serviceIds: [serviceId, ...(Array.isArray(serviceAddons) ? serviceAddons.map((a) => a?.serviceId) : [])],
+      // Names too, id or not: an ID-less add-on persists by name alone —
+      // each with its OWN cadence when it carries one (codex r22: a live 6x
+      // T&S add-on posted with a quarterly pattern is the retired plan under
+      // the parent's monthly recurrence).
+      serviceTypes: [serviceType, ...(Array.isArray(serviceAddons) ? serviceAddons.map((a) => ({
+        label: a?.name || a?.serviceName,
+        recurrence: addonLineRecurrence({ recurringPattern: a?.recurringPattern || a?.cadence, recurringIntervalDays: a?.recurringIntervalDays ?? a?.intervalDays }),
+      })) : [])],
+      // The structured cadence too (codex r20): an ID-less "Tree & Shrub
+      // Care" booked quarterly is the retired plan by another name.
+      recurrence: isRecurring ? { pattern: recurringPattern, intervalDays: recurringIntervalDays } : null,
+    })).filter((r) => !vouchedByQuote.has(r.service_key));
+    if (notHeldRetired.length) {
+      return res.status(409).json({
+        error: `${notHeldRetired.map((r) => r.name).join(', ')} is retired for new sales and this customer is not on that plan.`,
+        code: 'RETIRED_SERVICE_NOT_SELLABLE',
+      });
     }
     // Booking from a phone "yes": a sent/viewed quote the customer accepted
     // verbally gets its win recorded AFTER the appointment commits (below), so
@@ -11769,6 +11814,207 @@ async function computeUpdateDetailsFinancialPlan({
   };
 }
 
+// An add-on line's own structured cadence for the retired-plan gate, or null
+// when it rides the visit's (codex r22 on #4786).
+function addonLineRecurrence(line) {
+  const pattern = typeof line?.recurringPattern === 'string' && line.recurringPattern.trim() ? line.recurringPattern.trim() : null;
+  const intervalDays = Number.parseInt(line?.recurringIntervalDays, 10);
+  return pattern || (Number.isInteger(intervalDays) && intervalDays > 0)
+    ? { pattern, intervalDays: Number.isInteger(intervalDays) && intervalDays > 0 ? intervalDays : null }
+    : null;
+}
+
+// The retired-for-sale gate's inputs for a visit EDIT (codex r13/r17/r18/r19/
+// r20/r22 on #4786): only what the save ADDS to the visit — catalog ids not
+// already on it (primary or add-on line), a changed primary label, and the
+// name of every ID-less add-on line not already on the visit by name — each
+// add-on name carrying its own cadence ({ label, recurrence }). A
+// grandfathered visit that keeps its own lines is never re-checked — with
+// two exceptions that sell a retained line as a PLAN: `plansRetainedLines`
+// (the edit turns a one-off visit into a recurring one, or changes the
+// cadence of one that already recurs — every retained line is gated as if
+// newly added, the route adding the posted cadence words), or, on a visit
+// that already recurs, a retained add-on reposted with a DIFFERENT pattern
+// than its stored one (one_time promoted to the plan, or a plan pattern
+// changed) — gated by id and by name with the new cadence.
+// Pairs a visit edit's posted add-on lines to the stored rows ONE-TO-ONE
+// (codex r26/r27 on #4786): first by the stored row's own id when a posted
+// line carries it (and the same identity), then by identity — catalog id,
+// else id-less name — in posted order. EVERY read of "which stored row is
+// this posted line" (storedLine) and "which posted line keeps this stored
+// row" (postedFor) goes through the pairing, so two stored copies of one
+// service (one one_time, one riding the parent) each resolve to their own
+// posted line, and a posted line left unpaired is an added line — a second
+// copy of an add-on already on the visit is gated like any new line. The
+// primary line's own catalog id is one occurrence too: a same-id posted
+// primary takes it first, else a posted primary that matches a stored
+// add-on's service moves that row to the primary.
+function pairVisitEditAddonLines({ current, currentAddons, postedServiceId, lines }) {
+  const norm = (v) => String(v || '').trim().toLowerCase();
+  const pairs = (l, a) => (l.serviceId
+    ? String(a?.service_id || '') === String(l.serviceId)
+    : (!a?.service_id && norm(a?.service_name) === norm(l.serviceName)));
+  const pairedLine = new Map(); // stored row index -> posted line
+  const pairedStored = new Map(); // posted line -> stored row
+  const pairUp = (l, idx) => { pairedLine.set(idx, l); pairedStored.set(l, currentAddons[idx]); };
+  const firstFree = (match) => currentAddons.findIndex((a, i) => !pairedLine.has(i) && match(a));
+  // The PUT path hands the gate normalizeUpdateDetailsAddons' rows, which
+  // carry the stored row id as `submittedAddonId` (codex r28 on #4786).
+  const rowIdOf = (l) => (l.submittedAddonId != null ? l.submittedAddonId : l.id);
+  const sameRow = (l, a) => rowIdOf(l) != null && a?.id != null && String(rowIdOf(l)) === String(a.id);
+  for (const l of lines) {
+    const idx = firstFree((a) => sameRow(l, a) && pairs(l, a));
+    if (idx >= 0) pairUp(l, idx);
+  }
+  let primaryIdFree = !!current.service_id;
+  const takePrimaryId = (id) => {
+    if (!primaryIdFree || !id || String(id) !== String(current.service_id)) return false;
+    primaryIdFree = false;
+    return true;
+  };
+  const primaryAddedIds = [];
+  if (postedServiceId && !takePrimaryId(postedServiceId)) {
+    const idx = firstFree((a) => String(a?.service_id || '') === String(postedServiceId));
+    // The moved row stays on the visit as the primary, riding the parent.
+    if (idx >= 0) pairUp({ serviceId: String(postedServiceId), serviceName: null, recurringPattern: null, recurringIntervalDays: null }, idx);
+    // A row that ran on its own cadence (one_time, custom) now takes the
+    // parent's, so promoting it is a new plan line (codex r32 on #4786).
+    if (idx < 0 || currentAddons[idx]?.recurring_pattern) primaryAddedIds.push(String(postedServiceId));
+  }
+  for (const l of lines) {
+    if (pairedStored.has(l)) continue;
+    const idx = firstFree((a) => pairs(l, a));
+    if (idx >= 0) pairUp(l, idx);
+  }
+  return {
+    storedLine: (l) => pairedStored.get(l) || null,
+    postedFor: (a) => pairedLine.get(currentAddons.indexOf(a)) || null,
+    addedLines: lines.filter((l) => !pairedStored.has(l) && !takePrimaryId(l.serviceId)),
+    primaryAddedIds,
+  };
+}
+
+// The cadence a retained add-on will actually run at: the reposted line's
+// own, else the stored one (null rides the parent).
+function storedAddonRecurrence(a) {
+  return addonLineRecurrence({ recurringPattern: a?.recurring_pattern, recurringIntervalDays: a?.recurring_interval_days });
+}
+
+// When the edit sells the visit's retained lines as a PLAN
+// (`plansRetainedLines`), every line that remains after the save is gated as
+// if newly added. A stored add-on survives an explicit replacement only when
+// reposted, and a one_time add-on never rides the parent's cadence (codex
+// r24); the primary line survives unless a different service id is posted
+// (the new one is gated as added). Every retained add-on name goes through,
+// catalog-backed or not (codex r23: a live 6x T&S add-on riding a parent that
+// just turned quarterly is the retired plan by name + cadence).
+function retainedPlanLinesForVisitEdit({ current, currentAddons, postedServiceId, addonsReplaced, renamed, pairing }) {
+  const effectiveRecurrence = (a) => {
+    const posted = pairing.postedFor(a);
+    return posted ? addonLineRecurrence(posted) : storedAddonRecurrence(a);
+  };
+  const ridesPlan = (a) => (effectiveRecurrence(a)?.pattern || null) !== 'one_time';
+  const retainedAddons = currentAddons.filter((a) => ridesPlan(a) && (!addonsReplaced || pairing.postedFor(a)));
+  const primaryRetained = !postedServiceId || String(postedServiceId) === String(current.service_id || '');
+  const keepsPrimaryLabel = primaryRetained && !renamed && typeof current.service_type === 'string' && !!current.service_type.trim();
+  return {
+    ids: [primaryRetained ? current.service_id : null, ...retainedAddons.map((a) => a?.service_id)].filter(Boolean).map(String),
+    names: [
+      ...(keepsPrimaryLabel ? [current.service_type] : []),
+      ...retainedAddons.filter((a) => typeof a?.service_name === 'string' && a.service_name.trim())
+        .map((a) => ({ label: a.service_name, recurrence: effectiveRecurrence(a) })),
+    ],
+  };
+}
+
+// On a visit that already recurs, a retained add-on reposted with a different
+// cadence than its stored one — pattern OR interval (codex r24: custom every
+// 60 days → every 90 days) — joins the plan at the new cadence.
+function repatternedAddonLinesForVisitEdit({ lines, pairing }) {
+  const cadenceKey = (r) => (r ? `${r.pattern || ''}|${r.intervalDays || ''}` : '');
+  return lines.filter((l) => {
+    const stored = pairing.storedLine(l);
+    return stored && (l.recurringPattern || null) !== 'one_time'
+      && cadenceKey(storedAddonRecurrence(stored)) !== cadenceKey(addonLineRecurrence(l));
+  });
+}
+
+function retiredGateInputsForVisitEdit({
+  current, currentAddons = [], postedServiceId = null, postedAddons = null, serviceType, plansRetainedLines = false,
+}) {
+  // `postedAddons` null = the save did not post add-ons (every stored line
+  // stays); an array = an explicit replacement (a stored line absent from
+  // it is being removed and is not retained — codex r25 on #4786).
+  const addonsReplaced = Array.isArray(postedAddons);
+  const norm = (v) => String(v || '').trim().toLowerCase();
+  const lines = (postedAddons || []).filter(Boolean);
+  const named = (l) => typeof l.serviceName === 'string' && !!l.serviceName.trim();
+  const labelOf = (l) => ({ label: l.serviceName.trim(), recurrence: addonLineRecurrence(l) });
+  const renamed = typeof serviceType === 'string' && !!serviceType.trim() && norm(serviceType) !== norm(current.service_type);
+  const primaryLabel = typeof serviceType === 'string' && serviceType.trim() ? serviceType : (current.service_type || null);
+  const pairing = pairVisitEditAddonLines({ current, currentAddons, postedServiceId, lines });
+  const { addedLines, primaryAddedIds } = pairing;
+  const retained = plansRetainedLines
+    ? retainedPlanLinesForVisitEdit({ current, currentAddons, postedServiceId, addonsReplaced, renamed, pairing })
+    : { ids: [], names: [] };
+  const repatterned = current.is_recurring && !plansRetainedLines ? repatternedAddonLinesForVisitEdit({ lines, pairing }) : [];
+  return {
+    serviceIds: [...new Set([
+      ...primaryAddedIds,
+      ...addedLines.filter((l) => l.serviceId).map((l) => String(l.serviceId)),
+      ...retained.ids,
+      ...repatterned.filter((l) => l.serviceId).map((l) => String(l.serviceId)),
+    ])],
+    serviceTypes: [
+      // A renamed primary, or a primary whose catalog id is newly added
+      // (codex r30: the live 6x row swapped in under an unchanged generic
+      // "Tree & Shrub" label with a quarterly cadence), goes through by
+      // label — the route appends the visit's own cadence to plain labels.
+      ...(renamed || primaryAddedIds.length ? [primaryLabel].filter(Boolean) : []),
+      // Every added line's label rides with its own cadence, catalog-backed
+      // or not (codex r29): a live 6x T&S row added with a quarterly
+      // pattern is the retired plan by name + cadence while its id is live —
+      // the same shape POST / hands the gate for every add-on.
+      ...addedLines.filter(named).map(labelOf),
+      ...retained.names,
+      ...repatterned.filter(named).map(labelOf),
+    ],
+  };
+}
+
+// Retired-sale catalog keys an ACCEPTED linked estimate vouches for on a
+// booking (codex r18 P1 on #4786). Every acceptance path — the customer
+// PUT /accept (retiredTreeShrubRequoteNeeded), manual acceptance
+// (estimate-manual-acceptance) and POST /'s own preflight for an unaccepted
+// quote — refuses the retired 4x T&S plan, so an accepted quote that still
+// carries it predates the retirement or belongs to the customer already on
+// it: booking its visits is honoring that sale, not making a new one. An
+// open (sent/viewed) quote vouches for nothing.
+function retiredSaleKeysVouchedByAcceptedEstimate(linkedEstimate) {
+  if (!linkedEstimate || linkedEstimate.status !== 'accepted') return new Set();
+  let data = linkedEstimate.estimate_data || {};
+  if (typeof data === 'string') { try { data = JSON.parse(data); } catch { data = {}; } }
+  // The exact retired row the quote carries (codex r22): the shared label
+  // matcher over each recurring T&S row's identity fields, so an accepted
+  // legacy 12x Premium quote (retired too, but never sold as
+  // tree_shrub_quarterly) vouches for nothing.
+  const { acceptanceServiceLists, recurringServiceKey } = require('./estimate-public');
+  const { RETIRED_SALE_SERVICE_KEYS, retiredSaleKeyForLabel } = require('../services/pricing-engine/retired-sale-catalog');
+  const vouched = new Set();
+  for (const svc of acceptanceServiceLists(data).recurringSvcList || []) {
+    if (recurringServiceKey(svc) !== 'tree_shrub') continue;
+    for (const key of [svc?.service, svc?.serviceKey, svc?.service_key]) {
+      if (RETIRED_SALE_SERVICE_KEYS.has(key)) vouched.add(key);
+    }
+    const visits = [svc?.visitsPerYear, svc?.visits_per_year, svc?.visits].map(Number).find((n) => Number.isFinite(n) && n > 0);
+    const text = [svc?.name, svc?.label, svc?.displayName, svc?.serviceType, svc?.frequency, svc?.tier, visits ? `${visits}x` : '']
+      .filter((v) => typeof v === 'string' || typeof v === 'number').join(' ');
+    const key = retiredSaleKeyForLabel(`tree & shrub ${text}`);
+    if (key) vouched.add(key);
+  }
+  return vouched;
+}
+
 router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
   try {
     // First statement, before any read: see negativePricePosted.
@@ -12307,6 +12553,55 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           new Error('The total changed while saving — review the new total and save again.'),
           { statusCode: 409, isOperational: true, code: 'VISIT_CHANGED_RETRY', reason: 'PREVIEW_TOTAL_DRIFT' },
         );
+      }
+    }
+    // Same retired-for-sale gate as POST / (codex r13 on #4786), on the
+    // catalog ids this save ADDS — the resolved primary service and any
+    // add-on line not already on the visit. A grandfathered visit that keeps
+    // its own service is never re-checked.
+    // Every posted add-on line reaches the gate: by catalog id, by name when
+    // ID-less (normalizeUpdateDetailsAddons keeps an unresolved serviceName
+    // and persists it by name alone — codex r17), and with its own
+    // recurringPattern (a one_time line promoted to the plan — codex r19).
+    const postedAddons = Array.isArray(replaceAddons) ? replaceAddons.filter(Boolean) : null;
+    // service_type and service_id are written independently, so a changed
+    // label goes through the gate by name whether or not an id rides along.
+    const labelPosted = typeof serviceType === 'string' && !!serviceType.trim();
+    // Making the visit recurring, or changing the cadence of one that already
+    // recurs, sells its retained lines as a plan (codex r18/r20 P1):
+    // confirmed against the row's own is_recurring / recurring_pattern below.
+    const recurrencePosted = !!isRecurring;
+    if (updates.service_id || labelPosted || postedAddons?.length || recurrencePosted) {
+      const current = await db('scheduled_services').where({ id: req.params.id })
+        .first('customer_id', 'service_id', 'service_type', 'is_recurring', 'recurring_pattern', 'recurring_interval_days');
+      if (current) {
+        // A posted interval counts as a cadence change too (codex r23: custom
+        // every 60 days → every 90 days is the retired quarterly cadence).
+        const postedInterval = Number.parseInt(recurringIntervalDays, 10);
+        const intervalChanged = Number.isInteger(postedInterval) && postedInterval > 0
+          && postedInterval !== Number.parseInt(current.recurring_interval_days, 10);
+        const plansRetainedLines = recurrencePosted
+          && (!current.is_recurring || (!!recurringPattern && recurringPattern !== current.recurring_pattern) || intervalChanged);
+        const currentAddons = updates.service_id || postedAddons?.length || plansRetainedLines
+          ? await db('scheduled_service_addons').where({ scheduled_service_id: req.params.id })
+            .select('id', 'service_id', 'service_name', 'recurring_pattern', 'recurring_interval_days')
+          : [];
+        const gate = retiredGateInputsForVisitEdit({
+          current, currentAddons, postedServiceId: updates.service_id, postedAddons, serviceType, plansRetainedLines,
+        });
+        const notHeldRetired = gate.serviceIds.length || gate.serviceTypes.length
+          ? await require('../services/service-library').retiredServicesNotHeldBy({
+            customerId: current.customer_id,
+            ...gate,
+            recurrence: recurrencePosted ? { pattern: recurringPattern, intervalDays: recurringIntervalDays } : null,
+          })
+          : [];
+        if (notHeldRetired.length) {
+          return res.status(409).json({
+            error: `${notHeldRetired.map((r) => r.name).join(', ')} is retired for new sales and this customer is not on that plan.`,
+            code: 'RETIRED_SERVICE_NOT_SELLABLE',
+          });
+        }
       }
     }
     const addonsReplaced = Array.isArray(replaceAddons);
@@ -22682,6 +22977,9 @@ router.get('/services-dropdown', async (req, res, next) => {
             serviceKey: s.service_key || null,
             serviceCategory: s.category || null,
             excludedFromPercentDiscount: lineExcludedFromPercentDiscount(s.service_key),
+            // Pickers hide it (the edit dialog keeps it only as the visit's
+            // current service); the write routes refuse it for non-holders.
+            ...(RETIRED_SALE_SERVICE_KEYS.has(s.service_key) ? { retiredForSale: true, shortName: s.short_name || null } : {}),
           });
         }
         groups = Object.values(byCategory);
@@ -24055,6 +24353,9 @@ router._test = {
   stampRecurringTemplateOverrides,
   propagatePriceServiceToFollowingSiblings,
   PRICE_SERVICE_OVERRIDE_KEYS,
+  retiredGateInputsForVisitEdit,
+  retiredSaleKeysVouchedByAcceptedEstimate,
+  addonLineRecurrence,
 };
 
 module.exports = router;

@@ -5,8 +5,56 @@
  * neighbors' sample/range for an unassessed vacant parcel — is staff-only
  * context and must never ride the public response or the lead snapshot.
  */
-const { _test: { publicEnrichedProfile } } = require('../routes/public-property-lookup');
+const { _test: { publicEnrichedProfile, publicLookupMeta, publicLookupErrors } } = require('../routes/public-property-lookup');
 const { VACANT_SQFT_FLAG_COPY } = require('../routes/property-lookup-v2');
+
+describe('public lookup metadata — provider health stays staff-only', () => {
+  it.each(['miss', 'hit', 'refresh'])('strips credential configuration and provider attempts on a cache %s', (cache) => {
+    const parcelMeta = { cache, lookupMs: 1200, timestamp: '2026-01-01T12:00:00Z', budgetMs: 60000 };
+    const providerStatus = {
+      propertySearch: { claude: true, openai: true, gemini: true },
+      satelliteVision: { gemini: { configured: true, available: false }, openai: { configured: true, available: true } },
+      maps: true,
+    };
+    const adminMeta = { ...parcelMeta, providerStatus };
+    expect(publicLookupMeta(adminMeta)).toEqual(parcelMeta);
+    expect(adminMeta.providerStatus).toBe(providerStatus);
+  });
+
+  it('preserves cached metadata with no provider diagnostics', () => {
+    const meta = { cache: 'hit', cachedAt: '2026-01-01T12:00:00Z', lookupMs: 2 };
+    expect(publicLookupMeta(meta)).toEqual(meta);
+  });
+});
+
+describe('public lookup errors — operational failures stay staff-only', () => {
+  it('strips failed provider attempts and configuration messages without changing staff diagnostics', () => {
+    const errors = [
+      { source: 'gemini', message: 'Satellite vision analysis failed: no_key' },
+      { source: 'openai', message: 'Satellite vision analysis failed: openai_503' },
+      { source: 'claude', message: 'Claude analysis failed' },
+      { source: 'ai', message: 'All AI vision models failed — check API keys' },
+      { source: 'satellite', message: 'No GOOGLE_MAPS_API_KEY or GOOGLE_API_KEY configured' },
+      { source: 'ai-property', message: 'Provider-specific diagnostic' },
+    ];
+    const before = JSON.stringify(errors);
+    expect(publicLookupErrors(errors)).toEqual([]);
+    expect(JSON.stringify(errors)).toBe(before);
+  });
+
+  it('preserves the known service-area verdict without copying arbitrary fields', () => {
+    expect(publicLookupErrors([
+      { source: 'geo', message: 'Unknown upstream error', diagnostic: 'private' },
+      { source: 'geo', message: 'Outside SWFL service area', diagnostic: 'private' },
+      { source: 'openai', message: 'Satellite vision analysis failed: invalid_schema' },
+    ])).toEqual([{ source: 'geo', message: 'Outside SWFL service area' }]);
+  });
+
+  it('keeps successful responses free of errors', () => {
+    expect(publicLookupErrors([])).toEqual([]);
+    expect(publicLookupErrors(undefined)).toEqual([]);
+  });
+});
 
 describe('publicEnrichedProfile — plat median stays out of the public payload', () => {
   it('drops subdivisionMedian and keeps every other field', () => {

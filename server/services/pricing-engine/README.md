@@ -49,7 +49,7 @@ Single source of truth for what this engine prices, how, and with what constants
 |---|---|---|---|
 | Pest Control | ✅ quarterly / bimonthly / monthly | ✅ | ✅ |
 | Lawn Care | ✅ basic/standard/enhanced/premium | ✅ per-treatment | ✅ |
-| Tree & Shrub | ✅ light/standard | — | ✅ |
+| Tree & Shrub | ✅ standard/enhanced (light retired 2026-09-24) | — | ✅ |
 | Palm Injection | ✅ (4 treatment types) | — | ❌ flat credit only |
 | Mosquito | ✅ Seasonal/Monthly | ✅ treatable area | ✅ |
 | Termite Bait | ✅ monthly subscription | install only | ✅ |
@@ -111,12 +111,14 @@ into `priceLawnCare`.
 
 Tree & Shrub uses a 43% direct-cost ratio target, not a 43% margin target. This usually produces roughly 50%+ service-level margin after admin before final discounts.
 
-| Tier | Freq | Material rate | Floor |
-|---|---|---|---|
-| Light | 4x | $0.075/sqft | $40 |
-| Standard | 6x | $0.110/sqft | $50 |
+| Tier (sold) | Freq | Floor (monthly, pre-discount) |
+|---|---|---|
+| Standard (default) | 6x | $35 |
+| Enhanced (upsell) | 9x | $48 |
 
-The 6-visit Standard program is the mandated default and the pre-selected/auto-recommended tier (matches the protocol `six_x` cadence). Light (4x, protocol `four_x`) is a customer-selectable alternative cadence — shown alongside Standard the same way pest shows quarterly/bi-monthly/monthly — but it is never the auto-recommended default. Customer-facing surfaces label the tiers as cadences: Light = **Quarterly** (4 visits), Standard = **Bi-monthly** (6 visits). The 9-visit Enhanced and 12-visit Premium tiers are retired; legacy `tier: "enhanced"` / `tier: "premium"` requests are normalized to Standard with a warning.
+Material is a bottom-up model (`TREE_SHRUB.materialModel` in `constants.js`), not a flat $/sqft rate. Light (4x, $22 floor) remains in `constants.js` only to replay the grandfathered quarterly plan — it is not a sales tier.
+
+The 6-visit Standard program is the mandated default and the pre-selected/auto-recommended tier (matches the protocol `six_x` cadence). Light (4x/Quarterly, protocol `four_x`) is RETIRED for new sales (owner directive 2026-09-24: "remove quarterly tree and shrub care from the estimates and services") — `TREE_SHRUB.tiers.light.hidden` drops it from every offering surface, mirroring lawn's 6x/bi-monthly retirement; it stays priceable only for the one grandfathered existing quarterly customer's plan. `tier: "premium"` (12x) is likewise retired and normalizes to Standard with a warning. Enhanced (9x) is a live, customer-selectable upsell (un-retired 2026-07-23), never auto-recommended.
 
 **Standard positioning:** six core seasonal applications across the year.
 
@@ -129,7 +131,7 @@ The 6-visit Standard program is the mandated default and the pre-selected/auto-r
 
 Estimated bed area is capped at 8,000 sqft. Manual review is required for fallback bed area, bed area at/above the cap, tree count 15+, or difficult access with bed area 4,000 sqft+.
 
-**Recommendation logic:** The 6-visit Standard plan is the mandated default and is always the recommended tier. Light (4x) is a selectable alternative customers can choose, but it is never auto-recommended (Standard stays the pre-selected default). `recommendationReasons` (bed area 2,000 sqft+, heavy shrub density, moderate/complex landscaping, tree count 8+, difficult access, known pest/disease pressure) are advisory signals that the property warrants the full 6-visit program (i.e. reasons not to downsell to Light); they no longer change the recommended tier.
+**Recommendation logic:** The 6-visit Standard plan is the mandated default and is always the recommended tier. Light (4x) is RETIRED for new sales (owner directive 2026-09-24) — legacy/grandfathered-only, priceable but never offered or auto-recommended to a new customer. `recommendationReasons` (bed area 2,000 sqft+, heavy shrub density, moderate/complex landscaping, tree count 8+, difficult access, known pest/disease pressure) are advisory signals that the property warrants the full 6-visit program (originally: reasons not to downsell to the now-retired Light tier); they no longer change the recommended tier.
 
 **Post-discount report:** after zone modifiers and WaveGuard discounts, Tree & Shrub reports true margin after direct cost and admin (`finalAnnual`, `finalMonthly`, `requestedDiscountPct`, `actualDiscountPct`, `finalMargin`, `belowMarginFloor`) — since the 2026-07-17 owner ruling nothing caps the discount; margins below 35% are surfaced for the owner to raise in the estimator.
 

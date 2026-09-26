@@ -125,6 +125,7 @@ const {
   OPEN_ESTIMATE_STATUSES,
 } = require('../services/estimate-automation-duplicates');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
+const { isSellableTreeShrubTier } = require('../services/pricing-engine/retired-sale-catalog');
 const {
   isCommercialProperty,
   normalizePropertyType,
@@ -1035,6 +1036,46 @@ function dropKeyedOnlyServices(bodyServices) {
   return out;
 }
 
+// Light (4x/quarterly) is retired for new sales (owner directive
+// 2026-09-24) — reject it (and any other hidden/unknown tier) at this
+// public, unkeyed boundary too, mirroring property-lookup-v2.js's builder
+// validation (which only protects the admin/property-lookup path). Absent
+// stays absent (the engine's own 'enhanced' default runs); a PRESENT but
+// hidden tier is refused rather than silently priced — codex P1 pre-push:
+// this route used to forward services.treeShrub.tier unchanged, so an
+// unkeyed request could still persist a fresh Light quote after retirement.
+// Shared chokepoint (codex P1 round 2 pre-push): isSellableTreeShrubTier
+// (pricing-engine/retired-sale-catalog.js), never a locally hand-rolled
+// hidden-flag check — the next tier retirement is one edit there, not one
+// per file. Extracted so it's directly unit-testable without a full HTTP
+// harness.
+function publicQuoteTreeShrubTierRejection(tier) {
+  // Absent means undefined/null/blank-after-trim ONLY (codex P0 round 4):
+  // `String(tier || '')` used to coerce EVERY other type first, so an array
+  // like ['standard'] stringified into the valid string 'standard' and
+  // slipped past the deliberately type-strict allowlist below, while
+  // present-but-falsy values (false, 0) coerced to '' and were wrongly
+  // treated as absent instead of refused. Pass the RAW value through —
+  // isSellableTreeShrubTier's own normalizedTierKey already rejects any
+  // non-string type outright, so a garbage type (array/object/boolean/
+  // number) reaches the SAME "not sellable" refusal a bad string gets.
+  if (tier === undefined || tier === null) return null;
+  if (typeof tier === 'string' && tier.trim() === '') return null;
+  if (!isSellableTreeShrubTier(tier)) {
+    return 'Tree & Shrub program must be standard or enhanced.';
+  }
+  return null;
+}
+
+// The tier /calculate forwards to the engine once the rejection above has
+// passed: absent (undefined / null / blank-after-trim) stays ABSENT so the
+// engine's own default runs. A whitespace-only tier used to be forwarded
+// verbatim and normalizeTreeShrubTier trimmed it to an empty key and threw
+// `Unknown T&S tier` — a server error instead of Standard (codex r17 P2).
+function publicQuoteTreeShrubTierInput(tier) {
+  return typeof tier === 'string' && tier.trim() ? tier : undefined;
+}
+
 const quoteLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 10,
@@ -1678,6 +1719,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       engineInput.services.rodentInspection = {};
     }
     if (services.treeShrub) {
+      const treeShrubTierError = publicQuoteTreeShrubTierRejection(services.treeShrub.tier);
+      if (treeShrubTierError) return res.status(400).json({ error: treeShrubTierError });
       // Only forward a real count. An explicit treeCount: 0 (the old ?? 0
       // default) suppresses priceTreeShrub's density fallback — it estimates
       // the count from the property's treeDensity only when the field is
@@ -1699,7 +1742,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         return res.status(400).json({ error: 'Palm count must be a whole number between 1 and 200.' });
       }
       engineInput.services.treeShrub = {
-        tier: services.treeShrub.tier,
+        tier: publicQuoteTreeShrubTierInput(services.treeShrub.tier),
         access: services.treeShrub.access || 'easy',
         ...(Number.isFinite(treeShrubCount) && treeShrubCount > 0 ? { treeCount: treeShrubCount } : {}),
         ...(palmsSupplied ? { palmCount: treeShrubPalms } : {}),
@@ -4314,6 +4357,8 @@ module.exports._internals = {
   resolveEntryChannel,
   unitOnMultiUnitParcelForcesSiteQuote,
   lotPricedServiceRequested,
+  publicQuoteTreeShrubTierRejection,
+  publicQuoteTreeShrubTierInput,
 };
 module.exports.PUBLIC_QUOTE_SERVICE_KEYS = PUBLIC_QUOTE_SERVICE_KEYS;
 module.exports.KEYED_ONLY_SERVICE_KEYS = KEYED_ONLY_SERVICE_KEYS;

@@ -1,4 +1,5 @@
 const { correctEmailDomain, meetsConfidence } = require('../utils/email-typo-correction');
+const { toE164, isLikelyE164 } = require('../utils/phone');
 const { looksGarbledTranscriptEmail } = require('../utils/intake-normalize');
 const { parseRawAddress, splitStreetLineUnit, splitUnitFirstLine, normalizeStreetLine, normalizeState, normalizeUnitLine, unitLineValueKey, unitAnywhereOnLine, STREET_SUFFIX_ALIASES } = require('../utils/address-normalizer');
 
@@ -11,6 +12,67 @@ const SERVICE_AREA_COUNTIES = new Set(['Manatee', 'Sarasota', 'Charlotte', 'DeSo
 function isDialablePhone(value) {
   if (!value) return false;
   return String(value).replace(/\D/g, '').length >= 10;
+}
+
+// Pure predicate: did THIS caller disclaim the ANI as not their own with no
+// spoken callback number backing it up? Single source of truth (schema
+// 1.14.0) — computeDeterministicTriageFlags derives callback_number_needed
+// from it, and every other consumer that needs the same fact (the
+// crm_notes stamp in extraction-compat.js, the CSR-coaching addendum in
+// csr-coach.js) calls this instead of re-deriving the condition, so a
+// future refinement here can't silently desync from the flag.
+//
+// Requires EVIDENCE of a DIFFERENT callback number (Codex round-1 P1,
+// tightened round 8 P1). A schema-valid model response can set
+// caller_id_disclaimed:true and still put the disclaimed ANI in phone_e164 —
+// under phone_source 'caller_id' (the model recording caller ID), and ALSO
+// under 'spoken'/'both' when the caller simply repeats the shared office
+// number aloud while saying it isn't theirs (the schema defines 'both' as a
+// spoken number that MATCHES the ANI). Neither is a replacement callback:
+// treating it as one cleared the flag, so no card and no hold, and the
+// confirmation/reminder SMS went to the exact number the caller disclaimed.
+//
+// The disclaimer is therefore unresolved (returns true) unless phone_e164
+// is a real, dialable number AND:
+//   - with a dialable ANI (opts.ani): phone_e164 is DISTINCT from it, both
+//     normalized to E.164 — whatever phone_source says. A number within one
+//     or two digits of the ANI counts as the SAME number (the processor's
+//     resolveCallContactPhone keeps the ANI for such a near miss, so the
+//     SMS would go to the disclaimed number anyway).
+//   - with no dialable ANI to compare (nothing to repeat aloud): the
+//     round-1 rule stands — phone_source 'spoken'/'both' counts as a
+//     callback the caller spoke; 'caller_id'/unknown fails closed to
+//     "still needed".
+function comparablePhoneKey(value) {
+  const e164 = toE164(value);
+  if (typeof e164 === 'string' && isLikelyE164(e164)) return e164.replace(/\D/g, '');
+  const digits = String(value || '').replace(/\D/g, '');
+  return digits.length >= 10 ? digits : null;
+}
+
+// Same rule as call-recording-processor.js's phoneNearMissOfAni: equal
+// length, same prefix, last 7 digits differing in 1–2 places.
+function nearMissPhoneKeys(a, b) {
+  if (!a || !b || a === b || a.length !== b.length || a.length < 10) return false;
+  if (a.slice(0, -7) !== b.slice(0, -7)) return false;
+  let diff = 0;
+  for (let i = 1; i <= 7; i += 1) if (a[a.length - i] !== b[b.length - i]) diff += 1;
+  return diff > 0 && diff <= 2;
+}
+
+function sameCallbackAsAni(phone, ani) {
+  const a = comparablePhoneKey(phone);
+  const b = comparablePhoneKey(ani);
+  if (!a || !b) return true; // uncomparable — fail closed to "same"
+  return a === b || nearMissPhoneKeys(a, b);
+}
+
+function callerIdDisclaimedNeedsCallback(caller, opts = {}) {
+  if (!caller || caller.caller_id_disclaimed !== true) return false;
+  if (!isDialablePhone(caller.phone_e164)) return true;
+  const ani = opts.ani;
+  if (isDialablePhone(ani)) return sameCallbackAsAni(caller.phone_e164, ani);
+  return !(caller.phone_source === 'spoken' || caller.phone_source === 'both');
 }
 
 // Role/shared mailboxes whose local-part legitimately won't contain a person's
@@ -271,6 +333,22 @@ function computeDeterministicTriageFlags(extraction, opts = {}) {
     flags.push('caller_phone_missing');
   }
 
+  // callback_number_needed (schema 1.14.0, live miss 2026-09-25, call
+  // 6fee5f34: "this is our office line... I pick up, and then text"). The
+  // caller explicitly disclaimed the ANI as NOT their own AND gave us no
+  // spoken number to use instead — the only number on file is one we now
+  // KNOW is wrong to text. Distinct from caller_phone_missing above, which
+  // fires when there is no reachable number at all; here the ANI IS
+  // dialable, it's just not this caller's. SMS-only: see SMS_ONLY_FLAGS /
+  // ADVISORY_TRIAGE_FLAGS — the appointment still books, the confirmation/
+  // reminder SMS leg holds. The predicate itself lives in
+  // callerIdDisclaimedNeedsCallback (single source of truth — pre-push
+  // review P1: the crm_notes stamp and CSR-coaching addendum call it too,
+  // rather than re-deriving the condition).
+  if (callerIdDisclaimedNeedsCallback(caller, { ani: opts.contactPhone })) {
+    flags.push('callback_number_needed');
+  }
+
   if (hasNameEmailMismatch(caller)) {
     flags.push('name_email_mismatch');
   }
@@ -342,7 +420,23 @@ function computeDeterministicTriageFlags(extraction, opts = {}) {
 const SMS_ONLY_FLAGS = new Set([
   'no_sms_consent_captured',
   'sms_consent_missing',
+  // Disclaimed caller ID, no spoken callback (see computeDeterministicTriageFlags):
+  // the SMS leg holds, never the appointment. Also registered in
+  // ADVISORY_TRIAGE_FLAGS so it files a Needs Review card without holding
+  // the booking; listed here too so a reader grepping SMS-blocking flags
+  // finds it.
+  'callback_number_needed',
 ]);
+
+// Pure decision: does callback_number_needed hold the confirmation/reminder
+// SMS leg for this call? Extracted so call-recording-processor.js's
+// v2SmsBlocked assignment is unit-testable without a DB/LLM — mirrors
+// checkTcpaConsent's own testability (call-routing-gates.js). Whatever TCPA
+// consent decided, the caller told us the ANI reaches someone who isn't
+// them, so it never overrides this hold.
+function callbackNumberNeededBlocksSms(finalTriageFlags) {
+  return Array.isArray(finalTriageFlags) && finalTriageFlags.includes('callback_number_needed');
+}
 
 // Advisory flags — they surface in the Needs Review inbox (informational: missing
 // surname, rental/tenant-occupied, a second service address) but must NOT block
@@ -383,6 +477,13 @@ const ADVISORY_TRIAGE_FLAGS = new Set([
   // call-triage-safety.js ADVISORY set); blocking here was an unintended
   // regression, now pinned by the schema-classification contract test.
   'competing_quotes_active',
+  // The caller disclaimed the ANI as not their own and gave no spoken
+  // callback: booking proceeds (the ANI is the only key available), only
+  // the SMS leg holds — see the SMS gate in call-recording-processor.js
+  // and SMS_ONLY_FLAGS above. Never auto-resolved (not listed in
+  // triage-auto-resolve.js): a "get a real callback number" ask is a
+  // human-only verdict, same as missing_unit_number.
+  'callback_number_needed',
 ]);
 
 // Explicit allowlist of flags allowed to HOLD an appointment (owner ruling
@@ -1482,6 +1583,16 @@ function deriveCallReviewBridge({ addressValidation, extracted = {}, v2TriageFla
   // the review card enforce mode no longer raises. Only an explicit third
   // party (tenant, agent, manager, other) carries the ask.
   if (flags.includes('caller_not_authorized') && isExplicitlyNonOwner(callerRelationship)) needsConfirmation.push('caller_not_authorized');
+  // Finding #4 (round 4 P1, PR #4807): callback_number_needed reaches this
+  // function inside bridgeTriageFlags (the processor already merges
+  // computeDeterministicTriageFlags's output in before calling this), but
+  // nothing here ever copied it into needsConfirmation — the shadow bridge
+  // filed no Needs Review card and the processor's SMS-hold arming (keyed
+  // on callbackNumberNeededBlocksSms) only ran in the enforce-only branch,
+  // so a disclaimed ANI kept getting texted while V2 is in shadow. Same
+  // ADVISORY posture as every other flag here — this never holds the
+  // booking, only the confirmation/reminder SMS leg (see SMS_ONLY_FLAGS).
+  if (flags.includes('callback_number_needed')) needsConfirmation.push('callback_number_needed');
   // The V2 deterministic pass (fed the same AV verdict) may also flag the
   // missing unit — consume it under the SAME corroboration rule, deduped
   // against the branch's own push.
@@ -1969,6 +2080,8 @@ module.exports = {
   canAutoRoute,
   onFileAddressSatisfaction,
   SMS_ONLY_FLAGS,
+  callbackNumberNeededBlocksSms,
+  callerIdDisclaimedNeedsCallback,
   ADVISORY_TRIAGE_FLAGS,
   BLOCKING_TRIAGE_FLAGS,
   CANONICAL_WRITE_BLOCKING_FLAGS,

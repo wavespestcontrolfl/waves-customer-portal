@@ -1,6 +1,6 @@
 /**
  * WAVES PEST CONTROL — Property Lookup API
- * Combines AI web search + Google Static Maps + Claude/OpenAI/Gemini Vision into enriched property data.
+ * Combines AI web search + Google Static Maps + Gemini vision with Sol fallback into enriched property data.
  *
  * Express route: POST /api/property-lookup
  * Body: { address: string }
@@ -16,6 +16,7 @@ const router = express.Router();
 const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const MODELS = require('../config/models');
+const { dispatchWithFallback } = require('../services/llm/call');
 const { auditAddressHouseNumber, hasCountyEvidence, canonicalLookupAddress, lookupStoriesEvidenceFromAI, lookupPropertyFromAITrio, buildPropertyDataQuality, detectUnassessedVacantParcel, detectVacantRollBareLandImagery, detectMultiSitusMasterParcel, detectStaleImageryTurfConflict, COUNTY_LOT_SQFT_MAX } = require('../services/property-lookup/ai-property-lookup');
 const { lookupFloodZoneByPoint } = require('../services/property-lookup/fema-nfhl');
 const { isInServiceAreaBox } = require('../services/service-area');
@@ -43,6 +44,7 @@ const {
 // land-use text) — shared so the unit-lot verify flag and the unit-scope
 // model can never disagree on what counts as a condo record.
 const { _private: { isCondoRecord: shadowIsCondoRecord } } = require('../services/estimator-engine/property-facts-shadow');
+const { isSellableTreeShrubTier } = require('../services/pricing-engine/retired-sale-catalog');
 const { normalizePropertyType: normalizePricingPropertyType } = require('../services/pricing-engine/commercial-helpers');
 const { lookupPalmCountIsTrustworthy } = require('../services/lookup-confidence');
 const { normalizeRoachType } = require('../services/pricing-engine/service-pricing');
@@ -55,10 +57,6 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 // ─────────────────────────────────────────────
 const GOOGLE_STATIC_MAP = 'https://maps.googleapis.com/maps/api/staticmap';
 const GOOGLE_GEOCODE = 'https://maps.googleapis.com/maps/api/geocode/json';
-const ANTHROPIC_API = 'https://api.anthropic.com/v1/messages';
-const OPENAI_RESPONSES_API = 'https://api.openai.com/v1/responses';
-const OPENAI_VISION_MODEL = process.env.OPENAI_VISION_MODEL || process.env.OPENAI_MODEL || 'gpt-5-mini';
-const GEMINI_VISION_MODEL = process.env.GEMINI_VISION_MODEL || MODELS.GEMINI_VISION_BEST;
 const DEFAULT_LOOKUP_TOTAL_BUDGET_MS = 60000;
 const DEFAULT_LOOKUP_RESPONSE_MARGIN_MS = 2500;
 const DEFAULT_STORIES_MIN_REMAINING_MS = 12000;
@@ -484,6 +482,7 @@ async function performPropertyLookupCore(address, options = {}) {
       timestamp: new Date(t0).toISOString(),
       lookupMs: 0,
       cache: options.refresh ? 'refresh' : 'miss',
+      providerStatus: buildProviderStatus(),
     }
   };
 
@@ -734,141 +733,68 @@ async function performPropertyLookupCore(address, options = {}) {
     result.errors.push({ source: 'satellite', message: err.message });
   }
 
-  // ── STEP 3: Trio AI Vision Analysis (Claude + OpenAI + Gemini) ──
+  // ── STEP 3: Gemini vision, with Sol only on a failed/invalid read ──
   const visionBudgetMs = Math.max(0, remainingLookupMs(t0, timing) - timing.responseMarginMs);
-  const visionTimeoutMs = options.prioritizeAccuracy
-    ? timing.visionProviderTimeoutMs
-    : Math.min(timing.visionProviderTimeoutMs, visionBudgetMs);
   if (result.satellite?._closeB64 && result.satellite?._wideB64
       && (options.prioritizeAccuracy || visionBudgetMs >= timing.visionMinRemainingMs)) {
     const visionContext = buildVisionContext(result.satellite, result.propertyRecord?._parcel);
-    const [claudeResult, openaiResult, geminiResult] = await Promise.allSettled([
-      // Claude Vision
-      (async () => {
-        if (!process.env.ANTHROPIC_API_KEY) {
-          console.log('[CLAUDE DEBUG] ANTHROPIC_API_KEY not set — skipping');
-          return null;
-        }
-        if (!result.satellite?._closeB64) {
-          console.log('[CLAUDE DEBUG] No close satellite image — skipping');
-          return null;
-        }
-        try {
-          console.log('[CLAUDE DEBUG] Starting Claude vision analysis...');
-          const claudeAnalysis = await analyzeWithClaude(
-            result.satellite._closeB64,
-            result.satellite._wideB64 || result.satellite._closeB64,
-            result.propertyRecord,
-            address,
-            result.satellite._superCloseB64,
-            result.satellite._ultraCloseB64,
-            result.satellite._microCloseB64,
-            visionTimeoutMs,
-            visionContext
-          );
-          console.log(`[CLAUDE DEBUG] Success! Confidence: ${claudeAnalysis?.confidenceScore || 'N/A'}%`);
-          return claudeAnalysis;
-        } catch (err) {
-          const timeoutLike = /timed out|timeout|abort/i.test(`${err.name || ''} ${err.message || ''}`);
-          const log = timeoutLike ? console.warn : console.error;
-          log.call(console, `[CLAUDE DEBUG] FAILED: ${err.message}`);
-          throw err;
-        }
-      })(),
-      // OpenAI Vision
-      (async () => {
-        if (!process.env.OPENAI_API_KEY) {
-          console.log('[OPENAI DEBUG] OPENAI_API_KEY not set — skipping');
-          return null;
-        }
-        try {
-          console.log('[OPENAI DEBUG] Starting OpenAI vision analysis...');
-          const openaiAnalysis = await analyzeWithOpenAI(
-            [
-              result.satellite?._microCloseB64,
-              result.satellite?._ultraCloseB64,
-              result.satellite?._superCloseB64,
-              result.satellite?._closeB64,
-              result.satellite?._wideB64,
-            ].filter(Boolean),
-            result.propertyRecord,
-            address,
-            visionTimeoutMs,
-            visionContext
-          );
-          console.log(`[OPENAI DEBUG] Success! Confidence: ${openaiAnalysis?.confidenceScore || 'N/A'}%`);
-          return openaiAnalysis;
-        } catch (openaiErr) {
-          const timeoutLike = /timed out|timeout|abort/i.test(`${openaiErr.name || ''} ${openaiErr.message || ''}`);
-          const log = timeoutLike ? console.warn : console.error;
-          log.call(console, `[OPENAI DEBUG] FAILED: ${openaiErr.message}`);
-          throw openaiErr;
-        }
-      })(),
-      // Gemini Vision
-      (async () => {
-        const geminiKey = process.env.GEMINI_API_KEY;
-        console.log(`[GEMINI DEBUG] Key exists: ${!!geminiKey}`);
-        if (!geminiKey) {
-          console.log('[GEMINI DEBUG] GEMINI_API_KEY not set — skipping');
-          return null;
-        }
-        try {
-          console.log('[GEMINI DEBUG] Starting Gemini vision analysis...');
-          const geminiAnalysis = await analyzeWithGemini(
-            [
-              result.satellite?._microCloseB64,
-              result.satellite?._ultraCloseB64,
-              result.satellite?._superCloseB64,
-              result.satellite?._closeB64,
-              result.satellite?._wideB64,
-            ].filter(Boolean),
-            result.propertyRecord,
-            address,
-            geminiKey,
-            visionTimeoutMs,
-            visionContext
-          );
-          console.log(`[GEMINI DEBUG] Success! Confidence: ${geminiAnalysis?.confidenceScore || 'N/A'}%`);
-          return geminiAnalysis;
-        } catch (gemErr) {
-          const timeoutLike = /timed out|timeout|abort/i.test(`${gemErr.name || ''} ${gemErr.message || ''}`);
-          const log = timeoutLike ? console.warn : console.error;
-          log.call(console, `[GEMINI DEBUG] FAILED: ${gemErr.message}`);
-          throw gemErr;
-        }
-      })(),
-    ]);
-
-    const claude = claudeResult.status === 'fulfilled' ? claudeResult.value : null;
-    const openai = openaiResult.status === 'fulfilled' ? openaiResult.value : null;
-    const gemini = geminiResult.status === 'fulfilled' ? geminiResult.value : null;
-
-    if (claudeResult.status === 'rejected') {
-      result.errors.push({ source: 'claude', message: claudeResult.reason?.message || 'Claude analysis failed' });
-    }
-    if (openaiResult.status === 'rejected') {
-      result.errors.push({ source: 'openai', message: openaiResult.reason?.message || 'OpenAI analysis failed' });
-    }
-    if (geminiResult.status === 'rejected') {
-      result.errors.push({ source: 'gemini', message: geminiResult.reason?.message || 'Gemini analysis failed' });
+    const images = [
+      result.satellite._microCloseB64,
+      result.satellite._ultraCloseB64,
+      result.satellite._superCloseB64,
+      result.satellite._closeB64,
+      result.satellite._wideB64,
+    ].filter(Boolean).map((data) => ({ data, mimeType: 'image/png' }));
+    const policy = MODELS.TEXT_POLICIES.estimateVision;
+    // Keep the lookup's response deadline and the existing per-provider cap.
+    // Reserve half the available time for Sol so a stalled Gemini request
+    // cannot spend the whole budget before its fallback starts.
+    const chainBudgetMs = options.prioritizeAccuracy
+      ? timing.visionProviderTimeoutMs * 2
+      : Math.min(visionBudgetMs, timing.visionProviderTimeoutMs * 2);
+    const outcome = await dispatchWithFallback(policy, {
+      text: buildSatelliteVisionPrompt(address, result.propertyRecord, visionContext),
+      images,
+      jsonMode: true,
+      maxTokens: 4096,
+      thinkingLevel: 'LOW',
+      timeoutMs: chainBudgetMs,
+      laneId: 'property_v2_vision',
+    }, {
+      reserveFallbackBudget: true,
+      maxAttemptMs: timing.visionProviderTimeoutMs,
+      validate: (candidate) => {
+        candidate.json = normalizeSatelliteAnalysis(candidate.json);
+        return isValidSatelliteVisionAnalysis(candidate.json) ? null : 'invalid_schema';
+      },
+    });
+    const configured = {
+      gemini: !!(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY),
+      openai: !!process.env.OPENAI_API_KEY,
+    };
+    for (const failure of outcome.failures || []) {
+      if (failure.reason === 'timeout_budget_exhausted') continue;
+      result.meta.providerStatus.satelliteVision[failure.provider] = {
+        configured: configured[failure.provider], available: false,
+      };
+      result.errors.push({
+        source: failure.provider,
+        message: `Satellite vision analysis failed: ${failure.reason}`,
+      });
     }
 
-    const analyses = [
-      claude ? { provider: 'claude', analysis: claude } : null,
-      openai ? { provider: 'openai', analysis: openai } : null,
-      gemini ? { provider: 'gemini', analysis: gemini } : null,
-    ].filter(Boolean);
-
-    if (analyses.length) {
-      result.aiAnalysis = mergeAiAnalyses(analyses);
+    if (outcome.ok) {
+      result.meta.providerStatus.satelliteVision[outcome.provider] = {
+        configured: configured[outcome.provider], available: true,
+      };
+      result.aiAnalysis = mergeAiAnalyses([{ provider: outcome.provider, analysis: outcome.json }]);
       // Reclassify a weak record from the satellite attachment read BEFORE the
       // turf cap: applyParcelTurfBound skips townhome/condo, so doing this first
       // keeps an attached unit's turf from being clamped to its small parcel and
       // underpriced (the cached aiAnalysis is then saved already-correct).
       applySatelliteAttachmentType(result.propertyRecord, result.aiAnalysis);
       applyParcelTurfBound(result.aiAnalysis, result.propertyRecord);
-      logger.info('[property-lookup] Trio AI analysis complete', {
+      logger.info('[property-lookup] Satellite AI analysis complete', {
         sources: result.aiAnalysis._sources,
         confidence: result.aiAnalysis.confidenceScore,
       });
@@ -1085,7 +1011,7 @@ router.post('/property-lookup', async (req, res) => {
     // The estimator needs the evidence to price the property. A slow record
     // search must not skip vision/stories; each provider still has a timeout.
     const result = await performPropertyLookup(address, { refresh: refresh === true, prioritizeAccuracy: true });
-    result.meta.providerStatus = buildProviderStatus();
+    result.meta.providerStatus ||= buildProviderStatus();
     res.json(result);
   } catch (err) {
     logger.error(`[property-lookup] ${err.message}`);
@@ -1350,194 +1276,6 @@ async function fetchImageAsBase64(url, timeoutMs = DEFAULT_IMAGE_TIMEOUT_MS) {
     throw err;
   } finally {
     timeout.clear();
-  }
-}
-
-
-// ─────────────────────────────────────────────
-// CLAUDE VISION ANALYSIS
-// ─────────────────────────────────────────────
-async function analyzeWithClaude(closeB64, wideB64, propertyRecord, address, superCloseB64, ultraCloseB64, microCloseB64, timeoutMs = DEFAULT_VISION_PROVIDER_TIMEOUT_MS, visionContext = null) {
-  const rcContext = propertyRecord ? `
-Property record for this address:
-- Address: ${propertyRecord.formattedAddress}
-- Type: ${propertyRecord.propertyType}
-- Sq Ft: ${propertyRecord.squareFootage}
-- Lot: ${propertyRecord.lotSize} sf
-- Year Built: ${propertyRecord.yearBuilt || 'unknown'}
-- Stories: ${propertyRecord.stories}
-- Pool (per records): ${poolRecordContext(propertyRecord)}
-- Construction: ${propertyRecord.constructionMaterial}
-- Foundation: ${propertyRecord.foundationType}
-- Roof: ${propertyRecord.roofType}
-- HOA Fee: ${propertyRecord.hoaFee ? '$' + propertyRecord.hoaFee + '/mo' : 'None/unknown'}
-` : `No public property record available for this property.`;
-
-  const systemPrompt = `You are a property analysis AI for Waves Pest Control, a pest control and lawn care company in Southwest Florida. You analyze satellite imagery to extract property features that affect pest control, lawn care, tree/shrub care, mosquito control, and termite treatment pricing.
-
-You will receive up to five satellite images (closer views carry MORE weight for feature detection):
-1. MICRO CLOSE VIEW (zoom 22) — HIGHEST PRIORITY when usable — closest property detail.
-2. ULTRA CLOSE VIEW (zoom 21) — shows pool cages, screen enclosures, lanai details, driveway width, individual plants.
-3. SUPER CLOSE VIEW (zoom 20) — shows fine detail: roof material, driveway surface, landscape beds.
-4. CLOSE VIEW (zoom 19) — shows the full property lot boundaries and structure.
-5. WIDE VIEW (zoom 18) — shows the neighborhood, water features, surrounding lots.
-
-You also receive public property record data for cross-reference.
-
-IMPORTANT RULES:
-- POOL DETECTION (SWFL-specific): Pool cages/screen enclosures are EXTREMELY common in Southwest Florida. They appear as rectangular screened structures attached to the back of the home, often covering both a pool and a lanai/patio. Look for: rectangular screen enclosure (lighter gray mesh visible from above), blue water visible through the screen, or a solid lanai roof extending from the main roof. If you see ANY screen enclosure attached to the home, mark poolCage=YES. Even small ones count. If public records say pool=NO but you clearly see a pool cage or blue water, override records because county/listing data can be outdated.
-- POOL CAGE SIZE: classify the visible screen enclosure service burden. SMALL is a compact lanai/cage under roughly 300 sq ft, MEDIUM is typical 300-600 sq ft, LARGE is roughly 600-900 sq ft or clearly longer/wider than a standard cage, OVERSIZED is a very large enclosure or complex cage with multiple sections. If poolCage is not YES, return NONE.
-- DRIVEWAY: "largeDriveway" means the driveway is wider than a standard 2-car width (~20ft) OR extends significantly along the side of the home OR has a circular/turnaround area. Standard SWFL driveways are 2-car width going straight to the garage — that is NOT large. Only mark YES if it's notably oversized.
-- For construction material: if the property record already identified it, confirm or note disagreement. If unknown, infer from satellite (CBS=stucco appearance, wood frame=siding visible, etc.)
-- For foundation: SWFL default is slab-on-grade. Only flag raised/crawlspace if clearly visible (house elevated, visible piers/stilts, lattice skirting).
-- STRUCTURE ATTACHMENT (drives townhome/condo vs single-family pricing): look at the roofline and the neighbors. A free-standing home with gaps to both neighbors is DETACHED. A unit at the end of a continuous shared roofline / row of identical units is ATTACHED_END (one party wall). A unit boxed in between two others in that row is ATTACHED_INTERIOR (two party walls, often no side yard). Floors stacked with separate ground-level entries (an apartment/condo building) are STACKED. New master-planned SWFL communities mix detached homes with attached villas/townhomes on the same street — judge THIS structure, not the community. If you genuinely cannot tell, return UNKNOWN rather than guessing DETACHED.
-- Estimate impervious surface as a percentage of the total lot, not just what you see — account for areas under the roof line too.
-- Be aggressive about detecting features — it's better to flag "POSSIBLE" than to miss something. Pest control pricing depends on accurate property assessment.
-
-Respond ONLY with a JSON object. No markdown, no explanation, no backticks.`;
-
-  const userPrompt = `Analyze these two satellite images of a property at: ${address}
-
-${rcContext}${visionContextPromptBlock(visionContext)}
-
-Return a JSON object with exactly these fields:
-
-{
-  "propertyUse": "RESIDENTIAL" | "COMMERCIAL" | "MIXED" | "UNKNOWN",
-  "commercialUseType": "OFFICE_RETAIL" | "WAREHOUSE_LIGHT" | "RESTAURANT_FOOD_SERVICE" | "MEDICAL_OFFICE" | "INDUSTRIAL" | "SCHOOL_DAYCARE" | "GOVERNMENT_MUNICIPAL" | "HOA_COMMON_AREA" | "MULTIFAMILY_COMMON_AREA" | "OTHER" | "NONE",
-
-  "structureAttachment": "DETACHED" | "ATTACHED_END" | "ATTACHED_INTERIOR" | "STACKED" | "UNKNOWN",
-  "sharedWallCount": number (0 for a free-standing home, 1 for an end unit, 2 for an interior row unit),
-  "structureAttachmentNotes": "string — what tells you it's attached/detached: continuous shared roofline, party walls, a row of identical units, stacked floors with separate entries",
-
-  "pool": "YES" | "NO" | "POSSIBLE",
-  "poolCage": "YES" | "NO" | "POSSIBLE",
-  "poolCageSize": "NONE" | "SMALL" | "MEDIUM" | "LARGE" | "OVERSIZED",
-  "poolNotes": "string — any relevant detail about pool/lanai/cage",
-
-  "largeDriveway": "YES" | "NO",
-  "drivewaySurfaceType": "CONCRETE" | "PAVER" | "ASPHALT" | "GRAVEL" | "UNKNOWN",
-
-  "fenceType": "NONE" | "PRIVACY_WOOD" | "PRIVACY_VINYL" | "CHAIN_LINK" | "ALUMINUM" | "PARTIAL" | "UNKNOWN",
-  "fenceNotes": "string — what sides fenced, condition",
-
-  "roofMaterial": "TILE" | "SHINGLE" | "METAL" | "FLAT" | "UNKNOWN",
-  "roofNotes": "string — color, condition visible from above",
-
-  "constructionVisible": "CBS" | "WOOD_FRAME" | "METAL" | "BRICK" | "UNKNOWN",
-
-  "shrubDensity": "LIGHT" | "MODERATE" | "HEAVY",
-  "treeDensity": "LIGHT" | "MODERATE" | "HEAVY",
-  "landscapeComplexity": "SIMPLE" | "MODERATE" | "COMPLEX",
-
-  "estimatedPalmCount": number,
-  "estimatedTreeCount": number,
-  "estimatedBedAreaSf": number,
-
-  "turfCondition": "GOOD" | "FAIR" | "POOR" | "UNKNOWN",
-  "possibleGrassType": "ST_AUGUSTINE" | "BERMUDA" | "BAHIA" | "ZOYSIA" | "MIXED" | "UNKNOWN",
-  "shadeCoveragePercent": number (0-100, percentage of turf under tree canopy),
-
-  "imperviousSurfacePercent": number (0-100, percentage of lot that is hardscape/concrete/roof/paved),
-  "estimatedTurfSf": number (estimated treatable turf area in sq ft — GRASS ONLY: exclude driveways/walkways/patios, mulch/rock beds, water, and the ENTIRE footprint of any screened pool enclosure/cage — nothing under a cage is treatable lawn),
-
-  "mulchBeds": "YES" | "NO" | "UNKNOWN",
-  "rockBeds": "YES" | "NO" | "UNKNOWN",
-  "bedMaterial": "MULCH" | "ROCK" | "MIXED" | "BARE" | "UNKNOWN",
-
-  "irrigationVisible": "YES" | "NO" | "UNKNOWN",
-
-  "nearWater": "NONE" | "CANAL_ADJACENT" | "POND_ON_PROPERTY" | "RETENTION_NEARBY" | "LAKE_ADJACENT" | "WETLAND_ADJACENT",
-  "waterDistance": "ON_PROPERTY" | "ADJACENT" | "WITHIN_200FT" | "WITHIN_500FT" | "NONE",
-
-  "woodedAdjacency": "NONE" | "PARTIAL" | "HEAVY",
-  "woodedNotes": "string — which sides back to wooded/undeveloped land",
-
-  "outbuildingCount": number (sheds, detached garages, pool houses — NOT the main structure),
-  "outbuildingNotes": "string",
-
-  "maintenanceCondition": "WELL_MAINTAINED" | "AVERAGE" | "DEFERRED" | "UNKNOWN",
-  "maintenanceNotes": "string — visible issues: overgrown vegetation, debris, roof staining, etc.",
-
-  "vegetationOnStructure": "NONE" | "MINOR" | "SIGNIFICANT",
-  "vegetationNotes": "string — vines, trees touching roof, branches overhanging",
-
-  "overallPestPressureEstimate": "LOW" | "MODERATE" | "HIGH" | "VERY_HIGH",
-  "pestPressureFactors": ["string array of factors contributing to pest pressure"],
-
-  "confidenceScore": number (0-100, how confident you are in the overall analysis),
-  "analysisNotes": "string — any caveats, things you couldn't determine, or recommendations for field verification"
-}`;
-
-  const timeout = createFetchTimeout(timeoutMs);
-  let data;
-  try {
-    const resp = await fetch(ANTHROPIC_API, {
-      method: 'POST',
-      signal: timeout.signal,
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': process.env.ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01'
-      },
-      body: JSON.stringify({
-        model: MODELS.FLAGSHIP,
-        max_tokens: 4096,
-        messages: [{
-          role: 'user',
-          content: [
-            ...(microCloseB64 ? [{
-              type: 'image',
-              source: { type: 'base64', media_type: 'image/png', data: microCloseB64 }
-            }] : []),
-            ...(ultraCloseB64 ? [{
-              type: 'image',
-              source: { type: 'base64', media_type: 'image/png', data: ultraCloseB64 }
-            }] : []),
-            ...(superCloseB64 ? [{
-              type: 'image',
-              source: { type: 'base64', media_type: 'image/png', data: superCloseB64 }
-            }] : []),
-            {
-              type: 'image',
-              source: { type: 'base64', media_type: 'image/png', data: closeB64 }
-            },
-            {
-              type: 'image',
-              source: { type: 'base64', media_type: 'image/png', data: wideB64 }
-            },
-            { type: 'text', text: userPrompt }
-          ]
-        }],
-        system: systemPrompt
-      })
-    });
-
-    if (!resp.ok) {
-      const errText = await resp.text();
-      throw new Error(`Claude API ${resp.status}: ${errText.substring(0, 200)}`);
-    }
-
-    data = await resp.json();
-  } catch (err) {
-    if (isTimeoutFailure(err, timeout)) throw timeoutError('Claude vision analysis', timeoutMs);
-    throw err;
-  } finally {
-    timeout.clear();
-  }
-  console.log(`[CLAUDE VISION DEBUG] stop_reason: ${data.stop_reason}, usage: ${JSON.stringify(data.usage || {})}`);
-  const text = data.content
-    .filter(b => b.type === 'text')
-    .map(b => b.text)
-    .join('');
-
-  // Parse JSON — strip any markdown fences if present
-  const clean = text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
-  try {
-    return JSON.parse(clean);
-  } catch (e) {
-    console.error(`[CLAUDE VISION DEBUG] JSON.parse failed: ${e.message}. Response tail: ${clean.slice(-200)}`);
-    throw e;
   }
 }
 
@@ -2602,11 +2340,9 @@ function buildProviderStatus() {
       openai: !!process.env.OPENAI_API_KEY,
       gemini: !!process.env.GEMINI_API_KEY,
     },
-    satelliteVision: {
-      claude: !!process.env.ANTHROPIC_API_KEY,
-      openai: !!process.env.OPENAI_API_KEY,
-      gemini: !!process.env.GEMINI_API_KEY,
-    },
+    // Populated only when an image provider is attempted. A fallback that
+    // wasn't needed must not become a "ChatGPT skipped" warning in the UI.
+    satelliteVision: {},
     maps: !!(process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_API_KEY),
   };
 }
@@ -4153,7 +3889,15 @@ function countyCeilingStillValid(p, { homeSqFt, lotSqFt, stories }) {
 // INP-001..005). A present-but-malformed value is REJECTED at the API
 // boundary — never silently dropped, defaulted, or clamped into a confident
 // price; an absent value stays absent so the pricer's own fallbacks run.
-const TREE_SHRUB_TIERS = new Set(['light', 'standard', 'enhanced']);
+// 'light' (4x/quarterly) is retired for NEW quotes (owner directive
+// 2026-09-24: "remove quarterly tree and shrub care from the estimates and
+// services") — dropped from this builder input's accepted values, same
+// treatment as a genuinely unknown tier. The one grandfathered quarterly
+// customer's existing plan is unaffected: this validates a NEW property
+// lookup / estimate build, never a replay of their stored engine inputs.
+// Shared chokepoint (codex P1 round 2 pre-push): isSellableTreeShrubTier
+// (pricing-engine/retired-sale-catalog.js), never a locally hand-rolled
+// tier set — the next tier retirement is one edit there, not one per file.
 const TREE_SHRUB_ACCESS = new Set(['easy', 'moderate', 'difficult']);
 function treeShrubInputError(message) {
   const err = new Error(message);
@@ -4431,7 +4175,7 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     const enumInput = (value, fallback) => (isBlankInput(value) ? fallback
       : (typeof value === 'string' ? value.trim().toLowerCase() : value));
     const tsTier = enumInput(o.treeShrubTier, 'standard');
-    if (!TREE_SHRUB_TIERS.has(tsTier)) throw treeShrubInputError('Tree & Shrub program must be light, standard, or enhanced.');
+    if (!isSellableTreeShrubTier(tsTier)) throw treeShrubInputError('Tree & Shrub program must be standard or enhanced.');
     const tsAccess = enumInput(o.treeShrubAccess, 'easy');
     if (!TREE_SHRUB_ACCESS.has(tsAccess)) throw treeShrubInputError('Tree & Shrub access must be easy, moderate, or difficult.');
     // Palms: the same resolution the property block uses below — the
@@ -5059,123 +4803,6 @@ router.post('/calculate-estimate', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────
-// OPENAI VISION ANALYSIS
-// ─────────────────────────────────────────────
-async function analyzeWithOpenAI(imageB64s, propertyRecord, address, timeoutMs = DEFAULT_VISION_PROVIDER_TIMEOUT_MS, visionContext = null) {
-  const content = [
-    { type: 'input_text', text: buildSatelliteVisionPrompt(address, propertyRecord, visionContext) },
-    ...imageB64s.map((imageB64) => ({
-      type: 'input_image',
-      image_url: `data:image/png;base64,${imageB64}`,
-      detail: 'high',
-    })),
-  ];
-
-  const timeout = createFetchTimeout(timeoutMs);
-  let data;
-  try {
-    const resp = await fetch(OPENAI_RESPONSES_API, {
-      method: 'POST',
-      signal: timeout.signal,
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model: OPENAI_VISION_MODEL,
-        input: [{ role: 'user', content }],
-      }),
-    });
-
-    if (!resp.ok) {
-      const errText = await resp.text();
-      throw new Error(`OpenAI API ${resp.status}: ${errText.substring(0, 200)}`);
-    }
-
-    data = await resp.json();
-  } catch (err) {
-    if (isTimeoutFailure(err, timeout)) throw timeoutError('OpenAI vision analysis', timeoutMs);
-    throw err;
-  } finally {
-    timeout.clear();
-  }
-  const text = extractOpenAIText(data);
-  if (!text) throw new Error('OpenAI returned empty response');
-  const clean = text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
-  const jsonMatch = clean.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) throw new Error('OpenAI returned no valid JSON');
-  return JSON.parse(jsonMatch[0]);
-}
-
-// ─────────────────────────────────────────────
-// GEMINI VISION ANALYSIS
-// ─────────────────────────────────────────────
-async function analyzeWithGemini(imageB64s, propertyRecord, address, apiKey, timeoutMs = DEFAULT_VISION_PROVIDER_TIMEOUT_MS, visionContext = null) {
-  const prompt = buildSatelliteVisionPrompt(address, propertyRecord, visionContext);
-
-  const timeout = createFetchTimeout(timeoutMs);
-  let data;
-  try {
-    const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_VISION_MODEL}:generateContent?key=${apiKey}`, {
-      method: 'POST',
-      signal: timeout.signal,
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{
-          parts: [
-            ...imageB64s.map((imageB64) => ({ inlineData: { mimeType: 'image/png', data: imageB64 } })),
-            { text: prompt },
-          ],
-        }],
-        generationConfig: {
-          temperature: 0.2,
-          maxOutputTokens: 4096,
-          responseMimeType: 'application/json',
-          thinkingConfig: { thinkingBudget: 0 },
-        },
-      }),
-    });
-
-    if (!resp.ok) {
-      const errText = await resp.text();
-      throw new Error(`Gemini API ${resp.status}: ${errText.substring(0, 200)}`);
-    }
-
-    data = await resp.json();
-  } catch (err) {
-    if (isTimeoutFailure(err, timeout)) throw timeoutError('Gemini vision analysis', timeoutMs);
-    throw err;
-  } finally {
-    timeout.clear();
-  }
-  console.log(`[GEMINI DEBUG] finishReason: ${data.candidates?.[0]?.finishReason}, usage: ${JSON.stringify(data.usageMetadata || {})}`);
-  // Gemini 2.5+ may return multiple parts (thinking + response)
-  const parts = data.candidates?.[0]?.content?.parts || [];
-  let text = '';
-  for (const part of parts) {
-    // Skip thought parts, only use text output parts
-    if (part.thought) continue;
-    if (part.text) text += part.text;
-  }
-  // If no non-thought text, try all parts
-  if (!text) {
-    for (const part of parts) {
-      if (part.text) text += part.text;
-    }
-  }
-  console.log(`[GEMINI DEBUG] Response text (first 200): ${(text || '').substring(0, 200)}`);
-  if (!text) throw new Error('Gemini returned empty response');
-  // Try direct parse first (responseMimeType: application/json)
-  try { return JSON.parse(text); } catch (e) {
-    console.log(`[GEMINI DEBUG] Direct JSON.parse failed: ${e.message}`);
-  }
-  // Fallback: extract JSON from text
-  const jsonMatch = text.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) throw new Error('Gemini returned no valid JSON');
-  return JSON.parse(jsonMatch[0]);
-}
-
-// ─────────────────────────────────────────────
 // MERGE AI ANALYSES
 // ─────────────────────────────────────────────
 function mergeAiAnalyses(providerResults) {
@@ -5362,6 +4989,32 @@ function mergeAiAnalyses(providerResults) {
   return merged;
 }
 
+// Required measurements and pricing inputs from the prompt. A JSON object
+// without these fields is a failed read, not evidence of zero service area.
+function isValidSatelliteVisionAnalysis(analysis) {
+  if (!analysis || typeof analysis !== 'object' || Array.isArray(analysis)) return false;
+  for (const field of ['estimatedTurfSf', 'estimatedBedAreaSf', 'estimatedPalmCount', 'estimatedTreeCount', 'sharedWallCount', 'outbuildingCount']) {
+    if (!Number.isFinite(analysis[field]) || analysis[field] < 0) return false;
+  }
+  for (const field of ['confidenceScore', 'imperviousSurfacePercent', 'shadeCoveragePercent']) {
+    if (!Number.isFinite(analysis[field]) || analysis[field] < 0 || analysis[field] > 100) return false;
+  }
+  const enums = {
+    propertyUse: ['RESIDENTIAL', 'COMMERCIAL', 'MIXED', 'UNKNOWN'],
+    structureAttachment: ['DETACHED', 'ATTACHED_END', 'ATTACHED_INTERIOR', 'STACKED', 'UNKNOWN'],
+    pool: ['YES', 'NO', 'POSSIBLE'],
+    poolCage: ['YES', 'NO', 'POSSIBLE'],
+    poolCageSize: ['NONE', 'SMALL', 'MEDIUM', 'LARGE', 'OVERSIZED'],
+    largeDriveway: ['YES', 'NO'],
+    shrubDensity: ['LIGHT', 'MODERATE', 'HEAVY'],
+    treeDensity: ['LIGHT', 'MODERATE', 'HEAVY'],
+    landscapeComplexity: ['SIMPLE', 'MODERATE', 'COMPLEX'],
+    nearWater: ['NONE', 'CANAL_ADJACENT', 'POND_ON_PROPERTY', 'RETENTION_NEARBY', 'LAKE_ADJACENT', 'WETLAND_ADJACENT'],
+    overallPestPressureEstimate: ['LOW', 'MODERATE', 'HIGH', 'VERY_HIGH'],
+  };
+  return Object.entries(enums).every(([field, values]) => values.includes(analysis[field]));
+}
+
 function normalizeSatelliteAnalysis(analysis = {}) {
   const normalized = { ...analysis };
   if (normalized.imperviousSurfacePercent == null && normalized.imperviosSurfacePercent != null) {
@@ -5369,6 +5022,14 @@ function normalizeSatelliteAnalysis(analysis = {}) {
   }
   if (normalized.imperviosSurfacePercent == null && normalized.imperviousSurfacePercent != null) {
     normalized.imperviosSurfacePercent = normalized.imperviousSurfacePercent;
+  }
+  // Models sometimes quote measurements. Accept finite numeric strings,
+  // while leaving blanks, nulls and booleans for the validator to reject.
+  for (const field of ['estimatedTurfSf', 'estimatedBedAreaSf', 'estimatedPalmCount', 'estimatedTreeCount', 'sharedWallCount', 'outbuildingCount', 'confidenceScore', 'imperviousSurfacePercent', 'imperviosSurfacePercent', 'shadeCoveragePercent']) {
+    const value = normalized[field];
+    if (typeof value === 'string' && value.trim() && Number.isFinite(Number(value))) {
+      normalized[field] = Number(value);
+    }
   }
   if (!normalized.waterProximity && normalized.nearWater) normalized.waterProximity = normalized.nearWater;
   if (!normalized.nearWater && normalized.waterProximity) normalized.nearWater = normalized.waterProximity;
@@ -5435,18 +5096,6 @@ Return ONLY valid JSON with these fields:
   "confidenceScore": number,
   "analysisNotes": "string"
 }`;
-}
-
-function extractOpenAIText(data) {
-  if (typeof data?.output_text === 'string') return data.output_text;
-  const parts = [];
-  for (const item of data?.output || []) {
-    for (const content of item?.content || []) {
-      if (content?.type === 'output_text' && content.text) parts.push(content.text);
-      if (content?.type === 'text' && content.text) parts.push(content.text);
-    }
-  }
-  return parts.join('');
 }
 
 module.exports = router;

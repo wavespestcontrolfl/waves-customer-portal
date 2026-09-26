@@ -106,3 +106,35 @@ describe('MobileAppointmentDetailSheet completion routing', () => {
     cleanup();
   });
 });
+
+describe('MobileAppointmentDetailSheet consultation outcome', () => {
+  it('offers Consultation outcome on a Waves Assessment and opens the sheet with its saved read', async () => {
+    const fetchMock = vi.fn(async (url) => ({
+      ok: true,
+      json: async () => (String(url).includes('/consultations/')
+        ? { outcome: { outcome: 'cold', interests: [], follow_up_at: null } }
+        : {}),
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      render(
+        <MobileAppointmentDetailSheet
+          service={{ ...baseService, serviceType: 'Waves Assessment', status: 'completed' }}
+          onClose={() => {}}
+        />,
+      );
+      fireEvent.click(screen.getByText('Consultation outcome'));
+      await waitFor(() => expect(screen.getByRole('radio', { name: 'Cold' }).getAttribute('aria-checked')).toBe('true'));
+      expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/admin/consultations/55/outcome'))).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+      cleanup();
+    }
+  });
+
+  it('does not offer it on other services', () => {
+    renderSheet('confirmed');
+    expect(screen.queryByText('Consultation outcome')).toBeNull();
+    cleanup();
+  });
+});

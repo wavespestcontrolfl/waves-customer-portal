@@ -2137,6 +2137,10 @@ const gates = {
   // Explicit opt-in in every environment.
   routeReorderRepair: gateEnvValue('GATE_ROUTE_REORDER_REPAIR'),
 
+  // Durable primary-address review and staff-verified pins. Explicit opt-in;
+  // an existing verified pin stays protected after the UI is disabled.
+  geocodeReview: gateEnvValue('GATE_GEOCODE_REVIEW'),
+
   // Nightly reorder pass only: on an unfrozen tech-day whose stored
   // route_order is incomplete (a null or a duplicate position), write any
   // strictly shorter promise-safe order instead of requiring the 805 m floor.
@@ -2833,6 +2837,16 @@ const gates = {
   // off unless exactly 'true'. Read live per call by
   // cancelReseedsRecurringLive(); this entry is for logGateStatus only.
   cancelReseedsRecurring: process.env.GATE_CANCEL_RESEEDS_RECURRING === 'true',
+  // Public estimate-page consultation offer ("Want us to come look first?",
+  // consultation-first lane, owner ruling 2026-09-23): the same
+  // /inspection/:token self-booking link the recurring-lead email offers,
+  // surfaced on the estimate view too for a strongly-linked recurring-intent
+  // lead. Ships DARK: off unless exactly 'true', and requires
+  // GATE_LEAD_INSPECTION_LINK on as well (the offer builder checks both).
+  // This entry is for logGateStatus only — the canonical CALL-TIME reader is
+  // estimateConsultationOfferLive() below, same leadInspectionLinkLive()
+  // convention.
+  estimateConsultationOffer: process.env.GATE_ESTIMATE_CONSULTATION_OFFER === 'true',
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks
@@ -2896,6 +2910,16 @@ function leadInspectionLinkLive() {
   return process.env.GATE_LEAD_INSPECTION_LINK === 'true';
 }
 
+// GATE_ESTIMATE_CONSULTATION_OFFER read at CALL time — strict `=== 'true'`,
+// same convention as leadInspectionLinkLive(). The `estimateConsultationOffer`
+// gates-map entry above is for logGateStatus only; this is the one canonical
+// reader server/services/estimate-consultation-offer.js uses. The offer
+// additionally requires leadInspectionLinkLive() (the /inspection/:token page
+// itself must be live too) — checked by the builder, not duplicated here.
+function estimateConsultationOfferLive() {
+  return process.env.GATE_ESTIMATE_CONSULTATION_OFFER === 'true';
+}
+
 // Self-booking day cap (owner ruling 2026-09-23) — the canonical reader
 // every day-cap call site uses (routes/booking.js buildBookingAvailability
 // + createSelfBooking, services/availability.js getAvailableSlots +
@@ -2955,5 +2979,5 @@ function logGateStatus() {
   }
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, customerIntelAiLive, selfBookDayCapEnabled, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, customerIntelAiLive, selfBookDayCapEnabled, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive };
 // gates 1775330914

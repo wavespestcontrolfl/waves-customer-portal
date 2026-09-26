@@ -44,7 +44,7 @@ let mockRows = [];
 let mockFirstRow = null;
 let mockRejectWith = null;
 const builders = [];
-const CHAIN_METHODS = ['where', 'whereIn', 'whereRaw', 'whereNotNull', 'select', 'orderBy', 'orderByRaw', 'limit', 'groupBy', 'count', 'max'];
+const CHAIN_METHODS = ['where', 'whereIn', 'whereNotIn', 'whereRaw', 'whereNotNull', 'select', 'orderBy', 'orderByRaw', 'limit', 'groupBy', 'count', 'max'];
 const makeBuilder = (table) => {
   const b = { table };
   CHAIN_METHODS.forEach((m) => { b[m] = jest.fn(() => b); });
@@ -185,6 +185,59 @@ describe('catalog tools', () => {
     mockFirstRow = null;
     const missing = await callTool('get_service', { service_key: 'nope' });
     expect(missing.body.result.isError).toBe(true);
+  });
+
+  // codex P1 pre-push (2026-09-24): tree_shrub_quarterly's customer_visible
+  // was RESTORED to true (20260924020010) so the grandfathered quarterly
+  // customer's tracking-page summary isn't blanked — this anonymous public
+  // catalog must keep it out through its own code-side filter instead.
+  //
+  // codex P1 ROUND 2 (2026-09-24): the round-1 filter used
+  // public-services-menu.js's FORMERLY_PUBLIC_KEYS — a much broader "left
+  // the public quote menu" set that also contains real, fully active,
+  // customer_visible, bookable services (foam_drill,
+  // termite_pretreatment, the rodent one-time keys) that simply aren't on
+  // the cold-sale quote menu. Filtering THIS catalog with that set falsely
+  // reported them as nonexistent. Use retired-sale-catalog.js's
+  // RETIRED_SALE_SERVICE_KEYS instead — a tiny, MCP-appropriate set.
+  test('list_services excludes RETIRED_SALE_SERVICE_KEYS (tree_shrub_quarterly) even though its row is customer_visible', async () => {
+    const { RETIRED_SALE_SERVICE_KEYS } = require('../services/pricing-engine/retired-sale-catalog');
+    mockRows = [{ service_key: 'tree_shrub_program', name: 'Tree & Shrub Care', category: 'tree_shrub' }];
+    const { body } = await callTool('list_services', {});
+    expect(toolResult(body).services).toHaveLength(1);
+    const b = builders.find((x) => x.table === 'services');
+    expect(b.whereNotIn).toHaveBeenCalledWith('service_key', expect.arrayContaining(['tree_shrub_quarterly']));
+    expect([...RETIRED_SALE_SERVICE_KEYS]).toEqual(['tree_shrub_quarterly']);
+  });
+
+  test('get_service short-circuits a RETIRED_SALE_SERVICE_KEYS key to not-found without querying the DB', async () => {
+    mockFirstRow = { service_key: 'tree_shrub_quarterly', name: 'Quarterly Tree & Shrub Care Service' };
+    const before = builders.length;
+    const { body } = await callTool('get_service', { service_key: 'tree_shrub_quarterly' });
+    expect(body.result.isError).toBe(true);
+    // No new 'services' query builder was created for this call.
+    expect(builders.slice(before).some((x) => x.table === 'services')).toBe(false);
+  });
+
+  test('list_services does NOT exclude foam_drill/termite_pretreatment/rodent one-time keys — they are FORMERLY_PUBLIC_KEYS (quote-menu-only), never RETIRED_SALE_SERVICE_KEYS (codex P1 round 2)', async () => {
+    const { FORMERLY_PUBLIC_KEYS } = require('../services/public-services-menu');
+    const { RETIRED_SALE_SERVICE_KEYS } = require('../services/pricing-engine/retired-sale-catalog');
+    for (const key of ['foam_drill', 'termite_pretreatment', 'rodent_trapping_exclusion']) {
+      expect(FORMERLY_PUBLIC_KEYS.has(key)).toBe(true);
+      expect(RETIRED_SALE_SERVICE_KEYS.has(key)).toBe(false);
+    }
+    mockRows = [{ service_key: 'foam_drill', name: 'Termite Foam Service', category: 'termite' }];
+    const { body } = await callTool('list_services', {});
+    expect(toolResult(body).services).toHaveLength(1);
+    expect(toolResult(body).services[0].service_key).toBe('foam_drill');
+    const b = builders.find((x) => x.table === 'services');
+    expect(b.whereNotIn).toHaveBeenCalledWith('service_key', expect.not.arrayContaining(['foam_drill']));
+  });
+
+  test('get_service still resolves foam_drill (not in RETIRED_SALE_SERVICE_KEYS)', async () => {
+    mockFirstRow = { service_key: 'foam_drill', name: 'Termite Foam Service' };
+    const { body } = await callTool('get_service', { service_key: 'foam_drill' });
+    expect(toolResult(body).name).toBe('Termite Foam Service');
   });
 
   test('get_service_areas returns active rows ordered by display_order', async () => {

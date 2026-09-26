@@ -50,6 +50,7 @@ import TechIntelligenceBar from '../../components/tech/TechIntelligenceBar';
 import GeofenceArrivalPrompt from '../../components/tech/GeofenceArrivalPrompt';
 import CreateProjectModal, { wdoFeeSeedFromVisit } from '../../components/tech/CreateProjectModal';
 import ServiceRecapModal from '../../components/ServiceRecapModal';
+import ConsultationOutcomeSheet from '../../components/ConsultationOutcomeSheet';
 import TechRecapCapture from './TechRecapCapture';
 import TechServicePhotosModal from '../../components/tech/TechServicePhotosModal';
 import TechTreatmentZoneModal from '../../components/tech/TechTreatmentZoneModal';
@@ -247,6 +248,7 @@ export default function TechHomePage({ section = 'today' }) {
   const [photoTarget, setPhotoTarget] = useState(null); // { id, customerName }
   const [zoneTarget, setZoneTarget] = useState(null); // schedule row → treatment-zone mapper open
   const [leadTarget, setLeadTarget] = useState(null);
+  const [outcomeTarget, setOutcomeTarget] = useState(null);
   const [recapService, setRecapService] = useState(null);
   const [enRouteState, setEnRouteState] = useState({ pendingId: null, message: '', isError: false });
   const [onSiteState, setOnSiteState] = useState({ pendingId: null, message: '', isError: false });
@@ -691,6 +693,7 @@ export default function TechHomePage({ section = 'today' }) {
                 onRetry={() => loadStopDetail(selectedVisit)}
                 onPhotos={(service) => setPhotoTarget({ id: service.id, customerName: service.customerName || service.customer_name || 'Customer' })}
                 onProject={openServiceReport} onZone={setZoneTarget} onLead={setLeadTarget}
+                onOutcome={setOutcomeTarget}
                 techLine={techLine} request={techRequest}
                 onBusyChange={(busy) => onStopBusyChange(selectedVisit, busy)}
               /></div>}
@@ -988,6 +991,7 @@ export default function TechHomePage({ section = 'today' }) {
                 })}
                 onZone={(s) => setZoneTarget(s)}
                 onLead={(s) => setLeadTarget(s)}
+                onOutcome={(s) => setOutcomeTarget(s)}
                 techLine={techLine}
               />
             ))}
@@ -1117,6 +1121,17 @@ export default function TechHomePage({ section = 'today' }) {
           yardMode={zoneTarget.traceCaptionKey
             ? zoneTarget.traceCaptionKey === 'yardCoverage'
             : detectServiceCategory(zoneTarget.service_type || zoneTarget.serviceType) === 'mosquito'}
+        />
+      )}
+
+      {outcomeTarget && (
+        <ConsultationOutcomeSheet
+          key={outcomeTarget.id}
+          serviceId={outcomeTarget.id}
+          customerName={outcomeTarget.customer_name || outcomeTarget.customerName || 'Customer'}
+          request={techRequest}
+          onClose={() => setOutcomeTarget(null)}
+          onSaved={() => setOutcomeTarget(null)}
         />
       )}
 
@@ -1403,7 +1418,7 @@ function TimecardSignoffCard({ techName }) {
 // name, status·window, service label + short address, exception chips
 // (access alerts / collect-needed). Tap anywhere expands the Visit Brief
 // — the per-service action buttons (the old ServiceRow's) live inside it.
-function StopRow({ stop, expanded, detail, onToggle, onBusyChange, onRetryDetail, onPhotos, onProject, onZone, onLead, techLine }) {
+function StopRow({ stop, expanded, detail, onToggle, onBusyChange, onRetryDetail, onPhotos, onProject, onZone, onLead, onOutcome, techLine }) {
   // The busy guard lives in the list's toggleStop (any header, not only
   // this row's, must leave a panel with a text or bridge in flight mounted).
   const toggle = () => onToggle();
@@ -1499,6 +1514,7 @@ function StopRow({ stop, expanded, detail, onToggle, onBusyChange, onRetryDetail
           onProject={onProject}
           onZone={onZone}
           onLead={onLead}
+          onOutcome={onOutcome}
           techLine={techLine}
           onBusyChange={onBusyChange}
           request={techRequest}

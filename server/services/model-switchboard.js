@@ -48,10 +48,8 @@ function catalogEntry(id) {
 // thinking blocks + refusals — catalog entries with requires:'deep'). `lock`
 // removes the picker entirely.
 const SELECTORS = [
-  // cap 'vision', not 'text': satellite-analyzer.js and routes/property-lookup-v2.js
-  // send image payloads through MODELS.FLAGSHIP, so a text-only pick would
-  // break those lanes after restart. Every catalogued Claude model has vision.
-  { key: 'FLAGSHIP', env: 'MODEL_FLAGSHIP', description: 'Best general reasoning (also the Claude leg of two photo lanes)', accepts: { providers: ['anthropic'], cap: 'vision' } },
+  // General reasoning callers may include images; keep a vision-capable tier.
+  { key: 'FLAGSHIP', env: 'MODEL_FLAGSHIP', description: 'Best general reasoning', accepts: { providers: ['anthropic'], cap: 'vision' } },
   { key: 'DEEP', env: 'MODEL_DEEP', description: 'Verifiers, judges, gates (via llm/deep.js)', accepts: { providers: ['anthropic'], cap: 'text', deep: true } },
   { key: 'EXTREME', env: 'MODEL_EXTREME', description: 'Explicit deep-audit opt-in; never automatic', accepts: { providers: ['anthropic'], cap: 'text', deep: true } },
   { key: 'WORKHORSE', env: 'MODEL_WORKHORSE', description: 'Drafting and content', accepts: { providers: ['anthropic'], cap: 'text' } },
@@ -66,6 +64,7 @@ const SELECTORS = [
   { key: 'OPENAI_REPORT_WRITER', env: 'MODEL_OPENAI_REPORT_WRITER', description: 'Reports + high-stakes backup (Sol)', accepts: { providers: ['openai'], cap: 'text' } },
   { key: 'OPENAI_BALANCED', env: 'MODEL_OPENAI_BALANCED', description: 'Q&A + customer-copy backup; OpenAI leg of the vision route (Terra)', accepts: { providers: ['openai'], cap: 'vision' } },
   { key: 'OPENAI_FRONTIER', env: 'MODEL_OPENAI_FRONTIER', description: 'Frontier OpenAI vision — lawn visit assessment backup leg (Astra)', accepts: { providers: ['openai'], cap: 'vision' } },
+  { key: 'OPENAI_ESTIMATE_VISION', env: 'MODEL_OPENAI_ESTIMATE_VISION', description: 'Estimate satellite/property image fallback (Sol)', accepts: { providers: ['openai'], cap: 'vision' } },
   { key: 'OPENAI_IMAGE_SCREEN', env: 'MODEL_OPENAI_IMAGE_SCREEN', description: 'Generated-image screen (Sol) — blog image text/logo/uniform/van check', accepts: { providers: ['openai'], cap: 'vision' } },
   { key: 'OPENAI_FAST', env: 'MODEL_OPENAI_FAST', description: 'Cheap structured classification (Luna)', accepts: { providers: ['openai'], cap: 'text' } },
   { key: 'OPENAI_SMS_DRAFT', env: 'MODEL_OPENAI_SMS_DRAFT', description: 'Sealed-eval Luna leg (follows OPENAI_FAST unless set)', derivesFrom: 'OPENAI_FAST', accepts: { providers: ['openai'], cap: 'text' }, lock: { kind: 'measurement', label: 'Measurement probe', detail: 'frozen exam leg; changing it invalidates the sealed-eval ranking' } },
@@ -93,7 +92,6 @@ const ROUTE_SELECTOR = {
   churnClassify: 'OPENAI_FAST',
   knowledgeAnswer: 'OPENAI_BALANCED',
   estimateAssistant: 'OPENAI_BALANCED',
-  askWaves: 'OPENAI_BALANCED',
   smsDraftDefault: 'SMS_SONNET',
   smsDraftSaveSale: 'SMS_SONNET',
   smsToneRewrite: 'SMS_SONNET',
@@ -105,7 +103,9 @@ const POLICY_SELECTOR = {
   highStakes: { primary: 'FLAGSHIP', fallback: 'OPENAI_REPORT_WRITER' },
   fastStructured: { primary: 'OPENAI_FAST', fallback: 'FAST' },
   balancedAnswer: { primary: 'OPENAI_BALANCED', fallback: 'WORKHORSE' },
+  askWaves: { primary: 'OPENAI_BALANCED', fallback: 'VOICE' },
   visionAnalysis: { primary: 'VISION', fallback: 'OPENAI_BALANCED' },
+  estimateVision: { primary: 'GEMINI_VISION_BEST', fallback: 'OPENAI_ESTIMATE_VISION' },
   photoCaptions: { primary: 'GEMINI_VISION_BEST', fallback: 'VISION' },
   lawnVisitAssessment: { primary: 'GEMINI_VISION_BEST', fallback: 'OPENAI_FRONTIER' },
   visitBrief: { primary: 'WORKHORSE', fallback: 'OPENAI_BALANCED' },
@@ -136,7 +136,7 @@ const R = (route) => ({ kind: 'route', key: route });
 const P = (policy, leg) => ({ kind: 'policy', key: policy, leg });
 const E = (env, ref, opts = {}) => ({ kind: 'env', env, ref, live: !!opts.live, parse: opts.parse || null, catalogOnly: !!opts.catalogOnly, allowed: opts.allowed || null });
 // D(env | [env, ...aliases], literal): the call site reads the first set var
-// in order (satellite: OPENAI_VISION_MODEL || OPENAI_MODEL || 'gpt-5-mini').
+// in order (property records: OPENAI_PROPERTY_MODEL || OPENAI_MODEL || 'gpt-5-mini').
 // The composer writes the FIRST (specific) name; aliases only report.
 //   opts.parse(value)  when the env value is not a bare model id (the image
 //                      chain "gpt-image-2,gemini-image-best"): returns the
@@ -308,14 +308,12 @@ const LANES = [
   // Sequential ladder, not a fan-out: analyzePhoto tries Gemini, then the
   // prior Gemini, and reaches Claude VISION only when both miss.
   L('tech_caption_vision', 'Tech social caption · photo read', 'tech-social-caption.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), T('GEMINI_VISION_FALLBACK'), { skipsEqualLeg: true, retry: T('VISION'), note: SHARED_GEMINI_PIN }),
-  // Ladder, not a fan-out (owner ruling 2026-09-24): Gemini first, then
-  // Claude (FLAGSHIP — the trio's heavier reasoning leg), then OpenAI as the
-  // true last resort — stopping at the first schema-valid result. No more
-  // three-way parallel fan-out / agreement-based confidence; a single-source
-  // result always reads 'single_model', never 'high'.
-  L('satellite', 'Satellite / aerial property analysis', 'satellite-analyzer.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), T('FLAGSHIP'), { retry: D(['OPENAI_VISION_MODEL', 'OPENAI_MODEL'], 'gpt-5-mini', { accepts: { providers: ['openai'], cap: 'vision' } }), note: 'Gemini → Claude → OpenAI ladder (owner 2026-09-24), stopping at the first schema-valid result' }),
+  // Estimate imagery uses Gemini, then Sol only on a failed/invalid read.
+  // Satellite confidence stays 'single_model'; V2 retains one source's
+  // measurement provenance rather than claiming multi-provider agreement.
+  L('satellite', 'Satellite / aerial property analysis', 'satellite-analyzer.js, config/models.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), P('estimateVision', 'fallback'), { note: 'Gemini → Sol fallback, stopping at the first schema-valid result' }),
   L('property_trio', 'Property lookup trio (stories, roof)', 'property-lookup/ai-property-lookup.js', 'multimodal', T('WORKHORSE'), E('GEMINI_PROPERTY_MODEL', T('GEMINI_VISION_BEST')), { fanout: true, also: [D(['OPENAI_PROPERTY_MODEL', 'OPENAI_MODEL'], 'gpt-5-mini', { accepts: { providers: ['openai'], cap: 'vision' } })], note: 'consensus of the three legs' }),
-  L('property_v2_vision', 'Property lookup v2 · vision legs', 'routes/property-lookup-v2.js', 'multimodal', T('FLAGSHIP'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { fanout: true, also: [D(['OPENAI_VISION_MODEL', 'OPENAI_MODEL'], 'gpt-5-mini', { accepts: { providers: ['openai'], cap: 'vision' } })], note: SHARED_GEMINI_PIN }),
+  L('property_v2_vision', 'Property lookup v2 · vision legs', 'routes/property-lookup-v2.js, config/models.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), P('estimateVision', 'fallback'), { note: 'Gemini → Sol fallback, stopping at the first schema-valid result' }),
   L('turf_ocr', 'Turf-height gauge OCR', 'turf-height-ocr.js', 'multimodal', E('GEMINI_TURF_OCR_MODEL', T('GEMINI_VISION_BEST')), null, { fanout: true, inbound: true, also: [T('VISION')], note: 'Claude + Gemini in parallel; consensus of both readings' }),
   L('photo_scoring', 'Completion photo scoring', 'routes/admin-dispatch.js, config/models.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), P('photoCaptions', 'fallback'), { inbound: true, note: `drives customer-facing health scores (owner 2026-07-21); Gemini-first, Claude fallback (owner 2026-09-24) · ${SHARED_GEMINI_PIN}` }),
   L('vision_delta', 'Before / after vision delta', 'vision-delta.js', 'multimodal', P('visionAnalysis', 'primary'), P('visionAnalysis', 'fallback')),
@@ -390,7 +388,7 @@ const LANES = [
   // ── Balanced Q&A ──
   L('estimate_assistant', 'Estimate assistant Q&A', 'estimate-assistant.js', 'qa', R('estimateAssistant'), E('ESTIMATE_ASSISTANT_MODEL', T('WORKHORSE'), { live: true }), { inbound: true }),
   L('knowledge_qa', 'Knowledge-base Q&A', 'knowledge-bridge.js', 'qa', R('knowledgeAnswer'), T('FLAGSHIP')),
-  L('ask_waves', 'Ask Waves (public chat)', 'ask-waves-intake.js', 'qa', R('askWaves'), E('ASK_WAVES_MODEL', T('VOICE'), { live: true }), { inbound: true }),
+  L('ask_waves', 'Ask Waves (public chat)', 'ask-waves-intake.js', 'qa', P('askWaves', 'primary'), E('ASK_WAVES_MODEL', P('askWaves', 'fallback'), { live: true }), { inbound: true }),
   L('wiki_qa', 'Wiki Q&A', 'knowledge/wiki-qa.js', 'qa', P('highStakes', 'primary'), P('highStakes', 'fallback')),
   L('wdo_history', 'WDO history lookup', 'property-lookup/wdo-history-lookup.js', 'qa', T('WORKHORSE'), null, { inbound: true }),
   L('link_investigator', 'Internal-link path investigation', 'seo/link-path-investigator.js', 'qa', T('WORKHORSE')),

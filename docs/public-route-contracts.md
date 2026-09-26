@@ -173,7 +173,18 @@ unassigned work remains a fixed blocker. Public responses expose no full route,
 provider legs or exact route coordinates. Scheduling traffic lookups share a
 40-request/800-element allowance per application process per 15 minutes across
 HTTP requests and fall back to the conservative model when exhausted; response
-data remains request-local. Gate-off availability is unchanged apart from the
+data remains request-local. Existing stops are planned at the owner planning
+minutes (`scheduling/planning-minutes.js`, owner 2026-09-25) rather than their
+window span; the visit being offered keeps its own resolved allowance. Detour
+cap (owner 2026-09-25): self-serve callers that pass `customerFacing` (the
+/book availability engine behind /api/booking/availability and the public
+reschedule/re-service pickers, and the estimate slot routes) omit a feasible slot whose added round-trip drive exceeds
+`SCHEDULING_MAX_DETOUR_MINUTES` (default 30; an empty day counts the whole trip
+from HQ). Staff and phone booking see every fit. The finder's per-slot `return_time`
+(modeled return to HQ) and result-level `rejections` tally are staff/diagnostic
+fields only: /api/booking/availability builds each public slot field by field
+(`routes/booking.js`) and the estimate routes build theirs through
+`classifySlot`, so neither field reaches a customer response. Gate-off availability is unchanged apart from the
 shared grid / day-end / lunch-gate rules above, which apply in both modes.
 Packed offers + expected-minutes travel gap (owner ruling 2026-09-23,
 `scheduling/packing-geometry.js` — `loadPackingAnchors`/`packedBounds`, the
@@ -274,6 +285,71 @@ row still resolves to a retired lawn cadence — any tier hidden via
 removed 4x/quarterly — by explicit cadence, visit count, or the cadence's
 catalog key (`lawn_care_recurring` for 6x). The customer picks a current lawn
 option or the office requotes; the accept never silently reprices at 9x.
+
+The same accept path answers 409 `{ error, reason:
+'retired_tree_shrub_cadence_selection' }` when a recurring tree & shrub row
+still resolves to a retired T&S cadence — 4x/Light/quarterly (hidden via
+`TREE_SHRUB.tiers.light.hidden` since 2026-09-24, catalog key
+`tree_shrub_quarterly`) or the already-retired 12x/Premium — by explicit
+cadence, visit count, cadence wording, catalog key, or an explicit tier field
+(`tier` / `tierKey` / `serviceTier` / `selectedTier`, any spelling).
+9x/Enhanced and 6x/Standard stay current. One existing customer's already-scheduled quarterly program is
+grandfathered and untouched by this gate; it only blocks a NEW self-serve
+accept from landing on the retired cadence.
+
+GET `/api/estimates/:token/data` narrows to match (2026-09-24): a saved
+estimate's `pricing.frequencies` tree & shrub ladder omits any 4x/Light (and
+12x/Premium) entry, so only Standard 6x / Enhanced 9x cards render. What the
+response does next depends on what is left:
+- **Mixed ladder** (the saved ladder still has a 6x or 9x entry): self-service
+  stays on and no quote requirement is added, even when the stored recurring
+  T&S row is itself 4x. The customer must pick a current card: the selection
+  restamps the row to that tier (cadence, visit count, catalog key and tier
+  fields) before accept. A PUT `/accept` that still carries the retired row
+  (no current T&S selection) gets the 409 `retired_tree_shrub_cadence_selection`
+  above.
+- **All-retired ladder** (only Light and/or Premium entries), or no tier ladder
+  at all with a stored recurring T&S row at a retired cadence: the response's
+  quote requirement is `{ quoteRequired: true, reason:
+  'retired_tree_shrub_cadence_requote' }` with the friendly "call Waves to
+  refresh your tree & shrub plan" copy, so the page shows the requote state
+  instead of an acceptable card.
+
+The same retired-cadence gate applies to staff-side manual acceptance (Mark
+Won / phone accept) and to booking from a linked not-yet-accepted estimate
+(409 before any appointment is written). Estimates accepted before the
+retirement are unaffected.
+
+Termite annual plan sign-before-pay (dark behind `GATE_TERMITE_ANNUAL_PLAN`,
+or an annual-plan offer already delivered before the gate turned off): a
+`prepay_annual` accept of the Subterranean Termite Protection annual plan
+PARKS — the estimate is stamped `annual_plan_activation_status =
+'awaiting_signature'` with the accept-time opts and the frozen accepted
+price (annual fee net of discount, setup lines, tax, total) and nothing is
+billed, booked or charged. The in-lane prepay charge quote never applies to
+it (no `402 PREPAY_CHARGE_QUOTE` round-trip, no card capture, no due-today);
+a selected slot hold is released, not committed, and an existing
+appointment is not adopted — the pick is kept only as a staff scheduling
+preference. The success payload carries `invoiceKind:
+'annual_prepay_deferred'`, `invoiceId`/`invoicePayUrl` null,
+`invoiceAmount`/`prepayInvoiceAmount` = the frozen accepted total (setup
+lines and tax included — the figure the signature-time invoice bills, never
+a re-derived display amount), `billingTerm: 'prepay_annual'` and `nextStep:
+'sign_agreement'`; the success card and accept notifications tell the
+customer to sign — signing starts the plan and its billing, and the 12-month
+coverage begins on the installation date — never "approved, invoice to
+follow". The
+already-accepted retry returns the same shape while the agreement is
+unsigned, and `invoiceKind: 'annual_prepay_activation_pending'` with
+`nextStep: 'activation_pending'` once it is signed but the plan has not
+finished activating (the signing link is burned by then). Signing the
+annual agreement at `/api/contracts/:token/sign` activates the plan after
+the sign transaction commits (`termite-annual-activation.js`, retried by the
+daily reconcile sweep): it bills exactly the frozen price, charges the
+customer's enrolled payment method once (capped at the frozen total; owner
+ruling 2026-09-25, behind `GATE_PREPAY_CARD_AND_CHARGE`), and sends the pay
+link only when there is no enrolled method, charging is off, or the charge
+definitively failed. The sign response itself is unchanged.
 `durationMinutes` and `windowEnd` describe the whole work block; arrival copy
 remains start plus 120 minutes. One assignable technician must have no selected
 service capability explicitly disabled. The allocation stamp is server-owned
@@ -299,6 +375,13 @@ is omitted and that leg stays live. The PDF filename and the canonical lawn
 pin read the same overlaid row. Presentation (technician photo URL, copy
 config) and the deliberately live sections (next visit, review CTA,
 cross-sell) are unchanged. `services/service-report/report-identity-snapshot.js`.
+For tree/shrub assessments, a technician-hidden photo metric and its influenced
+overall score are `null` in reports and historical trends. Stored review decisions
+also mask legacy healthy substitutions on read; original AI scores remain in the
+internal audit record. Partial assessments retain their scored categories without
+whole-landscape reassurance. Public and queued PDFs share the tree-only `tsreview2`
+cache revision so older PDFs cannot retain the substituted scores. Token, access,
+privacy, and rate-limit guards are unchanged.
 Under `GATE_LAWN_PROPERTY_HISTORY`, lawn trends, initial scores and before/after comparisons use the visit property’s confirmed assessments, one installed result per visit, bounded by the report visit date and applicable baseline-reset window. Mowing and water-gap histories use the same proven visit eligibility. Payload keys stay unchanged; `assessmentDate` and trend dates use visit dates, including the seasonal calculation and water-gap history cutoff. Frozen weather remains keyed to the assessment run date. The PDF signature includes the resolved history identity. The existing opaque `asig` may carry a signed `h1.<history fingerprint>.<HMAC>` envelope: the data route verifies it and refuses a changed history or a disabled gate with the existing generic 409 pin refusal. Legacy signatures remain accepted; token, eligibility, privacy and rate-limit guards remain in force.
 Confirmed assessment property stamps remain eligible after another property is added, subject to ownership and conflicting visit/address checks; unstamped assessment and ancillary histories still require the live sole-property/no-move fallback. Unresolved property scope retains only the report visit’s installed assessment (or its valid signed pin), without prior-property comparisons. An empty same-day baseline reset excludes confirmations preceding the reset from the active window; reports for those earlier confirmations retain their historical window.
 The lawn assessment payload also carries `droughtStress` (`none`, `minor`,
@@ -907,6 +990,10 @@ MINUS the staff-only `subdivisionMedian` block (the plat name, county, and
 assessed-neighbor sample/range that back the admin estimator's home-size
 estimate for an unassessed vacant parcel) — `publicEnrichedProfile` strips it
 on both paths; the response otherwise describes only the requested parcel).
+Operational `meta.providerStatus` (credential configuration and attempted-provider
+health) is staff-only; `publicLookupMeta` removes it from every public response.
+The public `errors` array includes only the known outside-service-area verdict;
+`publicLookupErrors` removes provider failures and internal diagnostic messages.
 `/api/public/estimator/lead-prefill` (POST exchange, read-only semantics;
 swaps the voicemail text-back link's `lead_id` + HMAC token for that ONE
 lead's own contact fields — first/last name, email, phone, address, city,
@@ -944,6 +1031,14 @@ the quote invitation and booking confirmations retain their existing paths.
 A refused website publication
 withholds the booking handoff. Legacy callers keep their current `/book`
 handoff. Ordinary website lead forms do not opt into this route.
+`services.treeShrub.tier` is validated (2026-09-24, codex P1 round 2): a
+present tier must be a currently-sold one (`standard`/`enhanced`) or the
+route answers 400 before pricing — `light` (4x/quarterly, retired for new
+sales) and any unrecognized value are refused rather than silently priced
+or forwarded unchanged. Absent stays absent (the engine's own `standard`
+default runs, via `TREE_SHRUB.defaultTier` — the mandated 6x program, not
+`enhanced`). A narrowing of the existing payload contract, not a new
+field.
 Address-verification guard (2026-09-23): when the SERVER-trusted property
 profile (the cache-only `performPropertyLookup` re-read, or the lookup
 stage's own server-written `extracted_data.address_unverified` on the
@@ -1170,7 +1265,10 @@ the chat's quote step posts to the existing `/api/public/quote/calculate`
 above, which owns the four-field contact gate, lead minting, and attribution.
 All deterministic guards (price scrub, emergency + account-support fallback
 when both LLM providers miss) read English AND Spanish — the prompt answers
-Spanish visitors in Spanish. NOT CORS-open — credentialed allowlist origins
+Spanish visitors in Spanish. Each turn has a wall-clock budget across both
+providers (`ASK_WAVES_TURN_BUDGET_MS`, default 22000) after which the
+deterministic fallback is returned; the conversation log never delays the
+reply. NOT CORS-open — credentialed allowlist origins
 only (hub site)).
 `/api/public/experiments` (`GET /status` + `POST /exposure`) (client-side
 GrowthBook experimentation surface — no auth, anonymous visitors are the
@@ -1251,7 +1349,23 @@ Mounted at `server/index.js` → `routes/public-services-menu.js`; payload is
 with `Cache-Control: public, max-age=300` on success and `no-store` on
 error; inherits the global `/api/` IP rate limit. Consumed by the Astro
 quote form, so its item shape is a spoke-fleet contract per CLAUDE.md
-rule 18 — additive changes only).
+rule 18 — additive changes only, with ONE documented exception: a catalog
+row the menu previously advertised can be RETIRED from it via
+`services.public_quote_selectable=false` (owner directive, mirrors a
+retired cadence tier — e.g. `lawn_care_recurring` 2026-09-24,
+`tree_shrub_quarterly` 2026-09-24) — the item disappears from `items` on
+the NEXT menu fetch, but never breaks a caller that already has the old
+payload cached: `services/public-services-menu.js`'s `FORMERLY_PUBLIC_KEYS`
+denylist keeps posting that key to `/api/public/quote/calculate` resolving
+(never a 404/500) as a quote-on-request lead — never instant-priced,
+never silently repriced at a different tier. `is_active` stays true either
+way (historic/scheduled visits still reference the row); `customer_visible`
+is a separate, per-row decision independent of this menu removal —
+`tree_shrub_quarterly` keeps `customer_visible=true` (20260924020010,
+superseding 20260924020000's flip of that one flag) specifically so an
+existing customer's tracking-page visit summary is unaffected, while
+`lawn_care_recurring` set it false too since it has no such grandfathered
+dependency).
 `/api/public/service-areas` (read-only canonical SWFL city list — no auth, no
 token, public `Cache-Control`. Consumed by the Astro build and the admin blog
 UI; no PII).
@@ -1261,8 +1375,15 @@ Ranges are computed from the live pricing engine (DB-authoritative
 pricing_config) so the published numbers cannot drift from admin-edited
 pricing; owner ruling 2026-08-06 approved publishing ranges for all
 residential services. Consumed by the Astro build for the agent-readable
-/pricing.md surface and directly by AI agents. Exact per-property pricing
-stays on POST /api/public/quote/calculate).
+/pricing.md surface and directly by AI agents (both surfaces read this
+same computed payload — neither carries its own copy of the sweep).
+Exact per-property pricing stays on POST /api/public/quote/calculate.
+The `tree_shrub_care` row contracted with the Light tier's retirement
+(2026-09-24): the sweep is now `standard`/`enhanced` only (`light` dropped
+from the tier sweep the same way the lawn row above dropped its retired
+6x column), so the published low end is Standard-derived (`low` ≈ $28,
+was lower under Light's cheaper 4x rate) and `notes` now reads "6 or 9
+applications per year by tier" instead of the old 4/6/9 wording).
 `/api/public/credentials` (+ `/api/public/credentials/:slug`) (read-only
 canonical FDACS / license / insurance numbers — no auth, no token, public
 `Cache-Control`. Consumed by the Astro content build; intentionally public
@@ -1294,6 +1415,39 @@ Router-wide url-safe 15-64 token param gate (generic 404, prod-verified
 against all live tokens 2026-08-07); accept/decline carry a 10/hr
 limiter — the two heaviest public money-adjacent writes; select-tier/
 preferences ride estimateToggleLimiter, data/pdf ride dataLimiter).
+`/data`'s optional `consultationOffer: { url }` (consultation-first lane,
+owner ruling 2026-09-23; dark behind BOTH `GATE_ESTIMATE_CONSULTATION_OFFER`
+and `GATE_LEAD_INSPECTION_LINK` — `server/services/estimate-consultation-offer.js`)
+is the "Want us to come look first?" section's link to the SAME
+`/inspection/:token` self-booking page the recurring-lead new_lead email
+offers (`lead-consultation-email-block.js`) — this covers the estimate page
+only, never the email. Present only when: both gates are live; the estimate
+is in an open, customer-actionable state (never accepted/declined/expired/
+send_failed/unpublished/past-expiry, and never a staff draft or verified
+staff preview — the same `isEstimateAcceptActive` verdict `returnVisit`/
+`softExit` use); `estimate_data.lead_linkage` is STRONG (`sid` or `stamp` —
+the same set the accept/decline handlers' own lead re-lock condition on); the
+linked lead passes `leadLinkRefusal` (open lead, US phone, and — if a
+customer is linked — that customer live and still on the lead's phone) and
+`leadWantsRecurringPlan`; and the `/inspection/:token` page's own lead-wide
+probe (`inspection-public.js` `_internals.computeConsultationSlotsForLead`,
+the same one the email block uses) finds at least one open slot AT THIS
+ESTIMATE'S PROPERTY — the address the page resolved matches the estimate's
+(same street key, unit and zip); an out-of-area, unresolved, no-address,
+retired-catalog, no-open-times or other-property result omits the field.
+Quote-first only: never on an estimate drafted from a visit
+(`estimate_data.scheduled_service_id`) or on a grouped estimate
+(`estimate_group_id`). Composed on the page's own first `/data` load only —
+never on an internal `?refresh=1` of a viewed estimate (the client carries
+the first load's offer forward) and never for a caller that does not opt in
+(`includeConsultationOffer`). The Intelligence Bar's `get_estimate_detail` projection drops
+`consultationOffer` (the URL is a booking bearer). The URL is
+`consultationUrlForLead(leadId)` with NO channel (unverified delivery — this
+is neither an SMS send, which asserts phone delivery, nor an email send);
+the endpoint makes NO write of any kind to mint it (no `createShortCode`, no
+DB insert) — a public GET stays read-only. Any lookup error, or any other
+ineligibility, omits the field entirely (never `null`); absent, the page
+renders byte-identical to before this field existed.
 Authored commercial proposals expose reviewed four-decimal quantities and unit
 rates, explicit unit labels, cent-rounded line amounts, and the fixed
 `validThrough` date in their normalized proposal and document output. Internal
@@ -2477,7 +2631,19 @@ expose only already-public data: customer-visible catalog rows (price
 columns excluded AND `description` excluded — tighter than /api/mcp
 get_service, because catalog descriptions are admin-editable free text
 that is neither compliance-curated nor price-synced and must not reach an
-anonymous surface),
+anonymous surface). `list_services`/`get_service` additionally exclude
+`services/pricing-engine/retired-sale-catalog.js`'s `RETIRED_SALE_SERVICE_KEYS`
+denylist (currently only `tree_shrub_quarterly`) even when a row's own
+`customer_visible=true` — this is deliberately narrower than
+`public-services-menu.js`'s `FORMERLY_PUBLIC_KEYS` (which also carries
+still-active services, e.g. foam/termite/rodent keys, that are merely off
+the public quote MENU); MCP's catalog would otherwise promise a narrower
+service list than it actually serves. `tree_shrub_quarterly` is the
+first key excluded this way rather than by `customer_visible=false`
+(2026-09-24; see the services/menu entry above for why its customer_visible
+stays true), so a retired catalog row never becomes agent-discoverable
+again just because its customer_visible flag serves an unrelated
+customer-facing surface,
 the /api/public/pricing-ranges payload via its shared fail-closed producer,
 the service-areas table, and a static description of the
 /api/public/quote/calculate HTTP contract (how_to_request_quote). No

@@ -43,6 +43,7 @@ import {
   percentageDiscountDollars,
 } from '../../lib/discountStack';
 import { useDiscountStackingState, ensureStackingFresh } from '../../hooks/useDiscountStacking';
+import { labelNamesRetiredSale, RETIRED_SALE_SERVICE_KEYS } from '../../constants/retiredSaleLabels';
 import { propertyRelationshipChip } from '../../lib/contact-roles';
 import { addressAskNotice } from '../../lib/addressAsks';
 
@@ -1324,6 +1325,21 @@ export function appointmentDiscountSpansLine(group, svc) {
   return !group || group.lines.includes(svc);
 }
 
+// A service line in this modal is a retired-for-sale plan (quarterly T&S)
+// by its search-result flag, its catalog key, or its name plus the cadence it
+// is set to run at — the server write gate's own reading. Quote-derived lines
+// carry no flag (codex r35 on #4786), so the flag alone is not enough.
+export function lineIsRetiredSale(line) {
+  if (!line) return false;
+  if (line.retiredForSale) return true;
+  if (RETIRED_SALE_SERVICE_KEYS.has(line.serviceKey || line.service_key)) return true;
+  const name = String(line.name || '');
+  const cadence = line.cadence === 'custom' && Number(line.intervalDays) > 0
+    ? `every ${Number(line.intervalDays)} days`
+    : String(line.cadence || '').replace(/_/g, ' ');
+  return labelNamesRetiredSale(name) || labelNamesRetiredSale(`${name} ${cadence}`);
+}
+
 export default function CreateAppointmentModal({ defaultDate, defaultWindowStart, defaultDurationMinutes, defaultTechId, defaultCustomer = null, defaultEstimateId = null, onClose, onCreated, onChange }) {
   const dialogRef = useModalFocus(true, onClose);
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
@@ -1495,13 +1511,23 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     const q = serviceSearch.trim();
     if (!q) { setServiceResults([]); setServiceLoading(false); return; }
     setServiceLoading(true);
+    // A response belongs to the customer + query that asked for it (codex
+    // r27): once either changes, the superseded request's response is
+    // dropped instead of overwriting the current customer's results.
+    let superseded = false;
     const handle = setTimeout(async () => {
       try {
         const params = new URLSearchParams();
         params.set('search', q);
         params.set('is_active', 'true');
+        // Hide retired-for-sale rows (quarterly T&S, retired 2026-09-24);
+        // a customer who already has visits on one (the grandfathered plan) still
+        // sees it for a catch-up visit.
+        params.set('sellable', 'true');
+        if (selectedCustomer?.id) params.set('sellable_customer_id', selectedCustomer.id);
         params.set('limit', '50');
         const r = await adminFetch(`/admin/services?${params}`);
+        if (superseded) return;
         setServiceResults((r.services || []).map((s) => ({
           id: s.id,
           service_key: s.service_key,
@@ -1515,15 +1541,42 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           priceMax: s.price_range_max ?? s.base_price,
           base_price: s.base_price,
           default_duration_minutes: s.default_duration_minutes,
+          retiredForSale: s.retired_for_sale === true,
         })));
       } catch {
-        setServiceResults([]);
+        if (!superseded) setServiceResults([]);
       } finally {
-        setServiceLoading(false);
+        if (!superseded) setServiceLoading(false);
       }
     }, 200);
-    return () => clearTimeout(handle);
-  }, [serviceSearch]);
+    return () => { superseded = true; clearTimeout(handle); };
+  }, [serviceSearch, selectedCustomer?.id]);
+
+  // A retired-for-sale line (quarterly T&S) is only offered because the
+  // selected customer is already on that plan — it must not carry over to a
+  // different customer. The server refuses it too (RETIRED_SERVICE_NOT_SELLABLE).
+  // lineIsRetiredSale reads search-result AND quote-derived lines (codex r35).
+  const retiredLinesCustomerRef = useRef(selectedCustomer?.id || null);
+  useEffect(() => {
+    const customerId = selectedCustomer?.id || null;
+    if (retiredLinesCustomerRef.current === customerId) return;
+    retiredLinesCustomerRef.current = customerId;
+    // An ACCEPTED quote that stays pinned through this switch (a lead quote
+    // with no owner yet, e.g. its customer being quick-added, or one owned by
+    // the new customer) vouches for its own retired lines on the server
+    // (retiredSaleKeysVouchedByAcceptedEstimate), so they stay. A quote owned
+    // by another customer is unlinked, lines and all, by the estimate effect
+    // below (codex r2 on #4855).
+    const keptQuote = defaultEstimateId && linkedEstimate?.status === 'accepted'
+      && (!linkedEstimate.customerId || String(linkedEstimate.customerId) === String(customerId || ''))
+      ? String(linkedEstimate.id)
+      : null;
+    const drops = (line) => lineIsRetiredSale(line) && !(keptQuote && String(line.sourceEstimateId ?? '') === keptQuote);
+    setServices((arr) => (arr.some(drops) ? arr.filter((line) => !drops(line)) : arr));
+    // The previous customer's search results (a retired row among them) are
+    // not offered to the next one while their own search is in flight.
+    setServiceResults([]);
+  }, [selectedCustomer?.id]);
 
   useEffect(() => {
     const customerId = selectedCustomer?.id;
@@ -1535,6 +1588,14 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     if (!defaultEstimateId) {
       setLinkedEstimate(null);
       autoAppliedScheduleEstimateRef.current = null;
+    } else if (linkedEstimate?.customerId && customerId && String(linkedEstimate.customerId) !== String(customerId)) {
+      // ...but a pinned quote OWNED by a different customer cannot ride this
+      // one: the server refuses it ("Linked estimate belongs to a different
+      // customer"). Unlink it and drop the lines it filled; an unowned lead
+      // quote (customerId null) stays pinned (codex r1 on #4855).
+      const staleId = String(linkedEstimate.id);
+      setLinkedEstimate(null);
+      setServices((arr) => arr.filter((line) => String(line.sourceEstimateId ?? '') !== staleId));
     }
     setScheduleEstimates([]);
     setScheduleEstimateError('');
@@ -1554,8 +1615,14 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       if (defaultEstimateId && !list.some((e) => String(e.id) === String(defaultEstimateId))) {
         try {
           const r = await adminFetch(`/admin/estimates/${defaultEstimateId}/schedule-source`);
-          if (r?.estimate) {
-            list = [r.estimate, ...list];
+          // schedule-source reports the owner beside the estimate. A quote
+          // owned by a DIFFERENT customer than the one selected is not
+          // offered at all: the switch above unlinked it, and listing it
+          // again would let the auto-apply relink it (codex r1 on #4855).
+          const ownerId = r?.estimate ? (r.estimate.customerId ?? r.customerId ?? null) : null;
+          const ownedByOther = !!(ownerId && customerId && String(ownerId) !== String(customerId));
+          if (r?.estimate && !ownedByOther) {
+            list = [{ ...r.estimate, customerId: ownerId }, ...list];
             const c = r.contact || {};
             // Only stage a new customer to create when the quote is genuinely
             // unowned (r.customerId === null — a lead/standalone estimate). If it

@@ -93,6 +93,9 @@ jobs:
                 run(['../node_modules/jest/bin/jest.js', '--ci', '--runInBand', '--no-coverage',
                   'tests/customer360-workspace-postgres.test.js', 'tests/admin-billing-recovery-postgres.test.js'],
                   { cwd: 'server', env: { ...process.env, C360_TEST_DATABASE_URL: `${base}${name}` } });
+                run(['../node_modules/jest/bin/jest.js', '--ci', '--runInBand', '--no-coverage',
+                  'tests/customer-geocode-review-postgres.test.js'],
+                  { cwd: 'server', env: { ...process.env, SERVICE_GEOCODE_TEST_DATABASE_URL: `${base}${name}` } });
               } finally { await client.query(`DROP DATABASE "${name}" WITH (FORCE)`); }
             } finally { await client.end(); }
           })().catch(error => { console.error(error); process.exitCode = 1; });
@@ -190,7 +193,7 @@ jobs:
         working-directory: server
         env:
           SERVICE_GEOCODE_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        run: npx jest --ci --silent --runInBand tests/geocoder-service-locations-postgres.test.js tests/geocoder-quality-recovery-postgres.test.js
+        run: npx jest --ci --silent --runInBand tests/geocoder-service-locations-postgres.test.js tests/geocoder-quality-recovery-postgres.test.js tests/schedule-quality-refresh-postgres.test.js
       - name: Completion pricing and invoice replay transaction tests
         working-directory: server
         env:

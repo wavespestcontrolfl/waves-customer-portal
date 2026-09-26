@@ -84,6 +84,12 @@ const FIELD_GROUPS = {
     // the SECONDARY entry's contents (e.g. its unit). A plain deterministic
     // string; normalizeField needs no special case.
     'prices_signature',
+    // caller_id_disclaimed / phone_note (schema 1.14.0) — feeds the
+    // deterministic callback_number_needed triage flag and the confirmation/
+    // reminder SMS hold; a model that stops catching the disclaim (or starts
+    // hallucinating one) must show up here, not just in a triage-flag count.
+    'caller_id_disclaimed',
+    'phone_note',
   ],
   low: [
     'lead_quality',
@@ -409,6 +415,10 @@ function normalizeField(field, value) {
   // agent_committed_booking, null is NOT collapsed into false — "acceptance
   // never at issue" is a distinct state from "the caller declined".
   if (field === 'price_accepted') return normalizeBool(value);
+  // caller_id_disclaimed is the same tri-state shape as price_accepted — the
+  // schema never sets it false (see call-extraction.model-output.schema.json),
+  // so null (not addressed) must stay distinct from a hypothetical false.
+  if (field === 'caller_id_disclaimed') return normalizeBool(value);
   // agent_committed_booking postdates every legacy extraction: absent/null
   // means "not committed", identical to false — collapse them so replays
   // don't report a spurious high-severity delta on every pre-1.8.0 row

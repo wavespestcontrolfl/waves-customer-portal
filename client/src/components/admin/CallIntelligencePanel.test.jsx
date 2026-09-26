@@ -117,6 +117,31 @@ describe("CallIntelligencePanel", () => {
     expect(screen.queryByText(/All prices/)).not.toBeInTheDocument();
   });
 
+  // caller_id_disclaimed / phone_note (schema 1.14.0, live miss 2026-09-25,
+  // call 6fee5f34): the caller said the incoming number isn't theirs.
+  it("shows the Caller ID row only when caller_id_disclaimed is true", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url, options = {}) => {
+      calls.push({ url: String(url), method: options.method || "GET", body: options.body ? JSON.parse(options.body) : null });
+      if (String(url).includes("/intelligence")) {
+        const view = intelligence({ caller: { caller_id_disclaimed: true, phone_note: "office line, routes to me" } });
+        return { ok: true, status: 200, json: async () => ({ intelligence: view, features: { commitments: true, admin: true } }) };
+      }
+      if (String(url).includes("/commitments/")) return { ok: true, status: 200, json: async () => ({ commitment: {} }) };
+      return { ok: true, status: 200, json: async () => ({}) };
+    }));
+    render(<CallIntelligencePanel callId={CALL_ID} onJumpToQuote={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: /call intelligence/i }));
+    await waitFor(() => expect(screen.getByText("Complete")).toBeInTheDocument());
+    expect(screen.getByText("Not caller's own number — office line, routes to me")).toBeInTheDocument();
+  });
+
+  it("hides the Caller ID row when caller_id_disclaimed is absent", async () => {
+    render(<CallIntelligencePanel callId={CALL_ID} onJumpToQuote={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: /call intelligence/i }));
+    await waitFor(() => expect(screen.getByText("Complete")).toBeInTheDocument());
+    expect(screen.queryByText(/Not caller's own number/)).not.toBeInTheDocument();
+  });
+
   it("hands the verbatim quote to the transcript on Jump", async () => {
     const onJump = vi.fn();
     render(<CallIntelligencePanel callId={CALL_ID} onJumpToQuote={onJump} />);

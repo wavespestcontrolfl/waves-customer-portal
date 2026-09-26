@@ -44,6 +44,7 @@ function chain({ result = [], first, returning } = {}) {
     'whereRaw',
     'whereNull',
     'whereIn',
+    'join',
     'select',
     'orderBy',
     'limit',
@@ -1110,6 +1111,20 @@ describe('email template library rendering', () => {
       expect(err.status).toBe(409);
       expect(err.code).toBe('EMAIL_TEMPLATE_DISABLED');
     }
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['missing template', { email_templates: [chain({ first: null })] }, { templateKey: 'missing.template' }, 'template not found'],
+    ['missing version', { 'email_template_versions as v': [chain({ first: null })] }, { versionId: 'missing-version' }, 'template version not found'],
+    ['missing active version', { email_templates: [chain({ first: serviceTemplate() })] }, { templateKey: 'estimate.expiring_notice' }, 'active template not found'],
+  ])('sendTemplate gives a typed pre-provider refusal for %s', async (_label, queues, selector, message) => {
+    setDbQueues(queues);
+    await expect(EmailTemplates.sendTemplate({
+      ...selector,
+      to: 'sam@example.com',
+      payload: { first_name: 'Sam' },
+    })).rejects.toMatchObject({ code: 'EMAIL_TEMPLATE_UNAVAILABLE', message });
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
   });
 

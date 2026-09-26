@@ -1326,6 +1326,37 @@ describe('extraction plumbing for the new booking fields', () => {
     expect(base.price_count).toBe(acceptedChanged.price_count);
   });
 
+  // caller.caller_id_disclaimed / caller.phone_note (schema 1.14.0, live
+  // miss 2026-09-25, call 6fee5f34): flatView must expose these so replay
+  // variance (FIELD_GROUPS medium) watches them the same way it watches price.
+  test('flatView exposes caller_id_disclaimed and phone_note', () => {
+    const flat = flatView({
+      meta: { schema_version: '1.14.0' },
+      caller: { caller_id_disclaimed: true, phone_note: 'office line, routes to me', phone_source: 'caller_id' },
+    });
+    expect(flat.caller_id_disclaimed).toBe(true);
+    expect(flat.phone_note).toBe('office line, routes to me');
+  });
+
+  test('flatView keeps caller_id_disclaimed a genuine tri-state (false survives, absent reads null)', () => {
+    const disclaimedFalseIsNeverModelSet = flatView({
+      meta: { schema_version: '1.14.0' },
+      caller: { caller_id_disclaimed: false },
+    });
+    // The model never emits false (schema description), but flatView must
+    // still pass a false value through unchanged if one ever arrives —
+    // never silently collapsed to null.
+    expect(disclaimedFalseIsNeverModelSet.caller_id_disclaimed).toBe(false);
+
+    const absent = flatView({ meta: { schema_version: '1.14.0' }, caller: {} });
+    expect(absent.caller_id_disclaimed).toBeNull();
+    expect(absent.phone_note).toBeNull();
+
+    const nulled = flatView({ meta: { schema_version: '1.14.0' }, caller: { caller_id_disclaimed: null, phone_note: null } });
+    expect(nulled.caller_id_disclaimed).toBeNull();
+    expect(nulled.phone_note).toBeNull();
+  });
+
   test('normalizeCallExtraction sanitizes the new V1 fields', () => {
     const out = normalizeCallExtraction({
       quoted_price: '350',
@@ -1691,6 +1722,7 @@ describe('loadBookableCallServices (catalog order feeds the prompt hash)', () =>
     const orderBys = [];
     const chain = {
       where: jest.fn().mockReturnThis(),
+      whereNotIn: jest.fn().mockReturnThis(),
       orderBy: jest.fn((col, dir) => { orderBys.push([col, dir]); return chain; }),
       select: jest.fn().mockResolvedValue([{ name: 'A' }]),
     };
@@ -1698,5 +1730,17 @@ describe('loadBookableCallServices (catalog order feeds the prompt hash)', () =>
     const rows = await loadBookableCallServices(conn);
     expect(rows).toEqual([{ name: 'A' }]);
     expect(orderBys).toEqual([['name', 'asc'], ['id', 'asc']]);
+  });
+
+  test('a retired-for-sale row never reaches the call pipelines, even with booking_enabled re-selected (codex r22 on #4786)', async () => {
+    const chain = {
+      where: jest.fn().mockReturnThis(),
+      whereNotIn: jest.fn().mockReturnThis(),
+      orderBy: jest.fn().mockReturnThis(),
+      select: jest.fn().mockResolvedValue([]),
+    };
+    await loadBookableCallServices(jest.fn(() => chain));
+    expect(chain.where).toHaveBeenCalledWith({ is_active: true, booking_enabled: true });
+    expect(chain.whereNotIn).toHaveBeenCalledWith('service_key', expect.arrayContaining(['tree_shrub_quarterly']));
   });
 });

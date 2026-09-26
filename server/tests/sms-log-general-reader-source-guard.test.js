@@ -62,6 +62,16 @@ const WINDOW_SPAN = 15;
 // apply. Default is ZERO — every OTHER unwrapped site fails.
 const ALLOWLIST = [
   {
+    file: 'services/billing-retry-email-obligation.js',
+    snippet: "const existing = await trx('sms_log')",
+    reason: 'Exact billing_retry_email_key lookup owns queue deduplication across every status; it never presents a reservation as delivered contact history.',
+  },
+  {
+    file: 'services/billing-retry-email-obligation.js',
+    snippet: "let query = database('sms_log').where({ id, status: 'sending' });",
+    reason: 'This is a guarded metadata UPDATE of the exact claimed queue row, not a message-history read; excluding the sending row would discard provider-start evidence.',
+  },
+  {
     file: 'services/sms-reply-alert-delivery.js',
     snippet: "const prior = await db('sms_log')",
     reason: "inbound-only (direction: 'inbound', from_phone = the unknown sender) repeat-receipt check — a send reservation is always Waves' own outbound row and can never match an inbound sender's from_phone.",
@@ -502,8 +512,13 @@ const ALLOWLIST = [
   },
   {
     file: 'services/workflows/balance-reminder.js',
-    snippet: 'const prevReminders = await db("sms_log")',
+    snippet: 'const smsHistory = await db("sms_log")',
     reason: 'message_type restricted to \'balance_reminder\', disjoint from every reservation message_type (review / manual / ai_autosent) — a reservation can never match this filter.',
+  },
+  {
+    file: 'services/workflows/balance-reminder.js',
+    snippet: '|| await db(\'sms_log\').where({ customer_id: customer.id, message_type: \'late_payment\' })',
+    reason: 'message_type restricted to \'late_payment\', disjoint from every reservation message_type (review / manual / ai_autosent) — a reservation can never match this filter.',
   },
   {
     file: 'services/workflows/balance-reminder.js',

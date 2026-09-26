@@ -53,6 +53,13 @@ jest.mock('../services/logger', () => ({
   error: jest.fn(),
 }));
 
+// callback_number_needed (PR #4807): every SMS is checked against
+// disclaimed_number_holds (sendCustomerMessage + sendSMS's dispatch). Not
+// under test here — stubbed to "never held" so no hold read reaches the db.
+jest.mock('../services/disclaimed-number-holds', () => ({
+  disclaimedNumberBlocksSend: jest.fn(async () => false),
+}));
+
 const TwilioService = require('../services/twilio');
 const { annualHandoffGuard, rewriteWithheldEstimateLinks } = require('../services/estimate-annual-guard');
 const { isEnabled } = require('../config/feature-gates');
@@ -160,10 +167,12 @@ describe('TwilioService.sendSMS preSendCheck (provider-handoff gate)', () => {
     require('../models/db').mockImplementation(table => ({ insert: async row => {
       events.push(table);
       expect(row.created_at).toEqual(acquiredAt);
+      expect(JSON.parse(row.metadata).notificationEventKey).toBe('payment-expiry:pm-1:9:2026:expired');
     } }));
     mockTwilioCreate.mockImplementation(async () => { events.push('sdk'); return { sid: 'SM_ok' }; });
     try {
       const result = await TwilioService.sendSMS(TO, 'Reminder body', { messageType: 'manual', fromNumber: FROM,
+        notificationEventKey: 'payment-expiry:pm-1:9:2026:expired',
         withSmsHandoff: async dispatch => {
           events.push('locked');
           jest.setSystemTime(acquiredAt);
@@ -240,6 +249,7 @@ describe('TwilioService.sendSMS preSendCheck (provider-handoff gate)', () => {
     try {
       const result = await TwilioService.sendSMS('(941) 555-0123', 'Thanks — visit https://example.com', {
         messageType: 'estimate_service_details', fromNumber: FROM,
+        notificationEventKey: 'payment-expiry:pm-1:9:2026:expired',
         withSmsHandoff: async dispatch => {
           events.push(['handoff']);
           await dispatch({ held: true });
@@ -258,6 +268,7 @@ describe('TwilioService.sendSMS preSendCheck (provider-handoff gate)', () => {
       expect(events.find(([event, context]) => event === 'capture' && context.body)?.[1]).toMatchObject({
         to: '+19415550123', fromNumber: FROM, body: 'Thanks - visit example.com',
         messageType: 'estimate_service_details', channel: 'sms',
+        metadata: expect.objectContaining({ notificationEventKey: 'payment-expiry:pm-1:9:2026:expired' }),
       });
       const eventNames = events.map(([event]) => event);
       expect(eventNames.indexOf('reserve')).toBeLessThan(eventNames.indexOf('handoff'));
@@ -265,6 +276,7 @@ describe('TwilioService.sendSMS preSendCheck (provider-handoff gate)', () => {
       expect(eventNames.indexOf('settle')).toBeGreaterThan(eventNames.indexOf('handoff-done'));
       expect(capture).toHaveBeenCalledWith(handle, expect.objectContaining({
         providerAcceptedAt: expect.any(Date),
+        metadata: expect.objectContaining({ notificationEventKey: 'payment-expiry:pm-1:9:2026:expired' }),
       }));
       expect(settle).toHaveBeenCalledWith(handle);
     } finally {

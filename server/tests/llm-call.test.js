@@ -675,12 +675,122 @@ describe('dispatchWithFallback', () => {
     expect(mockAnthropicCreate.mock.calls.at(-1)[1]).toEqual({ timeout: 700, maxRetries: 0 });
   });
 
+  test.each([
+    [1000, 500, 500, 500],
+    [1000, 0, 500, 700],
+    [4000, 0, 700, 700],
+  ])('reserves fallback time within a %i ms deadline and caps both attempts', async (budget, elapsed, primaryMs, fallbackMs) => {
+    let now = 1000;
+    jest.spyOn(Date, 'now').mockImplementation(() => now);
+    const timeoutSpy = jest.spyOn(AbortSignal, 'timeout');
+    jest.spyOn(global, 'fetch').mockImplementation(async () => {
+      now += elapsed;
+      throw new DOMException('Timed out', 'TimeoutError');
+    });
+    mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: 'backup copy' }] });
+    const result = await dispatchWithFallback({
+      primary: { provider: PROVIDER.OPENAI, model: 'openai-primary' },
+      fallback: { provider: PROVIDER.ANTHROPIC, model: 'claude-backup' },
+    }, { text: 'write', jsonMode: false, timeoutMs: budget }, { reserveFallbackBudget: true, maxAttemptMs: 700 });
+    expect(result).toMatchObject({ ok: true, fallbackUsed: true });
+    expect(timeoutSpy).toHaveBeenCalledWith(primaryMs);
+    expect(mockAnthropicCreate.mock.calls.at(-1)[1]).toEqual({ timeout: fallbackMs, maxRetries: 0 });
+  });
+
+  test('a reserved fallback is not called after the shared deadline expires', async () => {
+    let now = 1000;
+    jest.spyOn(Date, 'now').mockImplementation(() => now);
+    jest.spyOn(global, 'fetch').mockImplementation(async () => {
+      now += 1000;
+      return { ok: false, status: 503 };
+    });
+    const result = await dispatchWithFallback({
+      primary: { provider: PROVIDER.OPENAI, model: 'openai-primary' },
+      fallback: { provider: PROVIDER.ANTHROPIC, model: 'claude-backup' },
+    }, { text: 'write', timeoutMs: 1000 }, { reserveFallbackBudget: true, maxAttemptMs: 700 });
+    expect(result).toMatchObject({ ok: false, failures: [
+      expect.objectContaining({ reason: 'openai_503' }),
+      expect.objectContaining({ reason: 'timeout_budget_exhausted' }),
+    ] });
+    expect(mockAnthropicCreate).not.toHaveBeenCalled();
+  });
+
   test('rejects a same-provider fallback policy', async () => {
     const result = await dispatchWithFallback({
       primary: { provider: PROVIDER.OPENAI, model: 'a' },
       fallback: { provider: PROVIDER.OPENAI, model: 'b' },
     }, { text: 'write' });
     expect(result).toEqual({ ok: false, reason: 'same_provider_fallback', failures: [] });
+  });
+
+  // hardDeadline (opt-in, default false): every adapter already asks its own
+  // transport to abort at timeoutMs (fetch AbortSignal / the Anthropic SDK's
+  // timeout+maxRetries:0), but that guarantee lives in the adapter, not the
+  // chain. A caller with a hard, user-facing wait budget (ask-waves-intake.js:
+  // a synchronous chat reply) opts into hardDeadline so the chain itself races
+  // each leg against its own share, bounding a stalled leg even when the
+  // adapter (a test double, or a future adapter bug) never honors the timeout
+  // it was handed at all.
+  describe('hardDeadline', () => {
+    test('bounds a leg whose adapter ignores its own timeoutMs entirely, and still reaches the fallback', async () => {
+      // A fetch double that never settles and never even looks at the abort
+      // signal — exactly what an adapter bug or a badly-behaved test double
+      // ignoring `timeoutMs` looks like from the chain's side.
+      jest.spyOn(global, 'fetch').mockImplementation(() => new Promise(() => {}));
+      mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: 'backup copy' }] });
+      const result = await dispatchWithFallback({
+        primary: { provider: PROVIDER.OPENAI, model: 'openai-primary' },
+        fallback: { provider: PROVIDER.ANTHROPIC, model: 'claude-backup' },
+      }, { text: 'write', jsonMode: false, timeoutMs: 200 }, { reserveFallbackBudget: true, hardDeadline: true });
+      expect(result).toMatchObject({ ok: true, provider: PROVIDER.ANTHROPIC, fallbackUsed: true, text: 'backup copy' });
+      // The stalled leg fails as the SAME code an adapter's own deadline
+      // would produce, so it classifies and reports identically either way.
+      expect(result.failures[0]).toMatchObject({ provider: PROVIDER.OPENAI, reason: 'openai_timeout' });
+    });
+
+    test('a single-leg (no fallback) policy still resolves — never hangs — when its only leg never settles', async () => {
+      jest.spyOn(global, 'fetch').mockImplementation(() => new Promise(() => {}));
+      const result = await dispatchWithFallback(
+        { primary: { provider: PROVIDER.OPENAI, model: 'openai-pinned' } },
+        { text: 'write', jsonMode: false, timeoutMs: 100 },
+        { hardDeadline: true },
+      );
+      expect(result).toMatchObject({ ok: false, reason: 'all_providers_failed', failures: [{ provider: PROVIDER.OPENAI, reason: 'openai_timeout' }] });
+    });
+
+    test('does not change the happy path: a normally-answering leg still wins on the first try', async () => {
+      jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true, json: async () => ({ output_text: 'provider copy' }) });
+      const result = await dispatchWithFallback({
+        primary: { provider: PROVIDER.OPENAI, model: 'openai-primary' },
+        fallback: { provider: PROVIDER.ANTHROPIC, model: 'claude-backup' },
+      }, { text: 'write', jsonMode: false, timeoutMs: 5000 }, { hardDeadline: true });
+      expect(result).toMatchObject({ ok: true, provider: PROVIDER.OPENAI, fallbackUsed: false, text: 'provider copy' });
+      expect(mockAnthropicCreate).not.toHaveBeenCalled();
+    });
+
+    test('a raced-away leg that later rejects never surfaces as an unhandled rejection', async () => {
+      let rejectLate;
+      jest.spyOn(global, 'fetch').mockImplementation(() => new Promise((_resolve, reject) => { rejectLate = reject; }));
+      mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: 'backup copy' }] });
+      const unhandled = [];
+      const onUnhandledRejection = (reason) => unhandled.push(reason);
+      process.on('unhandledRejection', onUnhandledRejection);
+      try {
+        const result = await dispatchWithFallback({
+          primary: { provider: PROVIDER.OPENAI, model: 'openai-primary' },
+          fallback: { provider: PROVIDER.ANTHROPIC, model: 'claude-backup' },
+        }, { text: 'write', jsonMode: false, timeoutMs: 100 }, { reserveFallbackBudget: true, hardDeadline: true });
+        expect(result.ok).toBe(true);
+        // The abandoned primary attempt finally rejects well after the chain
+        // moved on — must be swallowed, not leaked.
+        rejectLate(new Error('adapter blew up late'));
+        await new Promise((resolve) => setImmediate(resolve));
+        await new Promise((resolve) => setImmediate(resolve));
+      } finally {
+        process.off('unhandledRejection', onUnhandledRejection);
+      }
+      expect(unhandled).toEqual([]);
+    });
   });
 });
 

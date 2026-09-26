@@ -66,16 +66,22 @@ describe('admin tree & shrub service-line inputs (audit INP-001/002/004)', () =>
     expect(line.tier).toBe('enhanced');
     expect(line.frequency).toBe(9);
     expect(line.access).toBe('difficult');
-    // Case-insensitive, whitespace-tolerant — the select posts lowercase
-    // but a replayed engineRequest is data, not a contract.
-    expect(translateV2CallToV1Input(baseProfile(), ['TREE_SHRUB'], { treeShrubTier: ' Light ', treeShrubAccess: 'MODERATE' })
-      .services.treeShrub).toMatchObject({ tier: 'light', access: 'moderate' });
+    // Case-insensitive, whitespace-tolerant for a LIVE tier — the select
+    // posts lowercase but a replayed engineRequest is data, not a contract.
+    expect(translateV2CallToV1Input(baseProfile(), ['TREE_SHRUB'], { treeShrubTier: ' Enhanced ', treeShrubAccess: 'MODERATE' })
+      .services.treeShrub).toMatchObject({ tier: 'enhanced', access: 'moderate' });
   });
 
   test('a malformed program or access is refused at the boundary, never defaulted', () => {
-    // Present-but-falsy values are malformed, not defaults.
+    // Present-but-falsy values are malformed, not defaults. 'light' (4x/
+    // quarterly) joined this list 2026-09-24 (owner directive: stop
+    // offering quarterly tree & shrub care) — it is no longer a valid NEW
+    // builder selection, same treatment as the already-retired 'premium'.
+    // Case-insensitive/whitespace-tolerant input is still refused, not
+    // silently mapped.
     for (const options of [
       { treeShrubTier: 'premium' }, { treeShrubTier: 'gold' }, { treeShrubAccess: 'impossible' },
+      { treeShrubTier: 'light' }, { treeShrubTier: ' Light ' },
       { treeShrubTier: false }, { treeShrubTier: 0 }, { treeShrubAccess: false }, { treeShrubAccess: 0 }, { treeShrubTier: ['standard'] },
     ]) {
       let caught;

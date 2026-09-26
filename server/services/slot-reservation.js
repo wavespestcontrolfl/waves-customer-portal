@@ -945,7 +945,7 @@ async function reserveSlot({
           // no cycle with the processor's leads → call_log writers.
           await trx('call_log').where({ id: eng.callLogId }).forUpdate().first('id');
           const blocked = estimate.archived_at
-            || await callSideBlockForEstimateData(trx, reservationData);
+            || await callSideBlockForEstimateData(trx, reservationData, { estimateStatus: estimate.status });
           if (blocked) {
             const err = new Error('estimate is quarantined by a call-linkage correction');
             err.code = 'ESTIMATE_NOT_FOUND';
@@ -2312,7 +2312,7 @@ async function extendReservation({ estimateId, scheduledServiceId, holdMinutes =
       }
       if (extendData?.estimatorEngine?.callLogId) {
         await trx('call_log').where({ id: extendData.estimatorEngine.callLogId }).forUpdate().first('id');
-        if (await callSideBlockForEstimateData(trx, extendData)) {
+        if (await callSideBlockForEstimateData(trx, extendData, { estimateStatus: estimate.status })) {
           const err = new Error('estimate is quarantined by a call-linkage correction');
           err.code = 'ESTIMATE_NOT_FOUND';
           throw err;
