@@ -98,17 +98,24 @@ const TEMPORARY_INSTRUCTION = new RegExp([
 // tomorrow", "this afternoon", "Friday", "mid Oct", "in 2 days") is still
 // stated timing when the extractor leaves due_text empty; it must not be
 // replaced by a per-kind default that could ring before that period.
+// One unit vocabulary for every relative-offset form, so no form carries a
+// shorter unit list than another (Codex #4816 r25/r33): OFFSET_UNIT after
+// "in / within / give me …", SPAN_UNIT after "next / coming / following /
+// over the next". "this year" stays out: "ants all this year" is usually
+// the past, and a false match would drop a real follow-up's bell.
+const OFFSET_UNIT = String.raw`(?:secs?|seconds?|mins?|minutes?|hrs?|hours?|days?|weeks?|wks?|months?|mos?|years?|yrs?)`;
+const SPAN_UNIT = String.raw`(?:days?|weeks?|months?|years?)`;
 const STATED_TIMING = new RegExp([
-  String.raw`\b(?:today|tomorrow|tmrw|tonight|this (?:morning|afternoon|evening|week(?:end)?|month)|next (?:week(?:end)?|month)|later (?:today|this week)|end of (?:the )?(?:day|week|month)|eod|eow)\b`,
+  String.raw`\b(?:today|tomorrow|tmrw|tonight|this (?:morning|afternoon|evening|week(?:end)?|month)|next (?:week(?:end)?|month|year)|later (?:today|this week)|end of (?:the )?(?:day|week|month|year)|eod|eow)\b`,
   // Day parts after a timing preposition ("call me in the morning", "after
   // work"), or plural as a standing preference ("evenings are best"). A bare
   // "good morning" is a greeting, not timing (Codex #4816 r24).
   String.raw`\b(?:in the|during the|by|before|after|around|until|till|early|late) (?:morning|afternoon|evening|night)\b`,
   String.raw`\b(?:mornings|afternoons|evenings|nights)\b`,
   // The period forms TEMPORARY_INSTRUCTION already knows (Codex #4816 r27).
-  String.raw`\bover the (?:weekend|summer|winter|holidays?|next (?:${COUNT} )?(?:days?|weeks?|months?))\b`,
+  String.raw`\bover the (?:weekend|summer|winter|holidays?|next (?:${COUNT} )?${SPAN_UNIT})\b`,
   String.raw`\b(?:through|thru) the (?:weekend|week|month)\b`,
-  String.raw`\b(?:next|coming|following) (?:${COUNT} )?(?:days?|weeks?|months?)\b|\bnext (?:visit|appointment|service|time)\b`,
+  String.raw`\b(?:next|coming|following) (?:${COUNT} )?${SPAN_UNIT}\b|\bnext (?:visit|appointment|service|time)\b`,
   String.raw`\b(?:after|before) (?:work|school|lunch|dinner|noon)\b|\b(?:at )?lunch ?time\b`,
   String.raw`\b${WEEKDAY}`,
   // Undotted abbreviations ("call me Fri"). Wed/sat/sun double as ordinary
@@ -121,9 +128,9 @@ const STATED_TIMING = new RegExp([
   // one unit at a time. Bare "later", "shortly" or "2 hours" are left out:
   // an undated row never bells, so a false match would drop a real
   // follow-up, while a vague "later" only makes the default bell early.
-  String.raw`\b(?:in|within|after|give me|about|like) (?:(?:${COUNT}|half an?|an?(?: half)?|\d+(?:\.\d+)?)\s*(?:-|to|or)?\s*(?:\d+\s*)?)(?:secs?|seconds?|mins?|minutes?|hrs?|hours?|days?|weeks?|wks?|months?)\b`,
+  String.raw`\b(?:in|within|after|give me|about|like) (?:(?:${COUNT}|half an?|an?(?: half)?|\d+(?:\.\d+)?)\s*(?:-|to|or)?\s*(?:\d+\s*)?)${OFFSET_UNIT}\b`,
   String.raw`\b(?:in|after) (?:a (?:bit|few|while|sec|second|minute|moment)|a little (?:bit|while)|a few)\b`,
-  String.raw`\b(?:mid|early|late)[- ]?(?:${MONTH}\b|next (?:week|month)\b)`,
+  String.raw`\b(?:mid|early|late)[- ]?(?:${MONTH}\b|next (?:week|month|year)\b)`,
   String.raw`\b${MONTH}\.? ?(?:${ORDINAL_DAY}|\d{1,2})\b`,
   String.raw`\b(?:${ORDINAL_DAY}|\d{1,2}) (?:of )?${MONTH}\b`,
   // The calendar-date forms match TEMPORARY_INSTRUCTION's, ISO included
