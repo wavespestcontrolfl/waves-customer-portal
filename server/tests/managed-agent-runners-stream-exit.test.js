@@ -224,4 +224,36 @@ describe('lead-response-agent — a status_idle event is not terminal on its own
     await run(load(path));
     expect(recorded()).toMatchObject({ failure: 'session_stream_eof' });
   });
+
+  it('a run with more than 25 stream events still succeeds — the old 25-event max_events cap is gone', async () => {
+    const chatter = Array.from({ length: 30 }, (_, i) => text(`chunk ${i} `));
+    global.fetch = fetchFor([...chatter, idle('end_turn')]);
+    await expect(run(load(path))).resolves.toMatchObject({ sessionId: 'sess-1' });
+    expect(recorded()).toMatchObject({ failure: null });
+  });
+
+  it('a stream that never reaches a terminal event fails as session_timeout under a small LEAD_AGENT_TIMEOUT_MS', async () => {
+    process.env.LEAD_AGENT_TIMEOUT_MS = '500';
+    global.fetch = fetchFor([text('still going'), text('still going 2'), text('still going 3')]);
+    await run(load(path));
+    expect(recorded()).toMatchObject({ sessionId: 'sess-1', failure: expect.objectContaining({ code: 'session_timeout' }) });
+  });
+
+  it('an invalid LEAD_AGENT_TIMEOUT_MS override falls back to the default instead of failing fast', async () => {
+    process.env.LEAD_AGENT_TIMEOUT_MS = 'not-a-number';
+    global.fetch = fetchFor([text('all done'), { event: 'done', data: {} }]);
+    await expect(run(load(path))).resolves.toMatchObject({ sessionId: 'sess-1' });
+    expect(recorded()).toMatchObject({ failure: null });
+  });
+
+  it('opens the SSE stream before posting the kickoff user.message (Managed Agents streams do not replay earlier events)', async () => {
+    global.fetch = fetchFor([{ event: 'done', data: {} }]);
+    await run(load(path));
+    const calls = global.fetch.mock.calls;
+    const streamIndex = calls.findIndex(([url]) => /\/events\/stream$/.test(String(url)));
+    const kickoffIndex = calls.findIndex(([url, opts]) => opts?.method === 'POST' && /\/events$/.test(String(url)));
+    expect(streamIndex).toBeGreaterThan(-1);
+    expect(kickoffIndex).toBeGreaterThan(-1);
+    expect(streamIndex).toBeLessThan(kickoffIndex);
+  });
 });

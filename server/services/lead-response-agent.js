@@ -74,24 +74,71 @@ async function sendSessionEvents(sessionId, events) {
   return apiCall('POST', `/sessions/${sessionId}/events`, { events });
 }
 
-async function* streamSessionEvents(sessionId) {
-  const res = await fetch(`${API_BASE}/sessions/${sessionId}/events/stream`, {
-    headers: {
-      'x-api-key': ANTHROPIC_API_KEY,
-      'anthropic-version': '2023-06-01',
-      'anthropic-beta': BETA_HEADER,
-      'accept': 'text/event-stream',
-    },
-  });
+const DEFAULT_LEAD_AGENT_TIMEOUT_MS = 180000;
+
+// Defensive parse: an unset, non-numeric, or non-positive override falls
+// back to the default rather than producing a NaN/zero/negative deadline.
+function leadAgentTimeoutMs() {
+  const raw = process.env.LEAD_AGENT_TIMEOUT_MS;
+  const parsed = raw === undefined ? NaN : Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_LEAD_AGENT_TIMEOUT_MS;
+}
+
+// Our own deadline, not the provider's — the ledger files it as a timeout.
+// Mirrors server/services/content/agents/agent-dispatcher.js's deadlineError.
+function deadlineError(sessionId, deadline) {
+  return Object.assign(new Error(`session ${sessionId} timed out at its ${new Date(deadline).toISOString()} deadline`), { code: 'session_timeout' });
+}
+
+// Opens the SSE connection and returns it unread. Callers must open the
+// stream BEFORE posting the kickoff user.message — Managed Agents streams
+// do not replay events emitted before the connection is established, so
+// opening it after the kickoff can miss the run's earliest events entirely.
+async function openSessionStream(sessionId, deadline) {
+  const controller = new AbortController();
+  const timeoutMs = Math.max(0, deadline - Date.now());
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let res;
+  try {
+    res = await fetch(`${API_BASE}/sessions/${sessionId}/events/stream`, {
+      headers: {
+        'x-api-key': ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'anthropic-beta': BETA_HEADER,
+        'accept': 'text/event-stream',
+      },
+      signal: controller.signal,
+    });
+  } catch (err) {
+    clearTimeout(timer);
+    if (err?.name === 'AbortError') throw deadlineError(sessionId, deadline);
+    throw err;
+  }
   if (!res.ok) {
+    clearTimeout(timer);
     const err = await res.text();
     throw Object.assign(new Error(`Stream error ${res.status}: ${err}`), { status: res.status, code: `anthropic_${res.status}` });
   }
+  return { sessionId, deadline, res, timer };
+}
 
-  for await (const { event, data } of readSessionFrames(res.body)) {
-    let parsed;
-    try { parsed = JSON.parse(data); } catch { continue; }
-    yield { event, data: parsed };
+// Consumes an already-opened stream (see openSessionStream) against a
+// wall-clock deadline — the AbortController above aborts the underlying
+// fetch at the deadline; this checks it again per-frame so a fetch mock or
+// an already-buffered response can't outrun it.
+async function* readOpenedStream({ sessionId, deadline, res, timer }) {
+  try {
+    for await (const { event, data } of readSessionFrames(res.body)) {
+      if (Date.now() >= deadline) throw deadlineError(sessionId, deadline);
+      let parsed;
+      try { parsed = JSON.parse(data); } catch { continue; }
+      yield { event, data: parsed };
+    }
+  } catch (err) {
+    if (err?.name === 'AbortError') throw deadlineError(sessionId, deadline);
+    throw err;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -157,6 +204,12 @@ const LeadResponseAgent = {
       sessionId = session.id;
       logger.info(`[lead-agent] Session ${sessionId} for lead ${lead.leadId}`);
 
+      const deadline = Date.now() + leadAgentTimeoutMs();
+      // Open the stream first — the kickoff message is posted only once the
+      // SSE connection is live, so no early event is emitted before we're
+      // listening for it.
+      const openedStream = await openSessionStream(sessionId, deadline);
+
       await sendSessionEvents(sessionId, [{
         type: 'user.message',
         content: [{ type: 'text', text: prompt }],
@@ -165,16 +218,9 @@ const LeadResponseAgent = {
       let report = '';
       let toolsExecuted = [];
       let actionTaken = null;
-      let maxIterations = 25;
       const criticalFailures = [];
 
-      for await (const { event, data } of streamSessionEvents(sessionId)) {
-        if (--maxIterations <= 0) {
-          logger.warn(`[lead-agent] Hit max iterations for session ${sessionId}`);
-          failure = 'max_events';
-          break;
-        }
-
+      for await (const { event, data } of readOpenedStream(openedStream)) {
         if (event === 'assistant' || event === 'text') {
           if (data.text) report += data.text;
           if (data.content) {
