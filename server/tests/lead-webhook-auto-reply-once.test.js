@@ -28,6 +28,7 @@ jest.mock('../models/db', () => {
   const mkChain = (firstFn) => {
     const chain = {
       where: jest.fn(() => chain),
+      whereIn: jest.fn(() => chain),
       whereNotNull: jest.fn(() => chain),
       whereRaw: jest.fn(() => chain),
       first: jest.fn(() => firstFn()),
@@ -81,7 +82,10 @@ describe('hasPriorLeadAutoReply', () => {
     db.__state.audit = async () => ({ id: 'a1' });
     await expect(hasPriorLeadAutoReply(PHONE)).resolves.toBe(true);
     const audit = db.__chains['messaging_audit_log'];
-    expect(audit.where).toHaveBeenCalledWith({ entry_point: 'lead_webhook_auto_reply', to_hash: PHONE_HASH });
+    // The agent's personal text counts too: before the one-text ruling it
+    // could be the only automated text a phone ever received.
+    expect(audit.whereIn).toHaveBeenCalledWith('entry_point', ['lead_webhook_auto_reply', 'lead_response_auto_reply']);
+    expect(audit.where).toHaveBeenCalledWith({ to_hash: PHONE_HASH });
     expect(audit.whereNotNull).toHaveBeenCalledWith('sent_at');
     // Sentinel provider ids (gate-blocked / template-disabled /
     // owner-silence) record sent_at without any text reaching the
@@ -121,6 +125,7 @@ describe('hasPriorLeadAutoReply', () => {
     const mkChain = () => {
       const chain = {
         where: jest.fn(() => chain),
+        whereIn: jest.fn(() => chain),
         whereNotNull: jest.fn(() => chain),
         whereRaw: jest.fn(() => chain),
         first: jest.fn(async () => null),
@@ -204,6 +209,6 @@ describe('claimLeadFirstTouch — normalizes the phone like the messaging layer'
   test('the audit leg hashes the normalized recipient, not the raw string', async () => {
     db.__state.audit = async () => ({ id: 'a1' });
     await expect(claimLeadFirstTouch('(941) 555-1234', 'cust-1')).resolves.toMatchObject({ claimed: false });
-    expect(db.__chains['messaging_audit_log'].where).toHaveBeenCalledWith({ entry_point: 'lead_webhook_auto_reply', to_hash: PHONE_HASH });
+    expect(db.__chains['messaging_audit_log'].where).toHaveBeenCalledWith({ to_hash: PHONE_HASH });
   });
 });

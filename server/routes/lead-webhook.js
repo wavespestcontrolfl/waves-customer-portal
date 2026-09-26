@@ -763,23 +763,11 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
     // the menu text twice in prod). See services/lead-auto-reply.js for
     // the dedup predicate and the once-ever claim mechanism.
     try {
+      // With the agent configured, both the standard reply and the intake
+      // seed wait for the agent's outcome (see sendFallbackAutoReply below).
       if (!leadAgentConfigured) {
         await sendLeadAutoReplyOnce({ customer, phoneFormatted, firstName, location, leadSource });
-      }
-
-      // Seed the intake state machine so the customer's next inbound SMS
-      // gets routed through server/services/lead-intake.js (classify →
-      // ask for address → auto-create draft estimate → notify Adam).
-      // Seeded regardless of which automated text (if any) sent — the
-      // intake state machine reacts to the customer's NEXT inbound SMS.
-      try {
-        await db('customers').where({ id: customer.id }).update({
-          lead_intake_status: 'awaiting_service',
-        });
-      } catch (stateErr) {
-        // Non-fatal — the auto-reply was sent; worst case the next SMS
-        // falls through to the normal AI draft path.
-        logger.warn(`[lead-webhook] intake state seed failed: ${stateErr.message}`);
+        await seedLeadIntakeState(customer.id);
       }
     } catch (e) { logger.error(`Lead auto-reply failed: ${e.message}`); }
 
@@ -1160,7 +1148,12 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
     // The generic auto-reply above is the safety net; this replaces it with
     // something specific — see settleLeadResponseAgentRun for the "exactly
     // one automated text" fallback rule (owner ruling 2026-09-26).
+    // The intake state is seeded only on this path: awaiting_service expects
+    // an answer to the standard reply, not to whatever the agent's personal
+    // text asked. After an agent send the state stays unset, so the reply
+    // takes the normal AI draft path.
     const sendFallbackAutoReply = () => sendLeadAutoReplyOnce({ customer, phoneFormatted, firstName, location, leadSource })
+      .then(() => seedLeadIntakeState(customer.id))
       .catch(fallbackErr => logger.error(`[lead-agent] Fallback standard reply failed: ${fallbackErr.message}`));
     try {
       const LeadResponseAgent = require('../services/lead-response-agent');
@@ -1177,7 +1170,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
         pageUrl: pageUrl || '',
         formName: formName || '',
       });
-      settleLeadResponseAgentRun({
+      void settleLeadResponseAgentRun({
         agentConfigured: leadAgentConfigured,
         processLead,
         sendFallback: sendFallbackAutoReply,
@@ -1803,10 +1796,27 @@ function shouldRunLeadAcquisition({ isNewCustomer, isDuplicateSubmission } = {})
 // processLead/sendFallback/onError are injected so this can be tested
 // directly without driving the whole POST handler.
 // How long a configured agent gets before the standard reply goes out
-// instead — longer than the agent's own run deadline, so normally the agent
-// has finished (or failed) by then. A late agent send cannot double-text:
-// the fallback takes the phone's shared first-touch claim first.
-const LEAD_AGENT_FALLBACK_AFTER_MS = 4 * 60 * 1000;
+// instead: the agent's promised response window (under 60 seconds, see
+// lead-response-agent-config.js), so a stalled run never leaves a new lead
+// without an acknowledgment for longer than that. A late agent send cannot
+// double-text: the fallback takes the phone's shared first-touch claim
+// first, and the agent's send_lead_response is then refused.
+const LEAD_AGENT_FALLBACK_AFTER_MS = 60 * 1000;
+
+// Seed the intake state machine so the customer's next inbound SMS gets
+// routed through server/services/lead-intake.js (classify → ask for address
+// → auto-create draft estimate → notify Adam). Only after the standard
+// reply path. Non-fatal: worst case the next SMS falls through to the
+// normal AI draft path.
+async function seedLeadIntakeState(customerId) {
+  try {
+    await db('customers').where({ id: customerId }).update({
+      lead_intake_status: 'awaiting_service',
+    });
+  } catch (stateErr) {
+    logger.warn(`[lead-webhook] intake state seed failed: ${stateErr.message}`);
+  }
+}
 
 async function settleLeadResponseAgentRun({ agentConfigured, processLead, sendFallback, onError, fallbackAfterMs = LEAD_AGENT_FALLBACK_AFTER_MS }) {
   if (!agentConfigured) {
@@ -1873,6 +1883,7 @@ module.exports._test = {
   shouldApplyTriageServiceInterest,
   shouldRunLeadAcquisition,
   settleLeadResponseAgentRun,
+  LEAD_AGENT_FALLBACK_AFTER_MS,
   applyLeadEstimateAutomationGate,
   determineLeadSource,
   isHoneypotTripped,

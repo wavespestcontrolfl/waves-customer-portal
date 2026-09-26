@@ -20,7 +20,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/automation-runner', () => ({ enrollCustomer: jest.fn() }));
 
 const { _test } = require('../routes/lead-webhook');
-const { settleLeadResponseAgentRun } = _test;
+const { settleLeadResponseAgentRun, LEAD_AGENT_FALLBACK_AFTER_MS } = _test;
 
 function harness(processLeadImpl) {
   const sendFallback = jest.fn(async () => {});
@@ -55,6 +55,24 @@ describe('settleLeadResponseAgentRun — agent configured', () => {
     await settleLeadResponseAgentRun({ agentConfigured: true, processLead, sendFallback, onError, fallbackAfterMs: 20 });
     expect(sendFallback).toHaveBeenCalledTimes(1);
     expect(onError).not.toHaveBeenCalled();
+  });
+
+  test('default wait is the agent\'s promised 60-second response window', async () => {
+    // A stalled session must not leave a new lead unacknowledged for longer
+    // than the agent's documented under-60-second response.
+    expect(LEAD_AGENT_FALLBACK_AFTER_MS).toBe(60 * 1000);
+    jest.useFakeTimers();
+    try {
+      const { sendFallback, onError, processLead } = harness(() => new Promise(() => {}));
+      const settling = settleLeadResponseAgentRun({ agentConfigured: true, processLead, sendFallback, onError });
+      await jest.advanceTimersByTimeAsync(59 * 1000);
+      expect(sendFallback).not.toHaveBeenCalled();
+      await jest.advanceTimersByTimeAsync(1000);
+      await settling;
+      expect(sendFallback).toHaveBeenCalledTimes(1);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   test('an agent that sends before the bounded wait ends → no fallback', async () => {

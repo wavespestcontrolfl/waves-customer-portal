@@ -70,6 +70,11 @@ const { renderRequiredSmsTemplate } = require('./sms-template-renderer');
  */
 const LEAD_AUTO_REPLY_AUDIT_CUTOVER = new Date('2026-05-04T11:16:45Z');
 const REAL_TWILIO_SID_RE = /^(SM|MM)/;
+// Both automated first-touch texts count as "already greeted": the standard
+// reply and the Lead Response agent's personal text. Before the one-text
+// ruling the agent could reach a phone whose standard reply had failed,
+// leaving only a lead_response_auto_reply audit row and no claim marker.
+const LEAD_FIRST_TOUCH_ENTRY_POINTS = ['lead_webhook_auto_reply', 'lead_response_auto_reply'];
 
 async function hasPriorLeadAutoReply(phoneFormatted, dbc = db) {
   try {
@@ -80,7 +85,8 @@ async function hasPriorLeadAutoReply(phoneFormatted, dbc = db) {
 
     const toHash = crypto.createHash('sha256').update(String(phoneFormatted || ''), 'utf8').digest('hex');
     const auditHit = await dbc('messaging_audit_log')
-      .where({ entry_point: 'lead_webhook_auto_reply', to_hash: toHash })
+      .whereIn('entry_point', LEAD_FIRST_TOUCH_ENTRY_POINTS)
+      .where({ to_hash: toHash })
       .whereNotNull('sent_at')
       .whereRaw("provider_message_id ~ '^(SM|MM)'")
       .first();
