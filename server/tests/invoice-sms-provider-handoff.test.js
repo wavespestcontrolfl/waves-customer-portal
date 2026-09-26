@@ -657,6 +657,25 @@ describe('invoice SMS provider handoff', () => {
       };
     }
 
+    test('a queued replay keeps Email in its fan-out when no Email leg was accepted', async () => {
+      const smsLogInserts = [];
+      const { mock } = invoiceQueryDb({ smsLogInserts });
+      db.mockImplementation(mock);
+      sendCustomerMessage.mockImplementation(async () => ({
+        sent: false, blocked: false, deliveryOutcome: 'not_sent',
+        code: 'BILLING_CHANNEL_FAILED', reason: 'twilio unavailable', retryable: true,
+        channelResults: {
+          push: { sent: true, deliveryOutcome: 'accepted' },
+          sms: { sent: false, blocked: false, deliveryOutcome: 'not_sent',
+            code: 'BILLING_CHANNEL_FAILED', reason: 'twilio unavailable', retryable: true },
+        },
+      }));
+      const result = await InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' });
+      expect(result).toMatchObject({ sent: true, pendingChannel: 'sms', pendingChannelQueued: true });
+      expect(smsLogInserts).toHaveLength(1);
+      expect(JSON.parse(smsLogInserts[0].metadata).hasEmailLeg).toBeUndefined();
+    });
+
     test('a retryable pending Text leg is queued as one invoice_send_deferred row; invoice finalized; no claim restore', async () => {
       const smsLogInserts = [];
       const { mock } = invoiceQueryDb({ smsLogInserts });

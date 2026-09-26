@@ -2189,7 +2189,7 @@ async function restoreConsumedQueuedSend(consumedRows, database = db, claimToken
 // selection exactly like the immediate send does, and its own recipient
 // gate is exempted for this entry point (deferred-replay-registry.js
 // invoice_send_deferred: replayWithoutPhone).
-async function queuePendingChannelReplay({ invoiceId, customerId, toPhone, body, scheduledFor, originalBlockCode }) {
+async function queuePendingChannelReplay({ invoiceId, customerId, toPhone, body, scheduledFor, originalBlockCode, emailAccepted = false }) {
   const existingQueued = await db("sms_log")
     .whereIn("status", ["scheduled", "sending"])
     .whereRaw("metadata->>'entry_point' = ?", [INVOICE_SEND_DEFERRED_ENTRY_POINT])
@@ -2214,10 +2214,10 @@ async function queuePendingChannelReplay({ invoiceId, customerId, toPhone, body,
       invoice_id: invoiceId,
       billingDeliveryCategory: "invoice",
       notificationEventKey: `invoice:${invoiceId}:sent`,
-      // The already-accepted leg (Email) must never be re-touched by the
-      // replay — same marker sendViaSMSAndEmail's own held-SMS queue uses
-      // to keep its separate Email attempt from being duplicated.
-      hasEmailLeg: true,
+      // Only an Email leg that was actually accepted is excluded from the
+      // replay (the same marker sendViaSMSAndEmail's held-SMS queue uses);
+      // an Email that did not go out stays in the replay's fan-out.
+      ...(emailAccepted ? { hasEmailLeg: true } : {}),
       original_block_code: originalBlockCode,
       replay_purpose: "payment_link",
       refresh_customer_phone: true,
@@ -5488,6 +5488,8 @@ const InvoiceService = {
             const pendingChannelQueueOutcome = await queuePendingChannelReplay({
               invoiceId, customerId: customer.id, toPhone: customer.phone || "",
               body, scheduledFor, originalBlockCode: pendingLeg.code,
+              emailAccepted: acceptedChannelResults?.email?.sent === true
+                && acceptedChannelResults.email.deliveryOutcome === "accepted",
             });
             pendingChannelQueued = pendingChannelQueueOutcome.queued === true;
           } catch (queueErr) {
