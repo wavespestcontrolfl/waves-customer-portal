@@ -1065,9 +1065,9 @@ describe('name_email_mismatch in routing', () => {
     // through the inbound-only fail-open path, so an outbound confirmed
     // booking still held on it. Now it never blocks either direction.
     const e = validV2Extraction();
-    e.caller.first_name = 'Jeanette';
+    e.caller.first_name = 'Marisol';
     e.caller.last_name = null;
-    e.caller.email = 'gennettryan@yahoo.com';
+    e.caller.email = 'tpageharlan@example.com';
     const r = canAutoRoute(e, { contactPhone: '+19415551234', addressValidation: AV_CLEAN, failOpen: false });
     expect(r.allowed).toBe(true);
   });
