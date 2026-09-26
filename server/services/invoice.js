@@ -2057,61 +2057,6 @@ function anyBillingChannelAccepted(channelResults, sent) {
   return Object.values(channelResults).some(legAccepted);
 }
 
-// Shared by sendViaSMS's own partial-fanout surfacing AND the
-// invoice_send_deferred registry finalize hook's post-REPLAY pending check
-// (Codex round-4 P2 #4963 pre-push audit: a replay can itself only
-// partially succeed — e.g. it accepts Text while Email is still
-// retryable/held — and that must not be discharged as done). Given a
-// channelResults map, classifies every non-accepted leg PER CHANNEL — never
-// one "winner" that starves a sibling (Codex round-4 P1 pre-push audit: an
-// uncertain leg used to block the WHOLE requeue even when a different,
-// genuinely retryable leg was also pending):
-//   - uncertain: never retried (a retry could double-send) — the caller
-//     must exclude it from the replay's own fan-out too (replaySkipChannels),
-//     since staying silent about it would let the NEXT replay attempt send
-//     it again just as blindly.
-//   - retryable: queued (all of them, on the SAME one new row).
-//   - blocked: no retryable/deferred/uncertain flag (e.g. a phone-less
-//     customer's MISSING_SMS_RECIPIENT) — surfaced only, exactly as before.
-// pendingChannel is a single representative for logging/the legacy
-// single-channel API response: the first retryable leg wins (it is the
-// actionable one — what pendingChannelQueued describes), else the first
-// uncertain leg, else the first blocked leg. Callers gate on "was anything
-// accepted at all" themselves before calling this — with nothing accepted,
-// every leg would be "pending" and that is a full failure, not a partial one.
-function pendingBillingLeg(channelResults) {
-  if (!channelResults) {
-    return { pendingLegs: [], pendingChannel: null, uncertainChannels: [], retryableLegs: [], blockedChannels: [] };
-  }
-  const pendingLegs = Object.entries(channelResults).filter(([, leg]) => !legAccepted(leg));
-  const uncertainLegs = pendingLegs.filter(([, leg]) => leg?.deliveryOutcome === "uncertain");
-  const retryableLegs = pendingLegs.filter(([, leg]) => leg?.deliveryOutcome !== "uncertain"
-    && (leg?.retryable === true || leg?.deferred === true));
-  const blockedLegs = pendingLegs.filter(([, leg]) => leg?.deliveryOutcome !== "uncertain"
-    && !(leg?.retryable === true || leg?.deferred === true));
-  const pendingChannel = retryableLegs[0] || uncertainLegs[0] || blockedLegs[0] || null;
-  return {
-    pendingLegs,
-    pendingChannel,
-    uncertainChannels: uncertainLegs.map(([channel]) => channel),
-    retryableLegs,
-    blockedChannels: blockedLegs.map(([channel]) => channel),
-  };
-}
-
-// Shared queue-time scheduling for a retryable/deferred pending leg — the
-// leg's own explicit nextAllowedAt when it has one, else a backoff off
-// retryAfterMs or the generic default. Same rule for the initial send's
-// own queue and a replay-of-a-replay's re-queue (Codex round-4 P2
-// #4963 pre-push audit).
-function scheduledForPendingLeg(leg) {
-  const explicitNextAllowedAt = leg?.nextAllowedAt ? new Date(leg.nextAllowedAt) : null;
-  const retryDelayMs = Number.isFinite(leg?.retryAfterMs)
-    ? Math.max(0, leg.retryAfterMs) : PENDING_CHANNEL_RETRY_DELAY_MS;
-  return explicitNextAllowedAt && !Number.isNaN(explicitNextAllowedAt.getTime())
-    ? explicitNextAllowedAt : new Date(Date.now() + retryDelayMs);
-}
-
 // Staff-facing wording for which channel(s) actually delivered, built from
 // the SAME channelResults fan-out truth finalizeInvoiceAfterSms stamps from
 // — never the legacy "sent via SMS" wording regardless of which channel(s)
@@ -2264,151 +2209,76 @@ async function restoreConsumedQueuedSend(consumedRows, database = db, claimToken
   }
 }
 
-// Codex round-3 P1 (#4963): sendViaSMS's own fallback when an accepted leg
-// (Email, say) leaves a sibling leg (Text/App) still owing a retry — the
-// SAME invoice_send_deferred rail sendViaSMSAndEmail's held-SMS-leg queue
-// (below, ~5910) already uses, so this row re-enters the canonical router
-// at replay time (billingDeliveryCategory 'invoice', replay_purpose
-// 'payment_link') and re-fans-out whichever channel(s) the customer
-// currently has selected — it does not matter which leg was pending when
-// this queued, or whether more than one still is: the replay just re-tries
-// everything selected, except any channel THIS attempt already delivered.
-// Codex round-4 P2: that used to be Email-only (hasEmailLeg) because Email
-// has its own provider-side event dedupe (idempotencyKey) and so did App
-// (notifyCustomer dedupeKey) — but Text has none, so when TEXT was the
-// accepted leg and Email is the one still pending, excluding only Email
-// left Text with nothing to stop the replay from re-sending it (a real
-// double-text). replaySkipChannels (billing-channel-routing.js's
-// selectedLegs) now carries EVERY channel this attempt actually delivered,
-// not just Email — hasEmailLeg is kept unchanged alongside it since it also
-// drives sendCustomerMessage's own Email-leg-ownership branch elsewhere.
-// Retry-idempotent: an existing live row for this invoice is adopted, never
-// duplicated. `toPhone` may be blank for a phone-less customer (sms_log.
-// to_phone is NOT NULL): that row stamps requires_registered_dispatch, and
-// the registry's invoice_send_deferred entry (replayWithoutPhone + a
-// pass-through dispatch) lets the scheduler replay it through the router,
-// which resolves the customer's explicit Email/App selection without a
-// phone. from_phone is a placeholder; resolve_from_by_customer makes the
-// send use the customer's location line. Runs under `database` (the
-// caller's own transaction when finalizeInvoiceAfterSms calls it, or the
-// plain pool otherwise) so the enqueue commits or fails together with
-// whatever wrote it.
+// Codex round-3 P1 (#4963), simplified in round 5 (split PR): sendViaSMS's
+// own fallback when an accepted leg (Email, say) leaves a sibling leg
+// (Text/App) genuinely retryable/deferred — queues the WHOLE notice ONCE
+// on the same invoice_send_deferred rail sendViaSMSAndEmail's held-SMS-leg
+// queue (below, ~5910) already uses. The replay re-enters the canonical
+// router (billingDeliveryCategory 'invoice', replay_purpose 'payment_link')
+// and re-fans-out EVERY currently-selected channel with no exclusion list
+// at all — safe because Email (idempotencyKey), App (notifyCustomer
+// dedupeKey), and now Text (the sibling fix/billing-text-leg-dedupe PR,
+// keyed the same way on notificationEventKey) all dedupe an already-
+// accepted leg on their own. partial_fanout_retry marks the row for the
+// registry's own durable stamping (finalize) only — it carries no attempt
+// count, no skip list, no successor chain: if a replay again only partly
+// succeeds, the scheduler's own retry/backoff of this ONE row covers it,
+// same as any other scheduled-sms retry. Retry-idempotent: an existing
+// live row for this invoice is adopted, never duplicated — that check-
+// then-insert running inside finalizeInvoiceAfterSms's own transaction
+// (the only caller) is what keeps this to one row per invoice; there is
+// no concurrent second caller to race. `toPhone` may be blank for a
+// phone-less customer (sms_log.to_phone is NOT NULL): that row stamps
+// requires_registered_dispatch, and the registry's invoice_send_deferred
+// entry (replayWithoutPhone + a pass-through dispatch) lets the scheduler
+// replay it through the router, which resolves the customer's explicit
+// Email/App selection without a phone. from_phone is a placeholder;
+// resolve_from_by_customer makes the send use the customer's location
+// line. Runs under `database` (the caller's own transaction) so the
+// enqueue commits or fails together with the delivery stamp.
 async function queuePendingChannelReplay({
-  invoiceId, customerId, toPhone, body, scheduledFor, originalBlockCode, channelResults = null,
-  // previousSkipChannels: replaySkipChannels already recorded on the row
-  // this call supersedes (a replay-of-a-replay re-queue, finding C's own
-  // pending check) — unioned with whatever THIS attempt newly delivered, so
-  // a channel that delivered two attempts ago is never re-sent by the next
-  // one either. attempt: this row's own partial_fanout_attempt (1 for the
-  // very first queue, N+1 for a re-queue). excludeSmsLogId: the row id
-  // currently being finalized, if any — it can still read 'sending'/
-  // 'scheduled' at this exact moment (durable-finalize's own retry-only
-  // conversion), so without this the dedupe check below could "adopt"
-  // that SAME row as if a fresh retry already existed and skip queuing a
-  // genuine new one for the channel still pending (Codex round-4 P2
-  // #4963 pre-push audit).
-  previousSkipChannels = [], attempt = 1, excludeSmsLogId = null, database = db,
+  invoiceId, customerId, toPhone, body, scheduledFor, originalBlockCode, database = db,
 }) {
-  const runAttempt = async (conn) => {
-    // Advisory xact lock keyed on the invoice, released automatically when
-    // the enclosing transaction ends — matches this file's own setup-fee
-    // dedupe lock (~line 3581) and the repo-wide convention (admin-unread.js,
-    // appointment-tagger.js, complete-scheduled-service.js, …). Serializes
-    // the check-then-insert below against a CONCURRENT caller racing the
-    // same invoice (Codex round-4 P1 pre-push audit: without this, two
-    // callers could both read "nothing queued yet" and both insert a row).
-    await conn.raw("SELECT pg_advisory_xact_lock(hashtext(?))", [`invoice_send_deferred:${invoiceId}`]);
-    let existingQueuedQuery = conn("sms_log")
-      .whereIn("status", ["scheduled", "sending"])
-      .whereRaw("metadata->>'entry_point' = ?", [INVOICE_SEND_DEFERRED_ENTRY_POINT])
-      .whereRaw("metadata->>'invoice_id' = ?", [String(invoiceId)]);
-    if (excludeSmsLogId) existingQueuedQuery = existingQueuedQuery.whereNot({ id: excludeSmsLogId });
-    const existingQueued = await existingQueuedQuery.first("id");
-    if (existingQueued) {
-      logger.info(`[invoice] Pending-channel retry for invoice ${invoiceId} already queued (${existingQueued.id}) — not re-queued`);
-      return { queued: true, id: existingQueued.id, existing: true };
-    }
-    // Every channel this attempt actually delivered (legAccepted) OR left
-    // uncertain (Codex round-4 P1 pre-push audit: an uncertain leg is never
-    // retried — a retry could double-send — so it must be excluded from
-    // the replay's own fan-out too, exactly like an accepted leg, or the
-    // NEXT replay would blindly re-attempt it) is skipped on replay.
-    // Whatever is genuinely retryable/deferred is what the replay still
-    // owes — persisted as pending_channels so the replay's own finalize
-    // (Codex round-4 P2 finding C) knows which timestamp(s) to stamp when
-    // it accepts them. A permanently-blocked leg (no retryable/deferred/
-    // uncertain flag) is neither — surfaced only, same as before.
-    const knownChannels = ["email", "push", "sms"];
-    const acceptedChannels = channelResults
-      ? knownChannels.filter((ch) => legAccepted(channelResults[ch]))
-      : [];
-    const { uncertainChannels, retryableLegs } = pendingBillingLeg(channelResults);
-    const retryableChannels = retryableLegs.map(([channel]) => channel);
-    const skipChannels = Array.from(new Set([
-      ...(Array.isArray(previousSkipChannels) ? previousSkipChannels : []),
-      ...acceptedChannels,
-      ...uncertainChannels,
-    ]));
-    const emailAccepted = acceptedChannels.includes("email");
-    const TWILIO_NUMBERS = require("../config/twilio-numbers");
-    await conn("sms_log").insert({
-      customer_id: customerId,
-      direction: "outbound",
-      from_phone: TWILIO_NUMBERS.getOutboundNumber(),
-      to_phone: toPhone || "",
-      message_body: body,
-      status: "scheduled",
-      scheduled_for: scheduledFor,
-      message_type: "invoice",
-      metadata: JSON.stringify({
-        entry_point: INVOICE_SEND_DEFERRED_ENTRY_POINT,
-        invoice_id: invoiceId,
-        billingDeliveryCategory: "invoice",
-        notificationEventKey: `invoice:${invoiceId}:sent`,
-        // Only an Email leg that was actually accepted is excluded from the
-        // replay via this marker (the same one sendViaSMSAndEmail's held-SMS
-        // queue uses, and sendCustomerMessage's own Email-ownership branch
-        // elsewhere reads); an Email that did not go out stays in the
-        // replay's fan-out. Kept alongside replaySkipChannels, not replaced
-        // by it — the two markers serve different readers.
-        ...(emailAccepted ? { hasEmailLeg: true } : {}),
-        // Every channel delivered OR left uncertain across this AND every
-        // earlier attempt (Text has no dedupe of its own, so this is the
-        // only thing stopping a replay from re-sending it — see
-        // billing-channel-routing.js's selectedLegs).
-        ...(skipChannels.length ? { replaySkipChannels: skipChannels } : {}),
-        // What this row is actually still chasing (retryable/deferred
-        // legs ONLY — never an uncertain or permanently-blocked one), and
-        // the marker that scopes finding C's per-channel replay stamping/
-        // pending-recheck to rows THIS helper queues (never
-        // sendViaSMSAndEmail's own pre-existing invoice_send_deferred rows,
-        // which keep finalizeDeferredCompletionSend's SMS-only stamp).
-        // partial_fanout_attempt bounds the re-queue chain (finding C's own
-        // finalize hook caps it) — 1 for the very first queue, incremented
-        // on each re-queue.
-        ...(retryableChannels.length
-          ? { pending_channels: retryableChannels, partial_fanout_retry: true, partial_fanout_attempt: attempt }
-          : {}),
-        original_block_code: originalBlockCode,
-        replay_purpose: "payment_link",
-        refresh_customer_phone: true,
-        resolve_from_by_customer: true,
-        // Phone-less rows only: the scheduler replays a blank-phone billing
-        // row only when it carries this AND the entry opts in
-        // (replayWithoutPhone + dispatch). Phoned rows never carry it.
-        ...(toPhone ? {} : { requires_registered_dispatch: true }),
-      }),
-    });
-    return { queued: true, existing: false };
-  };
-  // Already inside a caller-managed transaction (finalizeInvoiceAfterSms
-  // passes its own trx, so the lock and the delivery stamp commit/rollback
-  // together) — lock on THAT handle, per Codex round-4 P1 pre-push audit
-  // instructions. Otherwise (the registry's post-replay re-queue, which
-  // passes no override and gets the plain pool) wrap the whole
-  // lock+select+insert in one new transaction of our own.
-  if (database !== db) return runAttempt(database);
-  return database.transaction((trx) => runAttempt(trx));
+  const existingQueued = await database("sms_log")
+    .whereIn("status", ["scheduled", "sending"])
+    .whereRaw("metadata->>'entry_point' = ?", [INVOICE_SEND_DEFERRED_ENTRY_POINT])
+    .whereRaw("metadata->>'invoice_id' = ?", [String(invoiceId)])
+    .first("id");
+  if (existingQueued) {
+    logger.info(`[invoice] Pending-channel retry for invoice ${invoiceId} already queued (${existingQueued.id}) — not re-queued`);
+    return { queued: true, id: existingQueued.id, existing: true };
+  }
+  const TWILIO_NUMBERS = require("../config/twilio-numbers");
+  await database("sms_log").insert({
+    customer_id: customerId,
+    direction: "outbound",
+    from_phone: TWILIO_NUMBERS.getOutboundNumber(),
+    to_phone: toPhone || "",
+    message_body: body,
+    status: "scheduled",
+    scheduled_for: scheduledFor,
+    message_type: "invoice",
+    metadata: JSON.stringify({
+      entry_point: INVOICE_SEND_DEFERRED_ENTRY_POINT,
+      invoice_id: invoiceId,
+      billingDeliveryCategory: "invoice",
+      notificationEventKey: `invoice:${invoiceId}:sent`,
+      // Marker only, read by the registry's finalize hook to scope its
+      // durable per-channel stamping to rows THIS helper queues (never
+      // sendViaSMSAndEmail's own pre-existing invoice_send_deferred rows,
+      // which keep finalizeDeferredCompletionSend's SMS-only stamp).
+      partial_fanout_retry: true,
+      original_block_code: originalBlockCode,
+      replay_purpose: "payment_link",
+      refresh_customer_phone: true,
+      resolve_from_by_customer: true,
+      // Phone-less rows only: the scheduler replays a blank-phone billing
+      // row only when it carries this AND the entry opts in
+      // (replayWithoutPhone + dispatch). Phoned rows never carry it.
+      ...(toPhone ? {} : { requires_registered_dispatch: true }),
+    }),
+  });
+  return { queued: true, existing: false };
 }
 
 // A provider-accepted SMS, replacement queued SMS, or full-credit outcome
@@ -5651,17 +5521,25 @@ const InvoiceService = {
       // accepted and any leg isn't" instead: when every leg IS accepted,
       // the filter below is empty regardless, so dropping the sendResult.sent
       // check never changes the fully-accepted case.
-      // Codex round-4 P1 pre-push audit: an uncertain leg used to win
-      // outright and block queuing a DIFFERENT, genuinely retryable leg —
-      // per-channel now: every uncertain leg is logged by name and excluded
-      // from the replay (pendingBillingLeg/queuePendingChannelReplay), every
-      // retryable/deferred leg is queued (all on the SAME one new row), and
-      // pendingChannel is just the representative for this single-channel
-      // API response (the first retryable leg — the actionable one — wins,
-      // else the first uncertain, else the first blocked).
-      const { pendingChannel, uncertainChannels, retryableLegs } = acceptedChannelResults && anyChannelAccepted
-        ? pendingBillingLeg(acceptedChannelResults)
-        : { pendingChannel: null, uncertainChannels: [], retryableLegs: [] };
+      // Codex round-5 (#4963), simplified for the split PR: no per-channel
+      // exclusion list anymore — a replay just re-fans-out EVERYTHING
+      // selected (Email/App/Text all dedupe an already-accepted leg on
+      // their own once the sibling fix/billing-text-leg-dedupe PR lands).
+      // The only decision left here is whether it's SAFE to queue a
+      // whole-notice replay at all: an uncertain leg means we don't know
+      // if it delivered, and a replay would retry it too — so ANY
+      // uncertain leg blocks queuing entirely (surfaced/logged, never
+      // requeued); otherwise, any retryable/deferred leg queues the whole
+      // notice once. pendingChannel is just the representative for this
+      // single-channel API response/log line (retryable wins — the
+      // actionable one — else uncertain, else permanently blocked).
+      const nonAcceptedLegs = acceptedChannelResults && anyChannelAccepted
+        ? Object.entries(acceptedChannelResults).filter(([, leg]) => !legAccepted(leg))
+        : [];
+      const uncertainLegs = nonAcceptedLegs.filter(([, leg]) => leg?.deliveryOutcome === "uncertain");
+      const retryableLegs = nonAcceptedLegs.filter(([, leg]) => leg?.deliveryOutcome !== "uncertain"
+        && (leg?.retryable === true || leg?.deferred === true));
+      const pendingChannel = retryableLegs[0] || uncertainLegs[0] || nonAcceptedLegs[0] || null;
 
       if (!anyChannelAccepted) {
         logger.warn(
@@ -5688,39 +5566,38 @@ const InvoiceService = {
         throw err;
       }
 
-      // The accepted leg(s) are delivered; a pending leg (if any) needs its
-      // own retry — queued onto the SAME invoice_send_deferred rail
-      // sendViaSMSAndEmail's held-SMS leg already uses (Codex round-3 P1
-      // #4963), so it actually gets retried instead of being silently
-      // dropped. Never queued for an uncertain outcome (a retry could
-      // double-send — surfaced only, per the round-2 fix); a permanently
-      // blocked leg (no retryable/deferred flag — e.g. a phone-less
-      // customer's MISSING_SMS_RECIPIENT) is surfaced but not queued either,
-      // since retrying it would just fail the same way again. The actual
-      // enqueue happens inside finalizeInvoiceAfterSms (below), in the SAME
-      // transaction as the delivery stamp — this just decides WHETHER to
-      // queue and computes its params; pendingChannelToQueue/
-      // pendingChannelQueued are declared above the try block.
+      // The accepted leg(s) are delivered; if another leg is genuinely
+      // retryable/deferred (and NONE is uncertain), queue the WHOLE notice
+      // once onto the SAME invoice_send_deferred rail sendViaSMSAndEmail's
+      // held-SMS leg already uses (Codex round-3 P1 #4963; simplified in
+      // round 5 for the split PR — no per-channel exclusion list, since a
+      // replay re-fans-out everything and every channel now dedupes an
+      // already-accepted leg on its own). Any uncertain leg blocks queuing
+      // entirely — a replay would retry it too, risking a double-send — so
+      // it is surfaced/logged only, same as a permanently-blocked leg (no
+      // retryable/deferred flag, e.g. a phone-less customer's
+      // MISSING_SMS_RECIPIENT). The actual enqueue happens inside
+      // finalizeInvoiceAfterSms (below), in the SAME transaction as the
+      // delivery stamp — this just decides WHETHER to queue and computes
+      // its params; pendingChannelToQueue/pendingChannelQueued are
+      // declared above the try block.
       if (pendingChannel) {
         const pendingLeg = pendingChannel[1] || {};
         logger.warn(
           `[invoice] payment-link ${pendingChannel[0]} leg for invoice ${invoiceId} needs retry after another leg was accepted: ${pendingLeg.code} — ${pendingLeg.reason}`,
         );
-        // Every uncertain leg is named — a retry could double-send it, so
-        // it is never queued, only ever excluded from the replay's own
-        // fan-out (queuePendingChannelReplay adds it to replaySkipChannels).
-        for (const uncertainChannel of uncertainChannels) {
-          logger.warn(`[invoice] payment-link ${uncertainChannel} leg for invoice ${invoiceId} is uncertain — not requeued (no double-send)`);
-        }
-        // Gate on "is ANY leg retryable/deferred", not on the single
-        // representative pendingChannel — an uncertain leg elsewhere must
-        // never starve a genuinely retryable sibling.
-        if (retryableLegs.length) {
+        if (uncertainLegs.length) {
+          for (const [uncertainChannel] of uncertainLegs) {
+            logger.warn(`[invoice] payment-link ${uncertainChannel} leg for invoice ${invoiceId} outcome uncertain — not requeued (a whole-notice replay would retry it too, risking a double-send)`);
+          }
+        } else if (retryableLegs.length) {
           const [, representativeRetryableLeg] = retryableLegs[0];
-          pendingChannelToQueue = {
-            scheduledFor: scheduledForPendingLeg(representativeRetryableLeg), originalBlockCode: representativeRetryableLeg.code,
-            channelResults: acceptedChannelResults,
-          };
+          const explicitNextAllowedAt = representativeRetryableLeg.nextAllowedAt ? new Date(representativeRetryableLeg.nextAllowedAt) : null;
+          const retryDelayMs = Number.isFinite(representativeRetryableLeg.retryAfterMs)
+            ? Math.max(0, representativeRetryableLeg.retryAfterMs) : PENDING_CHANNEL_RETRY_DELAY_MS;
+          const scheduledFor = explicitNextAllowedAt && !Number.isNaN(explicitNextAllowedAt.getTime())
+            ? explicitNextAllowedAt : new Date(Date.now() + retryDelayMs);
+          pendingChannelToQueue = { scheduledFor, originalBlockCode: representativeRetryableLeg.code };
         }
       }
 
@@ -10759,15 +10636,6 @@ InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES = ['void', 'refunded', 'cance
 InvoiceService.lineIsBaseApplication = lineIsBaseApplication;
 
 InvoiceService.rodentSetupRebillMarker = rodentSetupRebillMarker;
-// Shared with deferred-replay-registry.js's invoice_send_deferred.finalize
-// (Codex round-4 P2 #4963 pre-push audit): a replay of a partial-fanout
-// retry can itself only partially succeed, and that finalize hook re-runs
-// the SAME "what's still pending, queue it once" rules the initial send
-// uses here — never a second, drifting copy of them.
-InvoiceService.pendingBillingLeg = pendingBillingLeg;
-InvoiceService.scheduledForPendingLeg = scheduledForPendingLeg;
-InvoiceService.queuePendingChannelReplay = queuePendingChannelReplay;
-InvoiceService.legAccepted = legAccepted;
 module.exports = InvoiceService;
 module.exports.prepaySwitchSupersededByMarker = prepaySwitchSupersededByMarker;
 module.exports.prepayReplacedCharges = prepayReplacedCharges;

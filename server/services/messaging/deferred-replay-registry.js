@@ -262,40 +262,35 @@ const REGISTRY = {
     // Pass-through: a phone-less row is marked requires_registered_dispatch,
     // which dispatchDeferredReplay refuses without a registered hook. Every
     // row still replays through the executor's default dispatch.
+    // Codex r5 P1 #3 (#4963): this replay dispatches the whole notice
+    // WITHOUT re-taking the invoice send-claim lock the immediate path
+    // holds — deliberately out of scope here (split PR 3, locked invoice
+    // replay dispatch).
     async dispatch(meta, defaultDispatch) {
       return defaultDispatch();
     },
     async recheck(meta) {
       return invoiceStillCollectible(meta);
     },
-    async finalize(meta, ctx = {}) {
+    async finalize(meta) {
       const { finalizeDeferredCompletionSend } = require('../dispatch-completion-deferred');
       const result = await finalizeDeferredCompletionSend(meta);
-      // Codex round-4 P2 (#4963) finding C: a partial_fanout_retry row
-      // (queuePendingChannelReplay, invoice.js) carries neither
-      // mark_invoice_delivery nor bundled_review_request_id/etc, so the
-      // call above is a no-op for it — finalizeDeferredCompletionSend only
-      // stamps SMS-only invoice delivery for the WRAPPER's own pre-existing
-      // completion-send rows (mark_invoice_delivery===true, always sms:true).
+      // A partial_fanout_retry row (invoice.js's queuePendingChannelReplay)
+      // carries neither mark_invoice_delivery nor bundled_review_request_id/
+      // etc, so the call above is a no-op for it — finalizeDeferredCompletionSend
+      // only stamps SMS-only invoice delivery for the WRAPPER's own
+      // pre-existing completion-send rows (mark_invoice_delivery===true,
+      // always sms:true). Stamp from DURABLE evidence instead (Codex r4-C,
+      // r5 P1 #1+#2 pre-push audit) — never the scheduler's own transient
+      // dispatch result: a finalize_only retry re-invokes this hook with no
+      // dispatch result at all (only providerMessageId), so a ctx-based
+      // stamp would silently no-op on that retry path. Both durable checks
+      // below key off this row's own persisted identity (invoice_id,
+      // notificationEventKey), so recomputing them on any retry is
+      // idempotent by construction — no successor chain, no attempt count,
+      // nothing to lose between attempts.
       if (meta.partial_fanout_retry !== true || !meta.invoice_id) return result;
-      // The finalize_only durable-retry rail (scheduler.js, the
-      // claimMeta.finalize_only branch) re-invokes this hook after an
-      // earlier {ok:false} here converted the row for retry — but that
-      // rail's own ctx carries no channelResults/toPhone/body (it only
-      // proves providerMessageId). Fall back to a copy persisted on the
-      // row's OWN metadata below, or this retry would silently no-op
-      // through the now-inert finalizeDeferredCompletionSend call above
-      // instead of actually finishing the stamp/re-queue.
-      const channelResults = ctx.channelResults || meta.replay_channel_results || null;
-      if (!channelResults) return result;
-      const toPhone = ctx.toPhone || meta.replay_to_phone || '';
-      const body = ctx.body || meta.replay_body || '';
-      await persistReplayChannelResultsIfNeeded(meta, ctx, channelResults, toPhone, body);
-      const stamped = await stampPartialFanoutDelivery(meta, channelResults);
-      if (!stamped.ok) return stamped;
-      return requeuePartialFanoutIfPending(meta, channelResults, {
-        toPhone, body, smsLogId: ctx.smsLogId, customerId: meta.customer_id || ctx.customerId || null,
-      });
+      return stampPartialFanoutDeliveryDurably(meta);
     },
     durableFinalize: true,
   },
@@ -1532,34 +1527,28 @@ async function contactSlotStillAuthorized(meta, label) {
   }
 }
 
-// Durability seam for the finalize_only retry rail (scheduler.js), whose
-// own ctx carries no channelResults/toPhone/body — persisted once (best
-// effort; a failure here just means that retry path won't recover them,
-// logged) so a later invocation with only { retry: true, smsLogId } can
-// still find everything it needs on the row's own metadata.
-async function persistReplayChannelResultsIfNeeded(meta, ctx, channelResults, toPhone, body) {
-  if (!ctx.channelResults || !ctx.smsLogId || meta.replay_channel_results) return;
-  try {
-    await db('sms_log').where({ id: ctx.smsLogId }).update({
-      metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('replay_channel_results', ?::jsonb, 'replay_to_phone', ?::text, 'replay_body', ?::text)", [JSON.stringify(channelResults), toPhone || '', body || '']),
-    });
-  } catch (err) {
-    logger.warn(`[deferred-replay] could not persist replay channelResults for invoice ${meta.invoice_id} (finalize_only retry would lose them): ${err.message}`);
-  }
-}
-
-// Stamp the channel(s) THIS replay's own dispatch actually accepted (never
-// the stale snapshot from when the row was queued).
-async function stampPartialFanoutDelivery(meta, channelResults) {
-  const { legAccepted } = require('../invoice');
-  const emailAccepted = legAccepted(channelResults.email);
-  const smsOrAppAccepted = legAccepted(channelResults.sms) || legAccepted(channelResults.push);
+// Codex r4-C, r5 P1 #1+#2 pre-push audit (#4963): stamp durably, never from
+// the scheduler's own transient dispatch result — a finalize_only retry
+// re-invokes finalize() with no dispatch result at all, so a value threaded
+// through ctx would silently vanish on that path. Both checks below key
+// off this row's own persisted identity, so re-running them on any retry
+// (finalize_only or otherwise) recomputes the SAME answer — idempotent by
+// construction, no state to carry between attempts.
+async function stampPartialFanoutDeliveryDurably(meta) {
+  const notificationEventKey = meta.notificationEventKey || (meta.invoice_id ? `invoice:${meta.invoice_id}:sent` : null);
+  const [emailAccepted, smsOrAppAccepted] = await Promise.all([
+    billingEmailDurablyAccepted(notificationEventKey),
+    partialFanoutReplayAcceptedTextOrApp(meta.invoice_id),
+  ]);
   if (!emailAccepted && !smsOrAppAccepted) return { ok: true };
   try {
-    // A voided invoice is never re-stamped, even if a delayed replay landed.
+    // A voided invoice is never re-stamped, even if a delayed replay
+    // landed. COALESCE makes each stamp idempotent — a retry that lands
+    // twice (this hook re-running after a transient DB error) never
+    // clobbers an earlier stamp with a later timestamp.
     await db('invoices').where({ id: meta.invoice_id }).whereNot({ status: 'void' }).update({
-      ...(emailAccepted ? { email_sent_at: new Date() } : {}),
-      ...(smsOrAppAccepted ? { sms_sent_at: new Date() } : {}),
+      ...(emailAccepted ? { email_sent_at: db.raw('COALESCE(email_sent_at, now())') } : {}),
+      ...(smsOrAppAccepted ? { sms_sent_at: db.raw('COALESCE(sms_sent_at, now())') } : {}),
       updated_at: new Date(),
     });
     return { ok: true };
@@ -1569,57 +1558,37 @@ async function stampPartialFanoutDelivery(meta, channelResults) {
   }
 }
 
-// Codex round-4 P2 (#4963) pre-push audit, finding C continued: the REPLAY
-// itself can only partially succeed — e.g. it accepts Text while Email is
-// still retryable/held. Without this, the executor sees smsResult.sent:
-// true, calls finalize, gets ok:true, and discharges the row — the
-// still-outstanding channel is silently dropped with no further retry ever
-// queued. Same rules as the initial send (invoice.js's InvoiceService.
-// pendingBillingLeg): an uncertain leg never requeues; a retryable/
-// deferred one queues ONE new row, capped at 5 attempts.
-async function requeuePartialFanoutIfPending(meta, channelResults, { toPhone, body, smsLogId, customerId } = {}) {
-  const InvoiceService = require('../invoice');
-  const { pendingChannel, uncertainChannels, retryableLegs } = InvoiceService.pendingBillingLeg(channelResults);
-  if (!pendingChannel) return { ok: true };
-  // Codex round-4 P1 pre-push audit: an uncertain leg used to win outright
-  // (pendingBillingLeg's old single-winner shape) and block requeuing a
-  // DIFFERENT, genuinely retryable sibling — every uncertain leg is now
-  // logged by name (it is never retried; queuePendingChannelReplay excludes
-  // it from the replay via replaySkipChannels) and every retryable/deferred
-  // leg is queued regardless of what else is pending.
-  for (const uncertainChannel of uncertainChannels) {
-    logger.warn(`[deferred-replay] partial-fanout replay for invoice ${meta.invoice_id}: ${uncertainChannel} leg outcome uncertain — not requeued (no double-send)`);
-  }
-  if (!retryableLegs.length) {
-    if (!uncertainChannels.length) {
-      const [channel, leg] = pendingChannel;
-      logger.warn(`[deferred-replay] partial-fanout replay for invoice ${meta.invoice_id}: ${channel} leg permanently blocked (${leg?.code}) — surfaced only, not requeued`);
-    }
-    return { ok: true };
-  }
-  const [, representativeRetryableLeg] = retryableLegs[0];
-  const attempt = (Number(meta.partial_fanout_attempt) || 1) + 1;
-  if (attempt >= 5) {
-    logger.error(`[deferred-replay] partial-fanout replay for invoice ${meta.invoice_id} exhausted retries (5 attempts) — ${retryableLegs.map(([ch]) => ch).join(', ')} leg(s) still pending, needs operator review`);
-    return { ok: true };
-  }
-  try {
-    // The row this finalize call is settling (smsLogId) can still read
-    // 'sending'/'scheduled' at this exact moment (durable-finalize's own
-    // retry-only conversion runs AFTER this returns) — exclude it by id so
-    // the dedupe check inside queuePendingChannelReplay can never "adopt"
-    // it as if a fresh retry already existed and skip queuing a genuine one.
-    const queueOutcome = await InvoiceService.queuePendingChannelReplay({
-      invoiceId: meta.invoice_id, customerId, toPhone, body,
-      scheduledFor: InvoiceService.scheduledForPendingLeg(representativeRetryableLeg),
-      originalBlockCode: representativeRetryableLeg.code, channelResults,
-      previousSkipChannels: meta.replaySkipChannels, attempt, excludeSmsLogId: smsLogId || null,
-    });
-    return queueOutcome?.queued ? { ok: true } : { ok: false };
-  } catch (err) {
-    logger.warn(`[deferred-replay] partial-fanout re-queue failed for invoice ${meta.invoice_id}: ${err.message}`);
-    return { ok: false };
-  }
+// Durable evidence for the Email leg: an ACCEPTED row in email_messages
+// keyed by the SAME idempotency key billing-channel-email.js stamps
+// (billing_channel_email:${notificationEventKey}:email) — the exact
+// mechanism that already makes replaying the whole notice safe for Email.
+// 'sent'/'delivered'/'opened'/'clicked' match email-template-library.js's
+// own dedupedResultForExistingMessage sent computation; every other status
+// (blocked/dropped/bounced/queued/failed/…) is never accepted.
+async function billingEmailDurablyAccepted(notificationEventKey) {
+  if (!notificationEventKey) return false;
+  const row = await db('email_messages')
+    .where({ idempotency_key: `billing_channel_email:${notificationEventKey}:email` })
+    .first('status');
+  return !!row && ['sent', 'delivered', 'opened', 'clicked'].includes(String(row.status || '').toLowerCase());
+}
+
+// Durable evidence for the Text/App leg: this invoice's most recent
+// invoice_send_deferred sms_log row reaching a delivered status. A real
+// twilio_sid proves Twilio itself accepted the message (Text — a hard
+// carrier/API rejection never gets one). A phone-less row (to_phone blank
+// — the only way this replay ever runs without one, per replayWithoutPhone
+// above) can only have succeeded via App: Text requires a phone, and Email
+// never touches this row at all.
+async function partialFanoutReplayAcceptedTextOrApp(invoiceId) {
+  if (!invoiceId) return false;
+  const row = await db('sms_log')
+    .whereRaw("metadata->>'entry_point' = ?", ['invoice_send_deferred'])
+    .whereRaw("metadata->>'invoice_id' = ?", [String(invoiceId)])
+    .orderBy('updated_at', 'desc')
+    .first('status', 'to_phone', 'twilio_sid');
+  if (!row || !['sent', 'delivered'].includes(String(row.status || '').toLowerCase())) return false;
+  return Boolean(row.twilio_sid) || !String(row.to_phone || '').trim();
 }
 
 // Shared: deferred invoice pay-link/dunning replays must confirm the

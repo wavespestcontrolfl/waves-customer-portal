@@ -1653,6 +1653,50 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // While the follow-up pager is live, the overdue watchdog takes each
+  // promise over once it ages off the pager's 24-hour list. With callback
+  // cards on it already runs every 5 minutes; with cards off its cadence is
+  // daily, so it also runs — unmodified — once an hour, keeping that handoff
+  // gap under an hour (its bells dedupe per promise per ET day).
+  cron.schedule('0 25 * * * *', async () => {
+    const { isEnabled } = require('../config/feature-gates');
+    if (!isEnabled('followupSlaAlerts') || require('./callback-cards').enabled()) return;
+    try {
+      const { runCallCommitmentsWatchdog } = require('./call-commitments-watchdog');
+      const result = await runCallCommitmentsWatchdog();
+      if (result?.skipped && result.reason !== 'gated_off' && result.reason !== 'lease_held') {
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const t0 = Date.now();
+        await recordJobStart('call-commitments-watchdog').catch(() => {});
+        await recordJobEnd('call-commitments-watchdog', t0, new Error(`tick skipped: ${result.reason || 'no_connection'}`)).catch(() => {});
+        throw new Error(`Hourly overdue-promise tick skipped: ${result.reason || 'no_connection'}`);
+      }
+    } catch (err) {
+      logger.error(`[followup-sla] hourly watchdog tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // One-hour follow-up pager: every 15 minutes through the 8 AM–8 PM ET
+  // window (the 8:00–8:45 PM ticks catch deadlines that land at the close).
+  cron.schedule('0 */15 8-20 * * *', async () => {
+    try {
+      const { runFollowUpSlaWatcher } = require('./followup-sla-watcher');
+      const result = await runFollowUpSlaWatcher();
+      // A skip before runExclusive's own bookkeeping (no_connection: pool
+      // exhausted) is a MISSED tick and job_health must say so, as the
+      // adjacent commitment watchers record it.
+      if (result?.skipped && result.reason !== 'gated_off' && result.reason !== 'lease_held') {
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const t0 = Date.now();
+        await recordJobStart('followup-sla-watcher').catch(() => {});
+        await recordJobEnd('followup-sla-watcher', t0, new Error(`tick skipped: ${result.reason || 'no_connection'}`)).catch(() => {});
+        throw new Error(`Follow-up pager tick skipped: ${result.reason || 'no_connection'}`);
+      }
+    } catch (err) {
+      logger.error(`[followup-sla] tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   cron.schedule('0 20 7 * * *', async () => {
     try {
       const { runCallCommitmentsWatchdog } = require('./call-commitments-watchdog');
@@ -3602,7 +3646,7 @@ function initScheduledJobs() {
             // finalizers that settle once-ever claims key on the accepted
             // SID, and retrying without it would release a claim for a
             // message Twilio already delivered.
-            const fin = (await finalizeDeferredReplay(claimMeta.entry_point, claimMeta, { retry: true, customerId: msg.customer_id, providerMessageId: claimMeta.provider_message_id || null, smsLogId: msg.id })) || { ok: true };
+            const fin = (await finalizeDeferredReplay(claimMeta.entry_point, claimMeta, { retry: true, customerId: msg.customer_id, providerMessageId: claimMeta.provider_message_id || null })) || { ok: true };
             if (fin.ok || finalizeAttempts >= SCHEDULED_SMS_MAX_ATTEMPTS) {
               // finalize_pending clears on BOTH outcomes or the stranded-
               // finalization sweep would convert this row forever.
@@ -4113,15 +4157,6 @@ function initScheduledJobs() {
               ...(claimMeta.billingDeliveryCategory
                 ? { billingDeliveryCategory: claimMeta.billingDeliveryCategory }
                 : {}),
-              // Which billing legs already delivered on the attempt that
-              // queued this row (Codex #4963 round 4 P2) — Text has no
-              // provider-side event dedupe the way Email/App do, so
-              // billing-channel-routing.js's selectedLegs needs this to
-              // skip re-sending an already-accepted Text/App leg on replay.
-              ...(Array.isArray(claimMeta.replaySkipChannels)
-                && claimMeta.replaySkipChannels.filter((c) => ['email', 'push', 'sms'].includes(c)).length
-                ? { replaySkipChannels: claimMeta.replaySkipChannels.filter((c) => ['email', 'push', 'sms'].includes(c)) }
-                : {}),
               ...(claimMeta.entry_point === 'request_app_deferred' ? { appOnly: true,
                 service_request_id: claimMeta.service_request_id, request_status: claimMeta.request_status,
                 request_status_version: claimMeta.request_status_version,
@@ -4193,7 +4228,7 @@ function initScheduledJobs() {
             // settlement above) convert failures into bounded
             // finalize_only retries that never resend.
             {
-              const fin = await finalizeReplay(claimMeta.entry_point, { ...claimMeta, customer_id: msg.customer_id || claimMeta.customer_id || null }, { providerMessageId: smsResult.providerMessageId, customerId: msg.customer_id || null, channelResults: smsResult.channelResults || null, smsLogId: msg.id, body: msg.message_body, toPhone });
+              const fin = await finalizeReplay(claimMeta.entry_point, { ...claimMeta, customer_id: msg.customer_id || claimMeta.customer_id || null }, { providerMessageId: smsResult.providerMessageId, customerId: msg.customer_id || null });
               if (fin && owesFinalization) {
                 if (fin.ok) {
                   await db('sms_log').where({ id: msg.id }).update({

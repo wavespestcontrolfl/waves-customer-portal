@@ -634,7 +634,15 @@ describe('invoice SMS provider handoff', () => {
   // retryable or a deferred hold — never for `uncertain` (a retry could
   // double-send) and never for a permanently blocked leg (no
   // retryable/deferred flag — retrying it would just fail the same way).
-  describe('Codex #4963 round 3: a pending leg after a partial accept is queued for retry, not silently dropped', () => {
+  // Codex round 5 (#4963), simplified for the split PR: no more per-channel
+  // exclusion list — a partial-fanout replay just re-fans-out EVERYTHING
+  // selected once queued, safe because Email/App/Text all dedupe an
+  // already-accepted leg on their own (the sibling fix/billing-text-leg-
+  // dedupe PR). An uncertain leg therefore blocks queuing ENTIRELY (a
+  // whole-notice replay would retry it too); a retryable/deferred leg
+  // queues the whole notice once, with no replaySkipChannels/
+  // pending_channels/hasEmailLeg/partial_fanout_attempt on the row.
+  describe('Codex #4963 round 5: a pending leg after a partial accept queues the WHOLE notice once, not silently dropped', () => {
     function invoiceQueryDb({ smsLogInserts, smsLogExisting } = {}) {
       const invoiceQueries = [];
       return {
@@ -660,13 +668,10 @@ describe('invoice SMS provider handoff', () => {
     test.each([
       ['uncertain first', ['push', 'sms']],
       ['retryable first', ['sms', 'push']],
-    ])('an uncertain sibling never starves a retryable one, whatever the leg order (%s)', async (_label, order) => {
-      // Codex round-4 P1 pre-push audit: an uncertain leg is never itself
-      // retried (a retry could double-send), but it must not block a
-      // DIFFERENT, genuinely retryable leg from being queued either — one
-      // row queues for the retryable sms leg, with the uncertain push leg
-      // excluded from the replay via replaySkipChannels (not retried, but
-      // also never blindly re-attempted by the next replay).
+    ])('an uncertain sibling blocks queuing entirely, whatever the leg order (%s)', async (_label, order) => {
+      // A whole-notice replay has no exclusion list at all — retrying while
+      // ANY leg's outcome is still unknown risks re-attempting the very leg
+      // we can't confirm, so nothing queues until it resolves on its own.
       const smsLogInserts = [];
       const { mock } = invoiceQueryDb({ smsLogInserts });
       db.mockImplementation(mock);
@@ -680,38 +685,15 @@ describe('invoice SMS provider handoff', () => {
         sent: false, blocked: false, deliveryOutcome: 'uncertain', code: 'APP_OUTCOME_UNCERTAIN', retryable: true, channelResults,
       }));
       const result = await InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' });
-      expect(result).toMatchObject({
-        sent: true, pendingChannel: 'sms', pendingChannelCode: 'BILLING_CHANNEL_FAILED', pendingChannelQueued: true,
-      });
-      expect(smsLogInserts).toHaveLength(1);
-      const meta = JSON.parse(smsLogInserts[0].metadata);
-      expect(meta.hasEmailLeg).toBe(true);
-      expect(meta.replaySkipChannels.sort()).toEqual(['email', 'push']);
-      expect(meta.pending_channels).toEqual(['sms']);
-      expect(meta.partial_fanout_retry).toBe(true);
-      expect(meta.original_block_code).toBe('BILLING_CHANNEL_FAILED');
+      // pendingChannel still reports the retryable leg (the actionable
+      // one), but pendingChannelQueued is false — the uncertain sibling
+      // blocked the whole-notice queue.
+      expect(result).toMatchObject({ sent: true, pendingChannel: 'sms', pendingChannelCode: 'BILLING_CHANNEL_FAILED' });
+      expect(result.pendingChannelQueued).not.toBe(true);
+      expect(smsLogInserts).toHaveLength(0);
     });
 
-    test('a queued replay keeps Email in its fan-out when no Email leg was accepted', async () => {
-      const smsLogInserts = [];
-      const { mock } = invoiceQueryDb({ smsLogInserts });
-      db.mockImplementation(mock);
-      sendCustomerMessage.mockImplementation(async () => ({
-        sent: false, blocked: false, deliveryOutcome: 'not_sent',
-        code: 'BILLING_CHANNEL_FAILED', reason: 'twilio unavailable', retryable: true,
-        channelResults: {
-          push: { sent: true, deliveryOutcome: 'accepted' },
-          sms: { sent: false, blocked: false, deliveryOutcome: 'not_sent',
-            code: 'BILLING_CHANNEL_FAILED', reason: 'twilio unavailable', retryable: true },
-        },
-      }));
-      const result = await InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' });
-      expect(result).toMatchObject({ sent: true, pendingChannel: 'sms', pendingChannelQueued: true });
-      expect(smsLogInserts).toHaveLength(1);
-      expect(JSON.parse(smsLogInserts[0].metadata).hasEmailLeg).toBeUndefined();
-    });
-
-    test('a retryable pending Text leg is queued as one invoice_send_deferred row; invoice finalized; no claim restore', async () => {
+    test('a retryable pending Text leg queues the WHOLE notice once; invoice finalized; no claim restore', async () => {
       const smsLogInserts = [];
       const { mock } = invoiceQueryDb({ smsLogInserts });
       db.mockImplementation(mock);
@@ -738,27 +720,20 @@ describe('invoice SMS provider handoff', () => {
       expect(row.message_body).toEqual(expect.any(String));
       expect(row.message_body.length).toBeGreaterThan(0);
       const meta = JSON.parse(row.metadata);
-      expect(meta).toMatchObject({
+      expect(meta).toEqual({
         entry_point: 'invoice_send_deferred',
         invoice_id: 'inv-1',
         billingDeliveryCategory: 'invoice',
         notificationEventKey: 'invoice:inv-1:sent',
-        hasEmailLeg: true,
-        // Codex #4963 round 4 P2: Email is also carried in replaySkipChannels
-        // now (not just hasEmailLeg) — the generalized "already-delivered
-        // channels" marker billing-channel-routing.js's selectedLegs reads.
-        replaySkipChannels: ['email'],
+        // Marker only, for the registry's own durable stamping — no
+        // hasEmailLeg, no replaySkipChannels, no pending_channels, no
+        // partial_fanout_attempt: a replay just re-fans-out everything.
+        partial_fanout_retry: true,
         original_block_code: 'BILLING_CHANNEL_FAILED',
         replay_purpose: 'payment_link',
         refresh_customer_phone: true,
         resolve_from_by_customer: true,
       });
-      // Text is the only channel still owed — persisted so a later replay
-      // finalize (finding C) knows which timestamp to stamp.
-      expect(meta.pending_channels).toEqual(['sms']);
-      expect(meta.partial_fanout_retry).toBe(true);
-      // A phoned row never carries the phone-less replay marker.
-      expect(meta.requires_registered_dispatch).toBeUndefined();
       // No explicit nextAllowedAt on a plain retryable — falls back to the
       // ~5-minute default backoff, not immediate and not indefinitely far.
       const scheduledForMs = new Date(row.scheduled_for).getTime();
@@ -885,16 +860,14 @@ describe('invoice SMS provider handoff', () => {
     });
   });
 
-  // Codex #4963 round 4 P2 (finding B): billingDispatchOutcome
-  // (billing-channel-routing.js) picks an ACCEPTED Text as the
-  // representative outcome over a still-retrying Email — sendResult.sent
-  // comes back TRUE even though Email is still pending, which used to zero
-  // out pendingLegs entirely (gated on `!sendResult.sent`) and silently drop
-  // the Email retry. Gate on "any leg accepted and any leg isn't" instead.
-  // Finding C: persist which channel(s) are still owed (pending_channels +
-  // partial_fanout_retry) and which already delivered (replaySkipChannels)
-  // so a Text has no dedupe of its own to fall back on.
-  describe('Codex #4963 round 4: an accepted Text representative outcome still surfaces and queues a pending Email leg', () => {
+  // Codex #4963 round 4 P2 (finding B, still valid in round 5):
+  // billingDispatchOutcome (billing-channel-routing.js) picks an ACCEPTED
+  // Text as the representative outcome over a still-retrying Email —
+  // sendResult.sent comes back TRUE even though Email is still pending,
+  // which used to zero out pendingLegs entirely (gated on `!sendResult.
+  // sent`) and silently drop the Email retry. Gate on "any leg accepted
+  // and any leg isn't" instead.
+  describe('Codex #4963 round 4/5: an accepted Text representative outcome still surfaces and queues a pending Email leg', () => {
     function invoiceQueryDb({ smsLogInserts } = {}) {
       return {
         mock: (table) => {
@@ -911,7 +884,7 @@ describe('invoice SMS provider handoff', () => {
       };
     }
 
-    test('Email retryable + Text accepted (sendResult.sent: true): the Email leg still surfaces and queues, with replaySkipChannels [\'sms\'] and no hasEmailLeg', async () => {
+    test('Email retryable + Text accepted (sendResult.sent: true): the Email leg still surfaces and queues the whole notice once', async () => {
       const smsLogInserts = [];
       const { mock } = invoiceQueryDb({ smsLogInserts });
       db.mockImplementation(mock);
@@ -933,13 +906,13 @@ describe('invoice SMS provider handoff', () => {
       });
       expect(smsLogInserts).toHaveLength(1);
       const meta = JSON.parse(smsLogInserts[0].metadata);
-      expect(meta.hasEmailLeg).toBeUndefined();
-      expect(meta.replaySkipChannels).toEqual(['sms']);
-      expect(meta.pending_channels).toEqual(['email']);
       expect(meta.partial_fanout_retry).toBe(true);
+      expect(meta).not.toHaveProperty('hasEmailLeg');
+      expect(meta).not.toHaveProperty('replaySkipChannels');
+      expect(meta).not.toHaveProperty('pending_channels');
     });
 
-    test('every leg accepted: pendingLegs stays empty regardless of the sendResult.sent gate removal', async () => {
+    test('every leg accepted: nothing pending regardless of the sendResult.sent gate removal', async () => {
       const smsLogInserts = [];
       const { mock } = invoiceQueryDb({ smsLogInserts });
       db.mockImplementation(mock);
@@ -955,90 +928,6 @@ describe('invoice SMS provider handoff', () => {
       expect(result).toMatchObject({ sent: true });
       expect(result.pendingChannel).toBeUndefined();
       expect(smsLogInserts).toHaveLength(0);
-    });
-  });
-
-  // Codex round-4 P1 pre-push audit: queuePendingChannelReplay's dedupe
-  // check-then-insert was not atomic — two concurrent callers could both
-  // read "nothing queued yet" and both insert a row. A transaction-scoped
-  // pg_advisory_xact_lock keyed on the invoice, taken BEFORE the dedupe
-  // SELECT, serializes them. A real race can't be proven against a mock
-  // (see the report for the PG-fixture note); these pin the shape: the lock
-  // fires first, on the SAME connection handle the dedupe SELECT and the
-  // INSERT run on, and the transaction-wrapping decision matches the
-  // caller's own database param.
-  describe('queuePendingChannelReplay advisory lock (Codex round-4 P1 pre-push audit)', () => {
-    function trackedConn(calls, { existingQueued = undefined } = {}) {
-      const conn = jest.fn((table) => {
-        calls.push({ op: 'table', table });
-        const q = {};
-        for (const m of ['whereIn', 'whereRaw', 'whereNull', 'whereNot', 'forUpdate', 'clone']) q[m] = jest.fn(() => q);
-        q.first = jest.fn(async () => { calls.push({ op: 'first' }); return existingQueued; });
-        q.insert = jest.fn(async (row) => { calls.push({ op: 'insert', row }); return [1]; });
-        return q;
-      });
-      conn.raw = jest.fn((sql, params) => { calls.push({ op: 'raw', sql, params }); return Promise.resolve(); });
-      return conn;
-    }
-    const oneLegChannelResults = {
-      sms: { sent: false, blocked: false, deliveryOutcome: 'not_sent', code: 'BILLING_CHANNEL_FAILED', retryable: true },
-    };
-
-    test('called with an explicit connection (finalizeInvoiceAfterSms\'s own trx): locks on THAT handle, never wraps in db.transaction', async () => {
-      const calls = [];
-      const trx = trackedConn(calls);
-      const result = await InvoiceService.queuePendingChannelReplay({
-        invoiceId: 'inv-lock-1', customerId: 'cust-1', toPhone: '+19415550101', body: 'Invoice ready',
-        scheduledFor: new Date(), originalBlockCode: 'BILLING_CHANNEL_FAILED',
-        channelResults: oneLegChannelResults, database: trx,
-      });
-      expect(result.queued).toBe(true);
-      expect(db.transaction).not.toHaveBeenCalled();
-      expect(trx.raw).toHaveBeenCalledWith('SELECT pg_advisory_xact_lock(hashtext(?))', ['invoice_send_deferred:inv-lock-1']);
-      // Lock first, then the dedupe SELECT, then the INSERT — all on trx.
-      expect(calls[0]).toMatchObject({ op: 'raw' });
-      const firstIdx = calls.findIndex((c) => c.op === 'first');
-      const insertIdx = calls.findIndex((c) => c.op === 'insert');
-      expect(firstIdx).toBeGreaterThan(0);
-      expect(insertIdx).toBeGreaterThan(firstIdx);
-      expect(calls.every((c) => c.op !== 'table' || c.table === 'sms_log')).toBe(true);
-    });
-
-    test('called with no connection override (the registry path): wraps lock+select+insert in ONE new db.transaction', async () => {
-      const calls = [];
-      let txConn;
-      db.transaction.mockImplementationOnce(async (callback) => {
-        txConn = trackedConn(calls);
-        return callback(txConn);
-      });
-      const result = await InvoiceService.queuePendingChannelReplay({
-        invoiceId: 'inv-lock-2', customerId: 'cust-1', toPhone: '+19415550101', body: 'Invoice ready',
-        scheduledFor: new Date(), originalBlockCode: 'BILLING_CHANNEL_FAILED',
-        channelResults: oneLegChannelResults,
-      });
-      expect(result.queued).toBe(true);
-      expect(db.transaction).toHaveBeenCalledTimes(1);
-      expect(txConn.raw).toHaveBeenCalledWith('SELECT pg_advisory_xact_lock(hashtext(?))', ['invoice_send_deferred:inv-lock-2']);
-      expect(calls[0]).toMatchObject({ op: 'raw' });
-      const firstIdx = calls.findIndex((c) => c.op === 'first');
-      const insertIdx = calls.findIndex((c) => c.op === 'insert');
-      expect(firstIdx).toBeGreaterThan(0);
-      expect(insertIdx).toBeGreaterThan(firstIdx);
-    });
-
-    test('an existing queued row found under the lock is adopted without ever calling insert', async () => {
-      const calls = [];
-      const trx = trackedConn(calls, { existingQueued: { id: 'sms-log-existing-1' } });
-      const result = await InvoiceService.queuePendingChannelReplay({
-        invoiceId: 'inv-lock-3', customerId: 'cust-1', toPhone: '+19415550101', body: 'Invoice ready',
-        scheduledFor: new Date(), originalBlockCode: 'BILLING_CHANNEL_FAILED',
-        channelResults: oneLegChannelResults, database: trx,
-      });
-      expect(result).toEqual({ queued: true, id: 'sms-log-existing-1', existing: true });
-      expect(calls.some((c) => c.op === 'insert')).toBe(false);
-      // Still locked first, even on the adopt-existing path — the lock
-      // guards the whole check, not just the insert.
-      expect(calls[0]).toMatchObject({ op: 'raw' });
     });
   });
 

@@ -10,11 +10,6 @@ jest.mock('../models/db', () => {
   const mockDb = jest.fn();
   mockDb.raw = jest.fn((expr) => expr);
   mockDb.fn = { now: jest.fn(() => 'NOW()') };
-  // queuePendingChannelReplay's own advisory-lock wrap (Codex round-4 P1
-  // pre-push audit) calls db.transaction when it gets no override — the
-  // mock just re-enters with the same handle, matching invoice-sms-
-  // provider-handoff.test.js's own db mock shape.
-  mockDb.transaction = jest.fn(async (callback) => callback(mockDb));
   return mockDb;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -278,316 +273,189 @@ describe('deferred-replay registry', () => {
     expect(fallback).toHaveBeenCalledTimes(1);
   });
 
-  // Codex #4963 round 4 P2 (finding C): a partial_fanout_retry row
-  // (invoice.js's queuePendingChannelReplay) carries neither
-  // mark_invoice_delivery nor bundled_review_request_id, so
+  // Codex #4963 round 5 (r4-C, r5 P1 #1+#2 pre-push audit): a
+  // partial_fanout_retry row (invoice.js's queuePendingChannelReplay)
+  // carries neither mark_invoice_delivery nor bundled_review_request_id, so
   // finalizeDeferredCompletionSend (mocked above) is a no-op for it —
-  // finding C stamps the invoice's own email_sent_at/sms_sent_at directly
-  // in the registry's finalize hook, keyed off THIS replay's own dispatch
-  // result (ctx.channelResults), scoped to the marker so the wrapper's own
-  // pre-existing invoice_send_deferred rows are untouched.
-  describe('invoice_send_deferred finalize: partial-fanout replay stamping (finding C)', () => {
-    function whereUpdateChain(updateSpy) {
-      const q = {};
-      q.where = jest.fn(() => q);
-      q.whereNot = jest.fn(() => q);
-      q.update = updateSpy;
-      return q;
+  // stamp the invoice's own email_sent_at/sms_sent_at from DURABLE evidence
+  // instead (email_messages' idempotency row for Email; this invoice's most
+  // recent invoice_send_deferred sms_log row for Text/App), never from
+  // ctx — so a finalize_only retry (whose ctx carries no dispatch result at
+  // all) recomputes the SAME answer every time.
+  describe('invoice_send_deferred finalize: durable partial-fanout replay stamping', () => {
+    function mockDurableTables({ emailRow, smsRow, invoiceUpdate } = {}) {
+      db.mockImplementation((table) => {
+        if (table === 'email_messages') {
+          const q = {};
+          q.where = jest.fn(() => q);
+          q.first = jest.fn(async () => emailRow);
+          return q;
+        }
+        if (table === 'sms_log') {
+          const q = {};
+          q.whereRaw = jest.fn(() => q);
+          q.orderBy = jest.fn(() => q);
+          q.first = jest.fn(async () => smsRow);
+          return q;
+        }
+        if (table === 'invoices') {
+          const q = {};
+          q.where = jest.fn(() => q);
+          q.whereNot = jest.fn(() => q);
+          q.update = invoiceUpdate || jest.fn(async () => 1);
+          return q;
+        }
+        throw new Error(`Unexpected table: ${table}`);
+      });
     }
 
-    test('a delayed replay never stamps a voided invoice', async () => {
-      const update = jest.fn(async () => 0);
-      const chain = whereUpdateChain(update);
-      db.mockReturnValueOnce(chain);
-      await finalizeDeferredReplay('invoice_send_deferred', {
-        invoice_id: 'inv-1', partial_fanout_retry: true, pending_channels: ['email'],
-      }, { channelResults: { email: { sent: true, deliveryOutcome: 'accepted' } } });
-      expect(chain.whereNot).toHaveBeenCalledWith({ status: 'void' });
-    });
-
-    test('a replay that accepted Email stamps email_sent_at only', async () => {
+    test('stamps email_sent_at when email_messages shows an accepted billing email — no ctx needed at all', async () => {
       const update = jest.fn(async () => 1);
-      db.mockReturnValueOnce(whereUpdateChain(update));
+      mockDurableTables({ emailRow: { status: 'sent' }, smsRow: undefined, invoiceUpdate: update });
+      // No ctx argument at all — proves the check is durable, not
+      // scheduler-ctx-based (a finalize_only retry's ctx carries none of
+      // this either).
       const res = await finalizeDeferredReplay('invoice_send_deferred', {
-        invoice_id: 'inv-1', partial_fanout_retry: true, pending_channels: ['email'],
-      }, {
-        channelResults: { email: { sent: true, deliveryOutcome: 'accepted' } },
+        invoice_id: 'inv-1', partial_fanout_retry: true,
       });
       expect(res).toEqual({ ok: true });
-      expect(db).toHaveBeenCalledWith('invoices');
+      expect(db).toHaveBeenCalledWith('email_messages');
       expect(update).toHaveBeenCalledTimes(1);
       const payload = update.mock.calls[0][0];
       expect(payload).toHaveProperty('email_sent_at');
       expect(payload).not.toHaveProperty('sms_sent_at');
     });
 
-    test('a replay that accepted Text stamps sms_sent_at only', async () => {
+    test.each(['delivered', 'opened', 'clicked'])('email_messages status %s also counts as accepted', async (status) => {
       const update = jest.fn(async () => 1);
-      db.mockReturnValueOnce(whereUpdateChain(update));
-      const res = await finalizeDeferredReplay('invoice_send_deferred', {
-        invoice_id: 'inv-1', partial_fanout_retry: true, pending_channels: ['sms'],
-      }, {
-        channelResults: { sms: { sent: true, deliveryOutcome: 'accepted' } },
+      mockDurableTables({ emailRow: { status }, invoiceUpdate: update });
+      await finalizeDeferredReplay('invoice_send_deferred', { invoice_id: 'inv-1', partial_fanout_retry: true });
+      expect(update.mock.calls[0][0]).toHaveProperty('email_sent_at');
+    });
+
+    test.each(['queued', 'failed', 'blocked', 'dropped', 'bounced'])('email_messages status %s is never treated as accepted', async (status) => {
+      mockDurableTables({ emailRow: { status } });
+      await finalizeDeferredReplay('invoice_send_deferred', { invoice_id: 'inv-1', partial_fanout_retry: true });
+      expect(db).not.toHaveBeenCalledWith('invoices');
+    });
+
+    test('stamps sms_sent_at when the invoice\'s most recent invoice_send_deferred row shows a real Twilio acceptance (twilio_sid present)', async () => {
+      const update = jest.fn(async () => 1);
+      mockDurableTables({
+        smsRow: { status: 'sent', to_phone: '+19415550101', twilio_sid: 'SM123' },
+        invoiceUpdate: update,
       });
+      const res = await finalizeDeferredReplay('invoice_send_deferred', { invoice_id: 'inv-1', partial_fanout_retry: true });
       expect(res).toEqual({ ok: true });
       const payload = update.mock.calls[0][0];
       expect(payload).toHaveProperty('sms_sent_at');
       expect(payload).not.toHaveProperty('email_sent_at');
     });
 
-    test('App (push) acceptance also stamps sms_sent_at (App/Text share one timestamp)', async () => {
+    test('stamps sms_sent_at for a phone-less row via App (no twilio_sid, blank to_phone — Text requires a phone, Email never touches this row)', async () => {
       const update = jest.fn(async () => 1);
-      db.mockReturnValueOnce(whereUpdateChain(update));
-      await finalizeDeferredReplay('invoice_send_deferred', {
-        invoice_id: 'inv-1', partial_fanout_retry: true, pending_channels: ['push'],
-      }, {
-        channelResults: { push: { sent: true, deliveryOutcome: 'accepted' } },
+      mockDurableTables({
+        smsRow: { status: 'delivered', to_phone: '', twilio_sid: null },
+        invoiceUpdate: update,
       });
+      await finalizeDeferredReplay('invoice_send_deferred', { invoice_id: 'inv-1', partial_fanout_retry: true });
       expect(update.mock.calls[0][0]).toHaveProperty('sms_sent_at');
     });
 
-    test('a replay whose dispatch is still pending/uncertain stamps nothing', async () => {
-      await finalizeDeferredReplay('invoice_send_deferred', {
-        invoice_id: 'inv-1', partial_fanout_retry: true, pending_channels: ['email'],
-      }, {
-        channelResults: { email: { sent: false, deliveryOutcome: 'uncertain' } },
-      });
-      // No 'invoices' update call at all — db was never invoked for the
-      // stamp (finalizeDeferredCompletionSend is mocked and makes no real
-      // db call either).
+    test('a phoned row with no twilio_sid is NOT treated as a Text acceptance (Twilio never issued a SID)', async () => {
+      mockDurableTables({ smsRow: { status: 'sent', to_phone: '+19415550101', twilio_sid: null } });
+      await finalizeDeferredReplay('invoice_send_deferred', { invoice_id: 'inv-1', partial_fanout_retry: true });
       expect(db).not.toHaveBeenCalledWith('invoices');
     });
 
-    test('the wrapper\'s own pre-existing rows (no partial_fanout_retry marker) never touch the invoices table here — finalizeDeferredCompletionSend owns them byte-identically', async () => {
+    test('a scheduled/sending (not yet delivered) sms_log row is never treated as accepted', async () => {
+      mockDurableTables({ smsRow: { status: 'scheduled', to_phone: '+19415550101', twilio_sid: null } });
+      await finalizeDeferredReplay('invoice_send_deferred', { invoice_id: 'inv-1', partial_fanout_retry: true });
+      expect(db).not.toHaveBeenCalledWith('invoices');
+    });
+
+    test('both stamped when Email AND Text/App are both durably accepted', async () => {
+      const update = jest.fn(async () => 1);
+      mockDurableTables({
+        emailRow: { status: 'sent' },
+        smsRow: { status: 'sent', to_phone: '+19415550101', twilio_sid: 'SM123' },
+        invoiceUpdate: update,
+      });
+      await finalizeDeferredReplay('invoice_send_deferred', { invoice_id: 'inv-1', partial_fanout_retry: true });
+      const payload = update.mock.calls[0][0];
+      expect(payload).toHaveProperty('email_sent_at');
+      expect(payload).toHaveProperty('sms_sent_at');
+    });
+
+    test('neither durably accepted -> nothing stamped, invoices table never touched', async () => {
+      mockDurableTables({ emailRow: { status: 'queued' }, smsRow: { status: 'scheduled', to_phone: '+1', twilio_sid: null } });
+      const res = await finalizeDeferredReplay('invoice_send_deferred', { invoice_id: 'inv-1', partial_fanout_retry: true });
+      expect(res).toEqual({ ok: true });
+      expect(db).not.toHaveBeenCalledWith('invoices');
+    });
+
+    test('a delayed replay never re-stamps a voided invoice', async () => {
+      const update = jest.fn(async () => 0);
+      let whereNotArgs;
+      db.mockImplementation((table) => {
+        if (table === 'email_messages') {
+          const q = {}; q.where = jest.fn(() => q); q.first = jest.fn(async () => ({ status: 'sent' })); return q;
+        }
+        if (table === 'sms_log') {
+          const q = {}; q.whereRaw = jest.fn(() => q); q.orderBy = jest.fn(() => q); q.first = jest.fn(async () => undefined); return q;
+        }
+        if (table === 'invoices') {
+          const q = {};
+          q.where = jest.fn(() => q);
+          q.whereNot = jest.fn((args) => { whereNotArgs = args; return q; });
+          q.update = update;
+          return q;
+        }
+        throw new Error(`Unexpected table: ${table}`);
+      });
+      await finalizeDeferredReplay('invoice_send_deferred', { invoice_id: 'inv-1', partial_fanout_retry: true });
+      expect(whereNotArgs).toEqual({ status: 'void' });
+    });
+
+    test('the wrapper\'s own pre-existing rows (no partial_fanout_retry marker) never touch the durable checks — finalizeDeferredCompletionSend owns them byte-identically', async () => {
       const { finalizeDeferredCompletionSend } = require('../services/dispatch-completion-deferred');
       const res = await finalizeDeferredReplay('invoice_send_deferred', {
         invoice_id: 'inv-1', mark_invoice_delivery: true,
-      }, {
-        channelResults: { sms: { sent: true, deliveryOutcome: 'accepted' } },
       });
       expect(finalizeDeferredCompletionSend).toHaveBeenCalledWith({ invoice_id: 'inv-1', mark_invoice_delivery: true });
+      expect(db).not.toHaveBeenCalledWith('email_messages');
+      expect(db).not.toHaveBeenCalledWith('sms_log');
       expect(db).not.toHaveBeenCalledWith('invoices');
       expect(res).toEqual({ ok: true });
     });
 
-    test('a partial_fanout_retry row replayed with no ctx.channelResults (unregistered caller) stamps nothing and never throws', async () => {
+    test('a partial_fanout_retry row with no invoice_id is inert (never queries the durable tables)', async () => {
       await expect(finalizeDeferredReplay('invoice_send_deferred', {
-        invoice_id: 'inv-1', partial_fanout_retry: true, pending_channels: ['sms'],
+        partial_fanout_retry: true,
       })).resolves.toEqual({ ok: true });
-      expect(db).not.toHaveBeenCalledWith('invoices');
+      expect(db).not.toHaveBeenCalledWith('email_messages');
+      expect(db).not.toHaveBeenCalledWith('sms_log');
     });
 
     test('a stamp failure is caught and reported as ok:false (durable finalize retry rail), never thrown', async () => {
-      db.mockReturnValueOnce(whereUpdateChain(jest.fn(async () => { throw new Error('db down'); })));
-      const res = await finalizeDeferredReplay('invoice_send_deferred', {
-        invoice_id: 'inv-1', partial_fanout_retry: true, pending_channels: ['email'],
-      }, {
-        channelResults: { email: { sent: true, deliveryOutcome: 'accepted' } },
+      mockDurableTables({
+        emailRow: { status: 'sent' },
+        invoiceUpdate: jest.fn(async () => { throw new Error('db down'); }),
       });
-      expect(res).toEqual({ ok: false });
-    });
-  });
-
-  // Codex #4963 round 4 pre-push audit (finding C continued): the REPLAY
-  // itself can only partially succeed — e.g. it accepts Text while Email is
-  // still retryable/held. Without a pending check on the replay's own
-  // outcome, the executor sees smsResult.sent:true, calls finalize, gets
-  // ok:true, and discharges the row — the still-outstanding channel is
-  // silently dropped with no further retry ever queued.
-  describe('invoice_send_deferred finalize: the replay itself only partially succeeds', () => {
-    function chainable() {
-      const q = {};
-      for (const m of ['where', 'whereIn', 'whereRaw', 'whereNot', 'whereNull', 'forUpdate', 'clone']) q[m] = jest.fn(() => q);
-      q.update = jest.fn(async () => 1);
-      q.first = jest.fn(async () => undefined);
-      q.insert = jest.fn(async () => [1]);
-      return q;
-    }
-    function mockTables({ existingQueued, smsLogInserts } = {}) {
-      db.mockImplementation((table) => {
-        if (table === 'invoices') return chainable();
-        if (table === 'sms_log') {
-          const q = chainable();
-          // Models the real WHERE id != excludedId: a .whereNot({id}) call
-          // narrows a same-id existingQueued match away to none, exactly
-          // like the actual SQL would exclude the row being finalized.
-          let excludedId = null;
-          q.whereNot = jest.fn((criteria) => { excludedId = criteria?.id ?? criteria; return q; });
-          q.first = jest.fn(async () => {
-            if (existingQueued && excludedId && existingQueued.id === excludedId) return undefined;
-            return existingQueued || undefined;
-          });
-          q.insert = jest.fn((row) => { if (smsLogInserts) smsLogInserts.push(row); return Promise.resolve([1]); });
-          return q;
-        }
-        throw new Error(`Unexpected table: ${table}`);
-      });
-    }
-    const partialAcceptResults = {
-      email: { sent: false, blocked: false, deliveryOutcome: 'not_sent', code: 'BILLING_CHANNEL_FAILED', reason: 'twilio unavailable', retryable: true },
-      sms: { sent: true, deliveryOutcome: 'accepted' },
-    };
-
-    test('replay accepts Text with Email still retryable: queues ONE new row with replaySkipChannels [previous skip, sms] and attempt 2', async () => {
-      const smsLogInserts = [];
-      mockTables({ smsLogInserts });
-      const res = await finalizeDeferredReplay('invoice_send_deferred', {
-        invoice_id: 'inv-1', customer_id: 'cust-1', partial_fanout_retry: true,
-        pending_channels: ['email'], replaySkipChannels: ['push'], partial_fanout_attempt: 1,
-      }, {
-        channelResults: partialAcceptResults, smsLogId: 'row-1', toPhone: '+19415550101', body: 'Invoice ready',
-      });
-      expect(res).toEqual({ ok: true });
-      expect(smsLogInserts).toHaveLength(1);
-      const meta = JSON.parse(smsLogInserts[0].metadata);
-      expect(meta.partial_fanout_retry).toBe(true);
-      expect(meta.partial_fanout_attempt).toBe(2);
-      expect(meta.pending_channels).toEqual(['email']);
-      expect(meta.original_block_code).toBe('BILLING_CHANNEL_FAILED');
-      // Union of the PREVIOUS skip list and whatever THIS replay newly
-      // delivered — a channel accepted two attempts ago must never be
-      // re-sent by the next replay either.
-      expect(meta.replaySkipChannels.sort()).toEqual(['push', 'sms']);
-      expect(smsLogInserts[0].to_phone).toBe('+19415550101');
-      expect(smsLogInserts[0].message_body).toBe('Invoice ready');
-    });
-
-    test('an uncertain pending leg after a partial accept is surfaced but never requeued (no double-send)', async () => {
-      const smsLogInserts = [];
-      mockTables({ smsLogInserts });
-      const res = await finalizeDeferredReplay('invoice_send_deferred', {
-        invoice_id: 'inv-1', customer_id: 'cust-1', partial_fanout_retry: true,
-        pending_channels: ['email'], partial_fanout_attempt: 1,
-      }, {
-        channelResults: {
-          email: { sent: false, deliveryOutcome: 'uncertain' },
-          sms: { sent: true, deliveryOutcome: 'accepted' },
-        },
-        smsLogId: 'row-1', toPhone: '+19415550101', body: 'Invoice ready',
-      });
-      expect(res).toEqual({ ok: true });
-      expect(smsLogInserts).toHaveLength(0);
-    });
-
-    test('attempt cap: a would-be 5th attempt is refused, logged for operator review, never queued', async () => {
-      const smsLogInserts = [];
-      mockTables({ smsLogInserts });
-      const logger = require('../services/logger');
-      const res = await finalizeDeferredReplay('invoice_send_deferred', {
-        invoice_id: 'inv-1', customer_id: 'cust-1', partial_fanout_retry: true,
-        pending_channels: ['email'], partial_fanout_attempt: 4,
-      }, {
-        channelResults: partialAcceptResults, smsLogId: 'row-1', toPhone: '+19415550101', body: 'Invoice ready',
-      });
-      expect(res).toEqual({ ok: true });
-      expect(smsLogInserts).toHaveLength(0);
-      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('inv-1'));
-    });
-
-    test('the row currently being finalized is excluded from the dedupe check by id — it is not mistaken for an existing queued row', async () => {
-      const smsLogInserts = [];
-      // The row being finalized itself still reads as a live ('sending')
-      // sms_log row for this invoice at this exact moment — without
-      // excludeSmsLogId the dedupe check below would "find" it and skip
-      // queuing the genuine new retry row.
-      mockTables({ existingQueued: { id: 'row-1' }, smsLogInserts });
-      const res = await finalizeDeferredReplay('invoice_send_deferred', {
-        invoice_id: 'inv-1', customer_id: 'cust-1', partial_fanout_retry: true,
-        pending_channels: ['email'], partial_fanout_attempt: 1,
-      }, {
-        channelResults: partialAcceptResults, smsLogId: 'row-1', toPhone: '+19415550101', body: 'Invoice ready',
-      });
-      expect(res).toEqual({ ok: true });
-      expect(smsLogInserts).toHaveLength(1);
-    });
-
-    test('a genuinely already-queued OTHER row is still adopted, never duplicated', async () => {
-      const smsLogInserts = [];
-      mockTables({ existingQueued: { id: 'row-other' }, smsLogInserts });
-      const res = await finalizeDeferredReplay('invoice_send_deferred', {
-        invoice_id: 'inv-1', customer_id: 'cust-1', partial_fanout_retry: true,
-        pending_channels: ['email'], partial_fanout_attempt: 1,
-      }, {
-        channelResults: partialAcceptResults, smsLogId: 'row-1', toPhone: '+19415550101', body: 'Invoice ready',
-      });
-      expect(res).toEqual({ ok: true });
-      expect(smsLogInserts).toHaveLength(0);
-    });
-
-    test('a fully-accepted replay requeues nothing', async () => {
-      const smsLogInserts = [];
-      mockTables({ smsLogInserts });
-      const res = await finalizeDeferredReplay('invoice_send_deferred', {
-        invoice_id: 'inv-1', customer_id: 'cust-1', partial_fanout_retry: true,
-        pending_channels: ['email'], partial_fanout_attempt: 1,
-      }, {
-        channelResults: {
-          email: { sent: true, deliveryOutcome: 'accepted' },
-          sms: { sent: true, deliveryOutcome: 'accepted' },
-        },
-        smsLogId: 'row-1', toPhone: '+19415550101', body: 'Invoice ready',
-      });
-      expect(res).toEqual({ ok: true });
-      expect(smsLogInserts).toHaveLength(0);
-    });
-
-    test('a permanently-blocked pending leg (no retryable/deferred flag) is surfaced but never requeued', async () => {
-      const smsLogInserts = [];
-      mockTables({ smsLogInserts });
-      const res = await finalizeDeferredReplay('invoice_send_deferred', {
-        invoice_id: 'inv-1', customer_id: 'cust-1', partial_fanout_retry: true,
-        pending_channels: ['email'], partial_fanout_attempt: 1,
-      }, {
-        channelResults: {
-          email: { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'MISSING_BILLING_RECIPIENT' },
-          sms: { sent: true, deliveryOutcome: 'accepted' },
-        },
-        smsLogId: 'row-1', toPhone: '+19415550101', body: 'Invoice ready',
-      });
-      expect(res).toEqual({ ok: true });
-      expect(smsLogInserts).toHaveLength(0);
-    });
-
-    test('a queue-insert failure returns ok:false so the durable finalize retry rail redoes it', async () => {
-      db.mockImplementation((table) => {
-        if (table === 'invoices') return chainable();
-        if (table === 'sms_log') {
-          const q = chainable();
-          q.first = jest.fn(async () => undefined);
-          q.insert = jest.fn(() => { throw new Error('db down'); });
-          return q;
-        }
-        throw new Error(`Unexpected table: ${table}`);
-      });
-      const res = await finalizeDeferredReplay('invoice_send_deferred', {
-        invoice_id: 'inv-1', customer_id: 'cust-1', partial_fanout_retry: true,
-        pending_channels: ['email'], partial_fanout_attempt: 1,
-      }, {
-        channelResults: partialAcceptResults, smsLogId: 'row-1', toPhone: '+19415550101', body: 'Invoice ready',
-      });
+      const res = await finalizeDeferredReplay('invoice_send_deferred', { invoice_id: 'inv-1', partial_fanout_retry: true });
       expect(res).toEqual({ ok: false });
     });
 
-    test('the finalize_only durable retry rail (bare ctx — no channelResults) recovers a previously-persisted copy and still requeues', async () => {
-      // Mirrors scheduler.js's claimMeta.finalize_only branch: ctx carries
-      // only retry/customerId/providerMessageId/smsLogId — channelResults/
-      // toPhone/body are NOT there. They must come back from the row's OWN
-      // metadata (persisted by the FIRST attempt below).
-      const smsLogInserts = [];
-      mockTables({ smsLogInserts });
+    test('the finalize_only durable retry rail (bare ctx — retry/customerId/providerMessageId only) still stamps correctly, since the checks never depended on ctx', async () => {
+      const update = jest.fn(async () => 1);
+      mockDurableTables({ smsRow: { status: 'sent', to_phone: '+19415550101', twilio_sid: 'SM123' }, invoiceUpdate: update });
       const res = await finalizeDeferredReplay('invoice_send_deferred', {
-        invoice_id: 'inv-1', customer_id: 'cust-1', partial_fanout_retry: true,
-        pending_channels: ['email'], partial_fanout_attempt: 1,
-        replay_channel_results: partialAcceptResults,
-        replay_to_phone: '+19415550101', replay_body: 'Invoice ready',
+        invoice_id: 'inv-1', partial_fanout_retry: true,
       }, {
-        retry: true, customerId: 'cust-1', providerMessageId: null, smsLogId: 'row-1',
+        retry: true, customerId: 'cust-1', providerMessageId: null,
       });
       expect(res).toEqual({ ok: true });
-      expect(smsLogInserts).toHaveLength(1);
-      const meta = JSON.parse(smsLogInserts[0].metadata);
-      expect(meta.partial_fanout_attempt).toBe(2);
-      expect(smsLogInserts[0].to_phone).toBe('+19415550101');
+      expect(update.mock.calls[0][0]).toHaveProperty('sms_sent_at');
     });
   });
 
