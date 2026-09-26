@@ -427,8 +427,11 @@ async function runInner({ now = new Date() } = {}) {
     }
     const ids = onList.map((r) => String(r.id)).sort();
     const fresh = ids.filter((id) => !shown.includes(id));
-    const title = `${ids.length} missed follow-up${ids.length === 1 ? '' : 's'} in the last 24 hours`;
-    const body = `Promises made on calls with no follow-up within an hour (8 AM–8 PM):\n${onList.map((r) => `• ${describe(r)}`).join('\n')}`;
+    // Stored the way NotificationService stores admin text (emoji stripped
+    // — owner ruling), so an in-place rewrite matches a fresh post exactly.
+    const { stripEmoji } = require('../utils/strip-emoji');
+    const title = stripEmoji(`${ids.length} missed follow-up${ids.length === 1 ? '' : 's'} in the last 24 hours`);
+    const body = stripEmoji(`Promises made on calls with no follow-up within an hour (8 AM–8 PM):\n${onList.map((r) => `• ${describe(r)}`).join('\n')}`);
     if (fresh.length) {
       const key = `${ROLLING_KEY}:${now.toISOString()}`;
       const notif = await NotificationService.notifyAdmin('alert', title, body, {

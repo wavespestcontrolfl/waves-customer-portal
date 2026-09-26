@@ -479,3 +479,10 @@ test('at the 8:00 AM opening tick the pager is judged against last night\'s 8:45
   expect(await pagerHealthy(db, et('08:00', '2026-09-27'))).toBe(true);
   expect(await pagerHealthy(db, et('08:05', '2026-09-27'))).toBe(true);
 });
+
+test('an in-place rewrite stores admin text emoji-stripped, like a fresh post', async () => {
+  const updates = mockDb({ standingRow: { ...posted(['a']), read_at: NOW, title: 'x', body: 'old text' } });
+  listOpenCommitments.mockResolvedValue([row('a', { customer_first_name: 'Test\u{1F41B}' })]);
+  await runFollowUpSlaWatcher({ now: NOW });
+  expect(updates[0].patch.body).not.toMatch(/\u{1F41B}/u);
+});
