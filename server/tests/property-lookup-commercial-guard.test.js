@@ -1404,3 +1404,101 @@ describe('unit-address lookup on an apartment building (GATE_UNIT_SCOPE_GUARDRAI
     expect(profile.residentialUnitLookup).toBeNull();
   });
 });
+
+describe('unit-address lookup on a residential condo record (GATE_UNIT_SCOPE_GUARDRAILS)', () => {
+  // 2026-09-25: "4502 3rd St Cir West, Unit 242" — the listing typed the
+  // record residential Condo, so the commercial unit verdict never ran and
+  // the complex's pool, the association's 2,500 sf of turf, and the
+  // building's 2 floors all landed in a 725 sf unit's quote.
+  beforeEach(() => { process.env.GATE_UNIT_SCOPE_GUARDRAILS = 'true'; });
+  afterEach(() => { delete process.env.GATE_UNIT_SCOPE_GUARDRAILS; });
+
+  function condoRecord(overrides = {}) {
+    return {
+      formattedAddress: '4502 3rd St Cir W Apt 242, Bradenton, FL 34207',
+      propertyType: 'Condo',
+      unitCount: 1,
+      squareFootage: 725,
+      lotSize: 8000,
+      stories: 2,
+      hasPool: true,
+      yearBuilt: 1985,
+      _source: 'ai_trio',
+      ...overrides,
+    };
+  }
+  const parcelWideAi = {
+    pool: 'POSSIBLE',
+    estimatedTurfSf: 2500,
+    shrubDensity: 'HEAVY',
+    treeDensity: 'HEAVY',
+    waterProximity: 'ADJACENT',
+  };
+  const unit = '4502 3rd St Cir West, Unit 242, Bradenton, FL 34207';
+  const bare = '4502 3rd St Cir West, Bradenton, FL 34207';
+
+  test('unit address: parcel-wide reads dropped, the unit\'s own sq ft kept, floor flagged', () => {
+    const profile = buildEnrichedProfile(condoRecord(), parcelWideAi, null, null, null, null, unit);
+    expect(profile.category).toBe('RESIDENTIAL');
+    expect(profile.isCommercial).toBe(false);
+    expect(profile.propertyType).toBe('Condo');
+    expect(profile.residentialUnitLookup).toEqual({ wholePropertyCategory: 'RESIDENTIAL', wholePropertySubtype: null });
+    expect(profile.homeSqFt).toBe(725);
+    expect(profile.lotSqFt).toBe(0);
+    expect(profile.stories).toBe(1);
+    expect(profile.storiesSource).toBe('default');
+    expect(profile.pool).not.toBe('YES');
+    expect(profile.pool).not.toBe('POSSIBLE');
+    expect(profile.estimatedTurfSf || 0).toBe(0);
+    expect(profile.shrubDensity).not.toBe('HEAVY');
+    const flag = profile.fieldVerifyFlags.find((f) => f.field === 'propertyType');
+    expect(flag.priority).toBe('HIGH');
+    expect(flag.reason).toMatch(/ONE condo unit/);
+    expect(flag.reason).toMatch(/Condo — Upper/);
+  });
+
+  test('"Apt. 242" and "#242" read the same as "Unit 242"', () => {
+    for (const address of [
+      '4502 3rd St Cir W Apt. 242, Bradenton, FL 34207',
+      '4502 3rd St Cir W #242, Bradenton, FL 34207',
+    ]) {
+      const profile = buildEnrichedProfile(condoRecord(), parcelWideAi, null, null, null, null, address);
+      expect({ address, unit: !!profile.residentialUnitLookup, stories: profile.stories })
+        .toEqual({ address, unit: true, stories: 1 });
+    }
+  });
+
+  test('stacked-association aggregate: its sq ft is the building\'s, so it is dropped too', () => {
+    const profile = buildEnrichedProfile(
+      condoRecord({ squareFootage: 57600, _parcel: { aggregated: true, residentialUnits: 48, buildingCount: 6 } }),
+      parcelWideAi, null, null, null, null, unit,
+    );
+    expect(profile.homeSqFt).toBe(0);
+    expect(profile.fieldVerifyFlags.find((f) => f.field === 'propertyType').reason)
+      .toMatch(/get the unit's own sq ft/);
+  });
+
+  test('no unit designator, a Suite, or a townhome record: unchanged', () => {
+    const bareProfile = buildEnrichedProfile(condoRecord(), parcelWideAi, null, null, null, null, bare);
+    expect(bareProfile.residentialUnitLookup).toBeNull();
+    expect(bareProfile.stories).toBe(2);
+
+    const suite = buildEnrichedProfile(
+      condoRecord(), parcelWideAi, null, null, null, null, '4502 3rd St Cir W Suite 242, Bradenton, FL 34207',
+    );
+    expect(suite.residentialUnitLookup).toBeNull();
+
+    const townhome = buildEnrichedProfile(
+      condoRecord({ propertyType: 'Townhouse' }), parcelWideAi, null, null, null, null, unit,
+    );
+    expect(townhome.residentialUnitLookup).toBeNull();
+    expect(townhome.stories).toBe(2);
+  });
+
+  test('gate OFF: unit address changes nothing', () => {
+    delete process.env.GATE_UNIT_SCOPE_GUARDRAILS;
+    const profile = buildEnrichedProfile(condoRecord(), parcelWideAi, null, null, null, null, unit);
+    expect(profile.residentialUnitLookup).toBeNull();
+    expect(profile.stories).toBe(2);
+  });
+});

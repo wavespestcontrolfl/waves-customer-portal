@@ -39,6 +39,7 @@ const {
   unitScopeGuardrailsEnabled,
   hasPrimaryStreetNumber,
   residentialUnitLookupVerdict,
+  residentialCondoUnitLookupVerdict,
 } = require('../services/estimator-engine/unit-scope-model');
 // The estimator's own condo-record predicate (propertyType OR county
 // land-use text) — shared so the unit-lot verify flag and the unit-scope
@@ -1638,10 +1639,22 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     structuredCommercialSignal: visionCommercialUseSignal(ai),
     commercialUseSignal: recordCommercialUseSignal(rc),
   });
+  // The same one-unit quote on a record already typed residential Condo:
+  // the commercial verdict above never sees it, so without this the
+  // parcel-wide reads (pool, turf, landscape, the building's floors) priced
+  // one unit. Unlike the commercial building, a non-aggregated condo record
+  // is the unit's own folio/listing, so its sqft IS the unit's and stays.
+  const residentialCondoUnitLookup = !residentialUnitLookup && residentialCondoUnitLookupVerdict({
+    address: lookupAddress,
+    category: wholePropertyCategory,
+    pricingPropertyType: rc?.propertyType ? normalizePricingPropertyType(rc.propertyType) : null,
+  });
+  const unitSqFtKept = residentialCondoUnitLookup && !rc?._parcel?.aggregated;
+  const unitLookup = residentialUnitLookup || residentialCondoUnitLookup;
   const category = residentialUnitLookup ? 'RESIDENTIAL' : wholePropertyCategory;
   const commercialProfile = category === 'COMMERCIAL';
   const commercialSubtype = commercialProfile ? wholePropertySubtype : null;
-  if (residentialUnitLookup) {
+  if (unitLookup) {
     // Everything the record and the imagery say about SIZE and GROUNDS is
     // the building's / the parcel's, not the unit's — carrying any of it
     // into a one-unit quote is the whole-complex overquote the unit-scope
@@ -1674,7 +1687,7 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
         squareFootage: isVerified('squareFootage') ? Number(rc.squareFootage) || 0 : 0,
         stories: (rc._storiesSource === 'verified' || isVerified('stories')) ? Number(rc.stories) || 0 : 0,
       },
-      squareFootage: 0,
+      squareFootage: unitSqFtKept ? rc.squareFootage : 0,
       lotSize: 0,
       stories: 1,
       // The assumed 1 is a DEFAULT nobody observed: stamped so the client's
@@ -1786,7 +1799,14 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     && parcelTurfBoundApplies
   ) ? Math.round(countyCeiling.turfSf * TURF_COUNTY_PRIOR_RATIO) : null;
 
-  const fieldVerifyFlags = buildFieldVerifyFlags(rc, ai, addressAudit, { parcelTurfBoundApplies, residentialUnitLookup });
+  const fieldVerifyFlags = buildFieldVerifyFlags(rc, ai, addressAudit, { parcelTurfBoundApplies, residentialUnitLookup: unitLookup });
+  if (residentialCondoUnitLookup) {
+    fieldVerifyFlags.push({
+      field: 'propertyType',
+      reason: `Unit address on a condo record — quoted as ONE condo unit (single level, no lot, no pool assumed). The building's story count, the community pool, and every satellite read (turf, landscape, water) describe the whole parcel and were dropped. Confirm the unit's floor (upper floors price as Condo — Upper)${unitSqFtKept ? ' and its sq ft' : ', and get the unit\'s own sq ft from the customer'}`,
+      priority: 'HIGH',
+    });
+  }
   if (residentialUnitLookup) {
     const wholeUnits = verifiedUnitCountOf(rc) ?? Math.max(Number(rc?.unitCount) || 0, Number(rc?._parcel?.residentialUnits) || 0);
     // Name what a person's earlier field-verified save holds on this unit
@@ -1901,7 +1921,7 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     commercialSubtype,
     // Unit-address reclassification audit: the whole-property verdict this
     // unit lookup overrode, so a consumer can still see the building.
-    residentialUnitLookup: residentialUnitLookup
+    residentialUnitLookup: unitLookup
       ? { wholePropertyCategory, wholePropertySubtype }
       : null,
     commercialDetectionSource: commercialProfile ? resolveCommercialDetectionSource(rc, ai) : null,
@@ -1949,7 +1969,7 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     // nothing about a building's area (the UI relabels the field).
     subdivisionMedian: rc?._subdivisionMedian === undefined
       ? undefined
-      : ((residentialUnitLookup || commercialProfile || fieldVerifyFlags.some((flag) => flag?.field === 'address'))
+      : ((unitLookup || commercialProfile || fieldVerifyFlags.some((flag) => flag?.field === 'address'))
         ? null : subdivisionMedianEstimate(rc)),
     // Machine-readable twin of the parkParcel verify flag (multi-situs master
     // parcel — land-lease mobile-home park or similar; the roll vouches for
