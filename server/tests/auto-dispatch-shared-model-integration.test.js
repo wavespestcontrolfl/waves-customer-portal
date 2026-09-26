@@ -7,14 +7,18 @@
 // drive/cluster numbers.
 jest.mock('../services/scheduling/find-time', () => ({ findAvailableSlots: jest.fn() }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-// The SLOT_TAKEN occupancy pre-filter now calls this canonical reader
-// directly (Codex pre-push P1) rather than going through ctx.db — mocked
-// to report no occupancy conflicts so these tests exercise the SCORE
-// comparison, not occupancy; windowsOverlap stays real (pure, harmless
-// against an empty occupancy list either way).
-jest.mock('../services/scheduling/occupancy', () => ({
-  listOccupiedWindows: jest.fn().mockResolvedValue([]),
-  windowsOverlap: jest.requireActual('../services/scheduling/occupancy').windowsOverlap,
+// The SLOT_TAKEN pre-filter now calls the writer's OWN read-only conflict
+// probe directly (Codex pre-push structural fix) rather than going through
+// ctx.db — mocked to report no conflicts so these tests exercise the SCORE
+// comparison, not occupancy. visit-groups' predictMemberWindows stays real
+// (pure); these services carry no visit_id, so it is never reached anyway.
+jest.mock('../services/rebooker', () => ({
+  probeMoveConflicts: jest.fn().mockResolvedValue({ rows: [], snapshot: [] }),
+  occupancyProbeEnd: jest.requireActual('../services/rebooker').occupancyProbeEnd,
+}));
+jest.mock('../services/visit-groups', () => ({
+  openMembers: jest.fn(),
+  predictMemberWindows: jest.requireActual('../services/visit-groups').predictMemberWindows,
 }));
 
 const { findAvailableSlots } = require('../services/scheduling/find-time');
@@ -38,15 +42,16 @@ const PREFS = {
 };
 const CONFIG = { minScoreImprovement: 15, removeStabilityFloor: 35 };
 
-function stopRow(id, windowStart, windowEnd, lat, lng) {
+function stopRow(id, windowStart, windowEnd, lat, lng, { date = '2026-08-11', tech = 't2' } = {}) {
   return {
     id, window_start: windowStart, window_end: windowEnd, status: 'confirmed',
-    estimated_duration_minutes: 60, svc_lat: lat, svc_lng: lng,
+    estimated_duration_minutes: 60, svc_lat: lat, svc_lng: lng, scheduled_date: date, technician_id: tech,
   };
 }
 
 // Sequenced db mock: call 1 = sibling-date query, call 2 = the candidate
-// day's OTHER stops, call 3 = the current day's OTHER stops.
+// tech-days' OTHER stops (one batched read), call 3+ = the current day's
+// OTHER stops (legacy neighbors, then the shared model's loadDayStops).
 function sequencedDb(candidateStops, currentStops) {
   let call = 0;
   return () => {
@@ -83,8 +88,8 @@ test('a visit already well placed (tight, clustered current day) does NOT move t
   // Current day: two neighbors immediately around the visit, close by (same
   // small neighborhood) — low detour, high cluster share.
   const currentStops = [
-    stopRow('n1', '08:00', '09:00', 27.401, -82.501),
-    stopRow('n2', '10:00', '11:00', 27.399, -82.499),
+    stopRow('n1', '08:00', '09:00', 27.401, -82.501, { date: '2026-08-04', tech: 't1' }),
+    stopRow('n2', '10:00', '11:00', 27.399, -82.499, { date: '2026-08-04', tech: 't1' }),
   ];
   findAvailableSlots.mockResolvedValue({
     slots: [
@@ -107,7 +112,7 @@ test('a clearly better clustered day wins over a poorly-placed current day', asy
     auto_dispatch_change_count: 0 };
   // Current day: the visit's only neighbor is far away (different part of
   // the county) — a big detour, and nothing nearby to cluster with.
-  const currentStops = [stopRow('far', '07:00', '08:00', 27.10, -82.10)];
+  const currentStops = [stopRow('far', '07:00', '08:00', 27.10, -82.10, { date: '2026-08-04', tech: 't1' })];
   // Candidate day: two neighbors immediately around the candidate window,
   // right next to the visit's own location — tight insertion, full cluster
   // credit.

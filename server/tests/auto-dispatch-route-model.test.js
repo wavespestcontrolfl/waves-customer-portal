@@ -107,6 +107,54 @@ describe('routeCost', () => {
     const cost = routeCost(others, { geo: NEAR_HQ, startMin: 541 });
     expect(cost.detourMinutes).toBeGreaterThanOrEqual(0);
   });
+
+  // Codex r1 (PRRT_kwDOR3YQi86mPzgn): routeCost charges every stop's
+  // planning minutes in routeTimeWith/WithoutMinutes (scoring.js's workload
+  // term reads it as route_minutes); detourMinutes stays pure drive, since
+  // the route-efficiency cap (45 min) is calibrated on drive alone.
+  describe('routeTimeWith/WithoutMinutes charge stopPlanningMinutes (Codex pre-push P1)', () => {
+    test('charges the MOVING VISIT\'s own planning minutes, on top of the (unchanged) drive chain', () => {
+      const cost = routeCost([], { geo: FAR, startMin: 600, estimated_duration_minutes: 40 });
+      expect(cost.detourMinutes).toBeCloseTo(cost.driveWithMinutes, 5); // detourMinutes itself: pure drive, unchanged
+      expect(cost.routeTimeWithMinutes).toBeCloseTo(cost.driveWithMinutes + 40, 5);
+    });
+
+    test('carries EXISTING stops\' planning minutes too (drive + every stop\'s service minutes)', () => {
+      const others = [
+        { geo: NEAR_HQ, startMin: 480, estimated_duration_minutes: 45 },
+        { geo: NEAR_HQ, startMin: 600, estimated_duration_minutes: 30 },
+      ];
+      const cost = routeCost(others, { geo: NEAR_HQ, startMin: 540, estimated_duration_minutes: 20 });
+      const driveOnly = chainDriveMinutes(others.map((s) => s.geo));
+      expect(cost.routeTimeWithoutMinutes).toBeCloseTo(driveOnly + 45 + 30, 5);
+      expect(cost.routeTimeWithMinutes).toBeCloseTo(cost.driveWithMinutes + 45 + 30 + 20, 5);
+    });
+
+    test('a GATE_SCHEDULING_CAPACITY planning-table change moves routeTimeWithMinutes (recurring pest: 25 min, not its own 60-min estimate)', () => {
+      process.env.GATE_SCHEDULING_CAPACITY = 'true';
+      const pestVisit = { geo: FAR, startMin: 600, service_type: 'Quarterly Pest Control Service', is_recurring: true, estimated_duration_minutes: 60 };
+      const tableNamed = routeCost([], { ...pestVisit }); // table names it -> 25, not 60
+      delete process.env.GATE_SCHEDULING_CAPACITY;
+      const gateOff = routeCost([], { ...pestVisit }); // gate off -> falls back to the 60-min estimate
+      expect(gateOff.routeTimeWithMinutes - tableNamed.routeTimeWithMinutes).toBeCloseTo(60 - 25, 5);
+      // The scored detourMinutes never moved — only the new field did.
+      expect(gateOff.detourMinutes).toBeCloseTo(tableNamed.detourMinutes, 5);
+    });
+
+    test('a stop with no coordinates is still on-site time: charged in route minutes, absent from the drive chain', () => {
+      const located = { geo: NEAR_HQ, startMin: 480, estimated_duration_minutes: 30 };
+      const unlocated = { geo: null, startMin: 600, estimated_duration_minutes: 45 };
+      const cost = routeCost([located, unlocated], null);
+      expect(cost.driveWithoutMinutes).toBeCloseTo(chainDriveMinutes([NEAR_HQ]), 5);
+      expect(cost.routeTimeWithoutMinutes).toBeCloseTo(cost.driveWithoutMinutes + 30 + 45, 5);
+    });
+
+    test('an empty day with no visit: routeTimeWithMinutes === routeTimeWithoutMinutes === 0', () => {
+      const cost = routeCost([], null);
+      expect(cost.routeTimeWithoutMinutes).toBe(0);
+      expect(cost.routeTimeWithMinutes).toBe(0);
+    });
+  });
 });
 
 describe('clusterShare', () => {
@@ -131,5 +179,34 @@ describe('clusterShare', () => {
   test('CLUSTER_RADIUS_MILES is a small, documented local radius', () => {
     expect(CLUSTER_RADIUS_MILES).toBeGreaterThan(0);
     expect(CLUSTER_RADIUS_MILES).toBeLessThanOrEqual(10);
+  });
+
+  // Codex pre-push P1 (this round): a visit-group's members share one
+  // physical address but are separate rows — must collapse to ONE stop.
+  describe('collapses visit-group members to one physical stop (Codex pre-push P1)', () => {
+    test('a 3-member group at the SAME location scores the SAME as a single stop there, not triple credit', () => {
+      const grouped = [
+        { geo: NEAR_HQ, startMin: 540, visit_id: 'v1' },
+        { geo: NEAR_HQ, startMin: 545, visit_id: 'v1' },
+        { geo: NEAR_HQ, startMin: 550, visit_id: 'v1' },
+      ];
+      const single = [{ geo: NEAR_HQ, startMin: 540, visit_id: 'v1' }];
+      expect(clusterShare(grouped, NEAR_HQ)).toBe(clusterShare(single, NEAR_HQ));
+    });
+
+    test('a mixed day (one grouped pair + one ungrouped far stop) shares by DISTINCT physical stop, not row count', () => {
+      const stops = [
+        { geo: NEAR_HQ, startMin: 540, visit_id: 'v1' },
+        { geo: NEAR_HQ, startMin: 545, visit_id: 'v1' }, // same group, same location — collapses with the row above
+        { geo: FAR, startMin: 700, visit_id: null },
+      ];
+      // 2 distinct physical stops (the group + the far one); 1 of them is nearby.
+      expect(clusterShare(stops, NEAR_HQ)).toBe(0.5);
+    });
+
+    test('rows with no visit_id never collapse into each other', () => {
+      const stops = [{ geo: NEAR_HQ, startMin: 540 }, { geo: NEAR_HQ, startMin: 600 }];
+      expect(clusterShare(stops, NEAR_HQ)).toBe(1); // both count, both nearby
+    });
   });
 });

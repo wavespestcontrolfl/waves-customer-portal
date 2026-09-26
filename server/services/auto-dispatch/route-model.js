@@ -60,6 +60,10 @@ function chainDriveMinutes(orderedGeos) {
   return total;
 }
 
+function sumPlanningMinutes(stops) {
+  return (stops || []).reduce((sum, s) => sum + stopPlanningMinutes(s), 0);
+}
+
 /**
  * Route cost of a technician-day's stop chain WITH and WITHOUT one visit —
  * the shared measure the current placement and every candidate score
@@ -73,16 +77,60 @@ function chainDriveMinutes(orderedGeos) {
  * Returns the SAME `detourMinutes` quantity for a current placement (its
  * removal savings) and a candidate (its insertion cost), so the two are
  * finally comparable on one scale (root cause b of the 2026-09-26 incident).
+ *
+ * `routeTimeWithMinutes` / `routeTimeWithoutMinutes` are the day's route
+ * time: the drive chain plus stopPlanningMinutes for EVERY stop — the
+ * existing stops and, in the "with" figure, the moving visit (Codex r1: the
+ * model documented drive + service minutes but charged drive only).
+ * scoring.js reads `routeTimeWithMinutes` (as `route_minutes`) for its
+ * workload term, so a heavier day by the owner planning table scores worse.
+ * `detourMinutes` stays pure drive: scoring.js's route-efficiency cap
+ * (DETOUR_CAP_MIN, 45 min) is calibrated on drive, and the mover's own
+ * service minutes are identical for the current placement and every
+ * candidate, so adding them there would only saturate that cap.
  */
 function routeCost(otherStops, visit) {
   const others = (otherStops || []).filter((s) => s && s.geo).sort((a, b) => a.startMin - b.startMin);
   const driveWithoutMinutes = chainDriveMinutes(others.map((s) => s.geo));
+  // Every other stop is on-site time, located or not.
+  const otherServiceMinutes = sumPlanningMinutes((otherStops || []).filter(Boolean));
+  const routeTimeWithoutMinutes = driveWithoutMinutes + otherServiceMinutes;
   if (!visit || !visit.geo) {
-    return { driveWithoutMinutes, driveWithMinutes: driveWithoutMinutes, detourMinutes: 0 };
+    return {
+      driveWithoutMinutes,
+      driveWithMinutes: driveWithoutMinutes,
+      detourMinutes: 0,
+      routeTimeWithoutMinutes,
+      routeTimeWithMinutes: routeTimeWithoutMinutes,
+    };
   }
   const withVisit = [...others, visit].sort((a, b) => a.startMin - b.startMin);
   const driveWithMinutes = chainDriveMinutes(withVisit.map((s) => s.geo));
-  return { driveWithoutMinutes, driveWithMinutes, detourMinutes: Math.max(0, driveWithMinutes - driveWithoutMinutes) };
+  const visitMinutes = stopPlanningMinutes(visit);
+  const routeTimeWithMinutes = driveWithMinutes + otherServiceMinutes + visitMinutes;
+  const detourMinutes = Math.max(0, driveWithMinutes - driveWithoutMinutes);
+  return {
+    driveWithoutMinutes, driveWithMinutes, detourMinutes, routeTimeWithoutMinutes, routeTimeWithMinutes,
+  };
+}
+
+// Codex r1: a visit group's members (combo lawn+pest, etc.) sit at the SAME
+// physical address on separate scheduled_services rows — uncollapsed, a
+// 3-member group would count as 3 "nearby" stops for the cluster share.
+// Keeps the first row per distinct visit_id; a stop with no visit_id (the
+// common case) always counts on its own.
+function collapseGroupedStops(stops) {
+  const seenVisitIds = new Set();
+  const out = [];
+  for (const s of stops) {
+    if (s && s.visit_id != null) {
+      const key = String(s.visit_id);
+      if (seenVisitIds.has(key)) continue;
+      seenVisitIds.add(key);
+    }
+    out.push(s);
+  }
+  return out;
 }
 
 /**
@@ -91,11 +139,13 @@ function routeCost(otherStops, visit) {
  * 10-point weight in scoring.js) with a measure of whether the visit is
  * actually clustered with the day's other work, not just how BUSY the day
  * is. An empty day (no other stops) scores 0 — there is nothing to cluster
- * with, same as the legacy density term's empty-day floor.
+ * with, same as the legacy density term's empty-day floor. Visit-group
+ * members collapse to ONE physical stop first (see collapseGroupedStops)
+ * so a grouped visit's own siblings never inflate this share.
  */
 function clusterShare(otherStops, geo) {
   if (!geo || !otherStops || !otherStops.length) return 0;
-  const withGeo = otherStops.filter((s) => s && s.geo);
+  const withGeo = collapseGroupedStops(otherStops).filter((s) => s && s.geo);
   if (!withGeo.length) return 0;
   const nearby = withGeo.filter((s) => haversine(s.geo.lat, s.geo.lng, geo.lat, geo.lng) <= CLUSTER_RADIUS_MILES).length;
   return Math.max(0, Math.min(1, nearby / withGeo.length));
@@ -107,4 +157,5 @@ module.exports = {
   chainDriveMinutes,
   routeCost,
   clusterShare,
+  _internals: { collapseGroupedStops, sumPlanningMinutes },
 };

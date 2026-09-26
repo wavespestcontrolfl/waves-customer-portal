@@ -121,6 +121,21 @@ describe('density/cluster term (GATE_AUTO_DISPATCH_SHARED_MODEL)', () => {
     expect(r.density_score).toBe(10); // stops_that_day=6 hits DENSITY_CAP → full legacy credit
   });
 
+  // Codex r1 (PRRT_kwDOR3YQi86mPzgn): the day's planned route minutes
+  // (drive + owner planning minutes of every stop) reach the comparison.
+  test('gate on: workload reads route_minutes — a heavier planned day scores lower; gate off ignores it', () => {
+    process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
+    const light = scoreAppointmentPlacement(placement({ stops_that_day: 3, route_minutes: 300 }), NEUTRAL_PREFS, {});
+    const heavy = scoreAppointmentPlacement(placement({ stops_that_day: 3, route_minutes: 540 }), NEUTRAL_PREFS, {});
+    const overfull = scoreAppointmentPlacement(placement({ stops_that_day: 3, route_minutes: 650 }), NEUTRAL_PREFS, {});
+    expect(light.workload_score).toBe(5);
+    expect(heavy.workload_score).toBeCloseTo(5 * (1 - (540 - 360) / 240), 2);
+    expect(overfull.workload_score).toBe(0);
+    delete process.env.GATE_AUTO_DISPATCH_SHARED_MODEL;
+    const legacy = scoreAppointmentPlacement(placement({ stops_that_day: 3, route_minutes: 650 }), NEUTRAL_PREFS, {});
+    expect(legacy.workload_score).toBe(5); // 3 stops: full legacy credit
+  });
+
   test('total weights are unchanged (cluster term still worth exactly 10 of 100)', () => {
     process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
     const full = scoreAppointmentPlacement(placement({ detour_minutes: 0, stops_that_day: 6, same_area_share: 1, capability_level: 'qualified', is_current: true }), { ...NEUTRAL_PREFS, preferred_day_indexes: [2] }, {});

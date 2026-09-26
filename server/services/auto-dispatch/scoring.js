@@ -14,11 +14,12 @@
  * backlog item 3): the stop-COUNT density term (WEIGHTS.density, "more
  * stops that day = better") is replaced by a stop-CLUSTER term at the SAME
  * 10-point weight — the share of the placement's day already within a few
- * miles of the visit (route-model.js clusterShare, on `p.same_area_share`).
- * Total weights and the move thresholds are unchanged either way. Gate off,
- * or a placement carrying no `same_area_share` (candidate-slots.js only
- * populates it when the gate is on): the legacy stop-count density term,
- * byte for byte.
+ * miles of the visit (route-model.js clusterShare, on `p.same_area_share`),
+ * and the stop-count workload term measures the day's planned route minutes
+ * instead (`p.route_minutes`, see workloadScoreFor). Total weights and the
+ * move thresholds are unchanged either way. Gate off, or a placement
+ * carrying neither field (candidate-slots.js only populates them when the
+ * gate is on): the legacy stop-count terms, byte for byte.
  */
 
 const { autoDispatchSharedModelLive } = require('../../config/feature-gates');
@@ -44,6 +45,24 @@ function weekdayOf(dateStr) {
   if (!dateStr) return null;
   const d = new Date(`${String(dateStr).split('T')[0]}T12:00:00Z`);
   return Number.isNaN(d.getTime()) ? null : d.getUTCDay();
+}
+
+// --- workload balance: planned route minutes (shared model) or stop count
+// (legacy). The legacy term gives full credit up to 6 stops and none at 10;
+// the shared model keeps those bounds at the legacy 60-minute default per
+// stop (360 / 600 minutes) but measures the day as route-model.js's
+// route_minutes — drive plus the owner planning minutes of every stop, the
+// moving visit included (Codex r1: planning minutes must reach the
+// comparison). Same 5-point weight either way.
+const ROUTE_MINUTES_FULL_CREDIT = 6 * 60;
+const ROUTE_MINUTES_NO_CREDIT = 10 * 60;
+function workloadScoreFor(p, stops) {
+  if (autoDispatchSharedModelLive() && Number.isFinite(p.route_minutes)) {
+    return WEIGHTS.workload * clamp(
+      1 - (p.route_minutes - ROUTE_MINUTES_FULL_CREDIT) / (ROUTE_MINUTES_NO_CREDIT - ROUTE_MINUTES_FULL_CREDIT), 0, 1,
+    );
+  }
+  return WEIGHTS.workload * (stops <= 6 ? 1 : clamp(1 - (stops - 6) / 4, 0, 1));
 }
 
 // --- route density: same-area clustering (shared model) or stop count
@@ -108,7 +127,7 @@ function scoreAppointmentPlacement(p, prefs, ctx = {}) {
   const densityScore = densityOrClusterScore(p, stops);
 
   // --- workload balance (penalize overloaded days) ---
-  const workloadScore = WEIGHTS.workload * (stops <= 6 ? 1 : clamp(1 - (stops - 6) / 4, 0, 1));
+  const workloadScore = workloadScoreFor(p, stops);
 
   // --- same-technician continuity ---
   let continuityScore = 0;
@@ -143,4 +162,6 @@ function scoreAppointmentPlacement(p, prefs, ctx = {}) {
   };
 }
 
-module.exports = { scoreAppointmentPlacement, WEIGHTS, weekdayOf, _internals: { hhmmToMin } };
+module.exports = {
+  scoreAppointmentPlacement, WEIGHTS, weekdayOf, _internals: { hhmmToMin, ROUTE_MINUTES_FULL_CREDIT, ROUTE_MINUTES_NO_CREDIT },
+};

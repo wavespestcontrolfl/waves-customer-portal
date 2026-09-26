@@ -5,32 +5,39 @@
 // today (2026-09-26 incident: 17 applied, 72 SLOT_TAKEN under the legacy
 // candidate generation).
 //
-// Codex pre-push P1 (this round): the SLOT_TAKEN occupancy pre-filter now
-// calls the canonical, tech-blind reader (scheduling/occupancy.js
-// listOccupiedWindows — the same one the writer's probeMoveConflicts uses)
-// instead of a hand-rolled tech-scoped-or-null query; route-cost/cluster
-// scoring (loadDayStops) stays tech-scoped, a separate concern, and now
-// also excludes windowless placeholder rows.
+// Codex pre-push P1 (this round — "we keep missing pieces because we mirror
+// the writer"): the SLOT_TAKEN pre-filter calls the writer's OWN read-only
+// conflict probe (rebooker.js probeMoveConflicts, exported unchanged) rather
+// than re-deriving any part of its predicate, ONE call per DISTINCT
+// candidate DATE (never per candidate/member). Groups are checked per member
+// window from the writer's own derivation (visit-groups.js
+// predictMemberWindows) rather than a summed/widened interval. Route-cost/
+// cluster scoring reads every candidate tech-day in ONE batched query
+// (tech-or-unassigned rows), with windowless placeholders excluded and
+// visit-group members collapsed to one physical stop for clustering.
 jest.mock('../services/scheduling/find-time', () => ({ findAvailableSlots: jest.fn() }));
 jest.mock('../services/route-optimizer', () => ({
   HQ: { lat: 27.39, lng: -82.39 },
   haversine: () => 1,
   milesToDriveMinutes: jest.requireActual('../services/route-optimizer').milesToDriveMinutes,
 }));
-jest.mock('../services/visit-groups', () => ({ openMembers: jest.fn() }));
-jest.mock('../services/scheduling/occupancy', () => ({
-  listOccupiedWindows: jest.fn(),
-  windowsOverlap: jest.requireActual('../services/scheduling/occupancy').windowsOverlap,
+jest.mock('../services/visit-groups', () => ({
+  openMembers: jest.fn(),
+  predictMemberWindows: jest.requireActual('../services/visit-groups').predictMemberWindows,
+}));
+jest.mock('../services/rebooker', () => ({
+  probeMoveConflicts: jest.fn().mockResolvedValue({ rows: [], snapshot: [] }),
+  occupancyProbeEnd: jest.requireActual('../services/rebooker').occupancyProbeEnd,
 }));
 
 const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { openMembers } = require('../services/visit-groups');
-const { listOccupiedWindows } = require('../services/scheduling/occupancy');
+const { probeMoveConflicts } = require('../services/rebooker');
 const {
   findValidCandidateSlots,
   computeCurrentPlacement,
   _internals: {
-    loadDayStops, loadGroupContext, unitPlanningMinutes, loadOccupancyForDate, filterAndScoreSharedModelCandidates,
+    loadDayStops, loadGroupContext, filterAndScoreSharedModelCandidates, loadDateOccupiedSpans, unitProbeWindows,
   },
 } = require('../services/auto-dispatch/candidate-slots');
 
@@ -39,7 +46,7 @@ const ORIGINAL_SHARED_GATE = process.env.GATE_AUTO_DISPATCH_SHARED_MODEL;
 beforeEach(() => {
   delete process.env.GATE_DRIVE_TIME_CALIBRATION;
   jest.clearAllMocks();
-  listOccupiedWindows.mockResolvedValue([]); // default: no occupancy conflicts anywhere
+  probeMoveConflicts.mockResolvedValue({ rows: [], snapshot: [] }); // default: no occupancy conflicts anywhere
 });
 afterEach(() => {
   if (ORIGINAL_SHARED_GATE === undefined) delete process.env.GATE_AUTO_DISPATCH_SHARED_MODEL; else process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = ORIGINAL_SHARED_GATE;
@@ -64,7 +71,7 @@ function ctxBase() {
 // Generic ctx.db mock: every scheduled_services query (sibling-date check,
 // loadDayStops for route scoring, computeCurrentPlacement's neighbor
 // queries) returns []. The SLOT_TAKEN occupancy check no longer touches
-// ctx.db at all — it goes through the mocked listOccupiedWindows above.
+// ctx.db at all — it goes through the mocked rebooker probeMoveConflicts above.
 function emptyDb() {
   const c = {};
   ['where', 'whereNot', 'whereNotIn', 'whereNotNull', 'whereIn', 'whereBetween', 'orWhere', 'leftJoin', 'orderBy', 'first']
@@ -73,7 +80,20 @@ function emptyDb() {
   return () => c;
 }
 
-test('gate ON: drops a SLOT_TAKEN candidate (via the canonical occupancy reader) and re-scores the survivor on the shared model', async () => {
+// A conflicting row shaped just enough for scheduling/occupancy.js's
+// occupiedRows to expand it to a plain {startMin, endMin} span (no
+// reservation_service_mix -> not a version-2 combined allocation, the common
+// case) — the SAME expansion probeMoveConflicts' own findConflictingVisits
+// applies internally.
+function conflictRow(windowStart, windowEnd) {
+  return { id: 'occupied-1', window_start: windowStart, window_end: windowEnd, estimated_duration_minutes: 60 };
+}
+
+// The tech-day a batched day-stop row belongs to (the 2026-08-06 / t1 slot
+// most tests use).
+const SLOT_KEY = { scheduled_date: '2026-08-06', technician_id: 't1' };
+
+test('gate ON: drops a SLOT_TAKEN candidate (via the writer\'s own probeMoveConflicts, batched by date) and re-scores the survivor on the shared model', async () => {
   process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
   findAvailableSlots.mockResolvedValue({
     slots: [
@@ -82,8 +102,8 @@ test('gate ON: drops a SLOT_TAKEN candidate (via the canonical occupancy reader)
     ],
   });
   // 08-05's window (08:00-09:00) collides with existing occupancy; 08-06 is clear.
-  listOccupiedWindows.mockImplementation(async ({ dateFrom }) => (
-    dateFrom === '2026-08-05' ? [{ startMin: 480, endMin: 540 }] : []
+  probeMoveConflicts.mockImplementation(async ({ target }) => (
+    target.date === '2026-08-05' ? { rows: [conflictRow('08:00', '09:00')], snapshot: [] } : { rows: [], snapshot: [] }
   ));
   const { candidates, current, drops } = await findValidCandidateSlots(SERVICE, prefs, { ...ctxBase(), db: emptyDb() });
 
@@ -104,8 +124,8 @@ test('gate OFF: no occupancy pre-filter, no shared-model fields, byte-identical 
     ],
   });
   // Only 2 db calls expected (sibling query + current-placement neighbors) —
-  // the shared-model queries never run, and the canonical occupancy reader
-  // is never even called.
+  // the shared-model queries never run, and the writer's probe is never
+  // even called.
   let calls = 0;
   const db = () => {
     calls += 1;
@@ -123,14 +143,30 @@ test('gate OFF: no occupancy pre-filter, no shared-model fields, byte-identical 
   expect(drops.slot_taken).toBe(0);
   expect(current.model).toBeUndefined();
   expect(calls).toBe(2);
-  expect(listOccupiedWindows).not.toHaveBeenCalled();
+  expect(probeMoveConflicts).not.toHaveBeenCalled();
+});
+
+// Codex r1 (PRRT_kwDOR3YQi86mP9cs): gate on, every survivor reaches the
+// caller to be scored (index.js caps by total score); gate off keeps the
+// legacy pre-score cap in find-time order.
+test('gate on: no pre-score cap — every survivor is returned; gate off: the legacy top-N cap', async () => {
+  const slots = ['2026-08-05', '2026-08-06', '2026-08-07'].map((date) => (
+    { date, technician: { id: 't1', name: 'A' }, start_time: '08:00', end_time: '09:00', detour_minutes: 1, total_drive_minutes: 5, stops_that_day: 0, score: 1 }
+  ));
+  findAvailableSlots.mockResolvedValue({ slots });
+  process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
+  const on = await findValidCandidateSlots(SERVICE, prefs, { ...ctxBase(), scoreCap: 1, db: emptyDb() });
+  delete process.env.GATE_AUTO_DISPATCH_SHARED_MODEL;
+  const off = await findValidCandidateSlots(SERVICE, prefs, { ...ctxBase(), scoreCap: 1, db: emptyDb() });
+  expect(on.candidates).toHaveLength(3);
+  expect(off.candidates.map((c) => c.date)).toEqual(['2026-08-05']);
 });
 
 // Sequenced db mock for a SINGLE candidate: call 1 = sibling-date query
-// (none), call 2 = loadDayStops for the candidate's (tech,date) —
-// `dayStops`, call 3 = computeCurrentPlacement's legacy neighbor query
-// (none), call 4 = computeCurrentPlacement's shared-model loadDayStops
-// (none). The occupancy check no longer touches ctx.db at all.
+// (none), call 2 = the batched candidate tech-day stops — `dayStops`, call
+// 3 = computeCurrentPlacement's legacy neighbor query (none), call 4 =
+// computeCurrentPlacement's shared-model loadDayStops (none). The occupancy
+// check goes through the mocked probe, never ctx.db.
 function singleCandidateDb(dayStops) {
   let call = 0;
   return () => {
@@ -141,7 +177,7 @@ function singleCandidateDb(dayStops) {
       .forEach((m) => { c[m] = () => c; });
     c.select = async () => {
       if (n === 1) return []; // sibling query
-      if (n === 2) return dayStops; // loadDayStops for the candidate's (tech,date)
+      if (n === 2) return dayStops; // the candidate tech-days' stops (one batched read)
       return []; // current-placement queries (legacy + shared-model)
     };
     return c;
@@ -162,11 +198,11 @@ test('a day whose only stops are an expired hold + a no_show scores IDENTICALLY 
   const expiredHoldRow = {
     id: 'expired-hold', window_start: '08:00', window_end: '09:00', status: 'confirmed',
     reservation_expires_at: new Date(Date.now() - 60000).toISOString(),
-    estimated_duration_minutes: 60, svc_lat: SERVICE.lat, svc_lng: SERVICE.lng,
+    estimated_duration_minutes: 60, svc_lat: SERVICE.lat, svc_lng: SERVICE.lng, ...SLOT_KEY,
   };
   const noShowRow = {
     id: 'no-show', window_start: '08:00', window_end: '09:00', status: 'no_show',
-    estimated_duration_minutes: 60, svc_lat: SERVICE.lat, svc_lng: SERVICE.lng,
+    estimated_duration_minutes: 60, svc_lat: SERVICE.lat, svc_lng: SERVICE.lng, ...SLOT_KEY,
   };
 
   findAvailableSlots.mockResolvedValue({ slots: [SLOT] });
@@ -175,7 +211,7 @@ test('a day whose only stops are an expired hold + a no_show scores IDENTICALLY 
   );
 
   jest.clearAllMocks();
-  listOccupiedWindows.mockResolvedValue([]);
+  probeMoveConflicts.mockResolvedValue({ rows: [], snapshot: [] });
   findAvailableSlots.mockResolvedValue({ slots: [SLOT] });
   const { candidates: empty } = await findValidCandidateSlots(
     SERVICE, prefs, { ...ctxBase(), db: singleCandidateDb([]) },
@@ -225,7 +261,7 @@ test('a day whose only "stop" is a windowless placeholder scores like an empty d
   const SLOT = { date: '2026-08-06', technician: { id: 't1', name: 'A' }, start_time: '08:00', end_time: '09:00', detour_minutes: 2, total_drive_minutes: 12, stops_that_day: 1, score: 2 };
   const placeholderRow = {
     id: 'placeholder', window_start: null, window_end: null, status: 'pending',
-    estimated_duration_minutes: 60, svc_lat: SERVICE.lat, svc_lng: SERVICE.lng,
+    estimated_duration_minutes: 60, svc_lat: SERVICE.lat, svc_lng: SERVICE.lng, ...SLOT_KEY,
   };
 
   findAvailableSlots.mockResolvedValue({ slots: [SLOT] });
@@ -234,7 +270,7 @@ test('a day whose only "stop" is a windowless placeholder scores like an empty d
   );
 
   jest.clearAllMocks();
-  listOccupiedWindows.mockResolvedValue([]);
+  probeMoveConflicts.mockResolvedValue({ rows: [], snapshot: [] });
   findAvailableSlots.mockResolvedValue({ slots: [SLOT] });
   const { candidates: empty } = await findValidCandidateSlots(
     SERVICE, prefs, { ...ctxBase(), db: windowlessAwareSingleCandidateDb([]) },
@@ -260,7 +296,7 @@ test('computeCurrentPlacement: a current-day expired hold / no_show does not cou
   };
   const rowsDb = (rows) => () => {
     const c = {};
-    ['where', 'whereNot', 'whereNotIn', 'whereNotNull', 'leftJoin'].forEach((m) => { c[m] = () => c; });
+    ['where', 'whereIn', 'whereNot', 'whereNotIn', 'whereNotNull', 'leftJoin'].forEach((m) => { c[m] = () => c; });
     c.select = async () => rows;
     return c;
   };
@@ -274,27 +310,47 @@ test('computeCurrentPlacement: a current-day expired hold / no_show does not cou
   expect(empty.same_area_share).toBe(0);
 });
 
-// Codex pre-push P1 (this round): the SLOT_TAKEN pre-filter calls the
-// canonical, tech-blind occupancy reader directly — never re-deriving its
-// WHERE — and route-cost/cluster scoring (loadDayStops) stays tech-scoped, a
-// separate concern, with windowless placeholders excluded.
-describe('loadOccupancyForDate: canonical, tech-blind occupancy reader (Codex pre-push P1)', () => {
-  test('calls listOccupiedWindows for exactly the one date, with the moving unit\'s excludeIds and the writer\'s own excludeStatuses', async () => {
-    listOccupiedWindows.mockResolvedValueOnce([{ startMin: 480, endMin: 540 }]);
-    const result = await loadOccupancyForDate(jest.fn(), { dateStr: '2026-08-06', excludeIds: new Set(['s1', 'sib1']) });
+// Codex pre-push P1 (this round): stops_that_day under the gate must count
+// the SAME active stop list (activeNeighbors) the detour/cluster numbers
+// above are computed from, not the legacy (inactive-carrying) neighbor list.
+test('computeCurrentPlacement: stops_that_day under the gate counts ACTIVE neighbors only', async () => {
+  process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
+  const noShowRow = {
+    id: 'no-show', window_start: '10:00', window_end: '11:00', status: 'no_show',
+    estimated_duration_minutes: 60, svc_lat: SERVICE.lat, svc_lng: SERVICE.lng,
+  };
+  const rowsDb = (rows) => () => {
+    const c = {};
+    ['where', 'whereIn', 'whereNot', 'whereNotIn', 'whereNotNull', 'leftJoin'].forEach((m) => { c[m] = () => c; });
+    c.select = async () => rows;
+    return c;
+  };
+  const current = await computeCurrentPlacement(SERVICE, prefs, { ...ctxBase(), db: rowsDb([noShowRow]) });
+  // The no_show never counts (it isn't active) — just the visit itself.
+  expect(current.stops_that_day).toBe(1);
+});
+
+// Codex pre-push P1 (this round): the writer's OWN read-only conflict probe
+// is the source of truth, batched by date rather than re-derived per query.
+describe('loadDateOccupiedSpans: the writer\'s own probe, batched by date (Codex pre-push P1)', () => {
+  test('calls probeMoveConflicts ONCE with a full-day window and the moving unit\'s excludeIds, expanding rows to {startMin, endMin} spans', async () => {
+    probeMoveConflicts.mockResolvedValueOnce({ rows: [conflictRow('08:00', '09:00')], snapshot: [] });
+    const result = await loadDateOccupiedSpans(jest.fn(), '2026-08-06', new Set(['s1', 'sib1']));
 
     expect(result).toEqual([{ startMin: 480, endMin: 540 }]);
-    expect(listOccupiedWindows).toHaveBeenCalledTimes(1);
-    const args = listOccupiedWindows.mock.calls[0][0];
-    expect(args.dateFrom).toBe('2026-08-06');
-    expect(args.dateTo).toBe('2026-08-06');
-    expect(new Set(args.excludeServiceIds)).toEqual(new Set(['s1', 'sib1']));
-    // Matches probeMoveConflicts' own excludeStatuses exactly.
-    expect(new Set(args.excludeStatuses)).toEqual(new Set(['cancelled', 'skipped', 'no_show', 'rescheduled', 'completed']));
+    expect(probeMoveConflicts).toHaveBeenCalledTimes(1);
+    const call = probeMoveConflicts.mock.calls[0][0];
+    expect(call.target.date).toBe('2026-08-06');
+    expect(call.target.technicianId).toBeNull();
+    // A full-day window — comfortably past the latest close this business
+    // ever runs — so the writer's own SQL predicate is vacuously true for
+    // every real row on the date.
+    expect(call.target.windowStart < '01:00').toBe(true);
+    expect(call.target.windowEnd > '18:00').toBe(true);
+    expect(new Set(call.excludeServiceIds)).toEqual(new Set(['s1', 'sib1']));
   });
 
-  test('filterAndScoreSharedModelCandidates batches by DATE, not by (technician, date) — one occupancy read serves every technician candidate on that date', async () => {
-    listOccupiedWindows.mockResolvedValue([]);
+  test('filterAndScoreSharedModelCandidates batches by DATE, not by (technician, date) — one probe call serves every technician candidate on that date', async () => {
     const service = { id: 's1', estimated_duration_minutes: 60, lat: 27.4, lng: -82.5 };
     const geo = { lat: 27.4, lng: -82.5 };
     const candidates = [
@@ -304,32 +360,80 @@ describe('loadOccupancyForDate: canonical, tech-blind occupancy reader (Codex pr
     ];
     await filterAndScoreSharedModelCandidates(service, geo, candidates, { db: emptyDb() }, {});
 
-    // Two distinct DATES among three candidates -> exactly two occupancy reads.
-    expect(listOccupiedWindows).toHaveBeenCalledTimes(2);
-    const dates = listOccupiedWindows.mock.calls.map((c) => c[0].dateFrom).sort();
+    // Two distinct DATES among three candidates -> exactly two probe calls.
+    expect(probeMoveConflicts).toHaveBeenCalledTimes(2);
+    const dates = probeMoveConflicts.mock.calls.map((c) => c[0].target.date).sort();
     expect(dates).toEqual(['2026-08-06', '2026-08-07']);
   });
 });
 
-describe('loadDayStops: tech-scoped route scoring, windowless placeholders excluded (Codex pre-push P1)', () => {
-  test('queries technician_id = the candidate tech ONLY (route scoring stays tech-scoped; occupancy is the separate, tech-blind concern above)', async () => {
-    let capturedTechArgs = null;
-    const db = () => {
-      const c = {};
-      c.where = (field, val) => { if (field === 'scheduled_services.technician_id') capturedTechArgs = [field, val]; return c; };
-      ['whereNot', 'whereNotIn', 'whereNotNull', 'leftJoin'].forEach((m) => { c[m] = () => c; });
-      c.select = async () => [];
+describe('loadDayStops: tech-scoped route scoring (+ the single tech\'s unassigned rows), windowless placeholders excluded', () => {
+  // .where receives a callback (the tech-or-null filter, Codex r1) — capture
+  // the callback's own sub-builder calls to verify the OR NULL predicate shape.
+  function techFilterCapturingDb() {
+    let capturedTech = null;
+    let capturedNullField = null;
+    const c = {};
+    c.where = (fieldOrFn) => {
+      if (typeof fieldOrFn === 'function') {
+        const sub = {
+          whereIn: (f, v) => { capturedTech = [f, v]; return sub; },
+          orWhereNull: (f) => { capturedNullField = f; return sub; },
+        };
+        fieldOrFn(sub);
+      }
       return c;
     };
-    await loadDayStops(db, { technicianId: 't1', dateStr: '2026-08-06', excludeIds: new Set(['s1']) });
-    expect(capturedTechArgs).toEqual(['scheduled_services.technician_id', 't1']);
+    ['whereIn', 'whereNot', 'whereNotIn', 'whereNotNull', 'leftJoin'].forEach((m) => { c[m] = () => c; });
+    c.select = async () => [];
+    return { db: () => c, get capturedTech() { return capturedTech; }, get capturedNullField() { return capturedNullField; } };
+  }
+
+  test('the technician filter matches the candidate tech OR technician_id IS NULL (single active field tech, Codex pre-push P1)', async () => {
+    const harness = techFilterCapturingDb();
+    await loadDayStops(harness.db, { technicianId: 't1', dateStr: '2026-08-06', excludeIds: new Set(['s1']) });
+    expect(harness.capturedTech).toEqual(['scheduled_services.technician_id', ['t1']]);
+    expect(harness.capturedNullField).toBe('scheduled_services.technician_id');
+  });
+
+  // Codex r1: no per-tech-day serial reads — every candidate tech-day comes
+  // from ONE query, split in memory (an unassigned row counts for every tech).
+  test('filterAndScoreSharedModelCandidates reads every candidate tech-day in ONE query and scores each on its own day', async () => {
+    let queries = 0;
+    let capturedDates = null;
+    const rows = [
+      { id: 'a', window_start: '10:00', window_end: '11:00', status: 'confirmed', svc_lat: 27.4, svc_lng: -82.5, scheduled_date: '2026-08-06', technician_id: 't1' },
+      { id: 'b', window_start: '12:00', window_end: '13:00', status: 'confirmed', svc_lat: 27.4, svc_lng: -82.5, scheduled_date: '2026-08-06', technician_id: null },
+      { id: 'c', window_start: '10:00', window_end: '11:00', status: 'confirmed', svc_lat: 27.4, svc_lng: -82.5, scheduled_date: new Date('2026-08-07T00:00:00Z'), technician_id: 't2' },
+    ];
+    const db = () => {
+      queries += 1;
+      const c = {};
+      ['where', 'whereNotIn', 'whereNotNull', 'leftJoin'].forEach((m) => { c[m] = () => c; });
+      c.whereIn = (field, v) => { if (field === 'scheduled_services.scheduled_date') capturedDates = v; return c; };
+      c.select = async () => rows;
+      return c;
+    };
+    const candidates = [
+      { technician_id: 't1', date: '2026-08-06', start_time: '08:00', end_time: '09:00' },
+      { technician_id: 't2', date: '2026-08-06', start_time: '14:00', end_time: '15:00' },
+      { technician_id: 't2', date: '2026-08-07', start_time: '08:00', end_time: '09:00' },
+    ];
+    const kept = await filterAndScoreSharedModelCandidates(
+      { id: 's1', estimated_duration_minutes: 60 }, { lat: 27.4, lng: -82.5 }, candidates, { db }, {},
+    );
+    expect(queries).toBe(1);
+    expect(capturedDates.sort()).toEqual(['2026-08-06', '2026-08-07']);
+    // t1 on 08-06: its own row + the unassigned row; t2 on 08-06: the
+    // unassigned row only; t2 on 08-07: its own row.
+    expect(kept.map((k) => k.stops_that_day)).toEqual([3, 2, 2]);
   });
 
   test('excludes windowless placeholder rows via whereNotNull(window_start) — matches the canonical occupancy reader\'s own convention', async () => {
     let capturedField = null;
     const db = () => {
       const c = {};
-      ['where', 'whereNotIn'].forEach((m) => { c[m] = () => c; });
+      ['where', 'whereIn', 'whereNotIn'].forEach((m) => { c[m] = () => c; });
       c.whereNotNull = (field) => { capturedField = field; return c; };
       c.leftJoin = () => c;
       c.select = async () => [];
@@ -350,7 +454,7 @@ describe('loadDayStops: tech-scoped route scoring, windowless placeholders exclu
     let capturedExcludeArgs = null;
     const db = () => {
       const c = {};
-      ['where', 'whereNotNull'].forEach((m) => { c[m] = () => c; });
+      ['where', 'whereIn', 'whereNotNull'].forEach((m) => { c[m] = () => c; });
       c.whereNotIn = (field, ids) => {
         if (field === 'scheduled_services.id') capturedExcludeArgs = ids;
         return c;
@@ -367,23 +471,23 @@ describe('loadDayStops: tech-scoped route scoring, windowless placeholders exclu
 // Codex pre-push P1: a visit-group's own siblings (moving together with the
 // tapped visit) must never be counted as a stationary "other stop" for
 // EITHER side of the current-vs-candidate comparison, and the group's
-// combined footprint (owner planning minutes, summed) must be what gets
-// checked for occupancy — not just the tapped row's own reported duration.
-describe('visit-group exclusion + unit planning minutes (Codex pre-push P1)', () => {
-  const ORIGINAL_CAPACITY_GATE = process.env.GATE_SCHEDULING_CAPACITY;
-  afterEach(() => {
-    if (ORIGINAL_CAPACITY_GATE === undefined) delete process.env.GATE_SCHEDULING_CAPACITY; else process.env.GATE_SCHEDULING_CAPACITY = ORIGINAL_CAPACITY_GATE;
-  });
+// occupancy must be checked via the writer's OWN per-member shift math
+// (predictMemberWindows) rather than a summed/widened interval.
+// Call 1 = loadGroupContext's sibling rows; later calls = the batched
+// candidate tech-day stops (none).
+function groupDb(siblingRows) {
+  let call = 0;
+  return () => {
+    call += 1;
+    const n = call;
+    const c = {};
+    ['where', 'whereIn', 'whereNotIn', 'whereNotNull', 'leftJoin'].forEach((m) => { c[m] = () => c; });
+    c.select = async () => (n === 1 ? siblingRows : []);
+    return c;
+  };
+}
 
-  test('unitPlanningMinutes sums the tapped visit + every sibling', () => {
-    delete process.env.GATE_SCHEDULING_CAPACITY; // legacy rule: falls back to each row's own estimate
-    const tapped = { estimated_duration_minutes: 60 };
-    const siblings = [{ estimated_duration_minutes: 90 }, { estimated_duration_minutes: 30 }];
-    expect(unitPlanningMinutes(tapped, siblings)).toBe(180);
-    expect(unitPlanningMinutes(tapped, [])).toBe(60);
-    expect(unitPlanningMinutes(tapped, undefined)).toBe(60);
-  });
-
+describe('visit-group exclusion (Codex pre-push P1)', () => {
   test('loadGroupContext: no visit_id -> standalone visit, zero db calls', async () => {
     const db = jest.fn();
     const result = await loadGroupContext(db, { id: 's1' });
@@ -393,14 +497,14 @@ describe('visit-group exclusion + unit planning minutes (Codex pre-push P1)', ()
     expect(openMembers).not.toHaveBeenCalled();
   });
 
-  test('loadGroupContext: a visit group resolves excludeIds (self + siblings) and the siblings\' planning-minutes fields', async () => {
+  test('loadGroupContext: a visit group resolves excludeIds (self + siblings) and the siblings\' windows', async () => {
     openMembers.mockResolvedValueOnce([{ id: 's1' }, { id: 'sib1' }, { id: 'sib2' }]);
     const db = () => {
       const c = {};
       c.whereIn = () => c;
       c.select = async () => [
-        { id: 'sib1', service_type: 'One-Time Pest Control', is_recurring: false, estimated_duration_minutes: 90 },
-        { id: 'sib2', service_type: 'One-Time Pest Control', is_recurring: false, estimated_duration_minutes: 30 },
+        { id: 'sib1', window_start: '10:00', window_end: '11:00' },
+        { id: 'sib2', window_start: '13:00', window_end: '14:00' },
       ];
       return c;
     };
@@ -416,9 +520,8 @@ describe('visit-group exclusion + unit planning minutes (Codex pre-push P1)', ()
     expect(result.siblings).toEqual([]);
   });
 
-  test('filterAndScoreSharedModelCandidates: excludes group siblings from loadDayStops (never a stationary "other stop") and from the occupancy excludeIds', async () => {
+  test('filterAndScoreSharedModelCandidates: excludes group siblings from loadDayStops (never a stationary "other stop") and from the occupancy probe\'s excludeServiceIds', async () => {
     openMembers.mockResolvedValueOnce([{ id: 's1' }, { id: 'sib1' }]);
-    listOccupiedWindows.mockResolvedValue([]);
     let call = 0;
     let capturedDayStopExcludeIds = null;
     const db = () => {
@@ -428,10 +531,11 @@ describe('visit-group exclusion + unit planning minutes (Codex pre-push P1)', ()
       if (n === 1) {
         // loadGroupContext's sibling-fields query
         c.whereIn = () => c;
-        c.select = async () => [{ id: 'sib1', service_type: 'One-Time Pest Control', is_recurring: false, estimated_duration_minutes: 90 }];
+        c.select = async () => [{ id: 'sib1', window_start: '10:00', window_end: '11:00' }];
       } else {
-        // loadDayStops for the candidate's (tech, date)
+        // the batched candidate tech-day stops
         c.where = () => c;
+        c.whereIn = () => c;
         c.whereNotNull = () => c;
         c.whereNotIn = (field, ids) => {
           if (field === 'scheduled_services.id') capturedDayStopExcludeIds = ids;
@@ -442,48 +546,27 @@ describe('visit-group exclusion + unit planning minutes (Codex pre-push P1)', ()
       }
       return c;
     };
-    const service = { id: 's1', visit_id: 'v1', estimated_duration_minutes: 60, lat: 27.4, lng: -82.5 };
+    const service = { id: 's1', visit_id: 'v1', window_start: '08:00', estimated_duration_minutes: 60, lat: 27.4, lng: -82.5 };
     const geo = { lat: 27.4, lng: -82.5 };
     const candidates = [{ technician_id: 't1', date: '2026-08-06', start_time: '08:00', end_time: '09:00' }];
     await filterAndScoreSharedModelCandidates(service, geo, candidates, { db }, {});
 
     expect(new Set(capturedDayStopExcludeIds)).toEqual(new Set(['s1', 'sib1']));
-    expect(new Set(listOccupiedWindows.mock.calls[0][0].excludeServiceIds)).toEqual(new Set(['s1', 'sib1']));
+    expect(new Set(probeMoveConflicts.mock.calls[0][0].excludeServiceIds)).toEqual(new Set(['s1', 'sib1']));
   });
 
-  test('a grouped visit whose COMBINED planning minutes exceed the candidate\'s own reported window is checked against its true footprint, not just the tapped row\'s duration', async () => {
-    delete process.env.GATE_SCHEDULING_CAPACITY; // legacy rule: full estimate per row
+  test('a sibling whose shift would cross midnight rejects the WHOLE candidate outright (predictMemberWindows\' own invalid flag)', async () => {
     openMembers.mockResolvedValueOnce([{ id: 's1' }, { id: 'sib1' }]);
-    // The candidate's own reported window is 08:00-09:00, but the group's
-    // TRUE combined footprint (60 + 90 = 150 min) reaches 10:30 — a real
-    // stop at 10:00-10:30 is inside that true span.
-    listOccupiedWindows.mockResolvedValue([{ startMin: 600, endMin: 630 }]);
-    let call = 0;
-    const db = () => {
-      call += 1;
-      const n = call;
-      const c = {};
-      if (n === 1) {
-        // loadGroupContext's sibling-fields query — a 90-minute sibling.
-        c.whereIn = () => c;
-        c.select = async () => [{ id: 'sib1', service_type: 'One-Time Pest Control', is_recurring: false, estimated_duration_minutes: 90 }];
-      } else {
-        c.where = () => c;
-        c.whereNotNull = () => c;
-        c.whereNotIn = () => c;
-        c.leftJoin = () => c;
-        c.select = async () => [];
-      }
-      return c;
-    };
-    const service = { id: 's1', visit_id: 'v1', estimated_duration_minutes: 60, lat: 27.4, lng: -82.5 };
+    // A sibling at 23:30 — the primary's requested +14h shift pushes it past
+    // midnight.
+    const db = groupDb([{ id: 'sib1', window_start: '23:30', window_end: '23:59' }]);
+    const service = { id: 's1', visit_id: 'v1', window_start: '08:00', estimated_duration_minutes: 60, lat: 27.4, lng: -82.5 };
     const geo = { lat: 27.4, lng: -82.5 };
-    const candidates = [{ technician_id: 't1', date: '2026-08-06', start_time: '08:00', end_time: '09:00' }];
+    // Requesting a MUCH later start shifts the sibling well past 24:00.
+    const candidates = [{ technician_id: 't1', date: '2026-08-06', start_time: '22:00', end_time: '23:00' }];
     const drops = { slot_taken: 0 };
-
     const kept = await filterAndScoreSharedModelCandidates(service, geo, candidates, { db }, drops);
-
-    expect(kept).toHaveLength(0); // dropped — the group's TRUE footprint collides
+    expect(kept).toHaveLength(0);
     expect(drops.slot_taken).toBe(1);
   });
 
@@ -504,10 +587,11 @@ describe('visit-group exclusion + unit planning minutes (Codex pre-push P1)', ()
       } else if (n === 2) {
         // loadGroupContext's sibling-fields query
         c.whereIn = () => c;
-        c.select = async () => [{ id: 'sib1', service_type: 'One-Time Pest Control', is_recurring: false, estimated_duration_minutes: 90 }];
+        c.select = async () => [{ id: 'sib1', window_start: '10:00', window_end: '11:00' }];
       } else {
         // loadDayStops for the CURRENT day/tech (the shared-model branch)
         c.where = () => c;
+        c.whereIn = () => c;
         c.whereNotNull = () => c;
         c.whereNotIn = (field, ids) => { if (field === 'scheduled_services.id') capturedExcludeIds = ids; return c; };
         c.leftJoin = () => c;
@@ -518,4 +602,128 @@ describe('visit-group exclusion + unit planning minutes (Codex pre-push P1)', ()
     await computeCurrentPlacement(grouped, prefs, { ...ctxBase(), db });
     expect(new Set(capturedExcludeIds)).toEqual(new Set(['s1', 'sib1']));
   });
+});
+
+// Codex r1 (PRRT_kwDOR3YQi86mPzgj, PRRT_kwDOR3YQi86mP9cn): the pre-filter
+// asks the writer's own probe for every window the writer itself will probe
+// — the tapped visit's, or each group member's derived window — instead of
+// a tech-scoped query or one summed interval for the group.
+describe('SLOT_TAKEN parity with the writer (Codex r1)', () => {
+  const realProbe = jest.requireActual('../services/rebooker').probeMoveConflicts;
+
+  // A knex-shaped double for the REAL probeMoveConflicts: the visit query
+  // returns `visitRows`, and the interview read (db.raw) returns
+  // `interviewRows` — the job_applications shape bookedInterviewConflictRows
+  // reads.
+  function probeDb({ visitRows = [], interviewRows = [] } = {}) {
+    const db = () => {
+      const c = {};
+      ['where', 'whereIn', 'whereNot', 'whereNotIn', 'whereNotNull', 'whereRaw', 'leftJoin', 'orWhere', 'first']
+        .forEach((m) => { c[m] = () => c; });
+      c.select = () => ({ orderBy: async () => visitRows, then: (r) => r([]) });
+      return c;
+    };
+    db.raw = jest.fn(async () => ({ rows: interviewRows }));
+    return db;
+  }
+
+  test('a booked interview blocks a candidate — through the writer\'s own probeMoveConflicts (includeInterviews)', async () => {
+    probeMoveConflicts.mockImplementation(realProbe);
+    // 08:30-09:00 ET interview on 2026-08-06 (EDT) — occupies 08:15-09:15
+    // with its buffers.
+    const db = probeDb({ interviewRows: [{ id: 'app-1', interview_at: '2026-08-06T12:30:00Z', interview_end_at: '2026-08-06T13:00:00Z' }] });
+    const service = { id: 's1', window_start: '09:00', estimated_duration_minutes: 60 };
+    const candidates = [
+      { technician_id: 't1', date: '2026-08-06', start_time: '08:00', end_time: '09:00' }, // overlaps the interview
+      { technician_id: 't1', date: '2026-08-06', start_time: '10:00', end_time: '11:00' }, // clear
+    ];
+    const drops = { slot_taken: 0 };
+    const kept = await filterAndScoreSharedModelCandidates(service, { lat: 27.4, lng: -82.5 }, candidates, { db }, drops);
+    expect(kept.map((k) => k.start_time)).toEqual(['10:00']);
+    expect(drops.slot_taken).toBe(1);
+    expect(db.raw).toHaveBeenCalledTimes(1); // one interview read for the date, not one per candidate
+  });
+
+  test('a PRECEDING sibling\'s collision blocks the candidate even when the primary\'s own window is clear', async () => {
+    // Sibling 08:00-09:00 ahead of the primary's 09:00. Moving the primary to
+    // 11:00 shifts the sibling by the same +2h, to 10:00-11:00.
+    openMembers.mockResolvedValueOnce([{ id: 's1' }, { id: 'sib1' }]);
+    const db = groupDb([{ id: 'sib1', window_start: '08:00', window_end: '09:00', estimated_duration_minutes: 60 }]);
+    // Another job at 10:00-10:30 collides with the sibling's derived window
+    // only — never with the primary's requested 11:00-12:00.
+    probeMoveConflicts.mockResolvedValue({ rows: [conflictRow('10:00', '10:30')], snapshot: [] });
+    const service = { id: 's1', visit_id: 'v1', window_start: '09:00', estimated_duration_minutes: 60 };
+    const candidates = [{ technician_id: 't1', date: '2026-08-06', start_time: '11:00', end_time: '12:00' }];
+    const drops = { slot_taken: 0 };
+    const kept = await filterAndScoreSharedModelCandidates(service, { lat: 27.4, lng: -82.5 }, candidates, { db }, drops);
+    expect(kept).toHaveLength(0);
+    expect(drops.slot_taken).toBe(1);
+  });
+
+  test('co-timed overlapping sibling windows do NOT falsely reject — the members\' own rows are excluded exactly as the unit move excludes them', async () => {
+    // A combo booking: both members 09:00-10:00. The date's occupancy holds
+    // BOTH members' current rows plus an unrelated 13:00 job.
+    openMembers.mockResolvedValueOnce([{ id: 's1' }, { id: 'sib1' }]);
+    const db = groupDb([{ id: 'sib1', window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60 }]);
+    const dateRows = [
+      { ...conflictRow('09:00', '10:00'), id: 's1' },
+      { ...conflictRow('09:00', '10:00'), id: 'sib1' },
+      { ...conflictRow('13:00', '14:00'), id: 'other' },
+    ];
+    // Honors excludeServiceIds the way findConflictingVisits' WHERE does.
+    probeMoveConflicts.mockImplementation(async ({ excludeServiceIds }) => ({
+      rows: dateRows.filter((r) => !excludeServiceIds.includes(r.id)), snapshot: [],
+    }));
+    const service = { id: 's1', visit_id: 'v1', window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60 };
+    const candidates = [
+      { technician_id: 't1', date: '2026-08-06', start_time: '09:30', end_time: '10:30' }, // both members land co-timed, overlapping their own old rows
+      { technician_id: 't1', date: '2026-08-06', start_time: '13:00', end_time: '14:00' }, // collides with the unrelated job
+    ];
+    const drops = { slot_taken: 0 };
+    const kept = await filterAndScoreSharedModelCandidates(service, { lat: 27.4, lng: -82.5 }, candidates, { db }, drops);
+    expect(kept.map((k) => k.start_time)).toEqual(['09:30']);
+    expect(drops.slot_taken).toBe(1);
+  });
+
+  test('unitProbeWindows: the writer\'s own spans — an open end probes the duration (else one hour); a group probes each member\'s derived window', () => {
+    expect(unitProbeWindows({ id: 's1', estimated_duration_minutes: 45 }, null, { start_time: '10:00', end_time: null }))
+      .toEqual([{ start: '10:00', end: '10:45' }]);
+    expect(unitProbeWindows({ id: 's1' }, null, { start_time: '10:00', end_time: null }))
+      .toEqual([{ start: '10:00', end: '11:00' }]);
+    const members = [
+      { id: 's1', window_start: '09:00', window_end: '10:00' },
+      { id: 'sib1', window_start: '10:00', window_end: null, estimated_duration_minutes: 30 },
+      { id: 'sib2', window_start: null, window_end: null },
+    ];
+    expect(unitProbeWindows({ id: 's1', window_start: '09:00' }, members, { start_time: '13:00', end_time: '14:00' }))
+      .toEqual([{ start: '13:00', end: '14:00' }, { start: '14:00', end: '14:30' }]); // windowless sib2 is not probed
+  });
+});
+
+// Codex r1 (PRRT_kwDOR3YQi86mPzgn): the owner planning minutes of the day's
+// stops reach the comparison through route_minutes.
+test('route_minutes charges the owner planning table: a planning-table change moves the candidate\'s cost', async () => {
+  const pestStop = {
+    id: 'p1', window_start: '10:00', window_end: '11:00', status: 'confirmed', service_type: 'Quarterly Pest Control Service',
+    is_recurring: true, estimated_duration_minutes: 60, svc_lat: 27.4, svc_lng: -82.5, ...SLOT_KEY,
+  };
+  const db = () => {
+    const c = {};
+    ['where', 'whereIn', 'whereNotIn', 'whereNotNull', 'leftJoin'].forEach((m) => { c[m] = () => c; });
+    c.select = async () => [pestStop];
+    return c;
+  };
+  const cand = [{ technician_id: 't1', date: '2026-08-06', start_time: '08:00', end_time: '09:00' }];
+  const service = { id: 's1', estimated_duration_minutes: 60 };
+  const ORIGINAL_CAPACITY = process.env.GATE_SCHEDULING_CAPACITY;
+  try {
+    delete process.env.GATE_SCHEDULING_CAPACITY;
+    const [legacy] = await filterAndScoreSharedModelCandidates(service, { lat: 27.4, lng: -82.5 }, cand, { db }, {});
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    const [planned] = await filterAndScoreSharedModelCandidates(service, { lat: 27.4, lng: -82.5 }, cand, { db }, {});
+    expect(legacy.route_minutes - planned.route_minutes).toBeCloseTo(60 - 25, 5); // recurring pest plans at 25, not its 60-min estimate
+    expect(legacy.detour_minutes).toBeCloseTo(planned.detour_minutes, 5);
+  } finally {
+    if (ORIGINAL_CAPACITY === undefined) delete process.env.GATE_SCHEDULING_CAPACITY; else process.env.GATE_SCHEDULING_CAPACITY = ORIGINAL_CAPACITY;
+  }
 });

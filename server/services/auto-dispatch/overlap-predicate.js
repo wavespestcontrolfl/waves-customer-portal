@@ -3,26 +3,11 @@
  *
  * GATE_AUTO_DISPATCH_SHARED_MODEL, dispatch backlog item 3.
  *
- * Superseded (Codex pre-push P1, 2026-09-26): this module used to also
- * carry a hand-rolled re-expression of SmartRebooker.reschedule's
- * TECH-SCOPED hard window-overlap probe (intervalsOverlap/conflictsWithStop/
- * candidateHasOverlap), for candidate-slots.js's SLOT_TAKEN pre-filter. That
- * re-derivation still missed what the writer's OTHER, tech-BLIND check
- * actually enforces (rebooker.js probeMoveConflicts -> scheduling/
- * occupancy.js findConflictingVisits has no technician_id filter at all —
- * "Waves runs exactly ONE active field technician, so any time overlap ...
- * is a real-world clash whether the rows carry a technician_id, carry
- * different ones, or carry none," occupancy.js header; AGENTS.md's
- * "tech-scoped conflict WHEREs are blind to technician-NULL rows" mirror
- * rule) — and since that tech-blind check is a strict superset of the
- * tech-scoped one (identical status/hold/windowless rules, just without the
- * technician_id narrowing), checking it alone is sufficient. candidate-
- * slots.js now calls the canonical reader (scheduling/occupancy.js's
- * listOccupiedWindows, batched by date) directly for that pre-filter
- * instead of re-deriving its WHERE — the removed functions are obsolete and
- * deleted here rather than kept unused.
+ * The SLOT_TAKEN pre-filter no longer lives here: candidate-slots.js asks
+ * the rebooker's own read-only probe (probeMoveConflicts) instead of a
+ * re-expression of its overlap rule.
  *
- * isActiveRouteStop() remains: a DIFFERENT, still-live concern — whether a
+ * isActiveRouteStop() is a different concern — whether a
  * day's OTHER stop is a live route stop at all (not a non-route-stop status
  * or completed, not an expired estimate-slot hold) — used to filter which
  * rows count for route-model.js's drive-cost/cluster-share math (those

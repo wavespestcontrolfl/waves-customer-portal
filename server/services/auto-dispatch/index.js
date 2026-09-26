@@ -17,7 +17,7 @@ const { getAutoDispatchConfig } = require('./config');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { isEligibleForAutoDispatch, isRecurringPlanActive } = require('./eligibility');
 const { getCustomerSchedulingPreferences } = require('./preferences');
-const { findValidCandidateSlots } = require('./candidate-slots');
+const { findValidCandidateSlots, SCORE_CAP } = require('./candidate-slots');
 const { scoreAppointmentPlacement } = require('./scoring');
 const { applyAutoDispatchMove, revalidatePlacement, unitMoveSize } = require('./apply');
 const { toDateStr, shiftDateStr } = require('./dates');
@@ -256,11 +256,14 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
   // Filtered to candidates that themselves clear the SAME move threshold
   // (Codex pre-push P1): apply.js's SLOT_TAKEN fallback must never be
   // offered a placement that would not have qualified as `best` on its own.
+  // Capped by TOTAL SCORE (Codex r1): with the gate on, findValidCandidateSlots
+  // returns every survivor and each was scored above before this cap.
   const rankedCandidates = scored.slice()
     .sort((a, b) => b.sc.total_score - a.sc.total_score)
     .filter((s) => visitClearsMoveThreshold(
       service, Math.round((s.sc.total_score - currentScore.total_score) * 100) / 100, threshold,
     ))
+    .slice(0, ctx.scoreCap || SCORE_CAP)
     .map((s) => s.cand);
 
   const auditCtx = {
@@ -294,6 +297,31 @@ function buildAppliedPlacementAudit(fresh, service, prefs, ctx, lockBoundary, re
   // this one landed — 1 when the first attempt succeeded, or when the
   // applier didn't report it (a plain mock, or a pre-lane version).
   return { ...built, attempts: result.attempts || 1 };
+}
+
+// The audit fields for a FAILED apply: the candidate apply.js tried LAST
+// (Codex r1 — a SLOT_TAKEN fallback can fail on a different candidate than
+// `fresh.best`), else the fresh placement, else the pass-1 audit when the
+// re-evaluation itself threw. apply.js attaches `lastAttempted` /
+// `attemptsTried` (ids/numbers only) only under
+// GATE_AUTO_DISPATCH_SHARED_MODEL, so gate off the row is unchanged.
+function failedPlacementAudit(fresh, pm, lockBoundary, applyErr) {
+  const attempted = fresh && fresh.kind === 'move' && applyErr && applyErr.lastAttempted;
+  if (!attempted) return (fresh && fresh.audit) || pm.result.audit;
+  const { service, prefs, ctx } = pm;
+  const scoreCtx = { currentTechnicianId: service.technician_id, changeCount: service.auto_dispatch_change_count || 0 };
+  const attemptedScore = scoreAppointmentPlacement(applyErr.lastAttempted, prefs, scoreCtx);
+  const built = buildPlacementAudit({
+    current: fresh.current, currentScore: fresh.currentScore, candidate: applyErr.lastAttempted, candidateScore: attemptedScore,
+    service, prefs, lockBoundary, ctx, threshold: fresh.threshold,
+  });
+  return {
+    newPlacement: built.newPlacement,
+    scores: built.scores,
+    prefsSnapshot: prefs.raw_snapshot,
+    routeMetrics: { ...built.routeMetrics, attempts: applyErr.attemptsTried || 1 },
+    constraints: built.constraints,
+  };
 }
 
 async function runAutoDispatch(opts = {}) {
@@ -596,9 +624,12 @@ async function runAutoDispatch(opts = {}) {
           // Next-best still-scored candidates (GATE_AUTO_DISPATCH_SHARED_MODEL) —
           // apply falls back to one of these on a SLOT_TAKEN refusal instead of
           // failing the visit outright. No effect when the gate is off.
+          // `rescore` (Codex r1): after a SLOT_TAKEN, re-run this visit's own
+          // evaluation against the now-current schedule before the next attempt.
           const result = await applyAutoDispatchMove(pm.service, fresh.best, runId, {
             ...config, remainingChanges: config.maxChangesPerRun - totals.changed, prefs: pm.prefs, lockBoundary,
             alternateCandidates: fresh.rankedCandidates,
+            rescore: () => evaluatePlacement(pm.service, pm.prefs, pm.ctx, config, lockBoundary),
           });
           totals.changed += result.movedCount || 1;
           // A SLOT_TAKEN fallback (Codex pre-push P1) can land on a DIFFERENT
@@ -630,9 +661,7 @@ async function runAutoDispatch(opts = {}) {
           }
           logger.error(`[auto-dispatch] apply failed for ${pm.service && pm.service.id}: ${applyErr.message}`);
           try {
-            // Prefer the fresh (actually-attempted) placement in the failure row;
-            // fall back to the pass-1 audit if the re-evaluation itself threw.
-            await audit.logDecision(runId, { action: 'failed', service: pm.service, reason_code: 'ERROR', reason_description: applyErr.message, ...((fresh && fresh.audit) || pm.result.audit), error: applyErr.message });
+            await audit.logDecision(runId, { action: 'failed', service: pm.service, reason_code: 'ERROR', reason_description: applyErr.message, ...failedPlacementAudit(fresh, pm, lockBoundary, applyErr), error: applyErr.message });
           } catch (_) { /* swallow */ }
         }
       }

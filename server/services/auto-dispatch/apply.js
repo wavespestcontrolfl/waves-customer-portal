@@ -477,26 +477,56 @@ async function attemptApplyAutoDispatchMove(service, best, fresh, runId, config 
   };
 }
 
+// The attempts list after a SLOT_TAKEN on attempt `triedCount` (Codex r1):
+// the refusal means the schedule moved since this visit was scored, so the
+// remaining alternates are re-evaluated against it (`config.rescore`, the
+// orchestrator's evaluatePlacement for this visit) before any is applied —
+// the tried prefix plus the fresh ranked candidates not yet tried, still
+// bounded at MAX_APPLY_ATTEMPTS. A re-evaluation that no longer qualifies,
+// or that fails, ends the retries (nothing verified to try). Without a
+// `rescore` hook the existing list is kept.
+async function attemptsAfterSlotTaken(config, attempts, triedCount, serviceId) {
+  if (typeof config.rescore !== 'function') return attempts;
+  const tried = attempts.slice(0, triedCount);
+  try {
+    const refreshed = await config.rescore();
+    if (!refreshed || refreshed.kind !== 'move' || !Array.isArray(refreshed.rankedCandidates)) return tried;
+    const keyOf = (c) => `${c.date}|${c.start_time}|${c.technician_id}`;
+    const triedKeys = new Set(tried.map(keyOf));
+    const fresh = refreshed.rankedCandidates.filter((c) => c && !triedKeys.has(keyOf(c)));
+    return [...tried, ...fresh].slice(0, MAX_APPLY_ATTEMPTS);
+  } catch (rescoreErr) {
+    logger.warn(`[auto-dispatch] re-evaluation after SLOT_TAKEN failed for ${serviceId}: ${rescoreErr.message}`);
+    return tried;
+  }
+}
+
 /**
  * Apply an auto-dispatch move, with a bounded next-best fallback on a
  * SLOT_TAKEN refusal (GATE_AUTO_DISPATCH_SHARED_MODEL, owner-approved
- * 2026-09-26 dispatch backlog item 3): the finder's writer-agreement
- * pre-filter already screens candidates against the SAME window-overlap
- * predicate the rebooker's writer enforces, but the live schedule can still
- * move between scoring and this apply call (another run, an operator edit).
+ * 2026-09-26 dispatch backlog item 3): the finder's pre-filter already
+ * screens candidates with the rebooker's own conflict probe, but the live
+ * schedule can still move between scoring and this apply call (another run,
+ * an operator edit).
  * `config.alternateCandidates` (set by the orchestrator from its ranked
  * scoring pass, gate on only) supplies the next-best still-scored
  * candidates; each is re-checked exactly like the first (moveGuard,
- * memberGuard, the atomic `expect` CAS) — never a loosened check.
+ * memberGuard, the atomic `expect` CAS) — never a loosened check. After a
+ * SLOT_TAKEN, `config.rescore` re-evaluates the visit against the
+ * now-current schedule before the next attempt (attemptsAfterSlotTaken) —
+ * still at most MAX_APPLY_ATTEMPTS overall.
  *
- * Gate off, or no alternates supplied: exactly one attempt against `best`,
- * byte-identical to this function before the retry wrapper existed.
+ * Gate off: exactly one attempt against `best`, byte-identical to this
+ * function before the retry wrapper existed.
  *
  * Resolves with `{ ok, pre_status, post_status, technician_changed,
  * notification, movedCount, applied, attempts }` — `applied` is the
  * candidate object that actually landed (may differ from `best` after a
  * fallback) and `attempts` is how many were tried (ids/numbers only), so a
  * caller can build its own audit entry from the candidate that really moved.
+ * Gate on, a failure's error carries `lastAttempted` (the candidate object
+ * of the final attempt) and `attemptsTried`, so the failure audit describes
+ * what was actually tried last, not always `best` (Codex r1).
  */
 async function applyAutoDispatchMove(service, best, runId, config = {}) {
   // Stale-recommendation guard: the row was loaded + scored earlier this run.
@@ -516,9 +546,8 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
   const alternates = sharedModelOn && Array.isArray(config.alternateCandidates)
     ? config.alternateCandidates.filter((c) => c && c !== best)
     : [];
-  const attempts = [best, ...alternates].slice(0, MAX_APPLY_ATTEMPTS);
+  let attempts = [best, ...alternates].slice(0, MAX_APPLY_ATTEMPTS);
 
-  let lastErr = null;
   for (let i = 0; i < attempts.length; i += 1) {
     try {
       // Bounded (MAX_APPLY_ATTEMPTS): each attempt must complete or fail
@@ -529,15 +558,19 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
       // never has to infer it from `applied === best`.
       return { ...applied, attempts: i + 1 };
     } catch (err) {
-      lastErr = err;
-      const canRetry = sharedModelOn && err && err.code === 'SLOT_TAKEN' && i < attempts.length - 1;
-      if (!canRetry) throw err;
+      const slotTaken = sharedModelOn && err && err.code === 'SLOT_TAKEN' && i + 1 < MAX_APPLY_ATTEMPTS;
+      if (slotTaken) attempts = await attemptsAfterSlotTaken(config, attempts, i + 1, service.id);
+      if (!slotTaken || i + 1 >= attempts.length) {
+        // Gate on: name the candidate that actually failed last, for the
+        // failure audit. Gate off: the error propagates untouched.
+        if (sharedModelOn && err) Object.assign(err, { lastAttempted: attempts[i], attemptsTried: i + 1 });
+        throw err;
+      }
       logger.warn(`[auto-dispatch] SLOT_TAKEN for ${service.id} on attempt ${i + 1}/${attempts.length} — trying next-best candidate`);
     }
   }
-  // Unreachable (the loop above always returns or throws), but keeps the
-  // function's contract explicit for a 0-length attempts array.
-  throw lastErr || Object.assign(new Error('No candidate to attempt'), { code: 'NO_VALID_SLOT' });
+  // Unreachable: `attempts` always holds `best`, and the loop returns or throws.
+  throw Object.assign(new Error('No candidate to attempt'), { code: 'NO_VALID_SLOT' });
 }
 
 /**
