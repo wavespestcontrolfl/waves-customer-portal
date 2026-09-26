@@ -40,7 +40,9 @@ class ResponseDrafter {
     );
     // The prompt forbids a sign-off, but a model can still copy one from the
     // signed history it is shown — strip it deterministically.
-    const draft = result.ok ? stripTrailingSignature(result.text) : '';
+    const draft = result.ok
+      ? stripTrailingSignature(result.text, { addresseeFirstName: context.customer?.firstName })
+      : '';
     if (!draft) return null;
     return { draft, context: context.summary, flags: context.flags, intent: intent?.intent };
   }

@@ -31,9 +31,12 @@ const CLOSER = '(?:thanks(?:\\s+again)?|many\\s+thanks|thank\\s+you|all\\s+the\\
 // Words are joined by spaces only, so it can never reach up into the line above.
 const VALEDICTION = "\\p{L}[\\p{L}'\\u2019]*(?:[ \\t]+\\p{L}[\\p{L}'\\u2019]*){0,3},";
 const COMPANY = '(?:the\\s+)?waves(?:\\s+pest\\s+control)?(?:\\s+team)?';
-const PERSON = '(?:adam(?:\\s+(?:benetti|b\\b\\.?))?|virginia)';
+const PEOPLE = {
+  adam: 'adam(?:\\s+(?:benetti|b\\b\\.?))?',
+  virginia: 'virginia',
+};
+const PERSON = `(?:${Object.values(PEOPLE).join('|')})`;
 const SIGNATURE_BLOCK = `${PERSON}\\s*,?\\s*(?:(?:from|at|with)\\s+)?${COMPANY}`;
-const SIGNER = `(?:${SIGNATURE_BLOCK}|${PERSON}|${COMPANY})`;
 // A line break that is not the value side of a "Label:" line.
 const OWN_LINE = '(?<![:\\s])[ \\t]*\\n\\s*';
 // After the signer: optional end punctuation, then only whitespace, quote
@@ -54,13 +57,27 @@ const DASH_SIGNOFF = `(?<!\\b(?:is|are|was|were|be|as|named|called|by)\\s*)\\s*$
 
 // Closer + signer first, so "Best,\nAdam" goes as one unit instead of
 // leaving a dangling "Best,".
-const SIGNATURE_TAIL_RES = [
-  new RegExp(`(?:^|(?<=[.!?])\\s+|${OWN_LINE}|${DASH_SIGNOFF})${CLOSER},?\\s+${SIGNER}${TAIL}`, 'iu'),
-  // A signer's own name is never the valediction ("Adam,\nVirginia" lists names).
-  new RegExp(`(?:^|(?<=[.!?])\\s+|${OWN_LINE})(?!${SIGNER}\\s*,)${VALEDICTION}[ \\t]*\\n\\s*${SIGNER}${TAIL}`, 'iu'),
-  new RegExp(`(?:${DASH_SIGNOFF}|${AFTER_SENTENCE_LINE})${SIGNER}${TAIL}`, 'iu'),
-  new RegExp(`(?:^|(?<=[.!?])\\s+)${SIGNATURE_BLOCK}${TAIL}`, 'iu'),
-];
+// When the customer shares a signer's first name, that name alone is how the
+// text addresses them ("See you soon, Adam."), so it is no bare signer; a
+// full name-and-company block still is.
+function buildSignatureTailRes(addresseeKey) {
+  const people = Object.entries(PEOPLE).filter(([key]) => key !== addresseeKey).map(([, re]) => re);
+  const signer = `(?:${SIGNATURE_BLOCK}|${people.length ? `(?:${people.join('|')})|` : ''}${COMPANY})`;
+  return [
+    new RegExp(`(?:^|(?<=[.!?])\\s+|${OWN_LINE}|${DASH_SIGNOFF})${CLOSER},?\\s+${signer}${TAIL}`, 'iu'),
+    // A signer's own name is never the valediction ("Adam,\nVirginia" lists names).
+    new RegExp(`(?:^|(?<=[.!?])\\s+|${OWN_LINE})(?!(?:${SIGNATURE_BLOCK}|${PERSON}|${COMPANY})\\s*,)${VALEDICTION}[ \\t]*\\n\\s*${signer}${TAIL}`, 'iu'),
+    new RegExp(`(?:${DASH_SIGNOFF}|${AFTER_SENTENCE_LINE})${signer}${TAIL}`, 'iu'),
+    new RegExp(`(?:^|(?<=[.!?])\\s+)${SIGNATURE_BLOCK}${TAIL}`, 'iu'),
+  ];
+}
+const SIGNATURE_TAIL_RES = { '': buildSignatureTailRes('') };
+for (const key of Object.keys(PEOPLE)) SIGNATURE_TAIL_RES[key] = buildSignatureTailRes(key);
+
+function addresseeKey(firstName) {
+  const key = String(firstName || '').trim().toLowerCase();
+  return Object.prototype.hasOwnProperty.call(PEOPLE, key) ? key : '';
+}
 
 const DOUBLE_QUOTES = '"“”';
 const SINGLE_QUOTES = "'‘’";
@@ -68,8 +85,8 @@ const SINGLE_QUOTES = "'‘’";
 // starts and ends with two separate quoted phrases is not one.
 const WRAPPED_RE = /^(?:["“]([^"“”]*)["”]|['‘]([^'‘’]*)['’])$/;
 
-function stripOnce(text) {
-  return SIGNATURE_TAIL_RES.reduce((current, re) => current.replace(re, ''), text).trim();
+function stripOnce(text, res) {
+  return res.reduce((current, re) => current.replace(re, ''), text).trim();
 }
 
 // A wrapped text's closing quote goes out with the sign-off ('"See you Tuesday.
@@ -93,13 +110,15 @@ function dropOrphanOpener(text, removed) {
 const THANKS_BY_NAME_RE = new RegExp(`^(?:thanks(?:\\s+again)?|many\\s+thanks|thank\\s+you),?\\s+${PERSON}${TAIL}`, 'iu');
 
 // Returns the text without its trailing sign-off. A text with no sign-off
-// comes back exactly as given (quotes and all).
-function stripTrailingSignature(message) {
+// comes back exactly as given (quotes and all). Pass the customer's first
+// name when known, so a text addressed to a customer named Adam keeps it.
+function stripTrailingSignature(message, { addresseeFirstName } = {}) {
+  const res = SIGNATURE_TAIL_RES[addresseeKey(addresseeFirstName)];
   const original = String(message || '').trim();
   if (THANKS_BY_NAME_RE.test(original)) return original;
   let text = original;
   for (let i = 0; i < 3; i += 1) {
-    const next = stripOnce(text);
+    const next = stripOnce(text, res);
     if (next === text) break;
     text = next;
   }
