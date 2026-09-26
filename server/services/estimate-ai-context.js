@@ -63,7 +63,7 @@ const CUSTOMER_SAFE_REPO_FILES = [MISTING_PROTOCOL_FILE];
 // edit to an allowlisted file/category (or an allowlist mistake) can't leak
 // that material into the model prompt silently. Applied to every DB-backed
 // support source below, not just the repo-file list.
-const INTERNAL_CONTENT_MARKER_PATTERN = /\b(?:margins?|contribution\s*margin|cost\s*targets?|COGS|mark\s*-?ups?|labor\s*(?:cost|rate)s?|material\s*costs?|dispatch(?:ing)?|route\s*density|best\s*price|wholesale|job\s*scor(?:e|ing))\b|\$\s?\d/i;
+const INTERNAL_CONTENT_MARKER_PATTERN = /\b(?:margins?|contribution\s*margin|cost\s*targets?|COGS|mark\s*-?ups?|labor\s*(?:cost|rate)s?|material\s*costs?|dispatch(?:ing)?|route\s*density|best\s*price|wholesale|job\s*scor(?:e|ing)|call\s+adam|escalat\w*|notify\s+the\s+office)\b|\$\s?\d/i;
 
 // AW-04 fix (2026-09-25): searchKnowledgeBase below used to accept ANY active,
 // non-blocked knowledge_base row that matched a search term — and this
@@ -456,6 +456,12 @@ async function searchKnowledgeBase(db, terms) {
     const rows = await db('knowledge_base')
       .where(function activeKnowledge() {
         this.where({ active: true }).orWhereNull('active');
+      })
+      // Claudeopedia's AI audit marks an outdated article status 'flagged'
+      // without touching `active` — flagged articles stay out of public
+      // prompts (production 2026-09-25: 119 active, 176 flagged).
+      .where(function notFlagged() {
+        this.where('status', 'active').orWhereNull('status');
       })
       // Wiki-sync MIRRORS inherit the wiki's review gate: a KB row that
       // mirrors an untrusted (red/blocked) wiki page must not reach the

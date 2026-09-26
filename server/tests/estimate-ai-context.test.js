@@ -15,10 +15,14 @@ function fakeDb(tables = {}) {
     // capped, exactly like the real query does. Mirrors Postgres NULL
     // semantics: a missing category never matches ANY(...).
     let categoryAllowlist = null;
+    // The Claudeopedia status gate (`status = 'active' OR status IS NULL`).
+    let requireActiveStatus = false;
     return {
-      where(arg) {
+      where(arg, value) {
         if (typeof arg === 'function') {
           arg.call(this);
+        } else if (arg === 'status' && value === 'active') {
+          requireActiveStatus = true;
         }
         return this;
       },
@@ -43,7 +47,8 @@ function fakeDb(tables = {}) {
       },
       select() { return this; },
       limit(count) {
-        const rows = tables[table] || [];
+        const rows = (tables[table] || [])
+          .filter((row) => !requireActiveStatus || row.status == null || row.status === 'active');
         const filtered = categoryAllowlist
           ? rows.filter((row) => categoryAllowlist
             .map((value) => String(value).toLowerCase())
@@ -1221,6 +1226,24 @@ describe('estimate AI support context', () => {
       context: { services: [{ label: 'Lawn Care', detail: 'Fertilizer' }] },
     });
     expect(result.knowledgeBase).toEqual([]);
+  });
+
+  test('AW-04 rd3: an audit-flagged knowledge_base article is excluded even while active', async () => {
+    const result = await loadEstimateAiSupportContext({
+      db: fakeDb({ knowledge_base: [{ path: 'kb/lawn.md', title: 'Lawn Program', category: 'services', status: 'flagged', active: true, summary: 'Seasonal lawn care guidance.', content: 'x' }] }),
+      question: 'What is included with lawn care?',
+      context: { services: [{ label: 'Lawn Care', detail: 'Fertilizer' }] },
+    });
+    expect(result.knowledgeBase).toEqual([]);
+  });
+
+  test('AW-04 rd3: the misting SOP staff-escalation paragraph never reaches the context', async () => {
+    const result = await loadEstimateAiSupportContext({
+      db: fakeDb({}),
+      question: 'Who handles an exposure report for a misting system? Do you call Adam?',
+      context: { services: [{ service: 'mosquito_misting_system', label: 'Mosquito Misting System Service', detail: 'Automatic misting system' }] },
+    });
+    expect(JSON.stringify(result)).not.toMatch(/call adam/i);
   });
 
   test('AW-04 rd2: a knowledge_base row with no category is excluded (allowlist fails closed)', async () => {

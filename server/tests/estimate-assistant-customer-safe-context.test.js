@@ -138,4 +138,24 @@ describe('estimate assistant model prompt — customer-safe context boundary (AW
     expect(dispatch).toHaveBeenCalledTimes(1);
     expect(result.source).toBe('openai');
   });
+
+  test('"When is my application?" with empty support reaches the model, not the safety fallback', async () => {
+    dispatch.mockResolvedValue({ ok: true, provider: 'openai', text: 'Your first application is scheduled once you accept.' });
+    const result = await answerEstimateQuestion({
+      database: null,
+      question: 'When is my application?',
+      estimate: {
+        id: 'synthetic-estimate-4',
+        token: 'synthetic-token-4',
+        status: 'sent',
+        customer_name: 'Synthetic Customer',
+        address: 'Synthetic Address',
+      },
+      estData: { services: [{ service: 'lawn_care', label: 'Lawn Care' }] },
+      pricingBundle: { waveGuardTier: 'WaveGuard' },
+    });
+
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(result.source).toBe('openai');
+  });
 });
