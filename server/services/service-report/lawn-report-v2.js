@@ -33,6 +33,7 @@ const PRODUCT_PURPOSES = [
   { pattern: /iron|micro|biostim|humic|kelp|seaweed/, kind: 'supplement', tag: 'color support', fallback: 'provides general color and stress support' },
   { pattern: /fert|nitrogen|urea|potash|\b\d{1,2}-\d{1,2}-\d{1,2}\b/, kind: 'fertilizer', tag: 'color & growth', fallback: 'provides nutrients as part of the lawn program' },
 ];
+const firstValue = (...values) => values.find((value) => value !== undefined && value !== null && value !== '') ?? null;
 
 function classifyProduct(app = {}) {
   const p = app.product || {};
@@ -44,7 +45,7 @@ function classifyProduct(app = {}) {
   const { kind, tag, fallback } = PRODUCT_PURPOSES.find(({ pattern }) => pattern.test(hay))
     || { kind: 'other', tag: 'lawn treatment', fallback: 'applied as part of today’s lawn program' };
   // Catalog prose is customer-facing only after report-data's approval gate.
-  const approvedFacts = p.facts_approved === true || Object.keys(facts).length > 0;
+  const approvedFacts = [p.facts_approved === true, Object.keys(facts).length > 0].includes(true);
   const approvedSummary = approvedFacts
     ? (facts.serviceReportSummary || facts.publicSummary || p.service_report_summary || p.public_summary)
     : null;
@@ -65,21 +66,21 @@ const uniq = (arr) => [...new Set(arr.filter(Boolean))];
 function buildTreatment({ applications = [], actions = [] } = {}) {
   const products = (applications || []).map((app) => {
     const { product: p = {}, approved_report_product_facts: facts = {} } = app;
-    const name = p.name || app.product_name || facts.name || null;
+    const name = firstValue(p.name, app.product_name, facts.name);
     if (!name) return null;
     const cls = classifyProduct(app);
     const targets = Array.isArray(app.targets) ? app.targets.filter(Boolean) : [];
     const areaVal = app.areaValue ?? app.area_value;
-    const areaUnit = app.areaUnit || app.area_unit;
+    const areaUnit = firstValue(app.areaUnit, app.area_unit);
     const area = areaVal && areaUnit ? `${areaVal} ${areaUnit}` : null;
-    const applicationMethod = app.applicationMethod || app.application_method || app.method || null;
+    const applicationMethod = firstValue(app.applicationMethod, app.application_method, app.method);
     const methodSource = applicationMethod
       ? (app.methodInferred === true ? 'category_inference' : 'recorded_application')
       : null;
-    const applicationArea = app.applicationArea || app.application_area || app.area || null;
+    const applicationArea = firstValue(app.applicationArea, app.application_area, app.area);
     return {
       name,
-      activeIngredient: p.active_ingredient || app.active_ingredient || facts.activeIngredient || null,
+      activeIngredient: firstValue(p.active_ingredient, app.active_ingredient, facts.activeIngredient),
       kind: cls.kind,
       whatItDoes: cls.whatItDoes,
       purposeSource: cls.purposeSource,
@@ -400,10 +401,11 @@ function buildSmsSummary(snapshot, grassLabel) {
 
 // Headline is driven by the most severe insight (what the customer should act on),
 // falling back to the overall band when nothing needs attention.
-function statusHeadline(overallStatus, topIssue) {
+function statusHeadline(overallStatus, topIssue, overallHealthVerified = true) {
   const topic = topIssue ? ISSUE_TOPIC[topIssue.category] : null;
   if (topIssue && topIssue.status === 'needs_attention') return topic ? `Needs attention — ${topic}` : 'Needs attention this visit';
   if (topIssue && topIssue.status === 'watch') return topic ? `Stable — watching ${topic}` : 'Stable — a couple of things to watch';
+  if (!overallHealthVerified) return 'Lawn health tracked';
   if (overallStatus === 'strong') return 'Looking great';
   if (overallStatus === 'healthy') return 'Looking healthy';
   return 'Lawn health tracked';
@@ -701,6 +703,10 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   const status = scoreStatus(overallScore);
   const issues = insights.filter((i) => i.status === 'needs_attention' || i.status === 'watch');
   const topIssue = issues[0] || null;
+  const overallInsightStatus = insights
+    .filter((insight) => insight.category === 'overall')
+    .map((insight) => insight.status)[0];
+  const overallHealthVerified = overallInsightStatus !== 'tracking';
 
   // "Why 68": name the category dragging the score down, reassure on the rest.
   // Only the DISPLAYED categories — the Water/Coverage card is hidden (its score
@@ -721,6 +727,20 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   const realCustomerAction = topIssue ? (topIssue.customerAction || null) : null;
   const hasCustomerTask = issues.some((issue) => Boolean(issue.customerAction));
   const wavesNext = topIssue ? (topIssue.nextVisitPlan || null) : null;
+  const ownedEvidence = [topIssue].filter(Boolean).flatMap((issue) => {
+    const provenance = issue.provenance || {};
+    return [
+      [issue.wavesAction, provenance.actionSource],
+      [issue.nextVisitPlan, provenance.planSource],
+    ];
+  });
+  const wavesOwnsTopIssue = ownedEvidence.some((evidence) => evidence.every(Boolean));
+  const noIssueNeedsAction = [!topIssue, overallHealthVerified].every(Boolean);
+  const noActionNeeded = [
+    !hasCustomerTask,
+    drySignal !== null,
+    [noIssueNeedsAction, wavesOwnsTopIssue].includes(true),
+  ].every(Boolean);
 
   // Cross-signal ROOT CAUSE: connect water + coverage + mowing + stress into one
   // explanation instead of leaving the customer to reconcile separate cards.
@@ -730,7 +750,7 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   const snapshot = {
     overallScore,
     status,
-    statusHeadline: statusHeadline(status, topIssue),
+    statusHeadline: statusHeadline(status, topIssue, overallHealthVerified),
     scoreExplanation,
     rootCause,
     seasonalNote,
@@ -743,7 +763,7 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
     wavesNext,
     customerAction: realCustomerAction,
     // An older assessment's missing moisture cause is not an all-clear.
-    noActionNeeded: !hasCustomerTask && drySignal !== null,
+    noActionNeeded,
   };
 
   // (Season-aware dormancy guard is applied above — before diagnosis/insights/snapshot

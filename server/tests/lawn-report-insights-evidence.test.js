@@ -123,6 +123,29 @@ describe('lawn insight evidence boundaries', () => {
     expect(healthy.provenance.actionSource).toBe('recorded_application');
   });
 
+  test('the hero stays neutral when category evidence cannot verify a healthy overall score', () => {
+    const report = buildLawnReportV2({
+      lawnAssessment: assessment({ scores: { overallScore: 92, season: 'peak' } }),
+    });
+
+    expect(report.insights).toEqual(expect.arrayContaining([
+      expect.objectContaining({ category: 'overall', status: 'tracking' }),
+    ]));
+    expect(report.snapshot.statusHeadline).toBe('Lawn health tracked');
+    expect(report.snapshot.noActionNeeded).toBe(false);
+    expect(report.snapshot.statusHeadline).not.toMatch(/healthy|great/i);
+    expect(report.smsSummary).not.toMatch(/No action needed/i);
+  });
+
+  test('an unsupported issue cannot become a covered no-action state', () => {
+    const report = buildLawnReportV2({ lawnAssessment: assessment() });
+    const weed = report.insights.find((card) => card.category === 'weeds');
+
+    expect(weed).toMatchObject({ wavesAction: '', customerAction: '', nextVisitPlan: '' });
+    expect(report.snapshot.noActionNeeded).toBe(false);
+    expect(report.smsSummary).not.toMatch(/No action needed/i);
+  });
+
   test('the real report carries recorded method and scope provenance into insights', () => {
     const report = buildLawnReportV2({
       lawnAssessment: assessment(),
