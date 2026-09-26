@@ -221,9 +221,17 @@ async function fenceFlexSeries(trx, rows, refuse) {
 // near its complexity budget — never grows from this. No-ops outside flex
 // mode, a non-recurring-child row, or the unplaced due-date shape (no
 // window_start yet — not a day-move in the first place).
+// The unplaced due-date shape (a recurring_dispatch_due_date visit with no
+// window_start yet) is a first placement, not a day-move: it has no
+// appointment time to freeze on and no scheduled slot to bound. Its own
+// due-date ±3-day and eligibility guards still apply (checkMemberEligibility).
+function isUnplacedDueDate(row) {
+  return Boolean(row.recurring_dispatch_due_date && !row.window_start);
+}
+
 async function checkFlexOwnBounds(trx, row, best, guardMode, refuse) {
   if (guardMode !== 'flex' || row.is_recurring !== true || !row.recurring_parent_id
-    || (row.recurring_dispatch_due_date && !row.window_start)) return;
+    || isUnplacedDueDate(row)) return;
   if (flexTier.ownScheduleFrozen(row, new Date())) {
     throw refuse(row.id, 'is within 73 hours of its own scheduled time (frozen, independent of reminder evidence)');
   }
@@ -335,12 +343,16 @@ async function checkFlexSiblingBounds(trx, siblings, rows, best, today, refuse) 
   if (freeze.failed) throw refuse(siblings[0].id, 'reminder-sent status is unreadable (frozen, fail closed)');
   const frozen = siblings.find((m) => freeze.frozen.has(m.id));
   if (frozen) throw refuse(frozen.id, 'is inside its 73-hour reminder window (frozen)');
-  const ownFrozen = rows.find((r) => flexTier.ownScheduleFrozen(r, now));
+  // Same exemption as checkFlexOwnBounds: an unplaced due-date sibling has
+  // no time to freeze on or slot to bound (Codex pre-push P1).
+  const placed = rows.filter((r) => !isUnplacedDueDate(r));
+  if (!placed.length) return;
+  const ownFrozen = placed.find((r) => flexTier.ownScheduleFrozen(r, now));
   if (ownFrozen) throw refuse(ownFrozen.id, 'is within 73 hours of its own scheduled time (frozen, independent of reminder evidence)');
-  await fenceFlexSeries(trx, rows, refuse);
-  const neighborMap = await flexTier.loadSeriesNeighbors(trx, rows);
-  if (neighborMap === null) throw refuse(siblings[0].id, 'series occurrence order is unreadable (no move, fail closed)');
-  for (const r of rows) {
+  await fenceFlexSeries(trx, placed, refuse);
+  const neighborMap = await flexTier.loadSeriesNeighbors(trx, placed);
+  if (neighborMap === null) throw refuse(placed[0].id, 'series occurrence order is unreadable (no move, fail closed)');
+  for (const r of placed) {
     const neighbors = neighborMap.get(r.id) || {};
     const window = flexTier.flexTierMoveWindow({ origDate: r.scheduled_date, today, neighbors });
     if (!window || best.date < window.dateFrom || best.date > window.dateTo) {

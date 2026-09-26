@@ -234,6 +234,29 @@ describe('checkFlexSiblingBounds (grouped siblings) — Finding 2', () => {
   });
 });
 
+describe('checkFlexSiblingBounds — unplaced due-date sibling', () => {
+  test('an unplaced due-date sibling (no window_start) is exempt from the freeze and series window, like the tapped row', async () => {
+    routeTiers.loadReminderFreeze.mockResolvedValueOnce({ failed: false, frozen: new Set() });
+    const rows = [{
+      id: 's2', scheduled_date: dayOffset(9), window_start: null, recurring_dispatch_due_date: dayOffset(9), recurring_parent_id: 'p1',
+    }];
+    const trx = seriesTrx({ p1: rows });
+    await expect(checkFlexSiblingBounds(trx, rows, rows, { date: dayOffset(10) }, TODAY, refuseFactory())).resolves.toBeUndefined();
+    expect(trx.raw).not.toHaveBeenCalled();
+  });
+
+  test('a placed sibling beside an unplaced one is still frozen/bounded', async () => {
+    routeTiers.loadReminderFreeze.mockResolvedValueOnce({ failed: false, frozen: new Set() });
+    const rows = [
+      { id: 's2', scheduled_date: dayOffset(9), window_start: null, recurring_dispatch_due_date: dayOffset(9), recurring_parent_id: 'p1' },
+      { id: 's3', scheduled_date: dayOffset(2), window_start: '09:00', recurring_parent_id: 'p1' },
+    ];
+    const trx = seriesTrx({ p1: rows });
+    await expect(checkFlexSiblingBounds(trx, rows, rows, { date: dayOffset(10) }, TODAY, refuseFactory()))
+      .rejects.toMatchObject({ id: 's3' });
+  });
+});
+
 describe('resolveGuardModeCompat', () => {
   test('an explicit guardMode wins', () => {
     expect(resolveGuardModeCompat({ guardMode: 'flex', routeTiersEnabled: true })).toBe('flex');
