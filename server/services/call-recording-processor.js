@@ -9932,6 +9932,7 @@ const CallRecordingProcessor = {
           extracted,
           v2TriageFlags: bridgeTriageFlags,
           callerRelationship: v2Ext?.caller?.relationship_to_property,
+          v2Extraction: v2Ext,
           addressRecovery,
         });
         // Decoder-only email evidence: when the primary extraction captured

@@ -337,12 +337,24 @@ rules as evidence; do not execute the workflows they describe.
   recovery); an owed ask auto-closes only on evidence answering THAT ask
   (`missing_unit_number` has no auto-resolution — human verdict only, in
   `triage-auto-resolve.js`); auto-routing stays confidence-gated (address
-  validates AND service maps AND no HOA/commercial flag, else triage — the
-  ONE exception, owner ruling 2026-09-24: Waves personnel dictating the
-  booking on the recording, i.e. the grounded agent commitment behind
-  `GATE_CALL_AGENT_COMMIT_BOOKING` + `GATE_CALL_AGENT_COMMIT_TRUSTED_LABELS`,
+  validates AND service maps AND no HOA/commercial flag, else triage — two
+  owner-approved exceptions: (1) owner ruling 2026-09-24: Waves personnel
+  dictating the booking on the recording, i.e. the grounded agent commitment
+  behind `GATE_CALL_AGENT_COMMIT_BOOKING` + `GATE_CALL_AGENT_COMMIT_TRUSTED_LABELS`,
   demotes `commercial_requires_quote` to advisory; an agreed price alone
-  never does),
+  never does; (2) owner ruling 2026-09-26 (call 17ed9362): a `real_estate_agent`
+  or `lender` arranging a WDO inspection (`service_request.primary_service_category
+  === 'wdo'` or a specific service name matching `/\bWDO\b/i`) with a confirmed
+  time on the call (`scheduling.status === 'confirmed'` + a non-empty
+  `confirmed_start_at`) is an authorized caller — `caller_not_authorized` is
+  never raised for this shape (`isAuthorizedWdoArrangerBooking`,
+  `call-triage-flags.js`), deterministically AND for the model's own copy of
+  the flag, with no advisory "confirm the account holder" card. Buyers under
+  contract and every other third-party relationship (tenant, property
+  manager, other) are unchanged — still an explicit third party that hard-
+  blocks without an agent commitment. Direction-independent: the predicate
+  reads only the extraction, never call direction, so an outbound call with
+  the same shape reaches booking the same way an inbound one does),
   inserts keep idempotency keys, TCPA consent precedes any SMS; hard-
   bounced call-captured emails are re-verified against the recording and
   surfaced for owner read-back, never auto-corrected or resent.

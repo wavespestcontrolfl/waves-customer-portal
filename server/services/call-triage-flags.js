@@ -217,8 +217,62 @@ function isExplicitlyNonOwner(relationship) {
 function suppressUnsupportedModelFlags(modelFlags, extraction) {
   const flags = Array.isArray(modelFlags) ? modelFlags : [];
   if (!flags.includes('caller_not_authorized')) return flags;
-  if (isExplicitlyNonOwner(extraction?.caller?.relationship_to_property)) return flags;
+  if (isExplicitlyNonOwner(extraction?.caller?.relationship_to_property)) {
+    // A real_estate_agent/lender WDO arranger with a confirmed time on the
+    // call is authorized (see isAuthorizedWdoArrangerBooking) — the model
+    // emits caller_not_authorized on these calls itself (it sees the same
+    // third-party relationship), so its copy needs the same demotion the
+    // deterministic derivation gets below, or the merge would reintroduce
+    // the block from the model side alone (live miss, call 17ed9362,
+    // 2026-09-24: a lender ordering a refinance WDO inspection, confirmed
+    // for 10am Monday, blocked with routing.reason "triage_flags" even
+    // though the deterministic pass never raised it — the MODEL's own
+    // triage_flags entry survived the merge unfiltered).
+    if (isAuthorizedWdoArrangerBooking(extraction)) return flags.filter((f) => f !== 'caller_not_authorized');
+    return flags;
+  }
   return flags.filter((f) => f !== 'caller_not_authorized');
+}
+
+// A WDO inspection is identified the same way call-recording-processor.js's
+// catalog anchoring does: the V2 structured category ('wdo') OR the specific
+// catalog service name containing "WDO" (the "WDO Inspection Service" row —
+// see project-types.js's wdo_inspection.defaultTitle and
+// call-recording-processor.js's WDO_KEYWORDS_* / catalog list). Matching on
+// the word boundary rather than an exact string tolerates minor model
+// rephrasing ("WDO Inspection", "WDO Report") without matching an unrelated
+// service that merely mentions "wdo" mid-word (there is none in the catalog,
+// but \b keeps this future-proof).
+function isWdoInspectionRequest(serviceRequest = {}) {
+  if (serviceRequest?.primary_service_category === 'wdo') return true;
+  return /\bWDO\b/i.test(String(serviceRequest?.specific_service_name || ''));
+}
+
+// Owner ruling 2026-09-26 (call 17ed9362): a lender or realtor ARRANGING a
+// WDO inspection is an authorized caller when staff agreed the time on the
+// call — the same bar a homeowner's own booking meets (scheduling.status
+// 'confirmed' with a real confirmed_start_at). This is deliberately narrower
+// than, and independent of, the general agent-commitment demotion
+// (hasAgentCommittedEvidence): it does not touch that closed-vocabulary
+// transcript-grounding grammar, which still guards every OTHER third-party
+// case (family members, property managers, tenants) — a lender/realtor
+// arranging a WDO refinance/closing inspection is a routine, recognized
+// professional relationship to the property that the office does not need
+// an agent-spoken confirmation quote to trust.
+//
+// Buyers under contract are explicitly NOT covered (relationship is usually
+// 'other', sometimes misreported) — the owner ruling names lender/realtor
+// only. Direction-independent by construction: this reads only the
+// extraction (caller/service_request/scheduling), never call direction, so
+// an outbound call with the identical extraction shape is authorized the
+// same way an inbound one is.
+const WDO_ARRANGER_RELATIONSHIPS = new Set(['real_estate_agent', 'lender']);
+function isAuthorizedWdoArrangerBooking(extraction) {
+  const relationship = String(extraction?.caller?.relationship_to_property || '').trim().toLowerCase();
+  if (!WDO_ARRANGER_RELATIONSHIPS.has(relationship)) return false;
+  if (!isWdoInspectionRequest(extraction?.service_request || {})) return false;
+  const scheduling = extraction?.scheduling || {};
+  return scheduling.status === 'confirmed' && !!scheduling.confirmed_start_at;
 }
 
 function computeDeterministicTriageFlags(extraction, opts = {}) {
@@ -373,7 +427,8 @@ function computeDeterministicTriageFlags(extraction, opts = {}) {
     flags.push('low_extraction_confidence');
   }
 
-  if (caller.on_site_authorization === false && isExplicitlyNonOwner(caller.relationship_to_property)) {
+  if (caller.on_site_authorization === false && isExplicitlyNonOwner(caller.relationship_to_property)
+      && !isAuthorizedWdoArrangerBooking(extraction)) {
     flags.push('caller_not_authorized');
   }
 
@@ -2038,7 +2093,7 @@ function streetCompareKey(s) {
  * still confirms it before anyone drives there.
  * Pure: no side effects. The caller mutates `extracted` and persists the reasons.
  */
-function deriveCallReviewBridge({ addressValidation, extracted = {}, v2TriageFlags = [], callerRelationship = null, addressRecovery = null } = {}) {
+function deriveCallReviewBridge({ addressValidation, extracted = {}, v2TriageFlags = [], callerRelationship = null, addressRecovery = null, v2Extraction = null } = {}) {
   const av = addressValidation || null;
   const status = av && av.status ? av.status : null;
   const hadStreet = !!String(extracted.address_line1 || '').trim();
@@ -2115,7 +2170,14 @@ function deriveCallReviewBridge({ addressValidation, extracted = {}, v2TriageFla
   // caller_not_authorized on an unknown / spouse caller would still open
   // the review card enforce mode no longer raises. Only an explicit third
   // party (tenant, agent, manager, other) carries the ask.
-  if (flags.includes('caller_not_authorized') && isExplicitlyNonOwner(callerRelationship)) needsConfirmation.push('caller_not_authorized');
+  // Same owner-ruling exception the enforce gate applies (2026-09-26): a
+  // real_estate_agent/lender arranging a confirmed WDO inspection is
+  // authorized, so this shadow-mode review card must not re-raise it either.
+  // v2Extraction is optional (older callers keep today's behavior) — the one
+  // live call site (call-recording-processor.js) passes the full V2
+  // extraction so the predicate can see service_request/scheduling.
+  if (flags.includes('caller_not_authorized') && isExplicitlyNonOwner(callerRelationship)
+      && !isAuthorizedWdoArrangerBooking(v2Extraction)) needsConfirmation.push('caller_not_authorized');
   // Finding #4 (round 4 P1, PR #4807): callback_number_needed reaches this
   // function inside bridgeTriageFlags (the processor already merges
   // computeDeterministicTriageFlags's output in before calling this), but
@@ -2596,6 +2658,8 @@ module.exports = {
   sameHouseNumberStreet,
   SCHEDULING_CHANGE_REVIEW_FLAGS,
   isExplicitlyNonOwner,
+  isAuthorizedWdoArrangerBooking,
+  isWdoInspectionRequest,
   computeDeterministicTriageFlags,
   statesNewAddress,
   dispatchesToOnFileAddress,
