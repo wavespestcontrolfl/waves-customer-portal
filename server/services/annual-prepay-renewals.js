@@ -6287,7 +6287,7 @@ async function evaluateDueDeclineRetrieval(termId, today = etDateString()) {
 async function dueDeclineRetrieval(term, today) {
   if (!term) return { reason: 'not_found' };
   if (term.status !== 'cancelled' || term.renewal_decision !== 'cancel') return { reason: 'not_declined' };
-  if (coverageAwaitsInstallation(term)) return { reason: 'not_installed' };
+  if (coverageAwaitsInstallation(term) && !(await hasCompletedInstallationEvidence(term))) return { reason: 'not_installed' };
   const termIdText = String(term.id);
   const portalDecline = await db('activity_log')
     .where({ action: CUSTOMER_DECLINE_ACTIVITY_ACTION })
@@ -6304,6 +6304,15 @@ async function dueDeclineRetrieval(term, today) {
   const termEnd = dateOnly(term.term_end);
   if (termEnd && termEnd < today) return { portalDecline, retrieveAfter: termEnd, key: termEnd };
   return { reason: 'not_due' };
+}
+
+// An original term not yet anchored may still have its stations in the ground
+// (#4940 pre-push P1: e.g. installed, then the anchor was refused) — a
+// completed installation visit, by the anchor's own plan-scoped rule, counts.
+async function hasCompletedInstallationEvidence(term) {
+  const { whereTermHasCompletedInstallation } = require('./termite-annual-activation');
+  const row = await whereTermHasCompletedInstallation(db('annual_prepay_terms as it').where('it.id', term.id), 'it', db).first('it.id');
+  return !!row;
 }
 
 async function isTermPrepayRefunded(term) {
@@ -6480,7 +6489,11 @@ async function raisePendingDeclineRetrievalTasks({ limit = 50, today = etDateStr
     .whereNotNull('dt.annual_plan_version')
     .where({ 'dt.status': 'cancelled', 'dt.renewal_decision': 'cancel' })
     .where(function installed() {
-      this.whereNotNull('dt.installation_anchored_at').orWhereNotNull('dt.renewed_from_term_id');
+      // Anchored, a renewal term, or a completed installation visit on file
+      // (stations in the ground even when the anchor never landed).
+      const { whereTermHasCompletedInstallation } = require('./termite-annual-activation');
+      this.whereNotNull('dt.installation_anchored_at').orWhereNotNull('dt.renewed_from_term_id')
+        .orWhere((evidence) => whereTermHasCompletedInstallation(evidence, 'dt', db));
     })
     .where(function due() {
       this.where('dt.term_end', '<', today).orWhere((refunded) => whereTermPrepayRefunded(refunded, 'dt'));

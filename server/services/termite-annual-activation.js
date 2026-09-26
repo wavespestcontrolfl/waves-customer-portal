@@ -869,47 +869,54 @@ async function retryUndeliveredInvoices({ conn, limit, counts }) {
 const ANCHORABLE_TERM_STATUSES = ['payment_pending', 'active'];
 
 // Codex round-1 P1 (reverses the earlier "paid, installed plan only"
-// online-decline restriction): a customer can decline renewal online
-// BEFORE their termite installation happens (annual-prepay-renewals.js
-// termiteDeclineBlockedReason no longer blocks on coverageAwaitsInstallation).
-// That decided-lapse original term (status 'cancelled', renewal_decision
-// 'cancel', installation_anchored_at still NULL) must still anchor to its
-// installation once it completes — the coverage year the customer already
-// paid for is untouched by the decline, only the FUTURE renewal is refused.
-// An anchorable term is either:
-//   - undecided and paid/live (renewal_decision IS NULL, status IN
-//     ANCHORABLE_TERM_STATUSES) — the ordinary case, or
-//   - the decided-lapse shape above, PROVIDED it is still actually paid.
-// A void/refund 'cancelled' row (renewal_decision IS NULL) is neither shape
-// and is never anchored — its coverage never happened.
-//
-// Codex pre-push P1: the decided-lapse shape is STATUS-only — a decline
-// followed by a refund or a disputed invoice still reads 'cancelled' +
-// 'cancel', but billing (coveredTermsAsOf) has already revoked its
-// coverage. isPaidDecidedLapseTerm (the SAME live-coverage test billing
-// uses) is the deciding vote for that shape, so a refunded/disputed
-// decline is never anchored and never gets an install-scheduling handoff.
-async function isAnchorableTermState(term, conn = db) {
+// online-decline restriction) + #4940 pre-push P1: anchoring records only
+// FACTS — installation_anchored_at, the installation visit, and the term's
+// dates moved to installation + 12 months. It never grants coverage: every
+// coverage write downstream is gated on its own paid test (refreshTermSnapshot
+// seeds/stamps only an ACTIVE term or a PAID end-at-term lapse through
+// keepEndAtTermLapseCoverage; createTermForAnnualPrepay's born-paid
+// follow-through runs only for ACTIVE or a paid decided lapse). So an
+// anchorable (dates) term is any ORIGINAL term whose installation is a fact
+// worth recording:
+//   - undecided and live/pending (renewal_decision IS NULL, status IN
+//     ANCHORABLE_TERM_STATUSES) — the ordinary case;
+//   - a customer 'cancel' decision, paid or not: the decided-lapse shape
+//     (cancelled + cancel — including one refunded, disputed or voided after
+//     the decline) and an unpaid plan declined online (payment_pending +
+//     cancel). Its stations are in the ground either way, and the station
+//     retrieval (annual-prepay-renewals.js raisePendingDeclineRetrievalTasks)
+//     keys on the installation.
+// A void/refund 'cancelled' row with NO decision is neither shape and is
+// never anchored — its coverage never happened and no decline governs it.
+const ANCHORABLE_DECIDED_STATUSES = ['cancelled', 'payment_pending'];
+
+function isAnchorableTermState(term) {
   if (term?.renewed_from_term_id) return false;
-  if (term?.status === 'cancelled' && term?.renewal_decision === 'cancel') {
-    const { isPaidDecidedLapseTerm } = require('./annual-prepay-renewals');
-    return isPaidDecidedLapseTerm(term, conn);
-  }
+  if (term?.renewal_decision === 'cancel') return ANCHORABLE_DECIDED_STATUSES.includes(term?.status);
   return !term?.renewal_decision && ANCHORABLE_TERM_STATUSES.includes(term?.status);
 }
 
-// SQL-level companion to isAnchorableTermState, for the two candidate
-// scans below (anchorInstalledTerms, retryInstallHandoffs). The decided-
-// lapse branch is NOT status-only: it carries the SAME paid/not-refunded/
-// not-disputed test isPaidDecidedLapseTerm runs (coveredTermsAsOf scoped to
-// this term's id, correlated as an EXISTS), so a refunded/disputed decline
-// is never even a candidate — it can't take a slot in the scan's `limit`
-// and starve paid rows behind it, and it never gets an install handoff
-// bell or an anchor attempt. Undecided active/payment_pending terms are
-// unchanged (status-only, as before).
-function whereAnchorableTermState(builder, alias, conn) {
-  const { coveredTermsAsOf } = require('./annual-prepay-renewals');
+// SQL companion of isAnchorableTermState — the anchor candidate scan.
+function whereAnchorableTermState(builder, alias) {
   return builder.where(function anchorableTermState() {
+    this.where(function declinedByCustomer() {
+      this.where(`${alias}.renewal_decision`, 'cancel').whereIn(`${alias}.status`, ANCHORABLE_DECIDED_STATUSES);
+    })
+      .orWhere(function undecidedAndLive() {
+        this.whereNull(`${alias}.renewal_decision`).whereIn(`${alias}.status`, ANCHORABLE_TERM_STATUSES);
+      });
+  });
+}
+
+// The install-SCHEDULING handoff (retryInstallHandoffs) is narrower than the
+// anchor: it asks staff to book an installation, so a declined term must
+// still be a PAID year (Codex pre-push P1 — a decline followed by a refund
+// or dispute never gets an install-scheduling bell). The decided branch
+// carries billing's own paid test (coveredTermsAsOf, correlated EXISTS), so a
+// refunded/disputed decline is never even a candidate there.
+function whereInstallHandoffTermState(builder, alias, conn) {
+  const { coveredTermsAsOf } = require('./annual-prepay-renewals');
+  return builder.where(function handoffTermState() {
     this.where(function paidDecidedLapse() {
       this.where(`${alias}.status`, 'cancelled').andWhere(`${alias}.renewal_decision`, 'cancel')
         .whereExists(coveredTermsAsOf(conn).whereRaw('t.id = ??', [`${alias}.id`]).select(conn.raw('1')));
@@ -994,6 +1001,27 @@ async function installationPlanForEstimate(conn, estimateId) {
   return installationPlanFor(term, estimate);
 }
 
+// Completed-installation EVIDENCE for a term, by THE plan-scoped
+// installation rule (whereInstallationVisitForPlan) — for the portal-decline
+// station retrieval (#4940 pre-push P1): a term whose anchor never landed
+// (e.g. an overlap refusal) still has stations in the ground once its
+// installation visit completed. Correlated form for a candidate scan over
+// annual_prepay_terms aliased `alias`.
+function whereTermHasCompletedInstallation(builder, alias, conn = db) {
+  return builder.whereExists(function completedInstallation() {
+    whereInstallationVisitForPlan(
+      this.select(conn.raw('1')).from('scheduled_services as ss').where('ss.status', 'completed'),
+      {
+        customerId: conn.ref(`${alias}.customer_id`),
+        estimateId: conn.ref(`${alias}.source_estimate_id`),
+        estimatePropertyId: conn.raw(`(select e_inst.property_id from estimates e_inst where e_inst.id = ${alias}.source_estimate_id)`),
+        termId: conn.ref(`${alias}.id`),
+        floor: conn.raw(`LEAST(${alias}.term_start, (${alias}.created_at AT TIME ZONE 'America/New_York')::date)`),
+      },
+    );
+  });
+}
+
 async function anchorTermToInstallation({ termId, conn = db }) {
   // A term the customer declined online BEFORE its installation gets its
   // real term_end here; its station retrieval is evaluated by the daily
@@ -1007,7 +1035,7 @@ async function anchorTermToInstallation({ termId, conn = db }) {
     await lockAndAssertNoAnnualPrepayOverlap(trx, peek.customer_id, null, true, '');
     const term = await trx('annual_prepay_terms').where({ id: termId }).forUpdate().first();
     if (!term || term.installation_anchored_at) return { skipped: 'already_anchored' };
-    if (!(await isAnchorableTermState(term, trx))) {
+    if (!isAnchorableTermState(term)) {
       return { skipped: 'not_original_term' };
     }
     if (await trx('annual_prepay_terms').where({ renewed_from_term_id: term.id }).first('id')) return { skipped: 'renewed' };
@@ -1082,7 +1110,7 @@ async function anchorInstalledTerms({ conn, limit, counts }) {
       .where('e.annual_plan_activation_status', 'activated')
       .whereNull('apt.installation_anchored_at')
       .whereNull('apt.renewed_from_term_id')
-      .modify((qb) => whereAnchorableTermState(qb, 'apt', conn))
+      .modify((qb) => whereAnchorableTermState(qb, 'apt'))
       .whereExists(function completedInstallation() {
         whereInstallationVisitForPlan(
           this.select(conn.raw('1')).from('scheduled_services as ss').where('ss.status', 'completed'),
@@ -1163,7 +1191,7 @@ async function retryDeclineRetrievalTasks({ counts }) {
 // before installation (decided lapse) is still a paid coverage year that
 // needs its installation, so it stays eligible (same anchorable-state rule
 // as anchoring) — only while that year is still PAID: a decline followed by
-// a refund or dispute is excluded in SQL (whereAnchorableTermState), so it
+// a refund or dispute is excluded in SQL (whereInstallHandoffTermState), so it
 // never gets a scheduling bell. Oldest activation first, never-stamped activation times
 // ahead of all, bounded.
 async function retryInstallHandoffs({ conn, limit, counts }) {
@@ -1174,7 +1202,7 @@ async function retryInstallHandoffs({ conn, limit, counts }) {
       .whereNull('e.annual_plan_install_handoff_at')
       .whereNull('apt.renewed_from_term_id')
       .whereNull('apt.installation_anchored_at')
-      .modify((qb) => whereAnchorableTermState(qb, 'apt', conn))
+      .modify((qb) => whereInstallHandoffTermState(qb, 'apt', conn))
       .orderBy('e.annual_plan_activated_at', 'asc', 'first')
       .select('e.id as estimate_id', 'e.annual_plan_deferred_invoice')
       .limit(limit);
@@ -1533,6 +1561,7 @@ module.exports = {
   activateTermiteAnnualPlanForSignedContract,
   anchorTermToInstallation,
   reconcileTermiteAnnualActivations,
+  whereTermHasCompletedInstallation,
   ANNUAL_TEMPLATE_KEY,
   ANNUAL_SIGNATURE_ABANDON_DAYS,
   _private: { CASTABLE_ISO_INSTANT, SIGNATURE_NUDGE_EVENT, expireAbandonedSignature },

@@ -658,4 +658,90 @@ describeOrSkip('termite annual renewal decline — coverage, renew supersession,
     expect(new Set(correctionBells.map((c) => c[3].dedupeKey)).size).toBe(1);
     expect(correctionBells[0][2]).toContain('earlier than the open station-retrieval task says');
   });
+
+  // #4940 pre-push P1: declined while unpaid, installed, then the invoice is
+  // VOIDED — the installed stations must still enter retrieval.
+  async function unpaidDeclinedAwaitingInstall(db) {
+    const customerId = randomUUID();
+    const today = etToday();
+    const signedOn = addMonths(today, -1);
+    await db('customers').insert({ id: customerId, first_name: 'Jane', last_name: 'Doe' });
+    const [estimate] = await db('estimates').insert({ customer_id: customerId }).returning('*');
+    const [invoice] = await db('invoices').insert({ customer_id: customerId, status: 'sent' }).returning('*');
+    const [term] = await db('annual_prepay_terms').insert({
+      customer_id: customerId,
+      source_estimate_id: estimate.id,
+      prepay_invoice_id: invoice.id,
+      plan_label: 'WaveGuard Termite Annual Protection',
+      prepay_amount: 450,
+      coverage_service_type: 'Termite Monitoring Visit',
+      coverage_visit_count: 2,
+      coverage_cadence: 'annual',
+      term_start: signedOn,
+      term_end: addMonths(signedOn, 12),
+      status: 'payment_pending',
+      annual_plan_version: 'v3',
+      created_at: new Date(`${signedOn}T16:00:00Z`),
+    }).returning('*');
+    return {
+      customerId, today, estimate, invoice, term,
+    };
+  }
+
+  test('decline unpaid -> installation completes -> anchored (dates, no coverage) -> invoice voided -> decided lapse -> immediate retrieval', async () => {
+    const {
+      db, Renewals, raiseTermiteRetrievalTask, anchorTermToInstallation,
+    } = await load();
+    const fx = await unpaidDeclinedAwaitingInstall(db);
+    expect(await Renewals.declineTermiteAnnualRenewal({ customerId: fx.customerId, termId: fx.term.id, today: fx.today }))
+      .toEqual(expect.objectContaining({ ok: true, unpaid: true }));
+
+    const [install] = await db('scheduled_services').insert({
+      customer_id: fx.customerId, source_estimate_id: fx.estimate.id, status: 'completed',
+      service_type: 'Termite Bait Station Installation', scheduled_date: fx.today,
+    }).returning('*');
+    const [futureVisit] = await db('scheduled_services').insert({
+      customer_id: fx.customerId, status: 'pending', service_type: 'Termite Monitoring Visit', scheduled_date: addMonths(fx.today, 6),
+    }).returning('*');
+
+    const anchored = await anchorTermToInstallation({ termId: fx.term.id, conn: db });
+    expect(anchored).toEqual(expect.objectContaining({ anchored: true, termStart: fx.today }));
+    const afterAnchor = await db('annual_prepay_terms').where({ id: fx.term.id }).first();
+    expect(afterAnchor).toEqual(expect.objectContaining({ status: 'payment_pending', renewal_decision: 'cancel', installation_anchor_visit_id: install.id }));
+    // Dates only — an unpaid term is never granted coverage.
+    const untouched = await db('scheduled_services').where({ id: futureVisit.id }).first();
+    expect(untouched.prepaid_amount).toBeNull();
+    expect(untouched.prepaid_method).toBeNull();
+
+    await db('invoices').where({ id: fx.invoice.id }).update({ status: 'void' });
+    await Renewals.syncTermForInvoicePayment(fx.invoice.id, db);
+    expect(await db('annual_prepay_terms').where({ id: fx.term.id }).first()).toEqual(expect.objectContaining({ status: 'cancelled', renewal_decision: 'cancel' }));
+    // The voided plan's unlinked future visit is taken off the calendar (a
+    // live termite visit left there would, conservatively, make the sweep
+    // ask staff to confirm which stations instead of raising the task).
+    await db('scheduled_services').where({ id: futureVisit.id }).update({ status: 'cancelled' });
+
+    expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 1, raised: 1 });
+    expect(raiseTermiteRetrievalTask).toHaveBeenCalledWith(fx.customerId, null, expect.objectContaining({ retrieveAfter: null, termId: fx.term.id }));
+  });
+
+  test('installed but NEVER anchored (the anchor did not land), then voided: the completed installation still makes it due', async () => {
+    const { db, Renewals, raiseTermiteRetrievalTask } = await load();
+    const fx = await unpaidDeclinedAwaitingInstall(db);
+    await Renewals.declineTermiteAnnualRenewal({ customerId: fx.customerId, termId: fx.term.id, today: fx.today });
+    await db('invoices').where({ id: fx.invoice.id }).update({ status: 'void' });
+    await Renewals.syncTermForInvoicePayment(fx.invoice.id, db);
+
+    // Not installed yet: nothing to retrieve.
+    expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 0, raised: 0 });
+
+    await db('scheduled_services').insert({
+      customer_id: fx.customerId, source_estimate_id: fx.estimate.id, status: 'completed',
+      service_type: 'Termite Bait Station Installation', scheduled_date: fx.today,
+    });
+    expect((await db('annual_prepay_terms').where({ id: fx.term.id }).first()).installation_anchored_at).toBeNull();
+    expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 1, raised: 1 });
+    expect(raiseTermiteRetrievalTask).toHaveBeenCalledWith(fx.customerId, null, expect.objectContaining({ retrieveAfter: null }));
+  });
 });
+

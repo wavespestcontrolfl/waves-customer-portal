@@ -479,8 +479,10 @@ describeOrSkip('termite annual installation anchor + install handoff — real Po
   // Codex pre-push P1: the decided-lapse shape is status-only — a decline
   // followed by a full refund (or a disputed invoice) still reads
   // 'cancelled' + 'cancel', but billing no longer covers that year. Such a
-  // term must never get an install-scheduling bell nor be anchored, and it
-  // must not even be a scan candidate (so it can't hold a `limit` slot).
+  // term never gets an install-SCHEDULING bell (not even a candidate there).
+  // #4940 pre-push P1: its installation is still a FACT — the stations are in
+  // the ground and the station retrieval keys on it — so it IS anchored
+  // (dates only; every coverage write downstream has its own paid gate).
   test.each([
     ['a full refund of the prepay payment', async (db) => {
       await db('invoices').where({ id: ids.invoiceId }).update({ stripe_payment_intent_id: 'pi_declined_then_refunded' });
@@ -489,7 +491,7 @@ describeOrSkip('termite annual installation anchor + install handoff — real Po
     ['a disputed prepay invoice', async (db) => {
       await db('invoices').where({ id: ids.invoiceId }).update({ status: 'overdue', paid_at: null });
     }],
-  ])('decline then %s: no install-handoff bell, no anchor — sweep and direct anchor both refuse', async (_label, unPay) => {
+  ])('decline then %s: no install-handoff bell, but the completed installation is anchored (dates only)', async (_label, unPay) => {
     const { sweep, notifyAdmin, createTermForAnnualPrepay, refreshTermSnapshot, db } = load();
     await db('estimates').where({ id: ids.estimateId }).update({ annual_plan_install_handoff_at: null });
     await db('annual_prepay_terms').where({ id: ids.termId }).update({ status: 'cancelled', renewal_decision: 'cancel' });
@@ -500,25 +502,35 @@ describeOrSkip('termite annual installation anchor + install handoff — real Po
 
     expect(Object.keys(counts).filter((key) => key.endsWith('ScanError'))).toEqual([]);
     expect(counts).toMatchObject({
-      anchorScanned: 0, anchored: 0, anchorFailed: 0, handoffScanned: 0, handedOff: 0, handoffFailed: 0,
+      anchorScanned: 1, anchored: 1, anchorFailed: 0, handoffScanned: 0, handedOff: 0, handoffFailed: 0,
     });
     expect(notifyAdmin).not.toHaveBeenCalled();
-    expect(createTermForAnnualPrepay).not.toHaveBeenCalled();
-    expect(refreshTermSnapshot).not.toHaveBeenCalled();
+    expect(createTermForAnnualPrepay.mock.calls.length + refreshTermSnapshot.mock.calls.length).toBe(1);
     const estimate = await db('estimates').where({ id: ids.estimateId }).first('annual_plan_install_handoff_at');
     expect(estimate.annual_plan_install_handoff_at).toBeNull();
-
-    // The direct anchor (under its lock) refuses the same term too.
-    const { anchorTermToInstallation } = require('../services/termite-annual-activation');
-    expect(await anchorTermToInstallation({ termId: ids.termId, conn: db })).toEqual({ skipped: 'not_original_term' });
     const term = await readTerm(db);
-    expect(term.installation_anchored_at).toBeNull();
-    expect(term.installation_anchor_visit_id).toBeNull();
+    expect(term.installation_anchored_at).toBeInstanceOf(Date);
     expect(term.status).toBe('cancelled');
     expect(term.renewal_decision).toBe('cancel');
   });
 
-  test('a still-PAID decline sitting next to an un-paid (refunded) decline: only the paid one is scanned, bell rung and anchored', async () => {
+  // #4940 pre-push P1: an UNPAID plan declined online keeps status
+  // payment_pending with the decision on file — its completed installation
+  // anchors too (dates only).
+  test('an unpaid plan declined online (payment_pending + cancel) anchors to its completed installation', async () => {
+    const { sweep, db } = load();
+    await db('invoices').where({ id: ids.invoiceId }).update({ status: 'sent' });
+    await db('annual_prepay_terms').where({ id: ids.termId }).update({ status: 'payment_pending', renewal_decision: 'cancel' });
+    const install = await addVisit(db, { scheduled_date: '2026-10-14' });
+
+    expect(await sweep()).toMatchObject({ anchorScanned: 1, anchored: 1 });
+    const term = await readTerm(db);
+    expect(term.installation_anchor_visit_id).toBe(install.id);
+    expect(term.status).toBe('payment_pending');
+    expect(term.renewal_decision).toBe('cancel');
+  });
+
+  test('a still-PAID decline next to a refunded decline: only the paid one gets the install-scheduling bell; both installations anchor (dates)', async () => {
     const { sweep, db } = load({});
     await db('annual_prepay_terms').where({ id: ids.termId }).update({ status: 'cancelled', renewal_decision: 'cancel' });
     await db('estimates').where({ id: ids.estimateId }).update({ annual_plan_install_handoff_at: null });
@@ -553,9 +565,10 @@ describeOrSkip('termite annual installation anchor + install handoff — real Po
     expect((await db('estimates').where({ id: otherEstimate.id }).first()).annual_plan_install_handoff_at).toBeNull();
 
     const install = await addVisit(db, { scheduled_date: '2026-10-14' });
-    expect(await sweep({ limit: 1 })).toMatchObject({ anchorScanned: 1, anchored: 1 });
+    await sweep();
     expect((await readTerm(db)).installation_anchor_visit_id).toBe(install.id);
-    expect((await db('annual_prepay_terms').where({ id: otherTerm.id }).first()).installation_anchored_at).toBeNull();
+    expect((await db('annual_prepay_terms').where({ id: otherTerm.id }).first()).installation_anchored_at).toBeInstanceOf(Date);
+    expect((await db('estimates').where({ id: otherEstimate.id }).first()).annual_plan_install_handoff_at).toBeNull();
   });
 
   test('install handoff: an installation staff already booked on the estimate is the handoff — stamped, no bell', async () => {
