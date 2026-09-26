@@ -254,6 +254,16 @@ describe('deferred-replay registry', () => {
     expect(q.where).toHaveBeenCalledWith({ id: 'pay-1', customer_id: 'cust-1' });
   });
 
+  test.each([
+    ['a partial refund amount', { status: 'paid', refund_amount: '12.50' }],
+    ['a pending refund', { status: 'paid', refund_amount: 0, refund_status: 'pending' }],
+  ])('billing receipt replay suppresses after %s on a still-paid payment', async (_label, payment) => {
+    db.mockReturnValueOnce(firstChain(payment));
+    expect(await recheckDeferredReplay('billing_receipt_deferred', {
+      payment_id: 'pay-1', customer_id: 'cust-1',
+    })).toEqual({ eligible: false, reason: 'payment-refunded' });
+  });
+
   test('billing receipt replay suppresses for a deleted customer', async () => {
     db.mockReturnValueOnce(firstChain({ status: 'paid' }));
     db.mockReturnValueOnce(firstChain({ id: 'cust-1', deleted_at: new Date() }));

@@ -677,6 +677,13 @@ const REGISTRY = {
           .first();
         if (!payment) return { eligible: false, reason: 'payment-missing' };
         if (payment.status !== 'paid') return { eligible: false, reason: `payment-${payment.status}` };
+        // A partial refund keeps status 'paid' and records itself in
+        // refund_amount / refund_status (stripe.js refund paths). Any refund
+        // activity makes the frozen full-charge receipt wrong (Codex r1 on
+        // #4951), so suppress it.
+        if (Number(payment.refund_amount || 0) > 0 || payment.refund_status) {
+          return { eligible: false, reason: 'payment-refunded' };
+        }
         const customer = await db('customers').where({ id: meta.customer_id }).first();
         if (!customer || customer.deleted_at) return { eligible: false, reason: 'customer-unavailable' };
         return { eligible: true };
