@@ -3469,13 +3469,16 @@ router.post('/outbound-dial-complete', async (req, res) => {
 router.post('/call-status', async (req, res) => {
   try {
     const { CallSid, CallStatus, CallDuration, From, To, Direction, ErrorCode, ErrorMessage, Timestamp } = req.body;
-    // codex #4919 finding D: Twilio's own event-time param — for a terminal
-    // status (the only status this fallback ever inserts under; see
-    // isFailureStatus/'completed' below) it IS the call's end instant, read
-    // straight off the webhook body rather than this row's own created_at
-    // (which the INSERT fallback paths below stamp at callback-RECEIPT time,
-    // not the call's actual end).
-    const providerEndedAt = parseProviderTimestamp(Timestamp);
+    // codex #4919 finding D (round-5 P1 fix): Twilio's own event-time param
+    // IS the call's end instant only for a TERMINAL status of THIS
+    // callback — /call-status fires on every lifecycle event (ringing,
+    // in-progress, completed…), not just the last one, and this endpoint's
+    // own fallback insert below can land on the FIRST one to arrive, whichever
+    // status that is. Gating here means a non-terminal event never stamps
+    // provider_ended_at at all — read straight off the webhook body rather
+    // than this row's own created_at (callback-RECEIPT time, not the call's
+    // actual end).
+    const providerEndedAt = TERMINAL_CALL_STATUSES.has(CallStatus) ? parseProviderTimestamp(Timestamp) : null;
     const isOutbound = Direction === 'outbound-api' || Direction === 'outbound-dial';
 
     await db.transaction(async (trx) => {
@@ -3517,6 +3520,20 @@ router.post('/call-status', async (req, res) => {
           status,
           duration_seconds: duration,
           updated_at: new Date(),
+          // codex #4919 finding D (round-5 P1 fix): the row may have been
+          // inserted earlier by a non-terminal event (no provider_ended_at
+          // stamped then, per the gate above) — completion landing HERE,
+          // on an already-existing row, is where it gets written. Merged
+          // into existing metadata, never a wholesale overwrite (COALESCE
+          // keeps every other key); omitted entirely on a non-terminal
+          // event, preserving the same late/retried-callback protection
+          // `status`/`duration` above already apply.
+          ...(providerEndedAt ? {
+            metadata: trx.raw(
+              "COALESCE(metadata, '{}'::jsonb) || ?::jsonb",
+              [JSON.stringify({ provider_ended_at: providerEndedAt })],
+            ),
+          } : {}),
         });
         return;
       }

@@ -73,12 +73,19 @@ describe('/recording-status recovery insert writes provider_started_at/provider_
 });
 
 describe('/call-status fallback inserts write provider_ended_at from Twilio\'s Timestamp param (codex #4919 finding D)', () => {
-  test('Timestamp is destructured and parsed once, ahead of both insert paths', () => {
+  // codex #4919 finding D round-5 P1: /call-status fires on EVERY lifecycle
+  // event (ringing, in-progress, completed…), not just the last one — a
+  // non-terminal event's own Timestamp is not the call's end and must never
+  // be stamped as provider_ended_at.
+  test('Timestamp is only read as provider_ended_at for a TERMINAL CallStatus, gated once ahead of both insert paths', () => {
     const destructureAt = processorSrc.indexOf(
       "const { CallSid, CallStatus, CallDuration, From, To, Direction, ErrorCode, ErrorMessage, Timestamp } = req.body;",
     );
     expect(destructureAt).toBeGreaterThan(-1);
-    const parseAt = processorSrc.indexOf('const providerEndedAt = parseProviderTimestamp(Timestamp);', destructureAt);
+    const parseAt = processorSrc.indexOf(
+      "const providerEndedAt = TERMINAL_CALL_STATUSES.has(CallStatus) ? parseProviderTimestamp(Timestamp) : null;",
+      destructureAt,
+    );
     expect(parseAt).toBeGreaterThan(destructureAt);
   });
 
@@ -110,5 +117,28 @@ describe('/call-status fallback inserts write provider_ended_at from Twilio\'s T
     // The recordTouchpoint metadata just below (a DIFFERENT object, plain
     // JS not stringified) is deliberately NOT asserted here — it is not a
     // call_log row and out of this finding's scope.
+  });
+
+  // codex #4919 finding D round-5 P1: a row this fallback inserted on an
+  // EARLIER non-terminal event (no provider_ended_at stamped then, per the
+  // gate above) must still get it once completion actually lands — on the
+  // EXISTING-row update path, not just at insert time.
+  test('the existing-row UPDATE path merges provider_ended_at into metadata via COALESCE, never a wholesale overwrite, and only when providerEndedAt is present', () => {
+    const handlerAt = processorSrc.indexOf(
+      "const { CallSid, CallStatus, CallDuration, From, To, Direction, ErrorCode, ErrorMessage, Timestamp } = req.body;",
+    );
+    expect(handlerAt).toBeGreaterThan(-1);
+    const existingAt = processorSrc.indexOf('if (existing) {', handlerAt);
+    expect(existingAt).toBeGreaterThan(handlerAt);
+    const returnAt = processorSrc.indexOf('return;', existingAt);
+    expect(returnAt).toBeGreaterThan(existingAt);
+    const section = processorSrc.slice(existingAt, returnAt);
+    expect(section).toContain("...(providerEndedAt ? {");
+    expect(section).toContain("COALESCE(metadata, '{}'::jsonb) || ?::jsonb");
+    expect(section).toContain('provider_ended_at: providerEndedAt');
+    // status/duration_seconds/updated_at are unconditional; metadata is the
+    // ONLY conditionally-spread key, so a non-terminal event's update never
+    // touches metadata at all.
+    expect(section).toMatch(/status,\s*\n\s*duration_seconds: duration,\s*\n\s*updated_at: new Date\(\),/);
   });
 });
