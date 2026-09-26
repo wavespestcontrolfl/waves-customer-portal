@@ -36,9 +36,11 @@ one. Merge gates are unchanged until then.
 
 ## Hard lines
 
-- **Managed tooling only.** Use the `npm run dev`, `dev:*`, and `qa:*`
-  scripts and the `scripts/qa/*` harnesses, which build their environment
-  with `childEnvironment` in `scripts/dev/context.js`. The verifier starts
+- **Managed tooling only.** Use `npm run dev`, `dev:managed-client`,
+  `dev:debug`, `dev:migrate`, `dev:doctor`, the `qa:*` scripts, and the
+  `scripts/qa/*` harnesses, which build their environment with
+  `childEnvironment` in `scripts/dev/context.js`. Never `dev:server` or
+  `dev:client`: those are the raw commands, and `dev:server` loads `.env`. The verifier starts
   nothing else that loads server code: no bare `node`, no repo operational
   scripts, no local `test:contracts`, no `eval:*`. Outside the managed
   runner, server code can read the checkout's `.env`, which may point at
@@ -54,9 +56,12 @@ one. Merge gates are unchanged until then.
 1. **Real database journey.** Per `docs/development.md` §Application QA:
    `qa:database`, `dev:migrate`, `dev:doctor`, then `qa:e2e` or `qa:seed`.
    Drive the changed page or route on the managed `npm run dev` stack as
-   the seeded fixture users, logging in the way `scripts/qa/e2e.js` does
-   (credentials in the private `.tmp/qa/e2e/fixture.json`). Read changed
-   state back through the app's own admin routes.
+   the seeded admin or technician, who log in by password through
+   `/api/admin/auth/login` (credentials in the private
+   `.tmp/qa/e2e/fixture.json`). Read changed state back through the app's
+   own admin routes. Customer login needs the OTP that only `qa:e2e`'s own
+   server captures, so a customer-authenticated scenario counts only when
+   `qa:e2e` itself covers it; otherwise it is `Not exercised`.
 2. **Real components, synthetic API.** `node scripts/qa/<harness>`,
    `npm run qa:previews`, `npm run audit:estimate-previews`. External
    requests are blocked. This is not database evidence; say so.
