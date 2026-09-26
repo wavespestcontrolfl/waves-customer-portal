@@ -11866,8 +11866,13 @@ function retiredGateInputsForVisitEdit({
   if (postedServiceId && !takePrimaryId(postedServiceId)) {
     const idx = currentAddons.findIndex((a, i) => !pairedLine.has(i) && String(a?.service_id || '') === String(postedServiceId));
     // The moved row stays on the visit as the primary, riding the parent.
-    if (idx >= 0) pairUp({ serviceId: String(postedServiceId), serviceName: null, recurringPattern: null, recurringIntervalDays: null }, idx);
-    else primaryAddedIds.push(String(postedServiceId));
+    if (idx >= 0) {
+      pairUp({ serviceId: String(postedServiceId), serviceName: null, recurringPattern: null, recurringIntervalDays: null }, idx);
+      // A row that ran on its own cadence (one_time, custom) now takes the
+      // parent's, so promoting it is a new plan line (codex r32 on #4786).
+      const moved = currentAddons[idx];
+      if (moved?.recurring_pattern) primaryAddedIds.push(String(postedServiceId));
+    } else primaryAddedIds.push(String(postedServiceId));
   }
   for (const l of lines) {
     if (pairedStored.has(l)) continue;

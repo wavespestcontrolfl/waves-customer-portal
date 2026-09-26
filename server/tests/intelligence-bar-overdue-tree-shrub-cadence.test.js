@@ -131,12 +131,19 @@ test('every supported recurrence resolves through the seeder\'s own table (codex
     { ...row('biweekly-due', 'Tree & Shrub', 15), active_plan: { service_key: 'tree_shrub_program', recurring_pattern: 'biweekly', recurring_interval_days: null } },
     // A pattern the seeder cannot place in days (seasonal) keeps the catalog default.
     { ...row('seasonal-catalog', 'Tree & Shrub', 45), active_plan: { service_key: 'tree_shrub_6week', recurring_pattern: 'seasonal_feb_oct', recurring_interval_days: null } },
+    // monthly_nth_weekday is due at 30, not the program row's 60 (codex r32).
+    { ...row('nth-weekday-due', 'Tree & Shrub', 40), active_plan: { service_key: 'tree_shrub_program', recurring_pattern: 'monthly_nth_weekday', recurring_interval_days: null } },
   ];
   const result = await executeTool('find_overdue_customers', { service_category: 'tree_shrub' });
-  expect(result.overdue_customers.map((c) => [c.id, c.expected_frequency_days]).sort()).toEqual([['biweekly-due', 14], ['seasonal-catalog', 42], ['semiannual-due', 180]]);
+  expect(result.overdue_customers.map((c) => [c.id, c.expected_frequency_days]).sort()).toEqual([['biweekly-due', 14], ['nth-weekday-due', 30], ['seasonal-catalog', 42], ['semiannual-due', 180]]);
   const { intervalDaysForPattern } = require('../services/recurring-appointment-seeder');
-  expect([['custom', 45], [null, 42], ['quarterly', 42], ['bimonthly', null], ['every_6_weeks', null], ['weekly', null], ['annual', null], ['seasonal_feb_oct', null], ['custom', null]]
+  expect([['custom', 45], [null, 42], ['quarterly', 42], ['bimonthly', null], ['every_6_weeks', null], ['weekly', null], ['annual', null], ['seasonal_feb_oct', null], ['one_time', 90]]
     .map(([pattern, interval]) => intervalDaysForPattern(pattern, interval))).toEqual([45, null, 90, 60, 42, 7, 360, null, null]);
+  // Mirrors nextRecurringDate (codex r32): monthly_nth_weekday is monthly,
+  // and custom with no interval or an unknown pattern runs at the 91-day
+  // fallback — neither lets the catalog default override the stored series.
+  expect([['monthly_nth_weekday', null], ['custom', null], ['foo', null]]
+    .map(([pattern, interval]) => intervalDaysForPattern(pattern, interval))).toEqual([30, 91, 91]);
 });
 
 test('other categories keep their fixed interval', async () => {

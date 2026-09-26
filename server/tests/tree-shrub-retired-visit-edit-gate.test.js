@@ -191,6 +191,26 @@ describe('retiredGateInputsForVisitEdit', () => {
   // reposted with a different pattern than its stored one (one_time promoted
   // to the plan, or a plan pattern changed) is gated as if added — by id and
   // by name, carrying the NEW cadence.
+  // codex r32: an id-only edit that moves a one_time (or own-cadence) add-on
+  // to the primary line makes it ride the parent's recurrence — a new plan
+  // line, gated by id and by the primary label.
+  test('promoting a one_time add-on to the primary service gates it', () => {
+    const recurring = { ...current, is_recurring: true };
+    const promoted = retiredGateInputsForVisitEdit({
+      current: recurring,
+      currentAddons: [{ service_id: RETIRED_ID, service_name: 'Quarterly T&S', recurring_pattern: 'one_time', recurring_interval_days: null }],
+      postedServiceId: RETIRED_ID, postedAddons: null, serviceType: undefined, plansRetainedLines: false,
+    });
+    expect(promoted.serviceIds).toEqual([RETIRED_ID]);
+    expect(promoted.serviceTypes).toContain('Quarterly Pest Control');
+    // An add-on that already rode the parent is not a new plan line when moved.
+    expect(retiredGateInputsForVisitEdit({
+      current: recurring,
+      currentAddons: [{ service_id: RETIRED_ID, service_name: 'Quarterly T&S', recurring_pattern: null, recurring_interval_days: 90 }],
+      postedServiceId: RETIRED_ID, postedAddons: null, serviceType: undefined, plansRetainedLines: false,
+    })).toEqual({ serviceIds: [], serviceTypes: [] });
+  });
+
   test('promoting a one_time add-on to a plan pattern gates it, by id or by name', () => {
     const recurring = { ...current, is_recurring: true };
     const stored = [

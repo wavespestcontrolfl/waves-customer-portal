@@ -329,14 +329,20 @@ function schedulerPlacesPattern(pattern) {
 // under a null pattern is NOT: lineDueOnRecurringDate rides every parent
 // occurrence when no pattern is stored, whatever the interval column says —
 // codex r30 on #4786); a month pattern is months × 30 (bimonthly 60,
-// quarterly 90, semiannual 180); a day-gap pattern reads the table; anything
-// else (seasonal, unknown, null) is null so the caller falls back to its own
-// default.
+// quarterly 90, semiannual 180), monthly_nth_weekday included; a day-gap
+// pattern reads the table. Every other pattern mirrors nextRecurringDate
+// (codex r32): 'custom' with no interval, or a value it cannot place, runs at
+// FALLBACK_RECURRENCE_GAP_DAYS. Null only for what has no single nominal gap
+// — no pattern, one_time, the Feb–Oct season — so the caller falls back to
+// its own default.
 function intervalDaysForPattern(pattern, intervalDays = null) {
   const interval = Number.parseInt(intervalDays, 10);
-  if (pattern === 'custom' && Number.isInteger(interval) && interval > 0) return interval;
+  if (pattern === 'custom') return Number.isInteger(interval) && interval > 0 ? interval : FALLBACK_RECURRENCE_GAP_DAYS;
+  if (pattern === 'monthly_nth_weekday') return MONTH_RECURRENCE_INTERVALS.monthly * 30;
   if (MONTH_RECURRENCE_INTERVALS[pattern]) return MONTH_RECURRENCE_INTERVALS[pattern] * 30;
-  return DAY_RECURRENCE_INTERVALS[pattern] || null;
+  if (Object.prototype.hasOwnProperty.call(DAY_RECURRENCE_INTERVALS, pattern)) return DAY_RECURRENCE_INTERVALS[pattern];
+  if (!pattern || pattern === 'one_time' || pattern === SEASONAL_FEB_OCT) return null;
+  return FALLBACK_RECURRENCE_GAP_DAYS;
 }
 
 function shiftPastWeekend(dateStr, skip, direction = DEFAULT_WEEKEND_SHIFT) {

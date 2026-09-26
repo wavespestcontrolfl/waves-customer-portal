@@ -85,6 +85,32 @@ describe('AnnualPrepayServiceFields local options', () => {
     renderModal({ customer: historyCustomer });
     await waitFor(() => expect(screen.queryAllByRole('option').some((o) => o.textContent === 'Quarterly Tree & Shrub Care')).toBe(true));
   });
+
+  it('drops the previous holder\'s catalog when the customer changes, even if the new load fails (codex r32 on #4786)', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url) => {
+      if (!String(url).includes('/services/dropdown?')) return new Response('{}', { status: 200 });
+      if (String(url).includes('sellable_customer_id=c-1')) {
+        return new Response(JSON.stringify([
+          { id: 'svc-tsq', service_key: 'tree_shrub_quarterly', name: 'Quarterly Tree & Shrub Care', retired_for_sale: true },
+        ]), { status: 200 });
+      }
+      return new Response('{"error":"boom"}', { status: 500 });
+    }));
+    const { rerender } = renderModal({ customer: historyCustomer });
+    await waitFor(() => expect(screen.queryAllByRole('option').some((o) => o.textContent === 'Quarterly Tree & Shrub Care')).toBe(true));
+    rerender(
+      <AnnualPrepayModal
+        customer={{ ...historyCustomer, id: 'c-2' }}
+        activeTerm={null}
+        prepaidPlans={[]}
+        annualPrepayTerms={[]}
+        onClose={() => {}}
+        onSaved={() => {}}
+      />,
+    );
+    await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([url]) => String(url).includes('sellable_customer_id=c-2'))).toBe(true));
+    await waitFor(() => expect(screen.queryAllByRole('option').some((o) => o.textContent === 'Quarterly Tree & Shrub Care')).toBe(false));
+  });
 });
 
 describe('estimateSuggestionMatchesService', () => {

@@ -3769,6 +3769,11 @@ function AnnualPrepayServiceFields({ serviceOptions, serviceType, onChange, cust
   const [catalogError, setCatalogError] = useState(false);
   useEffect(() => {
     let cancelled = false;
+    // Drop the previous customer's rows first: until this customer's list
+    // arrives (or if it fails), a holder's retired_for_sale row must not keep
+    // offering the retired plan to someone else (codex r32 on #4786).
+    setCatalog([]);
+    setCatalogError(false);
     // Sellable rows only, scoped to this customer: a retired-for-sale plan
     // (quarterly T&S) is offered just to the customer already on it — the
     // same filter the booking pickers read, so every choice here saves.

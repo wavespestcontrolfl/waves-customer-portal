@@ -447,8 +447,12 @@ function recurrenceWords(recurrence) {
   // so it reads as that gap here: a generic Tree & Shrub label under pattern
   // 'foo' is the retired four-visit plan by another name (codex r30 on
   // #4786). one_time is not a series and carries no cadence.
+  // A one_time line is anchor-only whatever its interval column says
+  // (scheduling ignores the interval), so a stale 90 does not read as the
+  // quarterly plan (codex r32 on #4786).
+  if (rawPattern === 'one_time') return 'one time';
   const { schedulerPlacesPattern, FALLBACK_RECURRENCE_GAP_DAYS } = require('./recurring-appointment-seeder');
-  const fallsBack = rawPattern && rawPattern !== 'one_time'
+  const fallsBack = rawPattern
     && (!schedulerPlacesPattern(rawPattern) || (rawPattern === 'custom' && !hasDays));
   return [
     rawPattern.replace(/_/g, ' '),
