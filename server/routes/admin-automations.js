@@ -292,6 +292,7 @@ function manualEnrollMessage(templateName, result) {
     case 'already enrolled': return 'This customer already has an active enrollment on this automation — nothing was re-sent.';
     case 'template disabled': return 'This automation is disabled. Enable it first, then send.';
     case 'no steps': return 'This automation has no enabled steps yet, so there is nothing to send.';
+    case 'not_termite_bond': return 'This reminder is only for customers with a termite bond — this customer has none on file.';
     default: return `Couldn't enroll: ${result.reason || 'unknown reason'}.`;
   }
 }

@@ -192,6 +192,9 @@ async function enrollCustomer({ templateKey, customer, dbh = db, commsLockMode =
   if (!customer?.email) return { enrolled: false, reason: 'no email' };
   const normalizedEmail = String(customer.email || '').trim().toLowerCase();
   if (!normalizedEmail) return { enrolled: false, reason: 'no email' };
+  // A lead-email-only enrollment has no customer row, so it can have no
+  // termite bond (see the post-lock check in runEnrollment).
+  if (templateKey === 'service_renewal' && !customer.id) return { enrolled: false, reason: 'not_termite_bond' };
 
   const steps = await dbh('automation_steps')
     .where({ template_key: templateKey, enabled: true })
@@ -225,8 +228,20 @@ async function enrollCustomer({ templateKey, customer, dbh = db, commsLockMode =
     if (customer.id) {
       const fresh = await conn('customers')
         .where({ id: customer.id })
-        .first('id', 'email', 'first_name', 'last_name', 'deleted_at');
+        .first('id', 'email', 'first_name', 'last_name', 'deleted_at', 'termite_renewal_date');
       if (!fresh || fresh.deleted_at) return { enrolled: false, reason: 'customer gone' };
+      // OWNER RULING (2026-07-13, renewal-reminder.js): "renewal" language is
+      // reserved for termite bonds — the one service with a real fixed term.
+      // The Automations-tab service_renewal template renders a termite-bond
+      // renewal ask, so every enrollment path (manual trigger, segment send,
+      // executeAutomation) is refused here — the one chokepoint all of them
+      // share — for a customer with no termite_renewal_date on file. Read
+      // fresh off this post-lock row rather than trusting the caller's
+      // snapshot, which may not carry the column at all (the trigger route
+      // and segment query both select a narrower customer projection).
+      if (templateKey === 'service_renewal' && !fresh.termite_renewal_date) {
+        return { enrolled: false, reason: 'not_termite_bond' };
+      }
       const liveEmail = String(fresh.email || '').trim().toLowerCase();
       if (normalizedEmail !== liveEmail) {
         // Merge-specific evidence only (r30), checked across EVERY live
