@@ -53,7 +53,10 @@ const NotificationService = require('../services/notification-service');
 const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
 const { _private } = AnnualPrepayRenewals;
 
-function query({ first, returning, columnInfo, rows = [] } = {}) {
+// An awaited .update() resolves to the affected-row count like knex does
+// (default 1; `updateCount` overrides — e.g. 0 for a zero-row witness
+// stamp). Other awaited chains resolve to `rows`.
+function query({ first, returning, columnInfo, rows = [], updateCount = 1 } = {}) {
   const q = {};
   [
     'whereIn',
@@ -85,13 +88,14 @@ function query({ first, returning, columnInfo, rows = [] } = {}) {
     return q;
   });
   q.orWhere = jest.fn(() => q);
-  q.update = jest.fn(() => q);
+  let updated = false;
+  q.update = jest.fn(() => { updated = true; return q; });
   q.insert = jest.fn(() => q);
   q.first = jest.fn(async () => first);
   q.returning = jest.fn(async () => returning || []);
   q.columnInfo = jest.fn(async () => columnInfo || {});
   q.catch = jest.fn(() => Promise.resolve());
-  q.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
+  q.then = (resolve, reject) => Promise.resolve(updated ? updateCount : rows).then(resolve, reject);
   return q;
 }
 
@@ -3059,6 +3063,121 @@ describe('annual prepay renewal helpers', () => {
       expect(stamp.update).toHaveBeenCalledWith(expect.objectContaining({ notice_45_sent_at: DAY45 }));
       auditLedger = () => { throw new Error('audit read failed'); };
       await expect(_private.recoveredBeforeEscalation(termFields, 45)).resolves.toBe(false);
+    });
+
+    // ---- Codex #4921 r7 P1: combined sends hold BOTH claims; zero-row stamps surface ----
+
+    test('two concurrent processors: with the 45 claim held by another instance, the combined path refuses and defers — no send, nothing stamped', async () => {
+      pinTermiteToday();
+      jest.setSystemTime(DAY28);
+      // The combined claim's conditional UPDATE matches no row (the 45 claim is fresh elsewhere).
+      const combinedClaim = query({ returning: [] });
+      setDbQueues({
+        scheduled_services: [query({ first: null }), query({ columnInfo: {} })],
+        annual_prepay_terms: [query({ returning: [refreshed] }), combinedClaim],
+      });
+      smsOutcomes({ sent: true, deliveryOutcome: 'accepted' });
+
+      await expect(_private.processTermiteNoticeObligations(termFields, '2026-10-13'))
+        .resolves.toEqual({ sent: false, reason: 'already_claimed' });
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(AccountMembershipEmail.sendTermiteRenewalReminder).not.toHaveBeenCalled();
+      // ONE UPDATE claims both rungs, each only if available and unrecorded.
+      expect(combinedClaim.update).toHaveBeenCalledWith(expect.objectContaining({
+        notice_30_claimed_at: expect.any(Date), notice_45_claimed_at: expect.any(Date), status: 'renewal_pending',
+      }));
+      for (const col of ['notice_30_sent_at', 'notice_30_late_sent_at', 'notice_45_sent_at', 'notice_45_late_sent_at', 'notice_30_claimed_at', 'notice_45_claimed_at']) {
+        expect(combinedClaim.whereNull).toHaveBeenCalledWith(col);
+      }
+      expect(combinedClaim.orWhere).toHaveBeenCalledWith('notice_45_claimed_at', '<', expect.any(Date));
+    });
+
+    test('a combined send whose delivery fails releases BOTH claims together', async () => {
+      pinTermiteToday();
+      jest.setSystemTime(DAY28);
+      const release = query();
+      setDbQueues({
+        scheduled_services: [query({ first: null }), query({ columnInfo: {} })],
+        annual_prepay_terms: [query({ returning: [refreshed] }), claimed(), release],
+        customers: [query({ first: customerRow })],
+      });
+      smsOutcomes({ sent: false, code: 'PROVIDER_DOWN', deliveryOutcome: 'not_sent' });
+      emailOutcomes({ ok: false, reason: 'email_opted_out' });
+
+      await expect(_private.processTermiteNoticeObligations(termFields, '2026-10-13')).resolves.toMatchObject({ sent: false });
+      expect(release.update).toHaveBeenCalledWith(expect.objectContaining({
+        notice_30_claimed_at: null, notice_45_claimed_at: null, status: 'active',
+      }));
+      expect(release.whereNull).toHaveBeenCalledWith('notice_30_sent_at');
+    });
+
+    test('the combined late-45 record also clears the 45 claim the combined send held', async () => {
+      pinTermiteToday();
+      jest.setSystemTime(DAY28);
+      const stamp30 = query();
+      const missed45 = query();
+      setDbQueues({
+        scheduled_services: [query({ first: null }), query({ columnInfo: {} })],
+        annual_prepay_terms: [query({ returning: [refreshed] }), claimed(), stamp30, missed45],
+        customers: [query({ first: customerRow })],
+        customer_interactions: [query()],
+      });
+      smsOutcomes({ sent: true, deliveryOutcome: 'accepted' });
+      emailOutcomes({ ok: true });
+
+      await expect(_private.processTermiteNoticeObligations(termFields, '2026-10-13')).resolves.toMatchObject({ sent: true });
+      expect(missed45.update).toHaveBeenCalledWith(expect.objectContaining({ notice_45_late_sent_at: expect.any(Date), notice_45_claimed_at: null }));
+    });
+
+    test('a recovery that needs the combined pair while holding only its own claim releases it and defers (never stamps half)', async () => {
+      pinTermiteToday();
+      jest.setSystemTime(new Date('2026-10-14T16:00:00Z'));
+      // Evidence appears between the pre-claim lookup and the under-claim re-check:
+      // the 30's first lookup sees nothing, the second sees the combined send.
+      let thirtyLookups = 0;
+      auditLedger = (daysOut) => {
+        if (daysOut !== 30) return undefined;
+        thirtyLookups += 1;
+        return thirtyLookups >= 2 ? { sent_at: DAY28, covers_rungs: [30, 45] } : undefined;
+      };
+      const release = query();
+      const singleClaim = claimed();
+      setDbQueues({
+        scheduled_services: [query({ first: null }), query({ columnInfo: {} })],
+        annual_prepay_terms: [query({ returning: [refreshed] }), singleClaim, release],
+        customers: [query({ first: customerRow })],
+      });
+
+      await expect(AnnualPrepayRenewals.sendCustomerTermNotice(termFields, 30))
+        .resolves.toEqual({ sent: false, reason: 'recovery_needs_both_claims' });
+      expect(singleClaim.update).toHaveBeenCalledWith(expect.not.objectContaining({ notice_45_claimed_at: expect.anything() }));
+      expect(release.update).toHaveBeenCalledWith(expect.objectContaining({ notice_30_claimed_at: null }));
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    test.each([
+      ['another sender already recorded the SAME witness → benign, surfaced as already_recorded, no bell', { notice_45_sent_at: DAY45 }, 'already_recorded', 0],
+      ['a LATE record landed first while this evidence is on time → CONFLICT, logged and belled', { notice_45_late_sent_at: new Date('2026-09-27T16:00:00Z') }, 'conflict', 1],
+    ])('a witness stamp that updates ZERO rows is never silently recorded: %s', async (_label, recordedFields, outcome, conflictBells) => {
+      pinTermiteToday();
+      jest.setSystemTime(new Date('2026-09-27T16:00:00Z'));
+      smsLedger.push({ daysOut: 45, covers: null, sentAt: DAY45 });
+      const zeroRowStamp = query({ updateCount: 0 });
+      setDbQueues({
+        scheduled_services: [query({ first: null }), query({ columnInfo: {} })],
+        annual_prepay_terms: [
+          query({ returning: [refreshed] }),
+          claimed(),
+          zeroRowStamp,
+          query({ first: { ...refreshed, ...recordedFields } }), // the re-read
+        ],
+      });
+
+      await expect(AnnualPrepayRenewals.sendCustomerTermNotice(termFields, 45))
+        .resolves.toMatchObject({ sent: true, recovered: true, witness: outcome });
+      expect(zeroRowStamp.update).toHaveBeenCalledWith(expect.objectContaining({ notice_45_sent_at: DAY45 }));
+      expect(bells('Termite annual renewal notice record conflict', 45)).toHaveLength(conflictBells);
+      expect(bells(LATE)).toHaveLength(0);
     });
 
     test('priorTermiteNoticeAcceptance: the EARLIEST of SMS and email, each covered rung at its earliest covering time; future/invalid times ignored', async () => {

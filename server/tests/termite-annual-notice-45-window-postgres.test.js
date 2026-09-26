@@ -597,6 +597,84 @@ describeOrSkip('termite annual-plan notice obligations — against a schema buil
     expect(lateBells(notifyAdmin, 45).map((c) => c[3].metadata.annual_prepay_term_id)).toEqual([combinedOnly.id]);
   });
 
+  // Codex #4921 r7 P1, real SQL: a combined send claims BOTH rungs in one
+  // conditional UPDATE, so two instances can never each hold one of the
+  // pair; and a zero-row witness stamp is classified, never silently
+  // "recorded".
+  test('claimCombinedTermNotice: one UPDATE claims both rungs only when both are free and unrecorded; concurrent claimers get exactly one winner; a held 45 blocks it', async () => {
+    const { db } = fixture;
+    await migrateThrough108(db);
+    jest.doMock('../models/db', () => db);
+    mockSendSide();
+    const { _private } = require('../services/annual-prepay-renewals');
+    const base = {
+      term_start: '2025-10-01', term_end: '2026-10-20', status: 'active', annual_plan_version: 'v3',
+      installation_anchored_at: new Date('2025-10-01T12:00:00Z'),
+    };
+    const insert = async (fields) => (await db('annual_prepay_terms').insert({ ...base, customer_id: randomUUID(), ...fields }).returning('*'))[0];
+    const free = await insert({});
+    const held45 = await insert({ notice_45_claimed_at: new Date() });
+    const stale45 = await insert({ notice_45_claimed_at: new Date(Date.now() - 60 * 60 * 1000) });
+    const late45 = await insert({ notice_45_late_sent_at: new Date() });
+    const raced = await insert({});
+
+    const claimedFree = await _private.claimCombinedTermNotice(free);
+    expect(claimedFree).toMatchObject({ status: 'renewal_pending' });
+    expect(claimedFree.notice_30_claimed_at).toBeInstanceOf(Date);
+    expect(claimedFree.notice_45_claimed_at).toEqual(claimedFree.notice_30_claimed_at);
+
+    // Another instance holds the 45 → no row claimed, and the 30 stays unclaimed too.
+    await expect(_private.claimCombinedTermNotice(held45)).resolves.toBeNull();
+    const h = await db('annual_prepay_terms').where({ id: held45.id }).first();
+    expect(h.notice_30_claimed_at).toBeNull();
+    expect(h.status).toBe('active');
+    // A stale 45 claim is reclaimable; a recorded 45 is never combined.
+    await expect(_private.claimCombinedTermNotice(stale45)).resolves.toMatchObject({ id: stale45.id });
+    await expect(_private.claimCombinedTermNotice(late45)).resolves.toBeNull();
+
+    // Two concurrent combined claimers: exactly one wins.
+    const results = await Promise.all([_private.claimCombinedTermNotice(raced), _private.claimCombinedTermNotice(raced)]);
+    expect(results.filter(Boolean)).toHaveLength(1);
+    // …and a single-rung 45 claimer racing the winner loses too.
+    await expect(_private.claimTermNotice(raced, 45)).resolves.toBeNull();
+    // …and the reverse: a single-rung 45 claim taken FIRST blocks the combined claim.
+    const single45 = await insert({});
+    await expect(_private.claimTermNotice(single45, 45)).resolves.toMatchObject({ id: single45.id });
+    await expect(_private.claimCombinedTermNotice(single45)).resolves.toBeNull();
+
+    // Release clears BOTH claims and restores the pre-claim status.
+    await _private.releaseCombinedTermNoticeClaim(claimedFree, 'active');
+    const r = await db('annual_prepay_terms').where({ id: free.id }).first();
+    expect(r.notice_30_claimed_at).toBeNull();
+    expect(r.notice_45_claimed_at).toBeNull();
+    expect(r.status).toBe('active');
+  });
+
+  test('stampTermNoticeWitness: a zero-row stamp is classified — same witness already there is benign, a conflicting record is belled and never overwritten', async () => {
+    const { db } = fixture;
+    await migrateThrough108(db);
+    jest.doMock('../models/db', () => db);
+    const notifyAdmin = mockSendSide();
+    const { _private } = require('../services/annual-prepay-renewals');
+    const base = {
+      term_start: '2025-10-01', term_end: '2026-11-10', status: 'renewal_pending', annual_plan_version: 'v3',
+      installation_anchored_at: new Date('2025-10-01T12:00:00Z'),
+    };
+    const onTime = new Date('2026-09-26T16:00:00Z'); // exactly 45 days before 2026-11-10 (ET)
+    const lateAt = new Date('2026-09-28T16:00:00Z');
+    const [sameWitness] = await db('annual_prepay_terms').insert({ ...base, customer_id: randomUUID(), notice_45_sent_at: onTime }).returning('*');
+    const [lateFirst] = await db('annual_prepay_terms').insert({ ...base, customer_id: randomUUID(), notice_45_late_sent_at: lateAt }).returning('*');
+
+    await expect(_private.stampTermNoticeWitness(sameWitness, 45, onTime)).resolves.toBe('already_recorded');
+    await expect(_private.stampTermNoticeWitness(lateFirst, 45, onTime)).resolves.toBe('conflict');
+    const row = await db('annual_prepay_terms').where({ id: lateFirst.id }).first();
+    expect(row.notice_45_sent_at).toBeNull(); // never silently overwritten
+    expect(row.notice_45_late_sent_at).toEqual(lateAt);
+    const conflictBells = notifyAdmin.mock.calls.filter((c) => c[1] === 'Termite annual renewal notice record conflict');
+    expect(conflictBells.map((c) => c[3].metadata.annual_prepay_term_id)).toEqual([lateFirst.id]);
+    expect(conflictBells[0][3]).toMatchObject({ bell: true, dedupeKey: `termite-annual-notice:${lateFirst.id}:45:witness_conflict` });
+  });
+
   test('checkAndSend: an accepted notice whose witness write failed is recovered from messaging_audit_log — before the send (44 days out) AND before the missed-notice bell (at term_end) — with no text, no email and no bell', async () => {
     const { db } = fixture;
     await migrateThrough108(db);
