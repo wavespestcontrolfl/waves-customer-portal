@@ -10772,6 +10772,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // Collectible on a covered visit means the add-ons bill; anywhere else
     // the visit's own invoice (ADMIN-BUG-R13).
     const coveredVisitCollectible = !prepaidCovered || annualPrepayExtrasCollectible;
+    // A covered visit routed to the office with no add-ons bill to collect:
+    // its invoice waits for review exactly as it stands — no account credit
+    // and no automatic charge (ADMIN-BUG-R13; set only with the gate on).
+    const annualPrepayOfficeReview = annualPrepayOwedUnbilled && !annualPrepayExtrasCollectible;
 
     // Auto-apply available account credit (e.g. the referral reward) to the
     // residual collectible bill — runs for BOTH the freshly-created (shouldInvoice)
@@ -10830,6 +10834,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // credit untouched for review.
       && !apptCardOverCap && !apptCardLaneUnresolved
       && !(extendedChargeCandidate && extendedLaneOverCap)
+      && !annualPrepayOfficeReview
       && require('../config/feature-gates').gates.autoApplyAccountCredit) {
       try {
         const { applyAccountCreditToInvoice } = require('../services/customer-credit');
@@ -10929,6 +10934,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     if (!isBackfillCompletion
       && (perApplicationBilling || apptCardOneTimeCharge || extendedChargeCandidate) && visitPerformed && invoice?.id && !alreadyPaid && !invoice.payer_id
       && !['paid', 'prepaid', 'void', 'processing'].includes(String(invoice.status || '').toLowerCase())
+      && !annualPrepayOfficeReview
       && customerAutopayActive) {
       // Above-quote guardrail (card-on-file spec §3.6, owner default = HARD
       // CAP) — the accepted per-visit amount, the setup-fee allowance and the

@@ -726,6 +726,34 @@ postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
       expect(PAID_TEXTS).not.toContain(out.body?.completionSmsType);
     });
 
+    test('an invoice left for the office is never settled from account credit — kept beside another invoice, or on a visit not performed', async () => {
+      const { gates } = require('../config/feature-gates');
+      const credit = require('../services/customer-credit');
+      const prior = gates.autoApplyAccountCredit;
+      gates.autoApplyAccountCredit = true;
+      const apply = jest.spyOn(credit, 'applyAccountCreditToInvoice');
+      try {
+        for (const performed of [true, false]) {
+          apply.mockClear();
+          const f = await coveredVisit({ invoiceLines: (x) => [addonLine(x)] });
+          if (performed) {
+            // An older paid invoice beside the office add-ons bill.
+            const siblingId = randomUUID();
+            await trx('invoices').insert({ id: siblingId, customer_id: f.customerId, scheduled_service_id: f.serviceId,
+              invoice_number: `TEST-${siblingId.slice(0, 8)}`, token: randomUUID().replace(/-/g, ''), status: 'paid',
+              total: BASE, subtotal: BASE, line_items: JSON.stringify([baseLine(f)]), created_at: new Date(Date.now() - 2 * 86400000) });
+          }
+          const out = await complete(f, performed ? {} : { visitOutcome: 'inspection_only' });
+          expect(out).toMatchObject({ status: 200 });
+          expect(await settledCovered(f)).toBe('draft');
+          expect(apply).not.toHaveBeenCalledWith(expect.objectContaining({ invoiceId: f.invoiceId }));
+        }
+      } finally {
+        apply.mockRestore();
+        gates.autoApplyAccountCredit = prior;
+      }
+    });
+
     test('an add-on read that fails while checking an existing invoice holds the closeout with the invoice untouched', async () => {
       const f = await coveredVisit({ invoiceLines: (x) => [addonLine(x)] });
       const idempotencyKey = randomUUID();
