@@ -95,20 +95,18 @@ function callStartedAt(row) {
 /**
  * When the call ENDED (start + duration). Null if the start is unknown.
  *
- * codex #4919 round-4 P1 (correcting a round-3 attempt to add `bridged_at`
- * handling here): the ONLY writer of `call_log.bridged_at` in this codebase
- * is /outbound-connect (twilio-voice-webhook.js) — staff pressing 1 on an
- * OUTBOUND admin-connect call, before the customer is even dialed. That
- * row's duration_seconds comes from /call-status's parent-leg CallDuration,
- * which Twilio measures from created_at (when the admin's leg answered),
- * NOT from the bridge — it already SPANS the pre-bridge wait (the prompt,
- * the button press) through the customer conversation. `created_at +
- * duration` is already the correct end; adding duration to `bridged_at`
- * instead would double-count that pre-bridge wait and push the computed end
- * PAST the true one — the opposite of the understatement bug this file
- * exists to fix, and one that could reject a genuinely bookable start as
- * "already past". There is no genuinely bridge-relative duration this
- * codebase writes today, so `bridged_at` needs no special case here.
+ * A staff-connect (bridged) row ends at `bridged_at + duration`. The only
+ * writer of `call_log.bridged_at` is /outbound-connect (staff pressed 1 on an
+ * OUTBOUND admin-connect call). created_at is written BEFORE Twilio dials
+ * staff (call-bridge.js), and Twilio's parent-leg CallDuration runs from
+ * when staff ANSWERED, somewhere between created_at and bridged_at. So the
+ * true end lies in [created_at + duration, bridged_at + duration] and is
+ * never before bridged_at. `created_at + duration` can land before the
+ * customer was even connected (codex #4972 r1 P1, which also corrects this
+ * file's earlier round-4 reasoning). The upper bound overstates by only the
+ * answer-to-keypress seconds, and a later end is the safe direction for the
+ * stale-start guard (it holds a borderline window for review rather than
+ * booking one that had begun).
  *
  * codex #4919 finding D: a provider-supplied end (metadata.provider_ended_at,
  * or one derived from provider_started_at + duration — see providerTimes)
@@ -119,7 +117,12 @@ function callEndedAt(row) {
   if (provided) return provided;
   const started = callStartedAt(row);
   if (!started) return null;
-  return new Date(started.getTime() + callDurationSeconds(row) * 1000);
+  const durationMs = callDurationSeconds(row) * 1000;
+  const bridged = row?.bridged_at ? new Date(row.bridged_at) : null;
+  if (bridged && !Number.isNaN(bridged.getTime()) && bridged.getTime() > started.getTime()) {
+    return new Date(bridged.getTime() + durationMs);
+  }
+  return new Date(started.getTime() + durationMs);
 }
 
 /**

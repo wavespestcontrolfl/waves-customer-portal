@@ -1138,23 +1138,11 @@ function leadIdsOf(call) {
 // ring time, so their end is created_at + duration; bridged rows end at
 // bridge + duration; other rows (recovered outbound, inserted near the end
 // by status callbacks) end at created_at.
-// codex #4919 round-3/4 P1s: `server/utils/call-timeline.js` keeps its OWN,
-// independently-evolved callEndedAt (used by call-recording-processor.js's
-// stale-start guard and the stall watchdog's recordingReadyAt), keyed on
-// metadata.source for its non-bridged branches rather than this file's call
-// DIRECTION. Round 3 tried adding a bridged_at branch there matching THIS
-// function's shape; round 4 caught that it double-counts the pre-bridge
-// wait for the only real writer of bridged_at (/outbound-connect: staff
-// pressing 1 on an OUTBOUND admin-connect call, before the customer is
-// dialed) — /call-status's duration_seconds for that row is the PARENT
-// leg's CallDuration, measured from created_at, already spanning the
-// pre-bridge wait, so created_at + duration is the correct end and
-// call-timeline.js's fix was to NOT special-case bridged_at at all. This
-// function's OWN bridged branch below adds duration to bridged_at the same
-// way and was not in scope to change here, but shares the same risk for
-// that row shape; not touched in this change (this file's other,
-// load-bearing non-bridged behavior for promise matching stays as-is) —
-// worth a dedicated look.
+// The bridged branch is deliberate: created_at is written before Twilio
+// dials staff and CallDuration runs from staff's answer (between created_at
+// and bridged_at), so bridge + duration is the safe upper bound and never
+// ends before the customer was connected. server/utils/call-timeline.js
+// callEndedAt uses the same rule (codex #4972 r1 P1).
 function callEndedAt(call) {
   const created = call?.created_at ? new Date(call.created_at) : null;
   if (!created || Number.isNaN(created.getTime())) return null;
