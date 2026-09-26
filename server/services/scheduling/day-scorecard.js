@@ -27,7 +27,7 @@ const { validate: isUuid } = require('uuid');
 const { etDateString, addETDays, validCalendarDate } = require('../../utils/datetime-et');
 const { etDateDiffDays } = require('../recurring-appointment-seeder');
 const { gateEnvValue } = require('../../config/feature-gates');
-const { getScheduleQualityMeasurements, physicalStopCount } = require('./day-quality');
+const { getScheduleQualityMeasurements, physicalStopCount, coVisitOnSiteMinutes } = require('./day-quality');
 const { getRoutePerformance, getSavedDayPlans, physicalVisitCount } = require('./route-performance');
 const { applyAssignable } = require('../technician-eligibility');
 
@@ -120,7 +120,12 @@ function plannedPastRow(plan) {
     waitMinutes: plan.plannedWaitingMinutes,
     driveShare: driveShare(plan.plannedDriveMinutes, plan.plannedServiceMinutes),
     stopsPerHour: stopsPerHour(physicalStops, DEPARTURE_MINUTES, plan.plannedReturnMinuteBeforeBreaks),
-    returnMinute: plan.plannedReturnMinuteBeforeBreaks, lateVisits: null,
+    returnMinute: plan.plannedReturnMinuteBeforeBreaks,
+    // Codex P2 (round 10): the snapshot's own modeled lateness count
+    // (route-performance's plannedPassthrough), not a hard-coded unknown —
+    // it is already null whenever the snapshot never simulated lateness
+    // (missing coordinates or grouped work at capture time).
+    lateVisits: Number.isFinite(plan.plannedLateVisits) ? plan.plannedLateVisits : null,
   };
 }
 
@@ -438,19 +443,28 @@ function pastDayRoster(date, techs, idsByDateMaps) {
   return ids;
 }
 
-// The day's unallocated footer, minus any technician rendered as a TODAY
-// saved-plan row (Codex P2, round 11): those rows can name an
-// off-board technician whose remaining stops day-quality still counts as
-// unallocated — their group comes out so no stop is shown twice. Without the
+// The day's unallocated footer, partitioned against a TODAY saved-plan
+// technician's own plannedStopIds instead of excluding their whole group
+// (Codex P2, round 12): a stop added or transferred to an off-board
+// technician AFTER their saved plan was captured is not in plannedStopIds,
+// so it stays in the footer — only the stops the saved plan actually named
+// come out, keeping the round-11 no-double-count fix without silently
+// dropping newer work. `savedPlans` is todayPlans (null on every other day,
+// which leaves every group as day-quality reported it). Without the
 // per-technician breakdown the day-level totals pass through unchanged.
-function unallocatedFooter(day, byTech) {
-  const rendered = new Set(byTech.filter(row => row.plannedBasis === 'saved_plan').map(row => row.technicianId));
+function unallocatedFooter(day, savedPlans) {
   if (!Array.isArray(day.unallocatedByTechnician)) {
     return { visits: day.unallocatedVisits, serviceMinutes: day.unallocatedServiceMinutes };
   }
-  const shown = day.unallocatedByTechnician.filter(group => !rendered.has(group.technicianId));
-  return { visits: shown.reduce((sum, group) => sum + group.visits, 0),
-    serviceMinutes: shown.reduce((sum, group) => sum + group.serviceMinutes, 0) };
+  const groups = day.unallocatedByTechnician.map((group) => {
+    const saved = savedPlans ? savedPlans.get(group.technicianId) : null;
+    if (!saved || !Array.isArray(saved.plannedStopIds) || !Array.isArray(group.stops)) return group;
+    const savedIds = new Set(saved.plannedStopIds);
+    const remaining = group.stops.filter(stop => !savedIds.has(stop.id));
+    return { visits: physicalStopCount(remaining), serviceMinutes: coVisitOnSiteMinutes(remaining) };
+  });
+  return { visits: groups.reduce((sum, group) => sum + group.visits, 0),
+    serviceMinutes: groups.reduce((sum, group) => sum + group.serviceMinutes, 0) };
 }
 
 function pastDayRows(date, { techs, idsByDateMaps, nameById, planByKey, mileageByKey, missingBaselineStopsByKey, truncatedPlanningRuns }) {
@@ -504,7 +518,7 @@ async function getDayScorecard(input = {}, conn = require('../../models/db'), no
       // offboarding/ineligible tech that still carries assigned work — Codex
       // P1) never get a named row; day-quality already tallies this at the
       // day level, so it's surfaced instead of a silently missing tech row.
-      unallocated: unallocatedFooter(day, byTech) });
+      unallocated: unallocatedFooter(day, day.date === today ? todayPlans : null) });
   }
   return {
     range: { from, to }, driveModel: quality.driveModel, days, truncatedPlanningRuns,

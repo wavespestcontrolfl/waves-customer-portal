@@ -228,6 +228,9 @@ test('getRoutePerformance refuses a snapshot whose planned stop ids are not UUID
 // plan (the live board drops completed visits). Only a snapshot captured
 // before the day's midnight counts; getRoutePerformance still never measures
 // a day that isn't over.
+// Updated (Codex P2, round 10): plannedPassthrough now also carries
+// plannedLateVisits and plannedStopIds, so this exact shape gained the two
+// new keys (null here — `plan` never sets modeledLateVisits).
 test('getSavedDayPlans returns today\'s pre-service plan per technician, planned numbers only', async () => {
   const goodId = '11111111-1111-4111-8111-111111111111';
   const plan = (technicianId, asOf) => ({ ...snapshot, technician_id: technicianId, as_of: asOf, serviceMinutes: 60,
@@ -240,8 +243,22 @@ test('getSavedDayPlans returns today\'s pre-service plan per technician, planned
   const plans = await getSavedDayPlans({ date: day, now }, conn);
   expect([...plans.keys()]).toEqual(['tech']);
   expect(plans.get('tech')).toEqual({ plannedVisits: 1, plannedPhysicalStops: 1, plannedServiceMinutes: 60, plannedDriveMinutes: 20,
-    plannedWaitingMinutes: 5, plannedReturnMinuteBeforeBreaks: 600, driveModel: 'calibrated' });
+    plannedWaitingMinutes: 5, plannedReturnMinuteBeforeBreaks: 600, driveModel: 'calibrated',
+    plannedLateVisits: null, plannedStopIds: [goodId] });
   expect(selectPlanningSnapshots([before], { from: day, to: day, now })).toEqual([]);
+});
+
+// Codex P2 (round 10): the snapshot's own modeled lateness count and stop
+// ids pass through (plannedPassthrough, shared by measureRoutePerformance
+// and getSavedDayPlans), rather than day-scorecard.js hard-coding lateVisits
+// to null for every saved-plan row.
+test('measureRoutePerformance carries modeledLateVisits and plannedStops through as plannedLateVisits/plannedStopIds', () => {
+  const late = { ...snapshot, modeledLateVisits: [{ id: 'visit', lateMinutes: 10 }] };
+  expect(measureRoutePerformance(late, [])).toMatchObject({ plannedLateVisits: 1, plannedStopIds: ['visit'] });
+  // A snapshot that never simulated lateness (missing coordinates/grouped
+  // work at capture time) leaves modeledLateVisits null — passed through as
+  // null, never invented as 0.
+  expect(measureRoutePerformance(snapshot, [])).toMatchObject({ plannedLateVisits: null });
 });
 
 // Codex P2 (round 3): a missing-baseline tech-day (no saved plan) still has

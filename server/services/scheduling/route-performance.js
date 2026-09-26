@@ -192,6 +192,18 @@ function plannedPassthrough(plan) {
     plannedDriveMinutes: finiteOrNull(plan.modeledDriveMinutes),
     plannedWaitingMinutes: finiteOrNull(plan.modeledWaitingMinutes),
     plannedReturnMinuteBeforeBreaks: finiteOrNull(plan.modeledReturnMinuteBeforeBreaks),
+    // Codex P2 (round 10): the saved snapshot's own modeled lateness count —
+    // day-scorecard.js's plannedPastRow used to hard-code this unknown even
+    // though the persisted snapshot carries it. modeledLateVisits is already
+    // null at capture time whenever the simulation didn't run (missing
+    // coordinates or grouped work — see measureDayQuality), so passing it
+    // through here (rather than recomputing anything) keeps that same null.
+    plannedLateVisits: Array.isArray(plan.modeledLateVisits) ? plan.modeledLateVisits.length : null,
+    // Codex P2 (round 12): the saved snapshot's own planned stop ids, so a
+    // caller (day-scorecard.js's unallocated footer) can partition CURRENT
+    // stops against what this plan actually named instead of excluding a
+    // whole technician's group wholesale.
+    plannedStopIds: plan.plannedStops.map(stop => stop.id),
     driveModel: plan.drive_model || null,
   };
 }

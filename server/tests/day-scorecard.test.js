@@ -466,6 +466,42 @@ describe('getDayScorecard', () => {
     expect(tomorrowRows[0]).toMatchObject({ plannedBasis: 'board', planned: { stops: 1 } });
   });
 
+  // Codex P2 (round 10): a saved-plan row (today's, via getSavedDayPlans)
+  // used to hard-code lateVisits to null even though the persisted snapshot
+  // carries the modeled count — it must show the saved count instead.
+  test("today's saved-plan row shows the snapshot's own modeled late-visit count", async () => {
+    const today = '2026-09-08';
+    getScheduleQualityMeasurements.mockResolvedValue({ driveModel: 'calibrated',
+      days: [{ date: today, closed: false, byTech: [{ technicianId: 'tech1', technician: 'Tech One' }] }] });
+    getSavedDayPlans.mockResolvedValue(new Map([['tech1', { plannedVisits: 5, plannedServiceMinutes: 240,
+      plannedDriveMinutes: 60, plannedWaitingMinutes: 10, plannedReturnMinuteBeforeBreaks: 1020, driveModel: 'legacy',
+      plannedLateVisits: 2 }]]));
+    const result = await getDayScorecard({ date_from: today, date_to: today }, conn(), new Date(`${today}T16:00:00Z`));
+    expect(result.days[0].byTech[0]).toMatchObject({ plannedBasis: 'saved_plan', planned: { lateVisits: 2 } });
+  });
+
+  // Codex P2 (round 10): the same passthrough for a PAST day's saved plan
+  // (route-performance's getRoutePerformance), not just today's.
+  test('a past row shows the saved snapshot\'s own modeled late-visit count', async () => {
+    const date = '2026-09-01';
+    getScheduleQualityMeasurements.mockResolvedValue({
+      driveModel: 'legacy',
+      days: [{ date, closed: false, byTech: [{ technicianId: 'tech1', technician: 'Tech One' }] }],
+    });
+    getRoutePerformance.mockResolvedValue({
+      plans: [{
+        date, technicianId: 'tech1', plannedVisits: 2, plannedServiceMinutes: 90, plannedDriveMinutes: 25,
+        plannedWaitingMinutes: 5, plannedReturnMinuteBeforeBreaks: 600, driveModel: 'legacy', plannedLateVisits: 1,
+        stops: [
+          { durationEvidence: 'recorded_lifecycle_interval', recordedServiceMinutes: 45, recordedArrivalMinute: 480, recordedCompletionMinute: 600, arrivalOutcome: 'on_time' },
+          { durationEvidence: 'unmatched_or_uncompleted_work', recordedServiceMinutes: null, recordedArrivalMinute: null, recordedCompletionMinute: null, arrivalOutcome: 'not_completed' },
+        ],
+      }],
+    });
+    const result = await getDayScorecard({ date_from: date, date_to: date }, conn([]), new Date('2026-09-08T12:00:00Z'));
+    expect(result.days[0].byTech[0].planned).toMatchObject({ lateVisits: 1 });
+  });
+
   // Codex P2 (round 10): a technician who became non-assignable after
   // today's snapshot is gone from the board roster, and their completed
   // planned work from the unallocated footer — the saved plan is the only
@@ -517,20 +553,48 @@ describe('getDayScorecard', () => {
   // saved-plan row still has their remaining stops in day-quality's
   // unallocated total — their group comes out of the footer so nothing is
   // counted twice. Other days keep every group.
+  // Updated (Codex P2, round 12): the footer now partitions a group against
+  // the saved plan's own plannedStopIds instead of excluding it outright —
+  // `stops`/`plannedStopIds` here name the SAME two stops, so the partition
+  // still removes the whole group, preserving this test's original result.
   test("today's footer leaves out an off-board technician already shown as a saved-plan row", async () => {
     const today = '2026-09-08';
     const goneId = '123e4567-e89b-12d3-a456-426614174000';
-    const breakdown = [{ technicianId: goneId, visits: 2, serviceMinutes: 90 }, { technicianId: null, visits: 1, serviceMinutes: 30 }];
+    const goneStops = [stop('g1', { technician_id: goneId }), stop('g2', { technician_id: goneId, customer_id: 'other-cust' })];
+    const breakdown = [{ technicianId: goneId, visits: 2, serviceMinutes: 90, stops: goneStops }, { technicianId: null, visits: 1, serviceMinutes: 30 }];
     getScheduleQualityMeasurements.mockResolvedValue({ driveModel: 'calibrated', days: [
       { date: today, closed: false, byTech: [], unallocatedVisits: 3, unallocatedServiceMinutes: 120, unallocatedByTechnician: breakdown },
       { date: '2026-09-09', closed: false, byTech: [], unallocatedVisits: 3, unallocatedServiceMinutes: 120, unallocatedByTechnician: breakdown }] });
     getSavedDayPlans.mockResolvedValue(new Map([[goneId, { plannedVisits: 3, plannedPhysicalStops: 3, plannedServiceMinutes: 150,
-      plannedDriveMinutes: 40, plannedWaitingMinutes: 0, plannedReturnMinuteBeforeBreaks: 780, driveModel: 'legacy' }]]));
+      plannedDriveMinutes: 40, plannedWaitingMinutes: 0, plannedReturnMinuteBeforeBreaks: 780, driveModel: 'legacy',
+      plannedStopIds: ['g1', 'g2'] }]]));
     const result = await getDayScorecard({ date_from: today, date_to: '2026-09-09' },
       conn([], [{ id: goneId, name: 'Former Tech' }]), new Date(`${today}T16:00:00Z`));
     expect(result.days[0].byTech.map(row => row.technicianId)).toEqual([goneId]);
     expect(result.days[0].unallocated).toEqual({ visits: 1, serviceMinutes: 30 });
     expect(result.days[1].unallocated).toEqual({ visits: 3, serviceMinutes: 120 });
+  });
+
+  // Codex P2 (round 12): fresh evidence after round 11 — a stop added or
+  // transferred to an off-board technician AFTER their saved plan was
+  // captured is not in plannedStopIds, so it must stay in the footer even
+  // though the rest of their group is already shown as the saved-plan row.
+  test("today's footer keeps a stop added to an off-board technician after their saved plan was captured", async () => {
+    const today = '2026-09-08';
+    const goneId = '123e4567-e89b-12d3-a456-426614174000';
+    const snapshotStop = stop('g1', { technician_id: goneId });
+    const newStop = stop('g2', { technician_id: goneId, customer_id: 'other-cust' }); // added/transferred post-snapshot
+    const breakdown = [{ technicianId: goneId, visits: 2, serviceMinutes: 120, stops: [snapshotStop, newStop] }];
+    getScheduleQualityMeasurements.mockResolvedValue({ driveModel: 'calibrated', days: [
+      { date: today, closed: false, byTech: [], unallocatedVisits: 2, unallocatedServiceMinutes: 120, unallocatedByTechnician: breakdown }] });
+    getSavedDayPlans.mockResolvedValue(new Map([[goneId, { plannedVisits: 1, plannedPhysicalStops: 1, plannedServiceMinutes: 60,
+      plannedDriveMinutes: 40, plannedWaitingMinutes: 0, plannedReturnMinuteBeforeBreaks: 780, driveModel: 'legacy',
+      plannedStopIds: ['g1'] }]]));
+    const result = await getDayScorecard({ date_from: today, date_to: today },
+      conn([], [{ id: goneId, name: 'Former Tech' }]), new Date(`${today}T16:00:00Z`));
+    // g1 (in the saved plan) comes out; g2 (added after the snapshot) stays —
+    // one physical stop, its own 60-minute fallback duration.
+    expect(result.days[0].unallocated).toEqual({ visits: 1, serviceMinutes: 60 });
   });
 
   test('a range that does not include today never reads saved day plans', async () => {

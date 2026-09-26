@@ -191,9 +191,12 @@ function groupedUnallocatedTotals(stops) {
   // Per-technician breakdown too (null = genuinely unassigned) so a caller
   // that renders one of these technicians elsewhere can leave that group
   // out of its footer instead of counting it twice (day-scorecard's today
-  // saved-plan rows — Codex P2, round 11).
+  // saved-plan rows — Codex P2, round 11). The raw stops ride along too
+  // (Codex P2, round 12) so that caller can partition a group against
+  // another stop-id set (a saved plan's own plannedStopIds) instead of
+  // excluding it wholesale — never itself part of the public response.
   const byTechnician = [...groups].map(([key, groupStops]) => ({ technicianId: key || null,
-    visits: physicalStopCount(groupStops), serviceMinutes: coVisitOnSiteMinutes(groupStops) }));
+    visits: physicalStopCount(groupStops), serviceMinutes: coVisitOnSiteMinutes(groupStops), stops: groupStops }));
   return { visits: byTechnician.reduce((sum, group) => sum + group.visits, 0),
     minutes: byTechnician.reduce((sum, group) => sum + group.serviceMinutes, 0), byTechnician };
 }
