@@ -15,6 +15,7 @@
  */
 
 const logger = require('../logger');
+const { parse: parseCsvSync } = require('csv-parse/sync');
 
 // Waves' three counties (Manatee, Sarasota, Charlotte) are all DBPR district 7.
 const DBPR_FOOD_LICENSE_DISTRICTS = [7];
@@ -45,54 +46,22 @@ function seatsToSqft(seats) {
 
 // ── CSV parsing ─────────────────────────────────────────────────
 
-// RFC4180-ish parser: quoted fields, doubled-quote escaping, CRLF/LF/CR line
-// endings. The extract is small enough (~15k rows/district) that a
-// straightforward char scan is fine — no streaming needed.
-function parseCsvRows(text) {
-  const rows = [];
-  let row = [];
-  let field = '';
-  let inQuotes = false;
-  const len = text.length;
-  for (let i = 0; i < len; i += 1) {
-    const c = text[i];
-    if (inQuotes) {
-      if (c === '"') {
-        if (text[i + 1] === '"') { field += '"'; i += 1; } else inQuotes = false;
-      } else {
-        field += c;
-      }
-      continue;
-    }
-    if (c === '"') { inQuotes = true; continue; }
-    if (c === ',') { row.push(field); field = ''; continue; }
-    if (c === '\r' || c === '\n') {
-      if (c === '\r' && text[i + 1] === '\n') i += 1;
-      row.push(field);
-      if (row.length > 1 || row[0] !== '') rows.push(row);
-      row = [];
-      field = '';
-      continue;
-    }
-    field += c;
-  }
-  if (field.length || row.length) { row.push(field); rows.push(row); }
-  return rows;
-}
-
+// The repository's installed parser (csv-parse), not a second bespoke one:
+// the extract is externally controlled, so malformed quoting and format
+// drift get the same handling as every other CSV import. A parse failure
+// yields no rows (the resolver falls through to the next rung).
 function parseDbprCsv(text) {
-  const rows = parseCsvRows(String(text || ''));
-  if (!rows.length) return [];
-  const header = rows[0].map((h) => String(h || '').trim());
-  const out = [];
-  for (let i = 1; i < rows.length; i += 1) {
-    const raw = rows[i];
-    if (!raw.length) continue;
-    const obj = {};
-    for (let c = 0; c < header.length; c += 1) obj[header[c]] = raw[c] !== undefined ? raw[c] : '';
-    out.push(obj);
+  try {
+    return parseCsvSync(String(text || ''), {
+      columns: (header) => header.map((h) => String(h || '').trim()),
+      skip_empty_lines: true,
+      relax_column_count: true,
+      bom: true,
+    });
+  } catch (err) {
+    logger.warn(`[commercial-suite-size] DBPR extract parse failed: ${err.message}`);
+    return [];
   }
-  return out;
 }
 
 // ── Address matching ────────────────────────────────────────────
@@ -233,22 +202,27 @@ function matchDbprRow(rows, { street, unit, zip, phone, businessNameHint } = {})
   });
   if (!addressMatches.length) return null;
 
-  const disambiguated = addressMatches.filter((row) => {
-    const loc = rowLocation(row);
-    const rowUnit = normalizeUnitValue(loc.unit);
-    // A license for a DIFFERENT suite at this address is never this suite,
-    // whatever the phone or name says (a shared owner's phone, a loose name
-    // hit) — only rows with no unit, or searches with no target unit, may be
-    // picked out by phone/name.
-    if (targetUnit && rowUnit && rowUnit !== targetUnit) return false;
-    if (targetUnit && rowUnit && rowUnit === targetUnit) return true;
-    return hintMatches(row);
-  });
-  // Exact-unit matches are the candidate set; when more than one license
-  // names the same suite, the caller's phone or business name picks one.
-  const final = disambiguated.length > 1 ? disambiguated.filter(hintMatches) : disambiguated;
-  if (final.length !== 1) return null;
-  return final[0];
+  // Exact-unit licenses are the candidate set whenever one exists — a
+  // unitless row that only hint-matches (phone / name) must never displace
+  // the license that names this very suite. Hint-only matching applies
+  // only when no exact-unit license exists, and never to a row that names
+  // a DIFFERENT suite (a shared owner's phone, a loose name hit).
+  const exactUnit = targetUnit
+    ? addressMatches.filter((row) => normalizeUnitValue(rowLocation(row).unit) === targetUnit)
+    : [];
+  let candidates;
+  if (exactUnit.length) {
+    // Two licenses on the same suite: the caller's phone or name picks one.
+    candidates = exactUnit.length > 1 ? exactUnit.filter(hintMatches) : exactUnit;
+  } else {
+    candidates = addressMatches.filter((row) => {
+      const rowUnit = normalizeUnitValue(rowLocation(row).unit);
+      if (targetUnit && rowUnit && rowUnit !== targetUnit) return false;
+      return hintMatches(row);
+    });
+  }
+  if (candidates.length !== 1) return null;
+  return candidates[0];
 
   function hintMatches(row) {
     if (targetPhone) {
@@ -269,40 +243,34 @@ const _failedAt = new Map(); // district -> ms of last failed fetch
 
 // A hung state server must never hang a property lookup: bound the download,
 // and after a failure back off instead of re-downloading on every lookup.
+// A failed refresh may keep serving the last good extract only for a
+// bounded window past its TTL (stale-if-error) — never indefinitely, or a
+// closed restaurant or a changed seat count would keep pricing as a current
+// license through a long outage; past the window the resolver gets no rows
+// and falls through to the low-confidence default.
 const DBPR_FETCH_TIMEOUT_MS = 15000;
 const DBPR_FAILURE_BACKOFF_MS = 10 * 60 * 1000;
+const DBPR_STALE_IF_ERROR_MS = 48 * 60 * 60 * 1000;
 
-async function defaultFetchText(url, timeoutMs = DBPR_FETCH_TIMEOUT_MS) {
-  const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+async function defaultFetchText(url) {
+  const res = await fetch(url, { signal: AbortSignal.timeout(DBPR_FETCH_TIMEOUT_MS) });
   if (!res || !res.ok) throw new Error(`HTTP ${res && res.status}`);
   const buf = await res.arrayBuffer();
   return new TextDecoder('latin1').decode(buf);
 }
 
-async function loadDistrictRows(district, { fetchText = defaultFetchText, now = () => Date.now(), timeoutMs } = {}) {
+async function loadDistrictRows(district, { fetchText = defaultFetchText, now = () => Date.now() } = {}) {
   const cached = _cache.get(district);
   if (cached && (now() - cached.fetchedAt) < DBPR_CACHE_TTL_MS) return cached.rows;
-  if (_inflight.has(district)) {
-    // Joining a fetch another request started (possibly with the full 15s
-    // budget) must still honor THIS caller's remaining budget.
-    const joined = _inflight.get(district);
-    if (!(timeoutMs > 0)) return joined;
-    let timer;
-    const expired = new Promise((resolve) => { timer = setTimeout(() => resolve(cached ? cached.rows : []), timeoutMs); });
-    try {
-      return await Promise.race([joined, expired]);
-    } finally {
-      clearTimeout(timer);
-    }
-  }
+  const staleIfError = () => (cached && (now() - cached.fetchedAt) < DBPR_CACHE_TTL_MS + DBPR_STALE_IF_ERROR_MS
+    ? cached.rows
+    : []);
+  if (_inflight.has(district)) return _inflight.get(district);
   const failedAt = _failedAt.get(district);
-  if (failedAt != null && (now() - failedAt) < DBPR_FAILURE_BACKOFF_MS) return cached ? cached.rows : [];
+  if (failedAt != null && (now() - failedAt) < DBPR_FAILURE_BACKOFF_MS) return staleIfError();
   const promise = (async () => {
     try {
-      // A caller with a bounded remaining lookup budget (property-lookup-v2's
-      // applyCommercialSuiteSize, primary review of PR #4840 r5 P2) can
-      // shorten this below the 15s default; absent, the default stands.
-      const text = await fetchText(dbprExtractUrl(district), timeoutMs ?? DBPR_FETCH_TIMEOUT_MS);
+      const text = await fetchText(dbprExtractUrl(district));
       const rows = parseDbprCsv(text);
       _cache.set(district, { rows, fetchedAt: now() });
       _failedAt.delete(district);
@@ -310,7 +278,7 @@ async function loadDistrictRows(district, { fetchText = defaultFetchText, now = 
     } catch (err) {
       _failedAt.set(district, now());
       logger.warn(`[commercial-suite-size] DBPR extract fetch failed for district ${district}: ${err.message}`);
-      return cached ? cached.rows : [];
+      return staleIfError();
     } finally {
       _inflight.delete(district);
     }
@@ -324,28 +292,6 @@ function _resetCacheForTests() {
   _cache.clear();
   _inflight.clear();
   _failedAt.clear();
-}
-
-// Synchronous, zero-I/O peek: the warm rows for a district, or null when the
-// in-process cache is cold/expired. Never triggers a fetch — a cache-hit
-// property lookup (server/routes/property-lookup-v2.js
-// buildResultFromCachedLookup) must never await a download, so it uses this
-// instead of loadDistrictRows to decide whether DBPR has anything to offer
-// right now.
-function peekDistrictRows(district, { now = () => Date.now() } = {}) {
-  const cached = _cache.get(district);
-  if (cached && (now() - cached.fetchedAt) < DBPR_CACHE_TTL_MS) return cached.rows;
-  return null;
-}
-
-// Fire-and-forget warm-up for a cold district: kicks the real (single-flight,
-// bounded, backed-off) fetch WITHOUT awaiting it, so a cache-hit request that
-// found the cache cold isn't blocked by it, but a LATER request — fresh or
-// cache-hit — may find it warm. loadDistrictRows already never throws; this
-// wraps it once more defensively so a background task can never surface as
-// an unhandled rejection.
-function warmDistrictRowsInBackground(district, opts = {}) {
-  Promise.resolve(loadDistrictRows(district, opts)).catch(() => {});
 }
 
 // Only an ACTIVE PERMANENT food-service license sizes a suite. The extract
@@ -371,31 +317,13 @@ function isEligibleDineInLicense(row) {
 /**
  * Resolve a suite's size from an active DBPR food-service license, or null.
  * Fail-open: any fetch/parse error resolves null, never throws.
- *
- * opts.requireWarmCache: true — the cache-hit fast path. Uses ONLY the
- * synchronous in-process cache (peekDistrictRows); a cold/expired district
- * skips DBPR entirely for THIS call (kicking a background warm-up for next
- * time) rather than awaiting a fetch, so a cache-hit property lookup can
- * never be blocked on a download.
  */
 async function resolveViaDbprLicense({ address = {}, phone = null, businessNameHint = null } = {}, opts = {}) {
   try {
     const districts = opts.districts || DBPR_FOOD_LICENSE_DISTRICTS;
     let rows = [];
-    if (opts.requireWarmCache) {
-      for (const district of districts) {
-        const warm = peekDistrictRows(district, opts);
-        if (warm == null) {
-          warmDistrictRowsInBackground(district, opts);
-          return null;
-        }
-        rows = rows.concat(warm);
-      }
-    } else {
-      for (const district of districts) {
-        const districtRows = await loadDistrictRows(district, opts);
-        rows = rows.concat(districtRows);
-      }
+    for (const district of districts) {
+      rows = rows.concat(await loadDistrictRows(district, opts));
     }
     rows = rows.filter(isEligibleDineInLicense);
     if (!rows.length) return null;
@@ -438,7 +366,5 @@ module.exports = {
   resolveViaDbprLicense,
   loadDistrictRows,
   isEligibleDineInLicense,
-  peekDistrictRows,
-  warmDistrictRowsInBackground,
   _resetCacheForTests,
 };

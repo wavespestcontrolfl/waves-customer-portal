@@ -200,64 +200,6 @@ describe('DBPR fetch failure backoff', () => {
   });
 });
 
-describe('requireWarmCache — the cache-hit fast path never awaits a download', () => {
-  const { peekDistrictRows, loadDistrictRows, warmDistrictRowsInBackground } = require('../services/commercial-suite-size/dbpr-food-license');
-  beforeEach(() => _resetCacheForTests());
-
-  test('peekDistrictRows returns null on a cold cache without ever calling fetchText', () => {
-    const fetchText = jest.fn();
-    expect(peekDistrictRows(7)).toBeNull();
-    expect(fetchText).not.toHaveBeenCalled();
-  });
-
-  test('peekDistrictRows returns the rows once loadDistrictRows has warmed the cache', async () => {
-    const text = csv([{ 'Location Street Address': '4400 Test Commons Pkwy E #102', 'Location Zip Code': '00000' }]);
-    const fetchText = jest.fn().mockResolvedValue(text);
-    await loadDistrictRows(7, { fetchText });
-    const warm = peekDistrictRows(7);
-    expect(Array.isArray(warm)).toBe(true);
-    expect(warm).toHaveLength(1);
-  });
-
-  test('requireWarmCache: a cold cache resolves null immediately and kicks a background warm-up, never awaiting the fetch', async () => {
-    let releaseFetch;
-    const pending = new Promise((resolve) => { releaseFetch = resolve; });
-    const fetchText = jest.fn().mockReturnValue(pending);
-    const result = await resolveViaDbprLicense({
-      address: { street: '4400 Test Commons Parkway East', unit: '102', zip: '00000' },
-    }, { requireWarmCache: true, fetchText });
-    expect(result).toBeNull();
-    // The background warm-up DID kick the real fetch (for next time) — this
-    // proves the resolve above returned without waiting on it.
-    expect(fetchText).toHaveBeenCalledTimes(1);
-    releaseFetch(csv([]));
-    await Promise.resolve().then(() => Promise.resolve()); // let the background promise settle before the next test resets the cache
-  });
-
-  test('requireWarmCache: a warm cache resolves the match with zero fetch calls', async () => {
-    const text = csv([{
-      'Location Street Address': '4400 Test Commons Pkwy E #102',
-      'Location Zip Code': '00000',
-      'Business Name': 'TEST TACO SHOP',
-      'Number of Seats or Rental Units': '25',
-    }]);
-    const warmFetch = jest.fn().mockResolvedValue(text);
-    await loadDistrictRows(7, { fetchText: warmFetch }); // warm the cache first, same as a prior fresh lookup would
-
-    const fetchText = jest.fn(); // must never be called on the warm path
-    const result = await resolveViaDbprLicense({
-      address: { street: '4400 Test Commons Parkway East', unit: '102', zip: '00000' },
-    }, { requireWarmCache: true, fetchText });
-    expect(result).toEqual(expect.objectContaining({ value: 1400, businessName: 'TEST TACO SHOP' }));
-    expect(fetchText).not.toHaveBeenCalled();
-  });
-
-  test('warmDistrictRowsInBackground never throws even when the fetch rejects', () => {
-    const fetchText = jest.fn().mockRejectedValue(new Error('network down'));
-    expect(() => warmDistrictRowsInBackground(7, { fetchText })).not.toThrow();
-  });
-});
-
 describe('isEligibleDineInLicense', () => {
   const { isEligibleDineInLicense } = require('../services/commercial-suite-size/dbpr-food-license');
   const base = {
@@ -397,18 +339,6 @@ describe('Codex r6 DBPR matching', () => {
     expect(dbpr.matchDbprRow([r1, r2], { street: '4400 Test Commons Pkwy E', unit: 'Suite 102', zip: '00000', phone: '+15550100222' })).toBe(r2);
     expect(dbpr.matchDbprRow([r1, r2], { street: '4400 Test Commons Pkwy E', unit: 'Suite 102', zip: '00000' })).toBeNull();
   });
-  test('joining an in-flight download honors the joiner\'s own timeout', async () => {
-    dbpr._resetCacheForTests();
-    let release;
-    const slow = new Promise((r) => { release = r; });
-    const first = dbpr.loadDistrictRows(7, { fetchText: () => slow });
-    const t0 = Date.now();
-    const joined = await dbpr.loadDistrictRows(7, { timeoutMs: 50 });
-    expect(joined).toEqual([]);
-    expect(Date.now() - t0).toBeLessThan(1000);
-    release('');
-    await first;
-  });
 });
 
 describe('Codex r7: Spc and Space compare equal', () => {
@@ -417,5 +347,40 @@ describe('Codex r7: Spc and Space compare equal', () => {
     expect(normalizeUnitValue('Spc 12')).toBe('12');
     expect(normalizeUnitValue('Spc. 12')).toBe('12');
     expect(normalizeUnitValue('Space 12')).toBe('12');
+  });
+});
+
+describe('Codex #4872 r2: exact-unit licenses win over hint-only rows', () => {
+  const { matchDbprRow } = require('../services/commercial-suite-size/dbpr-food-license');
+  const base = { 'Location Street Address': '4400 TEST COMMONS PKWY E', 'Location Zip Code': '00000' };
+  test('an exact-suite license is chosen over a unitless row that matches the caller phone', () => {
+    const exact = { ...base, 'Location Address Line 2': 'STE 102', 'Business Name': 'SUITE TENANT' };
+    const unitless = { ...base, 'Business Name': 'OTHER TENANT', 'Primary Phone Number': '555-010-0111' };
+    expect(matchDbprRow([exact, unitless], {
+      street: '4400 Test Commons Pkwy E', unit: 'Suite 102', zip: '00000', phone: '+15550100111',
+    })).toBe(exact);
+  });
+  test('with no exact-suite license, a unitless row still matches on the caller phone', () => {
+    const unitless = { ...base, 'Business Name': 'ONLY TENANT', 'Primary Phone Number': '555-010-0111' };
+    expect(matchDbprRow([unitless], {
+      street: '4400 Test Commons Pkwy E', unit: 'Suite 102', zip: '00000', phone: '+15550100111',
+    })).toBe(unitless);
+  });
+});
+
+describe('Codex #4872 r2: stale-if-error is bounded', () => {
+  const dbpr = require('../services/commercial-suite-size/dbpr-food-license');
+  beforeEach(() => dbpr._resetCacheForTests());
+  const HOUR = 60 * 60 * 1000;
+  test('a failed refresh serves the last extract within the window, and nothing after it', async () => {
+    let t = 0;
+    const good = jest.fn().mockResolvedValue('"Business Name","Location Zip Code"\r\n"TEST TACO SHOP","00000"\r\n');
+    const rows = await dbpr.loadDistrictRows(7, { fetchText: good, now: () => t });
+    expect(rows).toHaveLength(1);
+    const failing = jest.fn().mockRejectedValue(new Error('HTTP 503'));
+    t = 30 * HOUR; // past the 24h TTL, inside the 48h stale-if-error window
+    await expect(dbpr.loadDistrictRows(7, { fetchText: failing, now: () => t })).resolves.toHaveLength(1);
+    t = 80 * HOUR; // past TTL + window: a closed restaurant must not keep pricing as current
+    await expect(dbpr.loadDistrictRows(7, { fetchText: failing, now: () => t })).resolves.toEqual([]);
   });
 });
