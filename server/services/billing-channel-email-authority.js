@@ -151,15 +151,9 @@ async function preSendBlock(preSendCheck, database) {
   );
 }
 
-async function suppressionBlock(trx, recipientEmail, category, customer) {
+// phone: already locked by verifyAndDispatch (lockCustomerPhone).
+async function suppressionBlock(trx, recipientEmail, category, phone) {
   await lockCustomerEmail(trx, recipientEmail);
-  // Hold the phone's STOP/START lock (the namespace recordSuppression takes)
-  // for the rest of this transaction, which spans the provider dispatch, so
-  // an opt-out or manual DNC recorded mid-handoff waits for it rather than
-  // slipping past this read. Order: customer-comms -> email -> phone; STOP
-  // recorders take the phone lock alone.
-  const phone = toE164(clean(customer?.phone)) || null;
-  if (phone) await lockSmsPhone(trx, phone);
   const suppressionInput = {
     channel: 'email', to: phone,
     metadata: { billingDeliveryLeg: true },
@@ -188,10 +182,27 @@ async function suppressionBlock(trx, recipientEmail, category, customer) {
   return blocked('EMAIL_SUPPRESSED', `Suppressed: ${detail || 'active suppression'}`);
 }
 
+// The customer's phone STOP/START lock (the namespace recordSuppression
+// takes) is acquired BEFORE the customer/preference row locks, matching the
+// SMS order customer-comms -> phone -> rows, and held for the rest of this
+// transaction (which spans the provider dispatch) so an opt-out or manual DNC
+// recorded mid-handoff waits instead of slipping past the suppression read.
+async function lockCustomerPhone(trx, customerId) {
+  const row = await trx('customers').where({ id: customerId }).first('phone');
+  const phone = toE164(clean(row?.phone)) || null;
+  if (phone) await lockSmsPhone(trx, phone);
+  return phone;
+}
+
 async function verifyAndDispatch({ input, trx, invoice, recipientEmail, preSendCheck, dispatch, state }) {
+  const lockedPhone = await lockCustomerPhone(trx, input.customerId);
   const fresh = await loadBillingEmailContext(input, trx, { lockRecipients: true, invoice });
   if (fresh.error) state.boundaryBlock = fresh.error;
-  else if (fresh.recipientEmail !== recipientEmail) {
+  else if ((toE164(clean(fresh.customer?.phone)) || null) !== lockedPhone) {
+    // The phone changed between the lock and the row lock: retry under the
+    // new phone's lock rather than check suppression for an unlocked number.
+    state.boundaryBlock = blocked('BILLING_PHONE_CHANGED', 'Customer phone changed before delivery', { retryable: true });
+  } else if (fresh.recipientEmail !== recipientEmail) {
     state.boundaryBlock = blocked(
       'EMAIL_RECIPIENT_CHANGED',
       'Billing email recipient changed before delivery',
@@ -199,7 +210,7 @@ async function verifyAndDispatch({ input, trx, invoice, recipientEmail, preSendC
     );
   } else state.boundaryBlock = await preSendBlock(preSendCheck, trx);
   if (!state.boundaryBlock) {
-    state.boundaryBlock = await suppressionBlock(trx, recipientEmail, fresh.category, fresh.customer);
+    state.boundaryBlock = await suppressionBlock(trx, recipientEmail, fresh.category, lockedPhone);
   }
   if (state.boundaryBlock) return { ok: false };
 
