@@ -5927,6 +5927,13 @@ async function declineTermiteAnnualRenewal({ customerId, termId = null, today = 
 module.exports = {
   createTermForAnnualPrepay,
   termiteDeclineBlockedReason,
+  // Codex pre-push P1: the portal GET (property.js) and /api/auth/me's
+  // paid-through badge (auth.js) both re-check a decided-lapse row
+  // (cancelled + renewal_decision 'cancel') with this before ever
+  // displaying it as covered — the SAME test coveredTermsAsOf uses, so a
+  // refunded or disputed invoice can never leave display and billing
+  // disagreeing about whether the term is actually covered.
+  isPaidDecidedLapseTerm,
   refreshTermSnapshot,
   refreshActiveTermsForCustomer,
   // Public: the one-step-prepay booking preflight (admin-schedule) matches the

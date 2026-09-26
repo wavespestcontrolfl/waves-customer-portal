@@ -652,10 +652,15 @@ router.get('/termite-bond', async (req, res, next) => {
 // renewal_decision 'cancel', still covered through term_end) — and drops
 // every other terminal shape: a refund/void 'cancelled' row with
 // renewal_decision NULL, 'refunded', or 'canceled' never had its coverage
-// happen and is never shown here (codex round-1 P2).
+// happen and is never shown here (codex round-1 P2). The decided-lapse
+// shape is STATUS-ONLY at the SQL level, though — a declined term whose
+// invoice was later refunded or disputed still reads 'cancelled' +
+// 'cancel', so every such row is re-checked in JS against
+// isPaidDecidedLapseTerm (the same live-coverage test coveredTermsAsOf
+// uses) before it is ever shown as covered (codex pre-push P1).
 const { etDateString } = require('../utils/datetime-et');
 const { dateOnlyString } = require('../utils/date-only');
-const { declineTermiteAnnualRenewal, termiteDeclineBlockedReason } = require('../services/annual-prepay-renewals');
+const { declineTermiteAnnualRenewal, termiteDeclineBlockedReason, isPaidDecidedLapseTerm } = require('../services/annual-prepay-renewals');
 
 router.get('/termite-annual-plan', async (req, res, next) => {
   res.set('Cache-Control', 'private, no-store');
@@ -676,10 +681,25 @@ router.get('/termite-annual-plan', async (req, res, next) => {
       })
       .orderBy('term_end', 'asc')
       .select('id', 'term_end', 'prepay_amount', 'status', 'renewal_decision', 'annual_plan_version', 'renewed_from_term_id', 'installation_anchored_at');
-    if (!rows.length) {
+    // Codex pre-push P1: the decidedLapse branch above is status-only — a
+    // declined term whose invoice was later refunded or disputed still
+    // reads 'cancelled' + 'cancel' even though billing (coveredTermsAsOf)
+    // has already revoked its coverage. Re-check EVERY decided-lapse row
+    // against the same live-coverage test billing uses, so this card can
+    // never say "Coverage continues through …" for a term billing no
+    // longer covers. Active/renewal_pending/payment_pending rows are
+    // unaffected — they never go through this check.
+    const applicableRows = [];
+    for (const term of rows) {
+      if (term.status === 'cancelled' && term.renewal_decision === 'cancel') {
+        if (!(await isPaidDecidedLapseTerm(term, db))) continue;
+      }
+      applicableRows.push(term);
+    }
+    if (!applicableRows.length) {
       return res.json({ available: false, reason: 'no_term' });
     }
-    const terms = rows.map((term) => {
+    const terms = applicableRows.map((term) => {
       const declined = term.status === 'cancelled' && term.renewal_decision === 'cancel';
       return {
         id: term.id,

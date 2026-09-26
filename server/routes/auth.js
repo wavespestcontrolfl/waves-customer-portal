@@ -199,20 +199,33 @@ function dateOnlyForApi(value) {
   return String(value).slice(0, 10);
 }
 
+const { isPaidDecidedLapseTerm } = require('../services/annual-prepay-renewals');
+
 async function annualPrepayForCustomer(customerId) {
   if (!customerId) return null;
   const hasTable = await db.schema.hasTable('annual_prepay_terms').catch(() => false);
   if (!hasTable) return null;
   const today = etDateString();
-  const term = await db('annual_prepay_terms as apt')
+  // Codex round-1 P2: a decided-lapse term (status 'cancelled' AND
+  // renewal_decision 'cancel', still covered through term_end — e.g. a
+  // termite annual plan declined online, slice 6a) keeps the paid-through
+  // badge showing until its term_end, same as every other live status.
+  // A void/refund 'cancelled' row (renewal_decision NULL) is excluded
+  // either way — its coverage never happened.
+  //
+  // codex pre-push P1: that decided-lapse branch is STATUS-only at the SQL
+  // level — a declined term whose invoice was later refunded or disputed
+  // still reads 'cancelled' + 'cancel' even though billing
+  // (coveredTermsAsOf) has already revoked its coverage. Fetching a
+  // bounded candidate LIST (rather than `.first()`) and re-checking every
+  // decided-lapse candidate against isPaidDecidedLapseTerm — the SAME
+  // live-coverage test billing uses — before accepting it lets the badge
+  // fall through to the next-best candidate (or drop entirely) instead of
+  // showing "Paid through …" for a term billing no longer covers.
+  // Active/renewal_pending/payment_pending candidates are accepted as-is.
+  const candidates = await db('annual_prepay_terms as apt')
     .leftJoin('invoices as inv', 'apt.prepay_invoice_id', 'inv.id')
     .where('apt.customer_id', customerId)
-    // Codex round-1 P2: a decided-lapse term (status 'cancelled' AND
-    // renewal_decision 'cancel', still covered through term_end — e.g. a
-    // termite annual plan declined online, slice 6a) keeps the paid-through
-    // badge showing until its term_end, same as every other live status.
-    // A void/refund 'cancelled' row (renewal_decision NULL) is excluded
-    // either way — its coverage never happened.
     .where(function applicableStatus() {
       this.whereIn('apt.status', ['active', 'renewal_pending', 'payment_pending'])
         .orWhere(function decidedLapse() {
@@ -229,9 +242,11 @@ async function annualPrepayForCustomer(customerId) {
       END
     `)
     .orderBy('apt.term_end', 'desc')
-    .first(
+    .limit(20)
+    .select(
       'apt.id',
       'apt.status',
+      'apt.renewal_decision',
       'apt.plan_label',
       'apt.monthly_rate',
       'apt.prepay_amount',
@@ -243,8 +258,18 @@ async function annualPrepayForCustomer(customerId) {
     )
     .catch((err) => {
       logger.warn(`[auth] annual prepay lookup skipped for customer ${customerId}: ${err.message}`);
-      return null;
+      return [];
     });
+  let term = null;
+  for (const candidate of candidates) {
+    if (candidate.status === 'cancelled' && candidate.renewal_decision === 'cancel') {
+      // Bounded (limit 20) and sequential by design — the FIRST covered
+      // candidate wins, so this can't be parallelized with Promise.all.
+      if (!(await isPaidDecidedLapseTerm(candidate, db))) continue;
+    }
+    term = candidate;
+    break;
+  }
   if (!term) return null;
   return {
     id: term.id,

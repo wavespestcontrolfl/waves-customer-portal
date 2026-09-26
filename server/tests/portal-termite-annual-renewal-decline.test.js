@@ -35,10 +35,16 @@ jest.mock('../services/termite-stations', () => ({
 }));
 
 const mockDeclineTermiteAnnualRenewal = jest.fn();
+// codex pre-push P1: every decided-lapse row the GET fetches is re-checked
+// against this (billing's own live-coverage test) before being shown as
+// covered — defaults to true so tests that don't care about refund/dispute
+// exclusion (declined-and-still-covered) need no per-test setup.
+const mockIsPaidDecidedLapseTerm = jest.fn().mockResolvedValue(true);
 jest.mock('../services/annual-prepay-renewals', () => ({
   declineTermiteAnnualRenewal: (...args) => mockDeclineTermiteAnnualRenewal(...args),
   // The REAL shared eligibility rule — GET's canDecline must match the write.
   termiteDeclineBlockedReason: (...args) => jest.requireActual('../services/annual-prepay-renewals').termiteDeclineBlockedReason(...args),
+  isPaidDecidedLapseTerm: (...args) => mockIsPaidDecidedLapseTerm(...args),
 }));
 
 const state = { rows: [], fail: false, whereArgs: [] };
@@ -88,6 +94,7 @@ const postHandler = () => routeHandler(propertyRouter, 'post', '/termite-annual-
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mockIsPaidDecidedLapseTerm.mockResolvedValue(true);
   state.rows = [];
   state.fail = false;
   state.whereArgs = [];
@@ -167,6 +174,35 @@ describe('GET /api/property/termite-annual-plan', () => {
     }];
     const { body } = await invoke(getHandler());
     expect(body.terms[0]).toEqual(expect.objectContaining({ declined: true, canDecline: false }));
+    expect(mockIsPaidDecidedLapseTerm).toHaveBeenCalledWith(expect.objectContaining({ id: 'term-1' }), db);
+  });
+
+  // codex pre-push P1: the decidedLapse SQL branch is status-only — a
+  // declined term whose invoice was later refunded or disputed still reads
+  // 'cancelled' + 'cancel'. Every decided-lapse row must be re-checked
+  // against isPaidDecidedLapseTerm (billing's own live-coverage test)
+  // before ever being shown as covered.
+  test.each(['refunded', 'disputed'])('a declined term whose invoice was later %s no longer shows as covered', async () => {
+    state.rows = [{
+      id: 'term-1', term_end: '2027-05-20', prepay_amount: '450.00', status: 'cancelled', renewal_decision: 'cancel',
+    }];
+    mockIsPaidDecidedLapseTerm.mockResolvedValue(false);
+    const { body } = await invoke(getHandler());
+    expect(body).toEqual({ available: false, reason: 'no_term' });
+  });
+
+  test('a refunded decided-lapse term drops out while a separate still-active term keeps showing (multi-property)', async () => {
+    state.rows = [
+      { id: 'term-refunded', term_end: '2027-05-20', prepay_amount: '450.00', status: 'cancelled', renewal_decision: 'cancel' },
+      {
+        id: 'term-b', term_end: '2027-08-01', prepay_amount: '600.00', status: 'active', renewal_decision: null,
+        annual_plan_version: 'v3', renewed_from_term_id: null, installation_anchored_at: '2026-06-01T12:00:00Z',
+      },
+    ];
+    mockIsPaidDecidedLapseTerm.mockResolvedValue(false);
+    const { body } = await invoke(getHandler());
+    expect(body.available).toBe(true);
+    expect(body.terms).toEqual([{ id: 'term-b', termEnd: '2027-08-01', prepayAmount: 600, declined: false, canDecline: true }]);
   });
 
   test('an unpaid (payment_pending) plan never offers the decline control', async () => {
