@@ -29,6 +29,7 @@ jest.mock('../services/logger', () => ({ warn: jest.fn(), error: jest.fn(), info
 const { randomUUID } = require('node:crypto');
 const knex = require('knex');
 const { sendTemplate } = require('../services/email-template-library');
+const { handleEmailMessageEvent } = require('../routes/webhooks-sendgrid');
 const sendgrid = require('../services/sendgrid-mail');
 const connection = process.env.APP_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
@@ -52,6 +53,7 @@ postgres('email template retry claims (PostgreSQL)', () => {
     await mockPg.schema.createTable('email_templates', (t) => {
       t.uuid('id').primary(); t.uuid('active_version_id'); t.string('template_key');
       t.string('name'); t.string('mode'); t.string('send_stream');
+      t.string('suppression_group_key');
       t.jsonb('allowed_variables'); t.jsonb('required_variables');
     });
     await mockPg.schema.createTable('email_template_versions', (t) => {
@@ -59,6 +61,12 @@ postgres('email template retry claims (PostgreSQL)', () => {
     });
     await mockPg.schema.createTable('email_suppressions', (t) => {
       t.string('email'); t.string('status'); t.string('suppression_type'); t.string('group_key');
+      t.string('source'); t.jsonb('metadata');
+      ['suppressed_at', 'created_at', 'updated_at'].forEach((name) => t.timestamp(name));
+    });
+    await mockPg.schema.createTable('email_message_events', (t) => {
+      t.uuid('email_message_id'); t.string('provider'); t.string('provider_event_id');
+      t.string('event_type'); t.jsonb('raw_event'); t.timestamp('occurred_at');
     });
     await mockPg.schema.createTable('email_messages', (t) => {
       t.uuid('id').primary(); t.uuid('template_id'); t.uuid('template_version_id');
@@ -86,6 +94,7 @@ postgres('email template retry claims (PostgreSQL)', () => {
     sendgrid.sendOne.mockResolvedValue({ messageId: 'qa-provider-acceptance' });
     await mockPg('email_messages').delete();
     await mockPg('email_suppressions').delete();
+    await mockPg('email_message_events').delete();
     await mockPg('email_messages').insert({ id: messageId, template_id: templateId,
       template_version_id: versionId, template_key: 'billing.notice', idempotency_key: key,
       recipient_email_snapshot: 'fixture@example.com', status: 'failed', send_attempt_token: 'prior-attempt',
@@ -136,6 +145,36 @@ postgres('email template retry claims (PostgreSQL)', () => {
     await expect(send()).resolves.toMatchObject({ sent: true, deduped: true,
       message: { provider_message_id: 'winner-provider-id', send_attempt_token: 'accepted-attempt' } });
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+
+  test.each([null, 'prior-attempt'])('a late webhook cannot schedule a newer accepted attempt (old token %s)', async (token) => {
+    await mockPg('email_messages').where({ id: messageId }).update({ send_attempt_token: token });
+    const resolvedBeforeClaim = await mockPg('email_messages').where({ id: messageId }).first();
+    await expect(send()).resolves.toMatchObject({ sent: true });
+    await expect(mockPg.transaction((trx) => handleEmailMessageEvent({
+      event: 'blocked', email: 'fixture@example.com', sg_event_id: 'qa-stale-block',
+      response: 'Fixture provider block', timestamp: Math.floor(Date.now() / 1000),
+    }, resolvedBeforeClaim, trx))).resolves.toBe(false);
+    expect(await mockPg('email_messages').where({ id: messageId }).first()).toMatchObject({
+      status: 'sent', provider_message_id: 'qa-provider-acceptance', provider_retry_next_at: null,
+    });
+    expect(await mockPg('email_message_events').where({ provider_event_id: 'qa-stale-block' }))
+      .toHaveLength(1);
+    expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+  });
+
+  test('a lost attempt mutation still records the address opt-out', async () => {
+    const resolvedBeforeClaim = await mockPg('email_messages').where({ id: messageId }).first();
+    await send();
+    await expect(mockPg.transaction((trx) => handleEmailMessageEvent({
+      event: 'unsubscribe', email: 'fixture@example.com', sg_event_id: 'qa-stale-opt-out',
+      timestamp: Math.floor(Date.now() / 1000),
+    }, { ...resolvedBeforeClaim, suppression_group_key_snapshot: 'transactional_required' }, trx)))
+      .resolves.toBe(false);
+    expect(await mockPg('email_suppressions').where({ email: 'fixture@example.com' }).first())
+      .toMatchObject({ status: 'active', suppression_type: 'unsubscribe', group_key: null });
+    expect(await mockPg('email_messages').where({ id: messageId }).first())
+      .toMatchObject({ status: 'sent', provider_message_id: 'qa-provider-acceptance' });
   });
 
   test.each([null, 'prior-attempt'])('still retries an unowned failed row with prior token %s', async (token) => {

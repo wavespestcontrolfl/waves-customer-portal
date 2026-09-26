@@ -357,7 +357,10 @@ async function handleEvent(ev) {
     return;
   }
   if (emailMessage) {
-    const processedNew = await processWebhookEvent(ev, messageId, email, (trx) => handleEmailMessageEvent(ev, emailMessage, trx));
+    let attemptMatched = true;
+    const processedNew = await processWebhookEvent(ev, messageId, email, async (trx) => {
+      attemptMatched = await handleEmailMessageEvent(ev, emailMessage, trx);
+    });
     // Bounce recovery runs AFTER the event transaction commits, only when the
     // event was newly processed (so a SendGrid redelivery can't re-trigger it).
     // It does a network re-send (sendgrid.sendOne), so dispatch it WITHOUT
@@ -366,7 +369,7 @@ async function handleEvent(ev) {
     // though this event is already marked processed). Best-effort, fire-and-forget.
     // Tracked bounces are NOT routed through alertBouncedContactAddress —
     // attemptRecovery has its own richer alert (alertUnrecoverableBounce).
-    if (processedNew) {
+    if (processedNew && attemptMatched) {
       if (providerRetry.isProviderBlockedEvent(ev)) {
         providerRetry.alertIfProviderRetriesExhausted(emailMessage, ev)
           .catch((err) => logger.error(`[sendgrid-webhook] provider-retry alert failed for ${messageId}: ${err.message}`));
@@ -811,10 +814,26 @@ async function handleEmailMessageEvent(ev, message, client = db) {
   });
 
   const updates = computeEmailMessageEventUpdates(ev, message, now);
-  if (updates) await client('email_messages').where({ id: message.id }).update(updates);
-  await reconcileSummaryForEmailEvent(ev, message, updates, client);
+  let attemptMatched = true;
+  if (updates) {
+    // The row was resolved before the event transaction began. A direct retry
+    // or provider-retry claim can replace its attempt token in that gap; fence
+    // this mutation to the resolved attempt so the stale event cannot fail or
+    // schedule the new attempt. Legacy rows with no token remain compatible,
+    // but only while the current row is still null-tokened.
+    const mutation = client('email_messages').where({ id: message.id });
+    if (message.send_attempt_token == null) mutation.whereNull('send_attempt_token');
+    else mutation.where({ send_attempt_token: message.send_attempt_token });
+    const matched = await mutation.update(updates);
+    attemptMatched = Number(matched) > 0;
+  }
+  if (attemptMatched) await reconcileSummaryForEmailEvent(ev, message, updates, client);
+  // Address-level provider signals remain valid even when this event lost the
+  // attempt race. Record them while the existing address lock is held; the
+  // attempt verdict only gates row-scoped reconciliation/recovery.
   const groupKey = await groupKeyForEmailMessage(message, client);
   await recordEmailSuppressionForEvent(ev, message, groupKey, now, client);
+  return attemptMatched;
 }
 
 async function handleNewsletterEvent(ev, delivery, client = db) {
