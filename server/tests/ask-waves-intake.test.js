@@ -777,6 +777,24 @@ describe('processIntakeMessage provider ladder', () => {
     expect(out.ready_for_quote).toBe(false);
   });
 
+  test('chain miss on a pet ingestion → veterinary script, not the human 911 script', async () => {
+    dispatchWithFallback.mockResolvedValue(chainMiss());
+    const out = await processIntakeMessage({ message: 'My dog swallowed some bait' });
+    expect(out.reply).toMatch(/veterinarian or an emergency animal hospital/);
+    expect(out.reply).not.toContain('911');
+    expect(out.intent).toBe('emergency');
+    expect(out.ready_for_quote).toBe(false);
+    expect(out.source).toBe('fallback');
+  });
+
+  test('chain miss on a child ingestion → 911 script plus the Poison Control line', async () => {
+    dispatchWithFallback.mockResolvedValue(chainMiss());
+    const out = await processIntakeMessage({ message: 'My son swallowed some bait' });
+    expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
+    expect(out.reply).toContain('1-800-222-1222');
+    expect(out.source).toBe('fallback');
+  });
+
   test('chain miss on a Spanish emergency → emergency-safe fallback', async () => {
     dispatchWithFallback.mockResolvedValue(chainMiss());
     const out = await processIntakeMessage({ message: 'mi hijo fue picado por una avispa y no puede respirar' });

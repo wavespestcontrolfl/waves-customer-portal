@@ -683,7 +683,11 @@ async function processIntakeMessage({ message, history, sessionId } = {}) {
 
   if (!result) {
     logger.warn('[ask-waves] both providers missed; serving deterministic fallback');
-    result = looksLikeEmergency(guardText) ? { ...EMERGENCY_FALLBACK_RESULT }
+    // An emergency goes through the same guidance picker as a flagged reply,
+    // so "My dog swallowed bait" gets the veterinary script and a child
+    // ingestion gets the Poison Control line even with both providers down.
+    result = looksLikeEmergency(foldTypography(guardText))
+      ? emergencyGuidance({ ...EMERGENCY_FALLBACK_RESULT, reply: '' }, guardText)
       : SUPPORT_RE.test(guardText) ? { ...SUPPORT_FALLBACK_RESULT }
         : { ...FALLBACK_RESULT };
   }
