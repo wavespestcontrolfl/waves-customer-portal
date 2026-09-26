@@ -2562,15 +2562,20 @@ router.get('/mosquito-onetime-quote', requireAdmin, async (req, res, next) => {
 // create-appointment modal: how many visits the customer's current rodent
 // trapping job already has, and whether the next one is billable as the
 // $95 "Rodent Trap Check - Additional" row (owner ruling 2026-09-26: $350
-// covers setup + 1 check; grandfathered jobs keep included checks). Read-only;
-// the office still picks the service.
+// covers setup + 1 check; grandfathered jobs keep included checks). Scoped
+// to the booking's property (optional propertyId; none = primary premise).
+// Read-only; the office still picks the service.
 router.get('/rodent-trapping-status', requireAdmin, async (req, res, next) => {
   try {
     const customerId = String(req.query.customerId || '').trim();
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(customerId)) {
       throw httpError(400, 'customerId must be a valid customer id');
     }
-    res.json(await trappingJobStatus(db, customerId));
+    const propertyId = req.query.propertyId == null ? '' : String(req.query.propertyId).trim();
+    if (propertyId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(propertyId)) {
+      throw httpError(400, 'propertyId must be a valid property id');
+    }
+    res.json(await trappingJobStatus(db, customerId, { propertyId: propertyId || null }));
   } catch (err) { next(err); }
 });
 

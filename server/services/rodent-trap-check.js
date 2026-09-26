@@ -140,12 +140,19 @@ function sliceJobs(visits, declared) {
  * whose last active visit is within JOB_GAP_DAYS of today, with its visit
  * count and grandfathering. Reads the full trapping history, so an opener
  * of any age still anchors its job. When the job's opener cannot be
- * identified, the answer is openerUnknown — never "billable". Read-only.
+ * identified, the answer is openerUnknown — never "billable". Scoped to one
+ * premise (the booking's property, or the primary/unstamped premise when
+ * none is chosen) with review-request's trapping premise rules, so checks
+ * at another of the customer's properties never spend this one's
+ * allowance. Read-only.
  */
-async function trappingJobStatus(db, customerId, { today } = {}) {
+async function trappingJobStatus(db, customerId, { today, propertyId = null, premiseMatcher } = {}) {
   const anchor = today || etToday();
+  // Lazy: review-request pulls in the messaging stack.
+  const inPremise = premiseMatcher
+    || await require('./review-request').trappingPremiseMatcher(customerId, { property_id: propertyId || null });
 
-  const visits = await db('scheduled_services as ss')
+  const rows = await db('scheduled_services as ss')
     .join('services as sv', 'ss.service_id', 'sv.id')
     .leftJoin('estimates as e', 'ss.source_estimate_id', 'e.id')
     .where('ss.customer_id', customerId)
@@ -159,11 +166,17 @@ async function trappingJobStatus(db, customerId, { today } = {}) {
       'ss.status',
       'ss.source_estimate_id',
       'ss.followup_source_service_id',
+      'ss.property_id',
+      'ss.service_address_line1',
+      'ss.service_address_line2',
+      'ss.service_address_city',
+      'ss.service_address_zip',
       'sv.service_key',
       db.raw("to_char(ss.scheduled_date, 'YYYY-MM-DD') as scheduled_day"),
       db.raw("to_char(e.accepted_at AT TIME ZONE 'America/New_York', 'YYYY-MM-DD') as accepted_day"),
     );
 
+  const visits = rows.filter((r) => inPremise(r));
   const plainIds = visits.filter((v) => v.service_key === 'rodent_trapping').map((v) => v.id);
   const jobs = sliceJobs(visits, await declaredTypes(db, plainIds));
   const last = jobs[jobs.length - 1];

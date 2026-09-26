@@ -2290,6 +2290,10 @@ const WAVEGUARD = {
     // perk or any % discount (codex #3591 r2 P1: the generic one-time loop
     // was applying the 15% perk and charging $84.15).
     rodent_bait_setup: true,
+    // $95 extra rodent trap check, visit 3+ (owner ruling 2026-09-26): billed
+    // in full to members too and never bundle-discounted, so no % discount
+    // of any kind reduces it.
+    rodent_trap_check_additional: true,
     // Active German Roach Cleanout is a 3-visit specialty/cost-recovery line,
     // not a recurring-service benefit or one-time perk candidate.
     german_roach: true,

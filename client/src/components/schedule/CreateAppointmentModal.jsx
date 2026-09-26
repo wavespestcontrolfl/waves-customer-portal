@@ -2646,24 +2646,30 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const isRodentTrappingLine = (svc) => RODENT_TRAPPING_LINE_KEYS.includes(svc?.service_key ?? svc?.serviceKey);
   const hasRodentTrappingLine = services.some(isRodentTrappingLine);
   const [trappingStatus, setTrappingStatus] = useState(null);
+  // Keyed by customer + booking property: another property's trapping job
+  // never spends this one's allowance.
+  const trappingPropertyId = propertyPickerActive && selectedPropertyId ? String(selectedPropertyId) : '';
+  const trappingStatusKey = selectedCustomer?.id ? `${selectedCustomer.id}|${trappingPropertyId}` : null;
   useEffect(() => {
     const id = selectedCustomer?.id;
     if (!id || !hasRodentTrappingLine) return;
-    if (trappingStatus?.customerId === id) return;
-    setTrappingStatus({ customerId: id, status: 'loading' });
+    const key = trappingStatusKey;
+    if (trappingStatus?.key === key) return;
+    setTrappingStatus({ key, status: 'loading' });
     (async () => {
       try {
-        const r = await adminFetch(`/admin/schedule/rodent-trapping-status?customerId=${encodeURIComponent(id)}`);
-        setTrappingStatus((prev) => (prev?.customerId === id ? { customerId: id, status: 'ready', ...r } : prev));
+        const qs = `customerId=${encodeURIComponent(id)}${trappingPropertyId ? `&propertyId=${encodeURIComponent(trappingPropertyId)}` : ''}`;
+        const r = await adminFetch(`/admin/schedule/rodent-trapping-status?${qs}`);
+        setTrappingStatus((prev) => (prev?.key === key ? { ...r, key, status: 'ready' } : prev));
       } catch {
-        setTrappingStatus((prev) => (prev?.customerId === id ? { customerId: id, status: 'error' } : prev));
+        setTrappingStatus((prev) => (prev?.key === key ? { key, status: 'error' } : prev));
       }
     })();
-  }, [selectedCustomer?.id, hasRodentTrappingLine, trappingStatus]);
+  }, [selectedCustomer?.id, trappingStatusKey, trappingPropertyId, hasRodentTrappingLine, trappingStatus]);
   const trappingHint = (svc) => {
     if (!isRodentTrappingLine(svc)) return null;
     const t = trappingStatus;
-    if (!t || t.customerId !== selectedCustomer?.id || t.status !== 'ready' || !t.hasJob) return null;
+    if (!t || t.key !== trappingStatusKey || t.status !== 'ready' || !t.hasJob) return null;
     const key = svc?.service_key ?? svc?.serviceKey;
     const visitNo = t.visitCount + 1;
     if (t.openerUnknown) {

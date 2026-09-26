@@ -30,6 +30,7 @@ function fakeDb(rows, records = []) {
   return db;
 }
 
+const everyPremise = () => true;
 const report = (type) => ({ typedReportSnapshot: { values: { trap_visit_type: type } } });
 
 describe('rodent trap check allowance', () => {
@@ -51,14 +52,14 @@ describe('rodent trap check allowance', () => {
     const seen = [];
     const q = fakeDb([])('scheduled_services');
     q.select = async (...cols) => { seen.push(...cols); return []; };
-    await trappingJobStatus(Object.assign(() => q, { raw: (sql) => sql }), 'c', { today: '2026-10-05' });
+    await trappingJobStatus(Object.assign(() => q, { raw: (sql) => sql }), 'c', { premiseMatcher: everyPremise, today: '2026-10-05' });
     expect(seen).toContain("to_char(ss.scheduled_date, 'YYYY-MM-DD') as scheduled_day");
     expect(seen).toContain("to_char(e.accepted_at AT TIME ZONE 'America/New_York', 'YYYY-MM-DD') as accepted_day");
   });
 
   test('a job opened ON the effective date is not grandfathered', async () => {
     const rows = [{ id: 'a', scheduled_day: '2026-09-27', service_key: 'rodent_trapping', accepted_day: null }];
-    const status = await trappingJobStatus(fakeDb(rows), 'c', { today: '2026-09-28' });
+    const status = await trappingJobStatus(fakeDb(rows), 'c', { premiseMatcher: everyPremise, today: '2026-09-28' });
     expect(status).toMatchObject({ grandfathered: false, openerDate: '2026-09-27' });
   });
 
@@ -67,9 +68,9 @@ describe('rodent trap check allowance', () => {
       { id: 'a', scheduled_day: '2026-10-01', service_key: 'rodent_trapping', accepted_day: '2026-09-29' },
       { id: 'b', scheduled_day: '2026-10-08', service_key: 'rodent_trapping_followup', accepted_day: null },
     ];
-    const one = await trappingJobStatus(fakeDb(rows.slice(0, 1)), 'c', { today: '2026-10-05' });
+    const one = await trappingJobStatus(fakeDb(rows.slice(0, 1)), 'c', { premiseMatcher: everyPremise, today: '2026-10-05' });
     expect(one).toMatchObject({ hasJob: true, visitCount: 1, nextVisitBillable: false, grandfathered: false });
-    const two = await trappingJobStatus(fakeDb(rows), 'c', { today: '2026-10-09' });
+    const two = await trappingJobStatus(fakeDb(rows), 'c', { premiseMatcher: everyPremise, today: '2026-10-09' });
     expect(two).toMatchObject({ visitCount: 2, nextVisitBillable: true, additionalCheckPrice: 95 });
   });
 
@@ -79,7 +80,7 @@ describe('rodent trap check allowance', () => {
       { id: 'b', scheduled_day: '2026-09-27', service_key: 'rodent_trapping_followup', accepted_day: null },
       { id: 'c', scheduled_day: '2026-10-04', service_key: 'rodent_trapping_followup', accepted_day: null },
     ];
-    const status = await trappingJobStatus(fakeDb(rows), 'c', { today: '2026-10-05' });
+    const status = await trappingJobStatus(fakeDb(rows), 'c', { premiseMatcher: everyPremise, today: '2026-10-05' });
     expect(status).toMatchObject({ visitCount: 3, grandfathered: true, nextVisitBillable: false });
   });
 
@@ -91,7 +92,7 @@ describe('rodent trap check allowance', () => {
       // Dispatched follow-up link.
       { id: 'c', scheduled_day: '2026-10-05', service_key: 'rodent_trapping', accepted_day: null, followup_source_service_id: 'b' },
     ];
-    const status = await trappingJobStatus(fakeDb(rows), 'c', { today: '2026-10-06' });
+    const status = await trappingJobStatus(fakeDb(rows), 'c', { premiseMatcher: everyPremise, today: '2026-10-06' });
     expect(status).toMatchObject({ openerDate: '2026-09-20', visitCount: 3, grandfathered: true, nextVisitBillable: false });
   });
 
@@ -101,7 +102,7 @@ describe('rodent trap check allowance', () => {
       { id: 'b', scheduled_day: '2026-10-08', service_key: 'rodent_trapping', accepted_day: null, source_estimate_id: 'e2' },
     ];
     const records = [{ scheduled_service_id: 'b', service_data: JSON.stringify(report('Follow-up check')) }];
-    const status = await trappingJobStatus(fakeDb(rows, records), 'c', { today: '2026-10-09' });
+    const status = await trappingJobStatus(fakeDb(rows, records), 'c', { premiseMatcher: everyPremise, today: '2026-10-09' });
     expect(status).toMatchObject({ openerDate: '2026-10-01', visitCount: 2, nextVisitBillable: true });
   });
 
@@ -111,11 +112,11 @@ describe('rodent trap check allowance', () => {
       { id: 'b', scheduled_day: '2026-09-08', service_key: 'rodent_trapping_followup', accepted_day: null },
       { id: 'c', scheduled_day: '2026-10-01', service_key: 'rodent_trapping', accepted_day: '2026-09-29', source_estimate_id: 'e2' },
     ];
-    const byEstimate = await trappingJobStatus(fakeDb(rows), 'c', { today: '2026-10-02' });
+    const byEstimate = await trappingJobStatus(fakeDb(rows), 'c', { premiseMatcher: everyPremise, today: '2026-10-02' });
     expect(byEstimate).toMatchObject({ openerDate: '2026-10-01', visitCount: 1, grandfathered: false });
     const noEstimate = rows.map((r) => ({ ...r, source_estimate_id: null, accepted_day: null }));
     const records = [{ scheduled_service_id: 'c', service_data: report('Initial setup') }];
-    const byDeclared = await trappingJobStatus(fakeDb(noEstimate, records), 'c', { today: '2026-10-02' });
+    const byDeclared = await trappingJobStatus(fakeDb(noEstimate, records), 'c', { premiseMatcher: everyPremise, today: '2026-10-02' });
     expect(byDeclared).toMatchObject({ openerDate: '2026-10-01', visitCount: 1 });
   });
 
@@ -125,7 +126,7 @@ describe('rodent trap check allowance', () => {
       { id: 'b', scheduled_day: '2026-09-08', service_key: 'rodent_trapping_followup', accepted_day: null },
       { id: 'c', scheduled_day: '2026-10-10', service_key: 'rodent_trapping_exclusion', accepted_day: '2026-10-08' },
     ];
-    const status = await trappingJobStatus(fakeDb(rows), 'c', { today: '2026-10-12' });
+    const status = await trappingJobStatus(fakeDb(rows), 'c', { premiseMatcher: everyPremise, today: '2026-10-12' });
     expect(status).toMatchObject({ openerDate: '2026-10-10', visitCount: 1, grandfathered: false, nextVisitBillable: false });
   });
 
@@ -136,7 +137,7 @@ describe('rodent trap check allowance', () => {
       { id: 'c', scheduled_day: '2026-11-01', service_key: 'rodent_trapping_followup', accepted_day: null },
       { id: 'd', scheduled_day: '2026-12-20', service_key: 'rodent_trapping_followup', accepted_day: null },
     ];
-    const status = await trappingJobStatus(fakeDb(rows), 'c', { today: '2026-12-22' });
+    const status = await trappingJobStatus(fakeDb(rows), 'c', { premiseMatcher: everyPremise, today: '2026-12-22' });
     expect(status).toMatchObject({ openerDate: '2026-08-01', visitCount: 4, grandfathered: true, nextVisitBillable: false });
   });
 
@@ -147,18 +148,34 @@ describe('rodent trap check allowance', () => {
       { id: 'b', scheduled_day: '2026-12-30', service_key: 'rodent_trapping_followup', accepted_day: null },
       { id: 'c', scheduled_day: '2027-01-06', service_key: 'rodent_trapping_followup', accepted_day: null },
     ];
-    const status = await trappingJobStatus(fakeDb(rows), 'c', { today: '2027-01-07' });
+    const status = await trappingJobStatus(fakeDb(rows), 'c', { premiseMatcher: everyPremise, today: '2027-01-07' });
     expect(status).toMatchObject({ hasJob: true, openerUnknown: true, visitCount: 2, grandfathered: false, nextVisitBillable: false });
   });
 
   test('a job whose last visit is past the gap is closed', async () => {
     const rows = [{ id: 'a', scheduled_day: '2026-10-01', service_key: 'rodent_trapping', accepted_day: '2026-09-29' }];
-    const status = await trappingJobStatus(fakeDb(rows), 'c', { today: '2026-12-15' });
+    const status = await trappingJobStatus(fakeDb(rows), 'c', { premiseMatcher: everyPremise, today: '2026-12-15' });
     expect(status).toMatchObject({ hasJob: false, visitCount: 0 });
   });
 
+  test('visits at another premise never spend this property\'s allowance', async () => {
+    const rows = [
+      { id: 'a', scheduled_day: '2026-10-01', service_key: 'rodent_trapping', accepted_day: '2026-09-29', property_id: 'p1' },
+      { id: 'b', scheduled_day: '2026-10-08', service_key: 'rodent_trapping_followup', accepted_day: null, property_id: 'p1' },
+      { id: 'c', scheduled_day: '2026-10-09', service_key: 'rodent_trapping', accepted_day: '2026-10-07', property_id: 'p2' },
+    ];
+    const onlyP2 = (r) => r.property_id === 'p2';
+    const status = await trappingJobStatus(fakeDb(rows), 'c', { premiseMatcher: onlyP2, today: '2026-10-10' });
+    expect(status).toMatchObject({ openerDate: '2026-10-09', visitCount: 1, nextVisitBillable: false });
+  });
+
+  test('the $95 check is excluded from every % discount', () => {
+    const { serviceExcludedFromPercentDiscount } = require('../services/pricing-engine/discount-engine');
+    expect(serviceExcludedFromPercentDiscount('rodent_trap_check_additional')).toBe(true);
+  });
+
   test('no trapping visits means no job', async () => {
-    const status = await trappingJobStatus(fakeDb([]), 'c', { today: '2026-10-12' });
+    const status = await trappingJobStatus(fakeDb([]), 'c', { premiseMatcher: everyPremise, today: '2026-10-12' });
     expect(status).toMatchObject({ hasJob: false, visitCount: 0, nextVisitBillable: false });
   });
 });
