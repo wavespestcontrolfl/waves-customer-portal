@@ -464,6 +464,22 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
     expect(out.intent).toBe('question');
   });
 
+  test.each([
+    'It is safe, but see a doctor as soon as possible.',
+    'It is safe, but contact your pediatrician promptly.',
+    'It is safe, but get your child to a doctor now.',
+    'It is safe, but seek care from a doctor immediately.',
+    'It is safe, but take him to the doctor right away.',
+  ])('an urgent clinician referral keeps the emergency script: %s', (reply) => {
+    const out = scrubUnsafeClaims({ reply, intent: 'question', service_keys: [], ready_for_quote: false }, 'Is it ok?');
+    expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
+  });
+
+  test('a conditional clinician referral stays routine', () => {
+    const out = scrubUnsafeClaims({ reply: 'It is safe; call your doctor if symptoms appear.', intent: 'question', service_keys: [], ready_for_quote: false }, 'Is it ok?');
+    expect(out.reply).toMatch(/label directions/);
+  });
+
   test('routine "consult your doctor before use" is not escalated to 911', () => {
     const out = scrubUnsafeClaims({ reply: 'This product may not be safe during pregnancy; consult your doctor before use.', intent: 'question', service_keys: [], ready_for_quote: false }, 'Is it ok while pregnant?');
     expect(out.reply).toMatch(/label directions/);
