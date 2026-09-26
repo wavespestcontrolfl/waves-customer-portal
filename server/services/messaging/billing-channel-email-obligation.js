@@ -422,7 +422,9 @@ async function collectionsPolicyRefusal(meta) {
     customerId: meta.customer_id,
     invoiceId: meta.invoice_id || null,
     channel: 'email',
-    purpose: 'late_payment',
+    // Same purpose the producer consulted: a balance reminder is permitted
+    // for pays_by_check customers where late-payment outreach is not.
+    purpose: meta.source_entry_point === 'balance_reminder_workflow' ? 'balance_reminder' : 'late_payment',
     logTag: 'billing-email-obligation-replay',
     excludeLedgerIds: meta.collections_ledger_id ? [meta.collections_ledger_id] : [],
   });
@@ -455,7 +457,16 @@ function invalidObligationMeta(meta) {
 async function recheck(meta) {
   try {
     if (invalidObligationMeta(meta)) return refused('invalid-email-obligation');
-    if (meta.billing_email_provider_started_at || meta.billing_email_uncertain === true) return refused('billing-email-delivery-uncertain');
+    if (meta.billing_email_provider_started_at || meta.billing_email_uncertain === true) {
+      // A surviving fence whose email was provably accepted proceeds to
+      // replay(), which reconciles it as delivered and settles its ledger
+      // reservation; without canonical acceptance it stays held.
+      const message = await db('email_messages')
+        .where({ idempotency_key: obligationKey(meta.notificationEventKey) })
+        .first('status', 'provider_message_id');
+      if (emailEvidence(message) !== 'accepted') return refused('billing-email-delivery-uncertain');
+      return { eligible: true };
+    }
     return await producerEligible(meta);
   } catch {
     return refused('billing-email-eligibility-unavailable', true);

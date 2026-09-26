@@ -497,6 +497,15 @@ describe('collections policy recheck on INVOICE_GUARDS-sourced obligations (code
     }));
   });
 
+  test('a balance-reminder source is rechecked under the producer\'s balance_reminder purpose', async () => {
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    collectionsChannelPermitted.mockResolvedValue(true);
+    await obligation.producerEligible({ customer_id: customerId, invoice_id: invoiceId,
+      source_entry_point: 'balance_reminder_workflow', collections_ledger_id: ledgerId });
+    expect(collectionsChannelPermitted).toHaveBeenCalledWith(expect.objectContaining({
+      channel: 'email', purpose: 'balance_reminder' }));
+  });
+
   test('no persisted reservation id passes an empty exclusion list (safe over-suppression direction)', async () => {
     process.env.GATE_COLLECTIONS_POLICY = 'true';
     collectionsChannelPermitted.mockResolvedValue(true);
@@ -614,5 +623,25 @@ describe('collections_ledger_id persistence (codex r2 #4844 P1)', () => {
     await obligation.queueObligation(notice(), 'payment_receipt', 'receipt:event-no-ledger-persist',
       { sent: false, retryable: true, deliveryOutcome: 'not_sent' }, []);
     expect(db._rows[0].metadata.collections_ledger_id).toBeNull();
+  });
+});
+
+describe('scheduler recheck of a surviving provider fence', () => {
+  const fenced = (eventKey) => ({ customer_id: customerId, notificationEventKey: eventKey,
+    billingDeliveryLeg: 'email', channel: 'email', billing_email_provider_started_at: '2026-09-26T03:00:00Z' });
+
+  test('proceeds to replay when the email was provably accepted', async () => {
+    db._rows.push({ idempotency_key: obligation.obligationKey('fence:accepted'), status: 'sent',
+      provider_message_id: 'sg-accepted', metadata: {} });
+    await expect(obligation.recheck(fenced('fence:accepted'))).resolves.toEqual({ eligible: true });
+  });
+
+  test.each([
+    ['no email row', null],
+    ['a failed row without definite rejection evidence', { status: 'failed', error_message: 'socket hang up' }],
+  ])('stays held with %s', async (_label, row) => {
+    if (row) db._rows.push({ idempotency_key: obligation.obligationKey('fence:held'), ...row, metadata: {} });
+    await expect(obligation.recheck(fenced('fence:held')))
+      .resolves.toMatchObject({ eligible: false, reason: 'billing-email-delivery-uncertain' });
   });
 });
