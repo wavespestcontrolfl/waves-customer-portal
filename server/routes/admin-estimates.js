@@ -1041,7 +1041,7 @@ function notifyPricingFallbackAfterCommit(estimate, reason) {
       'The pricing engine failed while this estimate was saved, so the browser preview was stored as a NON-authoritative price (pricing authority: client fallback). Open it in the estimate tool and save again so the engine prices it before it is sent.',
       {
         icon: '\u26A0\uFE0F',
-        link: '/admin/estimates',
+        link: `/admin/estimates?estimateId=${estimate.id}`,
         // bell: true — an unverified price on a saved estimate must ring even
         // under GATE_ADMIN_BELL_POLICY, whose default denies the 'estimate'
         // category (pre-push codex P1; same override the commercial-schedule
