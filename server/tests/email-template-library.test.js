@@ -471,15 +471,16 @@ describe('email template library rendering', () => {
       id: queuedMessage.id,
       status: 'queued',
       send_attempt_token: expect.any(String),
-      provider_handoff_phase: 'started',
     }));
+    expect(failure.whereIn).toHaveBeenCalledWith('provider_handoff_phase', ['started']);
     expect(failure.update).toHaveBeenCalledWith(expect.objectContaining({
       status: 'failed',
       provider_handoff_phase: expectedPhase,
     }));
   });
 
-  test('a lost pending-to-started claim makes no provider request', async () => {
+  test.each(['lost claim', 'write failed', 'acknowledgement lost'])(
+    'a marker %s makes no provider request and restores an unsent failure', async (scenario) => {
     const current = {};
     const queueInsert = chain();
     queueInsert.returning.mockImplementation(async () => {
@@ -488,7 +489,11 @@ describe('email template library rendering', () => {
     });
     const failure = chain({ returning: [{ id: 'msg-marker-lost' }] });
     const marker = chain();
-    marker.update = jest.fn(async () => 0);
+    marker.update = jest.fn(async () => {
+      if (scenario === 'lost claim') return 0;
+      if (scenario === 'acknowledgement lost') current.provider_handoff_phase = 'started';
+      throw Object.assign(new Error('marker connection lost'), { code: 'ECONNRESET' });
+    });
     mockMarkerDb.mockReturnValue(marker);
     setDbQueues({
       email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
@@ -503,9 +508,15 @@ describe('email template library rendering', () => {
       templateKey: 'estimate.expiring_notice',
       to: 'sam@example.com',
       payload: { first_name: 'Sam', estimate_url: 'https://example.com/e', expires_at: 'June 12' },
-    })).rejects.toMatchObject({ code: 'EMAIL_SEND_IN_PROGRESS' });
+    })).rejects.toMatchObject({ code: scenario === 'lost claim' ? 'EMAIL_SEND_IN_PROGRESS' : 'ECONNRESET' });
 
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(failure.where).toHaveBeenCalledWith(expect.objectContaining({
+      send_attempt_token: current.send_attempt_token,
+      provider_handoff_attempt_token: current.send_attempt_token,
+    }));
+    expect(failure.whereIn).toHaveBeenCalledWith('provider_handoff_phase',
+      scenario === 'lost claim' ? ['pending'] : ['pending', 'started']);
     expect(failure.update).toHaveBeenCalledWith(expect.objectContaining({
       status: 'failed',
       provider_handoff_phase: 'pending',

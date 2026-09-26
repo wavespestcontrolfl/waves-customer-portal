@@ -1559,6 +1559,7 @@ async function sendTemplate({
 
   let providerAccepted = false;
   let providerHandoffStarted = false;
+  let markerWriteFailed = false;
   let result;
   const recordAcceptance = () => db('email_messages')
     .where({ id: message.id, send_attempt_token: sendAttemptToken,
@@ -1634,7 +1635,8 @@ async function sendTemplate({
           provider_handoff_phase: PROVIDER_HANDOFF_PENDING,
           provider_handoff_attempt_token: sendAttemptToken })
         .update({ provider_handoff_phase: PROVIDER_HANDOFF_STARTED,
-          provider_handoff_attempt_token: sendAttemptToken, updated_at: new Date() });
+          provider_handoff_attempt_token: sendAttemptToken, updated_at: new Date() })
+        .catch((err) => { markerWriteFailed = true; throw err; });
       if (Number(marked) !== 1) {
         throw inFlightCollisionError(idempotencyKey || message.id);
       }
@@ -1736,6 +1738,8 @@ async function sendTemplate({
     const expectedFailurePhase = providerHandoffStarted
       ? PROVIDER_HANDOFF_STARTED
       : PROVIDER_HANDOFF_PENDING;
+    const expectedFailurePhases = markerWriteFailed && !providerHandoffStarted
+      ? [PROVIDER_HANDOFF_PENDING, PROVIDER_HANDOFF_STARTED] : [expectedFailurePhase];
     const recordedFailurePhase = definiteRejection
       ? PROVIDER_HANDOFF_REJECTED
       : expectedFailurePhase;
@@ -1751,10 +1755,13 @@ async function sendTemplate({
       }
       // Hold the row through failure classification so retries cannot claim an
       // intermediate failure; read events AFTER stamping to include late evidence.
+      // A marker UPDATE can commit before its acknowledgement is lost. This
+      // invocation never entered sendOne when that write threw, so its matching
+      // started phase can safely return to pending instead of staying queued.
       const [failed] = await trx('email_messages')
         .where({ id: message.id, status: 'queued', send_attempt_token: sendAttemptToken,
-          provider_handoff_phase: expectedFailurePhase,
           provider_handoff_attempt_token: sendAttemptToken })
+        .whereIn('provider_handoff_phase', expectedFailurePhases)
         .update({
           status: 'failed',
           error_message: persistedErrorMessage.slice(0, 1000),

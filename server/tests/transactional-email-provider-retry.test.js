@@ -95,8 +95,15 @@ describe('transactional email provider retry classification', () => {
     });
   });
 
-  test('never schedules excluded messages', () => {
-    expect(retry.retryStateForProviderBlock(message({ has_attachments: true }))).toEqual({});
+  test.each([
+    { has_attachments: true }, { recipient_type: 'test' }, { recipient_type: 'job_application' },
+    { suppression_group_key_snapshot: 'marketing_referral' }, { categories: ['bounce_recovery'] },
+    { subject_snapshot: null },
+  ])('records definite rejection without scheduling an excluded message: %j', (excluded) => {
+    expect(retry.retryStateForProviderBlock(message({ ...excluded, send_attempt_token: 'direct-attempt',
+      provider_handoff_phase: 'started' }))).toEqual({
+      provider_handoff_phase: 'rejected', provider_handoff_attempt_token: 'direct-attempt',
+    });
   });
 
   test('rechecks suppression, clears only the provider block, then replays the stored snapshot', async () => {
