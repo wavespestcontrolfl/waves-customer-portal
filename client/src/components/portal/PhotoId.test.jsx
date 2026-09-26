@@ -578,6 +578,248 @@ describe('photo validation before resize/upload (Codex r7 P2)', () => {
   });
 });
 
+describe('v2 result card (GATE_PHOTO_ID_V2, server-side)', () => {
+  // Entry-level "pretty_sure" — every string below is payload text; the
+  // client composes nothing about the species itself.
+  const v2Entry = {
+    version: 2,
+    catalog_version: '2026-09-26.1',
+    tier: 'ai_suggestion',
+    answer: {
+      level: 'entry', node_id: 'tropical-fire-ant', wording: 'pretty_sure',
+      headline: "We're pretty sure: Tropical Fire Ant", subhead: 'Solenopsis geminata',
+    },
+    group: { id: 'ants', label: 'Ants', generic: 'an ant' },
+    entry: {
+      slug: 'tropical-fire-ant', common_name: 'Tropical Fire Ant', scientific_name: 'Solenopsis geminata',
+      kind: 'organism', verdict: 'call', verdict_label: 'Worth a pro look',
+      safety_line: 'Stings burn and can cause allergic reactions. Keep kids and pets off the mound.',
+      what_it_means: 'These ants nest in mounded soil and defend it aggressively.',
+      fact: 'A single mound can hold thousands of workers.',
+      site_url: 'https://www.wavespestcontrol.com/pest-identifier/tropical-fire-ant/',
+      look_alikes: [{ slug: 'fire-ant', common_name: 'Red Imported Fire Ant', difference: 'Workers are more uniform in size.' }],
+    },
+    evidence: {
+      matches: ['Reddish-brown ants of mixed sizes in the same trail'],
+      still_need: ['The biggest workers have an oversized, squarish head'],
+    },
+    candidates: [
+      { slug: 'tropical-fire-ant', common_name: 'Tropical Fire Ant', scientific_name: 'Solenopsis geminata', strength: 'strong', difference_from_top: null, local: 'common_here_now' },
+    ],
+    next_photo: null,
+    referral: null,
+  };
+
+  it('renders a pretty_sure entry card: headline, subhead, tier line, verdict chip, safety line, evidence, and the About section', async () => {
+    api.getPhotoIds.mockResolvedValue({ items: [] });
+    render(<Harness />);
+    fireEvent.click(await screen.findByRole('button', { name: /Photo ID/i }));
+    fireEvent.click(screen.getByText('Bug or pest'));
+    fireEvent.change(document.querySelector('input[type="file"]'), { target: { files: [photoFile()] } });
+    await screen.findByRole('img');
+
+    api.createPhotoId.mockResolvedValueOnce({
+      id: 'v1', type: 'pest', created_at: '2026-09-26T00:00:00Z',
+      result: { label: 'unused-v1-shape' },
+      v2: v2Entry,
+      next_step: { kind: 'none', title: 'All set', body: 'Nothing else needed right now.' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Identify' }));
+
+    expect(await screen.findByText("We're pretty sure: Tropical Fire Ant")).toBeInTheDocument();
+    expect(screen.getByText('Solenopsis geminata')).toBeInTheDocument();
+    expect(screen.getByText('AI suggestion')).toBeInTheDocument();
+    expect(screen.getByText('Worth a pro look')).toBeInTheDocument();
+    expect(screen.getByText(/Stings burn and can cause allergic reactions/)).toBeInTheDocument();
+    expect(screen.getByText('Reddish-brown ants of mixed sizes in the same trail')).toBeInTheDocument();
+    expect(screen.getByText('The biggest workers have an oversized, squarish head')).toBeInTheDocument();
+
+    // About section is collapsed by default.
+    expect(screen.queryByText('A single mound can hold thousands of workers.')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'About Tropical Fire Ant' }));
+    expect(screen.getByText('These ants nest in mounded soil and defend it aggressively.')).toBeInTheDocument();
+    expect(screen.getByText('A single mound can hold thousands of workers.')).toBeInTheDocument();
+    expect(screen.getByText(/Red Imported Fire Ant/)).toBeInTheDocument();
+    expect(screen.getByText(/Workers are more uniform in size\./)).toBeInTheDocument();
+    const link = screen.getByRole('link', { name: 'Read more on our website' });
+    expect(link).toHaveAttribute('href', 'https://www.wavespestcontrol.com/pest-identifier/tropical-fire-ant/');
+    expect(link).toHaveAttribute('target', '_blank');
+    expect(link).toHaveAttribute('rel', expect.stringContaining('noopener'));
+  });
+
+  it('never renders a site_url on another origin, even though the rest of the About section still shows', async () => {
+    api.getPhotoIds.mockResolvedValue({ items: [] });
+    render(<Harness />);
+    fireEvent.click(await screen.findByRole('button', { name: /Photo ID/i }));
+    fireEvent.click(screen.getByText('Bug or pest'));
+    fireEvent.change(document.querySelector('input[type="file"]'), { target: { files: [photoFile()] } });
+    await screen.findByRole('img');
+
+    api.createPhotoId.mockResolvedValueOnce({
+      id: 'v1b', type: 'pest', created_at: '2026-09-26T00:00:00Z',
+      result: {},
+      v2: { ...v2Entry, entry: { ...v2Entry.entry, site_url: 'https://evil.example.com/pest-identifier/tropical-fire-ant/' } },
+      next_step: { kind: 'none', title: 'All set', body: 'x' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Identify' }));
+
+    await screen.findByText("We're pretty sure: Tropical Fire Ant");
+    fireEvent.click(screen.getByRole('button', { name: 'About Tropical Fire Ant' }));
+    expect(screen.getByText('These ants nest in mounded soil and defend it aggressively.')).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Read more on our website' })).not.toBeInTheDocument();
+  });
+
+  it('renders "Other possibilities" after the top candidate, with the difference and local labels', async () => {
+    api.getPhotoIds.mockResolvedValue({ items: [] });
+    render(<Harness />);
+    fireEvent.click(await screen.findByRole('button', { name: /Photo ID/i }));
+    fireEvent.click(screen.getByText('Bug or pest'));
+    fireEvent.change(document.querySelector('input[type="file"]'), { target: { files: [photoFile()] } });
+    await screen.findByRole('img');
+
+    api.createPhotoId.mockResolvedValueOnce({
+      id: 'v1c', type: 'pest', created_at: '2026-09-26T00:00:00Z',
+      result: {},
+      v2: {
+        ...v2Entry,
+        candidates: [
+          { slug: 'tropical-fire-ant', common_name: 'Top Species', strength: 'strong', difference_from_top: null, local: 'common_here_now' },
+          { slug: 'alt-1', common_name: 'Alt One', strength: 'possible', difference_from_top: 'Bigger, squarish head.', local: 'common_here_now' },
+          { slug: 'alt-2', common_name: 'Alt Two', strength: 'possible', difference_from_top: 'Solid black body.', local: 'uncommon_here' },
+        ],
+      },
+      next_step: { kind: 'none', title: 'All set', body: 'x' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Identify' }));
+
+    await screen.findByText("We're pretty sure: Tropical Fire Ant");
+    expect(screen.getByText('Other possibilities')).toBeInTheDocument();
+    // The top candidate is not repeated inside "Other possibilities".
+    expect(screen.queryByText('Top Species')).not.toBeInTheDocument();
+
+    expect(screen.getByText('Alt One')).toBeInTheDocument();
+    expect(screen.getByText('Bigger, squarish head.')).toBeInTheDocument();
+    expect(screen.getByText('Alt Two')).toBeInTheDocument();
+    expect(screen.getByText('Solid black body.')).toBeInTheDocument();
+    const strengthChips = screen.getAllByText('Possible match');
+    expect(strengthChips).toHaveLength(2);
+    expect(screen.getByText('Common here now')).toBeInTheDocument();
+    expect(screen.getByText('Uncommon here')).toBeInTheDocument();
+  });
+
+  it('an unresolved group answer with next_photo shows the retake card; tapping it returns to photos with the ask banner and keeps the existing photo', async () => {
+    api.getPhotoIds.mockResolvedValue({ items: [] });
+    render(<Harness />);
+    fireEvent.click(await screen.findByRole('button', { name: /Photo ID/i }));
+    fireEvent.click(screen.getByText('Bug or pest'));
+    fireEvent.change(document.querySelector('input[type="file"]'), { target: { files: [photoFile()] } });
+    await screen.findByRole('img');
+
+    const v2GroupOnly = {
+      version: 2, catalog_version: '2026-09-26.1', tier: 'needs_more_evidence',
+      answer: { level: 'group', node_id: 'ants', wording: 'group_only', headline: 'Looks like an ant', subhead: null },
+      group: { id: 'ants', label: 'Ants', generic: 'an ant' },
+      entry: null,
+      evidence: {},
+      candidates: [],
+      next_photo: { ask: 'A close-up showing the waist from the side would settle it.', why: 'That view separates the two most likely ants.' },
+      referral: null,
+    };
+    api.createPhotoId.mockResolvedValueOnce({
+      id: 'v2g', type: 'pest', created_at: '2026-09-26T00:00:00Z',
+      result: {}, v2: v2GroupOnly,
+      next_step: { kind: 'unclear', title: 'Not sure yet', body: "We'll take another look." },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Identify' }));
+
+    expect(await screen.findByText('Looks like an ant')).toBeInTheDocument();
+    expect(screen.getByText('Needs more evidence')).toBeInTheDocument();
+    // No entry means no verdict chip / About section.
+    expect(screen.queryByRole('button', { name: /^About /i })).not.toBeInTheDocument();
+    expect(screen.getByText('Take the photo that settles it')).toBeInTheDocument();
+    expect(screen.getByText('A close-up showing the waist from the side would settle it.')).toBeInTheDocument();
+    expect(screen.getByText('That view separates the two most likely ants.')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Take this photo' }));
+    // Back on the photos step, with the retake ask shown as a banner...
+    expect(await screen.findByText('A close-up showing the waist from the side would settle it.')).toBeInTheDocument();
+    // ...and the existing photo kept (not cleared).
+    expect(screen.getByRole('img')).toBeInTheDocument();
+    expect(screen.queryByText(/3-photo limit/)).not.toBeInTheDocument();
+
+    // "Identify" from here runs a normal new identification — no invented params.
+    api.createPhotoId.mockResolvedValueOnce({
+      id: 'v2g2', type: 'pest', created_at: '2026-09-26T00:00:00Z',
+      result: {}, v2: { ...v2GroupOnly, next_photo: null },
+      next_step: { kind: 'none', title: 'Fine', body: 'x' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Identify' }));
+    await waitFor(() => expect(api.createPhotoId).toHaveBeenCalledTimes(2));
+    const [, secondPayload] = api.createPhotoId.mock.calls[1];
+    expect(secondPayload.photos).toHaveLength(1);
+  });
+
+  it('the retake banner tells the customer to remove a photo first when already at the 3-photo limit', async () => {
+    api.getPhotoIds.mockResolvedValue({ items: [] });
+    render(<Harness />);
+    fireEvent.click(await screen.findByRole('button', { name: /Photo ID/i }));
+    fireEvent.click(screen.getByText('Bug or pest'));
+    fireEvent.change(document.querySelector('input[type="file"]'), {
+      target: { files: [photoFile(), photoFile(), photoFile()] },
+    });
+    await waitFor(() => expect(screen.getAllByRole('img')).toHaveLength(3));
+
+    api.createPhotoId.mockResolvedValueOnce({
+      id: 'v2full', type: 'pest', created_at: '2026-09-26T00:00:00Z',
+      result: {},
+      v2: {
+        version: 2, catalog_version: '2026-09-26.1', tier: 'needs_more_evidence',
+        answer: { level: 'group', node_id: 'ants', wording: 'group_only', headline: 'Looks like an ant', subhead: null },
+        group: { id: 'ants', label: 'Ants', generic: 'an ant' }, entry: null, evidence: {}, candidates: [],
+        next_photo: { ask: 'A photo from directly above would settle it.', why: 'y' }, referral: null,
+      },
+      next_step: { kind: 'unclear', title: 'Not sure yet', body: 'x' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Identify' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Take this photo' }));
+
+    expect(await screen.findByText('A photo from directly above would settle it.')).toBeInTheDocument();
+    expect(screen.getByText(/3-photo limit/)).toBeInTheDocument();
+    expect(screen.getAllByRole('img')).toHaveLength(3);
+  });
+
+  it('a referral next_step renders the referral text and a Done button, with no request CTA', async () => {
+    api.getPhotoIds.mockResolvedValue({ items: [] });
+    render(<Harness />);
+    fireEvent.click(await screen.findByRole('button', { name: /Photo ID/i }));
+    fireEvent.click(screen.getByText('Bug or pest'));
+    fireEvent.change(document.querySelector('input[type="file"]'), { target: { files: [photoFile()] } });
+    await screen.findByRole('img');
+
+    api.createPhotoId.mockResolvedValueOnce({
+      id: 'v2ref', type: 'pest', created_at: '2026-09-26T00:00:00Z',
+      result: {},
+      v2: {
+        version: 2, catalog_version: '2026-09-26.1', tier: 'needs_more_evidence',
+        answer: { level: 'entry', node_id: 'honey-bee', wording: 'likely', headline: 'Likely: Honey Bee', subhead: 'Apis mellifera' },
+        group: { id: 'bees', label: 'Bees', generic: 'a bee' },
+        entry: null, evidence: {}, candidates: [], next_photo: null,
+        referral: { kind: 'bee_relocation', text: 'Honey bees are protected — we referred this to a local beekeeper for relocation.' },
+      },
+      next_step: { kind: 'referral', title: 'Referred out', body: 'We connected you with a local beekeeper.' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Identify' }));
+
+    expect(await screen.findByText(/Honey bees are protected/)).toBeInTheDocument();
+    expect(screen.getByText('Referred out')).toBeInTheDocument();
+    expect(screen.getByText('We connected you with a local beekeeper.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Done' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Request service' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Send to the team' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Book free re-service' })).not.toBeInTheDocument();
+  });
+});
+
 describe('request handoff falls back to live inputs (Codex r7 P2)', () => {
   it('a live actionable result missing request_prefill falls back to the type/note/location the customer already entered', async () => {
     api.getPhotoIds.mockResolvedValue({ items: [] });
