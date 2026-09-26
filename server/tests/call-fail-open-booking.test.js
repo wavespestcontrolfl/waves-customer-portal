@@ -1717,6 +1717,9 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     "Caller: Sunday at noon is off.",
     "Caller: I need to ask my husband first.",
     "Caller: Let me check and call you back.",
+    "Caller: Can we do the following week?",
+    "Agent: Let's push it back a day.",
+    "Caller: Could we do it a little earlier?",
   ])('Codex round-26 regression: a later caller rejection or caveat holds the call — %s', (later) => {
     const transcript = `${TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, "We'll see you Sunday at noon.")}\n${later}`;
     const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
@@ -2503,5 +2506,13 @@ describe('canAutoRoute unknown-relationship demotion (owner ruling 2026-07-31)',
     // A flag must not carry two classifications at once.
     const doubled = enumValues.filter((f) => sets.filter((s) => s.has(f)).length > 1);
     expect(doubled).toEqual([]);
+  });
+});
+
+describe('V2 decision version bookkeeping', () => {
+  test('V2_DECISION_VERSIONS ends with the current V2_DECISION_VERSION and has no duplicates', () => {
+    const { V2_DECISION_VERSION, V2_DECISION_VERSIONS } = require('../services/call-routing-gates');
+    expect(V2_DECISION_VERSIONS[V2_DECISION_VERSIONS.length - 1]).toBe(V2_DECISION_VERSION);
+    expect(new Set(V2_DECISION_VERSIONS).size).toBe(V2_DECISION_VERSIONS.length);
   });
 });

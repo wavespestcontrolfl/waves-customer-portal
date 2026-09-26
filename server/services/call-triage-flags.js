@@ -947,6 +947,10 @@ const RETRACTION_MARKER_TERMS = [
   ' actually ', ' instead ', ' change ', ' changed ', ' switch ', ' move ', ' moved ',
   ' cancel ', ' cancelled ', ' canceled ', ' scratch that ', ' never mind ', ' nevermind ',
   ' correction ',
+  // rescheduling with no slot word ("Let's push it back a day.", "Can we
+  // do the following week?")
+  ' push ', ' bump ', ' postpone ', ' delay ', ' rain check ', ' different ',
+  ' another day ', ' another time ', ' following ', ' later ', ' earlier ', ' sooner ',
 ];
 // "sorry"/"wait"/"hold on" are deliberately NOT markers: routine wrap-up
 // ("Sorry, what was your email?", "Please wait for the text.") uses them,
