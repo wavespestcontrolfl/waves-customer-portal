@@ -136,3 +136,40 @@ test('a clearly better clustered day wins over a poorly-placed current day', asy
   // placement's (both computed by the SAME route-model.js function).
   expect(result.audit.routeMetrics.candidate_detour_minutes).toBeLessThan(result.audit.routeMetrics.current_detour_minutes);
 });
+
+// Codex pre-push P1: an eligible recurring visit can carry technician_id
+// NULL. Its current placement must read the same single-tech day candidates
+// are scored on (the one active tech's stops + unassigned stops), not an
+// empty day — otherwise a well-clustered unassigned visit scores as a lone
+// HQ round trip and any comparable candidate falsely clears the threshold.
+test('an UNASSIGNED visit on a clustered day scores that day, so an equally clustered candidate does not move it', async () => {
+  const SVC = { id: 's1', customer_id: 'c1', scheduled_date: '2026-08-04', technician_id: null,
+    window_start: '09:00', estimated_duration_minutes: 60, lat: 27.40, lng: -82.50,
+    auto_dispatch_change_count: 0 };
+  const near = (id, start, end, date, tech) => stopRow(id, start, end, 27.401, -82.501, { date, tech });
+  const currentStops = [near('n1', '08:00', '09:00', '2026-08-04', 't1'), near('n2', '10:00', '11:00', '2026-08-04', null)];
+  const candidateStops = [near('c1', '08:00', '09:00', '2026-08-11', 't1'), near('c2', '10:00', '11:00', '2026-08-11', null)];
+  findAvailableSlots.mockResolvedValue({
+    slots: [{ date: '2026-08-11', technician: { id: 't1', name: 'A' }, start_time: '09:00', end_time: '10:00', detour_minutes: 0, total_drive_minutes: 0, stops_that_day: 2, score: 0 }],
+  });
+  // scheduled_services: call 1 = sibling-date query, call 2 = candidate
+  // tech-days, call 3 = the current day. technicians = the one active tech.
+  let ssCall = 0;
+  const db = (table) => {
+    const n = table === 'technicians' ? 0 : (ssCall += 1);
+    const c = {};
+    ['where', 'whereNot', 'whereNotIn', 'whereNotNull', 'whereIn', 'whereBetween', 'orWhere', 'leftJoin', 'orderBy', 'first']
+      .forEach((m) => { c[m] = () => c; });
+    c.select = async () => {
+      if (n === 0) return [{ id: 't1' }];
+      if (n === 1) return [];
+      return n === 2 ? candidateStops : currentStops;
+    };
+    return c;
+  };
+  const result = await evaluatePlacement(SVC, PREFS, ctxWith(db), CONFIG, '2026-06-20');
+
+  expect(result.kind).toBe('no_change');
+  expect(result.reason_code).toBe('NO_SCORE_IMPROVEMENT');
+  expect(result.audit.routeMetrics.current_score_breakdown.density_score).toBe(10); // clustered, not an empty day
+});

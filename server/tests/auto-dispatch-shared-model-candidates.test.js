@@ -443,11 +443,21 @@ describe('loadDayStops: tech-scoped route scoring (+ the single tech\'s unassign
     expect(capturedField).toBe('scheduled_services.window_start');
   });
 
-  test('a falsy technicianId still short-circuits to [] (no query at all)', async () => {
-    const db = jest.fn();
-    const result = await loadDayStops(db, { technicianId: null, dateStr: '2026-08-06', excludeIds: new Set() });
-    expect(result).toEqual([]);
-    expect(db).not.toHaveBeenCalled();
+  test('no technician: the unassigned rows alone (whereNull, no technician list)', async () => {
+    let usedWhereNull = null;
+    let usedWhereIn = false;
+    const c = {};
+    c.where = (fn) => {
+      if (typeof fn === 'function') {
+        fn({ whereNull: (f) => { usedWhereNull = f; }, whereIn: () => { usedWhereIn = true; return { orWhereNull: () => {} }; } });
+      }
+      return c;
+    };
+    ['whereIn', 'whereNotIn', 'whereNotNull', 'leftJoin'].forEach((m) => { c[m] = () => c; });
+    c.select = async () => [];
+    await loadDayStops(() => c, { technicianId: null, dateStr: '2026-08-06', excludeIds: new Set() });
+    expect(usedWhereNull).toBe('scheduled_services.technician_id');
+    expect(usedWhereIn).toBe(false);
   });
 
   test('excludes every id in excludeIds via whereNotIn', async () => {

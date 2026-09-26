@@ -45,6 +45,7 @@ const { autoDispatchSharedModelLive } = require('../../config/feature-gates');
 const { isActiveRouteStop } = require('./overlap-predicate');
 const { routeCost, clusterShare } = require('./route-model');
 const { occupiedRows, windowsOverlap } = require('../scheduling/occupancy');
+const { applyAssignable } = require('../technician-eligibility');
 
 const DAY_OPEN = 8 * 60;
 const DAY_CLOSE = 17 * 60;
@@ -149,15 +150,19 @@ const DAY_STOP_KEY_COLUMNS = ['scheduled_services.scheduled_date', 'scheduled_se
 // no_show row or an expired estimate-slot hold dropped by isActiveRouteStop,
 // and a windowless placeholder (window_start NULL — a due-date recurring
 // child not yet placed) excluded outright, as the occupancy reader keeps it
-// inert; otherwise it would default to a fictional 08:00 stop.
+// inert; otherwise it would default to a fictional 08:00 stop. No
+// technician ids: the unassigned rows alone.
 async function loadDayStopRows(db, { technicianIds, dates, excludeIds }) {
   const techIds = [...new Set((technicianIds || []).filter(Boolean).map(String))];
   const dateList = [...new Set((dates || []).filter(Boolean))];
-  if (!techIds.length || !dateList.length) return [];
+  if (!dateList.length) return [];
   const ids = [...(excludeIds || [])].map(String);
   const query = db('scheduled_services')
     .whereIn('scheduled_services.scheduled_date', dateList)
-    .where((q) => { q.whereIn('scheduled_services.technician_id', techIds).orWhereNull('scheduled_services.technician_id'); })
+    .where((q) => {
+      if (techIds.length) q.whereIn('scheduled_services.technician_id', techIds).orWhereNull('scheduled_services.technician_id');
+      else q.whereNull('scheduled_services.technician_id');
+    })
     .whereNotIn('scheduled_services.status', ['cancelled', 'completed', 'skipped', 'rescheduled'])
     .whereNotNull('scheduled_services.window_start')
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id');
@@ -174,10 +179,29 @@ function stopsForTechDay(stops, technicianId, dateStr) {
     && (s.technician_id == null || String(s.technician_id) === String(technicianId)));
 }
 
-// A single tech-day (computeCurrentPlacement's current day).
+// A single tech-day (computeCurrentPlacement's current day); a null
+// technicianId reads the unassigned rows alone.
 async function loadDayStops(db, { technicianId, dateStr, excludeIds }) {
-  if (!technicianId) return [];
-  return loadDayStopRows(db, { technicianIds: [technicianId], dates: [dateStr], excludeIds });
+  return loadDayStopRows(db, { technicianIds: technicianId ? [technicianId] : [], dates: [dateStr], excludeIds });
+}
+
+// The technician whose day an UNASSIGNED visit sits on (Codex pre-push P1):
+// eligible recurring visits can carry technician_id NULL, and every
+// candidate is scored on its tech's stops plus the unassigned ones, so the
+// current placement must read the same single-tech day — not an empty one,
+// which would score a well-clustered unassigned visit as a lone HQ round
+// trip and let any candidate clear the threshold. Waves runs one active
+// field technician: the only assignable one (technician-eligibility.js's
+// applyAssignable). Anything else (none, several, an unreadable table)
+// resolves to null — the unassigned rows alone, no guessed technician.
+async function resolveCurrentDayTech(db, service) {
+  if (service.technician_id) return service.technician_id;
+  try {
+    const techs = await applyAssignable(db('technicians')).select('technicians.id');
+    return Array.isArray(techs) && techs.length === 1 ? techs[0].id : null;
+  } catch {
+    return null;
+  }
 }
 
 // The moving unit: its ids (self + every open group member — the rebooker's
@@ -442,21 +466,23 @@ async function computeCurrentPlacement(service, prefs, ctx) {
     date: dateStr,
     start_time: service.window_start ? String(service.window_start).slice(0, 5) : null,
     capability_level: ctx.capabilityFor(techId, category),
-    ...(await sharedModelCurrentPlacement(service, geo, ctx, { dateStr, techId, myStart })),
+    ...(await sharedModelCurrentPlacement(service, geo, ctx, { dateStr, myStart })),
   };
 }
 
 // GATE_AUTO_DISPATCH_SHARED_MODEL: the current placement's numbers from the
 // SAME inputs and functions every candidate gets (scoreOnSharedModel) — the
-// same loadDayStops list (tech-or-unassigned, active stops only, the visit's
+// same day model (the visit's technician, or for an unassigned visit the
+// single active one, plus unassigned rows; active stops only; the visit's
 // own group excluded), so detour, route minutes, stop count and cluster
 // share all describe one stop list (Codex r1: stops_that_day counted the
 // legacy list). Overrides the legacy fields above; gate off returns {} so the
 // legacy object is byte-for-byte unchanged.
-async function sharedModelCurrentPlacement(service, geo, ctx, { dateStr, techId, myStart }) {
+async function sharedModelCurrentPlacement(service, geo, ctx, { dateStr, myStart }) {
   if (!autoDispatchSharedModelLive()) return {};
   const { excludeIds, siblings } = await loadGroupContext(ctx.db, service);
-  const stops = await loadDayStops(ctx.db, { technicianId: techId, dateStr, excludeIds });
+  const dayTech = await resolveCurrentDayTech(ctx.db, service);
+  const stops = await loadDayStops(ctx.db, { technicianId: dayTech, dateStr, excludeIds });
   const cost = geo ? routeCost(stops, serviceToRouteStop(service, geo, myStart, siblings)) : null;
   return {
     ...(cost ? { detour_minutes: cost.detourMinutes, total_drive_minutes: cost.driveWithMinutes, route_minutes: cost.routeTimeWithMinutes } : {}),
