@@ -1527,4 +1527,34 @@ describe('citability backfill completion (Codex r6 P2s)', () => {
     expect(checkImprovementOverPrior({ body: 'Ants.' }, backfill(['named_sources']), prior).ok).toBe(false);
     expect(checkImprovementOverPrior(small, backfill(['named_sources']), {}).ok).toBe(false);
   });
+  test('a trait the prior page satisfied may not regress on a targeted edit (Codex r8 P2)', () => {
+    const table = '<ComparisonTable columns={["a","b"]} rows={[]} />';
+    const howTo = '## How to choose\n- If A → B\n- If C → D\n- If E → F';
+    const prevBody = `## Bait or spray?\nExperts say both work.\n${table}\n${howTo}`;
+    const ctx = { previousVersion: { body: prevBody } };
+    const planned = backfill(['named_sources']);
+    const dropped = checkCitabilityBackfillGapsCleared({ title: 'Ghost Ants', body: '## Bait or spray?\nPer UF/IFAS, both work.' }, planned, ctx);
+    // Dropping the table makes how_to_choose n/a — the comparison regression alone fails the draft.
+    expect(dropped).toEqual({ ok: false, reason: 'citability_traits_regressed:comparison' });
+    const droppedHowTo = checkCitabilityBackfillGapsCleared({ title: 'Ghost Ants', body: `## Bait or spray?\nPer UF/IFAS, both work.\n${table}` }, planned, ctx);
+    expect(droppedHowTo).toEqual({ ok: false, reason: 'citability_traits_regressed:how_to_choose' });
+    const kept = checkCitabilityBackfillGapsCleared({ title: 'Ghost Ants', body: `## Bait or spray?\nPer UF/IFAS, both work.\n${table}\n${howTo}` }, planned, ctx);
+    expect(kept).toEqual({ ok: true });
+  });
+});
+
+describe('citability checks read rendered Markdown only (Codex r8 P2)', () => {
+  const { checkCitabilityComparison, checkCitabilityHowToChoose, checkCitabilityNamedSources } = require('../services/content/content-quality-gate')._internals;
+  test('a ComparisonTable in a code fence or comment does not count', () => {
+    const title = 'Bait vs. Spray';
+    expect(checkCitabilityComparison({ title, body: '```mdx\n<ComparisonTable columns={[]} rows={[]} />\n```' }).ok).toBe(false);
+    expect(checkCitabilityComparison({ title, body: '{/* <ComparisonTable columns={[]} rows={[]} /> */}' }).ok).toBe(false);
+    expect(checkCitabilityComparison({ title, body: '<!-- <ComparisonTable columns={[]} rows={[]} /> -->' }).ok).toBe(false);
+    expect(checkCitabilityComparison({ title, body: '<ComparisonTable columns={[]} rows={[]} />' }).ok).toBe(true);
+  });
+  test('fenced how-to headings/bullets and commented attributions do not count', () => {
+    const table = '<ComparisonTable columns={["a"]} rows={[]} />\n';
+    expect(checkCitabilityHowToChoose({ body: `${table}\`\`\`md\n## How to choose\n- a\n- b\n- c\n\`\`\`` }).reason).toBe('no_how_to_choose_section');
+    expect(checkCitabilityNamedSources({ body: '<!-- Per UF/IFAS, ants trail. -->\nAnts trail after rain.' }).ok).toBe(false);
+  });
 });

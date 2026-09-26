@@ -1153,6 +1153,21 @@ function nonBlogTarget(brief) {
   return brief?.target_page_type === 'page';
 }
 
+// Rendered lines only: fenced code, HTML/MDX comments and other non-rendered
+// Markdown must not satisfy (or trip) a citability check (Codex r8 P2).
+// The shared guardrails blanker preserves line structure but flattens list
+// indentation, so it is used as a per-line MASK over the original text —
+// nested-bullet indentation survives for the how-to criteria count.
+function renderedCitabilityBody(body) {
+  const raw = String(body || '');
+  const { blankNonRenderedMarkdown } = require('./content-guardrails');
+  const blanked = blankNonRenderedMarkdown(raw);
+  const orig = raw.split(/\r?\n/);
+  const mask = blanked.split(/\r?\n/);
+  if (orig.length !== mask.length) return blanked;
+  return orig.map((line, i) => (mask[i].trim() ? line : '')).join('\n');
+}
+
 // Attribution to ANY proper-noun source ("according to the Florida Forest
 // Service", "data from NOAA", "per Mote Marine Laboratory"): the writer
 // contract asks for the SPECIFIC authority the evidence came from, so the
@@ -1182,7 +1197,7 @@ function visibleInlineText(body) {
 
 function checkCitabilityNamedSources(draft, brief) {
   if (nonBlogTarget(brief)) return { ok: true, reason: 'non_blog_target' };
-  const body = visibleInlineText(draft.body);
+  const body = visibleInlineText(renderedCitabilityBody(draft.body));
   if (NAMED_SOURCE_RE.test(body) || hasAttributedSource(body)) return { ok: true };
   return { ok: false, reason: 'no_named_source_attribution' };
 }
@@ -1210,14 +1225,14 @@ function countConcreteSpecifics(body) {
 // all that leans on a vague stand-in instead.
 function checkCitabilityConcreteSpecifics(draft, brief, context) {
   if (nonBlogTarget(brief)) return { ok: true, reason: 'non_blog_target' };
-  const n = countConcreteSpecifics(draft.body);
+  const n = countConcreteSpecifics(renderedCitabilityBody(draft.body));
   const prev = context?.previousVersion?.body;
   if (prev != null) {
-    const before = countConcreteSpecifics(prev);
+    const before = countConcreteSpecifics(renderedCitabilityBody(prev));
     if (n < before) return { ok: false, reason: `refresh_dropped_measurements_${before}_to_${n}` };
   }
   if (n === 0) {
-    const vague = String(draft.body || '').match(VAGUE_QUALIFIER_RE);
+    const vague = renderedCitabilityBody(draft.body).match(VAGUE_QUALIFIER_RE);
     if (vague) return { ok: false, reason: `vague_qualifier_without_measurement:${vague[0].toLowerCase()}` };
   }
   return { ok: true };
@@ -1242,12 +1257,12 @@ function postFramesAChoice(draft) {
   if (CHOICE_POST_TYPES.has(draftPostType(draft))) return true;
   const title = String(draft.title || draft.frontmatter?.title || '');
   if (CHOICE_FRAMING_RE.test(title)) return true;
-  return headingLines(draft.body).some((h) => CHOICE_FRAMING_RE.test(h));
+  return headingLines(renderedCitabilityBody(draft.body)).some((h) => CHOICE_FRAMING_RE.test(h));
 }
 
 function checkCitabilityComparison(draft, brief) {
   if (nonBlogTarget(brief)) return { ok: true, reason: 'non_blog_target' };
-  const hasTable = COMPARISON_TABLE_RE.test(String(draft.body || ''));
+  const hasTable = COMPARISON_TABLE_RE.test(renderedCitabilityBody(draft.body));
   if (hasTable) return { ok: true };
   if (!postFramesAChoice(draft)) return { ok: true, reason: 'no_choice_framed' };
   return { ok: false, reason: 'choice_framed_without_ComparisonTable' };
@@ -1284,7 +1299,7 @@ function howToChooseSectionCriteria(body) {
 
 function checkCitabilityHowToChoose(draft, brief) {
   if (nonBlogTarget(brief)) return { ok: true, reason: 'non_blog_target' };
-  const body = String(draft.body || '');
+  const body = renderedCitabilityBody(draft.body);
   const applies = CHOICE_POST_TYPES.has(draftPostType(draft)) || COMPARISON_TABLE_RE.test(body);
   if (!applies) return { ok: true, reason: 'no_comparison_to_choose_from' };
   const criteria = howToChooseSectionCriteria(body);
@@ -1312,6 +1327,18 @@ function checkCitabilityBackfillGapsCleared(draft, brief, context) {
     if (!r.ok) unresolved.push(`${gap}(${r.reason})`);
   }
   if (unresolved.length) return { ok: false, reason: `planned_gaps_unresolved:${unresolved.join(',')}` };
+  // A targeted edit must not trade one trait for another: a trait the
+  // prior page already satisfied may not regress (Codex r8 P2).
+  const prevBody = context?.previousVersion?.body;
+  if (prevBody != null) {
+    const prevDraft = { ...draft, body: prevBody };
+    const regressed = [];
+    for (const [gap, check] of Object.entries(CITABILITY_GAP_CHECKS)) {
+      if (brief.gsc_signal.citability_gaps.includes(gap)) continue;
+      if (check(prevDraft, brief, {}).ok && !check(draft, brief, context).ok) regressed.push(gap);
+    }
+    if (regressed.length) return { ok: false, reason: `citability_traits_regressed:${regressed.join(',')}` };
+  }
   return { ok: true };
 }
 
