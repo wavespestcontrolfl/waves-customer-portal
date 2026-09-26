@@ -1,0 +1,427 @@
+[
+  {
+    "kind": "organism",
+    "aka": [],
+    "stages": [
+      "larva",
+      "adult"
+    ],
+    "sign_of": [],
+    "safety_line": null,
+    "legacy_slugs": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": ""
+    },
+    "slug": "fall-armyworm",
+    "common_name": "Fall Armyworm",
+    "aliases": [
+      "fall armyworm",
+      "armyworm",
+      "army worm",
+      "armyworms"
+    ],
+    "scientific_name": "Spodoptera frugiperda",
+    "rank": "species",
+    "group": "caterpillars-moths",
+    "subgroup": "lawn-caterpillars",
+    "site_category": "Lawn",
+    "traits": [
+      "Lawn browns in patches seemingly overnight, uniform across a large area",
+      "Light-colored, inverted \"Y\" mark on the front of the dark head",
+      "Caterpillars feed in groups, advancing across turf like a front",
+      "Birds suddenly very interested in the lawn — they find them first"
+    ],
+    "look_alikes": [
+      {
+        "slug": "sod-webworm",
+        "difference": "Fall armyworm has an inverted \"Y\" on the head and damages turf uniformly; sod webworm larvae are smaller with patchy, notched blades.",
+        "next_photo": "A close-up of the caterpillar's head marking, plus a wide shot of the damage pattern.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "worm-caterpillar",
+      "lawn-damage"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      4,
+      5,
+      9,
+      10
+    ],
+    "service": {
+      "line": "lawn",
+      "key": "lawnPestControl",
+      "label": "Lawn Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "Despite the name, fall armyworms damage Florida turf in both spring and fall. The name is literal — they advance across the lawn in fronts, eating as they go, and the birds usually find them before you do.",
+      "fact": "The name is literal — they advance across turf in fronts, eating as they go.",
+      "blurb": "Fast movers. The birds found them before you did."
+    },
+    "tech_notes": "Confirm inverted Y head marking. Soap-flush or visual count at dusk; treat while larvae are small for best control.",
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN255"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/fall-armyworm/",
+      "guides": []
+    },
+    "role": "lawn_pest",
+    "risk": "low",
+    "action": "specialist",
+    "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "kind": "organism",
+    "aka": [],
+    "stages": [
+      "larva",
+      "adult"
+    ],
+    "sign_of": [],
+    "safety_line": null,
+    "legacy_slugs": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": ""
+    },
+    "slug": "sod-webworm",
+    "common_name": "Tropical Sod Webworm",
+    "aliases": [
+      "sod webworm",
+      "sod webworms",
+      "lawn caterpillar",
+      "lawn caterpillars",
+      "webworm",
+      "webworms"
+    ],
+    "scientific_name": "Herpetogramma phaeopteralis",
+    "rank": "species",
+    "group": "caterpillars-moths",
+    "subgroup": "lawn-caterpillars",
+    "site_category": "Lawn",
+    "traits": [
+      "Small tan moths flush up in a zigzag pattern when you walk through or mow the lawn",
+      "Grass blades notched and chewed, patches look scalped",
+      "Cream larvae with brown-spotted segments, up to about 11 mm",
+      "Damage appears fast in late summer and fall, with adults present year-round in south Florida"
+    ],
+    "look_alikes": [
+      {
+        "slug": "fall-armyworm",
+        "difference": "Sod webworm damage starts as ragged, notched blades in smaller patches; fall armyworm eats uniformly across a large area and has an inverted \"Y\" on the head.",
+        "next_photo": "A wide shot of the damage pattern, plus a close-up of any caterpillar found.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "worm-caterpillar",
+      "lawn-damage"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": false
+    },
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      9,
+      10,
+      11
+    ],
+    "service": {
+      "line": "lawn",
+      "key": "lawnPestControl",
+      "label": "Lawn Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "The moths do zero damage — it's their caterpillars feeding at night that shear the lawn. This is a late-summer classic; a technician can evaluate how far the damage has spread and whether the lawn needs overseeding to recover.",
+      "fact": "The moths do zero damage — it’s their caterpillars feeding at night that shear the lawn.",
+      "blurb": "Late-summer classic. A technician evaluates the extent of the damage and the best path to recovery."
+    },
+    "tech_notes": "Moths flush when disturbed; larvae feed at night (window-feeding first 4 instars, then full blade). Treat late afternoon; re-check 10-14 days.",
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN968"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/sod-webworm/",
+      "guides": []
+    },
+    "role": "lawn_pest",
+    "risk": "low",
+    "action": "specialist",
+    "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "kind": "organism",
+    "aka": [
+      "Asp"
+    ],
+    "stages": [
+      "larva"
+    ],
+    "sign_of": [],
+    "safety_line": "The most venomous caterpillar in the US — hidden spines under the fur cause intense pain. Never touch it. See a doctor if pain or swelling worsens. Call 911 if someone has trouble breathing.",
+    "legacy_slugs": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": ""
+    },
+    "slug": "puss-caterpillar",
+    "common_name": "Puss Caterpillar",
+    "aliases": [
+      "puss caterpillar",
+      "asp caterpillar",
+      "asp"
+    ],
+    "scientific_name": "Megalopyge opercularis",
+    "rank": "species",
+    "group": "caterpillars-moths",
+    "subgroup": "stinging-caterpillars",
+    "site_category": "Stingers",
+    "traits": [
+      "Looks like a tiny blonde toupee — completely furry, teardrop-shaped, about 2.5 cm",
+      "Head hidden beneath dense hair; a short tail extends past the body",
+      "Found on oaks, elms, and citrus; sometimes drops onto railings or shoulders",
+      "Fall is peak season in Southwest Florida"
+    ],
+    "look_alikes": [
+      {
+        "slug": "io-moth-caterpillar",
+        "difference": "Puss caterpillars are uniformly fuzzy with no visible spines; Io moth caterpillars are bright green with a red-and-white stripe and obvious branched spines.",
+        "next_photo": "From a few feet away, zoom in on the body surface without touching it — fuzzy all over versus spiny with visible stripes.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "small",
+    "where": [
+      "lawn-garden",
+      "lanai-patio"
+    ],
+    "looks": [
+      "worm-caterpillar"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": true,
+      "bites": false,
+      "venomous": true,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": true
+    },
+    "range": "occasional",
+    "active_months": [
+      4,
+      5,
+      6,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      10,
+      11
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "The most venomous caterpillar in the United States hides under that soft-looking fur — the \"hairs\" conceal venomous spines. Teach kids the \"cute means don’t touch\" rule; stings are intensely painful but rarely dangerous.",
+      "fact": "The most venomous caterpillar in the United States hides under that fur — the \"hairs\" conceal venomous spines.",
+      "blurb": "Never touch; teach kids the \"cute = don’t\" rule. Stings are intensely painful but rarely dangerous."
+    },
+    "tech_notes": "Confirm dense uniform fur, no visible spine pattern. Advise removal by trained tech (tape-lift or clipping), never bare-handed.",
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/in014"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/puss-caterpillar/",
+      "guides": []
+    },
+    "role": "stinging_pest",
+    "risk": "medical",
+    "action": "leave_alone",
+    "season_basis": "unverified",
+    "verification": []
+  },
+  {
+    "kind": "organism",
+    "aka": [],
+    "stages": [
+      "larva",
+      "adult"
+    ],
+    "sign_of": [],
+    "safety_line": "Spines sting like nettles and can cause a burning, itchy welt. See a doctor for a strong allergic reaction. Call 911 if someone has trouble breathing.",
+    "legacy_slugs": [],
+    "review": {
+      "status": "owner_approved",
+      "notes": ""
+    },
+    "slug": "io-moth-caterpillar",
+    "common_name": "Io Moth Caterpillar",
+    "aliases": [
+      "io moth caterpillar",
+      "io caterpillar",
+      "automeris io"
+    ],
+    "scientific_name": "Automeris io",
+    "rank": "species",
+    "group": "caterpillars-moths",
+    "subgroup": "stinging-caterpillars",
+    "site_category": "Stingers",
+    "traits": [
+      "Bright green with a red-and-white racing stripe down each side",
+      "Branched spines covering the body, up to about 6.5 cm long",
+      "Feeds in groups on oaks, hibiscus, and many other shrubs",
+      "Grows into a moth with large false \"eyes\" on the hindwings"
+    ],
+    "look_alikes": [
+      {
+        "slug": "puss-caterpillar",
+        "difference": "Io moth caterpillars are green with branched spines and a red-white stripe; puss caterpillars are uniformly furry with no visible spines.",
+        "next_photo": "From a few feet away, zoom in on the body surface without touching it — spiny with a stripe versus uniformly fuzzy.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "medium",
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "worm-caterpillar"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": true,
+      "bites": false,
+      "venomous": true,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false,
+      "irritant": true
+    },
+    "range": "occasional",
+    "active_months": [
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "peak_months": [
+      7,
+      8,
+      9
+    ],
+    "service": {
+      "line": "pest",
+      "key": "pest",
+      "label": "General Pest Control",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "It grows into a moth with huge false \"eyes\" on its hindwings — one of Florida’s prettiest transformations from one of its spiciest caterpillars. Look, photograph, and don’t touch; pain from a sting typically fades within hours.",
+      "fact": "It grows into a moth with huge false \"eyes\" on its hindwings, used to startle predators.",
+      "blurb": "Spines sting like nettles. Look, photograph, don’t pet."
+    },
+    "tech_notes": "Confirm branched scoli spines + red/white lateral stripe. Advise removal by trained tech if on a high-traffic plant; no treatment usually needed.",
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN1065"
+    ],
+    "links": {
+      "site_page": "/pest-identifier/io-moth-caterpillar/",
+      "guides": []
+    },
+    "role": "stinging_pest",
+    "risk": "irritant",
+    "action": "leave_alone",
+    "season_basis": "observed",
+    "verification": []
+  }
+]
