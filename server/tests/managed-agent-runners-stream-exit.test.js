@@ -401,6 +401,15 @@ describe('lead-response-agent — a status_idle event is not terminal on its own
     expect(mockExecuteLeadTool.mock.calls.map(([name]) => name)).toEqual(['queue_for_adam']);
   });
 
+  it('a final agent.message carrying end_turn collects its text AND ends the run', async () => {
+    global.fetch = fetchFor([
+      { event: 'message', data: { type: 'agent.message', stop_reason: { type: 'end_turn' }, content: [{ type: 'text', text: 'Done.' }] } },
+      text('never read'),
+    ]);
+    await expect(run(load(path))).resolves.toMatchObject({ report: 'Done.' });
+    expect(recorded()).toMatchObject({ failure: null });
+  });
+
   it('a session that asks for more than 20 tool calls is stopped (max_tool_calls)', async () => {
     mockExecuteLeadTool.mockResolvedValue({ ok: true });
     global.fetch = fetchFor([

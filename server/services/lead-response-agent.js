@@ -105,14 +105,15 @@ const SIDE_EFFECTS = {
   save_lead_response_report: { key: 'save_lead_response_report', done: (result) => Boolean(result) && !result.error },
 };
 
-// One classification per frame. The JSON `type` is authoritative: the SSE
-// `event:` line may be absent, and readSessionFrames then reports 'message'.
+// What a frame carries for the run loop. The JSON `type` is authoritative:
+// the SSE `event:` line may be absent, and readSessionFrames then reports
+// 'message'. Terminal and error detection stay independent of this (a final
+// agent.message can carry stop_reason end_turn).
 function leadFrameKind(event, data) {
   const type = data?.type || event;
   if (type === 'agent.message' || event === 'assistant' || event === 'text') return 'text';
   if (type === 'agent.custom_tool_use' || type === 'tool_use' || event === 'tool_use') return 'tool_use';
-  if (isSessionTerminal(event, data)) return 'end';
-  return isSessionError(event) ? 'error' : 'other';
+  return 'other';
 }
 
 function frameText(data) {
@@ -440,13 +441,12 @@ const LeadResponseAgent = {
             content: [{ type: 'text', text: JSON.stringify(outcome.toolResult) }],
             ...(outcome.failed ? { is_error: true } : {}),
           }], openedStream.deadline);
-        } else if (kind === 'end') {
-          // session.status_idle is NOT terminal on its own (it arrives with
-          // requires_action while the agent waits for the tool result sent
-          // above) — the shared predicate reads only real terminals.
-          sessionEnded = true;
-          break;
-        } else if (kind === 'error') {
+        }
+        // session.status_idle is NOT terminal on its own (it arrives with
+        // requires_action while the agent waits for the tool result sent
+        // above) — the shared predicate reads only real terminals.
+        if (isSessionTerminal(event, data)) { sessionEnded = true; break; }
+        if (isSessionError(event)) {
           logger.error(`[lead-agent] Agent error: ${JSON.stringify(data)}`);
           failure = 'session_error_event';
           break;
