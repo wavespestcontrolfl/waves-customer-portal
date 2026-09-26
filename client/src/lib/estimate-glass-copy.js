@@ -434,6 +434,16 @@ const GLASS_ONE_TIME_HERO_REVIEW_NO_GUARANTEE = {
   heroSub: 'One visit, priced from your actual property — our team reviews it and confirms scheduling with you. Licensed & insured.',
 };
 
+// A recurring estimate the server marks noGuaranteeClaims keeps its pack but
+// never its guarantee: a hero subline that promises one (the pest pack's
+// "unlimited free callbacks, and a money-back guarantee", lawn's "backed by
+// our money-back guarantee") falls back to the bundle pack's subline, which
+// claims only that the plan was priced from the property.
+export function glassPackWithoutGuarantee(pack) {
+  if (!pack || !/guarantee/i.test(pack.heroSub || '')) return pack;
+  return { ...pack, heroSub: GLASS_PACKS.bundle.heroSub };
+}
+
 export function glassOneTimeHeroOverlay(pack, { reviewBeforeBooking = false, preserveServiceHero = false, noGuarantee = false } = {}) {
   if (!glassCopyActive()) return null;
   if (preserveServiceHero && pack) return pack;
@@ -530,7 +540,10 @@ export function glassServiceSlug(keyOrLabel) {
   if (raw.includes('lawn')) return 'lawn_care';
   if (raw.includes('mosquito')) return 'mosquito';
   if (raw.includes('tree') || raw.includes('shrub')) return 'tree_shrub';
-  if (raw.includes('foam')) return 'foam_recurring';
+  // Foam sealant is rodent-exclusion material ("Rodent Exclusion – Foam
+  // Sealing"): only termite foam work takes the foam slug, the same split as
+  // the server's service-normalizer.js detectServiceCategory.
+  if (raw.includes('foam') && !/rodent|seal/.test(raw)) return 'foam_recurring';
   if (raw.includes('termite')) return 'termite_bait';
   if (raw.includes('palm')) return 'palm_injection';
   if (raw.includes('rodent') || raw.includes('bait station')) return 'rodent_bait';

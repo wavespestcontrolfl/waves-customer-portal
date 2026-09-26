@@ -8,7 +8,7 @@
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
-const { serviceMixMakesNoGuaranteeClaim, normalizeOneTimeBreakdown } = require('../routes/estimate-public');
+const { serviceMixMakesNoGuaranteeClaim, normalizeOneTimeBreakdown, guaranteeRecurringRows } = require('../routes/estimate-public');
 
 const PEST = [{ name: 'Pest Control', mo: 55 }];
 const charge = (service, label, amount) => ({ service, label, amount, kind: 'charge' });
@@ -42,6 +42,21 @@ describe('serviceMixMakesNoGuaranteeClaim', () => {
   test('an unclassifiable recurring service row fails closed; a membership line does not count', () => {
     expect(serviceMixMakesNoGuaranteeClaim([...PEST, { name: 'Quarterly Specialty Visit', mo: 40 }], [])).toBe(true);
     expect(serviceMixMakesNoGuaranteeClaim([...PEST, { name: 'WaveGuard Membership', mo: 0 }], [])).toBe(false);
+  });
+
+  test('rodent foam sealing is rodent work, not termite (Codex r2)', () => {
+    expect(serviceMixMakesNoGuaranteeClaim(PEST, [
+      charge('rodent_exclusion', 'Rodent Exclusion – Foam Sealing', 350),
+      charge('rodent_exclusion_followup', 'Foam Sealing Follow-Up (Rodent)', 95),
+    ])).toBe(false);
+    expect(serviceMixMakesNoGuaranteeClaim(PEST, [charge('foam_drill', 'Foam Drill Treatment', 450)])).toBe(true);
+  });
+
+  test('a pest plan saved in the nested results.recurring shape keeps its guarantee (Codex r2)', () => {
+    const estData = { result: { results: { recurring: { services: PEST } }, oneTime: { items: [] } } };
+    expect(serviceMixMakesNoGuaranteeClaim(guaranteeRecurringRows(estData), normalizeOneTimeBreakdown(estData).items)).toBe(false);
+    const termiteNested = { result: { results: { recurring: { services: [{ name: 'Termite Bait Monitoring', mo: 45 }] } } } };
+    expect(serviceMixMakesNoGuaranteeClaim(guaranteeRecurringRows(termiteNested), [])).toBe(true);
   });
 
   test('nothing classifiable at all makes no guarantee', () => {

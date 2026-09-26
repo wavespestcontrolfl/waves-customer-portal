@@ -8840,7 +8840,7 @@ async function handleEstimateView(req, res, next) {
       // The page's guarantee rule, decided from the same normalized rows the
       // React view reads (renderPage only sees this view and the data).
       noGuaranteeClaims: serviceMixMakesNoGuaranteeClaim(
-        recurringServicesWithSupplements(estData?.result || estData?.engineResult || estData || {}),
+        guaranteeRecurringRows(estData),
         [
           ...(normalizeOneTimeBreakdown(estData)?.items || []),
           ...(pricingBundleForView?.oneTimeBreakdown?.items || []),
@@ -19908,7 +19908,10 @@ function collectServiceCategories(recurringServices = [], oneTimeItems = []) {
 // the same normalized rows and classifiers the page renders from (above).
 // Owner ruling: termite carries no guarantee of any kind (re-treatment needs
 // the paid bond). True when any recurring or one-time service row is termite
-// work (by the page's category, or by termite wording on the row), when a
+// work (by the page's category, or by the canonical service-name classifier,
+// service-normalizer.js detectServiceCategory, which routes only the
+// drill/recurring termite-foam forms to termite and leaves rodent foam
+// sealing as rodent), when a
 // service row can't be classified (it might be termite work), or when nothing
 // on the estimate classifies at all. isNonServiceOneTimeItem keeps setup,
 // discount and credit rows out, and counts a positive "other one-time
@@ -19918,25 +19921,37 @@ const NO_GUARANTEE_TERMITE_CATEGORIES = new Set([
   'termite_bait', 'foam_recurring', 'termite_trenching', 'pre_slab_termiticide',
   'bora_care', 'termite_foam', 'wdo_inspection',
 ]);
-const TERMITE_WORK_RX = /termite|trench|bora\s*care|boracare|pre\s*slab|slab\s*pre\s*treat|\bwdo\b|wood\s*destroying|\bfoam\b|termidor|trelona|taurus|altriset|sentricon/i;
 // Recurring rows that are not services (a membership line) never count.
 const NON_SERVICE_RECURRING_KEY_RX = /membership|setup|discount|credit/;
+// The recurring rows the guarantee rule reads: the page's supplemented rows
+// plus the nested results.recurring.services shape some saves persist
+// (estimate-manual-acceptance.js reads it too), which
+// recurringServicesWithSupplements does not initialize from. Classification
+// only, so a row seen twice is harmless.
+function guaranteeRecurringRows(estData) {
+  const root = estData?.result || estData?.engineResult || estData || {};
+  const nested = Array.isArray(root?.results?.recurring?.services) ? root.results.recurring.services : [];
+  return [...recurringServicesWithSupplements(root), ...nested];
+}
+
 function serviceMixMakesNoGuaranteeClaim(recurringServices = [], oneTimeItems = []) {
-  const rowText = (row = {}) => [row.key, row.service, row.name, row.label, row.displayName]
-    .filter(Boolean).join(' ').replace(/[_-]+/g, ' ');
+  const { detectServiceCategory } = require('../utils/service-normalizer');
+  const namedTermite = (row = {}) => detectServiceCategory(
+    [row.key, row.service, row.name, row.label, row.displayName].filter(Boolean).join(' ').replace(/[_-]+/g, ' '),
+  ) === 'termite';
   let classified = 0;
   for (const svc of (Array.isArray(recurringServices) ? recurringServices : [])) {
     if (!svc || typeof svc !== 'object') continue;
     const key = recurringServiceKey(svc);
     if (NON_SERVICE_RECURRING_KEY_RX.test(key || '')) continue;
     const category = categoryForRecurringServiceKey(key);
-    if (!category || NO_GUARANTEE_TERMITE_CATEGORIES.has(category) || TERMITE_WORK_RX.test(rowText(svc))) return true;
+    if (!category || NO_GUARANTEE_TERMITE_CATEGORIES.has(category) || namedTermite(svc)) return true;
     classified += 1;
   }
   for (const item of (Array.isArray(oneTimeItems) ? oneTimeItems : [])) {
     if (!item || typeof item !== 'object' || isNonServiceOneTimeItem(item)) continue;
     const category = serviceCategoryForOneTimeItem(item);
-    if (!category || NO_GUARANTEE_TERMITE_CATEGORIES.has(category) || TERMITE_WORK_RX.test(rowText(item))) return true;
+    if (!category || NO_GUARANTEE_TERMITE_CATEGORIES.has(category) || namedTermite(item)) return true;
     classified += 1;
   }
   return classified === 0;
@@ -26293,7 +26308,7 @@ async function composeEstimateDataPayload(estimate, {
     );
     // Termite work (or unclassifiable work) anywhere on the page's own rows:
     // the page and its proposal document make no estimate-wide guarantee.
-    const noGuaranteeClaims = serviceMixMakesNoGuaranteeClaim(recurringServicesForIntelligence, oneTimeItemsForCategory);
+    const noGuaranteeClaims = serviceMixMakesNoGuaranteeClaim(guaranteeRecurringRows(estimateDataForIntelligence), oneTimeItemsForCategory);
     // Guarantee-only renewals accept with NO appointment: the acceptance
     // contract tells the React view to skip the slot picker and offer the
     // payment-only (invoice) accept. An existing linked appointment keeps
@@ -27504,6 +27519,7 @@ module.exports.attachPublicPricingContract = attachPublicPricingContract;
 module.exports.serviceCategoryForOneTimeChoice = serviceCategoryForOneTimeChoice;
 module.exports.serviceCategoryForOneTimeItem = serviceCategoryForOneTimeItem;
 module.exports.serviceMixMakesNoGuaranteeClaim = serviceMixMakesNoGuaranteeClaim;
+module.exports.guaranteeRecurringRows = guaranteeRecurringRows;
 module.exports.oneTimeInvoiceLabelForCategory = oneTimeInvoiceLabelForCategory;
 module.exports.oneTimeToggleCopyForCategory = oneTimeToggleCopyForCategory;
 module.exports.isOneTimeChoiceItemForCategory = isOneTimeChoiceItemForCategory;

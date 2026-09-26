@@ -79,6 +79,7 @@ import {
   glassDayLinesFor,
   glassEstimateCopyFor,
   glassOneTimeHeroOverlay,
+  glassPackWithoutGuarantee,
   glassPackWithOneTimeHero,
   glassServiceSlug,
   glassTierDisplay,
@@ -7846,16 +7847,19 @@ function EstimateViewPageInner({ websiteMode = false }) {
     'termite_trenching', 'pre_slab_termiticide', 'bora_care',
     'wdo_inspection', 'termite_foam', 'trap_only',
   ]).has(serviceCategory);
-  // noGuaranteeClaims: the server's guarantee decision (termite lane, or
-  // lanes it can't classify), so the one-time hero drops "satisfaction
-  // guaranteed" the same way the estimate emails do.
-  const baseGlassPack = estimate.isOneTimeOnly === true
+  // noGuaranteeClaims: the server's guarantee decision (termite work, or a
+  // service it can't classify, anywhere on the estimate). The one-time hero
+  // drops "satisfaction guaranteed", and any other hero drops a guarantee
+  // promise, recurring plans included.
+  const noGuaranteeClaims = estimate?.noGuaranteeClaims === true;
+  const categoryGlassPack = estimate.isOneTimeOnly === true
     ? glassOneTimeHeroOverlay(glassEstimateCopyFor(serviceCategory), {
       reviewBeforeBooking,
       preserveServiceHero: serviceSpecificOneTimeHero,
-      noGuarantee: estimate?.noGuaranteeClaims === true,
+      noGuarantee: noGuaranteeClaims,
     })
     : glassEstimateCopyFor(serviceCategory);
+  const baseGlassPack = noGuaranteeClaims ? glassPackWithoutGuarantee(categoryGlassPack) : categoryGlassPack;
   // One-time-only service copy (server contract pricing.oneTimeServiceCopy —
   // roach cleanout, flea, wasp, bed bug, …): its hero names the service
   // actually quoted, replacing the category hero ("your service quote is

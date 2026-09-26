@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  glassPackWithoutGuarantee,
   applyCommercialExteriorScope,
   commercialGlassActive,
   glassCopyActive,
@@ -168,6 +169,39 @@ describe('termite work never carries a guarantee (owner ruling; server estimateM
     expect(glassCtaMicroForKeys(['pest_control'])).toBe(GLASS_COPY.ctaMicro);
     expect(glassCtaMicroForKeys(['rodent'])).toMatch(/Satisfaction guaranteed/);
     expect(glassCtaMicroForKeys(['pest_control', 'rodent_bait'])).toMatch(/Satisfaction guaranteed/);
+  });
+});
+
+describe('glassPackWithoutGuarantee (server noGuaranteeClaims on a recurring estimate)', () => {
+  it('replaces a hero subline that promises a guarantee and keeps the rest of the pack', () => {
+    setGlassDefault(true);
+    const pest = glassEstimateCopyFor('pest_control');
+    expect(pest.heroSub).toMatch(/money-back guarantee/);
+    const stripped = glassPackWithoutGuarantee(pest);
+    expect(stripped.heroSub).not.toMatch(/guarantee/i);
+    expect(stripped.heroSub).toBe(glassEstimateCopyFor('bundle').heroSub);
+    expect(stripped.heroH1).toBe(pest.heroH1);
+    expect(stripped.aiTitle).toBe(pest.aiTitle);
+  });
+
+  it('leaves a guarantee-free pack, or no pack, untouched', () => {
+    setGlassDefault(true);
+    const termite = glassEstimateCopyFor('termite_bait');
+    expect(glassPackWithoutGuarantee(termite)).toBe(termite);
+    expect(glassPackWithoutGuarantee(null)).toBeNull();
+  });
+});
+
+describe('foam slug: termite foam only (rodent foam sealing stays rodent)', () => {
+  it('routes rodent foam-sealing rows away from the termite foam slug', () => {
+    expect(glassServiceSlug('Rodent Exclusion – Foam Sealing')).toBe('rodent_bait');
+    expect(glassServiceSlug('Foam Sealing Follow-Up (Rodent)')).toBe('rodent_bait');
+    expect(glassCtaMicroForKeys(['Rodent Exclusion – Foam Sealing'])).toMatch(/Satisfaction guaranteed/);
+  });
+
+  it('keeps termite foam work on its slugs', () => {
+    expect(glassServiceSlug('foam_recurring')).toBe('foam_recurring');
+    expect(glassServiceSlug('Termite Foam Treatment')).toBe('termite_foam');
   });
 });
 
