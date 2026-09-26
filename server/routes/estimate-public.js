@@ -26051,10 +26051,8 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
           }
         }
       }
-      void db('sms_send_claims')
-        .where('created_at', '<', db.raw("NOW() - interval '1 day'"))
-        .del()
-        .catch(() => {});
+      // Weekly claims (the BI briefing's) survive the daily prune: sms-send-claims.js.
+      void require('../services/sms-send-claims').pruneSmsSendClaims().catch(() => {});
       return res.json({ ok: true, channel: 'sms', ...(smsResult.deduped ? { deduped: true } : {}) });
     }, async () => {
       // Pre-push audit P1 (round 7): the offer changed between the send
