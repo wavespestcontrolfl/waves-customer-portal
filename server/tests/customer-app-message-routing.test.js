@@ -143,12 +143,22 @@ test('temporary native failures retain their delay and never invoke a Text fallb
   expect(Twilio.sendSMS.mock.calls[0][2].explicitPushOnly).toBe(true);
 });
 
-test.each(['opt_out_keyword', 'wrong_number', 'manual_dnc', 'non_mobile'])('hard suppression %s still blocks app delivery', async (reason) => {
+test.each(['opt_out_keyword', 'wrong_number', 'manual_dnc'])('hard suppression %s still blocks app delivery', async (reason) => {
   suppression = { reason, active: true };
   const result = await sendCustomerMessage(input);
   expect(result.sent).toBe(false);
   expect(result.blocked).toBe(true);
   expect(Twilio.sendSMS).not.toHaveBeenCalled();
+});
+
+test('an unavailable App delivery cannot fall back to a non_mobile SMS number', async () => {
+  suppression = { reason: 'non_mobile', active: true };
+  Twilio.sendSMS.mockResolvedValue({ success: false, appUnavailable: true, error: 'no_fresh_device' });
+  expect(await sendCustomerMessage(input)).toMatchObject({
+    sent: false, code: 'SUPPRESSED_NON_MOBILE', requestedChannel: 'push',
+  });
+  expect(Twilio.sendSMS).toHaveBeenCalledTimes(1);
+  expect(Twilio.sendSMS.mock.calls[0][2].explicitPushOnly).toBe(true);
 });
 
 test('unknown suppression and category off both fail closed', async () => {
@@ -520,6 +530,18 @@ describe('explicit billing channel combinations', () => {
     expect(prefs.sms_enabled).toBe(false);
   });
 
+  test('non_mobile blocks only the selected Text leg while Email and App remain deliverable', async () => {
+    prefs.payment_receipt_channels = ['email', 'sms', 'push'];
+    suppression = { reason: 'non_mobile', active: true };
+    const result = await sendCustomerMessage(input);
+    expect(result.channelResults).toMatchObject({
+      email: { sent: true }, push: { sent: true }, sms: { sent: false, code: 'SUPPRESSED_NON_MOBILE' },
+    });
+    expect(sendBillingChannelEmail).toHaveBeenCalledTimes(1);
+    expect(Twilio.sendSMS).toHaveBeenCalledTimes(1);
+    expect(Twilio.sendSMS.mock.calls[0][2].explicitPushOnly).toBe(true);
+  });
+
   test('a disabled email leg does not prevent the selected text', async () => {
     prefs.payment_receipt_channels = ['email', 'sms'];
     prefs.email_enabled = false;
@@ -529,13 +551,9 @@ describe('explicit billing channel combinations', () => {
   });
 
   test('an unresolved phone-keyed suppression read fails CLOSED for Email, same as App (finding A)', async () => {
-    // checkSuppression only consults the phone-keyed messaging_suppression
-    // table — the ONLY place manual_dnc / opt_out live. The billing email
-    // authority's own suppression recheck only ever consults the
-    // email-template suppression store, never this one, so a transient read
-    // failure here must fail closed for Email exactly like it already does
-    // for App, or a DB blip lets a manual_dnc / opt-out recipient through on
-    // the Email leg.
+    // The initial routing check and the locked Email authority both use
+    // the canonical phone-keyed suppression validator. A transient read
+    // failure must defer Email and App instead of bypassing DNC / opt-out.
     prefs.payment_receipt_channels = ['email'];
     suppressionError = true;
     const result = await sendCustomerMessage(input);
