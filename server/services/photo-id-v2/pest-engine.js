@@ -595,9 +595,12 @@ function entryLevelAnswer(candidates, top, unansweredTrigger) {
   // surface the pair's own confirmation instructions and force
   // needs_more_evidence, rather than a confident answer with
   // `next_photo: null`.
-  const applicablePair = second?.entry
-    ? pairIfBothApproved(top.entry, second.entry.slug)
-    : firstApprovedLookAlike(top.entry);
+  // Codex round-0 P1 (round 7): mirrors `nextPhotoFor`'s OWN fallthrough
+  // exactly — a second candidate with no curated pair against the top
+  // (unapproved, or simply not each other's look-alike) still falls back
+  // to the top entry's own first-approved look-alike, the same as having
+  // no second candidate at all.
+  const applicablePair = (second?.entry && pairIfBothApproved(top.entry, second.entry.slug)) || firstApprovedLookAlike(top.entry);
   const unconfirmablePair = applicablePair?.photo_can_confirm === false;
   const named = (wording) => ({
     level: 'entry', wording, nodeId: top.slug, subhead: top.entry.scientific_name || null,

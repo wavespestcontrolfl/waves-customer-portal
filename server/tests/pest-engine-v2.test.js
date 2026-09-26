@@ -227,6 +227,18 @@ describe('buildAnswer — tier', () => {
     expect(built.tier).toBe('needs_more_evidence');
   });
 
+  test('a second candidate that is NOT the curated pair still falls back to the top entry\'s own unconfirmable pair — Codex round-0 P1 (round 7)', () => {
+    // ghost-ant is a real second candidate, but it is not no-photo-pair-a's
+    // curated pair (that's no-photo-pair-b) — the fallback must still apply.
+    const built = buildAnswer(baseCtx({
+      candidates: [cand('no-photo-pair-a', 0.95), cand('ghost-ant', 0.10)], currentMonth: CURRENT_MONTH,
+    }));
+    expect(built.answer.wording).toBe('likely');
+    expect(built.nextPhoto).not.toBeNull();
+    expect(built.nextPhoto.photo_can_confirm).toBe(false);
+    expect(built.tier).toBe('needs_more_evidence');
+  });
+
   test('an unconfirmable pair blocks pretty_sure even at 0.90 confidence — Codex round-0 P1 (round 5)', () => {
     const built = buildAnswer(baseCtx({
       candidates: [cand('no-photo-pair-a', 0.90), cand('no-photo-pair-b', 0.85)], currentMonth: CURRENT_MONTH,
