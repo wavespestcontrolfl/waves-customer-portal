@@ -43,6 +43,7 @@ const {
   buildPublicPestReport,
   publicIdentificationLabel,
 } = require('../services/pest-identification');
+const { identifyPestV2 } = require('../services/photo-id-v2/pest-engine');
 const lawnAssessment = require('../services/lawn-assessment');
 const { loadCustomerGrassContext, grassTypeLabel } = require('../services/lawn-grass-context');
 const {
@@ -239,6 +240,15 @@ const NEXT_STEP_COPY = {
     title: 'Send this to our team',
     body: "We'll review these photos and follow up with next steps.",
   },
+  // Photo ID v2 (GATE_PHOTO_ID_V2, V2-CONTRACT.md): this kind's specific
+  // referral text (bee relocation, wildlife trapper, FWC/FDACS, protected-
+  // leave-alone) lives in the `v2.referral.text` field the client renders —
+  // this generic fallback covers a client that hasn't shipped v2-aware UI
+  // yet, same compatibility posture as every other kind here.
+  referral: {
+    title: 'This one calls for a specialist',
+    body: 'See the details above for who to contact — this isn\'t something general pest control treats.',
+  },
 };
 
 function buildNextStep(kind, { url, prefill } = {}) {
@@ -388,10 +398,110 @@ function pestReserviceLane(contract) {
   return line === 'pest' || line === 'lawn' ? line : null;
 }
 
+// ── Pest v2 (GATE_PHOTO_ID_V2, customer mode only) ─────────────────────────
+//
+// V2-CONTRACT.md's next_step mapping, in the order the contract states it:
+// inspection-first (the SAME v1 hard rule the engine's v1 mapping already
+// carries — termite/bed-bug/rodent/honey-bee-style entries) outranks a
+// referral (Waves inspects in person before referring out — e.g.
+// honey-bee-wall-colony carries BOTH inspection_first and a referral, and
+// the in-person confirm happens first); a referral outranks the generic
+// needs_more_evidence read; a confident, uncontested harmless/ally entry
+// reads 'none'; everything else is the SAME lane logic v1 already uses
+// (`laneOutcomeKind` — reservice when covered, else request).
+function pestNextStepKindV2(v2, v1Contract, access, isSecondary) {
+  if (v1Contract?.service?.inspection_required) return 'inspection';
+  if (v2.referral) return 'referral';
+  if (v2.tier === 'needs_more_evidence') return 'unclear';
+  const confidentHarmless = v2.answer?.level === 'entry' && v2.answer?.wording === 'pretty_sure'
+    && v2.entry && (v2.entry.verdict === 'ally' || v2.entry.verdict === 'harmless');
+  if (confidentHarmless) return 'none';
+  return laneOutcomeKind(pestReserviceLane(v1Contract), access, isSecondary);
+}
+
+async function handlePestV2(req, res, {
+  note, location, propertyId, isSecondary, issueAssociation, photoInputs,
+}) {
+  const result = await identifyPestV2(photoInputs);
+  if (!result.ok) {
+    return res.status(503).json({ error: `Photo analysis is briefly unavailable. Please try again in a few minutes or call ${OFFICE_PHONE}.` });
+  }
+  const { v2, v1, internal } = result;
+
+  const submission = {
+    mode: 'customer',
+    status: 'analyzed',
+    source: 'portal',
+    customer_id: req.customer.id,
+    property_id: propertyId,
+    // `internal` (which models answered, escalation reasons) is server-side
+    // only — folded into ai_analysis (already an internal/admin-facing
+    // column, never returned to the customer), never into result_v2.
+    ai_analysis: JSON.stringify({ customer_note: note, engine: 'v2', internal }),
+    report_contract: JSON.stringify(v1.report_contract),
+    result_v2: JSON.stringify(v2),
+    category: v1.category,
+    species_slug: v1.species_slug,
+    service_line: v1.service_line,
+    urgency: v1.urgency,
+    ai_summary: (v2.evidence.matches || []).join(' ').slice(0, 2000) || null,
+    note,
+    location,
+  };
+  const row = issueAssociation.enabled
+    ? await savePestSubmission({
+      issueId: issueAssociation.issueId,
+      customerId: req.customer.id,
+      propertyId,
+      area: location,
+      observedOn: issueAssociation.observedOn,
+      submission,
+    })
+    : (await db('pest_identifications').insert(submission).returning(['id', 'created_at']))[0];
+
+  await storeFunnelPhotos({
+    table: 'pest_identification_photos',
+    fkColumn: 'identification_id',
+    rowId: row.id,
+    keyPrefix: 'pestid/customer',
+    photos: photoInputs,
+  });
+
+  const access = await reserviceStreamlineAccess(req.customer.id);
+  const lane = pestReserviceLane(v1.report_contract);
+  const kind = pestNextStepKindV2(v2, v1.report_contract, access, isSecondary);
+  const nextStep = buildNextStep(kind, {
+    url: kind === 'reservice' && access ? `/reservice/${access.token}` : undefined,
+    prefill: prefillFor(lane, kind, { location, note }),
+  });
+  // The legacy `result` field is kept byte-shape-compatible (V2-CONTRACT.md
+  // "the response keeps every v1 field... and ADDS v2") for any client that
+  // hasn't shipped v2-aware UI yet — v1.report_contract is already in the
+  // exact v1 contract shape `pestPublicResult` expects.
+  const pestResult = pestPublicResult(v1.report_contract);
+
+  const issueFields = issueAssociation.enabled
+    ? { issue_id: row.issue_id, observed_on: serializeObservedOn(row.observed_on) }
+    : {};
+  return res.status(200).json({
+    id: row.id, type: 'pest', created_at: row.created_at, result: pestResult, next_step: nextStep, v2,
+    ...issueFields,
+  });
+}
+
 async function handlePest(req, res, {
   note, location, propertyId, isSecondary, issueAssociation,
 }) {
   const photoInputs = req._photoInputs;
+
+  // Gate off => byte-identical to today, proven by the existing route
+  // tests below (none of them enable `photoIdV2`). Customer mode only —
+  // the website funnel and SMS photo triage have their own handlers and
+  // never reach this route.
+  if (isEnabled('photoIdV2')) {
+    return handlePestV2(req, res, { note, location, propertyId, isSecondary, issueAssociation, photoInputs });
+  }
+
   const result = await identifyPest(photoInputs);
   if (!result.ok) {
     return res.status(503).json({ error: `Photo analysis is briefly unavailable. Please try again in a few minutes or call ${OFFICE_PHONE}.` });
@@ -1095,8 +1205,20 @@ router.post('/:type', perCustomerLimiter, sharedDailyLimiter, async (req, res, n
 
 // ── Listing / detail ─────────────────────────────────────────────────────
 
+// Photo ID v2: the row's stored `v2` answer while the gate is on, else
+// null — the ONE place every v1/v2 branch below reads this from, so gate
+// off (or a pre-v2 row with no result_v2) is always exactly null, never a
+// stale v2 read.
+function v2FromRow(row) {
+  if (!isEnabled('photoIdV2') || !row.result_v2) return null;
+  const v2 = parseJsonSafe(row.result_v2, null);
+  return v2 && typeof v2 === 'object' ? v2 : null;
+}
+
 function pestHeadline(row) {
   try {
+    const v2 = v2FromRow(row);
+    if (v2?.answer?.headline) return v2.answer.headline;
     const contract = parseJsonSafe(row.report_contract);
     return publicIdentificationLabel(contract).label;
   } catch {
@@ -1116,6 +1238,8 @@ function lawnHeadline(row) {
 
 function pestNextStepKindFromRow(row, access, isSecondary) {
   const contract = parseJsonSafe(row.report_contract);
+  const v2 = v2FromRow(row);
+  if (v2) return pestNextStepKindV2(v2, contract, access, isSecondary);
   const publicReport = buildPublicPestReport({ report_contract: JSON.stringify(contract) });
   const idLabel = publicIdentificationLabel(contract);
   const partial = !!parseJsonSafe(row.ai_analysis).partial;
@@ -1162,6 +1286,7 @@ router.get('/', async (req, res, next) => {
   try {
     const customerId = req.customer.id;
     const issuesEnabled = isEnabled('customerPhotoIdIssues');
+    const v2Enabled = isEnabled('photoIdV2');
     const scope = await resolvePropertyScope(req);
     const pestQuery = db('pest_identifications').where({ customer_id: customerId, mode: 'customer' });
     const lawnQuery = db('lawn_diagnostics').where({ customer_id: customerId, mode: 'customer' });
@@ -1173,6 +1298,7 @@ router.get('/', async (req, res, next) => {
       pestQuery.orderBy('created_at', 'desc').limit(20).select(
         'id', 'created_at', 'report_contract', 'ai_analysis',
         ...(issuesEnabled ? ['issue_id', 'observed_on'] : []),
+        ...(v2Enabled ? ['result_v2'] : []),
       ),
       lawnQuery.orderBy('created_at', 'desc').limit(20).select('id', 'created_at', 'report_contract'),
       treeQuery.orderBy('created_at', 'desc').limit(20).select('id', 'created_at', 'overall_score', 'composite_scores'),
@@ -1180,11 +1306,15 @@ router.get('/', async (req, res, next) => {
 
     const access = await reserviceStreamlineAccess(customerId);
     const items = [
-      ...pestRows.map((row) => ({
-        id: row.id, type: 'pest', created_at: row.created_at, headline: pestHeadline(row),
-        next_step_kind: pestNextStepKindFromRow(row, access, scope.isSecondary),
-        ...(issuesEnabled ? { issue_id: row.issue_id, observed_on: serializeObservedOn(row.observed_on) } : {}),
-      })),
+      ...pestRows.map((row) => {
+        const v2 = v2FromRow(row);
+        return {
+          id: row.id, type: 'pest', created_at: row.created_at, headline: pestHeadline(row),
+          next_step_kind: pestNextStepKindFromRow(row, access, scope.isSecondary),
+          ...(issuesEnabled ? { issue_id: row.issue_id, observed_on: serializeObservedOn(row.observed_on) } : {}),
+          ...(v2 ? { v2 } : {}),
+        };
+      }),
       ...lawnRows.map((row) => ({
         id: row.id, type: 'lawn', created_at: row.created_at, headline: lawnHeadline(row),
         next_step_kind: lawnNextStepKindFromRow(row, access, scope.isSecondary),
@@ -1223,18 +1353,30 @@ router.get('/:type/:id', async (req, res, next) => {
       const issuesEnabled = isEnabled('customerPhotoIdIssues');
       const contract = parseJsonSafe(row.report_contract);
       const pestResult = pestPublicResult(contract);
-      const idLabel = publicIdentificationLabel(contract);
-      const partial = !!parseJsonSafe(row.ai_analysis).partial;
       const lane = pestReserviceLane(contract);
-      const kind = pestNextStepKind(pestResult, idLabel, lane, access, partial, scope.isSecondary);
+      const v2 = v2FromRow(row);
+      let kind;
+      if (v2) {
+        kind = pestNextStepKindV2(v2, contract, access, scope.isSecondary);
+      } else {
+        const idLabel = publicIdentificationLabel(contract);
+        const partial = !!parseJsonSafe(row.ai_analysis).partial;
+        kind = pestNextStepKind(pestResult, idLabel, lane, access, partial, scope.isSecondary);
+      }
       const nextStep = buildNextStep(kind, {
         url: kind === 'reservice' && access ? `/reservice/${access.token}` : undefined,
         prefill: prefillFor(lane, kind, { location: row.location, note: row.note }),
       });
-      const { result: finalPestResult } = finalizeCustomerResult('pest', { complete: !partial, build: () => pestResult });
+      // Gate off (or a pre-v2 row): byte-identical to today — `v2` is null,
+      // so `finalizeCustomerResult`'s partial-photo-batch handling (v1's
+      // own multi-photo concept; v2 sends every photo in one combined call
+      // and has no equivalent) still runs exactly as before.
+      const partialForFinalize = !v2 && !!parseJsonSafe(row.ai_analysis).partial;
+      const { result: finalPestResult } = finalizeCustomerResult('pest', { complete: !partialForFinalize, build: () => pestResult });
       return res.status(200).json({
         id: row.id, type: 'pest', created_at: row.created_at, result: finalPestResult, next_step: nextStep, photos,
         ...(issuesEnabled ? { issue_id: row.issue_id, observed_on: serializeObservedOn(row.observed_on) } : {}),
+        ...(v2 ? { v2 } : {}),
       });
     }
 

@@ -104,6 +104,7 @@ mockDb.transaction = jest.fn(async (callback) => {
 
 const mockGateState = { customerPhotoId: true, customerPhotoIdIssues: false };
 const mockIdentifyPest = jest.fn();
+const mockIdentifyPestV2 = jest.fn();
 const mockLawnAnalyzePhoto = jest.fn();
 const mockTreeAnalyzePhoto = jest.fn();
 const mockReserviceAccess = jest.fn(async () => null);
@@ -186,6 +187,9 @@ jest.mock('../services/pest-identification', () => {
   const actual = jest.requireActual('../services/pest-identification');
   return { ...actual, identifyPest: (...args) => mockIdentifyPest(...args) };
 });
+jest.mock('../services/photo-id-v2/pest-engine', () => ({
+  identifyPestV2: (...args) => mockIdentifyPestV2(...args),
+}));
 jest.mock('../services/lawn-assessment', () => ({
   analyzePhoto: (...args) => mockLawnAnalyzePhoto(...args),
 }));
@@ -282,6 +286,7 @@ beforeEach(() => {
   mockScopeCustomerId = `auto-customer-${testCounter}`;
   mockGateState.customerPhotoId = true;
   mockGateState.customerPhotoIdIssues = false;
+  mockGateState.photoIdV2 = false;
   mockDropIssueOnTransactionStart = false;
   mockReserviceAccess.mockResolvedValue(null);
   mockResolveSessionScope.mockResolvedValue({
@@ -290,6 +295,7 @@ beforeEach(() => {
   mockApplyPropertyPredicateCalls.length = 0;
   mockLoadCustomerGrassContext.mockResolvedValue({ grassTypeLabel: null, irrigationSystem: null });
   mockIdentifyPest.mockResolvedValue(pestResultFor('ghost-ant'));
+  mockIdentifyPestV2.mockResolvedValue({ ok: false, reason: 'not_configured_by_this_test' });
   mockLawnAnalyzePhoto.mockResolvedValue(lawnAnalyzeResult({
     turf_density: 80, weed_coverage: 10, color_health: 8, fungal_activity: 'none', insect_damage: 'none', mechanical_damage: 'none', drought_stress: 'none', thatch_visibility: 'low', overwatering_signal: false, grass_type: 'st_augustine', observations: 'Lawn looks healthy.',
   }));
@@ -1608,4 +1614,189 @@ test('preview signing failure retains the photo ID, emits a safe diagnostic and 
   mockGetViewUrl.mockRejectedValueOnce(new Error('secret signed URL must not be logged'));
   expect(await customerPhotoViews('pest', 'parent')).toEqual([{ id: 'photo-signing-failed', mime_type: undefined, url: null }]);
   expect(require('../services/logger').warn).toHaveBeenCalledWith('[photo-id] preview signing failed for photo photo-signing-failed');
+});
+
+// ── Photo ID v2 (GATE_PHOTO_ID_V2) — PR-2b wiring ──────────────────────────
+//
+// identifyPestV2 is mocked wholesale (its own 75-case suite,
+// pest-engine-v2.test.js, covers the engine itself) — these tests only
+// prove the ROUTE'S OWN job: gate off is byte-identical (every test above
+// this block already proves that implicitly, since none of them enable
+// photoIdV2; the explicit test below proves it directly too), gate on
+// writes result_v2 + returns v2, and the next_step kind mapping
+// (V2-CONTRACT.md) reads the engine's v1/v2 output correctly.
+describe('Photo ID v2 (GATE_PHOTO_ID_V2)', () => {
+  function pestV2Result({
+    wording = 'likely', level = 'entry', tier = 'ai_suggestion', verdict = 'watch',
+    inspectionRequired = false, referral = null, serviceLine = 'pest', slug = 'ghost-ant',
+  } = {}) {
+    const entry = level === 'entry' ? {
+      slug, common_name: 'Ghost Ant', scientific_name: 'Tapinoma melanocephalum', kind: 'organism',
+      verdict, verdict_label: 'Keep an eye on it', role: 'nuisance', role_label: 'Nuisance',
+      risk: 'low', risk_label: 'Low risk when left alone', action: 'monitor', action_label: 'Keep an eye on it',
+      safety_line: null, what_it_means: 'Ghost ants trail to moisture and sweets.', fact: 'Colonies split easily.',
+      site_url: null, look_alikes: [],
+    } : null;
+    return {
+      ok: true,
+      v2: {
+        version: 2, catalog_version: '2026-09-26.fixture', tier,
+        answer: { level, node_id: level === 'entry' ? slug : 'ants', wording, headline: 'Likely: Ghost Ant', subhead: null },
+        group: { id: 'ants', label: 'Ants', generic: 'an ant' },
+        entry,
+        evidence: { matches: [], still_need: [] },
+        candidates: [],
+        next_photo: null,
+        referral,
+      },
+      v1: {
+        species_slug: slug,
+        category: 'insect',
+        service_line: serviceLine,
+        urgency: 'moderate',
+        report_contract: {
+          contract_version: 'pest_id_v1',
+          identification: { slug, label: 'Ghost Ant', group: 'ants', category: 'insect', confidence: 'moderate', contested: false },
+          safety: { stinging: false, venomous: false, disease_vector: false, structural_threat: false },
+          urgency: 'moderate',
+          service: { line: serviceLine, key: 'pest', label: 'General Pest Control', inspection_required: inspectionRequired },
+          observations: [], distinguishing_features: [], alternate_slugs: [],
+        },
+      },
+      internal: { models: {}, escalation_triggered: false, escalation_reasons: [], disagreed: false },
+    };
+  }
+
+  test('gate off never calls identifyPestV2 — the v1 engine and legacy shape run unchanged', async () => {
+    mockGateState.photoIdV2 = false;
+    await withServer(async (base) => {
+      const created = await post(base, '/api/photo-id/pest', photoBody()).then((res) => res.json());
+      expect(mockIdentifyPestV2).not.toHaveBeenCalled();
+      expect(mockIdentifyPest).toHaveBeenCalled();
+      expect(created).not.toHaveProperty('v2');
+    });
+  });
+
+  test('gate on: writes result_v2, and the response carries v2 alongside the legacy result/next_step', async () => {
+    mockGateState.photoIdV2 = true;
+    mockIdentifyPestV2.mockResolvedValue(pestV2Result());
+    await withServer(async (base) => {
+      const res = await post(base, '/api/photo-id/pest', photoBody());
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(mockIdentifyPest).not.toHaveBeenCalled();
+      expect(mockIdentifyPestV2).toHaveBeenCalledTimes(1);
+      expect(body.v2.answer.wording).toBe('likely');
+      expect(body.result).toBeTruthy(); // legacy field kept for a pre-v2 client
+      expect(body.next_step).toBeTruthy();
+      const row = TABLES.pest_identifications.find((r) => r.id === body.id);
+      expect(JSON.parse(row.result_v2).answer.wording).toBe('likely');
+      expect(row.species_slug).toBe('ghost-ant');
+    });
+  });
+
+  test('inspection-first wins over a referral (Waves inspects in person before referring out)', async () => {
+    mockGateState.photoIdV2 = true;
+    mockIdentifyPestV2.mockResolvedValue(pestV2Result({
+      inspectionRequired: true, referral: { kind: 'bee_relocation', text: 'call a specialist' },
+    }));
+    await withServer(async (base) => {
+      const body = await post(base, '/api/photo-id/pest', photoBody()).then((res) => res.json());
+      expect(body.next_step.kind).toBe('inspection');
+    });
+  });
+
+  test('a referral (no inspection-first) wins over the generic lane logic', async () => {
+    mockGateState.photoIdV2 = true;
+    mockIdentifyPestV2.mockResolvedValue(pestV2Result({
+      inspectionRequired: false, referral: { kind: 'protected_leave_alone', text: 'leave it be' },
+    }));
+    await withServer(async (base) => {
+      const body = await post(base, '/api/photo-id/pest', photoBody()).then((res) => res.json());
+      expect(body.next_step.kind).toBe('referral');
+      expect(body.next_step.title).toBeTruthy();
+    });
+  });
+
+  test('needs_more_evidence tier reads unclear', async () => {
+    mockGateState.photoIdV2 = true;
+    mockIdentifyPestV2.mockResolvedValue(pestV2Result({ tier: 'needs_more_evidence', level: 'group' }));
+    await withServer(async (base) => {
+      const body = await post(base, '/api/photo-id/pest', photoBody()).then((res) => res.json());
+      expect(body.next_step.kind).toBe('unclear');
+    });
+  });
+
+  test('a confident, uncontested harmless/ally entry reads none', async () => {
+    mockGateState.photoIdV2 = true;
+    mockIdentifyPestV2.mockResolvedValue(pestV2Result({ wording: 'pretty_sure', verdict: 'ally', tier: 'ai_suggestion' }));
+    await withServer(async (base) => {
+      const body = await post(base, '/api/photo-id/pest', photoBody()).then((res) => res.json());
+      expect(body.next_step.kind).toBe('none');
+    });
+  });
+
+  test('otherwise falls to the existing lane logic — reservice when the lane is covered', async () => {
+    mockGateState.photoIdV2 = true;
+    mockReserviceAccess.mockResolvedValue({ token: 'tok-v2', lanes: ['pest'] });
+    mockIdentifyPestV2.mockResolvedValue(pestV2Result({ wording: 'likely', verdict: 'watch', serviceLine: 'pest' }));
+    await withServer(async (base) => {
+      const body = await post(base, '/api/photo-id/pest', photoBody()).then((res) => res.json());
+      expect(body.next_step.kind).toBe('reservice');
+      expect(body.next_step.url).toBe('/reservice/tok-v2');
+    });
+  });
+
+  test('otherwise falls to the existing lane logic — request when not covered', async () => {
+    mockGateState.photoIdV2 = true;
+    mockReserviceAccess.mockResolvedValue(null);
+    mockIdentifyPestV2.mockResolvedValue(pestV2Result({ wording: 'likely', verdict: 'watch', serviceLine: 'pest' }));
+    await withServer(async (base) => {
+      const body = await post(base, '/api/photo-id/pest', photoBody()).then((res) => res.json());
+      expect(body.next_step.kind).toBe('request');
+    });
+  });
+
+  test('GET /:type/:id returns the stored v2 while the gate is on', async () => {
+    mockGateState.photoIdV2 = true;
+    mockIdentifyPestV2.mockResolvedValue(pestV2Result());
+    await withServer(async (base) => {
+      const created = await post(base, '/api/photo-id/pest', photoBody()).then((res) => res.json());
+      const detail = await fetch(`${base}/api/photo-id/pest/${created.id}`).then((res) => res.json());
+      expect(detail.v2.answer.wording).toBe('likely');
+      expect(detail.photos).toBeDefined();
+    });
+  });
+
+  test('GET /:type/:id omits v2 once the gate is turned back off, even for a v2-written row', async () => {
+    mockGateState.photoIdV2 = true;
+    mockIdentifyPestV2.mockResolvedValue(pestV2Result());
+    await withServer(async (base) => {
+      const created = await post(base, '/api/photo-id/pest', photoBody()).then((res) => res.json());
+      mockGateState.photoIdV2 = false;
+      const detail = await fetch(`${base}/api/photo-id/pest/${created.id}`).then((res) => res.json());
+      expect(detail).not.toHaveProperty('v2');
+    });
+  });
+
+  test('history list includes v2 for a v2-written row while the gate is on', async () => {
+    mockGateState.photoIdV2 = true;
+    mockIdentifyPestV2.mockResolvedValue(pestV2Result());
+    await withServer(async (base) => {
+      await post(base, '/api/photo-id/pest', photoBody());
+      const list = await fetch(`${base}/api/photo-id`).then((res) => res.json());
+      expect(list.items[0].v2.answer.wording).toBe('likely');
+      expect(list.items[0].headline).toBe('Likely: Ghost Ant'); // v2's own headline, not v1's
+    });
+  });
+
+  test('a v2 engine miss (ok:false) answers 503, same as a v1 vision-unavailable miss', async () => {
+    mockGateState.photoIdV2 = true;
+    mockIdentifyPestV2.mockResolvedValue({ ok: false, reason: 'no_photos' });
+    await withServer(async (base) => {
+      const res = await post(base, '/api/photo-id/pest', photoBody());
+      expect(res.status).toBe(503);
+      expect(TABLES.pest_identifications).toHaveLength(0);
+    });
+  });
 });

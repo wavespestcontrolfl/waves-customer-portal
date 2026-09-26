@@ -638,6 +638,12 @@ const gates = {
   // environment; requires appPropertyScope so every issue has a durable saved-
   // property identity. Gate off keeps existing payloads and writes unchanged.
   customerPhotoIdIssues: process.env.GATE_CUSTOMER_PHOTO_ID_ISSUES === 'true',
+  // Photo ID v2 pest engine (server/services/photo-id-v2/pest-engine.js) —
+  // customer mode only, on top of customerPhotoId (both must be on).
+  // Strict opt-in in every environment; gate off keeps handlePest, the
+  // GET routes, and the history list byte-identical to the v1 engine —
+  // no v2 call, no result_v2 write, no `v2` field in any response.
+  photoIdV2: process.env.GATE_PHOTO_ID_V2 === 'true',
   // Public careers application funnel (POST /api/public/careers/apply).
   // Dark until the owner turns hiring on; the admin recruiting queue works
   // at any setting (it only reads/updates existing rows).
