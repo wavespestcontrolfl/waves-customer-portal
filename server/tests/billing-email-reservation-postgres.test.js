@@ -98,6 +98,7 @@ postgres('billing Email reservation reconciliation (PostgreSQL)', () => {
       table.jsonb('payload_snapshot');
       table.jsonb('categories');
       table.string('provider_message_id');
+      table.string('send_attempt_token');
       table.string('provider_handoff_phase');
       table.string('status');
       table.timestamp('sent_at', { useTz: true });
@@ -184,6 +185,10 @@ postgres('billing Email reservation reconciliation (PostgreSQL)', () => {
     await mockDatabase('collections_contact_ledger').insert([email, sibling]);
     await mockDatabase('email_messages').insert(stored);
 
+    await mockDatabase('email_messages').where({ id: stored.id }).update({ send_attempt_token: 'new-attempt' });
+    await mockDatabase.transaction((trx) => handleEmailMessageEvent({ event: 'delivered' }, stored, trx));
+    expect((await mockDatabase('collections_contact_ledger').where({ id: email.id }).first()).metadata.delivered).toBeUndefined();
+    stored.send_attempt_token = 'new-attempt';
     await mockDatabase.transaction((trx) => handleEmailMessageEvent({
       event: 'delivered', email: stored.recipient_email_snapshot,
       sg_event_id: 'event-delivered', timestamp: Math.floor(Date.now() / 1000),

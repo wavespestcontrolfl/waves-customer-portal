@@ -1,44 +1,15 @@
 /**
- * "Want us to come look first?" section on the public estimate page
+ * "Want us to come look first?" consultation offer on estimates
  * (consultation-first lane, owner ruling 2026-09-23: for recurring-plan
  * leads a free on-site consultation is the preferred path and the estimate
- * is the fallback). Offers the SAME /inspection/:token self-booking page
- * the recurring-lead new_lead email offers (lead-consultation-email-block.js)
- * — this covers the estimate PAGE only, not the email.
+ * is the fallback). Links to the SAME /inspection/:token self-booking page
+ * the recurring-lead new_lead email offers (lead-consultation-email-block.js).
  *
- * Dark behind BOTH GATE_ESTIMATE_CONSULTATION_OFFER (this feature) and
- * GATE_LEAD_INSPECTION_LINK (the /inspection/:token page itself, and the
- * one long-URL builder every consultation link shares) — both must be live.
- *
- * Renders `{ url }` only when ALL of the following hold, and null on ANY
- * other outcome (fail closed — never breaks the estimate page, never
- * throws):
- *   - both gates live;
- *   - the estimate is in an open, customer-actionable state (the caller
- *     passes `acceptActive`, computed the same way as every other
- *     accept-active-gated section on this page — never re-derived here, so
- *     this module can't drift from the route's own accepted/declined/
- *     expired/staff-preview verdict);
- *   - the estimate carries a STRONG lead linkage (`lead_linkage` 'sid' or
- *     'stamp' — the same strong-linkage set the accept handler's own
- *     lead/call-log re-lock uses) — a weak or absent linkage never offers;
- *   - the linked lead passes leadLinkRefusal (open lead, US phone, and — if
- *     a customer is linked — that customer is live and still on the lead's
- *     phone): the SAME chokepoint every consultation-link caller shares;
- *   - the lead wants a recurring plan (leadWantsRecurringPlan);
- *   - the /inspection/:token page would actually offer a time: reused via
- *     inspection-public.js's `_internals.computeConsultationSlotsForLead`
- *     (the same probe and the same rule the email block uses — eligible
- *     lead, live catalog, in-area location, at least one open slot; or no
- *     address on file yet, which the page asks for). It runs last, after
- *     every cheap check, so only a strongly-linked open recurring lead on an
- *     accept-active estimate pays for the location/availability lookup,
- *     once per page load (the page does not poll /data).
- *
- * NO writes: no createShortCode, no DB insert. The long URL only
- * (consultationUrlForLead with NO channel — unverified delivery; this is
- * neither an SMS send, which channel:'sms' asserts phone delivery for, nor
- * an email send). A public GET must stay read-only.
+ * buildEstimateConsultationOffer is the estimate PAGE's offer,
+ * dark behind GATE_ESTIMATE_CONSULTATION_OFFER plus the /inspection page's
+ * GATE_LEAD_INSPECTION_LINK: the long URL with no channel claim and no
+ * write of any kind (a public GET stays read-only). It never throws — any
+ * ineligibility or error is null and the page renders without the section.
  */
 
 const db = require('../models/db');
@@ -76,43 +47,79 @@ function sameProperty(estimateAddress, pageAddress) {
   return Boolean(estZip) && estZip === normalizeZip(pageAddress.zip);
 }
 
-async function buildEstimateConsultationOffer({
-  leadId, leadLinkage, acceptActive, estimateAddress, fromVisit = false, grouped = false,
-} = {}) {
+// The lead an estimate belongs to. The link the admin estimate tool writes
+// is the lead-side pointer leads.estimate_id (estimate-lead-linkage.js reads
+// it for attribution); only estimator-engine call drafts and commercial
+// proposals stamp estimate_data.lead_id with a strong lead_linkage — none of
+// the 234 estimates sent in the 90 days to 2026-09-26 carried one, so the
+// stamp alone left the offer inert. Both sources count; more than one live
+// lead pointing at the estimate, or a pointer and a stamp naming different
+// leads, is ambiguous and yields none.
+async function linkedLeadIdFor(estimateId, estimateData) {
+  const candidates = new Set();
+  if (estimateId) {
+    const pointing = await db('leads').where({ estimate_id: estimateId }).whereNull('deleted_at').limit(2).pluck('id');
+    pointing.forEach((id) => candidates.add(String(id).toLowerCase()));
+  }
+  // Lowercased on both sides: uuids compare case-insensitively in Postgres,
+  // so one lead written in two cases is still one candidate.
+  if (estimateData?.lead_id && STRONG_LEAD_LINKAGES.includes(estimateData?.lead_linkage)) {
+    candidates.add(String(estimateData.lead_id).toLowerCase());
+  }
+  return candidates.size === 1 ? [...candidates][0] : null;
+}
+
+// The lead a consultation offer on this estimate may invite, or null. The
+// caller checks its own gate first; this checks the /inspection page's gate
+// and everything else:
+//   - accept-active (the caller's verdict) and quote-first: not drafted
+//     from a visit (estimate_data.scheduled_service_id — the assessment
+//     pre-draft already had its look, Codex #4853 r2 P1) and not grouped
+//     (estimate_group_id spans properties);
+//   - an unambiguous linked lead (linkedLeadIdFor) that is still the
+//     estimate's contact, passes leadLinkRefusal and wants a recurring plan;
+//   - the page's probe finds an open slot (#4853 r1 P2) at the address it
+//     resolved, which must be this estimate's property (r2 P1, r3 P0).
+// Throws on unexpected errors — callers fail soft.
+async function estimateConsultationLead({ estimate, estimateData, acceptActive } = {}) {
+  if (!leadInspectionLinkLive() || !acceptActive || !estimate) return null;
+  if (estimateData?.scheduled_service_id || estimate.estimate_group_id) return null;
+  const leadId = await linkedLeadIdFor(estimate.id, estimateData);
+  if (!leadId) return null;
+
+  const lead = await db('leads').where({ id: leadId }).whereNull('deleted_at')
+    .first('id', 'phone', 'email', 'service_interest', 'status', 'converted_at', 'customer_id');
+  if (!lead) return null;
+  // The pointer is editable on its own (PUT /api/admin/leads/:id), so the
+  // lead must still be the estimate's contact (Codex #4906 r1 P1): the
+  // same customer, or the same phone or email — the rule attaching a lead
+  // to an estimate uses (lead-estimate-link.js).
+  const { leadMatchesEstimateContact } = require('./lead-estimate-link');
+  if (!leadMatchesEstimateContact(lead, estimate)) return null;
+  if (await leadLinkRefusal(lead)) return null;
+  if (!leadWantsRecurringPlan(lead)) return null;
+
+  const { computeConsultationSlotsForLead } = require('../routes/inspection-public')._internals;
+  const result = await computeConsultationSlotsForLead(lead.id, { count: 1 });
+  if (!result.ok || result.slots.length === 0) return null;
+  if (!sameProperty(estimate.address, result.address)) return null;
+  return lead;
+}
+
+// The estimate page's offer: its own gate, then the shared eligibility. The
+// long URL with NO channel claim (unverified delivery) and no write — a
+// public GET stays read-only.
+async function buildEstimateConsultationOffer({ estimate, estimateData, acceptActive } = {}) {
   try {
-    if (!estimateConsultationOfferLive() || !leadInspectionLinkLive()) return null;
-    if (!acceptActive) return null;
-    // Quote-first estimates only (Codex #4853 r2 P1): one drafted from a
-    // visit (estimate_data.scheduled_service_id — the assessment pre-draft)
-    // already had its look, and a grouped estimate spans properties.
-    if (fromVisit || grouped) return null;
-    if (!leadId || !STRONG_LEAD_LINKAGES.includes(leadLinkage)) return null;
-
-    const lead = await db('leads').where({ id: String(leadId) }).whereNull('deleted_at')
-      .first('id', 'phone', 'service_interest', 'status', 'converted_at', 'customer_id');
+    if (!estimateConsultationOfferLive()) return null;
+    const lead = await estimateConsultationLead({ estimate, estimateData, acceptActive });
     if (!lead) return null;
-    if (await leadLinkRefusal(lead)) return null;
-    if (!leadWantsRecurringPlan(lead)) return null;
-
-    // The /inspection/:token page's own lead-wide eligibility, so this
-    // offer can never link to a page that would refuse the same lead.
-    const { computeConsultationSlotsForLead } = require('../routes/inspection-public')._internals;
-    const result = await computeConsultationSlotsForLead(lead.id, { count: 1 });
-    // Bookable at THIS estimate's property: an open slot (Codex #4853 r1
-    // P2 — out of area, retired catalog or no open times would open a page
-    // with nothing to pick) at the address the page resolved, matched to
-    // the estimate (r2 P1). A lead with no address on file has nothing to
-    // match, so it gets no offer here.
-    if (!result.ok || result.slots.length === 0) return null;
-    if (!sameProperty(estimateAddress, result.address)) return null;
-
     const url = consultationUrlForLead(lead.id);
-    if (!url) return null;
-    return { url };
+    return url ? { url } : null;
   } catch (err) {
-    logger.warn(`[estimate-consultation-offer] build failed for lead ${leadId}: ${err.message}`);
+    logger.warn(`[estimate-consultation-offer] build failed for estimate ${estimate?.id}: ${err.message}`);
     return null;
   }
 }
 
-module.exports = { buildEstimateConsultationOffer, _test: { sameProperty } };
+module.exports = { buildEstimateConsultationOffer, _test: { sameProperty, linkedLeadIdFor } };
