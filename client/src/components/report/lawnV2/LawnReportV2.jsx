@@ -658,6 +658,13 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
   const stackedExtent = (hasRain ? rain : 0) + (hasIrr && irrOnFile ? irrigation : 0);
   const axisMax = Math.max(hasTotal ? total : 0, stackedExtent, hasTarget ? target : 0) * 1.25 || 2;
   const pctOf = (v) => `${clamp((v / axisMax) * 100)}%`;
+  // A required boolean without one complete, consistent instruction does not
+  // prove the amount/timing needed to credit or reduce this week's plan.
+  const canCreditWaterIn = [
+    aftercare?.waterInRequired === true,
+    aftercare?.evidenceSource === 'product_instruction',
+    aftercare?.needsReview !== true,
+  ].every(Boolean);
 
   return (
     <Card>
@@ -732,7 +739,7 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
           (codex gh-r16). */}
       {water.weekPlan && water.weekPlan.title ? (
         <div className="lawn-callout-plan" data-testid="lawn-week-plan" style={{ marginTop: 12, padding: '11px 13px', background: COLORS.sand, border: `1px solid ${COLORS.glassNavy}`, borderRadius: 8, fontSize: 14.5, color: BODY, lineHeight: 1.5 }}>
-          {aftercare && aftercare.waterInRequired === true && water.weekPlan.visitInPlanWeek === true ? (
+          {canCreditWaterIn && water.weekPlan.visitInPlanWeek === true ? (
             <div data-testid="lawn-week-plan-aftercare-note" data-plan-credit={water.weekPlan.prescribesRun === true ? 'run' : 'hold'} style={{ marginBottom: 6, fontSize: 14, color: MUTED }}>
               {water.weekPlan.prescribesRun === true
                 ? 'Today’s treatment comes first — follow the after-visit watering note below. That watering counts as one of this week’s runs (a one-run plan is covered by it); only pick the plan back up if it called for more.'
@@ -742,7 +749,7 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
           {/* A credited watering-in REDUCES the plan shown — never the
               unreduced run under the credit note (codex gh-r24). */}
           {(() => {
-            const credited = aftercare && aftercare.waterInRequired === true && water.weekPlan.visitInPlanWeek === true && water.weekPlan.prescribesRun === true && water.weekPlan.afterTreatment;
+            const credited = canCreditWaterIn && water.weekPlan.visitInPlanWeek === true && water.weekPlan.prescribesRun === true && water.weekPlan.afterTreatment;
             const shown = credited ? water.weekPlan.afterTreatment : water.weekPlan;
             return (
               <>

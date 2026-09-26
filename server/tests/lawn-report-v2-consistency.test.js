@@ -142,6 +142,23 @@ describe('structured moisture evidence owns sprinkler advice', () => {
     expect(report.smsSummary).not.toMatch(/No action needed/);
   });
 
+  test('a lower-priority mowing task prevents the hero from declaring no action', () => {
+    const report = buildLawnReportV2({
+      lawnAssessment: baseAssessment({
+        ...CASES.healthy,
+        scores: { ...CASES.healthy.scores, fungusControl: 40 },
+      }),
+      mowingHeight: { heightIn: 2, status: 'below', band: { min: 3.5, max: 4 } },
+    });
+    expect(report.insights.map((card) => [card.category, card.customerAction])).toEqual([
+      ['water', ''],
+      ['mowing', 'Raise the mower one setting.'],
+    ]);
+    expect(report.snapshot.customerAction).toBeNull();
+    expect(report.snapshot.noActionNeeded).toBe(false);
+    expect(report.smsSummary).not.toMatch(/No action needed/);
+  });
+
   test.each([
     ['none', undefined, false],
     [null, undefined, false],

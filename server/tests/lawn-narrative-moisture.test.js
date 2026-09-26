@@ -59,9 +59,10 @@ describe('structured moisture governs the optional whole-report narrative', () =
     ['none', true, 'balanced', 'balanced', 'checking the flagged area\'s coverage'],
     ['minor', undefined, 'deficit', 'low', 'more water'],
     ['minor', undefined, 'surplus', 'high', 'easing back'],
-  ])('affirmative severity %s / technician %j grounds %s water advice in the report status', async (severity, flag, adviceStatus, reportStatus, instruction) => {
+  ])('affirmative severity %s / technician %j preserves deterministic %s water advice without a plan', async (severity, flag, adviceStatus, reportStatus, instruction) => {
     const lawnAssessment = assessment(severity, flag, adviceStatus);
     const v2 = buildLawnReportV2({ lawnAssessment });
+    const deterministicExplanation = v2.water.explanation;
     const wording = `Based on rain this week, the lawn needs ${instruction}.`;
     const callModel = jest.fn(async () => ({ ok: true, json: { water: wording } }));
     const out = await applyLawnReportNarrative(v2, { observations: `${lawnAssessment.observations} ${severity}` }, { callModel });
@@ -69,9 +70,36 @@ describe('structured moisture governs the optional whole-report narrative', () =
     expect(callModel.mock.calls[0][0].text).toContain('"droughtSignal": true');
     expect(callModel.mock.calls[0][0].text).toContain(`"status": "${reportStatus}"`);
     expect(callModel.mock.calls[0][0].system).toContain(`"${reportStatus}" supports ${instruction}`);
-    expect(out.water.explanation).toBe(wording);
+    expect(out.water.explanation).toBe(deterministicExplanation);
+    expect(out.water.explanation).not.toBe(wording);
     expect(out.water.status).toBe(reportStatus);
     expect(out.water.droughtSignal).toBe(true);
     expect(out.water.totalInches).toBe(v2.water.totalInches);
+  });
+
+  test('a no-plan narrative overlay cannot replace evidence-bound customer actions', async () => {
+    const lawnAssessment = assessment('minor', undefined, 'surplus');
+    const v2 = buildLawnReportV2({ lawnAssessment });
+    const originalSnapshotAction = v2.snapshot.customerAction;
+    const originalInsightActions = v2.insights.map((insight) => insight.customerAction);
+    const originalWaterExplanation = v2.water.explanation;
+    const inventedAction = 'Ease back to one irrigation cycle this week.';
+    const callModel = jest.fn(async () => ({ ok: true, json: {
+      customerAction: inventedAction,
+      water: 'Based on rain this week, the lawn needs easing back.',
+      insights: v2.insights.map(() => ({ customerAction: inventedAction })),
+    } }));
+
+    const out = await applyLawnReportNarrative(v2, { observations: lawnAssessment.observations }, { callModel });
+
+    expect(callModel).toHaveBeenCalledTimes(1);
+    expect(callModel.mock.calls[0][0].text).toContain(JSON.stringify(originalSnapshotAction));
+    expect(v2.snapshot.rootCause).toMatch(/No upcoming watering plan is recorded/);
+    expect(v2.snapshot.rootCause).not.toMatch(/ease back|reduce.*irrigation|skip.*water/i);
+    expect(out.snapshot.customerAction).toBe(originalSnapshotAction);
+    expect(out.insights.map((insight) => insight.customerAction)).toEqual(originalInsightActions);
+    expect(out.water.explanation).toBe(originalWaterExplanation);
+    expect(out.snapshot.customerAction).toMatch(/No upcoming watering plan is recorded/);
+    expect(out.snapshot.customerAction).not.toContain(inventedAction);
   });
 });

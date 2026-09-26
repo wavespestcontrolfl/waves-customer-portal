@@ -463,17 +463,19 @@ function answerServiceReportQuestion({
   // label instruction, plus the reduced plan when a watering-in is credited.
   if (wateringIntent && aftercare?.watering && /\b(treat\w*|application|applied|product|spray\w*|today)\b/.test(q)) {
     // Same guards as the rendered card: a credited watering-in only for a
-    // REQUIRED watering-in, on a visit inside the plan week, on a plan that
-    // prescribes a run (codex gh-r31).
-    const credited = aftercare.waterInRequired === true && weekPlan?.visitInPlanWeek === true && weekPlan?.prescribesRun === true;
+    // complete product instruction, on a visit inside the plan week, on a
+    // plan that prescribes a run (codex gh-r31).
+    const recordedWaterIn = aftercare.waterInRequired === true
+      && aftercare.evidenceSource === 'product_instruction'
+      && aftercare.needsReview !== true;
+    const credited = recordedWaterIn && weekPlan?.visitInPlanWeek === true && weekPlan?.prescribesRun === true;
     const reduced = credited && weekPlan?.afterTreatment?.title ? weekPlan.afterTreatment : null;
-    // A HOLD plan beside a required watering-in: the answer must carry the
-    // plan's no-extra-runs guidance too — the label instruction alone reads
-    // as permission to resume the normal schedule (codex gh-r45).
-    const holdBeside = !reduced && aftercare.waterInRequired === true
-      && weekPlan?.visitInPlanWeek === true && weekPlan?.prescribesRun === false && weekPlan?.title
+    // When the watering-in cannot earn the reduced plan, carry the full plan
+    // beside it. This covers HOLD plans and incomplete/conflicting instructions.
+    const planBeside = !reduced && aftercare.waterInRequired === true
+      && weekPlan?.visitInPlanWeek === true && weekPlan?.title
       ? weekPlan : null;
-    return [aftercare.watering, reduced ? `${reduced.title}. ${reduced.detail}` : (holdBeside ? `${holdBeside.title}. ${holdBeside.detail}` : null)].filter(Boolean).join(' ');
+    return [aftercare.watering, reduced ? `${reduced.title}. ${reduced.detail}` : (planBeside ? `${planBeside.title}. ${planBeside.detail}` : null)].filter(Boolean).join(' ');
   }
   if (weekPlan?.title && wateringIntent) {
     return [weekPlan.title, weekPlan.detail].filter(Boolean).join(' ');

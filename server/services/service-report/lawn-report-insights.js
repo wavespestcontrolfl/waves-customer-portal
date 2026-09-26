@@ -6,8 +6,8 @@
  * Deterministic (no LLM) so customer copy can't drift or overclaim.
  *
  * RULES (baked in):
- *  - Every issue card carries a Waves action and either a customer action or a
- *    next-visit monitoring plan.
+ *  - Missing actions stay empty. A finding does not prove that Waves completed
+ *    work or committed to a future visit task.
  *  - Never say "improving" (that needs trend data — the trend chart owns it).
  *  - Never diagnose pests/disease from photo-only evidence ("signals", not "infestation").
  *  - Never recommend watering MORE when water is balanced/high (recommend checking
@@ -15,6 +15,21 @@
  */
 
 const STATUS_RANK = { needs_attention: 0, urgent: 0, watch: 1, healthy: 2, strong: 2, tracking: 3 };
+
+const SURPLUS_CUSTOMER_ACTION = {
+  'with_plan:not_required': 'Follow this week’s watering plan below — it already accounts for the extra water. Let us know if it stays soggy.',
+  'with_plan:recorded': 'Today’s application requires water-in; use the recorded product directions, then follow this week’s watering plan below.',
+  'with_plan:missing': 'Today’s application requires water-in, but its exact amount and timing are not recorded in this report; confirm that instruction before following the weekly plan.',
+  'without_plan:not_required': 'No upcoming watering plan is recorded on this report; check the technician’s guidance before changing your irrigation schedule.',
+  'without_plan:recorded': 'Today’s application requires water-in; use the recorded product directions. No upcoming watering plan is recorded on this report.',
+  'without_plan:missing': 'Today’s application requires water-in, but its exact amount and timing are not recorded in this report; confirm the directions with your technician before changing irrigation.',
+};
+
+const DAMP_CUSTOMER_ACTION = {
+  ...SURPLUS_CUSTOMER_ACTION,
+  'with_plan:not_required': 'Let the damp areas dry out between waterings and follow this week’s watering plan below rather than adding cycles.',
+  'with_plan:recorded': 'Today’s application requires water-in; use the recorded product directions first, then follow this week’s watering plan below.',
+};
 
 function catByKey(categories, key) {
   return (categories || []).find((c) => c.key === key) || null;
@@ -29,9 +44,24 @@ function catByKey(categories, key) {
  * @param {string} input.customerConcern
  * @returns {Array} prioritized LawnInsightCard[]
  */
-function buildLawnInsightCards({ categories = [], water = {}, mowing = null, grassLabel = 'lawn', customerConcern = '', treatmentKinds = [], waterInRequired = false } = {}) {
+function buildLawnInsightCards({
+  categories = [],
+  water = {},
+  mowing = null,
+  grassLabel = 'lawn',
+  customerConcern = '',
+  treatmentKinds = [],
+  waterInRequired = false,
+  waterInInstructionRecorded = false,
+} = {}) {
   const cards = [];
-  const has = (kind) => Array.isArray(treatmentKinds) && treatmentKinds.includes(kind);
+  const kinds = Array.isArray(treatmentKinds) ? treatmentKinds : [];
+  const has = (kind) => kinds.includes(kind);
+  const provenance = (findingSource, actionSource = null, planSource = null) => ({
+    findingSource,
+    actionSource,
+    planSource,
+  });
 
   // ── Water ───────────────────────────────────────────────────────────────────
   const waterCat = catByKey(categories, 'water_moisture_stress');
@@ -40,6 +70,11 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
   // the plan (which already accounts for the balance) instead of prescribing
   // more or less water against it (codex #3565 gh-r27).
   const hasPlan = !!(water && water.weekPlan && water.weekPlan.title);
+  const planState = hasPlan ? 'with_plan' : 'without_plan';
+  const waterInState = waterInRequired
+    ? (waterInInstructionRecorded ? 'recorded' : 'missing')
+    : 'not_required';
+  const waterActionKey = `${planState}:${waterInState}`;
   if (water && water.status === 'surplus') {
     cards.push({
       // Same provenance rule as the damp card below: overwatering is an
@@ -47,23 +82,20 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
       category: 'water', status: 'needs_attention', confidence: water.overwatering ? 'ai_supported' : 'area_estimated',
       headline: 'The lawn is likely getting too much water',
       whatWeSaw: water.overwatering
-        ? 'Damp areas and fungal/mushroom signs in today’s photos, with the weekly water total running above target.'
+        ? 'The photo assessment shows an excess-moisture signal, with the weekly water total running above target.'
         : 'The weekly water total (rain + irrigation) is running above the seasonal target.',
-      whyItMatters: `Staying too wet drives fungus, mushrooms, and weed pressure and weakens the ${grassLabel}.`,
+      whyItMatters: `Staying too wet can increase fungus and weed pressure and weaken the ${grassLabel}.`,
       wavesAction: has('fungicide')
-        ? 'Applied a fungicide and adjusted today’s plan toward drying things out.'
-        : 'Documented the moisture and adjusted today’s plan toward drying things out.',
-      customerAction: hasPlan
-        ? (waterInRequired
-          ? 'Water in today’s application as directed, then follow this week’s watering plan below — it already accounts for the extra water.'
-          : 'Follow this week’s watering plan below — it already accounts for the extra water. Let us know if it stays soggy.')
-        : (waterInRequired
-          ? 'Water in today’s application as directed, then ease back on irrigation by one cycle.'
-          : 'Ease back on irrigation by one cycle and let us know if it stays soggy.'),
-      nextVisitPlan: hasPlan
-        ? 'Recheck moisture and fungus signs next visit against this week’s watering plan.'
-        : 'Recheck moisture and fungus signs next visit to confirm the drier schedule is working.',
+        ? 'A fungicide application was recorded for today’s service.'
+        : '',
+      customerAction: SURPLUS_CUSTOMER_ACTION[waterActionKey],
+      nextVisitPlan: '',
       confidenceNote: null,
+      provenance: provenance(
+        water.overwatering ? 'photo_signal' : 'calculated_estimate',
+        has('fungicide') ? 'recorded_application' : null,
+        hasPlan ? 'approved_watering_plan' : null,
+      ),
     });
   } else if (water && water.status === 'deficit') {
     cards.push({
@@ -71,9 +103,7 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
       headline: 'The lawn is running a little dry',
       whatWeSaw: 'The weekly water total is below the seasonal target for your lawn.',
       whyItMatters: 'Under-watered turf shows heat and drought stress faster and thins out.',
-      wavesAction: hasPlan
-        ? 'Noted the shortfall and set this week’s watering plan on the report.'
-        : 'Noted the shortfall and set the watering target on the report.',
+      wavesAction: '',
       // The sentence must agree with the plan card below it — a hold /
       // conditional plan is never described as "setting runs" (gh-r44,
       // same rule as buildRootCause).
@@ -81,10 +111,9 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
         ? (water.weekPlan.action === 'run' && water.weekPlan.conditionalOnForecast !== true
           ? 'Follow this week’s watering plan below — it sets this week’s runs from the forecast and your area’s watering rules.'
           : 'Follow this week’s watering plan below — it weighs the shortfall against the forecast and your area’s watering rules.')
-        : `Add a little irrigation time to reach the seasonal target for your ${grassLabel}.`,
-      nextVisitPlan: hasPlan
-        ? 'Recheck moisture and color next visit.'
-        : 'Recheck moisture and color next visit to confirm the added water is landing.',
+        : 'No upcoming watering plan is recorded on this report; check the technician’s guidance before changing your irrigation schedule.',
+      nextVisitPlan: '',
+      provenance: provenance('calculated_estimate', null, hasPlan ? 'approved_watering_plan' : null),
     });
   } else if (water.localizedDry) {
     // Localized dry evidence (structured drought signal or a coverage-issue
@@ -98,9 +127,10 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
         ? 'Total water for the week looks on target, but one area still reads off.'
         : 'One area reads drier than the rest of the lawn in today’s photos.',
       whyItMatters: 'That pattern usually points to uneven sprinkler coverage, not the whole lawn needing more water.',
-      wavesAction: 'Flagged the area and will recheck it next visit.',
+      wavesAction: '',
       customerAction: 'Check sprinkler coverage in that area rather than watering the whole yard more.',
-      nextVisitPlan: 'Recheck the flagged area next visit to see whether coverage evened out.',
+      nextVisitPlan: '',
+      provenance: provenance(water.localizedDryConfidence === 'tech_confirmed' ? 'technician' : 'photo_signal'),
     });
   } else if (waterCat && (waterCat.status === 'watch' || waterCat.status === 'needs_attention')) {
     // The water score is degraded without dry evidence (overwatering/fungus
@@ -117,29 +147,18 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
       headline: damp ? 'Damp areas are the thing to watch' : 'Moisture balance is the thing to watch',
       whatWeSaw: waterCat.customerExplanation || 'Today’s photos showed a mixed moisture read across the lawn.',
       whyItMatters: 'Keeping moisture balanced protects the lawn from both fungus pressure and dry stress.',
-      wavesAction: 'Flagged it for a recheck at the next visit.',
+      wavesAction: '',
       // "Keep your current watering schedule" requires a schedule ON FILE —
       // for profiles without one it invented guidance and contradicted the
       // add-your-schedule CTA (codex P2 r23).
       // With a weekly plan on the card the plan is the sole watering
       // instruction — never "keep your current schedule" / "ease back a
       // cycle" beside a hold or run plan (codex #3565 gh-r29).
-      customerAction: hasPlan
-        ? (damp
-          ? (waterInRequired
-            ? 'Water in today’s application as directed first, then let the damp areas dry out between waterings — this week’s watering plan below already accounts for it.'
-            : 'Let the damp areas dry out between waterings and follow this week’s watering plan below rather than adding cycles.')
-          : 'Follow this week’s watering plan below; we’ll keep watching moisture balance at upcoming visits.')
-        : damp
-          // A label-required watering-in must not collide with ease-back
-          // advice — name the exception instead (codex P1 r32).
-          ? (waterInRequired
-            ? 'Water in today’s application as directed first, then let the damp areas dry out between waterings.'
-            : 'Let the damp areas dry out between waterings, and ease back an irrigation cycle if they stay soggy.')
-          : (water && water.scheduleOnFile
-            ? 'Keep your current watering schedule unless we flag a change.'
-            : 'We’ll keep watching moisture balance at upcoming visits.'),
-      nextVisitPlan: 'Recheck the moisture balance next visit.',
+      customerAction: damp
+        ? DAMP_CUSTOMER_ACTION[waterActionKey]
+        : (hasPlan ? 'Follow this week’s watering plan below.' : ''),
+      nextVisitPlan: '',
+      provenance: provenance(damp ? 'photo_signal' : 'assessment_signal', null, hasPlan ? 'approved_watering_plan' : null),
     });
   }
 
