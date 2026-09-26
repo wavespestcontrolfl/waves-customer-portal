@@ -463,11 +463,19 @@ async function newerSiblingRun(q, run) {
   if (!run.opportunity_id) return null;
   // Fail closed: a run whose age is unknown cannot prove it is the newest.
   if (!run.created_at) throw new Error(`run ${run.id} has no created_at — cannot verify it still owns opportunity ${run.opportunity_id}`);
-  return q('autonomous_runs')
+  let query = q('autonomous_runs')
     .where('opportunity_id', run.opportunity_id)
     .whereNot('id', run.id)
-    .where('created_at', '>', run.created_at)
-    .first('id');
+    .where('created_at', '>', run.created_at);
+  // Completion order is not ownership order. A recovered stale worker can
+  // finish after the replacement run parks its PR, creating a later audit
+  // row for the OLD claim. Only a sibling from this run's active claim can
+  // supersede it; sameQueueClaim already proves that claim owns the queue
+  // row. Legacy NULL claims remain comparable only with other NULL claims.
+  query = run.queue_claim_id == null
+    ? query.whereNull('queue_claim_id')
+    : query.where('queue_claim_id', run.queue_claim_id);
+  return query.first('id');
 }
 
 // Atomic: both writes run on `trx` (the topic-merge lock's transaction) and
@@ -825,13 +833,17 @@ async function queueRowParkedState(run) {
   // operator requeue followed by a NEWER run re-parking the same opportunity
   // reproduces the exact parked state this run was selected on, and the
   // stale run's old PR would look valid again. The opportunity's lifecycle
-  // belongs to its newest run — any newer sibling supersedes this one.
+  // belongs to its newest run for the SAME queue claim. A later audit row
+  // from a recovered stale claim records completion order, not ownership.
   if (parked && run.created_at) {
-    const newer = await db('autonomous_runs')
+    let newerQuery = db('autonomous_runs')
       .where('opportunity_id', run.opportunity_id)
       .whereNot('id', run.id)
-      .where('created_at', '>', run.created_at)
-      .first('id');
+      .where('created_at', '>', run.created_at);
+    newerQuery = run.queue_claim_id == null
+      ? newerQuery.whereNull('queue_claim_id')
+      : newerQuery.where('queue_claim_id', run.queue_claim_id);
+    const newer = await newerQuery.first('id');
     if (newer) return { parked: false, row, supersededByRunId: newer.id };
   }
   return { parked, row };

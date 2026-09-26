@@ -207,7 +207,15 @@ function setupDb({ pending = [], queue, queueFirst, updateResult = 1, briefs = [
             brief_id: null,
           });
         }
-        if (table === 'autonomous_runs') return Promise.resolve(newerRun);
+        if (table === 'autonomous_runs') {
+          if (!newerRun) return Promise.resolve(null);
+          const candidateClaim = newerRun.queue_claim_id ?? null;
+          const requestedClaim = q._filters.queue_claim_id;
+          const matchesClaim = q._filters['null:queue_claim_id']
+            ? candidateClaim === null
+            : requestedClaim === undefined || candidateClaim === requestedClaim;
+          return Promise.resolve(matchesClaim ? newerRun : null);
+        }
         return Promise.resolve(null);
       }),
       update: jest.fn((u) => {
@@ -1297,16 +1305,31 @@ describe('auto-merge gating (each condition individually blocking)', () => {
   });
 
   test('queueRowStillParkedLocked: the final pre-merge check locks the queue row on the merge transaction and fails closed (hook r31 P1)', async () => {
-    const run = makeRun({ created_at: '2026-08-28T04:00:00Z' });
+    const run = makeRun({ created_at: '2026-08-28T04:00:00Z', queue_claim_id: 'claim-b' });
     const fakeTrx = ({ row, newer = null, throwOn = null }) => {
       const trx = jest.fn((table) => {
-      const q = { where: jest.fn(() => q), whereNot: jest.fn(() => q), forUpdate: jest.fn(() => q), first: jest.fn(async () => { if (throwOn) throw new Error(throwOn); return table === 'opportunity_queue' ? row : newer; }) };
-      return q;
+        const q = {
+          filters: {},
+          where: jest.fn(function (col, value) { if (arguments.length === 2) q.filters[col] = value; return q; }),
+          whereNull: jest.fn(function (col) { q.filters[`null:${col}`] = true; return q; }),
+          whereNot: jest.fn(() => q),
+          forUpdate: jest.fn(() => q),
+          first: jest.fn(async () => {
+            if (throwOn) throw new Error(throwOn);
+            if (table === 'opportunity_queue') return row;
+            if (!newer) return null;
+            const candidateClaim = newer.queue_claim_id ?? null;
+            return q.filters['null:queue_claim_id']
+              ? (candidateClaim === null ? newer : null)
+              : (candidateClaim === q.filters.queue_claim_id ? newer : null);
+          }),
+        };
+        return q;
       });
       trx.raw = jest.fn().mockResolvedValue({});
       return trx;
     };
-    const parkedRow = { id: run.opportunity_id, status: 'pending_review', skip_reason: run.skip_reason };
+    const parkedRow = { id: run.opportunity_id, claim_id: 'claim-b', status: 'pending_review', skip_reason: run.skip_reason };
     // Still parked on this run → merge may proceed; the row was locked FOR UPDATE.
     let trx = fakeTrx({ row: parkedRow });
     expect(await poller._internals.queueRowStillParkedLocked(run, trx)).toBe(true);
@@ -1315,7 +1338,13 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     expect(await poller._internals.queueRowStillParkedLocked(run, fakeTrx({ row: { ...parkedRow, skip_reason: 'dismissed' } }))).toBe(false);
     expect(await poller._internals.queueRowStillParkedLocked(run, fakeTrx({ row: null }))).toBe(false);
     // A newer sibling owns the opportunity → withheld.
-    expect(await poller._internals.queueRowStillParkedLocked(run, fakeTrx({ row: parkedRow, newer: { id: 'run-newer' } }))).toBe(false);
+    expect(await poller._internals.queueRowStillParkedLocked(run, fakeTrx({ row: parkedRow, newer: { id: 'run-newer', queue_claim_id: 'claim-b' } }))).toBe(false);
+    // Worker A lost claim-a, then finished after current owner B parked its
+    // PR under claim-b. A's later audit row is not a newer OWNER.
+    expect(await poller._internals.queueRowStillParkedLocked(run, fakeTrx({
+      row: parkedRow,
+      newer: { id: 'run-a-late-audit', queue_claim_id: 'claim-a' },
+    }))).toBe(true);
     expect(await poller._internals.queueRowStillParkedLocked(
       makeRun({ action_type: 'refresh_existing_page' }),
       fakeTrx({ row: { ...parkedRow, bucket: 'citability_backfill', signal_metadata: { page_edit_superseded: {} } } }),
@@ -2380,6 +2409,42 @@ describe('review-queue supersession (requeue/dismiss)', () => {
     expect(indexNow.submit).not.toHaveBeenCalled();
     // the queue row now belongs to the newer run — never touched here
     expect(updates.find((u) => u.table === 'opportunity_queue')).toBeUndefined();
+  });
+
+  test('stale worker A finishing after owner B parks cannot supersede B on a human-merged PR', async () => {
+    const owner = makeRun({
+      id: 'run-b-owner',
+      queue_claim_id: 'claim-b',
+      created_at: '2026-06-11T04:00:00Z',
+    });
+    const updates = setupDb({
+      pending: [owner],
+      // A started on claim-a, was recovered, and persisted its lost-claim
+      // audit after B had already opened and parked the PR on claim-b.
+      newerRun: {
+        id: 'run-a-late-audit',
+        opportunity_id: owner.opportunity_id,
+        queue_claim_id: 'claim-a',
+        created_at: '2026-06-11T04:05:00Z',
+      },
+    });
+    gh.getPr.mockResolvedValue({
+      number: 42,
+      state: 'closed',
+      merged: true,
+      merged_at: '2026-06-11T05:00:00Z',
+      merge_commit_sha: 'merge-sha',
+    });
+    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
+    publisher.planInternalLinksForTarget.mockResolvedValue(null);
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({ merged: true });
+    expect(updates.find((u) => u.table === 'autonomous_runs'
+      && u.filters.id === owner.id
+      && u.updates.outcome === 'completed_published')).toBeDefined();
+    expect(updates.find((u) => u.updates?.skip_reason === 'superseded_by_review_queue_action')).toBeUndefined();
   });
 
   test('queue row parked under a DIFFERENT pending reason does not validate this run', async () => {
