@@ -133,7 +133,7 @@ const VISITS = [
 // → annual_prepay_terms → invoices (per term not already mapped) →
 // scheduled_services (cancellable, in-progress) → invoices (paid visit
 // invoices, only when cancellable visits exist).
-function previewQueues({ customer = CUSTOMER, deposits = [DEPOSIT_CREDITED], invoicesQueue, terms = [PENDING_TERM], visits = VISITS, inProgress = [] } = {}) {
+function previewQueues({ customer = CUSTOMER, deposits = [DEPOSIT_CREDITED], invoicesQueue, terms = [PENDING_TERM], visits = VISITS, inProgress = [], paidLapses = [] } = {}) {
   return {
     customers: [chain({ first: customer })],
     // The deposit lookup joins estimates (prospect deposits carry NULL
@@ -142,6 +142,8 @@ function previewQueues({ customer = CUSTOMER, deposits = [DEPOSIT_CREDITED], inv
     estimate_deposits: [],
     invoices: invoicesQueue || [chain({ rows: [UNPAID_INVOICE] }), chain({ rows: [] })],
     annual_prepay_terms: [chain({ rows: terms })],
+    // The paid decided-lapse check (coveredTermsAsOf) — none by default.
+    'annual_prepay_terms as t': [chain({ rows: paidLapses })],
     scheduled_services: [chain({ rows: visits }), chain({ rows: inProgress })],
     'estimate_card_holds as h': [chain({ rows: [] })],
   };
@@ -153,6 +155,13 @@ beforeEach(() => {
 });
 
 describe('previewCancelSignup — eligibility fails closed', () => {
+  it('blocks on a PAID decided lapse (renewal declined online, status cancelled) — collected annual money (#4940 r12)', async () => {
+    setDbQueues(previewQueues({ paidLapses: [{ id: 'term-lapse' }] }));
+    const p = await CustomerOffboarding.previewCancelSignup('cust-1');
+    expect(p.eligible).toBe(false);
+    expect(p.blockers).toContain('annual prepay term is paid through its term (renewal declined, money collected) — out of scope for signup cancellation');
+  });
+
   it('eligible: credited deposit on an unpaid invoice, pending term, open visits', async () => {
     setDbQueues(previewQueues());
     const p = await CustomerOffboarding.previewCancelSignup('cust-1');

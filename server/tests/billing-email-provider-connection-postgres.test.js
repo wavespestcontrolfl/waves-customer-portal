@@ -44,7 +44,6 @@ async function waitForPhoneLock(pid) {
   }
   throw new Error('Expected a concurrent phone-lock waiter');
 }
-
 function billingReplayRow(chargeDate, overrides = {}) {
   const event = `precharge:${customerId}:${chargeDate}`;
   const attempt = randomUUID();
