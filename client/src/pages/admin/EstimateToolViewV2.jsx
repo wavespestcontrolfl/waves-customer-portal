@@ -355,7 +355,15 @@ function commercialSuiteSizeNote(enrichedProfile) {
     ? ` Building total ${Number(enrichedProfile.buildingSqFt).toLocaleString()} sq ft.`
     : "";
   const nameNote = suite.businessName ? ` — ${suite.businessName}` : "";
-  return `Suite size ${Number(suite.value).toLocaleString()} sq ft — from ${sourceLabel}${seatsNote}.${buildingNote}${nameNote}`;
+  // A web-found listing size is model-reported: tell the operator to open
+  // the listing before sending, and where it is.
+  const listingUrl = suite.source === "commercial_listing"
+    ? (suite.evidence || []).map((e) => e && e.url).find(Boolean)
+    : null;
+  const verifyNote = suite.source === "commercial_listing"
+    ? ` Verify the listing before sending${listingUrl ? `: ${listingUrl}` : ""}.`
+    : "";
+  return `Suite size ${Number(suite.value).toLocaleString()} sq ft — from ${sourceLabel}${seatsNote}.${buildingNote}${nameNote}${verifyNote}`;
 }
 
 function adminFetch(path, options = {}) {

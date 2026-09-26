@@ -187,3 +187,23 @@ describe('source URL requirement', () => {
     expect(out == null || out.value == null).toBe(true);
   });
 });
+
+describe('quote must state the number, from a listing or records host', () => {
+  const { acceptWebSearchResult } = require('../services/commercial-suite-size/web-search-leg');
+  const accepted = (o) => {
+    const out = acceptWebSearchResult({ businessName: 'Test Taco Shop', ...o }, { unit: '#102' });
+    return out != null && Number(out.value) > 0;
+  };
+  test('a size the quote never states is rejected (building total in the quote, suite size invented)', () => {
+    expect(accepted({ suiteSqft: 1400, suiteSqftQuote: 'Suite 102 is in a 46,000 sq ft center.', suiteSqftUrl: 'https://www.loopnet.com/x' })).toBe(false);
+  });
+  test('comma-formatted figures back the number', () => {
+    expect(accepted({ suiteSqft: 1450, suiteSqftQuote: 'Suite 102: 1,450 SF available.', suiteSqftUrl: 'https://www.crexi.com/x' })).toBe(true);
+  });
+  test('a business website or directory is not a size source', () => {
+    expect(accepted({ suiteSqft: 1450, suiteSqftQuote: 'Suite 102: 1,450 SF.', suiteSqftUrl: 'https://www.yelp.com/biz/x' })).toBe(false);
+  });
+  test('a county records (.gov) page is a size source', () => {
+    expect(accepted({ suiteSqft: 1450, suiteSqftQuote: 'Unit 102 1,450 SF', suiteSqftUrl: 'https://www.manatee.gov/x' })).toBe(true);
+  });
+});

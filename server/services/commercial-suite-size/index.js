@@ -104,7 +104,9 @@ async function resolveCommercialSuiteSize(input = {}, opts = {}) {
           return {
             value: web.value,
             source: SOURCES.COMMERCIAL_LISTING,
-            confidence: 'high',
+            // Medium, not high: the size rests on a quote the MODEL reports
+            // from a page we did not fetch ourselves.
+            confidence: 'medium',
             businessName: web.businessName || businessName,
             businessType: web.businessType || businessType,
             evidence: web.evidence,

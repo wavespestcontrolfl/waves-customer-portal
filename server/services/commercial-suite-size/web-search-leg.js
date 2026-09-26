@@ -107,6 +107,24 @@ function unitBoundSuiteRegex(unit) {
   return new RegExp(`(?:\\b${token}\\.?\\s*#?\\s*${esc}\\b|\\b${esc}\\s*${token}\\b)`, 'i');
 }
 
+// Commercial listing marketplaces and public-records hosts. A business's
+// own site or a directory is not a size source.
+const LISTING_HOSTS = ['loopnet.com', 'crexi.com', 'commercialcafe.com', 'showcase.com', 'cityfeet.com', 'costar.com', 'officespace.com', 'commercialsearch.com'];
+
+function trustedListingUrl(url) {
+  if (!url) return false;
+  let host;
+  try { host = new URL(url).hostname.toLowerCase(); } catch { return false; }
+  if (host.endsWith('.gov')) return true;
+  return LISTING_HOSTS.some((h) => host === h || host.endsWith(`.${h}`));
+}
+
+function quoteStatesNumber(quote, value) {
+  const want = String(Math.round(Number(value)));
+  const numbers = String(quote || '').match(/\d[\d,]*(?:\.\d+)?/g) || [];
+  return numbers.some((n) => String(Math.round(Number(n.replace(/,/g, '')))) === want);
+}
+
 /**
  * Accept/reject the parsed model output. Exported separately so the
  * acceptance rules (the part that actually protects against an overquote)
@@ -129,9 +147,12 @@ function acceptWebSearchResult(parsed, { buildingSqft, unit } = {}) {
     && suiteSqft <= MAX_ACCEPTABLE_SQFT
     && suiteRe != null
     && suiteRe.test(quote)
-    // The quote is model-reported; a source URL at least ties it to a page
-    // the operator can open from the review reason.
-    && url != null
+    // The quote must actually state the number it claims (digits compared
+    // with separators stripped, so "1,450 SF" backs 1450).
+    && quoteStatesNumber(quote, suiteSqft)
+    // The quote is model-reported; a source URL on a listing or government
+    // records site at least ties it to a page the operator can open.
+    && trustedListingUrl(url)
     && (buildingCap == null || suiteSqft <= buildingCap);
 
   if (!usable) {

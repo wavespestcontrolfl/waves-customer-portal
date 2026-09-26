@@ -124,8 +124,8 @@ describe('classifyLane — commercial-suite-size review reasons', () => {
 
   test('commercial_listing parks yellow too: the size rests on a model-reported quote', () => {
     const propertyFacts = {
-      home: { value: 1400, source: SQFT_SOURCES.COMMERCIAL_LISTING, confidence: 'high', rejected: [] },
-      commercialSuiteSize: { value: 1400, source: SQFT_SOURCES.COMMERCIAL_LISTING, confidence: 'high', businessName: 'Test Taco Shop' },
+      home: { value: 1400, source: SQFT_SOURCES.COMMERCIAL_LISTING, confidence: 'medium', rejected: [] },
+      commercialSuiteSize: { value: 1400, source: SQFT_SOURCES.COMMERCIAL_LISTING, confidence: 'medium', businessName: 'Test Taco Shop' },
     };
     const out = classifyLane({
       intent: baseIntent(), propertyFacts, engineResult: { lineItems: [commercialPestLine(1400)] }, totals, comps: null, calibration: [],
