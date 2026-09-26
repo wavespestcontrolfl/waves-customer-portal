@@ -77,6 +77,21 @@ function resetCachesForTests() {
   termColsCache = null;
   scheduledColsCache = null;
   invoiceColsCache = null;
+  cancelDispositionColumnKnown = false;
+}
+
+// ADMIN-BUG-R18: whether annual_prepay_terms.cancel_disposition exists,
+// probed STRICTLY — a failed probe throws. annualPrepayColumns reads a
+// failure as "no column", which would record a cancel decision with no
+// disposition (the upkeep never recognizes it again) or silently skip the
+// end-now upgrade. Only a positive answer is cached.
+let cancelDispositionColumnKnown = false;
+async function cancelDispositionSupported() {
+  if (cancelDispositionColumnKnown) return true;
+  const cols = await db('annual_prepay_terms').columnInfo();
+  const exists = !!cols?.cancel_disposition;
+  if (exists) cancelDispositionColumnKnown = true;
+  return exists;
 }
 
 async function scheduledServiceColumns() {
@@ -734,9 +749,14 @@ async function fileCoverageException(term, reason, body, { title = 'Annual prepa
 
 // seedNotBefore (opt-in, ADMIN-BUG-R18): a gap-fill never seeds a visit
 // dated before it; such slots come back in unseededPastDates for the caller
-// to hand to the office. Unset (every activation / refresh caller), the
-// behavior is unchanged.
-async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString(), nowHHMM = etNowHHMM(), seedNotBefore = null } = {}) {
+// to hand to the office. gapFillOnly (opt-in, same lane): the term is never
+// treated as a first activation — no today floor on the anchor, no window
+// slide persisted to term_end — even when no visit is linked to it yet (a
+// legacy decided lapse): only slots inside the stored window are filled.
+// Unset (every activation / refresh caller), the behavior is unchanged.
+async function ensureCoverageRowsForTerm(term, conn = db, {
+  today = etDateString(), nowHHMM = etNowHHMM(), seedNotBefore = null, gapFillOnly = false,
+} = {}) {
   const coverageServiceType = normalizeCoverageServiceType(term?.coverage_service_type);
   const coverageVisitCount = normalizeCoverageVisitCount(term?.coverage_visit_count);
   const coverageCadence = inferCoverageCadence(term);
@@ -784,8 +804,8 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
   // a dedicated any-status query, NOT the eligible coverage set: cancelling
   // every linked visit must not make a later refresh look like a first
   // activation and reopen the compounding slide.
-  const alreadyActivated = !!cols.annual_prepay_term_id
-    && !!(await conn('scheduled_services').where({ annual_prepay_term_id: term.id }).first('id'));
+  const alreadyActivated = gapFillOnly || (!!cols.annual_prepay_term_id
+    && !!(await conn('scheduled_services').where({ annual_prepay_term_id: term.id }).first('id')));
 
   // Seeding runs at PAYMENT time, so the past-date floor is today: a term paid
   // days after it was minted must not generate a visit that already happened.
@@ -2854,7 +2874,7 @@ async function keepEndAtTermLapseCoverage(termOrId, conn = db, { reseed = false,
       // regenerates that day): it could not be serviced, and it would fill
       // the slot on every later sweep. The office books those with the
       // customer — a hand-booked visit is stamped by the next refresh.
-      const ensured = await ensureCoverageRowsForTerm({ ...term, term_start: termStart, term_end: termEnd, coverage_cadence: inferCoverageCadence(term) }, t, { seedNotBefore: today });
+      const ensured = await ensureCoverageRowsForTerm({ ...term, term_start: termStart, term_end: termEnd, coverage_cadence: inferCoverageCadence(term) }, t, { seedNotBefore: today, gapFillOnly: true });
       if (ensured?.effectiveTermEnd) windowEnd = ensured.effectiveTermEnd;
       createdCount = ensured?.createdCount || 0;
       unseededPastDates = ensured?.unseededPastDates || [];
@@ -2862,6 +2882,11 @@ async function keepEndAtTermLapseCoverage(termOrId, conn = db, { reseed = false,
     await attachScheduledServices({ ...term, term_start: termStart, term_end: windowEnd }, t);
     await applyPrepaidCoverageForTerm({ ...term, term_start: termStart, term_end: windowEnd }, t);
     if (windowEnd !== termEnd) await syncCustomerRenewalDate(term.customer_id, windowEnd, t);
+    // Attach and stamp swallow their own SQL errors, and a failed statement
+    // aborts this transaction — its COMMIT would then quietly roll back
+    // while the caller counts the visits stamped. This probe fails in an
+    // aborted transaction, so the failure reaches the caller instead.
+    await t.raw('select 1');
     if (unseededPastDates.length) {
       await fileCoverageException(term, 'lapse_replacement_unscheduled',
         `A paid visit${unseededPastDates.length > 1 ? 's' : ''} on this end-of-coverage plan (${unseededPastDates.join(', ')}) was skipped and its date has passed. Book ${unseededPastDates.length > 1 ? 'replacements' : 'a replacement'} with the customer before coverage ends ${windowEnd} — the plan is paid through then.`,
@@ -2951,14 +2976,20 @@ async function refreshActiveTermsForCustomer(customerId, conn = db) {
   if (!customerId) return [];
 
   // ADMIN-BUG-R18: plus end-at-term lapses still inside their window — they
-  // keep their paid visits stamped (isEndAtTermLapseInWindow). Column
-  // presence is schema-wide, so the cached lookup serves every connection.
-  const cols = await annualPrepayColumns();
+  // keep their paid visits stamped (isEndAtTermLapseInWindow). A failed
+  // column probe leaves lapses out of this refresh (the nightly sweep
+  // reaches them from each term's own row).
+  let lapseUpkeep = false;
+  try {
+    lapseUpkeep = await cancelDispositionSupported();
+  } catch (err) {
+    logger.warn(`[annual-prepay] cancel_disposition probe failed — end-at-term lapses skipped this refresh for ${customerId}: ${err.message}`);
+  }
   const terms = await conn('annual_prepay_terms')
     .where({ customer_id: customerId })
     .where(function liveOrEndAtTermLapse() {
       this.whereIn('status', ACTIVE_STATUSES);
-      if (cols.cancel_disposition) {
+      if (lapseUpkeep) {
         this.orWhere(function endAtTermLapseInWindow() {
           this.where({ status: 'cancelled', renewal_decision: 'cancel', cancel_disposition: 'end_at_term' })
             .andWhere('term_end', '>=', etDateString());
@@ -5838,7 +5869,7 @@ async function recordDecision({ termId, action, adminUserId = null, notes = null
   // lapse keep its paid visits through term_end?". Only Cancel plan's
   // "end now + refund" is end_now_refund; "End of paid coverage" and a
   // renewal-time lapse are end_at_term.
-  if (action === 'cancel' && (await annualPrepayColumns()).cancel_disposition) {
+  if (action === 'cancel' && (await cancelDispositionSupported())) {
     update.cancel_disposition = disposition === 'end_now_refund' ? 'end_now_refund' : 'end_at_term';
   }
   const [term] = await db('annual_prepay_terms')
@@ -5854,16 +5885,19 @@ async function recordDecision({ termId, action, adminUserId = null, notes = null
 // already recorded (an end-at-term lapse now ended early, or a retry). The
 // disposition only moves toward end_now_refund — Cancel plan refuses
 // end-now → end-at-term (prepay_term_already_ended) — and end_at_term only
-// fills a missing value. Returns the updated term, or null when nothing
-// changed (already that disposition, or no cancel decision to annotate).
+// fills a missing value. Returns { changed, disposition } — the term's
+// disposition after the call (null when it has no cancel decision) — or
+// null before the column exists.
 async function recordCancelDisposition({ termId, disposition } = {}, conn = db) {
   if (!CANCEL_DISPOSITIONS.includes(disposition)) throw new Error('invalid cancel disposition');
-  if (!(await annualPrepayColumns(conn)).cancel_disposition) return null;
+  if (!(await cancelDispositionSupported())) return null;
   const query = conn('annual_prepay_terms').where({ id: termId, renewal_decision: 'cancel' });
   if (disposition === 'end_now_refund') query.whereRaw("cancel_disposition is distinct from 'end_now_refund'");
   else query.whereNull('cancel_disposition');
   const [term] = await query.update({ cancel_disposition: disposition, updated_at: new Date() }).returning('*');
-  return term || null;
+  if (term) return { changed: true, disposition: term.cancel_disposition };
+  const stored = await conn('annual_prepay_terms').where({ id: termId, renewal_decision: 'cancel' }).first('cancel_disposition');
+  return { changed: false, disposition: stored ? stored.cancel_disposition : null };
 }
 
 module.exports = {

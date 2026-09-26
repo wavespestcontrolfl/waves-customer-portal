@@ -889,7 +889,14 @@ async function decideTermCancel(term, actorUserId, notes, disposition) {
   if (decided) return { verified: true, fresh: true };
   const reread = await db('annual_prepay_terms').where({ id: term.id }).first('renewal_decision');
   if (reread && reread.renewal_decision === 'cancel') {
-    await recordCancelDisposition({ termId: term.id, disposition });
+    const recorded = await recordCancelDisposition({ termId: term.id, disposition });
+    // An ended-now term never goes back to end-at-term: an end-of-coverage
+    // run that reaches one (its end-now case outside the preflight scan)
+    // is a conflict, not a verified decision — its kept visits would get
+    // no upkeep and could bill again.
+    if (disposition === 'end_at_term' && recorded?.disposition === 'end_now_refund') {
+      return { verified: false, fresh: false, conflictingDecision: 'end_now_refund' };
+    }
     return { verified: true, fresh: false };
   }
   return { verified: false, fresh: false, conflictingDecision: reread ? reread.renewal_decision || null : null };

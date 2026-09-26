@@ -790,6 +790,8 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
         whereNull: jest.fn().mockReturnThis(),
         update: jest.fn().mockReturnThis(),
         returning: jest.fn().mockResolvedValue([{ id: 'term-1' }]),
+        // The strict cancel_disposition probe (ADMIN-BUG-R18): a pre-migration schema.
+        columnInfo: jest.fn().mockResolvedValue({}),
       };
       db.mockReturnValue(chain);
     });

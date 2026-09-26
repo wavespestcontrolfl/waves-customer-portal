@@ -285,6 +285,63 @@ postgres('end-at-term annual-prepay lapses keep their paid visits through term_e
     expect(await trx('scheduled_services').where({ customer_id: t.customerId }).count('* as n').first()).toEqual(before);
   });
 
+  test('an end-of-coverage decision reaching an ended-now term is a conflict, not a verified decision (GitHub r1 P1)', async () => {
+    const { _private } = require('../services/admin-cancellation');
+    const t = await seededTerm();
+    await decideCancel(t, { disposition: 'end_now_refund' });
+    const term = await trx('annual_prepay_terms').where({ id: t.termId }).first();
+    expect(await _private.decideTermCancel(term, null, 'Cancel plan (Admin) — coverage kept; no renewal.', 'end_at_term'))
+      .toEqual({ verified: false, fresh: false, conflictingDecision: 'end_now_refund' });
+    expect(await disposition(t)).toBe('end_now_refund');
+  });
+
+  test('the nightly reseed of a legacy lapse with no linked visit fills its stored window — no first-activation slide (GitHub r1 P1)', async () => {
+    const customerId = randomUUID();
+    const invoiceId = randomUUID();
+    const termId = randomUUID();
+    await trx('customers').insert({ id: customerId, first_name: 'Synthetic', last_name: 'Legacy', email: `${customerId}@example.invalid`,
+      phone: `fixture-${customerId.slice(0, 8)}` });
+    await trx('invoices').insert({ id: invoiceId, customer_id: customerId, status: 'paid', paid_at: new Date(), subtotal: 480, total: 480,
+      line_items: '[]', invoice_number: `TEST-${invoiceId.slice(0, 8)}`, token: randomUUID() });
+    const termEnd = ymdOffset(165);
+    await trx('annual_prepay_terms').insert({ id: termId, customer_id: customerId, prepay_invoice_id: invoiceId,
+      status: 'cancelled', renewal_decision: 'cancel', renewal_decision_at: new Date(), cancel_disposition: 'end_at_term',
+      coverage_service_type: SERVICE, coverage_visit_count: 4, coverage_cadence: 'quarterly', prepay_amount: 480,
+      term_start: ymdOffset(-200), term_end: termEnd });
+    // Legacy: the kept visits exist but were never linked to the term.
+    for (const days of [12, 103]) {
+      await trx('scheduled_services').insert({ id: randomUUID(), customer_id: customerId, scheduled_date: ymdOffset(days),
+        service_type: SERVICE, status: 'pending' });
+    }
+    await sweep();
+    const term = await trx('annual_prepay_terms').where({ id: termId }).first('term_end');
+    expect(String(term.term_end instanceof Date ? term.term_end.toISOString() : term.term_end).slice(0, 10)).toBe(termEnd);
+    expect(await trx('scheduled_services').where({ customer_id: customerId }).where('scheduled_date', '>', termEnd)).toHaveLength(0);
+  });
+
+  test('a failed column probe fails the cancel decision instead of recording it without a disposition (GitHub r1 P1)', async () => {
+    const t = await seededTerm();
+    AnnualPrepayRenewals._private.resetCachesForTests();
+    const dbMock = require('../models/db');
+    const real = dbMock.connection;
+    // The column probe (a columnInfo read of annual_prepay_terms) fails;
+    // every other statement runs as usual.
+    dbMock.connection = new Proxy(real, {
+      apply(target, thisArg, args) {
+        const builder = Reflect.apply(target, thisArg, args);
+        if (args[0] === 'annual_prepay_terms') builder.columnInfo = async () => { throw new Error('synthetic probe failure'); };
+        return builder;
+      },
+    });
+    try {
+      await expect(decideCancel(t)).rejects.toThrow('synthetic probe failure');
+    } finally {
+      dbMock.connection = real;
+    }
+    expect(await trx('annual_prepay_terms').where({ id: t.termId }).first('status', 'renewal_decision', 'cancel_disposition'))
+      .toEqual({ status: 'active', renewal_decision: null, cancel_disposition: null });
+  });
+
   describe('backfill of decisions recorded before cancel_disposition', () => {
     const { backfillCancelDisposition } = require('../models/migrations/20260926120000_annual_prepay_terms_cancel_disposition');
 
@@ -300,6 +357,32 @@ postgres('end-at-term annual-prepay lapses keep their paid visits through term_e
     });
     const cancelRequest = (t, cancelPlan) => trx('service_requests').insert({
       customer_id: t.customerId, category: 'cancellation', subject: 'Cancel plan', metadata: JSON.stringify({ cancel_plan: cancelPlan }),
+    });
+
+    test('the Eastern-time correction moves only the UTC-boundary misreadings (GitHub r1 P1)', async () => {
+      const { correctCancelDispositionWindow } = require('../models/migrations/20260926130000_annual_prepay_terms_cancel_disposition_et_window');
+      // A whole-account end-now request at an ET wall-clock moment of a
+      // date taken from the term row, computed in SQL (DST-proof).
+      const requestAt = (t, dayExpr, time) => trx('service_requests').insert({
+        customer_id: t.customerId, category: 'cancellation', subject: 'Cancel plan',
+        metadata: JSON.stringify({ cancel_plan: { scope: [], effectiveDate: 'now', prepayDisposition: null } }),
+        created_at: trx.raw(`(select (${dayExpr} + time '${time}') at time zone 'America/New_York' from annual_prepay_terms where id = ?)`, [t.termId]),
+      });
+      const late = await legacyLapse();
+      await requestAt(late, 'term_end', '23:30');
+      const early = await legacyLapse();
+      await requestAt(early, '(term_start - 1)', '22:00');
+      const noted = await legacyLapse({ notes: 'Cancel plan (Admin) — ended now; unused-value refund owed to the customer.' });
+      await requestAt(noted, '(term_start - 1)', '22:00');
+      // Railway's session zone: the frozen backfill reads the date bounds at UTC midnight.
+      await trx.raw("set local time zone 'UTC'");
+      await backfillCancelDisposition(trx);
+      expect(await disposition(late)).toBe('end_at_term');
+      expect(await disposition(early)).toBe('end_now_refund');
+      await correctCancelDispositionWindow(trx);
+      expect(await disposition(late)).toBe('end_now_refund');
+      expect(await disposition(early)).toBe('end_at_term');
+      expect(await disposition(noted)).toBe('end_now_refund');
     });
 
     test('end-now evidence makes a legacy lapse end_now_refund; everything else is end_at_term; undecided terms stay null', async () => {
