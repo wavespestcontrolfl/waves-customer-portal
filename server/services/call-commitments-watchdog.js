@@ -114,7 +114,29 @@ async function runInner({ now = new Date() } = {}) {
     refreshed += r.fulfilled || 0;
   }
   if (refreshed > 0) rows = await listAllOpenWaves(now);
-  const candidates = commitments.selectOverdue(rows, { now }).filter((r) => !isInternalTestCustomerId(r.customer_id));
+  let candidates = commitments.selectOverdue(rows, { now }).filter((r) => !isInternalTestCustomerId(r.customer_id));
+  // While the one-hour follow-up pager is live AND healthy it owns the
+  // callback / quote / scheduling promises still inside its 24-hour list;
+  // this watchdog takes each over once it ages off that list. Isolated: any
+  // failure in the pager lookups means "not deferring" — this watchdog then
+  // pages everything as it did before the pager existed.
+  if (require('../config/feature-gates').isEnabled('followupSlaAlerts')) {
+    try {
+      const sla = require('./followup-sla-watcher');
+      // A pager that has not run for its latest tick (just switched on, or
+      // behind) gets one catch-up run first; only if that fails does this
+      // watchdog cover its promises itself.
+      if (!await sla.pagerHealthy(db, now)) {
+        await sla.runFollowUpSlaWatcher({ now }).catch((err) => logger.warn(`[call-commitments-watchdog] follow-up pager catch-up failed: ${err.message}`));
+      }
+      if (await sla.pagerHealthy(db, now)) {
+        const owned = await sla.slaOwnedIds(db, candidates, now);
+        if (owned.size) candidates = candidates.filter((r) => !owned.has(r.id));
+      }
+    } catch (err) {
+      logger.warn(`[call-commitments-watchdog] follow-up pager ownership check failed — not deferring: ${err.message}`);
+    }
+  }
   const unverified = unverifiedCalls.size;
   // The snapshot is minutes old by now (one refresh per candidate call):
   // a promise the office marked done or dismissed meanwhile must not ring.
