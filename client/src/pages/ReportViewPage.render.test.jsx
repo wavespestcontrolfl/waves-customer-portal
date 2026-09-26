@@ -471,6 +471,14 @@ describe('ReportViewPage — Mosquito Report V2 (flag-gated dashboard)', () => {
 });
 
 describe('ReportViewPage — typed pest reports compose Pest V2 WITH the ActivityCard', () => {
+  it('omits the retired schematic even when an older payload still includes defense rows', async () => {
+    renderReport({ ...pestReportV2, pestTraceOrNothing: false });
+    await screen.findByText('Today’s protection status');
+    expect(screen.queryByText('Where we protected')).toBeNull();
+    expect(screen.queryByText('Light ant trailing noted near the garage door seal.')).toBeNull();
+    expect(screen.queryByText('No active entry finding was documented.')).toBeNull();
+  });
+
   const PEST_V2 = {
     status: { key: 'protected', label: 'Protected', tone: 'good' },
     statusSummary: 'Your property is in a strong position after this visit.',
@@ -517,10 +525,12 @@ describe('ReportViewPage — typed pest reports compose Pest V2 WITH the Activit
   }
 
   it('renders the dashboard AND the gauge/chart/progress chip (owner ruling 2026-07-14)', async () => {
-    renderReport(typedPestPayload());
+    renderReport(typedPestPayload({ conditions: { temp_f: 84, rain_24h_in: 0.18 } }));
     await screen.findByText('Today’s protection status');
     await screen.findByText('Bed Bug Activity');
     await screen.findByText(/Down from 4\/5 at your first visit \(Jun 12\)/);
+    expect(screen.getByText('24 Hr Rainfall')).toBeInTheDocument();
+    expect(screen.queryByText('Rain last 24 hr')).toBeNull();
   });
 
   it('recurring pest with Pest V2 still suppresses the standalone pressure card', async () => {
@@ -856,11 +866,13 @@ describe('ReportViewPage — conversion cards (owner-dictated copy 2026-08-13)',
     return { ok: true, status: 200, json: async () => payload };
   });
 
-  it('renders the dictated headlines: price folded in, city from the payload', async () => {
+  it('renders the cross-sell as a price-free estimate request', async () => {
     const { container } = mountWithFetch(dataOnlyFetch());
-    expect(await screen.findByText('Keep your home in Parrish protected for just $114!')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Keep My Home Protected' })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Request an Estimate' })).toBeInTheDocument();
     expect(screen.getByText('Know someone who could use Waves?')).toBeInTheDocument();
+    const crossSellCard = container.querySelector('[data-section="cross-sell"]');
+    expect(crossSellCard.querySelector('h3')).toBeNull();
+    expect(crossSellCard.textContent).not.toContain('$114');
     // Cut copy stays cut: no eyebrows, no cadence line, no fine print.
     expect(screen.queryByText(/Complete your protection/i)).toBeNull();
     expect(screen.queryByText(/applications a year/i)).toBeNull();
@@ -911,7 +923,7 @@ describe('ReportViewPage — conversion cards (owner-dictated copy 2026-08-13)',
         }
         return { ok: true, status: 200, json: async () => payload };
       }));
-      fireEvent.click(await screen.findByRole('button', { name: 'Keep My Home Protected' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Request an Estimate' }));
       await waitFor(() => expect(assignSpy).toHaveBeenCalledWith(`${window.location.origin}/estimate/tok-abc`));
       // The recorded-request confirmation renders BEHIND the navigation, so
       // a blocked redirect still shows durable-state copy, never a dead card.
@@ -928,7 +940,7 @@ describe('ReportViewPage — conversion cards (owner-dictated copy 2026-08-13)',
     window.location = { ...originalLocation, assign: assignSpy, reload: vi.fn() };
     try {
       mountWithFetch(dataOnlyFetch());
-      fireEvent.click(await screen.findByRole('button', { name: 'Keep My Home Protected' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Request an Estimate' }));
       expect(await screen.findByText(/Request received/)).toBeInTheDocument();
       expect(assignSpy).not.toHaveBeenCalled();
     } finally {
@@ -948,7 +960,7 @@ describe('ReportViewPage — conversion cards (owner-dictated copy 2026-08-13)',
         }
         return { ok: true, status: 200, json: async () => payload };
       }));
-      fireEvent.click(await screen.findByRole('button', { name: 'Keep My Home Protected' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Request an Estimate' }));
       expect(await screen.findByText(/Request received/)).toBeInTheDocument();
       expect(assignSpy).not.toHaveBeenCalled();
     } finally {
