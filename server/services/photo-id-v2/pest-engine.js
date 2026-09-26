@@ -153,14 +153,14 @@ function resolveCandidate(raw) {
   const confidence = clamp01(raw?.confidence);
   const traitsVisible = Array.isArray(raw?.traits_visible) ? raw.traits_visible.filter(Number.isFinite) : [];
   const traitsNotVisible = Array.isArray(raw?.traits_not_visible) ? raw.traits_not_visible.filter(Number.isFinite) : [];
-  // `verified` (orchestration-internal only — buildAnswer never reads it;
-  // see combineEscalation's agreement branch, Codex round-0 P1): true only
-  // once a real trait check has actually applied to this candidate's OWN
-  // confidence number. A freshly resolved candidates-call/escalation-call
-  // candidate has NOT been checked against anything yet.
+  // Two orchestration flags, both false until a trait check runs:
+  // `checked` — a real trait check produced this confidence (its score
+  // replaces an unchecked guess, even when it found nothing supporting);
+  // `verified` — that check also cited at least one visible trait, which
+  // is what "pretty sure" requires (Codex round-0 P1, rounds 12–18).
   if (entry) {
     return {
-      slug: entry.slug, offCatalogName: null, groupId: entry.group, confidence, entry, traitsVisible, traitsNotVisible, verified: false,
+      slug: entry.slug, offCatalogName: null, groupId: entry.group, confidence, entry, traitsVisible, traitsNotVisible, checked: false, verified: false,
     };
   }
   return {
@@ -171,6 +171,7 @@ function resolveCandidate(raw) {
     entry: null,
     traitsVisible,
     traitsNotVisible,
+    checked: false,
     verified: false,
   };
 }
@@ -183,11 +184,11 @@ function dedupeCandidates(list) {
   for (const c of list) {
     const key = c.slug ? `slug:${c.slug}` : `off:${c.offCatalogName || ''}:${c.groupId || ''}`;
     const existing = seen.get(key);
-    // A checked confidence beats an unchecked guess for the same candidate,
-    // whatever the numbers; between two of the same kind, the higher wins
-    // (Codex round-0 P1, round 15: Gemini's stale 0.90 on a failed verify
-    // must not outrank OpenAI's checked 0.20 for the same species).
-    if (!existing || (!!c.verified === !!existing.verified ? c.confidence > existing.confidence : !!c.verified)) {
+    // A completed check's score beats an unchecked guess for the same
+    // candidate, whatever the numbers — even a check that found nothing
+    // supporting it (Codex round-0 P1, rounds 15 and 18); between two of
+    // the same kind, the higher wins.
+    if (!existing || (!!c.checked === !!existing.checked ? c.confidence > existing.confidence : !!c.checked)) {
       seen.set(key, c);
     }
   }
@@ -366,6 +367,7 @@ function mergeVerify(candidates, verifyResult) {
       confidence: clamp01(v.confidence),
       traitsVisible,
       traitsNotVisible: v.traits_not_visible.filter(Number.isFinite),
+      checked: true,
       verified: citesARealTrait(c.entry, traitsVisible),
     };
   });
@@ -874,8 +876,10 @@ function stripUncontextedTraits(candidate, contextSlugs) {
   // against, and already passed `isValidEscalationCandidate`'s array-shape
   // requirement — a genuine check, `verified: true` (used by
   // combineEscalation's agreement branch, Codex round-0 P1).
-  if (contextSlugs.has(candidate.slug)) return { ...candidate, verified: citesARealTrait(candidate.entry, candidate.traitsVisible) };
-  return { ...candidate, traitsVisible: [], traitsNotVisible: [], verified: false };
+  if (contextSlugs.has(candidate.slug)) {
+    return { ...candidate, checked: true, verified: citesARealTrait(candidate.entry, candidate.traitsVisible) };
+  }
+  return { ...candidate, traitsVisible: [], traitsNotVisible: [], checked: false, verified: false };
 }
 
 /** Prefer whichever candidate's confidence was actually verified (a real
@@ -883,8 +887,10 @@ function stripUncontextedTraits(candidate, contextSlugs) {
  * between two unverified guesses, `a` (the caller's default/fallback
  * side) — there is no real evidence either way to prefer `b` over it. */
 function pickVerifiedWinner(a, b) {
-  const aVerified = !!a.verified;
-  const bVerified = !!b.verified;
+  // `checked`, not `verified`: a completed check that found no supporting
+  // trait still replaces an unchecked guess (Codex round-0 P1, round 18).
+  const aVerified = !!a.checked;
+  const bVerified = !!b.checked;
   if (aVerified && bVerified) return b.confidence > a.confidence ? b : a;
   if (bVerified) return b;
   return a;
@@ -947,7 +953,8 @@ function combineEscalation(geminiCandidates, escalationResult, contextSlugs) {
       confidence: winner.confidence,
       traitsVisible: winner.traitsVisible,
       traitsNotVisible: winner.traitsNotVisible,
-      verified: !!(geminiTop.verified || openaiTop.verified),
+      checked: !!(geminiTop.checked || openaiTop.checked),
+      verified: !!winner.verified,
     };
     return {
       // Both providers' own top is the answer's top; a stale runner-up with

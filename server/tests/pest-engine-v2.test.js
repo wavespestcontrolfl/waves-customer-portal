@@ -49,7 +49,7 @@ const {
 function cand(slug, confidence, { traitsVisible = [], traitsNotVisible = [], verified = true } = {}) {
   const entry = catalog.getEntry(slug);
   if (!entry) throw new Error(`fixture has no entry "${slug}"`);
-  return { slug: entry.slug, offCatalogName: null, groupId: entry.group, confidence, entry, traitsVisible, traitsNotVisible, verified };
+  return { slug: entry.slug, offCatalogName: null, groupId: entry.group, confidence, entry, traitsVisible, traitsNotVisible, checked: verified, verified };
 }
 
 function candOff(offCatalogName, groupId, confidence) {
@@ -960,7 +960,7 @@ describe('identifyPestV2 — internal object never reaches v2', () => {
 
 describe('combineEscalation — agreement only takes a CHECKED confidence (Codex round-0 P1, rounds 12–13)', () => {
   const { combineEscalation } = engine._test;
-  const geminiTop = (confidence, verified) => ({ ...cand('fire-ant', confidence), verified });
+  const geminiTop = (confidence, verified) => ({ ...cand('fire-ant', confidence), checked: verified, verified });
   const escalation = (confidence) => ({
     ok: true,
     json: {
@@ -986,6 +986,20 @@ describe('combineEscalation — agreement only takes a CHECKED confidence (Codex
   test('a verified Gemini reading is not overridden by a higher unverified OpenAI guess', () => {
     const out = combineEscalation([geminiTop(0.8, true)], escalation(0.95), new Set());
     expect(out.finalCandidates[0].confidence).toBe(0.8);
+  });
+
+  test('a completed OpenAI check that found NO supporting trait still replaces an unchecked guess (round 18)', () => {
+    const esc = {
+      ok: true,
+      json: {
+        quality: { usable: true, issue: 'none' }, shows: 'organism',
+        candidates: [{ slug: 'fire-ant', confidence: 0.10, traits_visible: [], traits_not_visible: [1, 2, 3] }],
+      },
+    };
+    const out = combineEscalation([geminiTop(0.95, false)], esc, new Set(['fire-ant']));
+    expect(out.finalCandidates[0].confidence).toBe(0.10);
+    expect(out.finalCandidates[0].traitsNotVisible).toEqual([1, 2, 3]);
+    expect(out.finalCandidates[0].verified).toBe(false);
   });
 
   test('an unverified Gemini reading takes the verified OpenAI one, even when lower', () => {
