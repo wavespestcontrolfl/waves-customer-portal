@@ -5679,7 +5679,6 @@ function validatePhoneCallAppointmentCustomer(customer = {}, extracted = {}, cal
 
   const missing = [];
   if (!String(merged.firstName || '').trim()) missing.push('first_name');
-  if (!String(merged.lastName || '').trim()) missing.push('last_name');
   if (!hasUsablePhone(merged.phone)) missing.push('phone');
   if (!String(merged.streetAddress || '').trim()) missing.push('street_address');
   if (!String(merged.city || '').trim()) missing.push('city');
@@ -5692,9 +5691,21 @@ function validatePhoneCallAppointmentCustomer(customer = {}, extracted = {}, cal
   // site files. A stored/extracted email that fails EMAIL_RE also lands here
   // (garbled capture ≈ no capture). PERSISTED-OR-REVIEW above still governs
   // WHICH emails count when one exists.
+  //
+  // Last name is ADVISORY too (owner ruling 2026-09-26: "this is stupid,
+  // that the client has to have his last name on file to book an appt when
+  // we spoke to him, and invited us to go for an assessment" — a real
+  // outbound call where staff confirmed a Waves Assessment with only a
+  // first name went unbooked). The separate `missing_last_name` triage flag
+  // (call-triage-flags.js, ADVISORY_TRIAGE_FLAGS) already files a
+  // `name_review` card for the office to collect the surname — this gate
+  // must not ALSO hold the booking for the same missing field.
   const advisory = [];
   if (!EMAIL_RE.test(String(merged.email || '').trim().toLowerCase())) {
     advisory.push('email');
+  }
+  if (!String(merged.lastName || '').trim()) {
+    advisory.push('last_name');
   }
 
   return { ok: missing.length === 0, missing, advisory, details: merged };
@@ -15186,6 +15197,24 @@ const CallRecordingProcessor = {
               .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
               .ignore()
               .catch((e) => logger.warn(`[call-proc] email-missing advisory insert failed for ${maskSid(callSid)}: ${e.message}`));
+          }
+          // Last-name advisory (owner ruling 2026-09-26): the booking no
+          // longer holds on a missing surname, so the "get the full name"
+          // card must be filed HERE — the triage-flag path only raises
+          // missing_last_name for hot/warm leads with an extracted first
+          // name. Same partial unique index as the flag path, so a card that
+          // path already filed is not duplicated.
+          if (customerValidation.advisory?.includes('last_name')) {
+            await db('triage_items')
+              .insert(buildTriageItem({
+                callLogId: call.id,
+                flag: 'missing_last_name',
+                extraction: v2ApprovedExtraction || undefined,
+                severity: 'advisory',
+              }))
+              .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+              .ignore()
+              .catch((e) => logger.warn(`[call-proc] last-name advisory insert failed for ${maskSid(callSid)}: ${e.message}`));
           }
           // Email-less bookings in SHADOW/LEGACY mode still require a
           // positively validated address (codex round-7 P1). canAutoRoute's

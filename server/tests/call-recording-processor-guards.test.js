@@ -947,10 +947,13 @@ describe('call recording appointment guardrails', () => {
 
     expect(incomplete.ok).toBe(false);
     expect(incomplete.missing).toEqual(expect.arrayContaining([
-      'last_name',
       'street_address',
       'zip',
     ]));
+    // last_name is ADVISORY, not blocking (owner ruling 2026-09-26) — it must
+    // never appear in `missing`.
+    expect(incomplete.missing).not.toContain('last_name');
+    expect(incomplete.advisory).toContain('last_name');
 
     const complete = validatePhoneCallAppointmentCustomer(
       {
@@ -1002,6 +1005,45 @@ describe('call recording appointment guardrails', () => {
     expect(alsoMissingZip.ok).toBe(false);
     expect(alsoMissingZip.missing).toEqual(['zip']);
     expect(alsoMissingZip.advisory).toEqual(['email']);
+  });
+
+  test('missing last name is ADVISORY — the booking proceeds (owner ruling 2026-09-26)', () => {
+    const base = {
+      first_name: 'Testcaller',
+      phone: '+19417308491',
+      email: 'testcaller@example.com',
+      address_line1: '123 Main St',
+      city: 'Bradenton',
+      state: 'FL',
+      zip: '34205',
+    };
+
+    // No last name on file or extracted → still books; advisory card requested.
+    const noLastName = validatePhoneCallAppointmentCustomer(base, {}, null);
+    expect(noLastName.ok).toBe(true);
+    expect(noLastName.missing).toEqual([]);
+    expect(noLastName.advisory).toEqual(['last_name']);
+
+    // A last name extracted on THIS call (not yet persisted) satisfies it.
+    const extractedLast = validatePhoneCallAppointmentCustomer(base, { last_name: 'Alvarez' }, null);
+    expect(extractedLast.ok).toBe(true);
+    expect(extractedLast.advisory).toEqual([]);
+
+    // A stored last name satisfies it too.
+    const stored = validatePhoneCallAppointmentCustomer({ ...base, last_name: 'Alvarez' }, {}, null);
+    expect(stored.advisory).toEqual([]);
+
+    // Missing last name AND email both surface as advisory together, and
+    // neither masks a REAL missing field.
+    const bothAdvisoryPlusRealMiss = validatePhoneCallAppointmentCustomer(
+      { ...base, email: undefined, zip: '' },
+      {},
+      null
+    );
+    expect(bothAdvisoryPlusRealMiss.ok).toBe(false);
+    expect(bothAdvisoryPlusRealMiss.missing).toEqual(['zip']);
+    expect(bothAdvisoryPlusRealMiss.advisory).toEqual(expect.arrayContaining(['email', 'last_name']));
+    expect(bothAdvisoryPlusRealMiss.advisory).toHaveLength(2);
   });
 });
 
@@ -2115,5 +2157,23 @@ describe('round-13: extraction anchor and skipped-card snapshot', () => {
   test('both fileSkippedBookingCard sites pass the legacy booking-authority snapshot first', () => {
     const n = src.split('extraction: disputeSchedulingAuthority || v2ApprovedExtraction || v2CanonicalExtraction,').length - 1;
     expect(n).toBe(2);
+  });
+});
+
+// codex #4991 r1 P2: the booking no longer holds on a missing surname, and
+// the triage-flag path only raises missing_last_name for hot/warm leads with
+// an extracted first name — so the booking site itself must file the
+// advisory "get the full name" card, deduped on the same partial index.
+describe('booking site files the missing_last_name advisory card (codex #4991 r1 P2)', () => {
+  const processorSrc = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+
+  test('a last_name advisory from the booking validator inserts an advisory missing_last_name card', () => {
+    const gateAt = processorSrc.indexOf("if (customerValidation.advisory?.includes('last_name')) {");
+    expect(gateAt).toBeGreaterThan(-1);
+    const section = processorSrc.slice(gateAt, gateAt + 700);
+    expect(section).toContain("flag: 'missing_last_name'");
+    expect(section).toContain("severity: 'advisory'");
+    expect(section).toContain(".onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\\'open\\', \\'in_progress\\')'))");
+    expect(section).toContain('.ignore()');
   });
 });
