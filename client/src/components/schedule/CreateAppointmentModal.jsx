@@ -43,6 +43,7 @@ import {
   percentageDiscountDollars,
 } from '../../lib/discountStack';
 import { useDiscountStackingState, ensureStackingFresh } from '../../hooks/useDiscountStacking';
+import { labelNamesRetiredSale, RETIRED_SALE_SERVICE_KEYS } from '../../constants/retiredSaleLabels';
 import { propertyRelationshipChip } from '../../lib/contact-roles';
 import { addressAskNotice } from '../../lib/addressAsks';
 
@@ -1324,6 +1325,21 @@ export function appointmentDiscountSpansLine(group, svc) {
   return !group || group.lines.includes(svc);
 }
 
+// A service line in this modal is a retired-for-sale plan (quarterly T&S)
+// by its search-result flag, its catalog key, or its name plus the cadence it
+// is set to run at — the server write gate's own reading. Quote-derived lines
+// carry no flag (codex r35 on #4786), so the flag alone is not enough.
+export function lineIsRetiredSale(line) {
+  if (!line) return false;
+  if (line.retiredForSale) return true;
+  if (RETIRED_SALE_SERVICE_KEYS.has(line.serviceKey || line.service_key)) return true;
+  const name = String(line.name || '');
+  const cadence = line.cadence === 'custom' && Number(line.intervalDays) > 0
+    ? `every ${Number(line.intervalDays)} days`
+    : String(line.cadence || '').replace(/_/g, ' ');
+  return labelNamesRetiredSale(name) || labelNamesRetiredSale(`${name} ${cadence}`);
+}
+
 export default function CreateAppointmentModal({ defaultDate, defaultWindowStart, defaultDurationMinutes, defaultTechId, defaultCustomer = null, defaultEstimateId = null, onClose, onCreated, onChange }) {
   const dialogRef = useModalFocus(true, onClose);
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
@@ -1539,12 +1555,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // A retired-for-sale line (quarterly T&S) is only offered because the
   // selected customer is already on that plan — it must not carry over to a
   // different customer. The server refuses it too (RETIRED_SERVICE_NOT_SELLABLE).
+  // lineIsRetiredSale reads search-result AND quote-derived lines (codex r35).
   const retiredLinesCustomerRef = useRef(selectedCustomer?.id || null);
   useEffect(() => {
     const customerId = selectedCustomer?.id || null;
     if (retiredLinesCustomerRef.current === customerId) return;
     retiredLinesCustomerRef.current = customerId;
-    setServices((arr) => (arr.some((line) => line.retiredForSale) ? arr.filter((line) => !line.retiredForSale) : arr));
+    setServices((arr) => (arr.some(lineIsRetiredSale) ? arr.filter((line) => !lineIsRetiredSale(line)) : arr));
     // The previous customer's search results (a retired row among them) are
     // not offered to the next one while their own search is in flight.
     setServiceResults([]);

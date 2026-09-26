@@ -17,6 +17,7 @@ import {
   ESTIMATE_SOURCE_LABEL,
   filterScheduleEstimatesForProperty,
   findScheduleEstimateById,
+  lineIsRetiredSale,
   firstGroupSendFlags,
   isBookableProperty,
   lineDiscountFields,
@@ -863,5 +864,27 @@ describe('composeAppointmentSuccessToast', () => {
   it('drops the per-visit invoicing copy when a prepay notice is present', () => {
     expect(composeAppointmentSuccessToast({ resultsCount: 1, createdCount: 0, estimateAccepted: false, prepayNotice: 'Annual prepay invoice sent for $500.00.' }))
       .toBe('Appointment created Annual prepay invoice sent for $500.00.');
+  });
+});
+
+describe('lineIsRetiredSale (codex r35 on #4786)', () => {
+  it('reads a quote-derived line with no search-result flag by key, name, or name plus cadence', () => {
+    // An applied pre-retirement quote: no retiredForSale flag.
+    expect(lineIsRetiredSale({ serviceKey: 'tree_shrub_quarterly', name: 'Tree & Shrub Care', cadence: 'quarterly' })).toBe(true);
+    expect(lineIsRetiredSale({ serviceKey: null, name: 'Quarterly Tree & Shrub Care', cadence: 'quarterly' })).toBe(true);
+    expect(lineIsRetiredSale({ serviceKey: null, name: 'Tree & Shrub Care', cadence: 'quarterly' })).toBe(true);
+    expect(lineIsRetiredSale({ serviceKey: null, name: 'Tree & Shrub Care', cadence: 'custom', intervalDays: 90 })).toBe(true);
+    expect(lineIsRetiredSale({ serviceKey: null, name: 'Tree & Shrub (Light)', cadence: 'monthly' })).toBe(true);
+    // A search-result line keeps its flag.
+    expect(lineIsRetiredSale({ retiredForSale: true, name: 'Anything' })).toBe(true);
+  });
+
+  it('leaves current plans and other quarterly services alone', () => {
+    expect(lineIsRetiredSale({ serviceKey: 'tree_shrub_program', name: 'Bi-Monthly Tree & Shrub Care', cadence: 'bimonthly' })).toBe(false);
+    expect(lineIsRetiredSale({ serviceKey: null, name: 'Tree & Shrub Care', cadence: 'custom', intervalDays: 42 })).toBe(false);
+    // A fixed cadence ignores an interval field (quarterly lines infer 30 here).
+    expect(lineIsRetiredSale({ serviceKey: null, name: 'Tree & Shrub Care', cadence: 'bimonthly', intervalDays: 90 })).toBe(false);
+    expect(lineIsRetiredSale({ serviceKey: 'pest_quarterly', name: 'Quarterly Pest Control', cadence: 'quarterly' })).toBe(false);
+    expect(lineIsRetiredSale(null)).toBe(false);
   });
 });
