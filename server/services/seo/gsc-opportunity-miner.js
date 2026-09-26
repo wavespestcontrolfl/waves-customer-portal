@@ -864,6 +864,9 @@ function filterActiveCitabilityReservations(query) {
     this.where('bucket', '<>', 'citability_backfill')
       .orWhere('status', '<>', 'pending')
       .orWhere('attempt_count', '<', maxClaimAttempts());
+  }).where(function () {
+    this.where('bucket', '<>', 'citability_backfill')
+      .orWhereRaw("NOT jsonb_exists(COALESCE(signal_metadata, '{}'::jsonb), 'page_edit_superseded')");
   });
   return query;
 }
@@ -876,6 +879,7 @@ async function activeCitabilityPagesFor(trx) {
     .where({ bucket: 'citability_backfill' })
     .whereIn('status', ['pending', 'claimed', 'pending_review'])
     .whereNotNull('page_url')
+    .whereRaw("NOT jsonb_exists(COALESCE(signal_metadata, '{}'::jsonb), 'page_edit_superseded')")
     .select('page_url', 'status', 'attempt_count');
   return new Set(rows
     .filter((r) => r.status !== 'pending' || Number(r.attempt_count) < claimBudget)
@@ -4561,6 +4565,19 @@ class GscOpportunityMiner {
           row.mined_at, row.expires_at, row.dedupe_key,
         ]
       );
+      // mineAll passes the transaction that already holds the shared page-edit
+      // advisory lock. Direct persistAll calls are script/test entry points and
+      // do not arbitrate page ownership, so they must not mutate backfill rows.
+      if (trx && (result.rowCount ?? 0) > 0
+        && o.bucket !== 'citability_backfill'
+        && o.page_url
+        && GscOpportunityMiner.PAGE_EDITING_ACTIONS.includes(o.action_type)) {
+        const { supersedeCitabilityBackfillsForPage } = require('../content/opportunity-queue')._internals;
+        await supersedeCitabilityBackfillsForPage(runner, {
+          pageUrl: o.page_url,
+          ordinaryDedupeKey: o.dedupe_key,
+        });
+      }
       // ?? not || — a frozen-row conflict legitimately reports rowCount 0
       // (the WHERE guard skipped the update) and must not count as persisted.
       count += result.rowCount ?? 0;

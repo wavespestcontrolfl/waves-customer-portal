@@ -817,6 +817,24 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     }
   });
 
+  test('a paused citability PR marked superseded while the lane was off cannot merge after re-enable', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({
+      pending: [makeRun({ action_type: 'refresh_existing_page' })],
+      queue: [{
+        id: 'opp-1', status: 'pending_review', skip_reason: 'astro_pr_pending_merge', claim_id: null,
+        bucket: 'citability_backfill', signal_metadata: { page_edit_superseded: { ordinary_dedupe_key: 'ordinary:1' } },
+      }],
+    });
+    gh.getPr.mockResolvedValue(openPr());
+
+    const result = await poller.pollPending();
+
+    expect(result.results[0]).toMatchObject({ pending: true, reason: 'citability_backfill_superseded' });
+    expect(pagesPoll.latestDeploymentForBranch).not.toHaveBeenCalled();
+    expect(gh.mergePr).not.toHaveBeenCalled();
+  });
+
   test.each(['verdict', 'throw'])('a transient body-image %s after 49 hours never retires the PR', async (failure) => {
     const updates = setupDb({ pending: [makeRun({ poll_pending_reason: 'body_images_required', poll_pending_since: new Date(Date.now() - 49 * 3600000) })] });
     gh.getPr.mockResolvedValue(openPr());
@@ -1280,10 +1298,14 @@ describe('auto-merge gating (each condition individually blocking)', () => {
 
   test('queueRowStillParkedLocked: the final pre-merge check locks the queue row on the merge transaction and fails closed (hook r31 P1)', async () => {
     const run = makeRun({ created_at: '2026-08-28T04:00:00Z' });
-    const fakeTrx = ({ row, newer = null, throwOn = null }) => jest.fn((table) => {
+    const fakeTrx = ({ row, newer = null, throwOn = null }) => {
+      const trx = jest.fn((table) => {
       const q = { where: jest.fn(() => q), whereNot: jest.fn(() => q), forUpdate: jest.fn(() => q), first: jest.fn(async () => { if (throwOn) throw new Error(throwOn); return table === 'opportunity_queue' ? row : newer; }) };
       return q;
-    });
+      });
+      trx.raw = jest.fn().mockResolvedValue({});
+      return trx;
+    };
     const parkedRow = { id: run.opportunity_id, status: 'pending_review', skip_reason: run.skip_reason };
     // Still parked on this run → merge may proceed; the row was locked FOR UPDATE.
     let trx = fakeTrx({ row: parkedRow });
@@ -1294,6 +1316,10 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     expect(await poller._internals.queueRowStillParkedLocked(run, fakeTrx({ row: null }))).toBe(false);
     // A newer sibling owns the opportunity → withheld.
     expect(await poller._internals.queueRowStillParkedLocked(run, fakeTrx({ row: parkedRow, newer: { id: 'run-newer' } }))).toBe(false);
+    expect(await poller._internals.queueRowStillParkedLocked(
+      makeRun({ action_type: 'refresh_existing_page' }),
+      fakeTrx({ row: { ...parkedRow, bucket: 'citability_backfill', signal_metadata: { page_edit_superseded: {} } } }),
+    )).toBe(false);
     // Cannot verify (lock error, or a run without created_at) → fail closed.
     expect(await poller._internals.queueRowStillParkedLocked(run, fakeTrx({ row: parkedRow, throwOn: 'lock timeout' }))).toBe(false);
     expect(await poller._internals.queueRowStillParkedLocked(makeRun({ created_at: null }), fakeTrx({ row: parkedRow }))).toBe(false);

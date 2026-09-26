@@ -1759,6 +1759,7 @@ function loadRunnerWith({
   contentGuardrails = undefined,
   comparisonTableGate = undefined,
   claimsLedgerValidator = undefined,
+  dbTransaction = null,
 }) {
   queue.skip ||= jest.fn().mockResolvedValue(true);
   jest.resetModules();
@@ -1770,6 +1771,7 @@ function loadRunnerWith({
       insert: jest.fn(() => ({ returning, onConflict })),
     };
   });
+  if (dbTransaction) dbMock.transaction = jest.fn(dbTransaction);
   jest.doMock('../models/db', () => dbMock);
   jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
   // The runner fires the owner email-approval notification via setImmediate
@@ -2472,6 +2474,46 @@ describe('runNext general shadow behavior', () => {
 });
 
 describe('runNext post-publish bookkeeping', () => {
+  test('rechecks citability page ownership before publisher side effects', async () => {
+    const publisher = { publishRefresh: jest.fn() };
+    const queue = {
+      getById: jest.fn().mockResolvedValue({
+        id: 'opp_backfill_1',
+        bucket: 'citability_backfill',
+        signal_metadata: {},
+      }),
+      _internals: {
+        pageEditSuperseded: (row) => Boolean(row?.signal_metadata?.page_edit_superseded),
+      },
+    };
+    const trx = jest.fn(() => {
+      const q = {
+        where: jest.fn(() => q),
+        forUpdate: jest.fn(() => q),
+        first: jest.fn().mockResolvedValue({
+          bucket: 'citability_backfill',
+          signal_metadata: { page_edit_superseded: { ordinary_dedupe_key: 'ordinary:1' } },
+        }),
+      };
+      return q;
+    });
+    trx.raw = jest.fn().mockResolvedValue({});
+    const runner = loadRunnerWith({
+      queue,
+      briefBuilder: {},
+      publisher,
+      dbTransaction: (callback) => callback(trx),
+    });
+
+    await expect(runner._publishAndDistribute(
+      { body: 'stale draft' },
+      { action_type: 'refresh_existing_page' },
+      { opportunity_id: 'opp_backfill_1' },
+    )).rejects.toMatchObject({ code: 'PAGE_EDIT_SUPERSEDED' });
+    expect(trx.raw).toHaveBeenCalledWith("SELECT pg_advisory_xact_lock(hashtext('opportunity_page_edit'))");
+    expect(publisher.publishRefresh).not.toHaveBeenCalled();
+  });
+
   // These tests exercise publish/queue bookkeeping, not blog dedup. Blog
   // uniqueness now defaults ON (and requires a loaded corpus), so disable it
   // here to isolate the bookkeeping paths; dedup has its own coverage.

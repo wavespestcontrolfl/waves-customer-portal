@@ -2304,6 +2304,7 @@ describe('_revalidateFamilyBatch — citability page-edit fence under the persis
         }),
         whereIn: jest.fn().mockReturnThis(),
         whereNotNull: jest.fn().mockReturnThis(),
+        whereRaw: jest.fn().mockReturnThis(),
         forUpdate: jest.fn().mockReturnThis(),
         select: jest.fn(() => Promise.resolve(bucket === 'citability_backfill' ? citabilityRows : [])),
       };
@@ -2406,6 +2407,7 @@ describe('citability reservations outside the persist lock', () => {
     const calls = [];
     const query = {
       where: jest.fn().mockReturnThis(),
+      whereRaw: jest.fn().mockReturnThis(),
       whereIn: jest.fn().mockReturnThis(),
       whereNotNull: jest.fn().mockReturnThis(),
       whereNot: jest.fn((...args) => { calls.push(args); return query; }),
@@ -2422,7 +2424,7 @@ describe('citability reservations outside the persist lock', () => {
     const { query, calls } = queryRecorder();
     expect(filterActiveCitabilityReservations(query)).toBe(query);
     expect(calls).toEqual(open ? [] : [['bucket', 'citability_backfill']]);
-    expect(query.where).toHaveBeenCalledTimes(open ? 1 : 0);
+    expect(query.where).toHaveBeenCalledTimes(open ? 2 : 0);
   });
 
   test('the pre-mine listicle read uses the shared kill-switch filter', () => {

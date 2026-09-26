@@ -28,6 +28,9 @@ const effectiveActionSql = require('./opportunity-action-sql');
 // A failed status write may leave a published run's row pending. Fence every
 // blog claim, not just legacy approval holds. Only a verified closed PR with
 // its branch removed can cease blocking; published URLs never do.
+const PAGE_EDIT_SUPERSEDED_KEY = 'page_edit_superseded';
+const PAGE_EDIT_SUPERSEDED_REASON = 'superseded_by_ordinary_page_edit';
+
 const claimableStatusSql = `((status = 'pending' OR (
            ${effectiveActionSql} = 'new_supporting_blog' AND status = 'pending_review'
            AND (skip_reason IN ('named_competitor_review', 'affiliate_review')
@@ -36,7 +39,9 @@ const claimableStatusSql = `((status = 'pending' OR (
            SELECT 1 FROM autonomous_runs r WHERE r.opportunity_id = opportunity_queue.id
              AND (r.published_url IS NOT NULL
                OR (r.astro_pr_url IS NOT NULL AND r.astro_pr_retired_at IS NULL))
-         )))`;
+         )))
+         AND NOT (bucket = 'citability_backfill'
+           AND jsonb_exists(COALESCE(signal_metadata, '{}'::jsonb), '${PAGE_EDIT_SUPERSEDED_KEY}'))`;
 
 const { THRESHOLDS, minScoreToActFor } = require('./scoring-config');
 
@@ -83,6 +88,67 @@ function citabilityBackfillLaneOpen() {
 function maxClaimAttempts() {
   const n = Number(process.env.AUTONOMOUS_OPP_MAX_ATTEMPTS);
   return Number.isFinite(n) && n > 0 ? n : 5;
+}
+
+function pageEditRouteIdentity(url) {
+  if (!url) return null;
+  const raw = String(url).trim();
+  if (!raw) return null;
+  const withoutFragment = raw.split('#')[0].split('?')[0];
+  const host = raw.startsWith('/')
+    ? 'wavespestcontrol.com'
+    : raw.replace(/^[a-z]+:\/\//i, '').split('/')[0].split(':')[0].replace(/^www\./i, '').toLowerCase();
+  const path = withoutFragment.replace(/^[a-z]+:\/\/[^/]+/i, '').replace(/\/+$/, '') || '/';
+  return `${host}::${path}`;
+}
+
+function pageEditSuperseded(rowOrMetadata) {
+  let metadata = rowOrMetadata?.signal_metadata ?? rowOrMetadata;
+  if (typeof metadata === 'string') {
+    try { metadata = JSON.parse(metadata); } catch { return false; }
+  }
+  return Boolean(metadata && typeof metadata === 'object' && metadata[PAGE_EDIT_SUPERSEDED_KEY]);
+}
+
+// Caller holds opportunity_page_edit's transaction advisory lock. Once an
+// ordinary producer has actually queued a page edit, the older backfill no
+// longer owns that page even if its lane is enabled later. Pending work can be
+// retired immediately. Claimed/review rows retain their state and evidence;
+// the durable marker fences their worker/publication/merge boundaries.
+async function supersedeCitabilityBackfillsForPage(trx, { pageUrl, ordinaryDedupeKey, now = new Date() }) {
+  const identity = pageEditRouteIdentity(pageUrl);
+  if (!identity) return 0;
+  const candidates = await trx('opportunity_queue')
+    .where({ bucket: 'citability_backfill' })
+    .whereIn('status', ['pending', 'claimed', 'pending_review'])
+    .whereNotNull('page_url')
+    .forUpdate()
+    .select('id', 'page_url', 'status', 'signal_metadata');
+  const matched = candidates.filter((row) => pageEditRouteIdentity(row.page_url) === identity);
+  for (const row of matched) {
+    let metadata = row.signal_metadata;
+    if (typeof metadata === 'string') {
+      try { metadata = JSON.parse(metadata); } catch { metadata = {}; }
+    }
+    metadata = metadata && typeof metadata === 'object' ? metadata : {};
+    const pending = row.status === 'pending';
+    await trx('opportunity_queue').where('id', row.id).update({
+      signal_metadata: JSON.stringify({
+        ...metadata,
+        [PAGE_EDIT_SUPERSEDED_KEY]: {
+          ordinary_dedupe_key: ordinaryDedupeKey || null,
+          marked_at: now.toISOString(),
+        },
+      }),
+      ...(pending ? {
+        status: 'skipped',
+        skip_reason: PAGE_EDIT_SUPERSEDED_REASON,
+        completed_at: now,
+      } : {}),
+      updated_at: now,
+    });
+  }
+  return matched.length;
 }
 
 /**
@@ -390,6 +456,19 @@ class OpportunityQueue {
    */
   async recoverStaleClaims() {
     const cutoff = new Date(Date.now() - STALE_CLAIM_MS);
+    const superseded = await db('opportunity_queue')
+      .where('status', 'claimed')
+      .where('claimed_at', '<', cutoff)
+      .where('bucket', 'citability_backfill')
+      .whereRaw(`jsonb_exists(COALESCE(signal_metadata, '{}'::jsonb), ?)`, [PAGE_EDIT_SUPERSEDED_KEY])
+      .whereRaw(`skip_reason IS DISTINCT FROM 'named_competitor_publishing'`)
+      .update({
+        status: 'skipped',
+        claimed_at: null,
+        skip_reason: PAGE_EDIT_SUPERSEDED_REASON,
+        completed_at: new Date(),
+        updated_at: new Date(),
+      });
     const recovered = await db('opportunity_queue')
       .where('status', 'claimed')
       .where('claimed_at', '<', cutoff)
@@ -402,13 +481,16 @@ class OpportunityQueue {
       // carry a NULL skip_reason and NULL <> 'x' is NULL, which would
       // silently exclude every normal claim from recovery.
       .whereRaw(`skip_reason IS DISTINCT FROM 'named_competitor_publishing'`)
+      .whereRaw(`NOT (bucket = 'citability_backfill'
+        AND jsonb_exists(COALESCE(signal_metadata, '{}'::jsonb), ?))`, [PAGE_EDIT_SUPERSEDED_KEY])
       .update({
         status: 'pending',
         claimed_at: null,
         updated_at: new Date(),
       });
-    if (recovered > 0) logger.info(`[opportunity-queue] recovered ${recovered} stale claim(s) (cutoff ${cutoff.toISOString()})`);
-    return recovered;
+    const total = Number(superseded || 0) + Number(recovered || 0);
+    if (total > 0) logger.info(`[opportunity-queue] recovered ${total} stale claim(s) (cutoff ${cutoff.toISOString()}; superseded ${superseded || 0})`);
+    return total;
   }
 
   /**
@@ -511,4 +593,15 @@ function parseRow(row) {
 
 module.exports = new OpportunityQueue();
 module.exports.OpportunityQueue = OpportunityQueue;
-module.exports._internals = { parseRow, STALE_CLAIM_MS, maxClaimAttempts, listicleFamilyLaneOpen, citabilityBackfillLaneOpen };
+module.exports._internals = {
+  parseRow,
+  STALE_CLAIM_MS,
+  maxClaimAttempts,
+  listicleFamilyLaneOpen,
+  citabilityBackfillLaneOpen,
+  pageEditRouteIdentity,
+  pageEditSuperseded,
+  supersedeCitabilityBackfillsForPage,
+  PAGE_EDIT_SUPERSEDED_KEY,
+  PAGE_EDIT_SUPERSEDED_REASON,
+};

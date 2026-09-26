@@ -1329,6 +1329,15 @@ class AutonomousRunner {
     try {
       publishOutcome = await this._publishAndDistribute(draft, brief, run);
     } catch (err) {
+      if (err.code === 'PAGE_EDIT_SUPERSEDED') {
+        const finalized = await finalize(run, t0, {
+          outcome: 'skipped_gate_fail',
+          skip_reason: 'superseded_by_ordinary_page_edit',
+          reviewer_notes: err.message,
+        });
+        await this._skipClaimOrThrow(queue, opp.id, 'superseded_by_ordinary_page_edit', { claimToken });
+        return finalized;
+      }
       if (['BLOG_EDITORIAL_REVIEW_FAILED', 'BLOG_EDITORIAL_REVIEW_UNAVAILABLE'].includes(err.code)) {
         return this._gateFailRetryOrSkip(queue, opp, run, t0, finalize, {
           claimToken, skipReason: 'editorial_review_failed', notes: err.message, blocking: err.findings,
@@ -3562,6 +3571,24 @@ class AutonomousRunner {
     const indexNow = getIndexNow();
     const planner = getLinkPlanner();
 
+    // A gate-off backfill can lose its page reservation to an ordinary
+    // refresh while this worker is drafting. Re-read durable ownership at the
+    // irreversible publisher boundary so the stale worker cannot create a
+    // branch/commit/PR after the ordinary producer has taken the page.
+    let latestOpportunity = null;
+    if (run?.opportunity_id) {
+      const queue = getQueue();
+      latestOpportunity = typeof queue?.getById === 'function' ? await queue.getById(run.opportunity_id) : null;
+      const pageEditSuperseded = latestOpportunity?.bucket === 'citability_backfill'
+        ? require('./opportunity-queue')._internals?.pageEditSuperseded
+        : null;
+      if (typeof pageEditSuperseded === 'function' && pageEditSuperseded(latestOpportunity)) {
+        const err = new Error('Citability backfill was superseded by an ordinary page edit before publishing');
+        err.code = 'PAGE_EDIT_SUPERSEDED';
+        throw err;
+      }
+    }
+
     // Publish via existing astro-publisher. We pass the draft + brief;
     // the publisher decides whether to open a PR or commit directly to
     // main based on its own configuration. The astro-publisher service
@@ -3574,7 +3601,28 @@ class AutonomousRunner {
       ? publisher.publishRefresh.bind(publisher)
       : publisher?.publishOrUpdatePage?.bind(publisher);
     if (usePublish) {
-      const r = await usePublish(draft, brief);
+      const publish = () => usePublish(draft, brief);
+      // Serialize the last ownership read with ordinary page-edit producers.
+      // If an ordinary enqueue won while the lane was off, its marker is
+      // visible here before any branch/commit/PR side effect. If this worker
+      // wins while the lane is open, producers re-read the active reservation
+      // after the lock and yield to it.
+      const r = latestOpportunity?.bucket === 'citability_backfill'
+        ? await db.transaction(async (trx) => {
+          await trx.raw("SELECT pg_advisory_xact_lock(hashtext('opportunity_page_edit'))");
+          const locked = await trx('opportunity_queue')
+            .where('id', run.opportunity_id)
+            .forUpdate()
+            .first('bucket', 'signal_metadata');
+          const { pageEditSuperseded } = require('./opportunity-queue')._internals;
+          if (!locked || locked.bucket !== 'citability_backfill' || pageEditSuperseded(locked)) {
+            const err = new Error('Citability backfill no longer owns the page at the publisher boundary');
+            err.code = 'PAGE_EDIT_SUPERSEDED';
+            throw err;
+          }
+          return publish();
+        })
+        : await publish();
       // A refresh whose body + editable meta already match the live page is a
       // completed no-op: publishRefresh returns status:'no_changes' (no PR, no
       // commit, nothing republished). Leave published_url UNSET so the impact

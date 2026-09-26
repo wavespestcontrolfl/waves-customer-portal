@@ -363,6 +363,10 @@ async function seedAll({ dryRun = false, perDay = DEFAULT_PER_DAY, minGaps = DEF
                                   ELSE opportunity_queue.attempt_count
                              END,
              updated_at = now()
+       -- An ordinary producer can take this page while the lane is off.
+       -- That ownership transfer is durable: do not revive the retired row
+       -- or erase the marker if an operator runs the seeder after re-enable.
+       WHERE NOT jsonb_exists(COALESCE(opportunity_queue.signal_metadata, '{}'::jsonb), 'page_edit_superseded')
       `,
       [
         row.bucket, row.action_type, row.query, row.page_url, row.service, row.city,

@@ -225,6 +225,7 @@ describe('seedAll — gated, idempotent upsert', () => {
     expect(sql).toMatch(/INSERT INTO opportunity_queue/);
     expect(sql).toMatch(/ON CONFLICT \(dedupe_key\) DO UPDATE/);
     expect(sql).toMatch(/status IN \('claimed', 'done', 'pending_review'\)/);
+    expect(sql).toContain("WHERE NOT jsonb_exists(COALESCE(opportunity_queue.signal_metadata, '{}'::jsonb), 'page_edit_superseded')");
     expect(bindings[0]).toBe('citability_backfill');
     expect(bindings[1]).toBe('refresh_existing_page');
     expect(bindings[13]).toBe('citability:v1:/termite/bait-vs-liquid/');

@@ -794,8 +794,13 @@ async function resolveTargetForRun(run) {
 async function queueRowStillParkedLocked(run, trx) {
   if (!run.opportunity_id) return true;
   try {
-    const row = await trx('opportunity_queue').where('id', run.opportunity_id).forUpdate().first('id', 'status', 'skip_reason', 'claim_id');
+    if (run.action_type === 'refresh_existing_page') {
+      await trx.raw("SELECT pg_advisory_xact_lock(hashtext('opportunity_page_edit'))");
+    }
+    const row = await trx('opportunity_queue').where('id', run.opportunity_id).forUpdate().first('id', 'status', 'skip_reason', 'claim_id', 'bucket', 'signal_metadata');
+    const { pageEditSuperseded } = require('./opportunity-queue')._internals;
     if (!row || !sameQueueClaim(row, run)
+      || (row.bucket === 'citability_backfill' && pageEditSuperseded(row))
       || row.status !== 'pending_review' || row.skip_reason !== pendingSkipReasonForRun(run)) return false;
     if (await newerSiblingRun(trx, run)) return false;
     return true;
@@ -809,9 +814,11 @@ async function queueRowParkedState(run) {
   if (!run.opportunity_id) return { parked: true, row: null };
   const row = await db('opportunity_queue')
     .where('id', run.opportunity_id)
-    .first('id', 'status', 'skip_reason', 'claim_id');
+    .first('id', 'status', 'skip_reason', 'claim_id', 'bucket', 'signal_metadata');
+  const { pageEditSuperseded } = require('./opportunity-queue')._internals;
   const parked = !!row
     && sameQueueClaim(row, run)
+    && !(row.bucket === 'citability_backfill' && pageEditSuperseded(row))
     && row.status === 'pending_review'
     && row.skip_reason === pendingSkipReasonForRun(run);
   // status + skip_reason alone are ambiguous across requeue cycles: an
@@ -1218,10 +1225,13 @@ async function maybeAutoMerge(run, pr) {
   const branch = pr.head?.ref;
   if (!branch) return { pending: true, reason: 'pr_head_branch_unknown' };
   const opportunity = run.opportunity_id
-    ? await db('opportunity_queue').where('id', run.opportunity_id).first('bucket')
+    ? await db('opportunity_queue').where('id', run.opportunity_id).first('bucket', 'signal_metadata')
     : null;
   const isCitabilityBackfill = opportunity?.bucket === 'citability_backfill';
-  const { citabilityBackfillLaneOpen } = require('./opportunity-queue')._internals;
+  const { citabilityBackfillLaneOpen, pageEditSuperseded } = require('./opportunity-queue')._internals;
+  if (isCitabilityBackfill && pageEditSuperseded(opportunity)) {
+    return { pending: true, reason: 'citability_backfill_superseded' };
+  }
   if (isCitabilityBackfill && !citabilityBackfillLaneOpen()) {
     return { pending: true, transient: true, reason: 'citability_backfill_disabled' };
   }

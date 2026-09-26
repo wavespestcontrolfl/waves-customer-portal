@@ -93,6 +93,7 @@ describe('operator refresh — citability kill-switch reservations', () => {
           return q;
         },
         orWhere: () => q,
+        orWhereRaw: () => q,
         whereRaw: () => q,
         whereNot: (column, value) => {
           if (column === 'bucket' && value === 'citability_backfill') excludeCitability = true;
