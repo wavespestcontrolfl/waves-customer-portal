@@ -780,7 +780,9 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
     // One deadline object owns the lead's minute: settleLeadResponseAgentRun
     // takes it over (no second timer); until then it sends on its own.
     const leadFallbackDeadline = leadAgentConfigured
-      ? createLeadFallbackDeadline(sendFallbackAutoReply, LEAD_AGENT_FALLBACK_AFTER_MS)
+      // Counted from the request's arrival, so awaited work before this point
+      // (the owner alert's provider calls) cannot stretch the lead's minute.
+      ? createLeadFallbackDeadline(sendFallbackAutoReply, Math.max(0, LEAD_AGENT_FALLBACK_AFTER_MS - (Date.now() - leadReceivedAt.getTime())))
       : null;
     try {
       if (!leadAgentConfigured) {
@@ -1947,6 +1949,9 @@ async function settleLeadResponseAgentRun({ agentConfigured, processLead, sendFa
       clearTimeout(abandon);
       if (err) onError(err);
       if (outcome?.actionTaken === 'auto_sent') return done();
+      // Past the abandonment window the entry is gone; register again so a
+      // shutdown still waits for this late send (done() removes it after).
+      if (!pendingLeadFallbacks.has(sendFallback)) pendingLeadFallbacks.set(sendFallback, null);
       return finalFallback();
     }).catch(lateErr => onError(lateErr));
     // The deadline already sent before this run took it over: no second try

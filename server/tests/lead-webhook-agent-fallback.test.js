@@ -339,3 +339,31 @@ describe('createLeadFallbackDeadline (one timer for the lead\'s minute)', () => 
     expect(pendingLeadFallbacks.has(sendFallback)).toBe(false);
   });
 });
+
+describe('a run that settles after the abandonment window', () => {
+  test('its late retry is registered again while it sends', async () => {
+    jest.useFakeTimers();
+    try {
+      let finishRun;
+      let finishRetry;
+      const send = jest.fn()
+        .mockImplementationOnce(async () => {})
+        .mockImplementation(() => new Promise((resolve) => { finishRetry = resolve; }));
+      const sendFallback = singleFlight(send);
+      const processLead = jest.fn(() => new Promise((resolve) => { finishRun = resolve; }));
+      const settling = settleLeadResponseAgentRun({ agentConfigured: true, processLead, sendFallback, onError: jest.fn(), fallbackAfterMs: 1000 });
+      await jest.advanceTimersByTimeAsync(1000);
+      await settling;
+      await jest.advanceTimersByTimeAsync(5 * 60 * 1000);
+      expect(pendingLeadFallbacks.has(sendFallback)).toBe(false); // abandoned
+      finishRun({ actionTaken: 'queued_for_adam' });
+      await jest.advanceTimersByTimeAsync(0);
+      expect(pendingLeadFallbacks.has(sendFallback)).toBe(true); // re-registered for the flush
+      finishRetry();
+      await jest.advanceTimersByTimeAsync(0);
+      expect(pendingLeadFallbacks.has(sendFallback)).toBe(false);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+});
