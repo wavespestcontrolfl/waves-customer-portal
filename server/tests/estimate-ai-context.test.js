@@ -1275,6 +1275,26 @@ describe('estimate AI support context', () => {
     expect(result.knowledgeBase).toEqual([]);
   });
 
+  test('AW-04 rd6: service-library descriptions never reach the context; structure and products do', async () => {
+    const result = await loadEstimateAiSupportContext({
+      db: fakeDb({
+        services: [{
+          service_key: 'rodent_trapping_followup',
+          name: 'Rodent Trapping Follow-up',
+          category: 'rodent',
+          description: 'Standard trapping plan has unlimited no-charge callbacks; this row exists so the visit can be scheduled and reported.',
+          frequency: 'as needed',
+          default_products: [],
+        }],
+      }),
+      question: 'Do you use bait stations for rats?',
+      context: { services: [{ label: 'Rodent Bait Stations', detail: 'Exterior bait stations' }] },
+    });
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toMatch(/unlimited no-charge callbacks|this row exists/);
+    expect(result.serviceLibrary.some((row) => row.title === 'Rodent Trapping Follow-up')).toBe(true);
+  });
+
   test('AW-04 rd2: a knowledge_base row with no category is excluded (allowlist fails closed)', async () => {
     const result = await loadEstimateAiSupportContext({
       db: fakeDb({

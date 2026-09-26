@@ -599,8 +599,12 @@ async function searchServiceLibrary(db, terms) {
 
     return rows.map((row) => {
       const products = parseJsonList(row.default_products);
+      // The free-text description is admin-authored catalog copy (it can
+      // carry internal mechanics — "this row exists so the visit can be
+      // scheduled" — or plan benefits that don't apply to this estimate) and
+      // is never sent to the public model. Only structured facts go: name,
+      // category, cadence, and the product linkage below (Codex r6 on #4836).
       const parts = [
-        row.description,
         row.frequency ? `Frequency: ${row.frequency}` : '',
         row.visits_per_year ? `Visits per year: ${row.visits_per_year}` : '',
       ].filter(Boolean);

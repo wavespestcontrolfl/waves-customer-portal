@@ -171,4 +171,17 @@ describe('estimate assistant model prompt — customer-safe context boundary (AW
     expect(dispatch).toHaveBeenCalledTimes(1);
     expect(result.source).toBe('openai');
   });
+
+  test('"Why is my lawn dry?" with empty support reaches the model, not the safety fallback', async () => {
+    dispatch.mockResolvedValue({ ok: true, provider: 'openai', text: 'Dry patches usually mean irrigation coverage gaps.' });
+    const result = await answerEstimateQuestion({
+      database: null,
+      question: 'Why is my lawn dry?',
+      estimate: { id: 'synthetic-estimate-6', token: 'synthetic-token-6', status: 'sent', customer_name: 'Synthetic Customer', address: 'Synthetic Address' },
+      estData: { services: [{ service: 'lawn_care', label: 'Lawn Care' }] },
+      pricingBundle: { waveGuardTier: 'WaveGuard' },
+    });
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(result.source).toBe('openai');
+  });
 });
