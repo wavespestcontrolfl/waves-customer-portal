@@ -30,6 +30,12 @@ Google verdict (`v2AddressValidation`) — no appointment/routing changes:
 - **Identity signals** on real (hot/warm) prospects — `caller_not_authorized`
   (caller arranging service for someone else, e.g. Elaine for her fiancé Martin)
   and a missing surname are added to the same `needs_confirmation` list.
+  Exception (owner ruling 2026-09-26, call 17ed9362): a `real_estate_agent` or
+  `lender` arranging a WDO inspection with a confirmed time on the call is an
+  authorized caller — `isAuthorizedWdoArrangerBooking` in `call-triage-flags.js`
+  keeps `caller_not_authorized` off this list too, in both the enforce path
+  and this shadow bridge. Buyers and every other third-party relationship are
+  unchanged.
 - **Disclaimed caller ID** — `callback_number_needed` (schema 1.14.0, live miss
   2026-09-25, call 6fee5f34: "this is our office line... they don't pick up, I
   pick up, and then text"). The model sets `caller.caller_id_disclaimed = true`
