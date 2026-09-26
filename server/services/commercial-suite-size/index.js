@@ -108,7 +108,12 @@ async function resolveCommercialSuiteSize(input = {}, opts = {}) {
   // web-search-reported businessType never chooses the size (AGENTS.md); it
   // still rides the RESULT for display/notes and subtype reconciliation.
   const value = defaultSuiteSqftFor({ commercialRiskType, commercialSubtype });
-  const businessTypeLabel = businessType || commercialRiskType || commercialSubtype || 'this business type';
+  // Label with the SAME deterministic key that selected `value` — never
+  // `businessType` (the web-search-reported field plays no part in the
+  // lookup above; primary review of PR #4840 r4 P2). A web-reported
+  // "restaurant" on an office_retail profile must read as office/retail,
+  // matching the 1,500 sq ft it actually got.
+  const businessTypeLabel = commercialRiskType || commercialSubtype || 'this business type';
   return {
     value,
     source: SOURCES.SUITE_TYPE_DEFAULT,

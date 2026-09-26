@@ -3300,7 +3300,13 @@ function priceCommercialPest(property = {}, options = {}) {
   const margin = annual > 0 ? roundRatio((annual - annualCost) / annual) : 0;
   // A defaulted footprint (exterior-only priced off an explicit perimeter)
   // is always LOW confidence — the building size itself is unverified.
-  const pricingConfidence = (defaulted || footprint > cfg.lowConfidenceFootprintSf) ? 'LOW' : 'MEDIUM';
+  // Same for a commercial suite sized off the business-type default (no
+  // DBPR license, no operator measurement) — options.footprintSizeEstimated
+  // (primary review of PR #4840 r4 P1): the number auto-prices, but it's a
+  // guess, so it must grade LOW like every other unverified-size path here,
+  // not MEDIUM just because it happens to be under the acreage threshold.
+  const pricingConfidence = (defaulted || footprint > cfg.lowConfidenceFootprintSf || options.footprintSizeEstimated === true)
+    ? 'LOW' : 'MEDIUM';
 
   return {
     service: 'commercial_pest',

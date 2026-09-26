@@ -26,6 +26,12 @@ const { resolveViaDbprLicense } = require('../services/commercial-suite-size/dbp
 const { _private: routePrivate, buildEnrichedProfile, translateV2CallToV1Input } = require('../routes/property-lookup-v2');
 const { generateEstimate } = require('../services/pricing-engine');
 const { buildEngineInput } = require('../services/estimator-engine/draft-builder');
+const { commercialLowConfidenceRange } = require('../services/estimate-delivery-options');
+
+// Deterministic: a DBPR miss falls through to the web-search leg (business
+// name only) before the type default — disabled here so the miss test below
+// never makes a real network/LLM call.
+process.env.COMMERCIAL_SUITE_WEB_SEARCH = 'false';
 
 function plazaSuiteRecord(overrides = {}) {
   return {
@@ -101,6 +107,35 @@ describe('manual admin-tool path — buildEnrichedProfile -> applyCommercialSuit
     expect(line.monthly).toBeLessThan(EXPECTED_MONTHLY_MAX);
     // Explicitly NOT the building-footprint/perimeter price.
     expect(line.monthly).toBeLessThan(BUILDING_OVERQUOTE_MONTHLY_FLOOR);
+    // A real state license is a real record — MEDIUM, not LOW (primary
+    // review of PR #4840 r4 P1: only the type-default GUESS grades LOW).
+    expect(line.pricingConfidence).toBe('MEDIUM');
+    expect(commercialLowConfidenceRange({ lineItems: result.lineItems }).hasLowConfidence).toBe(false);
+  });
+
+  test('a DBPR miss (business-type default) prices LOW and trips the low-confidence delivery gate (primary review PR #4840 r4 P1)', async () => {
+    resolveViaDbprLicense.mockResolvedValue(null);
+
+    const profile = buildEnrichedProfile(plazaSuiteRecord(), null, 27.5, -82.45, null, null, SUITE_ADDRESS, { commercialSuiteSizing: true });
+    await routePrivate.applyCommercialSuiteSize(profile);
+    expect(profile.suiteSize.source).toBe('suite_type_default');
+    // A guess still auto-prices (never a $0 manual quote)...
+    expect(profile.homeSqFt).toBeGreaterThan(0);
+    expect(profile.footprint).toBe(profile.homeSqFt);
+
+    const v1Input = translateV2CallToV1Input(profile, ['PEST'], { commercialRiskType: 'restaurant_food' });
+    // ...but is flagged as an ESTIMATE, never a measurement, all the way to
+    // the pricer's options (mirrors buildingSizeMeasured's own plumbing).
+    expect(v1Input.footprintSizeEstimated).toBe(true);
+
+    const result = generateEstimate(v1Input);
+    const line = result.lineItems.find((l) => l.service === 'commercial_pest');
+    expect(line).toBeTruthy();
+    expect(line.commercialPricingMode).toBe('auto_estimate'); // still auto-prices
+    expect(line.pricingConfidence).toBe('LOW'); // ...but grades LOW, not MEDIUM
+    // ...and the existing low-confidence delivery gate now sees it.
+    const range = commercialLowConfidenceRange({ lineItems: result.lineItems });
+    expect(range.hasLowConfidence).toBe(true);
   });
 
   test('control: the SAME building record with no suite signal still prices off the whole building (unaffected)', async () => {

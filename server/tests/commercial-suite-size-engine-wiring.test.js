@@ -120,6 +120,24 @@ describe('classifyLane — commercial-suite-size review reasons', () => {
     expect(out.lane).toBe(LANES.YELLOW);
     expect(out.reasons.some((r) => /suite size not found.*defaulted to 1,800 sq ft.*confirm on site/.test(r))).toBe(true);
   });
+
+  test('the defaulted-size reason labels with commercial_risk_type/subtype, never suiteSize.businessType (primary review PR #4840 r4 P2)', () => {
+    // A web-search-reported businessType of "restaurant" plays no part in
+    // sizing this office/retail suite (value stays 1,500 sqft, the
+    // retail/office default) — the reason must read the composed intent's
+    // own commercial_risk_type, never the model's guess.
+    const intent = { ...baseIntent(), commercial_risk_type: 'retail_standard' };
+    const propertyFacts = {
+      home: { value: 1500, source: SQFT_SOURCES.SUITE_TYPE_DEFAULT, confidence: 'low', rejected: [] },
+      commercialSuiteSize: { value: 1500, source: SQFT_SOURCES.SUITE_TYPE_DEFAULT, confidence: 'low', businessType: 'restaurant' },
+    };
+    const out = classifyLane({
+      intent, propertyFacts, engineResult: { lineItems: [commercialPestLine(1500)] }, totals, comps: null, calibration: [],
+    });
+    const reason = out.reasons.find((r) => /suite size not found/.test(r));
+    expect(reason).toMatch(/defaulted to 1,500 sq ft for retail_standard/);
+    expect(reason).not.toMatch(/restaurant/);
+  });
 });
 
 describe('risk-type inference source', () => {
@@ -146,6 +164,17 @@ describe('engine adoption of the lookup suite size', () => {
     expect(block).toMatch(/lookupSuiteSize\.source === SQFT_SOURCES\.LICENSE_SEATS/);
     expect(block).toMatch(/phone: context\?\.phone/);
     expect(block).toMatch(/skipWebSearch: Boolean\(lookupSuiteSize\)/);
+  });
+
+  // Primary review of PR #4840 r4 P2: intent.customer_name is the CALLER,
+  // never the business — passing it as businessNameHint would mislabel
+  // every resolved suite with the caller's own name.
+  test('businessNameHint is never the caller\'s name, and the lookup businessName fallback still runs', () => {
+    const i = src.indexOf('const lookupSuiteSize = effectiveSignals.enriched?.suiteSize');
+    const block = src.slice(i, i + 1700);
+    expect(block).toMatch(/businessNameHint:\s*null,/);
+    expect(block).not.toMatch(/businessNameHint:\s*intent\.customer_name/);
+    expect(block).toMatch(/!suiteSize\.businessName && lookupSuiteSize\?\.businessName/);
   });
 });
 

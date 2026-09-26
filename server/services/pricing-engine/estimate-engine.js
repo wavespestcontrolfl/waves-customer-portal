@@ -751,6 +751,12 @@ function generateEstimate(input) {
         // confirm-step default (no measured building) — pest can't auto-price
         // off it. Undefined (admin / measured) → auto-price as usual.
         buildingSizeMeasured: input.buildingSizeMeasured,
+        // A suite sized off the business-type default (no DBPR license, no
+        // operator measurement) — primary review of PR #4840 r4 P1:
+        // auto-prices (buildingSizeMeasured stays true) but must grade LOW,
+        // not MEDIUM, so the existing low-confidence review/delivery gates
+        // catch it. license_seats leaves this unset and stays MEDIUM.
+        footprintSizeEstimated: input.footprintSizeEstimated === true,
         // Risk-type cadence override (null → program default 12).
         pestVisits: commercialPestVisits,
         // Interior service selection ('excluded' → exterior-only base price;

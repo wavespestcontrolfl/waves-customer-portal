@@ -4927,6 +4927,12 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     // attachedGarage key note in EstimatePage.jsx.
     footprintSqFt: p.footprintUnknown === true ? 0 : (p.footprint ?? p.footprintSqFt),
     footprintUnknown: p.footprintUnknown === true || undefined,
+    // A suite sized off the business-type default (no DBPR license, no
+    // operator measurement) is a GUESS — priceCommercialPest reads this to
+    // grade LOW rather than MEDIUM (primary review of PR #4840 r4 P1). A
+    // license_seats-sourced suite is a real state record and stays MEDIUM
+    // (this stays undefined for it, same as every non-suite property).
+    footprintSizeEstimated: p.suiteSize?.source === 'suite_type_default' || undefined,
     perimeterLF: perimeterLF ?? perimeter,
     perimeterSource: p.perimeterSource || null,
     propertyType: commercialProfile ? 'commercial' : v1PropertyType,

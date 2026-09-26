@@ -49,6 +49,20 @@ describe('resolveCommercialSuiteSize — priority order (caller/tech-stated -> l
     expect(result.value).toBe(1500);
   });
 
+  test('the evidence label matches the key that actually selected the value, never the web-reported businessType (primary review PR #4840 r4 P2)', async () => {
+    resolveViaDbprLicense.mockResolvedValue(null);
+    // The web leg reports "restaurant" on an office/retail profile — the
+    // label must read office_retail (what sized it), not "restaurant" (what
+    // the model guessed and had zero say over).
+    resolveViaWebSearch.mockResolvedValue({ businessName: 'Test Retail Co', businessType: 'restaurant' });
+
+    const result = await resolveCommercialSuiteSize({ address: ADDRESS, commercialSubtype: 'office_retail' });
+    expect(result.value).toBe(1500);
+    expect(result.businessType).toBe('restaurant'); // still rides the result for display
+    expect(result.evidence[0].detail).toContain('office_retail');
+    expect(result.evidence[0].detail).not.toContain('restaurant');
+  });
+
   test('falls to the type default when nothing resolves, but keeps a businessName either leg discovered', async () => {
     resolveViaDbprLicense.mockResolvedValue({ value: null, businessName: 'Test Discovered Name' });
     resolveViaWebSearch.mockResolvedValue({ businessType: null });

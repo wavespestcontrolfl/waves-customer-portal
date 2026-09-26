@@ -2673,7 +2673,13 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
               suiteSize = await resolveCommercialSuiteSize({
                 address: suiteAddressParts(quotedAddressLine),
                 phone: context?.phone || null,
-                businessNameHint: intent.customer_name || null,
+                // intent.customer_name is the CALLER, not the business
+                // (primary review of PR #4840 r4 P2) — there's no dedicated
+                // business-name intent field, so this resolves purely from
+                // the address (DBPR / web search); the fallback below still
+                // adopts the lookup's own businessName when this leg finds
+                // none of its own.
+                businessNameHint: null,
                 commercialRiskType: intent.commercial_risk_type || null,
                 commercialSubtype: intent.commercial_subtype || null,
               }, { skipWebSearch: Boolean(lookupSuiteSize) });
