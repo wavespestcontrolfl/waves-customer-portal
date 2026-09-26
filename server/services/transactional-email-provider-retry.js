@@ -43,15 +43,16 @@ function isTransactionalRetryEligible(message) {
 }
 
 function retryStateForProviderBlock(message, now = new Date()) {
-  if (!isTransactionalRetryEligible(message)) return {};
-  const retryCount = Math.max(0, Number(message.provider_retry_count || 0));
   // Runtime rows selected after the migration carry this key (including
   // NULL), so webhook scheduling records positive rejection evidence. Keep
   // the helper's legacy return shape for older callers that supply a partial
   // pre-column object during rolling deploys.
-  const phase = Object.prototype.hasOwnProperty.call(message, 'provider_handoff_phase')
+  const phase = message && Object.prototype.hasOwnProperty.call(message, 'provider_handoff_phase')
     ? { provider_handoff_phase: HANDOFF_PHASE_REJECTED, provider_handoff_attempt_token: message.send_attempt_token || null }
     : {};
+  // Definitive blocks also permit direct retries of messages outside this rail.
+  if (!isTransactionalRetryEligible(message)) return phase;
+  const retryCount = Math.max(0, Number(message.provider_retry_count || 0));
   if (retryCount >= MAX_RETRIES) {
     return {
       provider_retry_next_at: null,

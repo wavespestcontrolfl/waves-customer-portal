@@ -662,8 +662,11 @@ const TREE_SHRUB = {
   // specialty palm work stays the separate palm_injection service, and the
   // Gold+ $10/palm flat credit stays palm_injection-only (owner ruling
   // 2026-08-08). Convention: treeCount = NON-palm trees once palm counts
-  // flow; keep the two disjoint or palms double-charge.
-  routinePalmCareReserve: { perPalmAnnual: 0, minutesPerPalmVisit: 0 },
+  // flow; keep the two disjoint or palms double-charge. largePalmFactor
+  // (owner ruling 2026-09-26): a palm the admin estimate marks LARGE
+  // (canopy wider than ~15 ft) counts as that many regular palms in both
+  // reserve terms — fertilizer scales with canopy area. NEUTRAL 1 here.
+  routinePalmCareReserve: { perPalmAnnual: 0, minutesPerPalmVisit: 0, largePalmFactor: 1 },
   // Per-visit callback/re-treatment reserve, mirroring the commercial
   // pricers' callbackReservePerVisit knob. Residential T&S has ZERO
   // recorded callbacks (Phase-1 audit) so this ships 0 — a knob with no
