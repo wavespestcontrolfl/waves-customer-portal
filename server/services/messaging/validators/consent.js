@@ -354,10 +354,14 @@ async function loadContactState(input, dbh = db) {
       state.prefs = await dbh('notification_prefs').where({ customer_id: input.customerId }).first();
       state.customer = await dbh('customers').where({ id: input.customerId }).first('id', 'first_name', 'last_name', 'phone', 'email', 'address_line1', 'city', 'account_id');
       // Account-level billing arrays live on the primary profile (a sibling
-      // property's explicit leg must see them, or it holds forever).
-      state.prefs = await require('../../billing-delivery-channels').overlayAccountBillingArrays(
-        state.prefs, { customerId: input.customerId, accountId: state.customer?.account_id }, dbh,
-      );
+      // property's explicit leg must see them, or it holds forever). Only a
+      // billing-category send reads them, so only it pays for (and can fail
+      // closed on) the owner lookup.
+      if (require('../billing-channel-routing').billingDeliveryCategory(input)) {
+        state.prefs = await require('../../billing-delivery-channels').overlayAccountBillingArrays(
+          state.prefs, { customerId: input.customerId, accountId: state.customer?.account_id }, dbh,
+        );
+      }
     } catch (err) {
       if (dbh.isTransaction) throw err; // Required handoff read: an aborted transaction cannot authorize a send.
       logger.warn(`[messaging:consent] customer lookup failed: ${err.message}`);

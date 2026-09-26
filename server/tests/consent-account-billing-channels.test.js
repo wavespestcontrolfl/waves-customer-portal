@@ -28,6 +28,8 @@ function databaseWith({ prefs, customers, failCustomersPrimary = false }) {
   });
 }
 
+const billingInput = (customerId) => ({ customerId, purpose: 'billing', metadata: { billingDeliveryCategory: 'billing' } });
+
 const customers = [
   { id: 'primary', account_id: 'acct-1', is_primary_profile: true },
   { id: 'sibling', account_id: 'acct-1', is_primary_profile: false },
@@ -38,7 +40,7 @@ test("a sibling property's contact state carries the primary's billing arrays, o
     { customer_id: 'primary', billing_channels: ['email'], invoice_channels: ['push'], sms_enabled: true },
     { customer_id: 'sibling', billing_channels: null, sms_enabled: false },
   ] });
-  const state = await loadContactState({ customerId: 'sibling' }, dbh);
+  const state = await loadContactState(billingInput('sibling'), dbh);
   expect(state.lookupFailed).toBe(false);
   expect(state.prefs).toMatchObject({
     customer_id: 'sibling', sms_enabled: false, billing_channels: ['email'], invoice_channels: ['push'],
@@ -47,12 +49,19 @@ test("a sibling property's contact state carries the primary's billing arrays, o
 
 test('the primary profile keeps its own row untouched', async () => {
   const dbh = databaseWith({ customers, prefs: [{ customer_id: 'primary', billing_channels: ['sms'] }] });
-  const state = await loadContactState({ customerId: 'primary' }, dbh);
+  const state = await loadContactState(billingInput('primary'), dbh);
   expect(state.prefs).toEqual({ customer_id: 'primary', billing_channels: ['sms'] });
 });
 
 test('an unreadable primary owner fails the lookup closed', async () => {
   const dbh = databaseWith({ customers, failCustomersPrimary: true, prefs: [{ customer_id: 'sibling' }] });
-  const state = await loadContactState({ customerId: 'sibling' }, dbh);
+  const state = await loadContactState(billingInput('sibling'), dbh);
   expect(state.lookupFailed).toBe(true);
+});
+
+test('a non-billing send never pays for (or fails on) the owner lookup', async () => {
+  const dbh = databaseWith({ customers, failCustomersPrimary: true, prefs: [{ customer_id: 'sibling', sms_enabled: true }] });
+  const state = await loadContactState({ customerId: 'sibling', purpose: 'appointment' }, dbh);
+  expect(state.lookupFailed).toBe(false);
+  expect(state.prefs).toEqual({ customer_id: 'sibling', sms_enabled: true });
 });
