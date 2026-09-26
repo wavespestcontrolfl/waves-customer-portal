@@ -196,7 +196,27 @@ it.each(['one_time', 'consultation', undefined])('does not offer recurring-pest 
   expect(screen.queryByRole('combobox', { name: 'Search observations' })).toBeNull();
 });
 
-it('records interior treatment scope for a searchable pest application', async () => {
+it('offers the tree catalog for untyped palm closeouts while retaining closeout requirements', async () => {
+  completionChoicesEnabled = true;
+  render(<CompletionPanel
+    service={{ ...service, id: 'palm-choice', serviceType: 'Palm Care', completionProfile: { serviceKey: 'palm', requiresProducts: false }, waveguardTier: null }}
+    products={[]}
+    onClose={() => {}}
+    onSubmit={submit}
+  />);
+  const search = await screen.findByRole('combobox', { name: 'Search observations' });
+  const observation = 'Palm frond discoloration was visible; the cause was not confirmed.';
+  fireEvent.change(search, { target: { value: observation } });
+  fireEvent.click(await screen.findByRole('option', { name: observation }));
+  expect(screen.getByLabelText('Selected observations').textContent).toContain(observation);
+  expect(screen.getByRole('button', { name: /tree\/shrub closeout required/i }).disabled).toBe(true);
+});
+
+it.each([
+  ['Completed the documented crack-and-crevice treatment.', {}],
+  ['Applied gel bait in the recorded locations.', { dryDown: false }],
+  ['Applied dust to the recorded accessible voids.', { dryDown: false }],
+])('records treatment scope and drying evidence for a searchable pest application: %s', async (action, dryingEvidence) => {
   completionChoicesEnabled = true;
   techTipsAvailable = false;
   render(<CompletionPanel
@@ -206,14 +226,13 @@ it('records interior treatment scope for a searchable pest application', async (
     onSubmit={submit}
   />);
 
-  const action = 'Completed the documented crack-and-crevice treatment.';
   const search = await screen.findByRole('combobox', { name: 'Search completed actions' });
   fireEvent.change(search, { target: { value: action } });
   fireEvent.click(await screen.findByRole('option', { name: action }));
   fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
   await waitFor(() => expect(submit).toHaveBeenCalledOnce());
   expect(submit.mock.calls[0][1].protocolActionScopesCompleted).toContainEqual({
-    label: action, scope: 'interior', treatmentApplied: true,
+    label: action, scope: 'interior', treatmentApplied: true, ...dryingEvidence,
   });
 });
 
@@ -296,6 +315,25 @@ it.each(['gate off', 'API error'])('keeps saved scope for a visible pre-generati
     protocolActionsCompleted: [action],
     protocolActionScopesCompleted: [{ label: action, scope: 'exterior', treatmentApplied: true }],
   });
+});
+
+it.each([false, true])('omits retired lawn actions without saved choice or scope provenance: generated=%s', async (generated) => {
+  const retiredAction = 'Retired planned lawn application.';
+  completionChoicesEnabled = !generated;
+  localStorage.setItem(`waves_completion_draft_${service.id}`, JSON.stringify({
+    serviceId: service.id, savedAt: Date.now(),
+    notes: generated ? 'WHAT WE DID:\nDocumented this visit.' : `Handwritten visit note.\n[Protocol] ${retiredAction}`,
+    selectedProducts: [{ productId: 'test-k', rate: 3, rateUnit: 'fl_oz', totalAmount: 15, amountUnit: 'fl_oz', areaValue: 5000, areaUnit: 'sqft' }],
+    areasServiced: ['Front yard'], selectedProtocolActionLabels: [retiredAction],
+    chipLinesDetached: generated,
+  }));
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  await waitFor(() => expect(fetch.mock.calls.some(([url]) => url.includes('completion-actions'))).toBe(true));
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  expect(submit.mock.calls[0][1].protocolActionsCompleted).not.toContain(retiredAction);
+  expect(submit.mock.calls[0][1].technicianNotes).not.toContain(retiredAction);
 });
 
 it('omits a visible generated-draft action that is outside the current specialty preset', async () => {

@@ -93,9 +93,10 @@ describe("service completion choices", () => {
       .find(({ id }) => id.endsWith("inspected-turf"));
 
     expect(exterior).toMatchObject({ scope: "exterior", treatmentApplied: true });
-    expect(interiorApplication).toMatchObject({ scope: "interior", treatmentApplied: true });
+    expect(interiorApplication).toMatchObject({ scope: "interior", treatmentApplied: true, dryDown: false });
     expect(interiorApplications).toHaveLength(interiorApplicationIds.length);
     expect(interiorApplications.every((choice) => choice.scope === "interior" && choice.treatmentApplied === true)).toBe(true);
+    expect(interiorApplications.find(({ id }) => id.endsWith("dusted-voids"))).toMatchObject({ dryDown: false });
     expect(inspection).toMatchObject({ scope: "exterior", treatmentApplied: false });
     expect([...exterior.keywords, ...interiorApplication.keywords]).not.toContain("product");
   });

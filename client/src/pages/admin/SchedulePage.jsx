@@ -13697,7 +13697,7 @@ export function CompletionPanel({
     && !isCommercialServiceIdentity(service)
     ? isLawn
       ? "lawn"
-      : treeShrubCloseoutOn
+      : (treeShrubCloseoutOn || isTreeShrub)
         ? "tree_shrub"
         : serviceLineForCloseout === "pest" && !isTypedFindings
           && (service.completionProfile?.billingType === "recurring"
@@ -15969,13 +15969,14 @@ export function CompletionPanel({
       (isLawn && lawnAssessmentReady === "failed");
     return { payload, hasReportInput };
   }
-  function recordActionScope(label, scope, treatmentApplied, completionChoice = false) {
+  function recordActionScope(label, scope, treatmentApplied, completionChoice = false, dryDown) {
     const scoped = scope === "interior" || scope === "exterior";
     if (!label || (!scoped && !completionChoice)) return;
     setActionScopeByLabel((prev) => ({
       ...prev,
       [label]: {
         ...(scoped ? { scope, treatmentApplied: treatmentApplied === true } : {}),
+        ...(dryDown === false ? { dryDown: false } : {}),
         ...(completionChoice ? { completionChoice: true } : {}),
       },
     }));
@@ -16002,7 +16003,7 @@ export function CompletionPanel({
     }
     const detachedAfterInvalidation = invalidateGeneratedReportOnTypedEdit();
     appendUniqueLabel(setSelectedProtocolActionLabels, noteText);
-    recordActionScope(noteText, action.scope, action.treatmentApplied, completionChoice);
+    recordActionScope(noteText, action.scope, action.treatmentApplied, completionChoice, action.dryDown);
     if (!detachedAfterInvalidation) {
       const conflictSet = new Set(conflictLabels);
       const prefix = action.conditional ? "Protocol optional" : "Protocol";
@@ -17218,19 +17219,13 @@ export function CompletionPanel({
         if (specialtyProtocolActions.length > 0) {
           return specialtyProtocolActions.some((action) => action.label === label);
         }
-        // The gated searchable control displays every selected value, including
-        // restored/custom entries, so the technician can review or remove it.
-        // Detached labels render as removable pills even if the choices
-        // request fails or its gate turns off after this draft was saved.
-        // Keep those visible, reviewed values; pre-generation hidden labels
-        // still pass through the existing current-action allowlist below.
         // Choice provenance and scope are saved beside selected labels. They remain
         // authoritative when a pre-generation draft is restored after the
         // choices gate turns off or its probe fails; the visible marker still
         // controls selection through activeSelectedLabels above. Specialty
         // membership stays first and therefore cannot be bypassed by metadata.
         const savedScope = actionScopeByLabel[label];
-        if (completionChoiceFamily || chipLinesDetached || savedScope?.completionChoice === true
+        if (savedScope?.completionChoice === true
           || savedScope?.scope === "interior" || savedScope?.scope === "exterior") return true;
         return !isLawn ||
           (completionImprovements && LAWN_FIELD_ACTIONS.some((action) => action.note === label)) ||
@@ -17250,9 +17245,18 @@ export function CompletionPanel({
               ? specialtyActionScope({ areas: completionAreasServiced, defaultScope: meta.scope })
               : meta.scope,
             treatmentApplied: meta.treatmentApplied === true,
+            ...(meta.dryDown === false ? { dryDown: false } : {}),
           };
         })
         .filter(Boolean);
+      // The server also reconstructs actions from marker notes. Remove the
+      // rejected selections there so a stale draft cannot restore them again.
+      const excludedProtocolLabels = new Set(selectedProtocolActionLabels
+        .filter((label) => !reportProtocolActions.includes(label)));
+      const reportTechnicianNotes = notes.split("\n").filter((line) => {
+        const match = line.match(/^\s*\[(?:Protocol(?: optional)?|Action)\]\s+(.+)$/i);
+        return !match || !excludedProtocolLabels.has(match[1].trim());
+      }).join("\n");
       const reportObservations = [
         ...activeSelectedLabels(selectedObservationLabels),
         ...observationFreeText(),
@@ -17294,7 +17298,7 @@ export function CompletionPanel({
       const body = {
         ...(reviewedPricing ? { pricingReview: reviewedPricing.review } : {}),
         idempotencyKey: completionIdempotencyKeyRef.current,
-        technicianNotes: notes,
+        technicianNotes: reportTechnicianNotes,
         // Tips from your tech — ids only; the server resolves the copy and
         // freezes it into structured_notes.techTips (freezeTechTips). Only
         // when the picker actually loaded: a restored draft's picks behind a
