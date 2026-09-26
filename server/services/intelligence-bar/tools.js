@@ -3149,6 +3149,12 @@ async function cancelAppointment(input, actionContext = {}) {
     } catch (e) {
       logger.error(`[intelligence-bar] cancel replay follow-through failed for ${appointment_id}: ${e.message}`);
     }
+    // Counted-plan reseed on the replay too (Codex #4814 r7 P1): a first
+    // reseed that failed without its stamp gets its retry here, like the
+    // other post-commit obligations this branch replays. Idempotent.
+    await require('../recurring-series-cancel-reseed').runPostCancelSeriesReseed({
+      db, serviceId: appointment_id, source: 'intelligence-bar-cancel-replay',
+    });
     return {
       success: true,
       appointment_id,
@@ -3239,6 +3245,12 @@ async function cancelAppointment(input, actionContext = {}) {
   } catch (e) {
     logger.error(`[intelligence-bar] cancel follow-through failed for ${appointment_id}: ${e.message}`);
   }
+  // Counted-plan reseed (owner ruling 2026-09-24): a single-visit cancel
+  // inside a 9-application plan adds one back at the end of the series.
+  // Gated, failure-isolated, post-commit.
+  await require('../recurring-series-cancel-reseed').runPostCancelSeriesReseed({
+    db, serviceId: appointment_id, source: 'intelligence-bar-cancel',
+  });
 
   const customer = await db('customers').where('id', appt.customer_id).first();
 
