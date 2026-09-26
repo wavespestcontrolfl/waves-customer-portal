@@ -72,12 +72,24 @@ async function sendLeg(send, channel, entry, siblingIds) {
 
 async function reserveLegs(legs, { customerId, invoiceId, purpose, source, digest, eventKey, channels, metadata }) {
   const reservations = new Map();
-  for (const channel of legs) {
-    reservations.set(channel, await ContactLedger.recordContact({
-      customerId, channel, purpose, invoiceIds: [invoiceId], source,
-      idempotencyKey: `billing-reminder:${digest}:${channel}`,
-      metadata: { ...metadata, notificationEventKey: eventKey, selectedChannels: channels },
-    }));
+  try {
+    for (const channel of legs) {
+      reservations.set(channel, await ContactLedger.recordContact({
+        customerId, channel, purpose, invoiceIds: [invoiceId], source,
+        idempotencyKey: `billing-reminder:${digest}:${channel}`,
+        metadata: { ...metadata, notificationEventKey: eventKey, selectedChannels: channels },
+      }));
+    }
+  } catch (err) {
+    // Nothing was dispatched: release the rows this run created so a retry
+    // can claim them. A reused row may belong to an earlier in-flight
+    // attempt and keeps its state.
+    for (const entry of reservations.values()) {
+      if (entry && entry.reused !== true) {
+        await ContactLedger.markSendFailed(entry, { code: 'RESERVATION_INCOMPLETE' });
+      }
+    }
+    throw err;
   }
   return reservations;
 }

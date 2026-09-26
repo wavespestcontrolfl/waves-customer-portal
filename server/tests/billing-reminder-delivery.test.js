@@ -220,6 +220,32 @@ describe('billing reminder per-channel delivery progress', () => {
     expect(send).toHaveBeenCalledWith('sms', expect.objectContaining({ id: 'ledger-sms' }), ['ledger-email']);
   });
 
+  test('a failed later reservation releases this run\'s new rows for retry and sends nothing', async () => {
+    const send = jest.fn(async (channel) => ({ sent: true, deliveryOutcome: 'accepted', auditLogId: `audit-${channel}` }));
+    const record = ContactLedger.recordContact.getMockImplementation();
+    ContactLedger.recordContact
+      .mockImplementationOnce(record)
+      .mockImplementationOnce(async () => { throw new Error('connection terminated'); });
+
+    await expect(deliver(['email', 'sms'], send)).rejects.toThrow('connection terminated');
+    expect(send).not.toHaveBeenCalled();
+    expect(rows.find((row) => row.channel === 'email').metadata)
+      .toMatchObject({ send_failed: true, code: 'RESERVATION_INCOMPLETE' });
+
+    // The next run reuses the released Email row and delivers both legs once.
+    await expect(deliver(['email', 'sms'], send)).resolves.toMatchObject({ complete: true, deliveredNow: ['email', 'sms'] });
+    expect(send.mock.calls.map(([channel]) => channel)).toEqual(['email', 'sms']);
+  });
+
+  test('a failed reservation never releases a reused, possibly in-flight row', async () => {
+    ContactLedger.recordContact
+      .mockImplementationOnce(async () => ({ id: 'ledger-prior', metadata: {}, reused: true }))
+      .mockImplementationOnce(async () => { throw new Error('connection terminated'); });
+
+    await expect(deliver(['email', 'sms'], jest.fn())).rejects.toThrow('connection terminated');
+    expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
+  });
+
   test('an unstamped acceptance is held and never sent twice', async () => {
     ContactLedger.markDelivered.mockResolvedValueOnce(false);
     const send = jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted', auditLogId: 'audit-sms' }));
