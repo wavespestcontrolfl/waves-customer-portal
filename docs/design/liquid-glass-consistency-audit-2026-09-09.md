@@ -56,7 +56,7 @@ These are what the code does today. They are repeated widely but are not owner-a
 | # | Conflict | Where each side lives | Rendered today |
 |---|---|---|---|
 | C1 | Button case. The design brief and `theme-brand.js BTN_BASE` / `buttons.css` say UPPERCASE CTAs are brand identity; DECISIONS 2026-09-04 (batch B) rules sentence case on glass and the style guide repeats it. | `waves-customer-facing-design-brief.md` "Do not strip UPPERCASE"; `customer-doc-style-guide.md` Controls | Mixed: `TrackPage` renders "TEXT ALEX" and `/book` renders "FIND MY BEST TIMES →" / "CONTINUE →" via `buttons.css`; every other glass CTA is sentence case |
-| C2 | CTA ink on gold. `glass-theme.css:296-299` pins `#04395e` for `[data-glass-accent]`; `email-template.js:96-98` pins `#1B2C5B` and its comment claims to match the sheet. | `glass-theme.css`, `email-template.js`, `public-newsletter.js:491` | Web gold CTAs render navy `#04395E`; email and newsletter-landing gold CTAs render `#1B2C5B` |
+| C2 | CTA ink on gold. `glass-theme.css:296-299` pins `#04395e` for `[data-glass-accent]`; `email-template.js:96-98` pins `#1B2C5B` and its comment claims to match the sheet. | `glass-theme.css`, `email-template.js`, `public-newsletter.js:491` | Web gold CTAs render navy `#04395E`; email and newsletter-landing gold CTAs render `#1B2C5B`. **Update 2026-09-26: closed** — resolved 2026-09-11; all three surfaces now render `#04395E` (`server/services/email-template.js:90-94`, `server/routes/public-newsletter.js:496`). |
 | C3 | Control floor vs chip floor. The style guide sets primary 48, gold accent ≥44, choice chips ≥40; the 09-07 audit and the admin contract treat 44 as the touch floor; `BrandButton` authors 48 for every variant but the sheet forces `data-glass="chip"` (the `secondary` variant) to 40. | `customer-doc-style-guide.md` Controls; `glass-theme.css:461-462`; `BrandButton.jsx` | `BrandButton secondary` renders 40px; the portal account-menu chip renders 40px in the header |
 | C4 | Numeric display sizes. The sheet defines h1/h2/h3/eyebrow/fine/body and a `metric` role with weight and tabular figures but no size; pages author 17, 19, 22, 24, 28, 34, 50 and 64px metrics. | `glass-theme.css:136-142`; `theme-doc.js FS` (no metric size) | Seven metric sizes across portal, secure, track, billing |
 | C5 | Report review-card heading. `glass-theme.css:468` deliberately renders the review-request and cross-sell `h2` at 20px while every other `h2` is 26px. | `glass-theme.css:468` | Report "How did Alex do today?" is a 20px h2 |
@@ -165,6 +165,11 @@ Severity: **P1** = breaks a documented rule on a primary surface or blocks the "
 
 ### G-03 · P1 · Primary `BrandButton` renders 44px, not the 48px the standard specifies
 
+**Update 2026-09-26:** fixed — `client/src/glass/glass-theme.css` now sets `min-height: 48px !important` on
+`html[data-glass-theme] :is(button, a)[data-glass-size="primary"]`, and `BrandButton.jsx` emits
+`data-glass-size="primary"` on its primary variant, so that selector wins over the 44px floor. (The
+adjacent `[data-glass-accent].btn-primary` selector covers other gold primaries, not `BrandButton`.)
+
 - **Affected.** Every `BrandButton variant="primary"` (pay, statement, contract, the tokens showcase) and every gold accent authored ≥44 without extra padding.
 - **Measured.** Showcase "Approve my plan" and "Send code" (primary) **44px**; "Show all open times" (secondary) **40px**; ghost "Not now" **48px**; `a[data-glass-accent]` "Pay …" 56px (padding-driven).
 - **Expected.** `customer-doc-style-guide.md` Controls: "Primary action = `BrandButton` (48px …)"; `BrandButton.jsx` authors `minHeight: 48` for every variant.
@@ -173,6 +178,10 @@ Severity: **P1** = breaks a documented rule on a primary surface or blocks the "
 - **Verify.** Showcase primary = 48, secondary per ruling, gold accents ≥44; re-capture pay / contract / statement.
 
 ### G-04 · P1 · Weights above 700 survive on glass through shared tokens the gate cannot see
+
+**Update 2026-09-26:** fixed — `theme-brand.js BUTTON_BASE.fontWeight` is now 600
+and `styles/buttons.css:63, 114` cap `.btn-primary` / `.btn-nav` at 700, both with
+inline comments citing this finding.
 
 - **Affected / measured.** Portal: every `PORTAL_BUTTON_BASE` button (Get pricing, Request visit, Confirm, Replace card, Copy / Text / Email, Restart my plan …) and every `.pill-chip` (property preferences, irrigation days) at **800** (88 distinct elements); `/book` primary "Find my best times →" **800**; newsletter archive "Subscribe" **850**; mosquito V2 report `strong` **900**.
 - **Expected.** Weights stop at 700 (DECISIONS 09-04 (3), batch B/C; gate rule 4).

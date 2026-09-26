@@ -14,18 +14,18 @@ Static code evidence cannot prove that a production page has no users. No mounte
 
 ## Keep as primary destinations
 
-The destinations in `client/src/config/adminNavigation.js` remain the supported primary inventory. Desktop and mobile now expose the same inventory through these groups:
+The destinations in `client/src/config/adminNavigation.js` remain the supported primary inventory. With the `admin-navigation` flag off, desktop and mobile expose the same inventory through these groups (`NAV_SECTION_DEFINITIONS`; with the flag on, `WORKSPACE_GROUPS` applies instead: Dashboard, Schedule, Customers, Sales, Communications, Billing, Operations, Marketing, Team, Accounting, Agents and Settings):
 
 - Overview
 - Operations
-- Customers & Sales
+- Sales
+- Communications
+- Finance
+- People
 - Marketing
-- Team & Automation
-- Billing & Finance
-- Resources
-- Administration
+- System
 
-The five mobile task tabs remain Dashboard, Schedule, Customers, Messages, and More.
+The five mobile task tabs remain Dashboard, Schedule, Customers, Messages, and Settings (the fifth tab keeps the `more` id and `/admin/more` route, labelled Settings).
 
 ## Already consolidated correctly
 
@@ -55,7 +55,7 @@ Keep these compatibility routes while old bookmarks, notifications, or server-ge
 | `/admin/credentials` | `/admin/compliance?tab=credentials` |
 | `/admin/pricing` | `/admin/pricing-logic?area=strategy` |
 | `/admin/price-change` | `/admin/pricing-logic?area=notices` |
-| `/admin/auto-dispatch` | `/admin/dispatch?tab=automation` |
+| `/admin/auto-dispatch` | `/admin/agents?tab=dispatch` |
 | `/admin/lawn-protocol` | `/admin/service-library?tab=protocols`; the former `tab` value is preserved as `protocolTab` |
 | `/admin/kb` | `/admin/knowledge?area=base`; a known former `tab` value is preserved as `kbTab` |
 
@@ -71,7 +71,7 @@ These active entry routes now resolve inside a canonical destination. They use q
 | `/admin/estimates` | The route and `/admin/pipeline` both mount `EstimatesPageV2`. | `/admin/pipeline?tab=estimates`, while honoring explicit `tab=new` and estimate deep links |
 | `/admin/equipment-calibration` | `EquipmentCalibrationPanel` is already the Equipment `calibrations` tab. | `/admin/equipment?tab=calibrations` |
 | `/admin/lawn-protocol` | The command center owns seven related protocol-authoring and readiness areas. Services is its operational parent, and alert-driven subarea links must remain addressable. | `/admin/service-library?tab=protocols&protocolTab=<subarea>` |
-| `/admin/kb` | Wiki and Knowledge Base use separate APIs and workflows, but both are knowledge-management tools under the same Resources parent. | `/admin/knowledge?area=base`, while Wiki remains the default area |
+| `/admin/kb` | Wiki and Knowledge Base use separate APIs and workflows, but both are knowledge-management tools under the same Operations parent. | `/admin/knowledge?area=base`, while Wiki remains the default area |
 
 The `/admin/estimates/:estimateId/proposal` detail route remains a real workflow and must not be redirected.
 
@@ -100,7 +100,7 @@ The old page file should be deleted only in a cleanup-only change after confirmi
 1. Add route-reachability regression coverage for every navigation destination.
 2. Completed: redirect Leads, Estimates, and Equipment Calibration to their existing canonical tabs while preserving query parameters and fragments.
 3. Completed: Compliance + Credentials and the Pricing hub now remove the largest conceptual duplicates without deleting capabilities.
-4. Completed: Auto Dispatch is now the Schedule Automation tab, and Lawn Protocol is the Services Protocol & Readiness area.
+4. Completed: Auto Dispatch now lives in the Agents workspace (`/admin/agents?tab=dispatch`; the old Schedule `tab=automation` entry redirects there), and Lawn Protocol is the Services Protocol & Readiness area.
 5. Completed: the Knowledge hub combines Wiki and Knowledge Base navigation while preserving both workflows and their nested URLs.
 6. Collect route telemetry for at least one normal operating cycle before deleting retired page components.
 7. Apply the UI consistency contract one completed hub at a time.

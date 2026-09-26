@@ -83,6 +83,7 @@ Socket.io registers its own `upgrade` handler and only acts on `/socket.io/`. We
    | 07 | `flux_smartformat_off_v1` |
    | 08 | `flux_tts_normalization_v1` |
    | 09 | `flux_partials_probe_v1` (sandbox-only; counts Flux partials, never acts on them) |
+   | 10 | `flux_multilingual_es_v1` (sandbox-only; Deepgram Flux Multilingual — Sandy voice stack plan, Phase 0). Same `speechModel="flux"` every other Flux profile uses; renders `language="multi"` (Twilio's own STT/TTS auto-detect switch) **plus** the same `<Parameter lang=es>` marker the Spanish-menu vestibule carries, so the session is treated as Spanish end to end (prompt addendum, fallback copy, streaming hold) rather than only at the Twilio STT/TTS layer. See relay-profiles.js's own citations for the exact Twilio doc sections confirming `speechModel`/`language` values. **Not yet confirmed by a real call** — dial this cell on the sandbox number to verify transcription quality and mid-call language switching before trusting it for a real Spanish caller. |
    | 99 | raw `VOICE_RELAY_SANDBOX_ATTRS` JSON |
 
    Production picks a profile with `VOICE_RELAY_PROFILE=<id>` (unset = the untuned relay, byte-identical TwiML). `relay-profiles.js` is the only place the attributes are chosen; the allowlist and value validation follow Twilio's `<ConversationRelay>` noun docs.
