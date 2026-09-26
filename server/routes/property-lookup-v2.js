@@ -2195,7 +2195,9 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     // from homeSqFt/stories when footprint is 0, which would resurrect the
     // summed-living-area slab this suppression exists to prevent (codex P1
     // r4 #2721). Consumers skip derivation when this is set.
-    footprintUnknown: aggregateStoriesUnknown || undefined,
+    // A sized suite's footprint is the suite's own (single-story basis), not
+    // the aggregate's unknown-stories ground floor — never flag it unknown.
+    footprintUnknown: (!resolvedCommercialSuiteSize && aggregateStoriesUnknown) || undefined,
     // Rough pre-fills for the estimator's termite measurement boxes: the
     // attic deck and the slab both approximate the ground-floor footprint
     // (top floor ≈ footprint on equal-floor homes). Published under
@@ -2624,6 +2626,9 @@ async function applyCommercialSuiteSize(profile, opts = {}) {
       // perimeter, so pricing derives it from THIS footprint (4·√area)
       // rather than inheriting the building's ~1,000+ LF exterior wall.
       profile.footprint = suiteSize.value;
+      // The building-level unknown-stories flag describes the aggregate, not
+      // this suite — left set, the translator would zero the footprint.
+      delete profile.footprintUnknown;
       profile.suiteSize = {
         value: suiteSize.value,
         source: suiteSize.source,

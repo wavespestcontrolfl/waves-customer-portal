@@ -196,3 +196,14 @@ describe('estimator engine path — buildEngineInput -> generateEstimate', () =>
     expect(line.monthly).toBeLessThan(EXPECTED_MONTHLY_MAX);
   });
 });
+
+describe('aggregate parcel with unknown stories', () => {
+  test('a resolved suite clears footprintUnknown so the suite footprint reaches pricing', async () => {
+    const record = { ...plazaSuiteRecord(), stories: null, _parcel: { ...(plazaSuiteRecord()._parcel || {}), aggregated: true } };
+    const profile = buildEnrichedProfile(record, null, 27.5, -82.45, null, null, SUITE_ADDRESS, { commercialSuiteSizing: true });
+    await routePrivate.applyCommercialSuiteSize(profile);
+    expect(profile.footprintUnknown).toBeUndefined();
+    const v1Input = translateV2CallToV1Input(profile, ['PEST'], { commercialRiskType: 'restaurant_food' });
+    expect(Number(v1Input.footprintSqFt)).toBe(profile.homeSqFt);
+  });
+});
