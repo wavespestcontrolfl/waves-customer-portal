@@ -326,25 +326,16 @@ const regexPatterns = (v) => (!Array.isArray(v) || !v.length ? 'value must be a 
 // A regex list, or the same list graded over a caller-turn window —
 // { patterns: [...], fromTurn: 2 } skips what Sandy said before the caller's
 // second turn (a barge-in correction supersedes the read-back it cut);
-// { patterns: [...], toTurn: 3 } stops after the caller's third turn;
-// fromTurn and toTurn may combine into a range. { patterns: [...], onTurn: 2 }
-// scopes to EXACTLY that one caller turn (e.g. grading only the reply to a
-// backchannel that must not derail the intake) and cannot combine with
-// fromTurn/toTurn.
+// { patterns: [...], onTurn: 2 } scopes to EXACTLY that one caller turn (e.g.
+// grading only the reply to a backchannel that must not derail the intake).
 const regexList = (v) => {
   if (Array.isArray(v)) return regexPatterns(v);
-  if (!isPlainObject(v)) return 'value must be a non-empty regex list or { patterns: [...], fromTurn?, toTurn?, onTurn? }';
-  const unknown = Object.keys(v).find((k) => !['patterns', 'fromTurn', 'toTurn', 'onTurn'].includes(k));
-  if (unknown) return `unknown key "${unknown}" (patterns, fromTurn, toTurn, onTurn)`;
-  if (v.onTurn != null) {
-    if (v.fromTurn != null || v.toTurn != null) return 'onTurn cannot combine with fromTurn or toTurn';
-    if (!Number.isInteger(v.onTurn) || v.onTurn < 1) return 'onTurn must be a caller turn number (1 is the first)';
-  } else {
-    if (v.fromTurn == null && v.toTurn == null) return 'value must set fromTurn, toTurn, or onTurn';
-    if (v.fromTurn != null && (!Number.isInteger(v.fromTurn) || v.fromTurn < 1)) return 'fromTurn must be a caller turn number (1 is the first)';
-    if (v.toTurn != null && (!Number.isInteger(v.toTurn) || v.toTurn < 1)) return 'toTurn must be a caller turn number (1 is the first)';
-    if (v.fromTurn != null && v.toTurn != null && v.toTurn < v.fromTurn) return 'toTurn must be >= fromTurn';
-  }
+  if (!isPlainObject(v)) return 'value must be a non-empty regex list or { patterns: [...], fromTurn | onTurn: <caller turn> }';
+  const unknown = Object.keys(v).find((k) => !['patterns', 'fromTurn', 'onTurn'].includes(k));
+  if (unknown) return `unknown key "${unknown}" (patterns, fromTurn, onTurn)`;
+  if ((v.fromTurn == null) === (v.onTurn == null)) return 'value must set exactly one of fromTurn or onTurn';
+  const turn = v.onTurn != null ? v.onTurn : v.fromTurn;
+  if (!Number.isInteger(turn) || turn < 1) return `${v.onTurn != null ? 'onTurn' : 'fromTurn'} must be a caller turn number (1 is the first)`;
   return regexPatterns(v.patterns);
 };
 const CHECK_VALUE_RULES = Object.freeze({
@@ -1397,19 +1388,14 @@ const CHECK_RUNNERS = Object.freeze({
 });
 
 // The patterns and the speech they grade: every utterance, or — for
-// { patterns, fromTurn, toTurn, onTurn } — only what Sandy said in that
-// caller-turn window (onTurn is an exact single turn; fromTurn/toTurn are an
-// inclusive range, either end optional).
+// { patterns, fromTurn } / { patterns, onTurn } — only what Sandy said from
+// that caller turn on, or on exactly that caller turn.
 function spokenScope(value, { spoken, utterances }) {
   if (Array.isArray(value)) return { sources: value, spoken, scope: '' };
-  const { fromTurn, toTurn, onTurn } = value;
-  if (onTurn != null) {
-    return { sources: value.patterns, spoken: utterances.filter((u) => u.turn === onTurn).map((u) => u.text), scope: ` on caller turn ${onTurn}` };
+  if (value.onTurn != null) {
+    return { sources: value.patterns, spoken: utterances.filter((u) => u.turn === value.onTurn).map((u) => u.text), scope: ` on caller turn ${value.onTurn}` };
   }
-  const filtered = utterances.filter((u) => (fromTurn == null || u.turn >= fromTurn) && (toTurn == null || u.turn <= toTurn));
-  const scope = fromTurn != null && toTurn != null ? ` from caller turn ${fromTurn} to ${toTurn}`
-    : fromTurn != null ? ` from caller turn ${fromTurn}` : ` through caller turn ${toTurn}`;
-  return { sources: value.patterns, spoken: filtered.map((u) => u.text), scope };
+  return { sources: value.patterns, spoken: utterances.filter((u) => u.turn >= value.fromTurn).map((u) => u.text), scope: ` from caller turn ${value.fromTurn}` };
 }
 
 function firstRegexHit(sources, spoken) {
