@@ -247,6 +247,29 @@ const DBPR_FETCH_TIMEOUT_MS = 15000;
 const DBPR_FAILURE_BACKOFF_MS = 10 * 60 * 1000;
 const DBPR_STALE_IF_ERROR_MS = 48 * 60 * 60 * 1000;
 
+// A download is cached only when it looks like a whole district extract: the
+// columns the matcher reads are present, it carries a plausible number of
+// licenses (district 7 carries ~8,000), and it has not shrunk below half of
+// the last good extract. A cleanly truncated CSV or an HTTP-200 error page
+// that still parses into a few rows is a failed refresh, never a new cache.
+const DBPR_REQUIRED_COLUMNS = [
+  'License Type Code', 'Primary Status Code', 'Rank Code', 'Business Name',
+  'Location Street Address', 'Location Zip Code', 'Number of Seats or Rental Units',
+];
+const DBPR_MIN_EXTRACT_ROWS = 1000;
+const DBPR_MIN_SHARE_OF_LAST_GOOD = 0.5;
+
+function assertPlausibleExtract(rows, { minRows, lastGoodCount }) {
+  if (!rows.length) throw new Error('empty or unparseable extract');
+  const columns = new Set(Object.keys(rows[0]));
+  const missing = DBPR_REQUIRED_COLUMNS.filter((c) => !columns.has(c));
+  if (missing.length) throw new Error(`extract missing columns: ${missing.join(', ')}`);
+  if (rows.length < minRows) throw new Error(`extract has ${rows.length} rows (< ${minRows}) — likely partial`);
+  if (lastGoodCount && rows.length < lastGoodCount * DBPR_MIN_SHARE_OF_LAST_GOOD) {
+    throw new Error(`extract shrank to ${rows.length} rows from ${lastGoodCount} — likely partial`);
+  }
+}
+
 async function defaultFetchText(url) {
   const res = await fetch(url, { signal: AbortSignal.timeout(DBPR_FETCH_TIMEOUT_MS) });
   if (!res || !res.ok) throw new Error(`HTTP ${res && res.status}`);
@@ -254,7 +277,7 @@ async function defaultFetchText(url) {
   return new TextDecoder('latin1').decode(buf);
 }
 
-async function loadDistrictRows(district, { fetchText = defaultFetchText, now = () => Date.now() } = {}) {
+async function loadDistrictRows(district, { fetchText = defaultFetchText, now = () => Date.now(), minRows = DBPR_MIN_EXTRACT_ROWS } = {}) {
   const cached = _cache.get(district);
   if (cached && (now() - cached.fetchedAt) < DBPR_CACHE_TTL_MS) return cached.rows;
   const staleIfError = () => (cached && (now() - cached.fetchedAt) < DBPR_CACHE_TTL_MS + DBPR_STALE_IF_ERROR_MS
@@ -266,13 +289,14 @@ async function loadDistrictRows(district, { fetchText = defaultFetchText, now = 
   const promise = (async () => {
     try {
       const text = await fetchText(dbprExtractUrl(district));
-      // A malformed or truncated HTTP-200 body is a failed refresh, not an
-      // empty license list: it throws (parse error) or parses to no rows (a
-      // real district extract carries thousands), and either way it goes
-      // down the failure path below — never cached for 24h, and the last
-      // good extract keeps serving within the stale-if-error window.
+      // A malformed, truncated or error-page HTTP-200 body is a failed
+      // refresh, not a new license list: a parse error throws, and
+      // assertPlausibleExtract rejects anything that doesn't look like a
+      // whole district extract. Either way it goes down the failure path
+      // below — never cached, and the last good extract keeps serving
+      // within the stale-if-error window.
       const rows = parseDbprCsv(text);
-      if (!rows.length) throw new Error('empty or unparseable extract');
+      assertPlausibleExtract(rows, { minRows, lastGoodCount: cached?.rows?.length || 0 });
       _cache.set(district, { rows, fetchedAt: now() });
       _failedAt.delete(district);
       return rows;

@@ -157,7 +157,7 @@ describe('resolveViaDbprLicense', () => {
     const fetchText = jest.fn().mockResolvedValue(text);
     const result = await resolveViaDbprLicense({
       address: { street: '4400 Test Commons Parkway East', unit: '102', zip: '00000' },
-    }, { fetchText });
+    }, { fetchText, minRows: 1 });
     expect(result).toEqual(expect.objectContaining({
       value: 1400,
       businessName: 'TEST TACO SHOP',
@@ -374,14 +374,14 @@ describe('Codex #4872 r2: stale-if-error is bounded', () => {
   const HOUR = 60 * 60 * 1000;
   test('a failed refresh serves the last extract within the window, and nothing after it', async () => {
     let t = 0;
-    const good = jest.fn().mockResolvedValue('"Business Name","Location Zip Code"\r\n"TEST TACO SHOP","00000"\r\n');
-    const rows = await dbpr.loadDistrictRows(7, { fetchText: good, now: () => t });
+    const good = jest.fn().mockResolvedValue(csv([{ 'Business Name': 'TEST TACO SHOP', 'Location Zip Code': '00000' }]));
+    const rows = await dbpr.loadDistrictRows(7, { fetchText: good, now: () => t, minRows: 1 });
     expect(rows).toHaveLength(1);
     const failing = jest.fn().mockRejectedValue(new Error('HTTP 503'));
     t = 30 * HOUR; // past the 24h TTL, inside the 48h stale-if-error window
-    await expect(dbpr.loadDistrictRows(7, { fetchText: failing, now: () => t })).resolves.toHaveLength(1);
+    await expect(dbpr.loadDistrictRows(7, { fetchText: failing, now: () => t, minRows: 1 })).resolves.toHaveLength(1);
     t = 80 * HOUR; // past TTL + window: a closed restaurant must not keep pricing as current
-    await expect(dbpr.loadDistrictRows(7, { fetchText: failing, now: () => t })).resolves.toEqual([]);
+    await expect(dbpr.loadDistrictRows(7, { fetchText: failing, now: () => t, minRows: 1 })).resolves.toEqual([]);
   });
 });
 
@@ -395,15 +395,49 @@ describe('Codex #4872 r3: a malformed HTTP-200 extract is a failed refresh', () 
     ['header only', '"Business Name","Location Zip Code"\r\n'],
   ])('%s: never cached, and the last good extract keeps serving within the window', async (_label, badBody) => {
     let t = 0;
-    const good = jest.fn().mockResolvedValue('"Business Name","Location Zip Code"\r\n"TEST TACO SHOP","00000"\r\n');
-    await expect(dbpr.loadDistrictRows(7, { fetchText: good, now: () => t })).resolves.toHaveLength(1);
+    const good = jest.fn().mockResolvedValue(csv([{ 'Business Name': 'TEST TACO SHOP', 'Location Zip Code': '00000' }]));
+    await expect(dbpr.loadDistrictRows(7, { fetchText: good, now: () => t, minRows: 1 })).resolves.toHaveLength(1);
     t = 30 * HOUR; // past the 24h TTL
     const bad = jest.fn().mockResolvedValue(badBody);
-    await expect(dbpr.loadDistrictRows(7, { fetchText: bad, now: () => t })).resolves.toHaveLength(1);
+    await expect(dbpr.loadDistrictRows(7, { fetchText: bad, now: () => t, minRows: 1 })).resolves.toHaveLength(1);
     // Not cached: after the failure backoff the next call refetches.
     t += 11 * 60 * 1000;
-    const good2 = jest.fn().mockResolvedValue('"Business Name","Location Zip Code"\r\n"TEST TACO SHOP","00000"\r\n"SECOND SHOP","00000"\r\n');
-    await expect(dbpr.loadDistrictRows(7, { fetchText: good2, now: () => t })).resolves.toHaveLength(2);
+    const good2 = jest.fn().mockResolvedValue(csv([
+      { 'Business Name': 'TEST TACO SHOP', 'Location Zip Code': '00000' },
+      { 'Business Name': 'SECOND SHOP', 'Location Zip Code': '00000' },
+    ]));
+    await expect(dbpr.loadDistrictRows(7, { fetchText: good2, now: () => t, minRows: 1 })).resolves.toHaveLength(2);
     expect(good2).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('Codex #4872 r4: only a whole-looking district extract is cached', () => {
+  const dbpr = require('../services/commercial-suite-size/dbpr-food-license');
+  beforeEach(() => dbpr._resetCacheForTests());
+  const HOUR = 60 * 60 * 1000;
+  const rowsOf = (n) => Array.from({ length: n }, (_, i) => ({ 'Business Name': `SHOP ${i}`, 'Location Zip Code': '00000' }));
+
+  test('production floor: a download with a few hundred rows is treated as partial and not cached', async () => {
+    const small = jest.fn().mockResolvedValue(csv(rowsOf(300)));
+    await expect(dbpr.loadDistrictRows(7, { fetchText: small, now: () => 0 })).resolves.toEqual([]);
+  });
+
+  test('an HTTP-200 error page that parses into rows without the license columns is rejected', async () => {
+    const page = '"<html>"\r\n"<body>Service unavailable</body>"\r\n"</html>"\r\n';
+    const fetchText = jest.fn().mockResolvedValue(page);
+    await expect(dbpr.loadDistrictRows(7, { fetchText, now: () => 0, minRows: 1 })).resolves.toEqual([]);
+  });
+
+  test('a cleanly truncated extract (below half the last good one) never replaces the good cache', async () => {
+    let t = 0;
+    const full = jest.fn().mockResolvedValue(csv(rowsOf(20)));
+    await expect(dbpr.loadDistrictRows(7, { fetchText: full, now: () => t, minRows: 1 })).resolves.toHaveLength(20);
+    t = 30 * HOUR; // past TTL
+    const truncated = jest.fn().mockResolvedValue(csv(rowsOf(6)));
+    await expect(dbpr.loadDistrictRows(7, { fetchText: truncated, now: () => t, minRows: 1 })).resolves.toHaveLength(20);
+    // A normal-sized refresh after the backoff is accepted.
+    t += 11 * 60 * 1000;
+    const refreshed = jest.fn().mockResolvedValue(csv(rowsOf(19)));
+    await expect(dbpr.loadDistrictRows(7, { fetchText: refreshed, now: () => t, minRows: 1 })).resolves.toHaveLength(19);
   });
 });
