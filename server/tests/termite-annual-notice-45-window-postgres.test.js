@@ -16,11 +16,18 @@ const { randomUUID } = require('crypto');
 const SKIP = !process.env.REPAIR_TEST_DATABASE_URL;
 const describeOrSkip = SKIP ? describe.skip : describe;
 
-async function createScratchDb() {
+// Refuses anything but a LOCAL throwaway test database — every scratch
+// helper in this file must go through it.
+function localTestDatabaseUrl() {
   const url = new URL(process.env.REPAIR_TEST_DATABASE_URL);
   if (!['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname) || !['/invoice_repair_test', '/waves_test'].includes(url.pathname)) {
     throw new Error('This test requires a local invoice_repair_test or waves_test database');
   }
+  return url;
+}
+
+async function createScratchDb() {
+  const url = localTestDatabaseUrl();
   const schema = `termite_notice45_${randomUUID().replace(/-/g, '')}`;
   const db = knexLib({ client: 'pg', connection: url.toString(), searchPath: [schema], pool: { min: 0, max: 4 } });
   await db.raw('CREATE SCHEMA ??', [schema]);
@@ -362,7 +369,7 @@ describeOrSkip('termite annual-plan notice obligations — against a schema buil
   let fixture;
 
   async function createPre101Db() {
-    const url = new URL(process.env.REPAIR_TEST_DATABASE_URL);
+    const url = localTestDatabaseUrl();
     const schema = `termite_notice_migrated_${randomUUID().replace(/-/g, '')}`;
     const db = knexLib({ client: 'pg', connection: url.toString(), searchPath: [schema], pool: { min: 0, max: 4 } });
     await db.raw('CREATE SCHEMA ??', [schema]);
