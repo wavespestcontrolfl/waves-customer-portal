@@ -342,7 +342,26 @@ follow". The
 already-accepted retry returns the same shape while the agreement is
 unsigned, and `invoiceKind: 'annual_prepay_activation_pending'` with
 `nextStep: 'activation_pending'` once it is signed but the plan has not
-finished activating (the signing link is burned by then). Signing the
+finished activating (the signing link is burned by then). If the customer
+never signs, the daily reconcile sweep closes the offer out automatically
+`ANNUAL_SIGNATURE_ABANDON_DAYS` (45) days after the park (measured from
+`annual_plan_deferred_invoice.parkedAt`, falling back to `accepted_at`):
+`estimates.annual_plan_activation_status` becomes `'signature_expired'`,
+every unsigned v3 annual agreement for that estimate is cancelled (share
+link burned) so it can never be signed into activation, and a single staff
+bell rings — nothing is billed or booked either way. A concurrent signature
+always wins the race (the estimate row is locked the same way activation
+locks it, and a signed contract already on file blocks the close-out). Any
+retry of that estimate — the already-accepted rebuild above, or a stray
+re-run of `convertEstimate` (webhook replay, an operator re-triggering
+acceptance) — reports `invoiceKind: 'annual_prepay_signature_expired'` with
+`nextStep: 'offer_closed'`, never `'sign_agreement'`: the signing window is
+closed and re-parking the SAME estimate is not offered as a path (re-quote
+with a new estimate instead). A signing link that lapses before that 45-day
+close rings its own one-time staff nudge (dedup'd per contract and its
+current expiry, so a staff resend that later lapses again re-rings once) —
+purely informational; it changes nothing about the estimate or agreement.
+Signing the
 annual agreement at `/api/contracts/:token/sign` activates the plan after
 the sign transaction commits (`termite-annual-activation.js`, retried by the
 daily reconcile sweep): it bills exactly the frozen price, charges the
@@ -2194,7 +2213,16 @@ payment hold 402s BEFORE any content-derived answer; the paper compliance
 documents (wdo_inspection, pre_treatment_termite_certificate) return a
 generic 404 — their pages never mount the ask bar. Only write: an
 `activity_log` analytics row recording question length, never answer
-content).
+content. Optional body field `intent` — one of `findings` / `treatment` /
+`recommendations` / `next_visit`, sent by the shipped prompt chips — selects
+that answer directly; any other value is ignored and the question is
+keyword-routed as before, so older clients are unaffected. This route and the
+service-report `/api/reports/:token/ask` both answer with
+`Cache-Control: no-store` and `X-Robots-Tag: noindex, nofollow` on every
+response, including CORS preflights, the global `/api` limiter's 429 and
+body-parser errors — the middleware is mounted app-level ahead of all
+response-producing middleware (`server/index.js`) and again inside the router
+ahead of the `:token` param gate and limiter).
 `/api/webhooks/voice-agent/lead` (POST; machine-to-machine webhook — the
 bilingual AI voice agent (ElevenLabs) posts a captured lead when an AI-handled
 call ends. NOT browser-facing. Fail-closed shared-secret auth in the route

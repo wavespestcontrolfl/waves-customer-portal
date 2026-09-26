@@ -468,6 +468,28 @@ async function upsertEmail(parsed, { backfill = false } = {}) {
   });
   const [email] = inserted;
 
+  // Amazon "Delivered" email → auto-restock (GATE_PURCHASE_RECEIPT_RESTOCK):
+  // deterministic on from_address + subject, entirely independent of the AI
+  // classifier below — fire-and-forget so a slow/failed inventory write can
+  // never hold up the sync loop or cost a retry of this email. The ~15-min
+  // scheduler sweep (purchase-receipts/sweep.js) is the safety net for
+  // anything missed here (a process exit before setImmediate runs, etc.).
+  try {
+    const { gateEnvValue } = require('../../config/feature-gates');
+    if (gateEnvValue('GATE_PURCHASE_RECEIPT_RESTOCK')) {
+      const { isAmazonDeliveredEmail } = require('../purchase-receipts/amazon-delivery-parser');
+      if (isAmazonDeliveredEmail(email)) {
+        setImmediate(() => {
+          require('../purchase-receipts/sweep').processReceiptEmail(email).catch((err) => {
+            logger.error(`[email-sync] Amazon delivery restock failed for ${email.id}: ${err?.message || err}`);
+          });
+        });
+      }
+    }
+  } catch (err) {
+    logger.error(`[email-sync] Amazon delivery restock hook failed for ${email.id}: ${err?.message || err}`);
+  }
+
   // Store list_unsubscribe for auto-unsubscribe
   if (parsed.list_unsubscribe) {
     await db('emails').where('id', email.id).update({
