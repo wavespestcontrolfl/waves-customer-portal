@@ -145,7 +145,7 @@ const DEDICATED_SERVICE_PROFILES = new Map(Object.entries({
   one_time_pest_control: ['pest', null], pest_initial_cleanout: ['pest', null], pest_re_service: ['pest', null],
   pest_rodent_quarterly: ['pest', null], pest_termite_bait_quarterly: ['pest', null],
   lawn_care_monthly: ['lawn', null], lawn_care_recurring: ['lawn', null],
-  lawn_fertilization: ['lawn', null], palm_treatment: ['tree_shrub', null],
+  lawn_fertilization: ['lawn', null], palm_treatment: ['tree_shrub', [null, 'palm_injection']],
   lawn_care_6week: ['lawn', null], lawn_care_quarterly: ['lawn', null],
   lawn_re_service: ['lawn', 'one_time_lawn_treatment'],
   lawn_care_one_time: ['lawn', 'one_time_lawn_treatment'],
@@ -163,8 +163,13 @@ const EXISTING_SHARED_PROFILES = new Map([
 ]);
 
 function selectReportCopyPrompt(sharedPrompt, serviceType, context = {}) {
+  // Keep shared safety/provenance, without the old style rules and examples
+  // that demanded variation or supplied unsupported recovery timelines.
+  const start = sharedPrompt.indexOf('## HARD CONSTRAINTS');
+  const end = sharedPrompt.indexOf('## ANTI-TEMPLATE RULES', start);
+  const sharedSafety = start >= 0 && end > start ? sharedPrompt.slice(start, end).trim() : '';
   const remaining = selectRemainingServicePrompt(context, 'main');
-  if (remaining) return `# ${REMAINING_SERVICE_PROMPT_VERSION}\n\n${remaining}`;
+  if (remaining) return [`# ${REMAINING_SERVICE_PROMPT_VERSION}`, sharedSafety, remaining].filter(Boolean).join('\n\n');
   let serviceLine = null;
   if (context.serviceKey) {
     // Preserve established typed pretreatment and mixed membership writers
@@ -173,7 +178,8 @@ function selectReportCopyPrompt(sharedPrompt, serviceType, context = {}) {
       && context.findingsType === EXISTING_SHARED_PROFILES.get(context.serviceKey)) return sharedPrompt;
     const profile = DEDICATED_SERVICE_PROFILES.get(context.serviceKey);
     if (!profile) return null;
-    if (Object.hasOwn(context, 'findingsType') && context.findingsType !== profile[1]) return null;
+    const supportedFindingsTypes = Array.isArray(profile[1]) ? profile[1] : [profile[1]];
+    if (Object.hasOwn(context, 'findingsType') && !supportedFindingsTypes.includes(context.findingsType)) return null;
     [serviceLine] = profile;
   } else if (context.findingsType) {
     serviceLine = DEDICATED_FINDINGS_FAMILIES.get(context.findingsType);
@@ -191,11 +197,6 @@ function selectReportCopyPrompt(sharedPrompt, serviceType, context = {}) {
   };
   const selected = modules[serviceLine];
   if (!selected) return null;
-  // Keep shared safety/provenance, without the old style rules and examples
-  // that demanded variation or supplied unsupported recovery timelines.
-  const start = sharedPrompt.indexOf('## HARD CONSTRAINTS');
-  const end = sharedPrompt.indexOf('## ANTI-TEMPLATE RULES', start);
-  const sharedSafety = start >= 0 && end > start ? sharedPrompt.slice(start, end).trim() : '';
   return [selected[0], sharedSafety, ...selected.slice(1)].filter(Boolean).join('\n\n');
 }
 

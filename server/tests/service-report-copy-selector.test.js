@@ -1,9 +1,11 @@
 const { selectReportCopyPrompt } = require('../services/service-report/lawn-report-copy-prompt');
 const { ALL_LISTS, CUTOVER_IN_FLIGHT_KEYS } = require('../config/completion-lane-registry');
 
+const WORDS_ONLY_RATING_POLICY = 'Describe the rating in words only';
 const shared = `# Shared writer
 ## HARD CONSTRAINTS
 Keep provenance and never invent an observation.
+${WORDS_ONLY_RATING_POLICY}; never quote the number.
 ## ANTI-TEMPLATE RULES
 Old examples and unrelated service guidance.`;
 
@@ -13,7 +15,9 @@ describe('service-specific main report writer selection', () => {
     ...ALL_LISTS.one_time_generic_by_design,
     ...Object.keys(CUTOVER_IN_FLIGHT_KEYS).filter((key) => CUTOVER_IN_FLIGHT_KEYS[key].before === 'generic'),
   ])('the declared generic report lane %s retains a writer', (serviceKey) => {
-    expect(selectReportCopyPrompt(shared, 'Old label', { serviceKey, findingsType: null })).not.toBeNull();
+    const prompt = selectReportCopyPrompt(shared, 'Old label', { serviceKey, findingsType: null });
+    expect(prompt).not.toBeNull();
+    expect(prompt.split(WORDS_ONLY_RATING_POLICY)).toHaveLength(2);
   });
   test.each([
     ['Every 6 Weeks Lawn Care Service', 'LAWN v5', 'LAWN'],
@@ -31,6 +35,7 @@ describe('service-specific main report writer selection', () => {
     expect(prompt).not.toContain('Old examples');
     expect(prompt).not.toContain('Return JSON only');
     expect(prompt).not.toContain('exactly these top-level keys');
+    expect(prompt.split(WORDS_ONLY_RATING_POLICY)).toHaveLength(2);
     if (lane === 'TREE') expect(prompt).toContain('root injection');
     if (lane === 'PEST') expect(prompt).toContain('other labeled crawling pests');
   });
@@ -56,6 +61,7 @@ describe('service-specific main report writer selection', () => {
     expect(prompt).toContain('WHAT WE DID');
     expect(prompt).not.toContain('RECURRING PEST v1');
     expect(prompt.match(/SERVICE MODULE — /g)).toHaveLength(1);
+    expect(prompt.split(WORDS_ONLY_RATING_POLICY)).toHaveLength(2);
   });
 
   test('canonical lawn/tree/general-pest identities preserve dedicated writers', () => {
@@ -75,6 +81,17 @@ describe('service-specific main report writer selection', () => {
     expect(selectReportCopyPrompt(shared, 'Old label', { serviceKey: 'lawn_care_one_time', findingsType: 'one_time_lawn_treatment' })).toContain('LAWN v5');
     expect(selectReportCopyPrompt(shared, 'Old label', { serviceKey: 'tree_shrub_program', findingsType: 'tree_shrub' })).toContain('TREE AND SHRUB v1');
     expect(selectReportCopyPrompt(shared, 'Old label', { serviceKey: 'pest_initial_cleanout', findingsType: null })).toContain('RECURRING PEST v1');
+  });
+
+  test('palm treatment supports only its permitted generic and typed cutover states', () => {
+    for (const findingsType of [null, 'palm_injection']) {
+      const prompt = selectReportCopyPrompt(shared, 'Old label', { serviceKey: 'palm_treatment', findingsType });
+      expect(prompt).toContain('TREE AND SHRUB v1');
+      expect(prompt.split(WORDS_ONLY_RATING_POLICY)).toHaveLength(2);
+    }
+    expect(selectReportCopyPrompt(shared, 'Old label', {
+      serviceKey: 'palm_treatment', findingsType: 'tree_shrub',
+    })).toBeNull();
   });
 
   test('the established typed pretreatment report keeps its existing writer without opening the certificate lane', () => {
