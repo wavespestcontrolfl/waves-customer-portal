@@ -416,6 +416,8 @@ function fixedTimingClaim(reply, contextText, treatmentContext, activeMessage = 
   return false;
 }
 
+const AFFIRMATION_RE = /^\W*(?:yes|yeah|yep|yup|absolutely|sure|of\s+course|definitely|correct|certainly|indeed|totally|exactly|that'?s\s+(?:right|correct)|you\s+(?:can|may|bet)|s[ií]|claro|por\s+supuesto|exact[oa]|correct[oa]|desde\s+luego|as[ií]\s+es|puede)(?![a-zñáéíóú])/i;
+const SAFETY_QUESTION_RE = /\b(?:safe(?:ly|ty)?|harm\w*|hurt\w*|toxic|poison\w*|danger\w*|risk\w*|okay|ok|fine|alright|affect\w*|segur\w*|peligr\w*|t[oó]xic\w*|da[ñn]\w*|riesgo\w*|afect\w*|inocu\w*|inofensiv\w*)(?![a-zñáéíóú])/i;
 function intakeSafetyClaimSupplement(rawReply, rawContext = '', rawActive = rawContext) {
   const t = foldTypography(rawReply);
   const contextText = foldTypography(rawContext);
@@ -428,6 +430,11 @@ function intakeSafetyClaimSupplement(rawReply, rawContext = '', rawActive = rawC
   // one), so any blanket-safety or negated-hazard wording gets the reviewed
   // copy, which is itself a correct answer to any of those questions.
   if (safetyClaimIn(t)) return true;
+  // A bare affirmation ("Yes.", "Absolutely.", "Sí, claro.") confirms whatever
+  // the visitor asked — so when the ACTIVE question carries a safety or
+  // re-entry proposition, the affirmation is that claim.
+  if (AFFIRMATION_RE.test(t) && (SAFETY_QUESTION_RE.test(activeMessage)
+    || ((ACCESS_SIGNAL_RE.test(activeMessage) || ACCESS_TOPIC_RE.test(activeMessage)) && (DURATION_RE.test(activeMessage) || CLOCK_TIME_RE.test(activeMessage) || ANY_TIME_FIGURE_RE.test(activeMessage))))) return true;
   const conversation = `${t}\n${contextText}`;
   const treatmentContext = INTAKE_TREATMENT_CONTEXT_RE.test(conversation);
   return fixedTimingClaim(t, contextText, treatmentContext, activeMessage);
@@ -457,6 +464,18 @@ const REVIEWED_REPLIES = new Set([
 // the visitor's words carry emergency direction — human and/or veterinary,
 // whichever the model gave — and the turn stops offering a quote. Returns
 // null when there is no emergency evidence.
+// On a successful turn, an emergency in older history overrides the answer
+// only when the active message follows up on it ("what should I do now?",
+// "he's getting worse"); an unrelated new question ("How much is service?")
+// is judged on its own. The provider-failure fallback still reads the whole
+// history (no answer to protect, so caution wins).
+const FOLLOW_UP_RE = /\b(?:what\s+(?:should|do|can)\s+(?:i|we)\s+do|what\s+now|now\s+what|help|still|worse|getting|he|she|they|him|her|them|now|qu[eé]\s+hago|qu[eé]\s+hacemos|ayuda|todav[ií]a|peor|ahora|sigue)(?![a-zñáéíóú])/i;
+function emergencyContextOf(contextText, activeMessage) {
+  if (activeMessage === contextText) return contextText;
+  if (looksLikeEmergency(foldTypography(activeMessage))) return activeMessage;
+  return FOLLOW_UP_RE.test(activeMessage) ? contextText : activeMessage;
+}
+
 function emergencyGuidance(result, contextText = '') {
   const folded = foldTypography(result.reply);
   const context = foldTypography(contextText);
@@ -503,7 +522,7 @@ function scrubUnsafeClaims(result, contextText = '', activeMessage = contextText
   // redirect is not a re-entry time.
   if (REVIEWED_REPLIES.has(result.reply)) return result;
   if (!intakeSafetyClaimSupplement(result.reply, contextText, activeMessage)) return result;
-  const emergency = emergencyGuidance(result, contextText);
+  const emergency = emergencyGuidance(result, emergencyContextOf(contextText, activeMessage));
   if (emergency) return emergency;
   // The reply's own language, falling back to the visitor's ACTIVE message for
   // short replies ("Sí, es seguro.") — never an earlier turn, so a visitor
@@ -553,7 +572,7 @@ function normalizeIntakeResult(json, source, contextText = '', activeMessage = c
   // an emergency message) gets the emergency script; an account reply gets
   // the support copy — never the generic price redirect, which would strip
   // the 911/medical or portal guidance and still sound price-oriented.
-  const emergency = emergencyGuidance(base, contextText);
+  const emergency = emergencyGuidance(base, emergencyContextOf(contextText, activeMessage));
   if (emergency) return emergency;
   if (intent === 'existing_customer') return { ...base, reply: SUPPORT_FALLBACK_RESULT.reply };
   return scrubPriceTalk(base);

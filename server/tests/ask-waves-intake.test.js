@@ -743,6 +743,39 @@ describe('normalizeIntakeResult', () => {
     expect(out.reply).toMatch(/Get my price/);
   });
 
+  test.each([
+    ['Yes.', 'Is the pesticide safe for my child?'],
+    ['Absolutely.', 'Can I re-enter after 30 minutes?'],
+    ['Sí, claro.', '¿Es seguro para mi perro?'],
+  ])('a bare affirmation of a safety or re-entry question is replaced: %s', (reply, active) => {
+    expect(scrubUnsafeClaims({ reply, intent: 'question', service_keys: [], ready_for_quote: false }, active).reply)
+      .toMatch(/label directions|instrucciones de la etiqueta/);
+  });
+
+  test('a bare "Yes." to an ordinary question is untouched', () => {
+    expect(scrubUnsafeClaims({ reply: 'Yes.', intent: 'question', service_keys: [], ready_for_quote: false }, 'Do you treat for ants?').reply).toBe('Yes.');
+  });
+
+  test('an old emergency in history does not override a new unrelated price turn', () => {
+    const out = normalizeIntakeResult(
+      { reply: 'Service is $50 a month.', intent: 'quote', service_keys: [], ready_for_quote: true },
+      'openai',
+      'Last year my child was stung and had swelling\nHow much is service?',
+      'How much is service?',
+    );
+    expect(out.reply).toMatch(/Get my price/);
+  });
+
+  test('a follow-up to an emergency in history still gets the emergency script', () => {
+    const out = normalizeIntakeResult(
+      { reply: 'It is completely safe, and service is $50.', intent: 'question', service_keys: [], ready_for_quote: true },
+      'openai',
+      'My child was stung and his throat is swelling\nWhat should I do now?',
+      'What should I do now?',
+    );
+    expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
+  });
+
   test('price talk never erases emergency direction (safety runs on the original reply)', () => {
     const out = normalizeIntakeResult(
       { reply: 'The product is not safe to ingest; call Poison Control now. Treatment costs $50.', intent: 'question', service_keys: ['pest'], ready_for_quote: true },
