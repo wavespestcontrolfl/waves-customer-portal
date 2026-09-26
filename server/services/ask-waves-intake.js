@@ -127,11 +127,16 @@ const REACTION_RE = /\b(?:swell\w*|swoll\w*|hives|rash|dizzy|faint\w*|vomit\w*|n
 
 // Swallowing/ingesting is an emergency only when a person or pet did it —
 // "Have the ants ingested the bait?" is pest behavior, not a poisoning.
-const INGESTION_RE = /\b(?:i|we|he|she|someone|somebody|anyone|my|our|his|her|their|the\s+(?:baby|kids?|child|children|toddler|dogs?|cats?|puppy|pets?)|kids?|child|children|son|daughter|baby|toddler|infant|dogs?|cats?|puppy|pets?|husband|wife)\b[^.?!]{0,40}?\b(?:swallow(?:ed|ing|s)?|ingest(?:ed|ing|s)?)\b|\b(?:swallow|ingest)(?:ed)?\b[^.?!]{0,30}?\bby\s+(?:(?:my|our|his|her|their|the|a|an)\s+)?(?:baby|kids?|child|children|toddler|infant|son|daughter|husband|wife|someone|somebody|dogs?|cats?|pupp(?:y|ies)|kittens?|pets?|me|us|him|her|them)\b|\b(?:got|went|gets?|put)\s+(?:\w+\s+)?in(?:to)?\s+(?:his|her|their|my|our|the\s+\w+'?s?)\s+mouth\b|\b(?:me\s+|se\s+)?trag(?:u[eé]|[oó])(?![a-zñáéíóú])|\bingir(?:i[oó]|i[eé]ron|[ií])(?![a-zñáéíóú])/i;
+const INGESTION_RE = /\b(?:i|we|he|she|someone|somebody|anyone|my|our|his|her|their|the\s+(?:baby|kids?|child|children|toddler|dogs?|cats?|puppy|pets?)|kids?|child|children|son|daughter|baby|toddler|infant|dogs?|cats?|puppy|pets?|husband|wife)\b[^.?!]{0,40}?\b(?:swallow(?:ed|ing|s)?|ingest(?:ed|ing|s)?)\b|\b(?:swallow|ingest)(?:ed)?\b[^.?!]{0,30}?\bby\s+(?:(?:my|our|his|her|their|the|a|an)\s+)?(?:baby|kids?|child|children|toddler|infant|son|daughter|husband|wife|someone|somebody|dogs?|cats?|pupp(?:y|ies)|kittens?|pets?|me|us|him|her|them)\b|\b(?:got|went|gets?|put)\s+(?:\w+\s+)?in(?:to)?\s+(?:his|her|their|my|our|the\s+\w+'?s?)\s+mouth\b|\b(?:me\s+)?tragu[eé](?![a-zñáéíóú])|\bingeri(?![a-zñáéíóú])|\b(?:mi|su|el|la|nuestr[oa]|tu)\s+(?:hij[oa]s?|beb[eé]s?|ni[ñn][oa]s?|esposo|esposa|perr[oa]s?|gat[oa]s?|mascotas?|cachorr\w*)\b[^.?!]{0,30}?\b(?:se\s+)?(?:trag[oó]|ingiri[oó]|comi[oó])(?![a-zñáéíóú])|\b(?:ingerid|tragad|comid)[oa]s?\s+por\s+(?:(?:mi|su|el|la|nuestr[oa]|tu)\s+)?(?:hij[oa]s?|beb[eé]s?|ni[ñn][oa]s?|esposo|esposa|perr[oa]s?|gat[oa]s?|mascotas?|cachorr\w*)\b/i;
+
+// A denied symptom ("stung but has no swelling", "sin ronchas") is not a
+// reaction; it is removed before the sting/bite pairing is checked.
+const NEGATED_REACTION_RE = new RegExp(`\\b(?:no|not|without|never|sin|isn'?t|aren'?t|doesn'?t\\s+have|don'?t\\s+see|has\\s+no|have\\s+no|no\\s+tiene|no\\s+hay)\\s+(?:(?:any|signs?\\s+of|real|much|a|ninguna?|nada\\s+de)\\s+)*(?:${REACTION_RE.source.slice(5, -3)})`, 'gi');
 
 function looksLikeEmergency(text) {
   const t = String(text || '');
-  return EMERGENCY_RE.test(t) || INGESTION_RE.test(t) || (BITE_STING_RE.test(t) && REACTION_RE.test(t));
+  return EMERGENCY_RE.test(t) || INGESTION_RE.test(t)
+    || (BITE_STING_RE.test(t) && REACTION_RE.test(t.replace(NEGATED_REACTION_RE, ' ')));
 }
 
 const EMERGENCY_FALLBACK_RESULT = Object.freeze({
@@ -285,8 +290,8 @@ const POSITIVE_SAFETY_RE = /\b(?:safe(?:r|ly|ty)?|harmless|gentle|non-?toxic|ris
 // ("doesn't pose any risk", "will not cause any harm") — so "We can't treat
 // dangerous wasp nests at height" is not a claim.
 const HAZARD_FILLER = '(?:(?:a|an|any|much|real|serious|significant|health|to|your|you|for|the|be|pose|poses|cause|causes|bring|of|at|all|known|major|big)\\s+){0,3}';
-const NEGATED_HAZARD_RE = new RegExp(`\\b(?:no|zero|not|never|without|poses?\\s+no|presents?\\s+no|free\\s+(?:of|from)|won['’]?t|will\\s+not|doesn['’]?t|does\\s+not|isn['’]?t|is\\s+not|aren['’]?t|are\\s+not|can['’]?t|cannot|shouldn['’]?t|should\\s+not)\\s+${HAZARD_FILLER}(?:harm\\w*|hurt\\w*|danger\\w*|hazard\\w*|threat\\w*|risk\\w*|toxic\\w*|poison\\w*|affect\\w*|side[-\\s]?effects?|injur\\w*)\\b`, 'i');
-const NEGATED_HAZARD_ES_RE = /\b(?:no|sin|ning[uú]n|ninguna|cero|nunca|libre\s+de)\s+(?:(?:hay|representa|representan|causa|causan|tiene|tienen|es|son|un|una|ning[uú]n|ninguna|mayor|gran|alg[uú]n|alguna|para|a|la|el|los|las|su|sus|le|les|hace|hacen)\s+){0,3}(?:peligr\w*|riesgos?|da[ñn]\w*|t[oó]xic\w*|afect\w*|venen\w*|efectos?\s+secundarios)\b/i;
+const NEGATED_HAZARD_RE = new RegExp(`\\b(?:no|zero|not|never|without|poses?\\s+no|presents?\\s+no|free\\s+(?:of|from)|won['’]?t|will\\s+not|doesn['’]?t|does\\s+not|isn['’]?t|is\\s+not|aren['’]?t|are\\s+not|can['’]?t|cannot|shouldn['’]?t|should\\s+not)\\s+${HAZARD_FILLER}(?:harm\\w*|hurt\\w*|danger\\w*|hazard\\w*|threat\\w*|risk\\w*|toxic\\w*|poison\\w*|affect\\w*|side[-\\s]?effects?|adverse\\s+(?:effects?|reactions?|health\\s+effects?)|adverse\\w*|injur\\w*)\\b`, 'i');
+const NEGATED_HAZARD_ES_RE = /\b(?:no|sin|ning[uú]n|ninguna|cero|nunca|libre\s+de)\s+(?:(?:hay|representa|representan|causa|causan|produce|producen|provoca|provocan|genera|generan|tiene|tienen|es|son|un|una|ning[uú]n|ninguna|mayor|gran|alg[uú]n|alguna|para|a|la|el|los|las|su|sus|le|les|hace|hacen)\s+){0,3}(?:peligr\w*|riesgos?|da[ñn]\w*|t[oó]xic\w*|afect\w*|venen\w*|efectos?\s+secundarios|efectos?\s+adversos|reacciones\s+adversas)\b/i;
 function safetyClaimIn(text) {
   return POSITIVE_SAFETY_RE.test(text) || NEGATED_HAZARD_RE.test(text) || NEGATED_HAZARD_ES_RE.test(text);
 }
@@ -358,7 +363,11 @@ const ANY_TIME_FIGURE_RE = new RegExp(`\\d|\\b(?:${NUM_WORD}|${NUM_WORD_ES}|half
 // access check — a mixed turn ("I can't log in to the portal; when can I
 // re-enter the house?") still has a physical access question.
 const DIGITAL_ACCESS_RE = /\b(?:re-?enter(?:ing)?|log(?:ging)?\s*(?:in|back\s+in)|sign(?:ing)?\s+in|get(?:ting)?\s+(?:back\s+)?in(?:to)?|volver\s+a\s+entrar|entrar|ingresar|acceder)\s+(?:(?:to|into|in|on|al|a|la|el|en|the|your|my|our|su|mi|de)\s+){0,3}(?:portal|account|app|site|website|password|cuenta|p[aá]gina|sistema|sesi[oó]n|aplicaci[oó]n)\b/gi;
-function fixedTimingClaim(reply, contextText, treatmentContext) {
+// Looser than ACCESS_SIGNAL_RE, for deciding the TOPIC only: any subject or
+// modal in front of going in/out ("You'll be able to go inside", "When can
+// we go inside?", "Can the kids play outside?").
+const ACCESS_TOPIC_RE = /\b(?:(?:go|get|come|head|walk|be|play|stay)\s+(?:back\s+)?(?:inside|outside|indoors|outdoors)|(?:go|get)\s+(?:back\s+)?(?:out|in)\b|back\s+(?:inside|outside|indoors|outdoors)|re-?ent(?:er|ers|ered|ering|ry)|re-?occup\w*|dr(?:y|ies|ied|ying)|stay\s+(?:off|out|away|inside|indoors)|(?:salir|entrar|volver|regresar)|sec(?:o|a|os|as|ar|arse))\b/i;
+function fixedTimingClaim(reply, contextText, treatmentContext, activeMessage = contextText) {
   const text = String(reply || '');
   // Topic, not proximity: when the reply or the visitor's question is about
   // physical access at all (re-entry, drying, letting pets out, keeping off
@@ -367,7 +376,10 @@ function fixedTimingClaim(reply, contextText, treatmentContext) {
   // sentence the access wording sits in ("It takes 30 minutes. Then you can
   // re-enter.", "By noon." answering "When can I re-enter?").
   const physical = (t) => String(t || '').replace(DIGITAL_ACCESS_RE, ' ');
-  const accessTopic = ACCESS_SIGNAL_RE.test(physical(text)) || ACCESS_SIGNAL_RE.test(physical(contextText));
+  // The visitor side is the ACTIVE message only — an old re-entry question in
+  // history must not turn "The inspection takes about 45 minutes" into a claim.
+  const isAccess = (t) => ACCESS_SIGNAL_RE.test(physical(t)) || ACCESS_TOPIC_RE.test(physical(t));
+  const accessTopic = isAccess(text) || isAccess(activeMessage);
   if (accessTopic && (CLOCK_TIME_RE.test(text) || DURATION_RE.test(text) || ANY_TIME_FIGURE_RE.test(text))) return true;
   // No access topic: a clock time is booking ("we can treat tomorrow"); a
   // duration is judged by the words right around it.
@@ -385,9 +397,10 @@ function fixedTimingClaim(reply, contextText, treatmentContext) {
   return false;
 }
 
-function intakeSafetyClaimSupplement(rawReply, rawContext = '') {
+function intakeSafetyClaimSupplement(rawReply, rawContext = '', rawActive = rawContext) {
   const t = foldTypography(rawReply);
   const contextText = foldTypography(rawContext);
+  const activeMessage = foldTypography(rawActive);
   if (INTAKE_EPA_APPROVED_ES_RE.test(t)) return true;
   // Topic, not grammar: this is a pest-control chat, so safety wording in a
   // reply is about the treatment whatever its subject — "Our formula is safe",
@@ -398,7 +411,7 @@ function intakeSafetyClaimSupplement(rawReply, rawContext = '') {
   if (safetyClaimIn(t)) return true;
   const conversation = `${t}\n${contextText}`;
   const treatmentContext = INTAKE_TREATMENT_CONTEXT_RE.test(conversation);
-  return fixedTimingClaim(t, contextText, treatmentContext);
+  return fixedTimingClaim(t, contextText, treatmentContext, activeMessage);
 }
 
 // A flagged reply that directs someone to emergency help keeps emergency
@@ -459,7 +472,7 @@ function emergencyGuidance(result, contextText = '') {
   };
 }
 
-function scrubUnsafeClaims(result, contextText = '') {
+function scrubUnsafeClaims(result, contextText = '', activeMessage = contextText) {
   // The shared reentrySafetyClaimFinding is NOT called here: its worst case
   // blocks the event loop for seconds on ordinary replies (#4905), and this
   // runs on every chat turn. The chokepoint above covers its classes for this
@@ -468,12 +481,13 @@ function scrubUnsafeClaims(result, contextText = '') {
   // fallback scripts) is never re-scrubbed — "about 20 seconds" in the price
   // redirect is not a re-entry time.
   if (REVIEWED_REPLIES.has(result.reply)) return result;
-  if (!intakeSafetyClaimSupplement(result.reply, contextText)) return result;
+  if (!intakeSafetyClaimSupplement(result.reply, contextText, activeMessage)) return result;
   const emergency = emergencyGuidance(result, contextText);
   if (emergency) return emergency;
-  // The reply's own language, falling back to the visitor's for short replies
-  // ("Sí, es seguro.").
-  const spanish = looksSpanish(result.reply) || looksSpanish(contextText);
+  // The reply's own language, falling back to the visitor's ACTIVE message for
+  // short replies ("Sí, es seguro.") — never an earlier turn, so a visitor
+  // who switched to English gets English.
+  const spanish = looksSpanish(result.reply) || looksSpanish(activeMessage);
   return { ...result, reply: spanish ? UNSAFE_CLAIM_REPLY_ES : UNSAFE_CLAIM_REPLY };
 }
 
@@ -481,7 +495,7 @@ function scrubUnsafeClaims(result, contextText = '') {
 // Returns null when there is no usable reply (caller moves down the ladder).
 // `contextText` is the visitor's side of the conversation (treatment context
 // for the safety chokepoint).
-function normalizeIntakeResult(json, source, contextText = '') {
+function normalizeIntakeResult(json, source, contextText = '', activeMessage = contextText) {
   if (!json || typeof json !== 'object') return null;
   const reply = cleanText(json.reply, REPLY_MAX_LEN);
   if (!reply) return null;
@@ -501,11 +515,16 @@ function normalizeIntakeResult(json, source, contextText = '') {
   // price replacement: "…not safe to ingest; call Poison Control now.
   // Treatment costs $50." must keep the emergency script, not become the
   // "Get my price" redirect. The reviewed replacements carry no price.
-  const scrubbed = scrubUnsafeClaims(base, contextText);
+  const scrubbed = scrubUnsafeClaims(base, contextText, activeMessage);
   if (scrubbed.reply !== reply) {
     // No emergency: a claim-carrying price answer gets the price redirect —
     // reviewed copy too, and the useful answer to a price question.
-    if (scrubbed.intent !== 'emergency' && !quoteless && PRICE_TALK_RE.test(reply)) return scrubPriceTalk(base);
+    if (scrubbed.intent !== 'emergency' && PRICE_TALK_RE.test(reply)) {
+      // An account reply keeps account routing (portal + phone); a quote
+      // reply gets the price redirect. Both are reviewed and claim-free.
+      if (intent === 'existing_customer') return { ...base, reply: SUPPORT_FALLBACK_RESULT.reply };
+      if (!quoteless) return scrubPriceTalk(base);
+    }
     return scrubbed;
   }
   if (!PRICE_TALK_RE.test(reply)) return base;
@@ -684,7 +703,7 @@ async function processIntakeMessage({ message, history, sessionId } = {}) {
     logger.error(`[ask-waves] dispatch chain threw unexpectedly: ${err.message}`);
     dispatched = { ok: false, reason: 'error' };
   }
-  if (dispatched.ok) result = normalizeIntakeResult(dispatched.json, dispatched.provider, guardText);
+  if (dispatched.ok) result = normalizeIntakeResult(dispatched.json, dispatched.provider, guardText, cleanText(message, MESSAGE_MAX_LEN));
 
   if (!result) {
     logger.warn('[ask-waves] both providers missed; serving deterministic fallback');

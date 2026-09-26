@@ -213,6 +213,8 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ['The repaired screen is safe for pets.', ''],
     ['Ladybugs that are generally safe around pets are helpful in gardens.', ''],
     ['Our formula is safe for pets.', ''],
+    ['Our pesticide has no adverse effects on children or pets.', ''],
+    ['El tratamiento no produce efectos adversos.', ''],
     ['Our solution is completely harmless.', ''],
     ['Completely family-safe.', 'I have children'],
     ['Our treatment is non\u2011toxic.', ''],
@@ -234,6 +236,7 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ["Stay off the treated lawn until four o'clock.", ''],
     ['Manténgase fuera del césped tratado hasta las cuatro.', ''],
     ['You can re-enter at 4 PM.', "I cannot log in to the portal; when can I re-enter the house?"],
+    ["You'll be able to go inside after 30 minutes.", 'When can we go inside?'],
   ])('a clock-time re-entry instruction is replaced: %s', (reply, context) => {
     expect(scrubUnsafeClaims({ ...base, reply }, context).reply).toMatch(/label directions|instrucciones de la etiqueta/);
   });
@@ -613,6 +616,37 @@ describe('normalizeIntakeResult', () => {
     expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
     expect(out.reply).toContain('1-800-222-1222');
     expect(out.intent).toBe('emergency');
+  });
+
+  test('an old re-entry question in history does not make a later scheduling duration a claim', () => {
+    const reply = 'The inspection takes about 45 minutes.';
+    const out = normalizeIntakeResult(
+      { reply, intent: 'question', service_keys: [], ready_for_quote: false },
+      'openai',
+      'When can I re-enter after the treatment?\nHow long does an inspection take?',
+      'How long does an inspection take?',
+    );
+    expect(out.reply).toBe(reply);
+  });
+
+  test('replacement language follows the active message, not an earlier Spanish turn', () => {
+    const out = normalizeIntakeResult(
+      { reply: 'This treatment is completely safe.', intent: 'question', service_keys: [], ready_for_quote: false },
+      'openai',
+      '¿El tratamiento es seguro para mis mascotas?\nIs it okay for my dog?',
+      'Is it okay for my dog?',
+    );
+    expect(out.reply).toMatch(/label directions/);
+  });
+
+  test('an account reply with a price and a claim keeps account routing', () => {
+    const out = normalizeIntakeResult(
+      { reply: 'Your treatment is completely safe and costs $50.', intent: 'existing_customer', service_keys: [], ready_for_quote: false },
+      'openai',
+      'Is my treatment safe?',
+    );
+    expect(out.reply).toBe(SUPPORT_FALLBACK_RESULT.reply);
+    expect(out.ready_for_quote).toBe(false);
   });
 
   test('price talk never erases emergency direction (safety runs on the original reply)', () => {
@@ -1280,6 +1314,8 @@ describe('looksLikeEmergency', () => {
     'The bait was swallowed by my child',
     'Some granules were ingested by my dog',
     'Some bait got into her mouth',
+    'El cebo fue ingerido por mi hijo',
+    'mi perro se comió el cebo',
   ])('flags urgent/medical text: %s', (text) => {
     expect(looksLikeEmergency(text)).toBe(true);
   });
@@ -1294,6 +1330,9 @@ describe('looksLikeEmergency', () => {
     'picaduras de mosquito en el patio por la tarde',
     'Have the ants ingested the bait?',
     'the roaches swallowed the gel bait fast',
+    'La hormiga se tragó el cebo',
+    'My child was stung but has no swelling',
+    'stung yesterday, no rash and no fever',
   ])('does not flag routine pest talk: %s', (text) => {
     expect(looksLikeEmergency(text)).toBe(false);
   });
