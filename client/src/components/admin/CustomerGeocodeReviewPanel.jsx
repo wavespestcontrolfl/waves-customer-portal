@@ -212,6 +212,7 @@ export default function CustomerGeocodeReviewPanel({ customerId = null, onSelect
   useEffect(() => {
     scopeRef.current += 1;
     saveAbortRef.current?.abort();
+    activeIdRef.current = null;
     setActiveId(null);
     setConflictId(null);
     setSavingId(null);
@@ -243,6 +244,7 @@ export default function CustomerGeocodeReviewPanel({ customerId = null, onSelect
         signal: controller.signal,
       });
       if (!current()) return;
+      activeIdRef.current = null;
       setActiveId(null);
       setConflictId(null);
       let refreshFailed = false;

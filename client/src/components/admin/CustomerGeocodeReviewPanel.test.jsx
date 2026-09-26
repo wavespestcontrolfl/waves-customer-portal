@@ -143,8 +143,12 @@ describe("CustomerGeocodeReviewPanel", () => {
     render(<CustomerGeocodeReviewPanel onSelectCustomer={vi.fn()} />);
     fireEvent.click(await screen.findByRole("button", { name: /Address review queue/ }));
     expect(screen.getByText("Showing 1–1 of 26")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Review location" }));
+    fireEvent.change(screen.getByLabelText("Evidence"), { target: { value: "This page-one draft is intentionally left behind." } });
     fireEvent.click(screen.getByRole("button", { name: "Next" }));
     expect(await screen.findByRole("button", { name: "Page two Customer" })).toBeInTheDocument();
+    expect(screen.queryByText(/current saved review is unavailable/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Evidence")).not.toBeInTheDocument();
     expect(urls.some((url) => url.includes("limit=25&offset=25"))).toBe(true);
     expect(screen.getByRole("button", { name: "Previous" })).toBeEnabled();
   });
@@ -450,7 +454,11 @@ describe("CustomerGeocodeReviewPanel", () => {
       return response({ enabled: true, records: resolved ? [] : [record()], total: resolved ? 0 : 1 });
     }));
 
-    render(<CustomerGeocodeReviewPanel />);
+    function LastRowHarness() {
+      const [, setParentRefresh] = React.useState(0);
+      return <CustomerGeocodeReviewPanel onResolved={() => setParentRefresh((value) => value + 1)} />;
+    }
+    render(<LastRowHarness />);
     fireEvent.click(await screen.findByRole("button", { name: /Address review queue/ }));
     fireEvent.click(screen.getByRole("button", { name: "Review location" }));
     fireEvent.change(screen.getByLabelText("Evidence"), { target: { value: "Confirmed at the front entry." } });
