@@ -1107,7 +1107,8 @@
       "allowWindow": [
        13,
        15
-      ]
+      ],
+      "afterTool": "get_today_eta"
      },
      "severity": "critical"
     }
@@ -1467,10 +1468,10 @@
      "severity": "critical"
     },
     {
-     "check": "capture_lead_input_includes",
+     "check": "capture_lead_input_asserts",
      "value": {
-      "first_name": "Luis",
-      "city": "Bradenton"
+      "first_name": ["^\\s*luis\\s*$"],
+      "city": ["^\\s*bradenton\\s*$"]
      },
      "severity": "major"
     },
@@ -2308,7 +2309,8 @@
       "allowWindow": [
        13,
        15
-      ]
+      ],
+      "afterTool": "get_today_eta"
      },
      "severity": "critical"
     },
@@ -2392,16 +2394,16 @@
    },
    "expect": [
     {
-     "check": "capture_lead_input_includes",
+     "check": "capture_lead_input_asserts",
      "value": {
       "callback_phone": [
-       "9415550246",
-       "941-555-0246",
-       "(941) 555-0246",
-       "+19415550246",
-       "941 555 0246"
+       "^\\s*9415550246\\s*$",
+       "^\\s*941-555-0246\\s*$",
+       "^\\s*\\(941\\)\\s*555-0246\\s*$",
+       "^\\s*\\+19415550246\\s*$",
+       "^\\s*941\\s+555\\s+0246\\s*$"
       ],
-      "address_line1": "348 Ohio"
+      "address_line1": ["^\\s*348\\s+ohio\\s+ave(?:nue)?\\.?\\s*$"]
      },
      "severity": "major"
     },
@@ -2576,40 +2578,10 @@
      "severity": "critical"
     },
     {
-     "check": "spoken_never_matches",
+     "check": "amount_requires_unit",
      "value": {
-      "patterns": [
-       "\\bmensual(?:es|mente)?\\b",
-       "\\bal mes\\b",
-       "\\bpor mes\\b",
-       "\\bcada mes\\b",
-       "/mes\\b"
-      ],
-      "fromTurn": 2
-     },
-     "severity": "critical"
-    },
-    {
-     "check": "spoken_matches_any",
-     "value": {
-      "patterns": [
-       "\\$(119|99)\\b[^.!?]{0,40}\\bpor aplicaci[oó]n\\b",
-       "\\bpor aplicaci[oó]n\\b[^.!?]{0,40}\\$(119|99)\\b",
-       "\\b(119|99)\\s*d[oó]lares\\b[^.!?]{0,40}\\bpor aplicaci[oó]n\\b",
-       "\\bpor aplicaci[oó]n\\b[^.!?]{0,40}\\b(119|99)\\s*d[oó]lares\\b"
-      ],
-      "fromTurn": 2
-     },
-     "severity": "critical"
-    },
-    {
-     "check": "spoken_never_matches",
-     "value": {
-      "patterns": [
-       "\\bpor visitas?\\b",
-       "\\bcada visitas?\\b"
-      ],
-      "fromTurn": 2
+      "amount": [119, 99],
+      "unit": "aplicación"
      },
      "severity": "critical"
     },
@@ -2719,9 +2691,9 @@
      "severity": "critical"
     },
     {
-     "check": "capture_lead_input_includes",
+     "check": "capture_lead_input_asserts",
      "value": {
-      "address_line1": "88B Palm Harbor"
+      "address_line1": ["^\\s*88b\\s+palm\\s+harbor\\s+dr(?:ive)?\\.?\\s*$"]
      },
      "severity": "critical"
     },
@@ -4329,16 +4301,16 @@
    },
    "expect": [
     {
-     "check": "capture_lead_input_includes",
+     "check": "capture_lead_input_asserts",
      "value": {
       "callback_phone": [
-       "9415550134",
-       "941-555-0134",
-       "(941) 555-0134",
-       "+19415550134",
-       "941 555 0134"
+       "^\\s*9415550134\\s*$",
+       "^\\s*941-555-0134\\s*$",
+       "^\\s*\\(941\\)\\s*555-0134\\s*$",
+       "^\\s*\\+19415550134\\s*$",
+       "^\\s*941\\s+555\\s+0134\\s*$"
       ],
-      "address_line1": "1220 Gulf"
+      "address_line1": ["^\\s*1220\\s+gulf\\s+dr(?:ive)?\\.?\\s+n(?:orth)?\\.?\\s*$"]
      },
      "severity": "major"
     },
@@ -5558,9 +5530,9 @@
      "severity": "critical"
     },
     {
-     "check": "capture_lead_input_includes",
+     "check": "capture_lead_input_asserts",
      "value": {
-      "address_line1": "88B Palm Harbor"
+      "address_line1": ["^\\s*88b\\s+palm\\s+harbor\\s+dr(?:ive)?\\.?\\s*$"]
      },
      "severity": "critical"
     },
@@ -5738,28 +5710,10 @@
      "severity": "critical"
     },
     {
-     "check": "spoken_never_matches",
+     "check": "amount_requires_unit",
      "value": {
-      "patterns": [
-       "\\bmonthly\\b",
-       "\\ba month\\b",
-       "/mo\\b",
-       "\\bper month\\b",
-       "\\beach month\\b",
-       "\\bevery month\\b"
-      ],
-      "fromTurn": 2
-     },
-     "severity": "critical"
-    },
-    {
-     "check": "spoken_matches_any",
-     "value": {
-      "patterns": [
-       "\\$(119|99)\\b[^.!?]{0,40}\\bper application\\b",
-       "\\bper application\\b[^.!?]{0,40}\\$(119|99)\\b"
-      ],
-      "fromTurn": 2
+      "amount": [119, 99],
+      "unit": "application"
      },
      "severity": "critical"
     },

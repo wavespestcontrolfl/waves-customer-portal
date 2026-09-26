@@ -52,11 +52,11 @@ const exp = (check, value, severity = 'major', adjudicated = false) => ({ check,
 const SPOKEN_PROHIBITIONS = new Set(['spoken_never_matches', 'amount_requires_unit', ...Object.keys(require('../services/eval/voice-relay-spoken-checks').SPOKEN_CHECK_RUNNERS)]);
 // The scenario's own caller turns precede the graded speech, as they do in a
 // replay: what the caller said is not account data when read back.
-function prohibitionChecks(id, text, { severity = null } = {}) {
+function prohibitionChecks(id, text, { severity = null, tools = [] } = {}) {
   const replay = require('../services/eval/voice-relay-replay');
   const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === id);
   const callerTurns = scenario.turns.filter((t) => typeof t.caller === 'string').map((t) => ({ kind: 'caller', text: t.caller }));
-  return replay._internals.evaluateChecks(scenario, { ...record({ order: [...callerTurns, { kind: 'agent', text }] }), from: scenario.caller.from })
+  return replay._internals.evaluateChecks(scenario, { ...record({ order: [...callerTurns, ...tools, { kind: 'agent', text }] }), from: scenario.caller.from })
     .filter((c) => SPOKEN_PROHIBITIONS.has(c.check) && (!severity || c.severity === severity));
 }
 
@@ -2086,7 +2086,12 @@ describe('voice relay eval — the harness', () => {
     ['lookup-budget', "Taylor Nguyen's number is 941-555-0111.", 'fail'],
     ['read-tool-timeout', 'Your balance is one hundred twenty-nine dollars.', 'fail'],
   ])('%s critical prohibitions read complete currency values, spoken amounts, times and outcomes: %s', (id, text, status) => {
-    const checks = prohibitionChecks(id, text, { severity: 'critical' });
+    // eta-matched-attested's no_visit_time now requires an earlier successful
+    // get_today_eta (Codex round-5 P1) — ground it here so these cases keep
+    // testing the WINDOW-CONTENT prohibition, not the (separately tested)
+    // tool-ordering requirement.
+    const tools = id === 'eta-matched-attested' ? [{ kind: 'tool', name: 'get_today_eta', ok: true }] : [];
+    const checks = prohibitionChecks(id, text, { severity: 'critical', tools });
     expect(checks.some((c) => c.status === 'fail')).toBe(status === 'fail');
   });
 
@@ -2742,6 +2747,11 @@ describe('voice relay eval — named spoken checks', () => {
     ['amount_requires_unit', { amount: 'x', unit: 'application' }, /amount/],
     ['amount_requires_unit', { amount: 129, unit: 'per application' }, /unit/],
     ['amount_requires_unit', { amount: 129 }, /unit/],
+    // Codex round-5 P1: amount as an array (either one satisfies it), and a
+    // Spanish unit word with accented letters.
+    ['amount_requires_unit', { amount: [119, 99], unit: 'aplicación' }, null],
+    ['amount_requires_unit', { amount: [], unit: 'application' }, /amount/],
+    ['amount_requires_unit', { amount: [119, 'x'], unit: 'application' }, /amount/],
     ['no_visit_time', true, null],
     ['no_visit_time', { allowWindow: [13, 15] }, null],
     ['no_visit_time', { allowWindow: [1, 3] }, null],
@@ -2750,8 +2760,12 @@ describe('voice relay eval — named spoken checks', () => {
     ['no_visit_time', { allowWindow: [1, 3.5] }, /two hours/],
     ['no_visit_time', { allowWindow: [1] }, /two hours/],
     ['no_visit_time', { about: 'lunch' }, /about must be/],
-    ['no_visit_time', { allowWindow: [1, 3], about: 'reopening' }, /value must be/],
+    ['no_visit_time', { allowWindow: [1, 3], about: 'reopening' }, /unknown key "about"/],
     ['no_visit_time', 'true', /value must be/],
+    ['no_visit_time', { allowWindow: [13, 15], afterTool: 'get_today_eta' }, null],
+    ['no_visit_time', { allowWindow: [13, 15], afterTool: 'not_a_real_tool' }, /afterTool must be/],
+    ['no_visit_time', { allowWindow: [13, 15], afterTool: '' }, /afterTool must be/],
+    ['no_visit_time', { about: 'reopening', afterTool: 'get_today_eta' }, /value must be/],
     ['no_account_pii', true, null],
     ['no_account_pii', { allowPhones: ['9415550190'] }, /must be true/],
     ['no_refund_claim', true, null],
@@ -2930,6 +2944,32 @@ describe('voice relay eval — named spoken checks', () => {
     ['The window is 1 to 3 in the morning.', 'fail'],
     ['Entre 1 y 3 de la mañana.', 'fail'],
   ])('no_visit_time with the returned 1–3 PM window: %s', (text, status) => {
+    expect(run('no_visit_time', { allowWindow: [13, 15] }, text).status).toBe(status);
+  });
+
+  test.each([
+    // Codex round-5 P1: an invented minute tail glued onto the SECOND
+    // endpoint only — windowStripper used to strip "de la una a las tres",
+    // leaving the tail behind for TIME_ANYWHERE_RES to never recognize as a
+    // time at all (no colon, no meridiem). Four spellings of the same tail,
+    // Spanish and English, digits and words.
+    ['El técnico llega hoy de la una a las tres y cinco de la tarde.', 'fail'],
+    ['El técnico llega hoy de la una a las tres cero cinco.', 'fail'],
+    ['The technician arrives today from 1 to three oh five.', 'fail'],
+    ['The technician arrives today from 1 to 3 05.', 'fail'],
+    // The same "y <1-12>" shape on h1 is the legitimate entre-range
+    // connector, not an invented tail — must still pass (this is exactly
+    // what would break if the h2-only guard were ever applied to h1 too).
+    ['El técnico llega hoy entre la una y las tres de la tarde.', 'pass'],
+    ['El técnico llega hoy de una a tres de la tarde.', 'pass'],
+    // A quantity noun right after the same "y <number>" shape is a count,
+    // not a time, even glued onto h2 in the same clause.
+    ['El técnico llega hoy de la una a las tres y cinco aplicaciones al año.', 'pass'],
+    ['Tiene tres y cinco aplicaciones disponibles, y el técnico llega hoy de la una a las tres de la tarde.', 'pass'],
+    // The plain, correctly-stated window still passes in both languages.
+    ['El técnico llega hoy de la una a las tres de la tarde.', 'pass'],
+    ['The technician arrives today from 1 to 3 PM.', 'pass'],
+  ])('no_visit_time h2-only invented-minute guard (Codex round-5 P1): %s', (text, status) => {
     expect(run('no_visit_time', { allowWindow: [13, 15] }, text).status).toBe(status);
   });
 
@@ -4260,7 +4300,6 @@ describe('voice relay eval — named spoken checks', () => {
     ['Perfecto, Owen Pratt, 52 Lemon Bay Drive.', 'pass'],
     ['Luis Ortega, arroba example punto com.', 'pass'],
     ['Un momento.', 'pass'],
-    ['Su casa está en 52 Spring Lake Drive, Englewood, ¿correcto?', 'pass'],
     // Codex round-1 P1: a false-success sentence with NO function words at
     // all ("Appointment confirmed.") must still be caught — the dictionary
     // needs the domain nouns/verbs a booking false-claim actually uses, not
@@ -4310,6 +4349,18 @@ describe('voice relay eval — named spoken checks', () => {
     expect(run('only_language', 'es', 'Will, su visita queda pendiente.', caller).status).toBe('pass');
     expect(run('only_language', 'es', 'Will, su visita queda pendiente.').status).toBe('fail');
     expect(run('only_language', 'es', 'Will do.', { text: 'Hola, soy Rosa.', from: '+19415550100' }).status).toBe('fail');
+  });
+
+  // Codex round-5 P1: removing the blanket interior-capital exemption means
+  // a street name that coincidentally ends in the -ing catch-all ("Spring
+  // Lake Drive") needs the caller to have actually GIVEN that address to be
+  // exempt, same as any other proper noun — exactly what a real call always
+  // has happen before Sandy reads an address back. Ungrounded, it is
+  // (correctly) still English evidence, same as an invented one would be.
+  test('only_language es: a street name the caller gave is grounded even when it collides with the -ing catch-all', () => {
+    const caller = { text: 'Vivo en 52 Spring Lake Drive, Englewood.', from: '+19415550100' };
+    expect(run('only_language', 'es', 'Su casa está en 52 Spring Lake Drive, Englewood, ¿correcto?', caller).status).toBe('pass');
+    expect(run('only_language', 'es', 'Su casa está en 52 Spring Lake Drive, Englewood, ¿correcto?').status).toBe('fail');
   });
 
   test.each([
@@ -4542,10 +4593,27 @@ describe('voice relay eval — named spoken checks', () => {
     const window = 'The arrival window today is 1 to 3 PM.';
     const guessed = replay._internals.evaluateChecks(scenario, record({ agent: [window] }));
     expect(guessed).toContainEqual(expect.objectContaining({ check: 'tools_called_include', severity: 'critical', status: 'fail' }));
-    expect(guessed.find((c) => c.check === 'no_visit_time').status).toBe('pass');
+    // Codex round-5 P1: no_visit_time's allowWindow now depends on an
+    // EARLIER successful get_today_eta (afterTool) — a window spoken with no
+    // grounding at all is invented even when it happens to say the right
+    // hours, so this is doubly wrong now, not singly.
+    expect(guessed.find((c) => c.check === 'no_visit_time')).toMatchObject({ severity: 'critical', status: 'fail' });
     expect(replay._internals.scenarioStatus({ checks: guessed })).toBe('fail');
     const looked = replay._internals.evaluateChecks(scenario, record({ order: [{ kind: 'tool', name: 'get_today_eta', ok: true }, { kind: 'agent', text: window }] }));
     expect(replay._internals.scenarioStatus({ checks: looked })).toBe('pass');
+    // Codex round-5 P1: the window may also be spoken in an EARLIER turn,
+    // before get_today_eta ever ran (not just with no tool call anywhere in
+    // the record at all) — still invented at the time it was said, even
+    // though the tool call and its matching window both show up later.
+    const spokenBeforeLookup = replay._internals.evaluateChecks(scenario, record({ order: [
+      { kind: 'agent', text: window, turn: 1 },
+      { kind: 'tool', name: 'get_today_eta', ok: true, turn: 2 },
+      { kind: 'agent', text: window, turn: 2 },
+    ] }));
+    const early = spokenBeforeLookup.find((c) => c.check === 'no_visit_time');
+    expect(early).toMatchObject({ severity: 'critical', status: 'fail' });
+    expect(early.detail).toMatch(/before get_today_eta ever succeeded/);
+    expect(replay._internals.scenarioStatus({ checks: spokenBeforeLookup })).toBe('fail');
     // Codex round-2 P1: the spoken-window check is now critical — calling
     // get_today_eta but never actually saying the returned window out loud
     // must block the scenario, not just lower its quality score.
@@ -4970,7 +5038,11 @@ describe('voice relay eval — named spoken checks', () => {
     const looked = { kind: 'tool', name: 'get_today_eta', ok: true };
     const guessedNoLookup = replay._internals.evaluateChecks(scenario, record({ agent: ['La ventana de hoy es de la una a las tres de la tarde.'] }));
     expect(guessedNoLookup).toContainEqual(expect.objectContaining({ check: 'tools_called_include', severity: 'critical', status: 'fail' }));
-    expect(guessedNoLookup.find((c) => c.check === 'no_visit_time').status).toBe('pass');
+    // Codex round-5 P1: no_visit_time's allowWindow now depends on an
+    // EARLIER successful get_today_eta (afterTool) — a window with no
+    // grounding at all is invented even when it happens to say the right
+    // hours, so this is doubly wrong now, not singly.
+    expect(guessedNoLookup.find((c) => c.check === 'no_visit_time')).toMatchObject({ severity: 'critical', status: 'fail' });
     expect(replay._internals.scenarioStatus({ checks: guessedNoLookup })).toBe('fail');
     const wrongTime = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'El técnico llega hoy a las cinco de la tarde.' }] }));
     expect(wrongTime.find((c) => c.check === 'no_visit_time')).toMatchObject({ severity: 'critical', status: 'fail' });
@@ -4980,6 +5052,19 @@ describe('voice relay eval — named spoken checks', () => {
     expect(replay._internals.scenarioStatus({ checks: onTheWay })).toBe('fail');
     const correct = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'El técnico llega hoy de la una a las tres de la tarde.' }] }));
     expect(replay._internals.scenarioStatus({ checks: correct })).toBe('pass');
+    // Codex round-5 P1: the window may also be spoken in an EARLIER turn,
+    // before get_today_eta ever ran — still invented at the time it was
+    // said, even though the tool call and its matching window both show up
+    // later in the same call.
+    const spokenBeforeLookup = replay._internals.evaluateChecks(scenario, record({ order: [
+      { kind: 'agent', text: 'El técnico llega hoy de la una a las tres de la tarde.', turn: 1 },
+      { ...looked, turn: 2 },
+      { kind: 'agent', text: 'El técnico llega hoy de la una a las tres de la tarde.', turn: 2 },
+    ] }));
+    const early = spokenBeforeLookup.find((c) => c.check === 'no_visit_time');
+    expect(early).toMatchObject({ severity: 'critical', status: 'fail' });
+    expect(early.detail).toMatch(/before get_today_eta ever succeeded/);
+    expect(replay._internals.scenarioStatus({ checks: spokenBeforeLookup })).toBe('fail');
     // codex r1 P1: the "on the way" prohibition must be negation-aware (same
     // as the EN "on the way" check and the ES confirmation-claim check
     // above) — "todavía no está en camino" is the CORRECT thing to say and
@@ -5117,7 +5202,7 @@ describe('voice relay eval — named spoken checks', () => {
     const wrong = replay._internals.evaluateChecks(scenario, record({ order: [wrongNumber, { kind: 'agent', text: 'Gracias, un miembro del equipo le dará seguimiento.' }] }));
     // major, not critical (same tier as the EN original) — proven failable on
     // its own terms, not via scenarioStatus (a lone major miss never flips it).
-    expect(wrong.find((c) => c.check === 'capture_lead_input_includes')).toMatchObject({ severity: 'major', status: 'fail' });
+    expect(wrong.find((c) => c.check === 'capture_lead_input_asserts')).toMatchObject({ severity: 'major', status: 'fail' });
     const rightCapture = { kind: 'tool', name: 'capture_lead', input: { callback_phone: '9415550246', address_line1: '348 Ohio Avenue' }, ok: true, receipt: true };
     const english = replay._internals.evaluateChecks(scenario, record({ order: [rightCapture, { kind: 'agent', text: 'Thank you, a Waves team member will follow up.' }] }));
     expect(english.find((c) => c.check === 'only_language')).toMatchObject({ severity: 'critical', status: 'fail' });
@@ -5157,18 +5242,36 @@ describe('voice relay eval — named spoken checks', () => {
     const monthly = replay._internals.evaluateChecks(scenario, record({ order: [
       pestPricing, lawnPricing, { kind: 'agent', text: 'El programa mejorado sería 119 dólares al mes.', turn: 2 },
     ] }));
-    expect(monthly.some((c) => c.check === 'spoken_never_matches' && c.status === 'fail' && c.severity === 'critical')).toBe(true);
+    expect(monthly.find((c) => c.check === 'amount_requires_unit')).toMatchObject({ severity: 'critical', status: 'fail' });
     expect(replay._internals.scenarioStatus({ checks: monthly })).toBe('fail');
     const missingUnit = replay._internals.evaluateChecks(scenario, record({ order: [
       pestPricing, lawnPricing, { kind: 'agent', text: 'El programa mejorado cuesta $119, y el premium $99.', turn: 2 },
     ] }));
-    expect(missingUnit.find((c) => c.check === 'spoken_matches_any' && c.severity === 'critical')).toMatchObject({ status: 'fail' });
+    expect(missingUnit.find((c) => c.check === 'amount_requires_unit')).toMatchObject({ severity: 'critical', status: 'fail' });
     expect(replay._internals.scenarioStatus({ checks: missingUnit })).toBe('fail');
+    // Codex round-5 P1: "por año" was never on the old per-unit blocklist —
+    // amount_requires_unit now validates the unit on EVERY quoted price
+    // instead of enumerating bad ones, so the $99 side can no longer hide
+    // behind the $119 side's correct "por aplicación".
+    const perYear = replay._internals.evaluateChecks(scenario, record({ order: [
+      pestPricing, lawnPricing, { kind: 'agent', text: 'Para césped, el programa mejorado es $119 por aplicación y el premium es $99 por año.', turn: 2 },
+    ] }));
+    expect(perYear.find((c) => c.check === 'amount_requires_unit')).toMatchObject({ severity: 'critical', status: 'fail' });
+    expect(replay._internals.scenarioStatus({ checks: perYear })).toBe('fail');
     const correct = replay._internals.evaluateChecks(scenario, record({ order: [
       pestPricing, lawnPricing, { kind: 'agent', text: 'Para césped, el programa mejorado es $119 por aplicación, nueve veces al año; el premium es $99 por aplicación, doce veces al año.', turn: 2 },
     ] }));
     expect(correct.find((c) => c.check === 'no_price_disclosure')).toMatchObject({ status: 'pass' });
+    expect(correct.find((c) => c.check === 'amount_requires_unit')).toMatchObject({ status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: correct })).toBe('pass');
+    // Codex round-5 P1 sweep: amount is now an array (either $119 or $99
+    // satisfies it) — proving the OR side still passes on its own, not just
+    // when both figures happen to appear together.
+    const onlyPremium = replay._internals.evaluateChecks(scenario, record({ order: [
+      pestPricing, lawnPricing, { kind: 'agent', text: 'Para césped, el programa premium es $99 por aplicación, doce veces al año.', turn: 2 },
+    ] }));
+    expect(onlyPremium.find((c) => c.check === 'amount_requires_unit')).toMatchObject({ status: 'pass' });
+    expect(replay._internals.scenarioStatus({ checks: onlyPremium })).toBe('pass');
     // Codex round-1 P1: a hallucinated EXTRA price no tool ever returned must
     // fail even standing right beside the two compliant, grounded figures.
     const invented = replay._internals.evaluateChecks(scenario, record({ order: [
@@ -5183,7 +5286,7 @@ describe('voice relay eval — named spoken checks', () => {
     const perVisit = replay._internals.evaluateChecks(scenario, record({ order: [
       pestPricing, lawnPricing, { kind: 'agent', text: 'Para césped, el programa mejorado es $119 por aplicación y el premium es $99 por visita.', turn: 2 },
     ] }));
-    expect(perVisit.some((c) => c.check === 'spoken_never_matches' && c.status === 'fail' && c.severity === 'critical')).toBe(true);
+    expect(perVisit.find((c) => c.check === 'amount_requires_unit')).toMatchObject({ severity: 'critical', status: 'fail' });
     expect(replay._internals.scenarioStatus({ checks: perVisit })).toBe('fail');
     // codex r2 P1: natural Spanish speech says "119 dólares", not only "$119"
     // — the required price+unit check must accept that spelling too, and the
@@ -5197,6 +5300,44 @@ describe('voice relay eval — named spoken checks', () => {
     ] }));
     expect(resurfacedDolares.some((c) => c.check === 'spoken_never_matches' && c.status === 'fail' && c.severity === 'critical')).toBe(true);
     expect(replay._internals.scenarioStatus({ checks: resurfacedDolares })).toBe('fail');
+  });
+
+  // Codex round-5 P1 sweep: the English original had the exact same gap as
+  // its Spanish counterpart — "per year" was never on either enumerated
+  // blocklist (only "monthly"/"per month"/etc were), so "$119 per
+  // application and $99 per year" used to pass. amount_requires_unit closes
+  // it the same way in both languages.
+  test('interruption-inside-amount-or-date blocks when the unit is missing, per-year, or per-visit on either quoted lawn price', () => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'interruption-inside-amount-or-date');
+    const pestPricing = { kind: 'tool', name: 'get_pricing', input: { service: 'pest_control', home_sqft: 2000 }, ok: true, turn: 1 };
+    const lawnPricing = { kind: 'tool', name: 'get_pricing', input: { service: 'lawn_care', lawn_sqft: 5000 }, ok: true, turn: 2 };
+    const perYear = replay._internals.evaluateChecks(scenario, record({ order: [
+      pestPricing, lawnPricing, { kind: 'agent', text: 'For lawn care, the enhanced program is $119 per application and the premium is $99 per year.', turn: 2 },
+    ] }));
+    expect(perYear.find((c) => c.check === 'amount_requires_unit')).toMatchObject({ severity: 'critical', status: 'fail' });
+    expect(replay._internals.scenarioStatus({ checks: perYear })).toBe('fail');
+    const perVisit = replay._internals.evaluateChecks(scenario, record({ order: [
+      pestPricing, lawnPricing, { kind: 'agent', text: 'For lawn care, the enhanced program is $119 per application and the premium is $99 per visit.', turn: 2 },
+    ] }));
+    expect(perVisit.find((c) => c.check === 'amount_requires_unit')).toMatchObject({ severity: 'critical', status: 'fail' });
+    expect(replay._internals.scenarioStatus({ checks: perVisit })).toBe('fail');
+    const missingUnit = replay._internals.evaluateChecks(scenario, record({ order: [
+      pestPricing, lawnPricing, { kind: 'agent', text: 'For lawn care, the enhanced program is $119 and the premium is $99.', turn: 2 },
+    ] }));
+    expect(missingUnit.find((c) => c.check === 'amount_requires_unit')).toMatchObject({ severity: 'critical', status: 'fail' });
+    expect(replay._internals.scenarioStatus({ checks: missingUnit })).toBe('fail');
+    const correct = replay._internals.evaluateChecks(scenario, record({ order: [
+      pestPricing, lawnPricing, { kind: 'agent', text: 'For lawn care, the enhanced program is $119 per application, nine times a year; the premium is $99 per application, twelve times a year.', turn: 2 },
+    ] }));
+    expect(correct.find((c) => c.check === 'amount_requires_unit')).toMatchObject({ status: 'pass' });
+    expect(replay._internals.scenarioStatus({ checks: correct })).toBe('pass');
+    // Either amount alone (the OR side of the array) still passes on its own.
+    const onlyPremium = replay._internals.evaluateChecks(scenario, record({ order: [
+      pestPricing, lawnPricing, { kind: 'agent', text: 'For lawn care, the premium program is $99 per application, twelve times a year.', turn: 2 },
+    ] }));
+    expect(onlyPremium.find((c) => c.check === 'amount_requires_unit')).toMatchObject({ status: 'pass' });
+    expect(replay._internals.scenarioStatus({ checks: onlyPremium })).toBe('pass');
   });
 
   test('spanish-backchannel-vs-explicit-correction blocks on the wrong address after the correction, a double capture, or a restart cue on the backchannel turn', () => {
@@ -5229,6 +5370,55 @@ describe('voice relay eval — named spoken checks', () => {
       { kind: 'agent', text: 'Anoté 88B Palm Harbor Drive. Un miembro del equipo le dará seguimiento. Gracias.', turn: 4 },
     ] }));
     expect(replay._internals.scenarioStatus({ checks: correct })).toBe('pass');
+  });
+
+  // Codex round-5 P1: capture_lead_input_includes is a case-insensitive
+  // SUBSTRING match, so a near-miss superstring ("188B Palm Harbor Drive",
+  // an unrelated house number) or a near-miss with the wrong street type
+  // ("88B Palm Harbor Road") both contain "88B Palm Harbor" and used to pass
+  // as if the correct address had been captured. capture_lead_input_asserts
+  // with an anchored (^…$) pattern requires the WHOLE field to be the exact
+  // value (tolerant only of case/whitespace/an abbreviated "Dr"/"Drive"),
+  // closing that for both the Spanish scenario and its English mirror.
+  test.each([
+    ['spanish-backchannel-vs-explicit-correction', '188B Palm Harbor Drive', 'fail'],
+    ['spanish-backchannel-vs-explicit-correction', '88B Palm Harbor Road', 'fail'],
+    ['spanish-backchannel-vs-explicit-correction', '988B Palm Harbor Drive', 'fail'],
+    ['spanish-backchannel-vs-explicit-correction', '88B Palm Harbor Drive', 'pass'],
+    ['spanish-backchannel-vs-explicit-correction', '88B Palm Harbor Dr', 'pass'],
+    ['backchannel-vs-explicit-correction', '188B Palm Harbor Drive', 'fail'],
+    ['backchannel-vs-explicit-correction', '88B Palm Harbor Road', 'fail'],
+    ['backchannel-vs-explicit-correction', '88B Palm Harbor Drive', 'pass'],
+  ])('%s: capture_lead_input_asserts rejects a near-miss superstring/street-type address ("%s")', (id, address_line1, status) => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === id);
+    const capture = { kind: 'tool', name: 'capture_lead', input: { address_line1 }, ok: true, receipt: true, turn: 4 };
+    const checks = replay._internals.evaluateChecks(scenario, record({ order: [capture] }));
+    expect(checks.find((c) => c.check === 'capture_lead_input_asserts')).toMatchObject({ severity: 'critical', status });
+  });
+
+  // Codex round-5 P1 sweep: the same near-miss-superstring gap on the other
+  // exact-value capture_lead_input_includes checks in the 9 Spanish
+  // scenarios and their English originals — a phone number with an extra
+  // digit glued on, or a street missing/using the wrong suffix, used to
+  // still substring-match and pass.
+  test.each([
+    ['spanish-read-back-grouping', { callback_phone: '9415550246', address_line1: '348 Ohio Avenue' }, 'pass'],
+    ['spanish-read-back-grouping', { callback_phone: '99415550246', address_line1: '348 Ohio Avenue' }, 'fail'],
+    ['spanish-read-back-grouping', { callback_phone: '9415550246', address_line1: '3480 Ohio Avenue' }, 'fail'],
+    ['spanish-read-back-grouping', { callback_phone: '9415550246', address_line1: '348 Ohio Ave' }, 'pass'],
+    ['read-back-grouping', { callback_phone: '9415550134', address_line1: '1220 Gulf Drive North' }, 'pass'],
+    ['read-back-grouping', { callback_phone: '9415550134', address_line1: '1220 Gulf Drive' }, 'fail'],
+    ['read-back-grouping', { callback_phone: '19415550134', address_line1: '1220 Gulf Drive North' }, 'fail'],
+    ['spanish-capture', { first_name: 'Luis', city: 'Bradenton' }, 'pass'],
+    ['spanish-capture', { first_name: 'Luisa', city: 'Bradenton' }, 'fail'],
+    ['spanish-capture', { first_name: 'Luis', city: 'Bradentonville' }, 'fail'],
+  ])('%s: capture_lead_input_asserts rejects a near-miss on the swept exact-value fields (%j)', (id, input, status) => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === id);
+    const capture = { kind: 'tool', name: 'capture_lead', input, ok: true, receipt: true };
+    const checks = replay._internals.evaluateChecks(scenario, record({ order: [capture] }));
+    expect(checks.find((c) => c.check === 'capture_lead_input_asserts')).toMatchObject({ status });
   });
 });
 
