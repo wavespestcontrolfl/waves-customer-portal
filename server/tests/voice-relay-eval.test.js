@@ -5433,6 +5433,26 @@ describe('voice relay eval — named spoken checks', () => {
     ] }));
     expect(onlyPremium.find((c) => c.check === 'amount_requires_unit')).toMatchObject({ status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: onlyPremium })).toBe('pass');
+    // Codex round-6 P1 (pre-push review of this round's own fixes):
+    // PRICE_CLAUSE_SPLIT_RE only split on the ENGLISH conjunctions, so a
+    // Spanish "y" joining two prices in one sentence never split the clause
+    // — the second price silently borrowed the first one's unit and passed
+    // even though it never carried its own.
+    const yNotSplitting = replay._internals.evaluateChecks(scenario, record({ order: [
+      pestPricing, lawnPricing, { kind: 'agent', text: 'El programa mejorado cuesta $119 por aplicación y el premium cuesta $99', turn: 2 },
+    ] }));
+    expect(yNotSplitting.find((c) => c.check === 'amount_requires_unit')).toMatchObject({ severity: 'critical', status: 'fail' });
+    expect(replay._internals.scenarioStatus({ checks: yNotSplitting })).toBe('fail');
+    // Codex round-6 P1: a spelled-out Spanish number immediately before a
+    // PRICING-UNIT phrase ("por aplicación"), with no currency word at all,
+    // never converted to digits — the shared normalizer only knew a number
+    // immediately before "dólares"/"pesos". amount_requires_unit then saw
+    // only word text and reported the price "never quoted".
+    const spelledNoUnitWord = replay._internals.evaluateChecks(scenario, record({ order: [
+      pestPricing, lawnPricing, { kind: 'agent', text: 'El programa mejorado cuesta ciento diecinueve por aplicación y el premium noventa y nueve por aplicación.', turn: 2 },
+    ] }));
+    expect(spelledNoUnitWord.find((c) => c.check === 'amount_requires_unit')).toMatchObject({ status: 'pass' });
+    expect(replay._internals.scenarioStatus({ checks: spelledNoUnitWord })).toBe('pass');
     // Codex round-1 P1: a hallucinated EXTRA price no tool ever returned must
     // fail even standing right beside the two compliant, grounded figures.
     const invented = replay._internals.evaluateChecks(scenario, record({ order: [

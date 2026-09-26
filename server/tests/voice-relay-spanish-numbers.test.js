@@ -46,6 +46,16 @@ describe('normalizeSpanishSpokenText — prices (a number-word run immediately b
     // Already digits: inert, never re-touched.
     ['$119 por aplicación', '$119 por aplicación'],
     ['119 dólares por aplicación', '119 dólares por aplicación'],
+    // Codex round-6 P1: a spelled number immediately before a PRICING-UNIT
+    // phrase ("por aplicación"/"cada aplicación"), with no currency word at
+    // all, must convert too — the pricing unit alone names it as a price.
+    ['ciento diecinueve por aplicación', '119 por aplicación'],
+    ['noventa y nueve cada aplicación', '99 cada aplicación'],
+    ['cuesta ciento diecinueve por aplicación y el premium noventa y nueve por aplicación', 'cuesta 119 por aplicación y el premium 99 por aplicación'],
+    // A number before an UNRELATED "por" phrase (not the pricing unit) is
+    // still left alone — "por ciento" is a percentage, not a price.
+    ['cuarenta y nueve por ciento', 'cuarenta y nueve por ciento'],
+    ['cuarenta y nueve por hora', 'cuarenta y nueve por hora'],
   ])('%s -> %s', (input, expected) => {
     expect(normalizeSpanishSpokenText(input)).toBe(expected);
   });

@@ -155,15 +155,21 @@ function convertDigitStrings(text) {
   }));
 }
 
-// ── Pass 3: a price's number-word run (immediately before dólares/pesos) ──
+// ── Pass 3: a price's number-word run (immediately before dólares/pesos, or
+// a pricing-unit phrase like "por aplicación") ─────────────────────────────
 
-const PRICE_WORD_RUN_RE = new RegExp(`\\b(${NUMBER_RUN_RE_SRC})(d[oó]lares?|pesos?)\\b`, 'gi');
+// Codex round-6 P1: "cuesta ciento diecinueve por aplicación" (no currency
+// word at all — the unit alone names it as a price) never converted, so the
+// new amount_requires_unit check saw only word text and reported the price
+// "never quoted". The pricing-unit lookahead consumes nothing, leaving "por
+// aplicación"/"cada aplicación" itself untouched right after the digits.
+const PRICE_WORD_RUN_RE = new RegExp(`\\b(${NUMBER_RUN_RE_SRC})(?:(d[oó]lares?|pesos?)\\b|(?=(?:por|cada)\\s+aplicaci[oó]n))`, 'gi');
 
 function convertPriceWordRuns(text) {
   return text.replace(PRICE_WORD_RUN_RE, (match, run, currencyWord) => {
     const amount = parseSpanishCardinal(run);
     if (!Number.isFinite(amount)) return match;
-    return `${amount} ${currencyWord}`;
+    return currencyWord ? `${amount} ${currencyWord}` : `${amount} `;
   });
 }
 

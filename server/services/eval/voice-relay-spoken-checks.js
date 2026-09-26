@@ -189,8 +189,15 @@ const BARE_TOTAL_NUMBER = `(?:(?<![\\d.,/$-])[1-9]\\d(?:\\d|,\\d{3})*(?:\\.\\d+)
 const BANNED_TOTAL_RE = new RegExp(`(?:\\$\\s?${TOTAL_NUMBER}|${TOTAL_NUMBER}\\s*(?:dollars?|bucks|d[oó]lares?)|${BARE_TOTAL_NUMBER})\\s*(?:\\/\\s?(?:mo|month|yr|year|mes|a[nñ]o)s?\\b|(?:per|a|an|each|every|por|al|cada)\\s+(?:mo|month|yr|year|annum|mes|a[nñ]o)s?\\b|(?:monthly|yearly|annually|mensual(?:es|mente)?|anual(?:es|mente)?)\\b)`, 'i');
 // A price and its unit belong to the same clause: "quarterly is $129 per
 // application and monthly is $89" leaves the second price unit-less
-// ("one hundred AND twenty-nine" is one number, not two clauses).
-const PRICE_CLAUSE_SPLIT_RE = /,|\b(?:or|but|while|whereas)\b|(?<!\b(?:hundred|thousand)\s)\band\b/i;
+// ("one hundred AND twenty-nine" is one number, not two clauses). Codex
+// round-6 P1: this only split on the ENGLISH conjunctions, so a Spanish "y"
+// ("$119 por aplicación Y el premium $99") never split at all — the second
+// price borrowed the first one's unit and passed unit-less. The Spanish
+// tens-word lookbehind mirrors the English hundred/thousand one: by the time
+// this runs, a spelled Spanish number is normally already digits (the
+// shared normalizer), but a compound this can't parse is left as words, and
+// "cuarenta Y nueve" must still read as one number, not two clauses.
+const PRICE_CLAUSE_SPLIT_RE = /,|\b(?:or|but|while|whereas|o|pero|mientras)\b|(?<!\b(?:hundred|thousand|diez|veinte|treinta|cuarenta|cincuenta|sesenta|setenta|ochenta|noventa|cien|ciento)\s)\b(?:and|y)\b/i;
 const unitRe = (unit) => new RegExp(`\\b(?:per|an?|each|every|for each|for every|por|cada)\\s+${unit}s?\\b`, 'i');
 // The harness marks the words a caller interrupted as `<heard> [interrupted]`
 // (voice-relay-replay.js). A figure at that tail, followed by nothing or only
