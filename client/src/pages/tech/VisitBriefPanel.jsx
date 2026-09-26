@@ -27,6 +27,7 @@
 // Montserrat headings per-element. No Tailwind, no components/ui.
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { stopPropertyAlerts, TERMINAL_STATUSES } from './routeStops';
+import { canRecordConsultationOutcome } from '../../lib/consultationVisit';
 import {
   fmtMoney,
   lawnGateLabels,
@@ -469,9 +470,17 @@ function LastVisitSection({ service, visitBrief, facts, showType }) {
   );
 }
 
+// Waves Assessment only: the consultation read (warm/cold/lost).
+// Independent of the report button — it stays editable after the visit
+// completes, until a sale converts it to won.
+function ConsultationOutcomeAction({ service, onOutcome, style }) {
+  if (!onOutcome || !canRecordConsultationOutcome(service)) return null;
+  return <button onClick={() => onOutcome(service)} style={style}>📝 Outcome</button>;
+}
+
 // Per-service actions keep terminal reports read-only and preserve the
 // trace-eligibility guard — one row per member service on a grouped stop.
-function ServiceActions({ service, showType, onPhotos, onProject, onZone, onLead }) {
+function ServiceActions({ service, showType, onPhotos, onProject, onZone, onLead, onOutcome }) {
   const closeoutAvailable = !!service.visitCloseoutPacket || recordlessVisitNeedsCloseout(service);
   const reportDisabled = !closeoutAvailable
     && (TERMINAL_STATUSES.has(service.status) || ['sent', 'closed'].includes(service.linkedProject?.status));
@@ -517,6 +526,7 @@ function ServiceActions({ service, showType, onPhotos, onProject, onZone, onLead
           <button onClick={() => onZone(service)} aria-label="Trace treatment zone" style={btn}>🛰️ Zone</button>
         )}
         <button onClick={() => onLead(service)} aria-label="Flag opportunity" style={{ ...btn, color: DARK.amber }}>🚩</button>
+        <ConsultationOutcomeAction service={service} onOutcome={onOutcome} style={btn} />
       </div>
     </div>
   );
@@ -577,7 +587,7 @@ function LineTextCompose({ line, onSend, onClose, onBusyChange }) {
 // second tap cannot originate a second bridge (codex #4072 r6 P2).
 const CALL_LOCK_MS = 45000;
 
-export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onProject, onZone, onLead, techLine = null, request = null, onBusyChange = null }) {
+export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onProject, onZone, onLead, onOutcome = null, techLine = null, request = null, onBusyChange = null }) {
   const service = stop.primary;
   const phone = service.customerPhone || service.customer_phone || null;
   // Own-line mode: Call bridges through the line, Text composes from it.
@@ -783,6 +793,7 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
           onProject={onProject}
           onZone={onZone}
           onLead={onLead}
+          onOutcome={onOutcome}
         />
       ))}
     </div>
