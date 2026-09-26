@@ -227,6 +227,9 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ['Está bien para sus mascotas.', ''],
     ['Your pets will not get sick from this pesticide.', ''],
     ['Sus mascotas no se enfermarán.', ''],
+    ["You don't have to worry about your pets with this treatment.", ''],
+    ['There is nothing to worry about around children.', ''],
+    ['No need to worry about pets after we spray.', ''],
     ['No tiene ningún efecto en sus mascotas.', ''],
     ['Our solution is completely harmless.', ''],
     ['Completely family-safe.', 'I have children'],
@@ -261,6 +264,9 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ['Stay off the treated lawn until dark.', ''],
     ['Avoid going outside until 4 PM after treatment.', ''],
     ['Keep your pets inside until 4 PM.', 'When is my appointment?'],
+    ['Stay off the treated lawn until Friday.', ''],
+    ['You can re-enter next Monday.', ''],
+    ['Mantenga a los niños dentro hasta el viernes.', ''],
     ['Keep the kids indoors until the sun goes down after treatment.', ''],
     ['Mantenga a los niños dentro hasta las cuatro después del tratamiento.', ''],
   ])('a clock-time re-entry instruction is replaced: %s', (reply, context) => {
@@ -694,6 +700,9 @@ describe('normalizeIntakeResult', () => {
     ['We offer same-day service.', 'Do you offer pest control service?'],
     ['Our service hours are 8 AM to 5 PM, six days a week.', 'What are your service hours?'],
     ['No, the EPA has not approved this pesticide; it is EPA-registered.', ''],
+    ["We don't treat bees, but we can refer you.", ''],
+    ["We won't service your lawn today because of rain.", ''],
+    ["We don't remove birds from attics.", ''],
     ["The EPA doesn't approve pesticides; it registers them.", ''],
     ["The EPA didn't approve this product; it is EPA-registered.", ''],
     ['This product is not EPA-approved; it is EPA-registered.', ''],
@@ -727,6 +736,15 @@ describe('normalizeIntakeResult', () => {
     const out = scrubUnsafeClaims({ reply: 'It is not safe to eat.', intent: 'question', service_keys: [], ready_for_quote: false }, 'My dog swallowed bait and I cannot breathe.');
     expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
     expect(out.reply).toMatch(/veterinarian or an emergency animal hospital/);
+  });
+
+  test.each([
+    'My leg is swelling after a dog bite',
+    'I was walking my dog when a wasp stung me and now I have hives',
+  ])('a pet mention without the pet as patient adds no vet copy: %s', (context) => {
+    const out = scrubUnsafeClaims({ reply: 'It is completely safe.', intent: 'question', service_keys: [], ready_for_quote: false }, context);
+    expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
+    expect(out.reply).not.toMatch(/veterinarian/);
   });
 
   test('an earlier pet mention does not add vet copy to a child ingestion', () => {
@@ -1559,6 +1577,12 @@ describe('looksLikeEmergency', () => {
     'My child breathed pesticide fumes',
     'My child drank weed killer',
     'A mi hijo le cayó pesticida en los ojos',
+    'My son was taken to a hospital',
+    'My child is in a hospital now',
+    'Mi hijo fue llevado al hospital',
+    'My child consumed pesticide',
+    'My dog consumed rat poison',
+    'My toddler tasted weed killer',
     'my dog licked the roach spray',
     'My child ate pesticide granules',
     'The bait was eaten by my dog',
