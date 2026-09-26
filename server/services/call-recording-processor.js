@@ -20189,7 +20189,6 @@ CallRecordingProcessor.CALL_EXTRACTION_MAX_ATTEMPTS = CALL_EXTRACTION_MAX_ATTEMP
 // the booking path wrote window_start from — a second implementation of the
 // ET-offset-vs-instant rule would drift from it.
 CallRecordingProcessor.v2IsoToEtWallClock = v2IsoToEtWallClock;
-CallRecordingProcessor.resolveCallBookingWindowEnd = resolveCallBookingWindowEnd;
 CallRecordingProcessor.recoveryMarkerPayload = recoveryMarkerPayload;
 
 // Production contract for admin-triage.js's callback_number_needed clear
