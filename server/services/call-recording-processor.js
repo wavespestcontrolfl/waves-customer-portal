@@ -1362,7 +1362,13 @@ function failOpenKnownCustomer(knownCaller) {
 // lead. A no-op for inbound (outbound=false) and for a customer already
 // addressOnly (nothing to widen).
 function outboundScopedFailOpenCustomer(knownCustomer, outbound) {
-  if (!knownCustomer || !outbound || knownCustomer.addressOnly) return knownCustomer;
+  if (!knownCustomer || !outbound) return knownCustomer;
+  // Outbound recovery dispatches to the saved address, so it needs a
+  // COMPLETE one: street AND ZIP, the same evidence onFileAddressSatisfaction
+  // demands (hasAddress alone is derived from the street). A legacy row
+  // missing its ZIP keeps every address flag (codex #4933 r4 P1).
+  if (!String(knownCustomer.addressLine1 || '').trim() || !String(knownCustomer.addressZip || '').trim()) return null;
+  if (knownCustomer.addressOnly) return knownCustomer;
   return { ...knownCustomer, addressOnly: true };
 }
 

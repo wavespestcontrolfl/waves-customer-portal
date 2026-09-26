@@ -2942,6 +2942,24 @@ describe('outbound calls use the fail-open contract too, scoped to address recov
     }).options.failOpen).toBe(false);
   });
 
+  test('an OUTBOUND call whose saved address is incomplete (street but no ZIP) gets NO address recovery; inbound keeps its existing contract (codex #4933 r4 P1)', () => {
+    const noZip = { ...knownCustomer, zip: null };
+    const outboundCtx = buildFailOpenRoutingContext({
+      call: { direction: 'outbound', to_phone: '+19415550100' }, customer: noZip, failOpenEnabled: true,
+    });
+    expect(outboundCtx.options.knownCustomer).toBeNull();
+    const r = canAutoRoute(extraction(['address_unverifiable', 'missing_service_address']), {
+      ...outboundCtx.options, contactPhone: '+19415550100',
+    });
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toEqual(expect.arrayContaining(['missing_service_address']));
+
+    const inboundCtx = buildFailOpenRoutingContext({
+      call: { direction: 'inbound', from_phone: '+19415550100' }, customer: noZip, failOpenEnabled: true,
+    });
+    expect(inboundCtx.options.knownCustomer).toMatchObject({ hasAddress: true, addressOnly: false });
+  });
+
   test('an OUTBOUND confirmed call for a known customer with an on-file address, no new address stated, fails open and the call routes (address flags only)', () => {
     const ctx = buildFailOpenRoutingContext({
       call: { direction: 'outbound', to_phone: '+19415550100' }, customer: knownCustomer, failOpenEnabled: true,
