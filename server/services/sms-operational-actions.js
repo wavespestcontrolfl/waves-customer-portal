@@ -178,8 +178,14 @@ const STATED_TIMING = new RegExp([
 const TOPIC_STOP = String.raw`(?!${TRAILING_TIMING_START}|${STATED_TIMING.source})`;
 // The marker must directly follow the start expression (at most three
 // words in): "the service that happened on Friday" is a source (r46).
+const RECORD_NOUN = String.raw`(?:reports?|photos?|pictures?|pics|videos?|images?|invoices?|statements?|bills?|receipts?|records?|notes|results|readings|logs?|data|charges|paperwork|documents?)`;
 const FROM_START_DATE = String.raw`(?!(?:[^\s,.;!?]+\s+){1,3}(?:on|onwards?|forward|until|till|through|thru)\b)`;
-const TOPIC_CLAUSE = new RegExp(String.raw`(?<!\b(?:in|within|after|give me) )\b`
+const TOPIC_CLAUSE = new RegExp(
+  // After a record noun, "from" names what the record covers, range
+  // included, to the clause end ("the report from Friday through Sunday",
+  // Codex #4816 r48).
+  String.raw`(?<=\b${RECORD_NOUN}\s)from\s+[^,.;!?]*`
+  + String.raw`|(?<!\b(?:in|within|after|give me) )\b`
   + String.raw`(?:(?:about|regarding|concerning|re:|in regards? to|with regards? to)\s+|from\s+${FROM_START_DATE})`
   // A relative clause ("the service that happened on Friday") describes the
   // topic, so it runs to the clause end, its dates included (r46).

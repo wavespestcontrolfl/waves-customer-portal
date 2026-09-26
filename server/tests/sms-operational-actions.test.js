@@ -779,7 +779,8 @@ describe('R5 owner ruling 2026-09-24: per-kind default deadlines', () => {
     "Call me about next week's service", 'Please call me about my next visit', 'Can you call regarding the next appointment?',
     'Call me about tomorrow and the treatment plan', 'Please send me the report from this morning',
     "Send the photos from Friday's visit", 'Can you call to discuss the next appointment?', 'Please call, the next visit needs a gate code',
-    'Please send me the report from the service that happened on Friday', 'Call me about the treatment that was done on Monday'])(
+    'Please send me the report from the service that happened on Friday', 'Call me about the treatment that was done on Monday',
+    'Please send me the report from Friday through Sunday', 'Send the photos from Monday until Wednesday'])(
     'Codex #4816 r20: a quote with no stated timing still gets the per-kind default (%s)', (quote) => {
       expect(resolveDueDeadline({ party: 'waves', kind: 'callback', basis: 'request', due_at: null, due_text: null, quote }, at).due_basis)
         .toBe('default_kind');
@@ -1031,6 +1032,20 @@ describe('fulfillment proof', () => {
     expect(admissibleWitness(noShow, ask('callback'))).toBe(true);
     expect(admissibleWitness({ ...noShow, progressed_at: null }, ask('other'))).toBe(false);
     expect(admissibleWitness({ ...noShow, progressed_at: null }, ask('callback'))).toBe(false);
+  });
+
+  test('Codex #4816 r48: recorded progress still answers after a later skip; a pre-field reset without a move does not', () => {
+    const ask = (kind) => ({ kind, description: 'You still coming?', sms_context: { property_id: null, source_at: '2040-03-10T15:00:00Z' } });
+    const base = { id: 'visit-s', ref: 'visit:visit-s', type: 'visit', property_id: 'home', created_at: '2040-03-01T15:00:00Z',
+      progressed_at: '2040-03-10T16:00:00Z', text: 'Quarterly Lawn' };
+    for (const status of ['skipped', 'no_show', 'cancelled', 'completed', 'en_route']) {
+      expect(admissibleWitness({ ...base, status }, ask('other'))).toBe(true);
+      expect(admissibleWitness({ ...base, status }, ask('callback'))).toBe(true);
+    }
+    for (const status of ['pending', 'scheduled', 'confirmed']) {
+      expect(admissibleWitness({ ...base, status }, ask('other'))).toBe(false);
+    }
+    expect(admissibleWitness({ ...base, status: 'skipped', progressed_at: null }, ask('callback'))).toBe(false);
   });
 
   test('Codex #4816 r14–r27: a cancellation answers only a cancel ask whose property was resolved', () => {

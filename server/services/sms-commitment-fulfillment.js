@@ -67,29 +67,25 @@ const SMS_TYPES = {
 };
 // Owner ruling 2026-09-24: an "are you still coming" (other) or "call me
 // back" (callback) ask is nullified once the tech is actually moving on the
-// job — en route, on site, or completed all count as visible progress.
-// A cancel request is also `other` (the extractor has no cancel kind), so a
-// cancellation after the text is `other` evidence too — for the model only:
-// it answers "please cancel", never "are you still coming" (Codex #4816 r7).
-const PROGRESS_STATUSES = ['en_route', 'on_site', 'completed'];
-// A visit that progressed and was then cancelled or marked no_show (dispatch
-// allows no_show from en_route/on_site, Codex #4816 r43) still carries that
-// progress (progressed_at), so both are possible current statuses for both
-// kinds; visitWitnessAt decides which recorded stamp may answer.
+// job — en route, on site, or completed all count as visible progress
+// (the progressed_at stamp). A cancel request is also `other` (the
+// extractor has no cancel kind), so a cancellation after the text is
+// `other` evidence too — for the model only: it answers "please cancel",
+// never "are you still coming" (Codex #4816 r7).
 const VISIT_STATUSES = { schedule_visit: ['confirmed', 'rescheduled', 'en_route', 'on_site', 'completed'],
-  technician_follow_up: ['completed'], other: [...PROGRESS_STATUSES, 'cancelled', 'no_show'], callback: [...PROGRESS_STATUSES, 'cancelled', 'no_show'] };
-// Moving a live visit resets it to confirmed (admin-schedule reschedule
-// paths), so a logged move keeps the recorded progress admissible (Codex
-// #4816 r35). Without a logged move, a visit back at confirmed is an undone
-// En Route tap, which proves nobody came.
-const MOVED_STATUSES = ['confirmed', 'rescheduled'];
+  technician_follow_up: ['completed'] };
+// Statuses a visit holds before any field work. For other/callback the
+// recorded stamp decides whatever the visit became afterwards (completed,
+// cancelled, no_show, skipped — Codex #4816 r34/r43/r48), and a logged move
+// explains a reset to confirmed (r35). Back at a pre-field status with no
+// logged move is an undone En Route tap, which proves nobody came.
+const PRE_FIELD_STATUSES = ['pending', 'scheduled', 'confirmed', 'rescheduled', 'unassigned'];
 function visitStatusAdmits(record, kind) {
+  if (['other', 'callback'].includes(kind)) return !PRE_FIELD_STATUSES.includes(record.status) || !!record.moved_at;
   // admissibleWitness's witnessTypes gate already keeps visits from other
   // kinds; the fallback keeps this helper total on its own.
-  if ((VISIT_STATUSES[kind] || []).includes(record.status)) return true;
-  return ['other', 'callback'].includes(kind) && MOVED_STATUSES.includes(record.status) && !!record.moved_at;
+  return (VISIT_STATUSES[kind] || []).includes(record.status);
 }
-
 
 // Status transitions that can witness an obligation. The watcher's event
 // page filters on the same list so a skipped/no_show write never holds a
