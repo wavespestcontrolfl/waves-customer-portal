@@ -249,6 +249,11 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ['The EPA okayed this pesticide.', ''],
     ['The EPA gave this product the green light.', ''],
     ['This product got the green light from the EPA.', ''],
+    ['The EPA accepts this pesticide for use.', ''],
+    ['This pesticide has EPA acceptance.', ''],
+    ['This treatment cannot possibly cause any harm.', ''],
+    ['It could not conceivably hurt you.', ''],
+    ['It will never under any circumstances harm anyone.', ''],
     ['No tiene ningún efecto en sus mascotas.', ''],
     ['Our solution is completely harmless.', ''],
     ['Completely family-safe.', 'I have children'],
@@ -474,6 +479,33 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
   test('the reviewed label copy passes through a second scrub unchanged', () => {
     const first = scrubUnsafeClaims({ reply: 'It is completely safe.', intent: 'question', service_keys: [], ready_for_quote: false });
     expect(scrubUnsafeClaims(first, 'Is it safe for my pets after 30 minutes?')).toEqual(first);
+  });
+
+  test.each(['How long is that?', 'And how long should they wait?'])('a referential follow-up keeps the earlier re-entry topic: %s', (active) => {
+    const out = normalizeIntakeResult(
+      { reply: 'Two hours.', intent: 'question', service_keys: [], ready_for_quote: false },
+      'openai',
+      `When can my kids go back outside after the lawn treatment?\n${active}`,
+      active,
+    );
+    expect(out.reply).toMatch(/label directions/);
+  });
+
+  test('"take your dog to the nearest clinic" is a veterinary referral', () => {
+    const out = scrubUnsafeClaims({ reply: 'Your dog should be safe, but take your dog to the nearest clinic immediately.', intent: 'question', service_keys: [], ready_for_quote: false }, 'Could it have eaten some bait?');
+    expect(out.reply).toMatch(/veterinarian or an emergency animal hospital/);
+    expect(out.reply).not.toContain('911');
+  });
+
+  test('a mislabeled emergency with a price and a claim gets the price redirect', () => {
+    const out = normalizeIntakeResult({ reply: 'This treatment is completely safe and costs $50.', intent: 'emergency', service_keys: [], ready_for_quote: false }, 'openai', 'Is it safe and how much?');
+    expect(out.reply).toMatch(/Get my price/);
+  });
+
+  test('an earlier "I ate lunch" does not add Poison Control to a sting emergency', () => {
+    const out = scrubUnsafeClaims({ reply: 'It is completely safe.', intent: 'question', service_keys: [], ready_for_quote: false }, 'I ate lunch\nPesticide was applied. A wasp stung my child and his hand is swelling');
+    expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
+    expect(out.reply).not.toContain('1-800-222-1222');
   });
 
   test('a breed-named pet gets the veterinary script', () => {
@@ -840,6 +872,7 @@ describe('normalizeIntakeResult', () => {
     ['You can cancel your service plan within 2 days.', ''],
     ['Your service plan has a 30-day cancellation period.', ''],
     ['A refund posts within 5 days.', ''],
+    ['El técnico puede entrar a las 4 PM para hacer la inspección.', ''],
     ['They can damage St. Augustine grass.', 'Are chinch bugs harmful to grass?'],
     ['Please wait 30 minutes for our dispatcher to call you back.', ''],
     ['Please wait 2 business days for the refund to appear.', ''],
@@ -1784,6 +1817,10 @@ describe('looksLikeEmergency', () => {
     'My beagle licked the pesticide',
     'My dog got into the rat poison',
     'My toddler got into the ant bait',
+    'I accidentally sprayed myself with pesticide',
+    'At the hospital after a wasp sting',
+    'Going to the hospital now after the treatment',
+    'Hospital after a bee sting',
     'Is it dangerous? I said no\nhe swallowed some bait',
     'my dog licked the roach spray',
     'My child ate pesticide granules',
@@ -1838,6 +1875,11 @@ describe('looksLikeEmergency', () => {
     'The pesticide made the ants sick',
     'After the pesticide treatment, the roaches became sick',
     'The bait caused the rats to vomit',
+    'My dog is not shaking after the pesticide treatment',
+    'My cat did not collapse after treatment',
+    'The pesticide made my plants sick',
+    'The spray made my ants sick',
+    'The treatment made my lawn sick',
   ])('does not flag routine pest talk: %s', (text) => {
     expect(looksLikeEmergency(text)).toBe(false);
   });
