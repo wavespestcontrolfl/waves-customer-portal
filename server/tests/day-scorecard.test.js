@@ -160,7 +160,8 @@ describe('getDayScorecard', () => {
     ]), new Date('2026-09-08T12:00:00Z'));
     const row = result.days[0].byTech[0];
     expect(row.planned).toMatchObject({ stops: 2, onSiteMinutes: 90, driveMinutes: 25, returnMinute: 600 });
-    expect(row.actual).toMatchObject({ onSiteMinutes: 45, onSiteCoverage: { covered: 1, total: 2 }, driveMinutes: 30, driveTrips: 2, spanMinutes: 120 });
+    expect(row.actual).toMatchObject({ onSiteMinutes: 45, onSiteCoverage: { covered: 1, total: 2 }, driveMinutes: 30, driveTrips: 2, spanMinutes: 120,
+      stops: 1, physicalStops: null }); // 1 of the 2 planned stops actually completed on this route; no unbaselined job
     // No idle metric: mileage_log has no per-trip timestamps, so a day's
     // drive total can include outbound/return legs outside the recorded
     // arrival-to-completion span — span - onSite - drive is not a real
@@ -293,6 +294,8 @@ describe('getDayScorecard', () => {
     // Full coverage on the SNAPSHOT's own two stops, but a third, unbaselined
     // completed job existed that day and is not folded into onSiteMinutes.
     expect(row.actual.onSiteCoverage).toEqual({ covered: 2, total: 2, unbaselined: 1 });
+    // 2 planned-and-completed stops + the 1 same-day unbaselined completion.
+    expect(row.actual.stops).toBe(3);
   });
 
   test('a plan with no unbaselined completed visits reports unbaselined: 0, not undefined', async () => {
@@ -459,5 +462,60 @@ describe('getDayScorecard', () => {
     // The policy is documented, not silent.
     expect(result.assumptions.actualDriveMinutes).toMatch(/personal/i);
     expect(result.note).toMatch(/personal/i);
+  });
+
+  // Codex P2 (round 3): a missing-baseline tech-day (no saved plan at all)
+  // still has route-performance's own raw completed-work evidence
+  // (missingBaselineStops) — reused for actual on-site minutes/span/stops
+  // the SAME way a route WITH a plan is, instead of leaving it at all-null.
+  test('a missing-baseline tech-day aggregates actual on-site/span/stops from route-performance\'s own recorded evidence', async () => {
+    const date = '2026-09-01';
+    getScheduleQualityMeasurements.mockResolvedValue({
+      driveModel: 'legacy',
+      days: [{ date, closed: false, byTech: [{ technicianId: 'tech1', technician: 'Tech One' }] }],
+    });
+    const missingBaselineStops = new Map([[`${date}|tech1`, [
+      { appointmentId: 'a', durationEvidence: 'recorded_lifecycle_interval', recordedServiceMinutes: 45, recordedArrivalMinute: 480, recordedCompletionMinute: 540 },
+      { appointmentId: 'b', durationEvidence: 'recorded_lifecycle_interval', recordedServiceMinutes: 30, recordedArrivalMinute: 540, recordedCompletionMinute: 580 },
+    ]]]);
+    getRoutePerformance.mockResolvedValue({
+      plans: [], missingBaselineRoutes: [{ date, technicianId: 'tech1' }], missingBaselineStops, truncatedPlanningRuns: false,
+    });
+    const result = await getDayScorecard({ date_from: date, date_to: date }, conn([]), new Date('2026-09-08T12:00:00Z'));
+    const row = result.days[0].byTech.find(r => r.technicianId === 'tech1');
+    expect(row.planned).toBeNull(); // still no saved plan — this is additive, not a fabricated plan
+    expect(row.actual).toMatchObject({
+      stops: 2, physicalStops: null, onSiteMinutes: 75, // 45 + 30
+      onSiteCoverage: { covered: 2, total: 2, unbaselined: 0 },
+      spanMinutes: 100, // 580 - 480
+    });
+  });
+
+  test('a missing-baseline tech-day with no completed evidence at all still reports null, not zero', async () => {
+    const date = '2026-09-01';
+    getScheduleQualityMeasurements.mockResolvedValue({
+      driveModel: 'legacy',
+      days: [{ date, closed: false, byTech: [{ technicianId: 'tech1', technician: 'Tech One' }] }],
+    });
+    getRoutePerformance.mockResolvedValue({
+      plans: [], missingBaselineRoutes: [{ date, technicianId: 'tech1' }],
+      missingBaselineStops: new Map([[`${date}|tech1`, []]]), truncatedPlanningRuns: false,
+    });
+    const result = await getDayScorecard({ date_from: date, date_to: date }, conn([]), new Date('2026-09-08T12:00:00Z'));
+    const row = result.days[0].byTech.find(r => r.technicianId === 'tech1');
+    expect(row.actual).toMatchObject({ stops: 0, onSiteMinutes: null, spanMinutes: null, onSiteCoverage: { covered: 0, total: 0 } });
+  });
+
+  test('a missing-baseline entry with no completed rows at all (getRoutePerformance mock omits the map) does not crash', async () => {
+    const date = '2026-09-01';
+    getScheduleQualityMeasurements.mockResolvedValue({
+      driveModel: 'legacy',
+      days: [{ date, closed: false, byTech: [{ technicianId: 'tech1', technician: 'Tech One' }] }],
+    });
+    getRoutePerformance.mockResolvedValue({ plans: [] }); // no missingBaselineRoutes/missingBaselineStops at all
+    const result = await getDayScorecard({ date_from: date, date_to: date }, conn([]), new Date('2026-09-08T12:00:00Z'));
+    const row = result.days[0].byTech.find(r => r.technicianId === 'tech1');
+    expect(row.planned).toBeNull();
+    expect(row.actual).toMatchObject({ stops: null, onSiteMinutes: null });
   });
 });

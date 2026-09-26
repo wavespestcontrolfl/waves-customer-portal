@@ -214,6 +214,47 @@ describe('getScheduleQualityMeasurements selects the planning-minute inputs (Cod
     expect(withFlag.days[0].byTech[0]).toMatchObject({ serviceMinutes: 120, physicalStops: 1, coVisitOnSiteMinutes: 60 });
   });
 
+  // Codex P2 (round 3): the unallocated summary flat-summed EVERY unallocated
+  // stop together regardless of technician, so a co-visited pair assigned to
+  // an ineligible/offboarding technician double-counted its on-site minutes
+  // the same way plain serviceMinutes always did. Under the flag, each
+  // technician_id (null — genuinely unassigned — is its own group) is
+  // collapsed on its own before the day totals it; the two groups here must
+  // never merge into one "co-visit" just for sharing a clock slot.
+  test('unallocated totals collapse co-visits PER technician group under includeStopExtras; flag off is unchanged', async () => {
+    const ghostCoVisitStop = (id, extra = {}) => ({
+      id, technician_id: 'ghost', customer_id: 'cust-ghost', visit_id: null,
+      scheduled_date: DATE, window_start: '09:00', window_end: '10:00', time_window: null, route_order: null,
+      status: 'confirmed', reservation_expires_at: null, created_at: `2020-01-01T0${id.length}:00:00Z`,
+      estimated_duration_minutes: null, service_type: null, is_recurring: false, is_callback: false,
+      lat: 27.4, lng: -82.4, service_address_line1: '1 Main St', service_address_line2: null,
+      service_address_city: 'Bradenton', service_address_zip: '34205',
+      customer_address_line1: '1 Main St', customer_address_line2: null,
+      customer_city: 'Bradenton', customer_state: 'FL', customer_zip: '34205',
+      ...extra,
+    });
+    const unassignedStop = {
+      id: 'u1', technician_id: null, customer_id: 'cust-none', visit_id: null,
+      scheduled_date: DATE, window_start: '13:00', window_end: null, time_window: null, route_order: null,
+      status: 'confirmed', reservation_expires_at: null, created_at: '2020-01-01T02:00:00Z',
+      estimated_duration_minutes: 30, service_type: null, is_recurring: false, is_callback: false,
+      lat: 27.5, lng: -82.5, service_address_line1: '2 Second St', service_address_line2: null,
+      service_address_city: 'Bradenton', service_address_zip: '34205',
+      customer_address_line1: '2 Second St', customer_address_line2: null,
+      customer_city: 'Bradenton', customer_state: 'FL', customer_zip: '34205',
+    };
+    const stops = [ghostCoVisitStop('g1'), ghostCoVisitStop('g2'), unassignedStop];
+    dayStopsQuery.mockImplementation(() => ({ whereRaw: () => Promise.resolve(stops) }));
+
+    const withoutFlag = await getScheduleQualityMeasurements({ date: DATE }, conn, new Date(`${DATE}T12:00:00Z`));
+    expect(withoutFlag.days[0]).toMatchObject({ unallocatedVisits: 3, unallocatedServiceMinutes: 150 }); // 60+60+30, flat
+
+    const withFlag = await getScheduleQualityMeasurements({ date: DATE, includeStopExtras: true }, conn, new Date(`${DATE}T12:00:00Z`));
+    // ghost's co-visit pair collapses to 1 stop/60m; the unassigned stop
+    // stays its own group at 1 stop/30m — 2 stops, 90m total, never 1/60.
+    expect(withFlag.days[0]).toMatchObject({ unallocatedVisits: 2, unallocatedServiceMinutes: 90 });
+  });
+
   test('coVisitOnSiteMinutes only collapses a fallback-duration pair — two REAL, distinct estimates still sum', async () => {
     const realEstimateStop = (id, extra = {}) => ({
       id, technician_id: 'tech1', customer_id: 'cust-a', visit_id: null,

@@ -1,5 +1,7 @@
 jest.mock('../models/db', () => ({}));
-const { recordedTiming, selectPlanningSnapshots, measureRoutePerformance } = require('../services/scheduling/route-performance');
+const { recordedTiming, selectPlanningSnapshots, measureRoutePerformance, missingBaselineActualStops } = require('../services/scheduling/route-performance');
+
+const routeKey = (date, technicianId) => `${date}|${technicianId || ''}`;
 
 const day = '2026-09-08';
 const snapshot = { date: day, technician_id: 'tech', as_of: '2026-09-07T08:20:00Z', snapshot_phase: 'loaded_schedule',
@@ -93,4 +95,50 @@ test('malformed or duplicated baseline stops remain missing evidence instead of 
   const run = { id: 'bad', created_at: snapshot.as_of, result: { route_quality: [null, { ...snapshot, plannedStops: [null] },
     { ...snapshot, plannedStops: [snapshot.plannedStops[0], snapshot.plannedStops[0]] }] } };
   expect(selectPlanningSnapshots([run], { from: day, to: day, now: new Date('2026-09-09T12:00:00Z') })).toEqual([]);
+});
+
+// Codex P2 (round 3): a missing-baseline tech-day (no saved plan) still has
+// raw completed work — shaped like a plan's own `stops` so day-scorecard.js
+// can reuse the SAME actual-minutes aggregation instead of a second formula.
+describe('missingBaselineActualStops', () => {
+  const routes = [{ date: day, technicianId: 'tech' }];
+
+  test('only completed, ungrouped rows for the matching date+technician are included', () => {
+    const rows = [
+      recorded({ id: 'a' }),
+      recorded({ id: 'wrong-date', scheduled_date: '2026-09-09' }),
+      recorded({ id: 'wrong-tech', technician_id: 'other' }),
+      recorded({ id: 'not-completed', status: 'confirmed' }),
+      recorded({ id: 'grouped', visit_id: 'group-1' }),
+    ];
+    const byKey = missingBaselineActualStops(routes, rows, routeKey);
+    const stops = byKey.get(routeKey(day, 'tech'));
+    expect(stops.map(stop => stop.appointmentId)).toEqual(['a']);
+  });
+
+  test('each completed row is shaped like a plan stop, with recordedTiming\'s own evidence', () => {
+    const stops = missingBaselineActualStops(routes, [recorded({ id: 'a' })], routeKey).get(routeKey(day, 'tech'));
+    expect(stops).toEqual([{ appointmentId: 'a', durationEvidence: 'recorded_lifecycle_interval',
+      recordedServiceMinutes: 45, recordedArrivalMinute: 490, recordedCompletionMinute: 535 }]);
+  });
+
+  test('a route with no matching completed work gets an empty array, not undefined', () => {
+    const stops = missingBaselineActualStops(routes, [], routeKey).get(routeKey(day, 'tech'));
+    expect(stops).toEqual([]);
+  });
+
+  test('a null-technician route (unassigned work) matches rows with no technician_id', () => {
+    const nullTechRoutes = [{ date: day, technicianId: null }];
+    const rows = [recorded({ id: 'a', technician_id: null }), recorded({ id: 'b', technician_id: 'tech' })];
+    const stops = missingBaselineActualStops(nullTechRoutes, rows, routeKey).get(routeKey(day, null));
+    expect(stops.map(stop => stop.appointmentId)).toEqual(['a']);
+  });
+
+  test('independent routes get independently keyed arrays', () => {
+    const twoRoutes = [{ date: day, technicianId: 'tech' }, { date: '2026-09-09', technicianId: 'tech' }];
+    const rows = [recorded({ id: 'a' }), recorded({ id: 'b', scheduled_date: '2026-09-09' })];
+    const byKey = missingBaselineActualStops(twoRoutes, rows, routeKey);
+    expect(byKey.get(routeKey(day, 'tech')).map(stop => stop.appointmentId)).toEqual(['a']);
+    expect(byKey.get(routeKey('2026-09-09', 'tech')).map(stop => stop.appointmentId)).toEqual(['b']);
+  });
 });

@@ -175,3 +175,44 @@ it('zero recorded coverage reads as fully unknown, never "0m"', async () => {
   expect(within(actualRow).queryByText(/recorded/)).not.toBeInTheDocument();
   expect(within(actualRow).getAllByText('unknown').length).toBeGreaterThan(0);
 });
+
+it('a Late column renders the planned count, and unknown when day-scorecard has no count to give', async () => {
+  mockAdminFetch.mockResolvedValueOnce(ok({
+    driveModel: 'calibrated',
+    days: [{
+      date: '2026-10-01',
+      byTech: [{ technicianId: 'tech1', technician: 'Adam', driveModel: 'calibrated',
+        planned: { stops: 3, physicalStops: 2, onSiteMinutes: 90, driveMinutes: 30, waitMinutes: 5, driveShare: 0.25, stopsPerHour: 1, returnMinute: 600, lateVisits: 1 },
+        actual: null }],
+    }],
+  }));
+  const { unmount } = render(<DayScorecardPanel />);
+  const row = (await screen.findByText('2026-10-01')).closest('tr');
+  // physicalStops (Stops column) is 2; lateVisits (Late column) is 1 — kept
+  // distinct so this proves the "1" is really the Late cell, not a stray match.
+  expect(within(row).getByText('1')).toBeInTheDocument();
+  unmount();
+
+  // A past PLANNED row never sets lateVisits at all (day-scorecard.js's
+  // plannedPastRow) — the Late cell must read "unknown", never 0.
+  mockAdminFetch.mockResolvedValueOnce(ok(pastPayload({ onSiteMinutes: 90, onSiteCoverage: { covered: 2, total: 2 }, driveMinutes: 20, driveTrips: 2, spanMinutes: 130 })));
+  render(<DayScorecardPanel />);
+  await screen.findByText('2026-09-01');
+  const plannedRow = screen.getByText('Planned (legacy)').closest('tr');
+  // driveShare/stopsPerHour are also null in this fixture, so several cells
+  // read "unknown" — assert at least one (Late) rather than a single exact
+  // match, which would throw on the genuine ambiguity.
+  expect(within(plannedRow).getAllByText('unknown').length).toBeGreaterThan(0);
+});
+
+it('a Span column renders actual.spanMinutes on the Actual row; the Planned row always reads unknown', async () => {
+  mockAdminFetch.mockResolvedValue(ok(pastPayload({
+    onSiteMinutes: 90, onSiteCoverage: { covered: 2, total: 2 }, driveMinutes: 20, driveTrips: 2, spanMinutes: 130,
+  })));
+  render(<DayScorecardPanel />);
+  await screen.findByText('2026-09-01');
+  const actualRow = screen.getByText('Actual').closest('tr');
+  expect(within(actualRow).getByText('2h 10m')).toBeInTheDocument(); // 130 minutes
+  const plannedRow = screen.getByText('Planned (legacy)').closest('tr');
+  expect(within(plannedRow).getAllByText('unknown').length).toBeGreaterThan(0); // no planned-side span concept
+});

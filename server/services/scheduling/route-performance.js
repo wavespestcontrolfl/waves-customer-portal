@@ -252,6 +252,14 @@ async function getRoutePerformance({ from, to, now = new Date() }, conn) {
     plans: plans.map(plan => ({ ...measureRoutePerformance(plan, enriched),
       unbaselinedCompletedVisits: unbaselinedByRoute.get(routeKey(plan.date, plan.technician_id)) || 0 })),
     missingBaselineDates, missingBaselineRoutes,
+    // A missing-baseline tech-day (no plan at all) still has raw completed
+    // work in `enriched` — shaped exactly like a plan's own `stops`
+    // (durationEvidence/recordedServiceMinutes/recordedArrivalMinute/
+    // recordedCompletionMinute) so a caller with no saved snapshot can
+    // aggregate actual on-site minutes/span the SAME way it does for a route
+    // that has one, instead of a second formula (Codex P2). Additive only —
+    // every existing field above is unchanged.
+    missingBaselineStops: missingBaselineActualStops(missingBaselineRoutes, pastWork, routeKey),
     unbaselinedCompletedVisits: [...unbaselinedByRoute.values()].reduce((sum, count) => sum + count, 0),
     truncatedPlanningRuns: runs.length > 500,
     durationReferences: summarizeDurationReferences(pastWork, recordedTiming),
@@ -259,4 +267,24 @@ async function getRoutePerformance({ from, to, now = new Date() }, conn) {
   };
 }
 
-module.exports = { recordedTiming, selectPlanningSnapshots, measureRoutePerformance, getRoutePerformance };
+// Ungrouped completed rows only (visit_id groups stay out of scope here, the
+// same way measureRoutePerformance's own "comparable" check excludes them —
+// their occupancy/duration is a SUM-of-members model this reader does not
+// re-compose). Keyed the same way coveredRoutes/unbaselinedByRoute are.
+function missingBaselineActualStops(routes, pastWork, routeKey) {
+  const byKey = new Map();
+  for (const route of routes) {
+    const completed = pastWork.filter(row => dateOnly(row.scheduled_date) === route.date
+      && (row.technician_id || null) === route.technicianId && row.status === 'completed' && !row.visit_id);
+    byKey.set(routeKey(route.date, route.technicianId), completed.map(row => {
+      const timing = recordedTiming(row);
+      return { appointmentId: row.id, durationEvidence: timing.durationEvidence,
+        recordedServiceMinutes: timing.durationMinutes,
+        recordedArrivalMinute: timing.arrival ? minuteInET(timing.arrival) : null,
+        recordedCompletionMinute: timing.completion ? minuteInET(timing.completion) : null };
+    }));
+  }
+  return byKey;
+}
+
+module.exports = { recordedTiming, selectPlanningSnapshots, measureRoutePerformance, getRoutePerformance, missingBaselineActualStops };

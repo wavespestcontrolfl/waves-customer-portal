@@ -105,6 +105,22 @@ function plannedPastRow(plan) {
 // complete one — see onSiteCoverage on the client) and drive minutes summed
 // from mileage_log (null, not 0, when no trip rows exist).
 //
+// `stops` (Codex P2, round 3) is the COMPLETED stop count for the tech-day —
+// planned-and-completed (plan.stops entries whose durationEvidence isn't
+// 'unmatched_or_uncompleted_work', measureRoutePerformance's own marker for
+// "didn't match a completed row on this route") plus any same-day job
+// completed outside the snapshot (unbaselined, below). physicalStops stays
+// null: route-performance's own select carries no premise/coordinate
+// columns, so a co-visit collapse is not cheaply derivable here the way it
+// is from day-quality's own raw-stops read (plannedFutureRow).
+//
+// fallbackStops (Codex P1/P2, round 3): a MISSING-baseline tech-day (no
+// saved plan at all) still has route-performance's own raw completed rows,
+// shaped exactly like plan.stops (missingBaselineActualStops) — reusing the
+// SAME aggregation below instead of a second formula. Every completed row
+// in fallbackStops already counts toward `stops`; there is no separate
+// "unbaselined" concept when there was never a baseline to compare against.
+//
 // onSiteCoverage.unbaselined (Codex P1): plan.stops is the SAVED snapshot —
 // a job added to the route after the snapshot was captured and then
 // completed the same day exists in `enriched` (route-performance's own
@@ -124,17 +140,22 @@ function plannedPastRow(plan) {
 // shown as a wrong number. driveShare/stopsPerHour are PLANNED-only for the
 // same reason drive has no dependable actual denominator here — never
 // derived from a possibly-partial actual on-site sum.
-function actualPastRow(plan, mileage) {
+function actualPastRow(plan, mileage, fallbackStops) {
   const driveMinutes = mileage ? mileage.minutes : null;
   const driveTrips = mileage ? mileage.trips : null;
-  if (!plan) return { onSiteMinutes: null, onSiteCoverage: null, driveMinutes, driveTrips, spanMinutes: null };
-  const recorded = plan.stops.filter(stop => RECORDED_EVIDENCE.has(stop.durationEvidence) && Number.isFinite(stop.recordedServiceMinutes));
+  const stops = plan ? plan.stops : fallbackStops;
+  if (!stops) return { stops: null, physicalStops: null, onSiteMinutes: null, onSiteCoverage: null, driveMinutes, driveTrips, spanMinutes: null };
+  const recorded = stops.filter(stop => RECORDED_EVIDENCE.has(stop.durationEvidence) && Number.isFinite(stop.recordedServiceMinutes));
   const onSiteMinutes = recorded.length ? recorded.reduce((sum, stop) => sum + stop.recordedServiceMinutes, 0) : null;
-  const arrivals = plan.stops.map(stop => stop.recordedArrivalMinute).filter(Number.isFinite);
-  const completions = plan.stops.map(stop => stop.recordedCompletionMinute).filter(Number.isFinite);
+  const arrivals = stops.map(stop => stop.recordedArrivalMinute).filter(Number.isFinite);
+  const completions = stops.map(stop => stop.recordedCompletionMinute).filter(Number.isFinite);
   const spanMinutes = arrivals.length && completions.length ? Math.max(...completions) - Math.min(...arrivals) : null;
-  const unbaselined = Number.isFinite(plan.unbaselinedCompletedVisits) ? plan.unbaselinedCompletedVisits : 0;
-  return { onSiteMinutes, onSiteCoverage: { covered: recorded.length, total: plan.stops.length, unbaselined },
+  const unbaselined = plan && Number.isFinite(plan.unbaselinedCompletedVisits) ? plan.unbaselinedCompletedVisits : 0;
+  const completedStops = plan
+    ? plan.stops.filter(stop => stop.durationEvidence !== 'unmatched_or_uncompleted_work').length + unbaselined
+    : fallbackStops.length;
+  return { stops: completedStops, physicalStops: null, onSiteMinutes,
+    onSiteCoverage: { covered: recorded.length, total: stops.length, unbaselined },
     driveMinutes, driveTrips, spanMinutes };
 }
 
@@ -181,17 +202,18 @@ async function mileageByTechDay(conn, from, to) {
   return byKey;
 }
 
-function pastTechRow({ technicianId, technician }, planByKey, mileageByKey, date, truncatedPlanningRuns) {
+function pastTechRow({ technicianId, technician }, planByKey, mileageByKey, missingBaselineStopsByKey, date, truncatedPlanningRuns) {
   const key = `${date}|${technicianId}`;
   const plan = planByKey.get(key) || null;
   const mileage = mileageByKey.get(key) || null;
+  const fallbackStops = plan ? null : (missingBaselineStopsByKey.get(key) || null);
   return { technicianId, technician,
     driveModel: plan ? plan.driveModel : null,
     // Distinct from a definite "never had a baseline": the newest-500
     // planner-runs cap can evict a real one (see getDayScorecard), and this
     // response can't tell the two apart for any one row.
     plannedUnavailableReason: plan ? null : (truncatedPlanningRuns ? 'may_be_truncated' : 'no_saved_plan'),
-    planned: plannedPastRow(plan), actual: actualPastRow(plan, mileage) };
+    planned: plannedPastRow(plan), actual: actualPastRow(plan, mileage, fallbackStops) };
 }
 
 function futureTechRows(day, driveModel) {
@@ -272,12 +294,13 @@ async function getDayScorecard(input = {}, conn = require('../../models/db'), no
   const pastTo = to < yesterday ? to : yesterday;
   const performance = pastTo >= from
     ? await getRoutePerformance({ from, to: pastTo, now }, conn)
-    : { plans: [], missingBaselineRoutes: [], truncatedPlanningRuns: false };
+    : { plans: [], missingBaselineRoutes: [], missingBaselineStops: new Map(), truncatedPlanningRuns: false };
   const planByKey = new Map(performance.plans.map(plan => [`${plan.date}|${plan.technicianId}`, plan]));
   const mileageByKey = await mileageByTechDay(conn, from, to);
   const planIdsByDate = idsByDate(planByKey);
   const mileageIdsByDate = idsByDate(mileageByKey);
   const missingIdsByDate = missingBaselineIdsByDate(performance.missingBaselineRoutes);
+  const missingBaselineStopsByKey = performance.missingBaselineStops || new Map();
   const idsByDateMaps = [planIdsByDate, mileageIdsByDate, missingIdsByDate];
   const nameById = await resolveHistoricalNames(conn, techs, idsByDateMaps);
   const truncatedPlanningRuns = Boolean(performance.truncatedPlanningRuns);
@@ -286,7 +309,8 @@ async function getDayScorecard(input = {}, conn = require('../../models/db'), no
   for (const day of quality.days) {
     const byTech = day.date < today
       ? [...pastDayRoster(day.date, techs, idsByDateMaps)].map(technicianId => pastTechRow(
-        { technicianId, technician: nameById.get(technicianId) || null }, planByKey, mileageByKey, day.date, truncatedPlanningRuns))
+        { technicianId, technician: nameById.get(technicianId) || null }, planByKey, mileageByKey,
+        missingBaselineStopsByKey, day.date, truncatedPlanningRuns))
       : futureTechRows(day, quality.driveModel);
     days.push({ date: day.date, closed: day.closed, byTech,
       // Stops assigned to no assignable technician at all (unassigned, or an

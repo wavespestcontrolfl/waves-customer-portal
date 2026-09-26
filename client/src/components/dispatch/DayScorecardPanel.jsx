@@ -65,7 +65,15 @@ const METRICS = [
   { key: 'driveShare', label: 'Drive share', format: (m) => fmtPercent(m?.driveShare) },
   { key: 'stopsPerHour', label: 'Stops/hr', format: (m) => fmtRate(m?.stopsPerHour) },
   { key: 'waitMinutes', label: 'Wait', format: (m) => fmtMinutes(m?.waitMinutes) },
+  // Planned only (day-scorecard.js never sets this on an actual row) —
+  // unknown, not 0, on every Actual sub-row and on any planned row with no
+  // simulation to count lateness from (e.g. a past PLANNED snapshot).
+  { key: 'lateVisits', label: 'Late', format: (m) => fmtCount(m?.lateVisits) },
   { key: 'returnMinute', label: 'Return', format: (m) => fmtClock(m?.returnMinute) },
+  // Actual only (first recorded arrival to last recorded completion) — no
+  // planned-side equivalent, so a Planned sub-row always reads "unknown"
+  // here rather than a fabricated span.
+  { key: 'spanMinutes', label: 'Span', format: (m) => fmtMinutes(m?.spanMinutes) },
 ];
 
 // row.driveModel is THIS row's own saved/current drive model, not the

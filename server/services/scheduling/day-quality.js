@@ -126,6 +126,44 @@ function coVisitOnSiteMinutes(stops) {
   return total;
 }
 
+/**
+ * Unallocated work (Codex P2, round 3): a flat per-stop sum double-counts a
+ * co-visited pair the SAME way plain serviceMinutes does — except unallocated
+ * stops can span several DIFFERENT technician_ids (an offboarding tech's
+ * stops, an unrelated unassigned stop, …), and a co-visit is only ever
+ * within one technician's own route. Group first — a null technician_id
+ * (genuinely unassigned) is its own group, never merged with a named one —
+ * then collapse each group before totaling, so two different technicians'
+ * stops can never chain into one "co-visit" just for sharing a clock slot.
+ */
+function groupedUnallocatedTotals(stops) {
+  const groups = new Map();
+  for (const stop of stops) {
+    const key = stop.technician_id || '';
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(stop);
+  }
+  let visits = 0;
+  let minutes = 0;
+  for (const groupStops of groups.values()) {
+    visits += physicalStopCount(groupStops);
+    minutes += coVisitOnSiteMinutes(groupStops);
+  }
+  return { visits, minutes };
+}
+
+// One branch point, not three, at the getScheduleQualityMeasurements call
+// site: flag off is the original flat sum, byte for byte; flag on is the
+// per-technician-group collapse above.
+function unallocatedSummary(unallocated, includeStopExtras) {
+  if (!includeStopExtras) {
+    return { unallocatedVisits: unallocated.length,
+      unallocatedServiceMinutes: unallocated.reduce((sum, stop) => sum + workDuration(stop), 0) };
+  }
+  const totals = groupedUnallocatedTotals(unallocated);
+  return { unallocatedVisits: totals.visits, unallocatedServiceMinutes: totals.minutes };
+}
+
 function measureDayQuality(RouteOptimizer, stops, {
   departureMinutes = null, targetReturnMinutes = null, breakMinutes = null, future = true,
 } = {}) {
@@ -289,8 +327,7 @@ async function getScheduleQualityMeasurements(input = {}, conn = require('../../
         ...(input.includeStopExtras ? { physicalStops: physicalStopCount(techStops),
           coVisitOnSiteMinutes: coVisitOnSiteMinutes(techStops) } : {}) };
     });
-    days.push({ date, closed, unallocatedVisits: unallocated.length,
-      unallocatedServiceMinutes: unallocated.reduce((sum, stop) => sum + workDuration(stop), 0), byTech });
+    days.push({ date, closed, ...unallocatedSummary(unallocated, input.includeStopExtras), byTech });
   }
   const result = { range: { from, to }, units: 'minutes', days,
     basis: 'planned_schedule_not_actual_field_time',
