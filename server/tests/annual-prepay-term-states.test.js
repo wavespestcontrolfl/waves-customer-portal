@@ -66,7 +66,14 @@ const ACTIVE_STATUSES = ['active', 'renewal_pending'];
 // Each is fed exclusively by the notice/payment-reminder column helpers,
 // which are behaviorally pinned below to never return 'status'. Any other
 // identifier ([statusCol], [column], …) fails closed.
-const SANCTIONED_KEY_IDENTIFIERS = ['noticeCol', 'claimCol', 'sentCol'];
+// lateCol / escalatedCol (Codex #4921 r3): fed by
+// termiteLateColumnForDaysOut / termiteLateEscalationColumnForDaysOut,
+// pinned below to return only notice_45_late_sent_at / notice_30_late_sent_at
+// and notice_45_late_escalated_at / notice_30_late_escalated_at (or null) —
+// never 'status'.
+// missedClaimCol (Codex #4921 r7): the combined send's other-rung claim,
+// fed by noticeClaimColumnForDaysOut — pinned below to never be 'status'.
+const SANCTIONED_KEY_IDENTIFIERS = ['noticeCol', 'claimCol', 'sentCol', 'lateCol', 'escalatedCol', 'missedClaimCol'];
 
 // Non-literal `status:` expressions the scanner accepts, each one a pass-
 // through of a value that is itself CHECK-valid: a constant pinned below, the
@@ -631,11 +638,36 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
       {
         expr: "term.status === 'active' ? 'renewal_pending' : term.status",
         guards: ['where({ id: term.id })', "whereIn('status', ACTIVE_STATUSES)", "whereNull('renewal_decision')",
-          'whereNull(noticeCol)', 'where(function noticeClaimAvailable()', 'whereNull(claimCol)',
+          'whereNull(noticeCol)', 'where(lateTermiteSendAbsent(daysOut, term, baseline)', 'where(function noticeClaimAvailable()', 'whereNull(claimCol)',
           "orWhere(claimCol, '<', staleClaimCutoff)"],
       },
-      // Move 5: claim release — undecided + still unsent.
-      { expr: 'previousStatus', guards: ['where({ id: claimedTerm.id })', "whereNull('renewal_decision')", 'whereNull(noticeCol)'] },
+      // Move 4 (combined, Codex #4921 r7): a 30-day send that also discharges
+      // the 45 claims BOTH rungs in one UPDATE — active, undecided, both
+      // rungs wholly unrecorded, both claims available.
+      {
+        expr: "term.status === 'active' ? 'renewal_pending' : term.status",
+        guards: ['where({ id: term.id })', "whereIn('status', ACTIVE_STATUSES)", "whereNull('renewal_decision')",
+          "whereNull('notice_30_sent_at')", "whereNull('notice_30_late_sent_at')",
+          "whereNull('notice_45_sent_at')", "whereNull('notice_45_late_sent_at')",
+          'where(function claim30Available()', "whereNull('notice_30_claimed_at')", "orWhere('notice_30_claimed_at', '<', staleClaimCutoff)",
+          'where(function claim45Available()', "whereNull('notice_45_claimed_at')", "orWhere('notice_45_claimed_at', '<', staleClaimCutoff)"],
+      },
+      // Move 5 (combined): release of both claims — undecided, the 30 still
+      // unsent, AND still exactly what THIS attempt wrote (Codex #4921 r8:
+      // status renewal_pending + both claims at this attempt's timestamp),
+      // so a refund/dispute that moved the status meanwhile is never undone.
+      {
+        expr: 'previousStatus',
+        guards: ['where({ id: claimedTerm.id })', "whereNull('renewal_decision')", "whereNull('notice_30_sent_at')",
+          "where('status', 'renewal_pending')", "where('notice_30_claimed_at', claimedAt30)", "where('notice_45_claimed_at', claimedAt45)"],
+      },
+      // Move 5: claim release — undecided + still unsent + still this
+      // attempt's own state (status renewal_pending, claim at its timestamp).
+      {
+        expr: 'previousStatus',
+        guards: ['where({ id: claimedTerm.id })', "whereNull('renewal_decision')", 'whereNull(noticeCol)',
+          "where('status', 'renewal_pending')", 'where(claimCol, claimedAt)'],
+      },
       // Move 3: contacted.
       { expr: "'renewal_pending'", guards: ['where({ id: termId })', "whereIn('status', ACTIVE_STATUSES)", "whereNull('renewal_decision')"] },
       // Moves 6–8: decisions.
@@ -696,6 +728,34 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
         if (col !== null) expect(col).toMatch(/^(notice|payment_reminder)_/);
         expect(col).not.toBe('status');
       }
+    }
+    // sentCol in the notice mark-sent write comes from noticeWitnessColumn:
+    // the rung's own column, or the rung's own late column (45 or 30 —
+    // isTermiteAnnualPlanTerm gates whether the late branch is even reachable).
+    for (const days of [45, 30, 15, 7]) {
+      for (const today of ['2026-01-01', '2026-12-20']) {
+        for (const term of [{ term_end: '2026-12-31' }, { term_end: '2026-12-31', annual_plan_version: 'v3' }]) {
+          const col = _private.noticeWitnessColumn(days, term, today);
+          expect(col).toMatch(/^notice_/);
+          expect(col).not.toBe('status');
+        }
+      }
+    }
+    // missedClaimCol (the combined send's other-rung claim) is
+    // noticeClaimColumnForDaysOut of the 45 or 30 rung.
+    expect(_private.noticeClaimColumnForDaysOut(45)).toBe('notice_45_claimed_at');
+    expect(_private.noticeClaimColumnForDaysOut(30)).toBe('notice_30_claimed_at');
+    // lateCol (sendCustomerTermNotice's combined-send stamp) / escalatedCol
+    // (fileTermiteLateNoticeException) — Codex #4921 r3: only ever
+    // notice_45_late_sent_at / notice_30_late_sent_at and
+    // notice_45_late_escalated_at / notice_30_late_escalated_at, or null.
+    for (const days of [45, 30, 15, 7, 99, null]) {
+      const lateCol = _private.termiteLateColumnForDaysOut(days);
+      if (lateCol !== null) expect(lateCol).toMatch(/^notice_(45|30)_late_sent_at$/);
+      expect(lateCol).not.toBe('status');
+      const escalatedCol = _private.termiteLateEscalationColumnForDaysOut(days);
+      if (escalatedCol !== null) expect(escalatedCol).toMatch(/^notice_(45|30)_late_escalated_at$/);
+      expect(escalatedCol).not.toBe('status');
     }
   });
 

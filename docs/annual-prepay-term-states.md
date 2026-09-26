@@ -51,8 +51,8 @@ replay-idempotent), never an error.
 | 1 | *(birth)* | `payment_pending` / `active` / `cancelled` | `createTermForAnnualPrepay` — birth status is `statusForPrepayInvoice(prepayInvoiceId)`: **no linked invoice → `active`** (a manual term without a prepay invoice is treated as already-covered), invoice unpaid → `payment_pending`, paid → `active` (born-paid), void/refunded → `cancelled`, invoice lookup error → `payment_pending` (degrade, never guess active). Re-running for an existing **undecided** term re-derives the status the same way. | `R` `createTermForAnnualPrepay` (`statusForPrepayInvoice`) | existing row keeps its status when `renewal_decision` is set |
 | 2 | `payment_pending` | `active` | Prepay invoice paid (webhook / manual record) or the daily `activatePaidPendingTerms` sweep finds a paid invoice. Seeds coverage visits, stamps `prepaid_amount`, sets `billing_mode = annual_prepay`. | `R` `syncTermForInvoicePayment`, `activatePaidPendingTerms` | `status = 'payment_pending'` |
 | 3 | `active` / `renewal_pending` | `renewal_pending` | Operator records "contacted". Idempotent from `renewal_pending`. | `R` `recordDecision('contacted')` | `status IN ACTIVE_STATUSES AND renewal_decision IS NULL` |
-| 4 | `active` | `renewal_pending` | Automated 30/15/7-day renewal notice **claims** the term before sending (`notice_N_claimed_at` stamped in the same UPDATE; from `renewal_pending` the status is carried through). | `R` `sendCustomerTermNotice` (claim) | `status IN ACTIVE_STATUSES AND renewal_decision IS NULL AND notice_N_sent_at IS NULL AND (notice_N_claimed_at IS NULL OR stale > 15 min)` |
-| 5 | `renewal_pending` | `active` *(previous status)* | Notice delivery failed (no customer / SMS+email both failed) → the claim is released and the pre-claim status restored. Rollback of move 4 only. | `R` `sendCustomerTermNotice` (`releaseClaim`) | `renewal_decision IS NULL AND notice_N_sent_at IS NULL` |
+| 4 | `active` | `renewal_pending` | Automated 30/15/7-day renewal notice **claims** the term before sending (`notice_N_claimed_at` stamped in the same UPDATE; from `renewal_pending` the status is carried through). | `R` `sendCustomerTermNotice` (claim; a termite combined 30+45 send claims **both** rungs in one UPDATE via `claimCombinedTermNotice`, which additionally requires both rungs' on-time and late columns NULL and both claims available) | `status IN ACTIVE_STATUSES AND renewal_decision IS NULL AND notice_N_sent_at IS NULL AND (notice_N_claimed_at IS NULL OR stale > 15 min)` |
+| 5 | `renewal_pending` | `active` *(previous status)* | Notice delivery failed (no customer / SMS+email both failed) → the claim is released and the pre-claim status restored. Rollback of move 4 only. | `R` `sendCustomerTermNotice` (`releaseClaim`; the combined send's `releaseCombinedTermNoticeClaim` clears both claims, guarded on `notice_30_sent_at IS NULL`) | `renewal_decision IS NULL AND notice_N_sent_at IS NULL AND status = 'renewal_pending' AND notice_N_claimed_at = <this attempt's claim timestamp>` — otherwise only this attempt's own claim is cleared and the status is left alone (a refund/dispute that moved it meanwhile is never undone) |
 | 6 | `active` / `renewal_pending` | `renewed` | Operator records decision `renew`. Sets `renewal_decision = 'renew'`. | `R` `recordDecision('renew')` | same as 3 |
 | 7 | `active` / `renewal_pending` | `switch_plan` | Operator records decision `switch_plan`. Sets `renewal_decision = 'switch_plan'`. | `R` `recordDecision('switch_plan')` | same as 3 |
 | 8 | `active` / `renewal_pending` | `cancelled` **(b)** | Operator records decision `cancel` — a renewal lapse. Sets `renewal_decision = 'cancel'`; coverage for the paid window is kept. | `R` `recordDecision('cancel')` | same as 3 |
@@ -111,17 +111,18 @@ These constants in `R` decide what each stage *means* to the rest of billing:
   `DELETE /:id/annual-prepay` now runs the same `renewal_decision IS NULL`
   guard as move 9 (via the shared `cancelTermWithRestorations`) and refuses
   a decided term, a paid prepay and a charge-replacing prepay with 409.
-- Move 5's release is not ownership-checked: it clears `notice_N_claimed_at`
-  without comparing the claim timestamp, so a worker that stalls past the
-  15-minute TTL can clear a successor's fresh claim and overwrite its status
-  (a duplicate-notice window). Pre-existing behavior; the fix is a claim-token
-  compare in `releaseClaim` — a code change to the module, separate PR.
+- Move 5's release IS ownership-checked (Codex #4921 r8): it restores the
+  status only while the row is still `renewal_pending` with this attempt's
+  exact claim timestamp, else clears only its own claim (matched by
+  timestamp). A worker that stalls past the 15-minute TTL therefore no longer
+  clears a successor's fresh claim or overwrites its status, and a
+  refund/void/dispute that moved the status mid-attempt is never undone.
 - Move 1's existing-row re-run preserves a decided status via a snapshot read
   (`existing.renewal_decision ? existing.status : nextStatus`) with an
   id-only UPDATE — a `recordDecision` committing between the read and the
   write can be overwritten by `nextStatus` (TOCTOU). Pre-existing; the fix is
   a DB-side CASE or a `renewal_decision IS NULL` guard on that UPDATE —
-  a code change to the module, same follow-up lane as the releaseClaim race.
+  a code change to the module, separate follow-up.
 - `cancelled` carries two meanings. A dedicated `lapsed` status would remove
   the `renewal_decision` disambiguation everywhere, but that is a CHECK change
   plus ~10 read sites — not a one-PR move.

@@ -426,3 +426,186 @@ describe('app intro tracker destination', () => {
     }));
   });
 });
+
+describe('sendTermiteRenewalReminder (45/30-day termite annual renewal notice, slice 5)', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  test('the 45-day and 30-day rungs for the SAME term/renewal date use DIFFERENT idempotency keys (daysOut is embedded)', async () => {
+    setDbQueues({
+      customers: [chain({ first: customer() }), chain({ first: customer() }), chain({ first: customer() }), chain({ first: customer() })],
+    });
+
+    await AccountMembershipEmail.sendTermiteRenewalReminder({
+      customerId: 'cust-1',
+      termId: 'term-1',
+      daysOut: 45,
+      renewalDate: '2027-01-05',
+      renewalFee: 650,
+      newStart: '2027-01-05',
+      newEnd: '2028-01-05',
+      cancelLink: 'https://portal.wavespestcontrol.com/?tab=plan',
+    });
+    await AccountMembershipEmail.sendTermiteRenewalReminder({
+      customerId: 'cust-1',
+      termId: 'term-1',
+      daysOut: 30,
+      renewalDate: '2027-01-05',
+      renewalFee: 650,
+      newStart: '2027-01-05',
+      newEnd: '2028-01-05',
+      cancelLink: 'https://portal.wavespestcontrol.com/?tab=plan',
+    });
+
+    const keys = EmailTemplates.sendTemplate.mock.calls.map((call) => call[0].idempotencyKey);
+    expect(keys).toHaveLength(2);
+    expect(keys[0]).not.toEqual(keys[1]);
+    expect(keys[0]).toContain(':45:');
+    expect(keys[1]).toContain(':30:');
+  });
+
+  test('the SAME rung called twice for the same term/renewal date produces the SAME idempotency key (dedupe-stable)', async () => {
+    setDbQueues({
+      customers: [chain({ first: customer() }), chain({ first: customer() }), chain({ first: customer() }), chain({ first: customer() })],
+    });
+
+    const send = () => AccountMembershipEmail.sendTermiteRenewalReminder({
+      customerId: 'cust-1',
+      termId: 'term-1',
+      daysOut: 45,
+      renewalDate: '2027-01-05',
+      renewalFee: 650,
+      newStart: '2027-01-05',
+      newEnd: '2028-01-05',
+      cancelLink: 'https://portal.wavespestcontrol.com/?tab=plan',
+    });
+    await send();
+    await send();
+
+    const keys = EmailTemplates.sendTemplate.mock.calls.map((call) => call[0].idempotencyKey);
+    expect(keys[0]).toEqual(keys[1]);
+  });
+
+  test('renders a NULL prepay_amount/renewalFee as an EMPTY payload value (never "$0.00") — the caller\'s required_variables check is what fails it closed', async () => {
+    setDbQueues({ customers: [chain({ first: customer() }), chain({ first: customer() })] });
+
+    await AccountMembershipEmail.sendTermiteRenewalReminder({
+      customerId: 'cust-1',
+      termId: 'term-1',
+      daysOut: 45,
+      renewalDate: '2027-01-05',
+      renewalFee: null,
+      newStart: '2027-01-05',
+      newEnd: '2028-01-05',
+      cancelLink: 'https://portal.wavespestcontrol.com/?tab=plan',
+    });
+
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      payload: expect.objectContaining({ renewal_fee: '' }),
+    }));
+  });
+
+  test('a null lastInspectionDate omits the last-inspection sentence entirely (empty string, not a rendered fragment)', async () => {
+    setDbQueues({ customers: [chain({ first: customer() }), chain({ first: customer() })] });
+
+    await AccountMembershipEmail.sendTermiteRenewalReminder({
+      customerId: 'cust-1',
+      termId: 'term-1',
+      daysOut: 45,
+      renewalDate: '2027-01-05',
+      renewalFee: 650,
+      newStart: '2027-01-05',
+      newEnd: '2028-01-05',
+      cancelLink: 'https://portal.wavespestcontrol.com/?tab=plan',
+      lastInspectionDate: null,
+    });
+
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      payload: expect.objectContaining({ last_inspection_sentence: '' }),
+    }));
+  });
+
+  // Codex #4921 r3 P2: loadCustomer's own SELECT list omitted address_line2,
+  // so the customer-address fallback (no planAddress passed) always saw it
+  // as undefined and silently dropped a real unit/suite line from the
+  // notice. Fixed by adding address_line2 to loadCustomer's projection.
+  test('the customer-address fallback (no plan property) includes address_line2 when the customer has one', async () => {
+    setDbQueues({
+      customers: [chain({ first: customer({ address_line2: 'Unit 4B' }) }), chain({ first: customer({ address_line2: 'Unit 4B' }) })],
+    });
+
+    await AccountMembershipEmail.sendTermiteRenewalReminder({
+      customerId: 'cust-1',
+      termId: 'term-1',
+      daysOut: 45,
+      renewalDate: '2027-01-05',
+      renewalFee: 650,
+      newStart: '2027-01-05',
+      newEnd: '2028-01-05',
+      cancelLink: 'https://portal.wavespestcontrol.com/?tab=plan',
+      // No `address` (planAddress) passed — forces the loadCustomer fallback.
+    });
+
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      payload: expect.objectContaining({ address: '123 Main St, Unit 4B, Bradenton, FL, 34211' }),
+    }));
+  });
+
+  // Codex #4921 pre-push P1: a combined 30+45 notice carries its covered
+  // rungs in the email's own persisted payload (payload_snapshot), and the
+  // acceptance lookup reads them back — evidence, not call-site options.
+  test('a combined send persists covers_rungs in the payload; a plain send carries no marker', async () => {
+    setDbQueues({ customers: [chain({ first: customer() }), chain({ first: customer() }), chain({ first: customer() }), chain({ first: customer() })] });
+    const base = {
+      customerId: 'cust-1', termId: 'term-1', daysOut: 30, renewalDate: '2026-11-10', renewalFee: 650,
+      newStart: '2026-11-11', newEnd: '2027-11-11', cancelLink: 'https://portal.wavespestcontrol.com/?tab=plan',
+    };
+    await AccountMembershipEmail.sendTermiteRenewalReminder({ ...base, coversRungs: [30, 45] });
+    await AccountMembershipEmail.sendTermiteRenewalReminder(base);
+    const payloads = EmailTemplates.sendTemplate.mock.calls.map((c) => c[0].payload);
+    expect(payloads[0]).toMatchObject({ covers_rungs: [30, 45] });
+    expect(payloads[1]).not.toHaveProperty('covers_rungs');
+  });
+
+  test('findAcceptedTermiteRenewalReminder reads the sender\'s key, accepted statuses only, and covers_rungs from payload_snapshot', async () => {
+    const accepted = chain({ first: { status: 'delivered', sent_at: '2026-10-13T16:00:00.000Z', payload_snapshot: JSON.stringify({ covers_rungs: [30, 45] }) } });
+    const plain = chain({ first: { status: 'sent', sent_at: '2026-09-26T16:00:00.000Z', payload_snapshot: { first_name: 'T' } } });
+    const failed = chain({ first: { status: 'failed', sent_at: null, payload_snapshot: '{}' } });
+    setDbQueues({ email_messages: [accepted, plain, failed] });
+    const args = { customerId: 'cust-1', termId: 'term-1', renewalDate: '2026-11-10' };
+
+    await expect(AccountMembershipEmail.findAcceptedTermiteRenewalReminder({ ...args, daysOut: 30 }))
+      .resolves.toEqual({ sentAt: '2026-10-13T16:00:00.000Z', coversRungs: [30, 45] });
+    expect(accepted.where).toHaveBeenCalledWith({ idempotency_key: 'membership.termite_renewal_reminder:term-1:30:2026-11-10' });
+    await expect(AccountMembershipEmail.findAcceptedTermiteRenewalReminder({ ...args, daysOut: 45 }))
+      .resolves.toEqual({ sentAt: '2026-09-26T16:00:00.000Z', coversRungs: [] });
+    await expect(AccountMembershipEmail.findAcceptedTermiteRenewalReminder({ ...args, daysOut: 45 })).resolves.toBeNull();
+  });
+
+  // Codex #4921 r4 P1: a retry deduped against an email the provider already
+  // accepted must carry the ORIGINAL acceptance time (the existing
+  // email_messages row's sent_at), so the termite notice witness is
+  // classified from when the customer was actually told, not the retry.
+  test('a deduped retry returns the ORIGINAL acceptance time (sentAt) from the existing email_messages row', async () => {
+    setDbQueues({ customers: [chain({ first: customer() }), chain({ first: customer() })] });
+    EmailTemplates.sendTemplate.mockResolvedValueOnce({
+      sent: true,
+      deduped: true,
+      message: { provider_message_id: 'sg-orig', status: 'sent', sent_at: '2026-09-26T14:05:00.000Z' },
+    });
+
+    const result = await AccountMembershipEmail.sendTermiteRenewalReminder({
+      customerId: 'cust-1',
+      termId: 'term-1',
+      daysOut: 45,
+      renewalDate: '2026-11-10',
+      renewalFee: 650,
+      newStart: '2026-11-11',
+      newEnd: '2027-11-11',
+      cancelLink: 'https://portal.wavespestcontrol.com/?tab=plan',
+    });
+
+    expect(result).toEqual(expect.objectContaining({
+      ok: true, deduped: true, messageId: 'sg-orig', sentAt: '2026-09-26T14:05:00.000Z',
+    }));
+  });
+});
