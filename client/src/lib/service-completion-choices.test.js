@@ -77,27 +77,30 @@ describe("service completion choices", () => {
     }
   });
 
-  test("supplies dry-time metadata only as action facts and never product defaults", () => {
+  test("supplies pesticide scope as action facts and never product defaults", () => {
     const exterior = serviceCompletionChoicesFor("pest", "actions")
       .find(({ id }) => id.endsWith("applied-perimeter-band"));
-    const unscopedApplication = serviceCompletionChoicesFor("pest", "actions")
+    const interiorApplication = serviceCompletionChoicesFor("pest", "actions")
       .find(({ id }) => id.endsWith("applied-gel-bait"));
-    const unscopedApplicationIds = [
+    const interiorApplicationIds = [
       "completed-crack-crevice",
       "applied-gel-bait",
       "dusted-voids",
     ];
-    const unscopedApplications = serviceCompletionChoicesFor("pest", "actions")
-      .filter(({ id }) => unscopedApplicationIds.some((suffix) => id.endsWith(suffix)));
+    const interiorApplications = serviceCompletionChoicesFor("pest", "actions")
+      .filter(({ id }) => interiorApplicationIds.some((suffix) => id.endsWith(suffix)));
+    const trunkInjection = serviceCompletionChoicesFor("tree_shrub", "actions")
+      .find(({ id }) => id.endsWith("completed-trunk"));
     const inspection = serviceCompletionChoicesFor("lawn", "actions")
       .find(({ id }) => id.endsWith("inspected-turf"));
 
     expect(exterior).toMatchObject({ scope: "exterior", treatmentApplied: true });
-    expect(unscopedApplication).toMatchObject({ treatmentApplied: true });
-    expect(unscopedApplications).toHaveLength(unscopedApplicationIds.length);
-    expect(unscopedApplications.every((choice) => choice.treatmentApplied === true)).toBe(true);
-    expect(unscopedApplications.every((choice) => !Object.hasOwn(choice, "scope"))).toBe(true);
+    expect(interiorApplication).toMatchObject({ scope: "interior", treatmentApplied: true, dryDown: false });
+    expect(interiorApplications).toHaveLength(interiorApplicationIds.length);
+    expect(interiorApplications.every((choice) => choice.scope === "interior" && choice.treatmentApplied === true)).toBe(true);
+    expect(interiorApplications.find(({ id }) => id.endsWith("dusted-voids"))).toMatchObject({ dryDown: false });
+    expect(trunkInjection).toMatchObject({ scope: "exterior", treatmentApplied: true, dryDown: false });
     expect(inspection).toMatchObject({ scope: "exterior", treatmentApplied: false });
-    expect([...exterior.keywords, ...unscopedApplication.keywords]).not.toContain("product");
+    expect([...exterior.keywords, ...interiorApplication.keywords]).not.toContain("product");
   });
 });

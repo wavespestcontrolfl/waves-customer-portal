@@ -86,6 +86,8 @@ import {
 } from "../../lib/service-completion-presets";
 import { LAWN_DEFAULT_AREAS, LAWN_FIELD_ACTIONS, isLawnFindingSelection, lawnPlanSelections, reconcileLawnPlanSelections, lawnPlanActionOptions, previousLawnAssessment, withdrawLawnPlanSuggestions } from "../../lib/lawn-completion";
 import LawnFindingPicker from "../../components/tech/LawnFindingPicker";
+import SearchableCompletionChoices from "../../components/tech/SearchableCompletionChoices";
+import { serviceCompletionChoicesFor } from "../../lib/service-completion-choices";
 import { confirmCardHoldFeeChoice } from "../../lib/cardHoldCancel";
 import { useCancelFeeNotice } from "../../components/schedule/CancelFeeNotice";
 import {
@@ -10540,6 +10542,16 @@ function serviceLineFromType(serviceType = "") {
   return "pest";
 }
 
+function isCommercialServiceIdentity(service = {}) {
+  if (String(service.waveguardTier || "").trim().toLowerCase() === "commercial") return true;
+  return String([
+    service.service_type, service.serviceType, service.type,
+    service.service_key, service.serviceKey, service.service_name,
+    service.serviceName, service.name, service.label,
+    service.completionProfile?.serviceKey, service.completionProfile?.serviceName,
+  ].filter(Boolean).join(" ")).toLowerCase().includes("commercial");
+}
+
 // Method inference lives in lib/product-rate-prefill.js (shared with the
 // recap modal); this wrapper only resolves the service LINE from the type.
 export function defaultApplicationMethod(product = {}, serviceType = "", { interiorLane = false } = {}) {
@@ -13151,6 +13163,7 @@ export function CompletionPanel({
   // Textareas until the payload says otherwise: with the gate off (prod
   // today) the panel must paint exactly as before, with no loading swap.
   const techTipsAvailable = techTips?.available === true;
+  const completionChoicesEnabled = techTips?.completionChoicesEnabled === true;
   // Flips true once Generate AI report replaces the notes with clean prose.
   // Before that, the [Protocol]/[Found]/[Next] chip lines in the notes are the
   // selection source of truth (delete a line = deselect); after, the label
@@ -13408,7 +13421,9 @@ export function CompletionPanel({
     const method = String(p?.applicationMethod || p?.method || "").toLowerCase().replace(/[^a-z0-9]+/g, "_");
     return (!!method && !["bait_placement", "station_check", "trunk_injection"].includes(method))
       || isNonBaitPesticideSelection(p);
-  }) || Object.values(actionScopeByLabel).some((meta) => meta?.treatmentApplied === true);
+  }) || activeSelectedLabels(selectedProtocolActionLabels).some((label) => (
+    actionScopeByLabel[label]?.treatmentApplied === true && actionScopeByLabel[label]?.dryDown !== false
+  ));
   // Re-entry stepper seeds (owner rule 2026-08-11): what a hands-off
   // completion would persist for this visit. Re-fetched whenever spray
   // evidence appears/disappears so a bait/inspection identity that gains a
@@ -13680,6 +13695,41 @@ export function CompletionPanel({
   // "Follow-up recommended") were dropped everywhere (owner 2026-07-30):
   // they aren't areas and don't belong in the treated-areas list.
   const specialtyCompletion = specialtyCompletionFor(service);
+  const routineCompletionChoiceFamily = !specialtyCompletion
+    && !isCommercialServiceIdentity(service)
+    ? isLawn
+      ? "lawn"
+      : (treeShrubCloseoutOn || isTreeShrub)
+        ? "tree_shrub"
+        : serviceLineForCloseout === "pest" && !isTypedFindings
+          && (service.completionProfile?.billingType === "recurring"
+            || service.completionProfile?.serviceKey === "pest_re_service")
+          ? "recurring_pest"
+          : null
+    : null;
+  const completionChoiceFamily = completionChoicesEnabled
+    ? routineCompletionChoiceFamily
+    : null;
+  const governedCompletionObservationLabels = useMemo(() => new Set(
+    serviceCompletionChoicesFor(routineCompletionChoiceFamily, "observations")
+      .map(({ label }) => label),
+  ), [routineCompletionChoiceFamily]);
+  const completionObservationChoices = serviceCompletionChoicesFor(
+    completionChoiceFamily,
+    "observations",
+  );
+  const completionActionChoices = serviceCompletionChoicesFor(
+    completionChoiceFamily,
+    "completedActions",
+  );
+  const completionRecommendationChoices = useMemo(() => [
+    ...(techTips?.previousRecommendations || []).map((item) => ({
+      label: item.text,
+      group: "Previous visit",
+      detail: item.serviceDate ? formatETDateOnly(item.serviceDate) : undefined,
+    })),
+    ...serviceCompletionChoicesFor(completionChoiceFamily, "recommendations"),
+  ], [completionChoiceFamily, techTips]);
   const areaOptions = [
     ...(specialtyCompletion?.areas
       || (isBedBugVisit
@@ -15602,7 +15652,23 @@ export function CompletionPanel({
     // recommendations the completion submits, so it can't run mid-request
     // and it clears an untouched installed draft.
     if (generating) return;
-    invalidateGeneratedReportOnTypedEdit();
+    const detachedAfterInvalidation = invalidateGeneratedReportOnTypedEdit();
+    if (!detachedAfterInvalidation) {
+      const markerTags = kind === "protocol"
+        ? new Set(["protocol", "protocol optional", "action"])
+        : new Set([kind === "observation" ? "found" : "next"]);
+      const normalizedLabel = String(label || "").trim().toLowerCase();
+      setNotes((current) => current
+        .split("\n")
+        .filter((line) => {
+          const match = line.match(/^\s*\[([^\]]+)\]\s+(.+)$/);
+          return !match
+            || !markerTags.has(match[1].trim().toLowerCase())
+            || match[2].trim().toLowerCase() !== normalizedLabel;
+        })
+        .join("\n")
+        .trim());
+    }
     if (kind === "protocol") {
       setSelectedProtocolActionLabels((prev) =>
         prev.filter((item) => item !== label),
@@ -15843,6 +15909,12 @@ export function CompletionPanel({
         name: p.name,
         rate: p.rate || null,
         rateUnit: p.rateUnit || null,
+        applicationMethod: productApplicationMethod(p, serviceTypeForArea),
+        applicationArea:
+          p.applicationArea ||
+          (completionAreasServiced.length === 1 ? completionAreasServiced[0] : null),
+        areaValue: p.areaValue ?? null,
+        areaUnit: p.areaUnit || null,
         targets: Array.isArray(p.targets) ? p.targets : [],
       })),
       technicianName: service.technicianName || "Waves Tech",
@@ -15899,14 +15971,19 @@ export function CompletionPanel({
       (isLawn && lawnAssessmentReady === "failed");
     return { payload, hasReportInput };
   }
-  function recordActionScope(label, scope, treatmentApplied) {
-    if (!label || (scope !== "interior" && scope !== "exterior")) return;
+  function recordActionScope(label, scope, treatmentApplied, completionChoice = false, dryDown) {
+    const scoped = scope === "interior" || scope === "exterior";
+    if (!label || (!scoped && !completionChoice)) return;
     setActionScopeByLabel((prev) => ({
       ...prev,
-      [label]: { scope, treatmentApplied: treatmentApplied === true },
+      [label]: {
+        ...(scoped ? { scope, treatmentApplied: treatmentApplied === true } : {}),
+        ...(dryDown === false ? { dryDown: false } : {}),
+        ...(completionChoice ? { completionChoice: true } : {}),
+      },
     }));
   }
-  function applyProtocolAction(action, { conflictLabels = [] } = {}) {
+  function applyProtocolAction(action, { conflictLabels = [], completionChoice = false } = {}) {
     if (!action) return;
     // Same freeze + invalidation contract as every other payload mutation:
     // a productless protocol action (or one whose product is already
@@ -15920,7 +15997,7 @@ export function CompletionPanel({
     // the same metadata, and the product is already on the visit — so it
     // must not clear a valid untouched report (codex r80).
     if (
-      selectedProtocolActionLabels.includes(noteText)
+      activeSelectedLabels(selectedProtocolActionLabels).includes(noteText)
       && (!action.product?.id
         || selectedProducts.find((p) => p.productId === action.product.id))
     ) {
@@ -15928,7 +16005,7 @@ export function CompletionPanel({
     }
     const detachedAfterInvalidation = invalidateGeneratedReportOnTypedEdit();
     appendUniqueLabel(setSelectedProtocolActionLabels, noteText);
-    recordActionScope(noteText, action.scope, action.treatmentApplied);
+    recordActionScope(noteText, action.scope, action.treatmentApplied, completionChoice, action.dryDown);
     if (!detachedAfterInvalidation) {
       const conflictSet = new Set(conflictLabels);
       const prefix = action.conditional ? "Protocol optional" : "Protocol";
@@ -16753,7 +16830,16 @@ export function CompletionPanel({
     // first).
     {
       const freeTextProblems = [];
+      const completedActions = uniqueLines([
+        ...activeSelectedLabels(selectedProtocolActionLabels),
+        ...taggedNoteLines("protocol"), ...taggedNoteLines("protocol optional"), ...taggedNoteLines("action"),
+      ]);
       const mergedCounts = [
+        [
+          "Completed actions",
+          completedActions.length,
+          completedActions,
+        ],
         [
           "Observations",
           activeSelectedLabels(selectedObservationLabels).length +
@@ -17140,18 +17226,26 @@ export function CompletionPanel({
       // and must not reach the customer report (codex P2 r7 #3701).
       const reportProtocolActions = activeSelectedLabels(
         selectedProtocolActionLabels,
-      ).filter(
-        (label) =>
-          specialtyProtocolActions.length > 0
-            ? specialtyProtocolActions.some((action) => action.label === label)
-            : !isLawn ||
-              (completionImprovements && LAWN_FIELD_ACTIONS.some((action) => action.note === label)) ||
-              (protocolActionsLoaded &&
-                protocolActions.some(
-                  (action) =>
-                    (action.label || action.note || action.raw || "") === label,
-                )),
-      );
+      ).filter((label) => {
+        if (specialtyProtocolActions.length > 0) {
+          return specialtyProtocolActions.some((action) => action.label === label);
+        }
+        // Choice provenance and scope are saved beside selected labels. They remain
+        // authoritative when a pre-generation draft is restored after the
+        // choices gate turns off or its probe fails; the visible marker still
+        // controls selection through activeSelectedLabels above. Specialty
+        // membership stays first and therefore cannot be bypassed by metadata.
+        const savedScope = actionScopeByLabel[label];
+        if (savedScope?.completionChoice === true
+          || savedScope?.scope === "interior" || savedScope?.scope === "exterior") return true;
+        return !isLawn ||
+          (completionImprovements && LAWN_FIELD_ACTIONS.some((action) => action.note === label)) ||
+          (protocolActionsLoaded &&
+            protocolActions.some(
+              (action) =>
+                (action.label || action.note || action.raw || "") === label,
+            ));
+      });
       const reportProtocolActionScopes = reportProtocolActions
         .map((label) => {
           const meta = actionScopeByLabel[label];
@@ -17162,9 +17256,19 @@ export function CompletionPanel({
               ? specialtyActionScope({ areas: completionAreasServiced, defaultScope: meta.scope })
               : meta.scope,
             treatmentApplied: meta.treatmentApplied === true,
+            ...(meta.dryDown === false ? { dryDown: false } : {}),
           };
         })
         .filter(Boolean);
+      // The server also reconstructs actions from marker notes. Remove the
+      // rejected selections there so a stale draft cannot restore them again.
+      const excludedProtocolLabels = new Set(selectedProtocolActionLabels
+        .filter((label) => !reportProtocolActions.includes(label))
+        .map((label) => String(label || "").trim().toLowerCase()));
+      const reportTechnicianNotes = notes.split("\n").filter((line) => {
+        const match = line.match(/^\s*\[(?:Protocol(?: optional)?|Action)\]\s+(.+)$/i);
+        return !match || !excludedProtocolLabels.has(match[1].trim().toLowerCase());
+      }).join("\n");
       const reportObservations = [
         ...activeSelectedLabels(selectedObservationLabels),
         ...observationFreeText(),
@@ -17206,7 +17310,7 @@ export function CompletionPanel({
       const body = {
         ...(reviewedPricing ? { pricingReview: reviewedPricing.review } : {}),
         idempotencyKey: completionIdempotencyKeyRef.current,
-        technicianNotes: notes,
+        technicianNotes: reportTechnicianNotes,
         // Tips from your tech — ids only; the server resolves the copy and
         // freezes it into structured_notes.techTips (freezeTechTips). Only
         // when the picker actually loaded: a restored draft's picks behind a
@@ -17377,9 +17481,10 @@ export function CompletionPanel({
         observations: reportObservations,
         structuredObservations: specialtyCompletion
           ? activeSelectedLabels(selectedObservationLabels)
-          : completionImprovements && isLawn
-            ? activeSelectedLabels(selectedObservationLabels).filter(isLawnFindingSelection)
-            : [],
+          : [...activeSelectedLabels(selectedObservationLabels), ...freeTextLines(observationsText)].filter((observation) => (
+            (completionImprovements && isLawn && isLawnFindingSelection(observation))
+            || governedCompletionObservationLabels.has(observation)
+          )),
         recommendations: reportRecommendations,
         lawnAssessmentId,
         // Tree & Shrub AI photo assessment. When the background review ran,
@@ -17682,6 +17787,12 @@ export function CompletionPanel({
     : completionImprovements && isLawn
       ? [...protocolActions, ...LAWN_FIELD_ACTIONS]
       : protocolActions;
+  const searchableProtocolActions = [
+    ...effectiveProtocolActions,
+    ...completionActionChoices,
+  ].filter((action, index, list) => list.findIndex(
+    (item) => (item.label || item.note) === (action.label || action.note),
+  ) === index);
   const protocolActionFallbackChips = isLawn ? [] : CHIP_ACTIONS;
   const hideProtocolActionsField =
     isLawn &&
@@ -18147,6 +18258,63 @@ export function CompletionPanel({
         onAreaChange={value => { invalidateGeneratedReportOnTypedEdit(); setLawnAreaOverride(value); }}
         onReload={() => setLawnPlanReloadKey(key => key + 1)} />
         : <LawnPreviousVisitCard service={service} />
+  );
+  const searchableVisitDetails = completionChoiceFamily && !quickComplete && (
+    <div style={{ display: "flex", flexDirection: "column", gap: 18, margin: "4px 0 20px" }}>
+      <div>
+        <div style={{ ...CP_EYEBROW, fontSize: 14, marginBottom: 8 }}>Completed actions</div>
+        <SearchableCompletionChoices
+          label="Completed actions"
+          options={searchableProtocolActions}
+          maxSelections={20}
+          values={activeSelectedLabels(selectedProtocolActionLabels)}
+          onChange={(next) => {
+            const current = activeSelectedLabels(selectedProtocolActionLabels);
+            current
+              .filter((label) => !next.includes(label))
+              .forEach((label) => removeSelectedLabel("protocol", label));
+            next
+              .filter((label) => !current.includes(label))
+              .forEach((label) => applyProtocolAction(
+                searchableProtocolActions.find(
+                  (action) => (action.label || action.note) === label,
+                ) || { label },
+                { completionChoice: true },
+              ));
+          }}
+          disabled={submitting || generating}
+          helper="Choose only the work completed on this visit."
+        />
+      </div>
+      <div>
+        <div style={{ ...CP_EYEBROW, fontSize: 14, marginBottom: 8 }}>Observations</div>
+        <SearchableCompletionChoices
+          label="Observations"
+          options={completionObservationChoices}
+          values={freeTextLines(observationsText)}
+          onChange={(next) => setObservationsText(next.join("\n"))}
+          disabled={submitting || generating || photoAnalyzing}
+          helper="Choose what you observed or type a specific finding."
+        />
+      </div>
+      <div>
+        <div style={{ ...CP_EYEBROW, fontSize: 14, marginBottom: 8 }}>Recommendations</div>
+        <SearchableCompletionChoices
+          label="Recommendations"
+          options={completionRecommendationChoices}
+          values={freeTextLines(recommendationsText)}
+          onChange={(next) => setRecommendationsText(next.join("\n"))}
+          disabled={submitting || generating}
+          helper={techTipsLoading
+            ? "Loading previous recommendations…"
+            : techTipsError
+              ? "Previous recommendations could not load. Search the service library or add your own."
+              : techTips?.previousRecommendations?.length
+                ? "Previous recommendations are dated suggestions. Select only what still applies."
+                : "Search the service library or add the next step this property needs."}
+        />
+      </div>
+    </div>
   );
   if (isMobile) {
     const M = {
@@ -18985,8 +19153,9 @@ export function CompletionPanel({
                 </Field>
               );
             })}
-            {completionImprovements && isLawn && <LawnFindingPicker disabled={generating || photoAnalyzing} onAdd={handleLawnFindingAdd} />}
-            {!isTypedFindings && !hideProtocolActionsField && (
+            {searchableVisitDetails}
+            {!completionChoiceFamily && completionImprovements && isLawn && <LawnFindingPicker disabled={generating || photoAnalyzing} onAdd={handleLawnFindingAdd} />}
+            {!completionChoiceFamily && !isTypedFindings && !hideProtocolActionsField && (
               <details open={!(completionImprovements && isLawn) || undefined}>
                 {completionImprovements && isLawn && <summary style={{ fontSize: 14, cursor: "pointer", padding: "12px 0" }}>Additional work{selectedProtocolActionCount ? ` · ${selectedProtocolActionCount} recorded` : ""}</summary>}
               <Field label="Protocol actions">
@@ -19117,7 +19286,7 @@ export function CompletionPanel({
             {/* Gate off: the textareas as today. Gate on: they stay only while
                 they hold text (a draft saved before the gate flipped), so
                 nothing that will submit is ever hidden from the tech. */}
-            {(!techTipsAvailable || observationsText.trim()) && (
+            {!completionChoiceFamily && (!techTipsAvailable || observationsText.trim()) && (
               <Field label="Observations">
                 {" "}
                 <textarea
@@ -19131,7 +19300,7 @@ export function CompletionPanel({
                 />{" "}
               </Field>
             )}
-            {(!techTipsAvailable || recommendationsText.trim()) && (
+            {!completionChoiceFamily && (!techTipsAvailable || recommendationsText.trim()) && (
               <Field label="Recommendations">
                 {" "}
                 <textarea
@@ -21430,8 +21599,9 @@ export function CompletionPanel({
                 </div>
               );
             })}
-            {completionImprovements && isLawn && <LawnFindingPicker disabled={generating || photoAnalyzing} onAdd={handleLawnFindingAdd} />}
-            {!isTypedFindings && !hideProtocolActionsField && (
+          {searchableVisitDetails}
+          {!completionChoiceFamily && completionImprovements && isLawn && <LawnFindingPicker disabled={generating || photoAnalyzing} onAdd={handleLawnFindingAdd} />}
+            {!completionChoiceFamily && !isTypedFindings && !hideProtocolActionsField && (
             <details open={!(completionImprovements && isLawn) || undefined}>
                 {completionImprovements && isLawn && <summary style={{ fontSize: 14, cursor: "pointer", padding: "12px 0" }}>Additional work{selectedProtocolActionCount ? ` · ${selectedProtocolActionCount} recorded` : ""}</summary>}
               <div style={{ marginBottom: 12 }}>
@@ -21554,7 +21724,7 @@ export function CompletionPanel({
             )}
             {/* Gate off: the textareas as today. Gate on: they stay only while
                 they hold text (a draft saved before the gate flipped). */}
-            {(!techTipsAvailable || observationsText.trim()) && (
+            {!completionChoiceFamily && (!techTipsAvailable || observationsText.trim()) && (
               <div style={{ marginBottom: 12 }}>
                 <label style={{ ...labelStyle, color: D.amber }}>
                   Observations
@@ -21570,7 +21740,7 @@ export function CompletionPanel({
                 />{" "}
               </div>
             )}
-            {(!techTipsAvailable || recommendationsText.trim()) && (
+            {!completionChoiceFamily && (!techTipsAvailable || recommendationsText.trim()) && (
               <div style={{ marginBottom: 12 }}>
                 <label style={{ ...labelStyle, color: D.green }}>
                   Recommendations

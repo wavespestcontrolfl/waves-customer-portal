@@ -21,7 +21,13 @@ let catalog;
 let optionalOptions;
 let delayFlags;
 let flagResolvers;
+let completionChoicesEnabled;
+let techTipsAvailable;
+let techTipsFailure;
+let previousRecommendations;
+let reentryDefaultsFromEvidence;
 beforeEach(async () => {
+  reentryDefaultsFromEvidence = false;
   delayFlags = false;
   flagResolvers = [];
   history = [{ confirmed_by_tech: true, service_date: '2026-07-10', overall_score: 81 }];
@@ -31,6 +37,10 @@ beforeEach(async () => {
   withdrawDefaults = false;
   catalog = products;
   optionalOptions = [];
+  completionChoicesEnabled = false;
+  techTipsAvailable = true;
+  techTipsFailure = false;
+  previousRecommendations = [];
   localStorage.clear();
   localStorage.setItem('waves_admin_token', 'test-token');
   localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'technician' }));
@@ -68,16 +78,337 @@ beforeEach(async () => {
           history: { available: true, rows: [baseline, previous], current: null, baseline, previous, progress: { baselineDelta: 21 } } };
       }
     }
-    if (url.includes('tech-tips')) data = { available: true, groups: [{ id: 'lawn', label: 'Lawn care', tips: [{ id: 'lawn_water_morning', label: 'Water in the morning', copy: 'Use the morning irrigation window.' }] }] };
+    if (url.includes('tech-tips')) {
+      if (techTipsFailure) throw new Error('Synthetic completion choices outage');
+      data = {
+        available: techTipsAvailable,
+        completionChoicesEnabled,
+        previousRecommendations,
+        groups: [{ id: 'lawn', label: 'Lawn care', tips: [{ id: 'lawn_water_morning', label: 'Water in the morning', copy: 'Use the morning irrigation window.' }] }],
+      };
+    }
     if (url.includes('generate-report')) data = { report: 'WHAT WE DID:\nApplied the old products.\nWHAT WE FOUND:\nLawn looked fine.' };
     if (url.includes('completion-actions')) data = { actions: [] };
     if (url.includes('property-map')) data = { available: false, stationsLoaded: true };
+    if (reentryDefaultsFromEvidence && url.includes('reentry-defaults')) data = url.includes('applicationsRecorded=1')
+      ? { exteriorMinutes: 30, interiorMinutes: 120 } : { exteriorMinutes: 0, interiorMinutes: 0 };
     return { ok: true, json: async () => data };
   }));
   await refetchFlags();
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 const mount = () => render(<CompletionPanel service={service} products={catalog} onClose={() => {}} onSubmit={submit} />);
+
+it.each(['gate off', 'API error'])('keeps the existing completion form on %s', async (mode) => {
+  techTipsAvailable = false;
+  techTipsFailure = mode === 'API error';
+  mount();
+  expect(await screen.findByLabelText('Observations')).toBeTruthy();
+  expect(screen.getByLabelText('Recommendations')).toBeTruthy();
+  expect(screen.queryByRole('combobox', { name: 'Search completed actions' })).toBeNull();
+  expect(screen.queryByRole('combobox', { name: 'Search observations' })).toBeNull();
+});
+
+it('keeps commercial lawn visits on their existing completion form when choices are enabled', async () => {
+  completionChoicesEnabled = true;
+  techTipsAvailable = false;
+  render(<CompletionPanel
+    service={{ ...service, id: 'commercial-lawn', serviceType: 'Lawn Care', completionProfile: { serviceKey: 'lawn', requiresProducts: false }, waveguardTier: 'Commercial' }}
+    products={catalog}
+    onClose={() => {}}
+    onSubmit={submit}
+  />);
+
+  expect(await screen.findByLabelText('Observations')).toBeTruthy();
+  expect(screen.getByLabelText('Recommendations')).toBeTruthy();
+  expect(screen.queryByRole('combobox', { name: 'Search completed actions' })).toBeNull();
+});
+
+it('shows gated history as a suggestion and records only choices the technician selects', async () => {
+  completionChoicesEnabled = true;
+  previousRecommendations = [{
+    text: 'Homeowner: continue checking the repaired irrigation zone.',
+    serviceDate: '2026-08-20',
+    serviceRecordId: 'prior-record',
+  }];
+  mount();
+  await waitFor(() => expect(screen.getByPlaceholderText('Total').value).toBe('15'));
+
+  expect(screen.getByPlaceholderText('Search tips…')).toBeTruthy();
+  expect(screen.queryByLabelText('Selected recommendations')).toBeNull();
+  const actionSearch = screen.getByRole('combobox', { name: 'Search completed actions' });
+  fireEvent.change(actionSearch, { target: { value: 'Inspected the serviced turf areas.' } });
+  fireEvent.click(await screen.findByRole('option', { name: 'Inspected the serviced turf areas.' }));
+
+  const observationSearch = screen.getByRole('combobox', { name: 'Search observations' });
+  const governedObservation = 'Thin turf was visible in the inspected area.';
+  fireEvent.change(observationSearch, { target: { value: governedObservation } });
+  fireEvent.click(await screen.findByRole('option', { name: governedObservation }));
+  fireEvent.change(observationSearch, { target: { value: 'Custom lawn observation.' } });
+  fireEvent.keyDown(observationSearch, { key: 'Enter' });
+
+  const recommendationSearch = screen.getByRole('combobox', { name: 'Search recommendations' });
+  fireEvent.change(recommendationSearch, { target: { value: 'continue checking repaired' } });
+  fireEvent.click(await screen.findByRole('option', { name: /continue checking the repaired irrigation zone/i }));
+
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  const body = submit.mock.calls[0][1];
+  expect(body.protocolActionsCompleted).toContain('Inspected the serviced turf areas.');
+  expect(body.observations).toContain(governedObservation);
+  expect(body.observations).toContain('Custom lawn observation.');
+  expect(body.structuredObservations).toEqual([governedObservation]);
+  expect(body.recommendations).toEqual(['Homeowner: continue checking the repaired irrigation zone.']);
+});
+
+it.each([
+  ['recurring pest', 'Quarterly Pest Control', { serviceKey: 'pest', billingType: 'recurring', requiresProducts: false }, null, 'Live pest activity was visible in an inspected exterior area.'],
+  ['pest re-service', 'Pest Re-Service', { serviceKey: 'pest_re_service', billingType: 'one_time', requiresProducts: false }, null, 'Live pest activity was visible in an inspected exterior area.'],
+  ['typed tree/shrub', 'Every 6 Weeks Tree & Shrub Care Service', { serviceKey: 'tree_shrub', findingsType: 'tree_shrub', requiresProducts: false }, { type: 'tree_shrub', schemaVersion: 2, fields: [], nextStepChips: [] }, 'Yellow foliage was visible; the cause was not confirmed.'],
+])('submits a searchable %s observation through the customer-safe field', async (_family, serviceType, completionProfile, findingsSchema, observation) => {
+  completionChoicesEnabled = true;
+  techTipsAvailable = false;
+  render(<CompletionPanel
+    service={{ ...service, id: 'routine-observation', serviceType, completionProfile, findingsSchema, waveguardTier: null }}
+    products={[]}
+    onClose={() => {}}
+    onSubmit={submit}
+  />);
+
+  const search = await screen.findByRole('combobox', { name: 'Search observations' });
+  fireEvent.change(screen.getByPlaceholderText(/Notes about this service/), { target: { value: `[Found] ${observation}` } });
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  expect(submit.mock.calls[0][1].structuredObservations).toEqual([]);
+  submit.mockClear();
+  fireEvent.change(search, { target: { value: observation } });
+  fireEvent.click(await screen.findByRole('option', { name: observation }));
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  expect(submit.mock.calls[0][1]).toMatchObject({
+    observations: [observation],
+    structuredObservations: [observation],
+  });
+});
+
+it.each(['one_time', 'consultation', undefined])('does not offer recurring-pest choices for a non-recurring profile: %s', async (billingType) => {
+  completionChoicesEnabled = true;
+  techTipsAvailable = false;
+  render(<CompletionPanel
+    service={{ ...service, id: 'unsupported-pest-choice', serviceType: 'Quarterly Pest Control', completionProfile: { serviceKey: 'pest', billingType, requiresProducts: false }, waveguardTier: null }}
+    products={[]}
+    onClose={() => {}}
+    onSubmit={submit}
+  />);
+  expect(await screen.findByLabelText('Observations')).toBeTruthy();
+  expect(screen.queryByRole('combobox', { name: 'Search observations' })).toBeNull();
+});
+
+it('offers the tree catalog for untyped palm closeouts while retaining closeout requirements', async () => {
+  completionChoicesEnabled = true;
+  render(<CompletionPanel
+    service={{ ...service, id: 'palm-choice', serviceType: 'Palm Care', completionProfile: { serviceKey: 'palm', requiresProducts: false }, waveguardTier: null }}
+    products={[]}
+    onClose={() => {}}
+    onSubmit={submit}
+  />);
+  const search = await screen.findByRole('combobox', { name: 'Search observations' });
+  const observation = 'Palm frond discoloration was visible; the cause was not confirmed.';
+  fireEvent.change(search, { target: { value: observation } });
+  fireEvent.click(await screen.findByRole('option', { name: observation }));
+  expect(screen.getByLabelText('Selected observations').textContent).toContain(observation);
+  expect(screen.getByRole('button', { name: /tree\/shrub closeout required/i }).disabled).toBe(true);
+});
+
+it.each([
+  ['Completed the documented crack-and-crevice treatment.', {}, null, 'interior'],
+  ['Applied gel bait in the recorded locations.', { dryDown: false }, null, 'interior'],
+  ['Applied dust to the recorded accessible voids.', { dryDown: false }, null, 'interior'],
+  ['Completed the documented trunk application.', { dryDown: false }, {
+    serviceType: 'Every 6 Weeks Tree & Shrub Care Service',
+    completionProfile: { serviceKey: 'tree_shrub', findingsType: 'tree_shrub', requiresProducts: false },
+    findingsSchema: { type: 'tree_shrub', schemaVersion: 2, fields: [], nextStepChips: [] },
+  }, 'exterior'],
+])('records treatment scope and drying evidence for a searchable application: %s', async (action, dryingEvidence, serviceOverrides, scope) => {
+  reentryDefaultsFromEvidence = true;
+  completionChoicesEnabled = true;
+  techTipsAvailable = false;
+  render(<CompletionPanel
+    service={{ ...service, id: 'choice-visit', serviceType: 'Quarterly Pest Control', completionProfile: { serviceKey: 'pest', billingType: 'recurring', requiresProducts: false }, waveguardTier: null, ...serviceOverrides }}
+    products={[]}
+    onClose={() => {}}
+    onSubmit={submit}
+  />);
+
+  const search = await screen.findByRole('combobox', { name: 'Search completed actions' });
+  fireEvent.change(search, { target: { value: action } });
+  fireEvent.click(await screen.findByRole('option', { name: action }));
+  await waitFor(() => expect(fetch.mock.calls.filter(([url]) => url.includes('reentry-defaults')).at(-1)[0])
+    .toContain(`applicationsRecorded=${dryingEvidence.dryDown === false ? 0 : 1}`));
+  if (dryingEvidence.dryDown === false) expect(screen.queryByText('Re-entry countdown')).toBeNull();
+  else expect(await screen.findByText('Re-entry countdown')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  expect(submit.mock.calls[0][1].protocolActionScopesCompleted).toContainEqual({
+    label: action, scope, treatmentApplied: true, ...dryingEvidence,
+  });
+});
+
+it.each([false, true])('honors action removal and marker re-selection: reselect=%s', async (reselect) => {
+  completionChoicesEnabled = true;
+  techTipsAvailable = false;
+  mount();
+
+  const action = 'Inspected the serviced turf areas.';
+  const actionSearch = await screen.findByRole('combobox', { name: 'Search completed actions' });
+  fireEvent.change(actionSearch, { target: { value: action } });
+  fireEvent.click(await screen.findByRole('option', { name: action }));
+  expect(screen.getByPlaceholderText(/Notes about this service/).value).toContain(`[Protocol] ${action}`);
+
+  if (reselect) {
+    fireEvent.change(screen.getByPlaceholderText(/Notes about this service/), { target: { value: '' } });
+    fireEvent.change(actionSearch, { target: { value: action } });
+    fireEvent.click(await screen.findByRole('option', { name: action }));
+  } else fireEvent.click(screen.getByRole('button', { name: `Remove ${action}` }));
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  const body = submit.mock.calls[0][1];
+  expect(body.protocolActionsCompleted.includes(action)).toBe(reselect);
+  expect(body.technicianNotes.includes(action)).toBe(reselect);
+});
+
+it.each([
+  [Array.from({ length: 21 }, (_, i) => `Recorded action ${i + 1}.`), 'at most 20 entries'],
+  [Array.from({ length: 20 }, (_, i) => `Recorded action ${i + 1}.`), 'at most 20 entries', '[Action] Another recorded action.'],
+  [['Recorded action '.repeat(17)], 'keep each line under 240 characters'],
+])('blocks completed actions the server would truncate: %s', async (actions, message, extraMarker = '') => {
+  completionChoicesEnabled = true;
+  localStorage.setItem(`waves_completion_draft_${service.id}`, JSON.stringify({
+    serviceId: service.id, savedAt: Date.now(), notes: `${actions.map((label) => `[Protocol] ${label}`).join('\n')}\n${extraMarker}`,
+    selectedProducts: [{ productId: 'test-k', rate: 3, rateUnit: 'fl_oz', totalAmount: 15, amountUnit: 'fl_oz', areaValue: 5000, areaUnit: 'sqft' }],
+    selectedProtocolActionLabels: actions, actionScopeByLabel: Object.fromEntries(actions.map((label) => [label, { completionChoice: true }])),
+  }));
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  if (actions.length >= 20) {
+    fireEvent.focus(screen.getByRole('combobox', { name: 'Search completed actions' }));
+    expect(screen.getByText('Up to 20 selections.')).toBeTruthy();
+  }
+  fireEvent.click(await screen.findByRole('button', { name: /complete & send recap/i }));
+  expect(alert).toHaveBeenCalledWith(expect.stringContaining(message));
+  expect(submit).not.toHaveBeenCalled();
+});
+
+it.each([['gate off', true], ['API error', true], ['gate off', false], ['API error', false]])('preserves unscoped searchable actions after choices are unavailable: %s, generated=%s', async (mode, generated) => {
+  completionChoicesEnabled = true;
+  techTipsAvailable = false;
+  const first = mount();
+
+  const action = 'Custom documented lawn work.';
+  const actionSearch = await screen.findByRole('combobox', { name: 'Search completed actions' });
+  fireEvent.change(actionSearch, { target: { value: action } });
+  fireEvent.keyDown(actionSearch, { key: 'Enter' });
+  const catalogAction = 'Completed lawn service in the front yard.';
+  fireEvent.change(actionSearch, { target: { value: catalogAction } });
+  fireEvent.click(await screen.findByRole('option', { name: catalogAction }));
+  if (generated) {
+    fireEvent.click(screen.getAllByRole('button', { name: /generate ai/i })[0]);
+    await waitFor(() => expect(screen.getByPlaceholderText(/Notes about this service/).value).toContain('WHAT WE DID'));
+  }
+  const key = `waves_completion_draft_${service.id}`;
+  await waitFor(() => expect(JSON.parse(localStorage.getItem(key))).toMatchObject({
+    chipLinesDetached: generated,
+    selectedProtocolActionLabels: [action, catalogAction],
+  }));
+
+  first.unmount();
+  completionChoicesEnabled = false;
+  techTipsFailure = mode === 'API error';
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  if (generated) expect(await screen.findByRole('button', { name: `Remove protocol item: ${action}` })).toBeTruthy();
+  else expect(screen.getByPlaceholderText(/Notes about this service/).value).toContain(`[Protocol] ${action}`);
+
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  expect(submit.mock.calls[0][1].protocolActionsCompleted).toEqual([action, catalogAction]);
+});
+
+it.each(['gate off', 'API error'])('keeps saved scope for a visible pre-generation catalog action after choices are unavailable: %s', async (mode) => {
+  const action = 'Completed the documented lawn insect-control application.';
+  localStorage.setItem(`waves_completion_draft_${service.id}`, JSON.stringify({
+    serviceId: service.id,
+    savedAt: Date.now(),
+    notes: `[Protocol] ${action}`,
+    selectedProducts: [{ productId: 'test-k', rate: 3, rateUnit: 'fl_oz', totalAmount: 15, amountUnit: 'fl_oz', areaValue: 5000, areaUnit: 'sqft' }],
+    areasServiced: ['Front yard'],
+    selectedProtocolActionLabels: [action],
+    actionScopeByLabel: { [action]: { scope: 'exterior', treatmentApplied: true } },
+    chipLinesDetached: false,
+  }));
+  completionChoicesEnabled = false;
+  techTipsFailure = mode === 'API error';
+  mount();
+
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  expect(screen.getByPlaceholderText(/Notes about this service/).value).toContain(`[Protocol] ${action}`);
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  expect(submit.mock.calls[0][1]).toMatchObject({
+    protocolActionsCompleted: [action],
+    protocolActionScopesCompleted: [{ label: action, scope: 'exterior', treatmentApplied: true }],
+  });
+});
+
+it.each(['marker', 'mixed-case marker', 'generated'])('omits retired lawn actions without saved choice or scope provenance: %s', async (mode) => {
+  const retiredAction = 'Retired planned lawn application.';
+  const generated = mode === 'generated';
+  const markerAction = mode === 'mixed-case marker' ? retiredAction.toUpperCase() : retiredAction;
+  completionChoicesEnabled = !generated;
+  localStorage.setItem(`waves_completion_draft_${service.id}`, JSON.stringify({
+    serviceId: service.id, savedAt: Date.now(),
+    notes: generated ? 'WHAT WE DID:\nDocumented this visit.' : `Handwritten visit note.\n[Protocol] ${markerAction}`,
+    selectedProducts: [{ productId: 'test-k', rate: 3, rateUnit: 'fl_oz', totalAmount: 15, amountUnit: 'fl_oz', areaValue: 5000, areaUnit: 'sqft' }],
+    areasServiced: ['Front yard'], selectedProtocolActionLabels: [retiredAction],
+    chipLinesDetached: generated,
+  }));
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  await waitFor(() => expect(fetch.mock.calls.some(([url]) => url.includes('completion-actions'))).toBe(true));
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  expect(submit.mock.calls[0][1].protocolActionsCompleted).not.toContain(retiredAction);
+  expect(submit.mock.calls[0][1].technicianNotes).not.toContain(markerAction);
+});
+
+it('omits a visible generated-draft action that is outside the current specialty preset', async () => {
+  const specialtyService = {
+    ...service,
+    id: 'specialty-visit',
+    serviceType: 'Mud Dauber Removal',
+    completionProfile: { serviceKey: 'mud_dauber_removal', requiresProducts: false },
+  };
+  const retiredAction = 'Retired specialty protocol action';
+  localStorage.setItem(`waves_completion_draft_${specialtyService.id}`, JSON.stringify({
+    serviceId: specialtyService.id,
+    savedAt: Date.now(),
+    notes: 'WHAT WE DID:\nDocumented the visit.\nWHAT WE FOUND:\nNo active work recorded.',
+    selectedProducts: [],
+    areasServiced: [],
+    selectedProtocolActionLabels: [retiredAction],
+    chipLinesDetached: true,
+  }));
+
+  render(<CompletionPanel service={specialtyService} products={catalog} onClose={() => {}} onSubmit={submit} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  expect(await screen.findByRole('button', { name: `Remove protocol item: ${retiredAction}` })).toBeTruthy();
+
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  expect(submit.mock.calls[0][1].protocolActionsCompleted).toEqual([]);
+});
 
 it('prefills the engine mix and submits findings and inspection actions once, with edited quantities', async () => {
   mount();
@@ -862,6 +1193,9 @@ it('a plan refresh that changes the products drops an untouched generated report
   fireEvent.change(notes, { target: { value: 'Hand notes before generating.' } });
   fireEvent.click(screen.getAllByRole('button', { name: /generate ai/i })[0]);
   await waitFor(() => expect(notes.value).toContain('Applied the old products.'));
+  const generated = JSON.parse(fetch.mock.calls.find(([url]) => url.includes('generate-report'))[1].body);
+  expect(generated.products[0]).toMatchObject({ applicationMethod: 'broadcast_spray', applicationArea: 'Front yard, Back yard, Side yards', areaUnit: 'sqft' });
+  expect(String(generated.products[0].areaValue)).toBe('5000');
   withdrawDefaults = true;
   fireEvent.click(screen.getByRole('button', { name: 'Refresh plan' }));
   await waitFor(() => expect(screen.queryByText('Updating plan suggestions…')).toBeNull());

@@ -6,7 +6,7 @@
  *
  * @typedef {"lawn" | "tree_shrub" | "recurring_pest"} ServiceCompletionChoiceFamily
  * @typedef {"observations" | "recommendations" | "completedActions"} ServiceCompletionChoiceCategory
- * @typedef {{ id: string, label: string, keywords: readonly string[], scope?: "interior" | "exterior", treatmentApplied?: boolean }} ServiceCompletionChoice
+ * @typedef {{ id: string, label: string, keywords: readonly string[], scope?: "interior" | "exterior", treatmentApplied?: boolean, dryDown?: boolean }} ServiceCompletionChoice
  */
 
 export const SERVICE_COMPLETION_CHOICE_FAMILIES = Object.freeze([
@@ -210,7 +210,7 @@ const treeShrub = Object.freeze({
     ["completed-root-zone", "Completed the documented root-zone application.", ["soil treatment", "drench"], { scope: "exterior", treatmentApplied: true }],
     ["completed-granular", "Completed the documented granular application.", ["soil", "broadcast"], { scope: "exterior", treatmentApplied: true }],
     ["completed-targeted", "Completed a targeted application on the recorded plants.", ["spot treatment", "localized"], { scope: "exterior", treatmentApplied: true }],
-    ["completed-trunk", "Completed the documented trunk application.", ["injection", "stem"], { scope: "exterior", treatmentApplied: true }],
+    ["completed-trunk", "Completed the documented trunk application.", ["injection", "stem"], { scope: "exterior", treatmentApplied: true, dryDown: false }],
     ["treated-visible-activity", "Treated the recorded area of visible plant-pest activity.", ["insects", "localized"], { scope: "exterior", treatmentApplied: true }],
     ["serviced-palms", "Completed the recorded palm-care work.", ["palms", "fronds"]],
     ["serviced-foundation-beds", "Completed tree and shrub service in the foundation beds.", ["landscape", "zone"]],
@@ -301,9 +301,9 @@ const recurringPest = Object.freeze({
     ["applied-exterior-repellent", "Applied the documented repellent treatment to recorded exterior areas.", ["outside", "application"], { scope: "exterior", treatmentApplied: true }],
     ["applied-interior-repellent", "Applied the documented repellent treatment to recorded interior areas.", ["inside", "application"], { scope: "interior", treatmentApplied: true }],
     ["completed-baseboard-treatment", "Completed the documented interior edge and baseboard treatment.", ["kitchen", "bath", "inside"], { scope: "interior", treatmentApplied: true }],
-    ["completed-crack-crevice", "Completed the documented crack-and-crevice treatment.", ["gaps", "targeted"], { treatmentApplied: true }],
-    ["applied-gel-bait", "Applied gel bait in the recorded locations.", ["bait", "interior"], { treatmentApplied: true }],
-    ["dusted-voids", "Applied dust to the recorded accessible voids.", ["wall void", "application"], { treatmentApplied: true }],
+    ["completed-crack-crevice", "Completed the documented crack-and-crevice treatment.", ["gaps", "targeted"], { scope: "interior", treatmentApplied: true }],
+    ["applied-gel-bait", "Applied gel bait in the recorded locations.", ["bait", "interior"], { scope: "interior", treatmentApplied: true, dryDown: false }],
+    ["dusted-voids", "Applied dust to the recorded accessible voids.", ["wall void", "application"], { scope: "interior", treatmentApplied: true, dryDown: false }],
     ["serviced-eaves", "Completed the recorded eave and soffit service.", ["roofline", "exterior"]],
     ["serviced-garage", "Completed the recorded garage service.", ["interior", "area"]],
     ["serviced-kitchen-baths", "Completed the recorded kitchen and bathroom service.", ["interior", "area"]],
