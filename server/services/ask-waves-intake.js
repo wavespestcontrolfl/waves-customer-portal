@@ -652,7 +652,10 @@ function scrubUnsafeClaims(result, contextText = '', activeMessage = contextText
   // short replies ("Sí, es seguro.") — never an earlier turn, so a visitor
   // who switched to English gets English.
   const spanish = looksSpanish(result.reply) || looksSpanish(activeMessage) || looksSpanish(`${result.reply} ${activeMessage}`);
-  return { ...result, reply: spanish ? UNSAFE_CLAIM_REPLY_ES : UNSAFE_CLAIM_REPLY };
+  // A mislabeled "emergency" with no emergency evidence gets the label copy
+  // and is no longer an emergency turn.
+  const intent = result.intent === 'emergency' ? 'question' : result.intent;
+  return { ...result, intent, reply: spanish ? UNSAFE_CLAIM_REPLY_ES : UNSAFE_CLAIM_REPLY };
 }
 
 // Validate + coerce whatever JSON a provider returned into the wire contract.

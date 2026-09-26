@@ -460,6 +460,7 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
     const out = scrubUnsafeClaims({ reply: 'This treatment is completely safe for your pets.', intent: 'emergency', service_keys: [], ready_for_quote: false }, 'Is it safe for my pets?');
     expect(out.reply).toMatch(/label directions/);
     expect(out.reply).not.toContain('911');
+    expect(out.intent).toBe('question');
   });
 
   test('a treatment-linked pet symptom gets the veterinary script', () => {
