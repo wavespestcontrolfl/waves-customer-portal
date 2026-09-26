@@ -194,6 +194,18 @@ async function delayedLeadReplyStillEligible(customerId, phoneDigits, conn = db,
     if (exchanged) {
       return { ok: false, code: 'LEAD_CONVERSATION_STARTED', reason: 'A text was exchanged with the customer before the delayed lead reply' };
     }
+    // The shared thread guard every reply path runs (the Inbox sender, the
+    // auto-send executor): it also sees a staff reply still in flight (its
+    // 'sending' reservation is committed before its provider call) and a
+    // newer inbound. Run on this handoff's transaction; the thread advisory
+    // lock itself is NOT taken here, because the provider call below can
+    // open its own reservation transaction on that same lock.
+    const blocker = await require('./sms-suggest-mode').threadHasLiveAnswer(conn, {
+      threadLast10: phoneDigits, customerId, inboundCreatedAt: since,
+    });
+    if (blocker) {
+      return { ok: false, code: 'LEAD_CONVERSATION_STARTED', reason: `The thread is already active (${blocker}) before the delayed lead reply` };
+    }
   }
   const customer = await conn('customers').where({ id: customerId }).first('lead_intake_status');
   if (!UNTOUCHED_INTAKE_STATUSES.includes(customer?.lead_intake_status ?? null)) {
@@ -203,10 +215,18 @@ async function delayedLeadReplyStillEligible(customerId, phoneDigits, conn = db,
   // a staff status change waits until the provider has the request.
   const leadQuery = conn('leads').where({ customer_id: customerId });
   if (conn !== db) leadQuery.forNoKeyUpdate();
-  const leads = await leadQuery.select('status', 'deleted_at');
-  const livePreContact = leads.some(lead => !lead.deleted_at && (lead.status == null || PRE_CONTACT_LEAD_STATUSES.includes(lead.status)));
-  if (leads.length && !livePreContact) {
+  const leads = await leadQuery.select('status', 'deleted_at', 'phone');
+  const livePreContactLeads = leads.filter(lead => !lead.deleted_at && (lead.status == null || PRE_CONTACT_LEAD_STATUSES.includes(lead.status)));
+  if (leads.length && !livePreContactLeads.length) {
     return { ok: false, code: 'LEAD_NO_LONGER_PRE_CONTACT', reason: 'The lead was contacted, closed or deleted before the delayed lead reply' };
+  }
+  // Staff can correct the phone on the lead alone (PUT /api/admin/leads/:id
+  // leaves customers.phone as is): a live lead now on another number means
+  // the captured recipient is stale.
+  const leadPhoneChanged = livePreContactLeads.some(lead => lead.phone
+    && String(lead.phone).replace(/\D/g, '').slice(-10) !== phoneDigits);
+  if (leadPhoneChanged) {
+    return { ok: false, code: 'LEAD_SUBJECT_CHANGED', reason: 'The lead phone changed before the delayed lead reply' };
   }
   return { ok: true };
 }

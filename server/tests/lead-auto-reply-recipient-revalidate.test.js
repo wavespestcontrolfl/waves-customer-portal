@@ -38,6 +38,8 @@ jest.mock('../models/db', () => {
   db.__tableChain = tableChain;
   return db;
 });
+let mockThreadBlocker = null;
+jest.mock('../services/sms-suggest-mode', () => ({ threadHasLiveAnswer: jest.fn(async () => mockThreadBlocker) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/sms-template-renderer', () => ({ renderRequiredSmsTemplate: async () => 'Hello Sam! Waves Pest Control here.' }));
 jest.mock('../utils/customer-comms-lock', () => ({
@@ -71,6 +73,7 @@ beforeEach(() => {
   mockCustomerRow = { phone: '(941) 555-1234', lead_intake_status: 'awaiting_service' };
   mockLeads = [{ status: 'new', deleted_at: null }];
   mockInbound = null;
+  mockThreadBlocker = null;
 });
 
 describe('recipientStillCurrent', () => {
@@ -178,6 +181,24 @@ describe('delayedLeadReplyStillEligible', () => {
     await delayedLeadReplyStillEligible('cust-1', '9415551234', trx, { since: new Date() });
     const [, leadChain] = chains.find(([table]) => table === 'leads');
     expect(leadChain.forNoKeyUpdate).toHaveBeenCalled();
+  });
+
+  test('a staff reply still in flight (shared thread guard) → refused', async () => {
+    mockThreadBlocker = 'reply_in_flight';
+    await expect(delayedLeadReplyStillEligible('cust-1', '9415551234', undefined, { since: new Date() }))
+      .resolves.toMatchObject({ ok: false, code: 'LEAD_CONVERSATION_STARTED' });
+    const { threadHasLiveAnswer } = require('../services/sms-suggest-mode');
+    expect(threadHasLiveAnswer).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ threadLast10: '9415551234', customerId: 'cust-1' }));
+  });
+
+  test('the lead phone was corrected on the lead alone → refused', async () => {
+    mockLeads = [{ status: 'new', deleted_at: null, phone: '+19415559999' }];
+    await expect(delayedLeadReplyStillEligible('cust-1', '9415551234')).resolves.toMatchObject({ ok: false, code: 'LEAD_SUBJECT_CHANGED' });
+  });
+
+  test('the lead carries the same phone in another format → ok', async () => {
+    mockLeads = [{ status: 'new', deleted_at: null, phone: '(941) 555-1234' }];
+    await expect(delayedLeadReplyStillEligible('cust-1', '9415551234')).resolves.toEqual({ ok: true });
   });
 
   test('no inbound text since the form → ok', async () => {
