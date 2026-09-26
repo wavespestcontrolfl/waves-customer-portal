@@ -1083,4 +1083,67 @@ describe('estimate AI support context', () => {
     });
     expect(misting.repositoryFiles.some((row) => row.path === 'wiki/protocols/mosquito-misting-systems.md')).toBe(true);
   });
+
+  // AW-04 rd2 (Codex P1): the repo-file allowlist fixed in rd1 left the
+  // DB-backed knowledge_base lookup wide open — any active, non-blocked row
+  // matching a search term was eligible, and this loader always searches for
+  // 'WaveGuard' (requiredContextTerms). The seeded founder-knowledge article
+  // (20260415000013_seed_founder_knowledge.js, category 'business-strategy')
+  // carries WaveGuard tier/decoy/margin strategy and was reachable from
+  // nearly any estimate question. searchKnowledgeBase now gates on
+  // KNOWLEDGE_BASE_CUSTOMER_SAFE_CATEGORIES (an allowlist) plus
+  // INTERNAL_CONTENT_MARKER_PATTERN as a backstop.
+  test('AW-04 rd2: an internal business-strategy knowledge_base row is excluded; a customer-facing row still loads', async () => {
+    const result = await loadEstimateAiSupportContext({
+      db: fakeDb({
+        knowledge_base: [
+          {
+            path: 'wiki/business-strategy/waveguard-tier-logic.md',
+            title: 'Why WaveGuard Tiers Are Structured This Way',
+            category: 'business-strategy',
+            summary: 'The WaveGuard Bronze/Silver/Gold/Platinum ladder is a Hormozi-style Grand Slam Offer — the middle tier is priced to look like the obvious choice, Bronze is a decoy, and margin compounds at Gold.',
+            content: 'Internal margin, decoy-effect, and route-density strategy notes for staff only.',
+          },
+          {
+            path: 'wiki/services/mosquito-barrier.md',
+            title: 'Mosquito Barrier Program',
+            category: 'services',
+            summary: 'WaveGuard mosquito barrier treatment overview: monthly barrier spray targeting resting and breeding zones.',
+            content: 'Customer-facing description of the mosquito barrier program.',
+          },
+        ],
+      }),
+      question: 'What does my WaveGuard plan include?',
+      context: {
+        services: [{ label: 'Mosquito Control', detail: 'Barrier treatment' }],
+        waveGuardTier: 'WaveGuard Gold',
+      },
+    });
+
+    expect(result.knowledgeBase.some((row) => row.path === 'wiki/business-strategy/waveguard-tier-logic.md')).toBe(false);
+    expect(result.knowledgeBase.some((row) => row.path === 'wiki/services/mosquito-barrier.md')).toBe(true);
+
+    const serialized = JSON.stringify(result).toLowerCase();
+    expect(serialized).not.toContain('decoy');
+    expect(serialized).not.toContain('margin');
+    expect(serialized).not.toContain('grand slam offer');
+  });
+
+  test('AW-04 rd2: a knowledge_base row with no category is excluded (allowlist fails closed)', async () => {
+    const result = await loadEstimateAiSupportContext({
+      db: fakeDb({
+        knowledge_base: [{
+          path: 'wiki/uncategorized/notes.md',
+          title: 'Uncategorized Notes',
+          category: null,
+          summary: 'A knowledge_base row with no category set.',
+          content: 'Uncategorized content.',
+        }],
+      }),
+      question: 'What is included?',
+      context: { services: [{ label: 'Lawn Care', detail: 'Fertilizer program' }] },
+    });
+
+    expect(result.knowledgeBase).toEqual([]);
+  });
 });

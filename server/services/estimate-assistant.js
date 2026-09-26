@@ -1487,7 +1487,23 @@ async function answerEstimateQuestion({
     };
   }
 
-  if (FORCE_FALLBACK_QUESTION_PATTERN.test(cleanQuestion) && supportRows(context).length) {
+  // AW-04 fix (2026-09-25): this used to also require supportRows(context).length
+  // — added when support context always carried at least the (now-removed)
+  // fixed repo-file allowlist, so "no rows" never happened for a real
+  // service estimate. Now that repositoryFiles is a narrow allowlist and DB
+  // lookups can legitimately return nothing (DB unavailable, no matching
+  // row), a pesticide safety/re-entry/pet/kid question with empty support
+  // rows fell through that `&&` to the live model instead of the
+  // deterministic label-safety path below — exactly the question class this
+  // gate exists to keep off the LLM. answerEstimateQuestionFallback already
+  // degrades gracefully with zero support rows (labelSafetyFactsFromSupport
+  // returns '' and the safety branch still returns the controlled label-
+  // directions copy — see "no catalog rows at all still gets the generic
+  // safety answer" in estimate-assistant-label-safety-fallback.test.js), so
+  // routing here no longer depends on row availability. Populated-row
+  // behavior is unchanged: the pattern match alone already routed here
+  // whenever rows existed.
+  if (FORCE_FALLBACK_QUESTION_PATTERN.test(cleanQuestion)) {
     return {
       answer: answerEstimateQuestionFallback(cleanQuestion, context),
       source: 'fallback',

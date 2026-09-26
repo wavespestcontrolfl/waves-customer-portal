@@ -52,16 +52,40 @@ const SERVICE_LABEL_PATTERNS = [
 // customer-safe already comes from the structured, reviewed sources above
 // this loader (knowledge_base / knowledge_entries with TRUSTED_STATUSES,
 // the service library, and label-verified products_catalog rows) — those
-// are unaffected by this list and stay the primary customer-safe sources.
+// get their OWN customer-safe gates below (KNOWLEDGE_BASE_CUSTOMER_SAFE_CATEGORIES
+// + INTERNAL_CONTENT_MARKER_PATTERN), not this repo-file list.
 const MISTING_PROTOCOL_FILE = 'wiki/protocols/mosquito-misting-systems.md';
 const CUSTOMER_SAFE_REPO_FILES = [MISTING_PROTOCOL_FILE];
 
-// Defense in depth ON TOP OF the allowlist above — never the boundary
-// itself. Drops a repo-file snippet that contains internal cost/margin or
-// staff-routing language even though its file is allowlisted, so a future
-// edit to an allowlisted file (or an allowlist mistake) can't leak that
-// material into the model prompt silently.
+// Defense in depth ON TOP OF the allowlists in this file — never the boundary
+// itself. Drops a snippet that contains internal cost/margin or
+// staff-routing language even though its source is allowlisted, so a future
+// edit to an allowlisted file/category (or an allowlist mistake) can't leak
+// that material into the model prompt silently. Applied to every DB-backed
+// support source below, not just the repo-file list.
 const INTERNAL_CONTENT_MARKER_PATTERN = /\b(?:margins?|contribution\s*margin|cost\s*targets?|COGS|mark\s*-?ups?|labor\s*(?:cost|rate)s?|material\s*costs?|dispatch(?:ing)?|route\s*density)\b/i;
+
+// AW-04 fix (2026-09-25): searchKnowledgeBase below used to accept ANY active,
+// non-blocked knowledge_base row that matched a search term — and this
+// loader's search terms always include 'WaveGuard' (see
+// searchTermsFromContext's requiredContextTerms), so the founder-knowledge
+// seed (20260415000013_seed_founder_knowledge.js, category
+// 'business-strategy': WaveGuard tier/decoy/margin strategy, route-density
+// economics) was eligible for nearly every public estimate question. The
+// knowledge_base.category column is admin free text — Claudeopedia's
+// create()/normalizeCategory() (knowledge-base.js) slugifies whatever string
+// an admin passes, there is no audience/visibility column on this table — so
+// this is a closed ALLOWLIST, not a denylist: only these categories (the
+// customer content categories the original migration comment documented —
+// services, products, protocols, compliance, pests, turf — plus the
+// technician-neutral 'equipment' and the normalizeCategory() default
+// 'general') may answer a public estimate question. A new or misspelled
+// category (or 'business-strategy', 'operations', 'pricing', 'customers',
+// 'competitive' — the internal categories seen in this table today) is
+// invisible by default, same posture as CUSTOMER_SAFE_REPO_FILES above.
+const KNOWLEDGE_BASE_CUSTOMER_SAFE_CATEGORIES = [
+  'services', 'products', 'protocols', 'compliance', 'pests', 'turf', 'equipment', 'general',
+];
 
 const EXTERNAL_REFERENCES = {
   general: [
@@ -434,7 +458,13 @@ async function searchKnowledgeBase(db, terms) {
       title: row.title,
       category: row.category || null,
       snippet: rowSnippet(row),
-    })).filter((row) => row.snippet || row.title);
+    })).filter((row) => row.snippet || row.title)
+      // AW-04 fix — see KNOWLEDGE_BASE_CUSTOMER_SAFE_CATEGORIES above. A
+      // missing category is excluded too (fail closed): the allowlist is the
+      // boundary, not "not obviously internal".
+      .filter((row) => KNOWLEDGE_BASE_CUSTOMER_SAFE_CATEGORIES.includes(cleanText(row.category).toLowerCase()))
+      // Defense in depth — see INTERNAL_CONTENT_MARKER_PATTERN above.
+      .filter((row) => !INTERNAL_CONTENT_MARKER_PATTERN.test(`${row.title || ''} ${row.category || ''} ${row.snippet || ''}`));
   } catch (err) {
     logger.warn(`[estimate-ai-context] knowledge_base lookup skipped: ${err.message}`);
     return [];
@@ -472,7 +502,12 @@ async function searchAgronomicWiki(db, terms) {
       confidence: row.confidence || null,
       dataPointCount: row.data_point_count || 0,
       snippet: rowSnippet(row),
-    })).filter((row) => row.snippet || row.title);
+    })).filter((row) => row.snippet || row.title)
+      // Defense in depth — see INTERNAL_CONTENT_MARKER_PATTERN above. This
+      // table's own review_status gate (TRUSTED_STATUSES) is a content-accuracy
+      // review, not an audience boundary, so this catches a reviewed page that
+      // drifts into internal cost/staffing language.
+      .filter((row) => !INTERNAL_CONTENT_MARKER_PATTERN.test(`${row.title || ''} ${row.category || ''} ${row.snippet || ''}`));
   } catch (err) {
     logger.warn(`[estimate-ai-context] knowledge_entries lookup skipped: ${err.message}`);
     return [];
@@ -527,7 +562,12 @@ async function searchServiceLibrary(db, terms) {
         _productNames: products,
         snippet: trimSnippet(parts.join(' ')),
       };
-    }).filter((row) => row.snippet || row.title);
+    }).filter((row) => row.snippet || row.title)
+      // Defense in depth — see INTERNAL_CONTENT_MARKER_PATTERN above. The
+      // service library is admin-curated sellable-service copy (not open
+      // free text like knowledge_base), so this is a backstop, not the
+      // boundary.
+      .filter((row) => !INTERNAL_CONTENT_MARKER_PATTERN.test(`${row.title || ''} ${row.category || ''} ${row.snippet || ''}`));
   } catch (err) {
     logger.warn(`[estimate-ai-context] services lookup skipped: ${err.message}`);
     return [];

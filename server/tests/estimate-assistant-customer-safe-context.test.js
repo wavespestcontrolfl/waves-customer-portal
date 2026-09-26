@@ -81,4 +81,33 @@ describe('estimate assistant model prompt — customer-safe context boundary (AW
       expect(lowerContext).not.toContain(marker);
     }
   });
+
+  // AW-04 rd2 (Codex P1, estimate-ai-context.js:902 / estimate-assistant.js
+  // ~L1490): with the fixed repo-file allowlist above, repositoryFiles is
+  // empty for a non-misting question, and with database: null every DB-backed
+  // support lookup (knowledgeBase, agronomicWiki, serviceLibrary,
+  // productCatalog) also returns empty — so supportRows(context) is [].
+  // The force-fallback gate used to also require supportRows(context).length,
+  // so a pesticide safety/pet/kid question with zero support rows fell
+  // through to the live model instead of the deterministic label-safety
+  // branch. That gate is now unconditional on the pattern match alone.
+  test('a pet-safety question reaches the deterministic path (never the live model) when every support lookup returns nothing', async () => {
+    const result = await answerEstimateQuestion({
+      database: null,
+      question: 'Is this safe for my dog?',
+      estimate: {
+        id: 'synthetic-estimate-2',
+        token: 'synthetic-token-2',
+        status: 'sent',
+        customer_name: 'Synthetic Customer',
+        address: 'Synthetic Address',
+      },
+      estData: { services: [{ service: 'pest_control', label: 'Pest Control' }] },
+      pricingBundle: { waveGuardTier: 'WaveGuard' },
+    });
+
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(result.source).toBe('fallback');
+    expect(result.answer).toContain('follow the product label directions');
+  });
 });
