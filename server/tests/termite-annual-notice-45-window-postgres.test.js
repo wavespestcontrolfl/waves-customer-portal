@@ -49,6 +49,9 @@ async function createScratchDb() {
   return { db, async destroy() { await db.raw('DROP SCHEMA ?? CASCADE', [schema]); await db.destroy(); } };
 }
 
+// Real-PG scratch schemas + migration runs: slow under machine load.
+jest.setTimeout(60000);
+
 describeOrSkip('termite annual-plan notice obligations — unified 45/30 candidate query (real Postgres)', () => {
   let fixture;
   beforeEach(async () => { fixture = await createScratchDb(); });
