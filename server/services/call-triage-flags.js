@@ -971,7 +971,9 @@ function laterSentenceNamesSlot(ns) {
   const padded = ` ${ns} `;
   return LATER_TURN_SLOT_TERMS.some((t) => padded.includes(t))
     || MAY_DATE_RE.test(ns)
-    || /\bat \d{1,4}\b/.test(ns);
+    // "at <hour>" only in time position — sentence-final or followed by a
+    // time word — so "It's at 100 Example Street." stays an address.
+    || /\bat \d{1,4}(?:$| (?:o|oclock|clock|am|pm|a|p|thirty|fifteen|forty|\d{2})\b)/.test(ns);
 }
 function laterAgentSentenceRetracts(sentence, confirmedStartAt, callStartedAt) {
   const ns = sentence.ns;
