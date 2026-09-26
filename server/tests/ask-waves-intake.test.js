@@ -228,6 +228,7 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ['Keep the dog inside until 3pm.', ''],
     ['Usually by this afternoon.', 'When can I let my dog out after the treatment?'],
     ['Puede volver a entrar a las 4:30.', '¿Cuándo puedo volver a entrar después del tratamiento?'],
+    ['Your appointment is at 9 AM, and following completion of the treatment you can re-enter the house at 11 AM.', ''],
   ])('a clock-time re-entry instruction is replaced: %s', (reply, context) => {
     expect(scrubUnsafeClaims({ ...base, reply }, context).reply).toMatch(/label directions|instrucciones de la etiqueta/);
   });
@@ -576,6 +577,29 @@ describe('normalizeIntakeResult', () => {
     }, 'openai');
     expect(out.reply).toBe(SUPPORT_FALLBACK_RESULT.reply);
     expect(out.reply).not.toContain('Get my price');
+    expect(out.ready_for_quote).toBe(false);
+  });
+
+  test('price talk never erases emergency direction (safety runs on the original reply)', () => {
+    const out = normalizeIntakeResult(
+      { reply: 'The product is not safe to ingest; call Poison Control now. Treatment costs $50.', intent: 'question', service_keys: ['pest'], ready_for_quote: true },
+      'openai',
+      'My child swallowed bait',
+    );
+    expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
+    expect(out.reply).toContain('1-800-222-1222');
+    expect(out.reply).not.toMatch(/Get my price/);
+    expect(out.ready_for_quote).toBe(false);
+    expect(out.intent).toBe('emergency');
+  });
+
+  test('price talk in a reply to an emergency message gets the emergency script, not the price redirect', () => {
+    const out = normalizeIntakeResult(
+      { reply: 'Call Poison Control now. Treatment costs $50.', intent: 'question', service_keys: ['pest'], ready_for_quote: true },
+      'openai',
+      'My child swallowed bait',
+    );
+    expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
     expect(out.ready_for_quote).toBe(false);
   });
 

@@ -362,8 +362,9 @@ function durationWindow(sentence, index, length) {
 function fixedTimingClaim(reply, contextText, treatmentContext) {
   const visitorAskedTiming = ACCESS_SIGNAL_RE.test(String(contextText || ''));
   for (const sentence of String(reply || '').split(/(?<=[.!?])\s+|[;\n]+/)) {
-    const clock = CLOCK_TIME_RE.exec(sentence);
-    if (clock) {
+    const clockRe = new RegExp(CLOCK_TIME_RE.source, 'gi');
+    let clock;
+    while ((clock = clockRe.exec(sentence))) {
       const { near } = durationWindow(sentence, clock.index, clock[0].length);
       const digitalOnly = DIGITAL_CONTEXT_RE.test(near) && !treatmentContext;
       if (!digitalOnly && (ACCESS_SIGNAL_RE.test(near) || (visitorAskedTiming && treatmentContext))) return true;
@@ -422,6 +423,33 @@ const REVIEWED_REPLIES = new Set([
   FALLBACK_RESULT.reply,
 ]);
 
+// The emergency script for a reply that must be replaced, when the reply or
+// the visitor's words carry emergency direction — human and/or veterinary,
+// whichever the model gave — and the turn stops offering a quote. Returns
+// null when there is no emergency evidence.
+function emergencyGuidance(result, contextText = '') {
+  const folded = foldTypography(result.reply);
+  // The visitor's own words count too: a flagged reply to an emergency message
+  // gets the emergency script even if the model's reply names no direction.
+  const human = HUMAN_EMERGENCY_DIRECTION_RE.test(folded) || looksLikeEmergency(foldTypography(contextText));
+  const vet = VET_DIRECTION_RE.test(folded);
+  if (!(result.intent === 'emergency' || human || vet)) return null;
+  const parts = [];
+  if (human || (result.intent === 'emergency' && !vet)) {
+    parts.push(EMERGENCY_FALLBACK_RESULT.reply + (POISON_MENTION_RE.test(folded) ? POISON_CONTROL_LINE : ''));
+  }
+  if (vet) {
+    parts.push(`${ANIMAL_EMERGENCY_REPLY.trim()} For an urgent pest problem at your home, call us at ${COMPANY.phone}.`);
+  }
+  return {
+    ...result,
+    reply: parts.join(' '),
+    intent: 'emergency',
+    service_keys: [],
+    ready_for_quote: false,
+  };
+}
+
 function scrubUnsafeClaims(result, contextText = '') {
   // The shared reentrySafetyClaimFinding is NOT called here: its worst case
   // blocks the event loop for seconds on ordinary replies (#4905), and this
@@ -432,29 +460,8 @@ function scrubUnsafeClaims(result, contextText = '') {
   // redirect is not a re-entry time.
   if (REVIEWED_REPLIES.has(result.reply)) return result;
   if (!intakeSafetyClaimSupplement(result.reply, contextText)) return result;
-  // The visitor's own words count too: a flagged reply to an emergency message
-  // gets the emergency script even if the model's reply names no direction.
-  const folded = foldTypography(result.reply);
-  const human = HUMAN_EMERGENCY_DIRECTION_RE.test(folded) || looksLikeEmergency(foldTypography(contextText));
-  const vet = VET_DIRECTION_RE.test(folded);
-  if (result.intent === 'emergency' || human || vet) {
-    // Emergency guidance wins — human and/or veterinary, whichever the model
-    // gave — and the turn stops offering a quote.
-    const parts = [];
-    if (human || (result.intent === 'emergency' && !vet)) {
-      parts.push(EMERGENCY_FALLBACK_RESULT.reply + (POISON_MENTION_RE.test(folded) ? POISON_CONTROL_LINE : ''));
-    }
-    if (vet) {
-      parts.push(`${ANIMAL_EMERGENCY_REPLY.trim()} For an urgent pest problem at your home, call us at ${COMPANY.phone}.`);
-    }
-    return {
-      ...result,
-      reply: parts.join(' '),
-      intent: 'emergency',
-      service_keys: [],
-      ready_for_quote: false,
-    };
-  }
+  const emergency = emergencyGuidance(result, contextText);
+  if (emergency) return emergency;
   // The reply's own language, falling back to the visitor's for short replies
   // ("Sí, es seguro.").
   const spanish = looksSpanish(result.reply) || looksSpanish(contextText);
@@ -473,24 +480,34 @@ function normalizeIntakeResult(json, source, contextText = '') {
   const serviceKeys = Array.isArray(json.service_keys)
     ? [...new Set(json.service_keys.filter((k) => QUOTABLE_KEYS.has(k)))]
     : [];
-  // Intent-consistent handling, enforced in code not just the prompt.
-  // Emergency/support turns never steer into the quote flow — and when such a
-  // reply ALSO contains price talk, it must NOT get the generic "Get my price"
-  // redirect (that would strip the 911/medical or portal guidance and still
-  // sound price-oriented); it gets the matching safe copy instead.
-  if (intent === 'emergency' || intent === 'existing_customer') {
-    const safeReply = PRICE_TALK_RE.test(reply)
-      ? (intent === 'emergency' ? EMERGENCY_FALLBACK_RESULT.reply : SUPPORT_FALLBACK_RESULT.reply)
-      : reply;
-    return scrubUnsafeClaims({ reply: safeReply, intent, service_keys: [], ready_for_quote: false, source }, contextText);
-  }
-  return scrubUnsafeClaims(scrubPriceTalk({
+  const quoteless = intent === 'emergency' || intent === 'existing_customer';
+  const base = {
     reply,
     intent,
-    service_keys: serviceKeys,
-    ready_for_quote: json.ready_for_quote === true,
+    service_keys: quoteless ? [] : serviceKeys,
+    ready_for_quote: quoteless ? false : json.ready_for_quote === true,
     source,
-  }), contextText);
+  };
+  // Safety/emergency handling reads the model's ORIGINAL reply, before any
+  // price replacement: "…not safe to ingest; call Poison Control now.
+  // Treatment costs $50." must keep the emergency script, not become the
+  // "Get my price" redirect. The reviewed replacements carry no price.
+  const scrubbed = scrubUnsafeClaims(base, contextText);
+  if (scrubbed.reply !== reply) {
+    // No emergency: a claim-carrying price answer gets the price redirect —
+    // reviewed copy too, and the useful answer to a price question.
+    if (scrubbed.intent !== 'emergency' && !quoteless && PRICE_TALK_RE.test(reply)) return scrubPriceTalk(base);
+    return scrubbed;
+  }
+  if (!PRICE_TALK_RE.test(reply)) return base;
+  // Price talk in a reply that also carries emergency direction (or answers
+  // an emergency message) gets the emergency script; an account reply gets
+  // the support copy — never the generic price redirect, which would strip
+  // the 911/medical or portal guidance and still sound price-oriented.
+  const emergency = emergencyGuidance(base, contextText);
+  if (emergency) return emergency;
+  if (intent === 'existing_customer') return { ...base, reply: SUPPORT_FALLBACK_RESULT.reply };
+  return scrubPriceTalk(base);
 }
 
 // Best-effort conversation log into the existing assistant tables so Ask Waves
