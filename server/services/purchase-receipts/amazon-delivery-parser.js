@@ -41,6 +41,11 @@
  * sweep.js for the rest of the pipeline.
  */
 const AMAZON_DELIVERY_FROM = 'order-update@amazon.com';
+// "Shipped:" mail for the same shipment. It carries the same Order #, item
+// blocks and Track-link shipmentId as the later Delivered email (checked
+// against every real pair), which is what lets undelivered-shipments.js
+// notice a shipment whose Delivered email never came.
+const AMAZON_SHIPPED_FROM = 'shipment-tracking@amazon.com';
 const ORDER_NUMBER_RE = /Order\s*#\s*([\d-]+)/i;
 // The "Track package" (or "Track your package") link's shipmentId query
 // param: plain in body_text (`?shipmentId=X`), `&amp;shipmentId=X` in raw
@@ -55,6 +60,12 @@ function isAmazonDeliveredEmail(email) {
   const from = String(email?.from_address || '').trim().toLowerCase();
   const subject = String(email?.subject || '').trim();
   return from === AMAZON_DELIVERY_FROM && /^delivered:/i.test(subject);
+}
+
+function isAmazonShippedEmail(email) {
+  const from = String(email?.from_address || '').trim().toLowerCase();
+  const subject = String(email?.subject || '').trim();
+  return from === AMAZON_SHIPPED_FROM && /^shipped:/i.test(subject);
 }
 
 // The classifier only ever hands this parser already-plain text; stripping
@@ -145,7 +156,15 @@ function parseItemBlocksFromText(text) {
  *   review rather than letting an unreadable delivery vanish.
  */
 function parseAmazonDeliveredEmail(email) {
-  if (!isAmazonDeliveredEmail(email)) return null;
+  return isAmazonDeliveredEmail(email) ? parseOrderEmail(email) : null;
+}
+
+// The same shape for a "Shipped:" email; null when it isn't one.
+function parseAmazonShippedEmail(email) {
+  return isAmazonShippedEmail(email) ? parseOrderEmail(email) : null;
+}
+
+function parseOrderEmail(email) {
   const text = extractText(email);
   const orderNumber = extractOrderNumber(text);
   const items = parseItemBlocksFromText(text);
@@ -167,6 +186,8 @@ function parseAmazonDeliveredEmail(email) {
 
 module.exports = {
   parseAmazonDeliveredEmail,
+  parseAmazonShippedEmail,
   isAmazonDeliveredEmail,
   AMAZON_DELIVERY_FROM,
+  AMAZON_SHIPPED_FROM,
 };

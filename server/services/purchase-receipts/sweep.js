@@ -35,6 +35,9 @@
  *     per-email hook missed (a process restart mid-sync, the hook's own
  *     error swallow, a backfill). It looks back at most SWEEP_LOOKBACK_MS
  *     (never before PURCHASE_RECEIPT_SINCE), so its work stays bounded.
+ *     After the Delivered pass it runs undelivered-shipments.js: a stocked
+ *     shipment whose Delivered email never came gets one bell asking for a
+ *     hand log.
  */
 const db = require('../../models/db');
 const logger = require('../logger');
@@ -43,6 +46,7 @@ const { hasAlignedAuth } = require('../email/inbox-hygiene');
 const { domainFromAddress } = require('../email/spam-blocker');
 const { parseAmazonDeliveredEmail, AMAZON_DELIVERY_FROM } = require('./amazon-delivery-parser');
 const { processReceiptLine } = require('./receipt-processor');
+const { alertUndeliveredShipments } = require('./undelivered-shipments');
 
 const GATE = 'GATE_PURCHASE_RECEIPT_RESTOCK';
 const SINCE_ENV = 'PURCHASE_RECEIPT_SINCE';
@@ -71,6 +75,10 @@ const HELD_REASONS = {
 // `if (result.skipped)` would swallow every processed email.
 function emptySummary() {
   return { logged: [], possibleDuplicate: [], unmatched: [], sizeMismatch: [], needsSize: [], noItems: [], noOrderNumber: [], alreadyProcessed: [], errors: [] };
+}
+
+function adminNotifier(notify) {
+  return notify || ((...args) => require('../notification-service').notifyAdmin(...args));
 }
 
 function displayUnit(unit) {
@@ -165,7 +173,7 @@ async function processReceiptEmail(email, { notify } = {}) {
     return { skipped: 'unauthenticated' };
   }
 
-  const notifyAdmin = notify || ((...args) => require('../notification-service').notifyAdmin(...args));
+  const notifyAdmin = adminNotifier(notify);
   const summary = emptySummary();
   // An itemless "Delivered: N Lawn & Garden item(s)" email (see the parser's
   // header) gets one no_items placeholder line, titled with its subject.
@@ -209,6 +217,10 @@ async function runPurchaseReceiptRestockSweep({ notify } = {}) {
     if (result.skipped) continue;
     for (const [bucket, rows] of Object.entries(result)) totals[bucket].push(...rows.map((row) => ({ ...row, emailId: email.id })));
   }
+  // After the Delivered pass, so a delivery whose email did come is settled first.
+  const { undelivered, errors } = await alertUndeliveredShipments({ since, notifyAdmin: adminNotifier(notify) });
+  totals.undelivered = undelivered;
+  totals.errors.push(...errors);
   return totals;
 }
 

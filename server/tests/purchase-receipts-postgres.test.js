@@ -5,7 +5,7 @@
 // can't: the duplicate-receipt guard's time windows and NULL-safe source
 // test, the UNIQUE claim under a concurrent run, re-reading the product
 // under a real row lock, the bell committing (or failing) with its line,
-// the status CHECKs, and rollback.
+// the status CHECKs, rollback, and the undelivered-shipment alert.
 const SKIP = !process.env.DATABASE_URL;
 const knex = require('knex');
 const { randomUUID } = require('crypto');
@@ -21,11 +21,14 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const { processReceiptLine } = require('../services/purchase-receipts/receipt-processor');
 const notifications = require('../services/notification-service');
+const { alertUndeliveredShipments } = require('../services/purchase-receipts/undelivered-shipments');
 
-const TABLES = ['products_catalog', 'product_aliases', 'product_inventory_movements', 'product_restock_requests', 'purchase_receipt_lines', 'notifications'];
+const TABLES = ['products_catalog', 'product_aliases', 'product_inventory_movements', 'product_restock_requests', 'purchase_receipt_lines', 'notifications', 'emails'];
 const RECEIVED_AT = new Date('2026-09-27T15:00:00Z');
 const TITLE = 'Control Solutions Taurus SC Termiticide 78 oz';
 const HOUR = 60 * 60 * 1000;
+const DAY = 24 * HOUR;
+const ALIGNED_AMAZON_AUTH = 'dkim=pass header.i=@amazon.com; spf=pass smtp.mailfrom=amazon.com';
 
 jest.setTimeout(30000);
 (SKIP ? describe.skip : describe)('purchase receipts on PostgreSQL', () => {
@@ -160,5 +163,63 @@ jest.setTimeout(30000);
     expect(await savedLine()).toBeUndefined();
     await mockConn('products_catalog').where({ id: taurus.id }).update({ inventory_unit: 'fl_oz' });
     expect(await processReceiptLine(line())).toMatchObject({ status: 'logged' });
+  });
+  describe('shipments whose Delivered email never came', () => {
+    const NOW = new Date('2026-09-30T12:00:00Z').getTime();
+    const shipped = (shipmentId, overrides = {}) => mockConn('emails').insert({
+      gmail_id: `gm-${randomUUID()}`, gmail_thread_id: 'thread', from_address: 'shipment-tracking@amazon.com',
+      subject: 'Shipped: "Control Solutions Taurus..." and 1 more item', authentication_results: ALIGNED_AMAZON_AUTH,
+      body_text: `Order #\n900-1000001-1000001\nTrack package: https://www.amazon.com/x?shipmentId=${shipmentId}\n\n`
+        + `* ${TITLE}\n  Quantity: 2\n\n* Lenovo Chromebook\n  Quantity: 1\n`,
+      received_at: new Date(NOW - 4 * DAY), ...overrides,
+    });
+    const run = () => alertUndeliveredShipments({
+      since: new Date(NOW - 30 * DAY), now: NOW, notifyAdmin: (...args) => notifications.notifyAdmin(...args),
+    });
+    const alertBells = (shipmentId) => mockConn('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`purchase-receipt-undelivered:${shipmentId}`]);
+
+    test('a stocked shipment unconfirmed after 3 days: its stocked items are held and ONE bell asks for a hand log', async () => {
+      await shipped('ship-1');
+      expect((await run()).undelivered).toHaveLength(1);
+      const rows = await mockConn('purchase_receipt_lines').where({ shipment_key: 'ship-1' });
+      expect(rows).toEqual([expect.objectContaining({ status: 'no_delivery_email', product_id: taurus.id, raw_title: TITLE, line_no: 1 })]);
+      const [bell] = await alertBells('ship-1');
+      expect(bell.body).toBe("Amazon shipped Taurus SC ×2 on September 26 but never sent a delivery confirmation, so it wasn't added. If it arrived, log it by hand.");
+      expect(await stock()).toBe(0);
+    });
+
+    test('a re-run never re-rings', async () => {
+      await shipped('ship-1');
+      await run();
+      expect((await run()).undelivered).toEqual([]);
+      expect(await alertBells('ship-1')).toHaveLength(1);
+      expect(await mockConn('purchase_receipt_lines').where({ shipment_key: 'ship-1' })).toHaveLength(1);
+    });
+
+    test('its late Delivered email is never auto-logged, so the box can\'t be counted twice', async () => {
+      await shipped('ship-1');
+      await run();
+      // The same line key as the alert's row, and a line the Delivered email numbers differently.
+      expect(await processReceiptLine(line())).toEqual({ skipped: true, reason: 'already_processed' });
+      expect(await processReceiptLine(line({ lineNo: 2 }))).toEqual({ skipped: true, reason: 'asked_to_log_by_hand' });
+      expect(await stock()).toBe(0);
+    });
+
+    test('a shipment whose Delivered email came is settled: no bell', async () => {
+      await processReceiptLine(line()); // the Delivered line for shipment ship-1
+      await shipped('ship-1');
+      expect((await run()).undelivered).toEqual([]);
+      expect(await alertBells('ship-1')).toHaveLength(0);
+    });
+
+    test('too recent, unauthenticated, personal items only, or outside the lookback: no bell', async () => {
+      await shipped('ship-2', { received_at: new Date(NOW - 2 * DAY) });
+      await shipped('ship-3', { authentication_results: 'dkim=pass header.i=@evil.example; spf=fail' });
+      await shipped('ship-4', { body_text: 'Order #\n900-1\nhttps://www.amazon.com/x?shipmentId=ship-4\n\n* Lenovo Chromebook\n  Quantity: 1\n' });
+      await shipped('ship-5', { received_at: new Date(NOW - 8 * DAY) });
+      expect((await run()).undelivered).toEqual([]);
+      expect(await mockConn('purchase_receipt_lines')).toEqual([]);
+      expect(await mockConn('notifications')).toEqual([]);
+    });
   });
 });

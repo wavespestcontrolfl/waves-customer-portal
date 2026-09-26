@@ -21,6 +21,11 @@ jest.mock('../services/purchase-receipts/receipt-processor', () => ({
     return outcome;
   }),
 }));
+// Covered against Postgres in purchase-receipts-postgres.test.js; here only
+// its place in the sweep.
+jest.mock('../services/purchase-receipts/undelivered-shipments', () => ({
+  alertUndeliveredShipments: jest.fn(async () => ({ undelivered: [], errors: [] })),
+}));
 jest.mock('../models/db', () => {
   // Only runPurchaseReceiptRestockSweep's own emails query touches db in
   // this file — processReceiptEmail takes an already-fetched row.
@@ -33,6 +38,7 @@ jest.mock('../models/db', () => {
 
 const { processReceiptEmail, runPurchaseReceiptRestockSweep } = require('../services/purchase-receipts/sweep');
 const { processReceiptLine } = require('../services/purchase-receipts/receipt-processor');
+const { alertUndeliveredShipments } = require('../services/purchase-receipts/undelivered-shipments');
 const logger = require('../services/logger');
 
 // The shape a genuine Amazon delivery email carries (every
@@ -58,6 +64,7 @@ beforeEach(() => {
   mockState.emails = [];
   mockState.whereCalls = [];
   processReceiptLine.mockClear();
+  alertUndeliveredShipments.mockClear();
   logger.warn.mockClear();
   delete process.env.GATE_PURCHASE_RECEIPT_RESTOCK;
   delete process.env.PURCHASE_RECEIPT_SINCE;
@@ -69,6 +76,7 @@ describe('gating', () => {
     expect(await processReceiptEmail(deliveredEmail)).toEqual({ skipped: 'gated' });
     expect(await runPurchaseReceiptRestockSweep()).toEqual({ skipped: 'gated' });
     expect(processReceiptLine).not.toHaveBeenCalled();
+    expect(alertUndeliveredShipments).not.toHaveBeenCalled();
   });
 
   test.each([
@@ -243,6 +251,20 @@ describe('runPurchaseReceiptRestockSweep', () => {
     expect(result.emailsScanned).toBe(2);
     expect(result.logged).toEqual([{ title: 'Taurus SC Termiticide 78 oz', productId: 'p1', receivedQty: 156, receivedUnit: 'fl_oz', emailId: 'e1' }]);
     expect(result.unmatched.map((row) => row.emailId)).toEqual(['e1', 'e2']);
+  });
+
+  test('after the Delivered pass, runs the undelivered-shipment check and folds its results in', async () => {
+    mockState.emails = [deliveredEmail];
+    mockState.outcomes = [loggedTaurus(), unmatched];
+    alertUndeliveredShipments.mockResolvedValueOnce({
+      undelivered: [{ shipmentId: 'SHIPTEST02', emailId: 'e9' }], errors: [{ title: 'Shipped: x', message: 'boom', emailId: 'e8' }],
+    });
+    const result = await runPurchaseReceiptRestockSweep({ notify: jest.fn(async () => ({})) });
+    expect(alertUndeliveredShipments).toHaveBeenCalledWith({ since: new Date('2026-09-26T05:49:45Z'), notifyAdmin: expect.any(Function) });
+    // Delivered emails first, so a delivery whose email did come is settled before the check.
+    expect(processReceiptLine.mock.invocationCallOrder[0]).toBeLessThan(alertUndeliveredShipments.mock.invocationCallOrder[0]);
+    expect(result.undelivered).toEqual([{ shipmentId: 'SHIPTEST02', emailId: 'e9' }]);
+    expect(result.errors).toEqual([{ title: 'Shipped: x', message: 'boom', emailId: 'e8' }]);
   });
 
   test('an unauthenticated candidate email in the same sweep is skipped and never touches processReceiptLine', async () => {

@@ -2432,7 +2432,8 @@ function initScheduledJobs() {
         const { runPurchaseReceiptRestockSweep } = require('./purchase-receipts/sweep');
         const result = await runPurchaseReceiptRestockSweep();
         if (result.skipped) return;
-        const held = result.possibleDuplicate.length + result.sizeMismatch.length + result.needsSize.length + result.noItems.length + result.noOrderNumber.length;
+        const held = result.possibleDuplicate.length + result.sizeMismatch.length + result.needsSize.length + result.noItems.length
+          + result.noOrderNumber.length + result.undelivered.length;
         if (result.logged.length || held || result.errors.length) {
           logger.info(`[purchase-receipt-restock] ${result.logged.length} logged, ${held} held for a person, ${result.errors.length} error(s)`);
         }

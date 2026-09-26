@@ -47,7 +47,10 @@ jest.mock('../models/db', () => {
       q.first = async () => { mockDbState.lockedProducts.push(q._cond.id); return { id: q._cond.id }; };
       return q;
     }
-    q.first = async () => mockDbState.lines[`${q._cond.vendor}|${q._cond.order_number}|${q._cond.shipment_key}|${q._cond.line_no}`];
+    // By full key, or (the hand-off check) by vendor + shipment + status.
+    q.first = async () => (q._cond.status
+      ? Object.values(mockDbState.lines).find((l) => l.vendor === q._cond.vendor && l.shipment_key === q._cond.shipment_key && l.status === q._cond.status)
+      : mockDbState.lines[`${q._cond.vendor}|${q._cond.order_number}|${q._cond.shipment_key}|${q._cond.line_no}`]);
     q.insert = (row) => {
       const res = {
         onConflict: () => res,
@@ -71,6 +74,7 @@ jest.mock('../models/db', () => {
     return q;
   };
   const mockDb = jest.fn(fn);
+  mockDb.raw = jest.fn(async () => ({})); // lockShipment's advisory lock
   // A callback that throws restores purchase_receipt_lines to its
   // pre-transaction state, as a real ROLLBACK would undo the claim insert.
   mockDb.transaction = async (cb) => {
@@ -384,6 +388,20 @@ describe('processReceiptLine', () => {
     const two = await processReceiptLine(taurusLine({ email: { ...email, id: 'email-2' }, orderNumber: '900-4000004-4000004', shipmentKey: 'ship-two', item: { title: 'Taurus SC Termiticide 78 oz', quantity: 3 } }));
     expect([one.status, two.status]).toEqual(['logged', 'logged']);
     expect(mockAdjustStock).toHaveBeenCalledTimes(2);
+  });
+
+  test('every line takes its shipment\'s advisory lock', async () => {
+    mockState.match = { matched: true, product: taurus };
+    await processReceiptLine(taurusLine());
+    expect(require('../models/db').raw).toHaveBeenCalledWith('SELECT pg_advisory_xact_lock(hashtext(?))', ['purchase-receipt-shipment:ship-1']);
+  });
+
+  test('a shipment already handed to a person (no_delivery_email) is never auto-logged by its late Delivered email', async () => {
+    mockState.match = { matched: true, product: taurus };
+    mockDbState.lines['amazon|900-1000001-1000001|ship-1|7'] = { id: 'line-alert', vendor: 'amazon', shipment_key: 'ship-1', status: 'no_delivery_email' };
+    expect(await processReceiptLine(taurusLine())).toEqual({ skipped: true, reason: 'asked_to_log_by_hand' });
+    expect(mockAdjustStock).not.toHaveBeenCalled();
+    expect(Object.keys(mockDbState.lines)).toEqual(['amazon|900-1000001-1000001|ship-1|7']);
   });
 
   test('no shipment key -> skipped, nothing inserted', async () => {

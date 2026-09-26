@@ -39,6 +39,13 @@
  * held as 'no_order_number' instead, so it surfaces for review rather than
  * vanishing.
  *
+ * A shipment already handed to a person — undelivered-shipments.js recorded
+ * it as 'no_delivery_email' and asked for a hand log because its Delivered
+ * email never came — is never auto-logged when that email arrives late:
+ * the box would be counted twice. Every writer of a shipment's lines takes
+ * the same per-shipment advisory lock (lockShipment), so the alert and a
+ * late Delivered email can't both act on it.
+ *
  * Duplicate-receipt guard: the claim only catches the SAME email twice. If
  * staff already put the box on the shelf by hand, the line is held as
  * 'possible_duplicate' (no movement) when the product has a 'restock'
@@ -59,6 +66,7 @@ const VENDOR = 'amazon';
 const SOURCE = 'amazon_delivery';
 const DUPLICATE_RESTOCK_LOOKBACK_MS = 48 * 60 * 60 * 1000;
 const UNKNOWN_ORDER = 'unknown';
+const HANDED_TO_PERSON = Object.freeze({ skipped: true, reason: 'asked_to_log_by_hand' });
 const ALREADY_PROCESSED = Object.freeze({ skipped: true, reason: 'already_processed' });
 
 // Within 1% (min 0.01 unit) counts as agreement — the rounding slack the
@@ -190,6 +198,12 @@ async function claimLine(conn, row) {
   return inserted?.length ? inserted[0] : null;
 }
 
+// Serializes every writer of one shipment's lines (a Delivered line, the
+// undelivered alert) for the rest of the transaction.
+function lockShipment(trx, shipmentKey) {
+  return trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`purchase-receipt-shipment:${shipmentKey}`]);
+}
+
 // Classify, and for a line that would move stock, lock its product row and
 // classify again under the lock: a container_size edit or a deactivation
 // that committed after the first read is what counts.
@@ -214,6 +228,7 @@ async function classifyUnderLock(item, trx) {
  *   ringBell(outcome, trx): writes the line's bell on its transaction.
  * @returns one of (every recorded outcome carries lineId):
  *   { skipped: true, reason }                                    — nothing written
+ *     (reason 'asked_to_log_by_hand': the shipment was handed to a person)
  *   { status: 'unmatched'|'size_mismatch'|'needs_size'|'no_items'|'no_order_number', inserted: true, product }
  *   { status: 'possible_duplicate', product, receivedQty, receivedUnit }  — held, no movement
  *   { status: 'logged', product, receivedQty, receivedUnit, movement, hasOpenRestockRequest }
@@ -227,6 +242,10 @@ async function processReceiptLine({ email, orderNumber, shipmentKey, item, lineN
   if (await conn('purchase_receipt_lines').where(key).first('id')) return { ...ALREADY_PROCESSED };
 
   return conn.transaction(async (trx) => {
+    await lockShipment(trx, shipmentKey);
+    if (await trx('purchase_receipt_lines').where({ vendor: VENDOR, shipment_key: shipmentKey, status: 'no_delivery_email' }).first('id')) {
+      return { ...HANDED_TO_PERSON };
+    }
     let classified = forcedStatus ? { status: forcedStatus, productId: null, product: null } : await classifyUnderLock(item, trx);
     if (!orderNumber && classified.status === 'logged') {
       classified = { status: 'no_order_number', productId: classified.productId, product: classified.product };
@@ -282,4 +301,4 @@ async function performLoggedMovement(trx, { claim, classified, orderNumber, emai
   return { status: 'logged', product, receivedQty, receivedUnit, movement: result.movement, hasOpenRestockRequest: Boolean(liveRequest) };
 }
 
-module.exports = { classifyItem, processReceiptLine, VENDOR, SOURCE };
+module.exports = { classifyItem, processReceiptLine, lockShipment, VENDOR, SOURCE, UNKNOWN_ORDER };

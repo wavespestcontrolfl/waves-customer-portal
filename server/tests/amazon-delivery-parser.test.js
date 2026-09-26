@@ -4,7 +4,7 @@
  * shipmentKey, items }. (No sibling Ordered:/Shipped: lookup any more —
  * removed; see the module header and sweep.js for why.)
  */
-const { parseAmazonDeliveredEmail, isAmazonDeliveredEmail } = require('../services/purchase-receipts/amazon-delivery-parser');
+const { parseAmazonDeliveredEmail, parseAmazonShippedEmail, isAmazonDeliveredEmail } = require('../services/purchase-receipts/amazon-delivery-parser');
 
 describe('isAmazonDeliveredEmail', () => {
   test('true only for order-update@amazon.com with a Delivered: subject', () => {
@@ -217,5 +217,30 @@ describe('parseAmazonDeliveredEmail — itemless "N Lawn & Garden item(s)" templ
 
   test('"2 Lawn & Garden items" subject variant is still a Delivered email', () => {
     expect(isAmazonDeliveredEmail({ from_address: 'order-update@amazon.com', subject: 'Delivered: 2 Lawn & Garden items' })).toBe(true);
+  });
+});
+
+describe('parseAmazonShippedEmail', () => {
+  // The real "Shipped:" template: same Order #, item blocks and Track-link
+  // shipmentId as the Delivered email for that shipment.
+  const shipped = {
+    from_address: 'shipment-tracking@amazon.com', subject: 'Shipped: "ZOECON 10578 Gentrol..."', gmail_id: 'gm-s',
+    body_text: 'Arriving today 10 AM – 3 PM\nOrder #\n900-9000009-9000009\nTrack package: https://www.amazon.com/x?orderId=900-9000009-9000009&shipmentId=SHIPTEST02\n\n'
+      + '* ZOECON 10578 Gentrol Complete EC3 Insecticide and Growth Regulator, Orange\n  Quantity: 1\n',
+  };
+
+  test('reads a shipment-tracking@amazon.com "Shipped:" email the same way as a Delivered one', () => {
+    expect(parseAmazonShippedEmail(shipped)).toEqual({
+      orderNumber: '900-9000009-9000009', shipmentId: 'SHIPTEST02', shipmentKey: 'SHIPTEST02',
+      items: [{ title: 'ZOECON 10578 Gentrol Complete EC3 Insecticide and Growth Regulator, Orange', quantity: 1 }],
+    });
+  });
+
+  test.each([
+    ['a Delivered email', { from_address: 'order-update@amazon.com', subject: 'Delivered: "ZOECON..."' }],
+    ['another sender', { from_address: 'order-update@amazon.com' }],
+    ['another subject', { subject: 'Out for delivery: "ZOECON..."' }],
+  ])('null for %s', (_label, overrides) => {
+    expect(parseAmazonShippedEmail({ ...shipped, ...overrides })).toBeNull();
   });
 });
