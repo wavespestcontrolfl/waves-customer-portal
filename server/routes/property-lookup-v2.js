@@ -1684,6 +1684,22 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
         buildingSqft: rc?.squareFootage || null,
         commercialSubtype,
       };
+      // Same mutation residentialUnitLookup applies below, and for the
+      // identical reason: every GROUND-GEOMETRY figure computed further
+      // down (footprintSf, estimatedPerimeterLF, estimatedAtticSqFt,
+      // estimatedSlabSqFt) derives from rc.squareFootage — left alone, a
+      // 1,400 sqft suite would still auto-fill a ~46,000 sqft footprint and
+      // ~1,073 LF perimeter into the termite/trenching/Bora-Care boxes, and
+      // commercial pest would price the BUILDING's perimeter even after
+      // homeSqFt was corrected to the suite (the exact overquote class this
+      // lane exists to end — codex review on this PR). Zeroing it here
+      // means footprintSf/estimatedPerimeterLF/estimatedAtticSqFt/
+      // estimatedSlabSqFt all compute to 0/null naturally; homeSqFt below
+      // and applyCommercialSuiteSize's post-resolution footprint both key
+      // off this same rc, so there is only one place a suite's dimensions
+      // can come from. lotSize/pool/stories are untouched — this lane only
+      // owns the suite's floor-area figures.
+      if (rc) rc = { ...rc, squareFootage: 0 };
     }
   }
   if (residentialUnitLookup) {
@@ -1972,13 +1988,18 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     // Commercial suite sizing: a part-building suite tenant's county sqft
     // describes the WHOLE BUILDING, never the suite — never hand that
     // number to the operator as the quotable size (the exact overquote
-    // class this lane exists to end). homeSqFt/suiteSize are filled in by
-    // applyCommercialSuiteSize once the resolver runs; buildingSqFt keeps
-    // the whole-building total available for display. A non-suite lookup
-    // (residential, or a whole-building commercial tenant/owner) is
-    // byte-identical to before.
-    homeSqFt: commercialSuiteCandidate ? 0 : (rc?.squareFootage || 0),
-    ...(commercialSuiteCandidate ? { buildingSqFt: rc?.squareFootage || 0, suiteSize: null } : {}),
+    // class this lane exists to end). rc.squareFootage was already zeroed
+    // above for a candidate, so homeSqFt (and every ground-geometry figure
+    // below — footprint, estimatedPerimeterLF, estimatedAtticSqFt,
+    // estimatedSlabSqFt — all read from the SAME rc) compute to 0/null
+    // here with no separate per-field override. homeSqFt/footprint/
+    // suiteSize are filled in by applyCommercialSuiteSize once the
+    // resolver runs; buildingSqFt (read from the candidate, captured
+    // BEFORE the zeroing) keeps the whole-building total available for
+    // display. A non-suite lookup (residential, or a whole-building
+    // commercial tenant/owner) is byte-identical to before.
+    homeSqFt: rc?.squareFootage || 0,
+    ...(commercialSuiteCandidate ? { buildingSqFt: commercialSuiteCandidate.buildingSqft || 0, suiteSize: null } : {}),
     // Internal only — never read by a consumer; applyCommercialSuiteSize
     // deletes this before the profile reaches the client.
     _commercialSuiteCandidate: commercialSuiteCandidate,
@@ -2421,6 +2442,18 @@ async function applyCommercialSuiteSize(profile, opts = {}) {
     }, opts);
     if (suiteSize && Number(suiteSize.value) > 0) {
       profile.homeSqFt = suiteSize.value;
+      // The suite's own ground-floor footprint — a single in-line strip/
+      // plaza suite (no stories field of its own; profile.stories still
+      // reads the building's, which is fine for a 1-floor commercial
+      // footprint assumption). This is the field pricing/
+      // translateV2CallToV1Input actually reads (footprintSqFt <-
+      // p.footprint ?? p.footprintSqFt) — leaving it at the pre-resolution
+      // 0 would still price the building once footprintUnknown-style zeroing
+      // stopped applying. Perimeter/attic/slab stay unset (null, from the
+      // rc.squareFootage=0 zeroing above) — the resolver has no real suite
+      // perimeter, so pricing derives it from THIS footprint (4·√area)
+      // rather than inheriting the building's ~1,000+ LF exterior wall.
+      profile.footprint = suiteSize.value;
       profile.suiteSize = {
         value: suiteSize.value,
         source: suiteSize.source,
