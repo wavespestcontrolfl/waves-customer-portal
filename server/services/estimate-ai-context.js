@@ -75,21 +75,18 @@ const INTERNAL_CONTENT_MARKER_PATTERN = /\b(?:margins?|contribution\s*margin|cos
 // knowledge_base.category column is admin free text — Claudeopedia's
 // create()/normalizeCategory() (knowledge-base.js) slugifies whatever string
 // an admin passes, there is no audience/visibility column on this table — so
-// this is a closed ALLOWLIST, not a denylist. It was checked against the
-// production categories on 2026-09-25 (read-only): 'chemicals' rows carry
-// wholesale supplier prices ("Best Price: $… (SiteOne)"), 'protocols'
-// includes staff routing rules and the job-scoring formula, 'product' and
-// 'seasonal' are internal outcome analytics, 'pricing', 'business-strategy',
-// 'operations', 'credentials' and 'integrations' are internal. Only
-// 'agronomics' (FAWN weather, the county nitrogen blackout) is customer
-// content today; 'services', 'pests', 'turf' and 'compliance' are the
-// customer categories the original migration documented. 'general' (the
-// normalizeCategory() default) is NOT allowed — an uncategorized admin entry
-// could be anything. A new or misspelled category is invisible by default,
-// same posture as CUSTOMER_SAFE_REPO_FILES above.
-const KNOWLEDGE_BASE_CUSTOMER_SAFE_CATEGORIES = [
-  'agronomics', 'services', 'pests', 'turf', 'compliance',
-];
+// this is a closed ALLOWLIST, not a denylist. Production categories checked
+// read-only on 2026-09-25: 'chemicals' rows carry wholesale supplier prices,
+// 'protocols' holds staff routing rules and the job-scoring formula,
+// 'product'/'seasonal' are internal outcome analytics, 'pricing',
+// 'business-strategy', 'operations', 'credentials' and 'integrations' are
+// internal, and even 'agronomics' mixes customer facts with internal system
+// notes (the FAWN row describes the blog engine and station IDs). No
+// category is customer-safe as a whole, so the allowlist is EMPTY (fail
+// closed, same as knowledge_entries below): customer-facing facts come from
+// label-verified products_catalog rows and the service library. Add a
+// category here only once its every row is written for customers.
+const KNOWLEDGE_BASE_CUSTOMER_SAFE_CATEGORIES = [];
 
 // AW-04 fix (round 2 follow-up, Codex P1): searchAgronomicWiki below queries
 // knowledge_entries with only the content-accuracy gate (TRUSTED_STATUSES) —
@@ -1135,4 +1132,5 @@ module.exports = {
   // Exported for direct allowlist-mechanism testing only — production code
   // never mutates this array. See its definition for why it is empty today.
   KNOWLEDGE_ENTRIES_CUSTOMER_SAFE_CATEGORIES,
+  KNOWLEDGE_BASE_CUSTOMER_SAFE_CATEGORIES,
 };

@@ -5,7 +5,21 @@ const {
   serviceFamiliesFromText,
   searchTermsFromContext,
   KNOWLEDGE_ENTRIES_CUSTOMER_SAFE_CATEGORIES,
+  KNOWLEDGE_BASE_CUSTOMER_SAFE_CATEGORIES,
 } = require('../services/estimate-ai-context');
+
+// The production knowledge_base allowlist is empty (no category is
+// customer-safe as a whole); mechanism tests populate it temporarily.
+function withKbAllowlist(categories, fn) {
+  return async () => {
+    KNOWLEDGE_BASE_CUSTOMER_SAFE_CATEGORIES.push(...categories);
+    try {
+      await fn();
+    } finally {
+      KNOWLEDGE_BASE_CUSTOMER_SAFE_CATEGORIES.length = 0;
+    }
+  };
+}
 
 function fakeDb(tables = {}) {
   return (table) => {
@@ -845,7 +859,7 @@ describe('estimate AI support context', () => {
     )).toBe(true);
   });
 
-  test('loads shaped support sources from knowledge tables and static references', async () => {
+  test('loads shaped support sources from knowledge tables and static references', withKbAllowlist(['services'], async () => {
     const result = await loadEstimateAiSupportContext({
       db: fakeDb({
         knowledge_base: [{
@@ -924,7 +938,7 @@ describe('estimate AI support context', () => {
     expect(result.productCatalogTruncated).toBe(false);
     expect(result.externalSources.some((source) => source.title.includes('UF/IFAS'))).toBe(true);
     expect(result.externalSources.some((source) => source.title.includes('Florida-Friendly'))).toBe(true);
-  });
+  }));
 
   test('flags the product catalog slice as truncated when the row cap fills', () => {
     const manyProducts = Array.from({ length: 9 }, (_, i) => ({
@@ -1114,7 +1128,7 @@ describe('estimate AI support context', () => {
 
   // Companion to the AW-04 boundary test above: the fix must be an allowlist
   // restriction, not a blanket removal of customer-safe support material.
-  test('AW-04: customer-safe sources still load after the allowlist restriction', async () => {
+  test('AW-04: customer-safe sources still load after the allowlist restriction', withKbAllowlist(['services'], async () => {
     // Structured, reviewed DB sources are untouched by the repo-file allowlist.
     const structured = await loadEstimateAiSupportContext({
       db: fakeDb({
@@ -1155,7 +1169,7 @@ describe('estimate AI support context', () => {
       context: { services: [{ service: 'mosquito_misting_system', label: 'Mosquito Misting System Service', detail: 'Automatic misting system' }] },
     });
     expect(misting.repositoryFiles.some((row) => row.path === 'wiki/protocols/mosquito-misting-systems.md')).toBe(true);
-  });
+  }));
 
   // AW-04 rd2 (Codex P1): the repo-file allowlist fixed in rd1 left the
   // DB-backed knowledge_base lookup wide open — any active, non-blocked row
@@ -1166,7 +1180,7 @@ describe('estimate AI support context', () => {
   // nearly any estimate question. searchKnowledgeBase now gates on
   // KNOWLEDGE_BASE_CUSTOMER_SAFE_CATEGORIES (an allowlist) plus
   // INTERNAL_CONTENT_MARKER_PATTERN as a backstop.
-  test('AW-04 rd2: an internal business-strategy knowledge_base row is excluded; a customer-facing row still loads', async () => {
+  test('AW-04 rd2: an internal business-strategy knowledge_base row is excluded; a customer-facing row still loads', withKbAllowlist(['services'], async () => {
     const result = await loadEstimateAiSupportContext({
       db: fakeDb({
         knowledge_base: [
@@ -1200,7 +1214,7 @@ describe('estimate AI support context', () => {
     expect(serialized).not.toContain('decoy');
     expect(serialized).not.toContain('margin');
     expect(serialized).not.toContain('grand slam offer');
-  });
+  }));
 
   // Production categories checked 2026-09-25: 'chemicals' rows carry
   // wholesale supplier prices, 'protocols' holds staff routing / job-scoring
@@ -1244,6 +1258,21 @@ describe('estimate AI support context', () => {
       context: { services: [{ service: 'mosquito_misting_system', label: 'Mosquito Misting System Service', detail: 'Automatic misting system' }] },
     });
     expect(JSON.stringify(result)).not.toMatch(/call adam/i);
+  });
+
+  test('AW-04 rd4: with the production (empty) allowlist no knowledge_base row reaches the context', async () => {
+    expect(KNOWLEDGE_BASE_CUSTOMER_SAFE_CATEGORIES).toEqual([]);
+    const result = await loadEstimateAiSupportContext({
+      db: fakeDb({
+        knowledge_base: [
+          { path: 'kb/fawn.md', title: 'FAWN Weather Stations — Blog & Pest Pressure', category: 'agronomics', status: 'active', summary: 'Station IDs feed the blog engine pest-pressure matrix.', content: 'x' },
+          { path: 'kb/lawn.md', title: 'Lawn Program', category: 'services', status: 'active', summary: 'Seasonal lawn care guidance.', content: 'x' },
+        ],
+      }),
+      question: 'How does the weather affect my lawn care?',
+      context: { services: [{ label: 'Lawn Care', detail: 'Fertilizer' }] },
+    });
+    expect(result.knowledgeBase).toEqual([]);
   });
 
   test('AW-04 rd2: a knowledge_base row with no category is excluded (allowlist fails closed)', async () => {
@@ -1322,7 +1351,7 @@ describe('estimate AI support context', () => {
   // rows matching the search terms could fill the cap and crowd out an
   // allowed row that never even reached the filter. fakeDb's whereRaw support
   // mirrors the real SQL predicate this loader now applies.
-  test('AW-04 rd3: an allowed knowledge_base row survives 6 internal-category rows filling the cap', async () => {
+  test('AW-04 rd3: an allowed knowledge_base row survives 6 internal-category rows filling the cap', withKbAllowlist(['services'], async () => {
     const internalRows = Array.from({ length: 6 }, (_, i) => ({
       path: `kb/chemicals-${i}.md`,
       title: `Chemical Note ${i}`,
@@ -1349,5 +1378,5 @@ describe('estimate AI support context', () => {
     expect(result.knowledgeBase).toEqual([
       expect.objectContaining({ path: 'wiki/services/lawn.md' }),
     ]);
-  });
+  }));
 });

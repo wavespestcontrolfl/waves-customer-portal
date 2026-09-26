@@ -158,4 +158,17 @@ describe('estimate assistant model prompt — customer-safe context boundary (AW
     expect(dispatch).toHaveBeenCalledTimes(1);
     expect(result.source).toBe('openai');
   });
+
+  test('"Do you spray inside?" with empty support reaches the model, not the safety fallback', async () => {
+    dispatch.mockResolvedValue({ ok: true, provider: 'openai', text: 'Interior service is included on request.' });
+    const result = await answerEstimateQuestion({
+      database: null,
+      question: 'Do you spray inside?',
+      estimate: { id: 'synthetic-estimate-5', token: 'synthetic-token-5', status: 'sent', customer_name: 'Synthetic Customer', address: 'Synthetic Address' },
+      estData: { services: [{ service: 'pest_control', label: 'Pest Control' }] },
+      pricingBundle: { waveGuardTier: 'WaveGuard' },
+    });
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(result.source).toBe('openai');
+  });
 });
