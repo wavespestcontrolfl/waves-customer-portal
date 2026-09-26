@@ -6104,9 +6104,29 @@ async function resolveUnstampedWitness(claimedTerm, daysOut, sentCol, sentAt) {
   return 'conflict';
 }
 
-// Persist the conflict (and clear any earlier bell stamp) so a failed bell
-// is re-filed by the daily sweep. Best-effort: a missing column (pre-000109)
-// or a write failure still leaves the immediate bell attempt below.
+// ── Witness-conflict record: one entry PER RUNG (pre-push audit P1) ───────
+//
+// notice_witness_conflict is an object keyed by rung —
+//   { "45": { ...details, belled_at? }, "30": { ...details, belled_at? } }
+// — merged with jsonb `||`, so a conflict on one rung never erases another
+// rung's pending entry or its retry. Each rung's bell confirmation lives in
+// its own entry (belled_at); notice_witness_conflict_belled_at is the
+// "every rung belled" summary (NULL while any rung is unbelled), so the
+// sweep's candidate query is unchanged. Backward compatible: a record in the
+// old flat shape (one conflict, top-level days_out, confirmation in the
+// summary column) is normalized into the keyed shape on its next write and
+// read as a single entry until then. jsonb_exists() rather than `?` — knex
+// treats `?` as a binding placeholder.
+const WITNESS_CONFLICT_KEYED_SQL = `(CASE WHEN jsonb_exists(notice_witness_conflict, 'days_out')
+  THEN jsonb_build_object(notice_witness_conflict->>'days_out', notice_witness_conflict
+    || CASE WHEN notice_witness_conflict_belled_at IS NOT NULL
+      THEN jsonb_build_object('belled_at', notice_witness_conflict_belled_at) ELSE '{}'::jsonb END)
+  ELSE COALESCE(notice_witness_conflict, '{}'::jsonb) END)`;
+
+// Persist the conflict under its rung (replacing only that rung's entry, so
+// it is unbelled again) and clear the all-belled summary, so a failed bell is
+// re-filed by the daily sweep. Best-effort: a missing column (pre-000109) or
+// a write failure still leaves the immediate bell attempt below.
 async function recordWitnessConflict(termId, conflict) {
   try {
     const cols = await annualPrepayColumns();
@@ -6114,7 +6134,9 @@ async function recordWitnessConflict(termId, conflict) {
     await db('annual_prepay_terms')
       .where({ id: termId })
       .update({
-        notice_witness_conflict: JSON.stringify(conflict),
+        notice_witness_conflict: db.raw(`${WITNESS_CONFLICT_KEYED_SQL} || jsonb_build_object(?::text, ?::jsonb)`, [
+          String(conflict.days_out), JSON.stringify(conflict),
+        ]),
         notice_witness_conflict_belled_at: null,
         updated_at: new Date(),
       });
@@ -6156,7 +6178,7 @@ async function fileTermiteWitnessConflictException(term, conflict) {
       logger.warn(`[annual-prepay] termite witness-conflict bell insert failed for term ${term.id}; will retry on the next sweep`);
       return false;
     }
-    await stampWitnessConflictBelled(term.id);
+    await stampWitnessConflictBelled(term.id, conflict.days_out);
     return true;
   } catch (err) {
     logger.warn(`[annual-prepay] termite witness-conflict notification failed for term ${term?.id}: ${err.message}`);
@@ -6164,14 +6186,31 @@ async function fileTermiteWitnessConflictException(term, conflict) {
   }
 }
 
-async function stampWitnessConflictBelled(termId) {
+// Confirm ONE rung's bell inside the keyed record, then set the all-belled
+// summary only once no rung entry is left unbelled (evaluated on the locked
+// row, so a conflict recorded concurrently for another rung keeps it NULL).
+async function stampWitnessConflictBelled(termId, daysOut) {
   const cols = await annualPrepayColumns();
   if (!witnessConflictColumnsReady(cols)) return;
+  const rungKey = String(daysOut);
+  const now = new Date();
+  await db('annual_prepay_terms')
+    .where({ id: termId })
+    .whereNotNull('notice_witness_conflict')
+    .whereRaw(`jsonb_exists(${WITNESS_CONFLICT_KEYED_SQL}, ?)`, [rungKey])
+    .update({
+      notice_witness_conflict: db.raw(
+        `jsonb_set(${WITNESS_CONFLICT_KEYED_SQL}, ARRAY[?::text], (${WITNESS_CONFLICT_KEYED_SQL} -> ?::text) || jsonb_build_object('belled_at', ?::timestamptz))`,
+        [rungKey, rungKey, now.toISOString()],
+      ),
+      updated_at: now,
+    });
   await db('annual_prepay_terms')
     .where({ id: termId })
     .whereNotNull('notice_witness_conflict')
     .whereNull('notice_witness_conflict_belled_at')
-    .update({ notice_witness_conflict_belled_at: new Date(), updated_at: new Date() });
+    .whereRaw(`NOT EXISTS (SELECT 1 FROM jsonb_each(${WITNESS_CONFLICT_KEYED_SQL}) AS rung WHERE NOT jsonb_exists(rung.value, 'belled_at'))`)
+    .update({ notice_witness_conflict_belled_at: now, updated_at: now });
 }
 
 // The sweep's retry point: every termite term with a persisted witness
@@ -6190,10 +6229,27 @@ function parseWitnessConflict(value) {
   try { return JSON.parse(value); } catch { return null; }
 }
 
+// The per-rung conflict entries still awaiting a confirmed bell. An old flat
+// record is one entry, confirmed by the summary column.
+function unbelledWitnessConflicts(term) {
+  const record = parseWitnessConflict(term[TERMITE_WITNESS_CONFLICT_COLUMN]);
+  if (!record || typeof record !== 'object') return [];
+  if (record.days_out != null) {
+    return term[TERMITE_WITNESS_CONFLICT_BELLED_COLUMN] ? [] : [record];
+  }
+  return Object.entries(record)
+    .filter(([, entry]) => entry && typeof entry === 'object' && !entry.belled_at)
+    .map(([rung, entry]) => ({ ...entry, days_out: Number(entry.days_out ?? rung) }));
+}
+
+// Re-file every still-unbelled rung's bell independently; true when any
+// bell was confirmed this run.
 async function refileWitnessConflictBell(term) {
-  const conflict = parseWitnessConflict(term[TERMITE_WITNESS_CONFLICT_COLUMN]);
-  if (!conflict) return false;
-  return fileTermiteWitnessConflictException(term, { ...conflict, recorded_columns: conflict.recorded_columns || [] });
+  let confirmed = false;
+  for (const conflict of unbelledWitnessConflicts(term)) {
+    if (await fileTermiteWitnessConflictException(term, { ...conflict, recorded_columns: conflict.recorded_columns || [] })) confirmed = true;
+  }
+  return confirmed;
 }
 
 // Codex #4921 pre-push P1 (class fix): persisted acceptance evidence is
@@ -7796,6 +7852,9 @@ module.exports = {
     termiteWitnessConflictCandidates,
     fileTermiteWitnessConflictException,
     refileWitnessConflictBell,
+    unbelledWitnessConflicts,
+    recordWitnessConflict,
+    stampWitnessConflictBelled,
     ownsNoticeClaims,
     ensureTermNoticeLease,
     recoveryPlan,

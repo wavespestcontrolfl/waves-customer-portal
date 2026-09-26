@@ -803,7 +803,10 @@ describeOrSkip('termite annual-plan notice obligations — against a schema buil
     notifyAdmin.mockResolvedValue(null); // the bell insert fails
     await expect(_private.stampTermNoticeWitness(term, 45, onTime)).resolves.toBe('conflict');
     let row = await db('annual_prepay_terms').where({ id: term.id }).first();
-    expect(row.notice_witness_conflict).toMatchObject({ days_out: 45, intended_column: 'notice_45_sent_at', recorded_columns: ['notice_45_late_sent_at'] });
+    expect(row.notice_witness_conflict).toMatchObject({
+      45: { days_out: 45, intended_column: 'notice_45_sent_at', recorded_columns: ['notice_45_late_sent_at'] },
+    });
+    expect(row.notice_witness_conflict['45'].belled_at).toBeUndefined();
     expect(row.notice_witness_conflict_belled_at).toBeNull();
     await expect(_private.termiteWitnessConflictCandidates({ conn: db })).resolves.toHaveLength(1);
 
@@ -818,10 +821,97 @@ describeOrSkip('termite annual-plan notice obligations — against a schema buil
     await AnnualPrepayRenewals.checkAndSend({ today: '2026-10-02' });
     row = await db('annual_prepay_terms').where({ id: term.id }).first();
     expect(row.notice_witness_conflict_belled_at).toBeInstanceOf(Date);
+    expect(row.notice_witness_conflict['45'].belled_at).toEqual(expect.any(String));
     expect(conflictBells()).toHaveLength(3);
     await AnnualPrepayRenewals.checkAndSend({ today: '2026-10-03' });
     expect(conflictBells()).toHaveLength(3);
     await expect(_private.termiteWitnessConflictCandidates({ conn: db })).resolves.toHaveLength(0);
+  });
+
+  // Pre-push audit P1: the conflict record is keyed PER RUNG and merged —
+  // a second rung's conflict never erases the first's, and each rung's bell
+  // retries independently until confirmed.
+  test('witness conflicts on TWO rungs: the second never erases the first, and each rung\'s bell retries independently until confirmed', async () => {
+    const { db } = fixture;
+    await migrateThrough109(db);
+    jest.doMock('../models/db', () => db);
+    const notifyAdmin = mockSendSide();
+    const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+    const { _private } = AnnualPrepayRenewals;
+    const [term] = await db('annual_prepay_terms').insert({
+      customer_id: randomUUID(), term_start: '2025-11-10', term_end: '2026-11-10', status: 'renewal_pending',
+      annual_plan_version: 'v3', installation_anchored_at: new Date('2025-11-10T12:00:00Z'),
+      notice_45_late_sent_at: new Date('2026-09-28T16:00:00Z'),
+      notice_30_late_sent_at: new Date('2026-10-12T16:00:00Z'),
+    }).returning('*');
+    const bellsFor = (daysOut) => notifyAdmin.mock.calls
+      .filter((c) => c[1] === 'Termite annual renewal notice record conflict' && c[3].metadata.days_out === daysOut);
+    // The 45's bell keeps failing; the 30's is confirmed.
+    let bell45Works = false;
+    notifyAdmin.mockImplementation(async (_k, _t, _b, opts) => (
+      opts.metadata.days_out === 45 && !bell45Works ? null : { id: `n-${opts.metadata.days_out}` }
+    ));
+
+    await expect(_private.stampTermNoticeWitness(term, 45, new Date('2026-09-26T16:00:00Z'))).resolves.toBe('conflict');
+    await expect(_private.stampTermNoticeWitness(term, 30, new Date('2026-10-11T15:00:00Z'))).resolves.toBe('conflict');
+    let row = await db('annual_prepay_terms').where({ id: term.id }).first();
+    expect(row.notice_witness_conflict['45']).toMatchObject({ days_out: 45, intended_column: 'notice_45_sent_at' });
+    expect(row.notice_witness_conflict['45'].belled_at).toBeUndefined(); // still pending — NOT erased by the 30
+    expect(row.notice_witness_conflict['30']).toMatchObject({ days_out: 30, intended_column: 'notice_30_sent_at', belled_at: expect.any(String) });
+    expect(row.notice_witness_conflict_belled_at).toBeNull(); // not every rung belled
+
+    // The sweep re-files ONLY the unbelled 45.
+    await AnnualPrepayRenewals.checkAndSend({ today: '2026-10-13' });
+    expect(bellsFor(45)).toHaveLength(2);
+    expect(bellsFor(30)).toHaveLength(1);
+    row = await db('annual_prepay_terms').where({ id: term.id }).first();
+    expect(row.notice_witness_conflict_belled_at).toBeNull();
+
+    // The 45's bell is confirmed → its entry stamps, the summary lands, the sweep stops.
+    bell45Works = true;
+    await AnnualPrepayRenewals.checkAndSend({ today: '2026-10-14' });
+    row = await db('annual_prepay_terms').where({ id: term.id }).first();
+    expect(row.notice_witness_conflict['45'].belled_at).toEqual(expect.any(String));
+    expect(row.notice_witness_conflict['30'].belled_at).toEqual(expect.any(String));
+    expect(row.notice_witness_conflict_belled_at).toBeInstanceOf(Date);
+    await AnnualPrepayRenewals.checkAndSend({ today: '2026-10-15' });
+    expect(bellsFor(45)).toHaveLength(3);
+    expect(bellsFor(30)).toHaveLength(1);
+  });
+
+  test('backward compatible: an old FLAT conflict record is read as one entry and normalized (with its confirmation) when another rung\'s conflict is merged in', async () => {
+    const { db } = fixture;
+    await migrateThrough109(db);
+    jest.doMock('../models/db', () => db);
+    mockSendSide();
+    const { _private } = require('../services/annual-prepay-renewals');
+    const base = {
+      term_start: '2025-11-10', term_end: '2026-11-10', status: 'renewal_pending', annual_plan_version: 'v3',
+      installation_anchored_at: new Date('2025-11-10T12:00:00Z'),
+    };
+    const flat = { days_out: 45, intended_column: 'notice_45_sent_at', recorded_columns: ['notice_45_late_sent_at'], accepted_at: '2026-09-26T16:00:00.000Z' };
+    const belledAt = new Date('2026-09-30T12:00:00Z');
+    const [unbelled] = await db('annual_prepay_terms').insert({ ...base, customer_id: randomUUID(), notice_witness_conflict: JSON.stringify(flat) }).returning('*');
+    const [belled] = await db('annual_prepay_terms').insert({
+      ...base, customer_id: randomUUID(), notice_witness_conflict: JSON.stringify(flat), notice_witness_conflict_belled_at: belledAt,
+    }).returning('*');
+
+    expect(_private.unbelledWitnessConflicts(unbelled)).toEqual([flat]);
+    expect(_private.unbelledWitnessConflicts(belled)).toEqual([]);
+
+    const conflict30 = { days_out: 30, intended_column: 'notice_30_sent_at', recorded_columns: ['notice_30_late_sent_at'], accepted_at: '2026-10-11T15:00:00.000Z' };
+    await _private.recordWitnessConflict(belled.id, conflict30);
+    const row = await db('annual_prepay_terms').where({ id: belled.id }).first();
+    expect(row.notice_witness_conflict['45']).toMatchObject({ ...flat, belled_at: expect.any(String) }); // kept, confirmation carried over
+    expect(row.notice_witness_conflict['30']).toEqual(conflict30);
+    expect(row.notice_witness_conflict_belled_at).toBeNull();
+    expect(_private.unbelledWitnessConflicts(row).map((c) => c.days_out)).toEqual([30]);
+
+    // A flat record's own confirmation stamps into the normalized shape too.
+    await _private.stampWitnessConflictBelled(unbelled.id, 45);
+    const u = await db('annual_prepay_terms').where({ id: unbelled.id }).first();
+    expect(u.notice_witness_conflict['45']).toMatchObject({ days_out: 45, belled_at: expect.any(String) });
+    expect(u.notice_witness_conflict_belled_at).toBeInstanceOf(Date);
   });
 
   // Codex #4921 r7 P1, real SQL: a combined send claims BOTH rungs in one
