@@ -99,7 +99,7 @@ function ReviewRecord({ record, onSelectCustomer }) {
   );
 }
 
-export default function CustomerGeocodeReviewPanel({ customerId = null, onSelectCustomer }) {
+export default function CustomerGeocodeReviewPanel({ customerId = null, onSelectCustomer, refreshToken = 0 }) {
   const [state, setState] = useState({ enabled: null, records: [], total: 0 });
   const [open, setOpen] = useState(false);
   const [offset, setOffset] = useState(0);
@@ -137,7 +137,7 @@ export default function CustomerGeocodeReviewPanel({ customerId = null, onSelect
     } finally {
       if (abortRef.current === controller) abortRef.current = null;
     }
-  }, [customerId, offset]);
+  }, [customerId, offset, refreshToken]);
 
   useEffect(() => {
     void load();

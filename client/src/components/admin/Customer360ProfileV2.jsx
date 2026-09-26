@@ -9935,6 +9935,7 @@ export default function Customer360ProfileV2({
           <CustomerGeocodeReviewPanel
             key={customerId}
             customerId={customerId}
+            refreshToken={profileVersion}
           />
         ) : null}
       />
