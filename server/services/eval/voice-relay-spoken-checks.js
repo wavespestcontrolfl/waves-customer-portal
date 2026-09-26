@@ -230,7 +230,15 @@ const HOUR_WORDS_ES = 'una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once
 const MERIDIEM = '(?:(?:a\\.?m\\.?|p\\.?m\\.?|o[\\x27\\u2019]?clock|in the (?:morning|afternoon|evening)|de la (?:mañana|tarde|noche))(?![a-z]))';
 const RANGE = '(?:to|and|-|\\u2013|until|till|through|thru|a|y|hasta)';
 // An hour-looking number that is a count or a code, not a time.
-const NOT_A_TIME = '(?:of|minutes?|mins?|hours?|hrs?|days?|weeks?|months?|years?|options?|times?|things?|people|percent|%|points?|visits?|treatments?|applications?|services?|technicians?|techs?|team members?|calls?|attempts?|tries|try|stops?|steps?|more|other|last|final|extra|additional|quick|go\\b|glance|place|stage|level|address|numbers?|reasons?|questions?|[\\d:/-])';
+const NOT_A_TIME = '(?:of|minutes?|mins?|hours?|hrs?|days?|weeks?|months?|years?|options?|times?|things?|people|percent|%|points?|visits?|treatments?|applications?|services?|technicians?|techs?|team members?|calls?|attempts?|tries|try|stops?|steps?|more|other|last|final|extra|additional|quick|go\\b|glance|place|stage|level|address|numbers?|reasons?|questions?|rooms?|bedrooms?|bathrooms?|units?|pets?|[\\d:/-])';
+// Codex round-2 P1: "between two and four ROOMS" / "entre dos y cuatro
+// HABITACIONES" is a quantity, not a clock range — a noun right after the
+// second endpoint of the range check below (line ~284) means "how many",
+// not "what time". Spanish-specific since RANGE_HOUR (unlike the plain
+// HOUR used everywhere NOT_A_TIME already guards) accepts bare Spanish
+// number words, which is what exposed this: an English range already
+// reads NOT_A_TIME for the same reason.
+const NOT_A_QUANTITY_ES = '(?:minutos?|horas?|d[ií]as?|semanas?|meses?|a[ñn]os?|opciones?|veces|cosas?|personas?|puntos?|visitas?|tratamientos?|aplicaciones?|servicios?|t[eé]cnicos?|llamadas?|intentos?|paradas?|pasos?|m[aá]s|otro|otros?|[uú]ltimo|final|extra|adicional|habitaciones?|cuartos?|dormitorios?|ba[ñn]os?|mascotas?|pisos?|zonas?|[aá]reas?|n[uú]meros?|raz(?:[oó]n|ones)|preguntas?)';
 // A day of the month spelled out, EN ordinals and ES cardinals.
 const ORDINAL_WORDS = '(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth|thirteenth|fourteenth|fifteenth|sixteenth|seventeenth|eighteenth|nineteenth|twentieth|twenty[- ](?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth)|thirtieth|thirty[- ]first)';
 const DAY_WORDS_ES = '(?:primero|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce|trece|catorce|quince|diecis[eé]is|diecisiete|dieciocho|diecinueve|veinte|veinti(?:uno|d[oó]s|tr[eé]s|cuatro|cinco|s[eé]is|siete|ocho|nueve)|treinta(?: y uno)?)';
@@ -280,8 +288,10 @@ const TIME_ANYWHERE_RES = Object.freeze([
   // las tres"). This runs on whatever windowStripper (below) did NOT already
   // strip as the compliant, tool-returned window, so a genuinely correct
   // "de una a tres de la tarde" still passes; only an invented range is left
-  // for this to catch.
-  new RegExp(`\\b(?:between|entre|de)\\s+${RANGE_HOUR}(?::[0-5]\\d)?\\s*${MERIDIEM}?\\s*${RANGE}\\s+${RANGE_HOUR}\\b`, 'i'),
+  // for this to catch. The trailing negative lookahead (NOT_A_TIME/
+  // NOT_A_QUANTITY_ES) is a second Codex round-2 P1: without it "entre dos y
+  // cuatro habitaciones" (a room count, not a time) also matched.
+  new RegExp(`\\b(?:between|entre|de)\\s+${RANGE_HOUR}(?::[0-5]\\d)?\\s*${MERIDIEM}?\\s*${RANGE}\\s+${RANGE_HOUR}\\b(?!\\s*(?:${NOT_A_TIME}|${NOT_A_QUANTITY_ES}))`, 'i'),
   new RegExp(`\\b(?:at|around|about|by|exactly at|right at|closer to|near|before|after|until|till)\\s+${HOUR}(?::00)?\\b(?!\\s*(?:${RANGE}|${NOT_A_TIME}))`, 'i'),
   new RegExp(`\\b(?:expect(?:ing|ed)?|anticipat(?:e|ing)|arriv(?:e|es|ing|al)|be there|show(?:ing)? up|get there|come by|coming|due|eta)(?:\\s+(?:is|of|should|will|would|might|may|could|to|probably|likely|be|there))*\\s+(?:(?:at|around|about|by|before|after)\\s+)?${HOUR}(?::00)?\\b(?!\\s*(?:${RANGE}|${NOT_A_TIME}))`, 'i'),
   /\b(?:noon|midday|midnight|mediod[ií]a|medianoche)\b/i,

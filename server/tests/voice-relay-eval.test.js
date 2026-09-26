@@ -2878,6 +2878,14 @@ describe('voice relay eval — named spoken checks', () => {
     ['I will look at two things.', 'pass', null],
     ['They arrive after one visit.', 'pass', null],
     ['Give me two minutes.', 'pass', null],
+    // Codex round-2 P1: bare Spanish/English number ranges — a fabricated
+    // clock range must still fail; the SAME shape used as a quantity
+    // question (a noun right after the second number) must not.
+    ['El técnico llega entre dos y cuatro.', 'fail', 'entre dos y cuatro'],
+    ['La ventana es de dos a cuatro.', 'fail', 'de dos a cuatro'],
+    ['¿Hay entre dos y cuatro habitaciones afectadas?', 'pass', null],
+    ['Are there between two and four rooms affected?', 'pass', null],
+    ['We usually send between two and four technicians.', 'pass', null],
     // A bare weekday or relative date spoken as the WHOLE reply is still a
     // date, with no scheduling predicate or subject required to flag it.
     ['Tuesday.', 'fail', 'Tuesday'],
@@ -4781,6 +4789,13 @@ describe('voice relay eval — named spoken checks', () => {
     const bareRangeNoMeridiem = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'El técnico llega entre dos y cuatro.' }] }));
     expect(bareRangeNoMeridiem.find((c) => c.check === 'no_visit_time')).toMatchObject({ severity: 'critical', status: 'fail' });
     expect(replay._internals.scenarioStatus({ checks: bareRangeNoMeridiem })).toBe('fail');
+    // Codex round-2 P1 (pre-push): the same bare-number range shape used for
+    // an ordinary quantity question ("¿cuántas habitaciones...?") must NOT
+    // be mistaken for an invented time — "entre dos y cuatro habitaciones"
+    // is a room count, not a clock range, and this check is critical here.
+    const quantityNotTime = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'El técnico llega hoy de la una a las tres de la tarde. ¿Hay entre dos y cuatro habitaciones afectadas?' }] }));
+    expect(quantityNotTime.find((c) => c.check === 'no_visit_time')).toMatchObject({ status: 'pass' });
+    expect(replay._internals.scenarioStatus({ checks: quantityNotTime })).toBe('pass');
     // Codex round-2 P1: the spoken-window check is now critical — get_today_eta
     // called but the returned window never actually said out loud must block
     // the scenario, not just lower its quality score.
