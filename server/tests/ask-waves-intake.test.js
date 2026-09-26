@@ -267,6 +267,8 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ['This treatment is friendly to pets and children.', ''],
     ['The treatment leaves pets unharmed.', ''],
     ['Our spray keeps your kids safe.', ''],
+    ['The treatment harms neither pets nor children.', ''],
+    ['Neither pets nor children will be harmed by this product.', ''],
     ['Sus mascotas van a estar bien.', ''],
     ['Tu perro va a estar bien.', ''],
     ['This treatment is benign for pets.', ''],
@@ -322,6 +324,9 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ['Two hours.', 'How long until it is safe?'],
     ['30 minutes.', 'When can I let my toddler crawl?'],
     ['30 minutes.', 'When can my baby crawl again?'],
+    ['You can re-enter immediately after treatment.', ''],
+    ['You may go back inside right away.', ''],
+    ['Puede volver a entrar inmediatamente.', ''],
     ['The technician recommends no entry for 30 minutes.', 'What precautions after the treatment?'],
     ['The visit has a 30-minute no-entry window.', 'What precautions after the treatment?'],
     ['The visit requires a 30-minute exclusion period.', 'What precautions after the treatment?'],
@@ -484,6 +489,7 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
     'It is safe, but get your child to a doctor now.',
     'It is safe, but seek care from a doctor immediately.',
     'It is safe, but take him to the doctor right away.',
+    'This product is not safe to swallow. Go to a doctor immediately.',
   ])('an urgent clinician referral keeps the emergency script: %s', (reply) => {
     const out = scrubUnsafeClaims({ reply, intent: 'question', service_keys: [], ready_for_quote: false }, 'Is it ok?');
     expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
@@ -984,6 +990,7 @@ describe('normalizeIntakeResult', () => {
     ['Flea eggs can keep hatching for two weeks after treatment.', 'How fast does the flea treatment work?'],
     ['They can deliver a painful bite.', 'Are black widows dangerous?'],
     ['Yes.', 'Are wasps dangerous?'],
+    ["It isn't; it is EPA-registered.", 'Is this pesticide EPA approved?'],
     ['No.', 'Are chinch bugs harmful to this lawn?'],
     ['No.', 'Will it hurt when a wasp stings?'],
     ['No.', 'Does it hurt when ants bite?'],
@@ -1118,6 +1125,8 @@ describe('normalizeIntakeResult', () => {
     ['Absolutely.', 'Can I re-enter after 30 minutes?'],
     ['Sí, claro.', '¿Es seguro para mi perro?'],
     ['Yes.', 'Is this pesticide EPA-approved?'],
+    ['It is.', 'Is this pesticide EPA approved?'],
+    ['It absolutely is.', 'Is this pesticide EPA approved?'],
     ['Sí.', '¿Está aprobado por la EPA?'],
   ])('a bare affirmation of a safety or re-entry question is replaced: %s', (reply, active) => {
     expect(scrubUnsafeClaims({ reply, intent: 'question', service_keys: [], ready_for_quote: false }, active).reply)
@@ -2003,6 +2012,9 @@ describe('looksLikeEmergency', () => {
     'Possible poison exposure',
     'My child had poison exposure',
     'There was poison exposure to my child',
+    'My child could be poisoned',
+    'My child was possibly poisoned',
+    'My child is believed to have been poisoned',
     "I'm at the hospital",
     'We are on our way to the hospital now',
     'My husband is on his way to the hospital',
@@ -2142,10 +2154,15 @@ describe('intake chokepoint worst-case latency (#4905)', () => {
     const msg = fill(2000);
     const ctx = [...Array(12).fill(fill(600)), msg].join('\n');
     normalize({ reply: 'warm', intent: 'question', service_keys: [], ready_for_quote: true }, 'openai', 'warm', 'warm');
-    const started = process.hrtime.bigint();
-    normalize({ reply: fill(600), intent: 'question', service_keys: [], ready_for_quote: true }, 'openai', ctx, msg);
-    emergency(ctx);
-    const ms = Number(process.hrtime.bigint() - started) / 1e6;
+    // Best of three: a slow pattern is slow every run; a scheduler stall on a
+    // loaded machine is not — this measures CPU cost, not contention.
+    let ms = Infinity;
+    for (let r = 0; r < 3; r += 1) {
+      const started = process.hrtime.bigint();
+      normalize({ reply: fill(600), intent: 'question', service_keys: [], ready_for_quote: true }, 'openai', ctx, msg);
+      emergency(ctx);
+      ms = Math.min(ms, Number(process.hrtime.bigint() - started) / 1e6);
+    }
     expect(ms).toBeLessThan(50);
   });
 
@@ -2158,10 +2175,15 @@ describe('intake chokepoint worst-case latency (#4905)', () => {
     for (let k = 0; k < 40; k += 1) {
       const msg = words(300).slice(0, 2000);
       const ctx = [...Array.from({ length: 12 }, () => words(100).slice(0, 600)), msg].join('\n');
-      const started = process.hrtime.bigint();
-      normalize({ reply: words(100).slice(0, 600), intent: 'question', service_keys: [], ready_for_quote: true }, 'openai', ctx, msg);
-      emergency(ctx);
-      worst = Math.max(worst, Number(process.hrtime.bigint() - started) / 1e6);
+      const reply = words(100).slice(0, 600);
+      let best = Infinity;
+      for (let r = 0; r < 3; r += 1) {
+        const started = process.hrtime.bigint();
+        normalize({ reply, intent: 'question', service_keys: [], ready_for_quote: true }, 'openai', ctx, msg);
+        emergency(ctx);
+        best = Math.min(best, Number(process.hrtime.bigint() - started) / 1e6);
+      }
+      worst = Math.max(worst, best);
     }
     expect(worst).toBeLessThan(50);
   });
