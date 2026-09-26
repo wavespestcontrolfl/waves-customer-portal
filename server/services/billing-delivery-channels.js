@@ -119,11 +119,17 @@ async function accountBillingChannels(customerId, category, knex) {
   const database = knex || require('../models/db');
   const customer = await database('customers').where({ id: customerId }).first('account_id');
   if (!customer) return null;
+  // Same rule as the messaging core (consent loadContactState overlays the
+  // primary's arrays only onto an existing row): a property with no prefs
+  // row of its own routes legacy, so every caller agrees with the send path.
+  const own = await database('notification_prefs').where({ customer_id: customerId }).first();
+  if (!own) return null;
   const { resolvePrimaryProfileId } = require('./account-properties');
   const ownerId = await resolvePrimaryProfileId(
     { customerId, accountId: customer.account_id }, database, { onError: 'throw' },
   );
-  const prefs = await database('notification_prefs').where({ customer_id: ownerId }).first();
+  const prefs = String(ownerId) === String(customerId)
+    ? own : await database('notification_prefs').where({ customer_id: ownerId }).first();
   return explicitBillingChannels(prefs || {}, category);
 }
 
