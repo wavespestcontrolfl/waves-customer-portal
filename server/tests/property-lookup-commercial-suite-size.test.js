@@ -64,6 +64,30 @@ describe('buildEnrichedProfile stashes a candidate but never leaks building sqft
     expect(profile.isCommercial).toBe(false);
     expect(profile._commercialSuiteCandidate).toBeNull();
   });
+
+  test('a suite already stamped on the record (persisted by a prior fresh lookup) is reused synchronously — no candidate at all', () => {
+    const stamp = {
+      value: 1400, source: 'license_seats', confidence: 'medium',
+      businessName: 'Test Taco Shop', evidence: [{ source: 'license_seats', detail: '25 seats -> 1,400 sq ft' }], seats: 25,
+    };
+    const profile = buildEnrichedProfile(
+      plazaSuiteRecord({ _commercialSuiteSize: stamp }), null, 27.5, -82.45, null, null, SUITE_ADDRESS,
+    );
+    expect(profile.homeSqFt).toBe(1400);
+    expect(profile.footprint).toBe(1400);
+    expect(profile.buildingSqFt).toBe(46031);
+    expect(profile.suiteSize).toEqual(stamp);
+    // Already resolved — nothing pending for applyCommercialSuiteSize.
+    expect(profile._commercialSuiteCandidate).toBeNull();
+  });
+
+  test('a stamped office_retail plaza reconciles to restaurant synchronously, same as a fresh resolution', () => {
+    const stamp = { value: 1400, source: 'license_seats', businessName: 'Test Taco Shop' };
+    const profile = buildEnrichedProfile(
+      plazaSuiteRecord({ _commercialSuiteSize: stamp }), null, 27.5, -82.45, null, null, SUITE_ADDRESS,
+    );
+    expect(profile.commercialSubtype).toBe('restaurant');
+  });
 });
 
 describe('applyCommercialSuiteSize — the async resolution', () => {
@@ -100,6 +124,16 @@ describe('applyCommercialSuiteSize — the async resolution', () => {
     await routePrivate.applyCommercialSuiteSize(profile);
     expect(resolveCommercialSuiteSize).not.toHaveBeenCalled();
     expect(profile.homeSqFt).toBe(46031);
+  });
+
+  test('a profile whose suite was already resolved via a persisted stamp never calls the resolver either — zero network on reuse', async () => {
+    const stamp = { value: 1400, source: 'license_seats', businessName: 'Test Taco Shop' };
+    const profile = buildEnrichedProfile(
+      plazaSuiteRecord({ _commercialSuiteSize: stamp }), null, 27.5, -82.45, null, null, SUITE_ADDRESS,
+    );
+    await routePrivate.applyCommercialSuiteSize(profile);
+    expect(resolveCommercialSuiteSize).not.toHaveBeenCalled();
+    expect(profile.homeSqFt).toBe(1400);
   });
 
   test('a resolver failure is fail-open: the profile keeps its pending (0) homeSqFt rather than throwing', async () => {

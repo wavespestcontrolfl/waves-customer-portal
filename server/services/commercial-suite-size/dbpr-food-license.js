@@ -279,17 +279,56 @@ function _resetCacheForTests() {
   _failedAt.clear();
 }
 
+// Synchronous, zero-I/O peek: the warm rows for a district, or null when the
+// in-process cache is cold/expired. Never triggers a fetch — a cache-hit
+// property lookup (server/routes/property-lookup-v2.js
+// buildResultFromCachedLookup) must never await a download, so it uses this
+// instead of loadDistrictRows to decide whether DBPR has anything to offer
+// right now.
+function peekDistrictRows(district, { now = () => Date.now() } = {}) {
+  const cached = _cache.get(district);
+  if (cached && (now() - cached.fetchedAt) < DBPR_CACHE_TTL_MS) return cached.rows;
+  return null;
+}
+
+// Fire-and-forget warm-up for a cold district: kicks the real (single-flight,
+// bounded, backed-off) fetch WITHOUT awaiting it, so a cache-hit request that
+// found the cache cold isn't blocked by it, but a LATER request — fresh or
+// cache-hit — may find it warm. loadDistrictRows already never throws; this
+// wraps it once more defensively so a background task can never surface as
+// an unhandled rejection.
+function warmDistrictRowsInBackground(district, opts = {}) {
+  Promise.resolve(loadDistrictRows(district, opts)).catch(() => {});
+}
+
 /**
  * Resolve a suite's size from an active DBPR food-service license, or null.
  * Fail-open: any fetch/parse error resolves null, never throws.
+ *
+ * opts.requireWarmCache: true — the cache-hit fast path. Uses ONLY the
+ * synchronous in-process cache (peekDistrictRows); a cold/expired district
+ * skips DBPR entirely for THIS call (kicking a background warm-up for next
+ * time) rather than awaiting a fetch, so a cache-hit property lookup can
+ * never be blocked on a download.
  */
 async function resolveViaDbprLicense({ address = {}, phone = null, businessNameHint = null } = {}, opts = {}) {
   try {
     const districts = opts.districts || DBPR_FOOD_LICENSE_DISTRICTS;
     let rows = [];
-    for (const district of districts) {
-      const districtRows = await loadDistrictRows(district, opts);
-      rows = rows.concat(districtRows);
+    if (opts.requireWarmCache) {
+      for (const district of districts) {
+        const warm = peekDistrictRows(district, opts);
+        if (warm == null) {
+          warmDistrictRowsInBackground(district, opts);
+          return null;
+        }
+        rows = rows.concat(warm);
+      }
+    } else {
+      for (const district of districts) {
+        const districtRows = await loadDistrictRows(district, opts);
+        rows = rows.concat(districtRows);
+      }
     }
     if (!rows.length) return null;
     const row = matchDbprRow(rows, {
@@ -329,5 +368,7 @@ module.exports = {
   seatsToSqft,
   resolveViaDbprLicense,
   loadDistrictRows,
+  peekDistrictRows,
+  warmDistrictRowsInBackground,
   _resetCacheForTests,
 };

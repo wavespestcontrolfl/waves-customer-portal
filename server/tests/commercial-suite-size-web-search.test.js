@@ -33,56 +33,97 @@ describe('parseJson', () => {
 });
 
 describe('acceptWebSearchResult — acceptance rules', () => {
-  test('accepts a plausible suite figure that names the suite', () => {
+  test('accepts "Suite 102 … 1,450 SF" when 102 is the target unit', () => {
     const result = acceptWebSearchResult({
       businessName: 'Test Taco Shop',
       businessType: 'restaurant',
-      suiteSqft: 1400,
-      suiteSqftQuote: 'Suite 102 is a 1,400 sq ft restaurant space available for lease.',
+      suiteSqft: 1450,
+      suiteSqftQuote: 'Suite 102 is a 1,450 SF restaurant space available for lease.',
       suiteSqftUrl: 'https://www.loopnet.com/example',
-    }, { buildingSqft: 46031 });
-    expect(result).toEqual(expect.objectContaining({ value: 1400, businessName: 'Test Taco Shop', businessType: 'restaurant' }));
+    }, { buildingSqft: 46031, unit: '102' });
+    expect(result).toEqual(expect.objectContaining({ value: 1450, businessName: 'Test Taco Shop', businessType: 'restaurant' }));
     expect(result.evidence[0].url).toBe('https://www.loopnet.com/example');
   });
 
-  test('rejects a figure whose quote never mentions a suite/unit', () => {
+  test('no unit known at all -> never accepts a sqft, even with no building size and a plausible-looking quote', () => {
     const result = acceptWebSearchResult({
       businessName: 'Test Taco Shop',
       suiteSqft: 1400,
-      suiteSqftQuote: 'The shopping plaza is a 46,000 sq ft retail center.',
-    }, { buildingSqft: 46031 });
+      suiteSqftQuote: 'The shopping plaza is a 46,000 sq ft retail center with retail space available.',
+    }, { buildingSqft: null }); // no unit passed
     // businessName still comes through — discovering the tenant is useful
     // even when the size figure is rejected.
     expect(result).toEqual({ value: null, businessName: 'Test Taco Shop', businessType: null });
   });
 
-  test('rejects a figure that is actually the whole-building total (>50% of known building size)', () => {
+  test('rejects a quote naming a DIFFERENT suite number than the target unit', () => {
+    const result = acceptWebSearchResult({
+      businessName: 'Test Taco Shop',
+      suiteSqft: 1400,
+      suiteSqftQuote: 'Suite 104 leases at 1,400 sq ft.',
+    }, { buildingSqft: 46031, unit: '102' });
+    expect(result.value).toBeNull();
+  });
+
+  test('a bare "space" mention with no bound unit number is not accepted (the fixed overquote class)', () => {
+    const result = acceptWebSearchResult({
+      suiteSqft: 40000,
+      suiteSqftQuote: '40,000 sq ft of retail space available in this shopping plaza.',
+    }, { buildingSqft: 46031, unit: '102' });
+    expect(result).toBeNull();
+  });
+
+  test('rejects a figure that is actually the whole-building total (>50% of known building size), even when it names the right suite', () => {
     const result = acceptWebSearchResult({
       businessName: 'Test Plaza LLC',
       suiteSqft: 40000,
       suiteSqftQuote: 'Suite 102 spans 40,000 sq ft.',
-    }, { buildingSqft: 46031 });
+    }, { buildingSqft: 46031, unit: '102' });
     expect(result.value).toBeNull();
   });
 
   test('rejects an out-of-range suite figure (too small / too large), returning null with nothing else to report', () => {
     expect(acceptWebSearchResult({
       suiteSqft: 50, suiteSqftQuote: 'Suite 102 is 50 sq ft.',
-    }, {})).toBeNull();
+    }, { unit: '102' })).toBeNull();
     expect(acceptWebSearchResult({
       suiteSqft: 50000, suiteSqftQuote: 'Suite 102 is 50,000 sq ft.',
-    }, {})).toBeNull();
+    }, { unit: '102' })).toBeNull();
   });
 
   test('returns null outright when nothing at all was found', () => {
-    expect(acceptWebSearchResult({ suiteSqft: null, suiteSqftQuote: '' }, {})).toBeNull();
+    expect(acceptWebSearchResult({ suiteSqft: null, suiteSqftQuote: '' }, { unit: '102' })).toBeNull();
   });
 
   test('accepts a suite figure with no known building size to compare against', () => {
     const result = acceptWebSearchResult({
       suiteSqft: 1400, suiteSqftQuote: 'Unit 102 leases at 1,400 sq ft.',
-    }, { buildingSqft: null });
+    }, { buildingSqft: null, unit: '102' });
     expect(result.value).toBe(1400);
+  });
+
+  test('the target unit itself may carry a designator ("#102", "Suite 102") — address-normalizer never hands over a bare number', () => {
+    expect(acceptWebSearchResult({
+      suiteSqft: 1400, suiteSqftQuote: 'Suite 102 is 1,400 sq ft.',
+    }, { unit: '#102' }).value).toBe(1400);
+    expect(acceptWebSearchResult({
+      suiteSqft: 1400, suiteSqftQuote: 'Suite 102 is 1,400 sq ft.',
+    }, { unit: 'Suite 102' }).value).toBe(1400);
+    expect(acceptWebSearchResult({
+      suiteSqft: 1400, suiteSqftQuote: 'Suite 104 is 1,400 sq ft.', // wrong suite
+    }, { unit: '#102' })).toBeNull();
+  });
+
+  test('matches "Ste. 102", "#102", and reversed "102 Suite" phrasing, all bound to the target unit', () => {
+    expect(acceptWebSearchResult({
+      suiteSqft: 1400, suiteSqftQuote: 'Ste. 102 is 1,400 sq ft.',
+    }, { unit: '102' }).value).toBe(1400);
+    expect(acceptWebSearchResult({
+      suiteSqft: 1400, suiteSqftQuote: 'Unit #102 leases at 1,400 sq ft.',
+    }, { unit: '102' }).value).toBe(1400);
+    expect(acceptWebSearchResult({
+      suiteSqft: 1400, suiteSqftQuote: 'The 102 Suite space is 1,400 sq ft.',
+    }, { unit: '102' }).value).toBe(1400);
   });
 });
 

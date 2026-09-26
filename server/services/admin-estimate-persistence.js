@@ -1552,8 +1552,8 @@ function buildEstimatePersistenceFields(body, context = {}) {
     : null;
 
   return {
-    // Always emitted (create AND update, both funnel through this
-    // function): the estimates.category CHECK-constrained column
+    // Emitted ONLY when positively COMMERCIAL-detected — never an explicit
+    // 'RESIDENTIAL'. The estimates.category CHECK-constrained column
     // (RESIDENTIAL|COMMERCIAL, migration 20260401000014) was never written
     // by the manual admin-tool save path before this — every commercial
     // estimate saved through EstimateToolViewV2 silently kept the column's
@@ -1565,7 +1565,21 @@ function buildEstimatePersistenceFields(body, context = {}) {
     // accident). isCommercialEstimateData scans the saved payload the same
     // way estimate-delivery-options.js already does for its own commercial
     // detection, so this can never disagree with that reader.
-    category: isCommercialEstimateData(estimateData) ? 'COMMERCIAL' : 'RESIDENTIAL',
+    //
+    // The key is OMITTED (never set to 'RESIDENTIAL') on both create and
+    // update, deliberately: on CREATE, an omitted column falls to the
+    // migration default RESIDENTIAL — byte-identical to never having written
+    // it at all. On UPDATE, this function is shared by createOrReuseAdminEstimate
+    // AND reviseAdminEstimate (resolveEstimateWritePayload has no reliable
+    // "is this a revise" signal, and a revise's PARTIAL payload legitimately
+    // carries no commercial markers of its own even when the row genuinely
+    // is commercial — a category the row already carries, or one an engine
+    // draft / commercial proposal stamped, must never be silently reset to
+    // RESIDENTIAL by an unrelated field edit). An UPDATE with the key
+    // omitted leaves that column untouched (never downgrades); one row's
+    // ONLY path to COMMERCIAL, from either create or revise, is a payload
+    // this detector positively reads as commercial.
+    ...(isCommercialEstimateData(estimateData) ? { category: 'COMMERCIAL' } : {}),
     // Always emitted: a non-SERVER rewrite RESETS the column to its migration
     // default, so a draft first stamped by a server price can't keep claiming
     // that version after a CLIENT_FALLBACK/quote-required rewrite replaced

@@ -1,13 +1,21 @@
 /**
  * estimates.category persistence (owner ruling 2026-09-25,
- * server/services/commercial-suite-size/ follow-on): the manual admin-tool
- * save path never wrote estimates.category, so every commercial estimate
- * saved through EstimateToolViewV2 kept the migration column default
- * RESIDENTIAL — which let a commercial row pass the AGENTS.md P0
- * "Estimate service-mix rail member exclusion" guard's
- * `category !== 'RESIDENTIAL'` check by accident. buildEstimatePersistenceFields
- * now stamps the column on every save (create AND revise both funnel
- * through it — see resolveEstimateWritePayload).
+ * server/services/commercial-suite-size/ follow-on, then a primary review
+ * of b1150dec5c): the manual admin-tool save path never wrote
+ * estimates.category, so every commercial estimate saved through
+ * EstimateToolViewV2 kept the migration column default RESIDENTIAL — which
+ * let a commercial row pass the AGENTS.md P0 "Estimate service-mix rail
+ * member exclusion" guard's `category !== 'RESIDENTIAL'` check by accident.
+ *
+ * buildEstimatePersistenceFields emits `category: 'COMMERCIAL'` ONLY when
+ * the saved payload is positively detected commercial — it never emits an
+ * explicit 'RESIDENTIAL'. This is deliberate on BOTH create and update: an
+ * omitted key falls to the column's migration default on create (byte-
+ * identical to never writing it), and leaves an UPDATE's SET clause
+ * untouched on revise — so a revise's partial payload (which legitimately
+ * carries no commercial markers of its own) can never downgrade a row a
+ * prior create, engine draft, or commercial proposal already stamped
+ * COMMERCIAL.
  */
 
 const { buildEstimatePersistenceFields } = require('../services/admin-estimate-persistence');
@@ -30,12 +38,13 @@ const baseBody = {
 };
 
 describe('buildEstimatePersistenceFields — category', () => {
-  test('a residential payload persists category RESIDENTIAL', () => {
+  test('a residential payload omits category (column default RESIDENTIAL applies on create; an update leaves the column untouched)', () => {
     const fields = buildEstimatePersistenceFields({
       ...baseBody,
       estimateData: { inputs: { address: '123 Palm Ave' }, result: { total: 125 } },
     });
-    expect(fields.category).toBe('RESIDENTIAL');
+    expect(fields.category).toBeUndefined();
+    expect('category' in fields).toBe(false);
   });
 
   test('a commercial payload (isCommercial flag) persists category COMMERCIAL', () => {
@@ -64,8 +73,23 @@ describe('buildEstimatePersistenceFields — category', () => {
     expect(fields.category).toBe('COMMERCIAL');
   });
 
-  test('no estimateData at all falls back to RESIDENTIAL (the migration default), never throws', () => {
+  test('no estimateData at all omits category, never throws', () => {
     const fields = buildEstimatePersistenceFields({ ...baseBody, estimateData: null });
-    expect(fields.category).toBe('RESIDENTIAL');
+    expect(fields.category).toBeUndefined();
+    expect('category' in fields).toBe(false);
+  });
+
+  test('a revise whose incremental payload carries no commercial markers omits category — the row keeps whatever it already had (never downgraded)', () => {
+    // Simulates reviseAdminEstimate: the operator edited an unrelated field
+    // (e.g. a discount) on an already-commercial estimate, and the payload
+    // sent for THIS save happens to carry no commercial signal of its own
+    // (a partial/legacy shape). The fix must never write RESIDENTIAL here —
+    // only the update's OTHER fields change; category is left alone.
+    const fields = buildEstimatePersistenceFields({
+      ...baseBody,
+      estimateData: { inputs: { address: '4400 Test Commons Pkwy E #102' }, result: { total: 103 } },
+    });
+    expect(fields.category).toBeUndefined();
+    expect('category' in fields).toBe(false);
   });
 });

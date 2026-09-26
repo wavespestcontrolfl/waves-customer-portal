@@ -189,3 +189,61 @@ describe('DBPR fetch failure backoff', () => {
     expect(fetchText).toHaveBeenCalledTimes(2);
   });
 });
+
+describe('requireWarmCache — the cache-hit fast path never awaits a download', () => {
+  const { peekDistrictRows, loadDistrictRows, warmDistrictRowsInBackground } = require('../services/commercial-suite-size/dbpr-food-license');
+  beforeEach(() => _resetCacheForTests());
+
+  test('peekDistrictRows returns null on a cold cache without ever calling fetchText', () => {
+    const fetchText = jest.fn();
+    expect(peekDistrictRows(7)).toBeNull();
+    expect(fetchText).not.toHaveBeenCalled();
+  });
+
+  test('peekDistrictRows returns the rows once loadDistrictRows has warmed the cache', async () => {
+    const text = csv([{ 'Location Street Address': '4400 Test Commons Pkwy E #102', 'Location Zip Code': '00000' }]);
+    const fetchText = jest.fn().mockResolvedValue(text);
+    await loadDistrictRows(7, { fetchText });
+    const warm = peekDistrictRows(7);
+    expect(Array.isArray(warm)).toBe(true);
+    expect(warm).toHaveLength(1);
+  });
+
+  test('requireWarmCache: a cold cache resolves null immediately and kicks a background warm-up, never awaiting the fetch', async () => {
+    let releaseFetch;
+    const pending = new Promise((resolve) => { releaseFetch = resolve; });
+    const fetchText = jest.fn().mockReturnValue(pending);
+    const result = await resolveViaDbprLicense({
+      address: { street: '4400 Test Commons Parkway East', unit: '102', zip: '00000' },
+    }, { requireWarmCache: true, fetchText });
+    expect(result).toBeNull();
+    // The background warm-up DID kick the real fetch (for next time) — this
+    // proves the resolve above returned without waiting on it.
+    expect(fetchText).toHaveBeenCalledTimes(1);
+    releaseFetch(csv([]));
+    await Promise.resolve().then(() => Promise.resolve()); // let the background promise settle before the next test resets the cache
+  });
+
+  test('requireWarmCache: a warm cache resolves the match with zero fetch calls', async () => {
+    const text = csv([{
+      'Location Street Address': '4400 Test Commons Pkwy E #102',
+      'Location Zip Code': '00000',
+      'Business Name': 'TEST TACO SHOP',
+      'Number of Seats or Rental Units': '25',
+    }]);
+    const warmFetch = jest.fn().mockResolvedValue(text);
+    await loadDistrictRows(7, { fetchText: warmFetch }); // warm the cache first, same as a prior fresh lookup would
+
+    const fetchText = jest.fn(); // must never be called on the warm path
+    const result = await resolveViaDbprLicense({
+      address: { street: '4400 Test Commons Parkway East', unit: '102', zip: '00000' },
+    }, { requireWarmCache: true, fetchText });
+    expect(result).toEqual(expect.objectContaining({ value: 1400, businessName: 'TEST TACO SHOP' }));
+    expect(fetchText).not.toHaveBeenCalled();
+  });
+
+  test('warmDistrictRowsInBackground never throws even when the fetch rejects', () => {
+    const fetchText = jest.fn().mockRejectedValue(new Error('network down'));
+    expect(() => warmDistrictRowsInBackground(7, { fetchText })).not.toThrow();
+  });
+});

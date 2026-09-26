@@ -80,17 +80,39 @@ function parseJson(text) {
   }
 }
 
-// Loose "this mentions a suite/unit" check on the model's own quoted
-// sentence — a quote that never names a suite/unit is a building total by
-// construction, whatever number the model attached to it.
-const SUITE_MENTION_RE = /\b(suite|ste\.?|unit|space)\b/i;
+// The old check accepted ANY bare "suite"/"unit"/"space" word anywhere in
+// the quote — "40,000 sq ft of retail space" (naming no suite at all) or a
+// quote naming a DIFFERENT suite both passed, and the building-share cap
+// only helps when buildingSqft happens to be known (the engine can pass
+// null). The fix requires the quote to bind the number to the ACTUAL target
+// unit: a suite token immediately adjacent to that exact number, in either
+// order ("Suite 102", "Ste. #102", "102 Suite"). When no target unit is
+// known at all, this leg accepts no sqft — a bare building-wide phrase can
+// never stand in for "the suite this address names".
+// address.unit (address-normalizer.js splitStreetLineUnitParts) carries the
+// designator too — "#102", "Suite 102", "Unit 102" — never a bare number.
+// Strip a leading designator so the regex binds to the actual unit token
+// ("102"), matching how dbpr-food-license.js's normalizeUnitValue compares.
+function extractUnitToken(unit) {
+  const raw = String(unit || '').trim();
+  if (!raw) return '';
+  return raw.replace(/^(?:suite|ste\.?|unit|apt\.?|apartment|bldg\.?|building|bay|space|#)\s*#?\s*/i, '').trim();
+}
+
+function unitBoundSuiteRegex(unit) {
+  const num = extractUnitToken(unit);
+  if (!num) return null;
+  const esc = num.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const token = '(?:suite|ste\\.?|unit|bay|space|#)';
+  return new RegExp(`(?:\\b${token}\\.?\\s*#?\\s*${esc}\\b|\\b${esc}\\s*${token}\\b)`, 'i');
+}
 
 /**
  * Accept/reject the parsed model output. Exported separately so the
  * acceptance rules (the part that actually protects against an overquote)
  * are directly unit-testable without a live model call.
  */
-function acceptWebSearchResult(parsed, { buildingSqft } = {}) {
+function acceptWebSearchResult(parsed, { buildingSqft, unit } = {}) {
   if (!parsed || typeof parsed !== 'object') return null;
   const businessName = typeof parsed.businessName === 'string' && parsed.businessName.trim()
     ? parsed.businessName.trim() : null;
@@ -101,10 +123,12 @@ function acceptWebSearchResult(parsed, { buildingSqft } = {}) {
   const url = typeof parsed.suiteSqftUrl === 'string' && parsed.suiteSqftUrl.trim() ? parsed.suiteSqftUrl.trim() : null;
 
   const buildingCap = Number(buildingSqft) > 0 ? Number(buildingSqft) * MAX_BUILDING_SHARE : null;
+  const suiteRe = unitBoundSuiteRegex(unit);
   const usable = Number.isFinite(suiteSqft)
     && suiteSqft >= MIN_ACCEPTABLE_SQFT
     && suiteSqft <= MAX_ACCEPTABLE_SQFT
-    && SUITE_MENTION_RE.test(quote)
+    && suiteRe != null
+    && suiteRe.test(quote)
     && (buildingCap == null || suiteSqft <= buildingCap);
 
   if (!usable) {
@@ -161,7 +185,7 @@ async function resolveViaWebSearch({
     if (!textBlock?.text) return null;
     const parsed = parseJson(textBlock.text);
     if (!parsed) return null;
-    return acceptWebSearchResult(parsed, { buildingSqft });
+    return acceptWebSearchResult(parsed, { buildingSqft, unit: address.unit });
   } catch (err) {
     logger.warn(`[commercial-suite-size] web-search leg failed: ${err.message}`);
     return null;
