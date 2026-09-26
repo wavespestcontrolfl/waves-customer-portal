@@ -1896,6 +1896,21 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect(outcome).toMatchObject({ scanned: 1, fulfilled: 0 });
   });
 
+  test('R2 rule 7: an App-push receipt the provider accepted is payment evidence; an SMS receipt left at sent is not', async () => {
+    const commitment = { kind: 'other', description: 'Did my payment go through?', sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 1000);
+    const base = { ...message, direction: 'outbound', to_phone: message.from_phone, message_body: 'Payment received, thank you.',
+      message_type: 'receipt', status: 'sent', created_at: after };
+    const [push] = await mockPg('sms_log').insert({ ...base, id: randomUUID(), from_phone: 'push',
+      metadata: JSON.stringify({ channel: 'push', providerAccepted: true }) }).returning('id');
+    const [pending] = await mockPg('sms_log').insert({ ...base, id: randomUUID(), from_phone: message.to_phone }).returning('id');
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
+    const payments = evidence.records.filter((r) => r.type === 'payment').map((r) => r.id);
+    expect(payments).toContain(push.id);
+    expect(payments).not.toContain(pending.id);
+  });
+
   test('R2 rule 7: an unresolved send reservation is never presented as a delivered receipt (source-guard: excludeUnresolvedSendReservations)', async () => {
     const after = new Date(message.created_at.getTime() + 1000);
     await mockPg('sms_log').insert({ ...message, id: randomUUID(), direction: 'outbound',

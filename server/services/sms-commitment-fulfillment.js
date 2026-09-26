@@ -196,7 +196,11 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
       // (payments.metadata.payer_id) are excluded — that money is not the
       // customer's own (rule 5). A property-scoped ask needs the invoice's
       // own visit's property (rule 6); an office invoice with no visit link
-      // has none and never vouches for a scoped ask.
+      // has none and never vouches for a scoped ask. Unlike a delivered
+      // notice (whose content was fixed at send, #4816 r49), money settles
+      // the invoice for its visit, so the visit's property is the payment's
+      // property even if the visit was later switched: invoices carry no
+      // property of their own to snapshot.
       conn('invoices as pinv').where({ 'pinv.customer_id': customerId }).whereNull('pinv.payer_id')
         .where('pinv.paid_at', '>', after).where('pinv.paid_at', '<=', now)
         .leftJoin('scheduled_services as pinv_visit', 'pinv_visit.id', 'pinv.scheduled_service_id')
@@ -231,7 +235,12 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
       // "latest N" read (server/tests/sms-log-general-reader-source-guard.test.js).
       // Its property, when the send named a visit, rides the same
       // notice-scope metadata stamp the generic `sms` source reads.
-      excludeUnresolvedSendReservations(conn('sms_log').where({ customer_id: customerId, direction: 'outbound', status: 'delivered' }))
+      // Delivered, or an App push the provider accepted (status stays 'sent';
+      // the same proof smsDelivered() admits for other notices).
+      excludeUnresolvedSendReservations(conn('sms_log').where({ customer_id: customerId, direction: 'outbound' })
+        .where((q) => q.where('status', 'delivered').orWhere((push) => push.where('status', 'sent')
+          .whereRaw("(sms_log.metadata->>'providerAccepted') = 'true'")
+          .where((ch) => ch.where('from_phone', 'push').orWhereRaw("(sms_log.metadata->>'channel') = 'push'")))))
         .whereIn('message_type', PAYMENT_SMS_TYPES)
         .whereRaw("RIGHT(regexp_replace(to_phone, '[^0-9]', '', 'g'), 10) = ?", [phone(peer)])
         .where('created_at', '>', after).where('created_at', '<=', now)
