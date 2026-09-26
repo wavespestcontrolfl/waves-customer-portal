@@ -17,6 +17,7 @@ import { COCKROACH_V2_DASHBOARD_FIELD_KEYS } from '../components/report/cockroac
 import { TERMITE_V2_DASHBOARD_FIELD_KEYS } from '../components/report/termiteV2/TermiteReportV2';
 import { isProductApplication } from '../lib/product-application';
 import { isLawnFindingSelection } from '../lib/lawn-completion';
+import { serviceCompletionChoicesFor } from '../lib/service-completion-choices';
 import TreeShrubReportV2Section from '../components/report/treeShrubV2/TreeShrubReportV2Section';
 import {
   AlertTriangle,
@@ -5668,6 +5669,14 @@ function visualProofMomentIntro(moments = []) {
   return 'Reviewed service highlights from today\'s visit.';
 }
 
+const CUSTOMER_SAFE_LAWN_OBSERVATIONS = new Set(
+  serviceCompletionChoicesFor('lawn', 'observations').map(({ label }) => label),
+);
+
+function isCustomerSafeLawnObservation(value) {
+  return isLawnFindingSelection(value) || CUSTOMER_SAFE_LAWN_OBSERVATIONS.has(value);
+}
+
 function ServiceReportV1({ data, token, mode = 'live' }) {
   const pdfUrl = data.pdfUrl ? `${API_BASE}${data.pdfUrl.replace(/^\/api/, '')}` : null;
   const reportUrl = typeof window !== 'undefined' ? `${window.location.origin}/report/${token}` : `/report/${token}`;
@@ -5677,7 +5686,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   const premium = dynamicContext.premiumExperience || {};
   const isLawnReport = data.serviceLine === 'lawn' && data.lawnAssessment?.scores;
   const lawnFindings = data.serviceLine === 'lawn'
-    ? [...new Set((data.protocol?.structuredObservations || []).filter(isLawnFindingSelection))]
+    ? [...new Set((data.protocol?.structuredObservations || []).filter(isCustomerSafeLawnObservation))]
     : [];
   // Tree & Shrub V2 adopts the same "lead layout" as lawn V2: the visit timeline +
   // Ask-Waves + products render up top (under Re-entry), not in the generic non-lawn
