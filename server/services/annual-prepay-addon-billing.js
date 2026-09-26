@@ -366,9 +366,7 @@ class CoveredVisitCloseout {
 
   // The visit has invoice history this closeout cannot claim. Dark, only
   // the covered base is handled. Live, what is still owed is the office's
-  // call: one alert listing every invoice on the visit. An invoice is
-  // collected only when it is the visit's only one and bills just this
-  // visit's add-ons (beside another invoice, collecting it can charge twice).
+  // call: one alert listing every invoice on the visit.
   async reconcileWithOfficeInvoices(history) {
     const { svc } = this;
     const open = this.invoice?.id && !['paid', 'prepaid', 'void'].includes(this.invoice.status);
@@ -392,20 +390,28 @@ class CoveredVisitCloseout {
       }
     }
     if (!this.live) return;
-    if (outcome.kind === 'kept' && history.length <= 1) await this.takeBill(outcome.invoice);
-    if (!this.billable) return;
+    if (outcome.kind === 'kept') {
+      // An office bill for just the add-ons stays owed. It is collected only
+      // on a performed visit where it is the only invoice (beside another,
+      // collecting it can charge twice); otherwise it is left as the office
+      // made it, and the text never says "all paid" over it.
+      if (this.billable && history.length <= 1) await this.takeBill(outcome.invoice);
+      else this.owedUnbilled = true;
+    }
     // The history as it stands now: an invoice voided above reads void.
     const listed = (history.length ? history : [{ id: this.ownBillId, status: 'missing' }])
       .map((inv) => (outcome.kind === 'voided' && inv.id === outcome.invoice.id ? { ...inv, status: 'void' } : inv));
     // A voided invoice that charged more than the covered visit — voided
-    // above, on an earlier attempt, or by the office — is re-billed by hand.
+    // above, on an earlier attempt, or by the office — is re-billed by hand,
+    // on any visit: those charges may be owed whether or not the add-ons
+    // were done.
     const voidedCharges = (outcome.kind === 'voided' && outcome.otherCharges)
       || listed.some((inv) => inv.status === 'void' && classifyCoveredVisitInvoice(inv, addons).otherCharges);
     const listing = listed.map((inv) => `${invoiceLabel(inv)} (${inv.status})`).join(', ');
     const invoiceIds = listed.map((inv) => inv.id);
     if (voidedCharges) {
       await this.alert(`its invoices (${listing}) include a voided one that charged more than the covered visit; re-bill whatever it charged besides the covered visit that no other invoice covers`, { invoiceIds });
-    } else if (addons.owed) {
+    } else if (this.billable && addons.owed) {
       const one = listed.length === 1;
       await this.alert(`the visit already has ${one ? 'invoice' : 'invoices'} ${listing}; bill whatever of its add-ons ${one ? 'that invoice does' : 'those invoices do'} not already charge`, { invoiceIds });
     }

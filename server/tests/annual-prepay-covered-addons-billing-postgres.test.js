@@ -681,6 +681,24 @@ postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
       expect(PAID_TEXTS).not.toContain(out.body?.completionSmsType);
     });
 
+    test('a visit not performed still alerts a voided invoice\'s other charges — they may be owed either way', async () => {
+      const f = await coveredVisit({ invoiceLines: (x) => [baseLine(x), tripCharge] });
+      const out = await complete(f, { visitOutcome: 'inspection_only', sendCompletionSms: true });
+      expect(out).toMatchObject({ status: 200 });
+      expect(await settledCovered(f)).toBe('void');
+      expect((await addonsAlert(f)).body).toMatch(/charged more than the covered visit/);
+      expect(PAID_TEXTS).not.toContain(out.body?.completionSmsType);
+    });
+
+    test('a visit not performed leaves an office add-ons invoice open and uncollected — never "all paid" over it', async () => {
+      const f = await coveredVisit({ invoiceLines: (x) => [addonLine(x)] });
+      const out = await complete(f, { visitOutcome: 'inspection_only', sendCompletionSms: true });
+      expect(out).toMatchObject({ status: 200 });
+      expect(await settledCovered(f)).toBe('draft');
+      expect(out.body?.invoicePaymentActionRequired).not.toBe(true);
+      expect(PAID_TEXTS).not.toContain(out.body?.completionSmsType);
+    });
+
     test('an add-on read that fails while checking an existing invoice holds the closeout with the invoice untouched', async () => {
       const f = await coveredVisit({ invoiceLines: (x) => [addonLine(x)] });
       const idempotencyKey = randomUUID();
