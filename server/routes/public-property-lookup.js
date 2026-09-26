@@ -63,6 +63,23 @@ function publicPropertySummary(record) {
   };
 }
 
+function publicLookupMeta(meta) {
+  if (!meta || typeof meta !== 'object') return meta;
+  // Credential configuration and attempted-provider health are staff-only.
+  // Strip at the public boundary for both fresh and cached lookup results.
+  const { providerStatus: _providerStatus, ...rest } = meta;
+  return rest;
+}
+
+function publicLookupErrors(errors) {
+  // Only the service-area verdict is public. Provider failures can reveal
+  // credential configuration or upstream diagnostics; staff keeps those.
+  const outsideServiceArea = Array.isArray(errors) && errors.some((error) => (
+    error?.source === 'geo' && error.message === 'Outside SWFL service area'
+  ));
+  return outsideServiceArea ? [{ source: 'geo', message: 'Outside SWFL service area' }] : [];
+}
+
 // Public copy of the enriched profile. The admin lookup's plat-median
 // estimate (subdivisionMedian: plat name, county, neighbor sample and
 // range for an unassessed vacant parcel) is staff-only context — this
@@ -679,8 +696,8 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
         sources: result.aiAnalysis._sources,
         confidence: result.aiAnalysis._claudeConfidence || result.aiAnalysis.confidenceScore,
       } : null,
-      errors: result.errors,
-      meta: result.meta,
+      errors: publicLookupErrors(result.errors),
+      meta: publicLookupMeta(result.meta),
     });
   } catch (err) {
     logger.error(`[public-property-lookup] failed: ${err.message}`, { stack: err.stack });
@@ -690,6 +707,8 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
 
 module.exports = router;
 module.exports._test = {
+  publicLookupErrors,
+  publicLookupMeta,
   publicEnrichedProfile,
   normalizeServiceInterest,
   formatServiceInterestForFrequency,

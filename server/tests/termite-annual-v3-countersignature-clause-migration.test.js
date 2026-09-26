@@ -57,6 +57,24 @@ async function currentBody(db) {
   return row.body;
 }
 
+// Cross-check with the charge path (#4819): termite-annual-signature-charge
+// charges the saved method only when the SIGNED text carries
+// ANNUAL_INITIAL_CHARGE_AUTHORIZATION (whitespace-normalized). This revision
+// is what introduces that clause — the r2 body must not authorize it.
+describe('20260925030002 billing clause authorizes the signature-time charge', () => {
+  const { agreementAuthorizesInitialCharge } = jest.requireActual('../services/termite-program-agreement');
+  const revisionModule = require('../models/migrations/20260925030002_termite_annual_v3_countersignature_and_billing_clause');
+  const r2Module = require('../models/migrations/20260924030003_termite_annual_v3_signature_block');
+
+  test('the revised body carries the authorization phrase across its line wraps', () => {
+    expect(agreementAuthorizesInitialCharge(revisionModule.TEMPLATE_V3_ANNUAL_R3_BODY)).toBe(true);
+  });
+
+  test('the r2 body before this revision does not', () => {
+    expect(agreementAuthorizesInitialCharge(r2Module.TEMPLATE_V3_ANNUAL_R2_BODY)).toBe(false);
+  });
+});
+
 describeOrSkip('20260925030002_termite_annual_v3_countersignature_and_billing_clause — real Postgres', () => {
   let fixture;
   beforeEach(async () => { fixture = await createScratchDb(); });

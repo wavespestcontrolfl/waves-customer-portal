@@ -54,7 +54,12 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/autopay-log', () => ({ logAutopay: jest.fn() }));
 jest.mock('../services/payment-lifecycle-email', () => ({ sendAutopayEnabled: jest.fn().mockResolvedValue(undefined) }));
 jest.mock('../services/contract-signed-email', () => ({ sendSignedContractCopy: jest.fn().mockResolvedValue(undefined) }));
-jest.mock('../services/termite-program-agreement', () => ({ ANNUAL_TEMPLATE_KEY: 'service_agreement.termite_annual_protection' }));
+// The route keys both post-sign hooks (activation, then this bell) on the
+// activation module's template key; activation itself is stubbed out here.
+jest.mock('../services/termite-annual-activation', () => ({
+  ANNUAL_TEMPLATE_KEY: 'service_agreement.termite_annual_protection',
+  activateTermiteAnnualPlanForSignedContract: jest.fn().mockResolvedValue({ activated: true }),
+}));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn().mockResolvedValue({ id: 'n1' }) }));
 
 const express = require('express');

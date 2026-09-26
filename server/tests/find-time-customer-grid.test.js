@@ -35,10 +35,12 @@ jest.mock('../services/scheduling/arrival-route', () => ({
   enumerateArrivalPlacements: jest.fn(),
   // Every enumerated placement is feasible — the test only cares which
   // start times the loop itself generated and admitted.
-  evaluateArrivalPlacement: jest.fn(() => ({
-    feasible: true, routeOrder: ['candidate'], detourMinutes: 0, driveMinutes: 0,
-    occupiedMinutes: 0, waitingMinutes: 0, estimatedArrival: null, arrivals: [{}],
-    travelSource: 'none', travelReasons: [],
+  // Detour grows with the hour (10 minutes per hour after 08:00) so the
+  // self-serve detour cap has something to hide.
+  evaluateArrivalPlacement: jest.fn((_context, options) => ({
+    feasible: true, routeOrder: ['candidate'], detourMinutes: (Number(options.windowStart.slice(0, 2)) - 8) * 10,
+    driveMinutes: 0, occupiedMinutes: 0, waitingMinutes: 0, estimatedArrival: null, arrivals: [{}],
+    finishMinute: 1000, travelSource: 'none', travelReasons: [],
   })),
 }));
 
@@ -112,5 +114,38 @@ describe('absent tech-days (technician_absences, GATE_TECH_OUT_REDISTRIBUTE) —
     const dates = new Set(slots.map((s) => s.date));
     expect(dates.has(FUTURE_DATE)).toBe(false);
     expect(dates.has(NEXT_DATE)).toBe(true);
+  });
+});
+
+// Owner ruling 2026-09-25: self-serve surfaces hide slots adding more than 30
+// round-trip drive minutes; staff and phone callers see every fit.
+describe('self-serve detour cap (capacity mode)', () => {
+  beforeEach(() => {
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    db.mockImplementation((table) => (table === 'technicians' ? chain([{ id: 'tech-1', name: 'A' }]) : chain([])));
+  });
+  afterEach(() => {
+    delete process.env.GATE_SCHEDULING_CAPACITY;
+    delete process.env.SCHEDULING_MAX_DETOUR_MINUTES;
+  });
+
+  test('a customerFacing caller never sees a slot adding more than 30 minutes, and learns why', async () => {
+    const result = await findAvailableSlots({ ...BASE, customerFacing: true });
+    expect(result.slots.map((s) => s.start_time).sort()).toEqual(['09:00', '10:00', '11:00']);
+    expect(result.rejections.detour_cap).toBe(6); // 12:00-17:00
+    expect(result.slots[0].return_time).toBe('16:40');
+  });
+
+  test('staff callers keep every fit', async () => {
+    const result = await findAvailableSlots(BASE);
+    expect(result.slots.map((s) => s.start_time)).toContain('17:00');
+    expect(result.rejections.detour_cap).toBeUndefined();
+  });
+
+  test('SCHEDULING_MAX_DETOUR_MINUTES overrides the cap', async () => {
+    process.env.SCHEDULING_MAX_DETOUR_MINUTES = '50';
+    const result = await findAvailableSlots({ ...BASE, customerFacing: true });
+    expect(result.slots.map((s) => s.start_time)).toContain('13:00');
+    expect(result.slots.map((s) => s.start_time)).not.toContain('14:00');
   });
 });

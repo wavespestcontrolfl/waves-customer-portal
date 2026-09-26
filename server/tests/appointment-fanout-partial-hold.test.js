@@ -41,6 +41,12 @@ jest.mock('../services/appointment-email', () => ({
   sendTechEnRouteEmail: jest.fn(async () => ({ ok: true })),
 }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({})) }));
+// safeSendAppointment's callback_number_needed pre-check (PR #4807) reads
+// disclaimed_number_holds through its own module — stubbed (never held) so
+// this file's generic chain double isn't asked to answer those reads.
+jest.mock('../services/disclaimed-number-holds', () => ({
+  disclaimedNumberHeldForVisit: jest.fn(async () => false),
+}));
 
 const db = require('../models/db');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');

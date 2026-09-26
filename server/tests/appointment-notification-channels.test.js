@@ -554,6 +554,70 @@ describe('deliverConfirmationByChannel (self-service booking paths)', () => {
     expect(AppointmentEmail.sendAppointmentConfirmationEmail).not.toHaveBeenCalled();
   });
 
+  // Owner ruling 2026-09-25 (folded into PR #4807's callback_number_needed
+  // work): a caller who disclaims the inbound ANI as not their own with no
+  // spoken callback must NOT simply have the confirmation held — reach them
+  // by email when one is on file. call-recording-processor.js sets
+  // smsPermanentlyBlocked: v2SmsBlocked && !v2EmailBlocked for this exact
+  // case (v2SmsBlocked is true via callback_number_needed; v2EmailBlocked
+  // stays false since checkTcpaConsent only blocks email on an explicit
+  // do-not-contact request) and its smsAttempt closure never calls Twilio
+  // when v2SmsBlocked — so this is the same smsPermanentlyBlocked fallback
+  // exercised above, framed for the incident that prompted the ruling (a
+  // $300 flea job booked from an office line, with the caller's email
+  // captured on the call).
+  describe('callback_number_needed (disclaimed caller ID, owner ruling 2026-09-25)', () => {
+    test('disclaimed ANI + email on file: the confirmation is emailed, the disclaimed number is never texted', async () => {
+      setDbQueues({
+        notification_prefs: [firstChain({ appointment_confirmation_channel: 'sms' })],
+        customers: [firstChain({ account_id: 'acct-1', is_primary_profile: true })],
+        scheduled_services: [
+          firstChain({ scheduled_date: '2026-06-20', window_start: '08:00:00' }),
+          firstChain({ id: 'ss1', customer_id: 'c1', reschedule_token: null }),
+        ],
+        appointment_reminders: [firstChain(null)],
+      });
+      // Mirrors the real closure: v2SmsBlocked is true for this call, so
+      // the closure never reaches sendCustomerMessage/Twilio at all — it
+      // returns false without dialing out.
+      const smsAttempt = jest.fn(async () => false);
+      const reached = await deliverConfirmationByChannel({
+        customerId: 'c1', scheduledServiceId: 'ss1', serviceLabel: 'Flea treatment',
+        smsAttempt, smsPermanentlyBlocked: true,
+      });
+
+      expect(smsAttempt).toHaveBeenCalledTimes(1);
+      expect(AppointmentEmail.sendAppointmentConfirmationEmail).toHaveBeenCalledTimes(1);
+      expect(reached).toBe(true);
+    });
+
+    test('disclaimed ANI + no email on file: neither channel reaches the customer — stays held (crm_notes carries the warning)', async () => {
+      AppointmentEmail.sendAppointmentConfirmationEmail.mockResolvedValueOnce({ skipped: true, reason: 'missing_email' });
+      setDbQueues({
+        notification_prefs: [firstChain({ appointment_confirmation_channel: 'sms' })],
+        customers: [firstChain({ account_id: 'acct-1', is_primary_profile: true })],
+        scheduled_services: [
+          firstChain({ scheduled_date: '2026-06-20', window_start: '08:00:00' }),
+          firstChain({ id: 'ss1', customer_id: 'c1', reschedule_token: null }),
+        ],
+        appointment_reminders: [firstChain(null)],
+      });
+      const smsAttempt = jest.fn(async () => false);
+      const reached = await deliverConfirmationByChannel({
+        customerId: 'c1', scheduledServiceId: 'ss1', serviceLabel: 'Flea treatment',
+        smsAttempt, smsPermanentlyBlocked: true,
+      });
+
+      expect(smsAttempt).toHaveBeenCalledTimes(1);
+      expect(AppointmentEmail.sendAppointmentConfirmationEmail).toHaveBeenCalledTimes(1);
+      // Genuinely unreached on either channel — the crm_notes stamp
+      // (extraction-compat.js's callerIdDisclaimedNoteText, written when
+      // the customer record was created) is the durable warning; this
+      // helper itself never texted the disclaimed ANI.
+      expect(reached).toBe(false);
+    });
+  });
+
   test('falls back to the SMS send when channel prefs are unavailable', async () => {
     setDbQueues({
       notification_prefs: [firstChain(null)],

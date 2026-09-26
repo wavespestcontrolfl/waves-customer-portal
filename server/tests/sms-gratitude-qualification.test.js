@@ -208,7 +208,7 @@ describe('sms gratitude qualification', () => {
     expect(completed.state).toBe('complete');
     expect(completed.results).toHaveLength(exam.fixtures.length * 2);
     const negativeResults = completed.results.filter(result => result.fixtureId.startsWith('negative_'));
-    expect(negativeResults).toHaveLength(24);
+    expect(negativeResults).toHaveLength(26);
     expect(negativeResults.every(result => result.output.parsed.reply === ''
       && result.output.passes === 1 && result.output.converged === true
       && result.output.servedModel === completed.pins.routes[result.leg].model
@@ -217,13 +217,13 @@ describe('sms gratitude qualification', () => {
       .every(result => result.output.servedModel === completed.pins.routes[result.leg].model
         && result.output.verifierModels.length === 1
         && result.output.verifierModels[0] === completed.pins.verifier.model)).toBe(true);
-    expect(completed.summary).toMatchObject({ qualified: true, positives: 8, negatives: 24 });
+    expect(completed.summary).toMatchObject({ qualified: true, positives: 12, negatives: 26 });
     expect(store.rows[0]).toMatchObject({ status: 'shadow', correction_note: null });
 
     await expect(qualification.evaluateGratitudeQualification({
       dbi: store.dbi,
       voiceProfileVersion: 'synthetic-profile-v1',
-    })).resolves.toEqual(expect.objectContaining({ eligible: true, blockers: [], qualified: true, positives: 8, negatives: 24 }));
+    })).resolves.toEqual(expect.objectContaining({ eligible: true, blockers: [], qualified: true, positives: 12, negatives: 26 }));
   });
 
   test.each([

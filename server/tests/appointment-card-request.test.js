@@ -126,6 +126,18 @@ jest.mock('../routes/admin-sms-templates', () => ({
 jest.mock('../config/twilio-numbers', () => ({
   getOutboundNumber: () => '+19410000000',
 }));
+// callback_number_needed (PR #4807, round 6): the visit-level hold read
+// lives in disclaimed-number-holds.js (number-keyed: is the visit's
+// customer phone an actively held number?). Default: not held.
+const mockDisclaimedNumberHeldForVisit = jest.fn(async () => false);
+// Round 8 P1: the email-only path also needs THIS visit's own evidence
+// (its uncleared callback_number_hold_at stamp + an active hold row from
+// its own source call on the phone on file). Default: no evidence.
+const mockDisclaimedNumberHoldEvidenceForVisit = jest.fn(async () => false);
+jest.mock('../services/disclaimed-number-holds', () => ({
+  disclaimedNumberHeldForVisit: (...a) => mockDisclaimedNumberHeldForVisit(...a),
+  disclaimedNumberHoldEvidenceForVisit: (...a) => mockDisclaimedNumberHoldEvidenceForVisit(...a),
+}));
 
 const {
   requestCardForAppointment,
@@ -1735,6 +1747,191 @@ describe('the email leg (owner delivery rule 2026-07-23: both channels)', () => 
     expect(res.action).toBe('link_created');
     await new Promise((r) => setImmediate(r));
     expect(mockSendSetupInvitation).not.toHaveBeenCalled();
+  });
+});
+
+// callback_number_needed email-only fallback (owner ruling 2026-09-25, PR
+// #4807): a call-level SMS hold for a disclaimed caller ID must not simply
+// strand the card/Auto-Pay ask — the AI call pipeline's delivery:'none'
+// call is upgraded to an email-only invitation (the SAME invitation email
+// that normally only piggybacks a confirmed text, awaited synchronously
+// instead of fire-and-forget) when the visit carries the durable
+// callback_number_hold_at hold. Twilio is never dialed. No usable email
+// (or a send failure) resolves to the exact delivery_suppressed outcome —
+// claim released, nothing sent — the same lever every other definitive
+// non-send in this funnel already uses.
+describe('callback_number_needed email-only fallback (owner ruling 2026-09-25)', () => {
+  const HELD_VISIT = { ...VISIT, callback_number_hold_at: new Date(Date.now() - 3600000), call_sms_cleared_at: null };
+
+  beforeEach(() => {
+    mockDisclaimedNumberHeldForVisit.mockReset();
+    mockDisclaimedNumberHeldForVisit.mockResolvedValue(false);
+    mockDisclaimedNumberHoldEvidenceForVisit.mockReset();
+    mockDisclaimedNumberHoldEvidenceForVisit.mockResolvedValue(false);
+  });
+
+  // Round 6: "held" is now a property of the customer's NUMBER
+  // (disclaimed_number_holds), read through disclaimedNumberHeldForVisit;
+  // the visit row itself still backs requestCardForAppointment's own load.
+  function setHeldVisitFixture(row = HELD_VISIT) {
+    mockTableHandlers.scheduled_services.first = () => ({ ...row });
+    mockDisclaimedNumberHeldForVisit.mockResolvedValue(true);
+    mockDisclaimedNumberHoldEvidenceForVisit.mockResolvedValue(true);
+  }
+
+  // Codex round 8 P1: the number on file is held by SOME call (another
+  // call/customer disclaimed the same shared line), but this visit's
+  // delivery:'none' came from something else (no SMS consent) — no stamp /
+  // no hold row from this visit's own source call. Must stay silent: no
+  // /secure token minted, no card-invitation email.
+  test('a number held by ANOTHER call, with no hold evidence on this visit, stays delivery_suppressed — never emailed', async () => {
+    mockTableHandlers.scheduled_services.first = () => ({ ...VISIT });
+    mockDisclaimedNumberHeldForVisit.mockResolvedValue(true);
+    mockDisclaimedNumberHoldEvidenceForVisit.mockResolvedValue(false);
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'ai_call_pipeline', delivery: 'none' });
+    expect(res.reason).toBe('delivery_suppressed');
+    expect(mockDisclaimedNumberHoldEvidenceForVisit).toHaveBeenCalledWith('svc-1');
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    await new Promise((r) => setImmediate(r));
+    expect(mockSendSetupInvitation).not.toHaveBeenCalled();
+    const inserts = touches('appointment_card_requests')
+      .flatMap((t) => t.chain.calls.filter(([op]) => op === 'insert'));
+    expect(inserts).toHaveLength(0);
+  });
+
+  test('an evidence-read failure stays SILENT (never a confirmed hold)', async () => {
+    mockTableHandlers.scheduled_services.first = () => ({ ...VISIT });
+    mockDisclaimedNumberHeldForVisit.mockResolvedValue(true);
+    mockDisclaimedNumberHoldEvidenceForVisit.mockRejectedValue(new Error('select * from "customers" where "phone" = +19415551234'));
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'ai_call_pipeline', delivery: 'none' });
+    expect(res.reason).toBe('delivery_suppressed');
+    await new Promise((r) => setImmediate(r));
+    expect(mockSendSetupInvitation).not.toHaveBeenCalled();
+  });
+
+  test('disclaimed ANI + email on file: one invitation email, zero SMS, the claim consumed exactly once', async () => {
+    setHeldVisitFixture();
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'ai_call_pipeline', delivery: 'none' });
+
+    expect(res).toEqual({ requested: true, action: 'sent', reason: 'sent_email_only_disclaimed_ani' });
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(mockSendSetupInvitation).toHaveBeenCalledTimes(1);
+    expect(mockSendSetupInvitation).toHaveBeenCalledWith(expect.objectContaining({
+      customerId: 'cust-1',
+      scheduledServiceId: 'svc-1',
+      serviceType: 'Pest Control',
+      secureUrl: expect.stringMatching(/\/secure\/[A-Za-z0-9_-]{22}$/),
+    }));
+    // One-text-ever claim consumed exactly once (same stamp mechanism a
+    // real text would consume).
+    const claimUpdates = touches('scheduled_services')
+      .flatMap((t) => t.chain.calls.filter(([op, patch]) => op === 'update' && patch && patch.card_link_sent_at instanceof Date));
+    expect(claimUpdates).toHaveLength(1);
+    // Same durable audit stamp a real text leaves (sent_at) — this is what
+    // stops a later trigger from re-inviting once the hold clears.
+    const sentAtUpdates = touches('appointment_card_requests')
+      .flatMap((t) => t.chain.calls.filter(([op, patch]) => op === 'update' && patch && 'sent_at' in patch));
+    expect(sentAtUpdates).toHaveLength(1);
+    const inserts = touches('appointment_card_requests')
+      .flatMap((t) => t.chain.calls.filter(([op]) => op === 'insert'));
+    expect(inserts).toHaveLength(1);
+  });
+
+  test('disclaimed ANI + no email on file: stays the delivery_suppressed outcome — claim and row release, no SMS ever attempted', async () => {
+    setHeldVisitFixture();
+    // sendAutopaySetupInvitation's own "no usable email" signal.
+    mockSendSetupInvitation.mockResolvedValueOnce(null);
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'ai_call_pipeline', delivery: 'none' });
+
+    expect(res.reason).toBe('email_only_no_usable_email');
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    const releases = touches('scheduled_services')
+      .flatMap((t) => t.chain.calls.filter(([op, patch]) => op === 'update' && patch && patch.card_link_sent_at === null));
+    expect(releases).toHaveLength(1);
+    const deletes = touches('appointment_card_requests').flatMap((t) => t.chain.calls.filter(([op]) => op === 'del'));
+    expect(deletes).toHaveLength(1);
+  });
+
+  // codex round-3 P1: sendAutopaySetupInvitation/sendTemplate return TRUTHY
+  // objects for a definite non-send too — a bare truthiness check on the
+  // result treated these as delivered, permanently consuming the
+  // one-text-ever claim on a message that never left.
+  test('a suppressed recipient ({sent:false, blocked:true}) releases the claim instead of consuming it', async () => {
+    setHeldVisitFixture();
+    mockSendSetupInvitation.mockResolvedValueOnce({ sent: false, blocked: true, reason: 'Email suppressed' });
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'ai_call_pipeline', delivery: 'none' });
+
+    expect(res.reason).toBe('email_only_no_usable_email');
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    const releases = touches('scheduled_services')
+      .flatMap((t) => t.chain.calls.filter(([op, patch]) => op === 'update' && patch && patch.card_link_sent_at === null));
+    expect(releases).toHaveLength(1);
+    const deletes = touches('appointment_card_requests').flatMap((t) => t.chain.calls.filter(([op]) => op === 'del'));
+    expect(deletes).toHaveLength(1);
+  });
+
+  test('a pre-dispatch abort ({sent:false, aborted:true}) releases the claim instead of consuming it', async () => {
+    setHeldVisitFixture();
+    mockSendSetupInvitation.mockResolvedValueOnce({ sent: false, aborted: true, reason: 'aborted_by_caller_before_dispatch' });
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'ai_call_pipeline', delivery: 'none' });
+
+    expect(res.reason).toBe('email_only_no_usable_email');
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    const releases = touches('scheduled_services')
+      .flatMap((t) => t.chain.calls.filter(([op, patch]) => op === 'update' && patch && patch.card_link_sent_at === null));
+    expect(releases).toHaveLength(1);
+    const deletes = touches('appointment_card_requests').flatMap((t) => t.chain.calls.filter(([op]) => op === 'del'));
+    expect(deletes).toHaveLength(1);
+  });
+
+  test('a plain "no SMS consent" delivery:none call (no callback_number_hold_at) is unaffected — still delivery_suppressed, never emailed', async () => {
+    // Explicitly NOT the disclaimed-ANI hold — callback_number_hold_at unset.
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'ai_call_pipeline', delivery: 'none' });
+    expect(res.reason).toBe('delivery_suppressed');
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    await new Promise((r) => setImmediate(r));
+    expect(mockSendSetupInvitation).not.toHaveBeenCalled();
+  });
+
+  test('a hold-read failure stays SILENT — never authorizes the email-only path on an unproven hold (codex round-4 finding #1)', async () => {
+    // Only the hold-check's own read (callbackNumberHoldConfirmedForVisit →
+    // disclaimedNumberHeldForVisit) throws — the visit-load .first() a few lines
+    // above it in requestCardForAppointment must keep resolving normally,
+    // or the whole request wrongly aborts with a generic 'error:...' skip
+    // instead of exercising this specific failure path. Round-2's fix
+    // (fail CLOSED here, treating an unreadable result as held) was itself
+    // the round-4 bug: this delivery:'none' path mints a /secure bearer
+    // token and sends the card-enrollment EMAIL — the LAST channel left —
+    // so a transient read error on an ordinary TCPA-suppressed call must
+    // never be read as a CONFIRMED hold. Only a proven persisted hold may
+    // authorize the email; an unreadable result now falls through to the
+    // exact same delivery_suppressed outcome a plain TCPA block gets.
+    mockTableHandlers.scheduled_services.first = () => ({ ...VISIT });
+    mockDisclaimedNumberHeldForVisit.mockRejectedValue(new Error('db down'));
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'ai_call_pipeline', delivery: 'none' });
+    expect(res.reason).toBe('delivery_suppressed');
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    await new Promise((r) => setImmediate(r));
+    expect(mockSendSetupInvitation).not.toHaveBeenCalled();
+  });
+
+  test('once the invitation email has gone out, clearing the hold later does not re-send a second one', async () => {
+    setHeldVisitFixture();
+    const first = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'ai_call_pipeline', delivery: 'none' });
+    expect(first.reason).toBe('sent_email_only_disclaimed_ani');
+    expect(mockSendSetupInvitation).toHaveBeenCalledTimes(1);
+
+    // The visit now carries a real (non-stale) card_link_sent_at claim from
+    // the first call — the one-text-ever guard refuses a second claim
+    // regardless of trigger or delivery, exactly as it does for a real
+    // text (checks 3+4's "lost claim race" test uses the same lever).
+    mockTableHandlers.scheduled_services.update = () => 0;
+    setHeldVisitFixture({ ...HELD_VISIT, call_sms_cleared_at: new Date(), card_link_sent_at: new Date() });
+
+    const second = await requestCardForAppointment({ scheduledServiceId: 'svc-1', trigger: 'previsit_backstop' });
+    expect(second.reason).toBe('link_already_sent');
+    expect(mockSendSetupInvitation).toHaveBeenCalledTimes(1);
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
   });
 });
 

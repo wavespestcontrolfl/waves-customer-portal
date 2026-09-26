@@ -173,7 +173,18 @@ unassigned work remains a fixed blocker. Public responses expose no full route,
 provider legs or exact route coordinates. Scheduling traffic lookups share a
 40-request/800-element allowance per application process per 15 minutes across
 HTTP requests and fall back to the conservative model when exhausted; response
-data remains request-local. Gate-off availability is unchanged apart from the
+data remains request-local. Existing stops are planned at the owner planning
+minutes (`scheduling/planning-minutes.js`, owner 2026-09-25) rather than their
+window span; the visit being offered keeps its own resolved allowance. Detour
+cap (owner 2026-09-25): self-serve callers that pass `customerFacing` (the
+/book availability engine behind /api/booking/availability and the public
+reschedule/re-service pickers, and the estimate slot routes) omit a feasible slot whose added round-trip drive exceeds
+`SCHEDULING_MAX_DETOUR_MINUTES` (default 30; an empty day counts the whole trip
+from HQ). Staff and phone booking see every fit. The finder's per-slot `return_time`
+(modeled return to HQ) and result-level `rejections` tally are staff/diagnostic
+fields only: /api/booking/availability builds each public slot field by field
+(`routes/booking.js`) and the estimate routes build theirs through
+`classifySlot`, so neither field reaches a customer response. Gate-off availability is unchanged apart from the
 shared grid / day-end / lunch-gate rules above, which apply in both modes.
 Packed offers + expected-minutes travel gap (owner ruling 2026-09-23,
 `scheduling/packing-geometry.js` — `loadPackingAnchors`/`packedBounds`, the
@@ -274,6 +285,37 @@ row still resolves to a retired lawn cadence — any tier hidden via
 removed 4x/quarterly — by explicit cadence, visit count, or the cadence's
 catalog key (`lawn_care_recurring` for 6x). The customer picks a current lawn
 option or the office requotes; the accept never silently reprices at 9x.
+
+Termite annual plan sign-before-pay (dark behind `GATE_TERMITE_ANNUAL_PLAN`,
+or an annual-plan offer already delivered before the gate turned off): a
+`prepay_annual` accept of the Subterranean Termite Protection annual plan
+PARKS — the estimate is stamped `annual_plan_activation_status =
+'awaiting_signature'` with the accept-time opts and the frozen accepted
+price (annual fee net of discount, setup lines, tax, total) and nothing is
+billed, booked or charged. The in-lane prepay charge quote never applies to
+it (no `402 PREPAY_CHARGE_QUOTE` round-trip, no card capture, no due-today);
+a selected slot hold is released, not committed, and an existing
+appointment is not adopted — the pick is kept only as a staff scheduling
+preference. The success payload carries `invoiceKind:
+'annual_prepay_deferred'`, `invoiceId`/`invoicePayUrl` null,
+`invoiceAmount`/`prepayInvoiceAmount` = the frozen accepted total (setup
+lines and tax included — the figure the signature-time invoice bills, never
+a re-derived display amount), `billingTerm: 'prepay_annual'` and `nextStep:
+'sign_agreement'`; the success card and accept notifications tell the
+customer to sign — signing starts the plan and its billing, and the 12-month
+coverage begins on the installation date — never "approved, invoice to
+follow". The
+already-accepted retry returns the same shape while the agreement is
+unsigned, and `invoiceKind: 'annual_prepay_activation_pending'` with
+`nextStep: 'activation_pending'` once it is signed but the plan has not
+finished activating (the signing link is burned by then). Signing the
+annual agreement at `/api/contracts/:token/sign` activates the plan after
+the sign transaction commits (`termite-annual-activation.js`, retried by the
+daily reconcile sweep): it bills exactly the frozen price, charges the
+customer's enrolled payment method once (capped at the frozen total; owner
+ruling 2026-09-25, behind `GATE_PREPAY_CARD_AND_CHARGE`), and sends the pay
+link only when there is no enrolled method, charging is off, or the charge
+definitively failed. The sign response itself is unchanged.
 `durationMinutes` and `windowEnd` describe the whole work block; arrival copy
 remains start plus 120 minutes. One assignable technician must have no selected
 service capability explicitly disabled. The allocation stamp is server-owned
@@ -907,6 +949,10 @@ MINUS the staff-only `subdivisionMedian` block (the plat name, county, and
 assessed-neighbor sample/range that back the admin estimator's home-size
 estimate for an unassessed vacant parcel) — `publicEnrichedProfile` strips it
 on both paths; the response otherwise describes only the requested parcel).
+Operational `meta.providerStatus` (credential configuration and attempted-provider
+health) is staff-only; `publicLookupMeta` removes it from every public response.
+The public `errors` array includes only the known outside-service-area verdict;
+`publicLookupErrors` removes provider failures and internal diagnostic messages.
 `/api/public/estimator/lead-prefill` (POST exchange, read-only semantics;
 swaps the voicemail text-back link's `lead_id` + HMAC token for that ONE
 lead's own contact fields — first/last name, email, phone, address, city,

@@ -39,6 +39,7 @@ function chain({ result = [], first, returning, updateResult = 1 } = {}) {
   [
     'where',
     'whereRaw',
+    'whereIn',
     'whereNot',
     'join',
     'whereNotNull',
@@ -717,6 +718,84 @@ describe('enrollCustomer — context.leadId persists on automation_enrollments.m
 
     const inserted = insertChain.insert.mock.calls[0][0];
     expect(inserted.metadata).toBeUndefined();
+  });
+});
+
+describe('enrollCustomer — customer-only new_lead enrolls resolve the lead id', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+  });
+
+  const CUSTOMER = { id: 'cust-1', email: 'Lead@Example.com', first_name: 'Sam' };
+
+  function customerLinkedQueues({ templateKey = 'new_lead', leads } = {}) {
+    // Customer-linked inserts are an ON CONFLICT upsert.
+    const insertChain = chain();
+    insertChain.returning = jest.fn(() => insertChain);
+    insertChain.onConflict = jest.fn(() => insertChain);
+    insertChain.merge = jest.fn(async () => [{ id: 'enr-new' }]);
+    const queues = {
+      automation_templates: [chain({ first: { key: templateKey, name: 'T', enabled: true } })],
+      automation_steps: [chain({ result: [{ id: 'step-1', step_order: 0, delay_hours: 0, enabled: true }] })],
+      customers: [chain({ first: { id: 'cust-1', email: 'lead@example.com', first_name: 'Sam', last_name: null, deleted_at: null } })],
+      automation_enrollments: [chain({ first: undefined }), insertChain],
+    };
+    if (leads) queues.leads = leads;
+    setDbQueues(queues);
+    return insertChain;
+  }
+
+  test('an admin/dispatcher enroll (no leadId key) stamps the customer\'s newest open lead for the recipient', async () => {
+    const leadsChain = chain({ first: { id: 'lead-open' } });
+    const insertChain = customerLinkedQueues({ leads: [leadsChain] });
+
+    const result = await enrollCustomer({ templateKey: 'new_lead', customer: CUSTOMER });
+
+    expect(result).toEqual({ enrolled: true, enrollmentId: 'enr-new' });
+    expect(leadsChain.where).toHaveBeenCalledWith({ customer_id: 'cust-1' });
+    expect(leadsChain.whereNull).toHaveBeenCalledWith('deleted_at');
+    expect(leadsChain.whereRaw).toHaveBeenCalledWith('lower(email) = ?', ['lead@example.com']);
+    expect(leadsChain.whereIn).toHaveBeenCalledWith('status', expect.arrayContaining(['new', 'contacted']));
+    expect(leadsChain.whereNull).toHaveBeenCalledWith('converted_at');
+    expect(leadsChain.orderBy).toHaveBeenCalledWith('created_at', 'desc');
+    expect(insertChain.insert.mock.calls[0][0].metadata).toBe(JSON.stringify({ lead_id: 'lead-open' }));
+  });
+
+  test('no open lead for the recipient enrolls without a lead id', async () => {
+    const insertChain = customerLinkedQueues({ leads: [chain({ first: undefined })] });
+
+    await enrollCustomer({ templateKey: 'new_lead', customer: CUSTOMER });
+
+    expect(insertChain.insert.mock.calls[0][0].metadata).toBeUndefined();
+  });
+
+  test('a failed lead lookup fails soft — the enrollment still lands, without a lead id', async () => {
+    const broken = chain();
+    broken.first = jest.fn(async () => { throw new Error('boom'); });
+    const insertChain = customerLinkedQueues({ leads: [broken] });
+
+    const result = await enrollCustomer({ templateKey: 'new_lead', customer: CUSTOMER });
+
+    expect(result).toEqual({ enrolled: true, enrollmentId: 'enr-new' });
+    expect(insertChain.insert.mock.calls[0][0].metadata).toBeUndefined();
+  });
+
+  test('a lead-aware caller passing leadId: null keeps its decision — no lookup', async () => {
+    // No `leads` queue: any lookup would throw "Unexpected db table leads".
+    const insertChain = customerLinkedQueues();
+
+    await enrollCustomer({ templateKey: 'new_lead', customer: CUSTOMER, context: { leadId: null } });
+
+    expect(insertChain.insert.mock.calls[0][0].metadata).toBeUndefined();
+  });
+
+  test('other templates never look a lead up', async () => {
+    const insertChain = customerLinkedQueues({ templateKey: 'cold_lead' });
+
+    await enrollCustomer({ templateKey: 'cold_lead', customer: CUSTOMER });
+
+    expect(insertChain.insert.mock.calls[0][0].metadata).toBeUndefined();
   });
 });
 

@@ -30,6 +30,38 @@ Google verdict (`v2AddressValidation`) — no appointment/routing changes:
 - **Identity signals** on real (hot/warm) prospects — `caller_not_authorized`
   (caller arranging service for someone else, e.g. Elaine for her fiancé Martin)
   and a missing surname are added to the same `needs_confirmation` list.
+- **Disclaimed caller ID** — `callback_number_needed` (schema 1.14.0, live miss
+  2026-09-25, call 6fee5f34: "this is our office line... they don't pick up, I
+  pick up, and then text"). The model sets `caller.caller_id_disclaimed = true`
+  (with `caller.phone_note` carrying the caller's own words) when the caller
+  explicitly says the incoming Twilio ANI is NOT their own number — a shared
+  or office line. `computeDeterministicTriageFlags` (`call-triage-flags.js`)
+  raises `callback_number_needed` when that's true AND no spoken callback
+  number also covers it (`phone_source` not `spoken`/`both`). It's advisory
+  to the APPOINTMENT (not in `BLOCKING_TRIAGE_FLAGS` — the visit still books
+  off the ANI, which is the only key available) but hard-blocks the
+  confirmation/reminder SMS leg for that call (`call-recording-processor.js`
+  forces `v2SmsBlocked = true` when the flag is present, regardless of what
+  TCPA consent decided — someone else answering that line never gave THIS
+  caller's consent). The hold is keyed on the NUMBER, not the visit: the
+  processor records the disclaimed number in `disclaimed_number_holds`
+  (`disclaimed-number-holds.js`), and every SMS — `sendCustomerMessage`
+  (step 6.45 + its provider-boundary recheck) and `twilio.js` `sendSMS`'s
+  final dispatch, so legacy direct callers too — is refused
+  (`CALLBACK_NUMBER_HOLD`, retryable; read errors fail closed) while an
+  uncleared row exists for its destination. Visit notices with an email on
+  file fall back to email. Only resolving the `callback_number_needed` card
+  clears the row; a customer phone edit clears nothing (the new number just
+  has no hold). Never auto-resolved (human verdict only, same as
+  `missing_unit_number`) — the office gets a real cell number on the
+  callback. The new customer this call creates also gets a `crm_notes` stamp
+  (`callerIdDisclaimedNoteText` in `extraction-compat.js`) marking the phone
+  unverified, since there is no dedicated phone-verification column for
+  "not this caller's number" (distinct from `customers.line_type`, which is
+  Twilio Lookup's physical mobile/landline/VOIP classification). CSR Coach
+  also appends a deterministic coaching line ("Caller said this number isn't
+  theirs — ask for a cell before ending the call") when the call ends with
+  the flag set and no cell captured.
 - **Multi-property / occupancy signals** (the customer model is one-address-per-
   profile, with no rental/primary field):
   - `rental_or_tenant_occupied` — a tenant / property-manager caller, or an owner

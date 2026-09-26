@@ -483,13 +483,16 @@ function uncertifiableReason({ sourceStops, startMin, googleSource, legs, requir
  * feasibility simulation and the distance model would treat its travel as
  * zero, so a fallback built on it is not trustworthy; fail closed before
  * attempting the repair, codex GitHub round P1), or 'NO_FEASIBLE_IMPROVEMENT'
- * (gates on, coordinates present, the search ran, no legal order exists) —
- * the actionable "why didn't this get fixed". `conflict` — always present,
+ * (gates on, coordinates present, the bounded search ran, but returned no
+ * certifiable order) — the external refusal contract for "no fallback was
+ * found"; it does not prove that every possible order is impossible.
+ * `conflict` — always present,
  * null when Google's order was legal — is 'WINDOW_ORDER_CONFLICT' or
  * 'WINDOW_FIT_CONFLICT': which guard Google's order actually failed, for the
- * UI detail line (admin) and the skip reason (nightly, which additionally
+ * UI detail line (admin) and nightly ledger evidence (nightly additionally
  * applies its own min-savings floor on top of this decision — see
- * runRouteReorder).
+ * runRouteReorder, where a feasible repair below that floor is skipped as
+ * BELOW_MIN_SAVINGS while retaining this conflict).
  */
 function chooseWindowSafeOrder({
   RouteOptimizer, googleOrder: rawGoogleOrder, sourceStops: rawSourceStops, googleSource, legs: rawLegs = null,
@@ -606,7 +609,11 @@ const ROUTE_WRITE_GUARD_COLUMNS = ['window_start', 'window_end', 'time_window',
   // them must find them on BOTH sides of the lock, or every write aborts as
   // stale (codex round 5 P1).
   'customer_id', 'service_address_line1', 'service_address_line2',
-  'service_address_city', 'service_address_zip'];
+  'service_address_city', 'service_address_zip',
+  // Planning-minute inputs (scheduling/planning-minutes.js): with
+  // GATE_SCHEDULING_CAPACITY on, workDuration reads them, so both sides of
+  // the lock must carry them or every signature differs.
+  'service_type', 'is_recurring', 'is_callback'];
 
 /** The customer's primary premise, aliased the way effectiveServiceAddress
  *  (and stampedAddressDiverges) expect. An UNSTAMPED row resolves its premise
@@ -978,6 +985,7 @@ async function runRouteReorder(opts = {}, conn = db) {
             'scheduled_services.estimated_duration_minutes',
             'scheduled_services.auto_dispatch_locked', 'scheduled_services.auto_dispatch_excluded',
             'scheduled_services.service_type',
+            'scheduled_services.is_recurring', 'scheduled_services.is_callback',
             'scheduled_services.zone', 'scheduled_services.created_at',
             ...guardedCoordSelects(conn),
           ],
@@ -1188,14 +1196,17 @@ async function runRouteReorder(opts = {}, conn = db) {
             // safety decision).
             const fallbackSaved = Math.max(0, guardOutcome.beforeMeters - guardOutcome.afterMeters);
             if (fallbackSaved < floorMeters) {
-              // The day stays skipped under its ORIGINAL reason — the
-              // fallback tag records that the legal-order search ran and
-              // found nothing worth writing (same 805 m floor, owner-ruled).
+              // The constrained search DID find and certify a legal order;
+              // the nightly pass declines it only because it saves less than
+              // this day's savings floor. Keep the original Google-order
+              // conflict as evidence, but do not mislabel this as an
+              // impossible schedule / missing feasible improvement.
               summary.skipped.push({
                 ...entryBase,
-                reason: guardOutcome.conflict,
+                reason: 'BELOW_MIN_SAVINGS',
                 ...metrics,
-                fallback: 'NO_FEASIBLE_IMPROVEMENT',
+                conflict: guardOutcome.conflict,
+                constrained_order_feasible: true,
                 fallback_saved_meters: fallbackSaved,
               });
               continue;
@@ -1302,6 +1313,9 @@ async function runRouteReorder(opts = {}, conn = db) {
                     customer_city: 'customers.city',
                     customer_state: 'customers.state',
                     customer_zip: 'customers.zip' },
+                  // Planning-minute inputs, as selected at day-load.
+                  'scheduled_services.service_type', 'scheduled_services.is_recurring',
+                  'scheduled_services.is_callback',
                   'scheduled_services.route_order', ...guardedCoordSelects(trx));
               const num = (v) => (v == null || v === '' ? null : parseFloat(v));
               // Full guard-input signature (shared with the admin optimize

@@ -440,6 +440,10 @@ function buildTriageItem({
     low_extraction_confidence: 'service_unknown',
     spam_or_wrong_number: 'service_unknown',
     caller_phone_missing: 'customer_field_conflict',
+    // Caller said the ANI isn't theirs (shared/office line) and gave no
+    // spoken callback — same review lane as the other phone/consent asks;
+    // the appointment already booked, this only gets a real number.
+    callback_number_needed: 'customer_field_conflict',
     do_not_contact_requested: 'customer_field_conflict',
     lead_creation_failed: 'customer_field_conflict',
     name_email_mismatch: 'name_review',

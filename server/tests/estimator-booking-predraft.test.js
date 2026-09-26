@@ -218,15 +218,84 @@ describe('maybePreDraftForBooking — call delegation', () => {
     // The linkage merge is ONE conditional jsonb_set — never a blob
     // read-modify-write that could overwrite a concurrent admin revision —
     // guarded by a missing-key predicate so a stitched linkage wins.
-    expect(mockState.updates).toHaveLength(1);
-    expect(mockState.updates[0].payload.estimate_data.__raw[0]).toContain('jsonb_set');
-    expect(mockState.updates[0].payload.estimate_data.__raw[1]).toEqual(['svc-1']);
+    // codex #4815 r8 P2: the exception's durable provenance is its own
+    // atomic write, landed BEFORE (and independent of) the linkage.
+    expect(mockState.updates).toHaveLength(2);
+    const [provenanceWrite, linkageWrite] = mockState.updates;
+    expect(provenanceWrite.payload.estimate_data.__raw[0]).toContain("'{assessment_exception}'");
+    expect(JSON.parse(provenanceWrite.payload.estimate_data.__raw[1][0]))
+      .toMatchObject({ call_log_id: 'call-7', generation: 3, scheduled_service_id: 'svc-1' });
+    expect(linkageWrite.payload.estimate_data.__raw[0]).toContain('jsonb_set');
+    expect(linkageWrite.payload.estimate_data.__raw[1]).toEqual(['svc-1']);
     expect(mockState.whereRaws.some((w) => w.table === 'estimates'
       && w.args[0].includes("'scheduled_service_id') is null"))).toBe(true);
     // The linkage revalidates the booking under a FOR UPDATE row lock in
     // its own transaction — a bare EXISTS predicate would not serialize
     // against a cancellation committing behind its snapshot (codex round 4).
     expect(mockState.forUpdates).toContain('scheduled_services');
+  });
+
+  // codex #4815 r9 P2: a delegated insert the call's QUEUED agreed-price
+  // verdict refused reports WHICH verdict, so the processor can re-run the
+  // pre-draft once its own sweep clears that entry.
+  test('a delegated insert refused by a call verdict reports blockedBy; nothing is linked', async () => {
+    mockState.firstQueue = [
+      BOOKING({ source_call_log_id: 'call-7' }),
+      BOOKING({ source_call_log_id: 'call-7' }),
+      SETTLED_CALL(3),
+    ];
+    mockMaybeDraftEstimateForCall.mockResolvedValue({ created: false, blocked: true, blockedBy: 'price_agreed_on_call', lane: 'yellow' });
+    const result = await maybePreDraftForBooking('svc-1');
+    expect(result).toEqual({ drafted: false, delegated: 'call_engine', lane: 'yellow', estimateId: null, blockedBy: 'price_agreed_on_call' });
+    expect(mockState.updates).toHaveLength(0);
+  });
+
+  // codex #4815 r5 P1: a RECOVERED existing draft (created:false, an
+  // estimateId set by existingDraftForCall re-finding what an earlier pass
+  // drafted) is only the SAME exception when it is already linked to THIS
+  // booking — a legitimate idempotent replay (e.g. the admin regenerate-
+  // brief endpoint replaying the tagger hook).
+  test('a recovered existing draft ALREADY linked to this booking is reported and re-linked (idempotent replay)', async () => {
+    mockState.firstQueue = [
+      BOOKING({ source_call_log_id: 'call-7' }),
+      BOOKING({ source_call_log_id: 'call-7' }), // pre-delegation authoritative re-read
+      SETTLED_CALL(3), // pass-identity adopt
+      { id: 'est-9' }, // booking-linkage check: already linked to svc-1
+      BOOKING({ source_call_log_id: 'call-7' }), // linkage-trx FOR UPDATE revalidation
+    ];
+    mockMaybeDraftEstimateForCall.mockResolvedValue({ created: false, lane: 'yellow', estimateId: 'est-9' });
+    const result = await maybePreDraftForBooking('svc-1');
+    expect(result).toEqual({ drafted: false, delegated: 'call_engine', lane: 'yellow', estimateId: 'est-9' });
+    // The booking-linkage check itself is scoped to THIS estimate id.
+    expect(mockState.whereRaws.some((w) => w.table === 'estimates'
+      && w.args[0].includes("scheduled_service_id' = ?")
+      && JSON.stringify(w.args[1]) === JSON.stringify(['svc-1']))).toBe(true);
+    // Still re-linked (idempotent — the merge predicate no-ops on an
+    // existing match); the provenance write is equally idempotent (its own
+    // missing-key predicate keeps the FIRST exception's stamp, r8 P2).
+    expect(mockState.updates.filter((u) => u.payload.estimate_data.__raw[0].includes("'{scheduled_service_id}'"))).toHaveLength(1);
+    expect(mockState.updates.filter((u) => u.payload.estimate_data.__raw[0].includes("'{assessment_exception}'"))).toHaveLength(1);
+  });
+
+  // The bug this closes: existingDraftForCall inside the engine returns
+  // whatever draft currently sits open for the CALL, not this booking
+  // specifically — an untouched pre-existing draft (e.g. one an upstream
+  // agreed-price invalidation failed to archive) must never be reported,
+  // linked, or treated as a valid exception.
+  test('a recovered existing draft NOT linked to any booking is neither reported nor linked — never the assessment exception', async () => {
+    mockState.firstQueue = [
+      BOOKING({ source_call_log_id: 'call-7' }),
+      BOOKING({ source_call_log_id: 'call-7' }), // pre-delegation authoritative re-read
+      SETTLED_CALL(3), // pass-identity adopt
+      null, // booking-linkage check: NOT linked to svc-1 (or anything)
+    ];
+    mockMaybeDraftEstimateForCall.mockResolvedValue({ created: false, lane: 'yellow', estimateId: 'est-stale' });
+    const result = await maybePreDraftForBooking('svc-1');
+    expect(result).toEqual({ drafted: false, delegated: 'call_engine', lane: 'yellow', estimateId: null });
+    // linkEstimateToBooking never ran — no estimates update, no
+    // scheduled_services row lock taken for the linkage merge.
+    expect(mockState.updates).toHaveLength(0);
+    expect(mockState.forUpdates).not.toContain('scheduled_services');
   });
 
   test('a booking that died before the delegation starts never runs the engine', async () => {
@@ -285,7 +354,14 @@ describe('maybePreDraftForBooking — call delegation', () => {
     // The quote was promised on the CALL — the draft stands; the linkage
     // transaction's locked revalidation refuses the dead visit.
     expect(result.drafted).toBe(true);
-    expect(mockState.updates).toHaveLength(0);
+    // codex #4815 r8 P2: the ONLY write is the exception's durable
+    // provenance (no scheduled_service_id linkage to the dead visit), so a
+    // later agreed-price invalidation still excludes this surviving draft.
+    expect(mockState.updates).toHaveLength(1);
+    expect(mockState.updates[0].payload.estimate_data.__raw[0]).toContain("'{assessment_exception}'");
+    expect(mockState.updates[0].payload.estimate_data.__raw[0]).not.toContain("'{scheduled_service_id}'");
+    expect(mockState.whereRaws.some((w) => w.table === 'estimates'
+      && w.args[0].includes("'assessment_exception') is null"))).toBe(true);
   });
 
   test('a booking retyped away from Waves Assessment mid-flight never delegates', async () => {

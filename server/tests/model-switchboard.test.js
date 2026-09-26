@@ -89,19 +89,14 @@ describe('model-switchboard', () => {
       expect(balanced.overrideEnv).toBe('MODEL_OPENAI_BEST');
       expect(balanced.current).toBe('gpt-9.9-alias');
       expect(balanced.unpinnedModel).toBe(require('../config/models').DEFAULTS.OPENAI_BALANCED);
-      // Both aliases set: deleting the active one lands on the next, not the code default.
-      // Satellite's OpenAI leg is the ladder's last-resort `retry` rung (owner
-      // ruling 2026-09-24: Gemini → Claude → OpenAI, no more parallel `also`).
-      const sat = lanes.find((l) => l.id === 'satellite').retry;
-      expect(sat.pinEnv).toBe('OPENAI_VISION_MODEL');
-      expect(sat.setEnv).toBe('OPENAI_VISION_MODEL');
-      expect(sat.unpinnedModel).toBe('gpt-9.9-generic');
-      delete process.env.OPENAI_VISION_MODEL;
-      jest.resetModules();
-      const sat2 = require('../services/model-switchboard').getSwitchboard().lanes.find((l) => l.id === 'satellite').retry;
-      expect(sat2.pinned).toBe(true);
-      expect(sat2.setEnv).toBe('OPENAI_MODEL');
-      expect(sat2.unpinnedModel).toBe('gpt-5-mini');
+      // Estimate imagery follows its dedicated Sol selector, unaffected by
+      // legacy OPENAI_MODEL / OPENAI_VISION_MODEL pins.
+      for (const id of ['satellite', 'property_v2_vision']) {
+        const lane = lanes.find((l) => l.id === id);
+        expect(lane.fallback.selector).toBe('OPENAI_ESTIMATE_VISION');
+        expect(lane.fallback.model).toBe(require('../config/models').OPENAI_ESTIMATE_VISION);
+        expect(lane.retry).toBeNull();
+      }
     } finally {
       for (const [k, v] of Object.entries(prev)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
     }
@@ -222,21 +217,23 @@ describe('model-switchboard', () => {
     }
   });
 
-  it('photo ladders hide the Gemini retry leg while it resolves to the same model; satellite\'s OpenAI rung is a last resort, not a fan-out arm', () => {
+  it('photo ladders hide duplicate retries; estimate imagery has only Gemini and Sol', () => {
     // Registry default: GEMINI_VISION_FALLBACK equals GEMINI_VISION_BEST, and every
     // ladder skips the retry rung when the two ids match — the card must not
     // show Gemini 3.8 as its own retry.
     expect(MODELS.GEMINI_VISION_FALLBACK).toBe(MODELS.GEMINI_VISION_BEST);
     const { lanes } = sb.getSwitchboard();
-    const sat = lanes.find((l) => l.id === 'satellite');
-    // Owner ruling 2026-09-24: Gemini → Claude → OpenAI, stopping at the
-    // first schema-valid result — no more three-way parallel fan-out.
-    expect(sat.fanout).toBe(false);
-    expect(sat.primary.provider).toBe('gemini');
-    expect(sat.fallback.selector).toBe('FLAGSHIP');
-    expect(sat.also).toEqual([]);
-    expect(sat.retry.pinEnv).toBe('OPENAI_VISION_MODEL');
-    expect(sat.retry.provider).toBe('openai');
+    for (const id of ['satellite', 'property_v2_vision']) {
+      const lane = lanes.find((l) => l.id === id);
+      expect(lane.fanout).toBe(false);
+      expect(lane.primary.provider).toBe('gemini');
+      expect(lane.primary.model).toBe(MODELS.TEXT_POLICIES.estimateVision.primary.model);
+      expect(lane.fallback.selector).toBe('OPENAI_ESTIMATE_VISION');
+      expect(lane.fallback.provider).toBe('openai');
+      expect(lane.fallback.model).toBe(MODELS.OPENAI_ESTIMATE_VISION);
+      expect(lane.retry).toBeNull();
+      expect(lane.also).toEqual([]);
+    }
     expect(lanes.find((l) => l.id === 'property_trio').also[0].pinEnv).toBe('OPENAI_PROPERTY_MODEL');
     // pest_id, tree_shrub, the caption read, and the treatment-zone map are all
     // sequential ladders in execution order (Gemini → the prior Gemini model →
@@ -247,6 +244,31 @@ describe('model-switchboard', () => {
       const ladder = lanes.find((l) => l.id === id);
       expect({ id, fanout: ladder.fanout, primary: ladder.primary.provider, fallback: ladder.fallback.selector, fallbackSkipped: ladder.fallback.skipped, retry: ladder.retry.selector })
         .toEqual({ id, fanout: false, primary: 'gemini', fallback: 'GEMINI_VISION_FALLBACK', fallbackSkipped: true, retry: 'VISION' });
+    }
+  });
+
+  it('estimate image overrides retain the Gemini base and dedicated Sol selector', () => {
+    const prev = { GEMINI_VISION_MODEL: process.env.GEMINI_VISION_MODEL, MODEL_OPENAI_ESTIMATE_VISION: process.env.MODEL_OPENAI_ESTIMATE_VISION };
+    try {
+      process.env.GEMINI_VISION_MODEL = 'gemini-9.9-pinned';
+      process.env.MODEL_OPENAI_ESTIMATE_VISION = 'gpt-9.9-sol';
+      jest.resetModules();
+      const registry = require('../config/models');
+      const { lanes } = require('../services/model-switchboard').getSwitchboard();
+      for (const id of ['satellite', 'property_v2_vision']) {
+        const lane = lanes.find((l) => l.id === id);
+        expect(lane.primary.model).toBe(registry.TEXT_POLICIES.estimateVision.primary.model);
+        expect(lane.primary.selector).toBe('GEMINI_VISION_BEST');
+        expect(lane.primary.unpinnedModel).toBe(registry.GEMINI_VISION_BEST);
+        expect(lane.primary.accepts).toEqual({ providers: ['gemini'], cap: 'vision' });
+        expect(lane.fallback.model).toBe(registry.TEXT_POLICIES.estimateVision.fallback.model);
+        expect(lane.fallback.selector).toBe('OPENAI_ESTIMATE_VISION');
+      }
+    } finally {
+      for (const [key, value] of Object.entries(prev)) {
+        if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      }
+      jest.resetModules();
     }
   });
 
@@ -481,5 +503,121 @@ describe('model-switchboard', () => {
       expect(lanes.find((l) => l.id === id).inbound).toBe(true);
     }
     expect(lanes.find((l) => l.id === 'tax_advisor').inbound).toBe(false);
+  });
+});
+
+describe('voice_relay — picker vs runtime allowlist, and blast-radius attribution', () => {
+  const ENV_KEYS = ['VOICE_RELAY_INBOUND_MODEL', 'VOICE_RELAY_MODEL'];
+  let SAVED;
+  beforeEach(() => {
+    SAVED = {};
+    for (const k of ENV_KEYS) { SAVED[k] = process.env[k]; delete process.env[k]; }
+    jest.resetModules();
+  });
+  afterEach(() => {
+    for (const k of ENV_KEYS) { if (SAVED[k] === undefined) delete process.env[k]; else process.env[k] = SAVED[k]; }
+  });
+
+  it('voice_relay is catalogOnly (the picker must not offer a live-discovered id); collections is not', () => {
+    const { lanes } = require('../services/model-switchboard').getSwitchboard();
+    const inbound = lanes.find((l) => l.id === 'voice_relay');
+    const collections = lanes.find((l) => l.id === 'voice_relay_collections');
+    expect(inbound.primary.accepts.catalogOnly).toBe(true);
+    expect(collections.primary.accepts.catalogOnly).toBeFalsy();
+  });
+
+  it('with VOICE_RELAY_INBOUND_MODEL unset, voice_relay reports VOICE_RELAY_MODEL as a dependency — the composer must attribute a VOICE_RELAY_MODEL change to BOTH lanes', () => {
+    process.env.VOICE_RELAY_MODEL = 'claude-sonnet-5';
+    jest.resetModules();
+    const { lanes } = require('../services/model-switchboard').getSwitchboard();
+    const inbound = lanes.find((l) => l.id === 'voice_relay');
+    const collections = lanes.find((l) => l.id === 'voice_relay_collections');
+    expect(inbound.primary.pinEnv).toBe('VOICE_RELAY_INBOUND_MODEL');
+    expect(inbound.primary.dependsOnEnvs).toEqual(['VOICE_RELAY_MODEL']);
+    expect(collections.primary.pinEnv).toBe('VOICE_RELAY_MODEL');
+    // Every lane a change to VOICE_RELAY_MODEL must move — the composer's
+    // blast-radius grouping (modelDraft.js's computeChanges) matches a lane
+    // in by `leg.pinEnv === env || leg.dependsOnEnvs.includes(env)`.
+    const affected = lanes.filter((l) => [l.primary, l.fallback, l.retry, ...(l.also || [])].filter(Boolean)
+      .some((leg) => leg.pinEnv === 'VOICE_RELAY_MODEL' || leg.dependsOnEnvs?.includes('VOICE_RELAY_MODEL')));
+    expect(affected.map((l) => l.id).sort()).toEqual(['voice_relay', 'voice_relay_collections']);
+  });
+
+  it('with VOICE_RELAY_INBOUND_MODEL set to a valid override, voice_relay no longer depends on VOICE_RELAY_MODEL — only collections is affected', () => {
+    process.env.VOICE_RELAY_INBOUND_MODEL = 'claude-haiku-4-5-20251001';
+    process.env.VOICE_RELAY_MODEL = 'claude-sonnet-5';
+    jest.resetModules();
+    const { lanes } = require('../services/model-switchboard').getSwitchboard();
+    const inbound = lanes.find((l) => l.id === 'voice_relay');
+    expect(inbound.primary.model).toBe('claude-haiku-4-5-20251001');
+    expect(inbound.primary.dependsOnEnvs).toEqual([]);
+    const affected = lanes.filter((l) => [l.primary, l.fallback, l.retry, ...(l.also || [])].filter(Boolean)
+      .some((leg) => leg.pinEnv === 'VOICE_RELAY_MODEL' || leg.dependsOnEnvs?.includes('VOICE_RELAY_MODEL')));
+    expect(affected.map((l) => l.id)).toEqual(['voice_relay_collections']);
+  });
+
+  it('an unknown override id still resolves through the fallback — dependsOnEnvs reports the dependency exactly as the runtime falls back', () => {
+    process.env.VOICE_RELAY_INBOUND_MODEL = 'claude-nope-9000';
+    process.env.VOICE_RELAY_MODEL = 'claude-sonnet-5';
+    jest.resetModules();
+    const { lanes } = require('../services/model-switchboard').getSwitchboard();
+    const inbound = lanes.find((l) => l.id === 'voice_relay');
+    expect(inbound.primary.model).toBe('claude-sonnet-5');
+    expect(inbound.primary.dependsOnEnvs).toEqual(['VOICE_RELAY_MODEL']);
+  });
+
+  it('a rejected override with VOICE_RELAY_MODEL unset is NOT a pin — voice_relay follows the VOICE selector, so a MODEL_VOICE change lists it', () => {
+    process.env.VOICE_RELAY_INBOUND_MODEL = 'claude-nope-9000';
+    jest.resetModules();
+    const { lanes } = require('../services/model-switchboard').getSwitchboard();
+    const inbound = lanes.find((l) => l.id === 'voice_relay');
+    expect(inbound.primary.pinned).toBe(false);
+    expect(inbound.primary.selector).toBe('VOICE');
+    // Still deletable from the tab: setEnv names the rejected var.
+    expect(inbound.primary.setEnv).toBe('VOICE_RELAY_INBOUND_MODEL');
+    expect(inbound.primary.via).toMatch(/VOICE_RELAY_INBOUND_MODEL rejected/);
+    // The Models tab's selector-follower filter (`g.selector === key && !g.pinned`).
+    const followers = lanes.filter((l) => [l.primary, l.fallback, l.retry, ...(l.also || [])].filter(Boolean)
+      .some((leg) => leg.selector === 'VOICE' && !leg.pinned)).map((l) => l.id);
+    expect(followers).toEqual(expect.arrayContaining(['voice_relay', 'voice_relay_collections']));
+  });
+
+  it('with only VOICE_RELAY_MODEL set, voice_relay is env-pinned (not a VOICE selector follower) and has no own pin to delete', () => {
+    process.env.VOICE_RELAY_MODEL = 'claude-sonnet-5';
+    jest.resetModules();
+    const { lanes } = require('../services/model-switchboard').getSwitchboard();
+    const inbound = lanes.find((l) => l.id === 'voice_relay');
+    expect(inbound.primary.pinned).toBe(true);
+    expect(inbound.primary.setEnv).toBeNull();
+  });
+
+  it('reports the whole env chain with a per-link verdict, even while the override is active, so the composer can resolve any draft', () => {
+    process.env.VOICE_RELAY_INBOUND_MODEL = 'claude-haiku-4-5-20251001';
+    process.env.VOICE_RELAY_MODEL = 'claude-sonnet-5';
+    jest.resetModules();
+    const inbound = require('../services/model-switchboard').getSwitchboard().lanes.find((l) => l.id === 'voice_relay');
+    expect(inbound.primary.chain.map((k) => [k.env, k.model, k.accepted])).toEqual([
+      ['VOICE_RELAY_INBOUND_MODEL', 'claude-haiku-4-5-20251001', true],
+      ['VOICE_RELAY_MODEL', 'claude-sonnet-5', true],
+    ]);
+    expect(inbound.primary.chainBase).toEqual({ selector: 'VOICE', model: require('../config/models').VOICE });
+  });
+
+  it('an override that is rejected but equal to VOICE_RELAY_MODEL is still reported as rejected (verdict, not id equality)', () => {
+    process.env.VOICE_RELAY_INBOUND_MODEL = 'claude-nope-9000';
+    process.env.VOICE_RELAY_MODEL = 'claude-nope-9000';
+    jest.resetModules();
+    const inbound = require('../services/model-switchboard').getSwitchboard().lanes.find((l) => l.id === 'voice_relay');
+    expect(inbound.primary.chain[0]).toMatchObject({ env: 'VOICE_RELAY_INBOUND_MODEL', accepted: false });
+    expect(inbound.primary.dependsOnEnvs).toEqual(['VOICE_RELAY_MODEL']);
+    expect(inbound.primary.via).toMatch(/rejected/);
+  });
+
+  it('the catalog-only picker receives the runtime allowlist itself', () => {
+    const inbound = require('../services/model-switchboard').getSwitchboard().lanes.find((l) => l.id === 'voice_relay');
+    const { ALLOWED_OVERRIDE_MODEL_IDS } = require('../services/voice-agent/relay-conversation');
+    expect(inbound.primary.accepts.allowedIds).toEqual([...ALLOWED_OVERRIDE_MODEL_IDS]);
+    expect(inbound.primary.accepts.allowedIds).toContain('claude-haiku-4-5-20251001');
+    expect(inbound.primary.accepts.allowedIds.some((id) => id.includes('fable'))).toBe(false);
   });
 });

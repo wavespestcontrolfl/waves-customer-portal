@@ -1427,6 +1427,10 @@ const gates = {
   rescheduleProposalCard: gateEnvValue('GATE_RESCHEDULE_PROPOSAL_CARD'),
   callbackCard: gateEnvValue('GATE_CALLBACK_CARD'),
   smsAdditionalProperty: gateEnvValue('GATE_SMS_ADDITIONAL_PROPERTY'),
+  // Customer-intelligence AI legs (nightly sentiment mining + retention
+  // drafts). Read at CALL time inside signal-detector / the 3 AM pipeline;
+  // this entry is for logGateStatus only. Dark by default (owner 2026-09-25).
+  customerIntelAi: gateEnvValue('GATE_CUSTOMER_INTEL_AI'),
   // Missing-departure/arrival tracking: flags a scheduled_services row whose
   // promised window (the last communicated arrival window — SMS/email/call
   // evidence, never the raw schedule) has passed with no en_route/arrived
@@ -2127,6 +2131,9 @@ const gates = {
 
   // Null-position repair through the existing writer. Keeps customer promises
   // and positioned-stop order; requires drive calibration and the reorder gate.
+  // Also enables verified service-address pin recovery in the hourly geocoder
+  // backstop (with GATE_ROUTE_REORDER). Pin writes do not require calibration;
+  // the subsequent route repair still does. No customer messages.
   // Explicit opt-in in every environment.
   routeReorderRepair: gateEnvValue('GATE_ROUTE_REORDER_REPAIR'),
 
@@ -2844,6 +2851,17 @@ function discountStackingLive() {
   return process.env.GATE_DISCOUNT_STACKING === 'true';
 }
 
+// GATE_CUSTOMER_INTEL_AI read at CALL time — the ONE reader for every entry
+// point into the customer-intelligence AI legs (nightly sentiment mining in
+// signal-detector, retention drafting in retention-engine, and the admin
+// route that triggers drafting by hand), so the documented "unset = no
+// provider call" guarantee holds on every path, not just the scheduler
+// (Codex #4825 P1). The `customerIntelAi` gates-map entry is for
+// logGateStatus only.
+function customerIntelAiLive() {
+  return gateEnvValue('GATE_CUSTOMER_INTEL_AI');
+}
+
 // GATE_LEAD_INSPECTION_LINK read at CALL time — strict `=== 'true'`, same
 // convention as discountStackingLive(). The `leadInspectionLink` gates-map
 // entry above is for logGateStatus only; this is the one canonical reader
@@ -2924,5 +2942,5 @@ function logGateStatus() {
   }
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, selfBookDayCapEnabled, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, customerIntelAiLive, selfBookDayCapEnabled, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive };
 // gates 1775330914
