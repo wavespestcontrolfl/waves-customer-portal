@@ -20,11 +20,24 @@ const TREATMENT_QUESTION_RE = /\b(treat|treats|treating|treated|treatment|treatm
 // about what was FOUND there — "What did you find outdoors?" / "Did you see
 // any ants indoors?" are findings questions, not re-entry timing.
 const FINDINGS_QUESTION_RE = /\b(find|found|finding|see|saw|notice|noticed|activity|ants?|pests?|bugs?|roaches?|spiders?|rodents?|mice|rats?)\b/;
+// A temporal "when/after/how long … go/get/come/let … in/out" question is
+// re-entry even when it names the treatment ("When can I go inside after
+// the treatment?").
+// ("When will you come back?" stays a scheduling question.)
+const REENTRY_TEMPORAL_RE = /\b(?:when|after|how\s+long|how\s+soon)\b[^?.]*\b(?:go|get|let|walk|play)\b[^?.]*\b(?:in|out|inside|outside|indoors|outdoors)\b/;
 function isReentryIntent(q) {
   return SAFETY_SUBJECT_RE.test(q)
     || REENTRY_PHRASE_RE.test(q)
+    || REENTRY_TEMPORAL_RE.test(q)
     || (LOCATION_RE.test(q) && !TREATMENT_QUESTION_RE.test(q) && !FINDINGS_QUESTION_RE.test(q));
 }
+// Results questions ("Is the weed treatment working?") belong to the trend
+// answer even though they name the treatment.
+const EFFECTIVENESS_RE = /\b(working|improving|helping|trending|results?|better|worse)\b/;
+// Explicit advice wording outranks the broad lawn-trend subjects ("What do
+// you recommend for the stress areas?").
+const ADVICE_RE = /\b(recommend\w*|what\s+should\s+i|should\s+i|what\s+action|next\s+step)\b/;
+const TREND_RE = /\b(pressure|trend|trending|better|worse|score|index|improving|lawn|turf|weeds?|fungus|thatch|stress|damage|coverage|color|thicken\w*|thin)\b/;
 
 const PRODUCT_INSIGHTS = [
   {
@@ -521,14 +534,18 @@ function answerServiceReportQuestion({
   // trend branch below: a question that mentions both ("What was applied to
   // the weeds?", "What did you spray on the thin areas?") is asking about
   // the treatment, not the lawn trend, so treatment cues win when both match.
-  if (TREATMENT_QUESTION_RE.test(q)) {
+  if (TREATMENT_QUESTION_RE.test(q) && !EFFECTIVENESS_RE.test(q)) {
     return answerAppliedToday({ data });
+  }
+
+  if (ADVICE_RE.test(q)) {
+    return answerNextSteps({ data, nextAppointment });
   }
 
   // AW-06: covers the lawn V2 insight chips too (water/weeds/damage/
   // coverage/color categories in ReportViewPage.jsx's reportAskPrompts),
   // which all read from this same score breakdown in answerTrend.
-  if (/\b(pressure|trend|trending|better|worse|score|index|improving|lawn|turf|weeds?|fungus|thatch|stress|damage|coverage|color|thicken\w*|thin)\b/.test(q)) {
+  if (TREND_RE.test(q)) {
     return answerTrend({ data });
   }
 
@@ -543,7 +560,7 @@ function answerServiceReportQuestion({
     return answerNextAppointment({ nextAppointment });
   }
 
-  if (/\b(find|found|activity|issue|problem|clear|photo|map|where)\b/.test(q)) {
+  if (/\b(find|found|activity|issue|problem|clear|photo|map|where)\b/.test(q) || FINDINGS_QUESTION_RE.test(q)) {
     return answerFindings({ data });
   }
 

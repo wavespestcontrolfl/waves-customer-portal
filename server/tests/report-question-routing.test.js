@@ -269,6 +269,32 @@ describe('service report — every shipped chip answers its own category (AW-06)
     expect(answer).not.toMatch(/\bsafe\b/i);
   });
 
+  test.each([
+    'When can I go inside after the treatment?',
+    'Can I go indoors after the application? How long until I can go in?',
+  ])('temporal re-entry question naming the treatment gets re-entry: %s', (question) => {
+    const answer = answerServiceReportQuestion({ question, data: pestData });
+    expect(answer).toBe(answerServiceReportQuestion({ question: 'When can my pets go back out?', data: pestData }));
+  });
+
+  test('"Did you see any ants indoors?" reaches the findings answer', () => {
+    const answer = answerServiceReportQuestion({ question: 'Did you see any ants indoors?', data: pestData });
+    expect(answer).toBe(answerServiceReportQuestion({ question: 'What did you find?', data: pestData }));
+  });
+
+  test.each([
+    'Is the weed treatment working?',
+    'Is the product improving the weeds?',
+  ])('effectiveness question naming the treatment gets the trend answer: %s', (question) => {
+    expect(answerServiceReportQuestion({ question, data: lawnData }))
+      .toBe(answerServiceReportQuestion({ question: 'Is my lawn getting better?', data: lawnData }));
+  });
+
+  test('explicit advice wording outranks a lawn-trend subject', () => {
+    expect(answerServiceReportQuestion({ question: 'What do you recommend for the stress areas?', data: lawnData }))
+      .toBe(answerServiceReportQuestion({ question: 'What do you recommend?', data: lawnData }));
+  });
+
   test('"When will you come back?" is a scheduling question, not re-entry', () => {
     const answer = answerServiceReportQuestion({ question: 'When will you come back?', data: pestData, nextAppointment });
     expect(answer).toMatch(/Your next appointment is/);
