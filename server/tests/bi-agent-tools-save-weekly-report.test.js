@@ -14,10 +14,14 @@ jest.mock('../models/db', () => {
     return {
       insert(row) {
         mockInsertedRows.push(row);
-        return { returning: () => Promise.resolve([{ id: 'report-1', ...row }]) };
+        // The save is a week_of upsert (#4870):
+        // insert().onConflict().merge().where().returning().
+        const returning = () => Promise.resolve([{ id: 'report-1', ...row }]);
+        return { onConflict: () => ({ merge: () => ({ where: () => ({ returning }) }) }), returning };
       },
     };
   });
+  db.raw = jest.fn((sql) => sql);
   db.__mockInsertedRows = mockInsertedRows;
   return db;
 });
