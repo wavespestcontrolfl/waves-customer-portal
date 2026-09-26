@@ -315,6 +315,10 @@ describe('codex #4890 r5/r6 — WDO identity and elapsed agreed days', () => {
       expect(arrangerSlotElapsed({ authorized: true, scheduledDate: '2026-09-28', windowStart: '10:00' })).toBe(true);
     });
 
+    test('a midnight start rendered as "24:00" counts as the start of the day (codex #4890 r8 P2)', () => {
+      expect(arrangerSlotElapsed({ authorized: true, scheduledDate: '2026-09-28', windowStart: '24:00' })).toBe(true);
+    });
+
     test('a later same-day slot still books', () => {
       expect(arrangerSlotElapsed({ authorized: true, scheduledDate: '2026-09-28', windowStart: '16:00' })).toBe(false);
     });

@@ -1041,7 +1041,10 @@ function arrangerSlotElapsed({ authorized, scheduledDate, windowStart = null }) 
   if (!authorized || !scheduledDate) return false;
   // One clock for both halves: sameDayWindowElapsed reads the real ET "today".
   if (String(scheduledDate) < etDateString(new Date())) return true;
-  return sameDayWindowElapsed(scheduledDate, windowStart);
+  // Node's h24 hour cycle renders midnight as "24:00"; the start of the day
+  // is "00:00" for the elapsed comparison (codex #4890 r8 P2).
+  const start = windowStart ? String(windowStart).replace(/^24:/, '00:') : windowStart;
+  return sameDayWindowElapsed(scheduledDate, start);
 }
 
 function isLiveLeadConversation({ call, extracted, leadId, finalStatus, nonLeadCall, voicemailLeadPath, transcription }) {
