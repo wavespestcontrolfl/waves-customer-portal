@@ -29,7 +29,8 @@ const logger = require('../logger');
 const { matchAmazonTitleToProduct } = require('./product-matcher');
 const { parsePackSize } = require('../product-costing');
 const { convertInventoryQuantity } = require('../inventory-units');
-const { findLiveRestockRequest } = require('../procurement/live-restock-request');
+const { LIVE_RESTOCK_STATUSES } = require('../procurement/live-restock-request');
+const { restockMeta } = require('../inventory-restock-queue');
 const { adjustStock, updateRestockRequest } = require('../inventory-operations');
 
 const VENDOR = 'amazon';
@@ -46,6 +47,36 @@ function round4(value) {
   return Math.round(value * 10000) / 10000;
 }
 
+// Multipack markers, scanned ANYWHERE in the title — deliberately a SEPARATE,
+// local parse, not a change to parsePackSize (product-costing.js): that
+// function only ever reads a leading "N x " multiplier at the very start of
+// the string, because its other callers (vendor pricing display) hand it
+// just the pack-size text with the product name already stripped off. An
+// Amazon item title puts the product name FIRST ("Taurus SC 2 x 78 oz",
+// "Taurus SC 78 oz (Pack of 2)"), so parsePackSize's own multiplier check
+// never fires there and it silently reads only the per-unit size — this is
+// what under-logs a multipack delivery by the pack factor. "count" (e.g.
+// "Summit Mosquito Dunk Tablets 20 count") is deliberately NOT a multipack
+// marker — that is the product's own each-count sizing, not a pack of packs.
+const MULTIPACK_PATTERNS = [
+  /(\d+)\s*[x×]\s*(?=\d)/i, // "2 x 78 oz", "2×78 oz" — multiplier immediately before a size number
+  /pack\s+of\s+(\d+)/i, // "(Pack of 2)", "Pack of 2"
+  /(\d+)\s*-?\s*pack\b/i, // "2-Pack", "2 Pack"
+  /case\s+of\s+(\d+)/i, // "Case of 12"
+  /set\s+of\s+(\d+)/i, // "Set of 4"
+];
+
+function parseMultipackCount(title) {
+  const text = String(title || '');
+  for (const pattern of MULTIPACK_PATTERNS) {
+    const m = text.match(pattern);
+    if (!m) continue;
+    const n = Number.parseInt(m[1], 10);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return null;
+}
+
 // Pure classification: match + parse + compare, no DB writes. Exported for
 // direct unit testing of the size/mismatch rules without touching the DB.
 async function classifyItem(item, conn = db) {
@@ -55,6 +86,29 @@ async function classifyItem(item, conn = db) {
   const product = match.product;
   const containerParsed = parsePackSize(product.container_size);
   if (!containerParsed) return { status: 'needs_size', productId: product.id, product };
+
+  const multipackCount = parseMultipackCount(item.title);
+  if (multipackCount != null) {
+    // A multipack marker with no parseable per-unit size is never assumed —
+    // straight to size_mismatch, same as any other unresolvable size claim.
+    const titleParsed = parsePackSize(item.title);
+    const perUnitConverted = titleParsed ? convertInventoryQuantity(titleParsed.amount, titleParsed.unit, containerParsed.unit) : null;
+    if (perUnitConverted == null) return { status: 'size_mismatch', productId: product.id, product };
+
+    let perItemAmount;
+    if (sizesAgree(perUnitConverted, containerParsed.amount)) {
+      // The title's per-unit size IS the catalog container size: the pack
+      // multiplies the container count, not its size.
+      perItemAmount = multipackCount * containerParsed.amount;
+    } else if (sizesAgree(perUnitConverted * multipackCount, containerParsed.amount)) {
+      // The catalog container already represents the WHOLE pack (e.g. a
+      // case-sized catalog row) — the pack math is already baked in.
+      perItemAmount = containerParsed.amount;
+    } else {
+      return { status: 'size_mismatch', productId: product.id, product };
+    }
+    return { status: 'logged', productId: product.id, product, receivedQty: round4(item.quantity * perItemAmount), receivedUnit: containerParsed.unit };
+  }
 
   const titleParsed = parsePackSize(item.title);
   if (titleParsed) {
@@ -91,7 +145,10 @@ async function claimLine(conn, row) {
  * @returns one of:
  *   { skipped: true }                                             — already processed
  *   { status: 'unmatched'|'size_mismatch'|'needs_size'|'no_items', inserted: true }
- *   { status: 'logged', product, receivedQty, receivedUnit, movement, viaRequest }
+ *   { status: 'logged', product, receivedQty, receivedUnit, movement, viaRequest, leftoverRequest }
+ *   leftoverRequest (non-null only when viaRequest is false and exactly one
+ *   OTHER live request exists): { vendor, status } — a request this delivery
+ *   did NOT qualify to close, for the bell to name explicitly.
  */
 async function processReceiptLine({ email, orderNumber, shipmentKey, item, lineNo, forcedStatus }, conn = db) {
   const vendor = VENDOR;
@@ -141,6 +198,53 @@ async function processReceiptLine({ email, orderNumber, shipmentKey, item, lineN
   });
 }
 
+// The vendors row the price-scan Amazon adapter resolves to (see
+// price-scan/adapters/registry.js's isAmazonVendor, which routes by host) —
+// looked up here by name/website rather than a hardcoded vendor uuid, so a
+// re-seeded or renamed vendor row never silently breaks this correlation.
+async function findAmazonVendor(conn) {
+  return conn('vendors')
+    .where((b) => b.whereRaw('LOWER(name) LIKE ?', ['amazon%']).orWhereRaw('LOWER(website) LIKE ?', ['%amazon.com%']))
+    .where('active', true)
+    .first();
+}
+
+// request.metadata.vendorId (auto-reorder.js's convention — see its header
+// around "PR 2: learn vendor") is authoritative when present; a manually
+// created request (create_restock_request) carries only the plain `vendor`
+// display text, so that is the fallback.
+function requestIsAmazon(request, amazonVendor) {
+  const meta = restockMeta(request.metadata);
+  if (meta?.vendorId) return Boolean(amazonVendor) && meta.vendorId === amazonVendor.id;
+  return String(request.vendor || '').trim().toLowerCase().startsWith('amazon');
+}
+
+/**
+ * Which live (open/ordered) restock request, if any, THIS Amazon delivery
+ * should mark received — never just the oldest one, regardless of vendor
+ * (the earlier behavior, and wrong: an Amazon delivery must not close an
+ * order someone placed with SiteOne).
+ *   - 'open' (a need, no order placed with anyone yet) qualifies whatever
+ *     vendor it names — the need is real regardless of who fills it.
+ *   - 'ordered' qualifies ONLY when that order was placed with Amazon.
+ * Exactly one qualifying request -> receive it. Zero or 2+ (ambiguous) ->
+ * receive none, adjust stock directly; when exactly one OTHER live request
+ * is left dangling in that case, it is returned as `leftover` so the bell
+ * can name it instead of silently leaving it open with no explanation.
+ */
+async function selectRestockRequestOutcome(trx, productId) {
+  const liveRequests = await trx('product_restock_requests').where({ product_id: productId }).whereIn('status', LIVE_RESTOCK_STATUSES);
+  if (!liveRequests.length) return { toReceive: null, leftover: null };
+  const amazonVendor = await findAmazonVendor(trx);
+  const qualifying = liveRequests.filter((r) => r.status === 'open' || (r.status === 'ordered' && requestIsAmazon(r, amazonVendor)));
+  if (qualifying.length === 1) return { toReceive: qualifying[0], leftover: null };
+  const nonQualifying = liveRequests.filter((r) => !qualifying.includes(r));
+  // Only named when it is the SOLE live request and unambiguous — two or
+  // more leftover requests get no specific call-out (nothing to disambiguate).
+  const leftover = liveRequests.length === 1 && nonQualifying.length === 1 ? nonQualifying[0] : null;
+  return { toReceive: null, leftover };
+}
+
 // The actual restock write for an already-claimed 'logged' line, through the
 // shared adjustStock / updateRestockRequest path — on the SAME transaction
 // (options.trx) the claim was inserted on, so a failure here rolls back the
@@ -148,7 +252,7 @@ async function processReceiptLine({ email, orderNumber, shipmentKey, item, lineN
 // own branching flat.
 async function performLoggedMovement(trx, { claim, classified, orderNumber, email, item }) {
   const extraMetadata = { source: SOURCE, orderNumber, emailId: email?.id || null, rawTitle: item.title };
-  const liveRequest = await findLiveRestockRequest(trx, classified.productId);
+  const { toReceive: liveRequest, leftover } = await selectRestockRequestOutcome(trx, classified.productId);
   const result = liveRequest
     ? await updateRestockRequest(liveRequest.id, {
       action: 'receive', quantity: classified.receivedQty, unit: classified.receivedUnit,
@@ -163,6 +267,7 @@ async function performLoggedMovement(trx, { claim, classified, orderNumber, emai
   return {
     status: 'logged', product: classified.product, receivedQty: classified.receivedQty,
     receivedUnit: classified.receivedUnit, movement: result.movement, viaRequest: Boolean(liveRequest),
+    leftoverRequest: leftover ? { vendor: leftover.vendor || null, status: leftover.status } : null,
   };
 }
 

@@ -1287,6 +1287,14 @@
     "approval": null,
     "scope": "broad"
   },
+  "list_unlogged_purchases": {
+    "module": "procurement-tools.js",
+    "domain": "procurement",
+    "kind": "read",
+    "role": "admin",
+    "approval": null,
+    "scope": "none"
+  },
   "lookup_property": {
     "module": "estimate-tools.js",
     "domain": "estimate",

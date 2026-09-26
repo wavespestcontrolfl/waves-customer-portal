@@ -9,13 +9,23 @@
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
-const mockState = { match: { matched: false, reason: 'unmatched' }, liveRequest: null, adjustResult: null, adjustError: null, updateResult: null, updateError: null, claimUpdateError: null };
+// live-restock-request.js is used for real (unmocked) here — it is a pure,
+// side-effect-free constant + a function this module no longer even calls
+// (see selectRestockRequestOutcome, which queries product_restock_requests
+// directly for the vendor-correlation rule below).
+const mockState = {
+  match: { matched: false, reason: 'unmatched' },
+  // Seeds the fake `product_restock_requests` table for
+  // selectRestockRequestOutcome's own query (see the db mock below) — every
+  // row here is treated as already-filtered to open/ordered for the product.
+  liveRequests: [],
+  // Seeds the fake `vendors` table lookup findAmazonVendor runs.
+  amazonVendor: { id: 'vend-amazon', name: 'Amazon', website: 'https://www.amazon.com', active: true },
+  adjustResult: null, adjustError: null, updateResult: null, updateError: null, claimUpdateError: null,
+};
 
 jest.mock('../services/purchase-receipts/product-matcher', () => ({
   matchAmazonTitleToProduct: jest.fn(async () => mockState.match),
-}));
-jest.mock('../services/procurement/live-restock-request', () => ({
-  findLiveRestockRequest: jest.fn(async () => mockState.liveRequest),
 }));
 const mockAdjustStock = jest.fn(async () => {
   if (mockState.adjustError) throw mockState.adjustError;
@@ -32,7 +42,24 @@ jest.mock('../services/inventory-operations', () => ({
 
 const dbState = { lines: {} };
 jest.mock('../models/db', () => {
-  const fn = () => {
+  const fn = (table) => {
+    // findAmazonVendor's lookup — `.where(cb).where('active', true).first()`.
+    if (table === 'vendors') {
+      const q = {};
+      q.where = () => q;
+      q.first = async () => mockState.amazonVendor;
+      return q;
+    }
+    // selectRestockRequestOutcome's own query — `.where({product_id}).whereIn('status', [...])`,
+    // awaited directly (no .first()); mockState.liveRequests stands in as
+    // "every row already scoped to this product and open/ordered".
+    if (table === 'product_restock_requests') {
+      const q = {};
+      q.where = () => q;
+      q.whereIn = () => q;
+      q.then = (resolve, reject) => Promise.resolve(mockState.liveRequests).then(resolve, reject);
+      return q;
+    }
     const q = {};
     q.where = (cond) => { q._cond = cond; return q; };
     q.first = async () => {
@@ -91,7 +118,8 @@ const taurus = { id: 'p-taurus', name: 'Taurus SC', container_size: '78 fl oz', 
 
 beforeEach(() => {
   mockState.match = { matched: false, reason: 'unmatched' };
-  mockState.liveRequest = null;
+  mockState.liveRequests = [];
+  mockState.amazonVendor = { id: 'vend-amazon', name: 'Amazon', website: 'https://www.amazon.com', active: true };
   mockState.adjustResult = { movement: { id: 'mv-1' }, product: taurus };
   mockState.adjustError = null;
   mockState.updateResult = { movement: { id: 'mv-2' }, request: { id: 'req-1' } };
@@ -142,6 +170,83 @@ describe('classifyItem', () => {
   });
 });
 
+describe('classifyItem — multipack markers (anywhere in the title, not just a leading multiplier)', () => {
+  beforeEach(() => { mockState.match = { matched: true, product: taurus }; });
+
+  test('"N x SIZE" form: per-unit size matches the container -> N packs logged', async () => {
+    const result = await classifyItem({ title: 'Taurus SC 2 x 78 oz', quantity: 1 });
+    expect(result).toEqual({ status: 'logged', productId: 'p-taurus', product: taurus, receivedQty: 156, receivedUnit: 'fl_oz' });
+  });
+
+  test('"N × SIZE" (unicode multiplication sign) form', async () => {
+    const result = await classifyItem({ title: 'Taurus SC 2 × 78 oz', quantity: 1 });
+    expect(result.receivedQty).toBe(156);
+    expect(result.status).toBe('logged');
+  });
+
+  test('"(Pack of N)" form', async () => {
+    const result = await classifyItem({ title: 'Taurus SC Termiticide 78 oz (Pack of 2)', quantity: 1 });
+    expect(result.receivedQty).toBe(156);
+  });
+
+  test('"Pack of N" (no parens) form', async () => {
+    const result = await classifyItem({ title: 'Taurus SC Termiticide 78 oz Pack of 2', quantity: 1 });
+    expect(result.receivedQty).toBe(156);
+  });
+
+  test('"N-Pack" form', async () => {
+    const result = await classifyItem({ title: 'Taurus SC Termiticide 78 oz 2-Pack', quantity: 1 });
+    expect(result.receivedQty).toBe(156);
+  });
+
+  test('"N Pack" (no hyphen) form', async () => {
+    const result = await classifyItem({ title: 'Taurus SC Termiticide 78 oz 2 Pack', quantity: 1 });
+    expect(result.receivedQty).toBe(156);
+  });
+
+  test('"Case of N" form', async () => {
+    const result = await classifyItem({ title: 'Taurus SC Termiticide 78 oz Case of 2', quantity: 1 });
+    expect(result.receivedQty).toBe(156);
+  });
+
+  test('"Set of N" form', async () => {
+    const result = await classifyItem({ title: 'Taurus SC Termiticide 78 oz Set of 2', quantity: 1 });
+    expect(result.receivedQty).toBe(156);
+  });
+
+  test('order quantity still multiplies on top of the pack math (2 shipped, each a 2-pack of 78 oz)', async () => {
+    const result = await classifyItem({ title: 'Taurus SC 2 x 78 oz', quantity: 2 });
+    expect(result.receivedQty).toBe(312); // 2 (order qty) * 2 (pack) * 78
+  });
+
+  test('agreement branch B: N x per-unit size equals the catalog container (the container IS the whole pack)', async () => {
+    const bulkContainer = { id: 'p-taurus', name: 'Taurus SC', container_size: '156 fl oz' };
+    mockState.match = { matched: true, product: bulkContainer };
+    const result = await classifyItem({ title: 'Taurus SC 2 x 78 oz', quantity: 1 });
+    // 78 != 156 (branch A fails) but 2*78 == 156 (branch B) -> the container
+    // already IS the 2-pack, so received per item is just the container size.
+    expect(result).toEqual({ status: 'logged', productId: 'p-taurus', product: bulkContainer, receivedQty: 156, receivedUnit: 'fl_oz' });
+  });
+
+  test('mismatch: neither the per-unit size nor N times it agrees with the container -> size_mismatch, never assumed', async () => {
+    const result = await classifyItem({ title: 'Taurus SC 2 x 50 oz', quantity: 1 });
+    expect(result).toMatchObject({ status: 'size_mismatch', productId: 'p-taurus' });
+  });
+
+  test('a multipack marker with NO parseable per-unit size anywhere in the title is never assumed -> size_mismatch', async () => {
+    const result = await classifyItem({ title: 'Taurus SC Termiticide (Pack of 2)', quantity: 1 });
+    expect(result).toMatchObject({ status: 'size_mismatch', productId: 'p-taurus' });
+  });
+
+  test('"count" is never treated as a multipack marker (e.g. "20 count" tablet counts keep working as before)', async () => {
+    const result = await classifyItem({ title: 'Taurus SC Termiticide 20 count', quantity: 1 });
+    // No multipack marker matches "count" and parsePackSize has no "each"/
+    // "count" dimension either, so this is identical to "no size in the
+    // title at all" -> logged straight from the container size, unscaled.
+    expect(result).toEqual({ status: 'logged', productId: 'p-taurus', product: taurus, receivedQty: 78, receivedUnit: 'fl_oz' });
+  });
+});
+
 describe('processReceiptLine', () => {
   const email = { id: 'email-1', received_at: new Date() };
 
@@ -166,16 +271,60 @@ describe('processReceiptLine', () => {
     expect(saved).toMatchObject({ status: 'logged', movement_id: 'mv-1', restock_request_id: null, received_qty: 156, received_unit: 'fl_oz' });
   });
 
-  test('an open/ordered restock request for the matched product is RECEIVED instead of a second restock', async () => {
-    mockState.match = { matched: true, product: taurus };
-    mockState.liveRequest = { id: 'req-open', status: 'open' };
-    const outcome = await processReceiptLine({ email, orderNumber: '114-9578837-7732259', shipmentKey: 'ship-1', item: { title: 'Taurus SC Termiticide 78 oz', quantity: 1 }, lineNo: 1 });
-    expect(outcome.viaRequest).toBe(true);
-    expect(mockUpdateRestockRequest).toHaveBeenCalledWith('req-open',
-      { action: 'receive', quantity: 78, unit: 'fl_oz' },
-      expect.objectContaining({ source: 'amazon_delivery' }));
-    expect(mockAdjustStock).not.toHaveBeenCalled();
-    expect(dbState.lines['amazon|114-9578837-7732259|ship-1|1']).toMatchObject({ movement_id: 'mv-2', restock_request_id: 'req-open' });
+  describe('restock request vendor correlation', () => {
+    test('a live OPEN request qualifies regardless of vendor — a need, not yet placed with anyone', async () => {
+      mockState.match = { matched: true, product: taurus };
+      mockState.liveRequests = [{ id: 'req-open', status: 'open', vendor: 'SiteOne', metadata: null }];
+      const outcome = await processReceiptLine({ email, orderNumber: '114-9578837-7732259', shipmentKey: 'ship-1', item: { title: 'Taurus SC Termiticide 78 oz', quantity: 1 }, lineNo: 1 });
+      expect(outcome.viaRequest).toBe(true);
+      expect(outcome.leftoverRequest).toBeNull();
+      expect(mockUpdateRestockRequest).toHaveBeenCalledWith('req-open',
+        { action: 'receive', quantity: 78, unit: 'fl_oz' },
+        expect.objectContaining({ source: 'amazon_delivery' }));
+      expect(mockAdjustStock).not.toHaveBeenCalled();
+      expect(dbState.lines['amazon|114-9578837-7732259|ship-1|1']).toMatchObject({ movement_id: 'mv-2', restock_request_id: 'req-open' });
+    });
+
+    test('a live ORDERED request qualifies when it was placed with Amazon (metadata.vendorId)', async () => {
+      mockState.match = { matched: true, product: taurus };
+      mockState.liveRequests = [{ id: 'req-amz', status: 'ordered', vendor: 'Amazon', metadata: { vendorId: 'vend-amazon' } }];
+      const outcome = await processReceiptLine({ email, orderNumber: '114-9578837-7732259', shipmentKey: 'ship-1', item: { title: 'Taurus SC Termiticide 78 oz', quantity: 1 }, lineNo: 1 });
+      expect(outcome.viaRequest).toBe(true);
+      expect(mockUpdateRestockRequest).toHaveBeenCalledWith('req-amz', expect.objectContaining({ action: 'receive' }), expect.anything());
+      expect(mockAdjustStock).not.toHaveBeenCalled();
+    });
+
+    test('a live ORDERED request qualifies via the plain vendor display text ("Amazon") when metadata carries no vendorId', async () => {
+      mockState.match = { matched: true, product: taurus };
+      mockState.liveRequests = [{ id: 'req-amz-text', status: 'ordered', vendor: 'Amazon', metadata: null }];
+      const outcome = await processReceiptLine({ email, orderNumber: '114-9578837-7732259', shipmentKey: 'ship-1', item: { title: 'Taurus SC Termiticide 78 oz', quantity: 1 }, lineNo: 1 });
+      expect(outcome.viaRequest).toBe(true);
+      expect(mockUpdateRestockRequest).toHaveBeenCalledWith('req-amz-text', expect.objectContaining({ action: 'receive' }), expect.anything());
+    });
+
+    test('a live ORDERED request placed with a DIFFERENT vendor (SiteOne) is left untouched — stock is adjusted directly and the leftover is named', async () => {
+      mockState.match = { matched: true, product: taurus };
+      mockState.liveRequests = [{ id: 'req-site1', status: 'ordered', vendor: 'SiteOne', metadata: { vendorId: 'vend-siteone' } }];
+      const outcome = await processReceiptLine({ email, orderNumber: '114-9578837-7732259', shipmentKey: 'ship-1', item: { title: 'Taurus SC Termiticide 78 oz', quantity: 1 }, lineNo: 1 });
+      expect(outcome.viaRequest).toBe(false);
+      expect(outcome.leftoverRequest).toEqual({ vendor: 'SiteOne', status: 'ordered' });
+      expect(mockAdjustStock).toHaveBeenCalled();
+      expect(mockUpdateRestockRequest).not.toHaveBeenCalled();
+      expect(dbState.lines['amazon|114-9578837-7732259|ship-1|1']).toMatchObject({ movement_id: 'mv-1', restock_request_id: null });
+    });
+
+    test('two qualifying live requests are ambiguous — none received, stock adjusted, no leftover named', async () => {
+      mockState.match = { matched: true, product: taurus };
+      mockState.liveRequests = [
+        { id: 'req-open-1', status: 'open', vendor: 'SiteOne', metadata: null },
+        { id: 'req-open-2', status: 'open', vendor: 'Gemplers', metadata: null },
+      ];
+      const outcome = await processReceiptLine({ email, orderNumber: '114-9578837-7732259', shipmentKey: 'ship-1', item: { title: 'Taurus SC Termiticide 78 oz', quantity: 1 }, lineNo: 1 });
+      expect(outcome.viaRequest).toBe(false);
+      expect(outcome.leftoverRequest).toBeNull(); // 2+ leftover requests -> nothing specific to name
+      expect(mockAdjustStock).toHaveBeenCalled();
+      expect(mockUpdateRestockRequest).not.toHaveBeenCalled();
+    });
   });
 
   test('idempotency: running the same (order, shipment, line) twice logs once', async () => {

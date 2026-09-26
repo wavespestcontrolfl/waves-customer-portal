@@ -141,6 +141,28 @@ describe('processReceiptEmail', () => {
     expect(opts.dedupeKey).toBe('amazon-delivery:e1:Taurus SC Termiticide 78 oz');
   });
 
+  test('a logged line whose stock was adjusted around a non-qualifying live request names it in the bell', async () => {
+    mockState.outcomes = [
+      { status: 'logged', product: { id: 'p1', name: 'Taurus SC' }, receivedQty: 78, receivedUnit: 'fl_oz', leftoverRequest: { vendor: 'SiteOne', status: 'ordered' } },
+      { status: 'unmatched', inserted: true },
+    ];
+    const notify = jest.fn(async () => ({}));
+    await processReceiptEmail(deliveredEmail, { notify });
+    const body = notify.mock.calls[0][2];
+    expect(body).toContain('A SiteOne order for it is still marked ordered — close it if this covers it.');
+  });
+
+  test('a logged line received via a restock request (no leftover) carries no extra note in the bell', async () => {
+    mockState.outcomes = [
+      { status: 'logged', product: { id: 'p1', name: 'Taurus SC' }, receivedQty: 156, receivedUnit: 'fl_oz', leftoverRequest: null },
+      { status: 'unmatched', inserted: true },
+    ];
+    const notify = jest.fn(async () => ({}));
+    await processReceiptEmail(deliveredEmail, { notify });
+    const body = notify.mock.calls[0][2];
+    expect(body).not.toContain('still marked');
+  });
+
   test('size_mismatch and needs_size lines never ring a bell', async () => {
     mockState.outcomes = [{ status: 'size_mismatch', inserted: true }, { status: 'needs_size', inserted: true }];
     const notify = jest.fn(async () => ({}));

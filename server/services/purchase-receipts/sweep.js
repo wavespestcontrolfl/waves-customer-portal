@@ -54,8 +54,16 @@ async function ringLoggedBell(notifyAdmin, { email, item, outcome }) {
   if (!notifyAdmin) return;
   try {
     const perItemAmount = round(outcome.receivedQty / item.quantity);
-    const body = `Amazon delivery logged: ${outcome.product.name} +${outcome.receivedQty} ${displayUnit(outcome.receivedUnit)} `
+    let body = `Amazon delivery logged: ${outcome.product.name} +${outcome.receivedQty} ${displayUnit(outcome.receivedUnit)} `
       + `(${item.quantity} × ${perItemAmount} ${displayUnit(outcome.receivedUnit)})`;
+    // Stock was adjusted directly (no restock request qualified — see
+    // selectRestockRequestOutcome in receipt-processor.js) while exactly one
+    // OTHER live request sits open/ordered for the same product: name it so
+    // the office knows to close it by hand if this delivery actually covers it.
+    if (outcome.leftoverRequest) {
+      const vendorText = outcome.leftoverRequest.vendor || 'another vendor';
+      body += ` A ${vendorText} order for it is still marked ${outcome.leftoverRequest.status} — close it if this covers it.`;
+    }
     await notifyAdmin('inventory', 'Amazon delivery logged', body, {
       link: '/admin/inventory?tab=products',
       bell: true,
