@@ -8,7 +8,7 @@
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
-const { serviceMixMakesNoGuaranteeClaim, normalizeOneTimeBreakdown, guaranteeRecurringRows } = require('../routes/estimate-public');
+const { serviceMixMakesNoGuaranteeClaim, normalizeOneTimeBreakdown, guaranteeRecurringRows, guaranteeProposalRows } = require('../routes/estimate-public');
 
 const PEST = [{ name: 'Pest Control', mo: 55 }];
 const charge = (service, label, amount) => ({ service, label, amount, kind: 'charge' });
@@ -57,6 +57,24 @@ describe('serviceMixMakesNoGuaranteeClaim', () => {
     expect(serviceMixMakesNoGuaranteeClaim(guaranteeRecurringRows(estData), normalizeOneTimeBreakdown(estData).items)).toBe(false);
     const termiteNested = { result: { results: { recurring: { services: [{ name: 'Termite Bait Monitoring', mo: 45 }] } } } };
     expect(serviceMixMakesNoGuaranteeClaim(guaranteeRecurringRows(termiteNested), [])).toBe(true);
+  });
+
+  test('an authored proposal naming termite work is flagged even when its engine rows are pest only (Codex r4)', () => {
+    const estData = {
+      result: { recurring: { services: PEST }, oneTime: { items: [] } },
+      proposal: {
+        enabled: true,
+        buildings: [{ name: 'Building A', lineItems: [
+          { description: 'Monthly Pest Control', frequency: 'monthly' },
+          { description: 'Termite Trenching – Building A perimeter', frequency: 'one_time' },
+        ] }],
+        programs: [],
+      },
+    };
+    expect(serviceMixMakesNoGuaranteeClaim(guaranteeRecurringRows(estData), guaranteeProposalRows(estData))).toBe(true);
+    const pestOnly = { ...estData, proposal: { ...estData.proposal, buildings: [{ name: 'Building A', lineItems: [{ description: 'Monthly Pest Control' }] }] } };
+    expect(serviceMixMakesNoGuaranteeClaim(guaranteeRecurringRows(pestOnly), guaranteeProposalRows(pestOnly))).toBe(false);
+    expect(guaranteeProposalRows({ proposal: { programs: [{ name: 'Termite Bait Program' }] } })).toEqual([{ name: 'Termite Bait Program', service: null }]);
   });
 
   test('nothing classifiable at all makes no guarantee', () => {

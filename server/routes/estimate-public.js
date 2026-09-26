@@ -8844,6 +8844,7 @@ async function handleEstimateView(req, res, next) {
         [
           ...(normalizeOneTimeBreakdown(estData)?.items || []),
           ...(pricingBundleForView?.oneTimeBreakdown?.items || []),
+          ...guaranteeProposalRows(estData),
         ],
       ),
       status: estimate.status === 'accepted'
@@ -19934,6 +19935,23 @@ function guaranteeRecurringRows(estData) {
   return [...recurringServicesWithSupplements(root), ...nested];
 }
 
+// An authored proposal's own rows are its customer-visible scope
+// (acceptanceTermsApplyTo reads the same containers): building line items
+// and programs, classified like one-time rows by their names. Codex #4982 r4.
+function guaranteeProposalRows(estData) {
+  const proposal = estData?.proposal && typeof estData.proposal === 'object' ? estData.proposal : null;
+  if (!proposal) return [];
+  const list = (v) => (Array.isArray(v) ? v : []);
+  const asRow = (row) => ({
+    name: row?.description || row?.name || row?.title || row?.label || '',
+    service: row?.service || row?.serviceKey || null,
+  });
+  return [
+    ...list(proposal.buildings).flatMap((b) => list(b?.lineItems)).map(asRow),
+    ...list(proposal.programs).map(asRow),
+  ];
+}
+
 function serviceMixMakesNoGuaranteeClaim(recurringServices = [], oneTimeItems = []) {
   const { detectServiceCategory } = require('../utils/service-normalizer');
   const namedTermite = (row = {}) => detectServiceCategory(
@@ -26308,7 +26326,10 @@ async function composeEstimateDataPayload(estimate, {
     );
     // Termite work (or unclassifiable work) anywhere on the page's own rows:
     // the page and its proposal document make no estimate-wide guarantee.
-    const noGuaranteeClaims = serviceMixMakesNoGuaranteeClaim(guaranteeRecurringRows(estimateDataForIntelligence), oneTimeItemsForCategory);
+    const noGuaranteeClaims = serviceMixMakesNoGuaranteeClaim(
+      guaranteeRecurringRows(estimateDataForIntelligence),
+      [...oneTimeItemsForCategory, ...guaranteeProposalRows(estimateDataForIntelligence)],
+    );
     // Guarantee-only renewals accept with NO appointment: the acceptance
     // contract tells the React view to skip the slot picker and offer the
     // payment-only (invoice) accept. An existing linked appointment keeps
@@ -27520,6 +27541,7 @@ module.exports.serviceCategoryForOneTimeChoice = serviceCategoryForOneTimeChoice
 module.exports.serviceCategoryForOneTimeItem = serviceCategoryForOneTimeItem;
 module.exports.serviceMixMakesNoGuaranteeClaim = serviceMixMakesNoGuaranteeClaim;
 module.exports.guaranteeRecurringRows = guaranteeRecurringRows;
+module.exports.guaranteeProposalRows = guaranteeProposalRows;
 module.exports.oneTimeInvoiceLabelForCategory = oneTimeInvoiceLabelForCategory;
 module.exports.oneTimeToggleCopyForCategory = oneTimeToggleCopyForCategory;
 module.exports.isOneTimeChoiceItemForCategory = isOneTimeChoiceItemForCategory;

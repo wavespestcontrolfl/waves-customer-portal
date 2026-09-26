@@ -575,6 +575,14 @@ describe('OneTimeBreakdownCard', () => {
 });
 
 describe('oneTimePriceCopy', () => {
+  it('drops the callback term on an estimate the server marks noGuaranteeClaims (Codex #4982 r4)', () => {
+    // The rowless fallback (OneTimePriceCard) reaches the default copy.
+    expect(oneTimePriceCopy({ total: 400, items: [] })).toMatch(/30-day callback period/);
+    const neutral = oneTimePriceCopy({ total: 400, items: [] }, { noGuarantee: true });
+    expect(neutral).not.toMatch(/callback|guarantee/i);
+    expect(neutral).toMatch(/pay on service day/);
+  });
+
   it('returns Bora-Care wood-treatment copy without the pest callback line', () => {
     const copy = oneTimePriceCopy({ total: 1051, items: [{ service: 'bora_care', label: 'Bora-Care', amount: 1051 }] });
     expect(copy).toMatch(/borate wood treatment/i);

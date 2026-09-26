@@ -1566,7 +1566,7 @@ function germanRoachVisitPhrase(visits) {
   return words[n] || (n > 0 ? `${n} visits` : 'Multiple visits');
 }
 
-export function oneTimePriceCopy(breakdown = {}) {
+export function oneTimePriceCopy(breakdown = {}, { noGuarantee = false } = {}) {
   const items = Array.isArray(breakdown?.items) ? breakdown.items : [];
   const germanRoachItem = items.find(isGermanRoachCleanoutBreakdownItem);
   if (germanRoachItem) {
@@ -1621,6 +1621,10 @@ export function oneTimePriceCopy(breakdown = {}) {
   if (rodentGuaranteeOnly) {
     return 'Annual rodent guarantee — 12-month re-entry warranty, renewable annually. No service visit to schedule: accept below and we send your invoice.';
   }
+  // A callback period is a guarantee term: an estimate the server marks
+  // noGuaranteeClaims (termite, or work it can't classify) states the visit
+  // terms without it.
+  if (noGuarantee) return 'One visit, pay on service day. No recurring schedule, no tier discount.';
   return 'One visit, pay on service day. No recurring schedule, no tier discount. Includes a 30-day callback period if pests return after this visit.';
 }
 
@@ -1938,7 +1942,7 @@ export function EstimateAddServiceRequestCard({ offer, requestState, onRequest, 
 // one-time total but no billable breakdown rows must still show its price
 // (pre-push P0 on #3521). Every itemized estimate renders
 // OneTimeBreakdownCard instead (owner 2026-08-27).
-export function OneTimePriceCard({ oneTimePrice, breakdown }) {
+export function OneTimePriceCard({ oneTimePrice, breakdown, noGuarantee = false }) {
   return (
     <div style={estimateCard()}>
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, flexWrap: 'wrap' }}>
@@ -1948,7 +1952,7 @@ export function OneTimePriceCard({ oneTimePrice, breakdown }) {
         <span style={{ fontSize: 16, fontWeight: 500, color: ESTIMATE_MUTED }}>one-time</span>
       </div>
       <div style={{ fontSize: 16, color: '#3F4A65', marginTop: 16, lineHeight: 1.5 }}>
-        {oneTimePriceCopy(breakdown)}
+        {oneTimePriceCopy(breakdown, { noGuarantee })}
       </div>
     </div>
   );
@@ -8416,6 +8420,7 @@ function EstimateViewPageInner({ websiteMode = false }) {
             <OneTimePriceCard
               oneTimePrice={pricing.anchorOneTimePrice || pricing.oneTimeBreakdown?.total || 0}
               breakdown={pricing.oneTimeBreakdown}
+              noGuarantee={noGuaranteeClaims}
             />
           )}
         {!readOnly && canShowSlotPicker ? <GetServiceTodayCta slotMeta={glassContent ? selectedSlotMeta : null} /> : null}
