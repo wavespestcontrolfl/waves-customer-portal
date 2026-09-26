@@ -15720,7 +15720,10 @@ export function CompletionPanel({
     // value alone opened (codex r26; mirrors the chip membership rule).
     const nonInternalValuesNonEmpty = (schema, obj) => {
       const countableKeys = new Set(
-        (schema?.fields || []).filter((f) => !f.internal).map((f) => f.key),
+        // Treatment targets are objectives, not visit facts. Match the
+        // server's objective group for primary and companion forms alike.
+        (schema?.fields || []).filter((f) => !f.internal
+          && !/^target_(?!animal\b)|_target$/.test(f.key)).map((f) => f.key),
       );
       return Object.entries(obj || {}).some(
         ([key, v]) => countableKeys.has(key)
