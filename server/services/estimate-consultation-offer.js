@@ -60,10 +60,12 @@ async function linkedLeadIdFor(estimateId, estimateData) {
   const candidates = new Set();
   if (estimateId) {
     const pointing = await db('leads').where({ estimate_id: estimateId }).whereNull('deleted_at').limit(2).pluck('id');
-    pointing.forEach((id) => candidates.add(String(id)));
+    pointing.forEach((id) => candidates.add(String(id).toLowerCase()));
   }
+  // Lowercased on both sides: uuids compare case-insensitively in Postgres,
+  // so one lead written in two cases is still one candidate.
   if (estimateData?.lead_id && STRONG_LEAD_LINKAGES.includes(estimateData?.lead_linkage)) {
-    candidates.add(String(estimateData.lead_id));
+    candidates.add(String(estimateData.lead_id).toLowerCase());
   }
   return candidates.size === 1 ? [...candidates][0] : null;
 }

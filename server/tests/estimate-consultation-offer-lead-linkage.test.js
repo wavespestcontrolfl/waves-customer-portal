@@ -233,21 +233,11 @@ describe('estimateConsultationLead — cheap short-circuits never touch the DB',
 });
 
 describe('linkedLeadIdFor — same lead id as pointer AND stamp but different letter case', () => {
-  test('is treated as TWO distinct candidates today (String() changes type, not case) → ambiguous, null', async () => {
+  test('is ONE candidate — uuids compare case-insensitively, so both sides are lowercased', async () => {
     const upper = LEAD_ID.toUpperCase();
     mockBuilders.leads = splitBuilder({ pluckResult: [LEAD_ID], firstRow: OPEN_RECURRING_LEAD });
-    // Pointer resolves to the lowercase id; the stamp names the same lead in
-    // upper case. This documents CURRENT behavior — the two are not folded
-    // into one candidate, so the estimate is (safely, but perhaps
-    // surprisingly) treated as ambiguous rather than confirmed. Worth an
-    // explicit owner/engineering call on whether case-insensitive UUID
-    // comparison should be added; not changed here since it's unclear
-    // whether a real stamped lead_id can ever diverge in case from the
-    // canonical id Postgres returns (uuid columns normalize to lowercase on
-    // read, and every writer we found copies the id verbatim rather than
-    // retyping it).
     const result = await linkedLeadIdFor(ESTIMATE_ID, baseEstimateData({ lead_id: upper }));
-    expect(result).toBeNull();
+    expect(result).toBe(LEAD_ID.toLowerCase());
   });
 
   test('same id, same case, from both sources → ONE candidate, resolved', async () => {
