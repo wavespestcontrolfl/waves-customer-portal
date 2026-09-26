@@ -611,12 +611,16 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
     // (`orWhere` branches are pinned behaviorally in the notice-claim test
     // below; this list covers the where/whereIn/whereNull/whereNotIn guards.)
     expect(statusWriteSites(read('server/services/annual-prepay-renewals.js'))).toEqual([
+      // Moves 9 & 13 (ADMIN-BUG-R16): both the void/refund cancel
+      // (syncTermForInvoicePayment) and the invoice "remove annual-prepay
+      // flag" route (admin-invoices.js, listed separately below since it
+      // only CALLS this function) now share ONE write site — undecided
+      // only (a decided lapse keeps coverage).
+      { expr: "'cancelled'", guards: ['where({ id: termId })', "whereNull('renewal_decision')"] },
       // Move 2: payment_pending → active on invoice paid.
       { expr: "'active'", guards: ['where({ id: term.id, status: PAYMENT_PENDING_STATUS })'] },
       // Move 11: lost-dispute revival — undecided cancelled only.
       { expr: "'active'", guards: ["where({ id: term.id, status: 'cancelled' })", "whereNull('renewal_decision')"] },
-      // Move 9: void/refund cancels — undecided only (decided lapse keeps coverage).
-      { expr: "'cancelled'", guards: ['where({ id: term.id })', "whereNull('renewal_decision')"] },
       // Move 10: dispute demotion — active statuses only.
       { expr: 'PAYMENT_PENDING_STATUS', guards: ['where({ prepay_invoice_id: invoiceId })', "whereIn('status', ACTIVE_STATUSES)"] },
       // Move 1 (existing row): decided terms keep their status via the ternary itself.
@@ -645,8 +649,9 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
     );
 
     expect(statusWriteSites(read('server/routes/admin-invoices.js'))).toEqual([
-      // Move 13: DELETE /:id/annual-prepay — deliberately unguarded (documented residue).
-      { expr: "'cancelled'", guards: ['where({ id: termId })'] },
+      // Move 13's own write moved into the shared cancelTermWithRestorations
+      // (pinned above, in annual-prepay-renewals.js) — ADMIN-BUG-R16. This
+      // file's only remaining direct write is move 12.
       // Move 12: reverse-prepaid un-pay — undecided, non-cancelled only.
       { expr: "'payment_pending'", guards: ['where({ id: locked.annual_prepay_term_id })', "whereNull('renewal_decision')", "whereNotIn('status', ['cancelled', 'canceled'])"] },
     ]);
@@ -737,7 +742,7 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
       10: { from: st(['active', 'renewal_pending']), to: st(['payment_pending']), where: 'suspendActiveTermsForDisputedInvoice' },
       11: { from: st(['cancelled']), to: st(['active']), where: 'syncTermForInvoicePayment' },
       12: { from: st(['active', 'renewal_pending', 'payment_pending']), to: st(['payment_pending']), where: 'POST /:id/reverse-prepaid' },
-      13: { from: [], fromText: '*any*', to: st(['cancelled']), where: 'DELETE /:id/annual-prepay' },
+      13: { from: st(['payment_pending', 'cancelled']), to: st(['cancelled']), where: 'DELETE /:id/annual-prepay' },
     };
     const states = (cell) => [...cell.matchAll(/`([a-z_]+)`/g)].map((x) => x[1]).sort();
     for (const r of rows) {
@@ -761,7 +766,7 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
       10: 'ACTIVE_STATUSES',
       11: 'dispute_suspended_at IS NOT NULL',
       12: "NOT IN ('cancelled','canceled')",
-      13: 'none',
+      13: 'renewal_decision IS NULL',
     };
     for (const r of rows) expect(r.guard).toContain(guardFrag[r.n]);
   });
@@ -790,6 +795,8 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
         whereNull: jest.fn().mockReturnThis(),
         update: jest.fn().mockReturnThis(),
         returning: jest.fn().mockResolvedValue([{ id: 'term-1' }]),
+        // The strict cancel_disposition probe (ADMIN-BUG-R18): a pre-migration schema.
+        columnInfo: jest.fn().mockResolvedValue({}),
       };
       db.mockReturnValue(chain);
     });

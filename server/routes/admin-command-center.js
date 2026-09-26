@@ -75,7 +75,7 @@ function leadHref(id) {
 }
 
 function invoiceHref(row) {
-  return `/admin/invoices?search=${encodeURIComponent(row.invoice_number || row.id)}`;
+  return `/admin/invoices?invoice=${encodeURIComponent(row.id)}`;
 }
 
 function dispatchDayHref(date) {

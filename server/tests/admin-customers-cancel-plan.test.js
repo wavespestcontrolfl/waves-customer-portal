@@ -118,6 +118,8 @@ jest.mock('../services/annual-prepay-renewals', () => ({
     && String(r.scheduled_date) >= String(term.term_start).slice(0, 10)
     && String(r.scheduled_date) <= String(term.term_end).slice(0, 10))),
   recordDecision: (...args) => mockRecordDecision(...args),
+  // ADMIN-BUG-R18: an already-decided term takes the run's disposition.
+  recordCancelDisposition: jest.fn(async () => null),
 }));
 
 jest.mock('../models/db', () => {
@@ -1542,6 +1544,17 @@ describe('POST /:id/cancel-plan', () => {
         { id: 'cv4', customer_id: 'cust-1', status: 'confirmed', prepaid_method: 'annual_prepay_invoice', scheduled_date: '2027-02-01' },
       ];
     });
+
+    test('the decision carries its disposition (ADMIN-BUG-R18): end_of_coverage records end_at_term', () => withServer(async (baseUrl) => {
+      mockProcess.mockResolvedValueOnce({ ...PROCESSED, keptThrough: '2027-02-28' });
+      expect((await postCancel(baseUrl, { effectiveDate: 'end_of_coverage', prepayDisposition: 'end_at_term' })).status).toBe(200);
+      expect(mockRecordDecision).toHaveBeenCalledWith(expect.objectContaining({ termId: 'term-1', action: 'cancel', disposition: 'end_at_term' }));
+    }));
+
+    test('the decision carries its disposition (ADMIN-BUG-R18): now + refund records end_now_refund', () => withServer(async (baseUrl) => {
+      expect((await postCancel(baseUrl, { effectiveDate: 'now' })).status).toBe(200);
+      expect(mockRecordDecision).toHaveBeenCalledWith(expect.objectContaining({ termId: 'term-1', action: 'cancel', disposition: 'end_now_refund' }));
+    }));
 
     test('end_of_coverage: processor keeps visits through term_end, the term is decided cancel (no renewal), no refund, no office task', () => withServer(async (baseUrl) => {
       mockProcess.mockResolvedValueOnce({ ...PROCESSED, keptThrough: '2027-02-28' });
