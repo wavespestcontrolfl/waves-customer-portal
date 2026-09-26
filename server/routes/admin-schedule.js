@@ -5717,7 +5717,7 @@ router.get('/', async (req, res, next) => {
           .where({ scheduled_service_id: s.id })
           .whereNotIn('status', DEAD_ATTACHED_INVOICE_STATUSES)
           .orderBy('created_at', 'desc')
-          .first('id', 'status', 'total', 'subtotal', 'discount_amount', 'token', 'invoice_number', 'line_items', 'credit_applied', 'payer_id');
+          .first('id', 'status', 'total', 'subtotal', 'discount_amount', 'token', 'invoice_number', 'line_items', 'credit_applied', 'payer_id', 'title', 'notes');
       } catch { /* scheduled_service_id may be absent before migration */ }
       // Whether the visit's recorded prepayment has ALREADY been consumed by
       // this invoice (Charge-now's applyPrepaidCredit reduces invoices.total
@@ -6294,7 +6294,7 @@ router.get('/week', async (req, res, next) => {
             .where({ scheduled_service_id: s.id })
             .whereNotIn('status', DEAD_ATTACHED_INVOICE_STATUSES)
             .orderBy('created_at', 'desc')
-            .first('id', 'status', 'total', 'subtotal', 'discount_amount', 'token', 'invoice_number', 'line_items', 'credit_applied', 'payer_id');
+            .first('id', 'status', 'total', 'subtotal', 'discount_amount', 'token', 'invoice_number', 'line_items', 'credit_applied', 'payer_id', 'title', 'notes');
         } catch { /* scheduled_service_id may be absent before migration */ }
         // Mirrors the day-view enrichment: has the visit's prepayment already
         // been consumed by this invoice? Gated to the prepaid+invoice overlap.
