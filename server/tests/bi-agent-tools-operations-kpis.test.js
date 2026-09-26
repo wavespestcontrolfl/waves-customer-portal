@@ -57,14 +57,14 @@ const last7From = etDateString(addETDays(new Date(), -7));
 const last30From = etDateString(addETDays(new Date(), -30));
 
 // Only the paths get_operations_snapshot's kpis actually read.
-function kpiSet({ completion = 80, callback = 3, response = 64, conversion = 22, stops = 4.2, rpmh = 90, margin = 38, arDays = 34, retention = 88, collection = 65 } = {}) {
+function kpiSet({ completion = 80, callback = 3, response = 64, conversion = 22, stops = 4.2, rpmh = 90, margin = 38, arDays = 34, retention = 88, collection = 65, issuedCount = 20 } = {}) {
   return {
     service: { completionRate: completion, callbackRate: callback },
     sales: { avgResponseMin: response, conversion },
     financial: { stopsPerHour: stops, rpmh, grossMarginWeighted: margin },
     ar: { days: arDays },
     retention: { pct: retention },
-    billing: { collectionRate: collection },
+    billing: { collectionRate: collection, issuedCount },
   };
 }
 
@@ -258,6 +258,43 @@ describe('get_operations_snapshot — kpis (last7 vs last30 vs targets)', () => 
       expect(result.opsLine).toBe(
         'Ops 7d: AR days 90d (tgt 30d), resp 150m (tgt 60m), collections 0% (tgt 70%), margin 36% (tgt 40%)'
       );
+    });
+  });
+
+  describe('collection_rate small-sample fade (Codex P2, bi-agent-tools.js:111)', () => {
+    // Mirrors the dashboard tile's own guard: client/src/pages/admin/dashboard/
+    // KpiTile.jsx MIN_CONFIDENT_N = 5, fed by CashSection.jsx's
+    // `n={kpis.billing?.issuedCount}`.
+    const GOOD = {
+      completion: 90, callback: 3, response: 50, conversion: 25,
+      rpmh: 130, margin: 45, arDays: 20, retention: 90,
+    };
+
+    it('1-4 issued invoices: tone is null, the row is marked lowSample, and it never appears in opsLine even far off target', async () => {
+      // collection_rate at 0% against a 70% target would otherwise be the
+      // single worst outlier in the whole set — it must still be silently
+      // withheld, not merely de-prioritized.
+      mockComputeCoreKpis.mockResolvedValue(kpiSet({ ...GOOD, collection: 0, issuedCount: 3 }));
+      const result = await executeBITool('get_operations_snapshot', {});
+
+      const collection = result.kpis.find((k) => k.metric === 'collection_rate');
+      expect(collection).toMatchObject({ n: 3, lowSample: true, tone: null });
+
+      // Every other targeted metric is at GOOD, so with collection_rate
+      // correctly withheld the line reads "all on target" — not a collections
+      // miss, and not an "; n/a: ..." mention either (that bucket is for a
+      // real computation failure, not a too-small sample).
+      expect(result.opsLine).toBe('Ops 7d: all on target');
+      expect(result.opsLine).not.toMatch(/collections/);
+    });
+
+    it('5+ issued invoices: collection_rate is graded exactly as before', async () => {
+      mockComputeCoreKpis.mockResolvedValue(kpiSet({ ...GOOD, collection: 0, issuedCount: 5 }));
+      const result = await executeBITool('get_operations_snapshot', {});
+
+      const collection = result.kpis.find((k) => k.metric === 'collection_rate');
+      expect(collection).toMatchObject({ n: 5, lowSample: false, tone: 'bad' });
+      expect(result.opsLine).toMatch(/collections 0% \(tgt 70%\)/);
     });
   });
 });

@@ -71,6 +71,15 @@ const OPERATIONS_KPI_WINDOW = {
   collection_rate: 'rolling',
 };
 
+// Below this many issued invoices, collection_rate is noise, not a verdict —
+// mirrors the dashboard tile's own small-N fade (client/src/pages/admin/
+// dashboard/KpiTile.jsx MIN_CONFIDENT_N = 5, fed by CashSection.jsx's
+// `n={kpis.billing?.issuedCount}`). Codex P2 (bi-agent-tools.js:111): with 1-4
+// issued invoices this graded collection_rate normally and let buildOpsLine
+// report it as a target miss, displacing a meaningful outlier — the dashboard
+// never lets that happen. Keep this in sync with KpiTile's MIN_CONFIDENT_N.
+const MIN_CONFIDENT_ISSUED_INVOICES = 5;
+
 // Ops KPI targets: a kpi_targets row wins over DEFAULT_KPI_TARGETS, same
 // precedence as the client's resolveTargetDef — but read here directly since
 // resolveTargetDef itself stays client-only. A failed table read degrades to
@@ -94,9 +103,12 @@ async function loadOperationsKpiTargets() {
   }
 }
 
-function buildKpiRow(metric, { last7, last30, storeTargets }) {
+function buildKpiRow(metric, { last7, last30, storeTargets, n = null }) {
   const window = OPERATIONS_KPI_WINDOW[metric] || 'rolling';
   const def = storeTargets[metric] || DEFAULT_KPI_TARGETS[metric] || null;
+  // `n` is only wired up for collection_rate today (its issued-invoice count);
+  // every other metric passes null and lowSample is always false for them.
+  const lowSample = n != null && Number.isFinite(Number(n)) && Number(n) < MIN_CONFIDENT_ISSUED_INVOICES;
   return {
     metric,
     label: OPERATIONS_KPI_LABELS[metric],
@@ -106,9 +118,14 @@ function buildKpiRow(metric, { last7, last30, storeTargets }) {
     // be the identical number. Reporting that as a "baseline" would fabricate
     // a comparison that never happened. null makes the absence explicit.
     last30: window === 'current' ? null : last30,
+    n,
     target: def?.target ?? null,
     lowerIsBetter: def?.lowerIsBetter ?? null,
-    tone: def ? kpiTargetTone(last7, def) : null,
+    // A too-small sample never paints a verdict — same rule as the dashboard
+    // tile (KpiTile.jsx lowConfidence) — withheld here rather than graded and
+    // then displayed faded, since the SMS/report have no "faded tile" concept.
+    tone: lowSample ? null : (def ? kpiTargetTone(last7, def) : null),
+    lowSample,
     window,
   };
 }
@@ -136,7 +153,10 @@ async function buildOperationsKpis() {
     const getter = SNAPSHOT_GETTERS_BY_METRIC.get(metric);
     const last7 = getter ? toFiniteOrNull(getter(k7)) : null;
     const last30 = getter ? toFiniteOrNull(getter(k30)) : null;
-    return buildKpiRow(metric, { last7, last30, storeTargets });
+    // The 7-day issued-invoice count backs collection_rate's small-sample
+    // fade (see MIN_CONFIDENT_ISSUED_INVOICES) — null for every other metric.
+    const n = metric === 'collection_rate' ? toFiniteOrNull(k7?.billing?.issuedCount) : null;
+    return buildKpiRow(metric, { last7, last30, storeTargets, n });
   });
 }
 
@@ -168,10 +188,14 @@ const OPS_LINE_METRIC_META = {
 // vs 'rolling') doesn't change the on/off-target logic here — ar_days is
 // graded against its target exactly like any rolling metric.
 function buildOpsLine(kpis) {
-  // "Targeted" = has a resolvable target (store row or DEFAULT_KPI_TARGETS);
-  // an untargeted metric (e.g. stops_per_hour with no store row) is neither
-  // on-target nor unavailable — there's nothing to grade it against.
-  const targeted = kpis.filter((k) => k.target != null && OPS_LINE_METRIC_META[k.metric]);
+  // "Targeted" = has a resolvable target (store row or DEFAULT_KPI_TARGETS)
+  // AND a big enough sample to grade; an untargeted metric (e.g. stops_per_hour
+  // with no store row) or a lowSample one (collection_rate under
+  // MIN_CONFIDENT_ISSUED_INVOICES) is neither on-target nor unavailable —
+  // there's nothing to grade it against, so it's silently withheld rather
+  // than landing in the "; n/a: ..." bucket that's reserved for a real
+  // computation failure.
+  const targeted = kpis.filter((k) => k.target != null && !k.lowSample && OPS_LINE_METRIC_META[k.metric]);
   if (targeted.length === 0) return 'Ops 7d: no targets set';
 
   // Unavailable = has a target but no usable value (null last7, or a null
