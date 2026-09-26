@@ -946,8 +946,12 @@ function splitSentences(turn) {
 const RETRACTION_MARKER_TERMS = [
   ' actually ', ' instead ', ' change ', ' changed ', ' switch ', ' move ', ' moved ',
   ' cancel ', ' cancelled ', ' canceled ', ' scratch that ', ' never mind ', ' nevermind ',
-  ' wait ', ' hold on ', ' correction ', ' sorry ',
+  ' correction ',
 ];
+// "sorry"/"wait"/"hold on" are deliberately NOT markers: routine wrap-up
+// ("Sorry, what was your email?", "Please wait for the text.") uses them,
+// and a genuine retraction carries its own signal ("Sorry, we can't do
+// Sunday." — negation and a slot mention).
 function laterAgentSentenceRetracts(sentence, confirmedStartAt, callStartedAt) {
   const ns = sentence.ns;
   const padded = ` ${ns} `;
