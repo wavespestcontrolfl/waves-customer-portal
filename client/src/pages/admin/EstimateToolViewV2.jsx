@@ -430,11 +430,16 @@ function buildTurfRequestProfile(baseProfile, form) {
 // Services sized off the home (pest, cockroach, one-time pest, bed bug,
 // flea) fall back to a 2,000 sq ft house when no home size reaches the
 // engine, and mark that line footprintWasDefaulted. A PRICED line carrying
-// the mark is a guess at the customer's price; a quote-required line is not
-// a price, so it passes.
+// the mark is a guess at the customer's price. Two lines carrying it are
+// not: a quote-required line (no price at all) and an operator fee override
+// (priceOverridden — the typed amount prices, the defaulted bracket is
+// unused, codex r1 P2). Bed bug and flea land in specItems (codex r1 P1).
 function linesPricedOnGuessedHomeSize(result) {
-  return [...(result?.recurring?.services || []), ...(result?.oneTime?.items || [])]
-    .filter((line) => line?.footprintWasDefaulted === true && !line.quoteRequired);
+  return [
+    ...(result?.recurring?.services || []),
+    ...(result?.oneTime?.items || []),
+    ...(result?.oneTime?.specItems || []),
+  ].filter((line) => line?.footprintWasDefaulted === true && !line.quoteRequired && line.priceOverridden !== true);
 }
 
 async function summarizeEstimateResponseFailure(response, fallbackLabel) {

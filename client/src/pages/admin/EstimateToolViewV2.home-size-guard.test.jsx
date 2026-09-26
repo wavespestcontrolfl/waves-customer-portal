@@ -70,6 +70,27 @@ describe('home-size guard on a generated estimate', () => {
     expect(screen.queryByRole('button', { name: 'Save draft', exact: true })).not.toBeInTheDocument();
   });
 
+  it('guards bed bug and flea too — their lines land in the specialty list', async () => {
+    calculated = {
+      ...resultWith(pestLine({ footprintWasDefaulted: false })),
+      oneTime: {
+        total: 450, items: [],
+        specItems: [{ service: 'bed_bug', name: 'Bed Bug Treatment', price: 450, footprintWasDefaulted: true }],
+      },
+    };
+    await lookUpAndGenerate();
+    await waitFor(() => expect(window.alert).toHaveBeenCalledWith(
+      expect.stringMatching(/^Enter home sq ft\. Bed Bug Treatment is priced by the home's size/),
+    ));
+  });
+
+  it('honors an operator fee override — the typed amount prices, not the defaulted bracket', async () => {
+    calculated = resultWith(pestLine({ footprintWasDefaulted: true, priceOverridden: true }));
+    await lookUpAndGenerate();
+    expect(await screen.findByRole('button', { name: 'Save draft', exact: true })).toBeInTheDocument();
+    expect(window.alert).not.toHaveBeenCalledWith(expect.stringMatching(/^Enter home sq ft/));
+  });
+
   it('lets a quote-required line through — it is not a price', async () => {
     calculated = resultWith(pestLine({ footprintWasDefaulted: true, quoteRequired: true }));
     await lookUpAndGenerate();
