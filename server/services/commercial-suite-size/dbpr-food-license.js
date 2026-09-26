@@ -283,8 +283,11 @@ async function defaultFetchText(url, timeoutMs = DBPR_FETCH_TIMEOUT_MS) {
   return new TextDecoder('latin1').decode(buf);
 }
 
-// timeoutMs (the admin lookup's remaining budget) caps this caller's wait —
-// both a download it starts and one it joins; absent, the 15s default stands.
+// timeoutMs (the admin lookup's remaining budget) caps only THIS caller's
+// wait, for a download it starts or joins alike. The shared download always
+// runs on the full 15s timeout, so a short-budget caller never aborts a
+// healthy download or trips the 10-minute backoff for every later lookup
+// (Codex #4840 r9 P2).
 async function loadDistrictRows(district, {
   fetchText = defaultFetchText, now = () => Date.now(), minRows = DBPR_MIN_EXTRACT_ROWS, timeoutMs,
 } = {}) {
@@ -293,43 +296,42 @@ async function loadDistrictRows(district, {
   const staleIfError = () => (cached && (now() - cached.fetchedAt) < DBPR_CACHE_TTL_MS + DBPR_STALE_IF_ERROR_MS
     ? cached.rows
     : []);
-  if (_inflight.has(district)) {
-    const joined = _inflight.get(district);
-    if (!(timeoutMs > 0)) return joined;
-    let timer;
-    const expired = new Promise((resolve) => { timer = setTimeout(() => resolve(staleIfError()), timeoutMs); });
-    try {
-      return await Promise.race([joined, expired]);
-    } finally {
-      clearTimeout(timer);
-    }
+  let download = _inflight.get(district);
+  if (!download) {
+    const failedAt = _failedAt.get(district);
+    if (failedAt != null && (now() - failedAt) < DBPR_FAILURE_BACKOFF_MS) return staleIfError();
+    download = (async () => {
+      try {
+        const text = await fetchText(dbprExtractUrl(district), DBPR_FETCH_TIMEOUT_MS);
+        // A malformed, truncated or error-page HTTP-200 body is a failed
+        // refresh, not a new license list: a parse error throws, and
+        // assertPlausibleExtract rejects anything that doesn't look like a
+        // whole district extract. Either way it goes down the failure path
+        // below — never cached, and the last good extract keeps serving
+        // within the stale-if-error window.
+        const rows = parseDbprCsv(text);
+        assertPlausibleExtract(rows, { minRows, lastGoodCount: cached?.rows?.length || 0 });
+        _cache.set(district, { rows, fetchedAt: now() });
+        _failedAt.delete(district);
+        return rows;
+      } catch (err) {
+        _failedAt.set(district, now());
+        logger.warn(`[commercial-suite-size] DBPR extract fetch failed for district ${district}: ${err.message}`);
+        return staleIfError();
+      } finally {
+        _inflight.delete(district);
+      }
+    })();
+    _inflight.set(district, download);
   }
-  const failedAt = _failedAt.get(district);
-  if (failedAt != null && (now() - failedAt) < DBPR_FAILURE_BACKOFF_MS) return staleIfError();
-  const promise = (async () => {
-    try {
-      const text = await fetchText(dbprExtractUrl(district), timeoutMs ?? DBPR_FETCH_TIMEOUT_MS);
-      // A malformed, truncated or error-page HTTP-200 body is a failed
-      // refresh, not a new license list: a parse error throws, and
-      // assertPlausibleExtract rejects anything that doesn't look like a
-      // whole district extract. Either way it goes down the failure path
-      // below — never cached, and the last good extract keeps serving
-      // within the stale-if-error window.
-      const rows = parseDbprCsv(text);
-      assertPlausibleExtract(rows, { minRows, lastGoodCount: cached?.rows?.length || 0 });
-      _cache.set(district, { rows, fetchedAt: now() });
-      _failedAt.delete(district);
-      return rows;
-    } catch (err) {
-      _failedAt.set(district, now());
-      logger.warn(`[commercial-suite-size] DBPR extract fetch failed for district ${district}: ${err.message}`);
-      return staleIfError();
-    } finally {
-      _inflight.delete(district);
-    }
-  })();
-  _inflight.set(district, promise);
-  return promise;
+  if (!(timeoutMs > 0)) return download;
+  let timer;
+  const expired = new Promise((resolve) => { timer = setTimeout(() => resolve(staleIfError()), timeoutMs); });
+  try {
+    return await Promise.race([download, expired]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // Test-only: clear the module cache so suites don't leak state across files.

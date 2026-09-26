@@ -1570,9 +1570,13 @@ function v2FormMarkedCommercial(estimateData) {
 // corrected this estimate to residential in a full re-save (e.g. after a
 // false-positive commercial-suite lookup), not an unrelated partial edit
 // that merely lacks commercial markers of its own.
+// Mirrors the pricing predicate (client isCommercialEstimateInput): a "NO"
+// toggle does not override Property Type = Commercial — that estimate prices
+// as commercial, so it must not be saved RESIDENTIAL (Codex #4840 r9 P1).
 function v2FormMarkedResidential(estimateData) {
   const flag = estimateData?.inputs?.isCommercial;
-  return typeof flag === 'string' && flag.trim().toUpperCase() === 'NO';
+  const propertyType = String(estimateData?.inputs?.propertyType || '').trim().toLowerCase();
+  return typeof flag === 'string' && flag.trim().toUpperCase() === 'NO' && propertyType !== 'commercial';
 }
 
 function buildEstimatePersistenceFields(body, context = {}) {

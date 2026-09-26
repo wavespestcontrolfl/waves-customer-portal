@@ -416,6 +416,22 @@ describe('Codex r6 DBPR matching', () => {
     release('');
     await first;
   });
+
+  test('a short-budget caller never shortens the shared download or trips the backoff (Codex #4840 r9 P2)', async () => {
+    dbpr._resetCacheForTests();
+    let release;
+    const slow = new Promise((r) => { release = r; });
+    const fetchText = jest.fn(() => slow);
+    const budgeted = await dbpr.loadDistrictRows(7, { fetchText, timeoutMs: 20, minRows: 1 });
+    expect(budgeted).toEqual([]);
+    expect(fetchText).toHaveBeenCalledWith(expect.any(String), 15000);
+    // The download finishes after that caller gave up; the next lookup
+    // gets the rows instead of a 10-minute backoff.
+    release(csv([{ 'Location Street Address': '1 A St', 'Business Name': 'X' }]));
+    await new Promise((r) => setImmediate(r));
+    const next = await dbpr.loadDistrictRows(7, { fetchText: jest.fn(), minRows: 1 });
+    expect(next.length).toBe(1);
+  });
 });
 
 describe('Codex r7 + #4840 r8: plaza unit words compare equal to Suite', () => {

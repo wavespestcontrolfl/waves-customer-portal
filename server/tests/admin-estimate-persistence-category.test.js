@@ -163,4 +163,15 @@ describe('explicit V2 selection decides over stale derived signals', () => {
     });
     expect(fields.category).toBe('RESIDENTIAL');
   });
+
+  // Codex #4840 r9 P1: the two controls are independent, and the pricing
+  // predicate prices Property Type = Commercial as commercial even with the
+  // toggle left at "NO" — the saved category must agree.
+  test('Property Type Commercial with the toggle left at "NO" saves COMMERCIAL', () => {
+    const fields = buildEstimatePersistenceFields({
+      ...baseBody,
+      estimateData: { inputs: { isCommercial: 'NO', propertyType: 'Commercial' }, result: { total: 125 } },
+    });
+    expect(fields.category).toBe('COMMERCIAL');
+  });
 });
