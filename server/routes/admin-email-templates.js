@@ -1122,14 +1122,22 @@ router.get('/:key', async (req, res, next) => {
 // PUT /api/admin/email-templates/:key
 router.put('/:key', async (req, res, next) => {
   try {
-    const template = await loadTemplateByParam(req.params.key);
-    if (!template) return res.status(404).json({ error: 'template not found' });
-    const input = normalizeTemplateInput(req.body, template);
-    await db('email_templates').where({ id: template.id }).update({
-      ...input,
-      updated_at: new Date(),
+    // Lock the template row, then read it (Codex #4918 r18): the same
+    // row-first order publishVersion, createDraftVersion and the template
+    // migrations take. An edit that waits behind one of them re-reads what
+    // it wrote — normalizeTemplateInput merges onto this row — instead of
+    // writing back a stale copy of the variable lists.
+    const updated = await db.transaction(async (trx) => {
+      const template = await trx('email_templates').where({ template_key: req.params.key }).forUpdate().first();
+      if (!template) return null;
+      const input = normalizeTemplateInput(req.body, template);
+      await trx('email_templates').where({ id: template.id }).update({
+        ...input,
+        updated_at: new Date(),
+      });
+      return trx('email_templates').where({ id: template.id }).first();
     });
-    const updated = await db('email_templates').where({ id: template.id }).first();
+    if (!updated) return res.status(404).json({ error: 'template not found' });
     res.json({ template: updated });
   } catch (err) {
     if (err.status) return res.status(err.status).json({ error: err.message });

@@ -47,6 +47,43 @@ function sameProperty(estimateAddress, pageAddress) {
   return Boolean(estZip) && estZip === normalizeZip(pageAddress.zip);
 }
 
+// The slot probe can resolve an address through the geocoder and a county
+// lookup (tens of seconds when a provider is slow). The offer is optional,
+// so it never waits past this budget (Codex #4918 r1 P2): the estimate
+// page's first load and the gone-quiet email send — one job in a
+// sequential batch holding the follow-up lock — go ahead without it. The
+// probe is read-only, so letting it finish in the background is harmless.
+const PROBE_BUDGET_MS = 3000;
+const PROBE_TIMED_OUT = Symbol('probe-timed-out');
+function withinProbeBudget(promise) {
+  let timer;
+  const budget = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(PROBE_TIMED_OUT), PROBE_BUDGET_MS);
+    if (typeof timer.unref === 'function') timer.unref();
+  });
+  return Promise.race([promise, budget]).finally(() => clearTimeout(timer));
+}
+
+// The budget abandons a slow probe but cannot cancel it (the geocoder,
+// county lookup and slot computation take no abort signal), so a provider
+// slowdown would otherwise stack one background probe per gone-quiet job
+// or page load (Codex #4918 r8 P2). Probes in flight — abandoned ones
+// included, released only when the underlying work settles — are capped;
+// past the cap the offer is simply omitted and no new probe starts.
+const MAX_PROBES_IN_FLIGHT = 3;
+let probesInFlight = 0;
+function startBoundedProbe(run) {
+  if (probesInFlight >= MAX_PROBES_IN_FLIGHT) return null;
+  probesInFlight += 1;
+  const probe = Promise.resolve().then(run);
+  // Deliberate fire-and-forget: frees the slot when the work settles. The
+  // caller observes the result itself; this only logs a rejection (never its
+  // message — a geocoder error can carry an address).
+  void probe.finally(() => { probesInFlight -= 1; })
+    .catch((err) => logger.warn(`[estimate-consultation-offer] slot probe rejected (${err?.name || 'Error'})`));
+  return probe;
+}
+
 // The lead an estimate belongs to. The link the admin estimate tool writes
 // is the lead-side pointer leads.estimate_id (estimate-lead-linkage.js reads
 // it for attribution); only estimator-engine call drafts and commercial
@@ -79,9 +116,13 @@ async function linkedLeadIdFor(estimateId, estimateData) {
 //   - an unambiguous linked lead (linkedLeadIdFor) that is still the
 //     estimate's contact, passes leadLinkRefusal and wants a recurring plan;
 //   - the page's probe finds an open slot (#4853 r1 P2) at the address it
-//     resolved, which must be this estimate's property (r2 P1, r3 P0).
+//     resolved, which must be this estimate's property (r2 P1, r3 P0);
+//   - AFTER the probe (up to PROBE_BUDGET_MS), a fresh re-read of the
+//     estimate and lead re-judged against the same rules (finalEligibility,
+//     Codex #4918 r5 P2) — the caller's acceptActive and every row read
+//     above can go stale during the probe.
 // Throws on unexpected errors — callers fail soft.
-async function estimateConsultationLead({ estimate, estimateData, acceptActive } = {}) {
+async function estimateConsultationLead({ estimate, estimateData, acceptActive, context } = {}) {
   if (!leadInspectionLinkLive() || !acceptActive || !estimate) return null;
   if (estimateData?.scheduled_service_id || estimate.estimate_group_id) return null;
   const leadId = await linkedLeadIdFor(estimate.id, estimateData);
@@ -100,10 +141,94 @@ async function estimateConsultationLead({ estimate, estimateData, acceptActive }
   if (!leadWantsRecurringPlan(lead)) return null;
 
   const { computeConsultationSlotsForLead } = require('../routes/inspection-public')._internals;
-  const result = await computeConsultationSlotsForLead(lead.id, { count: 1 });
+  const probe = startBoundedProbe(() => computeConsultationSlotsForLead(lead.id, { count: 1 }));
+  if (!probe) {
+    logger.warn(`[estimate-consultation-offer] ${MAX_PROBES_IN_FLIGHT} slot probes already in flight — no offer for lead ${lead.id}`);
+    return null;
+  }
+  const result = await withinProbeBudget(probe);
+  if (result === PROBE_TIMED_OUT) {
+    logger.warn(`[estimate-consultation-offer] slot probe exceeded ${PROBE_BUDGET_MS}ms for lead ${lead.id} — no offer`);
+    return null;
+  }
   if (!result.ok || result.slots.length === 0) return null;
   if (!sameProperty(estimate.address, result.address)) return null;
-  return lead;
+
+  // Recheck estimate state after the availability probe (Codex #4918 r5
+  // P2): the probe above can take up to PROBE_BUDGET_MS, during which the
+  // estimate can be accepted/declined/expired, or gain a linkage/reprice/
+  // address hold (estimateOffCustomerSurface markers), and the lead's own
+  // contact fields (email included) can change — every snapshot this
+  // function was handed or has read so far (`estimate`, `estimateData`,
+  // `acceptActive`, `lead`) is now stale. Re-read the estimate and lead
+  // fresh and re-run the SAME eligibility this function already checked
+  // above, single-sourced in finalEligibility, before returning anything a
+  // caller will mint a bearer token for (the page) or email one (the
+  // gone-quiet follow-up) — both consultation surfaces share this helper
+  // and never re-derive eligibility themselves. The page mints right after
+  // this. The email runs this once a gone-quiet job has passed the engine's
+  // own checks, records `context`, and re-runs finalEligibility after the
+  // engine's claim (reconfirmConsultationLead).
+  const fresh = await finalEligibility(estimate.id, leadId, result.address, result.addressInputs);
+  if (fresh && context) {
+    Object.assign(context, {
+      estimateId: estimate.id, leadId, probedAddress: result.address, addressInputs: result.addressInputs,
+    });
+  }
+  return fresh;
+}
+
+// Lead fields the booking-state and refusal checks judge; the final
+// contact-bearing read must still carry the same values.
+const JUDGED_LEAD_FIELDS = ['phone', 'status', 'converted_at', 'customer_id', 'address', 'city', 'zip'];
+
+// The final, post-probe eligibility re-check — a fresh read of the
+// estimate and lead rows, re-judged against the same rules
+// estimateConsultationLead applies above. Kept single-sourced so a rule
+// added to either check never drifts between the pre-probe and post-probe
+// passes.
+async function finalEligibility(estimateId, leadId, probedAddress, probedAddressInputs) {
+  const { isEstimateAcceptActive } = require('../routes/estimate-public');
+  const freshEstimate = await db('estimates').where({ id: estimateId }).first();
+  if (!freshEstimate || !isEstimateAcceptActive(freshEstimate)) return null;
+  let freshEstimateData = freshEstimate.estimate_data;
+  if (typeof freshEstimateData === 'string') {
+    try { freshEstimateData = JSON.parse(freshEstimateData); } catch { freshEstimateData = null; }
+  }
+  if (freshEstimateData?.scheduled_service_id || freshEstimate.estimate_group_id) return null;
+  // The estimate's address can change during the probe too; the slot the
+  // probe found must still be at the estimate's own property.
+  if (!sameProperty(freshEstimate.address, probedAddress)) return null;
+
+  // The linkage itself can change during the probe (leads.estimate_id
+  // removed or reassigned, a second lead attached, the stamped lead_id
+  // replaced): the fresh linkage must still name exactly this lead.
+  const freshLeadId = await linkedLeadIdFor(freshEstimate.id, freshEstimateData);
+  if (!freshLeadId || String(freshLeadId).toLowerCase() !== String(leadId).toLowerCase()) return null;
+
+  // What /inspection/:token would do with this lead now (Codex #4918
+  // r17/r18): its lead-wide state must still allow a booking (an assessment
+  // or visit booked meanwhile means already_booked/converted), and what its
+  // booking address resolves from — the lead's own address, its trusted
+  // customer's, which customer that is — must be what the probe resolved
+  // from (compared, never re-geocoded). Missing probe inputs fail closed.
+  const { currentBookingState } = require('../routes/inspection-public')._internals;
+  const booking = await currentBookingState(leadId);
+  if (!booking?.bookable || !probedAddressInputs || booking.addressInputs !== probedAddressInputs) return null;
+  if (await leadLinkRefusal(booking.lead)) return null;
+
+  // The contact-bearing lead row is the LAST read (Codex #4918 r18): only
+  // synchronous checks follow it, so the caller's own-inbox judgment sees
+  // the lead as it is now. It must still be the lead the checks above
+  // judged — any field they read that moved since fails closed.
+  const freshLead = await db('leads').where({ id: leadId }).whereNull('deleted_at')
+    .first('id', 'phone', 'email', 'service_interest', 'status', 'converted_at', 'customer_id', 'address', 'city', 'zip');
+  if (!freshLead) return null;
+  if (JUDGED_LEAD_FIELDS.some((col) => JSON.stringify(freshLead[col]) !== JSON.stringify(booking.lead[col]))) return null;
+  const { leadMatchesEstimateContact } = require('./lead-estimate-link');
+  if (!leadMatchesEstimateContact(freshLead, freshEstimate)) return null;
+  if (!leadWantsRecurringPlan(freshLead)) return null;
+  return freshLead;
 }
 
 // The estimate page's offer: its own gate, then the shared eligibility. The
@@ -122,4 +247,24 @@ async function buildEstimateConsultationOffer({ estimate, estimateData, acceptAc
   }
 }
 
-module.exports = { buildEstimateConsultationOffer, _test: { sameProperty, linkedLeadIdFor } };
+// estimateConsultationLead is exported for its SECOND caller
+// (server/services/estimate-email-consultation-offer.js, the
+// estimate.engage_gone_quiet follow-up email's own consultation-offer
+// link, owner ruling 2026-09-26) — the same shared eligibility this
+// module's own page offer above already uses, never re-derived.
+// The probe-free final check, re-run by a caller that awaits more work
+// (the engine's send checks and claim, a short-link mint) between
+// eligibility and the send (Codex #4918 r9/r12). `context` is what
+// estimateConsultationLead recorded.
+async function reconfirmConsultationLead(context) {
+  if (!context?.leadId || !leadInspectionLinkLive()) return null;
+  return finalEligibility(context.estimateId, context.leadId, context.probedAddress, context.addressInputs);
+}
+
+module.exports = {
+  buildEstimateConsultationOffer,
+  estimateConsultationLead,
+  reconfirmConsultationLead,
+  PROBE_BUDGET_MS,
+  _test: { sameProperty, linkedLeadIdFor, finalEligibility, PROBE_BUDGET_MS, MAX_PROBES_IN_FLIGHT, probesInFlight: () => probesInFlight },
+};

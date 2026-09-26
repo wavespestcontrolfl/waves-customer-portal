@@ -32,7 +32,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { isEnabled } = require('../config/feature-gates');
+const { isEnabled, estimateEmailConsultationOfferLive } = require('../config/feature-gates');
 const { estimateDeliverableUnderGate } = require('./pricing-authority-gate');
 // A pricing-authority block is TEMPORARY (the operator re-saves the row
 // through the engine), so the job is deferred — never made terminal — and
@@ -44,8 +44,23 @@ const { sessionsForEstimate, SESSION_GAP_MINUTES } = require('./estimate-engagem
 const { inferEstimateServiceLines } = require('./estimate-service-lines');
 const { customerConvertedSince } = require('./estimate-conversion-guard');
 const { followupEmailVars } = require('./estimate-followup-copy');
+// gone_quiet's own "Rather have us come look first?" link (owner ruling
+// 2026-09-26) — the ONLY rule whose payload calls this; every other rule's
+// payload never references it.
+const {
+  probeGoneQuietConsultation, mintGoneQuietConsultationUrl, goneQuietConsultationStillValid, PROBE_BUDGET_MS,
+} = require('./estimate-email-consultation-offer');
 // Shared lane mechanics from the stage engine (see module doc above).
 const followupShared = require('./estimate-follow-up')._private;
+
+const GONE_QUIET_RULE_KEY = 'viewed_gone_quiet_72h';
+// The one estimate column the last read before an offer-carrying send
+// ignores: updated_at moves with any write, and a real change shows in its
+// own column. The follow-up counters are NOT ignored — the job's own heal
+// is already overlaid on the in-memory row, so a counter that differs there
+// is a concurrent send (Codex #4918 r16), and the job goes back through the
+// cap and spacing checks.
+const IGNORED_ESTIMATE_COLUMNS = new Set(['updated_at']);
 
 const ACTIVE_STATUSES = ['sent', 'viewed'];
 const TERMINAL_STATUSES = new Set(['declined', 'accepted', 'expired', 'void']);
@@ -63,6 +78,12 @@ const ENGINE_LIMITS = {
   retryDelayMinutes: 30,
   deferDelayMinutes: 15,
   jobBatchSize: 50,
+  // Wall-clock a batch may spend on gone-quiet consultation-offer slot
+  // probes while it holds the follow-up lock. A probe starts only if the
+  // budget still covers its full ceiling (PROBE_BUDGET_MS, 3 s), so the
+  // batch never runs past it (Codex #4918 r16); the rest of the batch's
+  // gone-quiet sends go out without the offer.
+  offerProbeBatchBudgetMs: 10000,
 };
 
 // Code defaults per rule — the DB row's params override key-by-key, so an
@@ -512,7 +533,15 @@ async function processDueBatch(now = new Date()) {
     }
   };
 
-  for (const job of jobs) {
+  // Gone-quiet jobs whose consultation-offer slot probe already ran this
+  // batch (Codex #4918 r14): a job is probed only after it passes every
+  // check in the loop, then judged once more from the top on state read
+  // after the probe — the second pass reuses the result, never re-probes.
+  const probedOffers = new Map();
+  let offerProbeMs = 0;
+  const queue = [...jobs];
+  while (queue.length) {
+    const job = queue.shift();
     let claimed = false;
     let trig = {};
     try {
@@ -715,6 +744,31 @@ async function processDueBatch(now = new Date()) {
         await deferOrShadow(live, job, new Date(nowMs + PRICING_AUTHORITY_RECHECK_MS), 'pricing-authority-not-server');
         continue;
       }
+      // ONE new variable, ONE rule (owner ruling 2026-09-26): only the
+      // gone-quiet email carries the consultation-offer link; every other
+      // rule's payload is byte-identical and never calls either step.
+      const isGoneQuiet = rule.rule_key === GONE_QUIET_RULE_KEY;
+      // The offer's slot probe can take up to 3 s. It runs only for a job
+      // that has passed every check above — no probe, and no time under the
+      // follow-up lock, for a job about to be skipped or deferred (Codex
+      // #4918 r14) — and the job is then judged once more from the top, on
+      // state read AFTER the probe (r7–r12): every check and every payload
+      // field of the send is post-probe. Shadow jobs never reach this point;
+      // with the offer's gate off, no job probes or takes a second pass. Once
+      // the batch has spent its probe budget, a gone-quiet send goes out
+      // without the offer in this single pass (nothing probed, nothing stale).
+      if (isGoneQuiet && estimateEmailConsultationOfferLive() && !probedOffers.has(job.id)) {
+        if (offerProbeMs + PROBE_BUDGET_MS > ENGINE_LIMITS.offerProbeBatchBudgetMs) {
+          probedOffers.set(job.id, null);
+        } else {
+          const probeStartedMs = Date.now();
+          probedOffers.set(job.id, await probeGoneQuietConsultation(job.estimate_id));
+          offerProbeMs += Date.now() - probeStartedMs;
+          queue.unshift(job);
+          continue;
+        }
+      }
+      const consultationContext = probedOffers.get(job.id) || null;
       if (!(await followupShared.claimFollowupSend(est.id, rule.rule_key, rule.template_key, {
         job_id: job.id,
         trigger: job.trigger,
@@ -757,6 +811,36 @@ async function processDueBatch(now = new Date()) {
       const { emailUrl: acceptUrl } = await followupShared.mintStageLinks(
         est, `estimate_engage_${rule.rule_key}_accept`, { query: 'intent=accept', emailOnly: true },
       );
+      // After the claim: mint the link (the one write this offer adds), then
+      // judge everything the send depends on TOGETHER as the last step
+      // before sending (Codex #4918 r9–r16) — the offer's shared eligibility
+      // and own-inbox rule, the estimate row, and the customer's email
+      // opt-out, read concurrently so none waits on another. If the row
+      // changed (anything but updated_at) or the customer opted out since,
+      // give the claim back and retry the whole job on fresh state, where
+      // the checks at the top decide it; a failed offer check drops only the
+      // link. A read error throws to the loop's catch: claim released,
+      // bounded retry. Nothing awaits after these reads but the send.
+      let consultationUrl = '';
+      if (consultationContext) {
+        const minted = await mintGoneQuietConsultationUrl(consultationContext);
+        const [offerStillValid, current, prefs] = await Promise.all([
+          minted ? goneQuietConsultationStillValid(consultationContext, est.customer_email) : false,
+          db('estimates').where({ id: est.id }).first(),
+          est.customer_id
+            ? db('notification_prefs').where({ customer_id: est.customer_id }).first('email_enabled')
+            : null,
+        ]);
+        const changed = !current || Object.keys(current).some((col) => !IGNORED_ESTIMATE_COLUMNS.has(col)
+          && JSON.stringify(current[col]) !== JSON.stringify(est[col]));
+        if (changed || prefs?.email_enabled === false) {
+          await followupShared.releaseFollowupSend(est.id, rule.rule_key);
+          claimed = false;
+          await deferJob(job.id, new Date(nowMs + ENGINE_LIMITS.deferDelayMinutes * 60000));
+          continue;
+        }
+        consultationUrl = offerStillValid ? minted : '';
+      }
       const ok = await followupShared.sendDualChannel(est, {
         email: {
           templateKey: rule.template_key,
@@ -770,6 +854,7 @@ async function processDueBatch(now = new Date()) {
           payload: followupShared.estimateEmailPayload(est, firstName, emailUrl, {
             ...followupEmailVars(est),
             estimate_accept_url: acceptUrl,
+            ...(isGoneQuiet ? { consultation_url: consultationUrl } : {}),
             ...(expiringLifecycle ? {
               expires_date: expiringLifecycle.toLocaleDateString('en-US', {
                 month: 'long', day: 'numeric', timeZone: 'America/New_York',

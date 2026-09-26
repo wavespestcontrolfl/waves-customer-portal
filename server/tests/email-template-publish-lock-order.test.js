@@ -43,3 +43,35 @@ test('publishVersion locks the template row, then archives/activates versions, t
     ['email_templates', 'update'],
   ]);
 });
+
+// createDraftVersion takes the same template row lock before it reads
+// max(version_number) and inserts max + 1 (Codex #4918 r7): unlocked, a
+// draft racing a publisher could take the same number, and one side fails
+// the (template_id, version_number) unique constraint.
+test('createDraftVersion locks the template row, then reads the latest version, then inserts — all in one transaction', async () => {
+  const ops = [];
+  const trx = jest.fn((table) => {
+    const q = {};
+    q.where = jest.fn(() => q);
+    q.orderBy = jest.fn(() => q);
+    q.forUpdate = jest.fn(() => { ops.push([table, 'lock']); return q; });
+    q.first = jest.fn(async () => {
+      if (table === 'email_templates') return { id: 't1', name: 'Your visit', active_version_id: null };
+      ops.push([table, 'read-latest']);
+      return { version_number: 3, subject: 'Your visit', blocks: [] };
+    });
+    q.insert = jest.fn(() => { ops.push([table, 'insert']); return q; });
+    q.returning = jest.fn(async () => [{ id: 'v4', version_number: 4 }]);
+    return q;
+  });
+  db.mockImplementation(() => { throw new Error('createDraftVersion must not query outside its transaction'); });
+  db.transaction = jest.fn(async (fn) => fn(trx));
+
+  await expect(EmailTemplates.createDraftVersion('estimate.engage_gone_quiet', 'tech-1')).resolves.toMatchObject({ version_number: 4 });
+  expect(db.transaction).toHaveBeenCalledTimes(1);
+  expect(ops).toEqual([
+    ['email_templates', 'lock'],
+    ['email_template_versions', 'read-latest'],
+    ['email_template_versions', 'insert'],
+  ]);
+});

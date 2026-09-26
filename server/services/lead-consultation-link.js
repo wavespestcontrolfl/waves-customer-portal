@@ -49,8 +49,11 @@ function consultationSmsLineFor(url) {
 // default), a link is UNVERIFIED delivery; an SMS send passes `'sms'` to
 // buildLeadConsultationLink, which signs it as smsChannelFor(lead.phone) so
 // inspection-public.js's leadContactVerified can trust that this exact link
-// reached the lead's CURRENT phone. Never set it for an email send —
-// only an SMS send is evidence the phone itself received the link.
+// reached the lead's CURRENT phone. Never mint the sms claim for an email
+// send — only an SMS send is evidence the phone itself received the link.
+// The email sends (the new_lead block and the gone-quiet estimate offer)
+// pass `'email'`: signed into the token like any claim, it never verifies
+// contact — leadContactVerified trusts only the phone-bound sms claim.
 function consultationUrlForLead(leadId, channel) {
   const token = mintLeadConsultationToken(leadId, undefined, channel);
   if (!token) return null;
