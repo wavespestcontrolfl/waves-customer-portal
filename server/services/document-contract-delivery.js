@@ -954,8 +954,16 @@ async function expireDocumentRequests({ now = new Date(), limit = AUTOMATION_BAT
   let expired = 0;
   for (const row of rows) {
     await db.transaction(async (trx) => {
+      // Lock order: CUSTOMER row first, then the contract — the order
+      // /:token/sign, /:id/cancel, createShareLink and the termite annual
+      // close-out hold. The event insert below takes a key lock on the
+      // customer, so contract-first cycled with them (Codex #4922 r3 P2).
+      if (row.customer_id) await trx('customers').where({ id: row.customer_id }).forUpdate().first('id');
       const locked = await trx('customer_contracts').where({ id: row.id }).forUpdate().first();
       if (!locked || ['signed', 'cancelled', 'voided', 'expired'].includes(String(locked.status || '').toLowerCase())) return;
+      // Repointed to another customer while we waited (a merge) — the next
+      // sweep retries under the right lock.
+      if (String(locked.customer_id || '') !== String(row.customer_id || '')) return;
       if (!locked.share_token_expires_at || new Date(locked.share_token_expires_at) >= now) return;
       const existing = await trx('customer_contract_events')
         .where({ contract_id: locked.id, event_type: 'expired' })

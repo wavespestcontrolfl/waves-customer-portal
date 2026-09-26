@@ -56,6 +56,43 @@ describe('resolveLibraryMatch', () => {
   });
 });
 
+describe('an unresolved risky runner-up (owner ruling 2026-09-26)', () => {
+  const pick = (over = {}) => ({ best_match: 'ghost ant', alternates: ['subterranean termite'], category: 'insect', confidence: 'high', confidence_score: 0.95, distinguishing_features: ['pale legs'], not_a_pest: false, observations: 'small pale ants', ...over });
+
+  test('a second look that never came back leaves the photo unresolved, never a named species', () => {
+    const gemini = pick();
+    const unresolved = _test.riskyRunnerUps(gemini);
+    expect(unresolved.map((entry) => entry.slug)).toEqual(['subterranean-termite']);
+    const photo = _test.resolvePhoto({ openai: null, gemini, unresolved });
+    expect(photo).toMatchObject({ entry: null, confidence: 'low', agreement: 'unresolved' });
+    expect(photo.alternate_slugs).toEqual(expect.arrayContaining(['ghost-ant', 'subterranean-termite']));
+  });
+
+  test('a harmless pick with an open hazardous runner-up is never "nothing to worry about"', () => {
+    const ladybug = pick({ best_match: 'ladybug', alternates: ['fire ant'], category: 'not_a_pest', not_a_pest: true });
+    const open = _test.resolvePhoto({ openai: null, gemini: ladybug, unresolved: _test.riskyRunnerUps(ladybug) });
+    const identification = _test.aggregateIdentification([open]);
+    expect(identification.category).not.toBe('not_a_pest');
+    const report = buildPublicPestReport({ report_contract: JSON.stringify(buildPestReportContract({ ...open, identification })) });
+    expect(report.not_a_pest).toBe(false);
+    expect(report.identified.label).not.toBe('nothing to worry about');
+    expect(report.recommendation).toMatchObject({ inspection_required: true });
+  });
+
+  test('one unresolved photo makes the whole upload a generic, inspection-first consultation', () => {
+    const clean = mergeModelResults(null, pick({ alternates: [] }));
+    const open = _test.resolvePhoto({ openai: null, gemini: pick(), unresolved: _test.riskyRunnerUps(pick()) });
+    const identification = _test.aggregateIdentification([clean, open]);
+    expect(identification).toMatchObject({ entry: null, unresolved: true });
+    const contract = buildPestReportContract({ ...clean, identification });
+    expect(publicIdentificationLabel(contract).specificity).toBe('generic');
+    expect(contract.service).toMatchObject({ key: null, inspection_required: true });
+    expect(contract.urgency).toBe('moderate');
+    expect(contract.safety).toEqual({ stinging: false, venomous: false, disease_vector: false, structural_threat: false });
+    expect(buildPestTeaser(contract)).toMatchObject({ identified_specific: false, safety_flag: false });
+  });
+});
+
 describe('mergeModelResults', () => {
   const claude = (over = {}) => ({ best_match: 'ghost ant', alternates: [], category: 'insect', confidence: 'high', distinguishing_features: ['pale legs'], not_a_pest: false, observations: 'small pale ants trailing', ...over });
 

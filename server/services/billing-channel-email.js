@@ -95,8 +95,13 @@ function providerFailure(err, handoffStarted) {
       providerAttempted: false,
     };
   }
-  const definitelyNotSent = !handoffStarted
-    || err.code === 'SENDGRID_NOT_CONFIGURED'
+  // Any other throw before the handoff (template lookup, delivery-row
+  // insert) never reached the provider: report it as a pre-handoff refusal
+  // so the preparation hold below schedules its replay.
+  if (!handoffStarted) {
+    return blocked(err.code || 'EMAIL_PREPARATION_ERROR', EmailTemplateLibrary.redactEmailAddresses(err.message), { retryable: true });
+  }
+  const definitelyNotSent = err.code === 'SENDGRID_NOT_CONFIGURED'
     || require('./sendgrid-mail').isDefiniteRejection(err);
   return {
     sent: false,
@@ -110,7 +115,26 @@ function providerFailure(err, handoffStarted) {
   };
 }
 
-async function sendBillingChannelEmail(input, { preSendCheck } = {}) {
+// A retryable refusal before the provider handoff sent nothing and left no
+// provider attempt for the email retry rail to recover. Producers of one-shot
+// notices persist only schedulable holds, so return it as one: the replay
+// re-fans-out under the same notificationEventKey (Codex pre-push P1 on #4843).
+const PREPARATION_RETRY_MS = 5 * 60 * 1000;
+
+function preparationHold(result) {
+  // A held outcome belongs to the attempt or retry rail that owns its key.
+  if (!(result.blocked && result.retryable && result.deliveryOutcome === 'not_sent') || result.held) return result;
+  return {
+    ...result, code: 'BILLING_EMAIL_PREPARATION_HOLD', originalCode: result.code, deferred: true,
+    nextAllowedAt: new Date(Date.now() + PREPARATION_RETRY_MS).toISOString(),
+  };
+}
+
+async function sendBillingChannelEmail(input, hooks) {
+  return preparationHold(await sendBillingChannelEmailOnce(input, hooks));
+}
+
+async function sendBillingChannelEmailOnce(input, { preSendCheck } = {}) {
   const notificationEventKey = clean(input?.metadata?.notificationEventKey);
   if (!notificationEventKey) {
     return blocked('NOTIFICATION_EVENT_KEY_REQUIRED', 'Billing email requires a stable notification event key');

@@ -98,6 +98,19 @@ const ANTHROPIC_EFFORT = ANTHROPIC_EFFORT_LEVELS.has(process.env.MODEL_ANTHROPIC
 // and pre-5 Sonnets 400 on the field. The admin picker can pin any of those
 // on a lane, so the pin must never reach them.
 const ANTHROPIC_EFFORT_CAPABLE_RE = /^claude-opus-(4-[7-9]|[5-9])(?![0-9])|^claude-sonnet-[5-9](?![0-9])|^claude-(fable|mythos)-/;
+// Models that accept only SOME levels, for callers that request one specific
+// level (the voice lanes' `low`) rather than applying the admin pin.
+const ANTHROPIC_EFFORT_PARTIAL_LEVELS = Object.freeze([
+  { re: /^claude-opus-4-5(?![0-9])/, levels: Object.freeze(['low', 'medium', 'high']) },
+  { re: /^claude-opus-4-6(?![0-9])/, levels: Object.freeze(['low', 'medium', 'high', 'max']) },
+]);
+// True when `model` accepts output_config.effort at exactly `level`.
+function anthropicAcceptsEffort(model, level) {
+  const id = String(model || '');
+  if (ANTHROPIC_EFFORT_CAPABLE_RE.test(id)) return ANTHROPIC_EFFORT_LEVELS.has(level);
+  const partial = ANTHROPIC_EFFORT_PARTIAL_LEVELS.find(({ re }) => re.test(id));
+  return Boolean(partial && partial.levels.includes(level));
+}
 // Thinking floor: Opus 5 and later, Fable and Mythos think on every request
 // that omits `thinking` (5.5, Fable and Mythos cannot turn it off), and
 // thinking spends from max_tokens ahead of the text block — a cap sized for
@@ -407,6 +420,17 @@ const TEXT_POLICIES = Object.freeze({
     primary: Object.freeze({ provider: PROVIDER.GEMINI, model: GEMINI_VISION_BEST }),
     fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_FRONTIER }),
   }),
+  photoIdVision: Object.freeze({
+    name: 'photoIdVision',
+    // Photo ID (pest-identification.js: website funnel, SMS photo triage,
+    // admin assessments, the customer app). Owner ruling 2026-09-26: Gemini
+    // 3.8 Flash reads the photo; a miss, an unsure answer
+    // (PHOTO_ID_ESCALATE_BELOW) or a risky runner-up goes to ChatGPT's best
+    // vision model, the same OpenAI leg as lawnVisitAssessment. Sequential,
+    // no Claude leg (DECISIONS.md 2026-09-26). Honors GEMINI_VISION_MODEL.
+    primary: Object.freeze({ provider: PROVIDER.GEMINI, model: process.env.GEMINI_VISION_MODEL || GEMINI_VISION_BEST }),
+    fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_FRONTIER }),
+  }),
   visitBrief: Object.freeze({
     name: 'visitBrief',
     // Per-visit pocket-reference brief (previsit-brief.js) — summarization
@@ -445,6 +469,7 @@ const TEXT_POLICIES = Object.freeze({
 module.exports = {
   ANTHROPIC_EFFORT,
   ANTHROPIC_EFFORT_CAPABLE_RE,
+  anthropicAcceptsEffort,
   ANTHROPIC_THINKING_FLOOR_RE,
   DEEP,
   EXTREME,

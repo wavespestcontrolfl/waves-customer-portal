@@ -17,7 +17,12 @@ jest.mock('../config/feature-gates', () => ({
 }));
 
 const db = require('../models/db');
-const { resolveScheduledRecipient, canReplayBillingWithoutPhone, scheduledDepositReceiptAllowed, classifyDepositReplayFallback } = require('../services/scheduler');
+const {
+  resolveScheduledRecipient,
+  canReplayBillingWithoutPhone,
+  scheduledDepositReceiptAllowed,
+  classifyDepositReplayFallback,
+} = require('../services/scheduler');
 
 test.each([false, true])('scheduled replay uses trusted row identities and registered dispatch: %s', async (registered) => {
   // Exercise the actual dispatch block without starting cron jobs or importing
@@ -220,6 +225,23 @@ describe('canReplayBillingWithoutPhone', () => {
   test('requires a customer row', () => {
     expect(canReplayBillingWithoutPhone({ customer_id: null, to_phone: '' }, registered)).toBe(false);
   });
+
+  // PR #4843 Codex r6 activation-checklist: a phone-less Stripe billing hold
+  // (ACH failure / bank verification) stamps requires_registered_dispatch so
+  // it replays through the registered dispatch hook instead of retrying
+  // toward a phone that will never resolve; a phone-bearing hold never
+  // carries that stamp and stays on the ordinary refresh rail.
+  test('a phone-less Stripe billing hold (stripe_webhook_billing_deferred) is accepted', () => {
+    const stripeHold = { entry_point: 'stripe_webhook_billing_deferred', requires_registered_dispatch: true,
+      refresh_customer_phone: true, billingDeliveryCategory: 'payment_issue' };
+    expect(canReplayBillingWithoutPhone({ customer_id: 'cust-1', to_phone: '' }, stripeHold)).toBe(true);
+  });
+
+  test('a phone-bearing Stripe billing hold never gets the stamp — stays on the refresh rail', () => {
+    const phoneBearingHold = { entry_point: 'stripe_webhook_billing_deferred',
+      refresh_customer_phone: true, billingDeliveryCategory: 'payment_issue' };
+    expect(canReplayBillingWithoutPhone({ customer_id: 'cust-1', to_phone: '' }, phoneBearingHold)).toBe(false);
+  });
 });
 
 describe('scheduledDepositReceiptAllowed', () => {
@@ -240,6 +262,11 @@ describe('scheduledDepositReceiptAllowed', () => {
     mockPrefsLookup({ payment_receipt_channel: 'push' });
     await expect(scheduledDepositReceiptAllowed(receiptRow)).resolves.toBe(true);
     mockPrefsLookup(null);
+    await expect(scheduledDepositReceiptAllowed(receiptRow)).resolves.toBe(true);
+  });
+
+  test('leaves explicit receipt combinations to the central billing router', async () => {
+    mockPrefsLookup({ payment_receipt_channel: 'email', payment_receipt_channels: ['push'] });
     await expect(scheduledDepositReceiptAllowed(receiptRow)).resolves.toBe(true);
   });
 

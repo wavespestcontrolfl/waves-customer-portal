@@ -1,5 +1,11 @@
 # Waves Lawn Care Program Explainer and Service Outline System
 
+> **Shipped 2026-05-30** (PR #1434): the system described in this plan is live.
+> See `server/services/lawn-service-outline.js`, `server/routes/admin-service-outlines.js`,
+> and `server/routes/service-outlines-public.js`. Some details below (table name,
+> route list, module count, pipeline steps) have drifted from the shipped build —
+> see the inline corrections further down.
+
 ## Executive Summary
 
 Build this as a compliance-controlled content system, not simply an AI writing feature.
@@ -204,12 +210,12 @@ Internal protocol points that should drive logic but not dominate customer copy:
 
 - apply Prodiamine Visit 1 by January 15 where applicable
 - maximum three Celsius applications per property per year
-- K-Flow rotation in June and September, calcium in July, magnesium/calcium in August
+- K-Flow rotation in June and September, magnesium/calcium in August
 - explicit nitrogen rate control
 - soil-test branching for phosphorus and potassium
 - chinch IPM threshold
 - FRAC rotation for disease history
-- SpeedZone weather-gated at 90 F
+- SpeedZone weather-gated at 85 F
 - August drive-by scout
 - December wellness touchpoint
 - March and October thatch measurements
@@ -239,7 +245,7 @@ Priorities:
 Internal protocol points:
 
 - no Atrazine on Bermuda
-- SpeedZone never above 90 F; use Celsius in summer broadleaf windows when appropriate
+- SpeedZone never above 85 F; use Celsius in summer broadleaf windows when appropriate
 - Primo Maxx growth response documented when used
 - high-input nitrogen budget
 - SDS preventive calendar in fall before soil temperatures drop
@@ -270,7 +276,7 @@ Internal protocol points:
 - no Atrazine
 - no Anuew EZ
 - conservative Primo Maxx use
-- SpeedZone never above 90 F
+- SpeedZone never above 85 F
 - Celsius for summer broadleaf windows where appropriate
 - large patch FRAC rotation
 - lower thatch threshold than Bermuda
@@ -307,7 +313,7 @@ Internal protocol points:
 - classify irrigated versus non-irrigated at Visit 1
 - soapy flush method and threshold for mole cricket IPM
 - fire ant protocol when history supports it
-- crabgrass breakthrough curative path
+- crabgrass breakthrough: no bahia-safe curative; pre-emergent timing plus manual or spot control only
 - seed head and dormancy expectation talks
 
 ### Section 4: Seasonal Treatment Calendar
@@ -763,7 +769,7 @@ A product cannot appear in a customer packet unless:
 Table:
 
 ```text
-content_modules
+lawn_service_content_modules
 - id
 - key
 - title
@@ -781,7 +787,7 @@ content_modules
 - updated_at
 ```
 
-Required modules:
+Required modules (22 seeded — `what_to_expect` and `faq` are deferred, see note below):
 
 1. `lawn_program_overview`
 2. `assessment_protocol`
@@ -802,20 +808,22 @@ Required modules:
 17. `gps_tracking`
 18. `service_reminders`
 19. `customer_portal`
-20. `what_to_expect`
-21. `what_this_does_not_include`
-22. `faq`
-23. `estimate_cta`
-24. `service_report_actual_products`
+20. `what_this_does_not_include`
+21. `estimate_cta`
+22. `service_report_actual_products`
+
+**Deferred:** `what_to_expect` and `faq` were not seeded by the shipped migration
+(`20260530000021_lawn_service_outline_system.js`) and do not exist in
+`lawn_service_content_modules` today.
 
 ## AI Architecture
 
-Use a rules-first composer with AI-assisted tone.
+Use a rules-first composer with AI-assisted tone. (As built, the composer is rules-only; the AI step below was never added.)
 
 1. Data collection: pull estimate, customer, property, turf, address, month, tier, local rules, protocol modules, seasonal modules, product facts, and prior service summaries.
 2. Deterministic eligibility: rules engine decides allowed turf module, seasonal module, local rule language, allowed product categories, allowed product cards, blocked facts, warnings, and exclusions.
 3. Content assembly: system assembles approved modules.
-4. AI polish: AI may shorten, expand, adjust reading level, warm tone, summarize approved facts, and write customer-friendly intro/closing.
+4. AI polish (future — not built): the shipped composer is fully deterministic (`generation_mode` is hard-coded `rules_only` in `admin-service-outlines.js`); no AI shortens, expands, or adjusts tone today.
 5. Validation: system scans final output before save/send.
 6. Admin review: admin previews warnings and approves.
 
@@ -1025,37 +1033,36 @@ packet_admin_edits
 
 ## Backend Routes
 
-Admin routes:
+Admin routes (as built, `server/routes/admin-service-outlines.js:237-456`):
 
 ```text
-GET    /api/admin/service-outlines/templates
-GET    /api/admin/service-outlines/content-modules
-POST   /api/admin/service-outlines/validate
 POST   /api/admin/service-outlines/preview
 POST   /api/admin/service-outlines
+GET    /api/admin/service-outlines/content-modules
+PATCH  /api/admin/service-outlines/content-modules/:id
 GET    /api/admin/service-outlines/:id
-PATCH  /api/admin/service-outlines/:id
+GET    /api/admin/service-outlines/:id/events
 POST   /api/admin/service-outlines/:id/approve
-POST   /api/admin/service-outlines/:id/send
 POST   /api/admin/service-outlines/:id/revoke
 POST   /api/admin/service-outlines/:id/regenerate
-GET    /api/admin/service-outlines/:id/events
+POST   /api/admin/service-outlines/:id/send
 ```
 
-Product/fact routes:
+There is no `/templates`, `/validate`, or generic `PATCH /:id` route.
+
+Product/fact routes: there is no dedicated `product-public-facts` API. Product facts are
+managed through two admin inventory routes (`server/routes/admin-inventory.js`, mounted at
+`/api/admin/inventory`): `GET /api/admin/inventory/lawn-outline-facts` and
+`PATCH /api/admin/inventory/lawn-outline-facts/:id`.
+
+Public API routes (as built, `server/routes/service-outlines-public.js`, mounted at `/api/service-outlines`):
 
 ```text
-GET    /api/admin/product-public-facts
-GET    /api/admin/product-public-facts/:id
-PATCH  /api/admin/product-public-facts/:id
-POST   /api/admin/product-public-facts/:id/approve
+GET    /api/service-outlines/:token
+POST   /api/service-outlines/:token/cta-click
 ```
 
-Public route:
-
-```text
-GET    /service-outlines/:token
-```
+The customer page itself is the SPA route `/service-outlines/:token`.
 
 ## Tokenized Public Page Security
 
@@ -1191,7 +1198,7 @@ Deliverables:
 - product transparency module
 - post-service report module
 - what-this-does-not-include module
-- FAQ module
+- FAQ module (not seeded in the shipped build; see the Deferred note above)
 
 Exit criteria:
 
@@ -1264,6 +1271,8 @@ Exit criteria:
 - AI is not required for core output
 
 ### Phase 5: AI-Assisted Polish
+
+**Update 2026-09-26:** not built. The shipped composer is fully deterministic (`generation_mode` is `rules_only`).
 
 Deliverables:
 
@@ -1469,6 +1478,8 @@ MVP focuses on:
 7. post-service report alignment
 
 ## Final Recommendation
+
+**Shipped 2026-05-30** (PR #1434) — see the banner at the top of this doc.
 
 Build this as a Waves Lawn Care Content and Outline System, not an AI estimate writer.
 
