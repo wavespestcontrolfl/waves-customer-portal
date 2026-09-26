@@ -1,5 +1,5 @@
 jest.mock('../models/db', () => ({}));
-const { recordedTiming, selectPlanningSnapshots, measureRoutePerformance, missingBaselineActualStops, getRoutePerformance } = require('../services/scheduling/route-performance');
+const { recordedTiming, selectPlanningSnapshots, measureRoutePerformance, missingBaselineActualStops, getRoutePerformance, getSavedDayPlans } = require('../services/scheduling/route-performance');
 
 const routeKey = (date, technicianId) => `${date}|${technicianId || ''}`;
 
@@ -146,6 +146,26 @@ test('getRoutePerformance refuses a snapshot whose planned stop ids are not UUID
   const idQuery = calls.find(([table, method, column]) => table === 'scheduled_services' && method === 'whereIn' && column === 'id');
   expect(idQuery[3]).toEqual([goodId]);
   expect(result.plans.map(measured => measured.technicianId)).toEqual(['tech-ok']);
+});
+
+// Codex P2 (round 7): the scorecard's TODAY row reads the saved pre-service
+// plan (the live board drops completed visits). Only a snapshot captured
+// before the day's midnight counts; getRoutePerformance still never measures
+// a day that isn't over.
+test('getSavedDayPlans returns today\'s pre-service plan per technician, planned numbers only', async () => {
+  const goodId = '11111111-1111-4111-8111-111111111111';
+  const plan = (technicianId, asOf) => ({ ...snapshot, technician_id: technicianId, as_of: asOf, serviceMinutes: 60,
+    modeledDriveMinutes: 20, modeledWaitingMinutes: 5, modeledReturnMinuteBeforeBreaks: 600, drive_model: 'calibrated',
+    plannedStops: [{ ...snapshot.plannedStops[0], id: goodId }] });
+  const before = { id: 'before', created_at: snapshot.as_of, result: { route_quality: [plan('tech', snapshot.as_of)] } };
+  const during = { id: 'during', created_at: '2026-09-08T15:00:00Z', result: { route_quality: [plan('late', '2026-09-08T14:00:00Z')] } };
+  const now = new Date('2026-09-08T16:00:00Z'); // `day` is today
+  const { conn } = recordingConn({ route_optimization_planner_runs: [during, before] });
+  const plans = await getSavedDayPlans({ date: day, now }, conn);
+  expect([...plans.keys()]).toEqual(['tech']);
+  expect(plans.get('tech')).toEqual({ plannedVisits: 1, plannedServiceMinutes: 60, plannedDriveMinutes: 20,
+    plannedWaitingMinutes: 5, plannedReturnMinuteBeforeBreaks: 600, driveModel: 'calibrated' });
+  expect(selectPlanningSnapshots([before], { from: day, to: day, now })).toEqual([]);
 });
 
 // Codex P2 (round 3): a missing-baseline tech-day (no saved plan) still has

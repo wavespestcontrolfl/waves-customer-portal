@@ -61,12 +61,21 @@ function fmtOnSite(m) {
   return (covered < total || unbaselined > 0) ? `${text}${addedNote} (partial)` : text;
 }
 
+// Actual drive and span (Codex P2, round 7) carry their own coverage the
+// same way on-site does: a trip with no recorded duration, or a completed
+// stop missing an arrival/completion, leaves the value a lower bound, so
+// it's marked partial rather than passed off as the whole day.
+function fmtWithCoverage(value, coverage, covered, noun) {
+  if (!coverage || covered >= coverage.total) return fmtMinutes(value);
+  return `${fmtMinutes(value)} · ${covered}/${coverage.total} ${noun} (partial)`;
+}
+
 // One metric column shared by the planned and actual sub-rows so the two
 // never drift into different formatting.
 const METRICS = [
   { key: 'stops', label: 'Stops', format: (m) => fmtCount(m?.physicalStops ?? m?.stops) },
   { key: 'onSiteMinutes', label: 'On-site', format: fmtOnSite },
-  { key: 'driveMinutes', label: 'Drive', format: (m) => fmtMinutes(m?.driveMinutes) },
+  { key: 'driveMinutes', label: 'Drive', format: (m) => fmtWithCoverage(m?.driveMinutes, m?.driveCoverage, m?.driveCoverage?.timed, 'trips timed') },
   { key: 'driveShare', label: 'Drive share', format: (m) => fmtPercent(m?.driveShare) },
   { key: 'stopsPerHour', label: 'Stops/hr', format: (m) => fmtRate(m?.stopsPerHour) },
   { key: 'waitMinutes', label: 'Wait', format: (m) => fmtMinutes(m?.waitMinutes) },
@@ -78,7 +87,7 @@ const METRICS = [
   // Actual only (first recorded arrival to last recorded completion) — no
   // planned-side equivalent, so a Planned sub-row always reads "unknown"
   // here rather than a fabricated span.
-  { key: 'spanMinutes', label: 'Span', format: (m) => fmtMinutes(m?.spanMinutes) },
+  { key: 'spanMinutes', label: 'Span', format: (m) => fmtWithCoverage(m?.spanMinutes, m?.spanCoverage, m?.spanCoverage?.covered, 'stops timed') },
 ];
 
 // row.driveModel is THIS row's own saved/current drive model, not the
@@ -95,7 +104,12 @@ function modelLabel(value) {
 // current-day value). A null planned row says which of the two distinct
 // reasons applies — a definite no_saved_plan, or the newest-500-planner-
 // runs cap that may have evicted a real one (see day-scorecard.js).
+// Today's row (Codex P2, round 7) names which of the two it shows: the
+// saved pre-service plan, or — with none saved — the live board's
+// REMAINING route, which drops each visit as it completes.
 function basisLabel(row, isPast) {
+  if (!isPast && row.plannedBasis === 'saved_plan') return `Planned (${modelLabel(row.driveModel)})`;
+  if (!isPast && row.plannedBasis === 'remaining_route') return `Remaining route (${modelLabel(row.driveModel)})`;
   if (!isPast) return `Board (${modelLabel(row.driveModel)})`;
   if (row.planned) return `Planned (${modelLabel(row.driveModel)})`;
   return row.plannedUnavailableReason === 'may_be_truncated' ? 'Planned (baseline may be truncated)' : 'Planned (no saved plan)';
@@ -164,16 +178,17 @@ export default function DayScorecardPanel() {
   const rows = days.flatMap((day) => day.byTech.map((row) => ({ date: day.date, row })));
   // The server's own caveat for past PLANNED on-site minutes (a saved
   // snapshot can't detect a co-visit and may double-count one — see
-  // day-scorecard.js PLANNED_ONSITE_NOTE). Shown whenever a past planned
-  // value is on screen, so an inflated number never reads as authoritative
-  // (Codex P2).
-  const plannedOnSiteNote = rows.some(({ row }) => row.actual != null && row.planned != null)
+  // day-scorecard.js PLANNED_ONSITE_NOTE). Shown whenever a saved-plan
+  // value (a past row, or today's saved plan) is on screen, so an inflated
+  // number never reads as authoritative (Codex P2).
+  const plannedOnSiteNote = rows.some(({ row }) => row.planned != null && (row.actual != null || row.plannedBasis === 'saved_plan'))
     ? request.data?.assumptions?.plannedOnSiteMinutes : null;
 
   return (
     <div>
       <div className="text-11 text-ink-tertiary mb-3">
-        {range.from} – {range.to}. Future/today rows are planned only. Past rows compare the saved
+        {range.from} – {range.to}. Future/today rows are planned only; today shows its saved plan when one
+        exists, else the remaining route. Past rows compare the saved
         pre-service plan with recorded work — a null shows as "unknown", never 0.
       </div>
       <Card>

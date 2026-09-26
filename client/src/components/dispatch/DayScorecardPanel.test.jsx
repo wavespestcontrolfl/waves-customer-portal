@@ -316,3 +316,62 @@ it('shows the planned on-site caveat whenever a past planned value is displayed,
   await screen.findByText('2026-10-01');
   expect(screen.queryByText(caveat)).not.toBeInTheDocument();
 });
+
+// Codex P2 (round 7): an actual drive total with untimed trips, or a span
+// missing a completed stop's boundary, is a lower bound — marked partial.
+it('marks actual drive and span partial when some trips or completed stops are untimed', async () => {
+  mockAdminFetch.mockResolvedValue(ok(pastPayload({
+    onSiteMinutes: 90, onSiteCoverage: { covered: 2, total: 2 },
+    driveMinutes: 20, driveTrips: 2, driveCoverage: { timed: 1, total: 2 },
+    spanMinutes: 50, spanCoverage: { covered: 1, total: 2 },
+  })));
+  render(<DayScorecardPanel />);
+  await screen.findByText('2026-09-01');
+  expect(screen.getByText('20m · 1/2 trips timed (partial)')).toBeInTheDocument();
+  expect(screen.getByText('50m · 1/2 stops timed (partial)')).toBeInTheDocument();
+});
+
+it('fully timed drive and span read as plain totals; no timed trip at all reads unknown (partial), never 0m', async () => {
+  mockAdminFetch.mockResolvedValueOnce(ok(pastPayload({
+    onSiteMinutes: 90, onSiteCoverage: { covered: 2, total: 2 },
+    driveMinutes: 25, driveTrips: 2, driveCoverage: { timed: 2, total: 2 },
+    spanMinutes: 130, spanCoverage: { covered: 2, total: 2 },
+  })));
+  const { unmount } = render(<DayScorecardPanel />);
+  const row = (await screen.findByText('Actual')).closest('tr');
+  expect(within(row).getByText('25m')).toBeInTheDocument();
+  expect(within(row).getByText('2h 10m')).toBeInTheDocument();
+  unmount();
+
+  mockAdminFetch.mockResolvedValueOnce(ok(pastPayload({
+    onSiteMinutes: null, driveMinutes: null, driveTrips: 1, driveCoverage: { timed: 0, total: 1 },
+  })));
+  render(<DayScorecardPanel />);
+  const untimed = (await screen.findByText('Actual')).closest('tr');
+  expect(within(untimed).getByText('unknown · 0/1 trips timed (partial)')).toBeInTheDocument();
+  expect(within(untimed).queryByText('0m')).not.toBeInTheDocument();
+});
+
+// Codex P2 (round 7): today's row says whether it is the saved pre-service
+// plan or the live board's remaining route (which drops completed visits).
+it("labels today's row as the saved plan or the remaining route, and future rows as the board", async () => {
+  const planned = { stops: 1, physicalStops: 1, onSiteMinutes: 60, driveMinutes: 10, waitMinutes: 0, driveShare: 0.14, stopsPerHour: 1, returnMinute: 540, lateVisits: 0 };
+  mockAdminFetch.mockResolvedValue(ok({
+    driveModel: 'calibrated', assumptions: { plannedOnSiteMinutes: 'Saved-plan caveat.' },
+    days: [
+      { date: '2026-10-01', byTech: [
+        { technicianId: 'tech1', technician: 'Adam', driveModel: 'legacy', plannedBasis: 'saved_plan', planned, actual: null },
+        { technicianId: 'tech2', technician: 'Bea', driveModel: 'calibrated', plannedBasis: 'remaining_route', planned, actual: null },
+      ] },
+      { date: '2026-10-02', byTech: [
+        { technicianId: 'tech1', technician: 'Adam', driveModel: 'calibrated', plannedBasis: 'board', planned, actual: null },
+      ] },
+    ],
+  }));
+  render(<DayScorecardPanel />);
+  expect(await screen.findByText('Planned (legacy)')).toBeInTheDocument();
+  expect(screen.getByText('Remaining route (calibrated)')).toBeInTheDocument();
+  expect(screen.getByText('Board (calibrated)')).toBeInTheDocument();
+  // Today's saved-plan value comes from the snapshot, so its caveat shows.
+  expect(screen.getByText('Saved-plan caveat.')).toBeInTheDocument();
+});

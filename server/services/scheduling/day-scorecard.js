@@ -28,7 +28,7 @@ const { etDateString, addETDays, validCalendarDate } = require('../../utils/date
 const { etDateDiffDays } = require('../recurring-appointment-seeder');
 const { gateEnvValue } = require('../../config/feature-gates');
 const { getScheduleQualityMeasurements, physicalStopCount } = require('./day-quality');
-const { getRoutePerformance } = require('./route-performance');
+const { getRoutePerformance, getSavedDayPlans } = require('./route-performance');
 const { applyAssignable } = require('../technician-eligibility');
 
 const MAX_RANGE_DAYS = 30; // Same 31-day inclusive cap as day-quality.
@@ -153,10 +153,9 @@ function plannedPastRow(plan) {
 // same reason drive has no dependable actual denominator here — never
 // derived from a possibly-partial actual on-site sum.
 function actualPastRow(plan, mileage, fallbackStops) {
-  const driveMinutes = mileage ? mileage.minutes : null;
-  const driveTrips = mileage ? mileage.trips : null;
+  const drive = actualDrive(mileage);
   const stops = plan ? plan.stops : fallbackStops;
-  if (!stops) return { stops: null, physicalStops: null, onSiteMinutes: null, onSiteCoverage: null, driveMinutes, driveTrips, spanMinutes: null };
+  if (!stops) return { stops: null, physicalStops: null, onSiteMinutes: null, onSiteCoverage: null, ...drive, spanMinutes: null, spanCoverage: null };
   const recorded = stops.filter(stop => RECORDED_EVIDENCE.has(stop.durationEvidence) && Number.isFinite(stop.recordedServiceMinutes));
   const onSiteMinutes = recorded.length ? recorded.reduce((sum, stop) => sum + stop.recordedServiceMinutes, 0) : null;
   // A same-day added (unbaselined) completed job's own recorded arrival/
@@ -175,16 +174,44 @@ function actualPastRow(plan, mileage, fallbackStops) {
   // carry grouped work's times in recorded* (their durations are what gets
   // forced null there), so they fall through to it.
   const spanStops = plan && Array.isArray(plan.unbaselinedStops) ? [...stops, ...plan.unbaselinedStops] : stops;
-  const arrivals = spanStops.map(stop => stop.lifecycleArrivalMinute ?? stop.recordedArrivalMinute).filter(Number.isFinite);
-  const completions = spanStops.map(stop => stop.lifecycleCompletionMinute ?? stop.recordedCompletionMinute).filter(Number.isFinite);
-  const spanMinutes = arrivals.length && completions.length ? Math.max(...completions) - Math.min(...arrivals) : null;
   const unbaselined = plan && Number.isFinite(plan.unbaselinedCompletedVisits) ? plan.unbaselinedCompletedVisits : 0;
   const completedStops = plan
     ? plan.stops.filter(stop => !NOT_COMPLETED_OUTCOMES.has(stop.arrivalOutcome)).length + unbaselined
     : fallbackStops.length;
   return { stops: completedStops, physicalStops: null, onSiteMinutes,
     onSiteCoverage: { covered: recorded.length, total: stops.length, unbaselined },
-    driveMinutes, driveTrips, spanMinutes };
+    ...drive, ...actualSpan(spanStops) };
+}
+
+// First recorded arrival to last recorded completion over the COMPLETED
+// stops (plan stops whose arrivalOutcome proves completion; unbaselined and
+// fallback stops are completed by construction). spanCoverage (Codex P2,
+// round 7): a completed stop missing either boundary — e.g. an operator-
+// corrected duration, whose completion recordedTiming deliberately leaves
+// null — could have opened or closed the day, so the span over the rest is
+// only a lower bound. It's still shown, but with covered < total so the UI
+// marks it partial instead of passing it off as the whole day.
+function actualSpan(spanStops) {
+  const completed = spanStops.filter(stop => !NOT_COMPLETED_OUTCOMES.has(stop.arrivalOutcome));
+  const arrivalOf = stop => stop.lifecycleArrivalMinute ?? stop.recordedArrivalMinute;
+  const completionOf = stop => stop.lifecycleCompletionMinute ?? stop.recordedCompletionMinute;
+  const arrivals = completed.map(arrivalOf).filter(Number.isFinite);
+  const completions = completed.map(completionOf).filter(Number.isFinite);
+  const covered = completed.filter(stop => Number.isFinite(arrivalOf(stop)) && Number.isFinite(completionOf(stop))).length;
+  return {
+    spanMinutes: arrivals.length && completions.length ? Math.max(...completions) - Math.min(...arrivals) : null,
+    spanCoverage: { covered, total: completed.length },
+  };
+}
+
+// driveMinutes sums only trips with a known duration (duration_minutes is
+// nullable); driveCoverage (Codex P2, round 7) says how many of the day's
+// counted trips that is, and driveMinutes is null — never a definitive 0 —
+// when none of them has one.
+function actualDrive(mileage) {
+  if (!mileage) return { driveMinutes: null, driveTrips: null, driveCoverage: null };
+  return { driveMinutes: mileage.timedTrips ? mileage.minutes : null, driveTrips: mileage.trips,
+    driveCoverage: { timed: mileage.timedTrips, total: mileage.trips } };
 }
 
 // bouncie-mileage.js's own canonical predicates (getIrsReport, the daily/
@@ -203,8 +230,8 @@ function actualPastRow(plan, mileage, fallbackStops) {
 const EXCLUDED_MILEAGE_PURPOSES = ['personal', 'commute'];
 const MILEAGE_NOTE = 'Actual drive minutes sum mileage_log trips for the day, excluding personal and commute trips; '
   + 'unclassified trips (no confirmed business/personal match) are counted as day driving.';
-const PLANNED_ONSITE_NOTE = "Future/today on-site minutes count a co-visited pair once. Past PLANNED on-site minutes "
-  + 'come from the saved snapshot, which cannot detect a co-visit (no customer/premise/coordinate columns) and may '
+const PLANNED_ONSITE_NOTE = "Board on-site minutes count a co-visited pair once. Past and today's saved-plan on-site "
+  + 'minutes come from the saved snapshot, which cannot detect a co-visit (no customer/premise/coordinate columns) and may '
   + 'double-count one; past ACTUAL minutes are unaffected (summed from recorded evidence per row).';
 
 // Date range + technician_id IS NOT NULL only — NOT the assignable-tech
@@ -222,8 +249,11 @@ async function mileageByTechDay(conn, from, to) {
   for (const row of rows) {
     if (EXCLUDED_MILEAGE_PURPOSES.includes(row.purpose)) continue;
     const key = `${dateOnly(row.trip_date)}|${row.technician_id}`;
-    const entry = byKey.get(key) || { minutes: 0, trips: 0 };
-    entry.minutes += Number(row.duration_minutes) || 0;
+    const entry = byKey.get(key) || { minutes: 0, trips: 0, timedTrips: 0 };
+    // Number(null) and Number('') are 0 — an unknown duration must stay
+    // unknown, not become a zero-minute trip.
+    const minutes = row.duration_minutes == null || row.duration_minutes === '' ? NaN : Number(row.duration_minutes);
+    if (Number.isFinite(minutes)) { entry.minutes += minutes; entry.timedTrips += 1; }
     entry.trips += 1;
     byKey.set(key, entry);
   }
@@ -244,12 +274,24 @@ function pastTechRow({ technicianId, technician }, planByKey, mileageByKey, miss
     planned: plannedPastRow(plan), actual: actualPastRow(plan, mileage, fallbackStops) };
 }
 
-function futureTechRows(day, driveModel) {
-  return day.byTech.map(techQuality => ({
-    technicianId: techQuality.technicianId, technician: techQuality.technician, driveModel,
-    planned: plannedFutureRow(techQuality),
-    actual: null,
-  }));
+// plannedBasis says what the planned column measures. A future day is the
+// live board ('board'). TODAY (Codex P2, round 7) prefers the saved
+// pre-service snapshot ('saved_plan', same numbers a past row's Planned
+// column reads): the live board excludes completed visits
+// (QUALITY_EXCLUDED_STATUSES), so its totals shrink as the day's work gets
+// done. Without a saved plan, today falls back to the board, labeled
+// 'remaining_route' so it never reads as the whole day's plan.
+function futureTechRows(day, driveModel, savedPlans) {
+  return day.byTech.map(techQuality => {
+    const saved = savedPlans ? savedPlans.get(techQuality.technicianId) : null;
+    if (saved) {
+      return { technicianId: techQuality.technicianId, technician: techQuality.technician,
+        driveModel: saved.driveModel, plannedBasis: 'saved_plan', planned: plannedPastRow(saved), actual: null };
+    }
+    return { technicianId: techQuality.technicianId, technician: techQuality.technician, driveModel,
+      plannedBasis: savedPlans ? 'remaining_route' : 'board',
+      planned: plannedFutureRow(techQuality), actual: null };
+  });
 }
 
 // keyed "date|technicianId" -> Map(date -> Set(technicianId)), shared by the
@@ -345,6 +387,8 @@ async function getDayScorecard(input = {}, conn = require('../../models/db'), no
   const idsByDateMaps = [planIdsByDate, mileageIdsByDate, missingIdsByDate];
   const nameById = await resolveHistoricalNames(conn, techs, idsByDateMaps);
   const truncatedPlanningRuns = Boolean(performance.truncatedPlanningRuns);
+  const todayPlans = from <= today && to >= today
+    ? await getSavedDayPlans({ date: today, now }, conn) : null;
 
   const days = [];
   for (const day of quality.days) {
@@ -352,7 +396,7 @@ async function getDayScorecard(input = {}, conn = require('../../models/db'), no
       ? [...pastDayRoster(day.date, techs, idsByDateMaps)].map(technicianId => pastTechRow(
         { technicianId, technician: nameById.get(technicianId) || null }, planByKey, mileageByKey,
         missingBaselineStopsByKey, day.date, truncatedPlanningRuns))
-      : futureTechRows(day, quality.driveModel);
+      : futureTechRows(day, quality.driveModel, day.date === today ? todayPlans : null);
     days.push({ date: day.date, closed: day.closed, byTech,
       // Stops assigned to no assignable technician at all (unassigned, or an
       // offboarding/ineligible tech that still carries assigned work — Codex
@@ -363,7 +407,8 @@ async function getDayScorecard(input = {}, conn = require('../../models/db'), no
   return {
     range: { from, to }, driveModel: quality.driveModel, days, truncatedPlanningRuns,
     assumptions: { actualDriveMinutes: MILEAGE_NOTE, plannedOnSiteMinutes: PLANNED_ONSITE_NOTE },
-    note: 'Future/today rows are planned only — nothing recorded yet to compare against. '
+    note: 'Future/today rows are planned only — nothing recorded yet to compare against. Today uses the saved '
+      + 'pre-service plan when one exists, else the remaining route (completed visits drop out of it). '
       + 'Past rows compare the saved pre-service plan with recorded work. Unknown values are null, never 0. '
       + MILEAGE_NOTE,
   };

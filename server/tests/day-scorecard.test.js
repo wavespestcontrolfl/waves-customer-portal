@@ -2,11 +2,11 @@ jest.mock('../services/scheduling/day-quality', () => {
   const actual = jest.requireActual('../services/scheduling/day-quality');
   return { ...actual, getScheduleQualityMeasurements: jest.fn() };
 });
-jest.mock('../services/scheduling/route-performance', () => ({ getRoutePerformance: jest.fn() }));
+jest.mock('../services/scheduling/route-performance', () => ({ getRoutePerformance: jest.fn(), getSavedDayPlans: jest.fn() }));
 jest.mock('../services/technician-eligibility', () => ({ applyAssignable: jest.fn() }));
 
 const { getScheduleQualityMeasurements } = require('../services/scheduling/day-quality');
-const { getRoutePerformance } = require('../services/scheduling/route-performance');
+const { getRoutePerformance, getSavedDayPlans } = require('../services/scheduling/route-performance');
 const { applyAssignable } = require('../services/technician-eligibility');
 const {
   routeScorecardEnabled, validDateRange, physicalStopCount, getDayScorecard,
@@ -50,6 +50,8 @@ const stop = (id, extra = {}) => ({
 beforeEach(() => {
   jest.clearAllMocks();
   applyAssignable.mockImplementation(() => ({ select: async () => TECHS }));
+  // No saved pre-service plan for today unless a test says otherwise.
+  getSavedDayPlans.mockResolvedValue(new Map());
   delete process.env.GATE_ROUTE_SCORECARD;
 });
 
@@ -382,6 +384,87 @@ describe('getDayScorecard', () => {
     getRoutePerformance.mockResolvedValueOnce({ plans: [plan([grouped])] });
     const allGrouped = await getDayScorecard({ date_from: date, date_to: date }, conn([]), new Date('2026-09-08T12:00:00Z'));
     expect(allGrouped.days[0].byTech[0].actual.spanMinutes).toBe(50);
+  });
+
+  // Codex P2 (round 7): a completed stop missing a lifecycle boundary (an
+  // operator-corrected duration has no measured completion) could have
+  // closed the day — the span over the rest is a lower bound and must say so.
+  test('the actual span reports how many completed stops had both boundaries', async () => {
+    const date = '2026-09-01';
+    getScheduleQualityMeasurements.mockResolvedValue({
+      driveModel: 'legacy',
+      days: [{ date, closed: false, byTech: [{ technicianId: 'tech1', technician: 'Tech One' }] }],
+    });
+    getRoutePerformance.mockResolvedValue({
+      plans: [{
+        date, technicianId: 'tech1', plannedVisits: 3, plannedServiceMinutes: 60, plannedDriveMinutes: 10,
+        plannedWaitingMinutes: 0, plannedReturnMinuteBeforeBreaks: 600, driveModel: 'legacy',
+        stops: [
+          { arrivalOutcome: 'on_time', durationEvidence: 'recorded_lifecycle_interval', recordedServiceMinutes: 50,
+            recordedArrivalMinute: 480, recordedCompletionMinute: 530, lifecycleArrivalMinute: 480, lifecycleCompletionMinute: 530 },
+          // Completed, operator-corrected: arrival known, completion not.
+          { arrivalOutcome: 'on_time', durationEvidence: 'operator_corrected', recordedServiceMinutes: 40,
+            recordedArrivalMinute: 560, recordedCompletionMinute: null, lifecycleArrivalMinute: 560, lifecycleCompletionMinute: null },
+          // Never completed: not a stop that could bound the day.
+          { arrivalOutcome: 'not_completed', durationEvidence: 'unmatched_or_uncompleted_work', recordedServiceMinutes: null,
+            recordedArrivalMinute: null, recordedCompletionMinute: null, lifecycleArrivalMinute: null, lifecycleCompletionMinute: null },
+        ],
+      }],
+    });
+    const result = await getDayScorecard({ date_from: date, date_to: date }, conn([]), new Date('2026-09-08T12:00:00Z'));
+    expect(result.days[0].byTech[0].actual).toMatchObject({ spanMinutes: 50, spanCoverage: { covered: 1, total: 2 } });
+  });
+
+  // Codex P2 (round 7): duration_minutes is nullable; Number(null) is 0, so an
+  // unknown-duration trip read as a definitive zero-minute trip.
+  test('mileage rows with an unknown duration are left out of drive minutes and reported as untimed', async () => {
+    const date = '2026-09-01';
+    getScheduleQualityMeasurements.mockResolvedValue({
+      driveModel: 'legacy',
+      days: [{ date, closed: false, byTech: [{ technicianId: 'tech1', technician: 'Tech One' }, { technicianId: 'tech2', technician: 'Tech Two' }] }],
+    });
+    applyAssignable.mockImplementation(() => ({ select: async () => [...TECHS, { id: 'tech2', name: 'Tech Two' }] }));
+    getRoutePerformance.mockResolvedValue({ plans: [] });
+    const rows = [
+      { technician_id: 'tech1', trip_date: date, duration_minutes: 20, purpose: 'business' },
+      { technician_id: 'tech1', trip_date: date, duration_minutes: null, purpose: 'business' },
+      { technician_id: 'tech2', trip_date: date, duration_minutes: null, purpose: 'business' },
+      { technician_id: 'tech2', trip_date: date, duration_minutes: 'n/a', purpose: 'unclassified' },
+    ];
+    const result = await getDayScorecard({ date_from: date, date_to: date }, conn(rows), new Date('2026-09-08T12:00:00Z'));
+    const byId = Object.fromEntries(result.days[0].byTech.map(row => [row.technicianId, row.actual]));
+    expect(byId.tech1).toMatchObject({ driveMinutes: 20, driveTrips: 2, driveCoverage: { timed: 1, total: 2 } });
+    expect(byId.tech2).toMatchObject({ driveMinutes: null, driveTrips: 2, driveCoverage: { timed: 0, total: 2 } });
+  });
+
+  // Codex P2 (round 7): the live board excludes completed visits, so today's
+  // planned totals shrank as the day's work got done. Today prefers the saved
+  // pre-service plan; without one, it's labeled the remaining route.
+  test('today reads the saved pre-service plan when one exists, else labels the board as the remaining route', async () => {
+    const today = '2026-09-08';
+    const boardTech = (technicianId) => ({ technicianId, technician: technicianId, scheduledVisits: 1, serviceMinutes: 30,
+      coVisitOnSiteMinutes: 30, physicalStops: 1, modeledDriveMinutes: 5, modeledWaitingMinutes: 0,
+      modeledReturnMinuteBeforeBreaks: 540, modeledLateVisits: [] });
+    getScheduleQualityMeasurements.mockResolvedValue({ driveModel: 'calibrated',
+      days: [{ date: today, closed: false, byTech: [boardTech('tech1'), boardTech('tech2')] },
+        { date: '2026-09-09', closed: false, byTech: [boardTech('tech1')] }] });
+    getSavedDayPlans.mockResolvedValue(new Map([['tech1', { plannedVisits: 5, plannedServiceMinutes: 240,
+      plannedDriveMinutes: 60, plannedWaitingMinutes: 10, plannedReturnMinuteBeforeBreaks: 1020, driveModel: 'legacy' }]]));
+    const dbConn = conn();
+    const now = new Date(`${today}T16:00:00Z`);
+    const result = await getDayScorecard({ date_from: today, date_to: '2026-09-09' }, dbConn, now);
+    expect(getSavedDayPlans).toHaveBeenCalledWith({ date: today, now }, dbConn);
+    const [todayRows, tomorrowRows] = result.days.map(day => day.byTech);
+    expect(todayRows[0]).toMatchObject({ plannedBasis: 'saved_plan', driveModel: 'legacy', actual: null,
+      planned: { stops: 5, onSiteMinutes: 240, driveMinutes: 60, waitMinutes: 10, returnMinute: 1020 } });
+    expect(todayRows[1]).toMatchObject({ plannedBasis: 'remaining_route', driveModel: 'calibrated', planned: { stops: 1, onSiteMinutes: 30 } });
+    expect(tomorrowRows[0]).toMatchObject({ plannedBasis: 'board', planned: { stops: 1 } });
+  });
+
+  test('a range that does not include today never reads saved day plans', async () => {
+    getScheduleQualityMeasurements.mockResolvedValue({ driveModel: 'legacy', days: [{ date: '2026-09-10', closed: false, byTech: [] }] });
+    await getDayScorecard({ date_from: '2026-09-10', date_to: '2026-09-10' }, conn(), new Date('2026-09-08T16:00:00Z'));
+    expect(getSavedDayPlans).not.toHaveBeenCalled();
   });
 
   test('the actual-drive assumption names both excluded purposes (personal and commute)', async () => {

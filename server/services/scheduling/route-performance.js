@@ -99,10 +99,18 @@ function validPlannedStops(plannedStops, validId) {
   return validStops && new Set(plannedStops.map(stop => stop.id)).size === plannedStops.length;
 }
 
+// Lexicographic rank comparison: the first differing position decides.
+function outranks(rank, previous) {
+  const index = rank.findIndex((value, position) => value !== previous[position]);
+  return index >= 0 && rank[index] > previous[index];
+}
+
 /** Choose the latest snapshot captured BEFORE the service day. The applied
  * order wins its same-run before-image. Never manufacture a historical plan
- * from the schedule as it looks after completion. */
-function selectPlanningSnapshots(runs, { from, to, now = new Date(), validStopId = anyStringId }) {
+ * from the schedule as it looks after completion. `includeToday` admits the
+ * current day's pre-service snapshot for a planned-only reader
+ * (getSavedDayPlans); the capture-before-midnight guard still applies. */
+function selectPlanningSnapshots(runs, { from, to, now = new Date(), validStopId = anyStringId, includeToday = false }) {
   const selected = new Map();
   const today = etDateString(now);
   for (const run of runs) {
@@ -115,19 +123,34 @@ function selectPlanningSnapshots(runs, { from, to, now = new Date(), validStopId
       const created = finiteDate(run.created_at);
       const midnight = parseETDateTime(`${plan.date}T00:00`);
       if (!captured || !created || !Number.isFinite(midnight.getTime()) || captured >= midnight || created >= midnight
-        || plan.date < from || plan.date > to || plan.date >= today
+        || plan.date < from || plan.date > to || plan.date > today || (plan.date === today && !includeToday)
         || typeof plan.technician_id !== 'string') continue;
       const key = `${plan.date}|${plan.technician_id}`;
       const previous = selected.get(key);
       const rank = [captured.getTime(), created.getTime(), plan.snapshot_phase === 'applied_reorder' ? 1 : 0];
-      if (!previous || rank[0] > previous.rank[0] || (rank[0] === previous.rank[0] && (rank[1] > previous.rank[1]
-        || (rank[1] === previous.rank[1] && rank[2] > previous.rank[2])))) {
+      if (!previous || outranks(rank, previous.rank)) {
         selected.set(key, { ...plan, planningRunId: run.id, rank });
       }
     }
   }
   return [...selected.values()].map(({ rank: _rank, ...plan }) => plan)
     .sort((a, b) => a.date.localeCompare(b.date) || a.technician_id.localeCompare(b.technician_id));
+}
+
+// Straight passthrough of the SAVED snapshot's own planned numbers (the
+// day-quality byTech object route-reorder.js/quality-after-change.js spread
+// into the ledger row) — day-scorecard.js's PLANNED-as-of-the-day-before
+// column reads these instead of recomputing them, so the scorecard can never
+// disagree with what was actually saved.
+function plannedPassthrough(plan) {
+  const finiteOrNull = value => (Number.isFinite(value) ? value : null);
+  return {
+    plannedServiceMinutes: finiteOrNull(plan.serviceMinutes),
+    plannedDriveMinutes: finiteOrNull(plan.modeledDriveMinutes),
+    plannedWaitingMinutes: finiteOrNull(plan.modeledWaitingMinutes),
+    plannedReturnMinuteBeforeBreaks: finiteOrNull(plan.modeledReturnMinuteBeforeBreaks),
+    driveModel: plan.drive_model || null,
+  };
 }
 
 function measureRoutePerformance(plan, rows) {
@@ -202,27 +225,38 @@ function measureRoutePerformance(plan, rows) {
     serviceErrorByEvidence,
     lastRecordedCompletionMinute: stops.length && stops.every(stop => stop.recordedCompletionMinute != null)
       ? Math.max(...stops.map(stop => stop.recordedCompletionMinute)) : null,
-    // Straight passthrough of the SAVED snapshot's own planned numbers (the
-    // day-quality byTech object route-reorder.js/quality-after-change.js
-    // spread into the ledger row) — day-scorecard.js's PLANNED-as-of-the-
-    // day-before column reads these instead of recomputing them, so the past
-    // side of the scorecard can never disagree with what was actually saved.
-    plannedServiceMinutes: Number.isFinite(plan.serviceMinutes) ? plan.serviceMinutes : null,
-    plannedDriveMinutes: Number.isFinite(plan.modeledDriveMinutes) ? plan.modeledDriveMinutes : null,
-    plannedWaitingMinutes: Number.isFinite(plan.modeledWaitingMinutes) ? plan.modeledWaitingMinutes : null,
-    plannedReturnMinuteBeforeBreaks: Number.isFinite(plan.modeledReturnMinuteBeforeBreaks) ? plan.modeledReturnMinuteBeforeBreaks : null,
-    driveModel: plan.drive_model || null,
+    ...plannedPassthrough(plan),
     actualDriveMinutes: null, actualWaitingMinutes: null, actualReturnMinute: null,
     stops,
   };
 }
 
-async function getRoutePerformance({ from, to, now = new Date() }, conn) {
-  // Range validation is shared with the caller, getScheduleQualityMeasurements.
-  const runs = await conn('route_optimization_planner_runs').whereIn('run_type', ['route_tiers_nightly', 'route_repair_change', 'schedule_quality_change'])
+function planningRuns(conn, from, to) {
+  return conn('route_optimization_planner_runs').whereIn('run_type', ['route_tiers_nightly', 'route_repair_change', 'schedule_quality_change'])
     .where('start_date', '<=', to).where('end_date', '>=', from)
     .whereRaw("jsonb_typeof(result->'route_quality') = 'array'").orderBy('created_at', 'desc').limit(501)
     .select('id', 'created_at', 'result');
+}
+
+/** The saved pre-service plan for a day that has already started (today),
+ * keyed by technician id — planned numbers only (plannedPassthrough plus the
+ * planned stop count). No recorded-work comparison: the day isn't over, so
+ * getRoutePerformance deliberately never measures it. Used by the scorecard
+ * so today's planned column doesn't shrink as visits complete (the live
+ * board excludes completed work). Same newest-500-runs cap and snapshot
+ * validation as getRoutePerformance; a technician with no saved plan (or
+ * one the cap evicted) is simply absent, and the caller falls back to the
+ * live board, labeled as the remaining route. */
+async function getSavedDayPlans({ date, now = new Date() }, conn) {
+  const runs = await planningRuns(conn, date, date);
+  const plans = selectPlanningSnapshots(runs.slice(0, 500), { from: date, to: date, now, validStopId: isUuid, includeToday: true });
+  return new Map(plans.map(plan => [plan.technician_id,
+    { plannedVisits: plan.plannedStops.length, ...plannedPassthrough(plan) }]));
+}
+
+async function getRoutePerformance({ from, to, now = new Date() }, conn) {
+  // Range validation is shared with the caller, getScheduleQualityMeasurements.
+  const runs = await planningRuns(conn, from, to);
   const plans = selectPlanningSnapshots(runs.slice(0, 500), { from, to, now, validStopId: isUuid });
   const plannedIds = [...new Set(plans.flatMap(plan => plan.plannedStops.map(stop => stop.id)))];
   const rows = await conn('scheduled_services').where(query => query.whereIn('id', plannedIds).orWhereBetween('scheduled_date', [from, to]))
@@ -336,4 +370,4 @@ function missingBaselineActualStops(routes, pastWork, routeKey) {
   return byKey;
 }
 
-module.exports = { recordedTiming, selectPlanningSnapshots, measureRoutePerformance, getRoutePerformance, missingBaselineActualStops };
+module.exports = { recordedTiming, selectPlanningSnapshots, measureRoutePerformance, getRoutePerformance, getSavedDayPlans, missingBaselineActualStops };

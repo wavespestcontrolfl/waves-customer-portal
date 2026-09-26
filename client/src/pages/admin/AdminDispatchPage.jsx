@@ -105,23 +105,34 @@ export default function AdminDispatchPage() {
   // GATE_ROUTE_SCORECARD: admin-only, so a technician never fires the
   // request. Off (or the request fails) simply keeps the tab absent —
   // byte-identical to this page before the scorecard existed.
-  const [scorecardEnabled, setScorecardEnabled] = useState(false);
+  const [scorecardStatus, setScorecardStatus] = useState("pending");
   useEffect(() => {
     if (!isAdmin) return undefined;
     let active = true;
     adminFetch("/admin/route-scorecard/status")
       .then((res) => (res.ok ? res.json() : null))
-      .then((data) => { if (active && data?.enabled) setScorecardEnabled(true); })
-      .catch(() => {});
+      .then((data) => { if (active) setScorecardStatus(data?.enabled ? "on" : "off"); })
+      .catch(() => { if (active) setScorecardStatus("off"); });
     return () => { active = false; };
   }, [isAdmin]);
+  const scorecardEnabled = scorecardStatus === "on";
+  // A direct ?tab=scorecard load stays unresolved until /status settles
+  // (Codex P2): resolving it to Board first would render the wrong
+  // workspace and fire an authoritative Board beacon that can flush before
+  // the enabled response switches to Scorecard — two page views. Only an
+  // admin ever resolves the gate; anyone else falls back as before.
+  const scorecardDeepLinkPending = isAdmin && scorecardStatus === "pending"
+    && searchParams.get(TAB_KEY) === TABS.SCORECARD;
   const tabList = scorecardEnabled ? [...TAB_LIST, SCORECARD_TAB] : TAB_LIST;
   const navGridClassName = `grid-cols-2 md:grid-cols-4 ${scorecardEnabled ? "xl:grid-cols-8" : "xl:grid-cols-7"}`;
 
   const validTabKeys = tabList.map((t) => t.key);
-  const tab = validTabKeys.includes(searchParams.get(TAB_KEY))
+  const resolvedTab = validTabKeys.includes(searchParams.get(TAB_KEY))
     ? searchParams.get(TAB_KEY)
     : TABS.BOARD;
+  // null while a scorecard deep link is unresolved = nothing rendered yet
+  // (no active section, no beacon, a loading placeholder below).
+  const tab = scorecardDeepLinkPending ? null : resolvedTab;
   const setTab = (nextTab) => {
     const next = new URLSearchParams(searchParams);
     next.set(TAB_KEY, nextTab);
@@ -182,7 +193,11 @@ export default function AdminDispatchPage() {
         aria-label="Schedule content"
         className="flex-1 min-h-0 flex flex-col"
       >
-        {tab === TABS.BOARD ? (
+        {tab == null ? (
+          <div role="status" className="text-14 text-ink-tertiary p-10 text-center">
+            Loading schedule…
+          </div>
+        ) : tab === TABS.BOARD ? (
           <DispatchBoardPage />
         ) : tab === TABS.SCORECARD ? (
           <div className="p-4">
