@@ -15763,7 +15763,10 @@ export function CompletionPanel({
     // value alone opened (codex r26; mirrors the chip membership rule).
     const nonInternalValuesNonEmpty = (schema, obj) => {
       const countableKeys = new Set(
-        (schema?.fields || []).filter((f) => !f.internal).map((f) => f.key),
+        // Treatment targets are objectives, not visit facts. Match the
+        // server's objective group for primary and companion forms alike.
+        (schema?.fields || []).filter((f) => !f.internal
+          && !/^target_(?!animal\b)|_target$/.test(f.key)).map((f) => f.key),
       );
       return Object.entries(obj || {}).some(
         ([key, v]) => countableKeys.has(key)
@@ -15886,6 +15889,12 @@ export function CompletionPanel({
         name: p.name,
         rate: p.rate || null,
         rateUnit: p.rateUnit || null,
+        applicationMethod: productApplicationMethod(p, serviceTypeForArea),
+        applicationArea:
+          p.applicationArea ||
+          (completionAreasServiced.length === 1 ? completionAreasServiced[0] : null),
+        areaValue: p.areaValue ?? null,
+        areaUnit: p.areaUnit || null,
         targets: Array.isArray(p.targets) ? p.targets : [],
       })),
       technicianName: service.technicianName || "Waves Tech",

@@ -66,18 +66,20 @@ test('a synthesized generic profile retains the legacy label-based writer', asyn
   expect(mockProvider).toHaveBeenCalled();
   expect(mockProvider.mock.calls[0][0].system).toContain('SERVICE REPORT COPY — LAWN');
 });
-test('the deterministic fallback names the canonical service instead of a stale request label', async () => {
+test('the canonical pest fallback cannot borrow legacy document wording from a stale label', async () => {
   Object.assign(mockProfile, { serviceKey: 'pest_initial_cleanout', serviceName: 'Initial Pest Cleanout' });
-  mockScheduledServiceType = 'Stale Lawn Label';
+  mockScheduledServiceType = 'WDO Inspection';
   mockProviderResult = { ok: false, reason: 'provider_unavailable' };
   const res = { statusCode: 200, status(code) { this.statusCode = code; return this; }, json: jest.fn() };
-  await handler({ techRole: 'admin', body: { scheduledServiceId: '11111111-1111-4111-8111-111111111111', serviceType: 'Stale Lawn Label', actionsCompleted: ['Removed exterior webs'] } }, res);
+  await handler({ techRole: 'admin', body: { scheduledServiceId: '11111111-1111-4111-8111-111111111111', serviceType: 'WDO Inspection', actionsCompleted: ['Removed exterior webs'] } }, res);
   expect(res.statusCode).toBe(200);
   expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
     fallback: true,
-    report: expect.stringContaining('Initial Pest Cleanout'),
+    report: 'WHAT WE DID\n\nRecorded completed work: Removed exterior webs.\n\nWHAT WE FOUND\n\nNo separate technician finding was supplied with the structured details used for this fallback.',
   }));
-  expect(res.json.mock.calls[0][0].report).not.toContain('Stale Lawn Label');
+  expect(mockProvider).toHaveBeenCalledTimes(2);
+  expect(mockProvider.mock.calls[0][0].system).toContain('RECURRING PEST CONTROL SERVICE MODULE');
+  expect(res.json.mock.calls[0][0].report).not.toContain('WDO Inspection');
 });
 test('a profile outage preserves the existing notes-only label fallback', async () => {
   mockProfileError = new Error('profile read unavailable');
