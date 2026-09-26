@@ -555,11 +555,11 @@ Fix sketch: increase the header surface's opacity (or add a solid scrim band) so
 
 ## TOP 10 (severity, then revenue impact)
 
-1. **S1-4** Third-party SMS enrollment without recipient consent (referrals + on-location contacts)
+1. **S1-4** Third-party SMS enrollment without recipient consent (referrals; on-location contacts now require an account-holder attestation — 2026-09-26)
 2. **S1-2** No durable SMS consent record anywhere
-3. **S1-3** No quiet-hours floor / HELP unwired / no in-repo opt-in disclosure
+3. **S1-3** No quiet-hours floor / HELP not answered for first-contact senders / no opt-in disclosure on `/book` or referrals (2026-09-26 scope)
 4. **S1-1** Review-funnel score gating (legal/policy call for owner + counsel)
-5. **S2-1** Portal cannot pay a balance; failed-payment recovery has no action — direct collections impact
+5. **S2-1** Portal cannot pay a balance; failed-payment recovery has no action — direct collections impact (2026-09-26: Billing-header and failed-banner pay links shipped behind `GATE_PORTAL_PAY_NOW`; remaining: gate rollout, dashboard tile, retry after card update)
 6. **S2-4** Post-STOP send path bypassing suppression (estimate details packet)
 7. **S2-3** Login dead-end for phones not on file — locks customers out of all self-service
 8. **S2-2** Service-outline dead-end with raw HTTP status — prospect-facing lost-sale path
@@ -583,7 +583,7 @@ Fix sketch: increase the header surface's opacity (or add a solid scrim band) so
 
 ## THREE FIXES THAT MOVE BOOKED REVENUE MOST IN ONE DAY
 
-1. **Put "Pay now" links where balances are (S2-1).** (2026-09-26: shipped behind `GATE_PORTAL_PAY_NOW`; see the S2-1 update.) Wire the existing `/pay/:token` checkout into the dashboard tile, Billing header, and failed-payment banner, and return a retry action after card update. Everything needed already exists server-side; this converts every in-app balance-due session and failed-payment recovery into same-day collections instead of a wait for the cron or a phone call.
+1. **Put "Pay now" links where balances are (S2-1).** (2026-09-26: the Billing-header and failed-payment-banner links shipped behind `GATE_PORTAL_PAY_NOW`; see the S2-1 update.) Remaining: roll out the gate, point the dashboard tile at the same `/pay/:token` checkout, and return a retry action after card update. Everything needed already exists server-side; this converts every in-app balance-due session and failed-payment recovery into same-day collections instead of a wait for the cron or a phone call.
 2. **Give `/book` a service picker with "from $X/visit" pricing (S3-1 + S3-2).** (2026-09-26: the picker has since shipped behind `GATE_MULTI_SERVICE_BOOKING`; the price line is still open.) At audit time the SERVICES catalog with descriptions was already written but never rendered; per-visit engine pricing already exists. One screen + one price line removes the two biggest silent bounces in the paid-traffic funnel — booking the wrong-service default, and handing over a phone number for an unpriced visit.
 3. **Un-dead-end the two prospect-facing terminal states (S2-2 + S2-3).** Phone + retry on the service-outline error card, and "that number may not be on file — call us" after repeated failed logins. Both are copy-plus-one-conditional changes that recover sessions currently ending in a technical wall — the cheapest lost-sale patches in this report.
 

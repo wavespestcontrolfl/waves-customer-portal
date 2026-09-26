@@ -72,7 +72,7 @@ dual-vision analysis → multi-photo averaging → seasonal normalization → we
 `/assess` (requires `customerId` + `photos`, line 484–485), `/:assessmentId/snapshot`,
 `/history/:customerId`, `/baseline/:customerId`, `/latest/:customerId`, `/service/:serviceId`,
 `/reset-baseline`, `/confirm/:assessmentId`, `/override/:assessmentId`, `/customers`, plus
-recommendation/snapshot endpoints. **Baseline assignment has two paths: with `GATE_LAWN_PROPERTY_HISTORY` and `GATE_LAWN_VISIT_ASSESSMENT` both off, the insert in `server/routes/admin-lawn-assessment.js` marks a customer's first assessment as baseline; with either gate on, the insert writes `is_baseline: false` and confirmation promotes the baseline through `installConfirmedBaseline` (the /confirm route and `server/services/lawn-visit-runs.js`). A baseline-excluded quick assessment must bypass both.**
+recommendation/snapshot endpoints. **Baseline assignment has three paths: (1) with `GATE_LAWN_PROPERTY_HISTORY` and `GATE_LAWN_VISIT_ASSESSMENT` both off, the insert in `server/routes/admin-lawn-assessment.js` marks a customer's first assessment as baseline; (2) with only `GATE_LAWN_VISIT_ASSESSMENT` on, the insert writes `is_baseline: false` and confirmation in `server/services/lawn-visit-runs.js` sets `is_baseline = true` directly when the customer has no baseline yet; (3) with `GATE_LAWN_PROPERTY_HISTORY` on, confirmation promotes the baseline through `installConfirmedBaseline` (the /confirm route and `lawn-visit-runs.js`). A baseline-excluded quick assessment must bypass all three.**
 
 ### Delivery rails (all reusable, all mature)
 

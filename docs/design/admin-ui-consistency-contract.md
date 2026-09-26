@@ -36,7 +36,7 @@ These promotions cover presentation and component structure only. Existing data,
 - **Page title:** 22px / 1.3 / 500; 18px under 768px (`#4714`, 2026-09-24, `client/src/styles/ui-workspace.css`).
 - **Section title:** 18px / 1.35 / 500.
 - **Card title:** 14px / 1.4 / 500.
-- **Record identity:** `ui-record-title`: 29px / 1.25 / 500 on desktop, 23px on phones. This is the Customer workspace's large identity treatment; ordinary page titles remain 22px.
+- **Record identity:** `ui-record-title`: 29px / 1.25 / 500 on desktop, 23px on phones. This is the Customer workspace's large identity treatment; ordinary page titles remain 22px (18px under 768px).
 - **Body:** `text-ui-body`, 14px / 1.55 / 400 minimum. Long operational copy may use 15–16px.
 - **Caption:** `text-ui-caption`, 14px / 1.55 / 400. Compact density does not reduce the readable-text floor.
 - **Form label:** `Field` / `ui-label`, 14px / 1.55 / 500; input, select, and textarea text is 16px.

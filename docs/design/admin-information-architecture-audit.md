@@ -100,7 +100,7 @@ The old page file should be deleted only in a cleanup-only change after confirmi
 1. Add route-reachability regression coverage for every navigation destination.
 2. Completed: redirect Leads, Estimates, and Equipment Calibration to their existing canonical tabs while preserving query parameters and fragments.
 3. Completed: Compliance + Credentials and the Pricing hub now remove the largest conceptual duplicates without deleting capabilities.
-4. Completed: Auto Dispatch is now the Schedule Automation tab, and Lawn Protocol is the Services Protocol & Readiness area.
+4. Completed: Auto Dispatch now lives in the Agents workspace (`/admin/agents?tab=dispatch`; the old Schedule `tab=automation` entry redirects there), and Lawn Protocol is the Services Protocol & Readiness area.
 5. Completed: the Knowledge hub combines Wiki and Knowledge Base navigation while preserving both workflows and their nested URLs.
 6. Collect route telemetry for at least one normal operating cycle before deleting retired page components.
 7. Apply the UI consistency contract one completed hub at a time.

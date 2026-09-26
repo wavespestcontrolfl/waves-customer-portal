@@ -407,7 +407,7 @@ Tailwind v4 defaults plus two custom compound queries:
 
 ## 14. Portal alignment (waves-customer-portal)
 
-The customer-facing portal (LoginPage, EstimateViewPage, PortalPage, ReportViewPage, PublicBookingPage) consumes this style guide via `client/src/theme-brand.js`, which the customer pages import. Palette and fonts there should stay in sync with the tokens above.
+The customer-facing portal (for example LoginPage, EstimateViewPage, PortalPage, ReportViewPage, PublicBookingPage, RatePage, PayPageV2, TrackPage and the report view pages — grep `theme-brand` for the full list) consumes this style guide via `client/src/theme-brand.js`, which the customer pages import. Palette and fonts there should stay in sync with the tokens above.
 
 **Key equivalents:**
 

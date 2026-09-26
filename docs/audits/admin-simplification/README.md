@@ -109,7 +109,7 @@ second so Schedule remains the second desktop destination.
 Overview: Dashboard
 Operations: Schedule, Reports, Assessments, Services, Pricing, Equipment, Inventory, Compliance, Knowledge
 Sales: Customers, Pipeline, Agent Estimate [flag], Price Match, Contracts
-Communications: Communications, Email
+Communications: Communications (Email is its embedded owner-only tab; /admin/email redirects there)
 Finance: Invoices, Recovery, Payers, Banking, Taxes
 People: Staff, Recruiting
 Marketing: PPC, SEO, Social Media, Blog, Newsletter, Reviews, Referrals
