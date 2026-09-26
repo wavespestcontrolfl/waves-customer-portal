@@ -75,6 +75,15 @@ These constants in `R` decide what each stage *means* to the rest of billing:
   holds only while the prepay invoice reads paid).
 - `cancelled` + `renewal_decision = 'cancel'` — treated like
   `DECIDED_COVERED_STATUSES` for coverage (decided lapse keeps its window).
+  The WRITE side matches (ADMIN-BUG-R18): `refreshActiveTermsForCustomer` /
+  `refreshTermSnapshot` keep gap-fill reseeding and prepaid stamping for a
+  decided lapse through `term_end` (`isDecidedLapseInWindow`), so a visit
+  skipped after an "end of paid coverage" cancel is still replaced and a
+  hand-added replacement is still stamped. Cancel plan records the same shape
+  for "end now + refund", which pulls every visit first; the disposition on
+  the cancellation case (`snapshot.prepayDisposition`) tells them apart, and
+  an `end_now_refund` term is never reseeded or stamped
+  (`decidedLapseKeepsCoverage`).
 - `PAYMENT_PENDING_STATUS = 'payment_pending'` — payment reminders (3d/1d),
   card-expiry exemptions, `getPaymentPendingCustomerIds`.
 

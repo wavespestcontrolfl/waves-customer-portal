@@ -2776,6 +2776,47 @@ async function annualPrepayCoversVisit(scheduledService, conn = db, { throwOnErr
   }
 }
 
+// ADMIN-BUG-R18: a decided lapse (status 'cancelled' + renewal_decision
+// 'cancel', term_end not yet passed) is still paid coverage on the READ side
+// (coveredTermsAsOf's lapsedRenewalStillInTerm), so the WRITE side — gap-fill
+// reseeding of a skipped visit, attach + prepaid stamping of a hand-added
+// replacement — must keep running for it. recordDecision('cancel') flips the
+// status the moment the decision is recorded, not at term_end, and both
+// refresh paths used to stop at ACTIVE_STATUSES right there: a kept visit
+// skipped later was never replaced, and a hand-added replacement was never
+// stamped and so billed again at completion.
+function isDecidedLapseInWindow(term, today = etDateString()) {
+  return term?.status === 'cancelled'
+    && term.renewal_decision === 'cancel'
+    && dateOnly(term.term_end) >= today;
+}
+
+// Cancel plan records that same decided-lapse shape for two opposite
+// dispositions (admin-cancellation.js decideTermCancel): end_at_term keeps
+// every covered visit through term_end, end_now_refund pulls them all first
+// and owes the unused value back. The disposition is durable on the
+// cancellation case (snapshot.prepayTermId / prepayDisposition — the record
+// the cancel flow's own idempotency latch reads), so:
+// - an end_now_refund case for this term never reseeds or stamps: the office
+//   removed those visits on purpose and a refund is owed;
+// - otherwise a still-open linked visit (the calendar was kept — also a
+//   renewal-time lapse, which has no case) or a recorded end_at_term case
+//   keeps the guarantees. The case covers the boundary where the last kept
+//   visit was just skipped and no open linked visit is left.
+async function decidedLapseKeepsCoverage(term, conn = db) {
+  const dispositions = (await conn('cancellation_cases')
+    .where({ customer_id: term.customer_id })
+    .whereRaw("snapshot->>'prepayTermId' = ?", [String(term.id)])
+    .select(conn.raw("snapshot->>'prepayDisposition' AS disposition")))
+    .map((row) => row.disposition);
+  if (dispositions.includes('end_now_refund')) return false;
+  const kept = await conn('scheduled_services')
+    .where({ annual_prepay_term_id: term.id })
+    .whereNotIn('status', [...PREPAID_UPDATE_EXCLUDED_STATUSES])
+    .first('id');
+  return !!kept || dispositions.includes('end_at_term');
+}
+
 async function refreshTermSnapshot(termOrId, conn = db) {
   if (!(await annualPrepayTableExists())) return null;
   const term = typeof termOrId === 'object'
@@ -2803,7 +2844,9 @@ async function refreshTermSnapshot(termOrId, conn = db) {
   if (term.status !== PAYMENT_PENDING_STATUS) {
     await detachCallbacksFromTerm(term, conn);
   }
-  if (ACTIVE_STATUSES.includes(term.status)) {
+  const seedsCoverage = ACTIVE_STATUSES.includes(term.status)
+    || (isDecidedLapseInWindow(term) && await decidedLapseKeepsCoverage(term, conn));
+  if (seedsCoverage) {
     const ensured = await ensureCoverageRowsForTerm({ ...term, term_start: termStart, term_end: termEnd, coverage_cadence: coverageCadence }, conn);
     if (ensured?.effectiveTermEnd) windowEnd = ensured.effectiveTermEnd;
     // Attach + prepaid stamping run even on a palm-identity DEFERRAL
@@ -2849,13 +2892,23 @@ async function refreshActiveTermsForCustomer(customerId, conn = db) {
   if (!(await annualPrepayTableExists())) return [];
   if (!customerId) return [];
 
+  // ADMIN-BUG-R18: a decided lapse still in its window keeps its write-side
+  // coverage guarantees (isDecidedLapseInWindow); one that does not keep
+  // coverage (end_now_refund) is left untouched, exactly as before.
   const terms = await conn('annual_prepay_terms')
     .where({ customer_id: customerId })
-    .whereIn('status', ACTIVE_STATUSES)
+    .where(function activeOrDecidedLapseInWindow() {
+      this.whereIn('status', ACTIVE_STATUSES)
+        .orWhere(function decidedLapseInWindow() {
+          this.where({ status: 'cancelled', renewal_decision: 'cancel' })
+            .andWhere('term_end', '>=', etDateString());
+        });
+    })
     .select('*');
 
   const refreshed = [];
   for (const term of terms) {
+    if (!ACTIVE_STATUSES.includes(term.status) && !(await decidedLapseKeepsCoverage(term, conn))) continue;
     const snapshot = await refreshTermSnapshot(term, conn);
     if (snapshot) refreshed.push(snapshot);
   }
