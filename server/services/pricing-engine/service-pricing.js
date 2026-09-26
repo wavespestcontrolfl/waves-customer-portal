@@ -2598,15 +2598,15 @@ function resolveTreeShrubBedArea(property = {}, warnings = []) {
 // Internal: full recommendation result with reason codes. The recommended
 // tier is always the mandated 6-visit Standard; the reason codes are advisory
 // signals (admin UI, customer proposal) that the property warrants the full
-// program rather than the Light downsell. `recommendTreeShrubTier` is the
+// program (Light 4x is retired for new sales — grandfathered replay only). `recommendTreeShrubTier` is the
 // back-compat string-returning wrapper used by older callers and tests.
 function evaluateTreeShrubTierRecommendation(property = {}) {
   // 6-visit Standard is the MANDATED default program (protocol six_x). We
-  // always recommend it — the 4-visit Light tier (protocol four_x) is an
-  // available downsell for clean / low-pest-history landscapes but is never
-  // auto-recommended. The reason codes below are retained for admin/customer
-  // surfaces as "signals the property warrants the full 6x program" (i.e.
-  // reasons NOT to downsell to Light); they no longer change the tier.
+  // always recommend it. The 4-visit Light tier (protocol four_x) was retired
+  // for new sales 2026-09-24 and is priced only to replay the grandfathered
+  // quarterly plan. The reason codes below are retained for admin/customer
+  // surfaces as "signals the property warrants the full 6x program"; they
+  // never change the tier.
   let bedArea = 0;
   let bedAreaFromFallback = false;
   if (hasPositivePricingNumber(property.bedArea)) {
@@ -2920,7 +2920,15 @@ function priceTreeShrub(property, options = {}) {
     recommendedTier,
     recommendationReasons,
     recommended: tier === recommendedTier,
-    availableTiers: Object.keys(TREE_SHRUB.tiers),
+    // Light (4x/quarterly) is hidden:true (owner directive 2026-09-24) — out
+    // of the default offered list, same as priceLawnCare's customer-facing
+    // tiers array. options.includeHiddenTiers (the internal/legacy escape
+    // hatch, mirroring priceLawnCare's) restores the full key set for a
+    // caller that genuinely needs it (e.g. rendering the one grandfathered
+    // quarterly customer's existing plan).
+    availableTiers: options.includeHiddenTiers
+      ? Object.keys(TREE_SHRUB.tiers)
+      : Object.keys(TREE_SHRUB.tiers).filter((k) => !TREE_SHRUB.tiers[k].hidden),
     frequency,
     // Expose visitsPerYear (mirrors `frequency`) so cost/audit consumers that
     // key off visits — admin-pricing-config margin preview, estimate-pricing

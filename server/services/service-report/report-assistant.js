@@ -1,4 +1,3 @@
-const db = require('../../models/db');
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
 
 const PRODUCT_INSIGHTS = [
@@ -15,7 +14,11 @@ const PRODUCT_INSIGHTS = [
     customerMeaning: 'This adds a faster-acting residual barrier on exterior surfaces where crawling insects travel.',
   },
   {
-    match: /90\/10|nonionic|surfactant|lesco/i,
+    // Exact chemistry terms only (AW-07): a brand name alone (e.g. "LESCO",
+    // which sells fertilizers as well as adjuvants) is not reliable evidence
+    // of what a product actually is. Category-based classification below
+    // covers a catalog-approved adjuvant whose name doesn't use these words.
+    match: /90\/10|nonionic\s*surfactant|\bsurfactant\b/i,
     role: 'spray adjuvant',
     customerMeaning: 'This is not the insecticide. It helps the spray mix wet and spread more evenly on treated surfaces.',
   },
@@ -117,38 +120,48 @@ function productName(app = {}) {
   return cleanText(app.product?.name || app.productName || app.product_name || 'Treatment');
 }
 
-function productContextFor(app = {}, productContext = {}) {
-  const byApplicationId = productContext.byApplicationId || {};
-  const byProductName = productContext.byProductName || {};
-  return byApplicationId[app.id]
-    || byProductName[normalizeKey(productName(app))]
-    || {};
+// AW-07: classify from the approved catalog product_type/category (frozen or
+// live-approved — whichever report-data.js's attachApprovedReportProductFacts
+// already resolved onto app.product) before falling back to exact
+// product/ingredient text matches. A brand name alone is never sufficient
+// evidence of chemistry or function (a brand covers multiple product types).
+function categoryInsightFor(app = {}) {
+  const product = app.product || {};
+  // Only approved catalog facts may drive a chemistry claim; a frozen-null or
+  // unapproved product still carries its recorded category string.
+  if (!product.facts_approved) return null;
+  const productType = String(product.product_type || '').toLowerCase();
+  const category = String(product.category || '').toLowerCase();
+  if (productType === 'wetting_agent' || /\b(surfactant|adjuvant|wetting agent)\b/.test(category)) {
+    return {
+      role: 'spray adjuvant',
+      customerMeaning: 'This is not the insecticide. It helps the spray mix wet and spread more evenly on treated surfaces.',
+    };
+  }
+  return null;
 }
 
-function insightFor(app = {}, meta = {}) {
+function insightFor(app = {}) {
+  const categoryInsight = categoryInsightFor(app);
+  if (categoryInsight) return categoryInsight;
   const haystack = [
     productName(app),
     app.product?.active_ingredient,
     app.product?.activeIngredient,
-    meta.active_ingredient,
-    meta.activeIngredient,
-    meta.name,
   ].join(' ');
   return PRODUCT_INSIGHTS.find((insight) => insight.match.test(haystack)) || null;
 }
 
-function activeIngredientFor(app = {}, meta = {}) {
+function activeIngredientFor(app = {}) {
   return cleanText(
     app.product?.active_ingredient
     || app.product?.activeIngredient
-    || meta.active_ingredient
-    || meta.activeIngredient
-    || insightFor(app, meta)?.activeIngredient
+    || insightFor(app)?.activeIngredient
   );
 }
 
-function epaRegFor(app = {}, meta = {}) {
-  return cleanText(app.product?.epa_reg || app.product?.epaReg || meta.epa_reg_number || meta.epaRegNumber);
+function epaRegFor(app = {}) {
+  return cleanText(app.product?.epa_reg || app.product?.epaReg);
 }
 
 function rateText(app = {}) {
@@ -165,20 +178,9 @@ function rateText(app = {}) {
   return '';
 }
 
-function rainfastText(meta = {}) {
-  const minutes = Number(meta.rainfast_minutes ?? meta.rainfastMinutes);
-  if (!Number.isFinite(minutes) || minutes <= 0) return '';
-  if (minutes < 60) return `rainfast about ${Math.round(minutes)} min`;
-  const hours = minutes / 60;
-  return `rainfast about ${Number.isInteger(hours) ? hours : hours.toFixed(1)} hr`;
-}
-
-function reiText(meta = {}) {
-  const hours = Number(meta.rei_hours ?? meta.reiHours);
-  if (!Number.isFinite(hours) || hours <= 0) return '';
-  return `label REI ${hours} hr`;
-}
-
+// No re-entry or rainfast figure is rendered here: customer surfaces never
+// carry a fixed re-entry/drying duration (AGENTS.md compliance language) —
+// the re-entry answer gives the once-dry guidance instead.
 function applicationScope(data = {}) {
   const apps = Array.isArray(data.applications) ? data.applications : [];
   const serviceAreas = Array.isArray(data.serviceAreas) ? data.serviceAreas : [];
@@ -217,7 +219,7 @@ function conditionSummary(conditions = {}) {
   return `${source || 'Application conditions'}: ${facts.join(', ')}.`;
 }
 
-function answerAppliedToday({ data = {}, productContext = {} } = {}) {
+function answerAppliedToday({ data = {} } = {}) {
   const applications = Array.isArray(data.applications) ? data.applications : [];
   if (!applications.length) return 'No product applications were recorded on this report.';
 
@@ -232,16 +234,15 @@ function answerAppliedToday({ data = {}, productContext = {} } = {}) {
   ]);
 
   const lines = applications.slice(0, 4).map((app) => {
-    const meta = productContextFor(app, productContext);
-    const insight = insightFor(app, meta);
+    const insight = insightFor(app);
     const name = productName(app);
     const method = cleanText(app.methodLabel || reportEnumLabel(app.method));
     const area = cleanText(app.applicationArea || app.area);
     const targets = Array.isArray(app.targets) && app.targets.length
       ? `targets ${app.targets.map(reportEnumLabel).join(', ')}`
       : '';
-    const active = activeIngredientFor(app, meta);
-    const epa = epaRegFor(app, meta);
+    const active = activeIngredientFor(app);
+    const epa = epaRegFor(app);
     const technical = compact([
       insight?.role,
       active ? `active ingredient: ${active}` : '',
@@ -249,8 +250,6 @@ function answerAppliedToday({ data = {}, productContext = {} } = {}) {
       area ? `area: ${area}` : '',
       targets,
       rateText(app),
-      rainfastText(meta),
-      reiText(meta),
       epa ? `EPA Reg. ${epa}` : '',
     ]);
     const meaning = insight?.customerMeaning ? ` ${insight.customerMeaning}` : '';
@@ -437,7 +436,6 @@ function answerServiceReportQuestion({
   question,
   data,
   nextAppointment,
-  productContext,
 } = {}) {
   const q = String(question || '').toLowerCase();
 
@@ -490,7 +488,7 @@ function answerServiceReportQuestion({
   }
 
   if (/\b(treat|treated|product|application|spray|bait|chemical|applied)\b/.test(q)) {
-    return answerAppliedToday({ data, productContext });
+    return answerAppliedToday({ data });
   }
 
   if (/\b(do|next step|recommend|recommendation|action|mulch|follow up|follow-up)\b/.test(q)) {
@@ -512,58 +510,8 @@ function answerServiceReportQuestion({
   return 'This service is complete. You can review the treatment map, applications, findings, conditions, and customer advisory on this report.';
 }
 
-async function loadReportAssistantProductContext(data = {}, knex = db) {
-  const applications = Array.isArray(data.applications) ? data.applications : [];
-  const ids = unique(applications.map((app) => app.product?.catalogId || app.product?.catalog_id));
-  const names = unique(applications.map(productName));
-  if (!ids.length && !names.length) return { byApplicationId: {}, byProductName: {} };
-
-  try {
-    const rows = await knex('products_catalog')
-      .where(function productLookup() {
-        if (ids.length) this.whereIn('id', ids);
-        if (names.length) this.orWhereIn('name', names);
-      })
-      .select(
-        'id',
-        'name',
-        'active_ingredient',
-        'epa_reg_number',
-        'moa_group',
-        'irac_group',
-        'frac_group',
-        'hrac_group',
-        'formulation',
-        'rainfast_minutes',
-        'rei_hours',
-        'reentry_text',
-        'label_url',
-        'sds_url',
-        'label_source_note',
-        'label_verified_at',
-        'requires_surfactant',
-        'allows_surfactant',
-      );
-    const byId = new Map(rows.map((row) => [String(row.id), row]));
-    const byName = new Map(rows.map((row) => [normalizeKey(row.name), row]));
-    return applications.reduce((ctx, app) => {
-      const meta = byId.get(String(app.product?.catalogId || app.product?.catalog_id || ''))
-        || byName.get(normalizeKey(productName(app)))
-        || {};
-      if (Object.keys(meta).length) {
-        ctx.byApplicationId[app.id] = meta;
-        ctx.byProductName[normalizeKey(productName(app))] = meta;
-      }
-      return ctx;
-    }, { byApplicationId: {}, byProductName: {} });
-  } catch {
-    return { byApplicationId: {}, byProductName: {} };
-  }
-}
-
 module.exports = {
   answerServiceReportQuestion,
   answerAppliedToday,
   answerNextSteps,
-  loadReportAssistantProductContext,
 };

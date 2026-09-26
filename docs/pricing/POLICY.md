@@ -68,22 +68,28 @@ swings without re-pricing the whole bracket.
 ### Tree & Shrub program cadence (tiers)
 **Where:** `constants.js` `TREE_SHRUB.tiers`, `recommendedTier`.
 
-| Tier | Visits/yr | Material rate ($/sqft/yr) | Monthly floor | Status |
-|---|---|---|---|---|
-| Light | 4 | 0.075 | $40 | downsell (manual only) |
-| **Standard** | **6** | **0.110** | **$50** | **mandated default** |
-| ~~Enhanced~~ | ~~9~~ | ~~0.190~~ | ~~$65~~ | retired (→ Standard) |
-| ~~Premium~~ | ~~12~~ | ~~0.220~~ | ~~$80~~ | retired (→ Standard) |
+| Tier | Visits/yr | Monthly floor | Status |
+|---|---|---|---|
+| **Standard** | **6** | **$35** | **mandated default** |
+| Enhanced | 9 | $48 | live upsell (un-retired 2026-07-23), never auto-recommended |
+| ~~Light~~ | ~~4~~ | ~~$22~~ | retired for new sales 2026-09-24 (grandfathered quarterly plans only) |
+| ~~Premium~~ | ~~12~~ | — | retired (→ Standard) |
+
+Material is the bottom-up `TREE_SHRUB.materialModel` (v4.6), not a flat
+$/sqft rate.
 
 **Meaning.** The 6-visit Standard program is the mandated default and the only
 auto-recommended tier — it matches the `six_x` cadence in the "10/10 SWFL Tree
-& Shrub Protocol" (`server/config/protocols.json`). Light (4x) maps to the
-protocol's `four_x` cadence ("best for cleaner properties with low pest
-history") and is offered only as a manual downsell. Material rate is an annual
-$/sqft; Light ≈ 4/6 of Standard because product spend scales with the number
-of applications.
+& Shrub Protocol" (`server/config/protocols.json`). Enhanced (9x, every 6
+weeks) is a customer-selectable upsell. Light (4x, protocol `four_x`) was
+retired for new sales by owner directive 2026-09-24:
+`TREE_SHRUB.tiers.light.hidden` drops it from every offering surface and
+`RETIRED_SALE_SERVICE_KEYS` (`retired-sale-catalog.js`) keeps the
+`tree_shrub_quarterly` catalog row out of sales and agent catalogs. The engine
+still prices an explicit `light` request only to replay the grandfathered
+quarterly plan.
 
-**Why Enhanced/Premium were retired (v4.5).** The documented protocol tops out
+**History — why Enhanced/Premium were retired (v4.5).** The documented protocol tops out
 at 6 visits, but the engine had sold a 9-visit Enhanced default (and a
 deprecated 12-visit Premium), charging labor + amortized material for visits
 that were never scheduled. The default also auto-escalated to Enhanced on any

@@ -28,15 +28,22 @@ function selectedTermiteAnnualPlanRows(estimateData) {
   const result = estimateData?.result && typeof estimateData.result === 'object'
     ? estimateData.result
     : estimateData;
-  const mapped = authoritativeMappedTermiteEnvelope(estimateData);
-  if (mapped) return isPlan(mapped.plan) ? [mapped] : [];
-  const rawLines = [result?.lineItems, estimateData?.engineResult?.lineItems]
-    .flatMap((list) => (Array.isArray(list) ? list : []))
-    .filter((li) => String(li?.service || '').toLowerCase() === 'termite_bait' && isPlan(li?.plan));
+  // The one-time station-setup row lives at result.oneTime.items regardless
+  // of which shape supplied the recurring annual line below — computed once
+  // and reused by both branches (codex P1, slice 3a restructure: the
+  // mapped-envelope branch used to return early WITHOUT it, so a real
+  // V1-mapper-shaped estimate — the current production shape — silently
+  // dropped its disclosed setup fee from every downstream reader of this
+  // helper, including the billing snapshot).
   const setupItems = [result?.oneTime?.items]
     .flatMap((list) => (Array.isArray(list) ? list : []))
     .filter((item) => String(item?.service || '').toLowerCase() === 'termite_bait_installation'
       && String(item?.kind || '').toLowerCase() === 'setup');
+  const mapped = authoritativeMappedTermiteEnvelope(estimateData);
+  if (mapped) return isPlan(mapped.plan) ? [mapped, ...setupItems] : [];
+  const rawLines = [result?.lineItems, estimateData?.engineResult?.lineItems]
+    .flatMap((list) => (Array.isArray(list) ? list : []))
+    .filter((li) => String(li?.service || '').toLowerCase() === 'termite_bait' && isPlan(li?.plan));
   return [...rawLines, ...setupItems];
 }
 

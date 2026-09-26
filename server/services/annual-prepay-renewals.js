@@ -542,6 +542,20 @@ function coverageFamilyIsPalm(coverageServiceType) {
   }
 }
 
+// A termite annual (sign-before-pay) ORIGINAL term — identified by the
+// annual_plan_version stamp termite-annual-activation.js writes in the same
+// transaction that mints the term, before its invoice can be paid (renewal
+// successors carry renewed_from_term_id) — whose installation has not
+// anchored it yet. Its coverage visits wait for that anchor.
+function coverageAwaitsInstallation(term) {
+  return !!term?.annual_plan_version && !term.renewed_from_term_id && !term.installation_anchored_at;
+}
+
+function isInstallationAnchorRow(term, row) {
+  return term?.installation_anchor_visit_id != null && row?.id != null
+    && String(row.id) === String(term.installation_anchor_visit_id);
+}
+
 async function coverageRowsForTerm(term, conn = db, { includeTerminalStatuses = false } = {}) {
   const coverageServiceType = normalizeCoverageServiceType(term?.coverage_service_type);
   const coverageVisitCount = normalizeCoverageVisitCount(term?.coverage_visit_count);
@@ -576,7 +590,13 @@ async function coverageRowsForTerm(term, conn = db, { includeTerminalStatuses = 
   // the normal case has none and costs nothing extra.
   const releasedTermIds = await releasedTermIdsForCustomer(conn, ambiguousForeignTermIds(term, filtered));
   const isCommittedToTerm = (row) => rowCommittedToTerm(term, row, releasedTermIds);
-  let matching = filtered.filter((row) => serviceMatchesCoverage(row, coverageServiceType));
+  // The installation visit an anchored termite annual term was anchored to
+  // is this term's by explicit identity (installation_anchor_visit_id), not
+  // by service-type text — it counts as the coverage year's visit even when
+  // it was booked under an installation label the coverage text does not
+  // match, so anchoring never seeds a second visit beside it.
+  let matching = filtered.filter((row) => isInstallationAnchorRow(term, row)
+    || serviceMatchesCoverage(row, coverageServiceType));
   // A row explicitly linked to a DIFFERENT term never counts toward THIS
   // term's coverage, for EVERY coverage family (not only palm — the palm
   // branch below already re-applies this, redundantly but harmlessly, as
@@ -720,6 +740,18 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
   if (!term?.customer_id || !coverageServiceType || !coverageVisitCount || !termStart || !termEnd) {
     return { createdCount: 0, targetDates: [], reason: 'coverage_not_configured' };
   }
+  // Termite annual plan (sign before pay, codex #4819 r6 P1): the signed
+  // agreement's coverage year begins at the station installation, and
+  // activation books no visit — so nothing is seeded until the term is
+  // installation-anchored (termite-annual-activation.js). Seeding at the
+  // provisional signature-day start would put a phantom visit on the board
+  // that the install-scheduling handoff cannot see. Checked here, the one
+  // seeding decision every caller (payment sync, refresh, sweeps) reaches.
+  if (coverageAwaitsInstallation(term)) {
+    return {
+      createdCount: 0, targetDates: [], effectiveTermEnd: termEnd, reason: 'awaiting_installation',
+    };
+  }
   const cols = await scheduledServiceColumns();
   if (!cols.scheduled_date || !cols.service_type) {
     return { createdCount: 0, targetDates: [], reason: 'scheduled_columns_missing' };
@@ -767,8 +799,12 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
   const anchorLagDays = daysUntil(mintAnchor, paidAnchor);
   let effectiveTermEnd = termEnd;
   // The slide only happens where it can also be PERSISTED — an in-memory-only
-  // extension would seed visits the stored window doesn't cover.
-  if (!alreadyActivated && anchorLagDays != null && anchorLagDays > 0 && (await annualPrepayColumns(conn)).term_end) {
+  // extension would seed visits the stored window doesn't cover. An
+  // installation-anchored termite term never slides: its window IS the
+  // installation date + 12 months, and the anchoring sweep runs after the
+  // installation, so the lag would otherwise stretch every anchored year.
+  if (!alreadyActivated && !term?.installation_anchored_at
+    && anchorLagDays != null && anchorLagDays > 0 && (await annualPrepayColumns(conn)).term_end) {
     effectiveTermEnd = addDaysYmd(termEnd, anchorLagDays);
     // Never slide into a successor term: a long-pending invoice can be paid
     // after the customer already bought the NEXT year, and overlapping paid
@@ -4696,6 +4732,11 @@ async function createTermForAnnualPrepay({
   coverageCadence = undefined,
   firstVisitDate = undefined,
   firstVisitWindowStart = undefined,
+  // Termite annual plan marker (codex #4819 r7 P1). Written WITH the row so
+  // the refreshTermSnapshot below already sees coverageAwaitsInstallation():
+  // stamped after this returns, the first refresh would seed a signature-day
+  // coverage visit before the installation ever anchors the term.
+  annualPlanVersion = undefined,
   conn = db,
 } = {}) {
   if (!(await annualPrepayTableExists())) return null;
@@ -4784,6 +4825,9 @@ async function createTermForAnnualPrepay({
     }
     if (termCols.first_visit_window_start && normalizedFirstVisitWindowStart !== undefined) {
       updates.first_visit_window_start = normalizedFirstVisitWindowStart;
+    }
+    if (termCols.annual_plan_version && annualPlanVersion && !existing.annual_plan_version) {
+      updates.annual_plan_version = annualPlanVersion;
     }
     await conn('annual_prepay_terms').where({ id: existing.id }).update(updates);
     // When the coverage window is edited (start/end actually supplied), detach
@@ -4941,6 +4985,9 @@ async function createTermForAnnualPrepay({
   }
   if (termCols.first_visit_window_start && normalizedFirstVisitWindowStart !== undefined) {
     insert.first_visit_window_start = normalizedFirstVisitWindowStart;
+  }
+  if (termCols.annual_plan_version && annualPlanVersion) {
+    insert.annual_plan_version = annualPlanVersion;
   }
 
   const [term] = await conn('annual_prepay_terms').insert(insert).returning('*');
@@ -5724,6 +5771,11 @@ module.exports = {
   // term as "still deciding" add PAYMENT_PENDING_STATUS explicitly.
   ACTIVE_STATUSES,
   PAYMENT_PENDING_STATUS,
+  // The cadence a term will actually run at (explicit cadence, else the
+  // service-type wording, else the stored visit count) — the prepay
+  // routes' retired-plan gate reads the same inference the coverage
+  // schedule is built from (codex r17 on #4786).
+  inferCoverageCadence,
   _private: {
     PENDING_COMPLETION_REVERSAL_IDENTITIES,
     dateOnly,

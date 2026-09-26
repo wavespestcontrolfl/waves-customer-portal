@@ -285,6 +285,71 @@ row still resolves to a retired lawn cadence — any tier hidden via
 removed 4x/quarterly — by explicit cadence, visit count, or the cadence's
 catalog key (`lawn_care_recurring` for 6x). The customer picks a current lawn
 option or the office requotes; the accept never silently reprices at 9x.
+
+The same accept path answers 409 `{ error, reason:
+'retired_tree_shrub_cadence_selection' }` when a recurring tree & shrub row
+still resolves to a retired T&S cadence — 4x/Light/quarterly (hidden via
+`TREE_SHRUB.tiers.light.hidden` since 2026-09-24, catalog key
+`tree_shrub_quarterly`) or the already-retired 12x/Premium — by explicit
+cadence, visit count, cadence wording, catalog key, or an explicit tier field
+(`tier` / `tierKey` / `serviceTier` / `selectedTier`, any spelling).
+9x/Enhanced and 6x/Standard stay current. One existing customer's already-scheduled quarterly program is
+grandfathered and untouched by this gate; it only blocks a NEW self-serve
+accept from landing on the retired cadence.
+
+GET `/api/estimates/:token/data` narrows to match (2026-09-24): a saved
+estimate's `pricing.frequencies` tree & shrub ladder omits any 4x/Light (and
+12x/Premium) entry, so only Standard 6x / Enhanced 9x cards render. What the
+response does next depends on what is left:
+- **Mixed ladder** (the saved ladder still has a 6x or 9x entry): self-service
+  stays on and no quote requirement is added, even when the stored recurring
+  T&S row is itself 4x. The customer must pick a current card: the selection
+  restamps the row to that tier (cadence, visit count, catalog key and tier
+  fields) before accept. A PUT `/accept` that still carries the retired row
+  (no current T&S selection) gets the 409 `retired_tree_shrub_cadence_selection`
+  above.
+- **All-retired ladder** (only Light and/or Premium entries), or no tier ladder
+  at all with a stored recurring T&S row at a retired cadence: the response's
+  quote requirement is `{ quoteRequired: true, reason:
+  'retired_tree_shrub_cadence_requote' }` with the friendly "call Waves to
+  refresh your tree & shrub plan" copy, so the page shows the requote state
+  instead of an acceptable card.
+
+The same retired-cadence gate applies to staff-side manual acceptance (Mark
+Won / phone accept) and to booking from a linked not-yet-accepted estimate
+(409 before any appointment is written). Estimates accepted before the
+retirement are unaffected.
+
+Termite annual plan sign-before-pay (dark behind `GATE_TERMITE_ANNUAL_PLAN`,
+or an annual-plan offer already delivered before the gate turned off): a
+`prepay_annual` accept of the Subterranean Termite Protection annual plan
+PARKS — the estimate is stamped `annual_plan_activation_status =
+'awaiting_signature'` with the accept-time opts and the frozen accepted
+price (annual fee net of discount, setup lines, tax, total) and nothing is
+billed, booked or charged. The in-lane prepay charge quote never applies to
+it (no `402 PREPAY_CHARGE_QUOTE` round-trip, no card capture, no due-today);
+a selected slot hold is released, not committed, and an existing
+appointment is not adopted — the pick is kept only as a staff scheduling
+preference. The success payload carries `invoiceKind:
+'annual_prepay_deferred'`, `invoiceId`/`invoicePayUrl` null,
+`invoiceAmount`/`prepayInvoiceAmount` = the frozen accepted total (setup
+lines and tax included — the figure the signature-time invoice bills, never
+a re-derived display amount), `billingTerm: 'prepay_annual'` and `nextStep:
+'sign_agreement'`; the success card and accept notifications tell the
+customer to sign — signing starts the plan and its billing, and the 12-month
+coverage begins on the installation date — never "approved, invoice to
+follow". The
+already-accepted retry returns the same shape while the agreement is
+unsigned, and `invoiceKind: 'annual_prepay_activation_pending'` with
+`nextStep: 'activation_pending'` once it is signed but the plan has not
+finished activating (the signing link is burned by then). Signing the
+annual agreement at `/api/contracts/:token/sign` activates the plan after
+the sign transaction commits (`termite-annual-activation.js`, retried by the
+daily reconcile sweep): it bills exactly the frozen price, charges the
+customer's enrolled payment method once (capped at the frozen total; owner
+ruling 2026-09-25, behind `GATE_PREPAY_CARD_AND_CHARGE`), and sends the pay
+link only when there is no enrolled method, charging is off, or the charge
+definitively failed. The sign response itself is unchanged.
 `durationMinutes` and `windowEnd` describe the whole work block; arrival copy
 remains start plus 120 minutes. One assignable technician must have no selected
 service capability explicitly disabled. The allocation stamp is server-owned
@@ -959,6 +1024,14 @@ the quote invitation and booking confirmations retain their existing paths.
 A refused website publication
 withholds the booking handoff. Legacy callers keep their current `/book`
 handoff. Ordinary website lead forms do not opt into this route.
+`services.treeShrub.tier` is validated (2026-09-24, codex P1 round 2): a
+present tier must be a currently-sold one (`standard`/`enhanced`) or the
+route answers 400 before pricing — `light` (4x/quarterly, retired for new
+sales) and any unrecognized value are refused rather than silently priced
+or forwarded unchanged. Absent stays absent (the engine's own `standard`
+default runs, via `TREE_SHRUB.defaultTier` — the mandated 6x program, not
+`enhanced`). A narrowing of the existing payload contract, not a new
+field.
 Address-verification guard (2026-09-23): when the SERVER-trusted property
 profile (the cache-only `performPropertyLookup` re-read, or the lookup
 stage's own server-written `extracted_data.address_unverified` on the
@@ -1266,7 +1339,23 @@ Mounted at `server/index.js` → `routes/public-services-menu.js`; payload is
 with `Cache-Control: public, max-age=300` on success and `no-store` on
 error; inherits the global `/api/` IP rate limit. Consumed by the Astro
 quote form, so its item shape is a spoke-fleet contract per CLAUDE.md
-rule 18 — additive changes only).
+rule 18 — additive changes only, with ONE documented exception: a catalog
+row the menu previously advertised can be RETIRED from it via
+`services.public_quote_selectable=false` (owner directive, mirrors a
+retired cadence tier — e.g. `lawn_care_recurring` 2026-09-24,
+`tree_shrub_quarterly` 2026-09-24) — the item disappears from `items` on
+the NEXT menu fetch, but never breaks a caller that already has the old
+payload cached: `services/public-services-menu.js`'s `FORMERLY_PUBLIC_KEYS`
+denylist keeps posting that key to `/api/public/quote/calculate` resolving
+(never a 404/500) as a quote-on-request lead — never instant-priced,
+never silently repriced at a different tier. `is_active` stays true either
+way (historic/scheduled visits still reference the row); `customer_visible`
+is a separate, per-row decision independent of this menu removal —
+`tree_shrub_quarterly` keeps `customer_visible=true` (20260924020010,
+superseding 20260924020000's flip of that one flag) specifically so an
+existing customer's tracking-page visit summary is unaffected, while
+`lawn_care_recurring` set it false too since it has no such grandfathered
+dependency).
 `/api/public/service-areas` (read-only canonical SWFL city list — no auth, no
 token, public `Cache-Control`. Consumed by the Astro build and the admin blog
 UI; no PII).
@@ -1276,8 +1365,15 @@ Ranges are computed from the live pricing engine (DB-authoritative
 pricing_config) so the published numbers cannot drift from admin-edited
 pricing; owner ruling 2026-08-06 approved publishing ranges for all
 residential services. Consumed by the Astro build for the agent-readable
-/pricing.md surface and directly by AI agents. Exact per-property pricing
-stays on POST /api/public/quote/calculate).
+/pricing.md surface and directly by AI agents (both surfaces read this
+same computed payload — neither carries its own copy of the sweep).
+Exact per-property pricing stays on POST /api/public/quote/calculate.
+The `tree_shrub_care` row contracted with the Light tier's retirement
+(2026-09-24): the sweep is now `standard`/`enhanced` only (`light` dropped
+from the tier sweep the same way the lawn row above dropped its retired
+6x column), so the published low end is Standard-derived (`low` ≈ $28,
+was lower under Light's cheaper 4x rate) and `notes` now reads "6 or 9
+applications per year by tier" instead of the old 4/6/9 wording).
 `/api/public/credentials` (+ `/api/public/credentials/:slug`) (read-only
 canonical FDACS / license / insurance numbers — no auth, no token, public
 `Cache-Control`. Consumed by the Astro content build; intentionally public
@@ -2492,7 +2588,19 @@ expose only already-public data: customer-visible catalog rows (price
 columns excluded AND `description` excluded — tighter than /api/mcp
 get_service, because catalog descriptions are admin-editable free text
 that is neither compliance-curated nor price-synced and must not reach an
-anonymous surface),
+anonymous surface). `list_services`/`get_service` additionally exclude
+`services/pricing-engine/retired-sale-catalog.js`'s `RETIRED_SALE_SERVICE_KEYS`
+denylist (currently only `tree_shrub_quarterly`) even when a row's own
+`customer_visible=true` — this is deliberately narrower than
+`public-services-menu.js`'s `FORMERLY_PUBLIC_KEYS` (which also carries
+still-active services, e.g. foam/termite/rodent keys, that are merely off
+the public quote MENU); MCP's catalog would otherwise promise a narrower
+service list than it actually serves. `tree_shrub_quarterly` is the
+first key excluded this way rather than by `customer_visible=false`
+(2026-09-24; see the services/menu entry above for why its customer_visible
+stays true), so a retired catalog row never becomes agent-discoverable
+again just because its customer_visible flag serves an unrelated
+customer-facing surface,
 the /api/public/pricing-ranges payload via its shared fail-closed producer,
 the service-areas table, and a static description of the
 /api/public/quote/calculate HTTP contract (how_to_request_quote). No

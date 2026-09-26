@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const logger = require('./logger');
+const { RETIRED_SALE_SERVICE_KEYS } = require('./pricing-engine/retired-sale-catalog');
 const { isMistingSystemService } = require('../utils/mosquito-misting-system');
 
 const ROOT = path.resolve(__dirname, '..', '..');
@@ -579,6 +580,9 @@ async function searchServiceLibrary(db, terms) {
       .where(function activeServices() {
         this.where({ is_active: true }).orWhereNull('is_active');
       })
+      // Retired-for-sale rows stay active only for grandfathered plans; a
+      // general sales-support lookup must never present them as offered.
+      .whereNotIn('service_key', [...RETIRED_SALE_SERVICE_KEYS])
       .where(function relevantServices() {
         for (const term of terms) {
           const like = `%${term}%`;
@@ -1129,6 +1133,7 @@ module.exports = {
   serviceKeysFromContext,
   serviceFamiliesFromText,
   searchTermsFromContext,
+  searchServiceLibrary,
   // Exported for direct allowlist-mechanism testing only — production code
   // never mutates this array. See its definition for why it is empty today.
   KNOWLEDGE_ENTRIES_CUSTOMER_SAFE_CATEGORIES,

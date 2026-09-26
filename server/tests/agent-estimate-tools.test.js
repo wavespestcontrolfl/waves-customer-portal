@@ -1555,6 +1555,78 @@ describe('Agent Estimate compute input boundary', () => {
     expect(mockGenerateEstimate).not.toHaveBeenCalled();
   });
 
+  // codex P1 round 2 pre-push (2026-09-24): treeShrub is an unconstrained
+  // object in this tool's schema, and priceTreeShrub intentionally keeps
+  // pricing an explicit tier:'light' for legacy stored-plan replay
+  // elsewhere — so nothing here stopped a brand-new four-visit draft from
+  // pricing and persisting. This is a new-draft boundary (every Agent
+  // Estimate draft is source='ai_agent'), never a replay of the one
+  // grandfathered customer's real plan.
+  test('rejects tier:"light" (retired 2026-09-24) on a new compute_estimate draft', async () => {
+    const result = await executeEstimateTool('compute_estimate', {
+      homeSqFt: 2000,
+      services: { treeShrub: { tier: 'light' } },
+    });
+
+    expect(result.error).toMatch(/not a currently sold program/i);
+    expect(result.error).toMatch(/light/i);
+    expect(mockGenerateEstimate).not.toHaveBeenCalled();
+  });
+
+  test('rejects the already-retired tier:"premium" too, and still allows the sold tiers', async () => {
+    const retired = await executeEstimateTool('compute_estimate', {
+      homeSqFt: 2000,
+      services: { treeShrub: { tier: 'premium' } },
+    });
+    expect(retired.error).toMatch(/not a currently sold program/i);
+    expect(mockGenerateEstimate).not.toHaveBeenCalled();
+
+    mockGenerateEstimate.mockReturnValueOnce(LAWN_TREE_ENGINE_RESULT);
+    const sold = await executeEstimateTool('compute_estimate', {
+      homeSqFt: 2000,
+      services: { treeShrub: { tier: 'enhanced' } },
+    });
+    expect(sold.error).toBeUndefined();
+    expect(mockGenerateEstimate).toHaveBeenCalled();
+  });
+
+  // codex P1 round 3 pre-push: this guard must use the POSITIVE
+  // isSellableTreeShrubTier allowlist (same as property-lookup-v2.js and
+  // public-quote.js), not the negative isRetiredTreeShrubTier — the
+  // negative form only names 'light'/'premium' and would silently pass a
+  // malformed/hallucinated tier value straight through to pricing.
+  test('rejects a malformed/unknown tier value that was never actually retired', async () => {
+    const result = await executeEstimateTool('compute_estimate', {
+      homeSqFt: 2000,
+      services: { treeShrub: { tier: 'gold' } },
+    });
+    expect(result.error).toMatch(/not a currently sold program/i);
+    expect(result.error).toMatch(/gold/i);
+    expect(mockGenerateEstimate).not.toHaveBeenCalled();
+  });
+
+  // validateAgentEngineInput gates the revision path (computeAgentDraftPreview,
+  // used by both create_agent_estimate_draft and the revise-after-feedback
+  // flow) — the same retired-tier check, tested directly since it's a pure
+  // function.
+  test('validateAgentEngineInput rejects retired T&S tiers and unknown tiers, allows the sold ones and an absent tier', () => {
+    expect(_private.validateAgentEngineInput({
+      homeSqFt: 2000, services: { treeShrub: { tier: 'light' } },
+    })).toMatch(/not a currently sold program/i);
+    expect(_private.validateAgentEngineInput({
+      homeSqFt: 2000, services: { treeShrub: { tier: 'premium' } },
+    })).toMatch(/not a currently sold program/i);
+    expect(_private.validateAgentEngineInput({
+      homeSqFt: 2000, services: { treeShrub: { tier: 'gold' } },
+    })).toMatch(/not a currently sold program/i);
+    expect(_private.validateAgentEngineInput({
+      homeSqFt: 2000, services: { treeShrub: { tier: 'enhanced' } },
+    })).toBeNull();
+    expect(_private.validateAgentEngineInput({
+      homeSqFt: 2000, services: { treeShrub: {} },
+    })).toBeNull();
+  });
+
   test('rejects a forbidden pricing override even if create draft is called directly', async () => {
     const { database, writes } = makeDatabase();
     mockDb.mockImplementation(database);
@@ -2906,6 +2978,32 @@ describe('create_pending_estimate server reprice (P1-8)', () => {
     expect(result.error).toMatch(/does not match the server reprice/i);
     expect(result.error).toMatch(/54\.17/);
     expect(writes).toEqual([]);
+  });
+
+  // codex P1 round 4 pre-push (Claude fallback): flagged create_pending_estimate
+  // as possibly NOT covered by the retired-tier guard, since it never calls
+  // retiredTreeShrubTierError directly. It doesn't need to — its SERVER
+  // REPRICE step above runs the full computeEstimate pipeline (same one
+  // compute_estimate uses), which already calls retiredTreeShrubTierError
+  // and returns {error} for a retired tier; createPendingEstimate then
+  // refuses the write on priced.error before any DB write happens. Pinning
+  // this end-to-end so a future refactor of the reprice step can't silently
+  // drop that coverage.
+  test('the server reprice step rejects a retired T&S tier before any write (codex P1 r4 — indirect coverage via computeEstimate)', async () => {
+    const { database, writes } = makeDatabase();
+    mockDb.mockImplementation(database);
+    mockTransactionDb = database;
+
+    const result = await executeEstimateTool('create_pending_estimate', {
+      ...PENDING_INPUT,
+      engineInputs: { homeSqFt: 2000, services: { treeShrub: { tier: 'light' } } },
+    });
+
+    expect(result.error).toMatch(/server reprice failed/i);
+    expect(result.error).toMatch(/not a currently sold program/i);
+    expect(result.error).toMatch(/light/i);
+    expect(writes).toEqual([]);
+    expect(mockGenerateEstimate).not.toHaveBeenCalled();
   });
 
   test('writes SERVER-computed totals, null notes, and operator review material in estimate_data', async () => {

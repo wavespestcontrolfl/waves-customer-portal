@@ -37,16 +37,20 @@ function formatPrice(s) {
 }
 
 export default function MobileServicePickerSheet({
-  desktopVisible = false, onClose, onSelect }) {
+  desktopVisible = false, customerId = null, onClose, onSelect }) {
   const [services, setServices] = useState([]);
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState('');
 
   useEffect(() => {
-    adminFetch('/admin/services?is_active=true&limit=500')
+    // Sellable rows only: a retired-for-sale row (quarterly T&S) is offered
+    // just to the customer already on that plan, as the desktop pickers do.
+    const params = new URLSearchParams({ is_active: 'true', sellable: 'true', limit: '500' });
+    if (customerId) params.set('sellable_customer_id', String(customerId));
+    adminFetch(`/admin/services?${params}`)
       .then((d) => { setServices(d.services || []); setLoading(false); })
       .catch(() => setLoading(false));
-  }, []);
+  }, [customerId]);
 
   const q = query.trim().toLowerCase();
   const list = services
