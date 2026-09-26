@@ -567,14 +567,17 @@ async function applySmsCommitmentUpdate(conn, id, { customerId, action, note, re
 // keeping microseconds), never to the tick time, so a visit write that
 // commits after the read with an earlier timestamp stays unseen (r19).
 const UNSEEN_FLOOR = "GREATEST(s.created_at, COALESCE((cc.sms_context->>'event_seen_at')::timestamptz, s.created_at))";
+// The floor and the tick bound sit in every branch, so each scan starts from
+// the row's watermark rather than the customer's whole visit history.
+const unseen = (column) => `${column} <= ? AND ${column} > ${UNSEEN_FLOOR}`;
 const UNSEEN_VISIT_ACTIVITY = `(SELECT MAX(a.at) FROM (
-    SELECT v.created_at AS at FROM scheduled_services v WHERE v.customer_id = s.customer_id
-    UNION ALL SELECT v.completed_at FROM scheduled_services v WHERE v.customer_id = s.customer_id
+    SELECT v.created_at AS at FROM scheduled_services v WHERE v.customer_id = s.customer_id AND ${unseen('v.created_at')}
+    UNION ALL SELECT v.completed_at FROM scheduled_services v WHERE v.customer_id = s.customer_id AND ${unseen('v.completed_at')}
     UNION ALL SELECT h.transitioned_at FROM job_status_history h JOIN scheduled_services v ON v.id = h.job_id
-      WHERE v.customer_id = s.customer_id
+      WHERE v.customer_id = s.customer_id AND ${unseen('h.transitioned_at')}
     UNION ALL SELECT r.created_at FROM reschedule_log r JOIN scheduled_services v ON v.id = r.scheduled_service_id
-      WHERE v.customer_id = s.customer_id
-  ) a WHERE a.at <= ? AND a.at > ${UNSEEN_FLOOR})`;
+      WHERE v.customer_id = s.customer_id AND ${unseen('r.created_at')}
+  ) a)`;
 
 // One open row: skip, verify, and close or bell. Returns what happened so
 // the caller can count it.
@@ -696,8 +699,9 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
   // A third page, ahead of the cursors: any open row (due, undated or
   // future) with unseen visit activity, so an event is checked on the next
   // tick wherever the cursors stand (Codex #4816 r15–r17).
-  const eventRows = await openRows().whereRaw(`${UNSEEN_VISIT_ACTIVITY} IS NOT NULL`, [now]).orderBy('cc.id').limit(PAGE)
-    .select('cc.*', conn.raw(`${UNSEEN_VISIT_ACTIVITY}::text AS event_seen_through`, [now]));
+  const tickBound = Array(4).fill(now);
+  const eventRows = await openRows().whereRaw(`${UNSEEN_VISIT_ACTIVITY} IS NOT NULL`, tickBound).orderBy('cc.id').limit(PAGE)
+    .select('cc.*', conn.raw(`${UNSEEN_VISIT_ACTIVITY}::text AS event_seen_through`, tickBound));
   const seenThrough = new Map(eventRows.map(({ id, event_seen_through: at }) => [id, at]));
   const pages = [
     await page('sms_operations.fulfillment_cursor', (q) => q.where((w) => w.whereNull('cc.due_at').orWhere('cc.due_at', '<=', now))),
