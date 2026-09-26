@@ -1447,6 +1447,63 @@ describe('evidence helpers', () => {
     expect(crossCustomer.size).toBe(0);
   });
 
+  // codex pre-push P1 (2026-09-26, round 2): loadCandidateItems' open-only
+  // query means an in_progress (human-claimed) sibling never reaches
+  // computeContestedBareNotConfirmedIds through the normal candidate list
+  // — but it can still be the card a shared booking actually answers, so
+  // the OPEN sibling must not auto-close as if it were uncontested. Loader
+  // level: exercises loadEvidence end to end against a stub connection.
+  test('loader: a HUMAN-CLAIMED (in_progress) sibling contests the booking too, even though the open-only query never lists it', async () => {
+    const none = { street_line_1: null, street_line_2: null, city: null, postal_code: null, raw_text: null, additional_properties: 0 };
+    const bareSchedulingWindow = {
+      status: 'requested', blackout_dates: [], requested_address: none, confirmed_start_at: null,
+      callback_window_start: null, callback_window_end: null, scheduling_notes_raw: null,
+      preferred_time_of_day: 'unspecified', requested_date_range_start: null, requested_date_range_end: null,
+    };
+    const CARD_AT = '2026-09-10T15:00:00Z';
+    const openCard = item({
+      id: 't1', reason_code: 'not_confirmed', call_log_id: 'call-1', call_customer_id: 'cust-1',
+      created_at: CARD_AT, customer_address_line1: '77 Oak St', customer_city: 'Bradenton', customer_zip: '34205',
+      payload: { flag: 'not_confirmed', confidence: 0.6, scheduling_status: 'requested', scheduling_window: bareSchedulingWindow },
+    });
+    // The claimed sibling, exactly as loadInProgressNotConfirmedSiblings'
+    // SELECT would shape it — never in the `items` handed to loadEvidence,
+    // the open-only candidate list a real sweep run builds.
+    const inProgressSibling = {
+      id: 't2', reason_code: 'not_confirmed', call_customer_id: 'cust-1', created_at: '2026-09-11T15:00:00Z',
+      payload: JSON.stringify({
+        flag: 'not_confirmed', confidence: 0.6, scheduling_status: 'requested', scheduling_window: bareSchedulingWindow,
+        // The sibling's own filing-time on-file snapshot — read from the
+        // payload (never the live customer columns), same as openCard's.
+        on_file_address: { address_line1: '77 Oak St', address_line2: null, city: 'Bradenton', zip: '34205' },
+      }),
+    };
+    const sharedBooking = {
+      id: 'b1', customer_id: 'cust-1', parent_service_id: null, recurring_parent_id: null, status: 'confirmed',
+      service_type: 'Bi-Monthly Pest Control', created_at: '2026-09-16T09:00:00Z', scheduled_date: '2026-09-18',
+      service_address_line1: '77 Oak Street', service_address_city: 'Bradenton', service_address_zip: '34205',
+    };
+    const chainable = (rows) => {
+      const c = { leftJoin: () => c, where: () => c, whereIn: () => c, whereNot: () => c, whereNull: () => c, orderBy: () => c, select: async () => rows };
+      return c;
+    };
+    const fakeConn = ({ inProgress }) => (table) => {
+      if (table === 'customer_properties') return chainable([]);
+      if (table === 'scheduled_services') return chainable([sharedBooking]);
+      if (table === 'triage_items as t') return chainable(inProgress);
+      return chainable([]); // 'services' (stampSpecificServiceKeys) and any other lookup
+    };
+    // Contested: the claimed sibling answers with the SAME booking →
+    // the open card must stay unflagged.
+    const contestedEvidence = await loadEvidence(fakeConn({ inProgress: [inProgressSibling] }), [openCard], { ignoreGate: true });
+    expect(contestedEvidence.get('t1')?.booking_after_card).toBeUndefined();
+    // Control: no in_progress sibling at all → the same booking resolves
+    // the open card normally (proves the stub, not just a bug, drove the
+    // contested case above).
+    const uncontestedEvidence = await loadEvidence(fakeConn({ inProgress: [] }), [openCard], { ignoreGate: true });
+    expect(uncontestedEvidence.get('t1')?.booking_after_card).toBe(true);
+  });
+
   test('loadEvidence is an empty map with the evidence gate off — no DB access', async () => {
     const OLD = process.env.GATE_TRIAGE_AUTO_RESOLVE_EVIDENCE;
     delete process.env.GATE_TRIAGE_AUTO_RESOLVE_EVIDENCE;

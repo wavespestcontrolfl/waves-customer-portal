@@ -2095,6 +2095,28 @@ function lineRecordIdentity(line) {
   return { engine, families: [...new Set(familiesIn(names.join('. ')).map((f) => f.key))] };
 }
 
+// in_progress not_confirmed cards for these customers — human-claimed, so
+// loadCandidateItems' open-only query never surfaces them, but one can
+// still be the card a shared booking actually answers (the booking contest
+// check in loadVisitEvidence). Best-effort: a failed lookup returns no
+// siblings rather than crashing the sweep (rule 6 — an uncertain query
+// never takes down an evidence arm), which only widens who a contest could
+// have caught, never narrows it.
+async function loadInProgressNotConfirmedSiblings(conn, customerIds) {
+  if (!customerIds.length) return [];
+  try {
+    return await conn('triage_items as t')
+      .leftJoin('call_log as cl', 'cl.id', 't.call_log_id')
+      .where('t.reason_code', 'not_confirmed')
+      .where('t.status', 'in_progress')
+      .whereIn('cl.customer_id', customerIds)
+      .select('t.id', 't.reason_code', 't.created_at', 't.payload', 'cl.customer_id as call_customer_id');
+  } catch (e) {
+    logger.warn(`[triage-sweep] in_progress sibling lookup for booking contest check failed: ${e.message}`);
+    return [];
+  }
+}
+
 // Bookings and completed visits for the not_confirmed / address arms.
 async function loadVisitEvidence(conn, items, flag, { ignoreGate = false } = {}) {
   // not_confirmed cards, address cards, and every card whose call CONFIRMED
@@ -2147,8 +2169,19 @@ async function loadVisitEvidence(conn, items, flag, { ignoreGate = false } = {})
   // cards (same customer) each got their own appointment — see
   // computeContestedBareNotConfirmedIds. Computed once over every bare
   // card in this batch, not per item, so a contest is caught however the
-  // sweep chunked the backlog.
-  const contestedBare = computeContestedBareNotConfirmedIds(visitItems, visitsByCustomer, places);
+  // sweep chunked the backlog. visitItems is OPEN-only (loadCandidateItems
+  // / loadEvidence's candidates filter both restrict to it), but a
+  // HUMAN-CLAIMED sibling (status in_progress) can still be the card the
+  // booking actually answers — it must count as a claimant too, or the
+  // open sibling would auto-close on evidence that belongs to the claimed
+  // one (codex pre-push P1, 2026-09-26). Loaded separately and used ONLY
+  // for this contest check: never added to visitItems, never made
+  // sweep-eligible, never flagged itself.
+  const bareOpenNotConfirmed = visitItems.filter((i) => i.reason_code === 'not_confirmed');
+  const inProgressSiblings = bareOpenNotConfirmed.some((i) => isBareNotConfirmedAsk(i))
+    ? await loadInProgressNotConfirmedSiblings(conn, customerIds)
+    : [];
+  const contestedBare = computeContestedBareNotConfirmedIds([...bareOpenNotConfirmed, ...inProgressSiblings], visitsByCustomer, places);
 
   for (const item of visitItems) {
     const mine = visitsByCustomer.get(String(item.call_customer_id)) || [];
