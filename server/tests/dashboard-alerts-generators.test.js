@@ -667,14 +667,20 @@ describe('Action Inbox generators', () => {
   });
 
   test('legacy watch-state generators are back-tagged kind:"alert"', async () => {
-    primeDb({
+    const capture = primeDb({
       invoices: { count: '2', amount: '500' },
       leads: leadsResult({ waiting: [{ id: 'lead-a' }], unattributed: { count: 0 } }),
     });
     const { alerts } = await computeDashboardAlertsUncached();
     expect(alerts.find((a) => a.id === 'ar_overdue_60').kind).toBe('alert');
-    // Opens the AR aging that shares its predicate, not the unfiltered invoice list.
+    // Opens Billing Recovery's AR aging, counting only what that page lists:
+    // a positive amount due after credit, internal/test customers excluded.
     expect(alerts.find((a) => a.id === 'ar_overdue_60').href).toBe('/admin/billing-recovery');
+    const { INTERNAL_TEST_CUSTOMERS } = require('../services/internal-test-customers');
+    expect(capture.some((c) => c.table === 'invoices' && c.method === 'whereRaw'
+      && String(c.args[0]).includes('COALESCE(invoices.credit_applied, 0), 0) > 0'))).toBe(true);
+    expect(capture.some((c) => c.table === 'invoices' && c.method === 'whereNotIn'
+      && c.args[1] === INTERNAL_TEST_CUSTOMERS)).toBe(true);
     expect(alerts.find((a) => a.id === 'leads_awaiting_contact').kind).toBe('action');
   });
 
