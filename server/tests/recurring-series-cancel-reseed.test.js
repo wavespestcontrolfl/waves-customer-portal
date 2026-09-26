@@ -264,6 +264,9 @@ describe('term / count math (pure)', () => {
     expect(planPositionDate({ scheduled_date: '2027-07-20', date_exception: false, date_exception_cadence_date: '2027-06-11' })).toBe('2027-07-20');
     expect(planPositionDate({ scheduled_date: new Date('2027-07-20T04:00:00Z') })).toBe('2027-07-20');
     expect(planPositionDate(null)).toBeNull();
+    // an auto-dispatched row keeps its cadence due date while scheduled_date moved (Codex r8 P2); an exception still wins
+    expect(planPositionDate({ scheduled_date: '2027-01-12', recurring_dispatch_due_date: '2027-01-10' })).toBe('2027-01-10');
+    expect(planPositionDate({ scheduled_date: '2027-01-12', recurring_dispatch_due_date: '2027-01-10', date_exception: true, date_exception_cadence_date: '2027-01-03' })).toBe('2027-01-03');
     const rows = [
       child({ id: 'root', scheduled_date: '2026-07-10', status: 'completed', recurring_parent_id: null }),
       moved,
@@ -427,7 +430,7 @@ describe('cancel surfaces wire the hook (source guards)', () => {
     const lock = body.indexOf('acquireRecurringSeriesMaintenanceLock(trx, parentId)');
     const comms = body.indexOf('const fenced = await lockReseedOwner(trx, cancelledServiceId, cancelled);');
     const refusal = body.indexOf('await reseedRefusal(trx, { parent, parentId, cancelledServiceId, cols })');
-    const term = body.indexOf('await reseedTermShortfall(trx, { parent, parentId, cancelled })');
+    const term = body.indexOf('await reseedTermShortfall(trx, { parent, parentId, cancelled, cols })');
     const reconcile = body.indexOf('await addOneReseedVisit(trx, { parent, parentId, cols, upcomingPlanCount: term.upcomingPlanCount })');
     expect(addFn()).toMatch(/reconcileRecurringSeriesVisitCount\(trx, \{/);
     expect(lock).toBeGreaterThan(-1);
@@ -477,20 +480,28 @@ describe('cancel surfaces wire the hook (source guards)', () => {
 
   test('term: membership by cadence SLOT over plan rows (exception + callback fields selected), stamps pin earlier re-adds, "nothing upcoming" read from the plan rows themselves', () => {
     const t = termFn();
-    expect(t).toMatch(/'is_recurring', 'recurring_parent_id', 'date_exception', 'date_exception_cadence_date', 'is_callback', 'followup_included'\)/);
+    expect(t).toMatch(/'is_recurring', 'recurring_parent_id', 'date_exception', 'date_exception_cadence_date', 'is_callback', 'followup_included'\];/);
+    // the auto-dispatch due date rides along when the column exists (Codex r8 P2)
+    expect(t).toMatch(/if \(cols\.recurring_dispatch_due_date\) seriesCols\.push\('recurring_dispatch_due_date'\);/);
+    expect(t).toMatch(/\.select\(seriesCols\);/);
+    expect(lockedBody()).toMatch(/reseedTermShortfall\(trx, \{ parent, parentId, cancelled, cols \}\)/);
     // stamps → overrides → slot map → the cancelled row's term → count → liveness, in that order
     const stampsRead = t.indexOf("action: 'recurring_cancel_reseed' })");
     const slots = t.indexOf('assignPlanTerms(seriesRows, expected, termOverrides)');
     const own = t.indexOf("if (termIndex == null) return { skipped: 'not_in_plan_sequence' };");
     const count = t.indexOf('countTermVisits(seriesRows, termIndex, terms)');
     const whole = t.indexOf("skipped: 'term_still_whole'");
-    const guard = t.indexOf("if (!hasUpcomingPlanRow(seriesRows, todayET)) return { skipped: 'no_live_visits'");
+    // counted plans only — an ongoing plan is refilled after its final future cancel (Codex r8 P1)
+    const guard = t.indexOf("if (!ongoing && !hasUpcomingPlanRow(seriesRows, todayET)) return { skipped: 'no_live_visits'");
+    expect(t).toMatch(/const ongoing = parent\.recurring_ongoing === true;/);
     // the cap counts the same plan-row population (Codex r7)
     expect(t).toMatch(/const upcomingPlanCount = countUpcomingPlanRows\(seriesRows, todayET\);/);
     expect(t).toMatch(/return \{ window, counting, expected, upcomingPlanCount \};/);
     const add = addFn();
     expect(add).toMatch(/if \(upcomingPlanCount >= MAX_SERIES_VISIT_COUNT\) return \{ skipped: 'at_max_visit_count' \};/);
-    expect(add.indexOf('upcomingPlanCount >= MAX_SERIES_VISIT_COUNT')).toBeLessThan(add.indexOf('await liveUpcomingSeriesVisits(trx, parentId)'));
+    expect(add.indexOf('upcomingPlanCount >= MAX_SERIES_VISIT_COUNT')).toBeLessThan(add.indexOf('reconcileRecurringSeriesVisitCount(trx'));
+    // no caller-side live read: its broader is_recurring population is what the reconciler clamp keyed on (Codex r8 P1)
+    expect(add).not.toMatch(/liveUpcomingSeriesVisits/);
     expect(add).not.toMatch(/live\.length >= MAX_SERIES_VISIT_COUNT/);
     expect(lockedBody()).toMatch(/upcomingPlanCount: term\.upcomingPlanCount/);
     expect(stampsRead).toBeGreaterThan(-1);
@@ -507,11 +518,15 @@ describe('cancel surfaces wire the hook (source guards)', () => {
     expect(lockedBody()).not.toMatch(/live\.length === 0/);
   });
 
-  test('exactly one visit: target = live + 1 fenced by baselineCount = live; a 409 refuses instead of over-adding; no claim token', () => {
+  test("exactly one visit: extendByOne sets target = the reconciler's own live + 1, unclamped; a 409 refuses; no claim token", () => {
     const body = addFn();
-    expect(body).toMatch(/targetCount: live\.length \+ 1,\s*baselineCount: live\.length,/);
+    expect(body).toMatch(/extendByOne: true,/);
+    expect(body).not.toMatch(/targetCount:|baselineCount:/);
     expect(body).toMatch(/claimToken: null/);
-    expect(body).toMatch(/if \(e\?\.statusCode === 409\) return \{ skipped: 'series_changed_retry' \};/);
+    expect(body).toMatch(/if \(e\?\.statusCode === 409\) return \{ skipped: 'extension_unbillable', code: e\.code \|\| null \};/);
+    // the reconciler: extendByOne reads live FIRST and skips the MAX_SERIES_VISIT_COUNT clamp (Codex r8 P1)
+    const rec = schedule.slice(schedule.indexOf('async function reconcileRecurringSeriesVisitCount('));
+    expect(rec).toMatch(/extendByOne = false,\s*\}\) \{\s*const live = await liveUpcomingSeriesVisits\(trx, parentId\);\s*const target = extendByOne\s*\? live\.length \+ 1\s*: Math\.min\(Math\.max\(parseInt\(targetCount, 10\) \|\| 0, 1\), MAX_SERIES_VISIT_COUNT\);/);
     // the wrapper retries the WHOLE locked transaction on that transient refusal (Codex r3), bounded
     const wrapper = schedule.slice(schedule.indexOf('async function reseedRecurringSeriesAfterCancel('), schedule.indexOf('async function reseedRecurringSeriesAfterCancelBatch('));
     expect(schedule).toMatch(/const RESEED_STALE_READ_ATTEMPTS = 3;/);

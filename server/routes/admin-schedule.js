@@ -16716,9 +16716,17 @@ async function reconcileRecurringSeriesVisitCount(trx, {
   // snapshot so this writer and the pre-lock plan agree; other callers
   // resolve fresh.
   prefNoWeekends = undefined,
+  // Post-cancel reseed only: add exactly one visit past this call's own live
+  // read (target = live + 1, never trims). Not clamped to
+  // MAX_SERIES_VISIT_COUNT — that cap is on the operator's count over this
+  // broader is_recurring population, and the reseed enforces it on the plan
+  // rows (callbacks / included follow-ups excluded) before calling.
+  extendByOne = false,
 }) {
-  const target = Math.min(Math.max(parseInt(targetCount, 10) || 0, 1), MAX_SERIES_VISIT_COUNT);
   const live = await liveUpcomingSeriesVisits(trx, parentId);
+  const target = extendByOne
+    ? live.length + 1
+    : Math.min(Math.max(parseInt(targetCount, 10) || 0, 1), MAX_SERIES_VISIT_COUNT);
   // `achieved` is the plan length this call actually leaves behind — the
   // number the operator must be shown. It is NOT always `target`: the extend
   // loop can run out of placeable cadence dates, and the trim can stop short
@@ -18184,7 +18192,7 @@ async function topUpRecurringSeries(conn, parentId, opts = {}) {
 // that contains the cancelled visit's date; the expected count is the
 // pattern's visits-per-year (custom: 365 / recurring_interval_days). When
 // the term now holds FEWER counting visits than that, the series gets one
-// more via reconcileRecurringSeriesVisitCount (targetCount = live upcoming +
+// more via reconcileRecurringSeriesVisitCount (extendByOne: live upcoming +
 // 1) — the same writer the "visit count" editor and the ongoing top-up use,
 // so cadence, blackout, weekend, add-on mirror and pricing rules cannot
 // drift. Refusals (all reported as `skipped`, never thrown):
@@ -18204,9 +18212,11 @@ async function topUpRecurringSeries(conn, parentId, opts = {}) {
 //   - the annual-prepay namespace is busy (a term is being created);
 //   - the term is still whole (a deliberate "visit count" trim already
 //     reconciled it, or the cancelled visit was outside the counted term);
-//   - another visit of the series changed between the live read and the
-//     reconciler's own (series_changed_retry — never a double add);
-//   - no upcoming visit is left (the plan ended, it was not interrupted);
+//   - the row's lineage or owner changed under the fences
+//     (series_changed_retry — the wrapper retries with fresh reads);
+//   - a COUNTED plan has no upcoming visit left (the plan ended, it was not
+//     interrupted) — an ongoing plan is refilled regardless;
+//   - the extension would be unbillable (extension_unbillable);
 //   - the reconciler could not place a date (at MAX_SERIES_VISIT_COUNT, no
 //     placeable day).
 // An ongoing series keeps its flag on the added row; a counted (non-ongoing)
@@ -18280,7 +18290,7 @@ async function reseedRefusal(trx, { parent, parentId, cancelledServiceId, cols }
 // year anchored on the series root; the cancelled row's PLAN position (a
 // moved exception keeps its cadence date) picks the term, and the count
 // reads plan rows only (no boosters) by the same position.
-async function reseedTermShortfall(trx, { parent, parentId, cancelled }) {
+async function reseedTermShortfall(trx, { parent, parentId, cancelled, cols = {} }) {
   const {
     plannedVisitsPerYearForSeries, termWindowAtIndex, assignPlanTerms, countTermVisits, planPositionDate, hasUpcomingPlanRow, countUpcomingPlanRows,
   } = require('../services/recurring-series-cancel-reseed');
@@ -18299,19 +18309,30 @@ async function reseedTermShortfall(trx, { parent, parentId, cancelled }) {
     if (!Number.isInteger(meta.term_index)) continue;
     for (const id of meta.added_service_ids || []) termOverrides.set(String(id), meta.term_index);
   }
+  // recurring_dispatch_due_date is the cadence position of an auto-dispatched
+  // row whose scheduled_date moved up to three days (Codex r8 P2) — part of
+  // the plan position when the column exists.
+  const seriesCols = ['id', 'status', 'scheduled_date', 'is_recurring', 'recurring_parent_id', 'date_exception', 'date_exception_cadence_date', 'is_callback', 'followup_included'];
+  if (cols.recurring_dispatch_due_date) seriesCols.push('recurring_dispatch_due_date');
   const seriesRows = await trx('scheduled_services')
     .where(function () { this.where('recurring_parent_id', parentId).orWhere('id', parentId); })
-    .select('id', 'status', 'scheduled_date', 'is_recurring', 'recurring_parent_id', 'date_exception', 'date_exception_cadence_date', 'is_callback', 'followup_included');
+    .select(seriesCols);
   // Term membership by cadence SLOT (Codex r6 P1) — see assignPlanTerms.
   const terms = assignPlanTerms(seriesRows, expected, termOverrides);
   const termIndex = terms.get(String(cancelled.id));
   if (termIndex == null) return { skipped: 'not_in_plan_sequence' };
   const counting = countTermVisits(seriesRows, termIndex, terms);
   if (counting >= expected) return { skipped: 'term_still_whole', counting, expected };
-  // Nothing left upcoming = the plan ended (its last visit was cancelled, or
-  // every remaining visit was), not a gap inside a running plan.
+  // Nothing left upcoming on a COUNTED plan = the plan ended (its last visit
+  // was cancelled, or every remaining visit was), not a gap inside a running
+  // plan. An ONGOING plan never ends by running out of rows (Codex r8 P1):
+  // cancelling its only future visit must refill it — the completion hook
+  // needs a completion and the nightly top-up is separately gated, so
+  // neither is guaranteed to. The reconciler anchors on the latest live
+  // (incl. completed) visit when nothing is upcoming.
   const todayET = etDateString();
-  if (!hasUpcomingPlanRow(seriesRows, todayET)) return { skipped: 'no_live_visits', counting, expected };
+  const ongoing = parent.recurring_ongoing === true;
+  if (!ongoing && !hasUpcomingPlanRow(seriesRows, todayET)) return { skipped: 'no_live_visits', counting, expected };
   // The visit cap counts the SAME plan-row population the term does (Codex
   // r7 P1) — legacy null-flagged children included, callbacks excluded —
   // not liveUpcomingSeriesVisits' is_recurring = true reader.
@@ -18388,12 +18409,13 @@ async function lockReseedOwner(trx, cancelledServiceId, cancelled) {
 // reconciler copies the root's window verbatim, so a "09:15" root would mint
 // an invalid appointment from this unattended path — same floor + validator
 // the nightly top-up applies; an unplaceable window refuses, never inserts.
-// Exactly ONE visit, even under a concurrent cancel (Codex r2 P1):
-// cancellation status writes do not hold the maintenance lock, so the live
-// count read here can go stale before the reconciler re-reads it and an
-// absolute target would then add two. baselineCount is the reconciler's own
-// staleness fence — a mismatch refuses (409 → series_changed_retry, the
-// wrapper retries) instead of over-adding.
+// Exactly ONE visit, even under a concurrent cancel (Codex r2 P1): the
+// reconciler's extendByOne mode sets its target from its OWN live read
+// (live + 1), so no caller-side count can go stale and over-add. It also
+// skips the MAX_SERIES_VISIT_COUNT clamp on that broader is_recurring
+// population (Codex r8 P1): 24 live rows of which some are callbacks /
+// included follow-ups would clamp live + 1 back to 24 and add nothing. The
+// cap is enforced here, on the plan-row population, instead.
 async function addOneReseedVisit(trx, { parent, parentId, cols, upcomingPlanCount }) {
   const normalizedWindow = normalizeTopUpWindow(parent.window_start, parent.estimated_duration_minutes, parent.window_end);
   if (normalizedWindow?.unplaceable) return { skipped: 'window_unplaceable' };
@@ -18403,12 +18425,10 @@ async function addOneReseedVisit(trx, { parent, parentId, cols, upcomingPlanCoun
   // Cap on the plan-row population (Codex r7 P1); the reconciler's own live
   // read below only sets its target and baseline.
   if (upcomingPlanCount >= MAX_SERIES_VISIT_COUNT) return { skipped: 'at_max_visit_count' };
-  const live = await liveUpcomingSeriesVisits(trx, parentId);
   try {
     const result = await reconcileRecurringSeriesVisitCount(trx, {
       parentId, parent: reconcileParent, cols,
-      targetCount: live.length + 1,
-      baselineCount: live.length,
+      extendByOne: true,
       actorId: null,
       // Extend-only by construction (target = live + 1): the trim branch,
       // the only consumer of the claim token, is unreachable.
@@ -18417,8 +18437,9 @@ async function addOneReseedVisit(trx, { parent, parentId, cols, upcomingPlanCoun
     });
     return { added: result.added, reconcileParent };
   } catch (e) {
-    // The staleness fence fires before any write, so the trx is intact.
-    if (e?.statusCode === 409) return { skipped: 'series_changed_retry' };
+    // The unbillable-extension refusal fires before any write, so the trx is
+    // intact; it is terminal (a retry would read the same template).
+    if (e?.statusCode === 409) return { skipped: 'extension_unbillable', code: e.code || null };
     throw e;
   }
 }
@@ -18457,11 +18478,11 @@ async function reseedRecurringSeriesAfterCancelLocked(trx, cancelledServiceId) {
 
   const refusal = await reseedRefusal(trx, { parent, parentId, cancelledServiceId, cols });
   if (refusal) return { added: [], skipped: refusal };
-  const term = await reseedTermShortfall(trx, { parent, parentId, cancelled });
+  const term = await reseedTermShortfall(trx, { parent, parentId, cancelled, cols });
   if (term.skipped) return { added: [], skipped: term.skipped, counting: term.counting, expected: term.expected };
 
   const add = await addOneReseedVisit(trx, { parent, parentId, cols, upcomingPlanCount: term.upcomingPlanCount });
-  if (add.skipped) return { added: [], skipped: add.skipped, counting: term.counting, expected: term.expected, parentId };
+  if (add.skipped) return { added: [], skipped: add.skipped, code: add.code, counting: term.counting, expected: term.expected, parentId };
   const overlapDates = await probeReseedOverlaps(trx, { parent: add.reconcileParent, parentId, added: add.added });
   if (add.added.length) {
     await stampReseed(trx, { parent, parentId, cancelled, cancelledServiceId, added: add.added, term, overlapDates });

@@ -165,12 +165,14 @@ function termWindowAtIndex(rootDateStr, index) {
 
 // The date a row occupies in its PLAN — a one-occurrence exception keeps
 // its cadence position (date_exception_cadence_date) even when the actual
-// appointment moved across the root anniversary (Codex #4814 r2 P1; the
-// same rule recurring-schedule-audit.js's spacing check applies).
+// appointment moved across the root anniversary (Codex #4814 r2 P1), and an
+// auto-dispatched row keeps its recurring_dispatch_due_date while
+// scheduled_date moved up to three days (Codex r8 P2) — the same order
+// recurring-schedule-audit.js's recurringCadenceDate reads.
 function planPositionDate(row) {
   if (!row) return null;
   if (row.date_exception === true && row.date_exception_cadence_date) return dateOnly(row.date_exception_cadence_date);
-  return dateOnly(row.scheduled_date);
+  return dateOnly(row.recurring_dispatch_due_date || row.scheduled_date);
 }
 
 // Plan terms by cadence SLOT (Codex #4814 r6 P1): the plan's k-th occurrence

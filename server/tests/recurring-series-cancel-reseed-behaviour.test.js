@@ -248,6 +248,29 @@ describe('reseedTermShortfall — term by plan position, stamps pin earlier re-a
     expect((await run({ seriesRows: rows(0) })).skipped).toBe('no_live_visits');
   });
 
+  test('an ONGOING plan whose only future visit was cancelled is refilled, not treated as ended (Codex r8 P1)', async () => {
+    const ongoingParent = { ...parent, recurring_ongoing: true };
+    const out = await reseedTermShortfall(makeConn(scenario({ seriesRows: rows(0) }).handler), { parent: ongoingParent, parentId: 10, cancelled });
+    expect(out.skipped).toBeUndefined();
+    expect(out).toMatchObject({ counting: 1, expected: 4, upcomingPlanCount: 0 });
+  });
+
+  test('an auto-dispatched row is slotted by its due date, not its moved scheduled_date (Codex r8 P2)', async () => {
+    // quarterly = 4 slots a term. Row 104 is due BEFORE the cancelled row (day 5) but auto-dispatch moved it
+    // to day 9; by due date the cancelled row is the plan's 5th occurrence → term 1, not term 0.
+    const series = [
+      { id: 10, status: 'completed', scheduled_date: ROOT, is_recurring: true, recurring_parent_id: null },
+      { id: 102, status: 'completed', scheduled_date: daysOut(-50), is_recurring: true, recurring_parent_id: 10 },
+      { id: 103, status: 'completed', scheduled_date: daysOut(-20), is_recurring: true, recurring_parent_id: 10 },
+      { id: 104, status: 'pending', scheduled_date: daysOut(9), recurring_dispatch_due_date: daysOut(5), is_recurring: true, recurring_parent_id: 10 },
+      { ...CANCELLED, scheduled_date: daysOut(7) },
+      { id: 105, status: 'pending', scheduled_date: daysOut(90), is_recurring: true, recurring_parent_id: 10 },
+    ];
+    const out = await run({ seriesRows: series });
+    expect(out.window.index).toBe(1);
+    expect(out).toMatchObject({ counting: 1, expected: 4 });
+  });
+
   test("an earlier reseed's stamp pins its added row to the term it served", async () => {
     // 3 counting in term 0 (root + 2; the cancelled slot is empty), plus a re-added row the stamp pins to term 0 → 4 → whole
     const out = await run({
