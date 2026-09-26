@@ -512,3 +512,119 @@ describe('Codex r6: commercial Space designator is suite scope', () => {
     expect(profile._commercialSuiteCandidate).not.toBeNull();
   });
 });
+
+// Primary review of PR #4840 r8: buildEnrichedProfile's suite-scope
+// decisions (verified vs stamp vs candidate, applies vs not) now come from
+// ONE pure function. Direct coverage here is on TOP of the buildEnrichedProfile
+// behavioral tests above, which already prove the profile fields built from
+// its result — these pin the decision object itself.
+describe('resolveCommercialSuiteScope — the pure suite-scope decision (primary review of PR #4840 r8)', () => {
+  const { resolveCommercialSuiteScope } = require('../routes/property-lookup-v2')._private;
+
+  test('option off: not applies, regardless of otherwise-qualifying evidence', () => {
+    const scope = resolveCommercialSuiteScope(plazaSuiteRecord(), SUITE_ADDRESS, 'office_retail', {});
+    expect(scope).toEqual({
+      applies: false, sizeSource: null, resolved: null, candidate: null, buildingSqft: null, distrustedVerifiedSqft: null,
+    });
+  });
+
+  test('no subpremise signal in the address: not applies', () => {
+    const scope = resolveCommercialSuiteScope(plazaSuiteRecord(), BUILDING_ADDRESS, 'office_retail', SUITE_SIZING_ON);
+    expect(scope.applies).toBe(false);
+    expect(scope.sizeSource).toBeNull();
+  });
+
+  test('no independent part-building evidence (freestanding store with a bare Suite suffix): not applies', () => {
+    const record = plazaSuiteRecord({ _parcel: { landUseDescription: 'Stores, One Story (1100)' } });
+    const scope = resolveCommercialSuiteScope(record, SUITE_ADDRESS, 'office_retail', SUITE_SIZING_ON);
+    expect(scope.applies).toBe(false);
+  });
+
+  test('own-unit commercial condo folio: not applies even with a suite suffix', () => {
+    const record = plazaSuiteRecord({
+      propertyType: 'Commercial Condo',
+      _parcel: { landUseDescription: 'Commercial Condominium (1900)' },
+    });
+    const scope = resolveCommercialSuiteScope(record, SUITE_ADDRESS, 'office_retail', SUITE_SIZING_ON);
+    expect(scope.applies).toBe(false);
+  });
+
+  test('verified wins: a genuine suite-sized verified override resolves immediately as sizeSource "verified"', () => {
+    const record = plazaSuiteRecord({
+      squareFootage: 1400,
+      _verifiedFields: ['squareFootage'],
+      _fieldEvidence: {
+        propertyType: { value: 'Commercial', confidence: 'high', sourceType: 'county', fieldVerify: false, score: 100 },
+        squareFootage: {
+          value: 1400, confidence: 'high', sourceType: 'verified',
+          evidence: [{ sourceType: 'verified', value: 1400 }, { sourceType: 'county', value: 46031 }],
+        },
+      },
+    });
+    const scope = resolveCommercialSuiteScope(record, SUITE_ADDRESS, 'office_retail', SUITE_SIZING_ON);
+    expect(scope.applies).toBe(true);
+    expect(scope.sizeSource).toBe('verified');
+    expect(scope.resolved).toEqual(expect.objectContaining({ value: 1400, source: 'verified', confidence: 'high' }));
+    expect(scope.candidate).toBeNull();
+    expect(scope.distrustedVerifiedSqft).toBeNull();
+  });
+
+  test('fresh matching stamp is reused as sizeSource "stamp" (no candidate, no resolver)', () => {
+    const stamp = { value: 1400, source: 'license_seats', unitKey: '102', resolvedAt: new Date().toISOString() };
+    const scope = resolveCommercialSuiteScope(
+      plazaSuiteRecord({ _commercialSuiteSize: stamp }), SUITE_ADDRESS, 'office_retail', SUITE_SIZING_ON,
+    );
+    expect(scope.applies).toBe(true);
+    expect(scope.sizeSource).toBe('stamp');
+    expect(scope.resolved).toBe(stamp);
+    expect(scope.candidate).toBeNull();
+    expect(scope.buildingSqft).toBe(46031);
+  });
+
+  test('a stale (31-day-old) license_seats stamp falls back to a pending candidate', () => {
+    const thirtyOneDaysAgo = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000).toISOString();
+    const stamp = { value: 1400, source: 'license_seats', unitKey: '102', resolvedAt: thirtyOneDaysAgo };
+    const scope = resolveCommercialSuiteScope(
+      plazaSuiteRecord({ _commercialSuiteSize: stamp }), SUITE_ADDRESS, 'office_retail', SUITE_SIZING_ON,
+    );
+    expect(scope.applies).toBe(true);
+    expect(scope.sizeSource).toBe('candidate');
+    expect(scope.resolved).toBeNull();
+    expect(scope.candidate).toEqual({ address: SUITE_ADDRESS, buildingSqft: 46031, commercialSubtype: 'office_retail' });
+  });
+
+  test('a stamp tagged for a different unit falls back to a pending candidate', () => {
+    const stamp = { value: 2200, source: 'license_seats', unitKey: '104', resolvedAt: new Date().toISOString() };
+    const scope = resolveCommercialSuiteScope(
+      plazaSuiteRecord({ _commercialSuiteSize: stamp }), SUITE_ADDRESS, 'office_retail', SUITE_SIZING_ON,
+    );
+    expect(scope.sizeSource).toBe('candidate');
+  });
+
+  test('a distrusted legacy whole-building verified figure: falls to a pending candidate AND reports the distrusted value', () => {
+    const record = plazaSuiteRecord({
+      squareFootage: 46031,
+      _verifiedFields: ['squareFootage'],
+      _fieldEvidence: {
+        propertyType: { value: 'Commercial', confidence: 'high', sourceType: 'county', fieldVerify: false, score: 100 },
+        squareFootage: {
+          value: 46031, confidence: 'high', sourceType: 'verified',
+          evidence: [{ sourceType: 'verified', value: 46031 }, { sourceType: 'county', value: 46031 }],
+        },
+      },
+    });
+    const scope = resolveCommercialSuiteScope(record, SUITE_ADDRESS, 'office_retail', SUITE_SIZING_ON);
+    expect(scope.applies).toBe(true);
+    expect(scope.sizeSource).toBe('candidate');
+    expect(scope.distrustedVerifiedSqft).toBe(46031);
+    expect(scope.candidate).toEqual(expect.objectContaining({ buildingSqft: 46031 }));
+  });
+
+  test('plain building sqft with no evidence at all: pending candidate, no distrust flag', () => {
+    const scope = resolveCommercialSuiteScope(plazaSuiteRecord(), SUITE_ADDRESS, 'office_retail', SUITE_SIZING_ON);
+    expect(scope.applies).toBe(true);
+    expect(scope.sizeSource).toBe('candidate');
+    expect(scope.distrustedVerifiedSqft).toBeNull();
+    expect(scope.buildingSqft).toBe(46031);
+  });
+});

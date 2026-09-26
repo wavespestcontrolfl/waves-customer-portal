@@ -1682,6 +1682,120 @@ function reconcileCommercialSuiteSubtype(subtype, suiteSize) {
   return suiteSize.source === 'license_seats' ? 'restaurant' : subtype;
 }
 
+// Commercial suite sizing (owner ruling 2026-09-25,
+// server/services/commercial-suite-size/) — the ONE decision this lane
+// makes: does a commercial lookup's address name a suite/unit signal on a
+// part-building/multi-tenant record, and if so what sizes it (a tech-
+// verified measurement, a fresh persisted stamp, or a pending candidate for
+// the async resolver). Pure and independently testable (primary review of
+// PR #4840 r8 — buildEnrichedProfile no longer branches this inline).
+// Reuses the SAME shared predicates as residentialUnitLookup (never a
+// second classifier). Stays synchronous — dozens of existing unit tests
+// call buildEnrichedProfile directly and un-awaited; applyCommercialSuiteSize
+// resolves a `candidate` result and folds it back into the profile.
+// Returns { applies, sizeSource: 'verified'|'stamp'|'candidate'|null,
+// resolved, candidate, buildingSqft, distrustedVerifiedSqft }.
+function resolveCommercialSuiteScope(rc, lookupAddress, commercialSubtype, options = {}) {
+  const NOT_APPLIES = {
+    applies: false,
+    sizeSource: null,
+    resolved: null,
+    candidate: null,
+    buildingSqft: null,
+    distrustedVerifiedSqft: null,
+  };
+  // Opt-in (owner ruling on primary review of PR #4840): OFF by default —
+  // public/unauthenticated callers never pass commercialSuiteSizing, so they
+  // get byte-identical behavior to before this feature existed. Only the
+  // admin estimate tool's own lookup route and the estimator engine's
+  // gatherPropertySignals opt in.
+  if (options.commercialSuiteSizing !== true) return NOT_APPLIES;
+
+  // Commercial subpremise: the shared residential predicate deliberately
+  // rejects "Space" (mobile-home lots), but plazas and flex complexes use
+  // "Space 12" for tenant bays. Accepted here only — independent
+  // multi-tenant evidence below is still required.
+  const suiteSubpremiseSignal = shadowHasSubpremiseSignal({ address: lookupAddress })
+    || /(?:^|[\s,])(?:space|spc)\.?\s*#?\s*[A-Za-z0-9-]+(?=$|[\s,])/i.test(String(lookupAddress || ''));
+  // subpremiseSignal:false on purpose — the shared predicate counts a
+  // Suite/Unit suffix as part-building evidence by itself, which would make
+  // this gate the subpremise signal alone. A freestanding building whose
+  // address reads "Ste 100" must keep its county building size; only
+  // INDEPENDENT multi-tenant evidence (aggregated parcel, or multi-unit
+  // property-type / land-use text like "Community Shopping Centers")
+  // corroborates that the suffix names one bay of a larger building.
+  const suitePartBuildingEvidence = shadowHasPartBuildingEvidence({
+    subpremiseSignal: false,
+    aggregated: rc?._parcel?.aggregated === true,
+    propertyType: rc?.propertyType,
+    landUseDescription: rc?._parcel?.landUseDescription || rc?._raw?.landUse || null,
+  });
+  // A non-aggregated commercial CONDO is its own county folio: its
+  // squareFootage already measures this unit, not the building — the same
+  // per-unit exemption the engine's applyUnitScopeToPropertyFacts applies.
+  const ownUnitFolio = shadowIsCondoRecord({
+    aggregated: rc?._parcel?.aggregated === true,
+    propertyType: rc?.propertyType,
+    landUseDescription: rc?._parcel?.landUseDescription || rc?._raw?.landUse || null,
+  });
+  if (!suiteSubpremiseSignal || !suitePartBuildingEvidence || ownUnitFolio) return NOT_APPLIES;
+
+  // A tech-verified sqft on this address (verified overrides never expire
+  // and re-apply on every cache hit) is a field measurement of what we
+  // service here — it outranks every resolver guess, so the suite path
+  // stands down and the verified figure stays the size. Only while it
+  // actually looks suite-scoped though (verifiedSqftLooksSuiteScoped) — a
+  // legacy whole-building save must not promote itself to a HIGH-confidence
+  // suite measurement.
+  const sqftVerifiedRaw = rc?._fieldEvidence?.squareFootage?.sourceType === 'verified'
+    || (Array.isArray(rc?._verifiedFields) && rc._verifiedFields.includes('squareFootage'));
+  const sqftVerified = sqftVerifiedRaw && verifiedSqftLooksSuiteScoped(rc);
+  // Distrusted (not suite-scoped) — surfaced by the caller as a fieldVerify
+  // flag so the operator reconfirms rather than the lookup silently keeping
+  // the old figure.
+  const distrustedVerifiedSqft = (sqftVerifiedRaw && !sqftVerified && Number(rc?.squareFootage) > 0)
+    ? Number(rc.squareFootage)
+    : null;
+  // The building's own total, captured before the caller's blanking zeroes
+  // it — needed for the profile's suiteBuildingTotalSqFt display field
+  // either way (pending candidate or an already-resolved stamp/verified).
+  const buildingSqft = sqftVerified ? null : (rc?.squareFootage || null);
+  const stamp = rc?._commercialSuiteSize;
+
+  // One ordered lookup, no side-effect assignments: verified wins; else a
+  // fresh persisted stamp for THIS unit is reused (zero network, cache
+  // hit); else a pending candidate is stashed for the async resolver.
+  if (sqftVerified && Number(rc?.squareFootage) > 0) {
+    return {
+      applies: true,
+      sizeSource: 'verified',
+      resolved: {
+        value: Number(rc.squareFootage),
+        source: 'verified',
+        confidence: 'high',
+        evidence: [{ source: 'verified', detail: 'tech-verified suite size' }],
+      },
+      candidate: null,
+      buildingSqft,
+      distrustedVerifiedSqft,
+    };
+  }
+  if (stamp && Number(stamp.value) > 0 && stamp.unitKey && stamp.unitKey === suiteUnitKey(lookupAddress)
+    && commercialSuiteSizeStampIsFresh(stamp)) {
+    return {
+      applies: true, sizeSource: 'stamp', resolved: stamp, candidate: null, buildingSqft, distrustedVerifiedSqft,
+    };
+  }
+  return {
+    applies: true,
+    sizeSource: 'candidate',
+    resolved: null,
+    candidate: { address: lookupAddress, buildingSqft, commercialSubtype },
+    buildingSqft,
+    distrustedVerifiedSqft,
+  };
+}
+
 function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = null, lookupAddress = null, options = {}) {
   // Association aggregate dimensions survive in _parcel even when a
   // same-weight PAO record (a single condo unit) won the merge — prefer them
@@ -1832,40 +1946,6 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   const category = residentialUnitLookup ? 'RESIDENTIAL' : wholePropertyCategory;
   const commercialProfile = category === 'COMMERCIAL';
   const commercialSubtype = commercialProfile ? wholePropertySubtype : null;
-  // Commercial suite sizing (owner ruling 2026-09-25,
-  // server/services/commercial-suite-size/): a COMMERCIAL lookup whose
-  // address carries a unit/suite signal on a part-building/multi-tenant
-  // record must not hand the operator the whole building's sqft as the
-  // quotable size — same doctrine as residentialUnitLookup above, reusing
-  // the SAME shared predicates (never a second classifier). Only a
-  // CANDIDATE is stashed here (this function stays synchronous — dozens of
-  // existing unit tests call it directly and un-awaited); the async route
-  // wrapper (applyCommercialSuiteSize) resolves it and folds the result
-  // back into the profile before it reaches the client.
-  let commercialSuiteCandidate = null;
-  // True once the commercial-suite grounds blanking below actually fires —
-  // the client keys its own stale-field reset off this (unitScopedLookup),
-  // the same way it already keys off residentialUnitLookup (primary review
-  // of PR #4840 r5 P1).
-  let commercialSuiteUnitScoped = false;
-  // A suite size RESOLVED ALREADY — either by a prior fresh lookup of this
-  // same address (persisted on the cached property_record as
-  // `_commercialSuiteSize`, since saveLookup serializes propertyRecord, not
-  // the recomputed-every-time enriched profile) or, on a fresh lookup that
-  // just ran applyCommercialSuiteSize once already this request (not
-  // applicable here — this function is synchronous and runs BEFORE that).
-  // Reusing it here means a cache hit needs ZERO network calls at all for a
-  // suite whose size a previous request already nailed down.
-  let resolvedCommercialSuiteSize = null;
-  // The building's own total, captured before the zeroing below — needed by
-  // BOTH the pending-candidate and the already-resolved-stamp branches for
-  // the profile's suiteBuildingTotalSqFt display field.
-  let commercialSuiteResolvedBuildingSqft = null;
-  // Set when a verified squareFootage on this suite address is DISTRUSTED as
-  // a suite measurement (primary review of PR #4840 r7 P1) — surfaced as a
-  // fieldVerify flag once `fieldVerifyFlags` exists further down, mirroring
-  // residentialUnitLookup's `_unitVerifiedSaved` "saved but not applied" flag.
-  let commercialSuiteDistrustedVerifiedSqft = null;
   // Shared with the residentialUnitLookup branch below (primary review of
   // PR #4840 r5 P1) — ONE blanking rule, not two parallel lists. Both a
   // residential unit and a commercial suite occupy ONE part of a larger
@@ -1904,102 +1984,69 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
       _parcel: record._parcel ? { ...record._parcel, buildingCount: 1 } : record._parcel,
     };
   };
-  // Opt-in (owner ruling on primary review of PR #4840): this whole lane is
-  // OFF by default. Public/unauthenticated callers (public-property-lookup,
-  // public-quote) never pass commercialSuiteSizing, so they get byte-
-  // identical behavior to before this feature existed — no candidate, no
-  // rc.squareFootage zeroing, no stamp reuse, no resolver, no network, and
-  // no suiteSize/suiteBuildingTotalSqFt fields on the profile at all. Only
-  // the admin estimate tool's own lookup route and the estimator engine's
-  // gatherPropertySignals opt in.
-  if (commercialProfile && options.commercialSuiteSizing === true) {
-    // Commercial subpremise: the shared residential predicate deliberately
-    // rejects "Space" (mobile-home lots), but plazas and flex complexes use
-    // "Space 12" for tenant bays. Accepted here only — the independent
-    // multi-tenant evidence below is still required.
-    const suiteSubpremiseSignal = shadowHasSubpremiseSignal({ address: lookupAddress })
-      || /(?:^|[\s,])(?:space|spc)\.?\s*#?\s*[A-Za-z0-9-]+(?=$|[\s,])/i.test(String(lookupAddress || ''));
-    // subpremiseSignal:false on purpose — the shared predicate counts a
-    // Suite/Unit suffix as part-building evidence by itself, which would make
-    // this gate the subpremise signal alone. A freestanding building whose
-    // address reads "Ste 100" must keep its county building size; only
-    // INDEPENDENT multi-tenant evidence (aggregated parcel, or multi-unit
-    // property-type / land-use text like "Community Shopping Centers")
-    // corroborates that the suffix names one bay of a larger building.
-    const suitePartBuildingEvidence = shadowHasPartBuildingEvidence({
-      subpremiseSignal: false,
-      aggregated: rc?._parcel?.aggregated === true,
-      propertyType: rc?.propertyType,
-      landUseDescription: rc?._parcel?.landUseDescription || rc?._raw?.landUse || null,
-    });
-    // A tech-verified sqft on this address (verified overrides never
-    // expire and re-apply on every cache hit) is a field measurement of
-    // what we service here — it outranks every resolver guess, so the
-    // suite path stands down and the verified figure stays the size. Only
-    // while it actually looks suite-scoped, though (see
-    // verifiedSqftLooksSuiteScoped) — a legacy whole-building save must not
-    // promote itself to a HIGH-confidence suite measurement.
-    const sqftVerifiedRaw = rc?._fieldEvidence?.squareFootage?.sourceType === 'verified'
-      || (Array.isArray(rc?._verifiedFields) && rc._verifiedFields.includes('squareFootage'));
-    const sqftVerified = sqftVerifiedRaw && verifiedSqftLooksSuiteScoped(rc);
-    // A non-aggregated commercial CONDO is its own county folio: its
-    // squareFootage already measures this unit, not the building — the same
-    // per-unit exemption the engine's applyUnitScopeToPropertyFacts applies.
-    const ownUnitFolio = shadowIsCondoRecord({
-      aggregated: rc?._parcel?.aggregated === true,
-      propertyType: rc?.propertyType,
-      landUseDescription: rc?._parcel?.landUseDescription || rc?._raw?.landUse || null,
-    });
-    if (suiteSubpremiseSignal && suitePartBuildingEvidence && !ownUnitFolio) {
-      // Distrusted (not suite-scoped) — surfaced as a fieldVerify flag once
-      // `fieldVerifyFlags` exists further down, so the operator reconfirms
-      // rather than the lookup silently keeping the old figure.
-      if (sqftVerifiedRaw && !sqftVerified && Number(rc?.squareFootage) > 0) {
-        commercialSuiteDistrustedVerifiedSqft = Number(rc.squareFootage);
-      }
-      const commercialSuiteBuildingSqft = sqftVerified ? null : (rc?.squareFootage || null);
-      const stamp = rc?._commercialSuiteSize;
-      if (sqftVerified && Number(rc?.squareFootage) > 0) {
-        // A tech-verified size is a field measurement of THIS suite: it wins
-        // over every resolver guess (no resolver runs), but the profile stays
-        // suite-scoped — the verified area is the footprint, never re-derived
-        // from the building's story count.
-        resolvedCommercialSuiteSize = {
-          value: Number(rc.squareFootage),
-          source: 'verified',
-          confidence: 'high',
-          evidence: [{ source: 'verified', detail: 'tech-verified suite size' }],
-        };
-      } else if (stamp && Number(stamp.value) > 0 && stamp.unitKey && stamp.unitKey === suiteUnitKey(lookupAddress)
-        && commercialSuiteSizeStampIsFresh(stamp)) {
-        resolvedCommercialSuiteSize = stamp;
-      } else {
-        commercialSuiteCandidate = {
-          address: lookupAddress,
-          buildingSqft: commercialSuiteBuildingSqft,
-          commercialSubtype,
-        };
-      }
-      // SAME blanking residentialUnitLookup applies below, via the shared
-      // helper (primary review of PR #4840 r5 P1 — a prior cut here only
-      // zeroed squareFootage, leaving the plaza's lot/turf/beds/pool/trees/
-      // satellite reads to price as this ONE suite's grounds; every
-      // GROUND-GEOMETRY figure computed further down — footprintSf,
-      // estimatedPerimeterLF, estimatedAtticSqFt, estimatedSlabSqFt,
-      // turf/bed/hardscape/pool — derives from this same rc/ai, so blanking
-      // both here is the only place a suite's dimensions can come from).
-      // homeSqFt below and applyCommercialSuiteSize's post-resolution
-      // footprint both key off this same rc, applying the suite's own
-      // resolved size on top afterward — this lane never re-derives
-      // anything from the (now cleared) building total.
-      commercialSuiteResolvedBuildingSqft = commercialSuiteBuildingSqft;
-      if (rc) rc = blankUnitScopedGroundsAndSize(rc);
-      // Every satellite/vision read (areas, densities, water, pool)
-      // describes the PARCEL, same as residentialUnitLookup below — dropped
-      // whole rather than priced as this one suite's grounds.
-      ai = null;
-      commercialSuiteUnitScoped = true;
-    }
+  // Commercial suite sizing (owner ruling 2026-09-25,
+  // server/services/commercial-suite-size/): a COMMERCIAL lookup whose
+  // address carries a unit/suite signal on a part-building/multi-tenant
+  // record must not hand the operator the whole building's sqft as the
+  // quotable size — same doctrine as residentialUnitLookup above. ONE call
+  // into the pure decision function (primary review of PR #4840 r8) —
+  // downstream fields are derived from its result with no re-branching.
+  // Public/unauthenticated callers never pass commercialSuiteSizing (the
+  // function's own opt-in check), so they see byte-identical behavior to
+  // before this feature existed. Only a CANDIDATE is stashed for the async
+  // route wrapper (applyCommercialSuiteSize) to resolve — this function
+  // stays synchronous (dozens of existing unit tests call it directly and
+  // un-awaited).
+  const commercialSuiteScope = commercialProfile
+    ? resolveCommercialSuiteScope(rc, lookupAddress, commercialSubtype, options)
+    : null;
+  // Only a CANDIDATE is stashed here; a verified/stamp size is already
+  // resolvedCommercialSuiteSize below.
+  const commercialSuiteCandidate = commercialSuiteScope?.sizeSource === 'candidate'
+    ? commercialSuiteScope.candidate
+    : null;
+  // A suite size RESOLVED ALREADY — either a tech-verified measurement, or a
+  // prior fresh lookup of this same address (persisted on the cached
+  // property_record as `_commercialSuiteSize`) reused with ZERO network.
+  const resolvedCommercialSuiteSize = (commercialSuiteScope?.sizeSource === 'verified'
+    || commercialSuiteScope?.sizeSource === 'stamp')
+    ? commercialSuiteScope.resolved
+    : null;
+  // The building's own total, captured before the blanking below — needed
+  // for the profile's suiteBuildingTotalSqFt display field either way.
+  const commercialSuiteResolvedBuildingSqft = commercialSuiteScope?.applies
+    ? commercialSuiteScope.buildingSqft
+    : null;
+  // A verified squareFootage on this suite address DISTRUSTED as a suite
+  // measurement (primary review of PR #4840 r7 P1) — surfaced as a
+  // fieldVerify flag once `fieldVerifyFlags` exists further down, mirroring
+  // residentialUnitLookup's `_unitVerifiedSaved` "saved but not applied" flag.
+  const commercialSuiteDistrustedVerifiedSqft = commercialSuiteScope?.applies
+    ? commercialSuiteScope.distrustedVerifiedSqft
+    : null;
+  // True once the commercial-suite grounds blanking below actually fires —
+  // the client keys its own stale-field reset off this (unitScopedLookup),
+  // the same way it already keys off residentialUnitLookup (primary review
+  // of PR #4840 r5 P1).
+  const commercialSuiteUnitScoped = Boolean(commercialSuiteScope?.applies);
+  if (commercialSuiteUnitScoped) {
+    // SAME blanking residentialUnitLookup applies below, via the shared
+    // helper (primary review of PR #4840 r5 P1 — a prior cut here only
+    // zeroed squareFootage, leaving the plaza's lot/turf/beds/pool/trees/
+    // satellite reads to price as this ONE suite's grounds; every
+    // GROUND-GEOMETRY figure computed further down — footprintSf,
+    // estimatedPerimeterLF, estimatedAtticSqFt, estimatedSlabSqFt,
+    // turf/bed/hardscape/pool — derives from this same rc/ai, so blanking
+    // both here is the only place a suite's dimensions can come from).
+    // homeSqFt below and applyCommercialSuiteSize's post-resolution
+    // footprint both key off this same rc, applying the suite's own
+    // resolved size on top afterward — this lane never re-derives anything
+    // from the (now cleared) building total.
+    if (rc) rc = blankUnitScopedGroundsAndSize(rc);
+    // Every satellite/vision read (areas, densities, water, pool) describes
+    // the PARCEL, same as residentialUnitLookup below — dropped whole
+    // rather than priced as this one suite's grounds.
+    ai = null;
   }
   if (unitLookup) {
     // Everything the record and the imagery say about SIZE and GROUNDS is
@@ -5630,6 +5677,7 @@ module.exports.buildParcelOverlayParam = buildParcelOverlayParam;
 module.exports._private = {
   applyCommercialSuiteSize,
   reconcileCommercialSuiteSubtype,
+  resolveCommercialSuiteScope,
   buildResultFromCachedLookup,
   cachedAggregateResolvesToOwnUnit,
   subdivisionMedianEstimate,
