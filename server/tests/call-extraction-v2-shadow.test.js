@@ -84,6 +84,23 @@ describe('v2 extraction prompt', () => {
     expect(prompt).toContain('courtesy heads-up');
   });
 
+  // codex #4919 round-8 P1: "Tuesday, 2 to 4" has no AM/PM anywhere, so the
+  // model had to invent a period to set confirmed_start_at — the window
+  // must be unambiguous, not merely a range with a start hour.
+  test('an arrival window with NO explicit period anywhere does NOT confirm — the model must never invent AM/PM (codex #4919 round-8 P1)', () => {
+    const prompt = buildExtractionPrompt('', '', '');
+    expect(prompt).toContain('UNAMBIGUOUS period for that start');
+    expect(prompt).toContain('"Tuesday, 2 to 4 PM"');
+    expect(prompt).toContain('"Tuesday, 2 to 4", "between 2 and 4"');
+    expect(prompt).toContain('does NOT qualify');
+    // The old ambiguous positive example is gone entirely, not just amended
+    // elsewhere — it must not still appear as a qualifying example.
+    expect(prompt).not.toMatch(/"Tuesday, 2 to 4"\)\s*DOES qualify/);
+    // The already-unambiguous examples still qualify unchanged.
+    expect(prompt).toContain('"between 6 and 9 tonight"');
+    expect(prompt).toContain('"between 10 and noon tomorrow"');
+  });
+
   test('prompt version and hash are stable', () => {
     expect(PROMPT_VERSION).toBe('v11');
     expect(PROMPT_HASH).toMatch(/^v11-[a-f0-9]{12}$/);

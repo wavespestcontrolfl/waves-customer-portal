@@ -3479,6 +3479,26 @@ router.post('/call-status', async (req, res) => {
     // than this row's own created_at (callback-RECEIPT time, not the call's
     // actual end).
     const providerEndedAt = TERMINAL_CALL_STATUSES.has(CallStatus) ? parseProviderTimestamp(Timestamp) : null;
+    // codex #4919 round-8 P1: the fallback insert below can just as easily
+    // land on a NON-terminal event (initiated/ringing/in-progress) — a
+    // Studio Flow call whose first status callback beats /voice. That
+    // event's own created_at IS already close to the call's actual START
+    // (not a post-call receipt time), but duration_seconds is 0/unknown at
+    // insert. The LATER terminal callback's UPDATE (below) folds in the
+    // real duration — and without a stamped start, callStartedAt's
+    // post-call fallback (call-timeline.js) then subtracts that
+    // now-correct duration from a created_at that was already the right
+    // start, landing on a start far too early. Stamping the event's own
+    // instant here as provider_started_at gives callStartedAt an
+    // authoritative value no later duration update can perturb. Terminal
+    // and non-terminal are mutually exclusive by construction (same
+    // CallStatus), so only one of these two ever lands on a given insert.
+    // Timestamp missing/unparseable falls back to the insert's own instant
+    // — the best available estimate of this event's time, same as if the
+    // row had no provider stamp at all before this fix.
+    const providerStartedAt = TERMINAL_CALL_STATUSES.has(CallStatus)
+      ? null
+      : (parseProviderTimestamp(Timestamp) || new Date().toISOString());
     const isOutbound = Direction === 'outbound-api' || Direction === 'outbound-dial';
 
     await db.transaction(async (trx) => {
@@ -3579,6 +3599,7 @@ router.post('/call-status', async (req, res) => {
             relay_sandbox: true,
             source: 'status_callback',
             ...(providerEndedAt ? { provider_ended_at: providerEndedAt } : {}),
+            ...(providerStartedAt ? { provider_started_at: providerStartedAt } : {}),
           }),
         });
         return;
@@ -3601,6 +3622,7 @@ router.post('/call-status', async (req, res) => {
           domain: numberConfig?.domain || null,
           source: 'status_callback',
           ...(providerEndedAt ? { provider_ended_at: providerEndedAt } : {}),
+          ...(providerStartedAt ? { provider_started_at: providerStartedAt } : {}),
         }),
       });
 

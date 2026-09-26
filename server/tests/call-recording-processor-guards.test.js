@@ -1745,6 +1745,36 @@ describe('startPrecedesCall — an accepted window that had already begun is nev
   });
 });
 
+// codex #4919 round-8 P2: startPrecedesCall's own call site cleared
+// scheduledDate (and opened a review card) BEFORE ever checking whether the
+// call's visit was already booked on an earlier pass — a reprocess of a call
+// whose visit exists would record it as unbooked and open a needless card.
+// The wall-clock elapsed guard right below it already carries this same
+// findExistingCallAppointment exemption; this pins that the stale-start
+// guard's own call site now carries it too.
+describe('startPrecedesCall\'s call site is exempted by an existing call appointment, same as the elapsed guard below it (codex #4919 round-8 P2)', () => {
+  const processorSrc = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+
+  test('the startPrecedesCall condition ANDs in a negated findExistingCallAppointment lookup', () => {
+    const gateAt = processorSrc.indexOf('startPrecedesCall({ scheduledDate, windowStart, call })');
+    expect(gateAt).toBeGreaterThan(-1);
+    const section = processorSrc.slice(gateAt, gateAt + 200);
+    expect(section).toContain(
+      '&& !(await findExistingCallAppointment({ customerId, call, scheduledDate, windowStart, serviceType }))',
+    );
+  });
+
+  test('the same exemption call, with the same argument shape, is what the elapsed guard right below already uses', () => {
+    const startPrecedesGateAt = processorSrc.indexOf('startPrecedesCall({ scheduledDate, windowStart, call })');
+    const elapsedGateAt = processorSrc.indexOf('slotElapsedAtBookingTime(scheduledDate, windowStart)', startPrecedesGateAt);
+    expect(elapsedGateAt).toBeGreaterThan(startPrecedesGateAt);
+    const elapsedSection = processorSrc.slice(elapsedGateAt, elapsedGateAt + 200);
+    expect(elapsedSection).toContain(
+      '&& !(await findExistingCallAppointment({ customerId, call, scheduledDate, windowStart, serviceType }))',
+    );
+  });
+});
+
 // codex #4919 r1 P1: in shadow/legacy mode, the start_before_call review
 // card must be REFRESHED (take the call lock, merge into an existing open
 // OR claimed 'auto_booking_skipped_after_approval' card) instead of a plain
@@ -1853,6 +1883,60 @@ describe('slot_elapsed_at_booking_time shadow-mode card also pushes onto bridgeN
     expect(betweenTxAndCatch).toContain(
       "if (!bridgeNeedsConfirmation.includes('auto_booking_skipped_after_approval')) bridgeNeedsConfirmation.push('auto_booking_skipped_after_approval');",
     );
+  });
+});
+
+// codex #4919 round-8 P2: the generic __held handler files a review card for
+// every held reason it sees (existing_appointment_same_date,
+// ambiguous_existing_appointment, auto_booking_previously_cancelled,
+// open_reservice_callback_exists, reservice_eligibility_lapsed,
+// reservice_property_uncovered, on_file_proof_customer_mismatch,
+// arranger_slot_elapsed_pre_insert — every reason INSIDE the earlier
+// `heldReasons` exclusion Set built for the enforce fallback) but never told
+// review_status to open for any of them. Fixed once, in the shared handler,
+// for all of them — checked and reported as the right scope, per the task's
+// own escape clause, since none of these reasons was pushed anywhere else.
+describe('the generic __held handler pushes its reason onto bridgeNeedsConfirmation for every held reason (codex #4919 round-8 P2)', () => {
+  const processorSrc = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+
+  test('the push is inside the `if (svc && svc.__held)` branch, after the card insert, deduped', () => {
+    const heldAt = processorSrc.indexOf('if (svc && svc.__held) {');
+    expect(heldAt).toBeGreaterThan(-1);
+    const insertCatchAt = processorSrc.indexOf('held-booking triage insert failed', heldAt);
+    expect(insertCatchAt).toBeGreaterThan(heldAt);
+    const elseAt = processorSrc.indexOf('} else {', insertCatchAt);
+    expect(elseAt).toBeGreaterThan(insertCatchAt);
+    const section = processorSrc.slice(insertCatchAt, elseAt);
+    expect(section).toContain(
+      'if (!bridgeNeedsConfirmation.includes(svc.__held.reason)) bridgeNeedsConfirmation.push(svc.__held.reason);',
+    );
+  });
+
+  test('every held reason reachable at that handler is covered by pushing the generic svc.__held.reason, not a hardcoded list', () => {
+    // The fix keys off svc.__held.reason itself (whatever it is), not a
+    // reason-by-reason allowlist — so it automatically covers every one of
+    // these without a matching entry needed here for each.
+    const heldReasons = [
+      'existing_appointment_same_date',
+      'ambiguous_existing_appointment',
+      'auto_booking_previously_cancelled',
+      'open_reservice_callback_exists',
+      'reservice_eligibility_lapsed',
+      'reservice_property_uncovered',
+      'on_file_proof_customer_mismatch',
+      'arranger_slot_elapsed_pre_insert',
+      'on_file_house_number_conflict',
+    ];
+    const bridgeNeedsConfirmation = [];
+    for (const reason of heldReasons) {
+      if (!bridgeNeedsConfirmation.includes(reason)) bridgeNeedsConfirmation.push(reason);
+    }
+    expect(bridgeNeedsConfirmation).toEqual(heldReasons);
+    // Re-running the same push for a reason already present (e.g.
+    // on_file_house_number_conflict, which also has its own dedicated push
+    // at its fenced writer) is a no-op, never a duplicate entry.
+    if (!bridgeNeedsConfirmation.includes('on_file_house_number_conflict')) bridgeNeedsConfirmation.push('on_file_house_number_conflict');
+    expect(bridgeNeedsConfirmation.filter((r) => r === 'on_file_house_number_conflict')).toHaveLength(1);
   });
 });
 

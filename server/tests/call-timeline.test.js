@@ -97,6 +97,29 @@ describe('provider-supplied times (metadata.provider_started_at / provider_ended
     expect(callEndedAt(row).toISOString()).toBe('2026-09-26T18:05:00.000Z');
   });
 
+  // codex #4919 round-8 P1: /call-status's fallback insert can land on a
+  // NON-terminal event (initiated/ringing/in-progress) whose created_at is
+  // already close to the real start. Before this fix, only a TERMINAL
+  // event stamped a provider time, so this row carried no
+  // provider_started_at at insert — and once the later terminal callback's
+  // UPDATE folded in the real, now-correct duration_seconds, callStartedAt's
+  // post-call fallback subtracted THAT duration from a created_at that was
+  // already right, landing on a start far too early. Stamping
+  // provider_started_at at the non-terminal insert (twilio-voice-webhook.js)
+  // fixes this — proven here as the "BOTH provider times present" case
+  // above already covers, but named for this exact regression.
+  test('an initiated-event row later updated with the real duration: callStartedAt stays the event time, never event time minus duration', () => {
+    const row = {
+      created_at: '2026-09-26T18:00:03Z', // /call-status received the "initiated" event ~instantly
+      duration_seconds: 300, // the LATER terminal callback's real, now-correct duration
+      metadata: { source: 'status_callback', provider_started_at: '2026-09-26T18:00:00Z' },
+    };
+    expect(callStartedAt(row).toISOString()).toBe('2026-09-26T18:00:00.000Z');
+    // Without the fix, this would have been created_at (18:00:03) minus the
+    // 300s duration — 17:55:03, five minutes before the call ever started.
+    expect(callStartedAt(row).toISOString()).not.toBe('2026-09-26T17:55:03.000Z');
+  });
+
   test('an INVALID provider_started_at is omitted — falls back to today\'s duration-backed-out behavior unchanged', () => {
     const row = {
       created_at: '2026-09-26T18:10:00Z',

@@ -83,6 +83,90 @@ describe('the existing-row metadata write condition respects nextCallStatus prec
   });
 });
 
+// codex #4919 round-8 P1: a non-terminal /call-status event (initiated/
+// ringing/in-progress) can be the one that lands the fallback insert — its
+// created_at is already close to the real start, but a LATER terminal
+// callback's update folds in the real duration and would otherwise make
+// callStartedAt subtract that duration from a start that was already
+// correct (see call-timeline.test.js for the callStartedAt-side proof).
+// Stamping provider_started_at at insert time, from this event's own
+// Timestamp, closes the gap.
+describe('providerStartedAt — stamped for a NON-terminal /call-status event only (codex #4919 round-8 P1)', () => {
+  const { TERMINAL_CALL_STATUSES, parseProviderTimestamp } = voiceRouter._test;
+
+  function computeProviderStartedAt(CallStatus, Timestamp) {
+    return TERMINAL_CALL_STATUSES.has(CallStatus)
+      ? null
+      : (parseProviderTimestamp(Timestamp) || 'INSERT_TIME_FALLBACK');
+  }
+
+  test('a non-terminal status (initiated/ringing/in-progress) stamps the event Timestamp', () => {
+    expect(computeProviderStartedAt('initiated', 'Sat, 26 Sep 2026 18:00:00 +0000')).toBe('2026-09-26T18:00:00.000Z');
+    expect(computeProviderStartedAt('ringing', 'Sat, 26 Sep 2026 18:00:00 +0000')).toBe('2026-09-26T18:00:00.000Z');
+    expect(computeProviderStartedAt('in-progress', 'Sat, 26 Sep 2026 18:00:00 +0000')).toBe('2026-09-26T18:00:00.000Z');
+  });
+
+  test('a TERMINAL status never stamps provider_started_at, regardless of Timestamp — providerEndedAt covers it instead', () => {
+    for (const status of TERMINAL_CALL_STATUSES) {
+      expect(computeProviderStartedAt(status, 'Sat, 26 Sep 2026 18:00:00 +0000')).toBeNull();
+    }
+  });
+
+  test('a missing/unparseable Timestamp on a non-terminal event falls back to the insert instant, never null/omitted', () => {
+    expect(computeProviderStartedAt('ringing', undefined)).toBe('INSERT_TIME_FALLBACK');
+    expect(computeProviderStartedAt('ringing', 'not-a-date')).toBe('INSERT_TIME_FALLBACK');
+  });
+
+  test('the source computes providerStartedAt once, ahead of both insert paths, mirroring providerEndedAt\'s own gate', () => {
+    const handlerAt = processorSrc.indexOf(
+      "const { CallSid, CallStatus, CallDuration, From, To, Direction, ErrorCode, ErrorMessage, Timestamp } = req.body;",
+    );
+    expect(handlerAt).toBeGreaterThan(-1);
+    const providerEndedAtDeclAt = processorSrc.indexOf(
+      'const providerEndedAt = TERMINAL_CALL_STATUSES.has(CallStatus) ? parseProviderTimestamp(Timestamp) : null;',
+      handlerAt,
+    );
+    expect(providerEndedAtDeclAt).toBeGreaterThan(handlerAt);
+    const isOutboundAt = processorSrc.indexOf('const isOutbound =', providerEndedAtDeclAt);
+    expect(isOutboundAt).toBeGreaterThan(providerEndedAtDeclAt);
+    const section = processorSrc.slice(providerEndedAtDeclAt, isOutboundAt);
+    expect(section).toContain('const providerStartedAt = TERMINAL_CALL_STATUSES.has(CallStatus)');
+    expect(section).toContain('? null');
+    expect(section).toContain('parseProviderTimestamp(Timestamp) || new Date().toISOString()');
+  });
+
+  test('the sandbox fallback insert stamps provider_started_at alongside provider_ended_at', () => {
+    const handlerAt = processorSrc.indexOf(
+      "const { CallSid, CallStatus, CallDuration, From, To, Direction, ErrorCode, ErrorMessage, Timestamp } = req.body;",
+    );
+    const sandboxAt = processorSrc.indexOf('source: VOICE_RELAY_SANDBOX_SOURCE,', handlerAt);
+    expect(sandboxAt).toBeGreaterThan(handlerAt);
+    const section = processorSrc.slice(sandboxAt, sandboxAt + 400);
+    expect(section).toContain("...(providerEndedAt ? { provider_ended_at: providerEndedAt } : {})");
+    expect(section).toContain("...(providerStartedAt ? { provider_started_at: providerStartedAt } : {})");
+  });
+
+  test('the regular inbound fallback insert stamps provider_started_at alongside provider_ended_at', () => {
+    const afterSandboxAt = processorSrc.indexOf('const customer = From');
+    expect(afterSandboxAt).toBeGreaterThan(-1);
+    const fallbackMetaAt = processorSrc.indexOf("source: 'status_callback',", afterSandboxAt);
+    expect(fallbackMetaAt).toBeGreaterThan(afterSandboxAt);
+    const section = processorSrc.slice(fallbackMetaAt, fallbackMetaAt + 200);
+    expect(section).toContain("...(providerEndedAt ? { provider_ended_at: providerEndedAt } : {})");
+    expect(section).toContain("...(providerStartedAt ? { provider_started_at: providerStartedAt } : {})");
+  });
+
+  test('the existing-row UPDATE path never writes provider_started_at — only the initial insert does', () => {
+    const handlerAt = processorSrc.indexOf(
+      "const { CallSid, CallStatus, CallDuration, From, To, Direction, ErrorCode, ErrorMessage, Timestamp } = req.body;",
+    );
+    const existingAt = processorSrc.indexOf('if (existing) {', handlerAt);
+    const returnAt = processorSrc.indexOf('return;', existingAt);
+    const section = processorSrc.slice(existingAt, returnAt);
+    expect(section).not.toContain('provider_started_at');
+  });
+});
+
 describe('/recording-status recovery insert writes provider_started_at/provider_ended_at (codex #4919 finding D)', () => {
   test('provider_started_at/provider_ended_at are computed from the fetched Call resource, with RecordingStartTime as a start hint ONLY when that fetch failed', () => {
     const anchor = "const twilioCall = (!requestFrom || !requestTo) ? await fetchTwilioCall(primaryCallSid) : null;";

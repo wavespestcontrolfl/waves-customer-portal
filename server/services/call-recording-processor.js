@@ -15368,7 +15368,14 @@ const CallRecordingProcessor = {
             // placed (a 6:30 PM caller accepting "between 6 and 9 tonight")
             // is never booked at its stale start — it goes to the office
             // like any other unbookable approved call (codex #4919 r1 P1).
-            if (scheduledDate && startPrecedesCall({ scheduledDate, windowStart, call })) {
+            // Same existing-call-appointment exemption the wall-clock
+            // elapsed guard right below uses (codex #4919 round-8 P2): a
+            // REPROCESS of a call whose visit was already booked on an
+            // earlier pass must not now record it as unbooked and open a
+            // fresh review card — only a not-yet-booked stale start is
+            // refused.
+            if (scheduledDate && startPrecedesCall({ scheduledDate, windowStart, call })
+              && !(await findExistingCallAppointment({ customerId, call, scheduledDate, windowStart, serviceType }))) {
               logger.warn(`[call-proc] Extracted start ${scheduledDate}T${windowStart} had already passed when the call was placed; skipping schedule + SMS for ${maskSid(callSid)}`);
               appointmentResult = {
                 service: serviceType,
@@ -16742,6 +16749,28 @@ const CallRecordingProcessor = {
                   .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
                   .ignore()
                   .catch((triageErr) => logger.warn(`[call-proc] held-booking triage insert failed for ${maskSid(callSid)}: ${triageErr.message}`));
+                // codex #4919 round-8 P2: this generic handler files a
+                // review card for every __held reason it sees (or, for
+                // on_file_house_number_conflict, defers to that reason's
+                // own fenced writer above) but never told review_status to
+                // open — a booking held for review with no schedule row is
+                // exactly the case review_status exists for. None of these
+                // reasons is pushed onto bridgeNeedsConfirmation anywhere
+                // else (checked: existing_appointment_same_date,
+                // ambiguous_existing_appointment,
+                // auto_booking_previously_cancelled,
+                // open_reservice_callback_exists,
+                // reservice_eligibility_lapsed,
+                // reservice_property_uncovered,
+                // on_file_proof_customer_mismatch,
+                // arranger_slot_elapsed_pre_insert), so the gap is the
+                // shared handler's, not any one reason's — fixed here for
+                // all of them rather than one at a time. Runs in both
+                // modes (this handler is unconditional on mode) and
+                // applies regardless of whether the card insert above
+                // fired (deduped, so on_file_house_number_conflict's own
+                // dedicated push elsewhere is never doubled).
+                if (!bridgeNeedsConfirmation.includes(svc.__held.reason)) bridgeNeedsConfirmation.push(svc.__held.reason);
               } else {
               if (reusedExistingSchedule) {
                 scheduleWasReused = true;
