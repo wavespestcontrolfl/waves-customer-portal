@@ -1138,6 +1138,11 @@ function leadIdsOf(call) {
 // ring time, so their end is created_at + duration; bridged rows end at
 // bridge + duration; other rows (recovered outbound, inserted near the end
 // by status callbacks) end at created_at.
+// The bridged branch is deliberate: created_at is written before Twilio
+// dials staff and CallDuration runs from staff's answer (between created_at
+// and bridged_at), so bridge + duration is the safe upper bound and never
+// ends before the customer was connected. server/utils/call-timeline.js
+// callEndedAt uses the same rule (codex #4972 r1 P1).
 function callEndedAt(call) {
   const created = call?.created_at ? new Date(call.created_at) : null;
   if (!created || Number.isNaN(created.getTime())) return null;

@@ -217,6 +217,19 @@ function maskSid(sid) {
   return `${value.slice(0, 2)}…${value.slice(-6)}`;
 }
 
+// codex #4919 finding D: a fallback insert's created_at is call-timeline.js's
+// "already post-call" case — this parses whatever provider-supplied instant
+// (a Twilio Call resource's Date startTime/endTime, or a webhook body's
+// RFC-2822 Timestamp/RecordingStartTime string) that row's metadata can
+// carry INSTEAD, so call-timeline.js can read the real instant rather than
+// backing it out of duration_seconds. Defensive: any unparseable/missing
+// value is omitted, never a thrown error or a bogus stored timestamp.
+function parseProviderTimestamp(value) {
+  if (!value) return null;
+  const d = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+}
+
 // ── Recording-callback idempotency ─────────────────────────────────────────
 // Twilio delivers /recording-status at least once, not exactly once: a retry
 // after a webhook timeout (the 2026-08-29 pool-exhaustion 502s), and the
@@ -2452,7 +2465,7 @@ router.post('/inbound-forward-accept', async (req, res) => {
 // =========================================================================
 router.post('/recording-status', async (req, res) => {
   try {
-    const { CallSid, RecordingSid, RecordingUrl, RecordingDuration, RecordingStatus } = req.body;
+    const { CallSid, RecordingSid, RecordingUrl, RecordingDuration, RecordingStatus, RecordingStartTime } = req.body;
 
     if (RecordingStatus === 'completed' && CallSid) {
       const recordingData = {
@@ -2762,6 +2775,13 @@ router.post('/recording-status', async (req, res) => {
           const twilioCall = (!requestFrom || !requestTo) ? await fetchTwilioCall(primaryCallSid) : null;
           const recoveredFrom = requestFrom || twilioCall?.from || null;
           const recoveredTo = requestTo || twilioCall?.to || null;
+          // codex #4919 finding D: the fetched Call resource's own
+          // start/end are the provider's record of this call's real clock —
+          // RecordingStartTime is a START hint ONLY when that fetch failed
+          // (no Call resource to read startTime from at all).
+          const providerStartedAt = parseProviderTimestamp(twilioCall?.startTime)
+            || (!twilioCall ? parseProviderTimestamp(RecordingStartTime) : null);
+          const providerEndedAt = parseProviderTimestamp(twilioCall?.endTime);
 
           await db.transaction(async (trx) => {
             // Serialize with /call-status, which may insert the same
@@ -2817,6 +2837,11 @@ router.post('/recording-status', async (req, res) => {
                 numberType: numberConfig?.type || 'unknown',
                 domain: numberConfig?.domain || null,
                 source: twilioCall ? 'twilio_recording_status_recovered' : 'twilio_studio_recording_status',
+                // codex #4919 finding D: omitted (never a null/invalid key)
+                // when unparseable — call-timeline.js falls back to its
+                // existing duration-backed-out logic in that case.
+                ...(providerStartedAt ? { provider_started_at: providerStartedAt } : {}),
+                ...(providerEndedAt ? { provider_ended_at: providerEndedAt } : {}),
               }),
               ...recordingData,
             });
@@ -3488,7 +3513,37 @@ router.post('/outbound-dial-complete', async (req, res) => {
 // =========================================================================
 router.post('/call-status', async (req, res) => {
   try {
-    const { CallSid, CallStatus, CallDuration, From, To, Direction, ErrorCode, ErrorMessage } = req.body;
+    const { CallSid, CallStatus, CallDuration, From, To, Direction, ErrorCode, ErrorMessage, Timestamp } = req.body;
+    // codex #4919 finding D (round-5 P1 fix): Twilio's own event-time param
+    // IS the call's end instant only for a TERMINAL status of THIS
+    // callback — /call-status fires on every lifecycle event (ringing,
+    // in-progress, completed…), not just the last one, and this endpoint's
+    // own fallback insert below can land on the FIRST one to arrive, whichever
+    // status that is. Gating here means a non-terminal event never stamps
+    // provider_ended_at at all — read straight off the webhook body rather
+    // than this row's own created_at (callback-RECEIPT time, not the call's
+    // actual end).
+    const providerEndedAt = TERMINAL_CALL_STATUSES.has(CallStatus) ? parseProviderTimestamp(Timestamp) : null;
+    // codex #4919 round-8 P1: the fallback insert below can just as easily
+    // land on a NON-terminal event (initiated/ringing/in-progress) — a
+    // Studio Flow call whose first status callback beats /voice. That
+    // event's own created_at IS already close to the call's actual START
+    // (not a post-call receipt time), but duration_seconds is 0/unknown at
+    // insert. The LATER terminal callback's UPDATE (below) folds in the
+    // real duration — and without a stamped start, callStartedAt's
+    // post-call fallback (call-timeline.js) then subtracts that
+    // now-correct duration from a created_at that was already the right
+    // start, landing on a start far too early. Stamping the event's own
+    // instant here as provider_started_at gives callStartedAt an
+    // authoritative value no later duration update can perturb. Terminal
+    // and non-terminal are mutually exclusive by construction (same
+    // CallStatus), so only one of these two ever lands on a given insert.
+    // Timestamp missing/unparseable falls back to the insert's own instant
+    // — the best available estimate of this event's time, same as if the
+    // row had no provider stamp at all before this fix.
+    const providerStartedAt = TERMINAL_CALL_STATUSES.has(CallStatus)
+      ? null
+      : (parseProviderTimestamp(Timestamp) || new Date().toISOString());
     const isOutbound = Direction === 'outbound-api' || Direction === 'outbound-dial';
 
     await db.transaction(async (trx) => {
@@ -3530,6 +3585,27 @@ router.post('/call-status', async (req, res) => {
           status,
           duration_seconds: duration,
           updated_at: new Date(),
+          // codex #4919 finding D (round-6 P1 fix): the row may have been
+          // inserted earlier by a non-terminal event (no provider_ended_at
+          // stamped then, per the gate above) — completion landing HERE,
+          // on an already-existing row, is where it gets written. Merged
+          // into existing metadata, never a wholesale overwrite (COALESCE
+          // keeps every other key); omitted on a non-terminal event
+          // (providerEndedAt itself is null then), same as before — AND
+          // omitted when `status !== CallStatus`, meaning nextCallStatus
+          // REJECTED this event's status (a late busy/failed/no-answer
+          // callback the SAME precedence rule already keeps from rolling a
+          // completed call's status/duration backward — see nextCallStatus's
+          // "completed is absorbing" comment). Without this check a late
+          // terminal callback for an already-completed call would keep its
+          // correct status/duration but still clobber the real completion's
+          // provider_ended_at with this stale event's own, later Timestamp.
+          ...(providerEndedAt && status === CallStatus ? {
+            metadata: trx.raw(
+              "COALESCE(metadata, '{}'::jsonb) || ?::jsonb",
+              [JSON.stringify({ provider_ended_at: providerEndedAt })],
+            ),
+          } : {}),
         });
         return;
       }
@@ -3564,7 +3640,12 @@ router.post('/call-status', async (req, res) => {
           status: CallStatus,
           duration_seconds: parseInt(CallDuration || 0),
           source: VOICE_RELAY_SANDBOX_SOURCE,
-          metadata: JSON.stringify({ relay_sandbox: true, source: 'status_callback' }),
+          metadata: JSON.stringify({
+            relay_sandbox: true,
+            source: 'status_callback',
+            ...(providerEndedAt ? { provider_ended_at: providerEndedAt } : {}),
+            ...(providerStartedAt ? { provider_started_at: providerStartedAt } : {}),
+          }),
         });
         return;
       }
@@ -3585,6 +3666,8 @@ router.post('/call-status', async (req, res) => {
           numberType: numberConfig?.type || 'unknown',
           domain: numberConfig?.domain || null,
           source: 'status_callback',
+          ...(providerEndedAt ? { provider_ended_at: providerEndedAt } : {}),
+          ...(providerStartedAt ? { provider_started_at: providerStartedAt } : {}),
         }),
       });
 
@@ -3652,6 +3735,7 @@ router.post('/call-status', async (req, res) => {
 });
 
 router._test = {
+  parseProviderTimestamp,
   stampRelayProfile,
   outboundVoicemailTextDialOptions,
   AMD_MACHINE_DETECTED_KEY,

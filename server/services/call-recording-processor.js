@@ -29,6 +29,7 @@ const { sendConfirmationEmail } = require('./newsletter-confirm');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { isLikelyE164 } = require('../utils/phone');
 const { lockTriageCall } = require('../utils/triage-locks');
+const { callStartedAt, callEndedAt } = require('../utils/call-timeline');
 const { resolveLocation } = require('../config/locations');
 const { composeRelaySegment } = require('./voice-agent/relay-transfer');
 const { TRANSCRIPTION_PROVIDER: RELAY_TRANSCRIPTION_PROVIDER } = require('./voice-agent/relay-transcript');
@@ -1032,6 +1033,35 @@ function resolveCallContactPhone(call = {}, extractedPhone = null) {
   return firstExternalPhone(call.from_phone, extracted, call.to_phone);
 }
 
+// True when an extracted start (ET date "YYYY-MM-DD" + "HH:MM") is earlier
+// than the call's own ET wall clock AT THE MOMENT THE CALLER AGREED TO IT —
+// the agreed window had already begun when it was accepted (codex #4919 r1
+// P1). Compared against the call's COMPLETION time (start + duration via
+// call-timeline's callEndedAt), not created_at: a long call that starts
+// before the window but crosses into it while still on the line must not
+// flag a start the caller could still make, and a post-call fallback row's
+// created_at is already the call's END, so comparing against it directly
+// would double-subtract the call's length (codex #4919 r2 P1). Compares the
+// full ET timestamp, not "same calendar day + time-of-day" pieces: a call
+// that itself crosses ET midnight (starts 11:55 PM, ends 12:05 AM the next
+// date) has a completion date one day AFTER the scheduled date of a start
+// that is nonetheless clearly already past — a same-day-only check would
+// silently exempt exactly that case (codex #4919 r5 P1). A genuinely later
+// calendar day's window always sits after the call's completion instant
+// regardless, so no separate "later date never precedes" special case is
+// needed.
+function startPrecedesCall({ scheduledDate, windowStart, call: callRow }) {
+  if (!scheduledDate || !windowStart || !callRow) return false;
+  const at = callEndedAt(callRow);
+  if (!at || Number.isNaN(at.getTime())) return false;
+  const datePart = String(scheduledDate).split('T')[0];
+  const timePart = String(windowStart).replace(/^24:/, '00:');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(datePart) || !/^\d{1,2}:\d{2}$/.test(timePart)) return false;
+  const candidateStart = parseETDateTime(`${datePart}T${timePart.padStart(5, '0')}`);
+  if (!candidateStart || Number.isNaN(candidateStart.getTime())) return false;
+  return candidateStart.getTime() < at.getTime();
+}
+
 // The customer's own number for an approval-gated clarify draft, either
 // direction (owner directive 2026-09-26): the inbound ANI, or on an outbound
 // call the customer leg resolveCallContactPhone already derives — the dialed
@@ -1042,19 +1072,36 @@ function clarifyAskTargetPhone(call = {}) {
   return isOutboundCall(call) ? resolveCallContactPhone(call, null) : firstExternalPhone(call.from_phone);
 }
 
-// True when an arranger-authorized WDO booking's agreed ET slot has already
-// started on the ET wall clock: its date (YYYY-MM-DD, the wall date the visit
-// row gets) is before today's ET date, or it is today and its window start
-// (HH:MM) has passed (codex #4890 r5/r6/r7). Uses the shared
-// sameDayWindowElapsed so the cutoff matches every other mover.
-function arrangerSlotElapsed({ authorized, scheduledDate, windowStart = null }) {
-  if (!authorized || !scheduledDate) return false;
+// True when a scheduled slot's date (YYYY-MM-DD, the wall date the visit row
+// gets) is before today's ET date, or it is today and its window start
+// (HH:MM) has passed — on the REAL ET wall clock AT THE MOMENT THIS RUNS
+// (booking time), not the call's own clock. Uses the shared
+// sameDayWindowElapsed so the cutoff matches every other mover (codex #4890
+// r5/r6/r7 for the arranger-only origin of this check; codex #4919 round-7
+// P1 generalized it to every fresh call booking — see the two call sites in
+// processRecording). Complements startPrecedesCall (above), which catches a
+// window already stale relative to the CALL itself; this catches one that
+// elapses during the PROCESSING gap between call-end and the actual DB
+// write (processing runs at least CALL_PROC_EARLY_PROCESS_DELAY_MS after
+// hang-up — twilio-voice-webhook.js — so a call ending just before an
+// accepted window's start can still land here after the window has begun).
+function slotElapsedAtBookingTime(scheduledDate, windowStart = null) {
+  if (!scheduledDate) return false;
   // One clock for both halves: sameDayWindowElapsed reads the real ET "today".
   if (String(scheduledDate) < etDateString(new Date())) return true;
   // Node's h24 hour cycle renders midnight as "24:00"; the start of the day
   // is "00:00" for the elapsed comparison (codex #4890 r8 P2).
   const start = windowStart ? String(windowStart).replace(/^24:/, '00:') : windowStart;
   return sameDayWindowElapsed(scheduledDate, start);
+}
+// Arranger-specific wrapper (codex #4890 r5/r6/r7) — kept for its own
+// dedicated test coverage; production call sites now call
+// slotElapsedAtBookingTime directly for every booking (codex #4919 round-7
+// P1), so `authorized` no longer gates whether the elapsed check itself
+// runs, only whether THIS function's own callers (if any remain) still key
+// off arranger status specifically.
+function arrangerSlotElapsed({ authorized, scheduledDate, windowStart = null }) {
+  return Boolean(authorized) && slotElapsedAtBookingTime(scheduledDate, windowStart);
 }
 
 function isLiveLeadConversation({ call, extracted, leadId, finalStatus, nonLeadCall, voicemailLeadPath, transcription }) {
@@ -3314,7 +3361,6 @@ async function noteSharedPhoneSibling(database, { leadId, phone, extracted = {},
 // pending call that sat through a multi-day outage waited multi-day days,
 // and erasing that is the exact bug this change exists to fix.
 function leadFirstContactAt(call, { reprocessOfProcessed = false } = {}) {
-  const { callStartedAt } = require('../utils/call-timeline');
   const callAt = callStartedAt(call);
   if (!callAt) return new Date();
   if (!reprocessOfProcessed) return callAt;
@@ -6832,6 +6878,7 @@ Do not inflate quality: a caller who is still comparing companies or said they'd
 IMPORTANT — appointment_confirmed rules:
 - Only set appointment_confirmed to true if BOTH a specific DATE and a specific TIME were explicitly agreed to by the caller.
 - Vague references like "tomorrow", "next week", "noonish", "sometime Tuesday" do NOT count — the caller must confirm an actual time (e.g. "10 AM", "2:30 PM", "noon").
+- ARRIVAL WINDOW EXCEPTION: an arrival window staff COMMITTED to and the caller ACCEPTED, on a specific day, with a clear start hour AND an UNAMBIGUOUS period for that start — an explicit AM/PM stated on either bound of the range, "noon"/"midnight" as either bound, or a day-part word that fixes the period ("tonight", "this evening", "in the morning", "this afternoon") — DOES count as confirmed; it is a specific time slot expressed as a range ("between 6 and 9 tonight", "we'll be there between noon and 1 today", "between 10 and noon tomorrow", "Tuesday, 2 to 4 PM"). Set appointment_confirmed true and preferred_date_time to the window's START. A relative day that resolves to one calendar date ("today", "tonight", "tomorrow", "this Tuesday") is a specific day here; the vague examples above are vague because they carry no time, not because of the period rule here. A committed window stays confirmed even when phrased loosely ("we'll be there sometime between 6 and 9 tonight") or paired with a courtesy heads-up ("the tech will call when he's on the way"). A range with NO explicit AM/PM, no "noon"/"midnight", and no day-part word — "Tuesday, 2 to 4", "between 2 and 4" — leaves the START's period unstated, so it does NOT count as confirmed (you would otherwise have to invent AM or PM). An offer staff did not commit to ("we'll try to fit you in", "maybe", "I'll check the schedule and call you back with a time") stays NOT confirmed.
 - If the agent says "I'll text you" or "let me check" without the caller confirming a specific time slot, appointment_confirmed must be false.
 - preferred_date_time must include the confirmed time, not just a date.
 - Resolve relative dates against the call date above in Eastern Time. "Today" means ${callDateET}; do not invent a prior year or use the model's training/current date.
@@ -8640,7 +8687,14 @@ const CallRecordingProcessor = {
     let extracted;
     try {
       const extractStartedAt = Date.now();
-      extracted = await extractCallData(transcription, contactPhone, { callStartedAt: call.created_at, knownCaller, bookableServiceNames, priorCall, callDirection: isOutboundCall(call) ? 'outbound' : 'inbound' });
+      // call-timeline's callStartedAt(), not the raw column (codex #4919
+      // round-3 P1): a status_callback/recording-recovery row's created_at
+      // is already POST-call, so the prompt's "today" anchor and the V2
+      // extraction below, and canAutoRoute's slot-binding dayDiff further
+      // down, must all resolve relative days ("tonight"/"tomorrow") from
+      // the SAME normalized call-start instant or they can disagree by a
+      // day on a call that lands after midnight.
+      extracted = await extractCallData(transcription, contactPhone, { callStartedAt: callStartedAt(call), knownCaller, bookableServiceNames, priorCall, callDirection: isOutboundCall(call) ? 'outbound' : 'inbound' });
       stageTimings.extraction_v1_ms = Date.now() - extractStartedAt;
     } catch (err) {
       logger.error(`[call-proc] AI extraction failed: ${err.message}`);
@@ -8690,7 +8744,7 @@ const CallRecordingProcessor = {
       try {
         const v2StartedAt = Date.now();
         v2Result = await extractCallDataV2(transcription, contactPhone, {
-          callStartedAt: call.created_at,
+          callStartedAt: callStartedAt(call),
           callId: call.id,
           bookableServiceNames,
           knownCaller,
@@ -9594,8 +9648,10 @@ const CallRecordingProcessor = {
             // until this companion gate flips (see feature-gates.js).
             transcriptLabelsTrusted: isEnabled('callAgentCommitTrustedLabels'),
             // Slot binding needs the call time: a spoken weekday only names a
-            // unique date within the 7 days after the call.
-            callStartedAt: call.created_at,
+            // unique date within the 7 days after the call. call-timeline's
+            // callStartedAt(), not created_at (codex #4919 round-3 P1) — see
+            // the extraction call site above for why.
+            callStartedAt: callStartedAt(call),
           });
           // Address fail-open is only safe when the on-file address really is
           // the booking address — V1-captured address evidence that conflicts
@@ -15303,32 +15359,169 @@ const CallRecordingProcessor = {
               scheduledDate = null;
             }
 
-            const callDateET = etDateString(call.created_at || new Date());
-            // An arranger-authorized WDO booking (owner ruling 2026-09-26) is
-            // refused once its agreed ET slot has started — checked HERE, when
-            // the visit is written, on the ET wall clock the row gets (codex
-            // #4890 r5 P1, r6, r7 P1: time-of-use, wall clock, same-day start
-            // time). A force-reprocess of an old blocked call must not create
-            // a backdated visit; routing itself stays clock-free.
-            // A reprocess of a call whose visit already exists keeps the
-            // existing-booking reuse below (codex #4890 r7 P2) — only a
-            // not-yet-booked elapsed slot is refused.
-            // Enforce mode only: that is the only mode where the arranger
-            // ruling authorizes a booking at all (shadow/legacy books on V1's
-            // own verdict), and enforce mode files the
-            // auto_booking_skipped_after_approval card for this skip, so a
-            // refused slot never vanishes silently (pre-push audit P1).
-            if (scheduledDate && arrangerSlotElapsed({ authorized: CALL_EXTRACTION_V2_DRIVES_ROUTING && wdoArrangerAuthorizedThisPass, scheduledDate, windowStart })
+            // The call's own ET date, from its START (callStartedAt), not
+            // created_at: a recovery row inserted after ET midnight for a call
+            // made the evening before would otherwise reject that evening's
+            // agreed slot as "before the call date" (codex #4919 pre-push P1).
+            const callDateET = etDateString(callStartedAt(call) || call.created_at || new Date());
+            // A same-day start that had already passed when the call was
+            // placed (a 6:30 PM caller accepting "between 6 and 9 tonight")
+            // is never booked at its stale start — it goes to the office
+            // like any other unbookable approved call (codex #4919 r1 P1).
+            // Same existing-call-appointment exemption the wall-clock
+            // elapsed guard right below uses (codex #4919 round-8 P2): a
+            // REPROCESS of a call whose visit was already booked on an
+            // earlier pass must not now record it as unbooked and open a
+            // fresh review card — only a not-yet-booked stale start is
+            // refused.
+            if (scheduledDate && startPrecedesCall({ scheduledDate, windowStart, call })
               && !(await findExistingCallAppointment({ customerId, call, scheduledDate, windowStart, serviceType }))) {
-              logger.warn(`[call-proc] Arranger-authorized WDO date ${scheduledDate} has already passed; skipping schedule + SMS for ${maskSid(callSid)}`);
+              logger.warn(`[call-proc] Extracted start ${scheduledDate}T${windowStart} had already passed when the call was placed; skipping schedule + SMS for ${maskSid(callSid)}`);
               appointmentResult = {
                 service: serviceType,
                 dateTime: extracted.preferred_date_time,
                 scheduleCreated: false,
                 smsSent: false,
-                skippedReason: 'past_extracted_date',
+                skippedReason: 'start_before_call',
               };
               scheduledDate = null;
+              // Enforce mode files the approved-but-unbooked card for this
+              // skip further down; shadow/legacy mode has no such fallback,
+              // so the office gets the same card here instead of a silent
+              // drop (pre-push audit P1). A standing task (open OR claimed)
+              // under the shared 'auto_booking_skipped_after_approval'
+              // reason code is REFRESHED with this start_before_call reason
+              // / window / service rather than left stale on a plain
+              // .ignore() — same lock + merge the enforce-mode fallback
+              // below applies (codex #4919 r1 P1).
+              // Keyed on the EFFECTIVE enforce state, not DRIVES_ROUTING
+              // alone (codex #4919 round-3 P1): DRIVES_ROUTING=true with
+              // CALL_EXTRACTION_V2_ENABLED=false is documented at boot as
+              // bare legacy V1 routing — v2ApprovedExtraction never gets
+              // set (see its gate above), so the enforce-mode fallback a
+              // few hundred lines below (guarded on `v2ApprovedExtraction`)
+              // never fires either, and a plain `!DRIVES_ROUTING` check here
+              // would skip this branch too, leaving NO card at all. Same
+              // `DRIVES_ROUTING && V2_ENABLED` boot already computes and
+              // every other "are we really in enforce mode" site in this
+              // file (e.g. `enforceModeActive` below) reuses.
+              if (!(CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED)) {
+                try {
+                  await db.transaction(async (ttrx) => {
+                    await lockTriageCall(ttrx, call.id);
+                    // A superseded worker leaves the current task untouched (codex r38 P1).
+                    const stillOwner = await ttrx('call_log').where({ id: call.id, processing_token: procToken }).first('id');
+                    if (!stillOwner) return;
+                    await ttrx('triage_items')
+                      .insert(buildTriageItem({
+                        callLogId: call.id,
+                        flag: 'auto_booking_skipped_after_approval',
+                        extraction: v2ApprovedExtraction || undefined,
+                        extraPayload: {
+                          skipped_reason: 'start_before_call',
+                          preferred_date_time: extracted.preferred_date_time || null,
+                          service: serviceType,
+                          // Same rebind-and-clear the enforce-mode fallback
+                          // below applies (codex #4919 round-4 P1): a merge
+                          // re-binds the task to the call's CURRENT customer
+                          // and must explicitly null the house-number-dispute
+                          // fields, or a card the merge reuses (opened for a
+                          // DIFFERENT reason, on a different customer/visit)
+                          // keeps its old dispute's retained_service_id /
+                          // retained_scheduled_date riding alongside this
+                          // one.
+                          dispute_customer_id: customerId ? String(customerId) : null,
+                          retained_service_id: null,
+                          retained_scheduled_date: null,
+                        },
+                      }))
+                      .onConflict(ttrx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+                      .merge({
+                        payload: ttrx.raw("COALESCE(triage_items.payload, '{}'::jsonb) || EXCLUDED.payload"),
+                        summary: ttrx.raw('EXCLUDED.summary'),
+                        updated_at: new Date(),
+                      });
+                  });
+                  // The task rides the call's review state like the
+                  // enforce-mode fallback's own card does (codex #4919
+                  // round-7 P2): review_status and the lead's
+                  // confirm-before-dispatch note derive from this list, not
+                  // from open triage rows, so shadow/legacy mode's card must
+                  // push onto it too or a stale-start call never shows as
+                  // needing review.
+                  if (!bridgeNeedsConfirmation.includes('auto_booking_skipped_after_approval')) bridgeNeedsConfirmation.push('auto_booking_skipped_after_approval');
+                } catch (e) {
+                  logger.warn(`[call-proc] start-before-call triage insert failed for ${maskSid(callSid)}: ${e.code || e.name || 'db_error'}`);
+                }
+              }
+            }
+            // A fresh call booking is refused once its agreed ET slot has
+            // already started — checked HERE, when the visit is written, on
+            // the ET wall clock the row gets (codex #4890 r5 P1, r6, r7 P1:
+            // time-of-use, wall clock, same-day start time; ORIGINALLY
+            // arranger-only, generalized to every booking by codex #4919
+            // round-7 P1 — processing runs at least 2 minutes after hang-up,
+            // so a call that ended just before an accepted window's start
+            // can still reach this write after the window began, in EITHER
+            // mode). A force-reprocess of an old blocked call must not
+            // create a backdated visit; routing itself stays clock-free.
+            // A reprocess of a call whose visit already exists keeps the
+            // existing-booking reuse below (codex #4890 r7 P2) — only a
+            // not-yet-booked elapsed slot is refused.
+            if (scheduledDate && slotElapsedAtBookingTime(scheduledDate, windowStart)
+              && !(await findExistingCallAppointment({ customerId, call, scheduledDate, windowStart, serviceType }))) {
+              logger.warn(`[call-proc] Scheduled date ${scheduledDate}T${windowStart} has already passed at booking time; skipping schedule + SMS for ${maskSid(callSid)}`);
+              appointmentResult = {
+                service: serviceType,
+                dateTime: extracted.preferred_date_time,
+                scheduleCreated: false,
+                smsSent: false,
+                skippedReason: 'slot_elapsed_at_booking_time',
+              };
+              scheduledDate = null;
+              // Enforce mode files the approved-but-unbooked card for this
+              // skip further down (this reason is not in that fallback's
+              // heldReasons exclusion set, so it fires there unchanged);
+              // shadow/legacy mode has no such fallback, so the office gets
+              // the same card here instead of a silent drop — same
+              // lock + merge + dispute-field-clearing shape the
+              // start_before_call shadow card above uses (codex #4919
+              // round-7 P1).
+              if (!(CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED)) {
+                try {
+                  await db.transaction(async (ttrx) => {
+                    await lockTriageCall(ttrx, call.id);
+                    // A superseded worker leaves the current task untouched (codex r38 P1).
+                    const stillOwner = await ttrx('call_log').where({ id: call.id, processing_token: procToken }).first('id');
+                    if (!stillOwner) return;
+                    await ttrx('triage_items')
+                      .insert(buildTriageItem({
+                        callLogId: call.id,
+                        flag: 'auto_booking_skipped_after_approval',
+                        extraction: v2ApprovedExtraction || undefined,
+                        extraPayload: {
+                          skipped_reason: 'slot_elapsed_at_booking_time',
+                          preferred_date_time: extracted.preferred_date_time || null,
+                          service: serviceType,
+                          dispute_customer_id: customerId ? String(customerId) : null,
+                          retained_service_id: null,
+                          retained_scheduled_date: null,
+                        },
+                      }))
+                      .onConflict(ttrx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+                      .merge({
+                        payload: ttrx.raw("COALESCE(triage_items.payload, '{}'::jsonb) || EXCLUDED.payload"),
+                        summary: ttrx.raw('EXCLUDED.summary'),
+                        updated_at: new Date(),
+                      });
+                  });
+                  // Same review-state ride as start_before_call's shadow
+                  // card above (codex #4919 round-7 P2).
+                  if (!bridgeNeedsConfirmation.includes('auto_booking_skipped_after_approval')) bridgeNeedsConfirmation.push('auto_booking_skipped_after_approval');
+                } catch (e) {
+                  logger.warn(`[call-proc] slot-elapsed-at-booking-time triage insert failed for ${maskSid(callSid)}: ${e.code || e.name || 'db_error'}`);
+                }
+              }
             }
             if (scheduledDate && scheduledDate < callDateET) {
               logger.warn(
@@ -16398,20 +16591,27 @@ const CallRecordingProcessor = {
                     }
                   }
                 }
-                // Recheck the arranger slot elapsed guard INSIDE this
-                // transaction, immediately before the fresh insert (codex
-                // #4890 P2): the check above ran BEFORE this transaction
-                // opened, and the payer lookup + advisory locks + comms-fence
-                // revalidation above can hold long enough for the agreed slot
-                // to elapse in the gap — the original check alone can't catch
-                // that. Same authorization gate as the early check (enforce
-                // mode only) and the same call-linked-visit exemption, now
-                // read through this transaction's own connection (`trx`) so
-                // it sees the state under the locks already taken, not a
-                // stale pre-transaction snapshot.
-                if (arrangerSlotElapsed({ authorized: CALL_EXTRACTION_V2_DRIVES_ROUTING && wdoArrangerAuthorizedThisPass, scheduledDate, windowStart })
+                // Recheck the slot-elapsed guard INSIDE this transaction,
+                // immediately before the fresh insert (codex #4890 P2,
+                // generalized to every booking by codex #4919 round-7 P1):
+                // the check above ran BEFORE this transaction opened, and
+                // the payer lookup + advisory locks + comms-fence
+                // revalidation above can hold long enough for the agreed
+                // slot to elapse in the gap — the original check alone
+                // can't catch that. Applies regardless of mode or arranger
+                // status now (every fresh booking reaches this same insert
+                // in both enforce and shadow/legacy), same call-linked-
+                // visit exemption, read through this transaction's own
+                // connection (`trx`) so it sees the state under the locks
+                // already taken, not a stale pre-transaction snapshot. The
+                // __held reason keeps its original name (no rename without
+                // also updating flagToCategoryMap/SCHEDULING_PAYLOAD_FLAGS
+                // and every test) — its card-filing (below, unconditional
+                // on `__held`) and its heldReasons exclusion (the enforce
+                // fallback further down) already work for any reason string.
+                if (slotElapsedAtBookingTime(scheduledDate, windowStart)
                   && !(await findExistingCallAppointment({ customerId, call, scheduledDate, windowStart, serviceType, trx }))) {
-                  logger.warn(`[call-proc] Arranger-authorized WDO date ${scheduledDate} elapsed while the scheduling transaction was in flight; refusing the insert for ${maskSid(callSid)}`);
+                  logger.warn(`[call-proc] Scheduled date ${scheduledDate} elapsed while the scheduling transaction was in flight; refusing the insert for ${maskSid(callSid)}`);
                   return { __held: { reason: 'arranger_slot_elapsed_pre_insert' } };
                 }
                 const [created] = await trx('scheduled_services')
@@ -16549,6 +16749,28 @@ const CallRecordingProcessor = {
                   .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
                   .ignore()
                   .catch((triageErr) => logger.warn(`[call-proc] held-booking triage insert failed for ${maskSid(callSid)}: ${triageErr.message}`));
+                // codex #4919 round-8 P2: this generic handler files a
+                // review card for every __held reason it sees (or, for
+                // on_file_house_number_conflict, defers to that reason's
+                // own fenced writer above) but never told review_status to
+                // open — a booking held for review with no schedule row is
+                // exactly the case review_status exists for. None of these
+                // reasons is pushed onto bridgeNeedsConfirmation anywhere
+                // else (checked: existing_appointment_same_date,
+                // ambiguous_existing_appointment,
+                // auto_booking_previously_cancelled,
+                // open_reservice_callback_exists,
+                // reservice_eligibility_lapsed,
+                // reservice_property_uncovered,
+                // on_file_proof_customer_mismatch,
+                // arranger_slot_elapsed_pre_insert), so the gap is the
+                // shared handler's, not any one reason's — fixed here for
+                // all of them rather than one at a time. Runs in both
+                // modes (this handler is unconditional on mode) and
+                // applies regardless of whether the card insert above
+                // fired (deduped, so on_file_house_number_conflict's own
+                // dedicated push elsewhere is never doubled).
+                if (!bridgeNeedsConfirmation.includes(svc.__held.reason)) bridgeNeedsConfirmation.push(svc.__held.reason);
               } else {
               if (reusedExistingSchedule) {
                 scheduleWasReused = true;
@@ -18778,7 +19000,11 @@ const CallRecordingProcessor = {
           agentCommitFailOpen: isEnabled('callAgentCommitBooking') && !isOutboundCall(call),
           transcript: transcription,
           transcriptLabelsTrusted: isEnabled('callAgentCommitTrustedLabels'),
-          callStartedAt: call.created_at,
+          // call-timeline's callStartedAt(), not created_at (codex #4919
+          // round-3 P1) — same normalized anchor as the live enforce path
+          // above and the extraction prompt, so a post-call fallback row
+          // never resolves a relative day one day late here alone.
+          callStartedAt: callStartedAt(call),
         });
         // Same on-file satisfaction the live merge point applies to its card set.
         if (routingResult?.onFileAddressSatisfiedFlags?.length) {
@@ -20171,8 +20397,10 @@ CallRecordingProcessor._test = {
   resolveDefaultCallBookingTechnician,
   resolveDefaultCallBookingTechnicianId,
   resolveCallContactPhone,
+  startPrecedesCall,
   clarifyAskTargetPhone,
   arrangerSlotElapsed,
+  slotElapsedAtBookingTime,
   isLiveLeadConversation,
   summarizeCustomerServiceContext,
   resolveSchedulableCallService,

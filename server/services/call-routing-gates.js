@@ -355,8 +355,26 @@ function checkTcpaConsent(extraction, opts = {}) {
 // and must write a fresh decision row); an actual WDO-inspection arranger
 // call is unaffected. (v2-1.46.0 is reserved by #4919, in review at the
 // time of this change.)
-const V2_DECISION_VERSION = 'v2-1.47.0';
-const V2_DECISION_VERSIONS = ['v2-1.0.0', 'v2-1.1.0', 'v2-1.2.0', 'v2-1.3.0', 'v2-1.4.0', 'v2-1.5.0', 'v2-1.6.0', 'v2-1.7.0', 'v2-1.8.0', 'v2-1.9.0', 'v2-1.10.0', 'v2-1.11.0', 'v2-1.12.0', 'v2-1.13.0', 'v2-1.14.0', 'v2-1.15.0', 'v2-1.16.0', 'v2-1.17.0', 'v2-1.18.0', 'v2-1.19.0', 'v2-1.20.0', 'v2-1.21.0', 'v2-1.22.0', 'v2-1.23.0', 'v2-1.24.0', 'v2-1.25.0', 'v2-1.26.0', 'v2-1.27.0', 'v2-1.28.0', 'v2-1.29.0', 'v2-1.30.0', 'v2-1.31.0', 'v2-1.32.0', 'v2-1.33.0', 'v2-1.34.0', 'v2-1.35.0', 'v2-1.36.0', 'v2-1.37.0', 'v2-1.38.0', 'v2-1.39.0', 'v2-1.40.0', 'v2-1.41.0', 'v2-1.42.0', 'v2-1.43.0', 'v2-1.44.0', 'v2-1.45.0', 'v2-1.47.0'];
+// v2-1.48.0 (codex #4919; it had reserved v2-1.46.0, which never shipped):
+// NOT the arrival-window evidence-binder expansion (range-collapse binding,
+// "this <weekday>", relative-day binding) — round 7 found 3 more P1s in
+// that expansion and it was split out to wip/call-window-evidence-binder
+// for future work; call-triage-flags.js is back to this version's own
+// pre-#4919 behavior there. What DOES still change canAutoRoute's decision
+// under this version: call-recording-processor.js's four callStartedAt call
+// sites (feeding extraction and both canAutoRoute calls) now pass
+// call-timeline.js's normalized callStartedAt(call), not the raw
+// call_log.created_at column. For a status_callback/recording-recovery
+// fallback row — where created_at is stamped at callback-RECEIPT time, not
+// the call's actual start — this can shift the ET calendar-day difference
+// the PRE-EXISTING (v2-1.1.0) agent-commitment slot-binding check keys on,
+// changing whether a spoken weekday+hour commitment quote binds for a
+// reprocessed call. Also carries the stale-start guard (startPrecedesCall)
+// and the provider-timestamp metadata work (finding D), neither of which is
+// part of canAutoRoute's own decision and so needs no version bump on its
+// own — the bump here is solely for the callStartedAt input change above.
+const V2_DECISION_VERSION = 'v2-1.48.0';
+const V2_DECISION_VERSIONS = ['v2-1.0.0', 'v2-1.1.0', 'v2-1.2.0', 'v2-1.3.0', 'v2-1.4.0', 'v2-1.5.0', 'v2-1.6.0', 'v2-1.7.0', 'v2-1.8.0', 'v2-1.9.0', 'v2-1.10.0', 'v2-1.11.0', 'v2-1.12.0', 'v2-1.13.0', 'v2-1.14.0', 'v2-1.15.0', 'v2-1.16.0', 'v2-1.17.0', 'v2-1.18.0', 'v2-1.19.0', 'v2-1.20.0', 'v2-1.21.0', 'v2-1.22.0', 'v2-1.23.0', 'v2-1.24.0', 'v2-1.25.0', 'v2-1.26.0', 'v2-1.27.0', 'v2-1.28.0', 'v2-1.29.0', 'v2-1.30.0', 'v2-1.31.0', 'v2-1.32.0', 'v2-1.33.0', 'v2-1.34.0', 'v2-1.35.0', 'v2-1.36.0', 'v2-1.37.0', 'v2-1.38.0', 'v2-1.39.0', 'v2-1.40.0', 'v2-1.41.0', 'v2-1.42.0', 'v2-1.43.0', 'v2-1.44.0', 'v2-1.45.0', 'v2-1.47.0', 'v2-1.48.0'];
 
 function buildRouteDecision({
   callLogId,
