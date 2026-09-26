@@ -35,8 +35,37 @@ one, compares it with the merge-base, and records what actually happened.
   message (rule 12). Managed runs exclude provider credentials; do not add
   them back. A scenario that could only be shown by messaging someone is
   `Not exercised`, with the strongest safe substitute named.
-- A `GATE_*` flag is turned on only in the environment of your own local
-  process, never on a shared deployment.
+- Anything not started by a managed command (`npm run dev`, `dev:*`,
+  `qa:*`) goes through the safe launcher below. A bare `node` that loads
+  server modules reads the checkout's `.env`, which can point at production.
+- A `GATE_*` flag is turned on only through the launcher for your own
+  process, never on a shared deployment. The managed runner drops every
+  `GATE_*` you export, so a gate-on run on `npm run dev` silently runs
+  gate-off.
+
+## Safe launcher
+
+Copy this to `.tmp/live-verify/qa-env.sh` and run every direct-execution
+script, job run, tool call, and gate-on server through it. It passes the
+same allowlist as the managed runner (`scripts/dev/context.js`
+`childEnvironment`), refuses anything but a dev/preview/test selection,
+and takes extra `NAME=value` pairs, for example
+`sh .tmp/live-verify/qa-env.sh GATE_FOO=true node .tmp/live-verify/run.js`.
+
+```sh
+#!/bin/sh
+set -eu
+set -a; . ./.tmp/dev/database.env; set +a
+case "${WAVES_DATABASE_ENVIRONMENT:-}" in development|preview|test) ;;
+  *) echo "refusing: database.env is not development/preview/test" >&2; exit 1 ;; esac
+exec env -i PATH="$PATH" HOME="$HOME" TMPDIR="${TMPDIR:-/tmp}" \
+  NODE_ENV=development WAVES_LOCAL_DEV=1 GATE_CRON_JOBS=false \
+  DATABASE_URL="$DATABASE_URL" "$@"
+```
+
+Run it from the worktree root after `qa:database`, so `DATABASE_URL` is
+this worktree's private QA database. A gate-on server run adds `PORT`,
+`JWT_SECRET`, and `CLIENT_URL` pairs and starts `node server/index.js`.
 - Bound jest (`--runInBand`, or `-w 2` for a broad pattern).
 
 ## Evidence ladder
@@ -53,8 +82,8 @@ skipped and why.
    `scripts/qa/` (`node scripts/qa/<name>`), `npm run qa:previews`, and
    `npm run audit:estimate-previews`. External requests are blocked.
 3. **Direct execution.** Call the changed service function, job, or route
-   handler with fixture input from a script under `.tmp/live-verify/` or a
-   targeted test.
+   handler with fixture input from a script under `.tmp/live-verify/`,
+   started through the safe launcher, or a targeted test.
 
 Rung 3 alone earns at most `PASS+NOTES` when this map lists a higher rung
 for the surface. Rungs 2 and 3 are not end-to-end database evidence; say so.
@@ -69,19 +98,22 @@ for the surface. Rungs 2 and 3 are not end-to-end database evidence; say so.
 | Tech portal | `tech-foundation.cjs`, `field-team.cjs` | 390 screenshots, interaction result |
 | Server route or service | rung 1: call the route on the managed stack with the seeded admin's token | request, response, and the DB rows read back |
 | Migration or raw SQL | `dev:migrate` on this worktree's QA database, plus the waves-db verification | the schema or rows read back; a second `dev:migrate` is a no-op |
-| Background job or cron | run the job's function once against the QA database from `.tmp/live-verify/` | rows before and after; a second run converges (idempotent) |
+| Background job or cron | run the job's function once against the QA database from `.tmp/live-verify/`, through the safe launcher | rows before and after; a second run converges (idempotent) |
 | Inbound webhook (Stripe, Twilio, SendGrid, Resend, Bouncie, ElevenLabs) | replay a signed synthetic payload at the local route, the way `qa:e2e` settles its webhook | response, resulting rows, and a replay that changes nothing |
-| Intelligence Bar tool | `npm run test:contracts -- --skip-exec` (the full suite executes every read tool, and some call live provider APIs when credentials are loaded), then `executeTool` for the changed tool only, against the QA database, in a process with provider credentials cleared | tool output and any rows it wrote |
-| LLM call site or prompt | the lane's eval if one exists (`eval:voice-relay`, `eval:call-replay`, `eval:lawn-diagnostic`), else one direct call with synthetic input. Evals need the model API key in that one process and contact no customer | the eval report, or input and output |
+| Intelligence Bar tool | `executeTool` for the changed tool only, through the safe launcher. Do not run `test:contracts` locally: CI runs it on every PR, and locally it reads `.env` and executes every tool, some against live provider APIs. Cite the CI job's result instead | tool output and any rows it wrote |
+| LLM call site or prompt | a synthetic-fixture eval if the lane has one (`eval:voice-relay`, `eval:lawn-diagnostic`), else one direct call with synthetic input through the safe launcher plus the model API key. Never `eval:call-replay`: it reads production `call_log` rows. Use synthetic transcripts through direct execution instead | the eval report, or input and output |
 | Voice relay (Sandy) | `eval:voice-relay`. Live calls only through the sandbox number (CLAUDE.md), only when the owner has arranged one | eval report |
 | Email or SMS template | rung 3: call the server render function with synthetic variables. The composing UI via `admin-email*.cjs` or `communications-sms-reliability.cjs`. Never send | rendered HTML screenshot or the final text |
-| Dark `GATE_*` behavior | run the scenario with the gate unset and with it on, in your own process | both outputs. A "gate off is unchanged" claim is checked against `main`'s output |
+| Dark `GATE_*` behavior | run the scenario with the gate unset and with it on, both through the safe launcher (the managed runner drops `GATE_*`). Confirm the gate-on run actually read the gate, for example a log line or a response field that only exists when it is on | both outputs. A "gate off is unchanged" claim is checked against the base's output |
 
 ## Regression lane
 
 Run the same scenario on the PR's merge-base as well as the head, so the
-verdict shows a change and not just a state. Use a throwaway worktree at
-`$(git merge-base origin/main HEAD)` under `.tmp/live-verify/base`, set up
+verdict shows a change and not just a state. Resolve the PR's real base
+first, since a stacked child's base is its parent, not `main`:
+`BASE=origin/$(gh pr view <n> --json baseRefName -q .baseRefName)`. Use a
+throwaway worktree at `$(git merge-base "$BASE" HEAD)` under
+`.tmp/live-verify/base`, set up
 like any checkout: `npm ci` (never share `node_modules`), then
 `npm run worktree:setup`, since every managed command refuses to start
 without it. A rung-1 base run also needs its own `.tmp/dev/database.env`
@@ -94,10 +126,11 @@ verify the end state the user waits for instead.
 
 ## Patch-id
 
-A verdict describes a patch, not a SHA. Record, after `git fetch origin`:
+A verdict describes a patch, not a SHA. Record, after `git fetch origin`,
+with `BASE` resolved as in §Regression lane:
 
 ```sh
-git diff "$(git merge-base origin/main HEAD)" HEAD | git patch-id --verbatim | cut -d' ' -f1
+git diff "$(git merge-base "$BASE" HEAD)" HEAD | git patch-id --verbatim | cut -d' ' -f1
 ```
 
 Before merge, recompute on the final head. The same patch-id means the
