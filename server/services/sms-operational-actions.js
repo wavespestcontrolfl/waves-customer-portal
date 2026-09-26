@@ -612,9 +612,11 @@ async function refreshSmsCommitment(conn, row, now, verify) {
   if (!eventWitness && inWindow) return { outcome: 'not_due' };
   const verdict = await verify(current, evidence, { now, eventOnly: inWindow });
   let closed = false;
-  // A fulfilled verdict the revalidator could not commit (a locked or
-  // changed witness) is retried, so its event stays unseen (Codex #4816 r18).
-  let deferred = false;
+  // Only a verdict this transaction actually persisted counts as handled.
+  // Every early exit — a relinked or changed source, the gate turning off, a
+  // fulfilled verdict the revalidator could not commit (a locked or changed
+  // witness) — is retried, so its event stays unseen (Codex #4816 r18/r19).
+  let persisted = false;
   await conn.transaction(async (trx) => {
     // Match merge and intake: customer, source, then commitment. A relink
     // while verification runs must retry against the current owner.
@@ -625,10 +627,7 @@ async function refreshSmsCommitment(conn, row, now, verify) {
     const live = await trx('call_commitments').where({ id: row.id }).forUpdate().first();
     if (!smsCommitmentsEnabled() || live?.status !== 'open' || live.human_state != null) return;
     const latest = { ...live, sms_context: { ...live.sms_context, customer_id: source.customer_id } };
-    if (verdict.verdict === 'fulfilled' && !await revalidateSmsFulfillment(trx, latest, source, verdict, now)) {
-      deferred = true;
-      return;
-    }
+    if (verdict.verdict === 'fulfilled' && !await revalidateSmsFulfillment(trx, latest, source, verdict, now)) return;
     const dedupeKey = `sms-commitment:${row.id}`;
     if (live.sms_context.customer_id !== source.customer_id) {
       // Rolling dedupe only refreshes recent rows. Older bells must also
@@ -642,6 +641,7 @@ async function refreshSmsCommitment(conn, row, now, verify) {
     await trx('call_commitments').where({ id: row.id }).update({
       sms_context: { ...current.sms_context, fulfillment_check: verdict },
     });
+    persisted = true;
     if (verdict.verdict === 'fulfilled') {
       await trx('call_commitments').where({ id: row.id }).update({
         status: 'fulfilled', fulfillment: verdict, fulfilled_at: now, updated_at: now,
@@ -669,7 +669,7 @@ async function refreshSmsCommitment(conn, row, now, verify) {
           sms_log_id: message.id, commitment_id: row.id, kind: row.kind, verification: verdict.verdict } });
     if (!notification?.id && !notification?.suppressed) throw new Error('sms_operations_bell_not_persisted');
   });
-  return { outcome: deferred ? 'deferred' : 'verified', verdict, closed };
+  return { outcome: persisted ? 'verified' : 'deferred', verdict, closed };
 }
 
 async function refreshSmsCommitments({ now = new Date(), conn = db, verify = verifySmsFulfillment } = {}) {

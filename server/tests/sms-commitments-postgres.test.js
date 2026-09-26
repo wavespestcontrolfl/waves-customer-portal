@@ -1188,7 +1188,8 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect(verify.mock.calls.map(([row, , opts]) => [row.id, opts.eventOnly])).toEqual([[target, false]]);
   });
 
-  test('Codex #4816 r18: a fulfilled verdict the revalidator defers leaves the event unseen for the next tick', async () => {
+  test.each(['revalidation refuses the close', 'the source text changes under the lock'])(
+    'Codex #4816 r18/r19: a verdict the transaction does not persist leaves the event unseen for the next tick (%s)', async (cause) => {
     result.facts = [];
     result.obligations[0] = { ...result.obligations[0], kind: 'other', basis: 'request', due_at: null, due_text: 'sometime soon',
       quote: 'You still coming?', description: 'You still coming?' };
@@ -1205,8 +1206,13 @@ postgres('SMS commitments on PostgreSQL', () => {
     await mockPg('job_status_history').insert({ job_id: visit.id, from_status: 'confirmed', to_status: 'en_route', transitioned_at: after });
     // A stale evidence hash: revalidation refuses the close, as it does for a
     // witness that changed or is locked by another writer.
-    const verify = jest.fn(async () => ({ verdict: 'fulfilled', record_type: 'visit', record_id: visit.id,
-      quote: 'en route', evidence_hash: 'stale', retry_after: null }));
+    const verify = jest.fn(async () => {
+      if (cause === 'the source text changes under the lock') {
+        await mockPg('sms_log').where({ id: message.id }).update({ message_body: `${message.message_body} (edited)` });
+        return { verdict: 'open', reason: 'no_answer', evidence_hash: 'x', retry_after: null };
+      }
+      return { verdict: 'fulfilled', record_type: 'visit', record_id: visit.id, quote: 'en route', evidence_hash: 'stale', retry_after: null };
+    });
     expect(await refreshSmsCommitments({ conn: mockPg, verify, now })).toMatchObject({ scanned: 1, fulfilled: 0 });
     const row = await mockPg('call_commitments').where({ id: target }).first();
     expect(row.status).toBe('open');
@@ -1217,7 +1223,8 @@ postgres('SMS commitments on PostgreSQL', () => {
     verify.mockClear();
     await refreshSmsCommitments({ conn: mockPg, verify, now: new Date(now.getTime() + 1000) });
     expect(verify.mock.calls.map(([r]) => r.id)).toEqual([target]);
-  });
+  },
+  );
 
   test('Codex #4816 r19: a visit write committed after the read with an earlier timestamp is still unseen next tick', async () => {
     result.facts = [];
