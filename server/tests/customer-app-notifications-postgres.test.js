@@ -1022,23 +1022,28 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     expect((await mockPg('sms_log').where({ from_phone: 'push' })).map((r) => r.message_body)).toEqual(['Your invoice is ready.']);
   });
 
-  test('Codex #4816 r46 pre-push: a lost proof for a visit-linked push is repaired as delivery proof without an unverified visit', async () => {
+  test('Codex #4816 r49: a lost proof for a visit-linked push is repaired with the scope that was delivered', async () => {
     await device();
     await put({ invoiceChannel: 'push' });
     const invoiceId = randomUUID();
     await mockPg('invoices').insert({ id: invoiceId, customer_id: property, token: randomUUID(), invoice_number: 'QA-INVOICE-6', status: 'sent' });
     const visitId = randomUUID();
+    const homeId = randomUUID();
+    await mockPg('scheduled_services').insert({ id: visitId, customer_id: property, property_id: homeId,
+      scheduled_date: '2026-09-09', service_type: 'Pest Control' });
     const routing = require('../services/messaging/push-channel-routing');
     const notice = { customerId: property, to: '+19415550101', body: 'Your invoice is ready.', messageType: 'invoice_followup',
       explicitPushOnly: true, invoiceId, appointmentId: visitId, notificationEventKey: `qa:${invoiceId}:visit-repair` };
     expect(await routing.attemptPushFirst(notice)).toMatchObject({ delivered: true });
-    expect((await mockPg('sms_log').where({ from_phone: 'push' }).first()).metadata.scheduled_service_id).toBe(visitId);
+    expect((await mockPg('sms_log').where({ from_phone: 'push' }).first()).metadata)
+      .toMatchObject({ scheduled_service_id: visitId, property_id: homeId });
     await mockPg('sms_log').where({ from_phone: 'push' }).del();
+    // The visit moves to another property before the retry: the repair keeps the delivered scope.
+    await mockPg('scheduled_services').where({ id: visitId }).update({ property_id: randomUUID() });
     expect(await routing.attemptPushFirst(notice)).toMatchObject({ delivered: true });
     const repaired = await mockPg('sms_log').where({ from_phone: 'push' });
     expect(repaired).toHaveLength(1);
-    expect(repaired[0].metadata).toMatchObject({ channel: 'push', providerAccepted: true, proof_repaired: true });
-    expect(repaired[0].metadata.scheduled_service_id).toBeUndefined();
+    expect(repaired[0].metadata).toMatchObject({ proof_repaired: true, scheduled_service_id: visitId, property_id: homeId });
   });
 
   test('Codex #4816 r45: another push of the same type near acceptance does not stand in for a missing proof', async () => {

@@ -459,6 +459,18 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
     if (explicitPushOnly && !gateEnvValue('GATE_CUSTOMER_APP_NOTIFICATIONS')) return { delivered: false, reason: 'app_gate_off' };
     if (!(await pushEligibleRuntime(customerId, to, messageType, db, { requireExplicit: explicitPushOnly, billingDeliveryCategory }))) return { delivered: false, reason: 'preference_changed' };
     const fresh = await hasFreshPushDevice(customerId);
+    // The visit and its property at send time, kept on the proof row and on
+    // the stored notification, so a repaired proof restores the scope that
+    // was actually delivered (Codex #4816 r49).
+    let noticePropertyId = null;
+    if (appointmentId) {
+      try {
+        noticePropertyId = (await db('scheduled_services').where({ id: appointmentId }).first('property_id'))?.property_id || null;
+      } catch { noticePropertyId = null; }
+    }
+    const proofScope = appointmentId
+      ? { scheduled_service_id: String(appointmentId), ...(noticePropertyId ? { property_id: String(noticePropertyId) } : {}) }
+      : {};
     let appNotification = null;
     if (explicitPushOnly) {
       let presentation = pushPresentation(messageType);
@@ -502,6 +514,7 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
       deliveryOutcome = 'uncertain';
       appNotification = await require('../notification-service').notifyCustomer(customerId, category, title, body, {
         link, dedupeKey: notificationEventKey, awaitPush: true, appointmentId,
+        ...(appointmentId ? { metadata: { proof_scope: proofScope } } : {}),
         pushOptions: { shouldContinue: windowGuardFrom(preSendCheck), minUpdatedAt: heartbeatCutoff(), nativeOnly: true },
       });
       if (appNotification?.push?.reason === 'push_in_flight') return { delivered: false, pending: true, deliveryOutcome: 'uncertain', reason: 'push_in_flight' };
@@ -562,7 +575,7 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
         // The visit this notice is about, like the SMS path's metadata:
         // readers that scope by property (SMS commitment evidence) need
         // it on the proof row itself (Codex #4816 r40).
-        ...(appointmentId ? { scheduled_service_id: String(appointmentId) } : {}),
+        ...proofScope,
         ...extra,
       }),
     });
@@ -570,16 +583,21 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
       // A retry of an accepted push repairs a proof the first attempt failed
       // to write (Codex #4816 r44). The proof must state what was delivered,
       // so a retry whose body differs from the stored notification repairs
-      // nothing (r46), and a repaired proof carries no visit: the stored
-      // notification does not record one. A scheduled send's queue row is
-      // its own proof.
+      // nothing (r46), and the repaired proof takes its visit scope from the
+      // delivered notification's proof_scope, never the retry's (r49). A
+      // scheduled send's queue row is its own proof.
       try {
         const notificationId = String(appNotification.id);
+        const deliveredMeta = typeof appNotification.metadata === 'string'
+          ? (() => { try { return JSON.parse(appNotification.metadata); } catch { return {}; } })()
+          : (appNotification.metadata || {});
+        const deliveredScope = deliveredMeta.proof_scope || {};
         if (appNotification.body !== body) {
           logger.warn(`[push-routing] proof repair skipped for notification ${notificationId}: retry payload differs from the delivered notice`);
         } else if (!scheduledSmsLogId) {
           await persistPushProof({ customerId, notificationId, notificationEventKey,
-            row: proofRow({ push_notification_id: notificationId, scheduled_service_id: undefined, proof_repaired: true }) });
+            row: proofRow({ push_notification_id: notificationId, proof_repaired: true,
+              scheduled_service_id: deliveredScope.scheduled_service_id, property_id: deliveredScope.property_id }) });
         }
       } catch (repairErr) {
         logger.warn(`[push-routing] proof repair failed: ${repairErr.message}`);

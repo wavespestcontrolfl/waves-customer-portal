@@ -1302,6 +1302,28 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect(await tick(minutes(40))).toMatchObject({ scanned: 1 });
   });
 
+  test('Codex #4816 r49: an automated notice keeps the property snapshotted at send time after its visit moves', async () => {
+    const [visit] = await mockPg('scheduled_services').insert({ customer_id: message.customer_id, property_id: context.properties[0].id,
+      service_type: 'Quarterly Pest Control', scheduled_date: etDateString(message.created_at), window_start: '09:00:00', status: 'confirmed',
+      created_at: new Date(message.created_at.getTime() - 86400000) }).returning('id');
+    const [notice] = await mockPg('sms_log').insert({ ...message, id: randomUUID(), direction: 'outbound',
+      from_phone: message.to_phone, to_phone: message.from_phone, message_body: 'Your appointment is confirmed.',
+      message_type: 'confirmation', status: 'delivered', created_at: new Date(message.created_at.getTime() + 1000),
+      metadata: JSON.stringify({ scheduled_service_id: visit.id, property_id: context.properties[0].id }) }).returning('id');
+    // The visit is switched to another property after the notice went out.
+    await mockPg('scheduled_services').where({ id: visit.id }).update({ property_id: randomUUID() });
+    const commitment = { kind: 'send_appointment_confirmation', sms_context: { property_id: context.properties[0].id, source_at: message.created_at.toISOString() } };
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, new Date(message.created_at.getTime() + 5000));
+    const record = evidence.records.find((r) => r.id === notice.id);
+    expect(String(record.linked_property_id)).toBe(String(context.properties[0].id));
+    expect(admissibleWitness(record, commitment)).toBe(true);
+    // A notice with no send-time snapshot cannot vouch for a scoped promise.
+    await mockPg('sms_log').where({ id: notice.id }).update({ metadata: JSON.stringify({ scheduled_service_id: visit.id }) });
+    const unscoped = (await loadSmsFulfillmentEvidence(mockPg, commitment, message, new Date(message.created_at.getTime() + 5000)))
+      .records.find((r) => r.id === notice.id);
+    expect(admissibleWitness(unscoped, commitment)).toBe(false);
+  });
+
   test('Codex #4816 r40: a no-show reschedule_log row (no new date) is not an event; a logged move is', async () => {
     result.facts = [];
     result.obligations[0] = { ...result.obligations[0], kind: 'other', basis: 'request', due_at: null, due_text: 'sometime soon',

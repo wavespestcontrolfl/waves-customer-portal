@@ -105,14 +105,11 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
       .select('id', 'status', 'message_type', 'message_body', 'created_at', 'from_phone',
         conn.raw("(sms_log.metadata->>'providerAccepted') = 'true' as provider_accepted"),
         conn.raw("(sms_log.metadata->>'channel') = 'push' as push_channel"),
-        // The visit an automated notice was about: the sender's metadata
-        // stamp, else the audit row for the same provider message (Codex
-        // #4816 r39). Null when neither links it.
-        conn.raw(`(SELECT v.property_id FROM scheduled_services v WHERE v.id::text = COALESCE(
-          sms_log.metadata->>'scheduled_service_id',
-          (SELECT a.appointment_id FROM messaging_audit_log a
-            WHERE sms_log.twilio_sid IS NOT NULL AND a.provider_message_id = sms_log.twilio_sid
-            ORDER BY a.created_at DESC, a.id DESC LIMIT 1))) as linked_property_id`)),
+        // The property an automated notice was about, as snapshotted at send
+        // time (twilio.js / push-channel-routing). Never the visit's CURRENT
+        // property: a later property switch must not re-scope a delivered
+        // notice (Codex #4816 r49). Null when the sender stamped none.
+        conn.raw("sms_log.metadata->>'property_id' as linked_property_id")),
     call: conn('call_log').where({ customer_id: customerId, direction: 'outbound' })
       .modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b))
       .whereRaw("RIGHT(regexp_replace(to_phone, '[^0-9]', '', 'g'), 10) = ?", [phone(peer)])
