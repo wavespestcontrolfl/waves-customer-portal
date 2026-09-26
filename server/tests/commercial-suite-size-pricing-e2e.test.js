@@ -281,6 +281,14 @@ describe('manual admin-tool path — buildEnrichedProfile -> applyCommercialSuit
       expect(src).toMatch(/commercialSuiteSizing: wholeProperty !== true/);
     });
 
+    test('a verified story count divides the recomputed default like a confirmed one (Codex #4840 r14 P1)', async () => {
+      resolveViaDbprLicense.mockResolvedValue(null);
+      const profile = buildEnrichedProfile(plazaSuiteRecord(), null, 27.5, -82.45, null, null, SUITE_ADDRESS, { commercialSuiteSizing: true });
+      await routePrivate.applyCommercialSuiteSize(profile);
+      const v1Input = translateV2CallToV1Input({ ...profile, stories: 2, storiesSource: 'verified' }, ['PEST'], { commercialRiskType: 'restaurant_food' });
+      expect(v1Input.footprintSqFt).toBe(900);
+    });
+
     test('license_seats / verified suite sizes are real measurements — never recomputed off risk type', async () => {
       resolveViaDbprLicense.mockResolvedValue({
         value: 1400, businessName: 'Test Taco Shop', seats: 25,

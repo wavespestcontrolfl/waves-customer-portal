@@ -1712,6 +1712,9 @@ function resolveCommercialSuiteScope(rc, lookupAddress, commercialSubtype, optio
   // admin estimate tool's own lookup route and the estimator engine's
   // gatherPropertySignals opt in.
   if (options.commercialSuiteSizing !== true) return NOT_APPLIES;
+  // The county already calls this an association's property: its common
+  // areas are the job, never one suite (Codex #4840 r14 P1).
+  if (isAssociationCommercialJob({ commercialSubtype })) return NOT_APPLIES;
 
   // Commercial subpremise: the shared residential predicate deliberately
   // rejects "Space" (mobile-home lots), but plazas and flex complexes use
@@ -1961,16 +1964,21 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   // applies its own size on top afterward (a suite's resolved footprint,
   // or a unit's operator-entered sq ft) — this only clears what nobody
   // measured for the unit itself.
-  const blankUnitScopedGroundsAndSize = (record, { keepSquareFootage = false } = {}) => {
+  const blankUnitScopedGroundsAndSize = (record, { keepSquareFootage = false, keepVerifiedStories = false } = {}) => {
     if (!record) return record;
     const isVerified = (field) => record?._fieldEvidence?.[field]?.sourceType === 'verified';
+    // A story count someone verified on THIS suite address measures the
+    // suite, so the suite path keeps it (Codex #4840 r14 P1); every other
+    // story count is the building's.
+    const verifiedStories = (record._storiesSource === 'verified' || isVerified('stories')) ? Number(record.stories) || 0 : 0;
+    const keptStories = keepVerifiedStories && verifiedStories >= 1;
     return {
       ...record,
       // What a person saved on this address, for the residential HIGH flag
       // only — unread on the commercial suite path.
       _unitVerifiedSaved: {
         squareFootage: isVerified('squareFootage') ? Number(record.squareFootage) || 0 : 0,
-        stories: (record._storiesSource === 'verified' || isVerified('stories')) ? Number(record.stories) || 0 : 0,
+        stories: verifiedStories,
       },
       squareFootage: keepSquareFootage ? record.squareFootage : 0,
       lotSize: 0,
@@ -1978,8 +1986,8 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
       // floor count of its own, and the building's would derive a
       // fractional footprint from its own sq ft (codex r2 P1, same
       // contract as the unknown-stories aggregate).
-      stories: 1,
-      _storiesSource: 'default',
+      stories: keptStories ? verifiedStories : 1,
+      _storiesSource: keptStories ? 'verified' : 'default',
       hasPool: null,
       poolCageSqft: null,
       // A stacked-association aggregate's building count multiplies the
@@ -2047,7 +2055,7 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     // footprint both key off this same rc, applying the suite's own
     // resolved size on top afterward — this lane never re-derives anything
     // from the (now cleared) building total.
-    if (rc) rc = blankUnitScopedGroundsAndSize(rc);
+    if (rc) rc = blankUnitScopedGroundsAndSize(rc, { keepVerifiedStories: true });
     // Every satellite/vision read (areas, densities, water, pool) describes
     // the PARCEL, same as residentialUnitLookup below — dropped whole
     // rather than priced as this one suite's grounds.
@@ -4497,6 +4505,15 @@ function requireBermudaSuppressionGate() {
   throw err;
 }
 
+// An association's common-area job (HOA / multifamily), by the operator's
+// business type or the property's subtype. One predicate for the lookup's
+// suite scope and the translate-time refusal; the estimate tool's
+// wholeProperty retry mirrors it (EstimateToolViewV2 doLookup).
+function isAssociationCommercialJob({ commercialRiskType = null, commercialSubtype = null } = {}) {
+  return ['hoa_common_area', 'multifamily'].includes(commercialRiskType)
+    || /^(?:hoa|multifamily)/.test(String(commercialSubtype || ''));
+}
+
 function translateV2CallToV1Input(profile, selectedServices, options) {
   const p = profile || {};
   const o = options || {};
@@ -4530,8 +4547,7 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
   // whole-property even at an office "Suite" address. Either way a fresh
   // lookup is required (Codex #4840 r13 P1s).
   if (p.suiteSize) {
-    const associationJob = ['hoa_common_area', 'multifamily'].includes(commercialRiskType)
-      || /^(?:hoa|multifamily)/.test(String(commercialSubtype || ''));
+    const associationJob = isAssociationCommercialJob({ commercialRiskType, commercialSubtype });
     if (!commercialSuiteSizingLive() || associationJob) {
       const err = new Error(associationJob
         ? 'HOA and common-area service prices the whole property, not one suite. Run Property Lookup again with this business type selected; it sizes the whole property.'
@@ -5212,7 +5228,7 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     // confirms a story count (storiesSource 'manual'); then it divides like
     // any building (Codex #4840 r11 P1).
     footprintSqFt: p.footprintUnknown === true ? 0 : (Number(suiteTypeDefaultSqFt) > 0
-      ? (p.storiesSource === 'manual' && Number(p.stories) >= 1 ? Math.round(homeSqFt / Number(p.stories)) : homeSqFt)
+      ? (['manual', 'verified'].includes(p.storiesSource) && Number(p.stories) >= 1 ? Math.round(homeSqFt / Number(p.stories)) : homeSqFt)
       : (p.footprint ?? p.footprintSqFt)),
     footprintUnknown: p.footprintUnknown === true || undefined,
     // A suite sized off the business-type default (no DBPR license, no

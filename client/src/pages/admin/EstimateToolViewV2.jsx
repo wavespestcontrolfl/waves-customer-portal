@@ -384,6 +384,16 @@ function adminFetch(path, options = {}) {
 // Bait-station footprint prefill from the home sqft. A suite-sized lookup's
 // homeSqFt is the suite's own single-story area while the stories box still
 // reads the BUILDING, so it is never divided by the building's floors.
+// A suite's Stories box is confirmed once the operator typed a count, or it
+// still holds a count verified on this address; until then the suite is one
+// floor of its own (the lookup's 1 is a default nobody observed).
+function suiteStoriesAreConfirmed(form) {
+  const stories = Number(form?.stories);
+  if (!(stories >= 1)) return false;
+  if (form._storiesEdited) return true;
+  return Number(form._suiteStoriesVerified) === stories;
+}
+
 export function termiteFootprintFromHome(homeSqFt, stories, suiteSized) {
   const sqft = Number(homeSqFt) || 0;
   if (sqft <= 0) return 0;
@@ -500,7 +510,9 @@ function buildTurfRequestProfile(baseProfile, form) {
   // from the original (wrong) classification.
   // Only while Stories is the untouched lookup default: a confirmed story
   // count divides like any building (Codex #4840 r11 P1).
-  const suiteStoriesConfirmed = !!form._storiesEdited && Number(form.stories) >= 1;
+  // A count verified on this suite address (and still in the box) is
+  // confirmed too (Codex #4840 r14 P1).
+  const suiteStoriesConfirmed = suiteStoriesAreConfirmed(form);
   if (baseProfile.suiteSize && formIsCommercial && !suiteStoriesConfirmed) {
     profile.footprint = profile.homeSqFt;
   } else if (profile.footprintUnknown !== true) {
@@ -694,7 +706,7 @@ const PROPERTY_FORM_FIELDS = [
   "boracareSurfaceHeightFt", "preslabSqft", "preslabLabelConfirmed", "plugArea",
   "topDressArea", "fleaExteriorAreaSqFt", "fleaExteriorAreaSource", "fleaExteriorZones",
   "palmDiagnosisConfirmed", "palmLicensedApplicator", "palmHighDose", "palmLargeDiameter",
-  "palmNonstandardProduct", "_termiteFootprintAuto", "_suiteSizedLookup", "_trenchingPerimeterAuto",
+  "palmNonstandardProduct", "_termiteFootprintAuto", "_suiteSizedLookup", "_suiteStoriesVerified", "_trenchingPerimeterAuto",
   "_boracareSqftAuto", "_preslabSqftAuto", "_palmCountAuto",
   "stingSpecies", "stingTier", "stingRemoval", "stingAggressive", "stingHeight", "stingConfined",
 ];
@@ -2300,7 +2312,7 @@ export default function EstimateToolViewV2({
       // not the single-story suite rule frozen from the original (wrong)
       // classification.
       const suiteSized = form._suiteSizedLookup && isCommercialEstimateInput(form)
-        && !(form._storiesEdited && Number(form.stories) >= 1);
+        && !suiteStoriesAreConfirmed(form);
       const fp = termiteFootprintFromHome(sqft, form.stories, suiteSized);
       setForm((f) => {
         // footprintUnknown lookup (association aggregate, story count
@@ -2326,7 +2338,7 @@ export default function EstimateToolViewV2({
         return { ...f, ...upd, _termiteFootprintAuto: true };
       });
     }
-  }, [form.homeSqFt, form.stories, form._storiesEdited, form.svcTermiteBait, form._suiteSizedLookup, form.isCommercial, form.propertyType]);
+  }, [form.homeSqFt, form.stories, form._storiesEdited, form.svcTermiteBait, form._suiteSizedLookup, form.isCommercial, form.propertyType, form._suiteStoriesVerified]);
 
   useEffect(() => {
     const q = customerSearch.trim();
@@ -3138,7 +3150,11 @@ export default function EstimateToolViewV2({
         body: JSON.stringify({
           address,
           refresh,
-          ...(["hoa_common_area", "multifamily"].includes(form.commercialRiskType) ? { wholeProperty: true } : {}),
+          // Mirrors the server's isAssociationCommercialJob: the business
+          // type OR the subtype (Codex #4840 r14 P1).
+          ...((["hoa_common_area", "multifamily"].includes(form.commercialRiskType)
+            || /^(?:hoa|multifamily)/.test(String(form.commercialSubtype || "")))
+            ? { wholeProperty: true } : {}),
         }),
         signal: lookupController.signal,
       });
@@ -3266,6 +3282,8 @@ export default function EstimateToolViewV2({
           // footprint the lookup refused to claim (codex P1 #2721).
           _footprintUnknownLookup: ep.footprintUnknown === true,
           _suiteSizedLookup: Boolean(ep.suiteSize),
+          // A story count verified on this suite address (0 = none).
+          _suiteStoriesVerified: ep.suiteSize && ep.storiesSource === "verified" ? Number(ep.stories) || 0 : 0,
           _unitLookup: !!ep.residentialUnitLookup,
           _poolCageSizeEdited: false,
           _storiesEdited: !!f._storiesEdited,
@@ -4358,6 +4376,7 @@ export default function EstimateToolViewV2({
       _termiteFootprintAuto: false,
       _footprintUnknownLookup: false,
       _suiteSizedLookup: false,
+      _suiteStoriesVerified: 0,
       _unitLookup: false,
       _trenchingPerimeterAuto: false,
       _boracareSqftAuto: false,
@@ -4971,6 +4990,7 @@ export default function EstimateToolViewV2({
                       _termiteFootprintAuto: false,
                       _footprintUnknownLookup: false,
                       _suiteSizedLookup: false,
+                      _suiteStoriesVerified: 0,
                       _unitLookup: false,
                       _trenchingPerimeterAuto: false,
                       _boracareSqftAuto: false,

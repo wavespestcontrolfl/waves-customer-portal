@@ -84,6 +84,14 @@ describe("buildTurfRequestProfile — suite-sized commercial profile", () => {
     expect(profile.footprint).toBe(700);
   });
 
+  it("a story count verified on the suite address (still in the box) divides like a confirmed one", () => {
+    const profile = buildTurfRequestProfile(
+      suiteProfile({ stories: 2, storiesSource: "verified" }),
+      { ...baseForm, stories: "2", _storiesEdited: false, _suiteStoriesVerified: 2 },
+    );
+    expect(profile.footprint).toBe(700);
+  });
+
   it("an untouched Stories box keeps the suite's own 1,400 sq ft footprint", () => {
     const profile = buildTurfRequestProfile(suiteProfile(), { ...baseForm, stories: "2", _storiesEdited: false });
     expect(profile.footprint).toBe(1400);

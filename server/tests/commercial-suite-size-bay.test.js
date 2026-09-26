@@ -78,3 +78,33 @@ describe('plaza "Bay" designator', () => {
     expect(scope.applies).toBe(false);
   });
 });
+
+// Codex #4840 r14 P1s.
+describe('association subtype and verified suite stories', () => {
+  const { resolveCommercialSuiteScope } = routePrivate;
+  const { buildEnrichedProfile } = require('../routes/property-lookup-v2');
+  const ADDRESS = '4400 Test Commons Pkwy E #102, Bradenton, FL 00000';
+
+  test.each(['hoa_common_area_commercial', 'multifamily_common_area_residential'])(
+    'a property the county types as an association (%s) is never suite-scoped',
+    (subtype) => {
+      expect(resolveCommercialSuiteScope(plazaSuiteRecord(), ADDRESS, subtype, SUITE_SIZING_ON).applies).toBe(false);
+    },
+  );
+
+  test('a story count verified on the suite address survives the suite blanking as verified', () => {
+    const record = plazaSuiteRecord({
+      stories: 2,
+      _storiesSource: 'verified',
+    });
+    const profile = buildEnrichedProfile(record, null, 27.5, -82.45, null, null, ADDRESS, SUITE_SIZING_ON);
+    expect(profile.stories).toBe(2);
+    expect(profile.storiesSource).toBe('verified');
+  });
+
+  test('an unverified building story count still defaults the suite to one floor', () => {
+    const profile = buildEnrichedProfile(plazaSuiteRecord({ stories: 3 }), null, 27.5, -82.45, null, null, ADDRESS, SUITE_SIZING_ON);
+    expect(profile.stories).toBe(1);
+    expect(profile.storiesSource).toBe('default');
+  });
+});
