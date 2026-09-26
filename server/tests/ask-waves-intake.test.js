@@ -244,6 +244,8 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ['At 4 PM.', 'When can I return home after pest control?'],
     ['At 4 PM.', 'When can we return after treatment?'],
     ['At 4 PM.', 'When can we come back after treatment?'],
+    ['Avoid your yard until 4 PM after the application.', ''],
+    ['Evite el jardín hasta las 4 PM.', ''],
   ])('a clock-time re-entry instruction is replaced: %s', (reply, context) => {
     expect(scrubUnsafeClaims({ ...base, reply }, context).reply).toMatch(/label directions|instrucciones de la etiqueta/);
   });
@@ -723,6 +725,7 @@ describe('normalizeIntakeResult', () => {
   test.each([
     'The product is not safe to swallow; take your child to the hospital now.',
     'El producto no es seguro; vaya al hospital de inmediato.',
+    'This product is not safe to ingest; call an ambulance now.',
   ])('a hospital referral in the reply keeps the emergency script: %s', (reply) => {
     const out = scrubUnsafeClaims({ reply, intent: 'question', service_keys: [], ready_for_quote: false }, 'Is this product ok?');
     expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
@@ -734,6 +737,8 @@ describe('normalizeIntakeResult', () => {
       { reply: 'We use Talak and it costs $45 a month.', intent: 'quote', service_keys: [], ready_for_quote: true },
       'openai',
       'Which rat poison do you use and what does it cost?',
+    'The roach put a bait pellet in its mouth',
+    'La hormiga se metió el cebo en la boca',
     );
     expect(out.reply).toMatch(/Get my price/);
   });
