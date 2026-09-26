@@ -178,7 +178,6 @@ const { safePdfRenderError } = require('../services/service-report/pdf-events');
 const { buildServiceReportDynamicContext } = require('../services/service-report/dynamic-context');
 const {
   answerServiceReportQuestion,
-  loadReportAssistantProductContext,
 } = require('../services/service-report/report-assistant');
 const {
   WAVES_SUPPORT_PHONE_DISPLAY,
@@ -1726,12 +1725,15 @@ router.post('/:token/ask', async (req, res, next) => {
       }
       : null;
 
-    const productContext = await loadReportAssistantProductContext(data).catch(() => ({ byApplicationId: {}, byProductName: {} }));
+    // AW-03: answers are built from data.applications[].product, the same
+    // approved/frozen product facts buildServiceReportV1ResponseData already
+    // resolved for the report display (report-data.js's
+    // attachApprovedReportProductFacts) — never a second, ungated live
+    // products_catalog lookup.
     const answer = answerServiceReportQuestion({
       question,
       data,
       nextAppointment,
-      productContext,
     });
     await recordServiceReportEvent(service, 'report_question_asked', 'public_report', req, {
       question_length: question.length,
