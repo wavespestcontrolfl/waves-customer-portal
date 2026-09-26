@@ -21865,7 +21865,7 @@ router.post('/generate-report', async (req, res) => {
     const sectionsHaveFacts = (sections) => !!sections && (
       sections.work.length > 0 || sections.observations.length > 0
       || sections.advice.length > 0 || sections.products.length > 0
-      || sections.customer.length > 0 || sections.objectives.length > 0
+      || sections.customer.length > 0
     );
     // Chips count toward the gate only when they VALIDATE for the claimed
     // type — a stale/off-type chip is dropped by the block builder, and a
