@@ -1930,6 +1930,70 @@ async function linkedScheduledServiceId(invoice, database = db) {
   return record?.scheduled_service_id || null;
 }
 
+// Shared invoice-handoff preconditions: send-claim token/status, linked-visit
+// terminal state, self-pay ownership, and amount-due/line-items unchanged vs
+// the snapshot being sent. Both sendViaSMS's own withProviderHandoff (the
+// SMS/App leg, inside its own locked withInvoiceDepositSettlement) and
+// billingEmailPreSendCheck (the explicit billing Email leg, composed into
+// send-customer-message.js's providerPreparationCheck and run under the
+// Email authority's OWN lock on the same invoice row — see
+// billing-channel-email-authority.js dispatchUnderBillingEmailAuthority)
+// call this, so a claim/visit/balance block is byte-identical — same codes,
+// validators, order — whichever leg catches it. `current` is the caller's
+// own already-locked invoice row (never re-read here — the SMS leg's
+// withInvoiceDepositSettlement already forUpdate-locked it; the Email leg's
+// own withInvoiceDepositSettlement, called inside the authority, does the
+// same on its transaction before its caller re-reads it and passes it in).
+// `database` is that same locked handle, used only for the linked-visit
+// lookup and the ownership recheck — never a second root-pool connection.
+async function checkInvoiceDeliveryPreconditions(database, current, { sendClaimToken, sendInvoice }) {
+  // `error` is the field withProviderHandoff's caller (this file) has always
+  // read on a blocked outcome (byte-identical to the pre-refactor shape);
+  // `reason` mirrors it so billingEmailPreSendCheck's OTHER caller —
+  // send-customer-message.js's providerPreparationCheck, then billing-
+  // channel-email-authority.js's preSendBlock — gets the real reason too,
+  // since that path reads `.reason`, not `.error`.
+  if (!current) {
+    return { sent: false, blocked: true, deliveryOutcome: "not_sent",
+      code: "INVOICE_UNREADABLE",
+      error: "Invoice could not be re-read before delivery",
+      reason: "Invoice could not be re-read before delivery",
+      validator: "check_invoice_deposit_settlement" };
+  }
+  if (current.send_claim_token !== sendClaimToken
+    || !SEND_FINALIZABLE_STATUSES.includes(current.status)) {
+    return { sent: false, blocked: true, deliveryOutcome: "not_sent",
+      code: "send_claim_lost",
+      error: "Invoice send claim changed; delivery not attempted",
+      reason: "Invoice send claim changed; delivery not attempted",
+      validator: "check_invoice_send_claim" };
+  }
+  const scheduledServiceId = await linkedScheduledServiceId(current, database);
+  const terminalVisit = await require("./invoice-helpers")
+    .visitRefusesSettlement(database, scheduledServiceId);
+  if (terminalVisit) {
+    const message = `Linked visit is ${terminalVisit}; delivery not attempted`;
+    return { sent: false, blocked: true, deliveryOutcome: "not_sent",
+      code: "INVOICE_VISIT_TERMINAL", error: message, reason: message,
+      validator: "check_invoice_visit_status" };
+  }
+  const ownership = await require("./invoice-helpers").selfPayAtDispatch(current.id, database)();
+  if (ownership.ok !== true) {
+    return { sent: false, blocked: true, deliveryOutcome: "not_sent",
+      code: ownership.code, error: ownership.reason, reason: ownership.reason,
+      validator: "check_invoice_ownership_boundary" };
+  }
+  if (invoiceAmountDue(current) <= 0
+    || invoiceAmountDue(current) !== invoiceAmountDue(sendInvoice)
+    || !isDeepStrictEqual(parseInvoiceLineItems(current.line_items), parseInvoiceLineItems(sendInvoice.line_items))) {
+    const message = "Invoice balance changed while preparing delivery; retry send";
+    return { sent: false, blocked: true, deliveryOutcome: "not_sent",
+      code: "INVOICE_BALANCE_CHANGED", error: message, reason: message,
+      validator: "check_invoice_deposit_settlement" };
+  }
+  return { ok: true };
+}
+
 // A text that carries THIS invoice's pay link and is queued for the send
 // window still owns the delivery after its sender released the 'sending'
 // claim (#4131): the replay body is frozen and its executor has no delivery
@@ -5149,6 +5213,20 @@ const InvoiceService = {
         // Wrap that ONE provider dispatcher so the invoice row and estimate
         // deposit ledger stay stable through whichever delivery leg it picks.
         // The canonical message audit runs after this callback commits.
+        // Email-leg invoice guard: composed into providerPreparationCheck
+        // (send-customer-message.js) and run under the Email authority's OWN
+        // lock (billing-channel-email-authority.js), never inside this
+        // handoff's withInvoiceDepositSettlement — the authority already
+        // holds a DIFFERENT connection's lock on the same invoice row
+        // (withCustomerCommsLock -> withInvoiceDepositSettlement), so taking
+        // this handoff's own lock there would deadlock against it. See
+        // checkInvoiceDeliveryPreconditions for the shared check both legs run.
+        billingEmailPreSendCheck: async ({ database } = {}) => {
+          const current = await database("invoices").where({ id: invoiceId }).first();
+          return checkInvoiceDeliveryPreconditions(database, current, {
+            sendClaimToken: invoice.send_claim_token, sendInvoice,
+          });
+        },
         withProviderHandoff: async (dispatch) => {
           let dispatchedOutcome = null;
           let providerStarted = false;
@@ -5156,32 +5234,10 @@ const InvoiceService = {
             const outcome = await require("./estimate-deposits").withInvoiceDepositSettlement(
               invoiceId,
               async (trx, current) => {
-                if (current.send_claim_token !== invoice.send_claim_token
-                  || !SEND_FINALIZABLE_STATUSES.includes(current.status)) {
-                  return { sent: false, blocked: true, deliveryOutcome: "not_sent",
-                    code: "send_claim_lost", error: "Invoice send claim changed; delivery not attempted",
-                    validator: "check_invoice_send_claim" };
-                }
-                const scheduledServiceId = await linkedScheduledServiceId(current, trx);
-                const terminalVisit = await require("./invoice-helpers")
-                  .visitRefusesSettlement(trx, scheduledServiceId);
-                if (terminalVisit) {
-                  return { sent: false, blocked: true, deliveryOutcome: "not_sent",
-                    code: "INVOICE_VISIT_TERMINAL", error: `Linked visit is ${terminalVisit}; delivery not attempted`,
-                    validator: "check_invoice_visit_status" };
-                }
-                const ownership = await require("./invoice-helpers").selfPayAtDispatch(invoiceId, trx)();
-                if (ownership.ok !== true) {
-                  return { sent: false, blocked: true, deliveryOutcome: "not_sent",
-                    code: ownership.code, error: ownership.reason, validator: "check_invoice_ownership_boundary" };
-                }
-                if (invoiceAmountDue(current) <= 0
-                  || invoiceAmountDue(current) !== invoiceAmountDue(sendInvoice)
-                  || !isDeepStrictEqual(parseInvoiceLineItems(current.line_items), parseInvoiceLineItems(sendInvoice.line_items))) {
-                  return { sent: false, blocked: true, deliveryOutcome: "not_sent",
-                    code: "INVOICE_BALANCE_CHANGED", error: "Invoice balance changed while preparing delivery; retry send",
-                    validator: "check_invoice_deposit_settlement" };
-                }
+                const precondition = await checkInvoiceDeliveryPreconditions(trx, current, {
+                  sendClaimToken: invoice.send_claim_token, sendInvoice,
+                });
+                if (!precondition.ok) return precondition;
                 providerStarted = true;
                 dispatchedOutcome = await dispatch();
                 return dispatchedOutcome;

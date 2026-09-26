@@ -211,6 +211,73 @@ describe('invoice SMS provider handoff', () => {
     expect(dispatch).not.toHaveBeenCalled();
   });
 
+  // billingEmailPreSendCheck (send-customer-message.js:428) is the SAME
+  // invoice guard withProviderHandoff runs, given to the explicit billing
+  // Email leg instead — never that handoff itself, which would deadlock
+  // against the Email authority's own lock on the same invoice row. It gets
+  // its own database handle (the authority's locked trx in production;
+  // here, a standalone double) rather than the claim-path `db` mock above,
+  // pinning that it re-reads the invoice through exactly the handle it was
+  // given.
+  test('billingEmailPreSendCheck (the explicit Email leg guard) passes when nothing changed, reading the invoice through its own given handle', async () => {
+    const emailTrx = jest.fn((table) => {
+      if (table === 'invoices') return query({ first: invoice });
+      throw new Error(`Unexpected table: ${table}`);
+    });
+    let captured;
+    sendCustomerMessage.mockImplementation(async ({ billingEmailPreSendCheck }) => {
+      captured = await billingEmailPreSendCheck({ database: emailTrx });
+      return { sent: true, deliveryOutcome: 'accepted' };
+    });
+
+    await expect(InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' }))
+      .resolves.toMatchObject({ sent: true });
+    expect(captured).toEqual({ ok: true });
+    expect(emailTrx).toHaveBeenCalledWith('invoices');
+  });
+
+  test('billingEmailPreSendCheck blocks on INVOICE_BALANCE_CHANGED — the SAME code withProviderHandoff gives the SMS/App leg for this exact scenario above — when its own locked read finds the balance changed', async () => {
+    const covered = {
+      ...invoice,
+      total: '0.00',
+      line_items: [...invoice.line_items, { category: 'deposit_credit', amount: -100 }],
+    };
+    const emailTrx = jest.fn((table) => {
+      if (table === 'invoices') return query({ first: covered });
+      throw new Error(`Unexpected table: ${table}`);
+    });
+    let captured;
+    sendCustomerMessage.mockImplementation(async ({ billingEmailPreSendCheck }) => {
+      captured = await billingEmailPreSendCheck({ database: emailTrx });
+      return { sent: true, deliveryOutcome: 'accepted' };
+    });
+
+    await expect(InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' }))
+      .resolves.toMatchObject({ sent: true });
+    expect(captured).toMatchObject({
+      blocked: true, deliveryOutcome: 'not_sent', code: 'INVOICE_BALANCE_CHANGED',
+      reason: 'Invoice balance changed while preparing delivery; retry send',
+    });
+  });
+
+  test('billingEmailPreSendCheck blocks on send_claim_lost — the SAME code withProviderHandoff gives — when its own locked read finds a different send-claim token', async () => {
+    const superseded = { ...invoice, send_claim_token: 'claim-2' };
+    const emailTrx = jest.fn((table) => {
+      if (table === 'invoices') return query({ first: superseded });
+      throw new Error(`Unexpected table: ${table}`);
+    });
+    let captured;
+    sendCustomerMessage.mockImplementation(async ({ billingEmailPreSendCheck }) => {
+      captured = await billingEmailPreSendCheck({ database: emailTrx });
+      return { sent: true, deliveryOutcome: 'accepted' };
+    });
+
+    await expect(InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' }))
+      .resolves.toMatchObject({ sent: true });
+    expect(captured).toMatchObject({ blocked: true, code: 'send_claim_lost' });
+    expect(captured.ok).not.toBe(true);
+  });
+
   test('blocks the provider handoff when the linked visit was cancelled during preparation', async () => {
     const cancelled = { ...invoice, scheduled_service_id: 'svc-cancelled' };
     invoiceReads = [cancelled, cancelled, cancelled];

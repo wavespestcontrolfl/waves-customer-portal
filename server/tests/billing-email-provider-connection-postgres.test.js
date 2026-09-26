@@ -55,6 +55,17 @@ postgres('billing Email provider preparation on its held connection', () => {
     await mockPg('customers').insert({ id: customerId, email: 'qa@example.invalid' });
     await mockPg('notification_prefs').insert({ customer_id: customerId,
       email_enabled: true, billing_channels: ['email'] });
+
+    // Minimal invoices shape for the invoiceId dispatch below: just enough
+    // columns for withInvoiceDepositSettlement's own lock+read (payer_id,
+    // total, notes for its deposit-provenance scan), selfPayAtDispatch's
+    // ownership recheck (payer_id, scheduled_send_error), and
+    // billingEmailPreSendCheck's own re-read (send_claim_token).
+    await mockPg.schema.createTable('invoices', (table) => {
+      table.uuid('id').primary(); table.uuid('customer_id'); table.uuid('payer_id');
+      table.text('status'); table.text('send_claim_token'); table.text('scheduled_send_error');
+      table.text('total'); table.decimal('credit_applied'); table.jsonb('line_items'); table.text('notes');
+    });
   }, 30000);
 
   beforeEach(() => {
@@ -96,6 +107,55 @@ postgres('billing Email provider preparation on its held connection', () => {
       expect(state.providerAccepted).toBe(true);
       expect(global.fetch).toHaveBeenCalledTimes(1);
       expect(queries.filter((query) => /^select/i.test(query.sql)).length).toBeGreaterThanOrEqual(2);
+      expect(new Set(queries.map((query) => query.__knexTxId)).size).toBe(1);
+      expect(queries[0].__knexTxId).toBeTruthy();
+    } finally { mockPg.removeListener('query', collect); }
+  }, 15000);
+
+  // Invoice delivery's explicit billing Email leg (send-customer-message.js
+  // billingEmailLeg) composes billingEmailPreSendCheck into preSendCheck
+  // here — invoice.js's own hook re-reads `invoices` by id through the SAME
+  // database it is given, never opening a fresh root-pool connection. This
+  // pool has exactly ONE slot: a hook that reached through the plain `db`
+  // module instead of its given `database` would starve on the still-open
+  // outer transaction and this test would time out.
+  test('an invoiceId dispatch composes the invoice pre-send check under the SAME held connection, never a second slot', async () => {
+    const invoiceId = randomUUID();
+    await mockPg('invoices').insert({
+      id: invoiceId, customer_id: customerId, status: 'sending', send_claim_token: 'qa-claim',
+      total: '50.00', credit_applied: 0, line_items: JSON.stringify([]),
+    });
+    const queries = [];
+    const collect = (query) => { if (/"invoices"/.test(query.sql)) queries.push(query); };
+    mockPg.on('query', collect);
+    const state = { boundaryBlock: null, handoffStarted: false, providerAccepted: false };
+    // Stand-in for invoice.js's billingEmailPreSendCheck: re-reads the
+    // invoice by id through the given locked handle and checks the SAME
+    // send-claim precondition checkInvoiceDeliveryPreconditions runs first.
+    const billingEmailPreSendCheck = jest.fn(async ({ database }) => {
+      const current = await database('invoices').where({ id: invoiceId }).first();
+      return current?.send_claim_token === 'qa-claim'
+        ? { ok: true }
+        : { ok: false, code: 'send_claim_lost', reason: 'Invoice send claim changed; delivery not attempted' };
+    });
+    try {
+      const outcome = await dispatchUnderBillingEmailAuthority({
+        input: { customerId, invoiceId, metadata: { billingDeliveryCategory: 'billing' } },
+        recipientEmail: 'qa@example.invalid', state,
+        // Exactly how providerPreparationCheck (send-customer-message.js)
+        // calls it: channel + the locked database it was itself given.
+        preSendCheck: async ({ database }) => billingEmailPreSendCheck({ channel: 'email', database }),
+        dispatch: async (database) => {
+          expect(database.isTransaction).toBe(true);
+          await sendgrid.sendOne({
+            to: 'qa@example.invalid', subject: 'Synthetic invoice notice',
+            html: '<p>Your invoice is ready.</p>', text: 'Your invoice is ready.', database,
+          });
+        },
+      });
+      expect(outcome).toEqual({ ok: true });
+      expect(state.providerAccepted).toBe(true);
+      expect(billingEmailPreSendCheck).toHaveBeenCalledTimes(1);
       expect(new Set(queries.map((query) => query.__knexTxId)).size).toBe(1);
       expect(queries[0].__knexTxId).toBeTruthy();
     } finally { mockPg.removeListener('query', collect); }
