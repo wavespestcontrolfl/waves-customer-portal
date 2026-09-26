@@ -101,7 +101,7 @@ describe('lawn water evidence boundaries', () => {
       lawnAssessment: surplusAssessment,
       applications: [{ product: {
         name: 'Synthetic Fertilizer', category: 'fertilizer', irrigation_required: true,
-        irrigation_notes: 'Apply the recorded water-in amount.',
+        irrigation_notes: 'Water in with 0.25 inches within 24 hours.',
       } }],
     });
     expect(recorded.aftercare).toMatchObject({ evidenceSource: 'product_instruction', needsReview: false });

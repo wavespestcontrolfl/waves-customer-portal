@@ -95,6 +95,20 @@ describe('neutral aftercare defers to the plan (codex gh-r28)', () => {
     expect(buildAftercare([{ product: { irrigation_required: true } }])).toMatchObject({ neutral: false, waterInRequired: true });
     expect(buildAftercare([{ product: { irrigation_notes: 'Do not water for 24 hours.' } }])).toMatchObject({ neutral: false, watering: 'Do not water for 24 hours.' });
   });
+  test('a circular catalog note cannot credit required watering against the plan', () => {
+    for (const irrigationNotes of [
+      'Watering or rainfall may be needed after application when directed by the service report.',
+      'Follow the service report for any watering instructions after application.',
+    ]) {
+      expect(buildAftercare([{ product: { irrigation_required: true, irrigation_notes: irrigationNotes } }]))
+        .toMatchObject({
+          watering: expect.stringMatching(/does not include a specific amount or timing/i),
+          waterInRequired: true,
+          evidenceSource: 'incomplete_product_instruction',
+          needsReview: true,
+        });
+    }
+  });
   test('source pin: with a plan the neutral copy is rewritten, label copy untouched', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'service-report', 'lawn-report-v2.js'), 'utf8');
     expect(src).toMatch(/if \(aftercare\.neutral && water && water\.weekPlan && water\.weekPlan\.title\) \{\s*aftercare\.watering = NEUTRAL_AFTERCARE_WITH_PLAN;/);

@@ -436,12 +436,24 @@ function buildRootCause({ effectiveWaterStatus, coverageWatch, overwatering, mow
   return null;
 }
 
+function isActionableWateringInstruction(note) {
+  const text = String(note || '').trim();
+  if (!text) return false;
+  // Catalog placeholders that defer back to this report are not directions.
+  if (/\b(?:may be needed|when directed|as directed|follow (?:the )?(?:service )?report)\b/i.test(text)) return false;
+  return /\b(?:do not|don't|avoid|delay|hold|keep)\b[^.]{0,48}\b(?:water|watering|irrigat\w*)\b/i.test(text)
+    || /\b(?:water|irrigat\w*)\s+in\b/i.test(text)
+    || /\b(?:water|watering|irrigat\w*)\b[^.]{0,48}\b(?:within|after|before|for|until|immediately|today|tomorrow|\d+(?:\.\d+)?\s*(?:inches?|in\.?|minutes?|hours?|days?|cycles?))\b/i.test(text)
+    || /\b(?:add|apply|give)\b[^.]{0,32}\b\d+(?:\.\d+)?\s*(?:inches?|in\.?|minutes?|hours?|days?|cycles?)\b[^.]{0,24}\b(?:water|watering|irrigation)\b/i.test(text);
+}
+
 // Aftercare watering/re-entry from the manufacturer LABEL on the applied products.
 // Surfaces a real label watering-in note when present; otherwise a safe default that
 // invents no number. Re-entry text comes from the label when available.
 function buildAftercare(applications) {
   const apps = Array.isArray(applications) ? applications : [];
   const productNotes = [];
+  const actionableProductNotes = [];
   const applicationWaterEvidence = [];
   let reentry = null;
   // Whether ANY product applied today must be watered IN (fertilizer). true = a
@@ -456,6 +468,7 @@ function buildAftercare(applications) {
     else if (req === false && waterInRequired == null) waterInRequired = false;
     const note = (p.irrigation_notes || facts.irrigationNotes || '').trim();
     if (note && !productNotes.includes(note)) productNotes.push(note);
+    if (isActionableWateringInstruction(note) && !actionableProductNotes.includes(note)) actionableProductNotes.push(note);
     applicationWaterEvidence.push({ required: req, hasInstruction: !!note });
     if (!reentry) reentry = (p.reentry_text || p.reentry_summary || facts.reentrySummary || '').trim() || null;
   }
@@ -471,6 +484,10 @@ function buildAftercare(applications) {
   if (productNotes.length > 1) {
     watering = 'The recorded product watering instructions differ. Confirm the directions with your technician before changing irrigation.';
     evidenceSource = 'conflicting_product_instructions';
+    needsReview = true;
+  } else if (productNotes.length === 1 && actionableProductNotes.length === 0) {
+    watering = 'A product watering note was recorded, but it does not include a specific amount or timing. Confirm the directions with your technician before changing irrigation.';
+    evidenceSource = 'incomplete_product_instruction';
     needsReview = true;
   } else if (requiredWithoutInstruction && productNotes.length) {
     watering = 'A required product watering instruction is missing. Confirm the directions with your technician before changing irrigation.';
