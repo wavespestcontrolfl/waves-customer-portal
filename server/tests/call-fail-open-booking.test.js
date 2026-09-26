@@ -1,7 +1,11 @@
 // Fail-open booking + inbound implied consent (2026-07-10). Grounded in live
 // misses: confirmed bookings blocked over recoverable contact-field flags
 // (ANI present but caller_phone_missing; existing customer's on-file address;
-// garbled-email name_email_mismatch; low confidence on a short familiar call).
+// low confidence on a short familiar call).
+// name_email_mismatch used to need this same fail-open demotion; owner
+// ruling 2026-09-26 made it advisory outright (ADVISORY_TRIAGE_FLAGS), so it
+// no longer reaches appointmentBlockingFlags at all, on any call direction,
+// with or without fail-open — see the dedicated tests below.
 const {
   canAutoRoute, BLOCKING_TRIAGE_FLAGS, ADVISORY_TRIAGE_FLAGS, SMS_ONLY_FLAGS,
   hasAgentCommittedEvidence, quoteBindsConfirmedSlot, normalizeCommitmentText,
@@ -26,18 +30,33 @@ function extraction(flags, overall = 0.9) {
 }
 
 describe('canAutoRoute fail-open booking', () => {
-  test('Robin case: caller_phone_missing + name_email_mismatch block WITHOUT fail-open', () => {
+  test('Robin case: caller_phone_missing blocks WITHOUT fail-open; name_email_mismatch is advisory-only (never blocks)', () => {
     const r = canAutoRoute(extraction(['caller_phone_missing', 'name_email_mismatch']), {});
     expect(r.allowed).toBe(false);
-    expect(r.appointmentBlockingFlags).toEqual(expect.arrayContaining(['caller_phone_missing', 'name_email_mismatch']));
+    expect(r.appointmentBlockingFlags).toEqual(['caller_phone_missing']);
+    expect(r.appointmentBlockingFlags).not.toContain('name_email_mismatch');
+    // Still surfaced for the office (the name_review card), just never a hold.
+    expect(r.flags).toContain('name_email_mismatch');
   });
 
-  test('Robin case: fail-open books when the ANI is present (phone) and clears name_email_mismatch', () => {
+  test('Robin case: fail-open books when the ANI is present (phone); name_email_mismatch never needed the demotion', () => {
     const r = canAutoRoute(extraction(['caller_phone_missing', 'name_email_mismatch']), {
       failOpen: true, callerAni: '+19419603120', addressValidation: AV_CLEAN,
     });
     expect(r.allowed).toBe(true);
-    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_phone_missing', 'name_email_mismatch']));
+    expect(r.failedOpenFlags).toEqual(['caller_phone_missing']);
+    expect(r.flags).toContain('name_email_mismatch');
+  });
+
+  // Owner ruling 2026-09-26 standing directive: every call-agent rule behaves
+  // the same on outbound and inbound calls. failOpen is inbound-only
+  // (call-recording-processor.js gates it on !isOutboundCall), so this test
+  // simulates the OUTBOUND shape directly: fail-open OFF, name_email_mismatch
+  // is the only flag on an otherwise-clean confirmed booking.
+  test('an OUTBOUND-shaped confirmed booking (fail-open off) is NOT blocked by name_email_mismatch alone', () => {
+    const r = canAutoRoute(extraction(['name_email_mismatch']), { addressValidation: AV_CLEAN });
+    expect(r.allowed).toBe(true);
+    expect(r.flags).toContain('name_email_mismatch');
   });
 
   test('caller_phone_missing is NOT recovered when the ANI is absent', () => {
@@ -169,14 +188,18 @@ describe('canAutoRoute fail-open booking', () => {
 
   test('fail-open never strips flags from an UNCONFIRMED call (P2)', () => {
     // Fail-open is for confirmed bookings only: an unconfirmed call keeps
-    // caller_phone_missing / name_email_mismatch etc., so the blocked branch
-    // files the contact/name review cards, not just the not_confirmed card.
+    // caller_phone_missing, so the blocked branch files the contact review
+    // card, not just the not_confirmed card. name_email_mismatch is advisory
+    // regardless of confirmed/unconfirmed — it never joins
+    // appointmentBlockingFlags, but still rides `flags` for its own card.
     const ex = extraction(['caller_phone_missing', 'name_email_mismatch']);
     ex.scheduling = { status: 'tentative' };
     const r = canAutoRoute(ex, { failOpen: true, callerAni: '+19419603120', knownCustomer: { hasAddress: true } });
     expect(r.allowed).toBe(false);
     expect(r.reason).toBe('triage_flags');
-    expect(r.appointmentBlockingFlags).toEqual(expect.arrayContaining(['caller_phone_missing', 'name_email_mismatch']));
+    expect(r.appointmentBlockingFlags).toEqual(['caller_phone_missing']);
+    expect(r.appointmentBlockingFlags).not.toContain('name_email_mismatch');
+    expect(r.flags).toContain('name_email_mismatch');
   });
 
   test('hard blocks are NEVER failed open', () => {

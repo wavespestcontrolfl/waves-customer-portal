@@ -122,9 +122,9 @@ const TRUSTED_CUSTOMER_STAGES = new Set(['active_customer', 'won', 'at_risk']);
 // missing_last_name (owed full-name capture — the name_moot rule closes it
 // on independent surname evidence), missing_unit_number (owed unit capture
 // for a multi-unit building — street+zip on file does NOT answer it), and
-// the fail-open confirmation pair
 // low_extraction_confidence / name_email_mismatch (the office owes
-// confirming the doubted fields; analogous to email_unverified).
+// confirming the doubted fields; analogous to email_unverified — advisory,
+// never a booking hold, per the 2026-09-26 ruling for name_email_mismatch).
 //
 // What remains is purely informational: multi-property mentions, the
 // SMS-only consent-capture notes (consent enforcement lives in the
@@ -1356,10 +1356,16 @@ async function loadUnambiguousEmailEvidence(conn, items, flag, {
     })
     .select('call_log_id', 'held_email', 'customer_id');
   const heldByCall = new Map(holds.map((h) => [String(h.call_log_id), { email: emailLc(h.held_email), customerId: String(h.customer_id || '') }]));
-  // A LIVE name/email mismatch card is an unanswered identity question
-  // about this very address, whatever the rolling flags say after a
-  // force-reprocess (codex r1 P1); the ledger's own release guard only
-  // watches the two email codes, so it is checked here.
+  // A LIVE name/email mismatch card is an unanswered identity question about
+  // this very address, whatever the rolling flags say after a force-reprocess
+  // (codex r1 P1); the ledger's own release guard (emailReviewBlocksRelease)
+  // only watches the two EMAIL_REVIEW_REASON_CODES, so it is checked here.
+  // This is narrower than a hold: it only withholds the fully-AUTOMATIC
+  // bypass-the-human-read-back release for an email_unverified card that is
+  // otherwise unambiguous — the underlying hold is the email_unverified card
+  // itself (unaffected by the 2026-09-26 ruling, which only stopped
+  // name_email_mismatch from holding a booking or the first-touch email on
+  // its own).
   const mismatchLive = new Set((await conn('triage_items')
     .whereIn('call_log_id', callIds)
     .where({ reason_code: 'name_email_mismatch' })
