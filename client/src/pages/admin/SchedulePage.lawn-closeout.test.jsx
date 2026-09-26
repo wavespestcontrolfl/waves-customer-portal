@@ -112,6 +112,23 @@ it.each([false, true])('requires visit facts beyond a typed treatment target: co
     .toEqual({ [targetKey]: 'Ants', work_completed: 'Inspected the kitchen.' });
 });
 
+it('sends the recorded application method, scope and edited measurement to Generate', async () => {
+  defaultsEnabled = true;
+  mount();
+  await waitFor(() => expect(screen.getByPlaceholderText('Sq ft').value).toBe('5000'));
+  fireEvent.change(screen.getByPlaceholderText('Sq ft'), { target: { value: '4000' } });
+  fireEvent.click(screen.getAllByRole('button', { name: /generate ai/i })[0]);
+  await waitFor(() => expect(fetch.mock.calls.some(([url]) => url.includes('generate-report'))).toBe(true));
+  const request = JSON.parse(fetch.mock.calls.find(([url]) => url.includes('generate-report'))[1].body);
+  expect(request.products).toEqual([expect.objectContaining({
+    productId: 'test-k',
+    applicationMethod: 'broadcast_spray',
+    applicationArea: 'Front yard, Back yard, Side yards',
+    areaValue: '4000',
+    areaUnit: 'sqft',
+  })]);
+});
+
 it('prefills the engine mix and submits findings and inspection actions once, with edited quantities', async () => {
   mount();
   await waitFor(() => expect(screen.getByPlaceholderText('Total').value).toBe('15'));

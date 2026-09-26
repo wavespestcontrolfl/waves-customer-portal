@@ -15889,6 +15889,12 @@ export function CompletionPanel({
         name: p.name,
         rate: p.rate || null,
         rateUnit: p.rateUnit || null,
+        applicationMethod: productApplicationMethod(p, serviceTypeForArea),
+        applicationArea:
+          p.applicationArea ||
+          (completionAreasServiced.length === 1 ? completionAreasServiced[0] : null),
+        areaValue: p.areaValue ?? null,
+        areaUnit: p.areaUnit || null,
         targets: Array.isArray(p.targets) ? p.targets : [],
       })),
       technicianName: service.technicianName || "Waves Tech",
