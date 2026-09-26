@@ -330,6 +330,15 @@ function resolveDueDeadline(item, messageCreatedAt, messageBody = '') {
   return { due_at: new Date(new Date(messageCreatedAt).getTime() + hours * 3600000).toISOString(), due_basis: 'default_kind' };
 }
 
+// Sole only when the snapshot taken before the provider call and the one read
+// under the write lock agree: a property deactivated while extraction was in
+// flight must not make an ambiguous request unambiguous (Codex #4816 r22).
+function requestTimeSoleProperty(locked, beforeExtraction) {
+  const soleOf = (list) => (list?.length === 1 ? list[0].id : null);
+  const sole = soleOf(locked);
+  return sole && sole === soleOf(beforeExtraction) ? sole : null;
+}
+
 async function recordMessageOperations(conn, message, extracted, matchedContext) {
   const replay = matchedContext.replay === true;
   if (replay && message.direction !== 'inbound') return { skipped: 'source_changed' };
@@ -375,11 +384,7 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
     const additional = !replay && matchedContext.captureAdditionalProperties
       ? await require('./sms-additional-properties').stageAdditionalProperties({ trx, message: live, proposals: extracted.additional_properties })
       : null;
-    // Sole only when the snapshot taken before the provider call and the one
-    // read under the lock agree: a property deactivated while extraction was
-    // in flight must not make an ambiguous request unambiguous (Codex #4816 r22).
-    const soleOf = (list) => (list?.length === 1 ? list[0].id : null);
-    const soleProperty = soleOf(properties) && soleOf(properties) === soleOf(matchedContext.properties) ? soleOf(properties) : null;
+    const soleProperty = requestTimeSoleProperty(properties, matchedContext.properties);
     if (obligations.length) await trx('call_commitments').insert(obligations.map((item) => {
       const propertyId = properties.length === 1 && properties.some((p) => p.id === item.property_id) ? item.property_id : null;
       const { due_at: dueAt, due_basis: dueBasis } = resolveDueDeadline(item, message.created_at, message.message_body);
