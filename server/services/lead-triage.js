@@ -51,14 +51,21 @@ function triageMatchesSchema(t) {
 // Owner ruling 2026-09-26: customer texts are never signed. The prompt says
 // so, and the suggestion is stripped deterministically anyway because models
 // add sign-offs on their own; the lead's first name keeps a reply addressed
-// to a customer who shares the signer's name intact.
-function mapTriage(parsed, { firstName } = {}) {
-  const reply = parsed.suggestedReply ? stripTrailingSignature(parsed.suggestedReply, { addresseeFirstName: firstName }) : '';
+// to a customer who shares the signer's name intact. Stripping runs BEFORE
+// triageMatchesSchema, so a suggestion that was only a signature ("— Adam")
+// is a blank reply there — a failed answer that falls back — instead of a
+// successful triage with no reply (Codex r1 on #4975).
+function unsignedTriage(parsed, firstName) {
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || typeof parsed.suggestedReply !== 'string') return parsed;
+  return { ...parsed, suggestedReply: stripTrailingSignature(parsed.suggestedReply, { addresseeFirstName: firstName }) };
+}
+
+function mapTriage(parsed) {
   return {
     serviceInterest: parsed.serviceInterest || null,
     urgency: parsed.urgency || 'normal',
     extractedData: parsed.extractedData || {},
-    suggestedReply: reply || null,
+    suggestedReply: parsed.suggestedReply || null,
   };
 }
 
@@ -100,7 +107,8 @@ Return ONLY valid JSON, no markdown.`;
       // The structured-output schema cannot forbid blank strings, so the
       // primary gets the same check as the fallback; a miss fails its row
       // and Claude gets a turn.
-      if (triageMatchesSchema(r.json)) return mapTriage(r.json, { firstName });
+      const primary = unsignedTriage(r.json, firstName);
+      if (triageMatchesSchema(primary)) return mapTriage(primary);
       rejectCall(r, 'schema_invalid');
     }
   }
@@ -123,6 +131,7 @@ Return ONLY valid JSON, no markdown.`;
     const text = stripThinkingBlocks(response).content?.[0]?.text || '';
     let triage;
     try { triage = JSON.parse(text); } catch (err) { ledgerCallRejected(response, 'invalid_json'); throw err; }
+    triage = unsignedTriage(triage, firstName);
     // An off-schema answer (e.g. urgency "critical") is a failed triage, not
     // one to map: its values used to be written onto the lead anyway while
     // only the ledger row said it failed (review on #4884). Same null the
@@ -131,7 +140,7 @@ Return ONLY valid JSON, no markdown.`;
       ledgerCallRejected(response, 'schema_invalid');
       return null;
     }
-    return mapTriage(triage, { firstName });
+    return mapTriage(triage);
   } catch (err) {
     logger.error(`[lead-triage] AI triage failed: ${err.message}`);
     return null;

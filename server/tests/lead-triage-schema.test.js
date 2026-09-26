@@ -110,3 +110,25 @@ describe('aiTriageLead — suggested replies are never signed', () => {
     expect(prompt).not.toMatch(/signed "Adam/);
   });
 });
+
+// Codex r1 on #4975: a suggestion that is ONLY a signature must not pass the
+// non-blank check and then be stripped to nothing after acceptance.
+describe('aiTriageLead — a signature-only suggestion is a failed answer', () => {
+  const prevKey = process.env.ANTHROPIC_API_KEY;
+  beforeEach(() => { process.env.ANTHROPIC_API_KEY = 'test-key'; mockCreate.mockReset(); ledgerCallRejected.mockClear(); rejectCall.mockClear(); dispatch.mockReset(); });
+  afterAll(() => { if (prevKey === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = prevKey; });
+
+  test('a signature-only primary suggestion fails its row and the Claude fallback answers', async () => {
+    dispatch.mockResolvedValueOnce({ ok: true, json: { ...VALID, suggestedReply: '— Adam' } });
+    mockCreate.mockResolvedValue(reply(VALID));
+    expect((await aiTriageLead(LEAD)).suggestedReply).toBe(VALID.suggestedReply);
+    expect(rejectCall).toHaveBeenCalledWith(expect.anything(), 'schema_invalid');
+  });
+
+  test('a signature-only fallback suggestion returns null and fails the row', async () => {
+    dispatch.mockResolvedValue({ ok: false, reason: 'openai_timeout' });
+    mockCreate.mockResolvedValue(reply({ ...VALID, suggestedReply: '— Adam, Waves Pest Control' }));
+    expect(await aiTriageLead(LEAD)).toBeNull();
+    expect(ledgerCallRejected).toHaveBeenCalledWith(expect.anything(), 'schema_invalid');
+  });
+});
