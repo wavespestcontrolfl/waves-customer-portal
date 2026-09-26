@@ -168,8 +168,37 @@ describe('flushPendingLeadFallbacks (deploy shutdown)', () => {
     expect(pendingLeadFallbacks.size).toBe(1);
     await expect(flushPendingLeadFallbacks(1000)).resolves.toBe(1);
     expect(sendFallback).toHaveBeenCalledTimes(1);
-    expect(pendingLeadFallbacks.size).toBe(0);
+    // Still registered: the run has not settled, so a late retry may follow
+    // and the second (post-drain) flush must still see it.
+    expect(pendingLeadFallbacks.size).toBe(1);
+    await expect(flushPendingLeadFallbacks(1000)).resolves.toBe(1);
     void settling;
+  });
+
+  test('a retry that starts after the first flush is still covered by the second', async () => {
+    let finishRun;
+    let finishRetry;
+    // Like the route's sender: single-flight over the once-ever send.
+    const send = jest.fn()
+      .mockImplementationOnce(async () => {}) // the timeout's attempt: the agent holds the claim, returns at once
+      .mockImplementation(() => new Promise((resolve) => { finishRetry = resolve; }));
+    const sendFallback = singleFlight(send);
+    const processLead = jest.fn(() => new Promise((resolve) => { finishRun = resolve; }));
+    await settleLeadResponseAgentRun({ agentConfigured: true, processLead, sendFallback, onError: jest.fn(), fallbackAfterMs: 10 });
+    expect(send).toHaveBeenCalledTimes(1);
+    // The agent's send fails and releases the claim: the late retry starts.
+    finishRun({ actionTaken: 'queued_for_adam' });
+    await new Promise(r => setImmediate(r));
+    expect(pendingLeadFallbacks.has(sendFallback)).toBe(true);
+    let flushed = false;
+    const secondFlush = flushPendingLeadFallbacks(1000).then(() => { flushed = true; });
+    await new Promise(r => setImmediate(r));
+    expect(flushed).toBe(false);
+    finishRetry();
+    await secondFlush;
+    expect(send).toHaveBeenCalledTimes(2); // the flush joined the retry, no extra send
+    await new Promise(r => setImmediate(r));
+    expect(pendingLeadFallbacks.has(sendFallback)).toBe(false);
   });
 
   test('a settled run is no longer pending', async () => {

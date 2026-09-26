@@ -18,6 +18,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { sendCustomerMessage, normalizeRecipient, classifyDeliveryCertainty } = require('./messaging/send-customer-message');
 const { renderRequiredSmsTemplate } = require('./sms-template-renderer');
+const { withSmsConsentLock } = require('../utils/customer-comms-lock');
 
 /**
  * The lead auto-reply (lead_auto_reply_biz) is sent AT MOST ONCE per
@@ -149,8 +150,10 @@ async function resolveLeadAutoReplyClaim(phoneDigits, smsResult, dbc = db) {
   }
 }
 
-async function recipientStillCurrent(customerId, phoneDigits) {
-  const row = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('phone');
+async function recipientStillCurrent(customerId, phoneDigits, conn = db) {
+  const query = conn('customers').where({ id: customerId }).whereNull('deleted_at');
+  if (conn !== db) query.forNoKeyUpdate();
+  const row = await query.first('phone');
   const currentDigits = String(row?.phone || '').replace(/\D/g, '').slice(-10);
   return row && currentDigits === phoneDigits
     ? { ok: true }
@@ -216,10 +219,17 @@ async function sendLeadAutoReplyOnce({ customer, phoneFormatted, firstName, loca
     identityTrustLevel: 'phone_matches_customer',
     entryPoint: 'lead_webhook_auto_reply',
     // The delayed fallback (after the Lead Response agent) goes out up to a
-    // minute after the form. Re-check at the provider boundary that this
-    // customer still exists and still has this phone; a refusal is a
-    // not-sent block, so the claim below is released.
-    ...(revalidateRecipient ? { preSendCheck: () => recipientStillCurrent(customer.id, phoneDigits) } : {}),
+    // minute after the form. Like the agent's own send, it dispatches inside
+    // the customer's comms lock with the customer row locked, after
+    // re-checking the row still exists and still has this phone, so a staff
+    // correction or delete either lands first (refused: a not-sent block,
+    // which releases the claim below) or waits until Twilio has the request.
+    ...(revalidateRecipient ? {
+      withSmsHandoff: dispatch => withSmsConsentLock(db, { phone: phoneFormatted, customerId: customer.id }, async (trx) => {
+        const current = await recipientStillCurrent(customer.id, phoneDigits, trx);
+        return current.ok ? dispatch(trx) : current;
+      }),
+    } : {}),
     metadata: {
       original_message_type: 'auto_reply',
       customerLocationId: location.id,

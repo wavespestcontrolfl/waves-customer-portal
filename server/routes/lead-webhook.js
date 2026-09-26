@@ -1852,9 +1852,12 @@ function singleFlight(fn) {
   };
 }
 
+// Entries stay registered until their run's last send attempt settles, so a
+// second flush (after in-flight requests drain) still covers a late retry
+// that started after the first. The senders are single-flight and the claim
+// allows one text, so flushing an entry twice is safe.
 async function flushPendingLeadFallbacks(timeoutMs = 10000) {
   const pending = [...pendingLeadFallbacks];
-  pendingLeadFallbacks.clear();
   if (!pending.length) return 0;
   let timer;
   await Promise.race([
