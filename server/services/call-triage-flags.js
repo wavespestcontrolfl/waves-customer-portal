@@ -776,6 +776,9 @@ const COMMITMENT_HEADS = [
 // day/date/time set — anything else after the head fails closed.
 const SLOT_WORDS = new Set([
   'for', 'at', 'on', 'the', 'this', 'it', 'of',
+  // "in the morning" / "in the afternoon" (codex round 30, P2) — the day
+  // period is parsed by parseSpokenSlot and must match the slot.
+  'in', 'morning', 'afternoon',
   'noon', 'midnight', 'am', 'pm', 'a', 'm', 'p', 'o', 'clock',
   'sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday',
   'january', 'february', 'march', 'april', 'may', 'june', 'july', 'august',
@@ -845,10 +848,22 @@ function normalizeCommitmentText(s) {
 // interrogative sentence can never be the commitment sentence. "a.m."/
 // "p.m." abbreviation dots are collapsed first so they don't split a
 // sentence in two.
+// Codex round 30, P1 (:851): non-ASCII question marks (fullwidth "？",
+// Arabic "؟", Greek ";", "‽", "⁇"/"⁈"/"⁉", reversed "⸮") terminate a
+// sentence and mark it interrogative exactly like "?", and an inverted "¿"
+// marks it interrogative; fullwidth/ideographic full stops and "！" end a
+// sentence like "." / "!". Folded to ASCII before splitting so every
+// downstream interrogative check sees them.
+const UNICODE_QUESTION_MARKS_RE = /[\uFF1F\u061F\u037E\u203D\u2047\u2048\u2049\u2E2E]/g;
+const UNICODE_STOPS_RE = /[\u3002\uFF0E]/g;
 function splitSentences(turn) {
-  const chunks = (String(turn).replace(/\b([ap])\.\s?m\.?/gi, '$1m').match(/[^.!?;]+[.!?;]*/g) || []);
+  const folded = String(turn)
+    .replace(UNICODE_QUESTION_MARKS_RE, '?')
+    .replace(UNICODE_STOPS_RE, '.')
+    .replace(/\uFF01/g, '!');
+  const chunks = (folded.replace(/\b([ap])\.\s?m\.?/gi, '$1m').match(/[^.!?;]+[.!?;]*/g) || []);
   return chunks
-    .map((c) => ({ raw: c, ns: normalizeCommitmentText(c), interrogative: c.includes('?') }))
+    .map((c) => ({ raw: c, ns: normalizeCommitmentText(c), interrogative: /[?\u00BF]/.test(c) }))
     .filter((s) => s.ns);
 }
 
@@ -1337,7 +1352,16 @@ function confirmedSlotFacts(confirmedStartAt, callStartedAt) {
 // otherwise infers one from the Waves business day (7–11 morning, 12 noon,
 // 1–6 afternoon). Mentions dedupe by meaning ("12 pm" + "noon" is one);
 // any unparseable hour is an invalid mention and fails the binding.
-const DATE_POSITION_PREV = new Set(['the', ...WEEKDAY_NAMES, ...MONTH_NAMES]);
+// Codex round 30, P1 (:1341): the date prepositions "for"/"on" also put a
+// lone cardinal in date position ("confirmed for 10 Sunday", "Sunday on 10
+// at 10 o'clock" — ASR drops the article/ordinal), still exempt when the
+// next token marks an hour ("for 10 o'clock", "on 10 am").
+const DATE_POSITION_PREV = new Set(['the', 'for', 'on', ...WEEKDAY_NAMES, ...MONTH_NAMES]);
+// Codex round 30, P2 (:1350): spoken day periods ("10 o'clock in the
+// morning", "3 o'clock in the afternoon") state the period like a standalone
+// am/pm — they take precedence over business-hours inference and must match
+// the slot's period.
+const SPOKEN_DAY_PERIODS = { morning: 'am', afternoon: 'pm' };
 const HOUR_MARKER_NEXT = new Set(['am', 'pm', 'o', 'oclock']);
 // A period token is ATTACHED when it follows an hour ("10 pm", "10 00 pm")
 // or an o'clock ("10 o'clock pm"); any other am/pm is a STANDALONE period.
@@ -1364,7 +1388,10 @@ function parseSpokenSlot(normalizedSentence) {
     numberRuns[numberRuns.length - 1].nums.push(Number(tok));
     numberRuns[numberRuns.length - 1].next = at(i + 1);
   });
-  const periods = new Set(toks.filter((t, i) => (t === 'am' || t === 'pm') && !PERIOD_ATTACHED_PREV_RE.test(at(i - 1))));
+  const periods = new Set([
+    ...toks.filter((t, i) => (t === 'am' || t === 'pm') && !PERIOD_ATTACHED_PREV_RE.test(at(i - 1))),
+    ...toks.filter((t) => SPOKEN_DAY_PERIODS[t]).map((t) => SPOKEN_DAY_PERIODS[t]),
+  ]);
   // More than one standalone period ("AM … PM") states no single period.
   const statedPeriod = periods.size === 1 ? [...periods][0] : null;
   const times = new Set(SPOKEN_TIME_RES.flatMap((re) => [...` ${ns} `.matchAll(re)].map((m) => {

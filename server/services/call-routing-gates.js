@@ -325,8 +325,12 @@ function checkTcpaConsent(extraction, opts = {}) {
 // v2-1.40.0 (codex round 29): a question-marked acknowledgement ("Okay?",
 // "Yes?") around the commitment or in a later turn never qualifies — MORE
 // RESTRICTIVE.
-const V2_DECISION_VERSION = 'v2-1.40.0';
-const V2_DECISION_VERSIONS = ['v2-1.0.0', 'v2-1.1.0', 'v2-1.2.0', 'v2-1.3.0', 'v2-1.4.0', 'v2-1.5.0', 'v2-1.6.0', 'v2-1.7.0', 'v2-1.8.0', 'v2-1.9.0', 'v2-1.10.0', 'v2-1.11.0', 'v2-1.12.0', 'v2-1.13.0', 'v2-1.14.0', 'v2-1.15.0', 'v2-1.16.0', 'v2-1.17.0', 'v2-1.18.0', 'v2-1.19.0', 'v2-1.20.0', 'v2-1.21.0', 'v2-1.22.0', 'v2-1.23.0', 'v2-1.24.0', 'v2-1.25.0', 'v2-1.26.0', 'v2-1.27.0', 'v2-1.28.0', 'v2-1.29.0', 'v2-1.30.0', 'v2-1.31.0', 'v2-1.32.0', 'v2-1.33.0', 'v2-1.34.0', 'v2-1.35.0', 'v2-1.36.0', 'v2-1.37.0', 'v2-1.38.0', 'v2-1.39.0', 'v2-1.40.0'];
+// v2-1.41.0 (codex round 30): Unicode question marks mark a sentence
+// interrogative; "for"/"on" put a lone cardinal in date position (both MORE
+// restrictive); "in the morning"/"in the afternoon" are parsed as the
+// stated period (grounds an explicit booking v2-1.40.0 held).
+const V2_DECISION_VERSION = 'v2-1.41.0';
+const V2_DECISION_VERSIONS = ['v2-1.0.0', 'v2-1.1.0', 'v2-1.2.0', 'v2-1.3.0', 'v2-1.4.0', 'v2-1.5.0', 'v2-1.6.0', 'v2-1.7.0', 'v2-1.8.0', 'v2-1.9.0', 'v2-1.10.0', 'v2-1.11.0', 'v2-1.12.0', 'v2-1.13.0', 'v2-1.14.0', 'v2-1.15.0', 'v2-1.16.0', 'v2-1.17.0', 'v2-1.18.0', 'v2-1.19.0', 'v2-1.20.0', 'v2-1.21.0', 'v2-1.22.0', 'v2-1.23.0', 'v2-1.24.0', 'v2-1.25.0', 'v2-1.26.0', 'v2-1.27.0', 'v2-1.28.0', 'v2-1.29.0', 'v2-1.30.0', 'v2-1.31.0', 'v2-1.32.0', 'v2-1.33.0', 'v2-1.34.0', 'v2-1.35.0', 'v2-1.36.0', 'v2-1.37.0', 'v2-1.38.0', 'v2-1.39.0', 'v2-1.40.0', 'v2-1.41.0'];
 
 function buildRouteDecision({
   callLogId,

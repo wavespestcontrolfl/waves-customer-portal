@@ -1883,6 +1883,16 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
   });
 
   test.each([
+    "Agent: We'll see you Sunday at noon. Okay\uFF1F",
+    "Agent: We'll see you Sunday at noon. Okay\u061F",
+    "Agent: We'll see you Sunday at noon. \u00BFOkay",
+  ])('Codex round-30 regression: a Unicode question-marked acknowledgement never qualifies — %s', (agentLine) => {
+    const transcript = TRANSCRIPT.replace(`Agent: ${AGENT_COMMIT_QUOTE}`, agentLine);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+  });
+
+  test.each([
     'Caller: Okay, never mind.',
     'Caller: Okay, thank you, but I have to ask my husband.',
     'Caller: Okay will come in the email.',
@@ -2284,6 +2294,35 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
   test('Codex round-18: "10 o\'clock" with no initial still binds by business hours', () => {
     const ns = normalizeCommitmentText("We'll see you Sunday at 10 o'clock.");
     expect(quoteBindsConfirmedSlot(ns, '2026-08-02T10:00:00-04:00', '2026-07-30T15:50:00-04:00')).toBe(true);
+  });
+
+  test.each([
+    ["We're confirmed for 10 Sunday at 10 o'clock.", '2026-08-02T10:00:00-04:00', false],
+    ["We'll see you Sunday on 10 at 10 o'clock.", '2026-08-02T10:00:00-04:00', false],
+    ["We're confirmed for 2 Sunday at 10 o'clock.", '2026-08-02T10:00:00-04:00', true],
+    ["We'll see you Sunday for 10 o'clock.", '2026-08-02T10:00:00-04:00', true],
+  ])('Codex round-30: a cardinal after for/on is a date unless an hour marker follows — %s @ %s', (sentence, slot, expected) => {
+    const ns = normalizeCommitmentText(sentence);
+    expect(quoteBindsConfirmedSlot(ns, slot, '2026-07-30T15:50:00-04:00')).toBe(expected);
+  });
+
+  test.each([
+    ["We'll see you Sunday at 10 o'clock in the morning.", '2026-08-02T10:00:00-04:00', true],
+    ["We'll see you Sunday at 3 o'clock in the afternoon.", '2026-08-02T15:00:00-04:00', true],
+    ["We'll see you Sunday at 3 o'clock in the morning.", '2026-08-02T15:00:00-04:00', false],
+    ["We'll see you Sunday at 10 o'clock in the afternoon.", '2026-08-02T10:00:00-04:00', false],
+  ])('Codex round-30: spoken morning/afternoon is the stated period — %s @ %s', (sentence, slot, expected) => {
+    const ns = normalizeCommitmentText(sentence);
+    expect(quoteBindsConfirmedSlot(ns, slot, '2026-07-30T15:50:00-04:00')).toBe(expected);
+  });
+
+  test('Codex round-30: "at 10 o\'clock in the morning" grounds end to end for a 10:00 slot', () => {
+    const quote = "We'll see you Sunday at 10 o'clock in the morning.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, quote);
+    const ex = agentCommitted(['caller_not_authorized'], { quote });
+    ex.scheduling.confirmed_start_at = '2026-08-02T10:00:00-04:00';
+    const r = canAutoRoute(ex, opts({ transcript }));
+    expect(r.allowed).toBe(true);
   });
 
   // AT_WEEKDAY_RE false-positive guards, exercised directly against
