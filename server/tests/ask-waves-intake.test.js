@@ -280,6 +280,7 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
     ['Las mascotas pueden salir después de 30 minutos.', ''],
     ['It takes about 30 minutes.', 'How long after treatment can I re-enter?'],
     ['It usually takes two hours.', 'How long does the spray take to dry?'],
+    ['Your technician recommends waiting 30 minutes.', 'How long after treatment can I re-enter?'],
   ])('flags: %s', (reply, context) => {
     expect(intakeSafetyClaimSupplement(reply, context)).toBe(true);
   });
