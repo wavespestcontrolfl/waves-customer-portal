@@ -79,3 +79,45 @@ describe('rowHeldForLegacyAutofillPrice — the shared row verdict (codex r1 P1 
     expect(rowHeldForLegacyAutofillPrice({ status: 'sent', price_locked_at: new Date(), estimate_data: guessed })).toBe(false);
   });
 });
+
+describe('estimateDeliverableUnderGate with GATE_SEND_REQUIRES_SERVER_PRICING off (pre-push P1 #4941)', () => {
+  const guessed = saved({ svcPest: true, lotSqFt: '9000' }, {}, [pest({ footprintWasDefaulted: true })]);
+  const clean = saved({ homeSqFt: '2400' });
+  const siblingsDb = (rows) => {
+    const qb = { where: () => qb, whereNot: () => qb, whereNull: () => qb, whereRaw: () => qb, whereIn: () => qb,
+      orWhereIn: () => qb, orWhere: () => qb, select: async () => rows };
+    qb.where = (arg) => (typeof arg === 'function' ? (arg(qb), qb) : qb);
+    return () => qb;
+  };
+  const withGateOff = async (fn) => {
+    const prior = process.env.GATE_SEND_REQUIRES_SERVER_PRICING;
+    delete process.env.GATE_SEND_REQUIRES_SERVER_PRICING;
+    jest.resetModules();
+    try { return await fn(require('../services/pricing-authority-gate')); } finally {
+      if (prior === undefined) delete process.env.GATE_SEND_REQUIRES_SERVER_PRICING; else process.env.GATE_SEND_REQUIRES_SERVER_PRICING = prior;
+      jest.resetModules();
+    }
+  };
+
+  test('still refuses a legacy row, read-free; passes everything else', () => withGateOff(async (gate) => {
+    expect(gate.gatedSendAuthorityPredicateApplies()).toBe(false);
+    const database = jest.fn();
+    expect(await gate.estimateDeliverableUnderGate(database, { id: 'a', status: 'sent', estimate_group_id: 'g', estimate_data: guessed })).toBe(false);
+    expect(await gate.estimateDeliverableUnderGate(database, { id: 'a', status: 'sent', pricing_authority: 'CLIENT_FALLBACK', estimate_data: clean })).toBe(true);
+    expect(database).not.toHaveBeenCalled();
+  }));
+
+  test('gate on, a group whose link-visible sibling is legacy is refused', async () => {
+    const prior = process.env.GATE_SEND_REQUIRES_SERVER_PRICING;
+    process.env.GATE_SEND_REQUIRES_SERVER_PRICING = 'true';
+    jest.resetModules();
+    try {
+      const gate = require('../services/pricing-authority-gate');
+      expect(await gate.estimateDeliverableUnderGate(siblingsDb([{ id: 'b', status: 'sent', pricing_authority: 'SERVER', estimate_data: guessed }]),
+        { id: 'a', status: 'sent', pricing_authority: 'SERVER', estimate_group_id: 'g', estimate_data: clean })).toBe(false);
+    } finally {
+      if (prior === undefined) delete process.env.GATE_SEND_REQUIRES_SERVER_PRICING; else process.env.GATE_SEND_REQUIRES_SERVER_PRICING = prior;
+      jest.resetModules();
+    }
+  });
+});

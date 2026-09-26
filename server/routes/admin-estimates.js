@@ -5075,7 +5075,7 @@ router.post('/:id/follow-up', async (req, res, next) => {
     // this text carries the estimate link, and the link renders every
     // viewable sibling — a SERVER anchor beside an unverified sibling is
     // refused like any other send while the gate is on.
-    if (gatedSendAuthorityPredicateApplies() && !(await estimateDeliverableUnderGate(db, estimate))) {
+    if (!(await estimateDeliverableUnderGate(db, estimate))) {
       return res.status(409).json({
         error: 'A property on this estimate\'s link has no engine-verified price — re-save it from the estimate tool before sending this follow-up.',
         code: 'PRICING_AUTHORITY_NOT_SERVER',
