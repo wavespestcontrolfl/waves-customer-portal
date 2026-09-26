@@ -150,11 +150,14 @@ it('prevents removing the final channel with mouse or keyboard activation', asyn
 });
 
 it.each([
-  ['Payment receipts', 'paymentConfirmationChannels', ['sms', 'push'], 'App', { paymentConfirmationSms: false }],
-  ['Invoices', 'invoiceChannels', ['email', 'sms'], 'Text', { emailEnabled: false }],
-])('keeps the last usable channel in %s when another selected channel is unavailable', async (group, key, channels, usable, overrides) => {
+  ['Payment receipts', 'paymentConfirmationChannels', ['sms', 'push'], 'App', { paymentConfirmationSms: false }, customer],
+  // Only a missing address makes Email unavailable — the portal-wide email
+  // switch does not (owner ruling 2026-09-26: payment emails cannot be
+  // turned off).
+  ['Invoices', 'invoiceChannels', ['email', 'sms'], 'Text', {}, { ...customer, email: '' }],
+])('keeps the last usable channel in %s when another selected channel is unavailable', async (group, key, channels, usable, overrides, rowCustomer) => {
   prefs = { ...prefs, smsEnabled: true, emailEnabled: true, [key]: channels, ...overrides };
-  render(<BillingTab customer={customer} />);
+  render(<BillingTab customer={rowCustomer} />);
   await screen.findByRole('group', { name: group });
   const lastUsable = billingChannel(group, usable);
   expect(lastUsable).toBeDisabled();
@@ -163,6 +166,18 @@ it.each([
   fireEvent.click(screen.getByRole('button', { name: 'Save billing preferences' }));
   await screen.findByRole('button', { name: 'Saved', exact: true });
   expect(api.updateNotificationPrefs.mock.calls[0][0]).not.toHaveProperty(key);
+});
+
+it('keeps Email selectable for billing when the portal-wide email switch is off', async () => {
+  prefs = { ...prefs, smsEnabled: true, emailEnabled: false, invoiceChannels: ['sms'] };
+  render(<BillingTab customer={customer} />);
+  await screen.findByRole('group', { name: 'Invoices' });
+  const email = billingChannel('Invoices', 'Email');
+  fireEvent.click(email);
+  expect(email).toBeChecked();
+  const text = billingChannel('Invoices', 'Text');
+  fireEvent.click(text);
+  expect(text).not.toBeChecked();
 });
 
 it('rolls billing choices back when saving fails', async () => {

@@ -72,7 +72,10 @@ describe('sendMicrodepositVerificationEmail', () => {
     expect(result).toMatchObject({ ok: false, skipped: true, reason: 'missing_email' });
   });
 
-  test('preference-enforced send skips when Email Messages is disabled', async () => {
+  // The portal-wide email switch never blocks a billing email (owner ruling
+  // 2026-09-26: payment emails cannot be turned off) — with no explicit
+  // payment_issue_channels selection, email_enabled=false is simply ignored.
+  test('preference-enforced send still proceeds when Email Messages is disabled', async () => {
     db.mockImplementation((table) => {
       if (table === 'notification_prefs') return prefsChain({ email_enabled: false });
       throw new Error(`Unexpected db table ${table}`);
@@ -82,8 +85,8 @@ describe('sendMicrodepositVerificationEmail', () => {
       invoice, customer, touchKey: '14d', enforceBillingPreference: true,
     });
 
-    expect(result).toEqual({ ok: false, skipped: true, reason: 'email_disabled' });
-    expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
+    expect(result.ok).toBe(true);
+    expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(1);
   });
 
   test.each([
@@ -119,12 +122,16 @@ describe('sendMicrodepositVerificationEmail', () => {
     expect(mockWithCustomerCommsLock).not.toHaveBeenCalled();
   });
 
-  test('fresh Email Messages opt-out refuses provider dispatch', async () => {
+  // The handoff recheck is billingChannelAllowed (channel selection) only —
+  // a portal-wide email_enabled flip landing mid-dispatch is never read
+  // there anymore (owner ruling 2026-09-26). A fresh CHANNEL-SELECTION
+  // change (Email deselected) is the one thing that can still abort it.
+  test('a fresh channel-selection change before provider handoff still refuses dispatch', async () => {
     db.mockImplementation((table) => {
       if (table === 'notification_prefs') return prefsChain({ email_enabled: true });
       throw new Error(`Unexpected db table ${table}`);
     });
-    const lockedPrefsQuery = prefsChain({ email_enabled: false });
+    const lockedPrefsQuery = prefsChain({ payment_issue_channels: ['sms'] });
     const lockedTrx = jest.fn((table) => {
       if (table === 'notification_prefs') return lockedPrefsQuery;
       throw new Error(`Unexpected locked table ${table}`);
@@ -148,7 +155,7 @@ describe('sendMicrodepositVerificationEmail', () => {
     expect(lockedTrx).toHaveBeenCalledWith('notification_prefs');
     expect(lockedPrefsQuery.where).toHaveBeenCalledWith({ customer_id: 'cust-1' });
     expect(dispatch).not.toHaveBeenCalled();
-    expect(result).toMatchObject({ ok: false, skipped: true, reason: 'email_disabled' });
+    expect(result).toMatchObject({ ok: false, reason: 'aborted_before_dispatch' });
   });
 
   test('preference-enforced provider handoff rechecks and dispatches under the customer lock', async () => {

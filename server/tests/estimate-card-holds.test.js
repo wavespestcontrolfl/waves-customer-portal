@@ -1665,14 +1665,15 @@ describe('settleNoShowFee — refundable fee invoice + receipt', () => {
     expect(mockSendReceipt).toHaveBeenCalledWith('inv1', { hasEmailLeg: true });
   });
 
-  it('email-only channel with email messages opted out falls back to the SMS receipt', async () => {
-    // The fee was charged — a receipt has to land somewhere (codex P1 on
-    // d040aa76; deposit twin).
+  it('email-only channel with email messages opted out still emails — payment emails cannot be turned off', async () => {
+    // The portal-wide email switch is no longer a deterministic miss (owner
+    // ruling 2026-09-26), so the address on file is deliverable and the SMS
+    // leg is never attempted for this email-only channel.
     stubDb([null, { payment_receipt_channel: 'email', email_enabled: false }, { first_name: 'Sam' }]);
     const r = await settleNoShowFee(pi());
     expect(r.settled).toBe(true);
-    expect(mockSendReceiptEmail).not.toHaveBeenCalled();
-    expect(mockSendReceipt).toHaveBeenCalledWith('inv1', { hasEmailLeg: false });
+    expect(mockSendReceiptEmail).toHaveBeenCalledWith('inv1', expect.objectContaining({ idempotencyKey: 'receipt_email_auto:inv1' }));
+    expect(mockSendReceipt).not.toHaveBeenCalled();
   });
 
   it('email-only channel with NO recipient email falls back to the SMS receipt; a transient email error does NOT', async () => {

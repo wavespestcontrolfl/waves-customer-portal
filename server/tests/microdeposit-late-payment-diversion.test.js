@@ -348,7 +348,10 @@ describe('late-payment micro-deposit diversion', () => {
   test.each([
     ['missing address', { ok: false, skipped: true, reason: 'missing_email' }],
     ['unavailable template', { ok: false, skipped: true, reason: 'template_unavailable' }],
-    ['email opt-out', { ok: false, skipped: true, reason: 'email_disabled' }],
+    // 'email_disabled' no longer exists as a refusal reason anywhere in
+    // billing code (owner ruling 2026-09-26: payment emails cannot be
+    // turned off) — the portal-wide opt-out row that used to live here is
+    // removed rather than asserting an impossible reason.
   ])('resolves a verification Email with %s and advances Text from day 14 to day 30 once', async (_label, refusal) => {
     StripeService.isInvoiceAwaitingMicrodepositVerification.mockResolvedValue(true);
     ContactLedger.recordContact.mockImplementation(async ({ idempotencyKey }) => ({

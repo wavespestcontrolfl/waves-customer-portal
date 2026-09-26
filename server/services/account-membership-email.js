@@ -520,9 +520,10 @@ async function sendCancellationReceived({
 // just renders and sends.
 // A BILLING email follows the billing recipient and the billing prefs, not
 // the primary contact (Codex r10 P1): notification_prefs.billing_email
-// routes AR mail to the payer's bookkeeper and email_enabled=false kills
-// the channel. (billing_reminder is RETIRED — owner ruling 2026-08-01:
-// billing notices carry no per-purpose opt-out.) The SMS leg's prefs are enforced inside send-customer-message —
+// routes AR mail to the payer's bookkeeper. (billing_reminder is RETIRED —
+// owner ruling 2026-08-01: billing notices carry no per-purpose opt-out; and
+// owner ruling 2026-09-26: the portal-wide email switch does not stop them
+// either.) The SMS leg's prefs are enforced inside send-customer-message —
 // this is the email leg's equivalent, shared with the sweep so hasEmailLeg
 // is only declared when the email can actually send.
 /**
@@ -555,7 +556,6 @@ async function resolvePrevisitBalanceEmailRecipient(customerId) {
   try {
     prefs = await db('notification_prefs').where({ customer_id: customerId }).first() || {};
   } catch { prefs = {}; }
-  if (prefs.email_enabled === false) return { recipient: null, reason: 'email_disabled' };
   const [recipient] = getInvoiceEmailRecipients(customer, prefs).filter((r) => isEmailLike(r.email));
   if (!recipient?.email) return { recipient: null, reason: 'missing_email' };
   return { recipient, reason: null };

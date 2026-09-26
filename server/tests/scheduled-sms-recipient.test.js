@@ -290,10 +290,17 @@ describe('classifyDepositReplayFallback — channel-flip email handoff outcomes'
 
   test('a deterministically undeliverable email lets the queued TEXT proceed — it is the only receipt left', () => {
     // Mirrors the immediate path\'s undeliverable-email SMS fallback
-    // (codex P2 on 6b73a479).
-    for (const reason of ['email_opted_out', 'no_recipient_email', 'sendgrid_not_configured', 'no_received_deposit', 'estimate_not_found', 'no_estimate_ref']) {
+    // (codex P2 on 6b73a479). 'email_opted_out' no longer exists as a
+    // fallback reason — payment emails cannot be turned off (owner ruling
+    // 2026-09-26) — so it is gone from this list; the classifier now
+    // treats it like any other unrecognized reason (see below).
+    for (const reason of ['no_recipient_email', 'sendgrid_not_configured', 'no_received_deposit', 'estimate_not_found', 'no_estimate_ref']) {
       expect(classifyDepositReplayFallback({ sent: false, reason })).toBe('sms_fallback');
     }
+  });
+
+  test('a retired "email_opted_out" reason (no longer produced) classifies as an ordinary retry, not an sms fallback', () => {
+    expect(classifyDepositReplayFallback({ sent: false, reason: 'email_opted_out' })).toBe('retry');
   });
 
   test('transient failures ride the bounded retry rail', () => {

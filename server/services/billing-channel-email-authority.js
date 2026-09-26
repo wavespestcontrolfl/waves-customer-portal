@@ -77,9 +77,8 @@ async function readContextRows(input, database, lockRecipients, lockedInvoice) {
 async function contextBlock(input, category, { customer, prefs, invoice }, database) {
   if (!customer || customer.deleted_at) return { error: blocked('CUSTOMER_NOT_FOUND', 'Customer is unavailable') };
   if (!prefs) return { error: blocked('BILLING_PREFS_UNAVAILABLE', 'Billing delivery preferences are unavailable', { retryable: true }) };
-  if (prefs.email_enabled === false) {
-    return { error: blocked('BILLING_EMAIL_DISABLED', 'Email notifications are disabled for this customer') };
-  }
+  // The portal-wide email switch (email_enabled) never blocks a billing
+  // email: payment emails cannot be turned off (owner ruling 2026-09-26).
   if (billingChannelAllowed(prefs, category, 'email') !== true) {
     // This fires both on the FIRST read (loadBillingEmailContext at the top
     // of sendBillingChannelEmail) and on the LOCKED recheck immediately
@@ -92,9 +91,8 @@ async function contextBlock(input, category, { customer, prefs, invoice }, datab
     // terminal drop. A first-read refusal (the customer never selected
     // Email at all) is retried the exact same way and simply reproduces the
     // same terminal-looking decision each time, so returning the schedulable
-    // shape here costs nothing. Kept distinct from BILLING_EMAIL_DISABLED (a
-    // portal-wide opt-out, not a channel-selection race) and the ownership
-    // refusals above, which stay terminal.
+    // shape here costs nothing. Kept distinct from the ownership refusals
+    // above, which stay terminal.
     return {
       error: {
         sent: false, provider: 'email', providerMessageId: null, blocked: true,

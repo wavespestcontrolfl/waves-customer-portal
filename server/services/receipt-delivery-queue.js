@@ -105,14 +105,11 @@ async function claimDueReceiptDeliveryJobs({ limit = 10, id = workerId() } = {})
 function expectedEmailSkip(result) {
   // 'receipt_opted_out' is the payment_receipt=false kill switch (migration
   // 104) — the customer opted out of payment receipts entirely, so the email
-  // leg is skipped on purpose, exactly like the no-recipient case.
-  // 'email_opted_out' is the portal-wide email_enabled=false opt-out — the
-  // transactional_required stream bypasses suppression-group filtering, so
-  // senders must honor it themselves (the deposit / no-show email legs
-  // already do; the SMS leg carries the receipt for these customers).
+  // leg is skipped on purpose, exactly like the no-recipient case. The
+  // portal-wide email switch (email_enabled) is deliberately not a skip:
+  // payment emails cannot be turned off (owner ruling 2026-09-26).
   return result?.error === 'No receipt recipient email'
     || result?.error === 'receipt_opted_out'
-    || result?.error === 'email_opted_out'
     || result?.error === 'billing_email_not_selected';
 }
 
@@ -255,7 +252,6 @@ async function processReceiptDeliveryJob(job) {
     // No receipt_sent_at stamp on this path (the stamp below requires a
     // delivered email) — nothing was sent.
     let receiptKillSwitch = false;
-    let emailOptedOut = false;
     let emailSelected = true;
     let prefsLookupFailed = false;
     if (!invoice.payer_id) {
@@ -271,7 +267,6 @@ async function processReceiptDeliveryJob(job) {
           return null;
         });
       receiptKillSwitch = prefs?.payment_receipt === false;
-      emailOptedOut = prefs?.email_enabled === false;
       emailSelected = billingChannelAllowed(prefs || {}, 'payment_receipt', 'email') !== false;
     }
     // The email leg is deliberately NOT gated on payment_receipt_channel:
@@ -286,11 +281,9 @@ async function processReceiptDeliveryJob(job) {
       ? { ok: false, error: 'receipt prefs lookup failed' }
       : receiptKillSwitch
         ? { ok: false, error: 'receipt_opted_out' }
-        : emailOptedOut
-          ? { ok: false, error: 'email_opted_out' }
-          : !emailSelected
-            ? { ok: false, skipped: true, error: 'billing_email_not_selected' }
-            : await sendReceiptEmail(invoice.id, {
+        : !emailSelected
+          ? { ok: false, skipped: true, error: 'billing_email_not_selected' }
+          : await sendReceiptEmail(invoice.id, {
             idempotencyKey: `receipt_email_auto:${invoice.id}`,
             billingDeliveryCategory: 'payment_receipt',
           }).catch((err) => ({ ok: false, error: err.message }));

@@ -277,20 +277,24 @@ describe('processReceiptDeliveryJob email-leg gating (payment_receipt kill switc
     expect(invoicesTable.update).toHaveBeenCalledWith({ receipt_sent_at: 'NOW' });
   });
 
-  test('portal-wide email opt-out (email_enabled=false) skips the receipt email as an expected skip', async () => {
-    // The transactional_required stream bypasses suppression groups, so the
-    // queue must honor the opt-out itself, like the deposit/no-show legs
-    // (codex P1 on d040aa76). The SMS leg carries the receipt.
+  test('the portal-wide email opt-out (email_enabled=false) no longer skips the receipt email', async () => {
+    // Payment emails cannot be turned off (owner ruling 2026-09-26): the
+    // transactional_required stream bypasses suppression groups, but
+    // email_enabled is no longer a reason for the queue to skip the leg.
     primeDb({
       invoice: { id: 'inv1', customer_id: 'c1', payer_id: null, invoice_number: 'WPC-1', receipt_sent_at: null },
       prefs: { payment_receipt: true, email_enabled: false },
     });
     InvoiceService.sendReceipt.mockResolvedValue({ sent: true });
+    sendReceiptEmail.mockResolvedValue({ ok: true });
 
     const result = await ReceiptDeliveryQueue.processReceiptDeliveryJob(job);
 
     expect(result.ok).toBe(true);
-    expect(sendReceiptEmail).not.toHaveBeenCalled();
+    expect(sendReceiptEmail).toHaveBeenCalledWith('inv1', {
+      idempotencyKey: 'receipt_email_auto:inv1',
+      billingDeliveryCategory: 'payment_receipt',
+    });
     expect(jobsTable.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'completed' }));
   });
 

@@ -5865,7 +5865,6 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
   const [paymentSmsOff, setPaymentSmsOff] = useState(false);
   const [paymentSmsReenabled, setPaymentSmsReenabled] = useState(false);
   const [paymentConfirmationChannel, setPaymentConfirmationChannel] = useState('sms');
-  const [emailPrefEnabled, setEmailPrefEnabled] = useState(true);
   const [smsPrefEnabled, setSmsPrefEnabled] = useState(true);
   const [billingPrefsSaving, setBillingPrefsSaving] = useState(false);
   const [billingPrefsStatus, setBillingPrefsStatus] = useState(null); // 'saved' | 'error' | null
@@ -6006,7 +6005,6 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
           setBillingChannels(nextBillingChannels);
           setSavedBillingChannels(nextBillingChannels);
           setAppPreferencesAvailable(prefsData.appPreferencesAvailable === true);
-          setEmailPrefEnabled(prefsData.emailEnabled !== false);
           setSmsPrefEnabled(prefsData.smsEnabled !== false);
         }
         setLoading(false);
@@ -6646,11 +6644,10 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
 
   // Email/Both delivery can only be offered with an email on file (the billing
   // recipient email or the account email) — otherwise the backend would
-  // suppress the texts with no deliverable email leg left. Same for the
-  // portal-wide email opt-out (Settings → Email Messages off): the receipt
-  // senders skip their email legs when email_enabled=false, so an email-only
-  // channel would suppress the text AND never email — the notice just drops.
-  const hasBillingEmail = !!(String(billingEmail || '').trim() || String(customer?.email || '').trim()) && emailPrefEnabled;
+  // suppress the texts with no deliverable email leg left. The portal-wide
+  // email switch does not matter here: payment emails cannot be turned off
+  // (owner ruling 2026-09-26).
+  const hasBillingEmail = !!(String(billingEmail || '').trim() || String(customer?.email || '').trim());
   const billingChannelAvailability = {
     email: hasBillingEmail,
     sms: smsPrefEnabled && !!String(customer?.phone || '').trim(),

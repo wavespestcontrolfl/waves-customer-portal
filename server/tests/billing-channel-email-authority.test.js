@@ -146,10 +146,14 @@ describe('billing channel email authority', () => {
     );
   });
 
-  test('does not allow dispatch when the global email preference is disabled', async () => {
+  test('still allows dispatch when the global email preference is disabled', async () => {
+    // Payment emails cannot be turned off (owner ruling 2026-09-26):
+    // email_enabled=false no longer blocks a billing email at all.
     rows.notification_prefs = { customer_id: 'cust-1', email_enabled: false, billing_channels: ['email'] };
-    const { context } = await runAuthority();
-    expect(context.error).toMatchObject({ blocked: true, code: 'BILLING_EMAIL_DISABLED' });
+    const { context, outcome, dispatch } = await runAuthority();
+    expect(context.error).toBeUndefined();
+    expect(outcome.ok).toBe(true);
+    expect(dispatch).toHaveBeenCalledWith(mockDb);
   });
 
   test('rechecks the selected channel at the provider boundary', async () => {
@@ -179,7 +183,9 @@ describe('billing channel email authority', () => {
     });
   });
 
-  test('rechecks the global email opt-out at the provider boundary', async () => {
+  test('does not block the provider boundary when the global email preference flips off', async () => {
+    // Same flip the old opt-out recheck caught, but the portal-wide switch
+    // is no longer authority over a billing email, so dispatch proceeds.
     let reads = 0;
     mockDb.mockImplementation((table) => ({
       where: jest.fn().mockReturnThis(),
@@ -193,8 +199,8 @@ describe('billing channel email authority', () => {
       }),
     }));
     const { outcome, state } = await runAuthority();
-    expect(outcome.ok).toBe(false);
-    expect(state.boundaryBlock).toMatchObject({ blocked: true, code: 'BILLING_EMAIL_DISABLED' });
+    expect(outcome.ok).toBe(true);
+    expect(state.boundaryBlock).toBeNull();
   });
 
   test('locks the address and rechecks canonical suppression before provider dispatch', async () => {

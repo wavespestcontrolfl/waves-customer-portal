@@ -339,30 +339,14 @@ describe('late-payment email sidecar', () => {
     },
   );
 
-  test('skips late-payment email when general customer email is disabled', async () => {
-    setDbQueues({
-      invoices: [chain({ first: invoice() })],
-      notification_prefs: [chain({ first: { email_enabled: false } })],
-    });
-
-    const result = await BalanceReminder.sendLatePaymentEmail({
-      customer: customer(),
-      invoice: invoice(),
-      balance: { totalBalance: 129, oldestDueDate: '2026-05-19' },
-      smsTemplateKey: 'late_payment_30d',
-      invoiceTitle: 'Quarterly Pest Control',
-      serviceDateClause: '',
-      payUrl: 'https://portal.wavespestcontrol.com/pay/token-1',
-    });
-
-    expect(result).toEqual({ ok: false, skipped: true, reason: 'email_disabled' });
-    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
-  });
-
   test.each([
     ['enabled preference', { email_enabled: true }, null],
     ['missing preference row', undefined, null],
     ['failed initial preference read', undefined, new Error('preferences unavailable')],
+    // A portal-wide opt-out (owner ruling 2026-09-26: payment emails cannot
+    // be turned off) with no explicit channel selection no longer blocks the
+    // send either.
+    ['a disabled portal-wide preference', { email_enabled: false }, null],
   ])('late-payment email proceeds with %s', async (_label, prefs, error) => {
     const prefRead = chain({ first: prefs });
     const freshPrefs = chain({ first: prefs });
@@ -412,7 +396,11 @@ describe('late-payment email sidecar', () => {
     expect(lockHeld).toBe(false);
   });
 
-  test('a fresh email opt-out before provider handoff prevents dispatch', async () => {
+  // The handoff recheck is billingChannelAllowed (channel selection) only —
+  // a portal-wide email_enabled flip landing mid-dispatch is never read
+  // there anymore. A fresh CHANNEL-SELECTION change (Email deselected) is
+  // the one thing that can still abort the handoff.
+  test('a fresh channel-selection change before provider handoff still prevents dispatch', async () => {
     const dispatch = jest.fn();
     let handoffResult;
     EmailTemplates.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) => {
@@ -426,7 +414,7 @@ describe('late-payment email sidecar', () => {
       ],
       notification_prefs: [
         chain({ first: { email_enabled: true } }),
-        chain({ first: { email_enabled: false } }),
+        chain({ first: { billing_channels: ['sms'] } }),
       ],
     });
 
@@ -445,10 +433,13 @@ describe('late-payment email sidecar', () => {
     expect(trx.mock.calls).toEqual([['invoices'], ['notification_prefs']]);
     expect(lockHeld).toBe(false);
     expect(dispatch).not.toHaveBeenCalled();
-    expect(result).toEqual({ ok: false, skipped: true, reason: 'email_disabled' });
+    expect(result).toEqual({ ok: false, blocked: false, reason: 'aborted_before_dispatch' });
   });
 
-  test('legacy email opt-out still sends SMS without recording an email delivery', async () => {
+  // A legacy portal-wide opt-out (no explicit channel selection) no longer
+  // blocks the email leg — both legs now deliver (owner ruling 2026-09-26).
+  test('a legacy portal-wide opt-out no longer blocks the email — both legs still send', async () => {
+    const emailLogInteraction = chain();
     const smsInteraction = chain();
     ContactLedger.recordContact
       .mockImplementationOnce(async ({ channel }) => ({ id: `led-${channel}`, metadata: {} }))
@@ -464,27 +455,35 @@ describe('late-payment email sidecar', () => {
       ],
       sms_log: [chain({ first: { count: '0' } }), chain({ first: null })],
       notification_prefs: [chain({ first: { email_enabled: false } })],
-      customer_interactions: [smsInteraction],
+      customer_interactions: [emailLogInteraction, smsInteraction],
     });
 
     await BalanceReminder.latePaymentCheck();
 
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
-    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      templateKey: 'billing_late_payment_7_day',
+      to: 'billing@example.com',
+    }));
     expect(ContactLedger.recordContact.mock.calls.map(([args]) => args.channel)).toEqual(['sms', 'email']);
     expect(ContactLedger.markDelivered).toHaveBeenCalledWith(expect.objectContaining({ id: 'led-sms' }));
-    expect(ContactLedger.markDelivered).not.toHaveBeenCalledWith(expect.objectContaining({ id: 'led-email' }));
-    expect(ContactLedger.markSendFailed).toHaveBeenCalledWith(
-      expect.objectContaining({ id: 'led-email' }),
-      expect.objectContaining({ reason: 'email_disabled' }),
-    );
+    expect(ContactLedger.markDelivered).toHaveBeenCalledWith(expect.objectContaining({ id: 'led-email' }));
+    expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
+    expect(emailLogInteraction.insert).toHaveBeenCalledWith(expect.objectContaining({
+      interaction_type: 'email_outbound',
+    }));
     expect(smsInteraction.insert).toHaveBeenCalledTimes(1);
     expect(smsInteraction.insert).toHaveBeenCalledWith(expect.objectContaining({
       interaction_type: 'sms_outbound',
     }));
   });
 
-  test('email opt-out with explicit Email and Text still sends SMS without recording an email delivery', async () => {
+  // A portal-wide opt-out with Email and Text both explicitly selected never
+  // blocked the email (the selection, not email_enabled, always governed
+  // this path) — and now that email_enabled is retired entirely, both legs
+  // simply deliver.
+  test('opt-out with explicit Email and Text selected still delivers both legs', async () => {
+    const emailLogInteraction = chain();
     const smsInteraction = chain();
     ContactLedger.recordContact
       .mockImplementationOnce(async ({ channel }) => ({ id: `led-${channel}`, metadata: {} }))
@@ -501,24 +500,23 @@ describe('late-payment email sidecar', () => {
       sms_log: [chain({ first: null })],
       notification_prefs: [chain({ first: { email_enabled: false, billing_channels: ['email', 'sms'] } })],
       collections_contact_ledger: [chain({ result: [] }), chain({ result: [] })],
-      customer_interactions: [smsInteraction],
+      customer_interactions: [emailLogInteraction, smsInteraction],
     });
 
     await BalanceReminder.latePaymentCheck();
 
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
-    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      templateKey: 'billing_late_payment_7_day',
+      to: 'billing@example.com',
+    }));
     expect(ContactLedger.recordContact.mock.calls.map(([args]) => args.channel)).toEqual(['email', 'sms']);
     expect(ContactLedger.markDelivered).toHaveBeenCalledWith(expect.objectContaining({ id: 'led-sms' }));
-    expect(ContactLedger.markDelivered).not.toHaveBeenCalledWith(expect.objectContaining({ id: 'led-email' }));
-    expect(ContactLedger.markSendFailed).toHaveBeenCalledWith(
-      expect.objectContaining({ id: 'led-email' }),
-      expect.objectContaining({
-        code: 'email_disabled',
-        resolved: true,
-        resolution: 'email_terminal_refusal',
-      }),
-    );
+    expect(ContactLedger.markDelivered).toHaveBeenCalledWith(expect.objectContaining({ id: 'led-email' }));
+    expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
+    expect(emailLogInteraction.insert).toHaveBeenCalledWith(expect.objectContaining({
+      interaction_type: 'email_outbound',
+    }));
     expect(smsInteraction.insert).toHaveBeenCalledTimes(1);
     expect(smsInteraction.insert).toHaveBeenCalledWith(expect.objectContaining({
       interaction_type: 'sms_outbound',

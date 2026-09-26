@@ -227,13 +227,27 @@ describe('invoice follow-up email sidecar', () => {
     ['enabled', { email_enabled: true }, {}, true],
     ['missing row', undefined, {}, true],
     ['missing flag', {}, {}, true],
-    ['disabled legacy', { email_enabled: false }, {}, false],
-    ['disabled selected Email and Text', { email_enabled: false, invoice_channels: ['email', 'sms'] }, {}, false],
-    ['disabled Email only', { email_enabled: false, invoice_channels: ['email'] }, { noSms: true }, false],
+    // A portal-wide email opt-out no longer blocks a billing email (owner
+    // ruling 2026-09-26: payment emails cannot be turned off) — legacy
+    // email_enabled=false with no explicit channel selection still sends it.
+    ['legacy opt-out with no channel selection', { email_enabled: false }, {}, true],
+    // Email AND Text both explicitly selected: the opt-out is irrelevant
+    // either way, and both legs still go out.
+    ['opt-out with Email and Text selected', { email_enabled: false, invoice_channels: ['email', 'sms'] }, {}, true],
+    // Email-only selected: the email still sends — only the CHANNEL
+    // selection (never email_enabled) suppresses the SMS leg.
+    ['opt-out with Email only selected', { email_enabled: false, invoice_channels: ['email'] }, { noSms: true }, true],
+    // Email-only selected with no address on file: nothing can deliver, so
+    // the touch pauses instead of advancing (a missing ADDRESS is still a
+    // terminal email refusal).
+    ['Email only selected with no address on file', { invoice_channels: ['email'] }, { noSms: true, noEmailAddress: true }, false],
     ['operator-initiated', { email_enabled: false, invoice_channels: ['sms'] }, { operator: true }, true],
     ['initial email prefs read failure', {}, { readFailure: true }, true],
-    ['opt-out at handoff', { email_enabled: true, invoice_channels: ['email', 'sms'] }, { handoffOptOut: true }, false],
-  ])('%s preserves email opt-out, SMS delivery, and sequence progress', async (_label, prefs, options, emailSent) => {
+    // A fresh opt-out landing between the first read and the provider
+    // handoff recheck does not retroactively block the send — the recheck
+    // is billingChannelAllowed (channel selection) only, never email_enabled.
+    ['opt-out flips in between the first read and the handoff recheck', { email_enabled: true, invoice_channels: ['email', 'sms'] }, { handoffOptOut: true }, true],
+  ])('%s: the billing email follows channel selection and address, never the portal-wide email switch', async (_label, prefs, options, emailSent) => {
     const interaction = chain();
     const sequenceUpdate = chain();
     const emailPrefs = chain({ first: prefs });
@@ -272,6 +286,8 @@ describe('invoice follow-up email sidecar', () => {
     });
     const invoiceHelpers = require('../services/invoice-helpers');
     const ownership = jest.spyOn(invoiceHelpers, 'selfPayAtDispatch').mockReturnValue(async () => ({ ok: true }));
+    const { getInvoiceEmailRecipients } = require('../services/customer-contact');
+    if (options.noEmailAddress) getInvoiceEmailRecipients.mockReturnValue([]);
     if (options.handoffOptOut || emailSent) {
       EmailTemplates.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) => {
         const verdict = await withProviderHandoff(dispatch);
@@ -292,34 +308,36 @@ describe('invoice follow-up email sidecar', () => {
       }
     } finally {
       ownership.mockRestore();
+      if (options.noEmailAddress) getInvoiceEmailRecipients.mockReturnValue([{ email: 'billing@example.com', name: 'Taylor' }]);
     }
 
     expect(EmailTemplates.sendTemplate).toHaveBeenCalledTimes(emailSent || options.handoffOptOut ? 1 : 0);
     expect(sendCustomerMessage).toHaveBeenCalledTimes(options.noSms ? 0 : 1);
-    if (options.handoffOptOut) expect(dispatch).not.toHaveBeenCalled();
     if (emailSent) {
       expect(dispatch).toHaveBeenCalledTimes(1);
       if (options.operator) expect(dispatch).toHaveBeenCalledWith();
       else expect(dispatch).toHaveBeenCalledWith(trx);
     }
     expect(lockHeld).toBe(false);
-    if (options.noSms) {
+    // Delivery no longer goes empty just because the portal-wide switch is
+    // off — the email leg still lands. Only an explicit Email-only channel
+    // selection (noSms) still suppresses the SMS leg, and even then the
+    // email delivering keeps the sequence advancing rather than pausing it.
+    const delivered = emailSent || !options.noSms;
+    if (!delivered) {
       expect(sequenceUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'paused' }));
       expect(sequenceUpdate.update.mock.calls[0][0]).not.toHaveProperty('step_index');
       expect(interaction.insert).not.toHaveBeenCalled();
+      expect(require('../services/collections/contact-ledger').markSendFailed).toHaveBeenCalledWith(
+        expect.anything(), expect.objectContaining({
+          reason: 'missing_email', resolved: true, resolution: 'email_terminal_refusal',
+        }),
+      );
     } else {
       expect(sequenceUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ step_index: 1 }));
       expect(JSON.parse(interaction.insert.mock.calls[0][0].metadata)).toMatchObject({
-        email_sent: emailSent, sms_sent: true, ...(!emailSent ? { email_reason: 'email_disabled' } : {}),
+        email_sent: emailSent, sms_sent: !options.noSms,
       });
-    }
-    if (!emailSent) {
-      expect(require('../services/collections/contact-ledger').markSendFailed).toHaveBeenCalledWith(
-        expect.anything(), expect.objectContaining({
-          reason: 'email_disabled',
-          ...(prefs.invoice_channels ? { resolved: true, resolution: 'email_terminal_refusal' } : {}),
-        }),
-      );
     }
   });
 

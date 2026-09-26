@@ -542,12 +542,14 @@ describe('explicit billing channel combinations', () => {
     expect(Twilio.sendSMS.mock.calls[0][2].explicitPushOnly).toBe(true);
   });
 
-  test('a disabled email leg does not prevent the selected text', async () => {
+  test('the portal-wide email switch no longer prevents the selected email leg or the selected text', async () => {
+    // Payment emails cannot be turned off (owner ruling 2026-09-26):
+    // email_enabled=false is no longer a billing-category EMAIL_OPTED_OUT.
     prefs.payment_receipt_channels = ['email', 'sms'];
     prefs.email_enabled = false;
     const result = await sendCustomerMessage(input);
-    expect(result.channelResults).toMatchObject({ email: { sent: false, code: 'EMAIL_OPTED_OUT' }, sms: { sent: true } });
-    expect(sendBillingChannelEmail).not.toHaveBeenCalled();
+    expect(result.channelResults).toMatchObject({ email: { sent: true }, sms: { sent: true } });
+    expect(sendBillingChannelEmail).toHaveBeenCalledTimes(1);
   });
 
   test('an unresolved phone-keyed suppression read fails CLOSED for Email, same as App (finding A)', async () => {

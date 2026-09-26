@@ -2348,12 +2348,14 @@ async function sendNoShowFeeReceipt({ invoice, customerId, amount, feeLabel, rea
     : null;
 
   // Emailed PDF receipt — attempted FIRST so an email-only channel whose
-  // email leg deterministically can't deliver (portal-wide email opt-out or
-  // no recipient address) falls back to the TEXT below: the fee was charged,
-  // a receipt has to land somewhere (undeliverable-email fallback, same as
-  // the consent gate / deposit twin). A transient provider error does NOT
-  // fall back — the invoice stays unstamped for the admin needs-receipt path.
-  let emailDeterministicMiss = prefs?.email_enabled === false;
+  // email leg deterministically can't deliver (no recipient address) falls
+  // back to the TEXT below: the fee was charged, a receipt has to land
+  // somewhere (undeliverable-email fallback, same as the consent gate /
+  // deposit twin). The portal-wide email switch is not a miss: payment
+  // emails cannot be turned off (owner ruling 2026-09-26). A transient
+  // provider error does NOT fall back — the invoice stays unstamped for the
+  // admin needs-receipt path.
+  let emailDeterministicMiss = false;
   let emailAttempted = false;
   let emailDelivered = false;
   if (!receiptOptOut && !emailDeterministicMiss && (wantsEmail === true

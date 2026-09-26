@@ -453,7 +453,10 @@ describe('late-payment checker email sidecar', () => {
   });
 
   test.each([
-    ['email opt-out', { ok: false, skipped: true, reason: 'email_disabled' }, true],
+    // 'email_disabled' no longer exists as a refusal reason anywhere in
+    // billing code (owner ruling 2026-09-26: payment emails cannot be
+    // turned off) — the portal-wide opt-out row that used to live here is
+    // removed rather than asserting an impossible reason.
     ['missing address with an activity row', { ok: false, skipped: true, reason: 'missing_email' }, true],
     ['suppressed address without an activity row', { ok: false, blocked: true, reason: 'Suppressed: bounce' }, false],
     ['unavailable template with an activity row', { ok: false, skipped: true, reason: 'template_unavailable' }, true],

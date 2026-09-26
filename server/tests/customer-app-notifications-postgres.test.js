@@ -653,7 +653,9 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     try {
       expect((await put({ billingReminderChannels: ['email'] })).status).toBe(409);
       expect((await put({ billingEmail: 'billing@example.com', billingReminderChannels: ['email'] })).status).toBe(200);
-      expect((await put({ emailEnabled: false, invoiceChannels: ['email', 'sms'] })).status).toBe(409);
+      // The portal-wide email switch never takes billing email away (owner
+      // ruling 2026-09-26): choosing Email while turning email off is accepted.
+      expect((await put({ emailEnabled: false, invoiceChannels: ['email', 'sms'] })).status).toBe(200);
     } finally {
       await mockPg('customers').where({ id: owner }).update({ email: 'qa-app-0@example.invalid' });
       await mockPg('customers').where({ id: property }).update({ email: 'qa-app-1@example.invalid' });
@@ -721,7 +723,15 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
       invoice_channels: ['email', 'sms'], email_enabled: false,
     });
     expect((await put({ paymentConfirmationChannels: ['sms'] })).status).toBe(409);
-    expect((await put({ invoiceChannels: ['email'] })).status).toBe(409);
+    // Email stays available with the portal-wide email switch off; only a
+    // missing address makes it unavailable.
+    expect((await put({ invoiceChannels: ['email'] })).status).toBe(200);
+    await mockPg('customers').where({ id: property }).update({ email: null });
+    try {
+      expect((await put({ invoiceChannels: ['email'] })).status).toBe(409);
+    } finally {
+      await mockPg('customers').where({ id: property }).update({ email: 'qa-app-1@example.invalid' });
+    }
     expect((await put({ paymentConfirmationChannels: ['sms'], paymentConfirmationSms: true })).status).toBe(200);
   });
 
@@ -741,7 +751,6 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
   });
 
   test.each([
-    ['emailEnabled', 'invoice_channels', 'invoiceChannels', 'email'],
     ['smsEnabled', 'invoice_channels', 'invoiceChannels', 'sms'],
     ['paymentConfirmationSms', 'payment_receipt_channels', 'paymentConfirmationChannels', 'sms'],
     ['pushEnabled', 'invoice_channels', 'invoiceChannels', 'push'],
@@ -749,32 +758,40 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     await device();
     await mockPg('notification_prefs').where({ customer_id: property }).update({ [column]: [channel] });
     expect((await put({ [flag]: false })).status).toBe(409);
-    const replacement = channel === 'email' ? 'sms' : 'email';
-    expect((await put({ [flag]: false, [key]: [replacement] })).status).toBe(200);
-    expect((await mockPg('notification_prefs').where({ customer_id: property }).first())[column]).toEqual([replacement]);
+    expect((await put({ [flag]: false, [key]: ['email'] })).status).toBe(200);
+    expect((await mockPg('notification_prefs').where({ customer_id: property }).first())[column]).toEqual(['email']);
+  });
+
+  test('turning the portal-wide email switch off never strands billing email', async () => {
+    await mockPg('notification_prefs').where({ customer_id: property }).update({ invoice_channels: ['email'] });
+    expect((await put({ emailEnabled: false })).status).toBe(200);
+    expect(await mockPg('notification_prefs').where({ customer_id: property }).first())
+      .toMatchObject({ email_enabled: false, invoice_channels: ['email'] });
   });
 
   test('billing availability honors the App gate and every charged profile', async () => {
     await device();
-    await mockPg('notification_prefs').where({ customer_id: property }).update({ invoice_channels: ['email', 'push'] });
+    await mockPg('notification_prefs').where({ customer_id: property }).update({ invoice_channels: ['sms', 'push'] });
     process.env.GATE_CUSTOMER_APP_NOTIFICATIONS = 'false';
-    expect((await put({ emailEnabled: false })).status).toBe(409);
+    expect((await put({ smsEnabled: false })).status).toBe(409);
 
     process.env.GATE_CUSTOMER_APP_NOTIFICATIONS = 'true';
-    await mockPg('notification_prefs').where({ customer_id: property }).update({ email_enabled: true, invoice_channels: null });
+    await mockPg('notification_prefs').where({ customer_id: property }).update({ invoice_channels: null });
     await mockPg('notification_prefs').where({ customer_id: owner }).update({ invoice_channels: ['push'] });
     expect((await put({ pushEnabled: false })).status).toBe(409);
     expect((await mockPg('notification_prefs').where({ customer_id: owner }).first()).push_enabled).not.toBe(false);
   });
 
   test('concurrent delivery-toggle saves cannot strand a billing category', async () => {
+    await device();
     await mockPg('notification_prefs').where({ customer_id: property }).update({
-      invoice_channels: ['email', 'sms'], email_enabled: true, sms_enabled: true,
+      invoice_channels: ['sms', 'push'], sms_enabled: true,
     });
-    const responses = await Promise.all([put({ emailEnabled: false }), put({ smsEnabled: false })]);
+    const responses = await Promise.all([put({ pushEnabled: false }), put({ smsEnabled: false })]);
     expect(responses.map(({ status }) => status).sort()).toEqual([200, 409]);
     const saved = await mockPg('notification_prefs').where({ customer_id: property }).first();
-    expect([saved.email_enabled, saved.sms_enabled].filter((enabled) => enabled !== false)).toHaveLength(1);
+    const primary = await mockPg('notification_prefs').where({ customer_id: owner }).first();
+    expect([primary.push_enabled, saved.sms_enabled].filter((enabled) => enabled !== false)).toHaveLength(1);
   });
 
   test('new Email and App checks compare against the row reread under lock', async () => {
@@ -811,7 +828,7 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
         billing_email: 'billing@example.com', invoice_channels: ['sms'],
       });
       expect(await raceLockedChange({ billing_email: null }, { invoiceChannels: ['email', 'sms'] }))
-        .toMatchObject({ status: 409, body: { error: 'Add a billing email and enable email notifications before choosing Email.' } });
+        .toMatchObject({ status: 409, body: { error: 'Add a billing email before choosing Email.' } });
 
       await mockPg('notification_prefs').where({ customer_id: property }).update({ invoice_channels: ['sms', 'push'] });
       expect(await raceLockedChange({ invoice_channels: ['sms'] }, { invoiceChannels: ['sms', 'push'] }))
