@@ -82,7 +82,7 @@ describe('a new trapping quote renders the 1-check copy on the public page path'
     expect(row).not.toHaveProperty('includedFollowUps');
     expect(row).not.toHaveProperty('includedCallbacks');
     expect(row).not.toHaveProperty('unlimitedCallbacks');
-    expect(row).not.toHaveProperty('includedScope');
+    expect(row.includedScope).toBeNull();
   });
 });
 
