@@ -1487,7 +1487,14 @@ async function answerEstimateQuestion({
     };
   }
 
-  if (FORCE_FALLBACK_QUESTION_PATTERN.test(cleanQuestion) && supportRows(context).length) {
+  // AW-04: before the public estimate context was restricted to customer-safe
+  // sources, the WaveGuard repo file matched the mandatory 'WaveGuard' search
+  // term on every request, so supportRows(context) was never empty and this
+  // route was effectively unconditional. Removing the internal repo sources
+  // must not move pesticide/product/safety questions onto the live model when
+  // the remaining support lookups return nothing (e.g. a DB outage), so the
+  // route stays unconditional — the same behavior as before, stated directly.
+  if (FORCE_FALLBACK_QUESTION_PATTERN.test(cleanQuestion)) {
     return {
       answer: answerEstimateQuestionFallback(cleanQuestion, context),
       source: 'fallback',

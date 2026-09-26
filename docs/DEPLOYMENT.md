@@ -15,8 +15,9 @@ Production is deployed by Railway from the GitHub `main` branch for
 - Custom domain: `https://portal.wavespestcontrol.com`
 - Health check: `https://portal.wavespestcontrol.com/api/health`
 - Config-as-code file: `railway.toml`
+- Build command: `npm run build && npx playwright install --with-deps chromium`
 - Pre-deploy command: `npm run db:migrate`
-- Start command: `npm start`
+- Start command: `node server/index.js`
 
 ### Confirm a Production Deploy
 
@@ -134,9 +135,12 @@ CLIENT_URL=https://your-app.railway.app
 
 ### Step 5: Configure Build & Start
 In Railway → Settings:
-- **Build Command:** `npm install && npm run build`
-- **Start Command:** `npm start`
+- **Build Command:** `npm run build && npx playwright install --with-deps chromium`
+- **Start Command:** `node server/index.js`
 - **Root Directory:** `/` (default)
+
+These commands are owned by `railway.toml`; keep the dashboard configuration
+aligned with that file.
 
 ### Step 6: Run Migrations
 In Railway → your service → "Shell" tab:

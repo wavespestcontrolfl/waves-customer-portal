@@ -49,7 +49,10 @@ Always push by explicit `sha:ref` when recovering. The tracked hook at `scripts/
 - Runs `codex exec --sandbox read-only` against the diff vs `origin/main` (override base with `CODEX_REVIEW_BASE`).
 - Blocks on P0, warns on P1, output schema at `.github/codex-review-schema.json`.
 - Findings JSON + codex stdout/stderr persist at `$(git rev-parse --absolute-git-dir)/codex-review-last/` (per-worktree, overwritten each audited push) — read a blocked push's verdict there; never re-roll the audit for evidence, its counts are nondeterministic.
-- Post-quota codex can exit 0 with an EMPTY verdict — the hook passes fail-open but prints an UN-AUDITED warning; treat the GitHub @codex round as the only audit on that push.
+- If Codex cannot produce a verdict (including an empty verdict), the hook runs
+  its sandboxed Claude fallback auditor. The hook passes fail-open with an
+  `UN-AUDITED` warning only when both auditors fail; only then is the GitHub
+  `@codex` round the sole audit on that push.
 - Bypass: `SKIP_CODEX_REVIEW=1` — use only for hijack recovery or docs-only emergencies; the GitHub bot still reviews the PR.
 
 ## Railway PR-environment facts

@@ -15,13 +15,15 @@ server-side env booleans. PostHog flags are reserved for *new* funnel A/B tests.
 | astro | `src/components/PostHogAnalytics.astro` (loader, consent-gated), `src/lib/analytics/events.ts` (taxonomy + `track()`), `src/components/CookieBanner.tsx` (now drops a `.wavespestcontrol.com` consent cookie), `BaseLayout.astro` (mounts loader), instrumentation in `EstimateForm/LeadForm/QuoteForm/SliderForm` |
 | portal | `client/src/lib/analytics/posthog.js` (loader, path-scoped), `client/src/lib/analytics/events.js` (taxonomy + `track()`), `client/src/components/analytics/PublicFunnelTracking.jsx` (self-gating consent + boot, mounted in `App.jsx`), instrumentation in `PublicBookingPage.jsx`, CSP opened in `server/index.js` |
 
-Scope guard: portal PostHog initializes for the retained `/book` acquisition
-route and for explicit, cookieless tokenized-estimate events. Public estimate
-and quote pages permanently redirect to the marketing site, whose own PostHog
-loader owns their pageviews. Portal tracking never loads on `/admin`, `/tech`,
-the authenticated customer portal, or any **tokenized** customer page
-(`/pay/:token`, a customer `/estimate/:token`, `/book/:token`) — those render
-customer PII. A `before_send` hard-gate drops any event/replay snapshot fired
+Scope guard: portal PostHog initializes with consent for the retained `/book`
+acquisition route and without cookies for explicit events on
+`/estimate/:token`. Public estimate and quote pages permanently redirect to the
+marketing site, whose own PostHog loader owns their pageviews. Portal tracking
+never loads on `/admin`, `/tech`, the authenticated customer portal, or other
+tokenized customer pages such as `/pay/:token` and `/book/:token`. The
+tokenized-estimate exception uses memory persistence, disables replay and
+automatic pageviews, and emits only explicit redacted events. A `before_send`
+hard-gate drops any event/replay snapshot fired
 off-funnel after a client-side navigation **and** strips the query/hash from the
 URL + referrer so a lead id never lands in an automatic pageview; the recorder
 is also stopped on funnel exit.
@@ -43,12 +45,17 @@ absent), so the marketing→portal handoff keeps stitching for existing users.
    **Project API key** (`phc_…`).
 2. **Astro** (Cloudflare Pages env, all relevant builds):
    - `PUBLIC_POSTHOG_KEY=phc_…`
-   - `PUBLIC_POSTHOG_HOST=https://us.i.posthog.com` (default; only set to override)
+   - `PUBLIC_POSTHOG_HOST=https://us.i.posthog.com` (default; only set to override —
+     or point at the portal's first-party `/ingest` proxy, dark behind
+     `GATE_POSTHOG_INGEST_PROXY`, if ad-blocker loss matters more than the extra hop)
 3. **Portal** (Railway, client build env — Vite reads these at build time):
    - `VITE_POSTHOG_KEY=phc_…`
-   - `VITE_POSTHOG_HOST=https://us.i.posthog.com` (default)
-4. Redeploy both. Verify network calls to `*.posthog.com` appear **only** after
-   accepting the cookie banner, and **never** on `/admin` or `/tech`.
+   - `VITE_POSTHOG_HOST=https://us.i.posthog.com` (default, or `/ingest` with the
+     proxy gate on)
+4. Redeploy both. Verify consent-gated `/book` network calls appear only after
+   accepting the cookie banner. Separately verify that `/estimate/:token` can
+   emit only its explicit cookieless events, with memory persistence and no
+   replay or automatic pageviews. Verify no calls appear on `/admin` or `/tech`.
 5. In PostHog → **Settings → Replay**: set a recording **sampling rate** (start
    ~50–100% given low traffic; dial down later). Confirm "Mask all inputs" is on.
 
@@ -63,8 +70,9 @@ estimate_confirm_submitted → estimate_quote_shown → estimate_book_cta_clicke
 Portal (`events.js`):
 `booking_viewed → booking_service_selected → booking_availability_loaded →
 booking_slot_selected → booking_contact_started → booking_confirmed`
-(plus `booking_ai_search_used`; and `estimate_accept_opened` / `estimate_accepted`
-are defined but **not yet wired** — fast-follow on `EstimateViewPage`).
+(plus `booking_ai_search_used`). `estimate_accepted` is emitted after a
+successful estimate acceptance in `EstimateViewPage`; `estimate_accept_opened`
+is defined in the taxonomy but has no caller yet.
 
 **The cross-property funnel to build in PostHog UI** (one funnel, both hosts —
 they stitch via the shared `.wavespestcontrol.com` cookie):

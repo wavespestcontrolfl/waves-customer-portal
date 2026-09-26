@@ -18,13 +18,14 @@
     {
       "router": "server/index.js",
       "mount": "/",
-      "reason": "Pre-router middleware inventoried as USE surface: the global helmet CSP selector (embed vs strict headers, always next()s), embed-CORS + privacy header stamps (pest-forecast, secure-card), and unobservable-when-dark 404 gates (payer statements, lawn assessment, careers, pest identifier, AI content report, public MCP/A2A, ops-digest ingest while OPS_DIGEST_INGEST_TOKEN is unset) — each either sets headers and next()s or 404s while its GATE_* is off Also the consultation page's pre-parser guard (/api/public/inspection): 404s while GATE_LEAD_INSPECTION_LINK is dark or the token is not validly signed (live for non-GET), before the limiter and body parsers.",
+      "reason": "Pre-router middleware inventoried as USE surface: the global helmet CSP selector (embed vs strict headers, always next()s), embed-CORS + privacy header stamps (pest-forecast, secure-card), and unobservable-when-dark 404 gates (payer statements, lawn assessment, careers, pest identifier, AI content report, public MCP/A2A, ops-digest ingest while OPS_DIGEST_INGEST_TOKEN is unset) — each either sets headers and next()s or 404s while its GATE_* is off. Also the consultation page's pre-parser guard (/api/public/inspection): 404s while GATE_LEAD_INSPECTION_LINK is dark or the token is not validly signed (live for non-GET), before the limiter and body parsers. The appointment and re-service pre-limiter guards likewise return only a generic 404 while their gates are dark, before shared rate limiting and body parsing.",
       "routes": [
         "USE / (inline function#1fe36153)",
         "USE /api/ai/chat/report (inline function#6b8b71c2)",
         "USE /api/ops/digest (inline function#4a372dfc)",
         "USE /api/pay/statement (inline function#cf970c43)",
         "USE /api/public/a2a (inline function#c621253a)",
+        "USE /api/public/appointment (inline function#e6220f30)",
         "USE /api/public/careers (inline function#1ef2d7c2)",
         "USE /api/public/careers/interview (inline function#656a8908)",
         "USE /api/public/inspection (inline function#ae857f75)",
@@ -32,6 +33,7 @@
         "USE /api/public/mcp (inline function#6af8a3db)",
         "USE /api/public/pest-forecast (inline function#a972e744)",
         "USE /api/public/pest-identifier (inline function#14727834)",
+        "USE /api/public/reservice (inline function#d0926d91)",
         "USE /api/public/secure-card (inline function#8abc12e6)"
       ]
     },
@@ -384,8 +386,9 @@
     {
       "router": "server/routes/reservice-public.js",
       "mount": "/api/public/reservice",
-      "reason": "Tokenized customer re-service request links from SMS/email",
+      "reason": "Tokenized customer re-service request links from SMS/email; the USE entry is the router's independent 404-when-dark gate (always next() or 404) before its local rate limit",
       "routes": [
+        "USE /api/public/reservice (inline function#69c846bf)",
         "GET /api/public/reservice/:token",
         "POST /api/public/reservice/:token",
         "POST /api/public/reservice/:token/find-slots"

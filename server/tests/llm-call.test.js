@@ -232,6 +232,61 @@ describe('callAnthropic prompt caching', () => {
     }));
   });
 
+  test('MODELS.ANTHROPIC_EFFORT pins output_config.effort on effort-capable models only (next to a json_schema format, or alone)', async () => {
+    const MODELS = require('../config/models');
+    mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: '{"ok":true}' }] });
+    MODELS.ANTHROPIC_EFFORT = 'high';
+    try {
+      const schema = { type: 'object', additionalProperties: false, required: ['ok'], properties: { ok: { type: 'boolean' } } };
+      await callAnthropic({ model: 'claude-opus-4-8', system: 'S', text: 'hi', jsonMode: true, jsonSchema: schema });
+      const withSchema = mockAnthropicCreate.mock.calls.at(-1)[0].output_config;
+      expect(withSchema.effort).toBe('high');
+      expect(withSchema.format.type).toBe('json_schema');
+      await callAnthropic({ model: 'claude-sonnet-5', text: 'hi', jsonMode: false });
+      expect(mockAnthropicCreate.mock.calls.at(-1)[0].output_config).toEqual({ effort: 'high' });
+      await callAnthropic({ model: 'claude-haiku-4-5-20251001', text: 'hi', jsonMode: false });
+      expect(mockAnthropicCreate.mock.calls.at(-1)[0].output_config).toBeUndefined();
+      await callAnthropic({ model: 'claude-sonnet-4-6', text: 'hi', jsonMode: false });
+      expect(mockAnthropicCreate.mock.calls.at(-1)[0].output_config).toBeUndefined();
+      for (const noEffort of ['claude-opus-4-20250514', 'claude-opus-4-1-20250805', 'claude-opus-4-1', 'claude-opus-4-5', 'claude-opus-4-6']) {
+        await callAnthropic({ model: noEffort, text: 'hi', jsonMode: false });
+        expect(mockAnthropicCreate.mock.calls.at(-1)[0].output_config).toBeUndefined();
+      }
+      for (const withEffort of ['claude-opus-4-7', 'claude-opus-4-8', 'claude-opus-5', 'claude-opus-5-5', 'claude-fable-5-1', 'claude-mythos-5-1']) {
+        await callAnthropic({ model: withEffort, text: 'hi', jsonMode: false });
+        expect(mockAnthropicCreate.mock.calls.at(-1)[0].output_config).toEqual({ effort: 'high' });
+      }
+    } finally {
+      delete MODELS.ANTHROPIC_EFFORT;
+    }
+    await callAnthropic({ model: FLAGSHIP, text: 'hi', jsonMode: false });
+    expect(mockAnthropicCreate.mock.calls.at(-1)[0].output_config).toBeUndefined();
+  });
+
+  test('the wire max_tokens clears always-on thinking on Opus 5+ and is untouched on Opus 4.8', async () => {
+    mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: '{"ok":true}' }] });
+    await callAnthropic({ model: 'claude-opus-5-5', text: 'hi', jsonMode: false, maxTokens: 200 });
+    expect(mockAnthropicCreate.mock.calls.at(-1)[0].max_tokens).toBe(8192);
+    await callAnthropic({ model: 'claude-opus-4-8', text: 'hi', jsonMode: false, maxTokens: 200 });
+    expect(mockAnthropicCreate.mock.calls.at(-1)[0].max_tokens).toBe(200);
+  });
+
+  test('MODEL_ANTHROPIC_EFFORT accepts only the five API levels (a typo resolves to undefined, never a 400)', () => {
+    const load = (level) => {
+      let out;
+      jest.isolateModules(() => {
+        const saved = process.env.MODEL_ANTHROPIC_EFFORT;
+        process.env.MODEL_ANTHROPIC_EFFORT = level;
+        out = require('../config/models').ANTHROPIC_EFFORT;
+        if (saved === undefined) delete process.env.MODEL_ANTHROPIC_EFFORT; else process.env.MODEL_ANTHROPIC_EFFORT = saved;
+      });
+      return out;
+    };
+    expect(load('high')).toBe('high');
+    expect(load('xhigh')).toBe('xhigh');
+    expect(load('turbo')).toBeUndefined();
+  });
+
   test('no system → no system field on the request', async () => {
     mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: '{"ok":true}' }] });
     await callAnthropic({ model: FLAGSHIP, text: 'hi' });
