@@ -2161,7 +2161,7 @@ async function loadInProgressNotConfirmedSiblings(conn, customerIds) {
       .where('t.reason_code', 'not_confirmed')
       .where('t.status', 'in_progress')
       .whereIn('cl.customer_id', customerIds)
-      .select('t.id', 't.reason_code', 't.created_at', 't.payload', 'cl.customer_id as call_customer_id');
+      .select('t.id', 't.call_log_id', 't.reason_code', 't.created_at', 't.payload', 'cl.customer_id as call_customer_id');
   } catch (e) {
     logger.warn(`[triage-sweep] in_progress sibling lookup for booking contest check failed: ${e.message}`);
     return null;

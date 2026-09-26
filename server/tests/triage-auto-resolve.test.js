@@ -1751,6 +1751,86 @@ describe('evidence helpers', () => {
     expect(evidence.get('t1')?.booking_after_card).toBeUndefined();
   });
 
+  // codex pre-push P1 (2026-09-26, round 4): loadInProgressNotConfirmedSiblings'
+  // SELECT omitted t.call_log_id, so an in_progress BARE sibling could
+  // never match a booking's source_call_log_id back to ITS OWN call — the
+  // one exact case notConfirmedClaimedBookings' source filter exists to
+  // recognize for a bare card. That broke the contest silently: an OPEN
+  // service-specific card claiming the SAME booking through its
+  // association arm (which never checks source_call_log_id at all) saw no
+  // contest and would auto-close on a booking that actually belongs to the
+  // in_progress sibling's own call.
+  test('loader: an in_progress BARE sibling still contests a booking sourced from ITS OWN call, against an open service-specific card', async () => {
+    const none = { street_line_1: null, street_line_2: null, city: null, postal_code: null, raw_text: null, additional_properties: 0 };
+    // The open card DID name a service, so it resolves (if at all) through
+    // association, not direct — the booking's source points elsewhere.
+    const specificCard = item({
+      id: 't1', reason_code: 'not_confirmed', call_log_id: 'call-2', call_customer_id: 'cust-1',
+      created_at: '2026-09-10T15:00:00Z', customer_address_line1: '77 Oak St', customer_city: 'Bradenton', customer_zip: '34205',
+      payload: {
+        flag: 'not_confirmed', confidence: 0.6, scheduling_status: 'requested',
+        scheduling_window: {
+          status: 'requested', blackout_dates: [], requested_address: none, confirmed_start_at: null,
+          callback_window_start: null, callback_window_end: null, scheduling_notes_raw: null,
+          preferred_time_of_day: 'unspecified',
+          // A window the booking's own date lands inside — required for
+          // the association arm to engage at all.
+          requested_date_range_start: '2026-09-18', requested_date_range_end: '2026-09-18',
+          requested_service_categories: ['pest_general'], requested_service_intent: 'preventative_one_time',
+        },
+      },
+    });
+    // The in_progress sibling's OWN call booked this appointment live —
+    // its booking's source_call_log_id is THIS sibling's call, 'call-1'.
+    const inProgressBareSibling = {
+      id: 't2', call_log_id: 'call-1', reason_code: 'not_confirmed', call_customer_id: 'cust-1', created_at: '2026-09-11T15:00:00Z',
+      payload: JSON.stringify({
+        flag: 'not_confirmed', confidence: 0.6, scheduling_status: 'requested',
+        scheduling_window: {
+          status: 'requested', blackout_dates: [], requested_address: none, confirmed_start_at: null,
+          callback_window_start: null, callback_window_end: null, scheduling_notes_raw: null,
+          preferred_time_of_day: 'unspecified', requested_date_range_start: null, requested_date_range_end: null,
+        },
+        on_file_address: { address_line1: '77 Oak St', address_line2: null, city: 'Bradenton', zip: '34205' },
+      }),
+    };
+    const sharedBooking = {
+      id: 'b1', customer_id: 'cust-1', parent_service_id: null, recurring_parent_id: null, status: 'confirmed',
+      source_call_log_id: 'call-1', service_type: 'Bi-Monthly Pest Control', created_at: '2026-09-16T09:00:00Z', scheduled_date: '2026-09-18',
+      service_address_line1: '77 Oak Street', service_address_city: 'Bradenton', service_address_zip: '34205',
+    };
+    const chainable = (rows) => {
+      const c = { leftJoin: () => c, where: () => c, whereIn: () => c, whereNot: () => c, whereNull: () => c, orderBy: () => c, select: async () => rows };
+      return c;
+    };
+    // A PROJECTING chain for triage_items — it actually cuts each row down
+    // to the columns SELECTed (by their final alias), the same way real
+    // SQL would, so a regression that drops a column from the query (the
+    // exact bug here) reproduces here too rather than silently passing
+    // because the test fixture happened to carry the field anyway.
+    const projectingChain = (rows) => {
+      const alias = (col) => (col.includes(' as ') ? col.split(' as ')[1].trim() : col.split('.').pop());
+      const c = {
+        leftJoin: () => c, where: () => c, whereIn: () => c, whereNot: () => c, whereNull: () => c, orderBy: () => c,
+        select: async (...cols) => rows.map((r) => Object.fromEntries(cols.map((col) => [alias(col), r[alias(col)]]))),
+      };
+      return c;
+    };
+    const fakeConn = (table) => {
+      if (table === 'customer_properties') return chainable([]);
+      if (table === 'scheduled_services') return chainable([sharedBooking]);
+      if (table === 'triage_items as t') return projectingChain([inProgressBareSibling]);
+      return chainable([]);
+    };
+    // In isolation the specific card resolves through association (source
+    // doesn't gate that arm) — the ambiguity only exists because the
+    // in_progress sibling's own call actually booked it.
+    const isolatedPlaces = new Map();
+    expect(bookingCoversRequest(specificCard, [sharedBooking], { singleProperty: true, places: isolatedPlaces })).toBe(true);
+    const evidence = await loadEvidence(fakeConn, [specificCard], { ignoreGate: true });
+    expect(evidence.get('t1')?.booking_after_card).toBeUndefined();
+  });
+
   test('loadEvidence is an empty map with the evidence gate off — no DB access', async () => {
     const OLD = process.env.GATE_TRIAGE_AUTO_RESOLVE_EVIDENCE;
     delete process.env.GATE_TRIAGE_AUTO_RESOLVE_EVIDENCE;
