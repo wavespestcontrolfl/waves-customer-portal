@@ -38,6 +38,19 @@ function isRouteTiersEnabled() {
   }
 }
 
+// GATE_AUTO_DISPATCH_FLEX_TIER — same call-time/fail-closed convention as
+// isRouteTiersEnabled above (the flip swaps which day-move window the run
+// uses, so it must never be an ambient dev default and never crash the
+// config resolution). See feature-gates.js for the full rationale.
+function isFlexTierEnabled() {
+  const { gateEnvValue } = require('../../config/feature-gates');
+  try {
+    return gateEnvValue('GATE_AUTO_DISPATCH_FLEX_TIER');
+  } catch (_) {
+    return false;
+  }
+}
+
 const VALID_MODES = new Set(['dry_run', 'apply']);
 
 /**
@@ -112,7 +125,15 @@ function getAutoDispatchConfig(overrides = {}) {
     // destination floor + reminder freeze). When false, NOTHING tier-related
     // runs — behavior is the legacy flat lock, byte for byte.
     routeTiersEnabled: overrides.routeTiersEnabled ?? isRouteTiersEnabled(),
+    // FLEX-TIER: when true, auto-dispatch's day-move guard is the Flexible
+    // tier (flex-tier.js: 73h freeze, fixed ±5-day radius clamped by the
+    // series' adjacent occurrence) instead of the route-tiers days-out
+    // ladder. Independent of routeTiersEnabled; index.js's guard-mode
+    // resolver gives this one precedence when both are somehow on.
+    flexTierEnabled: overrides.flexTierEnabled ?? isFlexTierEnabled(),
   };
 }
 
-module.exports = { getAutoDispatchConfig, isApplyAllowed, isRouteTiersEnabled, isCustomerRecurringDispatchEnabled, VALID_MODES };
+module.exports = {
+  getAutoDispatchConfig, isApplyAllowed, isRouteTiersEnabled, isFlexTierEnabled, isCustomerRecurringDispatchEnabled, VALID_MODES,
+};

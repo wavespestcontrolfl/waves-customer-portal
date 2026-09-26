@@ -25,6 +25,7 @@ const { stampedAddressDiverges } = require('../stamped-address');
 const { ensureCustomerGeocoded } = require('../geocoder');
 const audit = require('./audit');
 const routeTiers = require('./route-tiers');
+const flexTier = require('./flex-tier');
 
 // Self-heal MISSING_GEO: geocode the customer (fills customers.latitude/longitude
 // from their address) and re-check eligibility, so a not-yet-geocoded recurring
@@ -356,6 +357,175 @@ function failedPlacementAudit(fresh, pm, lockBoundary, applyErr) {
   };
 }
 
+// Which day-move guard governs this run: ROUTE-TIERS (its days-out ladder +
+// cumulative drift budget) or, when GATE_AUTO_DISPATCH_FLEX_TIER is on, the
+// Flexible tier (its own 73h freeze + fixed ±5-day radius clamped by the
+// series' adjacent occurrence) — see flex-tier.js. Both govern the SAME
+// thing (which day-moves may run, and inside what window), so at most one is
+// active per run; flex wins if both are somehow on. Neither ⇒ 'legacy' (the
+// flat lock, byte for byte). Pulled into its own function (Codex/lane
+// pattern — see buildPlacementAudit above) so runAutoDispatch's already
+// over-budget complexity never grows from this.
+function resolveGuardMode(config) {
+  if (config.flexTierEnabled === true) return 'flex';
+  if (config.routeTiersEnabled === true) return 'tiers';
+  return 'legacy';
+}
+
+// The `scheduled_date` floor loadEligibleServices() queries with. ROUTE-TIERS
+// loads from its own tier-2 floor (today+6 — the days-out ladder decides the
+// rest per visit); FLEX-TIER loads from tomorrow on — its precise cutoff is
+// the 73h freeze, checked per visit against the live reminder row, so a
+// coarser SQL floor here only costs a few extra unfrozen-but-too-close reads,
+// never misses one; legacy loads from its own flat lock boundary. Byte for
+// byte the old behavior when neither gate is on.
+function resolveLoadBoundary(guardMode, nowDate, lockBoundary, today) {
+  if (guardMode === 'tiers') return etDateString(addETDays(nowDate, routeTiers.TIER2_MIN_DAYS_OUT - 1));
+  if (guardMode === 'flex') return today;
+  return lockBoundary;
+}
+
+// eligibility.js's ctx for the active guard mode — a plain object build, kept
+// out of runAutoDispatch so its ternaries don't count against that
+// function's complexity.
+function buildEligCtx(guardMode, today, lockBoundary, lockWindowDays) {
+  const base = { today, lockBoundary, lockWindowDays };
+  if (guardMode === 'tiers') return { ...base, routeTiers: { enabled: true, today } };
+  if (guardMode === 'flex') return { ...base, flexTier: { enabled: true } };
+  return base;
+}
+
+// Bulk per-run guard context for the active mode — one query pair at most.
+// ROUTE-TIERS needs the reminder freeze (its 72.25h band) + drift-anchor
+// evidence; FLEX-TIER needs the reminder freeze (its own, tighter 73h band)
+// + each visit's series neighbors. Both FAIL CLOSED: a failed read must
+// freeze/guard-unknown every visit rather than move without the check.
+// Pulled out of runAutoDispatch for the same complexity-budget reason as
+// resolveGuardMode above. Returns { reminderFreeze, anchorMap, neighborMap, degraded }.
+async function loadGuardContext(guardMode, services, nowDate) {
+  if (guardMode === 'legacy') {
+    return {
+      reminderFreeze: null, anchorMap: null, neighborMap: null, degraded: false,
+    };
+  }
+  const ids = services.map((s) => s.id);
+  const freezeHours = guardMode === 'flex' ? flexTier.FLEX_TIER_FREEZE_HOURS : routeTiers.REMINDER_SENDABLE_HOURS;
+  const reminderFreeze = await routeTiers.loadReminderFreeze(db, ids, nowDate, freezeHours);
+  // ALL ids, not just change_count>0 — the durable move records (not the
+  // best-effort stamp) decide whether a visit has spent drift budget.
+  const anchorMap = guardMode === 'tiers' ? await routeTiers.loadAnchorMap(db, ids) : null;
+  const neighborMap = guardMode === 'flex' ? await flexTier.loadSeriesNeighbors(db, services) : null;
+  const degraded = (reminderFreeze && reminderFreeze.failed)
+    || (guardMode === 'tiers' && anchorMap === null)
+    || (guardMode === 'flex' && neighborMap === null);
+  if (degraded) {
+    // Fail closed AND fail loud: the per-visit skips keep every visit safe,
+    // but an outage that silently disables all day-moves must not leave cron
+    // health green (the run completes as completed_with_errors).
+    logger.error(`[auto-dispatch] ${guardMode} guard read failed (reminder freeze or ${guardMode === 'flex' ? 'series-neighbor' : 'anchor'} evidence) — all day-moves frozen this run`);
+  }
+  return {
+    reminderFreeze, anchorMap, neighborMap, degraded,
+  };
+}
+
+// The day-move window for ONE visit under the active guard mode — pulled out
+// of runAutoDispatch's per-service loop (same complexity-budget reason as
+// above) so GATE_AUTO_DISPATCH_FLEX_TIER's own branches never add to that
+// loop. `today` is the ET date the caller wants this decided against (the
+// run's own `today` on pass 1). Returns { window, meta, skip }; `skip` is
+// {code, description} when the visit cannot move this run/window.
+function resolveDayMoveWindow(guardMode, service, guardCtx, today) {
+  if (guardMode === 'legacy') return { window: null, meta: null, skip: null };
+  const { reminderFreeze, anchorMap, neighborMap } = guardCtx;
+  if (!reminderFreeze || reminderFreeze.failed) {
+    return { window: null, meta: null, skip: { code: 'REMINDER_STATUS_UNKNOWN', description: 'Reminder-sent status unreadable — frozen (fail closed)' } };
+  }
+  if (reminderFreeze.frozen.has(service.id)) {
+    return { window: null, meta: null, skip: { code: 'REMINDER_SENT_FROZEN', description: `${guardMode === 'flex' ? '73-hour' : '72-hour'} reminder already sent — visit is frozen` } };
+  }
+  const dateStr = toDateStr(service.scheduled_date);
+  if (guardMode === 'flex') {
+    if (!neighborMap) {
+      return { window: null, meta: null, skip: { code: 'SERIES_NEIGHBORS_UNKNOWN', description: 'Series occurrence order could not be derived — no move (fail closed)' } };
+    }
+    const neighbors = neighborMap.get(service.id) || {};
+    const window = flexTier.flexTierMoveWindow({ origDate: service.scheduled_date, today, neighbors });
+    if (!window) {
+      return { window: null, meta: null, skip: { code: 'FLEX_WINDOW_EXHAUSTED', description: `No legal candidate dates left within ±${flexTier.FLEX_TIER_RADIUS_DAYS} days of the series' adjacent occurrence` } };
+    }
+    return {
+      window, meta: {
+        mode: 'flex', radius_days: flexTier.FLEX_TIER_RADIUS_DAYS, neighbors, window,
+      }, skip: null,
+    };
+  }
+  const anchor = routeTiers.resolveAnchor(service, anchorMap);
+  if (!anchor) {
+    return { window: null, meta: null, skip: { code: 'DRIFT_ANCHOR_UNKNOWN', description: 'Recurrence anchor could not be derived — no move (fail closed)' } };
+  }
+  const daysOut = routeTiers.daysBetween(today, dateStr);
+  const radius = routeTiers.tierRadiusForDaysOut(daysOut);
+  const window = routeTiers.tierMoveWindow({
+    origDate: service.scheduled_date, anchorDate: anchor, today, radius,
+  });
+  if (!window) {
+    return { window: null, meta: null, skip: { code: 'DRIFT_BUDGET_EXHAUSTED', description: `No legal candidate dates left within tier radius ±${radius} and drift budget ±${routeTiers.DRIFT_BUDGET_DAYS} of anchor ${anchor}` } };
+  }
+  return {
+    window, meta: {
+      mode: 'tiers', days_out: daysOut, radius, anchor, drift_budget_days: routeTiers.DRIFT_BUDGET_DAYS, window,
+    }, skip: null,
+  };
+}
+
+// Apply-time re-check for the active day-move guard: the reminder freeze
+// re-read against the LIVE clock right before applying, and the window
+// recomputed against the CURRENT ET date (a slow or manual run crossing ET
+// midnight must not apply yesterday's window). `meta` is the pass-1 tierMeta
+// this visit was scored with — its durable evidence (the tier anchor, or the
+// flex-tier series neighbors) is REUSED, never re-queried; only the
+// clock-dependent numbers are refreshed. Pulled out of runAutoDispatch's
+// pass-2 loop for the same complexity-budget reason as resolveDayMoveWindow.
+// Returns { window, meta, skip }; skip.degraded flags a read failure the
+// caller must fold into the run's health status.
+async function recheckDayMoveWindow(guardMode, service, meta, nowDate) {
+  if (guardMode === 'legacy') return { window: null, meta: null, skip: null };
+  const freezeHours = guardMode === 'flex' ? flexTier.FLEX_TIER_FREEZE_HOURS : routeTiers.REMINDER_SENDABLE_HOURS;
+  const applyFreeze = await routeTiers.loadReminderFreeze(db, [service.id], nowDate, freezeHours);
+  if (applyFreeze.failed) {
+    return { window: null, meta: null, skip: { code: 'REMINDER_STATUS_UNKNOWN', description: 'Reminder-sent status unreadable at apply time — frozen (fail closed)', degraded: true } };
+  }
+  if (applyFreeze.frozen.has(service.id)) {
+    return { window: null, meta: null, skip: { code: 'REMINDER_SENT_FROZEN', description: `${guardMode === 'flex' ? '73-hour' : '72-hour'} reminder was sent during the run — visit is frozen` } };
+  }
+  const todayNow = etDateString(nowDate);
+  if (guardMode === 'flex') {
+    const neighbors = (meta && meta.neighbors) || {};
+    const window = flexTier.flexTierMoveWindow({ origDate: service.scheduled_date, today: todayNow, neighbors });
+    if (!window) {
+      return { window: null, meta: null, skip: { code: 'FLEX_WINDOW_EXHAUSTED', description: 'No longer legally movable at apply time, clamped by the series\' adjacent occurrence' } };
+    }
+    return { window, meta: { ...meta, window }, skip: null };
+  }
+  const daysOutNow = routeTiers.daysBetween(todayNow, toDateStr(service.scheduled_date));
+  const radiusNow = routeTiers.tierRadiusForDaysOut(daysOutNow);
+  const anchorNow = meta && meta.anchor;
+  const window = radiusNow > 0 && anchorNow
+    ? routeTiers.tierMoveWindow({
+      origDate: service.scheduled_date, anchorDate: anchorNow, today: todayNow, radius: radiusNow,
+    })
+    : null;
+  if (!window) {
+    return { window: null, meta: null, skip: { code: 'TIER_LOCKED', description: `No longer legally movable at apply time (${daysOutNow} days out)` } };
+  }
+  return {
+    window, meta: {
+      ...meta, days_out: daysOutNow, radius: radiusNow, window,
+    }, skip: null,
+  };
+}
+
 async function runAutoDispatch(opts = {}) {
   const config = getAutoDispatchConfig(opts);
   const triggeredBy = opts.triggeredBy || 'cron';
@@ -380,43 +550,22 @@ async function runAutoDispatch(opts = {}) {
   try {
     const capMap = await loadCapabilityMap();
     const capabilityFor = makeCapabilityFn(capMap);
-    // ROUTE-TIERS (GATE_ROUTE_TIERS): tier 2 starts at 7 days out, so the load
-    // floor moves in from today+lockWindowDays to today+6 (query is strict >).
-    // Gate off ⇒ the legacy lockBoundary loads exactly the same set as before.
-    const tiersOn = config.routeTiersEnabled === true;
-    const loadBoundary = tiersOn
-      ? etDateString(addETDays(nowDate, routeTiers.TIER2_MIN_DAYS_OUT - 1))
-      : lockBoundary;
+    // GUARD MODE: 'tiers' (GATE_ROUTE_TIERS), 'flex' (GATE_AUTO_DISPATCH_FLEX_TIER,
+    // takes precedence), or 'legacy' (neither — the flat lock, byte for byte).
+    const guardMode = resolveGuardMode(config);
+    const loadBoundary = resolveLoadBoundary(guardMode, nowDate, lockBoundary, today);
     const services = await loadEligibleServices(loadBoundary, lookaheadEnd, today);
 
-    // Tier-mode bulk context: reminder-freeze + drift anchors, one query each.
-    // Both FAIL CLOSED — a failed read freezes/anchors-unknowns every visit
-    // rather than moving without the guard.
-    let reminderFreeze = null;
-    let anchorMap = null;
-    let guardReadDegraded = false; // a failed guard read must not report a green run
-    if (tiersOn) {
-      reminderFreeze = await routeTiers.loadReminderFreeze(db, services.map((s) => s.id), nowDate);
-      // ALL ids, not just change_count>0 — the durable move records (not the
-      // best-effort stamp) decide whether a visit has spent drift budget.
-      anchorMap = await routeTiers.loadAnchorMap(db, services.map((s) => s.id));
-      // Fail closed AND fail loud: the skips below keep every visit safe, but
-      // an outage that silently disables all tier moves must not leave cron
-      // health green (the run completes as completed_with_errors).
-      if ((reminderFreeze && reminderFreeze.failed) || anchorMap === null) {
-        guardReadDegraded = true;
-        logger.error('[auto-dispatch] route-tiers guard read failed (reminder freeze or anchor evidence) — all tier moves frozen this run');
-      }
-    }
+    // Guard-mode bulk context: reminder-freeze + (tiers') drift anchors or
+    // (flex's) series neighbors, one query pair at most. FAIL CLOSED — a
+    // failed read freezes/guard-unknowns every visit rather than moving
+    // without the check.
+    const guardCtx = await loadGuardContext(guardMode, services, nowDate);
+    let guardReadDegraded = guardCtx.degraded; // a failed guard read must not report a green run
 
     for (const service of services) {
       try {
-        const eligCtx = {
-          today,
-          lockBoundary,
-          lockWindowDays: config.lockWindowDays,
-          ...(tiersOn ? { routeTiers: { enabled: true, today } } : {}),
-        };
+        const eligCtx = buildEligCtx(guardMode, today, lockBoundary, config.lockWindowDays);
         let elig = isEligibleForAutoDispatch(service, eligCtx);
         let planCheck = null;
 
@@ -454,39 +603,18 @@ async function runAutoDispatch(opts = {}) {
           continue;
         }
 
-        // ── ROUTE-TIERS guards (only when GATE_ROUTE_TIERS is on) ──
+        // ── Day-move guard (only when a guard mode is active) ──
         let tierWindow = null;
         let tierMeta = null;
-        if (tiersOn && !(service.recurring_dispatch_due_date && !service.window_start)) {
-          // Reminder freeze — the 72h reminder is the HARD gate. Unreadable
-          // status freezes everything (fail closed).
-          if (!reminderFreeze || reminderFreeze.failed) {
+        if (guardMode !== 'legacy' && !(service.recurring_dispatch_due_date && !service.window_start)) {
+          const guardResult = resolveDayMoveWindow(guardMode, service, guardCtx, today);
+          if (guardResult.skip) {
             totals.skipped++;
-            await audit.logDecision(runId, { action: 'skipped', service, reason_code: 'REMINDER_STATUS_UNKNOWN', reason_description: 'Reminder-sent status unreadable — frozen (fail closed)' });
+            await audit.logDecision(runId, { action: 'skipped', service, reason_code: guardResult.skip.code, reason_description: guardResult.skip.description });
             continue;
           }
-          if (reminderFreeze.frozen.has(service.id)) {
-            totals.skipped++;
-            await audit.logDecision(runId, { action: 'skipped', service, reason_code: 'REMINDER_SENT_FROZEN', reason_description: '72-hour reminder already sent — visit is frozen' });
-            continue;
-          }
-          const anchor = routeTiers.resolveAnchor(service, anchorMap);
-          if (!anchor) {
-            totals.skipped++;
-            await audit.logDecision(runId, { action: 'skipped', service, reason_code: 'DRIFT_ANCHOR_UNKNOWN', reason_description: 'Recurrence anchor could not be derived — no move (fail closed)' });
-            continue;
-          }
-          const daysOut = routeTiers.daysBetween(today, toDateStr(service.scheduled_date));
-          const radius = routeTiers.tierRadiusForDaysOut(daysOut);
-          tierWindow = routeTiers.tierMoveWindow({
-            origDate: service.scheduled_date, anchorDate: anchor, today, radius,
-          });
-          if (!tierWindow) {
-            totals.skipped++;
-            await audit.logDecision(runId, { action: 'skipped', service, reason_code: 'DRIFT_BUDGET_EXHAUSTED', reason_description: `No legal candidate dates left within tier radius ±${radius} and drift budget ±${routeTiers.DRIFT_BUDGET_DAYS} of anchor ${anchor}` });
-            continue;
-          }
-          tierMeta = { days_out: daysOut, radius, anchor, drift_budget_days: routeTiers.DRIFT_BUDGET_DAYS, window: tierWindow };
+          tierWindow = guardResult.window;
+          tierMeta = guardResult.meta;
         }
 
         // Plan-active gate (reuse the result if the geo self-heal already computed it).
@@ -596,44 +724,22 @@ async function runAutoDispatch(opts = {}) {
             continue;
           }
 
-          // ROUTE-TIERS: re-check the reminder freeze right before applying —
-          // pass 1 read it before a potentially long scoring pass, and the
-          // 72h reminder must stay the HARD gate at apply time too. The
-          // residual race after this point is closed by the rebooker's atomic
-          // `expect` (it pins the ORIGINAL scheduled_date; a visit whose date
-          // slipped near enough for a 72h reminder to fire has necessarily
-          // changed date and 409s). Fail closed on an unreadable re-check.
-          if (tiersOn && !(pm.service.recurring_dispatch_due_date && !pm.service.window_start)) {
-            const applyFreeze = await routeTiers.loadReminderFreeze(db, [pm.service.id], new Date());
-            if (applyFreeze.failed) {
-              guardReadDegraded = true;
-              await audit.logDecision(runId, { action: 'no_change', service: pm.service, reason_code: 'REMINDER_STATUS_UNKNOWN', reason_description: 'Reminder-sent status unreadable at apply time — frozen (fail closed)', ...pm.result.audit });
+          // Re-check the active day-move guard right before applying — pass 1
+          // read it before a potentially long scoring pass, and the freeze
+          // must stay the HARD gate at apply time too. The residual race
+          // after this point is closed by the rebooker's atomic `expect` (it
+          // pins the ORIGINAL scheduled_date; a visit whose date slipped near
+          // enough for its reminder to fire has necessarily changed date and
+          // 409s).
+          if (guardMode !== 'legacy' && !(pm.service.recurring_dispatch_due_date && !pm.service.window_start)) {
+            const recheck = await recheckDayMoveWindow(guardMode, pm.service, pm.ctx.tierMeta, new Date());
+            if (recheck.skip) {
+              if (recheck.skip.degraded) guardReadDegraded = true;
+              await audit.logDecision(runId, { action: 'no_change', service: pm.service, reason_code: recheck.skip.code, reason_description: recheck.skip.description, ...pm.result.audit });
               continue;
             }
-            if (applyFreeze.frozen.has(pm.service.id)) {
-              await audit.logDecision(runId, { action: 'no_change', service: pm.service, reason_code: 'REMINDER_SENT_FROZEN', reason_description: '72-hour reminder was sent during the run — visit is frozen', ...pm.result.audit });
-              continue;
-            }
-
-            // Recompute tier legality against the CURRENT ET date — a slow or
-            // manual run crossing ET midnight must not apply yesterday's
-            // window (the visit may have dropped into the <7-day no-day-move
-            // tier, and the >=5-days-out destination floor moves with the
-            // date). The refreshed window feeds the re-evaluation below, so
-            // every candidate the apply step can pick is legal NOW.
-            const todayNow = etDateString(new Date());
-            const daysOutNow = routeTiers.daysBetween(todayNow, toDateStr(pm.service.scheduled_date));
-            const radiusNow = routeTiers.tierRadiusForDaysOut(daysOutNow);
-            const anchorNow = pm.ctx.tierMeta && pm.ctx.tierMeta.anchor;
-            const windowNow = radiusNow > 0 && anchorNow
-              ? routeTiers.tierMoveWindow({ origDate: pm.service.scheduled_date, anchorDate: anchorNow, today: todayNow, radius: radiusNow })
-              : null;
-            if (!windowNow) {
-              await audit.logDecision(runId, { action: 'no_change', service: pm.service, reason_code: 'TIER_LOCKED', reason_description: `No longer legally movable at apply time (${daysOutNow} days out)`, ...pm.result.audit });
-              continue;
-            }
-            pm.ctx.tierWindow = windowNow;
-            pm.ctx.tierMeta = { ...pm.ctx.tierMeta, days_out: daysOutNow, radius: radiusNow, window: windowNow };
+            pm.ctx.tierWindow = recheck.window;
+            pm.ctx.tierMeta = recheck.meta;
           }
 
           fresh = await evaluatePlacement(pm.service, pm.prefs, pm.ctx, config, lockBoundary);
