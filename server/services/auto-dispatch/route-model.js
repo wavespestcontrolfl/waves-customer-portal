@@ -76,56 +76,75 @@ function withSequenceKeys(stop) {
 }
 
 /**
+ * One visit_id group as ONE stop in the dispatch sequence — the rule both
+ * the day's stationary groups and the moving unit use (Codex r5): the member
+ * with the earliest canonical key (currentOrder: COALESCE(route_order, 999),
+ * window_start, created_at, id) places the group, the first member with a
+ * location locates it, and its members' work is SUMMED (arrival-route.js
+ * groupRouteStops' contract).
+ */
+function groupUnit(members) {
+  const ordered = currentOrder(members.map(withSequenceKeys));
+  const located = ordered.find((m) => m.geo);
+  return {
+    ...ordered[0],
+    geo: located ? located.geo : null,
+    minutes: sumPlanningMinutes(ordered),
+    memberIds: ordered.map((m) => m.id),
+  };
+}
+
+/**
  * The day's PHYSICAL stops, in the sequence dispatch runs them
- * (route-reorder-window-fit.js currentOrder: COALESCE(route_order, 999),
- * window_start, created_at — Codex r4). Each carries `minutes`, its on-site
- * time. Rows collapse into one physical stop two ways, each with the
- * canonical duration rule:
- *   - a visit_id group (combo lawn+pest, etc.) — one drive stop at its first
- *     member's place in the sequence, members' work SUMMED (arrival-route.js
- *     groupRouteStops' contract);
- *   - a legacy null-visit_id co-visit — the row adjacent to the previous row
+ * (route-reorder-window-fit.js currentOrder — Codex r4). Each carries
+ * `minutes`, its on-site time. Rows collapse into one physical stop two
+ * ways, each with the canonical duration rule:
+ *   - a visit_id group (combo lawn+pest, etc.) — groupUnit;
+ *   - a legacy null-visit_id co-visit — a row adjacent to the previous row
  *     that isCoVisitPair accepts (same customer, promised window, premise and
  *     coordinates) — merged with the co-visit duration rule
  *     (startCoVisitChain / advanceCoVisit: real estimates summed, floored by
  *     the longest window-derived duration — never a phantom extra hour).
- * A location comes from the first member that has one. Codex r1 / r3 / r4.
+ * Codex r1 / r3 / r4 / r5.
  */
 function physicalStops(stops) {
+  const units = [];
+  const groups = new Map();
+  for (const row of (stops || []).filter(Boolean).map(withSequenceKeys)) {
+    if (row.visit_id == null) { units.push(row); continue; }
+    const key = String(row.visit_id);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(row);
+  }
+  for (const members of groups.values()) units.push(groupUnit(members));
   const out = [];
-  const byVisit = new Map();
-  let lastRow = null;
-  for (const row of currentOrder((stops || []).filter(Boolean).map(withSequenceKeys))) {
-    const group = row.visit_id != null ? byVisit.get(String(row.visit_id)) : null;
+  let prevRow = null;
+  for (const unit of currentOrder(units)) {
     const last = out[out.length - 1];
-    if (group) {
-      group.minutes += stopPlanningMinutes(row);
-      group.geo = group.geo || row.geo;
-    } else if (lastRow && last && last.coChain && isCoVisitPair(effectiveWindowRange, lastRow, row)) {
-      last.coChain = advanceCoVisit({ clock: 0, ...last.coChain }, row);
+    if (!unit.memberIds && prevRow && last.coChain && isCoVisitPair(effectiveWindowRange, prevRow, unit)) {
+      last.coChain = advanceCoVisit({ clock: 0, ...last.coChain }, unit);
       last.minutes = last.coChain.coMerged;
-      last.geo = last.geo || row.geo;
+      last.geo = last.geo || unit.geo;
     } else {
-      const stop = { ...row, minutes: stopPlanningMinutes(row), coChain: row.visit_id != null ? null : startCoVisitChain(row) };
-      if (row.visit_id != null) byVisit.set(String(row.visit_id), stop);
-      out.push(stop);
+      out.push(unit.memberIds ? { ...unit, coChain: null } : { ...unit, minutes: stopPlanningMinutes(unit), coChain: startCoVisitChain(unit) });
     }
-    lastRow = row;
+    prevRow = unit.memberIds ? null : unit;
   }
   return out;
 }
 
 // The day's chain WITH the moving visit: the whole chain sorted by the
-// canonical dispatch comparator (currentOrder — COALESCE(route_order, 999)
-// first, then window_start, then created_at), exactly as dispatch will run
-// it. The visit carries the route_order it will actually have (the caller's
-// job: kept on a same-day, same-tech move, cleared otherwise, per the
-// rebooker) and sits at its scored start (the candidate's, or its current
-// one), whatever window it stores for its duration. Codex r4 + pre-push P1:
-// an unsequenced visit runs after every sequenced stop, not by its time.
+// canonical dispatch comparator (currentOrder), exactly as dispatch will run
+// it (Codex r4 + pre-push P1: an unsequenced visit runs after every
+// sequenced stop, not by its time). The visit sits at its scored start (the
+// candidate's, or its current one) and carries the route_order it will
+// actually have; a grouped visit's `unitMembers` carry theirs, and the unit
+// takes its place in the sequence by groupUnit — the same rule as any
+// stationary group (Codex r5: a sibling with a lower route_order places it).
 function chainWithVisit(sequence, visit) {
-  const v = Number.isFinite(visit.startMin) ? { ...visit, window_start: hhmmFromMin(visit.startMin) } : withSequenceKeys(visit);
-  return currentOrder([...sequence, v]);
+  const own = Number.isFinite(visit.startMin) ? { ...visit, window_start: hhmmFromMin(visit.startMin) } : withSequenceKeys(visit);
+  const unit = visit.unitMembers && visit.unitMembers.length ? groupUnit([own, ...visit.unitMembers]) : own;
+  return currentOrder([...sequence, unit]);
 }
 
 /**
@@ -206,5 +225,5 @@ module.exports = {
   chainDriveMinutes,
   routeCost,
   clusterShare,
-  _internals: { physicalStops, chainWithVisit, sumPlanningMinutes },
+  _internals: { physicalStops, chainWithVisit, groupUnit, sumPlanningMinutes },
 };

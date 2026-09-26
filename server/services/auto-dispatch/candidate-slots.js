@@ -263,7 +263,10 @@ async function loadGroupContext(db, service) {
     const [siblings, visit] = await Promise.all([
       db('scheduled_services')
         .whereIn('id', siblingIds)
-        .select('id', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes', 'service_type', 'is_recurring', 'is_callback'),
+        .select(
+          'id', 'scheduled_date', 'technician_id', 'window_start', 'window_end', 'route_order', 'created_at',
+          'estimated_duration_minutes', 'service_type', 'is_recurring', 'is_callback',
+        ),
       db('service_visits').where({ id: service.visit_id }).first('window_start'),
     ]);
     return { excludeIds, siblings, visitWindowStart: (visit && visit.window_start) || null };
@@ -328,12 +331,11 @@ async function loadOccupiedSpansByDate(db, dates, excludeIds) {
 // own planning (anchor, shifted windows, midnight and admin-window
 // refusals) — then each member's span by the same end rule, as that
 // member's reschedule() probes it; a windowless member is not probed.
-// Returns `{ windows, unitStart }`: the probe spans, and the unit's earliest
-// start (where route scoring places the stop).
+// Returns `{ windows, targets }`: the probe spans, and each member's target
+// `{ id, start, end }` (where route scoring sequences the unit).
 function planUnitPlacement(service, group, cand) {
   const { occupancyProbeEnd } = require('../rebooker');
-  let targets = [{ start: cand.start_time, end: cand.end_time || service.window_end, duration: service.estimated_duration_minutes }];
-  let unitStart = cand.start_time;
+  let targets = [{ id: service.id, start: cand.start_time, end: cand.end_time || service.window_end, duration: service.estimated_duration_minutes }];
   if (group.members) {
     const { predictMemberWindows } = require('../visit-groups');
     const predicted = predictMemberWindows({
@@ -345,12 +347,11 @@ function planUnitPlacement(service, group, cand) {
       newDateStr: cand.date,
     });
     if (!predicted.ok) return null;
-    targets = predicted.targets.map((t, i) => ({ start: t.start, end: t.end, duration: group.members[i].estimated_duration_minutes }));
-    unitStart = predicted.unitStart || cand.start_time;
+    targets = predicted.targets.map((t, i) => ({ id: t.id, start: t.start, end: t.end, duration: group.members[i].estimated_duration_minutes }));
   }
   try {
     const windows = targets.filter((t) => t.start).map((t) => ({ start: t.start, end: occupancyProbeEnd(t.start, t.end, t.duration) }));
-    return { windows, unitStart };
+    return { windows, targets: targets.map(({ id, start, end }) => ({ id, start: start || null, end: end || null })) };
   } catch {
     return null;
   }
@@ -370,11 +371,21 @@ function unitMembers(service, siblings) {
   return [self, ...siblings];
 }
 
-// The unit's earliest CURRENT start in minutes (the tapped row or any
-// sibling), else DAY_OPEN — the current placement's position in the chain.
-function currentUnitStartMin(service, siblings) {
-  const starts = [service, ...siblings].map((r) => hhmmToMin(r.window_start)).filter((v) => v != null);
-  return starts.length ? Math.min(...starts) : DAY_OPEN;
+// The siblings as they will stand after this candidate's move — each at its
+// predicted target window, with the route_order the rebooker leaves it
+// (candidateRouteOrder, per member) — so route-model's groupUnit places the
+// unit exactly as dispatch will sequence it (Codex r5).
+function movedSiblings(siblings, placement, cand) {
+  const target = new Map(placement.targets.map((t) => [String(t.id), t]));
+  return siblings.map((sib) => {
+    const t = target.get(String(sib.id));
+    return {
+      ...sib,
+      window_start: t && t.start ? t.start : sib.window_start,
+      window_end: t && t.start ? t.end : sib.window_end,
+      route_order: candidateRouteOrder(sib, cand),
+    };
+  });
 }
 
 function slotTaken(placement, occupied) {
@@ -398,8 +409,9 @@ function candidateRouteOrder(service, cand) {
 // One surviving candidate's numbers on the shared model — the SAME
 // routeCost/clusterShare computeCurrentPlacement uses — over that tech-day's
 // active stops.
-function scoreOnSharedModel(service, geo, cand, stops, siblings, unitStart) {
-  const cost = routeCost(stops, serviceToRouteStop(service, geo, hhmmToMin(unitStart), siblings, candidateRouteOrder(service, cand)));
+function scoreOnSharedModel(service, geo, cand, stops, siblings, placement) {
+  const moved = movedSiblings(siblings, placement, cand);
+  const cost = routeCost(stops, serviceToRouteStop(service, geo, hhmmToMin(cand.start_time), moved, candidateRouteOrder(service, cand)));
   return {
     ...cand,
     detour_minutes: cost.detourMinutes,
@@ -436,7 +448,7 @@ async function filterAndScoreSharedModelCandidates(service, geo, candidates, ctx
     }
     const key = `${cand.technician_id}|${cand.date}`;
     if (!stopsByTechDay.has(key)) stopsByTechDay.set(key, stopsForTechDay(dayStops, cand.technician_id, cand.date));
-    kept.push(scoreOnSharedModel(service, geo, cand, stopsByTechDay.get(key), siblings, placement.unitStart));
+    kept.push(scoreOnSharedModel(service, geo, cand, stopsByTechDay.get(key), siblings, placement));
   }
   return kept;
 }
@@ -565,9 +577,9 @@ async function sharedModelCurrentPlacement(service, geo, ctx, dateStr) {
   const { excludeIds, siblings } = await loadGroupContext(ctx.db, service);
   const dayTech = await resolveCurrentDayTech(ctx.db, service);
   const stops = await loadDayStops(ctx.db, { technicianId: dayTech, dateStr, excludeIds });
-  // The unit sits at its earliest current start (Codex r2), as a candidate
-  // sits at its earliest predicted one.
-  const cost = geo ? routeCost(stops, serviceToRouteStop(service, geo, currentUnitStartMin(service, siblings), siblings)) : null;
+  // The unit as it stands: every member at its stored window and route_order
+  // (route-model's groupUnit sequences it, as a candidate's is).
+  const cost = geo ? routeCost(stops, serviceToRouteStop(service, geo, hhmmToMin(service.window_start) ?? DAY_OPEN, siblings)) : null;
   return {
     ...(cost ? { detour_minutes: cost.detourMinutes, total_drive_minutes: cost.driveWithMinutes, route_minutes: cost.routeTimeWithMinutes } : {}),
     stops_that_day: stops.length + 1,
@@ -749,6 +761,6 @@ module.exports = {
   violatesPreferredTime,
   _internals: {
     hhmmToMin, weekdayOf, isSaturday, loadDayStops, loadDayStopRows, loadGroupContext,
-    filterAndScoreSharedModelCandidates, loadDateOccupiedSpans, planUnitPlacement, currentUnitStartMin, candidateRouteOrder,
+    filterAndScoreSharedModelCandidates, loadDateOccupiedSpans, planUnitPlacement, movedSiblings, candidateRouteOrder,
   },
 };

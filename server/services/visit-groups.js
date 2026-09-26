@@ -2292,9 +2292,7 @@ function planMemberTargets({ members, primary, visitWindowStart, win, newDateStr
  * writer's refusal returned instead of thrown. `members` carries each row's
  * id, scheduled_date, window_start, window_end and estimated_duration_minutes
  * (the primary included); `visitWindowStart` is the visit's canonical start.
- * Returns `{ ok: true, targets, unitStart }` — `unitStart` is the unit's
- * earliest target start (null when every member is windowless) — or
- * `{ ok: false, code }`.
+ * Returns `{ ok: true, targets }` or `{ ok: false, code }`.
  */
 function predictMemberWindows({ members, primaryId, visitWindowStart, requestedStart, requestedEnd, newDateStr }) {
   const primary = (members || []).find((m) => String(m.id) === String(primaryId));
@@ -2303,8 +2301,7 @@ function predictMemberWindows({ members, primaryId, visitWindowStart, requestedS
     const targets = planMemberTargets({
       members, primary, visitWindowStart, win: { start: requestedStart || null, end: requestedEnd || null }, newDateStr,
     });
-    const starts = targets.map((t) => t.start).filter(Boolean).map((v) => String(v).slice(0, 5)).sort();
-    return { ok: true, targets, unitStart: starts[0] || null };
+    return { ok: true, targets };
   } catch (err) {
     return { ok: false, code: err.code || 'VISIT_MEMBER_WINDOW_INVALID' };
   }

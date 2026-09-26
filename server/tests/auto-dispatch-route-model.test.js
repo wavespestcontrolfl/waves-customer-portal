@@ -239,6 +239,37 @@ describe('routeCost: the canonical dispatch sequence', () => {
 
 });
 
+// Codex r5 (PRRT_kwDOR3YQi86mQ1x6): the moving unit takes its place in the
+// sequence by the SAME rule as a stationary group (groupUnit): the member
+// with the earliest canonical key — here a sibling numbered ahead of the
+// tapped row.
+describe('routeCost: a grouped moving unit is sequenced by its whole group', () => {
+  const { _internals: { chainWithVisit, physicalStops, groupUnit } } = require('../services/auto-dispatch/route-model');
+  const day = [
+    { id: 'B', geo: FAR, window_start: '09:00', route_order: 2 },
+    { id: 'C', geo: NEAR_HQ, window_start: '11:00', route_order: 3 },
+  ];
+
+  test('a sibling with a LOWER route_order than the tapped row leads: unit -> B -> C, not B -> C -> unit', () => {
+    const visit = { id: 's1', geo: NEAR_HQ, startMin: 13 * 60, route_order: 5, unitMembers: [{ id: 'sib1', window_start: '13:00', route_order: 1 }] };
+    expect(chainWithVisit(physicalStops(day), visit).map((st) => st.id)).toEqual(['sib1', 'B', 'C']); // the unit, placed (and named) by its lead member
+    const cost = routeCost(day.map((st) => ({ ...st, startMin: 0 })), visit);
+    expect(cost.driveWithMinutes).toBeCloseTo(chainDriveMinutes([NEAR_HQ, FAR, NEAR_HQ]), 5);
+    // Without the sibling's number the unit would run last.
+    const alone = { ...visit, unitMembers: [{ id: 'sib1', window_start: '13:00', route_order: null }] };
+    expect(chainWithVisit(physicalStops(day), alone).map((st) => st.id)).toEqual(['B', 'C', 's1']);
+  });
+
+  test('one shared rule: a stationary group is placed by the same member groupUnit picks', () => {
+    const members = [
+      { id: 'm1', visit_id: 'g', geo: NEAR_HQ, window_start: '13:00', route_order: 5 },
+      { id: 'm2', visit_id: 'g', geo: NEAR_HQ, window_start: '13:00', route_order: 1 },
+    ];
+    expect(groupUnit(members).id).toBe('m2');
+    expect(physicalStops([...day, ...members]).map((st) => st.id)).toEqual(['m2', 'B', 'C']);
+  });
+});
+
 // Codex r4 (PRRT_kwDOR3YQi86mQsai): a legacy null-visit_id co-visit (same
 // customer, promised window, premise and coordinates) is one physical stop
 // under the canonical co-visit duration rule; a visit_id group stays additive.

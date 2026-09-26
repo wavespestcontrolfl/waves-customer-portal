@@ -37,7 +37,7 @@ const {
   findValidCandidateSlots,
   computeCurrentPlacement,
   _internals: {
-    loadDayStops, loadGroupContext, filterAndScoreSharedModelCandidates, loadDateOccupiedSpans, planUnitPlacement, currentUnitStartMin, candidateRouteOrder,
+    loadDayStops, loadGroupContext, filterAndScoreSharedModelCandidates, loadDateOccupiedSpans, planUnitPlacement, movedSiblings, candidateRouteOrder,
   },
 } = require('../services/auto-dispatch/candidate-slots');
 
@@ -734,7 +734,7 @@ describe('SLOT_TAKEN parity with the writer (Codex r1)', () => {
   test('planUnitPlacement: the writer\'s own spans — an open end probes the duration (else one hour); a group probes each member\'s derived window', () => {
     const cand = { date: '2026-08-06', start_time: '10:00', end_time: null };
     expect(planUnitPlacement({ id: 's1', estimated_duration_minutes: 45 }, {}, cand))
-      .toEqual({ windows: [{ start: '10:00', end: '10:45' }], unitStart: '10:00' });
+      .toEqual({ windows: [{ start: '10:00', end: '10:45' }], targets: [{ id: 's1', start: '10:00', end: null }] });
     expect(planUnitPlacement({ id: 's1' }, {}, cand).windows).toEqual([{ start: '10:00', end: '11:00' }]);
     const members = [
       { id: 's1', window_start: '09:00', window_end: '10:00' },
@@ -742,7 +742,7 @@ describe('SLOT_TAKEN parity with the writer (Codex r1)', () => {
       { id: 'sib2', window_start: null, window_end: null },
     ];
     expect(planUnitPlacement({ id: 's1', window_start: '09:00' }, { members }, { date: '2026-08-06', start_time: '13:00', end_time: '14:00' }))
-      .toEqual({ windows: [{ start: '13:00', end: '14:00' }, { start: '14:00', end: '14:30' }], unitStart: '13:00' }); // windowless sib2 is not probed
+      .toMatchObject({ windows: [{ start: '13:00', end: '14:00' }, { start: '14:00', end: '14:30' }] }); // windowless sib2 is not probed
   });
 
   // Codex r2 (PRRT_kwDOR3YQi86mQebG): a windowless tapped row anchors on the
@@ -774,16 +774,31 @@ describe('SLOT_TAKEN parity with the writer (Codex r1)', () => {
 
   // Codex r2 (PRRT_kwDOR3YQi86mQebI): the unit is placed at its EARLIEST
   // start — a preceding sibling's — on both sides of the comparison.
-  test('route scoring places a grouped unit at its earliest start (current and predicted)', async () => {
-    openMembers.mockResolvedValue([{ id: 's1' }, { id: 'sib1' }]);
-    const sibling = { id: 'sib1', window_start: '08:00', window_end: '09:00', estimated_duration_minutes: 60 };
-    const service = { id: 's1', visit_id: 'v1', window_start: '10:00', window_end: '11:00', estimated_duration_minutes: 60 };
-    const placement = planUnitPlacement(service, { members: [{ ...service }, sibling] }, { date: '2026-08-06', start_time: '13:00', end_time: '14:00' });
-    expect(placement.unitStart).toBe('11:00'); // the sibling, shifted +3h, leads the unit
-    expect(currentUnitStartMin(service, [sibling])).toBe(8 * 60); // today the sibling's 08:00 leads it
-    expect(currentUnitStartMin({ window_start: null }, [])).toBe(8 * 60); // no window at all: the day's open
-    openMembers.mockReset();
+  // Codex r5 (PRRT_kwDOR3YQi86mQ1x6): the moving unit's siblings carry their
+  // own ordering keys as they will stand after the move.
+  test('movedSiblings: each sibling at its predicted window, with the route_order the rebooker leaves it', () => {
+    const sibling = { id: 'sib1', scheduled_date: '2026-08-06', technician_id: 't1', window_start: '08:00', window_end: '09:00', route_order: 1, created_at: '2026-07-01T00:00:00Z' };
+    const placement = { targets: [{ id: 's1', start: '13:00', end: '14:00' }, { id: 'sib1', start: '12:00', end: '13:00' }] };
+    const [sameDay] = movedSiblings([sibling], placement, { date: '2026-08-06', technician_id: 't1' });
+    expect(sameDay).toMatchObject({ window_start: '12:00', window_end: '13:00', route_order: 1, created_at: '2026-07-01T00:00:00Z' });
+    const [otherDay] = movedSiblings([sibling], placement, { date: '2026-08-07', technician_id: 't1' });
+    expect(otherDay.route_order).toBeNull();
   });
+
+  test('loadGroupContext reads each sibling\'s ordering keys (route_order, created_at, technician_id) for the unit\'s place in the sequence', async () => {
+    openMembers.mockResolvedValueOnce([{ id: 's1' }, { id: 'sib1' }]);
+    let cols = null;
+    const db = withVisit(() => {
+      const c = {};
+      c.whereIn = () => c;
+      c.select = async (...selected) => { cols = selected; return []; };
+      return c;
+    });
+    await loadGroupContext(db, { id: 's1', visit_id: 'v1' });
+    expect(cols).toEqual(expect.arrayContaining(['route_order', 'created_at', 'technician_id', 'window_start', 'window_end']));
+  });
+
+
 
 });
 
