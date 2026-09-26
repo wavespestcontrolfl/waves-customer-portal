@@ -5053,7 +5053,7 @@ export function ServiceSection({
             // directive to remove).
             showSavings={servicesLength === 1 || section?.waveGuardTierEligible !== false}
             // Guarantee line off under glass (owner 2026-07-23) — the approve
-            // CTA's glass micro line states the same 90-day guarantee
+            // CTA's glass micro line states the same money-back guarantee
             // immediately below, so the in-card line read twice. Non-glass
             // single-service cards keep it: the CTA micro is glass-gated, so
             // removing it there would drop the page's only guarantee claim
@@ -7813,7 +7813,7 @@ function EstimateViewPageInner({ websiteMode = false }) {
   // when glass is off. `glassContent` alone gates the service-agnostic swaps.
   const glassContent = glassCopyActive();
   // One-time-only estimates overlay a terms-neutral hero on the category
-  // pack — the packs' recurring promises (unlimited callbacks, 90-day
+  // pack — the packs' recurring promises (unlimited callbacks, money-back
   // guarantee) don't apply to a one-visit quote (owner 2026-07-23).
   // Review-gated quotes get the confirm-with-you variant instead of
   // "approve online and pick a day" (codex P2 r3).
@@ -8300,7 +8300,7 @@ function EstimateViewPageInner({ websiteMode = false }) {
             />
           ) : null}
 
-          {/* The standalone "Try us risk-free — 90-day money-back guarantee."
+          {/* The standalone "Try us risk-free — money-back guarantee."
               line is fully retired (owner 2026-07-24, extending the 2026-07-23
               glass dedupe): the approve CTA's micro line is the one sanctioned
               plan-level guarantee claim. The non-glass fallback rendered dead

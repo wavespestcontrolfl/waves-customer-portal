@@ -293,6 +293,62 @@ describe('billing channel email adapter', () => {
     expect(mockRedactEmailAddresses).toHaveBeenCalledWith('delivery to casey@example.com failed');
   });
 
+  test('preserves a canonical held provider outcome without exposing its stored row', async () => {
+    mockRedactEmailAddresses.mockReturnValue('provider retry held for [redacted]');
+    const err = Object.assign(new Error('provider retry held for casey@example.com'), {
+      code: 'EMAIL_PROVIDER_RETRY_HELD',
+      providerOutcome: {
+        sent: false,
+        held: true,
+        retryable: true,
+        providerAttempted: false,
+        deliveryOutcome: 'uncertain',
+        reason: 'provider retry held for casey@example.com',
+        emailMessageId: 'message-private',
+        message: { id: 'message-private', recipient_email_snapshot: 'casey@example.com' },
+      },
+    });
+    mockSendTemplate.mockRejectedValue(err);
+
+    const outcome = await sendBillingChannelEmail(input());
+    expect(outcome).toMatchObject({
+      sent: false,
+      provider: 'email',
+      providerMessageId: null,
+      deliveryOutcome: 'uncertain',
+      code: 'EMAIL_PROVIDER_RETRY_HELD',
+      reason: 'provider retry held for [redacted]',
+      retryable: true,
+      held: true,
+      providerAttempted: false,
+    });
+    expect(outcome).not.toHaveProperty('message');
+    expect(outcome).not.toHaveProperty('emailMessageId');
+  });
+
+  test('preserves canonical acceptance evidence carried by a throw', async () => {
+    mockSendTemplate.mockRejectedValue(Object.assign(new Error('audit write failed'), {
+      providerOutcome: {
+        sent: true,
+        deliveryOutcome: 'accepted',
+        providerMessageId: 'sg-accepted',
+        deduped: true,
+        message: { id: 'message-private' },
+      },
+    }));
+
+    const outcome = await sendBillingChannelEmail(input());
+    expect(outcome).toMatchObject({
+      sent: true,
+      provider: 'email',
+      providerMessageId: 'sg-accepted',
+      deliveryOutcome: 'accepted',
+      blocked: false,
+      deduped: true,
+    });
+    expect(outcome).not.toHaveProperty('message');
+  });
+
   test.each([false, true])('reports uncertainty only after provider handoff started: %s', async (afterHandoff) => {
     mockDispatchUnderBillingEmailAuthority.mockImplementation(async ({ dispatch, state }) => {
       if (!afterHandoff) throw Object.assign(new Error('temporary provider failure'), { retryable: true });
@@ -317,12 +373,24 @@ describe('billing channel email adapter', () => {
     });
   });
 
-  test('classifies EMAIL_SEND_IN_PROGRESS as not sent even after handoff started', async () => {
-    mockSendTemplate.mockImplementation(async (opts) => opts.withProviderHandoff(async () => {
-      throw Object.assign(new Error('a send is already in progress for this key'), { code: 'EMAIL_SEND_IN_PROGRESS' });
-    }));
+  test.each([false, true])('holds EMAIL_SEND_IN_PROGRESS as uncertain (handoff started=%s)', async (afterHandoff) => {
+    const collision = Object.assign(new Error('a send is already in progress for this key'), {
+      code: 'EMAIL_SEND_IN_PROGRESS',
+      retryable: true,
+    });
+    if (afterHandoff) {
+      mockSendTemplate.mockImplementation(async (opts) => opts.withProviderHandoff(async () => { throw collision; }));
+    } else {
+      // Real sendTemplate collision shape: thrown before withProviderHandoff.
+      mockSendTemplate.mockRejectedValue(collision);
+    }
     await expect(sendBillingChannelEmail(input())).resolves.toMatchObject({
-      sent: false, deliveryOutcome: 'not_sent', retryable: true, code: 'EMAIL_SEND_IN_PROGRESS',
+      sent: false,
+      deliveryOutcome: 'uncertain',
+      retryable: true,
+      held: true,
+      providerAttempted: false,
+      code: 'EMAIL_SEND_IN_PROGRESS',
     });
   });
 
