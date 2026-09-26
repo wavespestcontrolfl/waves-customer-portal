@@ -1,0 +1,1329 @@
+// scripts/route-order-cleanup.js — the route-order-cleanup script's pure
+// helpers: date-range bounding/validation, backup-file row flattening, and
+// the rollback compare-and-swap (a row that moved again since the backup is
+// reported, never blindly overwritten). main() itself (dotenv, real db,
+// runRouteReorder, runExclusive) is exercised only through require.main's
+// guard — see the recurring-series-topup.js precedent this mirrors.
+jest.mock('../models/db', () => ({
+  destroy: jest.fn(),
+  transaction: jest.fn(),
+}));
+
+const fs = require('fs');
+const { addETDays, etDateString, parseETDateTime } = require('../utils/datetime-et');
+const { wasLockSkipped } = require('../utils/cron-lock');
+const {
+  buildDateRange, buildBackupRows, applyRollback, parseLedgerResult, recoveryInstruction,
+  collectEntries, reportAndBackup, groupRowsByTechDay, readLiveTechDay, mismatchedIdsForDay,
+  buildRollbackTargetOrder, buildRollbackPositions, restoredDispatchOrder, rollbackWindowConflict, previewRollback, printRollbackPlan, printRollbackResult,
+  buildRunOpts, writeBackupFile, outOfHorizonDates, runIsUnhealthy, runRollback, rollbackIsIncomplete,
+  printPlan, exportLedgerBackup, runCleanup,
+} = require('../../scripts/route-order-cleanup');
+const {
+  ROUTE_WRITE_GUARD_COLUMNS, CUSTOMER_PREMISE_ALIASES, classifyWriteError, chooseWindowSafeOrder, _internals: reorderInternals,
+} = require('../services/route-reorder');
+const { guardedCoordSelects } = require('../services/scheduling/day-stops');
+const RouteOptimizer = require('../services/route-optimizer');
+
+// The real building blocks writeTechDayOrder itself reads from — passed
+// through as `deps` so readLiveTechDay builds the EXACT same select shape
+// the writer's own internal re-read does, never a second copy of it. The
+// real shared guard too (chooseWindowSafeOrder) — a rollback proposal is
+// certified by the SAME decision every other route_order write uses.
+function rollbackDeps(overrides = {}) {
+  return {
+    ROUTE_WRITE_GUARD_COLUMNS, CUSTOMER_PREMISE_ALIASES, guardedCoordSelects,
+    EXCLUDE_STATUSES: reorderInternals.EXCLUDE_STATUSES, LIVE_HOLD_SQL: reorderInternals.LIVE_HOLD_SQL,
+    classifyWriteError,
+    RouteOptimizer,
+    chooseWindowSafeOrder,
+    UNCERTIFIABLE_REASONS: reorderInternals.UNCERTIFIABLE_REASONS,
+    currentOrder: reorderInternals.currentOrder,
+    ...overrides,
+  };
+}
+
+// A fake connection for readLiveTechDay: `.select()` returns a thenable that
+// is ALSO chainable with `.forUpdate()` — both must resolve to the rows for
+// whichever (technician_id, scheduled_date) the query filtered on, keyed
+// "techId:dateStr" in `rowsByKey`.
+function fakeLiveConn(rowsByKey) {
+  const fn = () => {
+    const filters = {};
+    const chain = {
+      where: (col, val) => { filters[col] = val; return chain; },
+      whereNotIn: () => chain,
+      whereRaw: () => chain,
+      leftJoin: () => chain,
+      select: () => {
+        const key = `${filters['scheduled_services.technician_id']}:${filters['scheduled_services.scheduled_date']}`;
+        // Geocoded by default (the shared guard refuses coordless stops); a
+        // test that needs a coordless row sets lat/lng: null explicitly.
+        // (Filled in place so the returned array is the fixture itself.)
+        const rows = rowsByKey[key] || [];
+        for (const row of rows) if (!('lat' in row)) Object.assign(row, { lat: 27.5, lng: -82.5 });
+        const thenable = Promise.resolve(rows);
+        thenable.forUpdate = () => Promise.resolve(rows);
+        return thenable;
+      },
+    };
+    return chain;
+  };
+  fn.raw = (sql) => sql; // guardedCoordSelects(conn) only needs `.raw` to exist
+  return fn;
+}
+
+const deps = { addETDays, etDateString, parseETDateTime };
+
+describe('buildDateRange', () => {
+  test('inclusive list of ET calendar dates from..to', () => {
+    expect(buildDateRange('2026-10-01', '2026-10-04', deps)).toEqual({
+      dates: ['2026-10-01', '2026-10-02', '2026-10-03', '2026-10-04'],
+    });
+  });
+
+  test('a single-day range is one entry', () => {
+    expect(buildDateRange('2026-10-01', '2026-10-01', deps)).toEqual({ dates: ['2026-10-01'] });
+  });
+
+  test('from after to is an error, not an empty/reversed range', () => {
+    expect(buildDateRange('2026-10-05', '2026-10-01', deps).error).toMatch(/must not be after/);
+  });
+
+  test('a span over 60 days is refused rather than silently truncated', () => {
+    const to = etDateString(addETDays(parseETDateTime('2026-10-01T00:00'), 70));
+    expect(buildDateRange('2026-10-01', to, deps).error).toMatch(/more than 60 days/);
+  });
+});
+
+describe('buildBackupRows', () => {
+  test('flattens every entry\'s FULL tech-day route_order_snapshot (unchanged rows included) into per-row backup entries', () => {
+    const entries = [
+      { date: '2026-10-05', technicianId: 't1',
+        route_order_changes: [{ id: 'a', before: 2, after: 1 }, { id: 'b', before: null, after: 2 }],
+        route_order_snapshot: [{ id: 'a', before: 2, after: 1 }, { id: 'b', before: null, after: 2 }, { id: 'c', before: 3, after: 3 }] },
+      { date: '2026-10-06', technicianId: 't2', route_order_changes: [], route_order_snapshot: [] },
+      { date: '2026-10-07', technicianId: 't1', skipped_reason: 'WITHIN_72H' }, // no snapshot at all
+    ];
+    expect(buildBackupRows(entries)).toEqual([
+      { id: 'a', date: '2026-10-05', technician_id: 't1', before: 2, after: 1 },
+      { id: 'b', date: '2026-10-05', technician_id: 't1', before: null, after: 2 },
+      { id: 'c', date: '2026-10-05', technician_id: 't1', before: 3, after: 3 },
+    ]);
+  });
+
+  test('empty input produces an empty backup', () => {
+    expect(buildBackupRows([])).toEqual([]);
+    expect(buildBackupRows(undefined)).toEqual([]);
+  });
+});
+
+describe('groupRowsByTechDay', () => {
+  test('groups rows into one entry per (technician_id, date)', () => {
+    const rows = [
+      { id: 'a', date: '2026-10-05', technician_id: 't1' },
+      { id: 'b', date: '2026-10-05', technician_id: 't1' },
+      { id: 'c', date: '2026-10-05', technician_id: 't2' },
+      { id: 'd', date: '2026-10-06', technician_id: 't1' },
+    ];
+    const groups = groupRowsByTechDay(rows);
+    expect(groups).toHaveLength(3);
+    expect(groups.find((g) => g.technician_id === 't1' && g.date === '2026-10-05').rows.map((r) => r.id)).toEqual(['a', 'b']);
+    expect(groups.find((g) => g.technician_id === 't2').rows.map((r) => r.id)).toEqual(['c']);
+    expect(groups.find((g) => g.date === '2026-10-06').rows.map((r) => r.id)).toEqual(['d']);
+  });
+});
+
+describe('mismatchedIdsForDay (the pure "does the backup still match" check)', () => {
+  test('every row present at exactly its backed-up "after": no mismatch', () => {
+    const dayRows = [{ id: 'a', after: 1 }, { id: 'b', after: 2 }];
+    const liveRows = [{ id: 'a', route_order: 1 }, { id: 'b', route_order: 2 }];
+    expect(mismatchedIdsForDay(dayRows, liveRows)).toEqual([]);
+  });
+
+  test('a route_order that no longer matches "after" is a mismatch', () => {
+    const dayRows = [{ id: 'a', after: 1 }];
+    const liveRows = [{ id: 'a', route_order: 9 }];
+    expect(mismatchedIdsForDay(dayRows, liveRows)).toEqual(['a']);
+  });
+
+  test('a row missing from the live read (moved to a DIFFERENT tech-day, or gone) is a mismatch', () => {
+    // readLiveTechDay is already scoped to the exact (date, technician_id) —
+    // a row reassigned elsewhere since the backup is simply absent here,
+    // never a same-route_order coincidence matched against the wrong day
+    // (the original codex P1 this check fixed).
+    const dayRows = [{ id: 'a', after: 1 }];
+    expect(mismatchedIdsForDay(dayRows, [])).toEqual(['a']);
+  });
+
+  test('only the genuinely mismatching id is reported, not the whole day\'s ids', () => {
+    const dayRows = [{ id: 'a', after: 1 }, { id: 'b', after: 2 }];
+    const liveRows = [{ id: 'a', route_order: 1 }, { id: 'b', route_order: 9 }];
+    expect(mismatchedIdsForDay(dayRows, liveRows)).toEqual(['b']);
+  });
+});
+
+describe('buildRollbackTargetOrder', () => {
+  // codex pre-push P1 repro, verbatim: original A=2,B=3,C=null → cleanup
+  // wrote B=1,C=2,A=3 → the OLD (splice-by-index) implementation restored
+  // C,A,B — the previously-null-before row landed at the FRONT just
+  // because it was excluded from reinsertion and happened to sit there in
+  // the CURRENT live order, instead of the "no original position — sorts
+  // LAST" that a null before/route_order means everywhere else.
+  test('the coordinator repro: original A=2,B=3,C=null restores to A,B,C — never C,A,B', () => {
+    const live = [ // current, after cleanup wrote B=1, C=2, A=3
+      { id: 'A', route_order: 3 }, { id: 'B', route_order: 1 }, { id: 'C', route_order: 2 },
+    ];
+    const backup = [
+      { id: 'A', before: 2, after: 3 }, { id: 'B', before: 3, after: 1 }, { id: 'C', before: null, after: 2 },
+    ];
+    expect(buildRollbackTargetOrder(live, backup).map((r) => r.id)).toEqual(['A', 'B', 'C']);
+  });
+
+  test('every row returns to its recorded position — unchanged rows (before === after) included', () => {
+    // Original: P=1, Q=2, R=3, S=4. Cleanup swaps only Q and S: live now is
+    // P=1, S=2, R=3, Q=4. The full-day snapshot records P and R unchanged.
+    const live = [
+      { id: 'P', route_order: 1 }, { id: 'S', route_order: 2 },
+      { id: 'R', route_order: 3 }, { id: 'Q', route_order: 4 },
+    ];
+    const backup = [
+      { id: 'P', before: 1, after: 1 }, { id: 'S', before: 4, after: 2 },
+      { id: 'R', before: 3, after: 3 }, { id: 'Q', before: 2, after: 4 },
+    ];
+    expect(buildRollbackTargetOrder(live, backup).map((r) => r.id)).toEqual(['P', 'Q', 'R', 'S']);
+  });
+
+  test('a null "before" sorts the row LAST — the same "no position" convention route_order uses everywhere else', () => {
+    // Original: P=1, Q=2. Cleanup appended two previously-unpositioned rows
+    // (R, S) at the end: live is P=1, Q=2, R=3, S=4. Backup: R and S both
+    // before=null — restoring must put them back at the END, in their
+    // current relative order (the tie-break), never at the front.
+    const live = [
+      { id: 'P', route_order: 1 }, { id: 'Q', route_order: 2 },
+      { id: 'R', route_order: 3 }, { id: 'S', route_order: 4 },
+    ];
+    const backup = [
+      { id: 'P', before: 1, after: 1 }, { id: 'Q', before: 2, after: 2 },
+      { id: 'R', before: null, after: 3 }, { id: 'S', before: null, after: 4 },
+    ];
+    expect(buildRollbackTargetOrder(live, backup).map((r) => r.id)).toEqual(['P', 'Q', 'R', 'S']);
+  });
+
+  test('a non-numeric "before" is treated the same as null — sorts last, never first', () => {
+    const live = [{ id: 'A', route_order: 1 }, { id: 'B', route_order: 2 }];
+    const backup = [{ id: 'A', before: 1, after: 1 }, { id: 'B', before: 'oops', after: 2 }];
+    expect(buildRollbackTargetOrder(live, backup).map((r) => r.id)).toEqual(['A', 'B']);
+  });
+
+  test('a "before" far beyond the day\'s current size still just sorts after everything else — never throws, never clamps to a wrong index', () => {
+    const live = [{ id: 'A', route_order: 1 }, { id: 'B', route_order: 2 }];
+    const backup = [{ id: 'A', before: 99, after: 1 }, { id: 'B', before: 2, after: 2 }];
+    expect(buildRollbackTargetOrder(live, backup).map((r) => r.id)).toEqual(['B', 'A']);
+  });
+
+  test('a live row with no route_order (null) sorts last in the current-order baseline (the tie-break for two rows with the same "before")', () => {
+    const live = [{ id: 'A', route_order: null }, { id: 'B', route_order: 1 }];
+    const backup = [{ id: 'A', before: 5, after: null }, { id: 'B', before: 5, after: 1 }];
+    expect(buildRollbackTargetOrder(live, backup).map((r) => r.id)).toEqual(['B', 'A']);
+  });
+
+  test('multiple restored rows land in ascending "before" order regardless of the backup array\'s own order', () => {
+    const live = [
+      { id: 'P', route_order: 1 }, { id: 'S', route_order: 2 },
+      { id: 'R', route_order: 3 }, { id: 'Q', route_order: 4 },
+    ];
+    // Backup array lists S before Q, but Q's "before" (2) precedes S's (4).
+    const backup = [
+      { id: 'S', before: 4, after: 2 }, { id: 'R', before: 3, after: 3 },
+      { id: 'Q', before: 2, after: 4 }, { id: 'P', before: 1, after: 1 },
+    ];
+    expect(buildRollbackTargetOrder(live, backup).map((r) => r.id)).toEqual(['P', 'Q', 'R', 'S']);
+  });
+});
+
+describe('buildRollbackPositions (the exact values the rollback writes back)', () => {
+  test('the codex thread: original 4,5,null restores to exactly 4,5,null — never renumbered 1,2,3', () => {
+    // Cleanup renumbered A=4,B=5,C=null to A=1,B=2,C=3.
+    const backup = [
+      { id: 'A', before: 4, after: 1 },
+      { id: 'B', before: 5, after: 2 },
+      { id: 'C', before: null, after: 3 },
+    ];
+    expect(buildRollbackPositions(backup)).toEqual(new Map([['A', 4], ['B', 5], ['C', null]]));
+  });
+
+  test('an unchanged row in the full-day snapshot (before === after) is restored to itself', () => {
+    const backup = [{ id: 'A', before: 3, after: 1 }, { id: 'X', before: 7, after: 7 }];
+    expect(buildRollbackPositions(backup)).toEqual(new Map([['A', 3], ['X', 7]]));
+  });
+
+  test('a numeric-string "before" is restored as that integer; a non-numeric one as null (the same "no position" it sorts as)', () => {
+    const backup = [{ id: 'A', before: '6', after: 1 }, { id: 'B', before: 'junk', after: 2 }];
+    expect(buildRollbackPositions(backup)).toEqual(new Map([['A', 6], ['B', null]]));
+  });
+});
+
+describe('restoredDispatchOrder (the order dispatch reads after the rollback commits)', () => {
+  test('rows restored to null tie on COALESCE(route_order, 999) and fall to window_start, then created_at — dispatch\'s tie-break, not the target sequence', () => {
+    const live = [
+      { id: 'M', route_order: 1, time_window: 'morning', created_at: '2026-09-02T00:00:00Z' },
+      { id: 'P', route_order: 2, time_window: 'afternoon', created_at: '2026-09-01T00:00:00Z' },
+    ];
+    const order = restoredDispatchOrder(live, new Map([['M', null], ['P', null]]), rollbackDeps());
+    expect(order.map((r) => r.id)).toEqual(['P', 'M']);
+    expect(order.map((r) => r.route_order)).toEqual([null, null]);
+    expect(live[0].route_order).toBe(1); // copies — the live read (the writer's snapshot) is untouched
+  });
+});
+
+describe('rollbackWindowConflict (the shared guard, chooseWindowSafeOrder)', () => {
+  const at = (row) => ({ lat: 27.5, lng: -82.5, ...row });
+
+  test('a legal chronological geocoded order with no window data at all is certified', () => {
+    const target = [at({ id: 'a' }), at({ id: 'b' })];
+    expect(rollbackWindowConflict(target, target, rollbackDeps())).toBeNull();
+  });
+
+  test('restoring a row to an earlier slot whose window is now LATER than the row after it is a WINDOW_ORDER_CONFLICT (windows changed since the backup)', () => {
+    // B's window changed to 14:00 after the backup; route_order untouched.
+    const liveRows = [
+      at({ id: 'A', route_order: 1, window_start: '09:00' }),
+      at({ id: 'B', route_order: 2, window_start: '14:00' }),
+    ];
+    const target = [liveRows[1], liveRows[0]]; // [B, A] — B restored to the front
+    expect(rollbackWindowConflict(target, liveRows, rollbackDeps())).toBe('WINDOW_ORDER_CONFLICT');
+  });
+
+  test('an order whose windows are still chronological is certified', () => {
+    const liveRows = [
+      at({ id: 'A', route_order: 1, window_start: '09:00' }),
+      at({ id: 'B', route_order: 2, window_start: '14:00' }),
+    ];
+    expect(rollbackWindowConflict(liveRows, liveRows, rollbackDeps())).toBeNull();
+  });
+
+  test('codex pre-push P1: a coordless stop is refused with the guard\'s COORDLESS_STOPS — never certified on zero-travel legs', () => {
+    const liveRows = [
+      at({ id: 'A', route_order: 1, window_start: '09:00' }),
+      { id: 'B', route_order: 2, window_start: '14:00', lat: null, lng: null },
+    ];
+    expect(rollbackWindowConflict(liveRows, liveRows, rollbackDeps())).toBe('COORDLESS_STOPS');
+  });
+
+  test('the guard\'s uncertifiable verdict wins over a chronology conflict on the same day', () => {
+    const liveRows = [
+      at({ id: 'A', route_order: 1, window_start: '09:00' }),
+      { id: 'B', route_order: 2, window_start: '14:00', lat: null, lng: null },
+    ];
+    expect(rollbackWindowConflict([liveRows[1], liveRows[0]], liveRows, rollbackDeps())).toBe('COORDLESS_STOPS');
+  });
+
+  test('calls the guard with the exact dispatch-read order as googleOrder and the live read as sourceStops', () => {
+    const target = [at({ id: 'a' })];
+    const guard = jest.fn(() => ({ orderedStops: target, conflict: null }));
+    expect(rollbackWindowConflict(target, target, rollbackDeps({ chooseWindowSafeOrder: guard }))).toBeNull();
+    expect(guard).toHaveBeenCalledWith(expect.objectContaining({ RouteOptimizer, googleOrder: target, sourceStops: target }));
+  });
+
+  test('a guard that only offers a REPLACEMENT order (window-fit repair) is not a certification — the conflict is reported', () => {
+    const a = at({ id: 'a' });
+    const b = at({ id: 'b' });
+    const guard = jest.fn(() => ({ orderedStops: [b, a], source: 'window_constrained', conflict: 'WINDOW_FIT_CONFLICT' }));
+    expect(rollbackWindowConflict([a, b], [a, b], rollbackDeps({ chooseWindowSafeOrder: guard }))).toBe('WINDOW_FIT_CONFLICT');
+  });
+
+  test('a guard that certifies a DIFFERENT order with no conflict is still not a certification of the target', () => {
+    const a = at({ id: 'a' });
+    const b = at({ id: 'b' });
+    const guard = jest.fn(() => ({ orderedStops: [b, a], conflict: null }));
+    expect(rollbackWindowConflict([a, b], [a, b], rollbackDeps({ chooseWindowSafeOrder: guard }))).toBe('UNCERTIFIED_ORDER');
+  });
+});
+
+describe('applyRollback / previewRollback — a coordless restored day is skipped with the guard\'s reason', () => {
+  const NOW = new Date('2026-09-27T12:00:00Z');
+  const liveRows = [
+    { id: 'B', route_order: 1, window_start: '09:00' },
+    { id: 'A', route_order: 2, window_start: '11:00', lat: null, lng: null },
+  ];
+  const rows = [
+    { id: 'A', date: '2026-10-05', technician_id: 't1', before: 1, after: 2 },
+    { id: 'B', date: '2026-10-05', technician_id: 't1', before: 2, after: 1 },
+  ];
+
+  test('execute: skipped COORDLESS_STOPS, writer never called', async () => {
+    const conn = fakeLiveConn({ 't1:2026-10-05': liveRows });
+    const writeTechDayOrder = jest.fn();
+    const result = await applyRollback(conn, rows, NOW, rollbackDeps({ writeTechDayOrder }));
+    expect(writeTechDayOrder).not.toHaveBeenCalled();
+    expect(result.summary.skipped).toEqual([expect.objectContaining({ reason: 'COORDLESS_STOPS' })]);
+  });
+
+  test('preview shows the same verdict', async () => {
+    const conn = fakeLiveConn({ 't1:2026-10-05': liveRows });
+    const plan = await previewRollback(conn, rows, rollbackDeps());
+    expect(plan[0]).toMatchObject({ would_restore: false, conflict: 'COORDLESS_STOPS' });
+  });
+});
+
+describe('readLiveTechDay', () => {
+  function fakeConn() {
+    const calls = { where: [], whereNotIn: [], whereRaw: [], forUpdate: false };
+    const fn = (table) => {
+      expect(table).toBe('scheduled_services');
+      const chain = {
+        where: (...a) => { calls.where.push(a); return chain; },
+        whereNotIn: (...a) => { calls.whereNotIn.push(a); return chain; },
+        whereRaw: (...a) => { calls.whereRaw.push(a); return chain; },
+        leftJoin: () => chain,
+        select: () => {
+          const thenable = Promise.resolve([{ id: 'a' }]);
+          thenable.forUpdate = () => { calls.forUpdate = true; return Promise.resolve([{ id: 'a' }]); };
+          return thenable;
+        },
+      };
+      return chain;
+    };
+    fn.raw = (sql) => sql;
+    fn._calls = calls;
+    return fn;
+  }
+
+  test('scopes to the exact (date, technician) live day, excluding terminal statuses and expired holds, unlocked by default', async () => {
+    const conn = fakeConn();
+    const rows = await readLiveTechDay(conn, { dateStr: '2026-10-05', techId: 't1' }, rollbackDeps());
+    expect(rows).toEqual([{ id: 'a' }]);
+    expect(conn._calls.where).toEqual([
+      ['scheduled_services.scheduled_date', '2026-10-05'],
+      ['scheduled_services.technician_id', 't1'],
+    ]);
+    expect(conn._calls.whereNotIn[0][0]).toBe('scheduled_services.status');
+    expect(conn._calls.whereRaw[0][0]).toMatch(/reservation_expires_at/);
+    expect(conn._calls.forUpdate).toBe(false);
+  });
+
+  test('forUpdate: true locks the rows — used only inside the writer\'s own transaction', async () => {
+    const conn = fakeConn();
+    await readLiveTechDay(conn, { dateStr: '2026-10-05', techId: 't1', forUpdate: true }, rollbackDeps());
+    expect(conn._calls.forUpdate).toBe(true);
+  });
+});
+
+describe('previewRollback (dry run — reads the live day, no lock, no transaction)', () => {
+  test('a fully-matching tech-day would be restored, with a note that eligibility is re-checked at write time', async () => {
+    const conn = fakeLiveConn({
+      't1:2026-10-05': [{ id: 'a', route_order: 1 }, { id: 'b', route_order: 2 }],
+    });
+    const rows = [
+      { id: 'a', date: '2026-10-05', technician_id: 't1', before: 2, after: 1 },
+      { id: 'b', date: '2026-10-05', technician_id: 't1', before: null, after: 2 },
+    ];
+    expect(await previewRollback(conn, rows, rollbackDeps())).toEqual([{
+      technician_id: 't1', date: '2026-10-05', row_count: 2, would_restore: true, mismatched_ids: [], conflict: null,
+      note: 'eligibility (freeze/lock/today-past) re-checked at write time',
+    }]);
+  });
+
+  test('one mismatching row marks the WHOLE day as would-skip, listing every mismatching id', async () => {
+    const conn = fakeLiveConn({
+      't1:2026-10-05': [{ id: 'a', route_order: 1 }, { id: 'b', route_order: 9 }], // 'b' moved again
+    });
+    const rows = [
+      { id: 'a', date: '2026-10-05', technician_id: 't1', before: 2, after: 1 },
+      { id: 'b', date: '2026-10-05', technician_id: 't1', before: null, after: 2 },
+    ];
+    expect(await previewRollback(conn, rows, rollbackDeps())).toEqual([{
+      technician_id: 't1', date: '2026-10-05', row_count: 2, would_restore: false, mismatched_ids: ['b'], conflict: null, note: null,
+    }]);
+  });
+
+  test('a row moved to a DIFFERENT tech-day since the backup is a would-skip mismatch', async () => {
+    const conn = fakeLiveConn({ 't1:2026-10-05': [] }); // 'a' no longer lives on this tech-day
+    const rows = [{ id: 'a', date: '2026-10-05', technician_id: 't1', before: 2, after: 1 }];
+    expect(await previewRollback(conn, rows, rollbackDeps())).toEqual([{
+      technician_id: 't1', date: '2026-10-05', row_count: 1, would_restore: false, mismatched_ids: ['a'], conflict: null, note: null,
+    }]);
+  });
+
+  test('windows changed since the backup (route_order untouched) → would-skip with the window guard\'s reason, not a false would-restore', async () => {
+    // B's window moved from an early slot (when it sat first) to 14:00 after
+    // the backup was taken; both rows still match the backup's "after"
+    // route_order exactly (no MISMATCH), so only the window-legality
+    // recheck catches this.
+    const conn = fakeLiveConn({
+      't1:2026-10-05': [
+        { id: 'A', route_order: 1, window_start: '09:00' },
+        { id: 'B', route_order: 2, window_start: '14:00' },
+      ],
+    });
+    const rows = [
+      { id: 'A', date: '2026-10-05', technician_id: 't1', before: 2, after: 1 },
+      { id: 'B', date: '2026-10-05', technician_id: 't1', before: 1, after: 2 },
+    ];
+    expect(await previewRollback(conn, rows, rollbackDeps())).toEqual([{
+      technician_id: 't1', date: '2026-10-05', row_count: 2, would_restore: false,
+      mismatched_ids: [], conflict: 'WINDOW_ORDER_CONFLICT', note: null,
+    }]);
+  });
+});
+
+describe('applyRollback — hands each eligible tech-day to the SAME fenced writer', () => {
+  const NOW = new Date('2026-09-27T12:00:00Z');
+
+  test('a mismatching row skips the WHOLE tech-day WITHOUT ever calling the writer', async () => {
+    const conn = fakeLiveConn({
+      't1:2026-10-05': [{ id: 'a', route_order: 1 }, { id: 'b', route_order: 9 }],
+    });
+    const writeTechDayOrder = jest.fn();
+    const rows = [
+      { id: 'a', date: '2026-10-05', technician_id: 't1', before: 2, after: 1 },
+      { id: 'b', date: '2026-10-05', technician_id: 't1', before: null, after: 2 },
+    ];
+    const result = await applyRollback(conn, rows, NOW, rollbackDeps({ writeTechDayOrder }));
+    expect(writeTechDayOrder).not.toHaveBeenCalled();
+    expect(result.restored).toBe(0);
+    expect(result.summary.skipped).toEqual([{
+      date: '2026-10-05', technician_id: 't1', reason: 'MISMATCH',
+      detail: 'no longer matches the backup (ids only): b',
+      mismatched_ids: ['b'],
+    }]);
+  });
+
+  test('windows changed since the backup (route_order untouched) skips the day with the window guard\'s reason, WITHOUT ever calling the writer', async () => {
+    const conn = fakeLiveConn({
+      't1:2026-10-05': [
+        { id: 'A', route_order: 1, window_start: '09:00' },
+        { id: 'B', route_order: 2, window_start: '14:00' },
+      ],
+    });
+    const writeTechDayOrder = jest.fn();
+    const rows = [
+      { id: 'A', date: '2026-10-05', technician_id: 't1', before: 2, after: 1 },
+      { id: 'B', date: '2026-10-05', technician_id: 't1', before: 1, after: 2 },
+    ];
+    const result = await applyRollback(conn, rows, NOW, rollbackDeps({ writeTechDayOrder }));
+    expect(writeTechDayOrder).not.toHaveBeenCalled();
+    expect(result.restored).toBe(0);
+    expect(result.summary.skipped).toEqual([{
+      date: '2026-10-05', technician_id: 't1', reason: 'WINDOW_ORDER_CONFLICT',
+      detail: 'the restored order would violate a promised window — windows likely changed since the backup',
+    }]);
+    expect(result.summary.failed).toEqual([]);
+  });
+
+  test('an eligible tech-day hands the writer the live snapshot and the restored target order, and counts it restored', async () => {
+    // Original: A=1, B=2, X=3. Cleanup swapped A and B (X untouched): live
+    // is now B=1, A=2, X=3.
+    const liveRows = [
+      { id: 'B', route_order: 1 }, { id: 'A', route_order: 2 }, { id: 'X', route_order: 3 },
+    ];
+    const conn = fakeLiveConn({ 't1:2026-10-05': liveRows });
+    const writeTechDayOrder = jest.fn(async () => {});
+    const rows = [
+      { id: 'A', date: '2026-10-05', technician_id: 't1', before: 1, after: 2 },
+      { id: 'B', date: '2026-10-05', technician_id: 't1', before: 2, after: 1 },
+      { id: 'X', date: '2026-10-05', technician_id: 't1', before: 3, after: 3 }, // full-day snapshot: X unchanged
+    ];
+    const result = await applyRollback(conn, rows, NOW, rollbackDeps({ writeTechDayOrder }));
+    expect(writeTechDayOrder).toHaveBeenCalledTimes(1);
+    const [passedConn, args] = writeTechDayOrder.mock.calls[0];
+    expect(passedConn).toBe(conn);
+    expect(args.dateStr).toBe('2026-10-05');
+    expect(args.techId).toBe('t1');
+    // techStops is the writer's OWN comparison snapshot — the live read just taken.
+    expect(args.techStops).toBe(liveRows);
+    expect(args.finalOrdered.map((r) => r.id)).toEqual(['A', 'B', 'X']);
+    expect(args.repair).toBeNull();
+    // Explicit-positions mode: the exact recorded values, never index+1.
+    expect(args.opts).toEqual({ positions: new Map([['A', 1], ['B', 2], ['X', 3]]) });
+    expect(args.now).toBe(NOW);
+    expect(args.repairGates).toEqual([]);
+    expect(result.restored).toBe(3);
+    expect(result.summary.skipped).toEqual([]);
+    expect(result.summary.failed).toEqual([]);
+  });
+
+  test('the codex thread: a 4,5,null day hands the writer those exact values — the null row stays null', async () => {
+    const liveRows = [
+      { id: 'A', route_order: 1, window_start: '09:00' },
+      { id: 'B', route_order: 2, window_start: '11:00' },
+      { id: 'C', route_order: 3, window_start: '13:00' },
+    ];
+    const conn = fakeLiveConn({ 't1:2026-10-05': liveRows });
+    const writeTechDayOrder = jest.fn(async () => {});
+    const rows = [
+      { id: 'A', date: '2026-10-05', technician_id: 't1', before: 4, after: 1 },
+      { id: 'B', date: '2026-10-05', technician_id: 't1', before: 5, after: 2 },
+      { id: 'C', date: '2026-10-05', technician_id: 't1', before: null, after: 3 },
+    ];
+    const result = await applyRollback(conn, rows, NOW, rollbackDeps({ writeTechDayOrder }));
+    const [, args] = writeTechDayOrder.mock.calls[0];
+    expect(args.finalOrdered.map((r) => r.id)).toEqual(['A', 'B', 'C']);
+    expect(args.opts.positions).toEqual(new Map([['A', 4], ['B', 5], ['C', null]]));
+    expect(result.restored).toBe(3);
+  });
+
+  test('codex pre-push P1: two time_window-only rows restored to null — the afternoon row created first reads FIRST at dispatch, so the day is skipped, never written', async () => {
+    // Cleanup numbered morning M=1, afternoon P=2 (both originally null).
+    // The rollback target sequence is M,P (legal), but after restoring both
+    // to null dispatch reads COALESCE 999 tie → no window_start → created_at:
+    // P (created first) before M — afternoon before morning.
+    const liveRows = [
+      { id: 'M', route_order: 1, time_window: 'morning', created_at: '2026-09-02T00:00:00Z' },
+      { id: 'P', route_order: 2, time_window: 'afternoon', created_at: '2026-09-01T00:00:00Z' },
+    ];
+    const conn = fakeLiveConn({ 't1:2026-10-05': liveRows });
+    const writeTechDayOrder = jest.fn(async () => {});
+    const rows = [
+      { id: 'M', date: '2026-10-05', technician_id: 't1', before: null, after: 1 },
+      { id: 'P', date: '2026-10-05', technician_id: 't1', before: null, after: 2 },
+    ];
+    const result = await applyRollback(conn, rows, NOW, rollbackDeps({ writeTechDayOrder }));
+    expect(writeTechDayOrder).not.toHaveBeenCalled();
+    expect(result.restored).toBe(0);
+    expect(result.summary.skipped).toEqual([expect.objectContaining({
+      date: '2026-10-05', technician_id: 't1', reason: 'WINDOW_ORDER_CONFLICT',
+    })]);
+    const plan = await previewRollback(conn, rows, rollbackDeps());
+    expect(plan[0]).toMatchObject({ would_restore: false, conflict: 'WINDOW_ORDER_CONFLICT' });
+  });
+
+  test('the same null-restored pair with the MORNING row created first reads morning→afternoon — restored normally', async () => {
+    const liveRows = [
+      { id: 'M', route_order: 1, time_window: 'morning', created_at: '2026-09-01T00:00:00Z' },
+      { id: 'P', route_order: 2, time_window: 'afternoon', created_at: '2026-09-02T00:00:00Z' },
+    ];
+    const conn = fakeLiveConn({ 't1:2026-10-05': liveRows });
+    const writeTechDayOrder = jest.fn(async () => {});
+    const rows = [
+      { id: 'M', date: '2026-10-05', technician_id: 't1', before: null, after: 1 },
+      { id: 'P', date: '2026-10-05', technician_id: 't1', before: null, after: 2 },
+    ];
+    const result = await applyRollback(conn, rows, NOW, rollbackDeps({ writeTechDayOrder }));
+    expect(writeTechDayOrder).toHaveBeenCalledTimes(1);
+    expect(writeTechDayOrder.mock.calls[0][1].opts.positions).toEqual(new Map([['M', null], ['P', null]]));
+    expect(result.restored).toBe(2);
+  });
+
+  test('a STALE_TECH_DAY the writer refuses is reported as skipped via the REAL classifyWriteError, not a run-degrading failure', async () => {
+    const conn = fakeLiveConn({ 't1:2026-10-05': [{ id: 'a', route_order: 1 }] });
+    const writeTechDayOrder = jest.fn(async () => {
+      throw Object.assign(new Error('stop a route_order changed during the run'), { code: 'STALE_TECH_DAY' });
+    });
+    const rows = [{ id: 'a', date: '2026-10-05', technician_id: 't1', before: 2, after: 1 }];
+    const result = await applyRollback(conn, rows, NOW, rollbackDeps({ writeTechDayOrder }));
+    expect(result.restored).toBe(0);
+    expect(result.summary.skipped).toEqual([{
+      date: '2026-10-05', technician_id: 't1', reason: 'STALE_TECH_DAY',
+      detail: 'stop a route_order changed during the run',
+    }]);
+    expect(result.summary.failed).toEqual([]);
+  });
+
+  test('a LOCKED_STOP the writer refuses (rollback has no lock pre-check of its own) is reported as skipped', async () => {
+    const conn = fakeLiveConn({ 't1:2026-10-05': [{ id: 'a', route_order: 1 }] });
+    const writeTechDayOrder = jest.fn(async () => {
+      throw Object.assign(new Error('a stop on this tech-day is staff-locked'), { code: 'LOCKED_STOP' });
+    });
+    const rows = [{ id: 'a', date: '2026-10-05', technician_id: 't1', before: 2, after: 1 }];
+    const result = await applyRollback(conn, rows, NOW, rollbackDeps({ writeTechDayOrder }));
+    expect(result.restored).toBe(0);
+    expect(result.summary.skipped).toEqual([{
+      date: '2026-10-05', technician_id: 't1', reason: 'LOCKED_STOP', detail: 'a stop on this tech-day is staff-locked',
+    }]);
+  });
+
+  test('an unreadable reminder-freeze status at commit fails closed into the FAILED list, not skipped', async () => {
+    const conn = fakeLiveConn({ 't1:2026-10-05': [{ id: 'a', route_order: 1 }] });
+    const writeTechDayOrder = jest.fn(async () => {
+      throw Object.assign(new Error('reminder status unreadable at commit'), { code: 'REMINDER_GUARD_OUTAGE' });
+    });
+    const rows = [{ id: 'a', date: '2026-10-05', technician_id: 't1', before: 2, after: 1 }];
+    const result = await applyRollback(conn, rows, NOW, rollbackDeps({ writeTechDayOrder }));
+    expect(result.restored).toBe(0);
+    expect(result.summary.failed).toEqual([{
+      date: '2026-10-05', technician_id: 't1', reason: 'REMINDER_STATUS_UNKNOWN', error: 'reminder status unreadable at commit',
+    }]);
+    expect(result.summary.skipped).toEqual([]);
+  });
+
+  test('two independent tech-days: one restores, one is skipped for mismatch — neither affects the other', async () => {
+    const conn = fakeLiveConn({
+      't1:2026-10-05': [{ id: 'a', route_order: 1 }],
+      't2:2026-10-06': [{ id: 'c', route_order: 9 }], // moved again
+    });
+    const writeTechDayOrder = jest.fn(async () => {});
+    const rows = [
+      { id: 'a', date: '2026-10-05', technician_id: 't1', before: 2, after: 1 },
+      { id: 'c', date: '2026-10-06', technician_id: 't2', before: 4, after: 1 },
+    ];
+    const result = await applyRollback(conn, rows, NOW, rollbackDeps({ writeTechDayOrder }));
+    expect(writeTechDayOrder).toHaveBeenCalledTimes(1);
+    expect(result.restored).toBe(1);
+    expect(result.summary.skipped).toEqual([{
+      date: '2026-10-06', technician_id: 't2', reason: 'MISMATCH',
+      detail: 'no longer matches the backup (ids only): c', mismatched_ids: ['c'],
+    }]);
+  });
+
+  test('an empty backup takes no live read and calls the writer zero times', async () => {
+    const writeTechDayOrder = jest.fn();
+    const conn = jest.fn(() => { throw new Error('must not query with an empty backup'); });
+    const result = await applyRollback(conn, [], NOW, rollbackDeps({ writeTechDayOrder }));
+    expect(result).toEqual({ restored: 0, summary: { skipped: [], failed: [] } });
+    expect(writeTechDayOrder).not.toHaveBeenCalled();
+  });
+});
+
+describe('printRollbackPlan / printRollbackResult', () => {
+  let logs;
+  let logSpy;
+  beforeEach(() => { logs = []; logSpy = jest.spyOn(console, 'log').mockImplementation((msg) => logs.push(msg)); });
+  afterEach(() => logSpy.mockRestore());
+
+  test('printRollbackPlan reports a would-restore day with its note, and a would-skip day with its mismatching ids', () => {
+    printRollbackPlan([
+      { technician_id: 't1', date: '2026-10-05', row_count: 2, would_restore: true, mismatched_ids: [], note: 'eligibility (freeze/lock/today-past) re-checked at write time' },
+      { technician_id: 't2', date: '2026-10-06', row_count: 1, would_restore: false, mismatched_ids: ['x'], note: null },
+    ]);
+    expect(logs.some((l) => /would restore 2 row.*re-checked at write time/.test(l))).toBe(true);
+    expect(logs.some((l) => /WOULD SKIP/.test(l) && /x/.test(l))).toBe(true);
+  });
+
+  test('printRollbackResult reports the restored count and every skipped/failed tech-day with its reason', () => {
+    printRollbackResult({
+      restored: 3,
+      summary: {
+        skipped: [{ date: '2026-10-05', technician_id: 't1', reason: 'MISMATCH', detail: 'no longer matches the backup (ids only): b' }],
+        failed: [{ date: '2026-10-06', technician_id: 't2', reason: 'REMINDER_STATUS_UNKNOWN', error: 'boom' }],
+      },
+    }, 5);
+    expect(logs.some((l) => /Restored 3\/5/.test(l))).toBe(true);
+    expect(logs.some((l) => /2 tech-day\(s\) skipped/.test(l))).toBe(true);
+    expect(logs.some((l) => /2026-10-05 tech t1: MISMATCH — no longer matches the backup.*b/.test(l))).toBe(true);
+    expect(logs.some((l) => /2026-10-06 tech t2: REMINDER_STATUS_UNKNOWN — boom/.test(l))).toBe(true);
+  });
+
+  test('a fully successful rollback prints no skipped section', () => {
+    printRollbackResult({ restored: 2, summary: { skipped: [], failed: [] } }, 2);
+    expect(logs.some((l) => /skipped/.test(l))).toBe(false);
+  });
+});
+
+describe('parseLedgerResult', () => {
+  test('route_optimization_planner_runs.result is jsonb — a real read-back hands back an OBJECT, never a string', () => {
+    // This is the actual pg/knex shape after INSERT ... RETURNING or a
+    // plain SELECT on a jsonb column: JSON.parse'ing it throws
+    // ("[object Object]" is not valid JSON) — the exact codex P1 that
+    // crashed --out AFTER the live writes had already committed.
+    const obj = { reorders: [{ id: 'a' }], skips: [], failures: [] };
+    expect(parseLedgerResult(obj)).toBe(obj);
+  });
+
+  test('a string is still parsed (defensive — some driver configs stringify jsonb)', () => {
+    const obj = { reorders: [{ id: 'a' }] };
+    expect(parseLedgerResult(JSON.stringify(obj))).toEqual(obj);
+  });
+
+  test('null/undefined is an empty object, never a throw', () => {
+    expect(parseLedgerResult(null)).toEqual({});
+    expect(parseLedgerResult(undefined)).toEqual({});
+  });
+});
+
+describe('recoveryInstruction', () => {
+  test('PRRT_kwDOR3YQi86mQsF_: names the exact read-only --export-ledger command for that id and never suggests re-running', () => {
+    const msg = recoveryInstruction('ledger-123');
+    expect(msg).toMatch(/ledger id ledger-123/);
+    expect(msg).toMatch(/--export-ledger ledger-123 --out <path>/);
+    expect(msg).toMatch(/ALREADY COMMITTED/);
+    expect(msg).toMatch(/do NOT re-run/);
+    expect(msg).not.toMatch(/re-run with --out|or re-run/);
+  });
+
+  test('still reads sensibly with no ledger id — points at --export-ledger, never at a re-run', () => {
+    const msg = recoveryInstruction(null);
+    expect(msg).toMatch(/ALREADY COMMITTED/);
+    expect(msg).toMatch(/--export-ledger <id> --out <path>/);
+    expect(msg).toMatch(/do NOT re-run/);
+  });
+});
+
+describe('lock-refusal detection (the script must use wasLockSkipped, not a bare .skipped truthiness check)', () => {
+  // The exact regression: runRouteReorder's OWN successful return carries
+  // `skipped` as a NUMBER (the count of skipped tech-days — routinely > 0
+  // on a normal run with nothing else wrong), and its dry-run shape has no
+  // `skipped` key at all. A naive `if (result.skipped)` reads either as
+  // truthy/absent-but-safe in confusing ways; wasLockSkipped is the one
+  // correct predicate — real shapes, both directions.
+  test('a successful --execute run with skipped tech-days is NOT a lock refusal', () => {
+    expect(wasLockSkipped({ status: 'completed', applied: 2, skipped: 5, failed: 0, ledgerId: 'x' })).toBe(false);
+  });
+
+  test('a successful dry run (no `skipped` key at all) is NOT a lock refusal', () => {
+    expect(wasLockSkipped({ status: 'completed', plan: [] })).toBe(false);
+  });
+
+  test('the run reporting zero skips either way is NOT a lock refusal', () => {
+    expect(wasLockSkipped({ status: 'completed', applied: 1, skipped: 0, failed: 0, ledgerId: 'x' })).toBe(false);
+  });
+
+  test('the MACHINERY skip shapes ARE a lock refusal', () => {
+    expect(wasLockSkipped({ skipped: true, reason: 'lease_held' })).toBe(true);
+    expect(wasLockSkipped({ skipped: true, reason: 'no_connection' })).toBe(true);
+  });
+});
+
+describe('collectEntries', () => {
+  // The run's full tech-day snapshot for the one applied day (the backup's rows).
+  const SNAP = [{ id: 'a', before: 2, after: 1 }, { id: 'b', before: 1, after: 2 }];
+  test('dry run reads result.plan directly — no db call', async () => {
+    const db = jest.fn(() => { throw new Error('db must not be touched in dry run'); });
+    const result = { status: 'completed', plan: [{ date: '2026-10-05' }] };
+    expect(await collectEntries(db, false, result)).toEqual({ entries: [{ date: '2026-10-05' }], error: null });
+  });
+
+  test('--execute reads the ledger row back — the REAL jsonb shape (an object, not a string)', async () => {
+    const reorders = [{ date: '2026-10-05', technicianId: 't1', route_order_changes: [{ id: 'a', before: 2, after: 1 }], route_order_snapshot: SNAP }];
+    const db = jest.fn((table) => {
+      expect(table).toBe('route_optimization_planner_runs');
+      return { where: () => ({ first: async () => ({ result: { reorders, skips: [], failures: [] } }) }) };
+    });
+    const result = { status: 'completed', ledgerId: 'ledger-1', applied: 1, skipped: 0, failed: 0 };
+    expect(await collectEntries(db, true, result)).toEqual({ entries: reorders, error: null });
+  });
+
+  test('no ledger id (nothing applied) is an empty entry list, not a db call', async () => {
+    const db = jest.fn(() => { throw new Error('must not query with no ledgerId'); });
+    const result = { status: 'completed', ledgerId: null, applied: 0, skipped: 0, failed: 0 };
+    expect(await collectEntries(db, true, result)).toEqual({ entries: [], error: null });
+  });
+
+  test('with no primary evidence at all, a ledger read failure IS an error (nothing to fall back on)', async () => {
+    const db = jest.fn(() => ({ where: () => ({ first: async () => { throw new Error('connection lost'); } }) }));
+    const result = { status: 'completed', ledgerId: 'ledger-1', applied: 1, skipped: 0, failed: 0 }; // no appliedChanges
+    const { entries, error } = await collectEntries(db, true, result);
+    expect(entries).toEqual([]);
+    expect(error).toBeInstanceOf(Error);
+    expect(error.message).toMatch(/neither its own result nor the ledger/);
+  });
+
+  // ── codex pre-push P1: runRouteReorder can commit changes and then return
+  // ledgerId:null (or the read-back finds no row) — the run's OWN
+  // appliedChanges is the PRIMARY evidence and must save the backup either
+  // way; the ledger is a cross-check only. ──
+  test('a null ledgerId (ledger insert failed) after real writes still builds the backup from appliedChanges', async () => {
+    const db = jest.fn(() => { throw new Error('must not be queried with no ledgerId'); });
+    const result = {
+      status: 'completed', ledgerId: null, applied: 1, skipped: 0, failed: 0,
+      appliedChanges: [{ date: '2026-10-05', technicianId: 't1', changes: [{ id: 'a', before: 2, after: 1 }], snapshot: SNAP }],
+    };
+    expect(await collectEntries(db, true, result)).toEqual({
+      entries: [{ date: '2026-10-05', technicianId: 't1', route_order_changes: [{ id: 'a', before: 2, after: 1 }], route_order_snapshot: SNAP }],
+      error: null,
+    });
+  });
+
+  test('a ledger read failure with real appliedChanges evidence still builds the backup — no error', async () => {
+    const db = jest.fn(() => ({ where: () => ({ first: async () => { throw new Error('connection lost'); } }) }));
+    const result = {
+      status: 'completed', ledgerId: 'ledger-1', applied: 1, skipped: 0, failed: 0,
+      appliedChanges: [{ date: '2026-10-05', technicianId: 't1', changes: [{ id: 'a', before: 2, after: 1 }], snapshot: SNAP }],
+    };
+    const { entries, error } = await collectEntries(db, true, result);
+    expect(error).toBeNull();
+    expect(entries).toEqual([{ date: '2026-10-05', technicianId: 't1', route_order_changes: [{ id: 'a', before: 2, after: 1 }], route_order_snapshot: SNAP }]);
+  });
+
+  test('appliedChanges (primary) wins over the ledger even when the ledger read succeeds — but its canonicalized/source detail is still merged in for reporting', async () => {
+    // Same underlying row evidence in practice (both are written from the
+    // same in-memory summary), but this proves precedence for the actual
+    // route_order_changes AND that the richer canonicalized/source detail
+    // (which primary's own shape never carries) still reaches the printed
+    // plan by (date, technician) match, not just a blind fallback.
+    const ledgerReorders = [{ date: '2026-10-05', technician_id: 't1', canonicalized: { reasons: ['gap'], source: 'google' }, route_order_changes: [{ id: 'a', before: 2, after: 1 }] }];
+    const db = jest.fn(() => ({ where: () => ({ first: async () => ({ result: { reorders: ledgerReorders } }) }) }));
+    const result = {
+      status: 'completed', ledgerId: 'ledger-1', applied: 1, skipped: 0, failed: 0,
+      appliedChanges: [{ date: '2026-10-05', technicianId: 't1', changes: [{ id: 'a', before: 2, after: 1 }], snapshot: SNAP }],
+    };
+    const { entries, error } = await collectEntries(db, true, result);
+    expect(error).toBeNull();
+    expect(entries).toEqual([{
+      date: '2026-10-05', technicianId: 't1', route_order_changes: [{ id: 'a', before: 2, after: 1 }], route_order_snapshot: SNAP,
+      canonicalized: { reasons: ['gap'], source: 'google' },
+    }]);
+  });
+
+  test('the ledger metadata merge never touches route_order_changes even when the ledger disagrees on the row detail', async () => {
+    const ledgerReorders = [{
+      date: '2026-10-05', technician_id: 't1', source: 'window_constrained',
+      route_order_changes: [{ id: 'z', before: 9, after: 9 }], // deliberately different from primary's own evidence
+    }];
+    const db = jest.fn(() => ({ where: () => ({ first: async () => ({ result: { reorders: ledgerReorders } }) }) }));
+    const result = {
+      status: 'completed', ledgerId: 'ledger-1', applied: 1, skipped: 0, failed: 0,
+      appliedChanges: [{ date: '2026-10-05', technicianId: 't1', changes: [{ id: 'a', before: 2, after: 1 }], snapshot: SNAP }],
+    };
+    const { entries } = await collectEntries(db, true, result);
+    expect(entries).toEqual([{
+      date: '2026-10-05', technicianId: 't1', route_order_changes: [{ id: 'a', before: 2, after: 1 }], route_order_snapshot: SNAP,
+      source: 'window_constrained',
+    }]);
+  });
+
+  test('no matching ledger entry for a primary day leaves it unmerged, never crashing', async () => {
+    const ledgerReorders = [{ date: '2026-10-09', technician_id: 't9', canonicalized: { reasons: ['gap'], source: 'google' }, route_order_changes: [] }];
+    const db = jest.fn(() => ({ where: () => ({ first: async () => ({ result: { reorders: ledgerReorders } }) }) }));
+    const result = {
+      status: 'completed', ledgerId: 'ledger-1', applied: 1, skipped: 0, failed: 0,
+      appliedChanges: [{ date: '2026-10-05', technicianId: 't1', changes: [{ id: 'a', before: 2, after: 1 }], snapshot: SNAP }],
+    };
+    const { entries } = await collectEntries(db, true, result);
+    expect(entries).toEqual([{ date: '2026-10-05', technicianId: 't1', route_order_changes: [{ id: 'a', before: 2, after: 1 }], route_order_snapshot: SNAP }]);
+  });
+
+  test('a mismatch between appliedChanges and the ledger prints a warning but still uses appliedChanges', async () => {
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const ledgerReorders = [{ date: '2026-10-05', technician_id: 't1', route_order_changes: [] }]; // ledger under-counts
+    const db = jest.fn(() => ({ where: () => ({ first: async () => ({ result: { reorders: ledgerReorders } }) }) }));
+    const result = {
+      status: 'completed', ledgerId: 'ledger-1', applied: 1, skipped: 0, failed: 0,
+      appliedChanges: [{ date: '2026-10-05', technicianId: 't1', changes: [{ id: 'a', before: 2, after: 1 }], snapshot: SNAP }],
+    };
+    const { entries, error } = await collectEntries(db, true, result);
+    expect(error).toBeNull();
+    expect(entries[0].route_order_changes).toEqual([{ id: 'a', before: 2, after: 1 }]);
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringMatching(/Warning:.*1 row change.*ledger reports 0/));
+    errorSpy.mockRestore();
+  });
+
+  test('both sources genuinely empty with applied > 0 is an error, not a silent empty backup', async () => {
+    const db = jest.fn(() => ({ where: () => ({ first: async () => ({ result: { reorders: [] } }) }) }));
+    const result = { status: 'completed', ledgerId: 'ledger-1', applied: 1, skipped: 0, failed: 0 }; // no appliedChanges either
+    const { entries, error } = await collectEntries(db, true, result);
+    expect(entries).toEqual([]);
+    expect(error).toBeInstanceOf(Error);
+    expect(error.message).toMatch(/neither its own result nor the ledger/);
+  });
+
+  test('applied === 0 with no evidence anywhere is NOT an error — there was nothing to back up', async () => {
+    const db = jest.fn(() => ({ where: () => ({ first: async () => null }) }));
+    const result = { status: 'completed', ledgerId: 'ledger-1', applied: 0, skipped: 3, failed: 0 };
+    expect(await collectEntries(db, true, result)).toEqual({ entries: [], error: null });
+  });
+});
+
+describe('writeBackupFile', () => {
+  let writeSpy;
+  let renameSpy;
+  beforeEach(() => {
+    writeSpy = jest.spyOn(fs, 'writeFileSync').mockImplementation(() => {});
+    renameSpy = jest.spyOn(fs, 'renameSync').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    writeSpy.mockRestore();
+    renameSpy.mockRestore();
+  });
+
+  test('writes to a .tmp sibling, then renames it into place — never writes the final path directly', () => {
+    const rows = [{ id: 'a', date: '2026-10-05', technician_id: 't1', before: 2, after: 1 }];
+    writeBackupFile('/tmp/backup.json', rows);
+    const resolved = require('path').resolve('/tmp/backup.json');
+    expect(writeSpy).toHaveBeenCalledTimes(1);
+    const [writtenPath, writtenBody] = writeSpy.mock.calls[0];
+    expect(writtenPath).toBe(`${resolved}.tmp`);
+    expect(JSON.parse(writtenBody).rows).toEqual(rows);
+    expect(renameSpy).toHaveBeenCalledWith(`${resolved}.tmp`, resolved);
+  });
+
+  test('a write failure never reaches the rename — an existing backup at the final path is untouched', () => {
+    writeSpy.mockImplementation(() => { throw new Error('disk full'); });
+    expect(() => writeBackupFile('/tmp/backup.json', [])).toThrow('disk full');
+    expect(renameSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('reportAndBackup', () => {
+  let logs;
+  let errors;
+  let logSpy;
+  let errorSpy;
+  let writeSpy;
+  let renameSpy;
+
+  beforeEach(() => {
+    logs = [];
+    errors = [];
+    logSpy = jest.spyOn(console, 'log').mockImplementation((msg) => logs.push(msg));
+    errorSpy = jest.spyOn(console, 'error').mockImplementation((msg) => errors.push(msg));
+    writeSpy = jest.spyOn(fs, 'writeFileSync').mockImplementation(() => {});
+    renameSpy = jest.spyOn(fs, 'renameSync').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    logSpy.mockRestore();
+    errorSpy.mockRestore();
+    writeSpy.mockRestore();
+    renameSpy.mockRestore();
+  });
+
+  const entries = [{ date: '2026-10-05', technicianId: 't1', route_order_changes: [{ id: 'a', before: 2, after: 1 }],
+    route_order_snapshot: [{ id: 'a', before: 2, after: 1 }] }];
+
+  test('writes the backup file (via the tmp+rename path) when entries were read cleanly', () => {
+    const outcome = reportAndBackup({ execute: true, result: { ledgerId: 'ledger-1' }, entries, error: null, outPath: '/tmp/backup.json' });
+    expect(outcome).toEqual({ backupFailed: false });
+    expect(writeSpy).toHaveBeenCalledTimes(1);
+    const resolved = require('path').resolve('/tmp/backup.json');
+    const [writtenPath, writtenBody] = writeSpy.mock.calls[0];
+    expect(writtenPath).toBe(`${resolved}.tmp`);
+    expect(renameSpy).toHaveBeenCalledWith(`${resolved}.tmp`, resolved);
+    const parsed = JSON.parse(writtenBody);
+    expect(parsed.rows).toEqual([{ id: 'a', date: '2026-10-05', technician_id: 't1', before: 2, after: 1 }]);
+  });
+
+  test('no --out path: prints the plan, never touches the filesystem', () => {
+    const outcome = reportAndBackup({ execute: true, result: { ledgerId: 'ledger-1' }, entries, error: null, outPath: null });
+    expect(outcome).toEqual({ backupFailed: false });
+    expect(writeSpy).not.toHaveBeenCalled();
+    expect(logs.some((l) => /stop\(s\)/.test(l))).toBe(true);
+  });
+
+  test('a ledger read error refuses to write an EMPTY backup — never a silent "nothing changed" file', () => {
+    const outcome = reportAndBackup({ execute: true, result: { ledgerId: 'ledger-1' }, entries: [], error: new Error('boom'), outPath: '/tmp/backup.json' });
+    expect(outcome).toEqual({ backupFailed: false });
+    expect(writeSpy).not.toHaveBeenCalled();
+    expect(errors.some((e) => /Refusing to write/.test(e))).toBe(true);
+    expect(errors.some((e) => /ALREADY COMMITTED/.test(e) && /ledger-1/.test(e))).toBe(true);
+  });
+
+  test('a filesystem write failure after a successful run reports backupFailed AND prints the ledger-id recovery instruction', () => {
+    writeSpy.mockImplementation(() => { throw new Error('EACCES: permission denied'); });
+    const outcome = reportAndBackup({ execute: true, result: { ledgerId: 'ledger-1' }, entries, error: null, outPath: '/tmp/backup.json' });
+    expect(outcome).toEqual({ backupFailed: true });
+    expect(errors.some((e) => /Failed to write backup file/.test(e))).toBe(true);
+    expect(errors.some((e) => /ALREADY COMMITTED/.test(e) && /ledger-1/.test(e))).toBe(true);
+    // The final path was never touched — only the never-renamed .tmp file was attempted.
+    expect(renameSpy).not.toHaveBeenCalled();
+  });
+
+  test('a filesystem write failure in DRY RUN reports backupFailed but does not claim writes were committed (nothing to recover)', () => {
+    writeSpy.mockImplementation(() => { throw new Error('disk full'); });
+    const outcome = reportAndBackup({ execute: false, result: { ledgerId: null }, entries, error: null, outPath: '/tmp/backup.json' });
+    expect(outcome).toEqual({ backupFailed: true });
+    expect(errors.some((e) => /Failed to write backup file/.test(e))).toBe(true);
+    expect(errors.some((e) => /ALREADY COMMITTED/.test(e))).toBe(false);
+  });
+});
+
+describe('buildRunOpts', () => {
+  const now = new Date('2026-09-27T04:20:00Z');
+
+  test('--execute omits `now` entirely — runRouteReorder must read the real wall clock at commit time', () => {
+    // The exact codex P1: passing a fixed `now` here would freeze BOTH the
+    // load-time freeze check and writeTechDayOrder's commit-time re-check
+    // to this one instant for the whole run, even if it takes minutes.
+    const opts = buildRunOpts({ execute: true, dates: ['2026-10-05'], now, runType: 'route_order_cleanup' });
+    expect(opts).toEqual({ canonicalizeStale: true, dates: ['2026-10-05'], dryRun: false, runType: 'route_order_cleanup' });
+    expect(opts).not.toHaveProperty('now');
+  });
+
+  test('dry run keeps `now` — nothing commits, so one consistent preview clock across the whole range is safe', () => {
+    const opts = buildRunOpts({ execute: false, dates: ['2026-10-05'], now, runType: 'route_order_cleanup' });
+    expect(opts).toEqual({ canonicalizeStale: true, dates: ['2026-10-05'], dryRun: true, runType: 'route_order_cleanup', now });
+  });
+});
+
+describe('outOfHorizonDates', () => {
+  const TODAY = '2026-10-01';
+  const LAST_DATE = '2026-10-31'; // D+30 from an imagined "now" of 10-01
+
+  test('every date strictly inside (today, lastDate] is in-horizon — nothing reported', () => {
+    expect(outOfHorizonDates(['2026-10-02', '2026-10-31'], TODAY, LAST_DATE)).toEqual([]);
+  });
+
+  test('today itself is out of horizon (runRouteReorder never touches today)', () => {
+    expect(outOfHorizonDates(['2026-10-01', '2026-10-05'], TODAY, LAST_DATE)).toEqual(['2026-10-01']);
+  });
+
+  test('a past date is out of horizon', () => {
+    expect(outOfHorizonDates(['2026-09-15'], TODAY, LAST_DATE)).toEqual(['2026-09-15']);
+  });
+
+  test('a date past D+30 is out of horizon', () => {
+    expect(outOfHorizonDates(['2026-11-01', '2026-10-31'], TODAY, LAST_DATE)).toEqual(['2026-11-01']);
+  });
+
+  test('every date out of range is reported, not just the first', () => {
+    expect(outOfHorizonDates(['2026-09-01', '2026-10-15', '2026-12-01'], TODAY, LAST_DATE))
+      .toEqual(['2026-09-01', '2026-12-01']);
+  });
+});
+
+describe('runIsUnhealthy', () => {
+  test('a completed run with no failures is healthy', () => {
+    expect(runIsUnhealthy({ status: 'completed', applied: 2, skipped: 1, failed: 0 })).toBe(false);
+  });
+
+  test('a dry-run plan shape (no failed count at all) is healthy', () => {
+    expect(runIsUnhealthy({ status: 'completed', plan: [] })).toBe(false);
+  });
+
+  test('status "failed" (a fatal error) is unhealthy', () => {
+    expect(runIsUnhealthy({ status: 'failed' })).toBe(true);
+  });
+
+  test('status "completed_with_errors" is unhealthy even with failed: 0 on the summary count', () => {
+    expect(runIsUnhealthy({ status: 'completed_with_errors', applied: 1, skipped: 0, failed: 0 })).toBe(true);
+  });
+
+  test('a nonzero failed count is unhealthy even if status somehow still reads "completed"', () => {
+    expect(runIsUnhealthy({ status: 'completed', applied: 1, skipped: 0, failed: 2 })).toBe(true);
+  });
+
+  test('gate_off / outside_planning_horizon are legitimate no-ops, not unhealthy', () => {
+    expect(runIsUnhealthy({ status: 'gate_off' })).toBe(false);
+    expect(runIsUnhealthy({ status: 'outside_planning_horizon' })).toBe(false);
+  });
+});
+
+describe('runRollback --execute: run-level lock (PRRT_kwDOR3YQi86mQTC6) and exit code (PRRT_kwDOR3YQi86mQTCz)', () => {
+  const NOW = new Date('2026-09-27T12:00:00Z');
+  const BACKUP_PATH = '/nonexistent/route-order-backup.json';
+  const backupRows = [
+    { id: 'A', date: '2026-10-05', technician_id: 't1', before: 1, after: 2 },
+    { id: 'B', date: '2026-10-05', technician_id: 't1', before: 2, after: 1 },
+  ];
+  let readSpy;
+  let logSpy;
+  let errSpy;
+  beforeEach(() => {
+    readSpy = jest.spyOn(fs, 'readFileSync').mockReturnValue(JSON.stringify({ generated_at: 'x', rows: backupRows }));
+    logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+    errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+  });
+  afterEach(() => { readSpy.mockRestore(); logSpy.mockRestore(); errSpy.mockRestore(); });
+
+  const liveConn = () => fakeLiveConn({ 't1:2026-10-05': [{ id: 'B', route_order: 1 }, { id: 'A', route_order: 2 }] });
+  // Runs the callback like the real lock does when it wins the lease.
+  const lockWon = () => jest.fn(async (_name, fn) => fn());
+
+  test('--execute runs applyRollback INSIDE runExclusive(auto-dispatch-recurring), fail-fast, no health record', async () => {
+    const runExclusive = lockWon();
+    const writeTechDayOrder = jest.fn(async () => {});
+    const code = await runRollback(liveConn(), BACKUP_PATH, true, NOW, rollbackDeps({ writeTechDayOrder, runExclusive, wasLockSkipped }));
+    expect(runExclusive).toHaveBeenCalledTimes(1);
+    expect(runExclusive.mock.calls[0][0]).toBe('auto-dispatch-recurring');
+    expect(runExclusive.mock.calls[0][2]).toEqual({ recordHealth: false, waitForSlot: false });
+    expect(writeTechDayOrder).toHaveBeenCalledTimes(1);
+    expect(code).toBe(0);
+  });
+
+  test('a held lock refuses the whole rollback — the writer is never called, exit 1', async () => {
+    const runExclusive = jest.fn(async () => ({ skipped: true, reason: 'lease_held' }));
+    const writeTechDayOrder = jest.fn();
+    const code = await runRollback(liveConn(), BACKUP_PATH, true, NOW, rollbackDeps({ writeTechDayOrder, runExclusive, wasLockSkipped }));
+    expect(writeTechDayOrder).not.toHaveBeenCalled();
+    expect(code).toBe(1);
+    expect(errSpy.mock.calls.some(([m]) => /lock is held \(lease_held\)/.test(m))).toBe(true);
+  });
+
+  test('the dry-run preview takes no lock at all', async () => {
+    const runExclusive = jest.fn();
+    const code = await runRollback(liveConn(), BACKUP_PATH, false, NOW, rollbackDeps({ runExclusive, wasLockSkipped }));
+    expect(runExclusive).not.toHaveBeenCalled();
+    expect(code).toBe(0);
+  });
+
+  test('an executed rollback with a skipped tech-day exits nonzero', async () => {
+    const writeTechDayOrder = jest.fn(async () => {
+      throw Object.assign(new Error('stop A changed during the run'), { code: 'STALE_TECH_DAY' });
+    });
+    const code = await runRollback(liveConn(), BACKUP_PATH, true, NOW, rollbackDeps({ writeTechDayOrder, runExclusive: lockWon(), wasLockSkipped }));
+    expect(code).toBe(1);
+  });
+
+  test('an executed rollback with a failed tech-day (reminder status unreadable) exits nonzero', async () => {
+    const writeTechDayOrder = jest.fn(async () => {
+      throw Object.assign(new Error('boom'), { code: 'REMINDER_GUARD_OUTAGE' });
+    });
+    const code = await runRollback(liveConn(), BACKUP_PATH, true, NOW, rollbackDeps({ writeTechDayOrder, runExclusive: lockWon(), wasLockSkipped }));
+    expect(code).toBe(1);
+  });
+
+  test('rollbackIsIncomplete: restored < rows, or any skip/failure, is incomplete; a full clean restore is not', () => {
+    const clean = { skipped: [], failed: [] };
+    expect(rollbackIsIncomplete({ restored: 2, summary: clean }, 2)).toBe(false);
+    expect(rollbackIsIncomplete({ restored: 1, summary: clean }, 2)).toBe(true);
+    expect(rollbackIsIncomplete({ restored: 2, summary: { skipped: [{}], failed: [] } }, 2)).toBe(true);
+    expect(rollbackIsIncomplete({ restored: 2, summary: { skipped: [], failed: [{}] } }, 2)).toBe(true);
+  });
+});
+
+describe('full tech-day snapshot rollback (codex PRRT_kwDOR3YQi86mQfEB + its mirror case)', () => {
+  const NOW = new Date('2026-09-27T12:00:00Z');
+  const row = (id, before, after) => ({ id, date: '2026-10-05', technician_id: 't1', before, after });
+
+  test('the mirror case: original A=1, B=1 (a real duplicate) → cleanup A=1, B=2 → restores exactly A=1, B=1', async () => {
+    const live = [
+      { id: 'A', route_order: 1, window_start: '09:00' },
+      { id: 'B', route_order: 2, window_start: '09:00' },
+    ];
+    const snapshot = [row('A', 1, 1), row('B', 1, 2)]; // A unchanged, still in the snapshot
+    const writeTechDayOrder = jest.fn(async () => {});
+    const result = await applyRollback(fakeLiveConn({ 't1:2026-10-05': live }), snapshot, NOW, rollbackDeps({ writeTechDayOrder }));
+    expect(result.summary).toEqual({ skipped: [], failed: [] });
+    expect(writeTechDayOrder).toHaveBeenCalledTimes(1);
+    expect(writeTechDayOrder.mock.calls[0][1].opts.positions).toEqual(new Map([['A', 1], ['B', 1]]));
+    expect(result.restored).toBe(2);
+  });
+
+  // Original A=2, B=1, X=3. Cleanup swapped A/B (A=1, B=2; X unchanged at
+  // 3, recorded in the snapshot). An admin single-row reorder then moved X
+  // to 2. Restoring would have left A and X both at 2.
+  const axLive = () => [
+    { id: 'A', route_order: 1, window_start: '09:00' },
+    { id: 'B', route_order: 2, window_start: '09:00' },
+    { id: 'X', route_order: 2, window_start: '09:00' },
+  ];
+  const axSnapshot = [row('A', 2, 1), row('B', 1, 2), row('X', 3, 3)];
+
+  test('the A/X intervening edit: X no longer at its snapshot "after" → the whole day skips as MISMATCH naming X, writer never called', async () => {
+    const writeTechDayOrder = jest.fn();
+    const result = await applyRollback(fakeLiveConn({ 't1:2026-10-05': axLive() }), axSnapshot, NOW, rollbackDeps({ writeTechDayOrder }));
+    expect(writeTechDayOrder).not.toHaveBeenCalled();
+    expect(result.restored).toBe(0);
+    expect(result.summary.skipped).toEqual([{
+      date: '2026-10-05', technician_id: 't1', reason: 'MISMATCH',
+      detail: 'no longer matches the backup (ids only): X',
+      mismatched_ids: ['X'],
+    }]);
+  });
+
+  test('the A/X intervening edit: the preview shows the same would-skip', async () => {
+    const plan = await previewRollback(fakeLiveConn({ 't1:2026-10-05': axLive() }), axSnapshot, rollbackDeps());
+    expect(plan[0]).toMatchObject({ would_restore: false, mismatched_ids: ['X'], conflict: null });
+  });
+
+  test('a row ADDED to the tech-day since the backup skips the day as MISMATCH naming it', async () => {
+    const live = [
+      { id: 'A', route_order: 2, window_start: '09:00' },
+      { id: 'B', route_order: 1, window_start: '09:00' },
+      { id: 'NEW', route_order: null, window_start: '09:00' },
+    ];
+    const writeTechDayOrder = jest.fn();
+    const result = await applyRollback(fakeLiveConn({ 't1:2026-10-05': live }), [row('A', 1, 2), row('B', 2, 1)], NOW,
+      rollbackDeps({ writeTechDayOrder }));
+    expect(writeTechDayOrder).not.toHaveBeenCalled();
+    expect(result.summary.skipped).toEqual([expect.objectContaining({ reason: 'MISMATCH', mismatched_ids: ['NEW'] })]);
+  });
+
+  test('mismatchedIdsForDay: moved and missing snapshot rows first, then rows added since; an exact match is clean', () => {
+    const snap = [{ id: 'A', after: 1 }, { id: 'B', after: 2 }, { id: 'C', after: 3 }];
+    expect(mismatchedIdsForDay(snap, [{ id: 'A', route_order: 1 }, { id: 'B', route_order: 2 }, { id: 'C', route_order: 3 }])).toEqual([]);
+    expect(mismatchedIdsForDay(snap, [{ id: 'A', route_order: 1 }, { id: 'B', route_order: 5 }, { id: 'D', route_order: 3 }]))
+      .toEqual(['B', 'C', 'D']);
+  });
+});
+
+describe('printPlan shows skipped tech-days too (codex PRRT_kwDOR3YQi86mQsF7)', () => {
+  let logs;
+  let spy;
+  beforeEach(() => { logs = []; spy = jest.spyOn(console, 'log').mockImplementation((m) => logs.push(m)); });
+  afterEach(() => spy.mockRestore());
+
+  test('a dry-run plan with only skipped days prints each with its reason and counts them — never "No tech-day needs a change"', () => {
+    printPlan([
+      { date: '2026-10-05', technicianId: 't1', reasons: [], before: [], after: [], skipped_reason: 'COORDLESS_STOPS' },
+      { date: '2026-10-06', reasons: [], before: [], after: [], skipped_reason: 'WITHIN_72H' }, // day-level, no tech
+    ]);
+    expect(logs).toEqual([
+      '2026-10-05 tech t1: skipped (COORDLESS_STOPS)',
+      '2026-10-06 tech all techs: skipped (WITHIN_72H)',
+      '0 tech-day(s) with route_order changes, 2 skipped.',
+    ]);
+  });
+
+  test('changed and skipped days both print, and the summary counts both', () => {
+    printPlan([
+      { date: '2026-10-05', technicianId: 't1', source: 'promised_window', canonicalized: { reasons: ['gap'], source: 'promised_window' },
+        route_order_changes: [{ id: 'a', before: 4, after: 1 }], skipped_reason: null },
+      { date: '2026-10-05', technicianId: 't2', skipped_reason: 'LOCKED_STOP' },
+    ]);
+    expect(logs[0]).toMatch(/2026-10-05 tech t1: 1 stop\(s\) canonicalized/);
+    expect(logs[1]).toBe('2026-10-05 tech t2: skipped (LOCKED_STOP)');
+    expect(logs[2]).toBe('1 tech-day(s) with route_order changes, 1 skipped.');
+  });
+
+  test('"No tech-day needs a route_order change" only when nothing changed AND nothing was skipped', () => {
+    printPlan([]);
+    expect(logs).toEqual(['No tech-day needs a route_order change in this range.']);
+  });
+});
+
+describe('--export-ledger (codex PRRT_kwDOR3YQi86mQsF_)', () => {
+  let writeSpy;
+  let renameSpy;
+  let logSpy;
+  let errSpy;
+  beforeEach(() => {
+    writeSpy = jest.spyOn(fs, 'writeFileSync').mockImplementation(() => {});
+    renameSpy = jest.spyOn(fs, 'renameSync').mockImplementation(() => {});
+    logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+    errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+  });
+  afterEach(() => { writeSpy.mockRestore(); renameSpy.mockRestore(); logSpy.mockRestore(); errSpy.mockRestore(); });
+
+  const ledgerDb = (row) => {
+    const calls = [];
+    const db = jest.fn((table) => ({
+      where: (w) => ({ first: async (col) => { calls.push({ table, w, col }); return row; } }),
+    }));
+    db.calls = calls;
+    return db;
+  };
+
+  test('reads that planner-run row (one SELECT, no lock) and writes every applied day\'s full snapshot in the --out backup format', async () => {
+    const db = ledgerDb({ result: { reorders: [
+      { date: '2026-10-05', technician_id: 't1', route_order_changes: [{ id: 'a', before: 2, after: 1 }],
+        route_order_snapshot: [{ id: 'a', before: 2, after: 1 }, { id: 'b', before: 1, after: 2 }, { id: 'c', before: 3, after: 3 }] },
+    ] } });
+    const code = await exportLedgerBackup(db, 'ledger-9', '/tmp/restore.json');
+    expect(code).toBe(0);
+    expect(db.calls).toEqual([{ table: 'route_optimization_planner_runs', w: { id: 'ledger-9' }, col: 'result' }]);
+    const resolved = require('path').resolve('/tmp/restore.json');
+    expect(renameSpy).toHaveBeenCalledWith(`${resolved}.tmp`, resolved);
+    expect(JSON.parse(writeSpy.mock.calls[0][1]).rows).toEqual([
+      { id: 'a', date: '2026-10-05', technician_id: 't1', before: 2, after: 1 },
+      { id: 'b', date: '2026-10-05', technician_id: 't1', before: 1, after: 2 },
+      { id: 'c', date: '2026-10-05', technician_id: 't1', before: 3, after: 3 },
+    ]);
+  });
+
+  test('a missing ledger row, or one with no snapshot, exits 1 and writes nothing', async () => {
+    expect(await exportLedgerBackup(ledgerDb(null), 'nope', '/tmp/x.json')).toBe(1);
+    expect(await exportLedgerBackup(ledgerDb({ result: { reorders: [] } }), 'empty', '/tmp/x.json')).toBe(1);
+    expect(writeSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('runCleanup: the lease is taken only for --execute (codex PRRT_kwDOR3YQi86mQsGE)', () => {
+  test('a dry run never calls runExclusive — it runs the reorder pass directly, unlocked', async () => {
+    const runExclusive = jest.fn();
+    const runRouteReorder = jest.fn(async () => ({ status: 'completed', plan: [] }));
+    const opts = { dryRun: true, canonicalizeStale: true };
+    const result = await runCleanup(opts, { execute: false, runRouteReorder, runExclusive });
+    expect(runExclusive).not.toHaveBeenCalled();
+    expect(runRouteReorder).toHaveBeenCalledWith(opts);
+    expect(result).toEqual({ status: 'completed', plan: [] });
+  });
+
+  test('--execute runs inside runExclusive(auto-dispatch-recurring), fail-fast, no health record', async () => {
+    const runExclusive = jest.fn(async (_name, fn) => fn());
+    const runRouteReorder = jest.fn(async () => ({ status: 'completed', applied: 1 }));
+    const result = await runCleanup({ dryRun: false }, { execute: true, runRouteReorder, runExclusive });
+    expect(runExclusive).toHaveBeenCalledWith('auto-dispatch-recurring', expect.any(Function), { recordHealth: false, waitForSlot: false });
+    expect(result).toEqual({ status: 'completed', applied: 1 });
+  });
+});

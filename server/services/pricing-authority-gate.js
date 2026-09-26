@@ -12,6 +12,7 @@
 // not throw, and textual booleans must not pass).
 const { isEnabled } = require('../config/feature-gates');
 const { isProposalAuthoredByEditor } = require('./estimate-proposal');
+const { rowHeldForLegacyAutofillPrice } = require('./estimate-legacy-autofill-hold');
 
 const SERVER_PRICING_AUTHORITY_SQL = "UPPER(pricing_authority) = 'SERVER'";
 // Acceptance rewrites pricing_authority to LOCKED — the price is frozen and
@@ -41,6 +42,11 @@ function parseEstimateDataLoose(value) {
 }
 
 function rowPassesGatedSendAuthority(row = {}) {
+  // An estimate-tool price the 2026-09-26 lookup guards refuse is not the
+  // engine's verdict on today's inputs either: no rail puts it in front of
+  // the customer until staff regenerate it (codex r1 P1 #4941 — the
+  // follow-up / engagement rails ask only this verdict).
+  if (rowHeldForLegacyAutofillPrice(row)) return false;
   const authority = String(row.pricing_authority || row.pricingAuthority || '').toUpperCase();
   if (authority === 'SERVER') return true;
   const data = parseEstimateDataLoose(row.estimate_data ?? row.estimateData);
@@ -100,11 +106,15 @@ async function groupPassesGatedSendAuthority(database, row = {}, now = new Date(
   return (Array.isArray(siblings) ? siblings : []).every((sibling) => rowPassesGatedSendAuthority(sibling));
 }
 
-// The one question every customer-facing rail asks while the gate is on:
-// may THIS row (and the group its link shows) be put in front of the
-// customer? Gate off → always yes.
+const rowClearOfLegacyAutofillHold = (row) => !rowHeldForLegacyAutofillPrice(row);
+
+// The one question every customer-facing rail asks: may THIS row (and the
+// group its link shows) be put in front of the customer? Callers ask it
+// unconditionally. Gate off it stays read-free and judges only the row's own
+// legacy autofill hold (#4941); gate on, the row and every link-visible
+// sibling pass the full verdict, the hold included.
 async function estimateDeliverableUnderGate(database, row = {}) {
-  if (!gatedSendAuthorityPredicateApplies()) return true;
+  if (!gatedSendAuthorityPredicateApplies()) return rowClearOfLegacyAutofillHold(row);
   if (!rowPassesGatedSendAuthority(row)) return false;
   return groupPassesGatedSendAuthority(database, row);
 }
@@ -117,6 +127,7 @@ module.exports = {
   rowPassesGatedSendAuthority,
   groupPassesGatedSendAuthority,
   estimateDeliverableUnderGate,
+  rowClearOfLegacyAutofillHold,
   applyLinkVisibleSiblingScope,
   LINK_VISIBLE_LIVE_STATUSES,
   LINK_VISIBLE_TERMINAL_STATUSES,

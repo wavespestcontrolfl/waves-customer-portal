@@ -1,22 +1,64 @@
 #!/usr/bin/env node
+
+/**
+ * Create or update the Waves Weekly BI Briefing Managed Agent.
+ *
+ * Usage:
+ *   ANTHROPIC_API_KEY=sk-ant-xxx node scripts/create-bi-agent.js
+ *   ANTHROPIC_API_KEY=sk-ant-xxx BI_AGENT_ID=agent_xxx node scripts/create-bi-agent.js
+ *
+ * Add output to .env: BI_AGENT_ID=agent_xxx
+ */
+
 const { BI_AGENT_CONFIG } = require('../server/services/bi-agent-config');
+
 const API_KEY = process.env.ANTHROPIC_API_KEY;
 if (!API_KEY) { console.error('Set ANTHROPIC_API_KEY'); process.exit(1); }
 
-async function createAgent() {
-  console.log('Creating Weekly BI Agent...\n');
-  const res = await fetch('https://api.anthropic.com/v1/agents', {
-    method: 'POST',
-    headers: {
-      'x-api-key': API_KEY, 'anthropic-version': '2023-06-01',
-      'anthropic-beta': 'managed-agents-2026-04-01', 'content-type': 'application/json',
-    },
-    body: JSON.stringify(BI_AGENT_CONFIG),
+const API_HEADERS = {
+  'x-api-key': API_KEY,
+  'anthropic-version': '2023-06-01',
+  'anthropic-beta': 'managed-agents-2026-04-01',
+  'content-type': 'application/json',
+};
+
+async function apiFetch(path, options = {}) {
+  const res = await fetch(`https://api.anthropic.com/v1${path}`, {
+    ...options,
+    headers: API_HEADERS,
   });
-  if (!res.ok) { console.error(`API error ${res.status}:`, await res.text()); process.exit(1); }
-  const agent = await res.json();
-  console.log(`Agent ID:  ${agent.id}\nName:      ${agent.name}\nTools:     ${agent.tools?.length || 0}`);
-  console.log(`\nAdd to .env:\n  BI_AGENT_ID=${agent.id}\n`);
+  if (!res.ok) {
+    throw new Error(`API error ${res.status}: ${await res.text()}`);
+  }
+  return res.json();
 }
 
-createAgent().catch(err => { console.error('Fatal:', err.message); process.exit(1); });
+async function syncAgent() {
+  const agentId = process.env.BI_AGENT_ID;
+  const updating = Boolean(agentId);
+  console.log(`${updating ? 'Updating' : 'Creating'} Weekly BI Briefing Agent...\n`);
+
+  let body = BI_AGENT_CONFIG;
+  if (updating) {
+    const current = await apiFetch(`/agents/${agentId}`);
+    body = {
+      ...BI_AGENT_CONFIG,
+      version: current.version,
+    };
+  }
+
+  const agent = await apiFetch(`/agents${updating ? `/${agentId}` : ''}`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+  console.log(`Agent ID:  ${agent.id}`);
+  console.log(`Name:      ${agent.name}`);
+  console.log(`Tools:     ${agent.tools?.length || 0}`);
+  if (updating) {
+    console.log('\nBI_AGENT_ID is already set; config has been synchronized.\n');
+  } else {
+    console.log(`\nAdd to .env / Railway:\n  BI_AGENT_ID=${agent.id}\n`);
+  }
+}
+
+syncAgent().catch(err => { console.error('Fatal:', err.message); process.exit(1); });

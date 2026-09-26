@@ -100,3 +100,12 @@ it.each(['unknown', 'mixed'])('does not replace explicit %s turf with legacy St.
   await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => url.includes('/protocols/equipment'))).toBe(true));
   expect(fetchMock.mock.calls.some(([url]) => url.includes('/protocols/lawn-mix') || url.includes('/protocols/programs'))).toBe(false);
 });
+
+it('asks for the tree & shrub protocol visit of the appointment month', async () => {
+  const fetchMock = vi.fn(async () => ({ ok: true, json: async () => ({}) }));
+  vi.stubGlobal('fetch', fetchMock);
+  render(<ProtocolPanel service={{ id: 'test-visit', serviceType: 'Tree & Shrub Care', scheduledDate: '2026-04-14' }} onClose={() => {}} />);
+  await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => url.includes('/protocols/match?'))).toBe(true));
+  const matchUrl = fetchMock.mock.calls.map(([url]) => url).find((url) => url.includes('/protocols/match?'));
+  expect(matchUrl).toContain('month=Apr');
+});

@@ -137,8 +137,22 @@ export function PickerBestTimes({ slots, days, onPick, frame }) {
   // Nearby slots lead; within a group the engine's `rank` (lower = better;
   // /book's curated list arrives chronological, so list order is NOT the
   // ranking) decides, and list order only breaks ties or stands in when no
-  // rank rides along (estimate slots are engine-ordered).
-  const rankOf = (panelSlot, s) => [panelSlot.rank, s.rank].find(Number.isFinite) ?? null;
+  // rank rides along (estimate slots are engine-ordered). `s.rank` (the
+  // curated STRIP's own rank) is preferred over `panelSlot.rank` (the day
+  // panel's per-day rank): for every ordinary caller the two are always the
+  // same value (both copied from the same source candidate — booking.js's
+  // curateSlots never touches `rank` differently for the two output
+  // shapes), so this is a no-op there; the re-service rank profile
+  // (GATE_RESERVICE_RANK_AFTER_NEW) is the one case where they now
+  // legitimately diverge — curateReserviceStrip assigns the strip's `rank`
+  // by adjusted score/nearby-desc display order on copies, while
+  // days[].slots keeps each candidate's original (never-mutated) rank — and
+  // the strip's own order is the one that must win (pre-push audit P1 on
+  // #4926: preferring panelSlot.rank let an equal-nearby empty-day pick with
+  // a low RAW rank render ahead of a packed pick the strip had ranked
+  // first). Estimate's SlotPicker never sets `s.rank` at all, so it always
+  // falls through to `panelSlot.rank` unchanged either way.
+  const rankOf = (panelSlot, s) => [s.rank, panelSlot.rank].find(Number.isFinite) ?? null;
   const picks = (slots || [])
     .map((s, i) => {
       const day = s.date ? byDate.get(s.date) : null;

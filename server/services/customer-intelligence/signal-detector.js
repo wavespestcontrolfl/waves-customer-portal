@@ -37,6 +37,34 @@ const SIGNALS_SCHEMA = {
   },
 };
 
+// Structural, off-contract validation for dispatchWithFallback's validate
+// hook: a signal outside contract (confidence not a 0.0-1.0 number, evidence
+// not a non-blank string, or a type outside the schema enum) fails BOTH legs
+// of the chain rather than being silently coerced or stored — a
+// present-but-off-contract value is never rewritten to a different meaning.
+const SIGNAL_TYPE_ENUM = SIGNALS_SCHEMA.properties.signals.items.properties.type.enum;
+
+function invalidAiSignals(json) {
+  const signals = Array.isArray(json?.signals) ? json.signals : null;
+  if (!signals) return 'schema_invalid';
+  for (const sig of signals) {
+    if (!sig || typeof sig !== 'object') return 'schema_invalid';
+    if (!SIGNAL_TYPE_ENUM.includes(sig.type)) return 'schema_invalid';
+    if (typeof sig.confidence !== 'number' || !Number.isFinite(sig.confidence) || sig.confidence < 0 || sig.confidence > 1) return 'schema_invalid';
+    if (typeof sig.evidence !== 'string' || !sig.evidence.trim()) return 'schema_invalid';
+  }
+  return null;
+}
+
+// customer_signals.signal_value is varchar(255) (migration 20260401000037).
+// An accepted (in-contract) signal's composed value must never be able to
+// fail that insert — clip it here rather than let a long evidence quote
+// abort the whole nightly detectAllSignals loop.
+function clip(str, max) {
+  const s = String(str == null ? '' : str);
+  return s.length > max ? s.slice(0, max) : s;
+}
+
 const SIGNAL_TYPES = {
   PAYMENT_FAILED: { weight: -15, severity: 'warning' },
   PAYMENT_FAILED_TWICE: { weight: -25, severity: 'critical' },
@@ -125,11 +153,12 @@ For each signal give its type, a confidence, and a brief quote as evidence. Only
     // FLAGSHIP first, Sol on a miss. A two-leg miss throws into the catch
     // below, which returns the deterministic signals exactly as before.
     const res = await dispatchWithFallback(MODELS.TEXT_POLICIES.highStakes, {
+      laneId: 'signal_detector',
       text: prompt,
       jsonMode: true,
       jsonSchema: SIGNALS_SCHEMA,
       maxTokens: 500,
-    });
+    }, { validate: (result) => invalidAiSignals(result.json) });
     if (!res.ok || !res.json) throw new Error(res.reason || 'no_json');
     const aiSignals = res.json.signals || [];
 
@@ -154,7 +183,7 @@ For each signal give its type, a confidence, and a brief quote as evidence. Only
       if (sig.confidence >= 0.6 && typeMap[sig.type]) {
         signals.push({
           signal_type: typeMap[sig.type],
-          signal_value: `AI detected: ${sig.type} (${Math.round(sig.confidence * 100)}% confidence) — ${sig.evidence || ''}`,
+          signal_value: clip(`AI detected: ${sig.type} (${Math.round(sig.confidence * 100)}% confidence) — ${sig.evidence || ''}`, 255),
           severity: severityMap[sig.type] || 'warning',
         });
       }

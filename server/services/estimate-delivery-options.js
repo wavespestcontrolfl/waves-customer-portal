@@ -959,6 +959,7 @@ module.exports = {
   COMMERCIAL_LOW_CONFIDENCE_RANGE_PCT,
   estimateDataHasQuoteRequirement,
   estimateDataHasUnresolvedManagerApproval,
+  isCommercialEstimateData,
   commercialRiskTypeReviewNeeded,
   commercialLowConfidenceRange,
   commercialLowConfidenceServiceLines,

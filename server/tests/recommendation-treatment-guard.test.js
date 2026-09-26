@@ -251,6 +251,10 @@ describe('sanitizeRecommendationsAgainstTreatment', () => {
     expect(v({ recommendations: ['just a string'] })).toBe(false);
     expect(v({ recommendations: [{ action: { deep: 1 } }] })).toBe(false);
     expect(v({ recommendations: 'not-an-array' })).toBe(false);
+    // A present recommendation must say what to do (review on #4884).
+    expect(v({ recommendations: [{}] })).toBe(false);
+    expect(v({ recommendations: [{ priority: 1, reason: 'b' }] })).toBe(false);
+    expect(v({ recommendations: [{ action: '   ' }] })).toBe(false);
   });
 
   test('aliases are word-bounded — "Avoid driveway runoff" survives Drive XLR8 (r41)', () => {
