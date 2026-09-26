@@ -391,17 +391,19 @@ postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
       expect((await addonsAlert(f)).body).toMatch(/visit-wide discount/);
     });
 
-    test('an invoice that appears on the visit while billing is never taken as this bill — the office decides', async () => {
-      const f = await coveredVisit();
-      const appearedId = randomUUID();
-      const restore = aroundMint(() => trx('invoices').insert({ id: appearedId, customer_id: f.customerId, scheduled_service_id: f.serviceId,
-        invoice_number: `TEST-${appearedId.slice(0, 8)}`, token: randomUUID().replace(/-/g, ''), status: 'draft',
-        total: ADDON, subtotal: ADDON, line_items: JSON.stringify([addonLine(f)]) }));
-      const out = await withFailure(restore, () => complete(f));
-      expect(out).toMatchObject({ status: 200 });
-      expect((await liveInvoices(f)).map((i) => i.id)).toEqual([appearedId]);
-      expect(out.body?.invoiceId).not.toBe(appearedId);
-      expect(await addonsAlert(f)).toBeTruthy();
+    test('an invoice that appears on the visit while billing — live, or already voided — is never billed beside; the office decides', async () => {
+      for (const status of ['draft', 'void']) {
+        const f = await coveredVisit();
+        const appearedId = randomUUID();
+        const restore = aroundMint(() => trx('invoices').insert({ id: appearedId, customer_id: f.customerId, scheduled_service_id: f.serviceId,
+          invoice_number: `TEST-${appearedId.slice(0, 8)}`, token: randomUUID().replace(/-/g, ''), status,
+          total: ADDON, subtotal: ADDON, line_items: JSON.stringify([addonLine(f)]) }));
+        const out = await withFailure(restore, () => complete(f));
+        expect(out).toMatchObject({ status: 200 });
+        expect((await trx('invoices').where({ customer_id: f.customerId })).map((i) => i.id)).toEqual([appearedId]);
+        expect(out.body?.invoiceId).not.toBe(appearedId);
+        expect((await addonsAlert(f)).body).toMatch(/appeared on the visit while billing/);
+      }
     });
 
     test('a later pass that hits a different reason refreshes the office alert instead of leaving the first one standing', async () => {

@@ -191,9 +191,9 @@ class CoveredVisitCloseout {
 
   // Every invoice on the visit or its record, in any status (a voided or
   // refunded one is history too), oldest first.
-  async invoiceHistory() {
+  async invoiceHistory(conn = db) {
     const { svc, record } = this;
-    return db('invoices').where((qb) => {
+    return conn('invoices').where((qb) => {
       qb.where({ scheduled_service_id: svc.id });
       if (record?.id) qb.orWhere({ service_record_id: record.id });
     }).orderBy('created_at');
@@ -304,14 +304,18 @@ class CoveredVisitCloseout {
       // Quiet backfill closeout: the main backfill mint's posture — the
       // estimate deposit stays on its ledger for the reviewer.
       skipDepositCredit: quietBackfill,
-      // The add-on rows and the canonical lines, re-read under the visit
-      // lock: an edit the mint's price guard cannot see (an add-on replaced
-      // at the same price, a discount moved between lines at the same total)
-      // sends bill() back to decide again from the current visit. A status
-      // makes every failure here terminal for the mint's deposit retry.
-      assertLinesCurrentInTrx: async (trx) => {
+      // Re-checked under the visit lock. Invoice history: the mint adopts
+      // only a live invoice, so one another writer made (and voided) since
+      // the history read, or linked by the record alone, is found here. The
+      // add-on rows and canonical lines: an edit the mint's price guard
+      // cannot see (an add-on replaced at the same price, a discount moved
+      // between lines at the same total) sends bill() back to decide again.
+      // A status makes every failure here terminal for the deposit retry.
+      recheckInTrx: async (trx) => {
         let moved;
         try {
+          const [appeared] = await this.invoiceHistory(trx);
+          if (appeared) throw Object.assign(new Error('an invoice appeared on the visit while billing'), { code: 'INVOICE_HISTORY_APPEARED', invoice: appeared });
           const lockedAddons = await annualPrepayAddonRows(current, trx);
           const lockedExtras = await annualPrepayExtrasForVisit(current, lockedAddons, trx);
           moved = lockedAddons.fingerprint !== addons.fingerprint || JSON.stringify(lockedExtras) !== JSON.stringify(extras);
@@ -334,9 +338,13 @@ class CoveredVisitCloseout {
         lineItems: extras.lines,
         trustedStoredDiscountSources: ['scheduled_service'],
       }),
+    }).catch((err) => {
+      if (err.code !== 'INVOICE_HISTORY_APPEARED') throw err;
+      return { invoice: err.invoice, reused: true };
     });
-    // The mint adopts an invoice another writer committed under its lock:
-    // that is an invoice on the visit this closeout did not make.
+    // An invoice another writer committed first — adopted by the mint, or
+    // found under its lock in a status it does not adopt — is on the visit
+    // and this closeout did not make it.
     if (minted.reused) {
       await this.alert(`invoice ${invoiceLabel(minted.invoice)} (${minted.invoice.status}) appeared on the visit while billing; bill whatever of the add-ons ($${extras.total.toFixed(2)}) it does not already charge`, { invoiceId: minted.invoice.id, addonTotal: extras.total });
       return;
