@@ -529,6 +529,35 @@ describe('supporting-blog: hub link / cities / faq / voice', () => {
       expect(result.ok).toBe(true);
     });
 
+    // An unused reference definition, a reference-style image, and a
+    // bracketed phrase with no matching definition never render as a
+    // clickable anchor, so none of them may count.
+    test('an unused reference definition, a reference-style image, or an undefined [label] does NOT count', () => {
+      const body = [
+        'Prose about termites with a [shortcut phrase] that has no definition.',
+        '',
+        '![swarmer photo][c]',
+        '',
+        '[a]: /termite/a/',
+        '[c]: /termite/c/',
+      ].join('\n');
+      const result = checkRelatedPostsLinked({ body }, { voice_constraints: { related_posts: relatedPosts } });
+      expect(result.ok).toBe(false);
+      expect(result.reason).toMatch(/linked 0 so far/);
+    });
+
+    test('reference-style, collapsed, and shortcut links resolve through their REAL definitions', () => {
+      const body = [
+        'See [the A guide][a], [B][], and [C] for background.',
+        '',
+        '[a]: /termite/a/',
+        '[b]: /termite/b/',
+        '[c]: /termite/c/',
+      ].join('\n');
+      const result = checkRelatedPostsLinked({ body }, { voice_constraints: { related_posts: relatedPosts } });
+      expect(result.ok).toBe(true);
+    });
+
     test('a full evaluate() run: fewer than required HARD-FAILS (ok:false) but never moves total_score', () => {
       const passingBody = 'Termite swarmers show up after rain in Bradenton and Sarasota. See our [pest control services](/pest-control-services/) for treatment options.\n\nFAQ\n- Do swarmers bite?\n- No.';
       const baseline = evaluate(

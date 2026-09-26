@@ -36,10 +36,16 @@ const { THRESHOLDS } = require('./scoring-config');
 const { evaluateTitleMetaSpam, renderMetaTokens, PHONE_TOKEN_RE, CITY_PHONE_TOKEN_RE, SALESY_META_RE, endsWithSoftCta, metaHasSalesCopy, BARE_PHONE_DIGITS_RE } = require('./title-meta-spam-gate');
 const {
   isFaqBlockedService,
-  // Reused for related_posts_linked so it counts REAL rendered link
-  // destinations (comments/code fences/attribute display text masked first)
-  // instead of a naive body substring search (Codex #4984 r2 P1).
-  collectInternalDestinations,
+  // Reused for related_posts_linked so it counts REAL, RENDERED, non-image
+  // link destinations — resolving reference-style links against their
+  // ACTUAL definitions and skipping unused definitions and reference-style
+  // images — instead of a naive body substring search or an unconditional
+  // destination collector (Codex #4984 r2+r3 P1s).
+  eachMarkdownLink,
+  markdownReferenceDefinitions,
+  normalizeReferenceLabel,
+  parseLinkDestination,
+  blankReferenceDefinitions,
   blankExpressionStringLiterals,
   blankNonRenderedMarkdown,
   normalizeInternalPath,
@@ -1048,34 +1054,63 @@ function checkFaqSectionPresent(draft, brief) {
 // fewer candidates than this can still pass by linking all of them.
 const RELATED_POSTS_LINK_MINIMUM = 3;
 
+// Every REAL, RENDERED, non-image markdown link destination in `body`,
+// normalized. Built from content-guardrails' own balanced link scanner
+// (eachMarkdownLink) rather than a naive substring search or its broader
+// collectInternalDestinations (which counts ANY destination-shaped text,
+// including an unused reference DEFINITION with no [text][label] usage
+// anywhere, and doesn't distinguish an image from a link) — neither of
+// those renders as a clickable anchor a reader can follow (Codex #4984
+// r2+r3 P1s: a code-fenced/commented mention, an <img>/![alt](path), or a
+// bare `[a]: /x/` definition nobody references must never satisfy this).
+// Raw HTML <a href> is out of scope: the writer's plain-Markdown-subset
+// contract already hard-blocks it elsewhere (body_syntax_supported).
+function realMarkdownLinkPaths(body) {
+  const text = blankExpressionStringLiterals(blankNonRenderedMarkdown(body), { attrValues: false });
+  const defs = markdownReferenceDefinitions(text);
+  // Scan with the definition lines blanked (offsets preserved): otherwise a
+  // `[a]: /x/` line reads as a shortcut `[a]` usage of itself, and an
+  // unused definition counts as a link.
+  const scanned = blankReferenceDefinitions(text);
+  const paths = new Set();
+  for (const span of eachMarkdownLink(scanned)) {
+    if (span.isImage) continue; // never a clickable anchor, inline or reference-style
+    let rawDest = null;
+    if (span.kind === 'inline') {
+      rawDest = parseLinkDestination(text.slice(span.destStart, span.destEnd + 1));
+    } else if (span.kind === 'reference' || span.kind === 'none') {
+      // A reference tail `[text][label]` resolves by its own label; a
+      // collapsed `[text][]` or a bare shortcut `[text]` resolves by the
+      // link's own visible text — only an ACTUAL definition counts, so an
+      // ordinary bracketed phrase with no matching `[label]: /path/`
+      // definition anywhere resolves to nothing (Codex #4984 r3: an unused
+      // definition with no usage must likewise resolve to nothing on the
+      // OTHER side of this same lookup).
+      const refText = span.kind === 'reference' ? text.slice(span.refStart, span.refEnd + 1) : '';
+      const label = refText.trim() ? refText : text.slice(span.labelStart + 1, span.labelEnd);
+      rawDest = defs.get(normalizeReferenceLabel(label)) || null;
+    }
+    // 'malformed' spans never resolve to a destination.
+    if (!rawDest) continue;
+    const norm = normalizeInternalPath(rawDest);
+    if (norm) paths.add(norm);
+  }
+  return paths;
+}
+
 // HARD check (see PAGE_TYPE_CHECKS['supporting-blog'] above, weight 0 —
 // blocks without moving score/threshold math): counts DISTINCT REAL link
-// destinations against the brief's voice_constraints.related_posts
-// allowance (related-posts.js) — the writer prompt asks for at least
-// min(3, N) natural in-text links to them.
-//
-// Reuses content-guardrails' own internal-route destination extraction
-// (collectInternalDestinations, over text with non-rendered markdown and
-// expression-string prose masked first — the exact pipeline
-// internalRouteFinding runs) rather than a naive body.includes(path) —
-// which a code-fenced example, an HTML comment, an image src, or a longer
-// URL merely sharing a path prefix could satisfy without a real clickable
-// anchor (Codex #4984 r2 P1). A post linked twice, or via two different
-// anchors, still counts once — the Set below dedupes by normalized path.
-// No related_posts on the brief (older/non-blog briefs, or a topic with no
-// candidates) passes trivially — not applicable, not a miss.
+// destinations (realMarkdownLinkPaths above) against the brief's
+// voice_constraints.related_posts allowance (related-posts.js) — the
+// writer prompt asks for at least min(3, N) natural in-text links to them.
+// A post linked twice, or via two different anchors, still counts once —
+// the Set dedupes by normalized path. No related_posts on the brief
+// (older/non-blog briefs, or a topic with no candidates) passes trivially
+// — not applicable, not a miss.
 function checkRelatedPostsLinked(draft, brief) {
   const related = Array.isArray(brief?.voice_constraints?.related_posts) ? brief.voice_constraints.related_posts : [];
   if (!related.length) return { ok: true, reason: 'no_related_posts_on_brief' };
-  const body = String(draft.body || '');
-  const rendered = blankExpressionStringLiterals(blankNonRenderedMarkdown(body), { attrValues: false });
-  // collectInternalDestinations' destination pattern matches ANY "](/path)"
-  // or src="/path" — a real destination for the dead-route gate's purposes,
-  // but an <img>/![alt](path) is never a CLICKABLE anchor a reader can
-  // follow to the related post, so it must not satisfy this check (Codex
-  // #4984 r2 P1). Blank image syntax first so only true anchors remain.
-  const withoutImages = rendered.replace(/!\[[^\]]*\]\([^)]*\)/g, '').replace(/<img\b[^>]*>/gi, '');
-  const linkedPaths = new Set(collectInternalDestinations(withoutImages).map((d) => d.norm));
+  const linkedPaths = realMarkdownLinkPaths(String(draft.body || ''));
   let linked = 0;
   const unlinked = [];
   for (const post of related) {
