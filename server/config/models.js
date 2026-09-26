@@ -259,7 +259,6 @@ const ROUTES = Object.freeze({
   leadClassify:      Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_FAST }), // low-cost structured lane; Claude fallback
   knowledgeAnswer:   Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BALANCED }), // balanced Q&A; Claude fallback
   estimateAssistant: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BALANCED }), // balanced prose; Claude fallback
-  askWaves:          Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BALANCED }), // balanced public chat; Claude fallback
   churnClassify:     Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_FAST }), // low-cost structured lane; Claude fallback
   // Owner ruling 2026-07-30 (v9 sealed-exam ranking: Sonnet beat Luna on
   // voice 7.79 vs 7.25, overall 6.50 vs 5.90, 0 unsafe vs 1): Claude Sonnet
@@ -313,6 +312,19 @@ const TEXT_POLICIES = Object.freeze({
     name: 'balancedAnswer',
     primary: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BALANCED }),
     fallback: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: WORKHORSE }),
+  }),
+  askWaves: Object.freeze({
+    name: 'askWaves',
+    // Public sales-intake chat (services/ask-waves-intake.js): balanced OpenAI
+    // primary, Claude VOICE-tier fallback — through dispatchWithFallback like
+    // every other policy, so the shared chain (budget split, provider
+    // failures, chain telemetry) owns the fallback instead of a bespoke local
+    // implementation. ASK_WAVES_MODEL overrides the Anthropic fallback leg
+    // only (the call site swaps this policy's fallback route when set — same
+    // convention as MODEL_FACTCHECK/MODEL_COMPLIANCE overriding one leg of
+    // deepAnalysis); the OpenAI primary always follows OPENAI_BALANCED.
+    primary: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BALANCED }),
+    fallback: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: VOICE }),
   }),
   visionAnalysis: Object.freeze({
     name: 'visionAnalysis',
