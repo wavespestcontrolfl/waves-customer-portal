@@ -216,6 +216,9 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ['Our pesticide has no adverse effects on children or pets.', ''],
     ['El tratamiento no produce efectos adversos.', ''],
     ['El pesticida es completamente inocuo para niños y mascotas.', ''],
+    ["Our treatment won't bother your pets.", ''],
+    ['It will not irritate your kids.', ''],
+    ['No les hará daño a sus mascotas.', ''],
     ['Our solution is completely harmless.', ''],
     ['Completely family-safe.', 'I have children'],
     ['Our treatment is non\u2011toxic.', ''],
@@ -657,6 +660,9 @@ describe('normalizeIntakeResult', () => {
     ['We offer same-day service.', 'Do you offer pest control service?'],
     ['Our service hours are 8 AM to 5 PM, six days a week.', 'What are your service hours?'],
     ['No, the EPA has not approved this pesticide; it is EPA-registered.', ''],
+    ["The EPA doesn't approve pesticides; it registers them.", ''],
+    ["The EPA didn't approve this product; it is EPA-registered.", ''],
+    ['The barrier provides protection for 90 days.', 'How long does the mosquito treatment work?'],
   ])('ordinary service times and an explicit EPA denial are untouched: %s', (reply, context) => {
     expect(scrubUnsafeClaims({ reply, intent: 'question', service_keys: [], ready_for_quote: false }, context).reply).toBe(reply);
   });
@@ -707,6 +713,29 @@ describe('normalizeIntakeResult', () => {
     );
     expect(out.reply).toMatch(/Get my price/);
     expect(out.intent).toBe('quote');
+  });
+
+  test('"Es inocuo." gets the Spanish replacement', () => {
+    expect(scrubUnsafeClaims({ reply: 'Es inocuo.', intent: 'question', service_keys: [], ready_for_quote: false }, 'Seguro?').reply)
+      .toMatch(/instrucciones de la etiqueta/);
+  });
+
+  test.each([
+    'The product is not safe to swallow; take your child to the hospital now.',
+    'El producto no es seguro; vaya al hospital de inmediato.',
+  ])('a hospital referral in the reply keeps the emergency script: %s', (reply) => {
+    const out = scrubUnsafeClaims({ reply, intent: 'question', service_keys: [], ready_for_quote: false }, 'Is this product ok?');
+    expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
+    expect(out.intent).toBe('emergency');
+  });
+
+  test('a rat-poison price question keeps the price redirect, not the 911 script', () => {
+    const out = normalizeIntakeResult(
+      { reply: 'We use Talak and it costs $45 a month.', intent: 'quote', service_keys: [], ready_for_quote: true },
+      'openai',
+      'Which rat poison do you use and what does it cost?',
+    );
+    expect(out.reply).toMatch(/Get my price/);
   });
 
   test('price talk never erases emergency direction (safety runs on the original reply)', () => {
@@ -1395,6 +1424,8 @@ describe('looksLikeEmergency', () => {
     'El cebo fue ingerido por mi hijo',
     'mi perro se comió el cebo',
     'My dog ate the bait',
+    'My child put a bait pellet in his mouth',
+    'mi hijo se metió un cebo en la boca',
     'My child ate pesticide granules',
     'The bait was eaten by my dog',
   ])('flags urgent/medical text: %s', (text) => {
@@ -1412,6 +1443,7 @@ describe('looksLikeEmergency', () => {
     'Have the ants ingested the bait?',
     'the roaches swallowed the gel bait fast',
     'La hormiga se tragó el cebo',
+    'Which rat poison do you use and what does it cost?',
     'We noticed the ants ate the bait',
     'I ate lunch and now there are roaches',
     'my kids ate dinner, ants are in the kitchen',
