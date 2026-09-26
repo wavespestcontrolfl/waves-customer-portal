@@ -113,26 +113,31 @@ test('uncertain acceptance is a durable blocked hold, never an automatic schedul
   });
 });
 
-test('a definite not_sent initial result is trusted against this attempt\'s own concluded failed row', async () => {
-  // Simulates the immediate attempt's own email_messages row: a definite
-  // SendGrid rejection (400/401/429) persisted as `failed` with the real
-  // error message — no abort sentinel, no matching replay token. Before the
-  // fix, emailEvidence() alone called this 'uncertain' and the row queued
-  // permanently blocked even though the caller's own result already proved
-  // a definite not_sent for this exact attempt.
+test('a stored definite SendGrid rejection queues a retryable owner', async () => {
   db._rows.push({ idempotency_key: obligation.obligationKey('receipt:event-definite'), status: 'failed',
-    error_message: 'SendGrid rejected the recipient (400)', send_attempt_token: 'unrelated-token', metadata: {} });
+    error_message: 'SendGrid 400: The from address does not match a verified Sender Identity', metadata: {} });
   const result = { sent: false, retryable: true, deliveryOutcome: 'not_sent', code: 'EMAIL_PROVIDER_REJECTED' };
   const queued = await obligation.queueObligation(notice(), 'payment_receipt', 'receipt:event-definite', result, ['sms']);
   expect(queued).toMatchObject({ queued: true, uncertain: false });
   const row = db._rows.find((candidate) => candidate.id === queued.id);
-  expect(row).toMatchObject({ status: 'scheduled', metadata: { billing_email_uncertain: false,
-    billing_email_safe_attempt_token: 'unrelated-token' } });
+  expect(row).toMatchObject({ status: 'scheduled', metadata: { billing_email_uncertain: false } });
 });
 
-test('a definite not_sent trusted at enqueue is still retried by replay', async () => {
+test.each([
+  ['a transport timeout', 'The operation was aborted due to timeout'],
+  ['a provider 5xx', 'SendGrid 503: Service Unavailable'],
+  ['an ambiguous 408', 'SendGrid 408: Request Timeout'],
+])('%s on an earlier attempt stays held even when this caller reports not_sent', async (_label, errorMessage) => {
+  db._rows.push({ idempotency_key: obligation.obligationKey('receipt:event-ambiguous'), status: 'failed',
+    error_message: errorMessage, send_attempt_token: 'earlier-attempt', metadata: {} });
+  const queued = await obligation.queueObligation(notice(), 'payment_receipt', 'receipt:event-ambiguous',
+    { sent: false, retryable: true, deliveryOutcome: 'not_sent' }, ['sms']);
+  expect(queued).toMatchObject({ queued: true, uncertain: true });
+});
+
+test('a stored definite rejection is retried by replay', async () => {
   db._rows.push({ idempotency_key: obligation.obligationKey('receipt:event-definite-replay'), status: 'failed',
-    error_message: 'SendGrid rejected the recipient (429)', send_attempt_token: 'attempt-1', metadata: {} });
+    error_message: 'SendGrid 429: Too Many Requests', send_attempt_token: 'attempt-1', metadata: {} });
   const queued = await obligation.queueObligation(notice(), 'payment_receipt', 'receipt:event-definite-replay',
     { sent: false, retryable: true, deliveryOutcome: 'not_sent' }, ['sms']);
   const row = db._rows.find((candidate) => candidate.id === queued.id);

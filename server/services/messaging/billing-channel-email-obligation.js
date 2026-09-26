@@ -16,14 +16,26 @@ function obligationKey(eventKey) {
   return `billing_channel_email:${eventKey}:email`;
 }
 
+// sendgrid-mail throws `SendGrid <status>: <body>` and the template library
+// persists that message on the failed row. A status the canonical
+// classifier calls a definite rejection proves SendGrid accepted nothing,
+// whichever attempt wrote the row; timeouts, 5xx and network failures stay
+// ambiguous.
+function definiteProviderRejection(message) {
+  const status = /^SendGrid (\d{3}):/.exec(String(message.error_message || ''))?.[1];
+  return Boolean(status) && require('../sendgrid-mail').isDefiniteRejection({ status: Number(status) });
+}
+
 function emailEvidence(message, safeAttemptToken) {
   if (!message) return 'not_sent';
   if (message.provider_message_id || ['sent', 'delivered'].includes(message.status)) return 'accepted';
   if (message.status === 'failed'
     && (message.error_message === require('../email-template-library').ABORTED_BEFORE_DISPATCH
+      || definiteProviderRejection(message)
       || (safeAttemptToken && message.send_attempt_token === safeAttemptToken))) return 'not_sent';
   // A transport timeout is also persisted as failed. Only a recorded
-  // pre-provider refusal or this owner's definite result permits retry.
+  // pre-provider refusal, a definite provider rejection or this owner's
+  // definite result permits retry.
   return 'uncertain';
 }
 
@@ -168,22 +180,8 @@ async function queueObligation(input, category, eventKey, result, siblings = [],
     if (collision.blocked) return collision.blocked;
     const evidence = emailEvidence(collision.emailMessage);
     const accepted = evidence === 'accepted';
-    // A definite not_sent FOR THIS ATTEMPT (the caller's own just-concluded
-    // result) is authoritative once the colliding row has actually concluded
-    // (`failed`) rather than still resolving in flight (`queued`/`sending`/
-    // `blocked`) — an unresolved row can't be tied to this attempt's result,
-    // so it stays genuinely ambiguous and held (codex r1 #4844 P1: a definite
-    // 400/401/429 rejection was being reported uncertain and blocked forever
-    // because emailEvidence() alone can't see this attempt's own evidence).
-    const tiedToThisAttempt = !uncertain && collision.emailMessage?.status === 'failed';
-    const holdUncertain = !accepted && !tiedToThisAttempt && (uncertain || evidence === 'uncertain');
+    const holdUncertain = !accepted && (uncertain || evidence === 'uncertain');
     const metadata = queuedRowMetadata(input, category, eventKey, key, siblings, holdUncertain);
-    // Replay trusts a failed row only when its attempt token is this owner's
-    // recorded safe token, so the trusted failure's token must travel with the
-    // queued owner or replay re-reads it as uncertain and never retries.
-    if (tiedToThisAttempt && collision.emailMessage.send_attempt_token) {
-      metadata.billing_email_safe_attempt_token = String(collision.emailMessage.send_attempt_token);
-    }
     return insertQueuedRow(trx, input, category, metadata, accepted, holdUncertain);
   });
 }
