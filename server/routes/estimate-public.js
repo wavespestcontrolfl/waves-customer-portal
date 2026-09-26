@@ -26615,12 +26615,9 @@ async function composeEstimateDataPayload(estimate, {
     // builder itself fails soft (never throws) on any ineligibility or error.
     const consultationOffer = includeConsultationOffer && !isInternalRefresh
       ? await buildEstimateConsultationOffer({
-        leadId: estimateDataForIntelligence?.lead_id,
-        leadLinkage: estimateDataForIntelligence?.lead_linkage,
+        estimate,
+        estimateData: estimateDataForIntelligence,
         acceptActive: !adminDraftPreview && !verifiedStaffPreview && !isPdfRenderPass && isEstimateAcceptActive(estimate),
-        estimateAddress: estimate.address,
-        fromVisit: Boolean(estimateDataForIntelligence?.scheduled_service_id),
-        grouped: Boolean(estimate.estimate_group_id),
       })
       : null;
 

@@ -74,6 +74,8 @@ const {
   bindNewsletterDeliveryMessageId,
   reconcileNewsletterSendStatus,
   handleNewsletterEvent,
+  handleEmailMessageEvent,
+  staleEmailSuppressionGroupKey,
   newsletterSuppressionGroupKeyForEvent,
 } = sendgridWebhook;
 
@@ -1524,6 +1526,138 @@ describe('email template send history webhook updates', () => {
     expect(computeEmailMessageEventUpdates({ event: 'open' }, fresh({ opened_at: now }), now)).toBeNull();
     expect(computeEmailMessageEventUpdates({ event: 'click' }, fresh({ clicked_at: now }), now)).toBeNull();
     expect(computeEmailMessageEventUpdates({ event: 'spamreport' }, fresh({ complained_at: now }), now)).toBeNull();
+  });
+
+  test('stale group opt-outs keep a compatible precise scope and reject no-ASM snapshots', () => {
+    const oldNewsletter = process.env.SENDGRID_ASM_GROUP_NEWSLETTER;
+    const oldService = process.env.SENDGRID_ASM_GROUP_SERVICE;
+    process.env.SENDGRID_ASM_GROUP_NEWSLETTER = '101';
+    process.env.SENDGRID_ASM_GROUP_SERVICE = '202';
+    try {
+      expect(staleEmailSuppressionGroupKey({ event: 'group_unsubscribe', asm_group_id: 101 }, 'marketing_referral'))
+        .toBe('marketing_referral');
+      expect(staleEmailSuppressionGroupKey({ event: 'group_unsubscribe', asm_group_id: 202 }, 'transactional_required'))
+        .toBe('service_operational');
+      expect(staleEmailSuppressionGroupKey({ event: 'group_unsubscribe', asm_group_id: 101 }, 'service_operational'))
+        .toBe('marketing_newsletter');
+    } finally {
+      if (oldNewsletter === undefined) delete process.env.SENDGRID_ASM_GROUP_NEWSLETTER;
+      else process.env.SENDGRID_ASM_GROUP_NEWSLETTER = oldNewsletter;
+      if (oldService === undefined) delete process.env.SENDGRID_ASM_GROUP_SERVICE;
+      else process.env.SENDGRID_ASM_GROUP_SERVICE = oldService;
+    }
+  });
+
+  function attemptAwareClient(currentToken) {
+    const calls = {};
+    const client = jest.fn((table) => {
+      const q = {};
+      q.where = jest.fn(() => q);
+      q.whereRaw = jest.fn(() => q);
+      q.whereNull = jest.fn(() => q);
+      q.first = jest.fn(async () => null);
+      q.insert = jest.fn(async () => 1);
+      q.update = jest.fn(async () => {
+        if (table !== 'email_messages') return 1;
+        const tokenClause = q.where.mock.calls
+          .map(([value]) => value)
+          .find((value) => value && Object.prototype.hasOwnProperty.call(value, 'send_attempt_token'));
+        const matches = q.whereNull.mock.calls.some(([field]) => field === 'send_attempt_token')
+          ? currentToken == null
+          : tokenClause?.send_attempt_token === currentToken;
+        return matches ? 1 : 0;
+      });
+      calls[table] = q;
+      return q;
+    });
+    client.raw = jest.fn(async () => ({}));
+    client.transaction = jest.fn(async (fn) => fn(client));
+    return { client, calls };
+  }
+
+  const summaryMessage = (sendAttemptToken) => fresh({
+    id: 'message-1',
+    template_key: 'service.visit_summary',
+    recipient_email_snapshot: 'customer@example.com',
+    subject_snapshot: 'Your service summary',
+    suppression_group_key_snapshot: 'service_operational',
+    provider_retry_count: 3,
+    send_attempt_token: sendAttemptToken,
+  });
+  const blockedEvent = {
+    event: 'blocked',
+    response: 'provider reputation block',
+    email: 'customer@example.com',
+    sg_event_id: 'event-blocked-1',
+    timestamp: 1780066800,
+  };
+
+  test.each([
+    ['tokenized', 'attempt-old'],
+    ['legacy null-token', null],
+  ])('stale %s webhook cannot mutate or reconcile a newly claimed attempt', async (_label, resolvedToken) => {
+    const { client, calls } = attemptAwareClient('attempt-new');
+    const summary = require('../services/visit-completion-summary');
+    const reconcile = jest.spyOn(summary, 'reconcileSummaryEmailBounce').mockResolvedValue();
+    try {
+      await expect(handleEmailMessageEvent(blockedEvent, summaryMessage(resolvedToken), client)).resolves.toBe(false);
+      expect(calls.email_message_events.insert).toHaveBeenCalledTimes(1);
+      expect(calls.email_messages.update).toHaveBeenCalledWith(expect.objectContaining({
+        status: 'failed',
+        provider_retry_exhausted_at: expect.any(Date),
+      }));
+      if (resolvedToken == null) {
+        expect(calls.email_messages.whereNull).toHaveBeenCalledWith('send_attempt_token');
+      } else {
+        expect(calls.email_messages.where).toHaveBeenCalledWith({ send_attempt_token: resolvedToken });
+      }
+      expect(reconcile).not.toHaveBeenCalled();
+    } finally {
+      reconcile.mockRestore();
+    }
+  });
+
+  test.each([
+    ['tokenized', 'attempt-current'],
+    ['legacy null-token', null],
+  ])('same-attempt %s webhook retains normal mutation and reconciliation', async (_label, resolvedToken) => {
+    const { client, calls } = attemptAwareClient(resolvedToken);
+    const summary = require('../services/visit-completion-summary');
+    const reconcile = jest.spyOn(summary, 'reconcileSummaryEmailBounce').mockResolvedValue();
+    try {
+      await expect(handleEmailMessageEvent(blockedEvent, summaryMessage(resolvedToken), client)).resolves.toBe(true);
+      expect(calls.email_messages.update).toHaveBeenCalledTimes(1);
+      expect(reconcile).toHaveBeenCalledWith(expect.objectContaining({ id: 'message-1' }), client);
+    } finally {
+      reconcile.mockRestore();
+    }
+  });
+
+  test.each([
+    ['global unsubscribe', { event: 'unsubscribe' }, 'unsubscribe', null],
+    ['group unsubscribe', { event: 'group_unsubscribe' }, 'unsubscribe', 'service_operational'],
+    ['spam complaint', { event: 'spamreport' }, 'spam_complaint', null],
+    ['hard bounce', { event: 'bounce', type: 'hard', reason: 'mailbox missing' }, 'bounce', null],
+  ])('lost-token %s still records the address suppression', async (_label, event, suppressionType, groupKey) => {
+    const { client, calls } = attemptAwareClient('attempt-new');
+    const summary = require('../services/visit-completion-summary');
+    const bounce = jest.spyOn(summary, 'reconcileSummaryEmailBounce').mockResolvedValue();
+    const recovery = jest.spyOn(summary, 'reconcileSummaryEmailRecovery').mockResolvedValue();
+    try {
+      const webhookEvent = { ...blockedEvent, ...event, sg_event_id: `event-${event.event}` };
+      await expect(handleEmailMessageEvent(webhookEvent, summaryMessage('attempt-old'), client)).resolves.toBe(false);
+      expect(calls.email_suppressions.insert).toHaveBeenCalledWith(expect.objectContaining({
+        email: 'customer@example.com',
+        suppression_type: suppressionType,
+        group_key: groupKey,
+        status: 'active',
+      }));
+      expect(bounce).not.toHaveBeenCalled();
+      expect(recovery).not.toHaveBeenCalled();
+    } finally {
+      bounce.mockRestore();
+      recovery.mockRestore();
+    }
   });
 });
 
