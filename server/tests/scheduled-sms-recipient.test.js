@@ -17,7 +17,12 @@ jest.mock('../config/feature-gates', () => ({
 }));
 
 const db = require('../models/db');
-const { resolveScheduledRecipient, canReplayBillingWithoutPhone, scheduledDepositReceiptAllowed, classifyDepositReplayFallback } = require('../services/scheduler');
+const {
+  resolveScheduledRecipient,
+  canReplayBillingWithoutPhone,
+  scheduledDepositReceiptAllowed,
+  classifyDepositReplayFallback,
+} = require('../services/scheduler');
 
 test.each([false, true])('scheduled replay uses trusted row identities and registered dispatch: %s', async (registered) => {
   // Exercise the actual dispatch block without starting cron jobs or importing
@@ -240,6 +245,11 @@ describe('scheduledDepositReceiptAllowed', () => {
     mockPrefsLookup({ payment_receipt_channel: 'push' });
     await expect(scheduledDepositReceiptAllowed(receiptRow)).resolves.toBe(true);
     mockPrefsLookup(null);
+    await expect(scheduledDepositReceiptAllowed(receiptRow)).resolves.toBe(true);
+  });
+
+  test('leaves explicit receipt combinations to the central billing router', async () => {
+    mockPrefsLookup({ payment_receipt_channel: 'email', payment_receipt_channels: ['push'] });
     await expect(scheduledDepositReceiptAllowed(receiptRow)).resolves.toBe(true);
   });
 
