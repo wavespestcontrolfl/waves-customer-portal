@@ -117,6 +117,11 @@ postgres('billing email recipient locks (PostgreSQL)', () => {
         await trx.raw("SET LOCAL lock_timeout = '100ms'");
         await lockCustomerEmail(trx, 'qa-billing@example.invalid');
       })).rejects.toMatchObject({ code: '55P03' });
+      // A STOP / manual DNC for the customer's phone waits for the handoff.
+      await expect(mockPg.transaction(async (trx) => {
+        await trx.raw("SET LOCAL lock_timeout = '100ms'");
+        await require('../utils/customer-comms-lock').lockSmsPhone(trx, '+19415550100');
+      })).rejects.toMatchObject({ code: '55P03' });
     } catch (err) {
       lockProofError = err;
     } finally {

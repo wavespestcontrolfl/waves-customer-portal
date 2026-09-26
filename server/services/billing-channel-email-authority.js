@@ -10,7 +10,8 @@ const db = require('../models/db');
 const EmailTemplateLibrary = require('./email-template-library');
 const { getInvoiceEmailRecipients } = require('./customer-contact');
 const { billingChannelAllowed } = require('./billing-delivery-channels');
-const { withCustomerCommsLock, lockCustomerEmail } = require('../utils/customer-comms-lock');
+const { withCustomerCommsLock, lockCustomerEmail, lockSmsPhone } = require('../utils/customer-comms-lock');
+const { toE164 } = require('../utils/phone');
 const { preferenceChangeHold } = require('./messaging/billing-channel-routing');
 const { loadSuppressionState, checkSuppression } = require('./messaging/validators/suppression');
 
@@ -152,8 +153,15 @@ async function preSendBlock(preSendCheck, database) {
 
 async function suppressionBlock(trx, recipientEmail, category, customer) {
   await lockCustomerEmail(trx, recipientEmail);
+  // Hold the phone's STOP/START lock (the namespace recordSuppression takes)
+  // for the rest of this transaction, which spans the provider dispatch, so
+  // an opt-out or manual DNC recorded mid-handoff waits for it rather than
+  // slipping past this read. Order: customer-comms -> email -> phone; STOP
+  // recorders take the phone lock alone.
+  const phone = toE164(clean(customer?.phone)) || null;
+  if (phone) await lockSmsPhone(trx, phone);
   const suppressionInput = {
-    channel: 'email', to: clean(customer?.phone) || null,
+    channel: 'email', to: phone,
     metadata: { billingDeliveryLeg: true },
   };
   const suppressionState = await loadSuppressionState(suppressionInput, {}, trx);

@@ -18,9 +18,11 @@ const mockWithCustomerCommsLock = jest.fn(async (database, _customerId, callback
   database.transaction(callback)
 ));
 const mockLockCustomerEmail = jest.fn(async () => {});
+const mockLockSmsPhone = jest.fn(async () => {});
 jest.mock('../utils/customer-comms-lock', () => ({
   withCustomerCommsLock: mockWithCustomerCommsLock,
   lockCustomerEmail: mockLockCustomerEmail,
+  lockSmsPhone: mockLockSmsPhone,
 }));
 
 const mockWithInvoiceDepositSettlement = jest.fn(async (invoiceId, callback, database) => (
@@ -116,6 +118,13 @@ describe('billing channel email authority', () => {
     rows.customers = { id: 'cust-1', first_name: 'Casey', email: 'casey@example.com' };
     rows.notification_prefs = { customer_id: 'cust-1', billing_channels: ['email'] };
     rows.invoices = { id: 'inv-1', customer_id: 'cust-1', status: 'sent' };
+  });
+
+  test("holds the customer's phone STOP/START lock through the Email dispatch", async () => {
+    rows.customers = { id: 'cust-1', first_name: 'Casey', email: 'casey@example.com', phone: '(941) 555-0100' };
+    const { state } = await runAuthority();
+    expect(state.boundaryBlock).toBeNull();
+    expect(mockLockSmsPhone).toHaveBeenCalledWith(expect.anything(), '+19415550100');
   });
 
   test('does not allow dispatch when Email is absent from the explicit category selection', async () => {
