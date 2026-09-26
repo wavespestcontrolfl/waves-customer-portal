@@ -1,7 +1,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const TwilioService = require('./twilio');
-const { REPLAY_HOLD_CODES } = require('./messaging/billing-channel-routing');
+const { REPLAY_HOLD_CODES, isReplayHold } = require('./messaging/billing-channel-routing');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { logAutopay } = require('./autopay-log');
 const { etParts, etDateString, addETDays } = require('../utils/datetime-et');
@@ -83,6 +83,32 @@ async function sendCustomerBillingSms({ customer, body, purpose = 'billing', mes
       metadata: JSON.stringify({ ...metadata, entry_point: 'billing_failure_deferred',
         payment_id: paymentId, attempt_payment_id: attemptPaymentId, retry_count: retryCount,
         customer_id: customer.id, replay_purpose: 'payment_failure', original_block_code: sendResult.code,
+        refresh_customer_phone: true, resolve_from_by_customer: true,
+      }),
+    });
+    return { ...sendResult, scheduled: true };
+  }
+  // A receipt (payment_receipt) send hits the same explicit-router holds a
+  // failure notice does — a quiet-hours window, an unresolved App/Email
+  // suppression lookup, a mid-dispatch preference change — but by the time
+  // the caller catches the throw the payment already settled, so losing the
+  // receipt here loses it for good (#4843 r7). Schedule a replay the same
+  // way payment_failure does instead of throwing. No attemptPaymentId for a
+  // receipt (there is no failed-attempt row to correlate), so the event key
+  // stays payment:${paymentId}:${messageType} — the same key an already-
+  // accepted Email/App leg registered, so the replay dedupes onto it rather
+  // than re-fanning a leg that already delivered.
+  if (purpose === 'payment_receipt' && paymentId && isReplayHold(sendResult) && sendResult.nextAllowedAt) {
+    await db('sms_log').insert({
+      customer_id: customer.id, direction: 'outbound',
+      from_phone: require('../config/twilio-numbers').getOutboundNumber(), to_phone: customer.phone,
+      message_body: body, message_type: messageType, status: 'scheduled',
+      scheduled_for: new Date(sendResult.nextAllowedAt),
+      metadata: JSON.stringify({ ...metadata,
+        notificationEventKey: sendResult.notificationEventKey || metadata.notificationEventKey,
+        entry_point: 'billing_receipt_deferred',
+        payment_id: paymentId, customer_id: customer.id, replay_purpose: 'payment_receipt',
+        original_block_code: sendResult.code,
         refresh_customer_phone: true, resolve_from_by_customer: true,
       }),
     });

@@ -662,6 +662,30 @@ const REGISTRY = {
     },
   },
 
+  // A receipt replay (billing-cron.js's payment_receipt hold branch) —
+  // eligible only while the underlying charge is still the settled payment
+  // the frozen "you were charged $X" copy describes. 'paid' is the only
+  // settled value the payments status enum carries (initial_schema.js +
+  // 20260610000002_payments_status_disputed_canceled.js); a refund,
+  // chargeback, void, or any other non-'paid' status overnight means the
+  // receipt would misstate money the customer no longer owes or was given
+  // back — suppress rather than replay it.
+  billing_receipt_deferred: {
+    async recheck(meta) {
+      try {
+        const payment = await db('payments').where({ id: meta.payment_id, customer_id: meta.customer_id })
+          .first();
+        if (!payment) return { eligible: false, reason: 'payment-missing' };
+        if (payment.status !== 'paid') return { eligible: false, reason: `payment-${payment.status}` };
+        const customer = await db('customers').where({ id: meta.customer_id }).first();
+        if (!customer || customer.deleted_at) return { eligible: false, reason: 'customer-unavailable' };
+        return { eligible: true };
+      } catch (err) {
+        return failClosed('billing-receipt', meta.payment_id, err);
+      }
+    },
+  },
+
   stripe_webhook_billing_deferred: {
     async recheck(meta) {
       // An ACH failure / action-required notice queued at night can resolve

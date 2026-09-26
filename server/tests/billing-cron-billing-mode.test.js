@@ -38,7 +38,7 @@ jest.mock('../models/db', () => {
   return db;
 });
 
-jest.mock('../services/logger', () => ({ info() {}, warn() {}, error() {}, debug() {} }));
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/autopay-log', () => ({ logAutopay: jest.fn() }));
 jest.mock('../services/twilio', () => ({ sendSms: jest.fn() }));
 jest.mock('../services/messaging/send-customer-message', () => ({
@@ -215,5 +215,58 @@ describe('monthly payment settlement reporting', () => {
       purpose: 'payment_receipt',
       metadata: expect.objectContaining({ billingDeliveryCategory: 'payment_receipt' }),
     }));
+  });
+});
+
+describe('processMonthlyBilling — payment_receipt replay holds (#4843 r7)', () => {
+  test.each(['QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT', 'APP_DELIVERY_HOLD', 'APP_PROVIDER_RETRY', 'BILLING_PREFERENCES_CHANGED', 'SUPPRESSION_LOOKUP_FAILED', 'BILLING_EMAIL_PREPARATION_HOLD'])('a %s hold on the receipt send queues a scheduled replay instead of throwing', async (code) => {
+    mockCustomers = [{ ...baseCustomer, id: 'cust-RX', billing_mode: 'monthly_membership' }];
+    StripeService.chargeMonthly.mockResolvedValue({ id: 'pay-receipt-1', status: 'paid', amount: '55.30' });
+    const sender = require('../services/messaging/send-customer-message').sendCustomerMessage;
+    sender.mockResolvedValueOnce({
+      sent: false, deferred: true, code, nextAllowedAt: '2026-09-09T12:00:00Z',
+      notificationEventKey: 'payment:pay-receipt-1:autopay_charge_success',
+    });
+    const result = await BillingCron.processMonthlyBilling();
+    // The charge itself settled — only the receipt SMS is held.
+    expect(result.charged).toBe(1);
+    expect(mockScheduledNotices).toHaveLength(1);
+    expect(mockScheduledNotices[0]).toMatchObject({ customer_id: 'cust-RX', status: 'scheduled' });
+    const meta = JSON.parse(mockScheduledNotices[0].metadata);
+    expect(meta).toMatchObject({
+      payment_id: 'pay-receipt-1', entry_point: 'billing_receipt_deferred',
+      replay_purpose: 'payment_receipt', original_block_code: code,
+      notificationEventKey: 'payment:pay-receipt-1:autopay_charge_success',
+      billingDeliveryCategory: 'payment_receipt',
+      refresh_customer_phone: true, resolve_from_by_customer: true,
+    });
+    expect(meta.attempt_payment_id).toBeUndefined();
+  });
+
+  test('a non-hold receipt-send failure still throws (caught and logged, no scheduled row)', async () => {
+    mockCustomers = [{ ...baseCustomer, id: 'cust-RY', billing_mode: 'monthly_membership' }];
+    StripeService.chargeMonthly.mockResolvedValue({ id: 'pay-receipt-2', status: 'paid', amount: '55.30' });
+    const sender = require('../services/messaging/send-customer-message').sendCustomerMessage;
+    sender.mockResolvedValueOnce({ sent: false, blocked: true, code: 'SOME_OTHER_CODE', deliveryOutcome: 'not_sent' });
+    const logger = require('../services/logger');
+    const result = await BillingCron.processMonthlyBilling();
+    expect(result.charged).toBe(1);
+    expect(mockScheduledNotices).toHaveLength(0);
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('Payment confirmation SMS failed'));
+  });
+
+  test('a hold with no paymentId on the payment row still throws instead of queuing a scheduled row', async () => {
+    mockCustomers = [{ ...baseCustomer, id: 'cust-RZ', billing_mode: 'monthly_membership' }];
+    // No `id` on the settled payment row — sendCustomerBillingSms receives
+    // no paymentId, so even a replay-hold code must fall through to the
+    // generic throw rather than queue an unattributable scheduled row.
+    StripeService.chargeMonthly.mockResolvedValue({ status: 'paid', amount: '55.30' });
+    const sender = require('../services/messaging/send-customer-message').sendCustomerMessage;
+    sender.mockResolvedValueOnce({ sent: false, deferred: true, code: 'QUIET_HOURS_HOLD', nextAllowedAt: '2026-09-09T12:00:00Z' });
+    const logger = require('../services/logger');
+    const result = await BillingCron.processMonthlyBilling();
+    expect(result.charged).toBe(1);
+    expect(mockScheduledNotices).toHaveLength(0);
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('Payment confirmation SMS failed'));
   });
 });

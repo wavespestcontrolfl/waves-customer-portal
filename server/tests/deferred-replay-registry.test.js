@@ -237,6 +237,38 @@ describe('deferred-replay registry', () => {
     })).toEqual({ eligible: false, reason: 'settled' });
   });
 
+  test.each([
+    [{ status: 'paid' }, true],
+    [{ status: 'refunded' }, false],
+    [{ status: 'disputed' }, false],
+    [{ status: 'canceled' }, false],
+    [{ status: 'failed' }, false],
+    [null, false],
+  ])('billing receipt replay checks the payment is still paid: %j', async (payment, eligible) => {
+    const q = firstChain(payment);
+    db.mockReturnValueOnce(q);
+    if (eligible) db.mockReturnValueOnce(firstChain({ id: 'cust-1' }));
+    expect(await recheckDeferredReplay('billing_receipt_deferred', {
+      payment_id: 'pay-1', customer_id: 'cust-1',
+    })).toMatchObject({ eligible });
+    expect(q.where).toHaveBeenCalledWith({ id: 'pay-1', customer_id: 'cust-1' });
+  });
+
+  test('billing receipt replay suppresses for a deleted customer', async () => {
+    db.mockReturnValueOnce(firstChain({ status: 'paid' }));
+    db.mockReturnValueOnce(firstChain({ id: 'cust-1', deleted_at: new Date() }));
+    expect(await recheckDeferredReplay('billing_receipt_deferred', {
+      payment_id: 'pay-1', customer_id: 'cust-1',
+    })).toEqual({ eligible: false, reason: 'customer-unavailable' });
+  });
+
+  test('billing receipt replay retains its retry on a database outage', async () => {
+    db.mockReturnValueOnce(throwChain());
+    expect(await recheckDeferredReplay('billing_receipt_deferred', {
+      payment_id: 'pay-1', customer_id: 'cust-1',
+    })).toMatchObject({ eligible: false, retryable: true });
+  });
+
   test('unregistered entry points are inert', async () => {
     expect(await recheckDeferredReplay('some_future_unregistered_deferred', {})).toBeNull();
     expect(await finalizeDeferredReplay('some_future_unregistered_deferred', {}, {})).toBeNull();
