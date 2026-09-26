@@ -116,12 +116,13 @@ function rowToDayStop(r) {
   };
 }
 
-// The moving visit's own shape for route-model.js's routeCost/stopPlanningMinutes
-// (Codex pre-push P1: routeCost now charges the moving visit's planning
-// minutes, which needs its real service_type/estimated_duration_minutes —
-// a bare {geo, startMin} always fell back to the flat default, never the
-// service's actual duration or planning-table category).
-function serviceToRouteStop(service, geo, startMin) {
+// The moving UNIT's shape for route-model.js's routeCost: the tapped visit's
+// own planning fields plus `unitMembers`, its group siblings (loadGroupContext).
+// The siblings are excluded from the day's other stops because they move too,
+// so routeCost must charge their planning minutes with the visit's — on the
+// current placement and every candidate alike — or a grouped visit's route
+// minutes would omit their work (Codex pre-push P1).
+function serviceToRouteStop(service, geo, startMin, siblings = []) {
   return {
     geo,
     startMin,
@@ -130,6 +131,7 @@ function serviceToRouteStop(service, geo, startMin) {
     is_recurring: service.is_recurring,
     is_callback: service.is_callback,
     estimated_duration_minutes: service.estimated_duration_minutes,
+    unitMembers: siblings,
   };
 }
 
@@ -181,9 +183,10 @@ async function loadDayStops(db, { technicianId, dateStr, excludeIds }) {
 // The moving unit: its ids (self + every open group member — the rebooker's
 // excludeServiceIds for a unit move, so members never conflict with each
 // other and never count as a stationary "other stop" for scoring) and the
-// sibling rows predictMemberWindows needs. ONE `openMembers` read (the
-// accessor the unit mover itself uses) and, only when there ARE siblings, one
-// read of their windows. An unreadable group degrades to a standalone visit.
+// sibling rows predictMemberWindows (windows) and routeCost (planning fields)
+// need. ONE `openMembers` read (the accessor the unit mover itself uses) and,
+// only when there ARE siblings, one read of those rows. An unreadable group
+// degrades to a standalone visit.
 async function loadGroupContext(db, service) {
   const selfId = String(service.id);
   if (!service.visit_id) return { excludeIds: new Set([selfId]), siblings: [] };
@@ -195,7 +198,7 @@ async function loadGroupContext(db, service) {
     if (!siblingIds.length) return { excludeIds, siblings: [] };
     const siblings = await db('scheduled_services')
       .whereIn('id', siblingIds)
-      .select('id', 'window_start', 'window_end', 'estimated_duration_minutes');
+      .select('id', 'window_start', 'window_end', 'estimated_duration_minutes', 'service_type', 'is_recurring', 'is_callback');
     return { excludeIds, siblings };
   } catch {
     return { excludeIds: new Set([selfId]), siblings: [] };
@@ -288,8 +291,8 @@ function slotTaken(windows, occupied) {
 // One surviving candidate's numbers on the shared model — the SAME
 // routeCost/clusterShare computeCurrentPlacement uses — over that tech-day's
 // active stops.
-function scoreOnSharedModel(service, geo, cand, stops) {
-  const cost = routeCost(stops, serviceToRouteStop(service, geo, hhmmToMin(cand.start_time)));
+function scoreOnSharedModel(service, geo, cand, stops, siblings) {
+  const cost = routeCost(stops, serviceToRouteStop(service, geo, hhmmToMin(cand.start_time), siblings));
   return {
     ...cand,
     detour_minutes: cost.detourMinutes,
@@ -327,7 +330,7 @@ async function filterAndScoreSharedModelCandidates(service, geo, candidates, ctx
     }
     const key = `${cand.technician_id}|${cand.date}`;
     if (!stopsByTechDay.has(key)) stopsByTechDay.set(key, stopsForTechDay(dayStops, cand.technician_id, cand.date));
-    kept.push(scoreOnSharedModel(service, geo, cand, stopsByTechDay.get(key)));
+    kept.push(scoreOnSharedModel(service, geo, cand, stopsByTechDay.get(key), siblings));
   }
   return kept;
 }
@@ -452,9 +455,9 @@ async function computeCurrentPlacement(service, prefs, ctx) {
 // legacy object is byte-for-byte unchanged.
 async function sharedModelCurrentPlacement(service, geo, ctx, { dateStr, techId, myStart }) {
   if (!autoDispatchSharedModelLive()) return {};
-  const { excludeIds } = await loadGroupContext(ctx.db, service);
+  const { excludeIds, siblings } = await loadGroupContext(ctx.db, service);
   const stops = await loadDayStops(ctx.db, { technicianId: techId, dateStr, excludeIds });
-  const cost = geo ? routeCost(stops, serviceToRouteStop(service, geo, myStart)) : null;
+  const cost = geo ? routeCost(stops, serviceToRouteStop(service, geo, myStart, siblings)) : null;
   return {
     ...(cost ? { detour_minutes: cost.detourMinutes, total_drive_minutes: cost.driveWithMinutes, route_minutes: cost.routeTimeWithMinutes } : {}),
     stops_that_day: stops.length + 1,

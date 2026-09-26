@@ -484,8 +484,10 @@ async function attemptApplyAutoDispatchMove(service, best, fresh, runId, config 
 // the tried prefix plus the fresh ranked candidates not yet tried, still
 // bounded at MAX_APPLY_ATTEMPTS. A re-evaluation that no longer qualifies,
 // or that fails, ends the retries (nothing verified to try). Without a
-// `rescore` hook the existing list is kept.
-async function attemptsAfterSlotTaken(config, attempts, triedCount, serviceId) {
+// `rescore` hook the existing list is kept. Each fresh candidate is recorded
+// in `authorizedBy` against the re-evaluation that offered it, so the
+// caller audits it against THAT evaluation's current placement and scores.
+async function attemptsAfterSlotTaken(config, attempts, triedCount, serviceId, authorizedBy) {
   if (typeof config.rescore !== 'function') return attempts;
   const tried = attempts.slice(0, triedCount);
   try {
@@ -494,6 +496,7 @@ async function attemptsAfterSlotTaken(config, attempts, triedCount, serviceId) {
     const keyOf = (c) => `${c.date}|${c.start_time}|${c.technician_id}`;
     const triedKeys = new Set(tried.map(keyOf));
     const fresh = refreshed.rankedCandidates.filter((c) => c && !triedKeys.has(keyOf(c)));
+    fresh.forEach((c) => authorizedBy.set(c, refreshed));
     return [...tried, ...fresh].slice(0, MAX_APPLY_ATTEMPTS);
   } catch (rescoreErr) {
     logger.warn(`[auto-dispatch] re-evaluation after SLOT_TAKEN failed for ${serviceId}: ${rescoreErr.message}`);
@@ -524,9 +527,12 @@ async function attemptsAfterSlotTaken(config, attempts, triedCount, serviceId) {
  * candidate object that actually landed (may differ from `best` after a
  * fallback) and `attempts` is how many were tried (ids/numbers only), so a
  * caller can build its own audit entry from the candidate that really moved.
- * Gate on, a failure's error carries `lastAttempted` (the candidate object
- * of the final attempt) and `attemptsTried`, so the failure audit describes
- * what was actually tried last, not always `best` (Codex r1).
+ * `evaluation` is set when the landed candidate came from a re-evaluation
+ * after a SLOT_TAKEN — the evaluation that authorized it. Gate on, a
+ * failure's error carries `lastAttempted` (the candidate object of the final
+ * attempt), `attemptsTried` and `lastEvaluation` (null when the caller's own
+ * evaluation authorized it), so the failure audit describes what was
+ * actually tried last, not always `best` (Codex r1).
  */
 async function applyAutoDispatchMove(service, best, runId, config = {}) {
   // Stale-recommendation guard: the row was loaded + scored earlier this run.
@@ -547,6 +553,9 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
     ? config.alternateCandidates.filter((c) => c && c !== best)
     : [];
   let attempts = [best, ...alternates].slice(0, MAX_APPLY_ATTEMPTS);
+  // candidate -> the re-evaluation that authorized it (retries only; the
+  // caller's own evaluation authorized `best` and the original alternates).
+  const authorizedBy = new Map();
 
   for (let i = 0; i < attempts.length; i += 1) {
     try {
@@ -556,14 +565,17 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
       // attempts (ids/numbers only): how many candidates were tried before
       // this one landed — 1 when the first attempt succeeded, so a caller
       // never has to infer it from `applied === best`.
-      return { ...applied, attempts: i + 1 };
+      const evaluation = authorizedBy.get(attempts[i]);
+      return { ...applied, attempts: i + 1, ...(evaluation ? { evaluation } : {}) };
     } catch (err) {
       const slotTaken = sharedModelOn && err && err.code === 'SLOT_TAKEN' && i + 1 < MAX_APPLY_ATTEMPTS;
-      if (slotTaken) attempts = await attemptsAfterSlotTaken(config, attempts, i + 1, service.id);
+      if (slotTaken) attempts = await attemptsAfterSlotTaken(config, attempts, i + 1, service.id, authorizedBy);
       if (!slotTaken || i + 1 >= attempts.length) {
         // Gate on: name the candidate that actually failed last, for the
         // failure audit. Gate off: the error propagates untouched.
-        if (sharedModelOn && err) Object.assign(err, { lastAttempted: attempts[i], attemptsTried: i + 1 });
+        if (sharedModelOn && err) {
+          Object.assign(err, { lastAttempted: attempts[i], attemptsTried: i + 1, lastEvaluation: authorizedBy.get(attempts[i]) || null });
+        }
         throw err;
       }
       logger.warn(`[auto-dispatch] SLOT_TAKEN for ${service.id} on attempt ${i + 1}/${attempts.length} — trying next-best candidate`);

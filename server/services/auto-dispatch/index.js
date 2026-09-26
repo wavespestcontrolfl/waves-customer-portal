@@ -284,14 +284,18 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
 // so this lookup/rescore/rebuild doesn't add its own branches to that
 // function's already-large complexity count. Falls back to `fresh.best`
 // when the applier didn't report `applied` (a plain mock, or a version of
-// apply.js that predates this lane), so the common case is unaffected.
+// apply.js that predates this lane), so the common case is unaffected. A
+// candidate a post-SLOT_TAKEN re-evaluation offered (`result.evaluation`) is
+// scored against THAT evaluation's current placement and threshold — the
+// comparison that authorized the move (Codex pre-push P1).
 function buildAppliedPlacementAudit(fresh, service, prefs, ctx, lockBoundary, result) {
+  const evaluation = result.evaluation || fresh;
   const appliedCandidate = result.applied || fresh.best;
   const scoreCtx = { currentTechnicianId: service.technician_id, changeCount: service.auto_dispatch_change_count || 0 };
   const appliedScore = scoreAppointmentPlacement(appliedCandidate, prefs, scoreCtx);
   const built = buildPlacementAudit({
-    current: fresh.current, currentScore: fresh.currentScore, candidate: appliedCandidate, candidateScore: appliedScore,
-    service, prefs, lockBoundary, ctx, threshold: fresh.threshold,
+    current: evaluation.current, currentScore: evaluation.currentScore, candidate: appliedCandidate, candidateScore: appliedScore,
+    service, prefs, lockBoundary, ctx, threshold: evaluation.threshold,
   });
   // attempts (ids/numbers only): how many candidates apply.js tried before
   // this one landed — 1 when the first attempt succeeded, or when the
@@ -303,17 +307,20 @@ function buildAppliedPlacementAudit(fresh, service, prefs, ctx, lockBoundary, re
 // (Codex r1 — a SLOT_TAKEN fallback can fail on a different candidate than
 // `fresh.best`), else the fresh placement, else the pass-1 audit when the
 // re-evaluation itself threw. apply.js attaches `lastAttempted` /
-// `attemptsTried` (ids/numbers only) only under
-// GATE_AUTO_DISPATCH_SHARED_MODEL, so gate off the row is unchanged.
+// `attemptsTried` / `lastEvaluation` only under
+// GATE_AUTO_DISPATCH_SHARED_MODEL, so gate off the row is unchanged. The
+// comparison is the one that authorized the last attempt: a post-SLOT_TAKEN
+// re-evaluation's (`lastEvaluation`), else `fresh` (Codex pre-push P1).
 function failedPlacementAudit(fresh, pm, lockBoundary, applyErr) {
   const attempted = fresh && fresh.kind === 'move' && applyErr && applyErr.lastAttempted;
   if (!attempted) return (fresh && fresh.audit) || pm.result.audit;
+  const evaluation = applyErr.lastEvaluation || fresh;
   const { service, prefs, ctx } = pm;
   const scoreCtx = { currentTechnicianId: service.technician_id, changeCount: service.auto_dispatch_change_count || 0 };
   const attemptedScore = scoreAppointmentPlacement(applyErr.lastAttempted, prefs, scoreCtx);
   const built = buildPlacementAudit({
-    current: fresh.current, currentScore: fresh.currentScore, candidate: applyErr.lastAttempted, candidateScore: attemptedScore,
-    service, prefs, lockBoundary, ctx, threshold: fresh.threshold,
+    current: evaluation.current, currentScore: evaluation.currentScore, candidate: applyErr.lastAttempted, candidateScore: attemptedScore,
+    service, prefs, lockBoundary, ctx, threshold: evaluation.threshold,
   });
   return {
     newPlacement: built.newPlacement,

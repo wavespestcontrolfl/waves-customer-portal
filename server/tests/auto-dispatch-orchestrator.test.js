@@ -552,6 +552,36 @@ describe('shared-model apply path (Codex r1)', () => {
     }
   });
 
+  // Codex pre-push P1: a retry's audit compares against the evaluation that
+  // authorized it, not the first evaluation's current placement.
+  test('a retry authorized by a re-evaluation is audited against THAT evaluation (success and failure)', async () => {
+    const prev = process.env.AUTO_DISPATCH_ALLOW_APPLY;
+    process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
+    try {
+      candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_BIG], drops: {} });
+      const reCurrent = { ...CURRENT, detour_minutes: 12 };
+      const reEvaluation = { kind: 'move', current: reCurrent, currentScore: { total_score: 51.5 }, threshold: 15 };
+      apply.applyAutoDispatchMove.mockResolvedValueOnce({
+        ok: true, pre_status: 'confirmed', post_status: 'confirmed', applied: CAND_MODERATE, attempts: 2, evaluation: reEvaluation,
+      });
+      await runAutoDispatch({ mode: 'apply' });
+      const changed = lastDecision('changed');
+      expect(changed.scores.old).toBe(51.5);
+      expect(changed.routeMetrics.current_detour_minutes).toBe(12);
+
+      audit.logDecision.mockClear();
+      apply.applyAutoDispatchMove.mockRejectedValueOnce(Object.assign(new Error('taken'), {
+        code: 'SLOT_TAKEN', lastAttempted: CAND_MODERATE, attemptsTried: 2, lastEvaluation: reEvaluation,
+      }));
+      await runAutoDispatch({ mode: 'apply' });
+      const failed = lastDecision('failed');
+      expect(failed.scores.old).toBe(51.5);
+      expect(failed.routeMetrics.current_detour_minutes).toBe(12);
+    } finally {
+      process.env.AUTO_DISPATCH_ALLOW_APPLY = prev;
+    }
+  });
+
   test('a failure whose error names no attempted candidate (gate off) keeps the fresh placement audit', async () => {
     const prev = process.env.AUTO_DISPATCH_ALLOW_APPLY;
     process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';

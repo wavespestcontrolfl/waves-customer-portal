@@ -149,6 +149,14 @@ describe('routeCost', () => {
       expect(cost.routeTimeWithoutMinutes).toBeCloseTo(cost.driveWithoutMinutes + 30 + 45, 5);
     });
 
+    test('a grouped visit charges its moving group members (unitMembers) too — service minutes, no extra drive', () => {
+      const alone = routeCost([], { geo: FAR, startMin: 600, estimated_duration_minutes: 40 });
+      const unit = routeCost([], { geo: FAR, startMin: 600, estimated_duration_minutes: 40, unitMembers: [{ estimated_duration_minutes: 30 }, { estimated_duration_minutes: 20 }] });
+      expect(unit.routeTimeWithMinutes - alone.routeTimeWithMinutes).toBeCloseTo(50, 5);
+      expect(unit.driveWithMinutes).toBeCloseTo(alone.driveWithMinutes, 5);
+      expect(unit.detourMinutes).toBeCloseTo(alone.detourMinutes, 5);
+    });
+
     test('an empty day with no visit: routeTimeWithMinutes === routeTimeWithoutMinutes === 0', () => {
       const cost = routeCost([], null);
       expect(cost.routeTimeWithoutMinutes).toBe(0);

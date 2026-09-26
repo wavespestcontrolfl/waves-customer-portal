@@ -700,6 +700,40 @@ describe('SLOT_TAKEN parity with the writer (Codex r1)', () => {
   });
 });
 
+// Codex pre-push P1: group siblings are excluded from the day's stops because
+// they move with the visit, so both the current placement and every candidate
+// must charge their work as part of the moving unit.
+test('a grouped visit charges its siblings\' planning minutes on both the current placement and the candidate', async () => {
+  process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
+  const sibling = { id: 'sib1', window_start: '10:00', window_end: '10:45', estimated_duration_minutes: 45, service_type: 'Lawn', is_recurring: false, is_callback: false };
+  let siblingSelect = null;
+  const db = () => {
+    const c = {};
+    ['where', 'whereIn', 'whereNot', 'whereNotIn', 'whereNotNull', 'leftJoin'].forEach((m) => { c[m] = () => c; });
+    c.select = async (...cols) => {
+      if (cols[0] === 'id') { siblingSelect = cols; return [sibling]; }
+      return [];
+    };
+    return c;
+  };
+  const grouped = { ...SERVICE, visit_id: 'v1', window_start: '09:00', window_end: '10:00' };
+  const cand = [{ technician_id: 't1', date: '2026-08-06', start_time: '13:00', end_time: '14:00' }];
+  const geo = { lat: SERVICE.lat, lng: SERVICE.lng };
+
+  openMembers.mockResolvedValue([{ id: 's1' }, { id: 'sib1' }]);
+  const [groupedCand] = await filterAndScoreSharedModelCandidates(grouped, geo, cand, { db }, {});
+  const groupedCurrent = await computeCurrentPlacement(grouped, prefs, { ...ctxBase(), db });
+  openMembers.mockResolvedValue([{ id: 's1' }]);
+  const [aloneCand] = await filterAndScoreSharedModelCandidates(grouped, geo, cand, { db }, {});
+  const aloneCurrent = await computeCurrentPlacement(grouped, prefs, { ...ctxBase(), db });
+  openMembers.mockReset();
+
+  expect(siblingSelect).toEqual(expect.arrayContaining(['service_type', 'is_recurring', 'is_callback', 'estimated_duration_minutes']));
+  expect(groupedCand.route_minutes - aloneCand.route_minutes).toBeCloseTo(45, 5);
+  expect(groupedCurrent.route_minutes - aloneCurrent.route_minutes).toBeCloseTo(45, 5);
+  expect(groupedCand.detour_minutes).toBeCloseTo(aloneCand.detour_minutes, 5);
+});
+
 // Codex r1 (PRRT_kwDOR3YQi86mPzgn): the owner planning minutes of the day's
 // stops reach the comparison through route_minutes.
 test('route_minutes charges the owner planning table: a planning-table change moves the candidate\'s cost', async () => {

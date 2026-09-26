@@ -669,6 +669,31 @@ describe('SLOT_TAKEN fallback (GATE_AUTO_DISPATCH_SHARED_MODEL)', () => {
     expect(res.attempts).toBe(2);
   });
 
+  test('gate on: a retry reports the re-evaluation that authorized it — on success and on failure', async () => {
+    process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
+    const FRESH = { date: '2026-08-13', start_time: '10:00', end_time: '12:00', technician_id: 't1' };
+    const refreshed = { kind: 'move', rankedCandidates: [FRESH], currentScore: { total_score: 40 } };
+    db.mockImplementation(() => readRow(CONFIRMED_ROW));
+
+    SmartRebooker.reschedule.mockRejectedValueOnce(slotTakenErr()).mockRejectedValueOnce(slotTakenErr());
+    await expect(applyAutoDispatchMove(SERVICE, BEST, 'run1', { rescore: jest.fn().mockResolvedValue(refreshed) }))
+      .rejects.toMatchObject({ lastAttempted: FRESH, attemptsTried: 2, lastEvaluation: refreshed });
+
+    SmartRebooker.reschedule.mockReset();
+    SmartRebooker.reschedule.mockRejectedValueOnce(slotTakenErr());
+    await expect(applyAutoDispatchMove(SERVICE, BEST, 'run1', { rescore: jest.fn().mockResolvedValue({ kind: 'no_change' }) }))
+      .rejects.toMatchObject({ lastAttempted: BEST, lastEvaluation: null }); // the caller's own evaluation authorized BEST
+
+    SmartRebooker.reschedule.mockReset();
+    SmartRebooker.reschedule.mockRejectedValueOnce(slotTakenErr()).mockResolvedValueOnce({ success: true });
+    const update = jest.fn().mockResolvedValue(1);
+    const queue = [readRow(CONFIRMED_ROW), { where() { return this; }, update }];
+    db.mockImplementation(() => queue.shift());
+    const res = await applyAutoDispatchMove(SERVICE, BEST, 'run1', { rescore: jest.fn().mockResolvedValue(refreshed) });
+    expect(res.applied).toBe(FRESH);
+    expect(res.evaluation).toBe(refreshed);
+  });
+
   test('gate on: a re-evaluation that no longer qualifies ends the retries; the error names the candidate tried last', async () => {
     process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
     const STALE = { date: '2026-08-12', start_time: '09:00', end_time: '11:00', technician_id: 't1' };

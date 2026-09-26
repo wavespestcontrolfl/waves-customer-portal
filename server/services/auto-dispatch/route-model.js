@@ -80,8 +80,10 @@ function sumPlanningMinutes(stops) {
  *
  * `routeTimeWithMinutes` / `routeTimeWithoutMinutes` are the day's route
  * time: the drive chain plus stopPlanningMinutes for EVERY stop — the
- * existing stops and, in the "with" figure, the moving visit (Codex r1: the
- * model documented drive + service minutes but charged drive only).
+ * existing stops and, in the "with" figure, the moving visit and any
+ * `visit.unitMembers` (group members at the same stop, moving with it; they
+ * add service minutes but no drive) (Codex r1: the model documented drive +
+ * service minutes but charged drive only).
  * scoring.js reads `routeTimeWithMinutes` (as `route_minutes`) for its
  * workload term, so a heavier day by the owner planning table scores worse.
  * `detourMinutes` stays pure drive: scoring.js's route-efficiency cap
@@ -106,7 +108,8 @@ function routeCost(otherStops, visit) {
   }
   const withVisit = [...others, visit].sort((a, b) => a.startMin - b.startMin);
   const driveWithMinutes = chainDriveMinutes(withVisit.map((s) => s.geo));
-  const visitMinutes = stopPlanningMinutes(visit);
+  // The moving unit: the visit plus any co-located group members moving with it.
+  const visitMinutes = stopPlanningMinutes(visit) + sumPlanningMinutes(visit.unitMembers);
   const routeTimeWithMinutes = driveWithMinutes + otherServiceMinutes + visitMinutes;
   const detourMinutes = Math.max(0, driveWithMinutes - driveWithoutMinutes);
   return {
