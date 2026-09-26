@@ -599,6 +599,46 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       });
     }
 
+    // Only ONE automated text ever reaches a new website lead (owner ruling
+    // 2026-09-26). When the Lead Response Agent is configured it gets first
+    // crack at a personalized reply; the standard lead_auto_reply_biz text
+    // below is its fallback, sent from the processLead kickoff (further
+    // down) only when the agent's run does NOT end in an actual send. When
+    // the agent isn't configured, behavior is unchanged: the standard reply
+    // goes out immediately, exactly as before this ruling.
+    let leadAgentConfigured = false;
+    try {
+      leadAgentConfigured = require('../services/lead-response-agent').isLeadAgentConfigured();
+    } catch (cfgErr) {
+      logger.warn(`[lead-webhook] Lead Response Agent config check failed — treating as not configured: ${cfgErr.message}`);
+    }
+
+    // Auto-reply to lead — send AT MOST ONCE per person, ever (owner
+    // ruling 2026-08-05). shouldRunLeadAcquisition() already limits this
+    // to new customer rows, but the same person can produce a second
+    // "new" row (phone stored in a different format, deleted/merged
+    // record, double submission racing the 5-min window — 20 phones got
+    // the menu text twice in prod). See services/lead-auto-reply.js for
+    // the dedup predicate and the once-ever claim mechanism.
+    // The agent's fallback: the standard reply, once-ever claimed. Single
+    // flight: a call while a send is in flight (the guard's, then a
+    // shutdown flush) returns that same send, so the flush waits for the
+    // real dispatch instead of a duplicate that finds the claim and returns.
+    const sendFallbackAutoReply = singleFlight(() => sendLeadAutoReplyOnce({ customer, phoneFormatted, firstName, location, leadSource, revalidateRecipient: true, leadReceivedAt })
+      // Stable code + id only: provider/messaging errors can carry the phone or body.
+      .catch(fallbackErr => logger.error(`[lead-agent] Fallback standard reply failed for customer ${customer.id}: ${fallbackErr?.code || fallbackErr?.name || 'error'}`)));
+    // With the agent configured, the lead's one-minute clock and its
+    // shutdown registration start here, before the owner alert's provider
+    // I/O and the estimate work below, so a stall in either can never leave
+    // the lead unacknowledged; the deadline sends on its own until the
+    // agent kickoff takes it over.
+    // One deadline object owns the lead's minute: settleLeadResponseAgentRun
+    // takes it over (no second timer); until then it sends on its own.
+    const leadFallbackDeadline = leadAgentConfigured
+      // Counted from the request's arrival, so awaited work before this point
+      // (the owner alert's provider calls) cannot stretch the lead's minute.
+      ? createLeadFallbackDeadline(sendFallbackAutoReply, Math.max(0, LEAD_AGENT_FALLBACK_AFTER_MS - (Date.now() - leadReceivedAt.getTime())))
+      : null;
     // Push + bell notification for admins fires AFTER the lead row is
     // created (below) so the bell can deep-link the real lead id —
     // customer.id here made /admin/leads?lead=<id> resolve to nothing.
@@ -744,46 +784,6 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       }
     } catch (e) { logger.error(`Lead alert failed: ${e.message}`); }
 
-    // Only ONE automated text ever reaches a new website lead (owner ruling
-    // 2026-09-26). When the Lead Response Agent is configured it gets first
-    // crack at a personalized reply; the standard lead_auto_reply_biz text
-    // below is its fallback, sent from the processLead kickoff (further
-    // down) only when the agent's run does NOT end in an actual send. When
-    // the agent isn't configured, behavior is unchanged: the standard reply
-    // goes out immediately, exactly as before this ruling.
-    let leadAgentConfigured = false;
-    try {
-      leadAgentConfigured = require('../services/lead-response-agent').isLeadAgentConfigured();
-    } catch (cfgErr) {
-      logger.warn(`[lead-webhook] Lead Response Agent config check failed — treating as not configured: ${cfgErr.message}`);
-    }
-
-    // Auto-reply to lead — send AT MOST ONCE per person, ever (owner
-    // ruling 2026-08-05). shouldRunLeadAcquisition() already limits this
-    // to new customer rows, but the same person can produce a second
-    // "new" row (phone stored in a different format, deleted/merged
-    // record, double submission racing the 5-min window — 20 phones got
-    // the menu text twice in prod). See services/lead-auto-reply.js for
-    // the dedup predicate and the once-ever claim mechanism.
-    // The agent's fallback: the standard reply, once-ever claimed. Single
-    // flight: a call while a send is in flight (the guard's, then a
-    // shutdown flush) returns that same send, so the flush waits for the
-    // real dispatch instead of a duplicate that finds the claim and returns.
-    const sendFallbackAutoReply = singleFlight(() => sendLeadAutoReplyOnce({ customer, phoneFormatted, firstName, location, leadSource, revalidateRecipient: true, leadReceivedAt })
-      // Stable code + id only: provider/messaging errors can carry the phone or body.
-      .catch(fallbackErr => logger.error(`[lead-agent] Fallback standard reply failed for customer ${customer.id}: ${fallbackErr?.code || fallbackErr?.name || 'error'}`)));
-    // With the agent configured, the lead's one-minute clock starts here,
-    // where the immediate reply is skipped, not after the estimate work
-    // below. The guard sends the standard reply at the deadline even if
-    // that work stalls before the agent is ever started, and the fallback
-    // is registered for a deploy's shutdown flush from this point on.
-    // One deadline object owns the lead's minute: settleLeadResponseAgentRun
-    // takes it over (no second timer); until then it sends on its own.
-    const leadFallbackDeadline = leadAgentConfigured
-      // Counted from the request's arrival, so awaited work before this point
-      // (the owner alert's provider calls) cannot stretch the lead's minute.
-      ? createLeadFallbackDeadline(sendFallbackAutoReply, Math.max(0, LEAD_AGENT_FALLBACK_AFTER_MS - (Date.now() - leadReceivedAt.getTime())))
-      : null;
     try {
       if (!leadAgentConfigured) {
         await sendLeadAutoReplyOnce({ customer, phoneFormatted, firstName, location, leadSource });
