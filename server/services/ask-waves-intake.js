@@ -458,12 +458,20 @@ const AFFIRMATION_RE = /^\W*(?:yes|yeah|yep|yup|absolutely|sure|of\s+course|defi
 const POLARITY_START_RE = /^\W*(?:yes|yeah|yep|yup|no|nope|nah|not|never|none|nothing|absolutely|sure|of\s+course|definitely|certainly|correct|totally|it\s+(?:is|isn'?t|won'?t|will\s+not|can'?t|cannot|doesn'?t|does\s+not|shouldn'?t)|they\s+(?:are|aren'?t|won'?t|can'?t|cannot|don'?t)|s[ií]|claro|nada|nunca|tampoco|para\s+nada|en\s+absoluto)(?![a-zñáéíóú])/i;
 const HARM_QUESTION_RE = /\b(?:safe(?:ly|ty)?|harm\w*|hurt\w*|toxic|poison\w*|danger\w*|risk\w*|affect\w*|irritat\w*|bother\w*|sick|segur\w*|peligr\w*|t[oó]xic\w*|da[ñn]\w*|riesgo\w*|afect\w*|molest\w*|irrit\w*|inocu\w*|inofensiv\w*)(?![a-zñáéíóú])/i;
 const SAFETY_QUESTION_RE = /\b(?:safe(?:ly|ty)?|harm\w*|hurt\w*|toxic|poison\w*|danger\w*|risk\w*|okay|ok|fine|alright|affect\w*|segur\w*|peligr\w*|t[oó]xic\w*|da[ñn]\w*|riesgo\w*|afect\w*|inocu\w*|inofensiv\w*)(?![a-zñáéíóú])/i;
+// A yes/no to a safety question is a treatment claim only when the question
+// is about the treatment ("Is the spray safe?", "Is it safe for my dog?") —
+// "Are wasps dangerous?" → "Yes." is pest education.
+function aboutTreatment(question) {
+  return INTAKE_TREATMENT_CONTEXT_RE.test(question) || /\b(?:it|this|that|es|eso|esto)\b/i.test(question)
+    || /^\W*(?:safe|seguro|segura|harmful|toxic|t[oó]xico)\b/i.test(question);
+}
+
 // A terse reply takes its claim from the visitor's active question.
 function terseClaim(t, activeMessage) {
   // A bare affirmation ("Yes.", "Absolutely.", "Sí, claro.") confirms whatever
   // the visitor asked — so when the ACTIVE question carries a safety or
   // re-entry proposition, the affirmation is that claim.
-  if (AFFIRMATION_RE.test(t) && (SAFETY_QUESTION_RE.test(activeMessage)
+  if (AFFIRMATION_RE.test(t) && ((SAFETY_QUESTION_RE.test(activeMessage) && aboutTreatment(activeMessage))
     || ((ACCESS_SIGNAL_RE.test(activeMessage) || ACCESS_TOPIC_RE.test(activeMessage)) && (DURATION_RE.test(activeMessage) || CLOCK_TIME_RE.test(activeMessage) || ANY_TIME_FIGURE_RE.test(activeMessage))))) return true;
   // A short answer of EITHER polarity ("No.", "No, it cannot.", "At 4 PM.",
   // "Tomorrow.") to an active harm or physical-access question is itself the
@@ -472,7 +480,7 @@ function terseClaim(t, activeMessage) {
   // A short answer needs a yes/no or time shape — "They can deliver a painful
   // bite." answering "Are black widows dangerous?" is pest education.
   if (t.split(/\s+/).filter(Boolean).length <= 6) {
-    if (HARM_QUESTION_RE.test(activeMessage) && POLARITY_START_RE.test(t)) return true;
+    if (HARM_QUESTION_RE.test(activeMessage) && aboutTreatment(activeMessage) && POLARITY_START_RE.test(t)) return true;
     if ((ACCESS_SIGNAL_RE.test(physicalActive) || ACCESS_TOPIC_RE.test(physicalActive))
       && (POLARITY_START_RE.test(t) || CLOCK_TIME_RE.test(t) || DURATION_RE.test(t) || ANY_TIME_FIGURE_RE.test(t))) return true;
   }

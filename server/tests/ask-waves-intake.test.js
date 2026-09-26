@@ -751,6 +751,7 @@ describe('normalizeIntakeResult', () => {
     ['We will return in two weeks for the follow-up.', ''],
     ['We place dry bait in 2 stations.', 'How do you treat for roaches?'],
     ['They can deliver a painful bite.', 'Are black widows dangerous?'],
+    ['Yes.', 'Are wasps dangerous?'],
     ['They can damage St. Augustine grass.', 'Are chinch bugs harmful to grass?'],
     ['Please wait 30 minutes for our dispatcher to call you back.', ''],
     ['Please wait 2 business days for the refund to appear.', ''],
