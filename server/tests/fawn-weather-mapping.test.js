@@ -13,8 +13,9 @@
  * total) hit different FAWN endpoints and are covered separately — see the
  * fetch-URL assertions in each block below. They were split out (Codex
  * review, 2026-09-26) so the public forecast's day-total rainfall reading
- * never masquerades as "current conditions" for application-conditions.js
- * and other current-weather consumers of getCurrent().
+ * never masquerades as "current conditions". Neither FAWN period is a
+ * trailing 24h or 7-day total, so getCurrent() publishes only the hourly
+ * reading, as `rainfall_1h_in`.
  */
 
 describe('FawnWeather — real API shape', () => {
@@ -41,38 +42,33 @@ describe('FawnWeather — real API shape', () => {
   });
 
   describe('getCurrent (lastHour — current conditions)', () => {
-    test('fetches lastHour for current conditions, then lastDay for the 24h rainfall — never the old 400ing lastObservation URL', async () => {
+    test('fetches only the real lastHour/summary/json endpoint, not the old 400ing lastObservation URL', async () => {
       global.fetch = jest.fn(() => Promise.resolve({ ok: true, json: async () => [realShapedRow()] }));
       await FawnWeather.getCurrent({ latitude: 27.45, longitude: -82.57 });
       expect(global.fetch.mock.calls.map(([url]) => String(url))).toEqual([
         'https://fawn.ifas.ufl.edu/controller.php/lastHour/summary/json',
-        'https://fawn.ifas.ufl.edu/controller.php/lastDay/summary/json',
       ]);
     });
 
-    test('rainfall_in is the last complete-day total (aliased to rain_24h_in), with the hourly reading kept separately', async () => {
-      global.fetch = jest.fn((url) => Promise.resolve({
+    test('publishes the hour\'s rain only as rainfall_1h_in — rainfall_in stays null (no FAWN period is a 24h/7d total)', async () => {
+      global.fetch = jest.fn(() => Promise.resolve({
         ok: true,
-        json: async () => [realShapedRow({
-          StationID: '480',
-          rain_sum: String(url).includes('lastDay') ? '2.54' : '0',
-        })],
+        json: async () => [realShapedRow({ StationID: '480', rain_sum: '0.254' })],
       }));
       const snap = await FawnWeather.getCurrent({ latitude: 27.45, longitude: -82.57 });
-      expect(snap.rain_24h_in).toBeCloseTo(1, 5);
-      expect(snap.rainfall_in).toBeCloseTo(1, 5);
-      expect(snap.rainfall_1h_in).toBe(0);
+      expect(snap.rainfall_1h_in).toBeCloseTo(0.1, 5);
+      expect(snap.rainfall_in).toBeNull();
+      expect(snap).not.toHaveProperty('rain_24h_in');
     });
 
-    test('a failed 24h lookup nulls only the rainfall fields — the hourly temp snapshot still stands', async () => {
-      global.fetch = jest.fn((url) => (String(url).includes('lastDay')
-        ? Promise.resolve({ ok: false, status: 500 })
-        : Promise.resolve({ ok: true, json: async () => [realShapedRow({ StationID: '480', t2m_avg: '25' })] })));
-      const snap = await FawnWeather.getCurrent({ latitude: 27.45, longitude: -82.57 });
-      expect(snap.error).toBeUndefined();
-      expect(snap.temp_f).toBeCloseTo(77, 5);
-      expect(snap.rain_24h_in).toBeNull();
-      expect(snap.rainfall_in).toBeNull();
+    test('no coordinates → unavailable without a fetch, never a default station', async () => {
+      global.fetch = jest.fn(() => Promise.resolve({ ok: true, json: async () => [realShapedRow({ StationID: '480' })] }));
+      for (const opts of [undefined, {}, { latitude: null, longitude: null }, { latitude: '', longitude: '' }]) {
+        const snap = await FawnWeather.getCurrent(opts);
+        expect(snap.station).toBe('unavailable');
+        expect(snap.temp_f).toBeNull();
+      }
+      expect(global.fetch).not.toHaveBeenCalled();
     });
 
     test('an HTTP failure degrades to an error snapshot with rainfall_in null — never throws', async () => {
@@ -94,18 +90,6 @@ describe('FawnWeather — real API shape', () => {
       expect(snap.soil_temp_f).toBeCloseTo(81.428, 2);
       expect(snap.wind_mph).toBeCloseTo(5.902, 2);
     });
-    test('the 24h total comes from the SAME station as the hourly snapshot — never a different gauge', async () => {
-      global.fetch = jest.fn((url) => Promise.resolve({
-        ok: true,
-        json: async () => (String(url).includes('lastDay')
-          ? [realShapedRow({ StationID: '490', rain_sum: '2.54' })]
-          : [realShapedRow({ StationID: '480', rain_sum: '0' })]),
-      }));
-      const snap = await FawnWeather.getCurrent({ latitude: 27.45, longitude: -82.57 });
-      expect(snap.rain_24h_in).toBeNull();
-      expect(snap.rainfall_in).toBeNull();
-    });
-
     test('an out-of-range location gets an unavailable snapshot, not another location\'s cached conditions', async () => {
       global.fetch = jest.fn(() => Promise.resolve({
         ok: true,
@@ -113,9 +97,11 @@ describe('FawnWeather — real API shape', () => {
       }));
       const ok = await FawnWeather.getCurrent({ latitude: 27.45, longitude: -82.57 });
       expect(ok.temp_f).toBeCloseTo(77, 5);
+      const callsBefore = global.fetch.mock.calls.length;
       const far = await FawnWeather.getCurrent({ latitude: 26.6406, longitude: -81.8723 });
       expect(far.station).toBe('unavailable');
       expect(far.temp_f).toBeNull();
+      expect(global.fetch.mock.calls.length).toBe(callsBefore);
     });
 
     test('a later fetch failure at the SAME coordinate reuses that coordinate\'s last-good snapshot', async () => {
@@ -195,7 +181,18 @@ describe('FawnWeather — real API shape', () => {
       }));
       const snap = await FawnWeather.getRecentRainfall({ latitude: 26.6406, longitude: -81.8723 });
       expect(snap.rainfall_in).toBeNull();
-      expect(snap.error).toBeTruthy();
+      expect(snap.out_of_coverage).toBe(true);
+      // Not an outage — no `error`, so the forecast doesn't log it as one.
+      expect(snap.error).toBeUndefined();
+      expect(global.fetch).not.toHaveBeenCalled();
+    });
+
+    test('no coordinates is an error, never a default station', async () => {
+      global.fetch = jest.fn(() => Promise.resolve({ ok: true, json: async () => [realShapedRow({ StationID: '480', rain_sum: '1.27' })] }));
+      const snap = await FawnWeather.getRecentRainfall({});
+      expect(snap.rainfall_in).toBeNull();
+      expect(snap.error).toMatch(/Coordinates required/);
+      expect(global.fetch).not.toHaveBeenCalled();
     });
 
     test('a selected station with a missing/non-numeric rain_sum is an enrichment failure, not a cached null reading', async () => {
@@ -276,6 +273,24 @@ describe('FawnWeather — real API shape', () => {
       expect(fallback.station).toBe('unavailable');
 
       nowSpy.mockRestore();
+    });
+  });
+
+  describe('service-report application conditions', () => {
+    test('stay on Open-Meteo — FAWN is never requested for the report / FDACS conditions', async () => {
+      global.fetch = jest.fn(async () => ({
+        ok: true,
+        json: async () => ({
+          current: { time: '2026-09-26T14:00', temperature_2m: 88, relative_humidity_2m: 70, wind_speed_10m: 6, weather_code: 1 },
+          hourly: { time: ['2026-09-26T13:00', '2026-09-26T14:00'], precipitation: [0.1, 0.05] },
+        }),
+      }));
+      const { fetchApplicationConditions } = require('../services/service-report/application-conditions');
+      const conditions = await fetchApplicationConditions({ latitude: 27.45, longitude: -82.57 });
+      expect(conditions.provider).toBe('open_meteo');
+      expect(conditions.rain_24h_in).toBeCloseTo(0.15, 2);
+      const urls = global.fetch.mock.calls.map(([url]) => String(url));
+      expect(urls.some((url) => url.includes('fawn.ifas.ufl.edu'))).toBe(false);
     });
   });
 });

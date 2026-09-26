@@ -13,8 +13,7 @@ const logger = require('./logger');
 // 2026-09-26: it 400s). The documented, working "all stations" feed is
 // `{period}/summary/json`. Two different periods, two different jobs:
 // lastHour is near-real-time (~15-45min old) and is what "current
-// conditions" (getCurrent, used by application-conditions.js's live
-// service-report snapshot, lawn-intelligence.js, etc.) means; lastDay is
+// conditions" (getCurrent) means; lastDay is
 // the most recent COMPLETE day's totals, which is what "recent rainfall"
 // (getRecentRainfall, used by the public pest forecast to judge "has it
 // been wet lately") actually needs — an hour's rain_sum is almost always
@@ -57,9 +56,16 @@ const CURRENT_FALLBACK_MAX_AGE = 2 * 60 * 60 * 1000; // 2h
 
 function unavailableCurrent(message) {
   return {
-    temp_f: null, humidity_pct: null, rainfall_in: null, rainfall_1h_in: null, rain_24h_in: null,
+    temp_f: null, humidity_pct: null, rainfall_in: null, rainfall_1h_in: null,
     soil_temp_f: null, wind_mph: null, station: 'unavailable', timestamp: new Date().toISOString(),
     error: message,
+  };
+}
+
+function rainfallUnavailable(message) {
+  return {
+    rainfall_in: null, station: 'unavailable', station_key: null, observation_time: null,
+    ...(message ? { error: message } : {}),
   };
 }
 
@@ -218,33 +224,48 @@ async function fetchStationRows(period) {
 // County (Codex review, 2026-09-26).
 const MAX_STATION_DISTANCE_MILES = 35;
 
-function selectStation(stations = [], { latitude, longitude } = {}) {
+function targetOf({ latitude, longitude } = {}) {
+  return Number.isFinite(Number(latitude)) && Number.isFinite(Number(longitude))
+    && latitude !== null && longitude !== null && latitude !== '' && longitude !== ''
+    ? { latitude: Number(latitude), longitude: Number(longitude) }
+    : null;
+}
+
+// Whether a known station sits within range of the target at all — a fixed
+// property of the location, independent of what the feed returned. Out of
+// coverage is a normal answer (no FAWN data for that city), not an outage.
+function inStationCoverage(target) {
+  if (!target) return false;
+  return STATION_HINTS.some((hint) => {
+    const distance = distanceMiles(target, hint);
+    return distance != null && distance <= MAX_STATION_DISTANCE_MILES;
+  });
+}
+
+function selectStation(stations = [], options = {}) {
   // Only ever select a recognized SWFL station — never fall back to an
   // arbitrary statewide row. The live feed carries no name/coords, so an
   // unrecognized row can't even be distance-checked; treating it as a
   // candidate risks silently attaching a random Florida station's reading
   // to the SWFL forecast/current-conditions consumers (Codex review,
   // 2026-09-26).
+  //
+  // Coordinates are required: with none, "the first recognized row" would
+  // hand every caller North Port's reading regardless of where the property
+  // is (Codex review, 2026-09-26).
+  const target = targetOf(options);
+  if (!target) return null;
+
   const swflStations = stations.filter((station) => !!hintForStation(station));
-  if (!swflStations.length) return null;
-
-  const target = Number.isFinite(Number(latitude)) && Number.isFinite(Number(longitude))
-    ? { latitude: Number(latitude), longitude: Number(longitude) }
-    : null;
-
-  if (target) {
-    const nearest = swflStations
-      .map((station) => ({
-        station,
-        distance: distanceMiles(target, stationCoordinates(station)),
-      }))
-      .filter((entry) => entry.distance != null)
-      .sort((a, b) => a.distance - b.distance)[0];
-    if (!nearest || nearest.distance > MAX_STATION_DISTANCE_MILES) return null;
-    return nearest.station;
-  }
-
-  return swflStations[0] || null;
+  const nearest = swflStations
+    .map((station) => ({
+      station,
+      distance: distanceMiles(target, stationCoordinates(station)),
+    }))
+    .filter((entry) => entry.distance != null)
+    .sort((a, b) => a.distance - b.distance)[0];
+  if (!nearest || nearest.distance > MAX_STATION_DISTANCE_MILES) return null;
+  return nearest.station;
 }
 
 function normalizeStationSnapshot(station) {
@@ -270,51 +291,35 @@ const FawnWeather = {
 
   /**
    * Get current (near-real-time, ~15-45min old) FAWN observation for the
-   * nearest SWFL station. This is "current conditions" — application
-   * snapshots, lawn assessments, seasonal displays.
+   * SWFL station nearest the given coordinates.
    *
-   * `rainfall_1h_in` is the genuinely hourly `rain_sum` from this same
-   * lastHour row (almost always 0 unless it's raining right now).
-   * `rain_24h_in` is a best-effort lookup of the SAME station's most recent
-   * COMPLETE day total from lastDay — a meaningful accumulation, not an
-   * hourly blip. `rainfall_in` (the pre-existing generic name several
-   * callers already read, e.g. application-conditions.js's
-   * `rain_24h_in ?? rainfall_in`, lawn-intelligence.js's persisted
-   * fawn_snapshot) is now an ALIAS for `rain_24h_in`, never the hourly
-   * value — those callers already treat it as a longer accumulation, and an
-   * hourly reading under that name was reporting rain as 0 far too often
-   * (Codex review, 2026-09-26). The 24h lookup is best-effort: its failure
-   * only nulls the rainfall fields, never the hourly temp/humidity/wind
-   * snapshot.
-   * Returns: { temp_f, humidity_pct, rainfall_in, rainfall_1h_in, rain_24h_in, soil_temp_f, wind_mph, station, timestamp }
+   * Rainfall: FAWN's feeds are lastHour and lastDay (the most recent
+   * complete calendar day) — neither is a trailing 24h or 7-day total. So
+   * the only rain published here is `rainfall_1h_in`, the hour's rain_sum
+   * under its real period. `rainfall_in` stays null: callers read that name
+   * as a longer accumulation (a report's "rain in last 24h", a lawn
+   * assessment's fawn_rainfall_7d), and neither FAWN period is one (Codex
+   * review, 2026-09-26).
+   *
+   * Coordinates are required and must be within station coverage;
+   * otherwise the unavailable snapshot is returned without a fetch.
+   * Returns: { temp_f, humidity_pct, rainfall_in (null), rainfall_1h_in, soil_temp_f, wind_mph, station, timestamp }
    */
   async getCurrent(options = {}) {
+    const target = targetOf(options);
+    if (!target) return unavailableCurrent('Coordinates required for FAWN station weather');
+    if (!inStationCoverage(target)) return unavailableCurrent('Outside FAWN station coverage');
+
     const key = coordKey(options);
     try {
       const data = await fetchStationRows('lastHour');
       const station = selectStation(data, options);
 
-      // No recognized station within range is a geographic answer, not an
-      // outage — never paper over it with a cached reading.
-      if (!station) return unavailableCurrent('No FAWN station found');
+      if (!station) throw new Error('No FAWN station in range in the feed');
 
       const snapshot = normalizeStationSnapshot(station);
       snapshot.rainfall_1h_in = snapshot.rainfall_in;
-
-      let rain24h = null;
-      try {
-        // Match the day row by the hourly station's ID so the 24h total is
-        // always the same gauge the snapshot is labeled with; absent → null.
-        const id = stationId(station);
-        const dayRows = await fetchStationRows('lastDay');
-        const dayStation = id ? dayRows.find((row) => stationId(row) === id) : null;
-        if (dayStation) rain24h = rainfallInches(dayStation);
-      } catch {
-        // Best-effort only — the hourly "current conditions" snapshot
-        // (temp/humidity/wind) still stands even if the 24h lookup fails.
-      }
-      snapshot.rain_24h_in = rain24h;
-      snapshot.rainfall_in = rain24h;
+      snapshot.rainfall_in = null;
 
       _currentCache.set(key, { at: Date.now(), snapshot });
 
@@ -332,12 +337,18 @@ const FawnWeather = {
    * station — a meaningfully-sized "has it been wet lately" reading, unlike
    * getCurrent()'s near-real-time (and almost always zero) hourly rain_sum.
    * Used by the public pest forecast's SWFL enrichment; kept separate from
-   * getCurrent() so a stale day-total never masquerades as "current
-   * conditions" for application-conditions.js and other current-weather
-   * consumers (Codex review, 2026-09-26).
+   * getCurrent() so a day-total never masquerades as "current
+   * conditions" (Codex review, 2026-09-26).
    * Returns: { rainfall_in, station, station_key, observation_time }
    */
   async getRecentRainfall(options = {}) {
+    const target = targetOf(options);
+    if (!target) return rainfallUnavailable('Coordinates required for FAWN rainfall');
+    // Out of coverage (e.g. Fort Myers/Cape Coral) — no FAWN rainfall for
+    // this city, by design. No `error`, so the forecast doesn't log it as a
+    // failure on every cache fill.
+    if (!inStationCoverage(target)) return { ...rainfallUnavailable(null), out_of_coverage: true };
+
     const key = coordKey(options);
     try {
       const data = await fetchStationRows('lastDay');
@@ -368,10 +379,7 @@ const FawnWeather = {
       logger.error(`[fawn-weather] Recent-rainfall fetch failed: ${err.message}`);
       const cached = _recentRainfallCache.get(key);
       if (cached && Date.now() - cached.at < RAIN_FALLBACK_MAX_AGE) return cached.snapshot;
-      return {
-        rainfall_in: null, station: 'unavailable', station_key: null, observation_time: null,
-        error: err.message,
-      };
+      return rainfallUnavailable(err.message);
     }
   },
 
