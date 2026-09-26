@@ -24,7 +24,7 @@
  * Every null shows as "unknown" in the UI, never 0 (day-quality's own rule).
  */
 const { validate: isUuid } = require('uuid');
-const { etDateString, addETDays, validCalendarDate } = require('../../utils/datetime-et');
+const { etDateString, addETDays, validCalendarDate, etCalendarDayOf } = require('../../utils/datetime-et');
 const { etDateDiffDays } = require('../recurring-appointment-seeder');
 const { gateEnvValue } = require('../../config/feature-gates');
 const { getScheduleQualityMeasurements, physicalStopCount, coVisitOnSiteMinutes } = require('./day-quality');
@@ -53,10 +53,6 @@ function routeScorecardEnabled() {
 
 function validDateRange(from, to) {
   return Boolean(validCalendarDate(from) && validCalendarDate(to) && to >= from && etDateDiffDays(from, to) <= MAX_RANGE_DAYS);
-}
-
-function dateOnly(value) {
-  return value instanceof Date ? value.toISOString().slice(0, 10) : String(value || '').slice(0, 10);
 }
 
 function stopsPerHour(stops, departureMinutes, returnMinute) {
@@ -306,7 +302,7 @@ async function mileageByTechDay(conn, from, to) {
   const byKey = new Map();
   for (const row of rows) {
     if (EXCLUDED_MILEAGE_PURPOSES.includes(row.purpose)) continue;
-    const key = `${dateOnly(row.trip_date)}|${row.technician_id}`;
+    const key = `${etCalendarDayOf(row.trip_date)}|${row.technician_id}`;
     const entry = byKey.get(key) || { minutes: 0, trips: 0, timedTrips: 0 };
     // Number(null) and Number('') are 0 — an unknown duration must stay
     // unknown, not become a zero-minute trip.
