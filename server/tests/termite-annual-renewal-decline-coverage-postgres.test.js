@@ -878,5 +878,60 @@ describeOrSkip('termite annual renewal decline — coverage, renew supersession,
     expect((await db('annual_prepay_terms').where({ id: fx.term.id }).first()).status).toBe('cancelled');
     expect((await db('customers').where({ id: fx.customerId }).first()).billing_mode).toBe('per_application');
   });
+  // #4940 pre-push P1: installed, declined while UNPAID, and the invoice never
+  // resolves (still payment_pending + 'cancel'). Once the installation-derived
+  // end passes: ONE staff bell, settled on it — never a task, never a status
+  // change.
+  test('installed + unpaid decline + invoice never resolves: past the derived end, one staff bell, settled, no task; before it, nothing', async () => {
+    const { db, Renewals, raiseTermiteRetrievalTask, notifyAdmin } = await load();
+    const fx = await unpaidDeclinedAwaitingInstall(db);
+    expect(await Renewals.declineTermiteAnnualRenewal({ customerId: fx.customerId, termId: fx.term.id, today: fx.today }))
+      .toEqual(expect.objectContaining({ ok: true, unpaid: true }));
+    // Signed 14 months ago, installed 13 months ago, never paid (overdue).
+    const signedOn = addMonths(fx.today, -14);
+    await db('annual_prepay_terms').where({ id: fx.term.id }).update({
+      term_start: signedOn, term_end: addMonths(signedOn, 12), created_at: new Date(`${signedOn}T16:00:00Z`),
+    });
+    await db('invoices').where({ id: fx.invoice.id }).update({ status: 'overdue' });
+    const installedOn = addMonths(fx.today, -13);
+    await db('scheduled_services').insert({
+      customer_id: fx.customerId, source_estimate_id: fx.estimate.id, status: 'completed',
+      service_type: 'Termite Bait Station Installation', scheduled_date: installedOn,
+    });
+    const { addMonthsSameDay } = jest.requireActual('../utils/date-only');
+    const realEnd = addMonthsSameDay(installedOn, 12);
+    const unpaidBells = () => notifyAdmin.mock.calls.filter((c) => String(c[3]?.dedupeKey || '').endsWith(':unpaid_plan'));
+
+    // On the end date itself: not yet due — nothing.
+    expect(await Renewals.raisePendingDeclineRetrievalTasks({ today: realEnd })).toEqual({ scanned: 1, raised: 0 });
+    expect(unpaidBells()).toHaveLength(0);
+    expect(await settledMarker(db, fx)).toBeUndefined();
+
+    // Past it: one staff bell, settled on it, no task.
+    expect(await Renewals.raisePendingDeclineRetrievalTasks({ today: fx.today })).toEqual({ scanned: 1, raised: 0 });
+    expect(raiseTermiteRetrievalTask).not.toHaveBeenCalled();
+    expect(unpaidBells()).toHaveLength(1);
+    expect(unpaidBells()[0][2]).toContain('the plan was never paid');
+    expect(unpaidBells()[0][2]).toContain('decide on collection and station retrieval');
+    expect((await settledMarker(db, fx)).metadata).toEqual(expect.objectContaining({ outcome: 'unpaid_plan', retrieve_after: realEnd }));
+    // Billing status untouched: the term and its invoice are as they were.
+    expect(await db('annual_prepay_terms').where({ id: fx.term.id }).first())
+      .toEqual(expect.objectContaining({ status: 'payment_pending', renewal_decision: 'cancel' }));
+    expect((await db('invoices').where({ id: fx.invoice.id }).first()).status).toBe('overdue');
+
+    // Settled: the next sweep neither re-bells nor raises.
+    expect(await Renewals.raisePendingDeclineRetrievalTasks({ today: fx.today })).toEqual({ scanned: 0, raised: 0 });
+    expect(unpaidBells()).toHaveLength(1);
+    expect(raiseTermiteRetrievalTask).not.toHaveBeenCalled();
+  });
+
+  test('an unpaid declined plan with NO completed installation is never a candidate, however late', async () => {
+    const { db, Renewals, notifyAdmin } = await load();
+    const fx = await unpaidDeclinedAwaitingInstall(db);
+    await Renewals.declineTermiteAnnualRenewal({ customerId: fx.customerId, termId: fx.term.id, today: fx.today });
+    const bellsBefore = notifyAdmin.mock.calls.length;
+    expect(await Renewals.raisePendingDeclineRetrievalTasks({ today: addMonths(fx.today, 24) })).toEqual({ scanned: 0, raised: 0 });
+    expect(notifyAdmin.mock.calls.length).toBe(bellsBefore);
+  });
 });
 
