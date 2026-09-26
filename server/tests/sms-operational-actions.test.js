@@ -1180,17 +1180,19 @@ describe('fulfillment proof', () => {
       .toMatchObject({ verdict: 'uncertain', reason: 'sensitive_model_output' });
   });
 
-  test('only admissible records are offered to the model as witness_refs; payment evidence is split out of #4816', async () => {
+  test('only admissible records are offered to the model as witness_refs (R2/R3: a staff reply never is; a payment now can be)', async () => {
     dispatchWithFallback.mockReset().mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
     const ctx = { property_id: null, source_at: '2040-03-10T15:00:00Z' };
     const visit = { ref: 'visit:v-1', type: 'visit', id: 'v-1', status: 'en_route', progressed_at: '2040-03-11T15:00:00Z',
       text: 'Quarterly Lawn on 2040-03-11 at 09:00:00; status en_route; en route/on site/completed after the request' };
     const staffSms = { ref: 'sms:1', type: 'sms', status: 'delivered', message_type: 'manual', created_at: '2040-03-11T15:00:00Z', text: 'On our way' };
-    const paid = { ref: 'payment:i-1', type: 'payment', id: 'i-1', paid_at: '2040-03-11T15:00:00Z', text: 'Invoice paid' };
+    const paid = { ref: 'payment:i-1', type: 'payment', payment_source: 'invoice', id: 'i-1', paid_at: '2040-03-11T15:00:00Z', text: 'Invoice paid 2040-03-11' };
     const ask = { kind: 'other', description: 'You still coming this morning?', sms_context: ctx };
-    expect(admissibleWitness(paid, ask)).toBe(false);
-    await verifySmsFulfillment(ask, { records: [visit, staffSms], failures: [] });
-    expect(dispatchWithFallback.mock.calls[0][1].text).toContain('"witness_refs":["visit:v-1"]');
+    expect(admissibleWitness(staffSms, ask)).toBe(false);
+    expect(admissibleWitness(paid, ask)).toBe(true);
+    await verifySmsFulfillment(ask, { records: [visit, staffSms, paid], failures: [] });
+    const witnessRefs = JSON.parse(dispatchWithFallback.mock.calls[0][1].text.match(/"witness_refs":(\[[^\]]*\])/)[1]);
+    expect(witnessRefs.sort()).toEqual(['payment:i-1', 'visit:v-1']);
   });
 
   test('a PAN-lookalike record id survives the prompt and the sensitive-output guard', async () => {
@@ -1242,6 +1244,94 @@ describe('fulfillment proof', () => {
     expect(groundFulfillment({ ...verdict, quote: 'I answered the invoice dispute' }, { records: [record], failures: [] }, commitment))
       .toMatchObject({ verdict: 'uncertain', reason: 'ungrounded_witness' });
     await expect(verifySmsFulfillment(commitment, { records: [], failures: [] })).resolves.toMatchObject({ verdict: 'open' });
+  });
+});
+
+describe('R2 payment evidence (owner ruling 2026-09-25): a payment receipt or paid invoice/payments row closes a settlement question; a staff "done" reply never does', () => {
+  const ctx = { property_id: null, source_at: '2040-03-10T15:00:00Z' };
+  const invoicePaid = { id: 'invoice-1', ref: 'payment:invoice-1', type: 'payment', payment_source: 'invoice',
+    paid_at: '2040-03-11T15:00:00Z', text: 'Invoice Quarterly paid 2040-03-11' };
+  const ledgerPaid = { id: 'pay-1', ref: 'payment:pay-1', type: 'payment', payment_source: 'ledger',
+    created_at: '2040-03-11T15:00:00Z', text: 'Payment of $200.00 recorded 2040-03-11' };
+  const receiptSms = { id: 'sms-1', ref: 'payment:sms-1', type: 'payment', payment_source: 'sms', status: 'delivered',
+    message_type: 'receipt', created_at: '2040-03-11T15:00:00Z', text: 'Payment received, thank you. Invoice WPC-1: $125.00' };
+
+  test('rule 2: a payment is admissible for a settlement-worded `other` ask, and even an unrelated one — the model always decides (rule 1)', () => {
+    const paymentOther = { kind: 'other', description: 'What is the Zelle number?', sms_context: ctx };
+    const unrelatedOther = { kind: 'other', description: 'My son should be there for the visit', sms_context: ctx };
+    for (const witness of [invoicePaid, ledgerPaid, receiptSms]) {
+      expect(admissibleWitness(witness, paymentOther)).toBe(true);
+      expect(admissibleWitness(witness, unrelatedOther)).toBe(true);
+    }
+    // Payment evidence is `other`-only — a payment-worded ask of another kind never admits it.
+    expect(admissibleWitness(invoicePaid, { kind: 'callback', description: 'Call me about my payment' })).toBe(false);
+    expect(admissibleWitness(invoicePaid, { kind: 'schedule_visit', description: 'Did my payment go through?' })).toBe(false);
+  });
+
+  test('rule 2: money going the other way, or changing HOW the customer pays, is never answered by a payment landing', () => {
+    for (const description of ['Where is my refund?', 'I want to dispute this charge', 'You double charged me', 'I need a chargeback']) {
+      expect(admissibleWitness(invoicePaid, { kind: 'other', description })).toBe(false);
+    }
+    for (const description of ['Can you separate the charges under two payment methods?', 'Please update my card on file',
+      'Set up autopay for me', 'Can you change the card on the account?', 'Can you bill this across two cards?',
+      'Please change my payment method']) {
+      expect(admissibleWitness(invoicePaid, { kind: 'other', description })).toBe(false);
+    }
+    // Naming the tender, or a bare split/separate, describes a payment — not a change request.
+    for (const description of ['Did my card payment go through?', 'Was the autopay charged this month?',
+      'I split the payment into two charges; did both payments go through?', 'Did you receive the separate payment?',
+      'Did that payment method work?', 'Was this payment method charged?']) {
+      expect(admissibleWitness(invoicePaid, { kind: 'other', description })).toBe(true);
+    }
+  });
+
+  test('rule 6: a property-scoped ask needs the payment tied to that property; an unscoped ask admits any of the customer\'s own payments', () => {
+    const scopedAsk = { kind: 'other', description: 'Did you receive my payment?', sms_context: { property_id: 'home', source_at: ctx.source_at } };
+    const unscopedAsk = { kind: 'other', description: 'Did you receive my payment?', sms_context: ctx };
+    const invoiceAtHome = { ...invoicePaid, property_id: 'home' };
+    const invoiceElsewhere = { ...invoicePaid, property_id: 'rental' };
+    const invoiceUnlinked = { ...invoicePaid, property_id: null };
+    expect(admissibleWitness(invoiceAtHome, scopedAsk)).toBe(true);
+    expect(admissibleWitness(invoiceElsewhere, scopedAsk)).toBe(false);
+    // An unlinked ledger prepayment (no property at all) can never vouch for a scoped ask.
+    expect(admissibleWitness(invoiceUnlinked, scopedAsk)).toBe(false);
+    expect(admissibleWitness(ledgerPaid, scopedAsk)).toBe(false);
+    // Unscoped: every leg, linked or not, is admitted.
+    expect(admissibleWitness(invoiceUnlinked, unscopedAsk)).toBe(true);
+    expect(admissibleWitness(ledgerPaid, unscopedAsk)).toBe(true);
+  });
+
+  test('rule 7: a delivered receipt-family SMS answers a receipt request the same way it answers a settlement question', async () => {
+    dispatchWithFallback.mockReset().mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
+    const receiptAsk = { kind: 'other', description: 'Can you send me the receipt?', sms_context: ctx };
+    expect(admissibleWitness(receiptSms, receiptAsk)).toBe(true);
+    await verifySmsFulfillment(receiptAsk, { records: [receiptSms], failures: [] });
+    const prompt = dispatchWithFallback.mock.calls.at(-1)[1].text;
+    expect(prompt).toContain('a delivered receipt text does answer a request for that receipt');
+    expect(prompt).toContain('"witness_refs":["payment:sms-1"]');
+  });
+
+  test('rule 9: a ledger note (payments.description) never reaches the provider unscrubbed, and never rides twice under a raw key', async () => {
+    dispatchWithFallback.mockReset().mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
+    const note = 'Zelle prepayment — card 4242 4242 4242 4242 CVV 123';
+    const ledger = { ...ledgerPaid, description: note, text: `Payment of $200.00 recorded 2040-03-11: ${note}` };
+    const ask = { kind: 'other', description: 'What is the Zelle number?', sms_context: ctx };
+    await verifySmsFulfillment(ask, { records: [ledger], failures: [] });
+    const prompt = dispatchWithFallback.mock.calls.at(-1)[1].text;
+    expect(prompt).not.toContain('4242 4242 4242 4242');
+    expect(prompt).not.toContain('CVV 123');
+    expect(prompt).not.toContain('"description":"Zelle');
+    expect(prompt).toContain('"witness_refs":["payment:pay-1"]');
+  });
+
+  test('rule 1: admissibility alone never closes the row — grounding still requires the model to cite and quote the payment witness', () => {
+    const paymentOther = { kind: 'other', description: 'What is the Zelle number?', sms_context: ctx };
+    const evidence = { records: [invoicePaid], failures: [] };
+    // The model said open: no auto-fulfill even though a payment witness exists.
+    expect(groundFulfillment({ verdict: 'open', record_ref: null, quote: null }, evidence, paymentOther)).toEqual({ verdict: 'open' });
+    // The model cited it with a grounded quote: fulfilled, carrying which table to lock (rule 8).
+    expect(groundFulfillment({ verdict: 'fulfilled', record_ref: 'payment:invoice-1', quote: 'Invoice Quarterly paid' }, evidence, paymentOther))
+      .toMatchObject({ verdict: 'fulfilled', record_type: 'payment', record_id: 'invoice-1', payment_source: 'invoice' });
   });
 });
 
