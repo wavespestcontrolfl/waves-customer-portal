@@ -203,6 +203,13 @@ async function trappingVisits(db, customerId) {
 // Setup visit + the included checks, from the same pricing_config row the
 // engine's estimate copy uses (db-bridge overlays it). 'unlimited' → null:
 // every check is included, nothing is ever advised as billable.
+// Visits included for an allowance value ('unlimited' → null).
+function includedVisitsFor(value) {
+  if (String(value).toLowerCase() === 'unlimited') return null;
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? 1 + n : INCLUDED_TRAPPING_VISITS;
+}
+
 async function liveIncludedVisits(db) {
   let value;
   try {
@@ -213,9 +220,7 @@ async function liveIncludedVisits(db) {
     value = undefined;
   }
   if (value == null) value = require('./pricing-engine/constants').RODENT.trapping.includedFollowUps;
-  if (String(value).toLowerCase() === 'unlimited') return null;
-  const n = Number(value);
-  return Number.isFinite(n) && n >= 0 ? 1 + n : INCLUDED_TRAPPING_VISITS;
+  return includedVisitsFor(value);
 }
 
 const TRAP_SOLD_KEYS = new Set(TRAPPING_OPENER_KEYS);
@@ -223,15 +228,17 @@ const LINE_KEY_FIELDS = ['service', 'serviceKey', 'service_key', 'key'];
 
 // What the opener's estimate froze about trapping: whether it sold a
 // trapping program at all (a linked estimate may be for an unrelated
-// service), and the per-check price it quoted, if any. Bounded deep walk of
+// service), the per-check price it quoted, and the included-check
+// allowance it quoted ('unlimited' or a number), if any. Bounded deep walk of
 // estimate_data; parse problems read as "not sold".
 function estimateTrappingTerms(estimateData) {
   let data = estimateData;
   try {
     if (typeof data === 'string') data = JSON.parse(data);
-  } catch { return { sold: false, additionalCheckPrice: null }; }
+  } catch { return { sold: false, additionalCheckPrice: null, includedFollowUps: undefined }; }
   let sold = false;
   let price = null;
+  let allowance;
   const walk = (node, depth) => {
     if (!node || typeof node !== 'object' || depth > 8) return;
     if (Array.isArray(node)) { node.forEach((n) => walk(n, depth + 1)); return; }
@@ -241,15 +248,17 @@ function estimateTrappingTerms(estimateData) {
       sold = true;
       const quoted = Number(node.additionalCheckPrice ?? node.pricingBasis?.additionalCheckPrice);
       if (price == null && Number.isFinite(quoted) && quoted > 0) price = quoted;
+      const quotedAllowance = node.includedFollowUps ?? node.includedCallbacks ?? node.pricingBasis?.includedFollowUps;
+      if (allowance === undefined && quotedAllowance != null && quotedAllowance !== '') allowance = quotedAllowance;
     }
     for (const child of Object.values(node)) walk(child, depth + 1);
   };
   walk(data, 0);
-  return { sold, additionalCheckPrice: price };
+  return { sold, additionalCheckPrice: price, includedFollowUps: allowance };
 }
 
 async function openerEstimateTerms(db, opener) {
-  if (!opener?.source_estimate_id) return { sold: false, additionalCheckPrice: null };
+  if (!opener?.source_estimate_id) return { sold: false, additionalCheckPrice: null, includedFollowUps: undefined };
   const row = await db('estimates').where({ id: opener.source_estimate_id }).first('estimate_data');
   return estimateTrappingTerms(row?.estimate_data);
 }
@@ -291,8 +300,14 @@ async function trappingJobStatus(db, customerId, { date, today, propertyId = nul
   const lastDay = last && last.visits[last.visits.length - 1].scheduled_day;
   const job = last && dayNumber(anchor) - dayNumber(lastDay) <= JOB_GAP_DAYS ? last : null;
 
-  const includedVisits = await liveIncludedVisits(db);
-  const terms = job?.opener ? await openerEstimateTerms(db, job.opener) : { sold: false, additionalCheckPrice: null };
+  const terms = job?.opener
+    ? await openerEstimateTerms(db, job.opener)
+    : { sold: false, additionalCheckPrice: null, includedFollowUps: undefined };
+  // The allowance the sold estimate quoted wins; the live setting covers
+  // manually sold jobs and estimates that carried no allowance.
+  const includedVisits = terms.sold && terms.includedFollowUps !== undefined
+    ? includedVisitsFor(terms.includedFollowUps)
+    : await liveIncludedVisits(db);
   const base = {
     includedVisits,
     additionalCheckKey: TRAP_CHECK_ADDITIONAL_KEY,

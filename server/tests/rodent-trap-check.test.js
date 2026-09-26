@@ -275,6 +275,16 @@ describe('rodent trap check allowance', () => {
     expect(unlimited).toMatchObject({ includedVisits: null, nextVisitBillable: false });
   });
 
+  test('the allowance the estimate quoted wins over a later setting change', async () => {
+    const rows = [
+      { id: 'a', scheduled_day: '2026-10-05', service_key: 'rodent_trapping', estimate_day: '2026-10-01' },
+      { id: 'b', scheduled_day: '2026-10-12', service_key: 'rodent_trapping_followup', estimate_day: null },
+    ];
+    const quotedTwo = { oneTime: [{ service: 'rodent_trapping', includedFollowUps: 2 }] };
+    const status = await trappingJobStatus(fakeDb(rows, [], null, 95, { estimateData: quotedTwo, includedFollowups: 1 }), 'c', { premiseMatcher: everyPremise, today: '2026-10-13' });
+    expect(status).toMatchObject({ includedVisits: 3, nextVisitBillable: false });
+  });
+
   test('legacy rodent_exclusion ("Exclusion & Trapping") opens a trapping job', async () => {
     const rows = [
       { id: 'a', scheduled_day: '2026-09-01', service_key: 'rodent_exclusion', estimate_day: '2026-08-28' },
