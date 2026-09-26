@@ -156,6 +156,7 @@ test.each([
 
 test.each([
   ['Your next visit is scheduled for Oct 2 and keep pets off treated surfaces until dry.', 'Keep pets off treated surfaces until dry.'],
+  ['We treated the perimeter. Your next visit is scheduled for Oct 2 and 3 entry points should remain clear.', 'We treated the perimeter. 3 entry points should remain clear.'],
   ['We treated the perimeter. Your next visit is scheduled for Oct 2 and keep pets off treated surfaces until dry.', 'We treated the perimeter. Keep pets off treated surfaces until dry.'],
   ['We treated the perimeter. Your next visit is scheduled for Oct 2, and keep pets off treated surfaces until dry.', 'We treated the perimeter. Keep pets off treated surfaces until dry.'],
   ['We treated the perimeter, and your next visit is scheduled for Oct 2 and keep pets off treated surfaces until dry.', 'We treated the perimeter. Keep pets off treated surfaces until dry.'],
