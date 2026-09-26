@@ -1866,6 +1866,23 @@ describe('fileSkippedBookingCard — the shared shadow/legacy-mode "approved but
     expect(push).toBeGreaterThan(gate);
   });
 
+  // codex #4919 round-12 P1: a failed card write still leaves the call in
+  // review, since the booking was already dropped.
+  test('a failed card write still pushes the review marker in the catch path', () => {
+    const catchAt = body.indexOf('} catch (e) {');
+    expect(catchAt).toBeGreaterThan(-1);
+    expect(body.slice(catchAt)).toContain("bridgeNeedsConfirmation.push('auto_booking_skipped_after_approval')");
+  });
+
+  // codex #4919 round-12 P2: the late lead-activity refresh only lands while
+  // this worker still owns the call.
+  test('the late lead-activity refresh is fenced on processing ownership', () => {
+    const at = processorSrc.indexOf("await db('lead_activities').where({ id: aiTriageActivityId })");
+    expect(at).toBeGreaterThan(-1);
+    const stmt = processorSrc.slice(at, processorSrc.indexOf('.update({', at));
+    expect(stmt).toContain(".whereExists(db('call_log').select(db.raw('1')).where({ id: call.id, processing_token: procToken }))");
+  });
+
   test('takes the call lock, checks ownership under the claim fence, and MERGES instead of .ignore()-ing', () => {
     expect(body).toContain('await lockTriageCall(ttrx, call.id)');
     expect(body).toContain("ttrx('call_log').where({ id: call.id, processing_token: procToken }).first('id')");
@@ -1963,8 +1980,9 @@ describe('a late scheduling hold refreshes the ai_triage lead activity instead o
       afterRouteDecisionAt,
     );
     expect(refreshGateAt).toBeGreaterThan(afterRouteDecisionAt);
-    const section = processorSrc.slice(refreshGateAt, refreshGateAt + 700);
-    expect(section).toContain("db('lead_activities').where({ id: aiTriageActivityId }).update(");
+    const section = processorSrc.slice(refreshGateAt, refreshGateAt + 1100);
+    expect(section).toContain("db('lead_activities').where({ id: aiTriageActivityId })");
+    expect(section).toContain('.update({');
     expect(section).not.toContain('.insert(');
     expect(section).toContain('needs_confirmation: bridgeNeedsConfirmation');
   });
@@ -1984,7 +2002,7 @@ describe('a late scheduling hold refreshes the ai_triage lead activity instead o
 
   test('a refresh failure is caught and logged, never thrown — a non-critical op like the original insert', () => {
     const refreshGateAt = processorSrc.indexOf('if (aiTriageActivityId && bridgeConfirmationsAtTriageWrite');
-    const section = processorSrc.slice(refreshGateAt, refreshGateAt + 900);
+    const section = processorSrc.slice(refreshGateAt, refreshGateAt + 1400);
     expect(section).toContain('.catch((e) => logger.warn(');
   });
 });

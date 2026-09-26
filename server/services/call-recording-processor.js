@@ -1158,6 +1158,11 @@ async function fileSkippedBookingCard({ call, procToken, customerId, extraction,
     if (!bridgeNeedsConfirmation.includes('auto_booking_skipped_after_approval')) bridgeNeedsConfirmation.push('auto_booking_skipped_after_approval');
   } catch (e) {
     logger.warn(`[call-proc] ${skippedReason} triage insert failed for ${maskSid(callSid)}: ${e.code || e.name || 'db_error'}`);
+    // The caller already dropped the booking, so a failed card write must
+    // still leave the call in review rather than finalize it as processed
+    // (codex #4919 round-12 P1). The finalizer is ownership-fenced, so a
+    // superseded worker's marker never lands.
+    if (!bridgeNeedsConfirmation.includes('auto_booking_skipped_after_approval')) bridgeNeedsConfirmation.push('auto_booking_skipped_after_approval');
   }
 }
 
@@ -19086,7 +19091,11 @@ const CallRecordingProcessor = {
     // works instead of only living in review_status/needs_confirmation.
     if (aiTriageActivityId && bridgeConfirmationsAtTriageWrite
       && bridgeNeedsConfirmation.length > bridgeConfirmationsAtTriageWrite.length) {
-      await db('lead_activities').where({ id: aiTriageActivityId }).update({
+      // Fenced on this worker still owning the call (codex #4919 round-12
+      // P2): a reclaimed worker must not append its obsolete hold.
+      await db('lead_activities').where({ id: aiTriageActivityId })
+        .whereExists(db('call_log').select(db.raw('1')).where({ id: call.id, processing_token: procToken }))
+        .update({
         description: db.raw(
           "description || ? || ?",
           [' — (updated) ', `⚠ CONFIRM BEFORE DISPATCH: ${bridgeNeedsConfirmation.map(describeConfirmReason).join('; ')}`],
