@@ -170,8 +170,16 @@ const STATED_TIMING = new RegExp([
 // Stops before any word where STATED_TIMING itself matches, so every date
 // form it knows ("10/14", "Oct 14", "the 15th", weekdays) survives, plus the
 // preposition starts above (Codex #4816 r43).
-const TOPIC_CLAUSE = new RegExp(String.raw`(?<!\b(?:in|within|after|give me) )\b(?:about|regarding|concerning|from|re:|in regards? to|with regards? to)`
-  + String.raw`\s+[^\s,.;!?]+(?:\s+(?!${TRAILING_TIMING_START}|${STATED_TIMING.source})[^\s,.;!?]+)*`, 'gi');
+// "from" names a source ("the report from this morning", r41) unless an
+// open-ended marker makes it a start date ("call me from Friday onward",
+// "from tomorrow on", r44): then the clause is left for the timing test.
+// The other introducers always take their first word ("about tomorrow's
+// visit").
+const TOPIC_STOP = String.raw`(?!${TRAILING_TIMING_START}|${STATED_TIMING.source})`;
+const FROM_START_DATE = String.raw`(?![^,.;!?]*?\b(?:on|onwards?|forward|until|till|through|thru)\b)`;
+const TOPIC_CLAUSE = new RegExp(String.raw`(?<!\b(?:in|within|after|give me) )\b`
+  + String.raw`(?:(?:about|regarding|concerning|re:|in regards? to|with regards? to)\s+|from\s+${FROM_START_DATE})`
+  + String.raw`[^\s,.;!?]+(?:\s+${TOPIC_STOP}[^\s,.;!?]+)*`, 'gi');
 function withoutTopics(quote) {
   return String(quote || '').replace(TOPIC_CLAUSE, ' ');
 }

@@ -957,6 +957,23 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     expect((await mockPg('sms_log').where({ from_phone: 'push', status: 'sent' })).length).toBe(2);
   });
 
+  test('Codex #4816 r44: a retry of an accepted push repairs a missing proof row, once', async () => {
+    await device();
+    await put({ invoiceChannel: 'push' });
+    const invoiceId = randomUUID();
+    await mockPg('invoices').insert({ id: invoiceId, customer_id: property, token: randomUUID(), invoice_number: 'QA-INVOICE-3', status: 'sent' });
+    const routing = require('../services/messaging/push-channel-routing');
+    const notice = { customerId: property, to: '+19415550101', body: 'Your invoice is ready.', messageType: 'invoice_followup',
+      explicitPushOnly: true, invoiceId, notificationEventKey: `qa:${invoiceId}:repair` };
+    expect(await routing.attemptPushFirst(notice)).toMatchObject({ delivered: true });
+    await mockPg('sms_log').where({ from_phone: 'push' }).del(); // the first attempt's proof write was lost
+    expect(await routing.attemptPushFirst(notice)).toMatchObject({ delivered: true });
+    expect(await mockPg('sms_log').where({ from_phone: 'push' })).toHaveLength(1);
+    // A further retry finds the repaired proof and adds nothing.
+    expect(await routing.attemptPushFirst(notice)).toMatchObject({ delivered: true });
+    expect(await mockPg('sms_log').where({ from_phone: 'push' })).toHaveLength(1);
+  });
+
   test('Codex #4816 r40: a push proof row names the visit its notice was about', async () => {
     await device();
     await put({ invoiceChannel: 'push' });

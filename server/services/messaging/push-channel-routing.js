@@ -510,10 +510,61 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
     const acceptedAt = appNotification?.push?.deduped
       ? new Date(appNotification.push.acceptedAt)
       : new Date();
-    if (appNotification?.push?.deduped) return {
-      delivered: true, deliveryOutcome, sid: `push:${appNotification.id}`,
-      notificationId: String(appNotification.id), acceptedAt,
-    };
+    const proofRow = (extra = {}) => ({
+      customer_id: customerId,
+      direction: 'outbound',
+      from_phone: 'push',
+      to_phone: String(to || '').slice(0, 20),
+      message_body: body,
+      twilio_sid: null,
+      status: 'sent',
+      created_at: acceptedAt,
+      message_type: messageType,
+      metadata: JSON.stringify({
+        channel: 'push',
+        requestedChannel: explicitPushOnly ? 'push' : 'sms',
+        providerAccepted: true,
+        provider_from_number: fromNumber,
+        ...(scheduledSmsLogId ? { scheduled_sms_log_id: scheduledSmsLogId } : {}),
+        // Same event identity the Text path stamps (twilio.js), so a
+        // history reader can correlate this proof with its keyed ledger
+        // episode instead of counting the same contact twice.
+        ...(notificationEventKey ? { notificationEventKey } : {}),
+        // The visit this notice is about, like the SMS path's metadata:
+        // readers that scope by property (SMS commitment evidence) need
+        // it on the proof row itself (Codex #4816 r40).
+        ...(appointmentId ? { scheduled_service_id: String(appointmentId) } : {}),
+        ...extra,
+      }),
+    });
+    if (appNotification?.push?.deduped) {
+      // A retry of an accepted push repairs a proof row the first attempt
+      // failed to write, so readers of sms_log (SMS commitment evidence,
+      // history) still see the delivered notice (Codex #4816 r44). Match on
+      // the notification id, the event key, or the same notice within five
+      // minutes of acceptance so a proof written before the id back-fill is
+      // never duplicated.
+      try {
+        const notificationId = String(appNotification.id);
+        const windowMs = 5 * 60 * 1000;
+        const existing = await db('sms_log').where({ customer_id: customerId, from_phone: 'push' })
+          .where(function sameNotice() {
+            this.whereRaw("metadata->>'push_notification_id' = ?", [notificationId])
+              .modify((q) => { if (notificationEventKey) q.orWhereRaw("metadata->>'notificationEventKey' = ?", [notificationEventKey]); })
+              .orWhere((q) => q.where({ message_type: messageType })
+                .whereBetween('created_at', [new Date(acceptedAt.getTime() - windowMs), new Date(acceptedAt.getTime() + windowMs)]));
+          })
+          .first('id');
+        // A scheduled send's queue row is its durable proof (settled below).
+        if (!existing && !scheduledSmsLogId) await db('sms_log').insert(proofRow({ push_notification_id: notificationId }));
+      } catch (repairErr) {
+        logger.warn(`[push-routing] proof repair failed: ${repairErr.message}`);
+      }
+      return {
+        delivered: true, deliveryOutcome, sid: `push:${appNotification.id}`,
+        notificationId: String(appNotification.id), acceptedAt,
+      };
+    }
     // PROOF FIRST, bell second: this sms_log row is what
     // recoverStaleScheduledSmsClaims reads as durable proof-of-send — a
     // crash inside the bell insert before the proof exists would let the
@@ -524,32 +575,10 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
     // best-effort afterward.
     let proofRowId = null;
     try {
-      const inserted = await db('sms_log').insert({
-        customer_id: customerId,
-        direction: 'outbound',
-        from_phone: 'push',
-        to_phone: String(to || '').slice(0, 20),
-        message_body: body,
-        twilio_sid: null,
-        status: 'sent',
-        created_at: acceptedAt,
-        message_type: messageType,
-        metadata: JSON.stringify({
-          channel: 'push',
-          requestedChannel: explicitPushOnly ? 'push' : 'sms',
-          providerAccepted: true,
-          provider_from_number: fromNumber,
-          ...(scheduledSmsLogId ? { scheduled_sms_log_id: scheduledSmsLogId } : {}),
-          // Same event identity the Text path stamps (twilio.js), so a
-          // history reader can correlate this proof with its keyed ledger
-          // episode instead of counting the same contact twice.
-          ...(notificationEventKey ? { notificationEventKey } : {}),
-          // The visit this notice is about, like the SMS path's metadata:
-          // readers that scope by property (SMS commitment evidence) need
-          // it on the proof row itself (Codex #4816 r40).
-          ...(appointmentId ? { scheduled_service_id: String(appointmentId) } : {}),
-        }),
-      }).returning('id');
+      // One immediate retry: a transient write failure here would leave an
+      // accepted, non-scheduled push with no durable proof (Codex #4816 r44).
+      const insertProof = () => db('sms_log').insert(proofRow()).returning('id');
+      const inserted = await insertProof().catch(() => insertProof());
       proofRowId = inserted && inserted[0] ? (inserted[0].id || inserted[0]) : null;
     } catch (logErr) {
       logger.error(`[push-routing] sms_log record failed: ${logErr.message}`);
