@@ -1,9 +1,11 @@
 // CI's DB-gated pass runs this against the migrated PostgreSQL. Fixture
 // tables are LIKE copies (constraints and defaults included) in a unique
-// schema that is dropped after the suite. The real matcher, sizing and
-// adjustStock run; this proves the SQL the mocked suites can't: the
-// duplicate-receipt guard's time windows and NULL-safe source test, the
-// UNIQUE claim under a concurrent run, the status CHECK, and rollback.
+// schema that is dropped after the suite. The real matcher, sizing,
+// adjustStock and notifyAdmin run; this proves what the mocked suites
+// can't: the duplicate-receipt guard's time windows and NULL-safe source
+// test, the UNIQUE claim under a concurrent run, re-reading the product
+// under a real row lock, the bell committing (or failing) with its line,
+// the status CHECKs, and rollback.
 const SKIP = !process.env.DATABASE_URL;
 const knex = require('knex');
 const { randomUUID } = require('crypto');
@@ -18,8 +20,9 @@ jest.mock('../models/db', () => {
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
 const { processReceiptLine } = require('../services/purchase-receipts/receipt-processor');
+const notifications = require('../services/notification-service');
 
-const TABLES = ['products_catalog', 'product_aliases', 'product_inventory_movements', 'product_restock_requests', 'purchase_receipt_lines'];
+const TABLES = ['products_catalog', 'product_aliases', 'product_inventory_movements', 'product_restock_requests', 'purchase_receipt_lines', 'notifications'];
 const RECEIVED_AT = new Date('2026-09-27T15:00:00Z');
 const TITLE = 'Control Solutions Taurus SC Termiticide 78 oz';
 const HOUR = 60 * 60 * 1000;
@@ -110,6 +113,45 @@ jest.setTimeout(30000);
     const [request] = await mockConn('product_restock_requests').insert({ product_id: taurus.id, status: 'open', requested_quantity: 78 }).returning('*');
     expect(await processReceiptLine(line())).toMatchObject({ status: 'logged', hasOpenRestockRequest: true });
     expect(await mockConn('product_restock_requests').where({ id: request.id }).first()).toEqual(request);
+  });
+
+  test('the line\'s bell commits with it, keyed to the line', async () => {
+    const ringBell = (outcome, trx) => notifications.notifyAdmin('inventory', 'Amazon delivery logged', 'body', {
+      bell: true, dedupeKey: `purchase-receipt:${outcome.lineId}`, trx,
+    });
+    const outcome = await processReceiptLine(line({ ringBell }));
+    const bells = await mockConn('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`purchase-receipt:${outcome.lineId}`]);
+    expect(bells).toHaveLength(1);
+  });
+
+  test('a bell that can\'t be saved rolls back the line and its stock; the retry logs once', async () => {
+    const failingBell = (_outcome, trx) => trx.raw('SELECT 1 / 0');
+    await expect(processReceiptLine(line({ ringBell: failingBell }))).rejects.toThrow(/division by zero/);
+    expect(await stock()).toBe(0);
+    expect(await savedLine()).toBeUndefined();
+    expect(await processReceiptLine(line())).toMatchObject({ status: 'logged' });
+    expect(await stock()).toBe(156);
+  });
+
+  test('a container_size edit that commits while the line waits on the product lock is what counts', async () => {
+    const blocker = await mockConn.transaction();
+    await blocker('products_catalog').where({ id: taurus.id }).forUpdate().first('id');
+    const pending = processReceiptLine(line()); // first read sees 78 fl oz, then waits on the lock
+    for (let i = 0; i < 100; i += 1) {
+      const { rows } = await mockConn.raw("SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'");
+      if (rows[0].n > 0) break;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    await blocker('products_catalog').where({ id: taurus.id }).update({ container_size: '96 fl oz' });
+    await blocker.commit();
+    expect(await pending).toMatchObject({ status: 'size_mismatch' });
+    expect(await stock()).toBe(0);
+  });
+
+  test('no readable Order #: a would-be restock is held as no_order_number under order "unknown"', async () => {
+    expect(await processReceiptLine(line({ orderNumber: null }))).toMatchObject({ status: 'no_order_number' });
+    expect(await stock()).toBe(0);
+    expect(await mockConn('purchase_receipt_lines').where({ order_number: 'unknown' }).first()).toMatchObject({ status: 'no_order_number', product_id: taurus.id });
   });
 
   test('a failing stock write rolls the claim back, so the next sweep retries the line', async () => {

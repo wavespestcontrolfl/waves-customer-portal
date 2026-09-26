@@ -11,15 +11,22 @@
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
-const mockState = { outcomes: [], emails: [] };
+const mockState = { outcomes: [], emails: [], whereCalls: [] };
+// Like the real processor, a recorded outcome's bell is rung through the
+// ringBell callback on the line's transaction ('trx-stub' here).
 jest.mock('../services/purchase-receipts/receipt-processor', () => ({
-  processReceiptLine: jest.fn(async () => mockState.outcomes.shift()),
+  processReceiptLine: jest.fn(async (params) => {
+    const outcome = mockState.outcomes.shift();
+    if (outcome?.status) await params.ringBell(outcome, 'trx-stub');
+    return outcome;
+  }),
 }));
 jest.mock('../models/db', () => {
   // Only runPurchaseReceiptRestockSweep's own emails query touches db in
   // this file — processReceiptEmail takes an already-fetched row.
   const q = {};
-  for (const m of ['whereRaw', 'where', 'orderBy']) q[m] = () => q;
+  for (const m of ['whereRaw', 'orderBy', 'select']) q[m] = () => q;
+  q.where = (...args) => { mockState.whereCalls.push(args); return q; };
   q.then = (resolve, reject) => Promise.resolve(mockState.emails).then(resolve, reject);
   return jest.fn(() => q);
 });
@@ -38,8 +45,8 @@ const deliveredEmail = {
   received_at: new Date('2026-09-27T15:00:00Z'), authentication_results: ALIGNED_AMAZON_AUTH,
 };
 const taurus = { id: 'p1', name: 'Taurus SC' };
-const loggedTaurus = (extra = {}) => ({ status: 'logged', product: taurus, receivedQty: 156, receivedUnit: 'fl_oz', hasOpenRestockRequest: false, ...extra });
-const unmatched = { status: 'unmatched', inserted: true, product: null };
+const loggedTaurus = (extra = {}) => ({ status: 'logged', product: taurus, receivedQty: 156, receivedUnit: 'fl_oz', hasOpenRestockRequest: false, lineId: 'line-1', ...extra });
+const unmatched = { status: 'unmatched', inserted: true, product: null, lineId: 'line-2' };
 
 function openGates() {
   process.env.GATE_PURCHASE_RECEIPT_RESTOCK = 'true';
@@ -49,6 +56,7 @@ function openGates() {
 beforeEach(() => {
   mockState.outcomes = [];
   mockState.emails = [];
+  mockState.whereCalls = [];
   processReceiptLine.mockClear();
   logger.warn.mockClear();
   delete process.env.GATE_PURCHASE_RECEIPT_RESTOCK;
@@ -140,7 +148,8 @@ describe('processReceiptEmail', () => {
     expect(category).toBe('inventory');
     expect(title).toBe('Amazon delivery logged');
     expect(body).toBe('Amazon delivery logged: Taurus SC +156 fl oz (2 × 78 fl oz)');
-    expect(opts).toMatchObject({ bell: true, link: '/admin/inventory?tab=products', dedupeKey: 'amazon-delivery:e1:Taurus SC Termiticide 78 oz' });
+    // Written on the line's own transaction, keyed by the recorded line.
+    expect(opts).toMatchObject({ bell: true, link: '/admin/inventory?tab=products', dedupeKey: 'purchase-receipt:line-1', trx: 'trx-stub' });
   });
 
   test('a live restock request adds a read-only note to the logged bell', async () => {
@@ -155,8 +164,9 @@ describe('processReceiptEmail', () => {
     ['possible_duplicate', 'possibleDuplicate', 'A manual restock or count was logged around the same time, so check the count.'],
     ['size_mismatch', 'sizeMismatch', "The listing's size or pack count doesn't match the catalog container size, so log it by hand."],
     ['needs_size', 'needsSize', 'The product has no container size in the catalog, so log it by hand.'],
+    ['no_order_number', 'noOrderNumber', "The email's order number couldn't be read, so log it by hand."],
   ])('a %s line is held with one bell saying why', async (status, bucket, reason) => {
-    mockState.outcomes = [{ status, product: taurus, inserted: true }, unmatched];
+    mockState.outcomes = [{ status, product: taurus, inserted: true, lineId: 'line-9' }, unmatched];
     const notify = jest.fn(async () => ({}));
     const result = await processReceiptEmail(deliveredEmail, { notify });
     expect(result[bucket]).toEqual([{ title: 'Taurus SC Termiticide 78 oz', productId: 'p1', receivedQty: null, receivedUnit: null }]);
@@ -165,15 +175,15 @@ describe('processReceiptEmail', () => {
     const [, title, body, opts] = notify.mock.calls[0];
     expect(title).toBe('Amazon delivery not added');
     expect(body).toBe(`Amazon delivery of Taurus SC ×2 wasn't added. ${reason}`);
-    expect(opts).toMatchObject({ bell: true, dedupeKey: 'amazon-delivery-held:e1:Taurus SC Termiticide 78 oz', metadata: { emailId: 'e1', productId: 'p1', status } });
+    expect(opts).toMatchObject({ bell: true, dedupeKey: 'purchase-receipt:line-9', trx: 'trx-stub', metadata: { emailId: 'e1', productId: 'p1', status } });
   });
 
-  test('a failed bell is logged, never recorded as a failed line', async () => {
+  test('a bell that can\'t be saved fails its line: recorded as an error, and (rolled back) retried next sweep', async () => {
     mockState.outcomes = [loggedTaurus(), unmatched];
-    const result = await processReceiptEmail(deliveredEmail, { notify: jest.fn(async () => { throw new Error('bell down'); }) });
-    expect(result.logged).toHaveLength(1);
-    expect(result.errors).toEqual([]);
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('bell down'));
+    const result = await processReceiptEmail(deliveredEmail, { notify: jest.fn(async () => { throw new Error('admin notification insert failed'); }) });
+    expect(result.logged).toEqual([]);
+    expect(result.errors).toEqual([{ title: 'Taurus SC Termiticide 78 oz', message: 'admin notification insert failed' }]);
+    expect(result.unmatched).toHaveLength(1); // the other line is unaffected
   });
 
   test('a per-item failure is recorded and does not stop the other items on the same email', async () => {
@@ -198,7 +208,7 @@ describe('processReceiptEmail', () => {
       body_text: 'Order # 900-7000007-7000007\n\nTrack your package: https://www.amazon.com/x\n',
       received_at: new Date('2026-09-27T15:00:00Z'), authentication_results: ALIGNED_AMAZON_AUTH,
     };
-    mockState.outcomes = [{ status: 'no_items', inserted: true, product: null }];
+    mockState.outcomes = [{ status: 'no_items', inserted: true, product: null, lineId: 'line-4' }];
     const notify = jest.fn(async () => ({}));
     const result = await processReceiptEmail(itemless, { notify });
 
@@ -213,6 +223,18 @@ describe('processReceiptEmail', () => {
 
 describe('runPurchaseReceiptRestockSweep', () => {
   beforeEach(openGates);
+  afterEach(() => jest.restoreAllMocks());
+
+  test.each([
+    ['an old cutoff is bounded to the last 7 days', '2026-09-01T00:00:00Z', '2026-09-20T12:00:00.000Z'],
+    ['a recent cutoff is used as-is', '2026-09-26T05:49:45Z', '2026-09-26T05:49:45.000Z'],
+  ])('%s', async (_label, since, floor) => {
+    process.env.PURCHASE_RECEIPT_SINCE = since;
+    jest.spyOn(Date, 'now').mockReturnValue(new Date('2026-09-27T12:00:00Z').getTime());
+    await runPurchaseReceiptRestockSweep({ notify: jest.fn() });
+    const [column, op, value] = mockState.whereCalls.find(([col]) => col === 'received_at');
+    expect([column, op, value.toISOString()]).toEqual(['received_at', '>=', floor]);
+  });
 
   test('aggregates outcomes across every scanned email, tagged with the email id', async () => {
     mockState.emails = [deliveredEmail, { ...deliveredEmail, id: 'e2', body_text: 'Order # 900-8000008-8000008\n\n* Southern Ag Thuricide BT Concentrate\n' }];

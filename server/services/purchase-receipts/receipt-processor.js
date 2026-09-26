@@ -24,12 +24,20 @@
  *
  * Idempotency: purchase_receipt_lines is UNIQUE (vendor, order_number,
  * shipment_key, line_no) — shipment_key because one order can arrive as
- * several Delivered emails with the same Order #. For a 'logged' line the
- * claim insert, the product-row lock, the duplicate check, adjustStock (on
- * the same transaction via options.trx) and the movement_id update run in
- * ONE transaction: a failure anywhere rolls the claim back and the next
- * sweep retries the line cleanly. The claim's ON CONFLICT DO NOTHING is the
+ * several Delivered emails with the same Order #. Every line runs in ONE
+ * transaction: the product-row lock and a second classification under it
+ * (so a catalog edit that committed meanwhile is what counts), the claim
+ * insert, the duplicate check, adjustStock (options.trx), the movement_id
+ * update and the line's bell (the caller's ringBell, which writes the
+ * notification on the same transaction). A failure anywhere — a bell that
+ * can't be saved included — rolls it all back, and the next sweep retries
+ * the line from scratch. The claim's ON CONFLICT DO NOTHING is the
  * at-most-once guard against a concurrent run.
+ *
+ * An email with no readable "Order #" (a template change) is keyed under
+ * order_number 'unknown' by its shipment; a line that would move stock is
+ * held as 'no_order_number' instead, so it surfaces for review rather than
+ * vanishing.
  *
  * Duplicate-receipt guard: the claim only catches the SAME email twice. If
  * staff already put the box on the shelf by hand, the line is held as
@@ -50,6 +58,7 @@ const { adjustStock } = require('../inventory-operations');
 const VENDOR = 'amazon';
 const SOURCE = 'amazon_delivery';
 const DUPLICATE_RESTOCK_LOOKBACK_MS = 48 * 60 * 60 * 1000;
+const UNKNOWN_ORDER = 'unknown';
 const ALREADY_PROCESSED = Object.freeze({ skipped: true, reason: 'already_processed' });
 
 // Within 1% (min 0.01 unit) counts as agreement — the rounding slack the
@@ -181,38 +190,57 @@ async function claimLine(conn, row) {
   return inserted?.length ? inserted[0] : null;
 }
 
+// Classify, and for a line that would move stock, lock its product row and
+// classify again under the lock: a container_size edit or a deactivation
+// that committed after the first read is what counts.
+async function classifyUnderLock(item, trx) {
+  const first = await classifyItem(item, trx);
+  if (first.status !== 'logged') return first;
+  await trx('products_catalog').where({ id: first.productId }).forUpdate().first('id');
+  const locked = await classifyItem(item, trx);
+  // A different product matches now; its row isn't locked, so start over next sweep.
+  if (locked.status === 'logged' && locked.productId !== first.productId) {
+    throw new Error(`matched product changed while processing "${item.title}"; retrying next sweep`);
+  }
+  return locked;
+}
+
 /**
- * @param {{email, orderNumber, shipmentKey, item, lineNo, forcedStatus}} params
+ * @param {{email, orderNumber, shipmentKey, item, lineNo, forcedStatus, ringBell}} params
+ *   orderNumber: may be null (no readable Order #) — keyed as 'unknown'.
  *   shipmentKey: the parser's (shipmentId, else the email's gmail_id / id).
  *   forcedStatus: 'no_items' for the one placeholder line an itemless
  *   Delivered email gets (sweep.js) — no matching or sizing at all.
- * @returns one of:
+ *   ringBell(outcome, trx): writes the line's bell on its transaction.
+ * @returns one of (every recorded outcome carries lineId):
  *   { skipped: true, reason }                                    — nothing written
- *   { status: 'unmatched'|'size_mismatch'|'needs_size'|'no_items', inserted: true, product }
+ *   { status: 'unmatched'|'size_mismatch'|'needs_size'|'no_items'|'no_order_number', inserted: true, product }
  *   { status: 'possible_duplicate', product, receivedQty, receivedUnit }  — held, no movement
  *   { status: 'logged', product, receivedQty, receivedUnit, movement, hasOpenRestockRequest }
  */
-async function processReceiptLine({ email, orderNumber, shipmentKey, item, lineNo, forcedStatus }, conn = db) {
-  if (!orderNumber || !shipmentKey) {
-    const reason = orderNumber ? 'no_shipment_key' : 'no_order_number';
-    logger.warn(`[purchase-receipts] email ${email.id} line ${lineNo}: ${reason}, skipped`);
-    return { skipped: true, reason };
+async function processReceiptLine({ email, orderNumber, shipmentKey, item, lineNo, forcedStatus, ringBell = async () => {} }, conn = db) {
+  if (!shipmentKey) {
+    logger.warn(`[purchase-receipts] email ${email.id} line ${lineNo}: no shipment key, skipped`);
+    return { skipped: true, reason: 'no_shipment_key' };
   }
-  const key = { vendor: VENDOR, order_number: orderNumber, shipment_key: shipmentKey, line_no: lineNo };
+  const key = { vendor: VENDOR, order_number: orderNumber || UNKNOWN_ORDER, shipment_key: shipmentKey, line_no: lineNo };
   if (await conn('purchase_receipt_lines').where(key).first('id')) return { ...ALREADY_PROCESSED };
 
-  const classified = forcedStatus ? { status: forcedStatus, productId: null, product: null } : await classifyItem(item, conn);
-  const row = {
-    ...key, email_id: email.id, raw_title: item.title, quantity: item.quantity, product_id: classified.productId,
-    received_qty: classified.receivedQty ?? null, received_unit: classified.receivedUnit ?? null, status: classified.status,
-  };
-  if (classified.status !== 'logged') {
-    const saved = await claimLine(conn, row);
-    return saved ? { status: classified.status, inserted: true, product: classified.product || null } : { ...ALREADY_PROCESSED };
-  }
   return conn.transaction(async (trx) => {
-    const claim = await claimLine(trx, row);
-    return claim ? performLoggedMovement(trx, { claim, classified, orderNumber, email, item }) : { ...ALREADY_PROCESSED };
+    let classified = forcedStatus ? { status: forcedStatus, productId: null, product: null } : await classifyUnderLock(item, trx);
+    if (!orderNumber && classified.status === 'logged') {
+      classified = { status: 'no_order_number', productId: classified.productId, product: classified.product };
+    }
+    const claim = await claimLine(trx, {
+      ...key, email_id: email.id, raw_title: item.title, quantity: item.quantity, product_id: classified.productId,
+      received_qty: classified.receivedQty ?? null, received_unit: classified.receivedUnit ?? null, status: classified.status,
+    });
+    if (!claim) return { ...ALREADY_PROCESSED };
+    const outcome = classified.status === 'logged'
+      ? await performLoggedMovement(trx, { claim, classified, orderNumber, email, item })
+      : { status: classified.status, inserted: true, product: classified.product || null };
+    await ringBell({ ...outcome, lineId: claim.id }, trx);
+    return { ...outcome, lineId: claim.id };
   });
 }
 
@@ -234,12 +262,11 @@ function findPossibleDuplicateMovement(trx, productId, receivedAt) {
     .first('id');
 }
 
-// The claimed 'logged' line's write, on the claim's own transaction.
+// The claimed 'logged' line's write, on the claim's own transaction. The
+// product row is already locked (classifyUnderLock), so no manual
+// adjustment commits between the duplicate check and the movement;
+// adjustStock locks the same row again, which Postgres treats as a no-op.
 async function performLoggedMovement(trx, { claim, classified, orderNumber, email, item }) {
-  // Lock the product row before reading the ledger, so no manual adjustment
-  // commits between the duplicate check and the movement. adjustStock locks
-  // the same row again in this transaction, which Postgres treats as a no-op.
-  await trx('products_catalog').where({ id: classified.productId }).forUpdate().first('id');
   const { product, receivedQty, receivedUnit } = classified;
   if (await findPossibleDuplicateMovement(trx, classified.productId, email.received_at)) {
     await trx('purchase_receipt_lines').where({ id: claim.id }).update({ status: 'possible_duplicate' });

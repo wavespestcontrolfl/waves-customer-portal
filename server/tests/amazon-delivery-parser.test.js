@@ -113,13 +113,19 @@ describe('parseAmazonDeliveredEmail — item blocks', () => {
     expect(parseAmazonDeliveredEmail({ from_address: 'someone@example.com', subject: 'Delivered: your order', body_text: '* Thing\n  Quantity: 1' })).toBeNull();
   });
 
-  test('returns null when there is no text at all to parse', () => {
-    expect(parseAmazonDeliveredEmail({ from_address: 'order-update@amazon.com', subject: 'Delivered: your order', body_text: '', body_html: '' })).toBeNull();
+  // An unreadable Delivered email still yields a result, so the caller holds
+  // a line for review instead of the delivery vanishing.
+  test.each([
+    ['no text at all', { body_text: '', body_html: '' }],
+    ['no order number and no items', { body_text: 'No order number and no bullet lines here.' }],
+  ])('a Delivered email with %s still returns an object (orderNumber null, items [])', (_label, body) => {
+    const parsed = parseAmazonDeliveredEmail({ from_address: 'order-update@amazon.com', subject: 'Delivered: your order', gmail_id: 'gm-1', ...body });
+    expect(parsed).toEqual({ orderNumber: null, shipmentId: null, shipmentKey: 'gm-1', items: [] });
   });
 
-  test('returns null when there is no order number AND no items (nothing usable at all)', () => {
-    const email = { from_address: 'order-update@amazon.com', subject: 'Delivered: your order', body_text: 'No order number and no bullet lines here.' };
-    expect(parseAmazonDeliveredEmail(email)).toBeNull();
+  test('items with no readable Order # keep their items; orderNumber is null', () => {
+    const parsed = parseAmazonDeliveredEmail({ from_address: 'order-update@amazon.com', subject: 'Delivered: 1 item', gmail_id: 'gm-2', body_text: '* Taurus SC 78 oz\n  Quantity: 1\n' });
+    expect(parsed).toMatchObject({ orderNumber: null, shipmentKey: 'gm-2', items: [{ title: 'Taurus SC 78 oz', quantity: 1 }] });
   });
 });
 

@@ -279,23 +279,61 @@ describe('processReceiptLine', () => {
   const taurusLine = (overrides = {}) => ({
     email, orderNumber: '900-1000001-1000001', shipmentKey: 'ship-1', item: { title: 'Taurus SC Termiticide 78 oz', quantity: 2 }, lineNo: 1, ...overrides,
   });
+  const lineId = expect.stringMatching(/^line-/);
 
   test('unmatched item: inserts a purchase_receipt_lines row, never touches inventory-operations', async () => {
     const outcome = await processReceiptLine({ email, orderNumber: '900-5000005-5000005', shipmentKey: 'ship-1', item: { title: 'Chromebook', quantity: 1 }, lineNo: 1 });
-    expect(outcome).toEqual({ status: 'unmatched', inserted: true, product: null });
+    expect(outcome).toEqual({ status: 'unmatched', inserted: true, product: null, lineId });
     expect(mockAdjustStock).not.toHaveBeenCalled();
+    expect(mockDbState.lockedProducts).toEqual([]);
     expect(mockDbState.lines['amazon|900-5000005-5000005|ship-1|1']).toMatchObject({ status: 'unmatched', product_id: null, received_qty: null });
   });
 
   test('logged item: locks the product, calls adjustStock with the amount + provenance, records the movement', async () => {
     mockState.match = { matched: true, product: taurus };
     const outcome = await processReceiptLine(taurusLine());
-    expect(outcome).toEqual({ status: 'logged', product: taurus, receivedQty: 156, receivedUnit: 'fl_oz', movement: { id: 'mv-1' }, hasOpenRestockRequest: false });
+    expect(outcome).toEqual({ status: 'logged', product: taurus, receivedQty: 156, receivedUnit: 'fl_oz', movement: { id: 'mv-1' }, hasOpenRestockRequest: false, lineId });
     expect(mockDbState.lockedProducts).toEqual(['p-taurus']);
     expect(mockAdjustStock).toHaveBeenCalledWith('p-taurus',
       { movementType: 'restock', quantity: 156, unit: 'fl_oz' },
       expect.objectContaining({ source: 'amazon_delivery', extraMetadata: { orderNumber: '900-1000001-1000001', emailId: 'email-1', rawTitle: 'Taurus SC Termiticide 78 oz' } }));
     expect(mockDbState.lines['amazon|900-1000001-1000001|ship-1|1']).toMatchObject({ status: 'logged', movement_id: 'mv-1', received_qty: 156, received_unit: 'fl_oz' });
+  });
+
+  test('the bell is rung once, on the line\'s own transaction, with the recorded line id', async () => {
+    mockState.match = { matched: true, product: taurus };
+    const ringBell = jest.fn(async () => {});
+    const outcome = await processReceiptLine(taurusLine({ ringBell }));
+    expect(ringBell).toHaveBeenCalledTimes(1);
+    expect(ringBell.mock.calls[0][0]).toMatchObject({ status: 'logged', lineId: outcome.lineId });
+    expect(ringBell.mock.calls[0][1]).toBe(require('../models/db')); // the mocked transaction handle
+  });
+
+  test('a bell that can\'t be saved rolls the whole line back (claim and movement), so the next sweep retries it', async () => {
+    mockState.match = { matched: true, product: taurus };
+    const failing = jest.fn(async () => { throw new Error('admin notification insert failed'); });
+    await expect(processReceiptLine(taurusLine({ ringBell: failing }))).rejects.toThrow('admin notification insert failed');
+    expect(mockDbState.lines['amazon|900-1000001-1000001|ship-1|1']).toBeUndefined();
+    expect((await processReceiptLine(taurusLine())).status).toBe('logged');
+  });
+
+  test('a container_size edit committed before the lock is what counts: re-read under the lock -> size_mismatch, no movement', async () => {
+    matchAmazonTitleToProduct
+      .mockResolvedValueOnce({ matched: true, product: taurus }) // first read: 78 fl oz
+      .mockResolvedValueOnce({ matched: true, product: { ...taurus, container_size: '96 fl oz' } }); // under the lock
+    const outcome = await processReceiptLine(taurusLine());
+    expect(outcome).toMatchObject({ status: 'size_mismatch', inserted: true });
+    expect(mockAdjustStock).not.toHaveBeenCalled();
+    expect(mockDbState.lines['amazon|900-1000001-1000001|ship-1|1']).toMatchObject({ status: 'size_mismatch', received_qty: null });
+  });
+
+  test('a different product matching under the lock aborts the line (its row isn\'t locked); nothing is recorded', async () => {
+    matchAmazonTitleToProduct
+      .mockResolvedValueOnce({ matched: true, product: taurus })
+      .mockResolvedValueOnce({ matched: true, product: { ...taurus, id: 'p-other' } });
+    await expect(processReceiptLine(taurusLine())).rejects.toThrow(/matched product changed/);
+    expect(Object.keys(mockDbState.lines)).toHaveLength(0);
+    expect(mockAdjustStock).not.toHaveBeenCalled();
   });
 
   test('a live restock request is reported for the bell and never written', async () => {
@@ -310,11 +348,25 @@ describe('processReceiptLine', () => {
     mockState.match = { matched: true, product: taurus };
     mockDbState.duplicateMovement = { id: 'mv-manual' };
     const outcome = await processReceiptLine(taurusLine());
-    expect(outcome).toEqual({ status: 'possible_duplicate', product: taurus, receivedQty: 156, receivedUnit: 'fl_oz' });
+    expect(outcome).toEqual({ status: 'possible_duplicate', product: taurus, receivedQty: 156, receivedUnit: 'fl_oz', lineId });
     expect(mockAdjustStock).not.toHaveBeenCalled();
     const saved = mockDbState.lines['amazon|900-1000001-1000001|ship-1|1'];
     expect(saved).toMatchObject({ status: 'possible_duplicate', received_qty: 156, received_unit: 'fl_oz' });
     expect(saved.movement_id).toBeUndefined();
+  });
+
+  test('no readable Order #: a line that would move stock is held as no_order_number under order "unknown"', async () => {
+    mockState.match = { matched: true, product: taurus };
+    const outcome = await processReceiptLine(taurusLine({ orderNumber: null }));
+    expect(outcome).toEqual({ status: 'no_order_number', inserted: true, product: taurus, lineId });
+    expect(mockAdjustStock).not.toHaveBeenCalled();
+    expect(mockDbState.lines['amazon|unknown|ship-1|1']).toMatchObject({ status: 'no_order_number', product_id: 'p-taurus' });
+    expect(await processReceiptLine(taurusLine({ orderNumber: null }))).toEqual({ skipped: true, reason: 'already_processed' });
+  });
+
+  test('no readable Order # on a personal item stays unmatched (no hold, no bell)', async () => {
+    const outcome = await processReceiptLine(taurusLine({ orderNumber: null, item: { title: 'Chromebook', quantity: 1 } }));
+    expect(outcome).toMatchObject({ status: 'unmatched' });
   });
 
   test('idempotency: the same (order, shipment, line) twice logs once', async () => {
@@ -334,11 +386,8 @@ describe('processReceiptLine', () => {
     expect(mockAdjustStock).toHaveBeenCalledTimes(2);
   });
 
-  test.each([
-    [{ orderNumber: null }, 'no_order_number'],
-    [{ shipmentKey: null }, 'no_shipment_key'],
-  ])('%o -> skipped (%s), nothing inserted', async (overrides, reason) => {
-    expect(await processReceiptLine(taurusLine(overrides))).toEqual({ skipped: true, reason });
+  test('no shipment key -> skipped, nothing inserted', async () => {
+    expect(await processReceiptLine(taurusLine({ shipmentKey: null }))).toEqual({ skipped: true, reason: 'no_shipment_key' });
     expect(Object.keys(mockDbState.lines)).toHaveLength(0);
   });
 
@@ -364,12 +413,12 @@ describe('processReceiptLine', () => {
   test('size_mismatch and needs_size lines are inserted with no inventory-operations call', async () => {
     mockState.match = { matched: true, product: taurus };
     const mismatch = await processReceiptLine(taurusLine({ item: { title: 'Taurus SC Termiticide 96 oz', quantity: 1 } }));
-    expect(mismatch).toEqual({ status: 'size_mismatch', inserted: true, product: taurus });
+    expect(mismatch).toEqual({ status: 'size_mismatch', inserted: true, product: taurus, lineId });
 
     const noSize = { id: 'p-nosize', name: 'No Size Product', container_size: null };
     mockState.match = { matched: true, product: noSize };
     const needsSize = await processReceiptLine(taurusLine({ item: { title: 'No Size Product', quantity: 1 }, lineNo: 2 }));
-    expect(needsSize).toEqual({ status: 'needs_size', inserted: true, product: noSize });
+    expect(needsSize).toEqual({ status: 'needs_size', inserted: true, product: noSize, lineId });
     expect(mockAdjustStock).not.toHaveBeenCalled();
   });
 
@@ -378,7 +427,7 @@ describe('processReceiptLine', () => {
       email, orderNumber: '900-6000006-6000006', shipmentKey: 'ship-1',
       item: { title: 'Delivered: 1 Lawn & Garden item', quantity: 1 }, lineNo: 1, forcedStatus: 'no_items',
     });
-    expect(outcome).toEqual({ status: 'no_items', inserted: true, product: null });
+    expect(outcome).toEqual({ status: 'no_items', inserted: true, product: null, lineId });
     expect(mockDbState.lines['amazon|900-6000006-6000006|ship-1|1']).toMatchObject({ status: 'no_items', product_id: null, raw_title: 'Delivered: 1 Lawn & Garden item' });
     expect(mockAdjustStock).not.toHaveBeenCalled();
     expect(matchAmazonTitleToProduct).not.toHaveBeenCalled();

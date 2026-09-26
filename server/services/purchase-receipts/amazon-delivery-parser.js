@@ -139,17 +139,16 @@ function parseItemBlocksFromText(text) {
 /**
  * @param {{from_address, subject, body_text, body_html, gmail_id, id}} email
  * @returns {{orderNumber: string|null, shipmentId: string|null, shipmentKey: string|null, items: {title:string, quantity:number}[]} | null}
- *   null only when the email isn't a Delivered candidate at all, or has
- *   neither an order number nor any items to work with. An itemless
- *   "N Lawn & Garden item(s)" template still returns an object (items: []).
+ *   null only when the email isn't a Delivered candidate at all. Every
+ *   candidate returns an object, even with no readable Order # or items
+ *   (orderNumber: null / items: []), so the caller records a held line for
+ *   review rather than letting an unreadable delivery vanish.
  */
 function parseAmazonDeliveredEmail(email) {
   if (!isAmazonDeliveredEmail(email)) return null;
   const text = extractText(email);
-  if (!text) return null;
   const orderNumber = extractOrderNumber(text);
   const items = parseItemBlocksFromText(text);
-  if (!orderNumber && !items.length) return null;
   // stripHtml drops hrefs, so an HTML-only email is also searched raw —
   // otherwise its shipment falls back to the email's own identity, and a
   // second email for the same shipment would get a different claim key.

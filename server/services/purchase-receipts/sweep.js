@@ -19,10 +19,12 @@
  * "delivery" is refused before any purchase_receipt_lines row is written.
  *
  * Bells: a logged line rings one ("Amazon delivery logged: ..."). A line
- * held for a person — possible_duplicate, size_mismatch, needs_size, or an
- * itemless email's no_items placeholder — rings one saying why. unmatched
- * lines (personal purchases, mostly) ring nothing; the Intelligence Bar's
- * list_unlogged_purchases shows every non-logged line.
+ * held for a person — possible_duplicate, size_mismatch, needs_size,
+ * no_order_number, or an itemless email's no_items placeholder — rings one
+ * saying why; that bell is the office's to-do. unmatched lines (personal
+ * purchases, mostly) ring nothing. Each bell is written on its line's own
+ * transaction (receipt-processor.js), so a bell that can't be saved rolls
+ * the line back and the next sweep retries it — never a silent stock change.
  *
  * Two entry points sharing one path:
  *   - processReceiptEmail(email): called right after email-sync inserts a
@@ -31,7 +33,8 @@
  *     net, scanning `emails` directly by from_address + subject (never by
  *     LLM classification, which can lag or misfire) for anything the
  *     per-email hook missed (a process restart mid-sync, the hook's own
- *     error swallow, a backfill).
+ *     error swallow, a backfill). It looks back at most SWEEP_LOOKBACK_MS
+ *     (never before PURCHASE_RECEIPT_SINCE), so its work stays bounded.
  */
 const db = require('../../models/db');
 const logger = require('../logger');
@@ -44,12 +47,13 @@ const { processReceiptLine } = require('./receipt-processor');
 const GATE = 'GATE_PURCHASE_RECEIPT_RESTOCK';
 const SINCE_ENV = 'PURCHASE_RECEIPT_SINCE';
 const INVENTORY_LINK = '/admin/inventory?tab=products';
+const SWEEP_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
 
 // Line status -> summary bucket. A result with no status (already
 // processed, no order number) lands in alreadyProcessed.
 const SUMMARY_BUCKETS = {
   logged: 'logged', possible_duplicate: 'possibleDuplicate', unmatched: 'unmatched',
-  size_mismatch: 'sizeMismatch', needs_size: 'needsSize', no_items: 'noItems',
+  size_mismatch: 'sizeMismatch', needs_size: 'needsSize', no_items: 'noItems', no_order_number: 'noOrderNumber',
 };
 
 // Why a held line wasn't added — the second sentence of its bell.
@@ -58,6 +62,7 @@ const HELD_REASONS = {
   size_mismatch: "The listing's size or pack count doesn't match the catalog container size, so log it by hand.",
   needs_size: 'The product has no container size in the catalog, so log it by hand.',
   no_items: "The email doesn't name the item. If it's stock, log it by hand.",
+  no_order_number: "The email's order number couldn't be read, so log it by hand.",
 };
 
 // NOTE: the bucket is `alreadyProcessed`, never `skipped` — the whole-email
@@ -65,7 +70,7 @@ const HELD_REASONS = {
 // array is always truthy, so runPurchaseReceiptRestockSweep's
 // `if (result.skipped)` would swallow every processed email.
 function emptySummary() {
-  return { logged: [], possibleDuplicate: [], unmatched: [], sizeMismatch: [], needsSize: [], noItems: [], alreadyProcessed: [], errors: [] };
+  return { logged: [], possibleDuplicate: [], unmatched: [], sizeMismatch: [], needsSize: [], noItems: [], noOrderNumber: [], alreadyProcessed: [], errors: [] };
 }
 
 function displayUnit(unit) {
@@ -76,7 +81,7 @@ function round(value) {
   return Math.round(value * 10000) / 10000;
 }
 
-async function ringLoggedBell(notifyAdmin, { email, item, outcome }) {
+async function ringLoggedBell(notifyAdmin, { email, item, outcome, trx }) {
   const unit = displayUnit(outcome.receivedUnit);
   let body = `Amazon delivery logged: ${outcome.product.name} +${outcome.receivedQty} ${unit} `
     + `(${item.quantity} × ${round(outcome.receivedQty / item.quantity)} ${unit})`;
@@ -90,29 +95,41 @@ async function ringLoggedBell(notifyAdmin, { email, item, outcome }) {
   await notifyAdmin('inventory', 'Amazon delivery logged', body, {
     link: INVENTORY_LINK,
     bell: true,
-    dedupeKey: `amazon-delivery:${email.id}:${item.title}`,
+    dedupeKey: `purchase-receipt:${outcome.lineId}`,
+    trx,
     metadata: { emailId: email.id, productId: outcome.product.id, receivedQty: outcome.receivedQty, receivedUnit: outcome.receivedUnit },
   });
 }
 
-async function ringHeldBell(notifyAdmin, { email, item, outcome }) {
+async function ringHeldBell(notifyAdmin, { email, item, outcome, trx }) {
   // An itemless email's placeholder title is its subject ("Delivered: 1 Lawn & Garden item").
   const what = outcome.product ? `${outcome.product.name} ×${item.quantity}` : `"${item.title.replace(/^delivered:\s*/i, '')}"`;
   await notifyAdmin('inventory', 'Amazon delivery not added', `Amazon delivery of ${what} wasn't added. ${HELD_REASONS[outcome.status]}`, {
     link: INVENTORY_LINK,
     bell: true,
-    dedupeKey: `amazon-delivery-held:${email.id}:${item.title}`,
+    dedupeKey: `purchase-receipt:${outcome.lineId}`,
+    trx,
     metadata: { emailId: email.id, productId: outcome.product?.id || null, status: outcome.status },
   });
 }
 
-// One line -> one purchase_receipt_lines outcome, filed into its summary
-// bucket, with its bell. A failure here is recorded and never stops the
-// email's other lines.
+// The bell for one recorded line, on that line's transaction (notifyAdmin's
+// trx option): a bell that can't be saved throws, rolling the line back.
+function lineBell(notifyAdmin, email, item) {
+  return async (outcome, trx) => {
+    if (outcome.status === 'logged') await ringLoggedBell(notifyAdmin, { email, item, outcome, trx });
+    else if (HELD_REASONS[outcome.status]) await ringHeldBell(notifyAdmin, { email, item, outcome, trx });
+  };
+}
+
+// One line -> one purchase_receipt_lines outcome (with its bell), filed into
+// its summary bucket. A failure here is recorded and never stops the
+// email's other lines; nothing of the failed line was committed, so the
+// next sweep retries it.
 async function recordLineOutcome({ email, orderNumber, shipmentKey, item, lineNo, forcedStatus, notifyAdmin, summary }) {
   let outcome;
   try {
-    outcome = await processReceiptLine({ email, orderNumber, shipmentKey, item, lineNo, forcedStatus });
+    outcome = await processReceiptLine({ email, orderNumber, shipmentKey, item, lineNo, forcedStatus, ringBell: lineBell(notifyAdmin, email, item) });
   } catch (err) {
     logger.error(`[purchase-receipts] item "${item.title}" on email ${email.id} failed: ${err.message}`);
     summary.errors.push({ title: item.title, message: err.message });
@@ -124,14 +141,6 @@ async function recordLineOutcome({ email, orderNumber, shipmentKey, item, lineNo
     return;
   }
   summary[bucket].push({ title: item.title, productId: outcome.product?.id || null, receivedQty: outcome.receivedQty ?? null, receivedUnit: outcome.receivedUnit ?? null });
-  if (outcome.status !== 'logged' && !HELD_REASONS[outcome.status]) return;
-  // The line's write is already committed; a failed bell must not read as a failed line.
-  try {
-    if (outcome.status === 'logged') await ringLoggedBell(notifyAdmin, { email, item, outcome });
-    else await ringHeldBell(notifyAdmin, { email, item, outcome });
-  } catch (err) {
-    logger.warn(`[purchase-receipts] bell failed for email ${email.id}: ${err.message}`);
-  }
 }
 
 /**
@@ -185,9 +194,10 @@ async function runPurchaseReceiptRestockSweep({ notify } = {}) {
   if (!since) return { skipped: 'no_since' };
 
   const emails = await db('emails')
+    .select('id', 'gmail_id', 'from_address', 'subject', 'body_text', 'body_html', 'received_at', 'authentication_results')
     .whereRaw('LOWER(from_address) = ?', [AMAZON_DELIVERY_FROM])
     .whereRaw('subject ILIKE ?', ['Delivered:%'])
-    .where('received_at', '>=', since)
+    .where('received_at', '>=', new Date(Math.max(since.getTime(), Date.now() - SWEEP_LOOKBACK_MS)))
     .orderBy('received_at', 'asc');
 
   const totals = { emailsScanned: emails.length, ...emptySummary() };
