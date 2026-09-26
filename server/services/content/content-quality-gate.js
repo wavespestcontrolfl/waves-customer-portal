@@ -47,7 +47,6 @@ const {
   parseLinkDestination,
   blankReferenceDefinitions,
   blankExpressionStringLiterals,
-  blankNonRenderedMarkdown,
   blankNonRenderedMarkdownWithDepths,
   hubHostSet,
   normalizeInternalPath,
