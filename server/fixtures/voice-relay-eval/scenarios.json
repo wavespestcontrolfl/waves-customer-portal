@@ -493,7 +493,7 @@
       "afterTool": {
        "tool": "request_booking",
        "input": {
-        "slot_ref": "S1"
+        "slot_ref": "S3"
        }
       }
      },
@@ -2270,7 +2270,7 @@
       "afterTool": {
        "tool": "request_booking",
        "input": {
-        "slot_ref": "S1"
+        "slot_ref": "S3"
        }
       }
      },

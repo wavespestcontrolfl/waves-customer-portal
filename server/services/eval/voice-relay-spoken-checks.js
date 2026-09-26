@@ -184,9 +184,10 @@ const BARE_BILLED_NUMBER = '(?<![\\d.,/$-])[1-9]\\d(?:\\d|,\\d{3})*(?:\\.\\d+)?(
 // is a price (PR review). A "$" or currency word always is.
 const BARE_YEAR_NUMBER = '(?<![\\d.,/$-])(?:[1-9]\\d{0,2}(?:,\\d{3})+|[1-9]\\d{2,}|[3-9]\\d|2[5-9])(?:\\.\\d+)?(?![\\d/-])';
 // PR #4946 review (r9): a bare figure governed by a price verb is a price
-// too ("el premium cuesta 99", "it runs 99") — same two-digit rule, and never
-// a count ("cuesta 12 aplicaciones al año" names a quantity, not a price).
-const PRICE_VERB = '(?:cuestan?|costar[íi]an?|costar[áa]n?|valen?|sale(?:n)?\\s+(?:en|a)|precio\\s+(?:es|de|ser[íi]a)|costs?|priced\\s+at|price\\s+(?:is|of)|runs?|would\\s+(?:run|cost))';
+// too ("el premium cuesta 99", "it runs 99", "se cobra 119") — same
+// two-digit rule, and never a count ("cuesta 12 aplicaciones al año" names
+// a quantity, not a price).
+const PRICE_VERB = '(?:cobran?|cuestan?|costar[íi]an?|costar[áa]n?|valen?|sale(?:n)?\\s+(?:en|a)|precio\\s+(?:es|de|ser[íi]a)|charges?|costs?|priced\\s+at|price\\s+(?:is|of)|runs?|would\\s+(?:run|cost))';
 const COUNT_NOUN_AHEAD = '(?!\\s*(?:%|por\\s*ciento|percent|aplicaciones|applications|visitas|visits|veces|times|tratamientos|treatments|meses|months|a[ñn]os|years|d[ií]as|days|semanas|weeks|pies|feet|square|sq\\b|minutos|minutes|horas|hours))';
 // Codex r11 on #4946: a copular plan price ("el premium es 150", "premium
 // is 150") — a plan/price noun, a copula, then the figure — is a price too.
@@ -351,8 +352,9 @@ const RANGE_HOUR = `(?:${HOUR}|${HOUR_WORDS_ES})`;
 const TIME_ANYWHERE_RES = Object.freeze([
   new RegExp(`\\b(?:1[0-2]|0?[1-9])(?::[0-5]\\d)?\\s*${MERIDIEM}`, 'i'),
   /\b(?:[01]?\d|2[0-3]):[0-5]\d\b/,
-  // Codex r13 on #4946: "a las dos personas del equipo" is a count, not a time.
-  new RegExp(`\\ba las?\\s+(?:[01]?\\d|2[0-3]|${HOUR_WORDS_ES})(?::[0-5]\\d)?\\b(?!\\s*(?:${NOT_A_QUANTITY_ES}))`, 'i'),
+  // Codex r14 on #4946: catch ordinary Spanish ETA prepositions while keeping
+  // "a las dos personas del equipo" as a count rather than a clock time.
+  new RegExp(`\\b(?:a|sobre|cerca\\s+de|antes\\s+de)\\s+las?\\s+(?:[01]?\\d|2[0-3]|${HOUR_WORDS_ES})(?::[0-5]\\d)?\\b(?!\\s*(?:${NOT_A_QUANTITY_ES}))`, 'i'),
   new RegExp(`\\b(?:${HOUR_WORDS}|${HOUR_WORDS_ES})\\s*(?:${MERIDIEM}|thirty|fifteen|forty[- ]five)\\b`, 'i'),
   // Codex round-5 P1: a spoken "oh/zero/cero" minute prefix with no colon and
   // no meridiem ("three oh five", "3 oh 5", "las tres cero cinco") is still
@@ -2465,9 +2467,9 @@ const ENGLISH_EVIDENCE_WORDS = [
   'account', 'phone', 'name', 'pleasure', 'appointment', 'appointments', 'confirm', 'confirmed',
   'confirms', 'book', 'books', 'booked', 'submit', 'submitted', 'noted', 'save', 'saved',
   'cancel', 'cancelled', 'canceled', 'update', 'updated', 'pending', 'available', 'unavailable',
-  // Codex r13: English tool acknowledgements ("Request received.").
+  // Codex r14: English tool acknowledgements ("Request received.", "Lead captured.").
   'request', 'requests', 'requested', 'received', 'recorded', 'logged', 'filed', 'queued', 'placed',
-  'processed', 'entered', 'created', 'reservice',
+  'processed', 'entered', 'created', 'captured', 'reservice',
   // Contractions ("Don't worry.", "It's done.") and short replies.
   "don't", "can't", "won't", "it's", "i'm", "i'll", "i've", "i'd", "you're", "you'll", "you've",
   "you'd", "we're", "we'll", "we've", "we'd", "they're", "they'll", "they've", "that's",

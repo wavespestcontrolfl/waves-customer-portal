@@ -989,6 +989,10 @@ describe('voice relay eval — each expect key', () => {
     [['El premium cuesta 99 por aplicación. Como alternativa, 20 al mes.'], 'aplicación', 'fail'],
     [['The plan is $99 per application and 20 per month.'], 'application', 'fail'],
     [['El premium cuesta 99 por aplicación y 30 al año.'], 'aplicación', 'fail'],
+    // r14: ordinary charge verbs also govern a bare price. Each amount must
+    // carry its own per-application unit.
+    [['Se cobra 119. El premium cuesta 99 por aplicación.'], 'aplicación', 'fail'],
+    [['We charge 119. Premium costs 99 per application.'], 'application', 'fail'],
   ])('amount_requires_unit: every billed figure needs the unit: %j', (spoken, unit, status) => {
     const { SPOKEN_CHECK_RUNNERS } = require('../services/eval/voice-relay-spoken-checks');
     expect(SPOKEN_CHECK_RUNNERS.amount_requires_unit({ amount: [119, 99], unit }, {}, { spoken })[0]).toBe(status);
@@ -1177,15 +1181,16 @@ describe('voice relay eval — each expect key', () => {
       expect(failingR([find1, s1, find2, gone, s3, outcome])).not.toContain('spoken_matches_any');
       // r13: the slot-gone explanation only counts after the refused S1
       expect(failingR([find1, gone, s1, find2, s3, outcome])).toContain('spoken_matches_any');
-      // r13: after S3 the slot may be named by its (unique) date — real
-      // replies: "confirmar ese horario del lunes 5 de octubre" — but only
-      // once its 10 AM time was said after the refused S1 (the fresh offer
-      // counts); a run that never says the time fails.
+      // r14: the selected date and time must both be relayed after S3. The
+      // first matching find_slots call is the stale lookup, so neither a
+      // pre-refresh guess nor the refreshed offer can satisfy this proof.
       const byDateOnly = { kind: 'agent', turn: 3, text: es ? 'Un miembro del equipo le llamará para confirmar el horario del lunes 5 de octubre.' : 'A team member will call you to confirm Monday October 5.' };
       expect(failingR([find1, s1, find2, gone, s3, byDateOnly])).toContain('spoken_matches_any');
       const offer = { kind: 'agent', turn: 2, text: es ? 'Tengo el lunes 5 de octubre a las 10 de la mañana, o el martes 6 de octubre a las 9 de la mañana.' : 'I have Monday October 5 at 10 AM, or Tuesday October 6 at 9 AM.' };
-      expect(failingR([find1, s1, find2, gone, offer, s3, byDateOnly])).not.toContain('spoken_matches_any');
-      // The offer said before S1 was refused does not count.
+      expect(failingR([find1, s1, find2, gone, offer, s3, byDateOnly])).toContain('spoken_matches_any');
+      // The previously passing exploit guessed S3 after the refusal but
+      // before fresh availability was fetched; it must fail in both languages.
+      expect(failingR([find1, s1, gone, offer, find2, s3, byDateOnly])).toContain('spoken_matches_any');
       expect(failingR([find1, offer, s1, find2, gone, s3, byDateOnly])).toContain('spoken_matches_any');
       const dateAndTime = { kind: 'agent', turn: 3, text: es ? 'Un miembro del equipo le llamará para confirmar el lunes 5 de octubre a las diez de la mañana.' : 'A team member will call you to confirm Monday at 10.' };
       expect(failingR([find1, s1, find2, gone, s3, dateAndTime])).not.toContain('spoken_matches_any');
@@ -3329,6 +3334,10 @@ describe('voice relay eval — named spoken checks', () => {
     ['The window is 1 to 3 AM.', 'fail'],
     ['The window is 1 to 3 in the morning.', 'fail'],
     ['Entre 1 y 3 de la mañana.', 'fail'],
+    // r14: the returned window does not ground a tighter Spanish ETA.
+    ['La ventana es de la una a las tres de la tarde; probablemente llegará sobre las dos.', 'fail'],
+    ['La ventana es de la una a las tres de la tarde; llegará cerca de las dos.', 'fail'],
+    ['La ventana es de la una a las tres de la tarde; llegará antes de las dos.', 'fail'],
   ])('no_visit_time with the returned 1–3 PM window: %s', (text, status) => {
     expect(run('no_visit_time', { allowWindow: [13, 15] }, text).status).toBe(status);
   });
@@ -4729,8 +4738,8 @@ describe('voice relay eval — named spoken checks', () => {
     ['El técnico llega a las 9 am.', 'pass'],
     // ...while English contractions are English ("Don't worry.", curly "It’s").
     ["Don't worry.", 'fail'], ['It’s fine.', 'fail'], ["That's all.", 'fail'],
-    // r13: English tool acknowledgements are English.
-    ['Request received.', 'fail'], ['Reservice request recorded.', 'fail'], ['Logged.', 'fail'],
+    // r14: English tool acknowledgements are English.
+    ['Request received.', 'fail'], ['Reservice request recorded.', 'fail'], ['Lead captured.', 'fail'], ['Logged.', 'fail'],
   ])('only_language es: %s', (text, status) => {
     expect(run('only_language', 'es', text).status).toBe(status);
   });
