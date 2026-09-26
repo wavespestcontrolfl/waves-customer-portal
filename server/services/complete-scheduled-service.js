@@ -11087,9 +11087,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // pass voided the office invoice (its id saved before the void) finishes
     // that void's work instead — a plain bill would skip the office-pricing
     // check.
+    // The office invoice an earlier pass of this closeout voided (its id is
+    // saved before the void); null on a first pass.
+    const priorVoidedId = annualPrepayAddonBilling
+      ? parseJsonObject(record?.structured_notes)?.annualPrepayVoidedInvoiceId || null
+      : null;
+    let priorVoidRevisited = false;
     if (annualPrepayAddonBilling && !annualPrepayAddonsHandled && annualPrepayCovered && !invoice?.id
       && !issuedInvoiceCloseout) {
-      const priorVoidedId = parseJsonObject(record?.structured_notes)?.annualPrepayVoidedInvoiceId || null;
       if (terminalCompletionInvoice) {
         // A refunded invoice on the visit: nothing is minted beside it while
         // its money can still come back, and the manual-billing alert skips
@@ -11113,6 +11118,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
         } catch (err) {
           logger.warn(`[dispatch] annual-prepay voided invoice ${priorVoidedId} re-read failed for visit ${svc.id}: ${err.message}`);
         }
+        priorVoidRevisited = true;
         if (priorVoided) await afterCoveredInvoiceVoided(priorVoided);
         else await alertAnnualPrepayAddons(`invoice ${priorVoidedId}, voided by this closeout, could not be re-read`, { voidedInvoiceId: priorVoidedId });
       } else if (visitPerformed && !recapReviewOnly) {
@@ -11129,6 +11135,21 @@ async function completeScheduledService(completionInput, packetContext = null) {
       && svc.annual_prepay_term_id
       && String(invoice.annual_prepay_covered_term_id || '') === String(svc.annual_prepay_term_id)) {
       await billAnnualPrepayAddons({ coveredInvoiceId: invoice.id });
+    }
+    // A retry that found an invoice on the visit (the add-ons bill an earlier
+    // pass minted, perhaps paid or credited since) never revisited that
+    // void: its other charges still await the office's re-bill, so they are
+    // re-derived here — never "all paid" over them. An unreadable voided
+    // invoice counts as owed.
+    if (priorVoidedId && !priorVoidRevisited && !annualPrepayOtherChargesOwed) {
+      try {
+        const priorVoided = await db('invoices').where({ id: priorVoidedId }).first();
+        annualPrepayOtherChargesOwed = !priorVoided
+          || classifyCoveredVisitInvoice(priorVoided, svc, await annualPrepayAddonRows(svc)).unknownCharges;
+      } catch (err) {
+        annualPrepayOtherChargesOwed = true;
+        logger.warn(`[dispatch] annual-prepay voided invoice ${priorVoidedId} re-read failed for visit ${svc.id}: ${err.message}`);
+      }
     }
     // The alerts above are the ONLY follow-up for add-ons this closeout did
     // not bill, and for charges on an invoice it voided; the add-on read is
