@@ -62,8 +62,12 @@ function triageMatchesSchema(t) {
 // ending the reply right after a sentence that ends in "." or "!", or standing
 // alone. A dash inside a sentence ("We serve your area — Sarasota."), after a
 // question ("Which service? — Lawn Care"), or a bare last line is left as text.
-const NAME_TOKEN = "[A-Z][\\p{L}'-]+";
-const SIGN_OFF_TAIL = `${NAME_TOKEN}(?:\\s+${NAME_TOKEN})?(?:\\s*,\\s*${NAME_TOKEN}(?:\\s+${NAME_TOKEN}){0,3})?\\s*[!.🌊]?\\s*$`;
+// A single-word name may be any case or script ("— sarah", "— Élodie"); a
+// two-word one, and a company after the comma, must be capitalized words, so
+// a short phrase ("— Tuesday works.") is not read as a name.
+const CAP_TOKEN = "\\p{Lu}[\\p{L}'-]*";
+const ANY_TOKEN = "\\p{L}[\\p{L}'-]*";
+const SIGN_OFF_TAIL = `(?:${CAP_TOKEN}\\s+${CAP_TOKEN}|${ANY_TOKEN})(?:\\s*,\\s*${CAP_TOKEN}(?:\\s+${CAP_TOKEN}){0,3})?\\s*[!.🌊]?\\s*$`;
 const DASH_SIGN_OFF_RE = new RegExp(`(^|[.!])\\s*[—–-]{1,2}\\s*${SIGN_OFF_TAIL}`, 'u');
 function stripAnySignOff(text) {
   return text.trim().replace(DASH_SIGN_OFF_RE, '$1').trim();

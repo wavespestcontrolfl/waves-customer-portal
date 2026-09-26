@@ -144,6 +144,9 @@ describe('aiTriageLead — a sign-off by any name is removed', () => {
     ['We can help. — Sarah', 'We can help.'],
     ['We can help!\n— Sarah', 'We can help!'],
     ['We can help.\n\n— Sarah Jones, Waves Team', 'We can help.'],
+    // Review on #4975: lowercase and non-ASCII signer names.
+    ['We can help. — sarah', 'We can help.'],
+    ['We can help. — Élodie', 'We can help.'],
   ])('%j is stripped to %j and the triage kept', async (suggestedReply, expected) => {
     mockCreate.mockResolvedValue(reply({ ...VALID, suggestedReply }));
     const out = await aiTriageLead(LEAD);
@@ -173,6 +176,10 @@ describe('aiTriageLead — a sign-off by any name is removed', () => {
     'Which service would help?\nLawn Care',
     'Which service? — Lawn Care',
     'We can help.\n\nSarah',
+    // Review on #4975: a name given as the answer, not a sign-off.
+    'Your technician is — Sarah',
+    'Your technician is:\nSarah',
+    'Totally. — Tuesday works.',
   ])('ordinary text is kept as written: %j', async (suggestedReply) => {
     mockCreate.mockResolvedValue(reply({ ...VALID, suggestedReply }));
     expect((await aiTriageLead(LEAD)).suggestedReply).toBe(suggestedReply);
