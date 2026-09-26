@@ -2,7 +2,7 @@
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 import Customer360ProfileV2, { CancelSignupModal, RefundPaymentModal } from './Customer360ProfileV2';
 import { IntelligenceBarPageDataProvider, useIntelligenceBarActions } from '../../hooks/useIntelligenceBarPageData';
@@ -71,6 +71,11 @@ function MutationTrigger({ customerId }) {
 }
 
 describe('Customer360ProfileV2 profile state', () => {
+  // Keep Vite's cold lazy-module transform outside individual behavior-test deadlines.
+  beforeAll(async () => {
+    await import('../../pages/admin/CommunicationsPageV2');
+  }, 30000);
+
   afterEach(() => {
     cleanup();
     vi.unstubAllGlobals();
@@ -246,7 +251,7 @@ describe('Customer360ProfileV2 profile state', () => {
     expect(JSON.parse(sends[0][1].body)).toMatchObject({ customerId: 'customer-a', to: '+19415550100', fromNumber: chosenLine, body: 'Service update' });
     expect(fetch.mock.calls.some(([url]) => String(url).split('?')[0].endsWith('/timeline'))).toBe(false);
     expect(fetch.mock.calls.some(([url]) => String(url).includes('/unread-count'))).toBe(false);
-  });
+  }, 10000);
 
   it('refreshes the profile and timeline once after an admin message is sent', async () => {
     localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
@@ -270,19 +275,24 @@ describe('Customer360ProfileV2 profile state', () => {
     await screen.findByRole('heading', { name: 'Avery Customer' });
     container.querySelector('.c360-panel').scrollTo = vi.fn();
     fireEvent.click(screen.getByRole('button', { name: 'Message', exact: true }));
-    const field = await screen.findByRole('textbox', { name: 'Text message' });
+    const field = await screen.findByRole('textbox', { name: 'Text message' }, { timeout: 5000 });
     const sender = screen.getByRole('combobox', { name: 'Send from' });
     fireEvent.change(sender, { target: { value: [...sender.options].find(option => option.value).value } });
     fireEvent.change(field, { target: { value: 'Fixture service update' } });
     fireEvent.click(screen.getByRole('button', { name: 'Send', exact: true }));
     await waitFor(() => expect(field).toHaveValue(''));
-    await screen.findByRole('heading', { name: 'Updated Customer' });
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/communications/sms'))).toHaveLength(1);
+      expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/customer-a'))).toHaveLength(2);
+      expect(fetchMock.mock.calls.filter(([url]) => String(url).split('?')[0].endsWith('/timeline'))).toHaveLength(2);
+    }, { timeout: 5000 });
+    await screen.findByRole('heading', { name: 'Updated Customer' }, { timeout: 5000 });
     fireEvent.click(screen.getByRole('button', { name: 'Back to customer' }));
     fireEvent.click(screen.getByRole('tab', { name: 'Activity', exact: true }));
     expect(await screen.findByText('Saved message activity')).toBeInTheDocument();
     expect(fetchMock.mock.calls.filter(([url]) => String(url).split('?')[0].endsWith('/timeline'))).toHaveLength(2);
     expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/customer-a'))).toHaveLength(2);
-  });
+  }, 10000);
 
   it('discards A conversation data when its post-send refresh lands during the switch to B', async () => {
     localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
