@@ -16,8 +16,8 @@
  *   - When the visit has no invoice history (the common case: the prepay
  *     suppresses the completion invoice), they are billed alone through the
  *     shared scheduled-invoice mint — pay link, unpaid completion text. The
- *     bill's id is recorded on the service record, so a retry takes back
- *     its own bill.
+ *     bill's id is recorded on the service record: a retry takes back its
+ *     own bill while it stands and never mints a second one.
  *   - When the visit already has any other invoice — open, paid, in flight,
  *     voided, refunded, payer-billed — what is still owed depends on what
  *     that invoice charged, and the office decides: ONE alert names the
@@ -185,16 +185,14 @@ class CoveredVisitCloseout {
     }
   }
 
-  // Every invoice on the visit or its record other than this closeout's own
-  // add-ons bill, in any status (a voided or refunded one is history too).
+  // Every invoice on the visit or its record, in any status (a voided or
+  // refunded one is history too).
   async otherInvoices() {
     const { svc, record } = this;
-    const query = db('invoices').where((qb) => {
+    return db('invoices').where((qb) => {
       qb.where({ scheduled_service_id: svc.id });
       if (record?.id) qb.orWhere({ service_record_id: record.id });
-    });
-    if (this.ownBillId) query.whereNot({ id: this.ownBillId });
-    return query.select('id', 'invoice_number', 'status');
+    }).select('id', 'invoice_number', 'status');
   }
 
   // Take an add-ons bill as the completion's invoice. Nothing due (paid,
@@ -308,7 +306,7 @@ class CoveredVisitCloseout {
     });
     // The mint adopts an invoice another writer committed under its lock:
     // that is an invoice on the visit this closeout did not make.
-    if (minted.reused && minted.invoice.id !== this.ownBillId) {
+    if (minted.reused) {
       await this.alert(`invoice ${invoiceLabel(minted.invoice)} (${minted.invoice.status}) appeared on the visit while billing; bill whatever of the add-ons ($${extras.total.toFixed(2)}) it does not already charge`, { invoiceId: minted.invoice.id, addonTotal: extras.total });
       return;
     }
@@ -390,7 +388,8 @@ class CoveredVisitCloseout {
     // An office bill for the add-ons stays owed (pay link, collection).
     if (outcome.kind === 'kept') await this.takeBill(outcome.invoice);
     if (!this.live || !this.billable) return;
-    const named = outcome.invoice || this.ctx.terminalCompletionInvoice || this.invoice || others[0];
+    const named = outcome.invoice || this.ctx.terminalCompletionInvoice || this.invoice || others[0]
+      || { id: this.ownBillId, status: 'missing' };
     if (outcome.kind === 'voided' && (addons.owed || outcome.otherCharges)) {
       await this.alert(`invoice ${invoiceLabel(named)} was voided because the annual prepay covers the visit; re-bill the add-ons and anything else it charged besides the covered visit`, { voidedInvoiceId: named.id });
     } else if (addons.owed) {
@@ -409,20 +408,23 @@ class CoveredVisitCloseout {
       if (this.invoice?.id) await this.reconcileWithOfficeInvoices([]);
       return this.outcome();
     }
-    // This closeout's own add-ons bill, found again on a retry.
-    if (this.ownBillId && this.invoice?.id === this.ownBillId) {
-      await this.takeBill(this.invoice);
-      return this.outcome();
-    }
+    let own = null;
     let others;
     try {
+      if (this.ownBillId) own = await db('invoices').where({ id: this.ownBillId }).first();
       others = await this.otherInvoices();
     } catch (err) {
       this.lookupError = err;
       logger.error(`[dispatch] annual-prepay invoice history unreadable for visit ${this.svc.id}: ${err.message}`);
       return this.outcome();
     }
-    if (others.length || this.ctx.terminalCompletionInvoice) {
+    // This closeout's own add-ons bill, found again on a retry, is taken
+    // back while it stands. Once recorded, nothing is minted again: voided,
+    // canceled or refunded since, it was the office's call — history like
+    // any other invoice.
+    if (own && !require('./invoice').CANCELLED_SERVICE_RESOLVED_STATUSES.includes(own.status)) {
+      await this.takeBill(own);
+    } else if (others.length || this.ctx.terminalCompletionInvoice || this.ownBillId) {
       await this.reconcileWithOfficeInvoices(others);
     } else if (this.billable) {
       await this.bill();

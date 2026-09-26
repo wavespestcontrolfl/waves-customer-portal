@@ -433,6 +433,20 @@ postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
       expect(retry.body?.invoiceId).toBe(bill.id);
     });
 
+    test('an add-ons bill voided between attempts is never minted again — the retry leaves the add-ons to the office', async () => {
+      const f = await coveredVisit();
+      const idempotencyKey = randomUUID();
+      expect(await complete(f, {}, { idempotencyKey })).toMatchObject({ status: 200 });
+      const [bill] = await liveInvoices(f);
+      await trx('invoices').where({ id: bill.id }).update({ status: 'void' });
+      await releaseForResume(f);
+      const retry = await complete(f, {}, { idempotencyKey });
+      expect(retry).toMatchObject({ status: 200 });
+      expect(await liveInvoices(f)).toHaveLength(0);
+      expect(retry.body?.invoicePaymentActionRequired).not.toBe(true);
+      expect((await addonsAlert(f)).body).toMatch(/\(void\)/);
+    });
+
     test('a bill minted but not recorded on the record is never billed twice — the retry leaves it to the office', async () => {
       const f = await coveredVisit();
       const idempotencyKey = randomUUID();
