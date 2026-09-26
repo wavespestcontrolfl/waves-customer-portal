@@ -361,6 +361,12 @@ const SYSTEM_EVENT_TYPES = ['visit'];
 const witnessAllowed = (record, commitment, records, eventOnly) => admissibleWitness(record, commitment, records)
   && (!eventOnly || SYSTEM_EVENT_TYPES.includes(record.type));
 
+function witnessTime(witness, commitment) {
+  if (witness.type === 'estimate') return witnessAt(witness, new Date(commitment.sms_context?.source_at));
+  if (witness.type === 'visit') return visitWitnessAt(witness, commitment);
+  return witness.delivered_at || witness.sent_at || witness.received_at || witness.created_at;
+}
+
 function groundFulfillment(parsed, evidence, commitment, { eventOnly = false } = {}) {
   if (!validate(parsed)) return { verdict: 'uncertain', reason: 'invalid_model_output' };
   if (stringifySmsEvidence(parsed) !== JSON.stringify(parsed)) return { verdict: 'uncertain', reason: 'sensitive_model_output' };
@@ -372,9 +378,7 @@ function groundFulfillment(parsed, evidence, commitment, { eventOnly = false } =
   if (!witness || !witnessAllowed(witness, commitment, evidence.records, eventOnly)) return { verdict: 'uncertain', reason: 'invalid_witness' };
   const quote = normalized(parsed.quote);
   if (quote.length < 3 || !normalized(witness.text).includes(quote)) return { verdict: 'uncertain', reason: 'ungrounded_witness' };
-  const matchedAt = witness.type === 'estimate' ? witnessAt(witness, new Date(commitment.sms_context?.source_at))
-    : witness.type === 'visit' ? visitWitnessAt(witness, commitment)
-      : witness.delivered_at || witness.sent_at || witness.received_at || witness.created_at;
+  const matchedAt = witnessTime(witness, commitment);
   const matched = new Date(matchedAt);
   const failures = fatalFailures(evidence, commitment, { type: witness.type, matched_at: matched });
   if (failures.length) return { verdict: 'uncertain', reason: 'incomplete_sources', failures };
