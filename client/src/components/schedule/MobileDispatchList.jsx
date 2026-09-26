@@ -117,20 +117,27 @@ function effectiveStarts(services) {
   return eff;
 }
 
+// Full lexicographic key (start, displayOrder, original index): a total
+// order, so another tech's equal-time row sitting between two of one tech's
+// stops can't shield that pair from being put in displayOrder.
 function sortByWindow(services) {
   const eff = effectiveStarts(services);
-  return [...services].sort((a, b) => {
-    const ax = eff.has(a) ? eff.get(a) : parseHHMM(a.windowStart);
-    const bx = eff.has(b) ? eff.get(b) : parseHHMM(b.windowStart);
-    if (ax == null && bx == null) return 0;
-    if (ax == null) return 1;
-    if (bx == null) return -1;
-    if (ax !== bx) return ax - bx;
-    if (eff.has(a) && eff.has(b) && a.technicianId === b.technicianId) {
-      return a.displayOrder - b.displayOrder;
-    }
-    return 0;
-  });
+  return services
+    .map((s, i) => ({
+      s,
+      i,
+      start: eff.has(s) ? eff.get(s) : parseHHMM(s.windowStart),
+      order: eff.has(s) ? s.displayOrder : Infinity,
+    }))
+    .sort((a, b) => {
+      if (a.start == null && b.start == null) return a.i - b.i;
+      if (a.start == null) return 1;
+      if (b.start == null) return -1;
+      if (a.start !== b.start) return a.start - b.start;
+      if (a.order !== b.order) return a.order < b.order ? -1 : 1;
+      return a.i - b.i;
+    })
+    .map((x) => x.s);
 }
 
 function canMarkEnRoute(service) {

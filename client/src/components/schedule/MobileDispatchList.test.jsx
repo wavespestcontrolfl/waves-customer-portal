@@ -217,6 +217,33 @@ describe('MobileDispatchList tie-proximity display order', () => {
     });
   });
 
+  it('keeps one tech displayOrder when another tech equal-time row sits between', () => {
+    fetch.mockResolvedValue({ ok: true, json: async () => ({}) });
+    const aFar = {
+      ...SERVICE, id: 'svc-a-far', customerName: 'A Far Customer',
+      technicianId: 'tech-a', windowStart: '12:00', displayOrder: 1,
+    };
+    const bOnly = {
+      ...SERVICE, id: 'svc-b', customerName: 'B Only Customer',
+      technicianId: 'tech-b', windowStart: '12:00', displayOrder: 0,
+    };
+    const aNear = {
+      ...SERVICE, id: 'svc-a-near', customerName: 'A Near Customer',
+      technicianId: 'tech-a', windowStart: '12:00', displayOrder: 0,
+    };
+    render(
+      <MobileDispatchList
+        mode="day"
+        date="2026-07-15"
+        services={[aFar, bOnly, aNear]}
+        technicians={[{ id: 'tech-a', name: 'Tech A' }, { id: 'tech-b', name: 'Tech B' }]}
+      />,
+    );
+    const names = screen.getAllByText(/Customer$/).map((el) => el.textContent)
+      .filter((n) => n.startsWith('A '));
+    expect(names).toEqual(['A Near Customer', 'A Far Customer']);
+  });
+
   it('falls back to plain windowStart order when displayOrder is absent (gate off)', () => {
     fetch.mockResolvedValue({ ok: true, json: async () => ({}) });
     const first = { ...SERVICE, id: 'svc-1', customerName: 'First Customer', technicianId: 'tech-1', windowStart: '08:00' };
