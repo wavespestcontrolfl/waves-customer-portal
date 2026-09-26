@@ -103,7 +103,8 @@ function sendSessionEvents(sessionId, events, deadline) {
 }
 
 // A local tool call cannot be cancelled, but the run stops waiting for it at
-// the deadline and starts no further tool after it.
+// the deadline and starts no further tool after it. Side-effecting tools
+// (SIDE_EFFECT_DONE) are never raced — see executeToolUse.
 async function withinDeadline(promise, sessionId, deadline) {
   let timer;
   const expired = new Promise((_, reject) => {
@@ -304,7 +305,12 @@ const BIAgent = {
       let toolResult;
       let threw = false;
       try {
-        toolResult = await withinDeadline(executeBITool(toolName, toolInput), sessionId, deadline);
+        // The owner SMS and the saved report are awaited to completion even
+        // past the deadline: they cannot be cancelled, and returning while one
+        // is still in flight would let a retried run duplicate it (Codex P2
+        // r3). The deadline still ends the run at the next reply or frame.
+        const call = executeBITool(toolName, toolInput);
+        toolResult = SIDE_EFFECT_DONE[toolName] ? await call : await withinDeadline(call, sessionId, deadline);
       } catch (err) {
         if (err?.code === 'session_timeout') throw err;
         toolResult = { error: `Tool failed: ${err.message}` };

@@ -443,6 +443,24 @@ describe('bi-agent — current managed agents protocol', () => {
     expect(result.toolsExecuted).toEqual(['get_revenue_snapshot']);
   });
 
+  it('an owner SMS still in flight at the deadline is awaited before the run returns (no background send)', async () => {
+    process.env.BI_AGENT_TIMEOUT_MS = '50';
+    let settled = false;
+    // The send finishes after the deadline (this suite pins Date.now, so the
+    // tool advances the clock itself).
+    mockExecuteBITool.mockImplementation(() => new Promise((resolve) => setTimeout(() => { now += 1000; settled = true; resolve({ sent: true }); }, 150)));
+    const { fetchMock } = fetchWithOpenStream({
+      frames: [customToolUse('tool-1', 'send_briefing_sms'), idle('requires_action', ['tool-1'])],
+      onEventsPost: () => Promise.resolve({ ok: true, status: 200, json: async () => ({}) }),
+    });
+    global.fetch = fetchMock;
+
+    const result = await load(path).run({});
+    expect(settled).toBe(true);
+    expect(recorded()).toMatchObject({ failure: 'session_timeout' });
+    expect(result.smsSent).toBe(true);
+  });
+
   it('the owner SMS is sent at most once per briefing — a second request is answered as skipped', async () => {
     mockExecuteBITool.mockImplementation(async (name) => (name === 'send_briefing_sms' ? { sent: true } : { ok: true }));
     global.fetch = fetchFor([
