@@ -1153,6 +1153,12 @@ async function loadCandidateCalls(db, options) {
     'from_phone',
     'to_phone',
     'direction',
+    // Needed for resolveCallContactPhone to correctly resolve a
+    // lead-webhook-auto-bridge outbound row to the prospect (metadata.leadPhone)
+    // instead of the staff cell that dialed out — buildFailOpenRoutingContext
+    // now derives identity through that resolver (Codex #4933 r1 P2).
+    'metadata',
+    'source',
     'processing_status',
     'transcription',
     'ai_extraction',
@@ -1261,18 +1267,23 @@ async function replayCall(call, context) {
   // same env gate, the caller ANI, and whether the linked customer has a
   // verified on-file address (codex round-21 P2). Read-only; a lookup failure
   // degrades to no context, which is the pre-existing (stricter) behavior.
-  // Production's own builder, not an approximation: fail-open is inbound-only
-  // and the on-file lane is limited to actively-served pipeline stages, so a
-  // local "has an address" test over-granted it (local pre-push audit P1).
+  // Production's own builder, not an approximation: outbound is scoped to
+  // address recovery only and the on-file lane is limited to actively-served
+  // pipeline stages, so a local "has an address" test over-granted it (local
+  // pre-push audit P1; owner ruling 2026-09-26 + Codex #4933 r1 widened/
+  // rescoped outbound — see buildFailOpenRoutingContext).
   const linkedCustomer = call.customer_id
     ? await db('customers').where({ id: call.customer_id })
       .first('id', 'pipeline_stage', 'address_line1', 'address_line2', 'city', 'state', 'zip')
       .catch(() => null)
     : null;
+  // buildFailOpenRoutingContext resolves identity itself (resolveCallContactPhone)
+  // rather than trusting this script's own naive contactPhoneForCall — Codex
+  // #4933 r1 P2: that naive to_phone/from_phone-by-direction guess gets a
+  // lead-webhook-auto-bridge outbound row wrong (to_phone is the staff cell).
   const { knownCaller, options: failOpenContext } = CRP.buildFailOpenRoutingContext({
     call,
     customer: linkedCustomer,
-    contactPhone,
     failOpenEnabled: process.env.GATE_CALL_FAIL_OPEN_BOOKING === 'true',
   });
   // The verdict was computed for the persisted (prior) extraction — it always

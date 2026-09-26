@@ -30,7 +30,11 @@ async function main() {
       .where('processing_status', 'processed')
       .orderBy('created_at', 'desc')
       .limit(N)
-      .select('id', 'transcription', 'from_phone', 'to_phone', 'direction', 'created_at', 'ai_address_validation', 'ai_extraction_enriched', 'ai_extraction', 'customer_id', 'ai_validation',
+      // metadata + source: resolveCallContactPhone needs both to resolve a
+      // lead-webhook-auto-bridge outbound row to the prospect (metadata.leadPhone)
+      // rather than the staff cell that dialed out — buildFailOpenRoutingContext
+      // now derives identity through that resolver (Codex #4933 r1 P2).
+      .select('id', 'transcription', 'from_phone', 'to_phone', 'direction', 'metadata', 'source', 'created_at', 'ai_address_validation', 'ai_extraction_enriched', 'ai_extraction', 'customer_id', 'ai_validation',
         // The linked customer's fail-open inputs (codex round-21 P2 + the
         // local pre-push audit P1). An established customer who confirms
         // without restating their address normally has a `not_attempted`
@@ -105,10 +109,12 @@ async function main() {
       // V1-conflict demotion that always follows canAutoRoute on the live
       // path — a fail-open allow whose V1 address conflicts with the on-file
       // one is a NEW address and goes back to review.
+      // buildFailOpenRoutingContext resolves identity itself
+      // (resolveCallContactPhone) rather than trusting this script's own
+      // naive to_phone/from_phone-by-direction guess — Codex #4933 r1 P2.
       const { knownCaller, options: failOpenOptions } = CRP.buildFailOpenRoutingContext({
         call: r,
         customer: pj(r.linked_customer),
-        contactPhone,
         failOpenEnabled: process.env.GATE_CALL_FAIL_OPEN_BOOKING === 'true',
       });
       const route = CRP.demoteFailOpenOnV1AddressConflict(

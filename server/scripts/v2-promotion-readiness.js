@@ -119,7 +119,11 @@ async function main() {
     .whereIn('ai_extraction_prompt_version', [...new Set([CURRENT_PROMPT_VERSION, LIVE_PROMPT_VERSION])])
     // ai_extraction (the V1 legacy flat record) feeds demoteFailOpenOnV1AddressConflict,
     // exactly as the live path passes `extracted` to it.
-    .select('id', 'twilio_call_sid', 'ai_extraction', 'ai_extraction_enriched', 'ai_extraction_validation_errors', 'v2_extraction_status', 'created_at', 'from_phone', 'to_phone', 'direction', 'ai_extraction_model', 'ai_extraction_prompt_version', 'ai_address_validation', 'customer_id', 'ai_validation');
+    // metadata + source: resolveCallContactPhone needs both to resolve a
+    // lead-webhook-auto-bridge outbound row to the prospect (metadata.leadPhone)
+    // rather than the staff cell that dialed out — buildFailOpenRoutingContext
+    // now derives identity through that resolver (Codex #4933 r1 P2).
+    .select('id', 'twilio_call_sid', 'ai_extraction', 'ai_extraction_enriched', 'ai_extraction_validation_errors', 'v2_extraction_status', 'created_at', 'from_phone', 'to_phone', 'direction', 'metadata', 'source', 'ai_extraction_model', 'ai_extraction_prompt_version', 'ai_address_validation', 'customer_id', 'ai_validation');
 
   // Cohort boundary: rows are attributed by MODEL, so after a route change
   // a previous primary's rows could masquerade as current-route executions
@@ -296,10 +300,13 @@ async function main() {
     const effectiveAv = recoveredCallIds.has(r.id)
       ? { status: 'corrected', inServiceArea: true, county: storedAv?.county || null, normalized: storedAv?.normalized || null, reconstructed_from: 'address_recovered' }
       : storedAv;
+    // buildFailOpenRoutingContext resolves identity itself
+    // (resolveCallContactPhone) rather than trusting this script's own naive
+    // to_phone/from_phone-by-direction contactPhone guess above — Codex
+    // #4933 r1 P2.
     const { knownCaller, options: failOpenOptions } = buildFailOpenRoutingContext({
       call: r,
       customer: r.customer_id ? customerById.get(r.customer_id) || null : null,
-      contactPhone,
       failOpenEnabled: auditFailOpen,
     });
     const knownCustomer = failOpenOptions.knownCustomer;

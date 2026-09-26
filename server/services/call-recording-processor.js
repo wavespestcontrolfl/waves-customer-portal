@@ -1350,6 +1350,22 @@ function failOpenKnownCustomer(knownCaller) {
   };
 }
 
+// Owner ruling (2026-09-26) scoped outbound fail-open to the on-file ADDRESS
+// recovery only (Codex #4933 r1 P1) — never the confidence exemptions in
+// canAutoRouteDecision, which both key off knownCustomer.addressOnly
+// (knownCustomerConfidenceTrusted / failOpenLowConfidence, call-triage-flags.js).
+// Forcing addressOnly true here reuses that EXISTING lever exactly the way a
+// new lead's validated on-file address already does (trustValidatedNewLeadAddress
+// / applyOnFileAddressVerdict) — hasAddress is untouched, so the address flags
+// still clear on outbound, but the two confidence exemptions now read
+// addressOnly === true and hold on outbound exactly like they do for a new
+// lead. A no-op for inbound (outbound=false) and for a customer already
+// addressOnly (nothing to widen).
+function outboundScopedFailOpenCustomer(knownCustomer, outbound) {
+  if (!knownCustomer || !outbound || knownCustomer.addressOnly) return knownCustomer;
+  return { ...knownCustomer, addressOnly: true };
+}
+
 // Carrier caller-ID (CNAM) name for the extraction prompt, from the Twilio
 // AddOns envelope the voice webhook persisted. Only when the caller is NOT
 // withheld and the lookup succeeded; a business-line or "WIRELESS CALLER"
@@ -1387,13 +1403,23 @@ function callerIdNameForPrompt(call) {
  * a blocker — that direction of error lands on the permissive side of a
  * promotion gate. (Outbound calls are no longer excluded here — owner ruling
  * 2026-09-26 — but summarizeKnownCaller/failOpenKnownCustomer still refuse a
- * dormant/lost/duplicate account regardless of direction.)
+ * dormant/lost/duplicate account regardless of direction, and outbound is
+ * scoped to address recovery only — see outboundScopedFailOpenCustomer.)
+ *
+ * Identity (Codex #4933 r1 P2): takes an optional `extractedPhone` (a
+ * caller-stated callback number, same second argument resolveCallContactPhone
+ * takes live) and resolves the actual contact phone through that SAME
+ * resolver — never a caller-supplied raw contactPhone. A naive
+ * to_phone/from_phone-by-direction guess gets a lead-webhook-auto-bridge
+ * outbound row wrong (to_phone is the STAFF cell that dialed out;
+ * metadata.leadPhone carries the real prospect destination), and every
+ * offline audit script was repeating exactly that mistake.
  *
  * The caller must still run demoteFailOpenOnV1AddressConflict on the result,
  * exactly as the live path does — the two are one contract.
  */
 function buildFailOpenRoutingContext({
-  call = {}, customer = null, contactPhone = null, failOpenEnabled = false, onFileAddressVerdict = undefined,
+  call = {}, customer = null, extractedPhone = null, failOpenEnabled = false, onFileAddressVerdict = undefined,
 } = {}) {
   const knownCaller = customer ? summarizeKnownCaller(customer) : null;
   // A new lead's trust comes from the verdict production persisted for this
@@ -1403,19 +1429,23 @@ function buildFailOpenRoutingContext({
     const verdict = onFileAddressVerdict !== undefined ? onFileAddressVerdict : persistedOnFileAddressVerdict(call);
     applyOnFileAddressVerdict(knownCaller, verdict);
   }
+  const outbound = isOutboundCall(call);
+  const contactPhone = resolveCallContactPhone(call, extractedPhone);
   return {
     knownCaller,
     options: {
       // Owner ruling (2026-09-26): a staff-placed (OUTBOUND) call that ends
       // with a confirmed appointment time books itself like an inbound call
-      // does. Fail-open now applies on both directions — an outbound call's
-      // known customer with an on-file address clears the same recoverable
-      // flags an inbound caller's does; it only ever recovers what the
-      // customer already has on file, never a value stated on this call
-      // (see the newAddressGiven guard in call-triage-flags.js).
+      // does — but ONLY the on-file ADDRESS recovery, per the ruling's own
+      // scope (Codex #4933 r1 P1). Outbound does NOT get the ANI leg
+      // (caller_phone_missing stays held — callerAni withheld below) or the
+      // confidence exemptions (low_extraction_confidence / failOpenLowConfidence
+      // in call-triage-flags.js, both keyed on knownCustomer.addressOnly —
+      // outboundScopedFailOpenCustomer forces it true on outbound, reusing
+      // the same lever a new lead's validated on-file address already uses).
       failOpen: !!failOpenEnabled,
-      callerAni: contactPhone,
-      knownCustomer: failOpenKnownCustomer(knownCaller),
+      callerAni: outbound ? null : contactPhone,
+      knownCustomer: outboundScopedFailOpenCustomer(failOpenKnownCustomer(knownCaller), outbound),
     },
   };
 }
@@ -9530,25 +9560,35 @@ const CallRecordingProcessor = {
           // address flags, a garbled email (name_email_mismatch) is advisory.
           // Owner ruling (2026-09-26): a staff-placed (OUTBOUND) call that ends
           // with a confirmed appointment time books itself like an inbound
-          // call does, so this contract is no longer gated on !isOutboundCall
-          // — resolveCallContactPhone already resolves contactPhone to the
-          // DIALED (customer) number on an outbound call, so callerAni below
-          // is sound on both directions, and the address recovery only ever
-          // uses the on-file address (never one stated on this call — see
-          // newAddressGiven in call-triage-flags.js). agentCommitFailOpen
-          // stays inbound-only (below) — that demotion is a distinct contract.
+          // call does, so this is no longer gated on !isOutboundCall — but the
+          // ruling's own scope is the on-file ADDRESS recovery only (Codex
+          // #4933 r1 P1). Outbound does NOT get the ANI leg (caller_phone_missing
+          // stays held — callerAni is withheld below) or the confidence
+          // exemptions (low_extraction_confidence / failOpenLowConfidence in
+          // call-triage-flags.js, both keyed on knownCustomer.addressOnly —
+          // outboundScopedFailOpenCustomer forces it true on outbound, reusing
+          // the same lever a new lead's validated on-file address already
+          // uses). agentCommitFailOpen stays inbound-only too (below) — a
+          // distinct contract.
           const failOpenBooking = isEnabled('callFailOpenBooking');
+          const outboundCall = isOutboundCall(call);
           // A new lead's on-file address is validated HERE, once, and only
           // when this call does not state its own (codex #4685 r2 P2).
           knownCaller = await trustValidatedNewLeadAddress(knownCaller, { extraction: v2Extraction, failOpen: failOpenBooking });
-          const knownCustomerForFailOpen = failOpenKnownCustomer(knownCaller);
+          const knownCustomerForFailOpen = outboundScopedFailOpenCustomer(failOpenKnownCustomer(knownCaller), outboundCall);
           let routingResult = canAutoRoute(v2Extraction, {
             contactPhone, addressValidation,
             // The merged canonical record: on-file address satisfaction must
             // see a V1-only address the same way the fail-open conflict check
             // does, and the unit ask the same way the merge point does.
             canonicalRecord: extracted,
-            failOpen: failOpenBooking, callerAni: contactPhone, knownCustomer: knownCustomerForFailOpen,
+            failOpen: failOpenBooking,
+            // caller_phone_missing fail-open stays inbound-only (Codex #4933
+            // r1 P1) — withheld here rather than adding a new canAutoRoute
+            // option; contactPhone itself is unaffected for every other use
+            // in this pass (SMS/email resolution, extraction, etc).
+            callerAni: outboundCall ? null : contactPhone,
+            knownCustomer: knownCustomerForFailOpen,
             agentCommitFailOpen: isEnabled('callAgentCommitBooking') && !isOutboundCall(call),
             // Grounds the agent-commitment evidence quote against the labeled
             // source transcript — evidence objects are untrusted model output.
@@ -18656,8 +18696,11 @@ const CallRecordingProcessor = {
         });
         finalFlags = mergeTriageFlags(modelFlags, deterministicFlags);
         // Owner ruling (2026-09-26): fail-open applies on both directions —
-        // mirror the live path exactly (no !isOutboundCall gate) so the
-        // replayed audit decision agrees with what enforce mode would do.
+        // mirror the live path exactly (no !isOutboundCall gate on failOpen
+        // itself), but scoped to the on-file ADDRESS recovery only (Codex
+        // #4933 r1 P1) — see outboundScopedFailOpenCustomer and the withheld
+        // callerAni below, both mirroring the live path exactly.
+        const auditOutboundCall = isOutboundCall(call);
         knownCaller = await trustValidatedNewLeadAddress(knownCaller, { extraction: v2ExtractionForAudit, failOpen: isEnabled('callFailOpenBooking') });
         routingResult = canAutoRoute(v2ExtractionForAudit, {
           contactPhone,
@@ -18665,8 +18708,8 @@ const CallRecordingProcessor = {
           canonicalRecord: extracted,
           // Keep the audit/shadow decision consistent with the enforce path.
           failOpen: isEnabled('callFailOpenBooking'),
-          callerAni: contactPhone,
-          knownCustomer: failOpenKnownCustomer(knownCaller),
+          callerAni: auditOutboundCall ? null : contactPhone,
+          knownCustomer: outboundScopedFailOpenCustomer(failOpenKnownCustomer(knownCaller), auditOutboundCall),
           agentCommitFailOpen: isEnabled('callAgentCommitBooking') && !isOutboundCall(call),
           transcript: transcription,
           transcriptLabelsTrusted: isEnabled('callAgentCommitTrustedLabels'),
