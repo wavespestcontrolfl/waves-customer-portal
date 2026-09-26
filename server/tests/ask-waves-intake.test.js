@@ -973,6 +973,8 @@ describe('normalizeIntakeResult', () => {
     ['Yes.', 'Is the pesticide safe for my child?'],
     ['Absolutely.', 'Can I re-enter after 30 minutes?'],
     ['Sí, claro.', '¿Es seguro para mi perro?'],
+    ['Yes.', 'Is this pesticide EPA-approved?'],
+    ['Sí.', '¿Está aprobado por la EPA?'],
   ])('a bare affirmation of a safety or re-entry question is replaced: %s', (reply, active) => {
     expect(scrubUnsafeClaims({ reply, intent: 'question', service_keys: [], ready_for_quote: false }, active).reply)
       .toMatch(/label directions|instrucciones de la etiqueta/);

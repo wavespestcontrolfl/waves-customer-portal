@@ -514,6 +514,8 @@ function terseClaim(t, activeMessage) {
   // the visitor asked — so when the ACTIVE question carries a safety or
   // re-entry proposition, the affirmation is that claim.
   const physicalQuestion = activeMessage.replace(DIGITAL_ACCESS_RE, ' ');
+  // "Is it EPA-approved?" → "Yes." affirms the approval claim.
+  if (AFFIRMATION_RE.test(t) && EPA_MENTION_RE.test(activeMessage) && APPROVAL_WORD_RE.test(activeMessage)) return true;
   if (AFFIRMATION_RE.test(t) && ((SAFETY_QUESTION_RE.test(activeMessage) && aboutTreatment(activeMessage))
     || ((ACCESS_SIGNAL_RE.test(physicalQuestion) || ACCESS_TOPIC_RE.test(physicalQuestion)) && (DURATION_RE.test(activeMessage) || CLOCK_TIME_RE.test(activeMessage) || ANY_TIME_FIGURE_RE.test(activeMessage))))) return true;
   // A short answer of EITHER polarity ("No.", "No, it cannot.", "At 4 PM.",
