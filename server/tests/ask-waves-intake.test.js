@@ -223,6 +223,8 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ['El producto no irrita a los niños.', ''],
     ['Our treatment will not have any effect on your pets.', ''],
     ['The product poses no concerns for children.', ''],
+    ['The treatment is perfectly fine around children and pets.', ''],
+    ['Está bien para sus mascotas.', ''],
     ['No tiene ningún efecto en sus mascotas.', ''],
     ['Our solution is completely harmless.', ''],
     ['Completely family-safe.', 'I have children'],
@@ -388,6 +390,12 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
     'This treatment is not safe for cats; go to the nearest animal hospital.',
   ])('a veterinary-hospital direction is not a human emergency: %s', (reply) => {
     const out = scrubUnsafeClaims({ reply, intent: 'question', service_keys: [], ready_for_quote: true });
+    expect(out.reply).toMatch(/veterinarian or an emergency animal hospital/);
+    expect(out.reply).not.toContain('911');
+  });
+
+  test('an Animal Poison Control referral takes only the veterinary path', () => {
+    const out = scrubUnsafeClaims({ reply: 'This treatment is not safe for dogs; call Animal Poison Control now.', intent: 'question', service_keys: [], ready_for_quote: true });
     expect(out.reply).toMatch(/veterinarian or an emergency animal hospital/);
     expect(out.reply).not.toContain('911');
   });
@@ -1540,6 +1548,8 @@ describe('looksLikeEmergency', () => {
     'My dog breathed in rat poison',
     'Pesticide was inhaled by my child',
     'My bird ate rat poison',
+    'My child was exposed to pesticide',
+    'My child breathed pesticide fumes',
     'My child ate pesticide granules',
     'The bait was eaten by my dog',
   ])('flags urgent/medical text: %s', (text) => {
