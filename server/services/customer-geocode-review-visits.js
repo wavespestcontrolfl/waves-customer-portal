@@ -41,7 +41,7 @@ function visitStamp(row) {
 }
 
 function visitMatchesPrimary(row, customer, primary) {
-  if (row.property_id != null && String(row.property_id) !== String(primary.id)) return false;
+  if (row.property_id != null) return String(row.property_id) === String(primary.id);
   const reference = {
     service_address_line1: customer.address_line1,
     service_address_line2: customer.address_line2,
