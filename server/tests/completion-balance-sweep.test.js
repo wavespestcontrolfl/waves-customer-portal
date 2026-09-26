@@ -242,6 +242,17 @@ describe('completion balance sweep', () => {
     expect([...skip].sort()).toEqual(['b', 'c', 'd']);
   });
 
+  test('a DATE column read as UTC midnight still counts as its own calendar day', async () => {
+    // On a UTC server pg hands back tomorrow's service_date as tomorrow
+    // 00:00Z — 8 PM ET today. It must still read as tomorrow.
+    const { unperformedVisitInvoiceIds } = require('../services/completion-balance-sweep');
+    const skip = await unperformedVisitInvoiceIds([
+      { id: 'tomorrow', scheduled_service_id: null, service_date: new Date('2026-09-27T00:00:00Z') },
+      { id: 'today', scheduled_service_id: null, service_date: new Date('2026-09-26T00:00:00Z') },
+    ], { today: '2026-09-26' });
+    expect([...skip]).toEqual(['tomorrow']);
+  });
+
   test('missing method or customer → no-op, never throws', async () => {
     const result = await runCompletionBalanceSweep({ ...baseArgs, paymentMethodId: null });
     expect(result).toEqual({ charged: 0, pending: 0, failed: 0, skipped: 0, considered: 0 });

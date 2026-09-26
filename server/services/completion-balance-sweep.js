@@ -73,7 +73,7 @@ const { isEnabled } = require('../config/feature-gates');
 const { openBalanceInvoices } = require('./open-balance');
 const { invoiceAmountDue } = require('./invoice-helpers');
 const { logAutopay } = require('./autopay-log');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, etCalendarDayOf } = require('../utils/datetime-et');
 
 const SWEEP_SOURCE = 'completion_balance_sweep';
 
@@ -98,8 +98,6 @@ async function dunningStoppedInvoiceIds(invoiceIds, { database = db } = {}) {
  * @param {string} paymentMethodId — payment_methods.id the completion charge used
  * @returns {{ charged: number, failed: number, skipped: number, considered: number }}
  */
-const dateOnly = (value) => (typeof value === 'string' ? value.slice(0, 10) : etDateString(new Date(value)));
-
 // Invoices whose visit hasn't happened yet (owner ruling 2026-09-26). A
 // linked visit must be 'completed'; a missing, cancelled or still-scheduled
 // visit means the service was not performed, so the bill waits.
@@ -117,7 +115,7 @@ async function unperformedVisitInvoiceIds(invoices, { database = db, today = etD
   for (const inv of invoices) {
     if (inv.scheduled_service_id) {
       if (!performed.has(String(inv.scheduled_service_id))) skip.add(String(inv.id));
-    } else if (inv.service_date && dateOnly(inv.service_date) > today) {
+    } else if (inv.service_date && etCalendarDayOf(inv.service_date) > today) {
       skip.add(String(inv.id));
     }
   }
