@@ -18,6 +18,17 @@
  * collections-previsit-rail-policy.test.js.
  */
 
+// Account-level choice lookup: read the fixture's notification_prefs row
+// (primary-profile resolution is unit-tested in billing-delivery-channels).
+jest.mock('../services/billing-delivery-channels', () => {
+  const actual = jest.requireActual('../services/billing-delivery-channels');
+  return {
+    ...actual,
+    accountBillingChannels: jest.fn(async (customerId, category, knex) => actual.explicitBillingChannels(
+      (await knex('notification_prefs').where({ customer_id: customerId }).first()) || {}, category,
+    )),
+  };
+});
 jest.mock('../services/logger', () => ({
   info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(),
 }));

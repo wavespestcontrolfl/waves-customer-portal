@@ -35,7 +35,7 @@ const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { collectionsChannelVerdict } = require('./collections/rail-guard');
 const ContactLedger = require('./collections/contact-ledger');
-const { explicitBillingChannels } = require('./billing-delivery-channels');
+const { accountBillingChannels } = require('./billing-delivery-channels');
 const { reminderProgress, sendReminderChannels } = require('./billing-reminder-delivery');
 
 const TEMPLATE_KEY = 'previsit_balance_reminder';
@@ -370,14 +370,13 @@ function quotedBalanceStillOwed({ customerId, quotedInvoices, quotedDuesCents })
 // SMS+Email path (that would ignore a stored selection): skip, and the next
 // sweep in the window retries (no claim is held yet).
 async function previsitPolicyGate({ visit, consult }) {
-  let notifPrefs;
+  let explicitChannels;
   try {
-    notifPrefs = await db('notification_prefs').where({ customer_id: visit.customer_id }).first();
+    explicitChannels = await accountBillingChannels(visit.customer_id, 'billing', db);
   } catch (prefsErr) {
-    logger.warn(`[previsit-balance] notification_prefs lookup failed for customer ${visit.customer_id}: ${prefsErr.message}`);
+    logger.warn(`[previsit-balance] billing channel choice unreadable for customer ${visit.customer_id}: ${prefsErr.message}`);
     return { skip: true };
   }
-  const explicitChannels = explicitBillingChannels(notifPrefs || {}, 'billing');
   if (explicitChannels !== null) {
     const gate = await explicitChannelPolicyGate({ visit, consult, explicitChannels });
     return gate.skip ? gate : { explicitChannels, eligibleIds: gate.eligibleIds };

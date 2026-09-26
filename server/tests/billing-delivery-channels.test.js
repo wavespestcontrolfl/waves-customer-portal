@@ -179,3 +179,50 @@ describe('billing delivery channel contract', () => {
     expect(billingChannelsPayload({ ...prefs, billing_channels: ['email'], email_enabled: false }, { emailAvailable: false }).billingReminderChannels).toEqual(['email']);
   });
 });
+
+describe('accountBillingChannels (account-level choice on the primary profile)', () => {
+  const { accountBillingChannels } = require('../services/billing-delivery-channels');
+
+  function databaseWith({ customers = [], prefs = [], failCustomers = false }) {
+    return jest.fn((table) => {
+      const conditions = {};
+      const q = {
+        where: jest.fn((cond) => { Object.assign(conditions, cond); return q; }),
+        first: jest.fn(async () => {
+          if (table === 'customers') {
+            if (failCustomers) throw new Error('customers read failed');
+            return customers.find((row) => Object.entries(conditions)
+              .every(([key, value]) => String(row[key]) === String(value))) || undefined;
+          }
+          if (table === 'notification_prefs') return prefs.find((row) => String(row.customer_id) === String(conditions.customer_id));
+          throw new Error(`Unexpected table ${table}`);
+        }),
+        catch: undefined,
+      };
+      return q;
+    });
+  }
+
+  const customers = [
+    { id: 'primary', account_id: 'acct-1', is_primary_profile: true },
+    { id: 'sibling', account_id: 'acct-1', is_primary_profile: false },
+  ];
+
+  test("a sibling property's reminder reads the primary profile's stored choice", async () => {
+    const database = databaseWith({ customers, prefs: [
+      { customer_id: 'primary', billing_channels: ['email'] },
+      { customer_id: 'sibling' },
+    ] });
+    await expect(accountBillingChannels('sibling', 'billing', database)).resolves.toEqual(['email']);
+  });
+
+  test('no stored choice on the primary is null (legacy routing)', async () => {
+    const database = databaseWith({ customers, prefs: [{ customer_id: 'primary' }] });
+    await expect(accountBillingChannels('sibling', 'billing', database)).resolves.toBeNull();
+  });
+
+  test('an unreadable owner fails closed (throws) instead of reading a sibling row', async () => {
+    await expect(accountBillingChannels('sibling', 'billing', databaseWith({ failCustomers: true })))
+      .rejects.toThrow('customers read failed');
+  });
+});

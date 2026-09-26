@@ -108,8 +108,28 @@ function mergedBillingChannelUpdates(winner = {}, loser = {}) {
   return updates;
 }
 
+// A customer's stored billing channel choice for a category. Delivery
+// channel choices are account-level and persisted on the account's PRIMARY
+// profile (routes/notifications.js), so a sibling property's reminder must
+// read the primary's row — the same owner rule the router core applies
+// (push-channel-routing readChannelPreference). Throws when the owner or the
+// row cannot be read: a delivery decision must fail closed, never fall back
+// to legacy routing on an unknown choice. Returns null when none is stored.
+async function accountBillingChannels(customerId, category, knex) {
+  const database = knex || require('../models/db');
+  const customer = await database('customers').where({ id: customerId }).first('account_id');
+  if (!customer) return null;
+  const { resolvePrimaryProfileId } = require('./account-properties');
+  const ownerId = await resolvePrimaryProfileId(
+    { customerId, accountId: customer.account_id }, database, { onError: 'throw' },
+  );
+  const prefs = await database('notification_prefs').where({ customer_id: ownerId }).first();
+  return explicitBillingChannels(prefs || {}, category);
+}
+
 module.exports = {
   BILLING_DELIVERY_FIELDS,
+  accountBillingChannels,
   explicitBillingChannels,
   billingChannelAllowed,
   billingChannelsPayload,
