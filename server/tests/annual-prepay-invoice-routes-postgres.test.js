@@ -343,4 +343,143 @@ postgres('Invoices annual-prepay routes against migrated PostgreSQL', () => {
     expect(after.billing_mode).toBe('per_application');
     expect(Number(after.account_credits)).toBe(400);
   });
+
+  // ADMIN-BUG-R17-FINDING-1: a legacy-monthly customer's term, demoted by
+  // reverse-prepaid, must not read as an ordinary accept-pending prepay that
+  // holds their monthly billing hostage until the annual invoice resolves.
+  test('reversing an applied credit exempts the demoted term from the pending-prepay billing hold', async () => {
+    const customerId = await customer({ billing_mode: null, account_credits: 400 });
+    const termId = randomUUID();
+    await trx('annual_prepay_terms').insert({
+      id: termId, customer_id: customerId, status: 'payment_pending',
+      term_start: etDateString(), term_end: '2099-12-31', prepay_amount: 400,
+    });
+    const invoiceId = await invoice(customerId, { status: 'sent', annual_prepay_term_id: termId });
+    await trx('annual_prepay_terms').where({ id: termId }).update({ prepay_invoice_id: invoiceId });
+
+    const applied = await request('POST', `/${invoiceId}/apply-credit`, { note: 'synthetic' });
+    expect(applied.status).toBe(200);
+
+    const reversed = await request('POST', `/${invoiceId}/reverse-prepaid`, { note: 'synthetic' });
+    expect(reversed.status).toBe(200);
+
+    const termRow = await trx('annual_prepay_terms').where({ id: termId }).first('status', 'dispute_suspended_at');
+    expect(termRow.status).toBe('payment_pending');
+    expect(termRow.dispute_suspended_at).not.toBeNull();
+
+    const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+    const pendingIds = await AnnualPrepayRenewals.getPaymentPendingCustomerIds(etDateString(), trx);
+    expect(pendingIds.has(String(customerId))).toBe(false);
+  });
+
+  // ADMIN-BUG-R17-FINDING-4: a decided term (renewal_decision set) must be
+  // refused BEFORE any credit/invoice mutation, not merely before the
+  // guarded status update further down the transaction.
+  test('reversing a decided term is refused before any credit or invoice mutation', async () => {
+    const customerId = await customer({ billing_mode: 'annual_prepay', account_credits: 0 });
+    const prepayInvoiceId = await invoice(customerId, {
+      status: 'prepaid', paid_at: new Date(), prepaid_prev_status: 'sent', prepaid_at: new Date(), credit_applied: 400,
+    });
+    const termId = randomUUID();
+    await trx('annual_prepay_terms').insert({
+      id: termId, customer_id: customerId, prepay_invoice_id: prepayInvoiceId, status: 'renewed',
+      renewal_decision: 'renew', renewal_decision_at: new Date(), term_start: etDateString(), term_end: '2099-12-31',
+      prepay_amount: 400, prior_billing_mode: 'none',
+    });
+    await trx('invoices').where({ id: prepayInvoiceId }).update({ annual_prepay_term_id: termId });
+
+    const res = await request('POST', `/${prepayInvoiceId}/reverse-prepaid`, { note: 'synthetic' });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/renewal decision/);
+
+    const invRow = await trx('invoices').where({ id: prepayInvoiceId }).first('status', 'credit_applied', 'paid_at');
+    expect(invRow.status).toBe('prepaid');
+    expect(Number(invRow.credit_applied)).toBe(400);
+    expect(invRow.paid_at).not.toBeNull();
+    expect(await trx('annual_prepay_terms').where({ id: termId }).first('status', 'renewal_decision'))
+      .toEqual({ status: 'renewed', renewal_decision: 'renew' });
+    const custRow = await trx('customers').where({ id: customerId }).first('billing_mode', 'account_credits');
+    expect(custRow.billing_mode).toBe('annual_prepay');
+    expect(Number(custRow.account_credits)).toBe(0);
+  });
+
+  // ADMIN-BUG-R17-FINDING-3: a payment 'disputed' by Stripe (invoice reopened
+  // as overdue, PI cleared) is unresolved money — the payments query must not
+  // treat 'disputed' the same as "no payment", and must also match the
+  // dispute_invoice_id metadata key a card-on-file charge carries instead of
+  // invoice_id.
+  test('removing the flag is refused while the prepay charge is disputed', async () => {
+    const customerId = await customer({ billing_mode: null });
+    const termId = randomUUID();
+    await trx('annual_prepay_terms').insert({
+      id: termId, customer_id: customerId, status: 'payment_pending', term_start: etDateString(), term_end: '2099-12-31', prepay_amount: 400,
+    });
+    const prepayInvoiceId = await invoice(customerId, {
+      status: 'overdue', annual_prepay_term_id: termId, stripe_payment_intent_id: null,
+    });
+    await trx('annual_prepay_terms').where({ id: termId }).update({ prepay_invoice_id: prepayInvoiceId });
+    await trx('payments').insert({
+      customer_id: customerId, amount: 400, status: 'disputed', payment_date: new Date(),
+      metadata: JSON.stringify({ dispute_invoice_id: prepayInvoiceId }),
+    });
+
+    const res = await request('DELETE', `/${prepayInvoiceId}/annual-prepay`);
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/payment on it/);
+    expect((await trx('annual_prepay_terms').where({ id: termId }).first('status')).status).toBe('payment_pending');
+    expect((await trx('invoices').where({ id: prepayInvoiceId }).first('annual_prepay_term_id')).annual_prepay_term_id).toBe(termId);
+  });
+
+  // ADMIN-BUG-R17-FINDING-5: clearPrepaidStampsForTerm treats a skipped or
+  // rescheduled visit as terminal and keeps its stamp for audit — the detach
+  // must keep the term link on those SAME rows, only clearing it from open
+  // (non-terminal) visits.
+  test('removing the flag preserves the term link on skipped/rescheduled visits while detaching open ones', async () => {
+    const { prepayInvoiceId, term } = await markedPaidPrepay();
+    const coveredVisits = await trx('scheduled_services').where({ annual_prepay_term_id: term.id }).orderBy('scheduled_date');
+    expect(coveredVisits.length).toBeGreaterThan(1);
+    const [skippedVisit, openVisit] = coveredVisits;
+    await trx('scheduled_services').where({ id: skippedVisit.id }).update({ status: 'skipped' });
+    // The prepay went unpaid again (same setup the canonical-cancel test uses).
+    await trx('invoices').where({ id: prepayInvoiceId }).update({ status: 'sent', paid_at: null });
+    await trx('annual_prepay_terms').where({ id: term.id }).update({ status: 'payment_pending' });
+
+    const res = await request('DELETE', `/${prepayInvoiceId}/annual-prepay`);
+    expect(res.status).toBe(200);
+
+    expect((await trx('scheduled_services').where({ id: skippedVisit.id }).first('annual_prepay_term_id')).annual_prepay_term_id).toBe(term.id);
+    expect((await trx('scheduled_services').where({ id: openVisit.id }).first('annual_prepay_term_id')).annual_prepay_term_id).toBeNull();
+  });
+
+  // ADMIN-BUG-R17-FINDING-2: reopenAnnualPrepayCoveredInvoicesForTerm swallows
+  // per-invoice reopen failures internally — a strict caller (this operator
+  // action) must still refuse and roll back rather than commit a cancel that
+  // leaves a covered invoice phantom-covered by a now-dead term.
+  test('removing the flag rolls back atomically when a covered invoice fails to reopen', async () => {
+    const { customerId, prepayInvoiceId, term } = await markedPaidPrepay();
+    const coveredVisits = await trx('scheduled_services').where({ annual_prepay_term_id: term.id }).orderBy('scheduled_date');
+    const coveredInvoiceId = await invoice(customerId, {
+      status: 'prepaid', paid_at: new Date(), prepaid_prev_status: 'sent', prepaid_at: new Date(),
+      annual_prepay_covered_term_id: term.id, scheduled_service_id: coveredVisits[0].id,
+    });
+    await trx('invoices').where({ id: prepayInvoiceId }).update({ status: 'sent', paid_at: null });
+    await trx('annual_prepay_terms').where({ id: term.id }).update({ status: 'payment_pending' });
+
+    // Simulate reopenAnnualPrepayCoveredInvoicesForTerm's own per-invoice
+    // try/catch swallowing a failure: it returns cleanly with nothing
+    // reopened, exactly as it would after logging a per-row warn.
+    const InvoiceService = require('../services/invoice');
+    const spy = jest.spyOn(InvoiceService, 'reopenAnnualPrepayCoveredInvoicesForTerm').mockResolvedValueOnce(0);
+    try {
+      const res = await request('DELETE', `/${prepayInvoiceId}/annual-prepay`);
+      expect(res.status).toBe(500);
+      expect(res.body.error).toMatch(/reopen failed/);
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect((await trx('annual_prepay_terms').where({ id: term.id }).first('status')).status).toBe('payment_pending');
+    expect((await trx('invoices').where({ id: prepayInvoiceId }).first('annual_prepay_term_id')).annual_prepay_term_id).toBe(term.id);
+    expect((await trx('invoices').where({ id: coveredInvoiceId }).first('status')).status).toBe('prepaid');
+  });
 });

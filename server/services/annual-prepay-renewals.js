@@ -2946,7 +2946,37 @@ async function cancelTermWithRestorations(termId, conn = db, { throwOnError = fa
       try {
         await require('./invoice').reopenAnnualPrepayCoveredInvoicesForTerm(updated.id, t);
       } catch (err) {
+        if (throwOnError) throw err;
         logger.warn(`[annual-prepay] invoice coverage reopen skipped for term ${updated.id}: ${err.message}`);
+      }
+      // reopenAnnualPrepayCoveredInvoicesForTerm swallows PER-INVOICE update
+      // failures internally (its own try/catch logs + continues to the next
+      // row) rather than surfacing them through a throw or its return value
+      // (ADMIN-BUG-R17-FINDING-2) — a strict caller (an explicit operator
+      // cancel that must never half-complete) can't trust a clean return
+      // above to mean every covered invoice actually reopened. Verify the
+      // goal state instead: any invoice still wearing this now-cancelled
+      // term's coverage marker, still 'prepaid', with no cash settlement of
+      // its own (the SAME exemption reopenAnnualPrepayCoveredInvoicesForTerm
+      // checks before it attempts a reopen) means THAT invoice's reopen
+      // attempt failed. Refuse rather than let the cancel commit with the
+      // term dead and that invoice phantom-covered by it.
+      if (throwOnError) {
+        const stillCovered = await t('invoices')
+          .where({ annual_prepay_covered_term_id: updated.id, status: 'prepaid' })
+          .whereNull('payment_recorded_at')
+          .select('id');
+        const stuckIds = [];
+        for (const row of stillCovered) {
+          const paidPayment = await t('payments')
+            .whereIn('status', ['paid', 'processing'])
+            .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [row.id])
+            .first('id');
+          if (!paidPayment) stuckIds.push(row.id);
+        }
+        if (stuckIds.length) {
+          throw new Error(`Term ${updated.id} cancel refused — covered invoice reopen failed for invoice id(s) ${stuckIds.join(', ')}`);
+        }
       }
       // And claw back the pending-window completion credits this term
       // issued — a full cancel would otherwise refund those slices twice
@@ -5804,11 +5834,24 @@ module.exports = {
   // term as "still deciding" add PAYMENT_PENDING_STATUS explicitly.
   ACTIVE_STATUSES,
   PAYMENT_PENDING_STATUS,
+  // The terminal-visit vocabulary clearPrepaidStampsForTerm treats as
+  // "already serviced — leave its stamp for audit" (ADMIN-BUG-R17-FINDING-5):
+  // admin-invoices' remove-flag route detaches the term link from a term's
+  // scheduled_services rows on removal, and must exclude the SAME statuses
+  // clearPrepaidStampsForTerm excludes, or a skipped/rescheduled visit's
+  // coverage-history link is severed while its stamp is kept — orphaning the
+  // audit trail clearPrepaidStampsForTerm deliberately preserves.
+  PREPAID_UPDATE_EXCLUDED_STATUSES,
   // The cadence a term will actually run at (explicit cadence, else the
   // service-type wording, else the stored visit count) — the prepay
   // routes' retired-plan gate reads the same inference the coverage
   // schedule is built from (codex r17 on #4786).
   inferCoverageCadence,
+  // Column-existence probe for annual_prepay_terms, cached like the analogous
+  // scheduled_services/invoices probes — admin-invoices' reverse-prepaid
+  // route needs it to column-guard the SAME dispute_suspended_at marker
+  // suspendActiveTermsForDisputedInvoice stamps (ADMIN-BUG-R17-FINDING-1).
+  annualPrepayColumns,
   _private: {
     PENDING_COMPLETION_REVERSAL_IDENTITIES,
     dateOnly,
