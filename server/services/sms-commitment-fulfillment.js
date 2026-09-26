@@ -106,8 +106,11 @@ const WITNESS_TRANSITION_STATUSES = Object.freeze(['confirmed', 'rescheduled', '
 // as payment evidence); 'payment_failed' / 'payment_expiry' (a failure or an
 // expiring card, not a receipt); 'ach_payment_processing' if ever
 // reintroduced (mid-flight acknowledgment, not proof money landed);
-// 'invoice' (the bill went out, not that it was paid).
-const PAYMENT_SMS_TYPES = ['receipt', 'deposit_receipt', 'invoice_thank_you', 'autopay_charge_success', 'autopay_retry_success',
+// 'invoice' (the bill went out, not that it was paid); 'invoice_thank_you'
+// (admin-invoices.js also sends it when existing account credit covers an
+// invoice, with no new money — a real payment is already the invoice leg's
+// evidence).
+const PAYMENT_SMS_TYPES = ['receipt', 'deposit_receipt', 'autopay_charge_success', 'autopay_retry_success',
   // complete-scheduled-service.js: the combined "service done + paid" receipt.
   'service_complete_paid_receipt'];
 // Payment evidence and `other` asks: a payment record is ADMISSIBLE for any

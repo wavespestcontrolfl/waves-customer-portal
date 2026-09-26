@@ -1911,6 +1911,16 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect(payments).not.toContain(pending.id);
   });
 
+  test('R2 rule 3: a thank-you sent when account credit covers an invoice is not money received', async () => {
+    const commitment = { kind: 'other', description: 'Did you receive my payment?', sms_context: { property_id: null, source_at: message.created_at.toISOString() } };
+    const after = new Date(message.created_at.getTime() + 1000);
+    const [thanks] = await mockPg('sms_log').insert({ ...message, id: randomUUID(), direction: 'outbound', from_phone: message.to_phone,
+      to_phone: message.from_phone, message_body: 'Thank you! Your invoice is paid.', message_type: 'invoice_thank_you', status: 'delivered',
+      created_at: after }).returning('id');
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, new Date(after.getTime() + 1000));
+    expect(evidence.records.filter((r) => r.type === 'payment').map((r) => r.id)).not.toContain(thanks.id);
+  });
+
   test('R2 rule 7: an unresolved send reservation is never presented as a delivered receipt (source-guard: excludeUnresolvedSendReservations)', async () => {
     const after = new Date(message.created_at.getTime() + 1000);
     await mockPg('sms_log').insert({ ...message, id: randomUUID(), direction: 'outbound',
