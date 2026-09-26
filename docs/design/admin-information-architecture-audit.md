@@ -14,7 +14,7 @@ Static code evidence cannot prove that a production page has no users. No mounte
 
 ## Keep as primary destinations
 
-The destinations in `client/src/config/adminNavigation.js` remain the supported primary inventory. Desktop and mobile now expose the same inventory through these groups:
+The destinations in `client/src/config/adminNavigation.js` remain the supported primary inventory. With the `admin-navigation` flag off, desktop and mobile expose the same inventory through these groups (`NAV_SECTION_DEFINITIONS`; with the flag on, `WORKSPACE_GROUPS` applies instead: Dashboard, Schedule, Customers, Sales, Communications, Billing, Operations, Marketing, Team, Accounting, Agents and Settings):
 
 - Overview
 - Operations
@@ -55,7 +55,7 @@ Keep these compatibility routes while old bookmarks, notifications, or server-ge
 | `/admin/credentials` | `/admin/compliance?tab=credentials` |
 | `/admin/pricing` | `/admin/pricing-logic?area=strategy` |
 | `/admin/price-change` | `/admin/pricing-logic?area=notices` |
-| `/admin/auto-dispatch` | `/admin/dispatch?tab=automation` |
+| `/admin/auto-dispatch` | `/admin/agents?tab=dispatch` |
 | `/admin/lawn-protocol` | `/admin/service-library?tab=protocols`; the former `tab` value is preserved as `protocolTab` |
 | `/admin/kb` | `/admin/knowledge?area=base`; a known former `tab` value is preserved as `kbTab` |
 

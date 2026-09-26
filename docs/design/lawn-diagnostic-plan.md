@@ -42,8 +42,7 @@ audit of the current repo:
   and `assessment_completion_tracking` all aggregate every row assuming it's a real
   customer assessment. Injecting prospect/spot-check rows silently corrupts those metrics
   unless a filter is patched into every consumer.
-- Baseline is **auto-assigned on insert** (`server/routes/admin-lawn-assessment.js:792-798, 855`:
-  first row for a customer → `is_baseline = true`). Incompatible with standalone records.
+- Baseline assignment has two paths: with `GATE_LAWN_PROPERTY_HISTORY` and `GATE_LAWN_VISIT_ASSESSMENT` both off, the insert in `server/routes/admin-lawn-assessment.js` marks a customer's first assessment as baseline; with either gate on, the insert writes `is_baseline: false` and confirmation promotes the baseline through `installConfirmedBaseline` (the /confirm route and `server/services/lawn-visit-runs.js`). Either way it is incompatible with standalone records.
 
 Reuse doesn't require sharing the table: the AI engine, S3 upload, PDF renderer, and
 report-token rails are all service-layer functions that don't care which table the row
@@ -539,7 +538,7 @@ Both public routes added to the **docs/public-route-contracts.md** public-by-tok
 Tests: `lawn-diagnostic-public.test.js` (whitelisting no-leak, strict validation, token-gate
 404s, one-shot 409) + send-gate helper units in the route test. 54 lawn-diagnostic tests green.
 
-### v1 still to build
+### v1 status (updated 2026-09-26)
 **Shipped:** the `/tech/*` Lawn Diagnostic UI (`TechLawnDiagnosticPage`, `client/src/App.jsx:711`)
 and the public `/lawn-report/:token` React page (`LawnReportViewPage`, `client/src/App.jsx:686`).
 **Still open:** photo S3 persistence into `lawn_diagnostic_photos` exists for the public

@@ -72,7 +72,7 @@ dual-vision analysis → multi-photo averaging → seasonal normalization → we
 `/assess` (requires `customerId` + `photos`, line 484–485), `/:assessmentId/snapshot`,
 `/history/:customerId`, `/baseline/:customerId`, `/latest/:customerId`, `/service/:serviceId`,
 `/reset-baseline`, `/confirm/:assessmentId`, `/override/:assessmentId`, `/customers`, plus
-recommendation/snapshot endpoints. **Baseline auto-set logic is at lines 855–878.**
+recommendation/snapshot endpoints. **Baseline assignment has two paths: with `GATE_LAWN_PROPERTY_HISTORY` and `GATE_LAWN_VISIT_ASSESSMENT` both off, the insert in `server/routes/admin-lawn-assessment.js` marks a customer's first assessment as baseline; with either gate on, the insert writes `is_baseline: false` and confirmation promotes the baseline through `installConfirmedBaseline` (the /confirm route and `server/services/lawn-visit-runs.js`). A baseline-excluded quick assessment must bypass both.**
 
 ### Delivery rails (all reusable, all mature)
 
