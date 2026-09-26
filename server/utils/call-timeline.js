@@ -42,8 +42,19 @@ function callDurationSeconds(row) {
   return candidates.length ? Math.max(...candidates) : 0;
 }
 
+// Twilio's terminal call statuses (matches twilio-voice-webhook.js).
+const TERMINAL_CALL_STATUSES = new Set(['completed', 'busy', 'failed', 'no-answer', 'canceled']);
+
 function createdAfterTheCall(row) {
-  return POST_CALL_ROW_SOURCES.has(parseMetadata(row?.metadata).source);
+  const meta = parseMetadata(row?.metadata);
+  if (!POST_CALL_ROW_SOURCES.has(meta.source)) return false;
+  // A /call-status fallback row inserted on a NON-terminal event
+  // (initiated/ringing/in-progress) was created near the call's start, so
+  // created_at is the start (codex #4919 round-14 P1). Rows without the
+  // stamp (older inserts) keep the post-call reading.
+  if (meta.source === 'status_callback' && meta.inserted_on_status
+    && !TERMINAL_CALL_STATUSES.has(String(meta.inserted_on_status))) return false;
+  return true;
 }
 
 /** When the CUSTOMER placed the call. Null if the row carries no usable time. */

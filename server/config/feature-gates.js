@@ -102,6 +102,7 @@
  *     below), so flipping only this gate silently keeps the legacy
  *     invoice-and-pay-link behavior. isPrepayCardAndChargeEnabled() enforces
  *     the conjunction; the flip checklist is all three vars.)
+ *   GATE_ANNUAL_PREPAY_ADDON_BILLING=true (completing an annual-prepay-covered visit with no invoice at all and clearly priced add-ons bills them as their own invoice with the pay link and the unpaid completion text; any invoice already on the visit — never collected by the completion — an issued invoice missing an add-on, or an unclear amount — a visit-wide discount, an add-on awaiting its price — gets one office alert instead, ADMIN-BUG-R13, owner ruling 2026-09-26; read at call time and frozen on the service record at the first gate-on pass; dark = today's behavior: the covered visit bills nothing for its add-ons and an office invoice carrying them is voided)
  *
  *   GATE_LAWN_PROPERTY_HISTORY=true (property-scoped confirmed lawn history, one installed row per visit, report-date/reset windows and confirm-time baseline; dark in dev AND prod; consumers read at call time)
  *   GATE_LAWN_COMPLETION_DEFAULTS=true (appointment-plan completion defaults; requires GATE_LAWN_PROPERTY_HISTORY; opt-in in every environment)
@@ -504,6 +505,15 @@ const gates = {
   // only be reached from Customer 360 as before. Kill switch: unset or any
   // non-'true' value; nothing is minted retroactively when it flips.
   prepayOnBook: process.env.GATE_PREPAY_ON_BOOK === 'true',
+
+  // Add-ons on an annual-prepay-covered visit billed at completion
+  // (ADMIN-BUG-R13): with no invoice at all, their own invoice through the
+  // shared scheduled mint, pay link + unpaid completion text; any invoice
+  // already on the visit, or an unclear amount, gets one office alert
+  // instead. logGateStatus only — the completion
+  // reads gateEnvValue('GATE_ANNUAL_PREPAY_ADDON_BILLING') at CALL time.
+  // Off: the covered visit bills nothing for its add-ons, as before.
+  annualPrepayAddonBilling: gateEnvValue('GATE_ANNUAL_PREPAY_ADDON_BILLING'),
 
   // Switching an ALREADY-ACCEPTED per-application customer to annual prepay
   // from the appointment sheet — the "changed their mind on site" case
@@ -1428,6 +1438,12 @@ const gates = {
   // Off → nothing is written; the Calls tab still renders rows already
   // recorded. Kill switch: unset. See services/call-commitments.js.
   callCommitments: process.env.GATE_CALL_COMMITMENTS === 'true',
+  // One-hour follow-up pager (owner ruling 2026-09-26): a promise made on a
+  // call (callback, quote, a time to come out) is due within one hour of
+  // 8 AM–8 PM ET time; a missed one rings one bell, and a standing bell lists
+  // everything missed in the last 24 hours. Internal only. Needs
+  // callCommitments. Off → no-op. See services/followup-sla-watcher.js.
+  followupSlaAlerts: process.env.GATE_FOLLOWUP_SLA_ALERTS === 'true',
   // Call reschedule apply: a matched existing customer's agent-committed move
   // of a visit already on the books (V2 reschedule_requested + confirmed
   // start) is applied to that visit through the rebooker, the access note
@@ -2890,6 +2906,17 @@ const gates = {
   // estimateConsultationOfferLive() below, same leadInspectionLinkLive()
   // convention.
   estimateConsultationOffer: process.env.GATE_ESTIMATE_CONSULTATION_OFFER === 'true',
+  // "Rather have us come look first?" consultation-offer LINK inside the
+  // estimate.engage_gone_quiet follow-up EMAIL (owner ruling 2026-09-26,
+  // decision 2 of the estimate-email consultation-offer lane) — a separate
+  // gate from the estimate PAGE's own GATE_ESTIMATE_CONSULTATION_OFFER
+  // above, since the two surfaces (a page a customer already opened vs an
+  // automated send) ship independently. Ships DARK: off unless exactly
+  // 'true', and requires GATE_LEAD_INSPECTION_LINK on as well (checked by
+  // estimateConsultationLead, the same shared eligibility the page uses).
+  // This entry is for logGateStatus only — the canonical CALL-TIME reader is
+  // estimateEmailConsultationOfferLive() below, same convention.
+  estimateEmailConsultationOffer: process.env.GATE_ESTIMATE_EMAIL_CONSULTATION_OFFER === 'true',
   // Auto-Dispatch shared route model + day clustering (owner-approved
   // 2026-09-26 dispatch-backlog item 3, incident: the 04:10 ET run scored a
   // visit's CURRENT placement with plain haversine while CANDIDATES went
@@ -3006,6 +3033,18 @@ function estimateConsultationOfferLive() {
   return process.env.GATE_ESTIMATE_CONSULTATION_OFFER === 'true';
 }
 
+// GATE_ESTIMATE_EMAIL_CONSULTATION_OFFER read at CALL time — strict
+// `=== 'true'`, same convention as estimateConsultationOfferLive(). The
+// `estimateEmailConsultationOffer` gates-map entry above is for
+// logGateStatus only; this is the one canonical reader
+// server/services/estimate-email-consultation-offer.js uses. Like the page
+// offer, this additionally requires leadInspectionLinkLive() (checked
+// inside the shared estimateConsultationLead eligibility, not duplicated
+// here).
+function estimateEmailConsultationOfferLive() {
+  return process.env.GATE_ESTIMATE_EMAIL_CONSULTATION_OFFER === 'true';
+}
+
 // Self-booking day cap (owner ruling 2026-09-23) — the canonical reader
 // every day-cap call site uses (routes/booking.js buildBookingAvailability
 // + createSelfBooking, services/availability.js getAvailableSlots +
@@ -3073,5 +3112,5 @@ function logGateStatus() {
   }
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, commercialSuiteSizingLive, autoDispatchSharedModelLive };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, commercialSuiteSizingLive, autoDispatchSharedModelLive };
 // gates 1775330914

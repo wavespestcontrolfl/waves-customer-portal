@@ -957,6 +957,158 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     expect((await mockPg('sms_log').where({ from_phone: 'push', status: 'sent' })).length).toBe(2);
   });
 
+  test('Codex #4816 r44: a retry of an accepted push repairs a missing proof row, once', async () => {
+    await device();
+    await put({ invoiceChannel: 'push' });
+    const invoiceId = randomUUID();
+    await mockPg('invoices').insert({ id: invoiceId, customer_id: property, token: randomUUID(), invoice_number: 'QA-INVOICE-3', status: 'sent' });
+    const routing = require('../services/messaging/push-channel-routing');
+    const notice = { customerId: property, to: '+19415550101', body: 'Your invoice is ready.', messageType: 'invoice_followup',
+      explicitPushOnly: true, invoiceId, notificationEventKey: `qa:${invoiceId}:repair` };
+    expect(await routing.attemptPushFirst(notice)).toMatchObject({ delivered: true });
+    await mockPg('sms_log').where({ from_phone: 'push' }).del(); // the first attempt's proof write was lost
+    expect(await routing.attemptPushFirst(notice)).toMatchObject({ delivered: true });
+    expect(await mockPg('sms_log').where({ from_phone: 'push' })).toHaveLength(1);
+    // A further retry finds the repaired proof and adds nothing.
+    expect(await routing.attemptPushFirst(notice)).toMatchObject({ delivered: true });
+    expect(await mockPg('sms_log').where({ from_phone: 'push' })).toHaveLength(1);
+  });
+
+  test('Codex #4816 r46 pre-push: overlapping retries of one accepted push repair a single proof', async () => {
+    await device();
+    await put({ invoiceChannel: 'push' });
+    const invoiceId = randomUUID();
+    await mockPg('invoices').insert({ id: invoiceId, customer_id: property, token: randomUUID(), invoice_number: 'QA-INVOICE-7', status: 'sent' });
+    const routing = require('../services/messaging/push-channel-routing');
+    const notice = { customerId: property, to: '+19415550101', body: 'Your invoice is ready.', messageType: 'invoice_followup',
+      explicitPushOnly: true, invoiceId, notificationEventKey: `qa:${invoiceId}:race` };
+    expect(await routing.attemptPushFirst(notice)).toMatchObject({ delivered: true });
+    await mockPg('sms_log').where({ from_phone: 'push' }).del();
+    await Promise.all([routing.attemptPushFirst(notice), routing.attemptPushFirst(notice), routing.attemptPushFirst(notice)]);
+    expect(await mockPg('sms_log').where({ from_phone: 'push' })).toHaveLength(1);
+  });
+
+  test('Codex #4816 r47: a first write that finds a repaired proof for its notice reuses it', async () => {
+    await device();
+    await put({ invoiceChannel: 'push' });
+    const invoiceId = randomUUID();
+    await mockPg('invoices').insert({ id: invoiceId, customer_id: property, token: randomUUID(), invoice_number: 'QA-INVOICE-8', status: 'sent' });
+    const eventKey = `qa:${invoiceId}:first-vs-repair`;
+    // Another worker's retry repaired this notice before the original worker's proof write.
+    await mockPg('sms_log').insert({ customer_id: property, direction: 'outbound', from_phone: 'push', to_phone: '+19415550101',
+      message_body: 'Your invoice is ready.', status: 'sent', message_type: 'invoice_followup', created_at: new Date(),
+      metadata: JSON.stringify({ channel: 'push', providerAccepted: true, notificationEventKey: eventKey, proof_repaired: true }) });
+    const routing = require('../services/messaging/push-channel-routing');
+    expect(await routing.attemptPushFirst({ customerId: property, to: '+19415550101', body: 'Your invoice is ready.',
+      messageType: 'invoice_followup', explicitPushOnly: true, invoiceId, notificationEventKey: eventKey })).toMatchObject({ delivered: true });
+    expect(await mockPg('sms_log').where({ from_phone: 'push' })).toHaveLength(1);
+  });
+
+  test('Codex #4816 r46: a retry whose payload differs from the delivered notice repairs nothing', async () => {
+    await device();
+    await put({ invoiceChannel: 'push' });
+    const invoiceId = randomUUID();
+    await mockPg('invoices').insert({ id: invoiceId, customer_id: property, token: randomUUID(), invoice_number: 'QA-INVOICE-5', status: 'sent' });
+    const routing = require('../services/messaging/push-channel-routing');
+    const notice = { customerId: property, to: '+19415550101', body: 'Your invoice is ready.', messageType: 'invoice_followup',
+      explicitPushOnly: true, invoiceId, notificationEventKey: `qa:${invoiceId}:payload` };
+    expect(await routing.attemptPushFirst(notice)).toMatchObject({ delivered: true });
+    await mockPg('sms_log').where({ from_phone: 'push' }).del();
+    // The template changed since delivery: the proof must not claim text the customer never got.
+    expect(await routing.attemptPushFirst({ ...notice, body: 'Reminder: your invoice is still open.' })).toMatchObject({ delivered: true });
+    expect(await mockPg('sms_log').where({ from_phone: 'push' })).toHaveLength(0);
+    // The same payload as delivered does repair.
+    expect(await routing.attemptPushFirst(notice)).toMatchObject({ delivered: true });
+    expect((await mockPg('sms_log').where({ from_phone: 'push' })).map((r) => r.message_body)).toEqual(['Your invoice is ready.']);
+  });
+
+  test('Codex #4816 r49: a lost proof for a visit-linked push is repaired with the scope that was delivered', async () => {
+    await device();
+    await put({ invoiceChannel: 'push' });
+    const invoiceId = randomUUID();
+    await mockPg('invoices').insert({ id: invoiceId, customer_id: property, token: randomUUID(), invoice_number: 'QA-INVOICE-6', status: 'sent' });
+    const visitId = randomUUID();
+    const homeId = randomUUID();
+    await mockPg('scheduled_services').insert({ id: visitId, customer_id: property, property_id: homeId,
+      scheduled_date: '2026-09-09', service_type: 'Pest Control' });
+    const routing = require('../services/messaging/push-channel-routing');
+    const notice = { customerId: property, to: '+19415550101', body: 'Your invoice is ready.', messageType: 'invoice_followup',
+      explicitPushOnly: true, invoiceId, appointmentId: visitId, notificationEventKey: `qa:${invoiceId}:visit-repair` };
+    expect(await routing.attemptPushFirst(notice)).toMatchObject({ delivered: true });
+    expect((await mockPg('sms_log').where({ from_phone: 'push' }).first()).metadata)
+      .toMatchObject({ scheduled_service_id: visitId, property_id: homeId });
+    await mockPg('sms_log').where({ from_phone: 'push' }).del();
+    // The visit moves to another property before the retry: the repair keeps the delivered scope.
+    await mockPg('scheduled_services').where({ id: visitId }).update({ property_id: randomUUID() });
+    expect(await routing.attemptPushFirst(notice)).toMatchObject({ delivered: true });
+    const repaired = await mockPg('sms_log').where({ from_phone: 'push' });
+    expect(repaired).toHaveLength(1);
+    expect(repaired[0].metadata).toMatchObject({ proof_repaired: true, scheduled_service_id: visitId, property_id: homeId });
+  });
+
+  test('Codex #4816 r50: when both proof writes fail, the settled scheduled row carries the delivered visit scope', async () => {
+    await device();
+    await put({ invoiceChannel: 'push' });
+    const invoiceId = randomUUID();
+    await mockPg('invoices').insert({ id: invoiceId, customer_id: property, token: randomUUID(), invoice_number: 'QA-INVOICE-9', status: 'sent' });
+    const visitId = randomUUID();
+    const homeId = randomUUID();
+    await mockPg('scheduled_services').insert({ id: visitId, customer_id: property, property_id: homeId,
+      scheduled_date: '2026-09-09', service_type: 'Pest Control' });
+    const [queued] = await mockPg('sms_log').insert({ customer_id: property, direction: 'outbound', from_phone: '+19415550199',
+      to_phone: '+19415550101', message_body: 'Your invoice is ready.', status: 'sending', message_type: 'invoice_followup',
+      created_at: new Date(), metadata: JSON.stringify({ queued: true }) }).returning('id');
+    await mockPg.raw(`CREATE OR REPLACE FUNCTION reject_push_proof() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN IF NEW.from_phone = 'push' THEN RAISE EXCEPTION 'proof write refused'; END IF; RETURN NEW; END $$`);
+    await mockPg.raw('CREATE TRIGGER reject_push_proof BEFORE INSERT ON sms_log FOR EACH ROW EXECUTE FUNCTION reject_push_proof()');
+    try {
+      const routing = require('../services/messaging/push-channel-routing');
+      expect(await routing.attemptPushFirst({ customerId: property, to: '+19415550101', body: 'Your invoice is ready.',
+        messageType: 'invoice_followup', explicitPushOnly: true, invoiceId, appointmentId: visitId,
+        scheduledSmsLogId: queued.id || queued, notificationEventKey: `qa:${invoiceId}:settle` })).toMatchObject({ delivered: true });
+    } finally {
+      await mockPg.raw('DROP TRIGGER IF EXISTS reject_push_proof ON sms_log');
+    }
+    const settled = await mockPg('sms_log').where({ id: queued.id || queued }).first();
+    expect(settled.status).toBe('sent');
+    expect(settled.metadata).toMatchObject({ channel: 'push', providerAccepted: true, scheduled_service_id: visitId, property_id: homeId, queued: true });
+  });
+
+  test('Codex #4816 r45: another push of the same type near acceptance does not stand in for a missing proof', async () => {
+    await device();
+    await put({ invoiceChannel: 'push' });
+    const invoiceId = randomUUID();
+    await mockPg('invoices').insert({ id: invoiceId, customer_id: property, token: randomUUID(), invoice_number: 'QA-INVOICE-4', status: 'sent' });
+    const routing = require('../services/messaging/push-channel-routing');
+    const notice = { customerId: property, to: '+19415550101', body: 'Your invoice is ready.', messageType: 'invoice_followup',
+      explicitPushOnly: true, invoiceId, notificationEventKey: `qa:${invoiceId}:a` };
+    expect(await routing.attemptPushFirst(notice)).toMatchObject({ delivered: true });
+    // This notice's proof is lost; a different same-type notice sits inside any time window.
+    const [first] = await mockPg('sms_log').where({ from_phone: 'push' });
+    await mockPg('sms_log').where({ id: first.id }).update({ message_body: 'A different invoice notice.',
+      metadata: JSON.stringify({ channel: 'push', providerAccepted: true, notificationEventKey: `qa:${invoiceId}:b` }) });
+    expect(await routing.attemptPushFirst(notice)).toMatchObject({ delivered: true });
+    expect((await mockPg('sms_log').where({ from_phone: 'push' })).map((r) => r.message_body).sort())
+      .toEqual(['A different invoice notice.', 'Your invoice is ready.']);
+  });
+
+  test('Codex #4816 r40: a push proof row names the visit its notice was about', async () => {
+    await device();
+    await put({ invoiceChannel: 'push' });
+    const invoiceId = randomUUID();
+    await mockPg('invoices').insert({ id: invoiceId, customer_id: property, token: randomUUID(), invoice_number: 'QA-INVOICE-2', status: 'sent' });
+    const routing = require('../services/messaging/push-channel-routing');
+    const appointmentId = randomUUID();
+    expect(await routing.attemptPushFirst({ customerId: property, to: '+19415550101', body: 'Your invoice is ready.',
+      messageType: 'invoice_followup', explicitPushOnly: true, invoiceId, appointmentId, fromNumber: '+19415550199',
+      notificationEventKey: `qa:${invoiceId}:visit` })).toMatchObject({ delivered: true });
+    const proof = await mockPg('sms_log').where({ from_phone: 'push' }).first();
+    // The notification-id back-fill merges: the visit and the event key both survive it.
+    expect(proof.metadata).toMatchObject({ channel: 'push', providerAccepted: true, scheduled_service_id: appointmentId,
+      notificationEventKey: `qa:${invoiceId}:visit`, provider_from_number: '+19415550199' });
+    expect(proof.metadata.push_notification_id).toBeTruthy();
+  });
+
   test('payment problems preserves charged-profile ownership and legacy companion vetoes', async () => {
     const routing = require('../services/messaging/push-channel-routing');
     await mockPg('notification_prefs').where({ customer_id: property }).update({ billing_channel: 'email' });

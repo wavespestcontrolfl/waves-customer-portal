@@ -8400,6 +8400,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
     let payUrl = null;
     let invoice = null;
     let alreadyPaid = false;
+    // ADMIN-BUG-R13: a collectible invoice bills this annual-prepay-covered
+    // visit's add-ons. prepaidCovered stays true for the covered base, so this
+    // is what keeps the pay link and the unpaid completion text for that bill.
+    let annualPrepayExtrasCollectible = false;
+    // Add-ons owed but only alerted to the office, or a voided office
+    // invoice's other charges awaiting its re-bill: the completion text must
+    // not say "all paid" (ADMIN-BUG-R13).
+    let annualPrepayOwedUnbilled = false;
     let paymentCollectionSuppressed = false;
     let paymentReconciliationRequired = false;
     // Suppressor-lookup health (pre-push Codex P0, gate-removal round 2):
@@ -10712,52 +10720,62 @@ async function completeScheduledService(completionInput, packetContext = null) {
       else invoiceCreated = true;
     }
 
-    // A live annual-prepay-COVERED visit must never carry a collectible invoice for
-    // the covered work: it's already paid on the annual prepay invoice. The
-    // suppression gate stops NEW invoices; a pre-existing / pre-minted invoice with NO
-    // add-ons is SETTLED here as non-cash annual-prepay coverage → 'prepaid'
-    // (non-collectible, no pay link, books no payments row → no revenue double-count).
-    // An invoice WITH add-ons (or applied account credit) is VOIDED for now — same as
-    // before this PR, money-safe (no double-bill), but it drops the add-on AR until
-    // the base-covered / add-ons-collectible SPLIT ships as the fast-follow. Fails
-    // closed: a cash-paid / in-flight invoice is left for normal handling.
-    // Invoice-issued closeout: the issued invoice is the customer-facing
-    // artifact the office chose to send — it is never settled or voided here
-    // (pre-push P0: a covered visit whose SENT invoice carried add-ons would
-    // have been voided outright, dropping collectible AR right after
-    // delivery). Coverage questions on such an invoice are the office's.
-    if (annualPrepayCovered && invoice?.id && !issuedInvoiceCloseout
-      && !['paid', 'prepaid', 'void'].includes(String(invoice.status || '').toLowerCase())) {
-      try {
-        const InvoiceService = require('../services/invoice');
-        // Named settleRes, NOT res — `res` here would shadow the Express response
-        // for the rest of this block (the isOutboundCall TDZ-shadow failure class).
-        const settleRes = await InvoiceService.settleInvoiceAsAnnualPrepayCovered(
-          invoice.id, svc.annual_prepay_term_id, { recordedBy: 'system:annual_prepay_completion' },
-        );
-        if (settleRes.settled) {
-          // Fully covered → settled non-cash 'prepaid' (invoice + service record kept,
-          // no revenue double-count) — non-collectible, no pay link.
-          invoice = settleRes.invoice;
-          invoiceCreated = false;
-          payUrl = null;
-          alreadyPaid = true;
-        } else if (['has_add_ons', 'has_applied_credit', 'has_deposit_credit'].includes(settleRes.reason)) {
-          // Covered visit whose invoice can't be plain-settled here (positive extras, or
-          // applied account/deposit credit that voidInvoice must restore): fall back to
-          // the pre-split void (money-safe — voidInvoice restores any credit + cancels
-          // the PI; the extras-collectible split is the fast-follow). No double-bill.
-          await InvoiceService.voidInvoice(invoice.id);
-          invoice = null;
-          invoiceCreated = false;
-          payUrl = null;
-          alreadyPaid = true;
+    // An annual-prepay-COVERED visit's invoice and its add-ons — the covered
+    // base settled or voided, never collectible; the add-ons billed alone or
+    // alerted (ADMIN-BUG-R13, GATE_ANNUAL_PREPAY_ADDON_BILLING) — decided in
+    // services/annual-prepay-addon-billing.js.
+    if (annualPrepayCovered) {
+      const { reconcileCoveredVisitInvoice } = require('../services/annual-prepay-addon-billing');
+      const covered = await reconcileCoveredVisitInvoice({
+        svc, record, invoice, payUrl, alreadyPaid, invoiceCreated,
+        issuedInvoiceCloseout, recapReviewOnly, visitPerformed, terminalCompletionInvoice, packetEffects, invoiceLookupFailed,
+        quietBackfill: isBackfillCompletion,
+        serviceDate: serviceDateOnly(record?.service_date),
+        portalUrl,
+        mergeRecordNotesKeys,
+      });
+      ({ invoice, payUrl, alreadyPaid, invoiceCreated } = covered);
+      annualPrepayExtrasCollectible = covered.extrasCollectible;
+      annualPrepayOwedUnbilled = covered.owedUnbilled;
+      // A failed add-on read, or an office alert that did not land, keeps
+      // the closeout unfinalized — same release/503 shape as the
+      // manual-billing alert — so the retry reads and decides again before
+      // anything is sent.
+      if (covered.hold) {
+        logger.error(`[dispatch] ${covered.hold.code} for ${svc.id} — closeout NOT finalized: ${covered.hold.error.message}`);
+        const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, covered.hold.error);
+        if (!released) {
+          logger.error(`[dispatch] release-for-resume did NOT release attempt ${completionAttempt?.id} for ${svc.id} — retry blocked until the ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)}-minute stale window reclaims it`);
         }
-        // else (payer_billed / already_settled / processing): leave for normal handling.
-      } catch (settleErr) {
-        logger.warn(`[dispatch] annual-prepay covered visit ${svc.id}: could not settle pre-existing invoice ${invoice.id}: ${settleErr.message}`);
+        const heldError = released
+          ? `${covered.hold.summary} — the closeout is saved but NOT finalized. Retry the closeout.`
+          : `${covered.hold.summary} — the closeout is saved but NOT finalized. It will become retryable within about ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)} minutes — retry the closeout then.`;
+        // Literal codes: the admin client resumes every committed-but-not-
+        // finalized 503 by code (COMPLETION_RESUME_OWED_CODES), and its
+        // contract test reads each code off these objects.
+        if (covered.hold.code === 'annual_prepay_addons_lookup_failed') {
+          return ({ status: 503, body: {
+            error: heldError,
+            code: 'annual_prepay_addons_lookup_failed',
+            ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
+            serviceRecordId: record.id,
+          } });
+        }
+        return ({ status: 503, body: {
+          error: heldError,
+          code: 'annual_prepay_addons_alert_failed',
+          ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
+          serviceRecordId: record.id,
+        } });
       }
     }
+    // Collectible on a covered visit means the add-ons bill; anywhere else
+    // the visit's own invoice (ADMIN-BUG-R13).
+    const coveredVisitCollectible = !prepaidCovered || annualPrepayExtrasCollectible;
+    // A covered visit routed to the office with no add-ons bill to collect:
+    // its invoice waits for review exactly as it stands — no account credit
+    // and no automatic charge (ADMIN-BUG-R13; set only with the gate on).
+    const annualPrepayOfficeReview = annualPrepayOwedUnbilled && !annualPrepayExtrasCollectible;
 
     // Auto-apply available account credit (e.g. the referral reward) to the
     // residual collectible bill — runs for BOTH the freshly-created (shouldInvoice)
@@ -10816,6 +10834,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // credit untouched for review.
       && !apptCardOverCap && !apptCardLaneUnresolved
       && !(extendedChargeCandidate && extendedLaneOverCap)
+      && !annualPrepayOfficeReview
       && require('../config/feature-gates').gates.autoApplyAccountCredit) {
       try {
         const { applyAccountCreditToInvoice } = require('../services/customer-credit');
@@ -10915,6 +10934,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     if (!isBackfillCompletion
       && (perApplicationBilling || apptCardOneTimeCharge || extendedChargeCandidate) && visitPerformed && invoice?.id && !alreadyPaid && !invoice.payer_id
       && !['paid', 'prepaid', 'void', 'processing'].includes(String(invoice.status || '').toLowerCase())
+      && !annualPrepayOfficeReview
       && customerAutopayActive) {
       // Above-quote guardrail (card-on-file spec §3.6, owner default = HARD
       // CAP) — the accepted per-visit amount, the setup-fee allowance and the
@@ -11197,8 +11217,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // it's called whenever an invoice exists, even if alreadyPaid/payer, to
     // avoid leaving a completed job's hold stuck in 'held'. On a real charge it
     // marks the invoice already-paid so the completion SMS sends a receipt, not
-    // a pay link. Best-effort — never blocks completion.
-    if (invoice?.id) {
+    // a pay link. Best-effort — never blocks completion. An invoice left for
+    // the office (ADMIN-BUG-R13) keeps its hold for the office to capture or
+    // release.
+    if (invoice?.id && !annualPrepayOfficeReview) {
       if (paymentCollectionSuppressed) {
         // A fresh in-progress collision suppresses this request's card-hold
         // rail without mutating the hold: the owning request may still decline
@@ -12065,7 +12087,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // unpaid invoice always keeps a collection path.
         const allowCompletionInvoiceLinkBase = !suppressCompletionInvoiceLink
           && includePayLink !== false
-          && !prepaidCovered
+          // ADMIN-BUG-R13: the covered base needs no link, the add-ons bill does.
+          && coveredVisitCollectible
           && !alreadyPaid
           && !autopayCoversVisit
           // Collectible statuses only: a crash-resumed completion reloads the
@@ -12083,10 +12106,15 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // as its own text — the completion SMS goes report-only only once
         // that notice has ACTUALLY delivered.
         const allowCompletionInvoiceLink = allowCompletionInvoiceLinkBase && !paymentFailedNoticeSent;
-        const usePaidCompletionTemplate = alreadyPaid
+        // ADMIN-BUG-R13: never "you're all paid up" while the add-ons bill is
+        // open (account credit can still settle it above → alreadyPaid), while
+        // add-ons are owed but only alerted to the office, or while a voided
+        // invoice's other charges wait for the office to re-bill them.
+        const usePaidCompletionTemplate = !(annualPrepayExtrasCollectible && !alreadyPaid) && !annualPrepayOwedUnbilled
+          && (alreadyPaid
           || prepaidCovered
           || autopayCoversVisit
-          || ['paid', 'prepaid'].includes(String(invoice?.status || '').toLowerCase());
+          || ['paid', 'prepaid'].includes(String(invoice?.status || '').toLowerCase()));
         // Lawn Report V2 write-gate: freeze the synthesis onto the record (single
         // source of truth) and run the consistency check. Its smsSummary is no
         // longer read — the completion text is the plain DB template for every
@@ -13117,7 +13145,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // whose money is already moving (Codex round-5). Also covers
       // paid/prepaid/void/refunded via the shared helper.
       && require('../services/invoice-helpers').isInvoiceCollectibleStatus(invoice.status)
-      && !prepaidCovered
+      // ADMIN-BUG-R13: the add-ons bill on a covered visit is collectible.
+      && coveredVisitCollectible
       && !alreadyPaid
       && !autopayCoversVisit
       && !suppressCompletionInvoiceLink
