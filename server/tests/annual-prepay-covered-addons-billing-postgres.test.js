@@ -158,6 +158,23 @@ postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
     return jest.spyOn(NotificationService, 'notifyAdmin').mockImplementation(async (...args) => (
       matches(String(args[3]?.dedupeKey || '')) ? null : realNotify(...args)));
   }
+  // The R13 classifier's read of the visit's add-on rows fails (a Proxy
+  // over the test transaction, matched on the reading function's frame);
+  // every other query runs as usual.
+  function failAddonRowReads() {
+    const dbMock = require('../models/db');
+    const real = dbMock.connection;
+    dbMock.connection = new Proxy(real, {
+      apply(target, thisArg, args) {
+        if (args[0] === 'scheduled_service_addons' && /annualPrepayAddonRows/.test(new Error().stack)) {
+          throw new Error('synthetic add-on read failure');
+        }
+        return Reflect.apply(target, thisArg, args);
+      },
+    });
+    return () => { dbMock.connection = real; };
+  }
+  const PAID_TEXTS = ['service_complete_annual_prepay', 'service_complete_prepaid', 'service_complete_paid_receipt'];
   const attemptStatus = async (f) => (await trx('service_completion_attempts').where({ service_id: f.serviceId }).first('status'))?.status;
   const addonsAlert = (f) => trx('notifications').where({ recipient_type: 'admin' })
     .whereRaw("metadata->>'dedupeKey' = ?", [`annual_prepay_addons_unbilled:${f.serviceId}`]).first();
@@ -445,6 +462,42 @@ postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
     const invoices = await liveInvoices(f);
     expect(invoices).toHaveLength(1);
     expect(Number(invoices[0].total)).toBe(ADDON);
+  });
+
+  test('an add-on read that fails while checking an existing invoice leaves the closeout unfinalized and the invoice untouched; the retry collects it (pre-push P1 r4)', async () => {
+    const f = await coveredVisit({ invoiceLines: (x) => [addonLine(x)] });
+    const idempotencyKey = randomUUID();
+    const restore = failAddonRowReads();
+    let first;
+    try {
+      first = await complete(f, { sendCompletionSms: true }, { idempotencyKey });
+    } finally {
+      restore();
+    }
+    expect(first).toMatchObject({ status: 503, body: { code: 'annual_prepay_addons_lookup_failed' } });
+    expect(await attemptStatus(f)).toBe('side_effects_pending');
+    expect((await trx('invoices').where({ id: f.invoiceId }).first('status')).status).toBe('draft');
+    const retry = await complete(f, { sendCompletionSms: true }, { idempotencyKey });
+    expect(retry).toMatchObject({ status: 200 });
+    expect(retry.body?.invoiceId).toBe(f.invoiceId);
+    expect(retry.body?.invoicePaymentActionRequired).toBe(true);
+    expect(PAID_TEXTS).not.toContain(retry.body?.completionSmsType);
+  });
+
+  test('an office invoice that cannot be voided stays for normal handling, the office is alerted, and the text does not say "all paid"', async () => {
+    const f = await coveredVisit({ invoiceLines: (x) => [baseLine(x), addonLine(x)] });
+    const InvoiceService = require('../services/invoice');
+    const spy = jest.spyOn(InvoiceService, 'voidInvoice').mockRejectedValue(new Error('Invoice status changed while voiding — re-check and retry'));
+    let out;
+    try {
+      out = await complete(f, { sendCompletionSms: true });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(out).toMatchObject({ status: 200 });
+    expect((await trx('invoices').where({ id: f.invoiceId }).first('status')).status).toBe('draft');
+    expect(await addonsAlert(f)).toBeTruthy();
+    expect(PAID_TEXTS).not.toContain(out.body?.completionSmsType);
   });
 
   test('a visit that performed no application bills no add-ons', async () => {

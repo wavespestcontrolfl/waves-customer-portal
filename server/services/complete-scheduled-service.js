@@ -10947,12 +10947,21 @@ async function completeScheduledService(completionInput, packetContext = null) {
     };
 
     let annualPrepayAddonsHandled = false;
+    // An invoice this closeout could not read against the visit's add-ons
+    // is left untouched and unjudged: the closeout stays unfinalized (the
+    // release/503 below) and the retry classifies it again.
+    let annualPrepayLookupError = null;
     if (annualPrepayCovered && invoice?.id && !issuedInvoiceCloseout
       && !['paid', 'prepaid', 'void'].includes(String(invoice.status || '').toLowerCase())) {
       annualPrepayAddonsHandled = true;
+      let coveredAddons = null;
       try {
         const InvoiceService = require('../services/invoice');
-        const invoiceLines = classifyCoveredVisitInvoice(invoice, svc, await annualPrepayAddonRows(svc));
+        coveredAddons = await annualPrepayAddonRows(svc).catch((lookupErr) => {
+          annualPrepayLookupError = lookupErr;
+          throw lookupErr;
+        });
+        const invoiceLines = classifyCoveredVisitInvoice(invoice, svc, coveredAddons);
         if (invoiceLines.billsOnlyAddons) {
           annualPrepayExtrasCollectible = true;
           // This open bill is what the visit owes. The paid-invoice lookup
@@ -11013,6 +11022,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
         }
       } catch (settleErr) {
         logger.warn(`[dispatch] annual-prepay covered visit ${svc.id}: could not settle pre-existing invoice ${invoice?.id}: ${settleErr.message}`);
+        // Neither settled nor voided (a payment in flight, a concurrent
+        // change): the invoice stays for normal handling, and nothing here
+        // billed the visit's own add-ons — the office decides, and the text
+        // never says "all paid" over them.
+        if (!annualPrepayLookupError && coveredAddons?.priced) {
+          await alertAnnualPrepayAddons(`invoice ${invoice?.invoice_number || invoice?.id} could not be reconciled with the annual prepay: ${String(settleErr.message).slice(0, 160)}`, { invoiceId: invoice?.id || null });
+        }
       }
     }
     // No invoice on the covered visit at all (the common case): bill its
@@ -11049,21 +11065,26 @@ async function completeScheduledService(completionInput, packetContext = null) {
       await billAnnualPrepayAddons({ coveredInvoiceId: invoice.id });
     }
     // The alerts above are the ONLY follow-up for add-ons this closeout did
-    // not bill, and for charges on an invoice it voided. One that did not
-    // land keeps the closeout unfinalized — same release/503 shape as the
-    // manual-billing alert — so the retry raises it again.
-    if (annualPrepayAlertError) {
-      const alertErr = annualPrepayAlertError;
-      logger.error(`[dispatch] annual-prepay add-ons alert FAILED for ${svc.id} — closeout NOT finalized: ${alertErr.message}`);
-      const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, alertErr);
+    // not bill, and for charges on an invoice it voided; the add-on read is
+    // what every decision above rests on. Either failing keeps the closeout
+    // unfinalized — same release/503 shape as the manual-billing alert — so
+    // the retry reads and decides again before anything is sent.
+    if (annualPrepayLookupError || annualPrepayAlertError) {
+      const lookupFailed = !!annualPrepayLookupError;
+      const holdErr = annualPrepayLookupError || annualPrepayAlertError;
+      logger.error(`[dispatch] annual-prepay add-ons ${lookupFailed ? 'lookup' : 'alert'} FAILED for ${svc.id} — closeout NOT finalized: ${holdErr.message}`);
+      const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, holdErr);
       if (!released) {
         logger.error(`[dispatch] release-for-resume did NOT release attempt ${completionAttempt?.id} for ${svc.id} — retry blocked until the ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)}-minute stale window reclaims it`);
       }
+      const held = lookupFailed
+        ? 'This visit\'s add-ons could not be checked against its invoice'
+        : 'This visit\'s add-ons need the office\'s attention and the office alert could not be recorded';
       return ({ status: 503, body: {
         error: released
-          ? 'This visit\'s add-ons need the office\'s attention and the office alert could not be recorded — the closeout is saved but NOT finalized. Retry the closeout.'
-          : `This visit's add-ons need the office's attention and the office alert could not be recorded — the closeout is saved but NOT finalized. It will become retryable within about ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)} minutes — retry the closeout then.`,
-        code: 'annual_prepay_addons_alert_failed',
+          ? `${held} — the closeout is saved but NOT finalized. Retry the closeout.`
+          : `${held} — the closeout is saved but NOT finalized. It will become retryable within about ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)} minutes — retry the closeout then.`,
+        code: lookupFailed ? 'annual_prepay_addons_lookup_failed' : 'annual_prepay_addons_alert_failed',
         ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
         serviceRecordId: record.id,
       } });
