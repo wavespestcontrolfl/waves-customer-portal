@@ -137,6 +137,15 @@ describe('project report — every shipped chip answers its own category (AW-06)
       .toMatch(/Activity at the rear wall/i);
   });
 
+  test.each([
+    'Can I see what products were used?',
+    'Can I see what was treated?',
+  ])('a lookup "see" with a treatment noun answers the treatment, not findings: %s', (question) => {
+    const answer = answerProjectReportQuestion({ question, project, payload });
+    expect(answer).toMatch(/Synthetic bait/i);
+    expect(answer).not.toMatch(/Activity at the rear wall/i);
+  });
+
   test('"When can I see you again?" answers the next visit, not findings', () => {
     const answer = answerProjectReportQuestion({ question: 'When can I see you again?', project, payload });
     expect(answer).toMatch(/Nothing further is scheduled|scheduled for/i);
@@ -432,6 +441,29 @@ describe('service report — every shipped chip answers its own category (AW-06)
     'When are you treating the lawn?',
   ])('a bare when-question about treating is scheduling: %s', (question) => {
     expect(answerServiceReportQuestion({ question, data: pestData, nextAppointment })).toMatch(/Your next appointment is/);
+  });
+
+  test.each([
+    'What changed about the treatment?',
+    'Did you change the product?',
+    'What treatment was applied before my next visit?',
+    'What product did you use before my next appointment?',
+  ])('a treatment question with "change" or "before my next" gets the applied answer: %s', (question) => {
+    expect(answerServiceReportQuestion({ question, data: pestData, nextAppointment })).toMatch(/Sources used: this service report/);
+  });
+
+  test('"How did the pressure change?" still gets the trend answer', () => {
+    expect(answerServiceReportQuestion({ question: 'How did the pressure change?', data: pestData }))
+      .toMatch(/pressure index is 1\.8/);
+  });
+
+  test.each([
+    'Can I be back inside in two hours?',
+    'Can my dog be back outside in an hour?',
+  ])('customer re-entry with a time is re-entry, not a scheduled return: %s', (question) => {
+    const answer = answerServiceReportQuestion({ question, data: pestData, nextAppointment });
+    expect(answer).not.toMatch(/Your next appointment is/);
+    expect(answer).toMatch(/re-entry|dry|back (?:in|out)/i);
   });
 
   test('"How did the treatment affect the pressure score?" gets the trend answer', () => {

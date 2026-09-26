@@ -184,7 +184,9 @@ function answerProjectReportQuestion({ question, project, payload, intent }) {
     && /\b(when|next|again|upcoming|will\s+you|going\s+to)\b/.test(q)) {
     return answerNextVisit({ project, payload });
   }
-  if (/\b(find|found|finding|findings|see|saw|observe|observed|activity|evidence|result|results)\b/.test(q)) {
+  // Only an observational "see" ("What did you see?") is a findings cue — a
+  // lookup "Can I see what products were used?" falls through to treatment.
+  if (/\b(find|found|finding|findings|saw|observe|observed|activity|evidence|result|results)\b|\b(?:did|do)\s+you\s+see\b/.test(q)) {
     return answerFindings({ project, typeCfg });
   }
   if (/\b(treat|treats|treating|treated|treatment|treatments|product|products|use|used|appl(?:y|ies|ied|ying|ication|ications)|chemical|chemicals|spray|sprays|sprayed|spraying|bait|baits|baited|gallon|gallons)\b/.test(q)) {

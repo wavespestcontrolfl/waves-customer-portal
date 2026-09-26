@@ -13,8 +13,10 @@ const SAFETY_SUBJECT_RE = /\b(pets?|dogs?|cats?|kids?|child(?:ren)?)\b/;
 // back?" is a scheduling question.
 const REENTRY_PHRASE_RE = /\bre-?enter(?:ing|y)?\b|\bready\b|\bsafe\b|\bback\s*(?:out|outside|in|inside)\b/;
 // A scheduled return ("When will you come back in October?", "Will you be
-// back in two weeks?") is a visit question, not re-entry.
-const SCHEDULED_RETURN_RE = /\b(?:come|coming|be)\s+back\b[^?.!]*\b(?:in|on|next|by|around)\s+(?:\d+|a|an|one|two|three|four|five|six|few|couple|the\s+next|january|february|march|april|may|june|july|august|september|october|november|december|monday|tuesday|wednesday|thursday|friday|saturday|sunday|week|weeks|month|months|spring|summer|fall|winter)\b/;
+// back in two weeks?") is a visit question, not re-entry. A customer, pet or
+// location coming back ("Can I be back inside in two hours?", "Can my dog be
+// back outside in an hour?") is re-entry, not the technician returning.
+const SCHEDULED_RETURN_RE = /(?<!\bcan\s+(?:i|we|they|he|she|(?:my|our|the)\s+\w+)\s+)\b(?:come|coming|be)\s+back\b(?!\s+(?:inside|outside|indoors|outdoors|out|in\s+(?:the\s+)?(?:house|home|yard|room)))[^?.!]*\b(?:in|on|next|by|around)\s+(?:\d+|a|an|one|two|three|four|five|six|few|couple|the\s+next|january|february|march|april|may|june|july|august|september|october|november|december|monday|tuesday|wednesday|thursday|friday|saturday|sunday|week|weeks|month|months|spring|summer|fall|winter)\b/;
 // A location word still means re-entry ("When can we go outside again?")
 // unless the question is about what was applied there.
 const LOCATION_RE = /\b(outside|inside|outdoors|indoors)\b/;
@@ -44,7 +46,9 @@ const PAST_VERB_RE = /\b(?:was|were|did)\s+(?:you\s+|it\s+|they\s+|the\s+\w+\s+)
 const WHAT_APPLIED_RE = /\b(?:what|which)\b[^?.!]{0,40}\b(?:spray\w*|appl\w*|use[sd]?|treat\w*|products?)\b/;
 // Preparation / action wording outranks appointment nouns ("What should I do
 // before my next visit?"); "Should I schedule…" stays a scheduling question.
-const PREP_ADVICE_RE = /\b(what\s+should\s+i\s+do|should\s+i\s+(?:do|prepare|prep|move|clean|mow|water|cover|remove)|prepare|before\s+(?:my|the|your)\s+next)\b/;
+// A bare "before my next…" is not preparation ("What product did you use
+// before my next appointment?" asks what was applied).
+const PREP_ADVICE_RE = /\b(what\s+should\s+i\s+do|should\s+i\s+(?:do|prepare|prep|move|clean|mow|water|cover|remove)|prepare|get\s+ready|(?:do|need\s+to\s+do|have\s+to\s+do)\s+before\s+(?:my|the|your)\s+next)\b/;
 // A temporal "when/after/how long … go/get/come/let … in/out" question is
 // re-entry even when it names the treatment ("When can I go inside after
 // the treatment?").
@@ -73,8 +77,10 @@ function isReentryIntent(q) {
     || (LOCATION_RE.test(q) && !TREATMENT_QUESTION_RE.test(q) && !FINDINGS_QUESTION_RE.test(q) && !APPOINTMENT_RE.test(q));
 }
 // Results questions ("Is the weed treatment working?") belong to the trend
-// answer even though they name the treatment.
-const EFFECTIVENESS_RE = /\b(working|improving|improve[sd]?|helping|trending|results?|better|worse|affect(?:s|ed)?|impact\w*|lower\w*|reduc\w*|drop\w*|chang\w*|decreas\w*)\b/;
+// answer even though they name the treatment. "Change" counts only with a
+// result subject ("How did the pressure change?") — "Did you change the
+// product?" asks about the application.
+const EFFECTIVENESS_RE = /\b(working|improving|improve[sd]?|helping|trending|results?|better|worse|affect(?:s|ed)?|impact\w*|lower\w*|reduc\w*|drop\w*|decreas\w*)\b|\bchang\w*\b(?=[^?.!]*\b(?:pressure|scores?|results?|trend\w*|activity|numbers?|index)\b)|\b(?:pressure|scores?|results?|trend\w*|activity|numbers?|index)\b[^?.!]*\bchang\w*/;
 // Explicit advice wording outranks the broad lawn-trend subjects ("What do
 // you recommend for the stress areas?").
 const ADVICE_RE = /\b(recommend\w*|what\s+should\s+i|should\s+i|what\s+action|next\s+step)\b/;
