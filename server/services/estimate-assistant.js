@@ -4,7 +4,7 @@ const db = require('../models/db');
 const { WAVEGUARD } = require('./pricing-engine/constants');
 const { serviceCountsTowardWaveGuardTier } = require('./pricing-engine/discount-engine');
 const { loadEstimateAiSupportContext, serviceKeysFromContext, serviceFamiliesFromText } = require('./estimate-ai-context');
-const { dispatch } = require('./llm/call');
+const { dispatch, rejectCall } = require('./llm/call');
 const { isMistingSystemService } = require('../utils/mosquito-misting-system');
 const { ledgerCall } = require('./llm-dispatch-metrics');
 
@@ -1426,7 +1426,9 @@ async function answerWithOpenAI(question, context) {
     maxTokens: 420,
   });
   if (!r.ok || !r.text) return null;
-  return cleanAssistantAnswer(r.text) || null;
+  const answer = cleanAssistantAnswer(r.text);
+  if (!answer) rejectCall(r, 'invalid_output');
+  return answer || null;
 }
 
 async function answerWithAnthropic(question, context) {

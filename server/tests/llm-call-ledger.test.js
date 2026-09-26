@@ -385,11 +385,15 @@ describe('llm call ledger', () => {
       const empty = { ...ANTHROPIC_MESSAGE, stop_reason: 'end_turn', content: [{ type: 'thinking', thinking: '' }, { type: 'text', text: '  ' }] };
       const toolRound = { ...ANTHROPIC_MESSAGE, stop_reason: 'tool_use', content: [{ type: 'tool_use', id: 't1', name: 'lookup', input: {} }] };
       const answered = { ...ANTHROPIC_MESSAGE, stop_reason: 'end_turn' };
+      const malformed = { ...ANTHROPIC_MESSAGE, stop_reason: 'end_turn', content: {} };
+      // A malformed body never breaks the pass-through (Codex r4 on #4884).
+      expect(await metrics.ledgerCall('anthropic', 'm', () => Promise.resolve(malformed))).toBe(malformed);
       expect(await metrics.ledgerCall('anthropic', 'm', () => Promise.resolve(empty))).toBe(empty);
       await metrics.ledgerCall('anthropic', 'm', () => Promise.resolve(toolRound));
       await metrics.ledgerCall('anthropic', 'm', () => Promise.resolve(answered));
       await flush();
       expect(callRows().map((r) => [r.ok, r.error_code, r.error_class])).toEqual([
+        [false, 'empty_text', 'incomplete'],
         [false, 'empty_text', 'incomplete'],
         [true, null, null],
         [true, null, null],

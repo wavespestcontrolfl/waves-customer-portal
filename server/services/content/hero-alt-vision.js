@@ -80,6 +80,10 @@ async function describeHeroForAlt({ buffer, mimeType = 'image/webp', title, keyw
       jsonMode: false,
       maxTokens: 300,
       ...(timeoutMs > 0 ? { timeoutMs } : {}),
+    }, {
+      // An alt the sanitizer rejects fails the leg in the chain: the backup
+      // provider gets its turn and the ledger row is not filed as ok (Codex r4 on #4884).
+      validate: (result) => (sanitizeAlt(result.text) ? null : 'invalid_output'),
     });
     if (!res.ok) {
       logger.warn(`[hero-alt-vision] vision call failed (${res.reason}) — keeping writer alt (fail-open)`);

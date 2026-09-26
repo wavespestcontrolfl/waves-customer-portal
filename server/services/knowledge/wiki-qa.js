@@ -63,7 +63,7 @@ ${liveIndex}`,
         jsonMode: true,
         jsonSchema: ROUTING_SCHEMA,
         maxTokens: 500,
-      });
+      }, { validate: (result) => (Array.isArray(result.json?.paths) ? null : 'invalid_output') });
       if (!routing.ok || !Array.isArray(routing.json?.paths)) throw new Error(routing.reason || 'no_paths');
       paths = routing.json.paths;
     } catch {

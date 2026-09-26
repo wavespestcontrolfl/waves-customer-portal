@@ -604,6 +604,7 @@ async function runChallenge(perception = {}, context = {}) {
     }
     const normalized = normalizeDiagnosisJson(parsed);
     if (!normalized.findings.length) {
+      ledgerCallRejected(response, 'schema_invalid');
       return { ok: false, reason: 'no_findings', findings: [], challenge: challengeMeta({ attempted: true, degraded: true, failureType: 'empty_findings' }) };
     }
     const requiredConfirmationSteps = normalized.findings

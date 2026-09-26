@@ -164,18 +164,24 @@ function unwrappedSdkCalls(src) {
   const isNamed = (node, name) => node && !node.computed && node.property && node.property.name === name;
   (function walk(node, insideLedger) {
     if (!node || typeof node.type !== 'string') return;
-    let inside = insideLedger;
     if (node.type === 'CallExpression') {
       const callee = node.callee;
-      if ((callee.type === 'Identifier' && callee.name === 'ledgerCall') || (callee.type === 'MemberExpression' && isNamed(callee, 'ledgerCall'))) inside = true;
       const sdk = callee.type === 'MemberExpression' && (isNamed(callee, 'create') || isNamed(callee, 'stream'))
         && callee.object.type === 'MemberExpression' && isNamed(callee.object, 'messages');
       if (sdk && !insideLedger) count += 1;
+      if ((callee.type === 'Identifier' && callee.name === 'ledgerCall') || (callee.type === 'MemberExpression' && isNamed(callee, 'ledgerCall'))) {
+        // Only a function argument defers the request into the wrapper; an
+        // eager `ledgerCall(p, m, client.messages.create(req))` has already run
+        // the request, so it stays unwrapped (Codex r4 on #4884).
+        walk(callee, insideLedger);
+        node.arguments.forEach((arg) => walk(arg, insideLedger || arg.type === 'ArrowFunctionExpression' || arg.type === 'FunctionExpression'));
+        return;
+      }
     }
     for (const key of Object.keys(node)) {
       const value = node[key];
-      if (Array.isArray(value)) value.forEach((child) => walk(child, inside));
-      else if (value && typeof value.type === 'string') walk(value, inside);
+      if (Array.isArray(value)) value.forEach((child) => walk(child, insideLedger));
+      else if (value && typeof value.type === 'string') walk(value, insideLedger);
     }
   })(ast, false);
   return count;
@@ -206,6 +212,9 @@ describe('direct Anthropic SDK calls are on the call ledger', () => {
     expect(unwrappedSdkCalls('client.messages?.stream({ model: m });')).toBe(1);
     expect(unwrappedSdkCalls("ledgerCall('anthropic', m, () => client.messages\n  .create({ model: m }), { laneId: 'x' });")).toBe(0);
     expect(unwrappedSdkCalls("metrics.ledgerCall('anthropic', m, () => client.messages.create(req));")).toBe(0);
+    expect(unwrappedSdkCalls("ledgerCall('anthropic', m, async function () { return client.messages.create(req); });")).toBe(0);
+    // Eager: the request runs before ledgerCall exists — still unwrapped.
+    expect(unwrappedSdkCalls("ledgerCall('anthropic', m, client.messages.create(req));")).toBe(1);
   });
 
   test('every candidate file parses', () => {

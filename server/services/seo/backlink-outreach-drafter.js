@@ -17,7 +17,7 @@ const MODELS = require('../../config/models');
 const logger = require('../logger');
 const worker = require('./link-prospect-worker');
 const { fetchPageText } = require('./contact-finder');
-const { callAnthropic } = require('../llm/call');
+const { callAnthropic, rejectCall } = require('../llm/call');
 const { etDateString, etParts } = require('../../utils/datetime-et');
 const { ledgerCall, ledgerCallRejected } = require('../llm-dispatch-metrics');
 
@@ -91,7 +91,10 @@ function buildFollowUpPrompt(prospect, profile, loc, now = new Date()) {
 async function draftFollowUp(prospect, { profile, anthropic }) {
   const loc = pickLocation(prospect, profile);
   const r = await callAnthropic({ laneId: 'outreach_drafter', model: DRAFT_MODEL, maxTokens: 800, system: FOLLOW_UP_SYSTEM_PROMPT, text: buildFollowUpPrompt(prospect, profile, loc), jsonMode: false, anthropicClient: anthropic });
-  return r.ok ? parseDraft(r.text) : null;
+  if (!r.ok) return null;
+  const draft = parseDraft(r.text);
+  if (!draft) rejectCall(r, 'invalid_json');
+  return draft;
 }
 
 /**

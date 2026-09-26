@@ -423,7 +423,8 @@ const ledgerCallIdOf = new WeakMap();
 // tool_use or pause_turn stop is a tool round, never an empty answer.
 function endedWithoutText(message) {
   if (!['end_turn', 'stop_sequence'].includes(message?.stop_reason)) return false;
-  return !(message.content || []).some((block) => block?.type === 'text' && String(block.text || '').trim());
+  const content = Array.isArray(message?.content) ? message.content : [];
+  return !content.some((block) => block?.type === 'text' && String(block.text || '').trim());
 }
 
 /**
