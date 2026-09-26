@@ -346,6 +346,14 @@ describe('effort is sent only to models that accept it', () => {
     expect(voiceEffortFor('claude-sonnet-5')).toBe('low');
     expect(voiceEffortFor(HAIKU)).toBeNull();
     expect(voiceEffortFor(undefined)).toBeNull();
+    // Partially capable Opus tiers accept `low` (codex r1 P2 on #4938).
+    expect(voiceEffortFor('claude-opus-4-5')).toBe('low');
+    expect(voiceEffortFor('claude-opus-4-6')).toBe('low');
+    expect(MODELS.anthropicAcceptsEffort('claude-opus-4-5', 'xhigh')).toBe(false);
+    expect(MODELS.anthropicAcceptsEffort('claude-opus-4-6', 'xhigh')).toBe(false);
+    expect(MODELS.anthropicAcceptsEffort('claude-opus-4-6', 'max')).toBe(true);
+    expect(MODELS.anthropicAcceptsEffort('claude-sonnet-5', 'xhigh')).toBe(true);
+    expect(MODELS.anthropicAcceptsEffort('claude-sonnet-4-5', 'low')).toBe(false);
   });
 
   test('a Haiku 4.5 inbound override sends no output_config and stamps effort null', async () => {

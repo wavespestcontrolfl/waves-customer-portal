@@ -213,12 +213,13 @@ function resolveSessionModel({ sandbox } = {}) {
 
 // output_config.effort — GA, no beta header. See the call site for why `low`.
 const VOICE_EFFORT = 'low';
-// Only models on MODELS.ANTHROPIC_EFFORT_CAPABLE_RE accept the field; Haiku 4.5
-// and pre-5 Sonnets 400 on it, so a session pinned to one of them (an inbound or
-// sandbox override, or a benchmark candidate) sends no effort at all and stamps
-// null — otherwise every turn of that call errors before a word is spoken.
+// Haiku 4.5 and pre-5 Sonnets 400 on the field, so a session pinned to one of
+// them (an inbound or sandbox override, or a benchmark candidate) sends no
+// effort at all and stamps null — otherwise every turn of that call errors
+// before a word is spoken. Models that accept `low` (incl. Opus 4.5/4.6, which
+// take only some levels) keep it.
 function voiceEffortFor(model) {
-  return MODELS.ANTHROPIC_EFFORT_CAPABLE_RE.test(String(model || '')) ? VOICE_EFFORT : null;
+  return MODELS.anthropicAcceptsEffort(model, VOICE_EFFORT) ? VOICE_EFFORT : null;
 }
 // How agent text reaches Twilio today: one whole utterance per frame. Stamped
 // into every call's version record so a renderer change is attributable.

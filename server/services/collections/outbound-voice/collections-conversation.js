@@ -870,7 +870,7 @@ class CollectionsConversation {
             system: this._systemBlocks,
             thinking: { type: 'disabled' },
             // Haiku 4.5 / pre-5 Sonnets 400 on effort — omit it for them.
-            ...(MODELS.ANTHROPIC_EFFORT_CAPABLE_RE.test(String(MODEL || '')) ? { output_config: { effort: VOICE_EFFORT } } : {}),
+            ...(MODELS.anthropicAcceptsEffort(MODEL, VOICE_EFFORT) ? { output_config: { effort: VOICE_EFFORT } } : {}),
             // Tools are STATE-KEYED per round: the model never even sees a
             // tool that is invalid in the current state, and _executeTool
             // re-checks membership anyway (defense in depth — the fence is
