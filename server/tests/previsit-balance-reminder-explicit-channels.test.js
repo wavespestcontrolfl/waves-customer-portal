@@ -28,6 +28,8 @@ jest.mock('../services/billing-lane', () => ({
 }));
 jest.mock('../services/invoice-helpers', () => ({
   invoiceAmountDue: jest.fn((inv) => Number(inv.total)),
+  isInvoiceCollectibleStatus: jest.fn((status) => !['paid', 'void'].includes(status)),
+  invoiceWithdrawnFromCustomer: jest.fn(() => false),
 }));
 jest.mock('../services/payer', () => ({
   resolveForInvoice: jest.fn(async () => ({ payerId: null })),
@@ -425,5 +427,53 @@ describe('currentDuesAllowanceCents (retry-time dues allowance)', () => {
     await expect(currentDuesAllowanceCents('cust-1', customersDb({ monthly_rate: '49.00', billing_day: 1 }), now)).resolves.toBe(0);
     await expect(currentDuesAllowanceCents('cust-1', customersDb({ monthly_rate: '49.00', billing_day: 1 }), now)).resolves.toBe(0);
     await expect(currentDuesAllowanceCents('cust-1', customersDb(undefined), now)).resolves.toBe(0);
+  });
+});
+
+describe('quotedBalanceStillOwed (pre-dispatch recheck of the quoted balance)', () => {
+  const { quotedBalanceStillOwed } = require('../services/previsit-balance-reminder');
+  const live = { id: 'inv-9', customer_id: 'cust-1', status: 'sent', total: '96.60', payer_id: null };
+
+  function invoicesDb(rows) {
+    db.mockImplementation((table) => {
+      if (table !== 'invoices') throw new Error(`Unexpected table ${table}`);
+      const q = { whereIn: jest.fn(() => q), then: (resolve, reject) => Promise.resolve(rows).then(resolve, reject) };
+      return q;
+    });
+  }
+  const check = () => quotedBalanceStillOwed({
+    customerId: 'cust-1', quotedInvoices: [{ id: 'inv-9', due: 96.6 }], quotedDuesCents: 0,
+  })();
+
+  test('passes while every quoted invoice still owes exactly the quoted amount', async () => {
+    invoicesDb([live]);
+    await expect(check()).resolves.toEqual({ ok: true });
+  });
+
+  test.each([
+    ['paid', { status: 'paid' }],
+    ['partly paid', { total: '40.00' }],
+    ['payer-billed', { payer_id: 'payer-1' }],
+    ['moved to another customer', { customer_id: 'cust-2' }],
+  ])('holds the leg (retryable) when a quoted invoice was %s', async (_label, patch) => {
+    invoicesDb([{ ...live, ...patch }]);
+    await expect(check()).resolves.toMatchObject({ ok: false, code: 'PREVISIT_QUOTE_CHANGED', retryable: true });
+  });
+
+  test('holds the leg when a quoted invoice is gone or unreadable', async () => {
+    invoicesDb([]);
+    await expect(check()).resolves.toMatchObject({ ok: false, retryable: true });
+    db.mockImplementation(() => { throw new Error('connection reset'); });
+    await expect(check()).resolves.toMatchObject({ ok: false, retryable: true });
+  });
+
+  test('the explicit legs carry the recheck into sendCustomerMessage', async () => {
+    armOneVisit({ notificationPrefs: { billing_channels: ['sms'] } });
+    sendReminderChannels.mockImplementation(async ({ send }) => {
+      await send('sms', { id: 'led-1' });
+      return { complete: true, deliveredNow: ['sms'], results: {} };
+    });
+    await runSweep({ now: new Date('2026-08-14T15:00:00Z') });
+    expect(typeof sendCustomerMessage.mock.calls[0][0].preDispatchCheck).toBe('function');
   });
 });
