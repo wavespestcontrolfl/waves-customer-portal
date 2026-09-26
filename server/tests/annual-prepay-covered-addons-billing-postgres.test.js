@@ -740,6 +740,27 @@ postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
     expect(bills.map((i) => Number(i.total))).toEqual([ADDON]);
   });
 
+  test('handed a void invoice, the covered-visit decision treats it as none and bills the add-ons (pre-push P1)', async () => {
+    // The completion's lookups never pass a void row; the module is driven
+    // directly so its dispatch stays total.
+    const f = await coveredVisit({ invoiceLines: (x) => [baseLine(x), addonLine(x)], invoiceStatus: 'void' });
+    const { reconcileCoveredVisitInvoice } = require('../services/annual-prepay-addon-billing');
+    const svc = await trx('scheduled_services').where({ id: f.serviceId }).first();
+    const [record] = await trx('service_records').insert({ id: randomUUID(), customer_id: f.customerId,
+      scheduled_service_id: f.serviceId, technician_id: f.techId, service_type: svc.service_type, service_date: svc.scheduled_date,
+      status: 'completed' }).returning('*');
+    const outcome = await reconcileCoveredVisitInvoice({
+      svc, record, invoice: await trx('invoices').where({ id: f.invoiceId }).first(), payUrl: null, alreadyPaid: false, invoiceCreated: false,
+      issuedInvoiceCloseout: null, recapReviewOnly: false, visitPerformed: true, terminalCompletionInvoice: null, packetEffects: null,
+      quietBackfill: false, serviceDate: String(svc.scheduled_date instanceof Date ? svc.scheduled_date.toISOString() : svc.scheduled_date).slice(0, 10),
+      portalUrl: 'https://portal.example.invalid', mergeRecordNotesKeys: async () => {},
+    });
+    expect(outcome.hold).toBeNull();
+    expect(outcome.invoice.id).not.toBe(f.invoiceId);
+    expect(Number(outcome.invoice.total)).toBe(ADDON);
+    expect(outcome.extrasCollectible).toBe(true);
+  });
+
   describe('dark (GATE_ANNUAL_PREPAY_ADDON_BILLING off): today\'s behavior', () => {
     beforeEach(() => { delete process.env.GATE_ANNUAL_PREPAY_ADDON_BILLING; });
     afterEach(() => { process.env.GATE_ANNUAL_PREPAY_ADDON_BILLING = 'true'; });

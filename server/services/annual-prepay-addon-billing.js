@@ -553,12 +553,15 @@ class CoveredVisitCloseout {
     // issued-closeout lane; a replacement would contradict the closeout).
     if (this.ctx.issuedInvoiceCloseout) return this.outcome();
     await this.resolveGate();
+    // A void invoice bills nothing: it is the same as none. (The completion's
+    // lookups exclude void rows today; the dispatch stays total regardless.)
     const status = String(this.invoice?.status || '').toLowerCase();
-    if (this.invoice?.id && !['paid', 'prepaid', 'void'].includes(status)) {
+    const hasInvoice = !!this.invoice?.id && status !== 'void';
+    if (hasInvoice && !['paid', 'prepaid'].includes(status)) {
       await this.reconcileOpenInvoice();
-    } else if (this.live && !this.invoice?.id) {
+    } else if (this.live && !hasInvoice) {
       await this.reconcileNoInvoice();
-    } else if (this.live && ['paid', 'prepaid'].includes(status)) {
+    } else if (this.live) {
       await this.reconcileSettledInvoice();
     }
     if (this.live) await this.rederiveOtherCharges();
