@@ -597,12 +597,13 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
       expect(WRITTEN_STATUSES).toContain(s);
       expect(LEGACY_ONLY_STATUSES).not.toContain(s);
     }
-    // Only two files write the status today. A third writer is a new move
-    // and belongs in the doc's "Where" column.
+    // Three files write the status today (slice 6b added the third). A
+    // fourth writer is a new move and belongs in the doc's "Where" column.
     const writerFiles = [...new Set(writes.map((w) => w.file))].sort();
     expect(writerFiles).toEqual([
       'server/routes/admin-invoices.js',
       'server/services/annual-prepay-renewals.js',
+      'server/services/termite-annual-renewal-charge.js',
     ]);
   });
 
@@ -649,6 +650,11 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
       { expr: "'cancelled'", guards: ['where({ id: termId })'] },
       // Move 12: reverse-prepaid un-pay — undecided, non-cancelled only.
       { expr: "'payment_pending'", guards: ['where({ id: locked.annual_prepay_term_id })', "whereNull('renewal_decision')", "whereNotIn('status', ['cancelled', 'canceled'])"] },
+    ]);
+
+    expect(statusWriteSites(read('server/services/termite-annual-renewal-charge.js'))).toEqual([
+      // Move 14: renewal successor minted -> parent marked renewed.
+      { expr: "'renewed'", guards: ['where({ id: parent.id })', "whereNull('renewal_decision')"] },
     ]);
   });
 
@@ -716,7 +722,7 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
     const doc = read(DOC);
     const rows = [...doc.matchAll(/^\| (\d+) \| (.+?) \| (.+?) \| (.+?) \| (.+?) \| (.+?) \|$/gm)]
       .map((m) => ({ n: Number(m[1]), from: m[2], to: m[3], trigger: m[4], where: m[5], guard: m[6] }));
-    expect(rows.map((r) => r.n)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+    expect(rows.map((r) => r.n)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
     const valid = new Set([...WRITTEN_STATUSES, ...LEGACY_ONLY_STATUSES]);
     for (const r of rows) {
       for (const s of r.to.matchAll(/`([a-z_]+)`/g)) expect(valid.has(s[1])).toBe(true);
@@ -738,6 +744,7 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
       11: { from: st(['cancelled']), to: st(['active']), where: 'syncTermForInvoicePayment' },
       12: { from: st(['active', 'renewal_pending', 'payment_pending']), to: st(['payment_pending']), where: 'POST /:id/reverse-prepaid' },
       13: { from: [], fromText: '*any*', to: st(['cancelled']), where: 'DELETE /:id/annual-prepay' },
+      14: { from: st(['active', 'renewal_pending']), to: st(['renewed']), where: 'mintRenewalSuccessor' },
     };
     const states = (cell) => [...cell.matchAll(/`([a-z_]+)`/g)].map((x) => x[1]).sort();
     for (const r of rows) {
@@ -762,6 +769,7 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
       11: 'dispute_suspended_at IS NOT NULL',
       12: "NOT IN ('cancelled','canceled')",
       13: 'none',
+      14: 'renewal_decision IS NULL',
     };
     for (const r of rows) expect(r.guard).toContain(guardFrag[r.n]);
   });

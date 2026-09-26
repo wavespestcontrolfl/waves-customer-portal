@@ -4737,6 +4737,14 @@ async function createTermForAnnualPrepay({
   // stamped after this returns, the first refresh would seed a signature-day
   // coverage visit before the installation ever anchors the term.
   annualPlanVersion = undefined,
+  // Renewal successor marker (slice 6b, termite-annual-renewal-charge.js).
+  // Written WITH the row for the SAME reason as annualPlanVersion above:
+  // coverageAwaitsInstallation() reads `!term.renewed_from_term_id` to tell
+  // a renewal successor apart from a brand-new signed plan awaiting its
+  // installation visit — a renewal never awaits an installation, so this
+  // must be present before the refreshTermSnapshot call below runs its
+  // seeding decision, or a successor's coverage visits would wrongly defer.
+  renewedFromTermId = undefined,
   conn = db,
 } = {}) {
   if (!(await annualPrepayTableExists())) return null;
@@ -4828,6 +4836,9 @@ async function createTermForAnnualPrepay({
     }
     if (termCols.annual_plan_version && annualPlanVersion && !existing.annual_plan_version) {
       updates.annual_plan_version = annualPlanVersion;
+    }
+    if (termCols.renewed_from_term_id && renewedFromTermId && !existing.renewed_from_term_id) {
+      updates.renewed_from_term_id = renewedFromTermId;
     }
     await conn('annual_prepay_terms').where({ id: existing.id }).update(updates);
     // When the coverage window is edited (start/end actually supplied), detach
@@ -4988,6 +4999,9 @@ async function createTermForAnnualPrepay({
   }
   if (termCols.annual_plan_version && annualPlanVersion) {
     insert.annual_plan_version = annualPlanVersion;
+  }
+  if (termCols.renewed_from_term_id && renewedFromTermId) {
+    insert.renewed_from_term_id = renewedFromTermId;
   }
 
   const [term] = await conn('annual_prepay_terms').insert(insert).returning('*');

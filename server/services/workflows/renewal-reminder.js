@@ -48,6 +48,22 @@ class RenewalReminder {
       logger.error(`Annual prepay covered-term sweep failed: ${err.message}`);
     }
 
+    // Termite annual plan: the automatic renewal charge (slice 6b, dark
+    // behind GATE_TERMITE_ANNUAL_PLAN — no-ops end to end while the gate is
+    // off). Mints a renewal successor for every due, witnessed, undecided
+    // termite term, charges the saved consented method at most once, and
+    // voids/retires any successor whose grace period lapsed unpaid.
+    // Independent try/catch, same as every other leg in this workflow.
+    try {
+      const { runTermiteAnnualRenewalSweep } = require('../termite-annual-renewal-charge');
+      const renewalCharge = await runTermiteAnnualRenewalSweep();
+      if (renewalCharge.minted || renewalCharge.charged || renewalCharge.failed || renewalCharge.graceLapsed || renewalCharge.noWitnessBelled) {
+        logger.info(`Termite annual renewal charge: ${renewalCharge.candidatesScanned} scanned, ${renewalCharge.minted} minted, ${renewalCharge.charged} charged, ${renewalCharge.failed} failed, ${renewalCharge.graceLapsed} grace-lapsed, ${renewalCharge.noWitnessBelled} no-witness bells`);
+      }
+    } catch (err) {
+      logger.error(`Termite annual renewal charge sweep failed: ${err.message}`);
+    }
+
     // OWNER RULING (2026-07-13): "renewal" language is reserved for termite
     // bonds — the one service with a real fixed term. WaveGuard and mosquito
     // are no-term recurring services, so their reminder legs are removed

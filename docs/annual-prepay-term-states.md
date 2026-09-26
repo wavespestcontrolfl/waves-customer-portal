@@ -40,9 +40,10 @@ could then re-activate through move 2's `payment_pending`-only guard).
 ## Allowed moves
 
 `R` = `server/services/annual-prepay-renewals.js`, `AI` =
-`server/routes/admin-invoices.js`. Guards are the literal `WHERE` clauses on
-the `UPDATE`; an `UPDATE` whose guard misses is a no-op (race-safe,
-replay-idempotent), never an error.
+`server/routes/admin-invoices.js`, `TR` =
+`server/services/termite-annual-renewal-charge.js`. Guards are the literal
+`WHERE` clauses on the `UPDATE`; an `UPDATE` whose guard misses is a no-op
+(race-safe, replay-idempotent), never an error.
 
 | # | From | To | Trigger | Where | Guard |
 |---|---|---|---|---|---|
@@ -59,10 +60,14 @@ replay-idempotent), never an error.
 | 11 | `cancelled` **(a)** | `active` | Lost-dispute revival: the dispute-cancelled term's invoice is re-paid in dunning. Restores extension credits. | `R` `syncTermForInvoicePayment` | `status = 'cancelled' AND renewal_decision IS NULL AND dispute_suspended_at IS NOT NULL` |
 | 12 | `active` / `renewal_pending` / `payment_pending` | `payment_pending` | Admin reverses an applied credit on a prepaid invoice — the term is "un-paid"; stamps cleared. (The guard's `NOT IN` shape would also admit an undecided legacy `refunded` row — the only move that can touch a legacy row: move 9's upstream select is limited to `payment_pending`/`active`/`renewal_pending`. Code never writes the legacy names, but the 20260614 migration kept them in the CHECK and only normalized values *outside* it, so pre-existing rows may survive; see residue.) | `AI` `POST /:id/reverse-prepaid` (apply-credit reversal) | `renewal_decision IS NULL AND status NOT IN ('cancelled','canceled')` |
 | 13 | *any* | `cancelled` | Admin removes the annual-prepay flag from an invoice (`DELETE /:id/annual-prepay`). Stamps cleared, attached visits detached; billing mode is NOT reset. **Unguarded** — the only path that can move a decided term. Re-marking the invoice later re-derives the status via move 1 **only for an undecided term**; a decided term stays `cancelled` (`renewal_decision` survives the DELETE and move 1 preserves the status when it is set). | `AI` `DELETE /:id/annual-prepay` | none |
+| 14 | `active` / `renewal_pending` | `renewed` | Termite annual plan only (`annual_plan_version IS NOT NULL`), dark behind `GATE_TERMITE_ANNUAL_PLAN`: the daily renewal-charge sweep mints the renewal successor term (`renewed_from_term_id` on the new row) and, in the SAME transaction, marks the PARENT `renewed` — sets `renewal_decision = 'renew'` the instant the successor exists, deliberately not gated on the successor's payment (the parent's own coverage, if any is still live, depends only on its OWN already-paid `prepay_invoice_id` — see `coveredTermsAsOf`'s `decidedCoveredAndPaid` branch — so this never grants or removes coverage). Whether the successor itself is ever paid, and whether it eventually charges the saved method, lapses unpaid (voided after 30 days, its own terminal `cancelled`), or is paid by hand is a wholly separate question the successor's own row answers. | `TR` `mintRenewalSuccessor` | `where({ id: parent.id }) AND renewal_decision IS NULL` |
 
 Everything not in the table is not a move. In particular there is **no**
 `renewed → *`, `switch_plan → *`, or `cancelled(b) → *` (other than move 13),
-and nothing ever writes `canceled` or `refunded`.
+and nothing ever writes `canceled` or `refunded`. Move 14 is the one
+exception to "terminal": it is the ONLY writer that can put a term INTO
+`renewed` outside `recordDecision`, and — like every other move — never
+reads or writes a row already carrying a `renewal_decision`.
 
 ## Read-side groupings
 
