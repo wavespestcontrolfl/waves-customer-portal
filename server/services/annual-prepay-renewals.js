@@ -4996,6 +4996,18 @@ async function resetBillingModeAfterTermCancel(term, conn, { throwOnError = fals
   }
 }
 
+// Whether createTermForAnnualPrepay's result is a paid term that needs the
+// born-paid follow-through (renewal-date sync, pending-window reconcile,
+// annual_prepay billing stamp): ACTIVE — or, on the installation-anchor
+// path only (anchorInstallation), a decided-lapse term (declined before its
+// installation) that is still PAID. Its coverage year is untouched by the
+// decline; isPaidDecidedLapseTerm applies billing's own paid test.
+async function termCountsAsPaidAfterCreate(term, anchorInstallation, conn) {
+  if (!term) return false;
+  if (ACTIVE_STATUSES.includes(term.status)) return true;
+  return !!anchorInstallation && isPaidDecidedLapseTerm(term, conn);
+}
+
 async function createTermForAnnualPrepay({
   customerId,
   sourceEstimateId = null,
@@ -5017,11 +5029,10 @@ async function createTermForAnnualPrepay({
   annualPlanVersion = undefined,
   // Codex pre-push P1: set only by anchorTermToInstallation's window-move
   // call — lets a decided-lapse (declined-before-install) term's paid
-  // coverage year seed/attach/stamp through THIS refresh the same as an
-  // active term's, and reconcile/re-stamp exactly like a normal anchored
-  // term does. Forwarded to refreshTermSnapshot below; every other caller
-  // leaves it false (byte-identical to before this option existed).
-  anchorInstallation = false,
+  // coverage year reconcile/re-stamp exactly like a normal anchored term
+  // (termCountsAsPaidAfterCreate). Every other caller leaves it unset
+  // (byte-identical to before this option existed).
+  anchorInstallation,
   conn = db,
 } = {}) {
   if (!(await annualPrepayTableExists())) return null;
@@ -5224,17 +5235,7 @@ async function createTermForAnnualPrepay({
     }
     await syncInvoiceTerm(prepayInvoiceId, existing.id, conn);
     const refreshed = await refreshTermSnapshot(existing.id, conn);
-    // Codex pre-push P1: a decided-lapse term (declined before its
-    // installation, anchorInstallation:true) that is still PAID gets the
-    // SAME reconcile/stamp treatment below as an ACTIVE one — its coverage
-    // year is untouched by the decline. isPaidDecidedLapseTerm short-circuits
-    // on status alone for every other caller (anchorInstallation defaults
-    // false), so this adds a path rather than widening the existing one.
-    const coverageEligible = refreshed && (
-      ACTIVE_STATUSES.includes(refreshed.status)
-      || (anchorInstallation && await isPaidDecidedLapseTerm(refreshed, conn))
-    );
-    if (coverageEligible) {
+    if (await termCountsAsPaidAfterCreate(refreshed, anchorInstallation, conn)) {
       await syncCustomerRenewalDate(customerId, dateOnly(refreshed.term_end), conn);
       // A term that is ACTIVE (or a paid decided-lapse) here was born (or
       // re-anchored) already paid — the Customer 360 flow records the
@@ -5290,14 +5291,9 @@ async function createTermForAnnualPrepay({
 
   await syncInvoiceTerm(prepayInvoiceId, term.id, conn);
   const refreshed = await refreshTermSnapshot(term.id, conn);
-  // A brand-new insert never carries a renewal_decision, so
-  // isPaidDecidedLapseTerm is inert here (kept only for symmetry with the
-  // "existing" branch above) — this stays ACTIVE-only in practice.
-  const coverageEligible = refreshed && (
-    ACTIVE_STATUSES.includes(refreshed.status)
-    || (anchorInstallation && await isPaidDecidedLapseTerm(refreshed, conn))
-  );
-  if (coverageEligible) {
+  // A brand-new insert never carries a renewal_decision, so this stays
+  // ACTIVE-only in practice (same rule as the "existing" branch above).
+  if (await termCountsAsPaidAfterCreate(refreshed, anchorInstallation, conn)) {
     await syncCustomerRenewalDate(customerId, normalizedEnd, conn);
     // Born already paid (Customer 360 records the payment before creating the
     // term), so the payment sync's reconcile never fires for this term — run
@@ -6173,86 +6169,13 @@ async function raisePortalDeclineRetrievalTask(termId) {
   try {
     term = await db('annual_prepay_terms').where({ id: termId })
       .first('id', 'customer_id', 'status', 'renewal_decision', 'term_end', 'annual_plan_version', 'renewed_from_term_id', 'installation_anchored_at');
-    if (!term) return { raised: false, reason: 'not_found' };
-    if (term.status !== 'cancelled' || term.renewal_decision !== 'cancel') return { raised: false, reason: 'not_declined' };
-    if (coverageAwaitsInstallation(term)) return { raised: false, reason: 'not_installed' };
-    const termIdText = String(term.id);
-    const portalDecline = await db('activity_log')
-      .where({ action: CUSTOMER_DECLINE_ACTIVITY_ACTION })
-      .whereRaw("metadata->>'term_id' = ?", [termIdText])
-      .orderBy('created_at', 'asc')
-      .first('id', 'created_at', 'metadata');
-    if (!portalDecline) return { raised: false, reason: 'not_portal_decline' };
-    const settled = await db('activity_log')
-      .where({ action: DECLINE_RETRIEVAL_ACTIVITY_ACTION })
-      .whereRaw("metadata->>'term_id' = ?", [termIdText])
-      .first('id');
-    if (settled) return { raised: false, reason: 'already_settled' };
-    if (!(await isPaidDecidedLapseTerm(term, db))) return { raised: false, reason: 'not_paid' };
-
+    const { reason, portalDecline } = await declineRetrievalBlocker(term);
+    if (reason) return { raised: false, reason };
     const termEnd = dateOnly(term.term_end);
-    let outcome;
-    // Another live termite annual term (a second property) may still need
-    // stations on this account — an automatic "pull the stations" task
-    // could not tell which ones, so staff confirm by hand instead.
-    const today = etDateString();
-    const other = await db('annual_prepay_terms')
-      .where({ customer_id: term.customer_id })
-      .whereNot({ id: term.id })
-      .whereNotNull('annual_plan_version')
-      .where(function stillCovering() {
-        this.whereIn('status', [...ACTIVE_STATUSES, PAYMENT_PENDING_STATUS, ...DECIDED_COVERED_STATUSES])
-          .orWhere(function decidedLapse() { this.where('status', 'cancelled').andWhere('renewal_decision', 'cancel'); });
-      })
-      .where((current) => whereTermCurrentOrAwaitingInstallation(current, today))
-      .first('id');
-    if (other) {
-      outcome = { raised: false, reason: 'other_termite_plan' };
-    } else {
-      const { raiseTermiteRetrievalTask, termRetrievalDedupeKey } = require('./cancellation-processor');
-      // Codex #4940 r6 P1: the decline has no service request, so it passes
-      // its real event time — without it the helper ranks it as the OLDEST
-      // event and yields to any earlier request-keyed retrieval row (even
-      // one staff already acted on), raising nothing.
-      const declineMeta = typeof portalDecline.metadata === 'string'
-        ? (() => { try { return JSON.parse(portalDecline.metadata); } catch { return {}; } })()
-        : (portalDecline.metadata || {});
-      const eventAt = declineMeta.decided_at || portalDecline.created_at || null;
-      const raised = await raiseTermiteRetrievalTask(term.customer_id, null, {
-        retrieveAfter: termEnd, termId: term.id, episodeKey: DECLINE_RETRIEVAL_EPISODE, eventAt,
-      });
-      if (raised?.supersededByNewer) {
-        // A NEWER retrieval instruction stands on the account — nothing was
-        // created or reopened for THIS decline. Not settled: no marker, the
-        // sweep re-checks, and staff are told plainly.
-        outcome = { raised: false, reason: 'superseded_by_newer' };
-      } else if (raised?.raised) {
-        // Settle only on evidence: this decline's own task row must exist.
-        const taskRow = await db('notifications')
-          .where({ recipient_type: 'admin' })
-          .whereRaw("metadata->>'dedupeKey' = ?", [termRetrievalDedupeKey(term.id, DECLINE_RETRIEVAL_EPISODE, termEnd)])
-          .first('id');
-        outcome = taskRow ? { raised: true } : { raised: false, reason: 'not_raised' };
-      } else {
-        outcome = { raised: false, reason: raised?.reason || 'not_raised' };
-      }
-    }
-    const outcomeKey = outcome.raised ? 'raised' : outcome.reason;
-    if (DECLINE_RETRIEVAL_SETTLED.has(outcomeKey)) {
-      await db('activity_log').insert({
-        customer_id: term.customer_id,
-        action: DECLINE_RETRIEVAL_ACTIVITY_ACTION,
-        description: `Station retrieval after the online renewal decline: ${outcomeKey} (paid coverage through ${termEnd}).`,
-        metadata: {
-          term_id: term.id, term_end: termEnd, outcome: outcomeKey, source: 'customer_portal',
-        },
-      }).catch((markerErr) => {
-        // The task itself is idempotent on its key — a lost marker costs
-        // one deduped re-raise on the next sweep, never a second task.
-        logger.warn(`[annual-prepay] decline retrieval marker not written for term ${term.id}: ${markerErr.message}`);
-      });
-    }
-    return { ...outcome, termEnd, customerId: term.customer_id };
+    const retrieval = { ...(await raiseTaskForPortalDecline(term, portalDecline, termEnd)), termEnd, customerId: term.customer_id };
+    const outcomeKey = retrieval.raised ? 'raised' : retrieval.reason;
+    if (DECLINE_RETRIEVAL_SETTLED.has(outcomeKey)) await writeDeclineRetrievalMarker(term.id, retrieval, outcomeKey);
+    return retrieval;
   } catch (err) {
     logger.error(`[annual-prepay] renewal-decline retrieval task failed for term ${termId}: ${err.message}`);
     return {
@@ -6261,6 +6184,75 @@ async function raisePortalDeclineRetrievalTask(termId) {
       ...(term ? { termEnd: dateOnly(term.term_end), customerId: term.customer_id } : {}),
     };
   }
+}
+
+// Why this term's portal-decline retrieval task can't be raised now —
+// { reason } — or, when it can, { portalDecline } (the decline's activity
+// row, which dates it). A term must be a paid, installed, PORTAL-declined
+// decided lapse whose task is not yet settled.
+async function declineRetrievalBlocker(term) {
+  if (!term) return { reason: 'not_found' };
+  if (term.status !== 'cancelled' || term.renewal_decision !== 'cancel') return { reason: 'not_declined' };
+  if (coverageAwaitsInstallation(term)) return { reason: 'not_installed' };
+  const termIdText = String(term.id);
+  const portalDecline = await db('activity_log')
+    .where({ action: CUSTOMER_DECLINE_ACTIVITY_ACTION })
+    .whereRaw("metadata->>'term_id' = ?", [termIdText])
+    .orderBy('created_at', 'asc')
+    .first('id', 'created_at', 'metadata');
+  if (!portalDecline) return { reason: 'not_portal_decline' };
+  const settled = await db('activity_log')
+    .where({ action: DECLINE_RETRIEVAL_ACTIVITY_ACTION })
+    .whereRaw("metadata->>'term_id' = ?", [termIdText])
+    .first('id');
+  if (settled) return { reason: 'already_settled' };
+  if (!(await isPaidDecidedLapseTerm(term, db))) return { reason: 'not_paid' };
+  return { portalDecline };
+}
+
+// Raise the decline's dated task and classify what actually happened:
+// { raised: true } only once THIS decline's own task row exists.
+async function raiseTaskForPortalDecline(term, portalDecline, termEnd) {
+  // Another live termite annual term (a second property) may still need
+  // stations on this account — an automatic "pull the stations" task
+  // could not tell which ones, so staff confirm by hand instead.
+  const today = etDateString();
+  const other = await db('annual_prepay_terms')
+    .where({ customer_id: term.customer_id })
+    .whereNot({ id: term.id })
+    .whereNotNull('annual_plan_version')
+    .where(function stillCovering() {
+      this.whereIn('status', [...ACTIVE_STATUSES, PAYMENT_PENDING_STATUS, ...DECIDED_COVERED_STATUSES])
+        .orWhere(function decidedLapse() { this.where('status', 'cancelled').andWhere('renewal_decision', 'cancel'); });
+    })
+    .where((current) => whereTermCurrentOrAwaitingInstallation(current, today))
+    .first('id');
+  if (other) return { raised: false, reason: 'other_termite_plan' };
+  const { raiseTermiteRetrievalTask, termRetrievalDedupeKey } = require('./cancellation-processor');
+  // Codex #4940 r6 P1: the decline has no service request, so it passes its
+  // real event time — without it the helper ranks it as the OLDEST event
+  // and yields to any earlier request-keyed retrieval row (even one staff
+  // already acted on), raising nothing.
+  const declineMeta = parseActivityMetadata(portalDecline.metadata);
+  const raised = await raiseTermiteRetrievalTask(term.customer_id, null, {
+    retrieveAfter: termEnd, termId: term.id, episodeKey: DECLINE_RETRIEVAL_EPISODE, eventAt: declineMeta.decided_at || portalDecline.created_at,
+  });
+  // A NEWER retrieval instruction stands on the account — nothing was
+  // created or reopened for THIS decline, so it is not raised (the
+  // follow-up bell asks staff to confirm the newer one covers it).
+  if (raised?.supersededByNewer) return { raised: false, reason: 'superseded_by_newer' };
+  if (!raised?.raised) return { raised: false, reason: raised?.reason || 'not_raised' };
+  // Settle only on evidence: this decline's own task row must exist.
+  const taskRow = await db('notifications')
+    .where({ recipient_type: 'admin' })
+    .whereRaw("metadata->>'dedupeKey' = ?", [termRetrievalDedupeKey(term.id, DECLINE_RETRIEVAL_EPISODE, termEnd)])
+    .first('id');
+  return taskRow ? { raised: true } : { raised: false, reason: 'not_raised' };
+}
+
+function parseActivityMetadata(metadata) {
+  if (typeof metadata !== 'string') return metadata || {};
+  try { return JSON.parse(metadata); } catch { return {}; }
 }
 
 // Decline-time wrapper: the decline's own bell reports the outcome.
@@ -6584,7 +6576,7 @@ async function declineTermiteAnnualRenewal({ customerId, termId = null, today = 
   // reports what happened to it.
   const retrieval = result.alreadyDeclined ? null : await raiseDeclineRetrievalTask(result, customerId, conn);
   await ringTermiteAnnualDeclineBell(result, customerId, conn, retrieval);
-  const { supersededRenew, ...publicResult } = result;
+  const { supersededRenew: _supersededRenew, ...publicResult } = result;
   // An internal caller that supplied its own transaction must raise the
   // retrieval task itself once it commits — tell it so.
   if (retrieval?.reason === 'caller_transaction') return { ...publicResult, retrieval };

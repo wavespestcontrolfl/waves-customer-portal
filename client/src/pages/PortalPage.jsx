@@ -17,6 +17,7 @@ import NotificationBell from '../components/NotificationBell';
 import { showCustomerAlert, showCustomerConfirm } from '../components/brand/CustomerDialogHost';
 import { cardBrandLabel } from '../lib/cardBrand';
 import AutopayCard from '../components/billing/AutopayCard';
+import { annualPrepayRenewalLine } from '../lib/annualPrepayRenewal';
 import SaveCardConsent from '../components/billing/SaveCardConsent';
 import Icon from '../components/Icon';
 import { StationMapCard, STATION_CARD_PROGRAM_META } from '../components/StationMapCard';
@@ -368,6 +369,11 @@ function daysUntilEtDate(d) {
 function fmtDate(d, opts) {
   const dt = parseDate(d);
   return isNaN(dt) ? '—' : dt.toLocaleDateString('en-US', { timeZone: 'America/New_York', ...opts });
+}
+
+// "September 25, 2027" — the long date the Billing copy quotes.
+function fmtLongDate(d) {
+  return fmtDate(d, { month: 'long', day: 'numeric', year: 'numeric' });
 }
 
 function formatPortalMoney(n, digits = 2) {
@@ -6361,17 +6367,6 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
   // Annual prepay is term-covered — no monthly charge runs; the saved method
   // is used at renewal.
   const annualPrepayBilling = autopay?.billing_mode === 'annual_prepay';
-  // Codex r2 P1: billing_mode stays 'annual_prepay' after the customer
-  // declines renewal — /me's annualPrepay.renewalDeclined says the plan
-  // won't renew, so the "used at renewal" copy must not show. A term still
-  // awaiting its station installation has no real end date to quote.
-  const billingAnnualPrepay = customer?.annualPrepay || null;
-  const annualPrepayRenewalDeclined = annualPrepayBilling && billingAnnualPrepay?.renewalDeclined === true;
-  const annualPrepayNonRenewalCopy = billingAnnualPrepay?.awaitsInstallation === true
-    ? 'Your plan won’t renew; coverage runs 12 months from your station installation.'
-    : billingAnnualPrepay?.termEnd
-      ? `Your plan won’t renew; coverage continues through ${fmtDate(billingAnnualPrepay.termEnd, { month: 'long', day: 'numeric', year: 'numeric' })}.`
-      : 'Your plan won’t renew; coverage continues through the end of your current term.';
   // Explicit per-visit lanes invoice each completed service — the monthly
   // cron skips them, so monthly projection copy is wrong here too (Codex
   // r6). NULL modes the SERVER resolved non-monthly (non_monthly_billing)
@@ -6501,9 +6496,9 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
         : perVisitBilling
           ? 'We send an invoice after each completed service visit — your saved payment method makes paying it quick.'
           : annualPrepayBilling
-          ? (annualPrepayRenewalDeclined
-            ? annualPrepayNonRenewalCopy
-            : 'Your plan is prepaid for the year. Your saved payment method will be used at renewal.')
+          // Codex r2 P1: billing_mode stays 'annual_prepay' after a portal
+          // decline — /me's annualPrepay says the plan won't renew.
+          ? annualPrepayRenewalLine(customer, fmtLongDate, 'Your plan is prepaid for the year. Your saved payment method will be used at renewal.')
           : autopayMonthlyUnpriced
             ? 'Your monthly rate is being finalized, so no charge is scheduled yet.'
             : daysUntilDue === 0
@@ -7117,7 +7112,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
         <AutopayCard
           key={autopayRefreshKey}
           embedded
-          annualPrepay={customer?.annualPrepay || null}
+          customer={customer}
           onStateChange={setAutopay}
           openRequest={autopayOpenRequest}
           onOpenRequestHandled={() => setAutopayOpenRequest(null)}
@@ -11834,40 +11829,23 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
             </div>
           </section>
 
-          {termiteAnnualPlanStatus === 'error' && (
-            <section role="alert" data-glass="card" style={{ ...card, padding: 20 }}>
-              <div style={sectionTitle}><Icon name="shield" size={14} strokeWidth={2} />Termite Annual Plan</div>
-              <div style={{ marginTop: 10, fontSize: 14, color: muted, lineHeight: 1.45 }}>
-                Your termite annual plan couldn&rsquo;t be loaded. Your coverage is not affected.
-              </div>
-              <button
-                type="button"
-                data-glass-accent=""
-                onClick={loadTermiteAnnualPlan}
-                style={{ ...secondaryButton, marginTop: 14, minHeight: 44 }}
-              >
-                Retry
-              </button>
-            </section>
-          )}
-          {termiteAnnualPlans.map((term) => (
-            <TermiteAnnualRenewalCard
-              key={term.id}
-              term={term}
-              card={card}
-              sectionTitle={sectionTitle}
-              primaryButton={primaryButton}
-              secondaryButton={secondaryButton}
-              muted={muted}
-              onDeclined={(update) => {
-                setTermiteAnnualPlans((prev) => prev.map((t) => (t.id === term.id ? { ...t, ...update } : t)));
-                // Codex r2 P1: /me's annualPrepay.renewalDeclined drives the
-                // Billing tab's renewal copy — refresh it so Billing stops
-                // promising a renewal charge right away. Best-effort.
-                if (typeof refreshCustomer === 'function') Promise.resolve(refreshCustomer()).catch(() => {});
-              }}
-            />
-          ))}
+          <TermiteAnnualPlanSection
+            status={termiteAnnualPlanStatus}
+            plans={termiteAnnualPlans}
+            onRetry={loadTermiteAnnualPlan}
+            onDeclined={(termId, update) => {
+              setTermiteAnnualPlans((prev) => prev.map((t) => (t.id === termId ? { ...t, ...update } : t)));
+              // Codex r2 P1: /me's annualPrepay.renewalDeclined drives the
+              // Billing tab's renewal copy — refresh it so Billing stops
+              // promising a renewal charge right away. Best-effort.
+              if (typeof refreshCustomer === 'function') Promise.resolve(refreshCustomer()).catch(() => {});
+            }}
+            card={card}
+            sectionTitle={sectionTitle}
+            primaryButton={primaryButton}
+            secondaryButton={secondaryButton}
+            muted={muted}
+          />
 
           {tier && tierIdx >= 2 && (
             <section data-glass="card" style={{ ...card, padding: 20 }}>
@@ -11921,6 +11899,46 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer, cur
   );
 }
 
+// The My Plan tab's termite annual plan section (slice 6a): an explicit
+// load-failure state with Retry (never silently hidden — codex round-1 P1),
+// then one renewal card per applicable term.
+function TermiteAnnualPlanSection({
+  status, plans, onRetry, onDeclined, card, sectionTitle, primaryButton, secondaryButton, muted,
+}) {
+  return (
+    <>
+      {status === 'error' && (
+        <section role="alert" data-glass="card" style={{ ...card, padding: 20 }}>
+          <div style={sectionTitle}><Icon name="shield" size={14} strokeWidth={2} />Termite Annual Plan</div>
+          <div style={{ marginTop: 10, fontSize: 14, color: muted, lineHeight: 1.45 }}>
+            Your termite annual plan couldn&rsquo;t be loaded. Your coverage is not affected.
+          </div>
+          <button
+            type="button"
+            data-glass-accent=""
+            onClick={onRetry}
+            style={{ ...secondaryButton, marginTop: 14, minHeight: 44 }}
+          >
+            Retry
+          </button>
+        </section>
+      )}
+      {plans.map((term) => (
+        <TermiteAnnualRenewalCard
+          key={term.id}
+          term={term}
+          card={card}
+          sectionTitle={sectionTitle}
+          primaryButton={primaryButton}
+          secondaryButton={secondaryButton}
+          muted={muted}
+          onDeclined={(update) => onDeclined(term.id, update)}
+        />
+      ))}
+    </>
+  );
+}
+
 // Termite annual plan renewal card (My Plan tab, slice 6a). Dark behind
 // GATE_TERMITE_ANNUAL_PLAN + GATE_CANCEL_FLOW_V2 (server resolves the gate;
 // one of these renders per applicable term GET /property/termite-annual-plan
@@ -11940,7 +11958,7 @@ function TermiteAnnualRenewalCard({
   const [error, setError] = useState('');
   if (!term) return null;
 
-  const termEndLabel = term.termEnd ? fmtDate(term.termEnd, { month: 'long', day: 'numeric', year: 'numeric' }) : 'your term end date';
+  const termEndLabel = term.termEnd ? fmtLongDate(term.termEnd) : 'your term end date';
   const feeLabel = term.prepayAmount != null ? formatPortalMoney(term.prepayAmount) : null;
   // Which property this plan covers (pre-push audit P1: a multi-property
   // account's cards were otherwise identical). Absent label = single card.

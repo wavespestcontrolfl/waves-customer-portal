@@ -93,8 +93,13 @@ function termRetrievalDedupeKey(termId, episodeKey, retrieveAfter) {
 // yield and raise nothing. With eventAt it is placed by that time instead,
 // and its row carries metadata.eventAt so later raisers place it too. Unset
 // (every other caller), behavior is unchanged.
+// Epoch millis of a timestamp-ish value; 0 when absent or unparseable.
+function epochMs(value) {
+  return value ? (new Date(value).getTime() || 0) : 0;
+}
+
 async function raiseTermiteRetrievalTask(customerId, requestId = null, {
-  retrieveAfter = null, termId = null, episodeKey = null, eventAt = null,
+  retrieveAfter = null, termId = null, episodeKey = null, eventAt,
 } = {}) {
   const { rented, flaggedRental } = await rentedTermiteStationState(customerId);
   if (!rented.length && !flaggedRental) return { raised: false, reason: 'no_rented_stations' };
@@ -119,7 +124,10 @@ async function raiseTermiteRetrievalTask(customerId, requestId = null, {
   const dedupeKey = termKeyed
     ? termRetrievalDedupeKey(termId, episodeKey, retrieveAfter)
     : `termite_station_retrieval:${customerId}:${requestId || 'no-request'}`;
-  const eventTime = !requestId && eventAt ? (new Date(eventAt).getTime() || 0) : 0;
+  const eventTime = requestId ? 0 : epochMs(eventAt);
+  // A request-less raise dated by eventAt stamps its row so later raisers
+  // place it in the chronology too.
+  const eventMeta = eventTime ? { eventAt: new Date(eventTime).toISOString() } : {};
   let raised = null;
   // Staff hold at most ONE open retrieval instruction per account. Before
   // this raise, every earlier UNREAD retrieval row for the customer is
@@ -181,22 +189,20 @@ async function raiseTermiteRetrievalTask(customerId, requestId = null, {
       const openedAt = new Map();
       if (requestIds.length) {
         const rows = await trx('service_requests').whereIn('id', requestIds).select('id', 'created_at');
-        for (const r of rows || []) openedAt.set(String(r.id), new Date(r.created_at).getTime() || 0);
+        for (const r of rows || []) openedAt.set(String(r.id), epochMs(r.created_at));
       }
       const ownOpenedAt = requestId ? (openedAt.get(String(requestId)) || 0) : eventTime;
       // A row's place in the chronology: its request's open time, or — a
       // request-less row stamped with eventAt — that event time. Any other
-      // request-less row (legacy, portal without eventAt) counts as oldest.
-      const rowOpenedAt = (meta) => {
+      // request-less row (legacy, portal without eventAt) counts as oldest
+      // (no place: never newer).
+      const rowPlace = ({ meta }) => {
         const rid = rowRequestId(meta);
-        if (rid) return openedAt.get(rid) || 0;
-        return meta.eventAt ? (new Date(meta.eventAt).getTime() || 0) : null;
+        if (rid) return { at: openedAt.get(rid) || 0, label: rid };
+        return meta.eventAt ? { at: epochMs(meta.eventAt), label: `event:${meta.eventAt}` } : null;
       };
-      const newer = others.find(({ meta }) => {
-        const at = rowOpenedAt(meta);
-        return at != null && at > ownOpenedAt;
-      });
-      if (newer) { yieldedTo = rowRequestId(newer.meta) || `event:${newer.meta.eventAt}`; return; }
+      const newer = others.map(rowPlace).find((place) => place && place.at > ownOpenedAt);
+      if (newer) { yieldedTo = newer.label; return; }
       // The body's supersession note is derived from the account's whole
       // task HISTORY, not from what this call retired, so a routine retry
       // of the same event renders the identical body (refreshOnDedupe
@@ -257,7 +263,7 @@ async function raiseTermiteRetrievalTask(customerId, requestId = null, {
         metadata: {
           kind: 'termite_station_retrieval', customerId, stationCount: count, flaggedRental,
           ...(requestId ? { requestId } : {}),
-          ...(eventTime ? { eventAt: new Date(eventTime).toISOString() } : {}),
+          ...eventMeta,
           ...(termKeyed ? { termId, churnEpisode: episodeKey } : {}),
           ...(retrieveAfter ? { retrieveAfter } : {}),
         },
