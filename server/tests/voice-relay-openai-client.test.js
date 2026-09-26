@@ -233,6 +233,17 @@ describe('mapResponseToMessage — Responses response -> Anthropic Message shape
     expect(msg.stop_reason).toBe('max_tokens');
   });
 
+  test('an unfinished function_call (token exhaustion mid-arguments) rejects instead of running as a tool', () => {
+    expect(() => mapResponseToMessage({
+      status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' },
+      output: [{ type: 'function_call', status: 'incomplete', call_id: 'c1', name: 'capture_lead', arguments: '' }],
+    }, 'gpt-6-sol')).toThrow(/did not complete \(incomplete\)/);
+    expect(() => mapResponseToMessage({
+      status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' },
+      output: [{ type: 'function_call', call_id: 'c1', name: 'capture_lead', arguments: '' }],
+    }, 'gpt-6-sol')).toThrow(/incomplete response with no completion status/);
+  });
+
   test('a max_output_tokens response with only reasoning (no text, no tool call) rejects', () => {
     expect(() => mapResponseToMessage({
       status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' },

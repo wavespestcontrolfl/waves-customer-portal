@@ -190,6 +190,14 @@ function mapResponseToMessage(response, requestedModel) {
         else if (part.type === 'refusal' && typeof part.refusal === 'string') content.push({ type: 'text', text: part.refusal });
       }
     } else if (item.type === 'function_call') {
+      // A call cut off mid-arguments (token exhaustion) must never run as a
+      // tool — an empty/partial argument string would default to {} below.
+      if (item.status && item.status !== 'completed') {
+        throw new Error(`OpenAI function_call "${item.name || item.call_id}" did not complete (${item.status}).`);
+      }
+      if (response.status === 'incomplete' && !item.status) {
+        throw new Error(`OpenAI function_call "${item.name || item.call_id}" arrived in an incomplete response with no completion status.`);
+      }
       hasFunctionCall = true;
       let input;
       try {
