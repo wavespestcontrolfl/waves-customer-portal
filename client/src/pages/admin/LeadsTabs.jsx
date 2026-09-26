@@ -34,6 +34,7 @@ import {
   UiSurface,
 } from "../../components/ui";
 import { leadAddressUnverifiedNotice } from "../../lib/leadAddressUnverified";
+import ConsultationStatsPanel from "./ConsultationStatsPanel";
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
 const CONTACT_EVIDENCE_LABELS = new Map([
@@ -4006,6 +4007,10 @@ export function LeadsSection({ newLeadRequest = 0 }) {
             </TBody>
           </Table>{" "}
         </Card>{" "}
+        {/* Consultations (Waves Assessment outcomes) — own fetch, own
+            loading/error/empty states, so a failure here never breaks the
+            rest of this tab. See ConsultationStatsPanel.jsx. */}
+        <ConsultationStatsPanel />
       </>
     );
   };
