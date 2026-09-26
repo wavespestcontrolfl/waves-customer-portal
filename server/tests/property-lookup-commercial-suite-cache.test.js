@@ -40,6 +40,7 @@ function plazaSuiteRecord(overrides = {}) {
     formattedAddress: '4400 Test Commons Pkwy E #102, Bradenton, FL 00000',
     propertyType: 'Commercial',
     squareFootage: 46031,
+    _parcel: { landUseDescription: 'Community Shopping Centers (1555)' },
     unitCount: 1,
     _source: 'county',
     _fieldEvidence: {

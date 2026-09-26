@@ -122,7 +122,7 @@ describe('classifyLane — commercial-suite-size review reasons', () => {
     expect(out.reasons.some((r) => /suite size not found.*defaulted to 1,800 sq ft.*confirm on site/.test(r))).toBe(true);
   });
 
-  test('commercial_listing does not add the forced review reason (may still be green-eligible)', () => {
+  test('commercial_listing parks yellow too: the size rests on a model-reported quote', () => {
     const propertyFacts = {
       home: { value: 1400, source: SQFT_SOURCES.COMMERCIAL_LISTING, confidence: 'high', rejected: [] },
       commercialSuiteSize: { value: 1400, source: SQFT_SOURCES.COMMERCIAL_LISTING, confidence: 'high', businessName: 'Test Taco Shop' },
@@ -130,6 +130,7 @@ describe('classifyLane — commercial-suite-size review reasons', () => {
     const out = classifyLane({
       intent: baseIntent(), propertyFacts, engineResult: { lineItems: [commercialPestLine(1400)] }, totals, comps: null, calibration: [],
     });
-    expect(out.reasons.some((r) => /suite size/.test(r))).toBe(false);
+    expect(out.lane).toBe(LANES.YELLOW);
+    expect(out.reasons.some((r) => /suite size 1,400 sq ft from a web listing.*confirm on site/.test(r))).toBe(true);
   });
 });

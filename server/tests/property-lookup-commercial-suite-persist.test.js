@@ -41,6 +41,7 @@ beforeEach(() => {
     formattedAddress: ADDRESS,
     propertyType: 'Commercial',
     squareFootage: 46031,
+    _parcel: { landUseDescription: 'Community Shopping Centers (1555)' },
     unitCount: 1,
     stories: 1,
     _source: 'county',
@@ -83,4 +84,16 @@ test('a persisting run (default) stamps the SAME suite size onto the cached prop
   // real implementation) carries the stamp — a cache hit of this address
   // can reuse it with zero network calls.
   expect(savedResult.propertyRecord._commercialSuiteSize).toEqual(expect.objectContaining({ value: 1400, source: 'license_seats' }));
+});
+
+test('a type-default guess is NOT pinned to the cache row, so a later lookup can upgrade it', async () => {
+  const { resolveCommercialSuiteSize } = require('../services/commercial-suite-size');
+  resolveCommercialSuiteSize.mockResolvedValueOnce({
+    value: 1800, source: 'suite_type_default', confidence: 'low', businessName: null, evidence: [],
+  });
+  const result = await performPropertyLookup(ADDRESS, { prioritizeAccuracy: true });
+  expect(result.enriched.suiteSize).toEqual(expect.objectContaining({ value: 1800, source: 'suite_type_default' }));
+  expect(saveLookup).toHaveBeenCalledTimes(1);
+  const [, savedResult] = saveLookup.mock.calls[0];
+  expect(savedResult.propertyRecord._commercialSuiteSize).toBeUndefined();
 });

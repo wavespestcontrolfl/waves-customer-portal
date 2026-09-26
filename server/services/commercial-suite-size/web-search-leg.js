@@ -129,6 +129,9 @@ function acceptWebSearchResult(parsed, { buildingSqft, unit } = {}) {
     && suiteSqft <= MAX_ACCEPTABLE_SQFT
     && suiteRe != null
     && suiteRe.test(quote)
+    // The quote is model-reported; a source URL at least ties it to a page
+    // the operator can open from the review reason.
+    && url != null
     && (buildingCap == null || suiteSqft <= buildingCap);
 
   if (!usable) {

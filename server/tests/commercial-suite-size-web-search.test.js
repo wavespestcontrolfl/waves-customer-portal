@@ -49,7 +49,7 @@ describe('acceptWebSearchResult — acceptance rules', () => {
     const result = acceptWebSearchResult({
       businessName: 'Test Taco Shop',
       suiteSqft: 1400,
-      suiteSqftQuote: 'The shopping plaza is a 46,000 sq ft retail center with retail space available.',
+      suiteSqftQuote: 'The shopping plaza is a 46,000 sq ft retail center with retail space available.', suiteSqftUrl: 'https://www.loopnet.com/example',
     }, { buildingSqft: null }); // no unit passed
     // businessName still comes through — discovering the tenant is useful
     // even when the size figure is rejected.
@@ -60,7 +60,7 @@ describe('acceptWebSearchResult — acceptance rules', () => {
     const result = acceptWebSearchResult({
       businessName: 'Test Taco Shop',
       suiteSqft: 1400,
-      suiteSqftQuote: 'Suite 104 leases at 1,400 sq ft.',
+      suiteSqftQuote: 'Suite 104 leases at 1,400 sq ft.', suiteSqftUrl: 'https://www.loopnet.com/example',
     }, { buildingSqft: 46031, unit: '102' });
     expect(result.value).toBeNull();
   });
@@ -68,7 +68,7 @@ describe('acceptWebSearchResult — acceptance rules', () => {
   test('a bare "space" mention with no bound unit number is not accepted (the fixed overquote class)', () => {
     const result = acceptWebSearchResult({
       suiteSqft: 40000,
-      suiteSqftQuote: '40,000 sq ft of retail space available in this shopping plaza.',
+      suiteSqftQuote: '40,000 sq ft of retail space available in this shopping plaza.', suiteSqftUrl: 'https://www.loopnet.com/example',
     }, { buildingSqft: 46031, unit: '102' });
     expect(result).toBeNull();
   });
@@ -77,17 +77,17 @@ describe('acceptWebSearchResult — acceptance rules', () => {
     const result = acceptWebSearchResult({
       businessName: 'Test Plaza LLC',
       suiteSqft: 40000,
-      suiteSqftQuote: 'Suite 102 spans 40,000 sq ft.',
+      suiteSqftQuote: 'Suite 102 spans 40,000 sq ft.', suiteSqftUrl: 'https://www.loopnet.com/example',
     }, { buildingSqft: 46031, unit: '102' });
     expect(result.value).toBeNull();
   });
 
   test('rejects an out-of-range suite figure (too small / too large), returning null with nothing else to report', () => {
     expect(acceptWebSearchResult({
-      suiteSqft: 50, suiteSqftQuote: 'Suite 102 is 50 sq ft.',
+      suiteSqft: 50, suiteSqftQuote: 'Suite 102 is 50 sq ft.', suiteSqftUrl: 'https://www.loopnet.com/example',
     }, { unit: '102' })).toBeNull();
     expect(acceptWebSearchResult({
-      suiteSqft: 50000, suiteSqftQuote: 'Suite 102 is 50,000 sq ft.',
+      suiteSqft: 50000, suiteSqftQuote: 'Suite 102 is 50,000 sq ft.', suiteSqftUrl: 'https://www.loopnet.com/example',
     }, { unit: '102' })).toBeNull();
   });
 
@@ -97,32 +97,32 @@ describe('acceptWebSearchResult — acceptance rules', () => {
 
   test('accepts a suite figure with no known building size to compare against', () => {
     const result = acceptWebSearchResult({
-      suiteSqft: 1400, suiteSqftQuote: 'Unit 102 leases at 1,400 sq ft.',
+      suiteSqft: 1400, suiteSqftQuote: 'Unit 102 leases at 1,400 sq ft.', suiteSqftUrl: 'https://www.loopnet.com/example',
     }, { buildingSqft: null, unit: '102' });
     expect(result.value).toBe(1400);
   });
 
   test('the target unit itself may carry a designator ("#102", "Suite 102") — address-normalizer never hands over a bare number', () => {
     expect(acceptWebSearchResult({
-      suiteSqft: 1400, suiteSqftQuote: 'Suite 102 is 1,400 sq ft.',
+      suiteSqft: 1400, suiteSqftQuote: 'Suite 102 is 1,400 sq ft.', suiteSqftUrl: 'https://www.loopnet.com/example',
     }, { unit: '#102' }).value).toBe(1400);
     expect(acceptWebSearchResult({
-      suiteSqft: 1400, suiteSqftQuote: 'Suite 102 is 1,400 sq ft.',
+      suiteSqft: 1400, suiteSqftQuote: 'Suite 102 is 1,400 sq ft.', suiteSqftUrl: 'https://www.loopnet.com/example',
     }, { unit: 'Suite 102' }).value).toBe(1400);
     expect(acceptWebSearchResult({
-      suiteSqft: 1400, suiteSqftQuote: 'Suite 104 is 1,400 sq ft.', // wrong suite
+      suiteSqft: 1400, suiteSqftQuote: 'Suite 104 is 1,400 sq ft.', suiteSqftUrl: 'https://www.loopnet.com/example', // wrong suite
     }, { unit: '#102' })).toBeNull();
   });
 
   test('matches "Ste. 102", "#102", and reversed "102 Suite" phrasing, all bound to the target unit', () => {
     expect(acceptWebSearchResult({
-      suiteSqft: 1400, suiteSqftQuote: 'Ste. 102 is 1,400 sq ft.',
+      suiteSqft: 1400, suiteSqftQuote: 'Ste. 102 is 1,400 sq ft.', suiteSqftUrl: 'https://www.loopnet.com/example',
     }, { unit: '102' }).value).toBe(1400);
     expect(acceptWebSearchResult({
-      suiteSqft: 1400, suiteSqftQuote: 'Unit #102 leases at 1,400 sq ft.',
+      suiteSqft: 1400, suiteSqftQuote: 'Unit #102 leases at 1,400 sq ft.', suiteSqftUrl: 'https://www.loopnet.com/example',
     }, { unit: '102' }).value).toBe(1400);
     expect(acceptWebSearchResult({
-      suiteSqft: 1400, suiteSqftQuote: 'The 102 Suite space is 1,400 sq ft.',
+      suiteSqft: 1400, suiteSqftQuote: 'The 102 Suite space is 1,400 sq ft.', suiteSqftUrl: 'https://www.loopnet.com/example',
     }, { unit: '102' }).value).toBe(1400);
   });
 });
@@ -174,5 +174,16 @@ describe('resolveViaWebSearch — gating', () => {
     expect(anthropicClient.messages.create).toHaveBeenCalledTimes(1);
     const call = anthropicClient.messages.create.mock.calls[0][0];
     expect(call.tools[0].type).toBe('web_search_20250305');
+  });
+});
+
+describe('source URL requirement', () => {
+  const { acceptWebSearchResult } = require('../services/commercial-suite-size/web-search-leg');
+  test('a unit-bound quote with no source URL keeps the business name but no size', () => {
+    const out = acceptWebSearchResult({
+      businessName: 'Test Taco Shop', businessType: 'restaurant', suiteSqft: 1400,
+      suiteSqftQuote: 'Suite 102 is 1,400 sq ft.', suiteSqftUrl: '',
+    }, { unit: '#102', buildingSqft: 46000 });
+    expect(out == null || out.value == null).toBe(true);
   });
 });

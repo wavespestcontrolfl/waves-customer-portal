@@ -25,6 +25,7 @@ function plazaSuiteRecord(overrides = {}) {
     squareFootage: 46031,
     unitCount: 1,
     _source: 'county',
+    _parcel: { landUseDescription: 'Community Shopping Centers (1555)' },
     _fieldEvidence: {
       propertyType: { value: 'Commercial', confidence: 'high', sourceType: 'county', fieldVerify: false, score: 100 },
     },
@@ -50,6 +51,15 @@ describe('buildEnrichedProfile stashes a candidate but never leaks building sqft
 
   test('bare building address (no suite/unit): unaffected, homeSqFt is the building total as before', () => {
     const profile = buildEnrichedProfile(plazaSuiteRecord(), null, 27.5, -82.45, null, null, BUILDING_ADDRESS);
+    expect(profile.isCommercial).toBe(true);
+    expect(profile.homeSqFt).toBe(46031);
+    expect(profile.buildingSqFt).toBeUndefined();
+    expect(profile._commercialSuiteCandidate).toBeNull();
+  });
+
+  test('freestanding building whose address carries a suite: no multi-tenant evidence, keeps the county building size', () => {
+    const record = plazaSuiteRecord({ _parcel: { landUseDescription: 'Stores, One Story (1100)' } });
+    const profile = buildEnrichedProfile(record, null, 27.5, -82.45, null, null, SUITE_ADDRESS);
     expect(profile.isCommercial).toBe(true);
     expect(profile.homeSqFt).toBe(46031);
     expect(profile.buildingSqFt).toBeUndefined();

@@ -893,7 +893,11 @@ async function performPropertyLookupCore(address, options = {}) {
   // calls instead of re-running DBPR/web-search (or blocking on a cold DBPR
   // download) on every hit. Harmless when persist:false: the mutation lives
   // only on this in-memory result, and saveLookup below never runs.
-  if (result.enriched?.suiteSize && result.propertyRecord) {
+  // Only SOURCED sizes are pinned to the cache row. A type default is a
+  // guess (cold DBPR cache, web-search timeout) — pinning it would stop
+  // every later cache hit from upgrading to a license/listing size until
+  // the row expires.
+  if (PERSISTED_SUITE_SIZE_SOURCES.has(result.enriched?.suiteSize?.source) && result.propertyRecord) {
     result.propertyRecord._commercialSuiteSize = result.enriched.suiteSize;
   }
 
@@ -1718,8 +1722,15 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   let commercialSuiteResolvedBuildingSqft = null;
   if (commercialProfile) {
     const suiteSubpremiseSignal = shadowHasSubpremiseSignal({ address: lookupAddress });
+    // subpremiseSignal:false on purpose — the shared predicate counts a
+    // Suite/Unit suffix as part-building evidence by itself, which would make
+    // this gate the subpremise signal alone. A freestanding building whose
+    // address reads "Ste 100" must keep its county building size; only
+    // INDEPENDENT multi-tenant evidence (aggregated parcel, or multi-unit
+    // property-type / land-use text like "Community Shopping Centers")
+    // corroborates that the suffix names one bay of a larger building.
     const suitePartBuildingEvidence = shadowHasPartBuildingEvidence({
-      subpremiseSignal: suiteSubpremiseSignal,
+      subpremiseSignal: false,
       aggregated: rc?._parcel?.aggregated === true,
       propertyType: rc?.propertyType,
       landUseDescription: rc?._parcel?.landUseDescription || rc?._raw?.landUse || null,
@@ -2478,6 +2489,8 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
 // (see buildResultFromCachedLookup) — the DBPR leg is cheap once its 24h
 // in-process cache is warm, but a multi-second web-search call on every
 // cache hit would defeat the point of caching.
+const PERSISTED_SUITE_SIZE_SOURCES = new Set(['license_seats', 'commercial_listing']);
+
 async function applyCommercialSuiteSize(profile, opts = {}) {
   if (!profile) return profile;
   const candidate = profile._commercialSuiteCandidate;

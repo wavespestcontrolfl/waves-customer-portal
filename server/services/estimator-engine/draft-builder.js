@@ -659,15 +659,23 @@ function classifyLane({ intent, propertyFacts, engineResult, engineInput = null,
   // (buildingSizeMeasured stays true — these sources are deliberately NOT
   // in FALLBACK_SQFT_SOURCES), but it is still an INFERENCE, not a
   // measurement, so it parks yellow with a reason the operator can verify
-  // on site. A web-search-confirmed listing (commercial_listing) is not
-  // flagged here — it may still be green if nothing else parks the draft.
+  // on site. A web-search listing size (commercial_listing) parks yellow
+  // too: its only proof is a quote the MODEL reports, not a page we
+  // fetched, so model output must not become a green-lane priced footprint
+  // unreviewed (AGENTS.md: LLM output proposes, never prices).
   const suiteSize = propertyFacts?.commercialSuiteSize;
   if (usesHomeSqft && suiteSize
-    && (suiteSize.source === SQFT_SOURCES.LICENSE_SEATS || suiteSize.source === SQFT_SOURCES.SUITE_TYPE_DEFAULT)) {
+    && (suiteSize.source === SQFT_SOURCES.LICENSE_SEATS
+      || suiteSize.source === SQFT_SOURCES.SUITE_TYPE_DEFAULT
+      || suiteSize.source === SQFT_SOURCES.COMMERCIAL_LISTING)) {
     const sizedSqft = Number(propertyFacts.home?.value) || suiteSize.value;
-    reasons.push(suiteSize.source === SQFT_SOURCES.LICENSE_SEATS
-      ? `suite size estimated from state restaurant license: ${suiteSize.seats ?? '?'} seats → ${sizedSqft.toLocaleString()} sq ft — confirm on site`
-      : `suite size not found by license or listing — defaulted to ${sizedSqft.toLocaleString()} sq ft for ${suiteSize.businessType || 'this business type'} — confirm on site`);
+    if (suiteSize.source === SQFT_SOURCES.LICENSE_SEATS) {
+      reasons.push(`suite size estimated from state restaurant license: ${suiteSize.seats ?? '?'} seats → ${sizedSqft.toLocaleString()} sq ft — confirm on site`);
+    } else if (suiteSize.source === SQFT_SOURCES.COMMERCIAL_LISTING) {
+      reasons.push(`suite size ${sizedSqft.toLocaleString()} sq ft from a web listing found by search — check the listing, confirm on site`);
+    } else {
+      reasons.push(`suite size not found by license or listing — defaulted to ${sizedSqft.toLocaleString()} sq ft for ${suiteSize.businessType || 'this business type'} — confirm on site`);
+    }
   }
   // Lot-driven services (lawn/mosquito/tree & shrub price off turf/treatable
   // area derived from the lot) priced from an unverified lot source deserve
