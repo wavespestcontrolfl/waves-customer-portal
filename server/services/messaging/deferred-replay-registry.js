@@ -248,32 +248,6 @@ const REGISTRY = {
     },
   },
 
-  // estimate-deposits.js queues this row when the customer's deposit-receipt
-  // channel selection is App-ONLY and no phone is on file (or, per its own
-  // comment, when send_customer_message's provider handoff failed for a
-  // reason worth retrying). estimate-deposits.js stamps
-  // requires_registered_dispatch ONLY on the no-phone rows — a phone-bearing
-  // retry of this SAME entry_point never sets it, so this dispatch always
-  // delegates those straight back to defaultDispatch (the frozen queued
-  // body), byte-identical to before this entry existed.
-  //
-  // replayWithoutPhone lets the scheduler's canReplayBillingWithoutPhone
-  // (scheduler.js) tolerate a blank/unresolvable recipient for an App-only
-  // row instead of exhausting the bounded phone-refresh rail and blocking
-  // the receipt forever (codex r2 P1). A registered dispatch cannot reuse
-  // the frozen sms_log body (only claimMeta reaches it, never msg.body), so
-  // the no-phone case re-renders the receipt fresh from the current
-  // estimate/customer/ledger state and re-enters the canonical router —
-  // exactly what a fresh replay is supposed to do per this module's own
-  // dispatch contract above.
-  estimate_deposit_receipt_requeue: {
-    replayWithoutPhone: true,
-    async dispatch(meta, defaultDispatch) {
-      if (meta.requires_registered_dispatch !== true) return defaultDispatch();
-      return require('../estimate-deposits').replayDepositReceiptAppOnly(meta);
-    },
-  },
-
   invoice_send_deferred: {
     async recheck(meta) {
       return invoiceStillCollectible(meta);
@@ -747,27 +721,6 @@ const REGISTRY = {
           return { eligible: true };
         }
         if (!invoiceId) {
-          // Generic card-failure notices can belong to off-session charges
-          // without an invoice (for example a no-show fee). Their payment row
-          // is the durable state: replay only while that exact attempt is
-          // still failed, and suppress after a later settlement changes it.
-          if (meta.original_message_type === 'payment_failed' && meta.payment_id) {
-            const payment = await db('payments')
-              .where({ id: meta.payment_id, customer_id: meta.customer_id })
-              .first('status', 'superseded_by_payment_id');
-            if (!payment) return { eligible: false, reason: 'payment-missing' };
-            if (payment.status !== 'failed') return { eligible: false, reason: `payment-${payment.status}` };
-            // A failure resolved by a separate retry payment stays
-            // status='failed' with superseded_by_payment_id pointing at the
-            // row that actually collected (see billing-cron.js) — a
-            // self-pointing id is the sweep's own "parked" marker and is
-            // still eligible, matching the retry sweep's own convention
-            // (retry-collectibility.js).
-            if (payment.superseded_by_payment_id && String(payment.superseded_by_payment_id) !== String(meta.payment_id)) {
-              return { eligible: false, reason: 'payment-superseded' };
-            }
-            return { eligible: true };
-          }
           // A notice that CARRIED a PaymentIntent but resolves to no
           // invoice is a superseded association, not an invoice-less
           // notice (codex r21): the replacement-tender flow repoints the
@@ -790,7 +743,7 @@ const REGISTRY = {
           }
           return { eligible: true };
         }
-        return invoiceStillCollectible({ ...meta, invoice_id: invoiceId });
+        return invoiceStillCollectible({ invoice_id: invoiceId });
       } catch (err) {
         return failClosed('stripe-billing', meta.stripe_payment_intent_id || meta.invoice_id, err);
       }
@@ -1469,10 +1422,6 @@ async function invoiceStillCollectible(meta) {
     const { isTerminalInvoice } = require('../invoice-followups');
     const inv = await db('invoices').where({ id: meta.invoice_id }).first();
     if (!inv) return { eligible: false, reason: 'invoice-missing' };
-    if (meta.original_message_type === 'payment_failed' && meta.customer_id
-      && String(inv.customer_id) !== String(meta.customer_id)) {
-      return { eligible: false, reason: 'invoice-customer-changed' };
-    }
     if (isTerminalInvoice(inv)) return { eligible: false, reason: `invoice-terminal:${inv.status}` };
     // Third-party Bill-To adopted overnight: payer-billed invoices route
     // AR to the payer's AP inbox (email) and billing texts must never
@@ -1528,14 +1477,9 @@ async function recheckDeferredReplay(entryPoint, claimMeta = {}) {
 // fresh copy and its final send guard. Their outcome/error propagates as-is:
 // falling back after either one could send the frozen queued body. The marker
 // protects rows produced during a rolling deploy until their entry is loaded.
-// defaultDispatch is threaded through as the entry's second argument so an
-// entry that only needs to intercept a SUBSET of its own rows (e.g. a
-// requires_registered_dispatch marker set on some but not all rows of one
-// entry_point — see estimate_deposit_receipt_requeue) can delegate the rest
-// straight back to the frozen-body default instead of reimplementing it.
 async function dispatchDeferredReplay(entryPoint, claimMeta = {}, defaultDispatch) {
   const entry = entryFor(entryPoint);
-  if (entry && typeof entry.dispatch === 'function') return entry.dispatch(claimMeta, defaultDispatch);
+  if (entry && typeof entry.dispatch === 'function') return entry.dispatch(claimMeta);
   if (claimMeta.requires_registered_dispatch === true) {
     return {
       sent: false,
@@ -1728,6 +1672,7 @@ const DURABLE_FINALIZE_ENTRY_POINTS = Object.entries(REGISTRY)
   .map(([key]) => key);
 
 module.exports = {
+  invoiceStillCollectible,
   recheckDeferredReplay,
   dispatchDeferredReplay,
   replaysWithoutPhone,

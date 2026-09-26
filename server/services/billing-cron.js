@@ -37,7 +37,6 @@ const RETRY_DELAYS_DAYS = [2, 2]; // cumulative: +2, +2 more
 const { isBillingDayMatch } = require('./billing-helpers');
 const { isPaused } = require('./autopay-eligibility');
 const { withCustomerBillingLock } = require('../utils/customer-billing-lock');
-const { isReplayHold } = require('./messaging/billing-channel-routing');
 const { billingChannelAllowed } = require('./billing-delivery-channels');
 
 async function paymentIssueEmailChoice(customerId) {
@@ -73,19 +72,14 @@ async function sendCustomerBillingSms({ customer, body, purpose = 'billing', mes
     ...(hasEmailLeg ? { hasEmailLeg: true } : {}),
   });
   if (purpose === 'payment_failure' && paymentId && attemptPaymentId && !sendResult.sent
-    && isReplayHold(sendResult) && sendResult.nextAllowedAt) {
+    && ['QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT', 'APP_DELIVERY_HOLD', 'APP_PROVIDER_RETRY'].includes(sendResult.code)
+    && sendResult.deferred && sendResult.nextAllowedAt) {
     await db('sms_log').insert({
       customer_id: customer.id, direction: 'outbound',
       from_phone: require('../config/twilio-numbers').getOutboundNumber(), to_phone: customer.phone,
       message_body: body, message_type: messageType, status: 'scheduled',
       scheduled_for: new Date(sendResult.nextAllowedAt),
-      metadata: JSON.stringify({ ...metadata,
-        // Structural fix (pre-push audit P1 on #4843): the authoritative
-        // fan-out key wins if it differs from this call's own up-front
-        // guess — the single source of truth for a replay's dedup identity
-        // is dispatchBillingChannels's own return, not a producer's copy.
-        ...(sendResult.notificationEventKey ? { notificationEventKey: sendResult.notificationEventKey } : {}),
-        entry_point: 'billing_failure_deferred',
+      metadata: JSON.stringify({ ...metadata, entry_point: 'billing_failure_deferred',
         payment_id: paymentId, attempt_payment_id: attemptPaymentId, retry_count: retryCount,
         customer_id: customer.id, replay_purpose: 'payment_failure', original_block_code: sendResult.code,
         refresh_customer_phone: true, resolve_from_by_customer: true,

@@ -13,15 +13,6 @@ const BILLING_MESSAGE_CATEGORIES = Object.freeze({
   autopay_retry_final_failed: 'payment_issue', ach_retry_notice: 'payment_issue',
   ach_card_fallback: 'payment_issue', ach_suspended: 'payment_issue',
   bank_verification_incomplete: 'payment_issue', bank_verification_failed: 'payment_issue',
-  // ach_payment_processing is sent with purpose 'payment_failure' (stripe-
-  // webhook.js's sendBillingSms) purely for its send-window/consent policy —
-  // the notice itself is a no-action "your ACH payment is processing"
-  // acknowledgment, not a problem. Every other original_message_type on
-  // that purpose (payment_failed, autopay_charge_failed, autopay_retry_*,
-  // ach_retry_notice, ach_card_fallback, ach_suspended, bank_verification_*)
-  // is a genuine actionable issue and stays payment_issue; this is the one
-  // routine confirmation among them.
-  ach_payment_processing: 'payment_receipt',
 });
 
 function billingDeliveryCategory(input) {
@@ -80,49 +71,14 @@ function billingNotificationEventKey(input) {
 // refusal on an explicit billing leg now returns (Codex r3 P1 on PR #4843):
 // without it here too, a producer's copy of the old 4-code list would never
 // persist a retry for it and an Email-only -> Text-only race would drop the
-// notice. BILLING_LEG_RETRY (Codex r4 P1 on PR #4843) is the normalized
-// shape billingDispatchOutcome now stamps onto ANY leg outcome that is
-// retryable and definitely not_sent but arrives under its own one-off code
-// (a retryable provider failure, a locked-recheck channel mismatch, a
-// hand-rolled leg refusal) — see normalizeRetryableHold below. Without a
-// single normalized code here, every new one-off retryable code would need
-// its own manual addition to this list (the pattern this fixes: rounds kept
-// finding "one more outcome type" a producer's copy of this list rejected).
-// A Set (not an array) so every consumer — this file's own isReplayHold and
-// invoice.js's hold-literal sites (Codex r4 P2 on #4843) — checks it with
-// the same O(1) `.has(code)`, never a re-copied `[...].includes(code)`.
-const REPLAY_HOLD_CODES = Object.freeze(new Set([
+// notice.
+const REPLAY_HOLD_CODES = Object.freeze([
   'QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT', 'APP_DELIVERY_HOLD', 'APP_PROVIDER_RETRY',
-  'BILLING_PREFERENCES_CHANGED', 'BILLING_LEG_RETRY',
-]));
+  'BILLING_PREFERENCES_CHANGED',
+]);
 
 function isReplayHold(result) {
-  return result.deferred === true && REPLAY_HOLD_CODES.has(result.code);
-}
-
-// Structural fix (Codex r4 P1 on PR #4843): a leg outcome that is retryable
-// AND definitely not_sent (nothing went out for that leg) but isn't already
-// a recognized replay hold gets normalized into one HERE, at the single
-// place every dispatch path funnels through, instead of teaching every
-// one-shot producer's own copy of REPLAY_HOLD_CODES about each new one-off
-// code a provider or boundary check happens to return. An outcome that is
-// already accepted, already a replay hold, or merely `uncertain` (delivery
-// unproven — re-sending it risks a duplicate) is left untouched: an
-// uncertain leg must never be converted into an automatic replay.
-function normalizeRetryableHold(outcome) {
-  const accepted = outcome.sent === true && outcome.deliveryOutcome === 'accepted';
-  if (accepted || isReplayHold(outcome)) return outcome;
-  if (outcome.retryable === true && outcome.deliveryOutcome === 'not_sent') {
-    return {
-      ...outcome,
-      code: 'BILLING_LEG_RETRY',
-      deferred: true,
-      retryable: true,
-      nextAllowedAt: outcome.nextAllowedAt || new Date(Date.now() + 5 * 60 * 1000).toISOString(),
-      originalCode: outcome.code,
-    };
-  }
-  return outcome;
+  return result.deferred === true && REPLAY_HOLD_CODES.includes(result.code);
 }
 
 // Shared core shape for every "the customer changed their billing delivery
@@ -213,7 +169,7 @@ function billingDispatchOutcome(channelResults) {
   const outcome = results.find(isReplayHold)
     || (!textAccepted && (textRetry || retry)) || accepted || retry
     || results[results.length - 1];
-  return { ...normalizeRetryableHold(outcome), channelResults };
+  return { ...outcome, channelResults };
 }
 
 async function dispatchBillingChannels(input, prefs, sendLeg) {
@@ -253,5 +209,4 @@ async function dispatchBillingChannels(input, prefs, sendLeg) {
 module.exports = {
   BILLING_MESSAGE_CATEGORIES, billingDeliveryCategory, isBillingDeliveryCandidate, usesBillingDeliveryPreferences,
   billingNotificationEventKey, dispatchBillingChannels, REPLAY_HOLD_CODES, isReplayHold, preferenceChangeHold,
-  normalizeRetryableHold,
 };

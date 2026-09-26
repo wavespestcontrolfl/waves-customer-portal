@@ -133,13 +133,6 @@ describe('invoice SMS provider handoff', () => {
       .resolves.toMatchObject({ sent: true, payUrl: 'https://waves.test/l/invoice' });
 
     expect(dispatch).toHaveBeenCalledTimes(1);
-    // Codex r4 P1 on #4843: this is an App leg (providerOutcome.channel:
-    // 'push'). invoice.js must forward its own deposit-settlement
-    // transaction into dispatch() — send-customer-message.js's
-    // dispatchProvider threads it into the App leg's fresh eligibility/
-    // contact rereads instead of opening a second root-pool connection
-    // while this transaction is held.
-    expect(dispatch).toHaveBeenCalledWith(db);
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
     expect(require('../services/logger').error).toHaveBeenCalledWith(
       expect.stringContaining('Provider outcome known for inv-1'),
@@ -200,10 +193,6 @@ describe('invoice SMS provider handoff', () => {
     await expect(InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' }))
       .resolves.toMatchObject({ sent: true });
     expect(dispatch).toHaveBeenCalledTimes(1);
-    // Codex r4 P1 on #4843: this is the Text leg — dispatch() must receive
-    // the settlement's own transaction (the plain `db` mock here) rather
-    // than being called with no argument.
-    expect(dispatch).toHaveBeenCalledWith(db);
   });
 
   test('does not deliver a pay link when full credit landed before zero-balance close', async () => {

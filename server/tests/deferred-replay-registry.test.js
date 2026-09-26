@@ -82,10 +82,6 @@ jest.mock('../services/voicemail-lead-sms', () => ({ _deferredClaims: mockVmClai
 jest.mock('../services/account-membership-email', () => ({
   sendCancellationReceived: jest.fn(async () => ({ ok: true })),
 }));
-const mockReplayDepositReceiptAppOnly = jest.fn();
-jest.mock('../services/estimate-deposits', () => ({
-  replayDepositReceiptAppOnly: (...a) => mockReplayDepositReceiptAppOnly(...a),
-}));
 const mockReplayBillingRetryEmail = jest.fn(async () => ({
   sent: true, channel: 'email', deliveryOutcome: 'accepted',
 }));
@@ -124,6 +120,16 @@ describe('deferred-replay registry', () => {
     delete _registry.test_dispatch_deferred;
   });
 
+  test('exports the canonical collectibility check for billing Email eligibility', async () => {
+    const { invoiceStillCollectible } = require('../services/messaging/deferred-replay-registry');
+    db.mockReturnValueOnce(firstChain({ id: 'inv-1', status: 'paid' }));
+    await expect(invoiceStillCollectible({ invoice_id: 'inv-1' }))
+      .resolves.toMatchObject({ eligible: false, reason: 'invoice-terminal:paid' });
+    db.mockReturnValueOnce(throwChain());
+    await expect(invoiceStillCollectible({ invoice_id: 'inv-1' }))
+      .resolves.toMatchObject({ eligible: false, retryable: true });
+  });
+
   test('registered dispatch owns the replay and receives its trusted claim metadata', async () => {
     const outcome = { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'fixture-provider-id' };
     const dispatch = jest.fn(async () => outcome);
@@ -132,11 +138,7 @@ describe('deferred-replay registry', () => {
     const meta = { scheduled_sms_log_id: 'queue-1', customer_id: 'customer-1' };
 
     await expect(dispatchDeferredReplay('test_dispatch_deferred', meta, fallback)).resolves.toBe(outcome);
-    // defaultDispatch is threaded through as the entry's second argument
-    // (codex r2 P1) so an entry that only intercepts a SUBSET of its own
-    // rows can delegate the rest straight back to it — see
-    // estimate_deposit_receipt_requeue.
-    expect(dispatch).toHaveBeenCalledWith(meta, fallback);
+    expect(dispatch).toHaveBeenCalledWith(meta);
     expect(fallback).not.toHaveBeenCalled();
   });
 
@@ -859,15 +861,6 @@ describe('deferred-replay registry', () => {
     });
     expect(stillOwed.eligible).toBe(true);
 
-    db.mockReturnValueOnce(firstChain({ id: 'inv-1', customer_id: 'cust-new', status: 'sent', payer_id: null }));
-    const reassigned = await recheckDeferredReplay('stripe_webhook_billing_deferred', {
-      original_message_type: 'payment_failed',
-      customer_id: 'cust-original',
-      invoice_id: 'inv-1',
-      stripe_payment_intent_id: 'pi_old',
-    });
-    expect(reassigned).toEqual({ eligible: false, reason: 'invoice-customer-changed' });
-
     // Setup-intent notices never carried a PI — unaffected by the guard.
     db.mockReturnValueOnce(firstChain(null));
     const setupFailure = await recheckDeferredReplay('stripe_webhook_billing_deferred', {
@@ -876,48 +869,6 @@ describe('deferred-replay registry', () => {
       waves_customer_id: 'cust-1',
     });
     expect(setupFailure.eligible).toBe(true);
-  });
-
-  test('invoice-less payment_failed replay (Codex r1 P1 on #4843): a retry payment settling the failure supersedes the row', async () => {
-    // A failure resolved by a SEPARATE retry payment stays status='failed'
-    // with superseded_by_payment_id pointing at the row that actually
-    // collected (billing-cron.js) — replaying the frozen failure notice
-    // over a settled obligation must be refused, not just re-read status.
-    db.mockReturnValueOnce(firstChain({ status: 'failed', superseded_by_payment_id: 'pay-2' }));
-    const superseded = await recheckDeferredReplay('stripe_webhook_billing_deferred', {
-      original_message_type: 'payment_failed', payment_id: 'pay-1', customer_id: 'cust-1',
-    });
-    expect(superseded).toEqual({ eligible: false, reason: 'payment-superseded' });
-
-    // A self-pointing id is the sweep's own "parked" marker (matching
-    // retry-collectibility.js's convention), not a different collecting
-    // payment — still eligible.
-    db.mockReturnValueOnce(firstChain({ status: 'failed', superseded_by_payment_id: 'pay-1' }));
-    const selfParked = await recheckDeferredReplay('stripe_webhook_billing_deferred', {
-      original_message_type: 'payment_failed', payment_id: 'pay-1', customer_id: 'cust-1',
-    });
-    expect(selfParked).toEqual({ eligible: true });
-
-    // No supersession recorded — unchanged behavior.
-    db.mockReturnValueOnce(firstChain({ status: 'failed', superseded_by_payment_id: null }));
-    const stillFailed = await recheckDeferredReplay('stripe_webhook_billing_deferred', {
-      original_message_type: 'payment_failed', payment_id: 'pay-1', customer_id: 'cust-1',
-    });
-    expect(stillFailed).toEqual({ eligible: true });
-
-    // Settled by a status change directly (no supersession row) — unchanged.
-    db.mockReturnValueOnce(firstChain({ status: 'paid', superseded_by_payment_id: null }));
-    const paidDirect = await recheckDeferredReplay('stripe_webhook_billing_deferred', {
-      original_message_type: 'payment_failed', payment_id: 'pay-1', customer_id: 'cust-1',
-    });
-    expect(paidDirect).toEqual({ eligible: false, reason: 'payment-paid' });
-
-    // Row gone entirely — unchanged.
-    db.mockReturnValueOnce(firstChain(null));
-    const missing = await recheckDeferredReplay('stripe_webhook_billing_deferred', {
-      original_message_type: 'payment_failed', payment_id: 'pay-1', customer_id: 'cust-1',
-    });
-    expect(missing).toEqual({ eligible: false, reason: 'payment-missing' });
   });
 
   test('card request recheck (r24): a passed appointment instant suppresses the bearer link', async () => {
@@ -1394,41 +1345,5 @@ describe('recruiting_comms_deferred (PR #4623)', () => {
     const terminalCall = rec.mock.calls.find((c) => c[2] && c[2].handoff);
     expect(Object.keys(terminalCall[2])).toEqual(['deferred', 'handoff']);
     fin.mockRestore(); rec.mockRestore();
-  });
-});
-
-test('only an entry flagged replayWithoutPhone may replay without a phone', () => {
-  const { replaysWithoutPhone } = require('../services/messaging/deferred-replay-registry');
-  expect(replaysWithoutPhone('invoice_followup_deferred')).toBe(false);
-  expect(replaysWithoutPhone('no_such_entry')).toBe(false);
-  expect(replaysWithoutPhone(undefined)).toBe(false);
-  // Finding E: the App-only deposit-receipt requeue is the first registered
-  // replayWithoutPhone entry.
-  expect(replaysWithoutPhone('estimate_deposit_receipt_requeue')).toBe(true);
-});
-
-describe('estimate_deposit_receipt_requeue (finding E)', () => {
-  beforeEach(() => { mockReplayDepositReceiptAppOnly.mockReset(); });
-
-  test('a phone-bearing row (no requires_registered_dispatch) delegates to the frozen-body default, unchanged', async () => {
-    const fallback = jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted' }));
-    const meta = { entry_point: 'estimate_deposit_receipt_requeue', estimate_id: 'est-1', customer_id: 'cust-1' };
-    await expect(dispatchDeferredReplay('estimate_deposit_receipt_requeue', meta, fallback))
-      .resolves.toMatchObject({ sent: true, deliveryOutcome: 'accepted' });
-    expect(fallback).toHaveBeenCalledTimes(1);
-    expect(mockReplayDepositReceiptAppOnly).not.toHaveBeenCalled();
-  });
-
-  test('an App-only no-phone row (requires_registered_dispatch) re-renders fresh through the canonical router instead of falling back', async () => {
-    const fallback = jest.fn(async () => ({ sent: true }));
-    const outcome = { sent: true, deliveryOutcome: 'accepted', channel: 'push' };
-    mockReplayDepositReceiptAppOnly.mockResolvedValue(outcome);
-    const meta = {
-      entry_point: 'estimate_deposit_receipt_requeue', estimate_id: 'est-1', customer_id: 'cust-1',
-      payment_intent_id: 'pi_1', requires_registered_dispatch: true,
-    };
-    await expect(dispatchDeferredReplay('estimate_deposit_receipt_requeue', meta, fallback)).resolves.toBe(outcome);
-    expect(mockReplayDepositReceiptAppOnly).toHaveBeenCalledWith(meta);
-    expect(fallback).not.toHaveBeenCalled();
   });
 });

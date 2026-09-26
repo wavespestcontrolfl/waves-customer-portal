@@ -53,7 +53,6 @@ const TermiteStations = require('../services/termite-stations');
 // Mirrors the CompletionPanel auto-count zeroing on customer_declined.
 const DECLINED_VISIT_STATION_COUNT_KEYS = ['stations_checked', 'stations_inaccessible', 'stations_with_activity', 'traps_checked'];
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
-const { isReplayHold } = require('../services/messaging/billing-channel-routing');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { countSegments } = require('../services/messaging/segment-counter');
 const { recordServiceProductNutrients, amountToPounds, nutrientTreatedSqft, ledgerRowCoverage } = require('../services/nutrient-ledger');
@@ -11663,7 +11662,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // confirmed 'sent' drops it) — a morning double-link is coherent
             // copy; a night with no link is not.
             let paymentFailedNoticeDeferred = false;
-            if (!failResult.sent && isReplayHold(failResult) && failResult.nextAllowedAt) {
+            if (!failResult.sent && ['QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT', 'APP_DELIVERY_HOLD', 'APP_PROVIDER_RETRY'].includes(failResult.code) && failResult.deferred && failResult.nextAllowedAt) {
               try {
                 const TWILIO_NUMBERS = require('../config/twilio-numbers');
                 await db('sms_log').insert({
@@ -11677,12 +11676,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
                   message_type: 'payment_failed',
                   metadata: JSON.stringify({
                     entry_point: 'autopay_completion_decline_deferred',
-                    // Structural fix (pre-push audit P1 on #4843): prefer
-                    // the fan-out's own authoritative key (dispatchBillingChannels
-                    // now stamps it on every outcome) over re-deriving the
-                    // literal here, so a replay dedupes against the SAME
-                    // identity the immediate attempt actually used.
-                    notificationEventKey: failResult.notificationEventKey || `payment-problem:service:${record.id}`,
+                    notificationEventKey: `payment-problem:service:${record.id}`,
                     service_record_id: record.id,
                     invoice_id: invoice.id,
                     pay_url: payUrl,

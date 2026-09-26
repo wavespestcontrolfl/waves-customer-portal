@@ -11,6 +11,7 @@ const EmailTemplateLibrary = require('./email-template-library');
 const { getInvoiceEmailRecipients } = require('./customer-contact');
 const { billingChannelAllowed } = require('./billing-delivery-channels');
 const { withCustomerCommsLock, lockCustomerEmail } = require('../utils/customer-comms-lock');
+const { preferenceChangeHold } = require('./messaging/billing-channel-routing');
 
 const CATEGORY_LABELS = Object.freeze({
   invoice: 'Invoice update',
@@ -78,23 +79,26 @@ async function contextBlock(input, category, { customer, prefs, invoice }, datab
     return { error: blocked('BILLING_EMAIL_DISABLED', 'Email notifications are disabled for this customer') };
   }
   if (billingChannelAllowed(prefs, category, 'email') !== true) {
-    // Codex r4 P1 on #4843: retryable + not_sent (never terminal) — this
-    // fires both on the FIRST read (loadBillingEmailContext at the top of
-    // sendBillingChannelEmail) and on the LOCKED recheck immediately before
-    // the provider handoff (verifyAndDispatch below). Only the locked
-    // recheck can race a genuine mid-dispatch preference change (Email-only
-    // -> Text-only landing in the interval before this recheck), and that
-    // race must resolve to a schedulable hold (billing-channel-routing.js's
-    // normalizeRetryableHold turns any retryable+not_sent leg outcome into
-    // BILLING_LEG_RETRY) instead of a terminal drop — the same contract
-    // Text/App already have via BILLING_PREFERENCES_CHANGED. A first-read
-    // refusal (the customer never selected Email at all) is retried the
-    // exact same way and simply reproduces the same terminal-looking
-    // decision each time, so marking it retryable here costs nothing. Kept
-    // distinct from BILLING_EMAIL_DISABLED (a portal-wide opt-out, not a
-    // channel-selection race) and the ownership refusals above, which stay
-    // terminal.
-    return { error: blocked('BILLING_EMAIL_NOT_SELECTED', 'Email is not selected for this billing category', { retryable: true }) };
+    // This fires both on the FIRST read (loadBillingEmailContext at the top
+    // of sendBillingChannelEmail) and on the LOCKED recheck immediately
+    // before the provider handoff (verifyAndDispatch below). Only the
+    // locked recheck can race a genuine mid-dispatch preference change
+    // (Email-only -> Text-only landing in the interval before this
+    // recheck), and that race must resolve to the SAME schedulable hold
+    // Text/App already return via preferenceChangeHold()/
+    // BILLING_PREFERENCES_CHANGED (billing-channel-routing.js), not a
+    // terminal drop. A first-read refusal (the customer never selected
+    // Email at all) is retried the exact same way and simply reproduces the
+    // same terminal-looking decision each time, so returning the schedulable
+    // shape here costs nothing. Kept distinct from BILLING_EMAIL_DISABLED (a
+    // portal-wide opt-out, not a channel-selection race) and the ownership
+    // refusals above, which stay terminal.
+    return {
+      error: {
+        sent: false, provider: 'email', providerMessageId: null, blocked: true,
+        ...preferenceChangeHold({ reason: 'Email is not selected for this billing category' }),
+      },
+    };
   }
   if (input.invoiceId) {
     if (!invoice || String(invoice.customer_id) !== String(customer.id)) {

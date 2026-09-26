@@ -429,13 +429,8 @@ async function sendDepositReceipt({ estimateId, amountDollars, cardSurcharge = 0
   }
 }
 
-// Shared body-render + canonical-send step for the deposit-receipt SMS/App
-// leg, factored out (codex r2 P1) so the fresh App-only replay dispatcher
-// below (replayDepositReceiptAppOnly) can reuse the EXACT same render/send
-// logic the immediate path uses without also inheriting its own
-// requeue-on-failure side effect, which needs the frozen body this function
-// returns to write its retry row.
-async function buildDepositReceiptSmsSend({ estimate, customer, phone, amountDollars, cardSurcharge = 0, paymentIntentId, hasEmailLeg = false }) {
+// SMS leg. Kill switch = the deposit_receipt SMS template row.
+async function sendDepositReceiptSms({ estimate, customer, phone, amountDollars, cardSurcharge = 0, paymentIntentId, hasEmailLeg = false }) {
   const estimateId = estimate.id;
   const { renderSmsTemplate } = require('./sms-template-renderer');
   const firstName = String(customer?.first_name || '').trim()
@@ -451,7 +446,7 @@ async function buildDepositReceiptSmsSend({ estimate, customer, phone, amountDol
     entity_type: 'estimate',
     entity_id: estimateId,
   });
-  if (!body) return null; // template missing or toggled off — deliberate silence
+  if (!body) return; // template missing or toggled off — deliberate silence
 
   const { sendCustomerMessage } = require('./messaging/send-customer-message');
   // Lead-only estimates (no customer row yet) can't satisfy the
@@ -500,15 +495,6 @@ async function buildDepositReceiptSmsSend({ estimate, customer, phone, amountDol
     },
     ...(estimate.customer_id ? { hasEmailLeg } : {}),
   });
-  return { body, result };
-}
-
-// SMS leg. Kill switch = the deposit_receipt SMS template row.
-async function sendDepositReceiptSms({ estimate, customer, phone, amountDollars, cardSurcharge = 0, paymentIntentId, hasEmailLeg = false }) {
-  const estimateId = estimate.id;
-  const built = await buildDepositReceiptSmsSend({ estimate, customer, phone, amountDollars, cardSurcharge, paymentIntentId, hasEmailLeg });
-  if (!built) return; // template missing or toggled off — deliberate silence
-  const { body, result } = built;
   if (!result.sent) {
     // estimate_deposit_receipt is a customer-action entry point (owner
     // ruling 2026-08-29), so quiet hours never hold it — but a transient
@@ -560,34 +546,13 @@ async function sendDepositReceiptSms({ estimate, customer, phone, amountDollars,
             payment_intent_id: paymentIntentId || null,
             ...(estimate.customer_id ? {
               billingDeliveryCategory: 'payment_receipt',
-              // Structural fix (pre-push audit P1 on #4843): prefer the
-              // ACTUAL key dispatchBillingChannels used for the immediate
-              // fan-out (result.notificationEventKey, now stamped on every
-              // outcome) over re-deriving the literal here — the single
-              // source of truth stays the fan-out itself. Falls back to the
-              // same deterministic literal the immediate send seeded its
-              // own metadata with when the customer's legacy (non-explicit)
-              // preference never invoked the fan-out at all.
-              notificationEventKey: result.notificationEventKey || `estimate-deposit:${estimateId}:${paymentIntentId || 'receipt'}`,
-              // The retry keeps the immediate send's own Email ownership: a
-              // separate receipt email exists only when wantEmail was set.
-              hasEmailLeg: hasEmailLeg === true,
+              notificationEventKey: `estimate-deposit:${estimateId}:${paymentIntentId || 'receipt'}`,
+              hasEmailLeg: true,
             } : {}),
             // The customer can change their phone between the hold and
             // nextAllowedAt — the cron re-reads customers.phone at send time
             // so the phone_matches_customer trust it asserts stays true.
             ...(estimate.customer_id ? { refresh_customer_phone: true } : {}),
-            // Codex r2 P1: this row is written with a BLANK to_phone only
-            // when the customer selected the App leg with no phone on file
-            // at all (see the wantSms/explicitChannels.includes('push') call
-            // site above) — never for an ordinary phone-bearing retry of
-            // this same entry point. Registering the App-only case with the
-            // deferred-replay registry lets the scheduler's
-            // canReplayBillingWithoutPhone tolerate the blank recipient
-            // instead of exhausting the bounded phone-refresh rail and
-            // blocking the receipt forever; phone-bearing rows never set
-            // this flag and stay on the unchanged default replay path.
-            ...(estimate.customer_id && !phone ? { requires_registered_dispatch: true } : {}),
             ...(estimate.customer_id ? {} : {
               consent_basis: {
                 status: 'transactional_allowed',
@@ -2174,63 +2139,6 @@ async function sendDepositReceiptEmailFallback(estimateId, { paymentIntentId = n
   }
 }
 
-// Registered deferred-replay dispatch for estimate_deposit_receipt_requeue
-// (deferred-replay-registry.js), reached ONLY for a row stamped
-// requires_registered_dispatch — an App-only receipt queued with no phone on
-// file (see sendDepositReceiptSms above). A registered dispatch never
-// receives the frozen sms_log body (only the row's own claimMeta), so this
-// re-renders the receipt fresh from the CURRENT estimate/customer/ledger
-// state — same re-derivation contract as sendDepositReceiptEmailFallback
-// above — and re-enters the canonical router with `to: null`, letting the
-// customer's still-selected App leg (billing-channel-routing.js) retry under
-// the same notificationEventKey. Returns a canonical sendCustomerMessage-
-// shaped outcome; never throws (the scheduler's generic retry/finalize
-// handling reads deliveryOutcome/retryable/code directly from it).
-async function replayDepositReceiptAppOnly(meta) {
-  const unavailable = (code, extra = {}) => ({
-    sent: false, blocked: true, deliveryOutcome: 'not_sent', code, retryable: false, ...extra,
-  });
-  try {
-    if (!meta?.estimate_id || !meta?.customer_id) return unavailable('DEPOSIT_RECEIPT_REPLAY_UNAVAILABLE');
-    const estimate = await db('estimates')
-      .where({ id: meta.estimate_id })
-      .first('id', 'customer_id', 'customer_name');
-    if (!estimate || String(estimate.customer_id) !== String(meta.customer_id)) {
-      return unavailable('DEPOSIT_RECEIPT_REPLAY_UNAVAILABLE', { reason: 'estimate unavailable or reassigned' });
-    }
-    const customer = await db('customers').where({ id: meta.customer_id }).first();
-    if (!customer) return unavailable('DEPOSIT_RECEIPT_REPLAY_UNAVAILABLE', { reason: 'customer unavailable' });
-
-    // Same multi-deposit pin as the email fallback: an exact PaymentIntent
-    // match when the queued row named one, else the latest received/credited
-    // row.
-    const ledgerQuery = db('estimate_deposits')
-      .where({ estimate_id: meta.estimate_id })
-      .whereIn('status', ['received', 'credited']);
-    const ledgerRow = meta.payment_intent_id
-      ? await ledgerQuery.where({ stripe_payment_intent_id: meta.payment_intent_id }).first('amount', 'card_surcharge', 'stripe_payment_intent_id')
-      : await ledgerQuery.orderBy('received_at', 'desc').first('amount', 'card_surcharge', 'stripe_payment_intent_id');
-    if (!ledgerRow) return unavailable('DEPOSIT_RECEIPT_REPLAY_UNAVAILABLE', { reason: 'no received deposit' });
-
-    const built = await buildDepositReceiptSmsSend({
-      estimate,
-      customer,
-      // The customer may have added a phone while this receipt was held; a
-      // selected Text leg sends to it, and App/Email never read it.
-      phone: String(customer.phone || '').trim() || null,
-      amountDollars: Number(ledgerRow.amount || 0),
-      cardSurcharge: Number(ledgerRow.card_surcharge || 0),
-      paymentIntentId: ledgerRow.stripe_payment_intent_id,
-      hasEmailLeg: meta.hasEmailLeg === true,
-    });
-    if (!built) return unavailable('DEPOSIT_RECEIPT_TEMPLATE_MISSING');
-    return built.result;
-  } catch (err) {
-    logger.warn(`[estimate-deposits] deposit receipt App replay failed for estimate ${meta?.estimate_id}: ${err.message}`);
-    return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'DEPOSIT_RECEIPT_REPLAY_FAILED', reason: err.message, retryable: true };
-  }
-}
-
 module.exports = {
   acquireEstimateDepositLedgerLock,
   assessDepositFollowUpEligibility,
@@ -2253,7 +2161,6 @@ module.exports = {
   reconcileReceivedDepositToInvoice,
   summarizeEstimateDeposit,
   sendDepositReceiptEmailFallback,
-  replayDepositReceiptAppOnly,
   linkedScheduledServiceId,
   restoreDepositCreditForVoidedInvoice,
   sweepTerminalEstimateDeposits,

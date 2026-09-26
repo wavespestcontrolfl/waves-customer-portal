@@ -918,25 +918,8 @@ async function sendCustomerMessageCore(input) {
     error: acquiredProviderHandoff.block.reason,
     validator: acquiredProviderHandoff.block.validator,
   };
-  const dispatchProvider = (handoffTrx) => {
+  const dispatchProvider = () => {
     providerOutcome = { sent: false, deliveryOutcome: 'uncertain' };
-    // Codex r4 P1 on #4843: when the caller's own withProviderHandoff
-    // exposes its transaction (invoice.js's send-claim + deposit-settlement
-    // handoff), thread it into providerPreparationCheck's `{ trx }` param —
-    // the SAME plumbing the Email leg's locked authority already uses (see
-    // billing-channel-email-authority.js's preSendBlock) — so the Text and
-    // App legs' fresh contact/suppression rereads (and, further down,
-    // pushEligibleRuntime's read for a billing leg) reuse this connection
-    // instead of opening a second one on the root pool while the handoff
-    // trx is held (DB_POOL_MAX=2 deadlock risk). twilio.js and push-
-    // channel-routing.js call preSendCheck() with no arguments, so the
-    // closure below is what actually delivers the trx to them; when there
-    // is no handoff (plain `await dispatchProvider()`), handoffTrx is
-    // undefined and every read falls back to the plain pool exactly as
-    // before.
-    const preSendCheckWithHandoffTrx = (args = {}) => providerPreparationCheck({ ...args, trx: args?.trx || handoffTrx });
-    preSendCheckWithHandoffTrx.isStillValid = providerPreparationCheck.isStillValid;
-    preSendCheckWithHandoffTrx.handoffTrx = handoffTrx;
     return dispatchToProvider(sendInput, {
     // The caller's handoff receives (trx, onProviderStart): the callback fires
     // immediately before the provider request, after the rechecks below, so a
@@ -969,7 +952,7 @@ async function sendCustomerMessageCore(input) {
       await dispatch(trx);
       return { ok: true };
     })),
-    preSendCheck: preSendCheckWithHandoffTrx,
+    preSendCheck: providerPreparationCheck,
     // A separate caller predicate runs inside Twilio's final dispatch,
     // after its authoritative annual-offer guard. Keeping it distinct from
     // preSendCheck avoids invoking existing opaque preparation callbacks a

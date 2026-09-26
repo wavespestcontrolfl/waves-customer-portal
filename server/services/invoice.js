@@ -17,12 +17,6 @@ const { shortenOrPassthrough, invoiceShortCodePrefix } = require("./short-url");
 const { publicPortalUrl } = require("../utils/portal-url");
 const { loadInvoiceAnnualPrepay, buildPrepayCoverageSummary } = require("./invoice-prepay");
 const { explicitBillingChannels } = require("./billing-delivery-channels");
-// Codex r4 P2 on #4843: the one shared hold-code set (also owns
-// isReplayHold/normalizeRetryableHold) instead of this file's own
-// copy-pasted literal array at each site below — a new schedulable code
-// (BILLING_PREFERENCES_CHANGED, BILLING_LEG_RETRY) now reaches every site
-// that reads REPLAY_HOLD_CODES without a matching edit here.
-const { REPLAY_HOLD_CODES } = require("./messaging/billing-channel-routing");
 const PhotoService = require("./photos");
 const config = require("../config");
 const { customerSafeServiceNotes } = require("./project-types");
@@ -5188,15 +5182,7 @@ const InvoiceService = {
                     validator: "check_invoice_deposit_settlement" };
                 }
                 providerStarted = true;
-                // Codex r4 P1 on #4843: expose this handoff's own
-                // transaction to the dispatch — send-customer-message.js's
-                // dispatchProvider threads it into providerPreparationCheck
-                // (Text/App legs' fresh contact/suppression rereads) and
-                // pushEligibleRuntime's billing-leg read, mirroring the
-                // Email leg's own locked-trx pattern, so those reads reuse
-                // this connection instead of opening a second one on the
-                // root pool while this transaction is held (DB_POOL_MAX=2).
-                dispatchedOutcome = await dispatch(trx);
+                dispatchedOutcome = await dispatch();
                 return dispatchedOutcome;
               },
             );
@@ -5246,10 +5232,6 @@ const InvoiceService = {
         if (sendResult.deferred) err.deferred = true;
         if (sendResult.nextAllowedAt) err.nextAllowedAt = sendResult.nextAllowedAt;
         if (sendResult.retryAfterMs) err.retryAfterMs = sendResult.retryAfterMs;
-        // Structural fix (pre-push audit P1 on #4843): carry the fan-out's
-        // own key forward so the outer wrapper's requeue below (~5698) can
-        // persist the SAME identity the immediate attempt actually used.
-        if (sendResult.notificationEventKey) err.notificationEventKey = sendResult.notificationEventKey;
         err.smsBody = body;
         err.toPhone = customer.phone;
         throw err;
@@ -5686,7 +5668,6 @@ const InvoiceService = {
         if (err.deferred) sms.deferred = true;
         if (err.nextAllowedAt) sms.nextAllowedAt = err.nextAllowedAt;
         if (err.retryAfterMs) sms.retryAfterMs = err.retryAfterMs;
-        if (err.notificationEventKey) sms.notificationEventKey = err.notificationEventKey;
         if (err.smsBody) sms.heldBody = err.smsBody;
         if (err.toPhone) sms.heldToPhone = err.toPhone;
       }
@@ -5700,7 +5681,7 @@ const InvoiceService = {
     // 8:00 AM under the same payment_link policy. Scheduled callers
     // (allowClaimed) skip this — their whole send defers below instead.
     if (!allowClaimed
-      && REPLAY_HOLD_CODES.has(sms.code)
+      && ["QUIET_HOURS_HOLD", "PUSH_IN_FLIGHT", "APP_DELIVERY_HOLD", "APP_PROVIDER_RETRY"].includes(sms.code)
       && sms.deliveryOutcome !== "uncertain"
       && sms.deferred
       && sms.nextAllowedAt
@@ -5734,11 +5715,7 @@ const InvoiceService = {
               entry_point: "invoice_send_deferred",
               invoice_id: invoiceId,
               billingDeliveryCategory: "invoice",
-              // Structural fix (pre-push audit P1 on #4843): prefer the
-              // fan-out's own key (threaded up through sms.notificationEventKey
-              // above) over re-deriving the literal here — falls back to it
-              // only when the nested send never reached the fan-out at all.
-              notificationEventKey: sms.notificationEventKey || `invoice:${invoiceId}:sent`,
+              notificationEventKey: `invoice:${invoiceId}:sent`,
               hasEmailLeg: true,
               original_block_code: sms.code,
               replay_purpose: "payment_link",
@@ -5780,7 +5757,7 @@ const InvoiceService = {
     // night sends, admin resends) are NOT deferred: their documented
     // gate-ON behavior is email-immediate with the SMS leg held.
     const scheduledSmsHeld = allowClaimed
-      && REPLAY_HOLD_CODES.has(sms.code)
+      && ["QUIET_HOURS_HOLD", "PUSH_IN_FLIGHT", "APP_DELIVERY_HOLD", "APP_PROVIDER_RETRY"].includes(sms.code)
       && Boolean(sms.nextAllowedAt);
     const terminalSmsRefusal = sms.code === "INVOICE_VISIT_TERMINAL"
       && sms.deliveryOutcome === "not_sent";
@@ -6646,15 +6623,8 @@ const InvoiceService = {
       // 19:59→20:01 race) is a deferral, not a failure: move the due time
       // to the window open and leave the attempt counter alone — five
       // overnight cron passes must not permanently fail the send.
-      // APP_PROVIDER_RETRY is deliberately excluded here (it takes the
-      // native-backoff branch below via nativeRetryMs) — REPLAY_HOLD_CODES
-      // now also carries BILLING_PREFERENCES_CHANGED/BILLING_LEG_RETRY, so
-      // this can't switch to a bare `REPLAY_HOLD_CODES.has(...)` without
-      // also re-admitting that exclusion explicitly. BILLING_LEG_RETRY is
-      // excluded too: it wraps any retryable leg failure, which has no clock
-      // bound, so it must spend an attempt and stay capped.
-      const smsHeld = REPLAY_HOLD_CODES.has(result.sms?.code)
-        && !["APP_PROVIDER_RETRY", "BILLING_LEG_RETRY"].includes(result.sms?.code) && result.sms?.nextAllowedAt;
+      const smsHeld =
+        ["QUIET_HOURS_HOLD", "PUSH_IN_FLIGHT", "APP_DELIVERY_HOLD"].includes(result.sms?.code) && result.sms?.nextAllowedAt;
       const durableSendError = result.sms?.ok && result.email?.code === "billing_prefs_unavailable"
         ? BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED
         : error;

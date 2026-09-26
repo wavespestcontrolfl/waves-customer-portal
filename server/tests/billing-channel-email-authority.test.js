@@ -114,12 +114,12 @@ describe('billing channel email authority', () => {
     rows.notification_prefs = { customer_id: 'cust-1', billing_channels: ['sms', 'push'] };
     const { context } = await runAuthority();
     expect(context.error).toMatchObject({
-      // Codex r4 P1 on #4843: retryable (never terminal) — a channel-
-      // selection mismatch can be the exact mid-dispatch preference-change
-      // race the locked recheck below exists to catch, so
-      // billing-channel-routing.js's normalizeRetryableHold can turn it
-      // into a schedulable BILLING_LEG_RETRY hold instead of a dead end.
-      blocked: true, code: 'BILLING_EMAIL_NOT_SELECTED', deliveryOutcome: 'not_sent', retryable: true,
+      // A channel-selection mismatch can be the exact mid-dispatch
+      // preference-change race the locked recheck below exists to catch, so
+      // this returns the SAME schedulable hold Text/App already return via
+      // preferenceChangeHold() (billing-channel-routing.js) instead of a
+      // dead end.
+      blocked: true, code: 'BILLING_PREFERENCES_CHANGED', deliveryOutcome: 'not_sent', deferred: true, retryable: true,
     });
   });
 
@@ -130,10 +130,10 @@ describe('billing channel email authority', () => {
   });
 
   test('rechecks the selected channel at the provider boundary', async () => {
-    // This IS the Email-only -> Text-only mid-dispatch race (Codex r4 P1 on
-    // #4843): the locked recheck's channel-selection mismatch must be
-    // retryable, not terminal, so the caller's normalization step schedules
-    // a replay against the customer's new choice instead of dropping the
+    // This IS the Email-only -> Text-only mid-dispatch race: the locked
+    // recheck's channel-selection mismatch must return the shared
+    // schedulable hold, not a terminal drop, so the caller's replay
+    // schedules against the customer's new choice instead of losing the
     // notice.
     let reads = 0;
     mockDb.mockImplementation((table) => ({
@@ -151,7 +151,9 @@ describe('billing channel email authority', () => {
     }));
     const { outcome, state } = await runAuthority();
     expect(outcome.ok).toBe(false);
-    expect(state.boundaryBlock).toMatchObject({ blocked: true, code: 'BILLING_EMAIL_NOT_SELECTED', retryable: true });
+    expect(state.boundaryBlock).toMatchObject({
+      blocked: true, code: 'BILLING_PREFERENCES_CHANGED', deferred: true, retryable: true,
+    });
   });
 
   test('rechecks the global email opt-out at the provider boundary', async () => {

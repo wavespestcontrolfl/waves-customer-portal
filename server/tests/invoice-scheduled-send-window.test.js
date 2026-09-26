@@ -372,11 +372,7 @@ describe('processScheduledSends send-window handling', () => {
     await expect(InvoiceService.processScheduledSends()).rejects.toMatchObject({ code: 'boom' });
   });
 
-  // BILLING_PREFERENCES_CHANGED (Codex r4 P2 on #4843): invoice.js's smsHeld
-  // check now reads the shared REPLAY_HOLD_CODES set instead of its own
-  // literal 3-code array, so this schedulable hold reschedules exactly like
-  // the legacy send-window/App-transport holds.
-  test.each(['QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT', 'APP_DELIVERY_HOLD', 'BILLING_PREFERENCES_CHANGED'])('%s reschedules at nextAllowedAt without spending an attempt', async (code) => {
+  test.each(['QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT', 'APP_DELIVERY_HOLD'])('%s reschedules at nextAllowedAt without spending an attempt', async (code) => {
     isWithinSendWindowET.mockReturnValue(true); // guard passed at 19:59...
     const staleRecovery = chain();
     const dueQuery = chain({ rows: [dueRow] });
@@ -410,21 +406,6 @@ describe('processScheduledSends send-window handling', () => {
     expect(updateArgs.scheduled_send_attempts).toBeUndefined();
   });
 
-  test('a BILLING_LEG_RETRY hold spends an attempt so a persistent leg failure stays capped', async () => {
-    isWithinSendWindowET.mockReturnValue(true);
-    const update = chain();
-    db.mockReturnValueOnce(chain())
-      .mockReturnValueOnce(chain({ rows: [{ ...dueRow, scheduled_send_attempts: 1 }] }))
-      .mockReturnValueOnce(chain({ returning: [claimedRow()] }))
-      .mockReturnValueOnce(update);
-    sendSpy.mockResolvedValue({ ok: false, creditApplied: 0,
-      sms: { code: 'BILLING_LEG_RETRY', originalCode: 'PROVIDER_FAILURE', deferred: true, retryable: true,
-        nextAllowedAt: new Date(Date.now() + 300000).toISOString() },
-    });
-    expect(await InvoiceService.processScheduledSends()).toEqual({ sent: 0, failed: 1, deferred: 0 });
-    expect(update.update.mock.calls[0][0]).toMatchObject({ scheduled_send_attempts: 2 });
-  });
-
   test.each([0, 2, 4])('a temporary App failure after %s attempts spends an attempt and applies backoff', async (attempts) => {
     isWithinSendWindowET.mockReturnValue(true);
     const update = chain();
@@ -444,11 +425,7 @@ describe('processScheduledSends send-window handling', () => {
     } finally { jitter.mockRestore(); }
   });
 
-  // BILLING_PREFERENCES_CHANGED (Codex r4 P2 on #4843): invoice.js's
-  // scheduledSmsHeld check now reads the shared REPLAY_HOLD_CODES set — the
-  // whole scheduled send still defers instead of finalizing on a bare email
-  // success.
-  test.each(['QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT', 'APP_DELIVERY_HOLD', 'APP_PROVIDER_RETRY', 'BILLING_PREFERENCES_CHANGED'])('scheduled delivery held by %s skips email so the invoice cannot finalize', async (code) => {
+  test.each(['QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT', 'APP_DELIVERY_HOLD', 'APP_PROVIDER_RETRY'])('scheduled delivery held by %s skips email so the invoice cannot finalize', async (code) => {
     const { sendInvoiceEmail } = require('../services/invoice-email');
     const smsSpy = jest.spyOn(InvoiceService, 'sendViaSMS').mockImplementation(async () => {
       const err = new Error('payment-link SMS blocked: QUIET_HOURS_HOLD');
@@ -754,11 +731,7 @@ describe('processScheduledSends send-window handling', () => {
     }
   });
 
-  // BILLING_PREFERENCES_CHANGED (Codex r4 P2 on #4843): the direct-caller
-  // hold check now reads the shared REPLAY_HOLD_CODES set, so a mid-dispatch
-  // preference-change hold on a direct send still queues the held Text
-  // before the email leg fires.
-  test.each(['QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT', 'APP_DELIVERY_HOLD', 'APP_PROVIDER_RETRY', 'BILLING_PREFERENCES_CHANGED'])('direct delivery held by %s is queued before the email sends', async (code) => {
+  test.each(['QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT', 'APP_DELIVERY_HOLD', 'APP_PROVIDER_RETRY'])('direct delivery held by %s is queued before the email sends', async (code) => {
     const { sendInvoiceEmail } = require('../services/invoice-email');
     const smsSpy = jest.spyOn(InvoiceService, 'sendViaSMS').mockImplementation(async () => {
       const err = new Error('payment-link SMS blocked: QUIET_HOURS_HOLD');
@@ -800,58 +773,6 @@ describe('processScheduledSends send-window handling', () => {
       expect(queuedRow.status).toBe('scheduled');
       expect(queuedRow.scheduled_for).toEqual(WINDOW_OPEN);
       expect(queuedRow.message_body).toContain('https://pay.example/abc');
-    } finally {
-      smsSpy.mockRestore();
-    }
-  });
-
-  // Structural fix (pre-push audit P1 on #4843): the nested sendViaSMS call's
-  // own fan-out generates the authoritative notificationEventKey; this outer
-  // wrapper's requeue must persist THAT key, not just its own hardcoded
-  // `invoice:${id}:sent` guess, so an 8AM scheduler.js replay dedupes an
-  // already-accepted leg (e.g. Email) against the SAME identity instead of
-  // resending it.
-  test('direct delivery held by a hold code persists the fan-out\'s own notificationEventKey when present', async () => {
-    const { sendInvoiceEmail } = require('../services/invoice-email');
-    const smsSpy = jest.spyOn(InvoiceService, 'sendViaSMS').mockImplementation(async () => {
-      const err = new Error('payment-link SMS blocked: QUIET_HOURS_HOLD');
-      err.code = 'QUIET_HOURS_HOLD';
-      err.deferred = true;
-      err.nextAllowedAt = WINDOW_OPEN.toISOString();
-      err.smsBody = 'Hi Pat, your invoice is ready: https://pay.example/abc';
-      err.toPhone = '+19415550123';
-      err.notificationEventKey = 'fanout-authoritative-key';
-      throw err;
-    });
-    try {
-      const draftInvoice = {
-        id: 'inv-1',
-        status: 'draft',
-        customer_id: 'cust-1',
-        payer_id: null,
-        scheduled_request_review: false,
-        scheduled_review_delay_minutes: null,
-      };
-      const requeueInsert = chain();
-      queueMocks(db, [
-        chain({ first: { payer_statement_id: null } }), // accrual pre-check
-        chain({ first: draftInvoice }), // claim read
-        preClaimQueueCheck(),
-        chain({ returning: [{ ...draftInvoice, status: 'sending' }] }), // claim update
-        adoptionNoOp(),
-        chain({ first: undefined }), // requeue idempotency check (no prior row)
-        requeueInsert, // held-SMS scheduled-rail insert
-        chain(), // finalize update
-        chain({ first: null }), // lead-conversion read (permissive)
-      ]);
-
-      const result = await InvoiceService.sendViaSMSAndEmail('inv-1', {});
-
-      expect(sendInvoiceEmail).toHaveBeenCalledTimes(1);
-      expect(result.sms.scheduled).toBe(true);
-      const queuedRow = requeueInsert.insert.mock.calls[0][0];
-      const meta = JSON.parse(queuedRow.metadata);
-      expect(meta.notificationEventKey).toBe('fanout-authoritative-key');
     } finally {
       smsSpy.mockRestore();
     }
