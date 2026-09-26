@@ -22606,7 +22606,7 @@ router.post('/generate-report', async (req, res) => {
       return res.status(500).json({ error: 'AI model not configured' });
     }
 
-    const systemPrompt = `# SERVICE REPORT COPY — SYSTEM PROMPT v3
+    const systemPrompt = `# SERVICE REPORT COPY — SYSTEM PROMPT v4
 
 ## CONTEXT
 
@@ -22629,7 +22629,7 @@ A generic report is a failed report. Build both sections around the concrete det
 
 2. **No overpromising.** Never claim: elimination, eradication, impenetrable, guaranteed, 100%, total protection, pest-free, foolproof. Use language like: reduce activity, manage pressure, support long-term control, limit conducive conditions.
 
-3. **No invented observations.** Only reference conditions, pest types, or findings that appear in the service notes or in a STRUCTURED SERVICE FINDINGS block below (both are technician-recorded for THIS visit) — and a block line's own group decides HOW it may be used per constraint #7: only its "Findings observed" lines are observations. If the inputs say "general pest control" with no specifics, write generally. Do not fabricate sightings. Two narrowly scoped sources may also be used from GROUNDING CONTEXT: tech-confirmed LAWN ASSESSMENT scores are verified findings for this visit and may support their supplied deltas; TREE & SHRUB REVIEWED PHOTO SIGNALS may describe reviewed visual appearances only, with their photo-signal provenance. Tree photo signals never establish a diagnosis, confirmed cause, observed pest species, or completed work. Omitted/hidden signals are unavailable, not healthy or absent.
+3. **No invented observations.** Only present conditions, pest types, or findings as observed on THIS visit when they appear in the service notes or in a STRUCTURED SERVICE FINDINGS block below (both are technician-recorded for THIS visit) — and a block line's own group decides HOW it may be used per constraint #7: only its "Findings observed" lines are observations. If the inputs say "general pest control" with no specifics, do not fabricate sightings. A PRODUCT LABELED COVERAGE block may support a separate product-capability statement under the grounding rules below, but those label examples are never observations, visit targets, or proof that every listed species was treated. Two narrowly scoped sources may also be used from GROUNDING CONTEXT: tech-confirmed LAWN ASSESSMENT scores are verified findings for this visit and may support their supplied deltas; TREE & SHRUB REVIEWED PHOTO SIGNALS may describe reviewed visual appearances only, with their photo-signal provenance. Tree photo signals never establish a diagnosis, confirmed cause, observed pest species, or completed work. Omitted/hidden signals are unavailable, not healthy or absent.
 
 4. **No brand names for products.** Use active ingredient names (fipronil, bifenthrin, imidacloprid, prodiamine, etc.) or functional descriptions (non-repellent residual, insect growth regulator, pre-emergent herbicide, systemic drench). If the active ingredient is not provided in the inputs, use the functional description only. When the copy tells the homeowner to DO something with a product, lead with the plain-language role, not a bare chemical name — "water in today's grub treatment", never "water in the clothianidin".
 
@@ -22666,7 +22666,8 @@ Vary your opening. Rotate how WHAT WE DID begins — sometimes lead with the pes
 ## USING THE GROUNDING CONTEXT (when present)
 
 The GROUNDING CONTEXT block beneath the inputs holds real, customer-specific facts. Use them to make the copy specific — but still obey every hard constraint, and never assert anything the context or notes don't support:
-- **Targets tagged today**: when the context lists the specific targets the technician tagged per product, NAME them in the copy — "ghost ants and big-headed ants along the foundation," "brown patch in the front turf" — instead of generic categories ("ants," "pests," "disease"). For fertilization goals ("iron chlorosis," "nitrogen green-up"), state the nutritional objective in plain words. Use only the tagged names; never invent a species or condition that isn't tagged or noted. A tagged target is what the product was applied to CONTROL — if the observations do not record that pest or condition as seen, frame the application as protection ("targeting chinch bugs ahead of their peak season"), never as activity that was found. Do not write "no concerns were observed" and "the activity we found" about the same visit.
+- **Targets tagged today**: when the context lists the specific targets the technician tagged per product, NAME them in the copy — "ghost ants and big-headed ants along the foundation," "brown patch in the front turf" — instead of generic categories ("ants," "pests," "disease"). For fertilization goals ("iron chlorosis," "nitrogen green-up"), state the nutritional objective in plain words. Use only the tagged names when describing today's targets or findings; never invent a visit target or observed species. A tagged target is what the product was applied to CONTROL — if the observations do not record that pest or condition as seen, frame the application as protection ("targeting chinch bugs ahead of their peak season"), never as activity that was found. Do not write "no concerns were observed" and "the activity we found" about the same visit.
+- **Product labeled coverage**: for a recurring or general pest report, when the separate PRODUCT LABELED COVERAGE block contains approved facts for products selected on this visit, add one concise broader-capability sentence using the phrase "also helps control other labeled crawling pests in the treated areas." You may add only a few examples that appear in that block. Keep them separate from today's tagged targets and observations: they are product capabilities, not pests found or proof each species was treated. Treat the city as context only, never as proof a pest is endemic or present. Never sum overlapping product lists, state a numeric coverage total, or imply termite, rodent, or mosquito service is included merely because a product label names one of those pests.
 - **Prior visits**: do NOT repeat the prior wording — say something fresh, and note what has CHANGED since (an improvement, a recurring pest, a previously-noted concern that has eased). If the same pest recurs across visits, acknowledge it honestly rather than implying it is brand new.
 - **Pest pressure trend**: if it shows real movement, reflect it ("pest pressure has trended down across recent visits") instead of a vague statement. Claim only what the grounding states — do not invent a "first visit" or all-time baseline it doesn't provide.
 - **Weather (at service + recent rain)**: use it to explain a method choice, timing, or rainfast guidance — not as small talk.
@@ -22828,7 +22829,9 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
     // anyone else degrades to a notes-only report (no cross-customer data).
     let groundingCustomerId = null;
     let groundingServiceType = serviceType;
+    let fallbackServiceType = serviceType;
     let groundingServiceDate = serviceDate;
+    let reportPromptContext = { requireCanonical: Boolean(scheduledServiceId) };
     let groundingSuppressPressure = false;
     let typedFindingsBlock = '';
     let authorizedCompanionTypes = [];
@@ -22850,7 +22853,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         // in the projection the flag reads undefined and callback visits on
         // one-time keys would ground differently than /complete scores them
         // (codex P2 r2).
-        .first('id', 'service_id', 'customer_id', 'service_type', 'scheduled_date', 'technician_id', 'is_callback')
+        .first('id', 'service_id', 'service_key_snapshot', 'is_recurring', 'customer_id', 'service_type', 'scheduled_date', 'technician_id', 'is_callback')
         .catch(() => 'lookup_failed');
       // A transient service-row lookup failure on a typed request would leave
       // typedFindingsBlock empty while primaryTypedInput still opens the
@@ -22902,6 +22905,11 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
             retryable: true,
           });
         }
+        // Notes-only generation remains useful during a transient appointment
+        // lookup outage. The canonical identity is unavailable in this branch,
+        // so preserve the established label fallback instead of treating the
+        // unresolved service id as a canonical mismatch.
+        reportPromptContext = { requireCanonical: false };
       } else if (!svc && substantiveTypedFacts) {
         // The row is GONE (deleted concurrently — admins pass the ownership
         // check without an existence check). Typed facts can't be
@@ -22918,6 +22926,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
           // report in the wrong service line and pull unrelated prior-visit context.
           // The service line is derived from this type inside buildReportCopyContext.
           groundingServiceType = svc.service_type || serviceType;
+          fallbackServiceType = groundingServiceType;
           // The scheduled service is the source of truth for the date, so season
           // and trailing-rainfall grounding match the visit, not "today" (the
           // client builds serviceDate from new Date()). Fall back to the client
@@ -22934,6 +22943,27 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
           let profileResolutionFailed = false;
           const completionProfile = await resolveCompletionProfileForScheduledService(svc)
             .catch(() => { profileResolutionFailed = true; return null; });
+          const {
+            serviceKey = null,
+            serviceName = null,
+            findingsType = null,
+            billingType: serviceModel = null,
+            companions = [],
+          } = completionProfile || {};
+          const synthesizedGeneric = completionProfile?.synthesized === true && !serviceKey;
+          reportPromptContext = profileResolutionFailed
+            ? { requireCanonical: false }
+            : {
+              requireCanonical: !synthesizedGeneric,
+              serviceKey,
+              findingsType,
+              serviceModel,
+              isCallback: svc.is_callback === true,
+              isBundled: customerFacingCompanionTypes(companions).length > 0,
+            };
+          if (completionProfile) {
+            fallbackServiceType = serviceName || (serviceKey ? 'scheduled service' : groundingServiceType);
+          }
           // A transient profile-resolution failure must not silently drop
           // the typed/companion facts (empty allowlist -> prose from the
           // primary lane alone) or 409 a legitimate typed request — fail
@@ -23161,10 +23191,21 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
       }
     }
 
+    const { selectReportCopyPrompt } = require('../services/service-report/lawn-report-copy-prompt');
+    const effectiveSystemPrompt = selectReportCopyPrompt(systemPrompt, groundingServiceType, reportPromptContext);
+    if (!effectiveSystemPrompt) {
+      return res.status(503).json({
+        error: 'A report writer could not be matched to this service. Your notes were preserved; review the service profile before generating again.',
+        code: 'report_writer_unavailable',
+        retryable: true,
+      });
+    }
     const fullUserMessage = `${userMessage}${typedFindingsBlock}${contextText}${commsBlock}`;
-    // v6: typed structured findings joined the prompt payload (2026-08-15).
+    // v9: canonical remaining-service modules join the dedicated writers.
+    // Both the selected system
+    // prompt and all visit facts participate in the cache identity.
     const cacheKey = crypto.createHash('sha256')
-      .update(`v6|openai:${primaryModel}|anthropic:${backupModel}|${fullUserMessage}`)
+      .update(`v9|openai:${primaryModel}|anthropic:${backupModel}|${effectiveSystemPrompt}|${fullUserMessage}`)
       .digest('hex');
     const cached = reportCopyCacheGet(cacheKey);
     if (cached) return res.json({ report: cached, cached: true });
@@ -23194,7 +23235,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
       });
     }
     const generated = await generateReportCopyWithFallback({
-      systemPrompt,
+      systemPrompt: effectiveSystemPrompt,
       userMessage: fullUserMessage,
       extraRejection: (text) => (screenTradeNames(text) ? 'trade_name' : null),
     });
@@ -23212,7 +23253,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         });
       }
       const report = buildDeterministicReportCopy({
-        serviceType: groundingServiceType,
+        serviceType: fallbackServiceType,
         areas: promptAreas,
         actions: [...promptActions, ...typedFallbackActions],
         // Typed structured findings ride the fallback as technician work /
