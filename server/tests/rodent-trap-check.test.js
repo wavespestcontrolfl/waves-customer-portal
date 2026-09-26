@@ -125,6 +125,16 @@ describe('rodent trap check allowance', () => {
     expect(byDeclared).toMatchObject({ openerDate: '2026-10-01', visitCount: 1 });
   });
 
+  test('an estimate-linked setup after an office-booked job (no estimate) opens a fresh job', async () => {
+    const rows = [
+      { id: 'a', scheduled_day: '2026-09-01', service_key: 'rodent_trapping', accepted_day: null, source_estimate_id: null },
+      { id: 'b', scheduled_day: '2026-09-08', service_key: 'rodent_trapping_followup', accepted_day: null },
+      { id: 'c', scheduled_day: '2026-10-01', service_key: 'rodent_trapping', accepted_day: '2026-09-29', source_estimate_id: 'e9' },
+    ];
+    const status = await trappingJobStatus(fakeDb(rows), 'c', { premiseMatcher: everyPremise, today: '2026-10-02' });
+    expect(status).toMatchObject({ openerDate: '2026-10-01', visitCount: 1, grandfathered: false, nextVisitBillable: false });
+  });
+
   test('a combo package opens a fresh job', async () => {
     const rows = [
       { id: 'a', scheduled_day: '2026-09-01', service_key: 'rodent_trapping', accepted_day: '2026-08-30' },

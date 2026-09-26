@@ -22,9 +22,14 @@
  * Every copy change is value-guarded: a row an admin has edited since the
  * prior migration is left alone, and down() only reverts what up() recorded
  * changing (state in system_settings, same pattern as 20260826000006).
+ * Rollback never destroys service identity: a $95 row that visits already
+ * reference is kept and deactivated (not deleted), and a re-run of up()
+ * revives that same row.
  */
 const MIGRATION_TAG = 'migration:20260927000001';
 const STATE_KEY = 'migration.20260927000001.state';
+// Set by a rollback that had to keep the referenced $95 row (deactivated).
+const KEPT_KEY = 'migration.20260927000001.kept_service_id';
 const UP_REASON = 'Rodent trapping: $350 covers setup + 1 trap check; extra checks are the $95 Rodent Trap Check - Additional row (owner ruling 2026-09-26)';
 
 const NEW_KEY = 'rodent_trap_check_additional';
@@ -82,6 +87,18 @@ async function saveState(knex, state) {
   const value = JSON.stringify(state);
   const updated = await knex('system_settings').where({ key: STATE_KEY }).update({ value });
   if (!updated) await knex('system_settings').insert({ key: STATE_KEY, value });
+}
+
+async function readSetting(knex, key) {
+  if (!(await knex.schema.hasTable('system_settings'))) return null;
+  const row = await knex('system_settings').where({ key }).first();
+  return row ? row.value : null;
+}
+
+async function writeSetting(knex, key, value) {
+  if (!(await knex.schema.hasTable('system_settings'))) return;
+  const updated = await knex('system_settings').where({ key }).update({ value });
+  if (!updated) await knex('system_settings').insert({ key, value });
 }
 
 async function existingColumns(knex, table, row) {
@@ -153,7 +170,16 @@ exports.up = async function up(knex) {
   state.copyChanges = copyChanges;
 
   // 3. The $95 row.
-  const existing = await knex('services').where({ service_key: NEW_KEY }).first('id');
+  const existing = await knex('services').where({ service_key: NEW_KEY }).first('id', 'is_active');
+  const keptId = await readSetting(knex, KEPT_KEY);
+  if (existing && existing.is_active === false && keptId === String(existing.id)) {
+    // Kept (deactivated) by an earlier rollback because visits reference it:
+    // bring the same identity back rather than seeding a second row. A row
+    // an admin deactivated is never touched.
+    await knex('services').where({ id: existing.id }).update({ is_active: true, updated_at: knex.fn.now() });
+    await knex('system_settings').where({ key: KEPT_KEY }).del();
+    state.reactivatedServiceId = existing.id;
+  }
   if (!existing) {
     const insertRow = await existingColumns(knex, 'services', NEW_SERVICE_ROW);
     const [inserted] = await knex('services').insert(insertRow).returning('id');
@@ -186,23 +212,35 @@ exports.down = async function down(knex) {
   const state = await loadState(knex);
   if (!state) return;
 
-  if (state.profileInserted && await knex.schema.hasTable('service_completion_profiles')) {
-    await knex('service_completion_profiles').where({ service_key: NEW_KEY }).del();
+  // Non-destructive rollback: once the $95 row is referenced (booked,
+  // completed, invoiced), its id is the service identity of real visits —
+  // deleting or re-seeding it would orphan them. A referenced row and its
+  // completion profile are kept and only deactivated; an unused row is
+  // removed with its profile.
+  let keepInsertedRow = false;
+  const ownedServiceId = state.insertedServiceId || state.reactivatedServiceId;
+  if (ownedServiceId && await knex.schema.hasTable('services')) {
+    const row = await knex('services').where({ id: ownedServiceId, service_key: NEW_KEY }).first('id');
+    if (row) {
+      for (const table of ['scheduled_services', 'scheduled_service_addons', 'service_records']) {
+        if (keepInsertedRow) break;
+        if (await knex.schema.hasColumn(table, 'service_id')) {
+          keepInsertedRow = Boolean(await knex(table).where({ service_id: row.id }).first('service_id'));
+        }
+      }
+      if (keepInsertedRow) {
+        await knex('services').where({ id: row.id }).update({ is_active: false, updated_at: knex.fn.now() });
+        await writeSetting(knex, KEPT_KEY, String(row.id));
+      } else {
+        if (state.profileInserted && await knex.schema.hasTable('service_completion_profiles')) {
+          await knex('service_completion_profiles').where({ service_key: NEW_KEY }).del();
+        }
+        await knex('services').where({ id: row.id }).del();
+      }
+    }
   }
 
   if (await knex.schema.hasTable('services')) {
-    if (state.insertedServiceId) {
-      const ids = await knex('services').where({ id: state.insertedServiceId, service_key: NEW_KEY }).pluck('id');
-      if (ids.length) {
-        if (await knex.schema.hasColumn('scheduled_services', 'service_id')) {
-          await knex('scheduled_services').whereIn('service_id', ids).update({ service_id: null });
-        }
-        if (await knex.schema.hasColumn('service_records', 'service_id')) {
-          await knex('service_records').whereIn('service_id', ids).update({ service_id: null });
-        }
-        await knex('services').whereIn('id', ids).del();
-      }
-    }
     for (const change of state.copyChanges || []) {
       const [from, to] = change.key === 'rodent_trapping'
         ? [TRAPPING_DESCRIPTION, PRIOR_TRAPPING_DESCRIPTION]

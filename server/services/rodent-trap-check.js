@@ -102,7 +102,7 @@ async function declaredTypes(db, scheduledIds) {
 // Split the customer's trapping visits (ascending) into jobs. A visit opens
 // a new job when it is a conclusive opener, or a plain rodent_trapping row
 // with opener evidence (tech-declared "Initial setup", or a source estimate
-// different from the running job's), or when the gap from the previous
+// other than the running job's — including a job booked without one), or when the gap from the previous
 // visit exceeds JOB_GAP_DAYS. Check evidence — a check-only SKU, a
 // dispatched follow-up link, or a declared "Follow-up check" — never
 // opens a job, so a plain rodent_trapping check cannot reset the count.
@@ -122,14 +122,15 @@ function sliceJobs(visits, declared) {
         declaredType === 'initial'
         || !prev
         || gapBreak
-        || (v.source_estimate_id && current?.estimateId && v.source_estimate_id !== current.estimateId)
+        // A booking from an accepted estimate other than the running job's
+        // (or the running job had none — an office-booked job) is a new sale.
+        || (v.source_estimate_id && v.source_estimate_id !== current?.estimateId)
       ))
     );
     if (gapBreak || openerEvidence) {
       current = { opener: openerEvidence ? v : null, estimateId: v.source_estimate_id || null, visits: [] };
       jobs.push(current);
     }
-    if (!current.estimateId && v.source_estimate_id) current.estimateId = v.source_estimate_id;
     current.visits.push(v);
   }
   return jobs;

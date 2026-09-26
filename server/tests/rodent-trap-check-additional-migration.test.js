@@ -63,6 +63,7 @@ const seedDb = () => ({
     active: true, notes: '[rodent_graduation_action=graduated]',
   }],
   scheduled_services: [],
+  scheduled_service_addons: [],
   service_records: [],
   system_settings: [],
 });
@@ -131,5 +132,32 @@ describe('20260927000001 rodent trap check additional', () => {
   test('missing tables are a no-op', async () => {
     await expect(migration.up(fakeKnex({}))).resolves.toBeUndefined();
     await expect(migration.down(fakeKnex({}))).resolves.toBeUndefined();
+  });
+
+  test('rollback keeps a referenced $95 row (deactivated) and a re-run revives the same identity', async () => {
+    const db = seedDb();
+    const knex = fakeKnex(db);
+    await migration.up(knex);
+    const row = svc(db, 'rodent_trap_check_additional');
+    db.scheduled_services.push({ id: 'ss-1', service_id: row.id });
+
+    await migration.down(knex);
+    expect(svc(db, 'rodent_trap_check_additional')).toMatchObject({ id: row.id, is_active: false });
+    expect(db.scheduled_services[0].service_id).toBe(row.id);
+    expect(db.service_completion_profiles.some((p) => p.service_key === 'rodent_trap_check_additional')).toBe(true);
+    expect(cfg(db).included_followups).toBe('unlimited');
+
+    await migration.up(knex);
+    const rows = db.services.filter((r) => r.service_key === 'rodent_trap_check_additional');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ id: row.id, is_active: true });
+    expect(db.system_settings.some((r) => r.key === 'migration.20260927000001.kept_service_id')).toBe(false);
+  });
+
+  test('an admin-deactivated row is never revived', async () => {
+    const db = seedDb();
+    db.services.push({ id: 'svc-admin', service_key: 'rodent_trap_check_additional', is_active: false });
+    await migration.up(fakeKnex(db));
+    expect(svc(db, 'rodent_trap_check_additional')).toMatchObject({ id: 'svc-admin', is_active: false });
   });
 });
