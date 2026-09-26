@@ -103,8 +103,10 @@ function sendSessionEvents(sessionId, events, deadline) {
 }
 
 // A local tool call cannot be cancelled, but the run stops waiting for it at
-// the deadline and starts no further tool after it. Side-effecting tools
-// (SIDE_EFFECT_DONE) are never raced — see executeToolUse.
+// the deadline and starts no further tool after it. That includes the two
+// side effects: a send abandoned in flight cannot become a second text,
+// because the owner text is claimed once per ET week before it is sent
+// (bi-briefing-sms.js), and a saved report row is this run's own record.
 async function withinDeadline(promise, sessionId, deadline) {
   let timer;
   const expired = new Promise((_, reject) => {
@@ -191,7 +193,10 @@ function frameText(data) {
 // calls, runs a tool use id once, and completes each side-effecting tool (the
 // SMS to the owner, the saved report) at most once — a looping session must
 // not text the owner repeatedly or stack duplicate reports. A side effect
-// counts as done only when it actually happened.
+// counts as done only when it actually happened. This set is per run; the
+// once-per-ET-week guarantee for the owner text across runs and instances is
+// the durable claim in bi-briefing-sms.js, and the Monday cron itself runs
+// under runExclusive (scheduler.js).
 const MAX_TOOL_CALLS = 30;
 const SIDE_EFFECT_DONE = {
   send_briefing_sms: (result) => result?.sent === true,
@@ -202,20 +207,29 @@ const RECORDED_FAILURES = new Set(['session_timeout', 'max_tool_calls']);
 
 // Executes every pending custom tool use a requires_action idle names, then
 // replies to ALL of them in ONE POST (the protocol requires the whole batch
-// in a single events call, not one per tool). An id with no pending entry is
-// logged and skipped — the run still sends the results it does have rather
-// than hanging on a name it never saw registered.
-async function runRequiresActionBatch(sessionId, deadline, eventIds, pendingCustomToolUses, executeToolUse) {
+// in a single events call, not one per tool). An id this run already
+// answered gets its cached result event again — the session is waiting on
+// it, and the tool is never re-run (Codex r4). An id with neither a pending
+// entry nor a cached answer is logged and skipped — the run still sends the
+// results it does have rather than hanging on a name it never saw registered.
+async function runRequiresActionBatch(sessionId, deadline, eventIds, pendingCustomToolUses, executeToolUse, answeredResults) {
   const toolResultEvents = [];
-  for (const toolUseId of eventIds) {
+  for (const toolUseId of new Set(eventIds)) {
     const pending = pendingCustomToolUses.get(toolUseId);
     if (!pending) {
+      const cached = answeredResults.get(toolUseId);
+      if (cached) {
+        toolResultEvents.push(cached);
+        continue;
+      }
       logger.error(`[bi-agent] Missing pending custom tool use for required event ${toolUseId}`);
       continue;
     }
     pendingCustomToolUses.delete(toolUseId);
     const { toolResult, threw } = await executeToolUse(toolUseId, pending.toolName, pending.toolInput);
-    toolResultEvents.push(buildToolResultEvent(toolUseId, toolResult, threw));
+    const resultEvent = buildToolResultEvent(toolUseId, toolResult, threw);
+    answeredResults.set(toolUseId, resultEvent);
+    toolResultEvents.push(resultEvent);
   }
   if (toolResultEvents.length) await sendSessionEvents(sessionId, toolResultEvents, deadline);
 }
@@ -275,6 +289,7 @@ const BIAgent = {
 
     const pendingCustomToolUses = new Map();
     const resolvedToolUseIds = new Set();
+    const answeredResults = new Map();
     const completedSideEffects = new Set();
     let toolCalls = 0;
 
@@ -286,7 +301,7 @@ const BIAgent = {
         logger.error(`[bi-agent] Tool ${data?.name || '(unknown)'} (${data?.type || event}) missing tool use id in session ${sessionId}`);
         return;
       }
-      if (resolvedToolUseIds.has(toolUseId)) return; // a repeated request for a call already answered
+      if (resolvedToolUseIds.has(toolUseId)) return; // already answered — the batch resends the cached result
       pendingCustomToolUses.set(toolUseId, { toolName: data.name, toolInput: data.input || {} });
     };
 
@@ -299,18 +314,18 @@ const BIAgent = {
       if (completedSideEffects.has(toolName)) {
         return { toolResult: { skipped: true, reason: `${toolName} already completed in this briefing` }, threw: false };
       }
+      // A report-only run (skipSMS) never reaches the send, even if the model
+      // asks: it must not text the owner or use up the week's briefing text.
+      if (opts.skipSMS && toolName === 'send_briefing_sms') {
+        return { toolResult: { skipped: true, reason: 'This run is report-only; do not send the SMS.' }, threw: false };
+      }
       notify('pulling', `Tool: ${toolName}`);
       logger.info(`[bi-agent] Tool: ${toolName}`);
 
       let toolResult;
       let threw = false;
       try {
-        // The owner SMS and the saved report are awaited to completion even
-        // past the deadline: they cannot be cancelled, and returning while one
-        // is still in flight would let a retried run duplicate it (Codex P2
-        // r3). The deadline still ends the run at the next reply or frame.
-        const call = executeBITool(toolName, toolInput);
-        toolResult = SIDE_EFFECT_DONE[toolName] ? await call : await withinDeadline(call, sessionId, deadline);
+        toolResult = await withinDeadline(executeBITool(toolName, toolInput), sessionId, deadline);
       } catch (err) {
         if (err?.code === 'session_timeout') throw err;
         toolResult = { error: `Tool failed: ${err.message}` };
@@ -333,7 +348,7 @@ const BIAgent = {
         const frame = classifyFrame(event, data);
         if (frame.kind === 'text') report += frameText(data);
         else if (frame.kind === 'tool_use') registerToolUse(event, data);
-        else if (frame.kind === 'requires_action') await runRequiresActionBatch(sessionId, deadline, frame.eventIds, pendingCustomToolUses, executeToolUse);
+        else if (frame.kind === 'requires_action') await runRequiresActionBatch(sessionId, deadline, frame.eventIds, pendingCustomToolUses, executeToolUse, answeredResults);
         else if (frame.kind === 'failed') {
           logger.error(`[bi-agent] Session ${sessionId} failed: ${frame.failure} ${frame.detail || ''}`);
           failure = frame.failure;

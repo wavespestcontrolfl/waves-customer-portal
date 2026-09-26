@@ -2133,11 +2133,17 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // WEEKLY MONDAY 5:00AM — BI Briefing Agent (Monday morning SMS to Adam)
+  // runExclusive: a Railway deploy overlap fires this tick on both
+  // instances; the second skips (lease_held) instead of starting a second
+  // paid session and saving a second report. The owner text is also claimed
+  // once per ET week inside the tool (bi-briefing-sms.js).
   cron.schedule('0 5 * * 1', async () => {
     logger.info('Running: Weekly BI Briefing Agent');
     try {
-      const BIAgent = require('./bi-agent');
-      await BIAgent.run();
+      await runExclusive('bi-weekly-briefing', async () => {
+        const BIAgent = require('./bi-agent');
+        await BIAgent.run();
+      });
     } catch (err) {
       logger.error(`BI Briefing Agent failed: ${err.message}`);
     }

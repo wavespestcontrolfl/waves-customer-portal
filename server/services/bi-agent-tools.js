@@ -417,32 +417,9 @@ async function executeBITool(toolName, input) {
     }
 
     case 'send_briefing_sms': {
-      if (!process.env.ADAM_PHONE) return { error: 'ADAM_PHONE not set' };
-
-      // Internal-audience send. Routed through the wrapper so the BI
-      // SMS gets the same audit trail as customer/lead messages, but
-      // the policy profile for purpose='internal_briefing' allows
-      // emoji + dollar amounts + 3-segment bodies (the BI Monday SMS
-      // intentionally uses 📊 ↑ ↓ and quotes MRR / revenue figures).
-      // identityTrustLevel='admin_operator' is required for the
-      // internal_briefing policy row.
-      const { sendCustomerMessage } = require('./messaging/send-customer-message');
-      const result = await sendCustomerMessage({
-        to: process.env.ADAM_PHONE,
-        body: input.message,
-        channel: 'sms',
-        audience: 'internal',
-        purpose: 'internal_briefing',
-        identityTrustLevel: 'admin_operator',
-        entryPoint: 'bi_agent_send_briefing_sms',
-      });
-
-      if (result.sent) {
-        logger.info(`[bi-agent] Monday briefing SMS sent (segs=${result.segmentCount}, encoding=${result.encoding})`);
-        return { sent: true, segmentCount: result.segmentCount, encoding: result.encoding };
-      }
-      logger.warn(`[bi-agent] Briefing SMS BLOCKED: ${result.code} — ${result.reason}`);
-      return { sent: false, blocked: !!result.blocked, code: result.code, reason: result.reason };
+      // At most once per ET week, across runs and instances (bi-briefing-sms.js).
+      const { sendBriefingSmsOnce } = require('./bi-briefing-sms');
+      return sendBriefingSmsOnce(input.message);
     }
 
     case 'save_weekly_report': {

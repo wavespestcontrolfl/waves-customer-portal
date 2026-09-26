@@ -429,7 +429,7 @@ describe('bi-agent — current managed agents protocol', () => {
     expect(mockRecordSessionUsage).not.toHaveBeenCalled(); // no session, nothing to bill
   });
 
-  it('a repeated request for a tool use id already answered is not executed again', async () => {
+  it('a repeated request for a tool use id already answered is not executed again, and its cached result is resent (Codex r4)', async () => {
     mockExecuteBITool.mockImplementation(async (name) => ({ ok: true, tool: name }));
     global.fetch = fetchFor([
       customToolUse('tool-1', 'get_revenue_snapshot'),
@@ -441,24 +441,59 @@ describe('bi-agent — current managed agents protocol', () => {
     const result = await load(path).run({ skipSMS: true });
     expect(mockExecuteBITool).toHaveBeenCalledTimes(1);
     expect(result.toolsExecuted).toEqual(['get_revenue_snapshot']);
+    // Both requires_action idles got an answer for tool-1, and the second is
+    // the identical cached event — the session is never left waiting.
+    const answers = postsSent()
+      .map(p => (p.body.events || []).filter(e => e.type === 'user.custom_tool_result' && e.custom_tool_use_id === 'tool-1'))
+      .filter(list => list.length);
+    expect(answers).toHaveLength(2);
+    expect(answers[0]).toHaveLength(1);
+    expect(answers[1]).toEqual(answers[0]);
   });
 
-  it('an owner SMS still in flight at the deadline is awaited before the run returns (no background send)', async () => {
+  it('an id named twice in one requires_action idle is executed and answered once', async () => {
+    mockExecuteBITool.mockImplementation(async (name) => ({ ok: true, tool: name }));
+    global.fetch = fetchFor([
+      customToolUse('tool-1', 'get_revenue_snapshot'),
+      idle('requires_action', ['tool-1', 'tool-1']),
+      { event: 'done', data: {} },
+    ]);
+    await load(path).run({ skipSMS: true });
+    expect(mockExecuteBITool).toHaveBeenCalledTimes(1);
+    const answers = postsSent().flatMap(p => p.body.events || []).filter(e => e.custom_tool_use_id === 'tool-1');
+    expect(answers).toHaveLength(1);
+  });
+
+  it('a report-only run (skipSMS) never executes send_briefing_sms, even when the model asks', async () => {
+    mockExecuteBITool.mockImplementation(async (name) => ({ ok: true, tool: name }));
+    global.fetch = fetchFor([
+      customToolUse('tool-1', 'send_briefing_sms', { message: 'hi' }),
+      idle('requires_action', ['tool-1']),
+      { event: 'done', data: {} },
+    ]);
+    const result = await load(path).run({ skipSMS: true });
+    expect(mockExecuteBITool).not.toHaveBeenCalled();
+    expect(result.smsSent).toBe(false);
+    const answer = postsSent().flatMap(p => p.body.events || []).find(e => e.custom_tool_use_id === 'tool-1');
+    expect(JSON.parse(answer.content[0].text)).toMatchObject({ skipped: true });
+  });
+
+  it('a side-effecting tool still in flight at the deadline does not hold the run past it (Codex r4)', async () => {
+    // The send never settles. The run still ends at the deadline; a second
+    // text is prevented by the tool's once-per-week claim
+    // (bi-briefing-sms.test.js), not by waiting here.
     process.env.BI_AGENT_TIMEOUT_MS = '50';
-    let settled = false;
-    // The send finishes after the deadline (this suite pins Date.now, so the
-    // tool advances the clock itself).
-    mockExecuteBITool.mockImplementation(() => new Promise((resolve) => setTimeout(() => { now += 1000; settled = true; resolve({ sent: true }); }, 150)));
+    mockExecuteBITool.mockImplementation(() => new Promise(() => {}));
     const { fetchMock } = fetchWithOpenStream({
-      frames: [customToolUse('tool-1', 'send_briefing_sms'), idle('requires_action', ['tool-1'])],
+      frames: [customToolUse('tool-1', 'send_briefing_sms', { message: 'hi' }), idle('requires_action', ['tool-1'])],
       onEventsPost: () => Promise.resolve({ ok: true, status: 200, json: async () => ({}) }),
     });
     global.fetch = fetchMock;
 
     const result = await load(path).run({});
-    expect(settled).toBe(true);
+    expect(mockExecuteBITool).toHaveBeenCalledTimes(1);
     expect(recorded()).toMatchObject({ failure: 'session_timeout' });
-    expect(result.smsSent).toBe(true);
+    expect(result.smsSent).toBe(false);
   });
 
   it('the owner SMS is sent at most once per briefing — a second request is answered as skipped', async () => {
