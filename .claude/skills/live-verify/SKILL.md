@@ -42,6 +42,12 @@ one, compares it with the merge-base, and records what actually happened.
   process, never on a shared deployment. The managed runner drops every
   `GATE_*` you export, so a gate-on run on `npm run dev` silently runs
   gate-off.
+- Never run the repo's operational scripts (`server/scripts/*`,
+  `scripts/*` backfills and audits) as a scenario: many call `dotenv`
+  directly. Write the scenario script under `.tmp/live-verify/` and require
+  the service modules it exercises.
+- Targeted tests also run through the launcher, with jest bounded
+  (`--runInBand`, or `-w 2` for a broad pattern).
 
 ## Safe launcher
 
@@ -49,12 +55,17 @@ Copy this to `.tmp/live-verify/qa-env.sh` and run every direct-execution
 script, job run, tool call, and gate-on server through it. It passes the
 same allowlist as the managed runner (`scripts/dev/context.js`
 `childEnvironment`), refuses anything but a dev/preview/test selection,
-and takes extra `NAME=value` pairs, for example
+refuses a checkout that has a `.env` (application modules skip it under
+`WAVES_LOCAL_DEV=1`, but a module or script that calls `dotenv` itself
+would load provider keys from it), and takes extra `NAME=value` pairs, for example
 `sh .tmp/live-verify/qa-env.sh GATE_FOO=true node .tmp/live-verify/run.js`.
 
 ```sh
 #!/bin/sh
 set -eu
+for f in .env server/.env; do
+  [ ! -e "$f" ] || { echo "refusing: $f exists and scripts can load it" >&2; exit 1; }
+done
 set -a; . ./.tmp/dev/database.env; set +a
 case "${WAVES_DATABASE_ENVIRONMENT:-}" in development|preview|test) ;;
   *) echo "refusing: database.env is not development/preview/test" >&2; exit 1 ;; esac
@@ -66,7 +77,6 @@ exec env -i PATH="$PATH" HOME="$HOME" TMPDIR="${TMPDIR:-/tmp}" \
 Run it from the worktree root after `qa:database`, so `DATABASE_URL` is
 this worktree's private QA database. A gate-on server run adds `PORT`,
 `JWT_SECRET`, and `CLIENT_URL` pairs and starts `node server/index.js`.
-- Bound jest (`--runInBand`, or `-w 2` for a broad pattern).
 
 ## Evidence ladder
 
