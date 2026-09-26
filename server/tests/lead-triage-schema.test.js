@@ -134,39 +134,41 @@ describe('aiTriageLead — a signature-only suggestion is a failed answer', () =
 });
 
 // Codex r2 on #4975: the shared stripper knows only the Waves signers, so a
-// sign-off by any other name must still fail the answer rather than pass as
-// "unsigned".
-describe('aiTriageLead — a sign-off by any name fails the answer', () => {
+// sign-off by any other name is stripped too — in signature context only.
+describe('aiTriageLead — a sign-off by any name is removed', () => {
   const prevKey = process.env.ANTHROPIC_API_KEY;
-  beforeEach(() => { process.env.ANTHROPIC_API_KEY = 'test-key'; mockCreate.mockReset(); ledgerCallRejected.mockClear(); rejectCall.mockClear(); dispatch.mockReset(); });
+  beforeEach(() => { process.env.ANTHROPIC_API_KEY = 'test-key'; mockCreate.mockReset(); ledgerCallRejected.mockClear(); rejectCall.mockClear(); dispatch.mockReset(); dispatch.mockResolvedValue({ ok: false, reason: 'openai_timeout' }); });
   afterAll(() => { if (prevKey === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = prevKey; });
 
   test.each([
-    'We can help. — Sarah',
-    '— Sarah',
-    'We can help.\n\nSarah',
-    'We can help.\n\nSarah, Waves Team',
-  ])('a fallback suggestion signed %j returns null and fails the row', async (suggestedReply) => {
-    dispatch.mockResolvedValue({ ok: false, reason: 'openai_timeout' });
+    ['We can help. — Sarah', 'We can help.'],
+    ['We can help!\n— Sarah', 'We can help!'],
+    ['We can help.\n\nSarah', 'We can help.'],
+    ['We can help.\n\nSarah Jones, Waves Team', 'We can help.'],
+  ])('%j is stripped to %j and the triage kept', async (suggestedReply, expected) => {
     mockCreate.mockResolvedValue(reply({ ...VALID, suggestedReply }));
-    expect(await aiTriageLead(LEAD)).toBeNull();
-    expect(ledgerCallRejected).toHaveBeenCalledWith(expect.anything(), 'schema_invalid');
+    const out = await aiTriageLead(LEAD);
+    expect(out).toMatchObject({ suggestedReply: expected, urgency: VALID.urgency });
+    expect(ledgerCallRejected).not.toHaveBeenCalled();
   });
 
-  test('a primary suggestion signed by another name fails its row and the fallback answers', async () => {
-    dispatch.mockResolvedValueOnce({ ok: true, json: { ...VALID, suggestedReply: 'We can help. — Sarah' } });
+  test('a reply that is only a sign-off is blank: the primary fails its row and the fallback answers', async () => {
+    dispatch.mockResolvedValueOnce({ ok: true, json: { ...VALID, suggestedReply: '— Sarah' } });
     mockCreate.mockResolvedValue(reply(VALID));
     expect((await aiTriageLead(LEAD)).suggestedReply).toBe(VALID.suggestedReply);
     expect(rejectCall).toHaveBeenCalledWith(expect.anything(), 'schema_invalid');
   });
 
+  // Pre-push audit on #4975: ordinary text that looked name-shaped.
   test.each([
+    'Which pests are you seeing?\nAnts, roaches, or something else?',
+    'We serve your area — Sarasota.',
     'Totally — Tuesday works.',
     'We can help — call us at (941) 318-7612.',
     'See you Tuesday — Mike will be your tech.',
+    'Hi! — Mike from Waves will call you.',
     'Thanks, Sarah!',
-  ])('a dash or name inside the message is not a sign-off: %j', async (suggestedReply) => {
-    dispatch.mockResolvedValue({ ok: false, reason: 'openai_timeout' });
+  ])('ordinary text is kept as written: %j', async (suggestedReply) => {
     mockCreate.mockResolvedValue(reply({ ...VALID, suggestedReply }));
     expect((await aiTriageLead(LEAD)).suggestedReply).toBe(suggestedReply);
   });

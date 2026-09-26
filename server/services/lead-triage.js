@@ -36,18 +36,6 @@ const strOrNull = (v) => v === null || typeof v === 'string';
 // one into null, leaving the lead with no classification or reply while the
 // row read success (Codex r16 on #4884) — so they must be non-blank.
 const nonBlank = (v) => typeof v === 'string' && v.trim() !== '';
-// A sign-off by ANY name, left after the shared stripper (which knows only
-// the Waves signers): a dash-led capitalized name — "— Sarah", "— Sarah,
-// Waves Team" — or a last line that is only a capitalized name. Such a reply
-// is rejected, not guessed at: the other provider gets a turn, and a signed
-// fallback leaves no suggestion (Codex r2 on #4975). A dash inside a sentence
-// ("Totally — Tuesday works.") is untouched.
-const NAME = "[A-Z][\\p{L}'.-]*(?:\\s+[A-Z][\\p{L}'.-]*){0,2}";
-const SIGN_OFF_TAIL_RES = [
-  new RegExp(`(?:^|\\s)[—–-]{1,2}\\s*${NAME}(?:\\s*,\\s*[^\\n]{1,40})?[\\s!.🌊]*$`, 'u'),
-  new RegExp(`\\n\\s*${NAME}(?:\\s*,\\s*[^\\n]{1,40})?[\\s!.🌊]*$`, 'u'),
-];
-const hasSignOffTail = (text) => SIGN_OFF_TAIL_RES.some((re) => re.test(text.trim()));
 function triageMatchesSchema(t) {
   if (!t || typeof t !== 'object' || Array.isArray(t)) return false;
   const x = t.extractedData;
@@ -55,7 +43,7 @@ function triageMatchesSchema(t) {
   // longer one failed the async lead update after acceptance (Codex r20).
   return nonBlank(t.serviceInterest) && t.serviceInterest.trim().length <= 255
     && TRIAGE_SCHEMA.properties.urgency.enum.includes(t.urgency)
-    && nonBlank(t.suggestedReply) && !hasSignOffTail(t.suggestedReply)
+    && nonBlank(t.suggestedReply)
     && !!x && typeof x === 'object' && !Array.isArray(x)
     && strOrNull(x.pestType) && strOrNull(x.location) && strOrNull(x.propertyType);
 }
@@ -67,9 +55,25 @@ function triageMatchesSchema(t) {
 // triageMatchesSchema, so a suggestion that was only a signature ("— Adam")
 // is a blank reply there — a failed answer that falls back — instead of a
 // successful triage with no reply (Codex r1 on #4975).
+// The shared stripper knows only the Waves signers, so a sign-off by any
+// other name ("— Sarah", "Sarah, Waves Team" on its own last line) is removed
+// here too (Codex r2 on #4975). Only a signature context counts: a dash right
+// after a sentence end or at the start of the last line, or a last line that
+// is only a name — one or two capitalized words, optionally ", <Company>" in
+// capitalized words. A dash inside a sentence ("We serve your area —
+// Sarasota.") or a list line ("Ants, roaches, or something else?") is text.
+const NAME_TOKEN = "[A-Z][\\p{L}'-]+";
+const SIGN_OFF_TAIL = `${NAME_TOKEN}(?:\\s+${NAME_TOKEN})?(?:\\s*,\\s*${NAME_TOKEN}(?:\\s+${NAME_TOKEN}){0,3})?\\s*[!.🌊]?\\s*$`;
+const DASH_SIGN_OFF_RE = new RegExp(`(^|[.!?])\\s*[—–-]{1,2}\\s*${SIGN_OFF_TAIL}`, 'u');
+const LINE_SIGN_OFF_RE = new RegExp(`\\n\\s*(?:[—–-]{1,2}\\s*)?${SIGN_OFF_TAIL}`, 'u');
+function stripAnySignOff(text) {
+  return text.trim().replace(DASH_SIGN_OFF_RE, '$1').replace(LINE_SIGN_OFF_RE, '').trim();
+}
+
 function unsignedTriage(parsed, firstName) {
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || typeof parsed.suggestedReply !== 'string') return parsed;
-  return { ...parsed, suggestedReply: stripTrailingSignature(parsed.suggestedReply, { addresseeFirstName: firstName }) };
+  const known = stripTrailingSignature(parsed.suggestedReply, { addresseeFirstName: firstName });
+  return { ...parsed, suggestedReply: stripAnySignOff(known) };
 }
 
 function mapTriage(parsed) {
