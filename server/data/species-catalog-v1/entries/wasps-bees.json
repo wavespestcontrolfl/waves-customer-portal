@@ -345,7 +345,9 @@
       "honey bees",
       "honeybee",
       "bee swarm",
-      "bees"
+      "honeybees",
+      "honey bee swarm",
+      "honeybee swarm"
     ],
     "scientific_name": "Apis mellifera",
     "rank": "species",
@@ -447,7 +449,11 @@
     "aliases": [
       "honey bee colony",
       "bees in the wall",
-      "honey bee hive"
+      "honey bee hive",
+      "honey bee",
+      "honey bees",
+      "honeybee",
+      "honeybees"
     ],
     "scientific_name": "Apis mellifera",
     "rank": "species",

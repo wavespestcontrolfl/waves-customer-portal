@@ -299,6 +299,14 @@ describe('name collisions', () => {
     const result = catalog.resolveName('Apis mellifera');
     expect(result.node).toMatchObject({ level: 'subgroup', id: 'bees' });
   });
+
+  test('a plain "honey bee" never assumes a swarm; the specific situation still resolves', () => {
+    for (const q of ['honey bee', 'honey bees', 'I found honey bees']) {
+      expect(catalog.resolveName(q).node).toMatchObject({ level: 'subgroup', id: 'bees' });
+    }
+    expect(catalog.resolveName('a honey bee swarm on the fence').node.slug).toBe('honey-bee-swarm');
+    expect(catalog.resolveName('honey bee wall colony').node.slug).toBe('honey-bee-wall-colony');
+  });
 });
 
 describe('legacy slug map (v1 PEST_LIBRARY → v2 catalog)', () => {
