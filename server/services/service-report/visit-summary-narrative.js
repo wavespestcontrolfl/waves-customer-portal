@@ -27,9 +27,9 @@ const { dispatchWithFallback } = require('../llm/call');
 const { findBannedCustomerCopy } = require('./activity-indicators');
 const { appointmentClaimProblems } = require('./next-visit-claims');
 
-// v4: reviewed recurring-pest evidence/scope contract, authoritative
-// structured next-visit handling, and deterministic zero-pressure scope.
-const PROMPT_VERSION = 'pest_visit_summary_narrative_v4';
+// v5: preserve authoritative empty schedules and require technician evidence
+// before turning a zero pressure score into an inspection assertion.
+const PROMPT_VERSION = 'pest_visit_summary_narrative_v5';
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const _cache = new Map();
 
@@ -59,12 +59,16 @@ function cleanText(value) {
   return String(value || '').replace(/\s+/g, ' ').trim();
 }
 
-const APPOINTMENT_DATE = '(?:(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),?\\s+)?(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\\s+\\d{1,2}(?:st|nd|rd|th)?\\b(?:,?\\s+\\d{4})?';
+function cleanTextOrNull(value) {
+  return cleanText(value) || null;
+}
+
+const APPOINTMENT_DATE = '(?:(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),?\\s+)?(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\\s+\\d{1,2}(?:st|nd|rd|th)?\\b(?:\\s*,?\\s*(?:(?:in|of)\\s+)?\\(?\\d{4}\\)?)?';
 const APPOINTMENT_TIME = '\\d{1,2}(?::\\d{2})?\\s*(?:a\\.?m\\.?|p\\.?m\\.?)';
 const APPOINTMENT_WINDOW = `\\d{1,2}(?::\\d{2})?(?:\\s*(?:a\\.?m\\.?|p\\.?m\\.?))?\\s*(?:–|—|-|to)\\s*${APPOINTMENT_TIME}`;
 const APPOINTMENT_LEAD = '(?:(?:(?:your|the)\\s+)?(?:next|upcoming)\\s+(?:visit|appointment|service|follow[-\\s]?up)(?::|\\s+(?:(?:is\\s+)?(?:scheduled|booked|set)\\s+(?:for|on)|is\\s+on))|(?:we(?:\\s+will|[’\']ll)\\s+)?see\\s+you(?:\\s+again)?\\s+(?:on\\s+)?)';
 const RECAP_APPOINTMENT_RE = new RegExp(
-  `(?:,?\\s+and\\s+)?\\b${APPOINTMENT_LEAD}\\s*${APPOINTMENT_DATE}(?:,?\\s*(?:arriving|from)\\s+${APPOINTMENT_WINDOW}|,?\\s+with\\s+an?\\s+${APPOINTMENT_WINDOW}\\s+arrival\\s+window|,?\\s+at\\s+${APPOINTMENT_TIME}|,?\\s+${APPOINTMENT_WINDOW})?(?:,?\\s+(?:and|then)\\s+(\\S))?`,
+  `(?:(?:,?\\s+and|;)\\s+)?\\b${APPOINTMENT_LEAD}\\s*${APPOINTMENT_DATE}(?:,?\\s*(?:arriving|from)\\s+${APPOINTMENT_WINDOW}|,?\\s+with\\s+an?\\s+${APPOINTMENT_WINDOW}\\s+arrival\\s+window|,?\\s+at\\s+${APPOINTMENT_TIME}|,?\\s+${APPOINTMENT_WINDOW})?(?:,?\\s+(?:and|then)\\s+(\\S))?`,
   'gi',
 );
 
@@ -74,15 +78,16 @@ const RECAP_APPOINTMENT_RE = new RegExp(
 // care plans such as "recheck next visit" stay because they are not schedule
 // claims. This intentionally recognizes only the report writer's appointment
 // forms rather than attempting general prose/date parsing.
-function recapWithoutStaleAppointment(recap, nextVisit) {
+function recapWithoutStaleAppointment(recap, nextVisit, scheduleLookupSucceeded = Boolean(nextVisit)) {
   const text = cleanText(recap);
-  if (!text || !nextVisit) return text;
+  if (!text || !scheduleLookupSucceeded) return text;
   const stripped = text.replace(RECAP_APPOINTMENT_RE, (appointment, aftercareInitial, offset, source) => {
     const prefix = source.slice(0, offset).trimEnd();
     const removedLeadingConnector = /^\s*,?\s*and\b/i.test(appointment);
+    const removedSemicolonBoundary = /^\s*;/i.test(appointment);
     // Embedded discussion is outside the writer's appointment grammar. Keep
     // the entire sentence instead of removing a fragment of its meaning.
-    if (prefix && !/[.!?]$/.test(prefix) && !removedLeadingConnector) return appointment;
+    if (prefix && !/[.!?]$/.test(prefix) && !removedLeadingConnector && !removedSemicolonBoundary) return appointment;
     // When aftercare shares this clause, start its sentence at the removal
     // site. A leading-only cleanup misses appointments later in the recap.
     if (aftercareInitial) {
@@ -95,7 +100,7 @@ function recapWithoutStaleAppointment(recap, nextVisit) {
     const remainder = source.slice(offset + appointment.length);
     const reachesRecapEnd = !remainder.trim() || /^\s*[-–—]\s*Waves\s*$/i.test(remainder);
     const followedBySentence = /^\s+[A-Z]/.test(remainder);
-    return removedLeadingConnector
+    return (removedLeadingConnector || removedSemicolonBoundary)
       && (reachesRecapEnd || (consumedTerminalDot && followedBySentence)) ? '.' : '';
   });
   if (stripped === text) return text;
@@ -155,21 +160,27 @@ function groundingFacts({
   serviceTypeDisplay,
   areasServiced = [],
   pestPressure = null,
+  pestPressureEvidence = {},
   findings = [],
-  nextAppointment = null,
+  nextAppointment,
 } = {}) {
+  const findingList = [findings].filter(Array.isArray).flat();
+  const zeroInspectionSupported = pestPressureEvidence.zeroInspectionSupported === true
+    || findingList.some((finding) => finding?.category === 'no_activity');
+  const pressureIsZero = Number(pestPressure?.displayScore) === 0;
   const pressure = pestPressure && pestPressure.enabled && pestPressure.displayScore != null
     ? {
-      label: cleanText(pestPressure.label) || null,
-      trend: cleanText(pestPressure.trend) || null,
-      isZero: Number(pestPressure.displayScore) === 0,
+      label: cleanTextOrNull(pestPressure.label),
+      trend: cleanTextOrNull(pestPressure.trend),
+      isZero: pressureIsZero,
+      zeroInspectionSupported: pressureIsZero && zeroInspectionSupported,
     }
     : null;
-  const visibleFindings = (Array.isArray(findings) ? findings : [])
+  const visibleFindings = findingList
     .map((finding) => ({
       title: cleanText(finding.title),
-      severity: cleanText(finding.severity) || null,
-      recommendation: cleanText(finding.recommendation) || null,
+      severity: cleanTextOrNull(finding.severity),
+      recommendation: cleanTextOrNull(finding.recommendation),
     }))
     .filter((finding) => finding.title)
     .slice(0, 3);
@@ -183,6 +194,7 @@ function groundingFacts({
     recap: recapWithoutStaleAppointment(
       recap,
       nextVisit && nextVisit.date ? nextVisit : null,
+      nextAppointment !== undefined,
     ),
     serviceTypeDisplay: cleanText(serviceTypeDisplay) || 'pest control service',
     areasServiced: (Array.isArray(areasServiced) ? areasServiced : []).map(cleanText).filter(Boolean).slice(0, 10),
@@ -196,7 +208,7 @@ function groundingFacts({
 // Used verbatim when the model is unavailable or its output fails the guard.
 function deterministicSummary(facts) {
   const parts = [facts.recap];
-  if (facts.pressure?.isZero) {
+  if (facts.pressure?.isZero && facts.pressure.zeroInspectionSupported) {
     parts.push('No visible pest activity was noted in the areas assessed today.');
   }
   if (facts.nextVisit) {
@@ -215,7 +227,7 @@ Return JSON only: {"summary":"<one paragraph>"}.
 
 Use the supplied technician recap as the record of completed work, serviced areas as its scope, the runtime pressure label and verified trend as the activity summary, customer-visible findings as findings, and nextVisit as appointment information. Keep recommendations future-facing. Do not invent product choices, methods, mechanisms, labeled coverage, findings, safety advice, customer contact, or follow-up.
 
-Write normally 3–5 short sentences, fewer when facts are thin. Explain the most relevant recorded action and supported purpose. Mention at most one customer-visible finding and its supplied recommendation when useful. A recorded zero (pressure.isZero) means no visible activity noted within the assessed scope, not a pest-free property. Missing pressure is unknown, not zero. Describe activity in words without repeating its numeric score. Report change only when supplied. Preserve customer-reported concerns as reports, not technician findings. Never blame the customer.
+Write normally 3–5 short sentences, fewer when facts are thin. Explain the most relevant recorded action and supported purpose. Mention at most one customer-visible finding and its supplied recommendation when useful. A recorded zero supports no-visible-activity inspection wording only when pressure.zeroInspectionSupported is true, and then only within the assessed scope, not across the property. A zero without that evidence is not a technician observation. Missing pressure is unknown, not zero. Describe activity in words without repeating its numeric score. Report change only when supplied. Preserve customer-reported concerns as reports, not technician findings. Never blame the customer.
 
 When nextVisit is supplied, finish with its exact supplied date and customer-facing arrival window. Do not calculate dates, service durations, or windows. nextVisit is authoritative over appointment text in the recap: omit any different or stale recap appointment, and mention the current appointment only once. If nextVisit is absent, do not invent a visit or monitoring promise.
 

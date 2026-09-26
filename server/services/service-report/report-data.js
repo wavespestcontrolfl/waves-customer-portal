@@ -9,6 +9,7 @@ const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isRodentAd
 const { isTermiteBaitServiceName, termiteBaitSnapshotOf, recordStage, isMonitoringServiceKey, TERMITE_BAIT_TYPED_TYPE } = require('./termite-report-v2');
 const { cockroachSnapshotOf, resolveCockroachProgram, cockroachProgramSignature } = require('./cockroach-report-v2');
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
+const { hasTechnicianZeroEvidence } = require('../pest-pressure/calculate');
 const { loadActiveConfig, loadScoreForServiceRecord, loadHistoryForCustomer } = require('../pest-pressure/store');
 const { buildPestPressureCustomerView } = require('../pest-pressure/customer-view');
 const { isOneTimePressureExcludedRecord } = require('../pest-pressure/one-time-exclusion');
@@ -4635,7 +4636,10 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     && process.env.GATE_RODENT_REPORT_REFRESH === 'true';
 
   let nextAppointment = null;
-  let sameLineNextAppointment = null;
+  // undefined = the schedule lookup failed; null = it succeeded and found no
+  // same-line visit. The narrative must preserve frozen appointment copy only
+  // in the former case.
+  let sameLineNextAppointment;
   // Live-view only (stripLiveOnlyScheduleFields), termite line only.
   let termiteNextMonitoringVisit = null;
   // Live-view only, cockroach typed primaries only (cockroach-report-v2.js):
@@ -4744,7 +4748,9 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     // invariant (they keep only the date/window), so they receive the
     // strict same-line pick ONLY; the hero cell gets the cross-line
     // fallback, whose label carries the service name (codex inline r4).
-    sameLineNextAppointment = toNextAppointment(nextApptRow);
+    if (Array.isArray(upcomingRows)) {
+      sameLineNextAppointment = toNextAppointment(nextApptRow);
+    }
     nextAppointment = sameLineNextAppointment
       || toNextAppointment(Array.isArray(upcomingRows) ? upcomingRows[0] : null);
 
@@ -5047,6 +5053,9 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       serviceTypeDisplay: linkedServiceName,
       areasServiced: areaLabels,
       pestPressure,
+      pestPressureEvidence: pestPressureRow ? {
+        zeroInspectionSupported: hasTechnicianZeroEvidence(pestPressureRow.component_scores),
+      } : null,
       findings,
       nextAppointment: sameLineNextAppointment,
     }).catch(() => structured.customerRecap || '');

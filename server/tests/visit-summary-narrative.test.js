@@ -10,6 +10,8 @@ const {
   _test,
 } = require('../services/service-report/visit-summary-narrative');
 const { buildPestPressureCustomerView } = require('../services/pest-pressure/customer-view');
+const { calculatePestPressureScore, hasTechnicianZeroEvidence } = require('../services/pest-pressure/calculate');
+const { DEFAULT_CONFIG } = require('../services/pest-pressure/config');
 const { sanitizeRecap } = require('../services/completion-recap');
 const { appointmentClaimProblems } = require('../services/service-report/next-visit-claims');
 
@@ -69,7 +71,9 @@ test('formatNextVisitDate / formatArrivalWindow render the customer-facing forms
 
 test('groundingFacts keeps only usable facts', () => {
   const facts = groundingFacts(input());
-  expect(facts.pressure).toEqual({ label: 'Low', trend: 'improving', isZero: false });
+  expect(facts.pressure).toEqual({
+    label: 'Low', trend: 'improving', isZero: false, zeroInspectionSupported: false,
+  });
   expect(facts.findings).toHaveLength(1);
   expect(facts.nextVisit).toEqual({ date: 'Friday, October 2', window: '8–10 AM' });
 
@@ -93,10 +97,14 @@ test('reviewed prompt keeps pressure qualitative and treats missing or zero pres
     pestPressure: pressure,
     serviceTypeDisplay: 'One-Time Pest Control',
   }));
-  expect(zero.pressure).toEqual({ label: 'No visible activity', trend: 'first_marker', isZero: true });
+  expect(zero.pressure).toEqual({
+    label: 'No visible activity', trend: 'first_marker', isZero: true, zeroInspectionSupported: false,
+  });
   expect(groundingFacts(input({
     pestPressure: { enabled: true, displayScore: 0.3, label: 'None' },
-  })).pressure).toEqual({ label: 'None', trend: null, isZero: false });
+  })).pressure).toEqual({
+    label: 'None', trend: null, isZero: false, zeroInspectionSupported: false,
+  });
   expect(buildUserMessage(zero)).toContain('"serviceTypeDisplay": "One-Time Pest Control"');
   expect(buildUserMessage(zero)).not.toContain('"displayScore"');
   expect(groundingFacts(input({ pestPressure: { enabled: true, displayScore: null } })).pressure).toBeNull();
@@ -106,7 +114,7 @@ test('reviewed prompt keeps pressure qualitative and treats missing or zero pres
   expect(SYSTEM_PROMPT).toContain('Report change only when supplied');
   expect(SYSTEM_PROMPT).toContain('Mention at most one customer-visible finding');
   expect(SYSTEM_PROMPT).toContain('Never blame the customer');
-  expect(PROMPT_VERSION).toBe('pest_visit_summary_narrative_v4');
+  expect(PROMPT_VERSION).toBe('pest_visit_summary_narrative_v5');
 });
 
 test('current next visit replaces stale recap appointment in model facts and fallback', () => {
@@ -126,14 +134,18 @@ test('current next visit replaces stale recap appointment in model facts and fal
   expect(fallback).not.toContain('September 24');
 });
 
-test('current appointment appears once and null nextVisit leaves recap appointment untouched', () => {
+test('current appointment appears once and an authoritative empty schedule removes it', () => {
   const current = 'We completed the perimeter service. Your next visit is scheduled for Friday, October 2, arriving 8–10 AM.';
   const facts = groundingFacts(input({ recap: current }));
   expect((deterministicSummary(facts).match(/Friday, October 2/g) || [])).toHaveLength(1);
 
   const withoutNext = groundingFacts(input({ recap: current, nextAppointment: null }));
-  expect(withoutNext.recap).toBe(current);
-  expect(deterministicSummary(withoutNext)).toBe(current);
+  expect(withoutNext.recap).toBe('We completed the perimeter service.');
+  expect(deterministicSummary(withoutNext)).toBe('We completed the perimeter service.');
+
+  const failedLookup = groundingFacts(input({ recap: current, nextAppointment: undefined }));
+  expect(failedLookup.recap).toBe(current);
+  expect(deterministicSummary(failedLookup)).toBe(current);
 });
 
 test('appointment sanitizer preserves work and bare next-visit care plans', () => {
@@ -156,6 +168,13 @@ test('appointment sanitizer removes a colon-labeled stale slot', () => {
   expect(facts.recap).toBe('We treated the perimeter today.');
   expect(deterministicSummary(facts)).toBe(
     'We treated the perimeter today. Your next visit is scheduled for Friday, October 2, arriving 8–10 AM.',
+  );
+});
+
+test('appointment sanitizer treats a semicolon as a stale-appointment boundary', () => {
+  const recap = 'We treated the perimeter; your next visit is scheduled for Sep 24.';
+  expect(recapWithoutStaleAppointment(recap, { date: 'Friday, October 2' })).toBe(
+    'We treated the perimeter.',
   );
 });
 
@@ -240,7 +259,7 @@ test('clean model output is used verbatim', async () => {
   expect(callModel).toHaveBeenCalledWith(expect.objectContaining({
     jsonMode: true,
     maxTokens: 400,
-    promptVersion: 'pest_visit_summary_narrative_v4',
+    promptVersion: 'pest_visit_summary_narrative_v5',
   }));
 });
 
@@ -257,6 +276,8 @@ test.each([
   'Friday, October 2, 2027',
   'Friday, October 2 in 2027',
   'Friday, October 2 of 2027',
+  'Friday, October 2 (2027)',
+  'Friday, October 2, in 2027',
 ])('model output cannot add a year to the supplied next-visit date: %s', async (date) => {
   const args = input();
   const summary = `We refreshed the perimeter and entry points today. Your next visit is ${date}, arriving 8–10 AM.`;
@@ -286,6 +307,7 @@ test.each([
   'Your next visit is cancelled for Friday, October 2, arriving 8–10 AM.',
   'Your next visit is canceled for Friday, October 2, arriving 8–10 AM.',
   'Your next visit has been cancelled for Friday, October 2, arriving 8–10 AM.',
+  'Your next visit is no longer scheduled for Friday, October 2, arriving 8–10 AM.',
 ])('a non-affirmative statement of the authoritative slot falls back: %s', async (appointment) => {
   const args = input();
   const summary = `We refreshed the perimeter today. ${appointment}`;
@@ -337,8 +359,25 @@ test('model cannot invent an appointment when no next visit was supplied', async
   expect(out).toBe(deterministicSummary(groundingFacts(args)));
 });
 
+test('model cannot invent a come-back promise when no next visit was supplied', async () => {
+  const args = input({ nextAppointment: null });
+  const summary = 'We refreshed the perimeter and entry points today. We’ll come back next week to inspect again.';
+  expect(appointmentClaimProblems(summary, groundingFacts(args))).toContain('ungrounded_appointment_claim');
+  const out = await applyVisitSummaryNarrative(args, {
+    callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary } }),
+  });
+  expect(out).toBe(deterministicSummary(groundingFacts(args)));
+});
+
 test('zero pressure uses deterministic assessed-area wording instead of model absence claims', async () => {
-  const args = input({ pestPressure: { enabled: true, displayScore: 0, label: 'None', trend: null } });
+  const args = input({
+    pestPressure: { enabled: true, displayScore: 0, label: 'None', trend: null },
+    pestPressureEvidence: {
+      zeroInspectionSupported: hasTechnicianZeroEvidence({
+        technicianRating: { value: 0, weight: 30, present: true },
+      }),
+    },
+  });
   const callModel = jest.fn().mockResolvedValue({
     ok: true,
     json: { summary: 'No visible pest activity was found anywhere on the property today. Your next visit is Friday, October 2, arriving 8–10 AM.' },
@@ -348,6 +387,59 @@ test('zero pressure uses deterministic assessed-area wording instead of model ab
   expect(out).toContain('No visible pest activity was noted in the areas assessed today.');
   expect(out).not.toContain('anywhere on the property');
   expect(callModel).not.toHaveBeenCalled();
+});
+
+test('customer-only zero score does not become a technician inspection claim', async () => {
+  const base = {
+    clientRating: null,
+    technicianRating: null,
+    reServiceImpact: null,
+    recurringIssueRating: null,
+    riskFactorRating: null,
+    previousScore: null,
+  };
+  const customerScore = calculatePestPressureScore({ ...base, clientRating: 0 }, DEFAULT_CONFIG);
+  const technicianScore = calculatePestPressureScore({ ...base, technicianDirectRating: 0 }, DEFAULT_CONFIG);
+  const customerView = buildPestPressureCustomerView({
+    config: DEFAULT_CONFIG,
+    serviceRecord: { service_line: 'pest', service_type: 'Monthly Pest Control' },
+    scoreRow: {
+      displayed_score: customerScore.displayedScore,
+      label_name: customerScore.label.name,
+      trend: customerScore.trend,
+      data_completeness: customerScore.dataCompleteness,
+      component_scores: customerScore.componentScores,
+    },
+  });
+  const customerArgs = input({
+    pestPressure: customerView,
+    pestPressureEvidence: {
+      zeroInspectionSupported: hasTechnicianZeroEvidence(customerScore.componentScores),
+    },
+    nextAppointment: null,
+  });
+  const customerFacts = groundingFacts(customerArgs);
+
+  expect(customerView.displayScore).toBe('0.0');
+  expect(customerFacts.pressure).toMatchObject({ isZero: true, zeroInspectionSupported: false });
+  expect(deterministicSummary(customerFacts)).not.toMatch(/visible pest activity|areas assessed|technician/i);
+  const callModel = jest.fn();
+  const customerSummary = await applyVisitSummaryNarrative(customerArgs, { callModel });
+  expect(customerSummary).toBe(deterministicSummary(customerFacts));
+  expect(customerSummary).not.toMatch(/visible pest activity|areas assessed|technician/i);
+  expect(callModel).not.toHaveBeenCalled();
+
+  const technicianFacts = groundingFacts(input({
+    pestPressure: { enabled: true, displayScore: technicianScore.displayedScore, label: technicianScore.label.name },
+    pestPressureEvidence: {
+      zeroInspectionSupported: hasTechnicianZeroEvidence(technicianScore.componentScores),
+    },
+    nextAppointment: null,
+  }));
+  expect(technicianFacts.pressure).toMatchObject({ isZero: true, zeroInspectionSupported: true });
+  expect(deterministicSummary(technicianFacts)).toContain(
+    'No visible pest activity was noted in the areas assessed today.',
+  );
 });
 
 test('appointment guard ignores grounded work numbers, aftercare times, and unrelated dates', async () => {

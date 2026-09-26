@@ -37,14 +37,25 @@ const DIRECT_COMPONENT_KEY = 'technicianActivityRating';
 // calculation_version stamped on direct-score rows (column is varchar(20)).
 const DIRECT_CALCULATION_VERSION = 'direct-1.0';
 
-function scoreSourceFromComponents(componentScores) {
+function parseComponentScores(componentScores) {
   let parsed = componentScores;
   if (typeof parsed === 'string') {
     try { parsed = JSON.parse(parsed); } catch { parsed = null; }
   }
-  return parsed && typeof parsed === 'object' && parsed[DIRECT_COMPONENT_KEY]
+  return parsed && typeof parsed === 'object' ? parsed : null;
+}
+
+function scoreSourceFromComponents(componentScores) {
+  const parsed = parseComponentScores(componentScores);
+  return parsed && parsed[DIRECT_COMPONENT_KEY]
     ? 'technician_rating'
     : 'blended';
+}
+
+function hasTechnicianZeroEvidence(componentScores) {
+  const parsed = parseComponentScores(componentScores);
+  return [parsed?.[DIRECT_COMPONENT_KEY], parsed?.technicianRating]
+    .some((component) => component?.present === true && Number(component.value) === 0);
 }
 
 function clamp(value, min, max) {
@@ -293,6 +304,7 @@ module.exports = {
   DIRECT_COMPONENT_KEY,
   DIRECT_CALCULATION_VERSION,
   scoreSourceFromComponents,
+  hasTechnicianZeroEvidence,
   INPUT_KEY_TO_WEIGHT_KEY,
   calculatePestPressureScore,
   // Exposed for tests
