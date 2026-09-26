@@ -5661,15 +5661,28 @@ async function sendCustomerTermNotice(termOrId, daysOut, opts = {}) {
     });
     const markNoticeSent = async (sentAt = new Date()) => {
       const sentCol = noticeWitnessColumn(daysOut, claimedTerm, etDateString(sentAt));
-      await db('annual_prepay_terms')
-        .where({ id: claimedTerm.id })
-        .whereNull(noticeCol)
-        .where(lateTermiteSendAbsent(daysOut, claimedTerm))
-        .update({
-          [sentCol]: sentAt,
-          [claimCol]: null,
-          updated_at: sentAt,
-        });
+      // Combined send: the other rung's late column, if this send covers it.
+      const lateCol = opts.alsoRecordMissedRung ? termiteLateColumnForDaysOut(opts.alsoRecordMissedRung) : null;
+      // Combined send: this rung's witness and the OTHER rung's missed/late
+      // record commit in ONE transaction — never a second write a crash
+      // could lose (the next sweep would then re-send the other rung).
+      await db.transaction(async (trx) => {
+        const stamped = await trx('annual_prepay_terms')
+          .where({ id: claimedTerm.id })
+          .whereNull(noticeCol)
+          .where(lateTermiteSendAbsent(daysOut, claimedTerm))
+          .update({
+            [sentCol]: sentAt,
+            [claimCol]: null,
+            updated_at: sentAt,
+          });
+        if (lateCol && stamped) {
+          await trx('annual_prepay_terms')
+            .where({ id: claimedTerm.id })
+            .whereNull(lateCol)
+            .update({ [lateCol]: sentAt, updated_at: sentAt });
+        }
+      });
       noticeRecorded = true;
       if (sentCol === termiteLateColumnForDaysOut(daysOut)) await fileTermiteLateNoticeException(claimedTerm, daysOut);
       // Pre-push audit P1: the combined-send case (both rungs due at once —
@@ -5682,7 +5695,9 @@ async function sendCustomerTermNotice(termOrId, daysOut, opts = {}) {
       // cancel-flow guard blocks it or delivery fails; a failed combined
       // send now leaves BOTH rungs' columns untouched and simply retries
       // tomorrow, same as any other failed send.
-      if (opts.alsoRecordMissedRung) await recordTermiteRungMissedLate(claimedTerm, opts.alsoRecordMissedRung);
+      // Staff escalation for the other rung, AFTER the atomic stamp; the
+      // late-escalation retry pass re-rings it if this bell fails.
+      if (lateCol) await fileTermiteLateNoticeException(claimedTerm, opts.alsoRecordMissedRung);
     };
     // Email-only delivery: the witness lands only on a confirmed email send.
     const deliverByEmail = async (reason, extra = {}) => {
