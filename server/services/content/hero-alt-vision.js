@@ -19,7 +19,7 @@
 
 const logger = require('../logger');
 const MODELS = require('../../config/models');
-const { dispatchWithFallback, rejectCall } = require('../llm/call');
+const { dispatchWithFallback } = require('../llm/call');
 
 // Alt-text conventions: concrete subject first, no "image of"/"photo of"
 // preamble, one plain sentence sized for screen readers and image search.
@@ -492,7 +492,12 @@ async function screenGeneratedImage({ buffer, mimeType = 'image/webp', allowedTe
     return open;
   }
   try {
-    const ask = (text, maxTokens) => dispatchWithFallback(MODELS.TEXT_POLICIES.imageScreen, {
+    // `usable` runs inside the chain as its validate hook: an answer that
+    // parses but is the wrong shape fails that leg's ledger row and lets the
+    // next provider try, instead of being recorded as a successful check and
+    // then discarded (Codex r10-class gap on #4884; rejectCall on the chain's
+    // returned copy would not reach the row).
+    const ask = (text, maxTokens, usable) => dispatchWithFallback(MODELS.TEXT_POLICIES.imageScreen, {
       text,
       images: [{ data: buffer.toString('base64'), mimeType }],
       jsonMode: true,
@@ -500,32 +505,24 @@ async function screenGeneratedImage({ buffer, mimeType = 'image/webp', allowedTe
       reasoningEffort: SCREEN_REASONING_EFFORT,
       laneId: 'image_screen',
       ...(timeoutMs > 0 ? { timeoutMs } : {}),
-    });
+    }, { validate: (result) => (usable(result.text) ? null : 'invalid_output') });
+    const screenOpts = { requireForbidden: avoidDepicting.some((t) => String(t || '').trim()), requirePlacements: allowUniformLogo };
     // The van question runs beside the main one, inside the same deadline.
     // Either answer failing or unusable fails the whole screen open.
     const [res, vanRes] = await Promise.all([
       // The per-technician answer (technicians[], placements, lettering) is
       // several times the plain one; a truncated JSON would fail OPEN as
       // unusable, so give it room (pre-push fallback P1 on 8860b77737).
-      ask(buildScreenPrompt({ allowedText, avoidDepicting, allowUniformLogo, allowVanWrap }), allowUniformLogo ? SCREEN_MAX_TOKENS_WITH_LOGO : SCREEN_MAX_TOKENS),
-      allowVanWrap ? ask(buildVanScreenPrompt(), VAN_SCREEN_MAX_TOKENS) : null,
+      ask(buildScreenPrompt({ allowedText, avoidDepicting, allowUniformLogo, allowVanWrap }), allowUniformLogo ? SCREEN_MAX_TOKENS_WITH_LOGO : SCREEN_MAX_TOKENS, (text) => !!parseScreen(text, screenOpts)),
+      allowVanWrap ? ask(buildVanScreenPrompt(), VAN_SCREEN_MAX_TOKENS, (text) => !!parseVanScreen(text)) : null,
     ]);
     const failed = [res, vanRes].find((r) => r && !r.ok);
     if (failed) {
       logger.warn(`[hero-alt-vision] image screen failed (${failed.reason}) — accepting image (fail-open)`);
       return open;
     }
-    const parsed = parseScreen(res.text, { requireForbidden: avoidDepicting.some((t) => String(t || '').trim()), requirePlacements: allowUniformLogo });
+    const parsed = parseScreen(res.text, screenOpts);
     const vanAnswer = vanRes ? parseVanScreen(vanRes.text) : { van: null };
-    // Neither leg has a `validate` hook on its own dispatchWithFallback call
-    // (both run together, and a call is JSON-parseable-but-wrong-shape —
-    // e.g. `readable_text` missing — which the adapter's own empty_json
-    // check never catches). An unusable answer here is discarded and
-    // silently treated as "nothing to flag" (fail-open, the image is
-    // accepted unchecked) — exactly the shape the ledger must not read as a
-    // successful check (Codex r10-class gap on #4884).
-    if (!parsed) rejectCall(res, 'invalid_output');
-    if (vanRes && !vanAnswer) rejectCall(vanRes, 'invalid_output');
     if (!parsed || !vanAnswer) {
       logger.warn('[hero-alt-vision] image screen returned unusable output — accepting image (fail-open)');
       return open;
