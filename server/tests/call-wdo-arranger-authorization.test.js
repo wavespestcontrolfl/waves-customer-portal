@@ -314,8 +314,6 @@ describe('codex #4890 r1 — audit trail and shadow bridge', () => {
 });
 
 describe('codex #4890 r5/r6 — WDO identity and elapsed agreed days', () => {
-  const { arrangerSlotElapsed } = require('../services/call-recording-processor')._test;
-
   test('a named non-WDO service is not a WDO request even when the category says wdo', () => {
     const contradictory = wdoExtraction({
       service_request: { service_intent: 'inspection_only', primary_service_category: 'wdo', specific_service_name: 'Termite Inspection Service' },
@@ -332,44 +330,6 @@ describe('codex #4890 r5/r6 — WDO identity and elapsed agreed days', () => {
   test('the routing predicate is clock-free — a past slot still reads as authorized (the booking write refuses it)', () => {
     const past = wdoExtraction({ scheduling: { status: 'confirmed', confirmed_start_at: '2020-01-06T10:00:00-05:00' } });
     expect(isAuthorizedWdoArrangerBooking(past)).toBe(true);
-  });
-
-  // codex #4919 round-7 P1: arrangerSlotElapsed is now a THIN WRAPPER over
-  // slotElapsedAtBookingTime (`authorized && slotElapsedAtBookingTime(...)`)
-  // — its own contract (including the `authorized: false` no-op case) is
-  // unchanged and still exhaustively covered here, but production's two
-  // booking call sites (call-recording-processor.js, the early check and
-  // the pre-insert recheck) now call slotElapsedAtBookingTime directly and
-  // unconditionally, so the elapsed check applies to every fresh booking,
-  // not only arranger-authorized ones — see the describe block below for
-  // slotElapsedAtBookingTime's own direct coverage.
-  describe('arrangerSlotElapsed (clock pinned to 2026-09-28 13:30 EDT)', () => {
-    beforeAll(() => { jest.useFakeTimers({ now: new Date('2026-09-28T17:30:00Z') }); });
-    afterAll(() => { jest.useRealTimers(); });
-
-    test('an agreed ET day that has already passed is refused', () => {
-      expect(arrangerSlotElapsed({ authorized: true, scheduledDate: '2026-09-27', windowStart: '16:00' })).toBe(true);
-    });
-
-    test('a same-day slot whose start has passed on the ET wall clock is refused (codex #4890 r7 P1)', () => {
-      expect(arrangerSlotElapsed({ authorized: true, scheduledDate: '2026-09-28', windowStart: '10:00' })).toBe(true);
-    });
-
-    test('a midnight start rendered as "24:00" counts as the start of the day (codex #4890 r8 P2)', () => {
-      expect(arrangerSlotElapsed({ authorized: true, scheduledDate: '2026-09-28', windowStart: '24:00' })).toBe(true);
-    });
-
-    test('a later same-day slot still books', () => {
-      expect(arrangerSlotElapsed({ authorized: true, scheduledDate: '2026-09-28', windowStart: '16:00' })).toBe(false);
-    });
-
-    test('a future agreed day still books', () => {
-      expect(arrangerSlotElapsed({ authorized: true, scheduledDate: '2026-09-29', windowStart: '10:00' })).toBe(false);
-    });
-
-    test('the authorized:false gate is still a no-op on this wrapper, even though production no longer relies on it', () => {
-      expect(arrangerSlotElapsed({ authorized: false, scheduledDate: '2026-09-27', windowStart: '10:00' })).toBe(false);
-    });
   });
 
   // The generalized check itself (codex #4919 round-7 P1) — no
@@ -396,17 +356,15 @@ describe('codex #4890 r5/r6 — WDO identity and elapsed agreed days', () => {
       expect(slotElapsedAtBookingTime('2026-09-29', '10:00')).toBe(false);
     });
 
+    test('a midnight start rendered as "24:00" counts as the start of the day (codex #4890 r8 P2)', () => {
+      expect(slotElapsedAtBookingTime('2026-09-28', '24:00')).toBe(true);
+    });
+
     test('no scheduledDate at all is never elapsed (nothing to refuse)', () => {
       expect(slotElapsedAtBookingTime(null, '10:00')).toBe(false);
       expect(slotElapsedAtBookingTime(undefined, '10:00')).toBe(false);
     });
 
-    test('arrangerSlotElapsed(authorized: true, ...) agrees with slotElapsedAtBookingTime for the same inputs — the wrapper is exact', () => {
-      for (const [scheduledDate, windowStart] of [['2026-09-27', '16:00'], ['2026-09-28', '10:00'], ['2026-09-28', '16:00'], ['2026-09-29', '10:00']]) {
-        expect(arrangerSlotElapsed({ authorized: true, scheduledDate, windowStart }))
-          .toBe(slotElapsedAtBookingTime(scheduledDate, windowStart));
-      }
-    });
   });
 
   test('the spelled-out WDO service name is recognized (codex #4890 r7 P2)', () => {
@@ -453,7 +411,7 @@ describe('codex #4890 post-merge review P1 — arranger authorization requires I
 // that entire pass. The finalization transaction's lock-then-transition
 // contract is already pinned this way elsewhere in this codebase (see
 // call-processor-ownership-fences.test.js's regex-scan style for the same
-// function), and arrangerSlotElapsed's own logic is already exhaustively
+// function), and slotElapsedAtBookingTime's own logic is already exhaustively
 // unit-tested above — what these two pin is that the fix is actually wired
 // in, in the right place, relative to the writes it must run before.
 describe('codex #4890 P2 — the card-retirement finalization transaction takes the triage lock first', () => {
@@ -510,8 +468,6 @@ describe('codex #4890 P2 — the arranger slot-elapsed guard is rechecked inside
     const body = source.slice(txStart, insertMarker);
     const idx = body.lastIndexOf('slotElapsedAtBookingTime(');
     expect(idx).toBeGreaterThan(-1);
-    // No leftover arranger-gated call at this site.
-    expect(body.lastIndexOf('arrangerSlotElapsed({')).toBe(-1);
     const recheck = body.slice(idx, idx + 500);
     // Same call-linked-visit exemption as the early check, now read through
     // this transaction's own connection.

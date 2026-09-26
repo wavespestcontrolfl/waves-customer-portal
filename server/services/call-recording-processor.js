@@ -1103,15 +1103,6 @@ function slotElapsedAtBookingTime(scheduledDate, windowStart = null) {
   const start = windowStart ? String(windowStart).replace(/^24:/, '00:') : windowStart;
   return sameDayWindowElapsed(scheduledDate, start);
 }
-// Arranger-specific wrapper (codex #4890 r5/r6/r7) — kept for its own
-// dedicated test coverage; production call sites now call
-// slotElapsedAtBookingTime directly for every booking (codex #4919 round-7
-// P1), so `authorized` no longer gates whether the elapsed check itself
-// runs, only whether THIS function's own callers (if any remain) still key
-// off arranger status specifically.
-function arrangerSlotElapsed({ authorized, scheduledDate, windowStart = null }) {
-  return Boolean(authorized) && slotElapsedAtBookingTime(scheduledDate, windowStart);
-}
 
 // codex #4919 round-9 P2: start_before_call and slot_elapsed_at_booking_time
 // each opened an identical shadow/legacy-mode "approved but unbooked" review
@@ -20415,7 +20406,6 @@ CallRecordingProcessor._test = {
   resolveCallContactPhone,
   startPrecedesCall,
   clarifyAskTargetPhone,
-  arrangerSlotElapsed,
   slotElapsedAtBookingTime,
   fileSkippedBookingCard,
   isLiveLeadConversation,
