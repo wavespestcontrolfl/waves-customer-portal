@@ -85,10 +85,19 @@ function isHttpUrl(value) {
   }
 }
 
+// The two verdict fields every answer must carry. Without them (e.g. `{}`)
+// normalizeHistory would synthesize an all-unknown result that gets cached as
+// a resolved lookup — that is a failed answer, not "nothing found".
+function hasHistoryVerdict(parsed) {
+  return !!parsed
+    && ['yes', 'no', 'unknown'].includes(String(parsed.previousTreatment || '').trim().toLowerCase())
+    && ['high', 'medium', 'low'].includes(String(parsed.confidence || '').trim().toLowerCase());
+}
+
 function normalizeHistory(parsed) {
-  if (!parsed) return null;
-  const pt = String(parsed.previousTreatment || '').toLowerCase();
-  const conf = String(parsed.confidence || '').toLowerCase();
+  if (!hasHistoryVerdict(parsed)) return null;
+  const pt = String(parsed.previousTreatment || '').trim().toLowerCase();
+  const conf = String(parsed.confidence || '').trim().toLowerCase();
   const fum = parsed.fumigation && typeof parsed.fumigation === 'object' ? parsed.fumigation : null;
   return {
     previousTreatment: ['yes', 'no'].includes(pt) ? pt : 'unknown',

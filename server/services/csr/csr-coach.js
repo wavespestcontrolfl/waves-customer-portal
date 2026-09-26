@@ -100,12 +100,17 @@ const CSR_SCORE_NUMERIC_FIELDS = [
   'control_score', 'warmth_score', 'clarity_score', 'objection_handling_score', 'closing_strength_score',
   'lead_quality_score',
 ];
+const CSR_SCORE_INTEGER_FIELDS = ['total_score', 'core_score', 'rescue_score', 'lead_quality_score'];
 function isUsableCsrScore(score) {
   if (!score || typeof score !== 'object' || Array.isArray(score)) return false;
   // A strict numeric string ("8") inserts fine into the numeric columns, so it
   // counts; anything that isn't a number at all does not.
   const numeric = (v) => (typeof v === 'number' && Number.isFinite(v)) || (typeof v === 'string' && /^\s*-?\d+(\.\d+)?\s*$/.test(v));
+  // total/core/rescue/lead_quality are INTEGER columns (csr_coach migration):
+  // Postgres rejects 12.5 or "8.5" there, so a fractional value is unusable.
+  const integer = (v) => (typeof v === 'number' && Number.isInteger(v)) || (typeof v === 'string' && /^\s*-?\d+\s*$/.test(v));
   if (CSR_SCORE_NUMERIC_FIELDS.some((f) => !numeric(score[f]))) return false;
+  if (CSR_SCORE_INTEGER_FIELDS.some((f) => !integer(score[f]))) return false;
   if (typeof score.call_outcome !== 'string' || !score.call_outcome.trim()) return false;
   // JSON.stringify(undefined) IS undefined — an insert of that column value
   // is exactly the undefined-binding case this whole check exists to catch.

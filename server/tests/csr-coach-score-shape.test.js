@@ -41,6 +41,16 @@ describe('isUsableCsrScore', () => {
     expect(isUsableCsrScore({ ...GOOD, [field]: '8' })).toBe(true);
   });
 
+  test.each(['total_score', 'core_score', 'rescue_score', 'lead_quality_score'])('rejects a fractional %s (INTEGER column)', (field) => {
+    expect(isUsableCsrScore({ ...GOOD, [field]: 12.5 })).toBe(false);
+    expect(isUsableCsrScore({ ...GOOD, [field]: '8.5' })).toBe(false);
+    expect(isUsableCsrScore({ ...GOOD, [field]: '8' })).toBe(true);
+  });
+
+  test('decimal skill dimensions still accept fractions', () => {
+    expect(isUsableCsrScore({ ...GOOD, warmth_score: 7.25 })).toBe(true);
+  });
+
   test('rejects a missing, empty, or non-string call_outcome', () => {
     expect(isUsableCsrScore({ ...GOOD, call_outcome: undefined })).toBe(false);
     expect(isUsableCsrScore({ ...GOOD, call_outcome: '' })).toBe(false);
