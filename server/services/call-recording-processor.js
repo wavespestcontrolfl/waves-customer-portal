@@ -3864,7 +3864,16 @@ function canonicalizeInlineUnits(streetKey) {
 // that call's lead-level reminder must survive until its own card resolves
 // (codex #4890 r2 P2). Run inside the lead-row-locked transaction so the
 // verdict the locked reconcile applies is never stale (codex #4890 r3 P2).
+//
+// "Linked" is deliberately BROAD (codex #4890 r4 P2 — a customer-less lead
+// created by a call is linked only through leads.twilio_call_sid, with no
+// metadata.lead_id stamp): the lead_id stamp, the customer, the lead's own
+// creating call SID, or the lead's phone on either leg. Over-matching only
+// keeps a reminder a little longer; under-matching would drop one another
+// call still owns.
 async function otherOpenCallerAuthorizationCard(dbh, { callId, leadId, customerId }) {
+  const lead = await dbh('leads').where({ id: leadId }).first('twilio_call_sid', 'phone');
+  const leadPhoneKey = String(lead?.phone || '').replace(/\D/g, '').slice(-10);
   const row = await dbh('triage_items as t')
     .join('call_log as c', 'c.id', 't.call_log_id')
     .where('t.reason_code', 'caller_not_authorized')
@@ -3873,6 +3882,11 @@ async function otherOpenCallerAuthorizationCard(dbh, { callId, leadId, customerI
     .where(function linkedToThisLead() {
       this.whereRaw("c.metadata->>'lead_id' = ?", [String(leadId)]);
       if (customerId) this.orWhere('c.customer_id', customerId);
+      if (lead?.twilio_call_sid) this.orWhere('c.twilio_call_sid', lead.twilio_call_sid);
+      if (leadPhoneKey.length === 10) {
+        this.orWhereRaw("RIGHT(regexp_replace(COALESCE(c.from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [leadPhoneKey])
+          .orWhereRaw("RIGHT(regexp_replace(COALESCE(c.to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [leadPhoneKey]);
+      }
     })
     .first('t.id');
   return !!row;
