@@ -477,3 +477,16 @@ describe('quotedBalanceStillOwed (pre-dispatch recheck of the quoted balance)', 
     expect(typeof sendCustomerMessage.mock.calls[0][0].preDispatchCheck).toBe('function');
   });
 });
+
+test('a multi-channel selection quotes only invoices every permitted channel holds eligible', async () => {
+  const { collectionsChannelVerdict } = require('../services/collections/rail-guard');
+  collectionsChannelVerdict.mockImplementation(async ({ channel }) => ({
+    permitted: true, eligibleInvoiceIds: channel === 'sms' ? ['inv-9', 'inv-10'] : ['inv-10'],
+  }));
+  armOneVisit({ notificationPrefs: { billing_channels: ['sms', 'email'] } });
+  const result = await runSweep({ now: new Date('2026-08-14T15:00:00Z') });
+  // inv-9 (the only overdue invoice) is not eligible on Email, so nothing is quoted.
+  expect(sendReminderChannels).not.toHaveBeenCalled();
+  expect(result).toMatchObject({ sent: 0 });
+  collectionsChannelVerdict.mockImplementation(async () => ({ permitted: true, eligibleInvoiceIds: null }));
+});
