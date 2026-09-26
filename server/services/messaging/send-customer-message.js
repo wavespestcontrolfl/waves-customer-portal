@@ -775,10 +775,12 @@ async function sendCustomerMessageCore(input) {
     providerBoundaryBlock = { ...verdict, validator };
     return verdict;
   };
-  const runCallerPreSendCheck = async () => {
+  // An explicit Email leg's held authority transaction (below) is passed on
+  // so a caller's boundary reads reuse it, for the same pool reason.
+  const runCallerPreSendCheck = async (database) => {
     if (typeof preSendCheck !== 'function') return { ok: true };
     try {
-      const verdict = await preSendCheck({ channel: sendInput.channel });
+      const verdict = await preSendCheck({ channel: sendInput.channel, ...(database ? { database } : {}) });
       if (verdict?.ok === true) {
         if (Object.prototype.hasOwnProperty.call(verdict, 'validUntil')) {
           if (typeof verdict.validUntil !== 'number' || !Number.isFinite(verdict.validUntil)) {
@@ -869,7 +871,7 @@ async function sendCustomerMessageCore(input) {
     if (await callbackNumberHoldBlocksSend(sendInput)) {
       return rememberBoundaryBlock({ ...CALLBACK_NUMBER_HOLD_BLOCK }, 'callback_number_hold_boundary');
     }
-    const callerVerdict = await runCallerPreSendCheck();
+    const callerVerdict = await runCallerPreSendCheck(billingEmailTrx);
     if (!callerVerdict.ok) return rememberBoundaryBlock(callerVerdict, 'pre_send_check_boundary');
     const providerVerdict = await runCallerPreProviderCheck();
     if (!providerVerdict.ok) return rememberBoundaryBlock(providerVerdict, 'pre_provider_check_boundary');
@@ -1009,6 +1011,7 @@ async function sendCustomerMessageCore(input) {
       sent: false,
       blocked: true,
       deliveryOutcome: providerOutcome.deliveryOutcome,
+      ...(providerOutcome.bellPersisted ? { bellPersisted: true } : {}),
       code: providerOutcome.code,
       reason: providerOutcome.error,
       ...(providerOutcome.retryable ? { retryable: true } : {}),

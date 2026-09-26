@@ -11,6 +11,15 @@ const TERMINAL_EMAIL_REFUSAL_CODES = new Set([
   'BILLING_EMAIL_NOT_SELECTED',
   'BILLING_EMAIL_DISABLED',
   'EMAIL_SUPPRESSED',
+  // The billing Email authority's all-channel (phone-keyed) suppression
+  // recheck (#4962): the same hard stops the provider-retry path resolves
+  // terminally, so a fresh reminder settles the leg instead of re-claiming
+  // it until the suppression happens to clear. An unreadable store
+  // (SUPPRESSION_LOOKUP_FAILED) stays retryable.
+  'SUPPRESSED_OPT_OUT',
+  'SUPPRESSED_MANUAL_DNC',
+  'SUPPRESSED_WRONG_NUMBER',
+  'SUPPRESSED_OTHER',
 ]);
 
 // A permanent Email refusal (no address, Email not selected, template
@@ -89,24 +98,25 @@ async function sendLeg(send, channel, entry) {
 // as delivered), or null while it stays pending. An uncertain outcome keeps
 // the reservation held; only a definite non-send becomes retryable.
 async function recordLegOutcome(entry, channel, result, results) {
-  const accepted = result?.deliveryOutcome === 'accepted'
-    || (channel === 'email' && result?.ok === true && result.deliveryOutcome === undefined)
+  const { deliveryOutcome, ok, bellPersisted, held, deliveryHeld, code, reason } = result || {};
+  const accepted = deliveryOutcome === 'accepted'
+    || (channel === 'email' && ok === true && deliveryOutcome === undefined)
     // App delivery has two customer-visible surfaces. push-channel-routing
     // sets this witness only when this attempt created or refreshed a real,
     // unsuppressed in-app bell. A device-level not_sent therefore still
     // settles the App leg; it must not turn the reservation retryable and
     // re-notify the customer tomorrow.
-    || (channel === 'push' && result?.bellPersisted === true);
+    || (channel === 'push' && bellPersisted === true);
   if (accepted) {
     if (await ContactLedger.markDelivered(entry)) return 'delivered';
     results[channel] = { ...result, deliveryHeld: true, code: 'REMINDER_ACCEPTANCE_UNSTAMPED' };
     return null;
   }
-  if (result?.held === true || result?.deliveryHeld === true) return null;
-  if (result?.deliveryOutcome === 'uncertain') return null;
+  if (held === true || deliveryHeld === true) return null;
+  if (deliveryOutcome === 'uncertain') return null;
   const terminal = channel === 'email' && isTerminalEmailRefusal(result);
   const stamped = await ContactLedger.markSendFailed(entry, {
-    code: result?.code || result?.reason || 'not_sent',
+    code: code || reason || 'not_sent',
     ...(terminal ? { resolved: true, resolution: 'email_terminal_refusal' } : {}),
   });
   if (!stamped) results[channel] = { ...result, deliveryHeld: true, code: 'REMINDER_OUTCOME_UNCONFIRMED' };
@@ -154,14 +164,18 @@ async function sendReminderChannels({
   const episodeRowIds = new Set(entries.map((entry) => entry.id));
   for (const [index, channel] of pending.entries()) {
     if (!verdictAllows(permitted[index])) { results[channel] = { sent: false, blocked: true, code: 'COLLECTIONS_POLICY' }; continue; }
-    const entry = await ContactLedger.recordContact({
-      customerId, channel, purpose, invoiceIds: ledgerInvoiceIds(invoiceId, invoiceIds), source,
-      idempotencyKey: `billing-reminder:${digest}:${channel}`,
+    const reservation = {
+      invoiceIds: ledgerInvoiceIds(invoiceId, invoiceIds),
       metadata: { ...metadata, notificationEventKey: eventKey, selectedChannels: channels,
         ...(waived.size ? { policy_waived_channels: [...waived] } : {}) },
+    };
+    const entry = await ContactLedger.recordContact({
+      customerId, channel, purpose, invoiceIds: reservation.invoiceIds, source,
+      idempotencyKey: `billing-reminder:${digest}:${channel}`, metadata: reservation.metadata,
     });
     episodeRowIds.add(entry?.id);
-    const claim = await ContactLedger.claimAttempt(entry);
+    // A retry under the same key re-quotes: its claim refreshes the debt snapshot.
+    const claim = await ContactLedger.claimAttempt(entry, reservation);
     if (claim.delivered) { delivered.add(channel); continue; }
     if (!claim.allowed) { results[channel] = { sent: false, deliveryHeld: true, code: 'REMINDER_OUTCOME_UNCONFIRMED' }; continue; }
     const result = await sendLeg(send, channel, entry);

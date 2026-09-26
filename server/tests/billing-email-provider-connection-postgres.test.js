@@ -44,6 +44,7 @@ async function waitForPhoneLock(pid) {
   }
   throw new Error('Expected a concurrent phone-lock waiter');
 }
+
 function billingReplayRow(chargeDate, overrides = {}) {
   const event = `precharge:${customerId}:${chargeDate}`;
   const attempt = randomUUID();
@@ -155,52 +156,6 @@ postgres('billing Email provider preparation on its held connection', () => {
     } finally { mockPg.removeListener('query', collect); }
   }, 15000);
 
-  test.each([
-    ['manual_dnc', 'SUPPRESSED_MANUAL_DNC'],
-    ['opt_out_keyword', 'SUPPRESSED_OPT_OUT'],
-  ])('%s blocks provider work under the held transaction', async (reason, code) => {
-    const phone = '+19415550100';
-    await mockPg('customers').where({ id: customerId }).update({ phone });
-    await mockPg('messaging_suppression').insert({ phone, reason, active: true, created_at: new Date() });
-    const dispatch = jest.fn(async (database) => sendgrid.sendOne({
-      to: 'qa@example.invalid', subject: 'Suppressed billing update', html: '<p>Blocked</p>', text: 'Blocked', database,
-    }));
-    const state = { boundaryBlock: null, handoffStarted: false, providerAccepted: false };
-    try {
-      await expect(dispatchUnderBillingEmailAuthority({
-        input: { customerId, metadata: { billingDeliveryCategory: 'billing' } },
-        recipientEmail: 'qa@example.invalid', state, dispatch,
-      })).resolves.toEqual({ ok: false });
-      expect(state.boundaryBlock).toMatchObject({ code, blocked: true });
-      expect(dispatch).not.toHaveBeenCalled();
-      expect(global.fetch).not.toHaveBeenCalled();
-    } finally {
-      await mockPg('messaging_suppression').where({ phone }).delete();
-      await mockPg('customers').where({ id: customerId }).update({ phone: null });
-    }
-  }, 15000);
-
-  test('an unreadable all-channel suppression store returns a retryable hold', async () => {
-    const phone = '+19415550100';
-    await mockPg('customers').where({ id: customerId }).update({ phone });
-    await mockPg.schema.renameTable('messaging_suppression', 'messaging_suppression_unavailable');
-    const dispatch = jest.fn();
-    const state = { boundaryBlock: null, handoffStarted: false, providerAccepted: false };
-    try {
-      await expect(dispatchUnderBillingEmailAuthority({
-        input: { customerId, metadata: { billingDeliveryCategory: 'billing' } },
-        recipientEmail: 'qa@example.invalid', state, dispatch,
-      })).resolves.toEqual({ ok: false });
-      expect(state.boundaryBlock).toMatchObject({ code: 'BILLING_EMAIL_RECHECK_FAILED', retryable: true,
-        reason: 'Billing email authority could not be verified' });
-      expect(dispatch).not.toHaveBeenCalled();
-      expect(global.fetch).not.toHaveBeenCalled();
-    } finally {
-      await mockPg.schema.renameTable('messaging_suppression_unavailable', 'messaging_suppression');
-      await mockPg('customers').where({ id: customerId }).update({ phone: null });
-    }
-  }, 15000);
-
   test.each([true, false])('full billing replay on one root slot respects current Email choice %s', async (emailEnabled) => {
     const chargeDate = etDateString(addETDays(new Date(), 1));
     await mockPg('customers').where({ id: customerId }).update({ active: true, autopay_enabled: true,
@@ -232,6 +187,21 @@ postgres('billing Email provider preparation on its held connection', () => {
       expect(saved).toMatchObject({ status: 'blocked', provider_retry_next_at: null });
       expect(global.fetch).not.toHaveBeenCalled();
     }
+  }, 15000);
+
+  test.each(['billing.notice', 'billing.receipt_notice'])('a contextless %s still reaches the existing provider retry path', async (templateKey) => {
+    const stored = billingReplayRow('2026-01-01', {
+      template_key: templateKey,
+      payload_snapshot: { first_name: 'QA', notification_body: 'Payment received' },
+      categories: JSON.stringify(['billing', 'payment_receipt']),
+      trigger_event_id: `monthly_billing_success:${randomUUID()}`,
+    });
+    await mockPg('email_messages').insert(stored);
+    await expect(retryOne(stored)).resolves.toMatchObject({ sent: true });
+    await expect(mockPg('email_messages').where({ id: stored.id }).first()).resolves.toMatchObject({
+      status: 'sent', sent_at: expect.any(Date), provider_retry_exhausted_at: null,
+    });
+    expect(global.fetch).toHaveBeenCalledTimes(2);
   }, 15000);
 
   test('a Text-only billing choice defers the same row until Email is selected again', async () => {
@@ -286,6 +256,52 @@ postgres('billing Email provider preparation on its held connection', () => {
       expect(global.fetch).not.toHaveBeenCalled();
     } finally {
       await mockPg('messaging_suppression').where({ phone }).delete();
+      await mockPg('customers').where({ id: customerId }).update({ phone: null });
+    }
+  }, 15000);
+
+  test.each([
+    ['manual_dnc', 'SUPPRESSED_MANUAL_DNC'],
+    ['opt_out_keyword', 'SUPPRESSED_OPT_OUT'],
+  ])('%s blocks provider work under the held transaction', async (reason, code) => {
+    const phone = '+19415550100';
+    await mockPg('customers').where({ id: customerId }).update({ phone });
+    await mockPg('messaging_suppression').insert({ phone, reason, active: true, created_at: new Date() });
+    const dispatch = jest.fn(async (database) => sendgrid.sendOne({
+      to: 'qa@example.invalid', subject: 'Suppressed billing update', html: '<p>Blocked</p>', text: 'Blocked', database,
+    }));
+    const state = { boundaryBlock: null, handoffStarted: false, providerAccepted: false };
+    try {
+      await expect(dispatchUnderBillingEmailAuthority({
+        input: { customerId, metadata: { billingDeliveryCategory: 'billing' } },
+        recipientEmail: 'qa@example.invalid', state, dispatch,
+      })).resolves.toEqual({ ok: false });
+      expect(state.boundaryBlock).toMatchObject({ code, blocked: true });
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(global.fetch).not.toHaveBeenCalled();
+    } finally {
+      await mockPg('messaging_suppression').where({ phone }).delete();
+      await mockPg('customers').where({ id: customerId }).update({ phone: null });
+    }
+  }, 15000);
+
+  test('an unreadable all-channel suppression store returns a retryable hold', async () => {
+    const phone = '+19415550100';
+    await mockPg('customers').where({ id: customerId }).update({ phone });
+    await mockPg.schema.renameTable('messaging_suppression', 'messaging_suppression_unavailable');
+    const dispatch = jest.fn();
+    const state = { boundaryBlock: null, handoffStarted: false, providerAccepted: false };
+    try {
+      await expect(dispatchUnderBillingEmailAuthority({
+        input: { customerId, metadata: { billingDeliveryCategory: 'billing' } },
+        recipientEmail: 'qa@example.invalid', state, dispatch,
+      })).resolves.toEqual({ ok: false });
+      expect(state.boundaryBlock).toMatchObject({ code: 'BILLING_EMAIL_RECHECK_FAILED', retryable: true,
+        reason: 'Billing email authority could not be verified' });
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(global.fetch).not.toHaveBeenCalled();
+    } finally {
+      await mockPg.schema.renameTable('messaging_suppression_unavailable', 'messaging_suppression');
       await mockPg('customers').where({ id: customerId }).update({ phone: null });
     }
   }, 15000);

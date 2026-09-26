@@ -223,7 +223,7 @@ async function releasePrevisitClaim(visitId) {
 // billing_channel_email:<eventKey>:email and bound to this leg's reservation
 // (collections_ledger_id), so an acceptance whose stamp is lost is repaired
 // by reminderProgress.
-async function sendPrevisitLeg({ visit, amount, invoiceIds, eventKey, channel, ledger, preDispatchCheck }) {
+async function sendPrevisitLeg({ visit, amount, invoiceIds, eventKey, channel, ledger, preSendCheck }) {
   const body = await renderSmsTemplate(TEMPLATE_KEY, {
     first_name: visit.first_name || 'there',
     amount: amount.toFixed(2),
@@ -242,7 +242,7 @@ async function sendPrevisitLeg({ visit, amount, invoiceIds, eventKey, channel, l
     // recipient by customerId (a stale phone would read as a changed choice).
     to: channel === 'sms' ? visit.phone : null,
     body,
-    channel,
+    channel: channel === 'push' ? 'sms' : channel,
     audience: 'customer',
     purpose: 'billing',
     customerId: visit.customer_id,
@@ -252,7 +252,10 @@ async function sendPrevisitLeg({ visit, amount, invoiceIds, eventKey, channel, l
     // hasEmailLeg suppression heuristic (balance-reminder.js's
     // sendExplicitLatePaymentReminder contract).
     hasEmailLeg: true,
-    preDispatchCheck,
+    // App and Email reuse their boundary guard; SMS also checks after its
+    // notice-scope preparation and annual-offer guard inside dispatch().
+    preSendCheck,
+    ...(channel === 'sms' ? { providerPreSendCheck: preSendCheck } : {}),
     metadata: {
       original_message_type: 'balance_reminder',
       billingDeliveryCategory: 'billing',
@@ -284,7 +287,7 @@ async function sendPrevisitLeg({ visit, amount, invoiceIds, eventKey, channel, l
 async function deliverExplicitPrevisitReminder({ visit, amount, duesCents, explicitChannels, quotedInvoices }) {
   const eventKey = previsitEventKey(visit);
   const invoiceIds = quotedInvoices.map((inv) => inv.id);
-  const preDispatchCheck = quotedBalanceStillOwed({
+  const preSendCheck = quotedBalanceStillOwed({
     customerId: visit.customer_id, scheduledServiceId: visit.id, quotedInvoices, quotedDuesCents: duesCents,
   });
   let result;
@@ -300,7 +303,7 @@ async function deliverExplicitPrevisitReminder({ visit, amount, duesCents, expli
       eventKey,
       channels: explicitChannels,
       metadata: { scheduled_service_id: visit.id, amount },
-      send: (channel, ledger) => sendPrevisitLeg({ visit, amount, invoiceIds, eventKey, channel, ledger, preDispatchCheck }),
+      send: (channel, ledger) => sendPrevisitLeg({ visit, amount, invoiceIds, eventKey, channel, ledger, preSendCheck }),
     });
   } catch (helperErr) {
     logger.warn(`[previsit-balance] explicit-channel send failed for visit ${visit.id}: ${helperErr.message}`);
@@ -336,37 +339,47 @@ async function currentDuesAllowanceCents(customerId, database = db, now = new Da
   return lateDuesCents({ lane, duesCollected, todayEt, obligation, monthlyRate: customer.monthly_rate });
 }
 
-// Right before each leg dispatches, re-read everything the copy quotes: every
+// At each leg's provider handoff, re-read everything the copy quotes: every
 // overdue invoice must still be collectible, self-pay and owe exactly what
 // was quoted, and the late dues must still be owed. Any change holds the leg
 // (retryable) so the next sweep re-quotes from current state.
 function quotedBalanceStillOwed({ customerId, scheduledServiceId, quotedInvoices, quotedDuesCents }) {
   const changed = (reason) => ({ ok: false, code: 'PREVISIT_QUOTE_CHANGED', reason, retryable: true });
-  return async () => {
+  const recheck = async (database) => {
+    const payer = await require('./payer').resolveForInvoice({
+      database, customerId, scheduledServiceId, throwOnError: true,
+    });
+    if (payer.payerId) return changed('the visit is now payer billed');
+    const helpers = require('./invoice-helpers');
+    const ids = quotedInvoices.map((inv) => inv.id);
+    const live = ids.length ? await database('invoices').whereIn('id', ids) : [];
+    for (const quoted of quotedInvoices) {
+      const row = live.find((inv) => String(inv.id) === String(quoted.id));
+      if (!row || String(row.customer_id) !== String(customerId)
+        || !helpers.isInvoiceCollectibleStatus(row.status)
+        || row.payer_id || helpers.invoiceWithdrawnFromCustomer(row)
+        || Math.round(helpers.invoiceAmountDue(row) * 100) !== Math.round(quoted.due * 100)) {
+        return changed(`quoted invoice ${quoted.id} changed before dispatch`);
+      }
+      if (await require('./invoice-followups').isDunningStopped(row.id, database)) {
+        return changed('dunning stopped for a quoted invoice');
+      }
+    }
+    if (quotedDuesCents > 0 && (await currentDuesAllowanceCents(customerId, database)) !== quotedDuesCents) {
+      return changed('quoted monthly dues changed before dispatch');
+    }
+    return { ok: true };
+  };
+  // The Email authority passes the transaction it holds under the customer
+  // lock: read through it instead of a second pooled connection, inside a
+  // savepoint so a failed read cannot abort that held transaction.
+  return async ({ database, dbi } = {}) => {
+    // Email supplies `database`; the SMS handoff supplies `dbi`.
+    const connection = database || dbi || db;
     try {
-      const payer = await require('./payer').resolveForInvoice({
-        database: db, customerId, scheduledServiceId, throwOnError: true,
-      });
-      if (payer.payerId) return changed('the visit is now payer billed');
-      const helpers = require('./invoice-helpers');
-      const ids = quotedInvoices.map((inv) => inv.id);
-      const live = ids.length ? await db('invoices').whereIn('id', ids) : [];
-      for (const quoted of quotedInvoices) {
-        const row = live.find((inv) => String(inv.id) === String(quoted.id));
-        if (!row || String(row.customer_id) !== String(customerId)
-          || !helpers.isInvoiceCollectibleStatus(row.status)
-          || row.payer_id || helpers.invoiceWithdrawnFromCustomer(row)
-          || Math.round(helpers.invoiceAmountDue(row) * 100) !== Math.round(quoted.due * 100)) {
-          return changed(`quoted invoice ${quoted.id} changed before dispatch`);
-        }
-        if (await require('./invoice-followups').isDunningStopped(row.id, db)) {
-          return changed('dunning stopped for a quoted invoice');
-        }
-      }
-      if (quotedDuesCents > 0 && (await currentDuesAllowanceCents(customerId)) !== quotedDuesCents) {
-        return changed('quoted monthly dues changed before dispatch');
-      }
-      return { ok: true };
+      return connection.isTransaction
+        ? await connection.transaction((savepoint) => recheck(savepoint))
+        : await recheck(connection);
     } catch (err) {
       return changed(`quoted balance unreadable before dispatch: ${err.message}`);
     }

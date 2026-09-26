@@ -143,4 +143,8 @@ function buildBillingReplayContext(input, authorityContext, notificationEventKey
   });
 }
 
-module.exports = { buildBillingReplayContext, sanitizeBillingReplayContext };
+function isBillingReplaySource(entryPoint) {
+  return SOURCES.has(entryPoint);
+}
+
+module.exports = { buildBillingReplayContext, isBillingReplaySource, sanitizeBillingReplayContext };

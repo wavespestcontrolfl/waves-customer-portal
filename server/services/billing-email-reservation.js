@@ -104,8 +104,9 @@ async function repairAcceptedBillingEmailReservations(rows, database = db) {
       if (!candidate) continue;
       if (accepted) {
         if (await markBillingEmailReservationDelivered(message, database)) repaired.add(String(candidate.id));
-      } else {
-        await resolveBillingEmailReservationRefusal(message, database);
+      } else if (await resolveBillingEmailReservationRefusal(message, database)) {
+        candidate.metadata = { ...metadataOf(candidate), send_failed: true,
+          resolved: true, resolution: 'email_terminal_refusal' };
       }
     }
     return repaired;
