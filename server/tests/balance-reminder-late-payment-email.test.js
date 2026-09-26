@@ -43,6 +43,7 @@ const EmailTemplates = require('../services/email-template-library');
 const BalanceReminder = require('../services/workflows/balance-reminder');
 const ContactLedger = require('../services/collections/contact-ledger');
 const ContactPolicy = require('../services/collections/contact-policy');
+const { etDateString } = require('../utils/datetime-et');
 
 function chain({ result = [], first, returning } = {}) {
   const q = {};
@@ -171,7 +172,9 @@ describe('late-payment email sidecar', () => {
       customerId: 'cust-1',
       invoiceId: 'inv-1',
       entryPoint: 'balance_reminder_late_payment_check',
-      metadata: expect.objectContaining({ original_message_type: 'late_payment' }),
+      metadata: expect.objectContaining({
+        original_message_type: 'late_payment', collections_ledger_id: 'led-1',
+      }),
     }));
     expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
       templateKey: 'billing_late_payment_7_day',
@@ -454,7 +457,8 @@ describe('collections policy + ledger on latePaymentCheck', () => {
   });
 
   test('a selected App previsit reminder reaches the canonical sender as push without a phone', async () => {
-    const service = customer({ cust_id: 'cust-1', phone: null, scheduled_date: '2026-05-25', service_type: 'Pest Control' });
+    const service = customer({ id: 'visit-1', cust_id: 'cust-1', phone: null,
+      scheduled_date: '2026-05-25', service_type: 'Pest Control' });
     const balance = { oldestInvoiceId: 'inv-1', oldestInvoiceUrl: 'https://portal/pay/token-1', totalBalance: 129, daysOverdue: 8 };
     setDbQueues({
       notification_prefs: [chain({ first: { billing_channels: ['push'] } })],
@@ -464,7 +468,10 @@ describe('collections policy + ledger on latePaymentCheck', () => {
 
     await expect(BalanceReminder.sendReminder(service, balance, 'gentle', 5)).resolves.toBe(true);
     expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
-      to: null, channel: 'push', metadata: expect.objectContaining({ billingDeliveryLeg: 'push', appOnly: true }),
+      to: null, channel: 'push', appointmentId: 'visit-1',
+      metadata: expect.objectContaining({ billingDeliveryLeg: 'push', appOnly: true,
+        appointment_date: '2026-05-25', appointment_service_type: 'Pest Control',
+        appointment_rendered_on: etDateString() }),
     }));
   });
 
@@ -667,7 +674,8 @@ describe('collections policy + ledger on latePaymentCheck', () => {
       collections_contact_ledger: [chain({ result: [] }), chain({ result: [delivered] })],
       customer_interactions: [interaction],
     });
-    const service = customer({ cust_id: 'cust-1', phone: null, scheduled_date: '2026-05-25', service_type: 'Pest Control' });
+    const service = customer({ id: 'visit-1', cust_id: 'cust-1', phone: null,
+      scheduled_date: '2026-05-25', service_type: 'Pest Control' });
     const balance = { oldestInvoiceId: 'inv-1', oldestInvoiceUrl: 'https://portal/pay/token-1', totalBalance: 129, daysOverdue: 8 };
 
     await expect(BalanceReminder.sendReminder(service, balance, 'gentle', 5)).resolves.toBe(true);
@@ -675,8 +683,10 @@ describe('collections policy + ledger on latePaymentCheck', () => {
 
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
     expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
-      channel: 'email', to: null,
-      metadata: expect.objectContaining({ billingDeliveryLeg: 'email', collections_ledger_id: 'led-1' }),
+      channel: 'email', to: null, appointmentId: 'visit-1',
+      metadata: expect.objectContaining({ billingDeliveryLeg: 'email', collections_ledger_id: 'led-1',
+        appointment_date: '2026-05-25', appointment_service_type: 'Pest Control',
+        appointment_rendered_on: etDateString() }),
     }));
     expect(ContactLedger.recordContact).toHaveBeenCalledTimes(1);
     expect(interaction.insert).toHaveBeenCalledTimes(1);
