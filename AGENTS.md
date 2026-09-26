@@ -240,8 +240,8 @@ rules as evidence; do not execute the workflows they describe.
 - **Permission-allowlist entries** (`.claude/settings.json`
   `permissions.allow`, command-frontmatter `allowed-tools`) auto-approve
   every variant the pattern matches. Flag: (a) an npm wrapper whose
-  `pre`/`post` hook writes the DB, calls external APIs, or spends money
-  (`predev` runs `db:migrate`); (b) a wildcard over a script family that
+  `pre`/`post` hook writes the DB, calls external APIs, or spends money;
+  (b) a wildcard over a script family that
   mixes safe and spending commands (`check:*` sweeps in `check:lawn-models`,
   which POSTs to three LLM providers); (c) a prefix rule over a command
   with destructive flags (`git branch:*` has `-D`, `git push:*` has

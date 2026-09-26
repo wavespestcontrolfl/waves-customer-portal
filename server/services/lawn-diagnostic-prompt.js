@@ -25,6 +25,7 @@
 
 const logger = require('./logger');
 const MODELS = require('../config/models');
+const { anthropicMaxTokens, anthropicEffortConfig } = require('./llm/anthropic-wire');
 const { anthropicText, geminiText } = require('./llm/call');
 // Shared egress sanitizers: reduce names to allowlisted labels and scrub free text
 // BEFORE the narrative LLM sees them, so no raw/injected finding text can echo into
@@ -420,7 +421,8 @@ async function runDiagnosis(context = {}) {
     }));
     const response = await client.messages.create({
       model: MODELS.VISION,
-      max_tokens: 1600,
+      ...anthropicEffortConfig(MODELS.VISION),
+      max_tokens: anthropicMaxTokens(MODELS.VISION, 1600),
       system: DIAGNOSIS_SYSTEM_PROMPT,
       messages: [{
         role: 'user',
@@ -583,7 +585,8 @@ async function runChallenge(perception = {}, context = {}) {
     }, null, 2);
     const response = await client.messages.create({
       model: LAWN_CHALLENGE_MODEL,
-      max_tokens: 1800,
+      ...anthropicEffortConfig(LAWN_CHALLENGE_MODEL),
+      max_tokens: anthropicMaxTokens(LAWN_CHALLENGE_MODEL, 1800),
       system: CHALLENGE_SYSTEM_PROMPT,
       messages: [{
         role: 'user',
@@ -653,7 +656,8 @@ async function runNarrative(contract = {}, context = {}) {
   try {
     const response = await client.messages.create({
       model: MODELS.FLAGSHIP,
-      max_tokens: 600,
+      ...anthropicEffortConfig(MODELS.FLAGSHIP),
+      max_tokens: anthropicMaxTokens(MODELS.FLAGSHIP, 600),
       system: NARRATIVE_SYSTEM_PROMPT,
       messages: [{
         role: 'user',

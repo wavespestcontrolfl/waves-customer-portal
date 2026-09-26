@@ -169,6 +169,15 @@ function serializeContract(row, options = {}) {
     ...(options.includeAudit === false ? {} : {
       signerIp: row.signer_ip,
       signerUserAgent: row.signer_user_agent,
+      // Countersignature is a staff record step (A-14), read only by the
+      // admin Contracts page. Keeping it all behind the audit gate leaves the
+      // public token/sign payload unchanged and never exposes the
+      // countersigning staff id.
+      countersignedAt: isoDate(row.countersigned_at),
+      countersignedBy: row.countersigned_by,
+      countersignerName: row.countersigner_name,
+      countersignerIp: row.countersigner_ip,
+      countersignerUserAgent: row.countersigner_user_agent,
     }),
     cancelledAt: isoDate(row.cancelled_at),
     cancelledReason: row.cancelled_reason,

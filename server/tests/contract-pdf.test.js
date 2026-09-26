@@ -70,4 +70,37 @@ describe('contract-pdf', () => {
     const buf = await buildContractPDFBuffer(override, customer, {});
     await isPdf(buf);
   });
+
+  describe('certified-operator countersignature line (termite annual, A-14 owner ruling 2026-09-25)', () => {
+    const PDFDocument = require('pdfkit');
+    let textSpy;
+    beforeEach(() => { textSpy = jest.spyOn(PDFDocument.prototype, 'text'); });
+    afterEach(() => { textSpy.mockRestore(); });
+    const drawn = () => textSpy.mock.calls.map((call) => String(call[0]));
+
+    const signedAnnual = {
+      ...baseContract,
+      contract_type: 'document_template',
+      document_template_key: 'service_agreement.termite_annual_protection',
+      status: 'signed',
+      signed_name: 'Jane Buyer',
+      signed_at: '2026-09-24T15:04:00Z',
+    };
+
+    test('stamps "Certified Operator: <name>, <date>" once countersigned', async () => {
+      const buf = await buildContractPDFBuffer({
+        ...signedAnnual,
+        countersigned_at: '2026-09-25T14:00:00Z',
+        countersigner_name: 'Adam Owner',
+      }, customer, { signed: true });
+      await isPdf(buf);
+      expect(drawn()).toContain('Certified Operator: Adam Owner, September 25, 2026');
+    });
+
+    test('draws no countersignature line (and no blank operator ink line) before it is countersigned', async () => {
+      await buildContractPDFBuffer(signedAnnual, customer, { signed: true });
+      await buildContractPDFBuffer({ ...signedAnnual, status: 'sent', signed_name: null, signed_at: null }, customer, { signed: false });
+      expect(drawn().some((text) => text.includes('Certified Operator'))).toBe(false);
+    });
+  });
 });

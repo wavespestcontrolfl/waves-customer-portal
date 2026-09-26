@@ -41,9 +41,12 @@ const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { customerOnAutopay } = require('./autopay-eligibility');
 const { publicPortalUrl } = require('../utils/portal-url');
 const EmailTemplateLibrary = require('./email-template-library');
+const { isDefiniteRejection } = require('./sendgrid-mail');
 const { getInvoiceEmailRecipients } = require('./customer-contact');
 const { currency } = require('./email-template');
 const { formatDateOnly } = require('../utils/date-only');
+const { billingChannelAllowed, explicitBillingChannels } = require('./billing-delivery-channels');
+const { verdictAllows, verdictDurablyDenied } = require('./billing-reminder-delivery');
 
 const FOLLOWUP_EMAIL_TEMPLATE_BY_STEP_ID = {
   d3_friendly: 'invoice.followup_3_day',
@@ -99,10 +102,51 @@ function isSchedulableInvoice(invoice) {
 // byte-identical, per-channel verdicts, invoice-membership required.
 const { collectionsChannelPermitted: railGuardPermitted } = require('./collections/rail-guard');
 
-async function collectionsChannelPermitted(customerId, invoiceId, channel) {
+async function collectionsChannelPermitted(customerId, invoiceId, channel, excludeLedgerIds = [], detail = false) {
   return railGuardPermitted({
-    customerId, invoiceId, channel, purpose: 'late_payment', logTag: 'invoice-followups',
+    customerId, invoiceId, channel, purpose: 'late_payment', excludeLedgerIds, logTag: 'invoice-followups', detail,
   });
+}
+
+function followupLedgerKey(row, step, channel) {
+  return `invoice_followups:${row.id}:${step.id}:${channel}`;
+}
+
+async function currentStepLedgerIds(row, step, channels) {
+  if (process.env.GATE_COLLECTIONS_POLICY !== 'true') return [];
+  if (!channels.length) return [];
+  const rows = await db('collections_contact_ledger')
+    .where({ source: 'invoice_followups' })
+    .whereIn('idempotency_key', channels.map((channel) => followupLedgerKey(row, step, channel)));
+  return (rows || []).map((entry) => entry.id);
+}
+
+function terminalFollowupEmailRefusal(result) {
+  return result?.ok === false && result.retryable !== true && result.deferred !== true
+    && result.deliveryOutcome !== 'uncertain' && (
+      ['billing_email_not_selected', 'missing_email', 'template_unavailable'].includes(result.reason)
+      || (result.blocked === true && /^Suppressed: /.test(result.reason || ''))
+    );
+}
+
+function followupEmailOutcomeUncertain(result, explicit) {
+  return explicit && (result?.deliveryOutcome === 'uncertain'
+    || (result?.error && result?.deliveryOutcome !== 'not_sent')
+    || (result?.deduped && !result?.blocked));
+}
+
+async function settleFollowupEmailLedger(ContactLedger, ledger, result, explicit) {
+  if (result?.ok === true) {
+    return explicit && typeof ContactLedger.markDelivered === 'function'
+      && !await ContactLedger.markDelivered(ledger);
+  }
+  if (followupEmailOutcomeUncertain(result, explicit)) return true;
+  await ContactLedger.markSendFailed(ledger, {
+    reason: result?.reason || result?.error || 'email_not_sent',
+    ...(explicit && terminalFollowupEmailRefusal(result)
+      ? { resolved: true, resolution: 'email_terminal_refusal' } : {}),
+  });
+  return false;
 }
 
 /**
@@ -160,7 +204,7 @@ async function logFollowupEmailAttempt({
   }
 }
 
-async function sendFollowupEmail({ row, customer, step, ctx }) {
+async function sendFollowupEmail({ row, customer, step, ctx, enforceBillingPreference = true }) {
   const templateKey = FOLLOWUP_EMAIL_TEMPLATE_BY_STEP_ID[step.id];
   if (!templateKey) return { ok: false, skipped: true, reason: 'no_email_template_mapping' };
 
@@ -183,6 +227,9 @@ async function sendFollowupEmail({ row, customer, step, ctx }) {
       logger.warn(`[invoice-followups] notification_prefs lookup failed for ${customer.id}: ${err.message}`);
       return null;
     });
+  if (enforceBillingPreference && billingChannelAllowed(prefs || {}, 'invoice', 'email') === false) {
+    return { ok: false, skipped: true, reason: 'billing_email_not_selected' };
+  }
   const [recipient] = getInvoiceEmailRecipients(customer, prefs || {})
     .filter((entry) => isEmailLike(entry.email));
   if (!recipient?.email) return { ok: false, skipped: true, reason: 'missing_email' };
@@ -199,6 +246,7 @@ async function sendFollowupEmail({ row, customer, step, ctx }) {
     customer_portal_url: `${publicPortalUrl()}/?tab=billing`,
   };
 
+  let providerHandoffStarted = false;
   try {
     const result = await EmailTemplateLibrary.sendTemplate({
       templateKey,
@@ -217,6 +265,11 @@ async function sendFollowupEmail({ row, customer, step, ctx }) {
       withProviderHandoff: async (dispatch) => {
         const verdict = await invoiceHelpers.selfPayAtDispatch(row.invoice_id, db)();
         if (verdict.ok !== true) return verdict;
+        if (enforceBillingPreference) {
+          const freshPrefs = await db('notification_prefs').where({ customer_id: customer.id }).first();
+          if (billingChannelAllowed(freshPrefs || {}, 'invoice', 'email') === false) return { ok: false };
+        }
+        providerHandoffStarted = true;
         await dispatch();
         return { ok: true };
       },
@@ -227,6 +280,7 @@ async function sendFollowupEmail({ row, customer, step, ctx }) {
         ok: !!result.sent,
         deduped: true,
         blocked: !!result.blocked,
+        reason: result.reason || null,
         messageId: result.message?.provider_message_id || null,
       };
     }
@@ -252,16 +306,25 @@ async function sendFollowupEmail({ row, customer, step, ctx }) {
     }
     return { ok: true, messageId: result.message?.provider_message_id || null };
   } catch (err) {
+    const acceptedAtProvider = err.providerOutcome?.deliveryOutcome === 'accepted';
     await logFollowupEmailAttempt({
       customerId: customer.id,
       invoiceId: row.invoice_id,
       stepId: step.id,
       templateKey,
-      status: 'failed',
-      failureReason: err.message,
+      status: acceptedAtProvider ? 'sent' : 'failed',
+      failureReason: acceptedAtProvider ? null : err.message,
     });
+    if (acceptedAtProvider) return { ok: true, providerAccepted: true };
     logger.error(`[invoice-followups] ${step.id} email failed for invoice ${row.invoice_id}: ${err.message}`);
-    return { ok: false, error: err.message };
+    if (['EMAIL_TEMPLATE_DISABLED', 'EMAIL_TEMPLATE_UNAVAILABLE'].includes(err.code)) {
+      return { ok: false, skipped: true, reason: 'template_unavailable' };
+    }
+    const definitelyNotSent = err.code !== 'EMAIL_SEND_IN_PROGRESS'
+      && (err.providerOutcome?.deliveryOutcome === 'not_sent'
+        || (err.providerOutcome?.deliveryOutcome !== 'uncertain'
+          && (!providerHandoffStarted || isDefiniteRejection(err))));
+    return { ok: false, error: err.message, deliveryOutcome: definitelyNotSent ? 'not_sent' : 'uncertain' };
   }
 }
 
@@ -841,6 +904,26 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
     logger.info(`[invoice-followups] paused sequence ${row.id} — customer ${row.customer_id} is soft-deleted`);
     return;
   }
+  if (!customer) {
+    logger.warn(`[invoice-followups] skipped sequence ${row.id} — customer ${row.customer_id} is missing`);
+    return;
+  }
+  const mdPending = gates.divertMicrodepositDunning
+    && await StripeService.isInvoiceAwaitingMicrodepositVerification({
+      id: row.invoice_id,
+      stripe_payment_intent_id: row.invoice_stripe_pi,
+    });
+  const category = mdPending ? 'payment_issue' : 'invoice';
+  let explicitChannels = null;
+  if (!operatorInitiated) {
+    try {
+      const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first();
+      explicitChannels = explicitBillingChannels(prefs || {}, category);
+    } catch (err) {
+      logger.warn(`[invoice-followups] skipped sequence ${row.id} — channel preferences unavailable: ${err.message}`);
+      return;
+    }
+  }
   // Collections policy — BOTH legs' permissions resolved here, ahead of the
   // account-credit draw (a fully-denied touch must not draw down credit and
   // then need a reversal). Each channel decides independently (codex
@@ -849,10 +932,27 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
   // denial is a TRANSIENT state (frequency window, releasable hold) — a
   // both-denied touch returns with the sequence still active and due, so
   // the next tick re-decides; it is never paused terminally for policy.
-  const smsPermitted = await collectionsChannelPermitted(row.customer_id, row.invoice_id, 'sms');
-  const emailPermitted = await collectionsChannelPermitted(row.customer_id, row.invoice_id, 'email');
-  if (!smsPermitted && !emailPermitted) {
-    logger.info(`[invoice-followups] collections policy denied both channels for sequence ${row.id} — touch deferred to a later run`);
+  const selectedChannels = explicitChannels;
+  const nonEmailChannels = selectedChannels === null ? ['sms']
+    : ['push', 'sms'].filter((channel) => selectedChannels.includes(channel));
+  const emailSelected = selectedChannels === null || selectedChannels.includes('email');
+  const policyChannels = [...nonEmailChannels, ...(emailSelected ? ['email'] : [])];
+  let ownLedgerIds = [];
+  if (selectedChannels !== null) {
+    try { ownLedgerIds = await currentStepLedgerIds(row, step, policyChannels); }
+    catch (err) {
+      logger.warn(`[invoice-followups] skipped sequence ${row.id} — step ledger unavailable: ${err.message}`);
+      return;
+    }
+  }
+  const policyResults = await Promise.all(policyChannels.map((channel) =>
+    collectionsChannelPermitted(row.customer_id, row.invoice_id, channel, ownLedgerIds, true)));
+  const channelPolicy = Object.fromEntries(policyChannels.map((channel, index) => [channel, verdictAllows(policyResults[index])]));
+  const emailDurablyDenied = verdictDurablyDenied(policyResults[policyChannels.indexOf('email')]);
+  const smsPermitted = channelPolicy.sms === true;
+  const emailPermitted = channelPolicy.email === true;
+  if (!Object.values(channelPolicy).some(Boolean)) {
+    logger.info(`[invoice-followups] collections policy denied selected channels for sequence ${row.id} — touch deferred to a later run`);
     return;
   }
   // Apply any available account credit before dunning so the reminder bills amount
@@ -942,21 +1042,20 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
 
   // Divert micro-deposit-blocked invoices to a verification re-nudge: the customer
   // isn't ignoring the bill, they haven't confirmed their two ACH micro-deposits.
-  // Swap this touch's message to the verification copy (SMS-only, matching the
-  // webhook's one-time nudge) but keep the cadence so the re-nudge repeats on the
+  // Swap this touch's message to the verification copy, matching the
+  // webhook's one-time nudge, but keep the cadence so the re-nudge repeats on the
   // normal schedule until the PI clears (then the terminal-status filter stops it).
-  const mdPending = gates.divertMicrodepositDunning
-    && await StripeService.isInvoiceAwaitingMicrodepositVerification({
-      id: row.invoice_id,
-      stripe_payment_intent_id: row.invoice_stripe_pi,
-    });
-
   // Email leg — policy-permitted only, with RECORD-THEN-SEND ledger
   // discipline: the collections_contact_ledger row precedes the delivery
   // attempt; an insert failure skips the leg (no unledgered contact, ever),
-  // a failed delivery stamps the standing row send_failed.
+  // a definite failed delivery stamps send_failed, while an unknown outcome
+  // keeps the claim held until delivery evidence can settle it.
   const ContactLedger = require('./collections/contact-ledger');
   let emailResult = { ok: false, skipped: true, reason: 'collections_policy_denied' };
+  // A spacing-window denial keeps the selected Email owed on this step; a
+  // durable one (flag, suppression) waives it so the step cannot be pinned
+  // forever. The global-hold gate above still stops an all-denied touch.
+  let emailHold = selectedChannels !== null && emailSelected && !emailPermitted && !emailDurablyDenied;
   if (emailPermitted) {
     let emailLedger = null;
     try {
@@ -967,38 +1066,127 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
         invoiceIds: [row.invoice_id],
         source: 'invoice_followups',
         metadata: { step_id: step.id },
+        ...(selectedChannels !== null ? { idempotencyKey: followupLedgerKey(row, step, 'email') } : {}),
       });
     } catch (ledgerErr) {
       emailResult = { ok: false, skipped: true, reason: 'ledger_unavailable' };
       logger.warn(`[invoice-followups] email leg skipped for sequence ${row.id} — contact ledger unavailable: ${ledgerErr.message}`);
     }
     if (emailLedger) {
-      emailResult = mdPending
-        ? await sendMicrodepositVerificationEmail({
-            invoice: { id: row.invoice_id, title: row.title, total: row.total, credit_applied: row.credit_applied },
-            customer,
-            touchKey: step.id, // one branded verification email per follow-up step (same cadence as the SMS)
-          })
-        : await sendFollowupEmail({ row, customer, step, ctx });
-      if (emailResult?.ok !== true) {
-        await ContactLedger.markSendFailed(emailLedger, {
-          reason: emailResult?.reason || emailResult?.error || 'email_not_sent',
-        });
+      const claim = selectedChannels !== null && typeof ContactLedger.claimAttempt === 'function'
+        ? await ContactLedger.claimAttempt(emailLedger) : { allowed: true };
+      if (claim.delivered) emailResult = { ok: true, deduped: true };
+      else if (!claim.allowed) emailResult = { ok: false, deferred: true, reason: 'prior_email_outcome_unconfirmed' };
+      else {
+        emailResult = mdPending
+          ? await sendMicrodepositVerificationEmail({
+              invoice: { id: row.invoice_id, title: row.title, total: row.total, credit_applied: row.credit_applied },
+              customer,
+              touchKey: step.id, // one branded verification email per follow-up step (same cadence as the SMS)
+              enforceBillingPreference: !operatorInitiated,
+            })
+          : await sendFollowupEmail({ row, customer, step, ctx, enforceBillingPreference: !operatorInitiated });
+        const attemptHeld = await settleFollowupEmailLedger(
+          ContactLedger, emailLedger, emailResult, selectedChannels !== null,
+        );
+        emailHold = emailHold || attemptHeld;
       }
-    }
+    } else if (selectedChannels !== null) emailHold = true;
   }
+  if (selectedChannels !== null && emailSelected && !emailDurablyDenied && emailResult.ok !== true
+    && !terminalFollowupEmailRefusal(emailResult)) emailHold = true;
 
   let smsSent = false;
+  let actualSmsSent = false;
+  let appSent = false;
   let smsSkipReason = null;
   let smsDeferUntil = null;
   // The held SMS leg failed to reach the scheduled rail: nothing durable
   // owns it, so this touch must stay retryable (codex r21).
   let smsHoldUnowned = false;
-  if (!smsPermitted) {
+  if (selectedChannels !== null) {
+    const holdStep = (result = {}) => {
+      smsHoldUnowned = true;
+      const requested = result.nextAllowedAt ? new Date(result.nextAllowedAt) : null;
+      const at = requested && !Number.isNaN(requested.getTime())
+        ? requested : new Date(Date.now() + 30 * 60 * 1000);
+      if (!smsDeferUntil || at > smsDeferUntil) smsDeferUntil = at;
+    };
+    if (emailHold) holdStep();
+    const permittedLegs = nonEmailChannels.filter((channel) => channelPolicy[channel] === true
+      && (channel === 'push' || customer.phone));
+    let body = null;
+    if (permittedLegs.length) {
+      body = mdPending
+        ? await renderSmsTemplate('bank_verification_incomplete', {
+            first_name: ctx.name, billing_url: `${publicPortalUrl()}/billing`,
+          }, { workflow: 'microdeposit_verification_reminder', entity_type: 'invoice', entity_id: row.invoice_id })
+        : await resolveBody(step, ctx);
+    }
+    for (const channel of nonEmailChannels) {
+      if (!channelPolicy[channel]) { smsSkipReason = 'collections_policy_denied'; continue; }
+      if (channel === 'sms' && !customer.phone) { smsSkipReason = 'no_customer_phone'; continue; }
+      if (!body) { smsSkipReason = 'missing_template'; continue; }
+      let ledger;
+      try {
+        ledger = await ContactLedger.recordContact({
+          customerId: customer.id, channel,
+          purpose: mdPending ? 'payment_verification' : 'invoice_followup',
+          invoiceIds: [row.invoice_id], source: 'invoice_followups',
+          metadata: { step_id: step.id }, idempotencyKey: followupLedgerKey(row, step, channel),
+        });
+      } catch (err) {
+        smsSkipReason = 'ledger_unavailable';
+        holdStep();
+        logger.warn(`[invoice-followups] ${channel} ledger unavailable for sequence ${row.id}: ${err.message}`);
+        continue;
+      }
+      const claim = typeof ContactLedger.claimAttempt === 'function'
+        ? await ContactLedger.claimAttempt(ledger) : { allowed: true };
+      if (claim.delivered) {
+        smsSent = true;
+        if (channel === 'push') appSent = true; else actualSmsSent = true;
+        continue;
+      }
+      if (!claim.allowed) { holdStep(); continue; }
+      let result;
+      try {
+        result = await sendCustomerMessage({
+          to: customer.phone, body, channel, audience: 'customer', purpose: 'payment_link',
+          customerId: customer.id, invoiceId: row.invoice_id, entryPoint: 'invoice_followup_sequence',
+          metadata: {
+            original_message_type: mdPending ? 'bank_verification_incomplete' : 'invoice_followup',
+            notificationEventKey: `invoice-followup:${row.id}:${step.id}`,
+            billingDeliveryCategory: category, billingDeliveryLeg: channel,
+            ...(channel === 'push' ? { appOnly: true } : {}),
+          },
+          hasEmailLeg: emailSelected,
+          preDispatchCheck: invoiceHelpers.selfPayAtDispatch(row.invoice_id, db),
+        });
+      } catch (err) {
+        result = err.providerOutcome || { deliveryOutcome: 'uncertain', deferred: true };
+      }
+      if (result?.deliveryOutcome === 'accepted') {
+        smsSent = true;
+        if (channel === 'push') appSent = true; else actualSmsSent = true;
+        if (typeof ContactLedger.markDelivered === 'function'
+          && !await ContactLedger.markDelivered(ledger)) holdStep();
+      } else if (result?.deliveryOutcome === 'not_sent'
+        || (result?.deliveryOutcome == null && result?.blocked === true)) {
+        if (!await ContactLedger.markSendFailed(ledger, { code: result.code || 'not_sent' })) holdStep();
+        if (result.retryable || result.deferred || result.code === 'CONSENT_LOOKUP_FAILED') holdStep(result);
+        smsSkipReason = result.code || 'not_sent';
+      } else {
+        holdStep(result);
+        smsSkipReason = 'outcome_unconfirmed';
+      }
+    }
+    if (!nonEmailChannels.length) smsSkipReason = 'no_non_email_selected';
+  } else if (!smsPermitted) {
     // Collections policy denial — transient; the no-channel branch below
     // leaves the sequence armed instead of pausing it.
     smsSkipReason = 'collections_policy_denied';
-  } else if (customer?.phone) {
+  } else if (customer.phone) {
     const messageType = mdPending ? 'bank_verification_incomplete' : 'invoice_followup';
     const body = mdPending
       ? await renderSmsTemplate('bank_verification_incomplete', {
@@ -1042,7 +1230,9 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
         metadata: {
           original_message_type: messageType,
           notificationEventKey: `invoice-followup:${row.id}:${step.id}`,
+          billingDeliveryCategory: mdPending ? 'payment_issue' : 'invoice',
         },
+        hasEmailLeg: true,
         // The LAST ownership check, run by the canonical sender immediately
         // before provider preparation (Codex #4311 r42 P1): the short-link
         // round-trip and the contact-ledger writes are awaited after the
@@ -1090,6 +1280,8 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
                   ledger_reservation_key: require('crypto').randomUUID(),
                   followup_sequence_id: row.id,
                   notificationEventKey: `invoice-followup:${row.id}:${step.id}`,
+                  billingDeliveryCategory: mdPending ? 'payment_issue' : 'invoice',
+                  hasEmailLeg: true,
                   original_block_code: sendResult.code,
                   replay_purpose: 'payment_link',
                   // The amount the frozen body NAMES (codex r27): credit
@@ -1111,6 +1303,7 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
         logger.warn(`[invoice-followups] SMS blocked for sequence ${row.id}: ${sendResult.code || 'unknown'} ${sendResult.reason || ''}`);
       } else if (sendResult) {
         smsSent = true;
+        actualSmsSent = true;
       }
     }
   } else {
@@ -1200,14 +1393,16 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
   try {
     await db('customer_interactions').insert({
       customer_id: customer.id,
-      interaction_type: 'sms_outbound',
+      interaction_type: selectedChannels === null || actualSmsSent ? 'sms_outbound'
+        : appSent ? 'app_outbound' : 'email_outbound',
       subject: `Invoice follow-up — ${step.label} (${row.invoice_number || row.invoice_id})`,
       body: `Step ${row.step_index + 1}/${config.steps.length} fired. Amount: $${amount}.`,
       metadata: JSON.stringify({
         invoice_id: row.invoice_id,
         step_id: step.id,
         step_index: row.step_index,
-        sms_sent: smsSent,
+        sms_sent: actualSmsSent,
+        app_sent: appSent,
         email_sent: !!emailResult.ok,
         email_reason: emailResult.reason || emailResult.error || null,
       }),

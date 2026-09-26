@@ -688,6 +688,19 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(container.textContent).toMatch(/Avoid overhead watering/);
   });
 
+  it('does not print a hidden tree score or replace it with a healthy explanation', () => {
+    const data = { ...BASE_DATA, serviceLine: 'tree_shrub', reportV2: {
+      snapshot: { overallScore: null, status: 'tracking', statusHeadline: 'Plant health being tracked' },
+      diagnosis: [
+        { key: 'pest_activity', label: 'Pest Activity Signals', score: null, status: 'tracking', customerExplanation: '' },
+        { key: 'foliage_fullness', label: 'Foliage Fullness', score: 82, status: 'healthy', customerExplanation: 'Recorded foliage coverage.' },
+      ],
+    } };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(container.textContent).toContain('Foliage Fullness (82)');
+    expect(container.textContent).not.toMatch(/Pest Activity Signals \(78\)|little to no pest-pressure|\(0\/100\)/i);
+  });
+
   it('substitutes the week\'s rain on LAWN reports only', () => {
     const water = { water: { rainInches: 2.43 } };
     const lawn = render(<ServiceReportDocument data={{ ...BASE_DATA, serviceLine: 'lawn', reportV2: water, conditions: { rain_24h_in: 0 } }} token="t" />);
