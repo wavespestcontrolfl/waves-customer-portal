@@ -11,6 +11,7 @@ describe('pest/tree main report prompt modules', () => {
 
   test('recurring pest keeps observations distinct from labeled capability', () => {
     expect(RECURRING_PEST_MAIN_REPORT_PROMPT).toContain('Missing pressure is not zero');
+    expect(RECURRING_PEST_MAIN_REPORT_PROMPT).not.toContain('without repeating its numeric score');
     expect(RECURRING_PEST_MAIN_REPORT_PROMPT).toContain('also helps control other labeled crawling pests in the treated areas');
     expect(RECURRING_PEST_MAIN_REPORT_PROMPT).toContain('Never total overlapping lists or state a numeric coverage count');
     expect(RECURRING_PEST_MAIN_REPORT_PROMPT).toContain('Never imply termite protection or a bond, rodent service, mosquito service');
