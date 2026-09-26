@@ -82,6 +82,29 @@ describeOrSkip('20260926050000_termite_annual_renewal_charge — real Postgres D
     }
   });
 
+  // Codex round-4 P1.
+  test('up() adds renewal_charge_skipped_at (nullable timestamptz) and renewal_charge_skip_reason (nullable text)', async () => {
+    const { db } = fixture;
+    await migration.up(db);
+
+    const cols = await db('annual_prepay_terms').columnInfo();
+    expect(cols).toHaveProperty('renewal_charge_skipped_at');
+    expect(cols.renewal_charge_skipped_at.nullable).toBe(true);
+    expect(cols.renewal_charge_skipped_at.type).toBe('timestamp with time zone');
+    expect(cols).toHaveProperty('renewal_charge_skip_reason');
+    expect(cols.renewal_charge_skip_reason.nullable).toBe(true);
+    expect(cols.renewal_charge_skip_reason.type).toBe('text');
+
+    // The exclusion query reconcileStuckSuccessors' leg 7a actually runs.
+    const rowId = randomUUID();
+    await db('annual_prepay_terms').insert({ id: rowId });
+    const claimed = await db('annual_prepay_terms').where({ id: rowId }).whereNull('renewal_charge_skipped_at')
+      .update({ renewal_charge_skipped_at: new Date(), renewal_charge_skip_reason: 'no_method' });
+    expect(claimed).toBe(1);
+    const stillExcluded = await db('annual_prepay_terms').where({ id: rowId }).whereNull('renewal_charge_skipped_at').first();
+    expect(stillExcluded).toBeUndefined();
+  });
+
   test('up() seeds the termite_annual_renewal_charge_failed sms template with its variables', async () => {
     const { db } = fixture;
     await migration.up(db);
@@ -117,6 +140,8 @@ describeOrSkip('20260926050000_termite_annual_renewal_charge — real Postgres D
     expect(cols).not.toHaveProperty('renewal_charge_attempted_at');
     expect(cols).not.toHaveProperty('renewal_lapse_started_at');
     expect(cols).not.toHaveProperty('renewal_lapse_completed_at');
+    expect(cols).not.toHaveProperty('renewal_charge_skipped_at');
+    expect(cols).not.toHaveProperty('renewal_charge_skip_reason');
     expect(cols).toHaveProperty('id');
 
     const row = await db('sms_templates').where({ template_key: 'termite_annual_renewal_charge_failed' }).first();

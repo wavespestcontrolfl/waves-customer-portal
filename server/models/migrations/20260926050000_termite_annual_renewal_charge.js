@@ -24,6 +24,21 @@
  * ONLY rows with started_at set and completed_at still null — it never
  * touches any other cancelled successor. Additive, nullable.
  *
+ * annual_prepay_terms.renewal_charge_skipped_at /
+ * annual_prepay_terms.renewal_charge_skip_reason — Codex round-4 P1: the
+ * SAME persisted-provenance principle applied to decideAndCharge's own
+ * pre-fence skips (no_consent / no_method / surcharge_not_authorized /
+ * ineligible) — every one of these leaves renewal_charge_attempted_at NULL
+ * (the Stripe-attempt fence is never claimed), which is exactly what
+ * reconcileStuckSuccessors' leg 7a scans for. Without a persisted marker,
+ * that scan can only tell "already handled" apart from "genuinely never
+ * ran" by an inference over the notifications table (a LIKE on the bell's
+ * own dedupeKey) checked AFTER the row is already selected under LIMIT — a
+ * backlog of old, already-belled skips then starves newer crash-gap rows
+ * from ever being reached. Stamped once, in decideAndCharge itself, the
+ * moment any of those skips fires; the scan excludes on the column
+ * directly in SQL instead. Additive, nullable.
+ *
  * sms_templates row `termite_annual_renewal_charge_failed` — the customer
  * notice queued when the renewal charge declines or the outcome is
  * ambiguous (never for a no-consent/no-method skip, where nothing was ever
@@ -50,6 +65,16 @@ exports.up = async function up(knex) {
     if (!(await knex.schema.hasColumn('annual_prepay_terms', 'renewal_lapse_completed_at'))) {
       await knex.schema.alterTable('annual_prepay_terms', (t) => {
         t.timestamp('renewal_lapse_completed_at', { useTz: true });
+      });
+    }
+    if (!(await knex.schema.hasColumn('annual_prepay_terms', 'renewal_charge_skipped_at'))) {
+      await knex.schema.alterTable('annual_prepay_terms', (t) => {
+        t.timestamp('renewal_charge_skipped_at', { useTz: true });
+      });
+    }
+    if (!(await knex.schema.hasColumn('annual_prepay_terms', 'renewal_charge_skip_reason'))) {
+      await knex.schema.alterTable('annual_prepay_terms', (t) => {
+        t.text('renewal_charge_skip_reason');
       });
     }
   }
@@ -104,6 +129,16 @@ exports.down = async function down(knex) {
     if (await knex.schema.hasColumn('annual_prepay_terms', 'renewal_lapse_completed_at')) {
       await knex.schema.alterTable('annual_prepay_terms', (t) => {
         t.dropColumn('renewal_lapse_completed_at');
+      });
+    }
+    if (await knex.schema.hasColumn('annual_prepay_terms', 'renewal_charge_skipped_at')) {
+      await knex.schema.alterTable('annual_prepay_terms', (t) => {
+        t.dropColumn('renewal_charge_skipped_at');
+      });
+    }
+    if (await knex.schema.hasColumn('annual_prepay_terms', 'renewal_charge_skip_reason')) {
+      await knex.schema.alterTable('annual_prepay_terms', (t) => {
+        t.dropColumn('renewal_charge_skip_reason');
       });
     }
   }
