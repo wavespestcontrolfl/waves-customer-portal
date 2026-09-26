@@ -9,6 +9,11 @@
       "adult"
     ],
     "sign_of": [],
+    "role": "nuisance",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [],
     "safety_line": "Roaches can carry bacteria picked up outdoors. Wash hands after cleanup and keep food covered.",
     "legacy_slugs": [],
     "review": {
@@ -40,7 +45,8 @@
       {
         "slug": "smokybrown-cockroach",
         "difference": "American cockroaches have a pale band behind the head; smokybrown cockroaches are uniformly dark mahogany with no band.",
-        "next_photo": "A close-up from above of the area right behind the head."
+        "next_photo": "A close-up from above of the area right behind the head.",
+        "photo_can_confirm": true
       }
     ],
     "size": "large",
@@ -63,7 +69,8 @@
       "allergen": false,
       "protected": false,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": false
     },
     "range": "common",
     "active_months": [
@@ -116,6 +123,11 @@
       "adult"
     ],
     "sign_of": [],
+    "role": "nuisance",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [],
     "safety_line": "Roaches can carry bacteria picked up outdoors. Wash hands after cleanup and keep food covered.",
     "legacy_slugs": [],
     "review": {
@@ -144,7 +156,8 @@
       {
         "slug": "american-cockroach",
         "difference": "Smokybrown cockroaches are uniformly dark with no band behind the head; American cockroaches have a pale yellow band there.",
-        "next_photo": "A close-up from above of the area right behind the head."
+        "next_photo": "A close-up from above of the area right behind the head.",
+        "photo_can_confirm": true
       }
     ],
     "size": "large",
@@ -166,7 +179,8 @@
       "allergen": false,
       "protected": false,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": false
     },
     "range": "common",
     "active_months": [
@@ -219,6 +233,11 @@
       "adult"
     ],
     "sign_of": [],
+    "role": "health_pest",
+    "risk": "medical",
+    "action": "inspection",
+    "season_basis": "year_round",
+    "verification": [],
     "safety_line": "German roach infestations can trigger allergies and asthma and can adulterate food with feces and shed skins. Keep food sealed and surfaces clean while treatment is underway.",
     "legacy_slugs": [],
     "review": {
@@ -247,7 +266,8 @@
       {
         "slug": "brown-banded-cockroach",
         "difference": "German cockroaches have two straight parallel stripes on the pronotum; brown-banded cockroaches have bands across the wings and a more mottled look.",
-        "next_photo": "A close-up from above of the stripe or band pattern, next to a coin."
+        "next_photo": "A close-up from above of the stripe or band pattern, next to a coin.",
+        "photo_can_confirm": true
       }
     ],
     "size": "small",
@@ -268,7 +288,8 @@
       "allergen": true,
       "protected": false,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": false
     },
     "range": "common",
     "active_months": [

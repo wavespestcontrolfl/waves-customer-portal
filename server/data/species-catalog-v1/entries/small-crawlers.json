@@ -33,7 +33,8 @@
       {
         "slug": "firebrat",
         "difference": "Silverfish are silvery and prefer humid spots like bathrooms; firebrats are mottled gray-brown and prefer hot, dry spots like near water heaters and furnaces.",
-        "next_photo": "A close-up of the body color and where it was found (humid vs. hot/dry area)."
+        "next_photo": "A close-up of the body color and where it was found (humid vs. hot/dry area).",
+        "photo_can_confirm": true
       }
     ],
     "size": "small",
@@ -55,7 +56,8 @@
       "allergen": false,
       "protected": false,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": false
     },
     "range": "common",
     "active_months": [
@@ -93,7 +95,12 @@
     "links": {
       "site_page": "/pest-identifier/silverfish/",
       "guides": []
-    }
+    },
+    "role": "nuisance",
+    "risk": "low",
+    "action": "fix_conditions",
+    "season_basis": "year_round",
+    "verification": []
   },
   {
     "kind": "organism",
@@ -132,7 +139,8 @@
       {
         "slug": "silverfish",
         "difference": "Earwigs have rear pincers and a beetle-like body; silverfish have three tail bristles instead of pincers and a tapered, scaly body.",
-        "next_photo": "A close-up of the tail end — pincers versus bristles."
+        "next_photo": "A close-up of the tail end — pincers versus bristles.",
+        "photo_can_confirm": true
       }
     ],
     "size": "small",
@@ -154,7 +162,8 @@
       "allergen": false,
       "protected": false,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": false
     },
     "range": "common",
     "active_months": [
@@ -197,6 +206,11 @@
     "links": {
       "site_page": "/pest-identifier/earwig/",
       "guides": []
-    }
+    },
+    "role": "harmless_visitor",
+    "risk": "low",
+    "action": "fix_conditions",
+    "season_basis": "year_round",
+    "verification": []
   }
 ]

@@ -34,7 +34,8 @@
       {
         "slug": "southeastern-pocket-gopher",
         "difference": "Gopher tortoise burrows have a half-moon entrance and sandy apron; pocket gopher mounds are small volcano-shaped soil piles with no open entrance.",
-        "next_photo": "A wide photo of the burrow or mound shape, plus the shell if the tortoise is visible."
+        "next_photo": "A wide photo of the burrow or mound shape, plus the shell if the tortoise is visible.",
+        "photo_can_confirm": true
       }
     ],
     "size": "large",
@@ -54,7 +55,8 @@
       "allergen": false,
       "protected": true,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": false
     },
     "range": "common",
     "active_months": [
@@ -98,6 +100,11 @@
     "links": {
       "site_page": "/pest-identifier/gopher-tortoise/",
       "guides": []
-    }
+    },
+    "role": "protected_wildlife",
+    "risk": "low",
+    "action": "leave_alone",
+    "season_basis": "year_round",
+    "verification": []
   }
 ]

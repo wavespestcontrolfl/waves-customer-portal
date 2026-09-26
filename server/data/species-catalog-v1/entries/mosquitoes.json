@@ -9,6 +9,11 @@
       "adult"
     ],
     "sign_of": [],
+    "role": "health_pest",
+    "risk": "medical",
+    "action": "specialist",
+    "season_basis": "year_round",
+    "verification": [],
     "safety_line": "Can spread dengue, Zika, and chikungunya locally. See a doctor if you develop fever, rash, or joint pain after being bitten.",
     "legacy_slugs": [],
     "review": {
@@ -37,7 +42,8 @@
       {
         "slug": "asian-tiger-mosquito",
         "difference": "Yellow fever mosquito has a lyre-shaped mark on the thorax; Asian tiger mosquito has a single straight white stripe down the center of the back.",
-        "next_photo": "A close-up of the back (thorax) while it rests on skin or a wall."
+        "next_photo": "A close-up of the back (thorax) while it rests on skin or a wall.",
+        "photo_can_confirm": true
       }
     ],
     "size": "small",
@@ -51,14 +57,15 @@
     "verdict": "call",
     "safety": {
       "stings": false,
-      "bites": false,
+      "bites": true,
       "venomous": false,
       "disease_vector": true,
       "structural": false,
       "allergen": false,
       "protected": false,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": false
     },
     "range": "common",
     "active_months": [
@@ -91,7 +98,7 @@
     },
     "urgency": "moderate",
     "copy": {
-      "what_it_means": "It doesn't need a pond — a plant saucer after one afternoon storm can raise a generation in about a week. Day-biting around the patio points to container breeding within about 150 feet; tipping the standing water first is the highest-value fix, with a barrier program handling the rest.",
+      "what_it_means": "It doesn't need a pond — a plant saucer after one afternoon storm can raise a generation in about a week. Day-biting around the patio points to container breeding within about 150 feet; tipping out standing water is the first, highest-value step, and a technician can advise on treatment for the rest.",
       "fact": "It doesn't need a pond — a plant saucer after one afternoon storm raises a generation in about a week.",
       "blurb": "Southwest Florida mosquitoes breed in as little as a bottle-cap of standing water. A monthly barrier program plus breeding-site cleanup makes evenings outside livable again."
     },
@@ -112,6 +119,11 @@
       "adult"
     ],
     "sign_of": [],
+    "role": "health_pest",
+    "risk": "medical",
+    "action": "specialist",
+    "season_basis": "year_round",
+    "verification": [],
     "safety_line": "Capable of spreading dengue, chikungunya, and other viruses. See a doctor if you develop fever, rash, or joint pain after being bitten.",
     "legacy_slugs": [],
     "review": {
@@ -140,7 +152,8 @@
       {
         "slug": "aedes-mosquito",
         "difference": "Asian tiger mosquito has one straight white stripe down the back; yellow fever mosquito has a lyre-shaped mark instead.",
-        "next_photo": "A close-up of the back (thorax) while it rests on skin or a wall."
+        "next_photo": "A close-up of the back (thorax) while it rests on skin or a wall.",
+        "photo_can_confirm": true
       }
     ],
     "size": "small",
@@ -154,14 +167,15 @@
     "verdict": "call",
     "safety": {
       "stings": false,
-      "bites": false,
+      "bites": true,
       "venomous": false,
       "disease_vector": true,
       "structural": false,
       "allergen": false,
       "protected": false,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": false
     },
     "range": "common",
     "active_months": [
@@ -194,9 +208,9 @@
     },
     "urgency": "moderate",
     "copy": {
-      "what_it_means": "This species arrived in the US in used tire shipments in the 1980s and is now established statewide. Same playbook as its cousin: eliminate standing water around the home first, then a barrier treatment handles resting adults.",
+      "what_it_means": "This species arrived in the US in used tire shipments in the 1980s and is now established statewide. Same starting point as its cousin: eliminate standing water around the home first; a technician can then treat resting areas for the adults that remain.",
       "fact": "It arrived in the US in the 1980s in shipments of used tires — one of the world’s most-traveled mosquitoes.",
-      "blurb": "Same playbook: eliminate standing water, then treat resting areas."
+      "blurb": "Same starting point: eliminate standing water, then a technician can treat resting areas."
     },
     "tech_notes": "Barrier program per protocol. Walk property for tires, containers, bromeliads, tarps holding water.",
     "sources": [

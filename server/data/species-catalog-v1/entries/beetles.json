@@ -2,7 +2,8 @@
   {
     "kind": "organism",
     "aka": [
-      "June Beetle Larva"
+      "June Beetle Larva",
+      "Other Scarab Larvae"
     ],
     "stages": [
       "larva"
@@ -22,7 +23,7 @@
       "grubs",
       "june beetle larva"
     ],
-    "scientific_name": "Phyllophaga spp. and other scarab larvae",
+    "scientific_name": "Phyllophaga spp.",
     "rank": "group",
     "group": "beetles",
     "subgroup": "scarabs-grubs",
@@ -37,7 +38,8 @@
       {
         "slug": "june-beetle",
         "difference": "White grubs are pale, C-shaped larvae found in soil; June beetles (their adult stage) are brown, oval, hard-shelled beetles that fly at night.",
-        "next_photo": "A close-up of the specimen — a soft C-shaped grub versus a hard-shelled flying beetle."
+        "next_photo": "A close-up of the specimen — a soft C-shaped grub versus a hard-shelled flying beetle.",
+        "photo_can_confirm": true
       }
     ],
     "size": "medium",
@@ -58,7 +60,8 @@
       "allergen": false,
       "protected": false,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": false
     },
     "range": "common",
     "active_months": [
@@ -89,9 +92,9 @@
     },
     "urgency": "moderate",
     "copy": {
-      "what_it_means": "Animal digging is usually the first sign — the grubs are the buffet and your lawn is the tablecloth. Fixing the grubs typically sends the diggers looking for better hunting elsewhere.",
-      "fact": "Animal digging is usually the first sign — the grubs are the buffet, your lawn is the tablecloth.",
-      "blurb": "Fix the grubs and the diggers leave on their own."
+      "what_it_means": "Animal digging in the lawn at night often points to grubs feeding on roots underneath, but digging alone doesn't prove it — armadillos and raccoons also dig for earthworms. Pulling back a patch of turf to count grubs confirms it; a lawn technician can check density and treat if it's over threshold.",
+      "fact": "This covers Phyllophaga species (the classic 'June bug' larva) plus several other scarab beetle larvae that look nearly identical underground.",
+      "blurb": "Animal digging at night is often the first clue. Pulling back the turf to count grubs confirms it."
     },
     "tech_notes": "Tug test — roots sheared at grub-damaged spots. Cut-and-peel count per sq ft; treat over threshold per label, water-in required.",
     "sources": [
@@ -100,7 +103,12 @@
     "links": {
       "site_page": "/pest-identifier/white-grub/",
       "guides": []
-    }
+    },
+    "role": "lawn_pest",
+    "risk": "low",
+    "action": "specialist",
+    "season_basis": "year_round",
+    "verification": []
   },
   {
     "kind": "organism",
@@ -136,7 +144,8 @@
       {
         "slug": "diaprepes-root-weevil",
         "difference": "Sri Lankan weevil is chalky white to gray with a short snout; Diaprepes root weevil has a black wing cover banded with orange or yellow.",
-        "next_photo": "A close-up from above showing the wing-cover color pattern, next to a coin."
+        "next_photo": "A close-up from above showing the wing-cover color pattern, next to a coin.",
+        "photo_can_confirm": true
       }
     ],
     "size": "small",
@@ -156,7 +165,8 @@
       "allergen": false,
       "protected": false,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": false
     },
     "range": "common",
     "active_months": [
@@ -198,6 +208,11 @@
     "links": {
       "site_page": "/pest-identifier/sri-lankan-weevil/",
       "guides": []
-    }
+    },
+    "role": "plant_pest",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": []
   }
 ]

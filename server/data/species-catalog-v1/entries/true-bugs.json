@@ -36,7 +36,8 @@
       {
         "slug": "big-eyed-bug",
         "difference": "Chinch bugs are black with a small dark wing-margin spot and kill turf; big-eyed bugs have noticeably large eyes and are a beneficial predator, not a pest.",
-        "next_photo": "The closest possible photo of the insect on a blade of grass, next to a coin."
+        "next_photo": "The closest possible photo of the insect on a blade of grass, next to a coin.",
+        "photo_can_confirm": true
       }
     ],
     "size": "tiny",
@@ -57,7 +58,8 @@
       "allergen": false,
       "protected": false,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": false
     },
     "range": "common",
     "active_months": [
@@ -101,7 +103,12 @@
     "links": {
       "site_page": "/pest-identifier/chinch-bug/",
       "guides": []
-    }
+    },
+    "role": "lawn_pest",
+    "risk": "low",
+    "action": "specialist",
+    "season_basis": "year_round",
+    "verification": []
   },
   {
     "kind": "organism",
@@ -139,7 +146,8 @@
       {
         "slug": "chinch-bug",
         "difference": "Spittlebugs leave white foam and leaf streaking; chinch bugs cause drought-like patches with tiny black bugs at the soil line, no foam.",
-        "next_photo": "A close-up of the grass blades showing foam (or streaking) versus bare patches."
+        "next_photo": "A close-up of the grass blades showing foam (or streaking) versus bare patches.",
+        "photo_can_confirm": true
       }
     ],
     "size": "small",
@@ -160,7 +168,8 @@
       "allergen": false,
       "protected": false,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": false
     },
     "range": "occasional",
     "active_months": [
@@ -195,7 +204,12 @@
     "links": {
       "site_page": "/pest-identifier/spittlebug/",
       "guides": []
-    }
+    },
+    "role": "lawn_pest",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "observed",
+    "verification": []
   },
   {
     "kind": "organism",
@@ -234,7 +248,8 @@
       {
         "slug": "leaf-footed-bug",
         "difference": "Stink bugs have a plain shield outline; leaf-footed bugs have a flattened, leaf-like flare on the hind legs.",
-        "next_photo": "A close-up from above of the hind legs and overall body outline, next to a coin."
+        "next_photo": "A close-up from above of the hind legs and overall body outline, next to a coin.",
+        "photo_can_confirm": true
       }
     ],
     "size": "small",
@@ -255,7 +270,8 @@
       "allergen": false,
       "protected": false,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": false
     },
     "range": "common",
     "active_months": [
@@ -294,6 +310,11 @@
     "links": {
       "site_page": "/pest-identifier/stink-bug/",
       "guides": []
-    }
+    },
+    "role": "nuisance",
+    "risk": "low",
+    "action": "fix_conditions",
+    "season_basis": "observed",
+    "verification": []
   }
 ]

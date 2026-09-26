@@ -6,6 +6,11 @@
       "worker"
     ],
     "sign_of": [],
+    "role": "nuisance",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [],
     "safety_line": null,
     "legacy_slugs": [],
     "review": {
@@ -35,7 +40,8 @@
       {
         "slug": "white-footed-ant",
         "difference": "White-footed ants are black all over with only pale feet; ghost ants are pale from the head back, not just the feet.",
-        "next_photo": "A close-up of the whole body from the side, showing how much of it is pale versus black."
+        "next_photo": "A close-up of the whole body from the side, showing how much of it is pale versus black.",
+        "photo_can_confirm": true
       }
     ],
     "size": "tiny",
@@ -57,7 +63,8 @@
       "allergen": false,
       "protected": false,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": false
     },
     "range": "common",
     "active_months": [
@@ -116,6 +123,11 @@
       "major worker"
     ],
     "sign_of": [],
+    "role": "nuisance",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [],
     "safety_line": null,
     "legacy_slugs": [],
     "review": {
@@ -145,7 +157,8 @@
       {
         "slug": "fire-ant",
         "difference": "Bigheaded ant majors have a squarish, sculpted head and don't sting; fire ant workers are more uniform in size and sting readily when the mound is disturbed.",
-        "next_photo": "A close-up from above of a major worker next to a coin, showing the head shape."
+        "next_photo": "A close-up from above of a major worker next to a coin, showing the head shape.",
+        "photo_can_confirm": true
       }
     ],
     "size": "small",
@@ -167,7 +180,8 @@
       "allergen": false,
       "protected": false,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": false
     },
     "range": "common",
     "active_months": [
@@ -223,6 +237,11 @@
       "mound"
     ],
     "sign_of": [],
+    "role": "stinging_pest",
+    "risk": "medical",
+    "action": "specialist",
+    "season_basis": "year_round",
+    "verification": [],
     "safety_line": "Stings burn immediately and can trigger allergic reactions. Keep kids and pets away from mounds, and do not kick or disturb one.",
     "legacy_slugs": [],
     "review": {
@@ -253,7 +272,8 @@
       {
         "slug": "tropical-fire-ant",
         "difference": "Tropical fire ant major workers have a head much wider than the body; red imported fire ant majors have a normal-proportioned head.",
-        "next_photo": "A close-up from above of the largest workers from the mound, next to a coin."
+        "next_photo": "A close-up from a few feet away of the largest workers from the mound, next to a coin.",
+        "photo_can_confirm": true
       }
     ],
     "size": "small",
@@ -274,7 +294,8 @@
       "allergen": true,
       "protected": false,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": false
     },
     "range": "common",
     "active_months": [
@@ -328,11 +349,16 @@
       "winged reproductive"
     ],
     "sign_of": [],
-    "safety_line": null,
+    "role": "nuisance",
+    "risk": "defensive",
+    "action": "inspection",
+    "season_basis": "year_round",
+    "verification": [],
+    "safety_line": "Not considered medically dangerous, but it can pinch/bite if handled. Leave it undisturbed and let a technician check the wood it came from.",
     "legacy_slugs": [],
     "review": {
       "status": "draft",
-      "notes": ""
+      "notes": "Verdict kept as call because a carpenter-ant trail is a moisture/damage clue worth an inspection, not because the ant itself is dangerous or structural."
     },
     "slug": "carpenter-ant",
     "common_name": "Florida Carpenter Ant",
@@ -357,7 +383,8 @@
       {
         "slug": "subterranean-termite",
         "difference": "Carpenter ant swarmers have a pinched waist and elbowed antennae; termite swarmers have a straight waist, straight antennae, and four equal wings.",
-        "next_photo": "A close-up from the side of the waist and antennae of a winged individual, next to a coin."
+        "next_photo": "A close-up from the side of the waist and antennae of a winged individual, next to a coin.",
+        "photo_can_confirm": true
       }
     ],
     "size": "medium",
@@ -373,14 +400,15 @@
     "verdict": "call",
     "safety": {
       "stings": false,
-      "bites": false,
+      "bites": true,
       "venomous": false,
       "disease_vector": false,
-      "structural": true,
+      "structural": false,
       "allergen": false,
       "protected": false,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": false
     },
     "range": "common",
     "active_months": [
@@ -415,11 +443,11 @@
     },
     "urgency": "moderate",
     "copy": {
-      "what_it_means": "Carpenter ants are large ants that nest in damp or already-damaged wood — they don't eat sound wood like termites do. The ants are manageable; the moisture-damaged wood they chose to nest in is the real finding worth fixing.",
-      "fact": "They don't eat wood like termites — they hollow out damp or damaged wood to nest, so finding them often means finding a moisture problem first.",
-      "blurb": "Carpenter ants are large ants that nest in damp or damaged wood. They don't eat wood like termites, but a nest is a sign of a moisture problem worth finding."
+      "what_it_means": "Florida carpenter ants nest in wood already softened by moisture or old damage, not sound wood like termites eat. Workers or frass suggest a nest nearby; that doesn't confirm how much softening there is. An inspection checks the moisture source and how far it goes.",
+      "fact": "They don't eat wood like termites do — they excavate wood that's already soft or damaged to build their nest, so a trail often points to a moisture issue worth checking.",
+      "blurb": "Florida carpenter ants nest in wood that's already soft from moisture or old damage, not sound wood like termites. A trail is a clue worth an inspection, not proof of damage. It can pinch if handled, but it isn't aggressive."
     },
-    "tech_notes": "Large, single node, evenly rounded thorax in profile. Night-trail to nest; check frass kick-out, moisture-damaged wood, attic/soffit lines.",
+    "tech_notes": "Large, single node, evenly rounded thorax in profile; can bite/pinch if handled but not aggressive. Night-trail to nest; check frass kick-out and moisture-damaged wood, attic/soffit lines — don't assume extent of damage without inspection.",
     "sources": [
       "https://ask.ifas.ufl.edu/publication/IN1075"
     ],
@@ -435,6 +463,11 @@
       "worker"
     ],
     "sign_of": [],
+    "role": "nuisance",
+    "risk": "low",
+    "action": "specialist",
+    "season_basis": "year_round",
+    "verification": [],
     "safety_line": null,
     "legacy_slugs": [],
     "review": {
@@ -465,7 +498,8 @@
       {
         "slug": "longhorn-crazy-ant",
         "difference": "Tawny crazy ants are uniformly reddish-brown and slightly larger; longhorn crazy ants are dark with noticeably long legs and antennae.",
-        "next_photo": "A close-up from above showing body color and leg/antenna length next to a coin."
+        "next_photo": "A close-up from above showing body color and leg/antenna length next to a coin.",
+        "photo_can_confirm": true
       }
     ],
     "size": "small",
@@ -487,7 +521,8 @@
       "allergen": false,
       "protected": false,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": false
     },
     "range": "occasional",
     "active_months": [
@@ -540,6 +575,11 @@
       "worker"
     ],
     "sign_of": [],
+    "role": "nuisance",
+    "risk": "low",
+    "action": "fix_conditions",
+    "season_basis": "year_round",
+    "verification": [],
     "safety_line": null,
     "legacy_slugs": [],
     "review": {
@@ -568,7 +608,8 @@
       {
         "slug": "ghost-ant",
         "difference": "White-footed ants are black with only the feet pale; ghost ants are pale from the head backward across the whole abdomen and legs.",
-        "next_photo": "A close-up of the whole body from the side, showing how much of it is pale versus black."
+        "next_photo": "A close-up of the whole body from the side, showing how much of it is pale versus black.",
+        "photo_can_confirm": true
       }
     ],
     "size": "tiny",
@@ -590,7 +631,8 @@
       "allergen": false,
       "protected": false,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": false
     },
     "range": "common",
     "active_months": [
@@ -624,9 +666,9 @@
     },
     "urgency": "moderate",
     "copy": {
-      "what_it_means": "White-footed ants form huge, persistent colonies that trail along fences, eaves, and screens. Harmless but famously stubborn — exterior treatment beats kitchen-counter sprays because most of the colony never leaves the nest.",
-      "fact": "Colonies can hold a million-plus ants, and most workers never leave the nest — which is why the trail you treat keeps coming back.",
-      "blurb": "Colonies can hold a million-plus ants, and most workers never leave the nest — which is why the trail you kill keeps coming back."
+      "what_it_means": "White-footed ants form huge, persistent trails along fences, eaves, and screens. They don't sting, bite, or damage anything, but colonies can hold over a million ants, most never leaving the nest — trimming vegetation off the roofline and cutting moisture helps, and a technician can advise if trails keep returning.",
+      "fact": "Colonies can hold a million-plus ants, and most workers never leave the nest — which is why the trail you see keeps coming back.",
+      "blurb": "White-footed ants form huge, persistent trails along fences and eaves. Harmless, but colonies can hold a million-plus ants, most of which never leave the nest."
     },
     "tech_notes": "Sweet-feeding, low bait acceptance for standard protein baits. Exterior perimeter + trail treatment; manage moisture and canopy contact with roofline.",
     "sources": [

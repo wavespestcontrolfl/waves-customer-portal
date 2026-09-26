@@ -35,7 +35,8 @@
       {
         "slug": "norway-rat",
         "difference": "Roof rats are found up high (attic, roofline, trees) with a tail longer than the body; Norway rats burrow at ground level and have a shorter, thicker tail.",
-        "next_photo": "A close-up of the droppings next to a coin, plus a wide shot of where the activity is (attic vs. ground)."
+        "next_photo": "A close-up of the droppings next to a coin, plus a wide shot of where the activity is (attic vs. ground).",
+        "photo_can_confirm": true
       }
     ],
     "size": "large",
@@ -57,7 +58,8 @@
       "allergen": false,
       "protected": false,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": false
     },
     "range": "common",
     "active_months": [
@@ -95,7 +97,17 @@
     "links": {
       "site_page": "/pest-identifier/roof-rat/",
       "guides": []
-    }
+    },
+    "role": "structural_pest",
+    "risk": "medical",
+    "action": "inspection",
+    "season_basis": "year_round",
+    "verification": [
+      {
+        "claim": "Some behavioral/control details are normally cited from UF/IFAS ENY-224 (\"Rat and Mouse Control\")",
+        "note": "ENY-224 returned 410/Gone when checked this pass; sourced from a related UF/IFAS pest-exclusion publication instead. Re-verify against ENY-224 once its URL is restored."
+      }
+    ]
   },
   {
     "kind": "organism",
@@ -133,7 +145,8 @@
       {
         "slug": "roof-rat",
         "difference": "Norway rats burrow at ground level with a tail shorter than the body; roof rats are found up high with a tail longer than the body.",
-        "next_photo": "A close-up of the droppings next to a coin, plus a wide shot of where the activity is (ground vs. attic)."
+        "next_photo": "A close-up of the droppings next to a coin, plus a wide shot of where the activity is (ground vs. attic).",
+        "photo_can_confirm": true
       }
     ],
     "size": "large",
@@ -154,7 +167,8 @@
       "allergen": false,
       "protected": false,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": false
     },
     "range": "occasional",
     "active_months": [
@@ -192,7 +206,17 @@
     "links": {
       "site_page": "/pest-identifier/norway-rat/",
       "guides": []
-    }
+    },
+    "role": "structural_pest",
+    "risk": "medical",
+    "action": "inspection",
+    "season_basis": "year_round",
+    "verification": [
+      {
+        "claim": "Some behavioral/control details are normally cited from UF/IFAS ENY-224 (\"Rat and Mouse Control\")",
+        "note": "ENY-224 returned 410/Gone when checked this pass; sourced from a related UF/IFAS pest-exclusion publication instead. Re-verify against ENY-224 once its URL is restored."
+      }
+    ]
   },
   {
     "kind": "organism",
@@ -230,7 +254,8 @@
       {
         "slug": "norway-rat",
         "difference": "House mice are much smaller with rice-grain droppings; Norway rats are large with thick, capsule-shaped droppings and a burrow at ground level.",
-        "next_photo": "A close-up of the droppings next to a coin for size."
+        "next_photo": "A close-up of the droppings next to a coin for size.",
+        "photo_can_confirm": true
       }
     ],
     "size": "medium",
@@ -252,7 +277,8 @@
       "allergen": false,
       "protected": false,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": false
     },
     "range": "common",
     "active_months": [
@@ -290,6 +316,16 @@
     "links": {
       "site_page": "/pest-identifier/house-mouse/",
       "guides": []
-    }
+    },
+    "role": "structural_pest",
+    "risk": "medical",
+    "action": "inspection",
+    "season_basis": "year_round",
+    "verification": [
+      {
+        "claim": "Some behavioral/control details are normally cited from UF/IFAS ENY-224 (\"Rat and Mouse Control\")",
+        "note": "ENY-224 returned 410/Gone when checked this pass; sourced from a related UF/IFAS pest-exclusion publication instead. Re-verify against ENY-224 once its URL is restored."
+      }
+    ]
   }
 ]

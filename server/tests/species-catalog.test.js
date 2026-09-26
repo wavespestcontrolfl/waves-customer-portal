@@ -41,13 +41,24 @@ const ENUMS = {
   line: ['pest', 'termite', 'mosquito', 'lawn', 'tree_shrub', 'rodent', 'none'],
   key: ['pest', 'mosquito', 'flea', 'lawnPestControl', null],
   referral: [null, 'bee_relocation', 'wildlife_trapper', 'report_fwc', 'report_fdacs', 'protected_leave_alone'],
+  // Revision 2 (outside review, 2026-09-26): what it is / the risk / what to do.
+  role: ['beneficial', 'harmless_visitor', 'nuisance', 'plant_pest', 'lawn_pest', 'structural_pest', 'health_pest', 'stinging_pest', 'wildlife', 'protected_wildlife'],
+  risk: ['low', 'defensive', 'irritant', 'medical'],
+  action: ['leave_alone', 'monitor', 'fix_conditions', 'inspection', 'specialist', 'report'],
+  season_basis: ['observed', 'swarming', 'year_round', 'unverified'],
+  review_status: ['draft', 'owner_approved'],
 };
-const SAFETY_KEYS = ['stings', 'bites', 'venomous', 'disease_vector', 'structural', 'allergen', 'protected', 'toxic_to_pets', 'regulated'];
-const NEEDS_SAFETY_LINE = ['stings', 'venomous', 'disease_vector', 'toxic_to_pets', 'protected', 'regulated'];
+const SAFETY_KEYS = ['stings', 'bites', 'venomous', 'irritant', 'disease_vector', 'structural', 'allergen', 'protected', 'toxic_to_pets', 'regulated'];
+const NEEDS_SAFETY_LINE = ['stings', 'venomous', 'irritant', 'disease_vector', 'toxic_to_pets', 'protected', 'regulated'];
+// Overclaims the outside review found: a diagnosis from a photo, absolute
+// safety, or a treatment promise. Commercial promises (prices, response
+// times) are customer copy the catalog must never carry either.
+const OVERCLAIM = /\b(means an active|confirms? (an |the )?infestation|can'?t bite|cannot bite|does not bite|won'?t bite|completely harmless|beats sprays?|main way to get relief|will (solve|eliminate|get rid))\b/i;
+const COMMERCIAL_PROMISE = /\bfree (inspection|estimate|quote)s?\b|\bwithin (a|one|two|\d+) (day|days|hour|hours)\b|\busually within\b|\bno[- ]charge\b/i;
 const WILDLIFE_GROUPS = new Set(['wild-mammals', 'lizards', 'snakes', 'turtles', 'frogs-toads', 'birds']);
 
 function forbiddenCopyText(entry) {
-  return `${entry.copy.what_it_means} ${entry.copy.fact} ${entry.safety_line || ''} ${(entry.traits || []).join(' ')}`;
+  return `${entry.copy.what_it_means} ${entry.copy.fact} ${entry.copy.blurb || ''} ${entry.safety_line || ''} ${(entry.traits || []).join(' ')}`;
 }
 
 describe('species-catalog-v1 entries — schema (ported from validate.js)', () => {
@@ -98,6 +109,7 @@ describe('species-catalog-v1 entries — schema (ported from validate.js)', () =
       expect(la.difference.length).toBeLessThanOrEqual(160);
       expect(la.next_photo.trim().length).toBeGreaterThan(0);
       expect(la.next_photo.length).toBeLessThanOrEqual(180);
+      expect(typeof la.photo_can_confirm).toBe('boolean');
     }
 
     expect(ENUMS.size).toContain(e.size);
@@ -109,6 +121,20 @@ describe('species-catalog-v1 entries — schema (ported from validate.js)', () =
     for (const l of e.looks) expect(ENUMS.looks).toContain(l);
 
     expect(ENUMS.verdict).toContain(e.verdict);
+    expect(ENUMS.role).toContain(e.role);
+    expect(ENUMS.risk).toContain(e.risk);
+    expect(ENUMS.action).toContain(e.action);
+    expect(ENUMS.season_basis).toContain(e.season_basis);
+    if (e.role === 'beneficial') expect(e.verdict).toBe('ally');
+    if (e.role === 'protected_wildlife') expect(['leave_alone', 'report', 'specialist']).toContain(e.action);
+    if (e.risk === 'irritant') expect(e.safety.irritant).toBe(true);
+    if (e.risk === 'medical') expect((e.safety_line || '').trim().length).toBeGreaterThan(0);
+    // An unverified fact is an open item, never a recorded "false".
+    expect(Array.isArray(e.verification)).toBe(true);
+    for (const v of e.verification) {
+      expect(typeof v.claim).toBe('string');
+      expect(v.claim.trim().length).toBeGreaterThan(0);
+    }
 
     expect(e.safety).toBeTruthy();
     for (const k of SAFETY_KEYS) expect(typeof e.safety[k]).toBe('boolean');
@@ -183,6 +209,10 @@ describe('species-catalog-v1 entries — schema (ported from validate.js)', () =
     const copyText = forbiddenCopyText(e);
     expect(copyText).not.toMatch(/\$\s?\d/);
     expect(copyText).not.toMatch(/\b(guarantee|guaranteed|same[- ]day|within (an|the) hour|today)\b/i);
+    expect(copyText).not.toMatch(OVERCLAIM);
+    expect(copyText).not.toMatch(COMMERCIAL_PROMISE);
+    // Adult biting flies aren't a mosquito-treatment target (UF/IFAS).
+    if (e.group === 'biting-flies' && e.slug !== 'no-see-um') expect(s.line).not.toBe('mosquito');
 
     expect(typeof e.tech_notes).toBe('string');
     expect(e.tech_notes.trim().length).toBeGreaterThan(0);
@@ -201,7 +231,9 @@ describe('species-catalog-v1 entries — schema (ported from validate.js)', () =
     for (const u of e.sources) expect(u).toMatch(/^https:\/\//);
 
     expect(e.review).toBeTruthy();
-    expect(e.review.status).toBe('draft');
+    expect(ENUMS.review_status).toContain(e.review.status);
+    // Nothing is owner-approved while a fact-check is still open.
+    if (e.review.status === 'owner_approved') expect(e.verification).toEqual([]);
     expect(typeof e.review.notes).toBe('string');
   });
 

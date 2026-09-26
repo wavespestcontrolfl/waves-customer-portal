@@ -8,6 +8,11 @@
       "adult"
     ],
     "sign_of": [],
+    "role": "nuisance",
+    "risk": "defensive",
+    "action": "fix_conditions",
+    "season_basis": "year_round",
+    "verification": [],
     "safety_line": "Bites itch and burn but are not known to spread disease locally. See a doctor if a bite site becomes increasingly red, swollen, or painful days later.",
     "legacy_slugs": [],
     "review": {
@@ -39,7 +44,8 @@
       {
         "slug": "chiggers",
         "difference": "No-see-ums bite and leave scattered welts; chiggers come from vegetation and bite around sock lines, waistbands, and skin folds.",
-        "next_photo": "A close-up of the bite pattern and where on the body it appears."
+        "next_photo": "A close-up of the bite pattern and where on the body it appears.",
+        "photo_can_confirm": true
       }
     ],
     "size": "tiny",
@@ -59,7 +65,8 @@
       "allergen": false,
       "protected": false,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": false
     },
     "range": "common",
     "active_months": [

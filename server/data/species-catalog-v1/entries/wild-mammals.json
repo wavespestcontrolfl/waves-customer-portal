@@ -34,7 +34,8 @@
       {
         "slug": "feral-hog-rooting",
         "difference": "Armadillo holes are small, cone-shaped, and scattered overnight; feral hog rooting tears up much larger patches of turf and soil in a single visit.",
-        "next_photo": "A wide shot showing the size and shape of the disturbed area."
+        "next_photo": "A wide shot showing the size and shape of the disturbed area.",
+        "photo_can_confirm": true
       }
     ],
     "size": "large",
@@ -55,7 +56,8 @@
       "allergen": false,
       "protected": false,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": false
     },
     "range": "common",
     "active_months": [
@@ -93,6 +95,11 @@
     "links": {
       "site_page": "/pest-identifier/armadillo/",
       "guides": []
-    }
+    },
+    "role": "wildlife",
+    "risk": "low",
+    "action": "fix_conditions",
+    "season_basis": "year_round",
+    "verification": []
   }
 ]

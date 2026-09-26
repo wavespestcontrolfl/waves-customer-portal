@@ -36,7 +36,8 @@
       {
         "slug": "green-treefrog",
         "difference": "Cuban treefrogs are much larger with warty skin and oversized toe pads; green treefrogs are smaller, smooth-skinned, and usually have a white side stripe.",
-        "next_photo": "A close-up of the toe pads and overall size next to a coin."
+        "next_photo": "A close-up of the toe pads and overall size next to a coin.",
+        "photo_can_confirm": true
       }
     ],
     "size": "large",
@@ -57,7 +58,8 @@
       "allergen": false,
       "protected": false,
       "toxic_to_pets": true,
-      "regulated": false
+      "regulated": false,
+      "irritant": true
     },
     "range": "common",
     "active_months": [
@@ -101,6 +103,16 @@
     "links": {
       "site_page": "/pest-identifier/cuban-treefrog/",
       "guides": []
-    }
+    },
+    "role": "wildlife",
+    "risk": "irritant",
+    "action": "fix_conditions",
+    "season_basis": "year_round",
+    "verification": [
+      {
+        "claim": "Skin-secretion irritation details and native-treefrog predation facts",
+        "note": "The primary EDIS article returned a 403 on direct fetch this pass; facts are corroborated across multiple UF/IFAS and USFWS sources found via search rather than one directly-loaded page. Worth a follow-up direct verification."
+      }
+    ]
   }
 ]

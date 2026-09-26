@@ -9,6 +9,11 @@
       "adult"
     ],
     "sign_of": [],
+    "role": "health_pest",
+    "risk": "medical",
+    "action": "specialist",
+    "season_basis": "year_round",
+    "verification": [],
     "safety_line": "Bites itch and can trigger flea allergy dermatitis in pets. See a doctor if bites become infected or you develop a rash that spreads.",
     "legacy_slugs": [],
     "review": {
@@ -38,7 +43,8 @@
       {
         "slug": "chiggers",
         "difference": "Cat fleas are visible jumpers on pets and carpet; chiggers are outdoor-picked-up and too small to see, causing itchy welts at sock lines.",
-        "next_photo": "A close-up of the biting insect if visible, versus just the bite pattern on skin."
+        "next_photo": "A close-up of the biting insect if visible, versus just the bite pattern on skin.",
+        "photo_can_confirm": true
       }
     ],
     "size": "tiny",
@@ -61,7 +67,8 @@
       "allergen": true,
       "protected": false,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": false
     },
     "range": "common",
     "active_months": [
@@ -95,9 +102,9 @@
     },
     "urgency": "high",
     "copy": {
-      "what_it_means": "Adults on the pet are only about 5% of the infestation — the rest is eggs, larvae, and pupae hiding in carpet and bedding. Pet treatment alone tends to lose; home, yard, and pet together, timed to the life cycle, wins.",
+      "what_it_means": "Adults on the pet are usually a small share of the infestation — most of it is eggs, larvae and pupae hiding in carpet, bedding and shaded outdoor spots. Treating the pet alone often leaves that reservoir behind; a technician looks at pet, home and yard together and times the approach to the flea life cycle.",
       "fact": "Adults on the pet are roughly 5% of the infestation — the other 95% is eggs, larvae, and pupae in carpet and bedding.",
-      "blurb": "Pet treatment alone loses. Home + yard + pet together, timed to the life cycle, wins."
+      "blurb": "Treating just the pet often isn't enough — the home and yard usually need attention too, timed to the flea life cycle."
     },
     "tech_notes": "IGR + adulticide inside/out; customer prep sheet mandatory (vacuum, wash bedding, pet treatment same week).",
     "sources": [

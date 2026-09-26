@@ -6,6 +6,11 @@
       "adult"
     ],
     "sign_of": [],
+    "role": "harmless_visitor",
+    "risk": "low",
+    "action": "leave_alone",
+    "season_basis": "swarming",
+    "verification": [],
     "safety_line": null,
     "legacy_slugs": [],
     "review": {
@@ -36,7 +41,8 @@
       {
         "slug": "non-biting-midge",
         "difference": "Lovebugs have a red thorax and often fly stuck together in pairs; non-biting midges are smaller, mosquito-shaped, and don't pair up.",
-        "next_photo": "A close-up of the body color and shape, and whether two individuals are joined together."
+        "next_photo": "A close-up of the body color and shape, and whether two individuals are joined together.",
+        "photo_can_confirm": true
       }
     ],
     "size": "small",
@@ -58,7 +64,8 @@
       "allergen": false,
       "protected": false,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": false
     },
     "range": "common",
     "active_months": [
@@ -103,6 +110,11 @@
       "adult"
     ],
     "sign_of": [],
+    "role": "nuisance",
+    "risk": "low",
+    "action": "fix_conditions",
+    "season_basis": "year_round",
+    "verification": [],
     "safety_line": null,
     "legacy_slugs": [],
     "review": {
@@ -132,7 +144,8 @@
       {
         "slug": "fungus-gnat",
         "difference": "Drain flies are fuzzy and moth-shaped and stick to bathroom walls near drains; fungus gnats are slender, long-legged, and hover around houseplant soil.",
-        "next_photo": "A close-up of the wing shape and where it was resting (drain vs. potted plant)."
+        "next_photo": "A close-up of the wing shape and where it was resting (drain vs. potted plant).",
+        "photo_can_confirm": true
       }
     ],
     "size": "tiny",
@@ -153,7 +166,8 @@
       "allergen": false,
       "protected": false,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": false
     },
     "range": "common",
     "active_months": [
@@ -201,6 +215,11 @@
       "adult"
     ],
     "sign_of": [],
+    "role": "nuisance",
+    "risk": "low",
+    "action": "fix_conditions",
+    "season_basis": "year_round",
+    "verification": [],
     "safety_line": null,
     "legacy_slugs": [],
     "review": {
@@ -228,7 +247,8 @@
       {
         "slug": "drain-fly",
         "difference": "Fungus gnats are slender and long-legged and hover over houseplant soil; drain flies are fuzzy and moth-shaped and stick to bathroom walls near drains.",
-        "next_photo": "A close-up of the wing shape and where it was resting (potted plant vs. drain)."
+        "next_photo": "A close-up of the wing shape and where it was resting (potted plant vs. drain).",
+        "photo_can_confirm": true
       }
     ],
     "size": "tiny",
@@ -249,7 +269,8 @@
       "allergen": false,
       "protected": false,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": false
     },
     "range": "common",
     "active_months": [

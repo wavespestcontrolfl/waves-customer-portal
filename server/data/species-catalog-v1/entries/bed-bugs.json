@@ -8,6 +8,11 @@
       "adult"
     ],
     "sign_of": [],
+    "role": "health_pest",
+    "risk": "defensive",
+    "action": "inspection",
+    "season_basis": "year_round",
+    "verification": [],
     "safety_line": "Bites are a nuisance and can itch for days; no disease is known to spread through bed bug bites. See a doctor if a bite site looks infected.",
     "legacy_slugs": [],
     "review": {
@@ -37,7 +42,8 @@
       {
         "slug": "bat-bug",
         "difference": "Bed bugs and bat bugs look nearly identical; bat bug infestations trace back to a bat roost (attic, soffit) rather than bedrooms.",
-        "next_photo": "A wide shot of where you found it (bedroom vs. attic/soffit near a bat roost)."
+        "next_photo": "A wide shot of where you found it (bedroom vs. attic/soffit near a bat roost) — a technician confirms the species itself from a collected sample if it matters.",
+        "photo_can_confirm": false
       }
     ],
     "size": "small",
@@ -58,7 +64,8 @@
       "allergen": true,
       "protected": false,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": false
     },
     "range": "common",
     "active_months": [

@@ -8,6 +8,11 @@
       "swarmer"
     ],
     "sign_of": [],
+    "role": "structural_pest",
+    "risk": "low",
+    "action": "inspection",
+    "season_basis": "swarming",
+    "verification": [],
     "safety_line": null,
     "legacy_slugs": [],
     "review": {
@@ -41,7 +46,8 @@
       {
         "slug": "carpenter-ant",
         "difference": "Termite swarmers have a straight waist and straight antennae; carpenter ant swarmers have a pinched waist and elbowed antennae.",
-        "next_photo": "A close-up from the side of the waist and antennae of a winged individual, next to a coin."
+        "next_photo": "A close-up from the side of the waist and antennae of a winged individual, next to a coin.",
+        "photo_can_confirm": true
       }
     ],
     "size": "small",
@@ -64,7 +70,8 @@
       "allergen": false,
       "protected": false,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": false
     },
     "range": "common",
     "active_months": [
@@ -96,9 +103,9 @@
     },
     "urgency": "high",
     "copy": {
-      "what_it_means": "Mud tubes or swarmers are consistent with subterranean termite activity — the mud tubes are covered highways termites build between soil and wood so they don't dry out. A photo can't confirm termites; a free in-person inspection can.",
+      "what_it_means": "Mud tubes or swarmers suggest subterranean termite activity, but they don't prove it on their own — other insects and debris can look similar. An inspection is what confirms active termites and how far they've spread.",
       "fact": "The mud tubes are climate-controlled highways — termites dry out fast, so they build covered roads between soil and wood.",
-      "blurb": "What we’re seeing is consistent with subterranean termite activity — mud tubes, swarmers, or wings. A photo can’t confirm termites; a free in-person inspection can, usually within a day or two."
+      "blurb": "What's in the photo is consistent with subterranean termite activity — mud tubes, swarmers, or wings. A photo can't confirm termites; an in-person inspection can."
     },
     "tech_notes": "Photo ID is SUGGESTIVE ONLY — never report as a WDO finding. Verify tubes/frass/wings on-site; distinguish ant vs. termite swarmer (waist, wing pairs, antennae).",
     "sources": [
@@ -118,6 +125,11 @@
       "swarmer"
     ],
     "sign_of": [],
+    "role": "structural_pest",
+    "risk": "low",
+    "action": "inspection",
+    "season_basis": "swarming",
+    "verification": [],
     "safety_line": null,
     "legacy_slugs": [],
     "review": {
@@ -147,7 +159,8 @@
       {
         "slug": "subterranean-termite",
         "difference": "Formosan swarmers are slightly larger and more uniformly yellowish-brown; colonies are far larger and swarm in bigger numbers over a shorter spring window.",
-        "next_photo": "A close-up of several swarmers next to a coin, plus the time of evening and date."
+        "next_photo": "A close-up of several swarmers next to a coin, plus the time of evening and date.",
+        "photo_can_confirm": true
       }
     ],
     "size": "small",
@@ -169,7 +182,8 @@
       "allergen": false,
       "protected": false,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": false
     },
     "range": "occasional",
     "active_months": [
@@ -189,7 +203,7 @@
     },
     "urgency": "high",
     "copy": {
-      "what_it_means": "Formosan termites are Florida's most destructive termite — colonies mature to hold several million individuals. Swarms near your lights in late spring justify a free in-person inspection to confirm and scope treatment.",
+      "what_it_means": "Swarms like this near lights in late spring are consistent with Formosan termites, among the most destructive termites in Florida — but a photo doesn't confirm the species or how far a colony has spread. An inspection does, and scopes any treatment.",
       "fact": "A mature Formosan colony can hold millions of termites — they’re called \"super termites\" for colony size, not for how they bite.",
       "blurb": "A mature Formosan colony can hold millions — they’re called \"super termites\" for colony size, not bite."
     },
@@ -211,6 +225,11 @@
       "swarmer"
     ],
     "sign_of": [],
+    "role": "structural_pest",
+    "risk": "low",
+    "action": "inspection",
+    "season_basis": "swarming",
+    "verification": [],
     "safety_line": null,
     "legacy_slugs": [],
     "review": {
@@ -242,7 +261,8 @@
       {
         "slug": "carpenter-ant",
         "difference": "Drywood termite pellets are hard, six-sided, and uniform; carpenter ant frass is fibrous sawdust mixed with insect parts.",
-        "next_photo": "A close-up of the pellet or debris pile next to a coin, on a light-colored surface."
+        "next_photo": "A close-up of the pellet or debris pile next to a coin, on a light-colored surface.",
+        "photo_can_confirm": true
       }
     ],
     "size": "small",
@@ -264,7 +284,8 @@
       "allergen": false,
       "protected": false,
       "toxic_to_pets": false,
-      "regulated": false
+      "regulated": false,
+      "irritant": false
     },
     "range": "common",
     "active_months": [
@@ -288,9 +309,9 @@
     },
     "urgency": "high",
     "copy": {
-      "what_it_means": "Pellet piles under a pinhole in wood are the classic drywood termite \"kick-out\" — the colony sweeping its gallery clean. Pellets mean an active colony in that wood member; a free in-person inspection confirms it and scopes treatment.",
+      "what_it_means": "Pellet piles under a pinhole in wood are the classic drywood termite \"kick-out\" sign. Pellets are evidence of drywood termite activity — they don't confirm whether the colony is still active or how far it's spread through that wood. An inspection determines that and scopes any treatment.",
       "fact": "Those pellet piles are \"kick-out\" debris — the colony sweeps its gallery and pushes the pellets out a hole the size of a pin.",
-      "blurb": "The photo shows signs consistent with drywood termites — often the tell is small piles of pellet-like frass. Only an in-person inspection can confirm it, and ours are free."
+      "blurb": "The photo shows signs consistent with drywood termites — often the tell is small piles of pellet-like frass. Only an inspection can confirm whether the colony is active."
     },
     "tech_notes": "Photo ID is SUGGESTIVE ONLY. Six-sided pellets vs. carpenter-ant frass (fibrous). Map kick-out holes; check fascia, window frames, furniture.",
     "sources": [
