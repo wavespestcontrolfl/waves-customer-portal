@@ -100,58 +100,60 @@ const ACCEPTANCE_STAMP_RE = /Auto-generated from accepted estimate #([0-9a-fA-F-
 // (setup fee, or a first application booked without a visit link) waits
 // until a visit booked from its estimate is completed. A setup-fee bill with
 // no acceptance stamp can't be tied to a visit, so it waits too.
-async function unperformedVisitInvoiceIds(invoices, { database = db, today = etDateString() } = {}) {
-  const visitIds = [...new Set(invoices.map((inv) => inv.scheduled_service_id).filter(Boolean).map(String))];
-  const performed = new Set();
-  if (visitIds.length) {
-    const rows = await database('scheduled_services')
-      .whereIn('id', visitIds)
-      .where({ status: 'completed' })
-      .select('id');
-    for (const row of rows) performed.add(String(row.id));
-  }
+async function completedVisitIds(visitIds, database) {
+  if (!visitIds.length) return new Set();
+  const rows = await database('scheduled_services')
+    .whereIn('id', visitIds)
+    .where({ status: 'completed' })
+    .select('id');
+  return new Set(rows.map((row) => String(row.id)));
+}
 
-  const unlinkedIds = invoices
-    .filter((inv) => 'scheduled_service_id' in inv && !inv.scheduled_service_id)
-    .map((inv) => String(inv.id));
+const acceptanceEstimateId = (doc) => ACCEPTANCE_STAMP_RE.exec(String(doc?.notes || ''))?.[1] || null;
+
+// Provenance of unlinked candidates: their notes/lines, plus which stamped
+// estimates already have a completed visit booked from them.
+async function unlinkedProvenance(unlinkedIds, database) {
   const docs = new Map();
   const performedEstimates = new Set();
-  if (unlinkedIds.length) {
-    const rows = await database('invoices').whereIn('id', unlinkedIds).select('id', 'notes', 'line_items');
-    for (const row of rows) docs.set(String(row.id), row);
-    const estimateIds = [...new Set(rows
-      .map((row) => ACCEPTANCE_STAMP_RE.exec(String(row.notes || ''))?.[1])
-      .filter(Boolean))];
-    if (estimateIds.length) {
-      const done = await database('scheduled_services')
-        .whereIn('source_estimate_id', estimateIds)
-        .where({ status: 'completed' })
-        .select('source_estimate_id');
-      for (const row of done) performedEstimates.add(String(row.source_estimate_id));
-    }
+  if (!unlinkedIds.length) return { docs, performedEstimates };
+  const rows = await database('invoices').whereIn('id', unlinkedIds).select('id', 'notes', 'line_items');
+  for (const row of rows) docs.set(String(row.id), row);
+  const estimateIds = [...new Set(rows.map(acceptanceEstimateId).filter(Boolean))];
+  if (estimateIds.length) {
+    const done = await database('scheduled_services')
+      .whereIn('source_estimate_id', estimateIds)
+      .where({ status: 'completed' })
+      .select('source_estimate_id');
+    for (const row of done) performedEstimates.add(String(row.source_estimate_id));
   }
+  return { docs, performedEstimates };
+}
 
+function unlinkedBillWaits(inv, { docs, performedEstimates }, today) {
+  if (inv.service_date && etCalendarDayOf(inv.service_date) > today) return true;
+  const doc = docs.get(String(inv.id));
+  if (!doc) return true;
+  const estimateId = acceptanceEstimateId(doc);
+  if (estimateId) return !performedEstimates.has(estimateId);
+  return invoiceHasPositiveSetupFeeLine(doc);
+}
+
+async function unperformedVisitInvoiceIds(invoices, { database = db, today = etDateString() } = {}) {
+  // Fail closed: a candidate read without the visit link or the service
+  // date can't prove its visit happened, so it waits.
+  const readable = (inv) => 'scheduled_service_id' in inv && 'service_date' in inv;
+  const visitIds = [...new Set(invoices.map((inv) => inv.scheduled_service_id).filter(Boolean).map(String))];
+  const performed = await completedVisitIds(visitIds, database);
+  const unlinkedIds = invoices.filter((inv) => readable(inv) && !inv.scheduled_service_id).map((inv) => String(inv.id));
+  const provenance = await unlinkedProvenance(unlinkedIds, database);
   const skip = new Set();
   for (const inv of invoices) {
-    const id = String(inv.id);
-    // Fail closed: a candidate read without the visit link or the service
-    // date can't prove its visit happened, so it waits.
-    if (!('scheduled_service_id' in inv) || !('service_date' in inv)) {
-      skip.add(id);
-    } else if (inv.scheduled_service_id) {
-      if (!performed.has(String(inv.scheduled_service_id))) skip.add(id);
-    } else if (inv.service_date && etCalendarDayOf(inv.service_date) > today) {
-      skip.add(id);
-    } else {
-      const doc = docs.get(id);
-      const estimateId = doc && ACCEPTANCE_STAMP_RE.exec(String(doc.notes || ''))?.[1];
-      if (!doc) skip.add(id);
-      else if (estimateId) {
-        if (!performedEstimates.has(estimateId)) skip.add(id);
-      } else if (invoiceHasPositiveSetupFeeLine(doc)) {
-        skip.add(id);
-      }
-    }
+    const waits = !readable(inv)
+      || (inv.scheduled_service_id
+        ? !performed.has(String(inv.scheduled_service_id))
+        : unlinkedBillWaits(inv, provenance, today));
+    if (waits) skip.add(String(inv.id));
   }
   return skip;
 }
