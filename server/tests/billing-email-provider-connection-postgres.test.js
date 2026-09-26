@@ -165,6 +165,26 @@ postgres('billing Email provider preparation on its held connection', () => {
     }
   }, 15000);
 
+  test('SMS-only non_mobile suppression still permits authorized Email dispatch', async () => {
+    const phone = '+19415550100';
+    await mockPg('customers').where({ id: customerId }).update({ phone });
+    await mockPg('messaging_suppression').insert({ phone, reason: 'non_mobile', active: true });
+    const state = { boundaryBlock: null, handoffStarted: false, providerAccepted: false };
+    try {
+      expect(await dispatchUnderBillingEmailAuthority({
+        input: { customerId, metadata: { billingDeliveryCategory: 'billing' } },
+        recipientEmail: 'qa@example.invalid', state,
+        dispatch: (database) => sendgrid.sendOne({ to: 'qa@example.invalid', subject: 'Synthetic update',
+          html: '<p>Authorized Email</p>', text: 'Authorized Email', database }),
+      })).toEqual({ ok: true });
+      expect(state.providerAccepted).toBe(true);
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+    } finally {
+      await mockPg('messaging_suppression').where({ phone }).delete();
+      await mockPg('customers').where({ id: customerId }).update({ phone: null });
+    }
+  }, 15000);
+
   test('a prior suppression writer commits before the handoff recheck and blocks dispatch', async () => {
     const phone = '+19415550100';
     await mockPg('customers').where({ id: customerId }).update({ phone });
