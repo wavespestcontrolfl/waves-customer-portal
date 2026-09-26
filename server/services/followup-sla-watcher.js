@@ -169,7 +169,10 @@ function evidenceFrom(r) {
 }
 
 async function followedUpIds(conn, rows) {
-  const scoped = (rows || []).map((r) => ({ r, since: evidenceFrom(r), phone: r.customer_id ? null : contactPhone(r) }))
+  // A caller with no customer record is matched by a USABLE number only —
+  // an 'anonymous' or client: caller ID normalizes to nothing and gives the
+  // row no contact to match on (never a match between two unusable values).
+  const scoped = (rows || []).map((r) => ({ r, since: evidenceFrom(r), phone: r.customer_id ? null : phoneKey(contactPhone(r)) }))
     .filter((x) => x.since && (x.r.customer_id || x.phone));
   const done = new Set();
   if (!scoped.length) return done;
@@ -177,7 +180,7 @@ async function followedUpIds(conn, rows) {
   const customerIds = [...new Set(scoped.filter((x) => x.r.customer_id).map((x) => x.r.customer_id))];
   // Numbers match however they were written (9415550123, +19415550123,
   // (941) 555-0123) — call-commitments' phoneWhere rule, batched.
-  const phones = [...new Set(scoped.filter((x) => x.phone).map((x) => phoneKey(x.phone)).filter(Boolean))];
+  const phones = [...new Set(scoped.filter((x) => x.phone).map((x) => x.phone))];
   // A caller with no customer record when the promise was made is usually
   // linked (or created) by the very follow-up that keeps it, so their later
   // calls and texts match by number whether or not they carry a customer now.
@@ -245,9 +248,9 @@ async function followedUpIds(conn, rows) {
   }
   const after = (rec, since) => new Date(rec.created_at).getTime() > since.getTime();
   const mine = (rec, x) => (x.r.customer_id ? String(rec.customer_id) === String(x.r.customer_id)
-    : phoneKey(rec.to_phone) === phoneKey(x.phone));
+    : phoneKey(rec.to_phone) === x.phone);
   const visitFor = (v, x) => (x.r.customer_id ? String(v.customer_id) === String(x.r.customer_id)
-    : (customersByPhone.get(phoneKey(x.phone)) || []).includes(String(v.customer_id)));
+    : (customersByPhone.get(x.phone) || []).includes(String(v.customer_id)));
   for (const x of scoped) {
     if (visits.some((v) => visitFor(v, x) && after(v, x.since))
       || calls.some((c) => c.id !== x.r.call_log_id && mine(c, x) && after(c, x.since))
@@ -340,8 +343,11 @@ async function pagerHealthy(conn, now = new Date()) {
   // The latest run must have SUCCEEDED and have STARTED on or after the
   // settled tick — a run that began before it (and finished late) says
   // nothing about that tick, and a failed or still-running one proves nothing.
+  const started = row?.last_started_at ? new Date(row.last_started_at).getTime() : NaN;
+  // A run in progress right now IS the pager working (its start overwrote
+  // the previous success) — healthy while it is fresh, not once stuck.
+  if (row?.last_status === 'running') return Number.isFinite(started) && now.getTime() - started < 15 * 60 * 1000;
   if (row?.last_status !== 'success') return false;
-  const started = row.last_started_at ? new Date(row.last_started_at).getTime() : NaN;
   const last = Number.isFinite(started) ? started : NaN;
   // Judged against the last tick that has had time to FINISH: at 8:00 AM the
   // opening tick is still running (the watchdog fires at the same minute),
@@ -356,7 +362,9 @@ async function runFollowUpSlaWatcher({ now = new Date() } = {}) {
     // Switched off: no standing list may outlive the pager that kept it true.
     await db('notifications').where({ recipient_type: 'admin' }).whereNull('read_at')
       .whereRaw("metadata->>'dedupeKey' LIKE ?", [`${ROLLING_KEY}:%`])
-      .update({ read_at: now }).catch((err) => logger.warn(`[followup-sla] retiring the list while gated off failed: ${err.message}`));
+      // Flagged emptied too, so a re-enabled pager posts its list fresh.
+      .update({ read_at: now, metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || '{\"emptied\":true}'::jsonb") })
+      .catch((err) => logger.warn(`[followup-sla] retiring the list while gated off failed: ${err.message}`));
     return { skipped: true, reason: 'gated_off' };
   }
   const { runExclusive } = require('../utils/cron-lock');

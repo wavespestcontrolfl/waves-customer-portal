@@ -155,7 +155,10 @@ test('gated off → no scan, and any standing list is retired', async () => {
   isEnabled.mockReturnValue(false);
   expect(await runFollowUpSlaWatcher({ now: NOW })).toEqual({ skipped: true, reason: 'gated_off' });
   expect(listOpenCommitments).not.toHaveBeenCalled();
-  expect(updates).toEqual([{ table: 'notifications', patch: { read_at: NOW } }]);
+  expect(updates).toHaveLength(1);
+  expect(updates[0].patch.read_at).toBe(NOW);
+  // Flagged emptied, so a re-enabled pager posts its list fresh.
+  expect(String(updates[0].patch.metadata)).toMatch(/emptied/);
 });
 
 test('a new miss posts the rolling list fresh, unread, at the top of the feed', async () => {
@@ -541,4 +544,17 @@ test('a quote hint from before a floor time does not keep the promise', async ()
   mockDb({ hints: { q: JSON.stringify({ kind: 'estimate_sent', strength: 'association', matched_at: et('13:30').toISOString() }) } });
   listOpenCommitments.mockResolvedValue([row('q', { kind: 'send_estimate', call_started_at: et('13:00').toISOString(), due_at: et('14:00').toISOString(), due_type: 'floor' })]);
   expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(1);
+});
+
+test('a pager run in progress right now counts as healthy; a stuck one does not', async () => {
+  db.mockImplementation(() => { const q = {}; q.where = () => q; q.first = async () => ({ last_status: 'running', last_started_at: et('14:00').toISOString(), last_success_at: et('13:46').toISOString() }); return q; });
+  expect(await pagerHealthy(db, et('14:02'))).toBe(true);
+  expect(await pagerHealthy(db, et('14:30'))).toBe(false);
+});
+
+test('an anonymous caller ID gives no contact to match on — unrelated activity never keeps the promise', async () => {
+  mockDb({ activity: { sms_log: true, call_log: true } });
+  listOpenCommitments.mockResolvedValue([row('anon', { customer_id: null, from_phone: 'anonymous' })]);
+  expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(1);
+  expect(queriesOn('sms_log')).toHaveLength(0);
 });
