@@ -829,6 +829,12 @@ async function publishVersion(versionId, technicianId) {
     throw err;
   }
   await db.transaction(async (trx) => {
+    // Template row first, then its versions: the order every other publisher
+    // takes (the 2026-09-26 copy-audit migrations and their down paths CAS
+    // email_templates.active_version_id before archiving the version they
+    // replace), so an admin publish racing a deploy's migration on the same
+    // template waits for it instead of deadlocking.
+    await trx('email_templates').where({ id: row.template_id }).forUpdate().first('id');
     await trx('email_template_versions')
       .where({ template_id: row.template_id, status: 'active' })
       .update({ status: 'archived', updated_at: new Date() });
