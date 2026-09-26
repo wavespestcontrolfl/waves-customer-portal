@@ -46,8 +46,8 @@ In Railway dashboard, confirm these are set:
 
 Optional:
 - `INTELLIGENCE_BAR_TECH_MODEL` — Optional tech-portal override. Without it,
-  the tech context uses `MODELS.FLAGSHIP` from `server/config/models.js`
-  (currently `claude-opus-4-8` as the code default; the registry is authoritative).
+  the tech context uses `MODELS.FLAGSHIP`; `server/config/models.js` is the
+  authoritative model registry.
 
 ## Step 4: Deploy
 
@@ -154,4 +154,4 @@ Check `ROUTE_CONTEXT_MAP` in `GlobalCommandPalette.jsx`. The mapping uses prefix
 | reviews | 14 | 9 | 23 |
 | comms | 14 | 9 | 23 |
 | tax | 14 | 10 | 24 |
-| tech | — | 8 | 8 (Sonnet, read-only) |
+| tech | — | 8 | 8 (`MODELS.FLAGSHIP`, read-only) |

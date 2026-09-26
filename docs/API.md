@@ -136,16 +136,52 @@ Payment history with card details.
 Current balance, upcoming charges, monthly rate, next charge date.
 
 ### GET /billing/cards
-All cards on file with brand, last four, expiry, default/autopay status.
+All payment methods on file with their card or bank details, verification
+state, and default/autopay status.
+
+### POST /billing/cards/setup-intent
+Create a Stripe SetupIntent for the payment methods the client wants to offer.
+`paymentMethodType` accepts `card`, `us_bank_account`, or `card_or_bank` and
+defaults to `card`.
+
+**Request:**
+```json
+{ "paymentMethodType": "card_or_bank" }
+```
+
+**Response:**
+```json
+{
+  "clientSecret": "seti_..._secret_...",
+  "setupIntentId": "seti_...",
+  "publishableKey": "pk_...",
+  "paymentMethodTypes": ["card", "us_bank_account"]
+}
+```
+
+The server may reduce a bank-inclusive request to card-only when portal ACH is
+disabled. Clients must use the returned `paymentMethodTypes` as the effective
+set.
 
 ### POST /billing/cards
-Save a payment method after completing the Stripe SetupIntent flow:
+Save a payment method after confirming the Stripe SetupIntent with Stripe.
+The request supports `setupIntentId` (required) and `paymentMethodId`
+(optional). When `paymentMethodId` is omitted, the server resolves it from the
+SetupIntent; when supplied, it must match the SetupIntent's payment method.
+Bank saves require portal ACH to remain enabled; otherwise this endpoint
+returns `409` before saving the method or recording consent.
 
-1. `POST /billing/cards/setup-intent` to obtain `clientSecret` and
-   `setupIntentId`.
-2. Confirm the SetupIntent with Stripe using `clientSecret`.
-3. Submit the confirmed SetupIntent id here. `paymentMethodId` is optional;
-   when omitted, the server resolves it from the SetupIntent.
+Two confirmation outcomes are accepted:
+
+- `succeeded` saves the method immediately. A bank method is marked verified;
+  the route records consent and attempts Auto Pay enrollment.
+- `requires_action` with `next_action.type = verify_with_microdeposits` saves
+  the bank method as pending verification and records consent, but does not
+  make it default or enroll it in Auto Pay. Verification completion is handled
+  later through Stripe's verification flow.
+
+Other incomplete SetupIntent states return `409` without saving through this
+endpoint.
 
 **Request:**
 ```json
