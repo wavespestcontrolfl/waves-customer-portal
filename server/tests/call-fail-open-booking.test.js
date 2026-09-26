@@ -2238,6 +2238,15 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     // 1 PM, never 11 PM.
     ['We will be there Sunday between 11 and 1 pm.', '2026-08-02T23:00:00-04:00', false],
     ['We will be there Sunday between 11 and 1 pm.', '2026-08-02T11:00:00-04:00', true],
+    // codex #4919 review round 2 P1: the opposite shape — a range that does
+    // NOT cross noon ("between 8 and 10 pm") must resolve its first bound
+    // to the SAME period as the stated second bound, not the
+    // business-hours-inferred opposite one.
+    ['We will be there Sunday between 8 and 10 pm.', '2026-08-02T20:00:00-04:00', true],
+    ['We will be there Sunday between 8 and 10 pm.', '2026-08-02T08:00:00-04:00', false],
+    // An overnight range ("11 PM to 1 AM") is the same forward-progression
+    // logic wrapping past midnight.
+    ['We will be there Sunday between 11 and 1 am.', '2026-08-02T23:00:00-04:00', true],
     // codex #4919 review round P1 (:1597): "noon"/"midnight" bind as a
     // range bound too — both are the v11 prompt's own documented examples.
     ['We will be there tomorrow between 10 and noon.', '2026-07-31T10:00:00-04:00', true],

@@ -1605,17 +1605,37 @@ function parseSpokenSlot(normalizedSentence) {
 // Either bound may be "noon"/"midnight" instead of a number (both
 // documented v11 prompt examples: "between 10 and noon tomorrow", "between
 // noon and 1 today") — collapsed to the literal word, which parseSpokenSlot
-// already reads as 12 pm/12 am. A number bound with no stated period infers
-// one from the SAME business-hours table parseSpokenSlot already applies to
-// a bare hour elsewhere — from the FIRST bound's own hour only; the second
-// bound's period is never copied onto the first ("between 11 and 1 pm" is
-// 11 AM–1 PM, not 11 PM — codex review round).
+// already reads as 12 pm/12 am.
 const RANGE_RE = new RegExp(
   '\\bbetween (?:(?<b1h>\\d{1,2})(?: (?<b1p>am|pm))?|(?<b1w>noon|midnight)) and '
   + '(?:(?<b2h>\\d{1,2})(?: (?<b2p>am|pm))?|(?<b2w>noon|midnight))\\b'
   + '|\\b(?:(?<c1h>\\d{1,2})(?: (?<c1p>am|pm))?|(?<c1w>noon|midnight)) to '
   + '(?:(?<c2h>\\d{1,2})(?: (?<c2p>am|pm))?|(?<c2w>noon|midnight))\\b',
 );
+// The FIRST bound's period, when it states none itself, is resolved from
+// the SECOND bound (codex review round P1: "between 8 and 10 pm" is 8-10
+// PM, never the business-hours-inferred 8 AM — but "between 11 and 1 pm" is
+// still 11 AM-1 PM, never 11 PM, so the second bound's period is never just
+// copied onto the first either). Both readings of the first bound (am/pm)
+// are tried, and whichever makes the range run FORWARD the SHORTER way
+// (mod 24h — covers an overnight range like "11 PM and 1 AM" too) wins; a
+// tie, or the second bound stating no resolvable period/word of its own
+// either, falls back to the same business-hours inference parseSpokenSlot
+// already applies to a bare hour elsewhere.
+function secondBoundClock24(word, hour, period) {
+  if (word) return word === 'noon' ? 12 : 0;
+  if (!period) return null;
+  return (Number(hour) % 12) + (period === 'pm' ? 12 : 0);
+}
+function resolveRangeStartPeriod(hour1, endClock24) {
+  if (endClock24 == null) return null;
+  const h1 = Number(hour1) % 12;
+  const durationVia = (startClock24) => (((endClock24 - startClock24) % 24) + 24) % 24;
+  const durAm = durationVia(h1);
+  const durPm = durationVia(h1 + 12);
+  if (durAm === 0 || durPm === 0 || durAm === durPm) return null;
+  return durAm < durPm ? 'am' : 'pm';
+}
 function collapseRangeToFirstBound(ns) {
   const m = RANGE_RE.exec(ns);
   if (!m) return ns;
@@ -1628,7 +1648,14 @@ function collapseRangeToFirstBound(ns) {
   } else {
     const hour = betweenBranch ? g.b1h : g.c1h;
     const explicitPeriod = betweenBranch ? g.b1p : g.c1p;
-    const period = explicitPeriod || inferPeriodFromBusinessHours(Number(hour));
+    const endClock24 = secondBoundClock24(
+      betweenBranch ? g.b2w : g.c2w,
+      betweenBranch ? g.b2h : g.c2h,
+      betweenBranch ? g.b2p : g.c2p,
+    );
+    const period = explicitPeriod
+      || resolveRangeStartPeriod(hour, endClock24)
+      || inferPeriodFromBusinessHours(Number(hour));
     if (!period) return ns;
     replacement = `${hour} ${period}`;
   }
