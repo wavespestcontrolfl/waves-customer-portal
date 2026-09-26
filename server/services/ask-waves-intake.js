@@ -342,47 +342,39 @@ const INTAKE_EPA_APPROVED_ES_RE = { test: (t) => EPA_MENTION_RE.test(t) && APPRO
 // "Re-enter the portal / volver a entrar al portal" is a login, not a room.
 const DIGITAL_CONTEXT_RE = /\b(?:portal|account|login|log\s+in|password|website|site|app|página|pagina|cuenta|contraseña|sesi[oó]n|sistema)\b/i;
 
-// Each duration is judged by the words around it (same sentence, a few
-// words either side), not by keywords anywhere in the conversation:
-//   - an access signal next to it (re-entry / drying wording, a person or
-//     animal with an access verb — "let your pets out", "kids can play",
-//     "keep pets off", "use the lawn") → timing claim;
-//   - a scheduling word next to it ("visit takes about 45 minutes", "every
-//     21 days", "come back in two weeks") → not a claim;
-//   - otherwise it's a claim when the visitor asked a re-entry / drying
-//     question ("How long after treatment can I re-enter?" → "Usually about
-//     30 minutes.") or the conversation is about a treatment.
-// "…every 21 days to keep mosquitoes away" has no access signal (no person or
-// animal) and a scheduling word, so it passes.
+// Timing claims (see fixedTimingClaim): any access wording in the reply or
+// the visitor's question makes every duration / clock time in the reply a
+// claim. Without access wording, a duration is judged by the few words around
+// it — a scheduling word ("visit takes about 45 minutes", "every 21 days",
+// "come back in two weeks") exempts it; otherwise treatment context flags it.
 function durationWindow(sentence, index, length) {
   const before = sentence.slice(0, index).split(/\s+/).filter(Boolean).slice(-10).join(' ');
   const after = sentence.slice(index + length).split(/\s+/).filter(Boolean).slice(0, 8).join(' ');
-  return { near: `${before} ${sentence.substr(index, length)} ${after}`, tight: `${before.split(' ').slice(-6).join(' ')} ${sentence.substr(index, length)} ${after.split(' ').slice(0, 3).join(' ')}` };
+  return { tight: `${before.split(' ').slice(-6).join(' ')} ${sentence.substr(index, length)} ${after.split(' ').slice(0, 3).join(' ')}` };
 }
 function fixedTimingClaim(reply, contextText, treatmentContext) {
-  const visitorAskedTiming = ACCESS_SIGNAL_RE.test(String(contextText || ''));
-  for (const sentence of String(reply || '').split(/(?<=[.!?])\s+|[;\n]+/)) {
-    const clockRe = new RegExp(CLOCK_TIME_RE.source, 'gi');
-    let clock;
-    while ((clock = clockRe.exec(sentence))) {
-      const { near } = durationWindow(sentence, clock.index, clock[0].length);
-      const digitalOnly = DIGITAL_CONTEXT_RE.test(near) && !treatmentContext;
-      if (!digitalOnly && (ACCESS_SIGNAL_RE.test(near) || (visitorAskedTiming && treatmentContext))) return true;
-    }
+  const text = String(reply || '');
+  // Topic, not proximity: when the reply or the visitor's question is about
+  // access at all (re-entry, drying, letting pets out, keeping off the lawn),
+  // EVERY duration or clock time in the reply is a timing claim — no
+  // scheduling or "takes about" exemption, no matter which sentence the
+  // access wording sits in ("It takes 30 minutes. Then you can re-enter.",
+  // "By noon." answering "When can I re-enter?"). Only a login/portal
+  // conversation with no treatment in it is exempt.
+  const accessTopic = ACCESS_SIGNAL_RE.test(text) || ACCESS_SIGNAL_RE.test(String(contextText || ''));
+  const digitalOnly = !treatmentContext && DIGITAL_CONTEXT_RE.test(`${text}\n${contextText || ''}`);
+  const hasClock = CLOCK_TIME_RE.test(text);
+  if (accessTopic && !digitalOnly && (hasClock || DURATION_RE.test(text))) return true;
+  if (digitalOnly) return false;
+  // No access topic: a clock time is booking ("we can treat tomorrow"); a
+  // duration is judged by the words right around it.
+  for (const sentence of text.split(/(?<=[.!?])\s+|[;\n]+/)) {
     const re = new RegExp(DURATION_RE.source, 'gi');
     let m;
     while ((m = re.exec(sentence))) {
-      const { near, tight } = durationWindow(sentence, m.index, m[0].length);
-      // "Volver a entrar al portal" is a login, not a room.
-      const digitalOnly = DIGITAL_CONTEXT_RE.test(near) && !treatmentContext;
-      if (!digitalOnly && ACCESS_SIGNAL_RE.test(near)) return true;
+      const { tight } = durationWindow(sentence, m.index, m[0].length);
       // "waiting 30 minutes" / "espere 30 minutos" is itself a timing instruction.
       if (/\bwait(?:ing|s)?\b|\besper\w*/i.test(tight)) return true;
-      if (digitalOnly) continue;
-      // The visitor asked when they can re-enter / let pets out / how long it
-      // takes to dry: any duration in the answer is a timing claim — no
-      // scheduling word exempts it ("About 30 minutes after the visit.").
-      if (visitorAskedTiming) return true;
       if (SCHEDULING_DURATION_RE.test(tight) || GENERIC_LENGTH_RE.test(tight)) continue;
       if (treatmentContext) return true;
     }

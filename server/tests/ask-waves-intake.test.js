@@ -229,6 +229,8 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ['Usually by this afternoon.', 'When can I let my dog out after the treatment?'],
     ['Puede volver a entrar a las 4:30.', '¿Cuándo puedo volver a entrar después del tratamiento?'],
     ['Your appointment is at 9 AM, and following completion of the treatment you can re-enter the house at 11 AM.', ''],
+    ['By noon.', 'When can I re-enter?'],
+    ['It takes 30 minutes. Then you can re-enter the house.', 'Tell me about your treatment.'],
   ])('a clock-time re-entry instruction is replaced: %s', (reply, context) => {
     expect(scrubUnsafeClaims({ ...base, reply }, context).reply).toMatch(/label directions|instrucciones de la etiqueta/);
   });
