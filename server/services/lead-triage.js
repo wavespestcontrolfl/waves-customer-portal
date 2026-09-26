@@ -57,17 +57,18 @@ function triageMatchesSchema(t) {
 // successful triage with no reply (Codex r1 on #4975).
 // The shared stripper knows only the Waves signers, so a sign-off by any
 // other name ("— Sarah", "Sarah, Waves Team" on its own last line) is removed
-// here too (Codex r2 on #4975). Only a signature context counts: a dash right
-// after a sentence end or at the start of the last line, or a last line that
-// is only a name — one or two capitalized words, optionally ", <Company>" in
-// capitalized words. A dash inside a sentence ("We serve your area —
+// here too (Codex r2 on #4975). Only a signature context counts, right after
+// a finished sentence: a dash-led name, or a last line that is only a name —
+// one or two capitalized words, optionally ", <Company>" in capitalized words. A dash inside a sentence ("We serve your area —
 // Sarasota.") or a list line ("Ants, roaches, or something else?") is text.
 const NAME_TOKEN = "[A-Z][\\p{L}'-]+";
 const SIGN_OFF_TAIL = `${NAME_TOKEN}(?:\\s+${NAME_TOKEN})?(?:\\s*,\\s*${NAME_TOKEN}(?:\\s+${NAME_TOKEN}){0,3})?\\s*[!.🌊]?\\s*$`;
 const DASH_SIGN_OFF_RE = new RegExp(`(^|[.!?])\\s*[—–-]{1,2}\\s*${SIGN_OFF_TAIL}`, 'u');
-const LINE_SIGN_OFF_RE = new RegExp(`\\n\\s*(?:[—–-]{1,2}\\s*)?${SIGN_OFF_TAIL}`, 'u');
+// A sign-off line only follows a finished sentence; a line after "with:" or
+// "will be" is the answer itself (pre-push audit on #4975).
+const LINE_SIGN_OFF_RE = new RegExp(`([.!?])\\s*\\n\\s*(?:[—–-]{1,2}\\s*)?${SIGN_OFF_TAIL}`, 'u');
 function stripAnySignOff(text) {
-  return text.trim().replace(DASH_SIGN_OFF_RE, '$1').replace(LINE_SIGN_OFF_RE, '').trim();
+  return text.trim().replace(DASH_SIGN_OFF_RE, '$1').replace(LINE_SIGN_OFF_RE, '$1').trim();
 }
 
 function unsignedTriage(parsed, firstName) {

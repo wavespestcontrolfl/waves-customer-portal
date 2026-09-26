@@ -168,6 +168,8 @@ describe('aiTriageLead — a sign-off by any name is removed', () => {
     'See you Tuesday — Mike will be your tech.',
     'Hi! — Mike from Waves will call you.',
     'Thanks, Sarah!',
+    'We can help with:\nLawn Care',
+    'Your technician will be\nAdam',
   ])('ordinary text is kept as written: %j', async (suggestedReply) => {
     mockCreate.mockResolvedValue(reply({ ...VALID, suggestedReply }));
     expect((await aiTriageLead(LEAD)).suggestedReply).toBe(suggestedReply);
