@@ -89,9 +89,9 @@
     },
     "urgency": "low",
     "copy": {
-      "what_it_means": "Lovebugs don't bite or sting at all — they're a car-wash problem, not a pest-control problem, and no treatment prevents them since they drift in from miles around. The swarm season is short, typically about four weeks each flight.",
+      "what_it_means": "Lovebugs are not known to bite or sting — they're a car-wash problem, not a pest-control problem, and no treatment prevents them since they drift in from miles around. The swarm season is short, typically about four weeks each flight.",
       "fact": "Their body fluids are slightly acidic and can etch car paint if left baked on for several days — modern clear coats hold up much better than older paint.",
-      "blurb": "Lovebugs are a twice-a-year Florida nuisance that no treatment prevents — they drift in from miles around. The good news: they’re harmless and the swarm season is short."
+      "blurb": "Lovebugs are a twice-a-year Florida nuisance that no treatment prevents — they drift in from miles around. The good news: they’re not known to bite or sting, and the swarm season is short."
     },
     "tech_notes": "No treatment; set expectations honestly — this is not a pest-control problem.",
     "sources": [
@@ -194,9 +194,9 @@
     },
     "urgency": "low",
     "copy": {
-      "what_it_means": "The larvae live in the gel film that builds up inside drains, which is why sprays fail and a stiff brush plus an enzyme cleaner succeeds. Clean the drain film and they are usually gone within days.",
+      "what_it_means": "The larvae live in the gel film that builds up inside drains, which is why sprays fail and a stiff brush plus an enzyme cleaner succeeds. Clearing the drain film usually stops new flies from emerging; a technician can confirm the source if they keep coming back.",
       "fact": "The larvae live in the gel film inside drains — which is why sprays fail and a stiff brush plus enzyme cleaner succeeds.",
-      "blurb": "Clean the drain film (brush + enzyme cleaner) and they’re gone in days."
+      "blurb": "Clean the drain film (brush + enzyme cleaner) and new flies usually stop emerging; a technician can confirm the source if they keep coming back."
     },
     "tech_notes": "Non-biting, no known disease transmission. Recommend mechanical drain cleaning; treatment is rarely needed if the source is addressed.",
     "sources": [

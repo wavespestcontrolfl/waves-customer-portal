@@ -156,7 +156,7 @@
     "look_alikes": [
       {
         "slug": "fire-ant",
-        "difference": "Bigheaded ant majors have a squarish, sculpted head and don't sting; fire ant workers are more uniform in size and sting readily when the mound is disturbed.",
+        "difference": "Bigheaded ant majors have a squarish head and aren't known to sting; fire ant workers are more uniform and sting readily when the mound is disturbed.",
         "next_photo": "A close-up from above of a major worker next to a coin, showing the head shape.",
         "photo_can_confirm": true
       }
@@ -436,9 +436,9 @@
     ],
     "service": {
       "line": "pest",
-      "key": "pest",
+      "key": null,
       "label": "General Pest Control",
-      "inspection_first": false,
+      "inspection_first": true,
       "referral": null
     },
     "urgency": "moderate",
@@ -666,7 +666,7 @@
     },
     "urgency": "moderate",
     "copy": {
-      "what_it_means": "White-footed ants form huge, persistent trails along fences, eaves, and screens. They don't sting, bite, or damage anything, but colonies can hold over a million ants, most never leaving the nest — trimming vegetation off the roofline and cutting moisture helps, and a technician can advise if trails keep returning.",
+      "what_it_means": "White-footed ants form huge, persistent trails along fences, eaves, and screens. Not known to sting or bite, and no structural damage, but colonies can hold over a million ants, most never leaving the nest — trimming vegetation off the roofline and cutting moisture helps.",
       "fact": "Colonies can hold a million-plus ants, and most workers never leave the nest — which is why the trail you see keeps coming back.",
       "blurb": "White-footed ants form huge, persistent trails along fences and eaves. Harmless, but colonies can hold a million-plus ants, most of which never leave the nest."
     },

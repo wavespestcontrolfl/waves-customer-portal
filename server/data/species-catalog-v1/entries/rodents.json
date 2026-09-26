@@ -51,7 +51,7 @@
     "verdict": "call",
     "safety": {
       "stings": false,
-      "bites": false,
+      "bites": true,
       "venomous": false,
       "disease_vector": true,
       "structural": true,
@@ -160,7 +160,7 @@
     "verdict": "call",
     "safety": {
       "stings": false,
-      "bites": false,
+      "bites": true,
       "venomous": false,
       "disease_vector": true,
       "structural": true,
@@ -270,10 +270,10 @@
     "verdict": "call",
     "safety": {
       "stings": false,
-      "bites": false,
+      "bites": true,
       "venomous": false,
       "disease_vector": true,
-      "structural": false,
+      "structural": true,
       "allergen": false,
       "protected": false,
       "toxic_to_pets": false,
