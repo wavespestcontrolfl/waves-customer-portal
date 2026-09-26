@@ -25,7 +25,7 @@ test('countersign fields are null when the contract has never been countersigned
   expect(out.countersignerName).toBeNull();
 });
 
-test('countersign fields surface once stamped, including under includeAudit:false (the public sign response)', () => {
+test('countersign fields surface once stamped in the admin view, and never in the public view (includeAudit:false)', () => {
   const countersignedAt = new Date('2026-09-25T14:00:00Z');
   const row = {
     ...BASE_ROW,
@@ -42,13 +42,12 @@ test('countersign fields surface once stamped, including under includeAudit:fals
   expect(full.countersignerIp).toBe('203.0.113.9');
   expect(full.countersignerUserAgent).toBe('jest');
 
+  // The public token/sign payload is unchanged by the countersign step:
+  // no staff id, name, time, IP, or UA — same treatment as signerIp.
   const publicView = serializeContract(row, { includeAudit: false });
-  expect(publicView.countersignedAt).toBe(countersignedAt.toISOString());
-  expect(publicView.countersignerName).toBe('Adam Owner');
-  // Audit-only fields (IP/UA) are stripped from the public-facing view, same
-  // treatment as signerIp/signerUserAgent.
-  expect(publicView).not.toHaveProperty('countersignerIp');
-  expect(publicView).not.toHaveProperty('countersignerUserAgent');
+  for (const key of ['countersignedAt', 'countersignedBy', 'countersignerName', 'countersignerIp', 'countersignerUserAgent']) {
+    expect(publicView).not.toHaveProperty(key);
+  }
 });
 
 test('an autopay authorization contract never carries a document template key, so the countersign-bell condition can never match it', () => {
