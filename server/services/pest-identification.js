@@ -706,11 +706,17 @@ function aggregateIdentification(perPhoto) {
     confidence: (contested || inconclusive) ? lowerConfidenceOf(winner.best, 'moderate') : winner.best,
     category: winner.entry.category,
     contested,
-    // Any photo that wasn't a clean pick of a species (a split, a conflict,
-    // a blurry shot) sends the facts through disputedFacts; a blurry photo
-    // adds no candidates, so a clean winner's own facts come back unchanged.
-    shared: (contested || unmatched.length) ? disputedFacts(perPhoto) : null,
+    // A contested answer is published generically, so it carries only what
+    // every candidate shares. A named answer keeps its own species' facts,
+    // but an inspection-first candidate in any photo keeps the inspection.
+    shared: contested ? disputedFacts(perPhoto) : (unmatched.length ? namedFacts(winner.entry, perPhoto) : null),
   };
+}
+
+function namedFacts(entry, perPhoto) {
+  const facts = entryFacts(entry);
+  const inspection = candidateEntries(perPhoto).some((candidate) => candidate.inspection_required);
+  return { ...facts, service: { ...facts.service, inspection_required: facts.service.inspection_required || inspection } };
 }
 
 function disputedFacts(perPhoto) {
@@ -868,7 +874,10 @@ function buildPublicPestReport(row = {}) {
 
   // No species entry: the contract's own flags (all false for an unmatched
   // answer; the shared ones for a group-only answer).
-  const safety = item && !ident.contested ? item.safety : (contract.safety || { stinging: false, venomous: false, disease_vector: false, structural_threat: false });
+  // The contract's own facts: the named species' for a named answer, the
+  // shared ones for a disputed or group-only answer. Older contracts stored
+  // the same values, so the library entry is only a fallback.
+  const safety = contract.safety || (item ? item.safety : { stinging: false, venomous: false, disease_vector: false, structural_threat: false });
   const contact = parseJson(row.contact_snapshot, {});
   const address = parseJson(row.address_snapshot, {});
   const firstName = contact.first_name
@@ -929,7 +938,7 @@ function buildPestTeaser(contract = {}) {
   const generic = item
     ? (GROUP_GENERIC[item.group] || CATEGORY_GENERIC[item.category])
     : (GROUP_GENERIC[ident.group] || CATEGORY_GENERIC[category] || CATEGORY_GENERIC.other);
-  const teaserSafety = item && !ident.contested ? item.safety : contract.safety;
+  const teaserSafety = contract.safety || (item ? item.safety : null);
   return {
     identified_teaser: `We identified ${generic}.`,
     identified_specific: Boolean(item && ident.confidence !== 'low'),

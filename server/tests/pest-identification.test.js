@@ -158,6 +158,19 @@ describe('mergeModelResults', () => {
     expect(contract.service.inspection_required).toBe(true);
   });
 
+  test('a named answer keeps its own species\' hazards (fire ant photo + fire/ghost split)', () => {
+    const fire = mergeModelResults(null, claude({ best_match: 'fire ant' }));
+    const fireGhost = mergeModelResults(claude({ best_match: 'fire ant' }), claude());
+    const identification = _test.aggregateIdentification([fire, fireGhost]);
+    expect(identification.contested).toBe(false);
+    const contract = buildPestReportContract({ ...fire, identification });
+    expect(publicIdentificationLabel(contract).specificity).toBe('named');
+    expect(contract.safety.stinging).toBe(true);
+    const report = buildPublicPestReport({ report_contract: JSON.stringify(contract) });
+    expect(report.safety.stinging).toBe(true);
+    expect(buildPestTeaser(contract).safety_flag).toBe(true);
+  });
+
   test('a clean winner with only a blurry extra photo keeps its own facts', () => {
     const ghost = mergeModelResults(null, claude());
     const blurry = mergeModelResults(null, claude({ best_match: 'unidentifiable', category: 'other', confidence: 'low' }));
