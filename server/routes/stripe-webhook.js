@@ -1,6 +1,7 @@
 const express = require('express');
 const Sentry = require('@sentry/node');
 const { safeErrorToken } = require('../utils/sentry-scrub');
+const { REPLAY_HOLD_CODES } = require('../services/messaging/billing-channel-routing');
 const router = express.Router();
 const Stripe = require('stripe');
 const db = require('../models/db');
@@ -222,7 +223,7 @@ async function sendBillingSms(customer, body, metadata = {}, { customerInitiated
   // so callers log deferred, not lost; a failed enqueue falls through and
   // returns the block unchanged (loudly logged).
   if (!result.sent
-    && ['QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT', 'APP_DELIVERY_HOLD', 'APP_PROVIDER_RETRY'].includes(result.code)
+    && REPLAY_HOLD_CODES.includes(result.code)
     && result.deferred
     && result.nextAllowedAt) {
     try {
