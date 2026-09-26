@@ -805,7 +805,11 @@ estimate+service+day, suppression-blocked addresses return 409 with no
 send, generic errors — no PII in responses or logs; while
 GATE_SEND_REQUIRES_SERVER_PRICING is on, a row or group link that fails
 the engine-pricing-authority verdict (#3750) answers the same generic 404
-before either provider path; both provider paths re-read the row and repeat
+before either provider path — and, with the gate on or off, so does a row
+whose stored estimate-tool price the 2026-09-26 lookup guards refuse
+(legacy autofill hold, #4941: `rowHeldForLegacyAutofillPrice`; gate off it
+judges the row alone, read-free — its group siblings are judged only while
+the gate is on); both provider paths re-read the row and repeat
 the customer-viewable + call-side-hold check as the LAST step before the
 SendGrid/Twilio handoff, so a clarify hold or archive that lands during the
 PDF render withholds the packet with the same generic 404 and releases the
@@ -843,9 +847,11 @@ quoted).)
 expired, I still want this" from the React estimate page's expired/
 not-found screen. Estimate token format gate (same slug-or-64-hex regex as
 the slots router), generic 404 — unknown token, malformed token, ineligible
-row, gate-off, and (while GATE_SEND_REQUIRES_SERVER_PRICING is on) a row or
+row, gate-off, (while GATE_SEND_REQUIRES_SERVER_PRICING is on) a row or
 group link that fails the engine-pricing-authority verdict (#3750; judged
-before the auto-grant claim, nothing burned) are indistinguishable — 5
+before the auto-grant claim, nothing burned), and — gate on or off — a row
+under the legacy autofill hold (#4941; gate off the row alone, its revivable
+siblings only while the gate is on) are indistinguishable — 5
 req/hr per-IP limit, dark
 behind GATE_ESTIMATE_EXTENSION_REQUEST (the rate limiter `skip`s while the
 gate is off so a dark probe sees only generic 404s, never a revealing 429,

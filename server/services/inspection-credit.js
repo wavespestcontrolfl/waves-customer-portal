@@ -670,7 +670,7 @@ async function markBookingForInspectionCredit(trx, {
           'Inspection-credit booking evidence failed — auto-recovery queued',
           'A booking could not record its inspection-credit evidence in-transaction. The retry ladder and the hourly sweep will recover it automatically; no action needed unless this alert repeats for the same customer.',
           {
-            link: `/admin/customers/${customerId}`,
+            link: `/admin/customers?customerId=${customerId}`,
             connection: sp,
             metadata: {
               reason: 'booking_evidence_outbox',
@@ -1551,7 +1551,7 @@ async function alertReversalNeedsOffice(offer, scheduledServiceId, { reason, bod
         'Inspection credit could not be reversed',
         body,
         {
-          link: offer.customer_id ? `/admin/customers/${offer.customer_id}` : '/admin/invoices',
+          link: offer.customer_id ? `/admin/customers?customerId=${offer.customer_id}` : '/admin/invoices',
           metadata: { offerId: offer.id, scheduledServiceId, reason },
           connection: trx,
         },
@@ -1854,7 +1854,7 @@ function queueCreditReceiptResend({ scheduledServiceId, offerId, attempt = 0 }) 
           'Inspection credit terms were not delivered',
           `${memo || 'An inspection credit was recorded.'} ${body}`,
           {
-            link: offer.customer_id ? `/admin/customers/${offer.customer_id}` : '/admin/invoices',
+            link: offer.customer_id ? `/admin/customers?customerId=${offer.customer_id}` : '/admin/invoices',
             metadata: { offerId, scheduledServiceId, reason },
           },
         );
