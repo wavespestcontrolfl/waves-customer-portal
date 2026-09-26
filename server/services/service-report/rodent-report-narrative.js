@@ -41,6 +41,7 @@ const {
   normalizeWordNumbers,
 } = require('./activity-indicators');
 const { validateCustomerCopy } = require('./premium-experience');
+const { nextVisitProblems } = require('./next-visit-claims');
 const {
   EXTRA_FORBIDDEN,
   formatNextVisitDate,
@@ -666,73 +667,6 @@ function unsupportedActivityClaims(text, facts) {
     'unsupported_capture_claim', 'contradicted_capture_negative', 'ungrounded_capture_negative');
   scan(CONSUMPTION_CLAIM_RES, consumptionSupported, consumptionZeroRecorded, ALLOWED_CONSUMPTION_PHRASE,
     'unsupported_consumption_claim', 'contradicted_consumption_negative', 'ungrounded_consumption_negative');
-  return problems;
-}
-
-// Next-visit copy is validated as TEXT, not just numerals (codex round-4
-// P1): "8–10 PM" contains only grounded numbers but contradicts an 8–10 AM
-// appointment. Any arrival-window or month-day mention in the output must
-// match the grounded next visit exactly (weekday too, when written); with
-// no grounded next visit, mentioning either rejects.
-const WINDOW_TEXT_RE = /\b\d{1,2}(?::\d{2})?\s*(?:AM|PM)?\s*[–—-]\s*\d{1,2}(?::\d{2})?\s*(?:AM|PM)\b/gi;
-const MONTH_NAMES = 'January|February|March|April|May|June|July|August|September|October|November|December';
-const WEEKDAY_NAMES = 'Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday';
-const DATE_TEXT_RE = new RegExp(`\\b(?:(${WEEKDAY_NAMES}),?\\s+)?(${MONTH_NAMES})\\s+(\\d{1,2})\\b`, 'gi');
-
-function normalizeWindowText(value) {
-  return String(value || '').replace(/[–—-]/g, '–').replace(/\s+/g, ' ').trim().toUpperCase();
-}
-
-function nextVisitProblems(text, facts) {
-  const problems = [];
-  const expected = facts.nextVisit;
-  const expectedWindow = expected?.window ? normalizeWindowText(expected.window) : null;
-  for (const match of String(text).matchAll(new RegExp(WINDOW_TEXT_RE.source, 'gi'))) {
-    if (!expectedWindow || normalizeWindowText(match[0]) !== expectedWindow) {
-      problems.push(`ungrounded_window:${match[0].trim()}`);
-    }
-  }
-  const expectedDate = expected?.date
-    ? new RegExp(`^(?:(${WEEKDAY_NAMES}),?\\s+)?(${MONTH_NAMES})\\s+(\\d{1,2})$`, 'i').exec(String(expected.date).trim())
-    : null;
-  for (const match of String(text).matchAll(new RegExp(DATE_TEXT_RE.source, 'gi'))) {
-    const [, weekday, month, day] = match;
-    const ok = expectedDate
-      && month.toLowerCase() === expectedDate[2].toLowerCase()
-      && Number(day) === Number(expectedDate[3])
-      && (!weekday || !expectedDate[1] || weekday.toLowerCase() === expectedDate[1].toLowerCase());
-    if (!ok) problems.push(`ungrounded_date:${match[0].trim()}`);
-  }
-  // STANDALONE weekday mentions count too (codex round-6 P1): "your next
-  // visit is Tuesday" contradicts a Monday appointment without ever
-  // matching the month-day pattern. Every weekday word in the output must
-  // be the grounded visit's weekday.
-  const expectedWeekday = expectedDate && expectedDate[1] ? expectedDate[1].toLowerCase() : null;
-  for (const match of String(text).matchAll(new RegExp(`\\b(${WEEKDAY_NAMES})\\b`, 'gi'))) {
-    if (!expectedWeekday || match[1].toLowerCase() !== expectedWeekday) {
-      problems.push(`ungrounded_weekday:${match[1]}`);
-    }
-  }
-  // STANDALONE clock times too (codex round-8 P1): "at 8 PM" reformats the
-  // grounded 8–10 AM range into a wrong single time whose numeral is
-  // grounded. Range mentions are removed first (the window check above
-  // already judged them); every remaining clock time must be one of the
-  // grounded window's boundaries, meridiem included.
-  const allowedTimes = new Set();
-  if (expectedWindow) {
-    const win = /^(\d{1,2})(?::(\d{2}))?\s*(AM|PM)?\s*–\s*(\d{1,2})(?::(\d{2}))?\s*(AM|PM)$/.exec(expectedWindow);
-    if (win) {
-      const endMeridiem = win[6];
-      const startMeridiem = win[3] || endMeridiem;
-      allowedTimes.add(`${Number(win[1])}:${win[2] || '00'} ${startMeridiem}`);
-      allowedTimes.add(`${Number(win[4])}:${win[5] || '00'} ${endMeridiem}`);
-    }
-  }
-  const withoutRanges = String(text).replace(new RegExp(WINDOW_TEXT_RE.source, 'gi'), ' ');
-  for (const match of withoutRanges.matchAll(/\b(\d{1,2})(?::(\d{2}))?\s*(AM|PM)\b/gi)) {
-    const normalized = `${Number(match[1])}:${match[2] || '00'} ${match[3].toUpperCase()}`;
-    if (!allowedTimes.has(normalized)) problems.push(`ungrounded_time:${match[0].trim()}`);
-  }
   return problems;
 }
 

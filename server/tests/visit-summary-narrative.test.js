@@ -11,6 +11,7 @@ const {
 } = require('../services/service-report/visit-summary-narrative');
 const { buildPestPressureCustomerView } = require('../services/pest-pressure/customer-view');
 const { sanitizeRecap } = require('../services/completion-recap');
+const { appointmentClaimProblems } = require('../services/service-report/next-visit-claims');
 
 const {
   groundingFacts,
@@ -178,6 +179,7 @@ test.each([
   ['We treated the perimeter. Your next visit is scheduled for Oct 2, 1–3 PM.', 'We treated the perimeter.'],
   ['We sealed a 1.5-foot gap, and your next appointment is booked for Sep 24 at 1 p.m.', 'We sealed a 1.5-foot gap.'],
   [sanitizeRecap('We sealed a gap, and your next appointment is booked for Sep 24 at 1 p.m.'), 'We sealed a gap.'],
+  [sanitizeRecap('We treated the perimeter, and your next appointment is booked for Sep 24'), 'We treated the perimeter.'],
 ])('appointment removal preserves sentence boundaries: %s', (recap, expected) => {
   expect(recapWithoutStaleAppointment(recap, { date: 'Friday, October 9' })).toBe(expected);
 });
@@ -229,6 +231,47 @@ test('clean model output is used verbatim', async () => {
     maxTokens: 400,
     promptVersion: 'pest_visit_summary_narrative_v3',
   }));
+});
+
+test.each([
+  ['a mismatched date', 'We refreshed the perimeter today. Your next visit will be Saturday, October 3, arriving 8–10 AM.'],
+  ['a mismatched window', 'We refreshed the perimeter today. Your next visit is scheduled for Friday, October 2, arriving 1–3 PM.'],
+  ['an unsupported appointment form', 'We refreshed the perimeter today. Your next visit is scheduled soon, and we will keep monitoring the treated areas.'],
+  ['an unsupported relative date', 'We refreshed the perimeter today. Your next appointment is tomorrow, arriving 8–10 AM.'],
+  ['a mismatched appointment label', 'We refreshed the perimeter today. Next visit: Saturday, October 3, arriving 8–10 AM.'],
+])('model output with %s falls back to grounded copy', async (_label, summary) => {
+  const args = input();
+  const out = await applyVisitSummaryNarrative(args, {
+    callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary } }),
+  });
+  expect(out).toBe(deterministicSummary(groundingFacts(args)));
+});
+
+test('model cannot invent an appointment when no next visit was supplied', async () => {
+  const args = input({ nextAppointment: null });
+  const summary = 'We refreshed the perimeter and entry points today. Your next visit is scheduled for Friday, October 2, arriving 8–10 AM.';
+  const out = await applyVisitSummaryNarrative(args, {
+    callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary } }),
+  });
+  expect(out).toBe(deterministicSummary(groundingFacts(args)));
+});
+
+test('appointment guard ignores grounded work numbers, aftercare times, and unrelated dates', async () => {
+  expect(appointmentClaimProblems(
+    'We treated 3 entry points after reviewing the September 18 note. Keep pets away until 4 PM.',
+    { nextVisit: null },
+  )).toEqual([]);
+  expect(appointmentClaimProblems(
+    'We will recheck the garage next visit.',
+    { nextVisit: null },
+  )).toEqual([]);
+
+  const summary = 'We treated 3 entry points after reviewing the September 18 note. Keep the threshold clear until the sealant dries.';
+  const args = input({ recap: summary, nextAppointment: null });
+  const out = await applyVisitSummaryNarrative(args, {
+    callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary } }),
+  });
+  expect(out).toBe(summary);
 });
 
 test('banned copy in model output falls back to the deterministic summary', async () => {

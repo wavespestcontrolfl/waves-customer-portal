@@ -25,6 +25,7 @@ const MODELS = require('../../config/models');
 const logger = require('../logger');
 const { dispatchWithFallback } = require('../llm/call');
 const { findBannedCustomerCopy } = require('./activity-indicators');
+const { appointmentClaimProblems } = require('./next-visit-claims');
 
 // v3: reviewed recurring-pest evidence/scope contract and authoritative
 // structured next-visit handling.
@@ -87,15 +88,15 @@ function recapWithoutStaleAppointment(recap, nextVisit) {
     if (aftercareInitial) {
       return `${prefix && !/[.!?]$/.test(prefix) ? '. ' : ''}${aftercareInitial.toUpperCase()}`;
     }
-    // In "work, and [appointment]. More work", the final dot can also be the
-    // dot in "p.m." and is therefore part of the removed match. Restore only
-    // that clear sentence boundary; other surrounding prose stays verbatim.
+    // A leading-conjunction appointment is a clause boundary. Restore its
+    // period when it reaches the recap end/signoff, even when unpunctuated.
+    // A consumed "p.m." dot also marks a following sentence boundary.
     const consumedTerminalDot = /\.\s*$/.test(appointment);
     const remainder = source.slice(offset + appointment.length);
-    const followedBySentence = !remainder.trim()
-      || /^\s*[-–—]\s*Waves\s*$/i.test(remainder)
-      || /^\s+[A-Z]/.test(remainder);
-    return removedLeadingConnector && consumedTerminalDot && followedBySentence ? '.' : '';
+    const reachesRecapEnd = !remainder.trim() || /^\s*[-–—]\s*Waves\s*$/i.test(remainder);
+    const followedBySentence = /^\s+[A-Z]/.test(remainder);
+    return removedLeadingConnector
+      && (reachesRecapEnd || (consumedTerminalDot && followedBySentence)) ? '.' : '';
   });
   if (stripped === text) return text;
   const normalized = cleanText(stripped)
@@ -259,11 +260,12 @@ async function applyVisitSummaryNarrative(input = {}, deps = {}) {
       const banned = [
         ...findBannedCustomerCopy(text),
         ...EXTRA_FORBIDDEN.map((rx) => text.match(rx)?.[0] || null).filter(Boolean),
+        ...appointmentClaimProblems(text, facts),
       ];
       if (!banned.length) {
         value = text;
       } else {
-        logger.warn(`[visit-summary] narrative hit banned copy (${banned.join(', ')}); using deterministic summary`);
+        logger.warn(`[visit-summary] narrative hit guard (${banned.join(', ')}); using deterministic summary`);
       }
     } else if (res && !res.ok) {
       logger.warn(`[visit-summary] narrative miss (${res.reason}); using deterministic summary`);
