@@ -1265,7 +1265,10 @@ the chat's quote step posts to the existing `/api/public/quote/calculate`
 above, which owns the four-field contact gate, lead minting, and attribution.
 All deterministic guards (price scrub, emergency + account-support fallback
 when both LLM providers miss) read English AND Spanish — the prompt answers
-Spanish visitors in Spanish. NOT CORS-open — credentialed allowlist origins
+Spanish visitors in Spanish. Each turn has a wall-clock budget across both
+providers (`ASK_WAVES_TURN_BUDGET_MS`, default 22000) after which the
+deterministic fallback is returned; the conversation log never delays the
+reply. NOT CORS-open — credentialed allowlist origins
 only (hub site)).
 `/api/public/experiments` (`GET /status` + `POST /exposure`) (client-side
 GrowthBook experimentation surface — no auth, anonymous visitors are the
