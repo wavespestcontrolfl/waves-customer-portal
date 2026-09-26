@@ -54,7 +54,7 @@ describe('callDurationSeconds — largest positive of duration_seconds / recordi
   });
 });
 
-describe('callEndedAt — start + duration, except a bridged call ends at bridge + duration (codex #4919 round-3 P1)', () => {
+describe('callEndedAt — start + duration always, including a bridged (outbound-connect) row (codex #4919 round-4 P1)', () => {
   test('a normal row: created_at + duration', () => {
     const row = { created_at: '2026-09-26T18:00:00Z', duration_seconds: 300 };
     expect(callEndedAt(row).toISOString()).toBe('2026-09-26T18:05:00.000Z');
@@ -65,27 +65,22 @@ describe('callEndedAt — start + duration, except a bridged call ends at bridge
     expect(callEndedAt(row).toISOString()).toBe('2026-09-26T18:30:00.000Z');
   });
 
-  // The actual codex finding: created_at is RING time on an inbound bridged
-  // call, and duration_seconds measures the CONVERSATION from the bridge —
-  // a long ring must not be silently absorbed into the end time.
-  test('a bridged inbound call with a long ring: bridge + duration, not created_at + duration', () => {
+  // codex #4919 round-4 P1 (correcting a round-3 attempt): the ONLY writer
+  // of bridged_at is /outbound-connect — staff pressing 1 on an OUTBOUND
+  // admin-connect call, with a long wait BEFORE the customer is even
+  // dialed. /call-status's duration_seconds for that row is the parent
+  // leg's Twilio CallDuration, measured from created_at (when the admin's
+  // leg answered) — it already SPANS the pre-bridge wait, so created_at +
+  // duration is the correct end. Adding duration to bridged_at instead
+  // would double-count that wait and push the end PAST the true one.
+  test('an outbound-connect-shaped row (bridged_at set, long pre-bridge wait): created_at + duration, bridged_at is NOT added', () => {
     const row = {
-      created_at: '2026-09-26T21:00:00Z', // rang at 21:00
-      bridged_at: '2026-09-26T21:05:00Z', // answered 5 minutes later
-      duration_seconds: 300, // 5-minute conversation from the bridge
-      direction: 'inbound',
+      created_at: '2026-09-26T21:00:00Z', // admin's leg answered at 21:00
+      bridged_at: '2026-09-26T21:08:00Z', // staff pressed 1 eight minutes later
+      duration_seconds: 300, // parent CallDuration: the WHOLE call from 21:00, 5 min total
+      direction: 'outbound-api',
     };
-    // created_at + duration would wrongly give 21:05 — 5 minutes early.
-    expect(callEndedAt(row).toISOString()).toBe('2026-09-26T21:10:00.000Z');
-  });
-
-  test('bridged_at takes precedence even with no explicit direction on the row', () => {
-    const row = { created_at: '2026-09-26T21:00:00Z', bridged_at: '2026-09-26T21:05:00Z', duration_seconds: 300 };
-    expect(callEndedAt(row).toISOString()).toBe('2026-09-26T21:10:00.000Z');
-  });
-
-  test('an unusable bridged_at falls back to the normal start+duration path', () => {
-    const row = { created_at: '2026-09-26T21:00:00Z', bridged_at: 'not-a-date', duration_seconds: 300 };
+    // bridged_at + duration would wrongly give 21:13 — 8 minutes late.
     expect(callEndedAt(row).toISOString()).toBe('2026-09-26T21:05:00.000Z');
   });
 
@@ -94,15 +89,15 @@ describe('callEndedAt — start + duration, except a bridged call ends at bridge
   });
 });
 
-describe('recordingReadyAt — call end, or later if the recording landed later (unaffected by, but reuses, the bridged fix)', () => {
-  test('a bridged call: readiness anchors off the bridge-based end, not created_at + duration', () => {
+describe('recordingReadyAt — call end, or later if the recording landed later', () => {
+  test('an outbound-connect-shaped row: readiness anchors off created_at + duration, not bridged_at + duration', () => {
     const row = {
       created_at: '2026-09-26T21:00:00Z',
-      bridged_at: '2026-09-26T21:05:00Z',
+      bridged_at: '2026-09-26T21:08:00Z',
       duration_seconds: 300,
       processing_status: null,
     };
-    expect(recordingReadyAt(row).toISOString()).toBe('2026-09-26T21:10:00.000Z');
+    expect(recordingReadyAt(row).toISOString()).toBe('2026-09-26T21:05:00.000Z');
   });
 
   test('updated_at is folded in only while pending, and only if later than the call end', () => {

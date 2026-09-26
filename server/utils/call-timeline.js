@@ -56,25 +56,24 @@ function callStartedAt(row) {
 }
 
 /**
- * When the call ENDED. Start + duration — EXCEPT a bridged inbound call
- * (codex #4919 round-3 P1): created_at is ring time, but Twilio's
- * `bridged_at` is when the conversation actually began, and duration_seconds
- * measures FROM the bridge, not from ring. Adding duration to
- * callStartedAt()'s ring-time start would UNDERSTATE the true end by the
- * whole ring delay on a call that rang a while before pickup. This mirrors
- * call-commitments.js's own callEndedAt for the bridged case exactly (same
- * two duplicated definitions this module doesn't yet fully unify with —
- * that one's non-bridged branches key on call DIRECTION rather than this
- * module's metadata.source signal, a wider reconciliation left for its own
- * change). callStartedAt() itself stays ring-time-anchored regardless —
- * the SLA "how long did the caller wait" clock this module's docblock
- * describes needs ring time, not the bridge.
+ * When the call ENDED (start + duration). Null if the start is unknown.
+ *
+ * codex #4919 round-4 P1 (correcting a round-3 attempt to add `bridged_at`
+ * handling here): the ONLY writer of `call_log.bridged_at` in this codebase
+ * is /outbound-connect (twilio-voice-webhook.js) — staff pressing 1 on an
+ * OUTBOUND admin-connect call, before the customer is even dialed. That
+ * row's duration_seconds comes from /call-status's parent-leg CallDuration,
+ * which Twilio measures from created_at (when the admin's leg answered),
+ * NOT from the bridge — it already SPANS the pre-bridge wait (the prompt,
+ * the button press) through the customer conversation. `created_at +
+ * duration` is already the correct end; adding duration to `bridged_at`
+ * instead would double-count that pre-bridge wait and push the computed end
+ * PAST the true one — the opposite of the understatement bug this file
+ * exists to fix, and one that could reject a genuinely bookable start as
+ * "already past". There is no genuinely bridge-relative duration this
+ * codebase writes today, so `bridged_at` needs no special case here.
  */
 function callEndedAt(row) {
-  if (row?.bridged_at) {
-    const bridged = new Date(row.bridged_at);
-    if (!Number.isNaN(bridged.getTime())) return new Date(bridged.getTime() + callDurationSeconds(row) * 1000);
-  }
   const started = callStartedAt(row);
   if (!started) return null;
   return new Date(started.getTime() + callDurationSeconds(row) * 1000);
