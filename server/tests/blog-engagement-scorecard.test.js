@@ -63,9 +63,9 @@ describe('summarize', () => {
     { path: '/pest-control/bagworm/', refererHost: 'www.google.com', refererPath: '/', views: 0 },
   ];
 
-  test('counts blog entries and onward clicks, ignoring self-referrals', () => {
+  test('counts post views, entries and onward clicks per view, ignoring reloads', () => {
     const s = summarize(groups);
-    expect(s.totals).toEqual({ blogEntries: 190, onwardClicks: 9, onwardRate: 9 / 190 });
+    expect(s.totals).toEqual({ blogEntries: 190, blogViews: 196, onwardClicks: 9, onwardRate: 9 / 196 });
   });
 
   test('breaks down destinations by class', () => {
@@ -78,17 +78,35 @@ describe('summarize', () => {
     expect(s.destinations[0].label).toBe('Another blog post');
   });
 
-  test('reports per-post rows sorted by entries', () => {
+  test('reports per-post rows sorted by views, with internal arrivals counted as views', () => {
     const s = summarize(groups);
     expect(s.posts).toEqual([
-      { path: '/pest-control/huntsman/', entries: 150, onward: 8, toEstimateOrService: 2, rate: 8 / 150 },
-      { path: '/pest-control/bagworm/', entries: 40, onward: 1, toEstimateOrService: 1, rate: 1 / 40 },
+      { path: '/pest-control/huntsman/', entries: 150, views: 150, onward: 8, toEstimateOrService: 2, rate: 8 / 150 },
+      { path: '/pest-control/bagworm/', entries: 40, views: 40, onward: 1, toEstimateOrService: 1, rate: 1 / 40 },
+      { path: '/pest-control/wolf-spider/', entries: 0, views: 6, onward: 0, toEstimateOrService: 0, rate: 0 },
+    ]);
+  });
+
+  test('a visit that reads two posts is two views, never two clicks against one entry', () => {
+    const s = summarize([
+      { path: '/pest-control/a/', refererHost: 'www.google.com', refererPath: '/', views: 1 },
+      { path: '/pest-control/b/', refererHost: 'www.wavespestcontrol.com', refererPath: '/pest-control/a/', views: 1 },
+      { path: '/contact/', refererHost: 'www.wavespestcontrol.com', refererPath: '/pest-control/b/', views: 1 },
+    ]);
+    expect(s.totals).toEqual({ blogEntries: 1, blogViews: 2, onwardClicks: 2, onwardRate: 1 });
+    expect(s.posts.map((p) => [p.path, p.views, p.onward, p.rate])).toEqual([
+      ['/pest-control/a/', 1, 1, 1],
+      ['/pest-control/b/', 1, 1, 1],
+    ]);
+    expect(s.destinations.map((d) => [d.cls, d.views])).toEqual([
+      ['blog-post', 1],
+      ['estimate', 1],
     ]);
   });
 
   test('handles empty input', () => {
     expect(summarize([])).toEqual({
-      totals: { blogEntries: 0, onwardClicks: 0, onwardRate: null },
+      totals: { blogEntries: 0, blogViews: 0, onwardClicks: 0, onwardRate: null },
       destinations: [],
       posts: [],
     });
@@ -97,9 +115,10 @@ describe('summarize', () => {
   test('formats a markdown report', () => {
     const md = formatMarkdown(summarize(groups), { start: '2026-09-19', end: '2026-09-25', top: 1 });
     expect(md).toContain('## Blog engagement scorecard, 2026-09-19 to 2026-09-25');
-    expect(md).toContain('Onward clicks from posts to another page: 9 (4.7%)');
+    expect(md).toContain('Blog post views (reloads excluded): 196, of which 190 began a visit');
+    expect(md).toContain('Post views followed by a click to another page: 9 (4.6%)');
     expect(md).toContain('| Another blog post | 6 |');
-    expect(md).toContain('| /pest-control/huntsman/ | 150 | 8 | 5.3% | 2 |');
+    expect(md).toContain('| /pest-control/huntsman/ | 150 | 150 | 8 | 5.3% | 2 |');
     expect(md).not.toContain('/pest-control/bagworm/ |');
   });
 });

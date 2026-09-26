@@ -1,15 +1,17 @@
 // READ-ONLY: weekly blog engagement scorecard — do blog readers keep going?
 //
 // Reads Cloudflare Web Analytics (RUM) for the wavespestcontrol.com hub and
-// reports, per blog post, how many visits began on it (entries: views that
-// arrived from outside the site), how many clicked on to another page of the
-// site (onward clicks: views whose referrer path is that post), and where those
-// clicks went. A post referring to itself (a reload) is not an onward click.
+// reports, per blog post: views (reloads excluded), entries (views that began a
+// visit, i.e. arrived from outside the site), onward clicks (views of another
+// page of the site whose referrer path is that post), the share of the post's
+// views that were followed by an onward click, and where those clicks went.
+// Numerator and denominator are both per post view, so a visit that reads two
+// posts counts two views and up to two onward clicks.
 //
 // Cloudflare RUM is cookieless and counts every visitor (GA4 and PostHog only
 // see visitors who accept cookies), but it samples, so small counts are
-// approximate. Baseline 2026-07-17 → 2026-09-23: ~8,280 blog entries, ~100
-// onward clicks (1.2%).
+// approximate. Baseline 2026-07-17 → 2026-09-23: ~8,350 post views, ~100
+// followed by an onward click (1.2%).
 //
 // Writes nothing. Needs CF_API_TOKEN (Account Analytics read) and CF_ACCOUNT_ID
 // from the environment; CF_RUM_SITE_TAG overrides the site lookup.
@@ -84,16 +86,23 @@ function toCount(value) {
 }
 
 /**
+ * Per-pageview continuation: of the views of blog posts (reloads excluded),
+ * how many were followed by a click to another page of the site. Numerator and
+ * denominator are both counted per post view, so a journey that reads two
+ * posts (Google -> A -> B -> contact) is 2 views and 2 onward clicks, never
+ * 2 clicks against 1 entry.
+ *
  * @param {Array<{path: string, refererHost?: string, refererPath?: string, views: number}>} groups
  */
 function summarize(groups) {
   const posts = new Map();
   const destinations = new Map();
   let blogEntries = 0;
+  let blogViews = 0;
   let onwardClicks = 0;
 
   const post = (path) => {
-    if (!posts.has(path)) posts.set(path, { path, entries: 0, onward: 0, toEstimateOrService: 0 });
+    if (!posts.has(path)) posts.set(path, { path, entries: 0, views: 0, onward: 0, toEstimateOrService: 0 });
     return posts.get(path);
   };
 
@@ -102,32 +111,38 @@ function summarize(groups) {
     if (!views) continue;
     const dest = normalizePath(g.path);
     const destClass = classifyPath(dest);
-    if (!isInternalHost(g.refererHost)) {
-      if (destClass === 'blog-post') {
-        post(dest).entries += views;
+    const internal = isInternalHost(g.refererHost);
+    const from = internal ? normalizePath(g.refererPath) : null;
+    // A post referring to itself is a reload or an in-page hop: neither a new
+    // view of the post nor an onward click.
+    if (internal && from === dest) continue;
+    if (destClass === 'blog-post') {
+      const target = post(dest);
+      target.views += views;
+      blogViews += views;
+      if (!internal) {
+        target.entries += views;
         blogEntries += views;
       }
-      continue;
     }
-    const from = normalizePath(g.refererPath);
-    // A post referring to itself is a reload or an in-page hop, not an onward click.
-    if (classifyPath(from) !== 'blog-post' || from === dest) continue;
-    const p = post(from);
-    p.onward += views;
-    if (destClass === 'estimate' || destClass === 'service') p.toEstimateOrService += views;
+    if (!internal || classifyPath(from) !== 'blog-post') continue;
+    const source = post(from);
+    source.onward += views;
+    if (destClass === 'estimate' || destClass === 'service') source.toEstimateOrService += views;
     onwardClicks += views;
     destinations.set(destClass, (destinations.get(destClass) || 0) + views);
   }
 
   const rows = [...posts.values()]
-    .map((p) => ({ ...p, rate: p.entries > 0 ? p.onward / p.entries : null }))
-    .sort((a, b) => b.entries - a.entries || b.onward - a.onward || a.path.localeCompare(b.path));
+    .map((p) => ({ ...p, rate: p.views > 0 ? p.onward / p.views : null }))
+    .sort((a, b) => b.views - a.views || b.onward - a.onward || a.path.localeCompare(b.path));
 
   return {
     totals: {
       blogEntries,
+      blogViews,
       onwardClicks,
-      onwardRate: blogEntries > 0 ? onwardClicks / blogEntries : null,
+      onwardRate: blogViews > 0 ? onwardClicks / blogViews : null,
     },
     destinations: [...destinations.entries()]
       .map(([cls, views]) => ({ cls, label: CLASS_LABELS[cls] || cls, views }))
@@ -147,19 +162,19 @@ function formatMarkdown(summary, { start, end, top = 20 } = {}) {
   lines.push('');
   lines.push('Cloudflare Web Analytics: cookieless, every visitor, sampled (small counts are approximate).');
   lines.push('');
-  lines.push(`- Blog entries (visits that began on a post): ${totals.blogEntries}`);
-  lines.push(`- Onward clicks from posts to another page: ${totals.onwardClicks} (${pct(totals.onwardRate)})`);
-  lines.push('- Baseline 2026-07-17 to 2026-09-23: 1.2% (about 100 of 8,280)');
+  lines.push(`- Blog post views (reloads excluded): ${totals.blogViews}, of which ${totals.blogEntries} began a visit`);
+  lines.push(`- Post views followed by a click to another page: ${totals.onwardClicks} (${pct(totals.onwardRate)})`);
+  lines.push('- Baseline 2026-07-17 to 2026-09-23: 1.2% (about 100 of 8,350 post views)');
   lines.push('');
   lines.push('| Where onward clicks went | Views |');
   lines.push('|---|---:|');
   if (destinations.length === 0) lines.push('| (none) | 0 |');
   for (const d of destinations) lines.push(`| ${d.label} | ${d.views} |`);
   lines.push('');
-  lines.push(`| Post (top ${top} by entries) | Entries | Onward | Rate | To estimate/service |`);
-  lines.push('|---|---:|---:|---:|---:|');
+  lines.push(`| Post (top ${top} by views) | Views | Entries | Onward | Rate | To estimate/service |`);
+  lines.push('|---|---:|---:|---:|---:|---:|');
   for (const p of posts.slice(0, top)) {
-    lines.push(`| ${p.path} | ${p.entries} | ${p.onward} | ${pct(p.rate)} | ${p.toEstimateOrService} |`);
+    lines.push(`| ${p.path} | ${p.views} | ${p.entries} | ${p.onward} | ${pct(p.rate)} | ${p.toEstimateOrService} |`);
   }
   return `${lines.join('\n')}\n`;
 }
