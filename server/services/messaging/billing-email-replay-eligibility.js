@@ -179,6 +179,11 @@ async function collectionsPolicyRefusal(meta, database) {
     purpose: BALANCE_REMINDER_SOURCES.has(meta.source_entry_point) ? 'balance_reminder' : 'late_payment',
     logTag: 'billing-email-obligation-replay',
     excludeLedgerIds: await persistedLedgerExclusions(meta, database),
+    // A previsit reminder may be dues-only: count the dues still unpaid now.
+    ...(meta.source_entry_point === 'previsit_balance_reminder' ? {
+      offLedgerBalanceCents: await require('../previsit-balance-reminder')
+        .currentDuesAllowanceCents(meta.customer_id, database),
+    } : {}),
     detail: true,
     database,
   });

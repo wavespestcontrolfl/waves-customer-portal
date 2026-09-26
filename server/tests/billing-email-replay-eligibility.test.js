@@ -7,6 +7,7 @@ jest.mock('../services/annual-prepay-renewals', () => ({ getCardExpiryExemptions
 jest.mock('../services/messaging/deferred-replay-registry', () => ({ invoiceStillCollectible: jest.fn() }));
 jest.mock('../services/invoice-helpers', () => ({ selfPayAtDispatch: jest.fn() }));
 jest.mock('../services/collections/rail-guard', () => ({ collectionsChannelPermitted: jest.fn() }));
+jest.mock('../services/previsit-balance-reminder', () => ({ currentDuesAllowanceCents: jest.fn(async () => 0) }));
 
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { getChargeableAutopayMethod } = require('../services/autopay-eligibility');
@@ -229,6 +230,24 @@ describe('previsit balance reminder replay (aggregate, visit-pinned)', () => {
     expect(collectionsChannelPermitted).toHaveBeenCalledWith(expect.objectContaining({
       customerId, invoiceId: null, channel: 'email', purpose: 'balance_reminder', excludeLedgerIds: ['own-email'],
     }));
+  });
+
+  test('a dues-only previsit replay counts the dues still unpaid now as off-ledger debt', async () => {
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    const { currentDuesAllowanceCents } = require('../services/previsit-balance-reminder');
+    currentDuesAllowanceCents.mockResolvedValueOnce(4900);
+    const database = databaseWith({ scheduled_services: [visit], collections_contact_ledger: [] });
+    await billingEmailReplayEligible(meta, database);
+    expect(currentDuesAllowanceCents).toHaveBeenCalledWith(customerId, database);
+    expect(collectionsChannelPermitted).toHaveBeenCalledWith(expect.objectContaining({ offLedgerBalanceCents: 4900 }));
+  });
+
+  test('an unreadable dues state fails closed and stays retryable', async () => {
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    const { currentDuesAllowanceCents } = require('../services/previsit-balance-reminder');
+    currentDuesAllowanceCents.mockRejectedValueOnce(new Error('customers read failed'));
+    await expect(billingEmailReplayEligible(meta, databaseWith({ scheduled_services: [visit] })))
+      .resolves.toEqual({ eligible: false, reason: 'billing-email-eligibility-unavailable', retryable: true });
   });
 });
 

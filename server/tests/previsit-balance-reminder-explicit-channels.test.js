@@ -398,3 +398,32 @@ test('the ledger reservations carry the quoted overdue invoice ids', async () =>
   await runSweep({ now: new Date('2026-08-14T15:00:00Z') });
   expect(sendReminderChannels.mock.calls[0][0]).toMatchObject({ invoiceId: null, invoiceIds: ['inv-9'] });
 });
+
+describe('currentDuesAllowanceCents (retry-time dues allowance)', () => {
+  const { currentDuesAllowanceCents } = require('../services/previsit-balance-reminder');
+  const billingLane = require('../services/billing-lane');
+
+  function customersDb(row) {
+    return jest.fn((table) => {
+      if (table !== 'customers') throw new Error(`Unexpected table ${table}`);
+      const q = { where: jest.fn(() => q), first: jest.fn(async () => row) };
+      return q;
+    });
+  }
+
+  test('late unpaid monthly dues count in cents', async () => {
+    billingLane.resolveBillingLane.mockReturnValueOnce({ mode: 'monthly_membership' });
+    billingLane.monthlyDuesCollected.mockResolvedValueOnce(false);
+    const database = customersDb({ billing_mode: 'monthly_membership', monthly_rate: '49.00', billing_day: 1 });
+    await expect(currentDuesAllowanceCents('cust-1', database, new Date('2026-08-20T15:00:00Z'))).resolves.toBe(4900);
+  });
+
+  test('collected dues, per-visit billing, or a missing customer count nothing', async () => {
+    billingLane.resolveBillingLane.mockReturnValueOnce({ mode: 'monthly_membership' });
+    billingLane.monthlyDuesCollected.mockResolvedValueOnce(true);
+    const now = new Date('2026-08-20T15:00:00Z');
+    await expect(currentDuesAllowanceCents('cust-1', customersDb({ monthly_rate: '49.00', billing_day: 1 }), now)).resolves.toBe(0);
+    await expect(currentDuesAllowanceCents('cust-1', customersDb({ monthly_rate: '49.00', billing_day: 1 }), now)).resolves.toBe(0);
+    await expect(currentDuesAllowanceCents('cust-1', customersDb(undefined), now)).resolves.toBe(0);
+  });
+});

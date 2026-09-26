@@ -298,6 +298,31 @@ async function deliverExplicitPrevisitReminder({ visit, amount, duesCents, expli
   return result.deliveredNow.length ? 'sent' : 'skipped';
 }
 
+// Late monthly dues are debt the ledger does not hold (not invoiced), so the
+// collections policy counts them as an off-ledger balance.
+function lateDuesCents({ lane, duesCollected, todayEt, obligation, monthlyRate }) {
+  const duesLate = lane.mode === 'monthly_membership'
+    && duesCollected === false
+    && String(todayEt) >= String(obligation.graceDateEt);
+  return duesLate ? Math.round((Number(monthlyRate) || 0) * 100) : 0;
+}
+
+// The same allowance, recomputed from the customer's current state for a
+// retried previsit Email (billing-email-replay-eligibility): the replay
+// consult must count unpaid dues exactly as the original send did.
+async function currentDuesAllowanceCents(customerId, database = db, now = new Date()) {
+  const customer = await database('customers').where({ id: customerId })
+    .first('billing_mode', 'waveguard_tier', 'monthly_rate', 'billing_day');
+  if (!customer) return 0;
+  const todayEt = etDateString(now);
+  const lane = resolveBillingLane(customer);
+  const obligation = duesObligation(todayEt, customer.billing_day);
+  const duesCollected = lane.mode === 'monthly_membership'
+    ? await monthlyDuesCollected(database, customerId, new Date(`${obligation.dueDateEt}T12:00:00Z`))
+    : null;
+  return lateDuesCents({ lane, duesCollected, todayEt, obligation, monthlyRate: customer.monthly_rate });
+}
+
 // The customer's explicit billing channel choice is read BEFORE the
 // collections policy gate so the gate judges the channels actually selected
 // (an App-only customer with Text and Email both denied is still reachable).
@@ -440,12 +465,7 @@ async function runSweep({ now = new Date() } = {}) {
       // byte-identical, pinned). Dues are computed here (independent of the
       // invoice set) so the off-ledger carve-out covers a dues-only
       // reminder: late monthly dues aren't invoiced.
-      const duesLate = lane.mode === 'monthly_membership'
-        && duesCollected === false
-        && String(todayEt) >= String(obligation.graceDateEt);
-      const duesCents = duesLate
-        ? Math.round((Number(visit.monthly_rate) || 0) * 100)
-        : 0;
+      const duesCents = lateDuesCents({ lane, duesCollected, todayEt, obligation, monthlyRate: visit.monthly_rate });
       const consult = {
         customerId: visit.customer_id,
         purpose: 'balance_reminder',
@@ -605,6 +625,7 @@ async function runSweep({ now = new Date() } = {}) {
 
 module.exports = {
   runSweep,
+  currentDuesAllowanceCents,
   previsitBalanceReminderEligible,
   duesObligation,
   friendlyVisitDate,
