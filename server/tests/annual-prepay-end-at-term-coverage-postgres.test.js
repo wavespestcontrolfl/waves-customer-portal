@@ -148,6 +148,25 @@ postgres('decided-lapse annual-prepay terms keep their coverage guarantees throu
     expect(await coverage(t)).toHaveLength(0);
   });
 
+  test('a disputed end-at-term lapse does not get its stamps or a replacement back', async () => {
+    const t = await seededTerm();
+    await decideCancel(t);
+    // The chargeback reopens the prepay invoice; the dispute path clears the
+    // decided lapse's stamps and suspends it through the paid-invoice gate.
+    await trx('invoices').where({ id: t.invoiceId }).update({ status: 'overdue', paid_at: null });
+    await AnnualPrepayRenewals.suspendActiveTermsForDisputedInvoice(t.invoiceId, trx);
+    const kept = await upcoming(t);
+    expect(kept.length).toBeGreaterThan(1);
+    expect(kept.every((row) => row.prepaid_method === null)).toBe(true);
+
+    await skip(kept[kept.length - 1]);
+    await AnnualPrepayRenewals.refreshActiveTermsForCustomer(t.customerId, trx);
+
+    // Nothing reseeded for the skipped visit and nothing re-stamped.
+    expect(await upcoming(t)).toHaveLength(kept.length - 1);
+    expect((await coverage(t)).every((row) => row.prepaid_method === null)).toBe(true);
+  });
+
   test('an end-now-refund cancel is never reseeded or stamped', async () => {
     const t = await seededTerm();
     const pulled = await coverage(t);

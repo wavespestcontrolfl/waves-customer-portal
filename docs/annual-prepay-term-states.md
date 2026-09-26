@@ -83,7 +83,9 @@ These constants in `R` decide what each stage *means* to the rest of billing:
   for "end now + refund", which pulls every visit first; the disposition on
   the cancellation case (`snapshot.prepayDisposition`) tells them apart, and
   an `end_now_refund` term is never reseeded or stamped
-  (`decidedLapseKeepsCoverage`).
+  (`decidedLapseKeepsCoverage`). Both only while `coveredTermsAsOf` still
+  reports the term as paid coverage today, so a dispute's cleared stamps are
+  not handed back by a refresh.
 - `PAYMENT_PENDING_STATUS = 'payment_pending'` — payment reminders (3d/1d),
   card-expiry exemptions, `getPaymentPendingCustomerIds`.
 

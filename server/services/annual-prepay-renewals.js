@@ -2803,7 +2803,13 @@ function isDecidedLapseInWindow(term, today = etDateString()) {
 //   renewal-time lapse, which has no case) or a recorded end_at_term case
 //   keeps the guarantees. The case covers the boundary where the last kept
 //   visit was just skipped and no open linked visit is left.
+// All of it only while the read side still reports the term as paid
+// coverage today (coveredTermsAsOf): a dispute clears a decided lapse's
+// stamps and suspends it through that paid-invoice gate, and a refresh must
+// not hand the stamps back while the money is contested or refunded.
 async function decidedLapseKeepsCoverage(term, conn = db) {
+  const stillPaid = await coveredTermsAsOf(conn, etDateString()).where('t.id', term.id).first('t.id');
+  if (!stillPaid) return false;
   const dispositions = (await conn('cancellation_cases')
     .where({ customer_id: term.customer_id })
     .whereRaw("snapshot->>'prepayTermId' = ?", [String(term.id)])
