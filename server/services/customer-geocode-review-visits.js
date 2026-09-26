@@ -41,7 +41,7 @@ function visitStamp(row) {
 }
 
 function visitMatchesPrimary(row, customer, primary) {
-  if (row.property_id != null && String(row.property_id) !== String(primary.id)) return false;
+  if (row.property_id != null) return String(row.property_id) === String(primary.id);
   const reference = {
     service_address_line1: customer.address_line1,
     service_address_line2: customer.address_line2,
@@ -59,18 +59,21 @@ function visitMatchesPrimary(row, customer, primary) {
   return !stampedState || stampedState === String(customer.state || '').trim().toLowerCase();
 }
 
-function visitPinIsSafeToReplace(row, customer) {
+function visitPinIsSafeToReplace(row, customer, primary) {
+  if (row.property_id != null && String(row.property_id) === String(primary.id)) return true;
   if (row.lat == null || row.lng == null) return true;
-  const priorLat = Number(customer.latitude);
-  const priorLng = Number(customer.longitude);
   const rowLat = Number(row.lat);
   const rowLng = Number(row.lng);
   const rowHasPair = Number.isFinite(rowLat) && Number.isFinite(rowLng) && rowLat !== 0 && rowLng !== 0;
-  const customerHasPair = customer.latitude != null && customer.longitude != null
-    && Number.isFinite(priorLat) && Number.isFinite(priorLng) && priorLat !== 0 && priorLng !== 0;
-  return !rowHasPair || (customerHasPair
-    && pinAtScale(rowLat, 6) === pinAtScale(priorLat, 6)
-    && pinAtScale(rowLng, 6) === pinAtScale(priorLng, 6));
+  if (!rowHasPair) return true;
+  return [customer, primary].some(reference => {
+    if (reference?.latitude == null || reference?.longitude == null) return false;
+    const priorLat = Number(reference.latitude);
+    const priorLng = Number(reference.longitude);
+    return Number.isFinite(priorLat) && Number.isFinite(priorLng) && priorLat !== 0 && priorLng !== 0
+      && pinAtScale(rowLat, 6) === pinAtScale(priorLat, 6)
+      && pinAtScale(rowLng, 6) === pinAtScale(priorLng, 6);
+  });
 }
 
 function candidateVisits(conn, customerId, { lock = false } = {}) {
@@ -128,7 +131,7 @@ function sameVisitFence(before, after) {
 
 function rowIsEligible(row, customer, primary, verifyPin) {
   return visitMatchesPrimary(row, customer, primary)
-    && (!verifyPin || visitPinIsSafeToReplace(row, customer));
+    && (!verifyPin || visitPinIsSafeToReplace(row, customer, primary));
 }
 
 async function groupedPlans(trx, prelocked, { customer, primary, verifyPin }) {
@@ -264,29 +267,26 @@ async function updatePrimaryVisits(trx, customer, primary, after, latitude, long
 }
 
 async function clearMatchingPins(trx, customer, primary, storedReview, visitContext) {
-  if (storedReview?.latitude == null || storedReview?.longitude == null) {
-    return { customer: 0, property: 0, visits: 0, templates: 0 };
-  }
-  const latitude = Number(storedReview.latitude);
-  const longitude = Number(storedReview.longitude);
-  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
-    return { customer: 0, property: 0, visits: 0, templates: 0 };
-  }
-  const customerCount = await trx('customers')
+  const latitude = Number(storedReview?.latitude);
+  const longitude = Number(storedReview?.longitude);
+  const hasRejectedPin = storedReview?.latitude != null && storedReview?.longitude != null
+    && Number.isFinite(latitude) && Number.isFinite(longitude);
+  const customerCount = hasRejectedPin ? await trx('customers')
     .where({ id: customer.id, latitude, longitude })
-    .update({ latitude: null, longitude: null, updated_at: new Date() });
-  const propertyCount = await trx('customer_properties')
+    .update({ latitude: null, longitude: null, updated_at: new Date() }) : 0;
+  const propertyCount = hasRejectedPin ? await trx('customer_properties')
     .where({ id: primary.id, customer_id: customer.id, active: true, is_primary: true, latitude, longitude })
-    .update({ latitude: null, longitude: null, updated_at: new Date() });
+    .update({ latitude: null, longitude: null, updated_at: new Date() }) : 0;
   const visitLatitude = pinAtScale(latitude, 6);
   const visitLongitude = pinAtScale(longitude, 6);
   const visitIds = visitContext.visits
     .filter(row => visitMatchesPrimary(row, customer, primary))
-    .filter(row => pinAtScale(row.lat, 6) === visitLatitude && pinAtScale(row.lng, 6) === visitLongitude)
+    .filter(row => (row.property_id != null && String(row.property_id) === String(primary.id))
+      || (hasRejectedPin && pinAtScale(row.lat, 6) === visitLatitude && pinAtScale(row.lng, 6) === visitLongitude))
     .map(row => row.id);
   const visits = visitIds.length ? await trx('scheduled_services')
     .whereIn('id', visitIds)
-    .where({ customer_id: customer.id, lat: visitLatitude, lng: visitLongitude })
+    .where({ customer_id: customer.id })
     .whereIn('status', ['pending', 'confirmed'])
     .where('scheduled_date', '>=', etDateString())
     .update({ lat: null, lng: null, zone: null, route_order: null, updated_at: new Date() }) : 0;
@@ -294,8 +294,9 @@ async function clearMatchingPins(trx, customer, primary, storedReview, visitCont
   for (const parent of visitContext.parents) {
     const effective = { ...parent, ...recurringServiceAddress(parent) };
     if (!visitMatchesPrimary(effective, customer, primary)
-      || pinAtScale(effective.lat, 6) !== visitLatitude
-      || pinAtScale(effective.lng, 6) !== visitLongitude) continue;
+      || ((effective.property_id == null || String(effective.property_id) !== String(primary.id))
+        && (!hasRejectedPin || pinAtScale(effective.lat, 6) !== visitLatitude
+          || pinAtScale(effective.lng, 6) !== visitLongitude))) continue;
     templates += await trx('scheduled_services')
       .where({ id: parent.id, customer_id: customer.id })
       .update({
@@ -307,7 +308,7 @@ async function clearMatchingPins(trx, customer, primary, storedReview, visitCont
         ),
       });
   }
-  return { customer: customerCount, property: propertyCount, visits, templates };
+  return { customer: customerCount, property: propertyCount, visits, templates, visitIds };
 }
 
 module.exports = {
