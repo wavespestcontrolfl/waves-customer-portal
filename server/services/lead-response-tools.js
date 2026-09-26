@@ -287,12 +287,22 @@ async function executeLeadTool(toolName, input, context) {
       // Customer texts stay within two SMS segments, and the STOP line below
       // is added after the agent drafts. Measure the composed text before
       // taking the claim, so the agent can shorten and retry.
+      // An empty draft would send the STOP line alone and spend the phone's
+      // one automated text on it.
+      if (typeof input.message !== 'string' || !input.message.trim()) {
+        return { error: 'Message is empty. Write the reply and call send_lead_response again.', validationError: true };
+      }
       const messageBody = `${input.message}\n\nReply STOP to opt out.`;
       const { countSegments } = require('./messaging/segment-counter');
-      const { segmentCount } = countSegments(messageBody);
+      const { normalizeGsmPunctuation } = require('./messaging/gsm-normalize');
+      // Measured as it will go out: the send pipeline swaps typographic
+      // punctuation (em dash, curly quotes) for GSM before dispatch.
+      const { segmentCount, encoding, perSegmentLimit } = countSegments(normalizeGsmPunctuation(messageBody));
       if (segmentCount > LEAD_RESPONSE_MAX_SEGMENTS) {
+        const footerLength = '\n\nReply STOP to opt out.'.length;
+        const maxChars = perSegmentLimit * LEAD_RESPONSE_MAX_SEGMENTS - footerLength;
         return {
-          error: `Message too long: with the required "Reply STOP to opt out." line it is ${segmentCount} SMS segments (max ${LEAD_RESPONSE_MAX_SEGMENTS}). Shorten it to about 250 characters, no emoji, and call send_lead_response again.`,
+          error: `Message too long: with the required "Reply STOP to opt out." line it is ${segmentCount} SMS segments (max ${LEAD_RESPONSE_MAX_SEGMENTS}). Keep it under ${maxChars} characters${encoding === 'UCS_2' ? ' and drop the emoji or special characters (they shrink every segment)' : ''}, then call send_lead_response again.`,
           validationError: true,
         };
       }

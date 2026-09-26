@@ -762,6 +762,22 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
     // record, double submission racing the 5-min window — 20 phones got
     // the menu text twice in prod). See services/lead-auto-reply.js for
     // the dedup predicate and the once-ever claim mechanism.
+    // The agent's fallback: the standard reply, once-ever claimed.
+    const sendFallbackAutoReply = () => sendLeadAutoReplyOnce({ customer, phoneFormatted, firstName, location, leadSource })
+      .catch(fallbackErr => logger.error(`[lead-agent] Fallback standard reply failed: ${fallbackErr.message}`));
+    // With the agent configured, the lead's one-minute clock starts here,
+    // where the immediate reply is skipped, not after the estimate work
+    // below. The guard sends the standard reply at the deadline even if
+    // that work stalls before the agent is ever started, and the fallback
+    // is registered for a deploy's shutdown flush from this point on.
+    let leadFallbackDeadlineAt = null;
+    let leadFallbackGuard = null;
+    if (leadAgentConfigured) {
+      leadFallbackDeadlineAt = Date.now() + LEAD_AGENT_FALLBACK_AFTER_MS;
+      pendingLeadFallbacks.add(sendFallbackAutoReply);
+      leadFallbackGuard = setTimeout(() => { void sendFallbackAutoReply(); }, LEAD_AGENT_FALLBACK_AFTER_MS);
+      leadFallbackGuard.unref?.();
+    }
     try {
       if (!leadAgentConfigured) {
         await sendLeadAutoReplyOnce({ customer, phoneFormatted, firstName, location, leadSource });
@@ -1163,8 +1179,6 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
     // The generic auto-reply above is the safety net; this replaces it with
     // something specific — see settleLeadResponseAgentRun for the "exactly
     // one automated text" fallback rule (owner ruling 2026-09-26).
-    const sendFallbackAutoReply = () => sendLeadAutoReplyOnce({ customer, phoneFormatted, firstName, location, leadSource })
-      .catch(fallbackErr => logger.error(`[lead-agent] Fallback standard reply failed: ${fallbackErr.message}`));
     try {
       const LeadResponseAgent = require('../services/lead-response-agent');
       const messageText = body.message || body['Message'] || serviceInterest || findField(body, /service|help|pest|lawn|message/i) || '';
@@ -1180,10 +1194,12 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
         pageUrl: pageUrl || '',
         formName: formName || '',
       });
+      if (leadFallbackGuard) clearTimeout(leadFallbackGuard);
       void settleLeadResponseAgentRun({
         agentConfigured: leadAgentConfigured,
         processLead,
         sendFallback: sendFallbackAutoReply,
+        ...(leadFallbackDeadlineAt ? { fallbackAfterMs: Math.max(0, leadFallbackDeadlineAt - Date.now()) } : {}),
         onError: err => logger.error(`[lead-agent] Fire-and-forget error: ${err.message}`),
       }).catch(err => logger.error(`[lead-agent] Fallback chain error: ${err.message}`));
     } catch (e) {
@@ -1191,7 +1207,10 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       // A synchronous require/init throw also means "the agent didn't
       // send" — arm the fallback the same as any other non-auto_sent
       // outcome when the agent was otherwise configured.
-      if (leadAgentConfigured) void sendFallbackAutoReply();
+      if (leadFallbackGuard) clearTimeout(leadFallbackGuard);
+      if (leadAgentConfigured) {
+        void sendFallbackAutoReply().finally(() => pendingLeadFallbacks.delete(sendFallbackAutoReply));
+      }
     }
 
     await db('activity_log').insert({
@@ -1847,21 +1866,25 @@ async function settleLeadResponseAgentRun({ agentConfigured, processLead, sendFa
   const run = Promise.resolve().then(processLead).then(outcome => ({ outcome }), err => ({ err }));
   const settled = await Promise.race([run, timedOut]);
   clearTimeout(timer);
+  // The fallback stays registered for the shutdown flush until its last
+  // send attempt has settled, not just until the agent's run has.
+  const done = () => pendingLeadFallbacks.delete(sendFallback);
+  const finalFallback = () => Promise.resolve().then(sendFallback).finally(done);
   if (settled.timedOut) {
     // The fallback below may find the agent's claim still held by a send in
     // flight and skip. If that send then fails and releases the claim, the
     // lead would get nothing, so once the run ends without a send the
     // standard reply is tried again (the claim keeps it to one text).
     void run.then(({ outcome, err }) => {
-      pendingLeadFallbacks.delete(sendFallback);
       if (err) onError(err);
-      return outcome?.actionTaken === 'auto_sent' ? undefined : sendFallback();
+      if (outcome?.actionTaken === 'auto_sent') return done();
+      return finalFallback();
     }).catch(lateErr => onError(lateErr));
     return sendFallback();
   }
-  pendingLeadFallbacks.delete(sendFallback);
   if (settled.err) onError(settled.err);
-  if (settled.outcome?.actionTaken !== 'auto_sent') return sendFallback();
+  if (settled.outcome?.actionTaken === 'auto_sent') return done();
+  return finalFallback();
 }
 
 // The lead auto-reply dedup predicate, once-ever claim, and the send itself

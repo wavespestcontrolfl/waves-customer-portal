@@ -148,6 +148,19 @@ describe('settleLeadResponseAgentRun — agent not configured', () => {
 
 
 describe('flushPendingLeadFallbacks (deploy shutdown)', () => {
+  test('a fallback stays registered until its own send settles', async () => {
+    let finishSend;
+    const sendFallback = jest.fn(() => new Promise((resolve) => { finishSend = resolve; }));
+    const processLead = jest.fn(async () => null);
+    const settling = settleLeadResponseAgentRun({ agentConfigured: true, processLead, sendFallback, onError: jest.fn() });
+    await new Promise(r => setImmediate(r));
+    expect(sendFallback).toHaveBeenCalledTimes(1);
+    expect(pendingLeadFallbacks.has(sendFallback)).toBe(true);
+    finishSend();
+    await settling;
+    expect(pendingLeadFallbacks.has(sendFallback)).toBe(false);
+  });
+
   test('a run still pending at shutdown gets its standard reply now', async () => {
     const { sendFallback, onError, processLead } = harness(() => new Promise(() => {}));
     const settling = settleLeadResponseAgentRun({ agentConfigured: true, processLead, sendFallback, onError, fallbackAfterMs: 60000 });

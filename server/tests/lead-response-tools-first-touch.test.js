@@ -167,7 +167,7 @@ test('a draft that would pass two segments with the STOP line is sent back to th
   const result = await executeLeadTool('send_lead_response', { message: long }, context);
 
   expect(result).toMatchObject({ validationError: true });
-  expect(result.error).toMatch(/Shorten it/);
+  expect(result.error).toMatch(/Keep it under 282 characters/);
   expect(mockClaim).not.toHaveBeenCalled();
   expect(mockMessage).not.toHaveBeenCalled();
 });
@@ -177,6 +177,25 @@ test('a draft that fits two segments with the STOP line goes out', async () => {
   const fits = 'A'.repeat(306 - '\n\nReply STOP to opt out.'.length);
 
   const result = await executeLeadTool('send_lead_response', { message: fits }, context);
+
+  expect(result).toMatchObject({ sent: true });
+});
+
+test.each([['empty', ''], ['blank', '   '], ['missing', undefined]])('an %s draft is sent back before any claim (no STOP-only text)', async (_label, message) => {
+  mockClaim.mockResolvedValue({ claimed: true, phoneDigits: '9415550100' });
+
+  const result = await executeLeadTool('send_lead_response', { message }, context);
+
+  expect(result).toMatchObject({ validationError: true });
+  expect(mockClaim).not.toHaveBeenCalled();
+  expect(mockMessage).not.toHaveBeenCalled();
+});
+
+test('an em dash is measured as the GSM hyphen the pipeline sends, not as UCS-2', async () => {
+  mockClaim.mockResolvedValue({ claimed: true, phoneDigits: '9415550100' });
+  const draft = `${'A'.repeat(270)} \u2014 ok`;
+
+  const result = await executeLeadTool('send_lead_response', { message: draft }, context);
 
   expect(result).toMatchObject({ sent: true });
 });
