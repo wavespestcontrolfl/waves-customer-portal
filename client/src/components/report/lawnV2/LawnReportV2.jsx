@@ -553,6 +553,7 @@ const INSIGHT_CONFIDENCE = {
   tech_confirmed: 'Confirmed by your technician',
   ai_supported: 'Seen in today’s photos',
   area_estimated: 'Estimated for your area',
+  customer_reported: 'Reported by you',
 };
 
 export function LawnInsightCards({ insights = [], limit = 3 }) {
@@ -562,7 +563,7 @@ export function LawnInsightCards({ insights = [], limit = 3 }) {
   if (!top.length) return null;
   return (
     <Card>
-      <CardTitle sub="Your technician’s key findings from today’s inspection, ranked by priority — what we found, why it matters, and the treatment plan for each.">Priority Findings & Action Plan</CardTitle>
+      <CardTitle sub="Today’s key items, ranked by priority — what was reported or found, why it matters, and the plan for each.">Today’s Priorities & Action Plan</CardTitle>
       {/* minmax(0, 1fr) for the same reason as the diagnosis rows: an auto track
           sized to the headline's longest word + the status pill blew past the
           card on a 320px phone. */}
@@ -576,7 +577,7 @@ export function LawnInsightCards({ insights = [], limit = 3 }) {
                 <StatusPill status={it.status || 'tracking'} small />
               </div>
               <div style={{ display: 'grid', gap: 6 }}>
-                {it.whatWeSaw ? <InsightLine label="What we saw" value={it.whatWeSaw} /> : null}
+                {it.whatWeSaw ? <InsightLine label={it.confidence === 'customer_reported' ? 'What you reported' : 'What we saw'} value={it.whatWeSaw} /> : null}
                 {it.whyItMatters ? <InsightLine label="Why it matters" value={it.whyItMatters} /> : null}
                 {it.wavesAction ? <InsightLine label="What Waves did" value={it.wavesAction} /> : null}
                 {it.customerAction ? <InsightLine label="Your next step" value={it.customerAction} strong /> : null}

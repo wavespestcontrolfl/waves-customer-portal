@@ -218,6 +218,9 @@ describe('freeze contract in the render path', () => {
     expect(LAWN_RENDER_STRATEGY).not.toBe('p3');
     // p5: Front-only before/after pairing (close-up / trouble never pair).
     expect(LAWN_RENDER_STRATEGY).not.toBe('p4');
+    // p6: grounded insight/action copy changed; older cached PDFs must not
+    // retain the superseded claims after the live report is corrected.
+    expect(LAWN_RENDER_STRATEGY).not.toBe('p5');
   });
 
   test('a pre-freeze cached key cannot collide with a post-freeze one', async () => {
@@ -235,9 +238,9 @@ describe('freeze contract in the render path', () => {
     const { signature } = await resolveCanonicalLawnRender(
       { id: 'svc-1', customer_id: 'c1', service_line: 'lawn' }, knex,
     );
-    // Every pre-freeze lawn key carried -lap1…, pre-irrigation-stamp keys
-    // -lap2… / -lap3… — none can match the structured-evidence render.
-    expect(signature.startsWith('-lap5')).toBe(true);
+    // Every earlier lawn key carried -lap1… through -lap5…; none can match
+    // the grounded-copy render strategy.
+    expect(signature.startsWith('-lap6')).toBe(true);
     expect(signature.startsWith('-lap2')).toBe(false);
     expect(signature.startsWith('-lap1')).toBe(false);
   });

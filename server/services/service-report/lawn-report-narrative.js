@@ -25,7 +25,7 @@ const logger = require('../logger');
 const { dispatchWithFallback } = require('../llm/call');
 const { findBannedCustomerCopy } = require('./activity-indicators');
 
-const PROMPT_VERSION = 'lawn_report_v2_narrative_v8'; // v8: preserve recorded action evidence through the overlay.
+const PROMPT_VERSION = 'lawn_report_v2_narrative_v9'; // v9: preserve unverified-health headlines and cache prose only.
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const _cache = new Map();
 
@@ -37,11 +37,22 @@ function stableStringify(value) {
   return JSON.stringify(value ?? null);
 }
 
+function overallHealthVerified(v2) {
+  const diagnosis = v2.diagnosis || [];
+  const overallInsight = (v2.insights || []).find((insight) => insight?.category === 'overall');
+  const hasHealthEvidence = diagnosis.length > 0 || !!overallInsight;
+  const deterministicHeadlineIsUnverified = v2.snapshot?.statusHeadline === 'Lawn health tracked';
+  const hasTrackingEvidence = diagnosis.some((category) => category?.status === 'tracking')
+    || overallInsight?.status === 'tracking';
+  return hasHealthEvidence && !deterministicHeadlineIsUnverified && !hasTrackingEvidence;
+}
+
 // Facts and evidence-bound actions drive copy; an empty action must stay empty.
 function groundingFacts(v2, ctx) {
   return {
     overallScore: v2.snapshot?.overallScore ?? null,
     overallStatus: v2.snapshot?.status ?? null,
+    overallHealthVerified: overallHealthVerified(v2),
     customerAction: v2.snapshot?.customerAction ?? null,
     grassLabel: ctx.grassLabel || 'lawn',
     diagnosis: (v2.diagnosis || []).map((d) => ({ key: d.key, label: d.label, score: d.score, status: d.status })),
@@ -224,7 +235,9 @@ function mergeNarrative(v2, out) {
   const next = JSON.parse(JSON.stringify(v2));
 
   if (next.snapshot) {
-    next.snapshot.statusHeadline = safeText(out.statusHeadline, next.snapshot.statusHeadline);
+    if (overallHealthVerified(next)) {
+      next.snapshot.statusHeadline = safeText(out.statusHeadline, next.snapshot.statusHeadline);
+    }
     next.snapshot.mainWatch = next.snapshot.mainWatch ? safeText(out.mainWatch, next.snapshot.mainWatch) : next.snapshot.mainWatch;
     // Actions encode deterministic evidence and weekly-plan boundaries. Model
     // prose may polish observations, but it cannot replace those instructions.
@@ -277,7 +290,9 @@ async function applyLawnReportNarrative(v2, ctx = {}, deps = {}) {
   const facts = groundingFacts(v2, ctx);
   const cacheKey = crypto.createHash('sha256').update(`${PROMPT_VERSION}|${stableStringify(facts)}`).digest('hex');
   const hit = _cache.get(cacheKey);
-  if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.value;
+  if (hit && Date.now() - hit.at < CACHE_TTL_MS) {
+    return hit.value ? mergeNarrative(v2, hit.value) : v2;
+  }
 
   const callModel = deps.callModel || ((payload) => dispatchWithFallback(
     MODELS.TEXT_POLICIES.customerCopy,
@@ -285,10 +300,12 @@ async function applyLawnReportNarrative(v2, ctx = {}, deps = {}) {
   ));
 
   let merged = v2;
+  let narrative = null;
   try {
     const res = await callModel({ system: SYSTEM_PROMPT, text: buildUserMessage(facts), jsonSchema: narrativeSchema(facts) });
     if (res && res.ok && res.json) {
-      merged = mergeNarrative(v2, res.json);
+      narrative = res.json;
+      merged = mergeNarrative(v2, narrative);
     } else {
       logger.warn(`[lawn-report-v2] narrative miss (${res && res.reason}); using deterministic copy`);
     }
@@ -296,7 +313,10 @@ async function applyLawnReportNarrative(v2, ctx = {}, deps = {}) {
     logger.warn(`[lawn-report-v2] narrative failed: ${err.message}; using deterministic copy`);
   }
 
-  _cache.set(cacheKey, { at: Date.now(), value: merged });
+  // Cache only model-generated prose. The merged report contains signed photos,
+  // progression, appointment data, and other token-specific fields that are not
+  // part of the narrative key and must always come from the current report.
+  _cache.set(cacheKey, { at: Date.now(), value: narrative });
   if (_cache.size > 300) _cache.delete(_cache.keys().next().value);
   return merged;
 }

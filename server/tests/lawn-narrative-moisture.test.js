@@ -102,4 +102,58 @@ describe('structured moisture governs the optional whole-report narrative', () =
     expect(out.snapshot.customerAction).toMatch(/No upcoming watering plan is recorded/);
     expect(out.snapshot.customerAction).not.toContain(inventedAction);
   });
+
+  test('a narrative cache hit reuses generated prose without leaking the prior report object', async () => {
+    const lawnAssessment = assessment('minor', true, 'balanced');
+    const first = buildLawnReportV2({ lawnAssessment });
+    first.photos = [{ url: 'https://signed.example/customer-a.jpg' }];
+    first.heroPhoto = 'https://signed.example/customer-a-hero.jpg';
+    first.progression = [{ url: 'https://signed.example/customer-a-before.jpg' }];
+    first.snapshot.nextVisit = { label: 'Oct 2', source: 'scheduled' };
+    const second = JSON.parse(JSON.stringify(first));
+    second.photos = [{ url: 'https://signed.example/customer-b.jpg' }];
+    second.heroPhoto = 'https://signed.example/customer-b-hero.jpg';
+    second.progression = [{ url: 'https://signed.example/customer-b-before.jpg' }];
+    second.snapshot.nextVisit = { label: 'Oct 9', source: 'scheduled' };
+
+    const generated = 'Watching the dry-looking edge this visit';
+    const firstModel = jest.fn(async () => ({ ok: true, json: { statusHeadline: generated } }));
+    const secondModel = jest.fn(() => { throw new Error('cache miss'); });
+    const ctx = { observations: 'cache-isolation-fixture-4111037964' };
+    const firstOut = await applyLawnReportNarrative(first, ctx, { callModel: firstModel });
+    const secondOut = await applyLawnReportNarrative(second, ctx, { callModel: secondModel });
+
+    expect(firstModel).toHaveBeenCalledTimes(1);
+    expect(secondModel).not.toHaveBeenCalled();
+    expect(firstOut.snapshot.statusHeadline).toBe(generated);
+    expect(secondOut.snapshot.statusHeadline).toBe(firstOut.snapshot.statusHeadline);
+    expect(secondOut.photos).toEqual(second.photos);
+    expect(secondOut.heroPhoto).toBe(second.heroPhoto);
+    expect(secondOut.progression).toEqual(second.progression);
+    expect(secondOut.snapshot.nextVisit).toEqual(second.snapshot.nextVisit);
+  });
+
+  test('the overlay cannot turn unverified overall health into an all-clear headline', async () => {
+    const v2 = {
+      snapshot: {
+        overallScore: 92,
+        status: 'strong',
+        statusHeadline: 'Lawn health tracked',
+        mainWatch: null,
+      },
+      water: { droughtSignal: true, status: 'balanced' },
+      diagnosis: [{ key: 'coverage', status: 'tracking' }],
+      insights: [{ category: 'overall', status: 'tracking', priority: 1 }],
+    };
+    const deterministicHeadline = v2.snapshot.statusHeadline;
+    const callModel = jest.fn(async () => ({ ok: true, json: { statusHeadline: 'Looking great' } }));
+
+    const out = await applyLawnReportNarrative(v2, { observations: 'unverified-health-fixture-4111037967' }, { callModel });
+
+    expect(deterministicHeadline).toBe('Lawn health tracked');
+    expect(callModel).toHaveBeenCalledTimes(1);
+    expect(callModel.mock.calls[0][0].text).toContain('"overallHealthVerified": false');
+    expect(out.snapshot.statusHeadline).toBe(deterministicHeadline);
+    expect(out.snapshot.statusHeadline).not.toMatch(/great|healthy/i);
+  });
 });
