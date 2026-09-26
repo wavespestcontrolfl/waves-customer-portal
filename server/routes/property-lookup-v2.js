@@ -1716,7 +1716,9 @@ function resolveCommercialSuiteScope(rc, lookupAddress, commercialSubtype, optio
   // "Space 12" for tenant bays. Accepted here only — independent
   // multi-tenant evidence below is still required.
   const suiteSubpremiseSignal = shadowHasSubpremiseSignal({ address: lookupAddress })
-    || /(?:^|[\s,])(?:space|spc)\.?\s*#?\s*[A-Za-z0-9-]+(?=$|[\s,])/i.test(String(lookupAddress || ''));
+    || /(?:^|[\s,])(?:space|spc)\.?\s*#?\s*[A-Za-z0-9-]+(?=$|[\s,])/i.test(String(lookupAddress || ''))
+    // "Bay 12" — same unit-value rule suiteAddressParts splits it on.
+    || new RegExp(require('../services/commercial-suite-size/address-parts').PLAZA_BAY_RE.source, 'i').test(String(lookupAddress || ''));
   // subpremiseSignal:false on purpose — the shared predicate counts a
   // Suite/Unit suffix as part-building evidence by itself, which would make
   // this gate the subpremise signal alone. A freestanding building whose
