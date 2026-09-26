@@ -50,12 +50,23 @@ describe('verificationProblem', () => {
     expect(verificationProblem(extracted(), INVOICE)).toBeNull();
   });
 
+  test('an absent tax is 0, and numeric text counts as a number', () => {
+    const data = { ...extracted(), tax: undefined, total: '198.34' };
+    expect(verificationProblem(data, INVOICE)).toBeNull();
+  });
+
   test.each([
     ['a different invoice number than the email names', (d) => { d.invoice_number = '900000002-001'; }, 'invoice_number'],
     ['a quantity that disagrees with its line total (ordered 2, charged for 1)', (d) => { d.line_items[0].quantity = 2; }, 'line_math'],
     ['lines that don\'t sum to the subtotal', (d) => { d.subtotal = 298.34; }, 'subtotal'],
     ['a subtotal plus tax that isn\'t the total', (d) => { d.total = 222.22; }, 'total'],
-    ['an unreadable quantity', (d) => { d.line_items[1].quantity = 'one'; }, 'line_math'],
+    ['an unreadable quantity', (d) => { d.line_items[1].quantity = 'one'; }, 'missing_amounts'],
+    ['every amount missing (null would read as 0 and reconcile)', (d) => {
+      d.line_items = [{ description: 'Taurus SC 78 fl oz. UOM:EA', quantity: 2, unit_price: null, total: null }];
+      Object.assign(d, { subtotal: null, tax: null, total: null });
+    }, 'missing_amounts'],
+    ['a blank subtotal', (d) => { d.subtotal = ''; }, 'missing_amounts'],
+    ['a tax that isn\'t a number', (d) => { d.tax = 'n/a'; }, 'missing_amounts'],
   ])('%s -> %s', (_label, mutate, problem) => {
     const data = extracted();
     mutate(data);

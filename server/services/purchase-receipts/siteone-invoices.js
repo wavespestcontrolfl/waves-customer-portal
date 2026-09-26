@@ -61,14 +61,26 @@ function emailInvoiceNumber(email) {
 
 const moneyClose = (a, b) => Math.abs(Number(a) - Number(b)) <= MONEY_TOLERANCE;
 
+// A real number: the extraction's own number, or numeric text — never a
+// null or blank coerced to 0, which would reconcile against nothing.
+function realNumber(value) {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  return typeof value === 'string' && /^\s*-?\d+(?:\.\d+)?\s*$/.test(value) ? Number(value) : null;
+}
+
 // null when the extraction's lines reconcile with themselves and it names the
-// email's own invoice number; otherwise which check failed.
+// email's own invoice number; otherwise which check failed. Every amount
+// must be a real number (an absent tax is 0).
 function verificationProblem(extracted, invoiceNumber) {
-  const lines = extracted.line_items;
   if (extracted.invoice_number !== invoiceNumber) return 'invoice_number';
-  if (!lines.every((line) => moneyClose(Number(line.quantity) * Number(line.unit_price), line.total))) return 'line_math';
-  if (!moneyClose(lines.reduce((sum, line) => sum + Number(line.total), 0), extracted.subtotal)) return 'subtotal';
-  if (!moneyClose(Number(extracted.subtotal) + Number(extracted.tax || 0), extracted.total)) return 'total';
+  const lines = extracted.line_items.map((line) => [realNumber(line.quantity), realNumber(line.unit_price), realNumber(line.total)]);
+  const subtotal = realNumber(extracted.subtotal);
+  const total = realNumber(extracted.total);
+  const tax = extracted.tax == null ? 0 : realNumber(extracted.tax);
+  if (subtotal == null || total == null || tax == null || lines.some((amounts) => amounts.includes(null))) return 'missing_amounts';
+  if (!lines.every(([quantity, unitPrice, lineTotal]) => moneyClose(quantity * unitPrice, lineTotal))) return 'line_math';
+  if (!moneyClose(lines.reduce((sum, [, , lineTotal]) => sum + lineTotal, 0), subtotal)) return 'subtotal';
+  if (!moneyClose(subtotal + tax, total)) return 'total';
   return null;
 }
 
@@ -103,7 +115,7 @@ async function readSiteOneInvoice(email, now = Date.now(), conn = db) {
   }
   const items = extracted.line_items;
   // A blank or null quantity would read as 0 and look like a backordered line.
-  if (!Array.isArray(items) || !items.length || !items.every((line) => isQuantity(line?.quantity))) {
+  if (!Array.isArray(items) || !items.length || !items.every((line) => realNumber(line?.quantity) != null)) {
     return { number, problem: 'unreadable', lines: [] };
   }
   const problem = verificationProblem(extracted, number);
@@ -113,11 +125,6 @@ async function readSiteOneInvoice(email, now = Date.now(), conn = db) {
   return { number, problem, lines };
 }
 
-// A real number (the extraction's own, or numeric text), never a coerced blank.
-function isQuantity(value) {
-  if (typeof value === 'number') return Number.isFinite(value);
-  return typeof value === 'string' && /^\s*-?\d+(?:\.\d+)?\s*$/.test(value);
-}
 
 // The extracted unit of measure, else the "UOM:EA" a description carries.
 function lineUom(line) {
