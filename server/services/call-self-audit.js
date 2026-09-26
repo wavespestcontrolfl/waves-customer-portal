@@ -28,9 +28,41 @@ const BASELINE_DISAGREE_RATE = 0.11; // measured in the 2026-07 mining run (fast
 const FIELD_DRIFT_ALERT = BASELINE_DISAGREE_RATE + 0.03;
 const DISPOSITION_MISMATCH_ALERT = 0.05;
 
-const AUDIT_PROMPT = `You are auditing one phone-call analysis for Waves Pest Control (pest control + lawn care, SW Florida; "Agent" = staff). Judge ONLY from the transcript. Return ONLY JSON:
+const AUDIT_PROMPT = `You are auditing one phone-call analysis for Waves Pest Control (pest control + lawn care, SW Florida; "Agent" = staff, "Caller" = the external customer/contact). Judge ONLY from the transcript. Return ONLY JSON:
 {"is_lead": boolean, "is_spam": boolean, "is_voicemail": boolean, "appointment_agreed": boolean, "quote_promised": boolean, "complaint": boolean, "excerpt": "<=25 words supporting your most important judgment"}
-Rules: a two-party conversation (both speakers 3+ turns) is never a voicemail; a caller with a service request/address/quoted price is never spam; an existing customer coordinating a visit is not a new lead.`;
+Rules: a two-party conversation (both speakers 3+ turns) is never a voicemail; a caller with a service request/address/quoted price is never spam; an existing customer coordinating a visit is not a new lead. Each transcript is preceded by a CALL DIRECTION line — read it, since it can warn that the printed speaker labels are unreliable and tell you to judge by what each party says instead.`;
+
+const OUTBOUND_DIRECTION_SQL = "COALESCE(direction, '') LIKE 'outbound%'";
+const INBOUND_DIRECTION_SQL = "COALESCE(direction, '') NOT LIKE 'outbound%'";
+
+// Speaker labels ("Agent:"/"Caller:") in a diarized transcript can be SWAPPED
+// on outbound calls (the 2026-07-11 Copeman call — see call-recording-
+// processor.js's own callDirectionBlock in prompts/call-extraction-v1.js,
+// and the comment on applyRecurringIntentDefault explaining why the
+// recurring-intent backstop and agent-commitment authorization stay
+// inbound-only for this same reason). The self-audit samples BOTH directions
+// (owner directive 2026-09-26; codex #4912 r1 P2), so — unlike those two
+// deterministic, label-scanning helpers, which have no safe outbound
+// equivalent yet — this LLM judge is told the direction and, on outbound,
+// warned to identify parties by CONTENT rather than trust the label. This
+// mirrors production's own decision path (extractCallData /
+// extractCallDataV2 pass callDirection for the identical reason) rather than
+// inventing a parallel contract.
+function callDirectionBlock(direction) {
+  const isOutbound = /^outbound/i.test(String(direction || ''));
+  return isOutbound
+    ? 'CALL DIRECTION: OUTBOUND — Waves staff placed this call; the person who answered is the customer/prospect. This transcript\'s "Agent:"/"Caller:" speaker labels can be SWAPPED on outbound calls — do not trust them. Identify who is staff and who is the customer by what each says (who offers/describes pest control or lawn service vs. who requests it, gives their address, or asks about pricing).\n'
+    : 'CALL DIRECTION: INBOUND — the caller dialed Waves; the person who answered is staff.\n';
+}
+
+// Reserve up to half the sample for each direction; whatever one direction
+// cannot fill goes to the other. Each input is newest-first already.
+function stratifySample({ inbound = [], outbound = [], size = SAMPLE_SIZE } = {}) {
+  const half = Math.floor(size / 2);
+  const outTake = Math.min(outbound.length, Math.max(half, size - inbound.length));
+  const inTake = Math.min(inbound.length, size - outTake);
+  return [...inbound.slice(0, inTake), ...outbound.slice(0, outTake)];
+}
 
 async function runSelfAudit(depsIn = {}) {
   if (!isEnabled('callSelfAudit')) return { skipped: 'gate_off' };
@@ -43,15 +75,24 @@ async function runSelfAudit(depsIn = {}) {
     deps.createMessage = (params) => createDeepMessage(client, { laneId: 'call_self_audit', ...params });
   }
 
-  const calls = await db('call_log')
-    .where('direction', 'inbound')
+  // Both directions are sampled (owner directive 2026-09-26: every
+  // call-agent rule is audited the same way regardless of who dialed), each
+  // from its OWN newest-first query so a burst in one direction can never
+  // crowd the other out of a single recency-ordered LIMIT (codex #4912 r1 P2).
+  const sampleDirection = (directionSql) => db('call_log')
     .modify((qb) => require('./voice-agent/relay-protocol').whereNotSandboxCall(qb)) // bake-off calls are not audited
+    .whereRaw(directionSql)
     .whereIn('processing_status', ['processed', 'voicemail', 'spam'])
     .whereRaw("LENGTH(COALESCE(transcription, '')) > 200")
     .where('created_at', '>', db.raw("NOW() - INTERVAL '3 days'"))
     .orderBy('created_at', 'desc')
     .limit(SAMPLE_SIZE)
-    .select('id', 'twilio_call_sid', 'created_at', 'processing_status', 'transcription', 'ai_extraction', 'disposition');
+    .select('id', 'twilio_call_sid', 'created_at', 'direction', 'processing_status', 'transcription', 'ai_extraction', 'disposition');
+  const [inboundRows, outboundRows] = await Promise.all([
+    sampleDirection(INBOUND_DIRECTION_SQL),
+    sampleDirection(OUTBOUND_DIRECTION_SQL),
+  ]);
+  const calls = stratifySample({ inbound: inboundRows, outbound: outboundRows, size: SAMPLE_SIZE });
 
   if (!calls.length) return { sampled: 0 };
 
@@ -64,7 +105,7 @@ async function runSelfAudit(depsIn = {}) {
       const res = await deps.createMessage({
         max_tokens: 4096,
         system: AUDIT_PROMPT,
-        messages: [{ role: 'user', content: `Transcript:\n${call.transcription.slice(0, 5000)}` }],
+        messages: [{ role: 'user', content: `${callDirectionBlock(call.direction)}\nTranscript:\n${call.transcription.slice(0, 5000)}` }],
       });
       const text = (res?.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
       verdict = JSON.parse((text.match(/\{[\s\S]*\}/) || ['{}'])[0]);
@@ -148,4 +189,4 @@ async function runSelfAudit(depsIn = {}) {
 
 function safeParse(v) { if (!v) return {}; if (typeof v === 'object') return v; try { return JSON.parse(v); } catch { return {}; } }
 
-module.exports = { runSelfAudit };
+module.exports = { runSelfAudit, stratifySample, OUTBOUND_DIRECTION_SQL, INBOUND_DIRECTION_SQL, callDirectionBlock };

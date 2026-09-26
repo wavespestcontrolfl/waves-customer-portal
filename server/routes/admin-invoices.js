@@ -2313,40 +2313,226 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// DELETE /:id/annual-prepay — remove the annual-prepay flag from an invoice.
-// Clears the invoice link and cancels the linked term so the banner stops
-// rendering. Idempotent — re-marking later re-activates the same term row.
+// DELETE /:id/annual-prepay — remove the annual-prepay flag from an invoice
+// that was marked by mistake. The invoice itself survives as an ordinary
+// invoice, so the term is cancelled through the canonical pipeline the
+// void/refund sync uses (ADMIN-BUG-R16 — a raw status write here left the
+// customer on billing_mode 'annual_prepay', never billed again, and covered
+// visit invoices closed) only when that cannot double-bill:
+// - a decided term (renewed / switch_plan / decided lapse) is refused;
+// - a prepay with any payment on it is refused (owner ruling 2026-09-26):
+//   the payment stays on the surviving invoice, so undoing coverage would
+//   bill the covered work again — a refund is the way to end it;
+// - a prepay born from an accepted estimate, minted by the on-site switch or
+//   carrying a rodent setup fee is refused: its own flow owns collection and
+//   the charges it replaced — voiding it is the way to end it.
+// Re-marking later re-activates a term this route cancelled.
 router.delete('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
+  const refuse = (message) => {
+    const err = new Error(message);
+    err.statusCode = 409;
+    err.isOperational = true;
+    return err;
+  };
+  const INVOICE_FIELDS = ['id', 'customer_id', 'annual_prepay_term_id', 'status', 'paid_at', 'payment_recorded_at', 'credit_applied', 'stripe_payment_intent_id'];
+  // Why removing this flag would double-bill or destroy a decided term, or
+  // null. Read-only, so it runs before anything is touched (the pay-page
+  // triage cancels a live session) and again under the locks.
+  const removalRefusal = async (conn, row) => {
+    if (!row.annual_prepay_term_id) return null;
+    const term = await conn('annual_prepay_terms').where({ id: row.annual_prepay_term_id }).first('status', 'renewal_decision', 'source_estimate_id');
+    if (term?.renewal_decision) {
+      return `This term already has a renewal decision (${term.renewal_decision}) and cannot be removed this way — use the renewal workflow instead.`;
+    }
+    // A prepay born from an accepted estimate is not a mistaken flag: the
+    // accept flow owns its collection (a durable card auto-charge job can
+    // still charge the surviving invoice), so it ends by voiding.
+    if (term?.source_estimate_id) {
+      return 'This annual prepay came from an accepted estimate, so it is not a flag set by mistake. Void the invoice instead — voiding is how an accepted prepay is cancelled.';
+    }
+    // Money on the invoice itself, not only the term's status: the Stripe
+    // webhook commits the invoice paid before it activates the term (and
+    // survives an activation failure), and a partial or in-flight payment
+    // never activates it. Same evidence the covered-invoice reopen reads.
+    const paymentOnInvoice = ['paid', 'prepaid'].includes(String(row.status || '').toLowerCase())
+      || row.paid_at || row.payment_recorded_at || Number(row.credit_applied) > 0
+      || AnnualPrepayRenewals.ACTIVE_STATUSES.includes(term?.status)
+      // Disputed money is unresolved money, not absent money (ADMIN-BUG-R17-
+      // FINDING-3): an open dispute marks the charge's payments row
+      // 'disputed', reopens the invoice as overdue (clearing paid_at) and
+      // demotes the term to payment_pending — none of the checks above see
+      // it. 'disputed' joins the status set, and dispute_invoice_id joins
+      // the metadata keys, mirroring the SAME applied-money fence
+      // InvoiceService.update runs for a retotal (server/services/invoice.js)
+      // — a card-on-file charge's payments row carries no invoice_id at all,
+      // only dispute_invoice_id stamped at dispute time.
+      || await conn('payments')
+        .whereIn('status', ['paid', 'processing', 'disputed'])
+        .whereRaw(
+          "(metadata::jsonb ->> 'invoice_id' = ? OR metadata::jsonb ->> 'dispute_invoice_id' = ? OR metadata::jsonb ->> 'waves_invoice_id' = ?)",
+          [row.id, row.id, row.id],
+        )
+        .first('id');
+    if (paymentOnInvoice) {
+      return 'This annual prepay has a payment on it, so removing the flag would leave that payment on the invoice while the covered visits are billed again. To end the coverage, refund the invoice — a refund cancels the coverage and returns the money.';
+    }
+    if (await InvoiceService.prepayReplacedCharges(conn, row.id)) {
+      return 'This annual prepay replaced other charges when it was created (an on-site switch or a rodent setup fee). Void the invoice instead — voiding cancels the coverage and restores those charges.';
+    }
+    return null;
+  };
   try {
-    const invoice = await db('invoices')
-      .where({ id: req.params.id })
-      .first('id', 'annual_prepay_term_id');
+    const invoice = await db('invoices').where({ id: req.params.id }).first(INVOICE_FIELDS);
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+    const refusal = await removalRefusal(db, invoice);
+    if (refusal) return res.status(409).json({ error: refusal });
 
-    const termId = invoice.annual_prepay_term_id;
-    await db.transaction(async (trx) => {
+    // Saved-card claim fence (mirrors apply-credit): a card charge whose
+    // process died right after the Stripe call can succeed there while its
+    // DB transaction rolls back, leaving this invoice with no payment row
+    // and no PI while its stripe_invoice_charge_attempts row is still
+    // claimed/submitted. removalRefusal's payment checks above (status,
+    // paid_at, payments table) see none of that and would pass, so ask the
+    // fence directly before touching anything — not yet in a transaction,
+    // so a stale-claim promotion here commits on its own statement.
+    try {
+      await require('../services/stripe').assertNoInvoiceChargeReconciliationPending(invoice.id);
+    } catch (fenceErr) {
+      if (['STRIPE_CHARGE_IN_PROGRESS', 'STRIPE_AMBIGUOUS_OUTCOME', 'STRIPE_CHARGED_DB_FAILED'].includes(fenceErr.code)) {
+        return res.status(409).json({ error: `${fenceErr.message} — resolve it before removing the annual prepay flag` });
+      }
+      throw fenceErr;
+    }
+
+    // Retire an open pay-page session, the one mechanism apply-credit and
+    // manual payments use: a customer confirming it after coverage is removed
+    // would pay for coverage that no longer exists. Money already moving, or a
+    // session that cannot be verified, refuses. Only when there is a flag to
+    // remove; the PI id is re-checked under the invoice lock below.
+    const openPiId = invoice.stripe_payment_intent_id || null;
+    if (invoice.annual_prepay_term_id) {
+      const openPi = await retireOpenPaymentIntentBeforeSettlement(invoice, { action: 'removing the annual prepay flag' });
+      if (openPi) return res.status(openPi.status).json({ error: openPi.error });
+    }
+
+    // Visit invoices this term settled as coverage, which the cancel reopens.
+    // Settlement stopped their reminders and the reopen skips the re-arm
+    // inside a transaction, so it runs after commit (below).
+    let coveredInvoiceIds = [];
+    const txResult = await db.transaction(async (trx) => {
+      // Customer before invoice — the order reverse-prepaid and apply-credit
+      // take, and the cancel below locks the customer too — then re-read the
+      // invoice under its own lock: a payment landing on it waits for us.
+      await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');
+      const locked = await trx('invoices').where({ id: invoice.id }).forUpdate().first(INVOICE_FIELDS);
+      if (!locked || locked.customer_id !== invoice.customer_id
+        || locked.annual_prepay_term_id !== invoice.annual_prepay_term_id) {
+        throw refuse('This invoice changed while the annual prepay flag was being removed — retry.');
+      }
+      // A customer opened a NEW payment session after the triage above.
+      if ((locked.stripe_payment_intent_id || null) !== openPiId) {
+        throw refuse('A new payment session started for this invoice — retry removing the annual prepay flag.');
+      }
+      const lockedRefusal = await removalRefusal(trx, locked);
+      if (lockedRefusal) throw refuse(lockedRefusal);
+      // Saved-card claim fence again under the lock (mirrors apply-credit): a
+      // charge could have started between the pre-check above and this lock.
+      // assertNoInvoiceChargeReconciliationPending can itself WRITE on this
+      // same trx (promoting a stale 'claimed' row to 'ambiguous' once its
+      // active window has passed) — return a sentinel instead of throwing so
+      // the transaction still COMMITS that promotion, and map it to a
+      // refusal outside, after commit (same shape as apply-credit's own
+      // chargeReconciliationPending handling).
+      try {
+        await require('../services/stripe').assertNoInvoiceChargeReconciliationPending(invoice.id, trx);
+      } catch (fenceErr) {
+        if (['STRIPE_CHARGE_IN_PROGRESS', 'STRIPE_AMBIGUOUS_OUTCOME', 'STRIPE_CHARGED_DB_FAILED'].includes(fenceErr.code)) {
+          return { chargeReconciliationPending: `${fenceErr.message} — resolve it before removing the annual prepay flag` };
+        }
+        throw fenceErr;
+      }
+      const termId = locked.annual_prepay_term_id;
+      // The invoice survives as an ordinary one: drop the triaged (now
+      // cancelled) session with the flag, or every edit refuses it as a live
+      // payment.
       await trx('invoices')
         .where({ id: invoice.id })
-        .update({ annual_prepay_term_id: null, updated_at: new Date() });
+        .update({
+          annual_prepay_term_id: null,
+          ...(termId && openPiId ? { stripe_payment_intent_id: null } : {}),
+          updated_at: new Date(),
+        });
       if (termId) {
-        await trx('annual_prepay_terms')
-          .where({ id: termId })
-          .update({ status: 'cancelled', updated_at: new Date() });
-        // Clear per-visit prepaid_amount stamps on the term's not-yet-completed
-        // visits FIRST (while they can still be found by term id). Completion
-        // billing keys on prepaid_amount independently of the term link, so an
-        // unflagged future visit would otherwise stay "prepaid" and skip
-        // invoicing — same cleanup the refund/void path runs.
-        await AnnualPrepayRenewals.clearPrepaidStampsForTerm(termId, trx);
+        coveredInvoiceIds = await trx('invoices')
+          .where({ annual_prepay_covered_term_id: termId, status: 'prepaid' })
+          .pluck('id');
+        // Canonical cancel in this transaction: stamp clear, covered-invoice
+        // reopen, pending-window/WaveGuard credit reversal and the billing-mode
+        // reset to the recorded prior mode. throwOnError: an explicit operator
+        // action rolls back whole rather than stranding the customer between
+        // states.
+        const cancelled = await AnnualPrepayRenewals.cancelTermWithRestorations(termId, trx, { throwOnError: true });
+        // A decision recorded after the check above leaves the guarded update
+        // matching nothing — refuse rather than unlinking a decided term.
+        if (!cancelled) {
+          throw refuse('This term already has a renewal decision and cannot be removed this way — use the renewal workflow instead.');
+        }
         // Detach any scheduled visits attachScheduledServices() stamped while
         // the term was active — pricing-reality-check treats a non-null
         // annual_prepay_term_id as "Annual Prepay", so leaving them linked keeps
-        // visits reported/seeded as prepaid after the flag is removed.
+        // visits reported/seeded as prepaid after the flag is removed. Only
+        // non-terminal rows: a completed/invoiced visit's billing history
+        // must not be rewritten by this cleanup. SAME exclusion set
+        // clearPrepaidStampsForTerm uses (ADMIN-BUG-R17-FINDING-5) — a
+        // narrower hand-picked list here left skipped/rescheduled rows'
+        // coverage-history link severed while their stamp (which
+        // clearPrepaidStampsForTerm deliberately preserves for those
+        // statuses) survived, orphaning the audit trail.
         await trx('scheduled_services')
           .where({ annual_prepay_term_id: termId })
+          .whereNotIn('status', Array.from(AnnualPrepayRenewals.PREPAID_UPDATE_EXCLUDED_STATUSES))
           .update({ annual_prepay_term_id: null, updated_at: new Date() });
       }
+      // This invoice stops being an annual prepay here. A cancelled term
+      // still carrying dispute_suspended_at (a lost dispute, or a
+      // reverse-prepaid demotion) is revivable: syncTermForInvoicePayment
+      // brings it back when its prepay invoice is paid. Paying this invoice
+      // later as an ordinary one must never restore annual coverage, so clear
+      // the marker on its cancelled terms. Column-guarded like the stamps.
+      const termCols = await AnnualPrepayRenewals.annualPrepayColumns(trx);
+      if (termCols.dispute_suspended_at) {
+        await trx('annual_prepay_terms')
+          .where({ prepay_invoice_id: locked.id })
+          .whereIn('status', ['cancelled', 'canceled'])
+          .whereNotNull('dispute_suspended_at')
+          .update({ dispute_suspended_at: null, updated_at: new Date() });
+      }
+      return null;
     });
+
+    if (txResult?.chargeReconciliationPending) {
+      return res.status(409).json({ error: txResult.chargeReconciliationPending });
+    }
+
+    // Re-arm reminders on the invoices the cancel actually reopened (a
+    // cash-paid one keeps its coverage marker and is skipped), the same way
+    // reverse-prepaid does: resumeSequenceIfSystemResumable leaves an office
+    // stop stopped, and scheduleForInvoice creates a sequence if none exists.
+    if (coveredInvoiceIds.length) {
+      const FollowUps = require('../services/invoice-followups');
+      const reopenedIds = await db('invoices')
+        .whereIn('id', coveredInvoiceIds)
+        .whereNull('annual_prepay_covered_term_id')
+        .pluck('id');
+      for (const reopenedId of reopenedIds) {
+        try {
+          await FollowUps.resumeSequenceIfSystemResumable(reopenedId);
+          await FollowUps.scheduleForInvoice(reopenedId);
+        } catch (err) {
+          logger.warn(`[admin-invoices:remove-annual-prepay] follow-up re-arm failed for ${reopenedId}: ${err.message}`);
+        }
+      }
+    }
 
     const updated = await InvoiceService.getById(invoice.id);
     res.json({ ok: true, invoice: updated });
@@ -2853,6 +3039,29 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
 // money is simply held as account credit again. Reopens to `sent` (collectible
 // again). Body note is appended to the credit ledger + activity entry.
 router.post('/:id/reverse-prepaid', requireAdmin, async (req, res, next) => {
+  // A DECIDED term (renewal_decision set) must not be touched by this repair
+  // path — the renewal workflow owns its paid window. Read-only, mirrors
+  // remove-flag's own removalRefusal decided-term check; run BOTH unlocked
+  // (pre-transaction) and again under the invoice's row lock, and both BEFORE
+  // postCreditMovement — not only before the guarded status update further
+  // down — so a decided term is refused before any credit/invoice/stamp
+  // mutation (ADMIN-BUG-R17-FINDING-4). Without this, the guarded update
+  // matching zero rows left credit already posted, the invoice already
+  // reopened and the per-visit stamps already cleared, with the billing-mode
+  // reset silently skipped.
+  // lock: under the reversal's transaction the term row is locked (after the
+  // customer and invoice, the order this route already takes), so a
+  // recordDecision cannot commit between this check and the demotion below.
+  const decidedTermRefusal = async (conn, termId, { lock = false } = {}) => {
+    if (!termId) return null;
+    const query = conn('annual_prepay_terms').where({ id: termId });
+    if (lock) query.forUpdate();
+    const term = await query.first('renewal_decision');
+    if (term?.renewal_decision) {
+      return `This term already has a renewal decision (${term.renewal_decision}) and cannot be reversed this way — use the renewal workflow instead.`;
+    }
+    return null;
+  };
   try {
     const { id } = req.params;
     const { note } = req.body || {};
@@ -2867,7 +3076,13 @@ router.post('/:id/reverse-prepaid', requireAdmin, async (req, res, next) => {
       // also locks the customer, and this route's old invoice-then-
       // customer order could deadlock against settleZeroBalance's now
       // customer-first order (server/services/invoice.js).
-      const preCustomer = await db('invoices').where({ id }).first('customer_id');
+      const preCustomer = await db('invoices').where({ id }).first('customer_id', 'status', 'annual_prepay_term_id');
+      if (preCustomer && preCustomer.status === 'prepaid' && preCustomer.annual_prepay_term_id) {
+        const preRefusal = await decidedTermRefusal(db, preCustomer.annual_prepay_term_id);
+        if (preRefusal) {
+          const err = new Error(preRefusal); err.statusCode = 409; err.isOperational = true; throw err;
+        }
+      }
       outcome = await db.transaction(async (trx) => {
         if (preCustomer) await trx('customers').where({ id: preCustomer.customer_id }).forUpdate().first('id');
         const locked = await trx('invoices').where({ id }).forUpdate().first();
@@ -2920,6 +3135,17 @@ router.post('/:id/reverse-prepaid', requireAdmin, async (req, res, next) => {
           const err = new Error('No applied credit to restore'); err.statusCode = 400; err.isOperational = true; throw err;
         }
 
+        // Re-check under the lock: a decision recorded after the unlocked
+        // pre-check (above) must still refuse BEFORE any mutation — a
+        // partial-credit reversal never activated a term, so this only
+        // applies to the fully-prepaid case.
+        if (isPrepaid && locked.annual_prepay_term_id) {
+          const lockedRefusal = await decidedTermRefusal(trx, locked.annual_prepay_term_id, { lock: true });
+          if (lockedRefusal) {
+            const err = new Error(lockedRefusal); err.statusCode = 409; err.isOperational = true; throw err;
+          }
+        }
+
         const { balanceAfter } = await CustomerCredit.postCreditMovement({
           customerId: locked.customer_id,
           delta: restore,
@@ -2970,14 +3196,69 @@ router.post('/:id/reverse-prepaid', requireAdmin, async (req, res, next) => {
         // Prepaid-only: a partial credit on a collectible invoice never activated
         // a term.
         if (isPrepaid && locked.annual_prepay_term_id) {
-          await trx('annual_prepay_terms')
+          // ADMIN-BUG-R17-FINDING-1: stamp the SAME dispute_suspended_at
+          // marker suspendActiveTermsForDisputedInvoice uses to demote a
+          // term without holding ordinary billing hostage.
+          // getPaymentPendingCustomerIds excludes any payment_pending term
+          // carrying this marker from its pending-prepay set — without it, a
+          // legacy-monthly customer's demoted term reads as an ordinary
+          // accept-pending prepay, billing-cron guard 5 skips their monthly
+          // charge, and they stay unbilled until the annual invoice is paid
+          // or voided. The marker also anchors
+          // reconcileDisputeWindowMonthlyDues: if the customer later repays
+          // the annual invoice, syncTermForInvoicePayment's marker-gated
+          // revival credits back any monthly dues collected while this term
+          // sat demoted and clears the marker — the SAME later-repayment
+          // reconciliation the dispute-suspend path gets for free. Column-
+          // guarded exactly like suspendActiveTermsForDisputedInvoice's own
+          // inline demotion (pre-migration boots degrade to no exemption,
+          // never a crash).
+          const termCols = await AnnualPrepayRenewals.annualPrepayColumns(trx);
+          const demotion = { status: 'payment_pending', updated_at: trx.fn.now() };
+          if (termCols.dispute_suspended_at) demotion.dispute_suspended_at = trx.fn.now();
+          const demotedCount = await trx('annual_prepay_terms')
             .where({ id: locked.annual_prepay_term_id })
             .whereNull('renewal_decision')
             .whereNotIn('status', ['cancelled', 'canceled'])
-            .update({ status: 'payment_pending', updated_at: trx.fn.now() });
+            .update(demotion);
+          // Zero rows is expected only for a term that is already cancelled.
+          // Anything else (a decision that got past the check) refuses, so
+          // the credit, the reopened invoice and the stamp clear all roll back
+          // instead of committing against a term that kept its coverage.
+          if (!demotedCount) {
+            const current = await trx('annual_prepay_terms')
+              .where({ id: locked.annual_prepay_term_id })
+              .first('status', 'renewal_decision');
+            if (current && !['cancelled', 'canceled'].includes(current.status)) {
+              const err = new Error(current.renewal_decision
+                ? `This term already has a renewal decision (${current.renewal_decision}) and cannot be reversed this way — use the renewal workflow instead.`
+                : 'This term changed while the reversal was running. Nothing was changed; try again.');
+              err.statusCode = 409; err.isOperational = true;
+              throw err;
+            }
+          }
           // throwOnError → if stamp cleanup fails, the whole reversal rolls
           // back rather than restoring credit while visits stay stamped free.
           await AnnualPrepayRenewals.clearPrepaidStampsForTerm(locked.annual_prepay_term_id, trx, { throwOnError: true });
+          // ADMIN-BUG-R17: pair the SAME demotion the dispute-suspend path
+          // pairs it with (annual-prepay-renewals.js suspendActiveTermsForDisputedInvoice)
+          // — a payment_pending term must never leave the customer stranded
+          // in billing_mode='annual_prepay': the completion gate deliberately
+          // never auto-invoices unpriced annual-prepay visits (the coverage
+          // check is stamp-based, not amount-based), so a visit completing
+          // before the reopened invoice is repaid would be serviced FREE, and
+          // the monthly cron also skips 'annual_prepay' outright. throwOnError
+          // for the same reason as the stamp clear above — a swallowed
+          // failure here is exactly the nothing-bills limbo this fixes.
+          // resetBillingModeAfterTermCancel only needs id + customer_id (it
+          // re-reads prior_billing_mode itself), so no extra fetch is needed.
+          if (demotedCount) {
+            await AnnualPrepayRenewals.resetBillingModeAfterTermCancel(
+              { id: locked.annual_prepay_term_id, customer_id: locked.customer_id },
+              trx,
+              { throwOnError: true },
+            );
+          }
         }
 
         return { invoice: locked, restore, balanceAfter };
