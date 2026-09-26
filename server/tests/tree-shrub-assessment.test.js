@@ -108,6 +108,21 @@ describe('formatAssessmentScores — null-safe + overall fallback', () => {
     expect(s.foliageFullness).toBeNull();
     expect(s.overallScore).toBe(90);
   });
+  it.each([false, true])('masks historical hidden scores and their aggregate (JSON string=%s)', (asString) => {
+    const review = { ai: { pestActivity: 42 }, reviewed: [{ key: 'pest_activity', action: 'hidden' }] };
+    const s = formatAssessmentScores({
+      foliage_fullness: 82, pest_activity: 78, overall_score: 80,
+      composite_scores: asString ? JSON.stringify(review) : review,
+    });
+    expect(s).toMatchObject({ foliageFullness: 82, pestActivity: null, overallScore: null });
+    expect(review.ai.pestActivity).toBe(42);
+  });
+  it('does not recalculate an overall from remaining scores after a hide', () => {
+    expect(formatAssessmentScores({
+      foliage_fullness: 82, pest_activity: null, overall_score: null,
+      composite_scores: { reviewed: [{ key: 'pest_activity', action: 'hidden' }] },
+    }).overallScore).toBeNull();
+  });
 });
 
 describe('buildTreeShrubTechFindings — exception-based closeout', () => {
@@ -175,9 +190,26 @@ describe('treeShrubReviewSignature — anti-tamper binding', () => {
 
 describe('applyReviewDecisions — tech confirm/hide (signal-only)', () => {
   const scores = { foliageFullness: 84, leafColorVigor: 76, pestActivity: 45, diseaseLeafSpot: 50, waterHeatStress: 72 };
-  it('hide lifts a flagged category out of the watch band (no longer surfaces)', () => {
+  it('hide leaves a category unassessed and suppresses its influenced overall', () => {
     const out = applyReviewDecisions(scores, [{ key: 'pest_activity', action: 'hidden' }]);
-    expect(out.scores.pestActivity).toBe(78); // 45 (<70) → 78 healthy
+    expect(out.scores.pestActivity).toBeNull();
+    expect(out.scores.overallScore).toBeNull();
+    expect(out.scores.foliageFullness).toBe(84);
+    expect(scores.pestActivity).toBe(45);
+  });
+  it('hiding every metric produces tracking categories without healthy claims', () => {
+    const decisions = ['foliage_fullness', 'leaf_color_vigor', 'pest_activity', 'disease_leaf_spot', 'water_heat_mechanical_stress']
+      .map(key => ({ key, action: 'hidden' }));
+    const reviewed = applyReviewDecisions(scores, decisions).scores;
+    const report = require('../services/service-report/tree-shrub-report-v2').buildTreeShrubReportV2({
+      treeShrubAssessment: { scores: reviewed },
+    });
+    expect(report.snapshot).toMatchObject({ overallScore: null, status: 'tracking' });
+    expect(report.diagnosis).toHaveLength(5);
+    for (const category of report.diagnosis) {
+      expect(category).toMatchObject({ score: null, status: 'tracking', customerExplanation: '' });
+    }
+    expect(report.snapshot.peaceOfMind).not.toMatch(/healthy|no.*signals|did not flag/i);
   });
   it('confirm keeps the finding as a monitored signal — NO confirmed-diagnosis escalation', () => {
     const out = applyReviewDecisions(scores, [{ key: 'disease_leaf_spot', action: 'confirmed' }]);
@@ -200,7 +232,7 @@ describe('storeTreeShrubAssessmentFromReview — persist reviewed (no re-score)'
     });
     return { knex, inserts };
   }
-  it('applies decisions (hide lifts; confirm stays signal-only), no vision call', async () => {
+  it('persists hidden scores as unknown while retaining the original review for audit', async () => {
     const { knex, inserts } = captureKnex();
     const out = await storeTreeShrubAssessmentFromReview({
       service: { id: 'sr1', customer_id: 'c1', service_date: '2026-06-24' },
@@ -211,7 +243,13 @@ describe('storeTreeShrubAssessmentFromReview — persist reviewed (no re-score)'
     });
     expect(out.assessmentId).toBe('rev-1');
     const row = inserts.tree_shrub_assessments[0];
-    expect(row.pest_activity).toBe(78);          // hidden → lifted
+    expect(row.pest_activity).toBeNull();
+    expect(row.overall_score).toBeNull();
+    expect(row.foliage_fullness).toBe(84);
+    expect(JSON.parse(row.composite_scores)).toMatchObject({
+      ai: { pestActivity: 45 },
+      reviewed: [{ key: 'pest_activity', action: 'hidden' }, { key: 'disease_leaf_spot', action: 'confirmed' }],
+    });
     expect(row.tech_confirmed_disease).toBe(false); // confirm never escalates to confirmed diagnosis
     expect(row.tech_confirmed_pest).toBe(false);
     expect(row.confirmed_by_tech).toBe(true);
@@ -290,6 +328,19 @@ describe('buildTreeShrubAssessmentReportData — loader', () => {
     expect(out.photos[0].url).toBe('https://x/a.jpg');
     expect(out.plantGroups).toHaveLength(1);
     expect(out.assessmentDate).toBe('2026-06-24');
+  });
+  it('keeps hidden scores and aggregates out of current and historical trend readings', async () => {
+    const hidden = { ...assessment, pest_activity: 78,
+      composite_scores: { reviewed: [{ key: 'pest_activity', action: 'hidden' }] } };
+    const knex = (table) => {
+      const rows = table === 'tree_shrub_assessment_photos' ? [] : [hidden];
+      const query = { where: () => query, orderBy: () => query, limit: () => query,
+        first: async () => rows[0], catch: async () => rows };
+      return query;
+    };
+    const out = await buildTreeShrubAssessmentReportData({ id: 'sr1', customer_id: 'c1' }, 'tree_shrub', knex);
+    expect(out.scores).toMatchObject({ pestActivity: null, overallScore: null, foliageFullness: 84 });
+    expect(out.trend).toEqual([expect.objectContaining({ pestActivity: null, overallScore: null })]);
   });
 });
 

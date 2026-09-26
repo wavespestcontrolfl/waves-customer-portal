@@ -633,22 +633,25 @@ const REVIEW_CAT_KEY = {
 // keep-vs-hide review, NOT a formal pest/disease identification — so "Confirm
 // monitor" deliberately does NOT escalate the report to confirmed-diagnosis
 // language (guardrail: signals, never confirmed pest/disease). It only keeps the
-// finding as a monitored signal; "hide" lifts a false-read category out of the
-// flagging band. Every decision is preserved in composite_scores for audit.
-//  - hide    → false read; lift that category so the report doesn't surface it.
+// finding as a monitored signal; "hide" leaves the category unassessed.
+// A rejected signal is not evidence of healthy plants. Every decision and the
+// original scores are preserved in composite_scores for audit.
+//  - hide    → omit that score and its influenced overall.
 //  - confirm → keep monitoring (no report escalation, no confirmed-diagnosis copy).
 //  - edit    → captured (detail) for audit; customer copy stays system-generated.
 function applyReviewDecisions(scores = {}, decisions = []) {
   const s = { ...scores };
+  let hasHidden = false;
   for (const d of Array.isArray(decisions) ? decisions : []) {
-    const k = REVIEW_CAT_KEY[d && d.key];
-    if (!k) continue;
+    if (!d || !Object.hasOwn(REVIEW_CAT_KEY, d.key)) continue;
+    const k = REVIEW_CAT_KEY[d.key];
     if (d.action === 'hidden') {
-      const v = num(s[k]);
-      if (v != null && v < 70) s[k] = 78; // out of watch/attention → healthy
+      s[k] = null;
+      hasHidden = true;
     }
   }
-  return { scores: s };
+  if (hasHidden) s.overallScore = null;
+  return { scores: s, hasHidden };
 }
 
 /**
@@ -676,14 +679,13 @@ async function storeTreeShrubAssessmentFromReview({
     if (!service.customer_id) return null;
     const existing = await findExistingAssessment(service, knex);
     if (existing) return { assessmentId: existing, alreadyExists: true };
-    const final = applyReviewDecisions(scores, decisions).scores;
-    const overall = calculateOverall(final);
+    const { scores: final, hasHidden } = applyReviewDecisions(scores, decisions);
+    const overall = hasHidden ? null : calculateOverall(final);
     const now = new Date();
 
     // If the tech HID any finding, the AI free-text observation was generated from
     // signals that include the hidden one — drop it so the photo summary can't
     // contradict the hide. The deterministic diagnosis/insight copy still carries the report.
-    const hasHidden = (Array.isArray(decisions) ? decisions : []).some((d) => d && d.action === 'hidden');
     const safeObs = hasHidden ? '' : (observations || '');
 
     const [inserted] = await knex('tree_shrub_assessments').insert({
@@ -781,21 +783,21 @@ async function photoUrl(photo) {
 
 function formatAssessmentScores(row) {
   if (!row) return null;
-  return {
+  let composite = row.composite_scores;
+  if (typeof composite === 'string') {
+    try { composite = JSON.parse(composite); } catch { composite = null; }
+  }
+  // Reapply stored decisions for older assessments whose hidden metrics were
+  // saved as healthy scores. This also governs every historical trend point.
+  const { scores, hasHidden } = applyReviewDecisions({
     foliageFullness: tsScoreValue(row.foliage_fullness),
     leafColorVigor: tsScoreValue(row.leaf_color_vigor),
     pestActivity: tsScoreValue(row.pest_activity),
     diseaseLeafSpot: tsScoreValue(row.disease_leaf_spot),
     waterHeatStress: tsScoreValue(row.water_heat_stress),
-    overallScore: tsScoreValue(row.overall_score)
-      ?? calculateOverall({
-        foliageFullness: tsScoreValue(row.foliage_fullness),
-        leafColorVigor: tsScoreValue(row.leaf_color_vigor),
-        pestActivity: tsScoreValue(row.pest_activity),
-        diseaseLeafSpot: tsScoreValue(row.disease_leaf_spot),
-        waterHeatStress: tsScoreValue(row.water_heat_stress),
-      }),
-  };
+    overallScore: tsScoreValue(row.overall_score),
+  }, composite?.reviewed);
+  return { ...scores, overallScore: hasHidden ? null : scores.overallScore ?? calculateOverall(scores) };
 }
 
 // Link an assessment to THIS visit (by service record, then scheduled service).
