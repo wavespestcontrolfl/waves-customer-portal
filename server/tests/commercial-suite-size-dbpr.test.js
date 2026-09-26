@@ -384,3 +384,26 @@ describe('Codex #4872 r2: stale-if-error is bounded', () => {
     await expect(dbpr.loadDistrictRows(7, { fetchText: failing, now: () => t })).resolves.toEqual([]);
   });
 });
+
+describe('Codex #4872 r3: a malformed HTTP-200 extract is a failed refresh', () => {
+  const dbpr = require('../services/commercial-suite-size/dbpr-food-license');
+  beforeEach(() => dbpr._resetCacheForTests());
+  const HOUR = 60 * 60 * 1000;
+  test.each([
+    ['truncated quoting', '"Business Name","Location Zip Code"\r\n"TEST TACO SH'],
+    ['empty body', ''],
+    ['header only', '"Business Name","Location Zip Code"\r\n'],
+  ])('%s: never cached, and the last good extract keeps serving within the window', async (_label, badBody) => {
+    let t = 0;
+    const good = jest.fn().mockResolvedValue('"Business Name","Location Zip Code"\r\n"TEST TACO SHOP","00000"\r\n');
+    await expect(dbpr.loadDistrictRows(7, { fetchText: good, now: () => t })).resolves.toHaveLength(1);
+    t = 30 * HOUR; // past the 24h TTL
+    const bad = jest.fn().mockResolvedValue(badBody);
+    await expect(dbpr.loadDistrictRows(7, { fetchText: bad, now: () => t })).resolves.toHaveLength(1);
+    // Not cached: after the failure backoff the next call refetches.
+    t += 11 * 60 * 1000;
+    const good2 = jest.fn().mockResolvedValue('"Business Name","Location Zip Code"\r\n"TEST TACO SHOP","00000"\r\n"SECOND SHOP","00000"\r\n');
+    await expect(dbpr.loadDistrictRows(7, { fetchText: good2, now: () => t })).resolves.toHaveLength(2);
+    expect(good2).toHaveBeenCalledTimes(1);
+  });
+});

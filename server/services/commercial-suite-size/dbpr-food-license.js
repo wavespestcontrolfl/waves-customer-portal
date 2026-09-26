@@ -48,20 +48,15 @@ function seatsToSqft(seats) {
 
 // The repository's installed parser (csv-parse), not a second bespoke one:
 // the extract is externally controlled, so malformed quoting and format
-// drift get the same handling as every other CSV import. A parse failure
-// yields no rows (the resolver falls through to the next rung).
+// drift get the same handling as every other CSV import. A parse error
+// THROWS — loadDistrictRows treats it as a failed refresh (never cached).
 function parseDbprCsv(text) {
-  try {
-    return parseCsvSync(String(text || ''), {
-      columns: (header) => header.map((h) => String(h || '').trim()),
-      skip_empty_lines: true,
-      relax_column_count: true,
-      bom: true,
-    });
-  } catch (err) {
-    logger.warn(`[commercial-suite-size] DBPR extract parse failed: ${err.message}`);
-    return [];
-  }
+  return parseCsvSync(String(text || ''), {
+    columns: (header) => header.map((h) => String(h || '').trim()),
+    skip_empty_lines: true,
+    relax_column_count: true,
+    bom: true,
+  });
 }
 
 // ── Address matching ────────────────────────────────────────────
@@ -271,7 +266,13 @@ async function loadDistrictRows(district, { fetchText = defaultFetchText, now = 
   const promise = (async () => {
     try {
       const text = await fetchText(dbprExtractUrl(district));
+      // A malformed or truncated HTTP-200 body is a failed refresh, not an
+      // empty license list: it throws (parse error) or parses to no rows (a
+      // real district extract carries thousands), and either way it goes
+      // down the failure path below — never cached for 24h, and the last
+      // good extract keeps serving within the stale-if-error window.
       const rows = parseDbprCsv(text);
+      if (!rows.length) throw new Error('empty or unparseable extract');
       _cache.set(district, { rows, fetchedAt: now() });
       _failedAt.delete(district);
       return rows;
