@@ -17,8 +17,9 @@ const MODELS = require('../../config/models');
 const logger = require('../logger');
 const worker = require('./link-prospect-worker');
 const { fetchPageText } = require('./contact-finder');
-const { callAnthropic } = require('../llm/call');
+const { callAnthropic, rejectCall } = require('../llm/call');
 const { etDateString, etParts } = require('../../utils/datetime-et');
+const { ledgerCall, ledgerCallRejected } = require('../llm-dispatch-metrics');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -89,8 +90,11 @@ function buildFollowUpPrompt(prospect, profile, loc, now = new Date()) {
 // error normalization — the injected client keeps the drafter's per-site config and the test seam
 async function draftFollowUp(prospect, { profile, anthropic }) {
   const loc = pickLocation(prospect, profile);
-  const r = await callAnthropic({ model: DRAFT_MODEL, maxTokens: 800, system: FOLLOW_UP_SYSTEM_PROMPT, text: buildFollowUpPrompt(prospect, profile, loc), jsonMode: false, anthropicClient: anthropic });
-  return r.ok ? parseDraft(r.text) : null;
+  const r = await callAnthropic({ laneId: 'outreach_drafter', model: DRAFT_MODEL, maxTokens: 800, system: FOLLOW_UP_SYSTEM_PROMPT, text: buildFollowUpPrompt(prospect, profile, loc), jsonMode: false, anthropicClient: anthropic });
+  if (!r.ok) return null;
+  const draft = parseDraft(r.text);
+  if (!draft) rejectCall(r, 'invalid_json');
+  return draft;
 }
 
 /**
@@ -140,7 +144,13 @@ function parseDraft(text) {
   if (!m) return null;
   try {
     const o = JSON.parse(m[0]);
-    if (o && o.subject && o.body) return { subject: String(o.subject).trim(), body: String(o.body).trim() };
+    // Both must be real strings that are non-blank after trimming: "   " used
+    // to pass the truthiness check and park an empty draft as 'drafted', and
+    // a number/object was String()-coerced into a meaningless one — the call
+    // then read as a success on both legs (Codex r13 on #4884).
+    const subject = o && typeof o.subject === 'string' ? o.subject.trim() : '';
+    const body = o && typeof o.body === 'string' ? o.body.trim() : '';
+    if (subject && body) return { subject, body };
   } catch { /* fall through */ }
   return null;
 }
@@ -170,14 +180,16 @@ async function draftOne(prospect, { profile, anthropic, fetchPageFn = fetchPageT
   let page = null;
   try { page = await fetchPageFn(prospect.target_url || `https://${prospect.target_domain}/`); } catch { page = null; }
   const loc = pickLocation(prospect, profile);
-  const resp = await anthropic.messages.create({
+  const resp = await ledgerCall('anthropic', DRAFT_MODEL, () => anthropic.messages.create({
     model: DRAFT_MODEL,
     max_tokens: 1200,
     system: SYSTEM_PROMPT,
     messages: [{ role: 'user', content: buildUserPrompt(prospect, profile, loc, page) }],
-  });
+  }), { laneId: 'outreach_drafter' });
   const text = (resp && resp.content ? resp.content : []).map((b) => b.text || '').join('');
-  return parseDraft(text);
+  const draft = parseDraft(text);
+  if (!draft) ledgerCallRejected(resp, 'invalid_json');
+  return draft;
 }
 
 /**

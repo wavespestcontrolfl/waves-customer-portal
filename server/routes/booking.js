@@ -3991,7 +3991,7 @@ async function createSelfBooking(payload = {}) {
                     'billing',
                     'Rodent booking: setup waiver lapsed before self-booking',
                     `A self-booked rodent bait quote had its ${configuredSetupFee} setup waived by another service that is no longer active. The booking stands without the fee — re-quote or add the setup deliberately.`,
-                    { link: `/admin/customers/${custId}`, metadata: { customerId: custId, estimateId: freshPricingEst.id } },
+                    { link: `/admin/customers?customerId=${custId}`, metadata: { customerId: custId, estimateId: freshPricingEst.id } },
                   ).catch(() => null);
                   if (!(await pageLapsedWaiver()) && !(await pageLapsedWaiver())) {
                     logger.error(`[booking:confirm] FIX: lapsed-waiver alert could NOT be persisted for booking ${custId} / quote ${freshPricingEst.id} — the ${configuredSetupFee} underbilling has no notification; reconcile from this log`);
@@ -4222,7 +4222,7 @@ async function createSelfBooking(payload = {}) {
             category: 'alert',
             title,
             body,
-            link: `/admin/customers/${custId}`,
+            link: `/admin/customers?customerId=${custId}`,
             bell: true,
             metadata: { dedupeKey, customer_id: custId, ...metadata },
             connection: sp,

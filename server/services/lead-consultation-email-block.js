@@ -154,4 +154,8 @@ async function buildConsultationEmailBlock({ leadId, recipientEmail } = {}) {
   }
 }
 
-module.exports = { buildConsultationEmailBlock };
+// shortWrap and recipientIsLead are also reused by
+// estimate-email-consultation-offer.js (the gone_quiet estimate follow-up
+// email's own consultation-offer link) — same short-wrap and same-inbox
+// rules, never a second copy of either.
+module.exports = { buildConsultationEmailBlock, shortWrap, recipientIsLead };
