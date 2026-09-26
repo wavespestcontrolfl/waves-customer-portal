@@ -1074,5 +1074,59 @@ describeOrSkip('termite annual renewal decline — coverage, renew supersession,
     expect(raiseTermiteRetrievalTask).toHaveBeenCalledTimes(1);
     expect(notifyAdmin.mock.calls.length).toBe(bellsBefore);
   });
+  // #4940 pre-push P1: a declined pending term paid AFTER term_end settles
+  // first, then reconciles history. A failed reconcile is retried by the
+  // covered-terms sweep (expired terms included) until it completes, and the
+  // completion marker stops further runs.
+  test('paid after term_end, reconcile fails once: the next sweep reconciles, marks it, then never runs again', async () => {
+    const holder = {};
+    const settleInvoiceAsAnnualPrepayCovered = jest.fn()
+      .mockRejectedValueOnce(new Error('settle blew up'))
+      .mockImplementation(async (invoiceId, termId) => {
+        // What the real settle leaves: the invoice covered by this term, so
+        // a re-run of the reconcile skips it.
+        await holder.db('invoices').where({ id: invoiceId }).update({ annual_prepay_covered_term_id: termId });
+        return { settled: true };
+      });
+    const { db, Renewals } = await load({ invoiceModule: { settleInvoiceAsAnnualPrepayCovered } });
+    holder.db = db;
+    const fx = await unpaidDeclinedPlan(db, Renewals, { expired: true });
+    const reconciledMarker = () => db('activity_log').where({ action: 'annual_prepay_paid_lapse_reconciled' })
+      .whereRaw("metadata->>'term_id' = ?", [fx.term.id]).select('metadata');
+
+    await db('invoices').where({ id: fx.invoice.id }).update({ status: 'paid', paid_at: new Date() });
+    await Renewals.syncTermForInvoicePayment(fx.invoice.id, db);
+    expect((await db('annual_prepay_terms').where({ id: fx.term.id }).first()).status).toBe('cancelled');
+    expect(settleInvoiceAsAnnualPrepayCovered).toHaveBeenCalledTimes(1);
+    expect(await reconciledMarker()).toHaveLength(0);
+
+    // The daily sweep retries the expired, unmarked paid lapse.
+    await Renewals.reconcileCoveredTermsSweep();
+    expect(settleInvoiceAsAnnualPrepayCovered).toHaveBeenCalledTimes(2);
+    expect(settleInvoiceAsAnnualPrepayCovered).toHaveBeenLastCalledWith(fx.visitInvoice.id, fx.term.id);
+    expect((await db('invoices').where({ id: fx.visitInvoice.id }).first()).annual_prepay_covered_term_id).toBe(fx.term.id);
+    const markers = await reconciledMarker();
+    expect(markers).toHaveLength(1);
+    expect(markers[0].metadata).toEqual(expect.objectContaining({ settled: 1 }));
+
+    // Marked: no further runs, and billing_mode still untouched.
+    await Renewals.reconcileCoveredTermsSweep();
+    expect(settleInvoiceAsAnnualPrepayCovered).toHaveBeenCalledTimes(2);
+    expect(await reconciledMarker()).toHaveLength(1);
+    expect((await db('customers').where({ id: fx.customerId }).first()).billing_mode).toBe('per_application');
+  });
+
+  test('a paid decided lapse that was never declined while unpaid is not a retry candidate', async () => {
+    const invoiceModule = settleInvoiceModule();
+    const { db, Renewals } = await load({ invoiceModule });
+    const fx = await unpaidDeclinedPlan(db, Renewals, { expired: true });
+    // As if declined while already paid: no unpaid flag on the decline row.
+    await db('activity_log').where({ action: 'termite_annual_renewal_declined' }).update({ metadata: db.raw("metadata - 'unpaid'") });
+    await db('annual_prepay_terms').where({ id: fx.term.id }).update({ status: 'cancelled' });
+    await db('invoices').where({ id: fx.invoice.id }).update({ status: 'paid', paid_at: new Date() });
+
+    await Renewals.reconcileCoveredTermsSweep();
+    expect(invoiceModule.settleInvoiceAsAnnualPrepayCovered).not.toHaveBeenCalled();
+  });
 });
 

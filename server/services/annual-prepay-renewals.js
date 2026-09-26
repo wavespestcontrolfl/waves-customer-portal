@@ -2357,6 +2357,7 @@ async function reconcilePendingWindowCompletions(term, conn = db) {
           const res = await require('./invoice').settleInvoiceAsAnnualPrepayCovered(invoice.id, term.id);
           if (res?.settled) { summary.settled += 1; settledHere = true; }
         } catch (err) {
+          summary.failed = true;
           logger.warn(`[annual-prepay] pending-completion settle failed for invoice ${invoice.id}: ${err.message}`);
         }
       }
@@ -2397,6 +2398,7 @@ async function reconcilePendingWindowCompletions(term, conn = db) {
           continue;
         }
       } catch (err) {
+        summary.failed = true;
         logger.warn(`[annual-prepay] pending-completion refund check failed for invoice ${invoice.id}: ${err.message} — slice left unresolved`);
         continue;
       }
@@ -2430,12 +2432,16 @@ async function reconcilePendingWindowCompletions(term, conn = db) {
         const credited = conn === db ? await db.transaction(creditOnce) : await creditOnce(conn);
         if (credited) summary.credited += 1;
       } catch (err) {
+        summary.failed = true;
         logger.warn(`[annual-prepay] pending-completion credit skipped for visit ${row.id}: ${err.message}`);
       }
     }
   } catch (err) {
+    summary.failed = true;
     logger.warn(`[annual-prepay] pending-window completion reconcile skipped for term ${term?.id}: ${err.message}`);
   }
+  // `failed` (set only on an error, never on a deliberately-unresolved
+  // in-flight slice) lets a caller that must finish this work retry it.
   return summary;
 }
 
@@ -3635,14 +3641,68 @@ async function stampUnlessYearEnded(term, conn) {
   await stampAnnualPrepayBillingMode(term.customer_id, conn, term.id);
 }
 
+const PAID_LAPSE_RECONCILED_ACTION = 'annual_prepay_paid_lapse_reconciled';
+
+// Move 15's historical reconcile (#4940 pre-push P1): settle / credit the
+// visits billed per application before the late annual payment. Runs
+// whenever the term is PAID (isCoveredTerm — no date window, so an expired
+// year still counts), never gated on today's coverage, and records
+// PAID_LAPSE_RECONCILED_ACTION only once a run completes with no error. The
+// covered-terms sweep retries unmarked ones (retryPaidLapseReconciles).
+// Idempotent: settled invoices are skipped (annual_prepay_covered_term_id)
+// and credits dedupe on their ledger marker under the customer lock.
+async function reconcilePaidDecidedLapse(term, conn) {
+  if (!(await isCoveredTerm(term.id, conn))) return false;
+  const summary = await reconcilePendingWindowCompletions(term, conn);
+  if (summary.failed) return false;
+  await conn('activity_log').insert({
+    customer_id: term.customer_id,
+    action: PAID_LAPSE_RECONCILED_ACTION,
+    description: 'Annual prepay paid after the online renewal decline: visits billed before the payment reconciled.',
+    metadata: { term_id: term.id, settled: summary.settled, credited: summary.credited },
+  });
+  return true;
+}
+
+// The retry leg: paid, portal-declined-while-UNPAID terms (move 15 — the
+// decline row carries unpaid) with no completion marker, expired or not.
+async function retryPaidLapseReconciles(conn = db, limit = 50) {
+  let done = 0;
+  try {
+    const terms = await coveredTermsAsOf(conn, null)
+      .where({ 't.status': 'cancelled', 't.renewal_decision': 'cancel' })
+      .whereExists(function unpaidPortalDecline() {
+        this.select(conn.raw('1')).from('activity_log as a')
+          .where('a.action', CUSTOMER_DECLINE_ACTIVITY_ACTION)
+          .whereRaw("a.metadata->>'term_id' = t.id::text")
+          .whereRaw("a.metadata->>'unpaid' = 'true'");
+      })
+      .whereNotExists(function reconciled() {
+        this.select(conn.raw('1')).from('activity_log as r')
+          .where('r.action', PAID_LAPSE_RECONCILED_ACTION)
+          .whereRaw("r.metadata->>'term_id' = t.id::text");
+      })
+      .orderBy('t.term_end', 'asc')
+      .limit(limit)
+      .select('t.*');
+    for (const term of terms) {
+      if (await reconcilePaidDecidedLapse(term, conn)) done += 1;
+    }
+    if (done) logger.info(`[annual-prepay] paid-lapse reconcile retry leg completed ${done} term(s)`);
+  } catch (err) {
+    logger.warn(`[annual-prepay] paid-lapse reconcile retry leg failed: ${err.message}`);
+  }
+  return done;
+}
+
 async function followThroughPaidDecidedLapse(lapse, conn) {
   const refreshed = await refreshTermSnapshot(lapse, conn);
-  await reconcilePendingWindowCompletions(refreshed || lapse, conn);
+  await reconcilePaidDecidedLapse(refreshed || lapse, conn);
   // #4940 pre-push P1: the billing-mode stamp only while the term covers
   // TODAY — the decided-coverage restore's coveredToday rule. Paid after
   // term_end, 'annual_prepay' on expired coverage is the nothing-bills limbo
   // (the monthly cron skips the mode); the historical payment is still
-  // reconciled above. A pending term was never stamped, so the mode is left.
+  // reconciled above, retried by the sweep until it completes. A pending term was never stamped, so the mode is left.
   if (await termCoversToday(lapse.id, conn)) {
     await stampAnnualPrepayBillingMode(lapse.customer_id, conn, lapse.id);
   }
@@ -4501,6 +4561,9 @@ async function reconcileCoveredTermsSweep({ today = etDateString(), conn = db } 
   } catch (err) {
     logger.warn(`[annual-prepay] sweep WaveGuard extension-credit restore recovery failed: ${err.message}`);
   }
+  // Paid-late declined terms whose historical reconcile has not completed —
+  // expired ones too (they are outside the dated loop above).
+  await retryPaidLapseReconciles(conn);
   if (summary.settled || summary.credited || summary.reversed || summary.disputeRecovered) {
     logger.info(`[annual-prepay] covered-term sweep recovered work: ${JSON.stringify(summary)}`);
   }
