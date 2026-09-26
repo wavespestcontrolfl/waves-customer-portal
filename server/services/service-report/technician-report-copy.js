@@ -178,7 +178,7 @@ const REPORT_NUMERIC_CREDENTIAL_GROUP = String.raw`[A-Za-z#*]*\d[A-Za-z0-9#*]*`;
 // Do not let the optional leading affix consume the device noun itself in
 // suffix forms such as "rear gate 2468-AB"; the contextual detector still
 // needs that noun after normalization.
-const REPORT_CREDENTIAL_LEADING_AFFIX_GROUP = String.raw`(?!(?:gate|door|garage|entry|keypad|lockbox|alarm)\b)[A-Za-z#*]{1,8}`;
+const REPORT_CREDENTIAL_LEADING_AFFIX_GROUP = String.raw`(?!(?:[Gg][Aa][Tt][Ee]|[Dd][Oo][Oo][Rr]|[Gg][Aa][Rr][Aa][Gg][Ee]|[Ee][Nn][Tt][Rr][Yy]|[Kk][Ee][Yy][Pp][Aa][Dd]|[Ll][Oo][Cc][Kk][Bb][Oo][Xx]|[Aa][Ll][Aa][Rr][Mm])\b)[A-Za-z#*]{1,8}`;
 // A separated suffix must be uppercase/symbolic. Lowercase words after a code
 // are ordinary prose ("8842 after hours") and must remain available to the
 // surrounding detector rather than being absorbed as part of the token.
@@ -188,11 +188,18 @@ const REPORT_EXPLICIT_NUMERIC_CREDENTIAL_RE = new RegExp(
   String.raw`\b(?:code|pin|combo(?!\s+(?:of|with)\b)|combination(?!\s+(?:of|with)\b)|passcode|password|passphrase|keypad|lock\s?box)\b[^\n.!?]{0,25}?["'‘’“”]?(${REPORT_NUMERIC_CREDENTIAL_TOKEN})`,
   'gi',
 );
+const REPORT_REVERSE_EXPLICIT_NUMERIC_CREDENTIAL_RE = new RegExp(
+  String.raw`(${REPORT_NUMERIC_CREDENTIAL_TOKEN})\s+(?:is|=|was|were|remains?|stays?)\s+(?:the\s+)?(?:[a-z]+\s+){0,2}(?:code|pin|combo|combination|passcode|password|passphrase|keypad|lock\s?box)\b`,
+  'gi',
+);
 
 function containsExplicitNumericCredential(text) {
-  for (const match of String(text || '').matchAll(REPORT_EXPLICIT_NUMERIC_CREDENTIAL_RE)) {
-    const digitCount = match[1].replace(/\D/g, '').length;
-    if (digitCount >= 2 && digitCount <= 8) return true;
+  const value = String(text || '');
+  for (const pattern of [REPORT_EXPLICIT_NUMERIC_CREDENTIAL_RE, REPORT_REVERSE_EXPLICIT_NUMERIC_CREDENTIAL_RE]) {
+    for (const match of value.matchAll(pattern)) {
+      const digitCount = match[1].replace(/\D/g, '').length;
+      if (digitCount >= 2 && digitCount <= 8) return true;
+    }
   }
   return false;
 }
@@ -208,23 +215,52 @@ const REPORT_MEASUREMENT_QUANTITY_RE = new RegExp(
 );
 
 // N-P-K fertilizer analyses use the same separated-number surface as an
-// access token. Preserve them only when nearby treatment evidence establishes
-// an application or fertilizer identity. This masking runs after the original-
-// text explicit code/PIN scan, so "gate code 24-0-11" remains private even if
-// the sentence also mentions fertilizer.
+// access token. Preserve only a complete three-part analysis directly governed
+// by an application verb or identified as fertilizer. Loose proximity is not
+// enough: a later fertilizer sentence must not license an earlier gate code.
+// This masking runs after the original-text explicit code/PIN scan, including
+// reverse assignments, so credential nouns always take priority.
 const REPORT_FERTILIZER_ANALYSIS_RE = /\b\d{1,2}(?:\.\d+)?\s*[-–—]\s*\d{1,2}(?:\.\d+)?\s*[-–—]\s*\d{1,2}(?:\.\d+)?\b/g;
-const REPORT_FERTILIZER_CONTEXT_RE = /\b(?:fertili[sz]er|plant\s+food|nutrient(?:\s+blend)?|n\s*[-–—]\s*p\s*[-–—]\s*k|npk|analysis)\b/i;
-const REPORT_APPLICATION_BEFORE_RE = /\b(?:appl(?:y|ied|ication)|broadcast(?:ed)?|spread|distributed)\b[^\n.!?]{0,40}$/i;
-const REPORT_APPLICATION_AFTER_RE = /^[^\n.!?]{0,20}\b(?:was\s+|were\s+)?(?:applied|broadcast|spread|distributed)\b/i;
+const REPORT_FERTILIZER_NOUN = String.raw`(?:fertili[sz]er|plant\s+food|nutrient(?:\s+blend)?|n\s*[-–—]\s*p\s*[-–—]\s*k|npk|analysis)`;
+const REPORT_FERTILIZER_NOUN_BEFORE_RE = new RegExp(String.raw`\b${REPORT_FERTILIZER_NOUN}\b\s*(?::|=)?\s*$`, 'i');
+const REPORT_FERTILIZER_NOUN_AFTER_RE = new RegExp(String.raw`^\s*(?:${REPORT_FERTILIZER_NOUN})\b`, 'i');
+const REPORT_APPLICATION_BEFORE_RE = new RegExp(
+  String.raw`\b(?:appl(?:y|ied|ying|ication(?:\s+of)?)|broadcast(?:ed|ing)?|spread(?:ing)?|distribut(?:e|ed|ing))\b\s+(?:(?:an?|the)\s+)?(?:${REPORT_FERTILIZER_NOUN}\s+)?$`,
+  'i',
+);
+const REPORT_APPLICATION_AFTER_RE = /^\s*(?:was\s+|were\s+)?(?:applied|broadcast|spread|distributed)\b/i;
+const REPORT_CREDENTIAL_NOUN_IN_CLAUSE_RE = /\b(?:code|pin|combo|combination|passcode|password|passphrase|keypad|lock\s?box)\b/i;
+const REPORT_ACCESS_BEFORE_ANALYSIS_RE = /\b(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?)\b[^\n.!?]{0,25}\b(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b[^\n.!?]{0,15}(?:with|using|via|code|pin|combo|combination|[:=])?\s*$/i;
+const REPORT_DEVICE_BEFORE_ANALYSIS_RE = /\b(?:gate|door|garage|entry|keypad|lock\s?box|alarm)\b(?:\s+(?:is|was|were|reads?))?\s*[:=]?\s*$/i;
+const REPORT_DEVICE_ACCESS_BEFORE_ANALYSIS_RE = /\b(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b[^\n.!?]{0,20}\b(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?)\b[^\n.!?]{0,15}(?:with|using|via|code|pin|combo|combination|[:=])?\s*$/i;
+const REPORT_ACCESS_AFTER_ANALYSIS_RE = /^[^\n.!?]{0,20}\b(?:open(?:s|ed|ing)?|unlock(?:s|ed|ing)?|access(?:es|ed|ing)?|enter(?:s|ed|ing)?)\b[^\n.!?]{0,25}\b(?:gate|door|garage|entry|keypad|lock\s?box|lock)\b/i;
 
 function maskFertilizerAnalyses(text) {
   return String(text || '').replace(REPORT_FERTILIZER_ANALYSIS_RE, (analysis, offset, source) => {
-    const before = source.slice(Math.max(0, offset - 60), offset);
-    const after = source.slice(offset + analysis.length, offset + analysis.length + 60);
-    const treatmentEvidence = REPORT_APPLICATION_BEFORE_RE.test(before)
-      || REPORT_APPLICATION_AFTER_RE.test(after)
-      || REPORT_FERTILIZER_CONTEXT_RE.test(before)
-      || REPORT_FERTILIZER_CONTEXT_RE.test(after);
+    const before = source.slice(0, offset);
+    const after = source.slice(offset + analysis.length);
+    const embeddedToken = /(?:\d\s*[-–—]|[#*])\s*$/.test(before)
+      || /^\s*(?:[-–—]\s*\d|[#*])/.test(after);
+    if (embeddedToken) return analysis;
+
+    const clauseBefore = before.slice(Math.max(before.lastIndexOf('.'), before.lastIndexOf('!'), before.lastIndexOf('?'), before.lastIndexOf('\n')) + 1);
+    const clauseEndOffsets = [after.indexOf('.'), after.indexOf('!'), after.indexOf('?'), after.indexOf('\n')]
+      .filter((value) => value >= 0);
+    const clauseAfter = clauseEndOffsets.length ? after.slice(0, Math.min(...clauseEndOffsets)) : after;
+    const directApplication = REPORT_APPLICATION_BEFORE_RE.test(clauseBefore)
+      || REPORT_APPLICATION_AFTER_RE.test(clauseAfter);
+    const credentialNoun = REPORT_CREDENTIAL_NOUN_IN_CLAUSE_RE.test(clauseBefore)
+      || REPORT_CREDENTIAL_NOUN_IN_CLAUSE_RE.test(clauseAfter);
+    const deviceAccess = REPORT_ACCESS_BEFORE_ANALYSIS_RE.test(clauseBefore)
+      || REPORT_DEVICE_BEFORE_ANALYSIS_RE.test(clauseBefore)
+      || REPORT_DEVICE_ACCESS_BEFORE_ANALYSIS_RE.test(clauseBefore)
+      || REPORT_ACCESS_AFTER_ANALYSIS_RE.test(clauseAfter);
+    const accessInstruction = credentialNoun || (!directApplication && deviceAccess);
+    if (accessInstruction) return analysis;
+
+    const treatmentEvidence = directApplication
+      || REPORT_FERTILIZER_NOUN_BEFORE_RE.test(clauseBefore)
+      || REPORT_FERTILIZER_NOUN_AFTER_RE.test(clauseAfter);
     return treatmentEvidence ? '[fertilizer-analysis]' : analysis;
   });
 }
@@ -245,6 +281,11 @@ function accessCodeDetectionText(text) {
       const digits = token.replace(/\D/g, '');
       const credentialShape = /[A-Za-z#*]/.test(token) || /[\s–—-]/.test(token);
       if (!credentialShape || digits.length < 3 || digits.length > 8) return match;
+      const compactDevice = token.match(/^(?:(rear|side|front|back|main|north|south|east|west)[\s–—-]*)?(gate|door|garage|entry|keypad|lockbox|alarm)/i);
+      if (compactDevice) {
+        const direction = compactDevice[1] ? `${compactDevice[1]} ` : '';
+        return `${prefix}${direction}${compactDevice[2]} ${digits}`;
+      }
       return `${prefix}${digits}`;
     });
 }

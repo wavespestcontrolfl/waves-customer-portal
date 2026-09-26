@@ -391,7 +391,7 @@ describe('buildTreeShrubReportV2 — aggregator', () => {
     expect(measurementReport.treatment.focus).toEqual([groupedMeasurement]);
     expect(measurementReport.snapshot.todaysFocus).toEqual([groupedMeasurement]);
 
-    const fertilizerAction = 'Applied 24-0-11 fertilizer near the rear gate';
+    const fertilizerAction = 'Applied 24-0-11 fertilizer after opening the rear gate';
     const fertilizerReport = buildTreeShrubReportV2({
       treeShrubAssessment: assessment(),
       actions: [fertilizerAction],
@@ -406,6 +406,11 @@ describe('buildTreeShrubReportV2 — aggregator', () => {
       'rear gate AB24-68',
       'rear gate AB-2468',
       'rear gate #AB-2468',
+      'Gate2468',
+      'RearGATE2468',
+      'Opened rear gate with 24-0-11. Applied fertilizer to turf.',
+      '24-0-11 is the gate code. Applied fertilizer.',
+      'Opened rear gate with 2-4-6-8 and applied fertilizer',
       'rear gate 2468-AB',
       'rear gate A2B4-68',
       'rear gate A2B4-6C8D',

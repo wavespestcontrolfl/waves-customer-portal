@@ -213,6 +213,11 @@ describe('deterministic report fallback', () => {
         'Used gate code [redacted] for access',
         'rear gate AB-2468',
         'rear gate #AB-2468',
+        'Gate2468',
+        'RearGATE2468',
+        'Opened rear gate with 24-0-11. Applied fertilizer to turf.',
+        '24-0-11 is the gate code. Applied fertilizer.',
+        'Opened rear gate with 2-4-6-8 and applied fertilizer',
         'Applied 24-0-11 near the rear gate',
       ],
     });
@@ -419,6 +424,11 @@ describe('generate-report typed findings prompt block (buildTypedFindingsPromptB
     expect(reportCopyRejection('The rear gate #AB-2468 was used for entry.')).toBe('access_code');
     expect(reportCopyRejection('The rear gate 2468-AB was used for entry.')).toBe('access_code');
     expect(reportCopyRejection('Opened rear gate with #AB24–68C*.')).toBe('access_code');
+    expect(reportCopyRejection('Gate2468')).toBe('access_code');
+    expect(reportCopyRejection('RearGATE2468')).toBe('access_code');
+    expect(reportCopyRejection('Opened rear gate with 24-0-11. Applied fertilizer to turf.')).toBe('access_code');
+    expect(reportCopyRejection('24-0-11 is the gate code. Applied fertilizer.')).toBe('access_code');
+    expect(reportCopyRejection('Opened rear gate with 2-4-6-8 and applied fertilizer.')).toBe('access_code');
     expect(reportCopyRejection('Opened the gate onto 400 sqft of treated turf.')).toBeNull();
     expect(reportCopyRejection('Opened rear gate, applied 100 ml around hinges.')).toBeNull();
     expect(reportCopyRejection('Inspected the rear gate 120–150 feet from the lanai.')).toBeNull();
