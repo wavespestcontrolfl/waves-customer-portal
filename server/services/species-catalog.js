@@ -444,9 +444,15 @@ function resolveName(text) {
   const normalized = normalizeName(text);
   if (!normalized) return null;
 
+  // An entry can list phrases that name something else despite containing
+  // its name ("plaster bagworm" is an indoor casebearer, not the outdoor
+  // bagworm): such text never resolves to it (Codex #4974 r10).
+  const allowed = (node) => !(node && Array.isArray(node.not_matches)
+    && node.not_matches.some((phrase) => new RegExp(`\\b${normalizeName(phrase)}\\b`).test(normalized)));
+
   for (const via of NAME_ORDER) {
     const exact = exactMatch(normalized, NAME_INDICES[via].index);
-    if (exact) return { node: getNode(exact), via };
+    if (exact) return allowed(getNode(exact)) ? { node: getNode(exact), via } : null;
   }
 
   // On an equal-length fuzzy tie an entry's own common name ("drywood
@@ -454,7 +460,7 @@ function resolveName(text) {
   // ("drywood termites"), while a group still beats a bare generic alias
   // on one species ("termite" on subterranean termite).
   const fuzzy = fuzzyScanAcross(normalized, FUZZY_ORDER.map((via) => ({ via, index: NAME_INDICES[via].index })));
-  return fuzzy ? { node: getNode(fuzzy.id), via: fuzzy.via } : null;
+  return fuzzy && allowed(getNode(fuzzy.id)) ? { node: getNode(fuzzy.id), via: fuzzy.via } : null;
 }
 
 /** Every name claimed by two or more nodes while building the indices, with

@@ -1359,7 +1359,11 @@
     "risk": "low",
     "action": "monitor",
     "season_basis": "year_round",
-    "verification": []
+    "verification": [],
+    "not_matches": [
+      "plaster bagworm",
+      "household casebearer"
+    ]
   },
   {
     "slug": "polka-dot-wasp-moth",

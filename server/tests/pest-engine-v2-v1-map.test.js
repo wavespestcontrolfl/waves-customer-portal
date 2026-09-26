@@ -73,6 +73,17 @@ describe('real-catalog answer guards (Codex #4974 r2)', () => {
     expect(built.evidence.matches.join(' ')).not.toMatch(/soldier|worker|body/i);
   });
 
+  test('an organism-only read never names a sign entry (Codex #4974 r10)', () => {
+    const built = buildAnswer({ ...ctx([cand('discarded-wings', 0.95), cand('subterranean-termite', 0.3)]), organismOnly: true });
+    expect(built.entry?.kind).not.toBe('sign');
+    expect(built.candidatesBlock.map((c) => c.slug)).not.toContain('discarded-wings');
+  });
+
+  test('"plaster bagworm" never resolves to the outdoor bagworm (Codex #4974 r10)', () => {
+    expect(catalog.resolveName('plaster bagworm')?.node?.slug).not.toBe('bagworm');
+    expect(catalog.resolveName('bagworm')?.node?.slug).toBe('bagworm');
+  });
+
   test('bats get the exclusion-only referral, never a trapper', () => {
     expect(catalog.getEntry('brazilian-free-tailed-bat').service.referral).toBe('bat_exclusion');
     expect(REFERRAL_TEMPLATES.bat_exclusion).toMatch(/never trapped or handled/);

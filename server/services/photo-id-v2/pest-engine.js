@@ -883,7 +883,7 @@ function groupBlockFor(level, nodeId, entry) {
 function buildAnswer(ctx) {
   const {
     candidates, disagreed, disagreementNode, escalationTriggered, openaiAnswered, openaiStoodInAlone,
-    qualityUsable, qualityIssue, subjectConflict, signOnly, currentMonth,
+    qualityUsable, qualityIssue, subjectConflict, signOnly, organismOnly, currentMonth,
   } = ctx;
   const unansweredTrigger = escalationTriggered && !openaiAnswered;
   // Codex round-0 P1 (round 10): an OpenAI candidate that stood in ALONE
@@ -903,7 +903,10 @@ function buildAnswer(ctx) {
   // A sign-only read never names an organism: the photos show mud tubes, not
   // a termite, and several species make them. The sign entry itself may
   // still be named; an organism top climbs its lineage (Codex #4974 r7).
-  const organismFromSign = !!signOnly && top?.entry?.kind === 'organism';
+  // ...and, symmetrically, an organism-only read never names a sign entry
+  // (discarded wings when the photos show a live insect; Codex #4974 r10).
+  const hiddenKind = signOnly ? 'organism' : (organismOnly ? 'sign' : null);
+  const organismFromSign = !!hiddenKind && top?.entry?.kind === hiddenKind;
   const picked = disagreed
     ? climbedOrDisagreedAnswer(candidates, true, disagreementNode)
     : ((!organismFromSign && entryLevelAnswer(candidates, top, blockPrettySure)) || climbedOrDisagreedAnswer(candidates, false, null));
@@ -913,7 +916,7 @@ function buildAnswer(ctx) {
   // On a sign-only read the photos show no animal: nothing a customer sees
   // (evidence, other possibilities) comes from an organism candidate
   // (Codex #4974 r8-r9).
-  const shownCandidates = signOnly ? candidates.filter((c) => c.entry?.kind !== 'organism') : candidates;
+  const shownCandidates = hiddenKind ? candidates.filter((c) => c.entry?.kind !== hiddenKind) : candidates;
   const evidence = evidenceFor(candidatesSupporting(shownCandidates, level, nodeId));
   // On a sign-only read the photos show no animal, so no organism is listed
   // as another possibility either (Codex #4974 r8).
@@ -1328,6 +1331,7 @@ async function identifyPestV2(photos = []) {
   // droppings), no animal: a sign can't name one species that makes it.
   const showsReads = [candidatesJson?.shows, escalationJson?.shows].filter(Boolean);
   const signOnly = showsReads.length > 0 && showsReads.every((v) => v === 'sign');
+  const organismOnly = showsReads.length > 0 && showsReads.every((v) => v === 'organism');
   const currentMonth = etParts(new Date()).month;
 
   const built = buildAnswer({
@@ -1341,6 +1345,7 @@ async function identifyPestV2(photos = []) {
     qualityIssue: quality.issue || 'none',
     subjectConflict,
     signOnly,
+    organismOnly,
     currentMonth,
   });
 
