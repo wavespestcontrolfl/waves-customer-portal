@@ -473,7 +473,7 @@ test('an unlinked lead matches follow-up however its number was written', async 
 });
 
 test('a quote delivered to the customer (the proof\'s association hint) counts as follow-up', async () => {
-  mockDb({ hints: { q: JSON.stringify({ kind: 'estimate_sent', strength: 'association' }) } });
+  mockDb({ hints: { q: JSON.stringify({ kind: 'estimate_sent', strength: 'association', matched_at: et('13:30').toISOString() }) } });
   listOpenCommitments.mockResolvedValue([row('q', { kind: 'send_estimate', call_started_at: et('13:00').toISOString() })]);
   expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(0);
   expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
@@ -535,4 +535,10 @@ test('evidence for a floor promise counts only from its stated time — earlier 
   await runFollowUpSlaWatcher({ now: NOW });
   const since = argsOf('sms_log', 'where').filter(([col]) => col === 'created_at').map(([, , v]) => new Date(v).toISOString());
   expect(new Set(since)).toEqual(new Set([et('14:30').toISOString()]));
+});
+
+test('a quote hint from before a floor time does not keep the promise', async () => {
+  mockDb({ hints: { q: JSON.stringify({ kind: 'estimate_sent', strength: 'association', matched_at: et('13:30').toISOString() }) } });
+  listOpenCommitments.mockResolvedValue([row('q', { kind: 'send_estimate', call_started_at: et('13:00').toISOString(), due_at: et('14:00').toISOString(), due_type: 'floor' })]);
+  expect((await runFollowUpSlaWatcher({ now: NOW })).missed).toBe(1);
 });

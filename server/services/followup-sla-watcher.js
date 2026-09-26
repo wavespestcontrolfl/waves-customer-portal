@@ -235,9 +235,14 @@ async function followedUpIds(conn, rows) {
   // (customer FK, lead mirror, caller phone) are the Owed queue's own.
   const quoteIds = scoped.filter((x) => x.r.kind === 'send_estimate').map((x) => x.r.id);
   const hints = quoteIds.length ? await conn('call_commitments').whereIn('id', quoteIds).select('id', 'fulfillment') : [];
+  const sinceById = new Map(scoped.map((x) => [String(x.r.id), x.since]));
   for (const h of hints) {
     const f = typeof h.fulfillment === 'string' ? JSON.parse(h.fulfillment) : h.fulfillment;
-    if (f?.kind === 'estimate_sent') done.add(h.id);
+    // The same evidence boundary as every other kind of evidence: a quote
+    // sent before a floor time ("after the inspection") does not keep it.
+    const matched = f?.matched_at ? new Date(f.matched_at) : null;
+    const since = sinceById.get(String(h.id));
+    if (f?.kind === 'estimate_sent' && matched && since && matched > since) done.add(h.id);
   }
   const after = (rec, since) => new Date(rec.created_at).getTime() > since.getTime();
   const mine = (rec, x) => (x.r.customer_id ? String(rec.customer_id) === String(x.r.customer_id)
