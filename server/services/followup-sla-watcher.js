@@ -44,6 +44,9 @@ const { isInternalTestCustomerId } = require('./internal-test-customers');
 // bell reaches the staff who work the Owed tab.
 const TRIGGER_KEY = 'call_commitment_overdue';
 const SLA_KINDS = Object.freeze(['callback', 'send_estimate', 'schedule_visit']);
+// Human-authored texts, as the callback proof counts them: typed by staff,
+// or an AI draft staff approved or revised before it went out.
+const HUMAN_TEXT_TYPES = Object.freeze(['manual', 'ai_approved', 'ai_revised']);
 const SLA_MINUTES = 60;
 const DAY_OPEN = '08:00';
 const DAY_CLOSE = '20:00';
@@ -194,17 +197,27 @@ async function followedUpIds(conn, rows) {
   const calls = await byContact(conn('call_log'))
     .modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b))
     .whereRaw("direction LIKE 'outbound%'").where('created_at', '>', floor)
-    .whereRaw("metadata->'customer_leg'->>'status' = 'completed'")
-    .whereRaw("CASE WHEN metadata->'customer_leg'->>'duration_seconds' ~ '^[0-9]+$' THEN (metadata->'customer_leg'->>'duration_seconds')::numeric >= 60 ELSE FALSE END")
-    .where('v2_extraction_status', 'valid')
-    .whereRaw("ai_extraction_enriched->'meta'->>'is_voicemail' = 'false'")
+    // The proof's two connected-call arms: a callback-card bridge whose
+    // customer leg completed (>= 60 s, affirmatively not voicemail), or an
+    // ordinary outbound call — no card link — whose own duration is >= 60 s.
+    .where(function connected() {
+      this.where(function cardLeg() {
+        this.whereRaw("metadata->'customer_leg'->>'status' = 'completed'")
+          .whereRaw("CASE WHEN metadata->'customer_leg'->>'duration_seconds' ~ '^[0-9]+$' THEN (metadata->'customer_leg'->>'duration_seconds')::numeric >= 60 ELSE FALSE END")
+          .where('v2_extraction_status', 'valid')
+          .whereRaw("ai_extraction_enriched->'meta'->>'is_voicemail' = 'false'");
+      }).orWhere(function ordinary() {
+        this.whereRaw("metadata->>'relatedCommitmentId' IS NULL AND COALESCE(metadata->>'callback_policy', '') <> 'card'")
+          .whereRaw('COALESCE(duration_seconds, 0) >= 60');
+      });
+    })
     .select('id', 'customer_id', 'to_phone', 'created_at');
   // A text a person typed that actually went out: the staff send paths stamp
   // BOTH message_type 'manual' and admin_user_id (either alone admits
   // automated texts), and only queued/sent/delivered rows reached anyone.
   const texts = await byContact(conn('sms_log'))
     .whereRaw("direction LIKE 'out%'").where('created_at', '>', floor)
-    .where('message_type', 'manual').whereNotNull('admin_user_id')
+    .whereIn('message_type', HUMAN_TEXT_TYPES).whereNotNull('admin_user_id')
     .whereIn('status', ['queued', 'sent', 'delivered'])
     .select('customer_id', 'to_phone', 'created_at');
   // A quote delivered to the customer rather than linked to this call: the
@@ -310,15 +323,16 @@ function lastScheduledTick(now) {
 // watchdog defers to the pager only while this holds — a pager that keeps
 // failing hands its promises straight back.
 async function pagerHealthy(conn, now = new Date()) {
-  const row = await conn('job_health').where({ job_name: 'followup-sla-watcher' }).first('last_success_at', 'last_status');
-  // A failed latest tick is unhealthy however recent the success before it.
-  if (row?.last_status === 'failed') return false;
-  const last = row?.last_success_at ? new Date(row.last_success_at).getTime() : NaN;
+  const row = await conn('job_health').where({ job_name: 'followup-sla-watcher' }).first('last_success_at', 'last_started_at', 'last_status');
+  // The latest run must have SUCCEEDED and have STARTED on or after the
+  // settled tick — a run that began before it (and finished late) says
+  // nothing about that tick, and a failed or still-running one proves nothing.
+  if (row?.last_status !== 'success') return false;
+  const started = row.last_started_at ? new Date(row.last_started_at).getTime() : NaN;
+  const last = Number.isFinite(started) ? started : NaN;
   // Judged against the last tick that has had time to FINISH: at 8:00 AM the
   // opening tick is still running (the watchdog fires at the same minute),
   // so it is measured against last night's 8:45 PM tick, not today's.
-  // That tick must itself have succeeded (a success finishes after its tick
-  // starts) — an earlier success never covers a tick that failed or never ran.
   const settled = lastScheduledTick(new Date(now.getTime() - 10 * 60 * 1000));
   return Number.isFinite(last) && last >= settled.getTime();
 }

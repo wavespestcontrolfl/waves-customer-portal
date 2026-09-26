@@ -123,6 +123,12 @@ async function runInner({ now = new Date() } = {}) {
   if (require('../config/feature-gates').isEnabled('followupSlaAlerts')) {
     try {
       const sla = require('./followup-sla-watcher');
+      // A pager that has not run for its latest tick (just switched on, or
+      // behind) gets one catch-up run first; only if that fails does this
+      // watchdog cover its promises itself.
+      if (!await sla.pagerHealthy(db, now)) {
+        await sla.runFollowUpSlaWatcher({ now }).catch((err) => logger.warn(`[call-commitments-watchdog] follow-up pager catch-up failed: ${err.message}`));
+      }
       if (await sla.pagerHealthy(db, now)) {
         const owned = await sla.slaOwnedIds(db, candidates, now);
         if (owned.size) candidates = candidates.filter((r) => !owned.has(r.id));

@@ -312,11 +312,11 @@ test('only a text that actually went out counts — scheduled, reserved and fail
   expect(argsOf('sms_log', 'whereIn')).toContainEqual(['status', ['queued', 'sent', 'delivered']]);
 });
 
-test('a text counts only when a person typed it: manual AND a staff sender (automated texts with an admin id do not)', async () => {
+test('a text counts only when a person wrote it — manual, or an AI draft staff approved/revised — AND a staff sender', async () => {
   mockDb({ activity: { sms_log: true } });
   listOpenCommitments.mockResolvedValue([row('a')]);
   await runFollowUpSlaWatcher({ now: NOW });
-  expect(argsOf('sms_log', 'where')).toContainEqual(['message_type', 'manual']);
+  expect(argsOf('sms_log', 'whereIn')).toContainEqual(['message_type', ['manual', 'ai_approved', 'ai_revised']]);
   expect(argsOf('sms_log', 'whereNotNull')).toEqual([['admin_user_id']]);
 });
 
@@ -430,9 +430,11 @@ describe('pagerHealthy — judged against the pager schedule', () => {
   });
 
   let status = 'success';
-  const healthAt = (lastSuccess, lastStatus = 'success') => {
+  let started = null;
+  const healthAt = (lastSuccess, lastStatus = 'success', lastStarted = null) => {
     status = lastStatus;
-    db.mockImplementation(() => { const q = {}; q.where = () => q; q.first = async () => (lastSuccess ? { last_success_at: lastSuccess, last_status: status } : null); return q; });
+    started = lastStarted;
+    db.mockImplementation(() => { const q = {}; q.where = () => q; q.first = async () => (lastSuccess ? { last_success_at: lastSuccess, last_started_at: started || lastSuccess, last_status: status } : null); return q; });
   };
   test('a success at or after the latest tick (minus slack) is healthy; an older one, or none, is not', async () => {
     healthAt(et('20:46').toISOString());
@@ -446,6 +448,9 @@ describe('pagerHealthy — judged against the pager schedule', () => {
     expect(await pagerHealthy(db, NOW)).toBe(false);
     // A failed latest tick is unhealthy however recent the success before it.
     healthAt(et('20:31').toISOString(), 'failed');
+    expect(await pagerHealthy(db, et('23:00'))).toBe(false);
+    // A 20:30 run that finished at 20:46 did not run the 20:45 tick.
+    healthAt(et('20:46').toISOString(), 'success', et('20:30').toISOString());
     expect(await pagerHealthy(db, et('23:00'))).toBe(false);
   });
 });
@@ -473,7 +478,7 @@ test('a quote delivered to the customer (the proof\'s association hint) counts a
 });
 
 test('at the 8:00 AM opening tick the pager is judged against last night\'s 8:45 PM run, not the run still in progress', async () => {
-  db.mockImplementation(() => { const q = {}; q.where = () => q; q.first = async () => ({ last_success_at: et('20:46', '2026-09-26').toISOString() }); return q; });
+  db.mockImplementation(() => { const q = {}; q.where = () => q; q.first = async () => ({ last_success_at: et('20:46', '2026-09-26').toISOString(), last_started_at: et('20:45', '2026-09-26').toISOString(), last_status: 'success' }); return q; });
   expect(await pagerHealthy(db, et('08:00', '2026-09-27'))).toBe(true);
   expect(await pagerHealthy(db, et('08:05', '2026-09-27'))).toBe(true);
 });
@@ -511,4 +516,13 @@ test('the scan pages until exhaustion — no hidden row ceiling', async () => {
   listOpenCommitments.mockResolvedValueOnce([]);
   await runFollowUpSlaWatcher({ now: NOW });
   expect(listOpenCommitments).toHaveBeenCalledTimes(31);
+});
+
+test('an ordinary connected outbound call (no callback card, 60 s+) counts as follow-up too', async () => {
+  mockDb({ activity: { call_log: true } });
+  listOpenCommitments.mockResolvedValue([row('a', { kind: 'send_estimate', call_started_at: et('13:00').toISOString() })]);
+  await runFollowUpSlaWatcher({ now: NOW });
+  const raws = argsOf('call_log', 'whereRaw').map(([sql]) => sql).join(' ');
+  expect(raws).toMatch(/relatedCommitmentId' IS NULL/);
+  expect(raws).toMatch(/COALESCE\(duration_seconds, 0\) >= 60/);
 });

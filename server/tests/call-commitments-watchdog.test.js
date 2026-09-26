@@ -199,7 +199,11 @@ test('a pager that is not succeeding hands its promises straight back — the wa
   const sla = require('../services/followup-sla-watcher');
   const spy = jest.spyOn(sla, 'slaOwnedIds').mockResolvedValue(new Set(['owned']));
   const healthy = jest.spyOn(sla, 'pagerHealthy').mockResolvedValue(false);
+  const catchUp = jest.spyOn(sla, 'runFollowUpSlaWatcher').mockRejectedValue(new Error('pager down'));
   const result = await runCallCommitmentsWatchdog({ now: NOW });
+  // One catch-up run was attempted first; it failed, so this watchdog covers.
+  expect(catchUp).toHaveBeenCalledTimes(1);
+  catchUp.mockRestore();
   expect(spy).not.toHaveBeenCalled();
   expect(result.overdue).toBe(1);
   spy.mockRestore();
@@ -214,4 +218,18 @@ test('a failing pager ownership check never fails the watchdog — it simply doe
   const result = await runCallCommitmentsWatchdog({ now: NOW });
   expect(result.overdue).toBe(1);
   healthy.mockRestore();
+});
+
+test('a pager that has not run its latest tick (just switched on) gets a catch-up run, then the watchdog defers to it', async () => {
+  isEnabled.mockReturnValue(true);
+  listOpenCommitments.mockResolvedValue([row('owned')]);
+  const sla = require('../services/followup-sla-watcher');
+  const healthy = jest.spyOn(sla, 'pagerHealthy').mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+  const catchUp = jest.spyOn(sla, 'runFollowUpSlaWatcher').mockResolvedValue({ skipped: false });
+  const owned = jest.spyOn(sla, 'slaOwnedIds').mockResolvedValue(new Set(['owned']));
+  const result = await runCallCommitmentsWatchdog({ now: NOW });
+  expect(catchUp).toHaveBeenCalledTimes(1);
+  expect(result.overdue).toBe(0);
+  expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  healthy.mockRestore(); catchUp.mockRestore(); owned.mockRestore();
 });
