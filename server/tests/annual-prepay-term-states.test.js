@@ -626,8 +626,11 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
       // only CALLS this function) now share ONE write site — undecided
       // only (a decided lapse keeps coverage).
       { expr: "'cancelled'", guards: ['where({ id: termId })', "whereNull('renewal_decision')"] },
-      // Move 2: payment_pending → active on invoice paid.
-      { expr: "'active'", guards: ['where({ id: term.id, status: PAYMENT_PENDING_STATUS })'] },
+      // Move 15: a payment_pending term already DECLINED online settles to
+      // the decided-lapse shape when its invoice resolves (never 'active').
+      { expr: "'cancelled'", guards: ["where({ id, status: PAYMENT_PENDING_STATUS, renewal_decision: 'cancel' })"] },
+      // Move 2: payment_pending → active on invoice paid — undecided only.
+      { expr: "'active'", guards: ['where({ id: term.id, status: PAYMENT_PENDING_STATUS })', "whereNull('renewal_decision')"] },
       // Move 11: lost-dispute revival — undecided cancelled only.
       { expr: "'active'", guards: ["where({ id: term.id, status: 'cancelled' })", "whereNull('renewal_decision')"] },
       // Move 10: dispute demotion — active statuses only.
@@ -657,9 +660,6 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
           'whereNotExists(function noSuccessorTerm()',
           "whereRaw('successor.renewed_from_term_id = annual_prepay_terms.id')"],
       },
-      // Move 15: the customer's online decline of a signed plan still
-      // payment_pending — undecided payment_pending only.
-      { expr: "'cancelled'", guards: ['where({ id: termId, status: PAYMENT_PENDING_STATUS })', "whereNull('renewal_decision')"] },
     ]);
     // Move 11's third predicate lives on the upstream revival SELECT, not the
     // conditional UPDATE — pin it there: only dispute-marked, undecided
@@ -764,7 +764,7 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
       12: { from: st(['active', 'renewal_pending', 'payment_pending']), to: st(['payment_pending']), where: 'POST /:id/reverse-prepaid' },
       13: { from: st(['payment_pending', 'cancelled']), to: st(['cancelled']), where: 'DELETE /:id/annual-prepay' },
       14: { from: st(['renewed']), to: st(['cancelled']), where: 'supersedeRenewWithCustomerCancel' },
-      15: { from: st(['payment_pending']), to: st(['cancelled']), where: 'declinePaymentPendingWithCustomerCancel' },
+      15: { from: st(['payment_pending']), to: st(['cancelled']), where: 'settleDecidedPendingTerms' },
     };
     const states = (cell) => [...cell.matchAll(/`([a-z_]+)`/g)].map((x) => x[1]).sort();
     for (const r of rows) {
@@ -790,7 +790,7 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
       12: "NOT IN ('cancelled','canceled')",
       13: 'renewal_decision IS NULL',
       14: "renewal_decision = 'renew' AND NOT EXISTS",
-      15: "status = 'payment_pending' AND renewal_decision IS NULL",
+      15: "status = 'payment_pending' AND renewal_decision = 'cancel'",
     };
     for (const r of rows) expect(r.guard).toContain(guardFrag[r.n]);
   });

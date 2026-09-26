@@ -3241,6 +3241,41 @@ async function cancelTermWithRestorations(termId, conn = db, { throwOnError = fa
     : runCancel(conn);
 }
 
+// Move 15 (docs/annual-prepay-term-states.md): a payment_pending term the
+// customer already DECLINED online (renewal_decision 'cancel', recorded
+// without a status change) whose prepay invoice resolves becomes the
+// decided-lapse shape — never 'active', so it never renews:
+//   - paid: covered through term_end by coveredTermsAsOf's decided-lapse
+//     branch; the paid follow-through (attach + stamp through the end-at-term
+//     upkeep, pending-window reconcile, billing-mode stamp, dispute recovery)
+//     runs as it would for an activated term;
+//   - voided / refunded: nothing was ever covered — it simply leaves the
+//     pending rails.
+// Kept out of syncTermForInvoicePayment's own loop (which only walks
+// undecided terms), so that loop's activation/cancel moves stay the
+// undecided ones they always were.
+async function settleDecidedPendingTerms(decided, nextStatus, conn) {
+  if (!decided.length || (nextStatus !== 'active' && nextStatus !== 'cancelled')) return [];
+  const settled = [];
+  for (const { id } of decided) {
+    const [lapse] = await conn('annual_prepay_terms')
+      .where({ id, status: PAYMENT_PENDING_STATUS, renewal_decision: 'cancel' })
+      .update({ status: 'cancelled', updated_at: new Date() })
+      .returning('*');
+    if (!lapse) continue;
+    settled.push(nextStatus === 'active' ? await followThroughPaidDecidedLapse(lapse, conn) : lapse);
+  }
+  return settled;
+}
+
+async function followThroughPaidDecidedLapse(lapse, conn) {
+  const refreshed = await refreshTermSnapshot(lapse, conn);
+  await reconcilePendingWindowCompletions(refreshed || lapse, conn);
+  await stampAnnualPrepayBillingMode(lapse.customer_id, conn, lapse.id);
+  if (lapse.dispute_suspended_at) await finishDisputeRecoveryForTerm(lapse, conn);
+  return refreshed || lapse;
+}
+
 async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
   if (!(await annualPrepayTableExists())) return [];
   const invoice = typeof invoiceOrId === 'object'
@@ -3249,10 +3284,16 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
   if (!invoice?.id) return [];
 
   const nextStatus = invoiceTermStatus(invoice);
-  const terms = await conn('annual_prepay_terms')
+  const linkedTerms = await conn('annual_prepay_terms')
     .where({ prepay_invoice_id: invoice.id })
     .whereIn('status', [PAYMENT_PENDING_STATUS, ...ACTIVE_STATUSES])
     .select('*');
+  // A payment_pending term the customer already declined online settles
+  // separately (move 15) — never through activation below.
+  const terms = linkedTerms.filter((term) => !term.renewal_decision);
+  const decidedPendingResults = await settleDecidedPendingTerms(
+    linkedTerms.filter((term) => term.renewal_decision === 'cancel' && term.status === PAYMENT_PENDING_STATUS), nextStatus, conn,
+  );
 
   if (nextStatus === 'active') {
     // Lost-dispute revival (Codex #2533 round-4 P1): losing the dispute
@@ -3279,7 +3320,7 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
     }
   }
 
-  const results = [];
+  const results = [...decidedPendingResults];
   for (const term of terms) {
     let current = term;
     if (nextStatus === 'active' && term.status === PAYMENT_PENDING_STATUS) {
@@ -3297,6 +3338,7 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
       const reviveFromPending = async (t) => {
         const [updated] = await t('annual_prepay_terms')
           .where({ id: term.id, status: PAYMENT_PENDING_STATUS })
+          .whereNull('renewal_decision')
           .update({ status: 'active', updated_at: new Date() })
           .returning('*');
         if (updated) {
@@ -6085,33 +6127,36 @@ async function supersedeRenewWithCustomerCancel({ termId, conn = db } = {}) {
   return term || null;
 }
 
-// Move 15 (docs/annual-prepay-term-states.md): the CUSTOMER's online
-// decline of a signed plan still payment_pending — an unpaid original
-// invoice, or a dispute-suspended one (Codex #4940 r9). Guarded conditional
-// UPDATE to the same decided-lapse shape recordDecision('cancel') writes:
-// only an undecided payment_pending row moves. Paid later, the decided-lapse
-// branch of coveredTermsAsOf covers the paid year (and the end-at-term
-// upkeep keeps its visits); it never renews. Never paid, nothing is covered.
+// The CUSTOMER's online decline of a signed plan still payment_pending — an
+// unpaid original invoice, or a dispute-suspended one (Codex #4940 r9/r10).
+// The decision is recorded WITHOUT touching status: the term stays
+// payment_pending, so every pending rail keeps working — the billing cron's
+// payment-pending exclusion (getPaymentPendingCustomerIds) and the pre-visit
+// payment reminders (checkAndSendPaymentReminders) both select by status.
+// Guarded: only an undecided payment_pending row takes the decision. When
+// the prepay invoice later RESOLVES, settleDecidedPendingTermsForInvoice
+// (move 15) turns it into the decided-lapse shape — paid: covered through
+// term_end, never renewing; voided/refunded: nothing covered.
 async function declinePaymentPendingWithCustomerCancel({ termId, conn = db } = {}) {
   const now = new Date();
-  const decline = {
-    status: 'cancelled',
+  const decision = {
     renewal_decision: 'cancel',
     renewal_decision_at: now,
     renewal_decision_by: null,
     updated_at: now,
   };
-  if (await cancelDispositionSupported()) decline.cancel_disposition = 'end_at_term';
+  if (await cancelDispositionSupported()) decision.cancel_disposition = 'end_at_term';
   const [term] = await conn('annual_prepay_terms')
     .where({ id: termId, status: PAYMENT_PENDING_STATUS })
     .whereNull('renewal_decision')
-    .update(decline)
+    .update(decision)
     .returning('*');
   return term || null;
 }
 
 // The customer's decline, by the term's current shape: an unprocessed staff
-// renew (move 14), an unpaid payment_pending plan (move 15), or a live term
+// renew (move 14), an unpaid payment_pending plan (decision only — see
+// declinePaymentPendingWithCustomerCancel), or a live term
 // (recordDecision('cancel'), move 8). No `notes`: recordDecision would
 // OVERWRITE renewal_notes, which may hold staff's own renewal notes (Codex
 // r2 P2) — the activity_log row is the record of the online decline.
@@ -6464,7 +6509,55 @@ async function raisePendingDeclineRetrievalTasks({ limit = 50, today = etDateStr
     const retrieval = await evaluateDueDeclineRetrieval(row.id, today);
     if (retrieval.raised) raised += 1;
   }
+  await correctDeclineRetrievalDates(today).catch((err) => {
+    logger.error(`[annual-prepay] decline retrieval date correction pass failed: ${err.message}`);
+  });
   return { scanned: candidates.length, raised };
+}
+
+// Codex #4940 r10 P1: a staff correction to term_end AFTER the due-time task
+// was raised. Only this decline's still-OPEN dated tasks are checked (read_at
+// null — once staff act on one, it is history):
+//   - term_end moved LATER than the task's date: the stations must wait —
+//     re-raise dated to the new term_end through the same helper (its dedupe
+//     key includes the date, and it retires the obsolete open row); the
+//     marker records the new date;
+//   - term_end moved EARLIER: the stations are due sooner and a task already
+//     stands — staff are belled with the correction (once per new date).
+async function correctDeclineRetrievalDates(today) {
+  const open = await db('notifications')
+    .where({ recipient_type: 'admin' })
+    .whereNull('read_at')
+    .whereRaw("metadata->>'kind' = 'termite_station_retrieval'")
+    .whereRaw("metadata->>'churnEpisode' = ?", [DECLINE_RETRIEVAL_EPISODE])
+    .whereRaw("metadata->>'retrieveAfter' is not null")
+    .select('metadata');
+  for (const row of open) await correctDeclineRetrievalDate(parseActivityMetadata(row.metadata), today);
+}
+
+async function correctDeclineRetrievalDate(meta, today) {
+  const term = meta.termId
+    ? await db('annual_prepay_terms').where({ id: meta.termId }).first('id', 'customer_id', 'source_estimate_id', 'term_end')
+    : null;
+  const termEnd = term ? dateOnly(term.term_end) : null;
+  if (!termEnd || termEnd === meta.retrieveAfter) return;
+  const retrieval = { termEnd, customerId: term.customer_id, retrieveAfterKey: termEnd };
+  if (termEnd < meta.retrieveAfter) {
+    await ringDeclineRetrievalStaffBell(term.id, { ...retrieval, raised: false, reason: 'date_moved_earlier', previousRetrieveAfter: meta.retrieveAfter });
+    return;
+  }
+  const portalDecline = await db('activity_log')
+    .where({ action: CUSTOMER_DECLINE_ACTIVITY_ACTION })
+    .whereRaw("metadata->>'term_id' = ?", [String(term.id)])
+    .orderBy('created_at', 'asc')
+    .first('id', 'created_at', 'metadata');
+  if (!portalDecline) return;
+  Object.assign(retrieval, await actOnDueDeclineRetrieval(term, { portalDecline, retrieveAfter: termEnd, key: termEnd }, today));
+  // Re-raised: record the new date. Otherwise (other coverage now, a newer
+  // instruction, a failure) staff are belled — once per new date, the bell's
+  // dedupe — and the stale open row is left for them.
+  if (retrieval.raised) await writeDeclineRetrievalMarker(term.id, retrieval, 'raised');
+  else await ringDeclineRetrievalStaffBell(term.id, retrieval);
 }
 
 // Staff-facing sentence per due-time outcome. `when` is "after <date>" for a
@@ -6478,13 +6571,17 @@ const RETRIEVAL_SENTENCES = {
   termite_bond: { manual: true, text: (when) => `This customer has an active termite bond, so no retrieval task was raised automatically — confirm which stations to pull ${when}.` },
   superseded_by_newer: { manual: true, text: (when) => `A newer station-retrieval instruction already stands on this account, so no separate task was raised for this decline — confirm it covers pulling the stations ${when}.` },
   failed: { manual: false, text: (when) => `The station-retrieval task could not be raised yet — it is retried automatically each day; create it by hand ${when === 'now' ? 'now' : `for ${when}`} if it does not appear.` },
+  date_moved_earlier: {
+    manual: false,
+    text: (when, retrieval) => `Its paid-through date was corrected to ${formatDateLabel(retrieval.termEnd)}, earlier than the open station-retrieval task says (after ${formatDateLabel(retrieval.previousRetrieveAfter)}) — the stations can come out ${when}.`,
+  },
 };
 RETRIEVAL_SENTENCES.not_raised = RETRIEVAL_SENTENCES.failed;
 
 function retrievalSentence(retrieval, termEndLabel) {
   const entry = RETRIEVAL_SENTENCES[retrieval?.reason];
   if (!entry) return '';
-  return entry.text(retrieval.retrieveAfterKey === DECLINE_RETRIEVAL_IMMEDIATE ? 'now' : `after ${termEndLabel}`);
+  return entry.text(retrieval.retrieveAfterKey === DECLINE_RETRIEVAL_IMMEDIATE ? 'now' : `after ${termEndLabel}`, retrieval);
 }
 
 // The decline bell's retrieval line: nothing is raised now — the stations
@@ -6608,6 +6705,27 @@ async function alreadyDeclinedResult(term, conn) {
   return declineResultFromRow(term, { alreadyDeclined: true });
 }
 
+// A term already declined answers the same success shape: the decided-lapse
+// shape (cancelled + cancel, re-checked still paid), or an unpaid plan
+// already declined (decision on a payment_pending term, status unchanged —
+// Codex #4940 r10). null = not declined yet.
+async function declineReplayResult(term, trx) {
+  if (term.renewal_decision !== 'cancel') return null;
+  if (term.status === 'cancelled') return alreadyDeclinedResult(term, trx);
+  if (term.status === PAYMENT_PENDING_STATUS) return { ...declineResultFromRow(term, { alreadyDeclined: true }), unpaid: true };
+  return null;
+}
+
+// The refusal shape for each termiteDeclineBlockedReason.
+function declineRefusal(term, reason) {
+  const detail = {
+    already_decided: { decision: term.renewal_decision },
+    not_active: { status: term.status },
+    term_ended: { termEnd: dateOnly(term.term_end) },
+  }[reason];
+  return { ok: false, reason, ...detail, termId: term.id };
+}
+
 async function declineTermiteAnnualRenewal({ customerId, termId = null, today = etDateString(), conn = db } = {}) {
   if (!customerId) return { ok: false, reason: 'missing_customer' };
   if (!(await annualPrepayTableExists())) return { ok: false, reason: 'disabled' };
@@ -6635,19 +6753,14 @@ async function declineTermiteAnnualRenewal({ customerId, termId = null, today = 
       .first('*');
     if (!term) return notFound();
 
-    // Idempotent replay first — a term already decided-lapse (cancelled +
-    // renewal_decision 'cancel') answers the same success shape even once
-    // its term_end has since passed, rather than a confusing term_ended.
-    if (term.status === 'cancelled' && term.renewal_decision === 'cancel') {
-      return alreadyDeclinedResult(term, trx);
-    }
+    // Idempotent replay first — even once its term_end has since passed,
+    // rather than a confusing term_ended.
+    const replay = await declineReplayResult(term, trx);
+    if (replay) return replay;
     const renewDecided = term.status === 'renewed' && term.renewal_decision === 'renew';
     const hasSuccessor = renewDecided ? await hasSuccessorTerm(term.id, trx) : true;
     const blocked = termiteDeclineBlockedReason(term, today, { hasSuccessor });
-    if (blocked === 'already_decided') return { ok: false, reason: blocked, decision: term.renewal_decision, termId: term.id };
-    if (blocked === 'not_active') return { ok: false, reason: blocked, status: term.status, termId: term.id };
-    if (blocked === 'term_ended') return { ok: false, reason: blocked, termId: term.id, termEnd: dateOnly(term.term_end) };
-    if (blocked) return { ok: false, reason: blocked, termId: term.id };
+    if (blocked) return declineRefusal(term, blocked);
 
     // A superseded staff renew must still be a PAID year — never turn a
     // refunded/disputed renewed term into "coverage continues".

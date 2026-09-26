@@ -74,7 +74,7 @@ async function createScratchDb() {
     stripe_payment_intent_id text,
     stripe_charge_id text
   )`);
-  await db.raw('CREATE TABLE setup_fee_claims (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), invoice_id uuid, scheduled_service_id uuid)');
+  await db.raw('CREATE TABLE setup_fee_claims (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), invoice_id uuid, scheduled_service_id uuid, amount numeric)');
   // ADMIN-BUG-R18 (#4970): the end-at-term lapse upkeep checks for an open
   // end-now Cancel plan acceptance before stamping a decided lapse's visits.
   // Other live termite coverage the retrieval guard reads (Codex #4940 r7).
@@ -559,11 +559,11 @@ describeOrSkip('termite annual renewal decline — coverage, renew supersession,
     expect(stamped).toHaveLength(2);
   });
 
-  // Codex #4940 r9 P1: a signed plan still payment_pending is declinable
-  // online (move 15). Never paid: nothing is covered. Paid later: it covers
-  // the paid year (its visits are stamped by the end-at-term upkeep) and it
-  // never becomes 'active' again, so it never renews.
-  test('an unpaid (payment_pending) plan declined online: no coverage while unpaid; paid later it covers the year and stays a decided lapse', async () => {
+  // Codex #4940 r9/r10 P1: a signed plan still payment_pending is declinable
+  // online. The decision is recorded WITHOUT a status change, so it stays on
+  // every pending rail; when the invoice is paid it settles to the decided-
+  // lapse shape (move 15) — covered through term_end, never renewing.
+  test('an unpaid plan declined online stays payment_pending (pending rails); paid, it becomes a covered decided lapse, never active', async () => {
     const { db, Renewals } = await load();
     const fx = await paidInstalledTerm(db);
     await db('invoices').where({ id: fx.invoice.id }).update({ status: 'sent', paid_at: null });
@@ -572,20 +572,90 @@ describeOrSkip('termite annual renewal decline — coverage, renew supersession,
     const declined = await Renewals.declineTermiteAnnualRenewal({ customerId: fx.customerId, termId: fx.term.id, today: fx.today });
     expect(declined).toEqual(expect.objectContaining({ ok: true, unpaid: true, alreadyDeclined: false }));
     expect(await db('annual_prepay_terms').where({ id: fx.term.id }).first())
-      .toEqual(expect.objectContaining({ status: 'cancelled', renewal_decision: 'cancel', cancel_disposition: 'end_at_term' }));
-    expect(await Renewals.isPaidDecidedLapseTerm({ id: fx.term.id, status: 'cancelled', renewal_decision: 'cancel' }, db)).toBe(false);
+      .toEqual(expect.objectContaining({ status: 'payment_pending', renewal_decision: 'cancel', cancel_disposition: 'end_at_term' }));
+    // Still on the pending rail the billing cron excludes by.
+    expect([...(await Renewals.getPaymentPendingCustomerIds(fx.today))]).toContain(fx.customerId);
     await Renewals.refreshActiveTermsForCustomer(fx.customerId, db);
     expect((await db('scheduled_services').where({ id: fx.coveredVisit.id }).first()).prepaid_amount).toBeNull();
 
     // The prepay is paid after all.
     await db('invoices').where({ id: fx.invoice.id }).update({ status: 'paid', paid_at: new Date() });
-    await Renewals.syncTermForInvoicePayment(fx.invoice.id, db);
+    const synced = await Renewals.syncTermForInvoicePayment(fx.invoice.id, db);
+    expect(synced.map((t) => t.status)).toEqual(['cancelled']);
     const after = await db('annual_prepay_terms').where({ id: fx.term.id }).first();
-    expect(after).toEqual(expect.objectContaining({ status: 'cancelled', renewal_decision: 'cancel' }));
+    expect(after).toEqual(expect.objectContaining({ status: 'cancelled', renewal_decision: 'cancel', cancel_disposition: 'end_at_term' }));
     expect(await Renewals.isPaidDecidedLapseTerm(after, db)).toBe(true);
-    await Renewals.refreshActiveTermsForCustomer(fx.customerId, db);
     const stamped = await db('scheduled_services').where({ id: fx.coveredVisit.id }).first();
     expect(Number(stamped.prepaid_amount)).toBeGreaterThan(0);
     expect(stamped.prepaid_method).toBe('annual_prepay_invoice');
+    expect([...(await Renewals.getPaymentPendingCustomerIds(fx.today))]).not.toContain(fx.customerId);
+    // A replayed payment sync never activates it.
+    await Renewals.syncTermForInvoicePayment(fx.invoice.id, db);
+    expect((await db('annual_prepay_terms').where({ id: fx.term.id }).first()).status).toBe('cancelled');
+  });
+
+  test('an unpaid declined plan whose invoice is VOIDED leaves the pending rails, never covered', async () => {
+    const { db, Renewals } = await load();
+    const fx = await paidInstalledTerm(db);
+    await db('invoices').where({ id: fx.invoice.id }).update({ status: 'sent', paid_at: null });
+    await db('annual_prepay_terms').where({ id: fx.term.id }).update({ status: 'payment_pending' });
+    await Renewals.declineTermiteAnnualRenewal({ customerId: fx.customerId, termId: fx.term.id, today: fx.today });
+
+    await db('invoices').where({ id: fx.invoice.id }).update({ status: 'void' });
+    await Renewals.syncTermForInvoicePayment(fx.invoice.id, db);
+    const after = await db('annual_prepay_terms').where({ id: fx.term.id }).first();
+    expect(after).toEqual(expect.objectContaining({ status: 'cancelled', renewal_decision: 'cancel' }));
+    expect(await Renewals.isPaidDecidedLapseTerm(after, db)).toBe(false);
+    expect([...(await Renewals.getPaymentPendingCustomerIds(fx.today))]).not.toContain(fx.customerId);
+  });
+
+  // Codex #4940 r10 P1: a staff correction to term_end AFTER the due-time
+  // task was raised (and while it is still open).
+  test('term_end corrected LATER after the task was raised: re-raised at the new date, the old open row retired', async () => {
+    const { db, Renewals, raiseTermiteRetrievalTask } = await load();
+    const fx = await dueDeclinedTerm(db);
+    expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 1, raised: 1 });
+
+    const later = dayOffset(fx.today, 20);
+    await db('annual_prepay_terms').where({ id: fx.term.id }).update({ term_end: later });
+    // The stubbed helper retires other open rows like the real one does.
+    raiseTermiteRetrievalTask.mockImplementationOnce(async (customerId, _r, { retrieveAfter, termId, episodeKey }) => {
+      await db('notifications').whereRaw("metadata->>'churnEpisode' = ?", [episodeKey]).whereNull('read_at').update({ read_at: new Date() });
+      await db('notifications').insert({
+        recipient_type: 'admin',
+        metadata: {
+          kind: 'termite_station_retrieval', customerId, termId, churnEpisode: episodeKey, retrieveAfter,
+          dedupeKey: `termite_station_retrieval:term:${termId}:${episodeKey}:dated:${retrieveAfter}`,
+        },
+      });
+      return { raised: true, stationCount: 12 };
+    });
+
+    await Renewals.raisePendingDeclineRetrievalTasks();
+    expect(raiseTermiteRetrievalTask).toHaveBeenLastCalledWith(fx.customerId, null, expect.objectContaining({ retrieveAfter: later, termId: fx.term.id }));
+    const open = await db('notifications').whereNull('read_at').whereRaw("metadata->>'churnEpisode' = 'portal_renewal_decline'").select('metadata');
+    expect(open.map((r) => r.metadata.retrieveAfter)).toEqual([later]);
+    const latestMarker = await db('activity_log').where({ action: 'termite_annual_decline_retrieval' }).orderBy('created_at', 'desc').first();
+    expect(latestMarker.metadata).toEqual(expect.objectContaining({ outcome: 'raised', retrieve_after: later }));
+    // Settled at the new date: nothing more.
+    await Renewals.raisePendingDeclineRetrievalTasks();
+    expect(raiseTermiteRetrievalTask).toHaveBeenCalledTimes(2);
+  });
+
+  test('term_end corrected EARLIER after the task was raised: staff belled with the correction, once; no re-raise', async () => {
+    const { db, Renewals, raiseTermiteRetrievalTask, notifyAdmin } = await load();
+    const fx = await dueDeclinedTerm(db);
+    expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 1, raised: 1 });
+
+    const earlier = dayOffset(fx.termEnd, -10);
+    await db('annual_prepay_terms').where({ id: fx.term.id }).update({ term_end: earlier });
+    await Renewals.raisePendingDeclineRetrievalTasks();
+    await Renewals.raisePendingDeclineRetrievalTasks();
+
+    expect(raiseTermiteRetrievalTask).toHaveBeenCalledTimes(1);
+    const correctionBells = notifyAdmin.mock.calls.filter((c) => String(c[3]?.dedupeKey || '').endsWith(':date_moved_earlier'));
+    expect(correctionBells.length).toBeGreaterThanOrEqual(1);
+    expect(new Set(correctionBells.map((c) => c[3].dedupeKey)).size).toBe(1);
+    expect(correctionBells[0][2]).toContain('earlier than the open station-retrieval task says');
   });
 });

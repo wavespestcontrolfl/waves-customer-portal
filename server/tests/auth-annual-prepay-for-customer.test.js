@@ -172,6 +172,9 @@ describe('annualPrepayForCustomer', () => {
     ['a paid decline BEFORE installation (provisional term_end)', {
       status: 'cancelled', renewal_decision: 'cancel', annual_plan_version: 'v3', installation_anchored_at: null, renewed_from_term_id: null,
     }, { renewalDeclined: true, awaitsInstallation: true }],
+    ['an unpaid plan declined online (payment_pending + cancel, Codex #4940 r10)', {
+      status: 'payment_pending', renewal_decision: 'cancel', annual_plan_version: 'v3', installation_anchored_at: '2026-10-14T12:00:00Z',
+    }, { renewalDeclined: true, awaitsInstallation: false }],
     ['a non-termite annual prepay term (never anchored, never provisional)', {
       status: 'active', renewal_decision: null, annual_plan_version: null, installation_anchored_at: null,
     }, { renewalDeclined: false, awaitsInstallation: false }],

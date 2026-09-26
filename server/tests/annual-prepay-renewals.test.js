@@ -2718,8 +2718,11 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
       expect(AnnualPrepayRenewals.termiteDeclineBlockedReason({ ...unpaidTerm, dispute_suspended_at: '2026-09-01T00:00:00Z' }, '2026-09-26')).toBeNull();
     });
 
-    test('records the decided lapse through the guarded payment_pending write, says unpaid, never quotes paid coverage', async () => {
-      const decided = { ...unpaidTerm, status: 'cancelled', renewal_decision: 'cancel' };
+    // Codex #4940 r10: the decision is recorded WITHOUT a status change — the
+    // term stays payment_pending, so the pending rails (billing-cron
+    // exclusion, payment reminders) keep it until its invoice resolves.
+    test('records the decision on the payment_pending term WITHOUT changing status, says unpaid, never quotes paid coverage', async () => {
+      const decided = { ...unpaidTerm, renewal_decision: 'cancel' };
       const write = query({ returning: [decided] });
       const activityInsert = query();
       setDeclineQueues({
@@ -2734,14 +2737,24 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
       expect(write.where).toHaveBeenCalledWith({ id: 'term-1', status: 'payment_pending' });
       expect(write.whereNull).toHaveBeenCalledWith('renewal_decision');
       expect(write.update).toHaveBeenCalledWith(expect.objectContaining({
-        status: 'cancelled', renewal_decision: 'cancel', cancel_disposition: 'end_at_term',
+        renewal_decision: 'cancel', cancel_disposition: 'end_at_term',
       }));
+      expect(write.update.mock.calls[0][0]).not.toHaveProperty('status');
       expect(write.update.mock.calls[0][0]).not.toHaveProperty('renewal_notes');
       expect(activityInsert.insert.mock.calls[0][0].description).toContain('The prepay is not paid yet; if it is paid, coverage runs through 2027-05-20');
       expect(activityInsert.insert.mock.calls[0][0].metadata).toEqual(expect.objectContaining({ unpaid: true }));
       const body = require('../services/notification-service').notifyAdmin.mock.calls[0][2];
       expect(body).toContain('The prepay is not paid yet; if it is paid, coverage runs through');
       expect(body).not.toContain('Coverage continues through');
+    });
+
+    test('a replay on an already-declined unpaid plan answers the same success shape (alreadyDeclined, unpaid)', async () => {
+      setDeclineQueues({
+        annual_prepay_terms: [query({ first: { ...unpaidTerm, renewal_decision: 'cancel' } })],
+        customers: [query({ first: { first_name: 'Jane', last_name: 'Doe' } })],
+      });
+      const result = await AnnualPrepayRenewals.declineTermiteAnnualRenewal({ customerId: 'cust-1', termId: 'term-1', today: '2026-09-26' });
+      expect(result).toEqual(expect.objectContaining({ ok: true, alreadyDeclined: true, unpaid: true }));
     });
   });
 

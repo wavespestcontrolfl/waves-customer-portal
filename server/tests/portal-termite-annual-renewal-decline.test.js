@@ -467,6 +467,19 @@ describe('GET /api/property/termite-annual-plan', () => {
     }]);
   });
 
+  // Codex #4940 r10: an unpaid plan declined online keeps status
+  // payment_pending (renewal_decision 'cancel') — it stays listed as declined
+  // and unpaid, so the "will not renew" card survives a reload.
+  test('an unpaid plan already declined stays listed: declined, unpaid, no decline control', async () => {
+    state.rows = [{
+      id: 'term-1', term_end: '2027-05-20', prepay_amount: '450.00', status: 'payment_pending', renewal_decision: 'cancel',
+      annual_plan_version: 'v3', renewed_from_term_id: null, installation_anchored_at: '2026-06-01T12:00:00Z',
+    }];
+    const { body } = await invoke(getHandler());
+    expect(body.terms[0]).toEqual(expect.objectContaining({ declined: true, canDecline: false, unpaid: true }));
+    expect(mockIsPaidDecidedLapseTerm).not.toHaveBeenCalled();
+  });
+
   // Codex #4940 r9 P1: agreement v3 allows declining "any time before the
   // renewal date" — a signed plan still payment_pending included. It is
   // flagged unpaid so the portal never quotes paid coverage for it.

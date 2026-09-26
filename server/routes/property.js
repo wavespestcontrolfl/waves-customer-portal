@@ -787,7 +787,12 @@ router.get('/termite-annual-plan', async (req, res, next) => {
     }
     const labels = distinctTermLabels(applicableRows, propertyLabels);
     const terms = applicableRows.map((term) => {
-      const declined = term.status === 'cancelled' && term.renewal_decision === 'cancel';
+      // Declined = a 'cancel' decision on file: the decided-lapse shape
+      // (cancelled + cancel), or an UNPAID plan declined online, which keeps
+      // status payment_pending until its invoice resolves (Codex #4940 r10)
+      // — so its "will not renew" card survives a reload (unpaid: true, no
+      // coverage claim).
+      const declined = term.renewal_decision === 'cancel';
       const propertyLabel = labels.get(term.id);
       // The write side's own eligibility (decision on file, unpaid, or
       // the renewal date already passed) — never offer a decline the
@@ -811,7 +816,8 @@ router.get('/termite-annual-plan', async (req, res, next) => {
         declined,
         canDecline: eligible && !propertyUnclear,
         // A signed plan still payment_pending is declinable (Codex #4940 r9)
-        // but has no paid coverage to quote yet.
+        // — and still listed once declined (r10) — but has no paid coverage
+        // to quote yet.
         ...(term.status === 'payment_pending' ? { unpaid: true } : {}),
         ...(propertyUnclear ? { propertyUnclear: true } : {}),
       };

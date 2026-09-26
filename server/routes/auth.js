@@ -301,7 +301,9 @@ async function annualPrepayForCustomer(customerId) {
     // copy reads these instead: a decided-lapse term won't renew, and an
     // un-anchored original termite term's termEnd is provisional (coverage
     // runs 12 months from the station installation).
-    renewalDeclined: term.status === 'cancelled' && term.renewal_decision === 'cancel',
+    // A 'cancel' decision on file — also on an unpaid payment_pending plan
+    // declined online (Codex #4940 r10: its status stays payment_pending).
+    renewalDeclined: term.renewal_decision === 'cancel',
     awaitsInstallation: coverageAwaitsInstallation(term),
   };
 }
