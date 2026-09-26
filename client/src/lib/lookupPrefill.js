@@ -90,11 +90,15 @@ const UNIT_PARCEL_AREA_READS = [
 
 // A priced profile still carrying the development parcel's turf, bed, or
 // hardscape read — the percentages size the lot-fallback turf too (codex r2
-// P1). The request builder writes a TYPED bed area into estimatedBedAreaSf,
-// marked bedAreaSource 'manual' — that one is the operator's (pre-push P1).
+// P1). PRESENCE is the test: a stored 0% is a priced value, and
+// scopeUnitParcelProfile removes the key entirely (codex r3 P1). The one
+// exception is estimatedBedAreaSf, which the request builder always writes —
+// a TYPED bed area is marked bedAreaSource 'manual' and is the operator's.
+const PARCEL_PRICED_AREA_READS = ["estimatedTurfSf", "turfFallbackPreviewSf",
+  "imperviousSurfacePercent", "imperviosSurfacePercent", "estimatedBedAreaPercent"];
 function pricedFromParcelAreaReads(profile) {
-  return ["estimatedTurfSf", "turfFallbackPreviewSf", "imperviousSurfacePercent",
-    "imperviosSurfacePercent", "estimatedBedAreaPercent"].some((key) => Number(profile[key]) > 0)
+  return PARCEL_PRICED_AREA_READS.some((key) => profile[key] !== null && profile[key] !== ""
+      && Number.isFinite(Number(profile[key])))
     || (Number(profile.estimatedBedAreaSf) > 0 && profile.bedAreaSource !== "manual");
 }
 
