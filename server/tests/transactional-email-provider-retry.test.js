@@ -5,6 +5,7 @@ jest.mock('../services/sendgrid-mail', () => ({
   serviceGroupId: jest.fn(() => 222),
   clearBlockedAddress: jest.fn(),
   sendOne: jest.fn(),
+  isDefiniteRejection: jest.fn((err) => [400, 401, 403, 404, 405, 413, 415, 422, 429].includes(Number(err?.status))),
 }));
 jest.mock('../services/email-template-library', () => ({
   loadTemplateByKey: jest.fn(),
@@ -33,6 +34,7 @@ const message = (overrides = {}) => ({
   categories: ['email_template'],
   has_attachments: false,
   provider_retry_count: 0,
+  provider_handoff_phase: 'pending',
   ...overrides,
 });
 
@@ -66,6 +68,7 @@ describe('transactional email provider retry classification', () => {
       expect(retry.retryStateForProviderBlock(message({ provider_retry_count: count }), now)).toEqual({
         provider_retry_next_at: new Date(now.getTime() + delay),
         provider_retry_exhausted_at: null,
+        provider_handoff_phase: 'rejected',
       });
     }
   });
@@ -75,6 +78,17 @@ describe('transactional email provider retry classification', () => {
     expect(retry.retryStateForProviderBlock(message({ provider_retry_count: 3 }), now)).toEqual({
       provider_retry_next_at: null,
       provider_retry_exhausted_at: now,
+      provider_handoff_phase: 'rejected',
+    });
+  });
+
+  test('keeps the retry-state helper compatible with legacy row shapes', () => {
+    const now = new Date('2026-04-29T12:00:00Z');
+    const legacy = message();
+    delete legacy.provider_handoff_phase;
+    expect(retry.retryStateForProviderBlock(legacy, now)).toEqual({
+      provider_retry_next_at: new Date(now.getTime() + (10 * 60 * 1000)),
+      provider_retry_exhausted_at: null,
     });
   });
 
@@ -272,6 +286,7 @@ describe('transactional email provider retry classification', () => {
     const chain = {};
     chain.where = jest.fn(() => chain);
     chain.whereNull = jest.fn(() => chain);
+    chain.whereNotNull = jest.fn(() => chain);
     chain.whereNot = jest.fn(() => chain);
     chain.orWhereNot = jest.fn(() => chain);
     chain.update = jest.fn(() => chain);
@@ -290,7 +305,7 @@ describe('transactional email provider retry classification', () => {
     const marker = chain.update.mock.calls.findIndex(([data]) => data.error_message === retry.HANDOFF_STARTED);
     expect(pending).toBeGreaterThanOrEqual(0);
     expect(marker).toBeGreaterThan(pending);
-    expect(chain.where).toHaveBeenCalledWith(expect.objectContaining({ error_message: retry.HANDOFF_PENDING, status: 'queued' }));
+    expect(chain.where).toHaveBeenCalledWith(expect.objectContaining({ provider_handoff_phase: 'pending', status: 'queued' }));
     expect(chain.update.mock.invocationCallOrder[marker]).toBeLessThan(sendgrid.sendOne.mock.invocationCallOrder[0]);
     // Recovery: a started handoff settles as uncertain; other stale claims requeue.
     chain.update.mockClear();
@@ -336,6 +351,7 @@ describe('transactional email provider retry classification', () => {
     const chain = {};
     chain.where = jest.fn(() => chain);
     chain.whereNull = jest.fn(() => chain);
+    chain.whereNotNull = jest.fn(() => chain);
     chain.update = jest.fn(() => chain);
     chain.then = (res, rej) => Promise.resolve(1).then(res, rej);
     // The uncertain settlement selects its claims and settles each in its own transaction.
@@ -346,7 +362,7 @@ describe('transactional email provider retry classification', () => {
 
     // Two recovery updates run (started handoffs settle as uncertain, the
     // rest requeue); the fake yields one row for each.
-    await expect(retry.recoverStaleClaims(now)).resolves.toBe(2);
+    await expect(retry.recoverStaleClaims(now)).resolves.toBe(3);
     expect(require('../services/visit-completion-summary').reconcileSummaryEmailBounce)
       .toHaveBeenCalledWith(expect.objectContaining({ id: 'stale-summary' }), db);
     expect(db.transaction).toHaveBeenCalled();
@@ -361,6 +377,100 @@ describe('transactional email provider retry classification', () => {
       provider_retry_next_at: now,
       provider_retry_count: 'GREATEST(provider_retry_count - 1, 0)',
     }));
+  });
+
+  test.each([400, 429])('a definite provider rejection (%s) records rejected and keeps bounded retry', async (status) => {
+    const updates = [];
+    const chain = {};
+    chain.where = jest.fn(() => chain);
+    chain.update = jest.fn((data) => { updates.push(data); return chain; });
+    chain.then = (resolve, reject) => Promise.resolve(1).then(resolve, reject);
+    chain.returning = jest.fn(async () => [{ ...message(), status: 'failed' }]);
+    db.mockReturnValue(chain);
+    emailTemplates.loadTemplateByKey.mockResolvedValue({ template: { template_key: 'quote.request_received' } });
+    emailTemplates.activeSuppressionFor.mockResolvedValue(null);
+    sendgrid.clearBlockedAddress.mockResolvedValue({ cleared: true });
+    sendgrid.sendOne.mockRejectedValue(Object.assign(new Error(`HTTP ${status}`), { status }));
+
+    expect(await retry.retryOne(message({ send_attempt_token: `attempt-${status}` }))).toMatchObject({ sent: false });
+    expect(updates).toContainEqual(expect.objectContaining({
+      status: 'failed', provider_handoff_phase: 'rejected', provider_retry_next_at: expect.any(Date),
+    }));
+  });
+
+  test('a pre-request SendGrid configuration failure records rejected and keeps bounded retry', async () => {
+    const updates = [];
+    const chain = {};
+    chain.where = jest.fn(() => chain);
+    chain.update = jest.fn((data) => { updates.push(data); return chain; });
+    chain.then = (resolve, reject) => Promise.resolve(1).then(resolve, reject);
+    chain.returning = jest.fn(async () => [{ ...message(), status: 'failed' }]);
+    db.mockReturnValue(chain);
+    emailTemplates.loadTemplateByKey.mockResolvedValue({ template: { template_key: 'quote.request_received' } });
+    emailTemplates.activeSuppressionFor.mockResolvedValue(null);
+    sendgrid.clearBlockedAddress.mockResolvedValue({ cleared: true });
+    sendgrid.sendOne.mockRejectedValue(Object.assign(new Error('SendGrid unavailable'), { code: 'SENDGRID_NOT_CONFIGURED' }));
+
+    expect(await retry.retryOne(message({ send_attempt_token: 'not-configured' }))).toMatchObject({ sent: false });
+    expect(updates).toContainEqual(expect.objectContaining({
+      status: 'failed', provider_handoff_phase: 'rejected', provider_retry_next_at: expect.any(Date),
+    }));
+  });
+
+  test.each([408, 500, null])('an ambiguous provider failure (%s) remains started and is never scheduled', async (status) => {
+    const updates = [];
+    const chain = {};
+    chain.where = jest.fn(() => chain);
+    chain.update = jest.fn((data) => { updates.push(data); return chain; });
+    chain.then = (resolve, reject) => Promise.resolve(1).then(resolve, reject);
+    chain.returning = jest.fn(async () => [{ ...message(), status: 'failed', provider_handoff_phase: 'started' }]);
+    db.mockReturnValue(chain);
+    emailTemplates.loadTemplateByKey.mockResolvedValue({ template: { template_key: 'quote.request_received' } });
+    emailTemplates.activeSuppressionFor.mockResolvedValue(null);
+    sendgrid.clearBlockedAddress.mockResolvedValue({ cleared: true });
+    sendgrid.sendOne.mockRejectedValue(Object.assign(new Error('provider outcome unavailable'), status == null ? {} : { status }));
+
+    expect(await retry.retryOne(message({ send_attempt_token: `ambiguous-${status}` }))).toMatchObject({ sent: false, uncertain: true });
+    expect(updates).toContainEqual(expect.objectContaining({
+      status: 'failed', provider_handoff_phase: 'started', provider_retry_next_at: null,
+    }));
+    expect(updates).not.toContainEqual(expect.objectContaining({ provider_retry_next_at: expect.any(Date) }));
+  });
+
+  test('a lost pending-to-started CAS makes no provider call', async () => {
+    const chain = {};
+    chain.where = jest.fn(() => chain);
+    chain.update = jest.fn((data) => (data.provider_handoff_phase === 'started' ? Promise.resolve(0) : chain));
+    chain.then = (resolve, reject) => Promise.resolve(1).then(resolve, reject);
+    chain.returning = jest.fn(async () => []);
+    db.mockReturnValue(chain);
+    emailTemplates.loadTemplateByKey.mockResolvedValue({ template: { template_key: 'quote.request_received' } });
+    emailTemplates.activeSuppressionFor.mockResolvedValue(null);
+    sendgrid.clearBlockedAddress.mockResolvedValue({ cleared: true });
+
+    expect(await retry.retryOne(message({ send_attempt_token: 'lost-token' })))
+      .toEqual({ sent: false, stopped: true, reason: 'claim_lost' });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+
+  test('accepted-send bookkeeping failure remains started and never schedules', async () => {
+    const updates = [];
+    const chain = {};
+    chain.where = jest.fn(() => chain);
+    chain.update = jest.fn((data) => { updates.push(data); return chain; });
+    chain.then = (resolve, reject) => Promise.resolve(1).then(resolve, reject);
+    chain.returning = jest.fn()
+      .mockRejectedValueOnce(new Error('accepted row write failed'))
+      .mockResolvedValueOnce([{ ...message(), status: 'failed', provider_handoff_phase: 'started' }]);
+    db.mockReturnValue(chain);
+    emailTemplates.loadTemplateByKey.mockResolvedValue({ template: { template_key: 'quote.request_received' } });
+    emailTemplates.activeSuppressionFor.mockResolvedValue(null);
+    sendgrid.clearBlockedAddress.mockResolvedValue({ cleared: true });
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'accepted-1' });
+
+    expect(await retry.retryOne(message({ send_attempt_token: 'accepted-write-failed' })))
+      .toMatchObject({ sent: false, uncertain: true });
+    expect(updates).not.toContainEqual(expect.objectContaining({ provider_retry_next_at: expect.any(Date) }));
   });
 
   describe('annual-offer guard (Codex round 3 on #4608, structural move): automatic provider retries', () => {
