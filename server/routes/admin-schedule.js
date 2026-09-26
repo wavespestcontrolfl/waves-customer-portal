@@ -21432,7 +21432,7 @@ function buildDeterministicReportCopy({
   const cleanRecommendations = cleanItems(recommendations);
   const cleanConcern = cleanItems([customerConcern])[0];
   const safeRoles = new Set([
-    'weed-control application', 'fertilizer application', 'insect-control application',
+    'weed-control application', 'fertilizer application', 'insect-control application', 'bait application',
     'disease-control application', 'moisture-support application', 'soil-support application',
     'growth-regulator application',
   ]);

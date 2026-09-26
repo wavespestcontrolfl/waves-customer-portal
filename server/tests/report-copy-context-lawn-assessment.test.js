@@ -206,6 +206,7 @@ describe('buildReportCopyContext deterministic application evidence', () => {
     ['soil_amendment', 'biostimulant', 'soil-support application'],
     ['adjuvant', 'wetting_agent', 'moisture-support application'],
     ['IGR', null, 'insect-control application'],
+    ['bait', null, 'bait application'],
   ])('approved %s applications use their supported category or product type', async (category, product_type, role) => {
     const result = await buildReportCopyContext({
       customerId: 'c1', serviceType: 'Lawn Care', serviceDate: '2026-07-28',

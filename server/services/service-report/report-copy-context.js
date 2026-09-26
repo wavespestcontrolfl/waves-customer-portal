@@ -355,6 +355,7 @@ const DETERMINISTIC_APPLICATION_ROLES = new Map([
   ['micronutrient', 'fertilizer application'],
   ['insecticide', 'insect-control application'],
   ['igr', 'insect-control application'],
+  ['bait', 'bait application'],
   ['insect', 'insect-control application'],
   ['fungicide', 'disease-control application'],
   ['disease', 'disease-control application'],
