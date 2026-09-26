@@ -108,8 +108,46 @@ function mergedBillingChannelUpdates(winner = {}, loser = {}) {
   return updates;
 }
 
+const ACCOUNT_BILLING_ARRAY_COLUMNS = Object.freeze(Object.values(BILLING_DELIVERY_FIELDS));
+
+// Explicit billing channel arrays are ACCOUNT-level: routes/notifications.js
+// persists them only on the account's PRIMARY profile, so a sibling
+// property's own notification_prefs row never carries them. Every read that
+// decides a billing delivery (the messaging consent state, the billing Email
+// authority, producers) overlays the primary's arrays onto the property's
+// own row — every other preference stays per-property. A property with no
+// prefs row of its own is left as-is (legacy). The owner is resolved with
+// onError 'throw': an unknown owner must fail the caller closed, never read
+// a sibling's row. forUpdate locks the primary's row inside a transaction.
+async function overlayAccountBillingArrays(prefs, { customerId, accountId }, database, { forUpdate = false } = {}) {
+  if (!prefs || !accountId) return prefs;
+  const { resolvePrimaryProfileId } = require('./account-properties');
+  const ownerId = await resolvePrimaryProfileId({ customerId, accountId }, database, { onError: 'throw' });
+  if (!ownerId || String(ownerId) === String(customerId)) return prefs;
+  const query = database('notification_prefs').where({ customer_id: ownerId });
+  if (forUpdate) query.forUpdate();
+  const primary = await query.first(...ACCOUNT_BILLING_ARRAY_COLUMNS);
+  const overlay = {};
+  for (const column of ACCOUNT_BILLING_ARRAY_COLUMNS) overlay[column] = primary ? primary[column] ?? null : null;
+  return { ...prefs, ...overlay };
+}
+
+// A customer's stored billing channel choice for a category, read the same
+// way the send path reads it (overlayAccountBillingArrays). Throws when the
+// owner or a row cannot be read. Returns null when none is stored.
+async function accountBillingChannels(customerId, category, knex) {
+  const database = knex || require('../models/db');
+  const customer = await database('customers').where({ id: customerId }).first('account_id');
+  if (!customer) return null;
+  const own = await database('notification_prefs').where({ customer_id: customerId }).first();
+  const prefs = await overlayAccountBillingArrays(own, { customerId, accountId: customer.account_id }, database);
+  return explicitBillingChannels(prefs || {}, category);
+}
+
 module.exports = {
   BILLING_DELIVERY_FIELDS,
+  accountBillingChannels,
+  overlayAccountBillingArrays,
   explicitBillingChannels,
   billingChannelAllowed,
   billingChannelsPayload,

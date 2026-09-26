@@ -110,6 +110,54 @@ describe('billing channel email authority', () => {
     rows.invoices = { id: 'inv-1', customer_id: 'cust-1', status: 'sent' };
   });
 
+  // Billing arrays are account-level (primary profile); a sibling property's
+  // own row never carries them.
+  function siblingAccountDb({ primaryChannels, primaryReadFails = false }) {
+    const primaryPrefsQueries = [];
+    mockDb.mockImplementation((table) => {
+      const conditions = {};
+      const q = {
+        where: jest.fn((cond) => { Object.assign(conditions, cond); return q; }),
+        forUpdate: jest.fn(() => q),
+        first: jest.fn(async () => {
+          if (table === 'customers' && conditions.is_primary_profile) {
+            if (primaryReadFails) throw new Error('owner read failed');
+            return { id: 'primary-1' };
+          }
+          if (table === 'customers') return { id: 'cust-1', first_name: 'Casey', email: 'casey@example.com', account_id: 'acct-1' };
+          if (table === 'notification_prefs' && conditions.customer_id === 'primary-1') {
+            return { billing_channels: primaryChannels };
+          }
+          if (table === 'notification_prefs') return { customer_id: 'cust-1', billing_channels: null };
+          return rows[table] || null;
+        }),
+      };
+      if (table === 'notification_prefs') primaryPrefsQueries.push(q);
+      return q;
+    });
+    return primaryPrefsQueries;
+  }
+
+  test("a sibling property's Email leg honors the primary profile's billing choice and locks that row", async () => {
+    const prefsQueries = siblingAccountDb({ primaryChannels: ['email'] });
+    const { context, state } = await runAuthority();
+    expect(context.error).toBeUndefined();
+    expect(state.boundaryBlock).toBeNull();
+    // The locked recheck locks both the property row and the primary's row.
+    expect(prefsQueries.filter((q) => q.forUpdate.mock.calls.length).length).toBeGreaterThanOrEqual(2);
+  });
+
+  test("a sibling property's Email leg holds when the primary did not select Email", async () => {
+    siblingAccountDb({ primaryChannels: ['sms'] });
+    const { context } = await runAuthority();
+    expect(context.error).toMatchObject({ code: 'BILLING_PREFERENCES_CHANGED', deferred: true });
+  });
+
+  test('an unreadable primary owner fails the Email leg closed', async () => {
+    siblingAccountDb({ primaryChannels: ['email'], primaryReadFails: true });
+    await expect(runAuthority()).rejects.toThrow('owner read failed');
+  });
+
   test('does not allow dispatch when Email is absent from the explicit category selection', async () => {
     rows.notification_prefs = { customer_id: 'cust-1', billing_channels: ['sms', 'push'] };
     const { context } = await runAuthority();

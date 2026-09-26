@@ -9,7 +9,7 @@
 const db = require('../models/db');
 const EmailTemplateLibrary = require('./email-template-library');
 const { getInvoiceEmailRecipients } = require('./customer-contact');
-const { billingChannelAllowed } = require('./billing-delivery-channels');
+const { billingChannelAllowed, overlayAccountBillingArrays } = require('./billing-delivery-channels');
 const { withCustomerCommsLock, lockCustomerEmail } = require('../utils/customer-comms-lock');
 const { preferenceChangeHold } = require('./messaging/billing-channel-routing');
 
@@ -66,7 +66,12 @@ async function readContextRows(input, database, lockRecipients, lockedInvoice) {
     prefsQuery.forUpdate();
   }
   const customer = await customerQuery.first();
-  const prefs = await prefsQuery.first();
+  // Account-level billing arrays live on the primary profile; the locked
+  // recheck locks that row too.
+  const prefs = await overlayAccountBillingArrays(
+    await prefsQuery.first(), { customerId: input.customerId, accountId: customer?.account_id }, database,
+    { forUpdate: lockRecipients },
+  );
   const invoice = lockedInvoice
     || (input.invoiceId ? await database('invoices').where({ id: input.invoiceId }).first() : null);
   return { customer, prefs, invoice };
