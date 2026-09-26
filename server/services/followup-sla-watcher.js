@@ -240,9 +240,8 @@ async function followedUpIds(conn, rows) {
     const f = typeof h.fulfillment === 'string' ? JSON.parse(h.fulfillment) : h.fulfillment;
     // The same evidence boundary as every other kind of evidence: a quote
     // sent before a floor time ("after the inspection") does not keep it.
-    const matched = f?.matched_at ? new Date(f.matched_at) : null;
-    const since = sinceById.get(String(h.id));
-    if (f?.kind === 'estimate_sent' && matched && since && matched > since) done.add(h.id);
+    const matched = new Date(f?.matched_at || 0).getTime();
+    if (f?.kind === 'estimate_sent' && matched > (sinceById.get(String(h.id))?.getTime() ?? Infinity)) done.add(h.id);
   }
   const after = (rec, since) => new Date(rec.created_at).getTime() > since.getTime();
   const mine = (rec, x) => (x.r.customer_id ? String(rec.customer_id) === String(x.r.customer_id)
