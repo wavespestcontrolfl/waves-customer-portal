@@ -866,7 +866,19 @@ async function decideTermCancel(term, actorUserId, notes) {
     : await recordDecision({ termId: term.id, action: 'cancel', adminUserId: actorUserId, notes });
   if (decided) return { verified: true, fresh: true };
   const reread = await db('annual_prepay_terms').where({ id: term.id }).first('renewal_decision');
-  if (reread && reread.renewal_decision === 'cancel') return { verified: true, fresh: false };
+  if (reread && reread.renewal_decision === 'cancel') {
+    // Already decided (an end-at-term lapse now ended early, or a retry):
+    // leave this run's note beside the earlier one, once. The annual-prepay
+    // decided-lapse refresh reads an end-now's note as its durable evidence,
+    // and here no fresh decision write carries it.
+    if (notes) {
+      await db('annual_prepay_terms')
+        .where({ id: term.id, renewal_decision: 'cancel' })
+        .whereRaw("position(?::text in coalesce(renewal_notes, '')) = 0", [notes])
+        .update({ renewal_notes: db.raw("concat_ws(E'\\n', renewal_notes, ?::text)", [notes]), updated_at: new Date() });
+    }
+    return { verified: true, fresh: false };
+  }
   return { verified: false, fresh: false, conflictingDecision: reread ? reread.renewal_decision || null : null };
 }
 
@@ -2341,6 +2353,7 @@ module.exports = {
   // serializes with a cancel commit through it.
   tryHoldCancelCommitLockForTransaction,
   END_NOW_DECISION_NOTE,
+  _private: { decideTermCancel },
   // Portal replay guard (requests.js dedupe + inactive retry): never re-run
   // a portal cancellation without the boundary an admin end-of-coverage
   // decision holds.

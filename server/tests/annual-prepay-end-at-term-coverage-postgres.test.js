@@ -199,6 +199,24 @@ postgres('decided-lapse annual-prepay terms keep their coverage guarantees throu
     expect(await coverage(t)).toHaveLength(0);
   });
 
+  test('an end-at-term lapse switched to end-now keeps its end-now evidence even when the case write fails', async () => {
+    const { END_NOW_DECISION_NOTE, _private } = require('../services/admin-cancellation');
+    const t = await seededTerm();
+    await decideCancel(t, 'Cancel plan (Admin) — coverage kept through 2099-01-01; no renewal.');
+    const pulled = await coverage(t);
+    await trx('scheduled_services').whereIn('id', pulled.map((v) => v.id)).update({ status: 'cancelled', updated_at: new Date() });
+    const endNowNote = `Cancel plan (Admin) — ${END_NOW_DECISION_NOTE} to the customer (office refund task + cancellation case follow).`;
+    const term = await trx('annual_prepay_terms').where({ id: t.termId }).first();
+    expect(await _private.decideTermCancel(term, null, endNowNote)).toEqual({ verified: true, fresh: false });
+    // A retry leaves the note once.
+    await _private.decideTermCancel(term, null, endNowNote);
+    const notes = (await trx('annual_prepay_terms').where({ id: t.termId }).first('renewal_notes')).renewal_notes;
+    expect(notes.split(END_NOW_DECISION_NOTE)).toHaveLength(2);
+
+    await AnnualPrepayRenewals.refreshActiveTermsForCustomer(t.customerId, trx);
+    expect(await coverage(t)).toHaveLength(0);
+  });
+
   test('a failed end-now attempt does not block a later renewal lapse', async () => {
     const t = await seededTerm();
     await cancelCase(t, 'end_now_refund', 'skipped_processor_failed');
