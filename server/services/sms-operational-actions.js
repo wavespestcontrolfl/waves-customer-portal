@@ -608,6 +608,9 @@ async function refreshSmsCommitment(conn, row, now, verify) {
   if (!eventWitness && inWindow) return { outcome: 'not_due' };
   const verdict = await verify(current, evidence, { now, eventOnly: inWindow });
   let closed = false;
+  // A fulfilled verdict the revalidator could not commit (a locked or
+  // changed witness) is retried, so its event stays unseen (Codex #4816 r18).
+  let deferred = false;
   await conn.transaction(async (trx) => {
     // Match merge and intake: customer, source, then commitment. A relink
     // while verification runs must retry against the current owner.
@@ -618,7 +621,10 @@ async function refreshSmsCommitment(conn, row, now, verify) {
     const live = await trx('call_commitments').where({ id: row.id }).forUpdate().first();
     if (!smsCommitmentsEnabled() || live?.status !== 'open' || live.human_state != null) return;
     const latest = { ...live, sms_context: { ...live.sms_context, customer_id: source.customer_id } };
-    if (verdict.verdict === 'fulfilled' && !await revalidateSmsFulfillment(trx, latest, source, verdict, now)) return;
+    if (verdict.verdict === 'fulfilled' && !await revalidateSmsFulfillment(trx, latest, source, verdict, now)) {
+      deferred = true;
+      return;
+    }
     const dedupeKey = `sms-commitment:${row.id}`;
     if (live.sms_context.customer_id !== source.customer_id) {
       // Rolling dedupe only refreshes recent rows. Older bells must also
@@ -659,7 +665,7 @@ async function refreshSmsCommitment(conn, row, now, verify) {
           sms_log_id: message.id, commitment_id: row.id, kind: row.kind, verification: verdict.verdict } });
     if (!notification?.id && !notification?.suppressed) throw new Error('sms_operations_bell_not_persisted');
   });
-  return { outcome: 'verified', verdict, closed };
+  return { outcome: deferred ? 'deferred' : 'verified', verdict, closed };
 }
 
 async function refreshSmsCommitments({ now = new Date(), conn = db, verify = verifySmsFulfillment } = {}) {
@@ -704,9 +710,9 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
     if (result.outcome === 'not_due') counts.skipped_not_due += 1;
     if (result.verdict?.verdict === 'uncertain') counts.unverified += 1;
     if (result.closed) counts.fulfilled += 1;
-    // Stamped only after the row is handled: an error above leaves its
-    // event pending for the next tick.
-    if (eventIds.has(row.id)) {
+    // Stamped only after the row is handled: an error above, or a deferred
+    // close, leaves its event pending for the next tick.
+    if (eventIds.has(row.id) && result.outcome !== 'deferred') {
       await conn('call_commitments').where({ id: row.id }).update({
         sms_context: conn.raw("jsonb_set(COALESCE(sms_context, '{}'::jsonb), '{event_seen_at}', to_jsonb(?::text))", [now.toISOString()]),
       });

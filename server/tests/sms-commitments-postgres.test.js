@@ -1187,6 +1187,37 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect(verify.mock.calls.map(([row, , opts]) => [row.id, opts.eventOnly])).toEqual([[target, false]]);
   });
 
+  test('Codex #4816 r18: a fulfilled verdict the revalidator defers leaves the event unseen for the next tick', async () => {
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', basis: 'request', due_at: null, due_text: 'sometime soon',
+      quote: 'You still coming?', description: 'You still coming?' };
+    await recordMessageOperations(mockPg, message, result, context);
+    await mockPg('call_commitments').update({ due_at: null });
+    const [target] = await mockPg('call_commitments').pluck('id');
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 1000);
+    const [visit] = await mockPg('scheduled_services').insert({
+      customer_id: message.customer_id, property_id: context.properties[0].id, service_type: 'Quarterly Pest Control',
+      scheduled_date: etDateString(after), window_start: '09:00:00', status: 'en_route',
+      created_at: new Date(message.created_at.getTime() - 86400000), updated_at: after,
+    }).returning('id');
+    await mockPg('job_status_history').insert({ job_id: visit.id, from_status: 'confirmed', to_status: 'en_route', transitioned_at: after });
+    // A stale evidence hash: revalidation refuses the close, as it does for a
+    // witness that changed or is locked by another writer.
+    const verify = jest.fn(async () => ({ verdict: 'fulfilled', record_type: 'visit', record_id: visit.id,
+      quote: 'en route', evidence_hash: 'stale', retry_after: null }));
+    expect(await refreshSmsCommitments({ conn: mockPg, verify, now })).toMatchObject({ scanned: 1, fulfilled: 0 });
+    const row = await mockPg('call_commitments').where({ id: target }).first();
+    expect(row.status).toBe('open');
+    expect(row.sms_context.event_seen_at).toBeUndefined();
+    // The due cursor has moved on; the event page still brings it back.
+    await mockPg('system_settings').insert({ key: 'sms_operations.fulfillment_cursor', value: 'ffffffff-ffff-4fff-bfff-ffffffffffff', category: 'sms_operations' })
+      .onConflict('key').merge({ value: 'ffffffff-ffff-4fff-bfff-ffffffffffff' });
+    verify.mockClear();
+    await refreshSmsCommitments({ conn: mockPg, verify, now: new Date(now.getTime() + 1000) });
+    expect(verify.mock.calls.map(([r]) => r.id)).toEqual([target]);
+  });
+
   test('inside an open window a message witness waits for the deadline: no model call, no bell, then verified once due', async () => {
     result.facts = [];
     result.obligations[0] = { ...result.obligations[0], kind: 'callback', basis: 'request', due_at: null,
