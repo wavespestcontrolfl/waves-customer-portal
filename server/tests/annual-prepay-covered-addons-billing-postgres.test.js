@@ -559,6 +559,17 @@ postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
     expect((await liveInvoices(f)).map((i) => i.id).sort()).toEqual([f.invoiceId, siblingId].sort());
   });
 
+  test('an adopted invoice that bills the covered base beside the exact add-ons is never taken as this bill — no second charge for the base (pre-push P0)', async () => {
+    const f = await coveredVisit({ invoiceLines: (x) => [baseLine(x)], invoiceStatus: 'prepaid' });
+    const mixedId = await olderAddonsSibling(f, [baseLine(f), addonLine(f)]);
+    const out = await complete(f, { sendCompletionSms: true });
+    expect(out).toMatchObject({ status: 200 });
+    expect(out.body?.invoiceId).not.toBe(mixedId);
+    expect(out.body?.invoicePaymentActionRequired).not.toBe(true);
+    expect(out.body?.completionSmsType || '').not.toMatch(/with_invoice$/);
+    expect(await addonsAlert(f)).toBeTruthy();
+  });
+
   test('a covered visit with a refunded invoice alerts the office to bill the add-ons once the refund is final (GitHub r1 P1)', async () => {
     const f = await coveredVisit({ invoiceLines: (x) => [baseLine(x), addonLine(x)], invoiceStatus: 'refunded' });
     const out = await complete(f, { sendCompletionSms: true });

@@ -648,12 +648,15 @@ function classifyCoveredVisitInvoice(invoice, svc, addons) {
   };
 }
 
-// ADMIN-BUG-R13: is an add-ons-only invoice the WHOLE remainder the visit
-// owes — every priced add-on, netting to the canonical extras total? A
-// subset of the add-ons, a stale price, or a remainder the builder cannot
-// vouch for (a visit-wide discount) is not, and must never stand in for it.
+// ADMIN-BUG-R13: is this invoice the WHOLE remainder the visit owes — only
+// add-on charges (classifyCoveredVisitInvoice: never the covered base or any
+// other line), every priced add-on, netting to the canonical extras total?
+// A mixed invoice, a subset of the add-ons, a stale price, or a remainder the
+// builder cannot vouch for (a visit-wide discount) is not, and must never
+// stand in for it.
 function invoiceBillsExactExtras(invoice, addons, extras) {
   if (!extras || extras.ambiguous || !extras.lines.length) return false;
+  if (!classifyCoveredVisitInvoice(invoice, null, addons).billsOnlyAddons) return false;
   const InvoiceService = require('../services/invoice');
   const onAddons = (li) => addons.clientIds.has(li.client_id) || addons.clientIds.has(li.discount_for);
   const invoiceAddonLines = InvoiceService._parseInvoiceLineItems(invoice?.line_items).filter(onAddons);
