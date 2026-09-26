@@ -1389,6 +1389,8 @@ describe('citability nudges (weight-0, signal-only)', () => {
   test('concrete_specifics counts numbers with units, ignores dollars, years, and bare counts', () => {
     expect(countConcreteSpecifics('Mow St. Augustine at 3.5–4 inches and water 1/2 inch per week; wait 10-14 days between applications.')).toBe(3);
     expect(countConcreteSpecifics('It costs $120 and we were founded in 2024; here are 3 ways.')).toBe(0);
+    // '%' is not a word char, so a trailing \b after it never matched (fallback auditor P2, 2026-09-25).
+    expect(countConcreteSpecifics('Chinch bug damage covered 20% of the lawn and 35 % of the swale.')).toBe(2);
     expect(checkCitabilityConcreteSpecifics({ body: 'Mow at 4 inches. Water 30 minutes. Reapply in 6 weeks.' }).ok).toBe(true);
     const r = checkCitabilityConcreteSpecifics({ body: 'Mow tall. Water deeply. Reapply in a few weeks.' });
     expect(r.ok).toBe(false);

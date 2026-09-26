@@ -1113,7 +1113,7 @@ function checkCitabilityNamedSources(draft) {
 // as are bare years and bare counts ("3 ways", "2024") — those are not the
 // extractable measurements the nudge is after. Ranges ("3.5–4 inches",
 // "10-14 days") count once.
-const CONCRETE_SPECIFIC_RE = /(?<![$\d.])\d+(?:\.\d+)?(?:\s?(?:-|–|to)\s?\d+(?:\.\d+)?)?\s?(?:%|percent|inch(?:es)?|feet|foot|ft\b|yards?|sq\.? ?ft|square feet|millimeters?|mm\b|centimeters?|cm\b|meters?|°\s?F|degrees|days?|weeks?|months?|hours?|minutes?|seconds?|mph|gallons?|ounces?|oz\b|pounds?|lbs?|acres?|applications?|treatments?|visits?|mowings?|times? (?:a|per) (?:year|month|week|day)|per (?:year|month|week|day|acre|1,?000 sq))\b/gi;
+const CONCRETE_SPECIFIC_RE = /(?<![$\d.])\d+(?:\.\d+)?(?:\s?(?:-|–|to)\s?\d+(?:\.\d+)?)?\s?(?:%|(?:percent|inch(?:es)?|feet|foot|ft\b|yards?|sq\.? ?ft|square feet|millimeters?|mm\b|centimeters?|cm\b|meters?|°\s?F|degrees|days?|weeks?|months?|hours?|minutes?|seconds?|mph|gallons?|ounces?|oz\b|pounds?|lbs?|acres?|applications?|treatments?|visits?|mowings?|times? (?:a|per) (?:year|month|week|day)|per (?:year|month|week|day|acre|1,?000 sq))\b)/gi;
 const CONCRETE_SPECIFICS_MIN = 3;
 
 function countConcreteSpecifics(body) {
