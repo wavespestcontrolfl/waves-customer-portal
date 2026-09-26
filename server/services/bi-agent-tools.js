@@ -434,7 +434,13 @@ async function executeBITool(toolName, input) {
         anomalies_section: input.anomalies_section,
         action_items: input.action_items,
         created_at: new Date(),
-      }).returning('*');
+        // One report per ET week, the briefing's occurrence (the owner text is
+        // claimed per ET week too, bi-briefing-sms.js). A retried or
+        // overlapping run, or an insert that finished after its run hit the
+        // deadline, replaces the week's row instead of adding a second
+        // (Codex r6).
+        week_of: etWeekStart(),
+      }).onConflict('week_of').merge().returning('*');
 
       logger.info(`[bi-agent] Weekly report saved: ${report.id}`);
       return { saved: true, reportId: report.id };
