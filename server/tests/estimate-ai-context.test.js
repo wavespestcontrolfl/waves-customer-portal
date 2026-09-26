@@ -31,12 +31,17 @@ function fakeDb(tables = {}) {
     let categoryAllowlist = null;
     // The Claudeopedia status gate (`status = 'active' OR status IS NULL`).
     let requireActiveStatus = false;
+    // `where({ customer_visible: true })` — an absent fixture value stands in
+    // for the column default (true); an explicit false/null is excluded.
+    let requireCustomerVisible = false;
     return {
       where(arg, value) {
         if (typeof arg === 'function') {
           arg.call(this);
         } else if (arg === 'status' && value === 'active') {
           requireActiveStatus = true;
+        } else if (arg && typeof arg === 'object' && arg.customer_visible === true) {
+          requireCustomerVisible = true;
         }
         return this;
       },
@@ -62,7 +67,8 @@ function fakeDb(tables = {}) {
       select() { return this; },
       limit(count) {
         const rows = (tables[table] || [])
-          .filter((row) => !requireActiveStatus || row.status == null || row.status === 'active');
+          .filter((row) => !requireActiveStatus || row.status == null || row.status === 'active')
+          .filter((row) => !requireCustomerVisible || row.customer_visible === undefined || row.customer_visible === true);
         const filtered = categoryAllowlist
           ? rows.filter((row) => categoryAllowlist
             .map((value) => String(value).toLowerCase())
@@ -1273,6 +1279,21 @@ describe('estimate AI support context', () => {
       context: { services: [{ label: 'Lawn Care', detail: 'Fertilizer' }] },
     });
     expect(result.knowledgeBase).toEqual([]);
+  });
+
+  test('AW-04 rd10: staff-only services (customer_visible false) never reach the context', async () => {
+    const result = await loadEstimateAiSupportContext({
+      db: fakeDb({
+        services: [
+          { service_key: 'lawn_re_service', name: 'Lawn Re-Service', category: 'lawn', customer_visible: false, default_products: [] },
+          { service_key: 'lawn_care', name: 'Lawn Care', category: 'lawn', customer_visible: true, default_products: [] },
+        ],
+      }),
+      question: 'What is included with lawn care?',
+      context: { services: [{ label: 'Lawn Care', detail: 'Fertilizer' }] },
+    });
+    expect(result.serviceLibrary.some((row) => row.path === 'lawn_re_service')).toBe(false);
+    expect(result.serviceLibrary.some((row) => row.path === 'lawn_care')).toBe(true);
   });
 
   test('AW-04 rd6: service-library descriptions never reach the context; structure and products do', async () => {

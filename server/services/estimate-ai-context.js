@@ -580,6 +580,9 @@ async function searchServiceLibrary(db, terms) {
       .where(function activeServices() {
         this.where({ is_active: true }).orWhereNull('is_active');
       })
+      // Same audience boundary as the anonymous service catalog
+      // (public-mcp.js listServices): staff-only services stay out.
+      .where({ customer_visible: true })
       // Retired-for-sale rows stay active only for grandfathered plans; a
       // general sales-support lookup must never present them as offered.
       .whereNotIn('service_key', [...RETIRED_SALE_SERVICE_KEYS])

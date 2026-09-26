@@ -243,4 +243,17 @@ describe('estimate assistant model prompt — customer-safe context boundary (AW
     expect(dispatch).not.toHaveBeenCalled();
     expect(result.source).toBe('fallback');
   });
+
+  test('"What pesticide do you use?" with empty support gets the controlled product/label answer', async () => {
+    const result = await answerEstimateQuestion({
+      database: null,
+      question: 'What pesticide do you use?',
+      estimate: { id: 'synthetic-estimate-11', token: 'synthetic-token-11', status: 'sent', customer_name: 'Synthetic Customer', address: 'Synthetic Address' },
+      estData: { services: [{ service: 'pest_control', label: 'Pest Control' }] },
+      pricingBundle: { waveGuardTier: 'WaveGuard' },
+    });
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(result.source).toBe('fallback');
+    expect(result.answer).toContain('follow the product label directions');
+  });
 });

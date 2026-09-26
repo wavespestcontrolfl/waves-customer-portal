@@ -1377,7 +1377,7 @@ function answerEstimateQuestionFallback(question, context = {}) {
   // off" are service questions and belong to the branches below.
   // (LABEL_SAFETY_QUESTION_PATTERN — shared with the unconditional part of
   // the answerEstimateQuestion force-fallback gate; see its definition.)
-  if (LABEL_SAFETY_QUESTION_PATTERN.test(q) || APPLICATION_WORD_PATTERN.test(q)) {
+  if (LABEL_SAFETY_QUESTION_PATTERN.test(q) || APPLICATION_WORD_PATTERN.test(q) || PRODUCT_INTENT_PATTERN.test(q)) {
     const activeIngredients = activeIngredientsFromSupport(context, question);
     const labelSafetyFacts = labelSafetyFactsFromSupport(context, question);
     const labelCopy = 'Your technician will follow the product label directions for every application.';
