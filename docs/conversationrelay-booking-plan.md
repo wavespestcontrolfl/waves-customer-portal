@@ -2,6 +2,12 @@
 
 Status: **Phase 0 built (dark, gated off)** + **no-answer backstop wired into `/voice` (gated, fail-closed)** · Owner: Waves · Lane started 2026-06-27
 
+For the short, current summary — capabilities, permissions, env/config
+switches with defaults, proposed roadmap, owner-pending decisions, rollback —
+see `docs/sandy-voice-agent.md`. This page stays the engineering detail
+(architecture, latency-field semantics, the streaming chunking policy in
+full).
+
 ## Why this lane exists (the data that justified it)
 
 Pulled from `call_log` (prod, real window Apr–Jun 2026; pre-2026 rows are backfill noise):

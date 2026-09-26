@@ -97,34 +97,6 @@ function photoAssessmentLookupCriteria(customerId, assessmentId) {
   };
 }
 
-function parseJsonObject(value, fallback = {}) {
-  if (value == null) return fallback;
-  if (typeof value === 'object' && !Array.isArray(value)) return value;
-  if (typeof value === 'string') {
-    try {
-      const parsed = JSON.parse(value);
-      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : fallback;
-    } catch {
-      return fallback;
-    }
-  }
-  return fallback;
-}
-
-function parseJsonArray(value, fallback = []) {
-  if (value == null) return fallback;
-  if (Array.isArray(value)) return value;
-  if (typeof value === 'string') {
-    try {
-      const parsed = JSON.parse(value);
-      return Array.isArray(parsed) ? parsed : fallback;
-    } catch {
-      return fallback;
-    }
-  }
-  return fallback;
-}
-
 // App property scope (PR 4): the SESSION's selected saved property is the
 // house whose lawn the dashboard and history describe — handed to the
 // per-property history reader (#4039) and echoed as `propertyScope` so the

@@ -824,14 +824,14 @@ async function sendCustomerMessageCore(input) {
       };
     }
   };
-  const providerPreparationCheck = async ({ trx: billingEmailTrx } = {}) => {
+  const providerPreparationCheck = async ({ database: billingEmailTrx } = {}) => {
     if (sendInput.metadata?.billingDeliveryLeg) {
       // Settings can change while a provider prepares its request. Never
       // send a leg the customer removed after the initial preference read.
       // Codex r2 P1: an explicit Email leg's caller
       // (billing-channel-email-authority.js) already holds
       // withCustomerCommsLock's transaction for this exact recheck and
-      // threads it through as `trx` — reuse it for these reads instead of
+      // threads it through as `database` — reuse it for these reads instead of
       // opening a second root-pool connection (DB_POOL_MAX=2 deadlock risk
       // under two concurrent billing emails). Push/SMS callers never supply
       // a trx here, so they keep reading through the plain pool unchanged.

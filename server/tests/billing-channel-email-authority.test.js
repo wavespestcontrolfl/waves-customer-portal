@@ -123,6 +123,12 @@ describe('billing channel email authority', () => {
     });
   });
 
+  test('passes the authority transaction to provider preparation', async () => {
+    const { outcome, dispatch } = await runAuthority();
+    expect(outcome.ok).toBe(true);
+    expect(dispatch).toHaveBeenCalledWith(mockDb);
+  });
+
   test('does not allow dispatch when the global email preference is disabled', async () => {
     rows.notification_prefs = { customer_id: 'cust-1', email_enabled: false, billing_channels: ['email'] };
     const { context } = await runAuthority();
@@ -279,13 +285,13 @@ describe('billing channel email authority', () => {
       expect(customerId).toBe('cust-1');
       return callback(lockedTrx);
     });
-    const preSendCheck = jest.fn(async ({ trx }) => {
-      expect(trx).toBe(lockedTrx);
+    const preSendCheck = jest.fn(async ({ database }) => {
+      expect(database).toBe(lockedTrx);
       return { ok: true };
     });
     const { outcome } = await runAuthority({}, { preSendCheck });
     expect(outcome.ok).toBe(true);
-    expect(preSendCheck).toHaveBeenCalledWith({ channel: 'email', trx: lockedTrx });
+    expect(preSendCheck).toHaveBeenCalledWith({ channel: 'email', database: lockedTrx });
   });
 
   test('blocks when invoice ownership changes before provider dispatch', async () => {
@@ -338,12 +344,7 @@ describe('billing channel email authority', () => {
     const preSendCheck = jest.fn(async () => ({ ok: true }));
     const { outcome } = await runAuthority({}, { preSendCheck });
     expect(outcome.ok).toBe(true);
-    // The check runs while withCustomerCommsLock's transaction is held —
-    // threading it through lets the boundary check's own fresh contact/
-    // suppression/annual-offer reads reuse this SAME connection instead of
-    // opening a second one from the root pool (DB_POOL_MAX=2 deadlock risk
-    // under two concurrent billing emails).
-    expect(preSendCheck).toHaveBeenCalledWith({ channel: 'email', trx: mockDb });
+    expect(preSendCheck).toHaveBeenCalledWith({ channel: 'email', database: mockDb });
   });
 
   test('blocks dispatch when the pre-send check fails', async () => {

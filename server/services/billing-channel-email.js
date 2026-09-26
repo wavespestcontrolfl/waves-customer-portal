@@ -6,6 +6,7 @@ const {
   billingEmailTemplateKey,
   blocked,
 } = require('./billing-channel-email-authority');
+const { buildBillingReplayContext } = require('./billing-email-replay-context');
 
 function clean(value) {
   return String(value || '').trim();
@@ -101,6 +102,7 @@ async function sendBillingChannelEmailOnce(input, { preSendCheck } = {}) {
   if (context.error) return context.error;
 
   const { recipientEmail } = context;
+  const replayContext = buildBillingReplayContext(input, context, notificationEventKey);
   const state = { boundaryBlock: null, handoffStarted: false, providerAccepted: false };
   try {
     const result = await EmailTemplateLibrary.sendTemplate({
@@ -119,6 +121,7 @@ async function sendBillingChannelEmailOnce(input, { preSendCheck } = {}) {
       categories: ['billing', context.category],
       suppressionGroupKey: 'transactional_required',
       suppressProviderErrorLog: true,
+      ...(replayContext ? { billingReplayContext: replayContext } : {}),
       withProviderHandoff: (dispatch) => dispatchUnderBillingEmailAuthority({
         input, recipientEmail, preSendCheck, dispatch, state,
       }),

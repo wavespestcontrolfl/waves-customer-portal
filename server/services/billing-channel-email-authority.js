@@ -132,17 +132,11 @@ async function loadBillingEmailContext(input, database = db, { lockRecipients = 
   };
 }
 
-async function preSendBlock(preSendCheck, trx) {
+async function preSendBlock(preSendCheck, database) {
   if (typeof preSendCheck !== 'function') return null;
   let verdict;
   try {
-    // Codex r2 P1: thread the locked withCustomerCommsLock transaction this
-    // recheck already runs inside (verifyAndDispatch below) so the boundary
-    // check's own fresh contact/suppression reads reuse it instead of
-    // opening a second root-pool connection — with DB_POOL_MAX=2, two
-    // concurrent billing emails each holding trx while also blocking on a
-    // second connection for this read can deadlock the pool.
-    verdict = await preSendCheck({ channel: 'email', trx });
+    verdict = await preSendCheck({ channel: 'email', database });
   } catch (err) {
     verdict = { ok: false, code: err.code, reason: err.message, retryable: err.retryable };
   }
@@ -187,7 +181,7 @@ async function verifyAndDispatch({ input, trx, invoice, recipientEmail, preSendC
   if (state.boundaryBlock) return { ok: false };
 
   state.handoffStarted = true;
-  await dispatch();
+  await dispatch(trx);
   state.providerAccepted = true;
   return { ok: true };
 }

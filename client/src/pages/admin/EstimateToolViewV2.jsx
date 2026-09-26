@@ -484,6 +484,21 @@ function buildTurfRequestProfile(baseProfile, form) {
   return profile;
 }
 
+// Services sized off the home (pest, cockroach, one-time pest, bed bug,
+// flea) fall back to a 2,000 sq ft house when no home size reaches the
+// engine, and mark that line footprintWasDefaulted. A PRICED line carrying
+// the mark is a guess at the customer's price. Two lines carrying it are
+// not: a quote-required line (no price at all) and an operator fee override
+// (priceOverridden — the typed amount prices, the defaulted bracket is
+// unused, codex r1 P2). Bed bug and flea land in specItems (codex r1 P1).
+function linesPricedOnGuessedHomeSize(result) {
+  return [
+    ...(result?.recurring?.services || []),
+    ...(result?.oneTime?.items || []),
+    ...(result?.oneTime?.specItems || []),
+  ].filter((line) => line?.footprintWasDefaulted === true && !line.quoteRequired && line.priceOverridden !== true);
+}
+
 // One unit inside a building (a unit-address lookup), for as long as the
 // form still types it a condo — staff correcting the type to a whole
 // structure takes it out of unit scope (codex r5 P2 #4862).
@@ -3100,8 +3115,18 @@ export default function EstimateToolViewV2({
           treeCount: "",
         });
       }
-      if (ep.pool === "YES" || ep.pool === "POSSIBLE") upd.hasPool = "YES";
-      if (ep.poolCage === "YES") upd.hasPoolCage = "YES";
+      // Only a DECIDED pool prefills. POSSIBLE is satellite seeing a pool
+      // the records don't (the lookup's own flag says "may be neighbor") —
+      // the call-draft builder, customer pricing, and the website quote all
+      // leave it unpriced, and the verify flag asks the operator to check.
+      // The lookup states its pool verdict on EVERY lookup, so a refresh
+      // that downgrades a pool to POSSIBLE clears the earlier YES (codex r2
+      // P1); an operator-set value is restored after the merge below
+      // (_manualFields). A cage counts only with a decided pool: pricing
+      // treats any cage as a pool, and a cage seen in the same satellite read
+      // as a POSSIBLE pool carries the same "may be neighbor" doubt (r1 P1).
+      upd.hasPool = ep.pool === "YES" ? "YES" : "NO";
+      upd.hasPoolCage = ep.poolCage === "YES" && ep.pool === "YES" ? "YES" : "NO";
       if (ep.poolCageSize && ep.poolCageSize !== "NONE")
         upd.poolCageSize = ep.poolCageSize;
       if (ep.shrubDensity) upd.shrubDensity = ep.shrubDensity;
@@ -3888,6 +3913,27 @@ export default function EstimateToolViewV2({
         // invalidation already cleared the preview. Mounting this result would
         // pair stale pricing with the new form state (and Save would persist
         // the stale engineRequest), so drop it and let the operator regenerate.
+        return null;
+      }
+
+      // Runs AFTER the stale-response check above: a response computed before
+      // the operator typed Home Sq Ft is dropped silently, never answered with
+      // an alert asking for a value already entered (codex r3 P2).
+      // The pre-flight gate above only stops a quote with NO home and NO lot
+      // size. A lot alone still prices home-sized services at the engine's
+      // 2,000 sq ft default — refuse that result until Home Sq Ft is entered.
+      const guessedLines = linesPricedOnGuessedHomeSize(result);
+      if (guessedLines.length > 0) {
+        setEstimate(null);
+        const names = [...new Set(guessedLines.map((line) => line.name || line.service))].join(", ");
+        const verb = guessedLines.length === 1 ? "is" : "are";
+        // An association aggregate's Home Sq Ft is the summed building
+        // total with an unknown story count (footprintUnknown): what is
+        // missing is the story count, which is what unlocks the footprint
+        // (buildTurfRequestProfile) — ask for that (codex r2 P2).
+        alert(profile.footprintUnknown === true
+          ? `Enter the number of stories. ${names} ${verb} priced by the home's footprint, and this property's home size is a building total with an unknown story count.`
+          : `Enter home sq ft. ${names} ${verb} priced by the home's size, and without it the price is a guess at a 2,000 sq ft house.`);
         return null;
       }
       setEstimate(result);
