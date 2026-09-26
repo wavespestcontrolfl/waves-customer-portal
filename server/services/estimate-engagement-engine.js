@@ -721,6 +721,27 @@ async function processDueBatch(now = new Date()) {
         await deferOrShadow(live, job, new Date(nowMs + PRICING_AUTHORITY_RECHECK_MS), 'pricing-authority-not-server');
         continue;
       }
+      // ONE new variable, ONE rule (owner ruling 2026-09-26): every other
+      // rule's payload is byte-identical — this never even calls the
+      // builder for them. acceptActive: processDueBatch has already checked
+      // archived / ACTIVE_STATUSES / expiry for THIS send; the one part of
+      // the page's isEstimateAcceptActive verdict it does not check is
+      // estimateOffCustomerSurface (linkage invalidated or pending, reprice
+      // hold, unverified address) — an estimate held off the customer
+      // surface must never carry a consultation bearer.
+      const isGoneQuiet = rule.rule_key === GONE_QUIET_RULE_KEY;
+      // Runs BEFORE the claim (Codex #4918 r7 P2): the slot probe inside can
+      // take up to 3 s, and the claim's terminal-status check below must see
+      // an accept/decline that lands during it — the window between claim and
+      // send stays the milliseconds it was before this offer existed.
+      let consultationUrl = isGoneQuiet
+        ? await buildGoneQuietConsultationUrl({
+          estimate: est,
+          estimateData: parseEstimateData(est.estimate_data),
+          acceptActive: !require('../utils/estimate-claim-sql').estimateOffCustomerSurface(est),
+          recipientEmail: est.customer_email,
+        })
+        : '';
       if (!(await followupShared.claimFollowupSend(est.id, rule.rule_key, rule.template_key, {
         job_id: job.id,
         trigger: job.trigger,
@@ -754,6 +775,17 @@ async function processDueBatch(now = new Date()) {
           continue;
         }
       }
+      if (consultationUrl) {
+        // The URL was authorized for the recipient read before the probe.
+        // If the estimate's email moved since, this send goes to the NEW
+        // address without the offer (never a bearer for another inbox).
+        const freshRecipient = await db('estimates').where({ id: est.id }).first('customer_email');
+        if (String(freshRecipient?.customer_email || '').trim().toLowerCase()
+          !== String(est.customer_email || '').trim().toLowerCase()) {
+          consultationUrl = '';
+          est.customer_email = freshRecipient?.customer_email || null;
+        }
+      }
       const firstName = (est.customer_name || '').split(' ')[0] || 'there';
       const { emailUrl } = await followupShared.mintStageLinks(est, `estimate_engage_${rule.rule_key}`);
       // Accept-intent variant (owner 2026-07-15: as few clicks as possible)
@@ -763,23 +795,6 @@ async function processDueBatch(now = new Date()) {
       const { emailUrl: acceptUrl } = await followupShared.mintStageLinks(
         est, `estimate_engage_${rule.rule_key}_accept`, { query: 'intent=accept', emailOnly: true },
       );
-      // ONE new variable, ONE rule (owner ruling 2026-09-26): every other
-      // rule's payload is byte-identical — this never even calls the
-      // builder for them. acceptActive: processDueBatch has already checked
-      // archived / ACTIVE_STATUSES / expiry for THIS send; the one part of
-      // the page's isEstimateAcceptActive verdict it does not check is
-      // estimateOffCustomerSurface (linkage invalidated or pending, reprice
-      // hold, unverified address) — an estimate held off the customer
-      // surface must never carry a consultation bearer.
-      const isGoneQuiet = rule.rule_key === GONE_QUIET_RULE_KEY;
-      const consultationUrl = isGoneQuiet
-        ? await buildGoneQuietConsultationUrl({
-          estimate: est,
-          estimateData: parseEstimateData(est.estimate_data),
-          acceptActive: !require('../utils/estimate-claim-sql').estimateOffCustomerSurface(est),
-          recipientEmail: est.customer_email,
-        })
-        : '';
       const ok = await followupShared.sendDualChannel(est, {
         email: {
           templateKey: rule.template_key,

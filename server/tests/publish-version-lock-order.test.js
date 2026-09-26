@@ -50,3 +50,27 @@ describe('publishVersion — email_templates row lock precedes every version/tem
     expect(betweenTxAndLock).not.toMatch(/trx\('email_template/);
   });
 });
+
+// Codex #4918 r7 P2: createDraftVersion reads max(version_number) and
+// inserts max + 1 — both must sit under the same email_templates row lock
+// publishVersion and the migrations take, or a concurrent publisher picks
+// the same number and one side fails the (template_id, version_number)
+// unique constraint.
+describe('createDraftVersion — max read and insert run under the template row lock', () => {
+  test('one transaction: forUpdate() on email_templates, THEN the max read, THEN the insert — all on trx', () => {
+    const fnAt = src.indexOf('async function createDraftVersion(');
+    expect(fnAt).toBeGreaterThan(-1);
+    const body = src.slice(fnAt, src.indexOf('\n}\n', fnAt));
+
+    const txAt = body.indexOf('return db.transaction(async (trx) => {');
+    const lockAt = body.indexOf("await trx('email_templates').where({ template_key: templateKey }).forUpdate().first();");
+    const maxAt = body.indexOf("await trx('email_template_versions')\n      .where({ template_id: template.id })\n      .orderBy('version_number', 'desc')");
+    const insertAt = body.indexOf("await trx('email_template_versions').insert({");
+    expect(txAt).toBeGreaterThan(-1);
+    expect(lockAt).toBeGreaterThan(txAt);
+    expect(maxAt).toBeGreaterThan(lockAt);
+    expect(insertAt).toBeGreaterThan(maxAt);
+    // No read or write escapes the transaction.
+    expect(body).not.toMatch(/await db\('email_template/);
+  });
+});

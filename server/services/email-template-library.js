@@ -792,26 +792,33 @@ async function renderVersion(versionId, payload = {}, opts = {}) {
 }
 
 async function createDraftVersion(templateKey, technicianId) {
-  const template = await db('email_templates').where({ template_key: templateKey }).first();
-  if (!template) throw new Error('template not found');
-  const latest = await db('email_template_versions')
-    .where({ template_id: template.id })
-    .orderBy('version_number', 'desc')
-    .first();
-  const source = template.active_version_id
-    ? await db('email_template_versions').where({ id: template.active_version_id }).first()
-    : latest;
-  const [draft] = await db('email_template_versions').insert({
-    template_id: template.id,
-    version_number: (latest?.version_number || 0) + 1,
-    status: 'draft',
-    subject: source?.subject || template.name,
-    preview_text: source?.preview_text || null,
-    blocks: JSON.stringify(normalizeBlocks(source?.blocks || [])),
-    text_body: source?.text_body || null,
-    created_by: technicianId || null,
-  }).returning('*');
-  return draft;
+  // One transaction holding the template row lock (Codex #4918 r7 P2):
+  // publishVersion and the 20260926* migrations lock this row before they
+  // write a version, so the max(version_number) read and the insert below
+  // must sit under the same lock, or a concurrent publisher can take the
+  // same number and one side fails the (template_id, version_number) unique.
+  return db.transaction(async (trx) => {
+    const template = await trx('email_templates').where({ template_key: templateKey }).forUpdate().first();
+    if (!template) throw new Error('template not found');
+    const latest = await trx('email_template_versions')
+      .where({ template_id: template.id })
+      .orderBy('version_number', 'desc')
+      .first();
+    const source = template.active_version_id
+      ? await trx('email_template_versions').where({ id: template.active_version_id }).first()
+      : latest;
+    const [draft] = await trx('email_template_versions').insert({
+      template_id: template.id,
+      version_number: (latest?.version_number || 0) + 1,
+      status: 'draft',
+      subject: source?.subject || template.name,
+      preview_text: source?.preview_text || null,
+      blocks: JSON.stringify(normalizeBlocks(source?.blocks || [])),
+      text_body: source?.text_body || null,
+      created_by: technicianId || null,
+    }).returning('*');
+    return draft;
+  });
 }
 
 async function publishVersion(versionId, technicianId) {

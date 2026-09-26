@@ -461,6 +461,7 @@ describe('processDueJobs', () => {
     test('viewed_gone_quiet_72h calls the builder with the engine\'s own verified state and threads a non-blank result into the payload', async () => {
       buildGoneQuietConsultationUrl.mockResolvedValue('https://portal.wavespestcontrol.com/l/abc123');
       enqueueProcessorHappyPath();
+      enqueue('estimates', { first: { customer_email: 'taylor@example.com' } }); // post-claim recipient re-read
 
       const result = await Engine.processDueJobs(NOW);
 
@@ -525,26 +526,52 @@ describe('processDueJobs', () => {
       );
     });
 
-    test('the builder throwing (a regression in its own fail-closed contract) releases the claim and hits the existing poison-guard retry, never a broken send', async () => {
+    test('the builder throwing (a regression in its own fail-closed contract) hits the existing poison-guard retry before any claim, never a broken send', async () => {
       // The builder's own contract is "never throws" (see its unit suite);
       // this pins that a regression there is caught by the SAME poison-job
       // guard every other unexpected error in this loop already uses. The
-      // claim already landed by this point in the loop (claimFollowupSend
-      // runs before the payload is built), so the guard must release it —
-      // never leaves a phantom claim behind for a real send that never sent.
+      // builder runs BEFORE claimFollowupSend (Codex #4918 r7 P2), so there
+      // is no claim to release.
       buildGoneQuietConsultationUrl.mockRejectedValue(new Error('should never happen'));
       enqueueProcessorHappyPath();
 
       const result = await Engine.processDueJobs(NOW);
 
       expect(result).toEqual({ sent: 0, shadow: 0 });
-      expect(followupShared.claimFollowupSend).toHaveBeenCalled();
-      expect(followupShared.releaseFollowupSend).toHaveBeenCalledWith('est-1', 'viewed_gone_quiet_72h');
+      expect(followupShared.claimFollowupSend).not.toHaveBeenCalled();
+      expect(followupShared.releaseFollowupSend).not.toHaveBeenCalled();
       expect(followupShared.sendDualChannel).not.toHaveBeenCalled();
       const defer = writes.filter((w) => w.table === 'estimate_followup_jobs' && w.op === 'update').pop();
       expect(defer.payload.status).toBeUndefined(); // still pending, bounded retry
       expect(defer.payload.attempts).toBeDefined();
       expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('should never happen'));
+    });
+
+    test('the slot probe runs BEFORE the claim, so the claim\'s terminal-status check sees an accept/decline that lands during it (Codex #4918 r7 P2)', async () => {
+      const order = [];
+      buildGoneQuietConsultationUrl.mockImplementation(async () => { order.push('probe'); return ''; });
+      followupShared.claimFollowupSend.mockImplementation(async () => { order.push('claim'); return false; });
+      enqueueProcessorHappyPath();
+
+      const result = await Engine.processDueJobs(NOW);
+
+      expect(order).toEqual(['probe', 'claim']);
+      expect(result.sent).toBe(0); // the claim lost (e.g. accepted mid-probe) → nothing sent
+      expect(followupShared.sendDualChannel).not.toHaveBeenCalled();
+    });
+
+    test('the recipient email changed during the probe → the send goes to the NEW address WITHOUT the offer (Codex #4918 r7 P2)', async () => {
+      buildGoneQuietConsultationUrl.mockResolvedValue('https://portal.wavespestcontrol.com/l/abc123');
+      enqueueProcessorHappyPath();
+      enqueue('estimates', { first: { customer_email: 'new-owner@example.com' } });
+
+      const result = await Engine.processDueJobs(NOW);
+
+      expect(result.sent).toBe(1);
+      expect(followupShared.estimateEmailPayload.mock.calls[0][3]).toEqual(
+        expect.objectContaining({ consultation_url: '' }),
+      );
+      expect(followupShared.sendDualChannel.mock.calls[0][0].customer_email).toBe('new-owner@example.com');
     });
 
     test('every other rule\'s payload never gets consultation_url — the builder is never even called for them', async () => {
