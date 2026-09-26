@@ -589,7 +589,10 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
       // One immediate retry: a transient write failure here would leave an
       // accepted, non-scheduled push with no durable proof (Codex #4816 r44).
       const insertProof = () => db('sms_log').insert(proofRow()).returning('id');
-      const inserted = await insertProof().catch(() => insertProof());
+      const inserted = await insertProof().catch((firstErr) => {
+        logger.warn(`[push-routing] sms_log proof insert failed, retrying once: ${firstErr.message}`);
+        return insertProof();
+      });
       proofRowId = inserted && inserted[0] ? (inserted[0].id || inserted[0]) : null;
     } catch (logErr) {
       logger.error(`[push-routing] sms_log record failed: ${logErr.message}`);
