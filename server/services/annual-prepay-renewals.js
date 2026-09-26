@@ -5821,24 +5821,6 @@ async function termiteNoticeObligationCandidates({ today = etDateString(), conn 
     .select('*');
 }
 
-// Stamps the 45-day rung as missed/late WITHOUT a second customer send —
-// used only by the "both rungs due at once" case in
-// processTermiteNoticeObligations below. Same confirmed-insert-only
-// escalation as an ordinary late send (fileTermiteLateNoticeException).
-async function recordTermiteRungMissedLate(term, daysOut) {
-  const lateCol = termiteLateColumnForDaysOut(daysOut);
-  const noticeCol = noticeColumnForDaysOut(daysOut);
-  const now = new Date();
-  const [updated] = await db('annual_prepay_terms')
-    .where({ id: term.id })
-    .whereNull(noticeCol)
-    .whereNull(lateCol)
-    .update({ [lateCol]: now, updated_at: now })
-    .returning('*');
-  if (updated) await fileTermiteLateNoticeException(updated, daysOut);
-  return !!updated;
-}
-
 // One term's notice-obligation decision. At most ONE customer message per
 // run: a term first seen at <=30 days out has BOTH rungs due
 // simultaneously, and texting/emailing the same customer twice back to
@@ -5895,6 +5877,12 @@ async function termiteMissedNoticeEscalationCandidates({ today = etDateString(),
     .whereNull('renewal_decision')
     .whereNotNull('annual_plan_version')
     .where('term_end', '<=', today)
+    // An original term still awaiting installation has only a provisional
+    // term_end (the send path skips it the same way): never report a missed
+    // notice against it — anchoring later moves the real renewal date.
+    .where(function anchoredOrSuccessor() {
+      this.whereNotNull('installation_anchored_at').orWhereNotNull('renewed_from_term_id');
+    })
     .whereNull(TERMITE_NOTICE_MISSED_ESCALATION_COLUMN)
     .where(function anyRungMissing() {
       this.where(function rung45Missing() {

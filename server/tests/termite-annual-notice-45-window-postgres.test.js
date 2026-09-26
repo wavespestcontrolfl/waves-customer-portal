@@ -40,7 +40,9 @@ async function createScratchDb() {
     notice_30_claimed_at timestamptz,
     notice_30_late_sent_at timestamptz,
     notice_30_late_escalated_at timestamptz,
-    notice_missed_escalated_at timestamptz
+    notice_missed_escalated_at timestamptz,
+    installation_anchored_at timestamptz,
+    renewed_from_term_id uuid
   )`);
   return { db, async destroy() { await db.raw('DROP SCHEMA ?? CASCADE', [schema]); await db.destroy(); } };
 }
@@ -177,9 +179,14 @@ describeOrSkip('termite annual-plan notice obligations — unified 45/30 candida
     const { _private } = require('../services/annual-prepay-renewals');
     const today = '2026-09-26';
     const term = (label, fields) => ({
-      label, customer_id: randomUUID(), term_start: '2025-09-26', status: 'renewal_pending', annual_plan_version: 'v3', ...fields,
+      label, customer_id: randomUUID(), term_start: '2025-09-26', status: 'renewal_pending', annual_plan_version: 'v3',
+      installation_anchored_at: new Date('2025-09-26T12:00:00Z'), ...fields,
     });
     const rows = [
+      // Original term still awaiting installation: provisional term_end only.
+      term('pastDue_unanchoredOriginal', { term_end: '2026-09-01', installation_anchored_at: null }),
+      // A renewal successor is anchored by construction.
+      term('pastDue_successorNoAnchor', { term_end: '2026-09-01', installation_anchored_at: null, renewed_from_term_id: randomUUID() }),
       term('pastDue_missing45', { term_end: '2026-09-20', notice_30_sent_at: new Date() }),
       term('pastDue_missing30', { term_end: '2026-09-25', notice_45_sent_at: new Date() }),
       term('pastDue_missingBoth', { term_end: '2026-09-01' }),
@@ -202,6 +209,7 @@ describeOrSkip('termite annual-plan notice obligations — unified 45/30 candida
       'pastDue_missing30',
       'pastDue_missing45',
       'pastDue_missingBoth',
+      'pastDue_successorNoAnchor',
     ].sort());
   });
 
@@ -259,6 +267,10 @@ describeOrSkip('termite annual-plan notice obligations — against a schema buil
       notice_15_claimed_at timestamptz,
       notice_7_sent_at timestamptz,
       notice_7_claimed_at timestamptz,
+      -- pre-101 columns from earlier termite migrations (20260924030001 stamps,
+      -- 20260925000006 install anchor) the candidate queries read
+      renewed_from_term_id uuid,
+      installation_anchored_at timestamptz,
       updated_at timestamptz
     )`);
     return { db, async destroy() { await db.raw('DROP SCHEMA ?? CASCADE', [schema]); await db.destroy(); } };

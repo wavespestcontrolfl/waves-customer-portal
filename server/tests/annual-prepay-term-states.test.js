@@ -709,7 +709,7 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
         }
       }
     }
-    // lateCol (recordTermiteRungMissedLate) / escalatedCol
+    // lateCol (sendCustomerTermNotice's combined-send stamp) / escalatedCol
     // (fileTermiteLateNoticeException) — Codex #4921 r3: only ever
     // notice_45_late_sent_at / notice_30_late_sent_at and
     // notice_45_late_escalated_at / notice_30_late_escalated_at, or null.
