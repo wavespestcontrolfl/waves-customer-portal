@@ -291,7 +291,7 @@
       "regulated": false,
       "irritant": true
     },
-    "safety_line": "Like most toads, its skin secretion can irritate a pet's mouth if licked or bitten, but it's much milder than the invasive cane toad; rinse your pet's mouth with water if this happens.",
+    "safety_line": "Its skin secretion can irritate a pet's mouth, far less than a cane toad's. Wipe the gums, rinse with the head tilted down so it doesn't swallow water, and call your vet if it persists.",
     "range": "occasional",
     "active_months": [
       1,
@@ -338,7 +338,7 @@
       "https://edis.ifas.ufl.edu/uw432"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": "Cane-toad-competition claim confirmed directly this session: UF/IFAS EDIS WEC387/UW432, \"The Cane or 'Bufo' Toad (Rhinella marina) in Florida,\" states \"people have noticed that native southern toads disappear or become uncommon in their neighborhoods when cane toads arrive,\" while noting the exact mechanism (competition, predation, or another factor) isn't settled. Range 'occasional' is consistent with this source; exact current SWFL county-level density still isn't separately quantified anywhere, but the qualitative scarcity claim is resolved."
     },
     "role": "beneficial",

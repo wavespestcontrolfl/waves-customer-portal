@@ -95,7 +95,7 @@ const ACTION_LABELS = {
 const REFERRAL_TEMPLATES = {
   bee_relocation: "Honey bees are protected pollinators we don't spray. We refer you to a licensed bee removal/relocation specialist who can safely relocate the colony.",
   wildlife_trapper: 'This is a wildlife visitor, not something pest control treats. We refer you to a licensed nuisance wildlife trapper for safe removal.',
-  report_fwc: 'This is protected wildlife. Please report it to the Florida Fish and Wildlife Conservation Commission (FWC) rather than handling it yourself.',
+  report_fwc: 'Please report this sighting to the Florida Fish and Wildlife Conservation Commission (FWC) rather than handling it yourself.',
   report_fdacs: 'This may be a regulated pest of concern. Please report it to the Florida Department of Agriculture and Consumer Services (FDACS).',
   protected_leave_alone: 'This animal and its burrow are protected by Florida law. Please leave it undisturbed — no treatment is needed here.',
 };

@@ -26,9 +26,6 @@
       "subterranean termites",
       "termite",
       "termites",
-      "mud tube",
-      "mud tubes",
-      "termite swarmer",
       "swarmers"
     ],
     "scientific_name": "Reticulitermes flavipes",
@@ -242,7 +239,6 @@
       "drywood termite",
       "drywood termites",
       "frass",
-      "termite pellets",
       "kick out holes",
       "kick-out holes"
     ],
@@ -893,7 +889,7 @@
     },
     "urgency": "high",
     "copy": {
-      "what_it_means": "Drywood termites push these pellets out of the wood they're feeding on, so a pile like this is evidence of drywood termite activity in that wood. It doesn't confirm the colony is still active or how far it's spread — an inspection determines that.",
+      "what_it_means": "Drywood termites, and less often dampwood termites, push pellets like these out of the wood they feed on, so a pile points to termite activity in that wood. It doesn't show which kind, whether the colony is still active, or how far it's spread; an inspection determines that.",
       "fact": "Drywood termites push these pellets straight out of their tunnels to keep their living space clean, which is often the only visible sign of an infestation inside sound-looking wood."
     },
     "tech_notes": "Look for the kick-out hole near the pellet pile; sound the surrounding wood. Full inspection before any treatment recommendation.",
@@ -906,7 +902,7 @@
       "https://journals.flvc.org/edis/article/download/117299/115411"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": ""
     }
   },

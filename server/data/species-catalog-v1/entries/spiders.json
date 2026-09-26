@@ -1332,14 +1332,14 @@
       {
         "slug": "southern-house-spider",
         "difference": "Wandering male southern house spiders are the most common recluse look-alike in Florida, with much longer thin legs and no violin marking on the head",
-        "next_photo": "A close-up of the top of the head/body showing whether a violin-shaped marking is present",
-        "photo_can_confirm": true
+        "next_photo": "A photo can't confirm a brown recluse; the eye pattern needs magnification. Don't handle it; a technician can confirm on site.",
+        "photo_can_confirm": false
       },
       {
         "slug": "yellow-sac-spider",
         "difference": "Yellow sac spider is smaller, pale yellow-beige with darker leg tips and no violin marking; a genuine brown recluse has a distinct dark violin shape on the head",
-        "next_photo": "A close-up of the top of the head/body showing whether a violin-shaped marking is present",
-        "photo_can_confirm": true
+        "next_photo": "A photo can't confirm a brown recluse; the eye pattern needs magnification. Don't handle it; a technician can confirm on site.",
+        "photo_can_confirm": false
       }
     ],
     "size": "small",
@@ -1416,7 +1416,7 @@
       "https://en.wikipedia.org/wiki/Brown_recluse_spider"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": "Verdict/urgency are a deliberate judgment call: kept at watch/moderate rather than call/high specifically because the species is not established in Florida, to avoid fear-marketing a spider that is very unlikely to be the true culprit; owner should confirm this framing is what they want for this entry. Per audit item 46: traits[3] previously stated the Florida non-establishment fact, which isn't a visible trait; replaced with a size feature. The non-establishment fact is still covered in copy.what_it_means and tech_notes."
     }
   },

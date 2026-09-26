@@ -318,7 +318,7 @@
     },
     "urgency": "high",
     "copy": {
-      "what_it_means": "These marks are evidence of bed bug activity on or near the bed, whether or not you've seen a live bug yet. Because bed bugs hide well and spread easily, an inspection is what determines how far it's spread rather than treating off a photo alone.",
+      "what_it_means": "These marks point to bed bugs or their close relative the bat bug, whether or not you've seen a live bug yet. Both hide well, so an inspection is what tells which one it is and how far it's spread, rather than treating off a photo alone.",
       "fact": "A single fed female can lay a few eggs a day, which is how a couple of stray marks on a mattress seam can turn into a room-wide problem within weeks if left alone."
     },
     "tech_notes": "Photo signs are suggestive only; full inspection of mattress seams, box spring, frame, headboard and adjacent furniture needed to confirm live activity and scope before treatment.",
@@ -331,7 +331,7 @@
       "https://en.wikipedia.org/wiki/Cimex_lectularius"
     ],
     "review": {
-      "status": "owner_approved",
+      "status": "draft",
       "notes": ""
     }
   }
