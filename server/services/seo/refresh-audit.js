@@ -69,6 +69,18 @@ function canonPathSql(col) {
   return `regexp_replace(regexp_replace(split_part(${col}, chr(63), 1), '^[a-z]+://[^/]+', ''), '/+$', '')`;
 }
 
+function findInflightPageEdit(runner, { path, targetDomain }) {
+  return runner('opportunity_queue')
+    .whereIn('action_type', miner.PAGE_EDITING_ACTIONS)
+    .whereIn('status', ['pending', 'claimed', 'pending_review'])
+    .where(function () {
+      this.where('status', '<>', 'pending').orWhere('attempt_count', '<', maxClaimAttempts());
+    })
+    .whereRaw(`${canonPathSql('page_url')} = ?`, [path])
+    .whereRaw(`CASE WHEN page_url LIKE '/%' THEN '${HUB_DOMAIN}' ELSE ${hostRegistrableSql('page_url')} END = ?`, [targetDomain])
+    .first();
+}
+
 function slugPath(slug) {
   return `/${String(slug || '').replace(/^\/+|\/+$/g, '')}`;
 }
@@ -466,16 +478,7 @@ class RefreshAudit {
     // rewrite_title_meta edits the same Astro file a refresh would — the
     // miner's arbitration treats the two as one conflict class
     // (PAGE_EDITING_ACTIONS), so this producer must too.
-    const inflightRefreshFor = (runner) => runner('opportunity_queue')
-      .whereIn('action_type', miner.PAGE_EDITING_ACTIONS)
-      .whereIn('status', ['pending', 'claimed', 'pending_review'])
-      .where(function () {
-        this.where('status', '<>', 'pending').orWhere('attempt_count', '<', maxClaimAttempts());
-      })
-      .whereRaw(`${canonPathSql('page_url')} = ?`, [path])
-      .whereRaw(`${hostRegistrableSql('page_url')} = ?`, [targetDomain])
-      .first();
-    const inflight = await inflightRefreshFor(db);
+    const inflight = await findInflightPageEdit(db, { path, targetDomain });
     if (inflight) {
       return { queued: false, own: inflight.dedupe_key === dedupeKey, status: inflight.status, url: inflight.page_url, dedupeKey: inflight.dedupe_key };
     }
@@ -555,7 +558,7 @@ class RefreshAudit {
     // observe no row and insert competing edits for one page.
     const result = await db.transaction(async (trx) => {
       await trx.raw("SELECT pg_advisory_xact_lock(hashtext('opportunity_page_edit'))");
-      const inflightNow = await inflightRefreshFor(trx);
+      const inflightNow = await findInflightPageEdit(trx, { path, targetDomain });
       if (inflightNow) return { __inflight: inflightNow };
       return trx.raw(
       `INSERT INTO opportunity_queue
@@ -651,5 +654,6 @@ const refreshAudit = new RefreshAudit();
 // canonical path) — never a raw URL string comparison. Duplicating these
 // expressions per caller is how two lanes end up disagreeing about identity.
 refreshAudit._identity = { canonPathSql, hostRegistrableSql, urlToPath, registrableDomain };
+refreshAudit.findInflightPageEdit = findInflightPageEdit;
 
 module.exports = refreshAudit;

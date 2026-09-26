@@ -1217,6 +1217,14 @@ async function maybeAutoMerge(run, pr) {
   const gh = require('../content-astro/github-client');
   const branch = pr.head?.ref;
   if (!branch) return { pending: true, reason: 'pr_head_branch_unknown' };
+  const opportunity = run.opportunity_id
+    ? await db('opportunity_queue').where('id', run.opportunity_id).first('bucket')
+    : null;
+  const isCitabilityBackfill = opportunity?.bucket === 'citability_backfill';
+  const { citabilityBackfillLaneOpen } = require('./opportunity-queue')._internals;
+  if (isCitabilityBackfill && !citabilityBackfillLaneOpen()) {
+    return { pending: true, transient: true, reason: 'citability_backfill_disabled' };
+  }
   let verifiedApprovedEvidenceChild = false;
 
   // 1. Cloudflare preview build for the PR branch must be green.
@@ -1643,14 +1651,22 @@ async function maybeAutoMerge(run, pr) {
     ? articlePaths.flatMap((p) => [p, require('../../../packages/editorial-evidence/index.cjs').evidencePath(p)])
     : undefined;
 
-  const doMerge = () => gh.mergePr(pr.number, {
-    method: 'squash',
-    title: String(pr.title || '').slice(0, 72),
-    sha: pr.head?.sha,
-    expectBaseSha: editorialBaseProof?.baseSha,
-    expectBaseRef: editorialBaseProof?.baseRef,
-    verifyPaths,
-  });
+  const doMerge = () => {
+    // Re-read after the asynchronous review/build checks, at the write boundary.
+    if (isCitabilityBackfill && !citabilityBackfillLaneOpen()) {
+      const err = new Error('Citability backfill disabled during merge checks');
+      err.code = 'CITABILITY_BACKFILL_DISABLED';
+      throw err;
+    }
+    return gh.mergePr(pr.number, {
+      method: 'squash',
+      title: String(pr.title || '').slice(0, 72),
+      sha: pr.head?.sha,
+      expectBaseSha: editorialBaseProof?.baseSha,
+      expectBaseRef: editorialBaseProof?.baseRef,
+      verifyPaths,
+    });
+  };
   let mergeRes;
   try {
     if (run.action_type === 'new_supporting_blog') {
@@ -1738,6 +1754,9 @@ async function maybeAutoMerge(run, pr) {
       if (withheld) return withheld;
     }
   } catch (err) {
+    if (err?.code === 'CITABILITY_BACKFILL_DISABLED') {
+      return { pending: true, transient: true, reason: 'citability_backfill_disabled' };
+    }
     if (err?.code === 'TOPIC_MERGE_LOCK_BUSY') {
       logger.info(`[autonomous-pr-poller] auto-merge deferred for run ${run.id}: ${err.message}`);
       return { pending: true, transient: true, reason: 'topic_merge_lock_busy' };

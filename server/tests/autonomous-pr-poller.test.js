@@ -786,6 +786,37 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     return { number: 42, state: 'open', merged: false, merged_at: null, title: 'Blog: Test Post', head: { ref: 'content/autonomous-test', sha: 'headsha1' } };
   }
 
+  test.each(['disabled', 'disabled during checks', 'enabled'])('citability backfill merge: %s', async (state) => {
+    const gates = require('../config/feature-gates').gates;
+    const previous = gates.citabilityBackfill;
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    gates.citabilityBackfill = state !== 'disabled';
+    setupDb({
+      pending: [makeRun({ action_type: 'refresh_existing_page' })],
+      queue: [{ id: 'opp-1', status: 'pending_review', skip_reason: 'astro_pr_pending_merge', claim_id: null, bucket: 'citability_backfill' }],
+    });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue('headsha1');
+    publisher.assertCodexReviewClear.mockImplementationOnce(async () => {
+      if (state === 'disabled during checks') gates.citabilityBackfill = false;
+      return true;
+    });
+    gh.mergePr.mockResolvedValue({ merged: true, sha: 'mergesha' });
+    try {
+      const result = await poller.pollPending();
+      if (state === 'enabled') expect(gh.mergePr).toHaveBeenCalledTimes(1);
+      else {
+        expect(result.results[0]).toMatchObject({ pending: true, reason: 'citability_backfill_disabled' });
+        expect(gh.mergePr).not.toHaveBeenCalled();
+      }
+    } finally {
+      publisher.assertCodexReviewClear.mockReset();
+      gates.citabilityBackfill = previous;
+    }
+  });
+
   test.each(['verdict', 'throw'])('a transient body-image %s after 49 hours never retires the PR', async (failure) => {
     const updates = setupDb({ pending: [makeRun({ poll_pending_reason: 'body_images_required', poll_pending_since: new Date(Date.now() - 49 * 3600000) })] });
     gh.getPr.mockResolvedValue(openPr());

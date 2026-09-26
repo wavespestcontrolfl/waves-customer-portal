@@ -1820,7 +1820,7 @@ describe('listicle_family scoring + action mapping', () => {
     expect(src).toMatch(/\$\{ROUTE_IDENTITY_SQL\} NOT IN/);
     const auditSrc = require('fs').readFileSync(require.resolve('../services/seo/refresh-audit'), 'utf8');
     expect(auditSrc).toMatch(/pg_advisory_xact_lock\(hashtext\('opportunity_page_edit'\)\)/);
-    expect(auditSrc).toMatch(/const inflightNow = await inflightRefreshFor\(trx\);/);
+    expect(auditSrc).toMatch(/const inflightNow = await findInflightPageEdit\(trx, \{ path, targetDomain \}\);/);
     expect(mineSrc).toMatch(/pageCityByUrl\.get\(served\.hit\.page_url\)/);
     expect(mineSrc).toMatch(/reconcileExemptions\.pages\.add\(served\.hit\.page_url\)/);
     expect(mineSrc).toMatch(/inflightKeys\.has\(g\.key\) && eligible\(g\)/);
@@ -2264,6 +2264,100 @@ describe('arbitrateCityServiceTargets — one row per (service, city) across buc
     const out = arbitrateCityServiceTargets([row('local_gap', { score: 56 })]);
     expect(out).toHaveLength(1);
     expect(out[0].bucket).toBe('local_gap');
+  });
+});
+
+describe('_revalidateFamilyBatch — citability page-edit fence under the persist lock', () => {
+  const { GscOpportunityMiner } = require('../services/seo/gsc-opportunity-miner');
+  const oldMaxAttempts = process.env.AUTONOMOUS_OPP_MAX_ATTEMPTS;
+
+  beforeEach(() => {
+    process.env.AUTONOMOUS_OPP_MAX_ATTEMPTS = '5';
+  });
+
+  afterAll(() => {
+    if (oldMaxAttempts == null) delete process.env.AUTONOMOUS_OPP_MAX_ATTEMPTS;
+    else process.env.AUTONOMOUS_OPP_MAX_ATTEMPTS = oldMaxAttempts;
+  });
+
+  const candidate = (bucket, action_type, page_url, dedupe_key = bucket) => ({
+    bucket, action_type, page_url, dedupe_key, score: 80, signal_metadata: {},
+  });
+
+  const fakeTrx = (citabilityRows) => {
+    const trx = jest.fn(() => {
+      let bucket = null;
+      const chain = {
+        where: jest.fn((value) => {
+          if (value && typeof value === 'object') bucket = value.bucket || bucket;
+          return chain;
+        }),
+        whereIn: jest.fn().mockReturnThis(),
+        whereNotNull: jest.fn().mockReturnThis(),
+        forUpdate: jest.fn().mockReturnThis(),
+        select: jest.fn(() => Promise.resolve(bucket === 'citability_backfill' ? citabilityRows : [])),
+      };
+      return chain;
+    });
+    trx.raw = jest.fn((sql) => sql);
+    return trx;
+  };
+
+  test('decay, answer-gap, and CTR edits defer to a canonical-domain-and-path citability row', async () => {
+    const miner = new GscOpportunityMiner();
+    const trx = fakeTrx([{
+      page_url: 'https://www.wavespestcontrol.com/blog/termite-guide/?utm_source=seed',
+      status: 'pending',
+      attempt_count: 4,
+    }]);
+    const out = await miner._revalidateFamilyBatch(trx, [
+      candidate('decay_refresh', 'refresh_existing_page', 'https://wavespestcontrol.com/blog/termite-guide', 'decay'),
+      candidate('answer_gap', 'refresh_existing_page', 'https://www.wavespestcontrol.com/blog/termite-guide/#faq', 'answer'),
+      candidate('ctr_rewrite', 'rewrite_title_meta', 'https://wavespestcontrol.com/blog/termite-guide/?ref=gsc', 'ctr'),
+      candidate('decay_refresh', 'refresh_existing_page', 'https://sarasota.wavespestcontrol.com/blog/termite-guide/', 'spoke'),
+      candidate('decay_refresh', 'refresh_existing_page', 'https://wavespestcontrol.com/blog/other-guide/', 'other'),
+    ]);
+
+    expect(out.map((row) => row.dedupe_key)).toEqual(['spoke', 'other']);
+    expect(trx.raw).toHaveBeenCalledWith("SELECT pg_advisory_xact_lock(hashtext('opportunity_page_edit'))");
+    expect(trx.raw.mock.invocationCallOrder[0]).toBeLessThan(trx.mock.invocationCallOrder[1]);
+  });
+
+  test('an exhausted pending citability row no longer owns the page', async () => {
+    const miner = new GscOpportunityMiner();
+    const row = candidate('answer_gap', 'refresh_existing_page', 'https://wavespestcontrol.com/blog/termite-guide/', 'answer');
+    const out = await miner._revalidateFamilyBatch(fakeTrx([{
+      page_url: 'https://www.wavespestcontrol.com/blog/termite-guide',
+      status: 'pending',
+      attempt_count: 5,
+    }]), [row]);
+
+    expect(out).toEqual([row]);
+  });
+
+  test.each([
+    ['pending', 4],
+    ['claimed', 50],
+  ])('a legacy root-relative %s citability row still owns its hub page', async (status, attempt_count) => {
+    const miner = new GscOpportunityMiner();
+    const out = await miner._revalidateFamilyBatch(fakeTrx([{
+      page_url: '/blog/termite-guide/?legacy=1',
+      status,
+      attempt_count,
+    }]), [candidate('answer_gap', 'refresh_existing_page', 'https://www.wavespestcontrol.com/blog/termite-guide', 'answer')]);
+
+    expect(out).toEqual([]);
+  });
+
+  test.each(['claimed', 'pending_review'])('%s citability work keeps owning the page after the claim budget', async (status) => {
+    const miner = new GscOpportunityMiner();
+    const out = await miner._revalidateFamilyBatch(fakeTrx([{
+      page_url: 'https://wavespestcontrol.com/blog/termite-guide/',
+      status,
+      attempt_count: 50,
+    }]), [candidate('decay_refresh', 'refresh_existing_page', 'https://www.wavespestcontrol.com/blog/termite-guide', 'decay')]);
+
+    expect(out).toEqual([]);
   });
 });
 

@@ -61,6 +61,7 @@ function chain({
     'limit',
     'max',
     'count',
+    'forUpdate',
   ].forEach((method) => {
     q[method] = jest.fn(() => q);
   });
@@ -240,7 +241,10 @@ describe('admin email template routes', () => {
         allowed_variables: '["first_name","estimate_url"]',
       },
     });
-    setDbQueues({
+    // Lock, read, write and re-read in ONE transaction (Codex #4918 r18):
+    // the row is locked before it is read, so an edit waiting behind a
+    // migration merges onto what that migration wrote.
+    setTransactionQueues({
       email_templates: [loadQuery, updateQuery, updatedQuery],
     });
 
@@ -265,6 +269,10 @@ describe('admin email template routes', () => {
 
       expect(res.status).toBe(200);
       expect(body.template.name).toBe('Estimate Expiring Notice');
+      expect(db.transaction).toHaveBeenCalledTimes(1);
+      expect(loadQuery.where).toHaveBeenCalledWith({ template_key: 'estimate.expiring_notice' });
+      expect(loadQuery.forUpdate).toHaveBeenCalled();
+      expect(loadQuery.forUpdate.mock.invocationCallOrder[0]).toBeLessThan(loadQuery.first.mock.invocationCallOrder[0]);
       expect(updateQuery.update).toHaveBeenCalledWith(expect.objectContaining({
         name: 'Estimate Expiring Notice',
         from_email: 'service@example.com',
@@ -288,7 +296,7 @@ describe('admin email template routes', () => {
         send_stream: 'service_operational',
       },
     });
-    setDbQueues({ email_templates: [loadQuery] });
+    const trx = setTransactionQueues({ email_templates: [loadQuery] });
 
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/admin/email-templates/bad.settings`, {
@@ -300,7 +308,8 @@ describe('admin email template routes', () => {
 
       expect(res.status).toBe(400);
       expect(body.error).toMatch(/sendStream must be one of/);
-      expect(db).toHaveBeenCalledTimes(1);
+      expect(trx).toHaveBeenCalledTimes(1); // the locked read only — nothing written
+      expect(loadQuery.update).not.toHaveBeenCalled();
     });
   });
 

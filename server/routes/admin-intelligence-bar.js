@@ -85,6 +85,7 @@ try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
 const MODELS = require('../config/models');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('../services/llm/anthropic-wire');
+const { ledgerCall, ledgerCallRejected } = require('../services/llm-dispatch-metrics');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -2351,8 +2352,9 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
     const toolActivity = [];
 
     // Tool-use loop
+    let lastToolResponse = null;
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-      const response = await anthropic.messages.create({
+      const response = await ledgerCall('anthropic', model, () => anthropic.messages.create({
         model: model,
         ...anthropicEffortConfig(model),
         max_tokens: anthropicMaxTokens(model, context === 'tech' ? 1024 : 4096),
@@ -2365,7 +2367,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral', ttl: '1h' } }],
         tools,
         messages: withCacheBreakpoint(currentMessages),
-      });
+      }), { laneId: context === 'tech' ? 'ib_tech' : 'ib_admin' });
 
       // Cache-hit visibility: cache_read > 0 on repeat queries / later rounds
       // is the prod verification signal; all-zero across repeats means a
@@ -2383,8 +2385,16 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
 
       if (toolUses.length === 0) {
         finalResponse = textBlocks.map(t => t.text).join('\n');
+        // A terminal turn with neither a tool call nor usable text (a
+        // thinking-only or refused reply) answers nothing — the `!finalResponse`
+        // fallback further down still serves the operator a message, but that
+        // guard cannot tell this leg's own row apart from one where an
+        // earlier round correctly used a tool; flag it on the response that
+        // actually produced it.
+        if (!finalResponse.trim()) ledgerCallRejected(response, 'invalid_output');
         break;
       }
+      lastToolResponse = response;
 
       // Execute all tool calls using context-aware router
       const results = [];
@@ -2555,6 +2565,9 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
       if (activeTask) await IbTasks.checkpoint(activeTask.id, getAdminActorId(req), { runnerToken: activeTask.runner_token, messages: currentMessages });
     }
 
+    // finalResponse is still null only when every round was tool_use and the
+    // loop ran out — fail the round that ended it (Codex r12 on #4884).
+    if (finalResponse === null && lastToolResponse) ledgerCallRejected(lastToolResponse, 'tool_loop_exhausted');
     if (!finalResponse) {
       finalResponse = 'I ran into a complex query that needed too many steps. Try breaking it into smaller questions.';
     }

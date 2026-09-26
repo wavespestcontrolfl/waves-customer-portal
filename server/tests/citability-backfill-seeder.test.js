@@ -5,8 +5,12 @@
  */
 
 jest.mock('../models/db', () => {
-  const fn = jest.fn();
+  const fn = jest.fn(() => {
+    const query = { whereIn: () => query, where: () => query, whereRaw: () => query, first: async () => null };
+    return query;
+  });
   fn.raw = jest.fn(async () => ({ rowCount: 1 }));
+  fn.transaction = jest.fn(async (work) => work(fn));
   return fn;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
@@ -112,14 +116,23 @@ describe('rowForPost / planRows — page-anchored refresh rows, paced per ET day
     expect(row.query).toBeNull();
     expect(row.city).toBeNull();
     expect(row.service).toBe('termite');
-    expect(row.page_url).toBe('/termite/bait-vs-liquid/');
+    expect(row.page_url).toBe('https://www.wavespestcontrol.com/termite/bait-vs-liquid/');
     expect(row.score).toBe(BASE_SCORE + 4);
     expect(row.score).toBeGreaterThan(75);
     expect(row.signal_metadata.citability_gaps).toEqual(['named_sources', 'concrete_specifics', 'comparison', 'how_to_choose']);
     expect(row.signal_metadata.source).toBe('citability-backfill-seeder');
-    expect(row.dedupe_key).toBe(dedupeKeyFor('/termite/bait-vs-liquid/'));
+    expect(row.dedupe_key).toBe('citability:v1:/termite/bait-vs-liquid/');
     expect(row.available_at).toBeNull();
     expect(row.expires_at.getTime()).toBe(now.getTime() + 45 * 86400_000);
+  });
+  test('long URLs fit the DB dedupe limit without colliding on a shared prefix', () => {
+    const prefix = `/pest-control/${'long-blog-slug-'.repeat(20)}`;
+    const first = dedupeKeyFor(`${prefix}one/`);
+    const second = dedupeKeyFor(`${prefix}two/`);
+    expect(first).toHaveLength(200);
+    expect(second).toHaveLength(200);
+    expect(first).not.toBe(second);
+    expect(dedupeKeyFor('/pest-control/ants/')).toBe('citability:v1:/pest-control/ants/');
   });
   test('availableAtFor: day 0 is claimable now; later days land at midnight ET via the shared ET parser (DST-correct)', () => {
     expect(availableAtFor(now, 0)).toBeNull();
@@ -137,10 +150,10 @@ describe('rowForPost / planRows — page-anchored refresh rows, paced per ET day
   test('planRows: blog collection only, minGaps filter, worst-first, perDay pacing, limit', () => {
     const rows = seeder.planRows(corpus(), { now, perDay: 1, minGaps: 2 });
     // services/ file excluded; GOOD post has no gaps; POOR (4 gaps) sorts before mud-daubers (2).
-    expect(rows.map((r) => r.page_url)).toEqual(['/termite/bait-vs-liquid/', '/pest-control/mud-daubers/']);
+    expect(rows.map((r) => new URL(r.page_url).pathname)).toEqual(['/termite/bait-vs-liquid/', '/pest-control/mud-daubers/']);
     expect(rows[0].available_at).toBeNull();
     expect(rows[1].available_at.toISOString()).toBe('2026-09-26T04:00:00.000Z');
-    expect(seeder.planRows(corpus(), { now, minGaps: 3 }).map((r) => r.page_url)).toEqual(['/termite/bait-vs-liquid/']);
+    expect(seeder.planRows(corpus(), { now, minGaps: 3 }).map((r) => new URL(r.page_url).pathname)).toEqual(['/termite/bait-vs-liquid/']);
     expect(seeder.planRows(corpus(), { now, minGaps: 1, limit: 1 })).toHaveLength(1);
   });
   test('planRows skips non-indexable posts: noindex, spoke-rendered, off-hub or mismatched canonical (Codex P2)', () => {
@@ -152,25 +165,25 @@ describe('rowForPost / planRows — page-anchored refresh rows, paced per ET day
       variant('/mismatch', 'canonical: "/termite/other-post/"\n'),
       variant('/ok', ''),
     ];
-    expect(seeder.planRows(posts, { now, minGaps: 1 }).map((r) => r.page_url)).toEqual(['/termite/ok/']);
+    expect(seeder.planRows(posts, { now, minGaps: 1 }).map((r) => new URL(r.page_url).pathname)).toEqual(['/termite/ok/']);
   });
 });
 
 describe('rescanLive — stale seeded rows are re-checked before drafting (Codex P2)', () => {
   const opp = { id: 1, bucket: 'citability_backfill', page_url: '/termite/bait-vs-liquid/' };
   test('returns the live page gaps (frontmatter + body from the publisher)', async () => {
-    const publisher = { loadExistingPageBody: jest.fn().mockResolvedValue({ body: GOOD.slice(FM().length), frontmatter: { title: 'Termite Bait vs. Liquid Treatment in Venice', post_type: 'diagnostic' } }) };
+    const publisher = { loadExistingPageBody: jest.fn().mockResolvedValue({ source_file: 'src/content/blog/termite/bait-vs-liquid.mdx', body: GOOD.slice(FM().length), frontmatter: { title: 'Termite Bait vs. Liquid Treatment in Venice', post_type: 'diagnostic' } }) };
     const r = await seeder.rescanLive(opp, { publisher });
     expect(publisher.loadExistingPageBody).toHaveBeenCalledWith('/termite/bait-vs-liquid/');
     expect(r.gaps).toEqual([]);
     // Same page before the fix → the live gaps, not the seeded ones.
-    publisher.loadExistingPageBody.mockResolvedValue({ body: POOR.slice(FM().length), frontmatter: { title: 'Termite Bait vs. Liquid Treatment in Venice', post_type: 'diagnostic' } });
+    publisher.loadExistingPageBody.mockResolvedValue({ source_file: 'src/content/blog/termite/bait-vs-liquid.mdx', body: POOR.slice(FM().length), frontmatter: { title: 'Termite Bait vs. Liquid Treatment in Venice', post_type: 'diagnostic' } });
     expect((await seeder.rescanLive(opp, { publisher })).gaps).toEqual(['named_sources', 'concrete_specifics', 'comparison', 'how_to_choose']);
   });
-  test('the live re-scan honours the seeded source_file extension', async () => {
-    const publisher = { loadExistingPageBody: async () => ({ body: POOR.slice(FM().length), frontmatter: { title: 'Termite Bait vs. Liquid Treatment in Venice', post_type: 'diagnostic' } }) };
-    const r = await seeder.rescanLive({ ...opp, signal_metadata: { source_file: 'src/content/blog/termite/bait-vs-liquid.md' } }, { publisher });
-    expect(r.gaps).toEqual(['named_sources', 'concrete_specifics']);
+  test.each([['mdx', 'md', false], ['md', 'mdx', true]])('a %s to %s migration uses the current file format', async (oldExtension, extension, supportsComparison) => {
+    const publisher = { loadExistingPageBody: async () => ({ source_file: `src/content/blog/termite/bait-vs-liquid.${extension}`, body: POOR.slice(FM().length), frontmatter: { title: 'Termite Bait vs. Liquid Treatment in Venice', post_type: 'diagnostic' } }) };
+    const r = await seeder.rescanLive({ ...opp, signal_metadata: { source_file: `src/content/blog/termite/bait-vs-liquid.${oldExtension}` } }, { publisher });
+    expect(r.gaps.includes('comparison')).toBe(supportsComparison);
   });
   test('a post that turned non-indexable while queued resolves as ineligible (Codex r7 P2)', async () => {
     for (const frontmatter of [{ robots: 'noindex' }, { domains: ['some-spoke-domain.com'] }, { canonical: 'https://some-spoke-domain.com/x/' }, { canonical: '/termite/other/' }]) {
@@ -201,14 +214,40 @@ describe('seedAll — gated, idempotent upsert', () => {
   test('live: one ON CONFLICT upsert per eligible row, keyed on citability:v1:<page_url>', async () => {
     const r = await seeder.seedAll({ corpus: corpus(), perDay: 5 });
     expect(r.count).toBe(2);
-    expect(db.raw).toHaveBeenCalledTimes(2);
-    const [sql, bindings] = db.raw.mock.calls[0];
+    expect(db.transaction).toHaveBeenCalledTimes(2);
+    const inserts = db.raw.mock.calls.filter(([sql]) => sql.includes('INSERT INTO'));
+    expect(inserts).toHaveLength(2);
+    const [sql, bindings] = inserts[0];
     expect(sql).toMatch(/INSERT INTO opportunity_queue/);
     expect(sql).toMatch(/ON CONFLICT \(dedupe_key\) DO UPDATE/);
     expect(sql).toMatch(/status IN \('claimed', 'done', 'pending_review'\)/);
     expect(bindings[0]).toBe('citability_backfill');
     expect(bindings[1]).toBe('refresh_existing_page');
     expect(bindings[13]).toBe('citability:v1:/termite/bait-vs-liquid/');
+  });
+  test.each(['pending', 'claimed', 'pending_review'])('an existing %s page edit prevents a competing seed under the shared lock', async (status) => {
+    const refreshAudit = require('../services/seo/refresh-audit');
+    const check = jest.spyOn(refreshAudit, 'findInflightPageEdit').mockResolvedValue({ status, dedupe_key: 'other-bucket' });
+    try {
+      const r = await seeder.seedAll({ corpus: corpus() });
+      expect(r.count).toBe(0);
+      expect(db.raw.mock.calls.every(([sql]) => sql.includes('pg_advisory_xact_lock'))).toBe(true);
+      expect(check).toHaveBeenCalledWith(db, { path: '/termite/bait-vs-liquid', targetDomain: 'wavespestcontrol.com' });
+    } finally { check.mockRestore(); }
+  });
+  test.each(['pending', 'claimed', 'pending_review'])('normalizes a legacy %s seed without replacing its claim or scan', async (status) => {
+    const refreshAudit = require('../services/seo/refresh-audit');
+    const row = { id: 'existing-seed', bucket: 'citability_backfill', status, page_url: '/termite/bait-vs-liquid/', dedupe_key: 'citability:v1:/termite/bait-vs-liquid/' };
+    const check = jest.spyOn(refreshAudit, 'findInflightPageEdit').mockResolvedValue(row);
+    const update = jest.fn().mockResolvedValue(1);
+    const where = jest.fn(() => ({ update }));
+    db.mockImplementationOnce(() => ({ where }));
+    try {
+      const r = await seeder.seedAll({ corpus: [corpus()[0]] });
+      expect(r.count).toBe(0);
+      expect(where).toHaveBeenCalledWith({ id: 'existing-seed' });
+      expect(update).toHaveBeenCalledWith({ page_url: 'https://www.wavespestcontrol.com/termite/bait-vs-liquid/' });
+    } finally { check.mockRestore(); }
   });
 });
 

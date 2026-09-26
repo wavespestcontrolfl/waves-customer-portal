@@ -86,10 +86,39 @@ describe('isAuthorizedWdoArrangerBooking (predicate)', () => {
     }))).toBe(false);
   });
 
+  // codex #4966 r1 P1: a treatment (or any non-inspection) intent fails
+  // closed even with a catalog-looking "WDO Inspection Service" name.
+  test.each(['active_infestation_treatment', 'preventative_one_time', 'quote_only', undefined])(
+    'service_intent %s never qualifies, even named "WDO Inspection Service"',
+    (intent) => {
+      expect(isWdoInspectionRequest({ service_intent: intent, primary_service_category: 'wdo', specific_service_name: 'WDO Inspection Service' })).toBe(false);
+      const sr = { ...wdoExtraction().service_request, service_intent: intent, specific_service_name: 'WDO Inspection Service' };
+      expect(isAuthorizedWdoArrangerBooking(wdoExtraction({ service_request: sr }))).toBe(false);
+      expect(computeDeterministicTriageFlags(wdoExtraction({ service_request: sr }))).toContain('caller_not_authorized');
+    }
+  );
+
+  // codex #4966 r2 P1: the name is an exact-name ALLOWLIST, so inflected or
+  // extra treatment wording can never slip past a blocklist.
+  test.each([
+    'WDO inspection and treatments', 'WDO Retreatment', 'WDO inspection (tented)',
+    'WDO inspection, baited', 'WDO fumigated inspection', 'WDO Inspection + Termite Treatment',
+    'WDO Inspection and Repair', 'Termite Inspection Service', 'WDO Inspection Service for treatment',
+  ])('name %p never qualifies', (name) => {
+    expect(isWdoInspectionRequest({ service_intent: 'inspection_only', primary_service_category: 'wdo', specific_service_name: name })).toBe(false);
+  });
+  test.each([
+    'WDO', 'WDO Inspection', 'WDO Inspection Service', 'wdo inspection report',
+    'Wood-Destroying Organism Inspection', 'Wood Destroying Organisms (WDO) Inspection',
+    'WDO clearance letter', 'WDO Inspection Certificate',
+  ])('name %p qualifies', (name) => {
+    expect(isWdoInspectionRequest({ service_intent: 'inspection_only', primary_service_category: 'wdo', specific_service_name: name })).toBe(true);
+  });
+
   test('isWdoInspectionRequest matches on category or specific name', () => {
-    expect(isWdoInspectionRequest({ primary_service_category: 'wdo', specific_service_name: null })).toBe(true);
-    expect(isWdoInspectionRequest({ primary_service_category: 'inspection_only', specific_service_name: 'WDO Inspection Service' })).toBe(true);
-    expect(isWdoInspectionRequest({ primary_service_category: 'pest_general', specific_service_name: 'General Pest Control' })).toBe(false);
+    expect(isWdoInspectionRequest({ service_intent: 'inspection_only', primary_service_category: 'wdo', specific_service_name: null })).toBe(true);
+    expect(isWdoInspectionRequest({ service_intent: 'inspection_only', primary_service_category: 'inspection_only', specific_service_name: 'WDO Inspection Service' })).toBe(true);
+    expect(isWdoInspectionRequest({ service_intent: 'inspection_only', primary_service_category: 'pest_general', specific_service_name: 'General Pest Control' })).toBe(false);
   });
 });
 
@@ -289,14 +318,14 @@ describe('codex #4890 r5/r6 — WDO identity and elapsed agreed days', () => {
 
   test('a named non-WDO service is not a WDO request even when the category says wdo', () => {
     const contradictory = wdoExtraction({
-      service_request: { primary_service_category: 'wdo', specific_service_name: 'Termite Inspection Service' },
+      service_request: { service_intent: 'inspection_only', primary_service_category: 'wdo', specific_service_name: 'Termite Inspection Service' },
     });
     expect(isAuthorizedWdoArrangerBooking(contradictory)).toBe(false);
     expect(computeDeterministicTriageFlags(contradictory, { contactPhone: ANI, addressValidation: AV_CLEAN })).toContain('caller_not_authorized');
   });
 
   test('the category alone identifies a WDO when no specific service was named', () => {
-    const categoryOnly = wdoExtraction({ service_request: { primary_service_category: 'wdo', specific_service_name: null } });
+    const categoryOnly = wdoExtraction({ service_request: { service_intent: 'inspection_only', primary_service_category: 'wdo', specific_service_name: null } });
     expect(isAuthorizedWdoArrangerBooking(categoryOnly)).toBe(true);
   });
 
@@ -335,8 +364,38 @@ describe('codex #4890 r5/r6 — WDO identity and elapsed agreed days', () => {
   });
 
   test('the spelled-out WDO service name is recognized (codex #4890 r7 P2)', () => {
-    const spelled = wdoExtraction({ service_request: { primary_service_category: 'wdo', specific_service_name: 'Wood-Destroying Organism Inspection' } });
+    const spelled = wdoExtraction({ service_request: { service_intent: 'inspection_only', primary_service_category: 'wdo', specific_service_name: 'Wood-Destroying Organism Inspection' } });
     expect(isAuthorizedWdoArrangerBooking(spelled)).toBe(true);
+  });
+});
+
+// Codex #4890 post-merge review P1: specific_service_name is free text, so a
+// lender/realtor call labelled "WDO Treatment Service" matched the bare
+// \bWDO\b identity regex and, through isAuthorizedWdoArrangerBooking,
+// stripped caller_not_authorized from a third party's TREATMENT request.
+// The owner ruling covers only an inspection/report arranged for a lender or
+// realtor — never a treatment.
+describe('codex #4890 post-merge review P1 — arranger authorization requires INSPECTION identity, never treatment', () => {
+  test('"WDO Inspection Service" binds (inspection identity, no treatment wording)', () => {
+    expect(isWdoInspectionRequest({ service_intent: 'inspection_only', primary_service_category: 'wdo', specific_service_name: 'WDO Inspection Service' })).toBe(true);
+    const bound = wdoExtraction({ service_request: { service_intent: 'inspection_only', primary_service_category: 'wdo', specific_service_name: 'WDO Inspection Service' } });
+    expect(isAuthorizedWdoArrangerBooking(bound)).toBe(true);
+  });
+
+  test.each([
+    ['WDO Treatment Service'],
+    ['WDO Treatment'],
+    ['Wood-Destroying Organism Treatment'],
+    ['termite treatment'],
+    ['WDO inspection and treatment'],
+  ])('%s does NOT bind — not an inspection/report request', (specificServiceName) => {
+    expect(isWdoInspectionRequest({ service_intent: 'inspection_only', primary_service_category: 'wdo', specific_service_name: specificServiceName })).toBe(false);
+    const notBound = wdoExtraction({ service_request: { service_intent: 'inspection_only', primary_service_category: 'wdo', specific_service_name: specificServiceName } });
+    expect(isAuthorizedWdoArrangerBooking(notBound)).toBe(false);
+    // Fails closed all the way through: the deterministic pass still raises
+    // caller_not_authorized for a lender/realtor arranging a TREATMENT, even
+    // with a confirmed slot.
+    expect(computeDeterministicTriageFlags(notBound, { contactPhone: ANI, addressValidation: AV_CLEAN })).toContain('caller_not_authorized');
   });
 });
 
@@ -438,5 +497,28 @@ describe('codex #4890 P2 — the arranger slot-elapsed guard is rechecked inside
     // comment relies on).
     const heldReasonsMatch = source.match(/const heldReasons = new Set\(\[[^\]]*\]\);/)[0];
     expect(heldReasonsMatch).not.toContain("'past_extracted_date'");
+  });
+});
+
+// Codex #4890 post-merge review P2: buildTriageItem left
+// 'arranger_slot_elapsed_pre_insert' out of flagToCategoryMap AND
+// SCHEDULING_PAYLOAD_FLAGS, so the card filed as service_unknown with no
+// scheduling-window snapshot for the office to re-book against.
+describe('codex #4890 post-merge review P2 — arranger_slot_elapsed_pre_insert files in the scheduling lane', () => {
+  const { buildTriageItem } = require('../services/call-routing-gates');
+
+  test('buildTriageItem gives it the scheduling (time_ambiguous) category and carries the scheduling_window payload', () => {
+    const item = buildTriageItem({
+      callLogId: 42,
+      flag: 'arranger_slot_elapsed_pre_insert',
+      extraction: wdoExtraction(),
+      severity: 'advisory',
+    });
+    expect(item.category).toBe('time_ambiguous');
+    const payload = JSON.parse(item.payload);
+    expect(payload.scheduling_window).toEqual(expect.objectContaining({
+      status: 'confirmed',
+      confirmed_start_at: '2026-09-28T10:00:00-04:00',
+    }));
   });
 });

@@ -41,6 +41,7 @@
  */
 
 const db = require('../../models/db');
+const { createHash } = require('node:crypto');
 const logger = require('../logger');
 const { isEnabled } = require('../../config/feature-gates');
 const fm = require('../content-astro/frontmatter');
@@ -207,12 +208,14 @@ async function rescanLive(opportunity, { publisher = require('../content-astro/a
     || link.sourceCanonicalMismatch(fmData, url)) {
     return { gaps: [], results: {}, ineligible: true };
   }
-  const scan = scanParsed({ frontmatter: fmData, body: live.body, url, file: opportunity.signal_metadata?.source_file || null });
+  if (!live.source_file) return null;
+  const scan = scanParsed({ frontmatter: fmData, body: live.body, url, file: live.source_file });
   return { gaps: scan.gaps, results: scan.results, ineligible: false };
 }
 
 function dedupeKeyFor(url) {
-  return `${DEDUPE_PREFIX}${String(url || '').trim()}`;
+  const key = `${DEDUPE_PREFIX}${String(url || '').trim()}`;
+  return key.length <= 200 ? key : `${key.slice(0, 135)}:${createHash('sha256').update(key).digest('hex')}`;
 }
 
 // ET-midnight of today + dayOffset, so rows self-activate one batch per day
@@ -228,6 +231,8 @@ function availableAtFor(now, dayOffset) {
 }
 
 function rowForPost(post, scan, { now = new Date(), dayOffset = 0, scannedRef = null } = {}) {
+  // Other page-edit producers compare domain + path, so persist a full hub URL.
+  const pageUrl = new URL(post.url, 'https://www.wavespestcontrol.com').href;
   const score = BASE_SCORE + scan.gaps.length;
   const availableAt = availableAtFor(now, dayOffset);
   const expiresBase = availableAt || now;
@@ -235,7 +240,7 @@ function rowForPost(post, scan, { now = new Date(), dayOffset = 0, scannedRef = 
     bucket: CITABILITY_BACKFILL_BUCKET,
     action_type: 'refresh_existing_page',
     query: null, // page-only: no target_keyword, no SERP profiling
-    page_url: post.url,
+    page_url: pageUrl,
     service: serviceForPost(scan.frontmatter),
     city: null, // facts gate "not applicable"; local claims still need facts_pack ids
     score,
@@ -254,6 +259,7 @@ function rowForPost(post, scan, { now = new Date(), dayOffset = 0, scannedRef = 
     mined_at: now,
     expires_at: new Date(expiresBase.getTime() + EXPIRES_DAYS_AFTER_AVAILABLE * 86400_000),
     available_at: availableAt,
+    // Keep the seed identity stable for existing rows while normalizing page_url.
     dedupe_key: dedupeKeyFor(post.url),
   };
 }
@@ -312,7 +318,22 @@ async function seedAll({ dryRun = false, perDay = DEFAULT_PER_DAY, minGaps = DEF
 
   let count = 0;
   for (const row of rows) {
-    const result = await db.raw(
+    const result = await db.transaction(async (trx) => {
+      const refreshAudit = require('../seo/refresh-audit');
+      // Share the page-edit lock and identity check with the other producers.
+      await trx.raw("SELECT pg_advisory_xact_lock(hashtext('opportunity_page_edit'))");
+      const inflight = await refreshAudit.findInflightPageEdit(trx, {
+        path: refreshAudit._identity.urlToPath(row.page_url),
+        targetDomain: 'wavespestcontrol.com',
+      });
+      if (inflight) {
+        if (inflight.bucket === CITABILITY_BACKFILL_BUCKET && inflight.dedupe_key === row.dedupe_key && inflight.page_url !== row.page_url) {
+          // Repair legacy route identity without changing an active claim or scan.
+          await trx('opportunity_queue').where({ id: inflight.id }).update({ page_url: row.page_url });
+        }
+        return { rowCount: 0 };
+      }
+      return trx.raw(
       `INSERT INTO opportunity_queue
          (bucket, action_type, query, page_url, service, city,
           score, score_breakdown, signal_metadata, status,
@@ -349,8 +370,9 @@ async function seedAll({ dryRun = false, perDay = DEFAULT_PER_DAY, minGaps = DEF
         row.mined_at, row.expires_at, row.available_at, row.dedupe_key,
         maxClaimAttempts(),
       ]
-    );
-    count += result.rowCount || 1;
+      );
+    });
+    count += result.rowCount || 0;
   }
   logger.info(`[citability-backfill-seeder] seeded ${count}/${rows.length} refresh row(s) over ${summary.days} ET day(s) (perDay=${perDay}, minGaps=${minGaps}) from ${posts.length} scanned post(s)`);
   return { dryRun: false, count, rows, summary };

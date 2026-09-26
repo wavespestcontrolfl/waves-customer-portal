@@ -3849,7 +3849,30 @@ class GscOpportunityMiner {
       .where({ bucket: 'listicle_family' })
       .forUpdate()
       .select('dedupe_key', 'action_type', 'status', 'page_url', trx.raw("signal_metadata->'family_keys' as family_keys"));
-    if (!hasFamily) return opportunities; // lock taken (sweep / non-family page edits); nothing to filter
+    // Citability can seed the same Astro page before this miner reaches
+    // the persist transaction. Re-read that lane AFTER the shared lock so
+    // ordinary decay/answer-gap/CTR candidates cannot enqueue a competing
+    // edit. Keep the queue's exhausted-pending contract: an unclaimable
+    // pending row no longer owns the page, while claimed/review work does.
+    // Require lazily to avoid introducing a load-time cycle through the
+    // queue's content modules.
+    const { _internals: { maxClaimAttempts } } = require('../content/opportunity-queue');
+    const claimBudget = maxClaimAttempts();
+    const citabilityRows = await trx('opportunity_queue')
+      .where({ bucket: 'citability_backfill' })
+      .whereIn('status', ['pending', 'claimed', 'pending_review'])
+      .whereNotNull('page_url')
+      .select('page_url', 'status', 'attempt_count');
+    const activeCitabilityPages = new Set(citabilityRows
+      .filter((r) => r.status !== 'pending' || Number(r.attempt_count) < claimBudget)
+      .map((r) => routeIdentity(String(r.page_url).startsWith('/')
+        ? `https://${HUB_DOMAIN}${r.page_url}`
+        : r.page_url)));
+    const citabilityChecked = opportunities.filter((o) => o.bucket === 'citability_backfill'
+      || !o.page_url
+      || !GscOpportunityMiner.PAGE_EDITING_ACTIONS.includes(o.action_type)
+      || !activeCitabilityPages.has(routeIdentity(o.page_url)));
+    if (!hasFamily) return citabilityChecked; // lock taken (sweep / non-family page edits); nothing else to filter
     // One-edit-per-page under the LOCK (Codex r25 audit): a concurrent
     // mine can insert a different-subgroup refresh for the same page after
     // the pre-mine state read — with the rows now locked and re-read, a
@@ -3879,6 +3902,7 @@ class GscOpportunityMiner {
     const nonFamily = await trx('opportunity_queue')
       .whereIn('action_type', GscOpportunityMiner.PAGE_EDITING_ACTIONS)
       .whereNot('bucket', 'listicle_family')
+      .whereNot('bucket', 'citability_backfill')
       .whereIn('status', ['pending', 'claimed', 'pending_review'])
       .whereNotNull('page_url')
       .select('page_url', 'query', trx.raw("signal_metadata->'unanswered_queries' as unanswered_queries"));
@@ -3890,7 +3914,7 @@ class GscOpportunityMiner {
         if (u && u.query) conflictQueries.add(String(u.query).toLowerCase());
       }
     }
-    return opportunities.filter((o) => {
+    return citabilityChecked.filter((o) => {
       if (o.bucket !== 'listicle_family') return true;
       if (o.action_type === 'refresh_existing_page') {
         if (conflictPages.has(routeIdentity(o.page_url))) return false;

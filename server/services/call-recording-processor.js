@@ -751,7 +751,7 @@ async function quarantineCardRecording(call, { source = 'transcript_scrub' } = {
         'billing',
         'Card number heard on a recorded call',
         'A card number was detected in a call transcript. The transcript was masked and the recording was quarantined — remind callers we never take card numbers by phone; text the secure link instead.',
-        { link: call.customer_id ? `/admin/customers/${call.customer_id}` : '/admin/communications', metadata: { callId: call.id, twilioDeleted, source } },
+        { link: call.customer_id ? `/admin/customers?customerId=${call.customer_id}` : '/admin/communications', metadata: { callId: call.id, twilioDeleted, source } },
       );
       // Alert DELIVERED — only now mark it, so a failed/interrupted send
       // retries on the next quarantine/recovery touch (round-17 P2).
@@ -2186,7 +2186,7 @@ async function retirePriceAgreedEstimatorBell({
   }
   try {
     const { notify: notifyEstimator } = require('./estimator-engine');
-    const link = customerId ? `/admin/customers/${customerId}` : '/admin/communications';
+    const link = customerId ? `/admin/customers?customerId=${customerId}` : '/admin/communications';
     const priceLabel = formatAgreedPriceLabel(callAgreedPrice);
     const promised = callQuotePromised === true;
     await notifyEstimator({
@@ -7091,7 +7091,7 @@ async function generateLeadSynopsis(transcription) {
     // that could steal live work. With every call bounded, a stuck pass
     // FAILS, releases and stops beating, and the heartbeat rule alone is
     // enough.
-    const response = await client.messages.create({
+    const response = await ledgerCall('anthropic', MODELS.FLAGSHIP, () => client.messages.create({
       model: MODELS.FLAGSHIP,
       ...anthropicEffortConfig(MODELS.FLAGSHIP),
       max_tokens: anthropicMaxTokens(MODELS.FLAGSHIP, 1200),
@@ -7140,7 +7140,7 @@ Use markdown headers (##) for sections. Use bullet points. Keep the entire outpu
       // intervals and trip the stall watchdog on a healthy pass (codex P2).
       // The pipeline has its own retry lanes; a claim-holding pass does not
       // need a second one inside it.
-    }, { timeout: PROVIDER_FETCH_TIMEOUTS_MS.extraction, maxRetries: 0 });
+    }, { timeout: PROVIDER_FETCH_TIMEOUTS_MS.extraction, maxRetries: 0 }), { laneId: 'lead_synopsis' });
 
     // First TEXT block — a thinking block leads the content on Opus 5.5.
     return anthropicText(response).trim() || null;
@@ -14452,7 +14452,7 @@ const CallRecordingProcessor = {
           'Quote promised on call — send it',
           `${callerName}: the agent promised to send a quote (${servicesText}${propertyCount > 1 ? `, ${propertyCount} properties` : ''}). Send it before end of day — no lead is tracking this promise.`,
           {
-            link: customerId ? `/admin/customers/${customerId}` : '/admin/communications',
+            link: customerId ? `/admin/customers?customerId=${customerId}` : '/admin/communications',
             metadata: {
               customerId: customerId || null,
               callSid: call.twilio_call_sid,
@@ -19937,6 +19937,7 @@ const CallRecordingProcessor = {
     };
   },
 };
+const { ledgerCall } = require('./llm-dispatch-metrics');
 
 // Named production export for the first-touch resume lane (2026-07-30): the
 // held newsletter subscribe is re-driven from lead-first-touch-resume once
