@@ -5,7 +5,7 @@
 // countersigned, and the operator types their own name.
 import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useNavigate } from "react-router-dom";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import DocumentRequestsPage from "./DocumentRequestsPage";
 
@@ -50,6 +50,9 @@ beforeEach(() => {
       rows = rows.map((row) => (row.id === "annual" ? { ...row, countersignedAt: "2026-09-25T15:00:00.000Z" } : row));
       return Promise.resolve(response({ updated: true }));
     }
+    if (path === "/admin/contracts/done/pdf") {
+      return Promise.resolve({ ok: true, status: 200, blob: async () => new Blob(["%PDF"], { type: "application/pdf" }) });
+    }
     throw new Error(`Unexpected request: ${path}`);
   });
 });
@@ -64,6 +67,23 @@ it("preselects the Signed tab from ?status=signed (the countersign bell's link)"
   render(<MemoryRouter initialEntries={["/admin/contracts?tab=requests&status=signed"]}><DocumentRequestsPage /></MemoryRouter>);
   await screen.findByText("Annual agreement");
   expect(listPaths[0]).toContain("status=signed");
+});
+
+it("follows ?status= when the bell link navigates to the already-mounted page (codex #4842 r1 P2)", async () => {
+  function GoToSigned() {
+    const navigate = useNavigate();
+    return <button type="button" onClick={() => navigate("/admin/contracts?tab=requests&status=signed")}>open bell link</button>;
+  }
+  render(
+    <MemoryRouter initialEntries={["/admin/contracts?tab=requests&status=open"]}>
+      <GoToSigned />
+      <DocumentRequestsPage />
+    </MemoryRouter>,
+  );
+  await screen.findByText("Annual agreement");
+  expect(listPaths.at(-1)).toContain("status=open");
+  fireEvent.click(screen.getByRole("button", { name: "open bell link" }));
+  await waitFor(() => expect(listPaths.at(-1)).toContain("status=signed"));
 });
 
 it("offers Countersign only on a signed, not-yet-countersigned annual agreement", async () => {
@@ -94,4 +114,21 @@ it("requires a typed name, posts it, and refreshes the row as countersigned", as
   ));
   await waitFor(() => expect(within(rowFor("Annual agreement")).queryByRole("button", { name: /countersign/i })).toBeNull());
   expect(within(rowFor("Annual agreement")).getByText("Countersigned")).toBeInTheDocument();
+});
+
+it("a countersigned row offers the executed PDF, fetched with admin auth (codex #4842 r1 P2)", async () => {
+  const tab = { location: { href: "" }, close: vi.fn() };
+  const openSpy = vi.spyOn(window, "open").mockReturnValue(tab);
+  URL.createObjectURL = vi.fn(() => "blob:signed-pdf");
+  URL.revokeObjectURL = vi.fn();
+  try {
+    render(<MemoryRouter><DocumentRequestsPage /></MemoryRouter>);
+    await screen.findByText("Annual agreement");
+    expect(within(rowFor("Annual agreement")).queryByRole("button", { name: /signed pdf/i })).toBeNull();
+    fireEvent.click(within(rowFor("Countersigned annual")).getByRole("button", { name: /signed pdf/i }));
+    await waitFor(() => expect(tab.location.href).toBe("blob:signed-pdf"));
+    expect(adminFetch).toHaveBeenCalledWith("/admin/contracts/done/pdf");
+  } finally {
+    openSpy.mockRestore();
+  }
 });

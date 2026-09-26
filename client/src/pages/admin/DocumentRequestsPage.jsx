@@ -82,6 +82,31 @@ function CountersignBadge({ request }) {
   return null;
 }
 
+// The executed copy, countersignature stamp included — the only place a
+// countersigned PDF can be obtained (the customer's signing link is burned).
+function SignedPdfButton({ request, disabled, onError }) {
+  if (!request?.countersignedAt) return null;
+  const openPdf = async () => {
+    const tab = window.open("", "_blank");
+    try {
+      const res = await rawAdminFetch(`/admin/contracts/${request.id}/pdf`);
+      if (!res.ok) throw new Error(`Could not load the signed PDF (HTTP ${res.status})`);
+      const url = URL.createObjectURL(await res.blob());
+      if (tab) tab.location.href = url;
+      else window.location.assign(url);
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } catch (err) {
+      if (tab) tab.close();
+      onError(err.message || "Could not load the signed PDF");
+    }
+  };
+  return (
+    <Button size="sm" variant="secondary" disabled={disabled} onClick={openPdf}>
+      Signed PDF
+    </Button>
+  );
+}
+
 function CountersignButton({ request, disabled, onClick }) {
   if (!canCountersign(request)) return null;
   return (
@@ -127,10 +152,16 @@ export default function DocumentRequestsPage({ embedded = false, onSecondaryNav 
   // ?status=<tab> preselects a tab (the countersign-needed bell links to
   // ?tab=requests&status=signed); anything unrecognised falls back to Open.
   const [searchParams] = useSearchParams();
-  const [status, setStatus] = useState(() => {
-    const requested = searchParams.get("status");
-    return STATUS_TABS.some((tab) => tab.key === requested) ? requested : "open";
-  });
+  const requestedStatus = searchParams.get("status");
+  const [status, setStatus] = useState(() => (
+    STATUS_TABS.some((tab) => tab.key === requestedStatus) ? requestedStatus : "open"
+  ));
+  // The page stays mounted when the bell link navigates to it again, so the
+  // initializer alone would keep the old tab — follow the URL whenever its
+  // ?status= changes (tab clicks don't touch the URL, so they're unaffected).
+  useEffect(() => {
+    if (STATUS_TABS.some((tab) => tab.key === requestedStatus)) setStatus(requestedStatus);
+  }, [requestedStatus]);
   const [search, setSearch] = useState("");
   const [requests, setRequests] = useState([]);
   const [stats, setStats] = useState(null);
@@ -438,6 +469,7 @@ export default function DocumentRequestsPage({ embedded = false, onSecondaryNav 
                             </>
                           )}
                           <CountersignButton request={request} disabled={acting} onClick={setCountersignTarget} />
+                          <SignedPdfButton request={request} disabled={acting} onError={setError} />
                         </div>
                       </TD>
                     </TR>

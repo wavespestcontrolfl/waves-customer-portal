@@ -681,13 +681,42 @@ router.post('/:id/cancel', async (req, res, next) => {
 // lock (a second attempt 409s rather than silently no-opping, so the admin
 // UI can tell the difference between "just countersigned" and "already
 // was"). Admin-only via this router's router.use(adminAuthenticate,
-// requireAdmin).
+// requireAdmin) — and, on top of that, only the DESIGNATED certified
+// operator in charge (codex #4842 r1 P1): any other admin gets a 403.
+//
+// The designation is TERMITE_CERTIFIED_OPERATOR_TECHNICIAN_IDS (comma list of
+// technicians.id; unset = nobody can countersign — fail closed). The
+// designated account must also hold an unexpired FL applicator license on
+// file, and the name recorded on the agreement and PDF is that verified
+// account's printed name. The operator still types it as evidence of intent,
+// but the typed text is only checked against it, never stored in its place.
+function designatedCertifiedOperatorIds() {
+  return String(process.env.TERMITE_CERTIFIED_OPERATOR_TECHNICIAN_IDS || '')
+    .split(',').map((id) => id.trim()).filter(Boolean);
+}
+
+function normalizedPersonName(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+function applicatorLicenseCurrent(operator, now) {
+  if (!String(operator?.fl_applicator_license || '').trim()) return false;
+  // Repo convention (compliance picker): a missing expiry reads as active.
+  if (!operator.license_expiry) return true;
+  const expiry = new Date(operator.license_expiry);
+  return Number.isNaN(expiry.getTime()) ? false : expiry >= now;
+}
+
 router.post('/:id/countersign', async (req, res, next) => {
   try {
     const now = new Date();
     const { ANNUAL_TEMPLATE_KEY } = require('../services/termite-program-agreement');
     let response;
     let countersignedId = null;
+
+    if (!req.technicianId || !designatedCertifiedOperatorIds().includes(String(req.technicianId))) {
+      return res.status(403).json({ error: 'Only the designated certified operator in charge can countersign this agreement.' });
+    }
 
     await db.transaction(async (trx) => {
       const contract = await trx('customer_contracts')
@@ -711,12 +740,25 @@ router.post('/:id/countersign', async (req, res, next) => {
         return;
       }
 
-      // Typed-name evidence, validated exactly like the customer's typed
-      // signature (contracts-public.js /:token/sign) — the certified
-      // operator types their own name; it is never filled in for them.
-      const countersignerName = String(req.body?.name || '').trim();
-      if (countersignerName.length < 2 || countersignerName.length > 180) {
+      // Typed-name evidence, validated like the customer's typed signature
+      // (contracts-public.js /:token/sign). The operator types their own
+      // name; it is never filled in for them.
+      const typedName = String(req.body?.name || '').trim();
+      if (typedName.length < 2 || typedName.length > 180) {
         response = { status: 400, body: { error: 'Type your full name (2–180 characters) to countersign.' } };
+        return;
+      }
+
+      const operator = await trx('technicians')
+        .where({ id: req.technicianId })
+        .first('id', 'name', 'applicator_printed_name', 'fl_applicator_license', 'license_expiry');
+      if (!operator || !applicatorLicenseCurrent(operator, now)) {
+        response = { status: 403, body: { error: 'Your account has no current Florida applicator license on file, so it cannot countersign as the certified operator.' } };
+        return;
+      }
+      const countersignerName = String(operator.applicator_printed_name || operator.name || '').trim();
+      if (!countersignerName || normalizedPersonName(typedName) !== normalizedPersonName(countersignerName)) {
+        response = { status: 400, body: { error: `Type your name exactly as it appears on your applicator record (${countersignerName || 'no printed name on file'}) to countersign.` } };
         return;
       }
 
@@ -736,12 +778,36 @@ router.post('/:id/countersign', async (req, res, next) => {
         return;
       }
       countersignedId = contract.id;
-      await insertEvent(trx, contract.id, contract.customer_id, 'countersigned', req, { countersignerName });
+      await insertEvent(trx, contract.id, contract.customer_id, 'countersigned', req, {
+        countersignerName,
+        applicatorLicense: String(operator.fl_applicator_license).trim(),
+      });
     });
 
     if (response) return res.status(response.status).json(response.body);
     const updated = await loadContract(countersignedId);
     res.json({ contract: serializeContract(updated), updated: true });
+  } catch (err) { next(err); }
+});
+
+// Executed copy for staff (codex #4842 r1 P2): the customer's public token
+// is burned at signing and the signed-copy email goes out before any
+// countersignature, so without this the "Certified Operator: <name>, <date>"
+// stamp (contract-pdf.js) would be reachable nowhere. Renders the CURRENT
+// row, so a countersigned agreement prints its countersignature. Signed
+// document-template contracts only; admin-only via router.use.
+router.get('/:id/pdf', async (req, res, next) => {
+  try {
+    const contract = await loadContract(req.params.id);
+    if (!contract) return res.status(404).json({ error: 'Contract not found' });
+    if (contract.contract_type !== 'document_template' || contract.status !== 'signed') {
+      return res.status(409).json({ error: 'Only a signed agreement has an executed copy to download.' });
+    }
+    const customer = await db('customers')
+      .where({ id: contract.customer_id })
+      .first('first_name', 'last_name', 'company_name');
+    const { generateContractPDF } = require('../services/pdf/contract-pdf');
+    return generateContractPDF(contract, customer || {}, res, { signed: true });
   } catch (err) { next(err); }
 });
 

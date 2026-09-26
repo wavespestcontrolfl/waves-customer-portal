@@ -140,7 +140,11 @@ describe('countersign-needed bell', () => {
     expect(sendSignedContractCopy).toHaveBeenCalledWith(CONTRACT_ID);
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
     const [category, title, msg, opts] = NotificationService.notifyAdmin.mock.calls[0];
-    expect(category).toBe('document');
+    // Rings under GATE_ADMIN_BELL_POLICY (codex #4842 r1 P2): explicit
+    // bell:true site tag, on a registered owner-overridable category.
+    expect(category).toBe('customer');
+    expect(opts.bell).toBe(true);
+    expect(jest.requireActual('../services/notification-bell-policy').OVERRIDABLE_CATEGORY_SET.has(category)).toBe(true);
     expect(title).toMatch(/countersign needed/i);
     expect(msg).toMatch(/Sam Customer/);
     expect(opts.dedupeKey).toBe(`termite-annual-countersign:${CONTRACT_ID}`);

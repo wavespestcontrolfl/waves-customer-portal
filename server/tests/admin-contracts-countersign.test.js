@@ -55,6 +55,12 @@ jest.mock('../services/document-contract-delivery', () => ({
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/termite-program-agreement', () => ({ ANNUAL_TEMPLATE_KEY: 'service_agreement.termite_annual_protection' }));
+jest.mock('../services/pdf/contract-pdf', () => ({
+  generateContractPDF: jest.fn((contract, customer, res) => {
+    res.setHeader('Content-Type', 'application/pdf');
+    res.end(`PDF:${contract.countersigner_name || ''}`);
+  }),
+}));
 
 const express = require('express');
 const jwt = require('jsonwebtoken');
@@ -63,8 +69,14 @@ const adminContracts = require('../routes/admin-contracts');
 
 const TECH = { id: 'tech-9', role: 'technician', employment_status: 'active', auth_token_version: 1, must_change_password: false, first_name: 'Tessa', last_name: 'Tech' };
 const techToken = jwt.sign({ technicianId: TECH.id, type: 'access', tokenVersion: 1 }, process.env.JWT_SECRET);
-const ADMIN = { id: 'admin-9', role: 'admin', employment_status: 'active', auth_token_version: 1, must_change_password: false, first_name: 'Adam', last_name: 'Owner' };
+const ADMIN = {
+  id: 'admin-9', role: 'admin', employment_status: 'active', auth_token_version: 1, must_change_password: false, first_name: 'Adam', last_name: 'Owner',
+  name: 'Adam', applicator_printed_name: 'Adam Owner', fl_applicator_license: 'JE000000', license_expiry: null,
+};
 const adminToken = jwt.sign({ technicianId: ADMIN.id, type: 'access', tokenVersion: 1 }, process.env.JWT_SECRET);
+// A second admin who is NOT the designated certified operator.
+const OTHER_ADMIN = { ...ADMIN, id: 'admin-7', first_name: 'Olive', last_name: 'Office', name: 'Olive', applicator_printed_name: null, fl_applicator_license: null };
+const otherAdminToken = jwt.sign({ technicianId: OTHER_ADMIN.id, type: 'access', tokenVersion: 1 }, process.env.JWT_SECRET);
 
 async function withServer(fn) {
   const app = express();
@@ -91,7 +103,8 @@ beforeEach(() => {
   mockWrites.length = 0;
   mockRows = {};
   db.mockClear();
-  const staffById = { [TECH.id]: TECH, [ADMIN.id]: ADMIN };
+  process.env.TERMITE_CERTIFIED_OPERATOR_TECHNICIAN_IDS = ADMIN.id;
+  const staffById = { [TECH.id]: TECH, [ADMIN.id]: ADMIN, [OTHER_ADMIN.id]: OTHER_ADMIN };
   mockRows.technicians = (b) => {
     const filter = b.filters.find((f) => f && f.id);
     return staffById[filter?.id] || null;
@@ -186,7 +199,7 @@ describe('POST /api/admin/contracts/:id/countersign — admin', () => {
       actor_type: 'admin',
       actor_id: ADMIN.id,
     }));
-    expect(JSON.parse(event.payload.metadata)).toEqual({ countersignerName: 'Adam Owner' });
+    expect(JSON.parse(event.payload.metadata)).toEqual({ countersignerName: 'Adam Owner', applicatorLicense: 'JE000000' });
   });
 
   test('a blank or one-character typed name 400s and writes nothing — the operator types their own name, never auto-filled', async () => {
@@ -201,20 +214,30 @@ describe('POST /api/admin/contracts/:id/countersign — admin', () => {
     expect(mockWrites).toHaveLength(0);
   });
 
-  test('the typed name is stored as typed (trimmed), independent of the logged-in admin identity', async () => {
+  test('the recorded name is the verified operator\'s printed name — the typed name only has to match it', async () => {
     let served = false;
-    mockRows.customer_contracts = (b) => {
+    mockRows.customer_contracts = () => {
       if (!served) { served = true; return BASE_CONTRACT; }
-      return { ...BASE_CONTRACT, countersigned_at: new Date(), countersigner_name: 'Adam Benetti, Certified Operator' };
+      return { ...BASE_CONTRACT, countersigned_at: new Date(), countersigner_name: 'Adam Owner' };
     };
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/api/admin/contracts/${CONTRACT_ID}/countersign`, {
-        method: 'POST', headers: adminHdrs, body: JSON.stringify({ name: '  Adam Benetti, Certified Operator ' }),
+        method: 'POST', headers: adminHdrs, body: JSON.stringify({ name: '  adam   OWNER ' }),
       });
       expect(res.status).toBe(200);
     });
     const [update] = mockWrites.filter((w) => w.op === 'update' && w.table === 'customer_contracts');
-    expect(update.payload.countersigner_name).toBe('Adam Benetti, Certified Operator');
+    expect(update.payload.countersigner_name).toBe('Adam Owner');
+  });
+
+  test('a typed name that is not the operator\'s own (e.g. someone else\'s) 400s and writes nothing', async () => {
+    mockRows.customer_contracts = BASE_CONTRACT;
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/api/admin/contracts/${CONTRACT_ID}/countersign`, { method: 'POST', headers: adminHdrs, body: JSON.stringify({ name: 'Adam Benetti, Certified Operator' }) });
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toMatch(/exactly as it appears/i);
+    });
+    expect(mockWrites).toHaveLength(0);
   });
 
   test('lost race: the guarded update matches no row (another countersign landed first) — 409, no event', async () => {
@@ -234,6 +257,81 @@ describe('POST /api/admin/contracts/:id/countersign — admin', () => {
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/api/admin/contracts/missing/countersign`, { method: 'POST', headers: adminHdrs, body: '{}' });
       expect(res.status).toBe(404);
+    });
+  });
+});
+
+describe('POST /api/admin/contracts/:id/countersign — certified operator only (codex #4842 r1 P1)', () => {
+  const post = (baseUrl, headers, name = 'Adam Owner') => fetch(`${baseUrl}/api/admin/contracts/${CONTRACT_ID}/countersign`, {
+    method: 'POST', headers, body: JSON.stringify({ name }),
+  });
+
+  test('another admin — even typing the operator\'s name — 403s before anything is read or written', async () => {
+    mockRows.customer_contracts = BASE_CONTRACT;
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { authorization: `Bearer ${otherAdminToken}`, 'content-type': 'application/json' });
+      expect(res.status).toBe(403);
+      expect((await res.json()).error).toMatch(/designated certified operator/i);
+    });
+    expect(mockWrites).toHaveLength(0);
+  });
+
+  test('no designation configured: nobody can countersign (fail closed)', async () => {
+    delete process.env.TERMITE_CERTIFIED_OPERATOR_TECHNICIAN_IDS;
+    mockRows.customer_contracts = BASE_CONTRACT;
+    await withServer(async (baseUrl) => {
+      expect((await post(baseUrl, adminHdrs)).status).toBe(403);
+    });
+    expect(mockWrites).toHaveLength(0);
+  });
+
+  test('the designated account without a current applicator license 403s', async () => {
+    for (const license of [{ fl_applicator_license: '' }, { license_expiry: '2020-01-01' }]) {
+      mockWrites.length = 0;
+      const lapsed = { ...ADMIN, ...license };
+      mockRows.technicians = (b) => {
+        const filter = b.filters.find((f) => f && f.id);
+        return filter?.id === ADMIN.id ? lapsed : null;
+      };
+      mockRows.customer_contracts = BASE_CONTRACT;
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, adminHdrs);
+        expect(res.status).toBe(403);
+        expect((await res.json()).error).toMatch(/applicator license/i);
+      });
+      expect(mockWrites.filter((w) => w.op === 'update' && w.table === 'customer_contracts')).toHaveLength(0);
+    }
+  });
+});
+
+describe('GET /api/admin/contracts/:id/pdf — executed copy incl. countersignature (codex #4842 r1 P2)', () => {
+  const { generateContractPDF } = require('../services/pdf/contract-pdf');
+
+  test('a countersigned agreement renders from the current row, countersignature included', async () => {
+    mockRows.customer_contracts = { ...BASE_CONTRACT, countersigned_at: new Date('2026-09-25T15:00:00Z'), countersigner_name: 'Adam Owner' };
+    mockRows.customers = { first_name: 'Sam', last_name: 'Customer' };
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/api/admin/contracts/${CONTRACT_ID}/pdf`, { headers: adminHdrs });
+      expect(res.status).toBe(200);
+      expect(res.headers.get('content-type')).toMatch(/application\/pdf/);
+      expect(await res.text()).toBe('PDF:Adam Owner');
+    });
+    expect(generateContractPDF).toHaveBeenCalledWith(
+      expect.objectContaining({ id: CONTRACT_ID, countersigner_name: 'Adam Owner' }),
+      { first_name: 'Sam', last_name: 'Customer' },
+      expect.anything(),
+      { signed: true },
+    );
+  });
+
+  test('an unsigned agreement 409s; a missing one 404s; a technician token 403s', async () => {
+    await withServer(async (baseUrl) => {
+      mockRows.customer_contracts = { ...BASE_CONTRACT, status: 'viewed' };
+      expect((await fetch(`${baseUrl}/api/admin/contracts/${CONTRACT_ID}/pdf`, { headers: adminHdrs })).status).toBe(409);
+      mockRows.customer_contracts = null;
+      expect((await fetch(`${baseUrl}/api/admin/contracts/missing/pdf`, { headers: adminHdrs })).status).toBe(404);
+      mockRows.customer_contracts = BASE_CONTRACT;
+      expect((await fetch(`${baseUrl}/api/admin/contracts/${CONTRACT_ID}/pdf`, { headers: techHdrs })).status).toBe(403);
     });
   });
 });
