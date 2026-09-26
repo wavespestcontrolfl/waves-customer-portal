@@ -16,6 +16,7 @@ const ContactLedger = require("../collections/contact-ledger");
 const { billingChannelAllowed, explicitBillingChannels } = require('../billing-delivery-channels');
 const { reminderProgress, sendReminderChannels } = require('../billing-reminder-delivery');
 const { isDefiniteRejection } = require('../sendgrid-mail');
+const { withCustomerCommsLock } = require('../../utils/customer-comms-lock');
 
 const LATE_PAYMENT_EMAIL_BY_SMS_TEMPLATE = {
   late_payment_7d: { templateKey: "billing_late_payment_7_day", stageDays: 7 },
@@ -333,9 +334,11 @@ class BalanceReminder {
       invoiceIds,
       invoiceCount: outstanding.length,
       oldestInvoiceId: oldestInvoice?.id || null,
+      // /pay/ is keyed by the invoice token only — a customer id there opens a
+      // "not found" pay page, so a tokenless invoice gets no link at all.
       oldestInvoiceUrl: oldestInvoice?.token
         ? `${publicPortalUrl()}/pay/${oldestInvoice.token}`
-        : `${publicPortalUrl()}/pay/${customerId}`,
+        : null,
       oldestDueDate: oldest.payment_date,
       daysOverdue,
     };
@@ -343,9 +346,9 @@ class BalanceReminder {
 
   async sendReminder(service, balance, tier, daysUntil) {
     if (await customerDunningStopped(balance)) return false;
-    if (!balance.oldestInvoiceId) {
+    if (!balance.oldestInvoiceId || !balance.oldestInvoiceUrl) {
       throw new Error(
-        "balance reminder payment-link SMS skipped: no unpaid invoice id found",
+        "balance reminder payment-link SMS skipped: no unpaid invoice id/token found",
       );
     }
     // Collections policy (gate off ⇒ permitted without consulting — this
@@ -557,6 +560,9 @@ class BalanceReminder {
         prefs = null;
       }
     }
+    if (prefs?.email_enabled === false) {
+      return { ok: false, skipped: true, reason: 'email_disabled' };
+    }
     if (billingChannelAllowed(prefs || {}, 'billing', 'email') === false) {
       return { ok: false, skipped: true, reason: 'billing_email_not_selected' };
     }
@@ -584,6 +590,7 @@ class BalanceReminder {
     const triggerEventId = `late_payment:${latestInvoice.id}:${config.stageDays}`;
     const idempotencyKey = `late_payment_email:${latestInvoice.id}:${config.stageDays}`;
     let providerHandoffStarted = false;
+    let emailDisabledAtHandoff = false;
     try {
       const result = await EmailTemplateLibrary.sendTemplate({
         templateKey: config.templateKey,
@@ -602,20 +609,29 @@ class BalanceReminder {
         // …and again at the provider boundary, inside the library's handoff:
         // the recipient resolution and payload render are awaited after the
         // read above. Fail-closed, like the follow-up engine's email leg.
-        withProviderHandoff: async (dispatch) => {
-          const verdict = await require("../invoice-helpers").selfPayAtDispatch(invoice.id, db)();
+        // Same customer-comms lock as the follow-up engine and preference saves.
+        withProviderHandoff: async (dispatch) => withCustomerCommsLock(db, customer.id, async (trx) => {
+          const verdict = await require("../invoice-helpers").selfPayAtDispatch(invoice.id, trx)();
           if (verdict.ok !== true) return verdict;
-          const freshPrefs = await db('notification_prefs').where({ customer_id: customer.id }).first();
+          const freshPrefs = await trx('notification_prefs').where({ customer_id: customer.id }).first();
+          if (freshPrefs?.email_enabled === false) {
+            emailDisabledAtHandoff = true;
+            return { ok: false };
+          }
           if (billingChannelAllowed(freshPrefs || {}, 'billing', 'email') === false) return { ok: false };
-          const freshCustomer = await db('customers').where({ id: customer.id }).first();
+          const freshCustomer = await trx('customers').where({ id: customer.id }).first();
           const [freshRecipient] = getInvoiceEmailRecipients(freshCustomer, freshPrefs || {})
             .filter((entry) => isEmailLike(entry.email));
           if (cleanEmail(freshRecipient?.email) !== cleanEmail(recipient.email)) return { ok: false };
           providerHandoffStarted = true;
-          await dispatch();
+          await dispatch(trx);
           return { ok: true };
-        },
+        }),
       });
+
+      if (emailDisabledAtHandoff && !result.sent) {
+        return { ok: false, skipped: true, reason: 'email_disabled' };
+      }
 
       if (result.deduped) {
         return {

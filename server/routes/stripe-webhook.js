@@ -4062,7 +4062,7 @@ async function handleRefundFailed(refund) {
       title: `Refund FAILED at the bank: $${failedDollars.toFixed(2)}`,
       body: `Stripe refund ${refundId || '(unknown id)'} on charge ${chargeId || piId || '(unknown)'} did not clear (${refund?.failure_reason || 'no reason given'}). ${body}`,
       icon: '⚠️',
-      link: '/admin/invoices',
+      link: payment?.customer_id ? `/admin/invoices?customer=${payment.customer_id}` : '/admin/invoices',
       bell: true,
       connection: conn,
     });
@@ -7164,6 +7164,7 @@ async function handleDisputeCreated(dispute) {
   }
 
   let createdPaymentMeta = {};
+  let disputedInvoiceId = null; // for the bell link below
   if (payment) {
     try {
       createdPaymentMeta = payment.metadata
@@ -7193,6 +7194,7 @@ async function handleDisputeCreated(dispute) {
     // event lands), and the disputed-PI guard in the succeeded handler
     // would otherwise leave it stuck there.
     const invoice = await findInvoiceForPayment(payment);
+    disputedInvoiceId = invoice?.id || null;
     const invoicePi = invoice?.stripe_payment_intent_id ? String(invoice.stripe_payment_intent_id) : null;
     const disputedPi = payment.stripe_payment_intent_id ? String(payment.stripe_payment_intent_id) : null;
     // Only reopen when THIS disputed payment still settles the invoice —
@@ -7249,7 +7251,12 @@ async function handleDisputeCreated(dispute) {
       'dispute',
       `Dispute opened: $${amount}`,
       `Reason: ${reason}. Respond by ${dispute.evidence_details?.due_by ? new Date(dispute.evidence_details.due_by * 1000).toLocaleDateString('en-US', { timeZone: 'America/New_York' }) : 'soon'}. Charge: ${chargeId}`,
-      { icon: '\u26A0\uFE0F', link: '/admin/invoices' },
+      {
+        icon: '\u26A0\uFE0F',
+        link: disputedInvoiceId
+          ? `/admin/invoices?invoice=${disputedInvoiceId}`
+          : payment?.customer_id ? `/admin/invoices?customer=${payment.customer_id}` : '/admin/invoices',
+      },
     );
   } catch (err) {
     logger.error(`[stripe-webhook] Dispute notification failed: ${err.message}`);

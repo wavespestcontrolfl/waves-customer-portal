@@ -117,7 +117,7 @@ const DETECTORS = Object.freeze([
   {
     key: 'completion_lane_coverage',
     label: 'Active catalog services that do not resolve to exactly one completion lane',
-    href: '/admin/services',
+    href: '/admin/service-library',
     provenance: 'universal one-time services plan §5 Phase B — ops/agents/completion-lane-coverage.js',
     async run({ now }) {
       const { ALL_LISTS, classifyCatalogRow } = require('../config/completion-lane-registry');

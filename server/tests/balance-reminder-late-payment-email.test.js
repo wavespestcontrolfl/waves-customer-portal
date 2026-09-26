@@ -1,4 +1,5 @@
 jest.mock('../models/db', () => jest.fn());
+jest.mock('../utils/customer-comms-lock', () => ({ withCustomerCommsLock: jest.fn() }));
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
   warn: jest.fn(),
@@ -48,6 +49,7 @@ const InvoiceFollowUps = require('../services/invoice-followups');
 const StripeService = require('../services/stripe');
 const logger = require('../services/logger');
 const db = require('../models/db');
+const { withCustomerCommsLock } = require('../utils/customer-comms-lock');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderSmsTemplate } = require('../services/sms-template-renderer');
 const EmailTemplates = require('../services/email-template-library');
@@ -142,8 +144,18 @@ function customer(overrides = {}) {
 }
 
 describe('late-payment email sidecar', () => {
+  let lockHeld;
+  const trx = jest.fn((table) => {
+    expect(lockHeld).toBe(true);
+    return db(table);
+  });
   beforeEach(() => {
     jest.clearAllMocks();
+    lockHeld = false;
+    withCustomerCommsLock.mockImplementation(async (_db, _customerId, fn) => {
+      lockHeld = true;
+      try { return await fn(trx); } finally { lockHeld = false; }
+    });
   });
 
   test('latePaymentCheck keeps SMS send behavior and sends the matching 7-day email template', async () => {
@@ -327,14 +339,13 @@ describe('late-payment email sidecar', () => {
     },
   );
 
-  test('still sends required late-payment email when general customer email is disabled', async () => {
+  test('skips late-payment email when general customer email is disabled', async () => {
     setDbQueues({
       invoices: [chain({ first: invoice() })],
       notification_prefs: [chain({ first: { email_enabled: false } })],
-      customer_interactions: [chain()],
     });
 
-    await BalanceReminder.sendLatePaymentEmail({
+    const result = await BalanceReminder.sendLatePaymentEmail({
       customer: customer(),
       invoice: invoice(),
       balance: { totalBalance: 129, oldestDueDate: '2026-05-19' },
@@ -344,9 +355,173 @@ describe('late-payment email sidecar', () => {
       payUrl: 'https://portal.wavespestcontrol.com/pay/token-1',
     });
 
-    expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
-      templateKey: 'billing_late_payment_30_day',
-      suppressionGroupKey: 'transactional_required',
+    expect(result).toEqual({ ok: false, skipped: true, reason: 'email_disabled' });
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['enabled preference', { email_enabled: true }, null],
+    ['missing preference row', undefined, null],
+    ['failed initial preference read', undefined, new Error('preferences unavailable')],
+  ])('late-payment email proceeds with %s', async (_label, prefs, error) => {
+    const prefRead = chain({ first: prefs });
+    const freshPrefs = chain({ first: prefs });
+    const freshCustomer = chain({ first: customer() });
+    const ownershipRead = chain({ first: { payer_id: null, scheduled_send_error: null } });
+    if (error) prefRead.first.mockRejectedValueOnce(error);
+    setDbQueues({
+      invoices: [chain({ first: invoice() }), ownershipRead],
+      notification_prefs: [prefRead, freshPrefs],
+      customers: [freshCustomer],
+      customer_interactions: [chain()],
+    });
+    const dispatch = jest.fn(async (database) => {
+      expect(lockHeld).toBe(true);
+      expect(database).toBe(trx);
+      await Promise.resolve();
+      expect(lockHeld).toBe(true);
+    });
+    EmailTemplates.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) => {
+      const verdict = await withProviderHandoff(dispatch);
+      expect(verdict).toEqual({ ok: true });
+      return { sent: verdict.ok };
+    });
+
+    const result = await BalanceReminder.sendLatePaymentEmail({
+      customer: customer(),
+      invoice: invoice(),
+      balance: { totalBalance: 129, oldestDueDate: '2026-05-19' },
+      smsTemplateKey: 'late_payment_30d',
+      invoiceTitle: 'Quarterly Pest Control',
+      serviceDateClause: '',
+      payUrl: 'https://portal.wavespestcontrol.com/pay/token-1',
+    });
+
+    expect(result).toMatchObject({ ok: true });
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledTimes(1);
+    expect(withCustomerCommsLock).toHaveBeenCalledWith(db, 'cust-1', expect.any(Function));
+    expect(trx.mock.calls).toEqual([['invoices'], ['notification_prefs'], ['customers']]);
+    expect(ownershipRead.where).toHaveBeenCalledWith({ id: 'inv-1' });
+    expect(freshPrefs.where).toHaveBeenCalledWith({ customer_id: 'cust-1' });
+    expect(freshPrefs.first).toHaveBeenCalledTimes(1);
+    expect(freshCustomer.where).toHaveBeenCalledWith({ id: 'cust-1' });
+    expect(require('../services/customer-contact').getInvoiceEmailRecipients)
+      .toHaveBeenLastCalledWith(customer(), prefs || {});
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(dispatch).toHaveBeenCalledWith(trx);
+    expect(lockHeld).toBe(false);
+  });
+
+  test('a fresh email opt-out before provider handoff prevents dispatch', async () => {
+    const dispatch = jest.fn();
+    let handoffResult;
+    EmailTemplates.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) => {
+      handoffResult = await withProviderHandoff(dispatch);
+      return { sent: false, aborted: true, reason: 'aborted_before_dispatch' };
+    });
+    setDbQueues({
+      invoices: [
+        chain({ first: invoice() }),
+        chain({ first: { payer_id: null, scheduled_send_error: null } }),
+      ],
+      notification_prefs: [
+        chain({ first: { email_enabled: true } }),
+        chain({ first: { email_enabled: false } }),
+      ],
+    });
+
+    const result = await BalanceReminder.sendLatePaymentEmail({
+      customer: customer(),
+      invoice: invoice(),
+      balance: { totalBalance: 129, oldestDueDate: '2026-05-19' },
+      smsTemplateKey: 'late_payment_30d',
+      invoiceTitle: 'Quarterly Pest Control',
+      serviceDateClause: '',
+      payUrl: 'https://portal.wavespestcontrol.com/pay/token-1',
+    });
+
+    expect(handoffResult).toEqual({ ok: false });
+    expect(withCustomerCommsLock).toHaveBeenCalledWith(db, 'cust-1', expect.any(Function));
+    expect(trx.mock.calls).toEqual([['invoices'], ['notification_prefs']]);
+    expect(lockHeld).toBe(false);
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(result).toEqual({ ok: false, skipped: true, reason: 'email_disabled' });
+  });
+
+  test('legacy email opt-out still sends SMS without recording an email delivery', async () => {
+    const smsInteraction = chain();
+    ContactLedger.recordContact
+      .mockImplementationOnce(async ({ channel }) => ({ id: `led-${channel}`, metadata: {} }))
+      .mockImplementationOnce(async ({ channel }) => ({ id: `led-${channel}`, metadata: {} }));
+    setDbQueues({
+      customers: [chain({ result: [customer()] })],
+      payments: [chain({ result: [overduePayment(8)] })],
+      invoices: [
+        chain({ result: [] }),
+        chain({ first: { id: 'inv-1', token: 'token-1' } }),
+        chain({ first: invoice() }),
+        chain({ first: invoice() }),
+      ],
+      sms_log: [chain({ first: { count: '0' } }), chain({ first: null })],
+      notification_prefs: [chain({ first: { email_enabled: false } })],
+      customer_interactions: [smsInteraction],
+    });
+
+    await BalanceReminder.latePaymentCheck();
+
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    expect(ContactLedger.recordContact.mock.calls.map(([args]) => args.channel)).toEqual(['sms', 'email']);
+    expect(ContactLedger.markDelivered).toHaveBeenCalledWith(expect.objectContaining({ id: 'led-sms' }));
+    expect(ContactLedger.markDelivered).not.toHaveBeenCalledWith(expect.objectContaining({ id: 'led-email' }));
+    expect(ContactLedger.markSendFailed).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'led-email' }),
+      expect.objectContaining({ reason: 'email_disabled' }),
+    );
+    expect(smsInteraction.insert).toHaveBeenCalledTimes(1);
+    expect(smsInteraction.insert).toHaveBeenCalledWith(expect.objectContaining({
+      interaction_type: 'sms_outbound',
+    }));
+  });
+
+  test('email opt-out with explicit Email and Text still sends SMS without recording an email delivery', async () => {
+    const smsInteraction = chain();
+    ContactLedger.recordContact
+      .mockImplementationOnce(async ({ channel }) => ({ id: `led-${channel}`, metadata: {} }))
+      .mockImplementationOnce(async ({ channel }) => ({ id: `led-${channel}`, metadata: {} }));
+    setDbQueues({
+      customers: [chain({ result: [customer()] })],
+      payments: [chain({ result: [overduePayment(8)] })],
+      invoices: [
+        chain({ result: [] }),
+        chain({ first: { id: 'inv-1', token: 'token-1' } }),
+        chain({ first: invoice() }),
+        chain({ first: invoice() }),
+      ],
+      sms_log: [chain({ first: null })],
+      notification_prefs: [chain({ first: { email_enabled: false, billing_channels: ['email', 'sms'] } })],
+      collections_contact_ledger: [chain({ result: [] }), chain({ result: [] })],
+      customer_interactions: [smsInteraction],
+    });
+
+    await BalanceReminder.latePaymentCheck();
+
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    expect(ContactLedger.recordContact.mock.calls.map(([args]) => args.channel)).toEqual(['email', 'sms']);
+    expect(ContactLedger.markDelivered).toHaveBeenCalledWith(expect.objectContaining({ id: 'led-sms' }));
+    expect(ContactLedger.markDelivered).not.toHaveBeenCalledWith(expect.objectContaining({ id: 'led-email' }));
+    expect(ContactLedger.markSendFailed).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'led-email' }),
+      expect.objectContaining({
+        code: 'email_disabled',
+        resolved: true,
+        resolution: 'email_terminal_refusal',
+      }),
+    );
+    expect(smsInteraction.insert).toHaveBeenCalledTimes(1);
+    expect(smsInteraction.insert).toHaveBeenCalledWith(expect.objectContaining({
+      interaction_type: 'sms_outbound',
     }));
   });
 
@@ -500,7 +675,7 @@ describe('collections policy + ledger on latePaymentCheck', () => {
     const failedPrefs = chain();
     failedPrefs.first.mockRejectedValue(new Error('preferences temporarily unavailable'));
     const service = customer({ cust_id: 'cust-1', scheduled_date: new Date(Date.now() + 5 * 86400000) });
-    const balance = { oldestInvoiceId: 'inv-1', totalBalance: 129, daysOverdue: 8 };
+    const balance = { oldestInvoiceId: 'inv-1', oldestInvoiceUrl: 'https://portal/pay/token-1', totalBalance: 129, daysOverdue: 8 };
     const balanceRead = jest.spyOn(BalanceReminder, 'getCustomerBalance').mockResolvedValue(balance);
     try {
       setDbQueues({
@@ -750,6 +925,28 @@ describe('collections policy + ledger on latePaymentCheck', () => {
   });
 });
 
+describe('balance reminder pay link', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('a tokenless oldest invoice gets no pay link and skips the reminder, never texting /pay/<customer id>', async () => {
+    setDbQueues({
+      payments: [chain({ result: [overduePayment(8)] })],
+      invoices: [
+        chain({ result: [] }), // payer-billed invoice-id lookup (none)
+        chain({ first: invoice({ token: null }) }),
+      ],
+    });
+
+    const balance = await BalanceReminder.getCustomerBalance('cust-1');
+    expect(balance).toEqual(expect.objectContaining({ oldestInvoiceId: 'inv-1', oldestInvoiceUrl: null }));
+
+    await expect(BalanceReminder.sendReminder({ id: 'svc-1', cust_id: 'cust-1', scheduled_date: '2026-06-01' }, balance, 'three_day', 3))
+      .rejects.toThrow('no unpaid invoice id/token found');
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+});
 
 describe('account-level dunning stops', () => {
   const paths = [
