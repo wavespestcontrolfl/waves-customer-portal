@@ -3033,11 +3033,14 @@ export default function EstimateToolViewV2({
       // the records don't (the lookup's own flag says "may be neighbor") —
       // the call-draft builder, customer pricing, and the website quote all
       // leave it unpriced, and the verify flag asks the operator to check.
-      if (ep.pool === "YES") upd.hasPool = "YES";
-      // A cage prefills only with a decided pool: pricing treats any cage as
-      // a pool, and a cage seen in the same satellite read as a POSSIBLE
-      // pool carries the same "may be neighbor" doubt (codex r1 P1).
-      if (ep.poolCage === "YES" && ep.pool === "YES") upd.hasPoolCage = "YES";
+      // The lookup states its pool verdict on EVERY lookup, so a refresh
+      // that downgrades a pool to POSSIBLE clears the earlier YES (codex r2
+      // P1); an operator-set value is restored after the merge below
+      // (_manualFields). A cage counts only with a decided pool: pricing
+      // treats any cage as a pool, and a cage seen in the same satellite read
+      // as a POSSIBLE pool carries the same "may be neighbor" doubt (r1 P1).
+      upd.hasPool = ep.pool === "YES" ? "YES" : "NO";
+      upd.hasPoolCage = ep.poolCage === "YES" && ep.pool === "YES" ? "YES" : "NO";
       if (ep.poolCageSize && ep.poolCageSize !== "NONE")
         upd.poolCageSize = ep.poolCageSize;
       if (ep.shrubDensity) upd.shrubDensity = ep.shrubDensity;

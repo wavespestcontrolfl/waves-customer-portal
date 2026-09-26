@@ -69,6 +69,28 @@ describe('lookup pool prefill', () => {
     expect(await pricedPool()).toEqual({ pool: 'NO', poolCage: 'NO' });
   });
 
+  it('a same-address refresh that downgrades the pool to POSSIBLE clears the earlier YES; a staff-set value stays', async () => {
+    pool = 'YES';
+    poolCage = 'YES';
+    render(<MemoryRouter><EstimateToolViewV2 initialAddress={ADDRESS} /></MemoryRouter>);
+    const lookUp = async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Property Lookup', exact: true }));
+      await screen.findByRole('region', { name: 'Property lookup results' });
+    };
+    await lookUp();
+    expect(screen.getByLabelText('Pool')).toHaveValue('YES');
+    expect(screen.getByLabelText('Pool Cage')).toHaveValue('YES');
+
+    pool = 'POSSIBLE';
+    await lookUp();
+    await waitFor(() => expect(screen.getByLabelText('Pool')).toHaveValue('NO'));
+    expect(screen.getByLabelText('Pool Cage')).toHaveValue('NO');
+
+    fireEvent.change(screen.getByLabelText('Pool'), { target: { value: 'YES' } });
+    await lookUp();
+    await waitFor(() => expect(screen.getByLabelText('Pool')).toHaveValue('YES'));
+  });
+
   it('a decided pool is, with its cage', async () => {
     pool = 'YES';
     poolCage = 'YES';
