@@ -1354,6 +1354,7 @@ describe('looksLikeEmergency', () => {
     'mi perro se comió el cebo',
     'My dog ate the bait',
     'My child ate pesticide granules',
+    'The bait was eaten by my dog',
   ])('flags urgent/medical text: %s', (text) => {
     expect(looksLikeEmergency(text)).toBe(true);
   });
@@ -1370,6 +1371,10 @@ describe('looksLikeEmergency', () => {
     'the roaches swallowed the gel bait fast',
     'La hormiga se tragó el cebo',
     'We noticed the ants ate the bait',
+    'I ate lunch and now there are roaches',
+    'my kids ate dinner, ants are in the kitchen',
+    'my dog drank water and I see fleas',
+    'mi hijo comió la cena y hay hormigas',
     'My child was stung but has no swelling',
     'stung yesterday, no rash and no fever',
   ])('does not flag routine pest talk: %s', (text) => {

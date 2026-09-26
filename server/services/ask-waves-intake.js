@@ -127,7 +127,7 @@ const REACTION_RE = /\b(?:swell\w*|swoll\w*|hives|rash|dizzy|faint\w*|vomit\w*|n
 
 // Swallowing/ingesting is an emergency only when a person or pet did it —
 // "Have the ants ingested the bait?" is pest behavior, not a poisoning.
-const INGESTION_RE = /\b(?:i|we|he|she|someone|somebody|anyone|my|our|his|her|their|the\s+(?:baby|kids?|child|children|toddler|dogs?|cats?|puppy|pets?)|kids?|child|children|son|daughter|baby|toddler|infant|dogs?|cats?|puppy|pets?|husband|wife)\s+(?:(?!(?:ants?|roach\w*|cockroach\w*|bugs?|mice|rats?|rodents?|pests?|termites?|spiders?|insects?|flies|fleas?|squirrels?|birds?|wasps?|bees?)\b)\S+\s+){0,3}?(?:swallow(?:ed|ing|s)?|ingest(?:ed|ing|s)?|ate|eaten|drank|drunk)\b|\b(?:swallow(?:ed)?|ingest(?:ed)?|eaten|drunk)\b[^.?!]{0,30}?\bby\s+(?:(?:my|our|his|her|their|the|a|an)\s+)?(?:baby|kids?|child|children|toddler|infant|son|daughter|husband|wife|someone|somebody|dogs?|cats?|pupp(?:y|ies)|kittens?|pets?|me|us|him|her|them)\b|\b(?:got|went|gets?|put)\s+(?:\w+\s+)?in(?:to)?\s+(?:his|her|their|my|our|the\s+\w+'?s?)\s+mouth\b|\b(?:me\s+)?tragu[eé](?![a-zñáéíóú])|\bingeri(?![a-zñáéíóú])|\b(?:mi|su|el|la|nuestr[oa]|tu)\s+(?:hij[oa]s?|beb[eé]s?|ni[ñn][oa]s?|esposo|esposa|perr[oa]s?|gat[oa]s?|mascotas?|cachorr\w*)\b[^.?!]{0,30}?\b(?:se\s+)?(?:trag[oó]|ingiri[oó]|comi[oó])(?![a-zñáéíóú])|\b(?:ingerid|tragad|comid)[oa]s?\s+por\s+(?:(?:mi|su|el|la|nuestr[oa]|tu)\s+)?(?:hij[oa]s?|beb[eé]s?|ni[ñn][oa]s?|esposo|esposa|perr[oa]s?|gat[oa]s?|mascotas?|cachorr\w*)\b/i;
+const INGESTION_RE = /\b(?:i|we|he|she|someone|somebody|anyone|my|our|his|her|their|the\s+(?:baby|kids?|child|children|toddler|dogs?|cats?|puppy|pets?)|kids?|child|children|son|daughter|baby|toddler|infant|dogs?|cats?|puppy|pets?|husband|wife)\s+(?:(?!(?:ants?|roach\w*|cockroach\w*|bugs?|mice|rats?|rodents?|pests?|termites?|spiders?|insects?|flies|fleas?|squirrels?|birds?|wasps?|bees?)\b)\S+\s+){0,3}?(?:swallow(?:ed|ing|s)?|ingest(?:ed|ing|s)?)\b|\b(?:swallow(?:ed)?|ingest(?:ed)?)\b[^.?!]{0,30}?\bby\s+(?:(?:my|our|his|her|their|the|a|an)\s+)?(?:baby|kids?|child|children|toddler|infant|son|daughter|husband|wife|someone|somebody|dogs?|cats?|pupp(?:y|ies)|kittens?|pets?|me|us|him|her|them)\b|\b(?:got|went|gets?|put)\s+(?:\w+\s+)?in(?:to)?\s+(?:his|her|their|my|our|the\s+\w+'?s?)\s+mouth\b|\b(?:me\s+)?tragu[eé](?![a-zñáéíóú])|\bingeri(?![a-zñáéíóú])|\b(?:mi|su|el|la|nuestr[oa]|tu)\s+(?:hij[oa]s?|beb[eé]s?|ni[ñn][oa]s?|esposo|esposa|perr[oa]s?|gat[oa]s?|mascotas?|cachorr\w*)\b[^.?!]{0,30}?\b(?:se\s+)?(?:trag[oó]|ingiri[oó])(?![a-zñáéíóú])|\b(?:ingerid|tragad)[oa]s?\s+por\s+(?:(?:mi|su|el|la|nuestr[oa]|tu)\s+)?(?:hij[oa]s?|beb[eé]s?|ni[ñn][oa]s?|esposo|esposa|perr[oa]s?|gat[oa]s?|mascotas?|cachorr\w*)\b/i;
 
 // A denied symptom ("stung but has no swelling", "sin ronchas") is not a
 // reaction; it is removed before the sting/bite pairing is checked.
@@ -135,9 +135,16 @@ const INGESTION_RE = /\b(?:i|we|he|she|someone|somebody|anyone|my|our|his|her|th
 // ("is not breathing" is the emergency itself, matched by EMERGENCY_RE).
 const NEGATED_REACTION_RE = /\b(?:no|not|without|never|sin|isn'?t|aren'?t|doesn'?t\s+have|don'?t\s+see|has\s+no|have\s+no|no\s+tiene|no\s+hay)\s+(?:(?:any|signs?\s+of|real|much|a|ninguna?|nada\s+de)\s+)*(?:swell\w*|swoll\w*|hives|rash|dizz\w*|fever|vomit\w*|nause\w*|hincha\w*|ronchas|urticaria|fiebre|sarpullido|v[oó]mit\w*|n[aá]usea\w*)\b/gi;
 
+// Eating or drinking is an exposure only with a product in the same clause —
+// "my dog ate the bait" is, "I ate lunch and saw roaches" is not.
+const PRODUCT_NOUN = '(?:baits?|granul\\w*|pellets?|gel|pesticid\\w*|poison\\w*|spray|insecticid\\w*|chemicals?|products?|rodenticid\\w*|repellent\\w*|fertiliz\\w*|herbicid\\w*|traps?|stations?|cebos?|veneno\\w*|gr[aá]nulos?|productos?|qu[ií]mic\\w*|pesticida\\w*|insecticida\\w*|raticida\\w*|fertilizante\\w*)';
+const EXPOSURE_SUBJECT = '(?:i|we|he|she|someone|somebody|my|our|his|her|their|kids?|child|children|son|daughter|baby|toddler|infant|dogs?|cats?|pupp(?:y|ies)|kittens?|pets?|husband|wife|mi|su|nuestr[oa]|hij[oa]s?|beb[eé]s?|ni[ñn][oa]s?|perr[oa]s?|gat[oa]s?|mascotas?)';
+const NON_PEST_GAP = '(?:(?!(?:ants?|roach\\w*|cockroach\\w*|bugs?|mice|rats?|rodents?|pests?|termites?|spiders?|insects?|flies|fleas?|squirrels?|birds?|wasps?|bees?|hormigas?|cucarachas?|ratas?|ratones?|plagas?|insectos?)\\b)\\S+\\s+){0,4}?';
+const EAT_EXPOSURE_RE = new RegExp(`\\b${EXPOSURE_SUBJECT}\\s+${NON_PEST_GAP}(?:ate|eaten|eating|drank|drunk|drinking|chewed|chewing|licked|licking|(?:se\\s+)?comi[oó]|(?:se\\s+)?bebi[oó]|mastic[oó]|lami[oó])(?![a-zñáéíóú])[^.?!]{0,30}?\\b${PRODUCT_NOUN}(?![a-zñáéíóú])|\\b${PRODUCT_NOUN}\\b[^.?!]{0,30}?\\b(?:eaten|drunk|chewed|licked|comid[oa]s?|bebid[oa]s?)\\s+(?:by|por)\\s+(?:(?:my|our|the|his|her|their|mi|su|el|la)\\s+)?${EXPOSURE_SUBJECT}\\b`, 'i');
+
 function looksLikeEmergency(text) {
   const t = String(text || '');
-  return EMERGENCY_RE.test(t) || INGESTION_RE.test(t)
+  return EMERGENCY_RE.test(t) || INGESTION_RE.test(t) || EAT_EXPOSURE_RE.test(t)
     || (BITE_STING_RE.test(t) && REACTION_RE.test(t.replace(NEGATED_REACTION_RE, ' ')));
 }
 
