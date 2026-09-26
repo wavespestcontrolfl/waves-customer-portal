@@ -262,6 +262,8 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ['Your pets will be okay.', ''],
     ['Your children should be all right.', ''],
     ['Your dog is going to be fine.', ''],
+    ['Sus mascotas van a estar bien.', ''],
+    ['Tu perro va a estar bien.', ''],
     ['The EPA allows this pesticide for residential use.', ''],
     ['The EPA permits this product.', ''],
     ['This pesticide is permitted by the EPA.', ''],
@@ -311,6 +313,7 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ['At 4 PM.', 'When can my baby crawl on the floor again?'],
     ['Two hours.', 'When can we touch the countertops again?'],
     ['Two hours.', 'How long until it is safe?'],
+    ['The technician recommends no entry for 30 minutes.', 'What precautions after the treatment?'],
     ['Residents may return after 30 minutes.', 'How should I prepare?'],
     ['Keep the kids indoors until the sun goes down after treatment.', ''],
     ['Mantenga a los niños dentro hasta las cuatro después del tratamiento.', ''],
@@ -473,6 +476,25 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
   ])('an urgent clinician referral keeps the emergency script: %s', (reply) => {
     const out = scrubUnsafeClaims({ reply, intent: 'question', service_keys: [], ready_for_quote: false }, 'Is it ok?');
     expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
+  });
+
+  test('urgency in a different clause does not escalate a conditional clinician referral', () => {
+    const out = scrubUnsafeClaims({ reply: 'It is safe; consult your doctor if symptoms appear. For urgent pest service, call us now.', intent: 'question', service_keys: [], ready_for_quote: false }, 'Is it ok?');
+    expect(out.reply).toMatch(/label directions/);
+  });
+
+  test.each([
+    'Should I call to schedule service?',
+    'Should we go with quarterly service?',
+    'Will they be okay to come tomorrow?',
+  ])('a sales/scheduling question after an old emergency is not a follow-up: %s', (active) => {
+    const out = normalizeIntakeResult(
+      { reply: 'Quarterly service is $50 a month.', intent: 'quote', service_keys: [], ready_for_quote: true },
+      'openai',
+      `My child was stung and his throat is swelling\n${active}`,
+      active,
+    );
+    expect(out.reply).toMatch(/Get my price/);
   });
 
   test('a conditional clinician referral stays routine', () => {
@@ -949,6 +971,9 @@ describe('normalizeIntakeResult', () => {
     ['Your account will be active in 2 hours.', ''],
     ['The EPA has not accepted this pesticide; it is EPA-registered.', ''],
     ['The EPA did not okay this product; it is EPA-registered.', ''],
+    ['EPA approval is not required for this EPA-exempt product.', ''],
+    ['This product does not have EPA approval; it is EPA-exempt.', ''],
+    ['The product lacks EPA approval because it is EPA-exempt.', ''],
     ['They can damage St. Augustine grass.', 'Are chinch bugs harmful to grass?'],
     ['Please wait 30 minutes for our dispatcher to call you back.', ''],
     ['Please wait 2 business days for the refund to appear.', ''],
