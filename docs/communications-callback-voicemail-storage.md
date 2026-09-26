@@ -25,7 +25,11 @@ The app-owned inbound fallback now screens forwarded staff legs:
 2. Twilio simul-rings the configured staff numbers.
 3. The staff leg hears `Waves inbound call. Press 1 to accept.`
 4. If nobody presses `1`, the call falls through to the Waves voicemail
-   recorder in `/api/webhooks/twilio/call-complete`.
+   recorder, whose `<Record>` completion callback is
+   `/api/webhooks/twilio/voicemail-complete`.
+
+`/api/webhooks/twilio/call-complete` handles dial completion; it is not the
+terminal `<Record>` callback.
 
 Required env:
 

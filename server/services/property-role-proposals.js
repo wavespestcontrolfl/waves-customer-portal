@@ -1096,6 +1096,10 @@ async function applyPropertyRoleProposals(trx, { customerId, proposals = [] }) {
       const loc = resolveLocation(newPrimary.city || '');
       if (loc?.id) mirror.nearest_location_id = loc.id;
       await trx('customers').where({ id: customerId }).update(mirror);
+      // A verified pin can protect an unchanged address from a coordinate
+      // overwrite. Re-read the customer point so a same-address primary flip
+      // keeps the property mirror aligned with that protection.
+      await require('./customer-properties').syncPrimaryCoordsFromCustomer(customerId, trx);
       // The primary HOME changed: the customer's sprinkler settings described
       // the demoted property — same move guard as an address edit, same
       // transaction (codex #3565 gh-r26).

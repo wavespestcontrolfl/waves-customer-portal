@@ -31,33 +31,88 @@ const SERVICE_LABEL_PATTERNS = [
   ['rodent_bait', /\brodent|rat|mouse|bait station\b/i],
 ];
 
-const REPO_CONTEXT_FILES = [
-  'wiki/business-strategy/waveguard-tier-logic.md',
-  'wiki/business-strategy/route-density-economics.md',
-  'wiki/services/service-dispatch-rules.md',
-  'wiki/protocols/routing-rules.md',
-  'docs/pricing/POLICY.md',
-  'docs/TERMITE-PRICING.md',
-  'docs/editorial-policy-v2.md',
-  'server/config/protocols.json',
-  'server/services/pricing-engine/README.md',
-];
-
-const REPO_CONTEXT_DIRS = ['wiki', 'docs'];
-const REPO_CONTEXT_FILE_LIMIT = 80;
-
-// The misting-system protocol competes with the mosquito BARRIER program's
-// own repo matches (waveguard-tier-logic.md, protocols.json, the pricing
-// README, ...) for the same 5-result cap in loadRepoContext below, and those
-// fixed/discovered files are scanned first — a misting question can lose the
-// one file that actually answers it before the loader ever reaches it. Guard
-// it in explicitly, but ONLY when the question (or a service label in
-// context) is actually about the misting SYSTEM (the shared
-// isMistingSystemService predicate — bare "misting", the barrier program's
-// own "21-day misting" cycle-length wording, must NOT trigger this, or a
-// barrier customer's question would pull the wrong protocol), so an
-// unrelated question never pays for it.
+// AW-04 fix (2026-09-25, Ask Waves audit): this used to be a fixed list of
+// repo files PLUS an open-ended scan of every .md/.mdx file under wiki/ and
+// docs/ (discoverMarkdownFiles, removed). Both directories are internal
+// engineering/business trees — staff dispatch and routing rules, technician
+// assignment profiles, job-priority scoring, pricing-engine margin policy,
+// per-visit material/labor cost protocol data (server/config/protocols.json)
+// — and any matching line was inserted verbatim into the customer-facing
+// estimate assistant's model prompt: buildAssistantUserContent in
+// estimate-assistant.js serializes the whole context object, including
+// context.supportContext.repositoryFiles, straight into the LLM input. A
+// customer question about material/labor cost pulled internal margin
+// targets and technician-assignment notes into that prompt.
+//
+// This is now an ALLOWLIST, not a denylist, so a new internal wiki/docs page
+// is invisible to the public estimate assistant by default. Add a path here
+// only after confirming the file is written for customers — no cost,
+// margin, staffing, or dispatch content. The misting protocol below meets
+// that bar: it is a pure safety/procedure document that explicitly states
+// "Pricing is owner-pending; nothing here sets a price." Everything else
+// customer-safe already comes from the structured, reviewed sources above
+// this loader (knowledge_base / knowledge_entries with TRUSTED_STATUSES,
+// the service library, and label-verified products_catalog rows) — those
+// get their OWN customer-safe gates below (KNOWLEDGE_BASE_CUSTOMER_SAFE_CATEGORIES
+// + INTERNAL_CONTENT_MARKER_PATTERN), not this repo-file list.
 const MISTING_PROTOCOL_FILE = 'wiki/protocols/mosquito-misting-systems.md';
+const CUSTOMER_SAFE_REPO_FILES = [MISTING_PROTOCOL_FILE];
+
+// Defense in depth ON TOP OF the allowlists in this file — never the boundary
+// itself. Drops a snippet that contains internal cost/margin or
+// staff-routing language even though its source is allowlisted, so a future
+// edit to an allowlisted file/category (or an allowlist mistake) can't leak
+// that material into the model prompt silently. Applied to every DB-backed
+// support source below, not just the repo-file list.
+const INTERNAL_CONTENT_MARKER_PATTERN = /\b(?:margins?|contribution\s*margin|cost\s*targets?|COGS|mark\s*-?ups?|labor\s*(?:cost|rate)s?|material\s*costs?|dispatch(?:ing)?|route\s*density|best\s*price|wholesale|job\s*scor(?:e|ing)|call\s+adam|escalat\w*|notify\s+the\s+office)\b|\$\s?\d/i;
+
+// AW-04 fix (2026-09-25): searchKnowledgeBase below used to accept ANY active,
+// non-blocked knowledge_base row that matched a search term — and this
+// loader's search terms always include 'WaveGuard' (see
+// searchTermsFromContext's requiredContextTerms), so the founder-knowledge
+// seed (20260415000013_seed_founder_knowledge.js, category
+// 'business-strategy': WaveGuard tier/decoy/margin strategy, route-density
+// economics) was eligible for nearly every public estimate question. The
+// knowledge_base.category column is admin free text — Claudeopedia's
+// create()/normalizeCategory() (knowledge-base.js) slugifies whatever string
+// an admin passes, there is no audience/visibility column on this table — so
+// this is a closed ALLOWLIST, not a denylist. Production categories checked
+// read-only on 2026-09-25: 'chemicals' rows carry wholesale supplier prices,
+// 'protocols' holds staff routing rules and the job-scoring formula,
+// 'product'/'seasonal' are internal outcome analytics, 'pricing',
+// 'business-strategy', 'operations', 'credentials' and 'integrations' are
+// internal, and even 'agronomics' mixes customer facts with internal system
+// notes (the FAWN row describes the blog engine and station IDs). No
+// category is customer-safe as a whole, so the allowlist is EMPTY (fail
+// closed, same as knowledge_entries below): customer-facing facts come from
+// label-verified products_catalog rows and the service library. Add a
+// category here only once its every row is written for customers.
+const KNOWLEDGE_BASE_CUSTOMER_SAFE_CATEGORIES = [];
+
+// AW-04 fix (round 2 follow-up, Codex P1): searchAgronomicWiki below queries
+// knowledge_entries with only the content-accuracy gate (TRUSTED_STATUSES) —
+// review_status is a "was this checked for accuracy" gate, not an audience
+// boundary (see the comment on TRUSTED_STATUSES usage below), so every
+// trusted row was eligible for the public estimate assistant. Checked against
+// the actual writers of this table (2026-09-25): the ONLY code that inserts
+// into knowledge_entries is agronomic-wiki.js's generatePage(), called with
+// exactly four categories — 'product', 'condition', 'track', and 'seasonal'
+// (updateProductPage/updateConditionPage/updateTrackPage/updateSeasonalPage).
+// generatePage's own system prompt frames EVERY one of those categories the
+// same way, unconditionally: "Frame every finding as internal field
+// intelligence, never as label authority... Field intelligence from Waves
+// treatment outcomes — not label guidance." That is staff-facing analytics
+// language for all four, not customer copy — knowledge-bridge.js's own
+// syncToClaudeopedia mirrors them into knowledge_base titled "Outcome Data:
+// …" for the SAME reason. So unlike knowledge_base (whose original migration
+// documented real customer-facing categories — services/pests/turf/
+// compliance — even before every one had a production row), this table has
+// no documented or observed customer-safe category today: the allowlist
+// below is intentionally empty. Fails closed the same way an unknown
+// category would: nothing in knowledge_entries reaches the public estimate
+// assistant until a genuinely customer-facing entry type/category exists for
+// this table and is added here.
+const KNOWLEDGE_ENTRIES_CUSTOMER_SAFE_CATEGORIES = [];
 
 const EXTERNAL_REFERENCES = {
   general: [
@@ -400,6 +455,12 @@ async function searchKnowledgeBase(db, terms) {
       .where(function activeKnowledge() {
         this.where({ active: true }).orWhereNull('active');
       })
+      // Claudeopedia's AI audit marks an outdated article status 'flagged'
+      // without touching `active` — flagged articles stay out of public
+      // prompts (production 2026-09-25: 119 active, 176 flagged).
+      .where(function notFlagged() {
+        this.where('status', 'active').orWhereNull('status');
+      })
       // Wiki-sync MIRRORS inherit the wiki's review gate: a KB row that
       // mirrors an untrusted (red/blocked) wiki page must not reach the
       // customer-facing estimate context through this branch either.
@@ -421,6 +482,15 @@ async function searchKnowledgeBase(db, terms) {
             .orWhere('category', 'ilike', like);
         }
       })
+      // AW-04 fix (round 3, Codex P2): this used to run as a JS `.filter()`
+      // AFTER `.limit(6)` — six disallowed-category rows matching the search
+      // terms above could fill the entire cap and crowd out a seventh row
+      // that IS allowlisted but never even reached the JS loop. Applying the
+      // allowlist in the same query the LIMIT applies to means only
+      // allowlisted rows can ever occupy a cap slot. A NULL/missing category
+      // still fails closed here the same way it did in JS: `lower(NULL) =
+      // ANY(...)` is NULL, not true.
+      .whereRaw('lower(category) = ANY(?::text[])', [KNOWLEDGE_BASE_CUSTOMER_SAFE_CATEGORIES])
       .select('path', 'title', 'summary', 'category', 'content')
       .limit(6);
 
@@ -430,7 +500,9 @@ async function searchKnowledgeBase(db, terms) {
       title: row.title,
       category: row.category || null,
       snippet: rowSnippet(row),
-    })).filter((row) => row.snippet || row.title);
+    })).filter((row) => row.snippet || row.title)
+      // Defense in depth — see INTERNAL_CONTENT_MARKER_PATTERN above.
+      .filter((row) => !INTERNAL_CONTENT_MARKER_PATTERN.test(`${row.title || ''} ${row.category || ''} ${row.snippet || ''}`));
   } catch (err) {
     logger.warn(`[estimate-ai-context] knowledge_base lookup skipped: ${err.message}`);
     return [];
@@ -457,6 +529,15 @@ async function searchAgronomicWiki(db, terms) {
             .orWhere('category', 'ilike', like);
         }
       })
+      // AW-04 fix (round 2 follow-up, Codex P1) — see
+      // KNOWLEDGE_ENTRIES_CUSTOMER_SAFE_CATEGORIES above: TRUSTED_STATUSES is
+      // a content-accuracy gate, not an audience boundary, so every trusted
+      // page (all of them internal field-intelligence today) was reachable
+      // here. Applied in the query the LIMIT below runs against — see the
+      // AW-04 round 3 fix on searchKnowledgeBase's own allowlist above for
+      // why a post-limit JS filter would let disallowed rows crowd out an
+      // allowed one.
+      .whereRaw('lower(category) = ANY(?::text[])', [KNOWLEDGE_ENTRIES_CUSTOMER_SAFE_CATEGORIES])
       .select('slug', 'title', 'summary', 'category', 'content', 'confidence', 'data_point_count')
       .limit(5);
 
@@ -468,7 +549,12 @@ async function searchAgronomicWiki(db, terms) {
       confidence: row.confidence || null,
       dataPointCount: row.data_point_count || 0,
       snippet: rowSnippet(row),
-    })).filter((row) => row.snippet || row.title);
+    })).filter((row) => row.snippet || row.title)
+      // Defense in depth — see INTERNAL_CONTENT_MARKER_PATTERN above. This
+      // table's own review_status gate (TRUSTED_STATUSES) is a content-accuracy
+      // review, not an audience boundary, so this catches a reviewed page that
+      // drifts into internal cost/staffing language.
+      .filter((row) => !INTERNAL_CONTENT_MARKER_PATTERN.test(`${row.title || ''} ${row.category || ''} ${row.snippet || ''}`));
   } catch (err) {
     logger.warn(`[estimate-ai-context] knowledge_entries lookup skipped: ${err.message}`);
     return [];
@@ -494,6 +580,9 @@ async function searchServiceLibrary(db, terms) {
       .where(function activeServices() {
         this.where({ is_active: true }).orWhereNull('is_active');
       })
+      // Same audience boundary as the anonymous service catalog
+      // (public-mcp.js listServices): staff-only services stay out.
+      .where({ customer_visible: true })
       // Retired-for-sale rows stay active only for grandfathered plans; a
       // general sales-support lookup must never present them as offered.
       .whereNotIn('service_key', [...RETIRED_SALE_SERVICE_KEYS])
@@ -513,18 +602,35 @@ async function searchServiceLibrary(db, terms) {
 
     return rows.map((row) => {
       const products = parseJsonList(row.default_products);
+      // The free-text description is admin-authored catalog copy (it can
+      // carry internal mechanics — "this row exists so the visit can be
+      // scheduled" — or plan benefits that don't apply to this estimate) and
+      // is never sent to the public model. Only structured facts go: name,
+      // category, cadence, and the product linkage below (Codex r6 on #4836).
       const parts = [
-        row.description,
         row.frequency ? `Frequency: ${row.frequency}` : '',
         row.visits_per_year ? `Visits per year: ${row.visits_per_year}` : '',
       ].filter(Boolean);
+      const rawSnippet = trimSnippet(parts.join(' '));
+      // AW-04 fix (round 2 follow-up, Codex P1): this used to drop the WHOLE
+      // row when its free-text description matched INTERNAL_CONTENT_MARKER_PATTERN
+      // (e.g. a stray "$" figure) — but that also dropped _productNames, the
+      // real service→product linkage loadEstimateAiSupportContext uses below
+      // to fetch and attribute label-verified catalog facts (default
+      // products like Tekko Pro IGR / Maxforce / Alpine on the initial roach
+      // knockdown services). A description with internal-sounding text must
+      // never reach the model prompt, but the row's structural identity
+      // (name/service_key/category) and its product linkage are not free
+      // text and are safe to keep either way — only the free-text snippet is
+      // redacted.
+      const unsafeSnippet = INTERNAL_CONTENT_MARKER_PATTERN.test(rawSnippet);
       return {
         source: 'admin_service_library',
         path: row.service_key,
         title: row.name || row.service_key,
         category: row.category || null,
         _productNames: products,
-        snippet: trimSnippet(parts.join(' ')),
+        snippet: unsafeSnippet ? '' : rawSnippet,
       };
     }).filter((row) => row.snippet || row.title);
   } catch (err) {
@@ -883,10 +989,6 @@ function snippetFromFile(relativePath, terms) {
 
 function loadRepoContext(terms, question = '') {
   if (!terms.length) return [];
-  const discovered = [];
-  for (const dir of REPO_CONTEXT_DIRS) {
-    discovered.push(...discoverMarkdownFiles(dir));
-  }
   // The raw question is checked too, not just `terms` — searchTermsFromContext
   // tokenizes free-text question words individually ("misting" and "system"
   // land as two separate single-word terms), so the two-word "misting
@@ -895,48 +997,23 @@ function loadRepoContext(terms, question = '') {
   const mistingRequested = isMistingSystemService({ text: question })
     || terms.some((term) => isMistingSystemService({ text: term }));
 
-  // Scored normally, the misting protocol can rank BEHIND five other
-  // matches (barrier-program repo hits sharing "mosquito") and never survive
-  // the cap below — pull it out of the normal scan and guarantee it a slot
-  // up front instead, but only on a question that is actually about
-  // misting; otherwise it competes for the cap like any other file.
-  const results = unique([...REPO_CONTEXT_FILES, ...discovered])
-    .filter((file) => !(mistingRequested && file === MISTING_PROTOCOL_FILE))
+  // The misting protocol is the one allowlisted file gated behind its own
+  // topic check: scored like any other file it would also match plain
+  // "mosquito"/"barrier" terms shared with the BARRIER program, so it is
+  // only even considered when the question (or a service label in context)
+  // is actually about the misting SYSTEM — bare "misting" (the barrier
+  // program's own "21-day misting" cycle-length wording) must NOT pull it
+  // in for an ordinary barrier customer's question.
+  const results = CUSTOMER_SAFE_REPO_FILES
+    .filter((file) => file !== MISTING_PROTOCOL_FILE || mistingRequested)
     .map((file) => snippetFromFile(file, terms))
-    .filter(Boolean);
-
-  if (mistingRequested) {
-    const mistingSnippet = snippetFromFile(MISTING_PROTOCOL_FILE, terms);
-    if (mistingSnippet) results.unshift(mistingSnippet);
-  }
+    .filter(Boolean)
+    // Defense in depth (see INTERNAL_CONTENT_MARKER_PATTERN above) — the
+    // allowlist is the real boundary; this only catches an allowlisted file
+    // whose content later drifts into internal cost/staffing territory.
+    .filter((row) => !INTERNAL_CONTENT_MARKER_PATTERN.test(`${row.path || ''} ${row.snippet || ''}`));
 
   return results.slice(0, 5);
-}
-
-function discoverMarkdownFiles(relativeDir) {
-  const root = path.join(ROOT, relativeDir);
-  if (!root.startsWith(ROOT) || !fs.existsSync(root)) return [];
-  const out = [];
-  const walk = (dir) => {
-    if (out.length >= REPO_CONTEXT_FILE_LIMIT) return;
-    let entries = [];
-    try {
-      entries = fs.readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const entry of entries) {
-      if (out.length >= REPO_CONTEXT_FILE_LIMIT) break;
-      const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
-        walk(full);
-      } else if (entry.isFile() && /\.mdx?$/i.test(entry.name)) {
-        out.push(path.relative(ROOT, full));
-      }
-    }
-  };
-  walk(root);
-  return out;
 }
 
 function externalReferencesFor(serviceKeys) {
@@ -1064,4 +1141,8 @@ module.exports = {
   serviceFamiliesFromText,
   searchTermsFromContext,
   searchServiceLibrary,
+  // Exported for direct allowlist-mechanism testing only — production code
+  // never mutates this array. See its definition for why it is empty today.
+  KNOWLEDGE_ENTRIES_CUSTOMER_SAFE_CATEGORIES,
+  KNOWLEDGE_BASE_CUSTOMER_SAFE_CATEGORIES,
 };

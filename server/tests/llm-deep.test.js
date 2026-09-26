@@ -14,6 +14,8 @@
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/models', () => ({
+  // Real family patterns, so the anthropic-wire sizing is exercised as in prod.
+  ...jest.requireActual('../config/models'),
   DEEP: 'deep-model',
   TEXT_POLICIES: {
     deepAnalysis: {
@@ -50,6 +52,54 @@ describe('createDeepMessage', () => {
       model: 'deep-model',
       max_tokens: 4096,
     }));
+  });
+
+  test('string system goes out as one text block with an ephemeral breakpoint', async () => {
+    const client = clientReturning({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'ok' }] });
+    await createDeepMessage(client, { max_tokens: 4096, system: 'SYS', messages: [{ role: 'user', content: 'q' }] });
+    const req = client.messages.create.mock.calls[0][0];
+    expect(req.system).toEqual([{ type: 'text', text: 'SYS', cache_control: { type: 'ephemeral' } }]);
+    expect(req.max_tokens).toBe(4096);
+    expect(req.output_config).toBeUndefined();
+  });
+
+  test('the raw path raises max_tokens to the thinking floor only on models that think by default', () => {
+    const { wireParams } = require('../services/llm/deep')._test;
+    expect(wireParams({ max_tokens: 4096, messages: [] }, 'claude-opus-5-5').max_tokens).toBe(8192);
+    expect(wireParams({ max_tokens: 4096, messages: [] }, 'claude-opus-4-8').max_tokens).toBe(4096);
+    expect('max_tokens' in wireParams({ messages: [] }, 'claude-opus-4-8')).toBe(false);
+  });
+
+  test('a caller-placed cache_control on system blocks is left alone; blocks without one get the breakpoint on the last text block', async () => {
+    const { withSystemCache } = require('../services/llm/deep')._test;
+    const own = [{ type: 'text', text: 'a', cache_control: { type: 'ephemeral' } }, { type: 'text', text: 'b' }];
+    expect(withSystemCache({ system: own }).system).toBe(own);
+    const bare = [{ type: 'text', text: 'a' }, { type: 'text', text: 'b' }];
+    expect(withSystemCache({ system: bare }).system).toEqual([
+      { type: 'text', text: 'a' },
+      { type: 'text', text: 'b', cache_control: { type: 'ephemeral' } },
+    ]);
+    expect(withSystemCache({ system: '' }).system).toBe('');
+    expect(withSystemCache({ messages: [] }).system).toBeUndefined();
+  });
+
+  test('MODELS.ANTHROPIC_EFFORT is a default: caller format survives, a caller effort wins, non-effort models never see it', () => {
+    const MODELS = require('../config/models');
+    const { wireParams } = require('../services/llm/deep')._test;
+    MODELS.ANTHROPIC_EFFORT = 'high';
+    try {
+      const withFormat = wireParams({ max_tokens: 10, messages: [], output_config: { format: { type: 'json_schema', schema: {} } } }, 'claude-opus-4-8');
+      expect(withFormat.output_config).toEqual({ format: { type: 'json_schema', schema: {} }, effort: 'high' });
+      const callerEffort = wireParams({ max_tokens: 10, messages: [], output_config: { effort: 'low' } }, 'claude-opus-4-8');
+      expect(callerEffort.output_config).toEqual({ effort: 'low' });
+      expect(wireParams({ max_tokens: 10, messages: [] }, 'claude-haiku-4-5-20251001').output_config).toBeUndefined();
+      expect(wireParams({ max_tokens: 10, messages: [] }, 'claude-sonnet-4-6').output_config).toBeUndefined();
+      expect(wireParams({ max_tokens: 10, messages: [] }, 'claude-sonnet-5').output_config).toEqual({ effort: 'high' });
+      expect(wireParams({ max_tokens: 10, messages: [] }, 'claude-fable-5').output_config).toEqual({ effort: 'high' });
+    } finally {
+      delete MODELS.ANTHROPIC_EFFORT;
+    }
+    expect(wireParams({ max_tokens: 10, messages: [] }, 'claude-opus-4-8').output_config).toBeUndefined();
   });
 
   test('respects an explicit params.model (per-feature env overrides)', async () => {

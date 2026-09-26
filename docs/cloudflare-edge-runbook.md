@@ -30,11 +30,14 @@ silently (broken payments, SMS, GPS, email-event sync).
 
 These are automated server-to-server (or first-party app) callers that **cannot solve a
 JS/CAPTCHA challenge** — a bot/WAF rule would black-hole them. Their app-layer auth
-**varies** (see the **Auth in app** column), so the edge bypass is not uniformly backed
-by a replay-safe signature:
+**varies** (see the **Auth in app** column), so the edge bypass is not uniformly
+backed by the same authentication or replay controls:
 
-- **Provider signature (replay-safe):** Stripe (`/api/stripe/webhook`), SendGrid, Resend,
-  Twilio. These are the strongest — a forged request fails the signature check.
+- **Provider signature-authenticated:** Stripe (`/api/stripe/webhook`), SendGrid,
+  Resend, and Twilio. When signature enforcement is enabled, validation
+  authenticates the signed request contents. Freshness, replay rejection, and
+  duplicate-side-effect protection depend on the provider and endpoint;
+  Twilio's shared signature middleware has no replay-rejection check.
 - **First-party bearer:** Stripe Terminal (`/api/stripe/terminal/*`) — a scoped Bearer
   JWT issued to the WavesPay iOS app, not an external provider.
 - **Shared-secret header (no replay protection):** Bouncie and the voice-agent callback.
@@ -77,10 +80,10 @@ the marketing site:
 | `/api/health` | GET | Railway healthcheck probe | none (public) |
 
 > **⚠️ Why explicit prefixes, not the whole `/api/webhooks/` tree:** `/api/webhooks/lead`
-> (website lead-form intake — `server/index.js:355`) lives under that path but is
+> (website lead-form intake — its `app.use('/api/webhooks/lead', …)` mount in `server/index.js`) lives under that path but is
 > **browser-originated** and must **keep** bot protection — it's a spam target and accepts
 > PII. A blanket `starts_with(…, "/api/webhooks/")` skip would silently expose it.
-> (`/api/leads` — `server/index.js:356` — is the **same handler mounted at a separate
+> (`/api/leads` — the `app.use('/api/leads', …)` mount right after it — is the **same handler mounted at a separate
 > path**, *not* under `/api/webhooks/`, so a webhooks-tree skip would not reach it; it is
 > likewise browser-origin and must stay protected.) When a new server-to-server webhook
 > provider is onboarded, add its prefix to the expression **deliberately**.

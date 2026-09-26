@@ -15,6 +15,15 @@ jest.mock('../services/estimate-automation-duplicates', () => ({
   withAutomatedEstimatePhoneLock: async (_phone, callback, { database }) => callback(database),
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn() }));
+// The first-touch claim (lead-auto-reply) has its own suite
+// (lead-response-tools-first-touch.test.js); here every send is a won first
+// touch so these cases keep exercising the send path itself.
+jest.mock('../services/lead-auto-reply', () => ({
+  claimLeadFirstTouch: async (phone) => ({ claimed: true, phoneDigits: String(phone).slice(-10) }),
+  resolveLeadAutoReplyClaim: async () => {},
+  clearServiceMenuIntakeState: async () => {},
+  isDeliveredSms: (result) => result?.sent === true && /^(SM|MM)/.test(String(result.providerMessageId || '')),
+}));
 const mockState = {};
 const mockDb = jest.fn(table => {
   const filters = {};
@@ -316,7 +325,8 @@ describe('lead texts carry no sign-off', () => {
   test('the SMS actually sent is the stripped text, and the result hands that text back to the agent', async () => {
     mockMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM_fixture', auditLogId: 'audit-1' });
     const result = await executeLeadTool('send_lead_response', { message: 'Ants are very treatable this time of year. Best,\nAdam' }, context);
-    expect(mockMessage).toHaveBeenCalledWith(expect.objectContaining({ body: 'Ants are very treatable this time of year.' }));
+    // Stripped of its sign-off, then the first-touch opt-out line (#4915).
+    expect(mockMessage).toHaveBeenCalledWith(expect.objectContaining({ body: 'Ants are very treatable this time of year.\n\nReply STOP to opt out.' }));
     expect(result).toMatchObject({ sent: true, message: 'Ants are very treatable this time of year.' });
   });
 

@@ -232,6 +232,61 @@ describe('callAnthropic prompt caching', () => {
     }));
   });
 
+  test('MODELS.ANTHROPIC_EFFORT pins output_config.effort on effort-capable models only (next to a json_schema format, or alone)', async () => {
+    const MODELS = require('../config/models');
+    mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: '{"ok":true}' }] });
+    MODELS.ANTHROPIC_EFFORT = 'high';
+    try {
+      const schema = { type: 'object', additionalProperties: false, required: ['ok'], properties: { ok: { type: 'boolean' } } };
+      await callAnthropic({ model: 'claude-opus-4-8', system: 'S', text: 'hi', jsonMode: true, jsonSchema: schema });
+      const withSchema = mockAnthropicCreate.mock.calls.at(-1)[0].output_config;
+      expect(withSchema.effort).toBe('high');
+      expect(withSchema.format.type).toBe('json_schema');
+      await callAnthropic({ model: 'claude-sonnet-5', text: 'hi', jsonMode: false });
+      expect(mockAnthropicCreate.mock.calls.at(-1)[0].output_config).toEqual({ effort: 'high' });
+      await callAnthropic({ model: 'claude-haiku-4-5-20251001', text: 'hi', jsonMode: false });
+      expect(mockAnthropicCreate.mock.calls.at(-1)[0].output_config).toBeUndefined();
+      await callAnthropic({ model: 'claude-sonnet-4-6', text: 'hi', jsonMode: false });
+      expect(mockAnthropicCreate.mock.calls.at(-1)[0].output_config).toBeUndefined();
+      for (const noEffort of ['claude-opus-4-20250514', 'claude-opus-4-1-20250805', 'claude-opus-4-1', 'claude-opus-4-5', 'claude-opus-4-6']) {
+        await callAnthropic({ model: noEffort, text: 'hi', jsonMode: false });
+        expect(mockAnthropicCreate.mock.calls.at(-1)[0].output_config).toBeUndefined();
+      }
+      for (const withEffort of ['claude-opus-4-7', 'claude-opus-4-8', 'claude-opus-5', 'claude-opus-5-5', 'claude-fable-5-1', 'claude-mythos-5-1']) {
+        await callAnthropic({ model: withEffort, text: 'hi', jsonMode: false });
+        expect(mockAnthropicCreate.mock.calls.at(-1)[0].output_config).toEqual({ effort: 'high' });
+      }
+    } finally {
+      delete MODELS.ANTHROPIC_EFFORT;
+    }
+    await callAnthropic({ model: FLAGSHIP, text: 'hi', jsonMode: false });
+    expect(mockAnthropicCreate.mock.calls.at(-1)[0].output_config).toBeUndefined();
+  });
+
+  test('the wire max_tokens clears always-on thinking on Opus 5+ and is untouched on Opus 4.8', async () => {
+    mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: '{"ok":true}' }] });
+    await callAnthropic({ model: 'claude-opus-5-5', text: 'hi', jsonMode: false, maxTokens: 200 });
+    expect(mockAnthropicCreate.mock.calls.at(-1)[0].max_tokens).toBe(8192);
+    await callAnthropic({ model: 'claude-opus-4-8', text: 'hi', jsonMode: false, maxTokens: 200 });
+    expect(mockAnthropicCreate.mock.calls.at(-1)[0].max_tokens).toBe(200);
+  });
+
+  test('MODEL_ANTHROPIC_EFFORT accepts only the five API levels (a typo resolves to undefined, never a 400)', () => {
+    const load = (level) => {
+      let out;
+      jest.isolateModules(() => {
+        const saved = process.env.MODEL_ANTHROPIC_EFFORT;
+        process.env.MODEL_ANTHROPIC_EFFORT = level;
+        out = require('../config/models').ANTHROPIC_EFFORT;
+        if (saved === undefined) delete process.env.MODEL_ANTHROPIC_EFFORT; else process.env.MODEL_ANTHROPIC_EFFORT = saved;
+      });
+      return out;
+    };
+    expect(load('high')).toBe('high');
+    expect(load('xhigh')).toBe('xhigh');
+    expect(load('turbo')).toBeUndefined();
+  });
+
   test('no system → no system field on the request', async () => {
     mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: '{"ok":true}' }] });
     await callAnthropic({ model: FLAGSHIP, text: 'hi' });
@@ -721,6 +776,76 @@ describe('dispatchWithFallback', () => {
       fallback: { provider: PROVIDER.OPENAI, model: 'b' },
     }, { text: 'write' });
     expect(result).toEqual({ ok: false, reason: 'same_provider_fallback', failures: [] });
+  });
+
+  // hardDeadline (opt-in, default false): every adapter already asks its own
+  // transport to abort at timeoutMs (fetch AbortSignal / the Anthropic SDK's
+  // timeout+maxRetries:0), but that guarantee lives in the adapter, not the
+  // chain. A caller with a hard, user-facing wait budget (ask-waves-intake.js:
+  // a synchronous chat reply) opts into hardDeadline so the chain itself races
+  // each leg against its own share, bounding a stalled leg even when the
+  // adapter (a test double, or a future adapter bug) never honors the timeout
+  // it was handed at all.
+  describe('hardDeadline', () => {
+    test('bounds a leg whose adapter ignores its own timeoutMs entirely, and still reaches the fallback', async () => {
+      // A fetch double that never settles and never even looks at the abort
+      // signal — exactly what an adapter bug or a badly-behaved test double
+      // ignoring `timeoutMs` looks like from the chain's side.
+      jest.spyOn(global, 'fetch').mockImplementation(() => new Promise(() => {}));
+      mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: 'backup copy' }] });
+      const result = await dispatchWithFallback({
+        primary: { provider: PROVIDER.OPENAI, model: 'openai-primary' },
+        fallback: { provider: PROVIDER.ANTHROPIC, model: 'claude-backup' },
+      }, { text: 'write', jsonMode: false, timeoutMs: 200 }, { reserveFallbackBudget: true, hardDeadline: true });
+      expect(result).toMatchObject({ ok: true, provider: PROVIDER.ANTHROPIC, fallbackUsed: true, text: 'backup copy' });
+      // The stalled leg fails as the SAME code an adapter's own deadline
+      // would produce, so it classifies and reports identically either way.
+      expect(result.failures[0]).toMatchObject({ provider: PROVIDER.OPENAI, reason: 'openai_timeout' });
+    });
+
+    test('a single-leg (no fallback) policy still resolves — never hangs — when its only leg never settles', async () => {
+      jest.spyOn(global, 'fetch').mockImplementation(() => new Promise(() => {}));
+      const result = await dispatchWithFallback(
+        { primary: { provider: PROVIDER.OPENAI, model: 'openai-pinned' } },
+        { text: 'write', jsonMode: false, timeoutMs: 100 },
+        { hardDeadline: true },
+      );
+      expect(result).toMatchObject({ ok: false, reason: 'all_providers_failed', failures: [{ provider: PROVIDER.OPENAI, reason: 'openai_timeout' }] });
+    });
+
+    test('does not change the happy path: a normally-answering leg still wins on the first try', async () => {
+      jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true, json: async () => ({ output_text: 'provider copy' }) });
+      const result = await dispatchWithFallback({
+        primary: { provider: PROVIDER.OPENAI, model: 'openai-primary' },
+        fallback: { provider: PROVIDER.ANTHROPIC, model: 'claude-backup' },
+      }, { text: 'write', jsonMode: false, timeoutMs: 5000 }, { hardDeadline: true });
+      expect(result).toMatchObject({ ok: true, provider: PROVIDER.OPENAI, fallbackUsed: false, text: 'provider copy' });
+      expect(mockAnthropicCreate).not.toHaveBeenCalled();
+    });
+
+    test('a raced-away leg that later rejects never surfaces as an unhandled rejection', async () => {
+      let rejectLate;
+      jest.spyOn(global, 'fetch').mockImplementation(() => new Promise((_resolve, reject) => { rejectLate = reject; }));
+      mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: 'backup copy' }] });
+      const unhandled = [];
+      const onUnhandledRejection = (reason) => unhandled.push(reason);
+      process.on('unhandledRejection', onUnhandledRejection);
+      try {
+        const result = await dispatchWithFallback({
+          primary: { provider: PROVIDER.OPENAI, model: 'openai-primary' },
+          fallback: { provider: PROVIDER.ANTHROPIC, model: 'claude-backup' },
+        }, { text: 'write', jsonMode: false, timeoutMs: 100 }, { reserveFallbackBudget: true, hardDeadline: true });
+        expect(result.ok).toBe(true);
+        // The abandoned primary attempt finally rejects well after the chain
+        // moved on — must be swallowed, not leaked.
+        rejectLate(new Error('adapter blew up late'));
+        await new Promise((resolve) => setImmediate(resolve));
+        await new Promise((resolve) => setImmediate(resolve));
+      } finally {
+        process.off('unhandledRejection', onUnhandledRejection);
+      }
+      expect(unhandled).toEqual([]);
+    });
   });
 });
 

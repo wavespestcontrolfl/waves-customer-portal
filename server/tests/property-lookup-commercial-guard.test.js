@@ -1404,3 +1404,242 @@ describe('unit-address lookup on an apartment building (GATE_UNIT_SCOPE_GUARDRAI
     expect(profile.residentialUnitLookup).toBeNull();
   });
 });
+
+describe('unit-address lookup on a residential condo record (GATE_UNIT_SCOPE_GUARDRAILS)', () => {
+  // 2026-09-25: "210 Example Harbor Way, Unit 3C" — the listing typed the
+  // record residential Condo, so the commercial unit verdict never ran and
+  // the complex's pool, the association's 2,500 sf of turf, and the
+  // building's 2 floors all landed in a 725 sf unit's quote.
+  beforeEach(() => { process.env.GATE_UNIT_SCOPE_GUARDRAILS = 'true'; });
+  afterEach(() => { delete process.env.GATE_UNIT_SCOPE_GUARDRAILS; });
+
+  function condoRecord(overrides = {}) {
+    return {
+      formattedAddress: '210 Example Harbor Way Apt 3C, Sarasota, FL 34232',
+      propertyType: 'Condo',
+      unitCount: 1,
+      squareFootage: 725,
+      lotSize: 8000,
+      stories: 2,
+      hasPool: true,
+      yearBuilt: 1985,
+      _source: 'ai_trio',
+      ...overrides,
+    };
+  }
+  const parcelWideAi = {
+    pool: 'POSSIBLE',
+    estimatedTurfSf: 2500,
+    shrubDensity: 'HEAVY',
+    treeDensity: 'HEAVY',
+    waterProximity: 'ADJACENT',
+  };
+  const unit = '210 Example Harbor Way, Unit 3C, Sarasota, FL 34232';
+  const bare = '210 Example Harbor Way, Sarasota, FL 34232';
+
+  test('unit address: parcel-wide reads dropped, the unit\'s own sq ft kept, floor flagged', () => {
+    const profile = buildEnrichedProfile(condoRecord(), parcelWideAi, null, null, null, null, unit);
+    expect(profile.category).toBe('RESIDENTIAL');
+    expect(profile.isCommercial).toBe(false);
+    expect(profile.propertyType).toBe('Condo');
+    expect(profile.residentialUnitLookup).toEqual({ wholePropertyCategory: 'RESIDENTIAL', wholePropertySubtype: null });
+    expect(profile.homeSqFt).toBe(725);
+    expect(profile.lotSqFt).toBe(0);
+    expect(profile.stories).toBe(1);
+    expect(profile.storiesSource).toBe('default');
+    expect(profile.pool).not.toBe('YES');
+    expect(profile.pool).not.toBe('POSSIBLE');
+    expect(profile.estimatedTurfSf || 0).toBe(0);
+    expect(profile.shrubDensity).not.toBe('HEAVY');
+    const flag = profile.fieldVerifyFlags.find((f) => f.field === 'propertyType');
+    expect(flag.priority).toBe('HIGH');
+    expect(flag.reason).toMatch(/ONE condo unit/);
+    expect(flag.reason).toMatch(/Condo — Upper/);
+  });
+
+  test('the kept unit sqft never becomes a slab / attic / perimeter footprint (codex r2 P1)', () => {
+    const profile = buildEnrichedProfile(condoRecord(), parcelWideAi, null, null, null, null, unit);
+    expect(profile.homeSqFt).toBe(725);
+    // Pest still prices the unit's own living area — footprintUnknown
+    // would force it to manual review.
+    expect(profile.footprint).toBe(725);
+    expect(profile.footprintUnknown).toBeUndefined();
+    expect(profile.estimatedPerimeterLF).toBeNull();
+    expect(profile.estimatedAtticSqFt).toBeNull();
+    expect(profile.estimatedSlabSqFt).toBeNull();
+  });
+
+  test('termite pricing never derives a slab/perimeter from the unit\'s living area; a typed measurement still prices (codex r3 P1)', () => {
+    const { translateV2CallToV1Input } = require('../routes/property-lookup-v2');
+    const { calculatePropertyProfile } = require('../services/pricing-engine/property-calculator');
+    const { priceTermiteBait, priceTrenching } = require('../services/pricing-engine/service-pricing');
+    const profile = buildEnrichedProfile(condoRecord(), parcelWideAi, null, null, null, null, unit);
+    const v1 = translateV2CallToV1Input(profile, ['TERMITE_BAIT', 'TRENCHING'], {});
+    expect(v1.unitScoped).toBe(true);
+    const property = calculatePropertyProfile(v1);
+    // Recurring pest keeps sizing off the unit's own living area.
+    expect(property.footprint).toBe(725);
+    expect(property.unitScoped).toBe(true);
+
+    const bait = priceTermiteBait(property, {});
+    expect(bait.requiresMeasurement).toBe(true);
+    expect(bait.manualReviewReasons).toContain('missing_termite_footprint');
+    const measured = priceTermiteBait(property, { measurements: { footprintSqFt: 900 } });
+    expect(measured.requiresMeasurement).toBe(false);
+    expect(measured.footprintSqFt).toBe(900);
+    expect(measured.footprintSource).toBe('manual_override');
+
+    const trench = priceTrenching(property, { allowComputedPerimeterFromFootprint: true });
+    expect(trench.requiresMeasurement).toBe(true);
+    expect(trench.price).toBeNull();
+
+    // Staff correcting the unit to a whole structure takes it out of unit
+    // scope — footprint derivation resumes (codex r5 P2).
+    expect(translateV2CallToV1Input({ ...profile, propertyType: 'Townhome' }, ['TERMITE_BAIT'], {}).unitScoped).toBeUndefined();
+
+    // A whole-home lookup keeps deriving both, exactly as before.
+    const home = calculatePropertyProfile(translateV2CallToV1Input(
+      buildEnrichedProfile(condoRecord(), parcelWideAi, null, null, null, null, bare), ['TERMITE_BAIT'], {},
+    ));
+    expect(home.unitScoped).toBe(false);
+    expect(priceTermiteBait(home, {}).requiresMeasurement).toBe(false);
+  });
+
+  test('"Apt. 3C" and "#3C" read the same as "Unit 3C"', () => {
+    for (const address of [
+      '210 Example Harbor Way Apt. 3C, Sarasota, FL 34232',
+      '210 Example Harbor Way #3C, Sarasota, FL 34232',
+    ]) {
+      const profile = buildEnrichedProfile(condoRecord(), parcelWideAi, null, null, null, null, address);
+      expect({ address, unit: !!profile.residentialUnitLookup, stories: profile.stories })
+        .toEqual({ address, unit: true, stories: 1 });
+    }
+  });
+
+  test('stacked-association aggregate: its sq ft is the building\'s, so it is dropped too', () => {
+    const profile = buildEnrichedProfile(
+      condoRecord({ squareFootage: 57600, _parcel: { aggregated: true, residentialUnits: 48, buildingCount: 6 } }),
+      parcelWideAi, null, null, null, null, unit,
+    );
+    expect(profile.homeSqFt).toBe(0);
+    expect(profile.fieldVerifyFlags.find((f) => f.field === 'propertyType').reason)
+      .toMatch(/get the unit's own sq ft/);
+  });
+
+  test('no unit designator, a Suite, or a townhome record: unchanged', () => {
+    const bareProfile = buildEnrichedProfile(condoRecord(), parcelWideAi, null, null, null, null, bare);
+    expect(bareProfile.residentialUnitLookup).toBeNull();
+    expect(bareProfile.stories).toBe(2);
+
+    const suite = buildEnrichedProfile(
+      condoRecord(), parcelWideAi, null, null, null, null, '210 Example Harbor Way Suite 3C, Sarasota, FL 34232',
+    );
+    expect(suite.residentialUnitLookup).toBeNull();
+
+    const townhome = buildEnrichedProfile(
+      condoRecord({ propertyType: 'Townhouse' }), parcelWideAi, null, null, null, null, unit,
+    );
+    expect(townhome.residentialUnitLookup).toBeNull();
+    expect(townhome.stories).toBe(2);
+  });
+
+  test('a cached weak-typed row whose satellite read is STACKED gets the unit reset too (codex r1 P1)', () => {
+    const profile = buildEnrichedProfile(
+      condoRecord({ propertyType: null }),
+      { ...parcelWideAi, structureAttachment: 'STACKED', _structureAttachmentConfidence: 90 },
+      null, null, null, null, unit,
+    );
+    expect(profile.propertyType).toBe('Condo');
+    expect(profile.residentialUnitLookup).not.toBeNull();
+    expect(profile.stories).toBe(1);
+    expect(profile.pool).not.toBe('POSSIBLE');
+    // Satellite proved the building is stacked, not that the record's area
+    // is one unit's — the sqft is dropped and asked for (codex r5 P1).
+    expect(profile.homeSqFt).toBe(0);
+    // The satellite type's "is this really a condo?" ask survives the
+    // one-flag dedupe, merged into the unit flag (codex r3 P2).
+    const typeFlags = profile.fieldVerifyFlags.filter((f) => f.field === 'propertyType');
+    expect(typeFlags).toHaveLength(1);
+    expect(typeFlags[0].reason).toMatch(/ONE condo unit/);
+    expect(typeFlags[0].reason).toMatch(/Also confirm the type itself:/);
+    expect(profile.estimatedTurfSf || 0).toBe(0);
+  });
+
+  test('a confident DETACHED or townhome-row read vetoes the reset — a site condo is its own building (codex r4 P1)', () => {
+    for (const structureAttachment of ['DETACHED', 'ATTACHED_END', 'ATTACHED_INTERIOR']) {
+      const profile = buildEnrichedProfile(
+        condoRecord(),
+        { ...parcelWideAi, structureAttachment, _structureAttachmentConfidence: 90 },
+        null, null, null, null, unit,
+      );
+      expect({ structureAttachment, unit: profile.residentialUnitLookup, stories: profile.stories, lot: profile.lotSqFt })
+        .toEqual({ structureAttachment, unit: null, stories: 2, lot: 8000 });
+    }
+    // A shaky read is no evidence either way — the stacked reset stands.
+    const shaky = buildEnrichedProfile(
+      condoRecord(),
+      { ...parcelWideAi, structureAttachment: 'DETACHED', _structureAttachmentConfidence: 40 },
+      null, null, null, null, unit,
+    );
+    expect(shaky.residentialUnitLookup).not.toBeNull();
+  });
+
+  test('a RECORDLESS lookup whose satellite read is confidently STACKED gets the unit reset (codex r4 P1)', () => {
+    const profile = buildEnrichedProfile(
+      null,
+      { ...parcelWideAi, propertyUse: 'RESIDENTIAL', structureAttachment: 'STACKED', _structureAttachmentConfidence: 90 },
+      null, null, null, null, unit,
+    );
+    expect(profile.propertyType).toBe('Condo');
+    expect(profile.residentialUnitLookup).not.toBeNull();
+    expect(profile.pool).not.toBe('POSSIBLE');
+    expect(profile.estimatedTurfSf || 0).toBe(0);
+    expect(profile.shrubDensity).not.toBe('HEAVY');
+    // …and the same read on a bare address is untouched.
+    const bareProfile = buildEnrichedProfile(
+      null,
+      { ...parcelWideAi, propertyUse: 'RESIDENTIAL', structureAttachment: 'STACKED', _structureAttachmentConfidence: 90 },
+      null, null, null, null, bare,
+    );
+    expect(bareProfile.residentialUnitLookup).toBeNull();
+    expect(bareProfile.propertyType).toBe('Condo');
+  });
+
+  test('an untrusted web-listing "Condo" never clears parcel facts (codex r1 P1)', () => {
+    const profile = buildEnrichedProfile(
+      condoRecord({ _fieldEvidence: { propertyType: { value: 'Condo', sourceType: 'web', fieldVerify: true } } }),
+      parcelWideAi, null, null, null, null, unit,
+    );
+    expect(profile.residentialUnitLookup).toBeNull();
+    expect(profile.stories).toBe(2);
+    expect(profile.lotSqFt).toBe(8000);
+  });
+
+  test('a trusted 2–4-unit condo parcel: its sqft is the small building\'s, so it is dropped (codex r1 P1)', () => {
+    for (const overrides of [
+      { unitCount: 3, _source: 'county' },
+      { unitCount: 1, _parcel: { residentialUnits: 2 } },
+    ]) {
+      const profile = buildEnrichedProfile(condoRecord(overrides), parcelWideAi, null, null, null, null, unit);
+      expect({ overrides, unit: !!profile.residentialUnitLookup, homeSqFt: profile.homeSqFt })
+        .toEqual({ overrides, unit: true, homeSqFt: 0 });
+    }
+  });
+
+  test('exactly one propertyType flag — a source-conflict warning is replaced, not duplicated (codex r1 P2)', () => {
+    const profile = buildEnrichedProfile(
+      condoRecord({ _source: 'county', _fieldEvidence: { propertyType: { value: 'Condo', sourceType: 'county', fieldVerify: true } } }),
+      parcelWideAi, null, null, null, null, unit,
+    );
+    const typeFlags = profile.fieldVerifyFlags.filter((f) => f.field === 'propertyType');
+    expect(typeFlags).toHaveLength(1);
+    expect(typeFlags[0].reason).toMatch(/ONE condo unit/);
+  });
+
+  test('gate OFF: unit address changes nothing', () => {
+    delete process.env.GATE_UNIT_SCOPE_GUARDRAILS;
+    const profile = buildEnrichedProfile(condoRecord(), parcelWideAi, null, null, null, null, unit);
+    expect(profile.residentialUnitLookup).toBeNull();
+    expect(profile.stories).toBe(2);
+  });
+});

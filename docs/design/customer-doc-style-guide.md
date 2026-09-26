@@ -51,7 +51,8 @@ so glass and non-glass renders agree.
 Primary action = `BrandButton` (48px, r10, weight 600, sentence case — owner
 2026-09-04; the marketing site's UPPERCASE rule does not apply on glass).
 Gold accent actions (`data-glass-accent`) are 44px minimum; choice chips
-(`data-glass="chip"`) 40px minimum with a 999 radius when they are pills.
+(`data-glass="chip"`) are also 44px minimum with a 999 radius when they are
+pills (the 2026-09-11 C3 ruling supersedes the former 40px chip minimum).
 Inputs are 48px, r10, 16px text (no iOS zoom), placeholder 14px `#64748B`.
 Every control shows the shared `:focus-visible` ring (2px accent, 2px
 offset). Under `prefers-reduced-transparency` and `forced-colors` cards
@@ -95,10 +96,15 @@ padding, hairline 1–3px offsets) are allowed but must be deliberate.
 
 ## Color roles
 
-`DOC.*` roles are CSS-var references **on purpose**: warm brand navy
-`#1B2C5B` in print/PDF/non-glass renders, canonical glass navy `#04395E`
-while a glass scene is mounted. `DOC.navyLiteral` (#1B2C5B) pins chrome that
-must not shift (e.g. DocumentActionBar fills). Semantic roles: `danger`,
+`DOC.*` roles are CSS-var references **on purpose**: canonical navy
+`#04395E` everywhere — print, PDF, non-glass and glass renders alike
+(owner rulings 2026-07-05 and 2026-07-12). `#1B2C5B` is reserved for
+marketing-mirror surfaces, not customer docs. Some PDF generators have not
+migrated yet and still hard-code `#1B2C5B`, among them `server/services/pdf/contract-pdf.js`,
+`estimate-pdf.js`, `payer-statement-pdf.js`, and the service-report PDFs in
+`server/routes/documents.js` and `server/routes/reports-public.js`; search the server
+for `1B2C5B` to find the rest. `DOC.navyLiteral` (#04395E)
+pins chrome that must not shift (e.g. DocumentActionBar fills). Semantic roles: `danger`,
 `success` (+ `successBg/successBorder`), `soft/softBorder` washes,
 `border/borderStrong`, `page` (#FAF8F3 warm).
 

@@ -117,4 +117,13 @@ describe('client mirror of the label matcher (codex r30)', () => {
       expect(literal(client, name)).toBe(literal(server, name));
     }
   });
+
+  test('the client mirror lists the same retired catalog keys', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const client = fs.readFileSync(path.join(__dirname, '..', '..', 'client/src/constants/retiredSaleLabels.js'), 'utf8');
+    const keys = client.match(/RETIRED_SALE_SERVICE_KEYS = new Set\((\[[^\]]*\])\)/)?.[1];
+    expect(keys).toBeTruthy();
+    expect(new Set(JSON.parse(keys.replace(/'/g, '"')))).toEqual(RETIRED_SALE_SERVICE_KEYS);
+  });
 });

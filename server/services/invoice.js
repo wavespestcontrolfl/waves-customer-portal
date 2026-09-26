@@ -3,6 +3,7 @@ const { isDeepStrictEqual } = require("node:util");
 const db = require("../models/db");
 const logger = require("./logger");
 const TaxCalculator = require("./tax-calculator");
+const { REPLAY_HOLD_CODES } = require("./messaging/billing-channel-routing");
 const DiscountEngine = require("./discount-engine");
 const {
   percentageDiscountDollars,
@@ -175,6 +176,19 @@ function prepaySwitchSupersededByMarker(prepayInvoiceId) {
 }
 function prepaySwitchRestoreMarker(voidedInvoiceId) {
   return `[prepay-switch-restore:${voidedInvoiceId}]`;
+}
+// Did this prepay replace other charges when it was minted: an on-site
+// switch (a voided row carrying its superseded-by marker) or a positive
+// setup_fee_claims record? The claims table is server-mint only, so admin
+// routes ask here instead of reading it (setup-fee-claims-immutable test).
+async function prepayReplacedCharges(conn, prepayInvoiceId) {
+  return Boolean(
+    await conn("invoices")
+      .where({ status: "void" })
+      .where("notes", "like", `%${prepaySwitchSupersededByMarker(prepayInvoiceId)}%`)
+      .first("id")
+    || await conn("setup_fee_claims").where({ invoice_id: prepayInvoiceId }).where("amount", ">", 0).first("id"),
+  );
 }
 // A REPLACEMENT must never inherit the superseded-by marker (Codex
 // on-site-switch P0 r11): if the replacement is itself voided later, a
@@ -5681,7 +5695,7 @@ const InvoiceService = {
     // 8:00 AM under the same payment_link policy. Scheduled callers
     // (allowClaimed) skip this — their whole send defers below instead.
     if (!allowClaimed
-      && ["QUIET_HOURS_HOLD", "PUSH_IN_FLIGHT", "APP_DELIVERY_HOLD", "APP_PROVIDER_RETRY"].includes(sms.code)
+      && REPLAY_HOLD_CODES.includes(sms.code)
       && sms.deliveryOutcome !== "uncertain"
       && sms.deferred
       && sms.nextAllowedAt
@@ -5757,7 +5771,7 @@ const InvoiceService = {
     // night sends, admin resends) are NOT deferred: their documented
     // gate-ON behavior is email-immediate with the SMS leg held.
     const scheduledSmsHeld = allowClaimed
-      && ["QUIET_HOURS_HOLD", "PUSH_IN_FLIGHT", "APP_DELIVERY_HOLD", "APP_PROVIDER_RETRY"].includes(sms.code)
+      && REPLAY_HOLD_CODES.includes(sms.code)
       && Boolean(sms.nextAllowedAt);
     const terminalSmsRefusal = sms.code === "INVOICE_VISIT_TERMINAL"
       && sms.deliveryOutcome === "not_sent";
@@ -6624,7 +6638,12 @@ const InvoiceService = {
       // to the window open and leave the attempt counter alone — five
       // overnight cron passes must not permanently fail the send.
       const smsHeld =
-        ["QUIET_HOURS_HOLD", "PUSH_IN_FLIGHT", "APP_DELIVERY_HOLD"].includes(result.sms?.code) && result.sms?.nextAllowedAt;
+        // Holds that are not bounded by the clock spend an attempt instead:
+        // APP_PROVIDER_RETRY takes the native backoff below, and a suppression
+        // or Email preparation outage must not reschedule for free indefinitely.
+        REPLAY_HOLD_CODES.includes(result.sms?.code)
+        && !["APP_PROVIDER_RETRY", "SUPPRESSION_LOOKUP_FAILED", "BILLING_EMAIL_PREPARATION_HOLD"].includes(result.sms?.code)
+        && result.sms?.nextAllowedAt;
       const durableSendError = result.sms?.ok && result.email?.code === "billing_prefs_unavailable"
         ? BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED
         : error;
@@ -6715,8 +6734,10 @@ const InvoiceService = {
    */
   async receiptSmsFacts(invoice) {
     const domain = publicPortalUrl();
+    // /receipt/, not /pay/: the pay page forwards paid invoices to the
+    // receipt but renders a refunded one as a "Refunded" payment page.
     const longReceiptUrl = invoice.token
-      ? `${domain}/pay/${invoice.token}`
+      ? `${domain}/receipt/${invoice.token}`
       : "";
     const receiptUrl = longReceiptUrl
       ? await shortenOrPassthrough(longReceiptUrl, {
@@ -9787,7 +9808,11 @@ const InvoiceService = {
     return restored;
   },
 
-  async reopenAnnualPrepayCoveredInvoicesForTerm(termId, conn = db) {
+  // strict: an operator action that must never half-complete (the admin
+  // remove-flag cancel) gets a per-invoice failure thrown instead of logged,
+  // so its transaction rolls back whole. Every other caller keeps the
+  // best-effort reopen.
+  async reopenAnnualPrepayCoveredInvoicesForTerm(termId, conn = db, { strict = false } = {}) {
     if (!termId) return 0;
     let reopened = 0;
     const reopenedIds = [];
@@ -9819,6 +9844,7 @@ const InvoiceService = {
           reopenedIds.push(inv.id);
         }
       } catch (err) {
+        if (strict) throw err;
         logger.warn(`[invoice] annual-prepay coverage reopen skipped for ${inv.invoice_number || inv.id}: ${err.message}`);
       }
     }
@@ -10247,6 +10273,7 @@ InvoiceService.lineIsBaseApplication = lineIsBaseApplication;
 InvoiceService.rodentSetupRebillMarker = rodentSetupRebillMarker;
 module.exports = InvoiceService;
 module.exports.prepaySwitchSupersededByMarker = prepaySwitchSupersededByMarker;
+module.exports.prepayReplacedCharges = prepayReplacedCharges;
 module.exports.prepaySwitchRestoreMarker = prepaySwitchRestoreMarker;
 module.exports.stripPrepaySwitchSupersededMarkers = stripPrepaySwitchSupersededMarkers;
 module.exports.prepaySwitchRestoreAssertDate = prepaySwitchRestoreAssertDate;

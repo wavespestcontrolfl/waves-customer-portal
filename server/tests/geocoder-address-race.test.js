@@ -45,7 +45,22 @@ function installDb(customer, property) {
 
 describe('customer address geocode completion order', () => {
   const originalFetch = global.fetch;
-  afterEach(() => { global.fetch = originalFetch; jest.clearAllMocks(); });
+  afterEach(() => { global.fetch = originalFetch; jest.restoreAllMocks(); jest.clearAllMocks(); });
+
+  it.each([false, true])('reviewed geocoding preserves bulk collection (new commit: %s)', async written => {
+    const review = require('../services/customer-geocode-review');
+    jest.spyOn(review, 'reviewEnabled').mockReturnValue(true);
+    jest.spyOn(review, 'attemptReviewedGeocode').mockImplementation(async (id, conn, { onCoordinatesCommitted }) => {
+      if (written) await onCoordinatesCommitted();
+      return { lat: 27.6, lng: -82.5 };
+    });
+    const scheduleQualityCustomerIds = new Set();
+    await regeocodeCustomerAddressGuarded('reviewed-customer', { scheduleQualityCustomerIds });
+    expect([...scheduleQualityCustomerIds]).toEqual(written ? ['reviewed-customer'] : []);
+    expect(refreshScheduleQualityAfterChange).not.toHaveBeenCalled();
+    await regeocodeCustomerAddressGuarded('reviewed-customer');
+    expect(refreshScheduleQualityAfterChange).toHaveBeenCalledTimes(written ? 1 : 0);
+  });
 
   it('keeps the newer address coordinates on both customer and primary property', async () => {
     const customer = { id: 'customer-race', address_line1: '100 Synthetic Race Lane',

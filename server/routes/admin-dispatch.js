@@ -2573,6 +2573,13 @@ router.put('/:serviceId/status', async (req, res, next) => {
         reason: notes || null,
         source: 'admin-dispatch',
       });
+      // Counted-plan reseed (owner ruling 2026-09-24): a single-visit cancel
+      // inside a 9-application plan adds one back at the end of the series.
+      // Only this single-visit branch — the 'following' / 'series' scope
+      // above stops the plan. Gated, failure-isolated, post-commit.
+      await require('../services/recurring-series-cancel-reseed').runPostCancelSeriesReseed({
+        db, serviceId: svc.id, source: 'admin-dispatch-status-cancel',
+      });
     } else if (toStatus === 'no_show') {
       // Free the tech on the dispatch roster. A no-show marked after the
       // job already went en_route/on_site leaves tech_status.current_job_id
@@ -2637,7 +2644,7 @@ router.put('/:serviceId/status', async (req, res, next) => {
               'billing',
               'No-show fee needs review',
               'The no-show fee did not settle cleanly (declined or parked) — review the customer\'s billing; a retry may still charge.',
-              { link: `/admin/customers/${svc.customer_id}`, metadata: { scheduledServiceId: svc.id, reason: 'fee_unsettled' } },
+              { link: `/admin/customers?customerId=${svc.customer_id}`, metadata: { scheduledServiceId: svc.id, reason: 'fee_unsettled' } },
             );
           } catch (notifyErr) { logger.warn(`[admin-dispatch] no-show fee review alert failed: ${notifyErr.message}`); }
         }
@@ -2653,7 +2660,7 @@ router.put('/:serviceId/status', async (req, res, next) => {
             'billing',
             'No-show fee needs review',
             'The no-show fee step errored before lane ownership was resolved — review the customer\'s billing; a fee may still apply.',
-            { link: `/admin/customers/${svc.customer_id}`, metadata: { scheduledServiceId: svc.id, reason: 'fee_step_error' } },
+            { link: `/admin/customers?customerId=${svc.customer_id}`, metadata: { scheduledServiceId: svc.id, reason: 'fee_step_error' } },
           );
         } catch (notifyErr) { logger.warn(`[admin-dispatch] no-show fee review alert failed: ${notifyErr.message}`); }
       }
@@ -4194,7 +4201,7 @@ router.post('/:serviceId/tree-shrub/assess-preview', async (req, res) => {
     // can verify the review came from this preview for these images.
     const photosHash = treeShrubPhotosHash(photos.map((p) => p && p.data));
     result.signature = treeShrubReviewSignature(result.scores, result.scoredCount, req.params.serviceId, photosHash, result.observations);
-    return res.json({ ...result, status: 'complete' });
+    return res.json({ ...result, photosHash, status: 'complete' });
   } catch (err) {
     return res.status(500).json({ error: 'Tree & shrub assessment preview failed', detail: err.message });
   }

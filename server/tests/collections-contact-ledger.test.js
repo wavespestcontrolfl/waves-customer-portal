@@ -17,7 +17,9 @@ jest.mock('../models/db', () => {
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const db = require('../models/db');
-const { recordContact, markDelivered, claimAttempt } = require('../services/collections/contact-ledger');
+const {
+  recordContact, markDelivered, markSendFailed, claimAttempt,
+} = require('../services/collections/contact-ledger');
 
 function insertChain({ returned = [{ id: 'led-1' }] } = {}) {
   const q = {};
@@ -88,6 +90,36 @@ test('markDelivered stamps by key and never throws on failure', async () => {
   await expect(markDelivered(null)).resolves.toBe(false);
 });
 
+test('reservation stamps require one fully bound row and use a savepoint in caller transactions', async () => {
+  const q = insertChain();
+  q.update.mockResolvedValueOnce(0).mockResolvedValueOnce(1);
+  const savepoint = jest.fn(() => q);
+  savepoint.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+  const transaction = jest.fn(async (callback) => callback(savepoint));
+  transaction.isTransaction = true;
+  transaction.transaction = transaction;
+
+  const options = {
+    database: transaction,
+    match: {
+      customerId: 'cust-1', channel: 'email', source: 'late_payment_checker',
+      notificationEventKey: 'late-payment:inv-1:14', invoiceId: 'inv-1',
+    },
+  };
+  await expect(markDelivered({ id: 'led-1' }, options)).resolves.toBe(false);
+  await expect(markDelivered({ id: 'led-1' }, options)).resolves.toBe(true);
+
+  expect(transaction).toHaveBeenCalledTimes(2);
+  expect(q.where).toHaveBeenCalledWith({ id: 'led-1' });
+  expect(q.where).toHaveBeenCalledWith({
+    customer_id: 'cust-1', channel: 'email', source: 'late_payment_checker',
+  });
+  expect(q.whereRaw).toHaveBeenCalledWith("metadata->>'notificationEventKey' = ?", [
+    'late-payment:inv-1:14',
+  ]);
+  expect(q.whereRaw).toHaveBeenCalledWith('invoice_ids @> ?::jsonb', [JSON.stringify(['inv-1'])]);
+});
+
 test('a reused reservation refreshes occurred_at to the current attempt (codex r5)', async () => {
   const q = insertChain({ returned: [] });
   q.first = jest.fn(async () => ({ id: 'led-9', metadata: null }));
@@ -103,7 +135,6 @@ test('a reused reservation refreshes occurred_at to the current attempt (codex r
 // ambiguous dial failure racing a live call must not erase voicemail_left
 // or an outcome already stamped on the row.
 test('markSendFailed merges via jsonb, never replaces from the stale entry snapshot', async () => {
-  const { markSendFailed } = require('../services/collections/contact-ledger');
   const q = insertChain();
   db.mockImplementation(() => q);
   db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));

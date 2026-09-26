@@ -324,6 +324,10 @@ class PaymentExpiry {
             notificationEventKey,
             billing_mode_at_send: require('../billing-lane').resolveBillingLane(customer).mode,
             customerLocationId: customer.location_id,
+            payment_method_id: card.id,
+            expiry_month: String(card.exp_month),
+            expiry_year: String(card.exp_year),
+            expiry_stage: reminderStage,
           },
           hasEmailLeg: reminderStage !== '60_day',
         });

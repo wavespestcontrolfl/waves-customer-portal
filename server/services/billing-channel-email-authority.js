@@ -11,6 +11,7 @@ const EmailTemplateLibrary = require('./email-template-library');
 const { getInvoiceEmailRecipients } = require('./customer-contact');
 const { billingChannelAllowed } = require('./billing-delivery-channels');
 const { withCustomerCommsLock, lockCustomerEmail } = require('../utils/customer-comms-lock');
+const { preferenceChangeHold } = require('./messaging/billing-channel-routing');
 
 const CATEGORY_LABELS = Object.freeze({
   invoice: 'Invoice update',
@@ -78,7 +79,26 @@ async function contextBlock(input, category, { customer, prefs, invoice }, datab
     return { error: blocked('BILLING_EMAIL_DISABLED', 'Email notifications are disabled for this customer') };
   }
   if (billingChannelAllowed(prefs, category, 'email') !== true) {
-    return { error: blocked('BILLING_EMAIL_NOT_SELECTED', 'Email is not selected for this billing category') };
+    // This fires both on the FIRST read (loadBillingEmailContext at the top
+    // of sendBillingChannelEmail) and on the LOCKED recheck immediately
+    // before the provider handoff (verifyAndDispatch below). Only the
+    // locked recheck can race a genuine mid-dispatch preference change
+    // (Email-only -> Text-only landing in the interval before this
+    // recheck), and that race must resolve to the SAME schedulable hold
+    // Text/App already return via preferenceChangeHold()/
+    // BILLING_PREFERENCES_CHANGED (billing-channel-routing.js), not a
+    // terminal drop. A first-read refusal (the customer never selected
+    // Email at all) is retried the exact same way and simply reproduces the
+    // same terminal-looking decision each time, so returning the schedulable
+    // shape here costs nothing. Kept distinct from BILLING_EMAIL_DISABLED (a
+    // portal-wide opt-out, not a channel-selection race) and the ownership
+    // refusals above, which stay terminal.
+    return {
+      error: {
+        sent: false, provider: 'email', providerMessageId: null, blocked: true,
+        ...preferenceChangeHold({ reason: 'Email is not selected for this billing category' }),
+      },
+    };
   }
   if (input.invoiceId) {
     if (!invoice || String(invoice.customer_id) !== String(customer.id)) {
@@ -112,11 +132,11 @@ async function loadBillingEmailContext(input, database = db, { lockRecipients = 
   };
 }
 
-async function preSendBlock(preSendCheck) {
+async function preSendBlock(preSendCheck, database) {
   if (typeof preSendCheck !== 'function') return null;
   let verdict;
   try {
-    verdict = await preSendCheck({ channel: 'email' });
+    verdict = await preSendCheck({ channel: 'email', database });
   } catch (err) {
     verdict = { ok: false, code: err.code, reason: err.message, retryable: err.retryable };
   }
@@ -156,12 +176,12 @@ async function verifyAndDispatch({ input, trx, invoice, recipientEmail, preSendC
       'Billing email recipient changed before delivery',
       { retryable: true },
     );
-  } else state.boundaryBlock = await preSendBlock(preSendCheck);
+  } else state.boundaryBlock = await preSendBlock(preSendCheck, trx);
   if (!state.boundaryBlock) state.boundaryBlock = await suppressionBlock(trx, recipientEmail, fresh.category);
   if (state.boundaryBlock) return { ok: false };
 
   state.handoffStarted = true;
-  await dispatch();
+  await dispatch(trx);
   state.providerAccepted = true;
   return { ok: true };
 }

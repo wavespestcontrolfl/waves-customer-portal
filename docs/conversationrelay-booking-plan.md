@@ -2,6 +2,12 @@
 
 Status: **Phase 0 built (dark, gated off)** + **no-answer backstop wired into `/voice` (gated, fail-closed)** · Owner: Waves · Lane started 2026-06-27
 
+For the short, current summary — capabilities, permissions, env/config
+switches with defaults, proposed roadmap, owner-pending decisions, rollback —
+see `docs/sandy-voice-agent.md`. This page stays the engineering detail
+(architecture, latency-field semantics, the streaming chunking policy in
+full).
+
 ## Why this lane exists (the data that justified it)
 
 Pulled from `call_log` (prod, real window Apr–Jun 2026; pre-2026 rows are backfill noise):
@@ -77,6 +83,7 @@ Socket.io registers its own `upgrade` handler and only acts on `/socket.io/`. We
    | 07 | `flux_smartformat_off_v1` |
    | 08 | `flux_tts_normalization_v1` |
    | 09 | `flux_partials_probe_v1` (sandbox-only; counts Flux partials, never acts on them) |
+   | 10 | `flux_multilingual_es_v1` (sandbox-only; Deepgram Flux Multilingual — Sandy voice stack plan, Phase 0). Same `speechModel="flux"` every other Flux profile uses; renders `language="multi"` (Twilio's own STT/TTS auto-detect switch) **plus** the same `<Parameter lang=es>` marker the Spanish-menu vestibule carries, so the session is treated as Spanish end to end (prompt addendum, fallback copy, streaming hold) rather than only at the Twilio STT/TTS layer. See relay-profiles.js's own citations for the exact Twilio doc sections confirming `speechModel`/`language` values. **Not yet confirmed by a real call** — dial this cell on the sandbox number to verify transcription quality and mid-call language switching before trusting it for a real Spanish caller. |
    | 99 | raw `VOICE_RELAY_SANDBOX_ATTRS` JSON |
 
    Production picks a profile with `VOICE_RELAY_PROFILE=<id>` (unset = the untuned relay, byte-identical TwiML). `relay-profiles.js` is the only place the attributes are chosen; the allowlist and value validation follow Twilio's `<ConversationRelay>` noun docs.

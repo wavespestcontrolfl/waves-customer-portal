@@ -4,8 +4,9 @@ const db = require('../models/db');
 const { WAVEGUARD } = require('./pricing-engine/constants');
 const { serviceCountsTowardWaveGuardTier } = require('./pricing-engine/discount-engine');
 const { loadEstimateAiSupportContext, serviceKeysFromContext, serviceFamiliesFromText } = require('./estimate-ai-context');
-const { dispatch } = require('./llm/call');
+const { dispatch, rejectCall } = require('./llm/call');
 const { isMistingSystemService } = require('../utils/mosquito-misting-system');
+const { ledgerCall, ledgerCallRejected } = require('./llm-dispatch-metrics');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -619,7 +620,7 @@ function buildEstimateAssistantContext({
       items: oneTimeServices.map(rowWithSummary),
     } : null,
     guarantees: {
-      recurring: '90-day money-back guarantee on recurring WaveGuard service.',
+      recurring: 'Money-back guarantee on recurring WaveGuard service: free re-treats between visits, and a refund of the most recent service payment if a covered problem can’t be solved.',
       oneTime: 'One-time pest service may include a 30-day callback period when shown on the estimate.',
     },
     contact: COMPANY,
@@ -1391,7 +1392,7 @@ function answerEstimateQuestionFallback(question, context = {}) {
     if (context.serviceMode === 'one_time') {
       return `This is a one-time service, not a recurring WaveGuard membership. ${context.guarantees?.oneTime || 'One-time pest service may include a 30-day callback period when shown on the estimate.'}`;
     }
-    return `${tier} is the WaveGuard membership level shown on this estimate. Recurring WaveGuard service includes the 90-day money-back guarantee shown here, member pricing, and ongoing service support from Waves.`;
+    return `${tier} is the WaveGuard membership level shown on this estimate. Recurring WaveGuard service includes the money-back guarantee shown here, member pricing, and ongoing service support from Waves.`;
   }
 
   if (/\b(who|waves|company|local|license|insured|contact|phone|text|email)\b/.test(q)) {
@@ -1418,19 +1419,22 @@ function buildAssistantUserContent(question, context) {
 // on any miss returns null so answerEstimateQuestion falls back to Claude.
 async function answerWithOpenAI(question, context) {
   const r = await dispatch(MODELS.ROUTES.estimateAssistant, {
+    laneId: 'estimate_assistant',
     system: SYSTEM_PROMPT,
     text: buildAssistantUserContent(question, context),
     jsonMode: false,
     maxTokens: 420,
   });
   if (!r.ok || !r.text) return null;
-  return cleanAssistantAnswer(r.text) || null;
+  const answer = cleanAssistantAnswer(r.text);
+  if (!answer) rejectCall(r, 'invalid_output');
+  return answer || null;
 }
 
 async function answerWithAnthropic(question, context) {
   if (!Anthropic || !process.env.ANTHROPIC_API_KEY) return null;
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-  const response = await client.messages.create({
+  const response = await ledgerCall('anthropic', process.env.ESTIMATE_ASSISTANT_MODEL || MODELS.WORKHORSE, () => client.messages.create({
     model: process.env.ESTIMATE_ASSISTANT_MODEL || MODELS.WORKHORSE,
     max_tokens: 420,
     system: SYSTEM_PROMPT,
@@ -1438,8 +1442,12 @@ async function answerWithAnthropic(question, context) {
       role: 'user',
       content: buildAssistantUserContent(question, context),
     }],
-  });
-  return extractAnthropicText(response);
+  }), { laneId: 'estimate_assistant' });
+  // Same rule as the OpenAI leg: text the sanitizer strips to nothing is an
+  // unusable answer (the caller serves the template), so fail the row.
+  const answer = extractAnthropicText(response);
+  if (!answer) ledgerCallRejected(response, 'invalid_output');
+  return answer;
 }
 
 async function answerEstimateQuestion({
@@ -1487,7 +1495,14 @@ async function answerEstimateQuestion({
     };
   }
 
-  if (FORCE_FALLBACK_QUESTION_PATTERN.test(cleanQuestion) && supportRows(context).length) {
+  // AW-04: before the public estimate context was restricted to customer-safe
+  // sources, the WaveGuard repo file matched the mandatory 'WaveGuard' search
+  // term on every request, so supportRows(context) was never empty and this
+  // route was effectively unconditional. Removing the internal repo sources
+  // must not move pesticide/product/safety questions onto the live model when
+  // the remaining support lookups return nothing (e.g. a DB outage), so the
+  // route stays unconditional — the same behavior as before, stated directly.
+  if (FORCE_FALLBACK_QUESTION_PATTERN.test(cleanQuestion)) {
     return {
       answer: answerEstimateQuestionFallback(cleanQuestion, context),
       source: 'fallback',

@@ -416,6 +416,10 @@ async function sendCardExpiryWarnings() {
           billingDeliveryCategory: 'billing',
           notificationEventKey: `payment-expiry:${r.payment_method_id}:${r.exp_month}:${expYear}:${reminderStage}`,
           billing_mode_at_send: r.billing_mode_at_send,
+          payment_method_id: r.payment_method_id,
+          expiry_month: String(r.exp_month),
+          expiry_year: String(expYear),
+          expiry_stage: reminderStage,
         },
         hasEmailLeg: reminderStage !== '60_day',
       });

@@ -14,15 +14,15 @@
  *   2. scrubPriceTalk() replaces any reply containing a dollar figure,
  *   3. this service has no access to the pricing engine at all.
  *
- * Model ladder (house pattern, mirrors estimate-assistant.js):
- *   ROUTES.askWaves (live) → Claude fallback (ASK_WAVES_MODEL || VOICE)
- *   → deterministic canned reply. Never throws.
+ * Model ladder — the two-provider TEXT_POLICIES.askWaves entry (OpenAI
+ * balanced primary, Claude VOICE-tier fallback), through the shared
+ * dispatchWithFallback chain → deterministic canned reply. Never throws.
  */
 
 const db = require('../models/db');
 const logger = require('./logger');
 const MODELS = require('../config/models');
-const { dispatch, callAnthropic } = require('./llm/call');
+const { dispatchWithFallback } = require('./llm/call');
 
 const COMPANY = {
   name: 'Waves Pest Control',
@@ -76,12 +76,22 @@ const NUM_WORD = '(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleve
 const NUM_WORD_ES = '(?:un[oa]?|unos|unas|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce|trece|catorce|quince|diecis[eé]is|diecisiete|dieciocho|diecinueve|veinte|veinti\\w+|treinta|cuarenta|cincuenta|sesenta|setenta|ochenta|noventa|cien(?:to)?|mil|pocos)';
 // An "amount" is digits OR spelled-out number words — the SAME alternation
 // feeds both the currency branches and the per-cadence branches, so "forty
-// five per month" / "cuarenta al mes" scrub exactly like "45 per month".
-const EN_AMOUNT = `(?:\\d+(?:\\.\\d+)?|a|${NUM_WORD}(?:[-\\s]+(?:and[-\\s]+)?${NUM_WORD})*)`;
+// five per month" / "cuarenta al mes" scrub exactly like "45 per month". The
+// digit form also accepts a bare numeric RANGE ("80-120", "80 to 120") so
+// "80-120 dollars" scrubs the same as a single figure (AW-08) — the range is
+// only ever consumed when the currency/cadence suffix follows it, so "21-day"
+// or "2-3 visits" (no dollars/mo/etc. after) never matches.
+const RANGE_CONNECTOR = '(?:-|\\u2013|\\u2014|\\s+to\\s+)';
+const EN_AMOUNT = `(?:\\d+(?:\\.\\d+)?(?:\\s*${RANGE_CONNECTOR}\\s*\\d+(?:\\.\\d+)?)?|a|${NUM_WORD}(?:[-\\s]+(?:and[-\\s]+)?${NUM_WORD})*)`;
+// Currency-code amounts: digits or number words, never the bare article "a"
+// ("a USD account" is not a price).
+const USD_AMOUNT = `(?:\\d+(?:\\.\\d+)?|${NUM_WORD}(?:[-\\s]+(?:and[-\\s]+)?${NUM_WORD})*|${NUM_WORD_ES}(?:[-\\s]+(?:y[-\\s]+)?${NUM_WORD_ES})*)`;
 const ES_AMOUNT = `(?:\\d+(?:\\.\\d+)?|${NUM_WORD_ES}(?:[-\\s]+(?:y[-\\s]+)?${NUM_WORD_ES})*)`;
 const PRICE_TALK_RE = new RegExp(
-  '\\$\\s*\\d' // $45, $ 100
-  + `|\\b${EN_AMOUNT}\\s+(?:dollars?|bucks?)\\b` // 45 dollars, forty-five bucks, a few bucks
+  '\\$\\s*\\d' // $45, $ 100, US$85 (the $ needs no left boundary), $85.00/mo
+  + `|\\bUSD(?:\\s*\\$\\s*|\\s*)${USD_AMOUNT}\\b` // USD 85, USD$85, USD eighty-five, USD1200 (no space) — never "USDA" (AW-08)
+  + `|\\b${USD_AMOUNT}\\s*USD\\b` // 85 USD, eighty-five USD (AW-08)
+  + `|\\b${EN_AMOUNT}\\s+(?:dollars?|bucks?)\\b` // 45 dollars, forty-five bucks, a few bucks, 80-120 dollars
   + `|\\b${ES_AMOUNT}\\s+(?:d[oó]lar(?:es)?|pesos?)\\b` // 45 dólares, cuarenta y cinco dólares
   + `|\\b${EN_AMOUNT}\\s*(?:\\/|per\\s+|an?\\s+|each\\s+|every\\s+)(?:mo\\b|month|quarter|week|visit|treatment|application|year|yr\\b|qtr\\b|wk\\b)` // 45/mo, forty five per month, 108 per quarter, 45 each visit
   + `|\\b${ES_AMOUNT}\\s+(?:al|por|cada)\\s+(?:mes|trimestre|semana|visita|a[ñn]o|aplicaci[oó]n|tratamiento)\\b`, // 45 al mes, 90 por trimestre, cuarenta cada mes
@@ -284,6 +294,80 @@ async function logIntakeExchange({ sessionId, message, reply, intent }) {
   }
 }
 
+// Codex round 1 P2 (L437): two turns for the SAME session logging
+// concurrently could race logIntakeExchange's read-then-write session upsert
+// (two "no active session" reads → two inserts, or a stale message_count).
+// The log is best-effort, so an overlapping turn for a session whose previous
+// log is still running is simply skipped — no queue to grow. An entry is
+// removed only when the underlying log actually settles (never on a deadline,
+// so a timed-out write can't overlap the next one), and past a cap nothing
+// new is logged: sessionId is client-supplied on a public endpoint, and a
+// stalled DB must not grow this set without bound.
+const INTAKE_LOG_IN_FLIGHT_MAX = 500;
+const intakeLogInFlight = new Set();
+function logIntakeExchangeOnce({ sessionId, message, reply, intent }) {
+  const key = typeof sessionId === 'string' ? sessionId : null;
+  if (!key) return logIntakeExchange({ sessionId, message, reply, intent });
+  if (intakeLogInFlight.has(key) || intakeLogInFlight.size >= INTAKE_LOG_IN_FLIGHT_MAX) {
+    logger.info('[ask-waves] conversation log skipped: previous log for this session still running');
+    return Promise.resolve();
+  }
+  intakeLogInFlight.add(key);
+  return Promise.resolve(logIntakeExchange({ sessionId, message, reply, intent }))
+    .finally(() => intakeLogInFlight.delete(key));
+}
+
+// AW-09: the website fetch has no abort deadline, and intake passed no
+// timeout to either provider — the primary adapter's default is 10 minutes,
+// and the Anthropic fallback kept the SDK's own retry/timeout behavior on
+// top of that. This is the whole customer-turn wall-clock budget, covering
+// BOTH the live provider attempt and the Anthropic fallback attempt combined
+// (never each getting the full amount) — a synchronous chat box can't leave
+// a visitor waiting minutes for a reply that could be the deterministic
+// fallback in milliseconds. Env-overridable for tests / tuning; read at call
+// time, never cached, so a change needs no restart-sensitive module reload.
+// Codex round 1 P2: a garbage-but-"finite" value (e.g. a value past Node's
+// setTimeout/AbortSignal.timeout int32 ceiling) must not reach the dispatcher
+// as a real budget — Node silently clamps an out-of-range setTimeout to 1ms
+// and AbortSignal.timeout can throw — so anything above a sane ceiling falls
+// back to the default exactly like a non-finite or non-positive value does.
+const ASK_WAVES_TURN_BUDGET_MS = 22000;
+const ASK_WAVES_TURN_BUDGET_MAX_MS = 120000;
+function turnBudgetMs() {
+  const n = Number(process.env.ASK_WAVES_TURN_BUDGET_MS);
+  return Number.isFinite(n) && n > 0 && n <= ASK_WAVES_TURN_BUDGET_MAX_MS ? n : ASK_WAVES_TURN_BUDGET_MS;
+}
+
+// Codex round 1 P1: this service used to run its own provider-chain +
+// deadline implementation (withDeadline, a fixed PRIMARY_LEG_BUDGET_SHARE,
+// sequential dispatch()/callAnthropic() calls) instead of the shared
+// dispatchWithFallback chain — duplicating budget splitting, provider-failure
+// handling, and chain telemetry (recordDispatchOutcome) that every other
+// cross-provider lane already gets for free. TEXT_POLICIES.askWaves
+// (config/models.js) is the two-provider policy; ASK_WAVES_MODEL overrides
+// only the Anthropic fallback leg, same convention as MODEL_FACTCHECK /
+// MODEL_COMPLIANCE overriding one leg of TEXT_POLICIES.deepAnalysis
+// (content/fact-check-gate.js, content/compliance-gate.js) — read fresh on
+// every call, never cached, so the override stays live with no restart.
+function askWavesPolicy() {
+  const override = process.env.ASK_WAVES_MODEL || null;
+  if (!override) return MODELS.TEXT_POLICIES.askWaves;
+  return {
+    name: 'askWavesOverride',
+    primary: MODELS.TEXT_POLICIES.askWaves.primary,
+    fallback: { provider: MODELS.PROVIDER.ANTHROPIC, model: override },
+  };
+}
+
+// The chain's validate hook: a syntactically valid JSON answer with no usable
+// reply field must still be treated as a miss so the chain moves to the next
+// leg (mirrors normalizeIntakeResult's own "no reply" check) instead of
+// being accepted as this leg's answer.
+function hasUsableReply(result) {
+  const reply = result && result.json ? cleanText(result.json.reply, REPLY_MAX_LEN) : '';
+  return reply ? null : 'no_usable_reply';
+}
+
 /**
  * Answer one visitor message. Never throws; always returns the wire contract
  * { reply, intent, service_keys, ready_for_quote, source }.
@@ -292,28 +376,33 @@ async function processIntakeMessage({ message, history, sessionId } = {}) {
   const text = buildTranscript(message, history);
   let result = null;
 
-  const live = await dispatch(MODELS.ROUTES.askWaves, {
-    laneId: 'ask_waves',
-    system: SYSTEM_PROMPT,
-    text,
-    jsonMode: true,
-    jsonSchema: INTAKE_SCHEMA,
-    maxTokens: 400,
-  });
-  if (live.ok) result = normalizeIntakeResult(live.json, 'openai');
-
-  if (!result) {
-    const fallback = await callAnthropic({
+  // The shared chain owns budget splitting, provider-failure handling, and
+  // chain telemetry (recordDispatchOutcome) — the whole customer-turn
+  // wall-clock budget covers BOTH legs combined (reserveFallbackBudget: true
+  // splits it across whichever legs are actually reached, never handing the
+  // primary the entire budget and starving the fallback). hardDeadline: true
+  // is this lane's hard, user-facing wait ceiling: a synchronous chat box
+  // can't leave a visitor waiting on a stalled adapter, so the chain races
+  // each leg against its own share from its own side rather than trusting an
+  // adapter (or a misbehaving future one) to honor timeoutMs on its own.
+  let dispatched;
+  try {
+    dispatched = await dispatchWithFallback(askWavesPolicy(), {
       laneId: 'ask_waves',
-      model: process.env.ASK_WAVES_MODEL || MODELS.VOICE,
       system: SYSTEM_PROMPT,
       text,
       jsonMode: true,
       jsonSchema: INTAKE_SCHEMA,
       maxTokens: 400,
-    });
-    if (fallback.ok) result = normalizeIntakeResult(fallback.json, 'anthropic');
+      timeoutMs: turnBudgetMs(),
+    }, { reserveFallbackBudget: true, hardDeadline: true, validate: hasUsableReply });
+  } catch (err) {
+    // dispatchWithFallback is documented never to throw; this is a defensive
+    // second net so the never-throws contract holds even if that changes.
+    logger.error(`[ask-waves] dispatch chain threw unexpectedly: ${err.message}`);
+    dispatched = { ok: false, reason: 'error' };
   }
+  if (dispatched.ok) result = normalizeIntakeResult(dispatched.json, dispatched.provider);
 
   if (!result) {
     logger.warn('[ask-waves] both providers missed; serving deterministic fallback');
@@ -331,7 +420,12 @@ async function processIntakeMessage({ message, history, sessionId } = {}) {
         : { ...FALLBACK_RESULT };
   }
 
-  await logIntakeExchange({ sessionId, message, reply: result.reply, intent: result.intent });
+  // Best-effort log: fire-and-forget so a stalled/pending DB read can never
+  // hold up an already-generated reply (AW-09). logIntakeExchange already
+  // catches its own errors and logs them; this .catch is a second, defensive
+  // net so a rejection can never surface as an unhandled promise rejection.
+  logIntakeExchangeOnce({ sessionId, message, reply: result.reply, intent: result.intent })
+    .catch((err) => logger.warn(`[ask-waves] conversation log failed: ${err.message}`));
   return result;
 }
 
@@ -343,6 +437,7 @@ module.exports = {
     buildTranscript,
     scrubPriceTalk,
     logIntakeExchange,
+    logIntakeExchangeOnce,
     QUOTABLE_SERVICES,
     SYSTEM_PROMPT,
     PRICE_TALK_RE,
@@ -352,5 +447,10 @@ module.exports = {
     SUPPORT_RE,
     looksLikeEmergency,
     MESSAGE_MAX_LEN,
+    ASK_WAVES_TURN_BUDGET_MS,
+    ASK_WAVES_TURN_BUDGET_MAX_MS,
+    turnBudgetMs,
+    askWavesPolicy,
+    hasUsableReply,
   },
 };

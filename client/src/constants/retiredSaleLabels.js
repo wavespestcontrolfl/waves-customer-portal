@@ -10,6 +10,10 @@ const TREE_SHRUB_LABEL_RE = /\btrees?\s*(?:&|and|\+|\/)?\s*shrubs?\b|\bt\s*&\s*s
 const QUARTERLY_CADENCE_RE = /\bquarterly\b|\b(?:4|four)[\s-]*(?:x|visits?|applications?)\b|\bevery\s+(?:3|three)\s+months?\b|\bevery\s+(?:8[4-9]|9[0-7])\s+days?\b/i;
 const LIGHT_TIER_RE = /\blight\b/i;
 
+// The catalog keys retired for new sales (server RETIRED_SALE_SERVICE_KEYS,
+// pinned by the same test).
+export const RETIRED_SALE_SERVICE_KEYS = new Set(['tree_shrub_quarterly']);
+
 export function labelNamesRetiredSale(text) {
   if (typeof text !== "string" || !text.trim()) return false;
   return TREE_SHRUB_LABEL_RE.test(text) && (QUARTERLY_CADENCE_RE.test(text) || LIGHT_TIER_RE.test(text));

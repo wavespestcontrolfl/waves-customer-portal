@@ -17,7 +17,7 @@ const { getAutoDispatchConfig } = require('./config');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { isEligibleForAutoDispatch, isRecurringPlanActive } = require('./eligibility');
 const { getCustomerSchedulingPreferences } = require('./preferences');
-const { findValidCandidateSlots } = require('./candidate-slots');
+const { findValidCandidateSlots, SCORE_CAP } = require('./candidate-slots');
 const { scoreAppointmentPlacement } = require('./scoring');
 const { applyAutoDispatchMove, revalidatePlacement, unitMoveSize } = require('./apply');
 const { toDateStr, shiftDateStr } = require('./dates');
@@ -46,6 +46,17 @@ async function geocodeAndRecheck(service, eligCtx) {
     recheck: { eligible: false, reason_code: 'MISSING_GEO', reason_description: 'No usable geo (geocode attempt did not resolve the address)' },
     geocoded: false,
   };
+}
+
+// Which model scored a placement (ids/numbers-only audit tag, GATE_AUTO_DISPATCH_SHARED_MODEL
+// dispatch backlog item 3) — a tiny named helper rather than an inline
+// `||` chain so it doesn't add its own branches to evaluatePlacement's
+// complexity count.
+function modelLabelFor(...placements) {
+  for (const p of placements) {
+    if (p && p.model) return p.model;
+  }
+  return 'legacy';
 }
 
 async function loadCapabilityMap() {
@@ -119,6 +130,64 @@ function loadEligibleServices(lockBoundary, lookaheadEnd, today) {
     .limit(5000);
 }
 
+// Whether an improvement clears the move bar for THIS visit — the ONE rule
+// governing both the top-level move/no_change decision on `best` and which
+// candidates may ever reach apply.js as a SLOT_TAKEN fallback candidate
+// (GATE_AUTO_DISPATCH_SHARED_MODEL). An unplaced recurring due-date visit
+// (a due date with no window_start yet) accepts ANY placement over none;
+// every other visit needs its own improvement over the current placement to
+// clear `threshold`. Factored out (Codex pre-push P1) so a fallback
+// candidate is filtered by EXACTLY the rule `best` was — a below-threshold,
+// or literally worse-than-current, placement must never reach apply.js.
+function visitClearsMoveThreshold(service, improvement, threshold) {
+  if (service.recurring_dispatch_due_date && !service.window_start) return true;
+  return improvement >= threshold;
+}
+
+/**
+ * The audit fields (`newPlacement`, `scores`, `routeMetrics`, `constraints`)
+ * and rounded improvement for ONE candidate scored against ONE current
+ * placement. Pulled out of evaluatePlacement (Codex pre-push P1) so
+ * runAutoDispatch's pass-2 can re-run the SAME construction for whichever
+ * candidate apply.js actually applied — a SLOT_TAKEN fallback can land on a
+ * DIFFERENT candidate than `best`, and the audit must describe the one that
+ * actually moved.
+ */
+function buildPlacementAudit({
+  current, currentScore, candidate, candidateScore, service, prefs, lockBoundary, ctx, threshold,
+}) {
+  const improvement = Math.round((candidateScore.total_score - currentScore.total_score) * 100) / 100;
+  const scores = { old: currentScore.total_score, new: candidateScore.total_score, improvement };
+  const routeMetrics = {
+    current_detour_minutes: current.detour_minutes,
+    candidate_detour_minutes: candidate.detour_minutes,
+    candidate_total_drive_minutes: candidate.total_drive_minutes,
+    stops_that_day: candidate.stops_that_day,
+    current_score_breakdown: currentScore,
+    candidate_score_breakdown: candidateScore,
+    // Which model scored this visit (ids/numbers only) — GATE_AUTO_DISPATCH_SHARED_MODEL,
+    // dispatch backlog item 3: a dry-run night's audit rows must say which
+    // arithmetic produced the numbers being reviewed.
+    model: modelLabelFor(current, candidate),
+  };
+  // apply preserves pending (restores it after the rebooker), so the projected
+  // status must reflect that — don't claim a pending visit would be confirmed.
+  const projectedStatus = service.status === 'pending' ? 'pending' : 'confirmed';
+  const newPlacement = { date: candidate.date, window_start: candidate.start_time, window_end: candidate.end_time, technician_id: candidate.technician_id, status: projectedStatus };
+  const constraints = {
+    lock_boundary: lockBoundary,
+    blackout: prefs.blackout,
+    threshold,
+    capability_level: candidate.capability_level,
+    preferred_days: prefs.preferred_days,
+    effective_time_window: prefs.effective_time_window && prefs.effective_time_window.key,
+    ...(ctx.tierMeta ? { route_tiers: ctx.tierMeta } : {}),
+  };
+  return {
+    improvement, newPlacement, scores, routeMetrics, constraints,
+  };
+}
+
 /**
  * Score a single eligible service's current placement against its best valid
  * candidate slot. PURE of side effects (DB reads only, no mutation, no audit) so
@@ -128,25 +197,52 @@ function loadEligibleServices(lockBoundary, lookaheadEnd, today) {
  *
  * Returns a discriminated result:
  *   { kind: 'no_change', reason_code, reason_description, audit }
- *   { kind: 'move', improvement, best, threshold, audit }
- * where `audit` carries the named fields audit.logDecision consumes.
+ *   { kind: 'move', improvement, best, rankedCandidates, current, currentScore, threshold, audit }
+ * where `audit` carries the named fields audit.logDecision consumes, and
+ * `current`/`currentScore` let a caller re-audit a different (fallback)
+ * candidate later with buildPlacementAudit.
  */
+// findValidCandidateSlots, failing closed where the shared model cannot
+// establish what it would compare (GATE_AUTO_DISPATCH_SHARED_MODEL — an
+// unreadable visit group, Codex r3 P1; no single technician for an
+// unassigned visit's day, r7): the visit is not evaluated at all —
+// `skipped` carries the ids-only reason — rather than scored on a guess.
+// Any other error propagates as before.
+async function findSlotsOrSkip(service, prefs, ctx) {
+  try {
+    return await findValidCandidateSlots(service, prefs, ctx);
+  } catch (err) {
+    if (err && err.skipEvaluation === true) {
+      return { current: null, candidates: [], drops: null, skipped: { code: err.code, description: `${err.message} — not evaluated` } };
+    }
+    throw err;
+  }
+}
+
+// Why no candidate survived. When an explicit portal preference is the
+// reason, say so — a HARD preferred-day/time filter dropping every feasible
+// slot is the override working as designed, not a failure to optimize.
+function noSlotReason(drops, skipped) {
+  if (skipped) return skipped;
+  const prefDropped = !!drops && (drops.preferred_day > 0 || drops.preferred_time > 0);
+  return prefDropped
+    ? { code: 'NO_SLOT_MATCHING_PREFERENCE', description: 'No candidate slot honored the customer\'s explicit day/time preference' }
+    : { code: 'NO_VALID_SLOT', description: 'No valid candidate slot found' };
+}
+
 async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
-  const { current, candidates, drops } = await findValidCandidateSlots(service, prefs, ctx);
+  const {
+    current, candidates, drops, skipped,
+  } = await findSlotsOrSkip(service, prefs, ctx);
   const prefsSnapshot = prefs.raw_snapshot;
 
   if (!current || candidates.length === 0) {
-    // When an explicit portal preference is the reason nothing survived, say so —
-    // a HARD preferred-day/time filter dropping every feasible slot is the
-    // override working as designed, not a failure to optimize.
-    const prefDropped = !!drops && (drops.preferred_day > 0 || drops.preferred_time > 0);
+    const reason = noSlotReason(drops, skipped);
     return {
       kind: 'no_change',
-      reason_code: prefDropped ? 'NO_SLOT_MATCHING_PREFERENCE' : 'NO_VALID_SLOT',
-      reason_description: prefDropped
-        ? 'No candidate slot honored the customer\'s explicit day/time preference'
-        : 'No valid candidate slot found',
-      audit: { prefsSnapshot, constraints: { blackout: prefs.blackout, lock_boundary: lockBoundary, preferred_day_indexes: prefs.preferred_day_indexes, preferred_time_window: prefs.preferred_time_window, drops, ...(ctx.tierMeta ? { route_tiers: ctx.tierMeta } : {}) } },
+      reason_code: reason.code,
+      reason_description: reason.description,
+      audit: { prefsSnapshot, constraints: { blackout: prefs.blackout, lock_boundary: lockBoundary, preferred_day_indexes: prefs.preferred_day_indexes, preferred_time_window: prefs.preferred_time_window, drops, model: modelLabelFor(current), ...(ctx.tierMeta ? { route_tiers: ctx.tierMeta } : {}) } },
     };
   }
 
@@ -154,46 +250,110 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
   const currentScore = scoreAppointmentPlacement(current, prefs, scoreCtx);
   let best = null;
   let bestScore = null;
+  // Every candidate's score, in encounter order — kept (not just the single
+  // best) so a SLOT_TAKEN apply-time refusal (GATE_AUTO_DISPATCH_SHARED_MODEL)
+  // can fall back to the next-best still-scored candidate rather than giving
+  // up. Does not change which candidate wins `best`/`bestScore` below (still
+  // the first strictly-greater score encountered) — this is additional
+  // bookkeeping only.
+  const scored = [];
   for (const cand of candidates) {
     const sc = scoreAppointmentPlacement(cand, prefs, scoreCtx);
+    scored.push({ cand, sc });
     if (!bestScore || sc.total_score > bestScore.total_score) { best = cand; bestScore = sc; }
   }
 
-  const improvement = Math.round((bestScore.total_score - currentScore.total_score) * 100) / 100;
   // Already-moved visits must clear a higher bar (defeats the stability penalty)
   // so the job never thrashes the same customer day to day.
   const threshold = (service.auto_dispatch_change_count || 0) > 0
     ? Math.max(config.minScoreImprovement, config.removeStabilityFloor)
     : config.minScoreImprovement;
 
-  const scores = { old: currentScore.total_score, new: bestScore.total_score, improvement };
-  const routeMetrics = {
-    current_detour_minutes: current.detour_minutes,
-    candidate_detour_minutes: best.detour_minutes,
-    candidate_total_drive_minutes: best.total_drive_minutes,
-    stops_that_day: best.stops_that_day,
-    current_score_breakdown: currentScore,
-    candidate_score_breakdown: bestScore,
-  };
-  // apply preserves pending (restores it after the rebooker), so the projected
-  // status must reflect that — don't claim a pending visit would be confirmed.
-  const projectedStatus = service.status === 'pending' ? 'pending' : 'confirmed';
-  const newPlacement = { date: best.date, window_start: best.start_time, window_end: best.end_time, technician_id: best.technician_id, status: projectedStatus };
-  const constraints = {
-    lock_boundary: lockBoundary,
-    blackout: prefs.blackout,
-    threshold,
-    capability_level: best.capability_level,
-    preferred_days: prefs.preferred_days,
-    effective_time_window: prefs.effective_time_window && prefs.effective_time_window.key,
-    ...(ctx.tierMeta ? { route_tiers: ctx.tierMeta } : {}),
-  };
-  const auditCtx = { newPlacement, scores, prefsSnapshot, routeMetrics, constraints };
+  const {
+    improvement, newPlacement, scores, routeMetrics, constraints,
+  } = buildPlacementAudit({
+    current, currentScore, candidate: best, candidateScore: bestScore, service, prefs, lockBoundary, ctx, threshold,
+  });
 
-  if (!(service.recurring_dispatch_due_date && !service.window_start) && improvement < threshold) {
+  // Stable sort (Node/V8 Array#sort is stable): ties keep candidates' original
+  // encounter order, matching the strict `>` tie-break above — rankedCandidates[0]
+  // is always the SAME object as `best` whenever `best` itself qualifies.
+  // Filtered to candidates that themselves clear the SAME move threshold
+  // (Codex pre-push P1): apply.js's SLOT_TAKEN fallback must never be
+  // offered a placement that would not have qualified as `best` on its own.
+  // Capped by TOTAL SCORE (Codex r1): with the gate on, findValidCandidateSlots
+  // returns every survivor and each was scored above before this cap.
+  const rankedCandidates = scored.slice()
+    .sort((a, b) => b.sc.total_score - a.sc.total_score)
+    .filter((s) => visitClearsMoveThreshold(
+      service, Math.round((s.sc.total_score - currentScore.total_score) * 100) / 100, threshold,
+    ))
+    .slice(0, ctx.scoreCap || SCORE_CAP)
+    .map((s) => s.cand);
+
+  const auditCtx = {
+    newPlacement, scores, prefsSnapshot, routeMetrics, constraints,
+  };
+
+  if (!visitClearsMoveThreshold(service, improvement, threshold)) {
     return { kind: 'no_change', reason_code: 'NO_SCORE_IMPROVEMENT', reason_description: `Best improvement ${improvement} < threshold ${threshold}`, audit: auditCtx };
   }
-  return { kind: 'move', improvement, best, threshold, audit: auditCtx };
+  return {
+    kind: 'move', improvement, best, rankedCandidates, current, currentScore, threshold, audit: auditCtx,
+  };
+}
+
+// The audit fields for whichever candidate apply.js ACTUALLY applied
+// (`result.applied`, which may be a SLOT_TAKEN fallback rather than
+// `fresh.best`) — pulled out of runAutoDispatch's pass-2 (Codex pre-push P1)
+// so this lookup/rescore/rebuild doesn't add its own branches to that
+// function's already-large complexity count. Falls back to `fresh.best`
+// when the applier didn't report `applied` (a plain mock, or a version of
+// apply.js that predates this lane), so the common case is unaffected. A
+// candidate a post-SLOT_TAKEN re-evaluation offered (`result.evaluation`) is
+// scored against THAT evaluation's current placement and threshold — the
+// comparison that authorized the move (Codex pre-push P1).
+function buildAppliedPlacementAudit(fresh, service, prefs, ctx, lockBoundary, result) {
+  const evaluation = result.evaluation || fresh;
+  const appliedCandidate = result.applied || fresh.best;
+  const scoreCtx = { currentTechnicianId: service.technician_id, changeCount: service.auto_dispatch_change_count || 0 };
+  const appliedScore = scoreAppointmentPlacement(appliedCandidate, prefs, scoreCtx);
+  const built = buildPlacementAudit({
+    current: evaluation.current, currentScore: evaluation.currentScore, candidate: appliedCandidate, candidateScore: appliedScore,
+    service, prefs, lockBoundary, ctx, threshold: evaluation.threshold,
+  });
+  // attempts (ids/numbers only): how many candidates apply.js tried before
+  // this one landed — 1 when the first attempt succeeded, or when the
+  // applier didn't report it (a plain mock, or a pre-lane version).
+  return { ...built, attempts: result.attempts || 1 };
+}
+
+// The audit fields for a FAILED apply: the candidate apply.js tried LAST
+// (Codex r1 — a SLOT_TAKEN fallback can fail on a different candidate than
+// `fresh.best`), else the fresh placement, else the pass-1 audit when the
+// re-evaluation itself threw. apply.js attaches `lastAttempted` /
+// `attemptsTried` / `lastEvaluation` only under
+// GATE_AUTO_DISPATCH_SHARED_MODEL, so gate off the row is unchanged. The
+// comparison is the one that authorized the last attempt: a post-SLOT_TAKEN
+// re-evaluation's (`lastEvaluation`), else `fresh` (Codex pre-push P1).
+function failedPlacementAudit(fresh, pm, lockBoundary, applyErr) {
+  const attempted = fresh && fresh.kind === 'move' && applyErr && applyErr.lastAttempted;
+  if (!attempted) return (fresh && fresh.audit) || pm.result.audit;
+  const evaluation = applyErr.lastEvaluation || fresh;
+  const { service, prefs, ctx } = pm;
+  const scoreCtx = { currentTechnicianId: service.technician_id, changeCount: service.auto_dispatch_change_count || 0 };
+  const attemptedScore = scoreAppointmentPlacement(applyErr.lastAttempted, prefs, scoreCtx);
+  const built = buildPlacementAudit({
+    current: evaluation.current, currentScore: evaluation.currentScore, candidate: applyErr.lastAttempted, candidateScore: attemptedScore,
+    service, prefs, lockBoundary, ctx, threshold: evaluation.threshold,
+  });
+  return {
+    newPlacement: built.newPlacement,
+    scores: built.scores,
+    prefsSnapshot: prefs.raw_snapshot,
+    routeMetrics: { ...built.routeMetrics, attempts: applyErr.attemptsTried || 1 },
+    constraints: built.constraints,
+  };
 }
 
 async function runAutoDispatch(opts = {}) {
@@ -493,19 +653,34 @@ async function runAutoDispatch(opts = {}) {
             continue;
           }
 
-          const result = await applyAutoDispatchMove(pm.service, fresh.best, runId, { ...config, remainingChanges: config.maxChangesPerRun - totals.changed, prefs: pm.prefs, lockBoundary });
+          // Next-best still-scored candidates (GATE_AUTO_DISPATCH_SHARED_MODEL) —
+          // apply falls back to one of these on a SLOT_TAKEN refusal instead of
+          // failing the visit outright. No effect when the gate is off.
+          // `rescore` (Codex r1): after a SLOT_TAKEN, re-run this visit's own
+          // evaluation against the now-current schedule before the next attempt.
+          const result = await applyAutoDispatchMove(pm.service, fresh.best, runId, {
+            ...config, remainingChanges: config.maxChangesPerRun - totals.changed, prefs: pm.prefs, lockBoundary,
+            alternateCandidates: fresh.rankedCandidates,
+            rescore: () => evaluatePlacement(pm.service, pm.prefs, pm.ctx, config, lockBoundary),
+          });
           totals.changed += result.movedCount || 1;
+          // A SLOT_TAKEN fallback (Codex pre-push P1) can land on a DIFFERENT
+          // candidate than `fresh.best` — re-derive the audit from whichever
+          // one `result.applied` says actually moved, never the first-tried
+          // placement. For the common (non-fallback) case this reproduces
+          // fresh.audit exactly (same pure inputs).
+          const appliedAudit = buildAppliedPlacementAudit(fresh, pm.service, pm.prefs, pm.ctx, lockBoundary, result);
           await audit.logDecision(runId, {
             action: 'changed',
             service: pm.service,
             reason_code: 'CHANGE_APPLIED',
-            reason_description: `Moved (+${fresh.improvement})`,
+            reason_description: `Moved (+${appliedAudit.improvement})`,
             oldPlacement: { date: toDateStr(pm.service.scheduled_date), window_start: pm.service.window_start, window_end: pm.service.window_end, technician_id: pm.service.technician_id, status: result.pre_status },
-            newPlacement: { ...fresh.audit.newPlacement, status: result.post_status },
-            scores: fresh.audit.scores,
+            newPlacement: { ...appliedAudit.newPlacement, status: result.post_status },
+            scores: appliedAudit.scores,
             prefsSnapshot: fresh.audit.prefsSnapshot,
-            routeMetrics: fresh.audit.routeMetrics,
-            constraints: fresh.audit.constraints,
+            routeMetrics: { ...appliedAudit.routeMetrics, attempts: appliedAudit.attempts },
+            constraints: appliedAudit.constraints,
             appliedBy: 'auto_dispatch',
           });
         } catch (applyErr) {
@@ -518,9 +693,7 @@ async function runAutoDispatch(opts = {}) {
           }
           logger.error(`[auto-dispatch] apply failed for ${pm.service && pm.service.id}: ${applyErr.message}`);
           try {
-            // Prefer the fresh (actually-attempted) placement in the failure row;
-            // fall back to the pass-1 audit if the re-evaluation itself threw.
-            await audit.logDecision(runId, { action: 'failed', service: pm.service, reason_code: 'ERROR', reason_description: applyErr.message, ...((fresh && fresh.audit) || pm.result.audit), error: applyErr.message });
+            await audit.logDecision(runId, { action: 'failed', service: pm.service, reason_code: 'ERROR', reason_description: applyErr.message, ...failedPlacementAudit(fresh, pm, lockBoundary, applyErr), error: applyErr.message });
           } catch (_) { /* swallow */ }
         }
       }
@@ -547,4 +720,4 @@ async function runAutoDispatch(opts = {}) {
   return { runId, status: runStatus, geocoded, geocode_attempts: geocodeAttempts, ...totals };
 }
 
-module.exports = { runAutoDispatch, loadEligibleServices, _internals: { loadCapabilityMap, makeCapabilityFn } };
+module.exports = { runAutoDispatch, loadEligibleServices, _internals: { loadCapabilityMap, makeCapabilityFn, evaluatePlacement } };

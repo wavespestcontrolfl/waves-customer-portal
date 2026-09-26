@@ -9,6 +9,10 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const MODELS = require('../../config/models');
+const { anthropicMaxTokens, anthropicEffortConfig } = require('../llm/anthropic-wire');
+// First TEXT block of a Message — a thinking block leads the content on
+// always-thinking models (Opus 5.5, Fable), so content[0] is not the answer.
+const { anthropicText } = require('../llm/call');
 const { etDateString, parseETDateTime } = require('../../utils/datetime-et');
 const { excludeUnresolvedSendReservations } = require('../messaging/review-ask-reservation');
 const {
@@ -16,6 +20,7 @@ const {
   manualSmsDeliveryState,
 } = require('../messaging/send-manual-customer-sms');
 const { excludeRecruitingSmsLog } = require('../../utils/recruiting-thread-scope');
+const { ledgerCall, ledgerCallRejected } = require('../llm-dispatch-metrics');
 
 // Admin phones to exclude from results
 const ADMIN_PHONE_RAW = '9415993489';
@@ -897,9 +902,10 @@ async function draftSmsReply(input) {
 
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-  const msg = await client.messages.create({
+  const msg = await ledgerCall('anthropic', MODELS.FLAGSHIP, () => client.messages.create({
     model: MODELS.FLAGSHIP,
-    max_tokens: 200,
+    ...anthropicEffortConfig(MODELS.FLAGSHIP),
+    max_tokens: anthropicMaxTokens(MODELS.FLAGSHIP, 200),
     messages: [{
       role: 'user',
       content: `Draft a short SMS reply (max 160 chars) for Waves Pest Control.
@@ -914,9 +920,14 @@ Keep it friendly, concise, and action-oriented. Sign as "- Waves Pest Control" o
 Plain keyboard punctuation only: straight quotes and hyphens, never curly quotes, em dashes, or the ellipsis character (they force UCS-2 encoding and multiply SMS segments).
 Return ONLY the SMS text, nothing else.`
     }],
-  });
+  }), { laneId: 'ib_tools' });
 
-  const draft = msg.content[0]?.text || '';
+  const draft = anthropicText(msg);
+  // An empty/refusal answer (a thinking-only or refused reply has no .text)
+  // renders as a blank draft the human silently never sends — recorded a
+  // success with nothing usable produced, the same gap this call ledger
+  // exists to catch on every other draft lane.
+  if (!draft.trim()) ledgerCallRejected(msg, 'invalid_output');
 
   return {
     draft: true,

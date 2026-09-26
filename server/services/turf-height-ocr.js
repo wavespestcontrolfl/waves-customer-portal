@@ -9,6 +9,7 @@
  * visit commits; a failure just leaves verification_status at its prior value.
  */
 const MODELS = require('../config/models');
+const { anthropicMaxTokens, anthropicEffortConfig } = require('./llm/anthropic-wire');
 const { anthropicText, geminiText } = require('./llm/call');
 const logger = require('./logger');
 const db = require('../models/db');
@@ -55,7 +56,8 @@ async function callClaudeGaugeOcr(base64Image, mimeType) {
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
     const response = await anthropic.messages.create({
       model: MODELS.VISION,
-      max_tokens: 200,
+      ...anthropicEffortConfig(MODELS.VISION),
+      max_tokens: anthropicMaxTokens(MODELS.VISION, 200),
       messages: [{
         role: 'user',
         content: [

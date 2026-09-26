@@ -35,7 +35,7 @@ function fakeCache() {
 }
 
 // Response double with the surface the worker touches: ok/status, headers,
-// body, clone(), text(). `new Response(body, init)` in the sandbox builds the
+// body, clone(), text(), json(). `new Response(body, init)` in the sandbox builds the
 // same shape, so tagWithBuild's re-wrap round-trips through it.
 class FakeResponse {
   constructor(body, init = {}) {
@@ -52,6 +52,7 @@ class FakeResponse {
     return new this.constructor(this.body, { status: this.status, statusText: this.statusText, headers: this.headers, gate: this.gate });
   }
   async text() { if (this.gate) await this.gate; this.bodyUsed = true; return String(this.body); }
+  async json() { return JSON.parse(await this.text()); }
 }
 // A response whose body read is parked on a promise the test releases.
 class GatedResponse extends FakeResponse {
@@ -77,20 +78,22 @@ function fakeLocks() {
   };
 }
 
-function loadWorker(cache, { locks, cacheNames = [], cachesByName = {}, now, clientList = [] } = {}) {
+function loadWorker(cache, { locks, cacheNames = [], cachesByName = {}, now, clientList = [], badgeApi = {} } = {}) {
   const listeners = {};
   const names = new Set([...cacheNames, ...Object.keys(cachesByName)]);
   const workerClients = {
-    claim: async () => {},
-    openWindow: async () => {},
+    claim: vi.fn(async () => {}),
+    openWindow: vi.fn(async () => {}),
     matchAll: async () => clientList,
   };
+  const showNotification = vi.fn(async () => {});
+  const skipWaiting = vi.fn(async () => {});
   const sandbox = {
     self: {
       addEventListener(name, fn) { listeners[name] = fn; },
-      navigator: locks ? { locks } : {}, location: { origin: 'https://portal.test' },
-      registration: { showNotification: async () => {} },
-      skipWaiting: async () => {}, clients: workerClients,
+      navigator: { ...badgeApi, ...(locks ? { locks } : {}) }, location: { origin: 'https://portal.test' },
+      registration: { showNotification },
+      skipWaiting, clients: workerClients,
     },
     caches: {
       names,
@@ -98,7 +101,7 @@ function loadWorker(cache, { locks, cacheNames = [], cachesByName = {}, now, cli
       async keys() { return [...names]; },
       async delete(name) { return names.delete(name); },
     },
-    Request: class { constructor(url) { this.url = url; } },
+    Request: class { constructor(url, init = {}) { this.url = url; this.cache = init.cache; } },
     // A test may freeze the clock the worker reads, so two instances can
     // start within the same Date.now() tick on purpose.
     Date: now ? class extends Date { static now() { return now(); } } : Date,
@@ -132,6 +135,11 @@ function loadWorker(cache, { locks, cacheNames = [], cachesByName = {}, now, cli
     listeners.install({ waitUntil(promise) { pending.push(promise); } });
     await Promise.all(pending);
   }
+  async function dispatchActivate() {
+    const pending = [];
+    listeners.activate({ waitUntil(promise) { pending.push(promise); } });
+    await Promise.all(pending);
+  }
   async function dispatchPush(data) {
     const pending = [];
     listeners.push({
@@ -140,7 +148,20 @@ function loadWorker(cache, { locks, cacheNames = [], cachesByName = {}, now, cli
     });
     await Promise.all(pending);
   }
-  return { ...sandbox.__exports, dispatchFetch, setFetch, dispatchInstall, dispatchPush, cacheNames: names };
+  async function dispatchNotificationClick(data) {
+    const pending = [];
+    const close = vi.fn();
+    listeners.notificationclick({
+      notification: { data, close },
+      waitUntil(promise) { pending.push(promise); },
+    });
+    await Promise.all(pending);
+    return close;
+  }
+  return {
+    ...sandbox.__exports, dispatchFetch, setFetch, dispatchInstall, dispatchActivate, dispatchPush,
+    dispatchNotificationClick, showNotification, skipWaiting, workerClients, cacheNames: names,
+  };
 }
 
 const shellHtml = (assets) => `<html><head>${assets.map(a => `<script src="${a}"></script>`).join('')}</head></html>`;
@@ -155,76 +176,186 @@ const serveBuild = (shellAssets, owns = shellAssets) => async (request) => {
 const cachedAssets = async (cache) => (await cache.keys()).map(r => new URL(r.url).pathname).filter(p => p.startsWith('/assets/')).sort();
 
 describe('customer service-worker update contract', () => {
-  it('preloads hashed shell assets before storing the replacement HTML', () => {
-    expect(source).toContain('async function cacheCompleteShellResponse(shellResponse, enqueuedSeq = navigationSeq, { supersedable = true, startedAt = Date.now() } = {})');
-    expect(source).toContain('async function precacheCompleteShell()');
-    expect(source).toContain("new Request(assetUrl, { cache: 'reload' })");
-    expect(source).toContain('await Promise.allSettled(assetResponses.map');
-    expect(source.indexOf('await Promise.allSettled(assetResponses.map'))
-      .toBeLessThan(source.indexOf('await putShell(cache, shellResponse.clone(), buildId)'));
-    expect(source).toContain('event.waitUntil(cacheCompleteShellResponse(response.clone(), navSeq, { startedAt }).catch(() => {}))');
-    expect(source).not.toContain('cache.put(OFFLINE_URL, clone)');
-    // Every write to '/' goes through putShell, so no shell write can move
-    // the build the cache describes without the memo moving with it.
-    expect(source.match(/cache\.put\(OFFLINE_URL/g)).toHaveLength(1); // putShell's own
+  it('reloads shell assets and finishes their writes before replacing the shell or activating', async () => {
+    const cache = fakeCache();
+    const previous = shellHtml(['/assets/index-OLD.js']);
+    await cache.put('/', fakeResponse(previous));
+    const worker = loadWorker(cache);
+    const assets = ['/assets/index-NEW.js', '/assets/index-NEW.css'];
+    const fetch = vi.fn(async request => fakeResponse(request.url === '/' ? shellHtml(assets) : 'asset'));
+    worker.setFetch(fetch);
+    let releaseWrite;
+    const gate = new Promise(resolve => { releaseWrite = resolve; });
+    let writeStarted;
+    const started = new Promise(resolve => { writeStarted = resolve; });
+    cache.putGate = url => {
+      if (url.endsWith('/index-NEW.css')) { writeStarted(); return gate; }
+      return null;
+    };
+
+    const install = worker.dispatchInstall();
+    try {
+      await started;
+      expect(await (await cache.match('/')).text()).toBe(previous);
+      expect(worker.skipWaiting).not.toHaveBeenCalled();
+      for (const url of ['/', ...assets]) expect(fetch).toHaveBeenCalledWith(expect.objectContaining({ url, cache: 'reload' }));
+    } finally {
+      releaseWrite();
+      await install;
+    }
+    expect(await (await cache.match('/')).text()).toBe(shellHtml(assets));
+    for (const asset of assets) expect(await cache.match(asset)).toBeTruthy();
+    expect(worker.skipWaiting).toHaveBeenCalledTimes(1);
   });
 
-  it('serializes cache writes with origin-wide Web Locks so an installing worker queues behind the active one', () => {
-    // Codex #4335 P1: a newer sw.js installing beside the active worker
-    // shares the cache but not module globals, so a per-instance promise
-    // chain cannot order its install-time prune against the active
-    // worker's re-tags. Same fallback shape as the badge lock.
-    expect(source).toContain("const ASSET_WRITE_LOCK = 'waves-asset-writes'");
-    expect(source).toContain("const SHELL_REFRESH_LOCK = 'waves-shell-refresh'");
-    expect(source).toContain('if (self.navigator.locks?.request) return self.navigator.locks.request(name, fn)');
+  it('uses cache lock names shared with previously installed workers', async () => {
+    // Two instances of this source alone cannot catch a uniform rename that
+    // stops coordinating with the older worker still serving an open page.
+    const locks = fakeLocks();
+    const request = vi.spyOn(locks, 'request');
+    const worker = loadWorker(fakeCache(), { locks });
+    await worker.cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-AAA.js'])));
+    expect(request).toHaveBeenCalledWith('waves-shell-refresh', expect.any(Function));
+    expect(request).toHaveBeenCalledWith('waves-asset-writes', expect.any(Function));
   });
 
-  it('does not swallow install failure or delete caches outside this app', () => {
-    expect(source).toContain('event.waitUntil(precacheCompleteShell().then(() => self.skipWaiting()))');
-    expect(source).not.toMatch(/precacheCompleteShell\(\).*catch\(\(\) => \{\}\)/);
-    expect(source).toContain('k.startsWith(APP_CACHE_PREFIX) && k !== CACHE_NAME');
-    expect(source).toContain("if (!isQuotaError(err)) throw err;");
-    expect(source).toContain('await reclaimStaleCacheSpace();');
-    expect(source).not.toMatch(/isQuotaError\(err\)\) throw err;\s*await sweepStaleCaches\(\)/);
+  it('waits for every started asset write before rolling back a failed install', async () => {
+    const cache = fakeCache();
+    const previous = shellHtml(['/assets/index-OLD.js']);
+    await cache.put('/', fakeResponse(previous));
+    const worker = loadWorker(cache);
+    worker.setFetch(async request => fakeResponse(request.url === '/' ? shellHtml(['/assets/fail.js', '/assets/slow.js']) : 'asset'));
+    let releaseWrite;
+    const gate = new Promise(resolve => { releaseWrite = resolve; });
+    let writeStarted;
+    const started = new Promise(resolve => { writeStarted = resolve; });
+    const put = cache.put.bind(cache);
+    cache.put = async (key, response) => {
+      if (key === '/assets/fail.js') throw new TypeError('Asset write failed');
+      if (key === '/assets/slow.js') { writeStarted(); await gate; }
+      return put(key, response);
+    };
+    let settled = false;
+    const install = worker.dispatchInstall().catch(err => err).finally(() => { settled = true; });
+    try {
+      await started;
+      await tick();
+      expect(settled).toBe(false);
+      expect(await (await cache.match('/')).text()).toBe(previous);
+      expect(worker.skipWaiting).not.toHaveBeenCalled();
+    } finally {
+      releaseWrite();
+      await install;
+    }
+    expect((await install).message).toBe('Asset write failed');
+    expect(await cachedAssets(cache)).toEqual([]);
+    expect(await (await cache.match('/')).text()).toBe(previous);
+    expect(worker.skipWaiting).not.toHaveBeenCalled();
   });
 
-  it('sweeps the pre-prefix legacy buckets on activate but never the badge state', () => {
-    // 'waves-v10-admin-activation-stable' outlived every update because the
-    // APP_CACHE_PREFIX sweep never matched it (4.6k orphaned entries on an
-    // owner phone). The badge bucket must keep surviving the sweep.
-    expect(source).toContain("const LEGACY_CACHE_PATTERN = /^waves-v\\d+-/");
-    expect(source).toContain('LEGACY_CACHE_PATTERN.test(k)');
-    const legacy = /^waves-v\d+-/;
-    expect(legacy.test('waves-v10-admin-activation-stable')).toBe(true);
-    expect(legacy.test('waves-badge-state')).toBe(false);
-    expect(legacy.test('waves-customer-v12-shell-pruned')).toBe(false);
+  it('activates by sweeping only stale Waves buckets and preserving current, badge, and unrelated caches', async () => {
+    const worker = loadWorker(fakeCache(), { cacheNames: [
+      'waves-v10-admin-activation-stable', 'waves-customer-v11-shell-atomic',
+      'waves-customer-v12-shell-pruned', 'waves-badge-state', 'another-app-cache',
+    ] });
+    await worker.dispatchActivate();
+    expect([...worker.cacheNames].sort()).toEqual([
+      'another-app-cache', 'waves-badge-state', 'waves-customer-v12-shell-pruned',
+    ]);
+    expect(worker.workerClients.claim).toHaveBeenCalledTimes(1);
   });
 
-  it('constrains notification destinations to the portal origin', () => {
-    expect(source).toContain('candidate.origin === self.location.origin');
-    expect(source).toContain('data: { url: destination }');
+  it.each([
+    ['/admin/?tab=inbox#latest', '/admin/?tab=inbox#latest'],
+    ['https://portal.test/tech/?day=today#route', '/tech/?day=today#route'],
+    ['https://outside.test/admin/', '/'],
+    ['//outside.test/admin/', '/'],
+    ['https://portal.test.outside.test/admin/', '/'],
+    ['javascript:alert(1)', '/'],
+    ['https://[invalid', '/'],
+    [undefined, '/'],
+  ])('constrains pushed notification URL %s through click navigation to %s', async (url, destination) => {
+    const worker = loadWorker(fakeCache());
+    await worker.dispatchPush({ title: 'New activity', url });
+    expect(worker.showNotification).toHaveBeenCalledTimes(1);
+    expect(worker.showNotification).toHaveBeenCalledWith('New activity', expect.objectContaining({ data: { url: destination } }));
+    const close = await worker.dispatchNotificationClick(worker.showNotification.mock.calls[0][1].data);
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(worker.workerClients.openWindow).toHaveBeenCalledTimes(1);
+    expect(worker.workerClients.openWindow).toHaveBeenCalledWith(destination);
   });
 
-  it('mirrors the pushed unread count onto the app icon badge, gated on a numeric payload', () => {
-    expect(source).toContain('if (Number.isInteger(data.badge))');
-    expect(source).toContain("if (!('setAppBadge' in self.navigator)) return");
-    expect(source).toContain('self.navigator.setAppBadge(count)');
-    expect(source).toContain('self.navigator.clearAppBadge()');
+  it('sets positive unread badges and clears zero without Web Locks support', async () => {
+    const badgeApi = { setAppBadge: vi.fn(async () => {}), clearAppBadge: vi.fn(async () => {}) };
+    const worker = loadWorker(fakeCache(), { badgeApi });
+    await worker.dispatchPush({ badge: 3 });
+    expect(badgeApi.setAppBadge).toHaveBeenCalledTimes(1);
+    expect(badgeApi.setAppBadge).toHaveBeenCalledWith(3);
+    expect(badgeApi.clearAppBadge).not.toHaveBeenCalled();
+    await worker.dispatchPush({ badge: 0 });
+    expect(badgeApi.setAppBadge).toHaveBeenCalledTimes(1);
+    expect(badgeApi.clearAppBadge).toHaveBeenCalledTimes(1);
   });
 
-  it('drops an out-of-order badge and keeps its ordering state out of the app-cache sweep', () => {
-    // Overlapping pushes carry absolute count snapshots — a late delivery of
-    // an older snapshot must not overwrite a newer badge (codex #3541 P2),
-    // and the compare-and-apply spans awaits, so it must run under the
-    // cross-context Web Lock the page's syncAppBadge shares.
-    expect(source).toContain('self.navigator.locks.request(BADGE_LOCK, fn)');
-    expect(source).toContain("const BADGE_LOCK = 'waves-badge'");
-    expect(source).toContain('if (prev.seq > seq) return');
-    expect(source).toContain('if (prev.seq === seq && prev.count >= count) return');
-    expect(source).toContain("const BADGE_STATE_CACHE = 'waves-badge-state'");
-    // Must NOT start with APP_CACHE_PREFIX ('waves-customer-') or the
-    // activate sweep would wipe the ordering state on every SW update.
-    expect('waves-badge-state'.startsWith('waves-customer-')).toBe(false);
+  it.each([undefined, null, '3', true, 1.5, NaN, Infinity])('ignores non-integer badge %s while still showing the notification', async badge => {
+    const badgeApi = { setAppBadge: vi.fn(async () => {}), clearAppBadge: vi.fn(async () => {}) };
+    const worker = loadWorker(fakeCache(), { badgeApi });
+    await worker.dispatchPush({ badge, badgeAt: 100 });
+    expect(badgeApi.setAppBadge).not.toHaveBeenCalled();
+    expect(badgeApi.clearAppBadge).not.toHaveBeenCalled();
+    expect(worker.showNotification).toHaveBeenCalledTimes(1);
+  });
+
+  it('still shows a notification when the Badging API is unavailable', async () => {
+    const worker = loadWorker(fakeCache());
+    await worker.dispatchPush({ badge: 3, badgeAt: 100 });
+    expect(worker.showNotification).toHaveBeenCalledTimes(1);
+    expect(worker.cacheNames.has('waves-badge-state')).toBe(false);
+  });
+
+  it('preserves badge ordering through activation and restart, including equal stamps and a newer clear', async () => {
+    const badgeCache = fakeCache();
+    const badgeApi = { setAppBadge: vi.fn(async () => {}), clearAppBadge: vi.fn(async () => {}) };
+    const options = { badgeApi, locks: fakeLocks(), cachesByName: { 'waves-badge-state': badgeCache } };
+    const first = loadWorker(fakeCache(), options);
+    await first.dispatchPush({ badge: 4, badgeAt: 200 });
+    await first.dispatchActivate();
+    expect(first.cacheNames.has('waves-badge-state')).toBe(true);
+    const restarted = loadWorker(fakeCache(), options);
+    for (const [badge, badgeAt] of [[9, 100], [3, 200], [4, 200]]) await restarted.dispatchPush({ badge, badgeAt });
+    expect(badgeApi.setAppBadge.mock.calls).toEqual([[4]]);
+    await restarted.dispatchPush({ badge: 6, badgeAt: 200 });
+    expect(badgeApi.setAppBadge.mock.calls).toEqual([[4], [6]]);
+    await restarted.dispatchPush({ badge: 0, badgeAt: 201 });
+    await restarted.dispatchPush({ badge: 8, badgeAt: 200 });
+    expect(badgeApi.clearAppBadge).toHaveBeenCalledTimes(1);
+    expect(badgeApi.setAppBadge.mock.calls).toEqual([[4], [6]]);
+    expect(await (await badgeCache.match('/__badge-seq')).json()).toEqual({ seq: 201, count: 0 });
+  });
+
+  it('waits for the page badge lock so a delayed push cannot undo a newer page clear', async () => {
+    const locks = fakeLocks();
+    const badgeCache = fakeCache();
+    const badgeApi = { setAppBadge: vi.fn(async () => {}), clearAppBadge: vi.fn(async () => {}) };
+    const worker = loadWorker(fakeCache(), { locks, badgeApi, cachesByName: { 'waves-badge-state': badgeCache } });
+    let releasePage;
+    const pageGate = new Promise(resolve => { releasePage = resolve; });
+    // NotificationBell's page path uses this same lock, cache and key.
+    const pageClear = locks.request('waves-badge', async () => {
+      await pageGate;
+      await badgeCache.put('/__badge-seq', fakeResponse(JSON.stringify({ seq: 200, count: 0 })));
+    });
+    const push = worker.dispatchPush({ badge: 5, badgeAt: 100 });
+    try {
+      await tick();
+      expect(badgeApi.setAppBadge).not.toHaveBeenCalled();
+    } finally {
+      releasePage();
+      await Promise.all([pageClear, push]);
+    }
+    expect(badgeApi.setAppBadge).not.toHaveBeenCalled();
+    expect(badgeApi.clearAppBadge).not.toHaveBeenCalled();
+    expect(await (await badgeCache.match('/__badge-seq')).json()).toEqual({ seq: 200, count: 0 });
   });
 
   it('asks visible pages to refresh their unread counts after a push', async () => {
@@ -970,10 +1101,11 @@ describe('service-worker shell refresh keeps the asset cache bounded to two buil
 
   it('does not sweep buckets when the precache fails for a non-quota reason', async () => {
     const cache = fakeCache();
-    const { dispatchInstall, cacheNames, setFetch } = loadWorker(cache, { cacheNames: ['waves-customer-v11-shell-atomic'] });
+    const { dispatchInstall, cacheNames, setFetch, skipWaiting } = loadWorker(cache, { cacheNames: ['waves-customer-v11-shell-atomic'] });
     setFetch(async (request) => (request.url === '/' ? fakeResponse(shellHtml(['/assets/index-AAA.js'])) : fakeResponse('down', false)));
     await expect(dispatchInstall()).rejects.toThrow(/Shell asset failed/);
     expect(cacheNames.has('waves-customer-v11-shell-atomic')).toBe(true);
+    expect(skipWaiting).not.toHaveBeenCalled();
   });
 
   it('does not let a stale shell read reset the cached-build memo after a refresh', async () => {
@@ -1158,7 +1290,8 @@ describe('service-worker shell refresh keeps the asset cache bounded to two buil
     // mark in the cache.
     const cache = fakeCache();
     const locks = fakeLocks();
-    const active = loadWorker(cache, { locks });
+    let now = 1000;
+    const active = loadWorker(cache, { locks, now: () => now });
     await active.cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-000.js'])));
     let releaseA;
     const gateA = new Promise(resolve => { releaseA = resolve; });
@@ -1167,9 +1300,9 @@ describe('service-worker shell refresh keeps the asset cache bounded to two buil
       return fakeResponse(`asset:${request.url}`);
     });
     const navA = active.dispatchFetch('/admin/', { mode: 'navigate' }); // began first, response parked
-    await new Promise(resolve => setTimeout(resolve, 5)); // the install begins measurably later
+    now = 2000; // the install starts strictly after the active request
 
-    const installer = loadWorker(cache, { locks });
+    const installer = loadWorker(cache, { locks, now: () => now });
     installer.setFetch(async (request) => (request.url === '/' ? fakeResponse(shellHtml(['/assets/index-BBB.js'])) : fakeResponse(`asset:${request.url}`)));
     await installer.dispatchInstall(); // commits B
     expect(await (await cache.match('/')).text()).toBe(shellHtml(['/assets/index-BBB.js']));
@@ -1180,7 +1313,7 @@ describe('service-worker shell refresh keeps the asset cache bounded to two buil
     expect(await cachedAssets(cache)).toEqual(['/assets/index-000.js', '/assets/index-BBB.js']); // A's batch rolled back
 
     // A navigation that begins after the install may still move the shell on.
-    await new Promise(resolve => setTimeout(resolve, 5));
+    now = 3000;
     active.setFetch(async (request) => (request.mode === 'navigate' ? fakeResponse(shellHtml(['/assets/index-CCC.js'])) : fakeResponse(`asset:${request.url}`)));
     await active.dispatchFetch('/admin/', { mode: 'navigate' });
     expect(await (await cache.match('/')).text()).toBe(shellHtml(['/assets/index-CCC.js']));

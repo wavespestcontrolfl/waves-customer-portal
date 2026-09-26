@@ -2001,7 +2001,12 @@ const StripeService = {
   // 2026-08-29). Default false = machine ('admin_card_on_file' rails:
   // completion/balance sweeps, admin card-on-file, no-show, recurring) —
   // fenced to the 8AM-8PM window like every other schedule-driven send.
-  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { customerInitiated = false, deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, maxAuthorizedTotalCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, requireInvoiceScheduledServiceBinding = false, requireCompletedOneTimeVisit = false, requireNoAppointmentCardLane = false, requireExtendedCompletionAnchor = false, refuseWhenDunningStopped = false, requireVisitCompletionPacketId = null } = {}) {
+  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { customerInitiated = false, deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, maxAuthorizedTotalCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, requireInvoiceScheduledServiceBinding = false, requireCompletedOneTimeVisit = false, requireCompletedVisit = false, requireNoAppointmentCardLane = false, requireExtendedCompletionAnchor = false, refuseWhenDunningStopped = false, requireVisitCompletionPacketId = null } = {}) {
+    // The performed-visit gate runs under the visit lock; asking for it
+    // without naming the visit would silently skip it.
+    if (requireCompletedVisit && requireSelfPayScheduledServiceId == null) {
+      throw new Error('requireCompletedVisit needs requireSelfPayScheduledServiceId.');
+    }
     const stripe = getStripe();
     if (!stripe) throw new Error('Stripe not configured');
 
@@ -2205,6 +2210,14 @@ const StripeService = {
             if (lockedSvc.is_recurring === true || lockedSvc.recurring_parent_id || lockedSvc.recurring_pattern) {
               throw new Error('The visit is no longer one-time. Review before charging.');
             }
+          }
+          // Performed-visit gate under the SAME lock (owner ruling
+          // 2026-09-26: never charge a client before the visit). The
+          // completion balance sweep's preflight can be outrun by a
+          // concurrent reopen, cancel or reschedule of the visit; any
+          // lineage, recurring included. Opt-in.
+          if (requireCompletedVisit && String(lockedSvc.status || '') !== 'completed') {
+            throw new Error('The visit is no longer completed. Review before charging.');
           }
           // Cross-lane exclusion at the money move (hold-rail pre-push r13
           // P0): a /secure appointment-card row appearing on the visit —

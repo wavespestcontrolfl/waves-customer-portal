@@ -25,7 +25,7 @@ const logger = require('../logger');
 const { deliveryClaimFresh } = require('../admin-estimate-persistence');
 const contextBuilder = require('./context-builder');
 const { buildCallContext, existingDraftForCall } = contextBuilder;
-const { resolvePropertyFacts, normalizeParcelView } = require('./source-arbitration');
+const { resolvePropertyFacts, normalizeParcelView, SQFT_SOURCES } = require('./source-arbitration');
 const { hasWrongPremiseFlag } = require('../lookup-confidence');
 const { resolveCallAgreedPrice, formatAgreedPriceLabel } = require('../../utils/call-agreed-price');
 // Terminal, money-bearing estimate statuses + the row-scoped verdict
@@ -508,6 +508,10 @@ async function gatherPropertySignals(context, { refreshLookup = false, persistLo
         ...(refreshLookup ? { refresh: true } : {}),
         // dryRun replays are documented read-only — no cache rows behind.
         ...(persistLookup ? {} : { persist: false }),
+        // The lookup sizes a commercial suite itself (dark behind
+        // GATE_COMMERCIAL_SUITE_SIZING); the pipeline adopts that result
+        // below instead of resolving the same suite a second time.
+        commercialSuiteSizing: true,
       });
       propertyRecord = lookup?.propertyRecord || null;
       // The normalized profile carries the pricing feature modifiers the raw
@@ -586,7 +590,7 @@ async function notify({ call, context, title, body, lane, estimateId = null, quo
   // otherwise derive the historical default from what the bell references.
   link = link
     || (estimateId
-      ? '/admin/estimates'
+      ? `/admin/estimates?estimateId=${estimateId}`
       : (context?.lead?.id ? `/admin/leads?lead=${context.lead.id}` : '/admin/communications'));
   const metadata = {
     callSid,
@@ -2621,8 +2625,101 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
       // re-gathered record and composed address. Skipping the apply there
       // let a second-property Unit/Suite quote keep the master-parcel lot
       // (codex r10 P1, refining the r4 fence).
+      if (!unitScopeGuardrailsEnabled()
+        && require('../../config/feature-gates').commercialSuiteSizingLive()
+        && unitScope.serviceScope === 'commercial_suite') {
+        logger.warn('[estimator-engine] GATE_COMMERCIAL_SUITE_SIZING is on but GATE_UNIT_SCOPE_GUARDRAILS is off — commercial suite sizing is skipped in the engine (it depends on unit-scope guardrails)');
+      }
       if (unitScopeGuardrailsEnabled()) {
         applyUnitScopeToPropertyFacts(propertyFacts, unitScope);
+        // Commercial suite sizing (owner ruling 2026-09-25,
+        // server/services/commercial-suite-size/): a commercial tenant in a
+        // multi-tenant building must auto-price off the SUITE's own square
+        // footage, never the whole building and never a $0 manual quote —
+        // the same expectation residential auto-drafting already meets.
+        // Runs only when the apply above left home genuinely unresolved: a
+        // caller-stated size, or a non-aggregated condo's own per-unit
+        // folio, both survive the apply and always outrank this.
+        // DECLARED DEPENDENCY: suite sizing in the engine requires
+        // GATE_UNIT_SCOPE_GUARDRAILS (on in prod) — the apply above is what
+        // clears the whole-building size for a part-building suite, and
+        // this block sizes only what that left unresolved. With guardrails
+        // off the engine keeps its prior behavior and logs a warning (above)
+        // instead of sizing a suite it never scoped.
+        if (intent.is_commercial === true
+          && require('../../config/feature-gates').commercialSuiteSizingLive()
+          && unitScope.serviceScope === 'commercial_suite'
+          // A cross-property draft prices from the fenced facts, where a
+          // size the caller stated about the ORIGINAL property is dropped —
+          // decide on that same view, or the stale fact would skip sizing
+          // and the quoted suite would price off nothing.
+          && (crossPropertyRegather ? fenceExtractionFact(propertyFacts.home, 'address') : propertyFacts.home)?.source
+            === SQFT_SOURCES.NONE) {
+          try {
+            // The lookup already sized this suite (gatherPropertySignals asks
+            // it to): adopt a license-seat or tech-verified size as-is, but
+            // only when the lookup describes the gathered address — a
+            // wrong-premise lookup's suite belongs to another parcel. A
+            // lookup type default was chosen without the call's phone (a
+            // license tie-breaker) or composed risk type, so it is
+            // re-resolved with those (no second web search).
+            const lookupSuiteSize = effectiveParcelOk ? (effectiveSignals.enriched?.suiteSize || null) : null;
+            let suiteSize = (lookupSuiteSize && Number(lookupSuiteSize.value) > 0
+              && (lookupSuiteSize.source === SQFT_SOURCES.LICENSE_SEATS || lookupSuiteSize.source === 'verified'))
+              ? lookupSuiteSize
+              : null;
+            if (!suiteSize) {
+              const { resolveCommercialSuiteSize } = require('../commercial-suite-size');
+              const { suiteAddressParts } = require('../commercial-suite-size/address-parts');
+              const quotedAddressLine = intent.address || result.addressUsed || address;
+              suiteSize = await resolveCommercialSuiteSize({
+                address: suiteAddressParts(quotedAddressLine),
+                phone: context?.phone || null,
+                // intent.customer_name is the CALLER, not the business; there
+                // is no business-name intent field, so the license / web leg
+                // names the business from the address.
+                businessNameHint: null,
+                commercialRiskType: intent.commercial_risk_type || null,
+                // Intent wins when present; else the lookup's county-derived
+                // subtype, so a medical suite keeps its default — but only
+                // when the lookup describes the gathered address (a wrong-
+                // premise lookup's subtype belongs to another parcel).
+                commercialSubtype: intent.commercial_subtype
+                  || (effectiveParcelOk ? effectiveSignals.enriched?.commercialSubtype : null)
+                  || null,
+              }, { skipWebSearch: Boolean(lookupSuiteSize) });
+              // The re-resolve skips the web leg, so keep what the lookup's
+              // found: the business name and, independently, its type.
+              if (suiteSize) {
+                for (const field of ['businessName', 'businessType']) {
+                  if (!suiteSize[field] && lookupSuiteSize?.[field]) suiteSize = { ...suiteSize, [field]: lookupSuiteSize[field] };
+                }
+              }
+            }
+            if (suiteSize && Number(suiteSize.value) > 0) {
+              propertyFacts.home = {
+                value: suiteSize.value,
+                source: suiteSize.source,
+                confidence: suiteSize.confidence,
+                rejected: propertyFacts.home?.rejected || [],
+              };
+              unitScope.sizeBasis = suiteSize.source;
+              propertyFacts.commercialSuiteSize = suiteSize;
+              // An active state food-service license at this suite sets the
+              // commercial cadence when the composer left it null — a
+              // restaurant needs the 12-visit program, not the pricer's
+              // generic default. ONLY the license (a public record) may do
+              // this: a web-search businessType is model output, and model
+              // output must not pick the pricing program (AGENTS.md).
+              if (!intent.commercial_risk_type
+                && suiteSize.source === SQFT_SOURCES.LICENSE_SEATS) {
+                intent.commercial_risk_type = 'restaurant_food';
+              }
+            }
+          } catch (err) {
+            logger.warn(`[estimator-engine] commercial suite size resolve failed: ${err.message}`);
+          }
+        }
       }
     } catch (err) {
       logger.warn(`[estimator-engine] unit-scope model failed: ${err.message}`);

@@ -82,10 +82,10 @@ describe('geocodeAddressWithStatus with a rejected result', () => {
     global.fetch = jest.fn(async () => ({ json: async () => payload }));
 
     const first = await geocodeAddressWithStatus('100 Main St, Fort Worth, TX 76102');
-    expect(first).toEqual({ location: null, permanent: true });
+    expect(first).toEqual({ location: null, permanent: true, reason: 'outside_service_area' });
 
     const second = await geocodeAddressWithStatus('100 Main St, Fort Worth, TX 76102');
-    expect(second).toEqual({ location: null, permanent: true });
+    expect(second).toEqual({ location: null, permanent: true, reason: 'outside_service_area' });
     expect(global.fetch).toHaveBeenCalledTimes(1);
   });
 
@@ -101,7 +101,7 @@ describe('geocodeAddressWithStatus with a rejected result', () => {
     expect(asVenue).toEqual({ location: { lat: 27.9506, lng: -82.4572 }, permanent: false });
 
     const asCustomer = await geocodeAddressWithStatus('Curtis Hixon Park, Tampa, FL');
-    expect(asCustomer).toEqual({ location: null, permanent: true });
+    expect(asCustomer).toEqual({ location: null, permanent: true, reason: 'coarse_result:establishment|point_of_interest' });
     expect(global.fetch).toHaveBeenCalledTimes(1);
   });
 
@@ -118,7 +118,7 @@ describe('geocodeAddressWithStatus with a rejected result', () => {
       status: 'OK', results: [rooftop(27.4989, -82.5748)],
     }) }));
     expect(await geocodeAddressWithStatus(address, { cacheOnly: true }))
-      .toEqual({ location: null, permanent: false });
+      .toEqual({ location: null, permanent: false, reason: 'provider_unavailable' });
     expect(global.fetch).not.toHaveBeenCalled();
     await geocodeAddressWithStatus(address);
     expect(await geocodeAddressWithStatus(address, { cacheOnly: true }))
@@ -131,7 +131,7 @@ describe('geocodeAddressWithStatus with a rejected result', () => {
     }) });
     await geocodeAddressWithStatus(rejected, { serviceAddress: false });
     expect(await geocodeAddressWithStatus(rejected, { cacheOnly: true }))
-      .toEqual({ location: null, permanent: true });
+      .toEqual({ location: null, permanent: true, reason: 'partial_match' });
     expect(global.fetch).toHaveBeenCalledTimes(2);
   });
 });

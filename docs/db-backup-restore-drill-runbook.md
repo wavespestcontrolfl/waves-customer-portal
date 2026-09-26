@@ -86,8 +86,9 @@ Expected duration: roughly 10–20 minutes at today's ~1.2 GB.
 **Never restore over the live instance.** The script connects first and
 refuses any target that already holds any user object (tables, sequences, functions, types — extension-owned ones excepted); only an empty database is
 accepted. `RESTORE_REPLACE_EXISTING=yes` overrides that for a database you
-intend to erase — never the live one. Replace mode drops and recreates the
-`public` schema first, so nothing added after the backup survives.
+intend to erase — never the live one. Replace mode erases all user schemas and
+their objects, then recreates `public` before restoring the archive, so nothing
+added after the backup survives.
 
 1. Railway → the project → **+ New → Database → PostgreSQL**. Railway's
    Postgres image ships pgvector. Copy its `DATABASE_PUBLIC_URL`.

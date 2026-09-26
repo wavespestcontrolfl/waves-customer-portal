@@ -70,23 +70,6 @@ async function getServiceReportCredentialText() {
   }
 }
 
-// Map product categories to customer-friendly descriptions
-function friendlyProductDescription(category) {
-  const map = {
-    'insecticide': 'Insect barrier treatment',
-    'herbicide': 'Weed control',
-    'fungicide': 'Fungus prevention',
-    'fertilizer': 'Lawn nutrition',
-    'larvicide': 'Mosquito breeding prevention',
-    'rodenticide': 'Rodent control',
-    'growth regulator': 'Growth regulation',
-    'surfactant': 'Application enhancer',
-    'adjuvant': 'Application enhancer',
-  };
-  if (!category) return '—';
-  return map[category.toLowerCase()] || category;
-}
-
 // Get aftercare tips based on service type
 function getAftercareTips(serviceType) {
   if (!serviceType) return 'Allow treated areas to dry completely before contact. Call us with any questions.';

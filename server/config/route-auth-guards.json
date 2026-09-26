@@ -69,6 +69,8 @@
       "what": "factory for the JSON-RPC body-parser error handler — 413/parse-error JSON or next(err)" },
     { "name": "noStore", "module": "server/middleware/no-store.js",
       "what": "cache/robots/referrer header stamp for tokenized public surfaces — always next()" },
+    { "name": "reportsAskPrivacyHeaders", "module": "server/routes/reports-public.js", "local": true,
+      "what": "Cache-Control no-store + X-Robots-Tag noindex stamp on the report ask paths (matched on req.path) — always next(), never serves" },
     { "name": "requireStaffTokenForLargeBody", "module": "server/middleware/large-body-auth.js",
       "what": "401 on a large body without a staff token, next() otherwise — never serves" },
     { "name": "requireCustomerTokenForLargeBody", "module": "server/middleware/large-body-auth.js",

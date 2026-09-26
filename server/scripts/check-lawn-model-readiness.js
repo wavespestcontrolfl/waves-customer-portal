@@ -24,6 +24,10 @@
 require('dotenv').config({ path: require('path').join(__dirname, '..', '..', '.env') });
 
 const { LAWN_PIPELINE_MODELS } = require('../services/lawn-diagnostic-prompt');
+// Probe the way the pipeline calls: the cap clears always-on thinking (Opus 5.5)
+// and the answer is the first TEXT block, not content[0] (a thinking block).
+const { anthropicMaxTokens } = require('../services/llm/anthropic-wire');
+const { anthropicText } = require('../services/llm/call');
 const { geminiText } = require('../services/llm/call');
 
 // ── Pure helpers (exported for unit tests; no network) ────────────────────────
@@ -111,12 +115,12 @@ async function checkAnthropic(model) {
     const resp = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({ model, max_tokens: 30, messages: [{ role: 'user', content: PROMPT('anthropic') }] }),
+      body: JSON.stringify({ model, max_tokens: anthropicMaxTokens(model, 30), messages: [{ role: 'user', content: PROMPT('anthropic') }] }),
     });
     const latencyMs = Date.now() - started;
     if (!resp.ok) return { ok: false, status: resp.status, latencyMs, failureType: classifyAnthropic(resp.status), detail: (await resp.text()).slice(0, 200) };
     const data = await resp.json();
-    const parsed = looseJson(data?.content?.[0]?.text);
+    const parsed = looseJson(anthropicText(data));
     return parsed?.ok === true
       ? { ok: true, status: 200, latencyMs }
       : { ok: false, status: 200, latencyMs, failureType: 'unexpected_response', detail: 'reachable but did not return the expected JSON' };

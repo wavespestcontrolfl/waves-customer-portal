@@ -673,6 +673,25 @@ describe('version stamps', () => {
     expect(stamps.tts_language).toBe('es-US');
   });
 
+  // Codex r2 P1 on #4947: Flux Multilingual (cell 10) sets the conversation
+  // marker to `es` (isSpanish() — the prompt addendum, fallback copy,
+  // streaming hold) but Twilio's own STT/TTS actually ran with
+  // language="multi", not "es-US". The version stamp must say what Twilio
+  // actually ran, not what the conversation marker says.
+  test('a Flux Multilingual session (relay_profile_id: flux_multilingual_es_v1) stamps stt_language/tts_language as "multi", not "es-US", even though the conversation marker is Spanish', () => {
+    const stamps = new RelayConversation({ callSid: 'CA-v-multi', from: '+19415551234', send: jest.fn(), relayProfileId: 'flux_multilingual_es_v1', language: 'es' })._versionStamps();
+    expect(stamps.relay_profile_id).toBe('flux_multilingual_es_v1');
+    expect(stamps.stt_language).toBe('multi');
+    expect(stamps.tts_language).toBe('multi');
+  });
+
+  test('an UNRECOGNIZED relay_profile_id (e.g. a stray/forged setup-frame value) falls back to the conversation language, never throws', () => {
+    const stamps = new RelayConversation({ callSid: 'CA-v-unknown-profile', from: '+19415551234', send: jest.fn(), relayProfileId: 'no_such_profile_zz', language: 'es-US' })._versionStamps();
+    expect(stamps.relay_profile_id).toBe('no_such_profile_zz');
+    expect(stamps.stt_language).toBe('es-US');
+    expect(stamps.tts_language).toBe('es-US');
+  });
+
   test('the prompt hash is frozen with the system prompt and excludes the caller block', async () => {
     const a = new RelayConversation({ callSid: 'CA-v-3', from: '+19415551234', send: jest.fn() });
     const b = new RelayConversation({ callSid: 'CA-v-4', from: '+19415551234', send: jest.fn() });

@@ -34,8 +34,9 @@ between every draft and any send.
   (`Authorization: Bearer …`) — but the portal logs every bearer request and the
   token will be retired after 7 bearer-free days, so switch to signing as soon as
   the secret file exists.
-- `GATE_LINK_OUTREACH=true` — the outreach lane master switch. **If it is off, the
+- `GATE_OUTREACH_DRAFTER=true` — the claim-side master switch. **If it is off, the
   claim returns an empty list with a note and you must stop and tell the operator.**
+  (`GATE_LINK_OUTREACH` gates the later send, not the claim.)
 
 `PORTAL_URL` below = the same portal base URL the `waves-backlink-worker` signup
 skill already uses.
@@ -73,7 +74,7 @@ Returns:
   }
 }
 ```
-- `{"prospects": [], "note": "outreach is approval-gated (linkProspectOutreach off)"}`
+- `{"prospects": [], "note": "outreach drafting is disabled"}`
   → the gate is OFF. **Stop. Report to the operator.** Do not loop.
 - `{"prospects": []}` (no note) → nothing to draft right now. Done.
 

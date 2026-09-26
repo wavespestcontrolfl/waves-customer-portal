@@ -21,6 +21,7 @@ const { cleanupUploadedServicePhotoObjects } = require('./service-photos');
 const { finiteDate, firstFiniteDate } = require('../utils/service-duration-capture');
 const { minutesFromElapsed } = require('../utils/duration-minutes');
 const { parseJsonObject } = require('./job-costing');
+const { treeShrubPhotosHash, validateTreeShrubReviewForReport } = require('./tree-shrub-assessment');
 
 // A packet's stored payload, parsed once: pg returns json columns as
 // objects and the fixtures/older rows as strings.
@@ -85,8 +86,25 @@ function packetSnapshot(request, actor, members, existing) {
   // save-time replay must resend the same photos); each member's attempt hash
   // covers this stripped form. Uploaded objects belong to each service record;
   // packet retries never upload them again.
-  const items = request.items.map((item) => ({ ...item, body: withoutPhotoBytes(item.body) }));
-  return { items, actor, retainedMembers };
+  const items = request.items.map((item) => {
+    const photos = item.body.completionPhotos;
+    const review = item.body.treeShrubReview;
+    let verifiedTreeShrubPhotosHash = null;
+    if (review && Array.isArray(photos) && photos.length > 0
+      && photos.every((photo) => typeof photo?.data === 'string' && photo.data.length > 0)) {
+      const actualHash = treeShrubPhotosHash(photos.map((photo) => photo.data));
+      if (review.photosHash === actualHash && review.photoCount === photos.length
+        && validateTreeShrubReviewForReport(review, { serviceId: item.serviceId }).ok) {
+        verifiedTreeShrubPhotosHash = actualHash;
+      }
+    }
+    // Server-owned provenance stays OUTSIDE the client form. Always overwrite
+    // an incoming sibling; effects may trust only this saved verification.
+    return { ...item, body: withoutPhotoBytes(item.body), verifiedTreeShrubPhotosHash };
+  });
+  // Older writers retained arbitrary item siblings. Only this server-owned
+  // envelope marker proves the nested hashes were derived from uploaded bytes.
+  return { items, actor, retainedMembers, treeShrubPhotoVerificationVersion: 1 };
 }
 
 function retainedMemberMinutes(member, notes) {
@@ -534,6 +552,8 @@ async function runVisitCompletionPacketMemberEffects(packetId, database = db) {
       body: structuredClone(savedForm.body), actor: payload.actor,
     }, {
       phase: 'effects', itemId: item.id, packetId: packet.id,
+      verifiedTreeShrubPhotosHash: payload.treeShrubPhotoVerificationVersion === 1
+        ? savedForm.verifiedTreeShrubPhotosHash || null : null,
       completionAt: payload.durationAllocation?.completedAt || null,
       durationAllocation: memberDurationAllocation(payload, item.scheduled_service_id),
     });
@@ -1543,4 +1563,4 @@ async function resumePendingVisitCompletions({ limit = 3 } = {}) {
   return { checked: packets.length };
 }
 
-module.exports = { invoicePayerOwnedNow, memberInTechnicianScope, visitCloseoutMemberQuery, retainedCloseoutMembers, packetPayload, parseOfficeReviewState, buildVisitDurationAllocation, memberDurationAllocation, resolvePacketOwnershipLocked, withdrawPacketInvoiceForPayer, reconcileWithdrawnPacketInvoices, withdrawPacketInvoicesForOwner, packetInvoiceSendInFlight, lockPacketPayerRows, liveThirdPartyPayerForPacket, enrollVisitCompletionReviewForInvoice, saveVisitCompletionPacket, runVisitCompletionPacketMemberEffects, runVisitCompletionPacketEffects, enrollVisitCompletionReview, resumePendingVisitCompletions };
+module.exports = { invoicePayerOwnedNow, memberInTechnicianScope, visitCloseoutMemberQuery, retainedCloseoutMembers, packetPayload, parseOfficeReviewState, buildVisitDurationAllocation, memberDurationAllocation, resolvePacketOwnershipLocked, withdrawPacketInvoiceForPayer, reconcileWithdrawnPacketInvoices, withdrawPacketInvoicesForOwner, packetInvoiceSendInFlight, lockPacketPayerRows, liveThirdPartyPayerForPacket, enrollVisitCompletionReviewForInvoice, saveVisitCompletionPacket, runVisitCompletionPacketMemberEffects, runVisitCompletionPacketEffects, enrollVisitCompletionReview, resumePendingVisitCompletions, _test: { packetSnapshot } };

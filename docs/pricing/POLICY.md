@@ -17,15 +17,14 @@ say "document policy in v4.4" should resolve here, not in the code.
 
 ### `MARGIN_FLOOR = 0.35`
 **Where:** `constants.js` `GLOBAL.MARGIN_FLOOR`
-**Used by:** `discount-engine.validateEstimateDiscounts`, the `/margin-check`
-admin route, and the WaveGuard tier discount safety gate in
-`estimate-engine.js`.
+**Used by:** margin reporting, the `/margin-check` admin route, and pricing
+review signals in the estimate engine. `validateEstimateDiscounts` is a
+retired no-op; the pricing engine does not reject discount combinations.
 
-**Meaning.** Every recurring line item must keep at least 35% contribution
-margin (revenue minus fully-allocated COGS: labor + materials + drive +
-admin annual) **after** all stacked discounts. Falling below 35% triggers
-a margin warning surfaced in the estimate output and on the `/margin-check`
-operator tool.
+**Meaning.** 35% is the reporting threshold for recurring contribution margin
+(revenue minus fully-allocated COGS: labor + materials + drive + admin annual)
+after pricing-engine discounts. Falling below 35% is surfaced for operator
+review; enforcement is disarmed by default under the 2026-07-17 owner ruling.
 
 **Rationale.**
 - 30% leaves no headroom for cost shocks (chemical price spikes, fuel,
@@ -48,22 +47,17 @@ If a change is unavoidable, raise/lower in 0.025 (2.5pp) increments and
 re-run `/admin/pricing-config/margin-check` against representative property
 profiles before shipping.
 
-### `MARGIN_TARGET_TS = 0.43`
+### `MARGIN_TARGET_TS = 0.45`
 **Where:** `constants.js` `GLOBAL.MARGIN_TARGET_TS`, used by
-`service-pricing.priceTreeShrub` as the divisor when back-calculating
-price from cost.
+`service-pricing.priceTreeShrub` as the default admin-inclusive margin target.
 
 **Why higher than the global floor.** Tree & Shrub material costs are the
-most volatile in the catalog (chemical spot pricing changes month-to-month
-on imidacloprid, propiconazole, paclobutrazol). The 43% target builds in
-an 8-point cushion above the 35% floor specifically to absorb material
-swings without re-pricing the whole bracket.
-
-> **Naming caution.** `directCostRatioTarget` (0.43) is a *direct-cost ratio*,
-> not a margin target: price = directCost / 0.43, i.e. direct costs are
-> targeted at 43% of price, leaving ~57% gross before the admin allocation.
-> The code (`constants.js` `TREE_SHRUB.directCostRatioTarget`) is authoritative;
-> see its comment block for the full semantics.
+most volatile in the catalog. The 45% target builds in a 10-point cushion
+above the 35% reporting floor to absorb material swings without re-pricing
+the whole bracket. The current default formula is
+`price = (annualDirectCost + ADMIN_ANNUAL) / (1 - marginTarget)`, subject to
+the existing tier list-price floor. The resulting displayed margin includes
+the annual admin allocation.
 
 ### Tree & Shrub program cadence (tiers)
 **Where:** `constants.js` `TREE_SHRUB.tiers`, `recommendedTier`.
@@ -89,21 +83,22 @@ retired for new sales by owner directive 2026-09-24:
 still prices an explicit `light` request only to replay the grandfathered
 quarterly plan.
 
-**History — why Enhanced/Premium were retired (v4.5).** The documented protocol tops out
-at 6 visits, but the engine had sold a 9-visit Enhanced default (and a
-deprecated 12-visit Premium), charging labor + amortized material for visits
-that were never scheduled. The default also auto-escalated to Enhanced on any
-single signal — including the conservative unknown-bed-area fallback — which
-inflated quotes. Legacy `enhanced` / `premium` tier requests now map to
-Standard with a warning. The 0.43 multiplier was left unchanged; the fix was
-cadence, not markup.
+**History — v4.5 retirement and later reactivation.** The engine had sold a
+9-visit Enhanced default (and a deprecated 12-visit Premium), charging labor +
+amortized material for visits that were never scheduled. The default also
+auto-escalated on any single signal, including the conservative unknown-bed-
+area fallback. v4.5 retired both tiers and mapped their legacy requests to
+Standard. Enhanced was later reactivated as an explicit customer-selectable
+upsell; Premium remains retired and maps to Standard. At the v4.5 cadence
+change, the then-current 0.43 direct-cost-ratio setting was left unchanged;
+v4.6 later replaced that model with the current 45% admin-inclusive margin
+target.
 
 **How to change.** Visit cadence is a customer-facing program contract: a tier
 change needs a `pricing_changelog` entry and a baseline regen
 (`CAPTURE_BASELINE=1`). To lower list prices further without touching cadence,
-the lever is `directCostRatioTarget` (e.g. 0.43 → 0.50 trades ~7pp margin for
-~14% lower list); move it in a separate, deliberate step and re-run
-`/margin-check`.
+the lever is `marginTarget`; lowering it lowers list price and target margin.
+Move it in a separate, deliberate step and re-run `/margin-check`.
 
 ---
 
@@ -167,21 +162,23 @@ Rules in v4.3:
      commercial uses the same brackets but stays flat. A $99 one-time
      setup applies only to non-WaveGuard members (no other qualifying
      recurring service).
-   - `bed_bug_chemical` / `bed_bug_heat`: $50 flat WaveGuard credit
+   - `bed_bug`, `bed_bug_chemical`, `bed_bug_heat`: no percentage discount
+     and no flat credit
    - `bora_care`, `pre_slab_termidor`, `german_roach_initial`,
      `pest_initial_roach`: no discount, no credit. These are non-waivable
      cost-recovery line items.
-4. **Promo codes + tier**: stackable, *uncapped*. The 25% composite cap
-   that existed pre-v4.3 was removed because it interacted badly with
-   military / referral / new-customer flat credits. **The protection is
-   `MARGIN_FLOOR` — every stacked combo gets validated against it.**
-   If a promo + tier combination drops a line below 35%, the validator
-   warns and the operator must intervene.
+4. **Scope of this helper:** `getEffectiveDiscount` chooses the applicable
+   WaveGuard tier discount for a recurring line or the recurring-customer
+   one-time perk. It has no promo-code input and does not stack or validate
+   promo combinations. Database-backed promo records are handled by the
+   separate application discount service at its integration boundary.
+   `validateEstimateDiscounts` is retired and returns no warnings; margin
+   reporting remains the operator signal described above.
 
 **Open question (v4.4 backlog).** Do we want to formalize an explicit
-composite cap separate from the margin floor? Pro: simpler customer-facing
-explanation. Con: margin-floor enforcement already does the right thing
-case-by-case. Decision deferred.
+composite cap and validation policy in the application discount integration?
+The pricing-engine helper does not currently enforce either. Decision
+deferred.
 
 ---
 
@@ -275,9 +272,11 @@ Re-derive from operator records, update `pricing_config`, and re-run
 
 ### `PEST.base = 112`, `PEST.floor = 89`
 **Meaning.** `base` is the unmodified pest control per-visit price for a
-typical 2,000 sqft footprint. `floor` is the absolute minimum after
-all footprint/feature/property-type adjustments — no estimate goes below
-this regardless of property size.
+typical 2,000 sqft footprint. `floor` is the quarterly/property-adjusted base
+floor before cadence and discounts. Post-discount program-floor enforcement
+is disarmed by default, so the discounted candidate may fall below that
+reference and is returned with reporting flags. Explicitly re-arming
+`pricing_config.pest_base.enforce_floor_post_discount` restores enforcement.
 
 **Rationale.**
 - `base` is the operator's v4.3 anchor ($117), set against (a) average
@@ -300,9 +299,11 @@ first-visit line.
 
 **Current behavior.**
 - Recurring pest with regular/native roach selected auto-adds
-  `pest_initial_roach` as **Initial Native Roach Knockdown**.
+  `pest_initial_roach`; its admin-editable display name defaults to
+  **Cockroach Treatment Service**.
 - Recurring pest with German roach selected auto-adds
-  `pest_initial_roach` as **Initial German Roach Knockdown**.
+  `pest_initial_roach`; its admin-editable display name defaults to
+  **German Cockroach Treatment**.
 - The initial knockdown is a fixed first-visit cost-recovery fee, not a
   one-time service discount target. It is not waived by annual prepay and
   is excluded from recurring-customer one-time percentage discounts.
@@ -351,14 +352,15 @@ shadow-only until calibrated against Bouncie/time-tracking actuals.
 
 ### Lawn brackets — `LAWN_BRACKETS`
 **Where:** `constants.js`, separately for `st_augustine`, `bermuda`,
-`zoysia`, `bahia`. Each track has 12 size brackets × 4 service tiers
-(basic 4x/yr, standard 6x/yr, enhanced 9x/yr, premium 12x/yr).
+`zoysia`, `bahia`. Each code-default track has 20 size rows and three source
+columns: Standard 6x/yr, Enhanced 9x/yr, and Premium 12x/yr. Basic 4x is
+retired. Standard 6x remains an internal pricing anchor but is hidden from new
+residential offers by default; new offers present Enhanced 9x and Premium 12x.
 
-**Rationale.** Bracketing is by lawn square footage with shade-adjusted
-turf factor (a 5,000 sqft heavily shaded lawn behaves like a 4,000 sqft
-sunny lawn for chemical and mowing time). The tier-pricing structure
-matches industry norms but the absolute $/visit numbers are calibrated
-to SWFL-specific factors:
+**Rationale.** Bracketing is by raw lawn square footage. Shade affects the
+agronomic protocol and product selection, but it is not a pricing input. The
+tier-pricing structure matches industry norms but the absolute $/visit
+numbers are calibrated to SWFL-specific factors:
 - St. Augustine dominates the local turf mix (>70% of yards) and is the
   most chemical-intensive (chinch bug + brown patch). Highest baseline.
 - Bermuda is rarer locally; less intensive treatment.
@@ -371,12 +373,10 @@ UI. Changes write to the `lawn_pricing_brackets` table and bust the
 in-memory cache. Run `/margin-check` after any bracket move.
 
 ### Mosquito tier prices — `MOSQUITO.basePrices`
-**Lot category × tier matrix.** Visits per year vary by tier
-(`bronze=12, silver=12, gold=15, platinum=17`). These tier visits
-intentionally don't all match — Platinum gets more visits, not just a
-discount on the same number — because the value prop at the top tier
-is a more aggressive treatment cadence during peak SWFL mosquito
-season (June–September).
+**Treatable-area × program matrix.** The current programs are `seasonal9`
+(9 visits/year) and `monthly12` (12 visits/year). WaveGuard tier aliases are
+separate from cadence: Bronze maps to `seasonal9`, while Silver, Gold, and
+Platinum map to `monthly12`.
 
 ### Other services
 Termite, rodent, palm, and specialty values follow the same pattern:
@@ -434,14 +434,14 @@ uses Postgres `jsonb_set` on `pricing_config`) and creates a
 
 The following items are documented at a working level above but may
 benefit from deeper write-ups:
-- Composite discount cap policy decision (formalize cap, or stay
-  margin-floor-driven only).
-- Per-service margin targets — Tree & Shrub uses 43% but the rest
-  effectively use the global 35% floor as a target. Should other
-  high-volatility services (e.g., specialty bed-bug heat) get explicit
-  per-service targets above the floor?
+- Composite discount cap policy decision at the application discount
+  integration boundary; the pricing-engine helper does not enforce one.
+- Per-service margin rationale — Tree & Shrub uses an explicit 45%
+  admin-inclusive target, the global 35% value is a reporting threshold, and
+  some specialty pricers use their own margin divisors. Document why each
+  service-specific target/divisor differs where the current write-up is thin.
 - Frequency-discount curves for pest (`v1` 0.85/0.70 vs `v2` 0.88/0.78).
-  Currently `v2` is live. Is `v1` retired permanently or still a fallback?
+  `v2` is the current code default; `v1` remains for explicit-version replay.
 - Initial fees / setup fees: `PEST.initialFee = $99`, rodent setup $99
   (non-WaveGuard members only, 2026-08-29).
   (German Roach Cleanout no longer carries a separate setup charge — its

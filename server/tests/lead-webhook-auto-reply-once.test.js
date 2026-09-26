@@ -28,8 +28,10 @@ jest.mock('../models/db', () => {
   const mkChain = (firstFn) => {
     const chain = {
       where: jest.fn(() => chain),
+      whereIn: jest.fn(() => chain),
       whereNotNull: jest.fn(() => chain),
       whereRaw: jest.fn(() => chain),
+      update: jest.fn(async () => 1),
       first: jest.fn(() => firstFn()),
     };
     return chain;
@@ -49,8 +51,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { _test } = require('../routes/lead-webhook');
-const { hasPriorLeadAutoReply, resolveLeadAutoReplyClaim } = _test;
+const { hasPriorLeadAutoReply, resolveLeadAutoReplyClaim, claimLeadFirstTouch, clearServiceMenuIntakeState } = require('../services/lead-auto-reply');
 
 const PHONE = '+19415551234';
 const PHONE_HASH = crypto.createHash('sha256').update(PHONE, 'utf8').digest('hex');
@@ -82,7 +83,10 @@ describe('hasPriorLeadAutoReply', () => {
     db.__state.audit = async () => ({ id: 'a1' });
     await expect(hasPriorLeadAutoReply(PHONE)).resolves.toBe(true);
     const audit = db.__chains['messaging_audit_log'];
-    expect(audit.where).toHaveBeenCalledWith({ entry_point: 'lead_webhook_auto_reply', to_hash: PHONE_HASH });
+    // The agent's personal text counts too: before the one-text ruling it
+    // could be the only automated text a phone ever received.
+    expect(audit.whereIn).toHaveBeenCalledWith('entry_point', ['lead_webhook_auto_reply', 'lead_response_auto_reply']);
+    expect(audit.where).toHaveBeenCalledWith({ to_hash: PHONE_HASH });
     expect(audit.whereNotNull).toHaveBeenCalledWith('sent_at');
     // Sentinel provider ids (gate-blocked / template-disabled /
     // owner-silence) record sent_at without any text reaching the
@@ -122,6 +126,7 @@ describe('hasPriorLeadAutoReply', () => {
     const mkChain = () => {
       const chain = {
         where: jest.fn(() => chain),
+        whereIn: jest.fn(() => chain),
         whereNotNull: jest.fn(() => chain),
         whereRaw: jest.fn(() => chain),
         first: jest.fn(async () => null),
@@ -162,6 +167,8 @@ describe('resolveLeadAutoReplyClaim', () => {
     ['gate/template sentinel sid', { sent: true, providerMessageId: 'gate-blocked' }],
     ['owner-silence sentinel sid', { sent: true, providerMessageId: 'owner-silence' }],
     ['terminal provider rejection', { sent: false, blocked: false, terminal: true, code: 'PROVIDER_FAILURE' }],
+    // A throw before dispatch carries the wrapper's canonical not_sent.
+    ['pre-dispatch throw (deliveryOutcome not_sent)', { sent: false, deliveryOutcome: 'not_sent' }],
   ])('deterministic no-delivery: %s → claim released', async (_label, smsResult) => {
     const dbc = mkDbc();
     await resolveLeadAutoReplyClaim('9415551234', smsResult, dbc);
@@ -173,6 +180,7 @@ describe('resolveLeadAutoReplyClaim', () => {
 
   test.each([
     ['retryable transport error (may have been accepted by Twilio)', { sent: false, blocked: false, retryable: true, terminal: false, code: 'PROVIDER_FAILURE' }],
+    ['uncertain delivery (deliveryOutcome uncertain)', { sent: false, deliveryOutcome: 'uncertain' }],
     ['unknown result shape', undefined],
     ['null result', null],
   ])('AMBIGUOUS outcome: %s → claim KEPT (fail closed) and warns', async (_label, smsResult) => {
@@ -188,5 +196,43 @@ describe('resolveLeadAutoReplyClaim', () => {
     dbc.__chain.del = jest.fn(async () => { throw new Error('pool exhausted'); });
     await expect(resolveLeadAutoReplyClaim('9415551234', { sent: false }, dbc)).resolves.toBeUndefined();
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('fail closed'));
+  });
+});
+
+
+describe('claimLeadFirstTouch — normalizes the phone like the messaging layer', () => {
+  test.each(['(941) 555-1234', '941-555-1234', '9415551234', '+19415551234', '19415551234'])(
+    '%s hits the same claim key and audit hash as the canonical +19415551234',
+    async (phone) => {
+      db.__state.marker = async () => ({ phone_digits: '9415551234', twilio_sid: 'SM_existing' });
+      await expect(claimLeadFirstTouch(phone, 'cust-1')).resolves.toEqual({ claimed: false, phoneDigits: '9415551234' });
+      expect(db.__chains['lead_auto_reply_sends'].where).toHaveBeenCalledWith({ phone_digits: '9415551234' });
+    },
+  );
+
+  test('the audit leg hashes the normalized recipient, not the raw string', async () => {
+    db.__state.audit = async () => ({ id: 'a1' });
+    await expect(claimLeadFirstTouch('(941) 555-1234', 'cust-1')).resolves.toMatchObject({ claimed: false });
+    expect(db.__chains['messaging_audit_log'].where).toHaveBeenCalledWith({ to_hash: PHONE_HASH });
+  });
+});
+
+describe('clearServiceMenuIntakeState', () => {
+  test('clears only the untouched awaiting_service seed', async () => {
+    await clearServiceMenuIntakeState('cust-1');
+    const c = db.__chains['customers'];
+    expect(c.where).toHaveBeenCalledWith({ id: 'cust-1', lead_intake_status: 'awaiting_service' });
+    expect(c.update).toHaveBeenCalledWith({ lead_intake_status: null });
+  });
+
+  test('a db error is swallowed (non-fatal)', async () => {
+    const trx = jest.fn(() => ({ where() { return this; }, update: async () => { throw new Error('pg down'); } }));
+    await expect(clearServiceMenuIntakeState('cust-1', trx)).resolves.toBeUndefined();
+    expect(logger.warn).toHaveBeenCalled();
+  });
+
+  test('no customer id → no query', async () => {
+    await clearServiceMenuIntakeState(null);
+    expect(db).not.toHaveBeenCalled();
   });
 });

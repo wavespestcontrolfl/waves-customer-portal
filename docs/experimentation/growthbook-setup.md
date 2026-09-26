@@ -6,9 +6,11 @@ experiments locally (a deterministic hash) and computes lift by querying **our
 Postgres** — the `experiment_exposures` table (who saw what) joined to the
 existing conversion tables (`estimates`, `estimate_deposits`, `invoices`, …).
 
-Everything ships **dark**. Nothing calls GrowthBook until `GATE_GROWTHBOOK=true`
-AND `GROWTHBOOK_CLIENT_KEY` is set AND an experiment exists in GrowthBook. With
-the gate off, every code path is byte-identical to pre-experiment behavior.
+Everything ships **dark**. `GATE_GROWTHBOOK=true` plus a configured
+`GROWTHBOOK_CLIENT_KEY` enables the background feature fetch. A matching active
+experiment is additionally required before a new exposure or assignment is
+recorded. With the gate off, every code path is byte-identical to
+pre-experiment behavior.
 
 ---
 
@@ -264,11 +266,9 @@ WHERE anon_id IS NOT NULL
    rebuild. Kill switches: unset that var (next build), or unset
    `GATE_GROWTHBOOK` on Railway (instant — status probe fails closed).
 
-## 8. Later
+## 8. Historical proposal: glass theme experiment
 
-- **Experiment #2 — glass theme on/off** (the live redesign question). `?glass=1`
-  today (`EstimateViewPage.jsx`) is a client-side CSS layer *inside* v2. Turning
-  it into a proper 50/50 experiment is the sanctioned way to launch it. Cleanest
-  wiring keeps assignment server-side and passes it to the client via the
-  existing `GET /:token/data` response (`experiment.glass`), so React just reads
-  a field — no client GrowthBook SDK required for the decision.
+The former proposal to launch the estimate glass theme through `?glass=1` and
+a 50/50 experiment is superseded. The standard estimate view now mounts
+`EstimateGlassTheme` unconditionally; it is not a CSS opt-in. Any future theme
+experiment needs a new proposal based on the current implementation.

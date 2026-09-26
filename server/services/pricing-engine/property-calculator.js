@@ -646,6 +646,11 @@ function calculatePropertyProfile(input) {
     // included — must not re-derive homeSqFt/stories from a footprint of 0
     // (codex P1 #2721).
     footprintUnknown: input.footprintUnknown === true && !(footprint > 0),
+    // One unit inside a building: `footprint` above is the unit's living
+    // area — right for recurring pest, never a slab/attic/perimeter. The
+    // termite pricers read this and require a measurement instead
+    // (resolveTermiteFootprint / resolvePropertyPerimeter, codex r3 P1 #4862).
+    unitScoped: input.unitScoped === true,
     turfEstimated: turfArea.turfEstimated,
     turfConfidence: turfArea.turfConfidence,
     turfBasis: turfArea.turfBasis,

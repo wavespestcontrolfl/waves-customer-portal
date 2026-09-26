@@ -4,21 +4,35 @@ Environmental + recurring issues that aren't yet bugs but bite often enough to d
 
 ---
 
-## Dev server port :3001 EADDRINUSE
+## Managed development runner reports an occupied port
 
-**Symptom:** `npm run dev` logs `[UNCAUGHT EXCEPTION] listen EADDRINUSE: address already in use :::3001` repeatedly; nodemon exits and restarts, server never binds.
+`npm run dev` uses the managed runner and assigned per-worktree ports. Its
+doctor preflight refuses startup when an assigned port is already occupied;
+Vite uses `strictPort` and does not silently move to another port.
 
-**Cause:** a previous node process (usually a stale nodemon from a prior session, occasionally the agent review queue listener) still holds the port.
+`npm run worktree:status` contacts only the authenticated control port recorded
+for the current checkout. If it reports that checkout's managed runner as
+running, stop it from the same checkout with `npm run worktree:stop`. It cannot
+identify an arbitrary process listening on another assigned port.
 
-**Fix:**
-```bash
-lsof -iTCP:3001 -sTCP:LISTEN       # find the PID
-kill <pid>                          # polite first
-kill -9 <pid>                       # if it ignores
+The raw `npm run dev:server` command remains a separate nodemon entry point and
+does not provide the managed runner's port allocation or ownership controls. If
+status reports no matching runner (or refuses a different runner), inspect only
+the exact port named by the doctor error:
+
+```sh
+lsof -nP -iTCP:<reported-port> -sTCP:LISTEN
+ps -p <listener-pid> -o user=,pid=,ppid=,command=
+lsof -a -p <listener-pid> -d cwd -Fn
+ps -p <parent-pid> -o user=,pid=,ppid=,command=
 ```
 
-Client Vite falls back to the next free port (5177, 5178…) and runs fine, but backend API calls from the client 404 because there's no server bound. Restart both after killing.
-
-**Not yet worth fixing because:** cheap to diagnose once you know, and a permanent lockfile-style fix would need a dev-server supervisor we don't otherwise want. Revisit if it becomes weekly instead of occasional.
-
-*Logged 2026-04-18 during PR 0 of the blog-schema arc.*
+Verify the OS user, command, working directory, and parent process before doing
+anything. For a recognized raw `dev:server`, stop its original terminal with
+Ctrl+C. If that terminal is gone and the process belongs to the intended
+checkout, send `SIGTERM` to the verified nodemon supervisor, or to the exact
+standalone listener when there is no supervisor, then rerun the same `lsof`
+command to confirm the port was released. Do not use `killall`, `pkill`, a broad
+PID list, or signal a process whose checkout and purpose are unknown. See
+[`docs/development.md`](development.md) for managed setup, preflight, status,
+and stop procedures.

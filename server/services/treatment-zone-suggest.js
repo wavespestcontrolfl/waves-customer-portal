@@ -12,6 +12,7 @@
  * the tech's adjusted trace goes through the existing save route.
  */
 const MODELS = require('../config/models');
+const { anthropicMaxTokens, anthropicEffortConfig } = require('./llm/anthropic-wire');
 const { anthropicText, geminiText } = require('./llm/call');
 const logger = require('./logger');
 
@@ -251,7 +252,8 @@ async function claudeSuggest(base64Png, prompt) {
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
     const response = await anthropic.messages.create({
       model: MODELS.VISION,
-      max_tokens: 900,
+      ...anthropicEffortConfig(MODELS.VISION),
+      max_tokens: anthropicMaxTokens(MODELS.VISION, 900),
       messages: [{
         role: 'user',
         content: [
