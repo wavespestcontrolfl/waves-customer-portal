@@ -2143,27 +2143,39 @@ describe('public-quote resolveEntryChannel allowlist', () => {
 });
 
 // #4905 guard: the intake chokepoint runs synchronously on every public chat
-// turn, so its worst case must stay far from event-loop-blocking territory.
+// turn, so its steady per-turn CPU work must stay far from event-loop-blocking
+// territory. One-time regex/JIT setup is exercised before measurement below.
 // Inputs are sized to the real caps (12 history turns × 600 chars, a
 // 2000-char message, a 600-char reply) with repetitive adversarial shapes.
 describe('intake chokepoint worst-case latency (#4905)', () => {
   const { normalizeIntakeResult: normalize, looksLikeEmergency: emergency } = _internals;
   const shapes = ['a ', 'my ', 'not ', "child's ", 'dry ', 'no les ', '- ', 'my child ', 'can i ', 'return ', 'avoid ', 'hospital ', 'spray ', 'my dog ate un poco ', 'my dog ate the some of '];
+  const fill = (unit, n) => unit.repeat(Math.ceil(n / unit.length)).slice(0, n);
+  const runChokepoint = (reply, ctx, msg) => {
+    normalize({ reply, intent: 'question', service_keys: [], ready_for_quote: true }, 'openai', ctx, msg);
+    emergency(ctx);
+  };
+  const cpuMs = (fn) => {
+    const started = process.cpuUsage();
+    fn();
+    const elapsed = process.cpuUsage(started);
+    return (elapsed.user + elapsed.system) / 1000;
+  };
+
+  beforeAll(() => {
+    // Compile and exercise the full no-match path at the real input caps before
+    // measuring steady synchronous work. Wall time here is dominated by host
+    // scheduling when CI runs many suites in parallel; process CPU still counts
+    // regex/string work (and GC) that can actually block this Node event loop.
+    const msg = fill('my yard has ants and a question ', 2000);
+    const ctx = [...Array(12).fill(fill('ordinary pest question ', 600)), msg].join('\n');
+    for (let k = 0; k < 2; k += 1) runChokepoint(fill('ordinary answer ', 600), ctx, msg);
+  });
+
   test.each(shapes)('stays well under budget for repeated %j', (unit) => {
-    const fill = (n) => unit.repeat(Math.ceil(n / unit.length)).slice(0, n);
-    const msg = fill(2000);
-    const ctx = [...Array(12).fill(fill(600)), msg].join('\n');
-    normalize({ reply: 'warm', intent: 'question', service_keys: [], ready_for_quote: true }, 'openai', 'warm', 'warm');
-    // Best of three: a slow pattern is slow every run; a scheduler stall on a
-    // loaded machine is not — this measures CPU cost, not contention.
-    let ms = Infinity;
-    for (let r = 0; r < 3; r += 1) {
-      const started = process.hrtime.bigint();
-      normalize({ reply: fill(600), intent: 'question', service_keys: [], ready_for_quote: true }, 'openai', ctx, msg);
-      emergency(ctx);
-      ms = Math.min(ms, Number(process.hrtime.bigint() - started) / 1e6);
-    }
-    expect(ms).toBeLessThan(50);
+    const msg = fill(unit, 2000);
+    const ctx = [...Array(12).fill(fill(unit, 600)), msg].join('\n');
+    expect(cpuMs(() => runChokepoint(fill(unit, 600), ctx, msg))).toBeLessThan(50);
   });
 
   test('stays under budget for seeded random mixes of the matchers\' own vocabulary', () => {
@@ -2176,18 +2188,12 @@ describe('intake chokepoint worst-case latency (#4905)', () => {
       const msg = words(300).slice(0, 2000);
       const ctx = [...Array.from({ length: 12 }, () => words(100).slice(0, 600)), msg].join('\n');
       const reply = words(100).slice(0, 600);
-      let best = Infinity;
-      for (let r = 0; r < 3; r += 1) {
-        const started = process.hrtime.bigint();
-        normalize({ reply, intent: 'question', service_keys: [], ready_for_quote: true }, 'openai', ctx, msg);
-        emergency(ctx);
-        best = Math.min(best, Number(process.hrtime.bigint() - started) / 1e6);
-      }
-      worst = Math.max(worst, best);
+      worst = Math.max(worst, cpuMs(() => runChokepoint(reply, ctx, msg)));
     }
     expect(worst).toBeLessThan(50);
   });
 });
+
 
 // Drift guard: this surface keeps its own chokepoint (the shared checker is
 // too slow per turn, #4905). The corpus lives in a shared fixture that the
