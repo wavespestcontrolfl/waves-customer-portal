@@ -9,7 +9,8 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const logger = require('../services/logger');
 const {
   RELAY_PROFILES, SANDBOX_CELLS, validateRelayAttrs, resolveRelayProfile,
-  activeRelayProfile, activeRelayTwiMLOptions, resolveSandboxCell, parseTtsVoice,
+  activeRelayProfile, activeRelayTwiMLOptions, profileSupportsLanguage, resolveSandboxCell, parseTtsVoice,
+  FLUX_MULTILINGUAL_SPEECH_MODEL, FLUX_MULTILINGUAL_LANGUAGE,
 } = require('../services/voice-agent/relay-profiles');
 const { STT_HINTS } = require('../config/transcription-vocabulary');
 
@@ -201,4 +202,60 @@ describe('shipped profiles name their provider (codex r5 P1)', () => {
       expect(resolveRelayProfile(id).attrs.transcriptionProvider).toBe('Deepgram');
     }
   });
+});
+
+describe('flux_multilingual_es_v1 — Sandy voice stack plan, Phase 0', () => {
+  test('speechModel is the SAME "flux" every other Flux profile uses; the multilingual model is selected by language, not a different speechModel', () => {
+    const profile = resolveRelayProfile('flux_multilingual_es_v1');
+    expect(profile).not.toBeNull();
+    expect(profile.sandboxOnly).toBe(true);
+    expect(profile.attrs.speechModel).toBe(FLUX_MULTILINGUAL_SPEECH_MODEL);
+    expect(profile.attrs.speechModel).toBe('flux');
+    expect(profile.attrs.transcriptionProvider).toBe('Deepgram');
+    expect(profile.language).toBe(FLUX_MULTILINGUAL_LANGUAGE);
+    expect(profile.language).toBe('multi');
+  });
+
+  test('every OTHER Flux profile carries no `language` override — production defaults are untouched', () => {
+    for (const id of Object.keys(RELAY_PROFILES)) {
+      if (id === 'flux_multilingual_es_v1') continue;
+      expect(resolveRelayProfile(id).language).toBeUndefined();
+    }
+  });
+
+  test('sandbox cell "10" resolves it, carrying `language` alongside relayAttrs/relayProfileId', () => {
+    const cell = resolveSandboxCell('10');
+    expect(cell).toEqual({
+      relayAttrs: expect.objectContaining({ speechModel: 'flux', transcriptionProvider: 'Deepgram' }),
+      relayProfileId: 'flux_multilingual_es_v1',
+      language: 'multi',
+    });
+  });
+
+  test('every OTHER sandbox cell carries no `language` key — sandboxRelayXml\'s spread leaves buildRelayTwiML\'s language param at its default, byte-identical to before this profile existed', () => {
+    for (const code of Object.keys(SANDBOX_CELLS)) {
+      if (code === '10') continue;
+      expect(resolveSandboxCell(code).language).toBeUndefined();
+    }
+  });
+
+  test('profileSupportsLanguage recognizes it as supporting Spanish (and any non-English language); a same-speechModel profile with no language override stays English-only', () => {
+    const multilingual = resolveRelayProfile('flux_multilingual_es_v1');
+    const englishOnlyFlux = resolveRelayProfile('flux_balanced_v1');
+    expect(profileSupportsLanguage(multilingual, 'es-US')).toBe(true);
+    expect(profileSupportsLanguage(multilingual, 'fr-FR')).toBe(true);
+    expect(profileSupportsLanguage(multilingual, 'en-US')).toBe(true);
+    // Codex r10 P1's original finding, unchanged: plain "flux" is still
+    // English-only when no `language` override is present.
+    expect(profileSupportsLanguage(englishOnlyFlux, 'es-US')).toBe(false);
+    expect(profileSupportsLanguage(englishOnlyFlux, 'en-US')).toBe(true);
+  });
+
+  // This profile ships sandboxOnly, so VOICE_RELAY_PROFILE (the production
+  // activation env var) can never select it — activeRelayProfile() refuses
+  // any sandboxOnly id (see "a sandbox-only profile is refused in
+  // production" above), so profileSupportsLanguage's language-aware branch
+  // for it is unreachable through activeRelayTwiMLOptions today. The tests
+  // above exercise it directly instead, the same way the shipped-profiles
+  // tests exercise resolveRelayProfile independent of that production gate.
 });

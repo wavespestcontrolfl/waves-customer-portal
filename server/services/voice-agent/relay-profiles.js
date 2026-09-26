@@ -64,6 +64,49 @@ const HINTS_DEFAULT = 'default';
 // application-side estimate only.
 const EVENTS_ALL = 'speaker-events tokens-played';
 
+// ── Flux Multilingual (Sandy voice stack plan, Phase 0) ─────────────────────
+// Deepgram released Flux Multilingual (10 languages, mid-call switching) GA
+// 2026-04-29; Twilio's ConversationRelay supports it. Verified 2026-09-26
+// directly against Twilio's own reference doc (raw HTML table + prose, not a
+// third-party summary) — both values below are CONFIRMED, not guesses:
+//
+//   speechModel="flux"   — the SAME literal value as English Flux. Twilio's
+//     own <ConversationRelay> noun abstracts Deepgram's two underlying model
+//     ids (flux-general-en / flux-general-multi — Deepgram's own docs:
+//     https://developers.deepgram.com/docs/flux/language-prompting) behind
+//     one speechModel string; which one actually runs is selected by the
+//     LANGUAGE setting below, not by a different speechModel value. Confirmed
+//     by Twilio's own worked example (transcriptionProvider="Deepgram"
+//     speechModel="flux" …) in
+//     https://www.twilio.com/en-us/blog/developers/tutorials/integrations/deepgram-flux-twilio-conversation-relay
+//     and by the changelog https://www.twilio.com/en-us/changelog/conversation-relay-now-supports-deepgram-flux---new-features
+//   language="multi"     — the ConversationRelay-level switch that turns on
+//     automatic language detection for STT AND TTS (setting the top-level
+//     `language` attribute sets both `transcriptionLanguage` and
+//     `ttsLanguage` — same reference doc, "Language settings" section:
+//     "You can set the speech-to-text language in three ways… [1] The value
+//     of the `language` attribute on the <ConversationRelay> noun"). Its own
+//     "Automatic language detection" section: "you can specify `multi` as
+//     the active STT language for the session" / "as the active TTS language
+//     for the session", and "When using `speechModel`=`flux` with `multi`,
+//     ConversationRelay will use the <Language> element (if declared) as a
+//     language_hint to bias the model toward specific languages" (that
+//     optional per-language bias element is NOT implemented here — this
+//     profile relies on Flux Multilingual's own auto-detection, not a hint).
+//     https://www.twilio.com/docs/voice/twiml/connect/conversationrelay#automatic-language-detection
+//     https://www.twilio.com/docs/voice/twiml/connect/conversationrelay#setting-the-speech-to-text-language
+//   Required alongside `multi`, straight from the same doc's warning:
+//   transcriptionProvider must be Deepgram (every flux profile already sets
+//   this) and ttsProvider must be ElevenLabs — already this codebase's
+//   DEFAULT_TTS_PROVIDER (relay-protocol.js), so no override is needed here.
+//
+// What is NOT sandbox-call-confirmed: real transcription quality/latency,
+// whether mid-call language switching behaves as documented, and the
+// language_hint bias this profile skips — Phase 0 item 4 (a real sandbox
+// call on (941) 241-2993) is what actually proves those, not this citation.
+const FLUX_MULTILINGUAL_SPEECH_MODEL = 'flux';
+const FLUX_MULTILINGUAL_LANGUAGE = 'multi';
+
 // Every shipped profile names a Deepgram model (Nova / Flux), so every one
 // sets the provider — ConversationRelay's default is Google, and a Deepgram
 // speechModel on the Google provider cannot deliver the advertised recognizer.
@@ -109,6 +152,20 @@ const RELAY_PROFILES = Object.freeze({
     attrs: { transcriptionProvider: 'Deepgram', speechModel: 'flux', eotThreshold: '0.8', hints: HINTS_DEFAULT, events: EVENTS_ALL, partialPrompts: 'true' },
     sandboxOnly: true,
   },
+  // Sandbox only (Sandy voice stack plan, Phase 0): Flux Multilingual —
+  // speechModel is the same "flux" every other Flux profile uses; `language`
+  // (sibling of `attrs`, never a rendered tuning attribute — see
+  // RESERVED_RELAY_ATTRS in relay-protocol.js) is what actually selects the
+  // multilingual model, per the citations above FLUX_MULTILINGUAL_LANGUAGE.
+  // ttsProvider is not overridden: DEFAULT_TTS_PROVIDER is already
+  // 'ElevenLabs', which `language: 'multi'` requires. Not yet confirmed by an
+  // actual sandbox call — dial the cell below to verify before trusting it
+  // for a real Spanish caller.
+  flux_multilingual_es_v1: {
+    attrs: { transcriptionProvider: 'Deepgram', speechModel: FLUX_MULTILINGUAL_SPEECH_MODEL, eotThreshold: '0.8', hints: HINTS_DEFAULT, events: EVENTS_ALL },
+    language: FLUX_MULTILINGUAL_LANGUAGE,
+    sandboxOnly: true,
+  },
 });
 
 // Two-digit DTMF cell codes the sandbox route accepts (the audio runner sends
@@ -124,6 +181,7 @@ const SANDBOX_CELLS = Object.freeze({
   '07': 'flux_smartformat_off_v1',
   '08': 'flux_tts_normalization_v1',
   '09': 'flux_partials_probe_v1',
+  '10': 'flux_multilingual_es_v1',
 });
 const SANDBOX_RAW_CELL = '99';
 
@@ -155,7 +213,13 @@ function validateRelayAttrs(input) {
   return { ok: true, attrs };
 }
 
-/** Resolve a profile id to `{ id, attrs, sandboxOnly }`, or null. */
+// A profile's own `language` field (sibling of `attrs`, never a rendered
+// tuning attribute — RESERVED_RELAY_ATTRS in relay-protocol.js excludes
+// `language` from the attrs allowlist on purpose) is allowlisted here just
+// as strictly: today only Flux Multilingual's `multi` needs it.
+const PROFILE_LANGUAGE_VALUES = new Set([FLUX_MULTILINGUAL_LANGUAGE]);
+
+/** Resolve a profile id to `{ id, attrs, sandboxOnly, language? }`, or null. */
 function resolveRelayProfile(id) {
   const key = String(id || '').trim();
   const profile = Object.prototype.hasOwnProperty.call(RELAY_PROFILES, key) ? RELAY_PROFILES[key] : null;
@@ -167,10 +231,15 @@ function resolveRelayProfile(id) {
     logger.error(`[relay-profiles] profile "${key}" is invalid: ${checked.error}`);
     return null;
   }
+  if (profile.language !== undefined && !PROFILE_LANGUAGE_VALUES.has(profile.language)) {
+    logger.error(`[relay-profiles] profile "${key}" is invalid: unknown language "${profile.language}"`);
+    return null;
+  }
   return {
     id: key,
     attrs: checked.attrs,
     sandboxOnly: profile.sandboxOnly === true,
+    ...(profile.language !== undefined ? { language: profile.language } : {}),
   };
 }
 
@@ -224,6 +293,15 @@ function activeRelayTwiMLOptions({ language = null } = {}) {
 const ENGLISH_RE = /^en(?:[-_]|$)/i;
 function profileSupportsLanguage(profile, language) {
   if (ENGLISH_RE.test(language)) return true;
+  // A plain "flux" profile (speechModel="flux", no `language` override) is
+  // the ENGLISH-only Flux model — Twilio selects Deepgram's multilingual
+  // model by the session's own `language`/`transcriptionLanguage` setting,
+  // not by a different speechModel string (see FLUX_MULTILINGUAL_LANGUAGE's
+  // citations above), so a profile that already carries
+  // `language: 'multi'` genuinely supports any non-English caller and is
+  // never dropped here — unlike a same-speechModel profile with no language
+  // override, which stays English-only.
+  if (profile.language === FLUX_MULTILINGUAL_LANGUAGE) return true;
   return String(profile.attrs.speechModel || '').toLowerCase() !== 'flux';
 }
 
@@ -252,7 +330,18 @@ function resolveSandboxCell(code) {
   }
   const id = SANDBOX_CELLS[key];
   const profile = id ? resolveRelayProfile(id) : null;
-  return profile ? { relayAttrs: profile.attrs, relayProfileId: profile.id } : null;
+  if (!profile) return null;
+  // A profile's `language` (Flux Multilingual's `multi` — see
+  // FLUX_MULTILINGUAL_LANGUAGE above) rides alongside relayAttrs/
+  // relayProfileId: sandboxRelayXml spreads this object straight into
+  // buildRelayTwiML's options, whose own `language` param this overrides —
+  // every other cell carries no `language` key and leaves that param at its
+  // default, byte-identical to before this profile existed.
+  return {
+    relayAttrs: profile.attrs,
+    relayProfileId: profile.id,
+    ...(profile.language !== undefined ? { language: profile.language } : {}),
+  };
 }
 
 /**
@@ -277,6 +366,9 @@ module.exports = {
   resolveRelayProfile,
   activeRelayProfile,
   activeRelayTwiMLOptions,
+  profileSupportsLanguage,
   resolveSandboxCell,
   parseTtsVoice,
+  FLUX_MULTILINGUAL_SPEECH_MODEL,
+  FLUX_MULTILINGUAL_LANGUAGE,
 };
