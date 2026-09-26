@@ -138,6 +138,23 @@ describe('rowForPost / planRows — page-anchored refresh rows, paced per ET day
   });
 });
 
+describe('rescanLive — stale seeded rows are re-checked before drafting (Codex P2)', () => {
+  const opp = { id: 1, bucket: 'citability_backfill', page_url: '/termite/bait-vs-liquid/' };
+  test('returns the live page gaps (frontmatter + body from the publisher)', async () => {
+    const publisher = { loadExistingPageBody: jest.fn().mockResolvedValue({ body: GOOD.slice(FM().length), frontmatter: { title: 'Termite Bait vs. Liquid Treatment in Venice', post_type: 'diagnostic' } }) };
+    const r = await seeder.rescanLive(opp, { publisher });
+    expect(publisher.loadExistingPageBody).toHaveBeenCalledWith('/termite/bait-vs-liquid/');
+    expect(r.gaps).toEqual([]);
+    // Same page before the fix → the live gaps, not the seeded ones.
+    publisher.loadExistingPageBody.mockResolvedValue({ body: POOR.slice(FM().length), frontmatter: { title: 'Termite Bait vs. Liquid Treatment in Venice', post_type: 'diagnostic' } });
+    expect((await seeder.rescanLive(opp, { publisher })).gaps).toEqual(['named_sources', 'concrete_specifics', 'comparison', 'how_to_choose']);
+  });
+  test('unreadable page → null (caller keeps the seeded gaps)', async () => {
+    expect(await seeder.rescanLive(opp, { publisher: { loadExistingPageBody: async () => null } })).toBeNull();
+    expect(await seeder.rescanLive({ ...opp, page_url: null }, { publisher: { loadExistingPageBody: jest.fn() } })).toBeNull();
+  });
+});
+
 describe('seedAll — gated, idempotent upsert', () => {
   test('dry-run scans without touching the DB or the gate', async () => {
     const r = await seeder.seedAll({ dryRun: true, corpus: corpus() });

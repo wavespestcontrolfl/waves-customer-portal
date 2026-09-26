@@ -1125,7 +1125,16 @@ function draftPostType(draft) {
 // ComparisonTable, so neither may count toward this nudge.
 // The county prefix is REQUIRED: a bare "Mosquito Control" is our own
 // service name and must not count as an external authority (fallback P2).
-const NAMED_SOURCE_RE = /\b(?:UF\s*\/\s*IFAS|IFAS|University of Florida|USDA|NOAA|National Weather Service|(?:[A-Z][\w&.]+ )+(?:State )?University Extension|Cooperative Extension|FDACS|Florida Department of Agriculture|Florida Department of Health|(?:U\.?S\.? )?EPA\b|Environmental Protection Agency|CDC\b|Centers for Disease Control|National Pesticide Information Center|NPIC|Florida Statutes?|[A-Z][a-z]+ County Mosquito (?:Control|Management)|Mosquito Control District|(?:[Pp]er|[Oo]n|[Uu]nder|[Aa]ccording to|[Rr]ead|[Ff]ollow) the (?:product )?label)\b/;
+const NAMED_AUTHORITY = String.raw`(?:UF\s*\/\s*IFAS|IFAS|University of Florida|USDA|NOAA|National Weather Service|(?:[A-Z][\w&.]+ )+(?:State )?University Extension|Cooperative Extension|FDACS|Florida Department of Agriculture|Florida Department of Health|(?:U\.?S\.? )?EPA\b|Environmental Protection Agency|CDC\b|Centers for Disease Control|National Pesticide Information Center|NPIC|Florida Statutes?|[A-Z][a-z]+ County Mosquito (?:Control|Management)|Mosquito Control District)`;
+// Bare mentions are NOT attribution (Codex P2, 2026-09-26): "an
+// EPA-registered product" names EPA without citing it for any claim. A named
+// authority counts only in a citation frame — led by an attribution phrase,
+// or followed by a reporting verb / source noun.
+const NAMED_SOURCE_RE = new RegExp(
+  String.raw`\b(?:[Aa]ccording to|[Pp]er|[Ff]rom|[Bb]y|[Cc]it(?:es?|ing)|[Uu]nder|[Ss]ee)\s+(?:the\s+)?(?:[\w.&'’-]+\s+){0,2}${NAMED_AUTHORITY}\b`
+  + String.raw`|\b${NAMED_AUTHORITY}(?:'s|’s)?\s+(?:[\w-]+\s+){0,2}?(?:recommends?|says|notes?|reports?|advises?|found|finds|warns?|tracks?|lists?|states?|requires?|publish(?:es)?|estimates?|confirms?|defines?|guidance|data|research|fact sheets?|publications?|stud(?:y|ies)|surveys?|rules?|records?|recommendations?|label(?:ing)?)\b`
+  + String.raw`|\b(?:[Pp]er|[Oo]n|[Uu]nder|[Aa]ccording to|[Rr]ead|[Ff]ollow) the (?:product )?label\b`,
+);
 
 // Refresh lane: the runner stamps target_page_type 'page' for non-blog
 // targets (service/city pages), where the blog citability contract does not

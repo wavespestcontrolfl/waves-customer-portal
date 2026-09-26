@@ -1380,7 +1380,8 @@ describe('citability nudges (weight-0, signal-only)', () => {
   test('named_sources passes on a specific authority, fails on "experts say"', () => {
     expect(checkCitabilityNamedSources({ body: 'Per UF/IFAS, chinch bugs peak in dry heat.' }).ok).toBe(true);
     expect(checkCitabilityNamedSources({ body: 'Read the product label before applying any bait.' }).ok).toBe(true);
-    expect(checkCitabilityNamedSources({ body: 'Sarasota County Mosquito Management sprays after rain events.' }).ok).toBe(true);
+    expect(checkCitabilityNamedSources({ body: 'Sarasota County Mosquito Management reports peaks after rain events.' }).ok).toBe(true);
+    expect(checkCitabilityNamedSources({ body: 'The CDC recommends draining standing water weekly.' }).ok).toBe(true);
     const r = checkCitabilityNamedSources({ body: 'Experts say chinch bugs are bad. Studies show they like heat.' });
     expect(r.ok).toBe(false);
     expect(r.reason).toBe('no_named_source_attribution');
@@ -1395,7 +1396,9 @@ describe('citability nudges (weight-0, signal-only)', () => {
     expect(checkCitabilityNamedSources({ body: 'According to experts, ants are common.' }).ok).toBe(false);
     // Our own service name is not an authority; a county program or district is.
     expect(checkCitabilityNamedSources({ body: '## Mosquito Control in Venice\nWe treat yards monthly.' }).ok).toBe(false);
-    expect(checkCitabilityNamedSources({ body: 'The Manatee County Mosquito Control District runs aerial sprays.' }).ok).toBe(true);
+    expect(checkCitabilityNamedSources({ body: 'The Manatee County Mosquito Control District reports aerial spray dates.' }).ok).toBe(true);
+    // A bare authority mention is not attribution (Codex P2, 2026-09-26).
+    expect(checkCitabilityNamedSources({ body: 'Use an EPA-registered product. We follow FDACS licensing.' }).ok).toBe(false);
   });
 
   test('concrete_specifics counts numbers with units, ignores dollars, years, and bare counts', () => {

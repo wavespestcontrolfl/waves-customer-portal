@@ -436,8 +436,24 @@ class ContentBriefBuilder {
    * persist=true writes to content_briefs as a new version.
    */
   async compose(opportunityId, { persist = true, skipSerp = false } = {}) {
-    const opp = await queue.getById(opportunityId);
+    let opp = await queue.getById(opportunityId);
     if (!opp) throw new Error(`opportunity ${opportunityId} not found`);
+
+    // Citability backfill: re-scan the live page — the seeded gap list can
+    // be days stale. Current gaps replace the seeded ones; none left routes
+    // the row to do_not_publish (the runner skips it) instead of drafting a
+    // redundant refresh. Unreadable page → keep the seeded gaps.
+    let citabilityResolved = false;
+    if (opp.bucket === 'citability_backfill') {
+      const live = await require('./citability-backfill-seeder').rescanLive(opp).catch((err) => {
+        logger.warn(`[brief-builder] citability live re-scan failed (opp ${opp.id}): ${err.message}`);
+        return null;
+      });
+      if (live) {
+        opp = { ...opp, signal_metadata: { ...(opp.signal_metadata || {}), citability_gaps: live.gaps, citability_scan: live.results } };
+        citabilityResolved = live.gaps.length === 0;
+      }
+    }
 
     // Operator-pinned intercept briefs skip signal gathering entirely: the
     // operator manifest IS the signal (decision-router pins the action
@@ -450,7 +466,10 @@ class ContentBriefBuilder {
       : await this._gatherSignals(opp, { skipSerp });
     const existingBriefVersions = await this._countExistingBriefs(opp.id);
 
-    const decision = router.route(opp, { ...signals, existing_brief_versions: existingBriefVersions });
+    let decision = router.route(opp, { ...signals, existing_brief_versions: existingBriefVersions });
+    if (citabilityResolved) {
+      decision = { ...decision, action_type: 'do_not_publish', human_review_required: false, human_review_reason: 'citability_gaps_already_resolved' };
+    }
 
     // Facts pack — the verified facts-bank facts the writer agent may cite.
     // Only assembled for facts-gated content actions with a city × service.

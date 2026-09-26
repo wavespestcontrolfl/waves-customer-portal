@@ -116,6 +116,10 @@ function splitPost(raw) {
  */
 function scanPost({ body: raw, url }) {
   const { frontmatter, body } = splitPost(raw);
+  return scanParsed({ frontmatter, body, url });
+}
+
+function scanParsed({ frontmatter = {}, body = '', url }) {
   const draft = { url, title: frontmatter.title || '', body, frontmatter };
   const results = {};
   const gaps = [];
@@ -130,6 +134,23 @@ function scanPost({ body: raw, url }) {
   // closing the row. Plan both together (Codex P2, 2026-09-26).
   if (gaps.includes('comparison') && !gaps.includes('how_to_choose')) gaps.push('how_to_choose');
   return { gaps, results, frontmatter, title: draft.title };
+}
+
+/**
+ * Re-scan the LIVE page for a queued row just before its brief is composed.
+ * Rows wait up to --per-day pacing days; a post fixed in between (manual
+ * edit or another refresh) must not get a stale, redundant brief (Codex P2,
+ * 2026-09-26). → { gaps, results } or null when the page can't be read
+ * (caller keeps the seeded gaps; the refresh gate still fails closed
+ * without a prior version).
+ */
+async function rescanLive(opportunity, { publisher = require('../content-astro/astro-publisher') } = {}) {
+  const url = opportunity?.page_url;
+  if (!url || !publisher?.loadExistingPageBody) return null;
+  const live = await publisher.loadExistingPageBody(url);
+  if (!live || typeof live.body !== 'string') return null;
+  const scan = scanParsed({ frontmatter: live.frontmatter || {}, body: live.body, url });
+  return { gaps: scan.gaps, results: scan.results };
 }
 
 function dedupeKeyFor(url) {
@@ -276,7 +297,7 @@ async function seedAll({ dryRun = false, perDay = DEFAULT_PER_DAY, minGaps = DEF
   return { dryRun: false, count, rows, summary };
 }
 
-module.exports = { seedAll, planRows, scanPost, loadBlogCorpus, CITABILITY_BACKFILL_BUCKET };
+module.exports = { seedAll, planRows, scanPost, rescanLive, loadBlogCorpus, CITABILITY_BACKFILL_BUCKET };
 module.exports._internals = {
   GAP_CHECKS, CATEGORY_TO_SERVICE, BASE_SCORE, DEFAULT_PER_DAY, DEFAULT_MIN_GAPS, EXPIRES_DAYS_AFTER_AVAILABLE,
   serviceForPost, splitPost, dedupeKeyFor, availableAtFor, rowForPost,
