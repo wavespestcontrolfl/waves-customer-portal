@@ -66,6 +66,16 @@ describe('billing reminder per-channel delivery progress', () => {
     purpose: 'balance_reminder', eventKey, channels, metadata: { tier: 'gentle' }, send,
   });
 
+  test('each leg is sent with its own reservation', async () => {
+    const send = jest.fn().mockResolvedValue({ sent: true, deliveryOutcome: 'accepted' });
+
+    await deliver(['email', 'push'], send);
+
+    expect(send.mock.calls.map(([channel, entry]) => [channel, entry.id])).toEqual([
+      ['email', 'ledger-1'], ['push', 'ledger-2'],
+    ]);
+  });
+
   test('Email acceptance and deferred App resume App only', async () => {
     const send = jest.fn()
       .mockResolvedValueOnce({ sent: true, deliveryOutcome: 'accepted', auditLogId: 'audit-email' })

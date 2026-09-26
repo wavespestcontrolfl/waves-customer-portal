@@ -361,13 +361,16 @@ class BalanceReminder {
         source: 'balance_reminder_workflow', purpose: 'balance_reminder', eventKey,
         channels: selectedChannels, metadata: { tier, days_until: daysUntil,
           invoiceId: balance.oldestInvoiceId, scheduledDate: formatDateOnly(service.scheduled_date) },
-        send: (channel) => sendCustomerMessage({
+        send: (channel, ledger) => sendCustomerMessage({
           to: service.phone, body: message, channel,
           audience: 'customer', purpose: 'payment_link', customerId: service.cust_id,
           invoiceId: balance.oldestInvoiceId, entryPoint: 'balance_reminder_workflow',
           metadata: { original_message_type: 'balance_reminder', billingDeliveryCategory: 'billing',
             notificationEventKey: eventKey, billingDeliveryLeg: channel,
-            ...(channel === 'push' ? { appOnly: true } : {}) },
+            ...(channel === 'push' ? { appOnly: true } : {}),
+            // A queued Email retry re-checks the collections rail excluding
+            // this leg's own reservation, then marks it delivered.
+            ...(channel === 'email' && ledger?.id ? { collections_ledger_id: String(ledger.id) } : {}) },
           preDispatchCheck: require('../invoice-helpers').selfPayAtDispatch(balance.oldestInvoiceId, db),
         }),
       });

@@ -41,9 +41,11 @@ async function reminderProgress(customerId, source, channels) {
   }));
 }
 
-async function sendLeg(send, channel) {
+// `send` receives the leg's reservation so a producer can hand its ledger id
+// to a deferred replay that must re-check the collections rail.
+async function sendLeg(send, channel, entry) {
   try {
-    return await send(channel);
+    return await send(channel, entry);
   } catch (err) {
     return err.providerOutcome || { sent: false, deliveryOutcome: 'uncertain', code: 'REMINDER_OUTCOME_UNCONFIRMED' };
   }
@@ -98,7 +100,7 @@ async function sendReminderChannels({ customerId, invoiceId, source, purpose, ev
     const claim = await ContactLedger.claimAttempt(entry);
     if (claim.delivered) { delivered.add(channel); continue; }
     if (!claim.allowed) { results[channel] = { sent: false, deliveryHeld: true, code: 'REMINDER_OUTCOME_UNCONFIRMED' }; continue; }
-    const result = await sendLeg(send, channel);
+    const result = await sendLeg(send, channel, entry);
     results[channel] = result;
     const state = await recordLegOutcome(entry, channel, result, results);
     if (state === 'delivered') {
