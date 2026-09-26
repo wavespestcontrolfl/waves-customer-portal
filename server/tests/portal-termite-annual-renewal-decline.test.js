@@ -44,6 +44,8 @@ const mockIsPaidDecidedLapseTerm = jest.fn().mockResolvedValue(true);
 // SQL runs for real in termite-annual-plan-property-label-postgres.test.js).
 // Defaults to no labels.
 const mockTermPropertyLabels = jest.fn().mockResolvedValue(new Map());
+// Paid re-check for an unprocessed renewed term (Codex #4940 r4).
+const mockIsCoveredTerm = jest.fn().mockResolvedValue(true);
 jest.mock('../services/annual-prepay-renewals', () => ({
   termPropertyLabelsForCustomer: (...args) => mockTermPropertyLabels(...args),
   declineTermiteAnnualRenewal: (...args) => mockDeclineTermiteAnnualRenewal(...args),
@@ -51,6 +53,7 @@ jest.mock('../services/annual-prepay-renewals', () => ({
   termiteDeclineBlockedReason: (...args) => jest.requireActual('../services/annual-prepay-renewals').termiteDeclineBlockedReason(...args),
   whereTermCurrentOrAwaitingInstallation: (...args) => jest.requireActual('../services/annual-prepay-renewals').whereTermCurrentOrAwaitingInstallation(...args),
   isPaidDecidedLapseTerm: (...args) => mockIsPaidDecidedLapseTerm(...args),
+  isCoveredTerm: (...args) => mockIsCoveredTerm(...args),
   // The REAL provisional-term rule — the card must agree with billing about
   // whether a term_end is still provisional (awaiting installation).
   coverageAwaitsInstallation: (...args) => jest.requireActual('../services/annual-prepay-renewals').coverageAwaitsInstallation(...args),
@@ -114,6 +117,7 @@ beforeEach(() => {
   });
   mockIsPaidDecidedLapseTerm.mockResolvedValue(true);
   mockTermPropertyLabels.mockResolvedValue(new Map());
+  mockIsCoveredTerm.mockResolvedValue(true);
   state.rows = [];
   state.fail = false;
   state.whereArgs = [];
@@ -165,6 +169,7 @@ describe('GET /api/property/termite-annual-plan', () => {
       whereNull: jest.fn((col) => { seen.push(['whereNull', col]); return fake; }),
       whereIn: jest.fn(() => fake),
       andWhere: jest.fn(() => fake),
+      whereNotExists: jest.fn(() => fake),
     };
     predicates.forEach((fn) => fn.call(fake, fake));
     expect(seen).toEqual(expect.arrayContaining([
@@ -441,9 +446,54 @@ describe('GET /api/property/termite-annual-plan', () => {
     expect(body.terms[0]).toEqual(expect.objectContaining({ declined: false, canDecline: true }));
   });
 
-  test('a term already decided to renew hides the decline control (canDecline:false)', async () => {
+  // Codex #4940 r4 P1: a staff-recorded renew that has not been PROCESSED
+  // (the query only returns a renewed term with no successor) does not
+  // strip the customer's online decline before the renewal date.
+  test('an unprocessed staff renew stays declinable (the customer decline supersedes it)', async () => {
     state.rows = [{
       id: 'term-1', term_end: '2027-05-20', prepay_amount: '450.00', status: 'renewed', renewal_decision: 'renew',
+      annual_plan_version: 'v3', renewed_from_term_id: null, installation_anchored_at: '2026-06-01T12:00:00Z',
+    }];
+    const { body } = await invoke(getHandler());
+    expect(body.terms[0]).toEqual(expect.objectContaining({ declined: false, canDecline: true }));
+    expect(mockIsCoveredTerm).toHaveBeenCalledWith('term-1', db);
+  });
+
+  test('an unprocessed renew whose year is no longer paid (refunded/disputed) is not shown', async () => {
+    state.rows = [{
+      id: 'term-1', term_end: '2027-05-20', prepay_amount: '450.00', status: 'renewed', renewal_decision: 'renew',
+      annual_plan_version: 'v3', renewed_from_term_id: null, installation_anchored_at: '2026-06-01T12:00:00Z',
+    }];
+    mockIsCoveredTerm.mockResolvedValue(false);
+    const { body } = await invoke(getHandler());
+    expect(body).toEqual({ available: false, reason: 'no_term' });
+  });
+
+  test('the query admits a renewed term ONLY when no successor term was minted from it', async () => {
+    await invoke(getHandler());
+    const predicate = state.whereArgs.map((args) => args[0]).filter((arg) => typeof arg === 'function')
+      .find((fn) => String(fn).includes('applicableTermState') || fn.name === 'applicableTermState');
+    const seen = [];
+    let notExistsFn = null;
+    const fake = {
+      whereIn: jest.fn((...args) => { seen.push(['whereIn', ...args]); return fake; }),
+      where: jest.fn((...args) => { seen.push(['where', ...args]); return fake; }),
+      andWhere: jest.fn((...args) => { seen.push(['andWhere', ...args]); return fake; }),
+      orWhere: jest.fn((fn) => { fn.call(fake, fake); return fake; }),
+      whereNotExists: jest.fn((fn) => { notExistsFn = fn; return fake; }),
+    };
+    predicate.call(fake, fake);
+    expect(seen).toEqual(expect.arrayContaining([['where', 'status', 'renewed'], ['andWhere', 'renewal_decision', 'renew']]));
+    expect(notExistsFn).toEqual(expect.any(Function));
+    const sub = { select: jest.fn(() => sub), from: jest.fn(() => sub), whereRaw: jest.fn(() => sub) };
+    notExistsFn.call(sub);
+    expect(sub.from).toHaveBeenCalledWith('annual_prepay_terms as successor');
+    expect(sub.whereRaw).toHaveBeenCalledWith('successor.renewed_from_term_id = annual_prepay_terms.id');
+  });
+
+  test('a switch_plan decision still hides the decline control (canDecline:false)', async () => {
+    state.rows = [{
+      id: 'term-1', term_end: '2027-05-20', prepay_amount: '450.00', status: 'switch_plan', renewal_decision: 'switch_plan',
     }];
     const { body } = await invoke(getHandler());
     expect(body.terms[0]).toEqual(expect.objectContaining({ declined: false, canDecline: false }));

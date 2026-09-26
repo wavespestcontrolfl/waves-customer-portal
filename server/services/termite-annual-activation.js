@@ -1038,13 +1038,13 @@ async function anchorTermToInstallation({ termId, conn = db }) {
     });
     const moved = termStart !== dateOnlyString(term.term_start) || termEnd !== dateOnlyString(term.term_end);
     const AnnualPrepayRenewals = require('./annual-prepay-renewals');
-    // Codex pre-push P1: anchorInstallation:true is what lets a decided-
-    // lapse term (declined online BEFORE this installation, still PAID) get
-    // its coverage year seeded/attached/prepaid-stamped through this same
-    // refresh, exactly like an undecided/active term — the decline only
-    // refuses the FUTURE renewal. Every OTHER refreshTermSnapshot /
-    // createTermForAnnualPrepay caller leaves this option unset (false), so
-    // this is scoped to the anchor path only.
+    // A decided-lapse term (declined online BEFORE this installation, still
+    // PAID) gets its coverage year seeded/attached/prepaid-stamped here
+    // exactly like an undecided/active term — refreshTermSnapshot treats a
+    // paid decided-lapse term as coverage-eligible on every refresh.
+    // createTermForAnnualPrepay's anchorInstallation:true additionally runs
+    // its renewal-date sync + born-paid reconcile for that shape (its other
+    // callers leave it false).
     if (moved) {
       await AnnualPrepayRenewals.createTermForAnnualPrepay({
         customerId: term.customer_id,
@@ -1057,7 +1057,7 @@ async function anchorTermToInstallation({ termId, conn = db }) {
         anchorInstallation: true,
       });
     } else {
-      await AnnualPrepayRenewals.refreshTermSnapshot(term.id, trx, { anchorInstallation: true });
+      await AnnualPrepayRenewals.refreshTermSnapshot(term.id, trx);
     }
     return {
       anchored: true, termId: term.id, termStart, termEnd, moved,

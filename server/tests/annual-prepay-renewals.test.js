@@ -33,6 +33,11 @@ jest.mock('../services/customer-credit', () => ({
 jest.mock('../services/notification-service', () => ({
   notifyAdmin: jest.fn().mockResolvedValue({ id: 'notif-1' }),
 }));
+// The portal decline's dated station-retrieval task (Codex #4940 r4) —
+// its own suites cover the task body/dedupe; here only the call is pinned.
+jest.mock('../services/cancellation-processor', () => ({
+  raiseTermiteRetrievalTask: jest.fn().mockResolvedValue({ raised: true, stationCount: 12 }),
+}));
 
 const db = require('../models/db');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
@@ -61,6 +66,7 @@ function query({ first, returning, columnInfo, rows = [] } = {}) {
     'orWhereNot',
     'orWhereIn',
     'orWhereNotIn',
+    'whereNotExists',
   ].forEach((method) => {
     q[method] = jest.fn(() => q);
   });
@@ -2550,10 +2556,10 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
     expect(result).toEqual({ ok: false, reason: 'no_term' });
   });
 
-  test('a conflicting decision (renew/switch_plan) already on file is refused, never overwritten', async () => {
+  test('a switch_plan decision already on file is refused, never overwritten', async () => {
     const termRow = {
-      id: 'term-1', customer_id: 'cust-1', annual_plan_version: 'v3',
-      status: 'renewed', renewal_decision: 'renew', term_end: '2027-05-20', prepay_amount: '450.00',
+      id: 'term-1', customer_id: 'cust-1', annual_plan_version: 'v3', installation_anchored_at: '2026-06-01T12:00:00Z',
+      status: 'switch_plan', renewal_decision: 'switch_plan', term_end: '2027-05-20', prepay_amount: '450.00',
     };
     setDbQueues({ annual_prepay_terms: [query({ first: termRow })] });
 
@@ -2561,7 +2567,132 @@ describe('declineTermiteAnnualRenewal (slice 6a — customer online decline)', (
       customerId: 'cust-1', today: '2026-09-26',
     });
 
+    expect(result).toEqual({ ok: false, reason: 'already_decided', decision: 'switch_plan', termId: 'term-1' });
+  });
+
+  // Codex #4940 r4 P1: a staff renew whose successor term was already
+  // minted has been processed — the decline can no longer supersede it.
+  test('a PROCESSED staff renew (successor term exists) is refused, never overwritten', async () => {
+    const termRow = {
+      id: 'term-1', customer_id: 'cust-1', annual_plan_version: 'v3', installation_anchored_at: '2026-06-01T12:00:00Z',
+      status: 'renewed', renewal_decision: 'renew', term_end: '2027-05-20', prepay_amount: '450.00',
+    };
+    const successorProbe = query({ first: { id: 'term-2' } });
+    setDbQueues({ annual_prepay_terms: [query({ first: termRow }), successorProbe] });
+
+    const result = await AnnualPrepayRenewals.declineTermiteAnnualRenewal({
+      customerId: 'cust-1', termId: 'term-1', today: '2026-09-26',
+    });
+
+    expect(successorProbe.where).toHaveBeenCalledWith({ renewed_from_term_id: 'term-1' });
     expect(result).toEqual({ ok: false, reason: 'already_decided', decision: 'renew', termId: 'term-1' });
+    expect(require('../services/cancellation-processor').raiseTermiteRetrievalTask).not.toHaveBeenCalled();
+  });
+
+  test('an UNPROCESSED staff renew is superseded by the customer decline (guarded renewed → cancelled)', async () => {
+    const termRow = {
+      id: 'term-1', customer_id: 'cust-1', annual_plan_version: 'v3', installation_anchored_at: '2026-06-01T12:00:00Z',
+      status: 'renewed', renewal_decision: 'renew', term_end: '2027-05-20', prepay_amount: '450.00',
+    };
+    const decidedRow = { ...termRow, status: 'cancelled', renewal_decision: 'cancel' };
+    const supersede = query({ returning: [decidedRow] });
+    const activityInsert = query();
+    setDbQueues({
+      annual_prepay_terms: [query({ first: termRow }), query({ first: null }), supersede, query({ first: null })],
+      'annual_prepay_terms as t': [query({ first: { id: 'term-1' } })],
+      activity_log: [activityInsert],
+      customers: [query({ first: { first_name: 'Jane', last_name: 'Doe' } })],
+    });
+
+    const result = await AnnualPrepayRenewals.declineTermiteAnnualRenewal({
+      customerId: 'cust-1', termId: 'term-1', today: '2026-09-26',
+    });
+
+    expect(result).toEqual({
+      ok: true, termId: 'term-1', termEnd: '2027-05-20', awaitsInstallation: false, prepayAmount: 450, alreadyDeclined: false,
+    });
+    expect(supersede.where).toHaveBeenCalledWith({ id: 'term-1', status: 'renewed', renewal_decision: 'renew' });
+    expect(supersede.whereNotExists).toHaveBeenCalledWith(expect.any(Function));
+    expect(supersede.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'cancelled', renewal_decision: 'cancel' }));
+    expect(activityInsert.insert.mock.calls[0][0].metadata).toEqual(expect.objectContaining({ superseded_decision: 'renew' }));
+    const NotificationService = require('../services/notification-service');
+    expect(NotificationService.notifyAdmin.mock.calls[0][2]).toContain('replacing the renewal staff had recorded');
+  });
+
+  test('an unprocessed renew whose year is no longer paid is refused (not_active)', async () => {
+    const termRow = {
+      id: 'term-1', customer_id: 'cust-1', annual_plan_version: 'v3', installation_anchored_at: '2026-06-01T12:00:00Z',
+      status: 'renewed', renewal_decision: 'renew', term_end: '2027-05-20', prepay_amount: '450.00',
+    };
+    setDbQueues({
+      annual_prepay_terms: [query({ first: termRow }), query({ first: null })],
+      'annual_prepay_terms as t': [query({ first: null })],
+    });
+
+    const result = await AnnualPrepayRenewals.declineTermiteAnnualRenewal({
+      customerId: 'cust-1', termId: 'term-1', today: '2026-09-26',
+    });
+
+    expect(result).toEqual({ ok: false, reason: 'not_active', status: 'renewed', termId: 'term-1' });
+  });
+
+  // Codex #4940 r4 P1: a successful decline raises the dated station-
+  // retrieval task once — never on a replay, never for an uninstalled term.
+  describe('station-retrieval task', () => {
+    const anchored = {
+      id: 'term-1', customer_id: 'cust-1', annual_plan_version: 'v3', installation_anchored_at: '2026-06-01T12:00:00Z',
+      status: 'active', renewal_decision: null, term_end: '2027-05-20', prepay_amount: '450.00',
+    };
+    const freshDecline = (termRow, otherPlan = null) => {
+      setDbQueues({
+        annual_prepay_terms: [query({ first: termRow }), query({ returning: [{ ...termRow, status: 'cancelled', renewal_decision: 'cancel' }] }), query({ first: otherPlan })],
+        activity_log: [query()],
+        customers: [query({ first: { first_name: 'Jane', last_name: 'Doe' } })],
+      });
+      return AnnualPrepayRenewals.declineTermiteAnnualRenewal({ customerId: 'cust-1', termId: 'term-1', today: '2026-09-26' });
+    };
+    const { raiseTermiteRetrievalTask } = require('../services/cancellation-processor');
+    const bellBody = () => require('../services/notification-service').notifyAdmin.mock.calls[0][2];
+
+    test('a fresh decline raises it once, dated to the paid-through day, keyed on the term + portal episode', async () => {
+      await freshDecline(anchored);
+      expect(raiseTermiteRetrievalTask).toHaveBeenCalledTimes(1);
+      expect(raiseTermiteRetrievalTask).toHaveBeenCalledWith('cust-1', null, {
+        retrieveAfter: '2027-05-20', termId: 'term-1', episodeKey: 'portal_renewal_decline',
+      });
+      expect(bellBody()).toContain('A dated station-retrieval task was raised for after');
+      expect(bellBody()).not.toContain('no action needed');
+    });
+
+    test('an idempotent replay raises nothing', async () => {
+      setDbQueues({
+        annual_prepay_terms: [query({ first: { ...anchored, status: 'cancelled', renewal_decision: 'cancel' } })],
+        'annual_prepay_terms as t': [query({ first: { id: 'term-1' } })],
+        customers: [query({ first: { first_name: 'Jane', last_name: 'Doe' } })],
+      });
+      const result = await AnnualPrepayRenewals.declineTermiteAnnualRenewal({ customerId: 'cust-1', termId: 'term-1', today: '2026-09-26' });
+      expect(result.alreadyDeclined).toBe(true);
+      expect(raiseTermiteRetrievalTask).not.toHaveBeenCalled();
+    });
+
+    test('a term still awaiting installation raises none — the bell says the stations are not installed yet', async () => {
+      await freshDecline({ ...anchored, installation_anchored_at: null, renewed_from_term_id: null });
+      expect(raiseTermiteRetrievalTask).not.toHaveBeenCalled();
+      expect(bellBody()).toContain('The stations are not installed yet, so no retrieval task was raised');
+    });
+
+    test('another live termite plan on the account: no automatic task, staff confirm which stations', async () => {
+      await freshDecline(anchored, { id: 'term-other' });
+      expect(raiseTermiteRetrievalTask).not.toHaveBeenCalled();
+      expect(bellBody()).toContain('another termite annual plan');
+    });
+
+    test('a task failure never fails the committed decline — the bell says to create it by hand', async () => {
+      raiseTermiteRetrievalTask.mockRejectedValueOnce(new Error('notifications down'));
+      const result = await freshDecline(anchored);
+      expect(result.ok).toBe(true);
+      expect(bellBody()).toContain('could not be raised — create it by hand');
+    });
   });
 
   // Codex r3 P0: the gates control only ISSUING new plans. A customer who

@@ -667,7 +667,7 @@ const { etDateString } = require('../utils/datetime-et');
 const { dateOnlyString } = require('../utils/date-only');
 const { validate: isUuid } = require('uuid');
 const {
-  declineTermiteAnnualRenewal, termiteDeclineBlockedReason, isPaidDecidedLapseTerm, termPropertyLabelsForCustomer,
+  declineTermiteAnnualRenewal, termiteDeclineBlockedReason, isPaidDecidedLapseTerm, isCoveredTerm, termPropertyLabelsForCustomer,
   coverageAwaitsInstallation, whereTermCurrentOrAwaitingInstallation,
 } = require('../services/annual-prepay-renewals');
 
@@ -723,6 +723,16 @@ router.get('/termite-annual-plan', async (req, res, next) => {
         this.whereIn('status', ['active', 'renewal_pending', 'payment_pending'])
           .orWhere(function decidedLapse() {
             this.where('status', 'cancelled').andWhere('renewal_decision', 'cancel');
+          })
+          // Codex #4940 r4 P1: a staff 'renew' not yet PROCESSED (no
+          // successor term minted from it) is still declinable online —
+          // the customer's decline supersedes it before the renewal date.
+          .orWhere(function unprocessedRenew() {
+            this.where('status', 'renewed').andWhere('renewal_decision', 'renew')
+              .whereNotExists(function noSuccessorTerm() {
+                this.select(db.raw('1')).from('annual_prepay_terms as successor')
+                  .whereRaw('successor.renewed_from_term_id = annual_prepay_terms.id');
+              });
           });
       })
       .orderBy('term_end', 'asc')
@@ -735,10 +745,14 @@ router.get('/termite-annual-plan', async (req, res, next) => {
     // never say "Coverage continues through …" for a term billing no
     // longer covers. Active/renewal_pending/payment_pending rows are
     // unaffected — they never go through this check.
+    // An unprocessed renewed term gets the same paid re-check (a refunded
+    // or disputed renewed year is never offered or shown as covered).
     const applicableRows = [];
     for (const term of rows) {
       if (term.status === 'cancelled' && term.renewal_decision === 'cancel') {
         if (!(await isPaidDecidedLapseTerm(term, db))) continue;
+      } else if (term.status === 'renewed') {
+        if (!(await isCoveredTerm(term.id, db))) continue;
       }
       applicableRows.push(term);
     }
@@ -770,7 +784,9 @@ router.get('/termite-annual-plan', async (req, res, next) => {
       // The write side's own eligibility (decision on file, unpaid, or
       // the renewal date already passed) — never offer a decline the
       // POST refuses. Same `today` this request already resolved.
-      const eligible = !declined && !termiteDeclineBlockedReason(term, today);
+      // hasSuccessor:false — the query above only returns a renewed term
+      // when no successor exists (the write side re-checks under its lock).
+      const eligible = !declined && !termiteDeclineBlockedReason(term, today, { hasSuccessor: false });
       // Several terms but THIS one can't be told apart from the others:
       // withhold its decline control (fail closed) and say why.
       const propertyUnclear = eligible && applicableRows.length > 1 && !propertyLabel;

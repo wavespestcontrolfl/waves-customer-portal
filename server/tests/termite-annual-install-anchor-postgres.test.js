@@ -612,9 +612,9 @@ describeOrSkip('termite annual installation anchor + install handoff — real Po
     await addVisit(db, { scheduled_date: SIGNED_ON });
     expect((await sweep()).anchored).toBe(1);
     expect(createTermForAnnualPrepay).not.toHaveBeenCalled();
-    // Codex pre-push P1: anchorInstallation:true is what lets a decided-lapse
-    // term's paid coverage seed/attach/stamp through this same refresh.
-    expect(refreshTermSnapshot).toHaveBeenCalledWith(ids.termId, expect.anything(), { anchorInstallation: true });
+    // A paid decided-lapse term is coverage-eligible on EVERY refresh now
+    // (Codex #4940 r4), so the anchor needs no special refresh option.
+    expect(refreshTermSnapshot).toHaveBeenCalledWith(ids.termId, expect.anything());
     expect(anchoredWhenRefreshed).toEqual([true]);
   });
 
