@@ -1604,9 +1604,14 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       if (defaultEstimateId && !list.some((e) => String(e.id) === String(defaultEstimateId))) {
         try {
           const r = await adminFetch(`/admin/estimates/${defaultEstimateId}/schedule-source`);
-          if (r?.estimate) {
-            // schedule-source reports the owner beside the estimate.
-            list = [{ ...r.estimate, customerId: r.estimate.customerId ?? r.customerId ?? null }, ...list];
+          // schedule-source reports the owner beside the estimate. A quote
+          // owned by a DIFFERENT customer than the one selected is not
+          // offered at all: the switch above unlinked it, and listing it
+          // again would let the auto-apply relink it (codex r1 on #4855).
+          const ownerId = r?.estimate ? (r.estimate.customerId ?? r.customerId ?? null) : null;
+          const ownedByOther = !!(ownerId && customerId && String(ownerId) !== String(customerId));
+          if (r?.estimate && !ownedByOther) {
+            list = [{ ...r.estimate, customerId: ownerId }, ...list];
             const c = r.contact || {};
             // Only stage a new customer to create when the quote is genuinely
             // unowned (r.customerId === null — a lead/standalone estimate). If it

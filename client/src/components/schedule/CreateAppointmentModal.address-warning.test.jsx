@@ -3169,6 +3169,13 @@ describe('a pinned quote owned by another customer is unlinked on a customer swi
   it('drops the quote and the lines it filled when the quote belongs to the previous customer', async () => {
     await run('customer-a');
     await waitFor(() => expect(screen.queryByLabelText('Repeats for Bi-Monthly Tree & Shrub Care')).toBeNull());
+    // Final state after customer B's reload (schedule-source included)
+    // settles: the previous customer's quote is not re-offered and the
+    // auto-apply does not relink it (codex pre-push P1).
+    await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([u]) => String(u).includes('/customers/customer-b/schedule-estimates'))).toBe(true));
+    await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([u]) => String(u).includes('/estimates/est-9/schedule-source'))).toBe(true));
+    await new Promise((resolve) => { setTimeout(resolve, 100); });
+    expect(screen.queryByLabelText('Repeats for Bi-Monthly Tree & Shrub Care')).toBeNull();
   });
 
   it('keeps an unowned lead quote pinned across the switch', async () => {
