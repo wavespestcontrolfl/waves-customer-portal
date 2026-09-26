@@ -4,9 +4,15 @@ const { lifecycleMinutes, physicalVisitCount, recordedTiming, selectPlanningSnap
 const routeKey = (date, technicianId) => `${date}|${technicianId || ''}`;
 
 const day = '2026-09-08';
-const snapshot = { date: day, technician_id: 'tech', as_of: '2026-09-07T08:20:00Z', snapshot_phase: 'loaded_schedule',
+// A snapshot's technician_id must be a real UUID (Codex P2, round 11) — this
+// fixture stands in for a real technicians.id everywhere a plan/snapshot
+// object flows through selectPlanningSnapshots; `recorded()`'s row default
+// below is kept equal to it so the sameRoute match in measureRoutePerformance
+// tests still holds.
+const techId = '22222222-2222-4222-8222-222222222222';
+const snapshot = { date: day, technician_id: techId, as_of: '2026-09-07T08:20:00Z', snapshot_phase: 'loaded_schedule',
   plannedStops: [{ id: 'visit', arrivalWindow: { startMin: 480, endMin: 600 }, serviceMinutes: 60, predictedArrivalMinute: 480 }] };
-const recorded = (extra = {}) => ({ id: 'visit', technician_id: 'tech', scheduled_date: day, status: 'completed', window_start: '08:00',
+const recorded = (extra = {}) => ({ id: 'visit', technician_id: techId, scheduled_date: day, status: 'completed', window_start: '08:00',
   actual_start_time: '2026-09-08T12:10:00Z', actual_end_time: '2026-09-08T12:55:00Z',
   service_time_minutes: 60, completionNotes: { timeOnSite: '45:00' },
   statusHistory: [
@@ -113,6 +119,25 @@ test('malformed or duplicated baseline stops remain missing evidence instead of 
   expect(selectPlanningSnapshots([run], { from: day, to: day, now: new Date('2026-09-09T12:00:00Z') })).toEqual([]);
 });
 
+// Codex P2 (round 11): technician_id must be null or a real UUID. A bare
+// typeof-string check let '' through, and this function's own dedupe key
+// (`${plan.date}|${plan.technician_id}`) plus routeKey's `technicianId || ''`
+// both collapse '' the same way a genuinely null technician_id does — a
+// corrupted snapshot could otherwise be read as the real Unassigned route's
+// own saved plan. Any other non-UUID, non-null value is refused the same way.
+test('a snapshot with an empty-string, non-UUID, or otherwise malformed technician_id is refused', () => {
+  const from = { from: day, to: day, now: new Date('2026-09-09T12:00:00Z') };
+  const runFor = (technicianId) => ({ id: 'run', created_at: snapshot.as_of,
+    result: { route_quality: [{ ...snapshot, technician_id: technicianId }] } });
+  expect(selectPlanningSnapshots([runFor('')], from)).toEqual([]);
+  expect(selectPlanningSnapshots([runFor('not-a-uuid')], from)).toEqual([]);
+  expect(selectPlanningSnapshots([runFor(42)], from)).toEqual([]);
+  expect(selectPlanningSnapshots([runFor(undefined)], from)).toEqual([]);
+  // A genuinely null technician_id is accepted (no production writer emits
+  // one today, but the validator treats it as a real value, not malformed).
+  expect(selectPlanningSnapshots([runFor(null)], from)).toHaveLength(1);
+});
+
 // Codex P2 (round 8): planned stops sharing a visitId are one physical
 // visit on the saved plan too, matching the live board's physicalStopCount.
 test('a saved plan reports planned physical stops with visitId groups collapsed', () => {
@@ -214,14 +239,20 @@ function recordingConn(tables) {
 // snapshot is refused like any other malformed one instead.
 test('getRoutePerformance refuses a snapshot whose planned stop ids are not UUIDs and never queries them', async () => {
   const goodId = '11111111-1111-4111-8111-111111111111';
+  // Distinct real UUIDs (Codex P2, round 11 — a snapshot's own technician_id
+  // is validated too) standing in for the old 'tech-ok'/'tech-empty'/
+  // 'tech-garbage' labels, so this test still isolates the STOP-id check.
+  const techOk = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const techEmpty = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+  const techGarbage = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
   const plan = (technicianId, id) => ({ ...snapshot, technician_id: technicianId, plannedStops: [{ ...snapshot.plannedStops[0], id }] });
   const run = { id: 'run', created_at: snapshot.as_of,
-    result: { route_quality: [plan('tech-ok', goodId), plan('tech-empty', ''), plan('tech-garbage', 'not-a-uuid')] } };
+    result: { route_quality: [plan(techOk, goodId), plan(techEmpty, ''), plan(techGarbage, 'not-a-uuid')] } };
   const { conn, calls } = recordingConn({ route_optimization_planner_runs: [run] });
   const result = await getRoutePerformance({ from: day, to: day, now: new Date('2026-09-09T12:00:00Z') }, conn);
   const idQuery = calls.find(([table, method, column]) => table === 'scheduled_services' && method === 'whereIn' && column === 'id');
   expect(idQuery[3]).toEqual([goodId]);
-  expect(result.plans.map(measured => measured.technicianId)).toEqual(['tech-ok']);
+  expect(result.plans.map(measured => measured.technicianId)).toEqual([techOk]);
 });
 
 // Codex P2 (round 7): the scorecard's TODAY row reads the saved pre-service
@@ -231,18 +262,21 @@ test('getRoutePerformance refuses a snapshot whose planned stop ids are not UUID
 // Updated (Codex P2, round 10): plannedPassthrough now also carries
 // plannedLateVisits and plannedStopIds, so this exact shape gained the two
 // new keys (null here — `plan` never sets modeledLateVisits).
+// Updated (Codex P2, round 11): technician_id must be a real UUID now, so
+// the old 'tech'/'late' labels became two distinct UUIDs.
 test('getSavedDayPlans returns today\'s pre-service plan per technician, planned numbers only', async () => {
   const goodId = '11111111-1111-4111-8111-111111111111';
+  const lateTechId = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
   const plan = (technicianId, asOf) => ({ ...snapshot, technician_id: technicianId, as_of: asOf, serviceMinutes: 60,
     modeledDriveMinutes: 20, modeledWaitingMinutes: 5, modeledReturnMinuteBeforeBreaks: 600, drive_model: 'calibrated',
     plannedStops: [{ ...snapshot.plannedStops[0], id: goodId }] });
-  const before = { id: 'before', created_at: snapshot.as_of, result: { route_quality: [plan('tech', snapshot.as_of)] } };
-  const during = { id: 'during', created_at: '2026-09-08T15:00:00Z', result: { route_quality: [plan('late', '2026-09-08T14:00:00Z')] } };
+  const before = { id: 'before', created_at: snapshot.as_of, result: { route_quality: [plan(techId, snapshot.as_of)] } };
+  const during = { id: 'during', created_at: '2026-09-08T15:00:00Z', result: { route_quality: [plan(lateTechId, '2026-09-08T14:00:00Z')] } };
   const now = new Date('2026-09-08T16:00:00Z'); // `day` is today
   const { conn } = recordingConn({ route_optimization_planner_runs: [during, before] });
   const plans = await getSavedDayPlans({ date: day, now }, conn);
-  expect([...plans.keys()]).toEqual(['tech']);
-  expect(plans.get('tech')).toEqual({ plannedVisits: 1, plannedPhysicalStops: 1, plannedServiceMinutes: 60, plannedDriveMinutes: 20,
+  expect([...plans.keys()]).toEqual([techId]);
+  expect(plans.get(techId)).toEqual({ plannedVisits: 1, plannedPhysicalStops: 1, plannedServiceMinutes: 60, plannedDriveMinutes: 20,
     plannedWaitingMinutes: 5, plannedReturnMinuteBeforeBreaks: 600, driveModel: 'calibrated',
     plannedLateVisits: null, plannedStopIds: [goodId] });
   expect(selectPlanningSnapshots([before], { from: day, to: day, now })).toEqual([]);
@@ -265,7 +299,7 @@ test('measureRoutePerformance carries modeledLateVisits and plannedStops through
 // raw completed work — shaped like a plan's own `stops` so day-scorecard.js
 // can reuse the SAME actual-minutes aggregation instead of a second formula.
 describe('missingBaselineActualStops', () => {
-  const routes = [{ date: day, technicianId: 'tech' }];
+  const routes = [{ date: day, technicianId: techId }];
 
   test('only completed rows for the matching date+technician are included (grouped ones too)', () => {
     const rows = [
@@ -276,7 +310,7 @@ describe('missingBaselineActualStops', () => {
       recorded({ id: 'grouped', visit_id: 'group-1' }),
     ];
     const byKey = missingBaselineActualStops(routes, rows, routeKey);
-    const stops = byKey.get(routeKey(day, 'tech'));
+    const stops = byKey.get(routeKey(day, techId));
     // Codex P1: a completed grouped row must still count as a completed
     // stop for the tech-day — dropping it entirely (the old behavior) made
     // an all-grouped no-baseline day read as zero actual stops.
@@ -284,7 +318,7 @@ describe('missingBaselineActualStops', () => {
   });
 
   test('a grouped completed row counts as a stop but never contributes an accepted duration', () => {
-    const stops = missingBaselineActualStops(routes, [recorded({ id: 'a', visit_id: 'group-1' })], routeKey).get(routeKey(day, 'tech'));
+    const stops = missingBaselineActualStops(routes, [recorded({ id: 'a', visit_id: 'group-1' })], routeKey).get(routeKey(day, techId));
     // A visit_id group's real duration is a SUM across members this reader
     // does not re-compose, so the row's OWN recordedTiming is never trusted
     // as its on-site minutes — same forcing measureRoutePerformance applies
@@ -294,28 +328,28 @@ describe('missingBaselineActualStops', () => {
   });
 
   test('each completed row is shaped like a plan stop, with recordedTiming\'s own evidence', () => {
-    const stops = missingBaselineActualStops(routes, [recorded({ id: 'a' })], routeKey).get(routeKey(day, 'tech'));
+    const stops = missingBaselineActualStops(routes, [recorded({ id: 'a' })], routeKey).get(routeKey(day, techId));
     expect(stops).toEqual([{ appointmentId: 'a', visitId: null, windowStartMin: 480, durationEvidence: 'recorded_lifecycle_interval',
       recordedServiceMinutes: 45, recordedArrivalMinute: 490, recordedCompletionMinute: 535 }]);
   });
 
   test('a route with no matching completed work gets an empty array, not undefined', () => {
-    const stops = missingBaselineActualStops(routes, [], routeKey).get(routeKey(day, 'tech'));
+    const stops = missingBaselineActualStops(routes, [], routeKey).get(routeKey(day, techId));
     expect(stops).toEqual([]);
   });
 
   test('a null-technician route (unassigned work) matches rows with no technician_id', () => {
     const nullTechRoutes = [{ date: day, technicianId: null }];
-    const rows = [recorded({ id: 'a', technician_id: null }), recorded({ id: 'b', technician_id: 'tech' })];
+    const rows = [recorded({ id: 'a', technician_id: null }), recorded({ id: 'b', technician_id: techId })];
     const stops = missingBaselineActualStops(nullTechRoutes, rows, routeKey).get(routeKey(day, null));
     expect(stops.map(stop => stop.appointmentId)).toEqual(['a']);
   });
 
   test('independent routes get independently keyed arrays', () => {
-    const twoRoutes = [{ date: day, technicianId: 'tech' }, { date: '2026-09-09', technicianId: 'tech' }];
+    const twoRoutes = [{ date: day, technicianId: techId }, { date: '2026-09-09', technicianId: techId }];
     const rows = [recorded({ id: 'a' }), recorded({ id: 'b', scheduled_date: '2026-09-09' })];
     const byKey = missingBaselineActualStops(twoRoutes, rows, routeKey);
-    expect(byKey.get(routeKey(day, 'tech')).map(stop => stop.appointmentId)).toEqual(['a']);
-    expect(byKey.get(routeKey('2026-09-09', 'tech')).map(stop => stop.appointmentId)).toEqual(['b']);
+    expect(byKey.get(routeKey(day, techId)).map(stop => stop.appointmentId)).toEqual(['a']);
+    expect(byKey.get(routeKey('2026-09-09', techId)).map(stop => stop.appointmentId)).toEqual(['b']);
   });
 });

@@ -25,12 +25,21 @@ function fmtMinutes(value) {
   return hours > 0 ? `${sign}${hours}h ${mins}m` : `${sign}${mins}m`;
 }
 
+// A return minute can run past midnight (a late route finishing the next
+// calendar day) — % 24 alone silently drops that day and shows an early-
+// morning time for what's really a next-day return (Codex P2, round 11).
+// Round the TOTAL once (same reasoning as fmtMinutes above) so the day
+// offset, hour and minute all derive from the same whole-minute value.
 function fmtClock(minuteOfDay) {
   if (!Number.isFinite(minuteOfDay)) return 'unknown';
-  const hour24 = Math.floor(minuteOfDay / 60) % 24;
-  const mins = Math.round(minuteOfDay % 60);
+  const total = Math.round(minuteOfDay);
+  const dayOffset = Math.floor(total / 1440);
+  const minuteOfThatDay = total - dayOffset * 1440;
+  const hour24 = Math.floor(minuteOfThatDay / 60);
+  const mins = minuteOfThatDay % 60;
   const hour12 = hour24 % 12 === 0 ? 12 : hour24 % 12;
-  return `${hour12}:${String(mins).padStart(2, '0')} ${hour24 < 12 ? 'AM' : 'PM'}`;
+  const dayNote = dayOffset === 0 ? '' : ` (${dayOffset > 0 ? '+' : ''}${dayOffset} day${Math.abs(dayOffset) === 1 ? '' : 's'})`;
+  return `${hour12}:${String(mins).padStart(2, '0')} ${hour24 < 12 ? 'AM' : 'PM'}${dayNote}`;
 }
 
 function fmtPercent(value) {

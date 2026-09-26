@@ -426,6 +426,41 @@ it('labels a closed date and suppresses its simulated planned metrics', async ()
   expect(within(row).getAllByText('unknown').length).toBeGreaterThanOrEqual(4);
 });
 
+// Codex P2 (round 11): a return past midnight must show the day offset
+// instead of dropping it (`% 24` alone reads 1500 as 1:00 AM with no hint
+// it's the next calendar day).
+it('shows the day offset for a return time past midnight', async () => {
+  mockAdminFetch.mockResolvedValue(ok({
+    driveModel: 'legacy',
+    days: [{ date: '2026-10-01', byTech: [{ technicianId: 'tech1', technician: 'Adam', driveModel: 'legacy', plannedBasis: 'board',
+      planned: { stops: 3, physicalStops: 3, onSiteMinutes: 90, driveMinutes: 30, waitMinutes: 5, driveShare: 0.25, stopsPerHour: 1, returnMinute: 1500, lateVisits: 0 },
+      actual: null }] }],
+  }));
+  render(<DayScorecardPanel />);
+  const row = (await screen.findByText('2026-10-01')).closest('tr');
+  expect(within(row).getByText('1:00 AM (+1 day)')).toBeInTheDocument();
+});
+
+// A return exactly at midnight (1440) is still "+1 day", and an ordinary
+// same-day return (< 1440) never gets a day note.
+it('shows no day offset for a same-day return, and +1 day at exactly midnight', async () => {
+  mockAdminFetch.mockResolvedValue(ok({
+    driveModel: 'legacy',
+    days: [{ date: '2026-10-01', byTech: [
+      { technicianId: 'tech1', technician: 'Adam', driveModel: 'legacy', plannedBasis: 'board',
+        planned: { stops: 1, physicalStops: 1, onSiteMinutes: 60, driveMinutes: 10, waitMinutes: 0, driveShare: 0.14, stopsPerHour: 1, returnMinute: 630, lateVisits: 0 },
+        actual: null },
+      { technicianId: 'tech2', technician: 'Beth', driveModel: 'legacy', plannedBasis: 'board',
+        planned: { stops: 1, physicalStops: 1, onSiteMinutes: 60, driveMinutes: 10, waitMinutes: 0, driveShare: 0.14, stopsPerHour: 1, returnMinute: 1440, lateVisits: 0 },
+        actual: null },
+    ] }],
+  }));
+  render(<DayScorecardPanel />);
+  await screen.findByText('Adam');
+  expect(screen.getByText('10:30 AM')).toBeInTheDocument();
+  expect(screen.getByText('12:00 AM (+1 day)')).toBeInTheDocument();
+});
+
 // Codex P2 (round 11): span coverage names its unit — rows when the
 // physical stop count is unknown, never "stops" that disagree with Stops.
 it('labels span coverage in rows when the server counted rows', async () => {

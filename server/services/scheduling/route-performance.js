@@ -118,6 +118,20 @@ function outranks(rank, previous) {
   return index >= 0 && rank[index] > previous[index];
 }
 
+// A snapshot's technician_id must be null or a real UUID (Codex P2, round
+// 11) — the same isUuid validator validPlannedStops already applies to a
+// stop's own id. A bare typeof-string check let a malformed '' through, and
+// `${plan.date}|${plan.technician_id}` (selectPlanningSnapshots' own dedupe
+// key) collapses that the same way routeKey's `technicianId || ''` collapses
+// a genuinely null technician_id downstream (getRoutePerformance,
+// missingBaselineIdsByDate) — a corrupted snapshot could otherwise be read
+// as the real Unassigned route's own saved plan. Its own function (not an
+// inline condition) so it doesn't add another branch to the already-large
+// selectPlanningSnapshots.
+function validSnapshotTechnicianId(technicianId) {
+  return technicianId === null || isUuid(technicianId);
+}
+
 /** Choose the latest snapshot captured BEFORE the service day. The applied
  * order wins its same-run before-image. Never manufacture a historical plan
  * from the schedule as it looks after completion. `includeToday` admits the
@@ -137,7 +151,7 @@ function selectPlanningSnapshots(runs, { from, to, now = new Date(), validStopId
       const midnight = parseETDateTime(`${plan.date}T00:00`);
       if (!captured || !created || !Number.isFinite(midnight.getTime()) || captured >= midnight || created >= midnight
         || plan.date < from || plan.date > to || plan.date > today || (plan.date === today && !includeToday)
-        || typeof plan.technician_id !== 'string') continue;
+        || !validSnapshotTechnicianId(plan.technician_id)) continue;
       const key = `${plan.date}|${plan.technician_id}`;
       const previous = selected.get(key);
       const rank = [captured.getTime(), created.getTime(), plan.snapshot_phase === 'applied_reorder' ? 1 : 0];
