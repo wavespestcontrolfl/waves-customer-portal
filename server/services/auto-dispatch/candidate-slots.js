@@ -37,7 +37,7 @@ const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { resolveGeo, driveMin, HQ } = require('./geo');
 const { toDateStr, shiftDateStr } = require('./dates');
 const { autoDispatchSharedModelLive } = require('../../config/feature-gates');
-const { candidateHasOverlap } = require('./overlap-predicate');
+const { candidateHasOverlap, isActiveRouteStop } = require('./overlap-predicate');
 const { routeCost, clusterShare } = require('./route-model');
 
 const DAY_OPEN = 8 * 60;
@@ -105,10 +105,16 @@ function rowToDayStop(r) {
 }
 
 // One technician-day's OTHER stops (never `excludeId`), shaped for the
-// shared model. Status filter matches computeCurrentPlacement's existing
-// neighbor query (cancelled/completed/skipped/rescheduled excluded at the
-// query level — a no_show row is fetched but overlap-predicate.js excludes
-// it from a conflict verdict, matching the rebooker's own occupancy probe).
+// shared model and filtered to ACTIVE stops only (overlap-predicate.js's
+// isActiveRouteStop — the SAME status/expiry rule the writer's occupancy
+// probe applies): cancelled/completed/skipped/rescheduled are excluded at
+// the query level, and a no_show row or an expired estimate-slot hold
+// (fetched here, since the query alone can't see reservation_expires_at
+// expiring) is filtered out in memory. Without this, a day whose only
+// "stops" are expired holds or no-shows was invisible to the overlap check
+// but still counted as real stops for route-cost/cluster scoring — near-zero
+// detour and full cluster credit for a day that is actually empty (Codex
+// pre-push P1).
 async function loadDayStops(db, { technicianId, dateStr, excludeId }) {
   if (!technicianId) return [];
   const rows = await db('scheduled_services')
@@ -118,7 +124,7 @@ async function loadDayStops(db, { technicianId, dateStr, excludeId }) {
     .whereNotIn('scheduled_services.status', ['cancelled', 'completed', 'skipped', 'rescheduled'])
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .select(...DAY_STOP_COLUMNS);
-  return rows.map(rowToDayStop);
+  return rows.map(rowToDayStop).filter(isActiveRouteStop);
 }
 
 // Visit-group members moving together are never a conflict for each other
@@ -289,8 +295,16 @@ async function computeCurrentPlacement(service, prefs, ctx) {
   // associative — routing through the shared function ONLY when the gate is
   // on keeps gate-off byte-for-byte the legacy computation.
   const sharedModelOn = autoDispatchSharedModelLive();
+  // Active-only neighbors for the shared model (Codex pre-push P1): `neighbors`
+  // above still carries a no_show row or an expired estimate-slot hold (the
+  // legacy detour formula above always has, and gate-off must stay
+  // byte-for-byte) — but routeCost/clusterShare have no overlap check of
+  // their own, so without this filter a day whose only neighbors were
+  // expired holds scored a near-zero detour and full cluster credit, same
+  // bug loadDayStops had for candidates.
+  const activeNeighbors = sharedModelOn ? neighbors.filter(isActiveRouteStop) : neighbors;
   if (sharedModelOn && geo) {
-    const shared = routeCost(neighbors, { geo, startMin: myStart });
+    const shared = routeCost(activeNeighbors, { geo, startMin: myStart });
     detour = shared.detourMinutes;
     totalDrive = shared.driveWithMinutes;
   }
@@ -304,7 +318,7 @@ async function computeCurrentPlacement(service, prefs, ctx) {
     date: dateStr,
     start_time: service.window_start ? String(service.window_start).slice(0, 5) : null,
     capability_level: ctx.capabilityFor(techId, category),
-    ...(sharedModelOn ? { same_area_share: clusterShare(neighbors, geo), model: 'shared_v1' } : {}),
+    ...(sharedModelOn ? { same_area_share: clusterShare(activeNeighbors, geo), model: 'shared_v1' } : {}),
   };
 }
 

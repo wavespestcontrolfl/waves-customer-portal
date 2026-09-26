@@ -5,8 +5,33 @@
 // boundary is NOT a conflict, and it excludes self / visit-group members /
 // non-route-stop statuses / completed / expired holds exactly like the writer.
 const {
-  intervalsOverlap, conflictsWithStop, candidateHasOverlap, OVERLAP_EXCLUDED_STATUSES,
+  intervalsOverlap, isActiveRouteStop, conflictsWithStop, candidateHasOverlap, OVERLAP_EXCLUDED_STATUSES,
 } = require('../services/auto-dispatch/overlap-predicate');
+
+describe('isActiveRouteStop', () => {
+  const liveRow = { id: 'r1', window_start: '09:00', window_end: '10:00', status: 'confirmed' };
+
+  test('a live row is active', () => {
+    expect(isActiveRouteStop(liveRow)).toBe(true);
+  });
+  test.each(['cancelled', 'skipped', 'no_show', 'rescheduled', 'completed'])(
+    'a %s row is NOT active (matches the writer\'s excluded statuses)', (status) => {
+      expect(isActiveRouteStop({ ...liveRow, status })).toBe(false);
+    },
+  );
+  test('an expired estimate-slot hold is NOT active', () => {
+    const expired = { ...liveRow, reservation_expires_at: new Date(Date.now() - 60000).toISOString() };
+    expect(isActiveRouteStop(expired)).toBe(false);
+  });
+  test('a still-live hold IS active', () => {
+    const live = { ...liveRow, reservation_expires_at: new Date(Date.now() + 60000).toISOString() };
+    expect(isActiveRouteStop(live)).toBe(true);
+  });
+  test('a nullish row is not active', () => {
+    expect(isActiveRouteStop(null)).toBe(false);
+    expect(isActiveRouteStop(undefined)).toBe(false);
+  });
+});
 
 describe('intervalsOverlap', () => {
   test('overlapping windows conflict', () => {

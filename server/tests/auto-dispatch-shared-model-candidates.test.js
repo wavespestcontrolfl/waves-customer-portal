@@ -118,3 +118,95 @@ test('gate OFF: no overlap pre-filter, no shared-model fields, byte-identical to
   expect(current.model).toBeUndefined();
   expect(calls).toBe(2);
 });
+
+// Sequenced db mock for a SINGLE candidate: call 1 = sibling-date query
+// (none), call 2 = day-stops for the candidate's (tech,date) — `dayStops`,
+// call 3 = computeCurrentPlacement's own neighbor query (none).
+function singleCandidateDb(dayStops) {
+  let call = 0;
+  return () => {
+    call += 1;
+    const n = call;
+    const c = {};
+    ['where', 'whereNot', 'whereNotIn', 'whereIn', 'whereBetween', 'orWhere', 'leftJoin', 'orderBy', 'first']
+      .forEach((m) => { c[m] = () => c; });
+    c.select = async () => {
+      if (n === 1) return [];
+      if (n === 2) return dayStops;
+      return [];
+    };
+    return c;
+  };
+}
+
+// Codex pre-push P1 (2026-09-26): loadDayStops fetched expired estimate-slot
+// holds and no_show rows — invisible to the overlap predicate already, but
+// routeCost/clusterShare had no exclusion of their own, so a day whose only
+// "stops" were inactive read as near-zero detour and fully clustered.
+test('a day whose only stops are an expired hold + a no_show scores IDENTICALLY to a genuinely empty day', async () => {
+  process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
+  const SLOT = { date: '2026-08-06', technician: { id: 't1', name: 'A' }, start_time: '08:00', end_time: '09:00', detour_minutes: 2, total_drive_minutes: 12, stops_that_day: 1, score: 2 };
+
+  // Sitting right on top of the candidate's own location — if either row
+  // wrongly counted, it would score a near-zero detour and full cluster
+  // credit. Same time window as the candidate too, to also confirm neither
+  // wrongly blocks the candidate as SLOT_TAKEN.
+  const expiredHoldRow = {
+    id: 'expired-hold', window_start: '08:00', window_end: '09:00', status: 'confirmed',
+    reservation_expires_at: new Date(Date.now() - 60000).toISOString(),
+    estimated_duration_minutes: 60, svc_lat: SERVICE.lat, svc_lng: SERVICE.lng,
+  };
+  const noShowRow = {
+    id: 'no-show', window_start: '08:00', window_end: '09:00', status: 'no_show',
+    estimated_duration_minutes: 60, svc_lat: SERVICE.lat, svc_lng: SERVICE.lng,
+  };
+
+  findAvailableSlots.mockResolvedValue({ slots: [SLOT] });
+  const { candidates: withInactiveOnly } = await findValidCandidateSlots(
+    SERVICE, prefs, { ...ctxBase(), db: singleCandidateDb([expiredHoldRow, noShowRow]) },
+  );
+
+  jest.clearAllMocks();
+  findAvailableSlots.mockResolvedValue({ slots: [SLOT] });
+  const { candidates: empty } = await findValidCandidateSlots(
+    SERVICE, prefs, { ...ctxBase(), db: singleCandidateDb([]) },
+  );
+
+  expect(withInactiveOnly).toHaveLength(1); // neither row wrongly triggers SLOT_TAKEN
+  expect(empty).toHaveLength(1);
+  expect(withInactiveOnly[0].detour_minutes).toBe(empty[0].detour_minutes);
+  expect(withInactiveOnly[0].total_drive_minutes).toBe(empty[0].total_drive_minutes);
+  // Cluster share must read as an EMPTY day (0), not fully clustered (the
+  // mocked haversine below always reports every pair as "close").
+  expect(withInactiveOnly[0].same_area_share).toBe(0);
+  expect(empty[0].same_area_share).toBe(0);
+});
+
+test('computeCurrentPlacement: a current-day expired hold / no_show does not count toward detour or clustering', async () => {
+  process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
+  const { computeCurrentPlacement } = require('../services/auto-dispatch/candidate-slots');
+
+  const expiredHoldRow = {
+    id: 'expired-hold', window_start: '08:00', window_end: '09:00', status: 'confirmed',
+    reservation_expires_at: new Date(Date.now() - 60000).toISOString(),
+    estimated_duration_minutes: 60, svc_lat: SERVICE.lat, svc_lng: SERVICE.lng,
+  };
+  const noShowRow = {
+    id: 'no-show', window_start: '10:00', window_end: '11:00', status: 'no_show',
+    estimated_duration_minutes: 60, svc_lat: SERVICE.lat, svc_lng: SERVICE.lng,
+  };
+  const rowsDb = (rows) => () => {
+    const c = {};
+    ['where', 'whereNot', 'whereNotIn', 'leftJoin'].forEach((m) => { c[m] = () => c; });
+    c.select = async () => rows;
+    return c;
+  };
+
+  const withInactive = await computeCurrentPlacement(SERVICE, prefs, { ...ctxBase(), db: rowsDb([expiredHoldRow, noShowRow]) });
+  const empty = await computeCurrentPlacement(SERVICE, prefs, { ...ctxBase(), db: rowsDb([]) });
+
+  expect(withInactive.detour_minutes).toBe(empty.detour_minutes);
+  expect(withInactive.total_drive_minutes).toBe(empty.total_drive_minutes);
+  expect(withInactive.same_area_share).toBe(0);
+  expect(empty.same_area_share).toBe(0);
+});
