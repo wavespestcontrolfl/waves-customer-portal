@@ -29,8 +29,10 @@ describe('v1SlugFor on the real catalog', () => {
 describe('real-catalog answer guards (Codex #4974 r2)', () => {
   const catalog = require('../services/species-catalog');
   const { buildAnswer, REFERRAL_TEMPLATES } = require('../services/photo-id-v2/pest-engine');
+  // The guards under test are about photo-confirmability, not the owner's
+  // review state, so the top entry is treated as approved here.
   const cand = (slug, confidence) => {
-    const entry = catalog.getEntry(slug);
+    const entry = { ...catalog.getEntry(slug), review: { status: 'owner_approved', notes: '' }, verification: [] };
     return { slug, offCatalogName: null, groupId: entry.group, confidence, entry, traitsVisible: [1], traitsNotVisible: [], checked: true, verified: true };
   };
   const ctx = (candidates) => ({
