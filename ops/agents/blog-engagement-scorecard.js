@@ -1,17 +1,18 @@
 // READ-ONLY: weekly blog engagement scorecard — do blog readers keep going?
 //
 // Reads Cloudflare Web Analytics (RUM) for the wavespestcontrol.com hub and
-// reports, per blog post: views (reloads excluded), entries (views that began a
-// visit, i.e. arrived from outside the site), onward clicks (views of another
-// page of the site whose referrer path is that post), the share of the post's
-// views that were followed by an onward click, and where those clicks went.
-// Numerator and denominator are both per post view, so a visit that reads two
-// posts counts two views and up to two onward clicks.
+// reports, per blog post: page views, entries (views that began a visit, i.e.
+// arrived from outside the site), onward page views (views of another page of
+// the site whose referrer path is that post), onward views per post view, and
+// where they went. Both sides are page views, so a visit that reads two posts
+// counts two post views and up to two onward views. Only fresh navigations
+// count: reloads, back/forward, bfcache restores and in-page (History API)
+// jumps are skipped, and so is a post referring to itself.
 //
 // Cloudflare RUM is cookieless and counts every visitor (GA4 and PostHog only
 // see visitors who accept cookies), but it samples, so small counts are
-// approximate. Baseline 2026-07-17 → 2026-09-23: ~8,350 post views, ~100
-// followed by an onward click (1.2%).
+// approximate. Baseline 2026-07-17 → 2026-09-23: ~8,220 post views, ~100
+// onward views (1.2% per post view).
 //
 // Writes nothing. Needs CF_API_TOKEN (Account Analytics read) and CF_ACCOUNT_ID
 // from the environment; CF_RUM_SITE_TAG overrides the site lookup.
@@ -76,6 +77,17 @@ function classifyPath(path) {
   return 'other';
 }
 
+// Cloudflare's navigation types: only a fresh navigation (or an older browser
+// that reports none) is a real page view here. Reloads, back/forward and bfcache
+// restores re-show a page, and "routing-apis" is a History-API URL change
+// (in-page jump links), not a new page.
+const COUNTED_NAVIGATION_TYPES = new Set(['navigate', 'unknown']);
+
+function countsAsPageView(navigationType) {
+  if (navigationType == null || navigationType === '') return true;
+  return COUNTED_NAVIGATION_TYPES.has(String(navigationType).toLowerCase());
+}
+
 function isInternalHost(host) {
   return HUB_HOSTS.has(String(host || '').trim().toLowerCase());
 }
@@ -86,11 +98,13 @@ function toCount(value) {
 }
 
 /**
- * Per-pageview continuation: of the views of blog posts (reloads excluded),
- * how many were followed by a click to another page of the site. Numerator and
- * denominator are both counted per post view, so a journey that reads two
- * posts (Google -> A -> B -> contact) is 2 views and 2 onward clicks, never
- * 2 clicks against 1 entry.
+ * Onward page views per post view: of the page views of blog posts, how many
+ * page views of other pages on the site they referred. Numerator and
+ * denominator are both page views, so a journey that reads two posts
+ * (Google -> A -> B -> contact) is 2 post views and 2 onward views, never
+ * 2 clicks against 1 entry. One reader opening several links from one post
+ * counts each, so a single post can exceed 100%. Only fresh navigations count
+ * (see COUNTED_NAVIGATION_TYPES); a post referring to itself is skipped too.
  *
  * @param {Array<{path: string, refererHost?: string, refererPath?: string, views: number}>} groups
  */
@@ -108,7 +122,7 @@ function summarize(groups) {
 
   for (const g of groups || []) {
     const views = toCount(g.views);
-    if (!views) continue;
+    if (!views || !countsAsPageView(g.navigationType)) continue;
     const dest = normalizePath(g.path);
     const destClass = classifyPath(dest);
     const internal = isInternalHost(g.refererHost);
@@ -162,9 +176,9 @@ function formatMarkdown(summary, { start, end, top = 20 } = {}) {
   lines.push('');
   lines.push('Cloudflare Web Analytics: cookieless, every visitor, sampled (small counts are approximate).');
   lines.push('');
-  lines.push(`- Blog post views (reloads excluded): ${totals.blogViews}, of which ${totals.blogEntries} began a visit`);
-  lines.push(`- Post views followed by a click to another page: ${totals.onwardClicks} (${pct(totals.onwardRate)})`);
-  lines.push('- Baseline 2026-07-17 to 2026-09-23: 1.2% (about 100 of 8,350 post views)');
+  lines.push(`- Blog post views (fresh navigations): ${totals.blogViews}, of which ${totals.blogEntries} began a visit`);
+  lines.push(`- Onward page views referred by a post: ${totals.onwardClicks} (${pct(totals.onwardRate)} per post view)`);
+  lines.push('- Baseline 2026-07-17 to 2026-09-23: 1.2% (about 100 onward views per 8,220 post views)');
   lines.push('');
   lines.push('| Where onward clicks went | Views |');
   lines.push('|---|---:|');
@@ -247,7 +261,7 @@ async function hubSiteTag(accountId) {
 const QUERY = `query($acct: String!, $tag: String!, $from: Time!, $to: Time!, $limit: Int!) {
   viewer { accounts(filter: { accountTag: $acct }) {
     rumPageloadEventsAdaptiveGroups(filter: { siteTag: $tag, datetime_geq: $from, datetime_lt: $to }, limit: $limit, orderBy: [count_DESC]) {
-      count dimensions { requestPath refererHost refererPath }
+      count dimensions { requestPath refererHost refererPath navigationType }
     } } } }`;
 
 async function fetchGroups(accountId, siteTag, start, end) {
@@ -271,6 +285,7 @@ async function fetchGroups(accountId, siteTag, start, end) {
         path: r.dimensions.requestPath,
         refererHost: r.dimensions.refererHost,
         refererPath: r.dimensions.refererPath,
+        navigationType: r.dimensions.navigationType,
         views: r.count,
       });
     }
@@ -307,6 +322,7 @@ if (require.main === module) {
 
 module.exports = {
   classifyPath,
+  countsAsPageView,
   formatMarkdown,
   isInternalHost,
   normalizePath,

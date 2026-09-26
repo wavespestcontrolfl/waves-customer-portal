@@ -1,5 +1,6 @@
 const {
   classifyPath,
+  countsAsPageView,
   formatMarkdown,
   isInternalHost,
   normalizePath,
@@ -104,6 +105,25 @@ describe('summarize', () => {
     ]);
   });
 
+  test('only fresh navigations count: reloads, back/forward, restores and in-page jumps are skipped', () => {
+    const base = { refererHost: 'www.wavespestcontrol.com', refererPath: '/pest-control/a/' };
+    const s = summarize([
+      { path: '/pest-control/a/', refererHost: 'www.google.com', refererPath: '/', navigationType: 'navigate', views: 10 },
+      { path: '/pest-control/a/', refererHost: 'www.google.com', refererPath: '/', navigationType: 'reload', views: 4 },
+      { path: '/contact/', ...base, navigationType: 'navigate', views: 2 },
+      { path: '/contact/', ...base, navigationType: 'reload', views: 3 },
+      { path: '/contact/', ...base, navigationType: 'back-forward', views: 5 },
+      { path: '/contact/', ...base, navigationType: 'restore', views: 6 },
+      { path: '/pest-control/b/', ...base, navigationType: 'routing-apis', views: 7 },
+      { path: '/pest-control/b/', ...base, navigationType: 'unknown', views: 1 },
+    ]);
+    expect(s.totals).toEqual({ blogEntries: 10, blogViews: 11, onwardClicks: 3, onwardRate: 3 / 11 });
+    expect(countsAsPageView('navigate')).toBe(true);
+    expect(countsAsPageView('Navigate')).toBe(true);
+    expect(countsAsPageView(undefined)).toBe(true);
+    expect(countsAsPageView('prerender')).toBe(false);
+  });
+
   test('handles empty input', () => {
     expect(summarize([])).toEqual({
       totals: { blogEntries: 0, blogViews: 0, onwardClicks: 0, onwardRate: null },
@@ -115,8 +135,8 @@ describe('summarize', () => {
   test('formats a markdown report', () => {
     const md = formatMarkdown(summarize(groups), { start: '2026-09-19', end: '2026-09-25', top: 1 });
     expect(md).toContain('## Blog engagement scorecard, 2026-09-19 to 2026-09-25');
-    expect(md).toContain('Blog post views (reloads excluded): 196, of which 190 began a visit');
-    expect(md).toContain('Post views followed by a click to another page: 9 (4.6%)');
+    expect(md).toContain('Blog post views (fresh navigations): 196, of which 190 began a visit');
+    expect(md).toContain('Onward page views referred by a post: 9 (4.6% per post view)');
     expect(md).toContain('| Another blog post | 6 |');
     expect(md).toContain('| /pest-control/huntsman/ | 150 | 150 | 8 | 5.3% | 2 |');
     expect(md).not.toContain('/pest-control/bagworm/ |');
