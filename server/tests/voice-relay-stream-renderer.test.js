@@ -267,6 +267,36 @@ describe('relay-stream-renderer — pure chunking + hold policy', () => {
   ])('an hour word with no scheduling word nearby is unaffected: %s', (sentence) => {
     expect(needsHold(sentence)).toBe(false);
   });
+
+  // Item 1: a relative-day scheduling phrase ("the next day", "the day
+  // after next", "the following day") has no digit, weekday/month name, or
+  // am/pm marker of its own for DATE_TIME_RE to catch on the existing
+  // rules — it needs the day/days/week/weekend + relative-qualifier
+  // addition. "Could we do next week?" / "the following Monday" already
+  // held via the bare "week" word / weekday name, so this also pins that
+  // they still do.
+  test.each([
+    'Would the next day work?',
+    'Does the day after next work?',
+    'How about the following day?',
+    'Is the day after tomorrow open?',
+    'Could we do next week?',
+    'What about the following Monday?',
+  ])('a relative-day scheduling phrase needs holding: %s', (sentence) => {
+    expect(needsHold(sentence)).toBe(true);
+  });
+
+  // The relative-day addition must not hold the existing safe fillers (no
+  // "day"/"week" word in them) or a plain non-scheduling question.
+  test.each([
+    'One moment.',
+    'Give me one second',
+    'One moment while I pull that up.',
+    "I'll see what I can find.",
+    'Can you spell your last name?',
+  ])('the relative-day addition does not hold safe fillers or a plain question: %s', (sentence) => {
+    expect(needsHold(sentence)).toBe(false);
+  });
 });
 
 // ── isStreamSafe — the allowlist grammar (structural fix #1) ───────────────

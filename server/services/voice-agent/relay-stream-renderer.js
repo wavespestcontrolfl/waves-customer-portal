@@ -150,6 +150,17 @@ const HOUR_WORDS = 'one|two|three|four|five|six|seven|eight|nine|ten|eleven|twel
 const ORDINAL_WORDS = 'first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth|'
   + 'thirteenth|fourteenth|fifteenth|sixteenth|seventeenth|eighteenth|nineteenth|twentieth|thirtieth|'
   + 'twenty[- ](?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth)|thirty[- ]first';
+// A relative-day scheduling phrase — "the next day", "the following day",
+// "the day after next", "this coming week", "later this week" — has no
+// digit, weekday/month name, or am/pm marker of its own; only "week" and
+// "weekend" above already hold bare. "day"/"days" only holds paired with
+// one of these relative qualifiers (never bare — "Have a great day." isn't
+// scheduling), so RELATIVE_DAY_RE_SOURCE below covers the qualifier+unit
+// and day-after-next/tomorrow shapes without adding a bare "day" that would
+// over-hold unrelated pleasantries.
+const RELATIVE_DAY_QUALIFIER_SOURCE = 'next|following|this coming|later this';
+const RELATIVE_DAY_RE_SOURCE = `\\b(?:${RELATIVE_DAY_QUALIFIER_SOURCE})\\s+(?:day|days|week|weekend)\\b`
+  + '|\\bday\\s+after\\s+(?:next|tomorrow)\\b';
 const DATE_TIME_RE = new RegExp(
   '\\d'
   + '|\\b(?:'
@@ -162,7 +173,8 @@ const DATE_TIME_RE = new RegExp(
   // An ordinal is a date when it closes a phrase ("how about the fifteenth?")
   // or follows on/by/for/until/after/before the — not "the first question".
   + `the\\s+(?:${ORDINAL_WORDS})(?=\\s*(?:[.,!?;]|$|of\\b|at\\b|in\\b))|`
-  + `(?:on|by|for|until|till|after|before|from)\\s+the\\s+(?:${ORDINAL_WORDS})\\b`
+  + `(?:on|by|for|until|till|after|before|from)\\s+the\\s+(?:${ORDINAL_WORDS})\\b|`
+  + RELATIVE_DAY_RE_SOURCE
   + ')',
   'i',
 );
