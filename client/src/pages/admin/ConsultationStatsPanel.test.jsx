@@ -46,7 +46,7 @@ const emptyStats = {
 it("renders counts and derived rates from a stubbed response", async () => {
   const adminFetch = vi.fn().mockResolvedValue(fullStats);
   render(<ConsultationStatsPanel adminFetch={adminFetch} />);
-  expect(await screen.findByText("Consultations")).toBeInTheDocument();
+  expect(await screen.findByText("Consultations · visits in the last 90 days")).toBeInTheDocument();
   expect(adminFetch).toHaveBeenCalledWith("/admin/consultations/stats");
 
   // Booked / showed / won counts.
@@ -84,7 +84,7 @@ it("shows a sparse-data empty state instead of zero-filled cards when nothing is
   const adminFetch = vi.fn().mockResolvedValue(emptyStats);
   render(<ConsultationStatsPanel adminFetch={adminFetch} />);
   expect(
-    await screen.findByText(/No consultations or outcomes recorded yet/),
+    await screen.findByText(/No Waves Assessment visits in the last 90 days/),
   ).toBeInTheDocument();
   // The metric-grid-only elements must not render in the empty state.
   expect(screen.queryByText("By technician")).not.toBeInTheDocument();

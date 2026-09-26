@@ -165,7 +165,7 @@ export default function ConsultationStatsPanel({ adminFetch = sharedAdminFetch }
     return (
       <Card className="p-5 mb-[24px]">
         <h2 className="m-0 mb-[12px] text-zinc-900 text-ui-body font-medium">
-          Consultations
+          Consultations · visits in the last 90 days
         </h2>
         <ActionFeedback error onRetry={load}>
           Couldn&apos;t load consultation stats
@@ -182,11 +182,10 @@ export default function ConsultationStatsPanel({ adminFetch = sharedAdminFetch }
     return (
       <Card className="p-5 mb-[24px]">
         <h2 className="m-0 mb-[6px] text-zinc-900 text-ui-body font-medium">
-          Consultations
+          Consultations · visits in the last 90 days
         </h2>
         <div className="text-ink-secondary text-ui-body">
-          No consultations or outcomes recorded yet in this window —
-          outcome capture only just shipped, so early data will be sparse.
+          No Waves Assessment visits in the last 90 days.
         </div>
       </Card>
     );
@@ -219,7 +218,7 @@ export default function ConsultationStatsPanel({ adminFetch = sharedAdminFetch }
     <div className="mb-[24px]">
       <div className="mb-[10px]">
         <h2 className="m-0 mb-[6px] text-zinc-900 text-ui-body font-medium">
-          Consultations
+          Consultations · visits in the last 90 days
         </h2>
         <div className="m-0 text-ink-secondary text-ui-body">
           Waves Assessment outcomes for the selected window.
