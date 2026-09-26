@@ -5485,7 +5485,8 @@ async function sendExplicitPaymentReminderChannels({
   try {
     result = await sendReminderChannels({
       customerId: customer.id,
-      invoiceId: null,
+      invoiceId: null, // draft invoice: policy uses the off-ledger amount below
+      invoiceIds: [invoice.id], // ...but the ledger records the invoice it quotes
       source,
       purpose: 'balance_reminder',
       eventKey,
@@ -5557,6 +5558,37 @@ async function sendExplicitPaymentReminderChannels({
   return { sent: anyDelivered, termId: claimedTerm.id, complete: result.complete };
 }
 
+// Advisory pre-claim checks on the candidate term row (the claim UPDATE
+// re-checks status/sent atomically). Returns a skip reason or null.
+function paymentReminderTermRefusal(term, sentCol) {
+  if (!term) return 'term_not_found';
+  if (term.status !== PAYMENT_PENDING_STATUS) return 'not_payment_pending';
+  if (term[sentCol]) return 'already_sent';
+  if (!term.prepay_invoice_id) return 'no_invoice';
+  return null;
+}
+
+// Explicit per-customer billing-channel selection (router core, PR #4843).
+// Returns null when the customer has no stored choice (the legacy SMS path
+// runs), else the explicit-rail result. An unreadable choice must not fall
+// through to the legacy SMS path (that would ignore a stored selection): the
+// attempt is undone and the next scan retries.
+async function routeExplicitPaymentReminder(ctx) {
+  let explicitChannels;
+  try {
+    const { explicitBillingChannels } = require('./billing-delivery-channels');
+    const prefs = await db('notification_prefs').where({ customer_id: ctx.customer.id }).first();
+    explicitChannels = explicitBillingChannels(prefs || {}, 'billing');
+  } catch (err) {
+    logger.warn(`[annual-prepay] notification_prefs lookup failed for customer ${ctx.customer.id}: ${err.message}`);
+    await ctx.reverseReminderCredit();
+    await ctx.releaseClaim();
+    return { sent: false, reason: 'notification_prefs_unavailable' };
+  }
+  if (!explicitChannels) return null;
+  return sendExplicitPaymentReminderChannels({ ...ctx, explicitChannels });
+}
+
 async function sendPaymentPendingReminder(termOrId, daysOut, opts = {}) {
   if (!(await annualPrepayTableExists())) return { sent: false, reason: 'table_missing' };
   const sentCol = paymentReminderColumnForDaysOut(daysOut);
@@ -5572,10 +5604,8 @@ async function sendPaymentPendingReminder(termOrId, daysOut, opts = {}) {
   const term = typeof termOrId === 'object' && termOrId?.id
     ? termOrId
     : await db('annual_prepay_terms').where({ id: termOrId }).first();
-  if (!term) return { sent: false, reason: 'term_not_found' };
-  if (term.status !== PAYMENT_PENDING_STATUS) return { sent: false, reason: 'not_payment_pending' };
-  if (term[sentCol]) return { sent: false, reason: 'already_sent' };
-  if (!term.prepay_invoice_id) return { sent: false, reason: 'no_invoice' };
+  const termRefusal = paymentReminderTermRefusal(term, sentCol);
+  if (termRefusal) return { sent: false, reason: termRefusal };
 
   let invoice = await db('invoices').where({ id: term.prepay_invoice_id }).first();
   if (!invoice) return { sent: false, reason: 'invoice_missing' };
@@ -5675,28 +5705,11 @@ async function sendPaymentPendingReminder(termOrId, daysOut, opts = {}) {
       return { sent: false, reason: 'customer_missing_or_deleted' };
     }
 
-    // Explicit per-customer billing-channel selection (router core, PR
-    // #4843 — dark until GATE_BILLING_NOTIFICATION_CHANNELS; explicitChannels
-    // is null while no array is stored). An unreadable choice must not fall
-    // through to the legacy SMS path (that would ignore a stored selection):
-    // undo this attempt and let the next scan retry.
-    let explicitChannels = null;
-    try {
-      const { explicitBillingChannels } = require('./billing-delivery-channels');
-      const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first();
-      explicitChannels = explicitBillingChannels(prefs || {}, 'billing');
-    } catch (err) {
-      logger.warn(`[annual-prepay] notification_prefs lookup failed for customer ${customer.id}: ${err.message}`);
-      await reverseReminderCredit();
-      await releaseClaim();
-      return { sent: false, reason: 'notification_prefs_unavailable' };
-    }
-    if (explicitChannels) {
-      return await sendExplicitPaymentReminderChannels({
-        claimedTerm, invoice, customer, daysOut, amountDue, explicitChannels, opts,
-        sentCol, claimCol, releaseClaim, reverseReminderCredit,
-      });
-    }
+    const explicitResult = await routeExplicitPaymentReminder({
+      claimedTerm, invoice, customer, daysOut, amountDue, opts,
+      sentCol, claimCol, releaseClaim, reverseReminderCredit,
+    });
+    if (explicitResult) return explicitResult;
 
     if (!customer.phone) {
       // The invoice email already carries the pay link (sent at accept, plus
