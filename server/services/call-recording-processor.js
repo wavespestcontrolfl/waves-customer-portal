@@ -31,6 +31,7 @@ const { isLikelyE164 } = require('../utils/phone');
 const { lockTriageCall } = require('../utils/triage-locks');
 const { callStartedAt } = require('../utils/call-timeline');
 const { resolveLocation } = require('../config/locations');
+const { safeErrorToken } = require('../utils/sentry-scrub');
 const { composeRelaySegment } = require('./voice-agent/relay-transfer');
 const { TRANSCRIPTION_PROVIDER: RELAY_TRANSCRIPTION_PROVIDER } = require('./voice-agent/relay-transcript');
 
@@ -897,6 +898,20 @@ function maskSid(sid) {
   const value = String(sid);
   if (value.length <= 8) return `${value.slice(0, 2)}...`;
   return `${value.slice(0, 2)}...${value.slice(-6)}`;
+}
+
+const LAST_NAME_ADVISORY_INSERT_ERROR_CODE = 'CALL_LAST_NAME_ADVISORY_INSERT_FAILED';
+
+// Knex can embed bound customer fields and the failing SQL in its error
+// message/stack. Replace the rejection at this insert's boundary so both the
+// best-effort logger and the transaction failure path receive only fixed text
+// plus an allowlisted machine token. A fresh Error deliberately drops the
+// original cause and stack while still rejecting under the comms fence.
+function sanitizeLastNameAdvisoryInsertError(err) {
+  const sanitized = new Error('last-name advisory insert failed');
+  sanitized.code = LAST_NAME_ADVISORY_INSERT_ERROR_CODE;
+  sanitized.errorToken = safeErrorToken(err?.code) || safeErrorToken(err?.name) || 'error';
+  return sanitized;
 }
 
 async function updateUnifiedVoiceMessage(call, patch = {}) {
@@ -15219,10 +15234,11 @@ const CallRecordingProcessor = {
               },
             }))
             .onConflict(conn.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
-            .ignore();
+            .ignore()
+            .catch((err) => { throw sanitizeLastNameAdvisoryInsertError(err); });
           if (customerValidation.advisory?.includes('last_name')) {
             await fileLastNameAdvisoryCard(db)
-              .catch((e) => logger.warn(`[call-proc] last-name advisory insert failed for ${maskSid(callSid)}: ${e.message}`));
+              .catch((err) => logger.warn(`[call-proc] last-name advisory insert failed for ${maskSid(callSid)} (${err.code}:${err.errorToken})`));
           }
           // Email-less bookings in SHADOW/LEGACY mode still require a
           // positively validated address (codex round-7 P1). canAutoRoute's
@@ -20491,6 +20507,7 @@ function legacyDisputeServiceIntent(extracted) {
 }
 
 CallRecordingProcessor._test = {
+  sanitizeLastNameAdvisoryInsertError,
   legacyDisputeServiceIntent,
   backfillLinkedCustomerFromExtraction,
   prelinkedBackfillGate,

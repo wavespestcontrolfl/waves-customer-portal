@@ -2166,6 +2166,7 @@ describe('round-13: extraction anchor and skipped-card snapshot', () => {
 // advisory "get the full name" card, deduped on the same partial index.
 describe('booking site files the missing_last_name advisory card (codex #4991 r1+r2)', () => {
   const processorSrc = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+  const { sanitizeLastNameAdvisoryInsertError } = CallRecordingProcessor._test;
 
   test('the card helper inserts an advisory missing_last_name card with the heard_name_v1 snapshot, deduped', () => {
     const helperAt = processorSrc.indexOf('const fileLastNameAdvisoryCard = (conn) =>');
@@ -2176,10 +2177,41 @@ describe('booking site files the missing_last_name advisory card (codex #4991 r1
     // name_moot auto-resolve needs the filing-time V1 name snapshot.
     expect(section).toContain('heard_name_v1: { first_name: extracted?.first_name ?? null, last_name: extracted?.last_name ?? null }');
     expect(section).toContain('.ignore()');
+    expect(section).toContain('.catch((err) => { throw sanitizeLastNameAdvisoryInsertError(err); });');
   });
 
   test('it fires on the pre-fence validation AND on the under-fence revalidation, in the booking transaction', () => {
     expect(processorSrc).toContain("if (customerValidation.advisory?.includes('last_name')) {\n            await fileLastNameAdvisoryCard(db)");
     expect(processorSrc).toContain("if (freshValidation.advisory?.includes('last_name')) {\n                    await fileLastNameAdvisoryCard(trx);");
+  });
+
+  test('the shared rejection boundary drops synthetic customer PII while retaining only an allowlisted token', () => {
+    const pii = 'Jane Fixture jane.fixture@example.test +19415550123';
+    const raw = new Error(`insert into triage_items values ('${pii}')`);
+    raw.code = `23505-${pii}`;
+    raw.name = pii;
+    raw.stack = `${raw.name}: ${raw.message}\n    at ${pii}`;
+
+    const sanitized = sanitizeLastNameAdvisoryInsertError(raw);
+    const exposed = [sanitized.message, sanitized.code, sanitized.errorToken, sanitized.stack].join('\n');
+
+    expect(sanitized).toMatchObject({
+      message: 'last-name advisory insert failed',
+      code: 'CALL_LAST_NAME_ADVISORY_INSERT_FAILED',
+      errorToken: 'error',
+    });
+    expect(sanitized.cause).toBeUndefined();
+    expect(exposed).not.toContain('Jane Fixture');
+    expect(exposed).not.toContain('jane.fixture@example.test');
+    expect(exposed).not.toContain('+19415550123');
+  });
+
+  test('the rejection boundary preserves a safe database code without preserving raw error text', () => {
+    const raw = Object.assign(new Error('Jane Fixture violated a database constraint'), { code: '23505' });
+    const sanitized = sanitizeLastNameAdvisoryInsertError(raw);
+
+    expect(sanitized.errorToken).toBe('23505');
+    expect(sanitized.message).toBe('last-name advisory insert failed');
+    expect(sanitized.stack).not.toContain(raw.message);
   });
 });
