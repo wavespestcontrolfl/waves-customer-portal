@@ -102,10 +102,12 @@ function normalizeHistory(parsed) {
   const sources = Array.isArray(parsed.sources)
     ? parsed.sources.map((s) => str(s, 300)).filter(isHttpUrl).slice(0, 8)
     : [];
-  // The prompt allows "yes" ONLY with a concrete source; an uncited "yes"
-  // would be cached and pre-fill a legal FDACS-13645 filing, so it is a
-  // failed lookup (retryable), not a verdict (Codex-class gap on #4884).
-  if (pt === 'yes' && !sources.length) return null;
+  // The prompt allows "yes" ONLY with a concrete source and "no" only when a
+  // source affirmatively shows no prior treatment; an uncited verdict would be
+  // cached and pre-fill the legal FDACS-13645 filing, so it is a failed
+  // lookup (retryable), not a verdict. "unknown" is the evidence-free result
+  // (Codex r20 on #4884).
+  if ((pt === 'yes' || pt === 'no') && !sources.length) return null;
   return {
     previousTreatment: ['yes', 'no'].includes(pt) ? pt : 'unknown',
     treatmentNotes: str(parsed.treatmentNotes, 1000),

@@ -683,8 +683,11 @@ function normalizeExtractedEvent(source, ev, nowMs, opts = {}) {
   // safeHttpUrl() canonical form don't.
   const description = typeof ev.description === 'string' && ev.description ? ev.description.slice(0, 2000) : null;
   const venueName = typeof ev.venueName === 'string' && ev.venueName ? ev.venueName.slice(0, 256) : null;
-  const eventUrl = safeHttpUrl(ev.eventUrl);
-  const imageUrl = safeHttpUrl(ev.imageUrl);
+  // events_raw.event_url / image_url are varchar(1024); a longer URL would
+  // fail the upsert and abort the pull, so it is dropped like an unsafe one.
+  const fitUrl = (u) => (u && u.length <= 1024 ? u : null);
+  const eventUrl = fitUrl(safeHttpUrl(ev.eventUrl));
+  const imageUrl = fitUrl(safeHttpUrl(ev.imageUrl));
 
   // Synthesize a stable dedup key from canonical title+date+url.
   // Extracted events don't have a UID/guid, so we key on the

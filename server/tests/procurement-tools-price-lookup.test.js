@@ -175,3 +175,18 @@ describe('tool loop', () => {
     expect(ledgerCallRejected).toHaveBeenCalledWith(expect.anything(), 'schema_invalid');
   });
 });
+
+// Codex r20 on #4884: price_approvals.new_quantity varchar(50), source_url
+// varchar(500), new_price decimal(10,2).
+test.each([
+  ['a quantity over 50 chars', { quantity: 'q'.repeat(51) }],
+  ['a URL over 500 chars', { url: `https://acme.example/${'p'.repeat(500)}` }],
+  ['a price past decimal(10,2)', { price: 1e8 }],
+])('%s makes the result unusable (no failed insert) and fails the row', async (_label, extra) => {
+  const inserts = wireDb();
+  respondWith([{ vendor: 'Acme Supply', price: 55.25, ...extra }]);
+  const out = await executeProcurementTool('run_price_lookup', { product_name: 'Taurus SC' });
+  expect(out.approvals_created).toBe(0);
+  expect(inserts).toHaveLength(0);
+  expect(ledgerCallRejected).toHaveBeenCalledWith(expect.anything(), 'schema_invalid');
+});

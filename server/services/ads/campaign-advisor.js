@@ -61,13 +61,16 @@ const ADS_LIST_FIELDS = {
   capacity_warnings: ['area', 'utilization', 'recommendation'],
   seo_insights: ['detail', 'type', 'action'],
 };
+// apply_action / manual_action feed `.replace()` on the page's manual-action
+// hint, so a non-string one crashed the view (Codex r20 on #4884).
 function isUsableRecommendation(rec) {
   return isText(rec.action) && ADS_PRIORITIES.has(canonicalPriority(rec.priority))
-    && ['campaign', 'reasoning', 'estimated_impact'].every((k) => isRenderable(rec[k]));
+    && ['campaign', 'reasoning', 'estimated_impact', 'apply_value', 'campaign_id'].every((k) => isRenderable(rec[k]))
+    && ['apply_action', 'manual_action'].every((k) => rec[k] == null || typeof rec[k] === 'string');
 }
 function isUsableAdsReport(advice) {
   if (!advice || typeof advice !== 'object' || Array.isArray(advice)) return false;
-  if (typeof advice.grade !== 'string' || !advice.grade.trim()) return false;
+  if (typeof advice.grade !== 'string' || !advice.grade.trim() || advice.grade.length > 255) return false;
   if (typeof advice.overall_assessment !== 'string' || !advice.overall_assessment.trim()) return false;
   if (advice.insights != null && !(Array.isArray(advice.insights) && advice.insights.every(isText))) return false;
   const listsOk = ADS_REPORT_OBJECT_LISTS.every((key) => advice[key] == null || (Array.isArray(advice[key]) && advice[key].every((v) => v && typeof v === 'object' && !Array.isArray(v))));

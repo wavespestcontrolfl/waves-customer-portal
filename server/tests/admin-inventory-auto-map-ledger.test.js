@@ -116,3 +116,20 @@ test('in-contract optional fields are accepted', async () => {
   expect(await propose([P1_FOUND, full])).toEqual([P1_FOUND, full]);
   expect(ledgerCallRejected).not.toHaveBeenCalled();
 });
+
+// Codex r20 on #4884: distributor_product_map column limits.
+test.each([
+  ['a SKU over distributor_sku varchar(100)', { vendorSku: 'S'.repeat(101) }],
+  ['a unit over package_size_unit varchar(30)', { packageSizeUnit: 'u'.repeat(31) }],
+  ['a purchase UOM over varchar(30)', { purchaseUom: 'e'.repeat(31) }],
+  ['a package size past decimal(12,4)', { packageSizeValue: 1e9 }],
+])('%s makes the decision unusable: dropped, and the row fails', async (_label, extra) => {
+  expect(await propose([P1_FOUND, { productId: 'p2', found: true, vendorSku: 'TS-78', ...extra }])).toEqual([P1_FOUND]);
+  expect(ledgerCallRejected).toHaveBeenCalledWith(expect.anything(), 'schema_invalid');
+});
+
+test('a non-numeric package size ("32 oz") is kept, stored as no size as before', async () => {
+  const entry = { productId: 'p2', found: true, vendorSku: 'TS-78', packageSizeValue: '32 oz' };
+  expect(await propose([P1_FOUND, entry])).toEqual([P1_FOUND, entry]);
+  expect(ledgerCallRejected).not.toHaveBeenCalled();
+});

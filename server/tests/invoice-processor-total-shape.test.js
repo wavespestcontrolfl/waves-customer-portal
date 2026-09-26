@@ -100,3 +100,14 @@ describe('readParsedInvoice — invoice number length', () => {
     expect(readParsedInvoice({ invoice_number: 'INV-2026-000123', total: 10 }).invoice.invoice_number).toBe('INV-2026-000123');
   });
 });
+
+// Codex r20 on #4884: years 0000-0099 passed a month/day-only check (Date.UTC
+// remaps them to 19xx), then taxPeriodFor returned null and the destructuring threw.
+describe('readParsedInvoice — invoice date year', () => {
+  const { readParsedInvoice } = require('../services/email/invoice-processor');
+  test.each(['0012-01-15', '0099-12-31', '2026-02-30'])('%s is not a calendar date: dropped and degraded', (date) => {
+    const { invoice, degraded } = readParsedInvoice({ invoice_number: 'A1', invoice_date: date, total: 10 });
+    expect(invoice.invoice_date).toBeNull();
+    expect(degraded).toBe(true);
+  });
+});

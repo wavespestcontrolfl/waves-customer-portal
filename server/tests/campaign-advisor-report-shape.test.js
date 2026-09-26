@@ -109,3 +109,19 @@ describe('rendered items must be usable as given', () => {
     expect(out.recommendations.map((r) => r.priority)).toEqual(['high', 'low']);
   });
 });
+
+// Codex r20 on #4884: the manual-action hint calls .replace() on
+// apply_action / manual_action, so a non-string one crashed the Ads page.
+describe('recommendation apply fields', () => {
+  const rec = { priority: 'high', action: 'raise budget' };
+  test.each([
+    ['a numeric apply_action', { apply_action: 5 }],
+    ['an object apply_action', { apply_action: { kind: 'increase_budget' } }],
+    ['an object apply_value', { apply_action: 'increase_budget', apply_value: { usd: 30 } }],
+  ])('%s fails the report', (_label, extra) => {
+    expect(isUsableAdsReport({ ...GOOD, recommendations: [{ ...rec, ...extra }] })).toBe(false);
+  });
+  test('string apply fields are usable', () => {
+    expect(isUsableAdsReport({ ...GOOD, recommendations: [{ ...rec, apply_action: 'increase_budget', apply_value: 30, campaign_id: '123' }] })).toBe(true);
+  });
+});

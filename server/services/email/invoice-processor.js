@@ -7,7 +7,7 @@ const { anthropicMaxTokens, anthropicEffortConfig } = require('../llm/anthropic-
 // First TEXT block of a Message — a thinking block leads the content on
 // always-thinking models (Opus 5.5, Fable), so content[0] is not the answer.
 const { anthropicText } = require('../llm/call');
-const { etDateString } = require('../../utils/datetime-et');
+const { etDateString, validCalendarDate } = require('../../utils/datetime-et');
 const { taxPeriodFor } = require('../../utils/tax-period');
 const { ledgerCall, ledgerCallRejected } = require('../llm-dispatch-metrics');
 
@@ -61,9 +61,12 @@ function readParsedInvoice(raw) {
   }
   invoice.invoice_date = null;
   if (present(raw.invoice_date)) {
-    const m = typeof raw.invoice_date === 'string' && raw.invoice_date.trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
-    const d = m && new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
-    if (d && d.getUTCMonth() === +m[2] - 1 && d.getUTCDate() === +m[3]) invoice.invoice_date = raw.invoice_date.trim();
+    // The shared calendar check (the same one taxPeriodFor applies): a hand-
+    // rolled month/day check let years 0000-0099 through, which Date.UTC
+    // remaps to 19xx, and taxPeriodFor then returned null and the tax-period
+    // destructuring threw (Codex r20 on #4884).
+    const date = typeof raw.invoice_date === 'string' ? validCalendarDate(raw.invoice_date.trim()) : null;
+    if (date) invoice.invoice_date = date;
     else degraded = true;
   }
   invoice.line_items = [];
@@ -180,9 +183,12 @@ async function processVendorInvoice(email, classification) {
   const rawInvoiceDate = parsedInvoice?.invoice_date || classification.extracted?.invoice_date;
   const parsedDate = rawInvoiceDate ? new Date(rawInvoiceDate) : null;
   const invoiceDateValid = parsedDate && !Number.isNaN(parsedDate.getTime());
-  const invoiceDate = invoiceDateValid
-    ? parsedDate.toISOString().split('T')[0]
-    : etDateString();
+  // The classifier's own date is not calendar-checked upstream: a date
+  // taxPeriodFor cannot place (e.g. year 0012) falls back to today — date and
+  // tax period together — instead of throwing before the email outcome is
+  // recorded (Codex r20 on #4884).
+  const candidateDate = invoiceDateValid ? parsedDate.toISOString().split('T')[0] : null;
+  const invoiceDate = candidateDate && taxPeriodFor(candidateDate) ? candidateDate : etDateString();
   const { tax_year: taxYear, quarter } = taxPeriodFor(invoiceDate);
 
   if (amount > 0) {

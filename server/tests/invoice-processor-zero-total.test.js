@@ -49,3 +49,13 @@ test('a long vendor name / classifier invoice number is clipped to the expense c
   expect(row.description.length).toBeLessThanOrEqual(300);
   expect(row.vendor_name.length).toBeLessThanOrEqual(200);
 });
+
+test('a classifier date taxPeriodFor cannot place falls back to today (date and period) instead of throwing', async () => {
+  extraction({ total: 25 });
+  await processVendorInvoice(EMAIL, { extracted: { vendor_name: 'Acme', invoice_date: '0012-06-01' } });
+  const insert = mockWrites.find(([t, op]) => t === 'expenses' && op === 'insert');
+  expect(insert).toBeDefined();
+  const [, , row] = insert;
+  expect(row.expense_date).not.toBe('0012-06-01');
+  expect(row.tax_year).toBe(row.expense_date.slice(0, 4));
+});

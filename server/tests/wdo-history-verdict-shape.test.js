@@ -39,3 +39,13 @@ describe('wdo history — a "yes" verdict needs a cited source', () => {
     expect(normalizeHistory({ previousTreatment: 'unknown', confidence: 'low', sources: [] })).toMatchObject({ previousTreatment: 'unknown' });
   });
 });
+
+// Codex r20 on #4884: "no" is only allowed when a source affirmatively shows
+// no prior treatment — an uncited "no" pre-filled the FDACS form as "No".
+describe('wdo history — a "no" verdict needs a cited source too', () => {
+  test('"no" without an http(s) source is not a usable history; with one it is', () => {
+    expect(normalizeHistory({ previousTreatment: 'no', confidence: 'high', sources: [] })).toBeNull();
+    expect(normalizeHistory({ previousTreatment: 'no', confidence: 'high' })).toBeNull();
+    expect(normalizeHistory({ previousTreatment: 'no', confidence: 'high', sources: ['https://www.sc-pa.com/permit/9'] })).toMatchObject({ previousTreatment: 'no' });
+  });
+});

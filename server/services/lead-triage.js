@@ -38,7 +38,9 @@ const nonBlank = (v) => typeof v === 'string' && v.trim() !== '';
 function triageMatchesSchema(t) {
   if (!t || typeof t !== 'object' || Array.isArray(t)) return false;
   const x = t.extractedData;
-  return nonBlank(t.serviceInterest)
+  // serviceInterest is written to leads.service_interest varchar(255); a
+  // longer one failed the async lead update after acceptance (Codex r20).
+  return nonBlank(t.serviceInterest) && t.serviceInterest.trim().length <= 255
     && TRIAGE_SCHEMA.properties.urgency.enum.includes(t.urgency)
     && nonBlank(t.suggestedReply)
     && !!x && typeof x === 'object' && !Array.isArray(x)

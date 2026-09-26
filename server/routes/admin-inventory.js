@@ -1774,6 +1774,16 @@ function isUsableAutoMapProposal(m, requestedIds) {
   // was stored as "[object Object]" (review on #4884).
   const textOrAbsent = (v) => v == null || typeof v === 'string' || typeof v === 'number';
   if (!['notes', 'vendorProductName', 'packageSizeUnit', 'purchaseUom', 'packageSizeValue'].every((k) => textOrAbsent(m[k]))) return false;
+  // distributor_product_map limits: distributor_sku varchar(100), source_url
+  // varchar(700), package_size_unit / purchase_uom varchar(30),
+  // package_size_value decimal(12,4) — an oversized value failed the whole
+  // auto-map request after earlier products were written (Codex r20 on #4884).
+  const fits = (v, max) => v == null || String(v).trim().length <= max;
+  if (!fits(m.vendorSku, 100) || !fits(m.productUrl, 700) || !fits(m.packageSizeUnit, 30) || !fits(m.purchaseUom, 30)) return false;
+  // A non-numeric size ("32 oz") is stored as no size (parseDecimalOrNull),
+  // as before; only a number the column cannot hold is off-contract.
+  const size = parseDecimalOrNull(m.packageSizeValue);
+  if (size !== null && (size < 0 || size >= 1e8)) return false;
   if (m.confidence != null && !(typeof m.confidence === 'number' && m.confidence >= 0 && m.confidence <= 1)) return false;
   if (m.price != null && priceResultNumber(m.price) === null) return false;
   if (m.found === false) return true;
@@ -3574,13 +3584,11 @@ router.put('/:id', async (req, res, next) => {
 
 // A price may arrive as a number or a strictly numeric string ("42.50" —
 // the old loop accepted it and Postgres coerced it); anything else is null.
+// Bounded to the decimal(10,2) price columns (Codex r20 on #4884).
 function priceResultNumber(price) {
-  if (typeof price === 'number') return Number.isFinite(price) && price > 0 ? price : null;
-  if (typeof price === 'string' && /^\s*\d+(\.\d+)?\s*$/.test(price)) {
-    const n = Number(price);
-    return n > 0 ? n : null;
-  }
-  return null;
+  const n = typeof price === 'number' ? price
+    : (typeof price === 'string' && /^\s*\d+(\.\d+)?\s*$/.test(price) ? Number(price) : NaN);
+  return Number.isFinite(n) && n > 0 && n < 1e8 ? n : null;
 }
 
 // The requested vendor a result names (trimmed, any case), or undefined. The
@@ -3604,6 +3612,10 @@ function parsePriceResult(r, vendors) {
   const quantity = typeof r.quantity === 'number' && Number.isFinite(r.quantity) ? String(r.quantity)
     : (typeof r.quantity === 'string' && r.quantity.trim() ? r.quantity.trim() : null);
   const url = typeof r.url === 'string' && /^https?:\/\/\S+$/i.test(r.url.trim()) ? r.url.trim() : null;
+  // price_approvals.new_quantity is varchar(50) and source_url varchar(500):
+  // a longer value failed the approval insert after the call was accepted
+  // (Codex r20 on #4884), so the result is not usable as given.
+  if ((quantity && quantity.length > 50) || (url && url.length > 500)) return null;
   const notes = typeof r.notes === 'string' ? r.notes.trim() : '';
   return { vendor, price, quantity, url, notes, pricePerOz: priceResultNumber(r.pricePerOz) };
 }

@@ -42,13 +42,19 @@ try { TwilioService = require('../twilio'); } catch { TwilioService = null; }
 // Same shape as tax-advisor.js's isUsableTaxReport.
 const SEO_REPORT_OBJECT_LISTS = ['recommendations', 'page2_opportunities', 'declining_alerts', 'gbp_insights', 'technical_issues', 'mobile_insights'];
 const isRenderable = (v) => v == null || typeof v === 'string' || typeof v === 'number';
+// The advisor tab groups recommendations by exact lowercase priority, so one
+// labelled "High" or unlabelled silently disappeared (Codex r20 on #4884):
+// any case is accepted here and lower-cased after acceptance.
+const SEO_PRIORITIES = new Set(['high', 'medium', 'low']);
+const canonicalPriority = (v) => (typeof v === 'string' ? v.trim().toLowerCase() : '');
 function isUsableRecommendation(rec) {
   return typeof rec.action === 'string' && rec.action.trim() !== ''
-    && ['priority', 'category', 'page_or_query', 'reasoning', 'estimated_impact'].every((k) => isRenderable(rec[k]));
+    && SEO_PRIORITIES.has(canonicalPriority(rec.priority))
+    && ['category', 'page_or_query', 'reasoning', 'estimated_impact'].every((k) => isRenderable(rec[k]));
 }
 function isUsableSeoReport(report) {
   if (!report || typeof report !== 'object' || Array.isArray(report)) return false;
-  if (typeof report.grade !== 'string' || !report.grade.trim()) return false;
+  if (typeof report.grade !== 'string' || !report.grade.trim() || report.grade.length > 255) return false;
   if (typeof report.overall_assessment !== 'string' || !report.overall_assessment.trim()) return false;
   if (report.wins != null && !Array.isArray(report.wins)) return false;
   const listsOk = SEO_REPORT_OBJECT_LISTS.every((key) => report[key] == null || (Array.isArray(report[key]) && report[key].every((v) => v && typeof v === 'object' && !Array.isArray(v))));
@@ -246,6 +252,9 @@ Analyze and provide specific, prioritized recommendations.`,
       // the catch below and stores the deterministic fallback report.
       if (!res.ok) throw new Error(`report dispatch failed: ${res.reason}`);
       const report = res.json;
+      if (Array.isArray(report.recommendations)) {
+        for (const rec of report.recommendations) rec.priority = canonicalPriority(rec.priority);
+      }
 
       report.date = etDateString();
       await this.storeReport(report);

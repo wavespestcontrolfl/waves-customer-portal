@@ -161,3 +161,15 @@ describe('event extraction: thinking-block tolerance', () => {
     });
   });
 });
+
+// events_raw.event_url / image_url are varchar(1024): a longer URL would fail
+// the upsert and abort the pull, so it is dropped like an unsafe one.
+describe('normalizeExtractedEvent — URL column limits', () => {
+  const { normalizeExtractedEvent } = require('../services/event-ingestion');
+  test('an over-long event / image URL is dropped; a normal one is kept', () => {
+    const long = `https://example.com/${'e'.repeat(1100)}`;
+    const out = normalizeExtractedEvent(SOURCE, { title: 'Sunset Market', eventUrl: long, imageUrl: 'https://example.com/i.jpg' }, Date.now());
+    expect(out.row.event_url).toBeNull();
+    expect(out.row.image_url).toBe('https://example.com/i.jpg');
+  });
+});

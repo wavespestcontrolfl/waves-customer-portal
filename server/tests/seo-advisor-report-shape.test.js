@@ -74,3 +74,17 @@ describe('recommendations must be usable', () => {
     expect(isUsableSeoReport({ ...GOOD, recommendations: [{ priority: 'high', category: 'content', action: 'add FAQ content', page_or_query: '/termite', reasoning: 'page 2', estimated_impact: '+40 clicks' }] })).toBe(true);
   });
 });
+
+// Codex r20 on #4884: the advisor tab groups recommendations by exact
+// lowercase priority, so an unlabelled or off-enum one silently disappeared.
+describe('recommendation priority', () => {
+  test('a missing, numeric or off-enum priority fails the report; any case of high/medium/low is usable', () => {
+    for (const priority of [undefined, 1, 'urgent']) {
+      expect(isUsableSeoReport({ ...GOOD, recommendations: [{ action: 'x', priority }] })).toBe(false);
+    }
+    expect(isUsableSeoReport({ ...GOOD, recommendations: [{ action: 'x', priority: 'High' }] })).toBe(true);
+  });
+  test('a grade longer than its column fails the report', () => {
+    expect(isUsableSeoReport({ ...GOOD, grade: 'B'.repeat(256) })).toBe(false);
+  });
+});

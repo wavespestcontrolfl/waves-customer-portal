@@ -67,3 +67,11 @@ describe('aiTriageLead — structured-output primary', () => {
     expect(mockCreate).toHaveBeenCalledTimes(1);
   });
 });
+
+// Codex r20 on #4884: serviceInterest is written to leads.service_interest varchar(255).
+test('a serviceInterest longer than 255 chars is not usable (fallback)', async () => {
+  process.env.ANTHROPIC_API_KEY = 'test-key';
+  mockCreate.mockResolvedValue(reply({ ...VALID, serviceInterest: 'x'.repeat(256) }));
+  expect(await aiTriageLead(LEAD)).toBeNull();
+  expect(ledgerCallRejected).toHaveBeenCalledWith(expect.anything(), 'schema_invalid');
+});
