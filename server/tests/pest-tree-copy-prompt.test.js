@@ -168,4 +168,24 @@ describe('tree/shrub treatment narrative adapter', () => {
       `Grounding facts:\n${JSON.stringify(facts, null, 2)}\n\nReturn only the JSON object.`,
     );
   });
+  test('concentration formatting preserves leading and multiple active ingredient names', () => {
+    const products = [
+      { activeIngredient: '6% Fe (EDDHA chelate)', method: 'soil_drench', area: 'entry palms' },
+      { activeIngredient: 'Azoxystrobin 0.31% + Propiconazole 0.75%', method: 'foliar_spray', area: 'hibiscus' },
+    ];
+    for (const output of [buildTreeShrubTreatmentNarrativePrompt({ products }), buildTreeShrubTreatmentFallback({ products })]) {
+      expect(output).toMatch(/Fe \(eddha chelate\)/i);
+      expect(output).toContain('azoxystrobin + propiconazole');
+      expect(output).not.toContain('%');
+    }
+  });
+
+  test('fallback keeps all recorded targets with their own application method and scope', () => {
+    const fallback = buildTreeShrubTreatmentFallback({ products: [
+      { activeIngredient: 'Dinotefuran', method: 'root_injection', area: 'palms', targets: ['scale', 'mealybugs', 'aphids', 'whiteflies'] },
+      { activeIngredient: 'Azoxystrobin', method: 'foliar_spray', area: 'hibiscus', targets: ['leaf spot'] },
+    ] });
+    expect(fallback).toBe('Today we applied dinotefuran by root injection for palms, targeting scale, mealybugs, aphids and whiteflies; azoxystrobin by foliar spray for hibiscus, targeting leaf spot.');
+  });
+
 });

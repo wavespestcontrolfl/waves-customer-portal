@@ -102,9 +102,8 @@ function methodLabel(value) {
 }
 
 function activeIdentifier(product = {}) {
-  const active = cleanText(product.activeIngredient)
-    .replace(/\s*\d+(\.\d+)?\s*%.*$/, '')
-    .trim();
+  const active = cleanText(cleanText(product.activeIngredient)
+    .replace(/(?:\d+(?:\.\d+)?|\.\d+)\s*%/g, ''));
   if (active) {
     const isSymbolToken = (word) => {
       const segments = String(word).split(/[^A-Za-z]+/).filter(Boolean);
@@ -177,16 +176,16 @@ function buildTreeShrubTreatmentFallback(treatment = {}) {
   const applications = products.map((product) => {
     const method = methodLabel(product.method);
     const scope = applicationScope(product);
-    return [
+    const targets = [...new Set(Array.isArray(product.targets)
+      ? product.targets.map(cleanText).filter(Boolean) : [])];
+    const application = [
       activeIdentifier(product),
       method ? `by ${method}` : null,
       scope ? `for ${scope}` : null,
     ].filter(Boolean).join(' ');
+    return `${application}${targets.length ? `, targeting ${joinList(targets)}` : ''}`;
   });
-  const targets = [...new Set(products.flatMap((product) => (
-    Array.isArray(product.targets) ? product.targets.map(cleanText).filter(Boolean) : []
-  )))].slice(0, 3);
-  return `Today we applied ${joinList(applications)}${targets.length ? `, targeting ${joinList(targets)}` : ''}.`;
+  return `Today we applied ${applications.join('; ')}.`;
 }
 
 function buildTreeShrubTreatmentNarrativePrompt({ products = [], findingsText = '', photoSummary = '' } = {}) {
