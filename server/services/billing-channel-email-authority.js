@@ -219,7 +219,9 @@ async function dispatchUnderBillingEmailAuthority({ input, recipientEmail, preSe
   } catch (err) {
     if (state.providerAccepted) return { ok: true };
     if (state.handoffStarted) throw err;
-    state.boundaryBlock = blocked('BILLING_EMAIL_RECHECK_FAILED', err.message, { retryable: true });
+    // Query errors can contain recipient bindings; callers persist this reason.
+    state.boundaryBlock = blocked('BILLING_EMAIL_RECHECK_FAILED',
+      'Billing email authority could not be verified', { retryable: true });
     return { ok: false };
   }
 }

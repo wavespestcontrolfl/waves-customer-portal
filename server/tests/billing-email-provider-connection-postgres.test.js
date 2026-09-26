@@ -140,7 +140,8 @@ postgres('billing Email provider preparation on its held connection', () => {
         input: { customerId, metadata: { billingDeliveryCategory: 'billing' } },
         recipientEmail: 'qa@example.invalid', state, dispatch,
       })).resolves.toEqual({ ok: false });
-      expect(state.boundaryBlock).toMatchObject({ code: 'BILLING_EMAIL_RECHECK_FAILED', retryable: true });
+      expect(state.boundaryBlock).toMatchObject({ code: 'BILLING_EMAIL_RECHECK_FAILED', retryable: true,
+        reason: 'Billing email authority could not be verified' });
       expect(dispatch).not.toHaveBeenCalled();
       expect(global.fetch).not.toHaveBeenCalled();
     } finally {

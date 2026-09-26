@@ -218,15 +218,17 @@ describe('billing channel email authority', () => {
     expect(dispatch).not.toHaveBeenCalled();
   });
 
-  test('holds the retry when the all-channel suppression read fails', async () => {
+  test('holds suppression read failures without exposing phone bindings or SQL', async () => {
     rows.customers = { ...rows.customers, phone: '+19415550100' };
-    mockLoadSuppressionState.mockRejectedValueOnce(new Error('suppression read unavailable'));
+    mockLoadSuppressionState.mockRejectedValueOnce(new Error(
+      'select * from messaging_suppression where phone = +19415550100 - permission denied',
+    ));
     const dispatch = jest.fn();
     const { outcome, state } = await runAuthority({}, { dispatch });
     expect(outcome.ok).toBe(false);
     expect(state.boundaryBlock).toMatchObject({
       blocked: true, code: 'BILLING_EMAIL_RECHECK_FAILED', retryable: true,
-      reason: 'suppression read unavailable',
+      reason: 'Billing email authority could not be verified',
     });
     expect(dispatch).not.toHaveBeenCalled();
   });
