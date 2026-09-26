@@ -303,48 +303,73 @@ function sentencesOf(text) {
 const DURATION_RE = /(?:\b|(?<=\d))(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?|overnight|segundos?|minutos?|horas?|d[ií]as?|semanas?|seg|h)\b/i;
 // A visit / scheduling duration ("The visit takes about 45 minutes", "every
 // 21 days") — exempt only when no drying or re-entry wording is present.
-const SCHEDULING_DURATION_RE = /\b(?:visits?|appointments?|arriv\w*|window|technicians?|tech|inspections?|on[-\s]?site|takes?|took|lasts?|business\s+days?|respond\w*|repl(?:y|ies)|schedul\w*|book\w*|next\s+(?:treatment|service|visit|application)|(?:next|this|coming|following)\s+(?:week|month|day)|every|each|pr[oó]xim[oa]\s+(?:semana|mes|d[ií]a)|esta\s+semana|quarterly|monthly|citas?|visitas?|lleg\w*|t[eé]cnicos?|inspecci[oó]n|dura(?:n|r)?|cada|programad\w*)\b/i;
-const DRY_OR_REENTRY_RE = /\b(?:dr(?:y|ies|ied|ying)|re-?ent\w*|re-?occup\w*|occup\w*|re-?ocup\w*|ocupa\w*|keep|kept|stay\w*|wait\w*|avoid\w*|before\s+(?:letting|walking|going|allowing|touching)|return\w*|back\s+in(?:side|doors)?|go(?:ing)?\s+(?:back\s+)?(?:inside|outside|in|out)|come\s+(?:back\s+)?in(?:side)?|let\s+\S+\s+(?:out|in|back)|walk\w*|play\w*|touch\w*|contact\w*|access\w*|resume\w*|normal\s+(?:use|activit\w*)|us(?:e|ing)\s+(?:the|your)\s+(?:lawn|yard|room|area|pool|patio|deck|house|home|garden|kitchen|space)|until|rainfast|rain\w*|water(?:ing|ed)?|sec[oa]s?|seca(?:r|rse|do|da)?|volver|regres\w*|entrar|reingres\w*|salir|re-?entrada|esper\w*|evit\w*|mant[eé]n\w*|fuera|lejos|hasta|lluvia|regar|rieg\w*|toc\w*|acceso)\b/i;
+const SCHEDULING_DURATION_RE = /\b(?:visits?|appointments?|arriv\w*|window|technicians?|tech|inspections?|on[-\s]?site|takes?|took|lasts?|business\s+days?|respond\w*|repl(?:y|ies)|schedul\w*|book\w*|next\s+(?:treatment|service|visit|application)|come\s+back|follow[-\s]?ups?|return\s+visits?|re-?service|(?:next|this|coming|following)\s+(?:week|month|day)|every|each|pr[oó]xim[oa]\s+(?:semana|mes|d[ií]a)|esta\s+semana|quarterly|monthly|citas?|visitas?|lleg\w*|t[eé]cnicos?|inspecci[oó]n|dura(?:n|r)?|cada|programad\w*)\b/i;
+const ACCESS_SIGNAL_RE = new RegExp([
+  // explicit re-entry / reoccupancy / drying
+  '\\b(?:re-?ent(?:er|ers|ered|ering|ry)|re-?occup\\w*|dr(?:y|ies|ied|ying)|rain-?fast)\\b',
+  '\\b(?:come|go|get|head)\\s+back\\s+(?:inside|indoors|into)\\b',
+  // a person/animal paired with an access verb
+  '\\b(?:let|allow|keep|bring|take)\\s+(?:your\\s+|the\\s+|my\\s+)?(?:pets?|dogs?|cats?|puppy|puppies|kittens?|animals?|kids?|children|child|family|people|everyone|you|yourself|guests)\\s+(?:\\S+\\s+){0,2}?(?:out|in|back|off|away|outside|inside|indoors|on)\\b',
+  '\\b(?:pets?|dogs?|cats?|puppy|puppies|kittens?|animals?|kids?|children|child|family|people|everyone|you|yourself|guests)\\s+(?:can|may|should|could|will\\s+be\\s+able\\s+to|are\\s+(?:free|ok|okay|fine)\\s+to|is\\s+(?:free|ok|okay|fine)\\s+to)\\s+(?:\\S+\\s+){0,2}?(?:go|come|be|play|walk|return|head|get|use|enter|touch)\\b',
+  '\\b(?:stay|keep)\\s+(?:off|out\\s+of|away\\s+from|clear\\s+of)\\b',
+  '\\b(?:use|walk\\s+on|play\\s+(?:on|in))\\s+(?:the|your)\\s+(?:lawn|yard|grass|room|area|pool|patio|deck|house|home|garden|kitchen|space|treated)\\b',
+  '\\bwait\\w*\\s+(?:\\S+\\s+){0,3}?(?:before|until|after)\\b',
+  '\\bbefore\\s+(?:letting|walking|going|allowing|touching|entering|returning|using)\\b',
+  '\\b(?:treated|sprayed)\\s+(?:area|areas|room|rooms|lawn|yard|surfaces?)\\b',
+  // Spanish
+  '\\b(?:volver\\s+a\\s+entrar|reingres\\w*|re-?entrada|reocup\\w*|sec(?:o|a|os|as|ar|arse|ado|ada)|se\\s+seca)\\b',
+  '\\b(?:dej\\w*|permit\\w*)\\s+(?:salir|entrar|volver)\\b|\\b(?:mascotas?|perros?|gatos?|animales|niños|ni[ñn]as?|familia|personas|usted(?:es)?|todos)\\s+(?:pueden|puede|podr[aá]n?)\\s+(?:\\S+\\s+){0,2}?(?:salir|entrar|volver|regresar|jugar|caminar|usar)\\b',
+  '\\bmant[eé]n\\w*\\s+(?:\\S+\\s+){0,3}?(?:fuera|alejad\\w*|adentro)\\b|\\besper\\w*\\s+(?:\\S+\\s+){0,3}?(?:antes|hasta)\\b',
+  '\\bantes\\s+de\\s+(?:dejar|permitir|caminar|salir|entrar|volver|usar|tocar)\\b|\\b(?:[aá]reas?|zonas?|c[eé]sped|jard[ií]n|habitaci[oó]n)\\s+tratad\\w*',
+].join('|'), 'i');
 
 const INTAKE_EPA_APPROVED_ES_RE = { test: (t) => EPA_MENTION_RE.test(t) && APPROVAL_WORD_RE.test(t) };
 
-// A duration is a scheduling duration only when a scheduling word sits right
-// next to it ("the visit takes about 45 minutes", "arrives in a 2 hour
-// window", "every 21 days", "next treatment is in two weeks") — an unrelated
-// "technician" elsewhere in the reply ("Your technician says you can use the
-// lawn after 30 minutes") must not exempt it.
-function everyDurationIsScheduling(text) {
-  const re = new RegExp(DURATION_RE.source, 'gi');
-  let m;
-  let found = false;
-  while ((m = re.exec(text))) {
-    found = true;
-    const before = text.slice(0, m.index).split(/\s+/).filter(Boolean).slice(-6).join(' ');
-    const after = text.slice(m.index + m[0].length).split(/\s+/).filter(Boolean).slice(0, 3).join(' ');
-    if (!SCHEDULING_DURATION_RE.test(`${before} ${m[0]} ${after}`)) return false;
-  }
-  return found;
-}
 
-// Explicit re-entry or drying wording makes any duration a timing claim, even
-// with no treatment keyword ("When can we come back inside?" → "You can
-// re-enter after 30 minutes."; "How long does it take to dry?" → "It dries in
-// 30 minutes."). Bare "come back in" is not here — "We'll come back in two
-// weeks" is a follow-up visit.
-const EXPLICIT_REENTRY_RE = /\b(?:re-?ent(?:er|ers|ered|ering|ry)|re-?occup\w*|(?:come|go|get|let\s+\S+)\s+back\s+(?:inside|indoors|into)|volver\s+a\s+entrar|reingres\w*|re-?entrada|reocup\w*|dr(?:y|ies|ied|ying)|sec(?:o|a|os|as|ar|arse|ado|ada)|se\s+seca)\b/i;
 
 // "Re-enter the portal / volver a entrar al portal" is a login, not a room.
 const DIGITAL_CONTEXT_RE = /\b(?:portal|account|login|log\s+in|password|website|site|app|página|pagina|cuenta|contraseña|sesi[oó]n|sistema)\b/i;
+
+// Each duration is judged by the words around it (same sentence, a few
+// words either side), not by keywords anywhere in the conversation:
+//   - an access signal next to it (re-entry / drying wording, a person or
+//     animal with an access verb — "let your pets out", "kids can play",
+//     "keep pets off", "use the lawn") → timing claim;
+//   - a scheduling word next to it ("visit takes about 45 minutes", "every
+//     21 days", "come back in two weeks") → not a claim;
+//   - otherwise it's a claim when the visitor asked a re-entry / drying
+//     question ("How long after treatment can I re-enter?" → "Usually about
+//     30 minutes.") or the conversation is about a treatment.
+// "…every 21 days to keep mosquitoes away" has no access signal (no person or
+// animal) and a scheduling word, so it passes.
+function durationWindow(sentence, index, length) {
+  const before = sentence.slice(0, index).split(/\s+/).filter(Boolean).slice(-10).join(' ');
+  const after = sentence.slice(index + length).split(/\s+/).filter(Boolean).slice(0, 8).join(' ');
+  return { near: `${before} ${sentence.substr(index, length)} ${after}`, tight: `${before.split(' ').slice(-6).join(' ')} ${sentence.substr(index, length)} ${after.split(' ').slice(0, 3).join(' ')}` };
+}
+function fixedTimingClaim(reply, contextText, treatmentContext) {
+  const visitorAskedTiming = ACCESS_SIGNAL_RE.test(String(contextText || ''));
+  for (const sentence of String(reply || '').split(/(?<=[.!?])\s+|[;\n]+/)) {
+    const re = new RegExp(DURATION_RE.source, 'gi');
+    let m;
+    while ((m = re.exec(sentence))) {
+      const { near, tight } = durationWindow(sentence, m.index, m[0].length);
+      // "Volver a entrar al portal" is a login, not a room.
+      const digitalOnly = DIGITAL_CONTEXT_RE.test(near) && !treatmentContext;
+      if (!digitalOnly && ACCESS_SIGNAL_RE.test(near)) return true;
+      if (SCHEDULING_DURATION_RE.test(tight) || digitalOnly) continue;
+      if (visitorAskedTiming || treatmentContext) return true;
+    }
+  }
+  return false;
+}
 
 function intakeSafetyClaimSupplement(reply, contextText = '') {
   const t = String(reply || '');
   if (INTAKE_EPA_APPROVED_ES_RE.test(t)) return true;
   const conversation = `${t}\n${contextText || ''}`;
   const treatmentContext = INTAKE_TREATMENT_CONTEXT_RE.test(conversation);
-  if (DURATION_RE.test(t) && EXPLICIT_REENTRY_RE.test(conversation)
-    && (treatmentContext || !DIGITAL_CONTEXT_RE.test(conversation))) return true;
-  if (treatmentContext && DURATION_RE.test(t)
-    && (!everyDurationIsScheduling(t) || DRY_OR_REENTRY_RE.test(conversation))) return true;
+  if (fixedTimingClaim(t, contextText, treatmentContext)) return true;
   if (treatmentContext && safetyClaimIn(t)) return true;
   return sentencesOf(t).some((sentence) => SUBJECTLESS_SAFE_RE.test(sentence)
     || (PRONOUN_LEAD_RE.test(sentence) && safetyClaimIn(sentence)));

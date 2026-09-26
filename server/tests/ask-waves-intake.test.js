@@ -274,6 +274,10 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
     ['It takes about 2 hours to dry.', 'How long does the treatment take?'],
     ['Our products are gentle on pets.', ''],
     ['The spray is pet-friendly.', ''],
+    ['You can let your pets out after 30 minutes.', 'When can my dog go outside?'],
+    ['Kids can play outside after 2 hours.', ''],
+    ['Wait 30 minutes before letting the dog out.', ''],
+    ['Las mascotas pueden salir después de 30 minutos.', ''],
   ])('flags: %s', (reply, context) => {
     expect(intakeSafetyClaimSupplement(reply, context)).toBe(true);
   });
@@ -286,6 +290,9 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
     ['Our barrier treatment repeats every 21 days.', 'How often do you treat for mosquitoes?'],
     ['Our products are EPA-registered and your technician follows the label.', ''],
     ['Your next treatment is in two weeks.', ''],
+    ['Our barrier treatment repeats every 21 days to keep mosquitoes away.', ''],
+    ['The visit takes about 45 minutes.', 'Do I need to stay home during the treatment?'],
+    ['We will come back in two weeks for a follow-up treatment.', ''],
   ])('leaves alone: %s', (reply, context) => {
     expect(intakeSafetyClaimSupplement(reply, context)).toBe(false);
   });
