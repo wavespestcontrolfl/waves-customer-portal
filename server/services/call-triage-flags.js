@@ -1012,6 +1012,13 @@ const CALLER_CAVEAT_TERMS = [
   ' ask my ', ' check with ', ' talk to my ', ' talk with my ', ' run it by ', ' run this by ',
   ' get back to you ', ' think about it ', ' let you know ',
   ' husband ', ' wife ', ' landlord ', ' boss ', ' partner ', ' property manager ', ' owner ',
+  // Codex round 26, P1 (:1015): direct refusals ("I decline.", "I have to
+  // pass.") and price/interest walk-aways.
+  ' decline ', ' declining ', ' pass ', ' refuse ', ' forget it ', ' forget about it ', ' skip ',
+  ' hold off ', ' not interested ', ' no thanks ', ' no thank you ', ' rather ',
+  ' too expensive ', ' too much ', ' afford ', ' pricey ', ' shop around ', ' other quotes ',
+  ' compare ', ' go with someone else ', ' someone else ', ' changed my mind ', ' change my mind ',
+  ' don t want ', ' do not want ', ' stop ',
 ];
 function laterCallerSentenceRetracts(sentence, confirmedStartAt, callStartedAt) {
   const ns = sentence.ns.replace(CALLER_CLOSER_NEGATION_RE, ' ').trim();
