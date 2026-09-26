@@ -92,6 +92,69 @@ const EMAIL_PREFIX_NAME_EQUIVALENTS = new Map([
   ['ronnie', 'ronni'],
 ]);
 
+// Owner ruling 2026-09-26: nicknames, initials, and personal/work email
+// handles must not raise a false name↔email mismatch. Plain Levenshtein edit
+// distance, used two ways below: (a) a fuzzy WHOLE-STRING match (never an
+// arbitrary substring window inside a longer run-on local-part — that would
+// let a genuinely different, similarly-spelled short name concatenated with
+// a surname clear itself, e.g. "Marie" must not fuzzy-match "mariabrown@"),
+// and (b) the residual string left after peeling a recognized initials
+// prefix/suffix off an initials-shaped local-part.
+function levenshtein(a, b) {
+  if (a === b) return 0;
+  const m = a.length;
+  const n = b.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+  let prev = new Array(n + 1);
+  let curr = new Array(n + 1);
+  for (let j = 0; j <= n; j += 1) prev[j] = j;
+  for (let i = 1; i <= m; i += 1) {
+    curr[0] = i;
+    for (let j = 1; j <= n; j += 1) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      curr[j] = Math.min(curr[j - 1] + 1, prev[j] + 1, prev[j - 1] + cost);
+    }
+    [prev, curr] = [curr, prev];
+  }
+  return prev[n];
+}
+
+// <=1 for a 5–6 char token, <=2 for 7+ (owner ruling 2026-09-26 rule a).
+function fuzzyEditThreshold(len) {
+  return len >= 7 ? 2 : 1;
+}
+
+// Whole-string closeness only — see the comment above. `token` must be
+// name-length (>=5); a short token (initials, "Al", "Ed") is never fuzzy-
+// matched on its own (too likely to coincidentally resemble something).
+function fuzzyWholeMatch(token, candidate) {
+  if (!token || !candidate || token.length < 5) return false;
+  const threshold = fuzzyEditThreshold(token.length);
+  if (Math.abs(token.length - candidate.length) > threshold) return false; // cheap bound before the DP
+  return levenshtein(token, candidate) <= threshold;
+}
+
+// Modest nickname ↔ formal-first-name table (owner ruling 2026-09-26 rule c).
+// Deliberately small: common, unambiguous pairs only.
+const NICKNAME_GROUPS = [
+  ['jackie', 'jacqueline'], ['bill', 'william'], ['bob', 'robert'],
+  ['jim', 'james'], ['mike', 'michael'], ['kathy', 'katherine', 'catherine'],
+  ['liz', 'elizabeth'], ['tony', 'anthony'], ['dave', 'david'],
+  ['tom', 'thomas'], ['chris', 'christopher', 'christine'],
+  ['pat', 'patricia', 'patrick'], ['sue', 'susan'], ['deb', 'deborah'],
+  ['rick', 'richard'], ['ed', 'edward'], ['andy', 'andrew'],
+  ['dot', 'dorothy'], ['peggy', 'margaret'], ['jen', 'jenny', 'jennifer'],
+  ['kim', 'kimberly'], ['steve', 'steven', 'stephen'], ['dan', 'daniel'],
+  ['joe', 'joseph'], ['sam', 'samuel', 'samantha'],
+];
+const NICKNAME_EQUIVALENTS = new Map();
+for (const group of NICKNAME_GROUPS) {
+  for (const name of group) {
+    NICKNAME_EQUIVALENTS.set(name, group.filter((n) => n !== name));
+  }
+}
+
 function nameTokenMatchesEmailLocal(token, local) {
   const t = String(token || '').replace(/[^a-z]/g, '');
   if (t.length < 3) return false;
@@ -104,6 +167,66 @@ function nameTokenMatchesEmailLocal(token, local) {
     return true;
   }
 
+  // (a) Fuzzy whole-string match — a transcription/typing drift on the SAME
+  // name (e.g. a surname segment spelled with one letter off).
+  if (fuzzyWholeMatch(t, local)) return true;
+
+  // (c) Nickname ↔ formal-first-name equivalence, either direction, fuzzy
+  // included so drift on the FORMAL form still corroborates a spoken
+  // nickname ("Jackie" / "jacqueline525@").
+  const equivalents = NICKNAME_EQUIVALENTS.get(t);
+  if (equivalents) {
+    for (const alt of equivalents) {
+      if (alt.length >= 3 && (local.includes(alt) || fuzzyWholeMatch(alt, local))) return true;
+    }
+  }
+
+  return false;
+}
+
+// (b) Initials adjacent to a fuzzy surname/first name, or a surname prefix
+// adjacent to initials (owner ruling 2026-09-26). Words of length <=2 (a
+// bare middle initial, a suffix like "Jr"/"Sr"/"II") are kept whole rather
+// than reduced further; longer words contribute just their first letter.
+function wordInitial(word) {
+  return word.length <= 2 ? word : word[0];
+}
+
+function callerNameWords(caller) {
+  const raw = String(caller.name_full || `${caller.first_name || ''} ${caller.last_name || ''}`).toLowerCase();
+  return raw.split(/[^a-z]+/).filter(Boolean);
+}
+
+function initialsCorroborated(local, tokens, nameWords) {
+  if (nameWords.length < 2) return false; // need >=2 name words to form "initials"
+  const initials = nameWords.map(wordInitial).join('');
+  if (initials.length < 2) return false;
+  const candidates = new Set();
+  for (let len = 2; len <= Math.min(3, initials.length); len += 1) {
+    candidates.add(initials.slice(0, len));
+    if (initials.length > len) candidates.add(initials.slice(-len));
+  }
+  const surnamePrefixes = tokens.filter((tok) => tok.length >= 4).map((tok) => tok.slice(0, 4));
+
+  const restCorroborates = (rest) => rest.length >= 4 && (
+    tokens.some((tok) => rest === tok || fuzzyWholeMatch(tok, rest))
+    || surnamePrefixes.some((p) => rest.startsWith(p))
+  );
+  for (const ini of candidates) {
+    if (local.startsWith(ini) && restCorroborates(local.slice(ini.length))) return true;
+    if (local.length > ini.length && local.endsWith(ini)
+      && restCorroborates(local.slice(0, local.length - ini.length))) return true;
+  }
+  // A surname prefix directly adjacent to a short (2-3 letter) initials-like
+  // remainder anywhere in the local — e.g. a surname prefix followed by a
+  // short first-name abbreviation ("chow" + "pr").
+  for (const p of surnamePrefixes) {
+    const idx = local.indexOf(p);
+    if (idx === -1) continue;
+    const before = local.slice(0, idx);
+    const after = local.slice(idx + p.length);
+    if ((before.length === 2 || before.length === 3) || (after.length === 2 || after.length === 3)) return true;
+  }
   return false;
 }
 
@@ -138,6 +261,21 @@ function hasNameEmailMismatch(caller = {}) {
       .filter((t) => t.length >= 3)
   )];
   if (tokens.length === 0) return false;          // no usable name to check
+
+  // (d) owner ruling 2026-09-26: rule (2) below never fires when the caller's
+  // own FIRST name is itself one of the delimited segments — a personal
+  // handle prefixed/suffixed with an unrelated word ("packers.brad@" for a
+  // caller named Brad) is not evidence of someone else's name, even though
+  // the OTHER segment matches nothing extracted.
+  const firstNameToken = String(caller.first_name || '').toLowerCase().replace(/[^a-z]/g, '');
+  if (firstNameToken.length >= 3 && localRaw.split(/[^a-z]+/).includes(firstNameToken)) {
+    return false;
+  }
+
+  // (b) Initials (2-3 letters) adjacent to a fuzzy surname/first name, or a
+  // surname prefix adjacent to initials — corroborates the WHOLE local at
+  // once (see initialsCorroborated), so it short-circuits both (1) and (2).
+  if (initialsCorroborated(local, tokens, callerNameWords(caller))) return false;
 
   const present = tokens.filter((t) => nameTokenMatchesEmailLocal(t, local));
 
@@ -484,6 +622,14 @@ const ADVISORY_TRIAGE_FLAGS = new Set([
   // triage-auto-resolve.js): a "get a real callback number" ask is a
   // human-only verdict, same as missing_unit_number.
   'callback_number_needed',
+  // Owner ruling 2026-09-26: nicknames, initials, and personal/work email
+  // handles must not block anything, and every call-agent rule behaves the
+  // same on outbound and inbound calls. name_email_mismatch still files the
+  // name_review card (a garbled/uncorroborated email is worth a human look)
+  // but never holds the appointment — the office confirms the address on
+  // the confirmation touch, exactly like email_unverified/email_invalid.
+  // Un-gated: advisory for every direction, with or without fail-open.
+  'name_email_mismatch',
 ]);
 
 // Explicit allowlist of flags allowed to HOLD an appointment (owner ruling
@@ -520,7 +666,6 @@ const BLOCKING_TRIAGE_FLAGS = new Set([
   'existing_appointment_coordination',
   'voicemail',
   'caller_phone_missing',
-  'name_email_mismatch',
 ]);
 
 // Flags that mean "this is not a customer we should write to canonical tables."
@@ -1206,10 +1351,12 @@ function canAutoRouteDecision(extraction, opts = {}, out = {}) {
   // Fail-open booking (opts.failOpen): a CONFIRMED appointment must not die over
   // recoverable contact-field flags. Grounded in live misses (2026-07-10):
   // bookings blocked because the caller didn't recite a callback number (the ANI
-  // is present), an existing customer didn't restate an address already on file,
-  // or a garbled email tripped name_email_mismatch. The flag is still returned
-  // (failedOpenFlags) so the office can confirm the field — it just no longer
-  // holds the appointment. Hard blocks (out_of_service_area, do_not_contact,
+  // is present) or an existing customer didn't restate an address already on
+  // file. (A garbled email tripping name_email_mismatch used to need this same
+  // demotion; owner ruling 2026-09-26 made the flag advisory outright, so it
+  // no longer reaches appointmentBlockingFlags at all — see ADVISORY_TRIAGE_FLAGS.)
+  // The flag is still returned (failedOpenFlags) so the office can confirm the
+  // field — it just no longer holds the appointment. Hard blocks (out_of_service_area, do_not_contact,
   // caller_not_authorized, spam) are NOT recoverable and stay in the filter —
   // the ONE gated exception is the agent-commitment block below, which demotes
   // caller_not_authorized (only) when OUR agent committed to the slot.
@@ -1256,7 +1403,6 @@ function canAutoRouteDecision(extraction, opts = {}, out = {}) {
     // so it must hold for review, not fall back to the on-file primary.
     appointmentBlockingFlags = appointmentBlockingFlags.filter((f) => {
       if (f === 'caller_phone_missing' && aniPresent) { failedOpenFlags.push(f); return false; }
-      if (f === 'name_email_mismatch') { failedOpenFlags.push(f); return false; }
       if (f === 'low_extraction_confidence' && knownCustomerConfidenceTrusted) { failedOpenFlags.push(f); return false; }
       if (FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS.has(f) && knownCustomerHasAddress && !newAddressGiven) { failedOpenFlags.push(f); return false; }
       return true;

@@ -1012,26 +1012,79 @@ describe('hasNameEmailMismatch', () => {
     expect(hasNameEmailMismatch({ first_name: null, last_name: null, email: 'gennettryan@yahoo.com' })).toBe(false);
     expect(hasNameEmailMismatch({ first_name: 'Al', last_name: null, email: 'xy@x.com' })).toBe(false);
   });
+
+  // Owner ruling 2026-09-26 — false-positive shapes cut (all names/emails
+  // below are SYNTHETIC, chosen to exercise the same shape as the reviewed
+  // production false positives without reusing any real value).
+  describe('false-positive shapes (owner ruling 2026-09-26)', () => {
+    test('fuzzy surname spelling drift on a delimited segment does not false-flag', () => {
+      // "Whitfield" heard/typed as "whitfeld" — a one-letter-off surname.
+      expect(hasNameEmailMismatch({ first_name: 'Priya', last_name: 'Whitfield', email: 'p.whitfeld@example.com' })).toBe(false);
+    });
+    test('an initials prefix adjacent to a fuzzy surname does not false-flag', () => {
+      // "nc" (initials) + "castellenos" (one letter off "Castellanos").
+      expect(hasNameEmailMismatch({ first_name: 'Nadia', last_name: 'Castellanos', email: 'nccastellenos@example.com' })).toBe(false);
+    });
+    test('a nickname vs formal first name does not false-flag', () => {
+      expect(hasNameEmailMismatch({ first_name: 'Jackie', last_name: 'Nguyen', email: 'jacqueline84@example.com' })).toBe(false);
+    });
+    test('an extracted first name that is itself a delimited segment is not overridden by an unrelated adjacent segment', () => {
+      // "lakers" (an unrelated personal handle) + "nolan" (the caller's own
+      // first name, present as its own segment) — rule (2) must not fire.
+      expect(hasNameEmailMismatch({ first_name: 'Nolan', last_name: 'Reyes', email: 'lakers.nolan@example.com' })).toBe(false);
+    });
+    test('a pure handle with no name signal still flags (advisory, never a hold)', () => {
+      expect(hasNameEmailMismatch({ first_name: 'Karen', last_name: 'Boyd', email: 'freshideas1987@example.com' })).toBe(true);
+    });
+    test('the incident shape (uncorroborated spoken first name, null surname) still flags', () => {
+      // Same shape as the real incident this flag was introduced for
+      // (spoken first name, surname null, email encoding a different name) —
+      // synthetic values here, distinct from the repo's existing pinned
+      // regression test for the real incident above.
+      expect(hasNameEmailMismatch({ first_name: 'Marisol', last_name: null, email: 'tpageharlan@example.com' })).toBe(true);
+    });
+  });
 });
 
+// Owner ruling 2026-09-26: name_email_mismatch is advisory — it still files
+// the name_review card, but never holds the appointment, for any call
+// direction, with or without fail-open.
 describe('name_email_mismatch in routing', () => {
-  test('flags name_email_mismatch and blocks auto-route', () => {
+  test('flags name_email_mismatch but does NOT block auto-route (advisory)', () => {
     const e = validV2Extraction();
     e.caller.first_name = 'Jeanette';
     e.caller.last_name = null;
     e.caller.email = 'gennettryan@yahoo.com';
     const flags = computeDeterministicTriageFlags(e, { contactPhone: '+19415551234' });
     expect(flags).toContain('name_email_mismatch');
-    expect(canAutoRoute(e, { contactPhone: '+19415551234' }).allowed).toBe(false);
+    // With everything else clean (AV accepted, confirmed booking) the call
+    // auto-routes despite the uncorroborated email.
+    const r = canAutoRoute(e, { contactPhone: '+19415551234', addressValidation: AV_CLEAN });
+    expect(r.allowed).toBe(true);
+    expect(r.flags).toContain('name_email_mismatch');
   });
 
-  test('name_email_mismatch is appointment-blocking, not SMS-only', () => {
+  test('name_email_mismatch is advisory, not appointment-blocking', () => {
     const e = validV2Extraction();
     e.caller.first_name = 'Jeanette';
     e.caller.last_name = null;
     e.caller.email = 'gennettryan@yahoo.com';
-    const r = canAutoRoute(e, { contactPhone: '+19415551234' });
-    expect(r.appointmentBlockingFlags).toContain('name_email_mismatch');
+    const r = canAutoRoute(e, { contactPhone: '+19415551234', addressValidation: AV_CLEAN });
+    expect(r.appointmentBlockingFlags || []).not.toContain('name_email_mismatch');
+    expect(ADVISORY_TRIAGE_FLAGS.has('name_email_mismatch')).toBe(true);
+    expect(BLOCKING_TRIAGE_FLAGS.has('name_email_mismatch')).toBe(false);
+  });
+
+  test('an OUTBOUND confirmed booking (fail-open off) is not blocked by name_email_mismatch alone', () => {
+    // The evidence: inbound confirmed bookings used to demote this flag only
+    // through the inbound-only fail-open path, so an outbound confirmed
+    // booking still held on it. Now it never blocks either direction.
+    const e = validV2Extraction();
+    e.caller.first_name = 'Jeanette';
+    e.caller.last_name = null;
+    e.caller.email = 'gennettryan@yahoo.com';
+    const r = canAutoRoute(e, { contactPhone: '+19415551234', addressValidation: AV_CLEAN, failOpen: false });
+    expect(r.allowed).toBe(true);
   });
 
   test('maps to name_review triage category', () => {
