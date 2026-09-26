@@ -162,6 +162,11 @@ jobs:
           VISIT_PACKET_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
           DATA_HYGIENE_VAULT_KEY: ci-only-visit-summary-test-key
         run: npx jest --ci --silent --runInBand tests/visit-completion-summary-postgres.test.js
+      - name: Billing Email provider connection tests
+        working-directory: server
+        env:
+          APP_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/billing-email-provider-connection-postgres.test.js
       - name: Server tests (no DB — golden masters keep in-memory semantics)
         working-directory: server
         run: npx jest --ci --silent --maxWorkers=2

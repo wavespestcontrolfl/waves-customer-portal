@@ -16,6 +16,7 @@ const logger = require('./logger');
 const NotificationService = require('./notification-service');
 const { isInternalTestEmail } = require('./internal-test-customers');
 const { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_E164 } = require('../constants/business');
+const { sanitizeBillingReplayContext } = require('./billing-email-replay-context');
 
 const VARIABLE_RE = /\{\{\s*([a-zA-Z][a-zA-Z0-9_]*)\s*\}\}/g;
 const ASM_UNSUBSCRIBE_URL = '<%asm_group_unsubscribe_raw_url%>';
@@ -572,6 +573,28 @@ function redactedPayloadSnapshot(value) {
   ]));
 }
 
+const BILLING_REPLAY_CONTEXT_KEY = '__billing_replay_context';
+
+function billingReplayContextForSnapshot(context, facts = {}) {
+  const out = sanitizeBillingReplayContext(context);
+  if (!out) return null;
+  const expectedTemplate = out.category === 'payment_receipt' ? 'billing.receipt_notice' : 'billing.notice';
+  const expectedKey = `billing_channel_email:${out.notificationEventKey}:email`;
+  if (facts.templateKey !== expectedTemplate || facts.recipientType !== 'customer'
+    || String(facts.recipientId) !== out.customer_id || facts.triggerEventId !== out.notificationEventKey
+    || facts.idempotencyKey !== expectedKey || !(facts.categories || []).includes(out.category)) return null;
+  return out;
+}
+
+function payloadSnapshotForSend(payload, billingReplayContext, facts) {
+  const snapshot = redactedPayloadSnapshot(payload || {});
+  if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) return snapshot;
+  delete snapshot[BILLING_REPLAY_CONTEXT_KEY];
+  const safeContext = billingReplayContextForSnapshot(billingReplayContext, facts);
+  if (safeContext) snapshot[BILLING_REPLAY_CONTEXT_KEY] = safeContext;
+  return snapshot;
+}
+
 function effectiveSuppressionGroupKeyFor(template, suppressionGroupKey) {
   if (suppressionGroupKey !== undefined && suppressionGroupKey !== null) {
     const override = String(suppressionGroupKey).trim();
@@ -897,9 +920,9 @@ async function runProviderHandoff({ withProviderHandoff, dispatchToProvider, tem
   let result;
   let verdict;
   try {
-    verdict = await withProviderHandoff(async () => {
+    verdict = await withProviderHandoff(async (database) => {
       dispatchStarted = true;
-      result = await dispatchToProvider();
+      result = await dispatchToProvider(database);
     });
   } catch (err) {
     if (dispatchStarted && result === undefined) throw err;
@@ -969,6 +992,7 @@ async function sendTemplate({
   categories = [],
   attachments = [],
   suppressionGroupKey,
+  billingReplayContext = null,
   // PII-sensitive bulk callers (e.g. the weekly irrigation sweep) set this so
   // sendOne does NOT log the raw SendGrid response body — provider rejections
   // can echo the recipient address, and email addresses in logs are a P1. The
@@ -1220,7 +1244,14 @@ async function sendTemplate({
     subject_snapshot: test ? `[TEST] ${rendered.subject}` : rendered.subject,
     html_snapshot: rendered.html,
     text_snapshot: rendered.text,
-    payload_snapshot: JSON.stringify(redactedPayloadSnapshot(payload || {})),
+    payload_snapshot: JSON.stringify(payloadSnapshotForSend(payload, billingReplayContext, {
+      templateKey: template.template_key,
+      recipientType: test ? 'test' : (recipientType || null),
+      recipientId: recipientId || null,
+      triggerEventId: triggerEventId || null,
+      idempotencyKey: idempotencyKey || null,
+      categories: allCategories,
+    })),
     categories: JSON.stringify(allCategories),
     idempotency_key: idempotencyKey || null,
     // Attachments aren't persisted in the snapshot; flag their presence so the
@@ -1378,7 +1409,7 @@ async function sendTemplate({
     // directly with no caller opinion of their own. This library forwards
     // `withheldLinkPolicy` only when a caller explicitly passed one (an
     // override); otherwise sendOne's template-keyed default governs.
-    const sendToProvider = (html, text, guardIds) => sendgrid.sendOne({
+    const sendToProvider = (html, text, guardIds, database) => sendgrid.sendOne({
         to,
         fromEmail,
         fromName,
@@ -1397,6 +1428,7 @@ async function sendTemplate({
         suppressErrorLog: suppressProviderErrorLog,
         estimateIds: guardIds,
         templateKey,
+        ...(database ? { database } : {}),
         ...(withheldLinkPolicy ? { withheldLinkPolicy } : {}),
       });
     // Codex round 1 on #4608 (P1): keying this ONLY on estimateId/estimateIds
@@ -1417,9 +1449,9 @@ async function sendTemplate({
     // have produced) both resolve to their own sentinel instead, so
     // dispatchToProvider always either sends or reports a real,
     // non-throwing outcome.
-    const dispatchToProvider = async () => {
+    const dispatchToProvider = async (database) => {
       try {
-        const providerResult = await sendToProvider(rendered.html, rendered.text, guardEstimateIds);
+        const providerResult = await sendToProvider(rendered.html, rendered.text, guardEstimateIds, database);
         if (providerResult?.withheldLinksRewritten?.length) {
           // Pre-push audit P1 (b49be57b12 round 4), still true under the
           // round 9 structural move: the STORED row should match what
@@ -1437,7 +1469,7 @@ async function sendTemplate({
           // touched. Best-effort: a write failure here must not block a
           // send that already succeeded.
           try {
-            await db('email_messages')
+            await (database || db)('email_messages')
               .where({ id: message.id, status: 'queued', send_attempt_token: sendAttemptToken })
               .update({
                 html_snapshot: providerResult.html,
@@ -1582,6 +1614,7 @@ module.exports = {
   normalizeBlocks,
   validationFor,
   redactedPayloadSnapshot,
+  payloadSnapshotForSend,
   redactEmailAddresses,
   safeUrl,
   productionPlaceholderPayloadValues,

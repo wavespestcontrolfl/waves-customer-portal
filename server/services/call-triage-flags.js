@@ -484,6 +484,12 @@ const ADVISORY_TRIAGE_FLAGS = new Set([
   // triage-auto-resolve.js): a "get a real callback number" ask is a
   // human-only verdict, same as missing_unit_number.
   'callback_number_needed',
+  // Owner ruling 2026-09-26: nicknames, initials, and personal/work email
+  // handles must not block anything, and every call-agent rule behaves the
+  // same on outbound and inbound calls. name_email_mismatch still files the
+  // name_review card (an uncorroborated name is worth a human look) but never
+  // holds the appointment or the first-touch email.
+  'name_email_mismatch',
 ]);
 
 // Explicit allowlist of flags allowed to HOLD an appointment (owner ruling
@@ -520,7 +526,6 @@ const BLOCKING_TRIAGE_FLAGS = new Set([
   'existing_appointment_coordination',
   'voicemail',
   'caller_phone_missing',
-  'name_email_mismatch',
 ]);
 
 // Flags that mean "this is not a customer we should write to canonical tables."
@@ -1739,8 +1744,9 @@ function canAutoRouteDecision(extraction, opts = {}, out = {}) {
   // Fail-open booking (opts.failOpen): a CONFIRMED appointment must not die over
   // recoverable contact-field flags. Grounded in live misses (2026-07-10):
   // bookings blocked because the caller didn't recite a callback number (the ANI
-  // is present), an existing customer didn't restate an address already on file,
-  // or a garbled email tripped name_email_mismatch. The flag is still returned
+  // is present) or an existing customer didn't restate an address already on
+  // file. (name_email_mismatch is advisory outright since the owner ruling of
+  // 2026-09-26 — see ADVISORY_TRIAGE_FLAGS.) The flag is still returned
   // (failedOpenFlags) so the office can confirm the field — it just no longer
   // holds the appointment. Hard blocks (out_of_service_area, do_not_contact,
   // caller_not_authorized, spam) are NOT recoverable and stay in the filter —
@@ -1789,7 +1795,6 @@ function canAutoRouteDecision(extraction, opts = {}, out = {}) {
     // so it must hold for review, not fall back to the on-file primary.
     appointmentBlockingFlags = appointmentBlockingFlags.filter((f) => {
       if (f === 'caller_phone_missing' && aniPresent) { failedOpenFlags.push(f); return false; }
-      if (f === 'name_email_mismatch') { failedOpenFlags.push(f); return false; }
       if (f === 'low_extraction_confidence' && knownCustomerConfidenceTrusted) { failedOpenFlags.push(f); return false; }
       if (FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS.has(f) && knownCustomerHasAddress && !newAddressGiven) { failedOpenFlags.push(f); return false; }
       return true;

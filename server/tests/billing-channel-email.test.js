@@ -24,6 +24,7 @@ jest.mock('../services/email-template-library', () => ({
 }));
 
 const { sendBillingChannelEmail } = require('../services/billing-channel-email');
+const { sanitizeBillingReplayContext } = require('../services/billing-email-replay-context');
 
 function baseContext(overrides = {}) {
   return {
@@ -97,6 +98,77 @@ describe('billing channel email adapter', () => {
       recipientEmail: 'casey@example.com',
       preSendCheck,
     }));
+  });
+
+  test('passes only complete allowlisted producer context to the template snapshot', async () => {
+    mockLoadBillingEmailContext.mockResolvedValue(baseContext({ invoice: { id: 'inv-1', customer_id: 'cust-1' } }));
+    await sendBillingChannelEmail(input({
+      invoiceId: 'inv-1',
+      entryPoint: 'invoice_followup_sequence',
+      metadata: {
+        billingDeliveryCategory: 'billing',
+        notificationEventKey: 'invoice-followup:seq-1:May 25, 2026',
+        followup_sequence_id: 'seq-1',
+        rendered_amount: '129.00',
+        collections_ledger_id: 'ledger-email-1',
+        collections_sibling_ledger_ids: ['untrusted-sibling'],
+        recipient_email: 'must-not-persist@example.com',
+        token: 'must-not-persist',
+      },
+    }));
+    expect(mockSendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      billingReplayContext: {
+        schema_version: 1,
+        customer_id: 'cust-1',
+        invoice_id: 'inv-1',
+        category: 'billing',
+        source_entry_point: 'invoice_followup_sequence',
+        notificationEventKey: 'invoice-followup:seq-1:May 25, 2026',
+        followup_sequence_id: 'seq-1',
+        rendered_amount: '129.00',
+        collections_ledger_id: 'ledger-email-1',
+      },
+    }));
+  });
+
+  test.each([{ customer_id: null }, { notificationEventKey: null }, { rendered_amount: 'not-an-amount' }])(
+    'refuses replay context with missing identity or malformed amount: %j', (change) => {
+      expect(sanitizeBillingReplayContext({ schema_version: 1, customer_id: 'cust-1', category: 'billing',
+        source_entry_point: 'autopay_pre_charge_reminder', notificationEventKey: 'event-1',
+        charge_date: '2026-09-29', ...change })).toBeNull();
+    },
+  );
+
+  test('retains balance visit pins without inventing an amount absent from the rendered copy', () => {
+    expect(sanitizeBillingReplayContext({ schema_version: 1, customer_id: 'cust-1', category: 'billing',
+      source_entry_point: 'balance_reminder_workflow', notificationEventKey: 'event-1', invoice_id: 'inv-1',
+      appointment_id: 'visit-1', appointment_date: '2026-09-29', appointment_service_type: 'Pest Control',
+      appointment_rendered_on: '2026-09-28', collections_ledger_id: 'ledger-email-1' }))
+      .toMatchObject({ appointment_id: 'visit-1', collections_ledger_id: 'ledger-email-1' });
+  });
+
+  test('accepts the actual 60-day card-expiry producer stage', () => {
+    expect(sanitizeBillingReplayContext({ schema_version: 1, customer_id: 'cust-1', category: 'billing',
+      source_entry_point: 'autopay_card_expiry_warning', notificationEventKey: 'payment-expiry:pm-1:9:2026:60_day',
+      payment_method_id: 'pm-1', expiry_month: '9', expiry_year: '2026', expiry_stage: '60_day' }))
+      .toMatchObject({ payment_method_id: 'pm-1', expiry_stage: '60_day' });
+  });
+
+  test.each([
+    ['unsupported receipt source', { entryPoint: 'invoice_receipt_sms', invoiceId: 'inv-1' }],
+    ['unsupported payment-issue source', { entryPoint: 'autopay_retry_failed', invoiceId: 'inv-1' }],
+    ['invoice source without its ledger reservation', {
+      entryPoint: 'invoice_followup_sequence',
+      invoiceId: 'inv-1',
+      metadata: {
+        billingDeliveryCategory: 'billing', notificationEventKey: 'invoice-followup:seq-1:day-3',
+        followup_sequence_id: 'seq-1', rendered_amount: '129.00',
+      },
+    }],
+  ])('omits replay context for an %s', async (_label, overrides) => {
+    mockLoadBillingEmailContext.mockResolvedValue(baseContext({ invoice: { id: 'inv-1', customer_id: 'cust-1' } }));
+    await sendBillingChannelEmail(input(overrides));
+    expect(mockSendTemplate.mock.calls[0][0]).not.toHaveProperty('billingReplayContext');
   });
 
   test('routes a payment_receipt-category send through billing.receipt_notice', async () => {
