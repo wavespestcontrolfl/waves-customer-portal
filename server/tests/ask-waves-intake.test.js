@@ -278,6 +278,8 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
     ['Kids can play outside after 2 hours.', ''],
     ['Wait 30 minutes before letting the dog out.', ''],
     ['Las mascotas pueden salir después de 30 minutos.', ''],
+    ['It takes about 30 minutes.', 'How long after treatment can I re-enter?'],
+    ['It usually takes two hours.', 'How long does the spray take to dry?'],
   ])('flags: %s', (reply, context) => {
     expect(intakeSafetyClaimSupplement(reply, context)).toBe(true);
   });
@@ -293,6 +295,7 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
     ['Our barrier treatment repeats every 21 days to keep mosquitoes away.', ''],
     ['The visit takes about 45 minutes.', 'Do I need to stay home during the treatment?'],
     ['We will come back in two weeks for a follow-up treatment.', ''],
+    ['The treatment takes about 45 minutes.', 'How long does the treatment take?'],
   ])('leaves alone: %s', (reply, context) => {
     expect(intakeSafetyClaimSupplement(reply, context)).toBe(false);
   });

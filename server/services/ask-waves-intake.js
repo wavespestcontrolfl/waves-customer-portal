@@ -303,7 +303,11 @@ function sentencesOf(text) {
 const DURATION_RE = /(?:\b|(?<=\d))(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?|overnight|segundos?|minutos?|horas?|d[ií]as?|semanas?|seg|h)\b/i;
 // A visit / scheduling duration ("The visit takes about 45 minutes", "every
 // 21 days") — exempt only when no drying or re-entry wording is present.
-const SCHEDULING_DURATION_RE = /\b(?:visits?|appointments?|arriv\w*|window|technicians?|tech|inspections?|on[-\s]?site|takes?|took|lasts?|business\s+days?|respond\w*|repl(?:y|ies)|schedul\w*|book\w*|next\s+(?:treatment|service|visit|application)|come\s+back|follow[-\s]?ups?|return\s+visits?|re-?service|(?:next|this|coming|following)\s+(?:week|month|day)|every|each|pr[oó]xim[oa]\s+(?:semana|mes|d[ií]a)|esta\s+semana|quarterly|monthly|citas?|visitas?|lleg\w*|t[eé]cnicos?|inspecci[oó]n|dura(?:n|r)?|cada|programad\w*)\b/i;
+const SCHEDULING_DURATION_RE = /\b(?:visits?|appointments?|arriv\w*|window|technicians?|tech|inspections?|on[-\s]?site|business\s+days?|respond\w*|repl(?:y|ies)|schedul\w*|book\w*|next\s+(?:treatment|service|visit|application)|come\s+back|follow[-\s]?ups?|return\s+visits?|re-?service|(?:next|this|coming|following)\s+(?:week|month|day)|every|each|pr[oó]xim[oa]\s+(?:semana|mes|d[ií]a)|esta\s+semana|quarterly|monthly|citas?|visitas?|lleg\w*|t[eé]cnicos?|inspecci[oó]n|cada|programad\w*)\b/i;
+// Generic length verbs ("takes about 45 minutes") exempt a duration only when
+// the visitor didn't ask a timing / access question — "It takes about 30
+// minutes" answering "How long after treatment can I re-enter?" is a claim.
+const GENERIC_LENGTH_RE = /\b(?:takes?|took|lasts?|dura(?:n|r)?|tarda\w*)\b/i;
 const ACCESS_SIGNAL_RE = new RegExp([
   // explicit re-entry / reoccupancy / drying
   '\\b(?:re-?ent(?:er|ers|ered|ering|ry)|re-?occup\\w*|dr(?:y|ies|ied|ying)|rain-?fast)\\b',
@@ -358,6 +362,7 @@ function fixedTimingClaim(reply, contextText, treatmentContext) {
       const digitalOnly = DIGITAL_CONTEXT_RE.test(near) && !treatmentContext;
       if (!digitalOnly && ACCESS_SIGNAL_RE.test(near)) return true;
       if (SCHEDULING_DURATION_RE.test(tight) || digitalOnly) continue;
+      if (!visitorAskedTiming && GENERIC_LENGTH_RE.test(tight)) continue;
       if (visitorAskedTiming || treatmentContext) return true;
     }
   }
