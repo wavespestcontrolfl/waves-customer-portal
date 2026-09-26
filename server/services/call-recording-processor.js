@@ -29,6 +29,7 @@ const { sendConfirmationEmail } = require('./newsletter-confirm');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { isLikelyE164 } = require('../utils/phone');
 const { lockTriageCall } = require('../utils/triage-locks');
+const { callEndedAt } = require('../utils/call-timeline');
 const { resolveLocation } = require('../config/locations');
 const { composeRelaySegment } = require('./voice-agent/relay-transfer');
 const { TRANSCRIPTION_PROVIDER: RELAY_TRANSCRIPTION_PROVIDER } = require('./voice-agent/relay-transcript');
@@ -1033,13 +1034,20 @@ function resolveCallContactPhone(call = {}, extractedPhone = null) {
 }
 
 // True when an extracted same-day start (ET date "YYYY-MM-DD" + "HH:MM") is
-// earlier than the call's own ET wall clock — the agreed window had already
-// begun when it was agreed (codex #4919 r1 P1). Only the call's date is
-// compared with the slot's; a later date never precedes the call.
-function startPrecedesCall({ scheduledDate, windowStart, callCreatedAt }) {
-  if (!scheduledDate || !windowStart || !callCreatedAt) return false;
-  const at = new Date(callCreatedAt);
-  if (Number.isNaN(at.getTime())) return false;
+// earlier than the call's own ET wall clock AT THE MOMENT THE CALLER AGREED
+// TO IT — the agreed window had already begun when it was accepted (codex
+// #4919 r1 P1). Compared against the call's COMPLETION time (start +
+// duration via call-timeline's callEndedAt), not created_at: a long call
+// that starts before the window but crosses into it while still on the line
+// must not flag a start the caller could still make, and a post-call
+// fallback row's created_at is already the call's END, so comparing against
+// it directly would double-subtract the call's length (codex #4919 r2 P1).
+// Only the call's date is compared with the slot's; a later date never
+// precedes the call.
+function startPrecedesCall({ scheduledDate, windowStart, call: callRow }) {
+  if (!scheduledDate || !windowStart || !callRow) return false;
+  const at = callEndedAt(callRow);
+  if (!at || Number.isNaN(at.getTime())) return false;
   if (String(scheduledDate) !== etDateString(at)) return false;
   const [sh, sm] = String(windowStart).replace(/^24:/, '00:').split(':').map(Number);
   if (!Number.isFinite(sh)) return false;
@@ -15244,7 +15252,7 @@ const CallRecordingProcessor = {
             // placed (a 6:30 PM caller accepting "between 6 and 9 tonight")
             // is never booked at its stale start — it goes to the office
             // like any other unbookable approved call (codex #4919 r1 P1).
-            if (scheduledDate && startPrecedesCall({ scheduledDate, windowStart, callCreatedAt: call.created_at })) {
+            if (scheduledDate && startPrecedesCall({ scheduledDate, windowStart, call })) {
               logger.warn(`[call-proc] Extracted start ${scheduledDate}T${windowStart} had already passed when the call was placed; skipping schedule + SMS for ${maskSid(callSid)}`);
               appointmentResult = {
                 service: serviceType,
@@ -15257,23 +15265,40 @@ const CallRecordingProcessor = {
               // Enforce mode files the approved-but-unbooked card for this
               // skip further down; shadow/legacy mode has no such fallback,
               // so the office gets the same card here instead of a silent
-              // drop (pre-push audit P1). Same insert shape as the off-hour
-              // card above.
+              // drop (pre-push audit P1). A standing task (open OR claimed)
+              // under the shared 'auto_booking_skipped_after_approval'
+              // reason code is REFRESHED with this start_before_call reason
+              // / window / service rather than left stale on a plain
+              // .ignore() — same lock + merge the enforce-mode fallback
+              // below applies (codex #4919 r1 P1).
               if (!CALL_EXTRACTION_V2_DRIVES_ROUTING) {
-                await db('triage_items')
-                  .insert(buildTriageItem({
-                    callLogId: call.id,
-                    flag: 'auto_booking_skipped_after_approval',
-                    extraction: v2ApprovedExtraction || undefined,
-                    extraPayload: {
-                      skipped_reason: 'start_before_call',
-                      preferred_date_time: extracted.preferred_date_time || null,
-                      service: serviceType,
-                    },
-                  }))
-                  .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
-                  .ignore()
-                  .catch((e) => logger.warn(`[call-proc] start-before-call triage insert failed for ${maskSid(callSid)}: ${e.message}`));
+                try {
+                  await db.transaction(async (ttrx) => {
+                    await lockTriageCall(ttrx, call.id);
+                    // A superseded worker leaves the current task untouched (codex r38 P1).
+                    const stillOwner = await ttrx('call_log').where({ id: call.id, processing_token: procToken }).first('id');
+                    if (!stillOwner) return;
+                    await ttrx('triage_items')
+                      .insert(buildTriageItem({
+                        callLogId: call.id,
+                        flag: 'auto_booking_skipped_after_approval',
+                        extraction: v2ApprovedExtraction || undefined,
+                        extraPayload: {
+                          skipped_reason: 'start_before_call',
+                          preferred_date_time: extracted.preferred_date_time || null,
+                          service: serviceType,
+                        },
+                      }))
+                      .onConflict(ttrx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+                      .merge({
+                        payload: ttrx.raw("COALESCE(triage_items.payload, '{}'::jsonb) || EXCLUDED.payload"),
+                        summary: ttrx.raw('EXCLUDED.summary'),
+                        updated_at: new Date(),
+                      });
+                  });
+                } catch (e) {
+                  logger.warn(`[call-proc] start-before-call triage insert failed for ${maskSid(callSid)}: ${e.message}`);
+                }
               }
             }
             if (scheduledDate && scheduledDate < callDateET) {

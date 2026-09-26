@@ -55,6 +55,13 @@ function callStartedAt(row) {
   return new Date(created.getTime() - callDurationSeconds(row) * 1000);
 }
 
+/** When the call ENDED (start + duration). Null if the start is unknown. */
+function callEndedAt(row) {
+  const started = callStartedAt(row);
+  if (!started) return null;
+  return new Date(started.getTime() + callDurationSeconds(row) * 1000);
+}
+
 /**
  * When the recording could FIRST have been processable — where the
  * pipeline's clock starts. Call end, or later if the recording only landed
@@ -64,18 +71,18 @@ function callStartedAt(row) {
  * is bumped by the claim itself.
  */
 function recordingReadyAt(row) {
-  const started = callStartedAt(row);
-  if (!started) return null;
-  const callEnded = started.getTime() + callDurationSeconds(row) * 1000;
+  const callEnded = callEndedAt(row);
+  if (!callEnded) return null;
   const status = row?.processing_status == null ? null : String(row.processing_status);
   const touched = (status === null || status === 'pending') && row?.updated_at
     ? new Date(row.updated_at).getTime() : NaN;
-  return new Date(Number.isNaN(touched) ? callEnded : Math.max(callEnded, touched));
+  return new Date(Number.isNaN(touched) ? callEnded.getTime() : Math.max(callEnded.getTime(), touched));
 }
 
 module.exports = {
   POST_CALL_ROW_SOURCES,
   callStartedAt,
+  callEndedAt,
   recordingReadyAt,
   callDurationSeconds,
 };

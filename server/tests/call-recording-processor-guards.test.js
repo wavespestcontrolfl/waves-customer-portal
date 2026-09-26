@@ -1627,25 +1627,99 @@ describe('attachCandidateMatchesProperty (attach evidence gate)', () => {
   });
 });
 
-describe('startPrecedesCall — an accepted window that had already begun is never booked at its stale start (codex #4919 r1 P1)', () => {
+describe('startPrecedesCall — an accepted window that had already begun is never booked at its stale start (codex #4919 r1/r2 P1)', () => {
   const { startPrecedesCall } = CallRecordingProcessor._test;
-  // 2026-09-26 18:30 EDT = 22:30Z.
+  // 2026-09-26 18:30 EDT = 22:30Z. A plain /voice row: created_at IS the
+  // call's start, and with no duration_seconds set the call is treated as
+  // ending the instant it started (a short call).
   const CALL_AT = '2026-09-26T22:30:00Z';
+  const callRow = (overrides = {}) => ({ created_at: CALL_AT, duration_seconds: 0, metadata: null, ...overrides });
 
   test('a same-day start earlier than the call time precedes the call', () => {
-    expect(startPrecedesCall({ scheduledDate: '2026-09-26', windowStart: '18:00', callCreatedAt: CALL_AT })).toBe(true);
+    expect(startPrecedesCall({ scheduledDate: '2026-09-26', windowStart: '18:00', call: callRow() })).toBe(true);
   });
 
   test('a same-day start at or after the call time does not', () => {
-    expect(startPrecedesCall({ scheduledDate: '2026-09-26', windowStart: '19:00', callCreatedAt: CALL_AT })).toBe(false);
+    expect(startPrecedesCall({ scheduledDate: '2026-09-26', windowStart: '19:00', call: callRow() })).toBe(false);
   });
 
   test('a later day never precedes the call', () => {
-    expect(startPrecedesCall({ scheduledDate: '2026-09-27', windowStart: '08:00', callCreatedAt: CALL_AT })).toBe(false);
+    expect(startPrecedesCall({ scheduledDate: '2026-09-27', windowStart: '08:00', call: callRow() })).toBe(false);
   });
 
   test('missing inputs fail open to the existing date guard', () => {
-    expect(startPrecedesCall({ scheduledDate: '2026-09-26', windowStart: null, callCreatedAt: CALL_AT })).toBe(false);
-    expect(startPrecedesCall({ scheduledDate: '2026-09-26', windowStart: '18:00', callCreatedAt: null })).toBe(false);
+    expect(startPrecedesCall({ scheduledDate: '2026-09-26', windowStart: null, call: callRow() })).toBe(false);
+    expect(startPrecedesCall({ scheduledDate: '2026-09-26', windowStart: '18:00', call: null })).toBe(false);
+  });
+
+  test('a long call crossing the window start compares against completion, not created_at (codex #4919 r2 P1)', () => {
+    // Call STARTS at 17:55 ET (created_at) and runs 10 minutes, ending at
+    // 18:05 ET — after the caller accepted "6 to 9 tonight" (window start
+    // 18:00). created_at alone (17:55) would wrongly say the window had NOT
+    // yet begun; the call's actual completion (18:05) says it had.
+    const startedAt = '2026-09-26T21:55:00Z'; // 17:55 ET
+    const longCall = callRow({ created_at: startedAt, duration_seconds: 600 });
+    expect(startPrecedesCall({ scheduledDate: '2026-09-26', windowStart: '18:00', call: longCall })).toBe(true);
+    // A window starting after the call actually ended (18:10) is still bookable.
+    expect(startPrecedesCall({ scheduledDate: '2026-09-26', windowStart: '18:10', call: longCall })).toBe(false);
+  });
+
+  test('a post-call fallback row (created_at already IS the completion) is not double-corrected for duration (codex #4919 r2 P1)', () => {
+    // status_callback / recording-status recovery rows insert AFTER the
+    // call ends, so created_at (18:30 ET) is already the completion time.
+    // Naively backing out duration_seconds (1 hour) without adding it back
+    // would land on 17:30 and wrongly clear a 18:00 window as still-future.
+    const postCallRow = callRow({
+      created_at: '2026-09-26T22:30:00Z', // 18:30 ET, already the call's end
+      duration_seconds: 3600,
+      metadata: { source: 'status_callback' },
+    });
+    expect(startPrecedesCall({ scheduledDate: '2026-09-26', windowStart: '18:00', call: postCallRow })).toBe(true);
+  });
+});
+
+// codex #4919 r1 P1: in shadow/legacy mode, the start_before_call review
+// card must be REFRESHED (take the call lock, merge into an existing open
+// OR claimed 'auto_booking_skipped_after_approval' card) instead of a plain
+// .ignore() that drops the reason/window/service onto an already-open card
+// for a different skip reason. A live DB round-trip for this branch is
+// heavy (full processRecording pipeline); the codebase's established
+// pattern for these hard-to-integration-test branches (see
+// call-onfile-house-number-conflict.test.js) is a source assertion plus a
+// knex-compiled SQL/bindings check, used here too.
+describe('start_before_call shadow-mode review card is refreshed, not dropped, on a standing card (codex #4919 r1 P1)', () => {
+  const processorSrc = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+
+  test('the shadow/legacy branch takes the call lock and MERGES instead of .ignore()-ing', () => {
+    // The insert is inside a transaction under lockTriageCall, guarded by
+    // the same superseded-worker check as every other refresh in this file.
+    expect(processorSrc).toContain('start-before-call triage insert failed');
+    const branch = processorSrc.slice(
+      processorSrc.indexOf('same lock + merge the enforce-mode fallback'),
+      processorSrc.indexOf('start-before-call triage insert failed') + 40,
+    );
+    expect(branch).toContain('await lockTriageCall(ttrx, call.id)');
+    expect(branch).toContain("ttrx('call_log').where({ id: call.id, processing_token: procToken }).first('id')");
+    expect(branch).toContain(
+      "COALESCE(triage_items.payload, '{}'::jsonb) || EXCLUDED.payload",
+    );
+    expect(branch).not.toContain('.ignore()');
+  });
+
+  test('the refresh SQL compiles and binds the refreshed payload/summary (knex, no live DB)', () => {
+    const knex = require('knex')({ client: 'pg' });
+    const compiled = knex('triage_items')
+      .insert({ call_log_id: 'call-1', reason_code: 'auto_booking_skipped_after_approval', payload: JSON.stringify({ skipped_reason: 'start_before_call' }) })
+      .onConflict(knex.raw("(call_log_id, reason_code) WHERE status IN ('open', 'in_progress')"))
+      .merge({
+        payload: knex.raw("COALESCE(triage_items.payload, '{}'::jsonb) || EXCLUDED.payload"),
+        summary: knex.raw('EXCLUDED.summary'),
+        updated_at: new Date('2026-09-26T00:00:00Z'),
+      })
+      .toSQL();
+    expect(compiled.sql).toContain('on conflict');
+    expect(compiled.sql).toContain('do update set');
+    expect(compiled.sql).not.toContain('do nothing');
+    knex.destroy();
   });
 });

@@ -292,6 +292,78 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['commercial_requires_quote']));
   });
 
+  // codex #4919 r1 P1: an agent-committed ARRIVAL WINDOW ("between 6 and 9")
+  // states two time bounds, but confirmed_start_at is ONLY the window's
+  // START (v11 prompt) — the evidence binder must bind on that first bound
+  // alone, never require the window's end (the job block) to match too.
+  test('agent-committed ARRIVAL WINDOW range demotes commercial_requires_quote via its FIRST bound', () => {
+    const turn = "We'll be there Sunday between 6 and 9.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const ex = agentCommitted(['commercial_requires_quote'], { quote: turn });
+    ex.caller = { relationship_to_property: 'owner', on_site_authorization: true };
+    ex.scheduling.confirmed_start_at = '2026-08-02T18:00:00-04:00'; // window START (6 PM)
+    const r = canAutoRoute(ex, opts({ transcript }));
+    expect(r.allowed).toBe(true);
+    expect(r.appointmentBlockingFlags || []).not.toContain('commercial_requires_quote');
+    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['commercial_requires_quote']));
+  });
+
+  // codex #4919 r1 P1: a range whose FIRST bound does NOT match
+  // confirmed_start_at must still fail closed — the exception binds on the
+  // first bound, it does not waive the match entirely.
+  test('an ARRIVAL WINDOW range whose first bound does not match the confirmed slot still hard-blocks', () => {
+    const turn = "We'll be there Sunday between 7 and 9.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const ex = agentCommitted(['commercial_requires_quote'], { quote: turn });
+    ex.caller = { relationship_to_property: 'owner', on_site_authorization: true };
+    ex.scheduling.confirmed_start_at = '2026-08-02T18:00:00-04:00'; // slot says 6 PM, quote's first bound says 7
+    const r = canAutoRoute(ex, opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('commercial_requires_quote');
+  });
+
+  // codex #4919 r1 P1: TWO time mentions joined by a bare "and" with NO
+  // "between"/"to" range marker must still fail exactly like before — only
+  // a genuine between/to range collapses to its first bound.
+  test('two time mentions with no between/to range marker still hard-block commercial_requires_quote', () => {
+    const turn = "We'll see you Sunday at 6 pm and 9 pm.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const ex = agentCommitted(['commercial_requires_quote'], { quote: turn });
+    ex.caller = { relationship_to_property: 'owner', on_site_authorization: true };
+    ex.scheduling.confirmed_start_at = '2026-08-02T18:00:00-04:00';
+    const r = canAutoRoute(ex, opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('commercial_requires_quote');
+  });
+
+  // codex #4919 r1 P1: a RELATIVE-day word ("tonight") with no weekday
+  // mention binds a same-day slot — the call is Thursday 7/30, so "tonight"
+  // must bind ONLY a 7/30 slot (dayDiff 0), never a different day.
+  test('agent-committed "tonight" (no weekday) demotes commercial_requires_quote for a same-day slot', () => {
+    const turn = "We'll be there tonight between 6 and 9.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const ex = agentCommitted(['commercial_requires_quote'], { quote: turn });
+    ex.caller = { relationship_to_property: 'owner', on_site_authorization: true };
+    ex.scheduling.confirmed_start_at = '2026-07-30T18:00:00-04:00'; // same calendar day as the call
+    const r = canAutoRoute(ex, opts({ transcript }));
+    expect(r.allowed).toBe(true);
+    expect(r.appointmentBlockingFlags || []).not.toContain('commercial_requires_quote');
+    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['commercial_requires_quote']));
+  });
+
+  // codex #4919 r1 P1: "tonight" only binds the call's OWN day — a slot on
+  // a different day must still fail closed.
+  test('"tonight" does not bind a slot on a different day', () => {
+    const turn = "We'll be there tonight between 6 and 9.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const ex = agentCommitted(['commercial_requires_quote'], { quote: turn });
+    ex.caller = { relationship_to_property: 'owner', on_site_authorization: true };
+    ex.scheduling.confirmed_start_at = '2026-07-31T18:00:00-04:00'; // the NEXT day, not "tonight"
+    const r = canAutoRoute(ex, opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('commercial_requires_quote');
+  });
+
   test('an agreed price WITHOUT an agent commitment does not clear commercial_requires_quote', () => {
     const ex = agentCommitted(['commercial_requires_quote'], { claim: false, quote: null });
     ex.caller = { relationship_to_property: 'owner', on_site_authorization: true };
@@ -2106,6 +2178,46 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     ['We will see you Sunday am at 10 pm.', '2026-08-02T22:00:00-04:00', false],
     ['We will see you Sunday am pm at 10.', '2026-08-02T10:00:00-04:00', false],
   ])('Codex round-14: standalone period binding — %s @ %s → %s', (sentence, startAt, expected) => {
+    const ns = normalizeCommitmentText(sentence);
+    expect(quoteBindsConfirmedSlot(ns, startAt, '2026-07-30T15:50:00-04:00')).toBe(expected);
+  });
+
+  // codex #4919 r1 P1: a committed ARRIVAL WINDOW range binds on its FIRST
+  // bound alone (window_end is the job block, never confirmed_start_at —
+  // v11 prompt); a relative-day word ("tonight"/"today"/"tomorrow") with no
+  // weekday mention binds the matching same-/next-day slot. Call is Thursday
+  // 2026-07-30 15:50 ET.
+  test.each([
+    // "between N and N" — explicit periods on both bounds, first binds.
+    ['We will see you Sunday between 6 pm and 9 pm.', '2026-08-02T18:00:00-04:00', true],
+    // First bound mismatched — must still fail (owner ruling: no waiving the match).
+    ['We will see you Sunday between 7 pm and 9 pm.', '2026-08-02T18:00:00-04:00', false],
+    // The window's END matching (not its start) must NOT bind.
+    ['We will see you Sunday between 6 pm and 9 pm.', '2026-08-02T21:00:00-04:00', false],
+    // No explicit period on either bound — falls back to the SAME
+    // business-hours inference parseSpokenSlot already uses for a bare hour.
+    ['We will see you Sunday between 6 and 9.', '2026-08-02T18:00:00-04:00', true],
+    // "N to N" bare range, same fallback inference.
+    ['We will see you Sunday 6 to 9.', '2026-08-02T18:00:00-04:00', true],
+    // "or" is NOT a range marker — two unrelated offers still fail (exactly
+    // one time mention required, unchanged).
+    ['We could do Sunday at 6 or 9, whichever works.', '2026-08-02T18:00:00-04:00', false],
+    // A bare "and" with NO "between"/"to" is not a range marker either —
+    // two REAL time mentions ("6 pm" and "9 pm") joined only by "and" still fail.
+    ['We will see you Sunday at 6 pm and 9 pm.', '2026-08-02T18:00:00-04:00', false],
+    // Relative-day words with NO weekday mention bind same-day ("tonight"/
+    // "today", dayDiff 0) or next-day ("tomorrow", dayDiff 1) slots.
+    ['We will be there tonight between 6 and 9.', '2026-07-30T18:00:00-04:00', true],
+    ['We will be there today between 6 and 9.', '2026-07-30T18:00:00-04:00', true],
+    ['We will be there tomorrow between 6 and 9.', '2026-07-31T18:00:00-04:00', true],
+    // "tonight" only binds the call's OWN day — a different day still fails.
+    ['We will be there tonight between 6 and 9.', '2026-07-31T18:00:00-04:00', false],
+    // "tomorrow" only binds day+1 — same-day still fails.
+    ['We will be there tomorrow between 6 and 9.', '2026-07-30T18:00:00-04:00', false],
+    // A BARE weekday name on the ambiguous same day (dayDiff 0) still fails
+    // closed — the relative-day exception never extends to weekday names.
+    ['We will be there Thursday between 6 and 9.', '2026-07-30T18:00:00-04:00', false],
+  ])('ARRIVAL WINDOW / relative-day binding — %s @ %s → %s', (sentence, startAt, expected) => {
     const ns = normalizeCommitmentText(sentence);
     expect(quoteBindsConfirmedSlot(ns, startAt, '2026-07-30T15:50:00-04:00')).toBe(expected);
   });
