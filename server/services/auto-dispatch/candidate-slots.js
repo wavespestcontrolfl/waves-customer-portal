@@ -532,7 +532,11 @@ async function computeCurrentPlacement(service, prefs, ctx) {
   const category = prefs.service_category;
 
   let neighbors = [];
-  if (techId) {
+  // Gate on: sharedModelCurrentPlacement reads the day itself and replaces
+  // every field these neighbors feed (they only matter when the visit has a
+  // location, and then the shared model overrides them), so skip the legacy
+  // read instead of querying the same tech-day twice per evaluation.
+  if (techId && !autoDispatchSharedModelLive()) {
     const rows = await ctx.db('scheduled_services')
       .where('scheduled_services.scheduled_date', dateStr)
       .where('scheduled_services.technician_id', techId)

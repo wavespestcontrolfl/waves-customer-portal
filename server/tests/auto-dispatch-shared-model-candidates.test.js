@@ -625,11 +625,9 @@ describe('visit-group exclusion (Codex pre-push P1)', () => {
       call += 1;
       const n = call;
       const c = {};
+      // Gate on: the legacy neighbor read is skipped (the shared model reads
+      // the day itself), so the first query is the group's sibling fields.
       if (n === 1) {
-        // The legacy (unconditional) neighbor query — irrelevant here.
-        ['where', 'whereNot', 'whereNotIn', 'leftJoin'].forEach((m) => { c[m] = () => c; });
-        c.select = async () => [];
-      } else if (n === 2) {
         // loadGroupContext's sibling-fields query
         c.whereIn = () => c;
         c.select = async () => [{ id: 'sib1', window_start: '10:00', window_end: '11:00' }];
