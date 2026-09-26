@@ -1,0 +1,1473 @@
+[
+ {
+  "template_key": "account.cancellation_received",
+  "version_number": 1,
+  "subject": "We received your cancellation request",
+  "preview_text": "Our team will follow up to confirm.",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "content": "Hello {{first_name}},"
+   },
+   {
+    "type": "paragraph",
+    "content": "We received your cancellation request and sent it to the Waves team. Our team will follow up to confirm the details with you."
+   },
+   {
+    "rows": [
+     {
+      "label": "Request",
+      "value": "{{request_subject}}"
+     },
+     {
+      "label": "Submitted",
+      "value": "{{submitted_at}}"
+     }
+    ],
+    "type": "details"
+   },
+   {
+    "type": "paragraph",
+    "content": "If you have questions — or did not make this request — reply to this email or call us at {{company_phone}}."
+   },
+   {
+    "type": "signature",
+    "content": "Thank you, The Waves Team"
+   }
+  ]
+ },
+ {
+  "template_key": "account.resolution_accepted",
+  "version_number": 1,
+  "subject": "Your plan stays — here is what we set up",
+  "preview_text": "The change you accepted, in writing.",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "content": "Hello {{first_name}},"
+   },
+   {
+    "type": "paragraph",
+    "content": "{{summary_line}}"
+   },
+   {
+    "type": "paragraph",
+    "content": "{{effects_text}}"
+   },
+   {
+    "rows": [
+     {
+      "label": "Reference",
+      "value": "{{reference}}"
+     }
+    ],
+    "type": "details"
+   },
+   {
+    "type": "paragraph",
+    "content": "This creates no term and no fee — you can still cancel any time from your portal. Questions, or did not make this change? Reply to this email or call us at {{company_phone}}."
+   },
+   {
+    "type": "signature",
+    "content": "Thank you, The Waves Team"
+   }
+  ]
+ },
+ {
+  "template_key": "billing_late_payment_14_day",
+  "version_number": 3,
+  "subject": "Your Waves invoice is 14 days overdue",
+  "preview_text": "Your invoice is now 14 days past due.",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "content": "Hello {{first_name}},"
+   },
+   {
+    "type": "paragraph",
+    "content": "Invoice {{invoice_number}}, due {{due_date}}, is now 14 days overdue."
+   },
+   {
+    "rows": [
+     {
+      "label": "Invoice",
+      "value": "{{invoice_number}}"
+     },
+     {
+      "label": "Amount due",
+      "value": "{{amount_due}}"
+     },
+     {
+      "label": "Due date",
+      "value": "{{due_date}}"
+     }
+    ],
+    "type": "details"
+   },
+   {
+    "type": "paragraph",
+    "content": "Please submit payment as soon as possible or reply here if something about the invoice needs review."
+   },
+   {
+    "type": "cta",
+    "label": "Pay invoice",
+    "url_variable": "pay_url"
+   },
+   {
+    "type": "paragraph",
+    "content": "We can help with questions, receipt matching, or payment options if you need assistance."
+   },
+   {
+    "type": "small_note",
+    "content": "Questions or need help? Reply to this email or call {{company_phone}}."
+   }
+  ]
+ },
+ {
+  "template_key": "billing_late_payment_60_day",
+  "version_number": 3,
+  "subject": "Action needed: Waves invoice 60 days overdue",
+  "preview_text": "Your invoice is now 60 days past due.",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "content": "Hello {{first_name}},"
+   },
+   {
+    "type": "paragraph",
+    "content": "Invoice {{invoice_number}}, due {{due_date}}, is now 60 days overdue."
+   },
+   {
+    "rows": [
+     {
+      "label": "Invoice",
+      "value": "{{invoice_number}}"
+     },
+     {
+      "label": "Amount due",
+      "value": "{{amount_due}}"
+     },
+     {
+      "label": "Due date",
+      "value": "{{due_date}}"
+     }
+    ],
+    "type": "details"
+   },
+   {
+    "type": "paragraph",
+    "content": "Please pay today or reply to discuss payment options before the account remains on hold."
+   },
+   {
+    "type": "cta",
+    "label": "Pay invoice",
+    "url_variable": "pay_url"
+   },
+   {
+    "type": "paragraph",
+    "content": "Your account may remain on service hold until the past-due balance is resolved."
+   },
+   {
+    "type": "small_note",
+    "content": "Questions or need help? Reply to this email or call {{company_phone}}."
+   }
+  ]
+ },
+ {
+  "template_key": "billing_late_payment_90_day",
+  "version_number": 3,
+  "subject": "Final notice: Waves invoice 90 days overdue",
+  "preview_text": "Your invoice is now 90 days past due.",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "content": "Hello {{first_name}},"
+   },
+   {
+    "type": "paragraph",
+    "content": "Final notice: invoice {{invoice_number}}, due {{due_date}}, is now 90 days overdue."
+   },
+   {
+    "rows": [
+     {
+      "label": "Invoice",
+      "value": "{{invoice_number}}"
+     },
+     {
+      "label": "Amount due",
+      "value": "{{amount_due}}"
+     },
+     {
+      "label": "Due date",
+      "value": "{{due_date}}"
+     }
+    ],
+    "type": "details"
+   },
+   {
+    "type": "paragraph",
+    "content": "Please pay today or contact us immediately if you believe this notice was sent in error."
+   },
+   {
+    "type": "cta",
+    "label": "Pay invoice",
+    "url_variable": "pay_url"
+   },
+   {
+    "type": "paragraph",
+    "content": "If payment is not received and we do not hear from you, this account may be sent to collections or further recovery action."
+   },
+   {
+    "type": "small_note",
+    "content": "Questions or need help? Reply to this email or call {{company_phone}}."
+   }
+  ]
+ },
+ {
+  "template_key": "estimate.accepted_onboarding",
+  "version_number": 2,
+  "subject": "You're booked, {{first_name}} — here's what happens next",
+  "preview_text": "Your {{service_type}} plan is confirmed. Here’s the road to your first visit.",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "content": "Hi {{first_name}}, your {{service_type}} plan is confirmed — welcome aboard. Here’s exactly what happens next, so there are no surprises."
+   },
+   {
+    "type": "heading",
+    "content": "Between now and your first visit"
+   },
+   {
+    "type": "paragraph",
+    "content": "{{appointment_line}}"
+   },
+   {
+    "type": "paragraph",
+    "content": "Before we arrive you’ll get a confirmation with your arrival window, a reminder the day before, and a live tracking link when your technician is on the way. No need to be home for most services."
+   },
+   {
+    "type": "heading",
+    "content": "After every visit"
+   },
+   {
+    "type": "paragraph",
+    "content": "You’ll get a full service report — what we treated, what we found, and photos from your property. It lands in your email and lives in your customer portal."
+   },
+   {
+    "type": "paragraph",
+    "content": "{{acceptance_note}}",
+    "seeded_by": "20260828000032"
+   },
+   {
+    "type": "paragraph",
+    "content": "You can get ready now: [get started with the Waves app](https://www.wavespestcontrol.com/app/), sign in with the mobile number on your account, and enter your texted code. Home shows your next visit. Our [sign-in guide](https://www.wavespestcontrol.com/pest-control/waves-app-guide/?utm_source=estimate_accepted&utm_medium=email&utm_campaign=app_onboarding#start-here-sign-in) walks through each step."
+   },
+   {
+    "type": "signature",
+    "content": "We look forward to servicing your home. — The Waves Team"
+   },
+   {
+    "type": "cta",
+    "label": "View my account",
+    "url_variable": "customer_portal_url"
+   },
+   {
+    "type": "small_note",
+    "content": "Questions before we come out? Reply to this email or call {{company_phone}} — a real person answers."
+   }
+  ]
+ },
+ {
+  "template_key": "estimate.engage_expiring",
+  "version_number": 1,
+  "subject": "Heads up — your estimate expires soon",
+  "preview_text": "Your pricing holds until the expiration date on your estimate.",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "content": "Hi {{first_name}}, a quick heads up: your {{service_label}} estimate expires on {{expires_date}}. Until then, your pricing is locked in."
+   },
+   {
+    "type": "paragraph",
+    "content": "{{category_included}}"
+   },
+   {
+    "alt": "Tap to watch: a tour of a real Waves service report",
+    "src": "{{report_video_preview}}",
+    "href": "{{report_video_url}}",
+    "type": "image",
+    "width": 520,
+    "radius": 18
+   },
+   {
+    "type": "small_note",
+    "content": "{{report_video_caption}}"
+   },
+   {
+    "type": "paragraph",
+    "content": "Need more time to decide? Just reply — we’re happy to extend it."
+   },
+   {
+    "type": "heading",
+    "content": "Why folks choose Waves"
+   },
+   {
+    "type": "list",
+    "items": [
+     "★★★★★ Five-star rated on Google by your neighbors across Southwest Florida.",
+     "Family-owned and local — one Southwest Florida team for your whole property.",
+     "FDACS-licensed and insured, with a written report after every visit.",
+     "We actually show up — same-day service, on time, every time."
+    ]
+   },
+   {
+    "type": "small_note",
+    "content": "{{category_benefit}}"
+   },
+   {
+    "type": "cta",
+    "label": "Accept before it expires",
+    "url_variable": "estimate_accept_url"
+   },
+   {
+    "type": "small_note",
+    "content": "Questions? Just reply — it goes straight to our team in Bradenton. No call center, no ticket queue."
+   },
+   {
+    "type": "signature",
+    "content": "— The Waves Team"
+   }
+  ]
+ },
+ {
+  "template_key": "estimate.engage_expiring_unseen",
+  "version_number": 1,
+  "subject": "Worth a look before it expires",
+  "preview_text": "Your estimate was built from your property — one quick look.",
+  "blocks": [
+   {
+    "type": "heading",
+    "content": "{{category_headline}}"
+   },
+   {
+    "type": "paragraph",
+    "content": "Hi {{first_name}}, your {{service_label}} estimate expires on {{expires_date}} and it doesn’t look like you’ve had a chance to see it yet — worth one quick look before it does."
+   },
+   {
+    "type": "paragraph",
+    "content": "{{category_hook}}"
+   },
+   {
+    "type": "heading",
+    "content": "Why folks choose Waves"
+   },
+   {
+    "alt": "The Waves van outside a customer’s home in Southwest Florida",
+    "src": "https://portal.wavespestcontrol.com/app-email/why-waves-van-home.jpg",
+    "type": "image",
+    "width": 520,
+    "radius": 18
+   },
+   {
+    "type": "list",
+    "items": [
+     "★★★★★ Five-star rated on Google by your neighbors across Southwest Florida.",
+     "Family-owned and local — one Southwest Florida team for your whole property.",
+     "FDACS-licensed and insured, with a written report after every visit.",
+     "We actually show up — same-day service, on time, every time."
+    ]
+   },
+   {
+    "type": "heading",
+    "content": "What your plan covers"
+   },
+   {
+    "type": "paragraph",
+    "content": "{{category_included}}"
+   },
+   {
+    "type": "paragraph",
+    "content": "After every visit, you get a detailed service report — the areas we treated, the EPA-registered products we used, what we found, and photos from your property."
+   },
+   {
+    "alt": "Tap to watch: a tour of a real Waves service report",
+    "src": "{{report_video_preview}}",
+    "href": "{{report_video_url}}",
+    "type": "image",
+    "width": 520,
+    "radius": 18
+   },
+   {
+    "type": "small_note",
+    "content": "{{report_video_caption}}"
+   },
+   {
+    "type": "paragraph",
+    "content": "And the Waves app keeps everything in one place — every visit and every report, pay in a tap, and if a time stops working you can reschedule any visit yourself, right from the app."
+   },
+   {
+    "alt": "Tap to watch: the Waves app — visits, reports, reschedule, and payments in one place",
+    "src": "https://portal.wavespestcontrol.com/app-email/videos/waves-app-tour-poster.jpg",
+    "href": "https://portal.wavespestcontrol.com/app-email/videos/waves-app-tour.mp4",
+    "type": "image",
+    "width": 520,
+    "radius": 18
+   },
+   {
+    "type": "small_note",
+    "content": "Tap to watch the Waves app in action."
+   },
+   {
+    "type": "paragraph",
+    "content": "Need more time? Just reply — we’re happy to extend it."
+   },
+   {
+    "type": "heading",
+    "content": "A few things folks usually ask"
+   },
+   {
+    "rows": [
+     {
+      "label": "When can I start?",
+      "value": "{{faq_start}}"
+     },
+     {
+      "label": "Am I locked in?",
+      "value": "{{faq_terms}}"
+     },
+     {
+      "label": "What if I see activity between visits?",
+      "value": "{{faq_between_visits}}"
+     },
+     {
+      "label": "Is the price locked in?",
+      "value": "{{faq_price}}"
+     }
+    ],
+    "type": "details",
+    "variant": "faq"
+   },
+   {
+    "type": "small_note",
+    "content": "{{category_benefit}}"
+   },
+   {
+    "type": "cta",
+    "label": "See my estimate",
+    "url_variable": "estimate_url"
+   },
+   {
+    "url": "https://www.wavespestcontrol.com/products-and-safety",
+    "type": "cta",
+    "label": "How we treat your home — products & safety"
+   },
+   {
+    "type": "small_note",
+    "content": "Questions? Just reply — it goes straight to our team in Bradenton. No call center, no ticket queue."
+   },
+   {
+    "type": "signature",
+    "content": "— The Waves Team"
+   }
+  ]
+ },
+ {
+  "template_key": "estimate.engage_gone_quiet",
+  "version_number": 1,
+  "subject": "Any questions about your Waves estimate?",
+  "preview_text": "Reply and ask — real answers in minutes.",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "content": "Hi {{first_name}}, just checking in on your {{service_label}} estimate — no rush at all."
+   },
+   {
+    "type": "paragraph",
+    "content": "{{category_question}}"
+   },
+   {
+    "type": "paragraph",
+    "content": "{{category_included}}"
+   },
+   {
+    "type": "heading",
+    "content": "Why folks choose Waves"
+   },
+   {
+    "type": "list",
+    "items": [
+     "★★★★★ Five-star rated on Google by your neighbors across Southwest Florida.",
+     "Family-owned and local — one Southwest Florida team for your whole property.",
+     "FDACS-licensed and insured, with a written report after every visit.",
+     "We actually show up — same-day service, on time, every time."
+    ]
+   },
+   {
+    "alt": "Tap to watch: a tour of a real Waves service report",
+    "src": "{{report_video_preview}}",
+    "href": "{{report_video_url}}",
+    "type": "image",
+    "width": 520,
+    "radius": 18
+   },
+   {
+    "type": "small_note",
+    "content": "{{report_video_caption}}"
+   },
+   {
+    "type": "heading",
+    "content": "A few things folks usually ask"
+   },
+   {
+    "rows": [
+     {
+      "label": "When can I start?",
+      "value": "{{faq_start}}"
+     },
+     {
+      "label": "Am I locked in?",
+      "value": "{{faq_terms}}"
+     },
+     {
+      "label": "What if I see activity between visits?",
+      "value": "{{faq_between_visits}}"
+     },
+     {
+      "label": "Is the price locked in?",
+      "value": "{{faq_price}}"
+     }
+    ],
+    "type": "details",
+    "variant": "faq"
+   },
+   {
+    "type": "small_note",
+    "content": "{{category_benefit}}"
+   },
+   {
+    "type": "cta",
+    "label": "Take another look",
+    "url_variable": "estimate_url"
+   },
+   {
+    "url": "https://www.wavespestcontrol.com/products-and-safety",
+    "type": "cta",
+    "label": "How we treat your home — products & safety"
+   },
+   {
+    "type": "signature",
+    "content": "— The Waves Team"
+   }
+  ]
+ },
+ {
+  "template_key": "estimate.engage_high_intent",
+  "version_number": 1,
+  "subject": "Ready when you are — it takes about a minute",
+  "preview_text": "Your estimate is saved. Accepting takes about a minute.",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "content": "Hi {{first_name}}, your {{service_label}} estimate is saved and ready whenever you are — accepting takes about a minute, and we handle the rest."
+   },
+   {
+    "type": "paragraph",
+    "content": "{{category_hook}}"
+   },
+   {
+    "type": "heading",
+    "content": "How it works"
+   },
+   {
+    "type": "paragraph",
+    "content": "{{category_process}}"
+   },
+   {
+    "alt": "Tap to watch: a tour of a real Waves service report",
+    "src": "{{report_video_preview}}",
+    "href": "{{report_video_url}}",
+    "type": "image",
+    "width": 520,
+    "radius": 18
+   },
+   {
+    "type": "small_note",
+    "content": "{{report_video_caption}}"
+   },
+   {
+    "type": "paragraph",
+    "content": "And the Waves app keeps everything in one place — every visit and every report, pay in a tap, and if a time stops working you can reschedule any visit yourself, right from the app."
+   },
+   {
+    "alt": "Tap to watch: the Waves app — visits, reports, reschedule, and payments in one place",
+    "src": "https://portal.wavespestcontrol.com/app-email/videos/waves-app-tour-poster.jpg",
+    "href": "https://portal.wavespestcontrol.com/app-email/videos/waves-app-tour.mp4",
+    "type": "image",
+    "width": 520,
+    "radius": 18
+   },
+   {
+    "type": "small_note",
+    "content": "Tap to watch the Waves app in action."
+   },
+   {
+    "type": "heading",
+    "content": "Why folks choose Waves"
+   },
+   {
+    "type": "list",
+    "items": [
+     "★★★★★ Five-star rated on Google by your neighbors across Southwest Florida.",
+     "Family-owned and local — one Southwest Florida team for your whole property.",
+     "FDACS-licensed and insured, with a written report after every visit.",
+     "We actually show up — same-day service, on time, every time."
+    ]
+   },
+   {
+    "type": "small_note",
+    "content": "{{category_benefit}}"
+   },
+   {
+    "type": "cta",
+    "label": "Accept my estimate",
+    "url_variable": "estimate_accept_url"
+   },
+   {
+    "type": "small_note",
+    "content": "Questions? Just reply — it goes straight to our team in Bradenton. No call center, no ticket queue."
+   },
+   {
+    "type": "signature",
+    "content": "— The Waves Team"
+   }
+  ]
+ },
+ {
+  "template_key": "estimate.engage_return_after_dark",
+  "version_number": 1,
+  "subject": "Your estimate is right where you left it",
+  "preview_text": "Nothing has changed — same plan, same pricing, saved for you.",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "content": "Hi {{first_name}}, good to see you back. Your {{service_label}} estimate is right where you left it — same plan, same pricing."
+   },
+   {
+    "type": "paragraph",
+    "content": "{{category_hook}}"
+   },
+   {
+    "type": "paragraph",
+    "content": "{{category_included}}"
+   },
+   {
+    "type": "paragraph",
+    "content": "After every visit, you get a detailed service report — the areas we treated, the EPA-registered products we used, what we found, and photos from your property."
+   },
+   {
+    "alt": "Tap to watch: a tour of a real Waves service report",
+    "src": "{{report_video_preview}}",
+    "href": "{{report_video_url}}",
+    "type": "image",
+    "width": 520,
+    "radius": 18
+   },
+   {
+    "type": "small_note",
+    "content": "{{report_video_caption}}"
+   },
+   {
+    "type": "heading",
+    "content": "Why folks choose Waves"
+   },
+   {
+    "type": "list",
+    "items": [
+     "★★★★★ Five-star rated on Google by your neighbors across Southwest Florida.",
+     "Family-owned and local — one Southwest Florida team for your whole property.",
+     "FDACS-licensed and insured, with a written report after every visit.",
+     "We actually show up — same-day service, on time, every time."
+    ]
+   },
+   {
+    "type": "small_note",
+    "content": "{{category_benefit}}"
+   },
+   {
+    "type": "cta",
+    "label": "Pick up where I left off",
+    "url_variable": "estimate_accept_url"
+   },
+   {
+    "type": "small_note",
+    "content": "Questions? Just reply — it goes straight to our team in Bradenton. No call center, no ticket queue."
+   },
+   {
+    "type": "signature",
+    "content": "— The Waves Team"
+   }
+  ]
+ },
+ {
+  "template_key": "estimate.engage_return_visit",
+  "version_number": 1,
+  "subject": "Welcome back — questions about your estimate?",
+  "preview_text": "Reply to this email and a real person answers in minutes.",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "content": "Hi {{first_name}}, thanks for taking another look at your {{service_label}} estimate. If anything’s unclear, we’re happy to help."
+   },
+   {
+    "type": "paragraph",
+    "content": "{{category_question}}"
+   },
+   {
+    "type": "heading",
+    "content": "How it works"
+   },
+   {
+    "type": "paragraph",
+    "content": "{{category_process}}"
+   },
+   {
+    "alt": "Tap to watch: a tour of a real Waves service report",
+    "src": "{{report_video_preview}}",
+    "href": "{{report_video_url}}",
+    "type": "image",
+    "width": 520,
+    "radius": 18
+   },
+   {
+    "type": "small_note",
+    "content": "{{report_video_caption}}"
+   },
+   {
+    "type": "heading",
+    "content": "Why folks choose Waves"
+   },
+   {
+    "type": "list",
+    "items": [
+     "★★★★★ Five-star rated on Google by your neighbors across Southwest Florida.",
+     "Family-owned and local — one Southwest Florida team for your whole property.",
+     "FDACS-licensed and insured, with a written report after every visit.",
+     "We actually show up — same-day service, on time, every time."
+    ]
+   },
+   {
+    "type": "small_note",
+    "content": "{{category_benefit}}"
+   },
+   {
+    "type": "cta",
+    "label": "Accept my estimate",
+    "url_variable": "estimate_accept_url"
+   },
+   {
+    "type": "signature",
+    "content": "— The Waves Team"
+   }
+  ]
+ },
+ {
+  "template_key": "estimate.engage_unopened",
+  "version_number": 1,
+  "subject": "Your Waves estimate is ready when you are",
+  "preview_text": "It’s saved and waiting — take a look whenever suits.",
+  "blocks": [
+   {
+    "type": "heading",
+    "content": "{{category_headline}}"
+   },
+   {
+    "type": "paragraph",
+    "content": "Hi {{first_name}}, we sent over your {{service_label}} estimate and wanted to follow up personally. No sales pitch — just making sure it landed, and answering anything you’re wondering about."
+   },
+   {
+    "type": "paragraph",
+    "content": "{{category_hook}}"
+   },
+   {
+    "type": "heading",
+    "content": "Why folks choose Waves"
+   },
+   {
+    "alt": "The Waves van outside a customer’s home in Southwest Florida",
+    "src": "https://portal.wavespestcontrol.com/app-email/why-waves-van-home.jpg",
+    "type": "image",
+    "width": 520,
+    "radius": 18
+   },
+   {
+    "type": "list",
+    "items": [
+     "★★★★★ Five-star rated on Google by your neighbors across Southwest Florida.",
+     "Family-owned and local — one Southwest Florida team for your whole property.",
+     "FDACS-licensed and insured, with a written report after every visit.",
+     "We actually show up — same-day service, on time, every time."
+    ]
+   },
+   {
+    "type": "heading",
+    "content": "What your plan covers"
+   },
+   {
+    "type": "paragraph",
+    "content": "{{category_included}}"
+   },
+   {
+    "type": "paragraph",
+    "content": "After every visit, you get a detailed service report — the areas we treated, the EPA-registered products we used, what we found, and photos from your property."
+   },
+   {
+    "alt": "Tap to watch: a tour of a real Waves service report",
+    "src": "{{report_video_preview}}",
+    "href": "{{report_video_url}}",
+    "type": "image",
+    "width": 520,
+    "radius": 18
+   },
+   {
+    "type": "small_note",
+    "content": "{{report_video_caption}}"
+   },
+   {
+    "type": "paragraph",
+    "content": "And the Waves app keeps everything in one place — every visit and every report, pay in a tap, and if a time stops working you can reschedule any visit yourself, right from the app."
+   },
+   {
+    "alt": "Tap to watch: the Waves app — visits, reports, reschedule, and payments in one place",
+    "src": "https://portal.wavespestcontrol.com/app-email/videos/waves-app-tour-poster.jpg",
+    "href": "https://portal.wavespestcontrol.com/app-email/videos/waves-app-tour.mp4",
+    "type": "image",
+    "width": 520,
+    "radius": 18
+   },
+   {
+    "type": "small_note",
+    "content": "Tap to watch the Waves app in action."
+   },
+   {
+    "type": "heading",
+    "content": "A few things folks usually ask"
+   },
+   {
+    "rows": [
+     {
+      "label": "When can I start?",
+      "value": "{{faq_start}}"
+     },
+     {
+      "label": "Am I locked in?",
+      "value": "{{faq_terms}}"
+     },
+     {
+      "label": "What if I see activity between visits?",
+      "value": "{{faq_between_visits}}"
+     },
+     {
+      "label": "Is the price locked in?",
+      "value": "{{faq_price}}"
+     }
+    ],
+    "type": "details",
+    "variant": "faq"
+   },
+   {
+    "type": "small_note",
+    "content": "{{category_benefit}}"
+   },
+   {
+    "type": "cta",
+    "label": "View my estimate",
+    "url_variable": "estimate_url"
+   },
+   {
+    "url": "https://www.wavespestcontrol.com/products-and-safety",
+    "type": "cta",
+    "label": "How we treat your home — products & safety"
+   },
+   {
+    "type": "small_note",
+    "content": "Questions? Just reply — it goes straight to our team in Bradenton. No call center, no ticket queue."
+   },
+   {
+    "type": "signature",
+    "content": "— The Waves Team"
+   }
+  ]
+ },
+ {
+  "template_key": "invoice.followup_14_day",
+  "version_number": 1,
+  "subject": "Action requested: Waves invoice still open",
+  "preview_text": "Please pay your open Waves invoice or contact us for help.",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "content": "Hello {{first_name}},"
+   },
+   {
+    "type": "paragraph",
+    "content": "Checking in on your Waves invoice for {{invoice_title}}{{service_date_clause}}. Our records still show an open balance of {{amount_due}}."
+   },
+   {
+    "rows": [
+     {
+      "label": "Invoice #",
+      "value": "{{invoice_number}}"
+     },
+     {
+      "label": "Amount due",
+      "value": "{{amount_due}}"
+     },
+     {
+      "label": "Due date",
+      "value": "{{due_date}}"
+     }
+    ],
+    "type": "details"
+   },
+   {
+    "type": "paragraph",
+    "content": "Please pay the invoice or reply to this email if there is anything we should review."
+   },
+   {
+    "type": "signature",
+    "content": "Thank you, The Waves Team"
+   },
+   {
+    "type": "cta",
+    "label": "Pay invoice",
+    "url_variable": "pay_url"
+   },
+   {
+    "type": "small_note",
+    "content": "We can help with questions, receipt matching, or payment options if needed."
+   }
+  ]
+ },
+ {
+  "template_key": "invoice.followup_30_day",
+  "version_number": 1,
+  "subject": "Final reminder: Waves invoice still open",
+  "preview_text": "Final reminder for an open Waves invoice.",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "content": "Hello {{first_name}},"
+   },
+   {
+    "type": "paragraph",
+    "content": "Final reminder: your Waves invoice for {{invoice_title}}{{service_date_clause}} still has an open balance of {{amount_due}}."
+   },
+   {
+    "rows": [
+     {
+      "label": "Invoice #",
+      "value": "{{invoice_number}}"
+     },
+     {
+      "label": "Amount due",
+      "value": "{{amount_due}}"
+     },
+     {
+      "label": "Due date",
+      "value": "{{due_date}}"
+     }
+    ],
+    "type": "details"
+   },
+   {
+    "type": "paragraph",
+    "content": "Please pay now or reply to discuss payment options."
+   },
+   {
+    "type": "signature",
+    "content": "Thank you, The Waves Team"
+   },
+   {
+    "type": "cta",
+    "label": "Pay invoice",
+    "url_variable": "pay_url"
+   },
+   {
+    "type": "small_note",
+    "content": "If payment is not received or we do not hear from you, future service may be paused until the balance is resolved."
+   }
+  ]
+ },
+ {
+  "template_key": "invoice.followup_3_day",
+  "version_number": 1,
+  "subject": "Reminder: your Waves invoice is still open",
+  "preview_text": "Your Waves invoice still has an open balance.",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "content": "Hello {{first_name}},"
+   },
+   {
+    "type": "paragraph",
+    "content": "Your Waves invoice for {{invoice_title}}{{service_date_clause}} still has an open balance of {{amount_due}}."
+   },
+   {
+    "rows": [
+     {
+      "label": "Invoice #",
+      "value": "{{invoice_number}}"
+     },
+     {
+      "label": "Amount due",
+      "value": "{{amount_due}}"
+     },
+     {
+      "label": "Due date",
+      "value": "{{due_date}}"
+     }
+    ],
+    "type": "details"
+   },
+   {
+    "type": "paragraph",
+    "content": "You can securely pay your invoice here:"
+   },
+   {
+    "type": "signature",
+    "content": "Thank you, The Waves Team"
+   },
+   {
+    "type": "cta",
+    "label": "Pay invoice",
+    "url_variable": "pay_url"
+   },
+   {
+    "type": "small_note",
+    "content": "If something looks off, reply to this email and we will help sort it out."
+   }
+  ]
+ },
+ {
+  "template_key": "invoice.followup_7_day",
+  "version_number": 1,
+  "subject": "Your Waves invoice is still open",
+  "preview_text": "Please review and pay your open Waves invoice.",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "content": "Hello {{first_name}},"
+   },
+   {
+    "type": "paragraph",
+    "content": "Quick reminder: your Waves invoice for {{invoice_title}}{{service_date_clause}} is still open."
+   },
+   {
+    "rows": [
+     {
+      "label": "Invoice #",
+      "value": "{{invoice_number}}"
+     },
+     {
+      "label": "Amount due",
+      "value": "{{amount_due}}"
+     },
+     {
+      "label": "Due date",
+      "value": "{{due_date}}"
+     }
+    ],
+    "type": "details"
+   },
+   {
+    "type": "paragraph",
+    "content": "Please use the secure link below to make payment:"
+   },
+   {
+    "type": "signature",
+    "content": "Thank you, The Waves Team"
+   },
+   {
+    "type": "cta",
+    "label": "Pay invoice",
+    "url_variable": "pay_url"
+   },
+   {
+    "type": "small_note",
+    "content": "Already paid? Thank you - no further action is needed."
+   }
+  ]
+ },
+ {
+  "template_key": "irrigation.weekly_cut_back",
+  "version_number": 5,
+  "subject": "You can ease up on the sprinklers this week, {{first_name}}",
+  "preview_text": "Your lawn got about {{total_inches}}\" of water — more than it needs. Here's how to dial it in.",
+  "blocks": [
+   {
+    "type": "heading",
+    "content": "Good news, {{first_name}} — you can ease up on the sprinklers this week"
+   },
+   {
+    "type": "paragraph",
+    "content": "Between the rain that fell near your home last week ({{rain_last_week}}\") and your irrigation schedule ({{irrigation_inches}}\" per week), your lawn got about {{total_inches}}\" of water — roughly {{difference_inches}}\" more than the {{target_inches}}\" your {{grass_label}} needs this time of year."
+   },
+   {
+    "rows": [
+     {
+      "label": "Rain at your home last week",
+      "value": "{{rain_last_week}}\""
+     },
+     {
+      "label": "Your weekly irrigation setting",
+      "value": "{{irrigation_inches}}\""
+     },
+     {
+      "label": "Total water your lawn received",
+      "value": "{{total_inches}}\""
+     },
+     {
+      "label": "Weekly target for {{grass_label}}",
+      "value": "{{target_inches}}\""
+     }
+    ],
+    "type": "details"
+   },
+   {
+    "type": "callout",
+    "content": "This week: skip a watering day or trim a few minutes off each zone. Too much water is the #1 thing we see feeding fungus, mushrooms, and weeds in SWFL lawns — easing back actually makes your lawn healthier."
+   },
+   {
+    "type": "paragraph",
+    "content": "{{forecast_line}}"
+   },
+   {
+    "type": "paragraph",
+    "content": "If your sprinkler schedule has changed, take 30 seconds to update it in your portal so these check-ins stay accurate."
+   },
+   {
+    "type": "signature",
+    "content": "— The Waves Team"
+   },
+   {
+    "type": "cta",
+    "label": "UPDATE MY IRRIGATION INFO",
+    "url_variable": "customer_portal_url"
+   },
+   {
+    "type": "heading",
+    "content": "Helpful guides from the Waves blog"
+   },
+   {
+    "type": "paragraph",
+    "content": "[Find your sprinkler timer and its guide](https://www.wavespestcontrol.com/sprinkler-timers/)"
+   },
+   {
+    "type": "paragraph",
+    "content": "[Rain Bird: how to run your timer by hand](https://www.wavespestcontrol.com/lawn-care/rain-bird-sprinkler-timer-guide/)"
+   },
+   {
+    "type": "paragraph",
+    "content": "[Overwatering vs. underwatering](https://www.wavespestcontrol.com/lawn-care/overwatering-lawn-vs-underwatering/)"
+   },
+   {
+    "type": "paragraph",
+    "content": "[Mowing height for your grass type](https://www.wavespestcontrol.com/lawn-care/mowing-height-by-grass-type/)"
+   },
+   {
+    "type": "paragraph",
+    "content": "{{rain_source_note}}"
+   },
+   {
+    "type": "small_note",
+    "content": "This tip is based on the irrigation schedule you shared in your customer portal, rainfall and weather measured near your home, and University of Florida turf guidance. Local watering restrictions still apply — check your county's assigned days. Prefer not to get these weekly check-ins? Just reply to this email and we'll turn them off for you."
+   }
+  ]
+ },
+ {
+  "template_key": "membership.canceled",
+  "version_number": 2,
+  "subject": "Your Waves membership has been canceled",
+  "preview_text": "Your WaveGuard membership cancellation has been processed.",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "content": "Hello {{first_name}}, your Waves membership cancellation has been processed."
+   },
+   {
+    "rows": [
+     {
+      "label": "Plan",
+      "value": "{{membership_name}}"
+     },
+     {
+      "label": "Status",
+      "value": "{{membership_status}}"
+     },
+     {
+      "label": "Effective date",
+      "value": "{{cancellation_effective_date}}"
+     },
+     {
+      "label": "Reason",
+      "value": "{{pause_reason}}"
+     }
+    ],
+    "type": "details"
+   },
+   {
+    "type": "paragraph",
+    "content": "Any remaining open invoices, scheduled follow-up items, or completed-service charges still need to be resolved separately."
+   },
+   {
+    "type": "small_note",
+    "content": "If this cancellation was not expected, reply to this email and our team will help."
+   }
+  ]
+ },
+ {
+  "template_key": "membership.paused",
+  "version_number": 2,
+  "subject": "Your Waves service is paused",
+  "preview_text": "Your Waves service has been paused or placed on hold.",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "content": "Hello {{first_name}}, your Waves service has been paused or placed on hold."
+   },
+   {
+    "rows": [
+     {
+      "label": "Plan",
+      "value": "{{membership_name}}"
+     },
+     {
+      "label": "Status",
+      "value": "{{membership_status}}"
+     },
+     {
+      "label": "Paused on",
+      "value": "{{effective_date}}"
+     },
+     {
+      "label": "Paused until",
+      "value": "{{paused_until}}"
+     },
+     {
+      "label": "Reason",
+      "value": "{{pause_reason}}"
+     }
+    ],
+    "type": "details"
+   },
+   {
+    "type": "paragraph",
+    "content": "Future service may remain on hold until the pause is removed or the account issue is resolved."
+   },
+   {
+    "type": "cta",
+    "label": "View account",
+    "url_variable": "customer_portal_url"
+   },
+   {
+    "type": "small_note",
+    "content": "Need help reactivating service? Reply here or call {{company_phone}}."
+   }
+  ]
+ },
+ {
+  "template_key": "payment.ach_processing",
+  "version_number": 2,
+  "subject": "We received your bank payment — processing",
+  "preview_text": "Your Waves bank payment is on the way; it typically clears in 3-5 business days.",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "content": "Hello {{first_name}},"
+   },
+   {
+    "type": "paragraph",
+    "content": "Thank you — we received your bank payment for your Waves invoice and it is now processing."
+   },
+   {
+    "rows": [
+     {
+      "label": "Invoice",
+      "value": "{{invoice_title}}"
+     },
+     {
+      "label": "Invoice #",
+      "value": "{{invoice_number}}"
+     },
+     {
+      "label": "Amount",
+      "value": "{{amount_paid}}"
+     },
+     {
+      "label": "Initiated",
+      "value": "{{payment_initiated_date}}"
+     },
+     {
+      "label": "Expected to clear",
+      "value": "{{expected_clear_date}}"
+     }
+    ],
+    "type": "details"
+   },
+   {
+    "type": "paragraph",
+    "content": "ACH bank transfers typically take 3-5 business days to clear. We will send a receipt as soon as the payment posts."
+   },
+   {
+    "type": "small_note",
+    "content": "No action is needed right now. If the payment fails or your bank returns it, we will let you know."
+   },
+   {
+    "type": "small_note",
+    "content": "Questions or need help? Reply to this email and our team will be happy to help."
+   },
+   {
+    "type": "signature",
+    "content": "Thank you, The Waves Team"
+   }
+  ]
+ },
+ {
+  "template_key": "payment.autopay_enabled",
+  "version_number": 2,
+  "subject": "Autopay is now active for your Waves account",
+  "preview_text": "Autopay is active for future eligible Waves invoices.",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "content": "Hello {{first_name}}, autopay is now active for your Waves account."
+   },
+   {
+    "rows": [
+     {
+      "label": "Payment method",
+      "value": "{{payment_method_label}}"
+     },
+     {
+      "label": "Enabled",
+      "value": "{{autopay_enabled_date}}"
+     }
+    ],
+    "type": "details"
+   },
+   {
+    "type": "paragraph",
+    "content": "Future eligible invoices will be charged automatically after service is completed, unless a different billing arrangement applies."
+   },
+   {
+    "type": "paragraph",
+    "content": "You can review invoices, payment methods, upcoming services, and account details anytime in your customer portal."
+   },
+   {
+    "type": "cta",
+    "label": "Manage account",
+    "url_variable": "customer_portal_url"
+   },
+   {
+    "type": "small_note",
+    "content": "If you did not authorize autopay, reply to this email right away or call {{company_phone}}."
+   }
+  ]
+ },
+ {
+  "template_key": "payment.microdeposit_verification",
+  "version_number": 1,
+  "subject": "One more step to finish your payment",
+  "preview_text": "Verify the two small deposits in your bank account.",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "content": "Hi {{first_name}},"
+   },
+   {
+    "type": "paragraph",
+    "content": "Your payment for {{invoice_title}} is almost done — we just need you to verify your bank account before it can go through."
+   },
+   {
+    "type": "paragraph",
+    "content": "Our payment processor, Stripe, sent two small deposits to your account. In 1–2 business days, look for them on your bank statement, then enter the two amounts using the verification link in the email Stripe sent you. As soon as you confirm them, your payment completes automatically — there is nothing more for you to pay."
+   },
+   {
+    "rows": [
+     {
+      "label": "Amount",
+      "value": "{{amount_due}}"
+     },
+     {
+      "label": "Service",
+      "value": "{{invoice_title}}"
+     }
+    ],
+    "type": "details"
+   },
+   {
+    "type": "signature",
+    "content": "Thank you, The Waves Team"
+   },
+   {
+    "type": "cta",
+    "label": "Check payment status",
+    "url_variable": "billing_url"
+   },
+   {
+    "type": "small_note",
+    "content": "Can’t find Stripe’s verification email, or have questions? Just reply to this message and we will help."
+   }
+  ]
+ },
+ {
+  "template_key": "payment.refund_issued",
+  "version_number": 3,
+  "subject": "Your Waves refund has been issued",
+  "preview_text": "A refund has been issued for your Waves account.",
+  "blocks": [
+   {
+    "type": "paragraph",
+    "content": "Hello {{first_name}}, a refund has been issued for your Waves account."
+   },
+   {
+    "rows": [
+     {
+      "label": "Refund amount",
+      "value": "{{refund_amount}}"
+     },
+     {
+      "label": "Refund date",
+      "value": "{{refund_date}}"
+     },
+     {
+      "label": "Reason",
+      "value": "{{refund_reason}}"
+     },
+     {
+      "label": "Original payment date",
+      "value": "{{original_payment_date}}"
+     },
+     {
+      "label": "Refunded to",
+      "value": "{{payment_method_label}}"
+     }
+    ],
+    "type": "details"
+   },
+   {
+    "type": "paragraph",
+    "content": "Most banks and card providers take a few business days to post refunds after they are issued."
+   },
+   {
+    "type": "cta",
+    "label": "View account",
+    "url_variable": "customer_portal_url"
+   },
+   {
+    "type": "small_note",
+    "content": "If you do not see the refund after several business days, reply here and we will help trace it."
+   }
+  ]
+ }
+]

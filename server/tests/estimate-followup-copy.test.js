@@ -144,6 +144,14 @@ describe('truth scope — recurring-terms claims only where the estimate page ma
     expect(benefit).not.toMatch(/contract/i);
   });
 
+  test('termite makes no guarantee claim (owner ruling: guarantees stay off termite)', () => {
+    expect(PACKS.termite.benefit).not.toMatch(/guarantee/i);
+  });
+
+  test('no pack promises a reply time', () => {
+    for (const pack of Object.values(PACKS)) expect(pack.question).not.toMatch(/in minutes/i);
+  });
+
   test.each(['pest', 'lawn', 'mosquito', 'tree_shrub', 'palm_injection'])(
     '%s keeps the recurring-terms line', (category) => {
       expect(PACKS[category].benefit).toBe(RECURRING_TERMS_BENEFIT);
