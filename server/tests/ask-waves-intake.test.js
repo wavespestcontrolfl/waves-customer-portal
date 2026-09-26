@@ -321,6 +321,7 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ['Two hours.', 'When can we touch the countertops again?'],
     ['Two hours.', 'How long until it is safe?'],
     ['30 minutes.', 'When can I let my toddler crawl?'],
+    ['30 minutes.', 'When can my baby crawl again?'],
     ['The technician recommends no entry for 30 minutes.', 'What precautions after the treatment?'],
     ['The visit has a 30-minute no-entry window.', 'What precautions after the treatment?'],
     ['The visit requires a 30-minute exclusion period.', 'What precautions after the treatment?'],
@@ -645,6 +646,11 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
   test('"going to be fine" after a recognized pet emergency gets the veterinary script', () => {
     const out = normalizeIntakeResult({ reply: 'Your dog is going to be fine.', intent: 'question', service_keys: [], ready_for_quote: false }, 'openai', 'My dog ate rat poison');
     expect(out.reply).toMatch(/veterinarian or an emergency animal hospital/);
+  });
+
+  test.each(['No medical attention is needed.', 'Your child does not require medical care.'])('a care denial after an ingestion gets the emergency script: %s', (reply) => {
+    const out = normalizeIntakeResult({ reply, intent: 'question', service_keys: [], ready_for_quote: false }, 'openai', 'My child swallowed pesticide');
+    expect(out.reply).toContain(EMERGENCY_FALLBACK_RESULT.reply);
   });
 
   test('"out of danger" after an ingestion gets the emergency script', () => {
@@ -1990,6 +1996,13 @@ describe('looksLikeEmergency', () => {
     'My child may have gotten poisoned',
     'Mi hijo pudo haber sido envenenado',
     'My child was stung\nNow she is swelling',
+    "My husband didn't ingest the poison, but my daughter did",
+    'Should I take my child to the hospital?',
+    'Is this bad enough for the hospital?',
+    'Should I call Poison Control?',
+    'Possible poison exposure',
+    'My child had poison exposure',
+    'There was poison exposure to my child',
     "I'm at the hospital",
     'We are on our way to the hospital now',
     'My husband is on his way to the hospital',
@@ -2075,6 +2088,9 @@ describe('looksLikeEmergency', () => {
     'My dog ate dinner next to the bait station',
     "Pesticide didn't get in my eyes",
     'Do ants bite?\nMy child has a question about the lawn',
+    'I notice a burning smell after the treatment',
+    'I saw a rash of brown spots after the lawn treatment',
+    'I found sick ants after the pesticide treatment',
   ])('does not flag routine pest talk: %s', (text) => {
     expect(looksLikeEmergency(text)).toBe(false);
   });
