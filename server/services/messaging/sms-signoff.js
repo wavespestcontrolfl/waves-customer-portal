@@ -79,24 +79,56 @@ const SIGNATURE_TAIL_RES = { '': buildSignatureTailRes('') };
 for (const key of Object.keys(PEOPLE)) SIGNATURE_TAIL_RES[key] = buildSignatureTailRes(key);
 
 // Opt-in `anySigner`: a sign-off by a name the patterns above do not know
-// ("— Sarah", "— Élodie, Front Desk"), for callers whose text a model writes
-// from arbitrary input. Only the unambiguous dash form counts — the dash
-// starts its own line (not under a value word: "Your technician is\n— Sarah"
-// is an answer), follows a sentence ending in . or ! on the same line, or is
-// the whole text. A bare name, a closer + name, or a dash after a question on
-// the same line may be the answer or the addressee, so they stay. The name is
-// one word in any case or script, or two capitalized words, optionally
-// ", <Company>" in capitalized words — so a short phrase ("— Tuesday
-// works.") is not read as one.
+// ("— Sarah", "Thanks,\nSarah", a bare "Sarah Jones" line), for callers whose
+// text a model writes from arbitrary input. Only the unambiguous shapes count:
+//  - a dash-set name: the dash starts its own line (not under a value word,
+//    trailing spaces included: "Your technician is \n— Sarah" is an answer),
+//    follows a sentence ending in . or ! on the same line, or is the whole
+//    text. The name is one word in any case or script, or two capitalized
+//    words, optionally ", <Company>" in capitalized words;
+//  - a known closer on its own line with the name under it ("Thanks,\nSarah")
+//    — a closer from CLOSER, never any comma-ended line ("Here are the
+//    options,\nLawn Care" is a list);
+//  - a capitalized name alone on the last line under a FINISHED sentence
+//    ("We can help.\nSarah Jones"); after a question, a colon or an
+//    unfinished sentence the name is the answer.
+// A name that is the customer's own first name is the addressee in the last
+// two shapes, so it stays. A closer + name on one line, and a dash after a
+// question on the same line, may address or answer, so they stay too.
 const ANY_TOKEN = "\\p{L}[\\p{L}'\\u2019-]*";
 const CAP_TOKEN = "\\p{Lu}[\\p{L}'\\u2019-]*";
-const ANY_NAME = `(?:${CAP_TOKEN}\\s+${CAP_TOKEN}|${ANY_TOKEN})(?:\\s*,\\s*${CAP_TOKEN}(?:\\s+${CAP_TOKEN}){0,3})?`;
-const ANY_SIGNER_RE = new RegExp(
-  `(?:^|(?<=[.!]["'\\u201D\\u2019]?)[ \\t]*|(?<!\\b(?:[Ii]s|[Aa]re|[Ww]as|[Ww]ere|[Bb]e|[Aa]s|[Nn]amed|[Cc]alled|[Bb]y))[ \\t]*\\n\\s*)${DASH}\\s*${ANY_NAME}${TAIL}`,
-  // No `i`: under it \p{Lu} matches lowercase too, and "Tuesday works" would
-  // read as a two-word capitalized name.
-  'u',
-);
+const CAP_COMPANY = `(?:\\s*,\\s*${CAP_TOKEN}(?:\\s+${CAP_TOKEN}){0,3})?`;
+const CAP_NAME = `(?<name>${CAP_TOKEN}(?:\\s+${CAP_TOKEN})?)${CAP_COMPANY}`;
+const DASH_NAME = `(?<name>${CAP_TOKEN}\\s+${CAP_TOKEN}|${ANY_TOKEN})${CAP_COMPANY}`;
+// The patterns below are compiled without `i` (under it \p{Lu} also matches
+// lowercase, and "Tuesday works" would read as a capitalized name), so the
+// lowercase-only word lists are made case-insensitive by hand.
+function anyCase(source) {
+  let out = '';
+  for (let i = 0; i < source.length; i += 1) {
+    const ch = source[i];
+    if (ch === '\\') { out += ch + source[i + 1]; i += 1; } else if (/[a-z]/.test(ch)) out += `[${ch}${ch.toUpperCase()}]`;
+    else out += ch;
+  }
+  return out;
+}
+const VALUE_WORD = anyCase('(?:is|are|was|were|be|as|named|called|by)');
+const ANY_SIGNER_RES = [
+  // (?<![ \t]) starts the line-break alternative at the first trailing space,
+  // so the value-word lookbehind sees the word itself, not a space after it.
+  { re: new RegExp(`(?:^|(?<=[.!]["'\\u201D\\u2019]?)[ \\t]*|(?<!\\b${VALUE_WORD}[ \\t]*)(?<![ \\t])[ \\t]*\\n\\s*)${DASH}\\s*${DASH_NAME}${TAIL}`, 'u'), addresseeKept: false },
+  { re: new RegExp(`(?:^|(?<=[.!?])\\s+|${OWN_LINE})${anyCase(CLOSER)},?[ \\t]*\\n\\s*${CAP_NAME}${TAIL}`, 'u'), addresseeKept: true },
+  { re: new RegExp(`${AFTER_SENTENCE_LINE}${CAP_NAME}${TAIL}`, 'u'), addresseeKept: true },
+];
+
+function stripAnySignerOnce(text, addresseeFirstName) {
+  const addressee = String(addresseeFirstName || '').trim().toLowerCase();
+  return ANY_SIGNER_RES.reduce((current, { re, addresseeKept }) => current.replace(re, (...args) => {
+    const { name } = args[args.length - 1];
+    const first = String(name || '').split(/\\s+/)[0].toLowerCase();
+    return addresseeKept && addressee && first === addressee ? args[0] : '';
+  }), text).trim();
+}
 
 function addresseeKey(firstName) {
   const key = String(firstName || '').trim().toLowerCase();
@@ -142,12 +174,13 @@ const THANKS_BY_NAME_RES = Object.fromEntries(Object.entries(PEOPLE).map(([key, 
 // and `anySigner: true` to also strip a dash sign-off by any name (above).
 function stripTrailingSignature(message, { addresseeFirstName, anySigner = false } = {}) {
   const key = addresseeKey(addresseeFirstName);
-  const res = anySigner ? [...SIGNATURE_TAIL_RES[key], ANY_SIGNER_RE] : SIGNATURE_TAIL_RES[key];
+  const res = SIGNATURE_TAIL_RES[key];
   const original = String(message || '').trim();
   if (key && THANKS_BY_NAME_RES[key].test(original)) return original;
   let text = original;
   for (let i = 0; i < 3; i += 1) {
-    const next = stripOnce(text, res);
+    let next = stripOnce(text, res);
+    if (anySigner) next = stripAnySignerOnce(next, addresseeFirstName);
     if (next === text) break;
     text = next;
   }

@@ -148,6 +148,9 @@ describe('aiTriageLead — a sign-off by any name is removed', () => {
     ['We can help. — sarah', 'We can help.'],
     // Codex r3 on #4975: a question with the signer on its own dash line.
     ['Would you like to schedule?\n— Sarah', 'Would you like to schedule?'],
+    // Codex r4 on #4975: non-dash sign-offs by any name.
+    ['We can help.\nThanks,\nSarah', 'We can help.'],
+    ['We can help.\nSarah Jones', 'We can help.'],
     ['We can help. — Élodie', 'We can help.'],
   ])('%j is stripped to %j and the triage kept', async (suggestedReply, expected) => {
     mockCreate.mockResolvedValue(reply({ ...VALID, suggestedReply }));
@@ -177,7 +180,8 @@ describe('aiTriageLead — a sign-off by any name is removed', () => {
     'Who will be coming?\nAdam',
     'Which service would help?\nLawn Care',
     'Which service? — Lawn Care',
-    'We can help.\n\nSarah',
+    'Your technician is \n— Sarah',
+    'Here are the options,\nLawn Care',
     // Review on #4975: a name given as the answer, not a sign-off.
     'Your technician is — Sarah',
     'Your technician is:\nSarah',

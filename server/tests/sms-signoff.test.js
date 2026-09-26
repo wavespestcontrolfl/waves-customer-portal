@@ -158,6 +158,11 @@ describe('stripTrailingSignature — anySigner', () => {
     ['We can help. — sarah', 'We can help.'],
     ['We can help. — Élodie', 'We can help.'],
     ['We can help.\n\n— Sarah Jones, Waves Team', 'We can help.'],
+    // Codex r4 on #4975: non-dash sign-offs by any name.
+    ['We can help.\nThanks,\nSarah', 'We can help.'],
+    ['We can help.\nSarah Jones', 'We can help.'],
+    ['We can help.\n\nSarah', 'We can help.'],
+    ['We can help.\nBest regards,\nSarah Jones, Waves Team', 'We can help.'],
   ])('%j → %j', (text, expected) => {
     expect(any(text)).toBe(expected);
   });
@@ -169,7 +174,10 @@ describe('stripTrailingSignature — anySigner', () => {
     'Your technician is — Sarah',
     'Your technician is\n— Sarah',
     'Your technician is:\nSarah',
-    'We can help.\n\nSarah',
+    'Your technician is \n— Sarah',
+    'Your technician this week:\nSarah',
+    'Who will be coming?\nSarah Jones',
+    'Here are the options,\nLawn Care',
     'Thanks, Sarah!',
     'See you Tuesday — Mike will be your tech.',
   ])('%j is not a sign-off and is kept', (text) => {
@@ -178,5 +186,11 @@ describe('stripTrailingSignature — anySigner', () => {
 
   test('without anySigner an unknown name is left alone (existing callers unchanged)', () => {
     expect(stripTrailingSignature('We can help. — Sarah')).toBe('We can help. — Sarah');
+  });
+
+  test('a bare name or closer block that is the customer\'s own first name is the addressee and stays', () => {
+    const opts = { anySigner: true, addresseeFirstName: 'Sarah' };
+    expect(stripTrailingSignature('Great to hear from you.\nSarah', opts)).toBe('Great to hear from you.\nSarah');
+    expect(stripTrailingSignature('We can help.\nSarah', { anySigner: true, addresseeFirstName: 'Tom' })).toBe('We can help.');
   });
 });
