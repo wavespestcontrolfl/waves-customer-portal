@@ -77,7 +77,7 @@ on exercising real customer records or payment flows with live credentials.
   + `npm run dev` in `client/`, login via `/api/admin/auth/login` and stash
   `waves_admin_token` in localStorage. Routing trap: admin Customer 360 is a
   PANEL at `/admin/customers?customerId=<id>` — `/admin/customers/<id>`
-  falls through to the customer login.
+  lands on `/admin/dashboard` (unknown staff URLs redirect there).
 - NEVER verify against a real customer's live record — use the staff
   `adminDraftPreview` path or owner-created test records. On a real
   estimate page, frequency-tab clicks POST selection events even in

@@ -5,15 +5,27 @@ const db = require('../models/db');
 const ContactLedger = require('./collections/contact-ledger');
 const { collectionsChannelPermitted } = require('./collections/rail-guard');
 
+const TERMINAL_EMAIL_REFUSAL_CODES = new Set([
+  'NO_EMAIL_RECIPIENT',
+  'BILLING_EMAIL_NOT_SELECTED',
+  'BILLING_EMAIL_DISABLED',
+  'EMAIL_SUPPRESSED',
+]);
+
 // A permanent Email refusal (no address, Email not selected, template
 // unavailable, suppressed) can never succeed on retry. It resolves that leg
 // without claiming delivery, so the episode is not held open forever.
 function isTerminalEmailRefusal(result) {
-  return result?.ok === false && result.retryable !== true && result.deferred !== true
-    && result.deliveryOutcome !== 'uncertain' && (
+  if (!result || result.retryable === true || result.deferred === true
+      || result.held === true || result.deliveryHeld === true
+      || result.deliveryOutcome === 'uncertain') return false;
+  const legacy = result.ok === false && (
     (result.skipped === true && ['missing_email', 'billing_email_not_selected', 'template_unavailable'].includes(result.reason))
     || (result.blocked === true && /^Suppressed: /.test(result.reason || ''))
   );
+  const canonical = result.sent === false && result.blocked === true
+    && result.deliveryOutcome === 'not_sent' && TERMINAL_EMAIL_REFUSAL_CODES.has(result.code);
+  return legacy || canonical;
 }
 
 // Readers for a rail-guard `detail: true` verdict that also accept the plain
@@ -82,6 +94,7 @@ async function recordLegOutcome(entry, channel, result, results) {
     results[channel] = { ...result, deliveryHeld: true, code: 'REMINDER_ACCEPTANCE_UNSTAMPED' };
     return null;
   }
+  if (result?.held === true || result?.deliveryHeld === true) return null;
   if (result?.deliveryOutcome === 'uncertain') return null;
   const terminal = channel === 'email' && isTerminalEmailRefusal(result);
   const stamped = await ContactLedger.markSendFailed(entry, {
