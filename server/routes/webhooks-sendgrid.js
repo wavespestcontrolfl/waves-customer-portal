@@ -812,6 +812,14 @@ async function handleEmailMessageEvent(ev, message, client = db) {
 
   const updates = computeEmailMessageEventUpdates(ev, message, now);
   if (updates) await client('email_messages').where({ id: message.id }).update(updates);
+  // The route invokes this handler only after proving the event belongs to
+  // the current email_messages attempt (provider id or guarded id+token
+  // fallback). Heal only that billing message's bound Email reservation;
+  // the helper uses a savepoint so a failed stamp cannot abort this webhook.
+  if (String(ev.event || '').toLowerCase() === 'delivered') {
+    await require('../services/billing-email-reservation')
+      .markBillingEmailReservationDelivered({ ...message, ...updates }, client);
+  }
   await reconcileSummaryForEmailEvent(ev, message, updates, client);
   const groupKey = await groupKeyForEmailMessage(message, client);
   await recordEmailSuppressionForEvent(ev, message, groupKey, now, client);
