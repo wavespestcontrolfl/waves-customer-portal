@@ -2814,7 +2814,14 @@ async function decidedLapseKeepsCoverage(term, conn = db) {
     || await conn('service_requests')
       .where({ customer_id: term.customer_id, category: 'cancellation' })
       .where('created_at', '>=', term.created_at || term.term_start)
-      .whereRaw("metadata->'cancel_plan'->>'prepayDisposition' = 'end_now_refund'")
+      // Stated, or derived the way admin-cancellation resolvePrepay derives
+      // it when the request left it blank: a whole-account cancel (empty
+      // scope) that is not "end of coverage".
+      .whereRaw(`(metadata->'cancel_plan'->>'prepayDisposition' = 'end_now_refund'
+        OR (metadata->'cancel_plan' IS NOT NULL
+          AND coalesce(metadata->'cancel_plan'->>'prepayDisposition', '') = ''
+          AND coalesce(metadata->'cancel_plan'->'scope', '[]'::jsonb) = '[]'::jsonb
+          AND coalesce(metadata->'cancel_plan'->>'effectiveDate', 'now') <> 'end_of_coverage'))`)
       .first('id');
   return !endedNow;
 }

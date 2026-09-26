@@ -186,13 +186,16 @@ postgres('decided-lapse annual-prepay terms keep their coverage guarantees throu
     expect((await coverage(t)).every((row) => row.prepaid_method === null)).toBe(true);
   });
 
-  test('an end-now-refund cancel whose case write failed is still never reseeded', async () => {
+  test.each([
+    ['stated on the request', { scope: [], prepayDisposition: 'end_now_refund', effectiveDate: 'now' }],
+    ['derived from a whole-account "now" with the disposition left blank', { scope: [], prepayDisposition: null, effectiveDate: 'now' }],
+  ])('an end-now-refund cancel whose case write failed is still never reseeded (%s)', async (_label, cancelPlan) => {
     const t = await seededTerm();
-    // The cancellation request carries the disposition from before the
-    // processor ran; the case that would repeat it was never written.
+    // The cancellation request carries the plan from before the processor
+    // ran; the case that would repeat it was never written.
     await trx('service_requests').insert({
       customer_id: t.customerId, category: 'cancellation', subject: 'Cancel plan', source: 'admin', status: 'new',
-      metadata: JSON.stringify({ cancel_plan: { scope: [], prepayDisposition: 'end_now_refund', effectiveDate: 'now' } }),
+      metadata: JSON.stringify({ cancel_plan: cancelPlan }),
     });
     const pulled = await coverage(t);
     await trx('scheduled_services').whereIn('id', pulled.map((v) => v.id)).update({ status: 'cancelled', updated_at: new Date() });
@@ -201,6 +204,19 @@ postgres('decided-lapse annual-prepay terms keep their coverage guarantees throu
     await AnnualPrepayRenewals.refreshActiveTermsForCustomer(t.customerId, trx);
     await AnnualPrepayRenewals.refreshTermSnapshot(t.termId, trx);
     expect(await coverage(t)).toHaveLength(0);
+  });
+
+  test('an end-of-coverage request with the disposition left blank does not block the reseed', async () => {
+    const t = await seededTerm();
+    await trx('service_requests').insert({
+      customer_id: t.customerId, category: 'cancellation', subject: 'Cancel plan', source: 'admin', status: 'new',
+      metadata: JSON.stringify({ cancel_plan: { scope: [], prepayDisposition: null, effectiveDate: 'end_of_coverage' } }),
+    });
+    await decideCancel(t);
+    const kept = await upcoming(t);
+    await skip(kept[kept.length - 1]);
+    await AnnualPrepayRenewals.refreshActiveTermsForCustomer(t.customerId, trx);
+    expect(await upcoming(t)).toHaveLength(kept.length);
   });
 
   test('an end-now-refund cancel is never reseeded or stamped', async () => {
