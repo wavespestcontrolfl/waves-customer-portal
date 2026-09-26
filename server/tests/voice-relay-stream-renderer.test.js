@@ -1649,3 +1649,73 @@ describe('write-tool turn ownership recheck (block parity)', () => {
     expect(captured[1]).toBeUndefined();
   });
 });
+
+// Sandy slice 1, PR D — targeted race test for the "delayed tool response
+// with changed instructions" eval family (server/fixtures/voice-relay-eval/
+// scenarios.json: delayed-tool-response-changed-instructions). The eval
+// fixture grades the conversation-level outcome (never re-book a stale slot);
+// this test pins the underlying relay MECHANIC that outcome depends on:
+// handlePrompt's serialized `_chain` (relay-conversation.js ~1938-1957) must
+// queue a second caller turn behind a still-open first turn — including its
+// pending write tool AND its post-tool continuation round — rather than ever
+// letting the two turns' model rounds or messages interleave.
+describe('queued next-turn race: delayed tool response with changed instructions', () => {
+  afterEach(() => { delete process.env.VOICE_RELAY_RENDERER; });
+
+  test('a second prompt (changed instructions) arriving while the first turn\'s write tool is still pending queues behind the WHOLE turn — no round overlap, no duplicate write', async () => {
+    const { IsolatedConvo, captured } = isolatedConvoFactory();
+    const send = jest.fn();
+    const convo = new IsolatedConvo({ callSid: 'CA-queue-race', from: '+19415551234', send });
+    let resolveTool;
+    const executeToolBoundedSpy = jest.spyOn(convo, '_executeToolBounded')
+      .mockImplementation(() => new Promise((resolve) => { resolveTool = resolve; }));
+
+    const firstPrompt = convo.handlePrompt('book me for tuesday at 1pm');
+    await flush();
+    const round1 = captured[0];
+    round1.resolve({
+      content: [
+        { type: 'text', text: 'Let me get that request in for you.' },
+        { type: 'tool_use', id: 't1', name: 'request_booking', input: { slot_ref: 'S2' } },
+      ],
+      stop_reason: 'tool_use',
+    });
+    await flush(); // finalize settles; the tool loop is now awaiting the (still-pending) write tool
+    expect(executeToolBoundedSpy).toHaveBeenCalledTimes(1);
+
+    // The caller changes their mind before the pending write settles. This
+    // second prompt must queue onto _chain, never interleave with the still-
+    // open first turn.
+    const secondPrompt = convo.handlePrompt("actually cancel that — I'm seeing ants right now, can someone come take care of that instead");
+    await flush();
+    await flush();
+    expect(captured[1]).toBeUndefined(); // no round for EITHER turn starts while the write tool is pending
+
+    resolveTool('Booking request placed for Tuesday at 1 PM — PENDING office review.');
+    await flush();
+    const round1Continuation = captured[1];
+    expect(round1Continuation).toBeTruthy(); // turn 1's OWN continuation round (sees the tool result) — not turn 2's
+    round1Continuation.resolve({ content: [{ type: 'text', text: 'All set — a team member will confirm.' }], stop_reason: 'end_turn' });
+    await firstPrompt;
+    await flush();
+    await flush();
+
+    // Turn 1 fully closed (tool_result + its continuation) before turn 2's
+    // caller message was ever recorded — never interleaved.
+    const msgs = convo.messages;
+    const toolResultIdx = msgs.findIndex((m) => m.role === 'user' && Array.isArray(m.content) && m.content[0]?.type === 'tool_result');
+    const secondCallerIdx = msgs.findIndex((m) => m.role === 'user' && typeof m.content === 'string' && m.content.includes('ants'));
+    expect(toolResultIdx).toBeGreaterThanOrEqual(0);
+    expect(secondCallerIdx).toBeGreaterThan(toolResultIdx);
+
+    await flush();
+    const round2 = captured[2];
+    expect(round2).toBeTruthy(); // turn 2's round only starts once turn 1 is fully settled
+    round2.resolve({ content: [{ type: 'text', text: 'Sure, I can get that filed for you.' }], stop_reason: 'end_turn' });
+    await secondPrompt;
+
+    // The abandoned booking was placed exactly once — the changed instruction
+    // never re-triggers or duplicates the stale write.
+    expect(executeToolBoundedSpy).toHaveBeenCalledTimes(1);
+  });
+});
