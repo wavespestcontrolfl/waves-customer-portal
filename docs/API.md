@@ -5,10 +5,17 @@ Base URL: `http://localhost:3001/api` (development)
 
 ## Authentication
 
-All endpoints except `/auth/*` require a Bearer token in the Authorization header:
+The customer API sections below require a Bearer token in the Authorization
+header unless an endpoint is explicitly identified as public:
 ```
 Authorization: Bearer <jwt_token>
 ```
+
+`POST /auth/send-code`, `POST /auth/verify-code`, and `POST /auth/refresh` are
+the public authentication entry points. `GET /auth/me` requires the customer
+Bearer token. Health checks and provider-signed or tokenized public routes
+outside `/auth` have their own contracts; see
+[`docs/public-route-contracts.md`](public-route-contracts.md).
 
 ### POST /auth/send-code
 Send OTP verification code to customer's phone via Twilio.
@@ -20,8 +27,12 @@ Send OTP verification code to customer's phone via Twilio.
 
 **Response (200):**
 ```json
-{ "success": true, "message": "Verification code sent" }
+{ "success": true, "message": "If an account exists for that number, a verification code has been sent." }
 ```
+
+This uniform anti-enumeration response is also returned for an unknown number
+or a delivery failure. A 200 response does not confirm account existence or
+SMS delivery.
 
 ### POST /auth/verify-code
 Verify OTP and receive JWT tokens.
@@ -116,7 +127,7 @@ Customer requests a reschedule.
 
 ---
 
-## Billing (Square)
+## Billing (Stripe)
 
 ### GET /billing
 Payment history with card details.
@@ -128,11 +139,17 @@ Current balance, upcoming charges, monthly rate, next charge date.
 All cards on file with brand, last four, expiry, default/autopay status.
 
 ### POST /billing/cards
-Add a new card using a Square card nonce from the Web Payments SDK.
+Save a payment method after completing the Stripe SetupIntent flow:
+
+1. `POST /billing/cards/setup-intent` to obtain `clientSecret` and
+   `setupIntentId`.
+2. Confirm the SetupIntent with Stripe using `clientSecret`.
+3. Submit the confirmed SetupIntent id here. `paymentMethodId` is optional;
+   when omitted, the server resolves it from the SetupIntent.
 
 **Request:**
 ```json
-{ "cardNonce": "cnon:card-nonce-ok" }
+{ "setupIntentId": "seti_...", "paymentMethodId": "pm_..." }
 ```
 
 ### DELETE /billing/cards/:id
@@ -157,11 +174,13 @@ Update one or more notification preferences.
   "serviceReminder24h": true,
   "techEnRoute": true,
   "serviceCompleted": true,
-  "billingReminder": false,
   "seasonalTips": true,
   "smsEnabled": true
 }
 ```
+
+Legacy clients may still send `billingReminder`; the server accepts and
+discards that compatibility field, so it does not change a preference.
 
 ---
 
@@ -178,9 +197,9 @@ These run on cron schedules and are not exposed as API endpoints:
 
 | Job | Schedule | Description |
 |-----|----------|-------------|
-| Service Reminders | Daily 8:00 AM ET | SMS to customers with services tomorrow |
-| Monthly Billing | 1st of month 6:00 AM ET | Process autopay charges via Square |
-| Billing Reminders | 28th of month 10:00 AM ET | SMS to opted-in customers about upcoming charge |
+| Appointment Reminders | Every 15 minutes | Process persisted 72-hour and 24-hour appointment reminders that are due |
+| Monthly Billing | Daily 8:00 AM ET | Process Stripe autopay for customers whose configured billing day is today |
+| Autopay Pre-charge Reminders | Daily 9:00 AM ET | Notify eligible customers about scheduled charges three days out |
 
 ## Error Responses
 

@@ -2,17 +2,21 @@
 
 ## Pre-flight
 
-The Intelligence Bar is fully built. 104 tools, 11 modules, 13 pages wired, ⌘K global overlay in AdminLayout. The route is already registered in `server/index.js`. This guide covers what remains to go live.
+The Intelligence Bar route is registered in `server/index.js`, and the ⌘K
+global overlay is mounted in `AdminLayout`. Tool families and page contexts
+continue to evolve; use the route registry described below instead of a fixed
+count when checking the current surface.
 
 ## Step 1: Verify Files Exist
 
-Confirm all 11 tool modules are present:
+Confirm the tool modules imported by the route are present:
 ```bash
-ls server/services/intelligence-bar/
-# Expected: tools.js schedule-tools.js dashboard-tools.js seo-tools.js
-#           procurement-tools.js revenue-tools.js review-tools.js
-#           comms-tools.js tax-tools.js leads-tools.js tech-tools.js
+rg "services/intelligence-bar/.+-tools" server/routes/admin-intelligence-bar.js
+ls server/services/intelligence-bar/*-tools.js
 ```
+
+`server/routes/admin-intelligence-bar.js` is the current module/context
+registry. Do not use the original 11-module inventory as a completeness check.
 
 Confirm the route file exists and is registered:
 ```bash
@@ -41,7 +45,9 @@ In Railway dashboard, confirm these are set:
 - `DATABASE_URL` — Already set (PostgreSQL).
 
 Optional:
-- `INTELLIGENCE_BAR_TECH_MODEL` — Override the tech portal model (default: `claude-sonnet-4-20250514`)
+- `INTELLIGENCE_BAR_TECH_MODEL` — Optional tech-portal override. Without it,
+  the tech context uses `MODELS.FLAGSHIP` from `server/config/models.js`
+  (currently `claude-opus-4-8` as the code default; the registry is authoritative).
 
 ## Step 4: Deploy
 
@@ -66,7 +72,7 @@ for ctx in customers leads schedule dashboard seo procurement revenue reviews co
   echo ""
 done
 
-# Test tech context separately (uses Sonnet)
+# Test tech context separately (uses MODELS.FLAGSHIP unless explicitly overridden)
 echo "=== Testing: tech ==="
 curl -s -X POST "$BASE/admin/intelligence-bar/query" \
   -H "Authorization: Bearer $TOKEN" \
@@ -116,7 +122,8 @@ Watch Railway logs for the first few days:
 Key things to watch:
 - **Errors**: Any `[intelligence-bar] Tool X failed:` messages → fix the SQL query or missing table
 - **Latency**: Tool-use loops with 4+ rounds → might need query optimization
-- **Model usage**: Verify tech context logs show `claude-sonnet-4-20250514`, not Opus
+- **Model usage**: Verify the tech context uses `MODELS.FLAGSHIP` from the
+  registry unless `INTELLIGENCE_BAR_TECH_MODEL` is explicitly configured
 - **Token costs**: Each Opus query with 2-3 tool rounds costs ~$0.05-0.15. Monitor daily spend.
 
 ## Troubleshooting
