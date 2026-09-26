@@ -264,3 +264,42 @@ test('a failed sms leg does not prevent an independently delivered email leg fro
   expect(AccountMembershipEmail.sendPrevisitBalanceReminder).toHaveBeenCalledTimes(1);
   expect(result).toMatchObject({ sent: 1, skipped: 0 });
 });
+
+// An unreadable channel choice must not fall through to the legacy SMS+Email
+// path (that would ignore a stored selection): nothing sends, the claim is
+// released, and the next sweep in the window retries.
+test('a notification_prefs lookup failure sends nothing and releases the claim', async () => {
+  armOneVisit();
+  const releaseChain = armReleaseChain();
+  const originalImpl = db.getMockImplementation();
+  db.mockImplementation((table) => {
+    if (table === 'notification_prefs') {
+      const failing = chain();
+      failing.first = jest.fn(async () => { throw new Error('connection reset'); });
+      return failing;
+    }
+    return originalImpl(table);
+  });
+  const result = await runSweep({ now: new Date('2026-08-14T15:00:00Z') });
+  expect(sendReminderChannels).not.toHaveBeenCalled();
+  expect(sendCustomerMessage).not.toHaveBeenCalled();
+  expect(AccountMembershipEmail.sendPrevisitBalanceReminder).not.toHaveBeenCalled();
+  expect(releaseChain.update).toHaveBeenCalledWith({ balance_reminder_sent_at: null });
+  expect(result).toMatchObject({ sent: 0, skipped: 1 });
+});
+
+// One leg delivered while a sibling is still held: count it sent, but release
+// the claim so the next sweep retries the held leg (sendReminderChannels never
+// re-sends the delivered one).
+test('a delivered leg with a held sibling counts as sent and still releases the claim', async () => {
+  armOneVisit({ notificationPrefs: { billing_channels: ['sms', 'email'] } });
+  const releaseChain = armReleaseChain();
+  sendReminderChannels.mockResolvedValueOnce({
+    complete: false,
+    deliveredNow: ['sms'],
+    results: { email: { deferred: true, retryable: true, code: 'BILLING_EMAIL_PREPARATION_HOLD' } },
+  });
+  const result = await runSweep({ now: new Date('2026-08-14T15:00:00Z') });
+  expect(releaseChain.update).toHaveBeenCalledWith({ balance_reminder_sent_at: null });
+  expect(result).toMatchObject({ sent: 1, skipped: 0 });
+});

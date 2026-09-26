@@ -334,13 +334,20 @@ async function runSweep({ now = new Date() } = {}) {
       // Explicit per-channel billing delivery choice (PR #4843 router core).
       // A stored choice is enforced whether or not GATE_BILLING_NOTIFICATION_
       // CHANNELS is live (same read-side contract as balance-reminder.js's
-      // latePaymentCheck) — a lookup failure degrades to null (no explicit
-      // choice), which is the exact same path as "never set one".
+      // latePaymentCheck). An unreadable choice must not fall through to the
+      // legacy SMS+Email path (that would ignore a stored selection): release
+      // the claim and let the next sweep in the window retry.
       let notifPrefs = null;
       try {
         notifPrefs = await db('notification_prefs').where({ customer_id: visit.customer_id }).first();
       } catch (prefsErr) {
         logger.warn(`[previsit-balance] notification_prefs lookup failed for customer ${visit.customer_id}: ${prefsErr.message}`);
+        await db('scheduled_services')
+          .where({ id: visit.id })
+          .update({ balance_reminder_sent_at: null })
+          .catch(() => {});
+        skipped++;
+        continue;
       }
       const explicitChannels = explicitBillingChannels(notifPrefs || {}, 'billing');
 
@@ -409,24 +416,21 @@ async function runSweep({ now = new Date() } = {}) {
             });
           },
         });
-        // A delivered leg landed: count it sent and keep the claim (a
-        // sibling leg may still be pending/held — sendReminderChannels
-        // tracks that per channel, never inferred from this one outcome).
-        if (result.deliveredNow.length) { sent++; continue; }
-        // Nothing delivered. Only release the claim while the episode is
-        // still open (a replay hold, an uncertain outcome, or a transient
-        // policy/provider denial) so the NEXT sweep retries the same
-        // pending leg(s) under the same eventKey. A COMPLETE episode with
-        // nothing delivered means every leg resolved terminally (e.g. no
-        // email address, Email not selected) — that is settled, not a
-        // reason to keep churning the claim daily forever.
+        // Release the claim while the episode is still open (a replay hold,
+        // an uncertain outcome, or a transient policy/provider denial on ANY
+        // selected leg — even when a sibling leg delivered now) so the next
+        // sweep in the window retries only the pending leg(s) under the same
+        // eventKey; sendReminderChannels never re-sends a delivered or
+        // resolved leg. A COMPLETE episode keeps the claim: every leg is
+        // delivered or terminally resolved.
         if (!result.complete) {
           await db('scheduled_services')
             .where({ id: visit.id })
             .update({ balance_reminder_sent_at: null })
             .catch(() => {});
         }
-        skipped++;
+        if (result.deliveredNow.length) sent++;
+        else skipped++;
         continue;
       }
 
