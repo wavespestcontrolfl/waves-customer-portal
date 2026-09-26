@@ -36,12 +36,16 @@ one. Merge gates are unchanged until then.
 
 ## Hard lines
 
-- **Managed tooling only.** Use `npm run dev`, `dev:managed-client`,
-  `dev:debug`, `dev:migrate`, `dev:doctor`, the `qa:*` scripts, and the
-  `scripts/qa/*` harnesses, which build their environment with
-  `childEnvironment` in `scripts/dev/context.js`. Never `dev:server` or
-  `dev:client`: those are the raw commands, and `dev:server` loads `.env`. The verifier starts
-  nothing else that loads server code: no bare `node`, no repo operational
+- **Managed tooling only.** Use only commands that build their child
+  environment with `childEnvironment` (`scripts/dev/context.js`), directly
+  or through `scripts/qa/browser.js`: `npm run dev`, `dev:managed-client`,
+  `dev:debug`, `dev:migrate`, `dev:doctor`, `qa:database`, `qa:e2e`,
+  `qa:seed`, `qa:cleanup`, `qa:previews`, `audit:estimate-previews`, and
+  the `scripts/qa` harnesses named in the surface map. Before using any
+  other harness, confirm it launches that way. Not `qa:glass` or the
+  backlink scripts (they inherit the parent environment), and never
+  `dev:server` or `dev:client` (the raw commands; `dev:server` loads
+  `.env`). The verifier starts nothing else that loads server code: no bare `node`, no repo operational
   scripts, no local `test:contracts`, no `eval:*`. Outside the managed
   runner, server code can read the checkout's `.env`, which may point at
   production. Talking to the managed stack over HTTP (a browser, `curl`) is
@@ -105,6 +109,11 @@ own `.tmp/dev/database.env` on the same verified cluster, plus its own
 worktree's private database. If that setup is not possible, run the base on
 rung 2 and say so. For a bug fix, the base must show the bug. For a new
 capability, record "not on base" and verify the end state instead.
+
+When the base run ends, including when it fails, run `npm run qa:cleanup`
+and `npm run worktree:stop` inside the base worktree, then
+`git worktree remove --force .tmp/live-verify/base` from the head
+worktree. A later run can then recreate it at a new merge-base.
 
 ## Patch-id
 
