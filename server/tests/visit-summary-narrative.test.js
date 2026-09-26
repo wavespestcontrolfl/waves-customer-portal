@@ -148,6 +148,28 @@ test('current appointment appears once and an authoritative empty schedule remov
   expect(deterministicSummary(failedLookup)).toBe(current);
 });
 
+test('missing pressure row still strips a stale appointment after a successful empty schedule lookup', async () => {
+  const pestPressure = buildPestPressureCustomerView({
+    config: DEFAULT_CONFIG,
+    scoreRow: null,
+    serviceRecord: { service_line: 'pest', service_type: 'Monthly Pest Control' },
+  });
+  const args = input({
+    recap: 'We treated the perimeter. Your next visit is scheduled for Sep 24.',
+    pestPressure,
+    pestPressureEvidence: null,
+    nextAppointment: null,
+  });
+  const facts = groundingFacts(args);
+
+  expect(pestPressure).toMatchObject({ enabled: true, displayScore: null });
+  expect(facts.pressure).toBeNull();
+  expect(facts.recap).toBe('We treated the perimeter.');
+  await expect(applyVisitSummaryNarrative(args, {
+    callModel: jest.fn().mockResolvedValue({ ok: false, reason: 'provider_down' }),
+  })).resolves.toBe('We treated the perimeter.');
+});
+
 test('appointment sanitizer preserves work and bare next-visit care plans', () => {
   const recap = 'We sealed a 1.5-foot gap, and your next appointment is booked for Sep 24 at 1 p.m. We will recheck the garage next visit.';
   expect(recapWithoutStaleAppointment(recap, { date: 'Friday, October 2' })).toBe(

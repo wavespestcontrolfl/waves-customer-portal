@@ -164,8 +164,9 @@ function groundingFacts({
   findings = [],
   nextAppointment,
 } = {}) {
-  const findingList = [findings].filter(Array.isArray).flat();
-  const zeroInspectionSupported = pestPressureEvidence.zeroInspectionSupported === true
+  const pressureEvidence = pestPressureEvidence || {};
+  const findingList = Array.isArray(findings) ? findings : [];
+  const zeroInspectionSupported = pressureEvidence.zeroInspectionSupported === true
     || findingList.some((finding) => finding?.category === 'no_activity');
   const pressureIsZero = Number(pestPressure?.displayScore) === 0;
   const pressure = pestPressure && pestPressure.enabled && pestPressure.displayScore != null
@@ -184,23 +185,25 @@ function groundingFacts({
     }))
     .filter((finding) => finding.title)
     .slice(0, 3);
-  const nextVisit = nextAppointment && nextAppointment.scheduledDate
+  const appointment = nextAppointment || {};
+  const nextVisitDate = formatNextVisitDate(appointment.scheduledDate);
+  const nextVisit = nextVisitDate
     ? {
-      date: formatNextVisitDate(nextAppointment.scheduledDate),
-      window: formatArrivalWindow(nextAppointment.windowStart),
+      date: nextVisitDate,
+      window: formatArrivalWindow(appointment.windowStart),
     }
     : null;
   return {
     recap: recapWithoutStaleAppointment(
       recap,
-      nextVisit && nextVisit.date ? nextVisit : null,
+      nextVisit,
       nextAppointment !== undefined,
     ),
     serviceTypeDisplay: cleanText(serviceTypeDisplay) || 'pest control service',
     areasServiced: (Array.isArray(areasServiced) ? areasServiced : []).map(cleanText).filter(Boolean).slice(0, 10),
     pressure,
     findings: visibleFindings,
-    nextVisit: nextVisit && nextVisit.date ? nextVisit : null,
+    nextVisit,
   };
 }
 
