@@ -724,6 +724,11 @@ const PAYMENT_SECURITY_PATTERN = /\b(?:credit|debit|card|cards|payment|payments|
 // A payment question that also names a pesticide subject ("Is it safe for my
 // kids? I already paid") stays on the safety route.
 const PESTICIDE_SUBJECT_PATTERN = /\b(?:pets?|dogs?|cats?|kids?|child\w*|babies|baby|spray\w*|pesticid\w*|chemicals?|products?|treat\w*|re-?ent\w*|dry|drying|label)\b/i;
+// Explicit product/chemical questions tied to an application or treatment
+// ("Which chemical do you apply for my lawn treatment?", "What product do you
+// spray?") stay on the controlled route even with no support rows — the
+// compound keeps ambiguous bare uses ("Do you spray inside?") on the model.
+const PRODUCT_INTENT_PATTERN = /\b(?:which|what)\b[^?.!]{0,40}\b(?:chemicals?|products?|pesticides?|insecticides?|herbicides?|fungicides?|fertiliz\w+)\b|\b(?:chemicals?|products?|pesticides?|insecticides?|herbicides?|fungicides?)\b[^?.!]{0,40}\b(?:appl\w*|treat\w*|use[sd]?|using|spray\w*)\b|\b(?:appl\w*|treat\w*|spray\w*)\b[^?.!]{0,40}\b(?:chemicals?|products?|pesticides?|insecticides?|herbicides?|fungicides?)\b/i;
 const APPLICATION_WORD_PATTERN = /\b(?:applied|application|chemicals?|products?|spray|label|dry|dries|dried|drying|pets?|dogs?|cats?|kids?|child|children)\b/i;
 // Broadens LABEL_SAFETY_QUESTION_PATTERN with generic service-family words
 // (lawn/pest/inside/outside/etc.) that name a topic but not a safety intent
@@ -1543,7 +1548,7 @@ async function answerEstimateQuestion({
   // requirement, so it still routes deterministically whenever the estimate
   // actually has matching support rows, exactly as before this round.
   const paymentOnly = PAYMENT_SECURITY_PATTERN.test(cleanQuestion) && !PESTICIDE_SUBJECT_PATTERN.test(cleanQuestion);
-  if ((LABEL_SAFETY_QUESTION_PATTERN.test(cleanQuestion) && !paymentOnly)
+  if (((LABEL_SAFETY_QUESTION_PATTERN.test(cleanQuestion) || PRODUCT_INTENT_PATTERN.test(cleanQuestion)) && !paymentOnly)
     || (FORCE_FALLBACK_QUESTION_PATTERN.test(cleanQuestion) && supportRows(context).length)) {
     return {
       answer: answerEstimateQuestionFallback(cleanQuestion, context),

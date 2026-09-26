@@ -228,4 +228,19 @@ describe('estimate assistant model prompt — customer-safe context boundary (AW
     expect(dispatch).not.toHaveBeenCalled();
     expect(safety.source).toBe('fallback');
   });
+
+  test.each([
+    'Which chemical do you apply for my lawn treatment?',
+    'What product do you spray around the house?',
+  ])('explicit product question "%s" with empty support stays on the controlled fallback', async (question) => {
+    const result = await answerEstimateQuestion({
+      database: null,
+      question,
+      estimate: { id: 'synthetic-estimate-10', token: 'synthetic-token-10', status: 'sent', customer_name: 'Synthetic Customer', address: 'Synthetic Address' },
+      estData: { services: [{ service: 'lawn_care', label: 'Lawn Care' }] },
+      pricingBundle: { waveGuardTier: 'WaveGuard' },
+    });
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(result.source).toBe('fallback');
+  });
 });
