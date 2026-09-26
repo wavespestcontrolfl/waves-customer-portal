@@ -645,7 +645,17 @@ semantics; both also accept an OPTIONAL `timeline` — the visitor's own
 `this_month` | `browsing` plus the form aliases in
 `server/services/lead-timeline.js`; stored verbatim in
 `extracted_data.timeline`, mapped onto `leads.urgency`, and it WINS over
-the AI triage's urgency guess; unknown values are ignored, never guessed),
+the AI triage's urgency guess; unknown values are ignored, never guessed;
+and both accept an OPTIONAL `sign_host` — the Astro `/neighbor/` page's
+"Which home had the sign?" answer, read from that exact key only,
+normalized to printable text with whitespace collapsed and capped at 120
+characters, stored in `extracted_data.sign_host` (kept through the AI
+triage's extracted_data replace) and as a "Saw our yard sign at: …" line on
+the new-lead / existing-customer Customer 360 note so the office can give
+the sign host the $25 thank-you credit. STAFF-ONLY: it never joins
+`message`, the AI triage prose or the Lead Response Agent's message, and
+the agent's `get_lead_details` tool strips it; a missing, blank or
+non-string value is a no-op),
 `/api/public/newsletter/*` (subscribe, confirm, unsubscribe, posts,
 posts/by-slug/:slug, rss, quiz/:token/:quizId/:answer,
 feedback/:token/:reaction, e/:token/:eventId (event click-through:

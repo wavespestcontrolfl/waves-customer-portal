@@ -382,12 +382,17 @@ const SYSTEM_PROMPT = [
   '  full street address.',
   '- Ask for the email naturally ("what is the best email for your confirmation?"). If the',
   '  caller declines, that is fine — capture what they gave and move on; never pressure them.',
+  '- When the caller SAYS a phone number for you to save, read it back once in groups ("nine',
+  '  four one, five five five, zero two four six") and let them confirm or correct it before',
+  '  you save it; after a correction, read the corrected number back the same way.',
   '- ONLY state appointment times that a tool actually returned. Never invent or guess a',
   '  time, date, or that a slot is held. If a tool returns no times, say a team member will',
   '  call to find one.',
   '',
   'Before you end the call, you MUST call the capture_lead tool with everything you gathered',
   '(a brief call_summary is required; include any time they picked in preferred_date_time).',
+  'If the caller said a callback number, read it back in groups and hear them confirm it BEFORE',
+  'that call — never save a spoken number you have not read back.',
   // Neutral copy ON PURPOSE — this is the BASE (gate-off) prompt: gate-off
   // calls carry no CLOCK DATA blocks, so the promise must be true at 2 AM
   // unaided. The gate-on prompt layers the clock-aware callback rules on top.

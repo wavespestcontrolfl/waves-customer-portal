@@ -1194,7 +1194,7 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
     // out-of-range value therefore degrades to NEUTRAL (fail-safe toward
     // "no adjustment"), never to whatever loaded before it.
     constants.TREE_SHRUB.densityFactors = { light: 1, moderate: 1, heavy: 1 };
-    constants.TREE_SHRUB.routinePalmCareReserve = { perPalmAnnual: 0, minutesPerPalmVisit: 0 };
+    constants.TREE_SHRUB.routinePalmCareReserve = { perPalmAnnual: 0, minutesPerPalmVisit: 0, largePalmFactor: 1 };
     constants.TREE_SHRUB.callbackReservePerVisit = 0;
     if (config.ts_material_rates) {
       const rates = config.ts_material_rates;
@@ -1239,6 +1239,10 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
         // 0–10 min/palm/visit; beyond that a 12-palm property books 2h of
         // palm time per visit.
         if (perPalmMin >= 0 && perPalmMin <= 10) reserve.minutesPerPalmVisit = perPalmMin;
+        const largeFactor = Number(rates.palm_large_factor);
+        // 1–5x: a large palm prices at least like a regular one, and past 5
+        // regular palms' worth is a typo, not a canopy.
+        if (largeFactor >= 1 && largeFactor <= 5) reserve.largePalmFactor = largeFactor;
       }
       const callbackReserve = Number(rates.callback_reserve_per_visit);
       if (callbackReserve >= 0 && callbackReserve <= 50) {
