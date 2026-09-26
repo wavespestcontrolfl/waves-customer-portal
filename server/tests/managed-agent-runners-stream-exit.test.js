@@ -318,6 +318,23 @@ describe('lead-response-agent — a status_idle event is not terminal on its own
     expect(seen.streamSignal.aborted).toBe(true);
   });
 
+  it('a non-2xx stream response whose error body stalls still ends at the deadline (session_timeout)', async () => {
+    process.env.LEAD_AGENT_TIMEOUT_MS = '50';
+    global.fetch = jest.fn((url, opts = {}) => {
+      if (opts.method === 'POST' && String(url).endsWith('/sessions')) return Promise.resolve({ ok: true, status: 200, json: async () => ({ id: 'sess-1' }) });
+      if (opts.method === 'POST') return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
+      return Promise.resolve({
+        ok: false,
+        status: 503,
+        body: {},
+        text: () => new Promise((_, reject) => opts.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })))),
+      });
+    });
+
+    expect(await run(load(path))).toBeNull();
+    expect(recorded()).toMatchObject({ failure: expect.objectContaining({ code: 'session_timeout' }) });
+  });
+
   it('a kickoff POST that fails closes the already-open stream', async () => {
     const { fetchMock, seen } = fetchWithOpenStream({
       onEventsPost: () => Promise.resolve({ ok: false, status: 500, text: async () => 'boom' }),
