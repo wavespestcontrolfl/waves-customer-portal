@@ -37,14 +37,14 @@ jest.mock('../models/db', () => {
     q.where = (cond) => { q._cond = cond; return q; };
     q.first = async () => {
       if (!q._cond?.vendor) return undefined;
-      return dbState.lines[`${q._cond.vendor}|${q._cond.order_number}|${q._cond.line_no}`];
+      return dbState.lines[`${q._cond.vendor}|${q._cond.order_number}|${q._cond.shipment_key}|${q._cond.line_no}`];
     };
     q.insert = (row) => {
       const res = {
         onConflict: () => res,
         ignore: () => res,
         returning: async () => {
-          const key = `${row.vendor}|${row.order_number}|${row.line_no}`;
+          const key = `${row.vendor}|${row.order_number}|${row.shipment_key}|${row.line_no}`;
           if (dbState.lines[key]) return [];
           const saved = { id: `line-${Object.keys(dbState.lines).length + 1}`, ...row };
           dbState.lines[key] = saved;
@@ -69,6 +69,7 @@ jest.mock('../models/db', () => {
 });
 
 const { processReceiptLine, classifyItem } = require('../services/purchase-receipts/receipt-processor');
+const { matchAmazonTitleToProduct } = require('../services/purchase-receipts/product-matcher');
 
 const taurus = { id: 'p-taurus', name: 'Taurus SC', container_size: '78 fl oz', inventory_unit: 'fl_oz' };
 
@@ -82,6 +83,7 @@ beforeEach(() => {
   for (const k of Object.keys(dbState.lines)) delete dbState.lines[k];
   mockAdjustStock.mockClear();
   mockUpdateRestockRequest.mockClear();
+  matchAmazonTitleToProduct.mockClear();
 });
 
 describe('classifyItem', () => {
@@ -127,41 +129,41 @@ describe('processReceiptLine', () => {
   const email = { id: 'email-1', received_at: new Date() };
 
   test('unmatched item: inserts a purchase_receipt_lines row, never touches inventory-operations', async () => {
-    const outcome = await processReceiptLine({ email, orderNumber: '111-1111111-1111111', item: { title: 'Chromebook', quantity: 1 }, lineNo: 1 });
+    const outcome = await processReceiptLine({ email, orderNumber: '111-1111111-1111111', shipmentKey: 'ship-1', item: { title: 'Chromebook', quantity: 1 }, lineNo: 1 });
     expect(outcome).toMatchObject({ status: 'unmatched', inserted: true });
     expect(mockAdjustStock).not.toHaveBeenCalled();
     expect(mockUpdateRestockRequest).not.toHaveBeenCalled();
-    expect(dbState.lines['amazon|111-1111111-1111111|1']).toMatchObject({ status: 'unmatched', product_id: null });
+    expect(dbState.lines['amazon|111-1111111-1111111|ship-1|1']).toMatchObject({ status: 'unmatched', product_id: null });
   });
 
   test('logged item with no live restock request calls adjustStock with the computed amount + amazon_delivery provenance', async () => {
     mockState.match = { matched: true, product: taurus };
-    const outcome = await processReceiptLine({ email, orderNumber: '114-9578837-7732259', item: { title: 'Taurus SC Termiticide 78 oz', quantity: 2 }, lineNo: 1 });
+    const outcome = await processReceiptLine({ email, orderNumber: '114-9578837-7732259', shipmentKey: 'ship-1', item: { title: 'Taurus SC Termiticide 78 oz', quantity: 2 }, lineNo: 1 });
     expect(outcome.status).toBe('logged');
     expect(outcome.viaRequest).toBe(false);
     expect(mockAdjustStock).toHaveBeenCalledWith('p-taurus',
       { movementType: 'restock', quantity: 156, unit: 'fl_oz' },
       expect.objectContaining({ source: 'amazon_delivery', extraMetadata: { source: 'amazon_delivery', orderNumber: '114-9578837-7732259', emailId: 'email-1', rawTitle: 'Taurus SC Termiticide 78 oz' } }));
     expect(mockUpdateRestockRequest).not.toHaveBeenCalled();
-    const saved = dbState.lines['amazon|114-9578837-7732259|1'];
+    const saved = dbState.lines['amazon|114-9578837-7732259|ship-1|1'];
     expect(saved).toMatchObject({ status: 'logged', movement_id: 'mv-1', restock_request_id: null, received_qty: 156, received_unit: 'fl_oz' });
   });
 
   test('an open/ordered restock request for the matched product is RECEIVED instead of a second restock', async () => {
     mockState.match = { matched: true, product: taurus };
     mockState.liveRequest = { id: 'req-open', status: 'open' };
-    const outcome = await processReceiptLine({ email, orderNumber: '114-9578837-7732259', item: { title: 'Taurus SC Termiticide 78 oz', quantity: 1 }, lineNo: 1 });
+    const outcome = await processReceiptLine({ email, orderNumber: '114-9578837-7732259', shipmentKey: 'ship-1', item: { title: 'Taurus SC Termiticide 78 oz', quantity: 1 }, lineNo: 1 });
     expect(outcome.viaRequest).toBe(true);
     expect(mockUpdateRestockRequest).toHaveBeenCalledWith('req-open',
       { action: 'receive', quantity: 78, unit: 'fl_oz' },
       expect.objectContaining({ source: 'amazon_delivery' }));
     expect(mockAdjustStock).not.toHaveBeenCalled();
-    expect(dbState.lines['amazon|114-9578837-7732259|1']).toMatchObject({ movement_id: 'mv-2', restock_request_id: 'req-open' });
+    expect(dbState.lines['amazon|114-9578837-7732259|ship-1|1']).toMatchObject({ movement_id: 'mv-2', restock_request_id: 'req-open' });
   });
 
-  test('idempotency: running the same (order, line) twice logs once', async () => {
+  test('idempotency: running the same (order, shipment, line) twice logs once', async () => {
     mockState.match = { matched: true, product: taurus };
-    const args = { email, orderNumber: '114-9578837-7732259', item: { title: 'Taurus SC Termiticide 78 oz', quantity: 2 }, lineNo: 1 };
+    const args = { email, orderNumber: '114-9578837-7732259', shipmentKey: 'ship-1', item: { title: 'Taurus SC Termiticide 78 oz', quantity: 2 }, lineNo: 1 };
     const first = await processReceiptLine(args);
     const second = await processReceiptLine(args);
     expect(first.status).toBe('logged');
@@ -169,12 +171,35 @@ describe('processReceiptLine', () => {
     expect(mockAdjustStock).toHaveBeenCalledTimes(1);
   });
 
+  test('split shipment: SAME order, DIFFERENT shipmentKey -> both shipments log (never dropped as a duplicate)', async () => {
+    mockState.match = { matched: true, product: taurus };
+    const shipmentOne = await processReceiptLine({ email, orderNumber: '113-3148685-4885834', shipmentKey: 'ship-one', item: { title: 'Taurus SC Termiticide 78 oz', quantity: 4 }, lineNo: 1 });
+    const shipmentTwo = await processReceiptLine({ email: { ...email, id: 'email-2' }, orderNumber: '113-3148685-4885834', shipmentKey: 'ship-two', item: { title: 'Taurus SC Termiticide 78 oz', quantity: 3 }, lineNo: 1 });
+    expect(shipmentOne.status).toBe('logged');
+    expect(shipmentTwo.status).toBe('logged');
+    expect(mockAdjustStock).toHaveBeenCalledTimes(2);
+    expect(dbState.lines['amazon|113-3148685-4885834|ship-one|1']).toBeDefined();
+    expect(dbState.lines['amazon|113-3148685-4885834|ship-two|1']).toBeDefined();
+  });
+
+  test('no shipmentKey passed falls back to the email\'s own id when it has no gmail_id', async () => {
+    mockState.match = { matched: true, product: taurus };
+    const outcome = await processReceiptLine({ email: { id: 'email-9' }, orderNumber: '114-9578837-7732259', item: { title: 'Taurus SC Termiticide 78 oz', quantity: 1 }, lineNo: 1 });
+    expect(outcome.status).toBe('logged');
+    expect(dbState.lines['amazon|114-9578837-7732259|email-9|1']).toBeDefined();
+  });
+
+  test('no shipmentKey and no email id at all -> skipped, never inserted', async () => {
+    const outcome = await processReceiptLine({ email: {}, orderNumber: '114-9578837-7732259', item: { title: 'Anything', quantity: 1 }, lineNo: 1 });
+    expect(outcome).toEqual({ skipped: true, reason: 'no_shipment_key' });
+  });
+
   test('a restock/adjust failure rolls back the claim so the next run retries the line', async () => {
     mockState.match = { matched: true, product: taurus };
     mockState.adjustError = new Error('DB unavailable');
-    const args = { email, orderNumber: '114-9578837-7732259', item: { title: 'Taurus SC Termiticide 78 oz', quantity: 2 }, lineNo: 1 };
+    const args = { email, orderNumber: '114-9578837-7732259', shipmentKey: 'ship-1', item: { title: 'Taurus SC Termiticide 78 oz', quantity: 2 }, lineNo: 1 };
     await expect(processReceiptLine(args)).rejects.toThrow('DB unavailable');
-    expect(dbState.lines['amazon|114-9578837-7732259|1']).toBeUndefined();
+    expect(dbState.lines['amazon|114-9578837-7732259|ship-1|1']).toBeUndefined();
     // A clean retry now succeeds and logs exactly once.
     mockState.adjustError = null;
     const retried = await processReceiptLine(args);
@@ -183,21 +208,34 @@ describe('processReceiptLine', () => {
   });
 
   test('no Order # on the email -> skipped, never inserted', async () => {
-    const outcome = await processReceiptLine({ email, orderNumber: null, item: { title: 'Anything', quantity: 1 }, lineNo: 1 });
+    const outcome = await processReceiptLine({ email, orderNumber: null, shipmentKey: 'ship-1', item: { title: 'Anything', quantity: 1 }, lineNo: 1 });
     expect(outcome).toEqual({ skipped: true, reason: 'no_order_number' });
     expect(Object.keys(dbState.lines)).toHaveLength(0);
   });
 
   test('size_mismatch and needs_size items are inserted with no inventory-operations call', async () => {
     mockState.match = { matched: true, product: taurus };
-    const mismatch = await processReceiptLine({ email, orderNumber: '200-0000000-0000000', item: { title: 'Taurus SC Termiticide 96 oz', quantity: 1 }, lineNo: 1 });
+    const mismatch = await processReceiptLine({ email, orderNumber: '200-0000000-0000000', shipmentKey: 'ship-1', item: { title: 'Taurus SC Termiticide 96 oz', quantity: 1 }, lineNo: 1 });
     expect(mismatch.status).toBe('size_mismatch');
 
     mockState.match = { matched: true, product: { id: 'p-nosize', name: 'No Size Product', container_size: null } };
-    const needsSize = await processReceiptLine({ email, orderNumber: '200-0000000-0000000', item: { title: 'No Size Product', quantity: 1 }, lineNo: 2 });
+    const needsSize = await processReceiptLine({ email, orderNumber: '200-0000000-0000000', shipmentKey: 'ship-1', item: { title: 'No Size Product', quantity: 1 }, lineNo: 2 });
     expect(needsSize.status).toBe('needs_size');
 
     expect(mockAdjustStock).not.toHaveBeenCalled();
     expect(mockUpdateRestockRequest).not.toHaveBeenCalled();
+  });
+
+  test('forcedStatus "no_items": one placeholder row, no matching/classification, no inventory-operations call', async () => {
+    const outcome = await processReceiptLine({
+      email, orderNumber: '300-0000000-0000000', shipmentKey: 'ship-1',
+      item: { title: 'Delivered: 1 Lawn & Garden item', quantity: 1 }, lineNo: 1, forcedStatus: 'no_items',
+    });
+    expect(outcome).toEqual({ status: 'no_items', inserted: true, product: null });
+    expect(dbState.lines['amazon|300-0000000-0000000|ship-1|1']).toMatchObject({ status: 'no_items', product_id: null, raw_title: 'Delivered: 1 Lawn & Garden item' });
+    expect(mockAdjustStock).not.toHaveBeenCalled();
+    expect(mockUpdateRestockRequest).not.toHaveBeenCalled();
+    // matchAmazonTitleToProduct is never consulted for a forced status.
+    expect(matchAmazonTitleToProduct).not.toHaveBeenCalled();
   });
 });

@@ -2433,7 +2433,7 @@ function initScheduledJobs() {
         const result = await runPurchaseReceiptRestockSweep();
         if (result?.skipped) return;
         const loggedCount = result?.logged?.length || 0;
-        const attentionCount = (result?.unmatched?.length || 0) + (result?.sizeMismatch?.length || 0) + (result?.needsSize?.length || 0);
+        const attentionCount = (result?.unmatched?.length || 0) + (result?.sizeMismatch?.length || 0) + (result?.needsSize?.length || 0) + (result?.noItems?.length || 0);
         if (loggedCount > 0 || attentionCount > 0 || result?.errors?.length > 0) {
           logger.info(`[purchase-receipt-restock] ${loggedCount} logged, ${attentionCount} need a look, ${result?.errors?.length || 0} error(s)`);
         }

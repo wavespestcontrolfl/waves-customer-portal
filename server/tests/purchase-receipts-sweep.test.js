@@ -14,8 +14,11 @@ jest.mock('../services/purchase-receipts/receipt-processor', () => ({
   processReceiptLine: jest.fn(async () => mockState.outcomes.shift()),
 }));
 jest.mock('../models/db', () => {
+  // Shared by BOTH the main sweep's own emails query and findSiblingItems'
+  // sibling-email query — no test in this file needs both to answer
+  // differently at once, so one fixed array (mockState.emails) is enough.
   const q = {};
-  for (const m of ['whereRaw', 'where', 'orderBy']) q[m] = () => q;
+  for (const m of ['whereRaw', 'where', 'orderBy', 'limit', 'whereILike', 'orWhereILike']) q[m] = () => q;
   q.then = (resolve, reject) => Promise.resolve(mockState.emails).then(resolve, reject);
   return jest.fn(() => q);
 });
@@ -83,8 +86,8 @@ describe('processReceiptEmail', () => {
     const result = await processReceiptEmail(deliveredEmail, { notify });
 
     expect(processReceiptLine).toHaveBeenCalledTimes(2);
-    expect(processReceiptLine.mock.calls[0][0]).toMatchObject({ orderNumber: '114-9578837-7732259', item: { title: 'Taurus SC Termiticide 78 oz', quantity: 2 }, lineNo: 1 });
-    expect(processReceiptLine.mock.calls[1][0]).toMatchObject({ item: { title: 'Chromebook', quantity: 1 }, lineNo: 2 });
+    expect(processReceiptLine.mock.calls[0][0]).toMatchObject({ orderNumber: '114-9578837-7732259', shipmentKey: 'e1', item: { title: 'Taurus SC Termiticide 78 oz', quantity: 2 }, lineNo: 1 });
+    expect(processReceiptLine.mock.calls[1][0]).toMatchObject({ shipmentKey: 'e1', item: { title: 'Chromebook', quantity: 1 }, lineNo: 2 });
 
     expect(result.logged).toEqual([{ title: 'Taurus SC Termiticide 78 oz', receivedQty: 156, receivedUnit: 'fl_oz', productId: 'p1' }]);
     expect(result.unmatched).toEqual([{ title: 'Chromebook' }]);
@@ -119,6 +122,52 @@ describe('processReceiptEmail', () => {
     const result = await processReceiptEmail(deliveredEmail, { notify: jest.fn() });
     expect(result.errors).toEqual([{ title: 'Taurus SC Termiticide 78 oz', message: 'inventory-operations boom' }]);
     expect(result.unmatched).toEqual([{ title: 'Chromebook' }]);
+  });
+
+  test('an itemless Delivered email ("N Lawn & Garden item(s)") pulls its items from a sibling Ordered: email', async () => {
+    const itemless = {
+      id: 'e3', from_address: 'order-update@amazon.com', subject: 'Delivered: 1 Lawn & Garden item',
+      body_text: 'Order # 100-0000000-0000000\n\nTrack your package: https://www.amazon.com/x?orderId=100-0000000-0000000\n',
+      received_at: new Date(),
+    };
+    // Consumed by findSiblingItems' `emails` query (processReceiptEmail
+    // itself never runs the main sweep's own emails query).
+    mockState.emails = [{
+      from_address: 'auto-confirm@amazon.com', subject: 'Ordered: "Bora-Care..."',
+      body_text: 'Order # 100-0000000-0000000\n\n* Bora-Care Termiticide/Insecticide, 1 Gallon\n  Quantity: 1\n',
+    }];
+    mockState.outcomes = [{ status: 'unmatched', inserted: true }];
+    const notify = jest.fn(async () => ({}));
+    const result = await processReceiptEmail(itemless, { notify });
+
+    expect(processReceiptLine).toHaveBeenCalledTimes(1);
+    expect(processReceiptLine.mock.calls[0][0]).toMatchObject({
+      orderNumber: '100-0000000-0000000', item: { title: 'Bora-Care Termiticide/Insecticide, 1 Gallon', quantity: 1 }, lineNo: 1,
+    });
+    expect(processReceiptLine.mock.calls[0][0].forcedStatus).toBeUndefined(); // a recovered item is processed normally, not as a placeholder
+    expect(result.unmatched).toEqual([{ title: 'Bora-Care Termiticide/Insecticide, 1 Gallon' }]);
+    expect(result.noItems).toEqual([]);
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  test('an itemless Delivered email with NO recoverable sibling records exactly one no_items placeholder line', async () => {
+    const itemless = {
+      id: 'e4', from_address: 'order-update@amazon.com', subject: 'Delivered: 2 Lawn & Garden items',
+      body_text: 'Order # 100-1111111-1111111\n\nTrack your package: https://www.amazon.com/x\n',
+      received_at: new Date(),
+    };
+    mockState.emails = []; // no sibling candidates at all
+    mockState.outcomes = [{ status: 'no_items', inserted: true, product: null }];
+    const notify = jest.fn(async () => ({}));
+    const result = await processReceiptEmail(itemless, { notify });
+
+    expect(processReceiptLine).toHaveBeenCalledTimes(1);
+    expect(processReceiptLine.mock.calls[0][0]).toMatchObject({
+      orderNumber: '100-1111111-1111111', item: { title: 'Delivered: 2 Lawn & Garden items', quantity: 1 }, lineNo: 1, forcedStatus: 'no_items',
+    });
+    expect(result.noItems).toEqual([{ title: 'Delivered: 2 Lawn & Garden items', orderNumber: '100-1111111-1111111' }]);
+    expect(result.logged).toEqual([]);
+    expect(notify).not.toHaveBeenCalled(); // no_items never bells
   });
 });
 

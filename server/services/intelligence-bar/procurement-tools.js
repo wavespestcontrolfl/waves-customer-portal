@@ -252,7 +252,7 @@ Use for: "what Amazon deliveries need a look?", "why didn't the Taurus SC order 
     input_schema: {
       type: 'object',
       properties: {
-        status: { type: 'string', enum: ['unmatched', 'size_mismatch', 'needs_size', 'all'], description: 'Filter by why it was not logged (default: all three non-logged statuses)' },
+        status: { type: 'string', enum: ['unmatched', 'size_mismatch', 'needs_size', 'no_items', 'all'], description: 'Filter by why it was not logged (default: all non-logged statuses)' },
         limit: { type: 'integer', minimum: 1, maximum: 200 },
       },
     },
@@ -1163,7 +1163,7 @@ async function updateRestockRequest(input, actionContext) {
     receipt: { label: labels[input.action], summary, href: result.href } };
 }
 
-const UNLOGGED_PURCHASE_STATUSES = ['unmatched', 'size_mismatch', 'needs_size'];
+const UNLOGGED_PURCHASE_STATUSES = ['unmatched', 'size_mismatch', 'needs_size', 'no_items'];
 
 // Read-only visibility into the Amazon delivery auto-restock lane
 // (server/services/purchase-receipts) for whatever it declined to log
@@ -1187,7 +1187,7 @@ async function listUnloggedPurchases(input) {
         created_at: r.created_at,
       })),
       total: rows.length,
-      note: 'unmatched = no confident product match (non-chemical items land here too); size_mismatch = the title\'s own pack size disagreed with the product\'s container_size; needs_size = the matched product has no parseable container_size.',
+      note: 'unmatched = no confident product match (non-chemical items land here too); size_mismatch = the title\'s own pack size disagreed with the product\'s container_size; needs_size = the matched product has no parseable container_size; no_items = the delivery email (and any sibling order/shipment email found) had no parseable item at all — title is "Amazon delivery, order X, items unknown".',
     };
   } catch (err) {
     logger.warn(`[intelligence-bar:procurement] list_unlogged_purchases failed: ${err.message}`);
