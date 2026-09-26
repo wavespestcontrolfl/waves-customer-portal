@@ -25,7 +25,7 @@
 
 const db = require('../../../models/db');
 const logger = require('../../logger');
-const { etCalendarDayOf } = require('../../../utils/datetime-et');
+const { etCalendarDayOf, addETBusinessDays } = require('../../../utils/datetime-et');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -42,16 +42,23 @@ const LIVE_CONVERSATION_OUTCOMES = new Set([
   'wrong_party',
 ]);
 
-// `date` (Date) + n business days (Mon–Fri), as a Date at the same UTC time.
+// `date` (Date) + n business days (Mon–Fri). Thin wrapper over the shared
+// addETBusinessDays (server/utils/datetime-et.js, also used by
+// routes/booking.js's re-service latency guard and routes/stripe-webhook.js's
+// ACH "expected to clear" date) — one implementation instead of a third
+// local copy. The one caller below and this module's own test always pass a
+// noon-UTC-anchored Date (`${date}T12:00:00Z`, matching
+// normalizeIntendedPaymentDate's own validated shape), for which
+// addETBusinessDays' ET-calendar-day arithmetic and the prior plain-UTC
+// arithmetic land on the identical calendar date every time (verified
+// across weekends, both DST transitions, and a year boundary) — the one
+// behavioral difference is that addETBusinessDays always RETURNS noon UTC on
+// the destination day (it re-anchors there to stay clear of DST seams),
+// whereas the old local version preserved the input's exact time-of-day;
+// since every actual input here already IS noon UTC, this is a no-op change
+// in practice, not a real divergence.
 function addBusinessDays(date, n) {
-  const d = new Date(date.getTime());
-  let remaining = n;
-  while (remaining > 0) {
-    d.setUTCDate(d.getUTCDate() + 1);
-    const dow = d.getUTCDay();
-    if (dow !== 0 && dow !== 6) remaining--;
-  }
-  return d;
+  return addETBusinessDays(date, n);
 }
 
 // ISO YYYY-MM-DD sanity for the model-supplied intended payment date: a real

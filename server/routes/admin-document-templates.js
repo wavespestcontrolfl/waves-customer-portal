@@ -467,6 +467,10 @@ router.post('/:key/contracts', async (req, res, next) => {
       const { PROGRAM_TEMPLATE_KEYS, normalizeAddress } = require('../services/termite-program-agreement');
       if (PROGRAM_TEMPLATE_KEYS.includes(loaded.template.template_key)) {
         await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`termite-agreement:${customer.id}`]);
+        // Customer row before the template and contract rows — the order
+        // every program-agreement writer holds; the cancellation event below
+        // takes the customer FK key lock (Codex #4922 r4).
+        await trx('customers').where({ id: customer.id }).forUpdate().first('id');
         // Revalidate AFTER the lock: this request may have waited behind
         // the v2 migration rollback (or a publish) — the render above was
         // captured before the wait, and inserting it unchecked would put a
