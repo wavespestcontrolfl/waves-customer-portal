@@ -34,8 +34,16 @@ const DBPR_HEADER = [
 function csvRow(fields = {}) {
   return DBPR_HEADER.map((h) => `"${String(fields[h] ?? '').replace(/"/g, '""')}"`).join(',');
 }
+// Unrelated licenses elsewhere in the district: a real extract has
+// thousands of rows, and the loader rejects one under 1,000 as partial.
+const FILLER_ROWS = Array.from({ length: 1000 }, (_, i) => ({
+  'Location Street Address': `${9000 + i} Filler Rd`,
+  'Location Zip Code': '99999',
+  'Business Name': `Filler ${i}`,
+}));
 function csv(rows) {
-  return [DBPR_HEADER.map((h) => `"${h}"`).join(','), ...rows.map(csvRow)].join('\r\n') + '\r\n';
+  const all = rows.length ? [...rows, ...FILLER_ROWS] : rows;
+  return [DBPR_HEADER.map((h) => `"${h}"`).join(','), ...all.map(csvRow)].join('\r\n') + '\r\n';
 }
 
 function plazaSuiteRecord(overrides = {}) {

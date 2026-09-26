@@ -157,7 +157,7 @@ describe('resolveViaDbprLicense', () => {
     const fetchText = jest.fn().mockResolvedValue(text);
     const result = await resolveViaDbprLicense({
       address: { street: '4400 Test Commons Parkway East', unit: '102', zip: '00000' },
-    }, { fetchText });
+    }, { fetchText, minRows: 1 });
     expect(result).toEqual(expect.objectContaining({
       value: 1400,
       businessName: 'TEST TACO SHOP',
@@ -200,7 +200,7 @@ describe('DBPR fetch failure backoff', () => {
   });
 });
 
-describe('requireWarmCache — the cache-hit fast path never awaits a download', () => {
+describe('requireWarmCache — the cache-hit fast path never awaits a download (PR #4840 admin lookup)', () => {
   const { peekDistrictRows, loadDistrictRows, warmDistrictRowsInBackground } = require('../services/commercial-suite-size/dbpr-food-license');
   beforeEach(() => _resetCacheForTests());
 
@@ -213,7 +213,7 @@ describe('requireWarmCache — the cache-hit fast path never awaits a download',
   test('peekDistrictRows returns the rows once loadDistrictRows has warmed the cache', async () => {
     const text = csv([{ 'Location Street Address': '4400 Test Commons Pkwy E #102', 'Location Zip Code': '00000' }]);
     const fetchText = jest.fn().mockResolvedValue(text);
-    await loadDistrictRows(7, { fetchText });
+    await loadDistrictRows(7, { fetchText, minRows: 1 });
     const warm = peekDistrictRows(7);
     expect(Array.isArray(warm)).toBe(true);
     expect(warm).toHaveLength(1);
@@ -225,7 +225,7 @@ describe('requireWarmCache — the cache-hit fast path never awaits a download',
     const fetchText = jest.fn().mockReturnValue(pending);
     const result = await resolveViaDbprLicense({
       address: { street: '4400 Test Commons Parkway East', unit: '102', zip: '00000' },
-    }, { requireWarmCache: true, fetchText });
+    }, { requireWarmCache: true, fetchText, minRows: 1 });
     expect(result).toBeNull();
     // The background warm-up DID kick the real fetch (for next time) — this
     // proves the resolve above returned without waiting on it.
@@ -242,7 +242,7 @@ describe('requireWarmCache — the cache-hit fast path never awaits a download',
       'Number of Seats or Rental Units': '25',
     }]);
     const warmFetch = jest.fn().mockResolvedValue(text);
-    await loadDistrictRows(7, { fetchText: warmFetch }); // warm the cache first, same as a prior fresh lookup would
+    await loadDistrictRows(7, { fetchText: warmFetch, minRows: 1 }); // warm the cache first, same as a prior fresh lookup would
 
     const fetchText = jest.fn(); // must never be called on the warm path
     const result = await resolveViaDbprLicense({
@@ -325,7 +325,7 @@ describe('compound designators ("Bldg 9 Unit 204") normalize to the same key on 
 
   test('normalizeUnitValue reduces "Bldg 9 Unit 204" and "BLDG 9 UNIT 204" to the same key', () => {
     expect(normalizeUnitValue('Bldg 9 Unit 204')).toBe(normalizeUnitValue('BLDG 9 UNIT 204'));
-    expect(normalizeUnitValue('Bldg 9 Unit 204')).toBe('9-204');
+    expect(normalizeUnitValue('Bldg 9 Unit 204')).toBe('bldg 9 unit 204');
   });
 
   test('the compound designator sits in the street line — the "Bldg 9" prefix must not leak into the street name', () => {
@@ -366,15 +366,22 @@ describe('DBPR row unit in Location Address Line 2, and both phone columns', () 
 describe('compound unit keys keep component boundaries', () => {
   const { normalizeUnitValue } = require('../services/commercial-suite-size/dbpr-food-license');
   test('Bldg 9 Unit 204 and Bldg 92 Unit 04 never collide', () => {
-    expect(normalizeUnitValue('Bldg 9 Unit 204')).toBe('9-204');
-    expect(normalizeUnitValue('BLDG 9 UNIT 204')).toBe('9-204');
-    expect(normalizeUnitValue('Bldg 92 Unit 04')).toBe('92-04');
+    expect(normalizeUnitValue('Bldg 9 Unit 204')).toBe('bldg 9 unit 204');
+    expect(normalizeUnitValue('BLDG 9 UNIT 204')).toBe('bldg 9 unit 204');
+    expect(normalizeUnitValue('Bldg 92 Unit 04')).toBe('bldg 92 unit 04');
+    expect(normalizeUnitValue('Bldg 9 Unit 204')).not.toBe(normalizeUnitValue('Bldg 92 Unit 04'));
   });
   test('single designators reduce to the bare value; words containing a designator are not mangled', () => {
     expect(normalizeUnitValue('#102')).toBe('102');
     expect(normalizeUnitValue('Suite 102')).toBe('102');
     expect(normalizeUnitValue('Ste. 102')).toBe('102');
-    expect(normalizeUnitValue('Suite WEST-2')).toBe('WEST-2');
+    expect(normalizeUnitValue('Suite WEST-2')).toBe('west-2');
+  });
+  // A building-level license ("Bldg 9") must never match a suite that
+  // happens to share the number ("Suite 9") — a structural designator is
+  // kept in the key, so the two never collide even though both name "9".
+  test('a building designator is not a suite: "Bldg 9" and "Suite 9" produce different keys', () => {
+    expect(normalizeUnitValue('Bldg 9')).not.toBe(normalizeUnitValue('Suite 9'));
   });
 });
 
@@ -397,7 +404,7 @@ describe('Codex r6 DBPR matching', () => {
     expect(dbpr.matchDbprRow([r1, r2], { street: '4400 Test Commons Pkwy E', unit: 'Suite 102', zip: '00000', phone: '+15550100222' })).toBe(r2);
     expect(dbpr.matchDbprRow([r1, r2], { street: '4400 Test Commons Pkwy E', unit: 'Suite 102', zip: '00000' })).toBeNull();
   });
-  test('joining an in-flight download honors the joiner\'s own timeout', async () => {
+  test('joining an in-flight download honors the joiner\'s own timeout (PR #4840 admin lookup budget)', async () => {
     dbpr._resetCacheForTests();
     let release;
     const slow = new Promise((r) => { release = r; });
@@ -413,9 +420,101 @@ describe('Codex r6 DBPR matching', () => {
 
 describe('Codex r7: Spc and Space compare equal', () => {
   const { normalizeUnitValue } = require('../services/commercial-suite-size/dbpr-food-license');
-  test('"Spc 12", "Spc. 12" and "Space 12" all reduce to "12"', () => {
-    expect(normalizeUnitValue('Spc 12')).toBe('12');
-    expect(normalizeUnitValue('Spc. 12')).toBe('12');
-    expect(normalizeUnitValue('Space 12')).toBe('12');
+  test('"Spc 12", "Spc. 12" and "Space 12" all reduce to the same key', () => {
+    expect(normalizeUnitValue('Spc 12')).toBe('spc 12');
+    expect(normalizeUnitValue('Spc. 12')).toBe('spc 12');
+    expect(normalizeUnitValue('Space 12')).toBe('spc 12');
+  });
+});
+
+describe('Codex #4872 r2: exact-unit licenses win over hint-only rows', () => {
+  const { matchDbprRow } = require('../services/commercial-suite-size/dbpr-food-license');
+  const base = { 'Location Street Address': '4400 TEST COMMONS PKWY E', 'Location Zip Code': '00000' };
+  test('an exact-suite license is chosen over a unitless row that matches the caller phone', () => {
+    const exact = { ...base, 'Location Address Line 2': 'STE 102', 'Business Name': 'SUITE TENANT' };
+    const unitless = { ...base, 'Business Name': 'OTHER TENANT', 'Primary Phone Number': '555-010-0111' };
+    expect(matchDbprRow([exact, unitless], {
+      street: '4400 Test Commons Pkwy E', unit: 'Suite 102', zip: '00000', phone: '+15550100111',
+    })).toBe(exact);
+  });
+  test('with no exact-suite license, a unitless row still matches on the caller phone', () => {
+    const unitless = { ...base, 'Business Name': 'ONLY TENANT', 'Primary Phone Number': '555-010-0111' };
+    expect(matchDbprRow([unitless], {
+      street: '4400 Test Commons Pkwy E', unit: 'Suite 102', zip: '00000', phone: '+15550100111',
+    })).toBe(unitless);
+  });
+});
+
+describe('Codex #4872 r2: stale-if-error is bounded', () => {
+  const dbpr = require('../services/commercial-suite-size/dbpr-food-license');
+  beforeEach(() => dbpr._resetCacheForTests());
+  const HOUR = 60 * 60 * 1000;
+  test('a failed refresh serves the last extract within the window, and nothing after it', async () => {
+    let t = 0;
+    const good = jest.fn().mockResolvedValue(csv([{ 'Business Name': 'TEST TACO SHOP', 'Location Zip Code': '00000' }]));
+    const rows = await dbpr.loadDistrictRows(7, { fetchText: good, now: () => t, minRows: 1 });
+    expect(rows).toHaveLength(1);
+    const failing = jest.fn().mockRejectedValue(new Error('HTTP 503'));
+    t = 30 * HOUR; // past the 24h TTL, inside the 48h stale-if-error window
+    await expect(dbpr.loadDistrictRows(7, { fetchText: failing, now: () => t, minRows: 1 })).resolves.toHaveLength(1);
+    t = 80 * HOUR; // past TTL + window: a closed restaurant must not keep pricing as current
+    await expect(dbpr.loadDistrictRows(7, { fetchText: failing, now: () => t, minRows: 1 })).resolves.toEqual([]);
+  });
+});
+
+describe('Codex #4872 r3: a malformed HTTP-200 extract is a failed refresh', () => {
+  const dbpr = require('../services/commercial-suite-size/dbpr-food-license');
+  beforeEach(() => dbpr._resetCacheForTests());
+  const HOUR = 60 * 60 * 1000;
+  test.each([
+    ['truncated quoting', '"Business Name","Location Zip Code"\r\n"TEST TACO SH'],
+    ['empty body', ''],
+    ['header only', '"Business Name","Location Zip Code"\r\n'],
+  ])('%s: never cached, and the last good extract keeps serving within the window', async (_label, badBody) => {
+    let t = 0;
+    const good = jest.fn().mockResolvedValue(csv([{ 'Business Name': 'TEST TACO SHOP', 'Location Zip Code': '00000' }]));
+    await expect(dbpr.loadDistrictRows(7, { fetchText: good, now: () => t, minRows: 1 })).resolves.toHaveLength(1);
+    t = 30 * HOUR; // past the 24h TTL
+    const bad = jest.fn().mockResolvedValue(badBody);
+    await expect(dbpr.loadDistrictRows(7, { fetchText: bad, now: () => t, minRows: 1 })).resolves.toHaveLength(1);
+    // Not cached: after the failure backoff the next call refetches.
+    t += 11 * 60 * 1000;
+    const good2 = jest.fn().mockResolvedValue(csv([
+      { 'Business Name': 'TEST TACO SHOP', 'Location Zip Code': '00000' },
+      { 'Business Name': 'SECOND SHOP', 'Location Zip Code': '00000' },
+    ]));
+    await expect(dbpr.loadDistrictRows(7, { fetchText: good2, now: () => t, minRows: 1 })).resolves.toHaveLength(2);
+    expect(good2).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('Codex #4872 r4: only a whole-looking district extract is cached', () => {
+  const dbpr = require('../services/commercial-suite-size/dbpr-food-license');
+  beforeEach(() => dbpr._resetCacheForTests());
+  const HOUR = 60 * 60 * 1000;
+  const rowsOf = (n) => Array.from({ length: n }, (_, i) => ({ 'Business Name': `SHOP ${i}`, 'Location Zip Code': '00000' }));
+
+  test('production floor: a download with a few hundred rows is treated as partial and not cached', async () => {
+    const small = jest.fn().mockResolvedValue(csv(rowsOf(300)));
+    await expect(dbpr.loadDistrictRows(7, { fetchText: small, now: () => 0 })).resolves.toEqual([]);
+  });
+
+  test('an HTTP-200 error page that parses into rows without the license columns is rejected', async () => {
+    const page = '"<html>"\r\n"<body>Service unavailable</body>"\r\n"</html>"\r\n';
+    const fetchText = jest.fn().mockResolvedValue(page);
+    await expect(dbpr.loadDistrictRows(7, { fetchText, now: () => 0, minRows: 1 })).resolves.toEqual([]);
+  });
+
+  test('a cleanly truncated extract (below half the last good one) never replaces the good cache', async () => {
+    let t = 0;
+    const full = jest.fn().mockResolvedValue(csv(rowsOf(20)));
+    await expect(dbpr.loadDistrictRows(7, { fetchText: full, now: () => t, minRows: 1 })).resolves.toHaveLength(20);
+    t = 30 * HOUR; // past TTL
+    const truncated = jest.fn().mockResolvedValue(csv(rowsOf(6)));
+    await expect(dbpr.loadDistrictRows(7, { fetchText: truncated, now: () => t, minRows: 1 })).resolves.toHaveLength(20);
+    // A normal-sized refresh after the backoff is accepted.
+    t += 11 * 60 * 1000;
+    const refreshed = jest.fn().mockResolvedValue(csv(rowsOf(19)));
+    await expect(dbpr.loadDistrictRows(7, { fetchText: refreshed, now: () => t, minRows: 1 })).resolves.toHaveLength(19);
   });
 });

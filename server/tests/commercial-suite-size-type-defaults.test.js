@@ -6,8 +6,9 @@ describe('defaultSuiteSqftFor', () => {
     expect(defaultSuiteSqftFor({ commercialSubtype: 'restaurant_food_service' })).toBe(1800);
   });
 
-  test('salon/personal service -> 1200', () => {
-    expect(defaultSuiteSqftFor({ commercialRiskType: 'personal_service' })).toBe(1200);
+  test('salon/personal service -> 1200 (salons arrive via the subtype; the risk enum has no salon bucket)', () => {
+    expect(defaultSuiteSqftFor({ commercialSubtype: 'salon' })).toBe(1200);
+    expect(defaultSuiteSqftFor({ commercialRiskType: 'retail_standard', commercialSubtype: 'nail salon' })).toBe(1200);
   });
 
   test('medical/healthcare -> 2500', () => {
@@ -32,13 +33,23 @@ describe('defaultSuiteSqftFor', () => {
   });
 });
 
-describe('Codex r7: risk type takes precedence over subtype', () => {
-  const { defaultSuiteSqftFor, SUITE_TYPE_DEFAULT_SQFT } = require('../services/commercial-suite-size/type-defaults');
-  test('a retail risk type with a medical subtype uses the retail default, not regex order', () => {
-    expect(defaultSuiteSqftFor({ commercialRiskType: 'retail_standard', commercialSubtype: 'medical_office' }))
-      .toBe(SUITE_TYPE_DEFAULT_SQFT.retailOffice);
+describe('one deciding input: a specific subtype first, else the risk-type bucket', () => {
+  const { defaultSuiteSqftFor, defaultSuiteSizeBasis, SUITE_TYPE_DEFAULT_SQFT } = require('../services/commercial-suite-size/type-defaults');
+  test('a salon arriving as retail_standard gets the salon default', () => {
+    expect(defaultSuiteSizeBasis({ commercialRiskType: 'retail_standard', commercialSubtype: 'salon' }))
+      .toEqual({ sqft: SUITE_TYPE_DEFAULT_SQFT.salon, basis: 'salon' });
   });
-  test('the subtype decides only when the risk type is absent', () => {
-    expect(defaultSuiteSqftFor({ commercialSubtype: 'medical_office' })).toBe(SUITE_TYPE_DEFAULT_SQFT.medical);
+  test('a daycare arriving as healthcare_childcare gets the small-suite default, not medical', () => {
+    expect(defaultSuiteSizeBasis({ commercialRiskType: 'healthcare_childcare', commercialSubtype: 'daycare' }))
+      .toEqual({ sqft: SUITE_TYPE_DEFAULT_SQFT.retailOffice, basis: 'daycare' });
+  });
+  test('a generic subtype falls back to the risk-type bucket, and the basis names the risk type', () => {
+    expect(defaultSuiteSizeBasis({ commercialRiskType: 'restaurant_food', commercialSubtype: 'office_retail' }))
+      .toEqual({ sqft: SUITE_TYPE_DEFAULT_SQFT.restaurant, basis: 'restaurant_food' });
+    expect(defaultSuiteSizeBasis({ commercialRiskType: 'healthcare_childcare' }))
+      .toEqual({ sqft: SUITE_TYPE_DEFAULT_SQFT.medical, basis: 'healthcare_childcare' });
+  });
+  test('defaultSuiteSqftFor returns the same number the basis reports', () => {
+    expect(defaultSuiteSqftFor({ commercialRiskType: 'retail_standard', commercialSubtype: 'salon' })).toBe(SUITE_TYPE_DEFAULT_SQFT.salon);
   });
 });

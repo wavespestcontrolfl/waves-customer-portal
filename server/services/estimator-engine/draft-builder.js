@@ -291,15 +291,19 @@ function buildEngineInput({
     // auto-price commercial pest — the engine's own manual-quote guards key
     // off these flags.
     lotSizeMeasured: !!lotSqFt && !FALLBACK_SQFT_SOURCES.has(lotSource),
+    // A suite_type_default is a business-type GUESS (no license, no operator
+    // measurement): it is NOT a measured building, so every measured-only
+    // guard (bed bug, termite bait, rodent bait, initial roach) keeps its
+    // manual-quote posture. footprintSizeEstimated is the separate, narrow
+    // opt-in that lets RECURRING commercial pest price off the guess — and
+    // grades every priced commercial line LOW (generateEstimate). A
+    // license_seats size is a real state record: measured, MEDIUM.
     ...(isCommercial
-      ? { buildingSizeMeasured: !!homeSqFt && !FALLBACK_SQFT_SOURCES.has(homeSource) }
+      ? {
+        buildingSizeMeasured: !!homeSqFt && !FALLBACK_SQFT_SOURCES.has(homeSource)
+          && homeSource !== SQFT_SOURCES.SUITE_TYPE_DEFAULT,
+      }
       : {}),
-    // suite_type_default is a business-type GUESS (no license, no operator
-    // measurement) — it clears buildingSizeMeasured (auto-prices) but must
-    // still grade LOW, not MEDIUM (primary review of PR #4840 r4 P1):
-    // priceCommercialPest reads this off options, mirroring
-    // buildingSizeMeasured's own options-not-property plumbing.
-    // license_seats is a real state record and stays MEDIUM.
     ...(isCommercial && homeSource === SQFT_SOURCES.SUITE_TYPE_DEFAULT
       ? { footprintSizeEstimated: true }
       : {}),
@@ -677,12 +681,10 @@ function classifyLane({ intent, propertyFacts, engineResult, engineInput = null,
     if (suiteSize.source === SQFT_SOURCES.LICENSE_SEATS) {
       reasons.push(`suite size estimated from state restaurant license: ${suiteSize.seats ?? '?'} seats → ${sizedSqft.toLocaleString()} sq ft — confirm on site`);
     } else {
-      // Label with the key that actually SELECTED the default
-      // (commercialRiskType/commercialSubtype) — never suiteSize.businessType,
-      // a web-search-reported field that plays no part in choosing the value
-      // (primary review of PR #4840 r4 P2; same fix as
-      // commercial-suite-size/index.js's evidence label).
-      const defaultedFor = intent.commercial_risk_type || intent.commercial_subtype || 'this business type';
+      // Label with the input that actually SELECTED the default (the
+      // resolver's defaultBasis: a specific subtype, else the risk type) —
+      // never suiteSize.businessType, a web-search field that plays no part.
+      const defaultedFor = suiteSize.defaultBasis || intent.commercial_risk_type || intent.commercial_subtype || 'this business type';
       reasons.push(`suite size not found by license — defaulted to ${sizedSqft.toLocaleString()} sq ft for ${defaultedFor} — confirm on site`);
     }
   }

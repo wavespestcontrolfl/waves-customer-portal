@@ -45,7 +45,7 @@ import {
   manualDiscountTypeForCatalogRow,
 } from "../../lib/discountCatalog";
 import { humanizeQuoteReason, quoteRequiredReasonNote } from "../../lib/quoteDisplay";
-import { EMPTY_PROPERTY_MEASUREMENTS, palmPrefillAllowed, lookupHomeSqFtPrefill, homeSqFtIsUnverifiedPlatMedian } from "../../lib/lookupPrefill";
+import { EMPTY_PROPERTY_MEASUREMENTS, palmPrefillAllowed, lookupHomeSqFtPrefill, homeSqFtIsUnverifiedPlatMedian, lookupLotIsUnitParcel, scopeUnitParcelProfile } from "../../lib/lookupPrefill";
 import PropertyLookupResult from "../../components/admin/PropertyLookupResult";
 import { computeProvisionalState, provisionalSummary } from "../../utils/estimateProvisional";
 
@@ -391,19 +391,54 @@ export function termiteFootprintFromHome(homeSqFt, stories, suiteSized) {
   return Math.round(sqft / st);
 }
 
+// The dimensions the form prices — a blank box is 0 sq ft / 1 story. One
+// definition for the priced profile and every reader that must agree with it.
+function formDimensions(form) {
+  const n = (value, blank) => {
+    const v = parseInt(value, 10);
+    return Number.isFinite(v) ? v : blank;
+  };
+  return { homeSqFt: n(form?.homeSqFt, 0), lotSqFt: n(form?.lotSqFt, 0), stories: n(form?.stories, 1) };
+}
+
+// Which of the lookup's own dimensions the boxes no longer hold (cleared or
+// corrected): the lot, or the building (home sq ft / stories).
+function lookupDimsChanged(lookupProfile, dims) {
+  const lookup = (key, blank) => Number(lookupProfile?.[key]) || blank;
+  return {
+    lot: dims.lotSqFt !== lookup("lotSqFt", 0),
+    building: dims.homeSqFt !== lookup("homeSqFt", 0) || dims.stories !== lookup("stories", 1),
+  };
+}
+
+// Turf DERIVED from the lookup's geometry is only as good as that geometry:
+// the county-prior seed came from the lot, the building footprint and its
+// stories; a vision read clamped to the parcel, from the lot alone. Once the
+// boxes no longer hold those values it neither prices nor displays (codex
+// r1+r2 P1 #4871); a measured turf entry is separate.
+function lookupTurfIsStale(lookupProfile, dims) {
+  const changed = lookupDimsChanged(lookupProfile, dims);
+  if (lookupProfile?.turfSource === "county_prior") return changed.lot || changed.building;
+  if (lookupProfile?.turfCappedToParcel === true) return changed.lot;
+  return false;
+}
+
 function buildTurfRequestProfile(baseProfile, form) {
   const manualNumber = (value, fallback = 0) => {
     const n = parseInt(value, 10);
     return Number.isFinite(n) ? n : fallback;
   };
+  // The dimension boxes are the operator's answer. The lookup prefills
+  // them, so a lookup value reaches pricing THROUGH its box — and a box the
+  // operator cleared prices as cleared (0 sq ft; 1 story, the form's own
+  // default). Falling back to the lookup here re-priced a number the form
+  // no longer showed.
+  const dims = formDimensions(form);
   const profile = {
     ...baseProfile,
-    homeSqFt: manualNumber(
-      form.homeSqFt,
-      Number(baseProfile.homeSqFt || baseProfile.squareFootage) || 0,
-    ),
-    lotSqFt: manualNumber(form.lotSqFt, Number(baseProfile.lotSqFt) || 0),
-    stories: manualNumber(form.stories, Number(baseProfile.stories) || 1),
+    homeSqFt: dims.homeSqFt,
+    lotSqFt: dims.lotSqFt,
+    stories: dims.stories,
     estimatedBedAreaSf: manualNumber(
       form.bedArea,
       Number(baseProfile.estimatedBedAreaSf) || 0,
@@ -419,6 +454,19 @@ function buildTurfRequestProfile(baseProfile, form) {
     // survives that case because it tracks the EDIT, not the number.
     _homeSqFtManuallyEdited: !!form._homeSqFtEdited,
   };
+  // The translator reads `homeSqFt || squareFootage`: a legacy profile's
+  // alias must not re-price a cleared Home Sq Ft box (codex r1 P1 #4871).
+  delete profile.squareFootage;
+  // Turf DERIVED from the lookup's lot — the county-prior seed, or a vision
+  // read clamped to that parcel — is only as good as that lot. Once the Lot
+  // box no longer holds it (cleared or corrected), it must not price
+  // (codex r1 P1 #4871); a measured turf entry is separate and unaffected.
+  if (lookupTurfIsStale(baseProfile, dims)) {
+    delete profile.estimatedTurfSf;
+    delete profile.turfSource;
+    delete profile.turfCappedToParcel;
+    delete profile.countyTurfPriorSf;
+  }
   // footprintUnknown (association aggregate, story count unknown): the
   // summed living area over a defaulted story count is NOT a ground-floor
   // footprint — deriving one here would hand pricing the exact fake slab
@@ -452,8 +500,12 @@ function buildTurfRequestProfile(baseProfile, form) {
   // from the original (wrong) classification.
   if (baseProfile.suiteSize && formIsCommercial) {
     profile.footprint = profile.homeSqFt;
-  } else if (profile.homeSqFt && profile.footprintUnknown !== true) {
-    profile.footprint = Math.round(profile.homeSqFt / (profile.stories || 1));
+  } else if (profile.footprintUnknown !== true) {
+    // The footprint follows the Home Sq Ft box too: a cleared box must not
+    // leave the lookup's own footprint (spread in above) pricing pest.
+    profile.footprint = profile.homeSqFt
+      ? Math.round(profile.homeSqFt / (profile.stories || 1))
+      : 0;
   }
   profile.pool = form.hasPool === "YES" ? "YES" : "NO";
   profile.poolCage = form.hasPoolCage === "YES" ? "YES" : "NO";
@@ -464,9 +516,14 @@ function buildTurfRequestProfile(baseProfile, form) {
     !form._poolCageSizeEdited &&
     profile.poolCage === "YES" &&
     profile.poolCageSize === "MEDIUM";
-  profile.storiesSource = form._storiesEdited
-    ? "manual"
-    : baseProfile.storiesSource;
+  // A blank Stories box prices the 1-story DEFAULT — stamped as such, never
+  // as a staff-entered value, so the engine keeps its stories review
+  // (codex r1 P1 #4871).
+  profile.storiesSource = !Number.isFinite(parseInt(form.stories, 10))
+    ? "default"
+    : form._storiesEdited
+      ? "manual"
+      : baseProfile.storiesSource;
   profile.shrubDensity = form.shrubDensity || profile.shrubDensity;
   profile.treeDensity = form.treeDensity || profile.treeDensity;
   profile.landscapeComplexity =
@@ -490,6 +547,13 @@ function buildTurfRequestProfile(baseProfile, form) {
 // default export is unaffected and every other consumer keeps importing it
 // the same way.
 export { buildTurfRequestProfile };
+
+// One unit inside a building (a unit-address lookup), for as long as the
+// form still types it a condo — staff correcting the type to a whole
+// structure takes it out of unit scope (codex r5 P2 #4862).
+function isUnitScopedForm(form) {
+  return !!form?._unitLookup && /^condo/i.test(String(form?.propertyType || ""));
+}
 
 async function summarizeEstimateResponseFailure(response, fallbackLabel) {
   try {
@@ -908,6 +972,10 @@ function lookupTermiteFootprintSqFt(data = {}) {
   // deriving homeSqFt/stories here would prefill a summed-living-area
   // "slab" the lookup explicitly refused to claim (codex P1 #2721).
   if (data.footprintUnknown === true) return undefined;
+  // One unit inside a building: its living area is interior floor space,
+  // never a slab/attic/perimeter to price termite work from (codex r2 P1
+  // #4862).
+  if (data.residentialUnitLookup) return undefined;
   const explicitFootprint = firstPositiveNumber(
     data.footprint,
     data.footprintSqFt,
@@ -1992,7 +2060,7 @@ export default function EstimateToolViewV2({
         previousAddressRef.current = seeded.address;
         savedFormRef.current = JSON.stringify(seeded);
         setForm(seeded);
-        setEnrichedProfile(d.engineProfile || null);
+        setEnrichedProfile(scopeUnitParcelProfile(d.engineProfile) || null);
         setLookupMeta(null);
         setSatelliteData(null);
         setEstimate(d.result ? { ...d.result, engineRequest: d.engineRequest } : null);
@@ -2229,6 +2297,9 @@ export default function EstimateToolViewV2({
           !(f._storiesEdited && Number(f.stories) >= 1)
         )
           return f;
+        // A unit lookup has no footprint to derive at all — no Stories
+        // edit supplies one (pre-push codex P1 #4862).
+        if (isUnitScopedForm(f)) return f;
         const upd = {};
         if (!f.termiteFootprintSqFt || f._termiteFootprintAuto)
           upd.termiteFootprintSqFt = String(fp);
@@ -2490,10 +2561,8 @@ export default function EstimateToolViewV2({
   const [enginePreviewSf, setEnginePreviewSf] = useState(null);
   const enginePreviewSeq = useRef(0);
   const turfUnobservable = enrichedProfile?.turfObservation === "unobservable";
-  const previewLotSqFt =
-    parseNonNegativeInteger(form.lotSqFt) ??
-    parseNonNegativeInteger(enrichedProfile?.lotSqFt) ??
-    0;
+  // The Lot box governs, exactly as in the priced profile.
+  const previewLotSqFt = parseNonNegativeInteger(form.lotSqFt) ?? 0;
   useEffect(() => {
     setEnginePreviewSf(null);
     // Bump the sequence BEFORE any early return so an in-flight answer for
@@ -2651,9 +2720,10 @@ export default function EstimateToolViewV2({
       return { area: measured, source: "MEASURED_TURF" };
     }
 
-    const ai =
-      parseNonNegativeInteger(enrichedProfile?.estimatedTurfSf) ??
-      parseNonNegativeInteger(satelliteData?.estimatedTurfSf);
+    const ai = lookupTurfIsStale(enrichedProfile, formDimensions(currentForm))
+      ? null
+      : parseNonNegativeInteger(enrichedProfile?.estimatedTurfSf) ??
+        parseNonNegativeInteger(satelliteData?.estimatedTurfSf);
     if (ai !== null && ai > 0) {
       return { area: ai, source: "AI_ESTIMATE" };
     }
@@ -2679,6 +2749,19 @@ export default function EstimateToolViewV2({
     setSavedId(null);
     setSavedViewUrl(null);
   }, [resolveFleaExteriorDefault]);
+
+  // An AI_ESTIMATE flea area is a COPY of the lookup turf. When a dimension
+  // edit makes that turf stale, the copy is re-resolved (a measured or
+  // confirmed area is the operator's and stays) — otherwise it kept pricing
+  // after pricing itself dropped the turf (codex r2 P1 #4871).
+  useEffect(() => {
+    setForm((f) => {
+      if (f.fleaExteriorAreaSource !== "AI_ESTIMATE") return f;
+      if (!lookupTurfIsStale(enrichedProfile, formDimensions(f))) return f;
+      const resolved = resolveFleaExteriorDefault({ ...f, fleaExteriorAreaSqFt: "0", fleaExteriorAreaSource: "UNKNOWN" });
+      return { ...f, fleaExteriorAreaSqFt: String(resolved.area), fleaExteriorAreaSource: resolved.source };
+    });
+  }, [form.lotSqFt, form.homeSqFt, form.stories, enrichedProfile]);
 
   const setFleaExteriorZone = useCallback((zone, checked) => {
     setForm((f) => {
@@ -3039,7 +3122,9 @@ export default function EstimateToolViewV2({
         return;
       }
 
-      const ep = data.enriched;
+      // Scoped once here: a condo record carrying the development's lot
+      // loses the parcel-scope area reads before anything reads them.
+      const ep = scopeUnitParcelProfile(data.enriched);
       if (!ep) throw new Error("Property details were not returned. Try refreshing the records.");
       setEnrichedProfile(ep);
       setLookupMeta({
@@ -3087,8 +3172,18 @@ export default function EstimateToolViewV2({
           treeCount: "",
         });
       }
-      if (ep.pool === "YES" || ep.pool === "POSSIBLE") upd.hasPool = "YES";
-      if (ep.poolCage === "YES") upd.hasPoolCage = "YES";
+      // Only a DECIDED pool prefills. POSSIBLE is satellite seeing a pool
+      // the records don't (the lookup's own flag says "may be neighbor") —
+      // the call-draft builder, customer pricing, and the website quote all
+      // leave it unpriced, and the verify flag asks the operator to check.
+      // The lookup states its pool verdict on EVERY lookup, so a refresh
+      // that downgrades a pool to POSSIBLE clears the earlier YES (codex r2
+      // P1); an operator-set value is restored after the merge below
+      // (_manualFields). A cage counts only with a decided pool: pricing
+      // treats any cage as a pool, and a cage seen in the same satellite read
+      // as a POSSIBLE pool carries the same "may be neighbor" doubt (r1 P1).
+      upd.hasPool = ep.pool === "YES" ? "YES" : "NO";
+      upd.hasPoolCage = ep.poolCage === "YES" && ep.pool === "YES" ? "YES" : "NO";
       if (ep.poolCageSize && ep.poolCageSize !== "NONE")
         upd.poolCageSize = ep.poolCageSize;
       if (ep.shrubDensity) upd.shrubDensity = ep.shrubDensity;
@@ -3124,13 +3219,21 @@ export default function EstimateToolViewV2({
           // Record value, else the plat-median estimate for an unassessed
           // vacant parcel (lib/lookupPrefill.js), else empty.
           homeSqFt: f._homeSqFtEdited ? f.homeSqFt : lookupHomeSqFtPrefill(ep),
-          lotSqFt: ep.unitScopedLookup ? "" : f._lotSqFtEdited ? f.lotSqFt : (ep.lotSqFt ? String(ep.lotSqFt) : ""),
+          // A lookup that finds the development's parcel withholds its bed
+          // estimate; an AUTO-filled bed area from an earlier lookup of this
+          // address goes too — a typed one stays (codex r2 P2 #4871).
+          ...(lookupLotIsUnitParcel(ep) && !(f._manualFields || []).includes("bedArea") ? { bedArea: "" } : {}),
+          // The development's lot (unit_parcel flag) is never prefilled — the
+          // flag asks the operator to enter the unit's own area, or the
+          // whole property's lot for an association quote.
+          lotSqFt: (ep.residentialUnitLookup || ep.unitScopedLookup) ? "" : f._lotSqFtEdited ? f.lotSqFt : (ep.lotSqFt && !lookupLotIsUnitParcel(ep) ? String(ep.lotSqFt) : ""),
           stories: f._storiesEdited ? f.stories : (ep.stories ? String(ep.stories) : "1"),
           ...(termiteFootprintNumber ? { _termiteFootprintAuto: true } : {}),
           // Rides the form so the homeSqFt/stories effect can't re-derive a
           // footprint the lookup refused to claim (codex P1 #2721).
           _footprintUnknownLookup: ep.footprintUnknown === true,
           _suiteSizedLookup: Boolean(ep.suiteSize),
+          _unitLookup: !!ep.residentialUnitLookup,
           _poolCageSizeEdited: false,
           _storiesEdited: !!f._storiesEdited,
           _unitCountEdited: false,
@@ -3558,7 +3661,7 @@ export default function EstimateToolViewV2({
         trenchingConcreteLF,
         trenchingDirtLF,
         trenchingConcretePct,
-        trenchingEstimateFromFootprint: !!form.trenchingEstimateFromFootprint,
+        trenchingEstimateFromFootprint: !!form.trenchingEstimateFromFootprint && !isUnitScopedForm(form),
         trenchingProductKey: form.trenchingProductKey || "taurus_sc",
         trenchingApplicationRate: form.trenchingApplicationRate || "standard",
         trenchingDepthFt: form.trenchingDepthFt || "0.5",
@@ -4161,6 +4264,7 @@ export default function EstimateToolViewV2({
       _termiteFootprintAuto: false,
       _footprintUnknownLookup: false,
       _suiteSizedLookup: false,
+      _unitLookup: false,
       _trenchingPerimeterAuto: false,
       _boracareSqftAuto: false,
       _preslabSqftAuto: false,
@@ -4218,7 +4322,7 @@ export default function EstimateToolViewV2({
       rgIdentityRef.current = `${seeded.address || ""}|${seeded.customerId || ""}|${seeded.customerName || ""}|${seeded.customerEmail || ""}`;
       savedFormRef.current = JSON.stringify(seeded);
       setForm(seeded);
-      setEnrichedProfile(source.engineProfile || null);
+      setEnrichedProfile(scopeUnitParcelProfile(source.engineProfile) || null);
       setExistingCustomerMatch(source.customer || null);
       setEditMode((current) => ({ ...current, status: source.status, editVersion: source.editVersion }));
       if (!source.editable) setEditLoadError(source.blockReason);
@@ -4244,15 +4348,16 @@ export default function EstimateToolViewV2({
   const E = estimate;
   const commercialDetected = isCommercialEstimateInput(form);
   const R = E?.results || {};
-  const aiTurfSqFt =
-    parseNonNegativeInteger(enrichedProfile?.estimatedTurfSf) ??
-    parseNonNegativeInteger(satelliteData?.estimatedTurfSf) ??
-    null;
+  const lotSqFtForTurf = parseNonNegativeInteger(form.lotSqFt) ?? 0;
+  const formDims = formDimensions(form);
+  // Same staleness rule as the priced profile — the panel never shows a
+  // turf number pricing has dropped.
+  const aiTurfSqFt = lookupTurfIsStale(enrichedProfile, formDims)
+    ? null
+    : parseNonNegativeInteger(enrichedProfile?.estimatedTurfSf) ??
+      parseNonNegativeInteger(satelliteData?.estimatedTurfSf) ??
+      null;
   const confirmedTurfSqFt = parseNonNegativeInteger(form.measuredTurfSf);
-  const lotSqFtForTurf =
-    parseNonNegativeInteger(form.lotSqFt) ??
-    parseNonNegativeInteger(enrichedProfile?.lotSqFt) ??
-    0;
   const lotEstimateTurfSqFt = (() => {
     // Show the number the pricing engine will ACTUALLY use — footprint,
     // hardscape and plausible-max cap included — not the local 20%/15%
@@ -4260,9 +4365,15 @@ export default function EstimateToolViewV2({
     // on the stale-imagery path the profile's lookup-time
     // turfFallbackPreviewSf covers the gap until it answers. The heuristic
     // is only the fail-open fallback for a preview miss.
+    // The stored stale-imagery preview was computed from the lookup's
+    // geometry — shown only while the boxes still hold it (codex r1 P1 #4871).
+    const lookupGeometryHeld = !lookupDimsChanged(enrichedProfile, formDims).lot
+      && !lookupDimsChanged(enrichedProfile, formDims).building;
     const enginePreview = parseNonNegativeInteger(
       enginePreviewSf ??
-        (turfUnobservable ? enrichedProfile?.turfFallbackPreviewSf : null),
+        (turfUnobservable && lotSqFtForTurf > 0 && lookupGeometryHeld
+          ? enrichedProfile?.turfFallbackPreviewSf
+          : null),
     );
     // Zero included: an engine 0 (footprint + hardscape consume the lot) is
     // the authoritative answer, not a miss — falling through to the local
@@ -4356,7 +4467,7 @@ export default function EstimateToolViewV2({
       : null,
     form.svcTrenching &&
       !parsePositiveNumber(form.trenchingPerimeterLF) &&
-      !form.trenchingEstimateFromFootprint
+      !(form.trenchingEstimateFromFootprint && !isUnitScopedForm(form))
       ? "Trenching needs measured perimeter LF before pricing."
       : null,
     form.svcBoracare && !parsePositiveNumber(form.boracareSqft) && !parsePositiveNumber(form.boracareSurfaceLinearFt)
@@ -4766,6 +4877,7 @@ export default function EstimateToolViewV2({
                       _termiteFootprintAuto: false,
                       _footprintUnknownLookup: false,
                       _suiteSizedLookup: false,
+                      _unitLookup: false,
                       _trenchingPerimeterAuto: false,
                       _boracareSqftAuto: false,
                       _preslabSqftAuto: false,
@@ -6331,10 +6443,18 @@ export default function EstimateToolViewV2({
                           />
                         </Field>
                       </div>
-                      <CheckboxV2
-                        k="trenchingEstimateFromFootprint"
-                        label="Estimate trenching perimeter from footprint"
-                      />
+                      {isUnitScopedForm(form) ? (
+                        // A unit's area is interior floor space — there is no
+                        // footprint to estimate a perimeter from (codex r5 P2).
+                        <div className="text-14 text-zinc-600 leading-snug mb-1">
+                          One unit in a building: enter the measured perimeter LF.
+                        </div>
+                      ) : (
+                        <CheckboxV2
+                          k="trenchingEstimateFromFootprint"
+                          label="Estimate trenching perimeter from footprint"
+                        />
+                      )}
                       <CheckboxV2
                         k="trenchingLabelConfirmed"
                         label="Label rate and trench depth confirmed"

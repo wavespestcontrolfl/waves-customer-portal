@@ -2831,6 +2831,9 @@ router.get('/:id/schedule-estimates', requireAdmin, async (req, res, next) => {
         // The quoted property (estimates.property_id, nullable) — the New
         // Appointment modal narrows the estimate list to the address being
         // booked; an unlinked quote stays offered at every property.
+        // The quote's owner (null = an unowned lead quote), so the modal can
+        // drop a pinned quote owned by a different customer on a switch.
+        customerId: estimate.customer_id || null,
         propertyId: estimate.property_id || null,
         status: estimate.status,
         serviceInterest: estimate.service_interest,

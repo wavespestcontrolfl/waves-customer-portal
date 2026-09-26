@@ -11,10 +11,13 @@ import { describe, expect, it } from "vitest";
 import { buildTurfRequestProfile, termiteFootprintFromHome } from "./EstimateToolViewV2";
 import { isCommercialEstimateInput } from "../../lib/estimateEngine";
 
+// The lookup prefills the dimension boxes, and the boxes are what prices
+// (#4871): a suite lookup's form holds the suite's own size and the
+// BUILDING's story count.
 const baseForm = {
-  homeSqFt: "",
+  homeSqFt: "1400",
   lotSqFt: "",
-  stories: "",
+  stories: "2",
   bedArea: "",
   hasPool: "NO",
   hasPoolCage: "NO",
@@ -40,7 +43,7 @@ describe("buildTurfRequestProfile — suite-sized commercial profile", () => {
 
   it("still divides by stories for an ordinary (non-suite) commercial whole-building profile", () => {
     const buildingProfile = { homeSqFt: 2800, stories: 2, isCommercial: true };
-    const profile = buildTurfRequestProfile(buildingProfile, baseForm);
+    const profile = buildTurfRequestProfile(buildingProfile, { ...baseForm, homeSqFt: "2800" });
     expect(profile.footprint).toBe(1400); // 2800 / 2 stories, unaffected — the pre-existing behavior
   });
 

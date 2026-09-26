@@ -36,6 +36,11 @@
  * changed under us. Un-swept invoices keep their pay links and their own
  * dunning clocks exactly as today (oldest-invoice escalation — ruling #2).
  *
+ * Only bills tied to performed work are swept (owner ruling 2026-09-26:
+ * never charge a client before the visit) — see performedWorkPlan. A bill
+ * minted ahead of its visit (estimate accept, setup fee) is collected by that
+ * visit's own completion charge or stays on its pay link and dunning.
+ *
  * Invoices whose follow-up sequence an admin explicitly STOPPED are skipped:
  * "stop dunning" (customer mailing a check, disputed bill) must also mean
  * "don't silently collect it off-session" — same signal previsit-balance
@@ -66,6 +71,9 @@ const { isEnabled } = require('../config/feature-gates');
 const { openBalanceInvoices } = require('./open-balance');
 const { invoiceAmountDue } = require('./invoice-helpers');
 const { logAutopay } = require('./autopay-log');
+const { etDateString, etCalendarDayOf } = require('../utils/datetime-et');
+const { invoiceHasPositiveSetupFeeLine } = require('./estimate-first-application-invoice');
+const { acceptedEstimateIdFromNotes } = require('./setup-fee-alert-reconcile');
 
 const SWEEP_SOURCE = 'completion_balance_sweep';
 
@@ -77,6 +85,55 @@ async function dunningStoppedInvoiceIds(invoiceIds, { database = db } = {}) {
     .where({ status: 'stopped' })
     .select('invoice_id');
   return new Set(rows.map((r) => String(r.invoice_id)));
+}
+
+// Owner ruling 2026-09-26: never charge a client before the visit. The
+// sweep collects only a bill it can tie to performed work; everything else
+// waits on its own pay link and dunning.
+//   - A bill linked to a visit (its own scheduled_service_id, or its service
+//     record's) is collectible once that visit is 'completed'. The charge
+//     re-checks it under the visit lock (requireCompletedVisit).
+//   - An unlinked bill is collectible only when its service_date is before
+//     today (ET) and it is neither an estimate-acceptance bill (setup fee or
+//     first application, any "accepted estimate #" stamp) nor a setup fee.
+// Returns Map(invoice id -> { visitId, ownVisit }) of collectible invoices.
+async function performedWorkPlan(invoiceIds, { database = db, today = etDateString() } = {}) {
+  const plan = new Map();
+  if (!invoiceIds.length) return plan;
+  // Read from the invoice row itself, not the candidate projection.
+  const docs = await database('invoices')
+    .whereIn('id', invoiceIds)
+    .select('id', 'scheduled_service_id', 'service_record_id', 'service_date', 'notes', 'line_items');
+
+  const recordIds = [...new Set(docs
+    .filter((doc) => !doc.scheduled_service_id && doc.service_record_id)
+    .map((doc) => String(doc.service_record_id)))];
+  const recordVisit = new Map();
+  if (recordIds.length) {
+    const records = await database('service_records').whereIn('id', recordIds).select('id', 'scheduled_service_id');
+    for (const r of records) if (r.scheduled_service_id) recordVisit.set(String(r.id), String(r.scheduled_service_id));
+  }
+  const visitOf = (doc) => (doc.scheduled_service_id
+    ? String(doc.scheduled_service_id)
+    : recordVisit.get(String(doc.service_record_id)) || null);
+
+  const visitIds = [...new Set(docs.map(visitOf).filter(Boolean))];
+  const completed = new Set();
+  if (visitIds.length) {
+    const rows = await database('scheduled_services').whereIn('id', visitIds).where({ status: 'completed' }).select('id');
+    for (const row of rows) completed.add(String(row.id));
+  }
+
+  for (const doc of docs) {
+    const visitId = visitOf(doc);
+    if (visitId) {
+      if (completed.has(visitId)) plan.set(String(doc.id), { visitId, ownVisit: !!doc.scheduled_service_id });
+    } else if (doc.service_date && etCalendarDayOf(doc.service_date) < today
+      && !acceptedEstimateIdFromNotes(doc.notes) && !invoiceHasPositiveSetupFeeLine(doc)) {
+      plan.set(String(doc.id), { visitId: null, ownVisit: false });
+    }
+  }
+  return plan;
 }
 
 /**
@@ -96,6 +153,7 @@ async function runCompletionBalanceSweep({ customerId, excludeInvoiceId, payment
   if (!customerId || !paymentMethodId) return summary;
 
   let candidates = [];
+  let plan = new Map();
   try {
     candidates = await openBalanceInvoices(customerId, { excludeInvoiceId });
     summary.considered = candidates.length;
@@ -105,6 +163,9 @@ async function runCompletionBalanceSweep({ customerId, excludeInvoiceId, payment
       summary.skipped += candidates.filter((inv) => stopped.has(String(inv.id))).length;
       candidates = candidates.filter((inv) => !stopped.has(String(inv.id)));
     }
+    plan = await performedWorkPlan(candidates.map((inv) => String(inv.id)));
+    summary.skipped += candidates.filter((inv) => !plan.has(String(inv.id))).length;
+    candidates = candidates.filter((inv) => plan.has(String(inv.id)));
   } catch (err) {
     logger.error(`[balance-sweep] candidate lookup failed for customer ${customerId}: ${err.message}`);
     return summary;
@@ -112,6 +173,7 @@ async function runCompletionBalanceSweep({ customerId, excludeInvoiceId, payment
 
   const StripeService = require('./stripe');
   for (const inv of candidates) {
+    const { visitId, ownVisit } = plan.get(String(inv.id));
     // This invoice's own current amount is the ceiling — the same pre-tax
     // subtotal-net-of-discount comparator the completion rail caps with,
     // re-checked by the charge service against the LOCKED row so a
@@ -127,7 +189,12 @@ async function runCompletionBalanceSweep({ customerId, excludeInvoiceId, payment
         // amount due must not exceed this snapshot's.
         maxAuthorizedChargeCents: Math.round(invoiceAmountDue(inv) * 100),
         requireAutopayForCustomerId: customerId,
-        requireSelfPayScheduledServiceId: inv.scheduled_service_id || null,
+        // The visit the bill was tied to (its own, or its service
+        // record's). The completed-visit verdict is binding under the
+        // charge's visit lock, and a bill on its own visit must still be
+        // that visit's bill.
+        requireSelfPayScheduledServiceId: visitId,
+        ...(visitId ? { requireCompletedVisit: true, requireInvoiceScheduledServiceBinding: ownVisit } : {}),
         // Binding default-payer check for ad-hoc invoices with no visit —
         // the visit-keyed guard has nothing to key on there (pre-push r2 P0).
         requireSelfPayCustomerId: customerId,
@@ -185,4 +252,4 @@ async function runCompletionBalanceSweep({ customerId, excludeInvoiceId, payment
   return summary;
 }
 
-module.exports = { runCompletionBalanceSweep, dunningStoppedInvoiceIds, SWEEP_SOURCE };
+module.exports = { runCompletionBalanceSweep, dunningStoppedInvoiceIds, performedWorkPlan, SWEEP_SOURCE };

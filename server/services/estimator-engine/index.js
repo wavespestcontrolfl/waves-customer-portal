@@ -508,9 +508,9 @@ async function gatherPropertySignals(context, { refreshLookup = false, persistLo
         ...(refreshLookup ? { refresh: true } : {}),
         // dryRun replays are documented read-only — no cache rows behind.
         ...(persistLookup ? {} : { persist: false }),
-        // Opt-in (primary review of PR #4840): the engine adopts
-        // lookup.enriched.suiteSize below when present instead of resolving
-        // again — this flag is what makes the lookup resolve it at all.
+        // The lookup sizes a commercial suite itself (dark behind
+        // GATE_COMMERCIAL_SUITE_SIZING); the pipeline adopts that result
+        // below instead of resolving the same suite a second time.
         commercialSuiteSizing: true,
       });
       propertyRecord = lookup?.propertyRecord || null;
@@ -2644,31 +2644,30 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
         // GATE_UNIT_SCOPE_GUARDRAILS (on in prod) — the apply above is what
         // clears the whole-building size for a part-building suite, and
         // this block sizes only what that left unresolved. With guardrails
-        // off the engine keeps its prior behavior and warns once per run
-        // (below) instead of sizing a suite it never scoped.
+        // off the engine keeps its prior behavior and logs a warning (above)
+        // instead of sizing a suite it never scoped.
         if (intent.is_commercial === true
           && require('../../config/feature-gates').commercialSuiteSizingLive()
           && unitScope.serviceScope === 'commercial_suite'
-          && propertyFacts.home?.source === SQFT_SOURCES.NONE) {
+          // A cross-property draft prices from the fenced facts, where a
+          // size the caller stated about the ORIGINAL property is dropped —
+          // decide on that same view, or the stale fact would skip sizing
+          // and the quoted suite would price off nothing.
+          && (crossPropertyRegather ? fenceExtractionFact(propertyFacts.home, 'address') : propertyFacts.home)?.source
+            === SQFT_SOURCES.NONE) {
           try {
-            // gatherPropertySignals already ran performPropertyLookup with
-            // commercialSuiteSizing:true, which resolved (and, on a fresh
-            // lookup, persisted) THIS suite's size — adopt it instead of
-            // running DBPR/web-search a second time for the same address.
-            // Only resolve directly when the lookup didn't (no lookup
-            // record, or its own classifier didn't see the suite signal the
-            // call/SMS extraction did).
-            // Adopt only a SOURCED lookup result (license seats). A lookup
-            // type default was chosen without what the call knows — the
-            // caller's phone (a DBPR disambiguator) and the composed risk
-            // type — so re-resolve with those instead (no web leg: the
-            // lookup already ran it, and it sizes nothing).
-            const lookupSuiteSize = effectiveSignals.enriched?.suiteSize || null;
-            // A tech-verified suite size from the lookup is a field
-            // measurement and is adopted as-is (never re-resolved over).
+            // The lookup already sized this suite (gatherPropertySignals asks
+            // it to): adopt a license-seat or tech-verified size as-is, but
+            // only when the lookup describes the gathered address — a
+            // wrong-premise lookup's suite belongs to another parcel. A
+            // lookup type default was chosen without the call's phone (a
+            // license tie-breaker) or composed risk type, so it is
+            // re-resolved with those (no second web search).
+            const lookupSuiteSize = effectiveParcelOk ? (effectiveSignals.enriched?.suiteSize || null) : null;
             let suiteSize = (lookupSuiteSize && Number(lookupSuiteSize.value) > 0
               && (lookupSuiteSize.source === SQFT_SOURCES.LICENSE_SEATS || lookupSuiteSize.source === 'verified'))
-              ? lookupSuiteSize : null;
+              ? lookupSuiteSize
+              : null;
             if (!suiteSize) {
               const { resolveCommercialSuiteSize } = require('../commercial-suite-size');
               const { suiteAddressParts } = require('../commercial-suite-size/address-parts');
@@ -2676,17 +2675,18 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
               suiteSize = await resolveCommercialSuiteSize({
                 address: suiteAddressParts(quotedAddressLine),
                 phone: context?.phone || null,
-                // intent.customer_name is the CALLER, not the business
-                // (primary review of PR #4840 r4 P2) — there's no dedicated
-                // business-name intent field, so this resolves purely from
-                // the address (DBPR / web search); the fallback below still
-                // adopts the lookup's own businessName when this leg finds
-                // none of its own.
+                // intent.customer_name is the CALLER, not the business; there
+                // is no business-name intent field, so the license / web leg
+                // names the business from the address.
                 businessNameHint: null,
                 commercialRiskType: intent.commercial_risk_type || null,
-                // Intent wins when present; else the lookup's deterministic
-                // (county-derived) subtype, so a medical suite keeps its default.
-                commercialSubtype: intent.commercial_subtype || effectiveSignals.enriched?.commercialSubtype || null,
+                // Intent wins when present; else the lookup's county-derived
+                // subtype, so a medical suite keeps its default — but only
+                // when the lookup describes the gathered address (a wrong-
+                // premise lookup's subtype belongs to another parcel).
+                commercialSubtype: intent.commercial_subtype
+                  || (effectiveParcelOk ? effectiveSignals.enriched?.commercialSubtype : null)
+                  || null,
               }, { skipWebSearch: Boolean(lookupSuiteSize) });
               if (suiteSize && !suiteSize.businessName && lookupSuiteSize?.businessName) {
                 suiteSize = { ...suiteSize, businessName: lookupSuiteSize.businessName };

@@ -7,8 +7,8 @@
  * source-arbitration.js gives a commercial tenant with no stated unit size
  * `sizeBasis: 'unresolved'` by design (county sqft describes the building) —
  * this module is what fills that gap for the estimator engine and the
- * manual property-lookup tool, the same way a residential estimate is
- * auto-sized from county/subdivision data.
+ * admin estimate tool's property lookup, the same way a residential
+ * estimate is auto-sized from county/subdivision data.
  *
  * Two SIZE sources, tried in priority order, each fail-open (an error or a
  * miss just falls through to the next):
@@ -33,27 +33,21 @@
 const logger = require('../logger');
 const { resolveViaDbprLicense } = require('./dbpr-food-license');
 const { resolveViaWebSearch } = require('./web-search-leg');
-const { defaultSuiteSqftFor } = require('./type-defaults');
+const { defaultSuiteSizeBasis } = require('./type-defaults');
 
 const SOURCES = {
   LICENSE_SEATS: 'license_seats',
   SUITE_TYPE_DEFAULT: 'suite_type_default',
 };
 
-// Mirrors each leg's own default (dbpr-food-license.js's DBPR_FETCH_TIMEOUT_MS,
-// web-search-leg.js's DEFAULT_TIMEOUT_MS) — used only to cap it further when
-// opts.deadlineAt leaves less than the leg's usual budget.
+// Admin-lookup budget (property-lookup-v2.js passes opts.deadlineAt, an
+// absolute Date.now()-comparable timestamp): each leg's timeout is capped to
+// the time left, and a leg isn't started at all under MIN_LEG_REMAINING_MS.
+// Absent (the estimator engine), every leg keeps its own default.
 const DBPR_DEFAULT_TIMEOUT_MS = 15000;
 const WEB_SEARCH_DEFAULT_TIMEOUT_MS = 20000;
-// Below this much remaining lookup budget, a leg isn't worth starting at all
-// (primary review of PR #4840 r5 P2 — a cold DBPR fetch (15s) + web search
-// (20s) could add ~35s to a lookup the caller is already waiting on).
 const MIN_LEG_REMAINING_MS = 2000;
 
-// opts.deadlineAt: an absolute Date.now()-comparable timestamp (never a
-// duration — avoids drift across the awaits between legs). Absent/non-finite
-// means unbounded (every existing caller that doesn't pass it keeps today's
-// behavior exactly).
 function remainingBudgetMs(deadlineAt) {
   return Number.isFinite(deadlineAt) ? (deadlineAt - Date.now()) : Infinity;
 }
@@ -68,12 +62,11 @@ function remainingBudgetMs(deadlineAt) {
  *                         address", not "require it to be typed in first")
  *   commercialRiskType  — intent-schema commercial_risk_type, or null
  *   commercialSubtype   — property-lookup commercialSubtype, or null
- * @param {object} opts   — timeouts/injection for tests: districts,
- *                         fetchText, now, requireWarmCache (DBPR leg),
- *                         timeoutMs, maxSearches, anthropicClient
- *                         (web-search leg), skipWebSearch, deadlineAt (an
- *                         absolute ms timestamp both legs' own timeoutMs are
- *                         capped to — see remainingBudgetMs above)
+ * @param {object} opts   — districts, fetchText, now, requireWarmCache,
+ *                         minRows (DBPR leg); timeoutMs, maxSearches,
+ *                         anthropicClient (web-search leg); skipWebSearch
+ *                         (the admin lookup's cache-hit path); deadlineAt
+ *                         (the admin lookup's remaining budget)
  * @returns {Promise<{value:number, source:string, confidence:string,
  *   businessName:string|null, businessType:string|null, evidence:array,
  *   seats?:number}|null>}
@@ -115,14 +108,11 @@ async function resolveCommercialSuiteSize(input = {}, opts = {}) {
     }
   }
 
-  // skipWebSearch: the manual lookup tool's fast CACHED-rebuild path uses
-  // this to keep a cache hit cheap — a Claude web-search call on every
-  // cache hit would defeat the point of caching. The FRESH lookup (already
-  // a multi-second, multi-provider call) and the estimator engine both run
-  // this leg (name-only; see web-search-leg.js — it never returns a size).
+  // Name-only leg (see web-search-leg.js — it never returns a size).
+  // skipWebSearch: the admin lookup's cache-hit path, which must stay fast.
   const webRemaining = remainingBudgetMs(opts.deadlineAt);
   if (opts.skipWebSearch) {
-    // no-op — existing behavior
+    // skipped by the caller
   } else if (webRemaining < MIN_LEG_REMAINING_MS) {
     logger.warn(`[commercial-suite-size] skipping web-search leg — ${Math.max(0, Math.round(webRemaining))}ms left in the lookup budget`);
   } else {
@@ -142,27 +132,23 @@ async function resolveCommercialSuiteSize(input = {}, opts = {}) {
 
   // Type default keys OFF commercialRiskType/commercialSubtype ONLY — a
   // web-search-reported businessType never chooses the size (AGENTS.md); it
-  // still rides the RESULT for display/notes and subtype reconciliation.
-  const value = defaultSuiteSqftFor({ commercialRiskType, commercialSubtype });
-  // Label with the SAME deterministic key that selected `value` — never
-  // `businessType` (the web-search-reported field plays no part in the
-  // lookup above; primary review of PR #4840 r4 P2). A web-reported
-  // "restaurant" on an office_retail profile must read as office/retail,
-  // matching the 1,500 sq ft it actually got.
-  const businessTypeLabel = commercialRiskType || commercialSubtype || 'this business type';
+  // still rides the RESULT for display/notes. The label names the ONE input
+  // that chose the value (a specific subtype, else the risk type).
+  const { sqft: value, basis } = defaultSuiteSizeBasis({ commercialRiskType, commercialSubtype });
+  const businessTypeLabel = basis || 'this business type';
   return {
     value,
     source: SOURCES.SUITE_TYPE_DEFAULT,
     confidence: 'low',
     businessName,
     businessType,
+    defaultBasis: basis || null,
     evidence: [{
       source: SOURCES.SUITE_TYPE_DEFAULT,
       detail: `no suite-specific measurement found — defaulted to ${value.toLocaleString()} sq ft for ${businessTypeLabel}`,
     }],
   };
 }
-
 
 const { suiteAddressParts } = require('./address-parts');
 

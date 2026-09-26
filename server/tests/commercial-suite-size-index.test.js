@@ -83,14 +83,6 @@ describe('resolveCommercialSuiteSize — priority order (caller/tech-stated -> l
     expect(result.value).toBe(1500);
   });
 
-  test('skipWebSearch option bypasses the web-search leg entirely', async () => {
-    resolveViaDbprLicense.mockResolvedValue(null);
-
-    const result = await resolveCommercialSuiteSize({ address: ADDRESS, commercialRiskType: 'office_low' }, { skipWebSearch: true });
-    expect(resolveViaWebSearch).not.toHaveBeenCalled();
-    expect(result.source).toBe(SOURCES.SUITE_TYPE_DEFAULT);
-  });
-
   test('resolveCommercialSuiteSize never forwards a buildingSqft param anywhere — the field was removed with the sizing rung', async () => {
     resolveViaDbprLicense.mockResolvedValue(null);
     resolveViaWebSearch.mockResolvedValue(null);
@@ -99,6 +91,14 @@ describe('resolveCommercialSuiteSize — priority order (caller/tech-stated -> l
     const webCallArg = resolveViaWebSearch.mock.calls[0][0];
     expect(dbprCallArg.buildingSqft).toBeUndefined();
     expect(webCallArg.buildingSqft).toBeUndefined();
+  });
+
+  test('skipWebSearch option bypasses the web-search leg entirely (PR #4840 admin lookup cache-hit path)', async () => {
+    resolveViaDbprLicense.mockResolvedValue(null);
+
+    const result = await resolveCommercialSuiteSize({ address: ADDRESS, commercialRiskType: 'office_low' }, { skipWebSearch: true });
+    expect(resolveViaWebSearch).not.toHaveBeenCalled();
+    expect(result.source).toBe(SOURCES.SUITE_TYPE_DEFAULT);
   });
 });
 

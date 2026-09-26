@@ -55,24 +55,24 @@ describe('applyUnitScopeToPropertyFacts — the sizing sources survive a commerc
   });
 });
 
-describe('buildEngineInput — buildingSizeMeasured true for the sizing sources', () => {
-  test.each([SQFT_SOURCES.LICENSE_SEATS, SQFT_SOURCES.SUITE_TYPE_DEFAULT])(
-    '%s auto-prices (buildingSizeMeasured: true, footprintSqFt set)', (source) => {
-      const intent = {
-        is_commercial: true,
-        services: { pest: true },
-        commercial_risk_type: 'restaurant_food',
-      };
-      const propertyFacts = {
-        home: { value: 1400, source, confidence: 'medium', rejected: [] },
-        lot: { value: null, source: 'unresolved', confidence: 'none', rejected: [] },
-      };
-      const input = buildEngineInput({ intent, propertyFacts, context: {} });
-      expect(input.buildingSizeMeasured).toBe(true);
-      expect(input.footprintSqFt).toBe(1400);
-      expect(input.homeSqFt).toBe(1400);
-    },
-  );
+describe('buildEngineInput — measured flag per sizing source', () => {
+  const intent = { is_commercial: true, services: { pest: true }, commercial_risk_type: 'restaurant_food' };
+  const facts = (source) => ({
+    home: { value: 1400, source, confidence: 'medium', rejected: [] },
+    lot: { value: null, source: 'unresolved', confidence: 'none', rejected: [] },
+  });
+  test('a license size is a measured building (a real state record)', () => {
+    const input = buildEngineInput({ intent, propertyFacts: facts(SQFT_SOURCES.LICENSE_SEATS), context: {} });
+    expect(input.buildingSizeMeasured).toBe(true);
+    expect(input.footprintSizeEstimated).toBeUndefined();
+    expect(input.footprintSqFt).toBe(1400);
+  });
+  test('a type default is NOT measured (every measured-only guard holds) but opts recurring pest in via footprintSizeEstimated', () => {
+    const input = buildEngineInput({ intent, propertyFacts: facts(SQFT_SOURCES.SUITE_TYPE_DEFAULT), context: {} });
+    expect(input.buildingSizeMeasured).toBe(false);
+    expect(input.footprintSizeEstimated).toBe(true);
+    expect(input.footprintSqFt).toBe(1400);
+  });
 });
 
 describe('classifyLane — commercial-suite-size review reasons', () => {
@@ -153,16 +153,33 @@ describe('risk-type inference source', () => {
   });
 });
 
-describe('engine adoption of the lookup suite size', () => {
+describe('engine resolves the suite size itself, with the call context', () => {
   const fs = require('fs');
   const path = require('path');
   const src = fs.readFileSync(path.join(__dirname, '../services/estimator-engine/index.js'), 'utf8');
+  const i = src.indexOf('suiteSize = await resolveCommercialSuiteSize({');
+  const block = src.slice(i, i + 1400);
+  test('passes the caller phone (a license disambiguator) and never the caller name as the business', () => {
+    expect(i).toBeGreaterThan(-1);
+    expect(block).toMatch(/phone: context\?\.phone/);
+    expect(block).toMatch(/businessNameHint:\s*null,/);
+    expect(block).not.toMatch(/businessNameHint:\s*intent\.customer_name/);
+  });
+  test('falls back to the lookup commercialSubtype only when the lookup describes the gathered address', () => {
+    expect(block).toMatch(/commercialSubtype: intent\.commercial_subtype\s*\|\| \(effectiveParcelOk \? effectiveSignals\.enriched\?\.commercialSubtype : null\)\s*\|\| null/);
+  });
+});
+
+describe('engine adoption of the lookup suite size (PR #4840: adopt license/verified, re-resolve a type default with the call context)', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const src = fs.readFileSync(path.join(__dirname, '../services/estimator-engine/index.js'), 'utf8');
+  const i = src.indexOf('const lookupSuiteSize = effectiveParcelOk ? (effectiveSignals.enriched?.suiteSize');
+
   test('adopts only a license-sourced lookup size; a lookup type default is re-resolved with the call context', () => {
-    const i = src.indexOf('const lookupSuiteSize = effectiveSignals.enriched?.suiteSize');
     expect(i).toBeGreaterThan(-1);
     const block = src.slice(i, i + 2400);
     expect(block).toMatch(/lookupSuiteSize\.source === SQFT_SOURCES\.LICENSE_SEATS/);
-    expect(block).toMatch(/phone: context\?\.phone/);
     expect(block).toMatch(/skipWebSearch: Boolean\(lookupSuiteSize\)/);
   });
 
@@ -170,11 +187,20 @@ describe('engine adoption of the lookup suite size', () => {
   // never the business — passing it as businessNameHint would mislabel
   // every resolved suite with the caller's own name.
   test('businessNameHint is never the caller\'s name, and the lookup businessName fallback still runs', () => {
-    const i = src.indexOf('const lookupSuiteSize = effectiveSignals.enriched?.suiteSize');
     const block = src.slice(i, i + 2600);
     expect(block).toMatch(/businessNameHint:\s*null,/);
     expect(block).not.toMatch(/businessNameHint:\s*intent\.customer_name/);
     expect(block).toMatch(/!suiteSize\.businessName && lookupSuiteSize\?\.businessName/);
+  });
+});
+
+describe('engine adopts a tech-verified lookup suite size', () => {
+  const fs = require('fs');
+  const path = require('path');
+  test('verified is adopted alongside license seats, never re-resolved over', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../services/estimator-engine/index.js'), 'utf8');
+    const i = src.indexOf('const lookupSuiteSize = effectiveParcelOk ? (effectiveSignals.enriched?.suiteSize');
+    expect(src.slice(i, i + 900)).toMatch(/lookupSuiteSize\.source === 'verified'/);
   });
 });
 
@@ -192,21 +218,11 @@ describe('engine suite sizing depends on unit-scope guardrails (declared)', () =
   });
 });
 
-describe('engine adopts a tech-verified lookup suite size', () => {
+describe('cross-property drafts decide suite sizing on the fenced facts', () => {
   const fs = require('fs');
   const path = require('path');
-  test('verified is adopted alongside license seats, never re-resolved over', () => {
+  test('a size stated about the ORIGINAL property does not skip sizing the quoted suite', () => {
     const src = fs.readFileSync(path.join(__dirname, '../services/estimator-engine/index.js'), 'utf8');
-    const i = src.indexOf('const lookupSuiteSize = effectiveSignals.enriched?.suiteSize');
-    expect(src.slice(i, i + 900)).toMatch(/lookupSuiteSize\.source === 'verified'/);
-  });
-});
-
-describe('Codex r6: engine re-resolve keeps the lookup subtype', () => {
-  const fs = require('fs');
-  const path = require('path');
-  test('falls back to the lookup commercialSubtype when intent has none', () => {
-    const src = fs.readFileSync(path.join(__dirname, '../services/estimator-engine/index.js'), 'utf8');
-    expect(src).toMatch(/commercialSubtype: intent\.commercial_subtype \|\| effectiveSignals\.enriched\?\.commercialSubtype \|\| null/);
+    expect(src).toMatch(/crossPropertyRegather \? fenceExtractionFact\(propertyFacts\.home, 'address'\) : propertyFacts\.home\)\?\.source/);
   });
 });
