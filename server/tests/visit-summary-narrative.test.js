@@ -175,8 +175,10 @@ test.each([
   expect(recapWithoutStaleAppointment(recap, { date: 'Friday, October 9' })).toBe(expected);
 });
 
-test('embedded appointment discussion remains intact outside the supported writer grammar', () => {
-  const recap = 'We discussed whether the next visit is scheduled for Oct 2 and agreed to confirm with the office.';
+test.each([
+  'We discussed whether the next visit is scheduled for Oct 2 and agreed to confirm with the office.',
+  'Your next visit is scheduled for October 2026.',
+])('unsupported appointment prose remains intact: %s', (recap) => {
   expect(recapWithoutStaleAppointment(recap, { date: 'Friday, October 9' })).toBe(recap);
 });
 
