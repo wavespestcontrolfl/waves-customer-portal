@@ -1097,7 +1097,7 @@
     {
      "check": "spoken_never_matches",
      "value": [
-      "(?<!\\b(?:not|never|hasn['’]t|isn['’]t|aren['’]t|didn['’]t|doesn['’]t|no|nothing|until|before)\\b(?:(?!\\b(?:but|however|though|although|and|so|then|yet)\\b)[^.!?;,])*)\\b(?:(?:is|are|'s|'re) (?:already )?on (?:the|their|his|her) way|has (?:already )?left|already left|headed (?:your|our|his|her) way|heading (?:over|your way|your direction))\\b"
+      "(?<!\\b(?:not|never|hasn['’]t|isn['’]t|aren['’]t|didn['’]t|doesn['’]t|no|nothing|until|before|will|shall|gonna|going to|['’]ll)\\b(?:(?!\\b(?:but|however|though|although|and|so|then|yet)\\b)[^.!?;,])*)\\b(?:(?:is|are|'s|'re) (?:already )?on (?:the|their|his|her) way|has (?:already )?left|already left|headed (?:your|our|his|her) way|heading (?:over|your way|your direction))\\b"
      ],
      "severity": "critical"
     },
@@ -2299,7 +2299,7 @@
     {
      "check": "spoken_never_matches",
      "value": [
-      "(?<!\\b(?:no|todavía no|aún no|nunca)\\b(?:(?!\\b(?:pero|sino|aunque)\\b)[^.!?;,])*)\\b(?:ya (?:va|está|se encuentra) (?:en camino|para allá)|viene en camino|está en camino|ya va para all[aá]|ya sali[oó]|sali[oó] (?:para|hacia)|est[aá] de camino|va de camino|va para all[aá]|ya viene|ya va para|est[aá] llegando|va llegando)(?![a-záéíóúñü])"
+      "(?<!\\b(?:no|todavía no|aún no|nunca|va a)\\b(?:(?!\\b(?:pero|sino|aunque)\\b)[^.!?;,])*)\\b(?:ya (?:va|está|se encuentra) (?:en camino|para allá)|viene en camino|está en camino|ya va para all[aá]|ya sali[oó]|sali[oó] (?:para|hacia)|est[aá] de camino|va de camino|va para all[aá]|ya viene|ya va para|est[aá] llegando|va llegando)(?![a-záéíóúñü])"
      ],
      "severity": "critical"
     },

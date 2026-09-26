@@ -4658,6 +4658,32 @@ describe('voice relay eval — named spoken checks', () => {
     expect(replay._internals.scenarioStatus({ checks: notLeftYet })).toBe('pass');
   });
 
+  // Codex round-5 P1 (found re-scoring real benchmark transcripts): the "on
+  // the way" ban was negation-aware but not TENSE-aware — "heading (over|
+  // your way|your direction)" and "headed <person> way" matched bare, with
+  // no requirement that a PRESENT/PAST claim govern them, so a real Haiku
+  // line ("The technician will be heading your way before then.", spoken
+  // while get_today_eta said he had not started the drive) false-failed a
+  // correct FUTURE statement. The lookbehind now also excludes future/modal
+  // auxiliaries ("will", "shall", "gonna", "going to", "'ll") the same way
+  // it already excludes negation — present/past claims still fail.
+  test.each([
+    ['The technician will be heading your way before then.', 'pass'],
+    ['The technician will head over as soon as the current job wraps up.', 'pass'],
+    ['The technician is going to head out shortly.', 'pass'],
+    ["He'll be heading your way soon.", 'pass'],
+    ['He is gonna head your way in a bit.', 'pass'],
+    ['The technician is on the way.', 'fail'],
+    ['The technician has already left.', 'fail'],
+    ['The technician is heading your way now.', 'fail'],
+    ['The technician headed your way already.', 'fail'],
+  ])('eta-matched-attested on-the-way ban is tense-aware, not just negation-aware: %s', (text, status) => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'eta-matched-attested');
+    const checks = replay._internals.evaluateChecks(scenario, record({ order: [{ kind: 'tool', name: 'get_today_eta', ok: true }, { kind: 'agent', text: `${text} The window today is 1 to 3 PM.` }] }));
+    expect(checks.find((c) => c.check === 'spoken_never_matches')).toMatchObject({ severity: 'critical', status });
+  });
+
   // Round 19: the read-back must carry all ten digits, in any grouped or spoken form.
   test.each([
     ['Nine four one, five five five, zero one three four.', 'pass'],
@@ -5083,6 +5109,23 @@ describe('voice relay eval — named spoken checks', () => {
     const noSalioYet = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'El técnico aún no salió; llega de la una a las tres de la tarde.' }] }));
     expect(noSalioYet.find((c) => c.check === 'spoken_never_matches')).toMatchObject({ status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: noSalioYet })).toBe('pass');
+    // Codex round-5 P1: the ban is negation-aware but was not TENSE-aware —
+    // a periphrastic future ("va a salir", "va a ir para allá") must pass
+    // the same way "will be heading your way" must in English, while the
+    // present-tense forms above still fail.
+    const vaASalir = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'El técnico va a salir hacia su casa en un momento; llega de la una a las tres de la tarde.' }] }));
+    expect(vaASalir.find((c) => c.check === 'spoken_never_matches')).toMatchObject({ status: 'pass' });
+    expect(replay._internals.scenarioStatus({ checks: vaASalir })).toBe('pass');
+    const vaAIrParaAlla = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'El técnico va a ir para allá en cuanto termine; llega de la una a las tres de la tarde.' }] }));
+    expect(vaAIrParaAlla.find((c) => c.check === 'spoken_never_matches')).toMatchObject({ status: 'pass' });
+    expect(replay._internals.scenarioStatus({ checks: vaAIrParaAlla })).toBe('pass');
+    // "saldrá" is a synthetic future (a different verb form entirely from
+    // the present-tense "salió"/"sale" the ban names) — already safe by
+    // construction, kept here as a fail-proof guard against a future
+    // regression that widens the ban to a bare "sal" stem.
+    const saldra = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'El técnico saldrá pronto hacia su casa; llega de la una a las tres de la tarde.' }] }));
+    expect(saldra.find((c) => c.check === 'spoken_never_matches')).toMatchObject({ status: 'pass' });
+    expect(replay._internals.scenarioStatus({ checks: saldra })).toBe('pass');
     // Codex round-1 P1: the window's hours must also strip when spoken as
     // BARE Spanish cardinals with no article ("una"/"tres", not "la
     // una"/"las tres") — "de una a tres de la tarde" says exactly the
