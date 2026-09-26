@@ -326,13 +326,19 @@ function attachVoiceRelay(httpServer) {
 
     // `last` defaults to true — one utterance per frame, as every caller sends
     // today. A streaming renderer passes false for the non-final chunks.
+    // Returns true only when the frame was actually handed to `ws.send` (PR C:
+    // the stream renderer's `_flushStreamChunk` needs to know a "sent" chunk
+    // really went out before it records it as spoken) — false when the socket
+    // is not OPEN or `ws.send` itself throws. Existing callers that ignore the
+    // return value are unaffected.
     const send = (text, last = true) => {
-      if (ws.readyState === ws.OPEN) {
-        try {
-          ws.send(textFrame(text, last));
-        } catch (e) {
-          logger.error(`[voice-relay] ws send failed: ${e.message}`);
-        }
+      if (ws.readyState !== ws.OPEN) return false;
+      try {
+        ws.send(textFrame(text, last));
+        return true;
+      } catch (e) {
+        logger.error(`[voice-relay] ws send failed: ${e.message}`);
+        return false;
       }
     };
 

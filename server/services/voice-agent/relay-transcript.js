@@ -437,7 +437,7 @@ function storedTurnStats(stats = []) {
     ...Object.fromEntries(numeric.map((key) => [key, Number.isFinite(turn[key]) ? turn[key] : null])),
     ...Object.fromEntries(flags.map((key) => [key, turn[key] === true])),
     effort: ['low', 'medium', 'high'].includes(turn.effort) ? turn.effort : null,
-    renderer: ['block', 'clause'].includes(turn.renderer) ? turn.renderer : null,
+    renderer: ['block', 'stream-v1'].includes(turn.renderer) ? turn.renderer : null,
     playedSource: ['assumed', 'interrupt_truncation', 'twilio_event'].includes(turn.playedSource) ? turn.playedSource : null,
   }));
 }

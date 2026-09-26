@@ -210,6 +210,160 @@ never went through a socket at all (a bake-off/synthetic fixture). So a
 single stored metric can always be traced back to its session + socket/leg +
 turn.
 
+## Streaming renderer (PR C)
+
+`VOICE_RELAY_RENDERER=block|stream` selects how agent text reaches Twilio,
+resolved once per session and pinned for its lifetime (same
+resolve-once/allowlist/warn-once pattern as the `VOICE_RELAY_INBOUND_MODEL`
+override). `VOICE_RELAY_SANDBOX_RENDERER` outranks it for sandbox sessions
+only. An unrecognized value falls back to `block` with one logged warning —
+never a silent substitution. Default (`block`, unset) is byte-identical to
+this lane's original behavior: one whole utterance per Twilio text frame,
+sent only after the model round's `finalMessage()` resolves — `renderer:
+'block'` in every turn stat, `renderer_version: 'block-v1'` in the session
+version stamp.
+
+`stream` sends sentence-complete chunks as `stream.on('text', …)` deltas
+arrive (`{type:'text', token, last:false}` frames, `last:true` on the
+close), stamped `renderer: 'stream-v1'` / `renderer_version: 'stream-v1'`.
+Chunking policy (`server/services/voice-agent/relay-stream-renderer.js`):
+
+1. **Flush at a completed sentence boundary** — `.`/`!`/`?` (+ an optional
+   closing quote/paren) followed by whitespace. An incomplete trailing
+   fragment is held for the next delta. A `.` is NOT a boundary when the
+   token right before it is a common abbreviation (Mr/Mrs/Ms/Dr/St/Ave/
+   Blvd/Rd/Ln/Ct/Hwy/Jr/Sr/vs/etc/approx/No/Mt/Ft/Pt/Apt/Ste/e.g/i.e/a.m/
+   p.m/U.S — `ABBREVIATIONS`) or a single-letter initial ("J. Smith") —
+   "We service St. Petersburg." and "Please ask Dr. Smith." hold past the
+   abbreviation's own period, not just to it.
+2. **A sentence streams ONLY if it's ALLOWLISTED-safe — an ordinary
+   statement holds by default.** The policy inverted from a commitment
+   BLOCKLIST to a safe-shape ALLOWLIST because a blocklist never converges:
+   Codex found "I'll book that" slipping the original hold-verb list; the
+   very next audit pass found "I'll take care of that", "let me put that
+   through", "I'll get that over to the team", "consider it handled" — an
+   unbounded set of ways to phrase "this is done." `isStreamSafe` (see
+   SAFE_FILLER_RE) allows exactly two shapes: (a) the whole trimmed
+   sentence is zero-or-more acknowledgments (sure/okay/great/got it/
+   thanks/…) optionally followed by ONE read-only clause — a modal (let me
+   / I'll / I'm going to / I can / give me a moment to…) plus a read-only
+   verb (check/look/look up/take a look/pull up/see/find/double-check —
+   NEVER a write verb) and an optional object, or a bare "one moment" /
+   "hang on" / "bear with me" — optional trailing "please"; or (b) the
+   sentence is a ONE-CLAUSE question: an optional acknowledgment, then a
+   question word or auxiliary (what/when/where/how/is/are/do/can/would/
+   anything/…), and no clause joiner (, ; : dashes, and/so/but/because)
+   before the final `?` (`QUESTION_RE`) — so "I've handled that, anything
+   else?" holds. "Let me check on that and I'll
+   take care of it." does NOT match (two clauses; the grammar allows
+   exactly one). This costs nothing real: the actual latency win was always
+   the LEADING acknowledgment/filler ahead of the model's real content, not
+   "stream everything until proven risky" — and that's exactly what the
+   allowlist covers.
+3. **`needsHold` still VETOES**, independently of `isStreamSafe` — a
+   sentence holds even if it would otherwise be allowlisted (e.g. "Is nine
+   a.m. open?" is a question but holds on the date/time veto) — when it
+   contains a dollar amount (reusing `eval/voice-relay-spoken-checks`'s
+   `amountMentions`), ANY digit, a date/time expression (weekday/month
+   names, relative days and parts of day, week/month, spoken clock times
+   like "at nine" or "two o'clock", ordinals like "the fifteenth" —
+   `DATE_TIME_RE`), a negation, a **commitment-or-success claim**: an
+   explicit commitment verb (booked/scheduled/sent/charged/refunded/
+   confirmed/reserved/created/completed/done/processed/…) OR a success
+   phrase that asserts the same outcome without one — "you're all set",
+   "taken care of", "got you booked", "on the calendar", "locked in",
+   "I've sent that over", "someone will call you" (`COMMITMENT_OR_SUCCESS_RE`)
+   — OR a **future/modal write commitment**: "I'll book that", "I'm going
+   to reschedule that", "let me submit that", or a bare `-ing` form of a
+   write verb ("Booking that now.") (`WRITE_COMMITMENT_RE`; read-only verbs
+   — check, look, pull up, see, find — are never in that list, so "Let me
+   check on that for you." still streams). These date/negation/commitment
+   patterns are English-only, so a **Spanish session never flushes
+   progressively** (its stream state starts holding — block timing,
+   released at finalize under the write-tool check), and in any session a
+   sentence with Spanish orthography or a common Spanish function/success
+   word ("listo", "ya quedó", "agendada", "reservado", …;
+   `NON_ENGLISH_HINT_RE`) is held too. Once one sentence in a round fails
+   EITHER check (not allowlisted, or vetoed), every sentence after it in
+   that same round holds too — never reordered, never partially released.
+   Independently, the round loop also stops flushing the instant ANY
+   `tool_use` content block starts streaming (belt-and-braces — text ahead
+   of a tool call has usually already streamed by the time that event
+   fires).
+4. **Release the held tail only at `finalMessage()`**, under the exact same
+   write-tool suppression check the block renderer already runs
+   (`hasPendingWrite` / `WRITE_TOOLS` in `relay-conversation.js`): if the
+   round ends in a write tool call, the held tail is dropped from both the
+   air and the assistant history (never spoken, never stored) — anything
+   already flushed before the hold point stays spoken and stays in history,
+   so the transcript agrees with what the caller actually heard. If not, the
+   held tail is sent as the closing chunk. If a barge-in lands WHILE that
+   release's own late-supersession recheck (next bullet) is in flight, the
+   tail is dropped exactly the same way, and the round's history is closed
+   with ONLY the sent prefix — never the model's full generated text — with
+   any `tool_use` block paired to a synthetic "not run" result so the next
+   model call's history never carries an unpaired tool call (mirrors how
+   the tool-result loop already ends a round the caller interrupted mid-way).
+5. **EVERY progressive flush — not just the round's first — revalidates
+   session ownership**, the SAME late-supersession recheck the block
+   renderer runs immediately before `say()` (a reconnect can take the
+   CallSid claim mid-round, and the old socket must not speak from cached
+   account context). There is no synchronous cross-socket takeover signal
+   to shortcut this with — relay-server.js keeps no in-process registry of
+   a call's owning socket, only the `call_log` claim row
+   `_sessionSuperseded()` reads — so each queued sentence's check-then-send
+   step is serialized through a per-round promise chain (`_queueOrFlush` in
+   `relay-conversation.js`): order is preserved, a stale/aborted/closed
+   round no-ops, and the moment any check finds the session superseded, the
+   REST of the round is withheld (not just that one sentence) and ends
+   through the same superseded end-session path the block renderer's own
+   recheck uses. `_finalizeStreamedRound` awaits the whole chain before
+   reading what was actually sent. Every step in that chain is also
+   caught-and-logged: a throw (most plausibly `_send` itself failing) never
+   leaves the chain REJECTED — `.then(onFulfilled)` with no `onRejected` on
+   a rejected promise just passes the rejection through, which would skip
+   every later queued sentence outright, surface as an unhandled rejection
+   (`_onStreamTextDelta` never awaits its own call into the chain), and
+   abort `_finalizeStreamedRound`'s bare `await` instead of finalizing
+   cleanly — so a step that throws logs it, marks the round `failed` (its
+   own flag, NOT `withheld`: the call still belongs to this socket, so it
+   must never end as `superseded`), and returns normally, keeping the chain
+   itself fulfilled so every later step no-ops. Each chunk is sent BEFORE
+   it is recorded, so a send that throws leaves no transcript or history
+   claim for text that never reached Twilio.
+6. **Finalize checks barge-in and failure FIRST.** Right after awaiting the
+   flush chain — before the write-tool branch or the tail release touches
+   the entry, the air, or history — an aborted signal (barge-in) or a
+   `failed` round ends via `_closeStreamedRoundEarly`: history keeps only
+   the sent prefix plus any `tool_use` paired with a "not run" result, no
+   tool runs, and no further frame is sent — except that a `failed` round
+   first makes a best-effort `last:true` close of the open token group and
+   then gets the same recovery as a mid-stream model failure (handoff if
+   the failure policy says so, else the failure copy), so the caller is
+   never left in dead air. `_closeStreamEntry` is a no-op
+   on an entry `interrupt()` already cut, so a late close can never send a
+   stray `last:true` or overwrite the played-text record.
+
+Interruption: a barge-in aborts the round's own `AbortController` (unchanged
+mechanism); every send call in the streaming path checks that controller's
+`signal.aborted` first, so a chunk queued before the abort but delivered
+after it is dropped rather than resurfacing. A round's streaming state is
+local to that round and is never read by a later round, a reconnect, or a
+transfer. A mid-stream timeout/error closes the open utterance with an empty
+`last:true` frame (no replay of anything already sent), pushes exactly the
+sent prefix as its own assistant history message (so the model's next round
+knows what it already told the caller — the block renderer's own failures
+never have partial text to preserve, so this only applies to streaming),
+before the existing failure copy speaks as its own, separate utterance. The
+`played`/`tokens-played` mapping (`_appendPlayed`, `interrupt()`) is
+unchanged in its matching logic, but a streaming entry that is still
+OPEN (more chunks may still extend it) is never retired early just because
+a played event happens to match its CURRENT planned text mid-stream —
+retirement is deferred until the entry closes, so a barge-in later in the
+same utterance can still find and correctly truncate it; the retirement
+check reruns the instant the entry closes in case a played event caught up
+while it was deferred.
+
 ## Roadmap (not in this PR)
 
 - **Phase 1** — add read-only `get_availability` / `find_slots` tools → agent quotes real openings, still writes a lead. Zero mutation risk.
