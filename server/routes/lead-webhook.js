@@ -1216,7 +1216,8 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       if (leadAgentConfigured) {
         // Registered for the shutdown flush while this immediate send runs.
         pendingLeadFallbacks.set(sendFallbackAutoReply, null);
-        void sendFallbackAutoReply().finally(() => pendingLeadFallbacks.delete(sendFallbackAutoReply));
+        void sendFallbackAutoReply().finally(() => pendingLeadFallbacks.delete(sendFallbackAutoReply))
+          .catch(err => logger.error(`[lead-agent] Init fallback failed for customer ${customer.id}: ${err?.code || err?.name || 'error'}`));
       }
     }
 
@@ -1897,7 +1898,7 @@ function createLeadFallbackDeadline(sendFallback, ms) {
     if (!owned) {
       void Promise.resolve().then(sendFallback).finally(() => {
         if (pendingLeadFallbacks.get(sendFallback) === null) pendingLeadFallbacks.delete(sendFallback);
-      });
+      }).catch(err => logger.error(`[lead-agent] Deadline fallback failed: ${err?.code || err?.name || 'error'}`));
     }
     signal({ timedOut: true, alreadySent: !owned });
   }, ms);

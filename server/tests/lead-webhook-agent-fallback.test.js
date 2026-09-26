@@ -367,3 +367,18 @@ describe('a run that settles after the abandonment window', () => {
     }
   });
 });
+
+test('a rejecting sender fired by the deadline timer never escapes as an unhandled rejection', async () => {
+  const unhandled = jest.fn();
+  process.on('unhandledRejection', unhandled);
+  try {
+    const sendFallback = jest.fn(async () => { throw new Error('boom'); });
+    createLeadFallbackDeadline(sendFallback, 5);
+    await new Promise(r => setTimeout(r, 30));
+    expect(sendFallback).toHaveBeenCalledTimes(1);
+    expect(unhandled).not.toHaveBeenCalled();
+    expect(pendingLeadFallbacks.has(sendFallback)).toBe(false);
+  } finally {
+    process.off('unhandledRejection', unhandled);
+  }
+});
