@@ -57,17 +57,21 @@ const DASH_SIGNOFF = `(?<!\\b(?:is|are|was|were|be|as|named|called|by)\\s*)\\s*$
 
 // Closer + signer first, so "Best,\nAdam" goes as one unit instead of
 // leaving a dangling "Best,".
-// When the customer shares a signer's first name, that name alone is how the
-// text addresses them ("See you soon, Adam."), so it is no bare signer; a
-// full name-and-company block still is.
+// When the customer shares a signer's first name, that name after a closer or
+// on its own line may be how the text addresses them ("See you soon, Adam."),
+// so those ambiguous forms skip it. A dash-set name ("- Adam") and a full
+// name-and-company block are sign-offs whoever the customer is.
+const SIGNER = `(?:${SIGNATURE_BLOCK}|${PERSON}|${COMPANY})`;
 function buildSignatureTailRes(addresseeKey) {
   const people = Object.entries(PEOPLE).filter(([key]) => key !== addresseeKey).map(([, re]) => re);
-  const signer = `(?:${SIGNATURE_BLOCK}|${people.length ? `(?:${people.join('|')})|` : ''}${COMPANY})`;
+  const ambiguousSigner = `(?:${SIGNATURE_BLOCK}|${people.length ? `(?:${people.join('|')})|` : ''}${COMPANY})`;
   return [
-    new RegExp(`(?:^|(?<=[.!?])\\s+|${OWN_LINE}|${DASH_SIGNOFF})${CLOSER},?\\s+${signer}${TAIL}`, 'iu'),
+    new RegExp(`${DASH_SIGNOFF}${CLOSER},?\\s+${SIGNER}${TAIL}`, 'iu'),
+    new RegExp(`(?:^|(?<=[.!?])\\s+|${OWN_LINE})${CLOSER},?\\s+${ambiguousSigner}${TAIL}`, 'iu'),
     // A signer's own name is never the valediction ("Adam,\nVirginia" lists names).
-    new RegExp(`(?:^|(?<=[.!?])\\s+|${OWN_LINE})(?!(?:${SIGNATURE_BLOCK}|${PERSON}|${COMPANY})\\s*,)${VALEDICTION}[ \\t]*\\n\\s*${signer}${TAIL}`, 'iu'),
-    new RegExp(`(?:${DASH_SIGNOFF}|${AFTER_SENTENCE_LINE})${signer}${TAIL}`, 'iu'),
+    new RegExp(`(?:^|(?<=[.!?])\\s+|${OWN_LINE})(?!${SIGNER}\\s*,)${VALEDICTION}[ \\t]*\\n\\s*${ambiguousSigner}${TAIL}`, 'iu'),
+    new RegExp(`${DASH_SIGNOFF}${SIGNER}${TAIL}`, 'iu'),
+    new RegExp(`${AFTER_SENTENCE_LINE}${ambiguousSigner}${TAIL}`, 'iu'),
     new RegExp(`(?:^|(?<=[.!?])\\s+)${SIGNATURE_BLOCK}${TAIL}`, 'iu'),
   ];
 }
@@ -105,17 +109,21 @@ function dropOrphanOpener(text, removed) {
   return unpaired ? text.slice(1).trim() : text;
 }
 
-// A whole text that only thanks someone by name ("Thanks, Adam!") is talking
-// to a customer with that name, not signing off.
-const THANKS_BY_NAME_RE = new RegExp(`^(?:thanks(?:\\s+again)?|many\\s+thanks|thank\\s+you),?\\s+${PERSON}${TAIL}`, 'iu');
+// A whole text that only thanks the customer by their own name ("Thanks,
+// Adam!" to a customer named Adam) is the message, not a sign-off.
+const THANKS_BY_NAME_RES = Object.fromEntries(Object.entries(PEOPLE).map(([key, re]) => [
+  key,
+  new RegExp(`^(?:thanks(?:\\s+again)?|many\\s+thanks|thank\\s+you),?\\s+${re}${TAIL}`, 'iu'),
+]));
 
 // Returns the text without its trailing sign-off. A text with no sign-off
 // comes back exactly as given (quotes and all). Pass the customer's first
 // name when known, so a text addressed to a customer named Adam keeps it.
 function stripTrailingSignature(message, { addresseeFirstName } = {}) {
-  const res = SIGNATURE_TAIL_RES[addresseeKey(addresseeFirstName)];
+  const key = addresseeKey(addresseeFirstName);
+  const res = SIGNATURE_TAIL_RES[key];
   const original = String(message || '').trim();
-  if (THANKS_BY_NAME_RE.test(original)) return original;
+  if (key && THANKS_BY_NAME_RES[key].test(original)) return original;
   let text = original;
   for (let i = 0; i < 3; i += 1) {
     const next = stripOnce(text, res);
