@@ -179,3 +179,21 @@ describe('billing delivery channel contract', () => {
     expect(billingChannelsPayload({ ...prefs, billing_channels: ['email'], email_enabled: false }, { emailAvailable: false }).billingReminderChannels).toEqual(['email']);
   });
 });
+
+describe('storedBillingChannels (the property row the send path reads)', () => {
+  const { storedBillingChannels } = require('../services/billing-delivery-channels');
+  const databaseWith = (row, fail = false) => jest.fn(() => {
+    const q = { where: jest.fn(() => q), first: jest.fn(async () => { if (fail) throw new Error('prefs read failed'); return row; }) };
+    return q;
+  });
+  test('reads the property\'s own explicit choice', async () => {
+    await expect(storedBillingChannels('prop-1', 'billing', databaseWith({ billing_channels: ['email'] }))).resolves.toEqual(['email']);
+  });
+  test('no row or no choice is null (legacy routing)', async () => {
+    await expect(storedBillingChannels('prop-1', 'billing', databaseWith(undefined))).resolves.toBeNull();
+    await expect(storedBillingChannels('prop-1', 'billing', databaseWith({}))).resolves.toBeNull();
+  });
+  test('an unreadable row throws so the caller fails closed', async () => {
+    await expect(storedBillingChannels('prop-1', 'billing', databaseWith(null, true))).rejects.toThrow('prefs read failed');
+  });
+});

@@ -80,6 +80,43 @@ describe('billing reminder per-channel delivery progress', () => {
     purpose: 'balance_reminder', eventKey, channels, metadata: { tier: 'gentle' }, send,
   });
 
+  test('an off-ledger balance allowance reaches every leg policy recheck', async () => {
+    const send = jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted' }));
+    await sendReminderChannels({
+      customerId: 'customer-1', invoiceId: null, source: 'previsit_balance_reminder',
+      purpose: 'balance_reminder', eventKey: 'previsit-balance:ss-1', channels: ['sms', 'email'],
+      offLedgerBalanceCents: 4900, send,
+    });
+    expect(collectionsChannelPermitted).toHaveBeenCalledTimes(2);
+    for (const [args] of collectionsChannelPermitted.mock.calls) {
+      expect(args).toMatchObject({ offLedgerBalanceCents: 4900 });
+    }
+  });
+
+  test('without an allowance the recheck counts no off-ledger balance', async () => {
+    await deliver(['sms'], jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted' })));
+    // Left undefined, so rail-guard's own default (0) applies.
+    expect(collectionsChannelPermitted.mock.calls[0][0].offLedgerBalanceCents).toBeUndefined();
+  });
+
+  test('an aggregate reminder records the invoices it quotes on each reservation', async () => {
+    await sendReminderChannels({
+      customerId: 'customer-1', invoiceId: null, invoiceIds: ['inv-a', 'inv-b'], source: 'previsit_balance_reminder',
+      purpose: 'balance_reminder', eventKey: 'previsit-balance:ss-1', channels: ['sms'],
+      send: jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted' })),
+    });
+    expect(ContactLedger.recordContact).toHaveBeenCalledWith(expect.objectContaining({ invoiceIds: ['inv-a', 'inv-b'] }));
+  });
+
+  test('a dues-only aggregate reminder records an empty invoice list, not [null]', async () => {
+    await sendReminderChannels({
+      customerId: 'customer-1', invoiceId: null, invoiceIds: [], source: 'previsit_balance_reminder',
+      purpose: 'balance_reminder', eventKey: 'previsit-balance:ss-2', channels: ['sms'],
+      send: jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted' })),
+    });
+    expect(ContactLedger.recordContact).toHaveBeenCalledWith(expect.objectContaining({ invoiceIds: [] }));
+  });
+
   test('each leg is sent with its own reservation', async () => {
     const send = jest.fn().mockResolvedValue({ sent: true, deliveryOutcome: 'accepted' });
 

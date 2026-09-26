@@ -28,12 +28,15 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
+const { dateOnlyString } = require('../utils/date-only');
 const { resolveBillingLane, monthlyDuesCollected } = require('./billing-lane');
 const { invoiceAmountDue } = require('./invoice-helpers');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { collectionsChannelVerdict } = require('./collections/rail-guard');
 const ContactLedger = require('./collections/contact-ledger');
+const { storedBillingChannels } = require('./billing-delivery-channels');
+const { reminderProgress, sendReminderChannels } = require('./billing-reminder-delivery');
 
 const TEMPLATE_KEY = 'previsit_balance_reminder';
 const EMAIL_TEMPLATE_KEY = 'billing.previsit_balance';
@@ -171,6 +174,232 @@ async function overdueRecurringInvoices(customerId, now = new Date()) {
     .select('invoices.*', 'ifs.last_touch_at as followup_last_touch_at');
 }
 
+// Explicit per-channel choice (PR #4843 router core): the collections policy
+// judges only the selected channels. This appointment's own earlier
+// reservations (a released-claim retry) must not trip recent-contact spacing
+// against the episode being resumed; unrelated contacts still count.
+// Returns { skip: true } or { eligibleIds } (null = no filtering).
+async function explicitChannelPolicyGate({ visit, consult, explicitChannels }) {
+  let episodeLedgerIds;
+  try {
+    const progress = await reminderProgress(visit.customer_id, 'previsit_balance_reminder', explicitChannels);
+    const episode = progress.find((event) => event.metadata.notificationEventKey === previsitEventKey(visit));
+    episodeLedgerIds = (episode?.entries || []).map((entry) => entry.id);
+  } catch (progressErr) {
+    logger.warn(`[previsit-balance] reminder progress read failed for visit ${visit.id}: ${progressErr.message}`);
+    return { skip: true };
+  }
+  const verdicts = [];
+  for (const channel of explicitChannels) {
+    verdicts.push(await collectionsChannelVerdict({ ...consult, channel, excludeLedgerIds: episodeLedgerIds }));
+  }
+  const permitted = verdicts.filter((v) => v.permitted);
+  if (!permitted.length) return { skip: true };
+  // Every permitted leg sends the same copy, so quote only debt that EVERY
+  // permitted selected channel holds eligible (null = no filtering).
+  const lists = permitted.map((v) => v.eligibleInvoiceIds).filter((ids) => ids !== null && ids !== undefined);
+  if (!lists.length) return { eligibleIds: null };
+  const eligibleIds = lists.reduce((acc, ids) => acc.filter((id) => ids.map(String).includes(String(id))));
+  return { eligibleIds };
+}
+
+// One episode per appointment, stable across a released-claim retry, so a
+// rerun resumes the same reservation set (reminderProgress finds it by
+// customer_id + source + this key).
+function previsitEventKey(visit) {
+  return `previsit-balance:${visit.id}`;
+}
+
+async function releasePrevisitClaim(visitId) {
+  await db('scheduled_services')
+    .where({ id: visitId })
+    .update({ balance_reminder_sent_at: null })
+    .catch((err) => logger.warn(`[previsit-balance] claim release failed for visit ${visitId}: ${err.message}`));
+}
+
+// Every leg, Email included, goes through sendCustomerMessage: an explicit
+// Email leg dispatches via the billing email adapter under the email
+// authority (which rechecks the selection at handoff), keyed
+// billing_channel_email:<eventKey>:email and bound to this leg's reservation
+// (collections_ledger_id), so an acceptance whose stamp is lost is repaired
+// by reminderProgress.
+async function sendPrevisitLeg({ visit, amount, eventKey, channel, ledger, preDispatchCheck }) {
+  const body = await renderSmsTemplate(TEMPLATE_KEY, {
+    first_name: visit.first_name || 'there',
+    amount: amount.toFixed(2),
+    service_type: visit.service_type || 'service',
+    visit_date: friendlyVisitDate(visit.scheduled_date),
+    billing_url: BILLING_PORTAL_URL,
+  });
+  if (!body) {
+    return {
+      sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'TEMPLATE_UNAVAILABLE',
+      reason: 'template rendered empty (inactive or missing)',
+    };
+  }
+  return sendCustomerMessage({
+    // Only the Text leg is addressed by phone; App and Email identify the
+    // recipient by customerId (a stale phone would read as a changed choice).
+    to: channel === 'sms' ? visit.phone : null,
+    body,
+    channel,
+    audience: 'customer',
+    purpose: 'billing',
+    customerId: visit.customer_id,
+    appointmentId: visit.id,
+    entryPoint: 'previsit_balance_reminder',
+    // Explicit routing already decided the channel set — never the legacy
+    // hasEmailLeg suppression heuristic (balance-reminder.js's
+    // sendExplicitLatePaymentReminder contract).
+    hasEmailLeg: true,
+    preDispatchCheck,
+    metadata: {
+      original_message_type: 'balance_reminder',
+      billingDeliveryCategory: 'billing',
+      notificationEventKey: eventKey,
+      billingDeliveryLeg: channel,
+      scheduled_service_id: visit.id,
+      amount,
+      // Visit pin for a retried Email (billing-email-replay-eligibility):
+      // refused once the visit moves or the copy is from an earlier day.
+      appointment_date: dateOnlyString(visit.scheduled_date),
+      appointment_service_type: visit.service_type || 'service',
+      appointment_rendered_on: etDateString(),
+      ...(ledger?.id ? { collections_ledger_id: ledger.id } : {}),
+      ...(channel === 'push' ? { appOnly: true } : {}),
+    },
+  });
+}
+
+// Sends the selected legs through the shared per-channel rail after the
+// appointment claim. Returns 'sent' when a leg delivered now, else 'skipped'.
+// The claim is released while the episode is still open (a replay hold, an
+// uncertain outcome, or a transient denial on ANY selected leg — even when a
+// sibling delivered) so the next sweep in the window retries only the
+// pending legs; sendReminderChannels never re-sends a delivered or resolved
+// leg. A helper throw releases the claim too (its reservations still guard
+// any leg whose outcome is uncertain). A COMPLETE episode keeps the claim.
+async function deliverExplicitPrevisitReminder({ visit, amount, duesCents, explicitChannels, quotedInvoices }) {
+  const eventKey = previsitEventKey(visit);
+  const invoiceIds = quotedInvoices.map((inv) => inv.id);
+  const preDispatchCheck = quotedBalanceStillOwed({
+    customerId: visit.customer_id, quotedInvoices, quotedDuesCents: duesCents,
+  });
+  let result;
+  try {
+    result = await sendReminderChannels({
+      customerId: visit.customer_id,
+      invoiceId: null, // aggregate balance rail, no single target invoice (rail-guard.js)
+      invoiceIds, // ...but the ledger still records the debts this reminder quotes
+      offLedgerBalanceCents: duesCents,
+      source: 'previsit_balance_reminder',
+      purpose: 'balance_reminder',
+      eventKey,
+      channels: explicitChannels,
+      metadata: { scheduled_service_id: visit.id, amount },
+      send: (channel, ledger) => sendPrevisitLeg({ visit, amount, eventKey, channel, ledger, preDispatchCheck }),
+    });
+  } catch (helperErr) {
+    logger.warn(`[previsit-balance] explicit-channel send failed for visit ${visit.id}: ${helperErr.message}`);
+    await releasePrevisitClaim(visit.id);
+    return 'skipped';
+  }
+  if (!result.complete) await releasePrevisitClaim(visit.id);
+  return result.deliveredNow.length ? 'sent' : 'skipped';
+}
+
+// Late monthly dues are debt the ledger does not hold (not invoiced), so the
+// collections policy counts them as an off-ledger balance.
+function lateDuesCents({ lane, duesCollected, todayEt, obligation, monthlyRate }) {
+  const duesLate = lane.mode === 'monthly_membership'
+    && duesCollected === false
+    && String(todayEt) >= String(obligation.graceDateEt);
+  return duesLate ? Math.round((Number(monthlyRate) || 0) * 100) : 0;
+}
+
+// The same allowance, recomputed from the customer's current state for a
+// retried previsit Email (billing-email-replay-eligibility): the replay
+// consult must count unpaid dues exactly as the original send did.
+async function currentDuesAllowanceCents(customerId, database = db, now = new Date()) {
+  const customer = await database('customers').where({ id: customerId })
+    .first('billing_mode', 'waveguard_tier', 'monthly_rate', 'billing_day');
+  if (!customer) return 0;
+  const todayEt = etDateString(now);
+  const lane = resolveBillingLane(customer);
+  const obligation = duesObligation(todayEt, customer.billing_day);
+  const duesCollected = lane.mode === 'monthly_membership'
+    ? await monthlyDuesCollected(database, customerId, new Date(`${obligation.dueDateEt}T12:00:00Z`))
+    : null;
+  return lateDuesCents({ lane, duesCollected, todayEt, obligation, monthlyRate: customer.monthly_rate });
+}
+
+// Right before each leg dispatches, re-read everything the copy quotes: every
+// overdue invoice must still be collectible, self-pay and owe exactly what
+// was quoted, and the late dues must still be owed. Any change holds the leg
+// (retryable) so the next sweep re-quotes from current state.
+function quotedBalanceStillOwed({ customerId, quotedInvoices, quotedDuesCents }) {
+  const changed = (reason) => ({ ok: false, code: 'PREVISIT_QUOTE_CHANGED', reason, retryable: true });
+  return async () => {
+    try {
+      const helpers = require('./invoice-helpers');
+      const ids = quotedInvoices.map((inv) => inv.id);
+      const live = ids.length ? await db('invoices').whereIn('id', ids) : [];
+      for (const quoted of quotedInvoices) {
+        const row = live.find((inv) => String(inv.id) === String(quoted.id));
+        if (!row || String(row.customer_id) !== String(customerId)
+          || !helpers.isInvoiceCollectibleStatus(row.status)
+          || row.payer_id || helpers.invoiceWithdrawnFromCustomer(row)
+          || Math.round(helpers.invoiceAmountDue(row) * 100) !== Math.round(quoted.due * 100)) {
+          return changed(`quoted invoice ${quoted.id} changed before dispatch`);
+        }
+      }
+      if (quotedDuesCents > 0 && (await currentDuesAllowanceCents(customerId)) !== quotedDuesCents) {
+        return changed('quoted monthly dues changed before dispatch');
+      }
+      return { ok: true };
+    } catch (err) {
+      return changed(`quoted balance unreadable before dispatch: ${err.message}`);
+    }
+  };
+}
+
+// The customer's explicit billing channel choice is read BEFORE the
+// collections policy gate so the gate judges the channels actually selected
+// (an App-only customer with Text and Email both denied is still reachable).
+// A stored choice is enforced whether or not GATE_BILLING_NOTIFICATION_
+// CHANNELS is live (same read-side contract as balance-reminder.js's
+// latePaymentCheck). An unreadable choice must not fall through to the legacy
+// SMS+Email path (that would ignore a stored selection): skip, and the next
+// sweep in the window retries (no claim is held yet).
+async function previsitPolicyGate({ visit, consult }) {
+  let explicitChannels;
+  try {
+    explicitChannels = await storedBillingChannels(visit.customer_id, 'billing', db);
+  } catch (prefsErr) {
+    logger.warn(`[previsit-balance] billing channel choice unreadable for customer ${visit.customer_id}: ${prefsErr.message}`);
+    return { skip: true };
+  }
+  if (explicitChannels !== null) {
+    const gate = await explicitChannelPolicyGate({ visit, consult, explicitChannels });
+    return gate.skip ? gate : { explicitChannels, eligibleIds: gate.eligibleIds };
+  }
+  const smsVerdict = await collectionsChannelVerdict({ ...consult, channel: 'sms' });
+  const emailVerdict = await collectionsChannelVerdict({ ...consult, channel: 'email' });
+  if (!smsVerdict.permitted && !emailVerdict.permitted) return { skip: true };
+  // Gate-on: the reminder may only QUOTE debt the policy holds eligible
+  // (codex r8 — an invoice the policy excludes, e.g. re-resolved as
+  // payer-billed or dunning-stopped, must not ride an allowed aggregate).
+  // Gate-off (null) = no filtering.
+  return {
+    explicitChannels: null,
+    smsPolicyPermitted: smsVerdict.permitted,
+    emailPolicyPermitted: emailVerdict.permitted,
+    eligibleIds: smsVerdict.permitted && smsVerdict.eligibleInvoiceIds !== null
+      ? smsVerdict.eligibleInvoiceIds
+      : emailVerdict.eligibleInvoiceIds,
+  };
+}
+
 async function runSweep({ now = new Date() } = {}) {
   if (!gateEnabled()) return { skipped: true, reason: 'gate_off' };
   if (!(await smsTemplateActive())) return { skipped: true, reason: 'template_inactive' };
@@ -275,31 +504,16 @@ async function runSweep({ now = new Date() } = {}) {
       // byte-identical, pinned). Dues are computed here (independent of the
       // invoice set) so the off-ledger carve-out covers a dues-only
       // reminder: late monthly dues aren't invoiced.
-      const duesLate = lane.mode === 'monthly_membership'
-        && duesCollected === false
-        && String(todayEt) >= String(obligation.graceDateEt);
-      const duesCents = duesLate
-        ? Math.round((Number(visit.monthly_rate) || 0) * 100)
-        : 0;
+      const duesCents = lateDuesCents({ lane, duesCollected, todayEt, obligation, monthlyRate: visit.monthly_rate });
       const consult = {
         customerId: visit.customer_id,
         purpose: 'balance_reminder',
         offLedgerBalanceCents: duesCents,
         logTag: 'previsit-balance',
       };
-      const smsVerdict = await collectionsChannelVerdict({ ...consult, channel: 'sms' });
-      const emailVerdict = await collectionsChannelVerdict({ ...consult, channel: 'email' });
-      const smsPolicyPermitted = smsVerdict.permitted;
-      const emailPolicyPermitted = emailVerdict.permitted;
-      if (!smsPolicyPermitted && !emailPolicyPermitted) { skipped++; continue; }
-
-      // Gate-on: the reminder may only QUOTE debt the policy holds eligible
-      // (codex r8 — an invoice the policy excludes, e.g. re-resolved as
-      // payer-billed or dunning-stopped, must not ride an allowed
-      // aggregate). Gate-off (null) = no filtering.
-      const eligibleIds = smsPolicyPermitted && smsVerdict.eligibleInvoiceIds !== null
-        ? smsVerdict.eligibleInvoiceIds
-        : emailVerdict.eligibleInvoiceIds;
+      const gate = await previsitPolicyGate({ visit, consult });
+      if (gate.skip) { skipped++; continue; }
+      const { explicitChannels, eligibleIds, smsPolicyPermitted, emailPolicyPermitted } = gate;
       const fresh = eligibleIds === null || eligibleIds === undefined
         ? freshAll
         : freshAll.filter((inv) => eligibleIds.map(String).includes(String(inv.id)));
@@ -328,6 +542,16 @@ async function runSweep({ now = new Date() } = {}) {
         .whereNull('balance_reminder_sent_at')
         .update({ balance_reminder_sent_at: new Date() });
       if (!claimed) { skipped++; continue; }
+
+      if (explicitChannels !== null) {
+        const outcome = await deliverExplicitPrevisitReminder({
+          visit, amount, duesCents, explicitChannels,
+          quotedInvoices: fresh.map((inv) => ({ id: inv.id, due: invoiceAmountDue(inv) })),
+        });
+        if (outcome === 'sent') sent++;
+        else skipped++;
+        continue;
+      }
 
       // The email sidecar routes through billing prefs + the billing
       // recipient (Codex r10 P1). Declare the email leg to the SMS channel
@@ -441,6 +665,8 @@ async function runSweep({ now = new Date() } = {}) {
 
 module.exports = {
   runSweep,
+  currentDuesAllowanceCents,
+  quotedBalanceStillOwed,
   previsitBalanceReminderEligible,
   duesObligation,
   friendlyVisitDate,
