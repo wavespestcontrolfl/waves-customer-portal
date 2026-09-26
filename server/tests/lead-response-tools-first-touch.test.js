@@ -199,3 +199,15 @@ test('an em dash is measured as the GSM hyphen the pipeline sends, not as UCS-2'
 
   expect(result).toMatchObject({ sent: true });
 });
+
+test('a throw before dispatch settles the claim on the wrapper-tagged not_sent outcome (so it is released)', async () => {
+  // sendCustomerMessageCore tags every throw with err.providerOutcome; before
+  // dispatch that is its initial { sent: false, deliveryOutcome: 'not_sent' }.
+  mockClaim.mockResolvedValue({ claimed: true, phoneDigits: '9415550100' });
+  const err = Object.assign(new Error('preparation failed'), { providerOutcome: { sent: false, deliveryOutcome: 'not_sent' } });
+  mockMessage.mockRejectedValue(err);
+
+  await executeLeadTool('send_lead_response', { message: 'Hi there.' }, context).catch(() => {});
+
+  expect(mockResolveClaim).toHaveBeenCalledWith('9415550100', { sent: false, deliveryOutcome: 'not_sent' });
+});
