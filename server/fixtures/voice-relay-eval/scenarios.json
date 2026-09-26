@@ -2454,6 +2454,8 @@
     "prohibited_facts": [
      "Any pest control figure ($129, $109 or $89) after the correction",
      "Any lawn price stated as a per-month or combined monthly/yearly total",
+     "Any lawn price stated as per visit (banned unit; only per application is customer-facing)",
+     "Any amount no tool ever returned",
      "Any English sentence to the caller"
     ],
     "required_action": "get_pricing(lawn_care) after the correction; never resume the pest control quote",
@@ -2522,6 +2524,24 @@
        "\\bpor aplicaci[oó]n\\b[^.!?]{0,40}\\b(119|99)\\s*d[oó]lares\\b"
       ],
       "fromTurn": 2
+     },
+     "severity": "critical"
+    },
+    {
+     "check": "spoken_never_matches",
+     "value": {
+      "patterns": [
+       "\\bpor visitas?\\b",
+       "\\bcada visitas?\\b"
+      ],
+      "fromTurn": 2
+     },
+     "severity": "critical"
+    },
+    {
+     "check": "no_price_disclosure",
+     "value": {
+      "allow": "returned"
      },
      "severity": "critical"
     },

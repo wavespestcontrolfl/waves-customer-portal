@@ -236,14 +236,19 @@ const ORDINAL_WORDS = '(?:first|second|third|fourth|fifth|sixth|seventh|eighth|n
 const DAY_WORDS_ES = '(?:primero|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce|trece|catorce|quince|diecis[eé]is|diecisiete|dieciocho|diecinueve|veinte|veinti(?:uno|d[oó]s|tr[eé]s|cuatro|cinco|s[eé]is|siete|ocho|nueve)|treinta(?: y uno)?)';
 const WEEKDAYS = 'monday|tuesday|wednesday|thursday|friday|saturday|sunday|lunes|martes|miércoles|miercoles|jueves|viernes|sábado|sabado|domingo';
 const HOUR_WORD_MAP = HOUR_WORDS.split('|');
+const HOUR_WORD_MAP_ES = HOUR_WORDS_ES.split('|');
 // The article Spanish grammar fixes to each hour ("la una", "las dos" …
-// "las doce") — used only inside windowStripper's own narrow regex below,
-// where the article is part of how the window is actually said ("de la una
-// a las tres").
+// "las doce") plus the bare cardinal alone ("una", "tres" — "La ventana es
+// de una a tres de la tarde" never says the article) — both used only
+// inside windowStripper's own narrow regex below, where a SECOND hour token
+// joined to the first by a RANGE word ("to/and/-/until/…/a/y/hasta") is
+// already required, so the common English word "once" ("once you call…")
+// still never collides: on its own it never sits beside a second
+// hour-shaped token with a range word between them.
 const HOUR_ARTICLE_ES = Object.freeze({ 1: 'la una', 2: 'las dos', 3: 'las tres', 4: 'las cuatro', 5: 'las cinco', 6: 'las seis', 7: 'las siete', 8: 'las ocho', 9: 'las nueve', 10: 'las diez', 11: 'las once', 12: 'las doce' });
 // A window's hours are 24-hour in the fixture (13 is 1 PM) and spoken as 12-hour.
 const twelveHour = (h) => Number(h) % 12 || 12;
-const hourAlt = (h) => `(?:${twelveHour(h)}|${HOUR_WORD_MAP[twelveHour(h) - 1]}|${HOUR_ARTICLE_ES[twelveHour(h)]})`;
+const hourAlt = (h) => `(?:${twelveHour(h)}|${HOUR_WORD_MAP[twelveHour(h) - 1]}|${HOUR_ARTICLE_ES[twelveHour(h)]}|${HOUR_WORD_MAP_ES[twelveHour(h) - 1]})`;
 const meridiemOfHour = (h) => (Number(h) < 12 ? 'am' : 'pm');
 // The part of day a spoken meridiem names; "o'clock" names none.
 const meridiemOf = (s) => { const t = String(s || '').toLowerCase(); return /^a\.?m|morning|mañana/.test(t) ? 'am' : /^p\.?m|afternoon|evening|tarde|noche/.test(t) ? 'pm' : null; };
@@ -2218,7 +2223,7 @@ function no_account_holder_callback(value, record, { spoken }) {
 // "ha") are in neither table. Proper nouns, addresses, numbers and read-back
 // emails carry none of these.
 const LANGUAGE_WORDS = Object.freeze({
-  en: /\b(?:the|will|you|your|yours|we|our|ours|us|they|them|their|it|its|i|my|is|are|am|was|were|be|been|being|and|or|but|for|with|without|to|of|in|on|at|by|up|out|if|so|not|do|does|did|don't|doesn't|didn't|can|can't|could|would|should|shall|may|might|must|have|has|had|having|that|this|these|those|there|here|what|when|where|which|who|how|why|from|about|into|over|after|before|until|while|please|thank|thanks|team|member|someone|anyone|somebody|office|follow|call|calls|calling|back|text|email|help|sorry|number|address|let|know|sure|right|get|got|need|needs|want|wants|soon|shortly|now|then|today|tomorrow|tonight|morning|afternoon|evening|week|day|time|just|also|very|only|again|still|already|yes|great|good|all|any|some|one|first|last|next|make|take|give|see|say|tell|ask|check|send|schedule|service|technician|visit|estimate|quote|price|account|phone|name|problem|welcome|pleasure|sounds|perfect|absolutely|certainly|understood|alright|moment|hold|hello|goodbye|bye|anytime|gotcha|[a-z]{2,}ing)\b/gi,
+  en: /\b(?:the|will|you|your|yours|we|our|ours|us|they|them|their|it|its|i|my|is|are|am|was|were|be|been|being|and|or|but|for|with|without|to|of|in|on|at|by|up|out|if|so|not|do|does|did|don't|doesn't|didn't|can|can't|could|would|should|shall|may|might|must|have|has|had|having|that|this|these|those|there|here|what|when|where|which|who|how|why|from|about|into|over|after|before|until|while|please|thank|thanks|team|member|someone|anyone|somebody|office|follow|call|calls|calling|back|text|email|help|sorry|number|address|let|know|sure|right|get|got|need|needs|want|wants|soon|shortly|now|then|today|tomorrow|tonight|morning|afternoon|evening|week|day|time|just|also|very|only|again|still|already|yes|great|good|all|any|some|one|first|last|next|make|take|give|see|say|tell|ask|check|send|schedule|scheduled|service|technician|visit|estimate|quote|price|account|phone|name|problem|welcome|pleasure|sounds|perfect|absolutely|certainly|understood|alright|moment|hold|hello|goodbye|bye|anytime|gotcha|appointment|appointments|confirm|confirmed|confirms|book|books|booked|[a-z]{2,}ing)\b/gi,
   es: /\b(?:el|la|los|las|de|del|que|un|una|unos|unas|le|les|lo|se|su|sus|mi|mis|tu|tus|nos|por|para|pero|es|está|estás|están|estamos|estoy|ser|soy|somos|hay|gracias|equipo|miembro|alguien|llamar|llamará|llamaremos|llamaré|enviar|enviaremos|contactar|seguimiento|oficina|puedo|podemos|puede|necesito|necesita|nombre|dirección|direccion|correo|número|numero|teléfono|telefono|claro|bien|hola|buenos|buenas|cómo|como|qué|que|cuándo|cuando|dónde|donde|ayudar|ayudarle|ayudarlo|presupuesto|servicio|técnico|tecnico|casa|aquí|aqui|ahora|pronto|hoy|mañana|también|tambien|muy|más|mas|sí|si|con|sin|del|al|este|esta|esto|ese|esa|eso|todo|todos|nada|algo|otra|otro|día|dia|semana|hora|cuenta|precio|cita)\b/gi,
 });
 const WORD_RE = /[a-záéíóúñü'’]+/gi;

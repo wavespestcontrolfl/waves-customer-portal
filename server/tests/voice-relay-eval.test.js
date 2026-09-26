@@ -4247,6 +4247,11 @@ describe('voice relay eval — named spoken checks', () => {
     ['Luis Ortega, arroba example punto com.', 'pass'],
     ['Un momento.', 'pass'],
     ['Su casa está en 52 Spring Lake Drive, Englewood, ¿correcto?', 'pass'],
+    // Codex round-1 P1: a false-success sentence with NO function words at
+    // all ("Appointment confirmed.") must still be caught — the dictionary
+    // needs the domain nouns/verbs a booking false-claim actually uses, not
+    // only function words.
+    ['Appointment confirmed.', 'fail'], ['Booking confirmed.', 'fail'],
   ])('only_language es: %s', (text, status) => {
     expect(run('only_language', 'es', text).status).toBe(status);
   });
@@ -4511,6 +4516,16 @@ describe('voice relay eval — named spoken checks', () => {
     const english = replay._internals.evaluateChecks(scenario, record({ order: [placed, { kind: 'agent', text: 'Great news, a Waves team member will call you to confirm the time.' }] }));
     expect(english.find((c) => c.check === 'only_language')).toMatchObject({ severity: 'critical', status: 'fail' });
     expect(replay._internals.scenarioStatus({ checks: english })).toBe('fail');
+    // Codex round-1 P1: a bare English false-success sentence carries none of
+    // the OLD dictionary's function words, so it used to slip past both the
+    // Spanish certainty prohibition (Spanish-only wording) AND only_language
+    // (no dictionary word at all) — it must still fail the scenario now.
+    const englishFalseSuccess = replay._internals.evaluateChecks(scenario, record({ order: [placed, { kind: 'agent', text: 'Appointment confirmed.' }] }));
+    expect(englishFalseSuccess.find((c) => c.check === 'only_language')).toMatchObject({ severity: 'critical', status: 'fail' });
+    expect(replay._internals.scenarioStatus({ checks: englishFalseSuccess })).toBe('fail');
+    const bookingConfirmed = replay._internals.evaluateChecks(scenario, record({ order: [placed, { kind: 'agent', text: 'Booking confirmed.' }] }));
+    expect(bookingConfirmed.find((c) => c.check === 'only_language')).toMatchObject({ severity: 'critical', status: 'fail' });
+    expect(replay._internals.scenarioStatus({ checks: bookingConfirmed })).toBe('fail');
     const honest = replay._internals.evaluateChecks(scenario, record({ order: [placed, { kind: 'agent', text: 'Perfecto, un miembro del equipo de Waves le llamará para confirmar la hora, a la una de la tarde.' }] }));
     expect(replay._internals.scenarioStatus({ checks: honest })).toBe('pass');
     // codex r3 P1: "pendiente de ser confirmada" correctly describes a
@@ -4581,6 +4596,17 @@ describe('voice relay eval — named spoken checks', () => {
     const correctlyDenied = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'El técnico todavía no está en camino; llega de la una a las tres de la tarde.' }] }));
     expect(correctlyDenied.find((c) => c.check === 'spoken_never_matches')).toMatchObject({ status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: correctlyDenied })).toBe('pass');
+    // Codex round-1 P1: the window's hours must also strip when spoken as
+    // BARE Spanish cardinals with no article ("una"/"tres", not "la
+    // una"/"las tres") — "de una a tres de la tarde" says exactly the
+    // returned window and must pass, while a genuinely wrong bare-word
+    // window must still fail.
+    const bareWindow = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'La ventana es de una a tres de la tarde.' }] }));
+    expect(bareWindow.find((c) => c.check === 'no_visit_time')).toMatchObject({ status: 'pass' });
+    expect(replay._internals.scenarioStatus({ checks: bareWindow })).toBe('pass');
+    const bareWrongWindow = replay._internals.evaluateChecks(scenario, record({ order: [looked, { kind: 'agent', text: 'La ventana es de dos a cuatro de la tarde.' }] }));
+    expect(bareWrongWindow.find((c) => c.check === 'no_visit_time')).toMatchObject({ severity: 'critical', status: 'fail' });
+    expect(replay._internals.scenarioStatus({ checks: bareWrongWindow })).toBe('fail');
   });
 
   test.each([
@@ -4613,8 +4639,11 @@ describe('voice relay eval — named spoken checks', () => {
   test('spanish-interruption-inside-amount-or-date blocks when the pest price resurfaces, a monthly total is spoken, or the unit is dropped, after the correction', () => {
     const replay = require('../services/eval/voice-relay-replay');
     const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'spanish-interruption-inside-amount-or-date');
-    const pestPricing = { kind: 'tool', name: 'get_pricing', input: { service: 'pest_control', home_sqft: 2000 }, ok: true, turn: 1 };
-    const lawnPricing = { kind: 'tool', name: 'get_pricing', input: { service: 'lawn_care', lawn_sqft: 5000 }, ok: true, turn: 2 };
+    const pricingResponses = scenario.fixtures.toolResponses.get_pricing;
+    // text is the fixture's own returned copy, so no_price_disclosure({allow:
+    // 'returned'}) below can tell a grounded figure from a hallucinated one.
+    const pestPricing = { kind: 'tool', name: 'get_pricing', input: { service: 'pest_control', home_sqft: 2000 }, ok: true, turn: 1, text: pricingResponses[0].text };
+    const lawnPricing = { kind: 'tool', name: 'get_pricing', input: { service: 'lawn_care', lawn_sqft: 5000 }, ok: true, turn: 2, text: pricingResponses[1].text };
     const resurfaced = replay._internals.evaluateChecks(scenario, record({ order: [
       pestPricing, { kind: 'agent', text: 'El control de plagas trimestral son $129 por aplicación.', turn: 1 },
       lawnPricing, { kind: 'agent', text: 'Entendido, césped. Como le decía, el control de plagas es $129, y el programa de césped mejorado es $119 por aplicación.', turn: 2 },
@@ -4634,7 +4663,24 @@ describe('voice relay eval — named spoken checks', () => {
     const correct = replay._internals.evaluateChecks(scenario, record({ order: [
       pestPricing, lawnPricing, { kind: 'agent', text: 'Para césped, el programa mejorado es $119 por aplicación, nueve veces al año; el premium es $99 por aplicación, doce veces al año.', turn: 2 },
     ] }));
+    expect(correct.find((c) => c.check === 'no_price_disclosure')).toMatchObject({ status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: correct })).toBe('pass');
+    // Codex round-1 P1: a hallucinated EXTRA price no tool ever returned must
+    // fail even standing right beside the two compliant, grounded figures.
+    const invented = replay._internals.evaluateChecks(scenario, record({ order: [
+      pestPricing, lawnPricing, { kind: 'agent', text: 'Para césped, el programa mejorado es $119 por aplicación; también hay una opción de $150 por aplicación.', turn: 2 },
+    ] }));
+    expect(invented.find((c) => c.check === 'no_price_disclosure')).toMatchObject({ severity: 'critical', status: 'fail' });
+    expect(replay._internals.scenarioStatus({ checks: invented })).toBe('fail');
+    // Codex round-1 P1: "por visita" is a banned unit (AGENTS.md — customer-
+    // facing lawn pricing is per application only) and the required-unit
+    // check is existential, so it must not be satisfied by a DIFFERENT price
+    // in the same sentence carrying the right unit.
+    const perVisit = replay._internals.evaluateChecks(scenario, record({ order: [
+      pestPricing, lawnPricing, { kind: 'agent', text: 'Para césped, el programa mejorado es $119 por aplicación y el premium es $99 por visita.', turn: 2 },
+    ] }));
+    expect(perVisit.some((c) => c.check === 'spoken_never_matches' && c.status === 'fail' && c.severity === 'critical')).toBe(true);
+    expect(replay._internals.scenarioStatus({ checks: perVisit })).toBe('fail');
     // codex r2 P1: natural Spanish speech says "119 dólares", not only "$119"
     // — the required price+unit check must accept that spelling too, and the
     // prohibited pest-figure check must still catch it in that spelling.
