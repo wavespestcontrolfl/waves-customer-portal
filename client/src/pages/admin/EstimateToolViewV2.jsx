@@ -393,8 +393,12 @@ function buildTurfRequestProfile(baseProfile, form) {
     Number(form.stories) >= 1
   )
     profile.footprintUnknown = false;
-  if (profile.homeSqFt && profile.footprintUnknown !== true)
-    profile.footprint = Math.round(profile.homeSqFt / (profile.stories || 1));
+  // The footprint follows the Home Sq Ft box too: a cleared box must not
+  // leave the lookup's own footprint (spread in above) pricing pest.
+  if (profile.footprintUnknown !== true)
+    profile.footprint = profile.homeSqFt
+      ? Math.round(profile.homeSqFt / (profile.stories || 1))
+      : 0;
   profile.pool = form.hasPool === "YES" ? "YES" : "NO";
   profile.poolCage = form.hasPoolCage === "YES" ? "YES" : "NO";
   profile.poolCageSize =

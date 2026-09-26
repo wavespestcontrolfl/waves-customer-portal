@@ -100,6 +100,18 @@ describe('estimate dimension boxes govern pricing', () => {
     expect(profile.homeSqFt).toBe(2400);
   });
 
+  it('a cleared Home Sq Ft box clears the footprint too — the lookup\'s own footprint never prices pest', async () => {
+    enriched = { ...HOUSE, footprint: 1200 };
+    render(<MemoryRouter><EstimateToolViewV2 initialAddress={ADDRESS} /></MemoryRouter>);
+    selectService('Pest Control');
+    await lookUp();
+    change('Home Sq Ft', '');
+    const profile = await generate();
+    expect(profile.homeSqFt).toBe(0);
+    expect(profile.footprint).toBe(0);
+    expect(profile.lotSqFt).toBe(9000);
+  });
+
   it('a condo on the development parcel: the lot is never prefilled and its parcel-scope area reads never price', async () => {
     enriched = CONDO_ON_DEVELOPMENT_PARCEL;
     render(<MemoryRouter><EstimateToolViewV2 initialAddress={ADDRESS} /></MemoryRouter>);
