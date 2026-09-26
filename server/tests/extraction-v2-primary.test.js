@@ -324,6 +324,73 @@ describe('adoptV2PrimaryFields — scheduling verdict', () => {
   });
 });
 
+// Arrival-window END (schema 1.15.0, owner ruling 2026-09-26 — "agreed time
+// windows like '6 to 9pm' never get booked"). confirmed_window_end_at rides
+// alongside confirmed_start_at through the same v2-wins/demotion rules.
+describe('adoptV2PrimaryFields — confirmed_window_end_at (arrival window)', () => {
+  test('a confirmed window adopts BOTH the start and the end onto a stub', () => {
+    const v2 = v2Fixture();
+    v2.scheduling = {
+      ...v2.scheduling,
+      confirmed_start_at: '2026-07-24T18:00:00-04:00',
+      confirmed_window_end_at: '2026-07-24T21:00:00-04:00',
+    };
+    const { merged, adoptedFields } = adoptV2PrimaryFields(v1Stub(), v2);
+    expect(merged.preferred_date_time).toBe('2026-07-24T18:00');
+    expect(merged.confirmed_window_end_at).toBe('2026-07-24T21:00');
+    expect(adoptedFields).toContain('confirmed_window_end_at');
+  });
+
+  test('a confirmed SINGLE time (no window) leaves confirmed_window_end_at null', () => {
+    const { merged } = adoptV2PrimaryFields(v1Stub(), v2Fixture());
+    expect(merged.preferred_date_time).toBe('2026-07-24T08:00');
+    expect(merged.confirmed_window_end_at).toBeNull();
+  });
+
+  test('V2 non-confirmed status demotes a V1 confirmed window end alongside the start', () => {
+    const v1 = {
+      ...v1Stub(),
+      appointment_confirmed: true,
+      preferred_date_time: '2026-07-24T18:00',
+      confirmed_window_end_at: '2026-07-24T21:00',
+    };
+    const v2 = v2Fixture();
+    v2.scheduling = { ...v2.scheduling, status: 'reschedule_requested' };
+    const { merged } = adoptV2PrimaryFields(v1, v2);
+    expect(merged.preferred_date_time).toBeNull();
+    expect(merged.confirmed_window_end_at).toBeNull();
+  });
+
+  test('confirmed WITHOUT a parseable start time also clears a stale window end', () => {
+    const v1 = {
+      ...v1Stub(),
+      appointment_confirmed: true,
+      preferred_date_time: '2026-07-24T18:00',
+      confirmed_window_end_at: '2026-07-24T21:00',
+    };
+    const v2 = v2Fixture();
+    v2.scheduling = { ...v2.scheduling, confirmed_start_at: null, confirmed_window_end_at: '2026-07-24T21:00:00-04:00' };
+    const { merged } = adoptV2PrimaryFields(v1, v2);
+    expect(merged.appointment_confirmed).toBe(false);
+    expect(merged.preferred_date_time).toBeNull();
+    expect(merged.confirmed_window_end_at).toBeNull();
+  });
+
+  test('ambiguous V2 status leaves a V1 window end alone, same as the start', () => {
+    const v1 = {
+      ...v1Stub(),
+      appointment_confirmed: true,
+      preferred_date_time: '2026-07-24T18:00',
+      confirmed_window_end_at: '2026-07-24T21:00',
+    };
+    const v2 = v2Fixture();
+    v2.scheduling = { ...v2.scheduling, status: 'ambiguous', confirmed_start_at: null };
+    const { merged } = adoptV2PrimaryFields(v1, v2);
+    expect(merged.preferred_date_time).toBe('2026-07-24T18:00');
+    expect(merged.confirmed_window_end_at).toBe('2026-07-24T21:00');
+  });
+});
+
 describe('adoptV2PrimaryFields — OR flags and fill-gap tiers', () => {
   test('spam/voicemail/quote flags OR in: V2 true wins, V2 false never un-flags', () => {
     const v2 = v2Fixture();

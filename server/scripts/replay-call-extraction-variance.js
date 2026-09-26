@@ -30,6 +30,11 @@ const FIELD_GROUPS = {
   high: [
     'appointment_confirmed',
     'preferred_date_time',
+    // Arrival-window END (schema 1.15.0, owner ruling 2026-09-26 — "agreed
+    // time windows like '6 to 9pm' never get booked"). Routing-critical
+    // alongside preferred_date_time: a model that stops capturing (or
+    // hallucinates) the agreed window end changes what gets booked.
+    'confirmed_window_end_at',
     'proposed_start_at',
     'agent_committed_booking',
     'is_spam',
@@ -424,7 +429,7 @@ function normalizeField(field, value) {
   // don't report a spurious high-severity delta on every pre-1.8.0 row
   // (codex P2). A genuine true↔false disagreement still surfaces.
   if (field === 'agent_committed_booking') return normalizeBool(value) === true;
-  if (field === 'preferred_date_time' || field === 'proposed_start_at') return normalizeDateTime(value);
+  if (field === 'preferred_date_time' || field === 'proposed_start_at' || field === 'confirmed_window_end_at') return normalizeDateTime(value);
   return normalizeString(value);
 }
 

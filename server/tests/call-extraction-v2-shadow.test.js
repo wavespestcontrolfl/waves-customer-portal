@@ -78,8 +78,8 @@ describe('v2 extraction prompt', () => {
   });
 
   test('prompt version and hash are stable', () => {
-    expect(PROMPT_VERSION).toBe('v10');
-    expect(PROMPT_HASH).toMatch(/^v10-[a-f0-9]{12}$/);
+    expect(PROMPT_VERSION).toBe('v11');
+    expect(PROMPT_HASH).toMatch(/^v11-[a-f0-9]{12}$/);
   });
 
   test('includes the service_request.price capture rules (call-agent audit 2026-09-23)', () => {
@@ -239,7 +239,7 @@ describe('v2 extraction function (extractCallDataV2)', () => {
 
 describe('schema version alignment', () => {
   test('schema version matches between validator and prompt', () => {
-    expect(SCHEMA_VERSION).toBe('1.14.0');
+    expect(SCHEMA_VERSION).toBe('1.15.0');
   });
 
   test('persisted schema_version enum accepts the current SCHEMA_VERSION (P1: a missing enum entry fail-closes every extraction)', () => {

@@ -812,6 +812,45 @@ describe('call extraction replay variance reporting', () => {
       );
       expect(variances.find((v) => v.field === 'phone_note')).toBeDefined();
     });
+  });
+
+  // scheduling.confirmed_window_end_at (schema 1.15.0, owner ruling
+  // 2026-09-26 — "agreed time windows like '6 to 9pm' never get booked").
+  // Registered `high` (routing-critical, alongside preferred_date_time): a
+  // model that drops or hallucinates the agreed window end changes what
+  // gets booked, not just a cosmetic display value.
+  describe('scheduling.confirmed_window_end_at variance coverage', () => {
+    test('confirmed_window_end_at is registered in FIELD_GROUPS.high', () => {
+      expect(FIELD_GROUPS.high).toContain('confirmed_window_end_at');
+    });
+
+    test('compareFlatFields reports a HIGH-severity variance when confirmed_window_end_at changes', () => {
+      const variances = compareFlatFields(
+        { preferred_date_time: '2026-05-28T18:00', confirmed_window_end_at: '2026-05-28T21:00' },
+        { preferred_date_time: '2026-05-28T18:00', confirmed_window_end_at: '2026-05-28T20:00' },
+        true
+      );
+      const variance = variances.find((v) => v.field === 'confirmed_window_end_at');
+      expect(variance).toBeDefined();
+      expect(variance.severity).toBe('high');
+    });
+
+    test('normalizeField compares confirmed_window_end_at as a datetime, same as preferred_date_time', () => {
+      expect(normalizeField('confirmed_window_end_at', '2026-05-28T21:00:00-04:00'))
+        .toBe(normalizeField('preferred_date_time', '2026-05-28T21:00:00-04:00'));
+      expect(normalizeField('confirmed_window_end_at', '2026-05-28T21:00:00-04:00'))
+        .not.toBe(normalizeField('confirmed_window_end_at', '2026-05-28T20:00:00-04:00'));
+      expect(normalizeField('confirmed_window_end_at', null)).toBeNull();
+    });
+
+    test('a null confirmed_window_end_at (no agreed window) is not a variance against another null', () => {
+      const variances = compareFlatFields(
+        { confirmed_window_end_at: null },
+        { confirmed_window_end_at: null },
+        true
+      );
+      expect(variances.find((v) => v.field === 'confirmed_window_end_at')).toBeUndefined();
+    });
 
     test('compareFlatFields reports no variance when nothing changed', () => {
       const flat = { caller_id_disclaimed: true, phone_note: 'office line' };

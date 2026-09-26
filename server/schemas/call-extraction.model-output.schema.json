@@ -1184,7 +1184,15 @@
             "null"
           ],
           "format": "date-time",
-          "description": "ISO 8601 datetime with the Eastern Time offset (never UTC 'Z'). Set when status='confirmed' AND both specific date AND specific time agreed, or when a reschedule concluded with a new agreed date+time (status='reschedule_requested' — carries the NEW slot for the office to move the existing visit to)."
+          "description": "ISO 8601 datetime with the Eastern Time offset (never UTC 'Z'). Set when status='confirmed' AND both specific date AND specific time agreed, or when a reschedule concluded with a new agreed date+time (status='reschedule_requested' — carries the NEW slot for the office to move the existing visit to). An agreed ARRIVAL WINDOW ('between 6 and 9 tonight') is confirmed too — this carries the window's START; confirmed_window_end_at carries its END."
+        },
+        "confirmed_window_end_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time",
+          "description": "schema 1.15.0 — the END of an agreed ARRIVAL WINDOW, same ISO 8601 Eastern-offset format as confirmed_start_at. Set ONLY alongside a confirmed_start_at that itself came from a window ('we'll be there between 6 and 9' -> confirmed_start_at=6pm, confirmed_window_end_at=9pm). Null when no window was agreed (a single confirmed time, no window) or status isn't confirmed/reschedule_requested."
         },
         "proposed_start_at": {
           "type": ["string", "null"],
