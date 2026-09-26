@@ -77,6 +77,12 @@
  *   railway run node scripts/route-order-cleanup.js --execute --out backup.json
  *   railway run node scripts/route-order-cleanup.js --rollback backup.json            # dry run
  *   railway run node scripts/route-order-cleanup.js --rollback backup.json --execute
+ *   railway run node scripts/route-order-cleanup.js --export-ledger <ledger_id> --out backup.json
+ *
+ * --export-ledger <ledger_id> --out <path> (read-only, no lock) rebuilds an
+ * --execute run's backup file from its route_optimization_planner_runs row
+ * — every applied tech-day's route_order_snapshot, the same format --out
+ * writes — for when the run's own backup could not be written.
  *
  * Under `railway run`, Railway injects the linked (portal) service's env
  * before the process starts — dotenv.config() below is a no-op then and
@@ -98,7 +104,7 @@ function argValue(flag) {
 
 // A selector flag with no value must fail, never silently widen the range
 // or skip the rollback file (same guard recurring-series-topup.js uses).
-for (const flag of ['--from', '--to', '--out', '--rollback']) {
+for (const flag of ['--from', '--to', '--out', '--rollback', '--export-ledger']) {
   if (!args.includes(flag)) continue;
   const v = argValue(flag);
   if (v == null || v.startsWith('--')) {
@@ -111,6 +117,7 @@ const FROM_ARG = argValue('--from');
 const TO_ARG = argValue('--to');
 const OUT_PATH = argValue('--out');
 const ROLLBACK_PATH = argValue('--rollback');
+const EXPORT_LEDGER_ID = argValue('--export-ledger');
 
 /**
  * Inclusive list of YYYY-MM-DD ET calendar dates from `from` to `to`.
@@ -201,19 +208,30 @@ function buildBackupRows(entries) {
   })));
 }
 
-/** One line per touched tech-day, ids only. */
+/** One line per touched tech-day AND per skipped/failed one (the dry-run
+ *  plan carries those with `skipped_reason`), ids only, then a summary line
+ *  counting both. "No tech-day needs a change" prints only when nothing was
+ *  skipped either (codex PRRT_kwDOR3YQi86mQsF7: a preview that dropped the
+ *  skipped days read as "all clean" while stale days were being passed
+ *  over). A day-level skip (no technician) reads "all techs". */
 function printPlan(entries) {
   const touched = (entries || []).filter((entry) => (entry.route_order_changes || []).length > 0);
-  if (!touched.length) {
+  const skipped = (entries || []).filter((entry) => entry.skipped_reason);
+  if (!touched.length && !skipped.length) {
     console.log('No tech-day needs a route_order change in this range.');
     return;
   }
+  const tech = (entry) => entry.technicianId ?? entry.technician_id ?? 'all techs';
   for (const entry of touched) {
     const tag = entry.canonicalized
       ? `canonicalized (reasons=${JSON.stringify(entry.canonicalized.reasons)}, source=${entry.canonicalized.source})`
       : `reordered (source=${entry.source || 'unknown'})`;
-    console.log(`${entry.date} tech ${entry.technicianId ?? entry.technician_id}: ${entry.route_order_changes.length} stop(s) ${tag}`);
+    console.log(`${entry.date} tech ${tech(entry)}: ${entry.route_order_changes.length} stop(s) ${tag}`);
   }
+  for (const entry of skipped) {
+    console.log(`${entry.date} tech ${tech(entry)}: skipped (${entry.skipped_reason})`);
+  }
+  console.log(`${touched.length} tech-day(s) with route_order changes, ${skipped.length} skipped.`);
 }
 
 /** Backup rows grouped into one entry per (technician_id, date) — the unit
@@ -568,10 +586,54 @@ function parseLedgerResult(raw) {
  *  for every row of that tech-day) plus its date/technicianId is exactly
  *  the backup file's row shape. */
 function recoveryInstruction(ledgerId) {
-  return `The route_order writes for this run ALREADY COMMITTED${ledgerId ? ` (ledger id ${ledgerId})` : ''}. `
-    + 'Recovery: read route_optimization_planner_runs.result.reorders for that ledger id — each entry\'s '
-    + 'route_order_snapshot ([{id,before,after}] for the whole tech-day) plus its date/technicianId is exactly the backup file\'s row '
-    + 'shape; rebuild --out by hand from those, or re-run with --out once the ledger is reachable again.';
+  const committed = `The route_order writes for this run ALREADY COMMITTED${ledgerId ? ` (ledger id ${ledgerId})` : ''} — do NOT re-run the cleanup to recover the backup (a second run would record the already-cleaned days, not the originals). `;
+  if (ledgerId) {
+    return `${committed}Recovery (read-only, once the database is reachable): `
+      + `node scripts/route-order-cleanup.js --export-ledger ${ledgerId} --out <path> rebuilds the backup file from that ledger row.`;
+  }
+  return `${committed}No ledger id was returned for this run: find its route_optimization_planner_runs row `
+    + '(run_type route_order_cleanup) and pass that id to --export-ledger <id> --out <path>; if no row exists the ledger '
+    + 'insert failed and this run\'s output above is the only record of what changed.';
+}
+
+/**
+ * `--export-ledger <ledger_id> --out <path>`: rebuilds an --execute run's
+ * backup file from its route_optimization_planner_runs row — every applied
+ * tech-day's route_order_snapshot, flattened by the SAME buildBackupRows
+ * and written by the SAME writeBackupFile --out uses, so the file is
+ * byte-for-byte the format --rollback reads (codex PRRT_kwDOR3YQi86mQsF_:
+ * the recovery path must never be "re-run the cleanup"). Read-only: one
+ * SELECT, no lock, no transaction. Returns the process exit code — 1 when
+ * the row is missing or carries no snapshot (nothing is written then).
+ */
+async function exportLedgerBackup(db, ledgerId, outPath) {
+  const row = await db('route_optimization_planner_runs').where({ id: ledgerId }).first('result');
+  if (!row) {
+    console.error(`No route_optimization_planner_runs row with id ${ledgerId}.`);
+    return 1;
+  }
+  const rows = buildBackupRows(parseLedgerResult(row.result).reorders || []);
+  if (!rows.length) {
+    console.error(`Ledger row ${ledgerId} carries no route_order_snapshot — nothing to export.`);
+    return 1;
+  }
+  writeBackupFile(outPath, rows);
+  console.log(`Wrote ${rows.length} row(s) from ledger ${ledgerId} to ${outPath}.`);
+  return 0;
+}
+
+/**
+ * The forward cleanup run. `--execute` holds the SAME run-level lease the
+ * nightly auto-dispatch/route-reorder pass holds
+ * (runExclusive('auto-dispatch-recurring'), fail-fast); a dry run commits
+ * nothing (no writer, no ledger row, no alert refresh), so it runs
+ * UNLOCKED, exactly like the rollback preview (codex PRRT_kwDOR3YQi86mQsGE:
+ * a preview must not contend with the nightly pass for its lease).
+ */
+function runCleanup(runOpts, { execute, runRouteReorder, runExclusive }) {
+  if (!execute) return runRouteReorder(runOpts);
+  return runExclusive('auto-dispatch-recurring', () => runRouteReorder(runOpts),
+    { recordHealth: false, waitForSlot: false });
 }
 
 /** True when an entry carries a committed tech-day snapshot — the only
@@ -746,29 +808,47 @@ async function runRollback(db, backupPath, execute, now, deps) {
   return rollbackIsIncomplete(result, rows.length) ? 1 : 0;
 }
 
+/**
+ * The two modes that are not a forward cleanup run: `--export-ledger`
+ * (read-only backup rebuild) and `--rollback` (restore from a backup).
+ * Returns that mode's exit code, or null when neither was asked for.
+ */
+async function runSideMode(db, { runExclusive, wasLockSkipped }) {
+  if (EXPORT_LEDGER_ID) {
+    if (!OUT_PATH) {
+      console.error('--export-ledger needs --out <path>.');
+      return 1;
+    }
+    return exportLedgerBackup(db, EXPORT_LEDGER_ID, OUT_PATH);
+  }
+  if (!ROLLBACK_PATH) return null;
+  // Rollback goes through the exact same fenced writer (writeTechDayOrder)
+  // and error classifier (classifyWriteError) every other route_order
+  // write in the app uses — these `deps` are the writer's own exported
+  // building blocks, never a second copy of its guards.
+  const {
+    writeTechDayOrder, classifyWriteError, ROUTE_WRITE_GUARD_COLUMNS, CUSTOMER_PREMISE_ALIASES,
+    chooseWindowSafeOrder, _internals: { EXCLUDE_STATUSES, LIVE_HOLD_SQL, UNCERTIFIABLE_REASONS, currentOrder },
+  } = require('../server/services/route-reorder');
+  const { guardedCoordSelects } = require('../server/services/scheduling/day-stops');
+  const RouteOptimizer = require('../server/services/route-optimizer');
+  const rollbackDeps = {
+    writeTechDayOrder, classifyWriteError,
+    ROUTE_WRITE_GUARD_COLUMNS, CUSTOMER_PREMISE_ALIASES, guardedCoordSelects,
+    EXCLUDE_STATUSES, LIVE_HOLD_SQL,
+    RouteOptimizer, chooseWindowSafeOrder, UNCERTIFIABLE_REASONS, currentOrder,
+    runExclusive, wasLockSkipped,
+  };
+  return runRollback(db, ROLLBACK_PATH, EXECUTE, new Date(), rollbackDeps);
+}
+
 async function main() {
   const db = require('../server/models/db');
   const { runExclusive, wasLockSkipped } = require('../server/utils/cron-lock');
 
-  if (ROLLBACK_PATH) {
-    // Rollback goes through the exact same fenced writer (writeTechDayOrder)
-    // and error classifier (classifyWriteError) every other route_order
-    // write in the app uses — these `deps` are the writer's own exported
-    // building blocks, never a second copy of its guards.
-    const {
-      writeTechDayOrder, classifyWriteError, ROUTE_WRITE_GUARD_COLUMNS, CUSTOMER_PREMISE_ALIASES,
-      chooseWindowSafeOrder, _internals: { EXCLUDE_STATUSES, LIVE_HOLD_SQL, UNCERTIFIABLE_REASONS, currentOrder },
-    } = require('../server/services/route-reorder');
-    const { guardedCoordSelects } = require('../server/services/scheduling/day-stops');
-    const RouteOptimizer = require('../server/services/route-optimizer');
-    const rollbackDeps = {
-      writeTechDayOrder, classifyWriteError,
-      ROUTE_WRITE_GUARD_COLUMNS, CUSTOMER_PREMISE_ALIASES, guardedCoordSelects,
-      EXCLUDE_STATUSES, LIVE_HOLD_SQL,
-      RouteOptimizer, chooseWindowSafeOrder, UNCERTIFIABLE_REASONS, currentOrder,
-      runExclusive, wasLockSkipped,
-    };
-    process.exitCode = await runRollback(db, ROLLBACK_PATH, EXECUTE, new Date(), rollbackDeps);
+  const sideModeExit = await runSideMode(db, { runExclusive, wasLockSkipped });
+  if (sideModeExit != null) {
+    process.exitCode = sideModeExit;
     await db.destroy();
     return;
   }
@@ -803,8 +883,7 @@ async function main() {
 
   const { runRouteReorder } = require('../server/services/route-reorder');
   const runOpts = buildRunOpts({ execute: EXECUTE, dates: range.dates, now, runType: 'route_order_cleanup' });
-  const lockResult = await runExclusive('auto-dispatch-recurring', () => runRouteReorder(runOpts),
-    { recordHealth: false, waitForSlot: false });
+  const lockResult = await runCleanup(runOpts, { execute: EXECUTE, runRouteReorder, runExclusive });
 
   // wasLockSkipped, not a bare `lockResult.skipped` truthiness check: a
   // SUCCESSFUL --execute run's own return carries `skipped` as a NUMBER
@@ -870,6 +949,6 @@ if (require.main === module) {
 module.exports = {
   buildDateRange, buildBackupRows, applyRollback, parseLedgerResult, recoveryInstruction, collectEntries, reportAndBackup,
   groupRowsByTechDay, readLiveTechDay, mismatchedIdsForDay, buildRollbackTargetOrder, buildRollbackPositions,
-  restoredDispatchOrder, restoreVerdict, rollbackWindowConflict, runRollback, rollbackIsIncomplete, previewRollback, printRollbackPlan, printRollbackResult, buildRunOpts, writeBackupFile,
+  restoredDispatchOrder, restoreVerdict, printPlan, exportLedgerBackup, runCleanup, rollbackWindowConflict, runRollback, rollbackIsIncomplete, previewRollback, printRollbackPlan, printRollbackResult, buildRunOpts, writeBackupFile,
   outOfHorizonDates, runIsUnhealthy,
 };

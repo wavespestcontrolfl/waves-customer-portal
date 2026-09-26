@@ -17,6 +17,7 @@ const {
   collectEntries, reportAndBackup, groupRowsByTechDay, readLiveTechDay, mismatchedIdsForDay,
   buildRollbackTargetOrder, buildRollbackPositions, restoredDispatchOrder, rollbackWindowConflict, previewRollback, printRollbackPlan, printRollbackResult,
   buildRunOpts, writeBackupFile, outOfHorizonDates, runIsUnhealthy, runRollback, rollbackIsIncomplete,
+  printPlan, exportLedgerBackup, runCleanup,
 } = require('../../scripts/route-order-cleanup');
 const {
   ROUTE_WRITE_GUARD_COLUMNS, CUSTOMER_PREMISE_ALIASES, classifyWriteError, chooseWindowSafeOrder, _internals: reorderInternals,
@@ -732,15 +733,20 @@ describe('parseLedgerResult', () => {
 });
 
 describe('recoveryInstruction', () => {
-  test('names the ledger id and points at route_order_snapshot for a manual rebuild', () => {
+  test('PRRT_kwDOR3YQi86mQsF_: names the exact read-only --export-ledger command for that id and never suggests re-running', () => {
     const msg = recoveryInstruction('ledger-123');
     expect(msg).toMatch(/ledger id ledger-123/);
-    expect(msg).toMatch(/route_order_snapshot/);
+    expect(msg).toMatch(/--export-ledger ledger-123 --out <path>/);
     expect(msg).toMatch(/ALREADY COMMITTED/);
+    expect(msg).toMatch(/do NOT re-run/);
+    expect(msg).not.toMatch(/re-run with --out|or re-run/);
   });
 
-  test('still reads sensibly with no ledger id', () => {
-    expect(recoveryInstruction(null)).toMatch(/ALREADY COMMITTED/);
+  test('still reads sensibly with no ledger id — points at --export-ledger, never at a re-run', () => {
+    const msg = recoveryInstruction(null);
+    expect(msg).toMatch(/ALREADY COMMITTED/);
+    expect(msg).toMatch(/--export-ledger <id> --out <path>/);
+    expect(msg).toMatch(/do NOT re-run/);
   });
 });
 
@@ -1218,5 +1224,106 @@ describe('full tech-day snapshot rollback (codex PRRT_kwDOR3YQi86mQfEB + its mir
     expect(mismatchedIdsForDay(snap, [{ id: 'A', route_order: 1 }, { id: 'B', route_order: 2 }, { id: 'C', route_order: 3 }])).toEqual([]);
     expect(mismatchedIdsForDay(snap, [{ id: 'A', route_order: 1 }, { id: 'B', route_order: 5 }, { id: 'D', route_order: 3 }]))
       .toEqual(['B', 'C', 'D']);
+  });
+});
+
+describe('printPlan shows skipped tech-days too (codex PRRT_kwDOR3YQi86mQsF7)', () => {
+  let logs;
+  let spy;
+  beforeEach(() => { logs = []; spy = jest.spyOn(console, 'log').mockImplementation((m) => logs.push(m)); });
+  afterEach(() => spy.mockRestore());
+
+  test('a dry-run plan with only skipped days prints each with its reason and counts them — never "No tech-day needs a change"', () => {
+    printPlan([
+      { date: '2026-10-05', technicianId: 't1', reasons: [], before: [], after: [], skipped_reason: 'COORDLESS_STOPS' },
+      { date: '2026-10-06', reasons: [], before: [], after: [], skipped_reason: 'WITHIN_72H' }, // day-level, no tech
+    ]);
+    expect(logs).toEqual([
+      '2026-10-05 tech t1: skipped (COORDLESS_STOPS)',
+      '2026-10-06 tech all techs: skipped (WITHIN_72H)',
+      '0 tech-day(s) with route_order changes, 2 skipped.',
+    ]);
+  });
+
+  test('changed and skipped days both print, and the summary counts both', () => {
+    printPlan([
+      { date: '2026-10-05', technicianId: 't1', source: 'promised_window', canonicalized: { reasons: ['gap'], source: 'promised_window' },
+        route_order_changes: [{ id: 'a', before: 4, after: 1 }], skipped_reason: null },
+      { date: '2026-10-05', technicianId: 't2', skipped_reason: 'LOCKED_STOP' },
+    ]);
+    expect(logs[0]).toMatch(/2026-10-05 tech t1: 1 stop\(s\) canonicalized/);
+    expect(logs[1]).toBe('2026-10-05 tech t2: skipped (LOCKED_STOP)');
+    expect(logs[2]).toBe('1 tech-day(s) with route_order changes, 1 skipped.');
+  });
+
+  test('"No tech-day needs a route_order change" only when nothing changed AND nothing was skipped', () => {
+    printPlan([]);
+    expect(logs).toEqual(['No tech-day needs a route_order change in this range.']);
+  });
+});
+
+describe('--export-ledger (codex PRRT_kwDOR3YQi86mQsF_)', () => {
+  let writeSpy;
+  let renameSpy;
+  let logSpy;
+  let errSpy;
+  beforeEach(() => {
+    writeSpy = jest.spyOn(fs, 'writeFileSync').mockImplementation(() => {});
+    renameSpy = jest.spyOn(fs, 'renameSync').mockImplementation(() => {});
+    logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+    errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+  });
+  afterEach(() => { writeSpy.mockRestore(); renameSpy.mockRestore(); logSpy.mockRestore(); errSpy.mockRestore(); });
+
+  const ledgerDb = (row) => {
+    const calls = [];
+    const db = jest.fn((table) => ({
+      where: (w) => ({ first: async (col) => { calls.push({ table, w, col }); return row; } }),
+    }));
+    db.calls = calls;
+    return db;
+  };
+
+  test('reads that planner-run row (one SELECT, no lock) and writes every applied day\'s full snapshot in the --out backup format', async () => {
+    const db = ledgerDb({ result: { reorders: [
+      { date: '2026-10-05', technician_id: 't1', route_order_changes: [{ id: 'a', before: 2, after: 1 }],
+        route_order_snapshot: [{ id: 'a', before: 2, after: 1 }, { id: 'b', before: 1, after: 2 }, { id: 'c', before: 3, after: 3 }] },
+    ] } });
+    const code = await exportLedgerBackup(db, 'ledger-9', '/tmp/restore.json');
+    expect(code).toBe(0);
+    expect(db.calls).toEqual([{ table: 'route_optimization_planner_runs', w: { id: 'ledger-9' }, col: 'result' }]);
+    const resolved = require('path').resolve('/tmp/restore.json');
+    expect(renameSpy).toHaveBeenCalledWith(`${resolved}.tmp`, resolved);
+    expect(JSON.parse(writeSpy.mock.calls[0][1]).rows).toEqual([
+      { id: 'a', date: '2026-10-05', technician_id: 't1', before: 2, after: 1 },
+      { id: 'b', date: '2026-10-05', technician_id: 't1', before: 1, after: 2 },
+      { id: 'c', date: '2026-10-05', technician_id: 't1', before: 3, after: 3 },
+    ]);
+  });
+
+  test('a missing ledger row, or one with no snapshot, exits 1 and writes nothing', async () => {
+    expect(await exportLedgerBackup(ledgerDb(null), 'nope', '/tmp/x.json')).toBe(1);
+    expect(await exportLedgerBackup(ledgerDb({ result: { reorders: [] } }), 'empty', '/tmp/x.json')).toBe(1);
+    expect(writeSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('runCleanup: the lease is taken only for --execute (codex PRRT_kwDOR3YQi86mQsGE)', () => {
+  test('a dry run never calls runExclusive — it runs the reorder pass directly, unlocked', async () => {
+    const runExclusive = jest.fn();
+    const runRouteReorder = jest.fn(async () => ({ status: 'completed', plan: [] }));
+    const opts = { dryRun: true, canonicalizeStale: true };
+    const result = await runCleanup(opts, { execute: false, runRouteReorder, runExclusive });
+    expect(runExclusive).not.toHaveBeenCalled();
+    expect(runRouteReorder).toHaveBeenCalledWith(opts);
+    expect(result).toEqual({ status: 'completed', plan: [] });
+  });
+
+  test('--execute runs inside runExclusive(auto-dispatch-recurring), fail-fast, no health record', async () => {
+    const runExclusive = jest.fn(async (_name, fn) => fn());
+    const runRouteReorder = jest.fn(async () => ({ status: 'completed', applied: 1 }));
+    const result = await runCleanup({ dryRun: false }, { execute: true, runRouteReorder, runExclusive });
+    expect(runExclusive).toHaveBeenCalledWith('auto-dispatch-recurring', expect.any(Function), { recordHealth: false, waitForSlot: false });
+    expect(result).toEqual({ status: 'completed', applied: 1 });
   });
 });
