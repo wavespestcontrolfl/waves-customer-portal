@@ -26,11 +26,17 @@ try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 let TwilioService;
 try { TwilioService = require('./twilio'); } catch { TwilioService = null; }
 
-// The weekly report's one required field: storeReport persists
-// executive_summary, and a report without it is a blank row.
+// The weekly report's shape: storeReport persists executive_summary (a report
+// without it is a blank row), stringifies financial_snapshot, and storeReport /
+// the SMS summary iterate every list below and read fields off each entry
+// (Codex r5 + r6 on #4884).
+const TAX_REPORT_LISTS = ['regulation_changes', 'savings_opportunities', 'deduction_gaps', 'compliance_alerts', 'equipment_recommendations', 'procurement_insights', 'action_items'];
+const isPlainObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 function isUsableTaxReport(report) {
-  return !!report && typeof report === 'object' && !Array.isArray(report)
-    && typeof report.executive_summary === 'string' && report.executive_summary.trim().length > 0;
+  if (!isPlainObject(report)) return false;
+  if (typeof report.executive_summary !== 'string' || !report.executive_summary.trim()) return false;
+  if (report.financial_snapshot != null && !isPlainObject(report.financial_snapshot)) return false;
+  return TAX_REPORT_LISTS.every((key) => report[key] == null || (Array.isArray(report[key]) && report[key].every(isPlainObject)));
 }
 
 class TaxAdvisor {

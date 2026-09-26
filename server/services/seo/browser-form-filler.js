@@ -186,8 +186,15 @@ async function boundedShot(page) {
 // The callers' own gates, so the ledger fails exactly what the lane rejects
 // (Codex r5 on #4884): the plan gate before any page interaction, and the
 // verifier's strict booleans.
-const planShapeInvalid = (plan) => !(plan && typeof plan === 'object' && BLOCKED_VALUES.has(plan.blocked)
-  && typeof plan.form_present === 'boolean' && Array.isArray(plan.actions));
+function planShapeInvalid(plan) {
+  if (!(plan && typeof plan === 'object' && BLOCKED_VALUES.has(plan.blocked)
+    && typeof plan.form_present === 'boolean' && Array.isArray(plan.actions))) return true;
+  // A blocked / no-form verdict is a legitimate answer; the caller stops there.
+  if (plan.blocked || !plan.form_present || !plan.actions.length) return false;
+  if (!plan.actions.every((a) => a && ALLOWED_ACTIONS.has(a.action))) return true;
+  const last = plan.actions[plan.actions.length - 1];
+  return plan.actions.filter((a) => a.action === 'submit').length !== 1 || last.action !== 'submit' || !last.selector;
+}
 const verifyShapeInvalid = (v) => !(v && typeof v === 'object' && ['success', 'pending', 'rejected'].every((k) => typeof v[k] === 'boolean'));
 
 async function callVision(anthropic, screenshotB64, text, shapeInvalid = null) {

@@ -591,12 +591,14 @@ Search vendor websites for exact prices. Return JSON only:
       return { success: true, raw_response: responseText, note: 'AI returned non-JSON. See raw_response.' };
     }
 
-    if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.results)) ledgerCallRejected(currentMsg, 'schema_invalid');
+    if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.results)
+      || !parsed.results.every((r) => r && typeof r === 'object' && !Array.isArray(r))) ledgerCallRejected(currentMsg, 'schema_invalid');
 
     // Create approval queue entries
     let approvalsCreated = 0;
     if (parsed.results && parsed.results.length > 0) {
       for (const result of parsed.results) {
+        if (!result || typeof result !== 'object') continue;
         const vendor = vendors.find(v => v.name.toLowerCase() === result.vendor?.toLowerCase());
         if (!vendor || !result.price) continue;
         try {

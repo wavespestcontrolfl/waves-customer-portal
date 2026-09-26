@@ -44,7 +44,9 @@ function slugify(text) {
 // call in the ledger on whichever leg produced it; what callClaude returns is
 // unchanged (codex r2 on #4884).
 function objectAnswerProblem(value) {
-  return value && typeof value === 'object' && !Array.isArray(value) ? null : 'invalid_output';
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return 'invalid_output';
+  // The caller's nested rule (codex P1 r37 there), so both fail the same answers.
+  return recommendationPayloadShapeValid(value) ? null : 'schema_invalid';
 }
 
 async function callClaude(systemPrompt, userPrompt, maxTokens = 2048) {

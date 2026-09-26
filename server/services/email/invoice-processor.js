@@ -91,7 +91,8 @@ async function processVendorInvoice(email, classification) {
       parsedInvoice = parseClaudeJson(anthropicText(parseResponse));
       if (!parsedInvoice) ledgerCallRejected(parseResponse, 'invalid_json');
       else if (typeof parsedInvoice !== 'object' || Array.isArray(parsedInvoice)
-        || (parsedInvoice.total == null && !parsedInvoice.invoice_number)) ledgerCallRejected(parseResponse, 'schema_invalid');
+        || (parsedInvoice.total == null && !parsedInvoice.invoice_number)
+        || (parsedInvoice.line_items != null && !Array.isArray(parsedInvoice.line_items))) ledgerCallRejected(parseResponse, 'schema_invalid');
 
       if (parsedInvoice) {
         await db('email_attachments').where({ id: pdfAttachment.id }).update({
@@ -128,7 +129,7 @@ async function processVendorInvoice(email, classification) {
       let aiSuggestionNote = '';
       if (!categoryRow) {
         try {
-          const ai = await autoCategorizeExpense(vendorName, parsedInvoice?.line_items?.map(l => l.description).join('; ') || email.subject, amount);
+          const ai = await autoCategorizeExpense(vendorName, (Array.isArray(parsedInvoice?.line_items) ? parsedInvoice.line_items.map(l => l?.description).filter(Boolean).join('; ') : '') || email.subject, amount);
           if (ai?.categoryName) aiSuggestionNote = ` AI-suggested category: ${ai.categoryName} (unconfirmed).`;
         } catch (err) {
           logger.warn(`[invoice-processor] AI categorization failed for ${email.id}: ${err.message}`);

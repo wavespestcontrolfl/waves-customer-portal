@@ -28,6 +28,19 @@ const TRIAGE_SCHEMA = {
   },
 };
 
+// TRIAGE_SCHEMA's own types — the Claude fallback is not schema-constrained
+// the way the structured-output leg is, so its answer is checked here.
+const strOrNull = (v) => v === null || typeof v === 'string';
+function triageMatchesSchema(t) {
+  if (!t || typeof t !== 'object' || Array.isArray(t)) return false;
+  const x = t.extractedData;
+  return typeof t.serviceInterest === 'string'
+    && TRIAGE_SCHEMA.properties.urgency.enum.includes(t.urgency)
+    && typeof t.suggestedReply === 'string'
+    && !!x && typeof x === 'object' && !Array.isArray(x)
+    && strOrNull(x.pestType) && strOrNull(x.location) && strOrNull(x.propertyType);
+}
+
 function mapTriage(parsed) {
   return {
     serviceInterest: parsed.serviceInterest || null,
@@ -91,9 +104,7 @@ Return ONLY valid JSON, no markdown.`;
     const text = stripThinkingBlocks(response).content?.[0]?.text || '';
     let triage;
     try { triage = JSON.parse(text); } catch (err) { ledgerCallRejected(response, 'invalid_json'); throw err; }
-    if (!triage || typeof triage !== 'object' || Array.isArray(triage) || !TRIAGE_SCHEMA.required.every((k) => k in triage)) {
-      ledgerCallRejected(response, 'schema_invalid');
-    }
+    if (!triageMatchesSchema(triage)) ledgerCallRejected(response, 'schema_invalid');
     return mapTriage(triage);
   } catch (err) {
     logger.error(`[lead-triage] AI triage failed: ${err.message}`);

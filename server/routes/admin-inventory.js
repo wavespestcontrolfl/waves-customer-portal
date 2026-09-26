@@ -3638,11 +3638,13 @@ RESPOND WITH ONLY valid JSON (no markdown fences, no preamble):
       return res.json({ success: true, raw: responseText, results: [], summary: 'AI returned non-JSON response. See raw field.' });
     }
 
-    if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.results)) ledgerCallRejected(currentMsg, 'schema_invalid');
+    if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.results)
+      || !parsed.results.every((r) => r && typeof r === 'object' && !Array.isArray(r))) ledgerCallRejected(currentMsg, 'schema_invalid');
 
     // If we have a productId, create approval queue entries for found prices
     if (productId && parsed.results && parsed.results.length > 0) {
       for (const result of parsed.results) {
+        if (!result || typeof result !== 'object') continue;
         // Find vendor by name
         const vendor = vendors.find(v => v.name.toLowerCase() === result.vendor?.toLowerCase());
         if (!vendor || !result.price) continue;

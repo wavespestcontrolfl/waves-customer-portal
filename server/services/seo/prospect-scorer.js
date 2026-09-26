@@ -182,10 +182,14 @@ ${JSON.stringify(list)}`;
     ledgerCallRejected(resp, 'invalid_json');
     throw new Error('classifier returned non-array');
   }
-  // Map back by index defensively (model may drop/reorder).
-  return chunk.map((c, idx) => {
+  // Map back by index defensively (model may drop/reorder). A non-empty chunk
+  // with no matching entry at all ([] or unrelated rows) is an answer that
+  // contributed nothing — heuristics stand in, and the row is failed (Codex r6 on #4884).
+  let hits = 0;
+  const scored = chunk.map((c, idx) => {
     const hit = arr.find((o) => o && (o.i === idx || String(o.domain).toLowerCase() === String(c.domain).toLowerCase()));
     if (!hit) return heuristicClassify(c);
+    hits += 1;
     return {
       domain: c.domain,
       intent_class: normalizeIntent(hit.intent_class, c.domain, c.source_url),
@@ -201,6 +205,8 @@ ${JSON.stringify(list)}`;
       reason: hit.reason || 'llm',
     };
   });
+  if (chunk.length && !hits) ledgerCallRejected(resp, 'schema_invalid');
+  return scored;
 }
 
 /**
