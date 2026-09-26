@@ -270,6 +270,7 @@ describe('scrubUnsafeClaims — the repository product-claim rules on intake out
     ['You can re-enter next Monday.', ''],
     ['Mantenga a los niños dentro hasta el viernes.', ''],
     ['Puede volver a entrar a las once.', '¿Cuándo puedo volver a entrar después del tratamiento?'],
+    ['Stay off the treated lawn until May 3.', ''],
     ['Keep the kids indoors until the sun goes down after treatment.', ''],
     ['Mantenga a los niños dentro hasta las cuatro después del tratamiento.', ''],
   ])('a clock-time re-entry instruction is replaced: %s', (reply, context) => {
@@ -414,6 +415,12 @@ describe('intakeSafetyClaimSupplement — claim shapes', () => {
     const out = scrubUnsafeClaims({ reply, intent: 'question', service_keys: [], ready_for_quote: true });
     expect(out.reply).toMatch(/veterinarian or an emergency animal hospital/);
     expect(out.reply).not.toContain('911');
+  });
+
+  test('a denied need for care is not an emergency direction', () => {
+    const out = scrubUnsafeClaims({ reply: 'It is safe and does not require medical care.', intent: 'question', service_keys: [], ready_for_quote: false }, 'Is it ok?');
+    expect(out.reply).toMatch(/label directions/);
+    expect(out.intent).toBe('question');
   });
 
   test('routine "consult your doctor before use" is not escalated to 911', () => {
@@ -721,6 +728,7 @@ describe('normalizeIntakeResult', () => {
     ['Nuestro técnico no hace visitas los domingos.', ''],
     ['No hace falta preparar la casa.', ''],
     ['You can re-enter once your technician confirms the product is dry.', ''],
+    ['You may re-enter once your technician confirms the product is dry.', ''],
     ["The EPA doesn't approve pesticides; it registers them.", ''],
     ["The EPA didn't approve this product; it is EPA-registered.", ''],
     ['This product is not EPA-approved; it is EPA-registered.', ''],
@@ -1601,6 +1609,9 @@ describe('looksLikeEmergency', () => {
     'My child consumed pesticide',
     'My dog consumed rat poison',
     'My toddler tasted weed killer',
+    "Bug spray got into my child's eyes",
+    "Pesticide splashed on my son's skin",
+    "Rat poison got in my dog's mouth",
     'my dog licked the roach spray',
     'My child ate pesticide granules',
     'The bait was eaten by my dog',
@@ -1639,6 +1650,8 @@ describe('looksLikeEmergency', () => {
     'I sprayed with Raid but the roaches are still here',
     'The invoice was sent to the hospital',
     'My house is next to a hospital',
+    'La factura fue enviada al hospital',
+    'La inspección fue programada en el hospital',
     'No necesito un médico, solo control de plagas',
     'I ate lunch\nWhich bug spray do you use?',
   ])('does not flag routine pest talk: %s', (text) => {
