@@ -35,6 +35,12 @@ Run top to bottom before merging any portal/astro PR. Every unchecked item is a 
 - [ ] Every P2 on the current head is fixed, rebutted inline, or listed under `Deferred P2s` in the PR body with file:line + reason — nothing silently unaddressed. P3s are advisory and need nothing.
 - [ ] Round history checked against the tier: Light = P2-only is merge-ready from round 1 (a P0/P1 fix or rebuttal still gets its confirmation round on the new head); Full = P2-only from round 4; if round 5 or later produced a NEW P0/P1, this PR is a split proposal for Adam, not a merge
 
+## Live verification gate (Full tier)
+- [ ] A `live-verify` verdict comment on the PR, from an agent that did not write the change: `PASS` or `PASS+NOTES`. `FAIL` and `BLOCKED` block. CI green and a clean Codex round are not a verdict. Procedure and comment format: `.claude/skills/live-verify/SKILL.md`
+- [ ] The verdict exercised the changed behavior on a running dev/preview stack (not only tests), ran the same scenario on `origin/main` as the regression lane, and cites its evidence
+- [ ] The verdict describes the FINAL patch: its recorded patch-id equals the final head's (`live-verify` §Patch-id). A head that only merged main with an unchanged patch-id keeps its verdict; a changed patch-id needs a fresh verdict on the affected scenarios
+- [ ] Every `NOTES` item is fixed, or listed under `Deferred P2s` with the verifier's evidence
+
 ## Merge authorization
 - [ ] Blast-radius diff? Check the diff against the FULL CLAUDE.md rule-18 list (money, customer comms, schema/CHECK values, public token routes, every webhook payload, admin auth, iOS/Android-consumed endpoints, astro spoke-fleet form posts and feeds, retained V1 exports, persisted identifiers) plus AGENTS.md P0 domains → Adam's in-session authorization is REQUIRED; standing "merge when clean" does not apply
 - [ ] Otherwise: the task authorizes shipping and does not restrict merging — merge when clean is the standing default under waves-ship §5, with no separate merge prompt. Both the final-HEAD CI and Codex gates above passed (an unevaluated or re-disputed P0/P1 rebuttal still blocks)
