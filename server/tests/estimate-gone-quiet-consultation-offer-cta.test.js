@@ -19,6 +19,9 @@ const migration = require('../models/migrations/20260926010000_estimate_gone_qui
 const reapply = require('../models/migrations/20260926010100_estimate_gone_quiet_consultation_offer_cta_reapply');
 // Final shape + non-destructive rollback (Codex #4918 r1 P2s).
 const normalize = require('../models/migrations/20260926010200_estimate_gone_quiet_consultation_offer_normalize');
+// Fixes 010200's anchor bug when the first non-link CTA isn't guaranteed
+// to render (Codex #4918 r2 P2).
+const anchor = require('../models/migrations/20260926010300_estimate_gone_quiet_consultation_offer_anchor');
 
 const { primaryCtaAnchorIndex, alreadyHasConsultationLink, NEW_VARIABLE, LINK_LABEL, MIGRATION } = migration._private;
 
@@ -66,6 +69,45 @@ describe('20260926010200 normalizedBlocks (no DB)', () => {
 
   test('no button CTA at all → throws for manual review', () => {
     expect(() => normalizedBlocks([STAFF_LINK, { type: 'paragraph', content: 'x' }])).toThrow(/no primary button CTA/);
+  });
+});
+
+describe('20260926010300 normalizedBlocks (no DB)', () => {
+  const { normalizedBlocks } = anchor._private;
+  const REQUIRED = ['first_name', 'estimate_url', 'service_label'];
+  const BUTTON = { type: 'cta', label: 'Take another look', url_variable: 'estimate_url' };
+  const CHIP = { type: 'cta', label: 'Products & safety', url: 'https://www.wavespestcontrol.com/products-and-safety' };
+  const STAFF_LINK = { type: 'cta', variant: 'link', label: 'Read our FAQ', url: 'https://www.wavespestcontrol.com/faq' };
+  const LINK = { type: 'cta', variant: 'link', label: LINK_LABEL, url_variable: NEW_VARIABLE };
+  // A CTA whose url_variable is optional (not in required_variables) — the
+  // send-time build may leave it blank, in which case renderBlocks() skips
+  // it entirely and it never becomes the rendered primary button.
+  const CONDITIONAL_BUTTON = { type: 'cta', label: 'See your custom quote', url_variable: 'quote_url' };
+
+  test('anchors after the first non-link CTA when its url_variable is a required variable (guaranteed to render)', () => {
+    const out = normalizedBlocks([{ type: 'paragraph', content: 'x' }, STAFF_LINK, BUTTON, CHIP], REQUIRED);
+    expect(out.map((b) => b.label)).toEqual([undefined, 'Read our FAQ', 'Take another look', LINK_LABEL, 'Products & safety']);
+  });
+
+  test('anchors after the first non-link CTA when it has a static url and no url_variable (guaranteed to render)', () => {
+    const staticButton = { type: 'cta', label: 'Learn more', url: 'https://www.wavespestcontrol.com/learn-more' };
+    const out = normalizedBlocks([staticButton, CHIP], REQUIRED);
+    expect(out.map((b) => b.label)).toEqual(['Learn more', LINK_LABEL, 'Products & safety']);
+  });
+
+  test('a conditional (optional url_variable) CTA ahead of the real button throws for manual review — never silently anchors on the guaranteed CTA that follows it (Codex #4918 r2 P2)', () => {
+    expect(() => normalizedBlocks([CONDITIONAL_BUTTON, BUTTON, CHIP], REQUIRED))
+      .toThrow(/optional url_variable.*not safe to anchor/s);
+  });
+
+  test('moves a misplaced link and leaves exactly one, still anchored on the guaranteed button', () => {
+    const out = normalizedBlocks([STAFF_LINK, LINK, BUTTON, LINK, CHIP], REQUIRED);
+    expect(out.filter((b) => b.url_variable === NEW_VARIABLE)).toHaveLength(1);
+    expect(out.findIndex((b) => b.url_variable === NEW_VARIABLE)).toBe(out.indexOf(BUTTON) + 1);
+  });
+
+  test('no button CTA at all → throws for manual review', () => {
+    expect(() => normalizedBlocks([STAFF_LINK, { type: 'paragraph', content: 'x' }], REQUIRED)).toThrow(/no primary button CTA/);
   });
 });
 
@@ -582,21 +624,91 @@ const knexLib = require('knex');
     });
   });
 
-  // The real deploy chain: all three migrations in order, and knex's reverse-order rollback.
-  async function upAll(trx) { await migration.up(trx); await reapply.up(trx); await normalize.up(trx); }
-  async function downAll(trx) { await normalize.down(trx); await reapply.down(trx); await migration.down(trx); }
+  // The real deploy chain: all four migrations in order, and knex's reverse-order rollback.
+  // 010300 confirms 010200's output rather than blindly republishing: the
+  // real seed's primary CTA (url_variable estimate_url, a required
+  // variable) is guaranteed, so 010200 already anchors correctly and
+  // 010300 is a no-op — the final owner stays 20260926010200.
+  async function upAll(trx) { await migration.up(trx); await reapply.up(trx); await normalize.up(trx); await anchor.up(trx); }
+  async function downAll(trx) { await anchor.down(trx); await normalize.down(trx); await reapply.down(trx); await migration.down(trx); }
 
-  test('full chain on a normal deploy: one link directly after the button, owned by 20260926010200, one active row', async () => {
+  test('full chain on a normal deploy: one link directly after the button, owned by 20260926010200 (010300 confirms and publishes nothing), one active row', async () => {
     await db.transaction(async (trx) => {
       const { template } = await seedTemplate(trx);
       await upAll(trx);
       const state = await activeState(trx, template.id);
       expect(state.active.validation_snapshot.migration).toBe('20260926010200');
       expect(state.activeRowCount).toBe(1);
+      // 010300 saw an already-correct, 010200-owned shape and published no
+      // new version: seed + 010000's publish + 010200's publish, nothing more.
+      expect(await trx('email_template_versions').where({ template_id: template.id }).count('* as n').first()).toEqual({ n: '3' });
       const blocks = state.active.blocks;
       expect(blocks.filter((b) => b.url_variable === NEW_VARIABLE)).toHaveLength(1);
       expect(blocks.findIndex((b) => b.url_variable === NEW_VARIABLE))
         .toBe(blocks.findIndex((b) => b.url_variable === 'estimate_url') + 1);
+      await trx.rollback();
+    });
+  });
+
+  test('20260926010300 is idempotent — running it again after the full chain publishes nothing', async () => {
+    await db.transaction(async (trx) => {
+      const { template } = await seedTemplate(trx);
+      await upAll(trx);
+      const count = await trx('email_template_versions').where({ template_id: template.id }).count('* as n').first();
+      await anchor.up(trx);
+      expect(await trx('email_template_versions').where({ template_id: template.id }).count('* as n').first()).toEqual(count);
+      expect((await activeState(trx, template.id)).active.validation_snapshot.migration).toBe('20260926010200');
+      await trx.rollback();
+    });
+  });
+
+  test('20260926010300 fixes the Codex #4918 r2 P2 anchor bug: a conditional CTA that 010200 wrongly anchored on is rejected for manual review, writing nothing', async () => {
+    await db.transaction(async (trx) => {
+      // quote_url is allowed but NOT required — 010200's anchor logic (no
+      // guarantee check) picks this as the "primary button" anyway, exactly
+      // the r2 P2 bug: renderBlocks() would skip it for a blank quote_url,
+      // so the REAL rendered button is "Take another look" below it.
+      const blocksWithConditionalFirst = [
+        SEED_BLOCKS[0],
+        { type: 'cta', label: 'See your custom quote', url_variable: 'quote_url' },
+        ...SEED_BLOCKS.slice(1),
+      ];
+      const [template] = await trx('email_templates').insert({
+        template_key: 'estimate.engage_gone_quiet', status: 'active', from_email: 'contact@wavespestcontrol.com',
+        send_stream: 'service_operational',
+        allowed_variables: JSON.stringify(['first_name', 'estimate_url', 'service_label', 'quote_url']),
+        optional_variables: JSON.stringify(['quote_url']),
+        required_variables: JSON.stringify(['first_name', 'estimate_url', 'service_label']),
+      }).returning('*');
+      const [version] = await trx('email_template_versions').insert({
+        template_id: template.id, version_number: 1, status: 'active',
+        subject: 'Any questions about your Waves estimate?', preview_text: 'Reply and ask — real answers in minutes.',
+        blocks: JSON.stringify(blocksWithConditionalFirst), validation_snapshot: JSON.stringify({ staff_reviewed: true }),
+      }).returning('*');
+      await trx('email_templates').where({ id: template.id }).update({ active_version_id: version.id });
+
+      await migration.up(trx);
+      await reapply.up(trx);
+      await normalize.up(trx); // 010200 wrongly anchors on the conditional CTA — this succeeds.
+      const afterNormalize = await activeState(trx, template.id);
+      expect(afterNormalize.active.validation_snapshot.migration).toBe('20260926010200');
+      expect(afterNormalize.active.blocks.findIndex((b) => b.url_variable === NEW_VARIABLE))
+        .toBe(afterNormalize.active.blocks.findIndex((b) => b.url_variable === 'quote_url') + 1);
+
+      await expect(anchor.up(trx)).rejects.toThrow(/optional url_variable/);
+
+      // Nothing changed: 010200's (wrongly anchored) version stays active,
+      // no new version row, no audit event for this migration's action.
+      const afterAnchor = await activeState(trx, template.id);
+      expect(afterAnchor.active.id).toBe(afterNormalize.active.id);
+      expect(afterAnchor.activeRowCount).toBe(1);
+      // seed + 010000's publish + 010200's (wrongly anchored) publish —
+      // 010300 threw before inserting a fourth.
+      expect(await trx('email_template_versions').where({ template_id: template.id }).count('* as n').first())
+        .toEqual({ n: '3' });
+      expect(await trx('audit_log').where({ action: 'migration:20260926010300:publish' }).count('* as n').first())
+        .toEqual({ n: '0' });
+
       await trx.rollback();
     });
   });
@@ -646,6 +758,19 @@ const knexLib = require('knex');
       const afterNormalize = await activeState(trx, template.id);
       expect(afterNormalize.active.id).toBe(beforeNormalize.active.id);
       expect(afterNormalize.activeRowCount).toBe(1);
+      await trx.rollback();
+    });
+  });
+
+  test('a custom plaintext body fails 20260926010300 for manual review and it writes nothing (same rule as 010200)', async () => {
+    await db.transaction(async (trx) => {
+      const { template, version } = await seedTemplate(trx);
+      await trx('email_template_versions').where({ id: version.id }).update({ text_body: 'Hi {{first_name}}, staff-written plaintext.' });
+      const beforeAnchor = await activeState(trx, template.id);
+      await expect(anchor.up(trx)).rejects.toThrow(/custom plaintext body/);
+      const afterAnchor = await activeState(trx, template.id);
+      expect(afterAnchor.active.id).toBe(beforeAnchor.active.id);
+      expect(afterAnchor.activeRowCount).toBe(1);
       await trx.rollback();
     });
   });
