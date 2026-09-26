@@ -108,34 +108,22 @@ function mergedBillingChannelUpdates(winner = {}, loser = {}) {
   return updates;
 }
 
-// A customer's stored billing channel choice for a category. Delivery
-// channel choices are account-level and persisted on the account's PRIMARY
-// profile (routes/notifications.js), so a sibling property's reminder must
-// read the primary's row — the same owner rule the router core applies
-// (push-channel-routing readChannelPreference). Throws when the owner or the
-// row cannot be read: a delivery decision must fail closed, never fall back
-// to legacy routing on an unknown choice. Returns null when none is stored.
-async function accountBillingChannels(customerId, category, knex) {
+// A property's stored billing channel choice for a category, read exactly as
+// the send path reads it: the explicit arrays are saved on the property's own
+// notification_prefs row (routes/notifications.js keeps them out of the
+// account-level CHANNEL_DB_COLUMNS; customer-app-notifications-postgres pins
+// the secondary row receiving them while the primary stays null). Throws when
+// the row cannot be read, so a delivery decision fails closed. Returns null
+// when none is stored.
+async function storedBillingChannels(customerId, category, knex) {
   const database = knex || require('../models/db');
-  const customer = await database('customers').where({ id: customerId }).first('account_id');
-  if (!customer) return null;
-  // Same rule as the messaging core (consent loadContactState overlays the
-  // primary's arrays only onto an existing row): a property with no prefs
-  // row of its own routes legacy, so every caller agrees with the send path.
-  const own = await database('notification_prefs').where({ customer_id: customerId }).first();
-  if (!own) return null;
-  const { resolvePrimaryProfileId } = require('./account-properties');
-  const ownerId = await resolvePrimaryProfileId(
-    { customerId, accountId: customer.account_id }, database, { onError: 'throw' },
-  );
-  const prefs = String(ownerId) === String(customerId)
-    ? own : await database('notification_prefs').where({ customer_id: ownerId }).first();
+  const prefs = await database('notification_prefs').where({ customer_id: customerId }).first();
   return explicitBillingChannels(prefs || {}, category);
 }
 
 module.exports = {
   BILLING_DELIVERY_FIELDS,
-  accountBillingChannels,
+  storedBillingChannels,
   explicitBillingChannels,
   billingChannelAllowed,
   billingChannelsPayload,

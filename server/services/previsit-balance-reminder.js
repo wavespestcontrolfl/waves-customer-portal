@@ -35,7 +35,7 @@ const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { collectionsChannelVerdict } = require('./collections/rail-guard');
 const ContactLedger = require('./collections/contact-ledger');
-const { accountBillingChannels } = require('./billing-delivery-channels');
+const { storedBillingChannels } = require('./billing-delivery-channels');
 const { reminderProgress, sendReminderChannels } = require('./billing-reminder-delivery');
 
 const TEMPLATE_KEY = 'previsit_balance_reminder';
@@ -374,7 +374,7 @@ function quotedBalanceStillOwed({ customerId, quotedInvoices, quotedDuesCents })
 async function previsitPolicyGate({ visit, consult }) {
   let explicitChannels;
   try {
-    explicitChannels = await accountBillingChannels(visit.customer_id, 'billing', db);
+    explicitChannels = await storedBillingChannels(visit.customer_id, 'billing', db);
   } catch (prefsErr) {
     logger.warn(`[previsit-balance] billing channel choice unreadable for customer ${visit.customer_id}: ${prefsErr.message}`);
     return { skip: true };
