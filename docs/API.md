@@ -5,10 +5,17 @@ Base URL: `http://localhost:3001/api` (development)
 
 ## Authentication
 
-All endpoints except `/auth/*` require a Bearer token in the Authorization header:
+The customer API sections below require a Bearer token in the Authorization
+header unless an endpoint is explicitly identified as public:
 ```
 Authorization: Bearer <jwt_token>
 ```
+
+`POST /auth/send-code`, `POST /auth/verify-code`, and `POST /auth/refresh` are
+the public authentication entry points. `GET /auth/me` requires the customer
+Bearer token. Health checks and provider-signed or tokenized public routes
+outside `/auth` have their own contracts; see
+[`docs/public-route-contracts.md`](public-route-contracts.md).
 
 ### POST /auth/send-code
 Send OTP verification code to customer's phone via Twilio.
@@ -20,8 +27,12 @@ Send OTP verification code to customer's phone via Twilio.
 
 **Response (200):**
 ```json
-{ "success": true, "message": "Verification code sent" }
+{ "success": true, "message": "If an account exists for that number, a verification code has been sent." }
 ```
+
+This uniform anti-enumeration response is also returned for an unknown number
+or a delivery failure. A 200 response does not confirm account existence or
+SMS delivery.
 
 ### POST /auth/verify-code
 Verify OTP and receive JWT tokens.
@@ -116,7 +127,7 @@ Customer requests a reschedule.
 
 ---
 
-## Billing (Square)
+## Billing (Stripe)
 
 ### GET /billing
 Payment history with card details.
@@ -125,14 +136,56 @@ Payment history with card details.
 Current balance, upcoming charges, monthly rate, next charge date.
 
 ### GET /billing/cards
-All cards on file with brand, last four, expiry, default/autopay status.
+All payment methods on file with their card or bank details, verification
+state, and default/autopay status.
 
-### POST /billing/cards
-Add a new card using a Square card nonce from the Web Payments SDK.
+### POST /billing/cards/setup-intent
+Create a Stripe SetupIntent for the payment methods the client wants to offer.
+`paymentMethodType` accepts `card`, `us_bank_account`, or `card_or_bank` and
+defaults to `card`.
 
 **Request:**
 ```json
-{ "cardNonce": "cnon:card-nonce-ok" }
+{ "paymentMethodType": "card_or_bank" }
+```
+
+**Response:**
+```json
+{
+  "clientSecret": "seti_..._secret_...",
+  "setupIntentId": "seti_...",
+  "publishableKey": "pk_...",
+  "paymentMethodTypes": ["card", "us_bank_account"]
+}
+```
+
+The server may reduce a bank-inclusive request to card-only when portal ACH is
+disabled. Clients must use the returned `paymentMethodTypes` as the effective
+set.
+
+### POST /billing/cards
+Save a payment method after confirming the Stripe SetupIntent with Stripe.
+The request supports `setupIntentId` (required) and `paymentMethodId`
+(optional). When `paymentMethodId` is omitted, the server resolves it from the
+SetupIntent; when supplied, it must match the SetupIntent's payment method.
+Bank saves require portal ACH to remain enabled; otherwise this endpoint
+returns `409` before saving the method or recording consent.
+
+Two confirmation outcomes are accepted:
+
+- `succeeded` saves the method immediately. A bank method is marked verified;
+  the route records consent and attempts Auto Pay enrollment.
+- `requires_action` with `next_action.type = verify_with_microdeposits` saves
+  the bank method as pending verification and records consent, but does not
+  make it default or enroll it in Auto Pay. Verification completion is handled
+  later through Stripe's verification flow.
+
+Other incomplete SetupIntent states return `409` without saving through this
+endpoint.
+
+**Request:**
+```json
+{ "setupIntentId": "seti_...", "paymentMethodId": "pm_..." }
 ```
 
 ### DELETE /billing/cards/:id
@@ -157,11 +210,13 @@ Update one or more notification preferences.
   "serviceReminder24h": true,
   "techEnRoute": true,
   "serviceCompleted": true,
-  "billingReminder": false,
   "seasonalTips": true,
   "smsEnabled": true
 }
 ```
+
+Legacy clients may still send `billingReminder`; the server accepts and
+discards that compatibility field, so it does not change a preference.
 
 ---
 
@@ -178,9 +233,9 @@ These run on cron schedules and are not exposed as API endpoints:
 
 | Job | Schedule | Description |
 |-----|----------|-------------|
-| Service Reminders | Daily 8:00 AM ET | SMS to customers with services tomorrow |
-| Monthly Billing | 1st of month 6:00 AM ET | Process autopay charges via Square |
-| Billing Reminders | 28th of month 10:00 AM ET | SMS to opted-in customers about upcoming charge |
+| Appointment Reminders | Every 15 minutes | Process persisted 72-hour and 24-hour appointment reminders that are due |
+| Monthly Billing | Daily 8:00 AM ET | Process Stripe autopay for customers whose configured billing day is today |
+| Autopay Pre-charge Reminders | Daily 9:00 AM ET | Notify eligible customers about scheduled charges three days out |
 
 ## Error Responses
 

@@ -90,6 +90,7 @@ const PAGE_PAYLOAD = {
   depositPolicy: { required: true, amount: 75, recurringAmount: 75, oneTimeAmount: 125 },
   cardHoldPolicy: { enforced: true, requiredForOneTime: true, noShowFeeAmount: 85, cancelWindowHours: 24 },
   showYourWork: { steps: ['internal only'] },
+  consultationOffer: { url: 'https://portal.example/inspection/CONSULT_BEARER' },
   meta: { generatedAt: '2026-09-11T22:00:00Z', engineVersion: 'v2', cacheHit: false },
 };
 
@@ -143,6 +144,9 @@ test('credentials, narrative, and sibling details are dropped', async () => {
   expect(shaped.page.estimate.token).toBeUndefined();
   expect(shaped.page.estimate.intelligence).toBeUndefined();
   expect(shaped.page.showYourWork).toBeUndefined();
+  // A live /inspection booking bearer (Codex #4853 r1 P1).
+  expect(shaped.page.consultationOffer).toBeUndefined();
+  expect(JSON.stringify(shaped)).not.toMatch(/CONSULT_BEARER/);
   expect(JSON.stringify(shaped)).not.toMatch(/sib-b|200 Test St/);
   expect(shaped.page.estimate.satelliteUrl).toBeUndefined();
   expect(shaped.page.estimate.licenseNumber).toBeUndefined();

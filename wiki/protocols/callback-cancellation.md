@@ -23,8 +23,13 @@ A callback is any return visit where the customer reports the original treatment
 
 ## Scoring
 - Callback jobs receive +15 flat score boost
-- Callbacks from Platinum/Gold customers receive additional +5
-- Canceled account callbacks receive +20 (winback priority)
+- Intended policy: callbacks from Platinum/Gold customers receive an additional +5
+- Intended policy: canceled-account callbacks receive +20 (winback priority)
+
+The retained `/api/dispatch/jobs/:id/score` compatibility scorer implements
+only the generic callback +15. The two intended-policy boosts above are not
+implemented there; changing dispatch scoring requires a separate code and
+policy decision.
 
 ## Communication
 - CSR calls customer within 2 hours of complaint

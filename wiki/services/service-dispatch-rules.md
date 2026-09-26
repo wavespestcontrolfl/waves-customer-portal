@@ -43,7 +43,7 @@
 - **Who:** Any licensed tech
 - **License required:** Pest control
 - **Estimated time:** 20–30 min per property
-- **Recurring:** Monthly or bi-monthly
+- **Recurring:** Seasonal program (9 visits/year) or monthly program (12 visits/year)
 - **Upsell flags:** WaveGuard Gold/Platinum upgrade, automatic misting system design visit (see Mosquito Misting Systems below), tick/flea add-on
 - **Seasonality:** High demand April–October in SWFL — push promos starting March
 
@@ -83,9 +83,9 @@
 - **Who:** Any licensed tech
 - **License required:** Pest control
 - **Estimated time:** 30–45 min (setup), 20 min (monitoring visit)
-- **Recurring:** Monthly monitoring
+- **Recurring:** Quarterly monitoring, billed per application. Code-default footprint ladder: up to 1,750 sqft $79/4 stations; 2,750 $89/5; 3,750 $99/6; 4,750 $109/7; 5,750 $119/8; 6,750 $129/9. Above 6,750 sqft, add one station and $10 per application for each additional 1,000 sqft.
 - **Upsell flags:** Exclusion package, interior general pest add-on
-- **Billing:** Monthly — no setup fee
+- **Billing:** Per quarterly application. Annual/12 is reporting only. The code-default standalone setup is $99 and is waived when another qualifying recurring service supplies WaveGuard membership.
 
 ## Callback / Retreat
 - **Who:** Original tech first; if unavailable → best-rated tech for that service type

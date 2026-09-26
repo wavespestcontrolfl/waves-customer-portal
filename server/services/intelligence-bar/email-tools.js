@@ -9,6 +9,10 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const MODELS = require('../../config/models');
+const { anthropicMaxTokens, anthropicEffortConfig } = require('../llm/anthropic-wire');
+// First TEXT block of a Message — a thinking block leads the content on
+// always-thinking models (Opus 5.5, Fable), so content[0] is not the answer.
+const { anthropicText } = require('../llm/call');
 const { etDateString } = require('../../utils/datetime-et');
 const { sendCustomerMessage } = require('../messaging/send-customer-message');
 
@@ -411,7 +415,8 @@ Address: ${customer.address_line1 || ''}, ${customer.city || ''}`;
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
     const msg = await anthropic.messages.create({
       model: MODELS.FLAGSHIP,
-      max_tokens: 800,
+      ...anthropicEffortConfig(MODELS.FLAGSHIP),
+      max_tokens: anthropicMaxTokens(MODELS.FLAGSHIP, 800),
       messages: [{
         role: 'user',
         content: `Draft an email reply for Waves Pest Control & Lawn Care.
@@ -436,7 +441,7 @@ Return ONLY the email body text, no subject line, no metadata.`
       }],
     });
 
-    const draft = msg.content[0]?.text || '';
+    const draft = anthropicText(msg);
 
     return {
       draft: true,

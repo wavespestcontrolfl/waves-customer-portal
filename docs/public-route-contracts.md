@@ -409,9 +409,10 @@ The optional whole-report AI narrative runs
 only when `droughtSignal` is `true`; otherwise all deterministic report copy
 is retained before narrative cache/model access. Lawn PDF render strategy `p4` regenerates
 older cached PDFs to match this evidence rule),
-the SPA `/recap/:token` "Your Visit, in Motion" recap player (token-gated; serves
-only an approved recap, consumes `/api/reports/:token/recap` + `/recap/video`,
-same noindex/no-referrer/no-store headers as `/report/:token`),
+the legacy SPA `/recap/:token` link (token-shaped and rate-limited; redirects
+to `/report/:token#visit-recap`, where the report embeds the approved "Your
+Visit, in Motion" recap and consumes `/api/reports/:token/recap` +
+`/recap/video`, with the tokenized noindex/no-referrer/no-store headers),
 `/api/stripe/webhook`, `/api/webhooks/twilio` (all Twilio inbound;
 recruiting replies (classification is NOT gated — `GATE_RECRUITING_COMMS`
 is the send / public-link kill switch only; applicants texted before it
@@ -959,11 +960,11 @@ is deliberately cacheable and indexable — it exposes only modeled,
 non-sensitive forecast data, so `no-store`/`noindex` privacy headers do
 NOT apply here).
 `/api/public/ui-flags` (read-only, no auth, no token, no params, no DB
-access, no PII — returns only client release-switch booleans (currently
-`{ portalGlass }` from the GATE_PORTAL_GLASS feature gate) so the portal
-SPA shell and login page, which have no per-page token payload, can learn
-a glass release. `Cache-Control: no-store` so gate flips propagate on the
-next page load; inherits the global `/api/` IP rate limit. Invariant: this
+access, no PII — compatibility shim that always returns
+`{ portalGlass: true }`. The glass release gate is retired and current
+client bundles no longer fetch this endpoint; cached app bundles can still
+use it. Carries `Cache-Control: no-store` and inherits the global `/api/`
+IP rate limit. Invariant: this
 surface must never grow beyond boolean/enum release flags — anything
 per-customer, secret, or configurable belongs on an authenticated payload).
 `/api/public/social-feed` (read-only aggregate of already-public social
@@ -1265,7 +1266,10 @@ the chat's quote step posts to the existing `/api/public/quote/calculate`
 above, which owns the four-field contact gate, lead minting, and attribution.
 All deterministic guards (price scrub, emergency + account-support fallback
 when both LLM providers miss) read English AND Spanish — the prompt answers
-Spanish visitors in Spanish. NOT CORS-open — credentialed allowlist origins
+Spanish visitors in Spanish. Each turn has a wall-clock budget across both
+providers (`ASK_WAVES_TURN_BUDGET_MS`, default 22000) after which the
+deterministic fallback is returned; the conversation log never delays the
+reply. NOT CORS-open — credentialed allowlist origins
 only (hub site)).
 `/api/public/experiments` (`GET /status` + `POST /exposure`) (client-side
 GrowthBook experimentation surface — no auth, anonymous visitors are the
@@ -1412,6 +1416,39 @@ Router-wide url-safe 15-64 token param gate (generic 404, prod-verified
 against all live tokens 2026-08-07); accept/decline carry a 10/hr
 limiter — the two heaviest public money-adjacent writes; select-tier/
 preferences ride estimateToggleLimiter, data/pdf ride dataLimiter).
+`/data`'s optional `consultationOffer: { url }` (consultation-first lane,
+owner ruling 2026-09-23; dark behind BOTH `GATE_ESTIMATE_CONSULTATION_OFFER`
+and `GATE_LEAD_INSPECTION_LINK` — `server/services/estimate-consultation-offer.js`)
+is the "Want us to come look first?" section's link to the SAME
+`/inspection/:token` self-booking page the recurring-lead new_lead email
+offers (`lead-consultation-email-block.js`) — this covers the estimate page
+only, never the email. Present only when: both gates are live; the estimate
+is in an open, customer-actionable state (never accepted/declined/expired/
+send_failed/unpublished/past-expiry, and never a staff draft or verified
+staff preview — the same `isEstimateAcceptActive` verdict `returnVisit`/
+`softExit` use); `estimate_data.lead_linkage` is STRONG (`sid` or `stamp` —
+the same set the accept/decline handlers' own lead re-lock condition on); the
+linked lead passes `leadLinkRefusal` (open lead, US phone, and — if a
+customer is linked — that customer live and still on the lead's phone) and
+`leadWantsRecurringPlan`; and the `/inspection/:token` page's own lead-wide
+probe (`inspection-public.js` `_internals.computeConsultationSlotsForLead`,
+the same one the email block uses) finds at least one open slot AT THIS
+ESTIMATE'S PROPERTY — the address the page resolved matches the estimate's
+(same street key, unit and zip); an out-of-area, unresolved, no-address,
+retired-catalog, no-open-times or other-property result omits the field.
+Quote-first only: never on an estimate drafted from a visit
+(`estimate_data.scheduled_service_id`) or on a grouped estimate
+(`estimate_group_id`). Composed on the page's own first `/data` load only —
+never on an internal `?refresh=1` of a viewed estimate (the client carries
+the first load's offer forward) and never for a caller that does not opt in
+(`includeConsultationOffer`). The Intelligence Bar's `get_estimate_detail` projection drops
+`consultationOffer` (the URL is a booking bearer). The URL is
+`consultationUrlForLead(leadId)` with NO channel (unverified delivery — this
+is neither an SMS send, which asserts phone delivery, nor an email send);
+the endpoint makes NO write of any kind to mint it (no `createShortCode`, no
+DB insert) — a public GET stays read-only. Any lookup error, or any other
+ineligibility, omits the field entirely (never `null`); absent, the page
+renders byte-identical to before this field existed.
 Authored commercial proposals expose reviewed four-decimal quantities and unit
 rates, explicit unit labels, cent-rounded line amounts, and the fixed
 `validThrough` date in their normalized proposal and document output. Internal
@@ -1744,9 +1781,11 @@ API/PDF responses must never be claimed by the app).
 `/api/public/track/:token` (read-only live service tracker; the
 `track_view_token` is the ONLY gate (`TOKEN_RE` format) plus a 120 req/min
 rate limit. In ANY state it returns the customer property block — first name,
-service address (line1/line2), lat/lng — and a top-level `prepToken` (set
-whenever a linked project has a `prep_token`, NOT gated on state) that fans
-out to `/prep/:token`. `en_route` additionally returns live tech coords + ETA
+service address (line1/line2), lat/lng — and a top-level `prepToken`,
+independent of tracker state. It uses the newest linked project's token
+among projects with both `prep_token` and `prep_sent_at`; otherwise it uses
+the visit's `prep_token` only when the visit has `prep_sent_at`, or null.
+A non-null token fans out to `/prep/:token`. `en_route` additionally returns live tech coords + ETA
 from Bouncie. The `complete` summary additionally hands out secondary bearer
 tokens — `serviceReportToken` (`report_view_token`), `invoiceToken`, a
 `/rate/:token` review URL, and TTL-presigned service-photo URLs — fanning out
@@ -1762,7 +1801,12 @@ count; it must never grow beyond that single bounded metadata write).
 confirmation texts link to. Gated by `scheduled_services.reschedule_token`
 — the SAME secret /reschedule uses, deliberately reused rather than
 minting a second one — plus a 60 req/min router limit and 10 req/min on
-the confirm. **Every route 404s unless `GATE_APPOINTMENT_PAGE=true`.**
+the confirm. **Anonymous application GET/POST requests return 404 unless
+`GATE_APPOINTMENT_PAGE` is exactly `true`.** A prefix-scoped noStore + gate
+runs before the global API limiter and body parsers; the router retains
+its gate before its local limits. Earlier shared controls keep precedence:
+CORS can finish OPTIONS requests, and signed Staff requests receive 503
+while Staff maintenance is enabled.
 GET returns the visit summary (service type, date + window_start, the
 server-derived arrival range, plan/one-time flag, confirmed flag, and
 `vanScene` — a boolean that is exactly `GATE_VAN_SCENE` in production
@@ -1893,7 +1937,12 @@ or commit path as security-critical).
 customer self-serve FREE re-service (callback) scheduler — the standing
 customer link texted by the office/comms composer and surfaced on the
 portal Visits tab. Whole surface is dark behind GATE_RESERVICE_SELF_SERVE
-(fail-closed `==='true'` in every env — every route 404s while off).
+(fail-closed `==='true'` in every env — anonymous application GET/POST
+requests return 404 while off). Prefix-scoped noStore + gate precedes the
+global API limiter and body parsers; the router also gates before its local
+limits and retains its handler checks. Earlier CORS handling of OPTIONS
+and the Staff maintenance interlock (503 for signed Staff requests while
+enabled) keep precedence.
 `customers.reservice_token` (64-hex, `TOKEN_RE` format gate; standing for
 the life of the customer like the /card token) is the ONLY gate, plus
 60 req/min router limit, 10 req/min on the commit POST, 15 req/min on
@@ -2101,7 +2150,7 @@ write-a-review URL, low → private feedback capture. Router-wide url-safe
 32-64 token param gate (generic 404; malformed tokens on `/go` degrade to
 the /rate page per its every-failure-lands-somewhere contract); the page
 GET and score/submit writes carry a 30/min limiter. `/:token/go` is the
-GATE_REVIEW_DIRECT_LINK tracked redirect: 64-hex token format gate, 30
+GATE_REVIEW_DIRECT_LINK tracked redirect: the same 32–64 URL-safe token format gate, 30
 req/min per-IP limit, stamps open/click on the review_requests row, stops
 the customer's active review cadence, and 302s to the location's GBP review
 URL — every failure path degrades to the /rate page, and the ONLY redirect
