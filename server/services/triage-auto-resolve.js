@@ -1547,28 +1547,39 @@ function isBareNotConfirmedAsk(item) {
 // provenance and address alone — never by service/category, so this is
 // deliberately looser than an actual resolution and applies to EVERY
 // not_confirmed card, bare or service-specific: live PARENT rows created
-// after the card, within NOT_CONFIRMED_BOOKING_MAX_AGE_DAYS of it, with
-// source_call_log_id either NULL (a human booked it by hand, off the
-// card, with no call to attribute it to) or equal to THIS card's own call
-// — never another call's (codex pre-push P1 round 2: a later call that
-// itself got the appointment booked leaves no triage sibling, but its
-// booking still carries that OTHER call's id and answers nothing about
-// this one) — honoring every date/time signal the card DID capture
+// after the card, honoring every date/time signal the card DID capture
 // (withinRequestedTiming) and positively matching at least one address the
 // card's ask named (bookingAtReadings — the on-file address when it named
-// none). Exported: bareNotConfirmedBookingCoversCall uses it for actual
-// resolution (a bare card has nothing else to check); the evidence pass
-// uses it for EVERY not_confirmed card to tell whether the SAME booking
-// would answer two different SIBLING cards (loadVisitEvidence's contest
-// check, computeContestedNotConfirmedIds) — one booking is not evidence a
-// customer got scheduled twice, whatever shape the competing cards are in.
+// none). For a BARE card this is its actual resolution (a bare card has
+// nothing else to check), so it ALSO carries the bare fallback's own two
+// tighter rules: created within NOT_CONFIRMED_BOOKING_MAX_AGE_DAYS of the
+// card, and source_call_log_id NULL (hand-made) or equal to THIS card's
+// own call — never another call's (codex pre-push P1 round 2: a later
+// call that itself got the appointment booked leaves no triage sibling,
+// but its booking still carries that OTHER call's id and answers nothing
+// about this one). For a SERVICE-SPECIFIC card, neither of those two
+// applies here: its REAL resolution (bookingCoversRequest's strict path,
+// below) has no age cap on `strictlyAfter` and no source_call_log_id check
+// on its association arm at all — a claim-detector any tighter than that
+// would miss a booking the real path accepts, which is exactly what let a
+// service-specific sibling and a bare card both claim the same one
+// undetected (codex pre-push P1 round 3). Widening the claim only makes
+// MORE cards contest each other, never lets one resolve wrongly, so this
+// stays the one shared function rather than a second mechanism. Exported:
+// bareNotConfirmedBookingCoversCall uses it for actual bare resolution;
+// the evidence pass uses it for EVERY not_confirmed card to tell whether
+// the SAME booking would answer two different SIBLING cards
+// (loadVisitEvidence's contest check, computeContestedNotConfirmedIds) —
+// one booking is not evidence a customer got scheduled twice, whatever
+// shape the competing cards are in.
 function notConfirmedClaimedBookings(item, mine, places) {
   const asked = requestedPlaces(item);
   if (!asked) return [];
+  const bare = isBareNotConfirmedAsk(item);
   const candidates = mine.filter((v) => !v.parent_service_id && !v.recurring_parent_id
     && strictlyAfter(v.created_at, item.created_at)
-    && ageDays(item.created_at, toDate(v.created_at) || new Date(NaN)) <= NOT_CONFIRMED_BOOKING_MAX_AGE_DAYS
-    && (!v.source_call_log_id || String(v.source_call_log_id) === String(item.call_log_id))
+    && (!bare || ageDays(item.created_at, toDate(v.created_at) || new Date(NaN)) <= NOT_CONFIRMED_BOOKING_MAX_AGE_DAYS)
+    && (!bare || !v.source_call_log_id || String(v.source_call_log_id) === String(item.call_log_id))
     && withinRequestedTiming(item, v));
   return candidates.filter((v) => asked.some((readings) => bookingAtReadings(item, v, places, readings)));
 }
@@ -2134,10 +2145,14 @@ function lineRecordIdentity(line) {
 // in_progress not_confirmed cards for these customers — human-claimed, so
 // loadCandidateItems' open-only query never surfaces them, but one can
 // still be the card a shared booking actually answers (the booking contest
-// check in loadVisitEvidence). Best-effort: a failed lookup returns no
-// siblings rather than crashing the sweep (rule 6 — an uncertain query
-// never takes down an evidence arm), which only widens who a contest could
-// have caught, never narrows it.
+// check in loadVisitEvidence). Returns `null`, never `[]`, when the lookup
+// itself fails: an EMPTY result and a FAILED one are not the same claim —
+// [] says "checked, no in_progress sibling exists", a thrown query says
+// nothing at all, and the caller must fail closed on that uncertainty
+// (codex pre-push P1, round 3) rather than resolve a not_confirmed card on
+// a booking that might belong to a sibling this lookup simply couldn't
+// see. loadVisitEvidence reads the `null` and skips not_confirmed booking
+// evidence for the WHOLE batch rather than guessing.
 async function loadInProgressNotConfirmedSiblings(conn, customerIds) {
   if (!customerIds.length) return [];
   try {
@@ -2149,7 +2164,7 @@ async function loadInProgressNotConfirmedSiblings(conn, customerIds) {
       .select('t.id', 't.reason_code', 't.created_at', 't.payload', 'cl.customer_id as call_customer_id');
   } catch (e) {
     logger.warn(`[triage-sweep] in_progress sibling lookup for booking contest check failed: ${e.message}`);
-    return [];
+    return null;
   }
 }
 
@@ -2220,7 +2235,15 @@ async function loadVisitEvidence(conn, items, flag, { ignoreGate = false } = {})
   const inProgressSiblings = openNotConfirmed.length
     ? await loadInProgressNotConfirmedSiblings(conn, customerIds)
     : [];
-  const contestedNotConfirmed = computeContestedNotConfirmedIds([...openNotConfirmed, ...inProgressSiblings], visitsByCustomer, places);
+  // `null` means the lookup FAILED, not that no in_progress sibling
+  // exists — an empty result and an unknown one are not the same claim,
+  // and treating a failure as "safe to proceed" would let a not_confirmed
+  // card resolve on a booking that might belong to a sibling this lookup
+  // simply couldn't see (codex pre-push P1, round 3). Fail the WHOLE batch
+  // closed for this evidence arm rather than guess card by card.
+  const contestedNotConfirmed = inProgressSiblings === null
+    ? new Set(openNotConfirmed.map((i) => i.id))
+    : computeContestedNotConfirmedIds([...openNotConfirmed, ...inProgressSiblings], visitsByCustomer, places);
 
   for (const item of visitItems) {
     const mine = visitsByCustomer.get(String(item.call_customer_id)) || [];
