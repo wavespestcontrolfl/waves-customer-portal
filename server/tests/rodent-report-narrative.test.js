@@ -261,7 +261,7 @@ test('ungrounded numbers and unsupported capture/consumption claims are rejected
   expect(ungroundedClaims('Your next visit is Monday, August 3, arriving 8–10 PM.', facts))
     .toContain('ungrounded_window:8–10 PM');
   expect(ungroundedClaims('Your next visit is Tuesday, August 3, arriving 8–10 AM.', facts))
-    .toContain('ungrounded_date:Tuesday, August 3');
+    .toContain('ungrounded_weekday:Tuesday');
   expect(ungroundedClaims('See you on September 3.', facts)).toContain('ungrounded_date:September 3');
   // with no grounded next visit, any window/date mention rejects
   const noVisit = groundingFacts(input({ nextAppointment: null }));
