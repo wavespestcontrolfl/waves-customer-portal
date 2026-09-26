@@ -174,7 +174,7 @@ const REPORT_ACCESS_CODE_RES = [
 // 2468ft" is still a credential, even though "400 ft" beside a gate can be
 // legitimate work detail. Inspect the original text before measurement
 // suppression and count digits in compact or grouped numeric tokens.
-const REPORT_EXPLICIT_NUMERIC_CREDENTIAL_RE = /\b(?:code|pin|combo(?!\s+(?:of|with)\b)|combination(?!\s+(?:of|with)\b)|passcode|password|passphrase|keypad|lock\s?box)\b[^\n.!?]{0,25}?["'‘’“”]?([#*]?(?:[A-Za-z#*]*\d[A-Za-z0-9#*]*|\d+(?:[\s–—-]+\d+)+))/gi;
+const REPORT_EXPLICIT_NUMERIC_CREDENTIAL_RE = /\b(?:code|pin|combo(?!\s+(?:of|with)\b)|combination(?!\s+(?:of|with)\b)|passcode|password|passphrase|keypad|lock\s?box)\b[^\n.!?]{0,25}?["'‘’“”]?([A-Za-z#*]*(?:\d+(?:[\s–—-]+\d+)+[A-Za-z#*]*|\d[A-Za-z0-9#*]*))/gi;
 
 function containsExplicitNumericCredential(text) {
   for (const match of String(text || '').matchAll(REPORT_EXPLICIT_NUMERIC_CREDENTIAL_RE)) {

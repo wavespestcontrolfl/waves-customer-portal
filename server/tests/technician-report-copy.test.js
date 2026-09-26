@@ -61,6 +61,9 @@ describe('custom action credential screening', () => {
     'Used gate code 2468ft for entry',
     'Gate code is 2468ml',
     'Used gate code 2468oz for entry',
+    'Gate code is 1 2 3 4ft',
+    'Gate code is 2-4-6-8ml',
+    'Gate PIN AB24 68oz',
     'side gate: 2468',
     'Open side gate with 2468 in the morning',
     'Opened side gate with 2468 in the morning',
@@ -79,6 +82,7 @@ describe('custom action credential screening', () => {
     'Opened the gate onto 400 sqft of treated turf',
     'Opened rear gate, applied 100 ml around hinges',
     'Inspected the rear gate 120–150 feet from the lanai',
+    'Opened rear gate, applied 24-68ml around hinges',
   ])('preserves dimensional work details: %s', (action) => {
     expect(customerCopyViolations(action)).toEqual([]);
   });

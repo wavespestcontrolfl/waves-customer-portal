@@ -358,6 +358,9 @@ describe('buildTreeShrubReportV2 — aggregator', () => {
         'Used gate code 2468ft for entry',
         'Gate code is 2468ml',
         'Used gate code 2468oz for entry',
+        'Gate code is 1 2 3 4ft',
+        'Gate code is 2-4-6-8ml',
+        'Gate PIN AB24 68oz',
       ],
     });
 
@@ -370,6 +373,27 @@ describe('buildTreeShrubReportV2 — aggregator', () => {
     expect(v2.treatment.focus).toEqual(safeActions);
     expect(v2.snapshot.todaysFocus).toEqual(safeActions);
     expect(JSON.stringify(v2)).not.toMatch(/4417|2468|2-4-6-8|24[- ]68|\[redacted\]|gate code/i);
+
+    const groupedMeasurement = 'Opened rear gate, applied 24-68ml around hinges';
+    const measurementReport = buildTreeShrubReportV2({
+      treeShrubAssessment: assessment(),
+      actions: [groupedMeasurement],
+    });
+    expect(measurementReport.treatment.focus).toEqual([groupedMeasurement]);
+    expect(measurementReport.snapshot.todaysFocus).toEqual([groupedMeasurement]);
+
+    const groupedCredentials = [
+      'Gate code is 1 2 3 4ft',
+      'Gate code is 2-4-6-8ml',
+      'Gate PIN AB24 68oz',
+    ];
+    const privateReport = buildTreeShrubReportV2({
+      treeShrubAssessment: assessment(),
+      actions: groupedCredentials,
+    });
+    expect(privateReport.treatment).toBeNull();
+    expect(privateReport.snapshot.todaysFocus).toEqual([]);
+    expect(JSON.stringify(privateReport)).not.toMatch(/1 2 3 4ft|2-4-6-8ml|AB24 68oz/i);
   });
 
   it('peace-of-mind keeps the treatment copy when products were actually applied', () => {
