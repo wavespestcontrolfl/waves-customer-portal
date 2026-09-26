@@ -95,7 +95,11 @@ async function getWeatherSignals({ lat, lng, region } = {}) {
   // Enrich SWFL points with FAWN recent rainfall (best-effort, never blocks).
   if (fawn && region === 'sw') {
     try {
-      const cur = await fawn.getCurrent({ latitude: lat, longitude: lng });
+      // getRecentRainfall() (not getCurrent()) — it reads FAWN's most recent
+      // COMPLETE day total, not the near-real-time hourly reading, which is
+      // what "has it been wet lately" needs and keeps this enrichment from
+      // pulling a stale day-total into any "current conditions" consumer.
+      const cur = await fawn.getRecentRainfall({ latitude: lat, longitude: lng });
       // Guard explicitly against null/undefined — Number(null) === 0 would
       // otherwise inject a phantom 0" reading and falsely flag the week "dry".
       if (cur && cur.rainfall_in != null && Number.isFinite(Number(cur.rainfall_in))) {
@@ -104,9 +108,9 @@ async function getWeatherSignals({ lat, lng, region } = {}) {
         if (!base.source) base.source = 'fawn';
         else base.source = 'nws+fawn';
       } else if (cur && cur.error) {
-        // FawnWeather.getCurrent() already caught its own fetch/parse error
-        // and returned a placeholder — log once per cache fill (not per
-        // request) so an upstream FAWN outage is visible without spamming.
+        // FawnWeather.getRecentRainfall() already caught its own fetch/parse
+        // error and returned a placeholder — log once per cache fill (not
+        // per request) so an upstream FAWN outage is visible without spamming.
         logger.warn?.(`[pest-forecast/weather] FAWN enrichment unavailable for ${key}: ${cur.error}`);
       }
     } catch (err) {

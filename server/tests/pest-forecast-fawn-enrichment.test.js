@@ -10,6 +10,11 @@
  * fawn-weather-mapping.test.js) and asserts the enrichment contract:
  * 'sw' + healthy FAWN -> 'nws+fawn' with a real reading; anything else
  * degrades to NWS-only, logged, never thrown.
+ *
+ * Enrichment calls getRecentRainfall() (lastDay total), not getCurrent()
+ * (lastHour) — kept separate so this day-total rainfall reading never
+ * masquerades as "current conditions" for other FAWN consumers (Codex
+ * review, 2026-09-26).
  */
 
 jest.mock('../services/fawn-weather');
@@ -48,25 +53,25 @@ describe('getWeatherSignals FAWN enrichment (public pest forecast)', () => {
   });
 
   test('sw region + healthy FAWN -> nws+fawn with the real rainfall reading', async () => {
-    FawnWeather.getCurrent.mockResolvedValue({ rainfall_in: 0.42, station: 'North Port' });
+    FawnWeather.getRecentRainfall.mockResolvedValue({ rainfall_in: 0.42, station: 'North Port' });
     const out = await getWeatherSignals({ lat: 27.4989, lng: -82.5748, region: 'sw' });
-    expect(FawnWeather.getCurrent).toHaveBeenCalledTimes(1);
+    expect(FawnWeather.getRecentRainfall).toHaveBeenCalledTimes(1);
     expect(out.source).toBe('nws+fawn');
     expect(out.recentRainIn).toBeCloseTo(0.42, 5);
     expect(out.hasWeather).toBe(true);
   });
 
   test('non-sw region never calls FAWN and stays nws-only', async () => {
-    FawnWeather.getCurrent.mockResolvedValue({ rainfall_in: 0.42 });
+    FawnWeather.getRecentRainfall.mockResolvedValue({ rainfall_in: 0.42 });
     const out = await getWeatherSignals({ lat: 25.77, lng: -80.19, region: 'se' });
-    expect(FawnWeather.getCurrent).not.toHaveBeenCalled();
+    expect(FawnWeather.getRecentRainfall).not.toHaveBeenCalled();
     expect(out.source).toBe('nws');
     expect(out.recentRainIn).toBeNull();
   });
 
   test('a FAWN rejection degrades to NWS-only, is logged, and never throws', async () => {
     const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {});
-    FawnWeather.getCurrent.mockRejectedValue(new Error('FAWN HTTP 400'));
+    FawnWeather.getRecentRainfall.mockRejectedValue(new Error('FAWN HTTP 400'));
 
     const out = await getWeatherSignals({ lat: 27.4989, lng: -82.5748, region: 'sw' });
 
@@ -79,7 +84,7 @@ describe('getWeatherSignals FAWN enrichment (public pest forecast)', () => {
 
   test('FawnWeather resolving its own error placeholder is also logged, not silently dropped', async () => {
     const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {});
-    FawnWeather.getCurrent.mockResolvedValue({
+    FawnWeather.getRecentRainfall.mockResolvedValue({
       rainfall_in: null, station: 'unavailable', error: 'FAWN HTTP 400',
     });
 
@@ -92,7 +97,7 @@ describe('getWeatherSignals FAWN enrichment (public pest forecast)', () => {
   });
 
   test('a null rainfall reading never injects a phantom 0" and stays nws-only', async () => {
-    FawnWeather.getCurrent.mockResolvedValue({ rainfall_in: null, station: 'North Port' });
+    FawnWeather.getRecentRainfall.mockResolvedValue({ rainfall_in: null, station: 'North Port' });
     const out = await getWeatherSignals({ lat: 27.4989, lng: -82.5748, region: 'sw' });
     expect(out.source).toBe('nws');
     expect(out.recentRainIn).toBeNull();

@@ -11,10 +11,16 @@ const logger = require('./logger');
 
 // `lastObservation/summary/` is not a real FAWN endpoint (confirmed live
 // 2026-09-26: it 400s). The documented, working "all stations" feed is
-// `{period}/summary/json` — lastDay gives the most recent complete day's
-// totals, which is what "recent rainfall" needs (a hookup consumers already
-// assume, e.g. application-conditions.js's `rain_24h_in`).
-const FAWN_URL = 'https://fawn.ifas.ufl.edu/controller.php/lastDay/summary/json';
+// `{period}/summary/json`. Two different periods, two different jobs:
+// lastHour is near-real-time (~15-45min old) and is what "current
+// conditions" (getCurrent, used by application-conditions.js's live
+// service-report snapshot, lawn-intelligence.js, etc.) means; lastDay is
+// the most recent COMPLETE day's totals, which is what "recent rainfall"
+// (getRecentRainfall, used by the public pest forecast to judge "has it
+// been wet lately") actually needs — an hour's rain_sum is almost always
+// zero unless it happens to be raining at fetch time.
+const FAWN_LAST_HOUR_URL = 'https://fawn.ifas.ufl.edu/controller.php/lastHour/summary/json';
+const FAWN_LAST_DAY_URL = 'https://fawn.ifas.ufl.edu/controller.php/lastDay/summary/json';
 
 // The real API's summary rows carry ONLY a numeric `StationID` — no name,
 // county, or lat/lng field (confirmed live 2026-09-26). There is also no
@@ -27,10 +33,13 @@ const STATION_HINTS = [
   { key: 'arcadia', id: '490', label: 'Arcadia', names: ['arcadia'], latitude: 27.22621, longitude: -81.83838 },
 ];
 
-// Cache for 15 minutes to avoid hammering FAWN
-let _stationCache = null;
-let _stationCacheTime = 0;
+// Cache for 15 minutes to avoid hammering FAWN. Separate slots per period —
+// lastHour and lastDay are different datasets and must not overwrite one
+// another's cache.
+const _stationCache = { lastHour: null, lastDay: null };
+const _stationCacheTime = { lastHour: 0, lastDay: 0 };
 let _lastSnapshot = null;
+let _lastRainSnapshot = null;
 const CACHE_TTL = 15 * 60 * 1000;
 
 function firstDefined(...values) {
@@ -122,19 +131,22 @@ function distanceMiles(from, to) {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-async function fetchStationRows() {
-  if (_stationCache && Date.now() - _stationCacheTime < CACHE_TTL) return _stationCache;
+async function fetchStationRows(period) {
+  const url = period === 'lastDay' ? FAWN_LAST_DAY_URL : FAWN_LAST_HOUR_URL;
+  const slot = period === 'lastDay' ? 'lastDay' : 'lastHour';
+
+  if (_stationCache[slot] && Date.now() - _stationCacheTime[slot] < CACHE_TTL) return _stationCache[slot];
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 3500);
   try {
-    const res = await fetch(FAWN_URL, { signal: controller.signal });
+    const res = await fetch(url, { signal: controller.signal });
     if (!res.ok) throw new Error(`FAWN HTTP ${res.status}`);
 
     const data = await res.json();
     const rows = Array.isArray(data) ? data : [];
-    _stationCache = rows;
-    _stationCacheTime = Date.now();
+    _stationCache[slot] = rows;
+    _stationCacheTime[slot] = Date.now();
     return rows;
   } finally {
     clearTimeout(timeout);
@@ -184,12 +196,14 @@ function normalizeStationSnapshot(station) {
 const FawnWeather = {
 
   /**
-   * Get current FAWN observation for nearest SWFL station.
+   * Get current (near-real-time, ~15-45min old) FAWN observation for the
+   * nearest SWFL station. This is "current conditions" — application
+   * snapshots, lawn assessments, seasonal displays.
    * Returns: { temp_f, humidity_pct, rainfall_in, soil_temp_f, station, timestamp }
    */
   async getCurrent(options = {}) {
     try {
-      const data = await fetchStationRows();
+      const data = await fetchStationRows('lastHour');
       const station = selectStation(data, options);
 
       if (!station) throw new Error('No FAWN station found');
@@ -203,6 +217,42 @@ const FawnWeather = {
       return _lastSnapshot || {
         temp_f: null, humidity_pct: null, rainfall_in: null,
         soil_temp_f: null, wind_mph: null, station: 'unavailable', timestamp: new Date().toISOString(),
+        error: err.message,
+      };
+    }
+  },
+
+  /**
+   * Get the most recent COMPLETE day's rainfall total for the nearest SWFL
+   * station — a meaningfully-sized "has it been wet lately" reading, unlike
+   * getCurrent()'s near-real-time (and almost always zero) hourly rain_sum.
+   * Used by the public pest forecast's SWFL enrichment; kept separate from
+   * getCurrent() so a stale day-total never masquerades as "current
+   * conditions" for application-conditions.js and other current-weather
+   * consumers (Codex review, 2026-09-26).
+   * Returns: { rainfall_in, station, station_key, observation_time }
+   */
+  async getRecentRainfall(options = {}) {
+    try {
+      const data = await fetchStationRows('lastDay');
+      const station = selectStation(data, options);
+
+      if (!station) throw new Error('No FAWN station found');
+
+      const hint = hintForStation(station);
+      const snapshot = {
+        rainfall_in: rainfallInches(station),
+        station: stationName(station) || hint?.label || 'FAWN SWFL',
+        station_key: hint?.key || null,
+        observation_time: firstDefined(station.ObservationTime, station.observation_time, station.startTime, station.DateTime, station.datetime, station.timestamp),
+      };
+      _lastRainSnapshot = snapshot;
+
+      return snapshot;
+    } catch (err) {
+      logger.error(`[fawn-weather] Recent-rainfall fetch failed: ${err.message}`);
+      return _lastRainSnapshot || {
+        rainfall_in: null, station: 'unavailable', station_key: null, observation_time: null,
         error: err.message,
       };
     }
