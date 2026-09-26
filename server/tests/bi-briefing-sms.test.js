@@ -16,7 +16,11 @@ jest.mock('../models/db', () => {
   return db;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
-jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: (...a) => mockSend(...a) }));
+jest.mock('../services/messaging/send-customer-message', () => ({
+  sendCustomerMessage: (...a) => mockSend(...a),
+  // The real canonical classifier: these tests pin how its verdict drives the claim.
+  classifyDeliveryCertainty: jest.requireActual('../services/messaging/send-customer-message').classifyDeliveryCertainty,
+}));
 
 const { etWeekStart } = require('../utils/datetime-et');
 const { sendBriefingSmsOnce, claimKeyFor } = require('../services/bi-briefing-sms');
@@ -78,11 +82,32 @@ test('an uncertain provider outcome keeps the claim: the provider may still hold
   expect(mockDel).not.toHaveBeenCalled();
 });
 
-test('a send that throws keeps the claim and surfaces the error to the runner', async () => {
+test('a send that throws with no provider outcome keeps the claim and surfaces the error to the runner', async () => {
   claimed();
   mockSend.mockRejectedValueOnce(new Error('socket hang up'));
   await expect(sendBriefingSmsOnce('📊')).rejects.toThrow('socket hang up');
   expect(mockDel).not.toHaveBeenCalled();
+});
+
+test('a send that throws before dispatch (providerOutcome not_sent) releases the week (Codex r5)', async () => {
+  claimed();
+  mockSend.mockRejectedValueOnce(Object.assign(new Error('audit insert failed'), { providerOutcome: { sent: false, deliveryOutcome: 'not_sent' } }));
+  await expect(sendBriefingSmsOnce('📊')).rejects.toThrow('audit insert failed');
+  expect(mockDel).toHaveBeenCalledTimes(1);
+});
+
+test('a send that throws after the provider handoff (uncertain) keeps the claim', async () => {
+  claimed();
+  mockSend.mockRejectedValueOnce(Object.assign(new Error('audit failed after send'), { providerOutcome: { sent: false, deliveryOutcome: 'uncertain' } }));
+  await expect(sendBriefingSmsOnce('📊')).rejects.toThrow('audit failed after send');
+  expect(mockDel).not.toHaveBeenCalled();
+});
+
+test('a suppression sentinel (sent:true but nothing left) releases the week for a later run', async () => {
+  claimed();
+  mockSend.mockResolvedValueOnce({ sent: true, providerMessageId: 'template-disabled', deliveryOutcome: 'not_sent' });
+  await expect(sendBriefingSmsOnce('📊')).resolves.toMatchObject({ sent: true });
+  expect(mockDel).toHaveBeenCalledTimes(1);
 });
 
 test('no ADAM_PHONE: nothing is claimed and nothing is sent', async () => {

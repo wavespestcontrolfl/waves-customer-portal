@@ -50,6 +50,13 @@ function load(path) {
   return mod;
 }
 const text = (t) => ({ event: 'assistant', data: { text: t } });
+// bi-agent re-throws a failure after its ledger row is written, so its
+// callers (the Monday cron's job health, /bi/run?wait=true) see the run
+// failed (Codex #4870 r5); the other runners resolve with it recorded.
+async function settleFailedRun(name, promise, code) {
+  if (name === 'bi-agent') await expect(promise).rejects.toMatchObject({ code });
+  else await promise;
+}
 const recorded = () => mockRecordSessionUsage.mock.calls[0][0];
 
 const RUNNERS = [
@@ -96,13 +103,13 @@ describe.each(RUNNERS)('%s — the session recorder sees how the stream ended', 
 
   it('a session.error event is the same failed run as an error event (session_error_event)', async () => {
     global.fetch = fetchFor([text('partial'), { event: 'session.error', data: { type: 'overloaded_error' } }, text('never read')]);
-    await run(load(path));
+    await settleFailedRun(name, run(load(path)), 'session_error_event');
     expect(recorded()).toMatchObject({ sessionId: 'sess-1', failure: 'session_error_event' });
   });
 
   it('a stream that closes before any terminal event is a failed run (session_stream_eof), not a success', async () => {
     global.fetch = fetchFor([text('partial')]);
-    await run(load(path));
+    await settleFailedRun(name, run(load(path)), 'session_stream_eof');
     expect(recorded()).toMatchObject({ sessionId: 'sess-1', failure: 'session_stream_eof' });
   });
 
@@ -316,16 +323,24 @@ describe('bi-agent — current managed agents protocol', () => {
     expect(recorded()).toMatchObject({ failure: null });
   });
 
-  it('is_error is set only when the tool threw', async () => {
-    mockExecuteBITool.mockRejectedValue(new Error('boom'));
+  it('is_error is set when the tool threw or returned { error } — never on a good result (Codex r5)', async () => {
+    mockExecuteBITool
+      .mockRejectedValueOnce(new Error('boom'))
+      .mockResolvedValueOnce({ error: 'Unknown tool: nope' })
+      .mockResolvedValueOnce({ ok: true });
     global.fetch = fetchFor([
       customToolUse('tool-1', 'get_revenue_snapshot'),
-      idle('requires_action', ['tool-1']),
+      customToolUse('tool-2', 'get_tool_health_snapshot'),
+      customToolUse('tool-3', 'get_customer_snapshot'),
+      idle('requires_action', ['tool-1', 'tool-2', 'tool-3']),
       { event: 'done', data: {} },
     ]);
     await load(path).run({ skipSMS: true });
-    const toolResultPosts = postsSent().filter(p => (p.body.events || []).some(e => e.type === 'user.custom_tool_result'));
-    expect(toolResultPosts[0].body.events[0].is_error).toBe(true);
+    const results = postsSent().flatMap(p => p.body.events || []).filter(e => e.type === 'user.custom_tool_result');
+    const byId = Object.fromEntries(results.map(e => [e.custom_tool_use_id, e]));
+    expect(byId['tool-1'].is_error).toBe(true);
+    expect(byId['tool-2'].is_error).toBe(true);
+    expect(byId['tool-3'].is_error).toBeFalsy();
   });
 
   it('a requires_action idle naming an id with no pending tool use still sends the results it does have', async () => {
@@ -376,9 +391,9 @@ describe('bi-agent — current managed agents protocol', () => {
     });
     global.fetch = fetchMock;
 
-    const result = await load(path).run({ skipSMS: true });
+    const err = await load(path).run({ skipSMS: true }).catch((e) => e);
+    expect(err).toMatchObject({ code: 'session_timeout', toolsExecuted: [] });
     expect(recorded()).toMatchObject({ failure: 'session_timeout' });
-    expect(result.toolsExecuted).toEqual([]);
     expect(postsSent().filter(p => (p.body.events || []).some(e => e.type === 'user.custom_tool_result'))).toHaveLength(0);
   });
 
@@ -389,7 +404,7 @@ describe('bi-agent — current managed agents protocol', () => {
     });
     global.fetch = fetchMock;
 
-    await load(path).run({ skipSMS: true });
+    await expect(load(path).run({ skipSMS: true })).rejects.toMatchObject({ code: 'session_timeout' });
     expect(recorded()).toMatchObject({ failure: 'session_timeout' });
     expect(seen.streamSignal.aborted).toBe(true);
   });
@@ -407,7 +422,7 @@ describe('bi-agent — current managed agents protocol', () => {
       });
     });
 
-    await load(path).run({ skipSMS: true });
+    await expect(load(path).run({ skipSMS: true })).rejects.toMatchObject({ code: 'session_timeout' });
     expect(recorded()).toMatchObject({ failure: 'session_timeout' });
   });
 
@@ -490,10 +505,10 @@ describe('bi-agent — current managed agents protocol', () => {
     });
     global.fetch = fetchMock;
 
-    const result = await load(path).run({});
+    const err = await load(path).run({}).catch((e) => e);
     expect(mockExecuteBITool).toHaveBeenCalledTimes(1);
+    expect(err).toMatchObject({ code: 'session_timeout', smsSent: false });
     expect(recorded()).toMatchObject({ failure: 'session_timeout' });
-    expect(result.smsSent).toBe(false);
   });
 
   it('the owner SMS is sent at most once per briefing — a second request is answered as skipped', async () => {
@@ -536,20 +551,20 @@ describe('bi-agent — current managed agents protocol', () => {
       idle('requires_action', ids),
       { event: 'done', data: {} },
     ]);
-    await load(path).run({ skipSMS: true });
+    await expect(load(path).run({ skipSMS: true })).rejects.toMatchObject({ code: 'max_tool_calls' });
     expect(mockExecuteBITool).toHaveBeenCalledTimes(30);
     expect(recorded()).toMatchObject({ failure: 'max_tool_calls' });
   });
 
   it('an idle with retries_exhausted is a failed run (session_idle_retries_exhausted)', async () => {
     global.fetch = fetchFor([text('partial'), idle('retries_exhausted'), text('never read')]);
-    await load(path).run({ skipSMS: true });
+    await expect(load(path).run({ skipSMS: true })).rejects.toMatchObject({ code: 'session_idle_retries_exhausted' });
     expect(recorded()).toMatchObject({ failure: 'session_idle_retries_exhausted' });
   });
 
   it('an idle with budget_reached is a failed run (session_idle_budget_reached)', async () => {
     global.fetch = fetchFor([idle('budget_reached'), text('never read')]);
-    await load(path).run({ skipSMS: true });
+    await expect(load(path).run({ skipSMS: true })).rejects.toMatchObject({ code: 'session_idle_budget_reached' });
     expect(recorded()).toMatchObject({ failure: 'session_idle_budget_reached' });
   });
 
@@ -566,7 +581,7 @@ describe('bi-agent — current managed agents protocol', () => {
     // No terminal frame at all — without the deadline this would hang until
     // the mock stream's own (irrelevant) EOF.
     global.fetch = fetchFor([text('one'), text('two'), text('three')]);
-    await load(path).run({ skipSMS: true });
+    await expect(load(path).run({ skipSMS: true })).rejects.toMatchObject({ code: 'session_timeout' });
     expect(recorded()).toMatchObject({ failure: 'session_timeout' });
   });
 

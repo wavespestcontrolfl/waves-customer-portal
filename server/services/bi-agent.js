@@ -227,7 +227,10 @@ async function runRequiresActionBatch(sessionId, deadline, eventIds, pendingCust
     }
     pendingCustomToolUses.delete(toolUseId);
     const { toolResult, threw } = await executeToolUse(toolUseId, pending.toolName, pending.toolInput);
-    const resultEvent = buildToolResultEvent(toolUseId, toolResult, threw);
+    // A tool that reports failure by returning { error } (the unknown-tool
+    // branch, get_tool_health_snapshot, get_experiment_results) is a failed
+    // result too, never valid input (Codex r5; the sibling runners agree).
+    const resultEvent = buildToolResultEvent(toolUseId, toolResult, threw || Boolean(toolResult && toolResult.error));
     answeredResults.set(toolUseId, resultEvent);
     toolResultEvents.push(resultEvent);
   }
@@ -377,6 +380,16 @@ const BIAgent = {
       }
       runEndedAt = Date.now();
       await recordSessionUsage({ laneId: 'agent_bi', sessionId, agentId: BI_AGENT_ID, model: BI_AGENT_CONFIG.model, startedAt: startTime, failure });
+    }
+
+    // The ledger row above records every failure; the caller must see it too
+    // (Codex r5). A briefing that timed out, hit the tool cap, errored or lost
+    // its stream did not finish: the Monday cron's runExclusive job health and
+    // /bi/run?wait=true both read a throw, never a resolved run.
+    if (failure) {
+      throw Object.assign(new Error(`BI briefing session ${sessionId} failed: ${failure}`), {
+        code: failure, sessionId, smsSent, toolsExecuted,
+      });
     }
 
     const durationSeconds = Math.round((runEndedAt - startTime) / 1000);
