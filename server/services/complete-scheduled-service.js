@@ -3590,10 +3590,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
         const label = String(entry.label || '').trim() || null;
         // Only governed non-spray actions can waive drying. Never trust a
         // client exemption on a spray or arbitrary legacy action.
-        const nonDryingAction = reportServiceLine === 'pest' && [
+        const nonDryingAction = (reportServiceLine === 'pest' && [
           'Applied gel bait in the recorded locations.',
           'Applied dust to the recorded accessible voids.',
-        ].includes(label);
+        ].includes(label)) || (['tree_shrub', 'palm'].includes(reportServiceLine)
+          && label === 'Completed the documented trunk application.');
         return {
           label,
           scope,
