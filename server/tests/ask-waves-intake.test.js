@@ -1751,6 +1751,7 @@ describe('looksLikeEmergency', () => {
     'The treatment caused my child to cough',
     "My dog didn't eat the bait, but he licked it",
     "My dog didn't eat the bait, but he inhaled it",
+    'Is it dangerous? I said no\nhe swallowed some bait',
     'my dog licked the roach spray',
     'My child ate pesticide granules',
     'The bait was eaten by my dog',

@@ -181,7 +181,11 @@ function treatmentSymptom(turn) {
 }
 
 function looksLikeEmergency(text) {
-  const t = String(text || '').replace(NEGATED_ALLERGY_RE, ' ').replace(NEGATED_NEED_RE, ' ').replace(NEGATED_EXPOSURE_RE, ' ');
+  // Denials are stripped one turn at a time, so a "no" ending one turn can
+  // never swallow a statement in the next.
+  const t = String(text || '').split('\n')
+    .map((turn) => turn.replace(NEGATED_ALLERGY_RE, ' ').replace(NEGATED_NEED_RE, ' ').replace(NEGATED_EXPOSURE_RE, ' '))
+    .join('\n');
   // Exposure shapes are judged one turn (line) at a time — "I ate lunch" in
   // history must not pair with "Which bug spray do you use?" now.
   const exposure = t.split(/\n+/).some((turn) => INGESTION_RE.test(turn) || EAT_EXPOSURE_RE.test(turn) || CONTACT_EXPOSURE_RE.test(turn) || treatmentSymptom(turn) || affirmedAfterDenial(turn));
