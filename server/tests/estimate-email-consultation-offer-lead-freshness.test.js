@@ -75,7 +75,7 @@ function estimateRow(overrides = {}) {
     archived_at: null,
     status: 'viewed',
     expires_at: null,
-    estimate_data: JSON.stringify({}),
+    estimate_data: JSON.stringify({ lead_id: LEAD_ID, lead_linkage: 'sid' }),
     customer_id: null,
     customer_phone: '(941) 555-1234',
     customer_email: 'original@example.com',

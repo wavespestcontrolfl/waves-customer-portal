@@ -106,7 +106,7 @@ function freshOpenEstimate(overrides = {}) {
     archived_at: null,
     status: 'viewed',
     expires_at: null,
-    estimate_data: JSON.stringify({}),
+    estimate_data: JSON.stringify({ lead_id: LEAD_ID, lead_linkage: 'sid' }),
     estimate_group_id: null,
     address: '123 Palm St, Bradenton, FL 34205',
     customer_id: null,
@@ -360,6 +360,18 @@ describe('buildEstimateConsultationOffer — post-probe estimate freshness', () 
 
   test('the estimate address changes to a different property during the probe → null', async () => {
     mockBuilders.estimates = chainBuilder({ firstRow: freshOpenEstimate({ address: '9 Other Rd, Bradenton, FL 34205' }) });
+    expect(await buildEstimateConsultationOffer(baseArgs())).toBeNull();
+  });
+
+  test('the stamped lead_id is replaced by another lead during the probe → null', async () => {
+    mockBuilders.estimates = chainBuilder({
+      firstRow: freshOpenEstimate({ estimate_data: JSON.stringify({ lead_id: 'other-lead', lead_linkage: 'sid' }) }),
+    });
+    expect(await buildEstimateConsultationOffer(baseArgs())).toBeNull();
+  });
+
+  test('the stamped link is removed during the probe (no pointer either) → null', async () => {
+    mockBuilders.estimates = chainBuilder({ firstRow: freshOpenEstimate({ estimate_data: JSON.stringify({}) }) });
     expect(await buildEstimateConsultationOffer(baseArgs())).toBeNull();
   });
 

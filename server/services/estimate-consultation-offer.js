@@ -163,6 +163,12 @@ async function finalEligibility(estimateId, leadId, probedAddress) {
   // probe found must still be at the estimate's own property.
   if (!sameProperty(freshEstimate.address, probedAddress)) return null;
 
+  // The linkage itself can change during the probe (leads.estimate_id
+  // removed or reassigned, a second lead attached, the stamped lead_id
+  // replaced): the fresh linkage must still name exactly this lead.
+  const freshLeadId = await linkedLeadIdFor(freshEstimate.id, freshEstimateData);
+  if (!freshLeadId || String(freshLeadId).toLowerCase() !== String(leadId).toLowerCase()) return null;
+
   const freshLead = await db('leads').where({ id: leadId }).whereNull('deleted_at')
     .first('id', 'phone', 'email', 'service_interest', 'status', 'converted_at', 'customer_id');
   if (!freshLead) return null;
