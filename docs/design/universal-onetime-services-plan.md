@@ -2,14 +2,16 @@
 
 > **Status (2026-09-26):** this scope was drafted on branch
 > `claude/universal-onetime-services-ui-oiyeyt` and never merged. It is added to
-> main unchanged below this note because code and docs cite its §5 phases:
+> main because code and docs cite its §5 phases:
 > Phase A shipped as `server/models/migrations/20260712200000_rodent_family_graduation.js`,
 > Phase B's lane registry is `server/config/completion-lane-registry.js` (which records
 > the plan as ratified 2026-07-12), and the visit-timeline amendment in
 > `specialty-service-completion-contract.md` §8 cites it. The whole draft describes
 > 2026-07-12: sections 1–4 are that day's state, and §§5–6 are the proposal and open
 > questions as drafted, several since executed or resolved (the rodent graduation,
-> the straggler and termite cutovers). Treat it as a design record, not a backlog.
+> the straggler and termite cutovers). One exception: the passages on the flea and
+> rodent-trapping standalone lanes (four short passages) were amended on 2026-09-26 to record
+> their 2026-07-13 retirement; those sentences describe the later state. Treat it as a design record, not a backlog.
 > Where this draft and a later DECISIONS.md entry or the specialty contract differ,
 > those win.
 
