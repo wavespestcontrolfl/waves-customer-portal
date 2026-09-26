@@ -7045,19 +7045,14 @@ function JobCardTab({ card, loading, error, D }) {
   );
 }
 
-// The appointment's month ("Jan".."Dec", ET) for protocol visit lookup —
-// month-keyed protocols (lawn tracks, tree & shrub) show that month's visit.
+// The appointment's month ("Jan".."Dec", ET; "" when unknown) for protocol
+// visit lookup — month-keyed protocols (lawn tracks, tree & shrub) show that
+// month's visit.
 function protocolMonthForService(service) {
-  const serviceDate =
-    service?.scheduledDate || service?.scheduled_date || service?.date;
-  if (!serviceDate) return null;
-  const dateOnly = String(serviceDate).split("T")[0];
-  const monthDate = new Date(`${dateOnly}T12:00:00`);
-  if (Number.isNaN(monthDate.getTime())) return null;
-  return monthDate.toLocaleString("en-US", {
-    month: "short",
-    timeZone: "America/New_York",
-  });
+  return formatETDateOnly(
+    service?.scheduledDate || service?.scheduled_date || service?.date,
+    { month: "short" },
+  );
 }
 
 export function ProtocolPanel({ service, onClose }) {
@@ -17145,14 +17140,25 @@ export function CompletionPanel({
       // Specialty preset lanes (any service) accept only the preset's own
       // actions — a restored label from a previously served list is stale
       // and must not reach the customer report (codex P2 r7 #3701).
+      // A month-keyed program (tree & shrub) serves the appointment month's
+      // own list, so once that list has loaded, a label restored from a
+      // draft saved for another month's visit is stale the same way. An
+      // empty or unloaded list leaves the fallback chips as the selector,
+      // so those labels stay.
+      const monthKeyedProtocolList =
+        !isLawn &&
+        protocolActionsLoaded &&
+        protocolActions.length > 0 &&
+        !!protocolActionMeta?.visit?.month &&
+        protocolActionMeta.visit.month !== "Any";
       const reportProtocolActions = activeSelectedLabels(
         selectedProtocolActionLabels,
       ).filter(
         (label) =>
           specialtyProtocolActions.length > 0
             ? specialtyProtocolActions.some((action) => action.label === label)
-            : !isLawn ||
-              (completionImprovements && LAWN_FIELD_ACTIONS.some((action) => action.note === label)) ||
+            : (!isLawn && !monthKeyedProtocolList) ||
+              (isLawn && completionImprovements && LAWN_FIELD_ACTIONS.some((action) => action.note === label)) ||
               (protocolActionsLoaded &&
                 protocolActions.some(
                   (action) =>

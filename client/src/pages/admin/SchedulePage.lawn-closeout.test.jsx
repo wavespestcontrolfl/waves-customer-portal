@@ -21,9 +21,11 @@ let catalog;
 let optionalOptions;
 let delayFlags;
 let flagResolvers;
+let completionActions;
 beforeEach(async () => {
   delayFlags = false;
   flagResolvers = [];
+  completionActions = { actions: [] };
   history = [{ confirmed_by_tech: true, service_date: '2026-07-10', overall_score: 81 }];
   improvementsEnabled = true;
   defaultsEnabled = false;
@@ -70,7 +72,7 @@ beforeEach(async () => {
     }
     if (url.includes('tech-tips')) data = { available: true, groups: [{ id: 'lawn', label: 'Lawn care', tips: [{ id: 'lawn_water_morning', label: 'Water in the morning', copy: 'Use the morning irrigation window.' }] }] };
     if (url.includes('generate-report')) data = { report: 'WHAT WE DID:\nApplied the old products.\nWHAT WE FOUND:\nLawn looked fine.' };
-    if (url.includes('completion-actions')) data = { actions: [] };
+    if (url.includes('completion-actions')) data = completionActions;
     if (url.includes('property-map')) data = { available: false, stationsLoaded: true };
     return { ok: true, json: async () => data };
   }));
@@ -161,6 +163,25 @@ it('prunes an out-of-line tip restored after the current lawn library has loaded
   fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
   await waitFor(() => expect(submit).toHaveBeenCalledOnce());
   expect(submit.mock.calls[0][1].techTips.ids).toEqual(['lawn_water_morning']);
+});
+
+it('drops a tree & shrub protocol action restored from a draft saved for another month', async () => {
+  // Non-typed Tree & Shrub loads the appointment month's protocol list; the
+  // draft was saved while this visit was still booked for April.
+  const shrubs = { ...service, serviceType: 'Tree & Shrub Care', completionProfile: { serviceKey: 'tree_shrub' }, scheduledDate: '2026-05-12', waveguardTier: null };
+  completionActions = { programKey: 'tree_shrub', visit: { visit: 5, month: 'May' }, actions: [{ id: 'may-palm', label: 'May palm fertilizer', note: 'May palm fertilizer', raw: 'May palm fertilizer' }] };
+  localStorage.setItem(`waves_completion_draft_${shrubs.id}`, JSON.stringify({
+    serviceId: shrubs.id, savedAt: Date.now(), visitOutcome: 'incomplete',
+    notes: '[Protocol] April palm fertilizer\n[Protocol] May palm fertilizer',
+    selectedProtocolActionLabels: ['April palm fertilizer', 'May palm fertilizer'],
+  }));
+  render(<CompletionPanel service={shrubs} products={[]} onClose={() => {}} onSubmit={submit} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  await screen.findByRole('option', { name: /May palm fertilizer/ });
+  expect(fetch.mock.calls.some(([url]) => url.includes('completion-actions') && url.includes('month=May'))).toBe(true);
+  fireEvent.click(screen.getByRole('button', { name: /mark visit incomplete/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  expect(submit.mock.calls[0][1].protocolActionsCompleted).toEqual(['May palm fertilizer']);
 });
 
 
