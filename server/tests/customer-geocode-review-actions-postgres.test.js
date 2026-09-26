@@ -170,3 +170,66 @@ const connection = process.env.SERVICE_GEOCODE_TEST_DATABASE_URL;
     expect({ customer: await customer(), primary: await primary(), review: await review(), visit: await visit(), audits: await audits() }).toEqual(before);
   });
 });
+
+(connection ? describe : describe.skip)('geocode decisions concurrent with a primary-address editor', () => {
+  let database;
+  const schema = `geocode_lock_order_${randomUUID().replaceAll('-', '')}`;
+  const previousGate = process.env.GATE_GEOCODE_REVIEW;
+  beforeAll(async () => {
+    const url = new URL(connection);
+    if (!/^\/waves_qa_[a-f0-9]{32}$/.test(url.pathname) || url.search || url.hash) throw new Error('Private QA database required');
+    database = knex({ client: 'pg', connection, searchPath: [schema, 'public'], pool: { min: 0, max: 3 } });
+    await database.raw('CREATE SCHEMA ??', [schema]);
+    await createActionSchema(database);
+    await seedLocation(database, { customerPin: {}, propertyPin: {}, propertyAddress: ADDRESS });
+    mockConnection = database;
+    process.env.GATE_GEOCODE_REVIEW = 'true';
+  });
+  afterAll(async () => {
+    if (previousGate === undefined) delete process.env.GATE_GEOCODE_REVIEW;
+    else process.env.GATE_GEOCODE_REVIEW = previousGate;
+    if (database) {
+      await database.raw('DROP SCHEMA IF EXISTS ?? CASCADE', [schema]);
+      await database.destroy();
+    }
+  });
+
+  test('an editor holding the preference lock can lock the customer while a decision waits', async () => {
+    const revision = (await reviewStore.getReviewDetail(CUSTOMER_ID, database)).revision;
+    const editor = await database.transaction();
+    let resolution;
+    try {
+      await editor.raw("SELECT set_config('lock_timeout', '1s', true)");
+      await editor.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['property-preferences', String(CUSTOMER_ID)]);
+      resolution = resolveCustomerGeocodeReview(CUSTOMER_ID, {
+        revision, action: 'verify_pin', ...PIN, confirmed: true,
+        source: 'site_visit', evidence: 'Synthetic concurrent review', address: CORRECTED,
+      }, ACTOR_ID, database).then(value => ({ value }), error => ({ error }));
+      // Observe the real PostgreSQL wait, so a slow runner cannot pass this
+      // merely because the review transaction has not begun yet.
+      let waiting = false;
+      for (let attempt = 0; attempt < 100 && !waiting; attempt += 1) {
+        const { rows } = await database.raw(`SELECT 1 FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event_type = 'Lock'
+          AND query LIKE 'SELECT pg_advisory_xact_lock%'`);
+        waiting = rows.length > 0;
+        if (!waiting) await new Promise(resolve => setTimeout(resolve, 20));
+      }
+      expect(waiting).toBe(true);
+      // The old customer-first order times out here: the review owns this
+      // row while waiting for the editor's advisory lock.
+      expect(await editor('customers').where({ id: CUSTOMER_ID }).forUpdate().first('id'))
+        .toEqual({ id: CUSTOMER_ID });
+      await editor.commit();
+      const result = await resolution;
+      if (result.error) throw result.error;
+      expect(result.value.review.status).toBe('verified');
+      expect(await database('customers').where({ id: CUSTOMER_ID }).first())
+        .toMatchObject(CORRECTED);
+    } finally {
+      if (!editor.isCompleted()) await editor.rollback();
+      if (resolution) await resolution;
+    }
+  });
+});
