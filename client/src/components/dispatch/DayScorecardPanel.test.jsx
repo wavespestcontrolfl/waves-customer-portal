@@ -375,3 +375,16 @@ it("labels today's row as the saved plan or the remaining route, and future rows
   // Today's saved-plan value comes from the snapshot, so its caveat shows.
   expect(screen.getByText('Saved-plan caveat.')).toBeInTheDocument();
 });
+
+// Codex P2 (round 9): an explicit null physicalStops means the server
+// couldn't prove the physical count — show the raw rows, labeled.
+it('labels a raw row count when the physical stop count is unknown', async () => {
+  mockAdminFetch.mockResolvedValue(ok(pastPayload(
+    { stops: 3, physicalStops: null, onSiteMinutes: 90, onSiteCoverage: { covered: 3, total: 3 }, driveMinutes: 20, driveTrips: 2, spanMinutes: 130 },
+    { planned: { stops: 4, physicalStops: null, onSiteMinutes: 120, driveMinutes: 25, waitMinutes: 5, driveShare: null, stopsPerHour: null, returnMinute: 600, lateVisits: null } },
+  )));
+  render(<DayScorecardPanel />);
+  await screen.findByText('2026-09-01');
+  expect(screen.getByText('4 rows · physical unknown')).toBeInTheDocument();
+  expect(screen.getByText('3 rows · physical unknown')).toBeInTheDocument();
+});

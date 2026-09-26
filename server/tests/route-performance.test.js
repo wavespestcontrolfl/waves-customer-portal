@@ -1,5 +1,5 @@
 jest.mock('../models/db', () => ({}));
-const { lifecycleMinutes, recordedTiming, selectPlanningSnapshots, measureRoutePerformance, missingBaselineActualStops, getRoutePerformance, getSavedDayPlans } = require('../services/scheduling/route-performance');
+const { lifecycleMinutes, physicalVisitCount, recordedTiming, selectPlanningSnapshots, measureRoutePerformance, missingBaselineActualStops, getRoutePerformance, getSavedDayPlans } = require('../services/scheduling/route-performance');
 
 const routeKey = (date, technicianId) => `${date}|${technicianId || ''}`;
 
@@ -139,6 +139,34 @@ test('plan stops carry visitId (recorded row first, else the snapshot\'s; null w
   expect(measureRoutePerformance(plan, []).stops[0].visitId).toBe('group-1');
 });
 
+// Codex P2 (round 9): a group dissolved after the snapshot leaves the
+// current row with visit_id null — that explicit null wins; the snapshot's
+// membership is used only when no current row exists.
+test('a current row\'s null visit_id wins over the snapshot\'s stale group', () => {
+  const plan = { ...snapshot, plannedStops: [{ ...snapshot.plannedStops[0], visitId: 'group-1' }] };
+  const [dissolved] = measureRoutePerformance(plan, [recorded({ visit_id: null })]).stops;
+  expect(dissolved).toMatchObject({ visitId: null, arrivalOutcome: 'on_time',
+    durationEvidence: 'recorded_lifecycle_interval', recordedServiceMinutes: 45 });
+  expect(measureRoutePerformance(plan, []).stops[0].visitId).toBe('group-1');
+});
+
+// Codex P2 (round 9): the snapshot and the recorded rows can't recognize a
+// same-property co-visit or a V2 allocation (no customer/premise/allocation
+// evidence); both need a shared window start, so two ungrouped rows sharing
+// one — or both lacking one — make the physical count unknown, not a
+// per-row overstatement.
+test('physicalVisitCount is null unless every ungrouped row has a distinct window start', () => {
+  expect(physicalVisitCount([{ visitId: 'v' }, { visitId: 'v' }, { visitId: null, windowStartMin: 480 },
+    { visitId: null, windowStartMin: 600 }])).toBe(3);
+  expect(physicalVisitCount([{ visitId: null, windowStartMin: 480 }, { visitId: null, windowStartMin: 480 }])).toBeNull();
+  expect(physicalVisitCount([{ visitId: null, windowStartMin: null }, { visitId: null }])).toBeNull();
+  // Grouped rows sharing a window never make it ambiguous.
+  expect(physicalVisitCount([{ visitId: 'v', windowStartMin: 480 }, { visitId: 'v', windowStartMin: 480 },
+    { visitId: null, windowStartMin: 480 }])).toBe(2);
+  const sameWindow = { ...snapshot, plannedStops: [{ ...snapshot.plannedStops[0], id: 'a' }, { ...snapshot.plannedStops[0], id: 'b' }] };
+  expect(measureRoutePerformance(sameWindow, []).plannedPhysicalStops).toBeNull();
+});
+
 // Codex P2 (round 8): minutes are measured from the SERVICE day's midnight,
 // so a boundary stamped on the next ET day reads 1440+ and a span taken
 // from them stays positive (23:30 -> 00:30 is 60 minutes, never -1380).
@@ -244,13 +272,13 @@ describe('missingBaselineActualStops', () => {
     // does not re-compose, so the row's OWN recordedTiming is never trusted
     // as its on-site minutes — same forcing measureRoutePerformance applies
     // to a grouped plan stop ('unmatched_or_uncompleted_work', null).
-    expect(stops).toEqual([{ appointmentId: 'a', visitId: 'group-1', durationEvidence: 'unmatched_or_uncompleted_work',
+    expect(stops).toEqual([{ appointmentId: 'a', visitId: 'group-1', windowStartMin: 480, durationEvidence: 'unmatched_or_uncompleted_work',
       recordedServiceMinutes: null, recordedArrivalMinute: 490, recordedCompletionMinute: 535 }]);
   });
 
   test('each completed row is shaped like a plan stop, with recordedTiming\'s own evidence', () => {
     const stops = missingBaselineActualStops(routes, [recorded({ id: 'a' })], routeKey).get(routeKey(day, 'tech'));
-    expect(stops).toEqual([{ appointmentId: 'a', visitId: null, durationEvidence: 'recorded_lifecycle_interval',
+    expect(stops).toEqual([{ appointmentId: 'a', visitId: null, windowStartMin: 480, durationEvidence: 'recorded_lifecycle_interval',
       recordedServiceMinutes: 45, recordedArrivalMinute: 490, recordedCompletionMinute: 535 }]);
   });
 

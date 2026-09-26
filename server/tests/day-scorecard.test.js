@@ -176,7 +176,9 @@ describe('getDayScorecard', () => {
     ]), new Date('2026-09-08T12:00:00Z'));
     const row = result.days[0].byTech[0];
     expect(row.planned).toMatchObject({ stops: 2, onSiteMinutes: 90, driveMinutes: 25, returnMinute: 600 });
-    expect(row.actual).toMatchObject({ onSiteMinutes: 45, onSiteCoverage: { covered: 1, total: 2 }, driveMinutes: 30, driveTrips: 2, spanMinutes: 120,
+    // Coverage is over the completed stops only (Codex P2, round 9): the
+    // not_completed stop has no on-site time to record.
+    expect(row.actual).toMatchObject({ onSiteMinutes: 45, onSiteCoverage: { covered: 1, total: 1 }, driveMinutes: 30, driveTrips: 2, spanMinutes: 120,
       stops: 1, physicalStops: null }); // 1 of the 2 planned stops actually completed on this route; no unbaselined job
     // No idle metric: mileage_log has no per-trip timestamps, so a day's
     // drive total can include outbound/return legs outside the recorded
@@ -217,7 +219,9 @@ describe('getDayScorecard', () => {
       { technician_id: 'tech1', trip_date: date, duration_minutes: 20, purpose: 'unclassified' },
     ]), new Date('2026-09-08T12:00:00Z'));
     const row = result.days[0].byTech[0];
-    expect(row.actual).toMatchObject({ onSiteMinutes: 45, onSiteCoverage: { covered: 1, total: 4 }, driveMinutes: 60, spanMinutes: 60 });
+    // 2 completed stops (on_time + unknown-arrival); the 2 not_completed
+    // ones are out of the coverage denominator (Codex P2, round 9).
+    expect(row.actual).toMatchObject({ onSiteMinutes: 45, onSiteCoverage: { covered: 1, total: 2 }, driveMinutes: 60, spanMinutes: 60 });
     expect(row.actual).not.toHaveProperty('idleMinutes');
     expect(row.actual).not.toHaveProperty('driveShare');
     expect(row.actual).not.toHaveProperty('stopsPerHour');
@@ -538,6 +542,64 @@ describe('getDayScorecard', () => {
     });
     const result = await getDayScorecard({ date_from: date, date_to: date }, conn([]), new Date('2026-09-08T12:00:00Z'));
     expect(result.days[0].byTech[0].actual).toMatchObject({ stops: 2, physicalStops: null });
+  });
+
+  // Codex P2 (round 9): when the simulation charged a V2 allocation a
+  // different duration than its summed contract, the simulation-dependent
+  // metrics are unknown rather than mixed with the summed on-site total.
+  test('a board row with an allocation model mismatch reports return/stops-hr/late/wait unknown', async () => {
+    const date = '2026-09-10';
+    const techQuality = { technicianId: 'tech1', technician: 'Tech One', scheduledVisits: 2, serviceMinutes: 120,
+      coVisitOnSiteMinutes: 120, physicalStops: 1, modeledDriveMinutes: 20, modeledWaitingMinutes: 5,
+      modeledReturnMinuteBeforeBreaks: 600, modeledLateVisits: [{ id: 'x' }] };
+    getScheduleQualityMeasurements.mockResolvedValue({ driveModel: 'legacy', days: [
+      { date, closed: false, byTech: [{ ...techQuality, allocationModelMismatch: true }] },
+      { date: '2026-09-11', closed: false, byTech: [{ ...techQuality, allocationModelMismatch: false }] }] });
+    const result = await getDayScorecard({ date_from: date, date_to: '2026-09-11' }, conn(), new Date('2026-09-08T12:00:00Z'));
+    expect(result.days[0].byTech[0].planned).toMatchObject({ onSiteMinutes: 120, driveMinutes: 20, physicalStops: 1,
+      returnMinute: null, stopsPerHour: null, lateVisits: null, waitMinutes: null });
+    expect(result.days[1].byTech[0].planned).toMatchObject({ returnMinute: 600, stopsPerHour: 0.5, lateVisits: 1, waitMinutes: 5 });
+  });
+
+  // Codex P2 (round 9): an unproven saved-plan physical count leaves
+  // stops/hour unknown instead of dividing the raw row count.
+  test('a saved-plan row with an unknown physical count has unknown stops/hour', async () => {
+    const date = '2026-09-01';
+    getScheduleQualityMeasurements.mockResolvedValue({
+      driveModel: 'legacy',
+      days: [{ date, closed: false, byTech: [{ technicianId: 'tech1', technician: 'Tech One' }] }],
+    });
+    getRoutePerformance.mockResolvedValue({
+      plans: [{ date, technicianId: 'tech1', plannedVisits: 4, plannedPhysicalStops: null, plannedServiceMinutes: 120,
+        plannedDriveMinutes: 30, plannedWaitingMinutes: 0, plannedReturnMinuteBeforeBreaks: 720, driveModel: 'legacy', stops: [] }],
+    });
+    const result = await getDayScorecard({ date_from: date, date_to: date }, conn([]), new Date('2026-09-08T12:00:00Z'));
+    expect(result.days[0].byTech[0].planned).toMatchObject({ stops: 4, physicalStops: null, stopsPerHour: null, returnMinute: 720 });
+  });
+
+  // Codex P2 (round 9): one completed, fully timed job plus three planned
+  // jobs that were moved/never completed is FULL coverage of the performed
+  // work, not 1/4.
+  test('on-site coverage counts only completed-on-route stops; the unbaselined marker stays separate', async () => {
+    const date = '2026-09-01';
+    getScheduleQualityMeasurements.mockResolvedValue({
+      driveModel: 'legacy',
+      days: [{ date, closed: false, byTech: [{ technicianId: 'tech1', technician: 'Tech One' }] }],
+    });
+    const unperformed = outcome => ({ arrivalOutcome: outcome, durationEvidence: 'unmatched_or_uncompleted_work', recordedServiceMinutes: null,
+      recordedArrivalMinute: null, recordedCompletionMinute: null });
+    getRoutePerformance.mockResolvedValue({
+      plans: [{ date, technicianId: 'tech1', plannedVisits: 4, plannedServiceMinutes: 240, plannedDriveMinutes: 30,
+        plannedWaitingMinutes: 0, plannedReturnMinuteBeforeBreaks: 720, driveModel: 'legacy', unbaselinedCompletedVisits: 1,
+        unbaselinedStops: [{ appointmentId: 'added', recordedArrivalMinute: 560, recordedCompletionMinute: 600 }],
+        stops: [
+          { arrivalOutcome: 'on_time', durationEvidence: 'recorded_lifecycle_interval', recordedServiceMinutes: 50,
+            recordedArrivalMinute: 480, recordedCompletionMinute: 530 },
+          unperformed('missing_visit'), unperformed('day_or_technician_changed'), unperformed('not_completed'),
+        ] }],
+    });
+    const result = await getDayScorecard({ date_from: date, date_to: date }, conn([]), new Date('2026-09-08T12:00:00Z'));
+    expect(result.days[0].byTech[0].actual).toMatchObject({ stops: 2, onSiteCoverage: { covered: 1, total: 1, unbaselined: 1 } });
   });
 
   test('a span across ET midnight (service-day minutes past 1440) is the real interval', async () => {

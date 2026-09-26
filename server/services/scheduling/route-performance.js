@@ -156,23 +156,38 @@ function selectPlanningSnapshots(runs, { from, to, now = new Date(), validStopId
 // column reads these instead of recomputing them, so the scorecard can never
 // disagree with what was actually saved.
 //
-// plannedPhysicalStops (Codex P2, round 8): planned stops sharing a visitId
-// are one physical visit (physicalVisitCount), the same collapse the live
-// board's physicalStopCount applies. The snapshot keeps only ids/visitIds/windows/
-// durations, so a same-property co-visit or a version-2 allocation without
-// a visit_id can't be recognized here and still counts per row.
-// Rows sharing a visitId are one physical visit; every other row is its
-// own. The one rule for both the saved plan's planned stops and the
-// scorecard's completed (actual) stops, so the two columns compare alike.
+// plannedPhysicalStops: physicalVisitCount over the snapshot's planned stops
+// (see its rule below) — a count only when the snapshot can prove it.
+
+// A stop's grouping evidence (Codex P2, round 9): the CURRENT row's own
+// visit_id and promised window when the row still exists — an explicit null
+// visit_id means the group was dissolved after the snapshot, and it wins —
+// else the snapshot's own membership and promise.
+function groupingOf(row, stop) {
+  if (row) return { visitId: row.visit_id || null, windowStartMin: effectiveWindowRange(row)?.startMin ?? null };
+  return { visitId: stop.visitId || null, windowStartMin: stop.arrivalWindow?.startMin ?? null };
+}
+
+// Physical visits: rows sharing a visitId are one. The one rule for the
+// saved plan's planned stops and the scorecard's completed (actual) stops,
+// so the two columns compare alike. Conservative by design (Codex P2,
+// round 9): a same-property co-visit and a version-2 allocation are also
+// one physical stop on the live board, but neither the snapshot nor this
+// reader keeps the customer/premise/allocation evidence to recognize them.
+// Both require a shared promised window start, so when two UNGROUPED rows
+// share one (or both lack one) the count can't be proven and is null
+// ("unknown"), never an overstated per-row count.
 function physicalVisitCount(stops) {
-  const grouped = new Set(stops.filter(stop => stop.visitId).map(stop => stop.visitId));
-  return stops.filter(stop => !stop.visitId).length + grouped.size;
+  const ungrouped = stops.filter(stop => !stop.visitId);
+  const starts = ungrouped.map(stop => (Number.isFinite(stop.windowStartMin) ? stop.windowStartMin : 'none'));
+  if (new Set(starts).size !== starts.length) return null;
+  return ungrouped.length + new Set(stops.filter(stop => stop.visitId).map(stop => stop.visitId)).size;
 }
 
 function plannedPassthrough(plan) {
   const finiteOrNull = value => (Number.isFinite(value) ? value : null);
   return {
-    plannedPhysicalStops: physicalVisitCount(plan.plannedStops),
+    plannedPhysicalStops: physicalVisitCount(plan.plannedStops.map(stop => groupingOf(null, stop))),
     plannedServiceMinutes: finiteOrNull(plan.serviceMinutes),
     plannedDriveMinutes: finiteOrNull(plan.modeledDriveMinutes),
     plannedWaitingMinutes: finiteOrNull(plan.modeledWaitingMinutes),
@@ -192,9 +207,8 @@ function measureRoutePerformance(plan, rows) {
       || (range?.endMin ?? null) !== (currentWindow?.endMin ?? null);
     const sameRoute = row && dateOnly(row.scheduled_date) === plan.date && row.technician_id === plan.technician_id;
     const completedOnRoute = sameRoute && row.status === 'completed';
-    // The recorded row's own group when it exists (it may have been
-    // regrouped since the snapshot), else the snapshot's.
-    const visitId = row?.visit_id || stop.visitId || null;
+    const grouping = groupingOf(row, stop);
+    const visitId = grouping.visitId;
     const comparable = completedOnRoute && !visitId;
     // Grouped (visit_id) work is never comparable — its duration is a
     // SUM-of-members model — but a completed grouped row's own corroborated
@@ -217,8 +231,7 @@ function measureRoutePerformance(plan, rows) {
     const scoredArrival = ['early', 'late', 'on_time'].includes(arrivalOutcome);
     const duration = comparable ? timing.durationMinutes ?? null : null;
     return {
-      appointmentId: stop.id, arrivalOutcome,
-      visitId,
+      appointmentId: stop.id, arrivalOutcome, ...grouping,
       recordedArrivalMinute: comparable ? lifecycle.arrival : null,
       arrivalEvidence: timing.arrival ? 'lifecycle_corroborated_by_status_event' : 'unknown',
       lateMinutes: scoredArrival ? Math.max(0, minuteInET(timing.arrival) - range.endMin) : null,
@@ -347,7 +360,7 @@ async function getRoutePerformance({ from, to, now = new Date() }, conn) {
     if (coveredRoutes.get(key)?.has(row.id)) continue;
     const lifecycle = lifecycleMinutes(recordedTiming(row), row);
     const entry = unbaselinedByRoute.get(key) || [];
-    entry.push({ appointmentId: row.id, visitId: row.visit_id || null,
+    entry.push({ appointmentId: row.id, ...groupingOf(row),
       recordedArrivalMinute: lifecycle.arrival, recordedCompletionMinute: lifecycle.completion });
     unbaselinedByRoute.set(key, entry);
   }
@@ -393,7 +406,7 @@ function missingBaselineActualStops(routes, pastWork, routeKey) {
     byKey.set(routeKey(route.date, route.technicianId), completed.map(row => {
       const timing = recordedTiming(row);
       const lifecycle = lifecycleMinutes(timing, row);
-      return { appointmentId: row.id, visitId: row.visit_id || null,
+      return { appointmentId: row.id, ...groupingOf(row),
         durationEvidence: row.visit_id ? 'unmatched_or_uncompleted_work' : timing.durationEvidence,
         recordedServiceMinutes: row.visit_id ? null : timing.durationMinutes,
         recordedArrivalMinute: lifecycle.arrival, recordedCompletionMinute: lifecycle.completion };

@@ -70,10 +70,20 @@ function fmtWithCoverage(value, coverage, covered, noun) {
   return `${fmtMinutes(value)} · ${covered}/${coverage.total} ${noun} (partial)`;
 }
 
+// Physical stops when the server could prove them; an explicit null
+// physicalStops means it couldn't (a saved snapshot or recorded rows that
+// can't rule out an unrecognized co-visit/allocation — Codex P2, round 9),
+// so the raw row count is shown and labeled rather than passed off as
+// physical stops.
+function fmtStops(m) {
+  if (m?.physicalStops === null && Number.isFinite(m?.stops)) return `${m.stops} rows · physical unknown`;
+  return fmtCount(m?.physicalStops ?? m?.stops);
+}
+
 // One metric column shared by the planned and actual sub-rows so the two
 // never drift into different formatting.
 const METRICS = [
-  { key: 'stops', label: 'Stops', format: (m) => fmtCount(m?.physicalStops ?? m?.stops) },
+  { key: 'stops', label: 'Stops', format: fmtStops },
   { key: 'onSiteMinutes', label: 'On-site', format: fmtOnSite },
   { key: 'driveMinutes', label: 'Drive', format: (m) => fmtWithCoverage(m?.driveMinutes, m?.driveCoverage, m?.driveCoverage?.timed, 'trips timed') },
   { key: 'driveShare', label: 'Drive share', format: (m) => fmtPercent(m?.driveShare) },

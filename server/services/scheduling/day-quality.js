@@ -130,14 +130,18 @@ function allocationTotals(stops) {
   return totals;
 }
 
-function coVisitOnSiteMinutes(stops) {
+//
+// `sumAllocations: false` is the simulation's OWN duration model (it chains
+// allocation members like any co-visit) — used only to detect when the two
+// disagree (allocationModelMismatch below).
+function coVisitOnSiteMinutes(stops, { sumAllocations = true } = {}) {
   const ordered = currentOrder(stops);
-  const allocations = allocationTotals(ordered);
+  const allocations = sumAllocations ? allocationTotals(ordered) : new Map();
   let total = [...allocations.values()].reduce((sum, minutes) => sum + minutes, 0);
   let chain = null;
   let chainTail = null;
   for (const stop of ordered) {
-    if (!stop.visit_id && allocationKey(stop)) {
+    if (sumAllocations && !stop.visit_id && allocationKey(stop)) {
       if (chain) total += chain.coMerged;
       chain = null;
       chainTail = null;
@@ -153,6 +157,18 @@ function coVisitOnSiteMinutes(stops) {
   }
   if (chain) total += chain.coMerged;
   return total;
+}
+
+/**
+ * True when a version-2 allocation's summed-member duration contract
+ * (coVisitOnSiteMinutes) disagrees with the duration simulateArrivalRoute
+ * charged it (the plain co-visit chain) — Codex P2, round 9. The modeled
+ * return/lateness/waiting then rest on a different duration model than the
+ * on-site total, so a caller should report them as unknown rather than mix
+ * the two.
+ */
+function allocationModelMismatch(stops) {
+  return coVisitOnSiteMinutes(stops) !== coVisitOnSiteMinutes(stops, { sumAllocations: false });
 }
 
 /**
@@ -354,7 +370,8 @@ async function getScheduleQualityMeasurements(input = {}, conn = require('../../
         // Opt-in only (day-scorecard.js) — every other caller's byTech shape
         // is unchanged. Reuses techStops instead of re-filtering `stops`.
         ...(input.includeStopExtras ? { physicalStops: physicalStopCount(techStops),
-          coVisitOnSiteMinutes: coVisitOnSiteMinutes(techStops) } : {}) };
+          coVisitOnSiteMinutes: coVisitOnSiteMinutes(techStops),
+          allocationModelMismatch: allocationModelMismatch(techStops) } : {}) };
     });
     days.push({ date, closed, ...unallocatedSummary(unallocated, input.includeStopExtras), byTech });
   }

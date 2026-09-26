@@ -283,6 +283,33 @@ describe('getScheduleQualityMeasurements selects the planning-minute inputs (Cod
     expect(withoutFlag.days[0]).toMatchObject({ unallocatedVisits: 2, unallocatedServiceMinutes: 120 }); // flat, unchanged
   });
 
+  // Codex P2 (round 9): the arrival simulation chains the same allocation as
+  // a co-visit (one 60-minute span), so its return/lateness rest on a
+  // different duration model than the summed on-site total — flagged so a
+  // caller can report them unknown. Plain rows never trip it.
+  test('allocationModelMismatch flags a V2 allocation the simulation under-charges; plain rows do not', async () => {
+    const row = (id, extra = {}) => ({
+      id, technician_id: 'tech1', customer_id: 'cust-a', visit_id: null,
+      scheduled_date: DATE, window_start: '09:00', window_end: '10:00', time_window: null, route_order: null,
+      status: 'confirmed', reservation_expires_at: null, created_at: `2020-01-01T0${id.length}:00:00Z`,
+      estimated_duration_minutes: null, service_type: null, is_recurring: false, is_callback: false,
+      lat: 27.4, lng: -82.4, service_address_line1: '1 Main St', service_address_line2: null,
+      service_address_city: 'Bradenton', service_address_zip: '34205',
+      customer_address_line1: '1 Main St', customer_address_line2: null,
+      customer_city: 'Bradenton', customer_state: 'FL', customer_zip: '34205', ...extra,
+    });
+    const mix = { version: 2, allocatedServiceIds: ['a', 'bb'] };
+    dayStopsQuery.mockImplementation(() => ({ whereRaw: () => Promise.resolve([row('a', { reservation_service_mix: mix }), row('bb', { reservation_service_mix: mix })]) }));
+    const allocated = await getScheduleQualityMeasurements({ date: DATE, includeStopExtras: true }, conn, new Date(`${DATE}T12:00:00Z`));
+    expect(allocated.days[0].byTech[0]).toMatchObject({ coVisitOnSiteMinutes: 120, allocationModelMismatch: true });
+
+    dayStopsQuery.mockImplementation(() => ({ whereRaw: () => Promise.resolve([row('a'), row('bb', { window_start: '11:00', window_end: '12:00' })]) }));
+    const plain = await getScheduleQualityMeasurements({ date: DATE, includeStopExtras: true }, conn, new Date(`${DATE}T12:00:00Z`));
+    expect(plain.days[0].byTech[0]).toMatchObject({ allocationModelMismatch: false });
+    const flagOff = await getScheduleQualityMeasurements({ date: DATE }, conn, new Date(`${DATE}T12:00:00Z`));
+    expect(flagOff.days[0].byTech[0]).not.toHaveProperty('allocationModelMismatch');
+  });
+
   test('coVisitOnSiteMinutes only collapses a fallback-duration pair — two REAL, distinct estimates still sum', async () => {
     const realEstimateStop = (id, extra = {}) => ({
       id, technician_id: 'tech1', customer_id: 'cust-a', visit_id: null,

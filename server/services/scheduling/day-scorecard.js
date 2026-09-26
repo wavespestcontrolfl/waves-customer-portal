@@ -75,18 +75,26 @@ function driveShare(driveMinutes, onSiteMinutes) {
 // simulateArrivalRoute itself charges) over the plain serviceMinutes flat
 // sum, which double-counts that case; physicalStops is day-quality's own
 // count from the SAME raw stops, not a second dayStopsQuery here.
+//
+// allocationModelMismatch (Codex P2, round 9): a version-2 allocation's
+// summed on-site minutes disagree with what the arrival simulation charged
+// it, so the simulation's return/waiting/lateness — and stops/hour, which
+// divides by that return — rest on a different duration model than the
+// on-site total. They're reported unknown rather than mixed; drive minutes
+// (travel legs, not durations) and the on-site total stand.
 function plannedFutureRow(techQuality) {
   const onSiteMinutes = Number.isFinite(techQuality.coVisitOnSiteMinutes) ? techQuality.coVisitOnSiteMinutes
     : (Number.isFinite(techQuality.serviceMinutes) ? techQuality.serviceMinutes : null);
   const driveMinutes = techQuality.modeledDriveMinutes ?? null;
-  const returnMinute = techQuality.modeledReturnMinuteBeforeBreaks ?? null;
   const physicalStops = Number.isFinite(techQuality.physicalStops) ? techQuality.physicalStops : null;
+  const simulated = techQuality.allocationModelMismatch ? {} : techQuality;
+  const returnMinute = simulated.modeledReturnMinuteBeforeBreaks ?? null;
   return {
     stops: techQuality.scheduledVisits, physicalStops,
-    onSiteMinutes, driveMinutes, waitMinutes: techQuality.modeledWaitingMinutes ?? null,
+    onSiteMinutes, driveMinutes, waitMinutes: simulated.modeledWaitingMinutes ?? null,
     driveShare: driveShare(driveMinutes, onSiteMinutes),
     stopsPerHour: stopsPerHour(physicalStops, DEPARTURE_MINUTES, returnMinute),
-    returnMinute, lateVisits: techQuality.modeledLateVisits ? techQuality.modeledLateVisits.length : null,
+    returnMinute, lateVisits: simulated.modeledLateVisits ? simulated.modeledLateVisits.length : null,
   };
 }
 
@@ -98,11 +106,11 @@ function plannedFutureRow(techQuality) {
 // double-counted here (see getDayScorecard's assumptions.plannedOnSiteMinutes
 // — noted rather than silently wrong or falsely "fixed").
 //
-// physicalStops (Codex P2, round 8) is route-performance's
-// plannedPhysicalStops — member rows sharing a visitId collapse to one, like
-// the board's physicalStopCount — and stops/hour uses it, so a two-service
-// visit reads as one stop on the saved plan and the future board alike.
-// null (older/partial shapes) falls back to the row count.
+// physicalStops is route-performance's plannedPhysicalStops — member rows
+// sharing a visitId collapse to one, and null when the snapshot can't prove
+// the count (see physicalVisitCount). stops/hour divides by it and is null
+// with it (Codex P2, round 9): the raw row count would overstate throughput
+// whenever an unrecognized co-visit or allocation is in the plan.
 function plannedPastRow(plan) {
   if (!plan) return null;
   const physicalStops = Number.isFinite(plan.plannedPhysicalStops) ? plan.plannedPhysicalStops : null;
@@ -111,7 +119,7 @@ function plannedPastRow(plan) {
     onSiteMinutes: plan.plannedServiceMinutes, driveMinutes: plan.plannedDriveMinutes,
     waitMinutes: plan.plannedWaitingMinutes,
     driveShare: driveShare(plan.plannedDriveMinutes, plan.plannedServiceMinutes),
-    stopsPerHour: stopsPerHour(physicalStops ?? plan.plannedVisits, DEPARTURE_MINUTES, plan.plannedReturnMinuteBeforeBreaks),
+    stopsPerHour: stopsPerHour(physicalStops, DEPARTURE_MINUTES, plan.plannedReturnMinuteBeforeBreaks),
     returnMinute: plan.plannedReturnMinuteBeforeBreaks, lateVisits: null,
   };
 }
@@ -163,7 +171,12 @@ function actualPastRow(plan, mileage, fallbackStops) {
   const drive = actualDrive(mileage);
   const stops = plan ? plan.stops : fallbackStops;
   if (!stops) return { stops: null, physicalStops: null, onSiteMinutes: null, onSiteCoverage: null, ...drive, spanMinutes: null, spanCoverage: null };
-  const recorded = stops.filter(stop => RECORDED_EVIDENCE.has(stop.durationEvidence) && Number.isFinite(stop.recordedServiceMinutes));
+  // Coverage is over the stops actually completed on this route (Codex P2,
+  // round 9) — the same predicate as `stops` below; a moved/cancelled/never-
+  // completed planned stop has no on-site time to record and never makes
+  // the performed work read partial. Unbaselined work stays its own marker.
+  const completedOnRoute = stops.filter(stop => !NOT_COMPLETED_OUTCOMES.has(stop.arrivalOutcome));
+  const recorded = completedOnRoute.filter(stop => RECORDED_EVIDENCE.has(stop.durationEvidence) && Number.isFinite(stop.recordedServiceMinutes));
   const onSiteMinutes = recorded.length ? recorded.reduce((sum, stop) => sum + stop.recordedServiceMinutes, 0) : null;
   // A same-day added (unbaselined) completed job's own recorded arrival/
   // completion counts toward the SPAN too (Codex P2, round 5) — route-
@@ -182,11 +195,9 @@ function actualPastRow(plan, mileage, fallbackStops) {
   // forced null there), so they fall through to it.
   const spanStops = plan && Array.isArray(plan.unbaselinedStops) ? [...stops, ...plan.unbaselinedStops] : stops;
   const unbaselined = plan && Number.isFinite(plan.unbaselinedCompletedVisits) ? plan.unbaselinedCompletedVisits : 0;
-  const completedStops = plan
-    ? plan.stops.filter(stop => !NOT_COMPLETED_OUTCOMES.has(stop.arrivalOutcome)).length + unbaselined
-    : fallbackStops.length;
+  const completedStops = completedOnRoute.length + unbaselined;
   return { stops: completedStops, physicalStops: actualPhysicalStops(plan, fallbackStops), onSiteMinutes,
-    onSiteCoverage: { covered: recorded.length, total: stops.length, unbaselined },
+    onSiteCoverage: { covered: recorded.length, total: completedOnRoute.length, unbaselined },
     ...drive, ...actualSpan(spanStops) };
 }
 
