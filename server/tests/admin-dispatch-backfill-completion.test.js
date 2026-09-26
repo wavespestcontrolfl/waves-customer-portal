@@ -2837,6 +2837,8 @@ describe('completion route wiring (source contracts)', () => {
       // estimate-deposit roll-forward skip + reviewer breadcrumb (fix round 2)
       'skipDepositCredit: isBackfillCompletion,',
       'estimate deposit NOT auto-applied',
+      // annual-prepay add-ons bill: deposit skip + due-today (ADMIN-BUG-R13)
+      'quietBackfill: isBackfillCompletion',
       // payer-statement accrual skip + reviewer breadcrumb (fix round 5)
       'skipAccrual: isBackfillCompletion,',
       'payer-statement accrual SKIPPED',

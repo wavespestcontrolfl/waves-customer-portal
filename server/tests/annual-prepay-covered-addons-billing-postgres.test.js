@@ -124,6 +124,9 @@ postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
       await trx('invoices').insert({ id: f.invoiceId, customer_id: f.customerId, scheduled_service_id: f.serviceId,
         invoice_number: `TEST-${f.invoiceId.slice(0, 8)}`, token: randomUUID().replace(/-/g, ''), status: invoiceStatus,
         total, subtotal: total, service_date: today, line_items: JSON.stringify(lines),
+        // The office's invoice predates the closeout, as in production (a
+        // shared transaction stamps every row with the same now()).
+        created_at: new Date(Date.now() - 86400000),
         ...(invoiceStatus === 'prepaid' ? { annual_prepay_covered_term_id: f.termId } : {}) });
     }
     return f;
@@ -132,15 +135,21 @@ postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
   const baseLine = (f) => ({ client_id: `scheduled_${f.serviceId}_primary`, description: 'Synthetic Quarterly Pest Control', amount: BASE, quantity: 1, unit_price: BASE });
   const addonLine = (f) => ({ client_id: `scheduled_${f.serviceId}_addon_${f.addonId}`, description: 'Wasp nest removal', amount: ADDON, quantity: 1, unit_price: ADDON });
 
-  async function complete(f, body = {}) {
+  async function complete(f, body = {}, { idempotencyKey = randomUUID() } = {}) {
     const { completeScheduledService } = require('../services/complete-scheduled-service');
-    return completeScheduledService({ serviceId: f.serviceId, idempotencyKey: randomUUID(),
+    return completeScheduledService({ serviceId: f.serviceId, idempotencyKey,
       actor: { techRole: 'admin', technicianId: f.techId, technician: null },
       body: { customerRecap: 'done', visitOutcome: 'completed', products: [], areasTreated: [], sendCompletionSms: false, requestReview: false, ...body } });
   }
 
   const liveInvoices = (f) => trx('invoices').where({ customer_id: f.customerId }).whereNotIn('status', ['void']);
   const linesOf = (invoice) => (typeof invoice.line_items === 'string' ? JSON.parse(invoice.line_items) : invoice.line_items) || [];
+  // What a crash after the commit leaves behind: the attempt handed back
+  // for a same-key retry to resume.
+  const releaseForResume = (f) => trx('service_completion_attempts').where({ service_id: f.serviceId })
+    .update({ status: 'side_effects_pending' });
+  const officeAddonDiscount = (x) => ({ client_id: `discount_office_${x.addonId}`, _kind: 'discount', discount_for: addonLine(x).client_id,
+    description: 'Office courtesy', amount: -10, quantity: 1, unit_price: -10 });
   const addonsAlert = (f) => trx('notifications').where({ recipient_type: 'admin' })
     .whereRaw("metadata->>'dedupeKey' = ?", [`annual_prepay_addons_unbilled:${f.serviceId}`]).first();
 
@@ -313,6 +322,76 @@ postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
     expect(String(bill.due_date instanceof Date ? bill.due_date.toISOString() : bill.due_date).slice(0, 10)).toBe(etDateString());
     const deposit = await trx('estimate_deposits').where({ estimate_id: f.estimateId }).first();
     expect(Number(deposit.credited_amount || 0)).toBe(0);
+  });
+
+  test('a retry after a crash past the void still prices the add-ons against the voided office invoice — never re-billed at list (pre-push P0 r2)', async () => {
+    const f = await coveredVisit({ invoiceLines: (x) => [baseLine(x), addonLine(x), officeAddonDiscount(x)] });
+    const idempotencyKey = randomUUID();
+    expect(await complete(f, {}, { idempotencyKey })).toMatchObject({ status: 200 });
+    expect((await trx('invoices').where({ id: f.invoiceId }).first('status')).status).toBe('void');
+    // The crash: the void committed, the office-pricing check never ran.
+    await trx('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`annual_prepay_addons_unbilled:${f.serviceId}`]).del();
+    await releaseForResume(f);
+    const retry = await complete(f, {}, { idempotencyKey });
+    expect(retry).toMatchObject({ status: 200 });
+    expect(await liveInvoices(f)).toHaveLength(0);
+    expect(await addonsAlert(f)).toBeTruthy();
+  });
+
+  test('a retry after a crash past the void of a list-priced office invoice bills the add-ons and flags its other charges', async () => {
+    const f = await coveredVisit({ invoiceLines: (x) => [baseLine(x), addonLine(x),
+      { description: 'Synthetic trip charge', amount: 15, quantity: 1, unit_price: 15 }] });
+    const idempotencyKey = randomUUID();
+    expect(await complete(f, {}, { idempotencyKey })).toMatchObject({ status: 200 });
+    // The crash: the void committed; no alert, no add-ons bill yet.
+    await trx('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`annual_prepay_invoice_reconcile:${f.serviceId}`]).del();
+    await trx('invoices').where({ customer_id: f.customerId }).whereNot({ id: f.invoiceId }).del();
+    await releaseForResume(f);
+    const retry = await complete(f, {}, { idempotencyKey });
+    expect(retry).toMatchObject({ status: 200 });
+    const invoices = await liveInvoices(f);
+    expect(invoices).toHaveLength(1);
+    expect(Number(invoices[0].total)).toBe(ADDON);
+    expect(await trx('notifications').where({ recipient_type: 'admin' })
+      .whereRaw("metadata->>'dedupeKey' = ?", [`annual_prepay_invoice_reconcile:${f.serviceId}`]).first()).toBeTruthy();
+  });
+
+  test('a void that throws after it committed still bills the add-ons (the invoice IS void)', async () => {
+    const f = await coveredVisit({ invoiceLines: (x) => [baseLine(x), addonLine(x)] });
+    const InvoiceService = require('../services/invoice');
+    const realVoid = InvoiceService.voidInvoice.bind(InvoiceService);
+    const spy = jest.spyOn(InvoiceService, 'voidInvoice').mockImplementation(async (id) => {
+      await realVoid(id);
+      throw new Error('voided, but its annual-prepay/setup restorations failed');
+    });
+    let out;
+    try {
+      out = await complete(f);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(out).toMatchObject({ status: 200 });
+    expect((await trx('invoices').where({ id: f.invoiceId }).first('status')).status).toBe('void');
+    const invoices = await liveInvoices(f);
+    expect(invoices).toHaveLength(1);
+    expect(Number(invoices[0].total)).toBe(ADDON);
+    expect(out.body?.invoiceId).toBe(invoices[0].id);
+  });
+
+  test('a resumed completion that finds the add-ons bill beside the settled base still collects it — not "all paid" (pre-push P1 r2)', async () => {
+    const f = await coveredVisit({ invoiceLines: (x) => [baseLine(x)] });
+    const idempotencyKey = randomUUID();
+    const first = await complete(f, {}, { idempotencyKey });
+    expect(first).toMatchObject({ status: 200 });
+    const [bill] = (await liveInvoices(f)).filter((i) => i.id !== f.invoiceId);
+    expect(bill).toBeTruthy();
+    expect(first.body?.invoicePaymentActionRequired).toBe(true);
+    await releaseForResume(f);
+    const retry = await complete(f, {}, { idempotencyKey });
+    expect(retry).toMatchObject({ status: 200 });
+    expect(retry.body?.invoiceId).toBe(bill.id);
+    expect(retry.body?.invoicePaymentActionRequired).toBe(true);
+    expect((await liveInvoices(f)).filter((i) => i.id !== f.invoiceId).map((i) => i.id)).toEqual([bill.id]);
   });
 
   test('a visit that performed no application bills no add-ons', async () => {
