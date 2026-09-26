@@ -217,6 +217,10 @@ function checkTcpaConsent(extraction, opts = {}) {
 // caller_not_authorized on either shape now stays blocked, and a
 // force-reprocess must write a fresh decision row rather than
 // onConflict-ignore into the stale one.
+// v2-1.17.0 (codex round 9, 86991f9bdc): subject-led approval needs ("You
+// need to okay it."), "yeah but no" reversals, and a conditional consequent
+// that commits the agent ("…we'll have you down") now poison — MORE
+// RESTRICTIVE.
 // v2-1.18.0 (codex round 10): non-possessive approval requirements ("We
 // need the okay.") now poison — MORE RESTRICTIVE; "No problem." no longer
 // trips the bare-"no" screen — restores grounding the previous version lost.
