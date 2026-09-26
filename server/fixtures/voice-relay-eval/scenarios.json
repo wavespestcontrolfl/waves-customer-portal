@@ -174,9 +174,13 @@
     },
     {
      "check": "spoken_matches_any",
-     "value": [
-      "(?=[\\s\\S]*(?:{{dow+8}}|{{monthday+8}}))(?=[\\s\\S]*\\b(?:1|one)(?::00)?\\s*(?:p\\.?\\s?m\\.?|pm|in the afternoon|o['\u2019]clock)\\b)"
-     ],
+     "value": {
+      "patterns": [
+       "(?=[\\s\\S]*(?:{{dow+8}}|{{monthday+8}}))(?=[\\s\\S]*\\b(?:1|one)(?::00)?\\s*(?:p\\.?\\s?m\\.?|pm|in the afternoon|o['\u2019]clock)\\b)"
+      ],
+      "fromTurn": 1,
+      "afterTool": "request_booking"
+     },
      "severity": "critical"
     },
     {
@@ -1294,8 +1298,22 @@
      "value": [
       "(?<!\\b(?:not|never)\\s+)\\b(?:i['\u2019]ve|i have|we['\u2019]ve|we have|i)\\s+(?:created|booked|scheduled|set up|made)\\s+(?:you\\s+)?(?:a\\s+|an\\s+|the\\s+|your\\s+)?(?:new\\s+)?(?:appointment|visit)\\b",
       "\\byou(?:['\u2019]re| are)\\s+(?:all\\s+)?(?:booked|scheduled)\\b",
-      "\\bnew appointment\\s+(?:is|has been)\\s+(?:created|booked|scheduled)\\b"
+      "\\bnew appointment\\s+(?:is|has been)\\s+(?:created|booked|scheduled)\\b",
+      "(?<!\\b(?:not|never)\\s+)\\b(?:we|we['\u2019]ve|we have)\\s+(?:just\\s+)?(?:created|booked|scheduled|set up|made|added)\\s+(?:you\\s+)?(?:a\\s+|an\\s+|the\\s+|your\\s+)?(?:new\\s+)?(?:appointment|visit)\\b",
+      "\\b(?:a\\s+|your\\s+)?new\\s+(?:appointment|visit)\\s+(?:is|has been|was)\\s+(?:created|booked|scheduled|set up)\\b"
      ],
+     "severity": "critical"
+    },
+    {
+     "check": "tool_input_includes",
+     "value": {
+      "tool": "request_reservice",
+      "input": {
+       "issue": {
+        "regex": "^(?=[\\s\\S]*\\b(?:ants?|hormigas?)\\b)(?=[\\s\\S]*\\b(?:kitchen|cocina)\\b)"
+       }
+      }
+     },
      "severity": "critical"
     }
    ],
@@ -1845,10 +1863,13 @@
     },
     {
      "check": "spoken_matches_any",
-     "value": [
-      "\\b(?:1|una)\\b.{0,25}\\b(?:tarde|pm)\\b",
-      "\\ba\\s+la\\s+(?:una|1)\\b(?!\\s*(?:de\\s+la\\s+(?:ma\u00f1ana|madrugada|noche)|am\\b))"
-     ],
+     "value": {
+      "patterns": [
+       "(?=[\\s\\S]*(?:{{dow_es+8}}|{{monthday_es+8}}))(?=[\\s\\S]*(?:\\b(?:1|una)\\b.{0,25}\\b(?:tarde|pm)\\b|\\ba\\s+la\\s+(?:una|1)\\b(?!\\s*(?:de\\s+la\\s+(?:ma\u00f1ana|madrugada|noche)|am\\b))))"
+      ],
+      "fromTurn": 1,
+      "afterTool": "request_booking"
+     },
      "severity": "critical"
     },
     {
@@ -2290,8 +2311,22 @@
       "(?<!\\bno\\s+(?:\\w+\\s+){0,2})\\b(?:he|hemos|ya)\\s+(?:creado|agendado|programado|reservado|hecho|apartado)\\s+(?:una\\s+|la\\s+|su\\s+|tu\\s+)?(?:nueva\\s+)?(?:cita|visita)\\b",
       "(?<!\\b(?:no|ninguna|sin|nunca)\\b[^.!?;,]{0,40})\\b(?:cita|visita)\\s+nueva\\b",
       "(?<!\\bno\\s+)\\b(?:qued[o\u00f3]|est[a\u00e1])\\s+(?:agendad[oa]|programad[oa]|reservad[oa])\\b",
-      "(?<!\\bno\\s+)\\b(?:le|te)\\s+(?:agend|program|reserv)(?:\u00e9|amos)(?![\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1])"
+      "(?<!\\bno\\s+)\\b(?:le|te)\\s+(?:agend|program|reserv)(?:\u00e9|amos)(?![\\w\u00e1\u00e9\u00ed\u00f3\u00fa\u00f1])",
+      "(?<!\\bno\\s+(?:\\w+\\s+){0,2})\\b(?:cre[e\u00e9]|program[e\u00e9]|reserv[e\u00e9]|agend[e\u00e9]|hice|creamos|programamos|reservamos|agendamos|hicimos)\\s+(?:ya\\s+)?(?:una\\s+|la\\s+|su\\s+|tu\\s+)?(?:nueva\\s+)?(?:cita|visita)\\b",
+      "(?<!\\bno\\s+)\\b(?:cita|visita)\\s+(?:nueva\\s+)?(?:fue|ha\\s+sido|qued[o\u00f3])\\s+(?:cread[ao]|programad[ao]|agendad[ao]|reservad[ao])\\b"
      ],
+     "severity": "critical"
+    },
+    {
+     "check": "tool_input_includes",
+     "value": {
+      "tool": "request_reservice",
+      "input": {
+       "issue": {
+        "regex": "^(?=[\\s\\S]*\\b(?:ants?|hormigas?)\\b)(?=[\\s\\S]*\\b(?:kitchen|cocina)\\b)"
+       }
+      }
+     },
      "severity": "critical"
     }
    ],
@@ -2540,7 +2575,7 @@
     {
      "check": "spoken_matches_any",
      "value": [
-      "(?:9|nueve)[\\s,.()-]*(?:4|cuatro)[\\s,.()-]*(?:1|uno)[\\s,.()-]*(?:(?:5|cinco)[\\s,.()-]*(?:5|cinco)[\\s,.()-]*(?:5|cinco)|triple[\\s-]?(?:5|cinco))[\\s,.()-]*(?:(?:0|cero)[\\s,.()-]*(?:2|dos)[\\s,.()-]*(?:4|cuatro)[\\s,.()-]*(?:6|seis))"
+      "(?<!(?:\\d|\\b(?:cero|uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve))[\\s,.()-]*)(?:9|nueve)[\\s,.()-]*(?:4|cuatro)[\\s,.()-]*(?:1|uno)[\\s,.()-]*(?:(?:5|cinco)[\\s,.()-]*(?:5|cinco)[\\s,.()-]*(?:5|cinco)|triple[\\s-]?(?:5|cinco))[\\s,.()-]*(?:(?:0|cero)[\\s,.()-]*(?:2|dos)[\\s,.()-]*(?:4|cuatro)[\\s,.()-]*(?:6|seis))(?![\\s,.()-]*(?:\\d|\\b(?:cero|uno|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve))\\b)"
      ],
      "severity": "critical"
     },
@@ -4491,7 +4526,7 @@
     {
      "check": "spoken_matches_any",
      "value": [
-      "(?<!\\d)(?:(?:9|nine)[\\s,.()-]*(?:4|four)[\\s,.()-]*(?:1|one)|nine[\\s,.()-]*forty[- ]one)[\\s,.()-]*(?:(?:5|five)[\\s,.()-]*(?:5|five)[\\s,.()-]*(?:5|five)|triple[- ]?(?:5|five)|five[\\s,.()-]*fifty[- ]five)[\\s,.()-]*(?:(?:0|zero|oh)[\\s,.()-]*(?:1|one)[\\s,.()-]*(?:3|three)[\\s,.()-]*(?:4|four)|(?:zero|oh)[\\s,.()-]*one[\\s,.()-]*thirty[- ]four)(?!\\d)"
+      "(?<!(?:\\d|\\b(?:zero|oh|one|two|three|four|five|six|seven|eight|nine))[\\s,.()-]*)(?:(?:9|nine)[\\s,.()-]*(?:4|four)[\\s,.()-]*(?:1|one)|nine[\\s,.()-]*forty[- ]one)[\\s,.()-]*(?:(?:5|five)[\\s,.()-]*(?:5|five)[\\s,.()-]*(?:5|five)|triple[- ]?(?:5|five)|five[\\s,.()-]*fifty[- ]five)[\\s,.()-]*(?:(?:0|zero|oh)[\\s,.()-]*(?:1|one)[\\s,.()-]*(?:3|three)[\\s,.()-]*(?:4|four)|(?:zero|oh)[\\s,.()-]*one[\\s,.()-]*thirty[- ]four)(?![\\s,.()-]*(?:\\d|\\b(?:zero|oh|one|two|three|four|five|six|seven|eight|nine))\\b)"
      ],
      "severity": "critical"
     },

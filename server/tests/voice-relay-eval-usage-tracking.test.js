@@ -126,6 +126,18 @@ describe('voice relay eval — per-round Anthropic usage threading (cache-hit lo
     expect(replay.summaryLine(summary)).toMatch(/usage INCOMPLETE/);
   });
 
+  // Codex r11 on #4946: a usage block whose counters do not parse ({} or
+  // renamed fields) is not telemetry — the round is incomplete, never zeros.
+  test('a malformed usage block marks the round incomplete instead of adding zeros', async () => {
+    mockSdk();
+    const { replay, scenario } = loadScenario('robocall');
+    script.push(say('This looks like a recording.', {}), say('Take care.', { inputTokens: 40, outputTokens: 6 }));
+    const result = await replay.runScenario(scenario);
+    expect(result.usage.rounds).toBe(0);
+    expect(result.usage.incompleteRounds).toBe(2);
+    expect(replay.summarize([result]).usage.complete).toBe(false);
+  });
+
   test('a scripted message with no usage block at all (most of this harness\'s own tests) contributes nothing and never divides by zero', async () => {
     mockSdk();
     const { replay, scenario } = loadScenario('robocall');

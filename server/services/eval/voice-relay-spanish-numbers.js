@@ -199,13 +199,21 @@ function convertPriceWordRuns(text) {
     if (currencyWord) return `${amount} ${currencyWord}`;
     return amount >= 10 ? `${amount} ` : match;
   });
-  const withVerbs = out.replace(PRICE_VERB_WORD_RUN_RE, (match, lead, run) => {
+  const convertLed = (t, re) => t.replace(re, (match, lead, run) => {
     const amount = parseSpanishCardinal(run);
     if (!Number.isFinite(amount) || amount < 10) return match;
     return `${lead}${amount}${/\s$/.test(run) ? ' ' : ''}`;
   });
-  return mergeCents(withVerbs);
+  return mergeCents(convertLed(convertLed(out, PRICE_VERB_WORD_RUN_RE), PLAN_COPULA_WORD_RUN_RE));
 }
+
+// Codex r11 on #4946: a copular plan price ("el premium es ciento
+// cincuenta") — a plan/price noun, then es/son/sería/queda en, then the
+// figure — is a price too; a count right after it ("son doce aplicaciones")
+// is not.
+const PLAN_NOUN_ES = '(?:programa|plan|premium|mejorado|b[aá]sico|servicio|tratamiento|precio|opci[oó]n|paquete|costo|tarifa)';
+const COUNT_AHEAD_ES = '(?!\\s*(?:pies|metros|aplicaciones|visitas|veces|meses|a[ñn]os|d[ií]as|semanas|horas|minutos|por\\s*ciento|%))';
+const PLAN_COPULA_WORD_RUN_RE = new RegExp(`(\\b${PLAN_NOUN_ES}\\b[^.!?;,\\d]{0,30}?\\b(?:es|son|ser[íi]an?|queda\\s+en|est[áa]\\s+en)\\s+(?:de\\s+)?)(${NUMBER_RUN_RE_SRC})${COUNT_AHEAD_ES}`, 'gi');
 
 // Codex pre-push on #4946: a converted figure followed by its cents
 // ("119 dólares con noventa y nueve centavos", "119 con noventa y nueve")

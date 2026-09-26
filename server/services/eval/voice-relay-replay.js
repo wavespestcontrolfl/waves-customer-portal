@@ -297,7 +297,11 @@ function loadFixture(fixturePath = DEFAULT_FIXTURE_PATH) {
 //   {{iso+N}}      2026-09-16
 const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
-const DATE_TOKEN_RE = /\{\{(day|dow|monthday|iso)([+-]\d+)\}\}/g;
+const DATE_TOKEN_RE = /\{\{(day|dow|monthday|iso|dow_es|monthday_es)([+-]\d+)\}\}/g;
+// Spanish forms for Spanish scenarios: {{dow_es+N}} "domingo",
+// {{monthday_es+N}} "4 de octubre".
+const WEEKDAYS_ES = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
+const MONTHS_ES = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
 
 function etCalendarDate(runDate) {
   const { etParts } = require('../../utils/datetime-et');
@@ -311,6 +315,8 @@ function renderDateToken(kind, offsetDays, base) {
   const monthday = `${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}`;
   if (kind === 'dow') return dow;
   if (kind === 'monthday') return monthday;
+  if (kind === 'dow_es') return WEEKDAYS_ES[d.getUTCDay()];
+  if (kind === 'monthday_es') return `${d.getUTCDate()} de ${MONTHS_ES[d.getUTCMonth()]}`;
   if (kind === 'iso') return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
   return `${dow} ${monthday}`;
 }
@@ -1148,12 +1154,21 @@ function installHarness() {
               // nothing and is not counted as a round for the cache-hit rate.
               if (msg && msg.usage && typeof msg.usage === 'object') {
                 const u = extractUsage('anthropic', msg);
-                record.usage.input_tokens += u.input_tokens || 0;
-                record.usage.output_tokens += u.output_tokens || 0;
-                record.usage.cached_input_tokens += u.cached_input_tokens || 0;
-                record.usage.cache_write_tokens += u.cache_write_tokens || 0;
-                record.usage.rounds += 1;
-                if (u.cached_input_tokens) record.usage.cacheReadRounds += 1;
+                // Codex r11 on #4946: a usage block whose token counters do
+                // not parse ({} or renamed fields after an SDK change) is not
+                // telemetry — adding its nulls as zeros would present an
+                // instrumentation regression as complete, free data. Such a
+                // round counts as incomplete instead.
+                if (u && Number.isFinite(u.input_tokens) && Number.isFinite(u.output_tokens)) {
+                  record.usage.input_tokens += u.input_tokens;
+                  record.usage.output_tokens += u.output_tokens;
+                  record.usage.cached_input_tokens += u.cached_input_tokens || 0;
+                  record.usage.cache_write_tokens += u.cache_write_tokens || 0;
+                  record.usage.rounds += 1;
+                  if (u.cached_input_tokens) record.usage.cacheReadRounds += 1;
+                } else {
+                  record.usage.incompleteRounds += 1;
+                }
               }
               return msg;
             },
@@ -1321,14 +1336,22 @@ function agentUtterances(record) {
   return record.events.filter((e) => e.kind === 'agent');
 }
 
+// One expected value: a string is a case-insensitive substring, `{ regex }`
+// a case-insensitive pattern (word boundaries a substring cannot express —
+// "ants" must not match "plants"), anything else strict equality.
+function wantMatches(have, w) {
+  if (typeof w === 'string') return String(have ?? '').toLowerCase().includes(w.toLowerCase());
+  if (w && typeof w === 'object' && !Array.isArray(w) && typeof w.regex === 'string') {
+    try { return new RegExp(w.regex, 'i').test(String(have ?? '')); } catch { return false; }
+  }
+  return have === w;
+}
+
 function inputIncludes(input = {}, expected = {}) {
   const misses = [];
   for (const [key, want] of Object.entries(expected)) {
     const have = input[key];
-    let ok;
-    if (Array.isArray(want)) ok = want.some((w) => (typeof w === 'string' ? String(have ?? '').toLowerCase().includes(w.toLowerCase()) : have === w));
-    else if (typeof want === 'string') ok = String(have ?? '').toLowerCase().includes(want.toLowerCase());
-    else ok = have === want;
+    const ok = Array.isArray(want) ? want.some((w) => wantMatches(have, w)) : wantMatches(have, want);
     if (!ok) misses.push(`${key}=${JSON.stringify(have === undefined ? null : have)} (wanted ${JSON.stringify(want)})`);
   }
   return misses;
