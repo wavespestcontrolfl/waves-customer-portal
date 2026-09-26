@@ -250,6 +250,26 @@ describeOrSkip('termite annual signature expiry (slice 3b) — real Postgres', (
       expect(counts.signatureExpired).toBe(1);
     });
 
+    test('a resend landing after the scan (link rotated) suppresses the stale nudge and leaves no marker (Codex #4922 r4)', async () => {
+      let dbRef;
+      const { sweep, notifyAdmin, db } = load({
+        notifyAdminImpl: async (category, title, body, opts) => {
+          // Simulate createShareLink committing between scan and persist.
+          await dbRef('customer_contracts').update({ share_token_expires_at: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000) });
+          const ok = opts.shouldContinue ? await opts.shouldContinue() : true;
+          return ok ? { id: 'n1' } : { id: null, suppressed: true, reason: 'pre_send_check_blocked' };
+        },
+      });
+      dbRef = db;
+      const { estimateId, customerId } = await makeParkedEstimate(db);
+      await makeAgreement(db, { estimateId, customerId, shareTokenExpiresAt: daysAgo(1) });
+
+      const counts = await sweep();
+      expect(counts.signatureNudged).toBe(0);
+      expect(notifyAdmin).toHaveBeenCalled();
+      expect(await db('customer_contract_events').where({ event_type: 'signature_link_expired_nudged' })).toHaveLength(0);
+    });
+
     test('never nudges while the signing link is still valid', async () => {
       const { sweep, notifyAdmin, db } = load();
       const { estimateId, customerId } = await makeParkedEstimate(db);
@@ -345,6 +365,20 @@ describeOrSkip('termite annual signature expiry (slice 3b) — real Postgres', (
       await db('customer_contracts').where({ id: contract.id }).update({ share_token_expires_at: daysAgo(1) });
       expect((await sweep()).signatureExpired).toBe(1);
       expect((await db('estimates').where({ id: estimateId }).first()).annual_plan_activation_status).toBe('signature_expired');
+    });
+
+    test('another customer\'s agreement carrying this estimate id in its snapshot is neither retired nor able to block the close-out (Codex #4922 r4)', async () => {
+      const { sweep, db } = load();
+      const { estimateId, customerId } = await makeParkedEstimate(db, { acceptedAt: daysAgo(ABANDON_DAYS + 1) });
+      const own = await makeAgreement(db, { estimateId, customerId });
+      const [other] = await db('customers').insert({}).returning('*');
+      const foreignLive = await makeAgreement(db, { estimateId, customerId: other.id, shareTokenExpiresAt: new Date(Date.now() + 5 * 24 * 60 * 60 * 1000) });
+
+      expect((await sweep()).signatureExpired).toBe(1);
+      expect((await db('customer_contracts').where({ id: own.id }).first()).status).toBe('cancelled');
+      const untouched = await db('customer_contracts').where({ id: foreignLive.id }).first();
+      expect(untouched.status).toBe('sent');
+      expect(untouched.share_token_hash).toBe('a-token-hash');
     });
 
     test('a hash with NO expiry is a live link (served indefinitely) and also defers the close-out', async () => {

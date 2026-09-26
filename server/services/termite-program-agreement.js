@@ -1466,10 +1466,15 @@ async function cancelStaleSource(row, conn = db) {
   // our transaction commits (the cancel already applied to a genuinely
   // stale request). No MVCC-snapshot window remains.
   return conn.transaction(async (trx) => {
-    // Customer first — the same order issuance holds (advisory → customer →
-    // templates → contracts) and the sign/cancel paths hold (customer →
-    // contract); the cancel event below takes the customer FK key lock.
-    if (row.customer_id) await trx('customers').where({ id: row.customer_id }).forUpdate().first('id');
+    // The same order every program-agreement writer holds: the per-customer
+    // advisory lock, then the customer row, then templates, then contracts
+    // (issuance, the manual admin issue, the annual close-out); the cancel
+    // event below takes the customer FK key lock (Codex #4922 r4). Callers
+    // never hold this advisory lock across the call.
+    if (row.customer_id) {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`termite-agreement:${row.customer_id}`]);
+      await trx('customers').where({ id: row.customer_id }).forUpdate().first('id');
+    }
     if (row.document_template_version_id && row.document_template_key) {
       const template = await trx('document_templates')
         .where({ template_key: row.document_template_key })

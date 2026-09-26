@@ -8451,9 +8451,11 @@ function EstimateViewPageInner({ websiteMode = false }) {
     if (cta.terminalState === 'accepted' && estimate.annualPlanOfferClosed) {
       // Slice 3b: accepted, but the termite annual offer closed unsigned —
       // nothing was booked or billed, so never the booked page (Codex #4922
-      // r3 P1).
+      // r3 P1). No host stage: "booked" would tell an embedding website the
+      // flow converted (Codex #4922 r4) — like the other non-booked
+      // terminal pages, it sends none.
       return (
-        <Page website={websiteMode} stage="booked">
+        <Page website={websiteMode}>
           {readOnlyPreview ? <DraftPreviewBanner draft={adminDraftPreview} estimateId={data?.estimate?.id} /> : null}
           {estimateActionBar}
           <Header

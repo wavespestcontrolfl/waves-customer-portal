@@ -1203,9 +1203,21 @@ async function remindExpiredSignatureLinks({ conn, limit, counts }) {
             bell: true,
             dedupeKey: `termite-annual-signature-expiry-nudge:${row.contract_id}:${expiresAtKey}`,
             metadata: { customerId: row.contract_customer_id, estimateId: row.estimate_id, contractId: row.contract_id },
+            // Re-read just before the bell persists: a staff resend landing
+            // after the scan rotated the link and moved its expiry, so a
+            // "this link expired, resend it" bell would be stale — acting on
+            // it would burn the freshly delivered link (Codex #4922 r4).
+            shouldContinue: async () => !!(await conn('customer_contracts')
+              .where({ id: row.contract_id })
+              .whereNotIn('status', ['signed', 'cancelled', 'voided'])
+              .where('share_token_expires_at', row.share_token_expires_at)
+              .where('share_token_expires_at', '<', new Date())
+              .first('id')),
           },
         );
-        if (bell) {
+        // A pre-send recheck that found the link rotated is not a nudge —
+        // leave no marker; the new expiry gets its own nudge if it lapses.
+        if (bell && bell.reason !== 'pre_send_check_blocked') {
           if (!bell.suppressed && !bell.deduped) counts.signatureNudged += 1;
           // Delivered, already standing under this key, or deliberately
           // suppressed (internal-test customer, bell policy): mark this lapse
@@ -1283,6 +1295,13 @@ async function expireAbandonedSignature({ estimateId, conn = db }) {
     const signedContract = await trx('customer_contracts')
       .where({ document_template_key: ANNUAL_TEMPLATE_KEY, status: 'signed' })
       .whereRaw("document_variables_snapshot -> 'estimate' ->> 'id' = ?", [String(estimateId)])
+      .where(function sameCustomerAsOffer() {
+        // Snapshot estimate ids are untrusted (the generic document route
+        // copies arbitrary values): only this offer's customer's agreements
+        // — or a legacy row with no customer — may block or be retired with
+        // it (Codex #4922 r4).
+        this.where('customer_id', estimate.customer_id || null).orWhereNull('customer_id');
+      })
       .first('id');
     if (signedContract) return { skipped: 'signed' };
 
@@ -1292,6 +1311,9 @@ async function expireAbandonedSignature({ estimateId, conn = db }) {
       .where({ document_template_key: ANNUAL_TEMPLATE_KEY })
       .whereNotIn('status', ['signed', 'cancelled', 'voided'])
       .whereRaw("document_variables_snapshot -> 'estimate' ->> 'id' = ?", [String(estimateId)])
+      .where(function sameCustomerAsOffer() {
+        this.where('customer_id', estimate.customer_id || null).orWhereNull('customer_id');
+      })
       .forUpdate();
     // A signing link staff reissued late in the window (the lapse nudge's
     // own advice) carries its full template TTL; burning it at day 45 would
@@ -1379,6 +1401,7 @@ async function expireAbandonedSignatures({ conn, limit, counts }) {
           .where('cc.document_template_key', ANNUAL_TEMPLATE_KEY)
           .whereNotIn('cc.status', ['signed', 'cancelled', 'voided'])
           .whereRaw("cc.document_variables_snapshot -> 'estimate' ->> 'id' = e.id::text")
+          .whereRaw('(cc.customer_id = e.customer_id OR cc.customer_id IS NULL)')
           .whereNotNull('cc.share_token_hash')
           .where(function linkWindowOpen() {
             this.whereNull('cc.share_token_expires_at').orWhere('cc.share_token_expires_at', '>', new Date());
