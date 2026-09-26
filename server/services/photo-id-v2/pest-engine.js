@@ -605,7 +605,7 @@ function referralFor(entry) {
 // harmless bar/likely), or null when none clears its bar — in which case
 // `buildAnswer` climbs the lineage instead. Split out of `buildAnswer` to
 // keep each rule's condition readable on its own line (lint: complexity).
-function entryLevelAnswer(candidates, top, unansweredTrigger) {
+function entryLevelAnswer(candidates, top, blockPrettySure) {
   if (!top?.entry || !isApproved(top.entry)) return null;
   const second = candidates[1] || null;
   // Codex round-0 P1 (rounds 5–6): a curated pair the catalog marks
@@ -631,9 +631,9 @@ function entryLevelAnswer(candidates, top, unansweredTrigger) {
     headline: `${wording === 'pretty_sure' ? "We're pretty sure" : 'Likely'}: ${top.entry.common_name}`,
     entry: top.entry,
   });
-  if (top.confidence >= PRETTY_SURE_MIN && !unansweredTrigger && !unconfirmablePair) return named('pretty_sure');
+  if (top.confidence >= PRETTY_SURE_MIN && !blockPrettySure && !unconfirmablePair) return named('pretty_sure');
   if (isHarmlessOrAlly(top.entry) && top.confidence >= HARMLESS_PRETTY_SURE_MIN
-    && !consequentialAltClose(candidates, top) && !unansweredTrigger && !unconfirmablePair) return named('pretty_sure');
+    && !consequentialAltClose(candidates, top) && !blockPrettySure && !unconfirmablePair) return named('pretty_sure');
   if (top.confidence >= LIKELY_MIN) return named('likely');
   return null;
 }
@@ -672,15 +672,22 @@ function groupBlockFor(level, nodeId, entry) {
  */
 function buildAnswer(ctx) {
   const {
-    candidates, disagreed, disagreementNode, escalationTriggered, openaiAnswered,
+    candidates, disagreed, disagreementNode, escalationTriggered, openaiAnswered, openaiStoodInAlone,
     qualityUsable, qualityIssue, currentMonth,
   } = ctx;
   const unansweredTrigger = escalationTriggered && !openaiAnswered;
+  // Codex round-0 P1 (round 10): an OpenAI candidate that stood in ALONE
+  // because Gemini gave us nothing was never checked against a single
+  // numbered trait by either provider (its own escalation prompt tells it
+  // to report empty trait arrays in that case) — same pretty_sure cap as
+  // an unanswered trigger, for the same underlying reason: no real
+  // verification happened.
+  const blockPrettySure = unansweredTrigger || !!openaiStoodInAlone;
   const top = candidates[0] || null;
 
   const picked = disagreed
     ? climbedOrDisagreedAnswer(candidates, true, disagreementNode)
-    : (entryLevelAnswer(candidates, top, unansweredTrigger) || climbedOrDisagreedAnswer(candidates, false, null));
+    : (entryLevelAnswer(candidates, top, blockPrettySure) || climbedOrDisagreedAnswer(candidates, false, null));
   const { level, wording, nodeId, subhead, headline, entry } = picked;
 
   const group = groupBlockFor(level, nodeId, entry);
@@ -818,7 +825,7 @@ function combineEscalation(geminiCandidates, escalationResult) {
     // OpenAI unavailable (or answered something invalid) — Gemini's result
     // stands, capped from reading pretty_sure by `unansweredTrigger` inside
     // `buildAnswer`.
-    return { finalCandidates: geminiCandidates, disagreed: false, disagreementNode: null, openaiAnswered: false };
+    return { finalCandidates: geminiCandidates, disagreed: false, disagreementNode: null, openaiAnswered: false, openaiStoodInAlone: false };
   }
   const openaiCandidates = dedupeCandidates(
     sanitizedCandidatesOf(escalationResult.json).filter(isValidEscalationCandidate).map(resolveCandidate),
@@ -832,12 +839,19 @@ function combineEscalation(geminiCandidates, escalationResult) {
   const openaiAnswered = !!openaiTop;
 
   if (openaiTop && !geminiTop) {
-    return { finalCandidates: openaiCandidates, disagreed: false, disagreementNode: null, openaiAnswered };
+    // Codex round-0 P1 (round 10): Gemini gave us NOTHING (no catalog
+    // candidate at all), so `candidateContextFor` handed OpenAI no
+    // numbered traits for anything — its own escalation prompt explicitly
+    // tells it to report empty trait arrays in that case. OpenAI's answer
+    // stands in as the ONLY candidate, but it was never actually verified
+    // against a single numbered trait by either provider — `buildAnswer`
+    // must not let this read pretty_sure however high its own confidence.
+    return { finalCandidates: openaiCandidates, disagreed: false, disagreementNode: null, openaiAnswered, openaiStoodInAlone: true };
   }
   if (!openaiTop || !geminiTop) {
     // Neither side has a top candidate, or OpenAI found nothing new —
     // Gemini's (already below-threshold/contested) result stands.
-    return { finalCandidates: geminiCandidates, disagreed: false, disagreementNode: null, openaiAnswered };
+    return { finalCandidates: geminiCandidates, disagreed: false, disagreementNode: null, openaiAnswered, openaiStoodInAlone: false };
   }
   if (sameCandidateKey(geminiTop, openaiTop)) {
     const bumped = { ...geminiTop, confidence: Math.max(geminiTop.confidence, openaiTop.confidence) };
@@ -846,6 +860,7 @@ function combineEscalation(geminiCandidates, escalationResult) {
       disagreed: false,
       disagreementNode: null,
       openaiAnswered,
+      openaiStoodInAlone: false,
     };
   }
   return {
@@ -853,6 +868,7 @@ function combineEscalation(geminiCandidates, escalationResult) {
     disagreed: true,
     disagreementNode: deepestSharedNode(candidateNodeId(geminiTop), candidateNodeId(openaiTop)),
     openaiAnswered,
+    openaiStoodInAlone: false,
   };
 }
 
@@ -934,10 +950,13 @@ async function identifyPestV2(photos = []) {
   // response with an empty candidates list confirms nothing and must cap
   // pretty_sure the same as an unavailable leg (see `combineEscalation`).
   let openaiAnswered = false;
+  let openaiStoodInAlone = false;
 
   if (escalationTriggered) {
     escalationResult = await callEscalationModel(images, catalogEntries, candidateContextFor(catalogCandidates1), legTimeoutMs(1));
-    ({ finalCandidates, disagreed, disagreementNode, openaiAnswered } = combineEscalation(finalCandidates, escalationResult));
+    ({
+      finalCandidates, disagreed, disagreementNode, openaiAnswered, openaiStoodInAlone,
+    } = combineEscalation(finalCandidates, escalationResult));
   }
 
   const escalationJson = escalationResult?.ok && hasCandidatesArray(escalationResult.json) ? escalationResult.json : null;
@@ -950,6 +969,7 @@ async function identifyPestV2(photos = []) {
     disagreementNode,
     escalationTriggered,
     openaiAnswered,
+    openaiStoodInAlone,
     qualityUsable: !!quality.usable,
     qualityIssue: quality.issue || 'none',
     currentMonth,

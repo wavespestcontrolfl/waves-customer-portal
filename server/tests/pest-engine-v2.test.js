@@ -61,6 +61,7 @@ function baseCtx(overrides = {}) {
     disagreementNode: null,
     escalationTriggered: false,
     openaiAnswered: false,
+    openaiStoodInAlone: false,
     qualityUsable: true,
     qualityIssue: 'none',
     currentMonth: 6,
@@ -493,7 +494,32 @@ function candidatesReply(candidates, quality = { usable: true, issue: 'none' }, 
 }
 
 describe('identifyPestV2 — escalation triggers', () => {
-  test('Gemini missed entirely (candidates call fails) escalates, and skips the verify call', async () => {
+  test('Gemini missed entirely + OpenAI stands in ALONE with EMPTY trait arrays never reads pretty_sure — Codex round-0 P1 (round 10)', async () => {
+    // Gemini's total failure means candidateContextFor had nothing to hand
+    // OpenAI — its own escalation prompt tells it to report empty trait
+    // arrays in exactly this case, so a high raw confidence here was never
+    // actually checked against a single numbered trait by anyone.
+    dispatch
+      .mockResolvedValueOnce({ ok: false, reason: 'gemini_500' }) // candidates
+      .mockResolvedValueOnce({
+        ok: true,
+        json: {
+          quality: { usable: true, issue: 'none' }, shows: 'organism',
+          candidates: [{ slug: 'fire-ant', confidence: 0.95, traits_visible: [], traits_not_visible: [] }],
+        },
+      }); // escalation, standing in alone
+
+    const result = await identifyPestV2([PHOTO]);
+    expect(result.internal.escalation_reasons).toContain('gemini_missed');
+    expect(result.v2.entry.slug).toBe('fire-ant');
+    expect(result.v2.answer.wording).toBe('likely'); // never pretty_sure — no trait was ever verified
+    expect(result.v2.evidence).toEqual({ matches: [], still_need: [] });
+  });
+
+  test('Gemini missed entirely (candidates call fails) escalates, skips the verify call, and stands in as the ONLY candidate — capped at likely even citing traits', async () => {
+    // Non-empty trait numbers here don't rescue pretty_sure either: Gemini
+    // never raised anything, so OpenAI had no numbered list to check
+    // these against in the first place (see the round-10 test above).
     dispatch
       .mockResolvedValueOnce({ ok: false, reason: 'gemini_500' }) // candidates
       .mockResolvedValueOnce({
@@ -509,7 +535,7 @@ describe('identifyPestV2 — escalation triggers', () => {
     expect(dispatch).toHaveBeenCalledTimes(2); // candidates + escalation only (no verify — no catalog candidate from call 1)
     expect(result.internal.escalation_reasons).toContain('gemini_missed');
     expect(result.internal.models.verify).toBeNull();
-    expect(result.v2.answer.wording).toBe('pretty_sure');
+    expect(result.v2.answer.wording).toBe('likely');
     expect(result.v2.entry.slug).toBe('fire-ant');
   });
 
