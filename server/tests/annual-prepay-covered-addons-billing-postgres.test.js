@@ -719,6 +719,27 @@ postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
     expect(Number((await liveInvoices(f))[0].total)).toBe(ADDON);
   });
 
+  test('a recorded void that never landed is not trusted by a later pass — no "we voided it" alert, the add-ons billed plainly (pre-push P1)', async () => {
+    const f = await coveredVisit({ invoiceLines: (x) => [baseLine(x), addonLine(x),
+      { description: 'Synthetic trip charge', amount: 15, quantity: 1, unit_price: 15 }] });
+    const InvoiceService = require('../services/invoice');
+    const voidSpy = jest.spyOn(InvoiceService, 'voidInvoice').mockRejectedValue(new Error('Invoice status changed while voiding — re-check and retry'));
+    const idempotencyKey = randomUUID();
+    try {
+      expect(await complete(f, {}, { idempotencyKey })).toMatchObject({ status: 200 });
+    } finally {
+      voidSpy.mockRestore();
+    }
+    // The marker was saved, the void never landed; the office then cancels the invoice itself.
+    await trx('invoices').where({ id: f.invoiceId }).update({ status: 'cancelled' });
+    await releaseForResume(f);
+    expect(await complete(f, {}, { idempotencyKey })).toMatchObject({ status: 200 });
+    expect(await trx('notifications').where({ recipient_type: 'admin' })
+      .whereRaw("metadata->>'dedupeKey' = ?", [`annual_prepay_invoice_reconcile:${f.serviceId}`]).first()).toBeUndefined();
+    const bills = (await liveInvoices(f)).filter((i) => i.id !== f.invoiceId);
+    expect(bills.map((i) => Number(i.total))).toEqual([ADDON]);
+  });
+
   describe('dark (GATE_ANNUAL_PREPAY_ADDON_BILLING off): today\'s behavior', () => {
     beforeEach(() => { delete process.env.GATE_ANNUAL_PREPAY_ADDON_BILLING; });
     afterEach(() => { process.env.GATE_ANNUAL_PREPAY_ADDON_BILLING = 'true'; });

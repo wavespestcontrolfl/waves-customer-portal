@@ -448,6 +448,17 @@ class CoveredVisitCloseout {
     return undefined;
   }
 
+  // The office invoice an earlier pass recorded before voiding it — trusted
+  // only when the void actually landed: a void that failed leaves the id on
+  // the record while that invoice stays live (or is later cancelled or paid
+  // by someone else). Returns { invoice } for a real void, { missing: true }
+  // when the row is gone, or {} for a stale marker.
+  async priorVoidedInvoice() {
+    const row = await db('invoices').where({ id: this.priorVoidedId }).first();
+    if (!row) return { missing: true };
+    return row.status === 'void' ? { invoice: row } : {};
+  }
+
   // No invoice on the covered visit. Not over a refunded invoice (nothing is
   // minted beside it while its money can still come back, and the
   // manual-billing alert skips a covered visit — so priced add-ons get their
@@ -472,9 +483,9 @@ class CoveredVisitCloseout {
     }
     if (this.priorVoidedId) {
       this.priorVoidRevisited = true;
-      let priorVoided = null;
+      let prior;
       try {
-        priorVoided = await db('invoices').where({ id: this.priorVoidedId }).first();
+        prior = await this.priorVoidedInvoice();
       } catch (err) {
         // A transient read: hold for the retry rather than finalize without
         // classifying the voided invoice's other charges.
@@ -482,9 +493,11 @@ class CoveredVisitCloseout {
         logger.error(`[dispatch] annual-prepay voided invoice ${this.priorVoidedId} re-read failed for visit ${svc.id}: ${err.message}`);
         return;
       }
-      if (priorVoided) await this.afterVoid(priorVoided);
-      else await this.alert(`invoice ${this.priorVoidedId}, voided by this closeout, could not be found`, { voidedInvoiceId: this.priorVoidedId });
-      return;
+      if (prior.invoice) return this.afterVoid(prior.invoice);
+      if (prior.missing) {
+        return this.alert(`invoice ${this.priorVoidedId}, voided by this closeout, could not be found`, { voidedInvoiceId: this.priorVoidedId });
+      }
+      // A stale marker (that void never landed): nothing of it to finish.
     }
     if (this.billable) await this.bill();
   }
@@ -525,9 +538,9 @@ class CoveredVisitCloseout {
   async rederiveOtherCharges() {
     if (!this.priorVoidedId || this.priorVoidRevisited || this.otherChargesOwed) return;
     try {
-      const priorVoided = await db('invoices').where({ id: this.priorVoidedId }).first();
-      this.otherChargesOwed = !priorVoided
-        || classifyCoveredVisitInvoice(priorVoided, await annualPrepayAddonRows(this.svc)).unknownCharges;
+      const prior = await this.priorVoidedInvoice();
+      this.otherChargesOwed = !!prior.missing
+        || (!!prior.invoice && classifyCoveredVisitInvoice(prior.invoice, await annualPrepayAddonRows(this.svc)).unknownCharges);
     } catch (err) {
       this.otherChargesOwed = true;
       logger.warn(`[dispatch] annual-prepay voided invoice ${this.priorVoidedId} re-read failed for visit ${this.svc.id}: ${err.message}`);
