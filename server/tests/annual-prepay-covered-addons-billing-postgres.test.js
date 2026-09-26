@@ -183,6 +183,34 @@ postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
     expect(out.body?.invoiceId).toBe(f.invoiceId);
   });
 
+  test('an office invoice that is not provably add-ons-only is voided, the add-ons re-billed, and its other charge flagged', async () => {
+    const f = await coveredVisit({ invoiceLines: () => [
+      { description: 'Quarterly pest treatment', amount: BASE, quantity: 1, unit_price: BASE },
+    ] });
+    const out = await complete(f);
+    expect(out).toMatchObject({ status: 200 });
+    expect((await trx('invoices').where({ id: f.invoiceId }).first('status')).status).toBe('void');
+    const invoices = await liveInvoices(f);
+    expect(invoices).toHaveLength(1);
+    expect(Number(invoices[0].total)).toBe(ADDON);
+    expect(await trx('notifications').where({ recipient_type: 'admin' })
+      .whereRaw("metadata->>'dedupeKey' = ?", [`annual_prepay_invoice_reconcile:${f.serviceId}`]).first()).toBeTruthy();
+  });
+
+  test('priced add-ons that build no invoice lines alert the office instead of reading as "nothing owed"', async () => {
+    const f = await coveredVisit();
+    const InvoiceService = require('../services/invoice');
+    const build = jest.spyOn(InvoiceService, 'buildLineItemsForScheduledService').mockResolvedValue({ lineItems: [], discountIds: [] });
+    try {
+      const out = await complete(f);
+      expect(out).toMatchObject({ status: 200 });
+    } finally {
+      build.mockRestore();
+    }
+    expect(await liveInvoices(f)).toHaveLength(0);
+    expect(await addonsAlert(f)).toBeTruthy();
+  });
+
   test('a covered visit without add-ons still bills nothing', async () => {
     const f = await coveredVisit();
     await trx('scheduled_service_addons').where({ id: f.addonId }).del();
