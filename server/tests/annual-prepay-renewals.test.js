@@ -12,6 +12,13 @@ jest.mock('../services/sms-template-renderer', () => ({
 }));
 jest.mock('../services/account-membership-email', () => ({
   sendMembershipRenewalReminder: jest.fn(),
+  sendTermiteRenewalReminder: jest.fn(),
+}));
+jest.mock('../services/cancellation-resolution', () => ({
+  cancelFlowV2Enabled: jest.fn(() => true),
+}));
+jest.mock('../utils/portal-url', () => ({
+  portalUrl: jest.fn((path) => `https://portal.wavespestcontrol.com${path || ''}`),
 }));
 // Lazy-required by reconcilePendingWindowCompletions (and the cancel-path
 // invoice reopen) — mocked so the unit tests don't pull real invoice/credit
@@ -38,6 +45,8 @@ const db = require('../models/db');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderSmsTemplate } = require('../services/sms-template-renderer');
 const AccountMembershipEmail = require('../services/account-membership-email');
+const CancellationResolution = require('../services/cancellation-resolution');
+const NotificationService = require('../services/notification-service');
 const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
 const { _private } = AnnualPrepayRenewals;
 
@@ -110,6 +119,10 @@ describe('annual prepay renewal helpers', () => {
     // passed a bare connection; run the callback against the same mock.
     db.transaction = jest.fn(async (cb) => cb(db));
     _private.resetCachesForTests();
+    // jest.clearAllMocks() above clears calls but not a prior test's
+    // mockReturnValue override — pin the default explicitly so a termite
+    // cancel-flow-off test can't leak `false` into a later test.
+    CancellationResolution.cancelFlowV2Enabled.mockReturnValue(true);
   });
 
   test('exposes serviceMatchesCoverage at the module root (the booking preflight destructures it)', () => {
@@ -156,13 +169,32 @@ describe('annual prepay renewal helpers', () => {
   });
 
   test('maps supported customer notice offsets to term columns', () => {
+    expect(_private.noticeColumnForDaysOut(45)).toBe('notice_45_sent_at');
     expect(_private.noticeColumnForDaysOut(30)).toBe('notice_30_sent_at');
     expect(_private.noticeColumnForDaysOut('15')).toBe('notice_15_sent_at');
     expect(_private.noticeColumnForDaysOut(7)).toBe('notice_7_sent_at');
     expect(_private.noticeColumnForDaysOut(10)).toBeNull();
+    expect(_private.noticeClaimColumnForDaysOut(45)).toBe('notice_45_claimed_at');
     expect(_private.noticeClaimColumnForDaysOut(30)).toBe('notice_30_claimed_at');
     expect(_private.noticeClaimColumnForDaysOut(15)).toBe('notice_15_claimed_at');
     expect(_private.noticeClaimColumnForDaysOut(10)).toBeNull();
+  });
+
+  // Slice 5 ("notice ladder"): the 45-day rung exists ONLY for termite
+  // annual-plan terms (annual_plan_version set) — every other annual-prepay
+  // term (lawn/mosquito/rodent/quarterly — this table is shared) never gets
+  // it, so CUSTOMER_NOTICE_DAYS itself ([30, 15, 7]) stays untouched.
+  test('isTermiteAnnualPlanTerm is true only for a term with annual_plan_version set', () => {
+    expect(_private.isTermiteAnnualPlanTerm({ annual_plan_version: 'v3' })).toBe(true);
+    expect(_private.isTermiteAnnualPlanTerm({ annual_plan_version: null })).toBe(false);
+    expect(_private.isTermiteAnnualPlanTerm({})).toBe(false);
+    expect(_private.isTermiteAnnualPlanTerm(null)).toBe(false);
+  });
+
+  test('formatCurrencyLabel matches email-template.js currency() formatting', () => {
+    expect(_private.formatCurrencyLabel(650)).toBe('$650.00');
+    expect(_private.formatCurrencyLabel(1234.5)).toBe('$1,234.50');
+    expect(_private.formatCurrencyLabel(null)).toBe('$0.00');
   });
 
   test('keeps draft prepay invoices payment pending until collected', () => {
@@ -2130,6 +2162,246 @@ describe('annual prepay renewal helpers', () => {
       notice_30_sent_at: expect.any(Date),
       notice_30_claimed_at: null,
     }));
+  });
+
+  // ---- termite annual plan: 45/30-day renewal-notice rung (slice 5, owner ruling §A2)
+
+  test('a termite annual-plan term at 45 days out renders the termite SMS template with every variable, excludes the setup fee from renewal_fee, and stamps notice_45_sent_at only after the SMS actually sends', async () => {
+    const term = {
+      id: 'term-1',
+      customer_id: 'customer-1',
+      status: 'active',
+      term_start: '2026-05-20',
+      term_end: '2027-05-20',
+      annual_plan_version: 'v3',
+      // prepay_amount already excludes the one-time Station Setup fee
+      // (estimate-converter.js subtracts annualPlanSetupFeeAmount before
+      // it is ever written here) — renewal_fee must render this figure
+      // untouched, never re-adding a setup amount.
+      prepay_amount: 650,
+      notice_45_sent_at: null,
+      notice_45_claimed_at: null,
+      renewal_decision: null,
+    };
+    const refreshedTerm = {
+      ...term,
+      status: 'active',
+      last_scheduled_service_id: null,
+      last_scheduled_service_date: null,
+    };
+    const claimQuery = query({ returning: [{ ...refreshedTerm, status: 'renewal_pending' }] });
+    const markNoticeQuery = query();
+    setDbQueues({
+      scheduled_services: [
+        query({ first: null }),
+        query({ columnInfo: {} }),
+      ],
+      annual_prepay_terms: [
+        query({ returning: [refreshedTerm] }),
+        claimQuery,
+        markNoticeQuery,
+      ],
+      customers: [
+        query({ first: { id: 'customer-1', first_name: 'Stan', address_line1: '123 Bayshore Rd', city: 'Bradenton', email: 'stan@example.com', phone: '+19415550100' } }),
+      ],
+      customer_interactions: [query()],
+    });
+    CancellationResolution.cancelFlowV2Enabled.mockReturnValue(true);
+    renderSmsTemplate.mockResolvedValue('rendered termite sms');
+    sendCustomerMessage.mockResolvedValue({ sent: true });
+    AccountMembershipEmail.sendTermiteRenewalReminder.mockResolvedValue({ ok: true });
+
+    await expect(AnnualPrepayRenewals.sendCustomerTermNotice(term, 45)).resolves.toMatchObject({
+      sent: true,
+      termId: 'term-1',
+    });
+
+    expect(renderSmsTemplate).toHaveBeenCalledWith(
+      'termite_annual_renewal_notice',
+      {
+        first_name: 'Stan',
+        address_short: '123 Bayshore Rd, Bradenton',
+        renewal_date: _private.formatDateLabel('2027-05-20'),
+        renewal_fee: '$650.00',
+        cancel_link: 'https://portal.wavespestcontrol.com/?tab=plan',
+      },
+      expect.objectContaining({ workflow: 'termite_annual_renewal_notice', entity_id: 'term-1' }),
+    );
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+      to: '+19415550100',
+      body: 'rendered termite sms',
+      metadata: expect.objectContaining({ original_message_type: 'termite_annual_renewal_notice', annual_prepay_term_id: 'term-1', days_out: 45 }),
+    }));
+    expect(markNoticeQuery.update).toHaveBeenCalledWith(expect.objectContaining({
+      notice_45_sent_at: expect.any(Date),
+      notice_45_claimed_at: null,
+    }));
+    // The email leg is a fire-and-forget companion send after a successful
+    // SMS (`void sendRenewalEmail()`) — the call itself is synchronous even
+    // though its own await isn't on this function's return path.
+    expect(AccountMembershipEmail.sendTermiteRenewalReminder).toHaveBeenCalledWith({
+      customerId: 'customer-1',
+      termId: 'term-1',
+      daysOut: 45,
+      renewalDate: '2027-05-20',
+      renewalFee: 650,
+      newStart: '2027-05-20',
+      newEnd: '2028-05-20',
+      cancelLink: 'https://portal.wavespestcontrol.com/?tab=plan',
+      lastInspectionDate: null,
+    });
+  });
+
+  test('a termite annual-plan term whose SMS send fails does NOT stamp notice_45_sent_at when the email fallback also fails (provider-success-only witness)', async () => {
+    const term = {
+      id: 'term-1',
+      customer_id: 'customer-1',
+      status: 'active',
+      term_start: '2026-05-20',
+      term_end: '2027-05-20',
+      annual_plan_version: 'v3',
+      prepay_amount: 650,
+      notice_45_sent_at: null,
+      notice_45_claimed_at: null,
+      renewal_decision: null,
+    };
+    const refreshedTerm = { ...term, status: 'active', last_scheduled_service_id: null, last_scheduled_service_date: null };
+    const claimQuery = query({ returning: [{ ...refreshedTerm, status: 'renewal_pending' }] });
+    const releaseQuery = query();
+    setDbQueues({
+      scheduled_services: [query({ first: null }), query({ columnInfo: {} })],
+      annual_prepay_terms: [
+        query({ returning: [refreshedTerm] }),
+        claimQuery,
+        releaseQuery, // releaseClaim() on total failure
+      ],
+      customers: [
+        query({ first: { id: 'customer-1', first_name: 'Stan', address_line1: '123 Bayshore Rd', city: 'Bradenton', phone: '+19415550100' } }),
+      ],
+    });
+    CancellationResolution.cancelFlowV2Enabled.mockReturnValue(true);
+    renderSmsTemplate.mockResolvedValue('rendered termite sms');
+    sendCustomerMessage.mockResolvedValue({ sent: false, reason: 'blocked' });
+    AccountMembershipEmail.sendTermiteRenewalReminder.mockResolvedValue({ ok: false, reason: 'email_opted_out' });
+
+    await expect(AnnualPrepayRenewals.sendCustomerTermNotice(term, 45)).resolves.toMatchObject({
+      sent: false,
+      reason: 'blocked',
+    });
+
+    // No markNoticeSent call ever happened — only the claim-release update.
+    expect(releaseQuery.update).toHaveBeenCalledWith(expect.objectContaining({
+      notice_45_claimed_at: null,
+      status: 'active',
+    }));
+    expect(releaseQuery.update).not.toHaveBeenCalledWith(expect.objectContaining({ notice_45_sent_at: expect.anything() }));
+  });
+
+  test('a termite annual-plan term skips the 45-day rung and rings an admin bell (no send) when the portal cancel-request flow is off', async () => {
+    const term = {
+      id: 'term-1',
+      customer_id: 'customer-1',
+      status: 'active',
+      term_start: '2026-05-20',
+      term_end: '2027-05-20',
+      annual_plan_version: 'v3',
+      prepay_amount: 650,
+      notice_45_sent_at: null,
+      notice_45_claimed_at: null,
+      renewal_decision: null,
+    };
+    setDbQueues({
+      scheduled_services: [query({ first: null }), query({ columnInfo: {} })],
+      annual_prepay_terms: [query({ returning: [{ ...term, last_scheduled_service_id: null, last_scheduled_service_date: null }] })],
+      notifications: [query({ first: undefined })], // dedupe probe: no open alert yet
+    });
+    CancellationResolution.cancelFlowV2Enabled.mockReturnValue(false);
+    NotificationService.notifyAdmin.mockClear();
+
+    await expect(AnnualPrepayRenewals.sendCustomerTermNotice(term, 45)).resolves.toMatchObject({
+      sent: false,
+      reason: 'cancel_flow_disabled',
+    });
+
+    expect(renderSmsTemplate).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(AccountMembershipEmail.sendTermiteRenewalReminder).not.toHaveBeenCalled();
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith(
+      'alert',
+      expect.stringMatching(/cancel flow is off/i),
+      expect.stringContaining('term-1'),
+      expect.objectContaining({ metadata: expect.objectContaining({ reason: 'cancel_flow_disabled', days_out: 45, annual_prepay_term_id: 'term-1' }) }),
+    );
+  });
+
+  test('a 45-day rung is refused outright for a non-termite term even when called directly', async () => {
+    const term = {
+      id: 'term-1',
+      customer_id: 'customer-1',
+      status: 'active',
+      term_start: '2026-05-20',
+      term_end: '2027-05-20',
+      annual_plan_version: null,
+      notice_45_sent_at: null,
+      notice_45_claimed_at: null,
+      renewal_decision: null,
+    };
+    // refreshTermSnapshot runs on the passed-in object with no coverage
+    // config, so it makes exactly its usual two scheduled_services calls
+    // and one annual_prepay_terms update — the not-termite guard trips
+    // immediately after, before any claim is attempted.
+    setDbQueues({
+      scheduled_services: [query({ first: null }), query({ columnInfo: {} })],
+      annual_prepay_terms: [query({ returning: [{ ...term, last_scheduled_service_id: null, last_scheduled_service_date: null }] })],
+    });
+
+    await expect(AnnualPrepayRenewals.sendCustomerTermNotice(term, 45)).resolves.toEqual({
+      sent: false,
+      reason: 'not_termite_plan',
+    });
+  });
+
+  test('a termite annual-plan term at 15 days out still uses the generic reminder template and email, not the termite copy', async () => {
+    const term = {
+      id: 'term-1',
+      customer_id: 'customer-1',
+      status: 'active',
+      term_start: '2026-05-20',
+      term_end: '2026-11-05',
+      annual_plan_version: 'v3',
+      prepay_amount: 650,
+      notice_15_sent_at: null,
+      notice_15_claimed_at: null,
+      renewal_decision: null,
+    };
+    const refreshedTerm = { ...term, status: 'active', last_scheduled_service_id: null, last_scheduled_service_date: null };
+    const claimQuery = query({ returning: [{ ...refreshedTerm, status: 'renewal_pending' }] });
+    const markNoticeQuery = query();
+    setDbQueues({
+      scheduled_services: [query({ first: null }), query({ columnInfo: {} })],
+      annual_prepay_terms: [
+        query({ returning: [refreshedTerm] }),
+        claimQuery,
+        markNoticeQuery,
+      ],
+      customers: [
+        query({ first: { id: 'customer-1', first_name: 'Stan', phone: '+19415550100' } }),
+      ],
+      customer_interactions: [query()],
+    });
+    renderSmsTemplate.mockResolvedValue('rendered generic sms');
+    sendCustomerMessage.mockResolvedValue({ sent: true });
+    AccountMembershipEmail.sendMembershipRenewalReminder.mockResolvedValue({ ok: true });
+
+    await expect(AnnualPrepayRenewals.sendCustomerTermNotice(term, 15)).resolves.toMatchObject({ sent: true, termId: 'term-1' });
+
+    expect(renderSmsTemplate).toHaveBeenCalledWith(
+      'annual_prepay_renewal_reminder',
+      expect.objectContaining({ first_name: 'Stan' }),
+      expect.objectContaining({ workflow: 'annual_prepay_renewal_reminder' }),
+    );
+    expect(AccountMembershipEmail.sendTermiteRenewalReminder).not.toHaveBeenCalled();
+    expect(markNoticeQuery.update).toHaveBeenCalledWith(expect.objectContaining({ notice_15_sent_at: expect.any(Date) }));
   });
 
   // ---- termite annual plan: coverage waits for the installation (codex #4819 r6 P1)

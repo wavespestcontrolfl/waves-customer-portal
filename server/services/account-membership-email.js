@@ -880,6 +880,55 @@ async function sendMembershipRenewalReminder({
   });
 }
 
+// Termite annual plan (GATE_TERMITE_ANNUAL_PLAN) renewal-notice email —
+// the 45/30-day termite copy variant of sendMembershipRenewalReminder above
+// (build brief slice 5). 15/7 days out still use the generic
+// sendMembershipRenewalReminder for a termite term too; only the 45/30-day
+// rungs carry the auto-renew/cancel disclosure this sends.
+async function sendTermiteRenewalReminder({
+  customerId,
+  termId = null,
+  daysOut,
+  renewalDate,
+  renewalFee,
+  newStart,
+  newEnd,
+  cancelLink,
+  // No annual-inspection tracking exists yet anywhere in the schema (the
+  // signed annual report is a later slice) — always null today. When present
+  // the sentence renders; when null it is dropped entirely (never a blank
+  // "Your last annual inspection: ." — see the last_inspection_sentence
+  // paragraph block in the seeded template, which drops on empty content).
+  lastInspectionDate = null,
+  idempotencyKey,
+} = {}) {
+  const customer = await loadCustomer(customerId);
+  if (!customer) return { ok: false, skipped: true, reason: 'customer_not_found' };
+  const address = [customer.address_line1, customer.address_line2, customer.city, customer.state, customer.zip]
+    .filter(Boolean)
+    .join(', ');
+  return sendTemplate({
+    customerId,
+    templateKey: 'membership.termite_renewal_reminder',
+    eventType: 'membership.termite_renewal_reminder',
+    payload: {
+      address,
+      new_start: displayDate(newStart),
+      new_end: displayDate(newEnd),
+      renewal_fee: money(renewalFee),
+      renewal_date: displayDate(renewalDate),
+      cancel_link: cancelLink,
+      last_inspection_sentence: lastInspectionDate
+        ? `Your last annual inspection: ${displayDate(lastInspectionDate)}.`
+        : '',
+    },
+    idempotencyKey: idempotencyKey
+      || `membership.termite_renewal_reminder:${termId || customerId}:${daysOut || 'notice'}:${stableEventKey(renewalDate)}`,
+    categories: ['membership_renewal_reminder', 'termite_annual_plan'],
+    metadata: { annual_prepay_term_id: termId, days_out: daysOut },
+  });
+}
+
 async function sendMembershipCanceled({
   customerId,
   effectiveDate = new Date(),
@@ -967,6 +1016,7 @@ module.exports = {
   sendAppIntro,
   sendMembershipUpdated,
   sendMembershipRenewalReminder,
+  sendTermiteRenewalReminder,
   sendMembershipCanceled,
   sendMembershipPaused,
   sendMembershipReactivated,
