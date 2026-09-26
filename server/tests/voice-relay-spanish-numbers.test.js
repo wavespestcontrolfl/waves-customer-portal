@@ -111,6 +111,94 @@ describe('normalizeSpanishSpokenText — spoken phone digit strings', () => {
   });
 });
 
+describe('normalizeSpanishSpokenText — grouped Spanish CARDINALS, phone-number style (Codex round-6 P1)', () => {
+  test.each([
+    // The real gap: compound tens/hundreds words (Pass 2's digit-word pass
+    // never touches these), chunked and concatenated into the 10-digit
+    // number they read back.
+    ['El número es novecientos cuarenta y uno, quinientos cincuenta y cinco, cero dos cuarenta y seis.', 'El número es 941 555 0 2 46.'],
+    // A 7-digit local number (no area code) still qualifies.
+    ['El número es quinientos cincuenta y cinco, cero dos cuarenta y seis.', 'El número es 555 0 2 46.'],
+    // Mixed: some groups spelled as bare digits, one as a compound.
+    ['nueve, cuatro, uno, quinientos cincuenta y cinco, cero, dos, cuatro, seis', '9 4 1 555 0 2 4 6'],
+  ])('%s -> %s', (input, expected) => {
+    expect(normalizeSpanishSpokenText(input)).toBe(expected);
+  });
+
+  // Guards: every one of these has fewer than 3 chunks, or is walled off by
+  // grammar — exactly the shapes a quantity or an hour range actually take.
+  test.each([
+    'la ventana es entre dos y cuatro',
+    'necesitamos entre dos y cuatro técnicos',
+    '¿Hay entre dos y cuatro habitaciones afectadas?',
+    'la ventana es entre una y tres de la tarde',
+    'el número es cuarenta y uno, cincuenta y cinco',
+    'tengo dos perros',
+    'Necesito una visita más.',
+  ])('leaves a non-phone-shaped cardinal run untouched: %s', (input) => {
+    expect(normalizeSpanishSpokenText(input)).toBe(input);
+  });
+
+  // A price is walled off from Pass 4 in practice, but by Pass 3 (the price
+  // pass) converting the number immediately before "dólares" FIRST, not by
+  // Pass 4's own guards — a single price is only 1 chunk either way, so
+  // this documents the actual mechanism rather than assuming Pass 4 alone.
+  test.each([
+    ['cuesta noventa y nueve dólares', 'cuesta 99 dólares'],
+    ['el precio es ciento diecinueve dólares por aplicación', 'el precio es 119 dólares por aplicación'],
+  ])('a single spelled-out price converts via the price pass, never the phone-group pass: %s -> %s', (input, expected) => {
+    expect(normalizeSpanishSpokenText(input)).toBe(expected);
+  });
+
+  // The residual case Pass 3 does NOT wall off: three or more spelled-out
+  // amounts in a row with only the LAST one immediately followed by a
+  // currency word (Pass 3 still converts that last one first, but the
+  // remaining word-only amounts can still total >=3 chunks and 7-11 digits
+  // if there are enough of them) is a real, if unlikely, phrasing this pass
+  // does not distinguish from a phone number — not exercised by any fixture
+  // scenario in this repo, which always states each price's own unit
+  // immediately ("por aplicación") rather than listing bare amounts.
+  test('two spelled-out amounts followed by one with an immediate currency word do not collide (below the chunk floor)', () => {
+    expect(normalizeSpanishSpokenText('cuesta noventa y nueve, ciento diecinueve, ciento veintinueve dólares'))
+      .toBe('cuesta noventa y nueve, ciento diecinueve, 129 dólares');
+  });
+});
+
+describe('chunkPhoneCardinals (Codex round-6 P1)', () => {
+  const { chunkPhoneCardinals } = require('../services/eval/voice-relay-spanish-numbers')._internals;
+  const chunk = (s) => chunkPhoneCardinals(s.split(/[\s,]+/).filter(Boolean));
+  test.each([
+    ['novecientos cuarenta y uno', [941]],
+    ['ciento diecinueve', [119]],
+    ['quinientos cincuenta y cinco', [555]],
+    ['cero dos cuarenta y seis', [0, 2, 46]],
+    ['cuarenta y seis', [46]],
+    ['cero', [0]],
+    ['dos', [2]],
+    ['cero cuarenta y seis', [0, 46]],
+    ['novecientos cuarenta y uno quinientos cincuenta y cinco cero dos cuarenta y seis', [941, 555, 0, 2, 46]],
+  ])('%s -> %j', (input, expected) => {
+    expect(chunk(input)).toEqual(expected);
+  });
+
+  // A units word directly after a completed units chunk starts a NEW chunk
+  // ("cero dos" is 0, 2 — never a compound "02").
+  test('a bare unit followed by another bare unit is two separate chunks', () => {
+    expect(chunk('dos tres')).toEqual([2, 3]);
+  });
+
+  // "y" only glues a completed tens word to its trailing unit. Anywhere else
+  // (a range connector, a trailing "y" with nothing after) this is not a
+  // phone-cardinal run at all, and the whole thing is rejected.
+  test.each([
+    'dos y cuatro',
+    'cuarenta y',
+    'mil doscientos',
+  ])('rejects a non-phone-cardinal shape: %s', (input) => {
+    expect(chunk(input)).toBeNull();
+  });
+});
+
 describe('normalizeSpanishSpokenText — article/quantity uses are never converted (Codex round-2/3 collisions)', () => {
   test.each([
     // "hour y minute"-shaped spans followed by a unit noun are durations or

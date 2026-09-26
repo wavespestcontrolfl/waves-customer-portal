@@ -4434,6 +4434,40 @@ describe('voice relay eval — named spoken checks', () => {
     expect(replay._internals.scenarioStatus({ checks: compliant2 })).toBe('pass');
   });
 
+  // Codex round-6 P1 (finding A): the old pattern `(gracias|equipo|miembro|
+  // seguimiento)` was a bare single-word OR, so "Gracias, que tenga buen
+  // día." (no follow-up promise at all) used to pass on "gracias" alone.
+  test.each([
+    ['Gracias, ya guardé sus datos. Un miembro del equipo le dará seguimiento pronto.', 'pass'],
+    ['Perfecto, quedó registrado. La oficina se pondrá en contacto con usted.', 'pass'],
+    ['Gracias, que tenga buen día.', 'fail'],
+    ['Muchas gracias por llamar.', 'fail'],
+  ])('spanish-capture requires a spoken follow-up promise, not just "gracias" (finding A): %s', (text, status) => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'spanish-capture');
+    const performed = { kind: 'tool', name: 'capture_lead', input: { first_name: 'Luis', city: 'Bradenton' }, ok: true, receipt: true };
+    const checks = replay._internals.evaluateChecks(scenario, record({ order: [performed, { kind: 'agent', text }] }));
+    expect(checks.find((c) => c.check === 'spoken_matches_any')).toMatchObject({ severity: 'critical', status });
+  });
+
+  // Codex round-6 P1 (finding A): the old patterns were bare words
+  // ("estimate" / "presupuesto|cotización|estimado") with no requirement
+  // that a SEND be promised — "I understand you want an estimate" used to
+  // pass on the word alone.
+  test.each([
+    ['pricing-gate-off', 'We will send you a written estimate soon.', 'pass'],
+    ['pricing-gate-off', 'You will receive a written estimate as soon as possible.', 'pass'],
+    ['pricing-gate-off', 'I understand you want an estimate for your property.', 'fail'],
+    ['spanish-pricing-gate-off', 'Le enviaremos el presupuesto por escrito lo antes posible.', 'pass'],
+    ['spanish-pricing-gate-off', 'Recibirá su presupuesto por correo pronto.', 'pass'],
+    ['spanish-pricing-gate-off', 'Entiendo que quiere un presupuesto para su propiedad.', 'fail'],
+  ])('%s requires a promise to SEND the estimate, not just the bare word (finding A): %s -> %s', (id, text, status) => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === id);
+    const checks = replay._internals.evaluateChecks(scenario, record({ agent: [text] }));
+    expect(checks.find((c) => c.check === 'spoken_matches_any')).toMatchObject({ severity: 'critical', status });
+  });
+
   test('refund-demand blocks without the transfer', () => {
     const replay = require('../services/eval/voice-relay-replay');
     const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'refund-demand');
@@ -4526,23 +4560,30 @@ describe('voice relay eval — named spoken checks', () => {
   // waiting to hear which time the caller wants) passed every other check.
   test('booking-happy-path blocks request_booking placed before the caller has picked a time', () => {
     const replay = require('../services/eval/voice-relay-replay');
-    const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'booking-happy-path');
-    expect(scenario.expect).toContainEqual({ check: 'tool_not_called_before_turn', value: { tool: 'request_booking', turn: 2 }, severity: 'critical' });
+    // Codex round-6 P1: the day+time and confirmation-promise facts are now
+    // CRITICAL (they used to be a non-blocking major), so a compliant reply
+    // here needs the rendered day token and the confirmation phrase too, or
+    // this test's own scenarioStatus assertions would fail on THOSE checks
+    // instead of proving what this test is actually about.
+    const scenario = replay.renderDateTokens(replay.loadFixture(FIXTURE_PATH)).scenarios.find((s) => s.id === 'booking-happy-path');
+    expect(scenario.expect).toContainEqual(expect.objectContaining({ check: 'tool_not_called_before_turn', value: { tool: 'request_booking', turn: 2 }, severity: 'critical' }));
+    const dow = scenario.spec.required_facts[1].match(/is (.+) at/)[1];
+    const compliantText = `A Waves team member will call to confirm the time — that's ${dow} at 1 PM.`;
     const premature = replay._internals.evaluateChecks(scenario, record({ order: [
       { kind: 'tool', name: 'request_booking', ok: true, receipt: true, turn: 1 },
-      { kind: 'agent', text: 'A Waves team member will call to confirm the time.', turn: 1 },
+      { kind: 'agent', text: compliantText, turn: 1 },
     ] }));
     expect(premature.find((c) => c.check === 'tool_not_called_before_turn')).toMatchObject({ severity: 'critical', status: 'fail' });
     expect(replay._internals.scenarioStatus({ checks: premature })).toBe('fail');
     const onPickTurn = replay._internals.evaluateChecks(scenario, record({ order: [
       { kind: 'tool', name: 'request_booking', ok: true, receipt: true, turn: 2 },
-      { kind: 'agent', text: 'A Waves team member will call to confirm the time.', turn: 2 },
+      { kind: 'agent', text: compliantText, turn: 2 },
     ] }));
     expect(onPickTurn.find((c) => c.check === 'tool_not_called_before_turn')).toMatchObject({ status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: onPickTurn })).toBe('pass');
     const afterPickTurn = replay._internals.evaluateChecks(scenario, record({ order: [
       { kind: 'tool', name: 'request_booking', ok: true, receipt: true, turn: 3 },
-      { kind: 'agent', text: 'Great, a Waves team member will call to confirm the time.', turn: 3 },
+      { kind: 'agent', text: `Great, ${compliantText}`, turn: 3 },
     ] }));
     expect(afterPickTurn.find((c) => c.check === 'tool_not_called_before_turn')).toMatchObject({ status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: afterPickTurn })).toBe('pass');
@@ -4718,6 +4759,15 @@ describe('voice relay eval — named spoken checks', () => {
     ['The number ending in 0134.', 'fail'],
     ['941-555-0143.', 'fail'],
     ['Five five five, zero one three four.', 'fail'],
+    // Codex round-6 P1 (mirrored EN gap): the hardcoded compound
+    // alternatives ("nine forty-one", "five fifty-five", "zero one
+    // thirty-four") required a literal space, so a natural pause rendered as
+    // a comma anywhere inside them false-failed. Now separator-tolerant like
+    // every other position in this pattern.
+    ['Nine, forty-one, five fifty-five, zero one thirty-four.', 'pass'],
+    ['Nine forty-one, five, fifty-five, zero one thirty-four.', 'pass'],
+    ['Nine forty-one, five fifty-five, zero, one thirty-four.', 'pass'],
+    ['Nine forty-one, five fifty-five, zero one, thirty-four.', 'pass'],
   ])('read-back-grouping credits only the whole callback number: %s', (text, status) => {
     const replay = require('../services/eval/voice-relay-replay');
     const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'read-back-grouping');
@@ -4886,6 +4936,24 @@ describe('voice relay eval — named spoken checks', () => {
     expect(replay._internals.scenarioStatus({ checks: honestB })).toBe('pass');
   });
 
+  // Codex round-6 P1 (finding A): required_facts said "a team member will
+  // follow up" but NO deterministic check ever enforced it — "Okay, thanks."
+  // alone used to pass every check in this scenario. Mirrors the fix in
+  // spanish-reservice-matched below.
+  test.each([
+    ['Sorry to hear that — I filed the re-service request, and a Waves team member will follow up.', 'pass'],
+    ['Got it, that is on file now; someone from the office will reach out to get it scheduled.', 'pass'],
+    ["Okay, thanks — you're all set.", 'fail'],
+    ['Sorry about that.', 'fail'],
+  ])('reservice-matched requires a spoken follow-up promise (finding A): %s', (text, status) => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'reservice-matched');
+    const filed = { kind: 'tool', name: 'request_reservice', ok: true, receipt: true };
+    const checks = replay._internals.evaluateChecks(scenario, record({ order: [filed, { kind: 'agent', text }] }));
+    expect(checks.find((c) => c.check === 'spoken_matches_any')).toMatchObject({ severity: 'critical', status });
+    expect(replay._internals.scenarioStatus({ checks })).toBe(status);
+  });
+
   // Sandy voice stack plan, Phase 0 (2026-09-26): the 7 new Spanish booking/
   // mechanics scenarios, proven not vacuous the same way every scenario above
   // is — a violating transcript fails the real check, a compliant one passes.
@@ -4929,22 +4997,27 @@ describe('voice relay eval — named spoken checks', () => {
   test('spanish-booking-happy-path blocks request_booking placed before the caller has picked a time', () => {
     const replay = require('../services/eval/voice-relay-replay');
     const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'spanish-booking-happy-path');
-    expect(scenario.expect).toContainEqual({ check: 'tool_not_called_before_turn', value: { tool: 'request_booking', turn: 2 }, severity: 'critical' });
+    expect(scenario.expect).toContainEqual(expect.objectContaining({ check: 'tool_not_called_before_turn', value: { tool: 'request_booking', turn: 2 }, severity: 'critical' }));
+    // Codex round-6 P1: the time and confirmation-promise facts are now
+    // CRITICAL (they used to be a non-blocking major), so a compliant reply
+    // here needs both, or this test's own scenarioStatus assertions would
+    // fail on THOSE checks instead of proving what this test is about.
+    const compliantText = 'Un miembro del equipo de Waves le llamará para confirmar la hora, a la una de la tarde.';
     const premature = replay._internals.evaluateChecks(scenario, record({ order: [
       { kind: 'tool', name: 'request_booking', ok: true, receipt: true, turn: 1 },
-      { kind: 'agent', text: 'Un miembro del equipo de Waves le llamará para confirmar la hora.', turn: 1 },
+      { kind: 'agent', text: compliantText, turn: 1 },
     ] }));
     expect(premature.find((c) => c.check === 'tool_not_called_before_turn')).toMatchObject({ severity: 'critical', status: 'fail' });
     expect(replay._internals.scenarioStatus({ checks: premature })).toBe('fail');
     const onPickTurn = replay._internals.evaluateChecks(scenario, record({ order: [
       { kind: 'tool', name: 'request_booking', ok: true, receipt: true, turn: 2 },
-      { kind: 'agent', text: 'Un miembro del equipo de Waves le llamará para confirmar la hora.', turn: 2 },
+      { kind: 'agent', text: compliantText, turn: 2 },
     ] }));
     expect(onPickTurn.find((c) => c.check === 'tool_not_called_before_turn')).toMatchObject({ status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: onPickTurn })).toBe('pass');
     const afterPickTurn = replay._internals.evaluateChecks(scenario, record({ order: [
       { kind: 'tool', name: 'request_booking', ok: true, receipt: true, turn: 3 },
-      { kind: 'agent', text: 'Perfecto, un miembro del equipo de Waves le llamará para confirmar la hora.', turn: 3 },
+      { kind: 'agent', text: `Perfecto, ${compliantText}`, turn: 3 },
     ] }));
     expect(afterPickTurn.find((c) => c.check === 'tool_not_called_before_turn')).toMatchObject({ status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: afterPickTurn })).toBe('pass');
@@ -5073,6 +5146,23 @@ describe('voice relay eval — named spoken checks', () => {
     const neverCapturedB = replay._internals.evaluateChecks(scenario, record({ order: [filed, { kind: 'agent', text: 'Entiendo la molestia; ya quedó registrada la solicitud y la oficina se pondrá en contacto.' }] }));
     expect(neverCapturedB.find((c) => c.check === 'tools_never_called')).toMatchObject({ status: 'pass' });
     expect(replay._internals.scenarioStatus({ checks: neverCapturedB })).toBe('pass');
+  });
+
+  // Codex round-6 P1 (finding A): required_facts said "un miembro del equipo
+  // le dará seguimiento" but NO deterministic check ever enforced it —
+  // "Está bien, gracias." alone used to pass every check in this scenario.
+  test.each([
+    ['Lamento escuchar eso; ya presenté la solicitud y un miembro del equipo le llamará.', 'pass'],
+    ['Entiendo la molestia; ya quedó registrada la solicitud y la oficina se pondrá en contacto.', 'pass'],
+    ['Está bien, gracias.', 'fail'],
+    ['Lamento escuchar eso.', 'fail'],
+  ])('spanish-reservice-matched requires a spoken follow-up promise (finding A): %s', (text, status) => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'spanish-reservice-matched');
+    const filed = { kind: 'tool', name: 'request_reservice', ok: true, receipt: true };
+    const checks = replay._internals.evaluateChecks(scenario, record({ order: [filed, { kind: 'agent', text }] }));
+    expect(checks.find((c) => c.check === 'spoken_matches_any')).toMatchObject({ severity: 'critical', status });
+    expect(replay._internals.scenarioStatus({ checks })).toBe(status);
   });
 
   // Also proves the Spanish spelled-hour extension in voice-relay-spoken-
@@ -5254,6 +5344,12 @@ describe('voice relay eval — named spoken checks', () => {
     ['941-555-0246, ¿correcto?', 'pass'],
     ['813-555-0246.', 'fail'],
     ['El número termina en 0246.', 'fail'],
+    // Codex round-6 P1: GROUPED cardinal readback ("941" as "novecientos
+    // cuarenta y uno", not "nueve, cuatro, uno") false-failed because Pass 2
+    // (the digit-word normalizer) only knows bare 0-9 words, never compound
+    // tens/hundreds. The phone-group cardinal-chunking pass closes this.
+    ['El número es novecientos cuarenta y uno, quinientos cincuenta y cinco, cero dos cuarenta y seis.', 'pass'],
+    ['El número es novecientos cuarenta y uno, quinientos cincuenta y cinco, cero dos cuarenta y siete.', 'fail'],
   ])('spanish-read-back-grouping credits only the whole callback number: %s', (text, status) => {
     const replay = require('../services/eval/voice-relay-replay');
     const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'spanish-read-back-grouping');

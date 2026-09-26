@@ -167,6 +167,93 @@ function convertPriceWordRuns(text) {
   });
 }
 
+// ── Pass 4: grouped Spanish CARDINALS (phone-number style) → digit groups ──
+
+// Codex round-6 P1: a caller/agent reads a phone number back in NATURAL
+// GROUPS ("novecientos cuarenta y uno, quinientos cincuenta y cinco, cero
+// dos cuarenta y seis" = 941, 555, 0246), not only as single spoken digits
+// (Pass 2 above already handles "nueve cuatro uno…"). Pass 2's DIGIT_WORD_SRC
+// only knows 0–9, so a compound like "cuarenta y seis" (46) or "novecientos
+// cuarenta y uno" (941) never matched it. This pass chunks a run of Spanish
+// cardinal-number tokens into the maximal valid numbers Spanish grammar
+// actually allows (hundreds, optionally + tens (+"y"+ units) or + a bare
+// unit directly; a tens word alone, optionally +"y"+ units; a teens/veinti
+// word or a bare digit alone; "cero" always its own chunk) and concatenates
+// their digits — but ONLY when that concatenation is unambiguously
+// phone-shaped: 7–11 digits from 3 or more chunks. A price ("noventa y
+// nueve dólares"), a quantity ("entre dos y cuatro habitaciones") or an hour
+// either has too FEW chunks (a single price or a single hour+minute phrase
+// is 1 chunk) or is walled off by Pass 1/3's own currency/duration word
+// immediately breaking the run — so neither is ever swept in by this pass.
+function chunkPhoneCardinals(tokens) {
+  const chunks = [];
+  let current = null; // { value, stage: 'centena' | 'decena' }
+  let pendingY = false;
+  const closeCurrent = () => { if (current !== null) { chunks.push(current.value); current = null; } };
+  for (const raw of tokens) {
+    const w = strip(raw);
+    if (w === 'y') {
+      // "y" only ever glues a completed tens word to its trailing unit
+      // ("cuarenta Y uno") — anywhere else ("dos Y cuatro", a range
+      // connector) this is not a phone-cardinal run at all.
+      if (current && current.stage === 'decena') { pendingY = true; continue; }
+      return null;
+    }
+    if (pendingY && !(w in UNIDADES)) return null;
+    if (w === 'cero') {
+      closeCurrent();
+      chunks.push(0);
+      pendingY = false;
+      continue;
+    }
+    if (w in CENTENAS) {
+      closeCurrent();
+      current = { value: CENTENAS[w], stage: 'centena' };
+      pendingY = false;
+      continue;
+    }
+    if (w in DECENAS) {
+      if (current && current.stage === 'centena') { current.value += DECENAS[w]; current.stage = 'decena'; } else {
+        closeCurrent();
+        current = { value: DECENAS[w], stage: 'decena' };
+      }
+      pendingY = false;
+      continue;
+    }
+    if (w in UNIDADES) {
+      // A units word right after a units word (nothing pending) is a NEW
+      // chunk — Spanish never concatenates two bare units into one number.
+      if (pendingY && current && current.stage === 'decena') { current.value += UNIDADES[w]; closeCurrent(); } else if (current && current.stage === 'centena') { current.value += UNIDADES[w]; closeCurrent(); } else {
+        closeCurrent();
+        chunks.push(UNIDADES[w]);
+      }
+      pendingY = false;
+      continue;
+    }
+    return null; // "mil" or anything else — not a valid cardinal chunk shape
+  }
+  closeCurrent();
+  return pendingY ? null : chunks; // a trailing "y" with nothing after it
+}
+
+const PHONE_GROUP_TOKEN_SRC = `(?:${NUMBER_WORD_ALT})`;
+// A run of 3+ cardinal tokens, comma/space (or "y") separated, not
+// immediately followed by a currency word — a real phone-number readback is
+// never adjacent to "dólares"/"pesos", and this keeps a spelled-out price
+// run ("noventa y nueve dólares") out even if grammar alone wouldn't.
+const PHONE_GROUP_RUN_RE = new RegExp(`\\b${PHONE_GROUP_TOKEN_SRC}\\b(?:(?:\\s+y\\s+|[\\s,]+)${PHONE_GROUP_TOKEN_SRC}\\b){2,30}(?!\\s*(?:d[oó]lares?|pesos?|por\\s*ciento|%))`, 'gi');
+
+function convertPhoneCardinalGroups(text) {
+  return text.replace(PHONE_GROUP_RUN_RE, (match) => {
+    const tokens = match.trim().split(/[\s,]+/).filter(Boolean);
+    const chunks = chunkPhoneCardinals(tokens);
+    if (!chunks || chunks.length < 3) return match;
+    const digits = chunks.join('');
+    if (digits.length < 7 || digits.length > 11) return match;
+    return chunks.join(' ');
+  });
+}
+
 /**
  * Normalizes spelled-out Spanish numbers, hour+minute phrases, and spoken
  * phone-digit strings in agent-spoken text to plain digits, so the existing
@@ -184,11 +271,12 @@ function normalizeSpanishSpokenText(text) {
   out = convertHourMinutePhrases(out);
   out = convertDigitStrings(out);
   out = convertPriceWordRuns(out);
+  out = convertPhoneCardinalGroups(out);
   return out;
 }
 
 module.exports = {
   normalizeSpanishSpokenText,
   parseSpanishCardinal,
-  _internals: { convertHourMinutePhrases, convertDigitStrings, convertPriceWordRuns, UNIDADES, DECENAS, CENTENAS },
+  _internals: { convertHourMinutePhrases, convertDigitStrings, convertPriceWordRuns, convertPhoneCardinalGroups, chunkPhoneCardinals, UNIDADES, DECENAS, CENTENAS },
 };
