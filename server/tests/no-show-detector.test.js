@@ -1583,13 +1583,16 @@ describe('callCommitmentInstant (when the customer heard the promise) (round-5 P
   // updated_at is the closest stored terminal stamp, trusted up to a bounded
   // ringing allowance past the talk time — later processing writes move it
   // too (round-10 P2).
-  test('an outbound call is measured from its recorded bridge, and the result never drifts', () => {
+  test('an outbound call is measured from created_at, and the result never drifts', () => {
     const created = '2026-09-10T10:00:00Z';
-    // bridged_at is when the two legs were actually connected — the same
-    // convention call-commitments.js's callEndedAt uses — so the end is
-    // bridge + talk time, measured rather than guessed (round-11 P2).
+    // bridged_at is when the two legs were actually connected, but its
+    // duration_seconds is the parent leg's Twilio CallDuration, measured
+    // from created_at — it already spans the pre-bridge wait, so the end
+    // is created_at + duration, not bridge + duration (that would
+    // double-count the wait — the bug call-commitments.js's callEndedAt
+    // fixed). A LONG pre-bridge wait still ends at created_at + duration.
     expect(callCommitmentInstant({ created_at: created, duration_seconds: 600, direction: 'outbound-api',
-      bridged_at: '2026-09-10T10:01:30Z' }).toISOString()).toBe('2026-09-10T10:11:30.000Z');
+      bridged_at: '2026-09-10T10:01:30Z' }).toISOString()).toBe('2026-09-10T10:10:00.000Z');
     // Inbound with no bridge: created_at + duration.
     expect(callCommitmentInstant({ created_at: created, duration_seconds: 600, direction: 'inbound' }).toISOString())
       .toBe('2026-09-10T10:10:00.000Z');

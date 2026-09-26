@@ -101,6 +101,11 @@ function taskLaneCarriesCallbackSql(alias) {
           -- (and wasn't completed) no longer suppresses the callback row,
           -- or the obligation would appear in neither section.
           AND (dt.deadline > now() - interval '30 days' OR dt.status = 'completed')
+          -- End-of-call boundary + 45-minute window: a bridged row's end is
+          -- created_at + duration, not bridge + duration (bridged_at only
+          -- marks when staff connected the customer leg; duration_seconds
+          -- already spans the pre-bridge wait) — same convention as
+          -- call-commitments.js's callEndedAt.
           AND (EXISTS (
               SELECT 1 FROM csr_call_scores dcs
               WHERE dcs.id = dt.call_score_id
@@ -108,7 +113,7 @@ function taskLaneCarriesCallbackSql(alias) {
                 AND COALESCE(${alias}.twilio_call_sid, '') <> ''
             )
             OR (dt.customer_id IS NOT NULL AND dt.customer_id = ${alias}.customer_id
-              AND dt.created_at BETWEEN ${alias}.created_at AND CASE WHEN ${alias}.bridged_at IS NOT NULL THEN ${alias}.bridged_at + make_interval(secs => COALESCE(${alias}.duration_seconds, 0)) WHEN ${alias}.direction = 'inbound' THEN ${alias}.created_at + make_interval(secs => COALESCE(${alias}.duration_seconds, 0)) ELSE ${alias}.created_at END + interval '45 minutes'))
+              AND dt.created_at BETWEEN ${alias}.created_at AND CASE WHEN ${alias}.bridged_at IS NOT NULL THEN ${alias}.created_at + make_interval(secs => COALESCE(${alias}.duration_seconds, 0)) WHEN ${alias}.direction = 'inbound' THEN ${alias}.created_at + make_interval(secs => COALESCE(${alias}.duration_seconds, 0)) ELSE ${alias}.created_at END + interval '45 minutes'))
       )`;
 }
 
@@ -198,7 +203,13 @@ async function loadCallbackCalls(cutoff = new Date(), { includeExpired = false }
       AND NOT EXISTS (
         SELECT 1 FROM call_log oc
         WHERE oc.direction = 'outbound'
-          AND oc.created_at > CASE WHEN c.bridged_at IS NOT NULL THEN c.bridged_at + make_interval(secs => COALESCE(c.duration_seconds, 0)) WHEN c.direction = 'inbound' THEN c.created_at + make_interval(secs => COALESCE(c.duration_seconds, 0)) ELSE c.created_at END
+          -- End-of-call boundary (call-commitments.js's callEndedAt): a
+          -- bridged row's duration_seconds is the parent leg's Twilio
+          -- CallDuration, measured from created_at, so its end is
+          -- created_at + duration too — never bridge + duration, which
+          -- would double-count the pre-bridge wait and miss a clearing
+          -- call made shortly after the real hang-up.
+          AND oc.created_at > CASE WHEN c.bridged_at IS NOT NULL THEN c.created_at + make_interval(secs => COALESCE(c.duration_seconds, 0)) WHEN c.direction = 'inbound' THEN c.created_at + make_interval(secs => COALESCE(c.duration_seconds, 0)) ELSE c.created_at END
           -- Heuristic: the stored duration is the PARENT leg (admin
           -- answer), so a short pickup-and-abandon still counts positive;
           -- >= 60s approximates a real customer conversation (leg-level
@@ -231,7 +242,10 @@ async function loadCallbackCalls(cutoff = new Date(), { includeExpired = false }
                                   AND os.created_at + interval '2 minutes'
           )
           AND os.status IN ('queued', 'sent', 'delivered')
-          AND os.created_at > CASE WHEN c.bridged_at IS NOT NULL THEN c.bridged_at + make_interval(secs => COALESCE(c.duration_seconds, 0)) WHEN c.direction = 'inbound' THEN c.created_at + make_interval(secs => COALESCE(c.duration_seconds, 0)) ELSE c.created_at END
+          -- Same end-of-call boundary as the outbound-call leg above: a
+          -- bridged row's end is created_at + duration, not bridge +
+          -- duration (call-commitments.js's callEndedAt).
+          AND os.created_at > CASE WHEN c.bridged_at IS NOT NULL THEN c.created_at + make_interval(secs => COALESCE(c.duration_seconds, 0)) WHEN c.direction = 'inbound' THEN c.created_at + make_interval(secs => COALESCE(c.duration_seconds, 0)) ELSE c.created_at END
           -- Same identity rule as the outbound-call leg (codex r31): a
           -- LINKED callback is cleared only by a text linked to the same
           -- customer — an unlinked manual send on a shared number may

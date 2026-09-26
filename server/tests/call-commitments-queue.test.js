@@ -63,10 +63,16 @@ describe('isOverdue / selectOverdue', () => {
     expect(isOverdue({ ...base, created_at: hoursAgo(OVERDUE_IMPLICIT_ESTIMATE_HOURS + 1) }, NOW)).toBe(true);
     expect(isOverdue({ ...base, source: 'ai', created_at: hoursAgo(1) }, NOW)).toBe(true);
   });
-  test('callEndedAt is the promised-estimate watcher\'s end-of-call boundary: ring + duration for inbound rows, bridge + duration when bridged, created_at otherwise', () => {
+  test('callEndedAt is the promised-estimate watcher\'s end-of-call boundary: ring + duration for inbound rows, created_at + duration when bridged, created_at otherwise', () => {
     const created = '2026-09-05T14:00:00Z';
     expect(callEndedAt({ direction: 'inbound', created_at: created, duration_seconds: 90 }).toISOString()).toBe('2026-09-05T14:01:30.000Z');
-    expect(callEndedAt({ direction: 'inbound', created_at: created, bridged_at: '2026-09-05T14:00:20Z', duration_seconds: 90 }).toISOString()).toBe('2026-09-05T14:01:50.000Z');
+    // A bridged row's duration already spans the pre-bridge wait (it's the
+    // parent leg's Twilio CallDuration, measured from created_at), so the
+    // end is created_at + duration, not bridged_at + duration.
+    expect(callEndedAt({ direction: 'inbound', created_at: created, bridged_at: '2026-09-05T14:00:20Z', duration_seconds: 90 }).toISOString()).toBe('2026-09-05T14:01:30.000Z');
+    // A bridged outbound row with a long pre-bridge wait: still
+    // created_at + duration, never bridge + duration.
+    expect(callEndedAt({ direction: 'outbound', created_at: created, bridged_at: '2026-09-05T14:05:00Z', duration_seconds: 90 }).toISOString()).toBe('2026-09-05T14:01:30.000Z');
     expect(callEndedAt({ direction: 'outbound', created_at: created, duration_seconds: 90 }).toISOString()).toBe('2026-09-05T14:00:00.000Z');
     expect(callEndedAt({ direction: 'inbound', created_at: created, duration_seconds: null }).toISOString()).toBe('2026-09-05T14:00:00.000Z');
     expect(callEndedAt({ direction: 'inbound', created_at: null })).toBeNull();
