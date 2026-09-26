@@ -173,6 +173,16 @@ function measureRoutePerformance(plan, rows) {
     serviceErrorByEvidence,
     lastRecordedCompletionMinute: stops.length && stops.every(stop => stop.recordedCompletionMinute != null)
       ? Math.max(...stops.map(stop => stop.recordedCompletionMinute)) : null,
+    // Straight passthrough of the SAVED snapshot's own planned numbers (the
+    // day-quality byTech object route-reorder.js/quality-after-change.js
+    // spread into the ledger row) — day-scorecard.js's PLANNED-as-of-the-
+    // day-before column reads these instead of recomputing them, so the past
+    // side of the scorecard can never disagree with what was actually saved.
+    plannedServiceMinutes: Number.isFinite(plan.serviceMinutes) ? plan.serviceMinutes : null,
+    plannedDriveMinutes: Number.isFinite(plan.modeledDriveMinutes) ? plan.modeledDriveMinutes : null,
+    plannedWaitingMinutes: Number.isFinite(plan.modeledWaitingMinutes) ? plan.modeledWaitingMinutes : null,
+    plannedReturnMinuteBeforeBreaks: Number.isFinite(plan.modeledReturnMinuteBeforeBreaks) ? plan.modeledReturnMinuteBeforeBreaks : null,
+    driveModel: plan.drive_model || null,
     actualDriveMinutes: null, actualWaitingMinutes: null, actualReturnMinute: null,
     stops,
   };

@@ -1,0 +1,151 @@
+// client/src/components/dispatch/DayScorecardPanel.jsx
+// Admin-only per-day drive-vs-stops scorecard (GATE_ROUTE_SCORECARD). Rendered
+// by AdminDispatchPage only after its own /status check reports the gate on.
+// Read-only: one GET, no writes, no customer surface. V2 monochrome tokens,
+// same alert-fg-for-genuine-alerts rule as InsightsPanelV2 — this panel
+// raises no alerts of its own, it just reports numbers.
+import { useState, useEffect } from 'react';
+import { Button, Card, CardBody, Table, THead, TBody, TR, TH, TD, cn } from '../ui';
+import { adminFetch } from '../../lib/adminFetch';
+import { etDateString, addETDays } from '../../lib/timezone';
+
+const DEFAULT_FROM = () => etDateString(addETDays(new Date(), -7));
+const DEFAULT_TO = () => etDateString(addETDays(new Date(), 7));
+
+function fmtMinutes(value) {
+  if (!Number.isFinite(value)) return 'unknown';
+  const hours = Math.floor(Math.abs(value) / 60);
+  const mins = Math.round(Math.abs(value) % 60);
+  const sign = value < 0 ? '-' : '';
+  return hours > 0 ? `${sign}${hours}h ${mins}m` : `${sign}${mins}m`;
+}
+
+function fmtClock(minuteOfDay) {
+  if (!Number.isFinite(minuteOfDay)) return 'unknown';
+  const hour24 = Math.floor(minuteOfDay / 60) % 24;
+  const mins = Math.round(minuteOfDay % 60);
+  const hour12 = hour24 % 12 === 0 ? 12 : hour24 % 12;
+  return `${hour12}:${String(mins).padStart(2, '0')} ${hour24 < 12 ? 'AM' : 'PM'}`;
+}
+
+function fmtPercent(value) {
+  return Number.isFinite(value) ? `${Math.round(value * 100)}%` : 'unknown';
+}
+
+function fmtRate(value) {
+  return Number.isFinite(value) ? value.toFixed(1) : 'unknown';
+}
+
+function fmtCount(value) {
+  return Number.isFinite(value) ? value : 'unknown';
+}
+
+// One metric column shared by the planned and actual sub-rows so the two
+// never drift into different formatting.
+const METRICS = [
+  { key: 'stops', label: 'Stops', format: (m) => fmtCount(m?.physicalStops ?? m?.stops) },
+  { key: 'onSiteMinutes', label: 'On-site', format: (m) => fmtMinutes(m?.onSiteMinutes) },
+  { key: 'driveMinutes', label: 'Drive', format: (m) => fmtMinutes(m?.driveMinutes) },
+  { key: 'driveShare', label: 'Drive share', format: (m) => fmtPercent(m?.driveShare) },
+  { key: 'stopsPerHour', label: 'Stops/hr', format: (m) => fmtRate(m?.stopsPerHour) },
+  { key: 'waitMinutes', label: 'Wait', format: (m) => fmtMinutes(m?.waitMinutes) },
+  { key: 'returnMinute', label: 'Return', format: (m) => fmtClock(m?.returnMinute) },
+];
+
+// Two stacked sub-rows (Planned / Actual) for a past tech-day, one row for a
+// future/today tech-day (nothing recorded yet). Date and, when more than one
+// technician is in range, the technician name are rowSpan'd across both.
+function TechDayRows({ date, row, isPast, showTechName }) {
+  const span = isPast ? 2 : 1;
+  return (
+    <>
+      <TR>
+        <TD className="font-medium text-ink-primary" rowSpan={span}>{date}</TD>
+        {showTechName && <TD className="text-ink-secondary" rowSpan={span}>{row.technician || row.technicianId}</TD>}
+        <TD className="text-11 text-ink-tertiary">{isPast ? 'Planned' : 'Board'}</TD>
+        {METRICS.map((metric) => <TD key={metric.key} nums align="right">{metric.format(row.planned)}</TD>)}
+      </TR>
+      {isPast && (
+        <TR>
+          <TD className="text-11 text-ink-tertiary">Actual</TD>
+          {METRICS.map((metric) => <TD key={metric.key} nums align="right">{metric.format(row.actual)}</TD>)}
+        </TR>
+      )}
+    </>
+  );
+}
+
+export default function DayScorecardPanel() {
+  const [range] = useState({ from: DEFAULT_FROM(), to: DEFAULT_TO() });
+  const [request, setRequest] = useState({ loading: true, data: null, error: false });
+  const [reload, setReload] = useState(0);
+
+  useEffect(() => {
+    let active = true;
+    setRequest({ loading: true, data: null, error: false });
+    adminFetch(`/admin/route-scorecard?from=${range.from}&to=${range.to}`)
+      .then((res) => {
+        if (!res.ok) throw new Error('Failed to load the scorecard');
+        return res.json();
+      })
+      .then((data) => { if (active) setRequest({ loading: false, data, error: false }); })
+      .catch(() => { if (active) setRequest({ loading: false, data: null, error: true }); });
+    return () => { active = false; };
+  }, [range.from, range.to, reload]);
+
+  if (request.loading) {
+    return <div role="status" className="text-14 text-ink-secondary py-6 text-center">Loading scorecard…</div>;
+  }
+  if (request.error) {
+    return (
+      <Card><CardBody className="p-4 text-center">
+        <div role="alert" className="text-14 text-alert-fg mb-3">Failed to load the scorecard</div>
+        <Button variant="secondary" onClick={() => setReload((value) => value + 1)}>Retry</Button>
+      </CardBody></Card>
+    );
+  }
+
+  const days = request.data?.days || [];
+  const techCounts = days.map((day) => day.byTech.length);
+  const showTechName = Math.max(0, ...techCounts) > 1;
+
+  return (
+    <div>
+      <div className="text-11 text-ink-tertiary mb-3">
+        {range.from} – {range.to}. Future/today rows are planned only. Past rows compare the saved
+        pre-service plan with recorded work — a null shows as "unknown", never 0.
+      </div>
+      <Card>
+        <CardBody className="p-0">
+          <Table>
+            <THead>
+              <TR>
+                <TH>Date</TH>
+                {showTechName && <TH>Technician</TH>}
+                <TH>Basis</TH>
+                {METRICS.map((metric) => <TH key={metric.key} align="right">{metric.label}</TH>)}
+              </TR>
+            </THead>
+            <TBody>
+              {days.flatMap((day) => day.byTech.map((row) => (
+                <TechDayRows
+                  key={`${day.date}|${row.technicianId}`}
+                  date={day.date}
+                  row={row}
+                  isPast={row.actual != null}
+                  showTechName={showTechName}
+                />
+              )))}
+              {!days.length && (
+                <TR><TD colSpan={2 + METRICS.length + (showTechName ? 1 : 0)} className="text-13 text-ink-tertiary py-6 text-center">No scheduled days in range</TD></TR>
+              )}
+            </TBody>
+          </Table>
+        </CardBody>
+      </Card>
+      <div className={cn('text-11 text-ink-tertiary mt-3')}>
+        Drive model: {request.data?.driveModel === 'calibrated' ? 'calibrated (fitted from real trips)' : 'legacy (straight-line estimate)'}.
+      </div>
+    </div>
+  );
+}

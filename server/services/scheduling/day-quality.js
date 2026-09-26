@@ -136,10 +136,39 @@ function measureDayQuality(RouteOptimizer, stops, {
   };
 }
 
+// The one stop-select list this measurement reads. Exported so a read-only
+// consumer that needs the SAME columns for its own raw query (day-scorecard's
+// physical-stop collapsing, which needs premise + coords + visit_id +
+// customer_id for isCoVisitPair) can share it instead of drifting from it.
+function dayStopSelect(conn) {
+  const { guardedCoordSelects } = require('./day-stops');
+  return ['scheduled_services.id', 'scheduled_services.technician_id', 'scheduled_services.route_order',
+    'scheduled_services.customer_id', 'scheduled_services.scheduled_date', 'scheduled_services.reservation_service_mix',
+    'scheduled_services.service_address_line1', 'scheduled_services.service_address_line2',
+    'scheduled_services.service_address_city', 'scheduled_services.service_address_zip',
+    {
+      customer_address_line1: 'customers.address_line1',
+      customer_address_line2: 'customers.address_line2',
+      customer_city: 'customers.city',
+      customer_state: 'customers.state',
+      customer_zip: 'customers.zip',
+    },
+    'scheduled_services.window_start', 'scheduled_services.window_end', 'scheduled_services.time_window',
+    'scheduled_services.status', 'scheduled_services.reservation_expires_at',
+    'scheduled_services.created_at', 'scheduled_services.visit_id', 'scheduled_services.estimated_duration_minutes',
+    // Planning-minute inputs (scheduling/planning-minutes.js) — without
+    // them workDuration's plannedWorkMinutes always reads an unnamed
+    // service and falls back to the legacy window/estimate rule, so
+    // these quality totals silently disagreed with the picker's real
+    // planned minutes under GATE_SCHEDULING_CAPACITY (Codex r1 P2).
+    'scheduled_services.service_type', 'scheduled_services.is_recurring', 'scheduled_services.is_callback',
+    ...guardedCoordSelects(conn)];
+}
+
 async function getScheduleQualityMeasurements(input = {}, conn = require('../../models/db'), now = new Date()) {
   const { etDateString, parseETDateTime, addETDays, validCalendarDate } = require('../../utils/datetime-et');
   const { etDateDiffDays } = require('../recurring-appointment-seeder');
-  const { dayStopsQuery, guardedCoordSelects } = require('./day-stops');
+  const { dayStopsQuery } = require('./day-stops');
   const { applyAssignable } = require('../technician-eligibility');
   const { getBlackoutLayers } = require('./blackout-dates');
   const RouteOptimizer = require('../route-optimizer');
@@ -170,27 +199,7 @@ async function getScheduleQualityMeasurements(input = {}, conn = require('../../
   for (let index = 0; index <= etDateDiffDays(from, to); index++) {
     const date = etDateString(addETDays(parseETDateTime(`${from}T12:00`), index));
     const stops = await dayStopsQuery(conn, { dateStr: date, excludeStatuses: QUALITY_EXCLUDED_STATUSES,
-      select: ['scheduled_services.id', 'scheduled_services.technician_id', 'scheduled_services.route_order',
-        'scheduled_services.customer_id', 'scheduled_services.scheduled_date', 'scheduled_services.reservation_service_mix',
-        'scheduled_services.service_address_line1', 'scheduled_services.service_address_line2',
-        'scheduled_services.service_address_city', 'scheduled_services.service_address_zip',
-        {
-          customer_address_line1: 'customers.address_line1',
-          customer_address_line2: 'customers.address_line2',
-          customer_city: 'customers.city',
-          customer_state: 'customers.state',
-          customer_zip: 'customers.zip',
-        },
-        'scheduled_services.window_start', 'scheduled_services.window_end', 'scheduled_services.time_window',
-        'scheduled_services.status', 'scheduled_services.reservation_expires_at',
-        'scheduled_services.created_at', 'scheduled_services.visit_id', 'scheduled_services.estimated_duration_minutes',
-        // Planning-minute inputs (scheduling/planning-minutes.js) — without
-        // them workDuration's plannedWorkMinutes always reads an unnamed
-        // service and falls back to the legacy window/estimate rule, so
-        // these quality totals silently disagreed with the picker's real
-        // planned minutes under GATE_SCHEDULING_CAPACITY (Codex r1 P2).
-        'scheduled_services.service_type', 'scheduled_services.is_recurring', 'scheduled_services.is_callback',
-        ...guardedCoordSelects(conn)],
+      select: dayStopSelect(conn),
     }).whereRaw('(scheduled_services.reservation_expires_at IS NULL OR scheduled_services.reservation_expires_at > NOW())');
     const unallocated = stops.filter(stop => !techs.some(tech => tech.id === stop.technician_id));
     const closed = blackouts.dates.has(date);
@@ -226,4 +235,4 @@ async function getScheduleQualityMeasurements(input = {}, conn = require('../../
 }
 
 module.exports = {
-  QUALITY_EXCLUDED_STATUSES, measureDayQuality, getScheduleQualityMeasurements };
+  QUALITY_EXCLUDED_STATUSES, measureDayQuality, getScheduleQualityMeasurements, dayStopSelect };
