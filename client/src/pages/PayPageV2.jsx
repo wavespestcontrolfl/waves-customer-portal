@@ -98,7 +98,7 @@ import DocumentActionBar from '../components/DocumentActionBar';
 import SaveCardConsent from '../components/billing/SaveCardConsent';
 import { computeCardTotal, DEFAULT_CARD_SURCHARGE_RATE } from '../lib/cardSurcharge';
 import { formatInvoiceDate, isInvoiceDueDateOverdue } from '../lib/invoiceDates';
-import { microdepositDetailFromNextAction, microdepositGuidance } from '../lib/microdeposit';
+import { microdepositDetailFromNextAction, microdepositGuidance, microdepositSavedPhrases } from '../lib/microdeposit';
 import { getStripe } from '../lib/stripeLoader';
 import { fetchWithNetworkRetry } from '../lib/fetchRetry';
 
@@ -1783,7 +1783,7 @@ function SetupMethodForm({ publishableKey, clientSecret, setupIntentId, token, o
       // ACH micro-deposit verification finishes days later — the webhook
       // completes enrollment then; show the pending guidance now.
       if (setupIntent && setupIntent.status !== 'succeeded') {
-        onBankPending?.();
+        onBankPending?.(setupIntent.next_action?.verify_with_microdeposits || null);
         return;
       }
       const res = await fetch(`${API_BASE}/pay/${token}/setup-complete`, {
@@ -2521,9 +2521,10 @@ export default function PayPageV2() {
                 {setupCapture.status === 'bank-pending' && (
                   <p style={{ margin: 0, fontSize: FS.bodyLg, color: DOC.ink, lineHeight: LH.body }}>
                     Your bank needs to be verified first: in the next 1–2 business days your bank
-                    statement will show two small deposits from Stripe — confirm those amounts using
-                    the link in the email Stripe sent you, and your payment method will be saved and
-                    enabled automatically. Nothing else to do here.
+                    statement will show {microdepositSavedPhrases(setupCapture.microdepositType).deposits} from
+                    Stripe — {microdepositSavedPhrases(setupCapture.microdepositType).confirmStep} using the link
+                    in the email Stripe sent you, and your payment method will be saved and enabled
+                    automatically. Nothing else to do here.
                   </p>
                 )}
                 {setupCapture.status === 'ready' && (
@@ -2544,7 +2545,7 @@ export default function PayPageV2() {
                       setSetupCapture({ status: 'done' });
                       setData((prev) => (prev?.invoice ? { ...prev, invoice: { ...prev.invoice, captureNeeded: false } } : prev));
                     }}
-                    onBankPending={() => setSetupCapture({ status: 'bank-pending' })}
+                    onBankPending={(vwm) => setSetupCapture({ status: 'bank-pending', microdepositType: vwm?.microdeposit_type || null })}
                     onAchBlocked={() => setSetupCapture({ status: 'minting' })}
                   />
                 )}
