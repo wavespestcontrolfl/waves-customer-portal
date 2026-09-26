@@ -135,6 +135,10 @@ describe('completion balance sweep', () => {
       maxAuthorizedChargeCents: 10000,
       requireAutopayForCustomerId: 'cust-1',
       requireSelfPayScheduledServiceId: 'svc-old-1',
+      // Linked bill: the performed-visit verdict is re-checked under the
+      // charge's visit lock, and the invoice must still be that visit's.
+      requireCompletedVisit: true,
+      requireInvoiceScheduledServiceBinding: true,
       requireSelfPayCustomerId: 'cust-1',
       refuseWhenDunningStopped: true,
     });

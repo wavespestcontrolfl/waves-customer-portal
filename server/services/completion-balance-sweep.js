@@ -212,6 +212,12 @@ async function runCompletionBalanceSweep({ customerId, excludeInvoiceId, payment
         maxAuthorizedChargeCents: Math.round(invoiceAmountDue(inv) * 100),
         requireAutopayForCustomerId: customerId,
         requireSelfPayScheduledServiceId: inv.scheduled_service_id || null,
+        // The performed-visit verdict above is binding under the charge's
+        // visit lock: a visit reopened or cancelled mid-sweep refuses, and
+        // the invoice must still be that visit's bill.
+        ...(inv.scheduled_service_id
+          ? { requireCompletedVisit: true, requireInvoiceScheduledServiceBinding: true }
+          : {}),
         // Binding default-payer check for ad-hoc invoices with no visit —
         // the visit-keyed guard has nothing to key on there (pre-push r2 P0).
         requireSelfPayCustomerId: customerId,
