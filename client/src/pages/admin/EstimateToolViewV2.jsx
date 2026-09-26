@@ -45,7 +45,7 @@ import {
   manualDiscountTypeForCatalogRow,
 } from "../../lib/discountCatalog";
 import { humanizeQuoteReason, quoteRequiredReasonNote } from "../../lib/quoteDisplay";
-import { EMPTY_PROPERTY_MEASUREMENTS, palmPrefillAllowed, lookupHomeSqFtPrefill, homeSqFtIsUnverifiedPlatMedian } from "../../lib/lookupPrefill";
+import { EMPTY_PROPERTY_MEASUREMENTS, palmPrefillAllowed, lookupHomeSqFtPrefill, homeSqFtIsUnverifiedPlatMedian, lookupLotIsUnitParcel, scopeUnitParcelProfile } from "../../lib/lookupPrefill";
 import PropertyLookupResult from "../../components/admin/PropertyLookupResult";
 import { computeProvisionalState, provisionalSummary } from "../../utils/estimateProvisional";
 
@@ -361,14 +361,16 @@ function buildTurfRequestProfile(baseProfile, form) {
     const n = parseInt(value, 10);
     return Number.isFinite(n) ? n : fallback;
   };
+  // The dimension boxes are the operator's answer. The lookup prefills
+  // them, so a lookup value reaches pricing THROUGH its box — and a box the
+  // operator cleared prices as cleared (0 sq ft; 1 story, the form's own
+  // default). Falling back to the lookup here re-priced a number the form
+  // no longer showed.
   const profile = {
     ...baseProfile,
-    homeSqFt: manualNumber(
-      form.homeSqFt,
-      Number(baseProfile.homeSqFt || baseProfile.squareFootage) || 0,
-    ),
-    lotSqFt: manualNumber(form.lotSqFt, Number(baseProfile.lotSqFt) || 0),
-    stories: manualNumber(form.stories, Number(baseProfile.stories) || 1),
+    homeSqFt: manualNumber(form.homeSqFt, 0),
+    lotSqFt: manualNumber(form.lotSqFt, 0),
+    stories: manualNumber(form.stories, 1),
     estimatedBedAreaSf: manualNumber(
       form.bedArea,
       Number(baseProfile.estimatedBedAreaSf) || 0,
@@ -1928,7 +1930,7 @@ export default function EstimateToolViewV2({
         previousAddressRef.current = seeded.address;
         savedFormRef.current = JSON.stringify(seeded);
         setForm(seeded);
-        setEnrichedProfile(d.engineProfile || null);
+        setEnrichedProfile(scopeUnitParcelProfile(d.engineProfile) || null);
         setLookupMeta(null);
         setSatelliteData(null);
         setEstimate(d.result ? { ...d.result, engineRequest: d.engineRequest } : null);
@@ -2421,10 +2423,8 @@ export default function EstimateToolViewV2({
   const [enginePreviewSf, setEnginePreviewSf] = useState(null);
   const enginePreviewSeq = useRef(0);
   const turfUnobservable = enrichedProfile?.turfObservation === "unobservable";
-  const previewLotSqFt =
-    parseNonNegativeInteger(form.lotSqFt) ??
-    parseNonNegativeInteger(enrichedProfile?.lotSqFt) ??
-    0;
+  // The Lot box governs, exactly as in the priced profile.
+  const previewLotSqFt = parseNonNegativeInteger(form.lotSqFt) ?? 0;
   useEffect(() => {
     setEnginePreviewSf(null);
     // Bump the sequence BEFORE any early return so an in-flight answer for
@@ -2970,7 +2970,9 @@ export default function EstimateToolViewV2({
         return;
       }
 
-      const ep = data.enriched;
+      // Scoped once here: a condo record carrying the development's lot
+      // loses the parcel-scope area reads before anything reads them.
+      const ep = scopeUnitParcelProfile(data.enriched);
       if (!ep) throw new Error("Property details were not returned. Try refreshing the records.");
       setEnrichedProfile(ep);
       setLookupMeta({
@@ -3052,7 +3054,10 @@ export default function EstimateToolViewV2({
           // Record value, else the plat-median estimate for an unassessed
           // vacant parcel (lib/lookupPrefill.js), else empty.
           homeSqFt: f._homeSqFtEdited ? f.homeSqFt : lookupHomeSqFtPrefill(ep),
-          lotSqFt: ep.residentialUnitLookup ? "" : f._lotSqFtEdited ? f.lotSqFt : (ep.lotSqFt ? String(ep.lotSqFt) : ""),
+          // The development's lot (unit_parcel flag) is never prefilled — the
+          // flag asks the operator to enter the unit's own area, or the
+          // whole property's lot for an association quote.
+          lotSqFt: ep.residentialUnitLookup ? "" : f._lotSqFtEdited ? f.lotSqFt : (ep.lotSqFt && !lookupLotIsUnitParcel(ep) ? String(ep.lotSqFt) : ""),
           stories: f._storiesEdited ? f.stories : (ep.stories ? String(ep.stories) : "1"),
           ...(termiteFootprintNumber ? { _termiteFootprintAuto: true } : {}),
           // Rides the form so the homeSqFt/stories effect can't re-derive a
@@ -4144,7 +4149,7 @@ export default function EstimateToolViewV2({
       rgIdentityRef.current = `${seeded.address || ""}|${seeded.customerId || ""}|${seeded.customerName || ""}|${seeded.customerEmail || ""}`;
       savedFormRef.current = JSON.stringify(seeded);
       setForm(seeded);
-      setEnrichedProfile(source.engineProfile || null);
+      setEnrichedProfile(scopeUnitParcelProfile(source.engineProfile) || null);
       setExistingCustomerMatch(source.customer || null);
       setEditMode((current) => ({ ...current, status: source.status, editVersion: source.editVersion }));
       if (!source.editable) setEditLoadError(source.blockReason);
@@ -4175,10 +4180,7 @@ export default function EstimateToolViewV2({
     parseNonNegativeInteger(satelliteData?.estimatedTurfSf) ??
     null;
   const confirmedTurfSqFt = parseNonNegativeInteger(form.measuredTurfSf);
-  const lotSqFtForTurf =
-    parseNonNegativeInteger(form.lotSqFt) ??
-    parseNonNegativeInteger(enrichedProfile?.lotSqFt) ??
-    0;
+  const lotSqFtForTurf = parseNonNegativeInteger(form.lotSqFt) ?? 0;
   const lotEstimateTurfSqFt = (() => {
     // Show the number the pricing engine will ACTUALLY use — footprint,
     // hardscape and plausible-max cap included — not the local 20%/15%

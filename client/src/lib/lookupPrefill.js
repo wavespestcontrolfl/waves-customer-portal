@@ -68,6 +68,42 @@ export function lookupHomeSqFtPrefill(enrichedProfile) {
 }
 
 /**
+ * The lookup's condo unit-lot flag (a lotSize verify flag scoped
+ * 'unit_parcel'): a condo record carrying the DEVELOPMENT's parcel. The lot
+ * measures the wrong thing, and so does every area estimate read off that
+ * parcel — the website quote refuses the same set (public-quote.js
+ * condoScopeLotFlag).
+ */
+export function lookupLotIsUnitParcel(profile) {
+  return Array.isArray(profile?.fieldVerifyFlags)
+    && profile.fieldVerifyFlags.some((f) => f && f.field === "lotSize" && f.scope === "unit_parcel");
+}
+
+// The parcel-scope area reads public-quote withholds under that flag (turf
+// and its provenance markers, hardscape %, bed area) plus the lot-derived
+// stale-imagery turf preview.
+const UNIT_PARCEL_AREA_READS = [
+  "estimatedTurfSf", "turfSource", "turfCappedToParcel", "turfFallbackPreviewSf",
+  "imperviousSurfacePercent", "imperviosSurfacePercent",
+  "estimatedBedAreaSf", "estimatedBedAreaPercent", "bedAreaSource",
+];
+
+/**
+ * The profile the estimator works from, scoped once where it enters the
+ * tool (fresh lookup AND a reopened estimate's priced profile), so every
+ * reader — pricing, prefill, the turf panel, the flea exterior area — sees
+ * the same thing. The lot itself stays on the profile as display context
+ * (the flag names it); it is simply never prefilled, and pricing reads the
+ * Lot box.
+ */
+export function scopeUnitParcelProfile(profile) {
+  if (!lookupLotIsUnitParcel(profile)) return profile;
+  const scoped = { ...profile };
+  for (const key of UNIT_PARCEL_AREA_READS) delete scoped[key];
+  return scoped;
+}
+
+/**
  * The "Verify home living area" save must never stamp a plat-median
  * PREFILL as a tech-verified measurement (that would poison the cached
  * record with a neighbor's number under the strongest source type). The
