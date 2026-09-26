@@ -161,6 +161,30 @@ function checkModelStamp(completed, expectedModel, parsed) {
   return { modelMismatch: resolvedModels.some((m) => m !== expectedModel), resolvedModels };
 }
 
+/**
+ * --trials, when given at all, must be an explicit positive integer — no
+ * value (`--trials` alone, parseArgs hands back `true`), a non-numeric
+ * string, zero, or a negative number all used to fall through
+ * `parseInt(...) || DEFAULT_TRIALS` and silently run the default trial count
+ * instead of erroring, which could run the WRONG number of trials (or, for a
+ * typo'd non-numeric value, none of the caller's intent) for up to an hour
+ * per condition before anyone noticed. The flag being absent entirely is
+ * unaffected — that is the documented default (see the file header's usage
+ * examples) and still resolves to DEFAULT_TRIALS. Pulled out of runBenchmark
+ * so its own branching doesn't push that function over the complexity cap.
+ */
+function resolveTrials(ARGS) {
+  if (!Object.prototype.hasOwnProperty.call(ARGS, 'trials')) return DEFAULT_TRIALS;
+  const raw = ARGS.trials;
+  const parsed = typeof raw === 'string' && /^-?\d+$/.test(raw) ? parseInt(raw, 10) : NaN;
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(
+      `--trials must be an explicit positive integer (got ${raw === true ? '--trials with no value' : `"${raw}"`})`,
+    );
+  }
+  return parsed;
+}
+
 function runOnce(condition, trial, { cliArgs = {}, scriptPath = SCRIPT_PATH, execFileImpl = execFile, timeoutMs = CHILD_TIMEOUT_MS } = {}) {
   return new Promise((resolve) => {
     const args = [scriptPath, '--json'];
@@ -353,7 +377,7 @@ async function runBenchmark({ argv = process.argv.slice(2), execFileImpl = execF
       + `excluding requires:"deep" ids): ${[...ALLOWED_OVERRIDE_MODEL_IDS].join(', ')}`,
     );
   }
-  const trials = Math.max(1, parseInt(ARGS.trials, 10) || DEFAULT_TRIALS);
+  const trials = resolveTrials(ARGS);
   const CONDITIONS = buildConditions(candidateModel);
 
   const runs = [];
@@ -407,6 +431,7 @@ module.exports = {
   parseArgs,
   buildConditions,
   rotateConditions,
+  resolveTrials,
   runOnce,
   percentile,
   summarizeCondition,

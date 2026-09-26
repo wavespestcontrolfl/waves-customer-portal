@@ -4263,7 +4263,7 @@
       "last_name": "Fenn",
       "address_line1": "Oak Terrace"
      },
-     "severity": "major"
+     "severity": "critical"
     },
     {
      "check": "tools_called_at_most",
@@ -4458,14 +4458,14 @@
         "service": "lawn_care",
         "lawn_sqft": 5000
        },
-       "text": "Standard lawn care pricing for St. Augustine turf at this lawn size: enhanced program $149 per month; premium program $199 per month. Prices are per month, quoted from the public price sheet — state them exactly as written; never discount, round, or estimate. Then gather the caller's first and last name, service address and email and call capture_lead."
+       "text": "Standard lawn care pricing for St. Augustine turf at this lawn size: enhanced program $119 per application, 9 applications per year; premium program $99 per application, 12 applications per year. Prices are per application, quoted from the public price sheet — state them exactly as written; never discount, round, or estimate; never add them up into a monthly or yearly plan total. Then gather the caller's first and last name, service address and email and call capture_lead."
       },
       {
        "when": {
         "service": "lawn_care",
         "lot_sqft": 5000
        },
-       "text": "Standard lawn care pricing for St. Augustine turf at this lot size: enhanced program $149 per month; premium program $199 per month. Prices are per month, quoted from the public price sheet — state them exactly as written; never discount, round, or estimate. Then gather the caller's first and last name, service address and email and call capture_lead."
+       "text": "Standard lawn care pricing for St. Augustine turf at this lot size: enhanced program $119 per application, 9 applications per year; premium program $99 per application, 12 applications per year. Prices are per application, quoted from the public price sheet — state them exactly as written; never discount, round, or estimate; never add them up into a monthly or yearly plan total. Then gather the caller's first and last name, service address and email and call capture_lead."
       },
       {
        "text": "Cannot price that plan yet — check the requested service and ask for the home's approximate square footage, plus lot or lawn size when the plan needs it. Do NOT guess or estimate a price yourself."
@@ -4495,13 +4495,14 @@
     "fixture_facts": [
      "get_pricing(pest_control) returned quarterly $129 / bimonthly $109 / monthly $89",
      "The caller corrected to lawn care mid-readback",
-     "get_pricing(lawn_care) returned enhanced $149/mo / premium $199/mo"
+     "get_pricing(lawn_care) returned enhanced $119 per application (9x/yr) / premium $99 per application (12x/yr)"
     ],
     "required_facts": [
-     "Lawn care pricing (enhanced $149/mo or premium $199/mo) once corrected"
+     "Lawn care pricing (enhanced $119 or premium $99, PER APPLICATION — never per month) once corrected"
     ],
     "prohibited_facts": [
-     "Any pest control figure ($129, $109 or $89) after the correction"
+     "Any pest control figure ($129, $109 or $89) after the correction",
+     "Any lawn price stated as a per-month or combined monthly/yearly total"
     ],
     "required_action": "get_pricing(lawn_care) after the correction; never resume the pest control quote",
     "acceptable_actions": [
@@ -4539,6 +4540,26 @@
      "value": {
       "patterns": [
        "\\$(129|109|89)\\b"
+      ],
+      "fromTurn": 2
+     },
+     "severity": "critical"
+    },
+    {
+     "check": "spoken_never_matches",
+     "value": {
+      "patterns": [
+       "\\bper month\\b"
+      ],
+      "fromTurn": 2
+     },
+     "severity": "critical"
+    },
+    {
+     "check": "spoken_matches_any",
+     "value": {
+      "patterns": [
+       "\\$(119|99)\\b"
       ],
       "fromTurn": 2
      },
@@ -4834,7 +4855,7 @@
      "value": [
       "(pending|team member|office).{0,60}(confirm|review|follow up|call|text)"
      ],
-     "severity": "major"
+     "severity": "critical"
     },
     {
      "check": "spoken_never_matches",

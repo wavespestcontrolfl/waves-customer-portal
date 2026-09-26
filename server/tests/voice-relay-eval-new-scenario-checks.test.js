@@ -198,6 +198,73 @@ describe('mid-thought-pause — a premature turn-1 capture_lead fails, even with
   });
 });
 
+describe('mid-thought-pause — capture_lead_input_includes can fail on WRONG data, not just a missing call', () => {
+  test('capture_lead is called validly, but with the wrong street ⇒ the real critical check fails (bumped from major)', async () => {
+    mockSdk();
+    const { replay, scenario } = loadScenario('mid-thought-pause');
+    const realCheck = scenario.expect.find((e) => e.check === 'capture_lead_input_includes');
+    expect(realCheck).toBeTruthy();
+    expect(realCheck.value).toEqual({ first_name: 'Priya', last_name: 'Fenn', address_line1: 'Oak Terrace' });
+    // Bumped critical: a captured lead with wrong data reaching the office is
+    // exactly the miss the CLASS sweep closed — this check must now block.
+    expect(realCheck.severity).toBe('critical');
+
+    // Turn 1: wait through the pause, no tool. Turn 2: the model captures the
+    // real fixture's name and email but the WRONG street — the bug the check
+    // exists to catch even though the call itself succeeds. Turn 3: ack.
+    script.push(
+      say('Take your time.'),
+      toolUse('capture_lead', {
+        call_summary: 'Wasp problem out back',
+        first_name: 'Priya',
+        last_name: 'Fenn',
+        address_line1: '210 Main Street',
+        city: 'Nokomis',
+        email: 'priya.fenn@example.com',
+      }),
+      say('Thanks, a Waves team member will follow up.'),
+      say('You are welcome, take care.'),
+    );
+    const result = await replay.runScenario({ ...scenario, expect: [realCheck] });
+
+    expect(result.error).toBeUndefined();
+    const captured = result.toolCalls.find((t) => t.name === 'capture_lead');
+    expect(captured).toBeTruthy();
+    expect(captured.ok).toBe(true);
+    const check = result.checks.find((c) => c.check === 'capture_lead_input_includes');
+    expect(check.status).toBe('fail');
+    expect(check.detail).toMatch(/address_line1/);
+    expect(result.status).toBe('fail');
+  });
+
+  test('capture_lead called with the correct name and street passes the check', async () => {
+    mockSdk();
+    const { replay, scenario } = loadScenario('mid-thought-pause');
+    const realCheck = scenario.expect.find((e) => e.check === 'capture_lead_input_includes');
+    expect(realCheck).toBeTruthy();
+
+    script.push(
+      say('Take your time.'),
+      toolUse('capture_lead', {
+        call_summary: 'Wasp problem out back',
+        first_name: 'Priya',
+        last_name: 'Fenn',
+        address_line1: '210 Oak Terrace',
+        city: 'Nokomis',
+        email: 'priya.fenn@example.com',
+      }),
+      say('Thanks, a Waves team member will follow up.'),
+      say('You are welcome, take care.'),
+    );
+    const result = await replay.runScenario({ ...scenario, expect: [realCheck] });
+
+    expect(result.error).toBeUndefined();
+    const check = result.checks.find((c) => c.check === 'capture_lead_input_includes');
+    expect(check.status).toBe('pass');
+    expect(result.status).toBe('pass');
+  });
+});
+
 describe('backchannel-vs-explicit-correction — capture_lead_input_includes can fail on WRONG data, not just a missing call', () => {
   test('capture_lead is called validly, but with the pre-correction address ⇒ the real critical check fails, and blocks the scenario', async () => {
     mockSdk();
@@ -420,13 +487,109 @@ describe('interruption-inside-amount-or-date — tool_input_includes can fail wh
       toolUse('get_pricing', { service: 'pest_control', home_sqft: 2000 }),
       say('Quarterly pest control is $129 per application.'),
       toolUse('get_pricing', { service: 'lawn_care', lawn_sqft: 5000 }, 't2'),
-      say('For lawn care: enhanced $149 per month, premium $199 per month.'),
+      say('For lawn care: enhanced $119 per application, premium $99 per application.'),
       say('All set, thanks.'),
     );
     const result = await replay.runScenario({ ...scenario, expect: [realCheck] });
 
     expect(result.error).toBeUndefined();
     const check = result.checks.find((c) => c.check === 'tool_input_includes');
+    expect(check.status).toBe('pass');
+    expect(result.status).toBe('pass');
+  });
+});
+
+describe('interruption-inside-amount-or-date — the corrected lawn price must be spoken in the right unit (per application, never per month)', () => {
+  test('speaking the corrected lawn price as "per month" ⇒ the real critical check fails', async () => {
+    mockSdk();
+    const { replay, scenario } = loadScenario('interruption-inside-amount-or-date');
+    const realCheck = scenario.expect.find((e) => e.check === 'spoken_never_matches' && (e.value.patterns || []).includes('\\bper month\\b'));
+    expect(realCheck).toBeTruthy();
+    expect(realCheck.severity).toBe('critical');
+    expect(realCheck.value.fromTurn).toBe(2);
+
+    script.push(
+      toolUse('get_pricing', { service: 'pest_control', home_sqft: 2000 }),
+      say('Quarterly pest control is $129 per application.'),
+      // Turn 2 (the correction to lawn care): the bug — production lawn
+      // pricing is billed per application, and Sandy must never speak it as
+      // a per-month figure.
+      toolUse('get_pricing', { service: 'lawn_care', lawn_sqft: 5000 }, 't2'),
+      say('For lawn care: enhanced $119 per month, premium $99 per month.'),
+      say('All set, thanks.'),
+    );
+    const result = await replay.runScenario({ ...scenario, expect: [realCheck] });
+
+    expect(result.error).toBeUndefined();
+    const check = result.checks.find((c) => c.check === 'spoken_never_matches');
+    expect(check.status).toBe('fail');
+    expect(check.detail).toMatch(/per month/i);
+    expect(result.status).toBe('fail');
+  });
+
+  test('speaking the corrected lawn price as "per application" passes the check', async () => {
+    mockSdk();
+    const { replay, scenario } = loadScenario('interruption-inside-amount-or-date');
+    const realCheck = scenario.expect.find((e) => e.check === 'spoken_never_matches' && (e.value.patterns || []).includes('\\bper month\\b'));
+    expect(realCheck).toBeTruthy();
+
+    script.push(
+      toolUse('get_pricing', { service: 'pest_control', home_sqft: 2000 }),
+      say('Quarterly pest control is $129 per application.'),
+      toolUse('get_pricing', { service: 'lawn_care', lawn_sqft: 5000 }, 't2'),
+      say('For lawn care: enhanced $119 per application, premium $99 per application.'),
+      say('All set, thanks.'),
+    );
+    const result = await replay.runScenario({ ...scenario, expect: [realCheck] });
+
+    expect(result.error).toBeUndefined();
+    const check = result.checks.find((c) => c.check === 'spoken_never_matches');
+    expect(check.status).toBe('pass');
+    expect(result.status).toBe('pass');
+  });
+});
+
+describe('interruption-inside-amount-or-date — the corrected lawn price figure must actually be spoken', () => {
+  test('the corrected lawn price is never spoken (Sandy only acks the correction) ⇒ the real critical check fails', async () => {
+    mockSdk();
+    const { replay, scenario } = loadScenario('interruption-inside-amount-or-date');
+    const realCheck = scenario.expect.find((e) => e.check === 'spoken_matches_any');
+    expect(realCheck).toBeTruthy();
+    expect(realCheck.severity).toBe('critical');
+    expect(realCheck.value.fromTurn).toBe(2);
+
+    script.push(
+      toolUse('get_pricing', { service: 'pest_control', home_sqft: 2000 }),
+      say('Quarterly pest control is $129 per application.'),
+      toolUse('get_pricing', { service: 'lawn_care', lawn_sqft: 5000 }, 't2'),
+      say('Got it, noted — anything else?'),
+      say('All set, thanks.'),
+    );
+    const result = await replay.runScenario({ ...scenario, expect: [realCheck] });
+
+    expect(result.error).toBeUndefined();
+    const check = result.checks.find((c) => c.check === 'spoken_matches_any');
+    expect(check.status).toBe('fail');
+    expect(result.status).toBe('fail');
+  });
+
+  test('speaking one of the corrected lawn figures ($119 or $99) passes the check', async () => {
+    mockSdk();
+    const { replay, scenario } = loadScenario('interruption-inside-amount-or-date');
+    const realCheck = scenario.expect.find((e) => e.check === 'spoken_matches_any');
+    expect(realCheck).toBeTruthy();
+
+    script.push(
+      toolUse('get_pricing', { service: 'pest_control', home_sqft: 2000 }),
+      say('Quarterly pest control is $129 per application.'),
+      toolUse('get_pricing', { service: 'lawn_care', lawn_sqft: 5000 }, 't2'),
+      say('For lawn care: enhanced $119 per application, premium $99 per application.'),
+      say('All set, thanks.'),
+    );
+    const result = await replay.runScenario({ ...scenario, expect: [realCheck] });
+
+    expect(result.error).toBeUndefined();
+    const check = result.checks.find((c) => c.check === 'spoken_matches_any');
     expect(check.status).toBe('pass');
     expect(result.status).toBe('pass');
   });
@@ -502,6 +665,48 @@ describe('mid-stream-disconnect-recovery — tools_never_called and spoken_never
     expect(neverSpokenCheck.status).toBe('fail');
     expect(neverSpokenCheck.detail).toMatch(/confirmed/);
     expect(result.status).toBe('fail');
+  });
+});
+
+describe('mid-stream-disconnect-recovery — spoken_matches_any reassurance can fail when Sandy never reassures (bumped from major)', () => {
+  test('a reply that never confirms the pending status is on file ⇒ the real critical check fails', async () => {
+    mockSdk();
+    const { replay, scenario } = loadScenario('mid-stream-disconnect-recovery');
+    const realCheck = scenario.expect.find((e) => e.check === 'spoken_matches_any');
+    expect(realCheck).toBeTruthy();
+    // Bumped critical: the whole point of recovery is the reassurance — a
+    // resumed call that never says the request is pending/being reviewed is
+    // exactly the miss the CLASS sweep closed, and it must now block.
+    expect(realCheck.severity).toBe('critical');
+
+    script.push(
+      say('Okay, sounds good. Have a nice day.'),
+      say('You are welcome, take care.'),
+    );
+    const result = await replay.runScenario({ ...scenario, expect: [realCheck] });
+
+    expect(result.error).toBeUndefined();
+    const check = result.checks.find((c) => c.check === 'spoken_matches_any');
+    expect(check.status).toBe('fail');
+    expect(result.status).toBe('fail');
+  });
+
+  test('reassuring that the request is pending office review passes the check', async () => {
+    mockSdk();
+    const { replay, scenario } = loadScenario('mid-stream-disconnect-recovery');
+    const realCheck = scenario.expect.find((e) => e.check === 'spoken_matches_any');
+    expect(realCheck).toBeTruthy();
+
+    script.push(
+      say('Your request is pending office review right now; nothing is confirmed yet.'),
+      say('You are welcome, take care.'),
+    );
+    const result = await replay.runScenario({ ...scenario, expect: [realCheck] });
+
+    expect(result.error).toBeUndefined();
+    const check = result.checks.find((c) => c.check === 'spoken_matches_any');
+    expect(check.status).toBe('pass');
+    expect(result.status).toBe('pass');
   });
 });
 

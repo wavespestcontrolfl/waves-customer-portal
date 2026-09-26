@@ -514,6 +514,61 @@ describe('runBenchmark — required --candidate-model and the benchmark-level ex
   });
 });
 
+describe('runBenchmark — --trials must be an explicit positive integer, before any child process runs', () => {
+  test('a non-numeric --trials is rejected', async () => {
+    const execFileImpl = jest.fn();
+    await expect(runBenchmark({ argv: ['--candidate-model=claude-haiku-4-5-20251001', '--trials=abc'], execFileImpl }))
+      .rejects.toThrow(/--trials must be an explicit positive integer/);
+    expect(execFileImpl).not.toHaveBeenCalled();
+  });
+
+  test('--trials=0 is rejected — it used to silently fall back to DEFAULT_TRIALS', async () => {
+    const execFileImpl = jest.fn();
+    await expect(runBenchmark({ argv: ['--candidate-model=claude-haiku-4-5-20251001', '--trials=0'], execFileImpl }))
+      .rejects.toThrow(/--trials must be an explicit positive integer/);
+    expect(execFileImpl).not.toHaveBeenCalled();
+  });
+
+  test('a negative --trials is rejected — it used to silently clamp to 1', async () => {
+    const execFileImpl = jest.fn();
+    await expect(runBenchmark({ argv: ['--candidate-model=claude-haiku-4-5-20251001', '--trials=-5'], execFileImpl }))
+      .rejects.toThrow(/--trials must be an explicit positive integer/);
+    expect(execFileImpl).not.toHaveBeenCalled();
+  });
+
+  test('a non-integer --trials (a float) is rejected', async () => {
+    const execFileImpl = jest.fn();
+    await expect(runBenchmark({ argv: ['--candidate-model=claude-haiku-4-5-20251001', '--trials=2.5'], execFileImpl }))
+      .rejects.toThrow(/--trials must be an explicit positive integer/);
+    expect(execFileImpl).not.toHaveBeenCalled();
+  });
+
+  test('--trials with no value is rejected, not silently defaulted', async () => {
+    const execFileImpl = jest.fn();
+    await expect(runBenchmark({ argv: ['--candidate-model=claude-haiku-4-5-20251001', '--trials'], execFileImpl }))
+      .rejects.toThrow(/--trials must be an explicit positive integer/);
+    expect(execFileImpl).not.toHaveBeenCalled();
+  });
+
+  test('--trials omitted entirely still resolves to DEFAULT_TRIALS (the documented default, unaffected by this check)', async () => {
+    const execFileImpl = stubChild([{
+      code: 0,
+      stdout: JSON.stringify({ status: 'pass', summary: { scenarios: 1, passed: 1 }, attempts: [{ status: 'pass', summary: { scenarios: 1, passed: 1 } }] }),
+    }]);
+    const { report } = await runBenchmark({ argv: ['--candidate-model=claude-haiku-4-5-20251001'], execFileImpl });
+    expect(report.trials).toBe(3); // DEFAULT_TRIALS
+  });
+
+  test('a valid positive integer --trials is accepted', async () => {
+    const execFileImpl = stubChild([{
+      code: 0,
+      stdout: JSON.stringify({ status: 'pass', summary: { scenarios: 1, passed: 1 }, attempts: [{ status: 'pass', summary: { scenarios: 1, passed: 1 } }] }),
+    }]);
+    const { report } = await runBenchmark({ argv: ['--candidate-model=claude-haiku-4-5-20251001', '--trials=2'], execFileImpl });
+    expect(report.trials).toBe(2);
+  });
+});
+
 describe('runBenchmark — unknown CLI options are refused before any child process runs', () => {
   test('a typo\'d --onyl is rejected with a clear error naming the flag and the supported set', async () => {
     const execFileImpl = jest.fn();
