@@ -661,6 +661,15 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   // drought — so a dry/uneven photo read must downgrade it regardless of the weekly
   // amount (this is the "95 Strong vs photo says drought" contradiction).
   const coverageWatch = drySignal === true && effectiveWaterStatus !== 'deficit';
+  const localizedDryFromSnapshot = usingSnapshot
+    && waterSnapshot.interpretation === 'coverage_issue_possible';
+  const localizedDryEvidenceSource = technicianDrought === true
+    ? 'technician'
+    : coverageWatch
+      ? 'photo_signal'
+      : localizedDryFromSnapshot
+        ? 'area_snapshot'
+        : null;
   const waterCat = diagnosis.find((c) => c.key === 'water_moisture_stress');
   if (waterCat && drySignal && (waterCat.status === 'strong' || waterCat.status === 'healthy')) {
     waterCat.status = 'watch';
@@ -689,9 +698,10 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
       overwateringEvidenceSource,
       status: effectiveWaterStatus,
       // A balanced total with a localized dry read → coverage, not "water more".
-      localizedDry: coverageWatch || (usingSnapshot && waterSnapshot.interpretation === 'coverage_issue_possible'),
+      localizedDry: coverageWatch || localizedDryFromSnapshot,
       localizedDryConfidence: technicianDrought === true
         ? 'tech_confirmed' : 'area_estimated',
+      localizedDryEvidenceSource,
     } : {},
     mowing,
     grassLabel,

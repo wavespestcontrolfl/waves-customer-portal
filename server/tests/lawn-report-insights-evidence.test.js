@@ -36,4 +36,30 @@ describe('lawn water evidence boundaries', () => {
       provenance: { findingSource: 'calculated_estimate', actionSource: null },
     });
   });
+
+  test('weekly-plan state participates in narrative cache grounding', () => {
+    const report = {
+      water: {
+        status: 'balanced',
+        droughtSignal: true,
+        rainInches: 0.8,
+        irrigationInches: 0.4,
+        totalInches: 1.2,
+        targetInches: 1.25,
+        confidence: 'high',
+        weekPlan: null,
+      },
+      insights: [],
+    };
+    const withoutPlan = groundingFacts(report, {});
+    const weekPlan = { title: 'This week: hold irrigation', action: 'hold' };
+    const withPlan = groundingFacts({
+      ...report,
+      water: { ...report.water, weekPlan },
+    }, {});
+
+    expect(withoutPlan.water.weekPlan).toBeNull();
+    expect(withPlan.water.weekPlan).toEqual(weekPlan);
+    expect(withPlan).not.toEqual(withoutPlan);
+  });
 });

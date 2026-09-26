@@ -253,6 +253,7 @@ describe('structured moisture evidence owns sprinkler advice', () => {
     });
     expect(waterCard(report).customerAction).toMatch(/Check sprinkler coverage/);
     expect(waterCard(report).confidence).toBe('area_estimated');
+    expect(waterCard(report).provenance.findingSource).toBe('area_snapshot');
   });
 });
 

@@ -45,7 +45,7 @@ function groundingFacts(v2, ctx) {
     customerAction: v2.snapshot?.customerAction ?? null,
     grassLabel: ctx.grassLabel || 'lawn',
     diagnosis: (v2.diagnosis || []).map((d) => ({ key: d.key, label: d.label, score: d.score, status: d.status })),
-    water: v2.water ? { status: v2.water.status, droughtSignal: v2.water.droughtSignal ?? null, rain: v2.water.rainInches, irrigation: v2.water.irrigationInches, total: v2.water.totalInches, target: v2.water.targetInches, confidence: v2.water.confidence, rainWindow: 'past 7 days ending on the visit date' } : null,
+    water: v2.water ? { status: v2.water.status, droughtSignal: v2.water.droughtSignal ?? null, rain: v2.water.rainInches, irrigation: v2.water.irrigationInches, total: v2.water.totalInches, target: v2.water.targetInches, confidence: v2.water.confidence, weekPlan: v2.water.weekPlan ?? null, rainWindow: 'past 7 days ending on the visit date' } : null,
     mowing: v2.mowing && v2.mowing.measuredHeightInches != null ? { status: v2.mowing.status, measured: v2.mowing.measuredHeightInches, idealMin: v2.mowing.idealMinInches, idealMax: v2.mowing.idealMaxInches } : null,
     treatment: v2.treatment ? { focus: v2.treatment.focus, products: (v2.treatment.products || []).map((p) => ({ name: p.name, activeIngredient: p.activeIngredient, kind: p.kind, whatItDoes: p.whatItDoes, targets: p.targets })) } : null,
     trendDirection: trendDirection(v2.trends?.overall),

@@ -143,7 +143,10 @@ function buildLawnInsightCards({
       customerAction: aftercareWaterAction
         || 'Check sprinkler coverage in that area rather than watering the whole yard more.',
       nextVisitPlan: '',
-      provenance: provenance(water.localizedDryConfidence === 'tech_confirmed' ? 'technician' : 'photo_signal'),
+      provenance: provenance(
+        water.localizedDryEvidenceSource
+          || (water.localizedDryConfidence === 'tech_confirmed' ? 'technician' : 'photo_signal'),
+      ),
     });
   } else if (waterCat && (waterCat.status === 'watch' || waterCat.status === 'needs_attention')) {
     // The water score is degraded without dry evidence (overwatering/fungus
