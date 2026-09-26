@@ -59,6 +59,7 @@ jest.setTimeout(120000);
 
 const BASE = 50;
 const ADDON = 40;
+const ADDON2 = 25;
 
 postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
   let database;
@@ -92,12 +93,12 @@ postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
     await database?.destroy();
   });
 
-  async function coveredVisit({ discountDollars = null, invoiceLines = null, invoiceStatus = 'draft', daysAgo = 0, depositDollars = null } = {}) {
+  async function coveredVisit({ discountDollars = null, invoiceLines = null, invoiceStatus = 'draft', daysAgo = 0, depositDollars = null, secondAddon = false } = {}) {
     const { etDateString, addETDays } = require('../utils/datetime-et');
     const today = daysAgo ? etDateString(addETDays(new Date(), -daysAgo)) : etDateString();
     const f = {
       customerId: randomUUID(), techId: randomUUID(), catalogId: randomUUID(), serviceId: randomUUID(),
-      termId: randomUUID(), addonId: randomUUID(), invoiceId: null,
+      termId: randomUUID(), addonId: randomUUID(), addon2Id: randomUUID(), invoiceId: null,
     };
     await trx('customers').insert({ id: f.customerId, first_name: 'Synthetic', last_name: 'Prepay', phone: '+12025550123',
       email: `${f.customerId}@example.invalid`, property_type: 'residential', autopay_enabled: false, billing_mode: 'annual_prepay' });
@@ -108,12 +109,16 @@ postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
       prepay_amount: 200, plan_label: 'Synthetic Annual' });
     await trx('scheduled_services').insert({ id: f.serviceId, customer_id: f.customerId, technician_id: f.techId, service_id: f.catalogId,
       service_type: 'Synthetic Quarterly Pest Control', scheduled_date: today, window_start: '09:00', window_end: '10:00', status: 'confirmed',
-      estimated_price: BASE + ADDON - (discountDollars || 0), primary_line_price: BASE, estimated_duration_minutes: 60,
+      estimated_price: BASE + ADDON + (secondAddon ? ADDON2 : 0) - (discountDollars || 0), primary_line_price: BASE, estimated_duration_minutes: 60,
       create_invoice_on_complete: true,
       prepaid_method: 'annual_prepay_invoice', prepaid_amount: BASE, annual_prepay_term_id: f.termId,
       ...(discountDollars ? { discount_dollars: discountDollars, discount_name: 'Synthetic visit discount', discount_type: 'fixed_amount', discount_amount: discountDollars } : {}) });
     await trx('scheduled_service_addons').insert({ id: f.addonId, scheduled_service_id: f.serviceId,
       service_name: 'Wasp nest removal', estimated_price: ADDON, base_price: ADDON });
+    if (secondAddon) {
+      await trx('scheduled_service_addons').insert({ id: f.addon2Id, scheduled_service_id: f.serviceId,
+        service_name: 'Fire ant mound treatment', estimated_price: ADDON2, base_price: ADDON2 });
+    }
     if (depositDollars) {
       f.estimateId = randomUUID();
       await trx('estimates').insert({ id: f.estimateId, customer_id: f.customerId, status: 'accepted' });
@@ -502,6 +507,95 @@ postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
     expect((await trx('invoices').where({ id: f.invoiceId }).first('status')).status).toBe('draft');
     expect(await addonsAlert(f)).toBeTruthy();
     expect(PAID_TEXTS).not.toContain(out.body?.completionSmsType);
+  });
+
+  // An add-ons bill another writer saved earlier than the settled base, so
+  // the completion reaches it through the mint's in-lock adoption.
+  async function olderAddonsSibling(f, lines) {
+    const id = randomUUID();
+    const total = lines.reduce((sum, li) => sum + li.amount, 0);
+    await trx('invoices').insert({ id, customer_id: f.customerId, scheduled_service_id: f.serviceId,
+      invoice_number: `TEST-${id.slice(0, 8)}`, token: randomUUID().replace(/-/g, ''), status: 'draft',
+      total, subtotal: total, line_items: JSON.stringify(lines), created_at: new Date(Date.now() - 2 * 86400000) });
+    return id;
+  }
+
+  test('an office invoice that bills only some of the add-ons stays owed with its pay link, and the office reconciles the rest (GitHub r1 P1)', async () => {
+    const f = await coveredVisit({ secondAddon: true, invoiceLines: (x) => [addonLine(x)] });
+    const out = await complete(f, { sendCompletionSms: true });
+    expect(out).toMatchObject({ status: 200 });
+    expect((await liveInvoices(f)).map((i) => i.id)).toEqual([f.invoiceId]);
+    expect(out.body?.invoiceId).toBe(f.invoiceId);
+    expect(out.body?.invoicePaymentActionRequired).toBe(true);
+    expect(await addonsAlert(f)).toBeTruthy();
+    expect(PAID_TEXTS).not.toContain(out.body?.completionSmsType);
+  });
+
+  test('an office invoice that bills the add-on at a stale price is not taken as the whole remainder (GitHub r1 P1)', async () => {
+    const f = await coveredVisit({ invoiceLines: (x) => [{ ...addonLine(x), amount: 35, unit_price: 35 }] });
+    const out = await complete(f);
+    expect(out).toMatchObject({ status: 200 });
+    expect((await liveInvoices(f)).map((i) => i.id)).toEqual([f.invoiceId]);
+    expect(await addonsAlert(f)).toBeTruthy();
+  });
+
+  test('an adopted add-ons bill that is the whole remainder is delivered with its pay link (GitHub r1 P1)', async () => {
+    const f = await coveredVisit({ invoiceLines: (x) => [baseLine(x)], invoiceStatus: 'prepaid' });
+    const siblingId = await olderAddonsSibling(f, [addonLine(f)]);
+    const out = await complete(f, { sendCompletionSms: true });
+    expect(out).toMatchObject({ status: 200 });
+    expect(out.body?.invoiceId).toBe(siblingId);
+    expect(out.body?.completionSmsType).toMatch(/with_invoice$/);
+    expect(await addonsAlert(f)).toBeUndefined();
+    expect((await liveInvoices(f)).map((i) => i.id).sort()).toEqual([f.invoiceId, siblingId].sort());
+  });
+
+  test('an adopted add-ons bill that covers only some of the add-ons is not taken as this bill — the office reconciles (GitHub r1 P1)', async () => {
+    const f = await coveredVisit({ secondAddon: true, invoiceLines: (x) => [baseLine(x)], invoiceStatus: 'prepaid' });
+    const siblingId = await olderAddonsSibling(f, [addonLine(f)]);
+    const out = await complete(f);
+    expect(out).toMatchObject({ status: 200 });
+    expect(await addonsAlert(f)).toBeTruthy();
+    expect((await liveInvoices(f)).map((i) => i.id).sort()).toEqual([f.invoiceId, siblingId].sort());
+  });
+
+  test('a covered visit with a refunded invoice alerts the office to bill the add-ons once the refund is final (GitHub r1 P1)', async () => {
+    const f = await coveredVisit({ invoiceLines: (x) => [baseLine(x), addonLine(x)], invoiceStatus: 'refunded' });
+    const out = await complete(f, { sendCompletionSms: true });
+    expect(out).toMatchObject({ status: 200 });
+    expect((await trx('invoices').where({ customer_id: f.customerId })).map((i) => i.id)).toEqual([f.invoiceId]);
+    expect(await addonsAlert(f)).toBeTruthy();
+    expect(PAID_TEXTS).not.toContain(out.body?.completionSmsType);
+  });
+
+  test('a voided office invoice\'s other charges are owed: the text does not say "all paid" even with no add-ons to bill (GitHub r1 P1)', async () => {
+    const f = await coveredVisit({ invoiceLines: (x) => [baseLine(x), { description: 'Synthetic trip charge', amount: 15, quantity: 1, unit_price: 15 }] });
+    await trx('scheduled_service_addons').where({ id: f.addonId }).del();
+    await trx('scheduled_services').where({ id: f.serviceId }).update({ estimated_price: BASE });
+    const out = await complete(f, { sendCompletionSms: true });
+    expect(out).toMatchObject({ status: 200 });
+    expect((await trx('invoices').where({ id: f.invoiceId }).first('status')).status).toBe('void');
+    expect(await trx('notifications').where({ recipient_type: 'admin' })
+      .whereRaw("metadata->>'dedupeKey' = ?", [`annual_prepay_invoice_reconcile:${f.serviceId}`]).first()).toBeTruthy();
+    expect(PAID_TEXTS).not.toContain(out.body?.completionSmsType);
+  });
+
+  test('an invoice-issued closeout whose invoice was voided since never gets a replacement add-ons bill', async () => {
+    const f = await coveredVisit({ daysAgo: 3, invoiceStatus: 'sent', invoiceLines: (x) => [baseLine(x), addonLine(x)] });
+    const idempotencyKey = `invoice-issued:${f.invoiceId}`;
+    const issuedCloseout = () => {
+      const { completeScheduledService } = require('../services/complete-scheduled-service');
+      return completeScheduledService({ serviceId: f.serviceId, idempotencyKey,
+        body: { visitOutcome: 'completed', backfill: true, sendCompletionSms: false, requestReview: false, invoiceAlreadySent: true, idempotencyKey },
+        actor: { techRole: 'admin', technicianId: f.techId, technician: null }, issuedInvoiceCloseout: { invoiceId: f.invoiceId, trigger: 'sent' } });
+    };
+    expect(await issuedCloseout()).toMatchObject({ status: 200 });
+    // The office voids the issued invoice after the closeout committed; the
+    // closeout's side effects then resume.
+    await trx('invoices').where({ id: f.invoiceId }).update({ status: 'void' });
+    await releaseForResume(f);
+    expect(await issuedCloseout()).toMatchObject({ status: 200 });
+    expect(await liveInvoices(f)).toHaveLength(0);
   });
 
   describe('dark (GATE_ANNUAL_PREPAY_ADDON_BILLING off): today\'s behavior', () => {
