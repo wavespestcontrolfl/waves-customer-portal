@@ -423,6 +423,62 @@ function hasDurableAppReplay(messageType, billingDeliveryCategory) {
     || ['request_channel', 'invoice_channel', 'payment_issue_channel'].includes(PREF_CHANNEL_COLUMN[messageType]);
 }
 
+// One sms_log proof per accepted push (Codex #4816 r44–r48). The first
+// write and a deduplicated retry's repair both come here: under a
+// per-notice advisory lock, an existing proof for this notice (notification
+// id or event key) is reused, otherwise the row is inserted. A failed
+// attempt is retried once in a FRESH transaction (a failed statement aborts
+// its own), and the lookup makes that retry idempotent. Without a
+// notification id nothing can repair concurrently, so no lock is taken and
+// the retry keys on the row's own acceptance instant.
+async function persistPushProof({ customerId, notificationId, notificationEventKey, row }) {
+  const attempt = () => db.transaction(async (trx) => {
+    if (notificationId) await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`push-proof:${notificationId}`]);
+    const existing = notificationId
+      ? await trx('sms_log').where({ customer_id: customerId, from_phone: 'push' }).where(function sameNotice() {
+        this.whereRaw("metadata->>'push_notification_id' = ?", [notificationId])
+          .modify((q) => { if (notificationEventKey) q.orWhereRaw("metadata->>'notificationEventKey' = ?", [notificationEventKey]); });
+      }).first('id')
+      : await trx('sms_log').where({ customer_id: customerId, from_phone: 'push', message_type: row.message_type, created_at: row.created_at }).first('id');
+    if (existing) return existing.id;
+    const [inserted] = await trx('sms_log').insert(row).returning('id');
+    return inserted?.id || inserted || null;
+  });
+  try {
+    return await attempt();
+  } catch (firstErr) {
+    logger.warn(`[push-routing] sms_log proof write failed, retrying once: ${firstErr.message}`);
+    return attempt();
+  }
+}
+
+// A retry of an accepted push repairs a proof the first attempt failed to
+// write (Codex #4816 r44). The proof must state what was delivered, so a
+// retry whose body differs from the stored notification repairs nothing
+// (r46), and the repaired proof takes its visit scope from the delivered
+// notification's proof_scope, never the retry's (r49). A scheduled send's
+// queue row is its own proof. Never throws.
+async function repairPushProof({ appNotification, body, customerId, notificationEventKey, scheduledSmsLogId, proofRow }) {
+  const notificationId = String(appNotification.id);
+  try {
+    if (appNotification.body !== body) {
+      logger.warn(`[push-routing] proof repair skipped for notification ${notificationId}: retry payload differs from the delivered notice`);
+      return;
+    }
+    if (scheduledSmsLogId) return;
+    let deliveredMeta = appNotification.metadata || {};
+    if (typeof deliveredMeta === 'string') {
+      try { deliveredMeta = JSON.parse(deliveredMeta); } catch { deliveredMeta = {}; }
+    }
+    const deliveredScope = deliveredMeta.proof_scope || {};
+    await persistPushProof({ customerId, notificationId, notificationEventKey,
+      row: proofRow({ push_notification_id: notificationId, proof_repaired: true,
+        scheduled_service_id: deliveredScope.scheduled_service_id, property_id: deliveredScope.property_id }) });
+  } catch (repairErr) {
+    logger.warn(`[push-routing] proof repair failed: ${repairErr.message}`);
+  }
+}
+
 async function attemptPushFirst({ customerId, to, body, messageType, fromNumber, scheduledSmsLogId, preSendCheck, explicitPushOnly = false, notificationEventKey, appointmentId = null, invoiceId, requestNotification, billingDeliveryCategory }) {
   let deliveryOutcome = 'not_sent';
   let acceptedResult = null;
@@ -430,6 +486,10 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
     if (explicitPushOnly && !gateEnvValue('GATE_CUSTOMER_APP_NOTIFICATIONS')) return { delivered: false, reason: 'app_gate_off' };
     if (!(await pushEligibleRuntime(customerId, to, messageType, db, { requireExplicit: explicitPushOnly, billingDeliveryCategory }))) return { delivered: false, reason: 'preference_changed' };
     const fresh = await hasFreshPushDevice(customerId);
+    // The visit and its send-time property, kept on the proof row and on the
+    // stored notification, so a repaired proof restores the delivered scope
+    // (Codex #4816 r49).
+    const proofScope = await require('./notice-scope').noticeScope(appointmentId);
     let appNotification = null;
     if (explicitPushOnly) {
       let presentation = pushPresentation(messageType);
@@ -473,6 +533,7 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
       deliveryOutcome = 'uncertain';
       appNotification = await require('../notification-service').notifyCustomer(customerId, category, title, body, {
         link, dedupeKey: notificationEventKey, awaitPush: true, appointmentId,
+        ...(appointmentId ? { metadata: { proof_scope: proofScope } } : {}),
         pushOptions: { shouldContinue: windowGuardFrom(preSendCheck), minUpdatedAt: heartbeatCutoff(), nativeOnly: true },
       });
       if (appNotification?.push?.reason === 'push_in_flight') return { delivered: false, pending: true, deliveryOutcome: 'uncertain', reason: 'push_in_flight' };
@@ -510,10 +571,40 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
     const acceptedAt = appNotification?.push?.deduped
       ? new Date(appNotification.push.acceptedAt)
       : new Date();
-    if (appNotification?.push?.deduped) return {
-      delivered: true, deliveryOutcome, sid: `push:${appNotification.id}`,
-      notificationId: String(appNotification.id), acceptedAt,
-    };
+    const proofRow = (extra = {}) => ({
+      customer_id: customerId,
+      direction: 'outbound',
+      from_phone: 'push',
+      to_phone: String(to || '').slice(0, 20),
+      message_body: body,
+      twilio_sid: null,
+      status: 'sent',
+      created_at: acceptedAt,
+      message_type: messageType,
+      metadata: JSON.stringify({
+        channel: 'push',
+        requestedChannel: explicitPushOnly ? 'push' : 'sms',
+        providerAccepted: true,
+        provider_from_number: fromNumber,
+        ...(scheduledSmsLogId ? { scheduled_sms_log_id: scheduledSmsLogId } : {}),
+        // Same event identity the Text path stamps (twilio.js), so a
+        // history reader can correlate this proof with its keyed ledger
+        // episode instead of counting the same contact twice.
+        ...(notificationEventKey ? { notificationEventKey } : {}),
+        // The visit this notice is about, like the SMS path's metadata:
+        // readers that scope by property (SMS commitment evidence) need
+        // it on the proof row itself (Codex #4816 r40).
+        ...proofScope,
+        ...extra,
+      }),
+    });
+    if (appNotification?.push?.deduped) {
+      await repairPushProof({ appNotification, body, customerId, notificationEventKey, scheduledSmsLogId, proofRow });
+      return {
+        delivered: true, deliveryOutcome, sid: `push:${appNotification.id}`,
+        notificationId: String(appNotification.id), acceptedAt,
+      };
+    }
     // PROOF FIRST, bell second: this sms_log row is what
     // recoverStaleScheduledSmsClaims reads as durable proof-of-send — a
     // crash inside the bell insert before the proof exists would let the
@@ -524,29 +615,8 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
     // best-effort afterward.
     let proofRowId = null;
     try {
-      const inserted = await db('sms_log').insert({
-        customer_id: customerId,
-        direction: 'outbound',
-        from_phone: 'push',
-        to_phone: String(to || '').slice(0, 20),
-        message_body: body,
-        twilio_sid: null,
-        status: 'sent',
-        created_at: acceptedAt,
-        message_type: messageType,
-        metadata: JSON.stringify({
-          channel: 'push',
-          requestedChannel: explicitPushOnly ? 'push' : 'sms',
-          providerAccepted: true,
-          provider_from_number: fromNumber,
-          ...(scheduledSmsLogId ? { scheduled_sms_log_id: scheduledSmsLogId } : {}),
-          // Same event identity the Text path stamps (twilio.js), so a
-          // history reader can correlate this proof with its keyed ledger
-          // episode instead of counting the same contact twice.
-          ...(notificationEventKey ? { notificationEventKey } : {}),
-        }),
-      }).returning('id');
-      proofRowId = inserted && inserted[0] ? (inserted[0].id || inserted[0]) : null;
+      proofRowId = await persistPushProof({ customerId, notificationId: appNotification?.id ? String(appNotification.id) : null,
+        notificationEventKey, row: proofRow() });
     } catch (logErr) {
       logger.error(`[push-routing] sms_log record failed: ${logErr.message}`);
       // Durable settlement for SCHEDULED sends: without the proof row the
@@ -586,8 +656,11 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
                      'providerAccepted', true,
                      'provider_message_id', ?::text,
                      'provider_from_number', ?::text,
-                     'finalize_pending', ?::boolean)`,
-                  [schedRow.created_at, 'push:delivered', fromNumber, owesFinalize],
+                     'finalize_pending', ?::boolean) || ?::jsonb`,
+                  [schedRow.created_at, 'push:delivered', fromNumber ?? null, owesFinalize,
+                    // The delivered visit scope, as on a normal proof row
+                    // (Codex #4816 r50): this settled row is the only proof.
+                    JSON.stringify(proofScope)],
                 ),
               });
           }
@@ -602,15 +675,11 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
     if (proofRowId && notificationId) {
       await db('sms_log')
         .where({ id: proofRowId })
+        // Merge, never rewrite: the proof row already carries every stamp
+        // (event key, visit, scheduled row); the back-fill adds only the
+        // notification id (Codex #4816 r40 — a rewrite dropped the visit).
         .update({
-          metadata: JSON.stringify({
-            channel: 'push',
-            requestedChannel: explicitPushOnly ? 'push' : 'sms',
-            providerAccepted: true,
-            provider_from_number: fromNumber,
-            push_notification_id: notificationId,
-            ...(scheduledSmsLogId ? { scheduled_sms_log_id: scheduledSmsLogId } : {}),
-          }),
+          metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('push_notification_id', ?::text)", [notificationId]),
         })
         .catch(() => {});
     }

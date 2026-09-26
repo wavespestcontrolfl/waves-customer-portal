@@ -10,9 +10,9 @@ jest.mock('../utils/pan-scrub', () => {
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn((name, work) => work()) }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
 
-const { groundExtraction, extractSmsOperations, buildPrompt, stringifySmsEvidence } = require('../services/sms-operational-extractor');
-const { eligibleMessage, factVerdict, runSmsOperationalActions } = require('../services/sms-operational-actions');
-const { groundFulfillment, admissibleWitness, verifySmsFulfillment } = require('../services/sms-commitment-fulfillment');
+const { groundExtraction, extractSmsOperations, buildPrompt, stringifySmsEvidence, statesClock } = require('../services/sms-operational-extractor');
+const { eligibleMessage, factVerdict, runSmsOperationalActions, resolveDueDeadline, DEFAULT_DEADLINE_HOURS, PROMISE_DEFAULT_DEADLINE_HOURS } = require('../services/sms-operational-actions');
+const { groundFulfillment, admissibleWitness, verifySmsFulfillment, fulfillmentFingerprint } = require('../services/sms-commitment-fulfillment');
 const { dispatchWithFallback } = require('../services/llm/call');
 const numbers = require('../config/twilio-numbers');
 const CUSTOMER_ID = '00000000-0000-4000-8000-000000000101';
@@ -382,7 +382,8 @@ describe('SMS operational evidence and ownership', () => {
     expect(result.facts).toEqual([]);
   });
 
-  test.each([['Please send the estimate by September 10 at 3', 'send_estimate'], ['Please call before 5 tomorrow', 'callback']])(
+  test.each([['Please send the estimate by September 10 at 3', 'send_estimate'], ['Please call before 5 tomorrow', 'callback'],
+    ['Please call before five tomorrow', 'callback'], ['Please call at nine', 'callback'], ['Please call around ten or eleven', 'callback']])(
     'a bare hour after a clock preposition is stated timing that needs review: %s', (body, kind) => {
       const message = source(body);
       const result = groundExtraction(extracted([obligation(message.message_body, { kind })]), { message, properties });
@@ -412,7 +413,9 @@ describe('SMS operational evidence and ownership', () => {
       expect(result.dropped).toBe(0);
     });
 
-  test.each([['Please call me at 941-555-0100', 'callback'], ['Please send 2 estimates', 'send_estimate'], ['Please send 2 a month of the estimates', 'send_estimate']])(
+  test.each([['Please call me at 941-555-0100', 'callback'], ['Please send 2 estimates', 'send_estimate'], ['Please send 2 a month of the estimates', 'send_estimate'],
+    ['Please call me at one of these numbers', 'callback'], ['Please call me at 3 different numbers', 'callback'],
+    ['Please send the estimate to me at 2 addresses', 'send_estimate']])(
     'a number that is not a clock hour stays undated without review: %s', (body, kind) => {
       const message = source(body);
       const result = groundExtraction(extracted([obligation(message.message_body, { kind })]), { message, properties });
@@ -695,6 +698,121 @@ describe('private profile writes', () => {
   });
 });
 
+describe('R5 owner ruling 2026-09-24: per-kind default deadlines', () => {
+  const at = new Date('2040-03-10T15:00:00Z');
+  test.each(Object.entries(DEFAULT_DEADLINE_HOURS))('a %s request with no stated due_at defaults to +%ih (due_basis default_kind)', (kind, hours) => {
+    const item = { party: 'waves', kind, basis: 'request', due_at: null };
+    expect(resolveDueDeadline(item, at)).toEqual({
+      due_at: new Date(at.getTime() + hours * 3600000).toISOString(), due_basis: 'default_kind',
+    });
+  });
+
+  test('any Waves basis=promise obligation defaults to +48h regardless of kind', () => {
+    for (const kind of [...Object.keys(DEFAULT_DEADLINE_HOURS), 'send_reschedule_link']) {
+      expect(resolveDueDeadline({ party: 'waves', kind, basis: 'promise', due_at: null }, at)).toEqual({
+        due_at: new Date(at.getTime() + PROMISE_DEFAULT_DEADLINE_HOURS * 3600000).toISOString(), due_basis: 'default_kind',
+      });
+    }
+  });
+
+  test('Codex #4816 r2: a customer-owned obligation never gets a default deadline', () => {
+    for (const kind of ['send_photos', 'call_back', 'make_payment', 'other']) {
+      expect(resolveDueDeadline({ party: 'customer', kind, basis: 'promise', due_at: null }, at)).toEqual({ due_at: null, due_basis: null });
+    }
+    expect(resolveDueDeadline({ party: 'customer', kind: 'other', basis: 'request', due_at: null }, at)).toEqual({ due_at: null, due_basis: null });
+  });
+
+  test.each(['Can you call me tomorrow?', 'Please send it this afternoon', 'Can someone come out Friday?', 'Schedule me mid Oct',
+    'Call me back in 2 hours', 'Can you come on 10/14?', 'Need someone out by the 15th', 'Send it by end of the week',
+    'Call me Fri', 'Can you come next Tues', 'Can someone come on Sat?', 'Send it by Wed',
+    'Call me on 2027-01-15', 'Hold off until the 20th', 'Starting the 3rd please call',
+    'Please call me in the morning', 'Can you call in the afternoon?', 'Call after work', 'Evenings are best to call', 'Call around lunchtime',
+    'Call me in 30 minutes', 'call me in 15 min', 'Give me 20 mins then call', 'Call within 2 hrs', 'Call me in half an hour',
+    'Call in 1-2 hours', 'Call me in a bit', 'Call in a few', 'Call me in about 2 hours', 'Give me like 20 mins then call',
+    'Call me over the weekend', 'Anytime through the week', 'Sometime in the next few days', 'At the next visit please call',
+    'Call me in a year', 'Contact me within 2 yrs', 'Check back next year', 'Follow up in 6 mos', 'Over the next 2 years please check in',
+    'Call early next year', 'Reach out by end of the year', 'Call me this month', 'Call me tomorrow, about the invoice',
+    'Call me about the invoice. Tomorrow works', 'At the next visit please call about the bait',
+    'Please call before my next appointment', 'Have it ready by the next service', 'Call me next time you are out',
+    'Please call me about the invoice 10/14', 'Call me about the bill on 2040-10-14', 'Call about the estimate Oct 14',
+    'Call me regarding the invoice by the 15th',
+    'Please call me from Friday onward', 'Call me from tomorrow on', 'Available from Monday through Wednesday, call me',
+    'Please call me about the report from last week tomorrow', 'Send the photos from Monday through Wednesday by Friday',
+    'Please call me about my invoice tomorrow', 'Call about the invoice on Friday',
+    'Call me regarding the estimate next week', 'Call about the termite quote this afternoon'])(
+    'Codex #4816 r20: timing stated in the quote keeps the row undated even when due_text is empty (%s)', (quote) => {
+      expect(resolveDueDeadline({ party: 'waves', kind: 'callback', basis: 'request', due_at: null, due_text: null, quote }, at))
+        .toEqual({ due_at: null, due_basis: null });
+    },
+  );
+
+  test.each(['Please call me at 3:00pm', 'Call at 3:00 p.m.', 'Call at 9:30am', 'Call at 9:30'])(
+    'Codex #4816 r46: a minute clock with or without a meridiem is a stated clock (%s)', (quote) => {
+      expect(statesClock(quote)).toBe(true);
+      const item = { party: 'waves', kind: 'callback', basis: 'request', due_at: null, due_text: null, timing_unverified: true, quote };
+      expect(resolveDueDeadline(item, at)).toEqual({ due_at: null, due_basis: null });
+    });
+
+  test('Codex #4816 r31: an unresolved clock suppresses the default only for the obligation whose quote states it', () => {
+    const item = (quote) => ({ party: 'waves', kind: 'callback', basis: 'request', due_at: null, due_text: null, timing_unverified: true, quote });
+    // "Call me at 3 and send the estimate": the flag covers the whole SMS.
+    expect(resolveDueDeadline(item('Call me at 3'), at)).toEqual({ due_at: null, due_basis: null });
+    expect(resolveDueDeadline({ ...item('send the estimate'), kind: 'send_estimate' }, at).due_basis).toBe('default_kind');
+  });
+
+  test('Codex #4816 r28 (reverses r22): only the obligation\'s own quote can suppress the default deadline', () => {
+    const item = (quote) => ({ party: 'waves', kind: 'callback', basis: 'request', due_at: null, due_text: null, quote });
+    // Timing in the quote itself: undated.
+    expect(resolveDueDeadline(item('please call me tomorrow'), at)).toEqual({ due_at: null, due_basis: null });
+    // An unrelated date elsewhere in the message ("The treatment on
+    // 2026-08-01 failed; please call me") must not drop the follow-up bell:
+    // resolveDueDeadline no longer reads the message body at all.
+    expect(resolveDueDeadline(item('please call me'), at, 'The treatment on 2026-08-01 failed; please call me').due_basis)
+      .toBe('default_kind');
+  });
+
+  test.each(['Please call me back', 'Can you send the estimate?', 'Call me back ASAP', 'Are you still coming?',
+    'The sun is burning the lawn, can someone call me?', 'The dog sat on the bait station, please call',
+    'Good morning, can someone call me back?', 'Can you call me later?', 'The treatment shortly after failed, please call',
+    'The tech spent 2 hours here and it still failed, call me', 'Had ants all this year, please call',
+    'Please call me about 2 years of invoices', 'The tech was here for like 2 hours and it failed; call me',
+    "Please call me about this month's invoice", "Call me about tomorrow's appointment", "Can someone call about Friday's visit?",
+    "Call me about next week's service", 'Please call me about my next visit', 'Can you call regarding the next appointment?',
+    'Call me about tomorrow and the treatment plan', 'Please send me the report from this morning',
+    "Send the photos from Friday's visit", 'Can you call to discuss the next appointment?', 'Please call, the next visit needs a gate code',
+    'Please send me the report from the service that happened on Friday', 'Call me about the treatment that was done on Monday',
+    'Please send me the report from Friday through Sunday', 'Send the photos from Monday until Wednesday'])(
+    'Codex #4816 r20: a quote with no stated timing still gets the per-kind default (%s)', (quote) => {
+      expect(resolveDueDeadline({ party: 'waves', kind: 'callback', basis: 'request', due_at: null, due_text: null, quote }, at).due_basis)
+        .toBe('default_kind');
+    },
+  );
+
+  test('a stated due_at is kept verbatim with due_basis "stated", never replaced by a default', () => {
+    const stated = '2040-03-11T09:00:00.000Z';
+    expect(resolveDueDeadline({ party: 'waves', kind: 'callback', basis: 'promise', due_at: stated }, at))
+      .toEqual({ due_at: stated, due_basis: 'stated' });
+  });
+
+  test('a kind outside the table with no stated due_at falls back to the legacy null-due behavior', () => {
+    expect(resolveDueDeadline({ party: 'waves', kind: 'not_a_kind', basis: 'request', due_at: null }, at))
+      .toEqual({ due_at: null, due_basis: null });
+  });
+
+  test('Codex #4816 r1: a stated-but-unresolved time never gets a manufactured default deadline', () => {
+    expect(resolveDueDeadline({ party: 'waves', kind: 'callback', basis: 'request', due_at: null, due_text: 'tomorrow at 9 or 10', timing_unverified: true }, at))
+      .toEqual({ due_at: null, due_basis: null });
+    expect(resolveDueDeadline({ party: 'waves', kind: 'schedule_visit', basis: 'request', due_at: null, due_text: 'mid Oct' }, at))
+      .toEqual({ due_at: null, due_basis: null });
+    expect(resolveDueDeadline({ party: 'waves', kind: 'callback', basis: 'promise', due_at: null, due_text: 'tomorrow' }, at))
+      .toEqual({ due_at: null, due_basis: null });
+  });
+
+  test('send_reschedule_link shares the 24h scheduling window', () => {
+    expect(DEFAULT_DEADLINE_HOURS.send_reschedule_link).toBe(24);
+  });
+});
+
 describe('fulfillment proof', () => {
   const commitment = { kind: 'send_estimate', sms_context: { property_id: PROPERTY_ID, source_at: '2040-03-10T15:00:00Z' } };
   const record = { id: 'estimate-id', ref: 'estimate:estimate-id', type: 'estimate', property_id: PROPERTY_ID,
@@ -737,8 +855,37 @@ describe('fulfillment proof', () => {
     }
   });
 
+  test('Codex #4816 r39: a push-only confirmation the provider accepted answers the promise; an SMS left at sent does not', () => {
+    const push = { type: 'sms', status: 'sent', message_type: 'confirmation', from_phone: 'push', provider_accepted: true };
+    expect(admissibleWitness(push, { kind: 'send_appointment_confirmation' })).toBe(true);
+    expect(admissibleWitness({ ...push, provider_accepted: false }, { kind: 'send_appointment_confirmation' })).toBe(false);
+    expect(admissibleWitness({ ...push, from_phone: '+19415550100' }, { kind: 'send_appointment_confirmation' })).toBe(false);
+  });
+
+  test('Codex #4816 r40: the scheduled-push fallback row (SMS from_phone, push channel stamped) is delivery proof', () => {
+    const settled = { type: 'sms', status: 'sent', message_type: 'confirmation', from_phone: '+19415550100', provider_accepted: true, push_channel: true };
+    expect(admissibleWitness(settled, { kind: 'send_appointment_confirmation' })).toBe(true);
+    expect(admissibleWitness({ ...settled, push_channel: false }, { kind: 'send_appointment_confirmation' })).toBe(false);
+    expect(admissibleWitness({ ...settled, provider_accepted: false }, { kind: 'send_appointment_confirmation' })).toBe(false);
+  });
+
+  test('Codex #4816 r39: on a property-scoped promise an automated notice counts only for a visit at that property', () => {
+    const scoped = { kind: 'send_appointment_confirmation', sms_context: { property_id: 'home' } };
+    const notice = { type: 'sms', status: 'delivered', message_type: 'appointment_rescheduled', linked_property_id: 'home' };
+    expect(admissibleWitness(notice, scoped)).toBe(true);
+    expect(admissibleWitness({ ...notice, linked_property_id: 'rental' }, scoped)).toBe(false);
+    // Unlinked: cannot vouch for the scoped property.
+    expect(admissibleWitness({ ...notice, linked_property_id: null }, scoped)).toBe(false);
+    // Unscoped promise, or a human-typed text (the model reads its words): unchanged.
+    expect(admissibleWitness({ ...notice, linked_property_id: null }, { kind: 'send_appointment_confirmation' })).toBe(true);
+    expect(admissibleWitness({ ...notice, message_type: 'manual', linked_property_id: null }, scoped)).toBe(true);
+  });
+
   test('provider acceptance or a SENT label cannot close an answer before delivery succeeds', () => {
-    const answer = { kind: 'other' };
+    // R3 (owner ruling 2026-09-24) drops sms/email_delivery from `other`'s
+    // witness types entirely; this test's own subject is generic
+    // delivery-status gating, so it runs against a kind that still has them.
+    const answer = { kind: 'send_appointment_confirmation' };
     const sms = { type: 'sms', message_type: 'manual' };
     const email = { type: 'email_delivery', recipient_email_snapshot: 'synthetic@example.invalid', sent_at: '2040-03-11T15:00:00Z' };
     const emailAnswer = { ...answer, evidence: [{ quote: 'Email the answer to synthetic@example.invalid' }] };
@@ -752,14 +899,197 @@ describe('fulfillment proof', () => {
   });
 
   test('email completion requires the exact single recipient in the grounded request', () => {
-    const request = { kind: 'other', evidence: [{ quote: 'Send the answer to desired@example.invalid' }] };
+    // R3: `other` no longer admits email_delivery at all — this test's own
+    // subject is the recipient-matching gate, so it runs against a kind
+    // that still has email_delivery in its witness types.
+    const request = { kind: 'send_appointment_confirmation', evidence: [{ quote: 'Send the answer to desired@example.invalid' }] };
     const email = { type: 'email_delivery', status: 'delivered', sent_at: '2040-03-11T15:00:00Z',
       recipient_email_snapshot: 'old@example.invalid' };
     expect(admissibleWitness(email, request)).toBe(false);
     expect(admissibleWitness({ ...email, recipient_email_snapshot: 'DESIRED@example.invalid' }, request)).toBe(true);
-    expect(admissibleWitness(email, { kind: 'other', evidence: [{ quote: 'Send the answer to my manager' }] })).toBe(false);
+    expect(admissibleWitness(email, { kind: 'send_appointment_confirmation', evidence: [{ quote: 'Send the answer to my manager' }] })).toBe(false);
     expect(admissibleWitness(email, { ...request, evidence: [{ quote: 'Send to old@example.invalid and desired@example.invalid' }] })).toBe(false);
     expect(admissibleWitness({ type: 'sms', status: 'delivered', message_type: 'manual' }, request)).toBe(false);
+  });
+
+  test('R3 owner ruling 2026-09-24: an "other" ask no longer admits a staff sms or email reply at all (the split-billing ask "separate the charges")', () => {
+    const other = { kind: 'other' };
+    expect(admissibleWitness({ type: 'sms', status: 'delivered', message_type: 'manual' }, other)).toBe(false);
+    expect(admissibleWitness({ type: 'call', status: 'completed', duration_seconds: 90 }, other)).toBe(false);
+    const emailOther = { kind: 'other', evidence: [{ quote: 'Email the answer to synthetic@example.invalid' }] };
+    expect(admissibleWitness({ type: 'email_delivery', status: 'delivered', sent_at: '2040-03-11T15:00:00Z',
+      recipient_email_snapshot: 'synthetic@example.invalid' }, emailOther)).toBe(false);
+    // `callback` keeps its existing call/visit mix — unaffected by R3.
+    expect(admissibleWitness({ type: 'call', status: 'completed', duration_seconds: 90 }, { kind: 'callback' })).toBe(true);
+  });
+
+  test('Codex #4816 r1: a visit never system-closes a schedule_visit or technician_follow_up (service match stays with the model)', () => {
+    const visitWitness = { id: 'visit-1', ref: 'visit:visit-1', type: 'visit', status: 'completed', property_id: PROPERTY_ID,
+      created_at: '2040-03-11T15:00:00Z', booked_at: '2040-03-11T15:00:00Z', completed_at: '2040-03-12T15:00:00Z', transitioned_at: '2040-03-12T15:00:00Z',
+      text: 'Quarterly Lawn on 2040-03-12 at 09:00:00; status completed' };
+    for (const kind of ['schedule_visit', 'technician_follow_up']) {
+      const commitment = { kind, sms_context: { property_id: PROPERTY_ID, source_at: '2040-03-10T15:00:00Z' } };
+      expect(admissibleWitness(visitWitness, commitment)).toBe(true);
+    }
+  });
+
+  test('Codex #4816 r46 pre-push: the provider sees whether an SMS row is an accepted App push, never its phone number', async () => {
+    const commitment = { kind: 'send_appointment_confirmation', description: 'Confirm my appointment',
+      sms_context: { property_id: null, source_at: '2040-03-10T15:00:00Z' } };
+    const push = { id: 'sms-1', ref: 'sms:sms-1', type: 'sms', status: 'sent', message_type: 'confirmation', from_phone: '+19415559876',
+      provider_accepted: true, push_channel: true, created_at: '2040-03-10T16:00:00Z', text: 'Your appointment is confirmed.' };
+    dispatchWithFallback.mockResolvedValueOnce({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
+    await verifySmsFulfillment(commitment, { records: [push], failures: [] });
+    const prompt = dispatchWithFallback.mock.calls.at(-1)[1].text;
+    expect(prompt).not.toContain('9415559876');
+    expect(prompt).not.toContain('from_phone');
+    expect(prompt).toContain('"app_push_accepted":true');
+  });
+
+  test('Codex #4816 r7: a cancellation after the text answers a cancel ask for the model only; it never closes "still coming?"', () => {
+    const ctx = { property_id: 'home', source_at: '2040-03-10T15:00:00Z' };
+    const cancelled = { id: 'visit-1', ref: 'visit:visit-1', type: 'visit', status: 'cancelled', created_at: '2040-03-01T15:00:00Z',
+      property_id: 'home',
+      cancelled_at: '2040-03-11T15:00:00Z', text: 'Quarterly Lawn on 2040-03-12 at 09:00:00; status cancelled; cancelled after the request' };
+    const cancelAsk = { kind: 'other', description: 'Please cancel my appointment on Thursday', sms_context: ctx };
+    expect(admissibleWitness(cancelled, cancelAsk)).toBe(true);
+    // Cancelled before the text: no witness.
+    expect(admissibleWitness({ ...cancelled, cancelled_at: '2040-03-09T15:00:00Z' }, cancelAsk)).toBe(false);
+    // A callback is answered by a call or field progress, never a cancellation.
+    expect(admissibleWitness(cancelled, { kind: 'callback', sms_context: ctx })).toBe(false);
+  });
+
+  test('Codex #4816 r17: inside an open window only an event record can ground a fulfilled verdict', async () => {
+    const ctx = { property_id: null, source_at: '2040-03-10T15:00:00Z' };
+    const callback = { kind: 'callback', description: 'Please call me back', sms_context: ctx };
+    const call = { id: 'call-1', ref: 'call:call-1', type: 'call', status: 'completed', duration_seconds: 120,
+      created_at: '2040-03-11T15:00:00Z', text: 'Returned the customer call about the visit' };
+    const visit = { id: 'v-1', ref: 'visit:v-1', type: 'visit', status: 'en_route', property_id: 'home',
+      created_at: '2040-03-09T15:00:00Z', progressed_at: '2040-03-11T15:00:00Z',
+      text: 'Quarterly Lawn on 2040-03-11 at 09:00:00; status en_route; en route/on site/completed after the request' };
+    const evidence = { records: [call, visit], failures: [] };
+    const citeCall = { verdict: 'fulfilled', record_ref: 'call:call-1', quote: 'Returned the customer call' };
+    expect(groundFulfillment(citeCall, evidence, callback).verdict).toBe('fulfilled');
+    expect(groundFulfillment(citeCall, evidence, callback, { eventOnly: true })).toMatchObject({ verdict: 'uncertain', reason: 'invalid_witness' });
+    expect(groundFulfillment({ verdict: 'fulfilled', record_ref: 'visit:v-1', quote: 'en route' }, evidence, callback, { eventOnly: true }).verdict)
+      .toBe('fulfilled');
+    dispatchWithFallback.mockResolvedValueOnce({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
+    const verdict = await verifySmsFulfillment(callback, evidence, { eventOnly: true });
+    expect(dispatchWithFallback.mock.calls.at(-1)[1].text).toContain('"witness_refs":["visit:v-1"]');
+    expect(verdict.event_only).toBe(true);
+    // The instructions admit the same accepted-push proof admissibleWitness does (#4816 r41 pre-push).
+    expect(dispatchWithFallback.mock.calls.at(-1)[1].text).toContain('except an App push the provider accepted');
+    // The window check and the after-deadline check never share a cached verdict.
+    expect(fulfillmentFingerprint(callback, evidence, { eventOnly: true }).evidenceHash)
+      .not.toBe(fulfillmentFingerprint(callback, evidence).evidenceHash);
+    // The event page's watermark is not obligation content.
+    expect(fulfillmentFingerprint({ ...callback, sms_context: { ...ctx, event_seen_at: '2040-03-11T16:00:00Z' } }, evidence).evidenceHash)
+      .toBe(fulfillmentFingerprint(callback, evidence).evidenceHash);
+  });
+
+  test('Codex #4816 r34: progress recorded before a later cancellation still answers "still coming?" or a callback', () => {
+    const ask = (kind, sms_context = {}) => ({ kind, description: 'You still coming?',
+      sms_context: { property_id: null, source_at: '2040-03-10T15:00:00Z', ...sms_context } });
+    const progressedThenCancelled = { id: 'visit-c', ref: 'visit:visit-c', type: 'visit', status: 'cancelled', property_id: 'home',
+      created_at: '2040-03-01T15:00:00Z', progressed_at: '2040-03-10T16:00:00Z', cancelled_at: '2040-03-10T18:00:00Z',
+      text: 'Quarterly Lawn on 2040-03-10 at 09:00:00; status cancelled; en route/on site/completed after the request; cancelled after the request' };
+    // Unscoped: the progress stamp answers; the cancellation never does.
+    expect(admissibleWitness(progressedThenCancelled, ask('other'))).toBe(true);
+    expect(admissibleWitness(progressedThenCancelled, ask('callback'))).toBe(true);
+    const grounded = groundFulfillment({ verdict: 'fulfilled', record_ref: 'visit:visit-c', quote: 'en route' },
+      { records: [progressedThenCancelled], failures: [] }, ask('other'));
+    expect(grounded).toMatchObject({ verdict: 'fulfilled', matched_at: new Date('2040-03-10T16:00:00Z') });
+    // No progress: an unscoped ask or a callback has no witness in a cancellation.
+    const cancelledOnly = { ...progressedThenCancelled, progressed_at: null };
+    expect(admissibleWitness(cancelledOnly, ask('other'))).toBe(false);
+    expect(admissibleWitness(cancelledOnly, ask('callback'))).toBe(false);
+    // Scoped cancel ask: the cancellation answers; the earliest qualifying stamp is the witness time.
+    expect(admissibleWitness(cancelledOnly, ask('other', { property_id: 'home' }))).toBe(true);
+  });
+
+  test('Codex #4816 r35: recorded progress still answers after a move resets the visit to confirmed', () => {
+    const ask = (kind) => ({ kind, description: 'You still coming?',
+      sms_context: { property_id: null, source_at: '2040-03-10T15:00:00Z' } });
+    const progressedThenMoved = { id: 'visit-m', ref: 'visit:visit-m', type: 'visit', status: 'confirmed', property_id: 'home',
+      created_at: '2040-03-01T15:00:00Z', progressed_at: '2040-03-10T16:00:00Z', moved_at: '2040-03-10T17:00:00Z',
+      text: 'Quarterly Lawn on 2040-03-12 at 09:00:00; status confirmed; moved after the request; en route/on site/completed after the request' };
+    for (const status of ['confirmed', 'rescheduled']) {
+      expect(admissibleWitness({ ...progressedThenMoved, status }, ask('other'))).toBe(true);
+      expect(admissibleWitness({ ...progressedThenMoved, status }, ask('callback'))).toBe(true);
+    }
+    // A move alone is not progress.
+    expect(admissibleWitness({ ...progressedThenMoved, progressed_at: null }, ask('other'))).toBe(false);
+    expect(admissibleWitness({ ...progressedThenMoved, progressed_at: null }, ask('callback'))).toBe(false);
+    // Back at confirmed with no logged move: an undone En Route tap, not progress.
+    expect(admissibleWitness({ ...progressedThenMoved, moved_at: null }, ask('other'))).toBe(false);
+    expect(admissibleWitness({ ...progressedThenMoved, moved_at: null }, ask('callback'))).toBe(false);
+  });
+
+  test('Codex #4816 r43: progress recorded before a later no_show still answers; a no_show alone does not', () => {
+    const ask = (kind) => ({ kind, description: 'You still coming?', sms_context: { property_id: null, source_at: '2040-03-10T15:00:00Z' } });
+    const noShow = { id: 'visit-n', ref: 'visit:visit-n', type: 'visit', status: 'no_show', property_id: 'home',
+      created_at: '2040-03-01T15:00:00Z', progressed_at: '2040-03-10T16:00:00Z', text: 'Quarterly Lawn; status no_show' };
+    expect(admissibleWitness(noShow, ask('other'))).toBe(true);
+    expect(admissibleWitness(noShow, ask('callback'))).toBe(true);
+    expect(admissibleWitness({ ...noShow, progressed_at: null }, ask('other'))).toBe(false);
+    expect(admissibleWitness({ ...noShow, progressed_at: null }, ask('callback'))).toBe(false);
+  });
+
+  test('Codex #4816 r48: recorded progress still answers after a later skip; a pre-field reset without a move does not', () => {
+    const ask = (kind) => ({ kind, description: 'You still coming?', sms_context: { property_id: null, source_at: '2040-03-10T15:00:00Z' } });
+    const base = { id: 'visit-s', ref: 'visit:visit-s', type: 'visit', property_id: 'home', created_at: '2040-03-01T15:00:00Z',
+      progressed_at: '2040-03-10T16:00:00Z', text: 'Quarterly Lawn' };
+    for (const status of ['skipped', 'no_show', 'cancelled', 'completed', 'en_route']) {
+      expect(admissibleWitness({ ...base, status }, ask('other'))).toBe(true);
+      expect(admissibleWitness({ ...base, status }, ask('callback'))).toBe(true);
+    }
+    for (const status of ['pending', 'scheduled', 'confirmed']) {
+      expect(admissibleWitness({ ...base, status }, ask('other'))).toBe(false);
+    }
+    expect(admissibleWitness({ ...base, status: 'skipped', progressed_at: null }, ask('callback'))).toBe(false);
+  });
+
+  test('Codex #4816 r14–r27: a cancellation answers only a cancel ask whose property was resolved', () => {
+    const ask = (sms_context) => ({ kind: 'other', description: 'Please cancel Thursday\'s appointment',
+      sms_context: { property_id: null, source_at: '2040-03-10T15:00:00Z', ...sms_context } });
+    const cancelled = { id: 'visit-b', ref: 'visit:visit-b', type: 'visit', status: 'cancelled', created_at: '2040-03-01T15:00:00Z',
+      property_id: 'property-b', cancelled_at: '2040-03-11T15:00:00Z', text: 'Quarterly Lawn on 2040-03-12 at 09:00:00; status cancelled' };
+    // Unscoped: nothing records the customer's properties when the text
+    // arrived, so a cancellation anywhere cannot vouch for the asked-about visit.
+    expect(admissibleWitness(cancelled, ask({}))).toBe(false);
+    expect(admissibleWitness(cancelled, ask({ sole_property_id: 'property-b' }))).toBe(false);
+    // Scoped to a resolved property: the cancellation there answers it.
+    expect(admissibleWitness(cancelled, ask({ property_id: 'property-b' }))).toBe(true);
+    expect(admissibleWitness(cancelled, ask({ property_id: 'property-a' }))).toBe(false);
+    // Field progress still answers an unscoped "still coming?" (owner ruling 2026-09-24).
+    const progressed = { ...cancelled, status: 'en_route', cancelled_at: null, progressed_at: '2040-03-11T15:00:00Z' };
+    expect(admissibleWitness(progressed, ask({}))).toBe(true);
+  });
+
+  test('Codex #4816 r1: production confirmation/reschedule-link sends are admissible for their kinds', () => {
+    const delivered = (message_type) => ({ type: 'sms', status: 'delivered', message_type, created_at: '2040-03-11T15:00:00Z' });
+    expect(admissibleWitness(delivered('appointment_rescheduled'), { kind: 'send_appointment_confirmation' })).toBe(true);
+    // Estimate-acceptance bookings stamp this one (routes/estimate-public.js → send-customer-message).
+    expect(admissibleWitness(delivered('appointment_confirmation'), { kind: 'send_appointment_confirmation' })).toBe(true);
+    expect(admissibleWitness(delivered('reschedule_series_confirmation'), { kind: 'send_appointment_confirmation' })).toBe(true);
+    // Codex #4816 r9: admin-dispatch.js recurring-placement notice.
+    expect(admissibleWitness(delivered('appointment_recurring_placement_confirmed'), { kind: 'send_appointment_confirmation' })).toBe(true);
+    expect(admissibleWitness(delivered('reschedule_link_promise'), { kind: 'send_reschedule_link' })).toBe(true);
+    expect(admissibleWitness(delivered('reschedule_link_promise'), { kind: 'send_appointment_confirmation' })).toBe(false);
+    expect(admissibleWitness(delivered('receipt'), { kind: 'send_reschedule_link' })).toBe(false);
+  });
+
+  test('R1 owner ruling 2026-09-24 (settled r10): visit progress is admissible for other/callback asks; the model decides', () => {
+    const other = { kind: 'other', sms_context: { property_id: null, source_at: '2040-03-10T15:00:00Z' } };
+    const visitWitness = { id: 'visit-1', ref: 'visit:visit-1', type: 'visit', status: 'completed',
+      created_at: '2040-03-09T15:00:00Z', progressed_at: '2040-03-11T15:00:00Z',
+      text: 'Quarterly Lawn on 2040-03-11 at 09:00:00; status completed' };
+    expect(admissibleWitness(visitWitness, other)).toBe(true);
+    expect(admissibleWitness(visitWitness, { ...other, kind: 'callback' })).toBe(true);
+    expect(admissibleWitness({ ...visitWitness, progressed_at: null }, other)).toBe(false);
+    // Codex #4816 r10: the no-model close is gone — "please cancel Thursday"
+    // is also `other`, and a tech going en route does not answer it.
+    expect(require('../services/sms-commitment-fulfillment').systemEventFulfillment).toBeUndefined();
   });
 
   test('a visit needs post-request scheduling or completion activity', () => {
@@ -848,6 +1178,19 @@ describe('fulfillment proof', () => {
     expect(dispatchWithFallback.mock.calls[0][1].text).not.toContain('CVV is 123');
     expect(groundFulfillment({ verdict: 'fulfilled', record_ref: 'sms:1', quote: text }, evidence, { kind: 'other' }))
       .toMatchObject({ verdict: 'uncertain', reason: 'sensitive_model_output' });
+  });
+
+  test('only admissible records are offered to the model as witness_refs; payment evidence is split out of #4816', async () => {
+    dispatchWithFallback.mockReset().mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
+    const ctx = { property_id: null, source_at: '2040-03-10T15:00:00Z' };
+    const visit = { ref: 'visit:v-1', type: 'visit', id: 'v-1', status: 'en_route', progressed_at: '2040-03-11T15:00:00Z',
+      text: 'Quarterly Lawn on 2040-03-11 at 09:00:00; status en_route; en route/on site/completed after the request' };
+    const staffSms = { ref: 'sms:1', type: 'sms', status: 'delivered', message_type: 'manual', created_at: '2040-03-11T15:00:00Z', text: 'On our way' };
+    const paid = { ref: 'payment:i-1', type: 'payment', id: 'i-1', paid_at: '2040-03-11T15:00:00Z', text: 'Invoice paid' };
+    const ask = { kind: 'other', description: 'You still coming this morning?', sms_context: ctx };
+    expect(admissibleWitness(paid, ask)).toBe(false);
+    await verifySmsFulfillment(ask, { records: [visit, staffSms], failures: [] });
+    expect(dispatchWithFallback.mock.calls[0][1].text).toContain('"witness_refs":["visit:v-1"]');
   });
 
   test('a PAN-lookalike record id survives the prompt and the sensitive-output guard', async () => {

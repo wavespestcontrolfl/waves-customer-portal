@@ -197,6 +197,21 @@ function hasClockRange(body) {
   return false;
 }
 
+// A clock the source states: "3pm", "9:30", "noon", or a bare hour after a
+// clock preposition ("tomorrow at 9", "before five"). Shared with the SMS
+// deadline defaults so both read clock timing the same way.
+const CLOCK_TOKEN = /\b(?:\d{1,2}:\d{2}(?:\s*[ap]\.?m\.?)?|\d{1,2}\s*[ap]\.?m\.?|\d{1,2}[ap]|o['’]?clock|noon|midnight)(?=\s|[,.!?;–-]|$)/gi;
+// A bare hour, digits or spelled, counts only when nothing or a time word
+// follows it: "at one of these numbers" or "at 3 different numbers" is not
+// a clock (Codex #4816 r35, r36).
+const CLOCK_TAIL = '(?=\\s*(?:[,.!?;]|$)|\\s+(?:o[\'’]?clock|thirty|fifteen|forty|[ap]\\.?m\\b|or|to|and|in the|this|tonight|today|tomorrow|on|then|please|works|ish)\\b|-ish\\b)';
+const CLOCK_PREPOSITION = new RegExp('\\b(?:at|by|around|before|after|until|till)\\s+'
+  + '(?:\\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)' + CLOCK_TAIL, 'i');
+function statesClock(text) {
+  const value = String(text || '');
+  return (value.match(CLOCK_TOKEN) || []).length > 0 || CLOCK_PREPOSITION.test(value);
+}
+
 function groundExtraction(parsed, { message, properties = [], captureCommitments = true, captureAdditionalProperties = false }) {
   if (!validate(parsed)) throw new Error('sms_operations_invalid_schema');
   if (stringifySmsEvidence(parsed) !== JSON.stringify(parsed)) throw new Error('sms_operations_sensitive_output');
@@ -226,9 +241,8 @@ function groundExtraction(parsed, { message, properties = [], captureCommitments
     // at 3", "before five") or SMS shorthand ("3p", "9a") is stated timing
     // the parser cannot resolve, so it must reach review rather than stay
     // undated.
-    const clocks = body.match(/\b(?:\d{1,2}:\d{2}|\d{1,2}\s*[ap]\.?m\.?|\d{1,2}[ap]|o['’]?clock|noon|midnight)(?=\s|[,.!?;–-]|$)/gi) || [];
-    const clockStated = clocks.length > 0
-      || /\b(?:at|by|around|before|after|until|till)\s+(?:\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)(?=\s|[,.!?;]|$)/i.test(body);
+    const clocks = body.match(CLOCK_TOKEN) || [];
+    const clockStated = statesClock(body);
     // A shortened due_text can drop an alternative or a hedge the source
     // states ("9am or 10am", "9-10am", "3pm-ish", "9am, I think"); substring grounding
     // cannot see what it omitted, so such timing stays a review item.
@@ -291,4 +305,4 @@ async function extractSmsOperations(context) {
   return groundExtraction(result.json, context);
 }
 
-module.exports = { VERSION, FACT_FIELDS, SCHEMA, buildPrompt, groundExtraction, explicitContactPreference, matchesExplicitAccessCode, stringifySmsEvidence, extractSmsOperations };
+module.exports = { VERSION, FACT_FIELDS, SCHEMA, buildPrompt, groundExtraction, statesClock, explicitContactPreference, matchesExplicitAccessCode, stringifySmsEvidence, extractSmsOperations };

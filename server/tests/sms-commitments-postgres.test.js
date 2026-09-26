@@ -28,7 +28,7 @@ const schema = `sms_commitments_${randomUUID().replaceAll('-', '')}`;
 const TABLES = ['customers', 'customer_properties', 'property_preferences', 'sms_log', 'call_log',
   'call_commitments', 'data_hygiene_source_extractions', 'data_hygiene_proposals', 'data_hygiene_sensitive_vault',
   'conversations', 'messages', 'notifications', 'audit_log',
-  'emails', 'email_messages', 'estimates', 'invoices', 'scheduled_services', 'job_status_history', 'reschedule_log', 'system_settings', 'leads'];
+  'emails', 'email_messages', 'estimates', 'invoices', 'payments', 'scheduled_services', 'job_status_history', 'reschedule_log', 'system_settings', 'leads', 'messaging_audit_log'];
 let mockPg;
 let admin;
 let message;
@@ -220,7 +220,10 @@ postgres('SMS commitments on PostgreSQL', () => {
     await recordMessageOperations(mockPg, message, result, context);
     expect(await mockPg('property_preferences')).toHaveLength(0);
     expect((await mockPg('sms_log').first()).operational_analysis.facts[0].outcome).toBe('temporary_instruction');
-    expect(NotificationService.notifyAdmin).toHaveBeenCalled();
+    // Codex #4816 r27: labelled durable, held back only by wording that
+    // cannot be tied to the fact — staff review it. R4 silence covers facts
+    // the extractor itself labels temporary or visit-only.
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
   });
 
   test('an excluded source type discovered under lock cannot update the profile', async () => {
@@ -538,7 +541,10 @@ postgres('SMS commitments on PostgreSQL', () => {
   });
 
   test('persisted evidence checks avoid repeated LLM calls and rerun after a delivery changes', async () => {
-    result.obligations[0] = { ...result.obligations[0], kind: 'other',
+    // R3 (owner ruling 2026-09-24): a delivered staff SMS no longer closes an
+    // `other` ask. This test's own subject is the evidence-hash cache/rerun
+    // behavior, so it runs against a kind that still admits an sms witness.
+    result.obligations[0] = { ...result.obligations[0], kind: 'send_appointment_confirmation',
       due_at: new Date(message.created_at.getTime() + 1000).toISOString() };
     await recordMessageOperations(mockPg, message, result, context);
     const [reply] = await mockPg('sms_log').insert({ ...message, id: randomUUID(), direction: 'outbound',
@@ -1026,11 +1032,15 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 
-  test('owner ruling 2026-09-24: a NULL-due commitment with an admissible witness can verify and close, but never bells', async () => {
+  test('R1 owner ruling 2026-09-24 (settled r10): field progress sends a NULL-due "other" ask to the model at once; a grounded verdict closes it, no bell', async () => {
     result.facts = [];
     result.obligations[0] = { ...result.obligations[0], kind: 'other', due_at: null,
       quote: 'You still coming this morning?', description: 'You still coming this morning?' };
     await recordMessageOperations(mockPg, message, result, context);
+    // R5 assigns a per-kind default due_at at insert time; force this back
+    // to a legacy NULL-due row so the scan picks it up on this tick instead
+    // of waiting out the default 24h window.
+    await mockPg('call_commitments').update({ due_at: null, due_basis: null });
     const after = new Date(message.created_at.getTime() + 1000);
     const now = new Date(after.getTime() + 1000);
     const [visit] = await mockPg('scheduled_services').insert({
@@ -1039,11 +1049,640 @@ postgres('SMS commitments on PostgreSQL', () => {
       created_at: new Date(message.created_at.getTime() - 1000),
     }).returning('id');
     await mockPg('job_status_history').insert({ job_id: visit.id, from_status: 'confirmed', to_status: 'en_route', transitioned_at: after });
-    dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'fulfilled', record_ref: `visit:${visit.id}`, quote: 'Quarterly Lawn' } });
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'fulfilled', record_ref: `visit:${visit.id}`,
+      quote: 'en route/on site/completed after the request' } });
     const outcome = await refreshSmsCommitments({ conn: mockPg, now });
     expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
     expect(outcome).toMatchObject({ scanned: 1, fulfilled: 1 });
-    expect((await mockPg('call_commitments').first()).status).toBe('fulfilled');
+    const commitment = await mockPg('call_commitments').first();
+    expect(commitment.status).toBe('fulfilled');
+    expect(commitment.fulfillment).toMatchObject({ verdict: 'fulfilled', basis: 'grounded_sms_request_outcome', record_type: 'visit', record_id: visit.id });
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('R1 owner ruling 2026-09-24 (settled r10): field progress reaches the model INSIDE the default 24h window, the moment it happens', async () => {
+    result.facts = [];
+    // "this morning" would be stated timing (Codex #4816 r20) and leave the
+    // row undated; this test is about the open default window.
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', due_at: null,
+      quote: 'You still coming?', description: 'You still coming?' };
+    await recordMessageOperations(mockPg, message, result, context);
+    const inserted = await mockPg('call_commitments').first();
+    expect(inserted.due_basis).toBe('default_kind');
+    const after = new Date(message.created_at.getTime() + 1000);
+    // Two seconds after the text: the 24h window is nowhere near over.
+    const now = new Date(after.getTime() + 1000);
+    expect(new Date(inserted.due_at) > now).toBe(true);
+    const [visit] = await mockPg('scheduled_services').insert({
+      customer_id: message.customer_id, property_id: context.properties[0].id, service_type: 'Quarterly Lawn',
+      scheduled_date: etDateString(message.created_at), window_start: '09:00:00', status: 'en_route',
+      created_at: new Date(message.created_at.getTime() - 1000),
+    }).returning('id');
+    await mockPg('job_status_history').insert({ job_id: visit.id, from_status: 'confirmed', to_status: 'en_route', transitioned_at: after });
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'fulfilled', record_ref: `visit:${visit.id}`,
+      quote: 'en route/on site/completed after the request' } });
+    const outcome = await refreshSmsCommitments({ conn: mockPg, now });
+    expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
+    expect(outcome).toMatchObject({ scanned: 1, fulfilled: 1, skipped_not_due: 0 });
+    const commitment = await mockPg('call_commitments').first();
+    expect(commitment.status).toBe('fulfilled');
+    expect(commitment.fulfillment).toMatchObject({ verdict: 'fulfilled', basis: 'grounded_sms_request_outcome', record_type: 'visit', record_id: visit.id });
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('Codex #4816 r4: a backlog of future-dated rows never crowds a due row out of the tick (separate pages and cursors)', async () => {
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], kind: 'callback', basis: 'request', due_at: null,
+      quote: 'Please call me back', description: 'Please call me back' };
+    await recordMessageOperations(mockPg, message, result, context);
+    const seed = await mockPg('call_commitments').first();
+    const now = new Date(message.created_at.getTime() + 2000);
+    const { id: _id, created_at: _c, updated_at: _u, ...template } = seed;
+    const clone = (i, due_at) => ({ ...template, commitment_key: `${seed.commitment_key}:${i}`, due_at,
+      evidence: JSON.stringify(seed.evidence), sms_context: JSON.stringify(seed.sms_context) });
+    // 25 more future-dated rows (26 with the seed) and ONE row whose deadline has passed.
+    await mockPg('call_commitments').insert([...Array.from({ length: 25 }, (_, i) => clone(i, new Date(now.getTime() + 3600000))),
+      clone('due', new Date(now.getTime() - 1000))]);
+    const verify = jest.fn(async () => ({ verdict: 'open', reason: 'no_answer', evidence_hash: 'x', retry_after: null }));
+    const outcome = await refreshSmsCommitments({ conn: mockPg, verify, now });
+    // Due page: the one overdue row (verified, belled). Future page: 25 of the
+    // 26, each skipped before any model call since nothing on file answers it.
+    expect(outcome).toMatchObject({ scanned: 26, fulfilled: 0, skipped_no_witness: 25, skipped_not_due: 0 });
+    expect(verify).toHaveBeenCalledTimes(1);
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    const cursors = Object.fromEntries((await mockPg('system_settings').whereIn('key', ['sms_operations.fulfillment_cursor', 'sms_operations.future_cursor'])).map((r) => [r.key, r.value]));
+    expect(cursors['sms_operations.fulfillment_cursor']).toBeNull();
+    expect(cursors['sms_operations.future_cursor']).toMatch(/^[a-f0-9-]{36}$/);
+  });
+
+  test('Codex #4816 r15–r17: rows with unseen visit activity are drained ahead of the cursors, watermarked, and return only on new activity', async () => {
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], kind: 'callback', basis: 'request', due_at: null,
+      quote: 'Please call me back', description: 'Please call me back' };
+    await recordMessageOperations(mockPg, message, result, context);
+    const seed = await mockPg('call_commitments').first();
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 1000);
+    const { id: _id, created_at: _c, updated_at: _u, ...template } = seed;
+    await mockPg('call_commitments').update({ due_at: new Date(now.getTime() + 3600000) });
+    await mockPg('call_commitments').insert(Array.from({ length: 29 }, (_, i) => ({ ...template,
+      commitment_key: `${seed.commitment_key}:${i}`, due_at: new Date(now.getTime() + 3600000),
+      evidence: JSON.stringify(seed.evidence), sms_context: JSON.stringify(seed.sms_context) })));
+    const ids = await mockPg('call_commitments').orderBy('id').pluck('id');
+    const [target, last] = [ids[0], ids[ids.length - 1]];
+    // The future cursor already sits on the target: its page starts after it.
+    const parkCursor = () => mockPg('system_settings').insert({ key: 'sms_operations.future_cursor', value: target, category: 'sms_operations' })
+      .onConflict('key').merge({ value: target });
+    const verify = jest.fn(async () => ({ verdict: 'open', reason: 'no_answer', evidence_hash: 'x', retry_after: null }));
+    const verified = () => verify.mock.calls.map(([row]) => row.id);
+    const tick = async (at = now) => { verify.mockClear(); await parkCursor(); return refreshSmsCommitments({ conn: mockPg, verify, now: at }); };
+    expect(await tick()).toMatchObject({ scanned: 25, skipped_no_witness: 25 });
+    expect(verify).not.toHaveBeenCalled();
+    const [visit] = await mockPg('scheduled_services').insert({
+      customer_id: message.customer_id, property_id: context.properties[0].id, service_type: 'Quarterly Pest Control',
+      scheduled_date: etDateString(after), window_start: '09:00:00', status: 'en_route',
+      created_at: new Date(message.created_at.getTime() - 86400000), updated_at: after,
+    }).returning('id');
+    await mockPg('job_status_history').insert({ job_id: visit.id, from_status: 'confirmed', to_status: 'en_route', transitioned_at: after });
+    // Tick 1: the event page takes the first 25 rows, the target among them;
+    // inside the window only the event may ground the check.
+    await tick();
+    expect(verified()).toContain(target);
+    expect(verified()).not.toContain(last);
+    expect(verify.mock.calls.every(([, , opts]) => opts.eventOnly === true)).toBe(true);
+    // Stamped through the activity read, capped at the commit grace (r20):
+    // the event is younger than ten minutes, so the cap holds the watermark.
+    expect(new Date((await mockPg('call_commitments').where({ id: target }).first()).sms_context.event_seen_at).getTime())
+      .toBe(now.getTime() - 10 * 60 * 1000);
+    // Tick 2: never-stamped rows come first, so the page drains the other
+    // five (the parked future cursor cannot reach the last row this tick).
+    await tick(new Date(now.getTime() + 1000));
+    expect(verified()).toContain(last);
+    // Hours later the cap has passed the event: one settling tick stamps it
+    // fully, then nothing is re-verified until new activity lands — and
+    // then the target comes straight back.
+    const later = new Date(now.getTime() + 2 * 3600000);
+    await mockPg('call_commitments').update({ due_at: new Date(later.getTime() + 3600000) });
+    await tick(later);
+    await tick(new Date(later.getTime() + 1000));
+    expect(verified()).not.toContain(target);
+    await mockPg('job_status_history').insert({ job_id: visit.id, from_status: 'en_route', to_status: 'on_site',
+      transitioned_at: new Date(later.getTime() - 1000) });
+    await mockPg('scheduled_services').where({ id: visit.id }).update({ status: 'on_site' });
+    await tick(new Date(later.getTime() + 2000));
+    expect(verified()).toContain(target);
+  });
+
+  test('Codex #4816 r17: an undated row behind the due cursor is verified on the next tick after a visit event', async () => {
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', basis: 'request', due_at: null, due_text: 'sometime soon',
+      quote: 'You still coming?', description: 'You still coming?' };
+    await recordMessageOperations(mockPg, message, result, context);
+    await mockPg('call_commitments').update({ due_at: null });
+    const [target] = await mockPg('call_commitments').pluck('id');
+    // A cursor already past the target: the due page cannot reach it.
+    await mockPg('system_settings').insert({ key: 'sms_operations.fulfillment_cursor', value: 'ffffffff-ffff-4fff-bfff-ffffffffffff', category: 'sms_operations' })
+      .onConflict('key').merge({ value: 'ffffffff-ffff-4fff-bfff-ffffffffffff' });
+    const after = new Date(message.created_at.getTime() + 1000);
+    const [visit] = await mockPg('scheduled_services').insert({
+      customer_id: message.customer_id, property_id: context.properties[0].id, service_type: 'Quarterly Pest Control',
+      scheduled_date: etDateString(after), window_start: '09:00:00', status: 'en_route',
+      created_at: new Date(message.created_at.getTime() - 86400000), updated_at: after,
+    }).returning('id');
+    await mockPg('job_status_history').insert({ job_id: visit.id, from_status: 'confirmed', to_status: 'en_route', transitioned_at: after });
+    const verify = jest.fn(async () => ({ verdict: 'open', reason: 'no_answer', evidence_hash: 'x', retry_after: null }));
+    await refreshSmsCommitments({ conn: mockPg, verify, now: new Date(after.getTime() + 1000) });
+    expect(verify.mock.calls.map(([row, , opts]) => [row.id, opts.eventOnly])).toEqual([[target, false]]);
+  });
+
+  test.each(['revalidation refuses the close', 'the source text changes under the lock', 'the provider fails',
+    'new activity lands during the provider backoff', 'an earlier-stamped write commits during the provider backoff',
+    'a non-witness evidence source fails'])(
+    'Codex #4816 r18/r19: a verdict the transaction does not persist leaves the event unseen for the next tick (%s)', async (cause) => {
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', basis: 'request', due_at: null, due_text: 'sometime soon',
+      quote: 'You still coming?', description: 'You still coming?' };
+    await recordMessageOperations(mockPg, message, result, context);
+    await mockPg('call_commitments').update({ due_at: null });
+    const [target] = await mockPg('call_commitments').pluck('id');
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 1000);
+    const [visit] = await mockPg('scheduled_services').insert({
+      customer_id: message.customer_id, property_id: context.properties[0].id, service_type: 'Quarterly Pest Control',
+      scheduled_date: etDateString(after), window_start: '09:00:00', status: 'en_route',
+      created_at: new Date(message.created_at.getTime() - 86400000), updated_at: after,
+    }).returning('id');
+    await mockPg('job_status_history').insert({ job_id: visit.id, from_status: 'confirmed', to_status: 'en_route', transitioned_at: after });
+    // A stale evidence hash: revalidation refuses the close, as it does for a
+    // witness that changed or is locked by another writer.
+    const verify = jest.fn(async () => {
+      if (['the provider fails', 'new activity lands during the provider backoff', 'an earlier-stamped write commits during the provider backoff'].includes(cause)) {
+        return { verdict: 'uncertain', reason: 'provider_failed', evidence_hash: 'x', retry_after: new Date(now.getTime() + 3600000).toISOString() };
+      }
+      if (cause === 'the source text changes under the lock') {
+        await mockPg('sms_log').where({ id: message.id }).update({ message_body: `${message.message_body} (edited)` });
+        return { verdict: 'open', reason: 'no_answer', evidence_hash: 'x', retry_after: null };
+      }
+      if (cause === 'a non-witness evidence source fails') {
+        // Codex #4816 r26: the visit witness loaded but the call source did
+        // not; verify settles as incomplete_sources with no retry_after.
+        return { verdict: 'uncertain', reason: 'incomplete_sources', failures: ['call'], evidence_hash: 'x', retry_after: null };
+      }
+      return { verdict: 'fulfilled', record_type: 'visit', record_id: visit.id, quote: 'en route', evidence_hash: 'stale', retry_after: null };
+    });
+    const conn = cause === 'a non-witness evidence source fails'
+      ? new Proxy(mockPg, { apply: (_t, _this, [table, ...rest]) => (table === 'call_log' ? mockPg('call_log_unavailable') : mockPg(table, ...rest)) })
+      : mockPg;
+    expect(await refreshSmsCommitments({ conn, verify, now })).toMatchObject({ scanned: 1, fulfilled: 0 });
+    const row = await mockPg('call_commitments').where({ id: target }).first();
+    expect(row.status).toBe('open');
+    expect(row.sms_context.event_seen_at).toBeUndefined();
+    // The due cursor has moved on; the event page still brings it back.
+    await mockPg('system_settings').insert({ key: 'sms_operations.fulfillment_cursor', value: 'ffffffff-ffff-4fff-bfff-ffffffffffff', category: 'sms_operations' })
+      .onConflict('key').merge({ value: 'ffffffff-ffff-4fff-bfff-ffffffffffff' });
+    const parkDue = () => mockPg('system_settings').insert({ key: 'sms_operations.fulfillment_cursor', value: 'ffffffff-ffff-4fff-bfff-ffffffffffff', category: 'sms_operations' })
+      .onConflict('key').merge({ value: 'ffffffff-ffff-4fff-bfff-ffffffffffff' });
+    let retryAt = new Date(now.getTime() + 1000);
+    if (cause === 'the provider fails') {
+      // Inside the ten-minute commit grace the fresh event may still bring
+      // the row back (verify reuses the stored failure — no model call);
+      // once the grace has passed what the failed attempt read, the row
+      // yields its event-page slot through the backoff...
+      await refreshSmsCommitments({ conn: mockPg, verify, now: new Date(now.getTime() + 11 * 60000) });
+      await parkDue();
+      verify.mockClear();
+      await refreshSmsCommitments({ conn: mockPg, verify, now: new Date(now.getTime() + 12 * 60000) });
+      expect(verify).not.toHaveBeenCalled();
+      await parkDue();
+      // ...and returns, event still unseen, once the retry is due.
+      retryAt = new Date(now.getTime() + 3601000);
+    }
+    if (cause === 'an earlier-stamped write commits during the provider backoff') {
+      // Codex #4816 r30: stamped at transaction start, before the failed
+      // attempt, committed after it — still new evidence.
+      await mockPg('job_status_history').insert({ job_id: visit.id, from_status: 'en_route', to_status: 'on_site',
+        transitioned_at: new Date(now.getTime() - 500) });
+      await mockPg('scheduled_services').where({ id: visit.id }).update({ status: 'on_site' });
+    }
+    if (cause === 'new activity lands during the provider backoff') {
+      // Codex #4816 r21: activity after the failed attempt changes the
+      // evidence, so the row comes back before retry_after.
+      await mockPg('job_status_history').insert({ job_id: visit.id, from_status: 'en_route', to_status: 'on_site',
+        transitioned_at: new Date(now.getTime() + 500) });
+      await mockPg('scheduled_services').where({ id: visit.id }).update({ status: 'on_site' });
+    }
+    verify.mockClear();
+    await refreshSmsCommitments({ conn: mockPg, verify, now: retryAt });
+    expect(verify.mock.calls.map(([r]) => r.id)).toEqual([target]);
+  },
+  );
+
+  test('Codex #4816 r38: a skipped/no_show transition is not an event the page picks up', async () => {
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', basis: 'request', due_at: null, due_text: 'sometime soon',
+      quote: 'You still coming?', description: 'You still coming?' };
+    await recordMessageOperations(mockPg, message, result, context);
+    await mockPg('call_commitments').update({ due_at: null });
+    const minutes = (m) => new Date(message.created_at.getTime() + m * 60000);
+    const [visit] = await mockPg('scheduled_services').insert({
+      customer_id: message.customer_id, property_id: context.properties[0].id, service_type: 'Quarterly Pest Control',
+      scheduled_date: etDateString(minutes(5)), window_start: '09:00:00', status: 'no_show',
+      created_at: new Date(message.created_at.getTime() - 86400000), updated_at: minutes(5),
+    }).returning('id');
+    await mockPg('job_status_history').insert({ job_id: visit.id, from_status: 'confirmed', to_status: 'no_show', transitioned_at: minutes(5) });
+    const verify = jest.fn(async () => ({ verdict: 'open', reason: 'no_answer', evidence_hash: 'x', retry_after: null }));
+    const tick = async (at) => {
+      await mockPg('system_settings').insert({ key: 'sms_operations.fulfillment_cursor', value: 'ffffffff-ffff-4fff-bfff-ffffffffffff', category: 'sms_operations' })
+        .onConflict('key').merge({ value: 'ffffffff-ffff-4fff-bfff-ffffffffffff' });
+      return refreshSmsCommitments({ conn: mockPg, verify, now: at });
+    };
+    expect(await tick(minutes(20))).toMatchObject({ scanned: 0 });
+    // A witness status on the same visit is an event.
+    await mockPg('job_status_history').insert({ job_id: visit.id, from_status: 'no_show', to_status: 'rescheduled', transitioned_at: minutes(21) });
+    expect(await tick(minutes(40))).toMatchObject({ scanned: 1 });
+  });
+
+  test('Codex #4816 r49: an automated notice keeps the property snapshotted at send time after its visit moves', async () => {
+    const [visit] = await mockPg('scheduled_services').insert({ customer_id: message.customer_id, property_id: context.properties[0].id,
+      service_type: 'Quarterly Pest Control', scheduled_date: etDateString(message.created_at), window_start: '09:00:00', status: 'confirmed',
+      created_at: new Date(message.created_at.getTime() - 86400000) }).returning('id');
+    const [notice] = await mockPg('sms_log').insert({ ...message, id: randomUUID(), direction: 'outbound',
+      from_phone: message.to_phone, to_phone: message.from_phone, message_body: 'Your appointment is confirmed.',
+      message_type: 'confirmation', status: 'delivered', created_at: new Date(message.created_at.getTime() + 1000),
+      metadata: JSON.stringify({ scheduled_service_id: visit.id, property_id: context.properties[0].id }) }).returning('id');
+    // The visit is switched to another property after the notice went out.
+    await mockPg('scheduled_services').where({ id: visit.id }).update({ property_id: randomUUID() });
+    const commitment = { kind: 'send_appointment_confirmation', sms_context: { property_id: context.properties[0].id, source_at: message.created_at.toISOString() } };
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, new Date(message.created_at.getTime() + 5000));
+    const record = evidence.records.find((r) => r.id === notice.id);
+    expect(String(record.linked_property_id)).toBe(String(context.properties[0].id));
+    expect(admissibleWitness(record, commitment)).toBe(true);
+    // A notice with no send-time snapshot cannot vouch for a scoped promise.
+    await mockPg('sms_log').where({ id: notice.id }).update({ metadata: JSON.stringify({ scheduled_service_id: visit.id }) });
+    const unscoped = (await loadSmsFulfillmentEvidence(mockPg, commitment, message, new Date(message.created_at.getTime() + 5000)))
+      .records.find((r) => r.id === notice.id);
+    expect(admissibleWitness(unscoped, commitment)).toBe(false);
+  });
+
+  test('Codex #4816 r40: a no-show reschedule_log row (no new date) is not an event; a logged move is', async () => {
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', basis: 'request', due_at: null, due_text: 'sometime soon',
+      quote: 'You still coming?', description: 'You still coming?' };
+    await recordMessageOperations(mockPg, message, result, context);
+    await mockPg('call_commitments').update({ due_at: null });
+    const minutes = (m) => new Date(message.created_at.getTime() + m * 60000);
+    const [visit] = await mockPg('scheduled_services').insert({
+      customer_id: message.customer_id, property_id: context.properties[0].id, service_type: 'Quarterly Pest Control',
+      scheduled_date: etDateString(minutes(5)), window_start: '09:00:00', status: 'confirmed',
+      created_at: new Date(message.created_at.getTime() - 86400000), updated_at: minutes(5),
+    }).returning('id');
+    await mockPg('reschedule_log').insert({ scheduled_service_id: visit.id, customer_id: message.customer_id,
+      original_date: etDateString(minutes(5)), new_date: null, initiated_by: 'admin', created_at: minutes(5) });
+    const verify = jest.fn(async () => ({ verdict: 'open', reason: 'no_answer', evidence_hash: 'x', retry_after: null }));
+    const tick = async (at) => {
+      await mockPg('system_settings').insert({ key: 'sms_operations.fulfillment_cursor', value: 'ffffffff-ffff-4fff-bfff-ffffffffffff', category: 'sms_operations' })
+        .onConflict('key').merge({ value: 'ffffffff-ffff-4fff-bfff-ffffffffffff' });
+      return refreshSmsCommitments({ conn: mockPg, verify, now: at });
+    };
+    expect(await tick(minutes(20))).toMatchObject({ scanned: 0 });
+    await mockPg('reschedule_log').insert({ scheduled_service_id: visit.id, customer_id: message.customer_id,
+      original_date: etDateString(minutes(5)), new_date: etDateString(new Date(minutes(5).getTime() + 7 * 86400000)),
+      initiated_by: 'admin', created_at: minutes(21) });
+    expect(await tick(minutes(40))).toMatchObject({ scanned: 1 });
+  });
+
+  test('Codex #4816 r38: an uncertain pet report still rings its safety review when the batch repeats the field', async () => {
+    const body = 'We have a cat. Not sure whether the dog will be out.';
+    message.message_body = body;
+    await mockPg('sms_log').where({ id: message.id }).update({ message_body: body });
+    result.obligations = [];
+    result.facts = [
+      { field: 'pet_details', quote: 'We have a cat.', value: 'cat', property_id: context.properties[0].id, duration: 'visit_only' },
+      { field: 'pet_details', quote: 'Not sure whether the dog will be out.', value: 'dog', property_id: context.properties[0].id, duration: 'visit_only' },
+    ];
+    await recordMessageOperations(mockPg, message, result, context);
+    const outcomes = (await mockPg('sms_log').first()).operational_analysis.facts.map((f) => f.outcome);
+    expect(outcomes).toEqual(['pet_needs_review', 'pet_needs_review']);
+    expect(NotificationService.notifyAdmin).toHaveBeenCalled();
+  });
+
+  test('Codex #4816 r27: the event page counts activity from the effective source time, not the queue row', async () => {
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', basis: 'request', due_at: null, due_text: 'sometime soon',
+      quote: 'You still coming?', description: 'You still coming?' };
+    await recordMessageOperations(mockPg, message, result, context);
+    await mockPg('call_commitments').update({ due_at: null });
+    const [target] = await mockPg('call_commitments').pluck('id');
+    const minutes = (m) => new Date(message.created_at.getTime() + m * 60000);
+    // A scheduled send: queued at the sms_log row's time, delivered 10 min later.
+    await mockPg('call_commitments').update({ sms_context: mockPg.raw("jsonb_set(sms_context, '{source_at}', to_jsonb(?::text))", [minutes(10).toISOString()]) });
+    const [visit] = await mockPg('scheduled_services').insert({
+      customer_id: message.customer_id, property_id: context.properties[0].id, service_type: 'Quarterly Pest Control',
+      scheduled_date: etDateString(minutes(5)), window_start: '09:00:00', status: 'en_route',
+      created_at: new Date(message.created_at.getTime() - 86400000), updated_at: minutes(5),
+    }).returning('id');
+    await mockPg('job_status_history').insert({ job_id: visit.id, from_status: 'confirmed', to_status: 'en_route', transitioned_at: minutes(5) });
+    const verify = jest.fn(async () => ({ verdict: 'open', reason: 'no_answer', evidence_hash: 'x', retry_after: null }));
+    const tick = async (at) => {
+      await mockPg('system_settings').insert({ key: 'sms_operations.fulfillment_cursor', value: 'ffffffff-ffff-4fff-bfff-ffffffffffff', category: 'sms_operations' })
+        .onConflict('key').merge({ value: 'ffffffff-ffff-4fff-bfff-ffffffffffff' });
+      verify.mockClear();
+      return refreshSmsCommitments({ conn: mockPg, verify, now: at });
+    };
+    // Activity between enqueue and delivery predates the promise: no event.
+    expect(await tick(minutes(12))).toMatchObject({ scanned: 0 });
+    // Activity after delivery is a new event: the page picks the row up.
+    await mockPg('job_status_history').insert({ job_id: visit.id, from_status: 'en_route', to_status: 'on_site', transitioned_at: minutes(15) });
+    expect(await tick(minutes(16))).toMatchObject({ scanned: 1 });
+    expect(new Date((await mockPg('call_commitments').where({ id: target }).first()).sms_context.event_seen_at).getTime())
+      .toBe(minutes(6).getTime());
+  });
+
+  test('Codex #4816 r28: deferred rows move behind untried rows on the event page', async () => {
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', basis: 'request', due_at: null, due_text: 'sometime soon',
+      quote: 'You still coming?', description: 'You still coming?' };
+    await recordMessageOperations(mockPg, message, result, context);
+    const seed = await mockPg('call_commitments').first();
+    const { id: _id, created_at: _c, updated_at: _u, ...template } = seed;
+    await mockPg('call_commitments').insert(Array.from({ length: 29 }, (_, i) => ({ ...template, commitment_key: `${seed.commitment_key}:${i}`,
+      evidence: JSON.stringify(seed.evidence), sms_context: JSON.stringify(seed.sms_context) })));
+    await mockPg('call_commitments').update({ due_at: null });
+    const ids = await mockPg('call_commitments').orderBy('id').pluck('id');
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 1000);
+    const [visit] = await mockPg('scheduled_services').insert({
+      customer_id: message.customer_id, property_id: context.properties[0].id, service_type: 'Quarterly Pest Control',
+      scheduled_date: etDateString(after), window_start: '09:00:00', status: 'en_route',
+      created_at: new Date(message.created_at.getTime() - 86400000), updated_at: after,
+    }).returning('id');
+    await mockPg('job_status_history').insert({ job_id: visit.id, from_status: 'confirmed', to_status: 'en_route', transitioned_at: after });
+    // Every revalidation is refused: each attempted row is deferred.
+    const verify = jest.fn(async () => ({ verdict: 'fulfilled', record_type: 'visit', record_id: visit.id,
+      quote: 'en route', evidence_hash: 'stale', retry_after: null }));
+    const tick = async (at) => {
+      await mockPg('system_settings').insert({ key: 'sms_operations.fulfillment_cursor', value: 'ffffffff-ffff-4fff-bfff-ffffffffffff', category: 'sms_operations' })
+        .onConflict('key').merge({ value: 'ffffffff-ffff-4fff-bfff-ffffffffffff' });
+      verify.mockClear();
+      await refreshSmsCommitments({ conn: mockPg, verify, now: at });
+      return verify.mock.calls.map(([r]) => r.id);
+    };
+    const first = await tick(now);
+    expect(first).toEqual(ids.slice(0, 25));
+    // The five never-tried rows come first on the next tick; the deferred
+    // ones stay eligible behind them.
+    const second = await tick(new Date(now.getTime() + 1000));
+    expect(second.slice(0, 5)).toEqual(ids.slice(25));
+    expect((await mockPg('call_commitments').where({ id: ids[0] }).first()).sms_context.event_seen_at).toBeUndefined();
+  });
+
+  test('Codex #4816 r32: a provider-failure backoff reached for a previous owner does not hold after a merge', async () => {
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', basis: 'request', due_at: null, due_text: 'sometime soon',
+      property_id: null, quote: 'You still coming?', description: 'You still coming?' };
+    await recordMessageOperations(mockPg, message, result, context);
+    await mockPg('call_commitments').update({ due_at: null });
+    const [target] = await mockPg('call_commitments').pluck('id');
+    const minutes = (m) => new Date(message.created_at.getTime() + m * 60000);
+    const visitFor = async (customerId, propertyId, at) => {
+      const [v] = await mockPg('scheduled_services').insert({ customer_id: customerId, property_id: propertyId, service_type: 'Quarterly Pest Control',
+        scheduled_date: etDateString(at), window_start: '09:00:00', status: 'en_route', created_at: new Date(message.created_at.getTime() - 86400000), updated_at: at,
+      }).returning('id');
+      await mockPg('job_status_history').insert({ job_id: v.id, from_status: 'confirmed', to_status: 'en_route', transitioned_at: at });
+    };
+    const other = { id: randomUUID() };
+    await mockPg('customers').insert({ id: other.id, first_name: 'Synthetic', last_name: 'Fixture',
+      phone: '+12025550105', address_line1: '300 Example Lane', city: 'Sarasota', zip: '34236' });
+    const [otherProperty] = await mockPg('customer_properties').insert({ customer_id: other.id, address_line1: '300 Example Lane',
+      city: 'Sarasota', zip: '34236', active: true }).returning('id');
+    // The new owner's event (minute 3) is older than what the failed attempt
+    // read for the old owner (minute 5).
+    await visitFor(other.id, otherProperty.id, minutes(3));
+    await visitFor(message.customer_id, context.properties[0].id, minutes(5));
+    const verify = jest.fn(async (_row, _evidence, { now }) => ({ verdict: 'uncertain', reason: 'provider_failed', evidence_hash: 'x',
+      retry_after: new Date(now.getTime() + 3600000).toISOString() }));
+    const tick = async (at) => {
+      await mockPg('system_settings').insert({ key: 'sms_operations.fulfillment_cursor', value: 'ffffffff-ffff-4fff-bfff-ffffffffffff', category: 'sms_operations' })
+        .onConflict('key').merge({ value: 'ffffffff-ffff-4fff-bfff-ffffffffffff' });
+      verify.mockClear();
+      await refreshSmsCommitments({ conn: mockPg, verify, now: at });
+      return verify.mock.calls.map(([r]) => r.id);
+    };
+    expect(await tick(minutes(40))).toEqual([target]);
+    // Inside the backoff, with nothing new, the row yields its slot.
+    expect(await tick(minutes(41))).toEqual([]);
+    await mockPg('sms_log').where({ id: message.id }).update({ customer_id: other.id });
+    expect(await tick(minutes(42))).toEqual([target]);
+  });
+
+  test('Codex #4816 r28: an ownership change resets the event watermark', async () => {
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', basis: 'request', due_at: null, due_text: 'sometime soon',
+      property_id: null, quote: 'You still coming?', description: 'You still coming?' };
+    await recordMessageOperations(mockPg, message, result, context);
+    await mockPg('call_commitments').update({ due_at: null });
+    const [target] = await mockPg('call_commitments').pluck('id');
+    const minutes = (m) => new Date(message.created_at.getTime() + m * 60000);
+    const verify = jest.fn(async () => ({ verdict: 'open', reason: 'no_answer', evidence_hash: 'x', retry_after: null }));
+    const tick = async (at) => {
+      await mockPg('system_settings').insert({ key: 'sms_operations.fulfillment_cursor', value: 'ffffffff-ffff-4fff-bfff-ffffffffffff', category: 'sms_operations' })
+        .onConflict('key').merge({ value: 'ffffffff-ffff-4fff-bfff-ffffffffffff' });
+      verify.mockClear();
+      await refreshSmsCommitments({ conn: mockPg, verify, now: at });
+      return verify.mock.calls.map(([r]) => r.id);
+    };
+    const visitFor = async (customerId, propertyId, at) => {
+      const [v] = await mockPg('scheduled_services').insert({ customer_id: customerId, property_id: propertyId, service_type: 'Quarterly Pest Control',
+        scheduled_date: etDateString(at), window_start: '09:00:00', status: 'en_route', created_at: new Date(message.created_at.getTime() - 86400000), updated_at: at,
+      }).returning('id');
+      await mockPg('job_status_history').insert({ job_id: v.id, from_status: 'confirmed', to_status: 'en_route', transitioned_at: at });
+    };
+    // The other customer's visit event lands at minute 5, before the old
+    // owner's watermark (minute 20) — invisible until ownership moves.
+    const other = { id: randomUUID() };
+    await mockPg('customers').insert({ id: other.id, first_name: 'Synthetic', last_name: 'Fixture',
+      phone: '+12025550104', address_line1: '300 Example Lane', city: 'Sarasota', zip: '34236' });
+    const [otherProperty] = await mockPg('customer_properties').insert({ customer_id: other.id, address_line1: '300 Example Lane',
+      city: 'Sarasota', zip: '34236', active: true }).returning('id');
+    await visitFor(other.id, otherProperty.id, minutes(5));
+    await visitFor(message.customer_id, context.properties[0].id, minutes(20));
+    expect(await tick(minutes(40))).toEqual([target]);
+    expect(await tick(minutes(41))).toEqual([]);
+    await mockPg('sms_log').where({ id: message.id }).update({ customer_id: other.id });
+    expect(await tick(minutes(42))).toEqual([target]);
+  });
+
+  test('Codex #4816 r34: a failed visit query defers an in-window row that has only a message witness', async () => {
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], kind: 'callback', basis: 'request', due_at: null, property_id: null,
+      quote: 'Please call me back', description: 'Please call me back' };
+    await recordMessageOperations(mockPg, message, result, context);
+    const [target] = await mockPg('call_commitments').pluck('id');
+    expect((await mockPg('call_commitments').first()).due_basis).toBe('default_kind');
+    const minutes = (m) => new Date(message.created_at.getTime() + m * 60000);
+    // An admissible call (a message witness: waits for the deadline) and a
+    // visit event older than the commit grace, so a stamp would stick.
+    await mockPg('call_log').insert({ customer_id: message.customer_id, direction: 'outbound',
+      from_phone: numbers.locations.parrish.number, to_phone: message.from_phone, status: 'completed', duration_seconds: 90,
+      transcription: 'Returned your call', created_at: minutes(2) });
+    const [visit] = await mockPg('scheduled_services').insert({
+      customer_id: message.customer_id, property_id: context.properties[0].id, service_type: 'Quarterly Pest Control',
+      scheduled_date: etDateString(minutes(1)), window_start: '09:00:00', status: 'en_route',
+      created_at: new Date(message.created_at.getTime() - 86400000), updated_at: minutes(1),
+    }).returning('id');
+    await mockPg('job_status_history').insert({ job_id: visit.id, from_status: 'confirmed', to_status: 'en_route', transitioned_at: minutes(1) });
+    const verify = jest.fn(async () => ({ verdict: 'open', reason: 'no_answer', evidence_hash: 'x', retry_after: null }));
+    const parkFuture = () => mockPg('system_settings').insert({ key: 'sms_operations.future_cursor', value: 'ffffffff-ffff-4fff-bfff-ffffffffffff', category: 'sms_operations' })
+      .onConflict('key').merge({ value: 'ffffffff-ffff-4fff-bfff-ffffffffffff' });
+    // Tick 1: the loader's visit query fails, so no event witness is seen and
+    // the call must wait for the deadline — the row is deferred, not stamped.
+    const failingConn = new Proxy(mockPg, { apply: (_t, _this, [table, ...rest]) => (
+      table === 'scheduled_services' ? mockPg('scheduled_services_unavailable') : mockPg(table, ...rest)) });
+    await parkFuture();
+    await refreshSmsCommitments({ conn: failingConn, verify, now: minutes(20) });
+    expect(verify).not.toHaveBeenCalled();
+    expect((await mockPg('call_commitments').where({ id: target }).first()).sms_context.event_seen_at).toBeUndefined();
+    // Tick 2: the query recovers and the event page still brings the row.
+    await parkFuture();
+    await refreshSmsCommitments({ conn: mockPg, verify, now: minutes(21) });
+    expect(verify.mock.calls.map(([r, , opts]) => [r.id, opts.eventOnly])).toEqual([[target, true]]);
+  });
+
+  test('Codex #4816 r21: a failed evidence query leaves the visit event pending for the next tick', async () => {
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', basis: 'request', due_at: null, due_text: 'sometime soon',
+      quote: 'You still coming?', description: 'You still coming?' };
+    await recordMessageOperations(mockPg, message, result, context);
+    await mockPg('call_commitments').update({ due_at: null });
+    const [target] = await mockPg('call_commitments').pluck('id');
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 1000);
+    const [visit] = await mockPg('scheduled_services').insert({
+      customer_id: message.customer_id, property_id: context.properties[0].id, service_type: 'Quarterly Pest Control',
+      scheduled_date: etDateString(after), window_start: '09:00:00', status: 'en_route',
+      created_at: new Date(message.created_at.getTime() - 86400000), updated_at: after,
+    }).returning('id');
+    await mockPg('job_status_history').insert({ job_id: visit.id, from_status: 'confirmed', to_status: 'en_route', transitioned_at: after });
+    // The visit source query fails outright this tick.
+    const failingConn = new Proxy(mockPg, { apply: (target_, thisArg, [table, ...rest]) => (
+      table === 'scheduled_services' ? mockPg('scheduled_services_unavailable') : mockPg(table, ...rest)) });
+    const verify = jest.fn(async () => ({ verdict: 'open', reason: 'no_answer', evidence_hash: 'x', retry_after: null }));
+    expect(await refreshSmsCommitments({ conn: failingConn, verify, now })).toMatchObject({ scanned: 1, skipped_no_witness: 0 });
+    expect((await mockPg('call_commitments').where({ id: target }).first()).sms_context.event_seen_at).toBeUndefined();
+    await mockPg('system_settings').insert({ key: 'sms_operations.fulfillment_cursor', value: 'ffffffff-ffff-4fff-bfff-ffffffffffff', category: 'sms_operations' })
+      .onConflict('key').merge({ value: 'ffffffff-ffff-4fff-bfff-ffffffffffff' });
+    await refreshSmsCommitments({ conn: mockPg, verify, now: new Date(now.getTime() + 1000) });
+    expect(verify.mock.calls.map(([r]) => r.id)).toEqual([target]);
+  });
+
+  test('Codex #4816 r19/r20: the watermark never passes now minus the commit grace, and keeps microseconds', async () => {
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', basis: 'request', due_at: null, due_text: 'sometime soon',
+      quote: 'You still coming?', description: 'You still coming?' };
+    await recordMessageOperations(mockPg, message, result, context);
+    await mockPg('call_commitments').update({ due_at: null });
+    const [target] = await mockPg('call_commitments').pluck('id');
+    const verify = jest.fn(async () => ({ verdict: 'open', reason: 'no_answer', evidence_hash: 'x', retry_after: null }));
+    // Park the due cursor past the row before every tick (an empty page
+    // wraps it), so only the event page can reach the row.
+    const tick = async (at) => {
+      await mockPg('system_settings').insert({ key: 'sms_operations.fulfillment_cursor', value: 'ffffffff-ffff-4fff-bfff-ffffffffffff', category: 'sms_operations' })
+        .onConflict('key').merge({ value: 'ffffffff-ffff-4fff-bfff-ffffffffffff' });
+      verify.mockClear();
+      await refreshSmsCommitments({ conn: mockPg, verify, now: at });
+    };
+    const minutes = (m) => new Date(message.created_at.getTime() + m * 60000);
+    const [visit] = await mockPg('scheduled_services').insert({
+      customer_id: message.customer_id, property_id: context.properties[0].id, service_type: 'Quarterly Pest Control',
+      scheduled_date: etDateString(minutes(30)), window_start: '09:00:00', status: 'on_site',
+      created_at: new Date(message.created_at.getTime() - 86400000), updated_at: minutes(30),
+    }).returning('id');
+    // The newer transition, microsecond-stamped as database defaults are.
+    await mockPg('job_status_history').insert({ job_id: visit.id, from_status: 'en_route', to_status: 'on_site',
+      transitioned_at: mockPg.raw("?::timestamptz + interval '456 microseconds'", [minutes(30)]) });
+    await tick(minutes(31));
+    expect(verify.mock.calls.map(([r]) => r.id)).toEqual([target]);
+    // A transaction that began before that read (transition stamped at
+    // minute 25) commits after it. The watermark sits at minute 21, not 30.
+    await mockPg('job_status_history').insert({ job_id: visit.id, from_status: 'confirmed', to_status: 'en_route', transitioned_at: minutes(25) });
+    await tick(new Date(minutes(31).getTime() + 1000));
+    expect(verify.mock.calls.map(([r]) => r.id)).toEqual([target]);
+    // Once the cap passes both, the watermark is the newest transition with
+    // its microseconds, and the same events are never re-selected.
+    await tick(minutes(50));
+    await tick(new Date(minutes(50).getTime() + 1000));
+    expect(verify).not.toHaveBeenCalled();
+  });
+
+  test('inside an open window a message witness waits for the deadline: no model call, no bell, then verified once due', async () => {
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], kind: 'callback', basis: 'request', due_at: null,
+      quote: 'Please call me back', description: 'Please call me back' };
+    await recordMessageOperations(mockPg, message, result, context);
+    const after = new Date(message.created_at.getTime() + 1000);
+    await mockPg('call_log').insert({ customer_id: message.customer_id, direction: 'outbound',
+      from_phone: numbers.locations.parrish.number, to_phone: message.from_phone, status: 'completed', duration_seconds: 90,
+      transcription: 'Returned your call about the gate code', created_at: after });
+    const verify = jest.fn(async () => ({ verdict: 'open', reason: 'not_yet', evidence_hash: 'x', retry_after: null }));
+    const early = await refreshSmsCommitments({ conn: mockPg, verify, now: new Date(after.getTime() + 1000) });
+    expect(verify).not.toHaveBeenCalled();
+    expect(early).toMatchObject({ scanned: 1, fulfilled: 0, skipped_not_due: 1 });
+    expect((await mockPg('call_commitments').first()).status).toBe('open');
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    // Past the 4h callback window the same row reaches the model as before.
+    await mockPg('system_settings').where({ key: 'sms_operations.fulfillment_cursor' }).del();
+    const late = await refreshSmsCommitments({ conn: mockPg, verify, now: new Date(message.created_at.getTime() + 4 * 3600000 + 1000) });
+    expect(verify).toHaveBeenCalledTimes(1);
+    expect(late).toMatchObject({ scanned: 1, fulfilled: 0, skipped_not_due: 0 });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+  });
+
+  test('Codex #4816 r1: a logged reschedule move is a witness for "schedule_visit" but still goes through the model (service match), never a system-event close', async () => {
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], kind: 'schedule_visit', due_at: null,
+      quote: 'Can we move to next week?', description: 'Can we move to next week?' };
+    await recordMessageOperations(mockPg, message, result, context);
+    await mockPg('call_commitments').update({ due_at: null, due_basis: null });
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 1000);
+    const nextWeek = etDateString(new Date(after.getTime() + 7 * 86400000));
+    const [visit] = await mockPg('scheduled_services').insert({
+      customer_id: message.customer_id, property_id: context.properties[0].id, service_type: 'Quarterly Lawn',
+      scheduled_date: nextWeek, window_start: '09:00:00', status: 'confirmed',
+      created_at: new Date(message.created_at.getTime() - 1000), updated_at: after,
+    }).returning('id');
+    await mockPg('reschedule_log').insert({ scheduled_service_id: visit.id, customer_id: message.customer_id,
+      original_date: etDateString(message.created_at), new_date: nextWeek, initiated_by: 'admin', created_at: after });
+    const verify = jest.fn(async () => ({ verdict: 'open', reason: 'different_service', evidence_hash: 'x', retry_after: null }));
+    const outcome = await refreshSmsCommitments({ conn: mockPg, verify, now });
+    expect(verify).toHaveBeenCalledTimes(1);
+    expect(outcome).toMatchObject({ scanned: 1, fulfilled: 0 });
+    expect((await mockPg('call_commitments').first()).status).toBe('open');
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('R1 owner ruling 2026-09-24 (settled r10): on-site field progress sends a NULL-due "callback" to the model, which may close it', async () => {
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], kind: 'callback', due_at: null,
+      quote: 'Can you call me back?', description: 'Can you call me back?' };
+    await recordMessageOperations(mockPg, message, result, context);
+    await mockPg('call_commitments').update({ due_at: null, due_basis: null });
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 1000);
+    const [visit] = await mockPg('scheduled_services').insert({
+      customer_id: message.customer_id, property_id: context.properties[0].id, service_type: 'Quarterly Lawn',
+      scheduled_date: etDateString(message.created_at), window_start: '09:00:00', status: 'on_site',
+      created_at: new Date(message.created_at.getTime() - 1000),
+    }).returning('id');
+    await mockPg('job_status_history').insert({ job_id: visit.id, from_status: 'en_route', to_status: 'on_site', transitioned_at: after });
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'fulfilled', record_ref: `visit:${visit.id}`,
+      quote: 'en route/on site/completed after the request' } });
+    const outcome = await refreshSmsCommitments({ conn: mockPg, now });
+    expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
+    expect(outcome).toMatchObject({ scanned: 1, fulfilled: 1 });
+    const commitment = await mockPg('call_commitments').first();
+    expect(commitment.status).toBe('fulfilled');
+    expect(commitment.fulfillment).toMatchObject({ verdict: 'fulfilled', basis: 'grounded_sms_request_outcome', record_type: 'visit', record_id: visit.id });
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 
@@ -1052,12 +1691,168 @@ postgres('SMS commitments on PostgreSQL', () => {
     result.obligations[0] = { ...result.obligations[0], kind: 'other', due_at: null,
       quote: 'You still coming this morning?', description: 'You still coming this morning?' };
     await recordMessageOperations(mockPg, message, result, context);
+    await mockPg('call_commitments').update({ due_at: null, due_basis: null });
     const now = new Date(message.created_at.getTime() + 2000);
     const outcome = await refreshSmsCommitments({ conn: mockPg, now });
     expect(dispatchWithFallback).not.toHaveBeenCalled();
     expect(outcome).toMatchObject({ scanned: 1, fulfilled: 0, skipped_no_witness: 1 });
     expect((await mockPg('call_commitments').first()).status).toBe('open');
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('Codex #4816 r2: a logged reschedule inside the 24h window reaches the model at once (service check), no bell', async () => {
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], kind: 'schedule_visit', due_at: null,
+      quote: 'Can we move to next week?', description: 'Can we move to next week?' };
+    await recordMessageOperations(mockPg, message, result, context);
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 1000);
+    const nextWeek = etDateString(new Date(after.getTime() + 7 * 86400000));
+    const [visit] = await mockPg('scheduled_services').insert({
+      customer_id: message.customer_id, property_id: context.properties[0].id, service_type: 'Quarterly Lawn',
+      scheduled_date: nextWeek, window_start: '09:00:00', status: 'confirmed',
+      created_at: new Date(message.created_at.getTime() - 1000), updated_at: after,
+    }).returning('id');
+    await mockPg('reschedule_log').insert({ scheduled_service_id: visit.id, customer_id: message.customer_id,
+      original_date: etDateString(message.created_at), new_date: nextWeek, initiated_by: 'admin', created_at: after });
+    const verify = jest.fn(async () => ({ verdict: 'open', reason: 'different_service', evidence_hash: 'x', retry_after: null }));
+    const outcome = await refreshSmsCommitments({ conn: mockPg, verify, now });
+    expect(verify).toHaveBeenCalledTimes(1);
+    expect(outcome).toMatchObject({ scanned: 1, fulfilled: 0, skipped_not_due: 0 });
+    expect((await mockPg('call_commitments').first()).status).toBe('open');
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('Codex #4816 r7: a visit cancelled after a cancel ask is evidence for the model, never a no-model close', async () => {
+    result.facts = [];
+    // Scoped to the property: an unscoped cancel ask is never answered by a
+    // cancellation (Codex #4816 r27).
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', due_at: null, property_id: context.properties[0].id,
+      quote: 'Please cancel my appointment', description: 'Please cancel my appointment' };
+    await recordMessageOperations(mockPg, message, result, context);
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 1000);
+    const [visit] = await mockPg('scheduled_services').insert({
+      customer_id: message.customer_id, property_id: context.properties[0].id, service_type: 'Quarterly Pest Control',
+      scheduled_date: etDateString(new Date(after.getTime() + 3 * 86400000)), window_start: '09:00:00', status: 'cancelled',
+      created_at: new Date(message.created_at.getTime() - 86400000), updated_at: after,
+    }).returning('id');
+    await mockPg('job_status_history').insert({ job_id: visit.id, from_status: 'confirmed', to_status: 'cancelled', transitioned_at: after });
+    const verify = jest.fn(async () => ({ verdict: 'open', reason: 'model_says_open', evidence_hash: 'x', retry_after: null }));
+    const outcome = await refreshSmsCommitments({ conn: mockPg, verify, now });
+    expect(verify).toHaveBeenCalledTimes(1);
+    const cancelled = verify.mock.calls[0][1].records.find((r) => r.type === 'visit');
+    expect(cancelled).toMatchObject({ id: visit.id, status: 'cancelled' });
+    expect(cancelled.text).toContain('cancelled after the request');
+    expect(outcome).toMatchObject({ scanned: 1, fulfilled: 0 });
+  });
+
+  test.each([
+    ['an unscoped ask, one active property', null, false],
+    ['an unscoped ask, two active properties', null, false],
+    ['an ask scoped to the cancelled visit\'s property', 'scoped', true],
+  ])('Codex #4816 r14–r27: a cancellation answers a cancel ask only when its property was resolved (%s)',
+    async (label, scope, admissible) => {
+      result.facts = [];
+      result.obligations[0] = { ...result.obligations[0], kind: 'other', due_at: null,
+        property_id: scope === 'scoped' ? context.properties[0].id : null,
+        quote: 'Please cancel my appointment', description: 'Please cancel my appointment' };
+      if (label.includes('two active')) {
+        await mockPg('customer_properties').insert({ id: randomUUID(), customer_id: message.customer_id,
+          address_line1: '200 Example Lane', city: 'Sarasota', zip: '34236', active: true });
+      }
+      await recordMessageOperations(mockPg, message, result, context);
+      const [commitment] = await mockPg('call_commitments').select('*');
+      expect(commitment.sms_context.property_id).toBe(scope === 'scoped' ? context.properties[0].id : null);
+      expect(commitment.sms_context).not.toHaveProperty('sole_property_id');
+      const after = new Date(message.created_at.getTime() + 1000);
+      const [visit] = await mockPg('scheduled_services').insert({
+        customer_id: message.customer_id, property_id: context.properties[0].id, service_type: 'Quarterly Pest Control',
+        scheduled_date: etDateString(new Date(after.getTime() + 3 * 86400000)), window_start: '09:00:00', status: 'cancelled',
+        created_at: new Date(message.created_at.getTime() - 86400000), updated_at: after,
+      }).returning('id');
+      await mockPg('job_status_history').insert({ job_id: visit.id, from_status: 'confirmed', to_status: 'cancelled', transitioned_at: after });
+      const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, new Date(after.getTime() + 1000));
+      const record = evidence.records.find((r) => r.type === 'visit');
+      expect(admissibleWitness(record, commitment, evidence.records)).toBe(admissible);
+    },
+  );
+
+  test('R3 owner ruling 2026-09-24: a delivered staff SMS reply no longer closes an "other" ask (the split-billing ask "separate the charges")', async () => {
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], kind: 'other', due_at: null,
+      quote: 'Can you separate the charges under two payment methods?',
+      description: 'Can you separate the charges under two payment methods?' };
+    await recordMessageOperations(mockPg, message, result, context);
+    await mockPg('call_commitments').update({ due_at: null, due_basis: null });
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 1000);
+    await mockPg('sms_log').insert({ ...message, id: randomUUID(), direction: 'outbound',
+      from_phone: message.to_phone, to_phone: message.from_phone,
+      message_body: 'Done: your card is now the Auto Pay method.', message_type: 'manual',
+      admin_user_id: '00000000-0000-4000-8000-000000000104', status: 'delivered', created_at: after });
+    const outcome = await refreshSmsCommitments({ conn: mockPg, now });
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
+    expect(outcome).toMatchObject({ scanned: 1, fulfilled: 0, skipped_no_witness: 1 });
+    expect((await mockPg('call_commitments').first()).status).toBe('open');
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('R3: a DUE "other" ask answered only by a staff SMS reaches the model, finds no admissible witness, and bells as today', async () => {
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], kind: 'other',
+      due_at: new Date(message.created_at.getTime() + 1000).toISOString(),
+      quote: 'Can you separate the charges under two payment methods?',
+      description: 'Can you separate the charges under two payment methods?' };
+    await recordMessageOperations(mockPg, message, result, context);
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 2000);
+    await mockPg('sms_log').insert({ ...message, id: randomUUID(), direction: 'outbound',
+      from_phone: message.to_phone, to_phone: message.from_phone,
+      message_body: 'Done: your card is now the Auto Pay method.', message_type: 'manual',
+      admin_user_id: '00000000-0000-4000-8000-000000000104', status: 'delivered', created_at: after });
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
+    const outcome = await refreshSmsCommitments({ conn: mockPg, now });
+    expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
+    expect(outcome).toMatchObject({ scanned: 1, fulfilled: 0 });
+    expect((await mockPg('call_commitments').first()).status).toBe('open');
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+  });
+
+  test.each([
+    ['callback', 4], ['send_appointment_confirmation', 4],
+    ['schedule_visit', 24], ['send_estimate', 24], ['other', 24],
+    ['send_report', 48], ['send_paperwork', 48],
+    ['technician_follow_up', 72],
+  ])('R5 owner ruling 2026-09-24: a %s request with no stated due_at gets a %ih default deadline (due_basis default_kind)', async (kind, hours) => {
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], kind, basis: 'request', due_at: null,
+      quote: `Please handle this ${kind} request`, description: `Please handle this ${kind} request` };
+    await recordMessageOperations(mockPg, message, result, context);
+    const row = await mockPg('call_commitments').first();
+    expect(row.due_basis).toBe('default_kind');
+    expect(new Date(row.due_at).getTime()).toBe(message.created_at.getTime() + hours * 3600000);
+  });
+
+  test('R5: any promise-basis obligation gets a 48h default deadline regardless of kind (owner ruling 2026-09-24, late)', async () => {
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], kind: 'callback', basis: 'promise', due_at: null,
+      quote: "I'll call you back", description: "I'll call you back" };
+    await recordMessageOperations(mockPg, message, result, context);
+    const row = await mockPg('call_commitments').first();
+    expect(row.due_basis).toBe('default_kind');
+    expect(new Date(row.due_at).getTime()).toBe(message.created_at.getTime() + 48 * 3600000);
+  });
+
+  test('R5: a stated due_at keeps due_basis "stated" and is never overridden by the per-kind default', async () => {
+    result.facts = [];
+    const stated = new Date(message.created_at.getTime() + 3600000).toISOString();
+    result.obligations[0] = { ...result.obligations[0], kind: 'callback', basis: 'request', due_at: stated,
+      quote: 'Call me back at 5pm', description: 'Call me back at 5pm' };
+    await recordMessageOperations(mockPg, message, result, context);
+    const row = await mockPg('call_commitments').first();
+    expect(row.due_basis).toBe('stated');
+    expect(new Date(row.due_at).toISOString()).toBe(stated);
   });
 
   test('reading a bell leaves work open and the real notification writer re-alerts after its rolling window', async () => {

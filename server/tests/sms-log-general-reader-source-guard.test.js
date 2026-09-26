@@ -62,6 +62,16 @@ const WINDOW_SPAN = 15;
 // apply. Default is ZERO — every OTHER unwrapped site fails.
 const ALLOWLIST = [
   {
+    file: 'services/messaging/push-channel-routing.js',
+    snippet: "? await trx('sms_log').where({ customer_id: customerId, from_phone: 'push' }).where(function sameNotice() {",
+    reason: 'persistPushProof: existence check for this accepted push notice before writing its proof; a send reservation is never a push proof.',
+  },
+  {
+    file: 'services/messaging/push-channel-routing.js',
+    snippet: ": await trx('sms_log').where({ customer_id: customerId, from_phone: 'push', message_type: row.message_type, created_at: row.created_at }).first('id');",
+    reason: 'persistPushProof: idempotency check on the proof row\'s own acceptance instant; a send reservation is never a push proof.',
+  },
+  {
     file: 'services/billing-retry-email-obligation.js',
     snippet: "const existing = await trx('sms_log')",
     reason: 'Exact billing_retry_email_key lookup owns queue deduplication across every status; it never presents a reservation as delivered contact history.',
@@ -435,7 +445,7 @@ const ALLOWLIST = [
   },
   {
     file: 'services/sms-operational-actions.js',
-    snippet: 'const source = await scheduledSourceMessage(trx, await trx(\'sms_log\').where({ id: message.id }).forUpdate().first());',
+    snippet: 'const source = customer && await scheduledSourceMessage(trx, await trx(\'sms_log\').where({ id: message.id }).forUpdate().first());',
     reason: 'single-row lookup by id — not a list read.',
   },
   {
