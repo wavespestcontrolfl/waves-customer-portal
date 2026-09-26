@@ -219,13 +219,19 @@ const ISSUE_TOPIC = {
 };
 
 // Headline is driven by the most severe insight, falling back to the overall band.
-function statusHeadline(overallStatus, topIssue) {
+function statusHeadline(overallStatus, topIssue, hasScoredDetails = false) {
   const topic = topIssue ? ISSUE_TOPIC[topIssue.category] : null;
   if (topIssue && topIssue.status === 'needs_attention') return topic ? `Needs attention — ${topic}` : 'Needs attention this visit';
   if (topIssue && topIssue.status === 'urgent') return topic ? `Action needed — ${topic}` : 'Action needed this visit';
-  if (topIssue && topIssue.status === 'watch') return topic ? `Healthy — monitoring ${topic}` : 'Healthy — a couple of things to watch';
+  if (topIssue && topIssue.status === 'watch') {
+    if (overallStatus === 'tracking') return topic ? `Monitoring ${topic}` : 'Recorded items to monitor';
+    return topic ? `Healthy — monitoring ${topic}` : 'Healthy — a couple of things to watch';
+  }
   if (overallStatus === 'strong') return 'Landscape looking great';
   if (overallStatus === 'healthy') return 'Landscape looking healthy';
+  if (overallStatus === 'tracking') return hasScoredDetails
+    ? 'Some plant-health scores are available'
+    : 'Plant-health details unavailable';
   return 'Plant health tracked';
 }
 
@@ -354,7 +360,11 @@ function buildTreeShrubReportV2({
   // recorded, nothing applied) still returns a truthy focus-carrying object
   // (codex P2 #2824 r4).
   const productsApplied = Boolean(treatment && treatment.products.length);
-  const peaceOfMind = hasUrgent
+  const peaceOfMind = status === 'tracking'
+    ? (scored.length
+      ? 'Recorded plant-health scores are shown below. An overall score is unavailable for this visit.'
+      : 'Plant-health assessment details were not supplied for this visit.')
+    : hasUrgent
     ? (productsApplied
       ? `We found ${monitorCount} item${monitorCount === 1 ? '' : 's'} to address today and completed treatment for ${monitorCount === 1 ? 'it' : 'them'}.`
       : `We found ${monitorCount} item${monitorCount === 1 ? '' : 's'} to address today and documented ${monitorCount === 1 ? 'it' : 'them'} below.`)
@@ -367,7 +377,7 @@ function buildTreeShrubReportV2({
   const snapshot = {
     overallScore,
     status,
-    statusHeadline: statusHeadline(status, topIssue),
+    statusHeadline: statusHeadline(status, topIssue, scored.length > 0),
     scoreExplanation,
     peaceOfMind,
     todaysFocus: treatment ? treatment.focus : [],
@@ -378,7 +388,7 @@ function buildTreeShrubReportV2({
     mainWatch: topIssue ? (topIssue.whatWeSaw || topIssue.headline) : null,
     wavesNext,
     customerAction: realCustomerAction,
-    noActionNeeded: !realCustomerAction,
+    noActionNeeded: status !== 'tracking' && !realCustomerAction,
   };
 
   const smsSummary = buildSmsSummary(snapshot);

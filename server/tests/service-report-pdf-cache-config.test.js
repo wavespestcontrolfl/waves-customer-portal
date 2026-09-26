@@ -51,6 +51,7 @@ jest.mock('../services/service-report/pdf-storage', () => ({
   // admin-dispatch-reentry.test.js for the components' own tests).
   timeOnSiteAdjustedPdfSignature: () => '',
   reentryAdjustedPdfSignature: () => '',
+  treeShrubReviewPdfSignature: jest.requireActual('../services/service-report/pdf-storage').treeShrubReviewPdfSignature,
 }));
 jest.mock('../services/pest-pressure/store', () => ({
   loadActiveConfig: mockLoadActiveConfig,
@@ -207,6 +208,29 @@ describe('service report PDF Pest Pressure cache config', () => {
     expect(mockGetHealthyStoredReportPdf).not.toHaveBeenCalled();
     expect(result.rendered).toBe(true);
     expect(result.key).toBe('reports/service-1/report-sig-current-tn0.pdf');
+  });
+
+  test.each([
+    { service_line: 'tree_shrub' },
+    { service_line: null, service_type: 'Tree & Shrub Care' },
+  ])('old tree PDFs miss the cache and store the reviewed-score version: %j', async (identity) => {
+    const knex = makeKnex(makeService({ ...identity,
+      pdf_storage_key: 'reports/service-1/report-sig-current.pdf' }));
+    const result = await getOrRenderServiceReportPdf('service-1', { token: 'token-1', knex });
+    expect(mockGetHealthyStoredReportPdf).not.toHaveBeenCalled();
+    expect(result.rendered).toBe(true);
+    expect(mockReportPdfStorageKey).toHaveBeenCalledWith('service-1', {
+      visibilitySignature: expect.stringContaining('-tsreview2'),
+    });
+    expect(mockPutReportPdf).toHaveBeenCalledWith('service-1', expect.any(Buffer), {
+      visibilitySignature: expect.stringContaining('-tsreview2'),
+    });
+    expect(result.key).toContain('-tsreview2');
+  });
+
+  test.each(['lawn', 'pest', 'termite', 'mosquito'])('the tree PDF version does not invalidate %s reports', (serviceLine) => {
+    const { treeShrubReviewPdfSignature } = jest.requireActual('../services/service-report/pdf-storage');
+    expect(treeShrubReviewPdfSignature({ service_line: serviceLine, service_type: 'Tree & Shrub Care' })).toBe('');
   });
 
   test('renderAndStoreServiceReportPdf retries instead of storing when config changes during render', async () => {
