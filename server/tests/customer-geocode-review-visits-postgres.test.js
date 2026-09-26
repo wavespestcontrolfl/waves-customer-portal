@@ -220,11 +220,11 @@ postgres('customer geocode review visit propagation in PostgreSQL', () => {
         status: 'completed', is_recurring: true, recurring_ongoing: true,
         recurring_template_overrides: { appointment_address: template },
       }),
-      visitRow(matchingId, { lat: 27.498124, lng: -82.574813, route_order: 4 }),
+      visitRow(matchingId, { lat: 27.498124, lng: -82.574813, zone: 'legacy', route_order: 4 }),
       visitRow(protectedId, {
-        lat: 27.498124, lng: -82.574813, route_order: 5, auto_dispatch_locked: true,
+        lat: 27.498124, lng: -82.574813, zone: 'legacy', route_order: 5, auto_dispatch_locked: true,
       }),
-      visitRow(independentId, { lat: 27.4, lng: -82.4, route_order: 6 }),
+      visitRow(independentId, { lat: 27.4, lng: -82.4, zone: 'independent', route_order: 6 }),
     ]);
 
     const locked = await context({ includeProtected: true, verifyPin: false });
@@ -233,14 +233,14 @@ postgres('customer geocode review visit propagation in PostgreSQL', () => {
     });
     for (const id of [matchingId, protectedId]) {
       expect(await trx('scheduled_services').where({ id }).first()).toMatchObject({
-        lat: null, lng: null, route_order: null,
+        lat: null, lng: null, zone: null, route_order: null,
       });
     }
     expect(await trx('scheduled_services').where({ id: independentId }).first()).toMatchObject({
-      lat: '27.400000', lng: '-82.400000', route_order: 6,
+      lat: '27.400000', lng: '-82.400000', zone: 'independent', route_order: 6,
     });
     expect(recurringServiceAddress(await trx('scheduled_services').where({ id: parentId }).first()))
-      .toMatchObject({ lat: null, lng: null });
+      .toMatchObject({ lat: null, lng: null, zone: null });
   });
 
   test('visit membership changes are part of the post-lock fence', async () => {

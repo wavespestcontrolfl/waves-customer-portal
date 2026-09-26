@@ -289,7 +289,7 @@ async function clearMatchingPins(trx, customer, primary, storedReview, visitCont
     .where({ customer_id: customer.id, lat: visitLatitude, lng: visitLongitude })
     .whereIn('status', ['pending', 'confirmed'])
     .where('scheduled_date', '>=', etDateString())
-    .update({ lat: null, lng: null, route_order: null, updated_at: new Date() }) : 0;
+    .update({ lat: null, lng: null, zone: null, route_order: null, updated_at: new Date() }) : 0;
   let templates = 0;
   for (const parent of visitContext.parents) {
     const effective = { ...parent, ...recurringServiceAddress(parent) };
@@ -302,7 +302,7 @@ async function clearMatchingPins(trx, customer, primary, storedReview, visitCont
         recurring_template_overrides: trx.raw(
           "COALESCE(recurring_template_overrides, '{}'::jsonb) || ?::jsonb",
           [JSON.stringify({ appointment_address: {
-            ...recurringServiceAddress(parent), lat: null, lng: null,
+            ...recurringServiceAddress(parent), lat: null, lng: null, zone: null,
           } })],
         ),
       });
