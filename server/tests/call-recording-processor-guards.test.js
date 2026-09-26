@@ -1775,6 +1775,30 @@ describe('startPrecedesCall\'s call site is exempted by an existing call appoint
   });
 });
 
+// codex #4919 round-8 push-review P1: extractCallData's own hand-written
+// prompt (the field names are appointment_confirmed/preferred_date_time,
+// not confirmed_start_at, so it's a separate hardcoded copy, not a template
+// call into prompts/call-extraction-v1.js) carries its own ARRIVAL WINDOW
+// EXCEPTION text and had the same "Tuesday, 2 to 4" ambiguous-period gap the
+// sibling v1 prompt was just fixed for. Fixed here with the identical rule.
+describe('extractCallData\'s own ARRIVAL WINDOW EXCEPTION requires an unambiguous period, same as the sibling v1 prompt (codex #4919 round-8 P1)', () => {
+  const processorSrc = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+
+  test('the rule requires UNAMBIGUOUS period and gives "Tuesday, 2 to 4 PM" as the qualifying example, not the bare "Tuesday, 2 to 4"', () => {
+    const ruleAt = processorSrc.indexOf('ARRIVAL WINDOW EXCEPTION:');
+    expect(ruleAt).toBeGreaterThan(-1);
+    const section = processorSrc.slice(ruleAt, ruleAt + 1600);
+    expect(section).toContain('UNAMBIGUOUS period for that start');
+    expect(section).toContain('"Tuesday, 2 to 4 PM"');
+    expect(section).toContain('"Tuesday, 2 to 4", "between 2 and 4"');
+    expect(section).toContain('does NOT count as confirmed');
+    expect(section).not.toMatch(/"Tuesday, 2 to 4"\)\s*DOES count as confirmed/);
+    // The already-unambiguous examples still qualify unchanged.
+    expect(section).toContain('"between 6 and 9 tonight"');
+    expect(section).toContain('"between 10 and noon tomorrow"');
+  });
+});
+
 // codex #4919 r1 P1: in shadow/legacy mode, the start_before_call review
 // card must be REFRESHED (take the call lock, merge into an existing open
 // OR claimed 'auto_booking_skipped_after_approval' card) instead of a plain
