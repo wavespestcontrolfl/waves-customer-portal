@@ -241,3 +241,34 @@ it('loads the remaining service when the selected lane becomes unavailable', asy
   expect(unscopedLoads).toBe(2);
   expect(screen.queryByRole('button', { name: /Try again/ })).not.toBeInTheDocument();
 });
+
+// Codex r2 P2 on #4926: every OTHER ScheduleFlowPage flow (reschedule,
+// inspection) hides "Our best times for you" once an AI search narrows the
+// calendar (rankedSlots={aiFiltered ? null : ...}) — but find-slots' own
+// response carries the SAME rankProfile-ranked availability.slots GET does,
+// over the searched window, so hiding it here threw away the whole point of
+// GATE_RESERVICE_RANK_AFTER_NEW for the one interaction (a targeted search)
+// a re-service customer is most likely to use. Re-service keeps the strip
+// visible after a search; every other flow's existing behavior is untouched
+// (the conditional only changes for flow==='reservice').
+it('keeps the ranked "best times" strip visible after an AI search (re-service only, #4926)', async () => {
+  const rankedDay = {
+    date: '2026-07-14', fullDate: 'Tuesday, July 14', nearby: true,
+    slots: [{
+      start_time: '14:00', end_time: '14:45', start_label: '2:00 PM', end_label: '2:45 PM',
+      technician_id: 'tech-1', is_best_fit: true, nearby: true,
+    }],
+  };
+  const searchedAvailability = {
+    slots: [{ date: '2026-07-14', start_time: '14:00', rank: 1 }],
+    days: [rankedDay],
+    nearby: true, rangeFrom: '2026-07-11', rangeTo: '2026-07-24',
+  };
+  stubFetch({ findSlots: jsonResponse({ availability: searchedAvailability, summary: 'Tuesday afternoon' }) });
+  renderPage();
+  await screen.findByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/ });
+  fireEvent.change(screen.getByLabelText('Search for a service date or time'), { target: { value: 'Tuesday' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+  await screen.findByText('Tuesday afternoon');
+  expect(screen.getByText('Our best times for you')).toBeInTheDocument();
+});
