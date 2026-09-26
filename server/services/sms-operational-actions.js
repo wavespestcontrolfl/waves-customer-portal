@@ -555,6 +555,24 @@ async function applySmsCommitmentUpdate(conn, id, { customerId, action, note, re
   });
 }
 
+// Long enough to span several five-minute watcher ticks (a missed or slow
+// tick still sees the event), short enough that old activity drops back to
+// the cursor pages instead of re-filling the event page every tick.
+const EVENT_LOOKBACK_MS = 30 * 60 * 1000;
+// A visit event for the commitment's customer inside (since, now], after the
+// source text: the same activity loadSmsFulfillmentEvidence reads (creation,
+// completion, a status transition, a logged move). Admissibility still
+// decides whether it answers the row.
+function recentVisitActivity(conn, since, now) {
+  const fresh = (column) => (q) => q.where(column, '>', since).where(column, '<=', now).whereRaw(`${column} > s.created_at`);
+  return conn('scheduled_services as v').select(conn.raw('1')).whereRaw('v.customer_id = s.customer_id')
+    .where(function recent() {
+      this.where(fresh('v.created_at')).orWhere(fresh('v.completed_at'))
+        .orWhereExists(conn('job_status_history as h').select(conn.raw('1')).whereRaw('h.job_id = v.id').where(fresh('h.transitioned_at')))
+        .orWhereExists(conn('reschedule_log as r').select(conn.raw('1')).whereRaw('r.scheduled_service_id = v.id').where(fresh('r.created_at')));
+    });
+}
+
 async function refreshSmsCommitments({ now = new Date(), conn = db, verify = verifySmsFulfillment } = {}) {
   if (!smsCommitmentsEnabled()) return { skipped: 'gate_off' };
   if (!gateEnvTimestamp('GATE_SMS_OPERATIONAL_ACTIONS_SINCE')) return { skipped: 'activation_time_required' };
@@ -586,8 +604,16 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
   const pages = [
     await page('sms_operations.fulfillment_cursor', (q) => q.where((w) => w.whereNull('cc.due_at').orWhere('cc.due_at', '<=', now))),
     await page('sms_operations.future_cursor', (q) => q.where('cc.due_at', '>', now)),
+    // Codex #4816 r15: the future cursor alone reaches a row only once per
+    // wrap, so a visit event on a row behind it could wait many ticks. Rows
+    // whose customer had visit activity in the last EVENT_LOOKBACK_MS get a
+    // cursor-less page of their own and are revisited every tick while the
+    // event is fresh.
+    { cursorKey: null, rows: await openRows().where('cc.due_at', '>', now)
+      .whereExists(recentVisitActivity(conn, new Date(now.getTime() - EVENT_LOOKBACK_MS), now))
+      .orderBy('cc.id').limit(PAGE).select('cc.*') },
   ];
-  const rows = pages.flatMap((p) => p.rows);
+  const rows = [...new Map(pages.flatMap((p) => p.rows).map((row) => [row.id, row])).values()];
   for (const row of rows) {
     if (!smsCommitmentsEnabled()) return { scanned, fulfilled, unverified, skipped_no_witness: skippedNoWitness, skipped_not_due: skippedNotDue, skipped: 'gate_off' };
     scanned += 1;
@@ -674,7 +700,7 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
       if (!notification?.id && !notification?.suppressed) throw new Error('sms_operations_bell_not_persisted');
     });
   }
-  for (const { cursorKey, rows: pageRows } of pages) {
+  for (const { cursorKey, rows: pageRows } of pages.filter((p) => p.cursorKey)) {
     const nextCursor = pageRows.length === PAGE ? pageRows[pageRows.length - 1].id : null;
     await conn('system_settings').insert({ key: cursorKey, value: nextCursor, category: 'sms_operations' })
       .onConflict('key').merge({ value: nextCursor, updated_at: now });

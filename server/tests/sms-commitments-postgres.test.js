@@ -1112,6 +1112,43 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect(cursors['sms_operations.future_cursor']).toMatch(/^[a-f0-9-]{36}$/);
   });
 
+  test('Codex #4816 r15: a future row behind the cursor is revisited on the next tick once its customer has fresh visit activity', async () => {
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], kind: 'callback', basis: 'request', due_at: null,
+      quote: 'Please call me back', description: 'Please call me back' };
+    await recordMessageOperations(mockPg, message, result, context);
+    const seed = await mockPg('call_commitments').first();
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 1000);
+    const { id: _id, created_at: _c, updated_at: _u, ...template } = seed;
+    await mockPg('call_commitments').update({ due_at: new Date(now.getTime() + 3600000) });
+    await mockPg('call_commitments').insert(Array.from({ length: 29 }, (_, i) => ({ ...template,
+      commitment_key: `${seed.commitment_key}:${i}`, due_at: new Date(now.getTime() + 3600000),
+      evidence: JSON.stringify(seed.evidence), sms_context: JSON.stringify(seed.sms_context) })));
+    const [target] = await mockPg('call_commitments').orderBy('id').limit(1).pluck('id');
+    // The future cursor already sits on the target: its page starts after it.
+    const parkCursor = () => mockPg('system_settings').insert({ key: 'sms_operations.future_cursor', value: target, category: 'sms_operations' })
+      .onConflict('key').merge({ value: target });
+    const verify = jest.fn(async () => ({ verdict: 'open', reason: 'no_answer', evidence_hash: 'x', retry_after: null }));
+    await parkCursor();
+    expect(await refreshSmsCommitments({ conn: mockPg, verify, now })).toMatchObject({ scanned: 25, skipped_no_witness: 25 });
+    expect(verify).not.toHaveBeenCalled();
+    const [visit] = await mockPg('scheduled_services').insert({
+      customer_id: message.customer_id, property_id: context.properties[0].id, service_type: 'Quarterly Pest Control',
+      scheduled_date: etDateString(after), window_start: '09:00:00', status: 'en_route',
+      created_at: new Date(message.created_at.getTime() - 86400000), updated_at: after,
+    }).returning('id');
+    await mockPg('job_status_history').insert({ job_id: visit.id, from_status: 'confirmed', to_status: 'en_route', transitioned_at: after });
+    await parkCursor();
+    await refreshSmsCommitments({ conn: mockPg, verify, now });
+    expect(verify.mock.calls.map(([row]) => row.id)).toContain(target);
+    // Stale activity drops back to the cursor pages.
+    verify.mockClear();
+    await parkCursor();
+    await refreshSmsCommitments({ conn: mockPg, verify, now: new Date(after.getTime() + 31 * 60 * 1000) });
+    expect(verify.mock.calls.map(([row]) => row.id)).not.toContain(target);
+  });
+
   test('inside an open window a message witness waits for the deadline: no model call, no bell, then verified once due', async () => {
     result.facts = [];
     result.obligations[0] = { ...result.obligations[0], kind: 'callback', basis: 'request', due_at: null,
