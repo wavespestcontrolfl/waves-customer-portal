@@ -166,6 +166,7 @@ function scenario({
     prepaid_amount: prepaidVisitIds.includes(100 + i) ? '185.00' : (zeroPrepaidAll ? '0.00' : null),
   }));
   const inserted = [];
+  const declines = [];
   const handler = ({ table, calls, op, data }) => {
     if (table === 'scheduled_services') {
       if (op === 'columnInfo') return COLS;
@@ -213,6 +214,9 @@ function scenario({
       return weeklyDaysOff ? { value: weeklyDaysOff } : null;
     }
     if (table === 'schedule_blackout_dates') return [];
+    // The trim's plan-reduction ledger (recordReseedDeclines): episode read + one row per cancelled visit.
+    if (table === 'job_status_history') return [];
+    if (table === 'activity_log' && op === 'insert') { for (const row of [].concat(data)) declines.push(row); return [1]; }
     // assignableRecurringTemplateTechnicianId fences the template tech on the trx.
     if (table === 'technicians') return op === 'first' ? { id: 'tech-1', employment_status: 'active', field_dispatchable: true } : [];
     // Same table/predicate assignableRecurringTemplateTechnicianId's date
@@ -227,7 +231,7 @@ function scenario({
     }
     return null;
   };
-  return { conn: makeConn(handler, { hasCardHoldTable }), inserted, parent, live };
+  return { conn: makeConn(handler, { hasCardHoldTable }), inserted, declines, parent, live };
 }
 
 // latestLiveSeriesVisit and the live-visit read both call .first()/.then() on
@@ -267,6 +271,18 @@ describe('reconcileRecurringSeriesVisitCount — trimming a plan', () => {
     expect(first.notifyCustomer).toBe('caller_suppress');
     expect(first.cancelNoticeToken).toBe('claim-token-1');
     expect(first.trx).toBe(conn);
+  });
+
+  test('a trim records every cancelled visit on the plan-reduction ledger in the same transaction (pre-push audit P1: a replayed trim cancel must never be re-added)', async () => {
+    const { conn, parent, live, inserted, declines } = scenario({ upcoming: 4 });
+    const result = await reconcile(conn, parent, 3);
+    expect(result.cancelledIds).toEqual([live[3].id]);
+    expect(inserted).toHaveLength(0);
+    expect(declines).toHaveLength(1);
+    const decline = declines.find((row) => row.action === 'recurring_cancel_reseed_declined');
+    expect(decline).toBeDefined();
+    expect(decline.customer_id).toBe(parent.customer_id);
+    expect(JSON.parse(decline.metadata)).toMatchObject({ cancelled_service_id: String(live[3].id), recurring_parent_id: '10', reason: 'visit_count_trim' });
   });
 
   test('the series parent and the visit being edited are never cancelled', async () => {

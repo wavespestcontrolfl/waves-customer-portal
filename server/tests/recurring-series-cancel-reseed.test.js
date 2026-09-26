@@ -597,7 +597,7 @@ describe('cancel surfaces wire the hook (source guards)', () => {
     const b = batchFn();
     // a job qualifies when its CURRENT cancellation episode left a counting status (Codex r7)
     expect(b).toMatch(/\.whereIn\('job_id', ids\)[\s\S]*?\.select\('id', 'job_id', 'from_status', 'to_status', 'transitioned_at'\)/);
-    expect(b).toMatch(/const episode = cancelEpisodeSourceStatus\(history\);\s*if \(episode && isCountingSourceStatus\(episode\.fromStatus\)\) countingCancel\.set\(key, episode\.episodeKey\);/);
+    expect(b).toMatch(/const episode = cancelEpisodeSourceStatus\(history\);\s*if \(episode && isCountingSourceStatus\(episode\.fromStatus\)\) countingCancel\.add\(key\);/);
     expect(b).toMatch(/if \(!countingCancel\.has\(String\(row\.id\)\)\) continue;/);
     expect(b).not.toMatch(/\.where\('to_status', 'cancelled'\)/);
     expect(b).toMatch(/if \(!isPlanSeriesRow\(row\)\) continue;/);
@@ -605,7 +605,10 @@ describe('cancel surfaces wire the hook (source guards)', () => {
     expect(b).not.toMatch(/row\.is_recurring !== true/);
     expect(b).toMatch(/if \(cancelledIds\.length > 1\) \{[\s\S]*?skipped: 'batch_series_cancel'/);
     // the decline is PERSISTED per visit + episode before moving on (pre-push audit P1)
-    expect(b).toMatch(/if \(cancelledIds\.length > 1\) \{[\s\S]*?await recordBatchReseedDecline\(conn, \{ rootId, cancelledIds, source, customerById, countingCancel \}\);\s*continue;/);
+    expect(b).toMatch(/if \(cancelledIds\.length > 1\) \{[\s\S]*?await recordReseedDeclines\(conn, \{[\s\S]*?reason: 'batch_series_cancel'[\s\S]*?\}\);[\s\S]*?continue;/);
+    // …and the visit-count trim records the same ledger inside its own transaction, after its cancels
+    const rec = schedule.slice(schedule.indexOf('async function reconcileRecurringSeriesVisitCount('));
+    expect(rec).toMatch(/result\.cancelledIds\.push\(visit\.id\);\s*\}[\s\S]*?await recordReseedDeclines\(trx, \{\s*customerId: parent\.customer_id, rootId: parentId, cancelledIds: result\.cancelledIds, reason: 'visit_count_trim'/);
     expect(b).toMatch(/try \{\s*results\.push\(await reseedRecurringSeriesAfterCancel\([\s\S]*?\} catch \(e\) \{[\s\S]*?results\.push\(\{ added: \[\], skipped: 'error', parentId: rootId, error: e\.message \}\);/);
   });
 });
