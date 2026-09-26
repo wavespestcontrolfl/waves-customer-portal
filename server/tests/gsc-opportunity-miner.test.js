@@ -51,6 +51,7 @@ const {
   materialServingPosition,
   queryDomainsCovered,
   buildListicleFamilyRefreshOpp,
+  filterActiveCitabilityReservations,
   canonicalizeServiceCategory,
 } = require('../services/seo/gsc-opportunity-miner')._internals;
 
@@ -2269,11 +2270,20 @@ describe('arbitrateCityServiceTargets — one row per (service, city) across buc
 
 describe('_revalidateFamilyBatch — citability page-edit fence under the persist lock', () => {
   const { GscOpportunityMiner } = require('../services/seo/gsc-opportunity-miner');
+  const featureGates = require('../config/feature-gates');
   const oldMaxAttempts = process.env.AUTONOMOUS_OPP_MAX_ATTEMPTS;
+  let citabilityOpen;
+  let gateSpy;
 
   beforeEach(() => {
     process.env.AUTONOMOUS_OPP_MAX_ATTEMPTS = '5';
+    citabilityOpen = true;
+    gateSpy = jest.spyOn(featureGates, 'isEnabled').mockImplementation((gate) => (
+      gate === 'citabilityBackfill' ? citabilityOpen : true
+    ));
   });
+
+  afterEach(() => gateSpy.mockRestore());
 
   afterAll(() => {
     if (oldMaxAttempts == null) delete process.env.AUTONOMOUS_OPP_MAX_ATTEMPTS;
@@ -2358,6 +2368,82 @@ describe('_revalidateFamilyBatch — citability page-edit fence under the persis
     }]), [candidate('decay_refresh', 'refresh_existing_page', 'https://www.wavespestcontrol.com/blog/termite-guide', 'decay')]);
 
     expect(out).toEqual([]);
+  });
+
+  test.each([
+    ['pending', 0],
+    ['claimed', 50],
+    ['pending_review', 50],
+  ])('a disabled citability lane releases an existing %s page reservation', async (status, attempt_count) => {
+    citabilityOpen = false;
+    const miner = new GscOpportunityMiner();
+    const row = candidate('answer_gap', 'refresh_existing_page', 'https://wavespestcontrol.com/blog/termite-guide/', 'answer');
+    const trx = fakeTrx([{
+      page_url: '/blog/termite-guide/', status, attempt_count,
+    }]);
+
+    await expect(miner._revalidateFamilyBatch(trx, [row])).resolves.toEqual([row]);
+    expect(trx.mock.calls.filter(([table]) => table === 'opportunity_queue')).toHaveLength(1);
+  });
+});
+
+describe('citability reservations outside the persist lock', () => {
+  const { GscOpportunityMiner } = require('../services/seo/gsc-opportunity-miner');
+  const featureGates = require('../config/feature-gates');
+  let citabilityOpen;
+  let gateSpy;
+
+  beforeEach(() => {
+    citabilityOpen = true;
+    gateSpy = jest.spyOn(featureGates, 'isEnabled').mockImplementation((gate) => (
+      gate === 'citabilityBackfill' ? citabilityOpen : true
+    ));
+  });
+
+  afterEach(() => gateSpy.mockRestore());
+
+  function queryRecorder(rows = []) {
+    const calls = [];
+    const query = {
+      where: jest.fn().mockReturnThis(),
+      whereIn: jest.fn().mockReturnThis(),
+      whereNotNull: jest.fn().mockReturnThis(),
+      whereNot: jest.fn((...args) => { calls.push(args); return query; }),
+      whereNotIn: jest.fn().mockReturnThis(),
+      select: jest.fn(async () => (calls.some(([column, value]) => (
+        column === 'bucket' && value === 'citability_backfill'
+      )) ? rows.filter((row) => row.bucket !== 'citability_backfill') : rows)),
+    };
+    return { query, calls };
+  }
+
+  test.each([['gate on', true], ['gate off', false]])('the pre-mine listicle fence with %s filters dormant citability rows correctly', (_label, open) => {
+    citabilityOpen = open;
+    const { query, calls } = queryRecorder();
+    expect(filterActiveCitabilityReservations(query)).toBe(query);
+    expect(calls).toEqual(open ? [] : [['bucket', 'citability_backfill']]);
+    expect(query.where).toHaveBeenCalledTimes(open ? 1 : 0);
+  });
+
+  test('the pre-mine listicle read uses the shared kill-switch filter', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/seo/gsc-opportunity-miner'), 'utf8');
+    const mineAll = src.slice(src.indexOf("['listicle_family', async () =>"), src.indexOf('// In-flight FAMILY work blocks'));
+    expect(mineAll).toMatch(/filterActiveCitabilityReservations\(inflightQuery\)/);
+  });
+
+  test.each([['gate on', true], ['gate off', false]])('companion protection with %s follows the citability lane state', async (_label, open) => {
+    citabilityOpen = open;
+    const { query, calls } = queryRecorder([{
+      bucket: 'citability_backfill',
+      page_url: 'https://wavespestcontrol.com/blog/termite-guide/',
+      service: 'termite',
+      city: null,
+    }]);
+    const runner = jest.fn(() => query);
+    const keys = await new GscOpportunityMiner()._companionProtection(runner);
+
+    expect(keys.size).toBe(open ? 1 : 0);
+    expect(calls).toEqual(open ? [] : [['bucket', 'citability_backfill']]);
   });
 });
 

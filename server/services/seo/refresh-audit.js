@@ -70,15 +70,19 @@ function canonPathSql(col) {
 }
 
 function findInflightPageEdit(runner, { path, targetDomain }) {
-  return runner('opportunity_queue')
+  const query = runner('opportunity_queue')
     .whereIn('action_type', miner.PAGE_EDITING_ACTIONS)
     .whereIn('status', ['pending', 'claimed', 'pending_review'])
     .where(function () {
       this.where('status', '<>', 'pending').orWhere('attempt_count', '<', maxClaimAttempts());
     })
     .whereRaw(`${canonPathSql('page_url')} = ?`, [path])
-    .whereRaw(`CASE WHEN page_url LIKE '/%' THEN '${HUB_DOMAIN}' ELSE ${hostRegistrableSql('page_url')} END = ?`, [targetDomain])
-    .first();
+    .whereRaw(`CASE WHEN page_url LIKE '/%' THEN '${HUB_DOMAIN}' ELSE ${hostRegistrableSql('page_url')} END = ?`, [targetDomain]);
+  // A disabled lane cannot publish, so it must not reserve an operator's page.
+  if (!require('../content/opportunity-queue')._internals.citabilityBackfillLaneOpen()) {
+    query.where('bucket', '<>', 'citability_backfill');
+  }
+  return query.first();
 }
 
 function slugPath(slug) {
