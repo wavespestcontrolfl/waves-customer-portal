@@ -112,11 +112,11 @@ async function loadBillingEmailContext(input, database = db, { lockRecipients = 
   };
 }
 
-async function preSendBlock(preSendCheck) {
+async function preSendBlock(preSendCheck, database) {
   if (typeof preSendCheck !== 'function') return null;
   let verdict;
   try {
-    verdict = await preSendCheck({ channel: 'email' });
+    verdict = await preSendCheck({ channel: 'email', database });
   } catch (err) {
     verdict = { ok: false, code: err.code, reason: err.message, retryable: err.retryable };
   }
@@ -156,12 +156,12 @@ async function verifyAndDispatch({ input, trx, invoice, recipientEmail, preSendC
       'Billing email recipient changed before delivery',
       { retryable: true },
     );
-  } else state.boundaryBlock = await preSendBlock(preSendCheck);
+  } else state.boundaryBlock = await preSendBlock(preSendCheck, trx);
   if (!state.boundaryBlock) state.boundaryBlock = await suppressionBlock(trx, recipientEmail, fresh.category);
   if (state.boundaryBlock) return { ok: false };
 
   state.handoffStarted = true;
-  await dispatch();
+  await dispatch(trx);
   state.providerAccepted = true;
   return { ok: true };
 }

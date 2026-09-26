@@ -1090,43 +1090,6 @@ router.post('/turf-preview', (req, res) => {
 
 
 // ─────────────────────────────────────────────
-// NORMALIZERS
-// ─────────────────────────────────────────────
-function normalizeConstruction(raw) {
-  if (!raw) return 'UNKNOWN';
-  const s = raw.toUpperCase();
-  if (s.includes('CONCRETE') || s.includes('CBS') || s.includes('BLOCK') ||
-      s.includes('MASONRY') || s.includes('STUCCO')) return 'CBS';
-  if (s.includes('WOOD') || s.includes('FRAME') || s.includes('TIMBER')) return 'WOOD_FRAME';
-  if (s.includes('METAL') || s.includes('STEEL') || s.includes('PREFAB')) return 'METAL';
-  if (s.includes('BRICK')) return 'BRICK';
-  return 'UNKNOWN';
-}
-
-function normalizeFoundation(raw) {
-  if (!raw) return 'UNKNOWN';
-  const s = raw.toUpperCase();
-  if (s.includes('SLAB') || s.includes('CONCRETE')) return 'SLAB';
-  if (s.includes('CRAWL')) return 'CRAWLSPACE';
-  if (s.includes('RAISED') || s.includes('PIER') || s.includes('PILING') ||
-      s.includes('STILT')) return 'RAISED';
-  if (s.includes('BASEMENT')) return 'BASEMENT';
-  return 'UNKNOWN';
-}
-
-function normalizeRoof(raw) {
-  if (!raw) return 'UNKNOWN';
-  const s = raw.toUpperCase();
-  if (s.includes('TILE') || s.includes('CLAY') || s.includes('BARREL')) return 'TILE';
-  if (s.includes('SHINGLE') || s.includes('ASPHALT') || s.includes('COMP')) return 'SHINGLE';
-  if (s.includes('METAL') || s.includes('STANDING SEAM') || s.includes('TIN')) return 'METAL';
-  if (s.includes('FLAT') || s.includes('BUILT-UP') || s.includes('TPO') ||
-      s.includes('MEMBRANE')) return 'FLAT';
-  return 'UNKNOWN';
-}
-
-
-// ─────────────────────────────────────────────
 // PARCEL OVERLAY + IMAGE SCALE (vision grounding)
 // ─────────────────────────────────────────────
 // Google Static Maps rejects URLs beyond 16384 chars; leave headroom for the

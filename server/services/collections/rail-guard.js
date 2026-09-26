@@ -39,6 +39,7 @@ async function collectionsChannelVerdict({
   excludeCollectionCaseId = null,
   excludeLedgerIds = [],
   logTag = 'collections',
+  database,
 }) {
   if (process.env.GATE_COLLECTIONS_POLICY !== 'true') {
     return { permitted: true, eligibleInvoiceIds: null };
@@ -46,7 +47,10 @@ async function collectionsChannelVerdict({
   let verdict;
   try {
     const ContactPolicy = require('./contact-policy');
-    verdict = await ContactPolicy.evaluate(customerId, { channel, purpose, now, offLedgerBalanceCents, excludeCollectionCaseId, excludeLedgerIds });
+    verdict = await ContactPolicy.evaluate(customerId, {
+      channel, purpose, now, offLedgerBalanceCents, excludeCollectionCaseId, excludeLedgerIds,
+      ...(database ? { database } : {}),
+    });
   } catch (err) {
     logger.warn(`[${logTag}] collections policy consult failed for customer ${customerId}: ${err.message} — denying`);
     return { permitted: false, eligibleInvoiceIds: [] };
@@ -69,13 +73,17 @@ async function collectionsChannelPermitted({
   excludeLedgerIds = [],
   logTag = 'collections',
   detail = false,
+  database,
 }) {
   const answer = (allowed, durable = false) => (detail ? { allowed, durable } : allowed);
   if (process.env.GATE_COLLECTIONS_POLICY !== 'true') return answer(true);
   let verdict;
   try {
     const ContactPolicy = require('./contact-policy');
-    verdict = await ContactPolicy.evaluate(customerId, { channel, purpose, now, offLedgerBalanceCents, excludeCollectionCaseId, excludeLedgerIds });
+    verdict = await ContactPolicy.evaluate(customerId, {
+      channel, purpose, now, offLedgerBalanceCents, excludeCollectionCaseId, excludeLedgerIds,
+      ...(database ? { database } : {}),
+    });
   } catch (err) {
     // evaluate() is documented never to throw (it denies internally), but a
     // guard-level surprise must read as a denial, not abort a sweep loop.
