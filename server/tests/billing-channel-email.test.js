@@ -165,10 +165,34 @@ describe('billing channel email adapter', () => {
   test('an annual-prepay replay context requires its invoice, quoted amount and reservation', () => {
     const complete = { schema_version: 1, customer_id: 'cust-1', category: 'billing',
       source_entry_point: 'annual_prepay_payment_reminder', notificationEventKey: 'annual-prepay-payment:term-1:1',
-      invoice_id: 'inv-1', rendered_amount: '392.04', collections_ledger_id: 'ledger-email-1' };
-    expect(sanitizeBillingReplayContext(complete)).toMatchObject({ invoice_id: 'inv-1', rendered_amount: '392.04' });
+      invoice_id: 'inv-1', annual_prepay_term_id: 'term-1', first_visit_date: '2026-09-29', days_out: 1,
+      rendered_amount: '392.04', collections_ledger_id: 'ledger-email-1' };
+    expect(sanitizeBillingReplayContext(complete)).toMatchObject({ invoice_id: 'inv-1', rendered_amount: '392.04',
+      annual_prepay_term_id: 'term-1', first_visit_date: '2026-09-29', days_out: 1 });
     expect(sanitizeBillingReplayContext({ ...complete, rendered_amount: null })).toBeNull();
     expect(sanitizeBillingReplayContext({ ...complete, collections_ledger_id: null })).toBeNull();
+    for (const invalid of [
+      { annual_prepay_term_id: null }, { first_visit_date: null }, { days_out: null }, { days_out: 2 },
+      { notificationEventKey: 'annual-prepay-payment:term-other:1' },
+    ]) expect(sanitizeBillingReplayContext({ ...complete, ...invalid })).toBeNull();
+  });
+
+  test('persists every annual-prepay rendering pin from producer metadata', async () => {
+    mockLoadBillingEmailContext.mockResolvedValue(baseContext({ invoice: { id: 'inv-1', customer_id: 'cust-1' } }));
+    await sendBillingChannelEmail(input({
+      invoiceId: 'inv-1',
+      entryPoint: 'annual_prepay_payment_reminder',
+      metadata: {
+        billingDeliveryCategory: 'billing', notificationEventKey: 'annual-prepay-payment:term-1:3',
+        collections_ledger_id: 'ledger-email-1', rendered_amount: '392.04',
+        annual_prepay_term_id: 'term-1', first_visit_date: '2026-09-29', days_out: 3,
+      },
+    }));
+    expect(mockSendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      billingReplayContext: expect.objectContaining({
+        invoice_id: 'inv-1', annual_prepay_term_id: 'term-1', first_visit_date: '2026-09-29', days_out: 3,
+      }),
+    }));
   });
 
   test('refuses a previsit replay context without its visit pin or reservation', () => {

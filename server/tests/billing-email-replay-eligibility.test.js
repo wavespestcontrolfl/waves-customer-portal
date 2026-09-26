@@ -9,7 +9,7 @@ jest.mock('../services/invoice-helpers', () => ({
   ...jest.requireActual('../services/invoice-helpers'),
   selfPayAtDispatch: jest.fn(),
   isInvoiceCollectibleStatus: jest.fn((status) => !['paid', 'void', 'prepaid'].includes(status)),
-  invoiceAmountDue: jest.fn((invoice) => Number(invoice.total)),
+  invoiceAmountDue: jest.fn((invoice) => Number(invoice.total) - Number(invoice.credit_applied || 0)),
 }));
 jest.mock('../services/collections/rail-guard', () => ({ collectionsChannelPermitted: jest.fn() }));
 jest.mock('../services/previsit-balance-reminder', () => ({ currentDuesAllowanceCents: jest.fn(async () => 0) }));
@@ -349,8 +349,10 @@ describe('previsit balance reminder replay (aggregate, visit-pinned)', () => {
 
 describe('annual-prepay payment reminder replay', () => {
   const meta = { customer_id: customerId, source_entry_point: 'annual_prepay_payment_reminder', invoice_id: 'inv-1',
+    annual_prepay_term_id: 'term-1', first_visit_date: '2026-09-27', days_out: 1,
     rendered_amount: '392.04', notificationEventKey: 'annual-prepay-payment:term-1:1', collections_ledger_id: 'own-email' };
-  const term = { id: 'term-1', customer_id: customerId, prepay_invoice_id: 'inv-1', status: 'payment_pending' };
+  const term = { id: 'term-1', customer_id: customerId, prepay_invoice_id: 'inv-1', status: 'payment_pending',
+    term_start: '2026-09-27', first_visit_date: null };
   const invoice = { id: 'inv-1', customer_id: customerId, status: 'sent', total: '392.04' };
   const database = (patch = {}) => databaseWith({
     annual_prepay_terms: [{ ...term, ...patch.term }], invoices: [{ ...invoice, ...patch.invoice }],
@@ -359,6 +361,80 @@ describe('annual-prepay payment reminder replay', () => {
 
   test('replays while the term awaits payment and the invoice owes exactly the quoted amount', async () => {
     await expect(billingEmailReplayEligible(meta, database())).resolves.toEqual({ eligible: true });
+  });
+
+  test('uses the live credited amount from the exactly bound invoice', async () => {
+    await expect(billingEmailReplayEligible({ ...meta, rendered_amount: '350.00' }, database({
+      invoice: { total: '392.04', credit_applied: '42.04' },
+    }))).resolves.toEqual({ eligible: true });
+  });
+
+  test.each(['annual_prepay_term_id', 'first_visit_date', 'days_out'])(
+    'fails closed when an older replay context lacks %s', async (field) => {
+      await expect(billingEmailReplayEligible({ ...meta, [field]: undefined }, database()))
+        .resolves.toMatchObject({ eligible: false, reason: 'annual-prepay-reminder-pin-missing' });
+    },
+  );
+
+  test.each([
+    ['term id', { annual_prepay_term_id: 'term-other', notificationEventKey: 'annual-prepay-payment:term-other:1' }, {}],
+    ['customer', {}, { term: { customer_id: 'customer-other' } }],
+    ['invoice', {}, { term: { prepay_invoice_id: 'invoice-other' } }],
+  ])('refuses a changed %s binding', async (_label, metaPatch, rowPatch) => {
+    await expect(billingEmailReplayEligible({ ...meta, ...metaPatch }, database(rowPatch)))
+      .resolves.toMatchObject({ eligible: false, reason: 'annual-prepay-term-binding-changed' });
+  });
+
+  test('refuses a moved first visit before using the frozen service date', async () => {
+    await expect(billingEmailReplayEligible(meta, database({ term: { first_visit_date: '2026-09-28' } })))
+      .resolves.toMatchObject({ eligible: false, reason: 'annual-prepay-first-visit-changed' });
+  });
+
+  test('allows the 3-day stage to resume 2 days out, then refuses it at 1 day out', async () => {
+    const resumed = { ...meta, days_out: 3, first_visit_date: '2026-09-28',
+      notificationEventKey: 'annual-prepay-payment:term-1:3' };
+    await expect(billingEmailReplayEligible(resumed, database({ term: { term_start: '2026-09-28' } })))
+      .resolves.toEqual({ eligible: true });
+    const expired = { ...resumed, first_visit_date: '2026-09-27' };
+    await expect(billingEmailReplayEligible(expired, database({ term: { term_start: '2026-09-27' } })))
+      .resolves.toMatchObject({ eligible: false, reason: 'annual-prepay-reminder-window-passed' });
+  });
+
+  test.each(['paused', 'autopay_hold', 'stopped'])(
+    'refuses replay while invoice dunning is %s', async (status) => {
+      await expect(billingEmailReplayEligible(meta, databaseWith({
+        annual_prepay_terms: [term], invoices: [invoice],
+        invoice_followup_sequences: [{ invoice_id: 'inv-1', status, last_touch_at: null, next_touch_at: null }],
+      }))).resolves.toMatchObject({ eligible: false, reason: 'annual-prepay-dunning-active' });
+    },
+  );
+
+  test('refuses replay after a recent completed dunning touch', async () => {
+    await expect(billingEmailReplayEligible(meta, databaseWith({
+      annual_prepay_terms: [term], invoices: [invoice],
+      invoice_followup_sequences: [{ invoice_id: 'inv-1', status: 'completed',
+        last_touch_at: new Date('2026-09-26T15:00:00Z'), next_touch_at: null }],
+    }))).resolves.toMatchObject({ eligible: false, reason: 'annual-prepay-dunning-active' });
+  });
+
+  test('refuses replay when an active dunning touch is due today on a follow-up send day', async () => {
+    jest.setSystemTime(new Date('2026-09-29T16:00:00Z'));
+    try {
+      const dueMeta = { ...meta, days_out: 1, first_visit_date: '2026-09-30' };
+      await expect(billingEmailReplayEligible(dueMeta, databaseWith({
+        annual_prepay_terms: [{ ...term, term_start: '2026-09-30' }], invoices: [invoice],
+        invoice_followup_sequences: [{ invoice_id: 'inv-1', status: 'active', last_touch_at: null,
+          next_touch_at: new Date('2026-09-29T14:00:00Z') }],
+      }))).resolves.toMatchObject({ eligible: false, reason: 'annual-prepay-dunning-active' });
+    } finally {
+      jest.setSystemTime(new Date('2026-09-26T16:00:00Z'));
+    }
+  });
+
+  test('refuses replay for retry when the dunning decision is unreadable', async () => {
+    await expect(billingEmailReplayEligible(meta, databaseWith({
+      annual_prepay_terms: [term], invoices: [invoice], invoice_followup_sequences: new Error('unavailable'),
+    }))).resolves.toEqual({ eligible: false, reason: 'annual-prepay-dunning-unavailable', retryable: true });
   });
 
   test.each([

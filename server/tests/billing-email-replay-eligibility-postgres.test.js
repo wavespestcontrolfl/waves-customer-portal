@@ -58,7 +58,11 @@ postgres('billing replay eligibility (PostgreSQL)', () => {
       table.text('status'); table.decimal('total'); table.decimal('credit_applied');
     });
     await mockPg.schema.createTable('invoice_followup_sequences', (table) => {
-      table.uuid('invoice_id'); table.text('status');
+      table.uuid('invoice_id'); table.text('status'); table.timestamp('last_touch_at'); table.timestamp('next_touch_at');
+    });
+    await mockPg.schema.createTable('annual_prepay_terms', (table) => {
+      table.uuid('id').primary(); table.uuid('customer_id').notNullable(); table.uuid('prepay_invoice_id').notNullable();
+      table.text('status'); table.date('term_start'); table.date('first_visit_date');
     });
   }, 30000);
 
@@ -71,6 +75,7 @@ postgres('billing replay eligibility (PostgreSQL)', () => {
     await mockPg('payers').delete();
     await mockPg('invoices').delete();
     await mockPg('invoice_followup_sequences').delete();
+    await mockPg('annual_prepay_terms').delete();
   });
 
   afterAll(async () => {
@@ -169,6 +174,29 @@ postgres('billing replay eligibility (PostgreSQL)', () => {
     await mockPg('invoice_followup_sequences').insert({ invoice_id: meta.invoice_ids[0], status: 'stopped' });
     await expect(billingEmailReplayEligible(meta, mockPg))
       .resolves.toMatchObject({ eligible: false, reason: 'previsit-quote-changed', retryable: false });
+  });
+
+  test('annual reminder pins bind the live term, credited invoice amount and dunning state', async () => {
+    delete process.env.GATE_COLLECTIONS_POLICY;
+    const termId = randomUUID();
+    const invoiceId = randomUUID();
+    const firstVisitDate = etDateString(addETDays(new Date(), 1));
+    await mockPg('annual_prepay_terms').insert({ id: termId, customer_id: customerId,
+      prepay_invoice_id: invoiceId, status: 'payment_pending', term_start: firstVisitDate });
+    await mockPg('invoices').insert({ id: invoiceId, customer_id: customerId, status: 'sent',
+      total: '392.04', credit_applied: '42.04' });
+    const meta = { customer_id: customerId, source_entry_point: 'annual_prepay_payment_reminder',
+      invoice_id: invoiceId, annual_prepay_term_id: termId, first_visit_date: firstVisitDate, days_out: 1,
+      rendered_amount: '350.00', notificationEventKey: `annual-prepay-payment:${termId}:1`,
+      collections_ledger_id: ownId };
+    await expect(billingEmailReplayEligible(meta, mockPg)).resolves.toEqual({ eligible: true });
+    await mockPg('invoice_followup_sequences').insert({ invoice_id: invoiceId, status: 'autopay_hold' });
+    await expect(billingEmailReplayEligible(meta, mockPg))
+      .resolves.toMatchObject({ eligible: false, reason: 'annual-prepay-dunning-active' });
+    await mockPg('invoice_followup_sequences').where({ invoice_id: invoiceId }).delete();
+    await mockPg('annual_prepay_terms').where({ id: termId }).update({ first_visit_date: etDateString(addETDays(new Date(), 2)) });
+    await expect(billingEmailReplayEligible(meta, mockPg))
+      .resolves.toMatchObject({ eligible: false, reason: 'annual-prepay-first-visit-changed' });
   });
 
   test('canonical account payer reassignment invalidates the previsit reminder', async () => {

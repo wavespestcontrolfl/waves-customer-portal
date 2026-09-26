@@ -153,20 +153,55 @@ async function balanceReminderVisitRefusal(meta, database) {
   return null;
 }
 
+function validAnnualPrepayReminderPin(meta) {
+  const daysOut = Number(meta.days_out);
+  return !!meta.annual_prepay_term_id
+    && /^\d{4}-\d{2}-\d{2}$/.test(meta.first_visit_date || '')
+    && [1, 3].includes(daysOut)
+    && meta.notificationEventKey === `annual-prepay-payment:${meta.annual_prepay_term_id}:${daysOut}`;
+}
+
+function annualPrepayReminderWindowOpen(firstVisitDate, daysOut, now) {
+  const offsets = Number(daysOut) === 3 ? [3, 2] : [1];
+  return offsets.some((offset) => etDateString(addETDays(now, offset)) === firstVisitDate);
+}
+
 // A retried annual-prepay payment reminder Email: the term must still await
 // payment, the prepay invoice must still be collectible and owe exactly the
 // quoted amount, and (gate on) the collections policy must still allow the
 // draft invoice's amount as off-ledger debt, excluding this episode.
 async function annualPrepayReminderRefusal(meta, database) {
   if (meta.source_entry_point !== 'annual_prepay_payment_reminder') return null;
+  const daysOut = Number(meta.days_out);
+  if (!validAnnualPrepayReminderPin(meta)) {
+    return refused('annual-prepay-reminder-pin-missing');
+  }
   const term = await database('annual_prepay_terms')
-    .where({ prepay_invoice_id: meta.invoice_id, customer_id: meta.customer_id }).first('status');
+    .where({ id: meta.annual_prepay_term_id, prepay_invoice_id: meta.invoice_id, customer_id: meta.customer_id })
+    .first('id', 'status', 'term_start', 'first_visit_date');
+  if (!term) return refused('annual-prepay-term-binding-changed');
   if (term?.status !== 'payment_pending') return refused('annual-prepay-term-settled');
+  const liveFirstVisitDate = dateOnlyString(term.first_visit_date) || dateOnlyString(term.term_start);
+  if (liveFirstVisitDate !== meta.first_visit_date) return refused('annual-prepay-first-visit-changed');
+  const now = new Date();
+  const today = etDateString(now);
+  if (!annualPrepayReminderWindowOpen(meta.first_visit_date, daysOut, now)) {
+    return refused('annual-prepay-reminder-window-passed');
+  }
   const invoice = await database('invoices').where({ id: meta.invoice_id, customer_id: meta.customer_id }).first();
   const helpers = require('../invoice-helpers');
   if (!invoice || !helpers.isInvoiceCollectibleStatus(invoice.status)) return refused('annual-prepay-invoice-settled');
   const amountDue = helpers.invoiceAmountDue(invoice);
   if (amountDue.toFixed(2) !== meta.rendered_amount) return refused('annual-prepay-amount-changed');
+  try {
+    const dunningActive = await require('../annual-prepay-payment-reminder').invoiceDunningActiveToday(
+      meta.invoice_id,
+      { database, rethrow: true, todayYmd: today, now },
+    );
+    if (dunningActive) return refused('annual-prepay-dunning-active');
+  } catch {
+    return refused('annual-prepay-dunning-unavailable', true);
+  }
   if (process.env.GATE_COLLECTIONS_POLICY !== 'true') return null;
   const permitted = await require('../collections/rail-guard').collectionsChannelPermitted({
     customerId: meta.customer_id, invoiceId: null, channel: 'email', purpose: 'balance_reminder',

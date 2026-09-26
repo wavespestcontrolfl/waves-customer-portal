@@ -9,6 +9,7 @@ const { renderSmsTemplate } = require('./sms-template-renderer');
 const AccountMembershipEmail = require('./account-membership-email');
 const CancellationResolution = require('./cancellation-resolution');
 const { portalUrl } = require('../utils/portal-url');
+const { invoiceDunningActiveToday } = require('./annual-prepay-payment-reminder');
 
 const ACTIVE_STATUSES = ['active', 'renewal_pending'];
 // Decided coverage: the renewal decision is recorded but the paid window still
@@ -7672,57 +7673,6 @@ function paymentReminderClaimColumnForDaysOut(daysOut) {
   return null;
 }
 
-// The invoice follow-up engine (send-anchored dunning) and this visit-anchored
-// reminder both text the same pay link, and both crons fire at 10 AM ET — so
-// suppress a pre-visit reminder when that invoice's sequence either touched
-// the customer in the last ~20h or is DUE to touch them today (deterministic
-// regardless of which cron runs first in the shared hour). The 20h window
-// (not 24h) keeps yesterday's 10 AM dunning from suppressing today's 10 AM
-// reminder on the boundary.
-const PAYMENT_REMINDER_DUNNING_SUPPRESS_MS = 20 * 60 * 60 * 1000;
-async function invoiceDunningActiveToday(invoiceId, { now = new Date(), todayYmd = null } = {}) {
-  try {
-    const row = await db('invoice_followup_sequences')
-      .where({ invoice_id: invoiceId })
-      .first('status', 'last_touch_at', 'next_touch_at');
-    if (!row) return false;
-    // A REAL recent send suppresses regardless of status — the FINAL step of
-    // a sequence stamps last_touch_at and flips the row to 'completed' in the
-    // same shared 10 AM hour (invoice followups are registered ahead of the
-    // renewal cron), so an active-only check would double-text that morning.
-    if (row.last_touch_at && (now - new Date(row.last_touch_at)) < PAYMENT_REMINDER_DUNNING_SUPPRESS_MS) return true;
-    // Deliberate dunning controls: a paused / autopay-held / stopped sequence
-    // means "no automated payment texts right now" (owner pause, autopay in
-    // flight, stop/waive) — the pre-visit reminder honors them too.
-    if (['paused', 'autopay_hold', 'stopped'].includes(row.status)) return true;
-    // 'completed' (sequence exhausted) falls through: the visit-anchored
-    // reminder is the only nudge left, so only the recent-touch window above
-    // suppresses it.
-    if (row.status !== 'active') return false;
-    if (row.next_touch_at) {
-      // A due touch only suppresses on a day the follow-up cron can actually
-      // fire (Tue–Fri per config.sendWindow). A touch that came due over the
-      // weekend would otherwise suppress the Sat 3d AND Mon 1d reminders while
-      // no dunning ran either day — the customer would reach the visit with no
-      // pre-visit contact at all.
-      const followupConfig = require('../config/invoice-followups');
-      const sendDays = new Set(followupConfig?.sendWindow?.daysOfWeek || []);
-      const today = todayYmd || etDateString();
-      const todayEtDow = new Date(`${today}T12:00:00Z`).getUTCDay();
-      if (sendDays.has(todayEtDow)) {
-        const endOfTodayEt = parseETDateTime(`${today} 23:59:59`);
-        if (new Date(row.next_touch_at) <= endOfTodayEt) return true;
-      }
-    }
-    return false;
-  } catch (err) {
-    // Fail open (send the reminder): a read miss must not silence the only
-    // visit-anchored nudge; worst case the customer gets dunning + reminder.
-    logger.warn(`[annual-prepay] dunning suppression check failed for invoice ${invoiceId}: ${err.message}`);
-    return false;
-  }
-}
-
 // Shared by the legacy (implicit-SMS) and explicit-channel payment-reminder
 // paths so the two can never drift on copy: the pay link, quoted amount, and
 // rendered SMS body are computed exactly once per attempt.
@@ -7739,17 +7689,18 @@ async function buildPaymentReminderMessage({ claimedTerm, invoice, customer, amo
   const amountText = Number.isFinite(amountDue) && amountDue > 0
     ? ` for $${amountDue.toFixed(2)}`
     : '';
+  const firstVisitDate = effectiveFirstVisitDate(claimedTerm);
   const body = await renderSmsTemplate(
     'annual_prepay_payment_reminder',
     {
       first_name: customer.first_name || 'there',
       amount_text: amountText,
-      first_visit_date: formatDateLabel(effectiveFirstVisitDate(claimedTerm)),
+      first_visit_date: formatDateLabel(firstVisitDate),
       pay_link: payUrl,
     },
     { workflow: 'annual_prepay_payment_reminder', entity_type: 'annual_prepay_term', entity_id: claimedTerm.id },
   );
-  return { payUrl, amountText, body };
+  return { payUrl, amountText, body, firstVisitDate };
 }
 
 // One stable key per reminder EPISODE (this term's this reminder stage) — a
@@ -7772,7 +7723,7 @@ async function sendExplicitPaymentReminderChannels({
   claimedTerm, invoice, customer, daysOut, amountDue, explicitChannels, opts,
   sentCol, claimCol, releaseClaim, reverseReminderCredit,
 }) {
-  const { body } = await buildPaymentReminderMessage({ claimedTerm, invoice, customer, amountDue });
+  const { body, firstVisitDate } = await buildPaymentReminderMessage({ claimedTerm, invoice, customer, amountDue });
   if (!body) {
     logger.warn(`[annual-prepay] annual_prepay_payment_reminder template missing/disabled for customer ${customer.id}`);
     await reverseReminderCredit();
@@ -7815,8 +7766,10 @@ async function sendExplicitPaymentReminderChannels({
       entryPoint: 'annual_prepay_payment_reminder',
       preDispatchCheck: invoiceStillOwedAsQuoted({ invoiceId: invoice.id, customerId: customer.id, amountDue }),
       metadata: {
+        ...(opts.metadata || {}),
         original_message_type: source,
         annual_prepay_term_id: claimedTerm.id,
+        first_visit_date: firstVisitDate,
         days_out: daysOut,
         billingDeliveryCategory: 'billing',
         // Replay contract: a retried Email re-checks the term, the invoice
@@ -7826,7 +7779,6 @@ async function sendExplicitPaymentReminderChannels({
         notificationEventKey: eventKey,
         ...(ledger?.id ? { collections_ledger_id: ledger.id } : {}),
         ...(channel === 'push' ? { appOnly: true } : {}),
-        ...(opts.metadata || {}),
       },
     });
   };
@@ -7854,6 +7806,7 @@ async function sendExplicitPaymentReminderChannels({
       metadata: {
         original_message_type: source,
         annual_prepay_term_id: claimedTerm.id,
+        first_visit_date: firstVisitDate,
         days_out: daysOut,
       },
       send: async (channel, ledger) => {
@@ -7990,7 +7943,7 @@ async function sendLegacyPaymentReminderSms({
     return { sent: false, reason: 'no_phone' };
   }
 
-  const { body } = await buildPaymentReminderMessage({ claimedTerm, invoice, customer, amountDue });
+  const { body, firstVisitDate } = await buildPaymentReminderMessage({ claimedTerm, invoice, customer, amountDue });
   if (!body) {
     logger.warn(`[annual-prepay] annual_prepay_payment_reminder template missing/disabled for customer ${customer.id}`);
     await reverseReminderCredit();
@@ -8056,10 +8009,11 @@ async function sendLegacyPaymentReminderSms({
     identityTrustLevel: 'phone_matches_customer',
     entryPoint: 'annual_prepay_payment_reminder',
     metadata: {
+      ...(opts.metadata || {}),
       original_message_type: 'annual_prepay_payment_reminder',
       annual_prepay_term_id: claimedTerm.id,
+      first_visit_date: firstVisitDate,
       days_out: daysOut,
-      ...(opts.metadata || {}),
     },
   });
   if (!smsResult.sent) {

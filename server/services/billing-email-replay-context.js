@@ -17,6 +17,7 @@ const STRING_FIELDS = Object.freeze({
   customer_id: 160, invoice_id: 160, source_entry_point: 80, notificationEventKey: 240,
   collections_ledger_id: 160, payment_method_id: 160, expiry_stage: 20,
   appointment_id: 160, appointment_service_type: 160, followup_sequence_id: 160, rendered_amount: 40,
+  annual_prepay_term_id: 160,
 });
 
 function boundedString(value, max) {
@@ -36,7 +37,7 @@ function copyStrings(context, out) {
 }
 
 function copyDates(context, out) {
-  for (const field of ['charge_date', 'appointment_date', 'appointment_rendered_on']) {
+  for (const field of ['charge_date', 'appointment_date', 'appointment_rendered_on', 'first_visit_date']) {
     if (context[field] == null) continue;
     if (!validDateOnly(context[field])) return false;
     out[field] = context[field];
@@ -53,6 +54,14 @@ function copyExpiry(context, out) {
     if (!/^(\d{2}|\d{4})$/.test(String(context.expiry_year))) return false;
     out.expiry_year = String(context.expiry_year);
   }
+  return true;
+}
+
+function copyDaysOut(context, out) {
+  if (context.days_out == null) return true;
+  const daysOut = Number(context.days_out);
+  if (![1, 3].includes(daysOut) || String(context.days_out).trim() !== String(daysOut)) return false;
+  out.days_out = daysOut;
   return true;
 }
 
@@ -73,7 +82,10 @@ function complete(context) {
   // Annual-prepay payment reminder: its prepay invoice and the exact quoted
   // amount, so a retry never re-sends a stale pay-link amount.
   if (context.source_entry_point === 'annual_prepay_payment_reminder') {
-    return has('invoice_id', 'rendered_amount', 'collections_ledger_id');
+    return has('invoice_id', 'rendered_amount', 'collections_ledger_id', 'annual_prepay_term_id',
+      'first_visit_date', 'days_out')
+      && [1, 3].includes(context.days_out)
+      && context.notificationEventKey === `annual-prepay-payment:${context.annual_prepay_term_id}:${context.days_out}`;
   }
   // Aggregate previsit dues reminder: pinned to its visit, no single invoice.
   if (context.source_entry_point === 'previsit_balance_reminder') {
@@ -95,6 +107,7 @@ function sanitizeBillingReplayContext(context) {
     out.invoice_ids = context.invoice_ids.map((id) => boundedString(id, STRING_FIELDS.invoice_id));
     if (out.invoice_ids.some((id) => !id) || new Set(out.invoice_ids).size !== out.invoice_ids.length) return null;
   }
+  if (!copyDaysOut(context, out)) return null;
   if (!out.customer_id || !out.notificationEventKey) return null;
   if (out.rendered_amount != null && !/^\d+\.\d{2}$/.test(out.rendered_amount)) return null;
   if (!CATEGORIES.has(context.category) || !SOURCES.has(out.source_entry_point)) return null;
@@ -124,6 +137,9 @@ function buildBillingReplayContext(input, authorityContext, notificationEventKey
     followup_sequence_id: meta.followup_sequence_id,
     rendered_amount: meta.rendered_amount,
     invoice_ids: meta.invoice_ids,
+    annual_prepay_term_id: meta.annual_prepay_term_id,
+    first_visit_date: meta.first_visit_date,
+    days_out: meta.days_out,
   });
 }
 

@@ -251,7 +251,9 @@ describe('annual prepay payment reminder — explicit billing-channel selection'
     setDbQueues(standardQueues({ prefs: { billing_channels: ['email'] } }));
     sendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted' });
 
-    const result = await AnnualPrepayRenewals.sendPaymentPendingReminder({ ...BASE_TERM }, 1);
+    const result = await AnnualPrepayRenewals.sendPaymentPendingReminder({ ...BASE_TERM }, 1, {
+      metadata: { annual_prepay_term_id: 'untrusted-term', first_visit_date: '2099-01-01', days_out: 3 },
+    });
 
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
     expect(sendCustomerMessage.mock.calls[0][0]).toMatchObject({
@@ -260,10 +262,14 @@ describe('annual prepay payment reminder — explicit billing-channel selection'
         billingDeliveryLeg: 'email', billingDeliveryCategory: 'billing',
         notificationEventKey: _private.paymentReminderEventKey('term-1', 1),
         collections_ledger_id: global.__ledgerStore[0].id, rendered_amount: '392.04',
+        annual_prepay_term_id: 'term-1', first_visit_date: '2026-07-11', days_out: 1,
       }),
     });
     expect(global.__ledgerStore).toHaveLength(1);
     expect(global.__ledgerStore[0]).toEqual(expect.objectContaining({ channel: 'email', source: 'annual_prepay_payment_reminder' }));
+    expect(global.__ledgerStore[0].metadata).toMatchObject({
+      annual_prepay_term_id: 'term-1', first_visit_date: '2026-07-11', days_out: 1,
+    });
     expect(global.__ledgerStore[0].metadata.delivered).toBe(true);
     expect(result).toEqual({ sent: true, termId: 'term-1', complete: true });
   });
