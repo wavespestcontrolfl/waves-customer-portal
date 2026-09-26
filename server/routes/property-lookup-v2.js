@@ -1822,12 +1822,18 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     // One propertyType flag per profile: win/loss tallies every flag, so a
     // source-conflict warning on the same field would double-count (codex
     // r1 P2). The unit explanation carries the confirm-before-pricing ask.
+    // Its provenance ask (satellite-promoted type, conflicting sources —
+    // "is this really a condo?") is merged in, never dropped (codex r3 P2).
+    const priorTypeReasons = [];
     for (let i = fieldVerifyFlags.length - 1; i >= 0; i -= 1) {
-      if (fieldVerifyFlags[i]?.field === 'propertyType') fieldVerifyFlags.splice(i, 1);
+      if (fieldVerifyFlags[i]?.field !== 'propertyType') continue;
+      if (fieldVerifyFlags[i].reason) priorTypeReasons.unshift(fieldVerifyFlags[i].reason);
+      fieldVerifyFlags.splice(i, 1);
     }
+    const typeProvenance = priorTypeReasons.length ? ` Also confirm the type itself: ${priorTypeReasons.join(' ')}` : '';
     fieldVerifyFlags.push({
       field: 'propertyType',
-      reason: `Unit address on a condo record — quoted as ONE condo unit (single level, no lot, no pool assumed). The building's story count, the community pool, and every satellite read (turf, landscape, water) describe the whole parcel and were dropped. Confirm the unit's floor (upper floors price as Condo — Upper)${unitSqFtKept ? ' and its sq ft' : ', and get the unit\'s own sq ft from the customer'}`,
+      reason: `Unit address on a condo record — quoted as ONE condo unit (single level, no lot, no pool assumed). The building's story count, the community pool, and every satellite read (turf, landscape, water) describe the whole parcel and were dropped. Confirm the unit's floor (upper floors price as Condo — Upper)${unitSqFtKept ? ' and its sq ft' : ', and get the unit\'s own sq ft from the customer'}.${typeProvenance}`,
       priority: 'HIGH',
     });
   }
@@ -4664,6 +4670,11 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     // attachedGarage key note in EstimatePage.jsx.
     footprintSqFt: p.footprintUnknown === true ? 0 : (p.footprint ?? p.footprintSqFt),
     footprintUnknown: p.footprintUnknown === true || undefined,
+    // One unit inside a building (unit-address lookup): its living area
+    // still sizes recurring pest, but it is interior floor space — never a
+    // slab, attic, or exterior perimeter — so the termite pricers withhold
+    // every DERIVED footprint and require a measurement (codex r3 P1 #4862).
+    unitScoped: p.residentialUnitLookup ? true : undefined,
     perimeterLF: perimeterLF ?? perimeter,
     perimeterSource: p.perimeterSource || null,
     propertyType: commercialProfile ? 'commercial' : v1PropertyType,

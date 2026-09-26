@@ -1469,6 +1469,38 @@ describe('unit-address lookup on a residential condo record (GATE_UNIT_SCOPE_GUA
     expect(profile.estimatedSlabSqFt).toBeNull();
   });
 
+  test('termite pricing never derives a slab/perimeter from the unit\'s living area; a typed measurement still prices (codex r3 P1)', () => {
+    const { translateV2CallToV1Input } = require('../routes/property-lookup-v2');
+    const { calculatePropertyProfile } = require('../services/pricing-engine/property-calculator');
+    const { priceTermiteBait, priceTrenching } = require('../services/pricing-engine/service-pricing');
+    const profile = buildEnrichedProfile(condoRecord(), parcelWideAi, null, null, null, null, unit);
+    const v1 = translateV2CallToV1Input(profile, ['TERMITE_BAIT', 'TRENCHING'], {});
+    expect(v1.unitScoped).toBe(true);
+    const property = calculatePropertyProfile(v1);
+    // Recurring pest keeps sizing off the unit's own living area.
+    expect(property.footprint).toBe(725);
+    expect(property.unitScoped).toBe(true);
+
+    const bait = priceTermiteBait(property, {});
+    expect(bait.requiresMeasurement).toBe(true);
+    expect(bait.manualReviewReasons).toContain('missing_termite_footprint');
+    const measured = priceTermiteBait(property, { measurements: { footprintSqFt: 900 } });
+    expect(measured.requiresMeasurement).toBe(false);
+    expect(measured.footprintSqFt).toBe(900);
+    expect(measured.footprintSource).toBe('manual_override');
+
+    const trench = priceTrenching(property, { allowComputedPerimeterFromFootprint: true });
+    expect(trench.requiresMeasurement).toBe(true);
+    expect(trench.price).toBeNull();
+
+    // A whole-home lookup keeps deriving both, exactly as before.
+    const home = calculatePropertyProfile(translateV2CallToV1Input(
+      buildEnrichedProfile(condoRecord(), parcelWideAi, null, null, null, null, bare), ['TERMITE_BAIT'], {},
+    ));
+    expect(home.unitScoped).toBe(false);
+    expect(priceTermiteBait(home, {}).requiresMeasurement).toBe(false);
+  });
+
   test('"Apt. 3C" and "#3C" read the same as "Unit 3C"', () => {
     for (const address of [
       '210 Example Harbor Way Apt. 3C, Sarasota, FL 34232',
@@ -1517,6 +1549,12 @@ describe('unit-address lookup on a residential condo record (GATE_UNIT_SCOPE_GUA
     expect(profile.residentialUnitLookup).not.toBeNull();
     expect(profile.stories).toBe(1);
     expect(profile.pool).not.toBe('POSSIBLE');
+    // The satellite type's "is this really a condo?" ask survives the
+    // one-flag dedupe, merged into the unit flag (codex r3 P2).
+    const typeFlags = profile.fieldVerifyFlags.filter((f) => f.field === 'propertyType');
+    expect(typeFlags).toHaveLength(1);
+    expect(typeFlags[0].reason).toMatch(/ONE condo unit/);
+    expect(typeFlags[0].reason).toMatch(/Also confirm the type itself:/);
     expect(profile.estimatedTurfSf || 0).toBe(0);
   });
 
