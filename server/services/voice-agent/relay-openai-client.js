@@ -110,8 +110,12 @@ function toResponsesInput(messages) {
     let textRun = [];
     const flushText = () => {
       if (!textRun.length) return;
-      const partType = role === 'assistant' ? 'output_text' : 'input_text';
-      items.push({ role, content: textRun.map((text) => ({ type: partType, text })) });
+      // An assistant turn replays as a plain-string easy input message — valid
+      // for every role, with no output-item metadata to reconstruct. A user
+      // turn keeps one input_text part per block.
+      items.push(role === 'assistant'
+        ? { role, content: textRun.join('\n') }
+        : { role, content: textRun.map((text) => ({ type: 'input_text', text })) });
       textRun = [];
     };
     for (const b of blocks) {
@@ -341,6 +345,9 @@ class OpenAIRelayStream {
         switch (evt.type) {
           case 'response.output_item.added': {
             const item = evt.item || {};
+            // Only a message or function call is the start of output the caller
+            // hears; a reasoning item must not stamp first-token latency.
+            if (item.type !== 'message' && item.type !== 'function_call') break;
             this._emit('streamEvent', {
               type: 'content_block_start',
               content_block: { type: item.type === 'function_call' ? 'tool_use' : 'text' },

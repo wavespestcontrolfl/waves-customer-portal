@@ -287,7 +287,11 @@ function resolveSessionModel({ sandbox } = {}) {
       warnRejectedOverrideOnce(source, value);
     }
   }
-  if (isAllowedOverrideModel(MODEL)) return { model: MODEL, fallbackReason };
+  // VOICE_RELAY_MODEL is shared with collections-conversation.js, which only
+  // speaks Anthropic — so the shared fallback takes the Anthropic allowlist
+  // alone, gate or no gate. OpenAI is reachable only via the inbound/sandbox
+  // overrides above.
+  if (typeof MODEL === 'string' && ALLOWED_OVERRIDE_MODEL_IDS.has(MODEL)) return { model: MODEL, fallbackReason };
   if (!fallbackReason) {
     fallbackReason = `unknown_shared_model:${SHARED_MODEL_ENV}=${MODEL}`;
     warnRejectedOverrideOnce(SHARED_MODEL_ENV, MODEL);

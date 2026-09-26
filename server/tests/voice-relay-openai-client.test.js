@@ -36,14 +36,14 @@ function fetchStub(events, { status = 200, ok = true } = {}) {
 }
 
 describe('toResponsesInput — Anthropic-shaped message history -> Responses input items', () => {
-  test('a bare string user/assistant message becomes one input_text/output_text item', () => {
+  test('a bare string user message becomes an input_text item; an assistant message a plain-string item', () => {
     const items = toResponsesInput([
       { role: 'user', content: 'hi there' },
       { role: 'assistant', content: 'hello!' },
     ]);
     expect(items).toEqual([
       { role: 'user', content: [{ type: 'input_text', text: 'hi there' }] },
-      { role: 'assistant', content: [{ type: 'output_text', text: 'hello!' }] },
+      { role: 'assistant', content: 'hello!' },
     ]);
   });
 
@@ -56,12 +56,19 @@ describe('toResponsesInput — Anthropic-shaped message history -> Responses inp
     ]);
   });
 
+  test('consecutive assistant text blocks replay as ONE plain-string item (never output_text parts)', () => {
+    const items = toResponsesInput([
+      { role: 'assistant', content: [{ type: 'text', text: 'One moment.' }, { type: 'text', text: 'Checking now.' }] },
+    ]);
+    expect(items).toEqual([{ role: 'assistant', content: 'One moment.\nChecking now.' }]);
+  });
+
   test('an assistant tool_use block becomes its own top-level function_call item, arguments JSON-stringified', () => {
     const items = toResponsesInput([
       { role: 'assistant', content: [{ type: 'text', text: 'Let me check.' }, { type: 'tool_use', id: 'call_1', name: 'lookup_customer', input: { phone: '+19415551234' } }] },
     ]);
     expect(items).toEqual([
-      { role: 'assistant', content: [{ type: 'output_text', text: 'Let me check.' }] },
+      { role: 'assistant', content: 'Let me check.' },
       { type: 'function_call', call_id: 'call_1', name: 'lookup_customer', arguments: '{"phone":"+19415551234"}' },
     ]);
   });
@@ -133,8 +140,9 @@ describe('buildOpenAIRequest — system/messages/tools/max_tokens/reasoning', ()
   });
 
   test('reasoning effort is read from MODEL_CATALOG, never hardcoded per model id here', () => {
-    expect(reasoningEffortFor('gpt-6-sol')).toBe('none');
-    expect(reasoningEffortFor('gpt-6-luna')).toBe('none');
+    // The GPT-6 line has no 'none' effort (services/llm/call.js) — 'low' is its floor.
+    expect(reasoningEffortFor('gpt-6-sol')).toBe('low');
+    expect(reasoningEffortFor('gpt-6-luna')).toBe('low');
     expect(reasoningEffortFor('gpt-5.6-luna')).toBe('none');
     expect(reasoningEffortFor('gpt-5.6-terra')).toBe('none');
     // gpt-5.6-sol / gpt-6-astra carry no `voice` entry — never offered to the
@@ -144,7 +152,8 @@ describe('buildOpenAIRequest — system/messages/tools/max_tokens/reasoning', ()
     expect(reasoningEffortFor('not-a-real-model')).toBeNull();
 
     const body = buildOpenAIRequest({ model: 'gpt-6-sol', messages: [] });
-    expect(body.reasoning).toEqual({ effort: 'none' });
+    expect(body.reasoning).toEqual({ effort: 'low' });
+    expect(buildOpenAIRequest({ model: 'gpt-5.6-luna', messages: [] }).reasoning).toEqual({ effort: 'none' });
     const bodyNoReasoning = buildOpenAIRequest({ model: 'gpt-5.6-sol', messages: [] });
     expect(bodyNoReasoning).not.toHaveProperty('reasoning');
   });
@@ -247,6 +256,7 @@ describe('OpenAIRelayClient.messages.stream — full SSE round trips', () => {
     const fetchImpl = async (url, opts) => {
       calls.push({ url, opts });
       return fetchStub([
+        { type: 'response.output_item.added', item: { type: 'reasoning' } },
         { type: 'response.output_item.added', item: { type: 'message' } },
         { type: 'response.output_text.delta', delta: 'Hi ' },
         { type: 'response.output_text.delta', delta: 'there.' },

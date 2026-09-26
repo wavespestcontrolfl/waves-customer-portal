@@ -138,9 +138,23 @@ describe('a shared VOICE_RELAY_MODEL/MODEL_VOICE value is validated too (Codex r
     expect(result.fallbackReason).toBe(`unknown_shared_model:VOICE_RELAY_MODEL=${OPENAI_CANDIDATE}`);
   });
 
-  test('an OpenAI id IS honored once the gate is on', () => {
+  // Codex r3 P1: VOICE_RELAY_MODEL is shared with collections-conversation.js,
+  // which only speaks Anthropic — so the gate never widens the shared fallback.
+  test('an OpenAI id still fails closed with the gate on (shared with collections)', () => {
     process.env.GATE_VOICE_RELAY_OPENAI = 'true';
     process.env.VOICE_RELAY_MODEL = OPENAI_CANDIDATE;
+    let result;
+    jest.isolateModules(() => {
+      result = require('../services/voice-agent/relay-conversation').resolveSessionModel({ sandbox: false });
+    });
+    expect(result.model).toBe(MODELS.DEFAULTS.VOICE);
+    expect(result.fallbackReason).toBe(`unknown_shared_model:VOICE_RELAY_MODEL=${OPENAI_CANDIDATE}`);
+  });
+
+  test('with the gate on, an OpenAI id is reachable through the inbound override instead', () => {
+    process.env.GATE_VOICE_RELAY_OPENAI = 'true';
+    process.env.VOICE_RELAY_MODEL = OPENAI_CANDIDATE;
+    process.env.VOICE_RELAY_INBOUND_MODEL = OPENAI_CANDIDATE;
     let result;
     jest.isolateModules(() => {
       result = require('../services/voice-agent/relay-conversation').resolveSessionModel({ sandbox: false });

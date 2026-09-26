@@ -306,9 +306,11 @@ const MODEL_CATALOG = {
   // read and applied; a model with no `voice` key is never offered to
   // VOICE_RELAY_INBOUND_MODEL / VOICE_RELAY_SANDBOX_MODEL / a benchmark
   // --candidate-model, gate or no gate.
-  'gpt-6-sol': { label: 'GPT-6 Sol', provider: 'openai', caps: ['text', 'vision'], status: 'current', voice: { reasoning: 'none' } },
+  // The GPT-6 line's efforts start at 'low' ('none' 400s — see
+  // services/llm/call.js), so its voice entries take 'low'; GPT-5.6 keeps 'none'.
+  'gpt-6-sol': { label: 'GPT-6 Sol', provider: 'openai', caps: ['text', 'vision'], status: 'current', voice: { reasoning: 'low' } },
   // Released 2026-09-22. No vision leg documented yet — text only.
-  'gpt-6-luna': { label: 'GPT-6 Luna', provider: 'openai', caps: ['text'], status: 'current', voice: { reasoning: 'none' } },
+  'gpt-6-luna': { label: 'GPT-6 Luna', provider: 'openai', caps: ['text'], status: 'current', voice: { reasoning: 'low' } },
   'gpt-5.6-sol': { label: 'GPT-5.6 Sol', provider: 'openai', caps: ['text', 'vision'], status: 'current' },
   'gpt-5.6-terra': { label: 'GPT-5.6 Terra', provider: 'openai', caps: ['text', 'vision'], status: 'current', voice: { reasoning: 'none' } },
   'gpt-5.6-luna': { label: 'GPT-5.6 Luna', provider: 'openai', caps: ['text', 'vision'], status: 'current', voice: { reasoning: 'none' } },
