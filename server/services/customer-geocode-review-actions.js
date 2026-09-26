@@ -7,6 +7,7 @@ const { lockTechDays } = require('./scheduling/tech-day-lock');
 const { etDateString } = require('../utils/datetime-et');
 const { toDateStr } = require('./auto-dispatch/dates');
 const { recurringServiceAddress } = require('./booking/visit-financial-stamps');
+const { roundDecimal } = require('../../shared/proposal-bid.cjs');
 const reviewStore = require('./customer-geocode-review');
 
 const REVIEW_SOURCES = new Set(['county_records', 'customer_confirmation', 'site_visit']);
@@ -19,7 +20,10 @@ const VISIT_FIELDS = [
   'service_address_line1', 'service_address_line2', 'service_address_city',
   'service_address_state', 'service_address_zip',
 ];
-const pinAtScale = (value, places) => Number(Number(value).toFixed(places));
+const pinAtScale = (value, places) => {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? roundDecimal(numeric, places) : NaN;
+};
 
 function actionError(message, statusCode, code) {
   return Object.assign(new Error(message), { statusCode, status: statusCode, code, isOperational: true });

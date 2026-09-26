@@ -30,6 +30,7 @@ const PRIMARY = '71000000-0000-4000-8000-000000000012';
 const SECONDARY = '71000000-0000-4000-8000-000000000013';
 const ACTOR = '72000000-0000-4000-8000-000000000011';
 const PIN = { latitude: 27.4981234, longitude: -82.5748123 };
+const HALF_PIN = { latitude: 27.4981235, longitude: -82.5748125 };
 const ADDRESS = { address_line1: '100 Fixture Way', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34205' };
 const SECONDARY_ADDRESS = { address_line1: '900 Other Ave', address_line2: null, city: 'Sarasota', state: 'FL', zip: '34236' };
 const postgres = connection ? describe : describe.skip;
@@ -167,12 +168,12 @@ postgres('customer geocode review actions in PostgreSQL', () => {
   const visit = id => mockConnection('scheduled_services').where({ id }).first();
   const detail = () => reviewStore.getReviewDetail(CUSTOMER, mockConnection);
 
-  async function verify({ address } = {}) {
+  async function verify({ address, pin = PIN } = {}) {
     return resolveCustomerGeocodeReview(CUSTOMER, {
       revision: (await detail()).revision,
       action: 'verify_pin',
       ...(address ? { address } : {}),
-      ...PIN,
+      ...pin,
       source: 'site_visit',
       evidence: 'Synthetic marker observation',
       confirmed: true,
@@ -248,6 +249,26 @@ postgres('customer geocode review actions in PostgreSQL', () => {
     const saved = await review();
     expect(saved).toMatchObject({ status: 'needs_pin', reason: 'verification_revoked', reviewed_by: null });
     expect(Number(saved.latitude)).toBe(PIN.latitude);
+  });
+
+  test('halfway coordinates use PostgreSQL rounding for repeat verification and revoke clearing', async () => {
+    await verify({ pin: HALF_PIN });
+    expect(await visit(visitIds.matching)).toMatchObject({ lat: '27.498124', lng: '-82.574813' });
+
+    await mockConnection('scheduled_services').where({ id: visitIds.matching }).update({
+      zone: 'stale-zone', route_order: 8,
+    });
+    await verify({ pin: HALF_PIN });
+    expect(await visit(visitIds.matching)).toMatchObject({
+      lat: '27.498124', lng: '-82.574813', zone: null, route_order: null,
+    });
+
+    await resolveCustomerGeocodeReview(CUSTOMER, {
+      revision: (await detail()).revision, action: 'revoke',
+    }, ACTOR, mockConnection);
+    expect(await visit(visitIds.matching)).toMatchObject({ lat: null, lng: null });
+    expect((await customer()).latitude).toBeNull();
+    expect((await primary()).latitude).toBeNull();
   });
 
   test('an empty optional unit on unchanged-address verification permits the next review action', async () => {

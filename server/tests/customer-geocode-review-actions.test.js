@@ -143,6 +143,12 @@ test('verified fanout only replaces an empty pin or the customer prior pin', () 
   expect(visitPinIsSafeToReplace(visit({ lat: 27.3364, lng: -82.5307 }), {
     ...customer, latitude: 27.3364004, longitude: -82.5307004,
   })).toBe(true);
+  expect(visitPinIsSafeToReplace(visit({ lat: 27.498124, lng: -82.574813 }), {
+    ...customer, latitude: 27.4981235, longitude: -82.5748125,
+  })).toBe(true);
+  expect(visitPinIsSafeToReplace(visit({ lat: 27.498123, lng: -82.574812 }), {
+    ...customer, latitude: 27.4981235, longitude: -82.5748125,
+  })).toBe(false);
   expect(visitPinIsSafeToReplace(visit({ lat: 27.1, lng: -82.1 }), customer)).toBe(false);
   expect(visitPinIsSafeToReplace(visit(), { ...customer, latitude: null, longitude: null })).toBe(false);
 });
