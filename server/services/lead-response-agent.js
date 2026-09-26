@@ -97,9 +97,13 @@ function sendSessionEvents(sessionId, events, deadline) {
 // for the owner counts even if the alert to the owner then failed, and a
 // send converted into a queued draft counts as the reply.
 const MAX_TOOL_CALLS = 20;
+// Only tools with no writes and no provider spend may be abandoned at the
+// deadline. Not here, so they run to completion like any write:
+// check_existing_estimates (shortenOrPassthrough inserts short_codes),
+// get_pest_context (WikiQA.query calls providers and inserts
+// knowledge_queries) and triage_lead (an LLM dispatch).
 const READ_ONLY_TOOLS = new Set([
-  'get_lead_details', 'triage_lead', 'get_customer_context',
-  'check_existing_estimates', 'check_next_availability', 'get_pest_context',
+  'get_lead_details', 'get_customer_context', 'check_next_availability',
 ]);
 const replyDecided = (result) => result?.sent === true || result?.queued === true;
 const SIDE_EFFECTS = {

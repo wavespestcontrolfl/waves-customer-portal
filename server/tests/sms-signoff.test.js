@@ -104,9 +104,6 @@ describe('stripTrailingSignature', () => {
     'The charge will appear as\nWaves Pest Control',
     // A smiley in content is content.
     'Your visit is Tuesday :)',
-    // Thanking a customer named Adam is the message, not a sign-off.
-    'Thanks, Adam!',
-    'Thank you, Adam!',
     // Valediction words never reach into the line above.
     'Your contacts are\nAdam,\nVirginia',
     // A dash after "is"/"as" introduces the answer.
@@ -123,6 +120,8 @@ describe('stripTrailingSignature', () => {
       ['See you soon, Adam', 'adam'],
       ['Your visit is Tuesday.\nAdam', 'Adam'],
       ['Talk soon! Thanks, Virginia', 'Virginia'],
+      ['Thanks, Adam!', 'Adam'],
+      ['Thank you, Adam!', 'Adam'],
     ])('keeps %j for a customer named %s', (input, addresseeFirstName) => {
       expect(stripTrailingSignature(input, { addresseeFirstName })).toBe(input);
     });
@@ -133,8 +132,13 @@ describe('stripTrailingSignature', () => {
       ['See you soon. Adam, Waves Pest Control', 'Adam', 'See you soon.'],
       // The other signer's name is still a sign-off.
       ['See you soon. - Virginia', 'Adam', 'See you soon.'],
-      // A different customer: unchanged behavior.
+      // A dash-set staff name is a sign-off even to a customer with that name.
+      ['See you soon. - Adam', 'Adam', 'See you soon.'],
+      ['See you soon. - Thanks, Adam', 'Adam', 'See you soon.'],
+      // A different customer: unchanged behavior, including a thanks-only text.
       ['See you soon, Adam.', 'Maria', ''],
+      ['Thanks, Adam!', 'Sam', ''],
+      ['Thanks, Adam!', undefined, ''],
     ])('strips %j for a customer named %s', (input, addresseeFirstName, expected) => {
       expect(stripTrailingSignature(input, { addresseeFirstName })).toBe(expected);
     });

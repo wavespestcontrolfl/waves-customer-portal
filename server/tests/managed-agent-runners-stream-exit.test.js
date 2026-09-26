@@ -412,7 +412,9 @@ describe('lead-response-agent — a status_idle event is not terminal on its own
     expect(recorded()).toMatchObject({ failure: null });
   });
 
-  it.each(['send_lead_response', 'update_lead_pipeline'])('a %s write still in flight at the deadline is awaited, not abandoned — the run returns only after it lands', async (writeTool) => {
+  // check_existing_estimates / get_pest_context / triage_lead write rows or spend
+  // on providers as a side effect, so they count as writes here.
+  it.each(['send_lead_response', 'update_lead_pipeline', 'check_existing_estimates', 'get_pest_context', 'triage_lead'])('a %s write still in flight at the deadline is awaited, not abandoned — the run returns only after it lands', async (writeTool) => {
     process.env.LEAD_AGENT_TIMEOUT_MS = '50';
     let sendLanded = false;
     mockExecuteLeadTool.mockImplementation((name) => (name === writeTool

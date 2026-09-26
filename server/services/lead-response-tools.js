@@ -603,7 +603,8 @@ async function executeLeadTool(toolName, input, context) {
             lead_id: input.lead_id,
             customer_id: input.customer_id,
             action_taken: input.action_taken,
-            response_message: stripTrailingSignature(input.response_message) || null,
+            // Same addressee as the send, so the saved text matches what went out.
+            response_message: stripTrailingSignature(input.response_message, { addresseeFirstName: subject.customer?.first_name }) || null,
             response_time_seconds: input.response_time_seconds,
             triage_summary: input.triage_summary,
             follow_up_scheduled: input.follow_up_scheduled || false,
