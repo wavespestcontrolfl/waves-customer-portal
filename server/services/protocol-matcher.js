@@ -357,10 +357,13 @@ const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', '
 // tree_shrub rule's `visit: 1` is only the no-month fallback, so without a
 // month every T&S appointment would show the January protocol. Programs
 // whose visits are 'Any' (pest, termite, …) return null and keep their
-// rule-picked visit. Same order as job-card.js seasonalVisit.
+// rule-picked visit.
+// Shared with job-card.js seasonalVisit so every protocol surface agrees.
+// `month` is "Apr"/"april"/4; anything else resolves no month (null).
 function monthVisit(program, month) {
+  const n = /^\d{1,2}$/.test(String(month ?? '').trim()) ? Number(month) : NaN;
   const abbr = String(month || '').slice(0, 3).toLowerCase();
-  const key = MONTHS.find((m) => m.toLowerCase() === abbr);
+  const key = n >= 1 && n <= 12 ? MONTHS[n - 1] : MONTHS.find((m) => m.toLowerCase() === abbr);
   if (!key) return null;
   return (program?.visits || []).find((visit) => visit?.month === key) || null;
 }

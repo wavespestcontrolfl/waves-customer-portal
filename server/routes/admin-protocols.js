@@ -774,10 +774,10 @@ router.get('/match', async (req, res, next) => {
   try {
     const protocols = require('../config/protocols.json');
     const serviceType = req.query.serviceType || req.query.service_type || '';
-    // Month-keyed programs (tree & shrub) pick the appointment month's visit;
-    // no month keeps the rule visit (monthAbbr would default to today).
-    const month = req.query.month ? monthAbbr(req.query.month) : null;
-    const result = matchServiceProtocol(protocols, serviceType, { month });
+    // Month-keyed programs (tree & shrub) pick the appointment month's visit.
+    // Passed raw, not through monthAbbr: an unusable month must keep the rule
+    // visit, never default to today's month.
+    const result = matchServiceProtocol(protocols, serviceType, { month: req.query.month || null });
 
     if (!result.program) return res.status(404).json({ error: 'Protocol program not found' });
 
@@ -1156,8 +1156,8 @@ router.get('/completion-actions', async (req, res, next) => {
       month = monthAbbr(req.query.month);
       visit = program?.visits?.find((v) => v.month === month) || program?.visits?.[0] || null;
     } else {
-      month = req.query.month ? monthAbbr(req.query.month) : null;
-      const matched = matchServiceProtocol(protocols, serviceType, { month });
+      // Raw month (see /match): an unusable value keeps the rule visit.
+      const matched = matchServiceProtocol(protocols, serviceType, { month: req.query.month || null });
       programKey = matched.programKey;
       program = matched.program;
       visit = matched.matchedVisit || program?.visits?.[0] || null;

@@ -76,24 +76,28 @@ describe('10/10 SWFL tree and shrub protocol config', () => {
     expect(addOns.products.join('\n')).toMatch(/IMA-jet.*4A\/neonic pressure/i);
   });
 
-  test('palm care: dose by canopy size, scouting, and diagnosis-only guidance', () => {
+  test('palm care: dose by measured canopy, scouting, and diagnosis-only guidance', () => {
     const program = protocols.tree_shrub;
     const notes = program.notes.join('\n');
 
-    expect(program.calibration.palm_size_tiers).toHaveLength(3);
-    expect(program.calibration.palm_size_tiers.join('\n')).toMatch(/Small.*0\.75 lb/);
-    expect(notes).toMatch(/1\.5 lb per 100 sq ft of canopy/);
+    // Dose table follows 1.5 lb per 100 sq ft of a circular canopy.
+    const table = [...notes.matchAll(/(\d+) ft = ([\d.]+) lb/g)].map(([, d, lb]) => [Number(d), Number(lb)]);
+    expect(table.map(([d]) => d)).toEqual([6, 8, 10, 12, 14, 16, 18, 20]);
+    for (const [d, lb] of table) expect(Math.abs(lb - 1.5 * Math.PI * (d / 2) ** 2 / 100)).toBeLessThan(0.05);
+    expect(program.calibration.palm_fertilizer_rate).toMatch(/By canopy width: .*20 ft = 4\.7 lb/);
     expect(notes).toMatch(/Palm scout every visit/);
     expect(notes).toMatch(/never a disease name without a diagnosis/);
-    expect(notes).toMatch(/lethal bronzing, Ganoderma butt rot, and Fusarium wilt have no cure/);
-    // Every visit that carries palm fertilizer tells the tech the dose by size.
+    expect(notes).toMatch(/do not quote a treatment on symptoms/);
+    expect(notes).toMatch(/Lethal-bronzing injections are preventive only/);
+    // Every visit that carries palm fertilizer tells the tech the dose by canopy width.
     const palmVisits = program.visits.filter((row) => /8-2-12/.test(`${row.primary}\n${row.secondary}`));
     expect(palmVisits.map((row) => row.month)).toEqual(['Jan', 'Apr', 'May', 'Oct', 'Dec']);
-    for (const row of palmVisits) expect(row.notes).toMatch(/Palm dose by canopy/);
+    for (const row of palmVisits) expect(row.notes).toMatch(/Palm dose by canopy width: .*20 ft = 4\.7 lb/);
   });
 
-  test('documents the 9x every-6-weeks program without fixed months', () => {
-    expect(protocols.tree_shrub.tiers.nine_x).toMatch(/Every 6 weeks/);
-    expect(protocols.tree_shrub.tiers.nine_x).toMatch(/month it lands in/);
+  test('documents the 9x every-6-weeks program in the rendered program notes', () => {
+    const notes = protocols.tree_shrub.notes.join('\n');
+    expect(notes).toMatch(/9x program \(every 6 weeks/);
+    expect(notes).toMatch(/month it lands in/);
   });
 });

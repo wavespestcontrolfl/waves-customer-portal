@@ -323,6 +323,7 @@ describe('protocol matcher appointment month', () => {
     expect(withMonth('Tree & Shrub Care', 'Apr')).toEqual(['tree_shrub', 4, 'Apr']);
     expect(withMonth('Tree and Shrub 6x', 'oct')).toEqual(['tree_shrub', 10, 'Oct']);
     expect(withMonth('Tree & Shrub Care', 'September')).toEqual(['tree_shrub', 9, 'Sep']);
+    expect(withMonth('Tree & Shrub Care', '7')).toEqual(['tree_shrub', 7, 'Jul']);
   });
 
   test('tree & shrub without a usable month keeps the visit-1 fallback', () => {
