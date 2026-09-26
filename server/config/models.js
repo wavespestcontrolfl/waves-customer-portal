@@ -297,10 +297,21 @@ const MODEL_CATALOG = {
   'claude-fable-5': { label: 'Claude Fable 5', provider: 'anthropic', caps: ['text', 'vision'], status: 'legacy', requires: 'deep' },
   'claude-haiku-4-5-20251001': { label: 'Claude Haiku 4.5', provider: 'anthropic', caps: ['text', 'vision'], status: 'current' },
   'gpt-6-astra': { label: 'GPT-6 Astra', provider: 'openai', caps: ['text', 'vision'], status: 'current' },
-  'gpt-6-sol': { label: 'GPT-6 Sol', provider: 'openai', caps: ['text', 'vision'], status: 'current' },
+  // `voice` marks a model eligible for the gated voice-relay OpenAI adapter
+  // (server/services/voice-agent/relay-openai-client.js) AND carries its
+  // per-model Responses `reasoning.effort` — one place for both, so the
+  // adapter never hardcodes a model id (CLAUDE.md AI rule 1). Voice-relay
+  // sessions always run this lane's `low`-equivalent: minimal thinking on a
+  // live phone call. See relay-openai-client.js for how `voice.reasoning` is
+  // read and applied; a model with no `voice` key is never offered to
+  // VOICE_RELAY_INBOUND_MODEL / VOICE_RELAY_SANDBOX_MODEL / a benchmark
+  // --candidate-model, gate or no gate.
+  'gpt-6-sol': { label: 'GPT-6 Sol', provider: 'openai', caps: ['text', 'vision'], status: 'current', voice: { reasoning: 'none' } },
+  // Released 2026-09-22. No vision leg documented yet — text only.
+  'gpt-6-luna': { label: 'GPT-6 Luna', provider: 'openai', caps: ['text'], status: 'current', voice: { reasoning: 'none' } },
   'gpt-5.6-sol': { label: 'GPT-5.6 Sol', provider: 'openai', caps: ['text', 'vision'], status: 'current' },
-  'gpt-5.6-terra': { label: 'GPT-5.6 Terra', provider: 'openai', caps: ['text', 'vision'], status: 'current' },
-  'gpt-5.6-luna': { label: 'GPT-5.6 Luna', provider: 'openai', caps: ['text', 'vision'], status: 'current' },
+  'gpt-5.6-terra': { label: 'GPT-5.6 Terra', provider: 'openai', caps: ['text', 'vision'], status: 'current', voice: { reasoning: 'none' } },
+  'gpt-5.6-luna': { label: 'GPT-5.6 Luna', provider: 'openai', caps: ['text', 'vision'], status: 'current', voice: { reasoning: 'none' } },
   'gpt-5.5': { label: 'GPT-5.5', provider: 'openai', caps: ['text', 'vision'], status: 'current' },
   'gpt-5-mini': { label: 'GPT-5 mini', provider: 'openai', caps: ['text', 'vision'], status: 'current' },
   'gemini-3.8-flash': { label: 'Gemini 3.8 Flash', provider: 'gemini', caps: ['text', 'vision'], status: 'current' },

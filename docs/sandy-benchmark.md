@@ -68,6 +68,12 @@ node server/scripts/run-voice-relay-benchmark.js --candidate-model=claude-haiku-
 
 # Add the optional transcript judge (extra API spend):
 node server/scripts/run-voice-relay-benchmark.js --candidate-model=claude-haiku-4-5-20251001 --trials=5 --judge
+
+# An OpenAI candidate (voice-eligible MODEL_CATALOG id, provider 'openai') —
+# needs OPENAI_API_KEY in this process's OWN environment; the runner sets
+# GATE_VOICE_RELAY_OPENAI=true in ONLY the two candidate-* conditions' child
+# env, never its own (see "OpenAI candidates" below):
+OPENAI_API_KEY=sk-… node server/scripts/run-voice-relay-benchmark.js --candidate-model=gpt-6-sol --trials=5
 ```
 
 `--only`, when passed, must name at least one real scenario id: an empty
@@ -149,13 +155,41 @@ without this a run could report 100% accuracy having skipped part of the
 fixture. `--out` is checked for writability before the first paid run, since
 the combined report is only written after every trial finishes.
 
+### OpenAI candidates (GATE_VOICE_RELAY_OPENAI)
+
+`--candidate-model` may also be a voice-eligible OpenAI id — one MODEL_CATALOG
+marks with a `voice` object (`server/config/models.js`; today gpt-6-sol,
+gpt-6-luna, gpt-5.6-luna, gpt-5.6-terra). Production inbound calls and
+Sandy's sandbox line stay on Claude Sonnet 5 either way — this only widens
+what a **benchmark candidate** may run on. The runner:
+  - requires `OPENAI_API_KEY` in its OWN process environment up front (a
+    usage error, exit 2, before any child runs) — without it every
+    OpenAI-candidate condition would fail its first model call;
+  - sets `GATE_VOICE_RELAY_OPENAI=true` in ONLY the two `candidate-*`
+    conditions' child env (`buildConditions`) — never its own, and never the
+    two `current-*` conditions', so a leftover value in the invoking shell
+    can never leak into a "current" condition and secretly turn it into a
+    second candidate run either.
+  - runs the session through `relay-openai-client.js` (Responses API, SSE)
+    instead of the Anthropic SDK — same tool-use loop, same stream/finalMessage
+    surface, but its own request/response translation and its own per-model
+    reasoning effort (`MODEL_CATALOG[model].voice.reasoning`).
+
+**No silent Claude fallback.** An OpenAI leg that errors, times out, or is
+aborted rejects the SAME way a stalled Anthropic call does — it counts as a
+model failure/abort in the harness telemetry and runs through the relay's
+existing provider-failure handling. It never quietly re-runs the turn on
+Claude; a benchmark candidate that hits an OpenAI outage must show up as a
+failed/inconclusive run, not a clean pass on the wrong provider.
+
 ### Model-stamp verification (candidate conditions only)
 
-`--candidate-model` is checked against the relay's OWN allowlist
-(`relay-conversation.js`'s `ALLOWED_OVERRIDE_MODEL_IDS`, derived from
-`config/models.js` `MODEL_CATALOG`) before any condition runs at all — an
-unrecognized id is a usage error (exit 2), not four wasted API-billed
-conditions. That check alone does not prove the candidate model actually ran,
+`--candidate-model` is checked against the relay's OWN catalog-eligible id
+sets (`relay-conversation.js`'s `ALLOWED_OVERRIDE_MODEL_IDS` — Anthropic — and
+`OPENAI_VOICE_OVERRIDE_MODEL_IDS` — OpenAI, see "OpenAI candidates" above —
+both derived from `config/models.js` `MODEL_CATALOG`) before any condition
+runs at all — an unrecognized id is a usage error (exit 2), not four wasted
+API-billed conditions. That check alone does not prove the candidate model actually ran,
 though: each condition's run is also checked AFTER it completes. Every
 scenario record in a completed run's `results[]` carries the resolved
 session model it actually pinned (`record.model`, from

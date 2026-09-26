@@ -1029,6 +1029,71 @@ function safeInput(input) {
 let harness = null;
 
 /**
+ * Patch ONE provider's Messages-like `.stream()` prototype method so it
+ * updates `state.record`'s model telemetry and can inject a scripted failure
+ * — the SAME instrumentation regardless of which provider a session pins
+ * (Anthropic always; OpenAI only under GATE_VOICE_RELAY_OPENAI). `getProto`
+ * is called inside this function's own try/catch (mirrors the original
+ * inline Anthropic-only block this replaced) so a missing/broken client
+ * module for one provider never prevents patching the other. `label` names
+ * the provider only in the warning logged on failure. Returns whether the
+ * patch was applied.
+ */
+function patchStreamProto(getProto, state, label) {
+  try {
+    const proto = getProto();
+    if (!proto || proto === Object.prototype || typeof proto.stream !== 'function') return false;
+    const realStream = proto.stream;
+    proto.stream = function evalStream(...args) {
+      if (state.record) state.record.modelCalls += 1;
+      if (state.modelFailuresLeft > 0) {
+        state.modelFailuresLeft -= 1;
+        if (state.record) state.record.injected.push('model_failure');
+        throw new Error('voice-relay eval: injected model failure');
+      }
+      // Model telemetry per scenario: a completed round vs a REAL provider
+      // error. Without it a keyless or outage run would read green — Sandy's
+      // "could you say that again?" fallback speaks nothing forbidden.
+      const record = state.record;
+      let stream;
+      try {
+        stream = realStream.apply(this, args);
+      } catch (err) {
+        // A throw during request construction never reaches the
+        // finalMessage wrapper below; the relay speaks its fallback and the
+        // round would otherwise grade as completed.
+        if (record) record.modelErrors.push(err && err.message ? err.message : String(err));
+        throw err;
+      }
+      if (record && stream && typeof stream.finalMessage === 'function') {
+        const finalMessage = stream.finalMessage.bind(stream);
+        stream.finalMessage = () => finalMessage().then(
+          (msg) => { record.modelRounds += 1; return msg; },
+          (err) => {
+            // The relay aborts the same controller for a caller barge-in AND
+            // for its 20 s stream timeout (or, on the OpenAI leg, the
+            // equivalent abort — see relay-openai-client.js's own
+            // normalizeAbort). Only an abort that lands while the harness
+            // itself is interrupting is deliberate; any other abort is a
+            // stalled provider and a real failure.
+            const message = err && err.message ? err.message : String(err);
+            const aborted = (err && err.name === 'AbortError') || /abort/i.test(message);
+            if (aborted && record.interruptInFlight) record.modelAborts += 1;
+            else record.modelErrors.push(aborted ? `stream aborted by the relay's own bound: ${message}` : message);
+            throw err;
+          },
+        );
+      }
+      return stream;
+    };
+    return true;
+  } catch (err) {
+    logger.warn(`[voice-relay-eval] model fault injection unavailable (${label}): ${err.message}`);
+    return false;
+  }
+}
+
+/**
  * Install the patched world ONCE per process and load the live conversation
  * module behind it. Throws when relay-conversation is already loaded — its
  * load-time bindings would then point at the real resolvers.
@@ -1084,64 +1149,30 @@ function installHarness() {
   leadWriter.stampCustomerPreferredLanguage = async () => false;
   conversations.syncVoiceMessageForCall = async () => refuse('syncVoiceMessageForCall');
 
-  // Model fault injection (fixtures.modelFailures): the SDK's Messages
-  // prototype is shared by every client instance, including the one
-  // relay-conversation built at load — a throw from stream() lands in the
-  // same catch a real provider error does.
-  let modelFaultInjection = false;
-  try {
+  // Model fault injection (fixtures.modelFailures): a provider client's
+  // Messages-like prototype is shared by every instance of it, including the
+  // one relay-conversation built at load — a throw from stream() lands in
+  // the same catch a real provider error does. Same instrumentation for
+  // EITHER provider a session might pin (GATE_VOICE_RELAY_OPENAI can put a
+  // benchmark candidate on relay-openai-client.js instead of the Anthropic
+  // SDK) — patchStreamProto is the one function both installs below share,
+  // so a benchmark run against an OpenAI candidate gets the same
+  // modelCalls/modelRounds/modelErrors/modelAborts telemetry and the same
+  // fixtures.modelFailures injection an Anthropic run always had.
+  const modelFaultInjection = patchStreamProto(() => {
     const Anthropic = require('@anthropic-ai/sdk');
-    const proto = Object.getPrototypeOf(new Anthropic({ apiKey: 'voice-relay-eval' }).messages);
-    if (proto && proto !== Object.prototype && typeof proto.stream === 'function') {
-      const realStream = proto.stream;
-      proto.stream = function evalStream(...args) {
-        if (state.record) state.record.modelCalls += 1;
-        if (state.modelFailuresLeft > 0) {
-          state.modelFailuresLeft -= 1;
-          if (state.record) state.record.injected.push('model_failure');
-          throw new Error('voice-relay eval: injected model failure');
-        }
-        // Model telemetry per scenario: a completed round vs a REAL provider
-        // error. Without it a keyless or outage run would read green — Sandy's
-        // "could you say that again?" fallback speaks nothing forbidden.
-        const record = state.record;
-        let stream;
-        try {
-          stream = realStream.apply(this, args);
-        } catch (err) {
-          // A throw during request construction never reaches the
-          // finalMessage wrapper below; the relay speaks its fallback and the
-          // round would otherwise grade as completed.
-          if (record) record.modelErrors.push(err && err.message ? err.message : String(err));
-          throw err;
-        }
-        if (record && stream && typeof stream.finalMessage === 'function') {
-          const finalMessage = stream.finalMessage.bind(stream);
-          stream.finalMessage = () => finalMessage().then(
-            (msg) => { record.modelRounds += 1; return msg; },
-            (err) => {
-              // The relay aborts the same controller for a caller barge-in AND
-              // for its 20 s stream timeout. Only an abort that lands while the
-              // harness itself is interrupting is deliberate; any other abort
-              // is a stalled provider and a real failure.
-              const message = err && err.message ? err.message : String(err);
-              const aborted = (err && err.name === 'AbortError') || /abort/i.test(message);
-              if (aborted && record.interruptInFlight) record.modelAborts += 1;
-              else record.modelErrors.push(aborted ? `stream aborted by the relay's own bound: ${message}` : message);
-              throw err;
-            },
-          );
-        }
-        return stream;
-      };
-      modelFaultInjection = true;
-    }
-  } catch (err) {
-    logger.warn(`[voice-relay-eval] model fault injection unavailable: ${err.message}`);
-  }
+    return Object.getPrototypeOf(new Anthropic({ apiKey: 'voice-relay-eval' }).messages);
+  }, state, 'anthropic');
+  const openaiFaultInjection = patchStreamProto(() => {
+    const { OpenAIRelayClient } = require('../voice-agent/relay-openai-client');
+    return Object.getPrototypeOf(new OpenAIRelayClient({ apiKey: 'voice-relay-eval' }).messages);
+  }, state, 'openai');
 
   const conversation = require('../voice-agent/relay-conversation');
-  harness = { RelayConversation: conversation.RelayConversation, MODEL: conversation.MODEL, state, guard, modelFaultInjection };
+  harness = {
+    RelayConversation: conversation.RelayConversation, MODEL: conversation.MODEL, state, guard,
+    modelFaultInjection, openaiFaultInjection,
+  };
   return harness;
 }
 
@@ -2026,7 +2057,7 @@ module.exports = {
   summaryLine,
   isFailedVoiceRun,
   _internals: {
-    CHILD_TIMEOUT_MS, attemptWithRetry, notifyOutcome, failureLines, notifyFailure, notifyInconclusive,
+    CHILD_TIMEOUT_MS, attemptWithRetry, notifyOutcome, failureLines, notifyFailure, notifyInconclusive, patchStreamProto,
     JUDGE_CONCURRENCY, judgeChecks, judgeRecord, mapPool, PROMISE_RE, DEFAULT_TOOL_TEXT, LOOKUP_BUDGET_TEXT, EVAL_CALLER_TO, ESTIMATE_FIELDS, allowedToolsCheck, validCallNames,
     makeDbGuard, officeHoursFixture, pickToolResponse, inputMatches, MISMATCH_TEXT, runFixtureTool, applyToolSideEffects, validateToolInput, offeredRefs, applyGates, applyResumeFixture, injectInterrupt, driveTurns, selectScenarios, assertRunConclusive,
     renderTranscript, evaluateChecks, runCheck, CHECK_RUNNERS, lintScenario, scenarioStatus, qualityScore, summarize,

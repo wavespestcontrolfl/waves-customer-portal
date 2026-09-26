@@ -255,8 +255,11 @@ function inboundOverrideParse(raw) {
   return isAllowedOverrideModel(raw) ? raw : null;
 }
 function inboundOverrideAllowed() {
-  const { ALLOWED_OVERRIDE_MODEL_IDS } = require('./voice-agent/relay-conversation');
-  return [...ALLOWED_OVERRIDE_MODEL_IDS];
+  // Gate-aware (GATE_VOICE_RELAY_OPENAI) — includes the voice-eligible OpenAI
+  // ids too while that gate is live, so the tab's displayed allowlist never
+  // goes stale relative to what resolveSessionModel would actually accept.
+  const { allowedOverrideModelIds } = require('./voice-agent/relay-conversation');
+  return [...allowedOverrideModelIds()];
 }
 
 // The audited call-site map (server/, 2026-09-02). Grouped by the kind of

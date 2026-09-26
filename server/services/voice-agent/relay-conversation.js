@@ -32,6 +32,24 @@
  * MODEL export stays the plain VOICE_RELAY_MODEL/MODELS.VOICE resolution for
  * any other importer (e.g. collections-conversation.js's own independent
  * read of the same env).
+ *
+ * GATE_VOICE_RELAY_OPENAI (off in production): while live, the SAME override
+ * envs above may also resolve to an OpenAI model MODEL_CATALOG marks
+ * voice-eligible (`voice: {...}` — config/models.js) — a benchmark/sandbox
+ * lane, never automatic for production inbound (isAllowedOverrideModel /
+ * allowedOverrideModelIds read the gate at call time; see there). The
+ * resolved session picks its client by MODEL_CATALOG[this.model].provider
+ * (`this._provider`, pinned alongside `this.model`): 'anthropic' runs the
+ * unchanged `anthropic.messages.stream(...)` path below; 'openai' runs
+ * relay-openai-client.js's adapter, which exposes the same
+ * stream/on/finalMessage surface. NO SILENT FALLBACK — an OpenAI leg that
+ * errors or aborts rejects `finalMessage()` like any other provider failure
+ * and runs through this file's EXISTING model-failure handling
+ * (`_modelFailures`, the provider-failure handoff); it never quietly re-runs
+ * on Claude. voiceEffortFor returns null for any non-Anthropic model id
+ * (its capability regexes only match `claude-*`), so an OpenAI round never
+ * sends `output_config` — the OpenAI adapter maps its own per-model
+ * reasoning effort from MODEL_CATALOG's `voice.reasoning` instead.
  * Thinking is DISABLED: this is a live phone call where a "thinking" pause reads
  * as dead air; tool-use + a tight system prompt carry the structure instead.
  * Streaming (.stream + .finalMessage) per the claude-api skill — avoids HTTP
@@ -159,8 +177,34 @@ const ALLOWED_OVERRIDE_MODEL_IDS = new Set(
     .map(([id]) => id)
 );
 
+// GATE_VOICE_RELAY_OPENAI (server/config/feature-gates.js voiceRelayOpenaiLive,
+// unset/off in production): the SAME override envs above may also resolve to
+// an OpenAI model — server/services/voice-agent/relay-openai-client.js — for
+// the benchmark/sandbox lane, but ONLY a model MODEL_CATALOG marks
+// voice-eligible (a `voice` object — see config/models.js) AND only while
+// this gate is live. Read at CALL time (not baked into the Set above) so a
+// gate flip needs no redeploy and never widens the allowlist for a session
+// that already resolved before the flip (resolveSessionModel runs once, at
+// construction). Off ⇒ isAllowedOverrideModel behaves exactly as before this
+// lane existed — Anthropic text models only.
+const OPENAI_VOICE_OVERRIDE_MODEL_IDS = new Set(
+  Object.entries(MODELS.MODEL_CATALOG)
+    .filter(([, meta]) => meta
+      && meta.provider === 'openai'
+      && meta.voice && typeof meta.voice === 'object'
+      && Array.isArray(meta.caps) && meta.caps.includes('text')
+      && meta.status !== 'unavailable')
+    .map(([id]) => id)
+);
+
+/** The full override allowlist for THIS call — gate-aware, always fresh. */
+function allowedOverrideModelIds() {
+  if (!require('../../config/feature-gates').voiceRelayOpenaiLive()) return new Set(ALLOWED_OVERRIDE_MODEL_IDS);
+  return new Set([...ALLOWED_OVERRIDE_MODEL_IDS, ...OPENAI_VOICE_OVERRIDE_MODEL_IDS]);
+}
+
 function isAllowedOverrideModel(id) {
-  return typeof id === 'string' && id.length > 0 && ALLOWED_OVERRIDE_MODEL_IDS.has(id);
+  return typeof id === 'string' && id.length > 0 && allowedOverrideModelIds().has(id);
 }
 
 // A misconfigured override is re-read by every new call; the per-session
@@ -172,7 +216,7 @@ function warnRejectedOverrideOnce(source, value) {
   const key = `${source}=${value}`;
   if (warnedOverrides.has(key)) return;
   warnedOverrides.add(key);
-  logger.warn(`[voice-relay] ignoring unknown model override ${key} — falling back (allowlist: ${[...ALLOWED_OVERRIDE_MODEL_IDS].join(', ')})`);
+  logger.warn(`[voice-relay] ignoring unknown model override ${key} — falling back (allowlist: ${[...allowedOverrideModelIds()].join(', ')})`);
 }
 
 /**
@@ -333,6 +377,29 @@ try {
   anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 } catch {
   anthropic = null;
+}
+
+// GATE_VOICE_RELAY_OPENAI (benchmark/sandbox only — see the file header and
+// isAllowedOverrideModel below). A shared singleton, same convention as
+// `anthropic` above; relay-openai-client.js resolves its own fetch at call
+// time, so this can be constructed even before OPENAI_API_KEY is set.
+let openaiClient = null;
+try {
+  const { OpenAIRelayClient } = require('./relay-openai-client');
+  openaiClient = new OpenAIRelayClient({ apiKey: process.env.OPENAI_API_KEY });
+} catch {
+  openaiClient = null;
+}
+
+/** MODEL_CATALOG's provider for `model`, defaulting to 'anthropic' for an unlisted id. */
+function providerFor(model) {
+  const meta = MODELS.MODEL_CATALOG[model];
+  return (meta && meta.provider) || 'anthropic';
+}
+
+/** The provider client for a resolved session — never a silent Claude substitute. */
+function clientFor(provider) {
+  return provider === 'openai' ? openaiClient : anthropic;
 }
 
 // The gate-off pricing rule. Defined ONCE and referenced inside SYSTEM_PROMPT
@@ -713,6 +780,12 @@ class RelayConversation {
     const modelResolution = resolveSessionModel({ sandbox: this.sandbox });
     this.model = modelResolution.model;
     this._modelFallbackReason = modelResolution.fallbackReason;
+    // Which client this session's model rounds run on — resolved once here,
+    // alongside the model itself, and never re-read mid-call (see the file
+    // header + resolveSessionModel). voiceEffortFor already returns null for
+    // any non-Anthropic id (its capability regexes only match claude-*), so
+    // no separate check is needed to keep output_config off an OpenAI round.
+    this._provider = providerFor(this.model);
     this._effort = voiceEffortFor(this.model);
     // PR C: resolved once, pinned for the session — see resolveSessionRenderer
     // and the file header. 'block' is byte-identical to this file's original
@@ -1261,6 +1334,7 @@ class RelayConversation {
     return {
       git_sha: process.env.RAILWAY_GIT_COMMIT_SHA || null,
       model: this.model,
+      provider: this._provider,
       model_fallback_reason: this._modelFallbackReason || null,
       effort: this._effort,
       prompt_sha: this._promptSha,
@@ -2757,8 +2831,13 @@ class RelayConversation {
   }
 
   async _runLoop(callerText = null) {
-    if (this.ended || !anthropic) {
-      if (!anthropic) this.say(require('./relay-language').copy('unavailable', this.language));
+    // Resolved from this session's PINNED provider (this._provider, set at
+    // construction) — never re-checked against the live gate mid-call, so a
+    // gate flip during an in-flight call can neither add nor remove a
+    // client from under it.
+    const client = clientFor(this._provider);
+    if (this.ended || !client) {
+      if (!client) this.say(require('./relay-language').copy('unavailable', this.language));
       return;
     }
     // Identity must be settled before the first model round: the tool ctx and
@@ -2929,7 +3008,7 @@ class RelayConversation {
       const modelStartAt = now();
       stat.rounds += 1; // an ATTEMPT — a timed-out or aborted round is still a round
       try {
-        const stream = anthropic.messages.stream(
+        const stream = client.messages.stream(
           {
             model: this.model,
             max_tokens: MAX_TOKENS,
@@ -3797,4 +3876,4 @@ function floorSummary(callerTurns, scrub) {
   return `Inbound voice call (auto-captured on hangup). ${spokenSoFar}`;
 }
 
-module.exports = { RelayConversation, voiceEffortFor, SYSTEM_PROMPT, MODEL, resolveSessionModel, isAllowedOverrideModel, ALLOWED_OVERRIDE_MODEL_IDS, composeSystemPrompt, sanitizeProfileForPrompt, invalidateVoiceProfileCache, PROFILE_INJECTION_LINE_RE, PROFILE_FACTUAL_LINE_RE, buildBasePrompt, PRICE_LINE_NO_CONTEXT, PRICE_LINE_CONTEXT, agentDisplayName };
+module.exports = { RelayConversation, voiceEffortFor, SYSTEM_PROMPT, MODEL, resolveSessionModel, isAllowedOverrideModel, ALLOWED_OVERRIDE_MODEL_IDS, OPENAI_VOICE_OVERRIDE_MODEL_IDS, allowedOverrideModelIds, providerFor, composeSystemPrompt, sanitizeProfileForPrompt, invalidateVoiceProfileCache, PROFILE_INJECTION_LINE_RE, PROFILE_FACTUAL_LINE_RE, buildBasePrompt, PRICE_LINE_NO_CONTEXT, PRICE_LINE_CONTEXT, agentDisplayName };
