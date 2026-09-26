@@ -3,24 +3,29 @@
 // Owner ruling 2026-09-26: customer texts are never signed ("— Adam, Waves
 // Pest Control" or any sign-off). Prompts forbid it; this strips a trailing
 // sign-off a model adds anyway, or copies from earlier signed history:
-//   - a known closer plus signer, same line or not: "Thanks, Adam", "Warm regards, Adam"
+//   - a known closer plus signer, same line or not: "Thanks, Adam", "Warm regards, Adam",
+//     "All the best, Adam", "Sincerely yours, Adam"
 //   - ANY short comma-ended valediction on its own line above the signer
 //     ("All the best,\nAdam", "Sincerely yours,\nAdam") — the two-line block shape,
 //     so a sentence addressed to a customer named Adam ("See you Tuesday, Adam.")
 //     is never mistaken for one
-//   - a signer set off by a dash or its own line: "— Adam", "\nWaves Pest Control"
-//     (not after a colon: "Your technician is:\nAdam" is an answer, not a sign-off)
+//   - a signer set off by a dash: "— Adam"
+//   - a signer on its own line under a FINISHED sentence (ends in . or ! or an
+//     emoji): "Talk soon!\nAdam". After a question, a colon or an unfinished
+//     sentence the name is the answer ("Who will be coming?\nAdam",
+//     "Your technician will be\nAdam", "Your technician is:\nAdam").
 //   - a full name-and-company block that is its own final sentence:
 //     "Talk soon. Adam, Waves Pest Control" (a lone name or company there may
 //     answer the sentence before it: "Who will be coming? Adam.")
-// even when the whole text is wrapped in quotes or emoji trail the name.
+// even when the whole text is wrapped in quotes or emoji or a keyboard
+// emoticon (":)") trail the name.
 // Signers are the people whose texts the models learn from (Adam, Virginia)
 // and the company.
 // Not sign-offs, so they stay: "Waves Pest Control here" mid-message,
 // "...choosing Waves Pest Control", "Hi Adam, ...", "Your technician is Adam."
 // and a closer that ends its own sentence ("Talk soon.").
 const DASH = '[-\\u2013\\u2014]{1,2}';
-const CLOSER = '(?:thanks|thank\\s+you|best(?:\\s+wishes)?|(?:(?:best|warm|kind)\\s+)?regards|cheers|sincerely|talk\\s+soon|see\\s+you\\s+soon|take\\s+care)';
+const CLOSER = '(?:thanks(?:\\s+again)?|many\\s+thanks|thank\\s+you|all\\s+the\\s+best|best(?:\\s+wishes)?|warm(?:est)?\\s+wishes|(?:(?:best|warm|kind(?:est)?)\\s+)?regards|cheers|sincerely(?:\\s+yours)?|yours\\s+(?:truly|sincerely)|warmly|respectfully|with\\s+(?:gratitude|thanks|appreciation)|talk\\s+soon|see\\s+you\\s+soon|take\\s+care)';
 // Any 1–4 word phrase ending in a comma — only ever matched as its own line.
 const VALEDICTION = "\\p{L}[\\p{L}'\\u2019]*(?:\\s+\\p{L}[\\p{L}'\\u2019]*){0,3},";
 const COMPANY = '(?:the\\s+)?waves(?:\\s+pest\\s+control)?(?:\\s+team)?';
@@ -33,14 +38,20 @@ const OWN_LINE = '(?<![:\\s])[ \\t]*\\n\\s*';
 // marks or whole emoji sequences — skin tones, ZWJ joins, flags (regional
 // indicator pairs and tag sequences) and keycaps.
 const EMOJI_PART = '\\p{Extended_Pictographic}|\\p{Emoji_Modifier}|\\p{Regional_Indicator}|[#*0-9]\\uFE0F?\\u20E3|[\\u{E0020}-\\u{E007F}]|\\uFE0F|\\u200D';
-const TAIL = `\\s*[.!]?(?:[\\s"'\\u201C\\u201D\\u2018\\u2019]|${EMOJI_PART})*$`;
+// Keyboard emoticons: :) :-) ;) :D :P =) <3 ^^ and the like.
+const EMOTICON = "[:;=8]['\\-^]?[)(\\]\\[DPp3*|/]+|<3+|\\^_?\\^";
+const TAIL = `\\s*[.!]?(?:[\\s"'\\u201C\\u201D\\u2018\\u2019]|${EMOJI_PART}|${EMOTICON})*$`;
+// A line break under a finished sentence: the line above ends in . or ! (a
+// quote mark may close it) or an emoji. A bare name after anything else
+// answers that line instead of signing it.
+const AFTER_SENTENCE_LINE = `(?<=(?:[.!]["'\\u201D\\u2019]?|${EMOJI_PART}))[ \\t]*\\n\\s*`;
 
 // Closer + signer first, so "Best,\nAdam" goes as one unit instead of
 // leaving a dangling "Best,".
 const SIGNATURE_TAIL_RES = [
   new RegExp(`(?:^|(?<=[.!?])\\s+|${OWN_LINE}|\\s*${DASH}\\s*)${CLOSER},?\\s+${SIGNER}${TAIL}`, 'iu'),
   new RegExp(`(?:^|(?<=[.!?])\\s+|${OWN_LINE})${VALEDICTION}[ \\t]*\\n\\s*${SIGNER}${TAIL}`, 'iu'),
-  new RegExp(`(?:\\s*${DASH}\\s*|${OWN_LINE})${SIGNER}${TAIL}`, 'iu'),
+  new RegExp(`(?:\\s*${DASH}\\s*|${AFTER_SENTENCE_LINE})${SIGNER}${TAIL}`, 'iu'),
   new RegExp(`(?<=[.!?])\\s+${SIGNATURE_BLOCK}${TAIL}`, 'iu'),
 ];
 

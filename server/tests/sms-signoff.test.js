@@ -50,6 +50,20 @@ describe('stripTrailingSignature', () => {
     ['""Gold plan" covers ants. - Adam"', '"Gold plan" covers ants.'],
     ['"Quarterly" means every three months. - Adam', '"Quarterly" means every three months.'],
     ['"— Adam, Waves Pest Control"', ''],
+    // Same-line valedictions that also appear in two-line form.
+    ['Ants are active. All the best, Adam', 'Ants are active.'],
+    ['Sincerely yours, Adam', ''],
+    ['See you Tuesday. Yours truly, Adam', 'See you Tuesday.'],
+    ['See you Tuesday. Many thanks, Adam', 'See you Tuesday.'],
+    ['See you Tuesday. With gratitude, Adam', 'See you Tuesday.'],
+    // Keyboard emoticons after the signer.
+    ['Your next visit is Tuesday. - Adam :)', 'Your next visit is Tuesday.'],
+    ['Your next visit is Tuesday. - Adam :-) ;D', 'Your next visit is Tuesday.'],
+    ['Talk soon! Thanks, Adam <3', 'Talk soon!'],
+    // An own-line signer under a finished sentence or an emoji.
+    ['See you Tuesday.\nWaves Pest Control', 'See you Tuesday.'],
+    ['See you Tuesday \u{1F60A}\nAdam', 'See you Tuesday \u{1F60A}'],
+    ['"See you Tuesday."\nAdam', 'See you Tuesday.'],
   ])('strips the trailing sign-off from %j', (input, expected) => {
     expect(stripTrailingSignature(input)).toBe(expected);
   });
@@ -79,6 +93,14 @@ describe('stripTrailingSignature', () => {
     // A label/value layout answers the customer; it is not a sign-off.
     'Your technician is:\nAdam',
     'The charge appears as:\nWaves Pest Control',
+    // A name on its own line after a question or an unfinished sentence
+    // answers it.
+    'Who will be coming?\nAdam',
+    'Who is your technician?\nAdam',
+    'Your technician will be\nAdam',
+    'The charge will appear as\nWaves Pest Control',
+    // A smiley in content is content.
+    'Your visit is Tuesday :)',
   ])('keeps text that is not a sign-off: %j', (input) => {
     expect(stripTrailingSignature(input)).toBe(input);
   });
