@@ -218,6 +218,16 @@ describe('buildAnswer — tier', () => {
     expect(built.nextPhoto.photo_can_confirm).toBe(false);
     expect(built.tier).toBe('needs_more_evidence');
   });
+
+  test('an unconfirmable pair blocks pretty_sure even at 0.90 confidence — Codex round-0 P1 (round 5)', () => {
+    const built = buildAnswer(baseCtx({
+      candidates: [cand('no-photo-pair-a', 0.90), cand('no-photo-pair-b', 0.85)], currentMonth: CURRENT_MONTH,
+    }));
+    expect(built.answer.wording).toBe('likely'); // never pretty_sure
+    expect(built.nextPhoto).not.toBeNull();
+    expect(built.nextPhoto.photo_can_confirm).toBe(false);
+    expect(built.tier).toBe('needs_more_evidence');
+  });
 });
 
 describe('buildAnswer — next_photo', () => {
@@ -587,6 +597,36 @@ describe('identifyPestV2 — malformed provider responses never throw (Codex rou
     expect(result.ok).toBe(true);
     expect(result.internal.models.escalation.ok).toBe(true); // the HTTP/parse call succeeded
     expect(result.v2.answer.wording).not.toBe('pretty_sure'); // but it is not treated as an OpenAI confirmation
+  });
+});
+
+describe('identifyPestV2 — a null element in an otherwise-valid candidates array never throws (Codex round-0 P1, round 5)', () => {
+  test('candidates: [null, {...}] is sanitized, not a crash', async () => {
+    dispatch
+      .mockResolvedValueOnce({
+        ok: true,
+        json: { quality: { usable: true, issue: 'none' }, shows: 'organism', candidates: [null, { slug: 'fire-ant', confidence: 0.9 }] },
+      })
+      .mockResolvedValueOnce({ ok: true, json: { candidates: [{ slug: 'fire-ant', confidence: 0.9, traits_visible: [1], traits_not_visible: [] }] } });
+
+    const result = await identifyPestV2([PHOTO]);
+    expect(result.ok).toBe(true);
+    expect(result.v2.entry.slug).toBe('fire-ant');
+    expect(result.v2.answer.wording).toBe('pretty_sure');
+  });
+
+  test('an escalation response with a null element is also sanitized', async () => {
+    dispatch
+      .mockResolvedValueOnce(candidatesReply([{ slug: 'fire-ant', confidence: 0.5 }]))
+      .mockResolvedValueOnce({ ok: true, json: { candidates: [{ slug: 'fire-ant', confidence: 0.5, traits_visible: [], traits_not_visible: [] }] } })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: { quality: { usable: true, issue: 'none' }, shows: 'organism', candidates: [null, { slug: 'fire-ant', confidence: 0.9 }] },
+      });
+
+    const result = await identifyPestV2([PHOTO]);
+    expect(result.ok).toBe(true);
+    expect(result.v2.answer.wording).toBe('pretty_sure'); // agreement bumps to the higher (0.9)
   });
 });
 

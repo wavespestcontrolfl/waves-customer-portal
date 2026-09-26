@@ -114,6 +114,13 @@ function hasCandidatesArray(json) {
   return !!json && Array.isArray(json.candidates);
 }
 
+/** The `candidates` array, with any non-object element (a raw provider
+ * array can legally contain `[null, {...}]` and still pass
+ * `hasCandidatesArray`) dropped before anything reads a field off it. */
+function sanitizedCandidatesOf(json) {
+  return hasCandidatesArray(json) ? json.candidates.filter((v) => v && typeof v === 'object') : [];
+}
+
 function clamp01(n) {
   const v = Number(n);
   if (!Number.isFinite(v)) return 0;
@@ -323,7 +330,12 @@ function mergeVerify(candidates, verifyResult) {
  * entry, OR the verify call marks most of the top entry's traits not
  * visible. */
 function detectSelfContradiction(candidatesJson, verifiedCandidates) {
-  const rawList = Array.isArray(candidatesJson?.candidates) ? candidatesJson.candidates : [];
+  // Codex round-0 P1 (round 5): `hasCandidatesArray` only proves the field
+  // IS an array, not that every element is an object — a raw provider array
+  // like `[null, {slug:'fire-ant', confidence:0.9}]` still throws on
+  // `b.confidence` in the sort below unless non-object elements are
+  // dropped first (`sanitizedCandidatesOf`).
+  const rawList = sanitizedCandidatesOf(candidatesJson);
   if (!rawList.length) return false;
   const rawTop = [...rawList].sort((a, b) => clamp01(b.confidence) - clamp01(a.confidence))[0];
   const rawTopSlug = rawTop && rawTop.slug ? String(rawTop.slug) : null;
@@ -563,14 +575,23 @@ function referralFor(entry) {
 // keep each rule's condition readable on its own line (lint: complexity).
 function entryLevelAnswer(candidates, top, unansweredTrigger) {
   if (!top?.entry || !isApproved(top.entry)) return null;
+  const second = candidates[1] || null;
+  // Codex round-0 P1 (round 5): a curated pair the catalog marks
+  // `photo_can_confirm: false` must never resolve as pretty_sure, however
+  // high the model's own confidence — that flag exists precisely because
+  // NO photo can settle it. Falling through to the `likely` bar instead
+  // (still allowed) leaves `nextPhotoFor` + the tier check to surface the
+  // pair's own confirmation instructions and force needs_more_evidence,
+  // rather than a confident answer with `next_photo: null`.
+  const unconfirmablePair = !!second?.entry && pairIfBothApproved(top.entry, second.entry.slug)?.photo_can_confirm === false;
   const named = (wording) => ({
     level: 'entry', wording, nodeId: top.slug, subhead: top.entry.scientific_name || null,
     headline: `${wording === 'pretty_sure' ? "We're pretty sure" : 'Likely'}: ${top.entry.common_name}`,
     entry: top.entry,
   });
-  if (top.confidence >= PRETTY_SURE_MIN && !unansweredTrigger) return named('pretty_sure');
+  if (top.confidence >= PRETTY_SURE_MIN && !unansweredTrigger && !unconfirmablePair) return named('pretty_sure');
   if (isHarmlessOrAlly(top.entry) && top.confidence >= HARMLESS_PRETTY_SURE_MIN
-    && !consequentialAltClose(candidates, top) && !unansweredTrigger) return named('pretty_sure');
+    && !consequentialAltClose(candidates, top) && !unansweredTrigger && !unconfirmablePair) return named('pretty_sure');
   if (top.confidence >= LIKELY_MIN) return named('likely');
   return null;
 }
@@ -744,7 +765,7 @@ function combineEscalation(geminiCandidates, escalationResult) {
     // `buildAnswer`.
     return { finalCandidates: geminiCandidates, disagreed: false, disagreementNode: null, openaiAnswered: false };
   }
-  const openaiCandidates = dedupeCandidates(escalationResult.json.candidates.map(resolveCandidate));
+  const openaiCandidates = dedupeCandidates(sanitizedCandidatesOf(escalationResult.json).map(resolveCandidate));
   const openaiTop = openaiCandidates[0] || null;
   const geminiTop = geminiCandidates[0] || null;
   // Codex round-0 P1 (round 2): the provider answered (HTTP ok, valid
@@ -823,7 +844,7 @@ async function identifyPestV2(photos = []) {
   // An `ok:true` response whose shape doesn't match what was requested is
   // treated the same as a failed leg — see `hasCandidatesArray`.
   const candidatesJson = candidatesResult.ok && hasCandidatesArray(candidatesResult.json) ? candidatesResult.json : null;
-  const candidatesFromCall1 = candidatesJson ? dedupeCandidates(candidatesJson.candidates.map(resolveCandidate)) : [];
+  const candidatesFromCall1 = candidatesJson ? dedupeCandidates(sanitizedCandidatesOf(candidatesJson).map(resolveCandidate)) : [];
   const catalogCandidates1 = candidatesFromCall1.filter((c) => c.entry);
 
   let verifyResult = null;
