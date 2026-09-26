@@ -1343,6 +1343,14 @@ describe('termite annual renewal charge', () => {
     // (the normal case) so it never blocks the happy path unless a test
     // explicitly passes a decided freshParent.
     freshParent = { status: 'active', renewal_decision: null },
+    // Codex round-3 audit P1: after a recordDecision('cancel') guard-miss
+    // (returns null), processGraceLapseSequence re-reads the PARENT via
+    // the OUTER `conn` (not `trx` — that transaction already committed)
+    // to tell "already decided 'cancel' by a prior partial run of THIS
+    // SAME lapse — treat as success" apart from "decided something ELSE
+    // — a genuine conflict". Default: undefined (no test exercises the
+    // guard-miss re-read unless it passes this).
+    parentAfterGuardMiss = undefined,
   } = {}) {
     const startedUpdate = jest.fn().mockResolvedValue(1);
     const completedUpdate = jest.fn().mockResolvedValue(1);
@@ -1355,6 +1363,9 @@ describe('termite annual renewal charge', () => {
             return { update: startedUpdate };
           }),
           update: completedUpdate,
+          // The ONLY `.where(...).first()` call this outer `conn` sees is
+          // processGraceLapseSequence's own parent-guard-miss re-read.
+          first: jest.fn().mockResolvedValue(parentAfterGuardMiss),
         })),
       };
     });
@@ -1433,7 +1444,7 @@ describe('termite annual renewal charge', () => {
       // the outer `conn`) — folded into the SAME atomic re-check as the
       // settlement/status check, all under one lock.
       expect(assertNoInvoiceChargeReconciliationPending).toHaveBeenCalledWith('succ-invoice-1', trx);
-      expect(voidInvoice).toHaveBeenCalledWith('succ-invoice-1');
+      expect(voidInvoice).toHaveBeenCalledWith('succ-invoice-1', { requireUnsettled: true });
       expect(raiseTermiteRetrievalTask).toHaveBeenCalledWith('cust-1', null, expect.objectContaining({
         termId: 'succ-term-1', episodeKey: 'renewal_grace_lapse',
       }));
@@ -1483,7 +1494,7 @@ describe('termite annual renewal charge', () => {
       // mock is a transparent `(termId, fn) => fn()` pass-through, so this
       // also confirms the fn passed to it is the one that actually did the
       // work, not a no-op).
-      expect(voidInvoice).toHaveBeenCalledWith('succ-invoice-1');
+      expect(voidInvoice).toHaveBeenCalledWith('succ-invoice-1', { requireUnsettled: true });
       expect(raiseTermiteRetrievalTask).toHaveBeenCalledTimes(1);
       expect(recordDecision).toHaveBeenCalledWith({ termId: 'parent-1', action: 'cancel', conn });
     });
@@ -1609,7 +1620,7 @@ describe('termite annual renewal charge', () => {
 
       expect(outcome).toBe('lapsed');
       // voidInvoice's own re-entry self-heals as a no-op — still called.
-      expect(voidInvoice).toHaveBeenCalledWith('succ-invoice-1');
+      expect(voidInvoice).toHaveBeenCalledWith('succ-invoice-1', { requireUnsettled: true });
       expect(raiseTermiteRetrievalTask).toHaveBeenCalledTimes(1);
       expect(recordDecision).toHaveBeenCalledWith({ termId: 'parent-1', action: 'cancel', conn });
       expect(completedUpdate).toHaveBeenCalledWith(expect.objectContaining({
@@ -1698,7 +1709,7 @@ describe('termite annual renewal charge', () => {
       expect(startedUpdate).not.toHaveBeenCalled();
       // voidInvoice self-heals on re-entry — still called even resuming after
       // a crash between the void and the retrieval task.
-      expect(voidInvoice).toHaveBeenCalledWith('succ-invoice-1');
+      expect(voidInvoice).toHaveBeenCalledWith('succ-invoice-1', { requireUnsettled: true });
       expect(raiseTermiteRetrievalTask).toHaveBeenCalledTimes(1);
       expect(recordDecision).toHaveBeenCalledTimes(1);
       expect(completedUpdate).toHaveBeenCalledTimes(1);
@@ -1728,6 +1739,71 @@ describe('termite annual renewal charge', () => {
       const { _private } = require('../services/termite-annual-renewal-charge');
       const term = { id: 'succ-term-1', customer_id: 'cust-1', prepay_invoice_id: 'succ-invoice-1', renewed_from_term_id: 'parent-1' };
       await expect(_private.processGraceLapseForTerm(term, conn)).resolves.not.toThrow();
+      expect(completedUpdate).not.toHaveBeenCalled();
+    });
+
+    // Codex round-3 audit P1: a crash right after recordDecision('cancel')
+    // COMMITS but BEFORE renewal_lapse_completed_at is stamped leaves this
+    // successor started-but-never-completed. On retry, recordDecision's
+    // OWN guard (`renewal_decision IS NULL`) correctly returns null again
+    // — the decision is already there — but the OLD code treated ANY
+    // guard-miss as "decided elsewhere, never complete", permanently
+    // stuck. Verifying the parent ALREADY reads 'cancel' distinguishes
+    // this resume from a genuine conflict (renew/switch_plan elsewhere)
+    // and completes the lapse.
+    test('P1: resume after a crash between recordDecision(\'cancel\') committing and completed_at — the parent already reads \'cancel\', so this completes instead of getting stuck forever', async () => {
+      mockCommon();
+      const { voidInvoice, raiseTermiteRetrievalTask, recordDecision } = mockLapseDeps({
+        recordDecisionImpl: async () => null, // guard-miss: renewal_decision is already non-null
+      });
+      jest.doMock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'n1' })) }));
+      const { conn, completedUpdate } = makeLapseConn({
+        freshSuccessor: { status: 'payment_pending', prepay_invoice_id: 'succ-invoice-1' },
+        freshInvoice: { status: 'sent', paid_at: null },
+        parentAfterGuardMiss: { renewal_decision: 'cancel' }, // THIS same lapse's own prior partial run
+      });
+
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      const term = {
+        id: 'succ-term-1', customer_id: 'cust-1', prepay_invoice_id: 'succ-invoice-1', renewed_from_term_id: 'parent-1',
+      };
+      const outcome = await _private.processGraceLapseForTerm(term, conn);
+
+      expect(outcome).toBe('lapsed'); // completes, not stuck
+      expect(voidInvoice).toHaveBeenCalledTimes(1);
+      expect(raiseTermiteRetrievalTask).toHaveBeenCalledTimes(1);
+      expect(recordDecision).toHaveBeenCalledWith({ termId: 'parent-1', action: 'cancel', conn });
+      expect(completedUpdate).toHaveBeenCalledWith(expect.objectContaining({
+        renewal_lapse_completed_at: expect.any(Date), renewal_lapse_outcome: 'lapsed',
+      }));
+    });
+
+    // The genuine conflict this must still catch: the parent was decided
+    // something ELSE (never 'cancel') in the gap — never complete.
+    test('P1: a guard-miss where the parent was decided \'renew\' elsewhere (never \'cancel\') stays incomplete, never stuck-but-silently-succeeding', async () => {
+      mockCommon();
+      const { voidInvoice, raiseTermiteRetrievalTask, recordDecision } = mockLapseDeps({
+        recordDecisionImpl: async () => null,
+      });
+      jest.doMock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'n1' })) }));
+      const { conn, completedUpdate } = makeLapseConn({
+        freshSuccessor: { status: 'payment_pending', prepay_invoice_id: 'succ-invoice-1' },
+        freshInvoice: { status: 'sent', paid_at: null },
+        parentAfterGuardMiss: { renewal_decision: 'renew' }, // a genuine conflict
+      });
+
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      const term = {
+        id: 'succ-term-1', customer_id: 'cust-1', prepay_invoice_id: 'succ-invoice-1', renewed_from_term_id: 'parent-1',
+      };
+      const outcome = await _private.processGraceLapseForTerm(term, conn);
+
+      expect(outcome).toBe('lapsed'); // the function still returns 'lapsed' (void+retrieval done)...
+      expect(voidInvoice).toHaveBeenCalledTimes(1);
+      expect(raiseTermiteRetrievalTask).toHaveBeenCalledTimes(1);
+      expect(recordDecision).toHaveBeenCalledWith({ termId: 'parent-1', action: 'cancel', conn });
+      // ...but completed_at is NEVER stamped — the row stays retryable
+      // rather than being marked "done" against a parent decided renew.
       expect(completedUpdate).not.toHaveBeenCalled();
     });
   });
@@ -1787,7 +1863,7 @@ describe('termite annual renewal charge', () => {
       expect(counts.lapseEffectsScanned).toBe(1);
       expect(counts.lapseEffectsReconciled).toBe(1);
       expect(assertNoInvoiceChargeReconciliationPending).toHaveBeenCalledWith('succ-invoice-1', trx);
-      expect(voidInvoice).toHaveBeenCalledWith('succ-invoice-1');
+      expect(voidInvoice).toHaveBeenCalledWith('succ-invoice-1', { requireUnsettled: true });
       expect(raiseTermiteRetrievalTask).toHaveBeenCalledWith('cust-1', null, expect.objectContaining({
         termId: 'succ-term-1', episodeKey: 'renewal_grace_lapse',
       }));
@@ -2102,6 +2178,7 @@ describe('termite annual renewal charge', () => {
       const empty = tableQuery([]);
       const neverReachedStripe = tableQuery([successor]);
 
+      const undeliveredInvoice = { where: jest.fn(() => ({ first: jest.fn().mockResolvedValue({ status: 'draft', sent_at: null, sms_sent_at: null, email_sent_at: null }) })) };
       let asTCall = 0;
       const conn = jest.fn((table) => {
         if (table === 'annual_prepay_terms as t') {
@@ -2109,6 +2186,7 @@ describe('termite annual renewal charge', () => {
           const order = [empty, empty, empty, empty, empty, empty, empty, neverReachedStripe];
           return order[Math.min(asTCall - 1, order.length - 1)];
         }
+        if (table === 'invoices') return undeliveredInvoice;
         throw new Error(`unexpected table ${table}`);
       });
       conn.schema = { hasTable: jest.fn().mockResolvedValue(true) };
@@ -2123,7 +2201,12 @@ describe('termite annual renewal charge', () => {
       expect(sendViaSMSAndEmail).toHaveBeenCalledWith('succ-invoice-1', expect.any(Object));
     });
 
-    test('6b: a bell already deduped does NOT re-deliver the pay-link invoice', async () => {
+    // Codex round-3 audit P1: a deduped bell with PERSISTED delivery
+    // evidence already on the invoice never re-delivers — dedup alone is
+    // NOT what skips redelivery (see the dedicated reconcileStuckSuccessors
+    // tests below for the "deduped but NEVER delivered" case, which now
+    // correctly retries).
+    test('6b: a bell already deduped, WITH persisted delivery evidence, does NOT re-deliver the pay-link invoice', async () => {
       mockCommon();
       process.env.GATE_TERMITE_ANNUAL_PLAN = 'true';
       mockGraceHelpers({ graceDays: 30 });
@@ -2137,6 +2220,7 @@ describe('termite annual renewal charge', () => {
       const successor = baseSuccessor({ renewed_from_term_id: 'parent-1', annual_plan_version: 'v3' });
       const empty = tableQuery([]);
       const neverReachedStripe = tableQuery([successor]);
+      const deliveredInvoice = { where: jest.fn(() => ({ first: jest.fn().mockResolvedValue({ status: 'sent', sent_at: new Date('2026-10-01T00:00:00Z'), sms_sent_at: null, email_sent_at: null }) })) };
 
       let asTCall = 0;
       const conn = jest.fn((table) => {
@@ -2145,6 +2229,7 @@ describe('termite annual renewal charge', () => {
           const order = [empty, empty, empty, empty, empty, empty, empty, neverReachedStripe];
           return order[Math.min(asTCall - 1, order.length - 1)];
         }
+        if (table === 'invoices') return deliveredInvoice;
         throw new Error(`unexpected table ${table}`);
       });
       conn.schema = { hasTable: jest.fn().mockResolvedValue(true) };
@@ -2163,7 +2248,12 @@ describe('termite annual renewal charge', () => {
     // reconcileStuckSuccessors (not the whole sweep) so the stamp UPDATE
     // itself (a distinct `annual_prepay_terms` call, no alias) is precisely
     // observable.
-    function makeLeg7bConn(successor) {
+    // `invoice` models the PERSISTED delivery-evidence read
+    // bellAndVerifyDeliveryForNeverReachedStripe now does (Codex round-3
+    // audit P1) — default is "never delivered" (a draft with no sent
+    // stamps), so a test must pass one showing evidence to exercise the
+    // "already delivered, no fresh attempt needed" path.
+    function makeLeg7bConn(successor, invoice = { status: 'draft', sent_at: null, sms_sent_at: null, email_sent_at: null }) {
       const empty = tableQuery([]);
       const neverReachedStripe = tableQuery([successor]);
       const stampUpdate = jest.fn().mockResolvedValue(1);
@@ -2177,6 +2267,9 @@ describe('termite annual renewal charge', () => {
         }
         if (table === 'annual_prepay_terms') {
           return { where: jest.fn(() => ({ whereNull: jest.fn(() => ({ update: stampUpdate })) })) };
+        }
+        if (table === 'invoices') {
+          return { where: jest.fn(() => ({ first: jest.fn().mockResolvedValue(invoice) })) };
         }
         throw new Error(`unexpected table ${table}`);
       });
@@ -2242,7 +2335,12 @@ describe('termite annual renewal charge', () => {
       expect(counts.reconcileNeverReachedStripeBelled).toBe(1);
     });
 
-    test('6b P1: a deduped bell (staff already know) stamps WITHOUT a fresh delivery', async () => {
+    // Codex round-3 audit P1: `deduped` means ONLY "staff already know" —
+    // it says nothing about whether the invoice was ever actually
+    // delivered, so it must not exempt a row from the delivery check.
+    // This test's invoice carries PERSISTED delivery evidence (sent_at
+    // set) — the ONLY reason a deduped bell may skip a fresh attempt.
+    test('6b P1: a deduped bell WITH persisted delivery evidence stamps WITHOUT a fresh delivery', async () => {
       mockCommon();
       const notifyAdmin = jest.fn(async () => ({ id: 'n1', deduped: true }));
       jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
@@ -2250,7 +2348,9 @@ describe('termite annual renewal charge', () => {
       jest.doMock('../services/invoice', () => ({ sendViaSMSAndEmail }));
 
       const successor = baseSuccessor({ renewed_from_term_id: 'parent-1', annual_plan_version: 'v3' });
-      const { conn, stampUpdate } = makeLeg7bConn(successor);
+      const { conn, stampUpdate } = makeLeg7bConn(successor, {
+        status: 'sent', sent_at: new Date('2026-10-01T00:00:00Z'), sms_sent_at: null, email_sent_at: null,
+      });
 
       const { _private } = require('../services/termite-annual-renewal-charge');
       const counts = { reconcileNeverReachedStripeBelled: 0 };
@@ -2259,6 +2359,32 @@ describe('termite annual renewal charge', () => {
       expect(sendViaSMSAndEmail).not.toHaveBeenCalled();
       expect(stampUpdate).toHaveBeenCalledTimes(1);
       expect(counts.reconcileNeverReachedStripeBelled).toBe(0);
+    });
+
+    // The exact bug the audit caught: a FRESH bell's delivery genuinely
+    // failed on tick 1 (correctly not stamped, per the "delivery fails
+    // never stamps" test above). Tick 2 dedupes the SAME bell — the old
+    // code treated deduped as "handled" and stamped WITHOUT ever
+    // retrying delivery, permanently excluding a row the customer was
+    // never actually sent an invoice for. With no persisted evidence, a
+    // deduped bell must still attempt delivery.
+    test('6b P1: a deduped bell with NO persisted delivery evidence still retries delivery — the bug the audit caught', async () => {
+      mockCommon();
+      const notifyAdmin = jest.fn(async () => ({ id: 'n1', deduped: true }));
+      jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
+      const sendViaSMSAndEmail = jest.fn(async () => ({ ok: true }));
+      jest.doMock('../services/invoice', () => ({ sendViaSMSAndEmail }));
+
+      const successor = baseSuccessor({ renewed_from_term_id: 'parent-1', annual_plan_version: 'v3' });
+      const { conn, stampUpdate } = makeLeg7bConn(successor); // default: draft, no sent stamps
+
+      const { _private } = require('../services/termite-annual-renewal-charge');
+      const counts = { reconcileNeverReachedStripeBelled: 0 };
+      await _private.reconcileStuckSuccessors({ conn, limit: 200, counts });
+
+      expect(sendViaSMSAndEmail).toHaveBeenCalledWith('succ-invoice-1', expect.any(Object));
+      expect(stampUpdate).toHaveBeenCalledTimes(1);
+      expect(counts.reconcileNeverReachedStripeBelled).toBe(1);
     });
   });
 });

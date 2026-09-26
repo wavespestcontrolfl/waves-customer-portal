@@ -3125,6 +3125,45 @@ function rodentSetupRebillMarker(invoiceId) {
   return `[rodent-setup-rebill:${invoiceId}]`;
 }
 
+// Extracted from voidInvoice's own requireUnsettled option (Codex round-3
+// audit P0 self-review, AGENTS.md L412-418 — keeps the surrounding
+// transaction's own complexity from growing past the ceiling for a
+// genuinely self-contained sub-decision). Runs under trx's row lock
+// (`.forUpdate()`) — the actual chokepoint a caller's own, separately-
+// committing eligibility check cannot close on its own. Throws a typed
+// error (never returns) the caller can classify without string-matching:
+// INVOICE_PROCESSING_REFUSE_VOID (still clearing — ambiguous, not
+// settled) or INVOICE_SETTLED_REFUSE_VOID (durable paid/prepaid evidence).
+async function assertInvoiceGenuinelyUnsettledLocked(trx, id) {
+  const lockedInvoice = await trx("invoices").where({ id }).forUpdate()
+    .first("status", "paid_at", "credit_applied");
+  if (!lockedInvoice) throw new Error("Invoice not found");
+  const lockedStatusKey = String(lockedInvoice.status || "").toLowerCase();
+  // 'processing' (an ACH debit mid-clearing) is durably neither paid nor
+  // unpaid yet — a DIFFERENT refusal code from a genuinely DURABLE
+  // settlement (paid_at set, status paid/prepaid, or credit applied), so
+  // the caller can retire the former as settled but defer-and-retry the
+  // latter rather than conflating them.
+  if (lockedStatusKey === "processing") {
+    const err = new Error("Invoice reads processing — the payment has not durably cleared yet; refusing to void while ambiguous");
+    err.code = "INVOICE_PROCESSING_REFUSE_VOID";
+    err.invoiceStatus = lockedInvoice.status;
+    throw err;
+  }
+  if (["paid", "prepaid"].includes(lockedStatusKey)
+    || lockedInvoice.paid_at
+    || parseFloat(lockedInvoice.credit_applied || 0) > 0) {
+    const err = new Error(`Invoice already reads ${lockedInvoice.status}${lockedInvoice.paid_at ? " (paid_at set)" : ""}${parseFloat(lockedInvoice.credit_applied || 0) > 0 ? " (credit applied)" : ""} — refusing to void a settled invoice`);
+    err.code = "INVOICE_SETTLED_REFUSE_VOID";
+    err.invoiceStatus = lockedInvoice.status;
+    throw err;
+  }
+  // Same reconciliation guard the termite-annual-renewal grace lapse used
+  // to run in its OWN separate transaction — folded in here so it runs
+  // under this SAME row lock too.
+  await require("./stripe").assertNoInvoiceChargeReconciliationPending(id, trx);
+}
+
 const InvoiceService = {
   async buildLineItemsForScheduledService(scheduledServiceId, options = {}) {
     return buildScheduledServiceInvoiceLines(scheduledServiceId, options);
@@ -7744,7 +7783,7 @@ const InvoiceService = {
     return edited;
   },
 
-  async voidInvoice(id) {
+  async voidInvoice(id, { requireUnsettled = false } = {}) {
     // Refuse to void a paid invoice. A paid invoice has a payments-ledger
     // row + (usually) a Stripe charge; flipping it to "void" silently
     // hides the revenue from dashboards but leaves the money collected
@@ -7844,6 +7883,20 @@ const InvoiceService = {
         if (locked && locked.status !== "open") {
           throw new Error("This invoice is on a finalized payer statement — adjust it with a credit on the next statement, not by voiding a billed line");
         }
+      }
+      // Codex round-3 P0 (termite-annual-renewal grace lapse): a caller
+      // that needs "genuinely still unpaid" as its OWN eligibility fact —
+      // not just "voidable by assertInvoiceVoidable's transition matrix,
+      // which deliberately ALLOWS voiding a credit-settled 'prepaid'
+      // invoice for an operator's legitimate un-prepay" — opts into this
+      // extra precondition. It runs under THIS row's own lock (the
+      // `.forUpdate()` read below), closing the exact race a caller's OWN
+      // separate eligibility-check transaction can't: account credit (or
+      // any other settlement) landing in the gap between that check
+      // committing and this void call starting. Every existing caller
+      // (requireUnsettled defaults off) is byte-identical to before.
+      if (requireUnsettled) {
+        await assertInvoiceGenuinelyUnsettledLocked(trx, id);
       }
       const [updated] = await trx("invoices")
         .where({ id, status: current.status })

@@ -1661,7 +1661,46 @@ async function processGraceLapseSequence(term, conn) {
 
   if (term.prepay_invoice_id) {
     const InvoiceService = require('./invoice');
-    await InvoiceService.voidInvoice(term.prepay_invoice_id);
+    // Codex round-3 audit P0: resolveLapseVoidEligibility's own re-check
+    // above already committed and released its row lock by the time this
+    // call happens — apply-credit (or any other settlement) takes NO
+    // parent advisory lock before committing, so it can settle the
+    // invoice in that exact gap. voidInvoice's own `requireUnsettled`
+    // precondition re-verifies "genuinely still unpaid, no reconciliation
+    // pending" a SECOND time, but this time under the INVOICE'S OWN row
+    // lock, right where the void itself commits — the actual chokepoint,
+    // closing the race the eligibility pre-check alone cannot.
+    try {
+      await InvoiceService.voidInvoice(term.prepay_invoice_id, { requireUnsettled: true });
+    } catch (err) {
+      // INVOICE_ALREADY_PAID/INVOICE_SETTLED_REFUSE_VOID are both DURABLE
+      // settlement — the former from assertInvoiceVoidable's own
+      // unconditional guard (a genuinely cash-paid invoice), the latter
+      // from requireUnsettled's own check (a credit-settled 'prepaid'
+      // invoice, the status assertInvoiceVoidable deliberately allows
+      // through for other callers). Both retire the lapse the same way.
+      if (err.code === 'INVOICE_ALREADY_PAID' || err.code === 'INVOICE_SETTLED_REFUSE_VOID') {
+        logger.warn(`[termite-annual-renewal] grace lapse for term ${term.id} retired at the void chokepoint — invoice ${term.prepay_invoice_id} settled between the eligibility re-check and the void: ${err.message}`);
+        await conn('annual_prepay_terms').where({ id: term.id })
+          .update({ renewal_lapse_completed_at: new Date(), renewal_lapse_outcome: 'retired_settled' });
+        await ringRenewalBell(term, 'lapse_retired_settled', err.message);
+        return 'retired';
+      }
+      // INVOICE_PAYMENT_IN_FLIGHT/INVOICE_PROCESSING_REFUSE_VOID are the
+      // SAME "still clearing, could still bounce" ambiguity — neither is
+      // durable settlement, so this defers rather than retires.
+      // INVOICE_SEND_IN_PROGRESS is transient (a live send claim clears in
+      // seconds) — also worth a retry rather than any permanent outcome.
+      if ([
+        'INVOICE_PAYMENT_IN_FLIGHT', 'INVOICE_PROCESSING_REFUSE_VOID', 'INVOICE_SEND_IN_PROGRESS',
+        'STRIPE_AMBIGUOUS_OUTCOME', 'STRIPE_CHARGE_IN_PROGRESS',
+      ].includes(err.code)) {
+        logger.warn(`[termite-annual-renewal] grace lapse for term ${term.id} deferred at the void chokepoint — invoice ${term.prepay_invoice_id}: ${err.message}`);
+        await ringRenewalBell(term, 'lapse_reconciliation_pending', err.message);
+        return 'deferred';
+      }
+      throw err;
+    }
   }
   const { raiseTermiteRetrievalTask } = require('./cancellation-processor');
   await raiseTermiteRetrievalTask(term.customer_id, null, {
@@ -1678,15 +1717,28 @@ async function processGraceLapseSequence(term, conn) {
     try {
       const decided = await require('./annual-prepay-renewals').recordDecision({ termId: term.renewed_from_term_id, action: 'cancel', conn });
       if (!decided) {
-        // Codex round-7 P1: recordDecision returns null (never throws) on
-        // a guard-miss — the parent was decided something else in the
-        // tiny gap between resolveLapseVoidEligibility's own re-check
-        // (above) releasing its lock and this write. The pre-check
-        // catches the common case; this catches the residual race.
-        // Either way: never mark the lapse "done" without a genuine
-        // 'cancel' decision on the parent.
-        logger.warn(`[termite-annual-renewal] parent lapse-stamp guard-missed for successor ${term.id} — the parent was decided elsewhere between the re-check and this write`);
-        parentDecided = false;
+        // Codex round-7 P1 / round-3 audit P1: recordDecision returns null
+        // (never throws) on a guard-miss — but that guard-miss has TWO
+        // very different causes. (a) The parent was decided something
+        // ELSE (renew/switch_plan) in the tiny gap between the
+        // eligibility re-check above releasing its lock and this write —
+        // a genuine conflict; never mark the lapse "done". (b) A prior
+        // partial run of THIS SAME lapse already recorded 'cancel' on the
+        // parent and crashed before stamping completed_at — recordDecision's
+        // own guard (`renewal_decision IS NULL`) then correctly returns
+        // null on RETRY, since the decision is already there, but that is
+        // SUCCESS, not a conflict; without this check the row is stuck
+        // started-but-never-completed forever, permanently consuming the
+        // recovery scan's limited slots. Verified with a fresh read — an
+        // already-'cancel' parent completes this lapse; anything else
+        // (including no parent at all) is the genuine guard-miss.
+        const parent = await conn('annual_prepay_terms').where({ id: term.renewed_from_term_id }).first('renewal_decision');
+        if (parent?.renewal_decision === 'cancel') {
+          logger.info(`[termite-annual-renewal] parent ${term.renewed_from_term_id} already reads decided 'cancel' for successor ${term.id} — a prior partial run of this SAME lapse; completing it now`);
+        } else {
+          logger.warn(`[termite-annual-renewal] parent lapse-stamp guard-missed for successor ${term.id} — the parent was decided elsewhere between the re-check and this write`);
+          parentDecided = false;
+        }
       }
     } catch (err) {
       logger.warn(`[termite-annual-renewal] parent lapse-stamp skipped for successor ${term.id}: ${err.message}`);
@@ -1750,7 +1802,7 @@ async function reconcileMissedLapseEffects({ conn = db, limit = 200, counts }) {
 // term is exempt — no delivery needed), or false (the bell itself failed,
 // or a fresh bell's delivery failed) — only a truthy return may stamp the
 // leg's own exclusion column; false must stay retryable.
-async function bellAndVerifyDeliveryForNeverReachedStripe(successor) {
+async function bellAndVerifyDeliveryForNeverReachedStripe(successor, conn) {
   const result = await ringRenewalBell(
     successor,
     'ambiguous',
@@ -1760,11 +1812,21 @@ async function bellAndVerifyDeliveryForNeverReachedStripe(successor) {
   // null) means staff were NEVER actually told — stamping "handled" would
   // permanently exclude a row nobody has seen.
   if (!result) return false;
-  if (result.deduped || result.suppressed) return true;
-  // A FRESH bell must also have a VERIFIED delivery before this leg calls
-  // itself done — a failed delivery must stay retryable too, exactly like
-  // deliverInvoiceAndStampSkip's own verified-delivery contract elsewhere
-  // in this file.
+  // Codex round-3 audit P1: `result.deduped` means ONLY "staff were
+  // already told" — it says NOTHING about whether the invoice was ever
+  // actually delivered. The old code treated a deduped bell as "handled",
+  // which meant a FRESH tick whose delivery genuinely failed permanently
+  // stopped retrying the instant the NEXT tick deduped the same bell
+  // (the dedupe key is unconditional on the kind, not on delivery
+  // success). Decoupled: delivery is checked and retried on PERSISTED
+  // evidence alone, independent of bell dedup — the SAME "invoice status
+  // not draft, or a sent_at/sms_sent_at/email_sent_at stamp" proof
+  // processGraceLapses' own presented-evidence check already uses.
+  const invoice = await conn('invoices').where({ id: successor.prepay_invoice_id })
+    .first('status', 'sent_at', 'sms_sent_at', 'email_sent_at');
+  const alreadyDelivered = !!invoice
+    && (String(invoice.status || '').toLowerCase() !== 'draft' || !!invoice.sent_at || !!invoice.sms_sent_at || !!invoice.email_sent_at);
+  if (alreadyDelivered) return true;
   const delivery = await deliverRenewalInvoice(successor);
   return delivery?.ok ? 'delivered' : false;
 }
@@ -1850,7 +1912,7 @@ async function reconcileStuckSuccessors({ conn = db, limit = 200, counts }) {
     counts.reconcileNeverReachedStripeScanned = candidates.length;
     for (const successor of candidates) {
       try {
-        const handled = await bellAndVerifyDeliveryForNeverReachedStripe(successor);
+        const handled = await bellAndVerifyDeliveryForNeverReachedStripe(successor, conn);
         if (handled === 'delivered') counts.reconcileNeverReachedStripeBelled += 1;
         if (handled) {
           await conn('annual_prepay_terms').where({ id: successor.id })
