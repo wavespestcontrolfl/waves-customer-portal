@@ -3,9 +3,10 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
-const { etDateString, etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etWeekStart, addETDays, parseETDateTime } = require('../utils/datetime-et');
+const { etDateString, etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etWeekStart, addETDays, parseETDateTime, validCalendarDate } = require('../utils/datetime-et');
 const { cacheRoute } = require('../utils/route-cache');
 const { whereNotSandboxCall } = require('../services/voice-agent/relay-protocol');
+const { computeOpsScoreboard } = require('../services/ops-scoreboard');
 const {
   executeDashboardTool,
   INTERNAL_TEST_CUSTOMERS,
@@ -1001,6 +1002,26 @@ router.get('/core-kpis', dashboardCache, async (req, res, next) => {
     res.json(await computeCoreKpis(String(req.query.period || "mtd").toLowerCase(), parseCustomRange(req.query)));
   } catch (err) {
     logger.error(`[admin-dashboard] /core-kpis failed: ${err.message}`);
+    next(err);
+  }
+});
+
+// GET /api/admin/dashboard/ops-scoreboard?from=YYYY-MM-DD&to=YYYY-MM-DD
+// Weekly ops scoreboard (owner ruling 2026-09-26): drive minutes/stop,
+// AI call share, bookings without staff, AI route-day adherence. Owner-only
+// like /core-kpis above — this router's top-level
+// router.use(adminAuthenticate, requireAdmin) already gates it. Window
+// defaults to the last completed 7-day week (ops-scoreboard.js) and is
+// capped at 92 days.
+router.get('/ops-scoreboard', dashboardCache, async (req, res, next) => {
+  try {
+    const { from, to } = req.query;
+    if ((from !== undefined && !validCalendarDate(from)) || (to !== undefined && !validCalendarDate(to))) {
+      return res.status(400).json({ error: 'from/to must be valid YYYY-MM-DD calendar dates' });
+    }
+    res.json(await computeOpsScoreboard({ from, to }));
+  } catch (err) {
+    logger.error(`[admin-dashboard] /ops-scoreboard failed: ${err.message}`);
     next(err);
   }
 });
