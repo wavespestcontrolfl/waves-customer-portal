@@ -189,6 +189,21 @@ postgres('billing Email provider preparation on its held connection', () => {
     }
   }, 15000);
 
+  test.each(['billing.notice', 'billing.receipt_notice'])('a contextless %s still reaches the existing provider retry path', async (templateKey) => {
+    const stored = billingReplayRow('2026-01-01', {
+      template_key: templateKey,
+      payload_snapshot: { first_name: 'QA', notification_body: 'Payment received' },
+      categories: JSON.stringify(['billing', 'payment_receipt']),
+      trigger_event_id: `monthly_billing_success:${randomUUID()}`,
+    });
+    await mockPg('email_messages').insert(stored);
+    await expect(retryOne(stored)).resolves.toMatchObject({ sent: true });
+    await expect(mockPg('email_messages').where({ id: stored.id }).first()).resolves.toMatchObject({
+      status: 'sent', sent_at: expect.any(Date), provider_retry_exhausted_at: null,
+    });
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+  }, 15000);
+
   test('a Text-only billing choice defers the same row until Email is selected again', async () => {
     const chargeDate = etDateString(addETDays(new Date(), 1));
     await mockPg('customers').where({ id: customerId }).update({ active: true, autopay_enabled: true,
