@@ -795,7 +795,11 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
   // holds back a row whose event has not been seen at all.
   const eventRows = await openRows().whereRaw(`${UNSEEN_VISIT_ACTIVITY} IS NOT NULL`, tickBound)
     .where((q) => q.whereRaw(`${RETRY_AFTER_SQL} IS NULL OR ${RETRY_AFTER_SQL} <= ?`, [now])
-      .orWhereRaw(`${UNSEEN_VISIT_ACTIVITY} > ${RETRY_AFTER_SQL} - make_interval(secs => ?)`, [...tickBound, PROVIDER_RETRY_MS / 1000]))
+      // Newer than what the failed attempt read: the same commit-grace cap
+      // as the watermark, so a visit write that began before that attempt
+      // but committed after it still counts (Codex #4816 r30).
+      .orWhereRaw(`${UNSEEN_VISIT_ACTIVITY} > COALESCE((cc.sms_context->>'event_attempted_through')::timestamptz,
+        ${RETRY_AFTER_SQL} - make_interval(secs => ?))`, [...tickBound, PROVIDER_RETRY_MS / 1000]))
     // A deferred row keeps its event but moves behind rows not yet tried, so
     // repeated deferrals cannot hold the page prefix (Codex #4816 r28).
     .orderByRaw(`GREATEST(${EVENT_SEEN_AT}, (cc.sms_context->>'event_attempted_at')::timestamptz) ASC NULLS FIRST, cc.id`).limit(PAGE)
@@ -823,8 +827,8 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
     if (seenThrough.has(row.id)) {
       const { at, customerId } = seenThrough.get(row.id);
       await conn('call_commitments').where({ id: row.id, status: 'open' }).whereNull('human_state').update({ sms_context: result.outcome === 'deferred'
-        ? conn.raw("jsonb_set(COALESCE(sms_context, '{}'::jsonb), '{event_attempted_at}', to_jsonb(?::text))", [now.toISOString()])
-        : conn.raw("(COALESCE(sms_context, '{}'::jsonb) - 'event_attempted_at') || jsonb_build_object('event_seen_at', ?::text, 'event_seen_customer_id', ?::text)", [at, customerId]) });
+        ? conn.raw("COALESCE(sms_context, '{}'::jsonb) || jsonb_build_object('event_attempted_at', ?::text, 'event_attempted_through', ?::text)", [now.toISOString(), at])
+        : conn.raw("(COALESCE(sms_context, '{}'::jsonb) - 'event_attempted_at' - 'event_attempted_through') || jsonb_build_object('event_seen_at', ?::text, 'event_seen_customer_id', ?::text)", [at, customerId]) });
     }
   }
   for (const { cursorKey, rows: pageRows } of pages) {

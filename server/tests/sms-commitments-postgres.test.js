@@ -1196,7 +1196,8 @@ postgres('SMS commitments on PostgreSQL', () => {
   });
 
   test.each(['revalidation refuses the close', 'the source text changes under the lock', 'the provider fails',
-    'new activity lands during the provider backoff', 'a non-witness evidence source fails'])(
+    'new activity lands during the provider backoff', 'an earlier-stamped write commits during the provider backoff',
+    'a non-witness evidence source fails'])(
     'Codex #4816 r18/r19: a verdict the transaction does not persist leaves the event unseen for the next tick (%s)', async (cause) => {
     result.facts = [];
     result.obligations[0] = { ...result.obligations[0], kind: 'other', basis: 'request', due_at: null, due_text: 'sometime soon',
@@ -1215,7 +1216,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     // A stale evidence hash: revalidation refuses the close, as it does for a
     // witness that changed or is locked by another writer.
     const verify = jest.fn(async () => {
-      if (['the provider fails', 'new activity lands during the provider backoff'].includes(cause)) {
+      if (['the provider fails', 'new activity lands during the provider backoff', 'an earlier-stamped write commits during the provider backoff'].includes(cause)) {
         return { verdict: 'uncertain', reason: 'provider_failed', evidence_hash: 'x', retry_after: new Date(now.getTime() + 3600000).toISOString() };
       }
       if (cause === 'the source text changes under the lock') {
@@ -1243,13 +1244,25 @@ postgres('SMS commitments on PostgreSQL', () => {
       .onConflict('key').merge({ value: 'ffffffff-ffff-4fff-bfff-ffffffffffff' });
     let retryAt = new Date(now.getTime() + 1000);
     if (cause === 'the provider fails') {
-      // Waiting out retry_after, the row yields its event-page slot...
+      // Inside the ten-minute commit grace the fresh event may still bring
+      // the row back (verify reuses the stored failure — no model call);
+      // once the grace has passed what the failed attempt read, the row
+      // yields its event-page slot through the backoff...
+      await refreshSmsCommitments({ conn: mockPg, verify, now: new Date(now.getTime() + 11 * 60000) });
+      await parkDue();
       verify.mockClear();
-      await refreshSmsCommitments({ conn: mockPg, verify, now: new Date(now.getTime() + 1000) });
+      await refreshSmsCommitments({ conn: mockPg, verify, now: new Date(now.getTime() + 12 * 60000) });
       expect(verify).not.toHaveBeenCalled();
       await parkDue();
       // ...and returns, event still unseen, once the retry is due.
       retryAt = new Date(now.getTime() + 3601000);
+    }
+    if (cause === 'an earlier-stamped write commits during the provider backoff') {
+      // Codex #4816 r30: stamped at transaction start, before the failed
+      // attempt, committed after it — still new evidence.
+      await mockPg('job_status_history').insert({ job_id: visit.id, from_status: 'en_route', to_status: 'on_site',
+        transitioned_at: new Date(now.getTime() - 500) });
+      await mockPg('scheduled_services').where({ id: visit.id }).update({ status: 'on_site' });
     }
     if (cause === 'new activity lands during the provider backoff') {
       // Codex #4816 r21: activity after the failed attempt changes the

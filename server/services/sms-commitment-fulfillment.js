@@ -382,7 +382,7 @@ function groundFulfillment(parsed, evidence, commitment, { eventOnly = false } =
 // The event page's scan watermark and attempt stamp are bookkeeping, not obligation content.
 function fulfillmentFingerprint(commitment, evidence, { eventOnly = false } = {}) {
   const { fulfillment_check: _previous, event_seen_at: _seen, event_seen_customer_id: _seenFor, event_attempted_at: _tried,
-    ...sms_context } = commitment.sms_context || {};
+    event_attempted_through: _triedThrough, ...sms_context } = commitment.sms_context || {};
   const obligation = { party: commitment.party, kind: commitment.kind, description: commitment.description,
     evidence: commitment.evidence, due_at: commitment.due_at, sms_context };
   return { obligation, evidenceHash: hashExtractionSource(JSON.stringify({ version: VERSION, fulfillmentPolicy: FULFILLMENT_POLICY, policy: MODELS.TEXT_POLICIES.highStakes,
