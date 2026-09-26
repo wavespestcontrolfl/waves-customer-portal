@@ -129,7 +129,12 @@ function normalizeStreetName(value) {
     .trim();
 }
 
-const UNIT_TAIL_RE = /(?:^|\s)(?:#|ste\.?|suite|unit|bldg\.?|building)\s*#?\s*([\w-]+)\s*$/i;
+// A compound designator ("Bldg 9 Unit 204") is TWO designator+value pairs,
+// not one — the trailing `+` captures every pair in the run, not just the
+// last, so the whole compound (not merely "204") is pulled out of the
+// street name (primary review of PR #4840 r5 P2). A bare single pair
+// ("#102") still matches as one iteration, unchanged.
+const UNIT_TAIL_RE = /(?:^|\s)((?:(?:#|ste\.?|suite|unit|bldg\.?|building)\s*#?\s*[\w-]+\s*)+)$/i;
 
 // Splits "4400 Test Commons Pkwy E #102" (or "4400 Test Commons Pkwy E,
 // Suite 102") into house number / street / unit. Deliberately simple — callers pass an
@@ -157,13 +162,19 @@ function parseAddressLine(line) {
 }
 
 // Callers hand over designator-bearing units ("#102", "Suite 102",
-// "Unit 102", "Ste. 102") while the extract's parsed unit is the bare
-// "102" — strip the designator before comparing, or the right suite reads
-// as a different one.
-const UNIT_DESIGNATOR_RE = /^(?:suite|ste\.?|unit|apt\.?|apartment|bldg\.?|building|bay|space|#)\s*#?\s*/i;
+// "Unit 102", "Ste. 102", or a COMPOUND "Bldg 9 Unit 204") while the
+// extract's parsed unit can be the bare "102" or its own differently-ordered
+// compound — strip EVERY designator word wherever it falls (not just a
+// single leading one) so both sides of a compound designator reduce to the
+// same key ("Bldg 9 Unit 204" and "BLDG 9 UNIT 204" both -> "9204"; primary
+// review of PR #4840 r5 P2). No `^` anchor and the `g` flag are the whole
+// fix — a prior single, start-anchored replace left a second/middle
+// designator word (e.g. the "Unit" in "Bldg 9 Unit 204") in the string,
+// where it then survived into the alnum-only key as literal letters.
+const UNIT_DESIGNATOR_RE = /(?:suite|ste\.?|unit|apt\.?|apartment|bldg\.?|building|bay|space|#)/gi;
 
 function normalizeUnitValue(value) {
-  const bare = String(value || '').trim().replace(UNIT_DESIGNATOR_RE, '');
+  const bare = String(value || '').trim().replace(UNIT_DESIGNATOR_RE, ' ');
   return bare.replace(/[^A-Z0-9]/gi, '').toUpperCase() || null;
 }
 
@@ -258,14 +269,14 @@ const _failedAt = new Map(); // district -> ms of last failed fetch
 const DBPR_FETCH_TIMEOUT_MS = 15000;
 const DBPR_FAILURE_BACKOFF_MS = 10 * 60 * 1000;
 
-async function defaultFetchText(url) {
-  const res = await fetch(url, { signal: AbortSignal.timeout(DBPR_FETCH_TIMEOUT_MS) });
+async function defaultFetchText(url, timeoutMs = DBPR_FETCH_TIMEOUT_MS) {
+  const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
   if (!res || !res.ok) throw new Error(`HTTP ${res && res.status}`);
   const buf = await res.arrayBuffer();
   return new TextDecoder('latin1').decode(buf);
 }
 
-async function loadDistrictRows(district, { fetchText = defaultFetchText, now = () => Date.now() } = {}) {
+async function loadDistrictRows(district, { fetchText = defaultFetchText, now = () => Date.now(), timeoutMs } = {}) {
   const cached = _cache.get(district);
   if (cached && (now() - cached.fetchedAt) < DBPR_CACHE_TTL_MS) return cached.rows;
   if (_inflight.has(district)) return _inflight.get(district);
@@ -273,7 +284,10 @@ async function loadDistrictRows(district, { fetchText = defaultFetchText, now = 
   if (failedAt != null && (now() - failedAt) < DBPR_FAILURE_BACKOFF_MS) return cached ? cached.rows : [];
   const promise = (async () => {
     try {
-      const text = await fetchText(dbprExtractUrl(district));
+      // A caller with a bounded remaining lookup budget (property-lookup-v2's
+      // applyCommercialSuiteSize, primary review of PR #4840 r5 P2) can
+      // shorten this below the 15s default; absent, the default stands.
+      const text = await fetchText(dbprExtractUrl(district), timeoutMs ?? DBPR_FETCH_TIMEOUT_MS);
       const rows = parseDbprCsv(text);
       _cache.set(district, { rows, fetchedAt: now() });
       _failedAt.delete(district);

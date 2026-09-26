@@ -137,6 +137,64 @@ describe('buildEnrichedProfile (flag on) stashes a candidate but never leaks bui
   });
 });
 
+describe('grounds blanking — a suite never inherits the plaza\'s lot/pool/stories/satellite reads (primary review PR #4840 r5 P1, shared with residentialUnitLookup)', () => {
+  test('lot, pool, stories, and building count are all blanked — not just squareFootage', () => {
+    const record = plazaSuiteRecord({
+      lotSize: 93940,
+      hasPool: true,
+      poolCageSqft: 900,
+      stories: 2,
+      _parcel: { landUseDescription: 'Community Shopping Centers (1555)', buildingCount: 3 },
+    });
+    const profile = buildEnrichedProfile(record, { estimatedTreeCount: 40, waterProximity: 'CLOSE' }, 27.5, -82.45, null, null, SUITE_ADDRESS, SUITE_SIZING_ON);
+    expect(profile.isCommercial).toBe(true);
+    expect(profile.homeSqFt).toBe(0); // pending resolution — unaffected by this fix
+    expect(profile.lotSqFt).toBe(0);
+    expect(profile.pool).not.toBe('YES');
+    expect(profile.poolCage).not.toBe('YES');
+    // The building's floor count would derive a fractional footprint from
+    // the suite's own sq ft once resolved — a suite is single-level, same
+    // assumption a residential unit gets.
+    expect(profile.stories).toBe(1);
+    expect(profile.storiesSource).toBe('default');
+    expect(profile.buildingCount).toBe(1);
+    // Every satellite/vision read describes the PARCEL — dropped whole, same
+    // as residentialUnitLookup, so a plaza's tree canopy never becomes this
+    // one suite's landscape estimate.
+    expect(profile.estimatedTreeCount).toBeFalsy();
+    expect(profile.waterProximity).not.toBe('CLOSE');
+  });
+
+  test('the resolved suite size is applied ON TOP of the blanked grounds — lot/pool/stories stay blanked even after resolution', async () => {
+    resolveCommercialSuiteSize.mockResolvedValue({
+      value: 1400, source: 'license_seats', confidence: 'medium', evidence: [],
+    });
+    const record = plazaSuiteRecord({ lotSize: 93940, hasPool: true, stories: 2 });
+    const profile = buildEnrichedProfile(record, null, 27.5, -82.45, null, null, SUITE_ADDRESS, SUITE_SIZING_ON);
+    await routePrivate.applyCommercialSuiteSize(profile);
+    expect(profile.homeSqFt).toBe(1400); // the suite's own resolved size...
+    expect(profile.footprint).toBe(1400);
+    expect(profile.lotSqFt).toBe(0); // ...but the plaza's grounds never come back
+    expect(profile.pool).not.toBe('YES');
+    expect(profile.stories).toBe(1);
+  });
+
+  test('control: a genuine whole-building commercial lookup keeps its real lot/pool/stories (unaffected)', () => {
+    const record = plazaSuiteRecord({
+      lotSize: 93940,
+      hasPool: true,
+      stories: 2,
+      _parcel: { landUseDescription: 'Community Shopping Centers (1555)', buildingCount: 3 },
+    });
+    const profile = buildEnrichedProfile(record, null, 27.5, -82.45, null, null, BUILDING_ADDRESS, SUITE_SIZING_ON);
+    expect(profile._commercialSuiteCandidate).toBeNull();
+    expect(profile.lotSqFt).toBe(93940);
+    expect(profile.pool).toBe('YES');
+    expect(profile.stories).toBe(2);
+    expect(profile.buildingCount).toBe(3);
+  });
+});
+
 describe('a stamp expires after its source-specific max age (license_seats: 30 days)', () => {
   test('a fresh (1-day-old) license_seats stamp is reused', () => {
     const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();

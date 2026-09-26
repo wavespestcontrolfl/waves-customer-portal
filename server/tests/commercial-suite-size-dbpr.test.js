@@ -320,6 +320,32 @@ describe('designator-bearing target units match the bare extract unit', () => {
   });
 });
 
+describe('compound designators ("Bldg 9 Unit 204") normalize to the same key on both sides (primary review PR #4840 r5 P2)', () => {
+  const { matchDbprRow, normalizeUnitValue } = require('../services/commercial-suite-size/dbpr-food-license');
+
+  test('normalizeUnitValue reduces "Bldg 9 Unit 204" and "BLDG 9 UNIT 204" to the same key', () => {
+    expect(normalizeUnitValue('Bldg 9 Unit 204')).toBe(normalizeUnitValue('BLDG 9 UNIT 204'));
+    expect(normalizeUnitValue('Bldg 9 Unit 204')).toBe('9204');
+  });
+
+  test('the compound designator sits in the street line — the "Bldg 9" prefix must not leak into the street name', () => {
+    const row = {
+      'Location Street Address': '4400 TEST COMMONS PKWY E BLDG 9 UNIT 204',
+      'Location Zip Code': '00000',
+      'Business Name': 'TEST TACO SHOP',
+    };
+    expect(matchDbprRow([row], { street: '4400 Test Commons Pkwy E', unit: 'Bldg 9 Unit 204', zip: '00000' })).toBe(row);
+  });
+
+  test('a DIFFERENT building/unit in the same compound form is still rejected', () => {
+    const row = {
+      'Location Street Address': '4400 TEST COMMONS PKWY E BLDG 9 UNIT 204',
+      'Location Zip Code': '00000',
+    };
+    expect(matchDbprRow([row], { street: '4400 Test Commons Pkwy E', unit: 'Bldg 10 Unit 204', zip: '00000' })).toBeNull();
+  });
+});
+
 describe('DBPR row unit in Location Address Line 2, and both phone columns', () => {
   const { matchDbprRow } = require('../services/commercial-suite-size/dbpr-food-license');
   const base = { 'Location Street Address': '4400 TEST COMMONS PKWY E', 'Location Zip Code': '00000' };

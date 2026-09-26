@@ -40,6 +40,24 @@ const SOURCES = {
   SUITE_TYPE_DEFAULT: 'suite_type_default',
 };
 
+// Mirrors each leg's own default (dbpr-food-license.js's DBPR_FETCH_TIMEOUT_MS,
+// web-search-leg.js's DEFAULT_TIMEOUT_MS) — used only to cap it further when
+// opts.deadlineAt leaves less than the leg's usual budget.
+const DBPR_DEFAULT_TIMEOUT_MS = 15000;
+const WEB_SEARCH_DEFAULT_TIMEOUT_MS = 20000;
+// Below this much remaining lookup budget, a leg isn't worth starting at all
+// (primary review of PR #4840 r5 P2 — a cold DBPR fetch (15s) + web search
+// (20s) could add ~35s to a lookup the caller is already waiting on).
+const MIN_LEG_REMAINING_MS = 2000;
+
+// opts.deadlineAt: an absolute Date.now()-comparable timestamp (never a
+// duration — avoids drift across the awaits between legs). Absent/non-finite
+// means unbounded (every existing caller that doesn't pass it keeps today's
+// behavior exactly).
+function remainingBudgetMs(deadlineAt) {
+  return Number.isFinite(deadlineAt) ? (deadlineAt - Date.now()) : Infinity;
+}
+
 /**
  * @param {object} input
  *   address            — { street, unit, city, zip }
@@ -53,7 +71,9 @@ const SOURCES = {
  * @param {object} opts   — timeouts/injection for tests: districts,
  *                         fetchText, now, requireWarmCache (DBPR leg),
  *                         timeoutMs, maxSearches, anthropicClient
- *                         (web-search leg), skipWebSearch
+ *                         (web-search leg), skipWebSearch, deadlineAt (an
+ *                         absolute ms timestamp both legs' own timeoutMs are
+ *                         capped to — see remainingBudgetMs above)
  * @returns {Promise<{value:number, source:string, confidence:string,
  *   businessName:string|null, businessType:string|null, evidence:array,
  *   seats?:number}|null>}
@@ -67,24 +87,32 @@ async function resolveCommercialSuiteSize(input = {}, opts = {}) {
   let businessName = businessNameHint || null;
   let businessType = null;
 
-  try {
-    const dbpr = await resolveViaDbprLicense({ address, phone, businessNameHint }, opts);
-    if (dbpr) {
-      businessName = businessName || dbpr.businessName || null;
-      if (Number(dbpr.value) > 0) {
-        return {
-          value: dbpr.value,
-          source: SOURCES.LICENSE_SEATS,
-          confidence: 'medium',
-          businessName: dbpr.businessName || businessName,
-          businessType: 'restaurant_food',
-          evidence: dbpr.evidence,
-          seats: dbpr.seats,
-        };
+  const dbprRemaining = remainingBudgetMs(opts.deadlineAt);
+  if (dbprRemaining < MIN_LEG_REMAINING_MS) {
+    logger.warn(`[commercial-suite-size] skipping DBPR leg — ${Math.max(0, Math.round(dbprRemaining))}ms left in the lookup budget`);
+  } else {
+    try {
+      const dbprOpts = Number.isFinite(dbprRemaining)
+        ? { ...opts, timeoutMs: Math.min(DBPR_DEFAULT_TIMEOUT_MS, dbprRemaining) }
+        : opts;
+      const dbpr = await resolveViaDbprLicense({ address, phone, businessNameHint }, dbprOpts);
+      if (dbpr) {
+        businessName = businessName || dbpr.businessName || null;
+        if (Number(dbpr.value) > 0) {
+          return {
+            value: dbpr.value,
+            source: SOURCES.LICENSE_SEATS,
+            confidence: 'medium',
+            businessName: dbpr.businessName || businessName,
+            businessType: 'restaurant_food',
+            evidence: dbpr.evidence,
+            seats: dbpr.seats,
+          };
+        }
       }
+    } catch (err) {
+      logger.warn(`[commercial-suite-size] DBPR leg errored: ${err.message}`);
     }
-  } catch (err) {
-    logger.warn(`[commercial-suite-size] DBPR leg errored: ${err.message}`);
   }
 
   // skipWebSearch: the manual lookup tool's fast CACHED-rebuild path uses
@@ -92,9 +120,17 @@ async function resolveCommercialSuiteSize(input = {}, opts = {}) {
   // cache hit would defeat the point of caching. The FRESH lookup (already
   // a multi-second, multi-provider call) and the estimator engine both run
   // this leg (name-only; see web-search-leg.js — it never returns a size).
-  if (!opts.skipWebSearch) {
+  const webRemaining = remainingBudgetMs(opts.deadlineAt);
+  if (opts.skipWebSearch) {
+    // no-op — existing behavior
+  } else if (webRemaining < MIN_LEG_REMAINING_MS) {
+    logger.warn(`[commercial-suite-size] skipping web-search leg — ${Math.max(0, Math.round(webRemaining))}ms left in the lookup budget`);
+  } else {
     try {
-      const web = await resolveViaWebSearch({ address, businessNameHint }, opts);
+      const webOpts = Number.isFinite(webRemaining)
+        ? { ...opts, timeoutMs: Math.min(opts.timeoutMs || WEB_SEARCH_DEFAULT_TIMEOUT_MS, webRemaining) }
+        : opts;
+      const web = await resolveViaWebSearch({ address, businessNameHint }, webOpts);
       if (web) {
         businessName = businessName || web.businessName || null;
         businessType = businessType || web.businessType || null;

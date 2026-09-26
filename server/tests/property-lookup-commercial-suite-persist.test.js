@@ -90,6 +90,20 @@ test('a persisting run (default) stamps the SAME suite size onto the cached prop
   expect(savedResult.propertyRecord._commercialSuiteSize).toEqual(expect.objectContaining({ value: 1400, source: 'license_seats', unitKey: '102' }));
 });
 
+test('the lookup\'s remaining budget is passed through as an absolute deadline, not the resolver\'s own full per-leg timeout (primary review PR #4840 r5 P2)', async () => {
+  const { resolveCommercialSuiteSize } = require('../services/commercial-suite-size');
+  const before = Date.now();
+  await performPropertyLookup(ADDRESS, { prioritizeAccuracy: true, commercialSuiteSizing: true });
+  const after = Date.now();
+  expect(resolveCommercialSuiteSize).toHaveBeenCalledTimes(1);
+  const deadlineAt = resolveCommercialSuiteSize.mock.calls[0][1].deadlineAt;
+  // An absolute timestamp near "now + the full ~60s lookup budget" — never
+  // undefined (which would mean each network leg gets its own unbounded
+  // full timeout on top of everything else this lookup already spent).
+  expect(deadlineAt).toBeGreaterThan(before + 40000);
+  expect(deadlineAt).toBeLessThanOrEqual(after + 60000);
+});
+
 test('a type-default guess is NOT pinned to the cache row, so a later lookup can upgrade it', async () => {
   const { resolveCommercialSuiteSize } = require('../services/commercial-suite-size');
   resolveCommercialSuiteSize.mockResolvedValueOnce({

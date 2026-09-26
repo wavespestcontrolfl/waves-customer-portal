@@ -751,12 +751,6 @@ function generateEstimate(input) {
         // confirm-step default (no measured building) — pest can't auto-price
         // off it. Undefined (admin / measured) → auto-price as usual.
         buildingSizeMeasured: input.buildingSizeMeasured,
-        // A suite sized off the business-type default (no DBPR license, no
-        // operator measurement) — primary review of PR #4840 r4 P1:
-        // auto-prices (buildingSizeMeasured stays true) but must grade LOW,
-        // not MEDIUM, so the existing low-confidence review/delivery gates
-        // catch it. license_seats leaves this unset and stays MEDIUM.
-        footprintSizeEstimated: input.footprintSizeEstimated === true,
         // Risk-type cadence override (null → program default 12).
         pestVisits: commercialPestVisits,
         // Interior service selection ('excluded' → exterior-only base price;
@@ -2623,6 +2617,25 @@ function generateEstimate(input) {
   const year2WithRenewal = year2Total + trenchingRenewal;
 
   assertFinitePriceFields(lineItems);
+
+  // A commercial suite sized off the business-type default (no DBPR
+  // license, no operator measurement — server/services/commercial-suite-size/)
+  // is a GUESS: every commercial line item derived from it is equally a
+  // guess, not just commercial_pest. ONE pass at the chokepoint every
+  // commercial pricer's output already passes through (post-discount, so a
+  // later mutation can't quietly restore MEDIUM), rather than threading
+  // footprintSizeEstimated into each pricer's own options (primary review
+  // of PR #4840 r5 P1 — round r4's per-pricer fix left commercial
+  // termite-bait/rodent-bait/etc. ungraded, so commercialLowConfidenceRange
+  // let an exact-looking price through for them). Manual-quote lines are
+  // untouched — they already carry their own review posture.
+  if (input.footprintSizeEstimated === true) {
+    lineItems.forEach((item) => {
+      if (typeof item?.service === 'string' && item.service.startsWith('commercial_') && item.quoteRequired !== true) {
+        item.pricingConfidence = 'LOW';
+      }
+    });
+  }
 
   // ── 6b. Hoist per-line review reasons to the estimate level ─
   // Historically only dethatching hoisted its reasons, so missing-footprint,

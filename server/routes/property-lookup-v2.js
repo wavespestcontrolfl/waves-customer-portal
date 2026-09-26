@@ -898,7 +898,14 @@ async function performPropertyLookupCore(address, options = {}) {
   // synchronous (it is called directly, unawaited, by dozens of existing
   // unit tests) and only STASHES the candidate; this awaits the actual
   // DBPR/web-search resolution and folds the result back in.
-  await applyCommercialSuiteSize(result.enriched);
+  // deadlineAt: the SAME lookup budget every other leg in this function
+  // already respects (remainingLookupMs) — a cold DBPR fetch (15s) + web
+  // search (20s) must not add ~35s on top of an already-budgeted lookup
+  // (primary review of PR #4840 r5 P2). Each leg caps its own timeout to
+  // whatever is left and skips outright under ~2s left; unaffected callers
+  // (buildEnrichedProfile's own direct test callers, buildResultFromCachedLookup's
+  // requireWarmCache path below) never pass this and stay unbounded.
+  await applyCommercialSuiteSize(result.enriched, { deadlineAt: Date.now() + remainingLookupMs(t0, timing) });
   // Persist the resolved suite size on the CACHED property_record —
   // saveLookup below serializes propertyRecord, never the enriched profile
   // (buildResultFromCachedLookup recomputes it fresh on every read) — so a
@@ -1770,6 +1777,11 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   // wrapper (applyCommercialSuiteSize) resolves it and folds the result
   // back into the profile before it reaches the client.
   let commercialSuiteCandidate = null;
+  // True once the commercial-suite grounds blanking below actually fires —
+  // the client keys its own stale-field reset off this (unitScopedLookup),
+  // the same way it already keys off residentialUnitLookup (primary review
+  // of PR #4840 r5 P1).
+  let commercialSuiteUnitScoped = false;
   // A suite size RESOLVED ALREADY — either by a prior fresh lookup of this
   // same address (persisted on the cached property_record as
   // `_commercialSuiteSize`, since saveLookup serializes propertyRecord, not
@@ -1783,6 +1795,44 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   // BOTH the pending-candidate and the already-resolved-stamp branches for
   // the profile's suiteBuildingTotalSqFt display field.
   let commercialSuiteResolvedBuildingSqft = null;
+  // Shared with the residentialUnitLookup branch below (primary review of
+  // PR #4840 r5 P1) — ONE blanking rule, not two parallel lists. Both a
+  // residential unit and a commercial suite occupy ONE part of a larger
+  // building/parcel: everything the record says about SIZE and GROUNDS
+  // (lot, stories, pool) is the building's/parcel's, not the unit's, and
+  // must never leak into commercial lawn/mosquito/tree-shrub pricing (or
+  // its residential mirror) as the WHOLE property's grounds. The caller
+  // applies its own size on top afterward (a suite's resolved footprint,
+  // or a unit's operator-entered sq ft) — this only clears what nobody
+  // measured for the unit itself.
+  const blankUnitScopedGroundsAndSize = (record) => {
+    if (!record) return record;
+    const isVerified = (field) => record?._fieldEvidence?.[field]?.sourceType === 'verified';
+    return {
+      ...record,
+      // What a person saved on this address, for the residential HIGH flag
+      // only — unread on the commercial suite path.
+      _unitVerifiedSaved: {
+        squareFootage: isVerified('squareFootage') ? Number(record.squareFootage) || 0 : 0,
+        stories: (record._storiesSource === 'verified' || isVerified('stories')) ? Number(record.stories) || 0 : 0,
+      },
+      squareFootage: 0,
+      lotSize: 0,
+      // The assumed 1 is a DEFAULT nobody observed — a unit/suite has no
+      // floor count of its own, and the building's would derive a
+      // fractional footprint from its own sq ft (codex r2 P1, same
+      // contract as the unknown-stories aggregate).
+      stories: 1,
+      _storiesSource: 'default',
+      hasPool: null,
+      poolCageSqft: null,
+      // A stacked-association aggregate's building count multiplies the
+      // perimeter estimate (N buildings of footprint/N) — for ONE unit/suite
+      // it is one structure (codex r4 P2). The association totals stay on
+      // profile.association as context.
+      _parcel: record._parcel ? { ...record._parcel, buildingCount: 1 } : record._parcel,
+    };
+  };
   // Opt-in (owner ruling on primary review of PR #4840): this whole lane is
   // OFF by default. Public/unauthenticated callers (public-property-lookup,
   // public-quote) never pass commercialSuiteSizing, so they get byte-
@@ -1844,23 +1894,25 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
           commercialSubtype,
         };
       }
-      // Same mutation residentialUnitLookup applies below, and for the
-      // identical reason: every GROUND-GEOMETRY figure computed further
-      // down (footprintSf, estimatedPerimeterLF, estimatedAtticSqFt,
-      // estimatedSlabSqFt) derives from rc.squareFootage — left alone, a
-      // 1,400 sqft suite would still auto-fill a ~46,000 sqft footprint and
-      // ~1,073 LF perimeter into the termite/trenching/Bora-Care boxes, and
-      // commercial pest would price the BUILDING's perimeter even after
-      // homeSqFt was corrected to the suite (the exact overquote class this
-      // lane exists to end — codex review on this PR). Zeroing it here
-      // means footprintSf/estimatedPerimeterLF/estimatedAtticSqFt/
-      // estimatedSlabSqFt all compute to 0/null naturally; homeSqFt below
-      // and applyCommercialSuiteSize's post-resolution footprint both key
-      // off this same rc, so there is only one place a suite's dimensions
-      // can come from. lotSize/pool/stories are untouched — this lane only
-      // owns the suite's floor-area figures.
+      // SAME blanking residentialUnitLookup applies below, via the shared
+      // helper (primary review of PR #4840 r5 P1 — a prior cut here only
+      // zeroed squareFootage, leaving the plaza's lot/turf/beds/pool/trees/
+      // satellite reads to price as this ONE suite's grounds; every
+      // GROUND-GEOMETRY figure computed further down — footprintSf,
+      // estimatedPerimeterLF, estimatedAtticSqFt, estimatedSlabSqFt,
+      // turf/bed/hardscape/pool — derives from this same rc/ai, so blanking
+      // both here is the only place a suite's dimensions can come from).
+      // homeSqFt below and applyCommercialSuiteSize's post-resolution
+      // footprint both key off this same rc, applying the suite's own
+      // resolved size on top afterward — this lane never re-derives
+      // anything from the (now cleared) building total.
       commercialSuiteResolvedBuildingSqft = commercialSuiteBuildingSqft;
-      if (rc) rc = { ...rc, squareFootage: 0 };
+      if (rc) rc = blankUnitScopedGroundsAndSize(rc);
+      // Every satellite/vision read (areas, densities, water, pool)
+      // describes the PARCEL, same as residentialUnitLookup below — dropped
+      // whole rather than priced as this one suite's grounds.
+      ai = null;
+      commercialSuiteUnitScoped = true;
     }
   }
   if (residentialUnitLookup) {
@@ -1888,29 +1940,11 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     // the confirm-before-pricing posture.
     // A RECORDLESS verdict (vision's multifamily read alone) still drops
     // the parcel-wide analysis (pre-push codex P1 r13).
-    const isVerified = (field) => rc?._fieldEvidence?.[field]?.sourceType === 'verified';
-    if (rc) rc = {
-      ...rc,
-      // What a person saved on this address, for the flag only.
-      _unitVerifiedSaved: {
-        squareFootage: isVerified('squareFootage') ? Number(rc.squareFootage) || 0 : 0,
-        stories: (rc._storiesSource === 'verified' || isVerified('stories')) ? Number(rc.stories) || 0 : 0,
-      },
-      squareFootage: 0,
-      lotSize: 0,
-      stories: 1,
-      // The assumed 1 is a DEFAULT nobody observed: stamped so the client's
-      // "save as field-verified" skips it unless the operator touches the
-      // field (codex r2 P1 — same contract as the unknown-stories aggregate).
-      _storiesSource: 'default',
-      hasPool: null,
-      poolCageSqft: null,
-      // A stacked-association aggregate's building count multiplies the
-      // perimeter estimate (N buildings of footprint/N) — for ONE unit it
-      // is one structure (codex r4 P2). The association totals stay on
-      // profile.association as context.
-      _parcel: rc._parcel ? { ...rc._parcel, buildingCount: 1 } : rc._parcel,
-    };
+    // blankUnitScopedGroundsAndSize (shared with the commercial suite lane
+    // above — primary review of PR #4840 r5 P1) does the sqft/lot/stories/
+    // pool/buildingCount blanking + the _unitVerifiedSaved capture the HIGH
+    // flag below reads.
+    if (rc) rc = blankUnitScopedGroundsAndSize(rc);
     ai = null;
   }
   const footprintTurf = computeFootprintTurf(rc);
@@ -2126,6 +2160,12 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     residentialUnitLookup: residentialUnitLookup
       ? { wholePropertyCategory, wholePropertySubtype }
       : null,
+    // Shared unit/suite-scoped signal (primary review of PR #4840 r5 P1):
+    // true for EITHER a residential unit or a commercial suite lookup — the
+    // client resets stale grounds fields (lot/pool/landscape) off this one
+    // flag instead of duplicating residentialUnitLookup's reset logic for
+    // the commercial case.
+    unitScopedLookup: Boolean(residentialUnitLookup) || commercialSuiteUnitScoped,
     commercialDetectionSource: commercialProfile ? resolveCommercialDetectionSource(rc, ai) : null,
     // On an aggregate, the association total wins over the merge's
     // unitCount (shapeAsPropertyRecord seeds every record with a truthy 1,
@@ -2634,9 +2674,9 @@ async function applyCommercialSuiteSize(profile, opts = {}) {
     if (suiteSize && Number(suiteSize.value) > 0) {
       profile.homeSqFt = suiteSize.value;
       // The suite's own ground-floor footprint — a single in-line strip/
-      // plaza suite (no stories field of its own; profile.stories still
-      // reads the building's, which is fine for a 1-floor commercial
-      // footprint assumption). This is the field pricing/
+      // plaza suite (no stories field of its own; blankUnitScopedGroundsAndSize
+      // already forced profile.stories to 1 above, the same single-floor
+      // assumption a residential unit gets). This is the field pricing/
       // translateV2CallToV1Input actually reads (footprintSqFt <-
       // p.footprint ?? p.footprintSqFt) — leaving it at the pre-resolution
       // 0 would still price the building once footprintUnknown-style zeroing

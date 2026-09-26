@@ -148,6 +148,79 @@ describe('manual admin-tool path — buildEnrichedProfile -> applyCommercialSuit
     expect(range.hasLowConfidence).toBe(true);
   });
 
+  test('a type-default suite\'s commercial termite-bait-only line also grades LOW and trips the gate — not just commercial_pest (primary review PR #4840 r5 P1)', async () => {
+    resolveViaDbprLicense.mockResolvedValue(null);
+    const profile = buildEnrichedProfile(plazaSuiteRecord(), null, 27.5, -82.45, null, null, SUITE_ADDRESS, { commercialSuiteSizing: true });
+    await routePrivate.applyCommercialSuiteSize(profile);
+    expect(profile.suiteSize.source).toBe('suite_type_default');
+
+    const v1Input = translateV2CallToV1Input(profile, ['TERMITE_BAIT'], { commercialRiskType: 'retail_standard', termiteScope: 'monitoring_only' });
+    expect(v1Input.footprintSizeEstimated).toBe(true);
+
+    const result = generateEstimate(v1Input);
+    const line = result.lineItems.find((l) => l.service === 'commercial_termite_bait');
+    expect(line).toBeTruthy();
+    expect(line.quoteRequired).not.toBe(true); // auto-priced, not a manual quote
+    expect(line.pricingConfidence).toBe('LOW');
+    expect(commercialLowConfidenceRange({ lineItems: result.lineItems }).hasLowConfidence).toBe(true);
+  });
+
+  test('a type-default suite\'s commercial rodent-bait-only line also grades LOW and trips the gate — not just commercial_pest (primary review PR #4840 r5 P1)', async () => {
+    resolveViaDbprLicense.mockResolvedValue(null);
+    const profile = buildEnrichedProfile(plazaSuiteRecord(), null, 27.5, -82.45, null, null, SUITE_ADDRESS, { commercialSuiteSizing: true });
+    await routePrivate.applyCommercialSuiteSize(profile);
+    expect(profile.suiteSize.source).toBe('suite_type_default');
+
+    const v1Input = translateV2CallToV1Input(profile, ['RODENT_BAIT'], { commercialRiskType: 'retail_standard' });
+    expect(v1Input.footprintSizeEstimated).toBe(true);
+
+    const result = generateEstimate(v1Input);
+    const line = result.lineItems.find((l) => l.service === 'commercial_rodent_bait');
+    expect(line).toBeTruthy();
+    expect(line.quoteRequired).not.toBe(true);
+    expect(line.pricingConfidence).toBe('LOW');
+    expect(commercialLowConfidenceRange({ lineItems: result.lineItems }).hasLowConfidence).toBe(true);
+  });
+
+  test('the license-sourced path keeps termite-bait and rodent-bait at MEDIUM (control)', async () => {
+    resolveViaDbprLicense.mockResolvedValue({
+      value: 1400, businessName: 'Test Taco Shop', seats: 25,
+      evidence: [{ source: 'license_seats', detail: '25 seats -> 1,400 sq ft' }],
+    });
+    const profile = buildEnrichedProfile(plazaSuiteRecord(), null, 27.5, -82.45, null, null, SUITE_ADDRESS, { commercialSuiteSizing: true });
+    await routePrivate.applyCommercialSuiteSize(profile);
+    expect(profile.suiteSize.source).toBe('license_seats');
+
+    const v1Input = translateV2CallToV1Input(profile, ['TERMITE_BAIT', 'RODENT_BAIT'], { commercialRiskType: 'restaurant_food', termiteScope: 'monitoring_only' });
+    expect(v1Input.footprintSizeEstimated).toBeUndefined();
+
+    const result = generateEstimate(v1Input);
+    expect(result.lineItems.find((l) => l.service === 'commercial_termite_bait').pricingConfidence).toBe('MEDIUM');
+    expect(result.lineItems.find((l) => l.service === 'commercial_rodent_bait').pricingConfidence).toBe('MEDIUM');
+  });
+
+  test('a suite\'s commercial lawn line never falls back to the plaza\'s lot — lot/turf were blanked, so it prices off the generic commercial default instead', async () => {
+    resolveViaDbprLicense.mockResolvedValue({
+      value: 1400, businessName: 'Test Taco Shop', seats: 25,
+      evidence: [{ source: 'license_seats', detail: '25 seats -> 1,400 sq ft' }],
+    });
+    const record = plazaSuiteRecord({ lotSize: 93940 }); // the plaza's own lot — must never reach lawn pricing
+    const profile = buildEnrichedProfile(record, null, 27.5, -82.45, null, null, SUITE_ADDRESS, { commercialSuiteSizing: true });
+    await routePrivate.applyCommercialSuiteSize(profile);
+    expect(profile.lotSqFt).toBe(0);
+
+    const v1Input = translateV2CallToV1Input(profile, ['LAWN'], { commercialRiskType: 'restaurant_food' });
+    expect(v1Input.lotSqFt).toBe(0);
+
+    const result = generateEstimate(v1Input);
+    const line = result.lineItems.find((l) => l.service === 'commercial_lawn');
+    expect(line).toBeTruthy();
+    // 45% of the plaza's 93,940 sq ft lot would be ~42,273 sq ft — nowhere
+    // close to what a suite with no lot of its own should ever price.
+    expect(line.turfBasis).not.toBe('commercialLotFallback');
+    expect(line.turfSf).toBeLessThan(10000);
+  });
+
   test('control: the SAME building record with no suite signal still prices off the whole building (unaffected)', async () => {
     const buildingAddress = '4400 Test Commons Pkwy E, Bradenton, FL 00000';
     const profile = buildEnrichedProfile(plazaSuiteRecord(), null, 27.5, -82.45, null, null, buildingAddress, { commercialSuiteSizing: true });

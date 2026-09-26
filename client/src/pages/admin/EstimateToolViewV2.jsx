@@ -3029,7 +3029,7 @@ export default function EstimateToolViewV2({
         errors: data.errors || [],
       });
       setVerifySaveState({});
-      unitLookupAddressRef.current = ep.residentialUnitLookup ? address : "";
+      unitLookupAddressRef.current = ep.unitScopedLookup ? address : "";
 
       const upd = {};
       if (ep.stories) upd.stories = String(ep.stories);
@@ -3037,15 +3037,18 @@ export default function EstimateToolViewV2({
         Object.assign(upd, resolveLookupPropertyTypeAutofill(ep.propertyType, ep.category));
       }
       if (ep.commercialSubtype) upd.commercialSubtype = ep.commercialSubtype;
-      if (ep.residentialUnitLookup) {
-        // One unit inside a building: the server already blanked the
-        // parcel's dims and dropped its parcel-wide reads, but the copies
-        // above only land TRUTHY values — so a bare-building lookup run a
-        // moment earlier (the usual sequence: address first, then "which
-        // apartment?") would keep the complex's sqft / lot / stories /
-        // pool / landscape in the form through the spread below and price
-        // the whole property anyway (codex r1 P1). Reset those to the form
-        // defaults; the operator supplies the unit's own figures.
+      if (ep.unitScopedLookup) {
+        // One unit/suite inside a building: the server already blanked the
+        // parcel's dims and dropped its parcel-wide reads (residential unit
+        // OR commercial suite — primary review of PR #4840 r5 P1, same flag
+        // for both), but the copies above only land TRUTHY values — so a
+        // bare-building lookup run a moment earlier (the usual sequence:
+        // address first, then "which apartment/suite?") would keep the
+        // complex's sqft / lot / stories / pool / landscape in the form
+        // through the spread below and price the whole property anyway
+        // (codex r1 P1). Reset those to the form defaults; the operator
+        // supplies the unit's own figures (a suite's homeSqFt is restored
+        // right after by ep.homeSqFt below, once the resolver has run).
         Object.assign(upd, {
           homeSqFt: ep.homeSqFt ? String(ep.homeSqFt) : "",
           lotSqFt: "",
@@ -3100,7 +3103,7 @@ export default function EstimateToolViewV2({
           // Record value, else the plat-median estimate for an unassessed
           // vacant parcel (lib/lookupPrefill.js), else empty.
           homeSqFt: f._homeSqFtEdited ? f.homeSqFt : lookupHomeSqFtPrefill(ep),
-          lotSqFt: ep.residentialUnitLookup ? "" : f._lotSqFtEdited ? f.lotSqFt : (ep.lotSqFt ? String(ep.lotSqFt) : ""),
+          lotSqFt: ep.unitScopedLookup ? "" : f._lotSqFtEdited ? f.lotSqFt : (ep.lotSqFt ? String(ep.lotSqFt) : ""),
           stories: f._storiesEdited ? f.stories : (ep.stories ? String(ep.stories) : "1"),
           ...(termiteFootprintNumber ? { _termiteFootprintAuto: true } : {}),
           // Rides the form so the homeSqFt/stories effect can't re-derive a
