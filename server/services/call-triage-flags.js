@@ -1666,6 +1666,29 @@ function sentenceHasSchedulingPredicate(strippedNs) {
 //      COMMITMENT_TURN_VOCAB plus the small BENIGN_CONDITIONAL_GLUE_WORDS
 //      filler set (never the raw, unstripped text — the benign topic words
 //      are gone by now and never need to sit in any vocabulary Set at all).
+// The allowlist itself (owner ruling 2026-09-26). Every entry is a WHOLE
+// normalized sentence (^…$); a sentence that adds anything to one of these
+// shapes falls off the list and holds the call for a human. The poison
+// screens above still run first, as defense in depth.
+const ACK_ALT = '(?:ok|okay|awesome|perfect|great|alright|all right|sounds good|yep|yes|yeah|no problem|got it|cool|wonderful|excellent|we made it)';
+const COURTESY_ALT = '(?:thanks|thank you(?: so much| very much)?|bye(?: bye)?|talk to you soon|have a (?:good|great|nice) (?:day|one|night|evening|weekend)|take care|you re welcome)';
+const BENIGN_SEND_TOPIC_ALT = '(?:(?:a|an|the|your) )?(?:confirmation text|confirmation email|text message|text|email|invoice|report|receipt|notification)';
+const SEND_TIMING_ALT = '(?: (?:momentarily|shortly|soon|now|right now|right away|today))?';
+const OTHER_SENTENCE_ALLOWED_SHAPES = [
+  // bare acknowledgements: "Awesome." / "Yes." / "No problem." / "Awesome, we made it."
+  new RegExp(`^${ACK_ALT}(?: ${ACK_ALT})*$`),
+  // courtesy closers: "Thank you so much." / "Have a good one." / "Okay, bye."
+  new RegExp(`^(?:${ACK_ALT} )*${COURTESY_ALT}(?: ${COURTESY_ALT})*$`),
+  // the let-us-know closer: "Just let us know if anything changes, thanks."
+  new RegExp(`^(?:${ACK_ALT} )*(?:just )?let (?:us|me) know if (?:anything changes|that changes|anything comes up|something comes up|you need anything|you have any questions)(?: ${COURTESY_ALT})*$`),
+  // a benign document/notification send: "I'll email you the invoice." /
+  // "I'll send you a confirmation text momentarily."
+  new RegExp(`^(?:${ACK_ALT} )*(?:i|we) (?:ll|will|am going to|are going to|re going to) (?:send|email|text) (?:you|him|her|them) ${BENIGN_SEND_TOPIC_ALT}${SEND_TIMING_ALT}$`),
+  // a notice the customer will receive: "You may get a text." / "You'll get an email shortly."
+  new RegExp(`^(?:${ACK_ALT} )*you (?:ll|will|may|should|re going to|are going to) (?:get|receive) ${BENIGN_SEND_TOPIC_ALT}${SEND_TIMING_ALT}$`),
+  // modal notification routing with the topic named: "Yep, it may go to him, the notification."
+  new RegExp(`^(?:${ACK_ALT} )*(?:(?:it|that) (?:may|will) (?:go|be sent|be going) to (?:him|her|them|you) the (?:notification|email|text)|the (?:notification|email|text|confirmation text) (?:may|will) (?:go|be sent|be going) to (?:him|her|them|you))$`),
+];
 function otherSentenceIsClean(other, prevNs) {
   if (other.interrogative) return false;
   if (turnHasNegationOrHedge(other.ns)) return false;
@@ -1678,14 +1701,20 @@ function otherSentenceIsClean(other, prevNs) {
   // cleared clauseIsBenign (codex round 9, P1 :713 root cause) — a plain
   // declarative gets the base vocabulary alone, so "I will tell him to okay
   // it." can never borrow "tell" from the conditional carve-out.
-  let extraSets = [];
   if (turnHasUnresolvedConditional(other.ns)) {
     const clauses = extractConditionalClauses(other.raw);
     if (!clauses.length || !clauses.every((clause) => clauseIsBenign(clause, prevNs))) return false;
     if (conditionalConsequentIsUnexempted(other.raw)) return false;
-    extraSets = [BENIGN_CONDITIONAL_GLUE_WORDS];
+    return stripped.split(' ').every((tok) => turnVocabularyTokenOk(tok, [BENIGN_CONDITIONAL_GLUE_WORDS]));
   }
-  return stripped.split(' ').every((tok) => turnVocabularyTokenOk(tok, extraSets));
+  // Owner ruling 2026-09-26 (after codex round 22): a NON-conditional
+  // OTHER sentence grounds only if it IS one of the known-benign shapes —
+  // guilty unless allowlisted, the same inversion that converged the
+  // conditional consequent (rounds 13-14). Rounds 4-22 each found a new
+  // sentence built purely from COMMITMENT_TURN_VOCAB words ("We'll see.",
+  // "Need to put you in.", "We need yes.") that the vocabulary screen read
+  // as a clean aside; vocabulary membership no longer clears anything here.
+  return OTHER_SENTENCE_ALLOWED_SHAPES.some((re) => re.test(other.ns));
 }
 
 // Canonical ET wall clock (codex P0, round 7h): the BOOKING path preserves

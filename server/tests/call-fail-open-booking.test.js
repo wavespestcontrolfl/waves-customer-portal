@@ -1620,6 +1620,41 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
   });
 
+  // Owner ruling 2026-09-26 (after codex round 22): a non-conditional OTHER
+  // sentence grounds only if it is an allowlisted whole-sentence shape.
+  // Sentences built purely from commitment vocabulary no longer clear.
+  test.each([
+    "We will have it. We'll see you Sunday at noon.",
+    "It will come up. We'll see you Sunday at noon.",
+    "We'll get it. We'll see you Sunday at noon.",
+    "That is it for him. We'll see you Sunday at noon.",
+    "You got it all. We'll see you Sunday at noon.",
+    "We'll see you Sunday at noon. We will send it.",
+    "We'll send you a link. We'll see you Sunday at noon.",
+    "I'll email him the invoice to okay it. We'll see you Sunday at noon.",
+    "Thanks, we need yes. We'll see you Sunday at noon.",
+  ])('owner allowlist: an unlisted other sentence holds the call — %s', (turn) => {
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test.each([
+    "Perfect. We'll see you Sunday at noon.",
+    "Okay, sounds good. We'll see you Sunday at noon.",
+    "We'll see you Sunday at noon. Have a good one.",
+    "We'll see you Sunday at noon. Okay, bye.",
+    "I'll send you the invoice. We'll see you Sunday at noon.",
+    "You'll get a text shortly. We'll see you Sunday at noon.",
+    "We're all set. We'll see you Sunday at noon.",
+  ])('owner allowlist: listed shapes still ground — %s', (turn) => {
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(true);
+    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+  });
+
   test.each([
     "We need that okay. We'll see you Sunday at noon.",
     "We need this approval. We'll see you Sunday at noon.",
