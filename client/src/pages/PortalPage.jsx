@@ -7087,9 +7087,9 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false }) 
               <>
                 {' '}
                 <a href={bankPendingVerifyUrl} target="_blank" rel="noopener noreferrer" style={{ color: B.glassNavy, fontWeight: 700 }}>
-                  Confirm the deposits here
+                  {microdepositSavedPhrases(bankPendingMicrodepositType).linkLabel}
                 </a>
-                {' '}once they arrive.
+                {' '}{microdepositSavedPhrases(bankPendingMicrodepositType).arrival}.
               </>
             )}
           </div>

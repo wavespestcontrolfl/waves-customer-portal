@@ -73,7 +73,18 @@ describe('microdepositSavedPhrases', () => {
   });
 
   test('names two deposits and their amounts for amounts', () => {
-    expect(microdepositSavedPhrases('amounts')).toEqual({ deposits: 'two small deposits', confirmStep: 'confirm the two amounts' });
+    expect(microdepositSavedPhrases('amounts')).toEqual({
+      deposits: 'two small deposits',
+      confirmStep: 'confirm the two amounts',
+      linkLabel: 'Confirm the deposits here',
+      arrival: 'once they arrive',
+    });
+  });
+
+  test('the verify link is singular for one deposit and neutral when the type is unknown (Codex r1)', () => {
+    expect(microdepositSavedPhrases('descriptor_code')).toMatchObject({ linkLabel: 'Enter the code here', arrival: 'once it arrives' });
+    expect(microdepositSavedPhrases(null).linkLabel).not.toMatch(/deposits/);
+    expect(microdepositSavedPhrases(null).arrival).toBe('once it arrives');
   });
 
   test('stays true for either kind when the type is unknown', () => {

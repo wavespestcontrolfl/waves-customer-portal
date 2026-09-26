@@ -29,7 +29,7 @@
  * may use typographic dashes; they render as HTML.
  */
 
-const { inferEstimateServiceLines, oneTimeServiceKeys } = require('./estimate-service-lines');
+const { inferEstimateServiceLines } = require('./estimate-service-lines');
 const logger = require('./logger');
 
 const RECURRING_TERMS_BENEFIT =
@@ -322,45 +322,20 @@ function packForEstimate(estimate) {
  * present (the unknown pack backstops), so template blocks that reference
  * them never render with holes.
  */
-/**
- * The one rule for whether an estimate may carry a guarantee claim, shared by
- * this drip copy, the estimate page and proposal document (the /data field
- * `noGuaranteeClaims`) and the legacy server-rendered plan terms. True when
- * the estimate quotes termite work anywhere (owner ruling above: termite
- * carries no guarantee of any kind) or when its lanes can't be classified,
- * since those might be termite work. Lane inference reports only the
- * recurring plan when there is one, so termite work quoted one-time beside
- * it (a pest plan plus trenching) is read from the one-time rows too; a read
- * that fails counts as termite, never as a guarantee.
- */
-function estimateMakesNoGuaranteeClaim(estimate, keys = laneKeysFor(estimate)) {
-  if (!keys || !keys.length) return true;
-  if (keys.some((k) => TERMITE_LANES.has(k))) return true;
-  try {
-    // A one-time row no lane matches ('unknown') might be termite work too.
-    const oneTime = oneTimeServiceKeys(estimate);
-    return Array.isArray(oneTime) && oneTime.some((k) => k === 'unknown' || TERMITE_LANES.has(k));
-  } catch (err) {
-    logger.warn(`[estimate-followup-copy] one-time lane read failed: ${err.message}`);
-    return true;
-  }
-}
-
 function followupEmailVars(estimate) {
   const keys = laneKeysFor(estimate);
   const pack = PACKS[copyCategoryForEstimate(estimate, keys)];
-  // No guarantee under ANY pack for a termite lane: one-time trenching /
+  // A termite lane drops the guarantee under ANY pack: one-time trenching /
   // pre-slab / Bora-Care quotes fold to `one_time`, termite + pest to
   // `bundle`, bait monitoring to `commercial`, and all three carry
-  // "satisfaction guaranteed". An unclassified estimate already reads the
-  // unknown pack's guarantee-free line.
-  const noGuarantee = estimateMakesNoGuaranteeClaim(estimate, keys);
+  // "satisfaction guaranteed".
+  const hasTermite = (keys || []).some((k) => TERMITE_LANES.has(k));
   const video = REPORT_TOUR_VIDEOS_LIVE ? pack.video : null;
   return {
     service_label: pack.label,
     category_headline: pack.headline,
     category_hook: pack.hook,
-    category_benefit: noGuarantee ? NO_GUARANTEE_BENEFIT : pack.benefit,
+    category_benefit: hasTermite ? NO_GUARANTEE_BENEFIT : pack.benefit,
     category_question: pack.question,
     category_included: pack.included,
     category_process: pack.process,
@@ -387,7 +362,6 @@ function followupSmsHook(estimate) {
 
 module.exports = {
   copyCategoryForEstimate,
-  estimateMakesNoGuaranteeClaim,
   followupEmailVars,
   followupSmsHook,
   _private: { PACKS, RECURRING_TERMS_BENEFIT, NEUTRAL_BENEFIT, NO_GUARANTEE_BENEFIT, REPORT_TOUR_VIDEOS_LIVE },

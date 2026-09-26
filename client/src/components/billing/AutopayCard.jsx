@@ -564,9 +564,9 @@ export default function AutopayCard({ onStateChange, openRequest = null, onOpenR
             <>
               {' '}
               <a href={bankVerifyUrl} target="_blank" rel="noopener noreferrer" style={{ color: PORTAL_BILLING.body, fontWeight: 700 }}>
-                Confirm the deposits here
+                {microdepositSavedPhrases(bankMicrodepositType).linkLabel}
               </a>
-              {' '}once they arrive.
+              {' '}{microdepositSavedPhrases(bankMicrodepositType).arrival}.
             </>
           )}
         </div>

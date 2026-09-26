@@ -5592,10 +5592,10 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // on unused visits, cancel anytime with no contract, money-back guarantee +
   // free re-service. Gated to recurring plans (same condition as the billing
   // card) and mode-aware so it hides in one-time mode.
-  // Termite and unclassifiable estimates make no guarantee claim (the shared
-  // rule, estimate-followup-copy.js, decided by the route from the estimate
-  // row): the card keeps its cancel/refund terms and drops the guarantee
-  // heading and item.
+  // Termite and unclassifiable estimates make no guarantee claim
+  // (serviceMixMakesNoGuaranteeClaim, decided by the route from the
+  // estimate's rows): the card keeps its cancel/refund terms and drops the
+  // guarantee heading and item.
   const planTermsNoGuarantee = estimate?.noGuaranteeClaims === true;
   const planTermsCardHtml = showBillingCard ? `
   <section class="card plan-terms-card"${billingModeAttr}>
@@ -8837,9 +8837,15 @@ async function handleEstimateView(req, res, next) {
 
     sendEstimatePage(res, req.params.token, {
       id: estimate.id,
-      // The shared guarantee rule, decided here from the estimate row
-      // (renderPage only sees this view and the parsed data).
-      noGuaranteeClaims: require('../services/estimate-followup-copy').estimateMakesNoGuaranteeClaim(estimate),
+      // The page's guarantee rule, decided from the same normalized rows the
+      // React view reads (renderPage only sees this view and the data).
+      noGuaranteeClaims: serviceMixMakesNoGuaranteeClaim(
+        recurringServicesWithSupplements(estData?.result || estData?.engineResult || estData || {}),
+        [
+          ...(normalizeOneTimeBreakdown(estData)?.items || []),
+          ...(pricingBundleForView?.oneTimeBreakdown?.items || []),
+        ],
+      ),
       status: estimate.status === 'accepted'
         ? estimate.status
         : (pageQuoteRequirement.quoteRequired ? 'quote_required' : estimate.status),
@@ -19898,6 +19904,44 @@ function collectServiceCategories(recurringServices = [], oneTimeItems = []) {
   return categories;
 }
 
+// Whether an estimate may carry an estimate-wide guarantee claim, read from
+// the same normalized rows and classifiers the page renders from (above).
+// Owner ruling: termite carries no guarantee of any kind (re-treatment needs
+// the paid bond). True when any recurring or one-time service row is termite
+// work (by the page's category, or by termite wording on the row), when a
+// service row can't be classified (it might be termite work), or when nothing
+// on the estimate classifies at all. isNonServiceOneTimeItem keeps setup,
+// discount and credit rows out, and counts a positive "other one-time
+// services" residual (work stored where the one-time rows don't reach, such
+// as engine lineItems) as real unclassified work.
+const NO_GUARANTEE_TERMITE_CATEGORIES = new Set([
+  'termite_bait', 'foam_recurring', 'termite_trenching', 'pre_slab_termiticide',
+  'bora_care', 'termite_foam', 'wdo_inspection',
+]);
+const TERMITE_WORK_RX = /termite|trench|bora\s*care|boracare|pre\s*slab|slab\s*pre\s*treat|\bwdo\b|wood\s*destroying|\bfoam\b|termidor|trelona|taurus|altriset|sentricon/i;
+// Recurring rows that are not services (a membership line) never count.
+const NON_SERVICE_RECURRING_KEY_RX = /membership|setup|discount|credit/;
+function serviceMixMakesNoGuaranteeClaim(recurringServices = [], oneTimeItems = []) {
+  const rowText = (row = {}) => [row.key, row.service, row.name, row.label, row.displayName]
+    .filter(Boolean).join(' ').replace(/[_-]+/g, ' ');
+  let classified = 0;
+  for (const svc of (Array.isArray(recurringServices) ? recurringServices : [])) {
+    if (!svc || typeof svc !== 'object') continue;
+    const key = recurringServiceKey(svc);
+    if (NON_SERVICE_RECURRING_KEY_RX.test(key || '')) continue;
+    const category = categoryForRecurringServiceKey(key);
+    if (!category || NO_GUARANTEE_TERMITE_CATEGORIES.has(category) || TERMITE_WORK_RX.test(rowText(svc))) return true;
+    classified += 1;
+  }
+  for (const item of (Array.isArray(oneTimeItems) ? oneTimeItems : [])) {
+    if (!item || typeof item !== 'object' || isNonServiceOneTimeItem(item)) continue;
+    const category = serviceCategoryForOneTimeItem(item);
+    if (!category || NO_GUARANTEE_TERMITE_CATEGORIES.has(category) || TERMITE_WORK_RX.test(rowText(item))) return true;
+    classified += 1;
+  }
+  return classified === 0;
+}
+
 // Optional service-category scope for the glass release: CSV env, e.g.
 // GATE_ESTIMATE_GLASS_CATEGORIES=pest_control,lawn_care. Unset/empty = all
 // categories. An estimate qualifies only when EVERY category on it is in
@@ -26247,10 +26291,9 @@ async function composeEstimateDataPayload(estimate, {
       recurringServicesForIntelligence,
       oneTimeItemsForCategory,
     );
-    // The shared guarantee rule (estimate-followup-copy.js): a termite lane or
-    // an unclassifiable estimate makes no guarantee claim. The drip emails,
-    // this page and its proposal document all read the same decision.
-    const noGuaranteeClaims = require('../services/estimate-followup-copy').estimateMakesNoGuaranteeClaim(estimate);
+    // Termite work (or unclassifiable work) anywhere on the page's own rows:
+    // the page and its proposal document make no estimate-wide guarantee.
+    const noGuaranteeClaims = serviceMixMakesNoGuaranteeClaim(recurringServicesForIntelligence, oneTimeItemsForCategory);
     // Guarantee-only renewals accept with NO appointment: the acceptance
     // contract tells the React view to skip the slot picker and offer the
     // payment-only (invoice) accept. An existing linked appointment keeps
@@ -26926,7 +26969,7 @@ async function composeEstimateDataPayload(estimate, {
         // the Ask bar (codex r5 P1). Present only when true so every other
         // response stays byte-identical.
         ...(isRegulatedCertificateSurface ? { regulatedCertificateSurface: true } : {}),
-        // The server's guarantee decision (estimateMakesNoGuaranteeClaim):
+        // The server's guarantee decision (serviceMixMakesNoGuaranteeClaim):
         // the React page and proposal document drop "Satisfaction
         // guaranteed" wherever they'd make an estimate-wide claim. Present
         // only when true so every other response stays byte-identical.
@@ -27460,6 +27503,7 @@ module.exports.bookingServiceFor = bookingServiceFor;
 module.exports.attachPublicPricingContract = attachPublicPricingContract;
 module.exports.serviceCategoryForOneTimeChoice = serviceCategoryForOneTimeChoice;
 module.exports.serviceCategoryForOneTimeItem = serviceCategoryForOneTimeItem;
+module.exports.serviceMixMakesNoGuaranteeClaim = serviceMixMakesNoGuaranteeClaim;
 module.exports.oneTimeInvoiceLabelForCategory = oneTimeInvoiceLabelForCategory;
 module.exports.oneTimeToggleCopyForCategory = oneTimeToggleCopyForCategory;
 module.exports.isOneTimeChoiceItemForCategory = isOneTimeChoiceItemForCategory;

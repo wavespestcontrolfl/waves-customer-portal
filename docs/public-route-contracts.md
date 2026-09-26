@@ -1444,19 +1444,21 @@ preferences ride estimateToggleLimiter, data rides dataLimiter, pdf rides
 its own estimatePdfLimiter (10 per 5 min)).
 `/data`'s optional `estimate.noGuaranteeClaims: true` (copy-audit follow-up
 to #4874, 2026-09-26; owner ruling: termite carries no guarantee of any kind)
-is the server's guarantee decision, `estimate-followup-copy.js`
-`estimateMakesNoGuaranteeClaim`, the same rule the estimate drip emails use.
-Present only when true, absent otherwise so every other response stays
-byte-identical. True when the estimate quotes termite work anywhere (a
-`termite` or `commercial_termite_bait` lane from `inferEstimateServiceLines`,
-or a termite or unclassifiable one-time row from `oneTimeServiceKeys`, which
-lane inference skips beside a recurring plan) or when its lanes can't be
-classified. The React page's one-time hero and the proposal document's terms
-line drop their guarantee wording when it is set; per-service CTA lines
-follow their own services (`glassCtaMicroForKeys`: termite work or an
-unclassifiable service makes no guarantee). Derived read-only from the
-estimate row; no write. The legacy server-rendered page applies the same
-rule to its plan-terms card.
+is the page's guarantee decision, `serviceMixMakesNoGuaranteeClaim` in this
+route, read from the SAME normalized rows the page's category and
+regulated-surface decisions use (`recurringServicesWithSupplements` plus the
+`normalizeOneTimeBreakdown` rows unioned with the pricing bundle's). Present
+only when true, absent otherwise so every other response stays
+byte-identical. True when any recurring or one-time service row is termite
+work (the page's own category, or termite wording on the row), when a service
+row can't be classified, or when nothing on the estimate classifies at all.
+Setup, discount and credit rows never count (`isNonServiceOneTimeItem`), and
+a positive "other one-time services" residual counts as unclassified work.
+The React page's one-time hero and the proposal document's terms line drop
+their guarantee wording when it is set; per-service CTA lines follow their
+own services (`glassCtaMicroForKeys`: termite work or an unclassifiable
+service makes no guarantee). Derived read-only; no write. The legacy
+server-rendered page applies the same rule to its plan-terms card.
 `/data`'s optional `consultationOffer: { url }` (consultation-first lane,
 owner ruling 2026-09-23; dark behind BOTH `GATE_ESTIMATE_CONSULTATION_OFFER`
 and `GATE_LEAD_INSPECTION_LINK` — `server/services/estimate-consultation-offer.js`)

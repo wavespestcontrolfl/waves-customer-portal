@@ -23,17 +23,30 @@ export function microdepositDetailFromNextAction(vwm = {}) {
 // carries a 6-character code starting with “SM”; `amounts` sends TWO deposits
 // whose amounts the customer confirms. An unknown type (a row read back from
 // the server, a redirect return) gets wording that is true for both.
+// `linkLabel` / `arrival` word the "verify here" link the same way.
 export function microdepositSavedPhrases(microdepositType) {
   if (microdepositType === 'descriptor_code') {
     return {
       deposits: 'one small deposit',
       confirmStep: 'enter the 6-character code starting with “SM” from its description',
+      linkLabel: 'Enter the code here',
+      arrival: 'once it arrives',
     };
   }
   if (microdepositType === 'amounts') {
-    return { deposits: 'two small deposits', confirmStep: 'confirm the two amounts' };
+    return {
+      deposits: 'two small deposits',
+      confirmStep: 'confirm the two amounts',
+      linkLabel: 'Confirm the deposits here',
+      arrival: 'once they arrive',
+    };
   }
-  return { deposits: 'a small deposit (or two)', confirmStep: 'confirm it' };
+  return {
+    deposits: 'a small deposit (or two)',
+    confirmStep: 'confirm it',
+    linkLabel: 'Verify your account here',
+    arrival: 'once it arrives',
+  };
 }
 
 // Copy building blocks for the "verify your bank to finish paying" state.
