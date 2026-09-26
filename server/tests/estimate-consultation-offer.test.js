@@ -18,6 +18,9 @@ jest.mock('../services/short-url', () => ({ createShortCode: (...args) => mockCr
 
 let mockBuilders = {};
 const mockDb = jest.fn((table) => mockBuilders[table]);
+// The final check opens one read-only REPEATABLE READ snapshot (Codex #4918
+// r21); here the snapshot is the same mocked db.
+mockDb.transaction = jest.fn(async (fn) => fn(mockDb));
 jest.mock('../models/db', () => mockDb);
 
 const mockComputeConsultationSlotsForLead = jest.fn();
@@ -463,7 +466,7 @@ describe('estimateConsultationLead context + reconfirmConsultationLead', () => {
     await estimateConsultationLead({ ...baseArgs(), context });
     mockCurrentBookingState.mockResolvedValue({ lead: OPEN_RECURRING_LEAD, bookable: true, addressInputs: 'INPUTS-B' });
     expect(await reconfirmConsultationLead(context)).toBeNull();
-    expect(mockCurrentBookingState).toHaveBeenLastCalledWith(LEAD_ID);
+    expect(mockCurrentBookingState).toHaveBeenLastCalledWith(LEAD_ID, mockDb); // inside the snapshot
   });
 
   test('the estimate goes off-surface after the build → the reconfirm returns null', async () => {
@@ -495,48 +498,35 @@ describe('buildEstimateConsultationOffer — the booking address inputs after th
   });
 });
 
-// Codex #4918 r18: the page's own lead-wide state is re-judged after the
-// probe, and the contact-bearing lead read is the LAST one.
-describe('buildEstimateConsultationOffer — lead-wide state and the final lead read', () => {
-  const { estimateConsultationLead } = require('../services/estimate-consultation-offer');
+// Codex #4918 r18/r21: the page's own lead-wide state is re-judged after
+// the probe, and every read of that final check comes from one snapshot.
+describe('buildEstimateConsultationOffer — lead-wide state and the final snapshot', () => {
+  const { estimateConsultationLead, reconfirmConsultationLead } = require('../services/estimate-consultation-offer');
 
   test('an assessment or visit booked for the lead during the probe (the page would answer already_booked/converted) → no offer', async () => {
     mockCurrentBookingState.mockResolvedValue({ lead: OPEN_RECURRING_LEAD, bookable: false, addressInputs: 'INPUTS-A' });
     expect(await buildEstimateConsultationOffer(baseArgs())).toBeNull();
   });
 
-  test('the contact-bearing lead read comes AFTER the booking-state lookup, and its row is the one returned', async () => {
-    const order = [];
-    mockCurrentBookingState.mockImplementation(async () => {
-      order.push('booking-state');
-      return { lead: OPEN_RECURRING_LEAD, bookable: true, addressInputs: 'INPUTS-A' };
-    });
-    const leadFirst = mockBuilders.leads.first;
-    mockBuilders.leads.first = jest.fn(async (...args) => { order.push('lead-read'); return leadFirst(...args); });
+  test('the whole final check reads ONE read-only REPEATABLE READ snapshot — the booking state, the refusal and the lead read all get it (Codex #4918 r21)', async () => {
     const context = {};
     const lead = await estimateConsultationLead({ ...baseArgs(), context });
+
     expect(lead).toBeTruthy();
-    expect(order[order.length - 1]).toBe('lead-read');
-    expect(order.lastIndexOf('booking-state')).toBeLessThan(order.lastIndexOf('lead-read'));
+    expect(mockDb.transaction).toHaveBeenCalledWith(expect.any(Function), { isolationLevel: 'repeatable read', readOnly: true });
+    expect(mockCurrentBookingState).toHaveBeenCalledWith(LEAD_ID, mockDb); // the snapshot handle
   });
 
-  test('the call-origin proof that picked the trusted customer was cleared before the final read (an admin unlinked the call) → fails closed (Codex #4918 r20)', async () => {
-    const callLead = { ...OPEN_RECURRING_LEAD, first_contact_channel: 'call', twilio_call_sid: 'CA123' };
-    mockCurrentBookingState.mockResolvedValue({ lead: callLead, bookable: true, addressInputs: 'INPUTS-A' });
-    let leadReads = 0;
-    // Call-verified for the pre-probe read, unlinked by the final contact read.
-    mockBuilders.leads.first = jest.fn(async () => (++leadReads === 1 ? callLead : { ...callLead, twilio_call_sid: null }));
-    expect(await buildEstimateConsultationOffer(baseArgs())).toBeNull();
-    expect(leadReads).toBe(2);
-  });
+  test('a caller-supplied snapshot is used as-is (the engine shares its own) — no second transaction', async () => {
+    const context = {};
+    await estimateConsultationLead({ ...baseArgs(), context });
+    mockDb.transaction.mockClear();
+    const engineSnapshot = jest.fn((table) => mockBuilders[table]);
 
-  test('a lead field the checks judged moved before the final read (here: the lead converted after the refusal check passed) → fails closed', async () => {
-    mockCurrentBookingState.mockResolvedValue({ lead: OPEN_RECURRING_LEAD, bookable: true, addressInputs: 'INPUTS-A' });
-    const converted = { ...OPEN_RECURRING_LEAD, status: 'converted', converted_at: new Date('2026-09-26T12:00:00Z') };
-    let leadReads = 0;
-    // Open for the pre-probe read, converted by the final contact read.
-    mockBuilders.leads.first = jest.fn(async () => (++leadReads === 1 ? OPEN_RECURRING_LEAD : converted));
-    expect(await buildEstimateConsultationOffer(baseArgs())).toBeNull();
-    expect(leadReads).toBe(2);
+    expect(await reconfirmConsultationLead(context, engineSnapshot)).toBeTruthy();
+    expect(mockDb.transaction).not.toHaveBeenCalled();
+    expect(mockCurrentBookingState).toHaveBeenLastCalledWith(LEAD_ID, engineSnapshot);
+    expect(engineSnapshot).toHaveBeenCalledWith('estimates');
+    expect(engineSnapshot).toHaveBeenCalledWith('leads');
   });
 });

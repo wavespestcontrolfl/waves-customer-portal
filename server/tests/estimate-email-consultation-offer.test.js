@@ -29,6 +29,7 @@ jest.mock('../services/estimate-consultation-offer', () => ({
   estimateConsultationLead: (...args) => mockEstimateConsultationLead(...args),
   reconfirmConsultationLead: (...args) => mockReconfirmConsultationLead(...args),
   PROBE_BUDGET_MS: 3000,
+  FINAL_CHECK_SNAPSHOT: { isolationLevel: 'repeatable read', readOnly: true },
 }));
 
 const mockConsultationUrlForLead = jest.fn();
@@ -220,8 +221,14 @@ describe('mintGoneQuietConsultationUrl — after the engine\'s claim', () => {
 describe('goneQuietConsultationStillValid — run by the engine together with its final reads', () => {
   test('still eligible and still the lead\'s own inbox → true', async () => {
     expect(await goneQuietConsultationStillValid(CONTEXT, 'taylor@example.com')).toBe(true);
-    expect(mockReconfirmConsultationLead).toHaveBeenCalledWith(CONTEXT);
+    expect(mockReconfirmConsultationLead).toHaveBeenCalledWith(CONTEXT, null);
     expect(mockRecipientIsLead).toHaveBeenCalledWith('taylor@example.com', LEAD);
+  });
+
+  test('the engine\'s snapshot is passed through, so the re-judge reads the same instant as the engine\'s own final reads (Codex #4918 r21)', async () => {
+    const snapshot = jest.fn();
+    await goneQuietConsultationStillValid(CONTEXT, 'taylor@example.com', snapshot);
+    expect(mockReconfirmConsultationLead).toHaveBeenCalledWith(CONTEXT, snapshot);
   });
 
   test('eligibility lost since the probe (hold, linkage change, lead edit) → false', async () => {

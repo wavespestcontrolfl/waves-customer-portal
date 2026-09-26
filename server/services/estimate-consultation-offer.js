@@ -92,10 +92,10 @@ function startBoundedProbe(run) {
 // stamp alone left the offer inert. Both sources count; more than one live
 // lead pointing at the estimate, or a pointer and a stamp naming different
 // leads, is ambiguous and yields none.
-async function linkedLeadIdFor(estimateId, estimateData) {
+async function linkedLeadIdFor(estimateId, estimateData, conn = db) {
   const candidates = new Set();
   if (estimateId) {
-    const pointing = await db('leads').where({ estimate_id: estimateId }).whereNull('deleted_at').limit(2).pluck('id');
+    const pointing = await conn('leads').where({ estimate_id: estimateId }).whereNull('deleted_at').limit(2).pluck('id');
     pointing.forEach((id) => candidates.add(String(id).toLowerCase()));
   }
   // Lowercased on both sides: uuids compare case-insensitively in Postgres,
@@ -178,24 +178,29 @@ async function estimateConsultationLead({ estimate, estimateData, acceptActive, 
   return fresh;
 }
 
-// Lead fields the booking-state and refusal checks judge — every lead-row
-// field those checks consume, including the call-origin proof
-// (first_contact_channel, twilio_call_sid) that decides which customer the
-// page trusts (Codex #4918 r20). The final contact-bearing read must still
-// carry the same values.
-const JUDGED_LEAD_FIELDS = [
-  'phone', 'status', 'converted_at', 'customer_id', 'address', 'city', 'zip',
-  'first_contact_channel', 'twilio_call_sid',
-];
+// Every read of the final check comes from ONE read-only REPEATABLE READ
+// snapshot (Codex #4918 r16–r21): a sequence of reads always leaves some
+// read stale against the ones after it, so the check reads one consistent
+// state instead — the estimate, its linkage, the lead-wide booking state,
+// the trusted customer, the refusal and the lead's contact all as of the
+// same instant. The engine's gone-quiet send shares the snapshot with its
+// own last estimate and opt-out reads.
+const FINAL_CHECK_SNAPSHOT = { isolationLevel: 'repeatable read', readOnly: true };
 
 // The final, post-probe eligibility re-check — a fresh read of the
 // estimate and lead rows, re-judged against the same rules
 // estimateConsultationLead applies above. Kept single-sourced so a rule
 // added to either check never drifts between the pre-probe and post-probe
-// passes.
-async function finalEligibility(estimateId, leadId, probedAddress, probedAddressInputs) {
+// passes. Runs inside the caller's snapshot `trx`, or opens its own.
+async function finalEligibility(estimateId, leadId, probedAddress, probedAddressInputs, trx = null) {
+  if (!trx) {
+    return db.transaction(
+      (snapshot) => finalEligibility(estimateId, leadId, probedAddress, probedAddressInputs, snapshot),
+      FINAL_CHECK_SNAPSHOT,
+    );
+  }
   const { isEstimateAcceptActive } = require('../routes/estimate-public');
-  const freshEstimate = await db('estimates').where({ id: estimateId }).first();
+  const freshEstimate = await trx('estimates').where({ id: estimateId }).first();
   if (!freshEstimate || !isEstimateAcceptActive(freshEstimate)) return null;
   let freshEstimateData = freshEstimate.estimate_data;
   if (typeof freshEstimateData === 'string') {
@@ -209,7 +214,7 @@ async function finalEligibility(estimateId, leadId, probedAddress, probedAddress
   // The linkage itself can change during the probe (leads.estimate_id
   // removed or reassigned, a second lead attached, the stamped lead_id
   // replaced): the fresh linkage must still name exactly this lead.
-  const freshLeadId = await linkedLeadIdFor(freshEstimate.id, freshEstimateData);
+  const freshLeadId = await linkedLeadIdFor(freshEstimate.id, freshEstimateData, trx);
   if (!freshLeadId || String(freshLeadId).toLowerCase() !== String(leadId).toLowerCase()) return null;
 
   // What /inspection/:token would do with this lead now (Codex #4918
@@ -219,18 +224,17 @@ async function finalEligibility(estimateId, leadId, probedAddress, probedAddress
   // customer's, which customer that is — must be what the probe resolved
   // from (compared, never re-geocoded). Missing probe inputs fail closed.
   const { currentBookingState } = require('../routes/inspection-public')._internals;
-  const booking = await currentBookingState(leadId);
+  const booking = await currentBookingState(leadId, trx);
   if (!booking?.bookable || !probedAddressInputs || booking.addressInputs !== probedAddressInputs) return null;
-  if (await leadLinkRefusal(booking.lead)) return null;
+  if (await leadLinkRefusal(booking.lead, trx)) return null;
 
-  // The contact-bearing lead row is the LAST read (Codex #4918 r18): only
-  // synchronous checks follow it, so the caller's own-inbox judgment sees
-  // the lead as it is now. It must still be the lead the checks above
-  // judged — any field they read that moved since fails closed.
-  const freshLead = await db('leads').where({ id: leadId }).whereNull('deleted_at')
-    .first('id', 'email', 'service_interest', ...JUDGED_LEAD_FIELDS);
+  // The lead's contact and intent — from the same snapshot, so it is the
+  // same lead state the booking-state and refusal checks above judged
+  // (Codex #4918 r18/r20: call-origin proof, status, address and contact
+  // can no longer move between those checks and this read).
+  const freshLead = await trx('leads').where({ id: leadId }).whereNull('deleted_at')
+    .first('id', 'phone', 'email', 'service_interest', 'status', 'converted_at', 'customer_id');
   if (!freshLead) return null;
-  if (JUDGED_LEAD_FIELDS.some((col) => JSON.stringify(freshLead[col]) !== JSON.stringify(booking.lead[col]))) return null;
   const { leadMatchesEstimateContact } = require('./lead-estimate-link');
   if (!leadMatchesEstimateContact(freshLead, freshEstimate)) return null;
   if (!leadWantsRecurringPlan(freshLead)) return null;
@@ -262,9 +266,9 @@ async function buildEstimateConsultationOffer({ estimate, estimateData, acceptAc
 // (the engine's send checks and claim, a short-link mint) between
 // eligibility and the send (Codex #4918 r9/r12). `context` is what
 // estimateConsultationLead recorded.
-async function reconfirmConsultationLead(context) {
+async function reconfirmConsultationLead(context, trx = null) {
   if (!context?.leadId || !leadInspectionLinkLive()) return null;
-  return finalEligibility(context.estimateId, context.leadId, context.probedAddress, context.addressInputs);
+  return finalEligibility(context.estimateId, context.leadId, context.probedAddress, context.addressInputs, trx);
 }
 
 module.exports = {
@@ -272,5 +276,6 @@ module.exports = {
   estimateConsultationLead,
   reconfirmConsultationLead,
   PROBE_BUDGET_MS,
+  FINAL_CHECK_SNAPSHOT,
   _test: { sameProperty, linkedLeadIdFor, finalEligibility, PROBE_BUDGET_MS, MAX_PROBES_IN_FLIGHT, probesInFlight: () => probesInFlight },
 };

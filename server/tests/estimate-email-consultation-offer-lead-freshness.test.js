@@ -17,6 +17,9 @@ jest.mock('../utils/portal-url', () => ({ publicPortalUrl: () => 'https://portal
 
 let mockBuilders = {};
 const mockDb = jest.fn((table) => mockBuilders[table]);
+// The final check opens one read-only REPEATABLE READ snapshot (Codex #4918
+// r21); here the snapshot is the same mocked db.
+mockDb.transaction = jest.fn(async (fn) => fn(mockDb));
 jest.mock('../models/db', () => mockDb);
 
 const mockComputeConsultationSlotsForLead = jest.fn();

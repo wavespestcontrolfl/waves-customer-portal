@@ -1477,11 +1477,12 @@ to finish in the background, and nothing it resolves is used), and at most
 3 probes run at once per server process (`MAX_PROBES_IN_FLIGHT`, abandoned
 ones counted until their work settles — past the cap no probe starts).
 After the probe the estimate and the lead are re-read and every row-level
-rule above is re-judged on the fresh rows (`finalEligibility`), so a status
-change, hold, re-link or contact edit that lands during the probe omits the
-field — and so does a change to what the page's booking address resolves
-from (the lead's own address, its trusted customer's stored address or
-coordinates, or which customer that is: `inspection-public.js`
+rule above is re-judged on the fresh rows (`finalEligibility`, all from one
+read-only REPEATABLE READ snapshot so every check sees the same instant), so
+a status change, hold, re-link or contact edit that lands during the probe
+omits the field — and so does a change to what the page's booking address
+resolves from (the lead's own address, its trusted customer's stored address
+or coordinates, or which customer that is: `inspection-public.js`
 `bookingAddressInputs`, compared, never re-geocoded), or a booking that
 leaves the page's own lead-wide state no longer bookable (an assessment or
 visit booked meanwhile: `currentBookingState`, the same `readEligibility`

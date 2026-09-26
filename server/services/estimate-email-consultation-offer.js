@@ -26,9 +26,10 @@
  *     probe-free shared eligibility (reconfirmConsultationLead) and the
  *     lead's-own-inbox rule (the bearer goes ONLY to the lead's own inbox,
  *     as in the new_lead consultation email) against the recipient this
- *     email is about to go to. The engine runs it TOGETHER with its own last
- *     reads of the estimate and the opt-out, as the final step before its
- *     send; false drops the link.
+ *     email is about to go to. The engine runs it inside ONE read-only
+ *     REPEATABLE READ snapshot together with its own last reads of the
+ *     estimate and the opt-out, as the final step before its send; false
+ *     drops the link.
  *
  * '' is what the estimate.engage_gone_quiet template's `consultation_url`
  * CTA block treats as "render nothing" — so a dark gate or an ineligible
@@ -44,7 +45,9 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { estimateEmailConsultationOfferLive } = require('../config/feature-gates');
-const { estimateConsultationLead, reconfirmConsultationLead, PROBE_BUDGET_MS } = require('./estimate-consultation-offer');
+const {
+  estimateConsultationLead, reconfirmConsultationLead, PROBE_BUDGET_MS, FINAL_CHECK_SNAPSHOT,
+} = require('./estimate-consultation-offer');
 const { consultationUrlForLead } = require('./lead-consultation-link');
 const { parseEstimateData } = require('./estimate-service-lines');
 // shortWrap (the same createShortCode-or-throw helper the new_lead
@@ -108,10 +111,10 @@ async function mintGoneQuietConsultationUrl(context) {
   }
 }
 
-async function goneQuietConsultationStillValid(context, recipientEmail) {
+async function goneQuietConsultationStillValid(context, recipientEmail, trx = null) {
   try {
     if (!context?.leadId || !estimateEmailConsultationOfferLive()) return false;
-    const lead = await reconfirmConsultationLead(context);
+    const lead = await reconfirmConsultationLead(context, trx);
     return Boolean(lead) && recipientIsLead(recipientEmail, lead);
   } catch (err) {
     logger.warn(`[estimate-email-consultation-offer] final check failed for estimate ${context?.estimateId} (${err?.name || 'Error'})`);
@@ -125,4 +128,6 @@ module.exports = {
   goneQuietConsultationStillValid,
   // The per-probe ceiling, so the engine can reserve it against its batch budget.
   PROBE_BUDGET_MS,
+  // The transaction config the engine's final guards share with this check.
+  FINAL_CHECK_SNAPSHOT,
 };

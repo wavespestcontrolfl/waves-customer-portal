@@ -85,6 +85,7 @@ jest.mock('../services/estimate-email-consultation-offer', () => ({
   mintGoneQuietConsultationUrl: jest.fn(async () => ''),
   goneQuietConsultationStillValid: jest.fn(async () => true),
   PROBE_BUDGET_MS: 3000,
+  FINAL_CHECK_SNAPSHOT: { isolationLevel: 'repeatable read', readOnly: true },
 }));
 
 const db = require('../models/db');
@@ -217,6 +218,8 @@ beforeEach(() => {
     const table = String(rawTable).split(' as ')[0]; // normalize aliased scans
     return makeBuilder(table, (queues[table] || []).shift() || {});
   });
+  // The final guards' snapshot transaction reads through the same queues.
+  db.transaction = jest.fn(async (fn) => fn(db));
   db.raw.mockImplementation((sql, bindings) => {
     if (typeof sql === 'string' && sql.includes('INSERT INTO estimate_followup_jobs')) {
       rawJobs.push({ sql, bindings });
@@ -522,11 +525,15 @@ describe('processDueJobs', () => {
       expect(order()).toEqual([
         'estimates', 'notification_prefs', 'probe', // pass 1: every check, then the probe
         'estimates', 'notification_prefs', 'claim', // pass 2: every check again, post-probe
-        'mint', 'recheck', 'estimates', 'notification_prefs', 'send', // the link, then the final checks together, then the send
+        'mint', 'estimates', 'notification_prefs', 'recheck', 'send', // the link, then the final guards in one snapshot, then the send
       ]);
       expect(probeGoneQuietConsultation).toHaveBeenCalledTimes(1);
       expect(probeGoneQuietConsultation).toHaveBeenCalledWith('est-1');
-      expect(goneQuietConsultationStillValid).toHaveBeenCalledWith(CONTEXT, 'jordan@example.com');
+      // Every final guard reads ONE read-only REPEATABLE READ snapshot, and the
+      // offer check reads it too (Codex #4918 r21).
+      expect(db.transaction).toHaveBeenCalledTimes(1);
+      expect(db.transaction).toHaveBeenCalledWith(expect.any(Function), { isolationLevel: 'repeatable read', readOnly: true });
+      expect(goneQuietConsultationStillValid).toHaveBeenCalledWith(CONTEXT, 'jordan@example.com', db);
       expect(followupShared.sendDualChannel.mock.calls[0][0]).toEqual(expect.objectContaining({ customer_email: 'jordan@example.com' }));
       expect(followupShared.estimateEmailPayload.mock.calls[0][1]).toBe('Jordan');
       expect(followupShared.estimateEmailPayload.mock.calls[0][3]).toEqual(expect.objectContaining({ consultation_url: OFFER_URL }));

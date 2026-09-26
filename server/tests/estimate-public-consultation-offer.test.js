@@ -41,6 +41,8 @@ jest.mock('../models/db', () => {
   const mock = jest.fn();
   mock.fn = { now: jest.fn(() => 'NOW') };
   mock.raw = jest.fn((sql) => sql);
+  // The offer's final check reads inside one snapshot transaction.
+  mock.transaction = jest.fn(async (fn) => fn(mock));
   return mock;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));

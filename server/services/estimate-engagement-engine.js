@@ -49,6 +49,7 @@ const { followupEmailVars } = require('./estimate-followup-copy');
 // payload never references it.
 const {
   probeGoneQuietConsultation, mintGoneQuietConsultationUrl, goneQuietConsultationStillValid, PROBE_BUDGET_MS,
+  FINAL_CHECK_SNAPSHOT,
 } = require('./estimate-email-consultation-offer');
 // Shared lane mechanics from the stage engine (see module doc above).
 const followupShared = require('./estimate-follow-up')._private;
@@ -812,25 +813,29 @@ async function processDueBatch(now = new Date()) {
         est, `estimate_engage_${rule.rule_key}_accept`, { query: 'intent=accept', emailOnly: true },
       );
       // After the claim: mint the link (the one write this offer adds), then
-      // judge everything the send depends on TOGETHER as the last step
-      // before sending (Codex #4918 r9–r16) — the offer's shared eligibility
-      // and own-inbox rule, the estimate row, and the customer's email
-      // opt-out, read concurrently so none waits on another. If the row
-      // changed (anything but updated_at) or the customer opted out since,
-      // give the claim back and retry the whole job on fresh state, where
-      // the checks at the top decide it; a failed offer check drops only the
-      // link. A read error throws to the loop's catch: claim released,
-      // bounded retry. Nothing awaits after these reads but the send.
+      // judge everything the send depends on as the last step before sending
+      // — the estimate row, the customer's email opt-out, and the offer's
+      // shared eligibility and own-inbox rule — from ONE read-only
+      // REPEATABLE READ snapshot (Codex #4918 r9–r21): every guard reads the
+      // same instant, so none can go stale while another is still reading.
+      // If the row changed (anything but updated_at) or the customer opted
+      // out, give the claim back and retry the whole job on fresh state,
+      // where the checks at the top decide it; a failed offer check drops
+      // only the link. A read error throws to the loop's catch: claim
+      // released, bounded retry. Nothing awaits after the snapshot but the
+      // send.
       let consultationUrl = '';
       if (consultationContext) {
         const minted = await mintGoneQuietConsultationUrl(consultationContext);
-        const [offerStillValid, current, prefs] = await Promise.all([
-          minted ? goneQuietConsultationStillValid(consultationContext, est.customer_email) : false,
-          db('estimates').where({ id: est.id }).first(),
-          est.customer_id
-            ? db('notification_prefs').where({ customer_id: est.customer_id }).first('email_enabled')
+        const { current, prefs, offerStillValid } = await db.transaction(async (trx) => ({
+          current: await trx('estimates').where({ id: est.id }).first(),
+          prefs: est.customer_id
+            ? await trx('notification_prefs').where({ customer_id: est.customer_id }).first('email_enabled')
             : null,
-        ]);
+          offerStillValid: minted
+            ? await goneQuietConsultationStillValid(consultationContext, est.customer_email, trx)
+            : false,
+        }), FINAL_CHECK_SNAPSHOT);
         const changed = !current || Object.keys(current).some((col) => !IGNORED_ESTIMATE_COLUMNS.has(col)
           && JSON.stringify(current[col]) !== JSON.stringify(est[col]));
         if (changed || prefs?.email_enabled === false) {

@@ -613,11 +613,14 @@ function bookingAddressInputs(lead, custRow) {
 // #4918 r17/r18): whether the lead-wide state still allows a booking (the
 // SAME readEligibility the probe ran — never already_booked/converted), and
 // what the booking address resolves from. `lead` is the row it judged.
-async function currentBookingState(leadId) {
-  const lead = await loadLead(db, leadId);
+// Every read goes through `conn`: the offer passes one read-only REPEATABLE
+// READ snapshot (Codex #4918 r21), so the customer row the fingerprint is
+// built from and the one eligibility judged are the same state.
+async function currentBookingState(leadId, conn = db) {
+  const lead = await loadLead(conn, leadId);
   if (!lead) return null;
-  const custRow = await loadTrustedCustomer(db, lead, undefined);
-  const eligibility = await readEligibility(lead, custRow, undefined, { includeRescheduleUrl: false });
+  const custRow = await loadTrustedCustomer(conn, lead, undefined);
+  const eligibility = await readEligibility(lead, custRow, undefined, { conn, includeRescheduleUrl: false });
   return { lead, bookable: eligibility.state === 'ok', addressInputs: bookingAddressInputs(lead, custRow) };
 }
 

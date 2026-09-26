@@ -75,13 +75,15 @@ function isUsPhone(phone) {
 // (Codex #4709 r17 + r18 P2s): open lead, a US phone, and a linked customer
 // (if any) that is live and still on the lead's phone. Nothing is minted
 // that the send would refuse.
-async function leadLinkRefusal(lead) {
+// `conn` lets a caller judge inside its own read snapshot (the estimate
+// consultation offer's final check); every other caller keeps the pool.
+async function leadLinkRefusal(lead, conn = db) {
   if (!lead) return 'Lead not found';
   if (!isOpenLeadRow(lead)) return 'That lead has already converted or closed';
   if (!lead.phone) return 'Lead has no phone number';
   if (!isUsPhone(lead.phone)) return 'Consultation links go to US numbers only';
   if (!lead.customer_id) return null;
-  const owner = await db('customers').where({ id: lead.customer_id }).whereNull('deleted_at').first('phone');
+  const owner = await conn('customers').where({ id: lead.customer_id }).whereNull('deleted_at').first('phone');
   if (!owner) return "This lead's customer record is archived — update the lead first";
   // Full phone identity, never a last-10 suffix (Codex #4709 r19 P1): an
   // international number sharing a US number's last ten digits is not it.
