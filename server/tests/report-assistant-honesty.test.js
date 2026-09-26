@@ -168,7 +168,7 @@ describe('watering questions answer with the weekly plan when the report carries
       pressureIndex: null, dynamicContext: {},
       reportV2: {
         water: { weekPlan: { ...plan, visitInPlanWeek: true, prescribesRun: true, afterTreatment: { title: 'This week: covered by today’s treatment watering-in', detail: 'No further turf runs this week.' } } },
-        aftercare: { watering: 'Water in today’s application — give the lawn a normal watering within the next 24 hours.', waterInRequired: true },
+        aftercare: { watering: 'Water in today’s application — give the lawn a normal watering within the next 24 hours.', waterInRequired: true, evidenceSource: 'product_instruction', needsReview: false },
       },
     };
     expect(answerServiceReportQuestion({ question: 'How many minutes until my dog can go outside?', data })).not.toMatch(/check the rain|turf irrigation/);
@@ -182,6 +182,19 @@ describe('watering questions answer with the weekly plan when the report carries
     const holdAnswer = answerServiceReportQuestion({ question: 'Should I water after today’s treatment?', data: holdData });
     expect(holdAnswer).toMatch(/^Water in today’s application/);
     expect(holdAnswer).toMatch(/skip your turf watering\. Your lawn has what it needs for the week\./);
+    // A missing/conflicting instruction cannot earn the reduced plan. Keep the
+    // recorded warning and the full plan together, matching the rendered card.
+    for (const incompleteAftercare of [
+      { ...data.reportV2.aftercare, evidenceSource: undefined, needsReview: false },
+      { ...data.reportV2.aftercare, evidenceSource: 'irrigation_requirement', needsReview: false },
+      { ...data.reportV2.aftercare, evidenceSource: 'product_instruction', needsReview: true },
+    ]) {
+      const incomplete = { ...data, reportV2: { ...data.reportV2, aftercare: incompleteAftercare } };
+      const incompleteAnswer = answerServiceReportQuestion({ question: 'Should I water after today’s treatment?', data: incomplete });
+      expect(incompleteAnswer).toMatch(/^Water in today’s application/);
+      expect(incompleteAnswer).toMatch(/check the rain before you water\. Leave the turf irrigation off for now/);
+      expect(incompleteAnswer).not.toMatch(/covered by today’s treatment watering-in|No further turf runs this week/);
+    }
     // gh-r31: a reopened HISTORICAL report (visit outside the plan week) never answers with the reduced plan.
     const old = { ...data, reportV2: { ...data.reportV2, water: { weekPlan: { ...data.reportV2.water.weekPlan, visitInPlanWeek: false } } } };
     const oldAnswer = answerServiceReportQuestion({ question: 'Should I water after today’s treatment?', data: old });

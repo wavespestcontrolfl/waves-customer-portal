@@ -409,12 +409,12 @@ function buildRootCause({ effectiveWaterStatus, coverageWatch, overwatering, mow
   if (effectiveWaterStatus === 'surplus' || (overwatering && !coverageWatch)) {
     if (planHolds) return 'The main driver looks like too much water — this week’s watering plan below already eases back, which should do more for fungus, mushrooms, and weed pressure than any single treatment.';
     if (hasPlan) return 'The main driver looks like too much water — this week’s watering plan below already accounts for it, so follow it as written; that should do more for fungus, mushrooms, and weed pressure than any single treatment.';
-    return 'The main driver looks like too much water — easing back on irrigation should do more for fungus, mushrooms, and weed pressure than any single treatment.';
+    return 'The available moisture evidence points to more water than the lawn may need. No upcoming watering plan is recorded here, so treat this as an observation and don’t change the irrigation schedule from this report alone.';
   }
   if (effectiveWaterStatus === 'deficit' && !coverageWatch) {
     if (planRuns) return 'The lawn is simply running a little dry — this week’s watering plan below sets the runs to close that gap.';
     if (hasPlan) return 'The lawn is simply running a little dry — this week’s watering plan below weighs that against the week’s rain, so follow it as written.';
-    return 'The lawn is simply running a little dry — a bit more even watering is the highest-impact fix right now.';
+    return 'The weekly water estimate is below the seasonal target. No upcoming watering plan is recorded here, so treat this as an observation and don’t change the irrigation schedule from this estimate alone.';
   }
   if (coverageWatch && mowShort) {
     return 'The dry-looking areas are most likely uneven sprinkler coverage plus mowing a notch too short — not the whole lawn needing more water.';

@@ -62,7 +62,12 @@ describe('water explanation agrees with no-plan action boundaries', () => {
 
 describe('root cause defers to the plan', () => {
   test('surplus and deficit name the plan; other stories unchanged', () => {
-    expect(buildRootCause({ effectiveWaterStatus: 'deficit' })).toMatch(/a bit more even watering/);
+    const deficitNoPlan = buildRootCause({ effectiveWaterStatus: 'deficit' });
+    expect(deficitNoPlan).toMatch(/No upcoming watering plan is recorded/);
+    expect(deficitNoPlan).not.toMatch(/more.*water|highest-impact fix/i);
+    const surplusNoPlan = buildRootCause({ effectiveWaterStatus: 'surplus' });
+    expect(surplusNoPlan).toMatch(/No upcoming watering plan is recorded/);
+    expect(surplusNoPlan).not.toMatch(/ease back|reduce.*irrigation|skip.*water/i);
     // gh-r37: the sentence agrees with the card's ACTION — never "sets the runs" beside a hold, never "eases back" beside a run.
     expect(buildRootCause({ effectiveWaterStatus: 'deficit', weekPlan: RUN_PLAN })).toMatch(/this week’s watering plan below sets the runs/);
     expect(buildRootCause({ effectiveWaterStatus: 'deficit', weekPlan: HOLD_PLAN })).toMatch(/weighs that against the week’s rain, so follow it as written/);

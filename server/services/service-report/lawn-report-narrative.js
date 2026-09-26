@@ -42,6 +42,7 @@ function groundingFacts(v2, ctx) {
   return {
     overallScore: v2.snapshot?.overallScore ?? null,
     overallStatus: v2.snapshot?.status ?? null,
+    customerAction: v2.snapshot?.customerAction ?? null,
     grassLabel: ctx.grassLabel || 'lawn',
     diagnosis: (v2.diagnosis || []).map((d) => ({ key: d.key, label: d.label, score: d.score, status: d.status })),
     water: v2.water ? { status: v2.water.status, droughtSignal: v2.water.droughtSignal ?? null, rain: v2.water.rainInches, irrigation: v2.water.irrigationInches, total: v2.water.totalInches, target: v2.water.targetInches, confidence: v2.water.confidence, rainWindow: 'past 7 days ending on the visit date' } : null,
@@ -86,7 +87,7 @@ You rewrite the customer-facing copy for a post-service LAWN report for Waves Pe
 7. Use active-ingredient names or plain descriptions for products — never hype. Lead with the product's plain-language role and never make a bare chemical name the subject of an instruction to the homeowner ("water in the clothianidin" → "water in today's treatment").
 8. Plain text only. No markdown, no emojis, no headers inside values.
 9. A product's "targets" list is what it is designed to control — NOT what was observed. Never say a pest or disease was found/observed unless the observations say so; frame targeted products as seasonal protection otherwise.
-10. Insight actions must preserve their supplied provenance. An empty wavesAction stays empty; never turn a condition or customer concern into completed work.
+10. Customer actions and insight actions are evidence-bound. Reproduce each supplied customerAction exactly; an empty action stays empty. An empty wavesAction stays empty; never turn a condition or customer concern into completed work.
 
 ## OUTPUT
 - statusHeadline: <=8 words, the one-line state for the hero.
@@ -212,7 +213,8 @@ function mergeNarrative(v2, out) {
   if (next.snapshot) {
     next.snapshot.statusHeadline = safeText(out.statusHeadline, next.snapshot.statusHeadline);
     next.snapshot.mainWatch = next.snapshot.mainWatch ? safeText(out.mainWatch, next.snapshot.mainWatch) : next.snapshot.mainWatch;
-    next.snapshot.customerAction = next.snapshot.customerAction ? safeText(out.customerAction, next.snapshot.customerAction) : next.snapshot.customerAction;
+    // Actions encode deterministic evidence and weekly-plan boundaries. Model
+    // prose may polish observations, but it cannot replace those instructions.
   }
   const cats = out.categories || {};
   next.diagnosis = (next.diagnosis || []).map((d) => {
@@ -235,7 +237,7 @@ function mergeNarrative(v2, out) {
         whatWeSaw: safeText(m.whatWeSaw, ins.whatWeSaw),
         whyItMatters: safeText(m.whyItMatters, ins.whyItMatters),
         wavesAction: ins.wavesAction && ins.provenance?.actionSource ? safeText(m.wavesAction, ins.wavesAction) : ins.wavesAction,
-        customerAction: ins.customerAction ? safeText(m.customerAction, ins.customerAction) : ins.customerAction,
+        customerAction: ins.customerAction,
         nextVisitPlan: ins.nextVisitPlan ? safeText(m.nextVisitPlan, ins.nextVisitPlan) : ins.nextVisitPlan,
       };
     });
