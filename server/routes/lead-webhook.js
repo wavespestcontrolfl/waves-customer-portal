@@ -1,6 +1,5 @@
 const express = require('express');
 const rateLimit = require('express-rate-limit');
-const crypto = require('crypto');
 const router = express.Router();
 const db = require('../models/db');
 const { publicSelectableService } = require('../services/public-services-menu');
@@ -10,8 +9,7 @@ const { createDefaultCustomerRows } = require('../services/customer-default-rows
 const LeadScorer = require('../services/lead-scorer');
 const { resolveLocationFromCandidates, isOfficeCity, findGbpLocationByUtmContent } = require('../config/locations');
 const logger = require('../services/logger');
-const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
-const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
+const { sendLeadAutoReplyOnce } = require('../services/lead-auto-reply');
 
 const { aiTriageLead } = require('../services/lead-triage');
 const { normalizeTimeline, urgencyForTimeline } = require('../services/lead-timeline');
@@ -160,6 +158,9 @@ const leadWebhookPhoneLimiter = rateLimit({
 
 // POST /api/webhooks/lead — website lead-form submission webhook
 router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res) => {
+  // When the form arrived: the delayed lead fallback stands down for any text
+  // exchanged with the customer after this moment.
+  const leadReceivedAt = new Date();
   try {
     const body = req.body;
 
@@ -598,6 +599,46 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       });
     }
 
+    // Only ONE automated text ever reaches a new website lead (owner ruling
+    // 2026-09-26). When the Lead Response Agent is configured it gets first
+    // crack at a personalized reply; the standard lead_auto_reply_biz text
+    // below is its fallback, sent from the processLead kickoff (further
+    // down) only when the agent's run does NOT end in an actual send. When
+    // the agent isn't configured, behavior is unchanged: the standard reply
+    // goes out immediately, exactly as before this ruling.
+    let leadAgentConfigured = false;
+    try {
+      leadAgentConfigured = require('../services/lead-response-agent').isLeadAgentConfigured();
+    } catch (cfgErr) {
+      logger.warn(`[lead-webhook] Lead Response Agent config check failed — treating as not configured: ${cfgErr.message}`);
+    }
+
+    // Auto-reply to lead — send AT MOST ONCE per person, ever (owner
+    // ruling 2026-08-05). shouldRunLeadAcquisition() already limits this
+    // to new customer rows, but the same person can produce a second
+    // "new" row (phone stored in a different format, deleted/merged
+    // record, double submission racing the 5-min window — 20 phones got
+    // the menu text twice in prod). See services/lead-auto-reply.js for
+    // the dedup predicate and the once-ever claim mechanism.
+    // The agent's fallback: the standard reply, once-ever claimed. Single
+    // flight: a call while a send is in flight (the guard's, then a
+    // shutdown flush) returns that same send, so the flush waits for the
+    // real dispatch instead of a duplicate that finds the claim and returns.
+    const sendFallbackAutoReply = singleFlight(() => sendLeadAutoReplyOnce({ customer, phoneFormatted, firstName, location, leadSource, revalidateRecipient: true, leadReceivedAt })
+      // Stable code + id only: provider/messaging errors can carry the phone or body.
+      .catch(fallbackErr => logger.error(`[lead-agent] Fallback standard reply failed for customer ${customer.id}: ${fallbackErr?.code || fallbackErr?.name || 'error'}`)));
+    // With the agent configured, the lead's one-minute clock and its
+    // shutdown registration start here, before the owner alert's provider
+    // I/O and the estimate work below, so a stall in either can never leave
+    // the lead unacknowledged; the deadline sends on its own until the
+    // agent kickoff takes it over.
+    // One deadline object owns the lead's minute: settleLeadResponseAgentRun
+    // takes it over (no second timer); until then it sends on its own.
+    const leadFallbackDeadline = leadAgentConfigured
+      // Counted from the request's arrival, so awaited work before this point
+      // (the owner alert's provider calls) cannot stretch the lead's minute.
+      ? createLeadFallbackDeadline(sendFallbackAutoReply, Math.max(0, LEAD_AGENT_FALLBACK_AFTER_MS - (Date.now() - leadReceivedAt.getTime())))
+      : null;
     // Push + bell notification for admins fires AFTER the lead row is
     // created (below) so the bell can deep-link the real lead id —
     // customer.id here made /admin/leads?lead=<id> resolve to nothing.
@@ -743,84 +784,19 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       }
     } catch (e) { logger.error(`Lead alert failed: ${e.message}`); }
 
-    // Auto-reply to lead — send AT MOST ONCE per person, ever (owner
-    // ruling 2026-08-05). shouldRunLeadAcquisition() already limits this
-    // to new customer rows, but the same person can produce a second
-    // "new" row (phone stored in a different format, deleted/merged
-    // record, double submission racing the 5-min window — 20 phones got
-    // the menu text twice in prod). See hasPriorLeadAutoReply for the
-    // dedup predicate. Concurrency: the CLAIM ITSELF is the mutex — the
-    // ON CONFLICT DO NOTHING ... RETURNING insert is an atomic per-phone
-    // test-and-set, so two concurrent POSTs can both pass the history
-    // check but exactly one wins the claim row and sends; the loser
-    // skips. No transaction and no advisory lock, so no handler ever
-    // holds one pool connection while waiting on a second (that shape
-    // deadlocks the pool under a burst). Fails CLOSED: any error in the
-    // check or claim path skips the send — a missed greeting beats
-    // texting a customer twice. Later inbound replies are still
-    // classified by server/services/lead-intake.js. Edit copy in the
-    // admin UI.
     try {
-      if (await hasPriorLeadAutoReply(phoneFormatted)) {
-        logger.info(`[lead-webhook] Auto-reply skipped for customer ${customer.id}: already sent once to this phone`);
-      } else {
-        // Render BEFORE claiming: a template failure claims nothing and
-        // the phone stays re-armed.
-        const replyMsg = await renderRequiredSmsTemplate(
-          'lead_auto_reply_biz',
-          { first_name: firstName },
-          { workflow: 'lead_webhook_auto_reply', entity_type: 'customer', entity_id: customer.id }
-        );
-
-        // CLAIM-BEFORE-SEND, committed (autocommit) before the Twilio
-        // call: from this point there is no instant where the customer
-        // can have received the menu without durable evidence — a crash
-        // anywhere after Twilio's accept leaves the claim in place and
-        // the guard stays fail-closed. RETURNING distinguishes winning
-        // the claim ([row]) from losing to a concurrent request or an
-        // existing row ([]). An unresolved claim (twilio_sid null)
-        // suppresses future sends by design — delete the
-        // lead_auto_reply_sends row to re-arm that phone.
-        const phoneDigits = String(phoneFormatted).slice(-10);
-        const claim = await db('lead_auto_reply_sends')
-          .insert({ phone_digits: phoneDigits, customer_id: customer.id, twilio_sid: null })
-          .onConflict('phone_digits')
-          .ignore()
-          .returning('phone_digits');
-
-        if (claim.length === 0) {
-          logger.info(`[lead-webhook] Auto-reply skipped for customer ${customer.id}: claim already held for this phone`);
-        } else {
-          const smsResult = await sendCustomerMessage({
-            to: phoneFormatted,
-            body: replyMsg,
-            channel: 'sms',
-            audience: 'lead',
-            purpose: 'conversational',
-            customerId: customer.id,
-            identityTrustLevel: 'phone_matches_customer',
-            entryPoint: 'lead_webhook_auto_reply',
-            metadata: {
-              original_message_type: 'auto_reply',
-              customerLocationId: location.id,
-              lead_source: leadSource.source,
-            },
-          });
-          if (!smsResult.sent) {
-            logger.warn(`[lead-webhook] Auto-reply blocked/failed for customer ${customer.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
-          }
-          // No quiet-hours requeue: lead_webhook_auto_reply is a
-          // customer-action entry point (owner ruling 2026-08-29) — the
-          // menu answers the customer's own form fill immediately, at any
-          // hour, so QUIET_HOURS_HOLD cannot surface here and every result
-          // settles the once-ever claim directly.
-          await resolveLeadAutoReplyClaim(phoneDigits, smsResult);
-        }
+      if (!leadAgentConfigured) {
+        await sendLeadAutoReplyOnce({ customer, phoneFormatted, firstName, location, leadSource });
       }
 
       // Seed the intake state machine so the customer's next inbound SMS
       // gets routed through server/services/lead-intake.js (classify →
       // ask for address → auto-create draft estimate → notify Adam).
+      // Seeded now, whichever text ends up going out, so the address-only
+      // clarification below can still advance it from the form data. If the
+      // agent's personal text is the one that goes out, the service-menu
+      // state is cleared again at that send (clearServiceMenuIntakeState in
+      // services/lead-auto-reply.js, called by send_lead_response).
       try {
         await db('customers').where({ id: customer.id }).update({
           lead_intake_status: 'awaiting_service',
@@ -1205,12 +1181,14 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
         .catch(err => logger.error(`[lead-webhook] AI triage fire-and-forget error: ${err.message}`));
     }
 
-    // Fire-and-forget Lead Response Agent — personalized response in <60s
-    // The generic auto-reply above is the safety net; this replaces it with something specific
+    // Fire-and-forget Lead Response Agent — personalized response in <60s.
+    // The generic auto-reply above is the safety net; this replaces it with
+    // something specific — see settleLeadResponseAgentRun for the "exactly
+    // one automated text" fallback rule (owner ruling 2026-09-26).
     try {
       const LeadResponseAgent = require('../services/lead-response-agent');
       const messageText = body.message || body['Message'] || serviceInterest || findField(body, /service|help|pest|lawn|message/i) || '';
-      LeadResponseAgent.processLead({
+      const processLead = () => LeadResponseAgent.processLead({
         leadId: leadRecord?.id,
         customerId: customer.id,
         phone: phoneFormatted,
@@ -1221,8 +1199,27 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
         leadSource: leadSource.source,
         pageUrl: pageUrl || '',
         formName: formName || '',
-      }).catch(err => logger.error(`[lead-agent] Fire-and-forget error: ${err.message}`));
-    } catch (e) { logger.error(`[lead-agent] Init error: ${e.message}`); }
+      });
+      void settleLeadResponseAgentRun({
+        agentConfigured: leadAgentConfigured,
+        processLead,
+        sendFallback: sendFallbackAutoReply,
+        ...(leadFallbackDeadline ? { deadline: leadFallbackDeadline.takeOver() } : {}),
+        onError: err => logger.error(`[lead-agent] Fire-and-forget error: ${err.message}`),
+      }).catch(err => logger.error(`[lead-agent] Fallback chain error for customer ${customer.id}: ${err?.code || err?.name || 'error'}`));
+    } catch (e) {
+      logger.error(`[lead-agent] Init error: ${e.message}`);
+      // A synchronous require/init throw also means "the agent didn't
+      // send" — arm the fallback the same as any other non-auto_sent
+      // outcome when the agent was otherwise configured.
+      leadFallbackDeadline?.cancel();
+      if (leadAgentConfigured) {
+        // Registered for the shutdown flush while this immediate send runs.
+        pendingLeadFallbacks.set(sendFallbackAutoReply, null);
+        void sendFallbackAutoReply().finally(() => pendingLeadFallbacks.delete(sendFallbackAutoReply))
+          .catch(err => logger.error(`[lead-agent] Init fallback failed for customer ${customer.id}: ${err?.code || err?.name || 'error'}`));
+      }
+    }
 
     await db('activity_log').insert({
       customer_id: customer.id, action: 'customer_created',
@@ -1821,126 +1818,158 @@ function shouldRunLeadAcquisition({ isNewCustomer, isDuplicateSubmission } = {})
   return !!isNewCustomer && !isDuplicateSubmission;
 }
 
-/**
- * The lead auto-reply (lead_auto_reply_biz) is sent AT MOST ONCE per
- * person, ever (owner ruling 2026-08-05).
- *
- * Audit leg: messaging_audit_log rows with
- * entry_point='lead_webhook_auto_reply' — this route is the ONLY sender
- * of the menu template, so the entry point identifies it exactly
- * (sms_log.message_type='auto_reply' is shared with the public-quote
- * booking invite and can't distinguish templates). Only rows with a
- * non-null sent_at count: blocked and provider-failed attempts never
- * reached the customer and must not suppress a real first send.
- * to_hash is sha256 of the wrapper-normalized recipient
- * (+1XXXXXXXXXX for NANP — see normalizeRecipient in
- * services/messaging/send-customer-message.js and sha256 in
- * services/messaging/audit.js); phoneFormatted here is built the same
- * way, so the hashes line up.
- *
- * Legacy leg: 36 menu sends predate the first audit row
- * (2026-05-04T11:16:45Z). For rows STRICTLY BEFORE that instant we
- * fall back to the old sms_log signature. The bound is a fixed UTC
- * instant (not an ET business-day window), so comparing against the
- * raw timestamptz is correct. Post-cutover sms_log rows are never
- * consulted — that's what keeps quote-wizard sends from
- * false-positively suppressing the menu.
- *
- * Durable marker: lead_auto_reply_sends is a CLAIM-BEFORE-SEND record —
- * this route commits it (an atomic ON CONFLICT test-and-set that also
- * serializes concurrent requests) before calling Twilio, confirms it
- * with the real SID on success, and releases it only on PROVABLY
- * undelivered outcomes (see resolveLeadAutoReplyClaim). There is
- * therefore no instant where a delivered menu lacks durable evidence:
- * persistAudit failing (best-effort, {id:null}) or a crash between
- * Twilio's accept and any later write both leave the claim in place.
- * An unresolved claim (null twilio_sid) suppresses by design — fail
- * closed; delete the row to re-arm the phone. Checked first — it is
- * the only leg this route fully controls.
- *
- * The audit leg additionally requires a REAL Twilio SID (SM/MM prefix):
- * gate-blocked / template-disabled / owner-silence sends record
- * sent_at with a sentinel provider_message_id even though no text
- * reached the customer — those must not suppress a later real send.
- * All 167 historical sent rows for this entry point carry real SIDs
- * (prod-verified), so the filter changes nothing for genuine sends.
- *
- * FAIL CLOSED: if any dedup query errors, report "already sent" so
- * the caller skips the send. A missed greeting is recoverable (the
- * operator lead alert still fires); texting a customer the same
- * automated message twice is the failure this guard exists to prevent.
- */
-const LEAD_AUTO_REPLY_AUDIT_CUTOVER = new Date('2026-05-04T11:16:45Z');
-const REAL_TWILIO_SID_RE = /^(SM|MM)/;
+// Owner ruling 2026-09-26: exactly one automated text ever reaches a new
+// website lead. When the agent is configured, the standard lead_auto_reply
+// text is SKIPPED immediately (see the call site above) and instead sent
+// here, once the agent's run settles, as the fallback for every outcome
+// that is NOT an actual send: a rejection, a null/skipped/queued-for-review
+// result. (A synchronous require/init throw before this function is ever
+// called is handled the same way at that call site — see its catch.) When
+// the agent isn't configured, processLead still runs (fire-and-forget,
+// unchanged) but no fallback is armed — the standard reply already went out
+// immediately, before this function was called. sendFallback
+// (sendLeadAutoReplyOnce) is itself the once-ever claim, so calling it here
+// can never double-text a phone the agent already reached.
+// processLead/sendFallback/onError are injected so this can be tested
+// directly without driving the whole POST handler.
+// How long a configured agent gets before the standard reply goes out
+// instead: the agent's promised response window (under 60 seconds, see
+// lead-response-agent-config.js), so a stalled run never leaves a new lead
+// without an acknowledgment for longer than that. A late agent send cannot
+// double-text: the fallback takes the phone's shared first-touch claim
+// first, and the agent's send_lead_response is then refused.
+const LEAD_AGENT_FALLBACK_AFTER_MS = 60 * 1000;
+// How long after the fallback a still-unsettled agent run stays registered
+// for a late retry: well past the agent's own run deadline (3 min).
+const LEAD_AGENT_LATE_RETRY_WINDOW_MS = 5 * 60 * 1000;
 
-/**
- * Settle a pre-send lead-auto-reply claim after the send attempt.
- *
- *  - Real Twilio SID → confirm the claim (stamp twilio_sid).
- *  - DETERMINISTIC no-delivery → release the claim so a later
- *    submission can greet the customer. Deterministic means the text
- *    provably never reached the carrier path:
- *      · wrapper policy block (blocked === true — provider never called)
- *      · gate/template/owner sentinel sid (sent:true without a real SID)
- *      · terminal provider failure (Twilio definitively rejected)
- *  - AMBIGUOUS outcomes KEEP the claim (fail closed): a retryable
- *    transport error (timeout, socket reset) can occur AFTER Twilio
- *    accepted the message, so releasing on those could let a later
- *    form send the menu a second time to a customer who received the
- *    first one. Same for unknown/absent result shapes.
- *  - If the release itself fails we keep the claim (fail closed) and
- *    log — a suppressed greeting is recoverable, a duplicate is not.
- *
- * Never throws: claim settlement must not mask the original send error.
- */
-async function resolveLeadAutoReplyClaim(phoneDigits, smsResult, dbc = db) {
-  try {
-    const sid = smsResult && smsResult.sent ? String(smsResult.providerMessageId || '') : '';
-    if (REAL_TWILIO_SID_RE.test(sid)) {
-      await dbc('lead_auto_reply_sends').where({ phone_digits: phoneDigits }).update({ twilio_sid: sid });
-      return;
-    }
-    const deterministicNoDelivery = !!smsResult && (
-      smsResult.blocked === true
-      || smsResult.sent === true // sentinel sid: gate-blocked / template-disabled / owner-silence
-      || (smsResult.sent === false && smsResult.terminal === true)
-    );
-    if (deterministicNoDelivery) {
-      await dbc('lead_auto_reply_sends').where({ phone_digits: phoneDigits }).whereNull('twilio_sid').del();
-    } else {
-      logger.warn(`[lead-webhook] auto-reply outcome ambiguous (retryable/unknown) — keeping claim, fail closed`);
-    }
-  } catch (settleErr) {
-    logger.warn(`[lead-webhook] auto-reply claim settlement failed (claim stays, fail closed): ${settleErr.message}`);
-  }
+// Agent runs whose fallback has not been settled yet. Both live only in this
+// process, so a deploy's SIGTERM flushes them (flushPendingLeadFallbacks,
+// called from index.js shutdown): the standard reply goes out at once
+// instead of dying with the process. The shared first-touch claim still
+// allows exactly one text, so an agent send that already landed wins.
+// sendFallback → a promise that settles when that run's fallback work is
+// finished (null while only the route has registered it).
+const pendingLeadFallbacks = new Map();
+
+// Wraps an async function so overlapping calls share the one in flight; a
+// call after it settles starts a fresh one.
+function singleFlight(fn) {
+  let inFlight = null;
+  return () => {
+    if (!inFlight) inFlight = Promise.resolve().then(fn).finally(() => { inFlight = null; });
+    return inFlight;
+  };
 }
 
-async function hasPriorLeadAutoReply(phoneFormatted, dbc = db) {
-  try {
-    const markerHit = await dbc('lead_auto_reply_sends')
-      .where({ phone_digits: String(phoneFormatted).slice(-10) })
-      .first();
-    if (markerHit) return true;
-
-    const toHash = crypto.createHash('sha256').update(String(phoneFormatted || ''), 'utf8').digest('hex');
-    const auditHit = await dbc('messaging_audit_log')
-      .where({ entry_point: 'lead_webhook_auto_reply', to_hash: toHash })
-      .whereNotNull('sent_at')
-      .whereRaw("provider_message_id ~ '^(SM|MM)'")
-      .first();
-    if (auditHit) return true;
-
-    const legacyHit = await dbc('sms_log')
-      .where({ direction: 'outbound', message_type: 'auto_reply' })
-      .where('created_at', '<', LEAD_AUTO_REPLY_AUDIT_CUTOVER)
-      .whereRaw("RIGHT(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [String(phoneFormatted).slice(-10)])
-      .first();
-    return !!legacyHit;
-  } catch (dedupErr) {
-    logger.warn(`[lead-webhook] auto-reply dedup check failed — skipping send (fail closed): ${dedupErr.message}`);
-    return true;
-  }
+// Entries stay registered until their run's last send attempt settles, so a
+// second flush (after in-flight requests drain) still covers a late retry
+// that started after the first. The senders are single-flight and the claim
+// allows one text, so flushing an entry twice is safe.
+async function flushPendingLeadFallbacks(timeoutMs = 10000) {
+  const pending = [...pendingLeadFallbacks.entries()];
+  if (!pending.length) return 0;
+  let timer;
+  await Promise.race([
+    // Send now, and also wait (within the bound) for the run itself: an agent
+    // send in flight holds the claim, and if it then fails the late retry
+    // must still go out before the process exits.
+    Promise.allSettled(pending.flatMap(([sendFallback, finished]) => [Promise.resolve().then(sendFallback), finished || null])),
+    new Promise((resolve) => { timer = setTimeout(resolve, timeoutMs); timer.unref?.(); }),
+  ]);
+  clearTimeout(timer);
+  return pending.length;
 }
+
+
+// The lead's one-minute deadline, started where the immediate reply is
+// skipped (the route registers the fallback for the shutdown flush from
+// then on). Until settleLeadResponseAgentRun takes it over, the deadline
+// sends the fallback itself (the agent was never started) and drops the
+// registration; after takeOver it only signals, so there is one timer.
+function createLeadFallbackDeadline(sendFallback, ms) {
+  pendingLeadFallbacks.set(sendFallback, null);
+  let owned = false;
+  let fired = false;
+  let signal;
+  const reached = new Promise((resolve) => { signal = resolve; });
+  const timer = setTimeout(() => {
+    fired = true;
+    if (!owned) {
+      void Promise.resolve().then(sendFallback).finally(() => {
+        if (pendingLeadFallbacks.get(sendFallback) === null) pendingLeadFallbacks.delete(sendFallback);
+      }).catch(err => logger.error(`[lead-agent] Deadline fallback failed: ${err?.code || err?.name || 'error'}`));
+    }
+    signal({ timedOut: true, alreadySent: !owned });
+  }, ms);
+  timer.unref?.();
+  return {
+    takeOver() {
+      owned = true;
+      return { reached, alreadySent: fired, cancel: () => clearTimeout(timer) };
+    },
+    cancel() {
+      clearTimeout(timer);
+      if (pendingLeadFallbacks.get(sendFallback) === null) pendingLeadFallbacks.delete(sendFallback);
+    },
+  };
+}
+
+async function settleLeadResponseAgentRun({ agentConfigured, processLead, sendFallback, onError, deadline = null, fallbackAfterMs = LEAD_AGENT_FALLBACK_AFTER_MS }) {
+  if (!agentConfigured) {
+    return processLead().catch(err => onError(err));
+  }
+  let markFinished;
+  pendingLeadFallbacks.set(sendFallback, new Promise((resolve) => { markFinished = resolve; }));
+  // The route's deadline when given (one timer for the lead's minute), else
+  // this call's own.
+  let timer;
+  const timedOut = deadline ? deadline.reached : new Promise((resolve) => {
+    timer = setTimeout(() => resolve({ timedOut: true }), fallbackAfterMs);
+    timer.unref?.();
+  });
+  const run = Promise.resolve().then(processLead).then(outcome => ({ outcome }), err => ({ err }));
+  const settled = await Promise.race([run, timedOut]);
+  clearTimeout(timer);
+  deadline?.cancel();
+  // The fallback stays registered for the shutdown flush until its last
+  // send attempt has settled, not just until the agent's run has.
+  const done = () => { pendingLeadFallbacks.delete(sendFallback); markFinished(); };
+  const finalFallback = () => Promise.resolve().then(sendFallback).finally(done);
+  if (settled.timedOut) {
+    // The fallback below may find the agent's claim still held by a send in
+    // flight and skip. If that send then fails and releases the claim, the
+    // lead would get nothing, so once the run ends without a send the
+    // standard reply is tried again (the claim keeps it to one text).
+    // A run that never settles would keep its entry (and the flush's wait)
+    // forever; after the agent's own deadline has long passed no late retry
+    // is coming, so let it go.
+    const abandon = setTimeout(done, LEAD_AGENT_LATE_RETRY_WINDOW_MS);
+    abandon.unref?.();
+    void run.then(({ outcome, err }) => {
+      clearTimeout(abandon);
+      if (err) onError(err);
+      if (outcome?.actionTaken === 'auto_sent') return done();
+      // Past the abandonment window the entry is gone; register again so a
+      // shutdown still waits for this late send (done() removes it after).
+      if (!pendingLeadFallbacks.has(sendFallback)) pendingLeadFallbacks.set(sendFallback, null);
+      return finalFallback();
+    }).catch(lateErr => onError(lateErr));
+    // The deadline already sent before this run took it over: no second try
+    // now (the late retry above still covers an agent that releases).
+    if (deadline?.alreadySent) return undefined;
+    return sendFallback();
+  }
+  if (settled.err) onError(settled.err);
+  if (settled.outcome?.actionTaken === 'auto_sent') return done();
+  return finalFallback();
+}
+
+// The lead auto-reply dedup predicate, once-ever claim, and the send itself
+// moved verbatim to services/lead-auto-reply.js (hasPriorLeadAutoReply,
+// resolveLeadAutoReplyClaim, sendLeadAutoReplyOnce) so the Lead Response
+// Agent's personalized SMS can share the same once-per-phone claim
+// (claimLeadFirstTouch, owner ruling 2026-09-26 — see lead-response-tools.js).
 
 function cleanPhone(value) {
   if (!value) return '';
@@ -1970,6 +1999,7 @@ function buildExistingCustomerLeadUpdates({ existing, leadSource }) {
 }
 
 module.exports = router;
+module.exports.flushPendingLeadFallbacks = flushPendingLeadFallbacks;
 module.exports._test = {
   buildExistingCustomerLeadUpdates,
   attachVoicemailPrefillLead,
@@ -1984,8 +2014,12 @@ module.exports._test = {
   serviceInterestUpdateFromTriage,
   shouldApplyTriageServiceInterest,
   shouldRunLeadAcquisition,
-  hasPriorLeadAutoReply,
-  resolveLeadAutoReplyClaim,
+  settleLeadResponseAgentRun,
+  flushPendingLeadFallbacks,
+  pendingLeadFallbacks,
+  singleFlight,
+  createLeadFallbackDeadline,
+  LEAD_AGENT_FALLBACK_AFTER_MS,
   applyLeadEstimateAutomationGate,
   determineLeadSource,
   isHoneypotTripped,

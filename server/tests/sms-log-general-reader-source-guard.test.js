@@ -471,6 +471,11 @@ const ALLOWLIST = [
     reason: 'status filtered to SENT_STATUSES (queued/sent/delivered), which excludes \'sending\' — an unresolved reservation cannot match (once promoted to \'sent\' it is real delivery evidence by design, not a reservation).',
   },
   {
+    file: 'services/lead-auto-reply.js',
+    snippet: 'const humanReplyInFlight = await conn(\'sms_log\')',
+    reason: 'deliberately reads in-flight reservations (status scheduled/sending, human reply types) — a staff reply reservation IS a send in progress that must stop the delayed lead fallback; single existence check, not a list read.',
+  },
+  {
     file: 'services/sms-suggest-mode.js',
     snippet: 'const answered = await trx(\'sms_log\')',
     reason: 'status filtered to SENT_STATUSES (queued/sent/delivered), which excludes \'sending\' — an unresolved reservation cannot match (once promoted to \'sent\' it is real delivery evidence by design, not a reservation).',

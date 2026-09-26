@@ -76,6 +76,12 @@ const SKIP = !process.env.DATABASE_URL;
     await db('lead_activities').whereIn('lead_id', leads).del();
     await db('phone_line_types').whereIn('phone', phones).del();
     await db('messaging_suppression').whereIn('phone', phones).del();
+    // send_lead_response takes the phone's once-ever first-touch claim; a
+    // leftover claim would short-circuit later cases (and later suite runs)
+    // with FIRST_TOUCH_ALREADY_SENT before the behavior they assert.
+    await db('lead_auto_reply_sends')
+      .whereIn('phone_digits', [...phones, '+19415550122', '+19415550129'].map(phone => phone.slice(-10)))
+      .del();
   }
 
   beforeEach(async () => {
@@ -230,6 +236,16 @@ const SKIP = !process.env.DATABASE_URL;
       pauseConsent = null;
     }
     expect(saved).toBe(true);
+    // One automated text per phone, ever: a second agent send is refused by
+    // the first-touch claim before any consent read.
+    expect(await executeLeadTool('send_lead_response', input, contexts[0]))
+      .toMatchObject({ sent: false, blocked: true, code: 'FIRST_TOUCH_ALREADY_SENT' });
+    // With the first text's evidence cleared (its claim and its delivered
+    // audit row, both of which count as "already texted"), the opt-out that
+    // landed during the handoff is what blocks it (the ordering this case
+    // exists to prove).
+    await db('lead_auto_reply_sends').where({ phone_digits: phones[0].slice(-10) }).del();
+    await db('messaging_audit_log').whereIn('customer_id', customers).del();
     expect(await executeLeadTool('send_lead_response', input, contexts[0]))
       .toMatchObject({ sent: false, blocked: true, code: change === 'preferences' ? 'SMS_OPTED_OUT' : 'SUPPRESSED_OPT_OUT' });
     expect(mockCreate).toHaveBeenCalledTimes(1);

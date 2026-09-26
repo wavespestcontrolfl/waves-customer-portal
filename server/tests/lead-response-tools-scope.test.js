@@ -15,6 +15,15 @@ jest.mock('../services/estimate-automation-duplicates', () => ({
   withAutomatedEstimatePhoneLock: async (_phone, callback, { database }) => callback(database),
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn() }));
+// The first-touch claim (lead-auto-reply) has its own suite
+// (lead-response-tools-first-touch.test.js); here every send is a won first
+// touch so these cases keep exercising the send path itself.
+jest.mock('../services/lead-auto-reply', () => ({
+  claimLeadFirstTouch: async (phone) => ({ claimed: true, phoneDigits: String(phone).slice(-10) }),
+  resolveLeadAutoReplyClaim: async () => {},
+  clearServiceMenuIntakeState: async () => {},
+  isDeliveredSms: (result) => result?.sent === true && /^(SM|MM)/.test(String(result.providerMessageId || '')),
+}));
 const mockState = {};
 const mockDb = jest.fn(table => {
   const filters = {};

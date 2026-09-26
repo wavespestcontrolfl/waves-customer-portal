@@ -95,7 +95,17 @@ async function* streamSessionEvents(sessionId) {
   }
 }
 
+// Same three env checks processLead makes before opening a session — used
+// by the lead webhook to decide, ahead of running the agent, whether the
+// standard lead_auto_reply_biz fallback should send immediately (agent off)
+// or wait on the agent's own outcome (agent configured). Owner ruling
+// 2026-09-26: exactly one automated text ever reaches a new website lead.
+function isLeadAgentConfigured() {
+  return !!ANTHROPIC_API_KEY && !!LEAD_AGENT_ID && !!LEAD_AGENT_ENVIRONMENT_ID;
+}
+
 const LeadResponseAgent = {
+  isLeadAgentConfigured,
 
   /**
    * Process a new lead end-to-end.
