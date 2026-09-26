@@ -51,6 +51,7 @@ const TERMITE_NOTICE_COLS = Object.fromEntries([
   'notice_45_late_escalated_at', 'notice_30_sent_at', 'notice_30_claimed_at', 'notice_30_late_sent_at',
   'notice_30_late_escalated_at', 'notice_missed_escalated_at',
   'notice_45_undelivered_escalated_at', 'notice_30_undelivered_escalated_at',
+  'notice_witness_conflict', 'notice_witness_conflict_belled_at',
 ].map((c) => [c, {}]));
 const REMINDER_COLS = {
   ...TERMITE_NOTICE_COLS,

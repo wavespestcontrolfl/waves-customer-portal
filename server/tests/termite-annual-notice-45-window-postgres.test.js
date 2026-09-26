@@ -510,6 +510,10 @@ describeOrSkip('termite annual-plan notice obligations — against a schema buil
       await require(`../models/migrations/${file}`).up(db);
     }
   }
+  async function migrateThrough109(db) {
+    await migrateThrough108(db);
+    await require('../models/migrations/20260926000109_termite_annual_notice_witness_conflict_columns').up(db);
+  }
   const lateBells = (notifyAdmin, daysOut) => notifyAdmin.mock.calls
     .filter((c) => c[1] === 'Termite annual renewal notice went out late' && c[3]?.metadata?.days_out === daysOut);
 
@@ -706,6 +710,118 @@ describeOrSkip('termite annual-plan notice obligations — against a schema buil
     await _private.releaseCombinedTermNoticeClaim(claimedE, 'active');
     const re = await db('annual_prepay_terms').where({ id: e.id }).first();
     expect(re).toMatchObject({ status: 'active', notice_30_claimed_at: null, notice_45_claimed_at: null });
+  });
+
+  // Codex #4921 r10 P2, real SQL: the witness stamp requires that this
+  // attempt still owns its claim(s); a stale worker finishing after a
+  // reclaim neither stamps nor clears the new holder's claim.
+  test('ownership: a stale worker whose claim was reclaimed never stamps and never clears the new holder\'s claim (single and combined)', async () => {
+    const { db } = fixture;
+    await migrateThrough109(db);
+    jest.doMock('../models/db', () => db);
+    mockSendSide();
+    const { _private } = require('../services/annual-prepay-renewals');
+    const base = {
+      term_start: '2025-11-10', term_end: '2026-11-10', status: 'active', annual_plan_version: 'v3',
+      installation_anchored_at: new Date('2025-11-10T12:00:00Z'),
+    };
+    const insert = async (fields = {}) => (await db('annual_prepay_terms').insert({ ...base, customer_id: randomUUID(), ...fields }).returning('*'))[0];
+    const onTime = new Date('2026-09-26T16:00:00Z');
+    const successorAt = new Date(Date.now() + 5000);
+
+    const a = await insert();
+    const staleA = await _private.claimTermNotice(a, 45);
+    await db('annual_prepay_terms').where({ id: a.id }).update({ notice_45_claimed_at: successorAt }); // reclaimed
+    await expect(_private.stampTermNoticeWitness(staleA, 45, onTime)).resolves.toBe('conflict');
+    const ra = await db('annual_prepay_terms').where({ id: a.id }).first();
+    expect(ra.notice_45_sent_at).toBeNull();
+    expect(ra.notice_45_claimed_at).toEqual(successorAt); // the new holder's claim, untouched
+
+    // Combined: the 45 was reclaimed by another worker → the combined stamp lands nothing.
+    const b = await insert({ term_end: '2026-10-20' });
+    const staleB = await _private.claimCombinedTermNotice(b);
+    await db('annual_prepay_terms').where({ id: b.id }).update({ notice_45_claimed_at: successorAt });
+    await _private.stampTermNoticeWitness(staleB, 30, new Date('2026-09-22T16:00:00Z'), { alsoRecordMissedRung: 45 });
+    const rb = await db('annual_prepay_terms').where({ id: b.id }).first();
+    expect(rb.notice_30_late_sent_at).toBeNull();
+    expect(rb.notice_45_late_sent_at).toBeNull();
+    expect(rb.notice_45_claimed_at).toEqual(successorAt);
+    expect(rb.notice_30_claimed_at).toEqual(staleB.notice_30_claimed_at);
+
+    // Still owned → stamps normally.
+    const c = await insert();
+    const ownC = await _private.claimTermNotice(c, 45);
+    await expect(_private.stampTermNoticeWitness(ownC, 45, onTime)).resolves.toBe('stamped');
+    const rc = await db('annual_prepay_terms').where({ id: c.id }).first();
+    expect(rc.notice_45_sent_at).toEqual(onTime);
+    expect(rc.notice_45_claimed_at).toBeNull();
+  });
+
+  test('lease: a claim past half its TTL is renewed before sending while still owned; a lost one stops the send and is left alone', async () => {
+    const { db } = fixture;
+    await migrateThrough109(db);
+    jest.doMock('../models/db', () => db);
+    mockSendSide();
+    const { _private } = require('../services/annual-prepay-renewals');
+    const base = {
+      term_start: '2025-11-10', term_end: '2026-11-10', status: 'renewal_pending', annual_plan_version: 'v3',
+      installation_anchored_at: new Date('2025-11-10T12:00:00Z'),
+    };
+    const oldClaim = new Date(Date.now() - 10 * 60 * 1000); // 10 min: past half the 15-min TTL
+    const [owned] = await db('annual_prepay_terms').insert({ ...base, customer_id: randomUUID(), notice_45_claimed_at: oldClaim }).returning('*');
+    const ctxOwned = { claimedTerm: { ...owned }, daysOut: 45, combined: false };
+    await expect(_private.ensureTermNoticeLease(ctxOwned)).resolves.toBe(true);
+    const r1 = await db('annual_prepay_terms').where({ id: owned.id }).first();
+    expect(r1.notice_45_claimed_at.getTime()).toBeGreaterThan(oldClaim.getTime());
+    expect(ctxOwned.claimedTerm.notice_45_claimed_at).toEqual(r1.notice_45_claimed_at);
+
+    const successorAt = new Date();
+    const [lost] = await db('annual_prepay_terms').insert({ ...base, customer_id: randomUUID(), notice_45_claimed_at: successorAt }).returning('*');
+    const ctxLost = { claimedTerm: { ...lost, notice_45_claimed_at: oldClaim }, daysOut: 45, combined: false };
+    await expect(_private.ensureTermNoticeLease(ctxLost)).resolves.toBe(false);
+    const r2 = await db('annual_prepay_terms').where({ id: lost.id }).first();
+    expect(r2.notice_45_claimed_at).toEqual(successorAt);
+  });
+
+  // Codex #4921 r10 P2: a witness conflict whose bell insert failed is
+  // persisted and re-filed by a later sweep; a confirmed bell stamps and stops.
+  test('witness-conflict bell: a failed bell stays pending and is re-filed by the next checkAndSend; a confirmed bell stamps and stops', async () => {
+    const { db } = fixture;
+    await migrateThrough109(db);
+    jest.doMock('../models/db', () => db);
+    const notifyAdmin = mockSendSide();
+    const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+    const { _private } = AnnualPrepayRenewals;
+    const onTime = new Date('2026-09-26T16:00:00Z');
+    const [term] = await db('annual_prepay_terms').insert({
+      customer_id: randomUUID(), term_start: '2025-11-10', term_end: '2026-11-10', status: 'renewal_pending',
+      annual_plan_version: 'v3', installation_anchored_at: new Date('2025-11-10T12:00:00Z'),
+      notice_45_late_sent_at: new Date('2026-09-28T16:00:00Z'),
+    }).returning('*');
+    const conflictBells = () => notifyAdmin.mock.calls.filter((c) => c[1] === 'Termite annual renewal notice record conflict');
+
+    notifyAdmin.mockResolvedValue(null); // the bell insert fails
+    await expect(_private.stampTermNoticeWitness(term, 45, onTime)).resolves.toBe('conflict');
+    let row = await db('annual_prepay_terms').where({ id: term.id }).first();
+    expect(row.notice_witness_conflict).toMatchObject({ days_out: 45, intended_column: 'notice_45_sent_at', recorded_columns: ['notice_45_late_sent_at'] });
+    expect(row.notice_witness_conflict_belled_at).toBeNull();
+    await expect(_private.termiteWitnessConflictCandidates({ conn: db })).resolves.toHaveLength(1);
+
+    // Next sweep, bell still failing → still pending.
+    await AnnualPrepayRenewals.checkAndSend({ today: '2026-10-01' });
+    row = await db('annual_prepay_terms').where({ id: term.id }).first();
+    expect(row.notice_witness_conflict_belled_at).toBeNull();
+    expect(conflictBells()).toHaveLength(2);
+
+    // Next sweep, bell confirmed → stamped; later sweeps no longer re-file.
+    notifyAdmin.mockResolvedValue({ id: 'n' });
+    await AnnualPrepayRenewals.checkAndSend({ today: '2026-10-02' });
+    row = await db('annual_prepay_terms').where({ id: term.id }).first();
+    expect(row.notice_witness_conflict_belled_at).toBeInstanceOf(Date);
+    expect(conflictBells()).toHaveLength(3);
+    await AnnualPrepayRenewals.checkAndSend({ today: '2026-10-03' });
+    expect(conflictBells()).toHaveLength(3);
+    await expect(_private.termiteWitnessConflictCandidates({ conn: db })).resolves.toHaveLength(0);
   });
 
   // Codex #4921 r7 P1, real SQL: a combined send claims BOTH rungs in one

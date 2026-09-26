@@ -64,6 +64,10 @@ const TERMITE_NOTICE_MISSED_ESCALATION_COLUMN = 'notice_missed_escalated_at';
 // then a late bell once a retry finally lands). Added by 20260926000108.
 const TERMITE_45_UNDELIVERED_ESCALATION_COLUMN = 'notice_45_undelivered_escalated_at';
 const TERMITE_30_UNDELIVERED_ESCALATION_COLUMN = 'notice_30_undelivered_escalated_at';
+// Durable witness-conflict record + its confirmed-bell stamp (20260926000109,
+// Codex #4921 r10 P2) — an unbelled conflict is re-filed by the daily sweep.
+const TERMITE_WITNESS_CONFLICT_COLUMN = 'notice_witness_conflict';
+const TERMITE_WITNESS_CONFLICT_BELLED_COLUMN = 'notice_witness_conflict_belled_at';
 // Days BEFORE term_start the unpaid-prepay payment reminder fires (daily cron
 // granularity: 3 days out and the day before the first visit).
 const PAYMENT_REMINDER_DAYS = [3, 1];
@@ -177,7 +181,12 @@ async function annualPrepayColumns(conn = db) {
 function termiteNoticeSchemaComplete(cols) {
   return TERMITE_NOTICE_PASS_COLUMNS.every((col) => Boolean(cols[col]))
     && Boolean(cols[TERMITE_45_UNDELIVERED_ESCALATION_COLUMN])
-    && Boolean(cols[TERMITE_30_UNDELIVERED_ESCALATION_COLUMN]);
+    && Boolean(cols[TERMITE_30_UNDELIVERED_ESCALATION_COLUMN])
+    && witnessConflictColumnsReady(cols);
+}
+
+function witnessConflictColumnsReady(cols) {
+  return Boolean(cols[TERMITE_WITNESS_CONFLICT_COLUMN]) && Boolean(cols[TERMITE_WITNESS_CONFLICT_BELLED_COLUMN]);
 }
 
 async function invoiceColumns() {
@@ -1740,18 +1749,16 @@ function isTermiteAnnualPlanTerm(term) {
   return !!term?.annual_plan_version;
 }
 
-// The plan's OWN property (the source estimate's property) — a
-// multi-property customer's billing address can be a different site, and
-// the termite notice names the protected property. Three-step fallback
-// (Codex #4921 r2 P1): the estimate's linked customer_properties row when
-// one resolves, else the estimate's OWN free-text address snapshot
-// (`estimates.address` — always authoritative for what was quoted, see
-// 20260806200000_estimates_property_linkage.js; carries no separate
-// city/state/zip, so it lands whole in address_line1), and the customer's
-// primary address is used ONLY when the estimate has neither — never as a
-// substitute for a still-quoted, still-real property just because its
-// `property_id` link is missing or its property row is gone (a hard
-// delete, or a customer_properties join miss for any other reason).
+// The plan's OWN property — a multi-property customer's billing address can
+// be a different site, and the termite notice names the protected property.
+// Codex #4921 r10 P1 order: the estimate's QUOTED ADDRESS SNAPSHOT
+// (`estimates.address`) whenever present — it is the authoritative record of
+// what was quoted and never changes, whereas a linked customer_properties row
+// is rewritten by syncPrimaryAddress when the customer moves; the linked
+// property row only for a legacy estimate with no snapshot (the snapshot
+// carries no separate city/state/zip, so it lands whole in address_line1);
+// and the customer's primary address (null here) only when the estimate has
+// neither.
 //
 // Codex #4921 r4 P1: a lookup ERROR is NOT absence. It used to be caught and
 // turned into null, so a transient DB error silently fell through to the
@@ -1768,16 +1775,14 @@ async function planPropertyForTerm(term, conn = db) {
     .where('id', term.source_estimate_id)
     .first('property_id', 'address');
   if (!estimate) return null;
-  if (estimate.property_id) {
-    const property = await conn('customer_properties')
-      .where('id', estimate.property_id)
-      .first('address_line1', 'address_line2', 'city', 'state', 'zip');
-    if (property?.address_line1) return property;
-  }
   if (estimate.address) {
     return { address_line1: estimate.address, address_line2: null, city: null, state: null, zip: null };
   }
-  return null;
+  if (!estimate.property_id) return null;
+  const property = await conn('customer_properties')
+    .where('id', estimate.property_id)
+    .first('address_line1', 'address_line2', 'city', 'state', 'zip');
+  return property?.address_line1 ? property : null;
 }
 
 // Matches email-template.js's currency() formatting so the SMS and email
@@ -6027,6 +6032,7 @@ async function stampTermNoticeWitness(claimedTerm, daysOut, sentAt, { alsoRecord
       .where({ id: claimedTerm.id })
       .whereNull(noticeCol)
       .where(lateTermiteSendAbsent(daysOut, claimedTerm, baseline))
+      .where(ownsNoticeClaims(claimedTerm, [claimCol, missedClaimCol]))
       .update({
         [sentCol]: sentAt,
         [claimCol]: null,
@@ -6053,6 +6059,20 @@ async function stampTermNoticeWitness(claimedTerm, daysOut, sentAt, { alsoRecord
   return 'stamped';
 }
 
+// Codex #4921 r10 P2: the witness stamp requires that THIS attempt still
+// owns its claim(s) — each claim column still equals the exact timestamp
+// this attempt wrote (both columns for a combined send), like the release.
+// A worker whose lease was lost (reclaimed after the TTL) matches zero rows,
+// so it never stamps over — or clears — the new holder's claim; the
+// zero-row path then re-reads and classifies.
+function ownsNoticeClaims(claimedTerm, claimCols) {
+  return function ownsNoticeClaimsGroup() {
+    for (const col of claimCols) {
+      if (col) this.where(col, claimedTerm[col] ?? null);
+    }
+  };
+}
+
 // A witness UPDATE matched zero rows: re-read and classify (see
 // stampTermNoticeWitness). Never throws past a failed bell.
 async function resolveUnstampedWitness(claimedTerm, daysOut, sentCol, sentAt) {
@@ -6063,38 +6083,108 @@ async function resolveUnstampedWitness(claimedTerm, daysOut, sentCol, sentAt) {
     return 'already_recorded';
   }
   logger.error(`[annual-prepay] ${daysOut}-day notice witness CONFLICT for term ${claimedTerm.id}: accepted at ${sentAt.toISOString()} → ${sentCol}, but the term already has ${recordedCols.join(', ') || 'no row'}`);
-  await fileTermiteWitnessConflictException(claimedTerm, daysOut, sentCol, recordedCols, sentAt);
+  const conflict = {
+    days_out: Number(daysOut),
+    intended_column: sentCol,
+    recorded_columns: recordedCols,
+    accepted_at: sentAt.toISOString(),
+    detected_at: new Date().toISOString(),
+  };
+  await recordWitnessConflict(claimedTerm.id, conflict);
+  await fileTermiteWitnessConflictException(current || claimedTerm, conflict);
   return 'conflict';
+}
+
+// Persist the conflict (and clear any earlier bell stamp) so a failed bell
+// is re-filed by the daily sweep. Best-effort: a missing column (pre-000109)
+// or a write failure still leaves the immediate bell attempt below.
+async function recordWitnessConflict(termId, conflict) {
+  try {
+    const cols = await annualPrepayColumns();
+    if (!witnessConflictColumnsReady(cols)) return;
+    await db('annual_prepay_terms')
+      .where({ id: termId })
+      .update({
+        notice_witness_conflict: JSON.stringify(conflict),
+        notice_witness_conflict_belled_at: null,
+        updated_at: new Date(),
+      });
+  } catch (err) {
+    logger.warn(`[annual-prepay] recording witness conflict failed for term ${termId}: ${err.message}`);
+  }
 }
 
 // Staff bell for a witness conflict: the customer WAS notified, but the
 // term's record disagrees with this delivery's evidence (e.g. on-time
 // evidence vs a late record another sender wrote first). The renewal-charge
 // gate reads notice_45_sent_at, so staff must reconcile before it renews.
-async function fileTermiteWitnessConflictException(term, daysOut, intendedCol, recordedCols, sentAt) {
+// Codex #4921 r10 P2: the notifyAdmin result is verified — the confirmed-
+// bell stamp lands ONLY on a non-null result, so a failed insert leaves the
+// persisted conflict unbelled for the daily sweep to re-file. Returns true
+// only on a confirmed bell.
+async function fileTermiteWitnessConflictException(term, conflict) {
   try {
     const NotificationService = require('./notification-service');
-    await NotificationService.notifyAdmin(
+    const result = await NotificationService.notifyAdmin(
       'alert',
       'Termite annual renewal notice record conflict',
-      `The ${daysOut}-day renewal notice for term ${term.id} (renews ${formatDateLabel(term.term_end)}) was accepted at ${sentAt.toISOString()}, which records as ${intendedCol}, but the term already shows ${recordedCols.join(' and ') || 'no record'} from another sender. Check the message history and correct the record before this renewal is charged.`,
+      `The ${conflict.days_out}-day renewal notice for term ${term.id} (renews ${formatDateLabel(term.term_end)}) was accepted at ${conflict.accepted_at}, which records as ${conflict.intended_column}, but the term already shows ${conflict.recorded_columns.join(' and ') || 'no record'} from another sender. Check the message history and correct the record before this renewal is charged.`,
       {
         link: termiteAlertLink(term),
         bell: true,
-        dedupeKey: `termite-annual-notice:${term.id}:${daysOut}:witness_conflict`,
+        dedupeKey: `termite-annual-notice:${term.id}:${conflict.days_out}:witness_conflict`,
         metadata: {
           customerId: term.customer_id || null,
           annual_prepay_term_id: term.id,
-          days_out: Number(daysOut),
+          days_out: conflict.days_out,
           reason: 'notice_witness_conflict',
-          intended_column: intendedCol,
-          recorded_columns: recordedCols,
+          intended_column: conflict.intended_column,
+          recorded_columns: conflict.recorded_columns,
         },
       },
     );
+    if (!result) {
+      logger.warn(`[annual-prepay] termite witness-conflict bell insert failed for term ${term.id}; will retry on the next sweep`);
+      return false;
+    }
+    await stampWitnessConflictBelled(term.id);
+    return true;
   } catch (err) {
     logger.warn(`[annual-prepay] termite witness-conflict notification failed for term ${term?.id}: ${err.message}`);
+    return false;
   }
+}
+
+async function stampWitnessConflictBelled(termId) {
+  const cols = await annualPrepayColumns();
+  if (!witnessConflictColumnsReady(cols)) return;
+  await db('annual_prepay_terms')
+    .where({ id: termId })
+    .whereNotNull('notice_witness_conflict')
+    .whereNull('notice_witness_conflict_belled_at')
+    .update({ notice_witness_conflict_belled_at: new Date(), updated_at: new Date() });
+}
+
+// The sweep's retry point: every termite term with a persisted witness
+// conflict whose bell was never confirmed.
+async function termiteWitnessConflictCandidates({ conn = db } = {}) {
+  return conn('annual_prepay_terms')
+    .whereNotNull('annual_plan_version')
+    .whereNotNull(TERMITE_WITNESS_CONFLICT_COLUMN)
+    .whereNull(TERMITE_WITNESS_CONFLICT_BELLED_COLUMN)
+    .select('*');
+}
+
+function parseWitnessConflict(value) {
+  if (!value) return null;
+  if (typeof value !== 'string') return value;
+  try { return JSON.parse(value); } catch { return null; }
+}
+
+async function refileWitnessConflictBell(term) {
+  const conflict = parseWitnessConflict(term[TERMITE_WITNESS_CONFLICT_COLUMN]);
+  if (!conflict) return false;
+  return fileTermiteWitnessConflictException(term, { ...conflict, recorded_columns: conflict.recorded_columns || [] });
 }
 
 // Codex #4921 pre-push P1 (class fix): persisted acceptance evidence is
@@ -6326,11 +6416,54 @@ async function deliverClaimedTermNotice(ctx) {
   const recovered = termiteRung && !ctx.baseline ? await recoverTermNoticeUnderClaim(ctx) : null;
   if (recovered) return recovered;
 
+  // Lease check right before any provider call (Codex #4921 r10 P2).
+  if (!(await ensureTermNoticeLease(ctx))) return { sent: false, reason: 'claim_lost' };
+
   if (!customer.phone) {
     const byEmail = await deliverTermNoticeByEmail(ctx, null);
     return byEmail.sent ? byEmail : { sent: false, reason: 'no_phone' };
   }
   return deliverTermNoticeBySms(ctx, addressShort);
+}
+
+// Codex #4921 r10 P2: renew this attempt's claim lease right before the
+// provider call when it is past half its TTL (a claim younger than that
+// cannot have been reclaimed by anyone — others treat it as fresh — so the
+// common path costs nothing). The renewal is conditional on the claim(s)
+// still holding this attempt's exact timestamp; if the lease was lost, this
+// attempt sends nothing and releases nothing (the claim is not ours).
+async function ensureTermNoticeLease(ctx) {
+  const claimCols = ctx.combined
+    ? ['notice_30_claimed_at', 'notice_45_claimed_at']
+    : [noticeClaimColumnForDaysOut(ctx.daysOut)];
+  const oldest = Math.min(...claimCols.map((col) => new Date(ctx.claimedTerm[col]).getTime()));
+  if (!(Date.now() - oldest > NOTICE_CLAIM_TTL_MS / 2)) return true;
+  const renewedAt = new Date();
+  const renewed = ctx.combined
+    ? await renewCombinedNoticeLease(ctx.claimedTerm, renewedAt)
+    : await renewNoticeLease(ctx.claimedTerm, claimCols[0], renewedAt);
+  if (!renewed) {
+    logger.warn(`[annual-prepay] ${ctx.daysOut}-day notice claim for term ${ctx.claimedTerm.id} was lost before sending; not sending`);
+    ctx.recorded = true; // nothing of ours to release
+    return false;
+  }
+  for (const col of claimCols) ctx.claimedTerm[col] = renewedAt;
+  return true;
+}
+
+async function renewNoticeLease(claimedTerm, claimCol, renewedAt) {
+  return db('annual_prepay_terms')
+    .where({ id: claimedTerm.id })
+    .where(claimCol, claimedTerm[claimCol])
+    .update({ [claimCol]: renewedAt, updated_at: renewedAt });
+}
+
+async function renewCombinedNoticeLease(claimedTerm, renewedAt) {
+  return db('annual_prepay_terms')
+    .where({ id: claimedTerm.id })
+    .where('notice_30_claimed_at', claimedTerm.notice_30_claimed_at)
+    .where('notice_45_claimed_at', claimedTerm.notice_45_claimed_at)
+    .update({ notice_30_claimed_at: renewedAt, notice_45_claimed_at: renewedAt, updated_at: renewedAt });
 }
 
 // Resolves { confirmed, acceptedAt } — acceptedAt is the provider's
@@ -6993,6 +7126,15 @@ async function runTermiteNoticePass(today, termCols) {
     () => termiteMissedNoticeEscalationCandidates({ today }),
     escalateMissedNotice,
   );
+  // A witness conflict whose staff bell never got a confirmed insert
+  // (Codex #4921 r10 P2) — gated on its own columns (20260926000109).
+  if (witnessConflictColumnsReady(termCols)) {
+    await runTermiteSubPass(
+      'termite witness-conflict bell retry',
+      () => termiteWitnessConflictCandidates(),
+      refileWitnessConflictBell,
+    );
+  }
   return sent;
 }
 
@@ -7642,6 +7784,11 @@ module.exports = {
     releaseCombinedTermNoticeClaim,
     releaseTermNoticeClaim,
     resolveUnstampedWitness,
+    termiteWitnessConflictCandidates,
+    fileTermiteWitnessConflictException,
+    refileWitnessConflictBell,
+    ownsNoticeClaims,
+    ensureTermNoticeLease,
     recoveryPlan,
     recoveredBeforeEscalation,
     fileTermiteUndeliveredNoticeException,

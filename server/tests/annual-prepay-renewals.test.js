@@ -105,6 +105,7 @@ const COMPLETE_TERMITE_NOTICE_COLS = Object.fromEntries([
   'notice_45_late_escalated_at', 'notice_30_sent_at', 'notice_30_claimed_at', 'notice_30_late_sent_at',
   'notice_30_late_escalated_at', 'notice_missed_escalated_at',
   'notice_45_undelivered_escalated_at', 'notice_30_undelivered_escalated_at',
+  'notice_witness_conflict', 'notice_witness_conflict_belled_at',
 ].map((c) => [c, {}]));
 
 // messaging_audit_log stand-in: resolves .first() from `auditLedger`
@@ -2502,8 +2503,9 @@ describe('annual prepay renewal helpers', () => {
       customers: [
         query({ first: { id: 'customer-1', first_name: 'Stan', address_line1: '1 Billing Way', city: 'Tampa', email: 'stan@example.com', phone: '+19415550100' } }),
       ],
+      // A LEGACY estimate (no quoted-address snapshot): the linked property row.
       estimates: [
-        query({ first: { property_id: 'property-9', address: '9 Palm Ave Fallback, Sarasota' } }),
+        query({ first: { property_id: 'property-9', address: null } }),
       ],
       customer_properties: [
         query({ first: { address_line1: '9 Palm Ave', address_line2: null, city: 'Sarasota', state: 'FL', zip: '34236' } }),
@@ -2539,12 +2541,38 @@ describe('annual prepay renewal helpers', () => {
       await expect(_private.planPropertyForTerm({ id: 't', source_estimate_id: 'est-1' })).rejects.toThrow('connection terminated');
     });
 
-    test('an ERROR reading the linked property rejects too', async () => {
+    test('an ERROR reading the linked property (legacy estimate, no snapshot) rejects too', async () => {
       setDbQueues({
-        estimates: [query({ first: { property_id: 'prop-1', address: '9 Palm Ave' } })],
+        estimates: [query({ first: { property_id: 'prop-1', address: null } })],
         customer_properties: [throwingFirst()],
       });
       await expect(_private.planPropertyForTerm({ id: 't', source_estimate_id: 'est-1' })).rejects.toThrow('connection terminated');
+    });
+
+    // Codex #4921 r10 P1: the estimate's QUOTED ADDRESS SNAPSHOT wins
+    // whenever present — a linked customer_properties row is rewritten by
+    // syncPrimaryAddress when the customer moves, so it can name a different
+    // site than the one quoted. The linked row is never even read then.
+    test('the quoted-address snapshot wins over a linked property row (which a customer move may have rewritten)', async () => {
+      const propertyQuery = query({ first: { address_line1: '55 New Home Rd', city: 'Tampa' } });
+      setDbQueues({
+        estimates: [query({ first: { property_id: 'prop-1', address: '9 Palm Ave, Sarasota, FL 34236' } })],
+        customer_properties: [propertyQuery],
+      });
+      await expect(_private.planPropertyForTerm({ id: 't', source_estimate_id: 'est-1' })).resolves.toEqual({
+        address_line1: '9 Palm Ave, Sarasota, FL 34236', address_line2: null, city: null, state: null, zip: null,
+      });
+      expect(propertyQuery.first).not.toHaveBeenCalled();
+    });
+
+    test('a legacy estimate (no snapshot) uses its linked property row; with neither, null (the customer address)', async () => {
+      setDbQueues({
+        estimates: [query({ first: { property_id: 'prop-1', address: '' } }), query({ first: { property_id: null, address: null } })],
+        customer_properties: [query({ first: { address_line1: '9 Palm Ave', address_line2: null, city: 'Sarasota', state: 'FL', zip: '34236' } })],
+      });
+      await expect(_private.planPropertyForTerm({ id: 't', source_estimate_id: 'est-1' }))
+        .resolves.toMatchObject({ address_line1: '9 Palm Ave', city: 'Sarasota' });
+      await expect(_private.planPropertyForTerm({ id: 't', source_estimate_id: 'est-2' })).resolves.toBeNull();
     });
 
     test('genuinely absent data still returns null (no estimate link, no estimate row, no property and no address)', async () => {
@@ -4125,6 +4153,8 @@ describe('annual prepay renewal helpers', () => {
     notice_missed_escalated_at: {},
     notice_45_undelivered_escalated_at: {},
     notice_30_undelivered_escalated_at: {},
+    notice_witness_conflict: {},
+    notice_witness_conflict_belled_at: {},
   };
 
   // Generic (non-termite) prepay terms: the shared 30/15/7 loop excludes
@@ -4142,6 +4172,7 @@ describe('annual prepay renewal helpers', () => {
         query({ rows: [] }), // late-escalation retry candidates
         query({ rows: [] }), // undelivered-past-deadline candidates
         query({ rows: [] }), // missed-notice candidates
+        query({ rows: [] }), // unbelled witness-conflict candidates
         q30, q15, q7,
       ],
     });
