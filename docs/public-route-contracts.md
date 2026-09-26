@@ -1426,9 +1426,11 @@ only, never the email. Present only when: both gates are live; the estimate
 is in an open, customer-actionable state (never accepted/declined/expired/
 send_failed/unpublished/past-expiry, and never a staff draft or verified
 staff preview — the same `isEstimateAcceptActive` verdict `returnVisit`/
-`softExit` use); `estimate_data.lead_linkage` is STRONG (`sid` or `stamp` —
-the same set the accept/decline handlers' own lead re-lock condition on); the
-linked lead passes `leadLinkRefusal` (open lead, US phone, and — if a
+`softExit` use); exactly one linked lead — a live lead whose
+`leads.estimate_id` names this estimate (the link the admin estimate tool
+writes) and/or a stamped `estimate_data.lead_id` with a STRONG `lead_linkage`
+(`sid` or `stamp`); two pointing leads, or a pointer and a stamp that
+disagree, offer nothing; the linked lead passes `leadLinkRefusal` (open lead, US phone, and — if a
 customer is linked — that customer live and still on the lead's phone) and
 `leadWantsRecurringPlan`; and the `/inspection/:token` page's own lead-wide
 probe (`inspection-public.js` `_internals.computeConsultationSlotsForLead`,

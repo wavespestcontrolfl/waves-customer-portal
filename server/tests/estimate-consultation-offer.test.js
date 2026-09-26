@@ -27,10 +27,16 @@ jest.mock('../routes/inspection-public', () => ({
   },
 }));
 
-function chainBuilder({ firstRow = null, throwOn = false } = {}) {
+// `pointing` = ids of live leads whose leads.estimate_id names the estimate.
+function chainBuilder({ firstRow = null, throwOn = false, pointing = [] } = {}) {
   const b = {};
   b.where = jest.fn(() => b);
   b.whereNull = jest.fn(() => b);
+  b.limit = jest.fn(() => b);
+  b.pluck = jest.fn(async () => {
+    if (throwOn) throw new Error('db exploded');
+    return pointing;
+  });
   b.first = jest.fn(async () => {
     if (throwOn) throw new Error('db exploded');
     return firstRow;
@@ -56,10 +62,24 @@ const OPEN_RECURRING_LEAD = {
 
 const PAGE_ADDRESS = { line1: '123 Palm Street', line2: null, city: 'Bradenton', state: 'FL', zip: '34205' };
 
+const ESTIMATE_ID = '7a1d2c3b-4444-4555-8666-abcdefabcdef';
+
+// Flat overrides → the builder's { estimate, estimateData, acceptActive }.
+// Defaults: a stamped strong link (lead_id + 'sid'), no leads.estimate_id
+// pointer (set via mockBuilders.leads = chainBuilder({ pointing })).
 function baseArgs(overrides = {}) {
-  return {
+  const o = {
     leadId: LEAD_ID, leadLinkage: 'sid', acceptActive: true,
-    estimateAddress: '123 Palm St, Bradenton, FL 34205', ...overrides,
+    estimateAddress: '123 Palm St, Bradenton, FL 34205', fromVisit: false, grouped: false, ...overrides,
+  };
+  return {
+    acceptActive: o.acceptActive,
+    estimate: { id: ESTIMATE_ID, address: o.estimateAddress, estimate_group_id: o.grouped ? 'grp-1' : null },
+    estimateData: {
+      ...(o.leadId ? { lead_id: o.leadId } : {}),
+      ...(o.leadLinkage ? { lead_linkage: o.leadLinkage } : {}),
+      ...(o.fromVisit ? { scheduled_service_id: 'svc-1' } : {}),
+    },
   };
 }
 
@@ -109,22 +129,32 @@ describe('buildEstimateConsultationOffer — hidden cases', () => {
     expect(mockDb).not.toHaveBeenCalled();
   });
 
-  test('no lead id at all → null', async () => {
+  test('no stamped lead and no leads.estimate_id pointer → null, no probe', async () => {
     const result = await buildEstimateConsultationOffer(baseArgs({ leadId: null }));
     expect(result).toBeNull();
-    expect(mockDb).not.toHaveBeenCalled();
+    expect(mockComputeConsultationSlotsForLead).not.toHaveBeenCalled();
   });
 
-  test('weak linkage (not sid/stamp) → null, never touches the DB', async () => {
+  test('weak stamped linkage (not sid/stamp) and no pointer → null, no probe', async () => {
     const result = await buildEstimateConsultationOffer(baseArgs({ leadLinkage: 'phone_fallback' }));
     expect(result).toBeNull();
-    expect(mockDb).not.toHaveBeenCalled();
+    expect(mockComputeConsultationSlotsForLead).not.toHaveBeenCalled();
   });
 
-  test('no linkage at all → null', async () => {
+  test('stamped lead id without any linkage and no pointer → null', async () => {
     const result = await buildEstimateConsultationOffer(baseArgs({ leadLinkage: null }));
     expect(result).toBeNull();
-    expect(mockDb).not.toHaveBeenCalled();
+  });
+
+  test('two live leads pointing at the estimate → ambiguous, null', async () => {
+    mockBuilders.leads = chainBuilder({ firstRow: OPEN_RECURRING_LEAD, pointing: [LEAD_ID, 'other-lead'] });
+    expect(await buildEstimateConsultationOffer(baseArgs({ leadId: null }))).toBeNull();
+    expect(mockComputeConsultationSlotsForLead).not.toHaveBeenCalled();
+  });
+
+  test('a pointer and a stamp naming different leads → ambiguous, null', async () => {
+    mockBuilders.leads = chainBuilder({ firstRow: OPEN_RECURRING_LEAD, pointing: ['other-lead'] });
+    expect(await buildEstimateConsultationOffer(baseArgs())).toBeNull();
   });
 
   test('"stamp" linkage is accepted (both strong values)', async () => {
@@ -178,6 +208,18 @@ describe('buildEstimateConsultationOffer — hidden cases', () => {
 });
 
 describe('buildEstimateConsultationOffer — happy path', () => {
+  test('the leads.estimate_id pointer alone links the lead (the link the admin estimate tool writes)', async () => {
+    mockBuilders.leads = chainBuilder({ firstRow: OPEN_RECURRING_LEAD, pointing: [LEAD_ID] });
+    const result = await buildEstimateConsultationOffer(baseArgs({ leadId: null, leadLinkage: null }));
+    expect(result?.url).toContain('/inspection/');
+    expect(mockComputeConsultationSlotsForLead).toHaveBeenCalledWith(LEAD_ID, { count: 1 });
+  });
+
+  test('a pointer and a stamp naming the same lead agree', async () => {
+    mockBuilders.leads = chainBuilder({ firstRow: OPEN_RECURRING_LEAD, pointing: [LEAD_ID] });
+    expect((await buildEstimateConsultationOffer(baseArgs()))?.url).toContain('/inspection/');
+  });
+
   test('eligible strongly-linked recurring lead gets the long URL with NO channel and no write', async () => {
     const result = await buildEstimateConsultationOffer(baseArgs());
     expect(result).not.toBeNull();
