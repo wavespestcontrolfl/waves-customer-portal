@@ -72,6 +72,5 @@ async function runBillingEmailProviderReplayHandoff(message, dispatch) {
 
 module.exports = {
   isBillingEmailProviderReplay,
-  readStoredBillingReplayContext,
   runBillingEmailProviderReplayHandoff,
 };
