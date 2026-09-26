@@ -819,6 +819,31 @@ describe('identifyPestV2 — off-catalog and no-photos', () => {
     expect(result.v2.answer.headline).toBe('Looks like an ant');
     expect(JSON.stringify(result.v2)).not.toContain('XYZ_MODEL_PROSE_MARKER');
   });
+
+  test('every attempted leg answering no_route (the model policy is unregistered) fails closed instead of degrading to a misleading analyzed answer — Codex round-0 P1 (PR-2b wiring round 1)', async () => {
+    dispatch
+      .mockResolvedValueOnce({ ok: false, reason: 'no_route' }) // candidates
+      .mockResolvedValueOnce({ ok: false, reason: 'no_route' }); // escalation (fallback also unregistered)
+
+    const result = await identifyPestV2([PHOTO]);
+    expect(result).toEqual({ ok: false, reason: 'no_route' });
+  });
+
+  test('no_route on the candidates leg alone does NOT fail closed when the escalation leg is configured and answers for real', async () => {
+    dispatch
+      .mockResolvedValueOnce({ ok: false, reason: 'no_route' }) // candidates: primary unregistered
+      .mockResolvedValueOnce({
+        ok: true,
+        json: {
+          quality: { usable: true, issue: 'none' }, shows: 'organism',
+          candidates: [{ slug: 'fire-ant', confidence: 0.9, traits_visible: [1, 2], traits_not_visible: [] }],
+        },
+      }); // escalation: fallback IS registered and answers
+
+    const result = await identifyPestV2([PHOTO]);
+    expect(result.ok).toBe(true);
+    expect(result.v2.entry.slug).toBe('fire-ant');
+  });
 });
 
 describe('identifyPestV2 — internal object never reaches v2', () => {

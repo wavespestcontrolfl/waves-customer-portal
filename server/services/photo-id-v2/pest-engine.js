@@ -972,6 +972,23 @@ async function identifyPestV2(photos = []) {
     } = combineEscalation(finalCandidates, escalationResult, contextSlugs));
   }
 
+  // Codex round-0 P1 (PR-2b wiring round 1): `no_route` means the model
+  // POLICY was never registered (MODELS.TEXT_POLICIES.photoIdVision
+  // missing/misconfigured) — a permanent misconfiguration, not a transient
+  // provider miss. If EVERY leg that was actually attempted came back
+  // `no_route`, no photo was ever analyzed by anyone; degrading to a
+  // deterministic "unknown" answer would let the route persist a
+  // misleadingly `status: 'analyzed'` row and a confident-looking 200 for
+  // a feature that is completely unconfigured. Fail the same way `identifyPest`
+  // (v1) already does on a total vision miss — `{ok:false}`, a 503 at the
+  // route — instead of a silent, empty "we couldn't tell" degrade.
+  const everyAttemptedLegUnconfigured = candidatesResult.reason === 'no_route'
+    && (!verifyResult || verifyResult.reason === 'no_route')
+    && (!escalationResult || escalationResult.reason === 'no_route');
+  if (everyAttemptedLegUnconfigured) {
+    return { ok: false, reason: 'no_route' };
+  }
+
   const escalationJson = escalationResult?.ok && hasCandidatesArray(escalationResult.json) ? escalationResult.json : null;
   const quality = combineQuality(candidatesJson?.quality, escalationJson?.quality);
   const currentMonth = etParts(new Date()).month;
