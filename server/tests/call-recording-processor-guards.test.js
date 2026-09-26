@@ -1739,4 +1739,32 @@ describe('start_before_call shadow-mode review card is refreshed, not dropped, o
     expect(compiled.sql).not.toContain('do nothing');
     knex.destroy();
   });
+
+  // codex #4919 round-4 P1: the merge above re-binds this SHARED reason-code
+  // card ('auto_booking_skipped_after_approval') to the call's current
+  // customer and clears the two house-number-dispute-specific fields, the
+  // same way the enforce-mode fallback a few hundred lines below already
+  // does — otherwise a merge reusing a card opened for house-number-dispute
+  // reasons (on a different customer/visit) would carry that old dispute's
+  // retained_service_id / retained_scheduled_date alongside this one.
+  test('the shadow-mode extraPayload rebinds dispute_customer_id and clears retained_service_id/retained_scheduled_date, mirroring the enforce-mode fallback', () => {
+    const shadowGateAt = processorSrc.indexOf("skipped_reason: 'start_before_call'");
+    expect(shadowGateAt).toBeGreaterThan(-1);
+    const shadowMergeAt = processorSrc.indexOf("COALESCE(triage_items.payload, '{}'::jsonb) || EXCLUDED.payload", shadowGateAt);
+    expect(shadowMergeAt).toBeGreaterThan(shadowGateAt);
+    const shadowPayload = processorSrc.slice(shadowGateAt, shadowMergeAt);
+    expect(shadowPayload).toContain('dispute_customer_id: customerId ? String(customerId) : null');
+    expect(shadowPayload).toContain('retained_service_id: null');
+    expect(shadowPayload).toContain('retained_scheduled_date: null');
+
+    // The enforce-mode fallback this mirrors (guarded on v2ApprovedExtraction).
+    const enforceGateAt = processorSrc.indexOf('CALL_EXTRACTION_V2_DRIVES_ROUTING && v2ApprovedExtraction && extracted.appointment_confirmed');
+    expect(enforceGateAt).toBeGreaterThan(shadowMergeAt);
+    const enforceMergeAt = processorSrc.indexOf("COALESCE(triage_items.payload, '{}'::jsonb) || EXCLUDED.payload", enforceGateAt);
+    expect(enforceMergeAt).toBeGreaterThan(enforceGateAt);
+    const enforcePayload = processorSrc.slice(enforceGateAt, enforceMergeAt);
+    expect(enforcePayload).toContain('dispute_customer_id: customerId ? String(customerId) : null');
+    expect(enforcePayload).toContain('retained_service_id: null');
+    expect(enforcePayload).toContain('retained_scheduled_date: null');
+  });
 });

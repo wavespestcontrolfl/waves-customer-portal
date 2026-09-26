@@ -15313,6 +15313,18 @@ const CallRecordingProcessor = {
                           skipped_reason: 'start_before_call',
                           preferred_date_time: extracted.preferred_date_time || null,
                           service: serviceType,
+                          // Same rebind-and-clear the enforce-mode fallback
+                          // below applies (codex #4919 round-4 P1): a merge
+                          // re-binds the task to the call's CURRENT customer
+                          // and must explicitly null the house-number-dispute
+                          // fields, or a card the merge reuses (opened for a
+                          // DIFFERENT reason, on a different customer/visit)
+                          // keeps its old dispute's retained_service_id /
+                          // retained_scheduled_date riding alongside this
+                          // one.
+                          dispute_customer_id: customerId ? String(customerId) : null,
+                          retained_service_id: null,
+                          retained_scheduled_date: null,
                         },
                       }))
                       .onConflict(ttrx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))

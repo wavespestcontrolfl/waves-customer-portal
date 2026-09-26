@@ -824,12 +824,14 @@ const COMMITMENT_TURN_VOCAB = new Set([
   // COMMITMENT_TURN_ACKNOWLEDGEMENTS, below).
   'go', 'made', 'send', 'momentarily',
   // codex #4919 r1 P1: an ARRIVAL WINDOW names its range with "between" (the
-  // "and"/"to" connectors were already ordinary vocabulary), and a
-  // relative-day word ("today"/"tonight"/"tomorrow") often substitutes for a
-  // weekday name entirely. The actual DAY/RANGE-BINDING is enforced by
-  // SLOT_BINDING_CHECKS/collapseRangeToFirstBound below, not here — this set
-  // only clears the ordinary closed-vocabulary screen.
-  'between', 'today', 'tonight', 'tomorrow',
+  // "and"/"to" connectors were already ordinary vocabulary). The actual
+  // RANGE-BINDING is enforced by SLOT_BINDING_CHECKS/
+  // collapseRangeToFirstBound below, not here — this set only clears the
+  // ordinary closed-vocabulary screen. Relative-day binding
+  // ("today"/"tonight"/"tomorrow") was tried and removed (codex #4919
+  // round-4 P1s, non-converging) — see the day-binding SLOT_BINDING_CHECKS
+  // entry below.
+  'between',
 ]);
 function turnVocabularyTokenOk(tok, extraSets) {
   if (!tok) return true;
@@ -897,11 +899,10 @@ const SLOT_WORDS = new Set([
   'january', 'february', 'march', 'april', 'may', 'june', 'july', 'august',
   'september', 'october', 'november', 'december',
   // codex #4919 r1 P1: an ARRIVAL WINDOW commitment names its range with
-  // "between … and …" or "… to …", and/or a relative-day word instead of a
-  // weekday name — all glue for the SAME slot-binding grammar this set
-  // already gates (collapseRangeToFirstBound / parseSpokenSlot enforce the
-  // actual binding; this only lets the sentence FORM through).
-  'between', 'and', 'to', 'today', 'tonight', 'tomorrow',
+  // "between … and …" or "… to …" — glue for the slot-binding grammar this
+  // set already gates (collapseRangeToFirstBound / parseSpokenSlot enforce
+  // the actual binding; this only lets the sentence FORM through).
+  'between', 'and', 'to',
 ]);
 const BENIGN_CLOSERS = [
   'and just let us know if anything changes',
@@ -1137,21 +1138,16 @@ function agentCommitmentSentenceVerified(quote, transcript, confirmedStartAt, ca
 // the unauthorized Sunday appointment books. Deterministic token check on the
 // normalized quote: it must contain BOTH the confirmed slot's ET weekday
 // name AND its ET hour in a spoken form ("noon"/"midnight" or the 12-hour
-// number) — OR, for "today"/"tonight"/"tomorrow", the matching relative-day
-// word against callStartedAt's own date, which IS threaded through here
-// (codex #4919 r1 P1; see the day-binding SLOT_BINDING_CHECKS entry below).
-// Any OTHER relative phrasing ("next Tuesday", "this weekend") still fails —
-// conservative and accepted: those calls stay in triage.
+// number). Relative phrasing ("today"/"tonight"/"tomorrow", "next Tuesday",
+// "this weekend") fails — conservative and accepted: those calls stay in
+// triage. (codex #4919 r1 P1 tried resolving "today"/"tonight"/"tomorrow"
+// against callStartedAt; round-4 found 3 more P1s in the binder expansion
+// and it was removed rather than patched further — non-converging. "this
+// <weekday>" on the SAME day is the one narrow exception kept; see the
+// day-binding SLOT_BINDING_CHECKS entry below.)
 const WEEKDAY_NAMES = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
 const MONTH_NAMES = ['january', 'february', 'march', 'april', 'may', 'june', 'july',
   'august', 'september', 'october', 'november', 'december'];
-// codex #4919 r1 P1: relative-day words resolve unambiguously against the
-// CALL's own date — "tonight"/"today" always name the call's calendar day,
-// "tomorrow" always the next one — unlike a bare weekday name, which is
-// genuinely ambiguous when spoken on that same weekday (see confirmedSlotFacts'
-// dayDiff comment above). Only these three; "next Tuesday"/"this weekend" etc.
-// stay unhandled and fail closed like before.
-const RELATIVE_DAY_WORDS = new Set(['today', 'tonight', 'tomorrow']);
 
 // Declarative poison vocabulary (codex P1, rounds 1-2 of this PR's local+
 // Codex audit): a sentence naming who has to sign off, the act of
@@ -1446,14 +1442,16 @@ function etWallClockOfConfirmedStart(value) {
 // call's ET date: same-day is rejected (a "Sunday" spoken on a Sunday is
 // ambiguous between today and next week) and day 7 is rejected (same
 // weekday again). Within 1–6 days every weekday names exactly one date.
-// codex #4919 r1 P1 / review round: this function has exactly ONE call site
+// codex #4919 round-4 P1: this function has exactly ONE call site
 // (quoteBindsConfirmedSlot, below) — NOT exported, and this file's only
-// confirmedSlotFacts( call. dayDiff 0 (today) is now also RETURNED (widened
-// from the 1–6 range) so a RELATIVE-day word can bind a same-day slot; the
-// bare-weekday same-day ambiguity this comment describes is enforced by the
-// day-binding SLOT_BINDING_CHECKS entry reading slot.dayDiff, not by this
-// function returning null. If a second call site is ever added, it must
-// handle dayDiff 0 explicitly rather than relying on null-on-same-day.
+// confirmedSlotFacts() call. dayDiff 0 (today) is also RETURNED (widened
+// from the 1–6 range) so "this <weekday>" can bind a same-day slot (the ONE
+// narrow same-day exception kept after removing a broader relative-day
+// binder — see the day-binding SLOT_BINDING_CHECKS entry below); the
+// bare-weekday same-day ambiguity this comment describes is enforced there,
+// reading slot.dayDiff, not by this function returning null. If a second
+// call site is ever added, it must handle dayDiff 0 explicitly rather than
+// relying on null-on-same-day.
 function confirmedSlotFacts(confirmedStartAt, callStartedAt) {
   const wall = etWallClockOfConfirmedStart(confirmedStartAt);
   const call = new Date(String(callStartedAt || ''));
@@ -1529,17 +1527,8 @@ const SPOKEN_TIME_RES = [
   /(?:^| )(\d{1,2}) o ?clock(?: (am|pm))?(?= |$)/g,
   new RegExp(`(?:^| )at (\\d{1,2})(?= $| on (?:${WEEKDAY_NAMES.join('|')})(?= |$))`, 'g'),
 ];
-// codex #4919 review rounds 3-4, P1: "tonight" is an evening-only word
-// (unlike "today"/"tomorrow", which carry no time-of-day signal on their
-// own) — a bare hour with no other period evidence at all is normally read
-// off this business-hours table, but "tonight at 8"/"tonight between 8 and
-// 10" is 8 PM, never this table's inferred 8 AM. `ns` is optional so every
-// pre-existing (non-"tonight") caller is unaffected; passed through from
-// BOTH callers below — the single-time-mention path and the range-collapse
-// fallback — so the override applies everywhere a bare hour can appear,
-// not just inside a range.
-function inferPeriodFromBusinessHours(n, ns) {
-  if (n >= 7 && n <= 11) return / tonight /.test(` ${ns || ''} `) ? 'pm' : 'am';
+function inferPeriodFromBusinessHours(n) {
+  if (n >= 7 && n <= 11) return 'am';
   return n >= 1 && n <= 12 ? 'pm' : null;
 }
 function parseSpokenSlot(normalizedSentence) {
@@ -1561,7 +1550,7 @@ function parseSpokenSlot(normalizedSentence) {
   const statedPeriod = periods.size === 1 ? [...periods][0] : null;
   const times = new Set(SPOKEN_TIME_RES.flatMap((re) => [...` ${ns} `.matchAll(re)].map((m) => {
     const n = Number(m[1]);
-    const period = m[2] || (periods.size ? statedPeriod : inferPeriodFromBusinessHours(n, ns));
+    const period = m[2] || (periods.size ? statedPeriod : inferPeriodFromBusinessHours(n));
     return n >= 1 && n <= 12 && period ? `${n} ${period}` : 'invalid';
   })));
   if (toks.includes('noon')) times.add('12 pm');
@@ -1591,9 +1580,11 @@ function parseSpokenSlot(normalizedSentence) {
       return { nums, hourPosition, datePosition };
     }),
     spokenDayPeriods: new Set(toks.filter((t) => SPOKEN_DAY_PERIODS[t])),
-    // codex #4919 r1 P1: only meaningful alongside an empty weekdays set —
-    // see the day-binding SLOT_BINDING_CHECKS entry below.
-    relativeDays: new Set(toks.filter((t) => RELATIVE_DAY_WORDS.has(t))),
+    // codex #4919 round-4 P1: "this <weekday>" resolves the same-day
+    // ambiguity a bare weekday name can't (see the day-binding
+    // SLOT_BINDING_CHECKS entry below) — "next <weekday>" or a bare name
+    // does not, so only a weekday IMMEDIATELY preceded by "this" counts.
+    thisWeekdays: new Set(toks.filter((t, i) => WEEKDAY_NAMES.includes(t) && at(i - 1) === 'this')),
     periods,
     times,
   };
@@ -1677,7 +1668,7 @@ function collapseRangeToFirstBound(ns) {
     );
     const period = explicitPeriod
       || resolveRangeStartPeriod(hour, endClock24)
-      || inferPeriodFromBusinessHours(Number(hour), ns);
+      || inferPeriodFromBusinessHours(Number(hour));
     if (!period) return ns;
     replacement = minute ? `${hour} ${minute} ${period}` : `${hour} ${period}`;
   }
@@ -1702,26 +1693,23 @@ const NUMBER_RUN_SHAPES = [
 // parseSpokenSlot ever runs — every check below still evaluates a single
 // collapsed mention, never a real range.
 const SLOT_BINDING_CHECKS = [
-  // The slot's day, named either by its WEEKDAY (only when the slot is 1-6
-  // days out — a bare weekday name spoken ON that weekday is ambiguous
-  // between today and next week, per confirmedSlotFacts) or by a RELATIVE-day
-  // word with no weekday mention at all: "tonight"/"today" only for a
-  // same-day slot, "tomorrow" only for a next-day slot (codex #4919 r1 P1).
-  // A weekday name AND a relative-day word both stated ("tomorrow Sunday at
-  // 6 pm"), or more than one relative-day word stated ("today and tomorrow
-  // at 6 pm"), is CONFLICTING evidence — fails closed rather than picking
-  // one (codex #4919 review round P1).
+  // The slot's WEEKDAY, exactly one mention. Main's rule: a bare weekday
+  // name spoken ON that same weekday is genuinely ambiguous between today
+  // and next week, so it only binds when the slot is 1-6 days out (per
+  // confirmedSlotFacts' dayDiff comment above). The ONE exception (codex
+  // #4919 round-4 P1): "this <weekday>" resolves that same-day ambiguity by
+  // construction — "this Tuesday" spoken on a Tuesday names TODAY, not
+  // ambiguous the way a bare "Tuesday" is. "next <weekday>" and a bare
+  // same-day weekday still fail, same as main.
+  // (Relative-day binding — "today"/"tonight"/"tomorrow" with no weekday —
+  // was tried and removed here: codex #4919 round-4 found 3 more P1s in
+  // that expansion and it was non-converging rather than fully specifiable.
+  // A relative-day quote now fails closed exactly like on main, raising a
+  // review card instead of auto-binding.)
   (said, slot) => {
-    if (said.weekdays.size && said.relativeDays.size) return false;
-    if (said.relativeDays.size > 1) return false;
-    if (said.weekdays.size === 1) return said.weekdays.has(slot.weekday) && slot.dayDiff >= 1;
-    if (said.weekdays.size > 1) return false;
-    if (said.relativeDays.size === 1) {
-      if (slot.dayDiff === 0) return said.relativeDays.has('today') || said.relativeDays.has('tonight');
-      if (slot.dayDiff === 1) return said.relativeDays.has('tomorrow');
-      return false;
-    }
-    return false;
+    if (said.weekdays.size !== 1 || !said.weekdays.has(slot.weekday)) return false;
+    if (slot.dayDiff >= 1) return true;
+    return slot.dayDiff === 0 && said.thisWeekdays.has(slot.weekday);
   },
   // Exactly one time mention, the slot's hour AND period.
   (said, slot) => said.times.size === 1 && said.times.has(`${slot.hour12} ${slot.period}`),
