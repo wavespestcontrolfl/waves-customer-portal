@@ -149,6 +149,14 @@ async function resolveLeadAutoReplyClaim(phoneDigits, smsResult, dbc = db) {
   }
 }
 
+async function recipientStillCurrent(customerId, phoneDigits) {
+  const row = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('phone');
+  const currentDigits = String(row?.phone || '').replace(/\D/g, '').slice(-10);
+  return row && currentDigits === phoneDigits
+    ? { ok: true }
+    : { ok: false, code: 'LEAD_SUBJECT_CHANGED', reason: 'Customer deleted or phone changed before the delayed lead reply' };
+}
+
 // Auto-reply to lead — send AT MOST ONCE per person, ever (owner ruling
 // 2026-08-05). Callers gate this to new customer rows; the same person can
 // still produce a second "new" row (phone stored in a different format,
@@ -164,7 +172,7 @@ async function resolveLeadAutoReplyClaim(phoneDigits, smsResult, dbc = db) {
 // send — a missed greeting beats texting a customer twice. Later inbound
 // replies are still classified by server/services/lead-intake.js. Edit copy
 // in the admin UI.
-async function sendLeadAutoReplyOnce({ customer, phoneFormatted, firstName, location, leadSource }) {
+async function sendLeadAutoReplyOnce({ customer, phoneFormatted, firstName, location, leadSource, revalidateRecipient = false }) {
   if (await hasPriorLeadAutoReply(phoneFormatted)) {
     logger.info(`[lead-auto-reply] Auto-reply skipped for customer ${customer.id}: already sent once to this phone`);
     return;
@@ -207,6 +215,11 @@ async function sendLeadAutoReplyOnce({ customer, phoneFormatted, firstName, loca
     customerId: customer.id,
     identityTrustLevel: 'phone_matches_customer',
     entryPoint: 'lead_webhook_auto_reply',
+    // The delayed fallback (after the Lead Response agent) goes out up to a
+    // minute after the form. Re-check at the provider boundary that this
+    // customer still exists and still has this phone; a refusal is a
+    // not-sent block, so the claim below is released.
+    ...(revalidateRecipient ? { preSendCheck: () => recipientStillCurrent(customer.id, phoneDigits) } : {}),
     metadata: {
       original_message_type: 'auto_reply',
       customerLocationId: location.id,
@@ -283,6 +296,7 @@ async function clearServiceMenuIntakeState(customerId, dbc = db) {
 }
 
 module.exports = {
+  recipientStillCurrent,
   clearServiceMenuIntakeState,
   LEAD_AUTO_REPLY_AUDIT_CUTOVER,
   hasPriorLeadAutoReply,
