@@ -35,44 +35,64 @@ function classifyProduct(app = {}) {
   let kind = 'other';
   let tag = 'lawn treatment';
   let fallback = 'applied as part of today’s lawn program';
-  if (/fung|azoxy|propiconazole|thiophanate/.test(hay)) { kind = 'fungicide'; tag = 'fungus protection'; fallback = 'helps protect turf where fungus pressure or wet conditions call for it'; }
-  else if (/pre.?emerg|prodiamine|dithiopyr|pendimethalin/.test(hay)) { kind = 'pre_emergent'; tag = 'weed prevention'; fallback = 'a pre-emergent that stops weeds before they sprout'; }
-  else if (/herb|weed|celsius|atrazine|2,?4-?d|metsulfuron|halosulfuron|sedgehammer|sulfentrazone|iodosulfuron|dicamba/.test(hay)) { kind = 'herbicide'; tag = 'weed control'; fallback = 'targets actively growing weeds'; }
-  else if (/insect|bifenthrin|imidacloprid|chinch|grub|dinotefuran|clothianidin/.test(hay)) { kind = 'insecticide'; tag = 'pest control'; fallback = 'targets turf-damaging insects'; }
-  else if (/iron|micro|biostim|humic|kelp|seaweed/.test(hay)) { kind = 'supplement'; tag = 'color support'; fallback = 'supports color and stress tolerance'; }
-  else if (/fert|nitrogen|urea|potash|\b\d{1,2}-\d{1,2}-\d{1,2}\b/.test(hay)) { kind = 'fertilizer'; tag = 'color & growth'; fallback = 'feeds the lawn to support density, color, and recovery'; }
-  const whatItDoes = p.service_report_summary || p.public_summary || facts.serviceReportSummary || facts.publicSummary || fallback;
-  return { kind, tag, whatItDoes };
+  if (/fung|azoxy|propiconazole|thiophanate/.test(hay)) { kind = 'fungicide'; tag = 'fungus protection'; fallback = 'supports management of labeled turf diseases'; }
+  else if (/pre.?emerg|prodiamine|dithiopyr|pendimethalin/.test(hay)) { kind = 'pre_emergent'; tag = 'weed prevention'; fallback = 'supports prevention of susceptible weeds'; }
+  else if (/herb|weed|celsius|atrazine|2,?4-?d|metsulfuron|halosulfuron|sedgehammer|sulfentrazone|iodosulfuron|dicamba/.test(hay)) { kind = 'herbicide'; tag = 'weed control'; fallback = 'supports control of labeled weeds'; }
+  else if (/insect|bifenthrin|imidacloprid|chinch|grub|dinotefuran|clothianidin/.test(hay)) { kind = 'insecticide'; tag = 'pest control'; fallback = 'supports control of labeled turf insects'; }
+  else if (/iron|micro|biostim|humic|kelp|seaweed/.test(hay)) { kind = 'supplement'; tag = 'color support'; fallback = 'provides general color and stress support'; }
+  else if (/fert|nitrogen|urea|potash|\b\d{1,2}-\d{1,2}-\d{1,2}\b/.test(hay)) { kind = 'fertilizer'; tag = 'color & growth'; fallback = 'provides nutrients as part of the lawn program'; }
+  // Catalog prose is customer-facing only after report-data's approval gate.
+  const approvedFacts = p.facts_approved === true || Object.keys(facts).length > 0;
+  const approvedSummary = approvedFacts
+    ? (facts.serviceReportSummary || facts.publicSummary || p.service_report_summary || p.public_summary)
+    : null;
+  return {
+    kind,
+    tag,
+    whatItDoes: approvedSummary || fallback,
+    purposeSource: approvedSummary ? 'approved_product_fact' : 'category_heuristic',
+  };
 }
 
 const cap = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
 const uniq = (arr) => [...new Set(arr.filter(Boolean))];
+const firstTruthy = (...values) => values.find(Boolean);
 
 // "What Waves did" — solutions/products applied, in plain language, plus the focus
 // tags those products + completed actions add up to. Grounds the report in the
 // actual treatment, not just the photo scores.
 function buildTreatment({ applications = [], actions = [] } = {}) {
   const products = (applications || []).map((app) => {
-    const p = app.product || {};
-    const facts = app.approved_report_product_facts || {};
-    const name = p.name || app.product_name || facts.name || null;
+    const { product: p = {}, approved_report_product_facts: facts = {} } = app;
+    const name = firstTruthy(p.name, app.product_name, facts.name) || null;
     if (!name) return null;
     const cls = classifyProduct(app);
     const targets = Array.isArray(app.targets) ? app.targets.filter(Boolean) : [];
     const areaVal = app.areaValue ?? app.area_value;
-    const areaUnit = app.areaUnit || app.area_unit;
+    const areaUnit = firstTruthy(app.areaUnit, app.area_unit);
     const area = areaVal && areaUnit ? `${areaVal} ${areaUnit}` : null;
+    const applicationMethod = firstTruthy(app.applicationMethod, app.application_method, app.method) || null;
+    const methodSource = applicationMethod
+      ? (app.methodInferred === true ? 'category_inference' : 'recorded_application')
+      : null;
+    const applicationArea = firstTruthy(app.applicationArea, app.application_area, app.area) || null;
     return {
       name,
-      activeIngredient: p.active_ingredient || app.active_ingredient || facts.activeIngredient || null,
+      activeIngredient: firstTruthy(p.active_ingredient, app.active_ingredient, facts.activeIngredient) || null,
       kind: cls.kind,
       whatItDoes: cls.whatItDoes,
+      purposeSource: cls.purposeSource,
       targets,
       area,
+      applicationArea,
+      applicationAreaSource: applicationArea ? 'recorded_application' : null,
       // app.method is the normalized field on persisted service_products
       // payloads (codex P2 2026-07-22) — without it drench/injection context
-      // never reached the narrative for stored reports.
-      method: app.applicationMethod || app.application_method || app.method || null,
+      // never reached the narrative for stored reports. Inferred methods remain
+      // metadata and cannot become a completed-method claim.
+      method: methodSource === 'recorded_application' ? applicationMethod : null,
+      inferredMethod: methodSource === 'category_inference' ? applicationMethod : null,
+      methodSource,
     };
   }).filter(Boolean);
 
@@ -432,7 +452,8 @@ function buildRootCause({ effectiveWaterStatus, coverageWatch, overwatering, mow
 // invents no number. Re-entry text comes from the label when available.
 function buildAftercare(applications) {
   const apps = Array.isArray(applications) ? applications : [];
-  let productNote = null;
+  const productNotes = [];
+  const applicationWaterEvidence = [];
   let reentry = null;
   // Whether ANY product applied today must be watered IN (fertilizer). true = a
   // product requires watering-in; false = watering-in is simply not required for
@@ -444,30 +465,44 @@ function buildAftercare(applications) {
     const req = p.irrigation_required ?? facts.irrigationRequired ?? null;
     if (req === true) waterInRequired = true;
     else if (req === false && waterInRequired == null) waterInRequired = false;
-    if (!productNote) productNote = (p.irrigation_notes || facts.irrigationNotes || '').trim() || null;
+    const note = (p.irrigation_notes || facts.irrigationNotes || '').trim();
+    if (note && !productNotes.includes(note)) productNotes.push(note);
+    applicationWaterEvidence.push({ required: req, hasInstruction: !!note });
     if (!reentry) reentry = (p.reentry_text || p.reentry_summary || facts.reentrySummary || '').trim() || null;
   }
-  // A REQUIRED water-in is the strongest signal — it wins over a product's generic
-  // irrigation note. Otherwise prefer the product's own label note. irrigation_required
-  // false only means watering-in isn't required (not that watering is prohibited), so
-  // it and the unknown case both fall to the neutral "keep your normal schedule" copy —
-  // we never publish a do-not-water instruction the label doesn't back.
+  // A requirement boolean proves water-in is required, but establishes no
+  // amount or timing. Different or incomplete product instructions need review.
   let watering;
   let neutral = false;
-  if (waterInRequired === true) {
-    watering = 'Water in today’s application — give the lawn a normal watering within the next 24 hours to move the product into the soil, unless your technician advised otherwise.';
-  } else if (productNote) {
-    watering = productNote;
+  let evidenceSource;
+  let needsReview = false;
+  const requiredWithoutInstruction = applicationWaterEvidence.some(
+    (entry) => entry.required === true && !entry.hasInstruction,
+  );
+  if (productNotes.length > 1) {
+    watering = null;
+    evidenceSource = 'conflicting_product_instructions';
+    needsReview = true;
+  } else if (requiredWithoutInstruction && productNotes.length) {
+    watering = null;
+    evidenceSource = 'incomplete_product_instructions';
+    needsReview = true;
+  } else if (productNotes.length === 1) {
+    [watering] = productNotes;
+    evidenceSource = 'product_instruction';
+  } else if (waterInRequired === true) {
+    watering = 'Today’s application is recorded as requiring water-in; the exact amount and timing are not recorded in this report.';
+    evidenceSource = 'irrigation_requirement';
+    needsReview = true;
   } else {
-    // Non-label fallback — the report rewrites it to defer to the weekly
-    // plan when one is on the card (see buildLawnReportV2).
     watering = NEUTRAL_AFTERCARE;
     neutral = true;
+    evidenceSource = 'neutral_fallback';
   }
-  return { watering, reentry, waterInRequired, neutral };
+  return { watering, reentry, waterInRequired, neutral, evidenceSource, needsReview };
 }
-const NEUTRAL_AFTERCARE = 'No special watering is needed because of today’s treatment — keep your normal schedule unless your technician advised otherwise.';
-const NEUTRAL_AFTERCARE_WITH_PLAN = 'No special watering is needed because of today’s treatment — follow this week’s watering plan.';
+const NEUTRAL_AFTERCARE = 'No product-specific watering instruction was recorded for this report.';
+const NEUTRAL_AFTERCARE_WITH_PLAN = 'No product-specific watering instruction was recorded for this report. Follow this week’s approved watering plan.';
 
 // Short topic phrase for the headline, from the top issue card's category.
 const ISSUE_TOPIC = {
@@ -576,6 +611,7 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
 
   const mowing = mapMowing(mowingHeight, grassLabel);
   const treatment = buildTreatment({ applications, actions });
+  const insightTreatment = treatment || {};
 
   // Aftercare is computed early enough for the insight builder to reconcile
   // its damp-area advice with a label-required watering-in (codex P1 r32).
@@ -594,8 +630,10 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
     mowing,
     grassLabel,
     customerConcern,
-    treatmentKinds: treatment ? treatment.kinds : [],
+    treatmentKinds: insightTreatment.kinds,
+    treatmentProducts: insightTreatment.products,
     waterInRequired: aftercare.waterInRequired === true,
+    waterInInstructionRecorded: ['product_instruction'].includes(aftercare.evidenceSource),
   });
 
   // Field photos for the horizontal strip (best photo first), plus ONE consolidated
@@ -683,26 +721,19 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
       { label: beforeAfter.after.label, url: beforeAfter.after.url, score: beforeAfter.after.score },
     ]
     : null;
-  // Reconcile watering-in with the water story: when the weekly total is already
-  // above target the report tells the customer to EASE BACK on irrigation, and a
-  // bare "give the lawn a normal watering" instruction two cards later reads like a
-  // contradiction. Name the exception explicitly so both instructions survive.
+  // Keep recorded product aftercare separate from routine irrigation.
   // Neutral (non-label) aftercare never tells a customer to "keep your normal
   // schedule" under a plan — a hold plan may be lower than, or the order may
   // forbid, that schedule (codex #3565 gh-r28). Label instructions stay.
   if (aftercare.neutral && water && water.weekPlan && water.weekPlan.title) {
     aftercare.watering = NEUTRAL_AFTERCARE_WITH_PLAN;
   }
-  // SURPLUS only: an overwatering photo signal can coexist with a deficit weekly
-  // balance, where the insight says to ADD water — "return to the reduced
-  // schedule" would reintroduce the contradiction (codex P1 #3038).
-  if (aftercare.waterInRequired === true && effectiveWaterStatus === 'surplus') {
-    // Beside a plan the wording stays action-neutral — a hot week's RUN plan
-    // can follow a historical surplus, and "exception to easing back" would
-    // contradict the card (codex gh-r47).
-    aftercare.watering += (water && water.weekPlan && water.weekPlan.title)
-      ? ' This one watering-in is required by today’s application — after it, follow this week’s watering plan.'
-      : ' This one watering-in is the exception to easing back on irrigation — after it, return to the reduced schedule.';
+  if (aftercare.waterInRequired === true
+    && aftercare.evidenceSource === 'product_instruction'
+    && aftercare.watering
+    && effectiveWaterStatus === 'surplus'
+    && water && water.weekPlan && water.weekPlan.title) {
+    aftercare.watering += ' After completing that product-specific instruction, follow this week’s approved watering plan.';
   }
 
   const trends = buildTrends(lawnAssessment, mowingHeight, waterGapHistory, mowingTrendFallback);

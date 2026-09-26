@@ -6,8 +6,8 @@
  * Deterministic (no LLM) so customer copy can't drift or overclaim.
  *
  * RULES (baked in):
- *  - Every issue card carries a Waves action and either a customer action or a
- *    next-visit monitoring plan.
+ *  - Missing actions stay empty. A finding does not prove that Waves completed
+ *    work or committed to a future visit task.
  *  - Never say "improving" (that needs trend data — the trend chart owns it).
  *  - Never diagnose pests/disease from photo-only evidence ("signals", not "infestation").
  *  - Never recommend watering MORE when water is balanced/high (recommend checking
@@ -15,6 +15,44 @@
  */
 
 const STATUS_RANK = { needs_attention: 0, urgent: 0, watch: 1, healthy: 2, strong: 2, tracking: 3 };
+
+const SURPLUS_CUSTOMER_ACTION = {
+  'with_plan:not_required': 'Follow this week’s watering plan below — it already accounts for the extra water. Let us know if it stays soggy.',
+  'with_plan:recorded': 'Today’s application requires water-in; use the recorded product directions, then follow this week’s watering plan below.',
+  'with_plan:missing': 'Today’s application requires water-in, but its exact amount and timing are not recorded in this report; confirm that instruction before following the weekly plan.',
+  'without_plan:not_required': 'No upcoming watering plan is recorded on this report; check the technician’s guidance before changing your irrigation schedule.',
+  'without_plan:recorded': 'Today’s application requires water-in; use the recorded product directions. No upcoming watering plan is recorded on this report.',
+  'without_plan:missing': 'Today’s application requires water-in, but its exact amount and timing are not recorded in this report.',
+};
+
+const DAMP_CUSTOMER_ACTION = {
+  'with_plan:not_required': 'Let the damp areas dry out between waterings and follow this week’s watering plan below rather than adding cycles.',
+  'with_plan:recorded': 'Today’s application requires water-in; use the recorded product directions first, then follow this week’s watering plan below.',
+  'with_plan:missing': 'Today’s application requires water-in, but its exact amount and timing are not recorded in this report; confirm that instruction before following the weekly plan.',
+  'without_plan:not_required': 'No upcoming watering plan is recorded on this report; check the technician’s guidance before changing your irrigation schedule.',
+  'without_plan:recorded': 'Today’s application requires water-in; use the recorded product directions. No upcoming watering plan is recorded on this report.',
+  'without_plan:missing': 'Today’s application requires water-in, but its exact amount and timing are not recorded in this report.',
+};
+
+const COVERAGE_PRESENTATION = {
+  true: { status: 'needs_attention', headline: 'Coverage or color needs attention' },
+  false: { status: 'watch', headline: 'Coverage or color is worth watching' },
+};
+
+const OVERALL_PRESENTATION = {
+  true: {
+    status: 'healthy',
+    headline: 'Your lawn is in good shape',
+    whatWeSaw: 'The assessed lawn-health categories are in healthy ranges today.',
+    whyItMatters: 'The current assessment supports continued routine care.',
+  },
+  false: {
+    status: 'tracking',
+    headline: 'Current lawn condition recorded',
+    whatWeSaw: 'Today’s assessment recorded the current lawn-health categories without establishing an all-clear.',
+    whyItMatters: 'The current readings provide a baseline for future comparison.',
+  },
+};
 
 function catByKey(categories, key) {
   return (categories || []).find((c) => c.key === key) || null;
@@ -29,9 +67,28 @@ function catByKey(categories, key) {
  * @param {string} input.customerConcern
  * @returns {Array} prioritized LawnInsightCard[]
  */
-function buildLawnInsightCards({ categories = [], water = {}, mowing = null, grassLabel = 'lawn', customerConcern = '', treatmentKinds = [], waterInRequired = false } = {}) {
+function buildLawnInsightCards({
+  categories = [],
+  water = {},
+  mowing = null,
+  grassLabel = 'lawn',
+  customerConcern = '',
+  treatmentKinds = [],
+  treatmentProducts = [],
+  waterInRequired = false,
+  waterInInstructionRecorded = false,
+} = {}) {
   const cards = [];
-  const has = (kind) => Array.isArray(treatmentKinds) && treatmentKinds.includes(kind);
+  const kinds = Array.isArray(treatmentKinds) ? treatmentKinds : [];
+  const products = Array.isArray(treatmentProducts) ? treatmentProducts : [];
+  const has = (kind) => kinds.includes(kind);
+  const productOfKind = (kind) => products.find((product) => product && product.kind === kind) || null;
+  const productCount = products.length;
+  const provenance = (findingSource, actionSource = null, planSource = null) => ({
+    findingSource,
+    actionSource,
+    planSource,
+  });
 
   // ── Water ───────────────────────────────────────────────────────────────────
   const waterCat = catByKey(categories, 'water_moisture_stress');
@@ -40,6 +97,11 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
   // the plan (which already accounts for the balance) instead of prescribing
   // more or less water against it (codex #3565 gh-r27).
   const hasPlan = !!(water && water.weekPlan && water.weekPlan.title);
+  const planState = hasPlan ? 'with_plan' : 'without_plan';
+  const waterInState = waterInRequired
+    ? (waterInInstructionRecorded ? 'recorded' : 'missing')
+    : 'not_required';
+  const waterActionKey = `${planState}:${waterInState}`;
   if (water && water.status === 'surplus') {
     cards.push({
       // Same provenance rule as the damp card below: overwatering is an
@@ -47,23 +109,20 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
       category: 'water', status: 'needs_attention', confidence: water.overwatering ? 'ai_supported' : 'area_estimated',
       headline: 'The lawn is likely getting too much water',
       whatWeSaw: water.overwatering
-        ? 'Damp areas and fungal/mushroom signs in today’s photos, with the weekly water total running above target.'
+        ? 'The photo assessment shows an excess-moisture signal, with the weekly water total running above target.'
         : 'The weekly water total (rain + irrigation) is running above the seasonal target.',
-      whyItMatters: `Staying too wet drives fungus, mushrooms, and weed pressure and weakens the ${grassLabel}.`,
+      whyItMatters: `Staying too wet can increase fungus and weed pressure and weaken the ${grassLabel}.`,
       wavesAction: has('fungicide')
-        ? 'Applied a fungicide and adjusted today’s plan toward drying things out.'
-        : 'Documented the moisture and adjusted today’s plan toward drying things out.',
-      customerAction: hasPlan
-        ? (waterInRequired
-          ? 'Water in today’s application as directed, then follow this week’s watering plan below — it already accounts for the extra water.'
-          : 'Follow this week’s watering plan below — it already accounts for the extra water. Let us know if it stays soggy.')
-        : (waterInRequired
-          ? 'Water in today’s application as directed, then ease back on irrigation by one cycle.'
-          : 'Ease back on irrigation by one cycle and let us know if it stays soggy.'),
-      nextVisitPlan: hasPlan
-        ? 'Recheck moisture and fungus signs next visit against this week’s watering plan.'
-        : 'Recheck moisture and fungus signs next visit to confirm the drier schedule is working.',
+        ? 'A fungicide application was recorded for today’s service.'
+        : '',
+      customerAction: SURPLUS_CUSTOMER_ACTION[waterActionKey],
+      nextVisitPlan: '',
       confidenceNote: null,
+      provenance: provenance(
+        water.overwatering ? 'photo_signal' : 'calculated_estimate',
+        has('fungicide') ? 'recorded_application' : null,
+        hasPlan ? 'approved_watering_plan' : null,
+      ),
     });
   } else if (water && water.status === 'deficit') {
     cards.push({
@@ -71,9 +130,7 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
       headline: 'The lawn is running a little dry',
       whatWeSaw: 'The weekly water total is below the seasonal target for your lawn.',
       whyItMatters: 'Under-watered turf shows heat and drought stress faster and thins out.',
-      wavesAction: hasPlan
-        ? 'Noted the shortfall and set this week’s watering plan on the report.'
-        : 'Noted the shortfall and set the watering target on the report.',
+      wavesAction: '',
       // The sentence must agree with the plan card below it — a hold /
       // conditional plan is never described as "setting runs" (gh-r44,
       // same rule as buildRootCause).
@@ -81,10 +138,9 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
         ? (water.weekPlan.action === 'run' && water.weekPlan.conditionalOnForecast !== true
           ? 'Follow this week’s watering plan below — it sets this week’s runs from the forecast and your area’s watering rules.'
           : 'Follow this week’s watering plan below — it weighs the shortfall against the forecast and your area’s watering rules.')
-        : `Add a little irrigation time to reach the seasonal target for your ${grassLabel}.`,
-      nextVisitPlan: hasPlan
-        ? 'Recheck moisture and color next visit.'
-        : 'Recheck moisture and color next visit to confirm the added water is landing.',
+        : 'No upcoming watering plan is recorded on this report; check the technician’s guidance before changing your irrigation schedule.',
+      nextVisitPlan: '',
+      provenance: provenance('calculated_estimate', null, hasPlan ? 'approved_watering_plan' : null),
     });
   } else if (water.localizedDry) {
     // Localized dry evidence (structured drought signal or a coverage-issue
@@ -98,9 +154,10 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
         ? 'Total water for the week looks on target, but one area still reads off.'
         : 'One area reads drier than the rest of the lawn in today’s photos.',
       whyItMatters: 'That pattern usually points to uneven sprinkler coverage, not the whole lawn needing more water.',
-      wavesAction: 'Flagged the area and will recheck it next visit.',
+      wavesAction: '',
       customerAction: 'Check sprinkler coverage in that area rather than watering the whole yard more.',
-      nextVisitPlan: 'Recheck the flagged area next visit to see whether coverage evened out.',
+      nextVisitPlan: '',
+      provenance: provenance(water.localizedDryConfidence === 'tech_confirmed' ? 'technician' : 'photo_signal'),
     });
   } else if (waterCat && (waterCat.status === 'watch' || waterCat.status === 'needs_attention')) {
     // The water score is degraded without dry evidence (overwatering/fungus
@@ -117,29 +174,18 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
       headline: damp ? 'Damp areas are the thing to watch' : 'Moisture balance is the thing to watch',
       whatWeSaw: waterCat.customerExplanation || 'Today’s photos showed a mixed moisture read across the lawn.',
       whyItMatters: 'Keeping moisture balanced protects the lawn from both fungus pressure and dry stress.',
-      wavesAction: 'Flagged it for a recheck at the next visit.',
+      wavesAction: '',
       // "Keep your current watering schedule" requires a schedule ON FILE —
       // for profiles without one it invented guidance and contradicted the
       // add-your-schedule CTA (codex P2 r23).
       // With a weekly plan on the card the plan is the sole watering
       // instruction — never "keep your current schedule" / "ease back a
       // cycle" beside a hold or run plan (codex #3565 gh-r29).
-      customerAction: hasPlan
-        ? (damp
-          ? (waterInRequired
-            ? 'Water in today’s application as directed first, then let the damp areas dry out between waterings — this week’s watering plan below already accounts for it.'
-            : 'Let the damp areas dry out between waterings and follow this week’s watering plan below rather than adding cycles.')
-          : 'Follow this week’s watering plan below; we’ll keep watching moisture balance at upcoming visits.')
-        : damp
-          // A label-required watering-in must not collide with ease-back
-          // advice — name the exception instead (codex P1 r32).
-          ? (waterInRequired
-            ? 'Water in today’s application as directed first, then let the damp areas dry out between waterings.'
-            : 'Let the damp areas dry out between waterings, and ease back an irrigation cycle if they stay soggy.')
-          : (water && water.scheduleOnFile
-            ? 'Keep your current watering schedule unless we flag a change.'
-            : 'We’ll keep watching moisture balance at upcoming visits.'),
-      nextVisitPlan: 'Recheck the moisture balance next visit.',
+      customerAction: damp
+        ? DAMP_CUSTOMER_ACTION[waterActionKey]
+        : (hasPlan ? 'Follow this week’s watering plan below.' : ''),
+      nextVisitPlan: '',
+      provenance: provenance(damp ? 'photo_signal' : 'assessment_signal', null, hasPlan ? 'approved_watering_plan' : null),
     });
   }
 
@@ -148,15 +194,23 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
   if (weed && (weed.status === 'watch' || weed.status === 'needs_attention')) {
     cards.push({
       category: 'weeds', status: weed.status, confidence: 'ai_supported',
-      headline: weed.status === 'needs_attention' ? 'Weed pressure is climbing' : 'A little weed activity to keep ahead of',
+      headline: weed.status === 'needs_attention' ? 'Weed pressure needs attention' : 'A little weed activity to keep ahead of',
       whatWeSaw: 'Weeds competing with the turf in places.',
       whyItMatters: 'Weeds spread fastest when the turf is thin or stressed.',
-      wavesAction: has('pre_emergent')
-        ? 'Applied a pre-emergent to stop new weeds and built follow-up into the plan.'
-        : has('herbicide')
-          ? 'Spot-treated the weeds with a targeted herbicide and built it into the plan.'
-          : 'Spot-treated where appropriate and built it into the plan.',
-      nextVisitPlan: 'Reassess weed pressure next visit.',
+      wavesAction: (() => {
+        const preventive = productOfKind('pre_emergent');
+        if (preventive) return 'A preventive weed treatment was recorded for today’s service.';
+        const herbicide = productOfKind('herbicide');
+        if (!herbicide) return '';
+        if (herbicide.method === 'spot_treatment') return 'A weed-control treatment was applied using the recorded spot-treatment method.';
+        if (herbicide.method === 'broadcast_spray') return 'A weed-control treatment was applied using the recorded broadcast method.';
+        return 'A weed-control treatment was recorded for today’s service.';
+      })(),
+      nextVisitPlan: '',
+      provenance: provenance(
+        'photo_signal',
+        has('pre_emergent') || has('herbicide') ? 'recorded_application' : null,
+      ),
     });
   }
 
@@ -168,25 +222,39 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
       headline: 'A few stress patterns to monitor',
       whatWeSaw: 'Some stress patterns in the turf that we want to keep an eye on.',
       whyItMatters: 'Catching patterns early lets us confirm the cause before it spreads.',
-      wavesAction: 'Documented the areas for comparison next visit.',
-      nextVisitPlan: 'Recheck these areas next visit to confirm what’s driving them.',
+      wavesAction: '',
+      nextVisitPlan: '',
+      provenance: provenance('photo_signal', null, null),
     });
   }
 
   // ── Coverage / color recovery ──────────────────────────────────────────────────
   const coverage = catByKey(categories, 'coverage');
   const color = catByKey(categories, 'color_vigor');
-  const weakGrowth = [coverage, color].filter((c) => c && c.status === 'needs_attention');
+  const weakGrowth = [coverage, color].filter(
+    (c) => c && ['watch', 'needs_attention'].includes(c.status),
+  );
   if (weakGrowth.length) {
+    const needsAttention = weakGrowth.some((c) => c.status === 'needs_attention');
+    const coveragePresentation = COVERAGE_PRESENTATION[needsAttention];
+    const labels = weakGrowth.map((c) => String(c.label || '').toLowerCase()).filter(Boolean);
+    const finding = labels.length
+      ? `${labels.join(' and ')} ${labels.length === 1 ? 'is' : 'are'} below the healthy range in the current assessment.`
+      : 'The current assessment shows coverage or color below the healthy range.';
+    const hasGrowthApplication = has('fertilizer') || has('supplement');
     cards.push({
-      category: 'coverage', status: 'watch', confidence: 'ai_supported',
-      headline: 'Some thinning and uneven color',
-      whatWeSaw: 'Coverage and color are down in places, mostly where the lawn is most stressed.',
+      category: 'coverage', status: coveragePresentation.status, confidence: 'ai_supported',
+      headline: coveragePresentation.headline,
+      whatWeSaw: finding,
       whyItMatters: 'Turf weakens when it can’t recover between stresses.',
-      wavesAction: has('fertilizer') || has('supplement')
-        ? 'Fed the lawn to support density and color recovery, and shifted the program accordingly.'
-        : 'Shifted the program toward density and color recovery.',
-      nextVisitPlan: 'Recheck density and color next visit.',
+      wavesAction: hasGrowthApplication
+        ? 'A nutrient or color-support application was recorded for today’s service.'
+        : '',
+      nextVisitPlan: '',
+      provenance: provenance(
+        'photo_signal',
+        hasGrowthApplication ? 'recorded_application' : null,
+      ),
     });
   }
 
@@ -202,34 +270,55 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
         : 'Tall mowing can shade the base of the turf and hold moisture.',
       wavesAction: 'Logged the height for your file — we don’t mow, so this is a heads-up.',
       customerAction: short ? 'Raise the mower one setting.' : 'Lower the mower one setting.',
-      nextVisitPlan: 'Re-measure the height of cut next visit.',
+      nextVisitPlan: '',
+      provenance: provenance('measured', 'measurement_record', null),
     });
   }
 
   // ── Customer concern (acknowledge, never confirm a cause) ──────────────────────
   if (String(customerConcern || '').trim()) {
     cards.push({
-      category: 'customer_concern', status: 'watch', confidence: 'tech_confirmed',
-      headline: 'We looked into what you flagged',
-      whatWeSaw: `You mentioned: “${String(customerConcern).trim()}”. We checked it during the visit.`,
-      whyItMatters: 'We want what you noticed tracked on the report, not lost.',
-      wavesAction: 'Noted it on this visit and built any follow-up into the plan.',
-      nextVisitPlan: 'Follow up on it next visit.',
+      category: 'customer_concern', status: 'watch', confidence: 'customer_reported',
+      headline: 'Your concern is recorded',
+      whatWeSaw: `You mentioned: “${String(customerConcern).trim()}”.`,
+      whyItMatters: 'This keeps your concern visible alongside the recorded visit findings.',
+      wavesAction: '',
+      nextVisitPlan: '',
+      provenance: provenance('customer', null, null),
     });
   }
 
   // ── Reassurance when nothing needs attention ───────────────────────────────────
   if (!cards.length) {
+    const assessedCategories = (categories || []).filter((category) => category && category.key !== 'water_moisture_stress');
+    const verifiedHealthy = assessedCategories.length > 0
+      && assessedCategories.every((category) => ['healthy', 'strong'].includes(category.status));
+    const overallPresentation = OVERALL_PRESENTATION[verifiedHealthy];
     cards.push({
-      category: 'overall', status: 'healthy', confidence: 'ai_supported',
-      headline: 'Your lawn is in good shape',
-      whatWeSaw: 'Coverage, color, and weed control all look healthy today.',
-      whyItMatters: 'Your lawn is responding well to the program.',
+      category: 'overall', status: overallPresentation.status, confidence: 'ai_supported',
+      headline: overallPresentation.headline,
+      whatWeSaw: overallPresentation.whatWeSaw,
+      whyItMatters: overallPresentation.whyItMatters,
       wavesAction: has('fertilizer')
-        ? 'Applied today’s scheduled feeding and documented the visit.'
-        : 'Completed today’s scheduled treatment and documented the visit.',
-      nextVisitPlan: 'Keep the program steady and keep tracking each visit.',
+        ? 'A fertilizer application was recorded for today’s service.'
+        : (productCount ? 'Today’s application was recorded on this report.' : ''),
+      nextVisitPlan: '',
+      provenance: provenance(
+        'current_assessment',
+        productCount ? 'recorded_application' : null,
+        null,
+      ),
     });
+  }
+
+  // Keep the deterministic fallback aligned with the narrative adapter: action
+  // ownership is explicit, and unsupported fields are empty strings rather
+  // than omitted keys a later mapper might feel compelled to fill.
+  const contentFields = ['headline', 'whatWeSaw', 'whyItMatters', 'wavesAction', 'customerAction', 'nextVisitPlan'];
+  for (const card of cards) {
+    for (const field of contentFields) {
+      if (typeof card[field] !== 'string') card[field] = '';
+    }
   }
 
   // Priority: worst status first, then a stable category order.
