@@ -74,6 +74,7 @@ postgres('portal renewal decline — station-retrieval chronology (real helper, 
     await trx('invoices').insert({
       id: invoiceId, customer_id: customerId, status: 'paid', paid_at: new Date(), subtotal: 450, total: 450,
       line_items: '[]', invoice_number: `TEST-${invoiceId.slice(0, 8)}`, token: randomUUID(),
+      stripe_payment_intent_id: `pi_${invoiceId.slice(0, 8)}`,
     });
     await trx('annual_prepay_terms').insert({
       id: termId, customer_id: customerId, prepay_invoice_id: invoiceId,
@@ -88,7 +89,9 @@ postgres('portal renewal decline — station-retrieval chronology (real helper, 
       metadata: JSON.stringify({ term_id: termId, source: 'customer_portal', decided_at: decidedAt.toISOString() }),
       created_at: decidedAt,
     });
-    return { customerId, termId, termEnd: ymdOffset(300) };
+    return {
+      customerId, termId, invoiceId, termEnd: ymdOffset(300),
+    };
   }
 
   // An admin cancellation request and its request-keyed retrieval row.
@@ -139,7 +142,7 @@ postgres('portal renewal decline — station-retrieval chronology (real helper, 
     expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 1, raised: 0 });
     expect(await ownTaskRow(t)).toBeUndefined();
     const bell = await trx('notifications')
-      .whereRaw("metadata->>'dedupeKey' = ?", [`termite-annual-decline-retrieval:${t.termId}:superseded_by_newer`])
+      .whereRaw("metadata->>'dedupeKey' = ?", [`termite-annual-decline-retrieval:${t.termId}:${t.termEnd}:superseded_by_newer`])
       .first('body');
     expect(bell.body).toContain('A newer station-retrieval instruction already stands on this account');
 
@@ -147,5 +150,65 @@ postgres('portal renewal decline — station-retrieval chronology (real helper, 
     // sweep stops re-checking it and it never holds a bounded slot.
     expect((await marker(t)).metadata).toEqual(expect.objectContaining({ outcome: 'superseded_by_newer' }));
     expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 0, raised: 0 });
+  });
+
+  // Codex #4940 r8: the settled marker means "the standing instruction
+  // matches the current facts" — keyed on (term, retrieve_after).
+  const taskRowFor = (t, retrieveAfter) => trx('notifications')
+    .where({ recipient_type: 'admin' })
+    .whereRaw("metadata->>'dedupeKey' = ?", [termRetrievalDedupeKey(t.termId, 'portal_renewal_decline', retrieveAfter)])
+    .first('id', 'read_at', 'metadata');
+  const markers = (t) => trx('activity_log')
+    .where({ action: 'termite_annual_decline_retrieval' })
+    .whereRaw("metadata->>'term_id' = ?", [t.termId])
+    .orderBy('created_at', 'asc')
+    .select('metadata');
+
+  test('staff correct term_end after the decline: the term is a candidate again and the new dated task supersedes the old one', async () => {
+    const t = await portalDeclinedTerm({ declinedDaysAgo: 1 });
+    expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 1, raised: 1 });
+    expect((await taskRowFor(t, t.termEnd)).read_at).toBeNull();
+
+    const corrected = ymdOffset(320);
+    await trx('annual_prepay_terms').where({ id: t.termId }).update({ term_end: corrected });
+
+    expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 1, raised: 1 });
+    const fresh = await taskRowFor(t, corrected);
+    expect(fresh.read_at).toBeNull();
+    expect(fresh.metadata).toEqual(expect.objectContaining({ retrieveAfter: corrected }));
+    // The obsolete dated instruction is retired (the helper's supersession).
+    expect((await taskRowFor(t, t.termEnd)).read_at).not.toBeNull();
+    expect((await markers(t)).map((m) => [m.metadata.retrieve_after, m.metadata.outcome])).toEqual([
+      [t.termEnd, 'raised'], [corrected, 'raised'],
+    ]);
+    expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 0, raised: 0 });
+  });
+
+  test('a FULL REFUND after the decline revokes coverage: an IMMEDIATE retrieval task supersedes the dated one', async () => {
+    const t = await portalDeclinedTerm({ declinedDaysAgo: 1 });
+    expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 1, raised: 1 });
+
+    await trx('payments').insert({
+      customer_id: t.customerId, amount: 450, payment_date: new Date(), status: 'refunded', refund_status: 'full',
+      stripe_payment_intent_id: `pi_${t.invoiceId.slice(0, 8)}`,
+    });
+
+    expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 1, raised: 1 });
+    const immediate = await taskRowFor(t, null);
+    expect(immediate.read_at).toBeNull();
+    expect(immediate.metadata.retrieveAfter).toBeUndefined();
+    expect((await taskRowFor(t, t.termEnd)).read_at).not.toBeNull();
+    expect((await markers(t)).map((m) => m.metadata.retrieve_after)).toEqual([t.termEnd, 'immediate']);
+    expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 0, raised: 0 });
+  });
+
+  test('a DISPUTED prepay (unpaid, not refunded) keeps the dated task — no immediate re-raise', async () => {
+    const t = await portalDeclinedTerm({ declinedDaysAgo: 1 });
+    expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 1, raised: 1 });
+    await trx('invoices').where({ id: t.invoiceId }).update({ status: 'overdue', paid_at: null });
+
+    expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 0, raised: 0 });
+    expect((await taskRowFor(t, t.termEnd)).read_at).toBeNull();
+    expect(await taskRowFor(t, null)).toBeUndefined();
   });
 });

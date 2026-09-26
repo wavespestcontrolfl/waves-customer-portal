@@ -149,6 +149,7 @@ async function createScratchDb() {
     status text NOT NULL,
     renewal_decision text,
     cancel_disposition text,
+    decline_retrieval_attempted_at timestamptz,
     renewal_decision_at timestamptz,
     renewal_decision_by uuid,
     renewal_notes text,
@@ -183,7 +184,14 @@ describeOrSkip('termite annual renewal decline — coverage, renew supersession,
     const raiseTermiteRetrievalTask = jest.fn(async (customerId, _requestId, { retrieveAfter, termId, episodeKey }) => {
       await db('notifications').insert({
         recipient_type: 'admin',
-        metadata: { kind: 'termite_station_retrieval', customerId, dedupeKey: termRetrievalDedupeKey(termId, episodeKey, retrieveAfter) },
+        metadata: {
+          kind: 'termite_station_retrieval',
+          customerId,
+          dedupeKey: termRetrievalDedupeKey(termId, episodeKey, retrieveAfter),
+          termId,
+          churnEpisode: episodeKey,
+          ...(retrieveAfter ? { retrieveAfter } : {}),
+        },
       });
       return { raised: true, stationCount: 12 };
     });
@@ -515,5 +523,70 @@ describeOrSkip('termite annual renewal decline — coverage, renew supersession,
 
     expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 1, raised: 1 });
     expect(raiseTermiteRetrievalTask).toHaveBeenCalledTimes(1);
+  });
+
+  // Codex #4940 r8 P1: the other-coverage guard is re-checked at DUE time —
+  // coverage added after the task was raised withdraws the automatic task.
+  test('an open task due soon is withdrawn once other live termite coverage appears; staff belled; settled for that instruction', async () => {
+    const { db, Renewals, notifyAdmin } = await load();
+    const fx = await paidInstalledTerm(db, { status: 'cancelled', renewalDecision: 'cancel' });
+    // Paid through a week from now — inside the 14-day revalidation horizon.
+    const dueSoon = new Date(Date.parse(`${fx.today}T00:00:00Z`) + 7 * 24 * 3600 * 1000).toISOString().slice(0, 10);
+    await db('annual_prepay_terms').where({ id: fx.term.id }).update({ term_end: dueSoon });
+    await db('activity_log').insert({
+      customer_id: fx.customerId, action: 'termite_annual_renewal_declined', description: 'x', metadata: { term_id: fx.term.id },
+    });
+    expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 1, raised: 1 });
+
+    // Nothing changed yet: the due task stays.
+    expect(await Renewals.revalidateDueDeclineRetrievalTasks()).toEqual({ checked: 1, withdrawn: 0 });
+
+    await db('termite_bonds').insert({ customer_id: fx.customerId, service_type: 'Termite Bond (1 yr)', status: 'active' });
+    expect(await Renewals.revalidateDueDeclineRetrievalTasks()).toEqual({ checked: 1, withdrawn: 1 });
+
+    const task = await db('notifications').whereRaw("metadata->>'churnEpisode' = 'portal_renewal_decline'").first();
+    expect(task.read_at).not.toBeNull();
+    const latest = await db('activity_log').where({ action: 'termite_annual_decline_retrieval' }).orderBy('created_at', 'desc').first();
+    expect(latest.metadata).toEqual(expect.objectContaining({ outcome: 'termite_bond', retrieve_after: dueSoon }));
+    const bodies = notifyAdmin.mock.calls.map((c) => c[2]).join(' ');
+    expect(bodies).toContain('The automatic station-retrieval task for a termite annual plan declined online was withdrawn.');
+    expect(bodies).toContain('has an active termite bond');
+    // Withdrawn and settled: no re-check, no re-raise.
+    expect(await Renewals.revalidateDueDeclineRetrievalTasks()).toEqual({ checked: 0, withdrawn: 0 });
+    expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 0, raised: 0 });
+  });
+
+  test('a task due beyond the horizon is not re-checked yet', async () => {
+    const { db, Renewals } = await load();
+    const fx = await paidInstalledTerm(db, { status: 'cancelled', renewalDecision: 'cancel' });
+    await db('activity_log').insert({
+      customer_id: fx.customerId, action: 'termite_annual_renewal_declined', description: 'x', metadata: { term_id: fx.term.id },
+    });
+    expect(await Renewals.raisePendingDeclineRetrievalTasks()).toEqual({ scanned: 1, raised: 1 });
+    await db('termite_bonds').insert({ customer_id: fx.customerId, service_type: 'Termite Bond (1 yr)', status: 'active' });
+    expect(await Renewals.revalidateDueDeclineRetrievalTasks()).toEqual({ checked: 0, withdrawn: 0 });
+  });
+
+  // Codex #4940 r8 P2: terms whose raise keeps failing rotate — the least-
+  // recently-attempted (never-attempted first) goes next, not the same one.
+  test('with limit 1, a repeatedly failing candidate never starves a newer one', async () => {
+    const { db, Renewals, raiseTermiteRetrievalTask } = await load();
+    const older = await paidInstalledTerm(db, { status: 'cancelled', renewalDecision: 'cancel' });
+    const newer = await paidInstalledTerm(db, { status: 'cancelled', renewalDecision: 'cancel' });
+    await db('annual_prepay_terms').where({ id: newer.term.id }).update({ term_end: addMonths(ymd(newer.term.term_end), 1) });
+    for (const fx of [older, newer]) {
+      await db('activity_log').insert({
+        customer_id: fx.customerId, action: 'termite_annual_renewal_declined', description: 'x', metadata: { term_id: fx.term.id },
+      });
+    }
+    raiseTermiteRetrievalTask.mockRejectedValue(new Error('notifications down'));
+
+    await Renewals.raisePendingDeclineRetrievalTasks({ limit: 1 });
+    await Renewals.raisePendingDeclineRetrievalTasks({ limit: 1 });
+    await Renewals.raisePendingDeclineRetrievalTasks({ limit: 1 });
+
+    expect(raiseTermiteRetrievalTask.mock.calls.map((c) => c[0])).toEqual([older.customerId, newer.customerId, older.customerId]);
+    const stamped = await db('annual_prepay_terms').whereIn('id', [older.term.id, newer.term.id]).whereNotNull('decline_retrieval_attempted_at');
+    expect(stamped).toHaveLength(2);
   });
 });

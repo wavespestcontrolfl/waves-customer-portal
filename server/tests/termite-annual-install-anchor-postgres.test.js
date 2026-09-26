@@ -236,6 +236,7 @@ describeOrSkip('termite annual installation anchor + install handoff — real Po
         // termite-annual-renewal-decline-coverage-postgres.test.js).
         raiseRetrievalAfterAnchor,
         raisePendingDeclineRetrievalTasks: jest.fn(async () => ({ scanned: 0, raised: 0 })),
+        revalidateDueDeclineRetrievalTasks: jest.fn(async () => ({ checked: 0, withdrawn: 0 })),
       };
     });
     const { reconcileTermiteAnnualActivations } = require('../services/termite-annual-activation');
@@ -735,6 +736,7 @@ describeOrSkip('termite annual countersign reminder — real Postgres (codex #48
         refreshTermSnapshot: jest.fn(),
         raiseRetrievalAfterAnchor: jest.fn(),
         raisePendingDeclineRetrievalTasks: jest.fn(async () => ({ scanned: 0, raised: 0 })),
+        revalidateDueDeclineRetrievalTasks: jest.fn(async () => ({ checked: 0, withdrawn: 0 })),
       };
     });
     const { reconcileTermiteAnnualActivations } = require('../services/termite-annual-activation');

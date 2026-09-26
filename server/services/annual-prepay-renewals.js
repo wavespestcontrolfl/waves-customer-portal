@@ -6171,17 +6171,34 @@ const DECLINE_RETRIEVAL_SETTLED = new Set([
   'raised', 'other_termite_plan', 'other_termite_service', 'termite_bond', 'no_rented_stations', 'internal_test_customer',
 ]);
 
+// Codex #4940 r8: the settled marker means "the standing retrieval
+// instruction matches the CURRENT facts", not "we once raised something". A
+// marker is keyed on the instruction it settled — metadata.retrieve_after:
+// the paid-through day ('YYYY-MM-DD') while the declined year is still paid,
+// or 'immediate' once a full refund (or void) of the prepay revoked the
+// coverage. A corrected term_end, or a refund after the decline, changes the
+// wanted instruction, so the term is a candidate again and the new raise
+// (its own dedupe key: term + episode + date/'immediate') retires the
+// obsolete open task through raiseTermiteRetrievalTask's supersession.
+const DECLINE_RETRIEVAL_IMMEDIATE = 'immediate';
+
 // Every read/write here uses the ROOT pool: raiseTermiteRetrievalTask writes
 // on its own connection, so it must only ever see committed state.
 async function raisePortalDeclineRetrievalTask(termId) {
   let term = null;
+  let wanted = null;
   try {
     term = await db('annual_prepay_terms').where({ id: termId })
-      .first('id', 'customer_id', 'source_estimate_id', 'status', 'renewal_decision', 'term_end', 'annual_plan_version', 'renewed_from_term_id', 'installation_anchored_at');
-    const { reason, portalDecline } = await declineRetrievalBlocker(term);
-    if (reason) return { raised: false, reason };
-    const termEnd = dateOnly(term.term_end);
-    const retrieval = { ...(await raiseTaskForPortalDecline(term, portalDecline, termEnd)), termEnd, customerId: term.customer_id };
+      .first('id', 'customer_id', 'source_estimate_id', 'prepay_invoice_id', 'status', 'renewal_decision', 'term_end', 'annual_plan_version', 'renewed_from_term_id', 'installation_anchored_at');
+    const blocker = await declineRetrievalBlocker(term);
+    if (blocker.reason) return { raised: false, reason: blocker.reason };
+    wanted = blocker.wanted;
+    const retrieval = {
+      ...(await raiseTaskForPortalDecline(term, blocker.portalDecline, wanted)),
+      termEnd: dateOnly(term.term_end),
+      retrieveAfterKey: wanted.key,
+      customerId: term.customer_id,
+    };
     const outcomeKey = retrieval.raised ? 'raised' : retrieval.reason;
     if (DECLINE_RETRIEVAL_SETTLED.has(outcomeKey)) await writeDeclineRetrievalMarker(term.id, retrieval, outcomeKey);
     return retrieval;
@@ -6190,15 +6207,49 @@ async function raisePortalDeclineRetrievalTask(termId) {
     return {
       raised: false,
       reason: 'failed',
-      ...(term ? { termEnd: dateOnly(term.term_end), customerId: term.customer_id } : {}),
+      ...(term ? { termEnd: dateOnly(term.term_end), customerId: term.customer_id, retrieveAfterKey: wanted?.key } : {}),
     };
   }
 }
 
+// The retrieval instruction the facts call for right now: dated to the
+// paid-through day while the declined year is still paid, IMMEDIATE once a
+// full refund / void revoked the coverage, none while it is merely
+// contested (a dispute can still be won — the dated task stands).
+async function wantedDeclineRetrieval(term) {
+  if (await isPaidDecidedLapseTerm(term, db)) {
+    const termEnd = dateOnly(term.term_end);
+    return { retrieveAfter: termEnd, key: termEnd };
+  }
+  const refunded = await whereTermPrepayRefunded(db('annual_prepay_terms as rt').where('rt.id', term.id), 'rt').first('rt.id');
+  return refunded ? { retrieveAfter: null, key: DECLINE_RETRIEVAL_IMMEDIATE } : null;
+}
+
+// A term whose prepay invoice was voided/refunded, or whose payment was fully
+// refunded — billing's revocation evidence (coveredTermsAsOf), minus the
+// merely-unpaid case a dispute produces.
+function whereTermPrepayRefunded(builder, alias) {
+  const statuses = [...INVOICE_CANCELLED_STATUSES];
+  return builder.whereExists(function refundedPrepay() {
+    this.select(db.raw('1')).from('invoices as ri')
+      .whereRaw('ri.id = ??', [`${alias}.prepay_invoice_id`])
+      .where(function revoked() {
+        this.whereRaw(`lower(coalesce(ri.status, '')) in (${statuses.map(() => '?').join(', ')})`, statuses)
+          .orWhereExists(function fullRefund() {
+            this.select(db.raw('1')).from('payments as rp')
+              .whereRaw("(rp.status = 'refunded' or rp.refund_status = 'full')")
+              .whereRaw(`((rp.stripe_payment_intent_id is not null and rp.stripe_payment_intent_id = ri.stripe_payment_intent_id)
+                or (rp.stripe_charge_id is not null and rp.stripe_charge_id = ri.stripe_charge_id))`);
+          });
+      });
+  });
+}
+
 // Why this term's portal-decline retrieval task can't be raised now —
-// { reason } — or, when it can, { portalDecline } (the decline's activity
-// row, which dates it). A term must be a paid, installed, PORTAL-declined
-// decided lapse whose task is not yet settled.
+// { reason } — or, when it can, { portalDecline, wanted }: the decline's
+// activity row (which dates it) and the instruction the facts call for. A
+// term must be an installed, PORTAL-declined decided lapse whose wanted
+// instruction is not yet settled.
 async function declineRetrievalBlocker(term) {
   if (!term) return { reason: 'not_found' };
   if (term.status !== 'cancelled' || term.renewal_decision !== 'cancel') return { reason: 'not_declined' };
@@ -6210,13 +6261,16 @@ async function declineRetrievalBlocker(term) {
     .orderBy('created_at', 'asc')
     .first('id', 'created_at', 'metadata');
   if (!portalDecline) return { reason: 'not_portal_decline' };
+  const wanted = await wantedDeclineRetrieval(term);
+  if (!wanted) return { reason: 'not_paid' };
+  // Settled only for exactly this instruction (term + retrieve_after key).
   const settled = await db('activity_log')
     .where({ action: DECLINE_RETRIEVAL_ACTIVITY_ACTION })
     .whereRaw("metadata->>'term_id' = ?", [termIdText])
+    .whereRaw("metadata->>'retrieve_after' = ?", [wanted.key])
     .first('id');
   if (settled) return { reason: 'already_settled' };
-  if (!(await isPaidDecidedLapseTerm(term, db))) return { reason: 'not_paid' };
-  return { portalDecline };
+  return { portalDecline, wanted };
 }
 
 // Codex #4940 r4/r7 P1: raiseTermiteRetrievalTask counts EVERY Waves-owned
@@ -6256,7 +6310,7 @@ async function otherLiveTermiteCoverage(term) {
 
 // Raise the decline's dated task and classify what actually happened:
 // { raised: true } only once THIS decline's own task row exists.
-async function raiseTaskForPortalDecline(term, portalDecline, termEnd) {
+async function raiseTaskForPortalDecline(term, portalDecline, wanted) {
   const otherCoverage = await otherLiveTermiteCoverage(term);
   if (otherCoverage) return { raised: false, reason: otherCoverage };
   const { raiseTermiteRetrievalTask, termRetrievalDedupeKey } = require('./cancellation-processor');
@@ -6266,7 +6320,7 @@ async function raiseTaskForPortalDecline(term, portalDecline, termEnd) {
   // already acted on), raising nothing.
   const declineMeta = parseActivityMetadata(portalDecline.metadata);
   const raised = await raiseTermiteRetrievalTask(term.customer_id, null, {
-    retrieveAfter: termEnd, termId: term.id, episodeKey: DECLINE_RETRIEVAL_EPISODE, eventAt: declineMeta.decided_at || portalDecline.created_at,
+    retrieveAfter: wanted.retrieveAfter, termId: term.id, episodeKey: DECLINE_RETRIEVAL_EPISODE, eventAt: declineMeta.decided_at || portalDecline.created_at,
   });
   // A NEWER retrieval instruction stands on the account — nothing was
   // created or reopened for THIS decline, so it is not raised (the
@@ -6276,7 +6330,7 @@ async function raiseTaskForPortalDecline(term, portalDecline, termEnd) {
   // Settle only on evidence: this decline's own task row must exist.
   const taskRow = await db('notifications')
     .where({ recipient_type: 'admin' })
-    .whereRaw("metadata->>'dedupeKey' = ?", [termRetrievalDedupeKey(term.id, DECLINE_RETRIEVAL_EPISODE, termEnd)])
+    .whereRaw("metadata->>'dedupeKey' = ?", [termRetrievalDedupeKey(term.id, DECLINE_RETRIEVAL_EPISODE, wanted.retrieveAfter)])
     .first('id');
   return taskRow ? { raised: true } : { raised: false, reason: 'not_raised' };
 }
@@ -6302,8 +6356,9 @@ async function raiseDeclineRetrievalTask(result, customerId, conn) {
 }
 
 // Staff follow-up when the anchor / sweep path could NOT raise the task
-// automatically (the decline's own bell already went out without a date).
-async function ringDeclineRetrievalFollowupBell(termId, retrieval) {
+// automatically (the decline's own bell already went out). `lead` opens the
+// bell body; the revalidation pass passes its own.
+async function ringDeclineRetrievalFollowupBell(termId, retrieval, { lead = 'A customer declined renewal of their termite annual plan online.' } = {}) {
   if (!retrieval || retrieval.raised || !retrieval.customerId) return;
   const sentence = retrievalSentence(retrieval, formatDateLabel(retrieval.termEnd));
   if (!sentence) return;
@@ -6312,14 +6367,21 @@ async function ringDeclineRetrievalFollowupBell(termId, retrieval) {
     const bell = await NotificationService.notifyAdmin(
       'service',
       'Termite annual plan — station retrieval needs staff',
-      `A customer who declined renewal online now has installed stations. ${sentence}`,
+      `${lead} ${sentence}`,
       {
         icon: '🪵',
         link: `/admin/customers?customerId=${retrieval.customerId}`,
         bell: true,
-        dedupeKey: `termite-annual-decline-retrieval:${termId}:${retrieval.reason}`,
+        // Per instruction: a re-dated (or refund-immediate) instruction
+        // that again needs staff is a NEW bell, not a dedupe of the old one.
+        dedupeKey: `termite-annual-decline-retrieval:${termId}:${retrieval.retrieveAfterKey}:${retrieval.reason}`,
         metadata: {
-          customerId: retrieval.customerId, termId, termEnd: retrieval.termEnd, reason: retrieval.reason, source: 'customer_portal',
+          customerId: retrieval.customerId,
+          termId,
+          termEnd: retrieval.termEnd,
+          retrieveAfter: retrieval.retrieveAfterKey,
+          reason: retrieval.reason,
+          source: 'customer_portal',
         },
       },
     );
@@ -6336,12 +6398,19 @@ async function ringDeclineRetrievalFollowupBell(termId, retrieval) {
 }
 
 async function writeDeclineRetrievalMarker(termId, retrieval, outcomeKey) {
+  const when = retrieval.retrieveAfterKey === DECLINE_RETRIEVAL_IMMEDIATE
+    ? 'immediately (prepay refunded)'
+    : `after ${retrieval.retrieveAfterKey}`;
   await db('activity_log').insert({
     customer_id: retrieval.customerId,
     action: DECLINE_RETRIEVAL_ACTIVITY_ACTION,
-    description: `Station retrieval after the online renewal decline: ${outcomeKey} (paid coverage through ${retrieval.termEnd}).`,
+    description: `Station retrieval after the online renewal decline: ${outcomeKey} (retrieve ${when}).`,
     metadata: {
-      term_id: termId, term_end: retrieval.termEnd, outcome: outcomeKey, source: 'customer_portal',
+      term_id: termId,
+      term_end: retrieval.termEnd,
+      retrieve_after: retrieval.retrieveAfterKey,
+      outcome: outcomeKey,
+      source: 'customer_portal',
     },
   }).catch((markerErr) => {
     logger.warn(`[annual-prepay] decline retrieval marker not written for term ${termId}: ${markerErr.message}`);
@@ -6358,67 +6427,133 @@ async function raiseRetrievalAfterAnchor(termId) {
 }
 
 // Daily sweep (reconcileTermiteAnnualActivations): every portal-declined,
-// installed (or renewal) termite term still in its paid year whose
-// retrieval task was never settled. Bounded, oldest end first.
+// installed (or renewal) termite term whose WANTED instruction has no
+// settled marker — dated to the current term_end while the year is still
+// paid (a corrected term_end is a new instruction), or immediate once a full
+// refund / void revoked the coverage. No term_end bound: a raise that keeps
+// failing through the whole paid year must still be retried after it ends
+// (the stations still need collecting). A disputed decline (unpaid, not
+// refunded) is never a candidate — a dispute can still be won.
+// Bounded; least-recently-attempted first (decline_retrieval_attempted_at,
+// never-attempted ahead of all — Codex #4940 r8 P2), then oldest end, so
+// terms whose raise keeps failing rotate instead of starving newer ones.
 async function raisePendingDeclineRetrievalTasks({ limit = 50 } = {}) {
+  const attemptTracked = !!(await annualPrepayColumns()).decline_retrieval_attempted_at;
+  const settledFor = (keySql) => function settled() {
+    this.select(db.raw('1')).from('activity_log as m')
+      .where('m.action', DECLINE_RETRIEVAL_ACTIVITY_ACTION)
+      .whereRaw("m.metadata->>'term_id' = dt.id::text")
+      .whereRaw(`m.metadata->>'retrieve_after' = ${keySql}`);
+  };
+  const covered = () => coveredTermsAsOf(db).whereRaw('t.id = dt.id').select(db.raw('1'));
   const candidates = await db('annual_prepay_terms as dt')
     .whereNotNull('dt.annual_plan_version')
     .where({ 'dt.status': 'cancelled', 'dt.renewal_decision': 'cancel' })
     .where(function installed() {
       this.whereNotNull('dt.installation_anchored_at').orWhereNotNull('dt.renewed_from_term_id');
     })
-    // No term_end bound: a raise that keeps failing through the whole paid
-    // year must still be retried after it ends — the stations still need
-    // collecting, and the absent settled-marker is what makes this set
-    // converge (the staff bell promises a daily retry).
-    // Still PAID (billing's own test): a refunded/disputed decline is never
-    // a candidate, so it can't hold a `limit` slot every day.
-    .whereExists(coveredTermsAsOf(db).whereRaw('t.id = dt.id').select(db.raw('1')))
     .whereExists(function portalDecline() {
       this.select(db.raw('1')).from('activity_log as a')
         .where('a.action', CUSTOMER_DECLINE_ACTIVITY_ACTION)
         .whereRaw("a.metadata->>'term_id' = dt.id::text");
     })
-    .whereNotExists(function alreadySettled() {
-      this.select(db.raw('1')).from('activity_log as m')
-        .where('m.action', DECLINE_RETRIEVAL_ACTIVITY_ACTION)
-        .whereRaw("m.metadata->>'term_id' = dt.id::text");
+    .where(function wantedInstructionUnsettled() {
+      this.where(function paidDated() {
+        this.whereExists(covered()).whereNotExists(settledFor("to_char(dt.term_end, 'YYYY-MM-DD')"));
+      }).orWhere(function refundedImmediate() {
+        whereTermPrepayRefunded(this.whereNotExists(covered()), 'dt')
+          .whereNotExists(settledFor(`'${DECLINE_RETRIEVAL_IMMEDIATE}'`));
+      });
     })
+    .modify((q) => { if (attemptTracked) q.orderBy('dt.decline_retrieval_attempted_at', 'asc', 'first'); })
     .orderBy('dt.term_end', 'asc')
     .limit(limit)
     .select('dt.id');
   let raised = 0;
   for (const row of candidates) {
+    if (attemptTracked) {
+      // Stamped before the attempt so a failing term rotates to the back.
+      await db('annual_prepay_terms').where({ id: row.id }).update({ decline_retrieval_attempted_at: new Date() })
+        .catch((stampErr) => logger.warn(`[annual-prepay] decline retrieval attempt stamp failed for term ${row.id}: ${stampErr.message}`));
+    }
     const retrieval = await raiseRetrievalAfterAnchor(row.id);
     if (retrieval.raised) raised += 1;
   }
   return { scanned: candidates.length, raised };
 }
 
-function retrievalSentence(retrieval, termEndLabel) {
-  switch (retrieval?.reason || (retrieval?.raised ? 'raised' : null)) {
-    case 'raised':
-      return `A dated station-retrieval task was raised for after ${termEndLabel}.`;
-    case 'not_installed':
-      return 'The stations are not installed yet — a dated retrieval task will be raised once the stations are installed and the coverage year is set.';
-    case 'no_rented_stations':
-      return 'No Waves-owned termite stations are on file, so no retrieval task was raised.';
-    case 'other_termite_plan':
-      return `This customer has another termite annual plan, so no retrieval task was raised automatically — confirm which stations to pull after ${termEndLabel}.`;
-    case 'other_termite_service':
-      return `This customer still has termite service on the calendar, so no retrieval task was raised automatically — confirm which stations to pull after ${termEndLabel}.`;
-    case 'termite_bond':
-      return `This customer has an active termite bond, so no retrieval task was raised automatically — confirm which stations to pull after ${termEndLabel}.`;
-    case 'superseded_by_newer':
-      return `A newer station-retrieval instruction already stands on this account, so no separate task was raised for this decline — confirm it covers pulling the stations after ${termEndLabel}.`;
-    case 'failed':
-    case 'not_raised':
-      return `The station-retrieval task could not be raised yet — it is retried automatically each day; create it by hand for after ${termEndLabel} if it does not appear.`;
-    case 'caller_transaction':
-      return `The station-retrieval task will be raised by the daily reconcile once this decline is committed (for after ${termEndLabel}).`;
-    default:
-      return '';
+// Codex #4940 r8 P1: the other-coverage guard runs when the task is raised,
+// but the customer can add another termite plan, a termite service or a
+// bond before the retrieval date. Every OPEN automatic retrieval task of a
+// portal decline that is due within `horizonDays` (or already due) is
+// re-checked: if the account now has other live termite coverage, the
+// task is withdrawn (marked read, as raiseTermiteRetrievalTask retires a
+// superseded instruction), the marker for that instruction records the
+// reason, and staff are belled to confirm which stations to pull.
+async function revalidateDueDeclineRetrievalTasks({ horizonDays = 14 } = {}) {
+  const horizon = addDaysYmd(etDateString(), horizonDays);
+  const open = await db('notifications')
+    .where({ recipient_type: 'admin' })
+    .whereNull('read_at')
+    .whereRaw("metadata->>'kind' = 'termite_station_retrieval'")
+    .whereRaw("metadata->>'churnEpisode' = ?", [DECLINE_RETRIEVAL_EPISODE])
+    .where(function dueSoon() {
+      this.whereRaw("metadata->>'retrieveAfter' <= ?", [horizon]).orWhereRaw("metadata->>'retrieveAfter' is null");
+    })
+    .select('id', 'metadata');
+  let withdrawn = 0;
+  for (const row of open) {
+    if (await withdrawIfOtherCoverage(row)) withdrawn += 1;
   }
+  return { checked: open.length, withdrawn };
+}
+
+async function withdrawIfOtherCoverage(row) {
+  const meta = parseActivityMetadata(row.metadata);
+  const term = meta.termId
+    ? await db('annual_prepay_terms').where({ id: meta.termId }).first('id', 'customer_id', 'source_estimate_id', 'term_end')
+    : null;
+  const reason = term ? await otherLiveTermiteCoverage(term) : null;
+  if (!reason) return false;
+  const withdrawnRows = await db('notifications').where({ id: row.id }).whereNull('read_at').update({ read_at: new Date() });
+  if (!withdrawnRows) return false;
+  const retrieval = {
+    raised: false,
+    reason,
+    termEnd: dateOnly(term.term_end),
+    retrieveAfterKey: meta.retrieveAfter || DECLINE_RETRIEVAL_IMMEDIATE,
+    customerId: term.customer_id,
+  };
+  await writeDeclineRetrievalMarker(term.id, retrieval, reason);
+  await ringDeclineRetrievalFollowupBell(term.id, retrieval, {
+    lead: 'The automatic station-retrieval task for a termite annual plan declined online was withdrawn.',
+  });
+  return true;
+}
+
+// Staff-facing sentence per retrieval outcome. `when` is "after <date>" for
+// a dated instruction, "now" once a refund made it immediate.
+const RETRIEVAL_SENTENCES = {
+  not_installed: () => 'The stations are not installed yet — a dated retrieval task will be raised once the stations are installed and the coverage year is set.',
+  no_rented_stations: () => 'No Waves-owned termite stations are on file, so no retrieval task was raised.',
+  other_termite_plan: (when) => `This customer has another termite annual plan, so no retrieval task was raised automatically — confirm which stations to pull ${when}.`,
+  other_termite_service: (when) => `This customer still has termite service on the calendar, so no retrieval task was raised automatically — confirm which stations to pull ${when}.`,
+  termite_bond: (when) => `This customer has an active termite bond, so no retrieval task was raised automatically — confirm which stations to pull ${when}.`,
+  superseded_by_newer: (when) => `A newer station-retrieval instruction already stands on this account, so no separate task was raised for this decline — confirm it covers pulling the stations ${when}.`,
+  failed: (when) => `The station-retrieval task could not be raised yet — it is retried automatically each day; create it by hand ${when === 'now' ? 'now' : `for ${when}`} if it does not appear.`,
+  caller_transaction: (when) => `The station-retrieval task will be raised by the daily reconcile once this decline is committed (for ${when}).`,
+};
+RETRIEVAL_SENTENCES.not_raised = RETRIEVAL_SENTENCES.failed;
+
+function retrievalSentence(retrieval, termEndLabel) {
+  const immediate = retrieval?.retrieveAfterKey === DECLINE_RETRIEVAL_IMMEDIATE;
+  if (retrieval?.raised) {
+    return immediate
+      ? 'An immediate station-retrieval task was raised — the prepay was refunded, so the plan\u2019s coverage has ended.'
+      : `A dated station-retrieval task was raised for after ${termEndLabel}.`;
+  }
+  const sentence = RETRIEVAL_SENTENCES[retrieval?.reason];
+  return sentence ? sentence(immediate ? 'now' : `after ${termEndLabel}`) : '';
 }
 
 // "Coverage continues through <date>" — or, for an original term not yet
@@ -6635,6 +6770,7 @@ module.exports = {
   // anchor and the daily reconcile raise it (termite-annual-activation.js).
   raiseRetrievalAfterAnchor,
   raisePendingDeclineRetrievalTasks,
+  revalidateDueDeclineRetrievalTasks,
   // The portal renewal card's per-term property label (property.js GET
   // /termite-annual-plan) — ownership-scoped, see its definition.
   termPropertyLabelsForCustomer,

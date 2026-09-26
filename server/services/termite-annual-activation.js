@@ -582,7 +582,7 @@ async function reconcileTermiteAnnualActivations({ conn = db, limit = 200 } = {}
     countersignScanned: 0, countersignReminded: 0,
     signatureNudgeScanned: 0, signatureNudged: 0,
     signatureExpireScanned: 0, signatureExpired: 0, signatureExpireFailed: 0,
-    declineRetrievalScanned: 0, declineRetrievalRaised: 0,
+    declineRetrievalScanned: 0, declineRetrievalRaised: 0, declineRetrievalWithdrawn: 0,
   };
   await retryAwaitingActivations({ conn, limit, counts });
   await retryUndeliveredInvoices({ conn, limit, counts });
@@ -1168,6 +1168,17 @@ async function retryDeclineRetrievalTasks({ counts }) {
   } catch (err) {
     logger.error(`[termite-annual-activation] decline retrieval sweep failed: ${err.message}`);
     counts.declineRetrievalScanError = err.message;
+  }
+  // Codex #4940 r8: an open automatic retrieval task due soon is re-checked
+  // against the account's other live termite coverage (see
+  // revalidateDueDeclineRetrievalTasks). Isolated from the raise pass.
+  try {
+    const { revalidateDueDeclineRetrievalTasks } = require('./annual-prepay-renewals');
+    const outcome = await revalidateDueDeclineRetrievalTasks();
+    counts.declineRetrievalWithdrawn = outcome?.withdrawn || 0;
+  } catch (err) {
+    logger.error(`[termite-annual-activation] decline retrieval revalidation failed: ${err.message}`);
+    counts.declineRetrievalRevalidateScanError = err.message;
   }
 }
 
