@@ -1037,14 +1037,15 @@ const TwilioService = {
         deliveryOutcome = pushed.deliveryOutcome === 'uncertain' ? 'uncertain' : 'not_sent';
         providerCoordination.recordProviderOutcome(providerHandoffReservation, { deliveryOutcome });
         if (options.explicitPushOnly) {
-          if (pushed.blocked) return { success: false, guardBlocked: true, error: pushed.reason };
-          if (pushed.pending) return { success: false, appPending: true, deliveryOutcome: pushed.deliveryOutcome, error: pushed.reason };
-          if (pushed.retryable) return { success: false, appRetryable: true, deliveryOutcome: pushed.deliveryOutcome, error: pushed.reason, retryAfterMs: pushed.retryAfterMs };
+          const bell = pushed.bellPersisted ? { bellPersisted: true } : {};
+          if (pushed.blocked) return { success: false, guardBlocked: true, error: pushed.reason, ...bell };
+          if (pushed.pending) return { success: false, appPending: true, deliveryOutcome: pushed.deliveryOutcome, error: pushed.reason, ...bell };
+          if (pushed.retryable) return { success: false, appRetryable: true, deliveryOutcome: pushed.deliveryOutcome, error: pushed.reason, retryAfterMs: pushed.retryAfterMs, ...bell };
           if (pushed.deliveryOutcome === 'uncertain') {
             return { success: false, appRetryable: true, deliveryOutcome: 'uncertain',
-              error: pushed.reason || 'push_attempt_failed', retryAfterMs: pushed.retryAfterMs };
+              error: pushed.reason || 'push_attempt_failed', retryAfterMs: pushed.retryAfterMs, ...bell };
           }
-          return { success: false, appUnavailable: true, error: pushed.reason || 'push_unavailable', ...(pushed.bellPersisted ? { bellPersisted: true } : {}) };
+          return { success: false, appUnavailable: true, error: pushed.reason || 'push_unavailable', ...bell };
         }
         if (pushed.deliveryOutcome === 'uncertain') {
           return { success: false, appRetryable: true, deliveryOutcome: 'uncertain',

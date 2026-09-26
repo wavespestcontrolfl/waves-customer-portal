@@ -133,4 +133,22 @@ describe('billing App-only leg: real sendSMS with no phone (to === null)', () =>
     });
     expect(bare.bellPersisted).toBeUndefined();
   });
+
+  test.each([
+    ['push in flight', { pending: true, deliveryOutcome: 'uncertain', reason: 'push_in_flight' }, { appPending: true }],
+    ['native retry', { retryable: true, deliveryOutcome: 'uncertain', reason: 'native_provider_retryable', retryAfterMs: 900000 }, { appRetryable: true, retryAfterMs: 900000 }],
+  ])('explicitPushOnly: %s carries only a real persisted-bell witness', async (_label, pushed, expected) => {
+    mockAttemptPushFirst.mockResolvedValue({ delivered: false, ...pushed, bellPersisted: true });
+    const witnessed = await TwilioService.sendSMS(null, 'Your invoice is ready.', {
+      explicitPushOnly: true, billingDeliveryCategory: 'billing', customerId: 'cust-1', messageType: 'billing',
+    });
+    expect(witnessed).toMatchObject({ success: false, deliveryOutcome: 'uncertain', bellPersisted: true, ...expected });
+
+    mockAttemptPushFirst.mockResolvedValue({ delivered: false, ...pushed });
+    const stale = await TwilioService.sendSMS(null, 'Your invoice is ready.', {
+      explicitPushOnly: true, billingDeliveryCategory: 'billing', customerId: 'cust-1', messageType: 'billing',
+    });
+    expect(stale).toMatchObject({ success: false, deliveryOutcome: 'uncertain', ...expected });
+    expect(stale.bellPersisted).toBeUndefined();
+  });
 });

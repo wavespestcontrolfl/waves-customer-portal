@@ -133,14 +133,18 @@ test('an unavailable invoice guard keeps a retry without falling back around the
 
 test('temporary native failures retain their delay and never invoke a Text fallback', async () => {
   prefs.invoice_channel = 'push';
-  Twilio.sendSMS.mockResolvedValue({ success: false, appRetryable: true, deliveryOutcome: 'uncertain', error: 'native_provider_retryable', retryAfterMs: 900000 });
+  Twilio.sendSMS.mockResolvedValue({ success: false, appRetryable: true, deliveryOutcome: 'uncertain', error: 'native_provider_retryable', retryAfterMs: 900000, bellPersisted: true });
   const startedAt = Date.now();
   const result = await sendCustomerMessage({ ...input, purpose: 'payment_link', metadata: { original_message_type: 'invoice' } });
   expect(result).toMatchObject({ sent: false, blocked: false, code: 'APP_PROVIDER_RETRY',
-    deliveryOutcome: 'uncertain', retryable: true, deferred: true, retryAfterMs: 900000 });
+    deliveryOutcome: 'uncertain', retryable: true, deferred: true, retryAfterMs: 900000, bellPersisted: true });
   expect(new Date(result.nextAllowedAt).getTime()).toBeGreaterThanOrEqual(startedAt + 900000);
   expect(Twilio.sendSMS).toHaveBeenCalledTimes(1);
   expect(Twilio.sendSMS.mock.calls[0][2].explicitPushOnly).toBe(true);
+
+  Twilio.sendSMS.mockResolvedValue({ success: false, appRetryable: true, deliveryOutcome: 'uncertain', error: 'native_provider_retryable', retryAfterMs: 900000 });
+  const stale = await sendCustomerMessage({ ...input, purpose: 'payment_link', metadata: { original_message_type: 'invoice' } });
+  expect(stale.bellPersisted).toBeUndefined();
 });
 
 test.each(['opt_out_keyword', 'wrong_number', 'manual_dnc'])('hard suppression %s still blocks app delivery', async (reason) => {
@@ -194,9 +198,12 @@ test('a fallback rechecks a new opt-out rather than bypassing it', async () => {
 });
 
 test('an event already being pushed defers without racing a backup text', async () => {
-  Twilio.sendSMS.mockResolvedValue({ success: false, appPending: true });
-  expect(await sendCustomerMessage(input)).toMatchObject({ sent: false, deferred: true, reason: 'push_in_flight' });
+  Twilio.sendSMS.mockResolvedValue({ success: false, appPending: true, deliveryOutcome: 'uncertain', bellPersisted: true });
+  expect(await sendCustomerMessage(input)).toMatchObject({ sent: false, deferred: true, reason: 'push_in_flight', deliveryOutcome: 'uncertain', bellPersisted: true });
   expect(Twilio.sendSMS).toHaveBeenCalledTimes(1);
+
+  Twilio.sendSMS.mockResolvedValue({ success: false, appPending: true, deliveryOutcome: 'uncertain' });
+  expect((await sendCustomerMessage(input)).bellPersisted).toBeUndefined();
 });
 
 test.each([{ bundled_review_request_id: 'qa-review' }, { mms_fallback_reason: 'fixture-failure' }])('excluded review and media fallback keep their text delivery: %j', async (metadata) => {
