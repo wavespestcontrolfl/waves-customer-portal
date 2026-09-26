@@ -1819,7 +1819,7 @@ async function fileTermiteAwaitingInstallationException(term, daysOut) {
       'Termite annual renewal notice skipped: installation never completed',
       `The ${daysOut}-day termite renewal notice for term ${term?.id} was skipped because the plan's installation visit has never completed — its term_end is only a provisional placeholder until then. Complete the installation (or fix the term) rather than letting this renew on the wrong date.`,
       {
-        link: term?.customer_id ? `/admin/customers/${term.customer_id}` : '/admin/dispatch',
+        link: term?.customer_id ? `/admin/customers?customerId=${term.customer_id}` : '/admin/dispatch',
         // bell:true — same rationale as the sibling termite exceptions: a
         // skipped notice must ring even under GATE_ADMIN_BELL_POLICY.
         bell: true,
@@ -1851,7 +1851,7 @@ async function fileTermiteCancelLinkException(term, daysOut) {
       'Termite annual renewal notice skipped: cancel flow is off',
       `The ${daysOut}-day termite renewal notice for term ${term?.id} was skipped because the customer portal's cancel-request flow (GATE_CANCEL_FLOW_V2) is off — sending would promise auto-renewal with no working cancel link. Enable the gate or handle this renewal manually.`,
       {
-        link: term?.customer_id ? `/admin/customers/${term.customer_id}` : '/admin/dispatch',
+        link: term?.customer_id ? `/admin/customers?customerId=${term.customer_id}` : '/admin/dispatch',
         // bell:true — a skipped termite notice leaves the renewal without its
         // notice witness, so this must ring even under GATE_ADMIN_BELL_POLICY
         // (the 'alert' category is silenced by default there).
@@ -1886,7 +1886,7 @@ async function fileTermiteMissingFeeException(term, daysOut) {
       'Termite annual renewal notice skipped: no renewal fee on file',
       `The ${daysOut}-day termite renewal notice for term ${term?.id} was skipped because the term has no prepay_amount recorded — sending would state a renewal fee of $0.00 instead of the real amount. Set the term's renewal fee or handle this renewal manually.`,
       {
-        link: term?.customer_id ? `/admin/customers/${term.customer_id}` : '/admin/dispatch',
+        link: term?.customer_id ? `/admin/customers?customerId=${term.customer_id}` : '/admin/dispatch',
         // bell:true — same rationale as fileTermiteCancelLinkException: a
         // skipped termite notice leaves the renewal without its notice
         // witness, so this must ring even under GATE_ADMIN_BELL_POLICY.
@@ -1948,7 +1948,7 @@ async function fileTermiteLateNoticeException(term, daysOut) {
       'Termite annual renewal notice went out late',
       `The ${n}-day termite renewal notice for term ${term?.id} (renews ${formatDateLabel(term?.term_end)}) was sent fewer than ${n} days before the renewal date, so the agreement's ${n}-day notice promise was missed. The customer has been told;${chargeSentence}`,
       {
-        link: term?.customer_id ? `/admin/customers/${term.customer_id}` : '/admin/dispatch',
+        link: term?.customer_id ? `/admin/customers?customerId=${term.customer_id}` : '/admin/dispatch',
         bell: true,
         dedupeKey: `termite-annual-notice:${term?.id}:${n}:late`,
         metadata: {
@@ -6736,7 +6736,7 @@ function missedNoticeLabel(missing45, missing30) {
 }
 
 function termiteAlertLink(term) {
-  return term.customer_id ? `/admin/customers/${term.customer_id}` : '/admin/dispatch';
+  return term.customer_id ? `/admin/customers?customerId=${term.customer_id}` : '/admin/dispatch';
 }
 
 // Confirmed-insert-only stamp (guarded on the column existing mid-rollout).
@@ -6818,7 +6818,7 @@ async function fileTermiteUndeliveredNoticeException(term, daysOut) {
       'Termite annual renewal notice not delivered',
       `The ${n}-day termite renewal notice for term ${term?.id} (renews ${formatDateLabel(term?.term_end)}) has not been confirmed delivered by text or email, and its ${n}-day deadline has passed. The system keeps retrying daily.${consequence} Check the customer's phone and email on file and contact them directly.`,
       {
-        link: term?.customer_id ? `/admin/customers/${term.customer_id}` : '/admin/dispatch',
+        link: term?.customer_id ? `/admin/customers?customerId=${term.customer_id}` : '/admin/dispatch',
         bell: true,
         dedupeKey: `termite-annual-notice:${term?.id}:${n}:undelivered`,
         metadata: {
