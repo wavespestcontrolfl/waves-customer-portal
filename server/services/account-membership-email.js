@@ -156,6 +156,7 @@ async function sendTemplate({
   triggerEventId,
   metadata = {},
   contactOverride = null,
+  billingCategory = null,
 }) {
   const recipientCustomer = await loadCustomer(recipientCustomerId);
   if (!recipientCustomer) return { ok: false, skipped: true, reason: 'customer_not_found' };
@@ -181,13 +182,16 @@ async function sendTemplate({
   // suppressionGroupKey below is TRANSACTIONAL_GROUP, which bypasses
   // SendGrid-side suppression groups by design). A lookup failure is treated
   // the same as opted-out: it must not read as "no opt-out" on a DB blip.
-  // A billing.* notice is exempt from the switch: payment emails cannot be
-  // turned off (owner ruling 2026-09-26).
-  const billingNotice = String(templateKey || '').startsWith('billing.');
+  // A billing notice (billingCategory set) is exempt from the switch:
+  // payment emails cannot be turned off (owner ruling 2026-09-26). It still
+  // follows the customer's billing channel choice, re-read here at hand-off
+  // so a Text/App-only change after the caller resolved the recipient wins.
   let emailOptedOut = false;
+  let billingEmailNotSelected = false;
   try {
     const prefs = await db('notification_prefs').where({ customer_id: recipientCustomer.id }).first();
-    emailOptedOut = !billingNotice && !!prefs && prefs.email_enabled === false;
+    emailOptedOut = !billingCategory && !!prefs && prefs.email_enabled === false;
+    billingEmailNotSelected = !!billingCategory && billingChannelAllowed(prefs || {}, billingCategory, 'email') === false;
   } catch (err) {
     // A lookup FAILURE is not the same fact as a genuine opt-out, and the
     // two must not collapse to the same {skipped:true} shape: several
@@ -220,6 +224,17 @@ async function sendTemplate({
       metadata,
     });
     return { ok: false, skipped: true, reason: 'email_opted_out' };
+  }
+  if (billingEmailNotSelected) {
+    await logLifecycleEmailAttempt({
+      customerId: recipientCustomer.id,
+      templateKey,
+      eventType,
+      status: 'skipped',
+      failureReason: 'billing_email_not_selected',
+      metadata,
+    });
+    return { ok: false, skipped: true, reason: 'billing_email_not_selected' };
   }
 
   const targetCustomer = String(customerId || '') === String(recipientCustomer.id)
@@ -529,7 +544,9 @@ async function sendCancellationReceived({
 // either.) Where billing goes is still the customer's choice: an explicit
 // billing channel selection without Email means no email leg, the same
 // choice the SMS leg's consent check honors; no selection at all keeps the
-// email. The SMS leg's prefs are enforced inside send-customer-message —
+// email. Unreadable prefs fail closed as a retryable no-send: the choice
+// cannot be checked, and the billing recipient cannot be resolved either.
+// The SMS leg's prefs are enforced inside send-customer-message —
 // this is the email leg's equivalent, shared with the sweep so hasEmailLeg
 // is only declared when the email can actually send.
 /**
@@ -558,10 +575,13 @@ async function sendResolutionAccepted({ customerId, caseId, reference, summary, 
 async function resolvePrevisitBalanceEmailRecipient(customerId) {
   const customer = await loadCustomer(customerId);
   if (!customer) return { recipient: null, reason: 'customer_not_found' };
-  let prefs = {};
+  let prefs;
   try {
     prefs = await db('notification_prefs').where({ customer_id: customerId }).first() || {};
-  } catch { prefs = {}; }
+  } catch (err) {
+    logger.warn(`[account-membership-email] previsit notification_prefs lookup failed for ${customerId}: ${err.message}`);
+    return { recipient: null, reason: 'prefs_unavailable', transient: true };
+  }
   if (billingChannelAllowed(prefs, 'billing', 'email') === false) {
     return { recipient: null, reason: 'billing_email_not_selected' };
   }
@@ -578,8 +598,10 @@ async function sendPrevisitBalanceReminder({
   billingUrl,
   idempotencyKey,
 } = {}) {
-  const { recipient, reason } = await resolvePrevisitBalanceEmailRecipient(customerId);
-  if (!recipient) return { ok: false, skipped: true, reason };
+  const { recipient, reason, transient } = await resolvePrevisitBalanceEmailRecipient(customerId);
+  if (!recipient) {
+    return transient ? { ok: false, sent: false, transient: true, reason } : { ok: false, skipped: true, reason };
+  }
   return sendTemplate({
     contactOverride: recipient,
     customerId,
@@ -594,6 +616,7 @@ async function sendPrevisitBalanceReminder({
     idempotencyKey,
     categories: ['previsit_balance_reminder'],
     metadata: { amount: clean(amount), visit_date: clean(visitDate) },
+    billingCategory: 'billing',
   });
 }
 

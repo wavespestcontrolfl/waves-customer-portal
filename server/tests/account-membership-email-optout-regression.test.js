@@ -135,11 +135,19 @@ describe('account-membership-email distinguishes a transient prefs failure from 
 describe('billing notices ignore the portal-wide email switch', () => {
   beforeEach(() => { jest.clearAllMocks(); });
 
-  function previsitDb(prefs) {
+  // First notification_prefs read = the recipient resolver, second = the
+  // hand-off re-read inside sendTemplate. An Error stands in for a failed read.
+  const prefsRead = (prefs) => {
+    if (!(prefs instanceof Error)) return chain({ first: prefs });
+    const q = chain();
+    q.first = jest.fn(async () => { throw prefs; });
+    return q;
+  };
+  function previsitDb(prefs, sendPrefs = prefs) {
     const queues = {
       customers: [chain({ first: customer() }), chain({ first: customer() }), chain({ first: customer() })],
       customer_interactions: [chain(), chain(), chain()],
-      notification_prefs: [chain({ first: prefs }), chain({ first: prefs })],
+      notification_prefs: [prefsRead(prefs), prefsRead(sendPrefs)],
     };
     db.mockImplementation((table) => {
       const q = queues[table];
@@ -180,5 +188,32 @@ describe('billing notices ignore the portal-wide email switch', () => {
     const result = await sendPrevisit();
     expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
     expect(result).toEqual({ ok: false, skipped: true, reason: 'billing_email_not_selected' });
+  });
+
+  test('an unreadable billing channel choice fails closed as a retryable no-send', async () => {
+    previsitDb(new Error('db down'));
+    await expect(AccountMembershipEmail.resolvePrevisitBalanceEmailRecipient('cust-1'))
+      .resolves.toEqual({ recipient: null, reason: 'prefs_unavailable', transient: true });
+    previsitDb(new Error('db down'));
+    const result = await sendPrevisit();
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    expect(result).toEqual({ ok: false, sent: false, transient: true, reason: 'prefs_unavailable' });
+  });
+
+  test('a Text-only change after the recipient was resolved stops the email at hand-off', async () => {
+    previsitDb(
+      { customer_id: 'cust-1', billing_channels: ['email', 'sms'] },
+      { customer_id: 'cust-1', billing_channels: ['sms'] },
+    );
+    const result = await sendPrevisit();
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    expect(result).toEqual({ ok: false, skipped: true, reason: 'billing_email_not_selected' });
+  });
+
+  test('an unreadable choice at hand-off fails closed as a retryable no-send', async () => {
+    previsitDb({ customer_id: 'cust-1', billing_channels: ['email'] }, new Error('db down'));
+    const result = await sendPrevisit();
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+    expect(result).toEqual({ ok: false, sent: false, transient: true, reason: 'prefs_unavailable' });
   });
 });
