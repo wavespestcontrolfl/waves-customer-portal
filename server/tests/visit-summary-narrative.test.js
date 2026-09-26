@@ -300,6 +300,10 @@ test.each([
   'Friday, October 2 of 2027',
   'Friday, October 2 (2027)',
   'Friday, October 2, in 2027',
+  'Friday, October 2nd, 2027',
+  'Friday, October 2nd in 2027',
+  'Friday, October 2nd (2027)',
+  'Friday, October 2ND, in 2027',
 ])('model output cannot add a year to the supplied next-visit date: %s', async (date) => {
   const args = input();
   const summary = `We refreshed the perimeter and entry points today. Your next visit is ${date}, arriving 8–10 AM.`;
@@ -307,6 +311,17 @@ test.each([
     callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary } }),
   });
   expect(out).toBe(deterministicSummary(groundingFacts(args)));
+});
+
+test.each(['1st', '2nd', '3rd', '4th', '21st', '22nd', '23rd', '31st'])('ordinal dates retain date and year validation: %s', (ordinal) => {
+  const day = Number.parseInt(ordinal, 10);
+  const facts = { nextVisit: { date: `October ${day}`, window: '8–10 AM' } };
+  expect(appointmentClaimProblems(`Your next visit is October ${ordinal}, arriving 8–10 AM.`, facts)).toEqual([]);
+  expect(appointmentClaimProblems(`Your next visit is October ${ordinal}, 2027, arriving 8–10 AM.`, facts))
+    .toEqual(expect.arrayContaining([expect.stringContaining('ungrounded_date:')]));
+  expect(appointmentClaimProblems(`Your next visit is October ${ordinal}, arriving 8–10 AM.`, {
+    nextVisit: { date: `October ${day === 31 ? 30 : day + 1}`, window: '8–10 AM' },
+  })).toEqual(expect.arrayContaining([expect.stringContaining('ungrounded_date:')]));
 });
 
 test('each appointment promise must independently match the authoritative slot', async () => {

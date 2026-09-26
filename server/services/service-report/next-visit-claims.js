@@ -6,7 +6,7 @@
 const WINDOW_TEXT_RE = /\b\d{1,2}(?::\d{2})?\s*(?:AM|PM)?\s*[–—-]\s*\d{1,2}(?::\d{2})?\s*(?:AM|PM)\b/gi;
 const MONTH_NAMES = 'January|February|March|April|May|June|July|August|September|October|November|December';
 const WEEKDAY_NAMES = 'Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday';
-const DATE_TEXT_RE = new RegExp(`\\b(?:(${WEEKDAY_NAMES}),?\\s+)?(${MONTH_NAMES})\\s+(\\d{1,2})\\b(?:\\s*,?\\s*(?:(?:in|of)\\s+)?\\(?(\\d{4})\\)?)?`, 'gi');
+const DATE_TEXT_RE = new RegExp(`\\b(?:(${WEEKDAY_NAMES}),?\\s+)?(${MONTH_NAMES})\\s+(\\d{1,2})(?:st|nd|rd|th)?\\b(?:\\s*,?\\s*(?:(?:in|of)\\s+)?\\(?(\\d{4})\\)?)?`, 'gi');
 const APPOINTMENT_CLAIM_RE = new RegExp(
   `\\b(?:(?:(?:your|the)\\s+)?(?:next|upcoming)\\s+(?:visit|appointment|service)(?:\\s*:\\s*|\\s+(?:is|has\\s+been|will\\s+be|scheduled|booked|set|on|for)\\b)|(?:we(?:\\s+will|[’']ll)?\\s+)?see\\s+you\\b|we(?:\\s+will|[’']ll)\\s+(?:return|arrive|be\\s+back|come\\s+back)\\b|(?:appointment|visit|follow[-\\s]?up)\\s+(?:is\\s+)?(?:scheduled|booked|set)\\b)`,
   'i',
