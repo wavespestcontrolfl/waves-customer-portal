@@ -17191,6 +17191,12 @@ function oneTimeItemsForRender(estResult, estData) {
     debrisRemovalIncluded: row.debrisRemovalIncluded === true,
     creditableWithinDays: row.creditableWithinDays || null,
     includesScreening: row.includesScreening === true,
+    // Trapping allowance (owner ruling 2026-09-26): the copy pack renders
+    // the saved count; dropping these made every quote read as legacy
+    // unlimited callbacks (codex #4932 pre-push P1).
+    includedFollowUps: row.includedFollowUps ?? null,
+    includedCallbacks: row.includedCallbacks ?? null,
+    unlimitedCallbacks: typeof row.unlimitedCallbacks === 'boolean' ? row.unlimitedCallbacks : null,
     includedScope: row.includedScope || null,
     retainerBilling: row.retainerBilling || null,
     atticSqFt: row.atticSqFt ?? null,
@@ -17655,6 +17661,10 @@ function normalizeOneTimeBreakdown(estData) {
         debrisRemovalIncluded: item.debrisRemovalIncluded === true,
         creditableWithinDays: Number(item.creditableWithinDays) > 0 ? Number(item.creditableWithinDays) : null,
         includesScreening: item.includesScreening === true || /\+screening\b/.test(String(item.detail || item.det || '')),
+        // Trapping allowance the copy pack renders (codex #4932 pre-push P1).
+        includedFollowUps: item.includedFollowUps ?? null,
+        includedCallbacks: item.includedCallbacks ?? null,
+        unlimitedCallbacks: typeof item.unlimitedCallbacks === 'boolean' ? item.unlimitedCallbacks : null,
         includedScope: item.includedScope || null,
         retainerBilling: item.retainerBilling || item.trapOnlyRetainerBilling || null,
         atticSqFt: Number(item.atticSqFt) > 0 ? Number(item.atticSqFt) : null,

@@ -6946,7 +6946,7 @@ export default function EstimateToolViewV2({
               {form.svcRodentTrap && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
                   <div className="text-14 text-zinc-600 mb-3">
-                    Standard plan — $350 flat, unlimited callbacks/checks for the active trapping job.
+                    Standard plan — $350 flat, covers the setup visit + 1 trap check. Visit 3+ is booked as Rodent Trap Check - Additional (catalog price).
                   </div>
                   <CheckboxV2 k="rodentTrappingEmergency" label="Emergency surcharge" />
                 </div>

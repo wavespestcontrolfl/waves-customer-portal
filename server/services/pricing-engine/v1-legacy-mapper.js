@@ -1165,6 +1165,12 @@ function mapV1ToLegacyShape(v1Result) {
         ...(li.debrisRemovalIncluded !== undefined ? { debrisRemovalIncluded: li.debrisRemovalIncluded === true } : {}),
         ...(Number(li.creditableWithinDays) > 0 ? { creditableWithinDays: Number(li.creditableWithinDays) } : {}),
         ...(li.includesScreening !== undefined ? { includesScreening: li.includesScreening === true } : {}),
+        // Trapping allowance the copy pack renders (owner ruling 2026-09-26;
+        // codex #4932 pre-push P1 — without it a new quote read as legacy
+        // unlimited callbacks).
+        ...(li.includedFollowUps !== undefined ? { includedFollowUps: li.includedFollowUps } : {}),
+        ...(li.includedCallbacks !== undefined ? { includedCallbacks: li.includedCallbacks } : {}),
+        ...(typeof li.unlimitedCallbacks === 'boolean' ? { unlimitedCallbacks: li.unlimitedCallbacks } : {}),
         // Trap-only billing mode + Bora-Care purchased areas (codex #3823 r8 P1s).
         ...(li.retainerBilling || li.trapOnlyRetainerBilling
           ? { retainerBilling: li.retainerBilling || li.trapOnlyRetainerBilling } : {}),
@@ -1384,6 +1390,9 @@ function mapV1ToLegacyShape(v1Result) {
           ...(s.debrisRemovalIncluded !== undefined ? { debrisRemovalIncluded: s.debrisRemovalIncluded === true } : {}),
           ...(Number(s.creditableWithinDays) > 0 ? { creditableWithinDays: Number(s.creditableWithinDays) } : {}),
           ...(s.includesScreening !== undefined ? { includesScreening: s.includesScreening === true } : {}),
+          ...(s.includedFollowUps !== undefined ? { includedFollowUps: s.includedFollowUps } : {}),
+          ...(s.includedCallbacks !== undefined ? { includedCallbacks: s.includedCallbacks } : {}),
+          ...(typeof s.unlimitedCallbacks === 'boolean' ? { unlimitedCallbacks: s.unlimitedCallbacks } : {}),
           ...(s.retainerBilling ? { retainerBilling: s.retainerBilling } : {}),
           ...(s.atticSqFt !== undefined ? { atticSqFt: s.atticSqFt } : {}),
           ...(s.surfaceSqFt !== undefined ? { surfaceSqFt: s.surfaceSqFt } : {}),

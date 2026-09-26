@@ -1186,7 +1186,7 @@ const TERMITE = {
 // ============================================================
 // Staged-remediation pricing model (Apr 2026 v2):
 //   1. Inspection / diagnosis (creditable)
-//   2. Active trapping (Standard: setup + unlimited callbacks/checks)
+//   2. Active trapping (Standard: setup + 1 trap check; extra checks $95)
 //   3. Exclusion (per-point with home-size minimums + access multipliers)
 //   4. Sanitation (light / standard / heavy with sqft + debris scaling)
 //   5. Bundle discount (7% / 5% / 10% with floors)
@@ -1237,16 +1237,20 @@ const RODENT = {
   },
 
   // ── Trapping ──────────────────────────────────────────────
-  // Standard is the only plan (owner directive 2026-08-26): flat $350 with
-  // UNLIMITED callbacks/checks for the same active trapping job — callbacks
-  // never bill. The separate Unlimited tier / upgrade / per-callback extras
-  // are retired.
+  // Standard is the only plan (owner directive 2026-08-26): flat $350.
+  // It covers TWO visits for the same active trapping job — the setup visit
+  // plus one trap check (owner ruling 2026-09-26, replacing the 08-26
+  // unlimited callbacks). Visit 3+ is the separate "Rodent Trap Check -
+  // Additional" catalog row, booked by the office; additionalCheckPrice is
+  // overlaid from that row's base_price by db-bridge (customer copy only).
+  // Jobs sold before 2026-09-27 keep their included checks.
   trapping: {
     standardPrice: r(350),
     base: r(350),
     floor: r(350),
     ceilingBeforeCustom: r(795),
-    includedFollowUps: 'unlimited',
+    includedFollowUps: 1,
+    additionalCheckPrice: r(95),
     activeWindowDays: null,
     homeSizeAdjustments: [
       { maxSqFt: 1200,     adjustment: -r(25) },
@@ -1271,7 +1275,7 @@ const RODENT = {
     emergencyMultiplier: 1.20,           // OR fixed surcharge, whichever is greater
     emergencyMinimumSurcharge: r(75),
     invoiceDescriptions: {
-      standard: 'Rodent Trapping - Unlimited callbacks/checks for the same active trapping job. Does not include exclusion, sanitation, or warranty.',
+      standard: (additionalCheckPrice) => `Rodent Trapping - Includes the setup visit and 1 trap check for the same active trapping job. Additional trap checks are $${additionalCheckPrice} each. Does not include exclusion, sanitation, or warranty.`,
     },
   },
 
@@ -2286,6 +2290,10 @@ const WAVEGUARD = {
     // perk or any % discount (codex #3591 r2 P1: the generic one-time loop
     // was applying the 15% perk and charging $84.15).
     rodent_bait_setup: true,
+    // $95 extra rodent trap check, visit 3+ (owner ruling 2026-09-26): billed
+    // in full to members too and never bundle-discounted, so no % discount
+    // of any kind reduces it.
+    rodent_trap_check_additional: true,
     // Active German Roach Cleanout is a 3-visit specialty/cost-recovery line,
     // not a recurring-service benefit or one-time perk candidate.
     german_roach: true,

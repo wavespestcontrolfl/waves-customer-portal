@@ -241,6 +241,13 @@ function validatePricingConfigData(configKey, data, oldConfig) {
   // thing while estimates price off the in-code default.
   if (configKey === 'global_labor_rate') {
     if (!isPositive(data?.value)) return fail('global_labor_rate.value must be a positive $/hr number');
+  } else if (configKey === 'rodent_trapping') {
+    // Fixed by owner ruling 2026-09-26: $350 covers setup + ONE trap check.
+    // The customer copy, the booking advisory, and the $95 extra-check row
+    // all assume 1, so a different allowance would contradict them.
+    if (data?.included_followups !== undefined && num(data.included_followups) !== 1) {
+      return fail('rodent_trapping.included_followups is fixed at 1 (setup + 1 trap check; extra checks are the $95 Rodent Trap Check - Additional row)');
+    }
   } else if (['global_drive_time', 'global_admin_annual', 'global_conditional_ceiling'].includes(configKey)) {
     if (!isPositive(data?.value)) return fail(`${configKey}.value must be a positive number (the runtime sync ignores zero values)`);
   } else if (['global_margin_floor', 'global_margin_target_ts'].includes(configKey)) {
@@ -711,10 +718,12 @@ async function ensureTable() {
       // Rodent — staged remediation (one-time)
       { config_key: 'rodent_inspection', name: 'Rodent Inspection Fee', category: 'rodent', sort_order: 5, data: JSON.stringify({ fee: 75, creditable_within_days: 14, waive_if_approved_total_over: 995 }) },
       // Only the controls priceRodentTrapping consumes (Standard-only, flat
-      // $350, unlimited callbacks): the retired callback rate and the
-      // footprint/lot/pressure adjustments are gone so the Pricing Logic
-      // editor can't offer knobs that no longer move a quote (codex #3521 r5).
-      { config_key: 'rodent_trapping', name: 'Rodent Trapping (Standard — flat $350, unlimited callbacks)', category: 'rodent', sort_order: 6, data: JSON.stringify({ included_followups: 'unlimited', emergency_multiplier: 1.20, emergency_minimum_surcharge: 75 }) },
+      // $350 covering setup + 1 trap check — owner ruling 2026-09-26): the
+      // callback rate and the footprint/lot/pressure adjustments are gone so
+      // the Pricing Logic editor can't offer knobs that no longer move a
+      // quote (codex #3521 r5). The $95 extra check is the catalog row
+      // rodent_trap_check_additional, not a pricing_config key.
+      { config_key: 'rodent_trapping', name: 'Rodent Trapping (Standard — flat $350, setup + 1 trap check)', category: 'rodent', sort_order: 6, data: JSON.stringify({ included_followups: 1, emergency_multiplier: 1.20, emergency_minimum_surcharge: 75 }) },
       { config_key: 'rodent_sanitation', name: 'Rodent Sanitation Tiers (bleach + wipe)', category: 'rodent', sort_order: 7, data: JSON.stringify({ light: { base: 395, floor: 395, included_sqft: 300, additional_per_sqft: 0.20, included_debris_cuft: 0, additional_debris_per_cuft: 12 }, standard: { base: 695, floor: 695, included_sqft: 750, additional_per_sqft: 0.30, included_debris_cuft: 10, additional_debris_per_cuft: 12 }, heavy: { base: 995, floor: 995, included_sqft: 750, additional_per_sqft: 0.55, included_debris_cuft: 25, additional_debris_per_cuft: 12, crawlspace_multiplier: 1.15, tight_access_multiplier: 1.25 } }) },
       { config_key: 'rodent_bundles', name: 'Rodent Bundle Discounts', category: 'rodent', sort_order: 8, data: JSON.stringify({ trap_exclusion: { discount: 0.07, floor: 895 }, trap_sanitation: { discount: 0.05, floor: 895 }, full_remediation: { discount: 0.10, floors: { light: 1195, standard: 1495, heavy: 1995 } } }) },
       { config_key: 'rodent_guarantee', name: 'Rodent Annual Guarantee Tiers', category: 'rodent', sort_order: 9, data: JSON.stringify({ standard: 199, complex: 249, estate: 299, eligibility_requires: ['trappingCompleted','exclusionCompleted','sanitationCompletedOrPhotoBaseline','noActivityAfterFinalTrapCheck'] }) },
