@@ -576,6 +576,27 @@ describe('identifyPestV2 — escalation triggers', () => {
     expect(result.v2.answer.wording).toBe('pretty_sure'); // bumped to the higher (0.85) of the two
   });
 
+  test('agreement carries the WINNING side\'s own trait evidence, not Gemini\'s stale/empty verify — Codex round-0 P1 (PR-2b wiring round 2)', async () => {
+    dispatch
+      .mockResolvedValueOnce(candidatesReply([{ slug: 'fire-ant', confidence: 0.5 }]))
+      // Gemini's verify is INVALID (no trait arrays) — a miss, not a real
+      // check — so its own confidence/traits never actually move.
+      .mockResolvedValueOnce({ ok: true, json: { candidates: [{ slug: 'fire-ant', confidence: 0.97 }] } })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: {
+          quality: { usable: true, issue: 'none' }, shows: 'organism',
+          candidates: [{ slug: 'fire-ant', confidence: 0.90, traits_visible: [1, 2], traits_not_visible: [] }],
+        },
+      });
+
+    const result = await identifyPestV2([PHOTO]);
+    expect(result.v2.answer.wording).toBe('pretty_sure');
+    // OpenAI is the winning (higher-confidence) side and its trait check
+    // must be what the customer sees — never empty, never Gemini's.
+    expect(result.v2.evidence.matches).toEqual(['Reddish-brown mound builders', 'Aggressive when disturbed']);
+  });
+
   test('self-contradiction (candidates-call top != verify-call top) triggers escalation', async () => {
     dispatch
       .mockResolvedValueOnce(candidatesReply([

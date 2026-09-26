@@ -866,7 +866,18 @@ function combineEscalation(geminiCandidates, escalationResult, contextSlugs) {
     return { finalCandidates: geminiCandidates, disagreed: false, disagreementNode: null, openaiAnswered, openaiStoodInAlone: false };
   }
   if (sameCandidateKey(geminiTop, openaiTop)) {
-    const bumped = { ...geminiTop, confidence: Math.max(geminiTop.confidence, openaiTop.confidence) };
+    // Codex round-0 P1: "the higher of the two" must carry that side's OWN
+    // validated trait evidence too — not just its confidence number stapled
+    // onto Gemini's (possibly empty, e.g. after a verify miss) traits. If
+    // OpenAI is the one supplying the winning confidence, its trait check
+    // is what actually earned it.
+    const winner = openaiTop.confidence > geminiTop.confidence ? openaiTop : geminiTop;
+    const bumped = {
+      ...geminiTop,
+      confidence: Math.max(geminiTop.confidence, openaiTop.confidence),
+      traitsVisible: winner.traitsVisible,
+      traitsNotVisible: winner.traitsNotVisible,
+    };
     return {
       finalCandidates: dedupeCandidates([bumped, ...geminiCandidates.slice(1), ...openaiCandidates.slice(1)]),
       disagreed: false,
