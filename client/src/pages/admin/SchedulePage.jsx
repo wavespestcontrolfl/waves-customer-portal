@@ -14952,10 +14952,15 @@ export function CompletionPanel({
     const draftProtocolLabels = Array.isArray(savedDraft.selectedProtocolActionLabels)
       ? savedDraft.selectedProtocolActionLabels
       : [];
+    // A draft saved before the month was recorded carries the list every
+    // tree & shrub completion showed until then: visit 1 (January).
+    const draftProtocolVisitMonth = Object.hasOwn(savedDraft, "protocolVisitMonth")
+      ? savedDraft.protocolVisitMonth
+      : !isTypedFindings && serviceLineForCloseout === "tree_shrub" ? "Jan" : null;
     const protocolVisitMoved = !isLawn
-      && typeof savedDraft.protocolVisitMonth === "string"
-      && savedDraft.protocolVisitMonth !== "Any"
-      && savedDraft.protocolVisitMonth !== protocolMonthForService(service);
+      && typeof draftProtocolVisitMonth === "string"
+      && draftProtocolVisitMonth !== "Any"
+      && draftProtocolVisitMonth !== protocolMonthForService(service);
     const restoredProtocolLabels = protocolVisitMoved ? [] : draftProtocolLabels;
     setNotes(protocolVisitMoved
       ? withoutProtocolMarkerLines(savedDraft.notes || "", draftProtocolLabels)
