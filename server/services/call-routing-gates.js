@@ -280,8 +280,13 @@ function checkTcpaConsent(extraction, opts = {}) {
 // membership no longer clears it. Net MORE RESTRICTIVE (a few courtesy
 // words outside the old vocabulary, e.g. "Have a good one.", now ground),
 // so a force-reprocess must write a fresh decision row.
-const V2_DECISION_VERSION = 'v2-1.31.0';
-const V2_DECISION_VERSIONS = ['v2-1.0.0', 'v2-1.1.0', 'v2-1.2.0', 'v2-1.3.0', 'v2-1.4.0', 'v2-1.5.0', 'v2-1.6.0', 'v2-1.7.0', 'v2-1.8.0', 'v2-1.9.0', 'v2-1.10.0', 'v2-1.11.0', 'v2-1.12.0', 'v2-1.13.0', 'v2-1.14.0', 'v2-1.15.0', 'v2-1.16.0', 'v2-1.17.0', 'v2-1.18.0', 'v2-1.19.0', 'v2-1.20.0', 'v2-1.21.0', 'v2-1.22.0', 'v2-1.23.0', 'v2-1.24.0', 'v2-1.25.0', 'v2-1.26.0', 'v2-1.27.0', 'v2-1.28.0', 'v2-1.29.0', 'v2-1.30.0', 'v2-1.31.0'];
+// v2-1.32.0 (codex round 23): a condition clause is benign only as a
+// WHOLE benign routing shape (not on any topic word), and a later agent
+// turn that retracts/caveats the commitment (negation, poison, change
+// marker, or scheduling content not binding the same slot) holds the call
+// — MORE RESTRICTIVE.
+const V2_DECISION_VERSION = 'v2-1.32.0';
+const V2_DECISION_VERSIONS = ['v2-1.0.0', 'v2-1.1.0', 'v2-1.2.0', 'v2-1.3.0', 'v2-1.4.0', 'v2-1.5.0', 'v2-1.6.0', 'v2-1.7.0', 'v2-1.8.0', 'v2-1.9.0', 'v2-1.10.0', 'v2-1.11.0', 'v2-1.12.0', 'v2-1.13.0', 'v2-1.14.0', 'v2-1.15.0', 'v2-1.16.0', 'v2-1.17.0', 'v2-1.18.0', 'v2-1.19.0', 'v2-1.20.0', 'v2-1.21.0', 'v2-1.22.0', 'v2-1.23.0', 'v2-1.24.0', 'v2-1.25.0', 'v2-1.26.0', 'v2-1.27.0', 'v2-1.28.0', 'v2-1.29.0', 'v2-1.30.0', 'v2-1.31.0', 'v2-1.32.0'];
 
 function buildRouteDecision({
   callLogId,

@@ -1655,6 +1655,46 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
   });
 
+  // Codex round 23 (reviews of 223c088e84 and 1be805e080): four P1s.
+  // (:1266) "Okay it." and (:613) "We'll let you know." — unlisted shapes,
+  // held by the owner allowlist. (:1429) an unpunctuated compound clause —
+  // the whole clause must be the benign routing shape.
+  test.each([
+    "Okay it. We'll see you Sunday at noon.",
+    "We'll let you know. We'll see you Sunday at noon.",
+    "If we're all set the email goes to you, I'll make sure that's rectified. We'll see you Sunday at noon.",
+  ])('Codex round-24 regression: approval imperatives, pending hedges, and unpunctuated compound clauses poison — %s', (turn) => {
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, turn);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  // (:958) a retraction or caveat in a LATER agent turn.
+  test.each([
+    "Agent: Actually, Sunday won't work.",
+    "Agent: Let me move that to Monday at noon.",
+    "Agent: We'll see you Monday at 3 instead.",
+    "Agent: He still needs to okay it.",
+    "Agent: We need to check with the technician first.",
+  ])('Codex round-24 regression: a later agent turn retracting or caveating the commitment holds the call — %s', (later) => {
+    const transcript = `${TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, "We'll see you Sunday at noon.")}\n${later}\nCaller: Okay.`;
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test.each([
+    "Agent: Can I get your email address?",
+    "Agent: Perfect, you'll get a text shortly. Have a good one.",
+    "Agent: So, we'll see you Sunday at noon.",
+  ])('Codex round-24: ordinary wrap-up or a same-slot restatement in a later turn still grounds — %s', (later) => {
+    const transcript = `${TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, "We'll see you Sunday at noon.")}\n${later}\nCaller: Okay.`;
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "We'll see you Sunday at noon." }), opts({ transcript }));
+    expect(r.allowed).toBe(true);
+    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+  });
+
   test.each([
     "We need that okay. We'll see you Sunday at noon.",
     "We need this approval. We'll see you Sunday at noon.",

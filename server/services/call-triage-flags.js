@@ -935,6 +935,30 @@ function splitSentences(turn) {
     .filter((s) => s.ns);
 }
 
+// Codex round 23, P1 (:958): the commitment can be taken back in a LATER
+// agent turn ("Agent: We'll see you Sunday at 10 o'clock." … "Agent:
+// Actually, Sunday won't work."), and only the pinned turn was ever read.
+// Later agent turns get a retraction screen — not the allowlist (they are
+// ordinary call wrap-up: address, email, questions): any negation/hedge,
+// any authorization/unavailability poison, an explicit change marker, or
+// scheduling content that does not itself bind the SAME confirmed slot
+// retracts the commitment and holds the call for a human.
+const RETRACTION_MARKER_TERMS = [
+  ' actually ', ' instead ', ' change ', ' changed ', ' switch ', ' move ', ' moved ',
+  ' cancel ', ' cancelled ', ' canceled ', ' scratch that ', ' never mind ', ' nevermind ',
+  ' wait ', ' hold on ', ' correction ', ' sorry ',
+];
+function laterAgentSentenceRetracts(sentence, confirmedStartAt, callStartedAt) {
+  const ns = sentence.ns;
+  const padded = ` ${ns} `;
+  if (turnHasNegationOrHedge(ns)) return true;
+  if (sentenceHasDeclarativePoisonVocabulary(ns)) return true;
+  if (RETRACTION_MARKER_TERMS.some((t) => padded.includes(t))) return true;
+  if (sentenceHasSchedulingPredicate(stripBenignTopicPhrases(ns))) {
+    return sentence.interrogative || !quoteBindsConfirmedSlot(ns, confirmedStartAt, callStartedAt);
+  }
+  return false;
+}
 function agentCommitmentSentenceVerified(quote, transcript, confirmedStartAt, callStartedAt) {
   const q = normalizeCommitmentText(quote);
   if (!q || q.length < 12) return false;
@@ -949,14 +973,16 @@ function agentCommitmentSentenceVerified(quote, transcript, confirmedStartAt, ca
   }
   if (!agentTurns.length || !sawCaller) return false;
   const containing = [];
-  for (const turn of agentTurns) {
-    const sentences = splitSentences(turn);
+  for (let t = 0; t < agentTurns.length; t += 1) {
+    const sentences = splitSentences(agentTurns[t]);
     for (let i = 0; i < sentences.length; i += 1) {
       const s = sentences[i];
       if (!s.ns.includes(q)) continue;
       const otherSentencesClean = sentences.every((other, j) => j === i
         || otherSentenceIsClean(other, sentences[j - 1]?.ns));
-      containing.push({ ...s, otherSentencesClean });
+      const laterTurnsClean = agentTurns.slice(t + 1).every((later) => splitSentences(later)
+        .every((ls) => !laterAgentSentenceRetracts(ls, confirmedStartAt, callStartedAt)));
+      containing.push({ ...s, otherSentencesClean: otherSentencesClean && laterTurnsClean });
     }
   }
   if (!containing.length) return false;
@@ -1407,6 +1433,7 @@ function isBarePronounClause(clauseNs) {
 // coordinated with and/or/but is now judged per component: every
 // component must be benign on its own.
 const CLAUSE_COORDINATOR_RE = / (?:and|or|but) /;
+const BENIGN_CLAUSE_SHAPE_RE = /^(?:(?:the|your|a|an|that|this) )?(?:confirmation text|confirmation email|confirmation sms|text message|email notification|notification|notifications|email|e mail|text|texts|invoice|invoices|report|reports) (?:goes|go|went|is going|gets sent|get sent|is sent|was sent|comes|ends up going|ends up) to (?:you|him|her|them|someone else|the wrong (?:person|number|email|address|inbox)|your (?:spam|junk)(?: folder)?|spam|junk)$/;
 function clauseIsBenign(clauseNs, prevNs) {
   if (!clauseNs) return false;
   if (CLAUSE_COORDINATOR_RE.test(clauseNs)) {
@@ -1426,7 +1453,12 @@ function clauseComponentIsBenign(clauseNs, prevNs) {
   if (SUBJECT_LED_APPROVAL_NEED_RE.test(clauseNs)) return false;
   if (APPROVAL_VERB_USE_RE.test(clauseNs)) return false;
   if (CONDITION_CLAUSE_POISON_TERMS.some((t) => padded.includes(t))) return false;
-  if (BENIGN_NON_BOOKING_TOPICS.some((t) => padded.includes(t))) return true;
+  // Codex round 23, P1 (:1429): a benign topic ANYWHERE in the clause used
+  // to clear it, so an unpunctuated compound ("If we're all set the email
+  // goes to you") rode through on "email". Same inversion as the owner's
+  // other-sentence allowlist: the WHOLE clause must be the benign routing
+  // shape — a notification/email/text/invoice/report going to a party.
+  if (BENIGN_CLAUSE_SHAPE_RE.test(clauseNs)) return true;
   if (prevNs && isBarePronounClause(clauseNs)) {
     const prevPadded = ` ${prevNs} `;
     if (BENIGN_NON_BOOKING_TOPICS.some((t) => prevPadded.includes(t))) return true;
