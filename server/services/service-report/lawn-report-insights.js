@@ -140,8 +140,10 @@ function buildLawnInsightCards({
         : 'One area reads drier than the rest of the lawn in today’s photos.',
       whyItMatters: 'That pattern usually points to uneven sprinkler coverage, not the whole lawn needing more water.',
       wavesAction: '',
-      customerAction: aftercareWaterAction
-        || 'Check sprinkler coverage in that area rather than watering the whole yard more.',
+      customerAction: [
+        'Check sprinkler coverage in that area rather than watering the whole yard more.',
+        aftercareWaterAction,
+      ].filter(Boolean).join(' '),
       nextVisitPlan: '',
       provenance: provenance(
         water.localizedDryEvidenceSource
