@@ -644,7 +644,10 @@ function aggregateIdentification(perPhoto) {
   const ranked = [...votes.values()].sort((x, y) => y.count - x.count || CONFIDENCE_RANK[y.best] - CONFIDENCE_RANK[x.best]);
   const winner = ranked[0];
   const unmatched = perPhoto.filter((result) => !result.entry);
-  const contradicting = unmatched.some((result) => result.category === 'not_a_pest'
+  // A photo whose two models disagreed disputes the winner too: an explicit
+  // conflict is never read as an inconclusive photo (pre-push audit, #4865 r2).
+  const contradicting = unmatched.some((result) => result.agreement === 'conflict'
+    || result.category === 'not_a_pest'
     || (result.category !== 'other' && result.category !== winner.entry.category)
     || (result.group && result.group !== winner.entry.group));
   const inconclusive = unmatched.length > 0 && !contradicting;

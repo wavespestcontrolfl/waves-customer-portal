@@ -100,6 +100,16 @@ describe('mergeModelResults', () => {
     expect(_test.aggregateIdentification([split, roachSpiderConflict]).group).toBeNull();
   });
 
+  test('a photo whose two models disagreed disputes a species winner from another photo', () => {
+    const ghost = mergeModelResults(null, claude());
+    const ghostVsUnlisted = mergeModelResults(claude({ best_match: 'white-footed ant' }), claude({ confidence: 'moderate' }));
+    expect(ghostVsUnlisted.agreement).toBe('conflict');
+    const identification = _test.aggregateIdentification([ghost, ghostVsUnlisted]);
+    expect(identification.contested).toBe(true);
+    const contract = buildPestReportContract({ ...ghost, identification });
+    expect(publicIdentificationLabel(contract)).toMatchObject({ label: 'an ant species', specificity: 'generic' });
+  });
+
   test('a group-only photo from another group disputes a species winner', () => {
     const ghost = mergeModelResults(null, claude());
     const roachSplit = mergeModelResults(claude({ best_match: 'american cockroach' }), claude({ best_match: 'german cockroach' }));
