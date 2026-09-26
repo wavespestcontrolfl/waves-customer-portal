@@ -181,15 +181,43 @@ function resolveGuardModeCompat(config) {
   return 'legacy';
 }
 
+// FLEX-TIER series fence: a plain re-read on `trx` does NOT serialize against
+// a concurrent series writer — READ COMMITTED never shows its uncommitted
+// insert/edit, and nothing here blocks it from committing right after this
+// row's move, crossing the bound we just checked. Every writer that reads-
+// then-writes a recurring series (top-up/auto-extend, rebooker series moves,
+// dispatch series cancel, recurring-alert actions) takes the canonical
+// `recurring-series-maintenance` advisory lock keyed by the series parent
+// (admin-schedule.js acquireRecurringSeriesMaintenanceLock — key derivation
+// kept byte-identical, as that helper requires). Taking it here before the
+// neighbor read makes the bounds hold through this row's commit. TRY-lock,
+// never wait: this runs after the move's row locks, so a blocking wait could
+// invert lock order against a writer holding the fence; a busy series is
+// simply refused (fail closed — the 04:10 pass retries tomorrow).
+// Parents sorted so multi-series grouped moves acquire in a stable order.
+async function fenceFlexSeries(trx, rows, refuse) {
+  const parents = [...new Set(rows.map((r) => r.recurring_parent_id).filter(Boolean).map(String))].sort();
+  for (const parentId of parents) {
+    const result = await trx.raw(
+      'SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS locked',
+      ['recurring-series-maintenance', parentId],
+    );
+    if (result?.rows?.[0]?.locked !== true) {
+      const row = rows.find((r) => String(r.recurring_parent_id) === parentId);
+      throw refuse(row.id, 'has a series update in progress (no move, fail closed)');
+    }
+  }
+}
+
 // FLEX-TIER (Codex pre-push P1): the series' adjacent-occurrence bounds are
 // NOT durable evidence like the tier anchor — a sibling occurrence can be
 // inserted or edited any time before THIS row's own commit, and that write
 // touches a DIFFERENT row, so the rebooker's `expect` CAS on this row (which
 // pins only this row's own columns) can never catch it. Re-read the series
-// fresh, on `trx` — the SAME transaction/lock this row's own write commits
-// in — right before that commit (mirrors checkFlexSiblingBounds' established
-// pattern for grouped siblings below; one scheme, reused, not invented
-// twice). Extracted (Codex pre-push P1) so makeMoveGuard's closure — already
+// fresh, on `trx` — the SAME transaction this row's own write commits in,
+// under the series fence (fenceFlexSeries) — right before that commit
+// (mirrors checkFlexSiblingBounds' established pattern for grouped siblings
+// below; one scheme, reused, not invented twice). Extracted (Codex pre-push P1) so makeMoveGuard's closure — already
 // near its complexity budget — never grows from this. No-ops outside flex
 // mode, a non-recurring-child row, or the unplaced due-date shape (no
 // window_start yet — not a day-move in the first place).
@@ -199,6 +227,7 @@ async function checkFlexOwnBounds(trx, row, best, guardMode, refuse) {
   if (flexTier.ownScheduleFrozen(row, new Date())) {
     throw refuse(row.id, 'is within 73 hours of its own scheduled time (frozen, independent of reminder evidence)');
   }
+  await fenceFlexSeries(trx, [row], refuse);
   const neighborMap = await flexTier.loadSeriesNeighbors(trx, [row]);
   if (neighborMap === null) throw refuse(row.id, 'series occurrence order is unreadable (no move, fail closed)');
   const neighbors = neighborMap.get(row.id) || {};
@@ -296,9 +325,10 @@ async function checkTiersSiblingBounds(trx, siblings, rows, best, today, refuse)
 // tapped row (makeMoveGuard) — the 73h freeze (reminder evidence, fail
 // closed on an unreadable read, OR-ed with each sibling's OWN schedule
 // since a sibling can equally lack a reminder row) and its own
-// series-neighbor window, re-read fresh here under this transaction's
-// locks — never reused from any earlier snapshot, so a sibling occurrence
-// inserted or edited since is still caught.
+// series-neighbor window, re-read fresh here under the series fence
+// (fenceFlexSeries) — never reused from any earlier snapshot, so a sibling
+// occurrence inserted or edited since is still caught, and none can land
+// before this move commits.
 async function checkFlexSiblingBounds(trx, siblings, rows, best, today, refuse) {
   const now = new Date();
   const freeze = await routeTiers.loadReminderFreeze(trx, siblings.map((m) => m.id), now, flexTier.FLEX_TIER_FREEZE_HOURS);
@@ -307,6 +337,7 @@ async function checkFlexSiblingBounds(trx, siblings, rows, best, today, refuse) 
   if (frozen) throw refuse(frozen.id, 'is inside its 73-hour reminder window (frozen)');
   const ownFrozen = rows.find((r) => flexTier.ownScheduleFrozen(r, now));
   if (ownFrozen) throw refuse(ownFrozen.id, 'is within 73 hours of its own scheduled time (frozen, independent of reminder evidence)');
+  await fenceFlexSeries(trx, rows, refuse);
   const neighborMap = await flexTier.loadSeriesNeighbors(trx, rows);
   if (neighborMap === null) throw refuse(siblings[0].id, 'series occurrence order is unreadable (no move, fail closed)');
   for (const r of rows) {

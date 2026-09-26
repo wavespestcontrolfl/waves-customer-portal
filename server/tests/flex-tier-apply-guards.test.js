@@ -46,8 +46,15 @@ function refuseFactory() {
 // A trx stub for loadSeriesNeighbors' `db('scheduled_services')
 // .where(fn).whereNotIn(status).select(...)` query — the only query these
 // unit-level guard functions issue once loadReminderFreeze is mocked.
-function seriesTrx(rowsByParent) {
-  return jest.fn((table) => {
+// `raw` answers fenceFlexSeries' pg_try_advisory_xact_lock — granted
+// unless the parent is listed in `busyParents`.
+function withSeriesFence(trx, busyParents = []) {
+  trx.raw = jest.fn(async (_sql, [, parentId]) => ({ rows: [{ locked: !busyParents.includes(parentId) }] }));
+  return trx;
+}
+
+function seriesTrx(rowsByParent, busyParents) {
+  return withSeriesFence(jest.fn((table) => {
     if (table !== 'scheduled_services') throw new Error(`unexpected table ${table}`);
     let parentId;
     const capture = { where: (col, val) => { if (col === 'id') parentId = val; return capture; }, orWhere: () => capture };
@@ -57,7 +64,7 @@ function seriesTrx(rowsByParent) {
       select: async () => rowsByParent[parentId] || [],
     };
     return api;
-  });
+  }), busyParents);
 }
 
 beforeEach(() => {
@@ -126,10 +133,45 @@ describe('checkFlexOwnBounds (the tapped row, inside makeMoveGuard)', () => {
     const row = {
       id: 's1', scheduled_date: dayOffset(9), window_start: '09:00', is_recurring: true, recurring_parent_id: 'p1',
     };
-    const trx = jest.fn(() => ({ where: () => ({ whereNotIn: () => ({ select: async () => { throw new Error('db down'); } }) }) }));
+    const trx = withSeriesFence(jest.fn(() => ({ where: () => ({ whereNotIn: () => ({ select: async () => { throw new Error('db down'); } }) }) })));
     const refuse = refuseFactory();
     await expect(checkFlexOwnBounds(trx, row, { date: dayOffset(11) }, 'flex', refuse))
       .rejects.toMatchObject({ code: 'TEST_REFUSE', id: 's1' });
+  });
+});
+
+describe('fenceFlexSeries — series writers are serialized, not just re-read', () => {
+  const row = {
+    id: 's1', scheduled_date: dayOffset(9), window_start: '09:00', is_recurring: true, recurring_parent_id: 'p1',
+  };
+
+  test('takes the canonical recurring-series-maintenance lock for the parent before reading neighbors', async () => {
+    const trx = seriesTrx({ p1: [{ id: 's1', scheduled_date: dayOffset(9) }] });
+    await expect(checkFlexOwnBounds(trx, row, { date: dayOffset(11) }, 'flex', refuseFactory())).resolves.toBeUndefined();
+    expect(trx.raw).toHaveBeenCalledWith(
+      'SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS locked',
+      ['recurring-series-maintenance', 'p1'],
+    );
+    expect(trx.raw.mock.invocationCallOrder[0]).toBeLessThan(trx.mock.invocationCallOrder[0]);
+  });
+
+  test('a series update in progress refuses the move without waiting or reading neighbors (fail closed)', async () => {
+    const trx = seriesTrx({ p1: [{ id: 's1', scheduled_date: dayOffset(9) }] }, ['p1']);
+    await expect(checkFlexOwnBounds(trx, row, { date: dayOffset(11) }, 'flex', refuseFactory()))
+      .rejects.toMatchObject({ code: 'TEST_REFUSE', id: 's1', why: expect.stringContaining('series update in progress') });
+    expect(trx).not.toHaveBeenCalled();
+  });
+
+  test('grouped siblings fence every distinct parent in sorted order and refuse on the busy one', async () => {
+    routeTiers.loadReminderFreeze.mockResolvedValueOnce({ failed: false, frozen: new Set() });
+    const rows = [
+      { id: 's3', scheduled_date: dayOffset(9), window_start: '09:00', recurring_parent_id: 'p2' },
+      { id: 's2', scheduled_date: dayOffset(9), window_start: '09:00', recurring_parent_id: 'p1' },
+    ];
+    const trx = seriesTrx({ p1: [rows[1]], p2: [rows[0]] }, ['p2']);
+    await expect(checkFlexSiblingBounds(trx, rows, rows, { date: dayOffset(11) }, TODAY, refuseFactory()))
+      .rejects.toMatchObject({ id: 's3' });
+    expect(trx.raw.mock.calls.map((c) => c[1][1])).toEqual(['p1', 'p2']);
   });
 });
 
