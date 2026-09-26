@@ -50,6 +50,21 @@ const DEFAULT_ANNUAL_PLAN_VERSION = 'v3';
 // deferred-invoice snapshot, or a malformed context) — never "never expires".
 const ANNUAL_SIGNATURE_ABANDON_DAYS = 45;
 
+// Every string this matches is a REAL instant PostgreSQL's ::timestamptz
+// cast accepts, so the cast can never throw and fail a whole sweep: year
+// 1900–2099; month 01–12 with each month's day limit (Feb capped at 28 —
+// a leap-day stamp just falls back to accepted_at, one day's difference at
+// most); hours 00–23, minutes/seconds 00–59; Z or an offset within ±14:59.
+// Shape-only matching let "2026-13-01T00:00:00Z" through to a throwing
+// cast. The park writes new Date().toISOString(), which always matches.
+// (No '?' anywhere — knex raw would read it as a binding placeholder.)
+const CASTABLE_ISO_INSTANT = '^(19|20)[0-9]{2}-('
+  + '(0[13578]|1[02])-(0[1-9]|[12][0-9]|3[01])'
+  + '|(0[469]|11)-(0[1-9]|[12][0-9]|30)'
+  + '|02-(0[1-9]|1[0-9]|2[0-8])'
+  + ')T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\\.[0-9]{1,6}|)'
+  + '(Z|[+-](0[0-9]|1[0-4])(:|)[0-5][0-9])$';
+
 function parseJsonish(raw) {
   if (!raw) return null;
   if (typeof raw === 'object') return raw;
@@ -1104,6 +1119,8 @@ async function retryInstallHandoffs({ conn, limit, counts }) {
 // fresh share_token_expires_at on the SAME row, so a later lapse of THAT
 // link is a distinct key and rings again — never suppressed by the first
 // bell's dedupe record.
+const SIGNATURE_NUDGE_EVENT = 'signature_link_expired_nudged';
+
 async function remindExpiredSignatureLinks({ conn, limit, counts }) {
   try {
     const candidates = await conn('estimates as e')
@@ -1126,12 +1143,19 @@ async function remindExpiredSignatureLinks({ conn, limit, counts }) {
           .whereRaw("cc2.document_variables_snapshot -> 'estimate' ->> 'id' = e.id::text")
           .whereRaw('cc2.created_at > cc.created_at');
       })
-      .select('e.id as estimate_id', 'e.annual_plan_deferred_invoice', 'e.accepted_at', 'cc.id as contract_id', 'cc.share_token_expires_at')
-      // Most recently lapsed first: an already-nudged link stays a
-      // (deduped) candidate until its estimate closes at day 45, so an
-      // oldest-first batch could keep re-selecting stale, already-belled
-      // rows ahead of a link that lapsed today.
-      .orderBy('cc.share_token_expires_at', 'desc')
+      // Already nudged for THIS lapse: a nudge event recorded at or after
+      // the current share_token_expires_at. A staff resend moves the expiry
+      // past that event, so the next lapse is a fresh candidate. Excluding
+      // them before LIMIT means a large backlog can't keep re-selecting
+      // already-belled links ahead of ones never nudged.
+      .whereNotExists(function alreadyNudgedForThisLapse() {
+        this.select(conn.raw('1')).from('customer_contract_events as ev')
+          .whereRaw('ev.contract_id = cc.id')
+          .where('ev.event_type', SIGNATURE_NUDGE_EVENT)
+          .whereRaw('ev.created_at >= cc.share_token_expires_at');
+      })
+      .select('e.id as estimate_id', 'e.annual_plan_deferred_invoice', 'e.accepted_at', 'cc.id as contract_id', 'cc.customer_id as contract_customer_id', 'cc.share_token_expires_at')
+      .orderBy('cc.share_token_expires_at', 'asc')
       .limit(limit);
     counts.signatureNudgeScanned = candidates.length;
     const NotificationService = require('./notification-service');
@@ -1157,7 +1181,18 @@ async function remindExpiredSignatureLinks({ conn, limit, counts }) {
             metadata: { estimateId: row.estimate_id, contractId: row.contract_id },
           },
         );
-        if (bell && !bell.deduped && !bell.suppressed) counts.signatureNudged += 1;
+        if (bell && !bell.suppressed) {
+          if (!bell.deduped) counts.signatureNudged += 1;
+          // Delivered (or already standing under this key): mark this lapse
+          // nudged so later sweeps stop selecting it.
+          await conn('customer_contract_events').insert({
+            contract_id: row.contract_id,
+            customer_id: row.contract_customer_id,
+            event_type: SIGNATURE_NUDGE_EVENT,
+            actor_type: 'system',
+            metadata: JSON.stringify({ shareTokenExpiresAt: expiresAtKey, estimateId: row.estimate_id }),
+          });
+        }
       } catch (err) {
         logger.warn(`[termite-annual-activation] signature-expiry nudge failed for estimate ${row.estimate_id}: ${err.message}`);
       }
@@ -1281,11 +1316,7 @@ async function expireAbandonedSignatures({ conn, limit, counts }) {
     // accepted_at in SQL exactly like parkedAtForEstimate does in JS (kept
     // in sync deliberately — this WHERE decides the candidate set, the JS
     // helper decides the per-row verdict inside the locked transaction).
-    // The ::timestamptz cast only ever sees an ISO-8601 instant (the park
-    // writes new Date().toISOString()): anything else falls back to
-    // accepted_at, so one malformed stamp can never fail the whole scan.
-    // (No '?' in the pattern — knex raw would read it as a binding.)
-    const isoParkedAt = "(e.annual_plan_deferred_invoice ->> 'parkedAt') ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+|)(Z|[+-][0-9]{2}(:|)[0-9]{2})$'";
+    const isoParkedAt = `(e.annual_plan_deferred_invoice ->> 'parkedAt') ~ '${CASTABLE_ISO_INSTANT}'`;
     const parkedAtExpr = `COALESCE(CASE WHEN ${isoParkedAt} THEN (e.annual_plan_deferred_invoice ->> 'parkedAt')::timestamptz END, e.accepted_at)`;
     const candidates = await conn('estimates as e')
       .where('e.annual_plan_activation_status', 'awaiting_signature')
@@ -1328,4 +1359,5 @@ module.exports = {
   reconcileTermiteAnnualActivations,
   ANNUAL_TEMPLATE_KEY,
   ANNUAL_SIGNATURE_ABANDON_DAYS,
+  _private: { CASTABLE_ISO_INSTANT, SIGNATURE_NUDGE_EVENT },
 };

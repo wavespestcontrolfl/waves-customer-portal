@@ -208,13 +208,16 @@ describeOrSkip('termite annual signature expiry (slice 3b) — real Postgres', (
       expect(reminderDedupeKeys(notifyAdmin)).toHaveLength(1);
       const firstKey = reminderDedupeKeys(notifyAdmin)[0];
 
+      expect(firstKey).toContain(new Date(daysAgo(1)).toISOString().slice(0, 10));
+
       notifyAdmin.mockClear();
       const second = await sweep();
-      // Same contract, same expiry — the dedupe key is identical, so
-      // notifyAdmin is called again but the real dedupe would suppress it;
-      // this fake always "delivers", so assert the KEY is stable instead.
-      expect(second.signatureNudgeScanned).toBe(1);
-      expect(reminderDedupeKeys(notifyAdmin)).toEqual([firstKey]);
+      // Same contract, same lapse: the recorded nudge event excludes it
+      // before LIMIT, so it is not even a candidate any more.
+      expect(second.signatureNudgeScanned).toBe(0);
+      expect(reminderDedupeKeys(notifyAdmin)).toEqual([]);
+      const nudgeEvents = await db('customer_contract_events').where({ event_type: 'signature_link_expired_nudged' });
+      expect(nudgeEvents).toHaveLength(1);
     });
 
     test('never nudges while the signing link is still valid', async () => {
@@ -236,8 +239,10 @@ describeOrSkip('termite annual signature expiry (slice 3b) — real Postgres', (
       const firstKey = reminderDedupeKeys(notifyAdmin)[0];
       expect(firstKey).toContain(String(contract.id));
 
-      // Staff resends: same row, a FRESH (still-lapsed, for the test) expiry.
+      // Staff resends AFTER that nudge (the nudge event predates the new
+      // link), and the new link has since lapsed too: a fresh lapse.
       notifyAdmin.mockClear();
+      await db('customer_contract_events').where({ contract_id: contract.id }).update({ created_at: daysAgo(4) });
       await db('customer_contracts').where({ id: contract.id }).update({ share_token_expires_at: daysAgo(1) });
       await sweep();
       const secondKey = reminderDedupeKeys(notifyAdmin)[0];
@@ -630,5 +635,59 @@ describeOrSkip('termite annual signature expiry (slice 3b) — real Postgres', (
       expect(stillOpen.share_token_hash).toBe('a-token-hash');
       expect(await db('customer_contract_events').where({ contract_id: contract.id })).toHaveLength(0);
     });
+  });
+
+  describe('parkedAt validation never throws a sweep', () => {
+    test('the ISO pattern only accepts strings PostgreSQL casts to timestamptz', async () => {
+      const { db } = load();
+      const { _private: { CASTABLE_ISO_INSTANT } } = require('../services/termite-annual-activation');
+      const cases = [
+        ['2026-09-26T13:45:07.123Z', true],
+        ['2026-09-26T09:45:07-04:00', true],
+        ['2026-09-26T09:45:07.123456+0530', true],
+        ['2026-01-31T00:00:00Z', true],
+        ['2026-02-28T23:59:59Z', true],
+        ['2026-13-01T00:00:00Z', false],
+        ['2026-02-30T00:00:00Z', false],
+        ['2026-04-31T00:00:00Z', false],
+        ['2026-02-29T00:00:00Z', false],
+        ['2026-09-26T24:00:00Z', false],
+        ['2026-09-26T12:60:00Z', false],
+        ['2026-09-26T12:00:00+15:00', false],
+        ['0000-01-01T00:00:00Z', false],
+        ['2026-09-26', false],
+        ['yesterday', false],
+        ['', false],
+      ];
+      for (const [value, expected] of cases) {
+        const { rows: [{ matches }] } = await db.raw('SELECT ? ~ ? AS matches', [value, CASTABLE_ISO_INSTANT]);
+        expect([value, matches]).toEqual([value, expected]);
+        // Everything the pattern accepts must cast without throwing.
+        if (matches) await expect(db.raw('SELECT ?::timestamptz AS t', [value])).resolves.toBeTruthy();
+      }
+    });
+
+    test('an ISO-SHAPED impossible parkedAt ("2026-13-01T00:00:00Z") falls back to accepted_at instead of failing the scan', async () => {
+      const { sweep, db } = load();
+      const { estimateId, customerId } = await makeParkedEstimate(db, { acceptedAt: daysAgo(ABANDON_DAYS + 2), parkedAtRaw: '2026-13-01T00:00:00Z' });
+      await makeAgreement(db, { estimateId, customerId });
+      const counts = await sweep();
+      expect(counts.signatureExpireScanError).toBeUndefined();
+      expect(counts.signatureExpired).toBe(1);
+    });
+  });
+
+  test('a backlog larger than the limit reaches every lapsed link: already-nudged ones leave the batch', async () => {
+    const { sweep, notifyAdmin, db } = load();
+    const contracts = [];
+    for (const lapsedDaysAgo of [3, 2, 1]) {
+      const { estimateId, customerId } = await makeParkedEstimate(db);
+      contracts.push(await makeAgreement(db, { estimateId, customerId, shareTokenExpiresAt: daysAgo(lapsedDaysAgo) }));
+    }
+    await sweep({ limit: 1 });
+    await sweep({ limit: 1 });
+    await sweep({ limit: 1 });
+    const nudgedContracts = reminderDedupeKeys(notifyAdmin).map((key) => key.split(':')[1]);
+    expect(new Set(nudgedContracts)).toEqual(new Set(contracts.map((c) => String(c.id))));
   });
 });
