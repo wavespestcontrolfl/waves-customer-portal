@@ -2249,7 +2249,7 @@ describe('required-mint failure leaves the closeout resumable — fail-closed by
       expect(bellAt).toBeGreaterThan(nonBlockingAt);
       expect(body).toContain("dedupeKey: `live_invoice_mint_failed:${svc.id}`,");
       expect(body).toContain('bell: true,');
-      expect(body).toContain("link: `/admin/customers/${svc.customer_id}`,");
+      expect(body).toContain("link: `/admin/customers?customerId=${svc.customer_id}`,");
       // A committed invoice row + a later failure is a RECONCILE bell, never a "create another" instruction (GH r1 P1).
       expect(body).toContain("dedupeKey: `live_invoice_postmint_failed:${svc.id}`,");
       // Lock + rescan + wording + insert in ONE transaction (GH r2 P1): a mint by another writer after the failed one released its lock must flip the wording, never leave a "create it" bell beside a live invoice.

@@ -1141,7 +1141,7 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
     if (permittedLegs.length) {
       body = mdPending
         ? await renderSmsTemplate('bank_verification_incomplete', {
-            first_name: ctx.name, billing_url: `${publicPortalUrl()}/billing`,
+            first_name: ctx.name, billing_url: `${publicPortalUrl()}/?tab=billing`,
           }, { workflow: 'microdeposit_verification_reminder', entity_type: 'invoice', entity_id: row.invoice_id })
         : await resolveBody(step, ctx);
     }
@@ -1216,7 +1216,7 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
     const body = mdPending
       ? await renderSmsTemplate('bank_verification_incomplete', {
           first_name: ctx.name,
-          billing_url: `${publicPortalUrl()}/billing`,
+          billing_url: `${publicPortalUrl()}/?tab=billing`,
         }, { workflow: 'microdeposit_verification_reminder', entity_type: 'invoice', entity_id: row.invoice_id })
       : await resolveBody(step, ctx);
     if (!body) {

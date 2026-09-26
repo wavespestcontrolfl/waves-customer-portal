@@ -1024,6 +1024,20 @@ const gates = {
   // reschedule flips status, and the SMS line renders empty again.
   reserviceStreamline: process.env.GATE_RESERVICE_STREAMLINE === 'true',
 
+  // Re-service ranking demotion (owner ruling 2026-09-24: "prefer new
+  // customers over existing — new-customer bookings get first pick of open
+  // time; re-service/callback pickers rank after"). Nested inside
+  // reserviceSelfServe — with that gate dark, /reservice/:token 404s and
+  // this one never runs. Ranking only: buildBookingAvailability's offered
+  // slot set (days[].slots, used for commit revalidation) never changes;
+  // only reservice-public's curated strip order and each day's is_best_fit
+  // badge move. This entry is for logGateStatus only — the one consumer
+  // (routes/booking.js's rankProfile:'reservice' branch, opted into only by
+  // reservice-public.js) reads reserviceRankAfterNewLive() at CALL time so a
+  // flip needs no redeploy. Kill switch: unset GATE_RESERVICE_RANK_AFTER_NEW
+  // — the strip returns to plain score ranking, byte-for-byte.
+  reserviceRankAfterNew: gateEnvValue('GATE_RESERVICE_RANK_AFTER_NEW'),
+
   // Portal "Pay now" — authenticated /billing/balance includes the
   // customer's open-invoice pay links (`openInvoices`) so the Billing tab
   // can offer the existing tokenized /pay checkout in-app instead of the
@@ -2953,6 +2967,14 @@ function selfBookDayCapEnabled() {
   return gateEnvValue('GATE_SELF_BOOK_DAY_CAP');
 }
 
+// GATE_RESERVICE_RANK_AFTER_NEW read at CALL time — the one canonical
+// reader buildBookingAvailability's reservice rank-profile branch uses
+// (server/routes/booking.js). The `reserviceRankAfterNew` gates-map entry
+// above is for logGateStatus only.
+function reserviceRankAfterNewLive() {
+  return gateEnvValue('GATE_RESERVICE_RANK_AFTER_NEW');
+}
+
 // Fresh annual contracts require the term-aware cancellation path. Read both
 // switches at call time so pricing, availability and delivery agree.
 function termiteAnnualPlanSelectionEnabled() {
@@ -3000,5 +3022,5 @@ function logGateStatus() {
   }
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, customerIntelAiLive, selfBookDayCapEnabled, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, commercialSuiteSizingLive };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, commercialSuiteSizingLive };
 // gates 1775330914
