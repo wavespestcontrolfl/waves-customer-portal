@@ -8,18 +8,25 @@
  * candidate through arrival-route.js's whole-route arrival simulation), so a
  * booking landing on the same tech-day between offer and confirm can make the
  * route infeasible without ever overlapping the exact window. This covers
- * assertBookCapacityCommit's gate wiring and argument-passing contract with
- * checkArrivalPlacement mocked (no DB) — see booking-capacity-commit-db.test.js
- * for the real end-to-end feasible/infeasible proof against PostgreSQL.
+ * assertBookCapacityCommit's gate wiring and argument-passing contract, and
+ * persistBookCapacityOrder's use of the certified fit (Codex #4992 r1 P1:
+ * evaluateArrivalPlacement may certify feasibility through a corrected order
+ * — clockOrder/storedOrderStale — different from the day's stale stored
+ * route_order values; that corrected order must be persisted, not discarded)
+ * — both with arrival-route.js mocked (no DB). See
+ * booking-capacity-commit-db.test.js for the real end-to-end feasible/
+ * infeasible/stale-order proof against PostgreSQL.
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
 const mockCheckArrivalPlacement = jest.fn();
+const mockPersistArrivalOrder = jest.fn();
 jest.mock('../services/scheduling/arrival-route', () => ({
   checkArrivalPlacement: (...args) => mockCheckArrivalPlacement(...args),
+  persistArrivalOrder: (...args) => mockPersistArrivalOrder(...args),
 }));
 
-const { assertBookCapacityCommit } = require('../routes/booking')._internals;
+const { assertBookCapacityCommit, persistBookCapacityOrder } = require('../routes/booking')._internals;
 
 const BASE = {
   trx: { isTransaction: true },
@@ -38,6 +45,7 @@ describe('assertBookCapacityCommit', () => {
   const savedCommit = process.env.GATE_BOOK_CAPACITY_COMMIT;
   afterEach(() => {
     mockCheckArrivalPlacement.mockReset();
+    mockPersistArrivalOrder.mockReset();
     if (savedCapacity === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
     else process.env.GATE_SCHEDULING_CAPACITY = savedCapacity;
     if (savedCommit === undefined) delete process.env.GATE_BOOK_CAPACITY_COMMIT;
@@ -78,9 +86,10 @@ describe('assertBookCapacityCommit', () => {
       process.env.GATE_BOOK_CAPACITY_COMMIT = 'true';
     });
 
-    test('feasible: resolves without throwing (the slot still books)', async () => {
-      mockCheckArrivalPlacement.mockResolvedValue({ feasible: true });
-      await expect(assertBookCapacityCommit(BASE)).resolves.toBeUndefined();
+    test('feasible: resolves with the certified fit (the slot still books)', async () => {
+      const fit = { feasible: true, routeOrder: ['a', '__candidate__', 'b'] };
+      mockCheckArrivalPlacement.mockResolvedValue(fit);
+      await expect(assertBookCapacityCommit(BASE)).resolves.toBe(fit);
       expect(mockCheckArrivalPlacement).toHaveBeenCalledTimes(1);
     });
 
@@ -116,5 +125,22 @@ describe('assertBookCapacityCommit', () => {
         prospective: expect.objectContaining({ lat: null, lng: null }),
       }));
     });
+  });
+});
+
+describe('persistBookCapacityOrder', () => {
+  afterEach(() => { mockPersistArrivalOrder.mockReset(); });
+
+  test('no fit (the check did not run — gate off or no technician): no-op, never calls persistArrivalOrder', async () => {
+    await expect(persistBookCapacityOrder({ isTransaction: true }, undefined, 'visit-1')).resolves.toBeUndefined();
+    expect(mockPersistArrivalOrder).not.toHaveBeenCalled();
+  });
+
+  test('a certified fit is applied onto the just-inserted row via the shared persistArrivalOrder mechanism', async () => {
+    const trx = { isTransaction: true };
+    const fit = { feasible: true, routeOrder: ['a', '__candidate__', 'b'], target: { scheduled_date: '2099-06-01', technician_id: 'tech-1' } };
+    await persistBookCapacityOrder(trx, fit, 'visit-1');
+    expect(mockPersistArrivalOrder).toHaveBeenCalledTimes(1);
+    expect(mockPersistArrivalOrder).toHaveBeenCalledWith(trx, fit, 'visit-1');
   });
 });

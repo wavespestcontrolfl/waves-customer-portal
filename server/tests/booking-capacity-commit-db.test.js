@@ -4,10 +4,14 @@
 // Same convention as arrival-window-placement-db.test.js — this file proves
 // createSelfBooking's assertBookCapacityCommit (GATE_BOOK_CAPACITY_COMMIT)
 // against the REAL arrival-route whole-route simulation instead of a mock:
-// a feasible slot still books, and a later booking landing on the same
-// tech-day (never overlapping the candidate's own window) is refused with
-// the SLOT_TAKEN shape once checkArrivalPlacement genuinely finds the route
-// infeasible.
+// a feasible slot still books, a later booking landing on the same tech-day
+// (never overlapping the candidate's own window) is refused with the
+// SLOT_TAKEN shape once checkArrivalPlacement genuinely finds the route
+// infeasible, and — Codex #4992 r1 P1 — when evaluateArrivalPlacement
+// certifies feasibility through its clockOrder/storedOrderStale fallback
+// (a corrected order, not the day's STALE stored route_order values),
+// persistBookCapacityOrder actually applies that corrected order onto the
+// rows instead of leaving the stale one in place.
 let mockConn;
 jest.mock('../models/db', () => {
   const proxy = (...args) => mockConn(...args);
@@ -22,7 +26,7 @@ jest.mock('../services/geocoder', () => ({
 }));
 
 const knex = require('knex');
-const { assertBookCapacityCommit } = require('../routes/booking')._internals;
+const { assertBookCapacityCommit, persistBookCapacityOrder } = require('../routes/booking')._internals;
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { geocodeAddress } = require('../services/geocoder');
 
@@ -75,8 +79,9 @@ describeDb('createSelfBooking commit-time capacity re-check on real PostgreSQL',
   });
   afterEach(async () => { await mockConn.rollback(); });
 
-  test('feasible slot still books: resolves without throwing', async () => {
-    await expect(assertBookCapacityCommit({ ...CANDIDATE, trx: mockConn })).resolves.toBeUndefined();
+  test('feasible slot still books: resolves with the certified fit', async () => {
+    await expect(assertBookCapacityCommit({ ...CANDIDATE, trx: mockConn }))
+      .resolves.toEqual(expect.objectContaining({ feasible: true }));
   });
 
   test('a slot made infeasible by a later booking on the same tech-day is refused with the SLOT_TAKEN shape', async () => {
@@ -89,7 +94,8 @@ describeDb('createSelfBooking commit-time capacity re-check on real PostgreSQL',
     // sense (it isn't even assigned to TECH), so this is precisely the case
     // findConflictingVisits' overlap predicate is narrow for and this gate
     // exists to close.
-    await expect(assertBookCapacityCommit({ ...CANDIDATE, trx: mockConn })).resolves.toBeUndefined();
+    await expect(assertBookCapacityCommit({ ...CANDIDATE, trx: mockConn }))
+      .resolves.toEqual(expect.objectContaining({ feasible: true }));
     await mockConn('scheduled_services').insert({
       id: BLOCKER, scheduled_date: DAY, window_start: '09:00', window_end: '12:00',
       status: 'confirmed', estimated_duration_minutes: 180, technician_id: null,
@@ -97,6 +103,41 @@ describeDb('createSelfBooking commit-time capacity re-check on real PostgreSQL',
     await expect(assertBookCapacityCommit({ ...CANDIDATE, trx: mockConn })).rejects.toMatchObject({
       code: 'SLOT_TAKEN', statusCode: 409, isOperational: true,
     });
+  });
+
+  test('Codex #4992 r1: a stale stored order certified through the clockOrder fallback is PERSISTED, not left stale', async () => {
+    // Invert the stored positions against the promised-window chronology —
+    // NORTH's window (08:00) is earlier than SOUTH's (10:00), but NORTH is
+    // numbered AFTER SOUTH. storedOrderStale (route-reorder-window-fit.js)
+    // flags this an 'inversion', so evaluateArrivalPlacement tries BOTH
+    // currentOrder (the stale [SOUTH, NORTH] baseline — infeasible, since it
+    // would demand SOUTH at 10:00 before NORTH's already-passed 08:00
+    // promise) and clockOrder (the corrected [NORTH, SOUTH] baseline) and
+    // certifies through whichever fits — here, only clockOrder can.
+    await mockConn('scheduled_services').where({ id: NORTH }).update({ route_order: 2 });
+    await mockConn('scheduled_services').where({ id: SOUTH }).update({ route_order: 1 });
+
+    const fit = await assertBookCapacityCommit({ ...CANDIDATE, trx: mockConn });
+    expect(fit).toEqual(expect.objectContaining({ feasible: true }));
+
+    // The real commit inserts the row BEFORE persisting the fit's order
+    // (createSelfBooking's own sequencing) — mirror that here.
+    const [{ id: candidateId }] = await mockConn('scheduled_services').insert({
+      id: '20000000-0000-4000-8000-000000000014', customer_id: CUSTOMER, technician_id: TECH,
+      scheduled_date: DAY, window_start: CANDIDATE.windowStart, window_end: CANDIDATE.windowEnd,
+      status: 'confirmed', estimated_duration_minutes: CANDIDATE.durationMinutes,
+      lat: CANDIDATE.lat, lng: CANDIDATE.lng,
+    }).returning('id');
+    await persistBookCapacityOrder(mockConn, fit, candidateId);
+
+    const rows = await mockConn('scheduled_services')
+      .whereIn('id', [NORTH, candidateId, SOUTH]).select('id', 'route_order');
+    const byId = Object.fromEntries(rows.map((row) => [row.id, row.route_order]));
+    // The corrected chronological order (NORTH, candidate, SOUTH) is what
+    // got written — the stale inversion (NORTH=2, SOUTH=1) did NOT survive.
+    expect(byId[NORTH]).toBeLessThan(byId[candidateId]);
+    expect(byId[candidateId]).toBeLessThan(byId[SOUTH]);
+    expect(byId[NORTH]).toBeLessThan(byId[SOUTH]);
   });
 
   test('GATE_BOOK_CAPACITY_COMMIT off: no new check even on an infeasible day (gate-off byte-identical)', async () => {
