@@ -49,6 +49,7 @@ import {
 import Customer360Profile from "../../components/admin/Customer360ProfileV2";
 import Customer360Workspace from "../../components/admin/Customer360Workspace";
 import CustomerDirectoryTable from "../../components/admin/CustomerDirectoryTable";
+import CustomerGeocodeReviewPanel from "../../components/admin/CustomerGeocodeReviewPanel";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import MobileNewCustomerSheet from "../../components/admin/MobileNewCustomerSheet";
 import AddressAutocomplete from "../../components/AddressAutocomplete";
@@ -1037,6 +1038,7 @@ function CustomerDirectoryView({
   openCustomerProfile,
   startEdit,
   handleDeleteCustomer,
+  geocodeReviewRefreshToken,
   isAdmin,
   editingId,
   customerEditor,
@@ -1047,6 +1049,12 @@ function CustomerDirectoryView({
   return (
     view === "directory" && (
       <>
+        {isAdmin && (
+          <CustomerGeocodeReviewPanel
+            onSelectCustomer={openCustomerProfile}
+            refreshToken={geocodeReviewRefreshToken}
+          />
+        )}
         {" "}
         <div className="u-nums text-ui-caption text-ink-tertiary text-right mb-3 mt-3">
           {totalCustomers} result{totalCustomers !== 1 ? "s" : ""}
@@ -1662,6 +1670,7 @@ function CustomersOverlayPage({
   selectedId,
   onSelect,
   onClose,
+  onCustomerMutation,
   initialTab,
   tabKey,
   children,
@@ -1678,6 +1687,7 @@ function CustomersOverlayPage({
           customerId={selectedId}
           onSelectCustomer={onSelect}
           onClose={onClose}
+          onCustomerMutation={onCustomerMutation}
         />
       )}
     </UiSurface>
@@ -1759,11 +1769,16 @@ export default function CustomersPageV2() {
   const [page, setPage] = useState(1);
   const [totalCustomers, setTotalCustomers] = useState(0);
   const [totalPages, setTotalPages] = useState(1);
+  const [geocodeReviewRefreshToken, setGeocodeReviewRefreshToken] = useState(0);
+  const refreshCustomersAndGeocodeReview = () => {
+    loadCustomers();
+    setGeocodeReviewRefreshToken((current) => current + 1);
+  };
   const {
     editingId,
     startEdit,
     editor: customerEditor,
-  } = useCustomerEditor(() => loadCustomers(), STAGES);
+  } = useCustomerEditor(refreshCustomersAndGeocodeReview, STAGES);
   const loadSeqRef = useRef(0);
   const loadAbortRef = useRef(null);
 
@@ -1816,7 +1831,7 @@ export default function CustomersPageV2() {
   const attachNoticeTimerRef = useRef(null);
   useEffect(() => () => clearTimeout(attachNoticeTimerRef.current), []);
   const handleQuickAddCreated = (customer) => {
-    loadCustomers();
+    refreshCustomersAndGeocodeReview();
     if (view === "pipeline") loadPipeline();
     if (customer?.attachedToExistingAccount) {
       setAttachNotice(
@@ -1984,7 +1999,7 @@ export default function CustomersPageV2() {
         const err = await r.json().catch(() => ({}));
         throw new Error(err.message || err.error || `HTTP ${r.status}`);
       }
-      loadCustomers();
+      refreshCustomersAndGeocodeReview();
     } catch (e) {
       window.alert("Delete failed: " + e.message);
     }
@@ -2061,6 +2076,7 @@ export default function CustomersPageV2() {
       selectedId={selected360Id}
       onSelect={openCustomerProfile}
       onClose={closeCustomerProfile}
+      onCustomerMutation={refreshCustomersAndGeocodeReview}
       initialTab={searchParams.get("tab") === "comms" ? "comms" : "overview"}
       tabKey={searchParams.get("tab") === "comms" ? location.key : "overview"}
       overlays={
@@ -2209,6 +2225,7 @@ export default function CustomersPageV2() {
         openCustomerProfile={openCustomerProfile}
         startEdit={startEdit}
         handleDeleteCustomer={handleDeleteCustomer}
+        geocodeReviewRefreshToken={geocodeReviewRefreshToken}
         isAdmin={isAdmin}
         editingId={editingId}
         customerEditor={customerEditor}

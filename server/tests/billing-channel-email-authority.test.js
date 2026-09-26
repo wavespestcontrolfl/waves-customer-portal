@@ -310,7 +310,7 @@ describe('billing channel email authority', () => {
     const preSendCheck = jest.fn(async () => ({ ok: true }));
     const { outcome } = await runAuthority({}, { preSendCheck });
     expect(outcome.ok).toBe(true);
-    expect(preSendCheck).toHaveBeenCalledWith({ channel: 'email' });
+    expect(preSendCheck).toHaveBeenCalledWith({ channel: 'email', database: mockDb });
   });
 
   test('blocks dispatch when the pre-send check fails', async () => {
