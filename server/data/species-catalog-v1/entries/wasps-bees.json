@@ -584,6 +584,12 @@
         "difference": "Carpenter bees have a shiny, mostly bare black abdomen; bumble bees are fuzzy over the whole body, including the abdomen.",
         "next_photo": "A close-up of the abdomen — shiny and bare versus fuzzy all over.",
         "photo_can_confirm": true
+      },
+      {
+        "slug": "woodpecker-damage",
+        "difference": "Carpenter bee holes are a single, round, pencil-width hole with a dark stain below; woodpecker holes are larger, rougher-edged and often clustered in a row.",
+        "next_photo": "A close-up of one hole: perfectly round and stained (bee) versus larger, ragged-edged and clustered (woodpecker).",
+        "photo_can_confirm": true
       }
     ],
     "size": "large",

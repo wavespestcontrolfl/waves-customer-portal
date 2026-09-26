@@ -38,6 +38,12 @@
         "difference": "Cuban treefrogs are much larger with warty skin and oversized toe pads; green treefrogs are smaller, smooth-skinned, and usually have a white side stripe.",
         "next_photo": "A close-up of the toe pads and overall size next to a coin.",
         "photo_can_confirm": true
+      },
+      {
+        "slug": "squirrel-treefrog",
+        "difference": "Cuban treefrog is much larger (to 5.5 in) with bumpy skin and huge bulging eyes; squirrel treefrog stays under 1.5 in with smooth skin and small eyes.",
+        "next_photo": "A close-up of the eyes (bulging vs. normal) and skin texture (bumpy vs. smooth), next to something for size.",
+        "photo_can_confirm": true
       }
     ],
     "size": "large",
