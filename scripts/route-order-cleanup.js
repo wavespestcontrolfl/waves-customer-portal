@@ -43,10 +43,17 @@
  * at commit time, today/past and the 72h reminder freeze — so a rollback
  * can never reinstate a stale position under a promise the customer has
  * since been told about, and never on a day that changed under it between
- * the pre-write read and the write itself. Everything the writer refuses is
- * reported as a skipped (or, for an unreadable reminder-freeze status,
- * failed) tech-day with its reason — never a partial day, since the writer
- * itself is one all-or-nothing transaction per tech-day.
+ * the pre-write read and the write itself. BEFORE that write, the
+ * restored order is also run through the SAME window-legality guards
+ * chooseWindowSafeOrder itself certifies an order with (chronology +
+ * drive-time feasibility, reused from route-reorder-window-fit.js): windows
+ * can change since a backup with route_order left untouched, and restoring
+ * the old position under the new windows could otherwise put an afternoon
+ * promise before a morning one. Everything the writer or this legality
+ * check refuses is reported as a skipped (or, for an unreadable
+ * reminder-freeze status, failed) tech-day with its reason — never a
+ * partial day, since the writer itself is one all-or-nothing transaction
+ * per tech-day.
  *
  * Serializes with the 4:20 ET nightly pass by taking its OWN lock
  * (runExclusive('auto-dispatch-recurring') — server/utils/cron-lock.js is a
@@ -281,13 +288,38 @@ function buildRollbackTargetOrder(liveRows, dayRows) {
 }
 
 /**
+ * The SAME legality guards chooseWindowSafeOrder itself runs before ever
+ * certifying an order (route-reorder-window-fit.js's pure checks, reused
+ * via `deps` rather than re-implemented): a target order that places a
+ * later-window promise before an earlier one (WINDOW_ORDER_CONFLICT), or
+ * one the truck provably cannot drive in time under the shared distance
+ * model (WINDOW_FIT_CONFLICT — day-open 08:00, HQ origin, the same
+ * future-day defaults the nightly pass itself falls back to; a rollback is
+ * only ever eligible on a future date — the writer refuses today/past).
+ * Windows can change after a backup was taken with route_order left alone
+ * — restoring the OLD position under the NEW windows could otherwise put
+ * an afternoon promise before a morning one. `liveRows` doubles as both the
+ * legality check's window/coordinate source AND the writer's comparison
+ * snapshot — the SAME live read, never a second one. Returns null when the
+ * order is legal, or which guard it failed.
+ */
+function rollbackWindowConflict(targetOrder, liveRows, deps) {
+  const { RouteOptimizer, violatesWindowChronology, violatesWindowFeasibility } = deps;
+  if (violatesWindowChronology(targetOrder, liveRows)) return 'WINDOW_ORDER_CONFLICT';
+  if (violatesWindowFeasibility(RouteOptimizer, targetOrder, liveRows, null, 8 * 60, RouteOptimizer.HQ)) {
+    return 'WINDOW_FIT_CONFLICT';
+  }
+  return null;
+}
+
+/**
  * Read-only preview for `--rollback <file>` WITHOUT --execute: reads each
  * backed-up tech-day's CURRENT live state (unlocked, no transaction —
  * nothing here can ever write) and reports the SAME "does the backup still
- * match" check the real rollback runs before ever calling the writer.
- * Freeze/lock/today-past eligibility is no longer a separate check this
- * script makes at all — a matching day's `note` says so plainly rather than
- * promising a write that the writer's own fresher re-check could still
+ * match" check AND the same window-legality check the real rollback runs
+ * before ever calling the writer. Freeze/lock/today-past eligibility is not
+ * checked here at all — a would-restore day's `note` says so plainly rather
+ * than promising a write that the writer's own fresher re-check could still
  * refuse.
  */
 async function previewRollback(conn, rows, deps) {
@@ -296,13 +328,19 @@ async function previewRollback(conn, rows, deps) {
   for (const day of days) {
     const liveRows = await readLiveTechDay(conn, { dateStr: day.date, techId: day.technician_id }, deps);
     const mismatchedIds = mismatchedIdsForDay(day.rows, liveRows);
+    let conflict = null;
+    if (!mismatchedIds.length) {
+      conflict = rollbackWindowConflict(buildRollbackTargetOrder(liveRows, day.rows), liveRows, deps);
+    }
+    const wouldRestore = mismatchedIds.length === 0 && !conflict;
     plan.push({
       technician_id: day.technician_id,
       date: day.date,
       row_count: day.rows.length,
-      would_restore: mismatchedIds.length === 0,
+      would_restore: wouldRestore,
       mismatched_ids: mismatchedIds,
-      note: mismatchedIds.length === 0 ? 'eligibility (freeze/lock/today-past) re-checked at write time' : null,
+      conflict,
+      note: wouldRestore ? 'eligibility (freeze/lock/today-past) re-checked at write time' : null,
     });
   }
   return plan;
@@ -312,24 +350,28 @@ async function previewRollback(conn, rows, deps) {
  * Rollback: for each backed-up tech-day, re-read the full live day and, if
  * every backed-up row still matches its backup `after` (mismatchedIdsForDay
  * — computed BEFORE the writer is ever called, so a mismatching day never
- * even attempts a write), hand the SAME fenced writer every other
- * route_order write goes through (`deps.writeTechDayOrder` —
- * writeTechDayOrder / runRouteReorder's own writer) an ORDINARY write:
- * techStops = the live read just taken (the writer's own comparison
- * snapshot — "expected snapshot = live day"), finalOrdered =
- * buildRollbackTargetOrder's restored sequence. The writer re-reads the
- * day itself under its own advisory lock, inside its own SERIALIZABLE
- * transaction, FOR UPDATE — compares against that snapshot, re-checks
- * freeze/lock/today-past with a FRESH clock at commit time, and CAS-updates
- * row by row. Every one of those guards now lives in EXACTLY ONE place,
- * never duplicated here. Anything the writer refuses is classified by
- * `deps.classifyWriteError` — the SAME classifier runRouteReorder's own
- * per-tech loop uses — into this run's skipped/failed report; a pre-write
- * mismatch is reported the same way. No outer transaction or lock wraps
- * this loop: each `writeTechDayOrder` call is already its own complete,
- * independently fenced unit of work, exactly like the forward per-tech-day
- * loop that calls it — there is no longer a separate rollback-only locking
- * mechanism to keep in sync with the writer's.
+ * even attempts a write) AND the restored order passes the same window
+ * legality guards the forward pass certifies an order with
+ * (rollbackWindowConflict — a day whose windows changed since the backup
+ * with route_order left alone is skipped here too, never handed to the
+ * writer), hand the SAME fenced writer every other route_order write goes
+ * through (`deps.writeTechDayOrder` — writeTechDayOrder / runRouteReorder's
+ * own writer) an ORDINARY write: techStops = the live read just taken (the
+ * writer's own comparison snapshot — "expected snapshot = live day"),
+ * finalOrdered = buildRollbackTargetOrder's restored sequence. The writer
+ * re-reads the day itself under its own advisory lock, inside its own
+ * SERIALIZABLE transaction, FOR UPDATE — compares against that snapshot,
+ * re-checks freeze/lock/today-past with a FRESH clock at commit time, and
+ * CAS-updates row by row. Every one of those guards now lives in EXACTLY
+ * ONE place, never duplicated here. Anything the writer refuses is
+ * classified by `deps.classifyWriteError` — the SAME classifier
+ * runRouteReorder's own per-tech loop uses — into this run's
+ * skipped/failed report; a pre-write mismatch or window conflict is
+ * reported the same way. No outer transaction or lock wraps this loop:
+ * each `writeTechDayOrder` call is already its own complete, independently
+ * fenced unit of work, exactly like the forward per-tech-day loop that
+ * calls it — there is no longer a separate rollback-only locking mechanism
+ * to keep in sync with the writer's.
  */
 async function applyRollback(conn, rows, now, deps) {
   const summary = { skipped: [], failed: [] };
@@ -350,6 +392,15 @@ async function applyRollback(conn, rows, now, deps) {
       continue;
     }
     const finalOrdered = buildRollbackTargetOrder(liveRows, day.rows);
+    const conflict = rollbackWindowConflict(finalOrdered, liveRows, deps);
+    if (conflict) {
+      summary.skipped.push({
+        ...entryBase,
+        reason: conflict,
+        detail: 'the restored order would violate a promised window — windows likely changed since the backup',
+      });
+      continue;
+    }
     try {
       await deps.writeTechDayOrder(conn, {
         dateStr: day.date, techId: day.technician_id, techStops: liveRows, finalOrdered,
@@ -368,6 +419,8 @@ function printRollbackPlan(plan) {
   for (const day of plan) {
     if (day.would_restore) {
       console.log(`${day.date} tech ${day.technician_id}: would restore ${day.row_count} row(s) (${day.note})`);
+    } else if (day.conflict) {
+      console.log(`${day.date} tech ${day.technician_id}: WOULD SKIP — ${day.conflict} (the restored order would violate a promised window)`);
     } else {
       console.log(`${day.date} tech ${day.technician_id}: WOULD SKIP (${day.mismatched_ids.length} row(s) no longer match, ids only): ${day.mismatched_ids.join(', ')}`);
     }
@@ -552,13 +605,15 @@ async function main() {
     // building blocks, never a second copy of its guards.
     const {
       writeTechDayOrder, classifyWriteError, ROUTE_WRITE_GUARD_COLUMNS, CUSTOMER_PREMISE_ALIASES,
-      _internals: { EXCLUDE_STATUSES, LIVE_HOLD_SQL },
+      _internals: { EXCLUDE_STATUSES, LIVE_HOLD_SQL, violatesWindowChronology, violatesWindowFeasibility },
     } = require('../server/services/route-reorder');
     const { guardedCoordSelects } = require('../server/services/scheduling/day-stops');
+    const RouteOptimizer = require('../server/services/route-optimizer');
     const rollbackDeps = {
       writeTechDayOrder, classifyWriteError,
       ROUTE_WRITE_GUARD_COLUMNS, CUSTOMER_PREMISE_ALIASES, guardedCoordSelects,
       EXCLUDE_STATUSES, LIVE_HOLD_SQL,
+      RouteOptimizer, violatesWindowChronology, violatesWindowFeasibility,
     };
     await runRollback(db, ROLLBACK_PATH, EXECUTE, new Date(), rollbackDeps);
     await db.destroy();
@@ -637,6 +692,6 @@ if (require.main === module) {
 
 module.exports = {
   buildDateRange, buildBackupRows, applyRollback, parseLedgerResult, recoveryInstruction, collectEntries, reportAndBackup,
-  groupRowsByTechDay, readLiveTechDay, mismatchedIdsForDay, buildRollbackTargetOrder, previewRollback,
-  printRollbackPlan, printRollbackResult, buildRunOpts, writeBackupFile,
+  groupRowsByTechDay, readLiveTechDay, mismatchedIdsForDay, buildRollbackTargetOrder, rollbackWindowConflict,
+  previewRollback, printRollbackPlan, printRollbackResult, buildRunOpts, writeBackupFile,
 };

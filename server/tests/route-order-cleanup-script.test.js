@@ -15,22 +15,29 @@ const { wasLockSkipped } = require('../utils/cron-lock');
 const {
   buildDateRange, buildBackupRows, applyRollback, parseLedgerResult, recoveryInstruction,
   collectEntries, reportAndBackup, groupRowsByTechDay, readLiveTechDay, mismatchedIdsForDay,
-  buildRollbackTargetOrder, previewRollback, printRollbackPlan, printRollbackResult,
+  buildRollbackTargetOrder, rollbackWindowConflict, previewRollback, printRollbackPlan, printRollbackResult,
   buildRunOpts, writeBackupFile,
 } = require('../../scripts/route-order-cleanup');
 const {
   ROUTE_WRITE_GUARD_COLUMNS, CUSTOMER_PREMISE_ALIASES, classifyWriteError, _internals: reorderInternals,
 } = require('../services/route-reorder');
 const { guardedCoordSelects } = require('../services/scheduling/day-stops');
+const RouteOptimizer = require('../services/route-optimizer');
 
 // The real building blocks writeTechDayOrder itself reads from — passed
 // through as `deps` so readLiveTechDay builds the EXACT same select shape
-// the writer's own internal re-read does, never a second copy of it.
+// the writer's own internal re-read does, never a second copy of it. The
+// real window-legality guards too (violatesWindowChronology /
+// violatesWindowFeasibility) — a rollback proposal is checked with the SAME
+// functions chooseWindowSafeOrder itself certifies an order with.
 function rollbackDeps(overrides = {}) {
   return {
     ROUTE_WRITE_GUARD_COLUMNS, CUSTOMER_PREMISE_ALIASES, guardedCoordSelects,
     EXCLUDE_STATUSES: reorderInternals.EXCLUDE_STATUSES, LIVE_HOLD_SQL: reorderInternals.LIVE_HOLD_SQL,
     classifyWriteError,
+    RouteOptimizer,
+    violatesWindowChronology: reorderInternals.violatesWindowChronology,
+    violatesWindowFeasibility: reorderInternals.violatesWindowFeasibility,
     ...overrides,
   };
 }
@@ -192,6 +199,53 @@ describe('buildRollbackTargetOrder', () => {
   });
 });
 
+describe('rollbackWindowConflict', () => {
+  test('a legal chronological order with no window data at all is not a conflict', () => {
+    const target = [{ id: 'a' }, { id: 'b' }];
+    expect(rollbackWindowConflict(target, target, rollbackDeps())).toBeNull();
+  });
+
+  test('restoring a row to an earlier slot whose window is now LATER than the row after it is a WINDOW_ORDER_CONFLICT (windows changed since the backup)', () => {
+    // B's window changed from an early slot (when it sat first) to 14:00
+    // some time after the backup was taken; route_order was never touched.
+    // Restoring B to the front now puts an afternoon promise before A's
+    // still-morning one.
+    const liveRows = [
+      { id: 'A', route_order: 1, window_start: '09:00' },
+      { id: 'B', route_order: 2, window_start: '14:00' },
+    ];
+    const target = [liveRows[1], liveRows[0]]; // [B, A] — B restored to the front
+    expect(rollbackWindowConflict(target, liveRows, rollbackDeps())).toBe('WINDOW_ORDER_CONFLICT');
+  });
+
+  test('an order whose windows are still chronological is not a conflict', () => {
+    const liveRows = [
+      { id: 'A', route_order: 1, window_start: '09:00' },
+      { id: 'B', route_order: 2, window_start: '14:00' },
+    ];
+    expect(rollbackWindowConflict(liveRows, liveRows, rollbackDeps())).toBeNull();
+  });
+
+  test('feasibility is checked (and reported as WINDOW_FIT_CONFLICT) only when chronology already passed — same short-circuit chooseWindowSafeOrder itself uses', () => {
+    const violatesWindowChronology = jest.fn(() => false);
+    const violatesWindowFeasibility = jest.fn(() => true);
+    const target = [{ id: 'a' }];
+    const result = rollbackWindowConflict(target, target, rollbackDeps({ violatesWindowChronology, violatesWindowFeasibility }));
+    expect(result).toBe('WINDOW_FIT_CONFLICT');
+    expect(violatesWindowChronology).toHaveBeenCalledWith(target, target);
+    expect(violatesWindowFeasibility).toHaveBeenCalledWith(RouteOptimizer, target, target, null, 8 * 60, RouteOptimizer.HQ);
+  });
+
+  test('a chronology conflict short-circuits — feasibility is never even checked', () => {
+    const violatesWindowChronology = jest.fn(() => true);
+    const violatesWindowFeasibility = jest.fn();
+    const target = [{ id: 'a' }];
+    const result = rollbackWindowConflict(target, target, rollbackDeps({ violatesWindowChronology, violatesWindowFeasibility }));
+    expect(result).toBe('WINDOW_ORDER_CONFLICT');
+    expect(violatesWindowFeasibility).not.toHaveBeenCalled();
+  });
+});
+
 describe('readLiveTechDay', () => {
   function fakeConn() {
     const calls = { where: [], whereNotIn: [], whereRaw: [], forUpdate: false };
@@ -245,7 +299,7 @@ describe('previewRollback (dry run — reads the live day, no lock, no transacti
       { id: 'b', date: '2026-10-05', technician_id: 't1', before: null, after: 2 },
     ];
     expect(await previewRollback(conn, rows, rollbackDeps())).toEqual([{
-      technician_id: 't1', date: '2026-10-05', row_count: 2, would_restore: true, mismatched_ids: [],
+      technician_id: 't1', date: '2026-10-05', row_count: 2, would_restore: true, mismatched_ids: [], conflict: null,
       note: 'eligibility (freeze/lock/today-past) re-checked at write time',
     }]);
   });
@@ -259,7 +313,7 @@ describe('previewRollback (dry run — reads the live day, no lock, no transacti
       { id: 'b', date: '2026-10-05', technician_id: 't1', before: null, after: 2 },
     ];
     expect(await previewRollback(conn, rows, rollbackDeps())).toEqual([{
-      technician_id: 't1', date: '2026-10-05', row_count: 2, would_restore: false, mismatched_ids: ['b'], note: null,
+      technician_id: 't1', date: '2026-10-05', row_count: 2, would_restore: false, mismatched_ids: ['b'], conflict: null, note: null,
     }]);
   });
 
@@ -267,7 +321,28 @@ describe('previewRollback (dry run — reads the live day, no lock, no transacti
     const conn = fakeLiveConn({ 't1:2026-10-05': [] }); // 'a' no longer lives on this tech-day
     const rows = [{ id: 'a', date: '2026-10-05', technician_id: 't1', before: 2, after: 1 }];
     expect(await previewRollback(conn, rows, rollbackDeps())).toEqual([{
-      technician_id: 't1', date: '2026-10-05', row_count: 1, would_restore: false, mismatched_ids: ['a'], note: null,
+      technician_id: 't1', date: '2026-10-05', row_count: 1, would_restore: false, mismatched_ids: ['a'], conflict: null, note: null,
+    }]);
+  });
+
+  test('windows changed since the backup (route_order untouched) → would-skip with the window guard\'s reason, not a false would-restore', async () => {
+    // B's window moved from an early slot (when it sat first) to 14:00 after
+    // the backup was taken; both rows still match the backup's "after"
+    // route_order exactly (no MISMATCH), so only the window-legality
+    // recheck catches this.
+    const conn = fakeLiveConn({
+      't1:2026-10-05': [
+        { id: 'A', route_order: 1, window_start: '09:00' },
+        { id: 'B', route_order: 2, window_start: '14:00' },
+      ],
+    });
+    const rows = [
+      { id: 'A', date: '2026-10-05', technician_id: 't1', before: 2, after: 1 },
+      { id: 'B', date: '2026-10-05', technician_id: 't1', before: 1, after: 2 },
+    ];
+    expect(await previewRollback(conn, rows, rollbackDeps())).toEqual([{
+      technician_id: 't1', date: '2026-10-05', row_count: 2, would_restore: false,
+      mismatched_ids: [], conflict: 'WINDOW_ORDER_CONFLICT', note: null,
     }]);
   });
 });
@@ -291,6 +366,27 @@ describe('applyRollback — hands each eligible tech-day to the SAME fenced writ
       date: '2026-10-05', technician_id: 't1', reason: 'MISMATCH',
       detail: 'no longer matches the backup (ids only): b',
       mismatched_ids: ['b'],
+    }]);
+  });
+
+  test('windows changed since the backup (route_order untouched) skips the day with the window guard\'s reason, WITHOUT ever calling the writer', async () => {
+    const conn = fakeLiveConn({
+      't1:2026-10-05': [
+        { id: 'A', route_order: 1, window_start: '09:00' },
+        { id: 'B', route_order: 2, window_start: '14:00' },
+      ],
+    });
+    const writeTechDayOrder = jest.fn();
+    const rows = [
+      { id: 'A', date: '2026-10-05', technician_id: 't1', before: 2, after: 1 },
+      { id: 'B', date: '2026-10-05', technician_id: 't1', before: 1, after: 2 },
+    ];
+    const result = await applyRollback(conn, rows, NOW, rollbackDeps({ writeTechDayOrder }));
+    expect(writeTechDayOrder).not.toHaveBeenCalled();
+    expect(result.restored).toBe(0);
+    expect(result.summary.skipped).toEqual([{
+      date: '2026-10-05', technician_id: 't1', reason: 'WINDOW_ORDER_CONFLICT',
+      detail: 'the restored order would violate a promised window — windows likely changed since the backup',
     }]);
     expect(result.summary.failed).toEqual([]);
   });
