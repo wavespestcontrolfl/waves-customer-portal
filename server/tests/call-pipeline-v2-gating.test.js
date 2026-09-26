@@ -1013,26 +1013,11 @@ describe('hasNameEmailMismatch', () => {
     expect(hasNameEmailMismatch({ first_name: 'Al', last_name: null, email: 'xy@x.com' })).toBe(false);
   });
 
-  // Owner ruling 2026-09-26 — false-positive shapes cut (all names/emails
-  // below are SYNTHETIC, chosen to exercise the same shape as the reviewed
-  // production false positives without reusing any real value).
-  describe('false-positive shapes (owner ruling 2026-09-26)', () => {
-    test('fuzzy surname spelling drift on a delimited segment does not false-flag', () => {
-      // "Whitfield" heard/typed as "whitfeld" — a one-letter-off surname.
-      expect(hasNameEmailMismatch({ first_name: 'Priya', last_name: 'Whitfield', email: 'p.whitfeld@example.com' })).toBe(false);
-    });
-    test('an initials prefix adjacent to a fuzzy surname does not false-flag', () => {
-      // "nc" (initials) + "castellenos" (one letter off "Castellanos").
-      expect(hasNameEmailMismatch({ first_name: 'Nadia', last_name: 'Castellanos', email: 'nccastellenos@example.com' })).toBe(false);
-    });
-    test('a nickname vs formal first name does not false-flag', () => {
-      expect(hasNameEmailMismatch({ first_name: 'Jackie', last_name: 'Nguyen', email: 'jacqueline84@example.com' })).toBe(false);
-    });
-    test('an extracted first name that is itself a delimited segment is not overridden by an unrelated adjacent segment', () => {
-      // "lakers" (an unrelated personal handle) + "nolan" (the caller's own
-      // first name, present as its own segment) — rule (2) must not fire.
-      expect(hasNameEmailMismatch({ first_name: 'Nolan', last_name: 'Reyes', email: 'lakers.nolan@example.com' })).toBe(false);
-    });
+  // Owner ruling 2026-09-26: the flag is advisory now (it never holds a
+  // booking or the first-touch email). The matcher itself is unchanged, so
+  // handles with no name signal and the original incident shape still flag.
+  // (Synthetic values.)
+  describe('still flags as an advisory (owner ruling 2026-09-26)', () => {
     test('a pure handle with no name signal still flags (advisory, never a hold)', () => {
       expect(hasNameEmailMismatch({ first_name: 'Karen', last_name: 'Boyd', email: 'sunnydays1987@example.com' })).toBe(true);
     });
@@ -1140,30 +1125,3 @@ describe('advisory identity flags (missing_last_name / rental_or_tenant_occupied
   });
 });
 
-// Codex #4901 r1 P2s — the relaxed matcher must not corroborate a different
-// person's mailbox, and must see name fields and segments it used to miss.
-describe('hasNameEmailMismatch — codex #4901 r1 refinements', () => {
-  const { hasNameEmailMismatch } = require('../services/call-triage-flags');
-
-  test('a surname that is also a formal first name never expands to a nickname', () => {
-    expect(hasNameEmailMismatch({ first_name: 'Karen', last_name: 'Thomas', email: 'tommy@example.com' })).toBe(true);
-  });
-
-  test('the short fragment next to a surname prefix must be the caller\'s initials or a name start', () => {
-    expect(hasNameEmailMismatch({ first_name: 'Nadia', last_name: 'Castellanos', email: 'castzz@example.com' })).toBe(true);
-    expect(hasNameEmailMismatch({ first_name: 'Nadia', last_name: 'Castellanos', email: 'xxcastunrelated@example.com' })).toBe(true);
-    expect(hasNameEmailMismatch({ first_name: 'Nadia', last_name: 'Castellanos', email: 'castna@example.com' })).toBe(false);
-  });
-
-  test('fuzzy matching sees each delimited segment, so a mailbox affix cannot hide a drifted surname', () => {
-    expect(hasNameEmailMismatch({ first_name: 'Priya', last_name: 'Whitfield', email: 'home.whitfeld@example.com' })).toBe(false);
-  });
-
-  test('initials use every structured name field, not a partial name_full alone', () => {
-    expect(hasNameEmailMismatch({ name_full: 'Nadia', first_name: 'Nadia', last_name: 'Castellanos', email: 'nccastellenos@example.com' })).toBe(false);
-  });
-
-  test('a first-name nickname still corroborates the formal form in a delimited segment', () => {
-    expect(hasNameEmailMismatch({ first_name: 'Jackie', last_name: 'Nguyen', email: 'jacqueline84@example.com' })).toBe(false);
-  });
-});
