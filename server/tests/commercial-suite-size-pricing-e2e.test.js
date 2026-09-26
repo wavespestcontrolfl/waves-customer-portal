@@ -214,6 +214,39 @@ describe('manual admin-tool path — buildEnrichedProfile -> applyCommercialSuit
       expect(v1Input.footprintSqFt).toBe(2200);
     });
 
+    // Codex #4840 r11 P1: the admin path marks an untouched type default as
+    // an unmeasured building, like the call engine does.
+    test('termite bait on an untouched type default is a manual quote; recurring pest still prices', async () => {
+      resolveViaDbprLicense.mockResolvedValue(null);
+      const profile = buildEnrichedProfile(plazaSuiteRecord(), null, 27.5, -82.45, null, null, SUITE_ADDRESS, { commercialSuiteSizing: true });
+      await routePrivate.applyCommercialSuiteSize(profile);
+      const v1Input = translateV2CallToV1Input(profile, ['PEST', 'TERMITE_BAIT'], {});
+      expect(v1Input.buildingSizeMeasured).toBe(false);
+      const result = generateEstimate(v1Input);
+      const termite = result.lineItems.find((l) => l.service === 'commercial_termite_bait');
+      expect(termite.quoteRequired).toBe(true);
+      const pest = result.lineItems.find((l) => l.service === 'commercial_pest');
+      expect(pest.quoteRequired).toBeFalsy();
+    });
+
+    test('an operator-typed termite footprint on a type default still prices termite', async () => {
+      resolveViaDbprLicense.mockResolvedValue(null);
+      const profile = buildEnrichedProfile(plazaSuiteRecord(), null, 27.5, -82.45, null, null, SUITE_ADDRESS, { commercialSuiteSizing: true });
+      await routePrivate.applyCommercialSuiteSize(profile);
+      const v1Input = translateV2CallToV1Input(profile, ['PEST', 'TERMITE_BAIT'], { termiteFootprintSqFt: 1600 });
+      const termite = generateEstimate(v1Input).lineItems.find((l) => l.service === 'commercial_termite_bait');
+      expect(termite.quoteRequired).toBeFalsy();
+    });
+
+    test('a confirmed story count divides the recomputed default like any building', async () => {
+      resolveViaDbprLicense.mockResolvedValue(null);
+      const profile = buildEnrichedProfile(plazaSuiteRecord(), null, 27.5, -82.45, null, null, SUITE_ADDRESS, { commercialSuiteSizing: true });
+      await routePrivate.applyCommercialSuiteSize(profile);
+      const v1Input = translateV2CallToV1Input({ ...profile, stories: 2, storiesSource: 'manual' }, ['PEST'], { commercialRiskType: 'restaurant_food' });
+      expect(v1Input.homeSqFt).toBe(1800);
+      expect(v1Input.footprintSqFt).toBe(900);
+    });
+
     test('license_seats / verified suite sizes are real measurements — never recomputed off risk type', async () => {
       resolveViaDbprLicense.mockResolvedValue({
         value: 1400, businessName: 'Test Taco Shop', seats: 25,
@@ -256,7 +289,7 @@ describe('manual admin-tool path — buildEnrichedProfile -> applyCommercialSuit
     expect(range.hasLowConfidence).toBe(true);
   });
 
-  test('a type-default suite\'s commercial termite-bait-only line also grades LOW and trips the gate — not just commercial_pest (primary review PR #4840 r5 P1)', async () => {
+  test('a type-default suite\'s commercial termite-bait-only line is a manual quote, as in the call engine (Codex #4840 r11 P1; was LOW auto-price in r5)', async () => {
     resolveViaDbprLicense.mockResolvedValue(null);
     const profile = buildEnrichedProfile(plazaSuiteRecord(), null, 27.5, -82.45, null, null, SUITE_ADDRESS, { commercialSuiteSizing: true });
     await routePrivate.applyCommercialSuiteSize(profile);
@@ -268,12 +301,10 @@ describe('manual admin-tool path — buildEnrichedProfile -> applyCommercialSuit
     const result = generateEstimate(v1Input);
     const line = result.lineItems.find((l) => l.service === 'commercial_termite_bait');
     expect(line).toBeTruthy();
-    expect(line.quoteRequired).not.toBe(true); // auto-priced, not a manual quote
-    expect(line.pricingConfidence).toBe('LOW');
-    expect(commercialLowConfidenceRange({ lineItems: result.lineItems }).hasLowConfidence).toBe(true);
+    expect(line.quoteRequired).toBe(true);
   });
 
-  test('a type-default suite\'s commercial rodent-bait-only line also grades LOW and trips the gate — not just commercial_pest (primary review PR #4840 r5 P1)', async () => {
+  test('a type-default suite\'s commercial rodent-bait-only line is a manual quote, as in the call engine (Codex #4840 r11 P1; was LOW auto-price in r5)', async () => {
     resolveViaDbprLicense.mockResolvedValue(null);
     const profile = buildEnrichedProfile(plazaSuiteRecord(), null, 27.5, -82.45, null, null, SUITE_ADDRESS, { commercialSuiteSizing: true });
     await routePrivate.applyCommercialSuiteSize(profile);
@@ -285,9 +316,7 @@ describe('manual admin-tool path — buildEnrichedProfile -> applyCommercialSuit
     const result = generateEstimate(v1Input);
     const line = result.lineItems.find((l) => l.service === 'commercial_rodent_bait');
     expect(line).toBeTruthy();
-    expect(line.quoteRequired).not.toBe(true);
-    expect(line.pricingConfidence).toBe('LOW');
-    expect(commercialLowConfidenceRange({ lineItems: result.lineItems }).hasLowConfidence).toBe(true);
+    expect(line.quoteRequired).toBe(true);
   });
 
   test('the license-sourced path keeps termite-bait and rodent-bait at MEDIUM (control)', async () => {

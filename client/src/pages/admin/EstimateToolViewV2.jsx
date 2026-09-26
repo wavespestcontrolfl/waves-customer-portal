@@ -498,7 +498,10 @@ function buildTurfRequestProfile(baseProfile, form) {
   // false-positive suite lookup to residential must get the ordinary
   // homeSqFt/stories derivation, not the single-story suite rule frozen
   // from the original (wrong) classification.
-  if (baseProfile.suiteSize && formIsCommercial) {
+  // Only while Stories is the untouched lookup default: a confirmed story
+  // count divides like any building (Codex #4840 r11 P1).
+  const suiteStoriesConfirmed = !!form._storiesEdited && Number(form.stories) >= 1;
+  if (baseProfile.suiteSize && formIsCommercial && !suiteStoriesConfirmed) {
     profile.footprint = profile.homeSqFt;
   } else if (profile.footprintUnknown !== true) {
     // The footprint follows the Home Sq Ft box too: a cleared box must not
@@ -2296,7 +2299,8 @@ export default function EstimateToolViewV2({
       // lookup to residential must get the ordinary per-story derivation,
       // not the single-story suite rule frozen from the original (wrong)
       // classification.
-      const suiteSized = form._suiteSizedLookup && isCommercialEstimateInput(form);
+      const suiteSized = form._suiteSizedLookup && isCommercialEstimateInput(form)
+        && !(form._storiesEdited && Number(form.stories) >= 1);
       const fp = termiteFootprintFromHome(sqft, form.stories, suiteSized);
       setForm((f) => {
         // footprintUnknown lookup (association aggregate, story count
@@ -2322,7 +2326,7 @@ export default function EstimateToolViewV2({
         return { ...f, ...upd, _termiteFootprintAuto: true };
       });
     }
-  }, [form.homeSqFt, form.stories, form.svcTermiteBait, form._suiteSizedLookup, form.isCommercial, form.propertyType]);
+  }, [form.homeSqFt, form.stories, form._storiesEdited, form.svcTermiteBait, form._suiteSizedLookup, form.isCommercial, form.propertyType]);
 
   useEffect(() => {
     const q = customerSearch.trim();
@@ -3510,7 +3514,16 @@ export default function EstimateToolViewV2({
         presets: serviceCreditPresets,
       });
       const formIsCommercial = isCommercialEstimateInput(form);
-      const termiteFootprintSqFt = parsePositiveNumber(form.termiteFootprintSqFt);
+      // A footprint auto-filled from a suite's business-type default is that
+      // same guess, not a measurement: sent as one it would price termite
+      // past the unmeasured-building manual quote (Codex #4840 r11 P1). A
+      // typed footprint, or one from a license/verified size, still counts.
+      const termiteFootprintFromSuiteDefault = form._termiteFootprintAuto
+        && enrichedProfile?.suiteSize?.source === "suite_type_default"
+        && !form._homeSqFtEdited;
+      const termiteFootprintSqFt = termiteFootprintFromSuiteDefault
+        ? undefined
+        : parsePositiveNumber(form.termiteFootprintSqFt);
       const termitePerimeterLF = parsePositiveNumber(form.termitePerimeterLF);
       const trenchingPerimeterLF = parsePositiveNumber(form.trenchingPerimeterLF);
       const trenchingConcreteLF = parseNonNegativeNumber(form.trenchingConcreteLF);

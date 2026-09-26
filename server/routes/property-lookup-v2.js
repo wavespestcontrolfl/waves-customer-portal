@@ -4534,7 +4534,8 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
   // never overwritten, and a license_seats/verified suite (a real measurement)
   // is never recomputed.
   let suiteTypeDefaultSqFt;
-  if (commercialProfile && p.suiteSize?.source === 'suite_type_default' && !p._homeSqFtManuallyEdited) {
+  const suiteSizeEstimated = p.suiteSize?.source === 'suite_type_default' && !p._homeSqFtManuallyEdited;
+  if (commercialProfile && suiteSizeEstimated) {
     const { defaultSuiteSqftFor } = require('../services/commercial-suite-size/type-defaults');
     suiteTypeDefaultSqFt = defaultSuiteSqftFor({ commercialRiskType, commercialSubtype });
     if (Number(suiteTypeDefaultSqFt) > 0) homeSqFt = Number(suiteTypeDefaultSqFt);
@@ -5182,7 +5183,12 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     // rule — footprint IS the suite's homeSqFt, single-story, never divided
     // by the building's story count — off the CORRECTED size, not the stale
     // one buildTurfRequestProfile forwarded in p.footprint/p.footprintSqFt.
-    footprintSqFt: p.footprintUnknown === true ? 0 : (Number(suiteTypeDefaultSqFt) > 0 ? homeSqFt : (p.footprint ?? p.footprintSqFt)),
+    // A recomputed suite default is one floor's area until the operator
+    // confirms a story count (storiesSource 'manual'); then it divides like
+    // any building (Codex #4840 r11 P1).
+    footprintSqFt: p.footprintUnknown === true ? 0 : (Number(suiteTypeDefaultSqFt) > 0
+      ? (p.storiesSource === 'manual' && Number(p.stories) >= 1 ? Math.round(homeSqFt / Number(p.stories)) : homeSqFt)
+      : (p.footprint ?? p.footprintSqFt)),
     footprintUnknown: p.footprintUnknown === true || undefined,
     // A suite sized off the business-type default (no DBPR license, no
     // operator measurement) is a GUESS — the estimate engine reads this to
@@ -5195,8 +5201,12 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     // value (primary review of PR #4840 r7 P2) — an operator who typed or
     // confirmed a size EQUAL to the default has still measured it, and a
     // value === check kept that case wrongly flagged as an estimate forever.
-    footprintSizeEstimated: (p.suiteSize?.source === 'suite_type_default'
-      && !p._homeSqFtManuallyEdited) || undefined,
+    footprintSizeEstimated: suiteSizeEstimated || undefined,
+    // ...and not a measured building: every measured-only guard (termite,
+    // rodent, roach, bed bug) falls to a manual quote, exactly as the call
+    // engine's suite_type_default does; recurring pest alone prices off it
+    // via allowEstimatedFootprint (Codex #4840 r11 P1).
+    ...(commercialProfile && suiteSizeEstimated ? { buildingSizeMeasured: false } : {}),
     // One unit inside a building (unit-address lookup): its living area
     // still sizes recurring pest, but it is interior floor space — never a
     // slab, attic, or exterior perimeter — so the termite pricers withhold

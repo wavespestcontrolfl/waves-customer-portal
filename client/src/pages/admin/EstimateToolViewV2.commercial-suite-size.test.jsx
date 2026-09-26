@@ -77,6 +77,18 @@ describe("buildTurfRequestProfile — suite-sized commercial profile", () => {
     expect(profile.footprint).toBe(1400);
   });
 
+  // Codex #4840 r11 P1: the single-story suite rule holds only while Stories
+  // is the untouched lookup default; a confirmed count divides.
+  it("a confirmed 2-story suite prices a 700 sq ft footprint", () => {
+    const profile = buildTurfRequestProfile(suiteProfile(), { ...baseForm, stories: "2", _storiesEdited: true });
+    expect(profile.footprint).toBe(700);
+  });
+
+  it("an untouched Stories box keeps the suite's own 1,400 sq ft footprint", () => {
+    const profile = buildTurfRequestProfile(suiteProfile(), { ...baseForm, stories: "2", _storiesEdited: false });
+    expect(profile.footprint).toBe(1400);
+  });
+
   // Primary review of PR #4840 r7 P2: the server's footprintSizeEstimated
   // check now reads THIS provenance stamp instead of comparing the priced
   // value to the type default — an operator who typed/confirmed a value
