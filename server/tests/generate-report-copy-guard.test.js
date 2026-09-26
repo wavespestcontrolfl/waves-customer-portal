@@ -3,6 +3,10 @@ const {
   buildDeterministicReportCopy,
   reportCopyRejection,
 } = require('../routes/admin-schedule')._test;
+const fs = require('fs');
+const path = require('path');
+
+const scheduleSource = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
 
 describe('generate-report output guard (reportCopyRejection)', () => {
   test('accepts clean, non-empty report copy', () => {
@@ -357,6 +361,29 @@ describe('deterministic report fallback', () => {
     expect(report).toContain('Inspection and identification only');
     expect(report).not.toMatch(/treated|treatment applied|pesticide applied/i);
     expect(reportCopyRejection(report)).toBeNull();
+  });
+});
+
+describe('Generate tree/shrub reviewed-photo payload contract', () => {
+  test('validates the signed review against the canonical scheduled tree/shrub visit and returns actionable 400s', () => {
+    const start = scheduleSource.indexOf("router.post('/generate-report'");
+    const end = scheduleSource.indexOf("router.get('/report-copy-status'", start);
+    const block = scheduleSource.slice(start, end > start ? end : start + 60000);
+    expect(block).toContain('treeShrubReview,');
+    expect(block).toContain("detectServiceLine(svc.service_type) !== 'tree_shrub'");
+    expect(block).toContain('validateTreeShrubReviewForReport(treeShrubReview');
+    expect(block).toContain("code: 'tree_shrub_review_service_mismatch'");
+    expect(block).toContain("code: 'tree_shrub_review_invalid'");
+    expect(block).toContain('Analyze the current photos again, confirm the review, and retry Generate.');
+  });
+
+  test('lets a valid photo-only review open Generate but sends no photo fact into deterministic completed work', () => {
+    const start = scheduleSource.indexOf("router.post('/generate-report'");
+    const block = scheduleSource.slice(start, start + 60000);
+    expect(block).toMatch(/const hasReportInput =[^;]+\|\| suppliedTreeShrubReview;/s);
+    expect(block).toContain('|| Object.keys(treeShrubReviewGrounding?.scores || {}).length > 0;');
+    expect(block).toContain('treeShrubReviewGrounding,');
+    expect(block).not.toMatch(/buildDeterministicReportCopy\(\{[^}]*treeShrubReview/s);
   });
 });
 

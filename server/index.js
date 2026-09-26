@@ -413,6 +413,22 @@ app.use('/api/public/inspection', (req, res, next) => {
   }
   next();
 });
+// Appointment and re-service links: dark application requests must reach
+// their 404 before the shared API limiter or body parsers can answer. Keep
+// CORS and the Staff maintenance interlock above these guards; the routers
+// retain their own gates and all enabled-feature rate limits.
+app.use('/api/public/appointment', require('./middleware/no-store').noStore, (req, res, next) => {
+  if (process.env.GATE_APPOINTMENT_PAGE !== 'true') {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  next();
+});
+app.use('/api/public/reservice', require('./middleware/no-store').noStore, (req, res, next) => {
+  if (!require('./config/feature-gates').isEnabled('reserviceSelfServe')) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  next();
+});
 app.use('/api/visit-summary', require('./middleware/no-store').noStore);
 app.use('/api/', limiter);
 

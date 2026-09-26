@@ -50,10 +50,14 @@ PR/audit reference and date, newest first within its section.
 
 ## Already-catalogued open findings (reference, don't re-report as new)
 
-- Test-suite false-confidence audit 2026-07-12: ~20 ranked findings including no
-  CI test run, 7 DB-gated suites that never execute (incl. the only
-  pricing-DB-sync test), the waveguard margin test trusting the engine's own
-  costs, and unverified irrigation opt-outs — fixes await owner decision.
+- Test-suite false-confidence audit 2026-07-12: the missing CI test-run and
+  DB-suite-wiring subclaims are resolved by
+  [`.github/workflows/tests.yml`](../.github/workflows/tests.yml), which
+  runs the server Jest suite and a database-backed serial selection of DB-gated
+  suites (the production-parity `products-catalog-label-fields` suite remains
+  explicitly excluded). The other dated findings remain open until separately
+  verified, including the WaveGuard margin test trusting the engine's own costs
+  and unverified irrigation opt-outs.
 - Alert audit 2026-07-11: lead-webhook new_lead notification passes the CUSTOMER
   id as leadId (`server/routes/lead-webhook.js:513`); quote-promised
   notification lacks a callSid dedupe (`call-recording-processor.js` ~5288/~5341);

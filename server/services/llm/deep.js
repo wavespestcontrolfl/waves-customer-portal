@@ -15,6 +15,7 @@
 const logger = require('../logger');
 const MODELS = require('../../config/models');
 const { callOpenAI, dispatchWithFallback } = require('./call');
+const { anthropicMaxTokens, anthropicEffortFor } = require('./anthropic-wire');
 const agentContext = require('../agent-control/context');
 const { ledgerCall } = require('../llm-dispatch-metrics');
 
@@ -68,12 +69,46 @@ async function createDeepMessage(client, { laneId, ...params } = {}, options = {
   return laneId ? agentContext.runInLane(laneId, run) : run();
 }
 
+// The raw path used to hand params to the SDK untouched, so raw-path DEEP
+// lanes (wiki compiler, agronomic wiki, KB audit, voice profile, call
+// self-audit, quarantine arbiter, SMS verifier / judge / pathology, intent
+// composer) sent their system prompts with no cache breakpoint, while the
+// adapter (call.js) — which the jsonSchema path above uses — cached every
+// one. This mirrors the adapter: the system prompt becomes one text block
+// with an ephemeral breakpoint; a caller that placed its own cache_control
+// is left alone. Prompts under the model's cacheable minimum (1024 tokens on
+// Opus 4.8, 512 on Opus 5.5) are silently not cached — harmless. Batch lanes
+// that reuse one prompt within five minutes read it back at ~0.1x.
+function withSystemCache(params) {
+  const { system } = params;
+  if (typeof system === 'string' && system) {
+    return { ...params, system: [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }] };
+  }
+  if (Array.isArray(system) && system.length && !system.some((b) => b?.cache_control)) {
+    const last = system.length - 1;
+    return { ...params, system: system.map((b, i) => (i === last && b?.type === 'text' ? { ...b, cache_control: { type: 'ephemeral' } } : b)) };
+  }
+  return params;
+}
+
+// The wire request: the cap clears always-on thinking and the effort pin is
+// a default a caller's own effort overrides (both via anthropic-wire.js, so
+// an Opus 5.5 flip keeps DEEP lanes sized and at the pinned depth).
+function wireParams(params, model) {
+  const rest = withSystemCache(params);
+  const maxTokens = anthropicMaxTokens(model, rest.max_tokens);
+  const req = { ...rest, model, ...(maxTokens === undefined ? {} : { max_tokens: maxTokens }) };
+  const effort = anthropicEffortFor(model);
+  if (effort) req.output_config = { effort, ...(rest.output_config || {}) };
+  return req;
+}
+
 async function createDeepMessageInChain(client, params) {
   const model = params.model || MODELS.DEEP;
   const startedAt = Date.now();
   let response;
   try {
-    response = await ledgerCall('anthropic', model, () => client.messages.create({ ...params, model }), {
+    response = await ledgerCall('anthropic', model, () => client.messages.create(wireParams(params, model)), {
       trace: { system: systemText(params.system) || null, prompt: messageText(params.messages) || null },
     });
   } catch (err) {
@@ -154,4 +189,4 @@ async function callOpenAIDeepFallback(params, timeoutMs) {
   };
 }
 
-module.exports = { createDeepMessage, stripThinkingBlocks, _test: { messageText, systemText, remainingBudget } };
+module.exports = { createDeepMessage, stripThinkingBlocks, _test: { messageText, systemText, remainingBudget, withSystemCache, wireParams } };

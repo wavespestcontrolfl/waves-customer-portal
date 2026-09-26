@@ -1672,6 +1672,7 @@ const DURABLE_FINALIZE_ENTRY_POINTS = Object.entries(REGISTRY)
   .map(([key]) => key);
 
 module.exports = {
+  invoiceStillCollectible,
   recheckDeferredReplay,
   dispatchDeferredReplay,
   replaysWithoutPhone,

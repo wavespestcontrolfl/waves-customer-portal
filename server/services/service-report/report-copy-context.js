@@ -492,6 +492,7 @@ async function buildReportCopyContext({
   lawnAssessmentId,
   serviceType,
   serviceLine,
+  treeShrubReviewGrounding = null,
   suppressPressureTrend = false,
   products = [],
   productNames = [],
@@ -611,6 +612,31 @@ async function buildReportCopyContext({
     }
   }
 
+  if (line === 'tree_shrub' && treeShrubReviewGrounding?.source === 'reviewed_photo_signals') {
+    const scoreLabels = {
+      foliageFullness: 'foliage fullness',
+      leafColorVigor: 'leaf color and vigor',
+      pestActivity: 'pest-pressure appearance',
+      diseaseLeafSpot: 'leaf-spot / disease-like appearance',
+      waterHeatStress: 'water / heat / mechanical-stress appearance',
+      overallScore: 'overall visual health',
+    };
+    const scoreLine = Object.entries(treeShrubReviewGrounding.scores || {})
+      .filter(([key, value]) => scoreLabels[key] && typeof value === 'number' && Number.isFinite(value))
+      .map(([key, value]) => `${scoreLabels[key]} ${value}/100`)
+      .join(', ');
+    if (scoreLine) {
+      const observation = cleanText(treeShrubReviewGrounding.observations);
+      sections.push(
+        'TREE & SHRUB REVIEWED PHOTO SIGNALS '
+        + `(source: reviewed_photo_signals; ${treeShrubReviewGrounding.photoCount} photo${treeShrubReviewGrounding.photoCount === 1 ? '' : 's'}; 0–100, higher means healthier appearance or fewer visible signals): `
+        + `${scoreLine}.`
+        + (observation ? ` Reviewed photo-model visual summary: ${observation}` : '')
+        + ' These are reviewed photo signals, never a confirmed pest, disease, deficiency, cause, or diagnosis, and never proof of completed work. Do not infer or repeat a cause from these signals unless a separate technician-recorded finding names it. Hidden signals and any aggregate observation affected by a hidden signal are omitted.',
+      );
+    }
+  }
+
   // The current visit isn't scored at generate time, so buildPressureTrendContext
   // computes the trend from PRIOR completed visits only (its placeholder "current"
   // point is really the last completed visit). Present it honestly as history
@@ -696,6 +722,9 @@ async function buildReportCopyContext({
     // CURRENT-visit grounding specifically — the scores-only gate must not be
     // satisfied by history when today's row failed or is retake-pending.
     hasCurrentLawnAssessment: !!lawnAssessments?.today,
+    hasTreeShrubReviewedPhotoSignals: line === 'tree_shrub'
+      && treeShrubReviewGrounding?.source === 'reviewed_photo_signals'
+      && Object.keys(treeShrubReviewGrounding.scores || {}).length > 0,
     targets,
     monthNum,
   };

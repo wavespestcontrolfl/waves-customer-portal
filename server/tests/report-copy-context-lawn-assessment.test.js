@@ -289,3 +289,36 @@ describe('buildReportCopyContext deterministic application evidence', () => {
     expect(report).not.toMatch(/2468|9753|Unapproved Product|Unsupported Category|-5 linear ft/);
   });
 });
+
+describe('buildReportCopyContext reviewed tree/shrub photo grounding', () => {
+  test('labels signed scores as reviewed photo signals without promoting a diagnosis or completed work', async () => {
+    const knex = makeKnexStub({ customers: [CUSTOMER] });
+    const result = await buildReportCopyContext({
+      customerId: 'c1',
+      serviceType: 'Tree and Shrub Care',
+      serviceDate: '2026-07-28',
+      treeShrubReviewGrounding: {
+        source: 'reviewed_photo_signals',
+        photoCount: 3,
+        scores: {
+          foliageFullness: 84,
+          leafColorVigor: 76,
+          pestActivity: 58,
+          diseaseLeafSpot: 88,
+          waterHeatStress: 72,
+          overallScore: 76,
+        },
+        observations: 'Visible foliage appears thin with some pale leaves.',
+      },
+      knex,
+    });
+
+    expect(result.contextText).toContain('TREE & SHRUB REVIEWED PHOTO SIGNALS');
+    expect(result.contextText).toContain('source: reviewed_photo_signals');
+    expect(result.contextText).toContain('pest-pressure appearance 58/100');
+    expect(result.contextText).toContain('Visible foliage appears thin with some pale leaves.');
+    expect(result.contextText).toContain('never a confirmed pest, disease, deficiency, cause, or diagnosis');
+    expect(result.contextText).toContain('never proof of completed work');
+    expect(result.signals.hasTreeShrubReviewedPhotoSignals).toBe(true);
+  });
+});

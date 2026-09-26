@@ -638,7 +638,12 @@ async function findOverdueCustomers(input) {
         db.raw("(SELECT service_type FROM service_records WHERE service_records.customer_id = customers.id AND service_type ~* ? ORDER BY service_date DESC LIMIT 1) as last_service_type", [patterns[cat]]),
         // The plan row is matched to its catalog row by id, key snapshot or
         // label (service-library's holder identity predicates — an ID-less
-        // legacy row still resolves its cadence, codex r25 on #4786).
+        // legacy row still resolves its cadence, codex r25 on #4786). A row
+        // no catalog row claims but whose label is a T&S plan ("Tree & Shrub
+        // Care" booked quarterly) is the plan too: its service_key is null
+        // and its own recurrence decides the cadence (codex r35 on #4786).
+        // Only a row with NO catalog match takes that path, so a label that
+        // names some other catalog row never reads as T&S.
         // The plan row's catalog key AND its own recurrence, as one JSON
         // value (the line's cadence outranks the catalog default — codex r28).
         db.raw(`(SELECT row_to_json(plan) FROM (
@@ -646,8 +651,9 @@ async function findOverdueCustomers(input) {
               scheduled_services.recurring_pattern, scheduled_services.recurring_interval_days,
               scheduled_services.recurring_nth, scheduled_services.recurring_weekday
             FROM scheduled_services
-            JOIN services ON ${require('../service-library').HOLDER_VISIT_IS_SERVICE_SQL}
-            WHERE scheduled_services.customer_id = customers.id AND services.service_key IN (${tsKeySql})
+            LEFT JOIN services ON ${require('../service-library').HOLDER_VISIT_IS_SERVICE_SQL}
+            WHERE scheduled_services.customer_id = customers.id
+              AND (services.service_key IN (${tsKeySql}) OR (services.id IS NULL AND scheduled_services.service_type ~* ?))
               AND scheduled_services.is_recurring = true AND scheduled_services.status NOT IN (${terminalSql})
           UNION ALL
           -- Plan carried as an add-on line of a combined recurring visit (a
@@ -663,13 +669,14 @@ async function findOverdueCustomers(input) {
               scheduled_services.recurring_nth, scheduled_services.recurring_weekday
             FROM scheduled_service_addons
             JOIN scheduled_services ON scheduled_services.id = scheduled_service_addons.scheduled_service_id
-            JOIN services ON ${require('../service-library').HOLDER_ADDON_IS_SERVICE_SQL}
-            WHERE scheduled_services.customer_id = customers.id AND services.service_key IN (${tsKeySql})
+            LEFT JOIN services ON ${require('../service-library').HOLDER_ADDON_IS_SERVICE_SQL}
+            WHERE scheduled_services.customer_id = customers.id
+              AND (services.service_key IN (${tsKeySql}) OR (services.id IS NULL AND scheduled_service_addons.service_name ~* ?))
               AND scheduled_services.is_recurring = true AND scheduled_services.status NOT IN (${terminalSql})
               AND ${require('../service-library').ADDON_LINE_IS_PLAN_SQL}
         ) plan ORDER BY plan.scheduled_date ASC LIMIT 1) as active_plan`, [
-          ...Object.keys(TREE_SHRUB_KEY_INTERVAL), ...PLAN_TERMINAL_STATUSES,
-          ...Object.keys(TREE_SHRUB_KEY_INTERVAL), ...PLAN_TERMINAL_STATUSES,
+          ...Object.keys(TREE_SHRUB_KEY_INTERVAL), patterns.tree_shrub, ...PLAN_TERMINAL_STATUSES,
+          ...Object.keys(TREE_SHRUB_KEY_INTERVAL), patterns.tree_shrub, ...PLAN_TERMINAL_STATUSES,
         ]),
         db.raw(`(SELECT service_type FROM scheduled_services WHERE scheduled_services.customer_id = customers.id AND service_type ~* ? AND is_recurring = true AND status NOT IN (${terminalSql}) ORDER BY scheduled_date ASC LIMIT 1) as active_plan_service_type`, [patterns[cat], ...PLAN_TERMINAL_STATUSES]),
         db.raw("(SELECT MIN(scheduled_date) FROM scheduled_services WHERE scheduled_services.customer_id = customers.id AND scheduled_date >= CURRENT_DATE AND status NOT IN ('cancelled','completed') AND service_type ~* ?) as next_scheduled", [patterns[cat]]),
@@ -681,7 +688,10 @@ async function findOverdueCustomers(input) {
           .whereRaw('service_records.customer_id = customers.id')
           .whereRaw('service_type ~* ?', [patterns[cat]]);
       })
-      .havingRaw("(SELECT MAX(service_date) FROM service_records WHERE service_records.customer_id = customers.id AND service_type ~* ?) <= ?", [patterns[cat], cutoffEt])
+      // A WHERE, not a HAVING: the query has no GROUP BY, and Postgres
+      // rejects HAVING over plain columns ("customers.id must appear in the
+      // GROUP BY clause"), which failed this tool for every category.
+      .whereRaw("(SELECT MAX(service_date) FROM service_records WHERE service_records.customer_id = customers.id AND service_type ~* ?) <= ?", [patterns[cat], cutoffEt])
       // customers.id breaks last-service-date ties so the paged read below
       // sees each row exactly once (codex r21 on #4786).
       .orderByRaw("(SELECT MAX(service_date) FROM service_records WHERE service_records.customer_id = customers.id AND service_type ~* ?) ASC, customers.id ASC", [patterns[cat]]);
