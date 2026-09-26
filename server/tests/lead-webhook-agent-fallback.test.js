@@ -15,12 +15,18 @@
  * so no fallback is armed here regardless of what processLead does.
  */
 
-jest.mock('../models/db', () => jest.fn());
+jest.mock('../models/db', () => {
+  const chain = { where: jest.fn(() => chain), update: jest.fn(async () => 1) };
+  const db = jest.fn(() => chain);
+  db.__chain = chain;
+  return db;
+});
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/automation-runner', () => ({ enrollCustomer: jest.fn() }));
 
 const { _test } = require('../routes/lead-webhook');
-const { settleLeadResponseAgentRun, LEAD_AGENT_FALLBACK_AFTER_MS } = _test;
+const { settleLeadResponseAgentRun, LEAD_AGENT_FALLBACK_AFTER_MS, clearServiceMenuIntakeState } = _test;
+const db = require('../models/db');
 
 function harness(processLeadImpl) {
   const sendFallback = jest.fn(async () => {});
@@ -75,6 +81,34 @@ describe('settleLeadResponseAgentRun — agent configured', () => {
     }
   });
 
+  test('agent sent → onAgentSent runs, fallback does not', async () => {
+    const { sendFallback, onError, processLead } = harness(async () => ({ actionTaken: 'auto_sent' }));
+    const onAgentSent = jest.fn(async () => {});
+    await settleLeadResponseAgentRun({ agentConfigured: true, processLead, sendFallback, onError, onAgentSent });
+    expect(onAgentSent).toHaveBeenCalledTimes(1);
+    expect(sendFallback).not.toHaveBeenCalled();
+  });
+
+  test('agent did not send → fallback runs, onAgentSent does not', async () => {
+    const { sendFallback, onError, processLead } = harness(async () => ({ actionTaken: 'queued_for_adam' }));
+    const onAgentSent = jest.fn(async () => {});
+    await settleLeadResponseAgentRun({ agentConfigured: true, processLead, sendFallback, onError, onAgentSent });
+    expect(onAgentSent).not.toHaveBeenCalled();
+    expect(sendFallback).toHaveBeenCalledTimes(1);
+  });
+
+  test('agent send that lands after the deadline still runs onAgentSent', async () => {
+    let finish;
+    const { sendFallback, onError, processLead } = harness(() => new Promise((resolve) => { finish = resolve; }));
+    const onAgentSent = jest.fn(async () => {});
+    await settleLeadResponseAgentRun({ agentConfigured: true, processLead, sendFallback, onError, onAgentSent, fallbackAfterMs: 10 });
+    expect(sendFallback).toHaveBeenCalledTimes(1);
+    expect(onAgentSent).not.toHaveBeenCalled();
+    finish({ actionTaken: 'auto_sent' });
+    await new Promise(r => setImmediate(r));
+    expect(onAgentSent).toHaveBeenCalledTimes(1);
+  });
+
   test('an agent that sends before the bounded wait ends → no fallback', async () => {
     const { sendFallback, onError, processLead } = harness(() => new Promise((resolve) => setTimeout(() => resolve({ actionTaken: 'auto_sent' }), 5)));
     await settleLeadResponseAgentRun({ agentConfigured: true, processLead, sendFallback, onError, fallbackAfterMs: 1000 });
@@ -118,5 +152,19 @@ describe('settleLeadResponseAgentRun — agent not configured', () => {
     await settleLeadResponseAgentRun({ agentConfigured: false, processLead, sendFallback, onError });
     expect(onError).toHaveBeenCalledWith(boom);
     expect(sendFallback).not.toHaveBeenCalled();
+  });
+});
+
+describe('clearServiceMenuIntakeState', () => {
+  test('clears only the untouched awaiting_service seed', async () => {
+    await clearServiceMenuIntakeState('cust-1');
+    expect(db).toHaveBeenCalledWith('customers');
+    expect(db.__chain.where).toHaveBeenCalledWith({ id: 'cust-1', lead_intake_status: 'awaiting_service' });
+    expect(db.__chain.update).toHaveBeenCalledWith({ lead_intake_status: null });
+  });
+
+  test('a db error is swallowed (non-fatal)', async () => {
+    db.__chain.update.mockRejectedValueOnce(new Error('pg down'));
+    await expect(clearServiceMenuIntakeState('cust-1')).resolves.toBeUndefined();
   });
 });

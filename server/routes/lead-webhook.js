@@ -763,11 +763,25 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
     // the menu text twice in prod). See services/lead-auto-reply.js for
     // the dedup predicate and the once-ever claim mechanism.
     try {
-      // With the agent configured, both the standard reply and the intake
-      // seed wait for the agent's outcome (see sendFallbackAutoReply below).
       if (!leadAgentConfigured) {
         await sendLeadAutoReplyOnce({ customer, phoneFormatted, firstName, location, leadSource });
-        await seedLeadIntakeState(customer.id);
+      }
+
+      // Seed the intake state machine so the customer's next inbound SMS
+      // gets routed through server/services/lead-intake.js (classify →
+      // ask for address → auto-create draft estimate → notify Adam).
+      // Seeded now, whichever text ends up going out, so the address-only
+      // clarification below can still advance it from the form data. If the
+      // agent's personal text is the one that goes out, the service-menu
+      // state is cleared again (clearServiceMenuIntakeState).
+      try {
+        await db('customers').where({ id: customer.id }).update({
+          lead_intake_status: 'awaiting_service',
+        });
+      } catch (stateErr) {
+        // Non-fatal — the auto-reply was sent; worst case the next SMS
+        // falls through to the normal AI draft path.
+        logger.warn(`[lead-webhook] intake state seed failed: ${stateErr.message}`);
       }
     } catch (e) { logger.error(`Lead auto-reply failed: ${e.message}`); }
 
@@ -1148,12 +1162,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
     // The generic auto-reply above is the safety net; this replaces it with
     // something specific — see settleLeadResponseAgentRun for the "exactly
     // one automated text" fallback rule (owner ruling 2026-09-26).
-    // The intake state is seeded only on this path: awaiting_service expects
-    // an answer to the standard reply, not to whatever the agent's personal
-    // text asked. After an agent send the state stays unset, so the reply
-    // takes the normal AI draft path.
     const sendFallbackAutoReply = () => sendLeadAutoReplyOnce({ customer, phoneFormatted, firstName, location, leadSource })
-      .then(() => seedLeadIntakeState(customer.id))
       .catch(fallbackErr => logger.error(`[lead-agent] Fallback standard reply failed: ${fallbackErr.message}`));
     try {
       const LeadResponseAgent = require('../services/lead-response-agent');
@@ -1174,6 +1183,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
         agentConfigured: leadAgentConfigured,
         processLead,
         sendFallback: sendFallbackAutoReply,
+        onAgentSent: () => clearServiceMenuIntakeState(customer.id),
         onError: err => logger.error(`[lead-agent] Fire-and-forget error: ${err.message}`),
       }).catch(err => logger.error(`[lead-agent] Fallback chain error: ${err.message}`));
     } catch (e) {
@@ -1803,22 +1813,23 @@ function shouldRunLeadAcquisition({ isNewCustomer, isDuplicateSubmission } = {})
 // first, and the agent's send_lead_response is then refused.
 const LEAD_AGENT_FALLBACK_AFTER_MS = 60 * 1000;
 
-// Seed the intake state machine so the customer's next inbound SMS gets
-// routed through server/services/lead-intake.js (classify → ask for address
-// → auto-create draft estimate → notify Adam). Only after the standard
-// reply path. Non-fatal: worst case the next SMS falls through to the
-// normal AI draft path.
-async function seedLeadIntakeState(customerId) {
+// After the agent's personal text went out, awaiting_service no longer
+// matches what the customer was asked (it expects an answer to the standard
+// reply), so the next reply takes the normal AI draft path instead. Guarded:
+// only the untouched seed is cleared. A state the form data already advanced
+// (awaiting_address from the address-only clarification) or that a reply
+// already moved on is left alone. Non-fatal.
+async function clearServiceMenuIntakeState(customerId) {
   try {
-    await db('customers').where({ id: customerId }).update({
-      lead_intake_status: 'awaiting_service',
-    });
+    await db('customers')
+      .where({ id: customerId, lead_intake_status: 'awaiting_service' })
+      .update({ lead_intake_status: null });
   } catch (stateErr) {
-    logger.warn(`[lead-webhook] intake state seed failed: ${stateErr.message}`);
+    logger.warn(`[lead-webhook] intake state clear after agent send failed: ${stateErr.message}`);
   }
 }
 
-async function settleLeadResponseAgentRun({ agentConfigured, processLead, sendFallback, onError, fallbackAfterMs = LEAD_AGENT_FALLBACK_AFTER_MS }) {
+async function settleLeadResponseAgentRun({ agentConfigured, processLead, sendFallback, onError, onAgentSent = async () => {}, fallbackAfterMs = LEAD_AGENT_FALLBACK_AFTER_MS }) {
   if (!agentConfigured) {
     return processLead().catch(err => onError(err));
   }
@@ -1830,8 +1841,19 @@ async function settleLeadResponseAgentRun({ agentConfigured, processLead, sendFa
   const run = Promise.resolve().then(processLead).then(outcome => ({ outcome }), err => ({ err }));
   const settled = await Promise.race([run, timedOut]);
   clearTimeout(timer);
+  if (settled.timedOut) {
+    // The agent may have won the claim just before the deadline and finish
+    // sending after it (the fallback then finds the claim and skips). Its
+    // send still counts once it lands.
+    void run.then(({ outcome, err }) => {
+      if (err) return onError(err);
+      if (outcome?.actionTaken === 'auto_sent') return onAgentSent();
+      return undefined;
+    }).catch(lateErr => onError(lateErr));
+  }
   if (settled.err) onError(settled.err);
-  if (settled.outcome?.actionTaken !== 'auto_sent') return sendFallback();
+  if (settled.outcome?.actionTaken === 'auto_sent') return onAgentSent();
+  return sendFallback();
 }
 
 // The lead auto-reply dedup predicate, once-ever claim, and the send itself
@@ -1884,6 +1906,7 @@ module.exports._test = {
   shouldRunLeadAcquisition,
   settleLeadResponseAgentRun,
   LEAD_AGENT_FALLBACK_AFTER_MS,
+  clearServiceMenuIntakeState,
   applyLeadEstimateAutomationGate,
   determineLeadSource,
   isHoneypotTripped,
