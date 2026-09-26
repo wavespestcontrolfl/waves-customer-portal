@@ -2,21 +2,30 @@
  * FAWN Weather Service
  *
  * Fetches current + trailing weather data from the Florida Automated
- * Weather Network for SWFL stations (Myakka River, Manatee County).
- * Used by lawn assessments, treatment outcomes, content engine, and
- * seasonal expectation displays.
+ * Weather Network for the SWFL stations nearest Waves' service area
+ * (North Port, Arcadia). Used by lawn assessments, treatment outcomes,
+ * content engine, and seasonal expectation displays.
  */
 
 const logger = require('./logger');
 
-const FAWN_URL = 'https://fawn.ifas.ufl.edu/controller.php/lastObservation/summary/';
+// `lastObservation/summary/` is not a real FAWN endpoint (confirmed live
+// 2026-09-26: it 400s). The documented, working "all stations" feed is
+// `{period}/summary/json` — lastDay gives the most recent complete day's
+// totals, which is what "recent rainfall" needs (a hookup consumers already
+// assume, e.g. application-conditions.js's `rain_24h_in`).
+const FAWN_URL = 'https://fawn.ifas.ufl.edu/controller.php/lastDay/summary/json';
+
+// The real API's summary rows carry ONLY a numeric `StationID` — no name,
+// county, or lat/lng field (confirmed live 2026-09-26). There is also no
+// FAWN station literally named "Myakka"/"Manatee"/"Sarasota". The two real
+// stations nearest Waves' SWFL service area (Manatee/Sarasota/Charlotte
+// counties) are North Port (Sarasota Co.) and Arcadia (DeSoto Co.); ids and
+// coordinates are from fawn.ifas.ufl.edu/station.php?id=<id>.
 const STATION_HINTS = [
-  { key: 'myakka', names: ['myakka'], latitude: 27.35, longitude: -82.18 },
-  { key: 'manatee', names: ['manatee'], latitude: 27.48, longitude: -82.37 },
-  { key: 'sarasota', names: ['sarasota'], latitude: 27.34, longitude: -82.53 },
-  { key: 'arcadia', names: ['arcadia'], latitude: 27.22, longitude: -81.86 },
+  { key: 'north_port', id: '480', label: 'North Port', names: ['north port'], latitude: 27.1434, longitude: -82.33741 },
+  { key: 'arcadia', id: '490', label: 'Arcadia', names: ['arcadia'], latitude: 27.22621, longitude: -81.83838 },
 ];
-const STATION_NAMES = STATION_HINTS.flatMap((station) => station.names);
 
 // Cache for 15 minutes to avoid hammering FAWN
 let _stationCache = null;
@@ -35,6 +44,11 @@ function numberOrNull(value) {
 
 function stationName(station = {}) {
   return firstDefined(station.StationName, station.station_name, station.name, station.NAME, station.station);
+}
+
+function stationId(station = {}) {
+  const raw = firstDefined(station.StationID, station.station_id, station.stationId, station.id);
+  return raw != null ? String(raw) : null;
 }
 
 function stationLatitude(station = {}) {
@@ -62,8 +76,17 @@ function stationLongitude(station = {}) {
   ));
 }
 
-function hintForStation(name = '') {
-  const normalized = String(name).toLowerCase();
+// Match a station row to a known SWFL hint. The live API gives us only a
+// numeric StationID (no name), so that's the primary key; name-substring
+// matching stays as a fallback for any fixture/shape that does carry a name.
+function hintForStation(station = {}) {
+  const id = stationId(station);
+  if (id != null) {
+    const byId = STATION_HINTS.find((hint) => hint.id === id);
+    if (byId) return byId;
+  }
+  const normalized = String(stationName(station) || '').toLowerCase();
+  if (!normalized) return null;
   return STATION_HINTS.find((hint) => hint.names.some((candidate) => normalized.includes(candidate)));
 }
 
@@ -71,8 +94,19 @@ function stationCoordinates(station = {}) {
   const lat = stationLatitude(station);
   const lon = stationLongitude(station);
   if (lat != null && lon != null) return { latitude: lat, longitude: lon };
-  const hint = hintForStation(stationName(station));
+  const hint = hintForStation(station);
   return hint ? { latitude: hint.latitude, longitude: hint.longitude } : null;
+}
+
+// FAWN's documented `rain_sum` field (lastDay/summary) is a SUM in
+// centimeters, not inches (confirmed live 2026-09-26). `Rain_Tot` /
+// `rainfall_in` / `precipitation` are defensive fallbacks for any shape
+// that already reports inches (e.g. test fixtures) — never seen on the
+// live API, so never double-converted.
+function rainfallInches(station = {}) {
+  const cm = numberOrNull(station.rain_sum);
+  if (cm != null) return cm / 2.54;
+  return numberOrNull(firstDefined(station.Rain_Tot, station.rainfall_in, station.precipitation));
 }
 
 function distanceMiles(from, to) {
@@ -108,10 +142,7 @@ async function fetchStationRows() {
 }
 
 function selectStation(stations = [], { latitude, longitude } = {}) {
-  const swflStations = stations.filter((station) => {
-    const name = String(stationName(station) || '').toLowerCase();
-    return STATION_NAMES.some((candidate) => name.includes(candidate));
-  });
+  const swflStations = stations.filter((station) => !!hintForStation(station));
   const candidates = swflStations.length ? swflStations : stations;
   const target = Number.isFinite(Number(latitude)) && Number.isFinite(Number(longitude))
     ? { latitude: Number(latitude), longitude: Number(longitude) }
@@ -132,17 +163,18 @@ function selectStation(stations = [], { latitude, longitude } = {}) {
 }
 
 function normalizeStationSnapshot(station) {
-  const name = stationName(station) || 'FAWN SWFL';
+  const hint = hintForStation(station);
+  const name = stationName(station) || hint?.label || 'FAWN SWFL';
   const coords = stationCoordinates(station);
   return {
-    temp_f: numberOrNull(firstDefined(station.AirTemp_Avg, station.t2m_avg, station.air_temp, station.temp_f)),
+    temp_f: numberOrNull(firstDefined(station.AirTemp_Avg, station.air_temp, station.temp_f)),
     humidity_pct: numberOrNull(firstDefined(station.RelHum_Avg, station.rh_avg, station.relative_humidity, station.humidity_pct)),
-    rainfall_in: numberOrNull(firstDefined(station.Rain_Tot, station.rain_sum, station.rainfall_in, station.precipitation)),
+    rainfall_in: rainfallInches(station),
     soil_temp_f: numberOrNull(firstDefined(station.SoilTemp4_Avg, station.ts4_avg, station.soil_temp_f)),
-    wind_mph: numberOrNull(firstDefined(station.Wind_Avg, station.ws_avg, station.wind_mph, station.wind_speed)),
+    wind_mph: numberOrNull(firstDefined(station.Wind_Avg, station.wind_mph, station.wind_speed)),
     station: name,
-    station_key: hintForStation(name)?.key || null,
-    observation_time: firstDefined(station.ObservationTime, station.observation_time, station.DateTime, station.datetime, station.timestamp),
+    station_key: hint?.key || null,
+    observation_time: firstDefined(station.ObservationTime, station.observation_time, station.startTime, station.DateTime, station.datetime, station.timestamp),
     timestamp: new Date().toISOString(),
     latitude: coords?.latitude ?? null,
     longitude: coords?.longitude ?? null,

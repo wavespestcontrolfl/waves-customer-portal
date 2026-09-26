@@ -103,8 +103,19 @@ async function getWeatherSignals({ lat, lng, region } = {}) {
         base.hasWeather = true;
         if (!base.source) base.source = 'fawn';
         else base.source = 'nws+fawn';
+      } else if (cur && cur.error) {
+        // FawnWeather.getCurrent() already caught its own fetch/parse error
+        // and returned a placeholder — log once per cache fill (not per
+        // request) so an upstream FAWN outage is visible without spamming.
+        logger.warn?.(`[pest-forecast/weather] FAWN enrichment unavailable for ${key}: ${cur.error}`);
       }
-    } catch (_e) { /* ignore — NWS signal already stands */ }
+    } catch (err) {
+      // Best-effort enrichment only — the NWS signal already stands, so we
+      // degrade to NWS-only rather than fail the whole forecast. Still log
+      // so a persistent problem (bad URL, station lookup failure, timeout)
+      // doesn't go unnoticed.
+      logger.warn?.(`[pest-forecast/weather] FAWN lookup failed for ${key}: ${err.message}`);
+    }
   }
 
   const value = flags(base);
