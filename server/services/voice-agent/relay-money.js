@@ -244,10 +244,10 @@ async function openEstimatesText(customerId, { tier = 'redacted' } = {}) {
   // agent neither guesses nor reads it back.
   const withheld = [];
   {
-    const { gatedSendAuthorityPredicateApplies, estimateDeliverableUnderGate } = require('../pricing-authority-gate');
+    const { estimateDeliverableUnderGate } = require('../pricing-authority-gate');
     const quotable = [];
     for (const row of viewable) {
-      if (gatedSendAuthorityPredicateApplies() && !(await estimateDeliverableUnderGate(db, row))) withheld.push(row);
+      if (!(await estimateDeliverableUnderGate(db, row))) withheld.push(row);
       else quotable.push(row);
     }
     viewable = quotable.slice(0, ESTIMATE_LIMIT);

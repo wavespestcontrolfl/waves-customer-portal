@@ -255,8 +255,10 @@ describe('codex #4890 r1 — audit trail and shadow bridge', () => {
   });
 
   test('the route-decision version is bumped for the new routing contract and stays in the version list', () => {
-    expect(V2_DECISION_VERSION).toBe('v2-1.44.0');
+    // Later bumps (v2-1.45.0 outbound parity, #4912) move the current
+    // version on; the arranger contract's version must stay listed.
     expect(V2_DECISION_VERSIONS).toEqual(expect.arrayContaining(['v2-1.43.0', 'v2-1.44.0']));
+    expect(V2_DECISION_VERSIONS.indexOf(V2_DECISION_VERSION)).toBeGreaterThanOrEqual(V2_DECISION_VERSIONS.indexOf('v2-1.44.0'));
   });
 
   test('shadow bridge: without a (valid) V2 extraction the caller_not_authorized reason still files', () => {

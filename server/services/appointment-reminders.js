@@ -206,7 +206,7 @@ async function alertNoReachableChannel({ customerId, kind, scheduledServiceId = 
       'Appointment notice undeliverable — no text or email',
       `${name}: the ${label} could not be delivered by text, and ${emailClause}. Call the customer.`,
       {
-        link: customerId ? `/admin/customers/${customerId}` : '/admin/communications',
+        link: customerId ? `/admin/customers?customerId=${customerId}` : '/admin/communications',
         metadata: { dedupeKey, customer_id: customerId, scheduled_service_id: scheduledServiceId, kind },
       },
     );
@@ -484,7 +484,7 @@ async function deliverAppointmentEmailFallback({ kind, customerId, scheduledServ
       await handOffToOffice(
         'Appointment fallback needs a consent check',
         `App and backup text delivery failed for the ${kind} notice. Verify current email consent and appointment details before sending its email fallback${scheduledServiceId ? ` (service ${scheduledServiceId})` : ''}.`,
-        { link: `/admin/customers/${customerId}`, dedupeKey: `appointment-app-fallback:${emailIdempotencyKey || `${customerId}:${scheduledServiceId}:${kind}:${apptTime ? new Date(apptTime).getTime() : 'unknown'}`}`, metadata: { customerId, scheduledServiceId, kind, reason: 'reminder_preferences_unavailable' } },
+        { link: `/admin/customers?customerId=${customerId}`, dedupeKey: `appointment-app-fallback:${emailIdempotencyKey || `${customerId}:${scheduledServiceId}:${kind}:${apptTime ? new Date(apptTime).getTime() : 'unknown'}`}`, metadata: { customerId, scheduledServiceId, kind, reason: 'reminder_preferences_unavailable' } },
       );
     }
     return false;
@@ -1983,7 +1983,7 @@ async function queueHeldNoticeContacts({ customer, heldContacts, messageType, pu
         'Held appointment notice needs a manual send',
         `A ${messageType} text to a ${held.contact.role || 'service'} contact was held for the 8 AM window but could not be queued, and the notice was already finalized for the other contact — send it from the composer.`,
         {
-          link: `/admin/customers/${customer.id}`,
+          link: `/admin/customers?customerId=${customer.id}`,
           metadata: {
             customerId: customer.id,
             scheduledServiceId: metaExtra.scheduled_service_id || null,
