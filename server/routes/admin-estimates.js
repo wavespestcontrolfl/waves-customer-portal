@@ -3,6 +3,7 @@ const express = require('express');
 const crypto = require('crypto');
 const { estimateOfferVersion, annualPlanOfferFingerprint } = require('../services/estimate-offer-version');
 const { gateEnvValue } = require('../config/feature-gates');
+const { legacyAutofillPriceReasons } = require('../services/estimate-legacy-autofill-hold');
 const router = express.Router();
 const db = require('../models/db');
 const { DELIVERY_CLAIM_NOT_LIVE_SQL, callSideBlockForEstimateData, REPRICE_PENDING_ABSENT_SQL } = require('../utils/estimate-claim-sql');
@@ -576,6 +577,16 @@ function assertEstimateSendable(estimate, { engineReviewAcknowledged = false } =
       const err = new Error('County records could not confirm this house number. Correct the address on the estimate (or confirm it) before sending — the customer link stays off until then.');
       err.statusCode = 409;
       err.code = 'ADDRESS_UNVERIFIED';
+      throw err;
+    }
+    // A stored estimate-tool price built from values the 2026-09-26 lookup
+    // guards now refuse: every send replays the stored price, so hold it until
+    // staff regenerate and save it (services/estimate-legacy-autofill-hold.js).
+    const legacyReasons = legacyAutofillPriceReasons(data);
+    if (legacyReasons.length > 0) {
+      const err = new Error(`This estimate's price was saved before a pricing fix and was built from ${legacyReasons.join('; ')}. Open it in the estimate tool, generate it again and save, then send.`);
+      err.statusCode = 409;
+      err.code = 'LEGACY_AUTOFILL_PRICE';
       throw err;
     }
   }

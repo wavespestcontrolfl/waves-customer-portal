@@ -1,0 +1,62 @@
+/**
+ * Send-time hold for a stored estimate-tool price the 2026-09-26 lookup
+ * guards refuse (#4862 / #4871 / #4878). Mirrors the estimate tool's reopen
+ * scrub (client/src/lib/lookupPrefill.js) — the same fixtures hold here.
+ */
+const { legacyAutofillPriceReasons } = require('../services/estimate-legacy-autofill-hold');
+
+const UNIT = { residentialUnitLookup: { wholePropertyCategory: 'RESIDENTIAL' } };
+const UNIT_PARCEL = { lotSqFt: 400000, fieldVerifyFlags: [{ field: 'lotSize', scope: 'unit_parcel' }] };
+const pest = (extra = {}) => ({ service: 'pest_control', name: 'Pest Control', mo: 50, ...extra });
+const saved = (inputs, profile = {}, lines = [pest()]) => ({
+  inputs, engineRequest: { profile }, result: { recurring: { services: lines }, oneTime: { items: [] } },
+});
+
+describe('legacyAutofillPriceReasons', () => {
+  test('holds a price the engine guessed at a 2,000 sq ft house, never a quote-required or overridden line', () => {
+    expect(legacyAutofillPriceReasons(saved({}, {}, [pest({ footprintWasDefaulted: true })])))
+      .toEqual(['a guessed 2,000 sq ft home size (enter home sq ft)']);
+    expect(legacyAutofillPriceReasons(saved({}, { footprintUnknown: true }, [pest({ footprintWasDefaulted: true })])))
+      .toEqual(['a guessed home footprint (enter the number of stories)']);
+    expect(legacyAutofillPriceReasons(saved({}, {}, [
+      pest({ footprintWasDefaulted: true, quoteRequired: true }),
+      pest({ footprintWasDefaulted: true, priceOverridden: true }),
+    ]))).toEqual([]);
+  });
+
+  test('holds a condo unit priced on footprint trenching or auto-derived termite boxes — not once retyped a house', () => {
+    expect(legacyAutofillPriceReasons(saved({ propertyType: 'Condo', svcTrenching: true, trenchingEstimateFromFootprint: true }, UNIT)))
+      .toEqual(["a trenching perimeter estimated from one unit's footprint"]);
+    expect(legacyAutofillPriceReasons(saved({ propertyType: 'Condo', termiteFootprintSqFt: '725', _termiteFootprintAuto: true }, UNIT)))
+      .toEqual(['termite measurements the lookup derived from one unit']);
+    expect(legacyAutofillPriceReasons(saved({ propertyType: 'Condo', trenchingPerimeterLF: '140', _trenchingPerimeterAuto: false }, UNIT)))
+      .toEqual([]);
+    expect(legacyAutofillPriceReasons(saved({ propertyType: 'Single Family', termiteFootprintSqFt: '1200', _termiteFootprintAuto: true }, UNIT)))
+      .toEqual([]);
+  });
+
+  test("holds the development's lot, bed and flea areas the lookup filled — never typed ones", () => {
+    expect(legacyAutofillPriceReasons(saved({ lotSqFt: '400000', bedArea: '6000', fleaExteriorAreaSqFt: '25000', fleaExteriorAreaSource: 'AI_ESTIMATE' }, UNIT_PARCEL)))
+      .toEqual(["the development's lot size", "the lookup's bed area for the development", "a flea exterior area copied from the development's lawn"]);
+    expect(legacyAutofillPriceReasons(saved({
+      lotSqFt: '1500', _lotSqFtEdited: true, bedArea: '200', fleaExteriorAreaSqFt: '900', fleaExteriorAreaSource: 'AI_ESTIMATE',
+      _manualFields: ['lotSqFt', 'bedArea', 'fleaExteriorAreaSqFt'],
+    }, { ...UNIT_PARCEL, estimatedBedAreaSf: 200, bedAreaSource: 'manual' }))).toEqual([]);
+  });
+
+  test("holds a priced profile still carrying the parcel's turf, bed or hardscape reads — a stored 0% included", () => {
+    const typedLot = { lotSqFt: '1500', _lotSqFtEdited: true };
+    for (const read of [{ estimatedTurfSf: 25000 }, { imperviousSurfacePercent: 0 }, { estimatedBedAreaSf: 6000, bedAreaSource: 'estimated' }]) {
+      expect(legacyAutofillPriceReasons(saved(typedLot, { ...UNIT_PARCEL, ...read })))
+        .toEqual(["lawn and bed areas from the development's parcel"]);
+    }
+    // The scoped profile a post-fix save persists carries none of them.
+    expect(legacyAutofillPriceReasons(saved(typedLot, { ...UNIT_PARCEL, estimatedBedAreaSf: 0 }))).toEqual([]);
+  });
+
+  test('judges builder-saved rows only — an engine draft has no form snapshot', () => {
+    expect(legacyAutofillPriceReasons({ engineRequest: { profile: {} }, result: { recurring: { services: [pest({ footprintWasDefaulted: true })] } } }))
+      .toEqual([]);
+    expect(legacyAutofillPriceReasons(null)).toEqual([]);
+  });
+});
