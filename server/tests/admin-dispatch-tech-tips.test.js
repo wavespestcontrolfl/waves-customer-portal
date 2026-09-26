@@ -85,16 +85,16 @@ function scriptedDb({ service, recommendationRows = null, sentRows = [], prefs =
     let rowLimit = null;
     let rowOffset = 0;
     let recommendationRead = false;
-    const passthrough = ['whereRaw', 'orderBy'];
+    const passthrough = ['whereRaw', 'orderBy', 'leftJoin'];
     for (const m of passthrough) chain[m] = () => chain;
     chain.limit = (value) => { rowLimit = value; return chain; };
     chain.offset = (value) => { rowOffset = value; return chain; };
     chain.select = (...columns) => {
-      recommendationRead = columns.includes('id');
+      recommendationRead = columns.some((column) => column === 'id' || String(column).endsWith(' as id'));
       return chain;
     };
     chain.where = (...args) => {
-      if (table === 'service_records' && args[0] === 'service_date' && args[1] === '<=') {
+      if (table === 'service_records' && ['service_date', 'service_records.service_date'].includes(args[0]) && args[1] === '<=') {
         throughDate = args[2];
       }
       return chain;
@@ -105,7 +105,24 @@ function scriptedDb({ service, recommendationRows = null, sentRows = [], prefs =
       // History fixtures are published by default; visibility-negative cases
       // opt out explicitly with report_view_token: null.
       const rows = recommendationRead
-        ? (recommendationRows || []).map((row) => ({ report_view_token: `token-${row.id}`, ...row }))
+        ? (recommendationRows || []).map((row) => {
+          const historyPropertyId = Object.prototype.hasOwnProperty.call(row, 'history_property_id')
+            ? row.history_property_id
+            : service?.property_id || null;
+          const defaultsToCurrentProperty = historyPropertyId
+            && String(historyPropertyId) === String(service?.property_id || '');
+          return {
+            report_view_token: `token-${row.id}`,
+            history_visit_id: row.scheduled_service_id || null,
+            history_visit_customer_id: service?.customer_id || null,
+            history_property_id: historyPropertyId,
+            history_property_address_line1: defaultsToCurrentProperty ? service?.current_property_address_line1 : null,
+            history_property_address_line2: defaultsToCurrentProperty ? service?.current_property_address_line2 : null,
+            history_property_city: defaultsToCurrentProperty ? service?.current_property_city : null,
+            history_property_zip: defaultsToCurrentProperty ? service?.current_property_zip : null,
+            ...row,
+          };
+        })
         : sentRows;
       const bounded = throughDate
         ? rows.filter((row) => String(row.service_date instanceof Date
@@ -125,6 +142,11 @@ const SERVICE = {
   service_type: 'Mosquito Treatment',
   scheduled_date: '2026-08-15',
   technician_id: 'tech-7',
+  property_id: 'property-home',
+  current_property_address_line1: '100 Main Street',
+  current_property_address_line2: 'Apt 4',
+  current_property_city: 'Sarasota',
+  current_property_zip: '34205-1234',
 };
 
 afterEach(() => {
@@ -280,7 +302,10 @@ describe('GET /:serviceId/tech-tips', () => {
         },
       },
       {
-        id: 'rec-3', scheduled_service_id: null, service_line: 'mosquito', service_date: new Date('2026-06-20T00:00:00.000Z'),
+        id: 'rec-3', scheduled_service_id: 'old-3', history_property_id: null,
+        history_service_address_line1: '100 Main St.', history_service_address_line2: '#4',
+        history_service_address_city: 'Sarasota', history_service_address_zip: '34205',
+        service_line: 'mosquito', service_date: new Date('2026-06-20T00:00:00.000Z'),
         structured_notes: JSON.stringify({ formRecommendations: ['Empty outdoor containers'] }),
       },
       {
@@ -307,13 +332,13 @@ describe('GET /:serviceId/tech-tips', () => {
     expect(calls).toEqual(['scheduled_services', 'service_records']);
   });
 
-  test('completion history includes only customer-visible companions matching the current line', async () => {
+  test('completion history includes only customer-visible companions matching the current line on a visible record', async () => {
     process.env.GATE_SERVICE_REPORT_COMPLETION_CHOICES = 'true';
     mockDbCurrent = scriptedDb({
       service: SERVICE,
       recommendationRows: [{
         id: 'combined-lawn', scheduled_service_id: 'old-combined', service_line: 'lawn', service_date: '2026-08-01',
-        structured_notes: { typedReportDelivery: 'internal_only', formRecommendations: ['Primary lawn recommendation'] },
+        structured_notes: { typedReportDelivery: 'auto_send', formRecommendations: ['Primary lawn recommendation'] },
         service_data: {
           typedReportSnapshot: { nextStepChips: ['Primary lawn next step'] },
           companionReportSnapshots: [
@@ -337,6 +362,27 @@ describe('GET /:serviceId/tech-tips', () => {
       { text: 'Recheck the screened patio', serviceDate: '2026-08-01', serviceRecordId: 'combined-lawn' },
     ]);
     expect(JSON.stringify(res.body)).not.toMatch(/Primary lawn|Internal mosquito|Wrong companion/);
+  });
+
+  test.each(['internal_only', 'disabled'])('record-level %s suppresses primary and auto-send companion history', async (typedReportDelivery) => {
+    process.env.GATE_SERVICE_REPORT_COMPLETION_CHOICES = 'true';
+    mockDbCurrent = scriptedDb({
+      service: SERVICE,
+      recommendationRows: [{
+        id: 'suppressed-combined', scheduled_service_id: 'suppressed-combined-visit', service_line: 'lawn', service_date: '2026-08-01',
+        structured_notes: { typedReportDelivery, formRecommendations: ['Suppressed primary'] },
+        service_data: {
+          companionReportSnapshots: [{
+            type: 'mosquito_event', delivery: 'auto_send', nextStepChips: ['Suppressed companion'],
+          }],
+        },
+      }],
+      calls: [],
+    });
+
+    const res = await invoke({ serviceId: 'svc-1' });
+
+    expect(res.body.previousRecommendations).toEqual([]);
   });
 
   test('delivery posture without a published report artifact exposes no primary or companion history', async () => {
@@ -455,7 +501,30 @@ describe('GET /:serviceId/tech-tips', () => {
     ]);
   });
 
-  test('completion history counts scheduled visits once, deduplicates sibling text, and treats unlinked records separately', async () => {
+  test('completion history filters governed no-action chips while preserving actionable negative wording', async () => {
+    process.env.GATE_SERVICE_REPORT_COMPLETION_CHOICES = 'true';
+    mockDbCurrent = scriptedDb({
+      service: SERVICE,
+      recommendationRows: [{
+        id: 'chip-history', scheduled_service_id: 'chip-history-visit', service_line: 'mosquito', service_date: '2026-08-01',
+        service_data: {
+          typedReportSnapshot: {
+            nextStepChips: ['No action needed', 'No follow-up needed', 'No store-bought sprays', 'Empty outdoor containers'],
+          },
+        },
+      }],
+      calls: [],
+    });
+
+    const res = await invoke({ serviceId: 'svc-1' });
+
+    expect(res.body.previousRecommendations.map((item) => item.text)).toEqual([
+      'No store-bought sprays',
+      'Empty outdoor containers',
+    ]);
+  });
+
+  test('completion history counts scheduled visits once, deduplicates sibling text, and treats linked legacy-address visits separately', async () => {
     process.env.GATE_SERVICE_REPORT_COMPLETION_CHOICES = 'true';
     mockDbCurrent = scriptedDb({
       service: SERVICE,
@@ -469,11 +538,17 @@ describe('GET /:serviceId/tech-tips', () => {
           structured_notes: { formRecommendations: ['Shared recommendation', 'Sibling-only recommendation'] },
         },
         {
-          id: 'legacy-a', scheduled_service_id: null, service_line: 'mosquito', service_date: '2026-08-05',
+          id: 'legacy-a', scheduled_service_id: 'legacy-a-svc', history_property_id: null,
+          history_service_address_line1: '100 Main St.', history_service_address_line2: '#4',
+          history_service_address_city: 'Sarasota', history_service_address_zip: '34205',
+          service_line: 'mosquito', service_date: '2026-08-05',
           structured_notes: { formRecommendations: ['First legacy recommendation'] },
         },
         {
-          id: 'legacy-b', scheduled_service_id: null, service_line: 'mosquito', service_date: '2026-08-04',
+          id: 'legacy-b', scheduled_service_id: 'legacy-b-svc', history_property_id: null,
+          history_service_address_line1: '100 Main Street', history_service_address_line2: 'Unit 4',
+          history_service_address_city: 'Sarasota', history_service_address_zip: '34205-9999',
+          service_line: 'mosquito', service_date: '2026-08-04',
           structured_notes: { formRecommendations: ['Second legacy recommendation'] },
         },
         {
@@ -493,6 +568,60 @@ describe('GET /:serviceId/tech-tips', () => {
       { text: 'Second legacy recommendation', serviceDate: '2026-08-04', serviceRecordId: 'legacy-b' },
     ]);
     expect(JSON.stringify(res.body)).not.toContain('Past visit bound');
+  });
+
+  test('completion history scopes to the appointment property before applying the three-visit bound', async () => {
+    process.env.GATE_SERVICE_REPORT_COMPLETION_CHOICES = 'true';
+    mockDbCurrent = scriptedDb({
+      service: SERVICE,
+      recommendationRows: [
+        {
+          id: 'other-property-newest', scheduled_service_id: 'rental-visit', history_property_id: 'property-rental',
+          service_line: 'mosquito', service_date: '2026-08-14', structured_notes: { formRecommendations: ['Rental recommendation'] },
+        },
+        {
+          id: 'other-customer-link', scheduled_service_id: 'foreign-visit', history_visit_customer_id: 'cust-2', history_property_id: 'property-home',
+          service_line: 'mosquito', service_date: '2026-08-14', structured_notes: { formRecommendations: ['Foreign visit recommendation'] },
+        },
+        {
+          id: 'legacy-other-premise', scheduled_service_id: 'legacy-other', history_property_id: null,
+          history_service_address_line1: '900 Other Avenue', history_service_address_city: 'Sarasota', history_service_address_zip: '34205',
+          service_line: 'mosquito', service_date: '2026-08-13', structured_notes: { formRecommendations: ['Other premise recommendation'] },
+        },
+        {
+          id: 'same-linked', scheduled_service_id: 'home-linked', history_property_id: 'property-home',
+          service_line: 'mosquito', service_date: '2026-08-12', structured_notes: { formRecommendations: ['Same linked property'] },
+        },
+        {
+          id: 'same-legacy', scheduled_service_id: 'home-legacy', history_property_id: null,
+          history_service_address_line1: '100 Main St.', history_service_address_line2: '#4',
+          history_service_address_city: 'Sarasota', history_service_address_zip: '34205',
+          service_line: 'mosquito', service_date: '2026-08-11', structured_notes: { formRecommendations: ['Same canonical legacy premise'] },
+        },
+        {
+          id: 'unlinked-record', scheduled_service_id: null,
+          service_line: 'mosquito', service_date: '2026-08-10', structured_notes: { formRecommendations: ['Unlinked and unproven'] },
+        },
+        {
+          id: 'third-home', scheduled_service_id: 'third-home', history_property_id: 'property-home',
+          service_line: 'mosquito', service_date: '2026-08-09', structured_notes: { formRecommendations: ['Third same-property visit'] },
+        },
+        {
+          id: 'past-home-bound', scheduled_service_id: 'past-home-bound', history_property_id: 'property-home',
+          service_line: 'mosquito', service_date: '2026-08-08', structured_notes: { formRecommendations: ['Past same-property bound'] },
+        },
+      ],
+      calls: [],
+    });
+
+    const res = await invoke({ serviceId: 'svc-1' });
+
+    expect(res.body.previousRecommendations.map((item) => item.text)).toEqual([
+      'Same linked property',
+      'Same canonical legacy premise',
+      'Third same-property visit',
+    ]);
+    expect(JSON.stringify(res.body)).not.toMatch(/Rental|Foreign visit|Other premise|Unlinked|Past same-property/);
   });
 
   test('completion history is bounded to twelve suggestions', async () => {
@@ -529,7 +658,7 @@ describe('GET /:serviceId/tech-tips', () => {
       },
       {
         id: 'older-companion', scheduled_service_id: 'older-companion-svc', service_line: 'lawn', service_date: '2026-07-20',
-        structured_notes: { typedReportDelivery: 'internal_only', formRecommendations: ['Hidden lawn recommendation'] },
+        structured_notes: { typedReportDelivery: 'auto_send', formRecommendations: ['Hidden lawn recommendation'] },
         service_data: {
           companionReportSnapshots: [{
             type: 'mosquito_event', delivery: 'auto_send', nextStepChips: ['Companion visible recommendation'],
@@ -655,10 +784,14 @@ describe('route wiring contracts', () => {
     const start = source.indexOf('async function loadPreviousRecommendations');
     const end = source.indexOf('// GET /api/admin/dispatch/:serviceId/tech-tips', start);
     const block = source.slice(start, end);
-    expect(block).toContain(".where('service_date', '<=', visitDay)");
+    expect(block).toContain(".where('service_records.service_date', '<=', visitDay)");
     expect(block).toContain('PREVIOUS_RECOMMENDATION_VISIT_LIMIT');
     expect(block).toContain('PREVIOUS_RECOMMENDATION_ITEM_LIMIT');
-    expect(block).toContain("'structured_notes', 'service_data', 'report_view_token'");
+    expect(block).toContain("'service_records.structured_notes as structured_notes'");
+    expect(block).toContain("'service_records.service_data as service_data'");
+    expect(block).toContain("'service_records.report_view_token as report_view_token'");
+    expect(block).toContain(".leftJoin('scheduled_services as history_visit'");
+    expect(block).toContain(".leftJoin('customer_properties as history_property'");
     expect(block).not.toContain('technician_notes');
   });
 });

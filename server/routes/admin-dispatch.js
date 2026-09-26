@@ -71,6 +71,7 @@ const {
 } = require('../services/service-completion-profiles');
 const ActivityIndicators = require('../services/service-report/activity-indicators');
 const { gateEnvValue } = require('../config/feature-gates');
+const { addressKey } = require('../services/customer-properties');
 
 // The follow-up override chain (German knockdown windows, two-treatment
 // package rules, species gating) lives in ONE place — the obligation module
@@ -291,7 +292,7 @@ const PREVIOUS_RECOMMENDATION_SCAN_LIMIT = 500;
 const RECOMMENDATION_FIELD_PATTERN = /(^|_)(?:recommendation|recommendations|recommended)(?:_|$)/i;
 // Governed rodent options include no-action and already-completed states.
 // Neither is a recommendation to carry into a later visit.
-const NEGATIVE_RECOMMENDATION_PATTERN = /^(?:no|false|none|not recommended|not needed at this time|no service needed at this time|completed previously)$/i;
+const NEGATIVE_RECOMMENDATION_PATTERN = /^(?:no|false|none|not recommended|no action needed|no follow-up needed|not needed at this time|no service needed at this time|completed previously)$/i;
 
 function recommendationTextValues(value) {
   const values = Array.isArray(value) ? value : [value];
@@ -325,7 +326,8 @@ function legacyRecommendationTexts(values, frozenKeys) {
 }
 
 function recommendationTextsFromSnapshot(snapshot = null) {
-  const texts = recommendationTextValues(snapshot?.nextStepChips);
+  const texts = recommendationTextValues(snapshot?.nextStepChips)
+    .filter((text) => !NEGATIVE_RECOMMENDATION_PATTERN.test(text));
   const frozenKeys = new Set();
   const findings = Array.isArray(snapshot?.findings) ? snapshot.findings : [];
   for (const finding of findings) {
@@ -351,8 +353,9 @@ function recommendationHistoryFromRecord(record = {}, visitLine = '') {
   // Delivery posture describes intent. The report token proves that a
   // customer-facing artifact was actually published for this record.
   const reportPublished = Boolean(record.report_view_token);
-  const primaryVisible = reportPublished && primaryLine === visitLine
+  const recordVisible = reportPublished
     && String(structured.typedReportDelivery || 'auto_send') === 'auto_send';
+  const primaryVisible = recordVisible && primaryLine === visitLine;
   const snapshots = [];
   if (primaryVisible && serviceData.typedReportSnapshot
     && typeof serviceData.typedReportSnapshot === 'object') {
@@ -360,7 +363,7 @@ function recommendationHistoryFromRecord(record = {}, visitLine = '') {
   }
   const companionSnapshots = Array.isArray(serviceData.companionReportSnapshots)
     ? serviceData.companionReportSnapshots.filter((snapshot) => snapshot
-      && reportPublished
+      && recordVisible
       && typeof snapshot === 'object'
       && snapshot.delivery === 'auto_send'
       && detectServiceLine(snapshot.type) === visitLine)
@@ -382,9 +385,36 @@ function recommendationHistoryFromRecord(record = {}, visitLine = '') {
   };
 }
 
-async function loadPreviousRecommendations({ customerId, serviceType, serviceId, visitDay }) {
+function recommendationPremiseKey({
+  propertyAddressLine1, propertyAddressLine2, propertyCity, propertyZip,
+  serviceAddressLine1, serviceAddressLine2, serviceCity, serviceZip,
+}) {
+  const linkedProperty = String(propertyAddressLine1 || '').trim();
+  const address = linkedProperty
+    ? {
+      address_line1: propertyAddressLine1,
+      address_line2: propertyAddressLine2,
+      city: propertyCity,
+      zip: propertyZip,
+    }
+    : {
+      address_line1: serviceAddressLine1,
+      address_line2: serviceAddressLine2,
+      city: serviceCity,
+      zip: serviceZip,
+    };
+  return String(address.address_line1 || '').trim() ? addressKey(address) : '';
+}
+
+async function loadPreviousRecommendations({ customerId, serviceType, serviceId, visitDay, propertyScope }) {
   if (!customerId || !/^\d{4}-\d{2}-\d{2}$/.test(String(visitDay || ''))) return [];
   const visitLine = detectServiceLine(serviceType);
+  const currentPropertyId = propertyScope?.propertyId || null;
+  const currentPremiseKey = recommendationPremiseKey(propertyScope || {});
+  // A property-scoped history read must have either the linked property id or
+  // a canonical legacy appointment address. Unknown premise is not evidence
+  // that a customer-wide record belongs to this appointment.
+  if (!currentPropertyId && !currentPremiseKey) return [];
   const output = [];
   const eligibleVisits = new Set();
   const seenRecommendations = new Set();
@@ -392,30 +422,65 @@ async function loadPreviousRecommendations({ customerId, serviceType, serviceId,
   let reachedVisitLimit = false;
   while (!reachedVisitLimit) {
     const rows = await db('service_records')
-      .where({ customer_id: customerId, status: 'completed' })
-      .where('service_date', '<=', visitDay)
-      .orderBy('service_date', 'desc')
-      .orderBy('created_at', 'desc')
-      .orderBy('id', 'desc')
+      .leftJoin('scheduled_services as history_visit', 'history_visit.id', 'service_records.scheduled_service_id')
+      .leftJoin('customer_properties as history_property', 'history_property.id', 'history_visit.property_id')
+      .where({ 'service_records.customer_id': customerId, 'service_records.status': 'completed' })
+      .where('service_records.service_date', '<=', visitDay)
+      .orderBy('service_records.service_date', 'desc')
+      .orderBy('service_records.created_at', 'desc')
+      .orderBy('service_records.id', 'desc')
       .limit(PREVIOUS_RECOMMENDATION_SCAN_LIMIT)
       .offset(offset)
       .select(
-        'id', 'scheduled_service_id', 'service_type', 'service_line', 'service_date',
-        'structured_notes', 'service_data', 'report_view_token',
+        'service_records.id as id', 'service_records.scheduled_service_id as scheduled_service_id',
+        'service_records.service_type as service_type', 'service_records.service_line as service_line',
+        'service_records.service_date as service_date', 'service_records.structured_notes as structured_notes',
+        'service_records.service_data as service_data', 'service_records.report_view_token as report_view_token',
+        'history_visit.id as history_visit_id', 'history_visit.customer_id as history_visit_customer_id',
+        'history_visit.property_id as history_property_id',
+        'history_visit.service_address_line1 as history_service_address_line1',
+        'history_visit.service_address_line2 as history_service_address_line2',
+        'history_visit.service_address_city as history_service_address_city',
+        'history_visit.service_address_zip as history_service_address_zip',
+        'history_property.address_line1 as history_property_address_line1',
+        'history_property.address_line2 as history_property_address_line2',
+        'history_property.city as history_property_city', 'history_property.zip as history_property_zip',
       )
       .catch(() => []);
-    for (const row of rows) {
+    // Property provenance is a distinct pipeline stage before visibility and
+    // visit counting. Linked ids are authoritative when present on both
+    // appointments; otherwise the canonical linked-property/legacy-stamp
+    // address proves the premise.
+    const propertyRows = rows.filter((row) => {
+      if (!row.history_visit_id
+        || String(row.history_visit_customer_id || '') !== String(customerId)) return false;
+      const historyPropertyId = row.history_property_id || null;
+      if (currentPropertyId && historyPropertyId) {
+        return String(currentPropertyId) === String(historyPropertyId);
+      }
+      const historyPremiseKey = recommendationPremiseKey({
+        propertyAddressLine1: row.history_property_address_line1,
+        propertyAddressLine2: row.history_property_address_line2,
+        propertyCity: row.history_property_city,
+        propertyZip: row.history_property_zip,
+        serviceAddressLine1: row.history_service_address_line1,
+        serviceAddressLine2: row.history_service_address_line2,
+        serviceCity: row.history_service_address_city,
+        serviceZip: row.history_service_address_zip,
+      });
+      return !!currentPremiseKey && historyPremiseKey === currentPremiseKey;
+    });
+    for (const row of propertyRows) {
       if (String(row.scheduled_service_id || '') === String(serviceId || '')) continue;
       const history = recommendationHistoryFromRecord(row, visitLine);
-      // Apply customer visibility before the three-visit bound so backfills,
-      // incomplete/suppressed primary reports, and internal-only companions
-      // cannot consume one of the customer's visible-history slots.
+      // Apply property provenance and customer visibility before the three-
+      // visit bound so other premises, backfills, incomplete/suppressed
+      // reports, and internal-only companions cannot consume a slot.
       if (!history.eligible) continue;
       // A scheduled visit may intentionally own multiple completed records.
-      // Legacy rows without a visit FK remain independent history entries.
-      const visitKey = row.scheduled_service_id
-        ? `scheduled:${row.scheduled_service_id}`
-        : `legacy:${row.id}`;
+      // The resolved visit link is the counting unit, including legacy visits
+      // whose property identity came from their canonical address stamp.
+      const visitKey = `scheduled:${row.history_visit_id}`;
       if (!eligibleVisits.has(visitKey)) {
         if (eligibleVisits.size >= PREVIOUS_RECOMMENDATION_VISIT_LIMIT) {
           reachedVisitLimit = true;
@@ -449,8 +514,20 @@ router.get('/:serviceId/tech-tips', async (req, res, next) => {
       return res.json({ available: false, completionChoicesEnabled: false });
     }
     const svc = await db('scheduled_services')
-      .where({ id: req.params.serviceId })
-      .first('id', 'customer_id', 'service_type', 'scheduled_date', 'technician_id');
+      .leftJoin('customer_properties as current_property', 'current_property.id', 'scheduled_services.property_id')
+      .where({ 'scheduled_services.id': req.params.serviceId })
+      .first(
+        'scheduled_services.id as id', 'scheduled_services.customer_id as customer_id',
+        'scheduled_services.service_type as service_type', 'scheduled_services.scheduled_date as scheduled_date',
+        'scheduled_services.technician_id as technician_id', 'scheduled_services.property_id as property_id',
+        'scheduled_services.service_address_line1 as service_address_line1',
+        'scheduled_services.service_address_line2 as service_address_line2',
+        'scheduled_services.service_address_city as service_address_city',
+        'scheduled_services.service_address_zip as service_address_zip',
+        'current_property.address_line1 as current_property_address_line1',
+        'current_property.address_line2 as current_property_address_line2',
+        'current_property.city as current_property_city', 'current_property.zip as current_property_zip',
+      );
     if (!svc) return res.status(404).json({ error: 'Service not found' });
     // A technician reads only their own assigned visit (the customer's tip
     // history and irrigation status are customer data); admins keep
@@ -471,6 +548,17 @@ router.get('/:serviceId/tech-tips', async (req, res, next) => {
         serviceType: svc.service_type,
         serviceId: svc.id,
         visitDay,
+        propertyScope: {
+          propertyId: svc.property_id,
+          propertyAddressLine1: svc.current_property_address_line1,
+          propertyAddressLine2: svc.current_property_address_line2,
+          propertyCity: svc.current_property_city,
+          propertyZip: svc.current_property_zip,
+          serviceAddressLine1: svc.service_address_line1,
+          serviceAddressLine2: svc.service_address_line2,
+          serviceCity: svc.service_address_city,
+          serviceZip: svc.service_address_zip,
+        },
       })
       : [];
     if (!tipsEnabled) {
