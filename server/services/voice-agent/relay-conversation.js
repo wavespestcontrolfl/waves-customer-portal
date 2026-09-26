@@ -1813,7 +1813,15 @@ class RelayConversation {
     const { sent, tail, reconciled } = this._reconcileStreamedText(streamState, msg);
     // A write-tool turn and a genuine text mismatch both need the SAME
     // sent-only history shape (P2-c) — one merged branch, not two.
-    if (hasPendingWrite || !reconciled) return this._closeStreamedRoundSentOnly(streamState, msg, sent, tail, hasPendingWrite);
+    if (hasPendingWrite || !reconciled) {
+      // The same ownership recheck the block renderer runs for every turn
+      // with text, write turns included — a reconnect may have superseded
+      // this socket since the last progressive flush (or, with the whole
+      // reply held, no flush ever checked), and the write tool must not run
+      // from stale context.
+      if (text && await this._sessionSuperseded().catch(() => false)) return { withheld: true };
+      return this._closeStreamedRoundSentOnly(streamState, msg, sent, tail, hasPendingWrite);
+    }
     return this._deliverStreamedTail(streamState, msg, tail, stat);
   }
 

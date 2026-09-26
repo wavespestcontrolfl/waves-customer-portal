@@ -767,10 +767,10 @@ describe('stream renderer — full round loop', () => {
     const convo = new IsolatedConvo({ callSid: 'CA-s10', from: '+19415551234', send });
     convo._sessionSuperseded = jest.fn().mockResolvedValue(false);
 
-    // A write-tool round: _finalizeStreamedRound's hasPendingWrite branch
-    // never calls _sessionSuperseded itself, so every call this round
-    // produces is the per-sentence chain's — isolating the count cleanly
-    // from the (separate, pre-existing) held-tail recheck.
+    // A write-tool round: one check per flushed sentence, plus the ONE
+    // finalize-time recheck the write-turn branch runs before the tool
+    // (block-renderer parity) — isolated from the held-tail recheck, which a
+    // write turn never reaches.
     const promptPromise = convo.handlePrompt('book me for tuesday');
     await flush();
     const round1 = captured[0];
@@ -795,7 +795,7 @@ describe('stream renderer — full round loop', () => {
 
     // Order preserved despite one check per sentence.
     expect(send.mock.calls.map(([t]) => t).join('')).toBe('Sure. One moment. Let me check on that. ');
-    expect(convo._sessionSuperseded).toHaveBeenCalledTimes(3); // one per sentence, not one for the whole round
+    expect(convo._sessionSuperseded).toHaveBeenCalledTimes(4); // one per sentence (3), not one for the whole round, + the write-turn finalize recheck
   });
 
   // P1-d regression: a takeover landing AFTER the round's first sentence
@@ -1615,5 +1615,37 @@ describe('needsHold — codex r5 date/time context', () => {
   ])('does not hold grammatical may/am: %p', (sentence) => {
     expect(needsHold(sentence)).toBe(false);
     expect(isStreamSafe(sentence)).toBe(true);
+  });
+});
+
+describe('write-tool turn ownership recheck (block parity)', () => {
+  afterEach(() => { delete process.env.VOICE_RELAY_RENDERER; });
+
+  test('a fully held write-tool reply rechecks ownership at finalize; superseded → the tool never runs', async () => {
+    const { IsolatedConvo, captured } = isolatedConvoFactory();
+    process.env.VOICE_RELAY_RENDERER = 'stream';
+    const send = jest.fn();
+    const endSession = jest.fn();
+    const convo = new IsolatedConvo({ callSid: 'CA-write-superseded', from: '+19415551234', send, endSession });
+    convo._sessionSuperseded = jest.fn().mockResolvedValue(true);
+    const executeToolBoundedSpy = jest.spyOn(convo, '_executeToolBounded');
+
+    const promptPromise = convo.handlePrompt('book me for tuesday');
+    await flush();
+    const round = captured[0];
+    round.textCb('Your total is $149. '); // an amount — held, never flushed
+    round.resolve({
+      content: [
+        { type: 'text', text: 'Your total is $149.' },
+        { type: 'tool_use', id: 't1', name: 'request_booking', input: {} },
+      ],
+      stop_reason: 'tool_use',
+    });
+    await promptPromise;
+
+    expect(convo._sessionSuperseded).toHaveBeenCalledTimes(1);
+    expect(executeToolBoundedSpy).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
+    expect(captured[1]).toBeUndefined();
   });
 });
