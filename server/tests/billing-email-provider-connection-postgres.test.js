@@ -39,11 +39,14 @@ postgres('billing Email provider preparation on its held connection', () => {
     mockPg = knex({ client: 'pg', connection, searchPath: [schema],
       pool: { min: 0, max: 1 }, acquireConnectionTimeout: 1500 });
     await mockPg.schema.createTable('customers', (table) => {
-      table.uuid('id').primary(); table.text('email'); table.timestamp('deleted_at');
+      table.uuid('id').primary(); table.text('email'); table.text('phone'); table.timestamp('deleted_at');
     });
     await mockPg.schema.createTable('notification_prefs', (table) => {
       table.uuid('customer_id').primary(); table.boolean('email_enabled');
       table.specificType('billing_channels', 'text[]');
+    });
+    await mockPg.schema.createTable('messaging_suppression', (table) => {
+      table.text('phone').primary(); table.text('reason'); table.boolean('active'); table.timestamp('created_at');
     });
     await mockPg.schema.createTable('estimates', (table) => {
       table.uuid('id').primary(); table.text('token'); table.jsonb('estimate_data');
@@ -71,7 +74,7 @@ postgres('billing Email provider preparation on its held connection', () => {
     if (admin) { await admin.schema.dropSchemaIfExists(schema, true); await admin.destroy(); }
   });
 
-  test.each(['refuse', 'rewrite'])('%s checks see the transaction and never acquire a second slot', async (policy) => {
+  test.each(['refuse', 'rewrite'])('%s checks allow no-phone customers and never acquire a second slot', async (policy) => {
     const estimateId = randomUUID();
     const token = randomUUID().replaceAll('-', '');
     const queries = [];
@@ -99,5 +102,50 @@ postgres('billing Email provider preparation on its held connection', () => {
       expect(new Set(queries.map((query) => query.__knexTxId)).size).toBe(1);
       expect(queries[0].__knexTxId).toBeTruthy();
     } finally { mockPg.removeListener('query', collect); }
+  }, 15000);
+
+  test.each([
+    ['manual_dnc', 'SUPPRESSED_MANUAL_DNC'],
+    ['opt_out_keyword', 'SUPPRESSED_OPT_OUT'],
+  ])('%s blocks provider work under the held transaction', async (reason, code) => {
+    const phone = '+19415550100';
+    await mockPg('customers').where({ id: customerId }).update({ phone });
+    await mockPg('messaging_suppression').insert({ phone, reason, active: true, created_at: new Date() });
+    const dispatch = jest.fn(async (database) => sendgrid.sendOne({
+      to: 'qa@example.invalid', subject: 'Suppressed billing update', html: '<p>Blocked</p>', text: 'Blocked', database,
+    }));
+    const state = { boundaryBlock: null, handoffStarted: false, providerAccepted: false };
+    try {
+      await expect(dispatchUnderBillingEmailAuthority({
+        input: { customerId, metadata: { billingDeliveryCategory: 'billing' } },
+        recipientEmail: 'qa@example.invalid', state, dispatch,
+      })).resolves.toEqual({ ok: false });
+      expect(state.boundaryBlock).toMatchObject({ code, blocked: true });
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(global.fetch).not.toHaveBeenCalled();
+    } finally {
+      await mockPg('messaging_suppression').where({ phone }).delete();
+      await mockPg('customers').where({ id: customerId }).update({ phone: null });
+    }
+  }, 15000);
+
+  test('an unreadable all-channel suppression store returns a retryable hold', async () => {
+    const phone = '+19415550100';
+    await mockPg('customers').where({ id: customerId }).update({ phone });
+    await mockPg.schema.renameTable('messaging_suppression', 'messaging_suppression_unavailable');
+    const dispatch = jest.fn();
+    const state = { boundaryBlock: null, handoffStarted: false, providerAccepted: false };
+    try {
+      await expect(dispatchUnderBillingEmailAuthority({
+        input: { customerId, metadata: { billingDeliveryCategory: 'billing' } },
+        recipientEmail: 'qa@example.invalid', state, dispatch,
+      })).resolves.toEqual({ ok: false });
+      expect(state.boundaryBlock).toMatchObject({ code: 'BILLING_EMAIL_RECHECK_FAILED', retryable: true });
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(global.fetch).not.toHaveBeenCalled();
+    } finally {
+      await mockPg.schema.renameTable('messaging_suppression_unavailable', 'messaging_suppression');
+      await mockPg('customers').where({ id: customerId }).update({ phone: null });
+    }
   }, 15000);
 });

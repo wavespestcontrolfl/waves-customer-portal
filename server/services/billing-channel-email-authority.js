@@ -12,6 +12,7 @@ const { getInvoiceEmailRecipients } = require('./customer-contact');
 const { billingChannelAllowed } = require('./billing-delivery-channels');
 const { withCustomerCommsLock, lockCustomerEmail } = require('../utils/customer-comms-lock');
 const { preferenceChangeHold } = require('./messaging/billing-channel-routing');
+const { loadSuppressionState, checkSuppression } = require('./messaging/validators/suppression');
 
 const CATEGORY_LABELS = Object.freeze({
   invoice: 'Invoice update',
@@ -106,7 +107,8 @@ async function contextBlock(input, category, { customer, prefs, invoice }, datab
     }
     const ownership = await require('./invoice-helpers').selfPayAtDispatch(invoice.id, database)();
     if (ownership.ok !== true) {
-      return { error: blocked(ownership.code || 'INVOICE_NOT_SELF_PAY', ownership.reason || 'Invoice is not eligible for customer delivery') };
+      return { error: blocked(ownership.code || 'INVOICE_NOT_SELF_PAY', ownership.reason || 'Invoice is not eligible for customer delivery',
+        { retryable: ownership.code === 'INVOICE_UNREADABLE' }) };
     }
   }
   return null;
@@ -148,8 +150,19 @@ async function preSendBlock(preSendCheck, database) {
   );
 }
 
-async function suppressionBlock(trx, recipientEmail, category) {
+async function suppressionBlock(trx, recipientEmail, category, customer) {
   await lockCustomerEmail(trx, recipientEmail);
+  const suppressionInput = {
+    channel: 'email', to: clean(customer?.phone) || null,
+    metadata: { billingDeliveryLeg: true },
+  };
+  const suppressionState = await loadSuppressionState(suppressionInput, {}, trx);
+  if (!suppressionInput.to) suppressionState.suppressionLoaded = true;
+  const messagingSuppression = await checkSuppression(suppressionInput, null, suppressionState);
+  if (!messagingSuppression.ok) {
+    return blocked(messagingSuppression.code, messagingSuppression.reason,
+      { retryable: messagingSuppression.retryable === true });
+  }
   const loaded = await EmailTemplateLibrary.loadTemplateByKey(billingEmailTemplateKey(category), trx);
   if (!loaded?.template) {
     return blocked('BILLING_EMAIL_RECHECK_FAILED', 'Billing email template is unavailable', { retryable: true });
@@ -177,7 +190,9 @@ async function verifyAndDispatch({ input, trx, invoice, recipientEmail, preSendC
       { retryable: true },
     );
   } else state.boundaryBlock = await preSendBlock(preSendCheck, trx);
-  if (!state.boundaryBlock) state.boundaryBlock = await suppressionBlock(trx, recipientEmail, fresh.category);
+  if (!state.boundaryBlock) {
+    state.boundaryBlock = await suppressionBlock(trx, recipientEmail, fresh.category, fresh.customer);
+  }
   if (state.boundaryBlock) return { ok: false };
 
   state.handoffStarted = true;

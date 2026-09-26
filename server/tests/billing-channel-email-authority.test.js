@@ -48,6 +48,12 @@ jest.mock('../services/invoice-helpers', () => ({
 jest.mock('../services/customer-contact', () => ({
   getInvoiceEmailRecipients: jest.fn(() => [{ email: 'casey@example.com', name: 'Casey', role: 'primary' }]),
 }));
+const mockLoadSuppressionState = jest.fn(async (_input, state) => Object.assign(state, { suppressionLoaded: true }));
+const mockCheckSuppression = jest.fn(async () => ({ ok: true }));
+jest.mock('../services/messaging/validators/suppression', () => ({
+  loadSuppressionState: mockLoadSuppressionState,
+  checkSuppression: mockCheckSuppression,
+}));
 
 const {
   loadBillingEmailContext,
@@ -97,6 +103,8 @@ describe('billing channel email authority', () => {
       template: { template_key: 'billing.notice', send_stream: 'transactional_required' },
     });
     mockActiveSuppressionFor.mockResolvedValue(null);
+    mockLoadSuppressionState.mockImplementation(async (_input, state) => Object.assign(state, { suppressionLoaded: true }));
+    mockCheckSuppression.mockResolvedValue({ ok: true });
     mockWithInvoiceDepositSettlement.mockImplementation(async (invoiceId, callback, database) => (
       database.transaction((trx) => {
         const invoice = rows.invoices?.id === invoiceId ? rows.invoices : null;
@@ -127,6 +135,12 @@ describe('billing channel email authority', () => {
     const { outcome, dispatch } = await runAuthority();
     expect(outcome.ok).toBe(true);
     expect(dispatch).toHaveBeenCalledWith(mockDb);
+    expect(mockLoadSuppressionState).toHaveBeenCalledWith(
+      expect.objectContaining({ channel: 'email', to: null }), expect.any(Object), mockDb,
+    );
+    expect(mockCheckSuppression).toHaveBeenCalledWith(
+      expect.any(Object), null, expect.objectContaining({ suppressionLoaded: true }),
+    );
   });
 
   test('does not allow dispatch when the global email preference is disabled', async () => {
@@ -204,6 +218,19 @@ describe('billing channel email authority', () => {
     expect(dispatch).not.toHaveBeenCalled();
   });
 
+  test('holds the retry when the all-channel suppression read fails', async () => {
+    rows.customers = { ...rows.customers, phone: '+19415550100' };
+    mockLoadSuppressionState.mockRejectedValueOnce(new Error('suppression read unavailable'));
+    const dispatch = jest.fn();
+    const { outcome, state } = await runAuthority({}, { dispatch });
+    expect(outcome.ok).toBe(false);
+    expect(state.boundaryBlock).toMatchObject({
+      blocked: true, code: 'BILLING_EMAIL_RECHECK_FAILED', retryable: true,
+      reason: 'suppression read unavailable',
+    });
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
   test('the locked suppression recheck loads billing.notice for a non-receipt category', async () => {
     const { outcome } = await runAuthority();
     expect(outcome.ok).toBe(true);
@@ -233,6 +260,15 @@ describe('billing channel email authority', () => {
     }));
     const { context } = await runAuthority({ invoiceId: 'inv-1' });
     expect(context.error).toMatchObject({ blocked: true, code: 'payer_billed' });
+  });
+
+  test('an unreadable invoice remains retryable at the locked provider boundary', async () => {
+    selfPayAtDispatch
+      .mockImplementationOnce(() => async () => ({ ok: true }))
+      .mockImplementationOnce(() => async () => ({ ok: false, code: 'INVOICE_UNREADABLE' }));
+    const { state, dispatch } = await runAuthority({ invoiceId: 'inv-1' });
+    expect(state.boundaryBlock).toMatchObject({ code: 'INVOICE_UNREADABLE', retryable: true });
+    expect(dispatch).not.toHaveBeenCalled();
   });
 
   test('rechecks invoice ownership while both handoff locks cover provider dispatch', async () => {
