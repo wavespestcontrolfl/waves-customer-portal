@@ -1033,26 +1033,33 @@ function resolveCallContactPhone(call = {}, extractedPhone = null) {
   return firstExternalPhone(call.from_phone, extracted, call.to_phone);
 }
 
-// True when an extracted same-day start (ET date "YYYY-MM-DD" + "HH:MM") is
-// earlier than the call's own ET wall clock AT THE MOMENT THE CALLER AGREED
-// TO IT — the agreed window had already begun when it was accepted (codex
-// #4919 r1 P1). Compared against the call's COMPLETION time (start +
-// duration via call-timeline's callEndedAt), not created_at: a long call
-// that starts before the window but crosses into it while still on the line
-// must not flag a start the caller could still make, and a post-call
-// fallback row's created_at is already the call's END, so comparing against
-// it directly would double-subtract the call's length (codex #4919 r2 P1).
-// Only the call's date is compared with the slot's; a later date never
-// precedes the call.
+// True when an extracted start (ET date "YYYY-MM-DD" + "HH:MM") is earlier
+// than the call's own ET wall clock AT THE MOMENT THE CALLER AGREED TO IT —
+// the agreed window had already begun when it was accepted (codex #4919 r1
+// P1). Compared against the call's COMPLETION time (start + duration via
+// call-timeline's callEndedAt), not created_at: a long call that starts
+// before the window but crosses into it while still on the line must not
+// flag a start the caller could still make, and a post-call fallback row's
+// created_at is already the call's END, so comparing against it directly
+// would double-subtract the call's length (codex #4919 r2 P1). Compares the
+// full ET timestamp, not "same calendar day + time-of-day" pieces: a call
+// that itself crosses ET midnight (starts 11:55 PM, ends 12:05 AM the next
+// date) has a completion date one day AFTER the scheduled date of a start
+// that is nonetheless clearly already past — a same-day-only check would
+// silently exempt exactly that case (codex #4919 r5 P1). A genuinely later
+// calendar day's window always sits after the call's completion instant
+// regardless, so no separate "later date never precedes" special case is
+// needed.
 function startPrecedesCall({ scheduledDate, windowStart, call: callRow }) {
   if (!scheduledDate || !windowStart || !callRow) return false;
   const at = callEndedAt(callRow);
   if (!at || Number.isNaN(at.getTime())) return false;
-  if (String(scheduledDate) !== etDateString(at)) return false;
-  const [sh, sm] = String(windowStart).replace(/^24:/, '00:').split(':').map(Number);
-  if (!Number.isFinite(sh)) return false;
-  const p = etParts(at);
-  return sh * 60 + (sm || 0) < p.hour * 60 + p.minute;
+  const datePart = String(scheduledDate).split('T')[0];
+  const timePart = String(windowStart).replace(/^24:/, '00:');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(datePart) || !/^\d{1,2}:\d{2}$/.test(timePart)) return false;
+  const candidateStart = parseETDateTime(`${datePart}T${timePart.padStart(5, '0')}`);
+  if (!candidateStart || Number.isNaN(candidateStart.getTime())) return false;
+  return candidateStart.getTime() < at.getTime();
 }
 
 function isLiveLeadConversation({ call, extracted, leadId, finalStatus, nonLeadCall, voicemailLeadPath, transcription }) {

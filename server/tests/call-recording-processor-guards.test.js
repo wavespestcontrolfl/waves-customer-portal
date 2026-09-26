@@ -1676,6 +1676,23 @@ describe('startPrecedesCall — an accepted window that had already begun is nev
     });
     expect(startPrecedesCall({ scheduledDate: '2026-09-26', windowStart: '18:00', call: postCallRow })).toBe(true);
   });
+
+  test('a call that itself crosses ET midnight still catches a stale start on the earlier date (codex #4919 r5 P1)', () => {
+    // Call STARTS 11:55 PM ET on the 26th and runs 10 minutes, ending
+    // 12:05 AM ET on the 27th. A same-calendar-day-only comparison would
+    // see scheduledDate (26th) != the completion's ET date (27th) and wave
+    // through an 11 PM start that is unambiguously already past by the time
+    // the call ends — this compares full ET timestamps instead, so the
+    // crossed midnight never exempts it.
+    const crossesMidnight = callRow({ created_at: '2026-09-27T03:55:00Z', duration_seconds: 600 }); // 23:55 ET 9/26
+    expect(startPrecedesCall({ scheduledDate: '2026-09-26', windowStart: '23:00', call: crossesMidnight })).toBe(true);
+    // A window on the NEXT date (the 27th) is still genuinely in the future
+    // relative to the call's completion and must not be flagged.
+    expect(startPrecedesCall({ scheduledDate: '2026-09-27', windowStart: '08:00', call: crossesMidnight })).toBe(false);
+    // A window right at/after the actual completion (12:05 AM) on the 27th
+    // is also still bookable.
+    expect(startPrecedesCall({ scheduledDate: '2026-09-27', windowStart: '00:05', call: crossesMidnight })).toBe(false);
+  });
 });
 
 // codex #4919 r1 P1: in shadow/legacy mode, the start_before_call review
