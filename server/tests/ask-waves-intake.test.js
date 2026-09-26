@@ -2097,7 +2097,7 @@ describe('public-quote resolveEntryChannel allowlist', () => {
 // 2000-char message, a 600-char reply) with repetitive adversarial shapes.
 describe('intake chokepoint worst-case latency (#4905)', () => {
   const { normalizeIntakeResult: normalize, looksLikeEmergency: emergency } = _internals;
-  const shapes = ['a ', 'my ', 'not ', "child's ", 'dry ', 'no les ', '- ', 'my child ', 'can i ', 'return ', 'avoid ', 'hospital ', 'spray '];
+  const shapes = ['a ', 'my ', 'not ', "child's ", 'dry ', 'no les ', '- ', 'my child ', 'can i ', 'return ', 'avoid ', 'hospital ', 'spray ', 'my dog ate un poco ', 'my dog ate the some of '];
   test.each(shapes)('stays well under budget for repeated %j', (unit) => {
     const fill = (n) => unit.repeat(Math.ceil(n / unit.length)).slice(0, n);
     const msg = fill(2000);
