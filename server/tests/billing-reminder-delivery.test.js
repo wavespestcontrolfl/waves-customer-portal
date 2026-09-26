@@ -108,6 +108,15 @@ describe('billing reminder per-channel delivery progress', () => {
     expect(ContactLedger.recordContact).toHaveBeenCalledWith(expect.objectContaining({ invoiceIds: ['inv-a', 'inv-b'] }));
   });
 
+  test('a dues-only aggregate reminder records an empty invoice list, not [null]', async () => {
+    await sendReminderChannels({
+      customerId: 'customer-1', invoiceId: null, invoiceIds: [], source: 'previsit_balance_reminder',
+      purpose: 'balance_reminder', eventKey: 'previsit-balance:ss-2', channels: ['sms'],
+      send: jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted' })),
+    });
+    expect(ContactLedger.recordContact).toHaveBeenCalledWith(expect.objectContaining({ invoiceIds: [] }));
+  });
+
   test('each leg is sent with its own reservation', async () => {
     const send = jest.fn().mockResolvedValue({ sent: true, deliveryOutcome: 'accepted' });
 

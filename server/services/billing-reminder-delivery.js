@@ -112,8 +112,10 @@ async function recordLegOutcome(entry, channel, result, results) {
 // is held, while a confirmed failed attempt can claim a retry atomically.
 // The debts a reservation covers: an aggregate reminder (invoiceId null)
 // passes the invoices it quotes as invoiceIds.
+// A supplied list is used as-is, including an empty one (a dues-only
+// reminder quotes no invoice, matching the legacy previsit ledger row).
 function ledgerInvoiceIds(invoiceId, invoiceIds) {
-  return invoiceIds?.length ? invoiceIds : [invoiceId];
+  return Array.isArray(invoiceIds) ? invoiceIds : [invoiceId];
 }
 
 // offLedgerBalanceCents (rail-guard defaults it to 0): debt the ledger does not hold (e.g. late monthly dues
