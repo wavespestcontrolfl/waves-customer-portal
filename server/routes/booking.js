@@ -147,7 +147,7 @@ const {
   CUSTOMER_HOUR_GRID, lunchBlockEnabled, customerWindowAdmits, refreshCustomerBookingWindowConfig,
 } = require('../services/scheduling/customer-windows');
 const { violatesSelfServeNotice } = require('../services/scheduling/self-serve-notice');
-const { selfBookDayCapEnabled, reserviceRankAfterNewLive } = require('../config/feature-gates');
+const { selfBookDayCapEnabled, reserviceRankAfterNewLive, bookCapacityCommitLive } = require('../config/feature-gates');
 const { etDateString, addETDays, addETBusinessDays } = require('../utils/datetime-et');
 const TwilioService = require('../services/twilio');
 const { applyContactNormalization } = require('../utils/intake-normalize');
@@ -3580,6 +3580,17 @@ async function createSelfBooking(payload = {}) {
         });
       }
 
+      // Commit-time whole-route capacity re-check (GATE_BOOK_CAPACITY_COMMIT,
+      // owner-approved 2026-09-26 dispatch backlog) — see
+      // assertBookCapacityCommit above the transaction for the full design
+      // rationale. One call, no branch, under the tech-day advisory lock
+      // already held above (rung 1) — never a second locking scheme.
+      await assertBookCapacityCommit({
+        trx, technicianId: technician_id, date: slotDateStr,
+        windowStart: slot_start, windowEnd: endTime, durationMinutes: duration,
+        lat: offerLat, lng: offerLng, serviceType: resolvedServiceType,
+      });
+
       const [bookingRow] = await trx('self_booked_appointments').insert({
         customer_id: custId,
         estimate_id: estimate_id || null,
@@ -5717,6 +5728,61 @@ async function createSelfBooking(payload = {}) {
     return { ok: true, body: { booking, confirmationCode: confCode, ...(secureCard ? { secureCard } : {}) } };
 }
 
+// Commit-time whole-route capacity re-check (GATE_BOOK_CAPACITY_COMMIT,
+// owner-approved 2026-09-26 dispatch backlog). createSelfBooking's existing
+// commit-time checks (conflictQuery, findConflictingVisits) answer "did
+// another visit land on this exact window" — the same overlap predicate
+// every commit path has always run. Under GATE_SCHEDULING_CAPACITY the OFFER
+// is stronger: find-time's findCapacitySlots (server/services/scheduling/
+// find-time.js) certifies each candidate through arrival-route.js's
+// WHOLE-ROUTE arrival simulation (owner planning minutes, every promised
+// window on the tech's day). A booking that lands on this tech-day between
+// offer and confirm can push a LATER stop's promise past its window, or the
+// day over capacity, without ever overlapping THIS window — the overlap
+// checks would miss it and the commit would still succeed on a route the
+// offer engine would now refuse. This re-runs the SAME single-candidate
+// placement evaluation the offer used (checkArrivalPlacement ->
+// loadArrivalRouteContext + evaluateArrivalPlacement, arrival-route.js — no
+// traffic preload, the same conservative model find-time's own offer-time
+// fallback check already requires every capacity slot to also pass) against
+// the LIVE day. Callers pass their already-open transaction (`trx`) so this
+// reads under the SAME tech-day advisory lock the booking transaction
+// already holds (rung 1, scheduling/occupancy.js's ORDERING CONTRACT) —
+// never a second locking scheme. A zone/no-tech confirm (technicianId null)
+// has no single technician's route to simulate and is a no-op here; the
+// overlap checks are that path's only capacity guard either way, unchanged
+// by this gate. Extracted to its own function (rather than inlined in the
+// transaction) so the transaction's own complexity count carries only the
+// one call, not this gate's branch logic. Declared AFTER createSelfBooking
+// (function declarations hoist — this changes nothing at runtime) so this
+// function's own `code: 'SLOT_TAKEN'` string never lands ahead of
+// createSelfBooking's own DAY_FULL/SLOT_TAKEN ordering that
+// booking-slot-commit-validation.test.js pins by source position.
+async function assertBookCapacityCommit({ trx, technicianId, date, windowStart, windowEnd, durationMinutes, lat, lng, serviceType }) {
+  if (!technicianId || !bookCapacityCommitLive() || !capacityEnabled()) return;
+  const { checkArrivalPlacement } = require('../services/scheduling/arrival-route');
+  const fit = await checkArrivalPlacement({
+    conn: trx,
+    date,
+    technicianId,
+    prospective: {
+      lat: Number.isFinite(lat) ? lat : null,
+      lng: Number.isFinite(lng) ? lng : null,
+      estimated_duration_minutes: durationMinutes,
+      service_type: serviceType,
+    },
+    windowStart,
+    windowEnd,
+    durationMinutes,
+  });
+  if (fit.feasible) return;
+  throw Object.assign(new Error('That time slot is no longer available. Please pick another.'), {
+    statusCode: 409,
+    isOperational: true,
+    code: 'SLOT_TAKEN',
+  });
+}
+
 // Public shape for a self_booked_appointments row — an EXPLICIT allow-list,
 // never `self_booked_appointments.*`. The raw row now persists the full
 // attribution capture (gclid, _fbc/_fbp, full referrer, and landing_url —
@@ -6197,6 +6263,9 @@ module.exports._internals = {
   bookingExpectedMinutes,
   loadBookingConfig,
   createSelfBooking,
+  // Commit-time whole-route capacity re-check (GATE_BOOK_CAPACITY_COMMIT),
+  // exported for direct unit coverage of the gate/argument-passing contract.
+  assertBookCapacityCommit,
   MAX_BOOKING_HORIZON_DAYS,
   mintCaptureToken,
   verifyCaptureToken,

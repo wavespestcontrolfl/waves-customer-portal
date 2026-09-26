@@ -186,6 +186,23 @@ fields only: /api/booking/availability builds each public slot field by field
 (`routes/booking.js`) and the estimate routes build theirs through
 `classifySlot`, so neither field reaches a customer response. Gate-off availability is unchanged apart from the
 shared grid / day-end / lunch-gate rules above, which apply in both modes.
+Commit-time capacity re-check (`GATE_BOOK_CAPACITY_COMMIT`, owner-approved
+2026-09-26; needs `GATE_SCHEDULING_CAPACITY` live too): every `createSelfBooking`
+commit — `/api/booking/confirm` here and the re-service commit below — re-runs
+the SAME single-candidate whole-route placement evaluation the offer used
+(`arrival-route.js`'s `checkArrivalPlacement`, the exact function
+`findCapacitySlots` certifies each offered slot through) against the LIVE
+tech-day, inside the transaction and under the SAME tech-day advisory lock the
+commit already holds (no second locking scheme). This closes the gap the
+overlap-only re-check (`findConflictingVisits`) leaves: another booking landing
+on the tech-day between offer and confirm can push a LATER stop's promised
+window past its promise, or the day over capacity, without ever overlapping
+the confirmed window — that booking now refuses with the existing `SLOT_TAKEN`
+409 (the same shape and client recovery as every other slot race on this
+route) instead of committing a route the offer engine would no longer certify.
+A zone/no-tech confirm (no technician bound) has no single route to re-check
+and keeps only the overlap gate, unchanged. Either gate off is byte-identical
+to today.
 Packed offers + expected-minutes travel gap (owner ruling 2026-09-23,
 `scheduling/packing-geometry.js` — `loadPackingAnchors`/`packedBounds`, the
 one shared anchor set and packed-start formula `scheduling/find-time.js`
@@ -2027,7 +2044,13 @@ never bills the monthly rate; re-service catalog service_id; card-capture
 step + ad attribution skipped; `/booking/confirm` pins the option null
 after the body spread). The lane dedupe is re-checked INSIDE the commit
 transaction under a customer+lane advisory lock, so parallel commits
-cannot double-book a lane's free visit. find-slots mirrors the
+cannot double-book a lane's free visit. Because the commit runs through the
+SAME `createSelfBooking` transaction, it gets the SAME commit-time capacity
+re-check under `GATE_BOOK_CAPACITY_COMMIT` (see the `GATE_SCHEDULING_CAPACITY`
+paragraph above) — a tech-bound re-service slot that a later booking made
+infeasible refuses with `SLOT_TAKEN` and this route's existing refresh (fresh
+availability in the 409 body) instead of committing an infeasible route.
+find-slots mirrors the
 reschedule search: model-backed parseWhen clamped on BOTH ends to the
 booking window, READ-ONLY, no raw query logging. Generic 404 for
 bad/unknown tokens and while the gate is off. Treat the reservice token,
