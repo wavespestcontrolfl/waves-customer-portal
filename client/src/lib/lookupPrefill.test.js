@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { palmPrefillAllowed, subdivisionMedianPrefillSqFt, lookupHomeSqFtPrefill, homeSqFtIsUnverifiedPlatMedian, lookupLotIsUnitParcel, scopeUnitParcelProfile } from "./lookupPrefill";
+import { palmPrefillAllowed, subdivisionMedianPrefillSqFt, lookupHomeSqFtPrefill, homeSqFtIsUnverifiedPlatMedian, lookupLotIsUnitParcel, scopeUnitParcelProfile, scrubReopenedEstimateForm } from "./lookupPrefill";
 
 describe("palm-count prefill gate", () => {
   it("prefills a server-trusted count", () => {
@@ -115,5 +115,45 @@ describe("plat-median prefill never saves as tech-verified", () => {
     expect(homeSqFtIsUnverifiedPlatMedian({ homeSqFt: "2980", _homeSqFtEdited: false }, { ...VACANT_WITH_MEDIAN, homeSqFt: 2980 })).toBe(false);
     expect(homeSqFtIsUnverifiedPlatMedian({ homeSqFt: "2980" }, { homeSqFt: 2980 })).toBe(false);
     expect(homeSqFtIsUnverifiedPlatMedian(null, VACANT_WITH_MEDIAN)).toBe(false);
+  });
+});
+
+describe("reopened estimate scrub (legacy-reopen follow-up to #4862 / #4871)", () => {
+  const UNIT = { residentialUnitLookup: { wholePropertyCategory: "RESIDENTIAL" } };
+  const UNIT_PARCEL = { lotSqFt: 400000, fieldVerifyFlags: [{ field: "lotSize", scope: "unit_parcel" }] };
+
+  it("seeds the unit flag and clears only auto-derived termite values", () => {
+    const { form, cleared } = scrubReopenedEstimateForm({
+      termiteFootprintSqFt: "725", _termiteFootprintAuto: true,
+      trenchingPerimeterLF: "140", _trenchingPerimeterAuto: false,
+    }, UNIT);
+    expect(form._unitLookup).toBe(true);
+    expect(form.termiteFootprintSqFt).toBe("");
+    expect(form._termiteFootprintAuto).toBe(false);
+    expect(form.trenchingPerimeterLF).toBe("140");
+    expect(cleared).toEqual(["termite measurements"]);
+  });
+
+  it("clears the development's lot, bed area and copied flea area — never typed ones", () => {
+    const auto = scrubReopenedEstimateForm({
+      lotSqFt: "400000", bedArea: "6000", fleaExteriorAreaSqFt: "25000", fleaExteriorAreaSource: "AI_ESTIMATE",
+    }, UNIT_PARCEL);
+    expect(auto.form).toMatchObject({ lotSqFt: "", bedArea: "", fleaExteriorAreaSqFt: "0", fleaExteriorAreaSource: "UNKNOWN" });
+    expect(auto.cleared).toEqual(["lot size", "bed area", "flea exterior area"]);
+
+    const typed = scrubReopenedEstimateForm({
+      lotSqFt: "1500", _lotSqFtEdited: true, bedArea: "200", _manualFields: ["lotSqFt", "bedArea"],
+      fleaExteriorAreaSqFt: "300", fleaExteriorAreaSource: "MANUAL_OVERRIDE",
+    }, UNIT_PARCEL);
+    expect(typed.form).toMatchObject({ lotSqFt: "1500", bedArea: "200", fleaExteriorAreaSqFt: "300" });
+    expect(typed.cleared).toEqual([]);
+  });
+
+  it("leaves a whole-home estimate alone", () => {
+    const input = { lotSqFt: "9000", termiteFootprintSqFt: "1200", _termiteFootprintAuto: true };
+    const { form, cleared } = scrubReopenedEstimateForm(input, { lotSqFt: 9000 });
+    expect(form).toEqual(input);
+    expect(cleared).toEqual([]);
+    expect(scrubReopenedEstimateForm(input, null).cleared).toEqual([]);
   });
 });

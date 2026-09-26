@@ -103,6 +103,60 @@ export function scopeUnitParcelProfile(profile) {
   return scoped;
 }
 
+// Measurement boxes the tool fills itself (flag = "auto-derived, not typed").
+const AUTO_DERIVED_TERMITE_MEASUREMENTS = [
+  ["termiteFootprintSqFt", "_termiteFootprintAuto"],
+  ["trenchingPerimeterLF", "_trenchingPerimeterAuto"],
+  ["boracareSqft", "_boracareSqftAuto"],
+  ["preslabSqft", "_preslabSqftAuto"],
+];
+
+/**
+ * Reopening a saved estimate restores its form from the stored inputs. One
+ * saved before today's lookup guards can carry values those guards now
+ * refuse. The priced profile it was saved with is the authority; only
+ * values the tool filled itself are cleared — anything the operator typed
+ * (_manualFields / the edited flags) stays.
+ * - A unit-address lookup: no `_unitLookup` flag (saved before unit scope)
+ *   and termite boxes auto-derived from one unit's interior area.
+ * - A condo record carrying the development's parcel (unit_parcel): the
+ *   development's lot, the lookup's bed area, and a flea exterior area
+ *   copied from the development's turf.
+ * Returns the form plus the labels of what was cleared, so the caller can
+ * refuse the stored price that was computed from them.
+ */
+export function scrubReopenedEstimateForm(form, engineProfile) {
+  const next = { ...form };
+  const cleared = [];
+  const typed = (key) => (form._manualFields || []).includes(key);
+  if (engineProfile?.residentialUnitLookup) {
+    next._unitLookup = true;
+    for (const [key, autoFlag] of AUTO_DERIVED_TERMITE_MEASUREMENTS) {
+      if (next[autoFlag] && String(next[key] || "").trim() !== "") {
+        next[key] = "";
+        next[autoFlag] = false;
+        cleared.push("termite measurements");
+      }
+    }
+  }
+  if (lookupLotIsUnitParcel(engineProfile)) {
+    if (!form._lotSqFtEdited && !typed("lotSqFt") && Number(form.lotSqFt) > 0) {
+      next.lotSqFt = "";
+      cleared.push("lot size");
+    }
+    if (!typed("bedArea") && Number(form.bedArea) > 0) {
+      next.bedArea = "";
+      cleared.push("bed area");
+    }
+    if (form.fleaExteriorAreaSource === "AI_ESTIMATE" && Number(form.fleaExteriorAreaSqFt) > 0) {
+      next.fleaExteriorAreaSqFt = "0";
+      next.fleaExteriorAreaSource = "UNKNOWN";
+      cleared.push("flea exterior area");
+    }
+  }
+  return { form: next, cleared: [...new Set(cleared)] };
+}
+
 /**
  * The "Verify home living area" save must never stamp a plat-median
  * PREFILL as a tech-verified measurement (that would poison the cached
