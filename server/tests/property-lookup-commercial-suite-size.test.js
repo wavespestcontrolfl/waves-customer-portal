@@ -378,3 +378,12 @@ describe('subtype reconciliation evidence', () => {
     expect(reconcileCommercialSuiteSubtype('office_retail', { source: 'license_seats' })).toBe('restaurant');
   });
 });
+
+describe('Codex r6: commercial Space designator is suite scope', () => {
+  test('"Space 12" on a plaza record enters the suite path', () => {
+    const address = '4400 Test Commons Pkwy E Space 12, Bradenton, FL 00000';
+    const profile = buildEnrichedProfile(plazaSuiteRecord({ formattedAddress: address }), null, 27.5, -82.45, null, null, address, SUITE_SIZING_ON);
+    expect(profile.homeSqFt).toBe(0);
+    expect(profile._commercialSuiteCandidate).not.toBeNull();
+  });
+});

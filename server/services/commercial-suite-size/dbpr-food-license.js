@@ -134,7 +134,7 @@ function normalizeStreetName(value) {
 // last, so the whole compound (not merely "204") is pulled out of the
 // street name (primary review of PR #4840 r5 P2). A bare single pair
 // ("#102") still matches as one iteration, unchanged.
-const UNIT_TAIL_RE = /(?:^|\s)((?:(?:#|ste\.?|suite|unit|bldg\.?|building)\s*#?\s*[\w-]+\s*)+)$/i;
+const UNIT_TAIL_RE = /(?:^|\s)((?:(?:#|ste\.?|suite|unit|bldg\.?|building|space|spc\.?|bay)\s*#?\s*[\w-]+\s*)+)$/i;
 
 // Splits "4400 Test Commons Pkwy E #102" (or "4400 Test Commons Pkwy E,
 // Suite 102") into house number / street / unit. Deliberately simple — callers pass an
@@ -196,7 +196,9 @@ function rowLocation(row) {
   const street = String(row['Location Street Address'] || '').trim();
   const line2 = String(row['Location Address Line 2'] || '').trim();
   // A bare "102" in line 2 gets a "#" so the unit parser recognizes it.
-  const line2Unit = /^\d/.test(line2) ? `#${line2}` : line2;
+  // A bare suite value in line 2 ("102", "A", "A-1") gets a "#" so the unit
+  // parser recognizes it; a designator-led value ("STE 102") is left as is.
+  const line2Unit = /^[A-Za-z0-9]{1,4}(?:-[A-Za-z0-9]{1,4})?$/.test(line2) ? `#${line2}` : line2;
   const parsed = parseAddressLine(line2 && !parseAddressLine(street).unit ? `${street} ${line2Unit}` : street);
   return {
     ...parsed,
@@ -240,6 +242,15 @@ function matchDbprRow(rows, { street, unit, zip, phone, businessNameHint } = {})
     // picked out by phone/name.
     if (targetUnit && rowUnit && rowUnit !== targetUnit) return false;
     if (targetUnit && rowUnit && rowUnit === targetUnit) return true;
+    return hintMatches(row);
+  });
+  // Exact-unit matches are the candidate set; when more than one license
+  // names the same suite, the caller's phone or business name picks one.
+  const final = disambiguated.length > 1 ? disambiguated.filter(hintMatches) : disambiguated;
+  if (final.length !== 1) return null;
+  return final[0];
+
+  function hintMatches(row) {
     if (targetPhone) {
       // Either license phone can be the business line — compare both.
       const rowPhones = [row['Secondary Phone Number'], row['Primary Phone Number']].map(normalizePhoneDigits);
@@ -247,10 +258,7 @@ function matchDbprRow(rows, { street, unit, zip, phone, businessNameHint } = {})
     }
     if (businessNameHint && businessNameMatches(row['Business Name'], businessNameHint)) return true;
     return false;
-  });
-
-  if (disambiguated.length !== 1) return null;
-  return disambiguated[0];
+  }
 }
 
 // ── Fetch + cache ───────────────────────────────────────────────
@@ -274,7 +282,19 @@ async function defaultFetchText(url, timeoutMs = DBPR_FETCH_TIMEOUT_MS) {
 async function loadDistrictRows(district, { fetchText = defaultFetchText, now = () => Date.now(), timeoutMs } = {}) {
   const cached = _cache.get(district);
   if (cached && (now() - cached.fetchedAt) < DBPR_CACHE_TTL_MS) return cached.rows;
-  if (_inflight.has(district)) return _inflight.get(district);
+  if (_inflight.has(district)) {
+    // Joining a fetch another request started (possibly with the full 15s
+    // budget) must still honor THIS caller's remaining budget.
+    const joined = _inflight.get(district);
+    if (!(timeoutMs > 0)) return joined;
+    let timer;
+    const expired = new Promise((resolve) => { timer = setTimeout(() => resolve(cached ? cached.rows : []), timeoutMs); });
+    try {
+      return await Promise.race([joined, expired]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
   const failedAt = _failedAt.get(district);
   if (failedAt != null && (now() - failedAt) < DBPR_FAILURE_BACKOFF_MS) return cached ? cached.rows : [];
   const promise = (async () => {

@@ -377,3 +377,36 @@ describe('compound unit keys keep component boundaries', () => {
     expect(normalizeUnitValue('Suite WEST-2')).toBe('WEST-2');
   });
 });
+
+describe('Codex r6 DBPR matching', () => {
+  const dbpr = require('../services/commercial-suite-size/dbpr-food-license');
+  const base = { 'Location Street Address': '4400 TEST COMMONS PKWY E', 'Location Zip Code': '00000' };
+  test('an alphabetic suite in Location Address Line 2 ("A", "A-1") matches Suite A / Suite A-1', () => {
+    const a = { ...base, 'Location Address Line 2': 'A' };
+    const a1 = { ...base, 'Location Address Line 2': 'A-1' };
+    expect(dbpr.matchDbprRow([a], { street: '4400 Test Commons Pkwy E', unit: 'Suite A', zip: '00000' })).toBe(a);
+    expect(dbpr.matchDbprRow([a1], { street: '4400 Test Commons Pkwy E', unit: 'Suite A-1', zip: '00000' })).toBe(a1);
+  });
+  test('a "SPACE 12" license row matches a Space 12 address', () => {
+    const row = { ...base, 'Location Street Address': '4400 TEST COMMONS PKWY E SPACE 12' };
+    expect(dbpr.matchDbprRow([row], { street: '4400 Test Commons Pkwy E', unit: 'Space 12', zip: '00000' })).toBe(row);
+  });
+  test('two licenses on the same suite: the caller phone picks one; no hint stays ambiguous', () => {
+    const r1 = { ...base, 'Location Address Line 2': 'STE 102', 'Primary Phone Number': '555-010-0111' };
+    const r2 = { ...base, 'Location Address Line 2': 'STE 102', 'Primary Phone Number': '555-010-0222' };
+    expect(dbpr.matchDbprRow([r1, r2], { street: '4400 Test Commons Pkwy E', unit: 'Suite 102', zip: '00000', phone: '+15550100222' })).toBe(r2);
+    expect(dbpr.matchDbprRow([r1, r2], { street: '4400 Test Commons Pkwy E', unit: 'Suite 102', zip: '00000' })).toBeNull();
+  });
+  test('joining an in-flight download honors the joiner\'s own timeout', async () => {
+    dbpr._resetCacheForTests();
+    let release;
+    const slow = new Promise((r) => { release = r; });
+    const first = dbpr.loadDistrictRows(7, { fetchText: () => slow });
+    const t0 = Date.now();
+    const joined = await dbpr.loadDistrictRows(7, { timeoutMs: 50 });
+    expect(joined).toEqual([]);
+    expect(Date.now() - t0).toBeLessThan(1000);
+    release('');
+    await first;
+  });
+});

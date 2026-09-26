@@ -171,7 +171,7 @@ describe('engine adoption of the lookup suite size', () => {
   // every resolved suite with the caller's own name.
   test('businessNameHint is never the caller\'s name, and the lookup businessName fallback still runs', () => {
     const i = src.indexOf('const lookupSuiteSize = effectiveSignals.enriched?.suiteSize');
-    const block = src.slice(i, i + 1700);
+    const block = src.slice(i, i + 2600);
     expect(block).toMatch(/businessNameHint:\s*null,/);
     expect(block).not.toMatch(/businessNameHint:\s*intent\.customer_name/);
     expect(block).toMatch(/!suiteSize\.businessName && lookupSuiteSize\?\.businessName/);
@@ -199,5 +199,14 @@ describe('engine adopts a tech-verified lookup suite size', () => {
     const src = fs.readFileSync(path.join(__dirname, '../services/estimator-engine/index.js'), 'utf8');
     const i = src.indexOf('const lookupSuiteSize = effectiveSignals.enriched?.suiteSize');
     expect(src.slice(i, i + 900)).toMatch(/lookupSuiteSize\.source === 'verified'/);
+  });
+});
+
+describe('Codex r6: engine re-resolve keeps the lookup subtype', () => {
+  const fs = require('fs');
+  const path = require('path');
+  test('falls back to the lookup commercialSubtype when intent has none', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../services/estimator-engine/index.js'), 'utf8');
+    expect(src).toMatch(/commercialSubtype: intent\.commercial_subtype \|\| effectiveSignals\.enriched\?\.commercialSubtype \|\| null/);
   });
 });

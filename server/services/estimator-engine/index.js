@@ -2684,7 +2684,9 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
                 // none of its own.
                 businessNameHint: null,
                 commercialRiskType: intent.commercial_risk_type || null,
-                commercialSubtype: intent.commercial_subtype || null,
+                // Intent wins when present; else the lookup's deterministic
+                // (county-derived) subtype, so a medical suite keeps its default.
+                commercialSubtype: intent.commercial_subtype || effectiveSignals.enriched?.commercialSubtype || null,
               }, { skipWebSearch: Boolean(lookupSuiteSize) });
               if (suiteSize && !suiteSize.businessName && lookupSuiteSize?.businessName) {
                 suiteSize = { ...suiteSize, businessName: lookupSuiteSize.businessName };

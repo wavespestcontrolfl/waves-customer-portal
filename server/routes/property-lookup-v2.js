@@ -1842,7 +1842,12 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   // the admin estimate tool's own lookup route and the estimator engine's
   // gatherPropertySignals opt in.
   if (commercialProfile && options.commercialSuiteSizing === true) {
-    const suiteSubpremiseSignal = shadowHasSubpremiseSignal({ address: lookupAddress });
+    // Commercial subpremise: the shared residential predicate deliberately
+    // rejects "Space" (mobile-home lots), but plazas and flex complexes use
+    // "Space 12" for tenant bays. Accepted here only — the independent
+    // multi-tenant evidence below is still required.
+    const suiteSubpremiseSignal = shadowHasSubpremiseSignal({ address: lookupAddress })
+      || /(?:^|[\s,])(?:space|spc)\.?\s*#?\s*[A-Za-z0-9-]+(?=$|[\s,])/i.test(String(lookupAddress || ''));
     // subpremiseSignal:false on purpose — the shared predicate counts a
     // Suite/Unit suffix as part-building evidence by itself, which would make
     // this gate the subpremise signal alone. A freestanding building whose
