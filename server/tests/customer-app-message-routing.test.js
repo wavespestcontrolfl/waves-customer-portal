@@ -618,6 +618,14 @@ describe('explicit billing channel combinations', () => {
       .not.toBe(billingNotificationEventKey({ ...input, paymentId: 'payment-two' }));
   });
 
+  test('numeric event ids hash like their string form', () => {
+    const { billingNotificationEventKey } = require('../services/messaging/billing-channel-routing');
+    const numeric = { ...input, metadata: { ...input.metadata, scheduled_sms_log_id: 4242 } };
+    expect(billingNotificationEventKey(numeric)).toBe(billingNotificationEventKey({
+      ...input, metadata: { ...input.metadata, scheduled_sms_log_id: '4242' },
+    }));
+  });
+
   test('unlisted receipt types forward their saved billing category to the App provider', async () => {
     prefs.payment_receipt_channels = ['push'];
     expect(await sendCustomerMessage({ ...input, metadata: { original_message_type: 'autopay_charge_success' } }))

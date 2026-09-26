@@ -53,7 +53,7 @@ function billingNotificationEventKey(input) {
   const eventId = input.metadata?.scheduled_sms_log_id || input.metadata?.stripe_event_id
     || input.metadata?.attempt_payment_id || input.metadata?.payment_id || input.paymentId;
   const identity = eventId || [input.invoiceId, input.appointmentId, input.estimateId, input.body].filter(Boolean).join(':');
-  return `billing:${input.customerId}:${input.metadata?.original_message_type || input.purpose}:${crypto.createHash('sha256').update(identity).digest('hex')}`;
+  return `billing:${input.customerId}:${input.metadata?.original_message_type || input.purpose}:${crypto.createHash('sha256').update(String(identity)).digest('hex')}`;
 }
 
 function isReplayHold(result) {
