@@ -28,6 +28,15 @@ const ARGS = Object.fromEntries(
   })
 );
 
+// Unknown flags fail closed: a mistyped --dry-run (--dryRun, --dry_run,
+// --dry) must never fall through to the live upsert (fallback P2).
+const KNOWN_FLAGS = new Set(['dry-run', 'dryrun', 'per-day', 'min-gaps', 'limit']);
+const unknown = Object.keys(ARGS).filter((k) => !KNOWN_FLAGS.has(k));
+if (unknown.length) {
+  console.error(`seed-citability-backfill: unknown argument(s) ${unknown.map((k) => JSON.stringify(k)).join(', ')} — known: --${[...KNOWN_FLAGS].join(', --')}`);
+  process.exit(1);
+}
+
 const dryRun = !!(ARGS['dry-run'] || ARGS.dryrun);
 
 // A flag that is present but not a positive integer is an operator typo —
