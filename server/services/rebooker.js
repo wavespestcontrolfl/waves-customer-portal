@@ -3677,6 +3677,18 @@ async function applyLiveMoveSideEffects(conn, svc, opts = {}) {
 }
 
 module.exports = new SmartRebooker();
+// Read-only conflict probe (auto-dispatch shared model, 2026-09-26): the
+// EXACT tech-blind occupancy + booked-interview check reschedule()'s own
+// occupancy gate calls before every move (probeMoveConflicts -> scheduling/
+// occupancy.js findConflictingVisits, includeInterviews:true), plus the
+// probe-end rule it applies to an open-ended window (occupancyProbeEnd: the
+// duration, else one hour). Both are pure reads — no locks, no writes —
+// exported unchanged so auto-dispatch's candidate pre-filter asks the
+// writer's own question instead of re-deriving it. The tech-scoped hard
+// check reschedule() also runs is a strict subset of this tech-blind one
+// (same status/hold/window rules, narrowed to one technician_id).
+module.exports.probeMoveConflicts = probeMoveConflicts;
+module.exports.occupancyProbeEnd = occupancyProbeEnd;
 // Shared with the IB schedule tools + bulk admin movers so every reschedule
 // path applies the same live-lifecycle rewind (see comment on the constant).
 module.exports.LIVE_LIFECYCLE_RESET = LIVE_LIFECYCLE_RESET;
