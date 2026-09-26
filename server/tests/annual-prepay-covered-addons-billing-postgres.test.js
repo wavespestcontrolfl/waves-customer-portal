@@ -603,6 +603,29 @@ postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
     expect(await addonsAlert(f)).toBeUndefined();
   });
 
+  test('a later pass that hits a different reason refreshes the office alert instead of leaving the first one standing (pre-push P1)', async () => {
+    const f = await coveredVisit();
+    const ScheduledInvoiceMint = require('../services/scheduled-invoice-mint');
+    const mint = jest.spyOn(ScheduledInvoiceMint, 'mintScheduledServiceInvoiceWithDeposit').mockRejectedValue(new Error('synthetic mint outage'));
+    const idempotencyKey = randomUUID();
+    try {
+      expect(await complete(f, {}, { idempotencyKey })).toMatchObject({ status: 200 });
+    } finally {
+      mint.mockRestore();
+    }
+    expect((await addonsAlert(f)).body).toMatch(/could not be created/);
+    // The visit gains a visit-wide discount; the closeout's side effects resume.
+    await trx('scheduled_services').where({ id: f.serviceId }).update({ estimated_price: BASE + ADDON - 9,
+      discount_dollars: 9, discount_name: 'Synthetic visit discount', discount_type: 'fixed_amount', discount_amount: 9 });
+    await releaseForResume(f);
+    expect(await complete(f, {}, { idempotencyKey })).toMatchObject({ status: 200 });
+    const alerts = await trx('notifications').where({ recipient_type: 'admin' })
+      .whereRaw("metadata->>'dedupeKey' = ?", [`annual_prepay_addons_unbilled:${f.serviceId}`]);
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0].body).toMatch(/visit-wide discount/);
+    expect(alerts[0].read_at).toBeNull();
+  });
+
   test('a covered visit with a refunded invoice alerts the office to bill the add-ons once the refund is final (GitHub r1 P1)', async () => {
     const f = await coveredVisit({ invoiceLines: (x) => [baseLine(x), addonLine(x)], invoiceStatus: 'refunded' });
     const out = await complete(f, { sendCompletionSms: true });

@@ -10856,6 +10856,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
         const bell = await NotificationService.notifyAdmin('billing', 'Annual-prepay add-ons not billed — bill by hand',
           `Completing ${svc.service_type} for customer ${svc.customer_id}: the visit is covered by the annual prepay, but its add-ons were not billed automatically (${reason}). Bill the add-ons by hand.`,
           { link: `/admin/customers/${svc.customer_id}`, bell: true, dedupeKey: `annual_prepay_addons_unbilled:${svc.id}`,
+            // One bell per visit, kept CURRENT: a later pass that hits a
+            // different reason or amount rewrites it and surfaces it unread.
+            refreshOnDedupe: true,
             metadata: { customerId: svc.customer_id, scheduledServiceId: svc.id, reason, ...extra } });
         // notifyAdmin returns null when its insert fails.
         if (!bell) throw new Error('the office notification was not recorded');
@@ -10946,6 +10949,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           const bell = await NotificationService.notifyAdmin('billing', 'Annual-prepay visit invoice voided — check its other charges',
             `Completing ${svc.service_type} for customer ${svc.customer_id}: invoice ${voidedInvoice.id} was voided because the annual prepay covers the visit, but it also carried charges that are neither the covered visit nor its add-ons. Re-bill any that are owed.`,
             { link: `/admin/customers/${svc.customer_id}`, bell: true, dedupeKey: `annual_prepay_invoice_reconcile:${svc.id}`,
+              refreshOnDedupe: true,
               metadata: { customerId: svc.customer_id, scheduledServiceId: svc.id, voidedInvoiceId: voidedInvoice.id } });
           if (!bell) throw new Error('the office notification was not recorded');
         } catch (bellErr) {
