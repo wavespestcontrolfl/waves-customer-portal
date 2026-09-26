@@ -289,7 +289,7 @@ async function loadMessageContext(conn, message) {
       .select('id', 'is_primary', 'address_line1', 'address_line2', 'city', 'zip'),
     conn('property_preferences').where({ customer_id: message.customer_id }).first(),
   ]);
-  return { message, history: history.reverse(), properties, preferences: preferences || {}, captureCommitments: smsCommitmentsEnabled(), captureAdditionalProperties: require('./sms-additional-properties').enabled() };
+  return { message, history: history.reverse(), properties, preferences: preferences || {}, loadedAt: new Date(), captureCommitments: smsCommitmentsEnabled(), captureAdditionalProperties: require('./sms-additional-properties').enabled() };
 }
 
 async function appliedSmsProfileFields(conn, message) {
@@ -348,10 +348,17 @@ function resolveDueDeadline(item, messageCreatedAt, messageBody = '') {
 // Sole only when the snapshot taken before the provider call and the one read
 // under the write lock agree: a property deactivated while extraction was in
 // flight must not make an ambiguous request unambiguous (Codex #4816 r22).
-function requestTimeSoleProperty(locked, beforeExtraction) {
+// Property rows carry no reliable change time, so a snapshot taken long
+// after the text arrived (a backlog, an interrupted post-ack kick) cannot
+// vouch for the property set the customer had then: fail closed and leave
+// the request ambiguous (Codex #4816 r26).
+const SOLE_PROPERTY_SNAPSHOT_GRACE_MS = 10 * 60 * 1000;
+function requestTimeSoleProperty(locked, context, sourceAt) {
   const soleOf = (list) => (list?.length === 1 ? list[0].id : null);
   const sole = soleOf(locked);
-  return sole && sole === soleOf(beforeExtraction) ? sole : null;
+  const prompt = context.loadedAt instanceof Date
+    && context.loadedAt.getTime() - new Date(sourceAt).getTime() <= SOLE_PROPERTY_SNAPSHOT_GRACE_MS;
+  return sole && prompt && sole === soleOf(context.properties) ? sole : null;
 }
 
 async function recordMessageOperations(conn, message, extracted, matchedContext) {
@@ -399,7 +406,7 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
     const additional = !replay && matchedContext.captureAdditionalProperties
       ? await require('./sms-additional-properties').stageAdditionalProperties({ trx, message: live, proposals: extracted.additional_properties })
       : null;
-    const soleProperty = requestTimeSoleProperty(properties, matchedContext.properties);
+    const soleProperty = requestTimeSoleProperty(properties, matchedContext, message.created_at);
     if (obligations.length) await trx('call_commitments').insert(obligations.map((item) => {
       const propertyId = properties.length === 1 && properties.some((p) => p.id === item.property_id) ? item.property_id : null;
       const { due_at: dueAt, due_basis: dueBasis } = resolveDueDeadline(item, message.created_at, message.message_body);
@@ -428,7 +435,14 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
     // Only a KNOWN-temporary fact is silent: the extractor marks ambiguous
     // timing duration 'uncertain' precisely for staff review, so that one
     // still rings (Codex #4816 r10).
-    const temporaryFacts = facts.filter((f) => f.outcome === 'temporary_instruction' && f.duration !== 'uncertain');
+    // A fact the extractor itself labelled temporary/visit-only is known
+    // temporary. One it labelled durable is held back only by temporary
+    // wording somewhere in the message; that wording speaks for it only when
+    // it is the message's sole fact — a durable sibling ("For tomorrow's
+    // visit use the side gate. My permanent lockbox code is 1234") still
+    // rings the bell (Codex #4816 r26).
+    const temporaryFacts = facts.filter((f) => f.outcome === 'temporary_instruction' && f.duration !== 'uncertain'
+      && (f.duration !== 'durable' || facts.length === 1));
     const exceptions = facts.filter((f) => !['applied', 'unchanged', 'proposed', 'superseded', 'previously_applied'].includes(f.outcome)
       && !temporaryFacts.includes(f));
     let notification = null;
@@ -735,7 +749,10 @@ async function refreshSmsCommitment(conn, row, now, verify) {
   // A provider or schema failure is persisted with retry_after, but no model
   // judged the event: keep it pending (verify reuses the stored failure until
   // retry_after, so this costs no extra provider calls).
-  return { outcome: persisted && !verdict.retry_after ? 'verified' : 'deferred', verdict, closed };
+  // A failed (not truncated) evidence source is transient too: the verdict
+  // was reached without it, so the event stays pending (Codex #4816 r26).
+  const transientFailure = evidence.failures.some((f) => !f.endsWith('_truncated'));
+  return { outcome: persisted && !verdict.retry_after && !transientFailure ? 'verified' : 'deferred', verdict, closed };
 }
 
 async function refreshSmsCommitments({ now = new Date(), conn = db, verify = verifySmsFulfillment } = {}) {

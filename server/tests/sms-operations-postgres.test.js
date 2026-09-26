@@ -915,6 +915,25 @@ postgres('SMS operations on PostgreSQL', () => {
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 
+  test('Codex #4816 r26: a durable sibling held back only by another sentence\'s temporary wording still rings the review bell', async () => {
+    message.message_body = "For tomorrow's visit use the side gate. My lockbox code is 1234";
+    await mockPg('sms_log').where({ id: message.id }).update({ message_body: message.message_body });
+    const property_id = context.properties[0].id;
+    const facts = [
+      { field: 'access_notes', value: 'Use the side gate', quote: message.message_body, duration: 'visit_only', property_id },
+      { field: 'lockbox_code', value: '1234', quote: message.message_body, duration: 'durable', property_id },
+    ];
+    await recordMessageOperations(mockPg, message, { ...result, facts }, context);
+    expect(await mockPg('property_preferences')).toHaveLength(0);
+    const analysis = (await mockPg('sms_log').first()).operational_analysis.facts;
+    expect(analysis.map((f) => [f.field, f.outcome])).toEqual([
+      ['access_notes', 'temporary_instruction'], ['lockbox_code', 'temporary_instruction']]);
+    // The visit-only note alone would be silent; the durable code, held back
+    // only by "tomorrow's", is not — staff see it.
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(NotificationService.notifyAdmin.mock.calls[0][1]).toBe('SMS instructions need review');
+  });
+
   test('Codex #4816 r10: an uncertain-duration fact is not known-temporary — it still rings the review bell', async () => {
     await recordMessageOperations(mockPg, message, { ...result, facts: [{ ...result.facts[0], duration: 'uncertain' }] }, context);
     expect(await mockPg('property_preferences')).toHaveLength(0);

@@ -1195,7 +1195,7 @@ postgres('SMS commitments on PostgreSQL', () => {
   });
 
   test.each(['revalidation refuses the close', 'the source text changes under the lock', 'the provider fails',
-    'new activity lands during the provider backoff'])(
+    'new activity lands during the provider backoff', 'a non-witness evidence source fails'])(
     'Codex #4816 r18/r19: a verdict the transaction does not persist leaves the event unseen for the next tick (%s)', async (cause) => {
     result.facts = [];
     result.obligations[0] = { ...result.obligations[0], kind: 'other', basis: 'request', due_at: null, due_text: 'sometime soon',
@@ -1221,9 +1221,17 @@ postgres('SMS commitments on PostgreSQL', () => {
         await mockPg('sms_log').where({ id: message.id }).update({ message_body: `${message.message_body} (edited)` });
         return { verdict: 'open', reason: 'no_answer', evidence_hash: 'x', retry_after: null };
       }
+      if (cause === 'a non-witness evidence source fails') {
+        // Codex #4816 r26: the visit witness loaded but the call source did
+        // not; verify settles as incomplete_sources with no retry_after.
+        return { verdict: 'uncertain', reason: 'incomplete_sources', failures: ['call'], evidence_hash: 'x', retry_after: null };
+      }
       return { verdict: 'fulfilled', record_type: 'visit', record_id: visit.id, quote: 'en route', evidence_hash: 'stale', retry_after: null };
     });
-    expect(await refreshSmsCommitments({ conn: mockPg, verify, now })).toMatchObject({ scanned: 1, fulfilled: 0 });
+    const conn = cause === 'a non-witness evidence source fails'
+      ? new Proxy(mockPg, { apply: (_t, _this, [table, ...rest]) => (table === 'call_log' ? mockPg('call_log_unavailable') : mockPg(table, ...rest)) })
+      : mockPg;
+    expect(await refreshSmsCommitments({ conn, verify, now })).toMatchObject({ scanned: 1, fulfilled: 0 });
     const row = await mockPg('call_commitments').where({ id: target }).first();
     expect(row.status).toBe('open');
     expect(row.sms_context.event_seen_at).toBeUndefined();
@@ -1461,6 +1469,9 @@ postgres('SMS commitments on PostgreSQL', () => {
     // Codex #4816 r22: two when extraction started, one deactivated before the
     // write committed — still ambiguous.
     ['two before extraction, one deactivated before the write', 2, 'deactivate-before-write', false],
+    // Codex #4816 r26: a context loaded long after the text (a backlog) cannot
+    // vouch for the property set the customer had when it arrived.
+    ['one property, but the text was first processed after a backlog', 1, 'late-context', false],
   ])('Codex #4816 r14/r20: an unscoped cancel ask admits a cancellation only at the request-time sole property (%s)',
     async (_label, activeAtRequest, later, admissible) => {
       result.facts = [];
@@ -1470,12 +1481,13 @@ postgres('SMS commitments on PostgreSQL', () => {
       const addSecond = () => mockPg('customer_properties').insert({ id: second, customer_id: message.customer_id,
         address_line1: '200 Example Lane', city: 'Sarasota', zip: '34236', active: true });
       if (activeAtRequest === 2) await addSecond();
-      const snapshot = { ...context, properties: await mockPg('customer_properties').where({ customer_id: message.customer_id, active: true }).select('id') };
+      const snapshot = { ...context, properties: await mockPg('customer_properties').where({ customer_id: message.customer_id, active: true }).select('id'),
+        loadedAt: new Date(new Date(message.created_at).getTime() + (later === 'late-context' ? 11 * 60000 : 1000)) };
       if (later === 'deactivate-before-write') await mockPg('customer_properties').where({ id: second }).update({ active: false });
       await recordMessageOperations(mockPg, message, result, snapshot);
       const [commitment] = await mockPg('call_commitments').select('*');
       expect(commitment.sms_context).toMatchObject({ property_id: null,
-        sole_property_id: activeAtRequest === 1 ? context.properties[0].id : null });
+        sole_property_id: activeAtRequest === 1 && later !== 'late-context' ? context.properties[0].id : null });
       if (later === 'deactivate') await mockPg('customer_properties').where({ id: second }).update({ active: false });
       if (later === 'add') await addSecond();
       const after = new Date(message.created_at.getTime() + 1000);
