@@ -211,7 +211,7 @@ async function releasePrevisitClaim(visitId) {
   await db('scheduled_services')
     .where({ id: visitId })
     .update({ balance_reminder_sent_at: null })
-    .catch(() => {});
+    .catch((err) => logger.warn(`[previsit-balance] claim release failed for visit ${visitId}: ${err.message}`));
 }
 
 // Every leg, Email included, goes through sendCustomerMessage: an explicit
@@ -541,7 +541,7 @@ async function runSweep({ now = new Date() } = {}) {
 
       if (explicitChannels !== null) {
         const outcome = await deliverExplicitPrevisitReminder({
-          visit, amount, duesCents: verdict.duesLate ? duesCents : 0, explicitChannels,
+          visit, amount, duesCents, explicitChannels,
           quotedInvoices: fresh.map((inv) => ({ id: inv.id, due: invoiceAmountDue(inv) })),
         });
         if (outcome === 'sent') sent++;
