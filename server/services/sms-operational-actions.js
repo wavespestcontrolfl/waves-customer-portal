@@ -555,32 +555,117 @@ async function applySmsCommitmentUpdate(conn, id, { customerId, action, note, re
   });
 }
 
-// Long enough to span several five-minute watcher ticks (a missed or slow
-// tick still sees the event), short enough that old activity drops back to
-// the cursor pages instead of re-filling the event page every tick.
-const EVENT_LOOKBACK_MS = 30 * 60 * 1000;
-// A visit event for the commitment's customer inside (since, now], after the
-// source text: the same activity loadSmsFulfillmentEvidence reads (creation,
-// completion, a status transition, a logged move). Admissibility still
-// decides whether it answers the row.
-function recentVisitActivity(conn, since, now) {
-  const fresh = (column) => (q) => q.where(column, '>', since).where(column, '<=', now).whereRaw(`${column} > s.created_at`);
+// Codex #4816 r15–r17: visit activity for the row's customer, after the
+// source text, that the event page has not scanned yet — newer than the
+// sms_context.event_seen_at watermark stamped each time the page reaches the
+// row. The same activity loadSmsFulfillmentEvidence reads (creation,
+// completion, a status transition, a logged move); admissibility still
+// decides whether it answers the row. A watermark rather than a lookback
+// window or cursor: the page drains every pending event however many rows
+// qualify, a scanned row leaves it until new activity lands, and no event
+// expires unseen.
+function unseenVisitActivity(conn, now) {
+  const floor = "GREATEST(s.created_at, COALESCE((cc.sms_context->>'event_seen_at')::timestamptz, s.created_at))";
+  const unseen = (column) => (q) => q.where(column, '<=', now).whereRaw(`${column} > ${floor}`);
   return conn('scheduled_services as v').select(conn.raw('1')).whereRaw('v.customer_id = s.customer_id')
     .where(function recent() {
-      this.where(fresh('v.created_at')).orWhere(fresh('v.completed_at'))
-        .orWhereExists(conn('job_status_history as h').select(conn.raw('1')).whereRaw('h.job_id = v.id').where(fresh('h.transitioned_at')))
-        .orWhereExists(conn('reschedule_log as r').select(conn.raw('1')).whereRaw('r.scheduled_service_id = v.id').where(fresh('r.created_at')));
+      this.where(unseen('v.created_at')).orWhere(unseen('v.completed_at'))
+        .orWhereExists(conn('job_status_history as h').select(conn.raw('1')).whereRaw('h.job_id = v.id').where(unseen('h.transitioned_at')))
+        .orWhereExists(conn('reschedule_log as r').select(conn.raw('1')).whereRaw('r.scheduled_service_id = v.id').where(unseen('r.created_at')));
     });
+}
+
+// One open row: skip, verify, and close or bell. Returns what happened so
+// the caller can count it.
+async function refreshSmsCommitment(conn, row, now, verify) {
+  const message = await scheduledSourceMessage(conn, await conn('sms_log').where({ id: row.sms_log_id }).first(...SOURCE_COLUMNS));
+  // A later delivery failure cannot erase already-recorded staff work.
+  // Intake still refuses failed sources; captured promises stay actionable.
+  if (!message || !eligibleMessage(message, { captured: true })) return { outcome: 'ineligible' };
+  // The SMS foreign key follows merges and merge undo. Embedded context
+  // is only a snapshot; never let its former owner strand the obligation.
+  const current = { ...row, sms_context: { ...row.sms_context, customer_id: message.customer_id } };
+  const evidence = await loadSmsFulfillmentEvidence(conn, current, message, now);
+  const deadlinePassed = row.due_at != null && new Date(row.due_at) <= now;
+  // No deadline to enforce yet (none stated, or the window is still open)
+  // and nothing on file even looks like an answer: skip the model call
+  // entirely rather than spend it on an obligation with no chance of a
+  // grounded verdict, and leave the row open and silent.
+  if (!deadlinePassed && !evidence.records.some((record) => admissibleWitness(record, current, evidence.records))) {
+    return { outcome: 'no_witness' };
+  }
+  // R1 (owner ruling 2026-09-24): inside an open window only an event may
+  // act. An admissible visit record (field progress, a move, a
+  // cancellation) reaches `verify` at once; a message witness (a staff
+  // text, a call) waits for the deadline before it costs a model call,
+  // exactly as a stated-deadline row always has. A NULL due_at is never an
+  // open window. Inside the window the event is what earned the early
+  // check, so only an event record may ground it (Codex #4816 r17): the
+  // model cannot close the row early by citing the call instead.
+  const inWindow = row.due_at != null && !deadlinePassed;
+  const eventWitness = evidence.records.some((record) => SYSTEM_EVENT_TYPES.includes(record.type)
+    && admissibleWitness(record, current, evidence.records));
+  if (!eventWitness && inWindow) return { outcome: 'not_due' };
+  const verdict = await verify(current, evidence, { now, eventOnly: inWindow });
+  let closed = false;
+  await conn.transaction(async (trx) => {
+    // Match merge and intake: customer, source, then commitment. A relink
+    // while verification runs must retry against the current owner.
+    const customer = await trx('customers').where({ id: message.customer_id }).whereNull('deleted_at').forUpdate().first();
+    if (!customer) return;
+    const source = await scheduledSourceMessage(trx, await trx('sms_log').where({ id: message.id }).forUpdate().first());
+    if (!source || !eligibleMessage(source, { captured: true }) || source.customer_id !== message.customer_id || source.message_body !== message.message_body) return;
+    const live = await trx('call_commitments').where({ id: row.id }).forUpdate().first();
+    if (!smsCommitmentsEnabled() || live?.status !== 'open' || live.human_state != null) return;
+    const latest = { ...live, sms_context: { ...live.sms_context, customer_id: source.customer_id } };
+    if (verdict.verdict === 'fulfilled' && !await revalidateSmsFulfillment(trx, latest, source, verdict, now)) return;
+    const dedupeKey = `sms-commitment:${row.id}`;
+    if (live.sms_context.customer_id !== source.customer_id) {
+      // Rolling dedupe only refreshes recent rows. Older bells must also
+      // follow a merge or undo instead of opening the retired account.
+      await trx('notifications').where({ recipient_type: 'admin' })
+        .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]).update({
+          link: `/admin/customers?customerId=${encodeURIComponent(source.customer_id)}&tab=comms`,
+          metadata: trx.raw("jsonb_set(metadata, '{customerId}', to_jsonb(?::text), true)", [source.customer_id]),
+        });
+    }
+    await trx('call_commitments').where({ id: row.id }).update({
+      sms_context: { ...current.sms_context, fulfillment_check: verdict },
+    });
+    if (verdict.verdict === 'fulfilled') {
+      await trx('call_commitments').where({ id: row.id }).update({
+        status: 'fulfilled', fulfillment: verdict, fulfilled_at: now, updated_at: now,
+      });
+      await trx('notifications').where({ recipient_type: 'admin' })
+        .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]).update({ read_at: now });
+      closed = true;
+      return;
+    }
+    // A NULL-due commitment only ever closes quietly on real evidence; it
+    // never rings a bell on its own (there is no stated deadline to have
+    // passed). The fulfillment_check above is still stored so a later
+    // pass with new evidence does not repeat the same model call for free.
+    if (!deadlinePassed) return;
+    const when = new Date(message.created_at).toLocaleString('en-US', {
+      timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+    });
+    const body = verdict.verdict === 'uncertain'
+      ? `The ${when} ET SMS needs a completion check. Some follow-up evidence is unavailable or ambiguous; the agent cannot determine whether the work was completed. Open the customer profile to verify.`
+      : `Requested or promised in the ${when} ET conversation. The available follow-up records do not establish completion. Open the customer profile to take the next step.`;
+    const notification = await NotificationService.notifyAdmin('alert', KIND_LABELS[row.kind] || KIND_LABELS.other, body,
+      { trx, bell: true, dedupeKey, dedupeWindowMs: 24 * 60 * 60 * 1000, refreshOnDedupe: true,
+        link: `/admin/customers?customerId=${encodeURIComponent(message.customer_id)}&tab=comms`,
+        metadata: { triggerKey: 'sms_operational_followup', customerId: message.customer_id,
+          sms_log_id: message.id, commitment_id: row.id, kind: row.kind, verification: verdict.verdict } });
+    if (!notification?.id && !notification?.suppressed) throw new Error('sms_operations_bell_not_persisted');
+  });
+  return { outcome: 'verified', verdict, closed };
 }
 
 async function refreshSmsCommitments({ now = new Date(), conn = db, verify = verifySmsFulfillment } = {}) {
   if (!smsCommitmentsEnabled()) return { skipped: 'gate_off' };
   if (!gateEnvTimestamp('GATE_SMS_OPERATIONAL_ACTIONS_SINCE')) return { skipped: 'activation_time_required' };
-  let scanned = 0;
-  let fulfilled = 0;
-  let unverified = 0;
-  let skippedNoWitness = 0;
-  let skippedNotDue = 0;
+  const counts = { scanned: 0, fulfilled: 0, unverified: 0, skipped_no_witness: 0, skipped_not_due: 0 };
   const PAGE = 25;
   // Two bounded pages per tick, each with its own durable cursor, so an old
   // open item cannot monopolize the first page and strand later customers.
@@ -601,111 +686,38 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
       .orderBy('cc.id').limit(PAGE).select('cc.*');
     return { cursorKey, rows };
   };
+  // A third page, ahead of the cursors: any open row (due, undated or
+  // future) with unseen visit activity, so an event is checked on the next
+  // tick wherever the cursors stand (Codex #4816 r15–r17).
+  const eventRows = await openRows().whereExists(unseenVisitActivity(conn, now)).orderBy('cc.id').limit(PAGE).select('cc.*');
   const pages = [
     await page('sms_operations.fulfillment_cursor', (q) => q.where((w) => w.whereNull('cc.due_at').orWhere('cc.due_at', '<=', now))),
     await page('sms_operations.future_cursor', (q) => q.where('cc.due_at', '>', now)),
-    // Codex #4816 r15: the future cursor alone reaches a row only once per
-    // wrap, so a visit event on a row behind it could wait many ticks. Rows
-    // whose customer had visit activity in the last EVENT_LOOKBACK_MS get a
-    // page of their own, revisited while the event is fresh. It rotates on
-    // its own cursor (r16): a fixed first 25 with unrelated activity must
-    // not pin the page for the whole lookback.
-    await page('sms_operations.event_cursor', (q) => q.where('cc.due_at', '>', now)
-      .whereExists(recentVisitActivity(conn, new Date(now.getTime() - EVENT_LOOKBACK_MS), now))),
   ];
-  const rows = [...new Map(pages.flatMap((p) => p.rows).map((row) => [row.id, row])).values()];
+  const eventIds = new Set(eventRows.map((row) => row.id));
+  const rows = [...new Map([...eventRows, ...pages.flatMap((p) => p.rows)].map((row) => [row.id, row])).values()];
   for (const row of rows) {
-    if (!smsCommitmentsEnabled()) return { scanned, fulfilled, unverified, skipped_no_witness: skippedNoWitness, skipped_not_due: skippedNotDue, skipped: 'gate_off' };
-    scanned += 1;
-    const message = await scheduledSourceMessage(conn, await conn('sms_log').where({ id: row.sms_log_id }).first(...SOURCE_COLUMNS));
-    // A later delivery failure cannot erase already-recorded staff work.
-    // Intake still refuses failed sources; captured promises stay actionable.
-    if (!message || !eligibleMessage(message, { captured: true })) continue;
-    // The SMS foreign key follows merges and merge undo. Embedded context
-    // is only a snapshot; never let its former owner strand the obligation.
-    const current = { ...row, sms_context: { ...row.sms_context, customer_id: message.customer_id } };
-    const evidence = await loadSmsFulfillmentEvidence(conn, current, message, now);
-    const deadlinePassed = row.due_at != null && new Date(row.due_at) <= now;
-    // No deadline to enforce yet (none stated, or the window is still open)
-    // and nothing on file even looks like an answer: skip the model call
-    // entirely rather than spend it on an obligation with no chance of a
-    // grounded verdict, and leave the row open and silent.
-    if (!deadlinePassed && !evidence.records.some((record) => admissibleWitness(record, current, evidence.records))) {
-      skippedNoWitness += 1;
-      continue;
-    }
-    // R1 (owner ruling 2026-09-24): inside an open window only an event may
-    // act. An admissible visit record (field progress, a move, a
-    // cancellation) reaches `verify` at once; a message
-    // witness (a staff text, a call) waits for the deadline before it costs
-    // a model call, exactly as a stated-deadline row always has. A NULL
-    // due_at reads as the epoch, never an open window.
-    const eventWitness = evidence.records.some((record) => SYSTEM_EVENT_TYPES.includes(record.type)
-      && admissibleWitness(record, current, evidence.records));
-    if (!eventWitness && new Date(row.due_at) > now) {
-      skippedNotDue += 1;
-      continue;
-    }
-    const verdict = await verify(current, evidence, { now });
-    if (verdict.verdict === 'uncertain') unverified += 1;
-    await conn.transaction(async (trx) => {
-      // Match merge and intake: customer, source, then commitment. A relink
-      // while verification runs must retry against the current owner.
-      const customer = await trx('customers').where({ id: message.customer_id }).whereNull('deleted_at').forUpdate().first();
-      if (!customer) return;
-      const source = await scheduledSourceMessage(trx, await trx('sms_log').where({ id: message.id }).forUpdate().first());
-      if (!source || !eligibleMessage(source, { captured: true }) || source.customer_id !== message.customer_id || source.message_body !== message.message_body) return;
-      const live = await trx('call_commitments').where({ id: row.id }).forUpdate().first();
-      if (!smsCommitmentsEnabled() || live?.status !== 'open' || live.human_state != null) return;
-      const latest = { ...live, sms_context: { ...live.sms_context, customer_id: source.customer_id } };
-      if (verdict.verdict === 'fulfilled' && !await revalidateSmsFulfillment(trx, latest, source, verdict, now)) return;
-      const dedupeKey = `sms-commitment:${row.id}`;
-      if (live.sms_context.customer_id !== source.customer_id) {
-        // Rolling dedupe only refreshes recent rows. Older bells must also
-        // follow a merge or undo instead of opening the retired account.
-        await trx('notifications').where({ recipient_type: 'admin' })
-          .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]).update({
-            link: `/admin/customers?customerId=${encodeURIComponent(source.customer_id)}&tab=comms`,
-            metadata: trx.raw("jsonb_set(metadata, '{customerId}', to_jsonb(?::text), true)", [source.customer_id]),
-          });
-      }
-      await trx('call_commitments').where({ id: row.id }).update({
-        sms_context: { ...current.sms_context, fulfillment_check: verdict },
+    if (!smsCommitmentsEnabled()) return { ...counts, skipped: 'gate_off' };
+    counts.scanned += 1;
+    const result = await refreshSmsCommitment(conn, row, now, verify);
+    if (result.outcome === 'no_witness') counts.skipped_no_witness += 1;
+    if (result.outcome === 'not_due') counts.skipped_not_due += 1;
+    if (result.verdict?.verdict === 'uncertain') counts.unverified += 1;
+    if (result.closed) counts.fulfilled += 1;
+    // Stamped only after the row is handled: an error above leaves its
+    // event pending for the next tick.
+    if (eventIds.has(row.id)) {
+      await conn('call_commitments').where({ id: row.id }).update({
+        sms_context: conn.raw("jsonb_set(COALESCE(sms_context, '{}'::jsonb), '{event_seen_at}', to_jsonb(?::text))", [now.toISOString()]),
       });
-      if (verdict.verdict === 'fulfilled') {
-        await trx('call_commitments').where({ id: row.id }).update({
-          status: 'fulfilled', fulfillment: verdict, fulfilled_at: now, updated_at: now,
-        });
-        await trx('notifications').where({ recipient_type: 'admin' })
-          .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]).update({ read_at: now });
-        fulfilled += 1;
-        return;
-      }
-      // A NULL-due commitment only ever closes quietly on real evidence; it
-      // never rings a bell on its own (there is no stated deadline to have
-      // passed). The fulfillment_check above is still stored so a later
-      // pass with new evidence does not repeat the same model call for free.
-      if (!deadlinePassed) return;
-      const when = new Date(message.created_at).toLocaleString('en-US', {
-        timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
-      });
-      const body = verdict.verdict === 'uncertain'
-        ? `The ${when} ET SMS needs a completion check. Some follow-up evidence is unavailable or ambiguous; the agent cannot determine whether the work was completed. Open the customer profile to verify.`
-        : `Requested or promised in the ${when} ET conversation. The available follow-up records do not establish completion. Open the customer profile to take the next step.`;
-      const notification = await NotificationService.notifyAdmin('alert', KIND_LABELS[row.kind] || KIND_LABELS.other, body,
-        { trx, bell: true, dedupeKey, dedupeWindowMs: 24 * 60 * 60 * 1000, refreshOnDedupe: true,
-          link: `/admin/customers?customerId=${encodeURIComponent(message.customer_id)}&tab=comms`,
-          metadata: { triggerKey: 'sms_operational_followup', customerId: message.customer_id,
-            sms_log_id: message.id, commitment_id: row.id, kind: row.kind, verification: verdict.verdict } });
-      if (!notification?.id && !notification?.suppressed) throw new Error('sms_operations_bell_not_persisted');
-    });
+    }
   }
   for (const { cursorKey, rows: pageRows } of pages) {
     const nextCursor = pageRows.length === PAGE ? pageRows[pageRows.length - 1].id : null;
     await conn('system_settings').insert({ key: cursorKey, value: nextCursor, category: 'sms_operations' })
       .onConflict('key').merge({ value: nextCursor, updated_at: now });
   }
-  return { scanned, fulfilled, unverified, skipped_no_witness: skippedNoWitness, skipped_not_due: skippedNotDue };
+  return counts;
 }
 
 // Explicit operator action only. The scheduled intake never clears analysis

@@ -12,7 +12,7 @@ jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() })
 
 const { groundExtraction, extractSmsOperations, buildPrompt, stringifySmsEvidence } = require('../services/sms-operational-extractor');
 const { eligibleMessage, factVerdict, runSmsOperationalActions, resolveDueDeadline, DEFAULT_DEADLINE_HOURS, PROMISE_DEFAULT_DEADLINE_HOURS } = require('../services/sms-operational-actions');
-const { groundFulfillment, admissibleWitness, verifySmsFulfillment } = require('../services/sms-commitment-fulfillment');
+const { groundFulfillment, admissibleWitness, verifySmsFulfillment, fulfillmentFingerprint } = require('../services/sms-commitment-fulfillment');
 const { dispatchWithFallback } = require('../services/llm/call');
 const numbers = require('../config/twilio-numbers');
 const CUSTOMER_ID = '00000000-0000-4000-8000-000000000101';
@@ -849,6 +849,32 @@ describe('fulfillment proof', () => {
     expect(admissibleWitness({ ...cancelled, cancelled_at: '2040-03-09T15:00:00Z' }, cancelAsk)).toBe(false);
     // A callback is answered by a call or field progress, never a cancellation.
     expect(admissibleWitness(cancelled, { kind: 'callback', sms_context: ctx })).toBe(false);
+  });
+
+  test('Codex #4816 r17: inside an open window only an event record can ground a fulfilled verdict', async () => {
+    const ctx = { property_id: null, source_at: '2040-03-10T15:00:00Z' };
+    const callback = { kind: 'callback', description: 'Please call me back', sms_context: ctx };
+    const call = { id: 'call-1', ref: 'call:call-1', type: 'call', status: 'completed', duration_seconds: 120,
+      created_at: '2040-03-11T15:00:00Z', text: 'Returned the customer call about the visit' };
+    const visit = { id: 'v-1', ref: 'visit:v-1', type: 'visit', status: 'en_route', property_id: 'home',
+      created_at: '2040-03-09T15:00:00Z', progressed_at: '2040-03-11T15:00:00Z',
+      text: 'Quarterly Lawn on 2040-03-11 at 09:00:00; status en_route; en route/on site/completed after the request' };
+    const evidence = { records: [call, visit], failures: [] };
+    const citeCall = { verdict: 'fulfilled', record_ref: 'call:call-1', quote: 'Returned the customer call' };
+    expect(groundFulfillment(citeCall, evidence, callback).verdict).toBe('fulfilled');
+    expect(groundFulfillment(citeCall, evidence, callback, { eventOnly: true })).toMatchObject({ verdict: 'uncertain', reason: 'invalid_witness' });
+    expect(groundFulfillment({ verdict: 'fulfilled', record_ref: 'visit:v-1', quote: 'en route' }, evidence, callback, { eventOnly: true }).verdict)
+      .toBe('fulfilled');
+    dispatchWithFallback.mockResolvedValueOnce({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
+    const verdict = await verifySmsFulfillment(callback, evidence, { eventOnly: true });
+    expect(dispatchWithFallback.mock.calls.at(-1)[1].text).toContain('"witness_refs":["visit:v-1"]');
+    expect(verdict.event_only).toBe(true);
+    // The window check and the after-deadline check never share a cached verdict.
+    expect(fulfillmentFingerprint(callback, evidence, { eventOnly: true }).evidenceHash)
+      .not.toBe(fulfillmentFingerprint(callback, evidence).evidenceHash);
+    // The event page's watermark is not obligation content.
+    expect(fulfillmentFingerprint({ ...callback, sms_context: { ...ctx, event_seen_at: '2040-03-11T16:00:00Z' } }, evidence).evidenceHash)
+      .toBe(fulfillmentFingerprint(callback, evidence).evidenceHash);
   });
 
   test('Codex #4816 r14: an unscoped cancel ask is answered only by a cancellation at the customer\'s sole active property', () => {
