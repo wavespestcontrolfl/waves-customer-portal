@@ -468,7 +468,13 @@ async function attemptApplyAutoDispatchMove(service, best, fresh, runId, config 
     logger.error(`[auto-dispatch] notify hook failed for ${service.id}: ${err.message}`);
   }
 
-  return { ok: true, pre_status: fresh.status, post_status: postStatus, technician_changed: techChanged, notification, movedCount };
+  // `applied` is THIS attempt's candidate object — the caller (applyAutoDispatchMove's
+  // retry wrapper, and the orchestrator beyond it) needs to know WHICH
+  // candidate actually landed when a SLOT_TAKEN fallback lands on something
+  // other than the first one tried (Codex pre-push P1).
+  return {
+    ok: true, pre_status: fresh.status, post_status: postStatus, technician_changed: techChanged, notification, movedCount, applied: best,
+  };
 }
 
 /**
@@ -485,6 +491,12 @@ async function attemptApplyAutoDispatchMove(service, best, fresh, runId, config 
  *
  * Gate off, or no alternates supplied: exactly one attempt against `best`,
  * byte-identical to this function before the retry wrapper existed.
+ *
+ * Resolves with `{ ok, pre_status, post_status, technician_changed,
+ * notification, movedCount, applied, attempts }` — `applied` is the
+ * candidate object that actually landed (may differ from `best` after a
+ * fallback) and `attempts` is how many were tried (ids/numbers only), so a
+ * caller can build its own audit entry from the candidate that really moved.
  */
 async function applyAutoDispatchMove(service, best, runId, config = {}) {
   // Stale-recommendation guard: the row was loaded + scored earlier this run.
@@ -511,7 +523,11 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
     try {
       // Bounded (MAX_APPLY_ATTEMPTS): each attempt must complete or fail
       // before trying the next, so a sequential await here is intentional.
-      return await attemptApplyAutoDispatchMove(service, attempts[i], fresh, runId, config);
+      const applied = await attemptApplyAutoDispatchMove(service, attempts[i], fresh, runId, config);
+      // attempts (ids/numbers only): how many candidates were tried before
+      // this one landed — 1 when the first attempt succeeded, so a caller
+      // never has to infer it from `applied === best`.
+      return { ...applied, attempts: i + 1 };
     } catch (err) {
       lastErr = err;
       const canRetry = sharedModelOn && err && err.code === 'SLOT_TAKEN' && i < attempts.length - 1;

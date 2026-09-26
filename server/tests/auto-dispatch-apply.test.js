@@ -591,6 +591,26 @@ describe('SLOT_TAKEN fallback (GATE_AUTO_DISPATCH_SHARED_MODEL)', () => {
     expect(SmartRebooker.reschedule.mock.calls[0].slice(1, 3)).toEqual([BEST.date, { start: BEST.start_time, end: BEST.end_time }]);
     expect(SmartRebooker.reschedule.mock.calls[1].slice(1, 3)).toEqual([ALT.date, { start: ALT.start_time, end: ALT.end_time }]);
     expect(res).toMatchObject({ ok: true });
+    // The caller (the orchestrator) needs to know WHICH candidate landed and
+    // how many attempts it took, so its audit can describe the actual move
+    // rather than the first one tried (Codex pre-push P1).
+    expect(res.applied).toBe(ALT);
+    expect(res.attempts).toBe(2);
+  });
+
+  test('gate on: the FIRST candidate succeeding reports applied=best and attempts=1', async () => {
+    process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
+    const ALT = { date: '2026-08-12', start_time: '09:00', end_time: '11:00', technician_id: 't1' };
+    SmartRebooker.reschedule.mockResolvedValueOnce({ success: true });
+    const update = jest.fn().mockResolvedValue(1);
+    const queue = [readRow(CONFIRMED_ROW), { where() { return this; }, update }];
+    db.mockImplementation(() => queue.shift());
+
+    const res = await applyAutoDispatchMove(SERVICE, BEST, 'run1', { alternateCandidates: [ALT] });
+
+    expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(1);
+    expect(res.applied).toBe(BEST);
+    expect(res.attempts).toBe(1);
   });
 
   test('gate on: a non-SLOT_TAKEN failure never falls back, even with alternates available', async () => {
