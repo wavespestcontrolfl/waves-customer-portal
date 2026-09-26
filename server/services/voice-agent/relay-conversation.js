@@ -1224,7 +1224,7 @@ class RelayConversation {
    * verdict or audit finding may need to attribute a difference to.
    */
   _versionStamps() {
-    const { parseTtsVoice } = require('./relay-profiles');
+    const { parseTtsVoice, RELAY_PROFILES } = require('./relay-profiles');
     const voice = this._ttsVoice != null ? this._ttsVoice : defaultTtsVoice();
     const tts = parseTtsVoice(voice, DEFAULT_TTS_PROVIDER);
     // The Spanish leg's <Parameter lang=es> is the setup-frame fallback when
@@ -1233,6 +1233,22 @@ class RelayConversation {
     const { isSpanish } = require('./relay-language');
     const raw = this.language || DEFAULT_LANGUAGE;
     const language = !/[-_]/.test(raw) && isSpanish(raw) ? require('./relay-protocol').SPANISH_LANGUAGE : raw;
+    // The relay profile's OWN `language` (Flux Multilingual's `"multi"`
+    // today — relay-profiles.js) is what Twilio's STT/TTS actually ran
+    // with, distinct from `language` above — the SEMANTIC conversation
+    // marker isSpanish() keys off (cell 10's setup frame carries
+    // <Parameter lang=es> so the prompt addendum/fallback copy run in
+    // Spanish, while the TwiML itself rendered language="multi", not
+    // "es-US"). Looked up from the raw, unvalidated RELAY_PROFILES map by
+    // the UNVERIFIED setup-frame relay_profile id — same trust level
+    // deriveRelayEventsSubscribed already reads it at (telemetry only,
+    // nothing acts on it) — so an unrecognized id is silently absent, never
+    // guessed. A profile with no `language` override ran its transport in
+    // the SAME language the conversation marker already names, so this
+    // falls back to `language` exactly as before this profile existed
+    // (codex r2 P1 on #4947).
+    const profile = this._relayProfileId ? RELAY_PROFILES[this._relayProfileId] : null;
+    const transportLanguage = (profile && profile.language) || language;
     return {
       git_sha: process.env.RAILWAY_GIT_COMMIT_SHA || null,
       model: this.model,
@@ -1243,8 +1259,8 @@ class RelayConversation {
       tool_schema_sha: this._toolSchemaSha,
       policy_pack_sha: null,
       relay_profile_id: this._relayProfileId,
-      stt_language: language,
-      tts_language: language,
+      stt_language: transportLanguage,
+      tts_language: transportLanguage,
       tts_provider: DEFAULT_TTS_PROVIDER,
       voice_id: tts.voiceId,
       tts_model: tts.ttsModel,

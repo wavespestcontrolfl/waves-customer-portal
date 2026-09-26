@@ -2118,23 +2118,29 @@ function sandboxRelayHost(req) {
     || 'portal.wavespestcontrol.com';
 }
 function sandboxRelayXml({ callSid, cell, req = null }) {
-  const { buildRelayTwiML, RELAY_WS_PATH } = require('../services/voice-agent/relay-protocol');
+  const { buildRelayTwiML, RELAY_WS_PATH, spanishWelcomeGreeting } = require('../services/voice-agent/relay-protocol');
   const { FLUX_MULTILINGUAL_LANGUAGE } = require('../services/voice-agent/relay-profiles');
   const domain = sandboxRelayHost(req);
   const options = cell || activeRelayTwiMLOptions();
+  const multilingual = options.language === FLUX_MULTILINGUAL_LANGUAGE;
   return buildRelayTwiML({
     wsUrl: `wss://${domain}${RELAY_WS_PATH}`,
     callSid,
     action: RELAY_COMPLETE_ACTION_SANDBOX,
     ...options,
-    // Flux Multilingual (cell 10): `language="multi"` (from `options` above)
-    // only tells Twilio's own STT/TTS to auto-detect — it carries no Spanish
-    // signal into OUR OWN prompt addendum / fallback copy / streaming-hold
-    // logic, which key off RelayConversation.language. Mirror the
-    // Spanish-menu vestibule's own `<Parameter lang=es>` marker (codex r1 P1
-    // on #4947) so relay-server.js's setup-frame resolution treats this leg
-    // as Spanish the same way that leg is.
-    ...(options.language === FLUX_MULTILINGUAL_LANGUAGE ? { parameters: { lang: 'es' } } : {}),
+    // Flux Multilingual (cell 10): the SAME Spanish welcome opener the
+    // production Spanish-menu vestibule uses — buildRelayTwiML otherwise
+    // defaults to the English defaultWelcomeGreeting(), which every OTHER
+    // sandbox cell wants (codex r2 P2 on #4947).
+    ...(multilingual ? { welcomeGreeting: spanishWelcomeGreeting() } : {}),
+    // `language="multi"` (from `options` above) only tells Twilio's own
+    // STT/TTS to auto-detect — it carries no Spanish signal into OUR OWN
+    // prompt addendum / fallback copy / streaming-hold logic, which key off
+    // RelayConversation.language. Mirror the Spanish-menu vestibule's own
+    // `<Parameter lang=es>` marker (codex r1 P1 on #4947) so
+    // relay-server.js's setup-frame resolution treats this leg as Spanish
+    // the same way that leg is.
+    ...(multilingual ? { parameters: { lang: 'es' } } : {}),
   });
 }
 
@@ -2160,10 +2166,16 @@ async function stampRelayProfile(callSid, opts, { clearWhenEmpty = false } = {})
         // permitted reconnect can restore it: without this,
         // readReconnectState rebuilt no language and the resumed leg
         // defaulted to en-US, silently dropping the Spanish marker the
-        // FIRST leg's setup frame carried (codex r1 P2 on #4947). Omitted
-        // entirely (not `null`) for every profile with no language — the
-        // exact prior stamp shape, unchanged.
-        ...(opts.language ? { relay_language: opts.language } : {}),
+        // FIRST leg's setup frame carried (codex r1 P2 on #4947). Written as
+        // `null` — never omitted — for a profile with none: the merge below
+        // is `COALESCE(metadata, '{}'::jsonb) || stamp`, which only
+        // overwrites keys the RIGHT side actually carries, so omitting this
+        // key on a re-stamp (e.g. a call moved off flux_multilingual_es_v1
+        // onto a plain profile) would leave a STALE `"multi"` from the
+        // earlier stamp in place (codex r2 P2 on #4947). readReconnectState
+        // already treats a `null` relay_language exactly like an absent one
+        // (falsy ⇒ no `language` key on the restored profile).
+        relay_language: opts.language || null,
       }
     : { relay_profile_id: null, relay_attrs: null };
   try {
