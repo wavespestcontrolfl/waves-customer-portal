@@ -17,10 +17,11 @@
  * still applies — this script adds no new writer, only a wider date range
  * and an operator trigger).
  *
- * --out <path> writes a backup JSON of every row this run changed (or
- * would change, in dry run): {generated_at, rows:[{id, date,
- * technician_id, before, after}]}. --rollback <path> restores exactly
- * those rows from a PRIOR --execute run's backup file — DRY RUN BY
+ * --out <path> writes a backup JSON holding a FULL snapshot of every
+ * tech-day this run changed (or would change, in dry run) — every row of
+ * that day, unchanged ones with before === after: {generated_at,
+ * rows:[{id, date, technician_id, before, after}]}. --rollback <path>
+ * restores those days from a PRIOR --execute run's backup file — DRY RUN BY
  * DEFAULT, same convention as the rest of the script: it prints the
  * would-restore plan and any per-day mismatches and opens no write
  * transaction; --rollback <path> --execute performs it.
@@ -29,14 +30,13 @@
  * route_order write in the app uses (writeTechDayOrder, the function
  * runRouteReorder's own per-tech loop calls) rather than a second,
  * hand-rolled copy of its guards. For each backed-up tech-day: the full
- * live day is re-read; if every backed-up row still sits at its "after" on
- * that tech-day (id present AND at exactly that route_order — a row moved
- * to a DIFFERENT tech-day since the backup is simply absent from that
- * read, never a same-route_order coincidence silently matched), the live
- * order with those rows returned to their backup "before" positions
- * (non-backed-up rows keep their relative order) is handed to
- * writeTechDayOrder as an ordinary write, with that same live read as its
- * expected snapshot. The writer re-reads the day itself, under its OWN
+ * live day is re-read and must equal the snapshot's "after" state EXACTLY
+ * — the same row set (no row added, removed, or moved to a DIFFERENT
+ * tech-day since, which is simply absent from that read) with every row at
+ * exactly its "after" route_order; then every row is restored to its exact
+ * "before" value (null included) through writeTechDayOrder's
+ * explicit-positions mode, as an ordinary write with that same live read
+ * as its expected snapshot. The writer re-reads the day itself, under its OWN
  * advisory lock, inside its OWN SERIALIZABLE transaction, FOR UPDATE, and
  * makes every guard check it makes for any other write — membership,
  * window/order/coordinate drift, LOCKED_STOP, and, with a clock read fresh
@@ -183,12 +183,16 @@ function runIsUnhealthy(result) {
 }
 
 /** Flatten runRouteReorder's per-tech-day entries (the dry-run `plan` array,
- *  or reorder rows read back from the ledger after --execute) into the
+ *  or the run's own appliedChanges / the ledger after --execute) into the
  *  backup file's per-ROW shape: {id, date, technician_id, before, after}.
- *  A day with no route_order_changes (skipped, or nothing actually moved)
- *  contributes nothing. */
+ *  Each applied tech-day contributes its FULL route_order_snapshot — every
+ *  row on that day, unchanged ones included (before === after) — so the
+ *  rollback can verify the whole day, not just the rows that moved (codex
+ *  pre-push: a moved-rows-only backup could neither tell a pre-existing
+ *  duplicate from a collision nor see a row moved/added since). A day with
+ *  no snapshot (skipped) contributes nothing. */
 function buildBackupRows(entries) {
-  return (entries || []).flatMap((entry) => (entry.route_order_changes || []).map((change) => ({
+  return (entries || []).flatMap((entry) => (entry.route_order_snapshot || []).map((change) => ({
     id: change.id,
     date: entry.date,
     technician_id: entry.technicianId ?? entry.technician_id ?? null,
@@ -260,23 +264,31 @@ function readLiveTechDay(conn, { dateStr, techId, forUpdate = false }, deps) {
 }
 
 /**
- * The pure "does the backup still match" check — all that's left of the
- * old hand-rolled eligibility logic. `liveRows` is already scoped to this
- * EXACT (date, technician_id) by readLiveTechDay, so a row reassigned to a
- * different tech-day since the backup needs no separate date/technician
- * compare: it is simply ABSENT from `liveRows` (id missing), never a
- * same-route_order coincidence silently matching the wrong day (the
- * original codex P1 this check fixed). Freeze/lock/today-past eligibility
- * is deliberately NOT checked here any more — that logic now lives in
- * exactly one place, inside writeTechDayOrder, re-checked against a
- * FRESHER read than this function ever sees.
+ * The pure "does the backup still match" check, over the WHOLE tech-day:
+ * `dayRows` is the backup's full snapshot of that day, and the live day
+ * must equal its "after" state exactly — every snapshot row present at
+ * exactly its `after` route_order, and no live row the snapshot doesn't
+ * have. Returns every offending id (moved/missing snapshot rows, then rows
+ * added since the backup). `liveRows` is already scoped to this EXACT
+ * (date, technician_id) by readLiveTechDay, so a row reassigned to a
+ * different tech-day is simply ABSENT (a mismatch), never a
+ * same-route_order coincidence. With the whole day verified, no row can
+ * collide with a restored position: every row's restored value is its own
+ * recorded "before" (codex PRRT_kwDOR3YQi86mQfEB and its mirror case).
+ * Freeze/lock/today-past eligibility is deliberately NOT checked here —
+ * that lives in exactly one place, inside writeTechDayOrder, re-checked
+ * against a FRESHER read than this function ever sees.
  */
 function mismatchedIdsForDay(dayRows, liveRows) {
   const liveById = new Map(liveRows.map((row) => [row.id, row]));
-  return dayRows.filter((row) => {
+  const snapshotIds = new Set(dayRows.map((row) => row.id));
+  const position = (v) => (v == null ? null : Number(v));
+  const moved = dayRows.filter((row) => {
     const live = liveById.get(row.id);
-    return !live || Number(live.route_order) !== Number(row.after);
+    return !live || position(live.route_order) !== position(row.after);
   }).map((row) => row.id);
+  const added = liveRows.filter((row) => !snapshotIds.has(row.id)).map((row) => row.id);
+  return [...moved, ...added];
 }
 
 /**
@@ -290,17 +302,10 @@ function mismatchedIdsForDay(dayRows, liveRows) {
  * A=2,B=3,C=null → cleanup wrote B=1,C=2,A=3 → the old code restored
  * C,A,B instead of A,B,C).
  *
- * Every row's original position is knowable with NO backup-format change:
- *   - a BACKED-UP row's (one in `dayRows`) original position is its
- *     recorded `before` — or, `before: null`/non-numeric, "no original
- *     position", sorting after every numbered one.
- *   - a NON-backed-up row's original position is simply its CURRENT
- *     route_order: cleanup never wrote it, so before-the-run and now are
- *     the same value by definition (and if some OTHER writer moved it
- *     since the backup, the fenced writer's own fresh re-read/signature
- *     compare catches that drift at commit time, exactly like any other
- *     row — this function only has to get the TARGET order right).
- * Sorting the whole day by that one key reconstructs the exact original
+ * Every row's original position is its recorded `before` in the day's full
+ * snapshot (mismatchedIdsForDay has already proven the live day holds
+ * exactly the snapshot's rows) — or, `before: null`/non-numeric, "no
+ * original position", sorting after every numbered one. Sorting the whole day by that one key reconstructs the exact original
  * sequence in one pass; ties (including several null-before rows) break on
  * the CURRENT live order — a stable, deterministic fallback, never a
  * clamped guess at an array index.
@@ -313,7 +318,7 @@ function buildRollbackTargetOrder(liveRows, dayRows) {
   });
   const beforeById = new Map(dayRows.map((row) => [row.id, row.before]));
   const originalPosition = (row) => {
-    const raw = beforeById.has(row.id) ? beforeById.get(row.id) : row.route_order;
+    const raw = beforeById.get(row.id);
     const n = raw == null ? NaN : Number(raw);
     return Number.isFinite(n) ? n : Infinity;
   };
@@ -329,22 +334,18 @@ function buildRollbackTargetOrder(liveRows, dayRows) {
  * rollback writes back what was recorded instead of renumbering the day by
  * index+1 (codex thread "Preserve null-position rows when reconstructing
  * rollback order": original 4,5,null must come back as 4,5,null, never
- * 1,2,3). A backed-up row returns to its recorded `before` (null stays
- * null; a non-numeric value is treated as null, the same "no position" it
- * sorts as in buildRollbackTargetOrder). A row the cleanup never touched
- * keeps its CURRENT value — it is rewritten to itself, so the writer's
- * per-row CAS still covers it.
+ * 1,2,3). Every row of the day's full snapshot returns to its recorded
+ * `before` — an unchanged row (before === after) is rewritten to itself, so
+ * the writer's per-row CAS still covers it; null stays null; a non-numeric
+ * value is treated as null, the same "no position" it sorts as in
+ * buildRollbackTargetOrder.
  */
-function buildRollbackPositions(liveRows, dayRows) {
+function buildRollbackPositions(dayRows) {
   const toPosition = (raw) => {
     const n = raw == null ? NaN : Number(raw);
     return Number.isInteger(n) ? n : null;
   };
-  const beforeById = new Map(dayRows.map((row) => [row.id, row.before]));
-  return new Map(liveRows.map((row) => [
-    row.id,
-    toPosition(beforeById.has(row.id) ? beforeById.get(row.id) : row.route_order),
-  ]));
+  return new Map(dayRows.map((row) => [row.id, toPosition(row.before)]));
 }
 
 /**
@@ -395,57 +396,22 @@ function rollbackWindowConflict(targetOrder, liveRows, deps) {
 }
 
 /**
- * Ids of every live row that would SHARE a non-null route_order once the
- * restore commits, where that sharing was not already in the backup's
- * before-state (codex PRRT_kwDOR3YQi86mQfEB). The mismatch check only
- * covers BACKED-UP rows; an unbacked row can be moved since the backup (an
- * admin single-row reorder) onto a slot a backed-up row is about to be
- * restored to — restore A→2 while unbacked X is now 2 leaves both at 2,
- * and the window guard can still approve that order. A shared position is
- * accepted only when every row in it is backed up AND their recorded
- * `before` values were equal (a duplicate the day genuinely had before the
- * cleanup); any group containing an unbacked row, or restored rows whose
- * shared value was not a before-state duplicate, collides. Empty = none.
- */
-function restorePositionCollisions(liveRows, dayRows, positions) {
-  const backedUp = new Set(dayRows.map((row) => row.id));
-  const byPosition = new Map();
-  for (const row of liveRows) {
-    const pos = positions.get(row.id);
-    if (pos == null) continue;
-    if (!byPosition.has(pos)) byPosition.set(pos, []);
-    byPosition.get(pos).push(row.id);
-  }
-  // Every value in `positions` for a backed-up row IS its recorded before,
-  // so an all-backed-up group sharing a position was a before-state duplicate.
-  const collides = (ids) => ids.length > 1 && ids.some((id) => !backedUp.has(id));
-  return [...byPosition.values()].filter(collides).flat().sort();
-}
-
-/**
- * The full pre-write verdict for one backed-up tech-day whose rows all still
- * match the backup — shared by the dry-run preview and the real rollback so
- * both report the same thing: the exact positions to restore, and why the
- * day must be skipped (null = restorable): RESTORE_POSITION_COLLISION first
- * (with `collisionIds`), then the shared guard's verdict on the order
- * dispatch will read (rollbackWindowConflict).
+ * The full pre-write verdict for one backed-up tech-day that matches its
+ * snapshot — shared by the dry-run preview and the real rollback so both
+ * report the same thing: the exact positions to restore, and the shared
+ * guard's verdict (null = restorable) on the order dispatch will read.
  */
 function restoreVerdict(liveRows, dayRows, deps) {
-  const positions = buildRollbackPositions(liveRows, dayRows);
-  const collisionIds = restorePositionCollisions(liveRows, dayRows, positions);
-  if (collisionIds.length) return { positions, conflict: 'RESTORE_POSITION_COLLISION', collisionIds };
+  const positions = buildRollbackPositions(dayRows);
   // Legality is checked on the order dispatch will READ after the commit
   // (restoredDispatchOrder) — with explicit positions the writer's row
   // sequence never decides how ties are read back.
   const conflict = rollbackWindowConflict(restoredDispatchOrder(liveRows, positions, deps), liveRows, deps);
-  return { positions, conflict, collisionIds };
+  return { positions, conflict };
 }
 
 /** Operator-facing explanation for a restoreVerdict conflict. */
-function rollbackConflictDetail(conflict, collisionIds = []) {
-  if (conflict === 'RESTORE_POSITION_COLLISION') {
-    return `restored positions would collide with rows moved since the backup (ids only): ${collisionIds.join(', ')}`;
-  }
+function rollbackConflictDetail(conflict) {
   return conflict.startsWith('WINDOW_')
     ? 'the restored order would violate a promised window — windows likely changed since the backup'
     : 'the shared route guard cannot certify the restored order (e.g. a stop without usable coordinates)';
@@ -467,8 +433,7 @@ async function previewRollback(conn, rows, deps) {
   for (const day of days) {
     const liveRows = await readLiveTechDay(conn, { dateStr: day.date, techId: day.technician_id }, deps);
     const mismatchedIds = mismatchedIdsForDay(day.rows, liveRows);
-    const verdict = mismatchedIds.length ? { conflict: null, collisionIds: [] } : restoreVerdict(liveRows, day.rows, deps);
-    const { conflict } = verdict;
+    const { conflict } = mismatchedIds.length ? { conflict: null } : restoreVerdict(liveRows, day.rows, deps);
     const wouldRestore = mismatchedIds.length === 0 && !conflict;
     plan.push({
       technician_id: day.technician_id,
@@ -477,7 +442,6 @@ async function previewRollback(conn, rows, deps) {
       would_restore: wouldRestore,
       mismatched_ids: mismatchedIds,
       conflict,
-      ...(verdict.collisionIds.length ? { collision_ids: verdict.collisionIds } : {}),
       note: wouldRestore ? 'eligibility (freeze/lock/today-past) re-checked at write time' : null,
     });
   }
@@ -486,7 +450,7 @@ async function previewRollback(conn, rows, deps) {
 
 /**
  * Rollback: for each backed-up tech-day, re-read the full live day and, if
- * every backed-up row still matches its backup `after` (mismatchedIdsForDay
+ * it still equals the backup's full-day `after` snapshot (mismatchedIdsForDay
  * — computed BEFORE the writer is ever called, so a mismatching day never
  * even attempts a write) AND the restored order passes the same window
  * legality guards the forward pass certifies an order with
@@ -532,13 +496,12 @@ async function applyRollback(conn, rows, now, deps) {
       continue;
     }
     const finalOrdered = buildRollbackTargetOrder(liveRows, day.rows);
-    const { positions, conflict, collisionIds } = restoreVerdict(liveRows, day.rows, deps);
+    const { positions, conflict } = restoreVerdict(liveRows, day.rows, deps);
     if (conflict) {
       summary.skipped.push({
         ...entryBase,
         reason: conflict,
-        detail: rollbackConflictDetail(conflict, collisionIds),
-        ...(collisionIds.length ? { collision_ids: collisionIds } : {}),
+        detail: rollbackConflictDetail(conflict),
       });
       continue;
     }
@@ -561,7 +524,7 @@ function printRollbackPlan(plan) {
     if (day.would_restore) {
       console.log(`${day.date} tech ${day.technician_id}: would restore ${day.row_count} row(s) (${day.note})`);
     } else if (day.conflict) {
-      console.log(`${day.date} tech ${day.technician_id}: WOULD SKIP — ${day.conflict} (${rollbackConflictDetail(day.conflict, day.collision_ids)})`);
+      console.log(`${day.date} tech ${day.technician_id}: WOULD SKIP — ${day.conflict} (${rollbackConflictDetail(day.conflict)})`);
     } else {
       console.log(`${day.date} tech ${day.technician_id}: WOULD SKIP (${day.mismatched_ids.length} row(s) no longer match, ids only): ${day.mismatched_ids.join(', ')}`);
     }
@@ -601,19 +564,20 @@ function parseLedgerResult(raw) {
 /** Printed whenever the writes already committed but this script could not
  *  finish reporting/backing them up — the backup must never look silently
  *  lost. The ledger row is the source of truth either way: every
- *  canonicalized/reordered entry's route_order_changes ({id, before, after})
- *  plus its date/technicianId is exactly the backup file's row shape. */
+ *  canonicalized/reordered entry's route_order_snapshot ({id, before, after}
+ *  for every row of that tech-day) plus its date/technicianId is exactly
+ *  the backup file's row shape. */
 function recoveryInstruction(ledgerId) {
   return `The route_order writes for this run ALREADY COMMITTED${ledgerId ? ` (ledger id ${ledgerId})` : ''}. `
     + 'Recovery: read route_optimization_planner_runs.result.reorders for that ledger id — each entry\'s '
-    + 'route_order_changes ([{id,before,after}]) plus its date/technicianId is exactly the backup file\'s row '
+    + 'route_order_snapshot ([{id,before,after}] for the whole tech-day) plus its date/technicianId is exactly the backup file\'s row '
     + 'shape; rebuild --out by hand from those, or re-run with --out once the ledger is reachable again.';
 }
 
-/** True when an entry actually carries committed row changes — the only
- *  thing that makes it useful for the backup file. */
+/** True when an entry carries a committed tech-day snapshot — the only
+ *  thing the backup file is built from. */
 function hasChanges(entry) {
-  return (entry.route_order_changes || []).length > 0;
+  return (entry.route_order_snapshot || []).length > 0;
 }
 
 /** Total row changes across a list of per-tech-day entries — the cross-check
@@ -643,6 +607,7 @@ async function collectEntries(db, execute, result) {
   if (!execute) return { entries: result.plan || [], error: null };
   const primary = (result.appliedChanges || []).map((entry) => ({
     date: entry.date, technicianId: entry.technicianId, route_order_changes: entry.changes || [],
+    route_order_snapshot: entry.snapshot || [],
   }));
   let ledgerEntries = [];
   try {
@@ -684,7 +649,7 @@ async function collectEntries(db, execute, result) {
   if ((result.applied || 0) > 0 && !entries.some(hasChanges)) {
     return {
       entries: [],
-      error: new Error(`runRouteReorder reported ${result.applied} applied tech-day(s) but neither its own result nor the ledger carried any route_order_changes`),
+      error: new Error(`runRouteReorder reported ${result.applied} applied tech-day(s) but neither its own result nor the ledger carried any route_order_snapshot`),
     };
   }
   return { entries, error: null };
@@ -905,6 +870,6 @@ if (require.main === module) {
 module.exports = {
   buildDateRange, buildBackupRows, applyRollback, parseLedgerResult, recoveryInstruction, collectEntries, reportAndBackup,
   groupRowsByTechDay, readLiveTechDay, mismatchedIdsForDay, buildRollbackTargetOrder, buildRollbackPositions,
-  restoredDispatchOrder, restorePositionCollisions, restoreVerdict, rollbackWindowConflict, runRollback, rollbackIsIncomplete, previewRollback, printRollbackPlan, printRollbackResult, buildRunOpts, writeBackupFile,
+  restoredDispatchOrder, restoreVerdict, rollbackWindowConflict, runRollback, rollbackIsIncomplete, previewRollback, printRollbackPlan, printRollbackResult, buildRunOpts, writeBackupFile,
   outOfHorizonDates, runIsUnhealthy,
 };

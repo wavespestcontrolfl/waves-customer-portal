@@ -5,7 +5,8 @@
 // promised-window baseline gets the baseline written (source
 // 'promised_window'); a stale day where Google/window-fit genuinely beats
 // the baseline is applied normally with a `canonicalized` ledger tag; a
-// stale day Google can't even run (coordless) still gets the baseline;
+// stale day Google can't even run still gets the baseline when the shared
+// guard certifies it (never with a coordless stop);
 // every freeze/LOCKED_STOP/MAX_APPLIES invariant still applies; opts.dates
 // reaches D+7..D+30 only when this mode is enabled; opts.dryRun writes
 // nothing and returns a plan.
@@ -238,7 +239,13 @@ describe('mode ON — canonicalization', () => {
       { date: DAY, technicianId: 't1', changes: expect.arrayContaining([
         { id: 'A', before: 2, after: 1 },
         { id: 'B', before: null, after: 2 },
-      ]) },
+      ]),
+      // The FULL tech-day snapshot — the unchanged C included (before === after).
+      snapshot: [
+        { id: 'A', before: 2, after: 1 },
+        { id: 'B', before: null, after: 2 },
+        { id: 'C', before: 3, after: 3 },
+      ] },
     ]);
   });
 
@@ -275,7 +282,13 @@ describe('mode ON — canonicalization', () => {
       { date: DAY, technicianId: 't1', changes: expect.arrayContaining([
         { id: 'A', before: 2, after: 1 },
         { id: 'B', before: null, after: 2 },
-      ]) },
+      ]),
+      // The FULL tech-day snapshot — the unchanged C included (before === after).
+      snapshot: [
+        { id: 'A', before: 2, after: 1 },
+        { id: 'B', before: null, after: 2 },
+        { id: 'C', before: 3, after: 3 },
+      ] },
     ]);
   });
 
@@ -633,12 +646,15 @@ describe('writeTechDayOrder explicit positions (rollback) — persisted values',
     ]);
   });
 
-  test('a row the backup never touched is written back to its own current value', async () => {
+  test('an unchanged row in the full-day snapshot (before === after) is written back to itself', async () => {
     stopsByDate[FUTURE] = [
       stop('A', { window_start: '09:00', route_order: 2 }),
       stop('X', { window_start: '11:00', route_order: 7 }),
     ];
-    const backup = [{ id: 'A', date: FUTURE, technician_id: 't1', before: 6, after: 2 }];
+    const backup = [
+      { id: 'A', date: FUTURE, technician_id: 't1', before: 6, after: 2 },
+      { id: 'X', date: FUTURE, technician_id: 't1', before: 7, after: 7 },
+    ];
     await applyRollback(rollbackConn(), backup, new Date(), realDeps());
     expect(trxUpdates).toEqual([{ id: 'A', route_order: 6 }, { id: 'X', route_order: 7 }]);
   });

@@ -15,7 +15,7 @@ const { wasLockSkipped } = require('../utils/cron-lock');
 const {
   buildDateRange, buildBackupRows, applyRollback, parseLedgerResult, recoveryInstruction,
   collectEntries, reportAndBackup, groupRowsByTechDay, readLiveTechDay, mismatchedIdsForDay,
-  buildRollbackTargetOrder, buildRollbackPositions, restoredDispatchOrder, restorePositionCollisions, rollbackWindowConflict, previewRollback, printRollbackPlan, printRollbackResult,
+  buildRollbackTargetOrder, buildRollbackPositions, restoredDispatchOrder, rollbackWindowConflict, previewRollback, printRollbackPlan, printRollbackResult,
   buildRunOpts, writeBackupFile, outOfHorizonDates, runIsUnhealthy, runRollback, rollbackIsIncomplete,
 } = require('../../scripts/route-order-cleanup');
 const {
@@ -96,15 +96,18 @@ describe('buildDateRange', () => {
 });
 
 describe('buildBackupRows', () => {
-  test('flattens every entry\'s route_order_changes into per-row backup entries', () => {
+  test('flattens every entry\'s FULL tech-day route_order_snapshot (unchanged rows included) into per-row backup entries', () => {
     const entries = [
-      { date: '2026-10-05', technicianId: 't1', route_order_changes: [{ id: 'a', before: 2, after: 1 }, { id: 'b', before: null, after: 2 }] },
-      { date: '2026-10-06', technicianId: 't2', route_order_changes: [] },
-      { date: '2026-10-07', technicianId: 't1', skipped_reason: 'WITHIN_72H' }, // no route_order_changes field at all
+      { date: '2026-10-05', technicianId: 't1',
+        route_order_changes: [{ id: 'a', before: 2, after: 1 }, { id: 'b', before: null, after: 2 }],
+        route_order_snapshot: [{ id: 'a', before: 2, after: 1 }, { id: 'b', before: null, after: 2 }, { id: 'c', before: 3, after: 3 }] },
+      { date: '2026-10-06', technicianId: 't2', route_order_changes: [], route_order_snapshot: [] },
+      { date: '2026-10-07', technicianId: 't1', skipped_reason: 'WITHIN_72H' }, // no snapshot at all
     ];
     expect(buildBackupRows(entries)).toEqual([
       { id: 'a', date: '2026-10-05', technician_id: 't1', before: 2, after: 1 },
       { id: 'b', date: '2026-10-05', technician_id: 't1', before: null, after: 2 },
+      { id: 'c', date: '2026-10-05', technician_id: 't1', before: 3, after: 3 },
     ]);
   });
 
@@ -176,15 +179,17 @@ describe('buildRollbackTargetOrder', () => {
     expect(buildRollbackTargetOrder(live, backup).map((r) => r.id)).toEqual(['A', 'B', 'C']);
   });
 
-  test('backed-up rows return to their original position; a non-backed-up row keeps ITS original position too (its own current route_order, since cleanup never touched it)', () => {
-    // Original: P=1, Q=2, R=3, S=4. Cleanup swaps only Q and S (P, R never
-    // touched): live now is P=1, S=2, R=3, Q=4. Backup: Q(before=2,after=4),
-    // S(before=4,after=2).
+  test('every row returns to its recorded position — unchanged rows (before === after) included', () => {
+    // Original: P=1, Q=2, R=3, S=4. Cleanup swaps only Q and S: live now is
+    // P=1, S=2, R=3, Q=4. The full-day snapshot records P and R unchanged.
     const live = [
       { id: 'P', route_order: 1 }, { id: 'S', route_order: 2 },
       { id: 'R', route_order: 3 }, { id: 'Q', route_order: 4 },
     ];
-    const backup = [{ id: 'Q', before: 2, after: 4 }, { id: 'S', before: 4, after: 2 }];
+    const backup = [
+      { id: 'P', before: 1, after: 1 }, { id: 'S', before: 4, after: 2 },
+      { id: 'R', before: 3, after: 3 }, { id: 'Q', before: 2, after: 4 },
+    ];
     expect(buildRollbackTargetOrder(live, backup).map((r) => r.id)).toEqual(['P', 'Q', 'R', 'S']);
   });
 
@@ -197,25 +202,29 @@ describe('buildRollbackTargetOrder', () => {
       { id: 'P', route_order: 1 }, { id: 'Q', route_order: 2 },
       { id: 'R', route_order: 3 }, { id: 'S', route_order: 4 },
     ];
-    const backup = [{ id: 'R', before: null, after: 3 }, { id: 'S', before: null, after: 4 }];
+    const backup = [
+      { id: 'P', before: 1, after: 1 }, { id: 'Q', before: 2, after: 2 },
+      { id: 'R', before: null, after: 3 }, { id: 'S', before: null, after: 4 },
+    ];
     expect(buildRollbackTargetOrder(live, backup).map((r) => r.id)).toEqual(['P', 'Q', 'R', 'S']);
   });
 
   test('a non-numeric "before" is treated the same as null — sorts last, never first', () => {
     const live = [{ id: 'A', route_order: 1 }, { id: 'B', route_order: 2 }];
-    const backup = [{ id: 'B', before: 'oops' }];
+    const backup = [{ id: 'A', before: 1, after: 1 }, { id: 'B', before: 'oops', after: 2 }];
     expect(buildRollbackTargetOrder(live, backup).map((r) => r.id)).toEqual(['A', 'B']);
   });
 
   test('a "before" far beyond the day\'s current size still just sorts after everything else — never throws, never clamps to a wrong index', () => {
     const live = [{ id: 'A', route_order: 1 }, { id: 'B', route_order: 2 }];
-    const backup = [{ id: 'A', before: 99 }];
+    const backup = [{ id: 'A', before: 99, after: 1 }, { id: 'B', before: 2, after: 2 }];
     expect(buildRollbackTargetOrder(live, backup).map((r) => r.id)).toEqual(['B', 'A']);
   });
 
-  test('a live row with no route_order (null) sorts last in the current-order baseline (the tie-break for two non-backed-up rows)', () => {
+  test('a live row with no route_order (null) sorts last in the current-order baseline (the tie-break for two rows with the same "before")', () => {
     const live = [{ id: 'A', route_order: null }, { id: 'B', route_order: 1 }];
-    expect(buildRollbackTargetOrder(live, []).map((r) => r.id)).toEqual(['B', 'A']);
+    const backup = [{ id: 'A', before: 5, after: null }, { id: 'B', before: 5, after: 1 }];
+    expect(buildRollbackTargetOrder(live, backup).map((r) => r.id)).toEqual(['B', 'A']);
   });
 
   test('multiple restored rows land in ascending "before" order regardless of the backup array\'s own order', () => {
@@ -224,7 +233,10 @@ describe('buildRollbackTargetOrder', () => {
       { id: 'R', route_order: 3 }, { id: 'Q', route_order: 4 },
     ];
     // Backup array lists S before Q, but Q's "before" (2) precedes S's (4).
-    const backup = [{ id: 'S', before: 4, after: 2 }, { id: 'Q', before: 2, after: 4 }];
+    const backup = [
+      { id: 'S', before: 4, after: 2 }, { id: 'R', before: 3, after: 3 },
+      { id: 'Q', before: 2, after: 4 }, { id: 'P', before: 1, after: 1 },
+    ];
     expect(buildRollbackTargetOrder(live, backup).map((r) => r.id)).toEqual(['P', 'Q', 'R', 'S']);
   });
 });
@@ -232,27 +244,22 @@ describe('buildRollbackTargetOrder', () => {
 describe('buildRollbackPositions (the exact values the rollback writes back)', () => {
   test('the codex thread: original 4,5,null restores to exactly 4,5,null — never renumbered 1,2,3', () => {
     // Cleanup renumbered A=4,B=5,C=null to A=1,B=2,C=3.
-    const live = [{ id: 'A', route_order: 1 }, { id: 'B', route_order: 2 }, { id: 'C', route_order: 3 }];
     const backup = [
       { id: 'A', before: 4, after: 1 },
       { id: 'B', before: 5, after: 2 },
       { id: 'C', before: null, after: 3 },
     ];
-    expect(buildRollbackPositions(live, backup)).toEqual(new Map([['A', 4], ['B', 5], ['C', null]]));
+    expect(buildRollbackPositions(backup)).toEqual(new Map([['A', 4], ['B', 5], ['C', null]]));
   });
 
-  test('a row the cleanup never touched keeps its CURRENT value, null included', () => {
-    const live = [
-      { id: 'A', route_order: 1 }, { id: 'X', route_order: 7 }, { id: 'Y', route_order: null },
-    ];
-    const backup = [{ id: 'A', before: 3, after: 1 }];
-    expect(buildRollbackPositions(live, backup)).toEqual(new Map([['A', 3], ['X', 7], ['Y', null]]));
+  test('an unchanged row in the full-day snapshot (before === after) is restored to itself', () => {
+    const backup = [{ id: 'A', before: 3, after: 1 }, { id: 'X', before: 7, after: 7 }];
+    expect(buildRollbackPositions(backup)).toEqual(new Map([['A', 3], ['X', 7]]));
   });
 
   test('a numeric-string "before" is restored as that integer; a non-numeric one as null (the same "no position" it sorts as)', () => {
-    const live = [{ id: 'A', route_order: 1 }, { id: 'B', route_order: 2 }];
     const backup = [{ id: 'A', before: '6', after: 1 }, { id: 'B', before: 'junk', after: 2 }];
-    expect(buildRollbackPositions(live, backup)).toEqual(new Map([['A', 6], ['B', null]]));
+    expect(buildRollbackPositions(backup)).toEqual(new Map([['A', 6], ['B', null]]));
   });
 });
 
@@ -515,6 +522,7 @@ describe('applyRollback — hands each eligible tech-day to the SAME fenced writ
     const rows = [
       { id: 'A', date: '2026-10-05', technician_id: 't1', before: 1, after: 2 },
       { id: 'B', date: '2026-10-05', technician_id: 't1', before: 2, after: 1 },
+      { id: 'X', date: '2026-10-05', technician_id: 't1', before: 3, after: 3 }, // full-day snapshot: X unchanged
     ];
     const result = await applyRollback(conn, rows, NOW, rollbackDeps({ writeTechDayOrder }));
     expect(writeTechDayOrder).toHaveBeenCalledTimes(1);
@@ -527,10 +535,10 @@ describe('applyRollback — hands each eligible tech-day to the SAME fenced writ
     expect(args.finalOrdered.map((r) => r.id)).toEqual(['A', 'B', 'X']);
     expect(args.repair).toBeNull();
     // Explicit-positions mode: the exact recorded values, never index+1.
-    expect(args.opts).toEqual({ positions: new Map([['B', 2], ['A', 1], ['X', 3]]) });
+    expect(args.opts).toEqual({ positions: new Map([['A', 1], ['B', 2], ['X', 3]]) });
     expect(args.now).toBe(NOW);
     expect(args.repairGates).toEqual([]);
-    expect(result.restored).toBe(2);
+    expect(result.restored).toBe(3);
     expect(result.summary.skipped).toEqual([]);
     expect(result.summary.failed).toEqual([]);
   });
@@ -724,10 +732,10 @@ describe('parseLedgerResult', () => {
 });
 
 describe('recoveryInstruction', () => {
-  test('names the ledger id and points at route_order_changes for a manual rebuild', () => {
+  test('names the ledger id and points at route_order_snapshot for a manual rebuild', () => {
     const msg = recoveryInstruction('ledger-123');
     expect(msg).toMatch(/ledger id ledger-123/);
-    expect(msg).toMatch(/route_order_changes/);
+    expect(msg).toMatch(/route_order_snapshot/);
     expect(msg).toMatch(/ALREADY COMMITTED/);
   });
 
@@ -762,6 +770,8 @@ describe('lock-refusal detection (the script must use wasLockSkipped, not a bare
 });
 
 describe('collectEntries', () => {
+  // The run's full tech-day snapshot for the one applied day (the backup's rows).
+  const SNAP = [{ id: 'a', before: 2, after: 1 }, { id: 'b', before: 1, after: 2 }];
   test('dry run reads result.plan directly — no db call', async () => {
     const db = jest.fn(() => { throw new Error('db must not be touched in dry run'); });
     const result = { status: 'completed', plan: [{ date: '2026-10-05' }] };
@@ -769,7 +779,7 @@ describe('collectEntries', () => {
   });
 
   test('--execute reads the ledger row back — the REAL jsonb shape (an object, not a string)', async () => {
-    const reorders = [{ date: '2026-10-05', technicianId: 't1', route_order_changes: [{ id: 'a', before: 2, after: 1 }] }];
+    const reorders = [{ date: '2026-10-05', technicianId: 't1', route_order_changes: [{ id: 'a', before: 2, after: 1 }], route_order_snapshot: SNAP }];
     const db = jest.fn((table) => {
       expect(table).toBe('route_optimization_planner_runs');
       return { where: () => ({ first: async () => ({ result: { reorders, skips: [], failures: [] } }) }) };
@@ -801,10 +811,10 @@ describe('collectEntries', () => {
     const db = jest.fn(() => { throw new Error('must not be queried with no ledgerId'); });
     const result = {
       status: 'completed', ledgerId: null, applied: 1, skipped: 0, failed: 0,
-      appliedChanges: [{ date: '2026-10-05', technicianId: 't1', changes: [{ id: 'a', before: 2, after: 1 }] }],
+      appliedChanges: [{ date: '2026-10-05', technicianId: 't1', changes: [{ id: 'a', before: 2, after: 1 }], snapshot: SNAP }],
     };
     expect(await collectEntries(db, true, result)).toEqual({
-      entries: [{ date: '2026-10-05', technicianId: 't1', route_order_changes: [{ id: 'a', before: 2, after: 1 }] }],
+      entries: [{ date: '2026-10-05', technicianId: 't1', route_order_changes: [{ id: 'a', before: 2, after: 1 }], route_order_snapshot: SNAP }],
       error: null,
     });
   });
@@ -813,11 +823,11 @@ describe('collectEntries', () => {
     const db = jest.fn(() => ({ where: () => ({ first: async () => { throw new Error('connection lost'); } }) }));
     const result = {
       status: 'completed', ledgerId: 'ledger-1', applied: 1, skipped: 0, failed: 0,
-      appliedChanges: [{ date: '2026-10-05', technicianId: 't1', changes: [{ id: 'a', before: 2, after: 1 }] }],
+      appliedChanges: [{ date: '2026-10-05', technicianId: 't1', changes: [{ id: 'a', before: 2, after: 1 }], snapshot: SNAP }],
     };
     const { entries, error } = await collectEntries(db, true, result);
     expect(error).toBeNull();
-    expect(entries).toEqual([{ date: '2026-10-05', technicianId: 't1', route_order_changes: [{ id: 'a', before: 2, after: 1 }] }]);
+    expect(entries).toEqual([{ date: '2026-10-05', technicianId: 't1', route_order_changes: [{ id: 'a', before: 2, after: 1 }], route_order_snapshot: SNAP }]);
   });
 
   test('appliedChanges (primary) wins over the ledger even when the ledger read succeeds — but its canonicalized/source detail is still merged in for reporting', async () => {
@@ -830,12 +840,12 @@ describe('collectEntries', () => {
     const db = jest.fn(() => ({ where: () => ({ first: async () => ({ result: { reorders: ledgerReorders } }) }) }));
     const result = {
       status: 'completed', ledgerId: 'ledger-1', applied: 1, skipped: 0, failed: 0,
-      appliedChanges: [{ date: '2026-10-05', technicianId: 't1', changes: [{ id: 'a', before: 2, after: 1 }] }],
+      appliedChanges: [{ date: '2026-10-05', technicianId: 't1', changes: [{ id: 'a', before: 2, after: 1 }], snapshot: SNAP }],
     };
     const { entries, error } = await collectEntries(db, true, result);
     expect(error).toBeNull();
     expect(entries).toEqual([{
-      date: '2026-10-05', technicianId: 't1', route_order_changes: [{ id: 'a', before: 2, after: 1 }],
+      date: '2026-10-05', technicianId: 't1', route_order_changes: [{ id: 'a', before: 2, after: 1 }], route_order_snapshot: SNAP,
       canonicalized: { reasons: ['gap'], source: 'google' },
     }]);
   });
@@ -848,11 +858,11 @@ describe('collectEntries', () => {
     const db = jest.fn(() => ({ where: () => ({ first: async () => ({ result: { reorders: ledgerReorders } }) }) }));
     const result = {
       status: 'completed', ledgerId: 'ledger-1', applied: 1, skipped: 0, failed: 0,
-      appliedChanges: [{ date: '2026-10-05', technicianId: 't1', changes: [{ id: 'a', before: 2, after: 1 }] }],
+      appliedChanges: [{ date: '2026-10-05', technicianId: 't1', changes: [{ id: 'a', before: 2, after: 1 }], snapshot: SNAP }],
     };
     const { entries } = await collectEntries(db, true, result);
     expect(entries).toEqual([{
-      date: '2026-10-05', technicianId: 't1', route_order_changes: [{ id: 'a', before: 2, after: 1 }],
+      date: '2026-10-05', technicianId: 't1', route_order_changes: [{ id: 'a', before: 2, after: 1 }], route_order_snapshot: SNAP,
       source: 'window_constrained',
     }]);
   });
@@ -862,10 +872,10 @@ describe('collectEntries', () => {
     const db = jest.fn(() => ({ where: () => ({ first: async () => ({ result: { reorders: ledgerReorders } }) }) }));
     const result = {
       status: 'completed', ledgerId: 'ledger-1', applied: 1, skipped: 0, failed: 0,
-      appliedChanges: [{ date: '2026-10-05', technicianId: 't1', changes: [{ id: 'a', before: 2, after: 1 }] }],
+      appliedChanges: [{ date: '2026-10-05', technicianId: 't1', changes: [{ id: 'a', before: 2, after: 1 }], snapshot: SNAP }],
     };
     const { entries } = await collectEntries(db, true, result);
-    expect(entries).toEqual([{ date: '2026-10-05', technicianId: 't1', route_order_changes: [{ id: 'a', before: 2, after: 1 }] }]);
+    expect(entries).toEqual([{ date: '2026-10-05', technicianId: 't1', route_order_changes: [{ id: 'a', before: 2, after: 1 }], route_order_snapshot: SNAP }]);
   });
 
   test('a mismatch between appliedChanges and the ledger prints a warning but still uses appliedChanges', async () => {
@@ -874,7 +884,7 @@ describe('collectEntries', () => {
     const db = jest.fn(() => ({ where: () => ({ first: async () => ({ result: { reorders: ledgerReorders } }) }) }));
     const result = {
       status: 'completed', ledgerId: 'ledger-1', applied: 1, skipped: 0, failed: 0,
-      appliedChanges: [{ date: '2026-10-05', technicianId: 't1', changes: [{ id: 'a', before: 2, after: 1 }] }],
+      appliedChanges: [{ date: '2026-10-05', technicianId: 't1', changes: [{ id: 'a', before: 2, after: 1 }], snapshot: SNAP }],
     };
     const { entries, error } = await collectEntries(db, true, result);
     expect(error).toBeNull();
@@ -952,7 +962,8 @@ describe('reportAndBackup', () => {
     renameSpy.mockRestore();
   });
 
-  const entries = [{ date: '2026-10-05', technicianId: 't1', route_order_changes: [{ id: 'a', before: 2, after: 1 }] }];
+  const entries = [{ date: '2026-10-05', technicianId: 't1', route_order_changes: [{ id: 'a', before: 2, after: 1 }],
+    route_order_snapshot: [{ id: 'a', before: 2, after: 1 }] }];
 
   test('writes the backup file (via the tmp+rename path) when entries were read cleanly', () => {
     const outcome = reportAndBackup({ execute: true, result: { ledgerId: 'ledger-1' }, entries, error: null, outPath: '/tmp/backup.json' });
@@ -1144,75 +1155,68 @@ describe('runRollback --execute: run-level lock (PRRT_kwDOR3YQi86mQTC6) and exit
   });
 });
 
-describe('restore position collisions (codex PRRT_kwDOR3YQi86mQfEB)', () => {
+describe('full tech-day snapshot rollback (codex PRRT_kwDOR3YQi86mQfEB + its mirror case)', () => {
   const NOW = new Date('2026-09-27T12:00:00Z');
-  // Original A=2, B=1, X=3. Cleanup swapped A/B (A=1, B=2; X untouched, so
-  // not in the backup). An admin single-row reorder then moved X to 2.
-  // Restoring A→2 would leave A and X both at 2 — the backup-match check
-  // (backed-up rows only) and the window guard both still pass.
+  const row = (id, before, after) => ({ id, date: '2026-10-05', technician_id: 't1', before, after });
+
+  test('the mirror case: original A=1, B=1 (a real duplicate) → cleanup A=1, B=2 → restores exactly A=1, B=1', async () => {
+    const live = [
+      { id: 'A', route_order: 1, window_start: '09:00' },
+      { id: 'B', route_order: 2, window_start: '09:00' },
+    ];
+    const snapshot = [row('A', 1, 1), row('B', 1, 2)]; // A unchanged, still in the snapshot
+    const writeTechDayOrder = jest.fn(async () => {});
+    const result = await applyRollback(fakeLiveConn({ 't1:2026-10-05': live }), snapshot, NOW, rollbackDeps({ writeTechDayOrder }));
+    expect(result.summary).toEqual({ skipped: [], failed: [] });
+    expect(writeTechDayOrder).toHaveBeenCalledTimes(1);
+    expect(writeTechDayOrder.mock.calls[0][1].opts.positions).toEqual(new Map([['A', 1], ['B', 1]]));
+    expect(result.restored).toBe(2);
+  });
+
+  // Original A=2, B=1, X=3. Cleanup swapped A/B (A=1, B=2; X unchanged at
+  // 3, recorded in the snapshot). An admin single-row reorder then moved X
+  // to 2. Restoring would have left A and X both at 2.
   const axLive = () => [
     { id: 'A', route_order: 1, window_start: '09:00' },
     { id: 'B', route_order: 2, window_start: '09:00' },
     { id: 'X', route_order: 2, window_start: '09:00' },
   ];
-  const axBackup = [
-    { id: 'A', date: '2026-10-05', technician_id: 't1', before: 2, after: 1 },
-    { id: 'B', date: '2026-10-05', technician_id: 't1', before: 1, after: 2 },
-  ];
+  const axSnapshot = [row('A', 2, 1), row('B', 1, 2), row('X', 3, 3)];
 
-  test('the A/X repro: execute skips the day with RESTORE_POSITION_COLLISION and the colliding ids — the writer is never called', async () => {
-    const conn = fakeLiveConn({ 't1:2026-10-05': axLive() });
+  test('the A/X intervening edit: X no longer at its snapshot "after" → the whole day skips as MISMATCH naming X, writer never called', async () => {
     const writeTechDayOrder = jest.fn();
-    const result = await applyRollback(conn, axBackup, NOW, rollbackDeps({ writeTechDayOrder }));
+    const result = await applyRollback(fakeLiveConn({ 't1:2026-10-05': axLive() }), axSnapshot, NOW, rollbackDeps({ writeTechDayOrder }));
     expect(writeTechDayOrder).not.toHaveBeenCalled();
     expect(result.restored).toBe(0);
     expect(result.summary.skipped).toEqual([{
-      date: '2026-10-05', technician_id: 't1', reason: 'RESTORE_POSITION_COLLISION',
-      detail: 'restored positions would collide with rows moved since the backup (ids only): A, X',
-      collision_ids: ['A', 'X'],
+      date: '2026-10-05', technician_id: 't1', reason: 'MISMATCH',
+      detail: 'no longer matches the backup (ids only): X',
+      mismatched_ids: ['X'],
     }]);
   });
 
-  test('the A/X repro: the preview shows the same verdict', async () => {
-    const conn = fakeLiveConn({ 't1:2026-10-05': axLive() });
-    const plan = await previewRollback(conn, axBackup, rollbackDeps());
-    expect(plan[0]).toMatchObject({
-      would_restore: false, conflict: 'RESTORE_POSITION_COLLISION', collision_ids: ['A', 'X'], mismatched_ids: [],
-    });
-    const logs = [];
-    const spy = jest.spyOn(console, 'log').mockImplementation((m) => logs.push(m));
-    printRollbackPlan(plan);
-    spy.mockRestore();
-    expect(logs.some((l) => /WOULD SKIP — RESTORE_POSITION_COLLISION/.test(l) && /A, X/.test(l))).toBe(true);
+  test('the A/X intervening edit: the preview shows the same would-skip', async () => {
+    const plan = await previewRollback(fakeLiveConn({ 't1:2026-10-05': axLive() }), axSnapshot, rollbackDeps());
+    expect(plan[0]).toMatchObject({ would_restore: false, mismatched_ids: ['X'], conflict: null });
   });
 
-  test('a duplicate the day genuinely had before the cleanup (two backed-up rows with the same "before") is restored, not rejected', async () => {
+  test('a row ADDED to the tech-day since the backup skips the day as MISMATCH naming it', async () => {
     const live = [
-      { id: 'A', route_order: 1, window_start: '09:00' },
-      { id: 'B', route_order: 2, window_start: '09:00' },
+      { id: 'A', route_order: 2, window_start: '09:00' },
+      { id: 'B', route_order: 1, window_start: '09:00' },
+      { id: 'NEW', route_order: null, window_start: '09:00' },
     ];
-    const backup = [
-      { id: 'A', date: '2026-10-05', technician_id: 't1', before: 3, after: 1 },
-      { id: 'B', date: '2026-10-05', technician_id: 't1', before: 3, after: 2 },
-    ];
-    const writeTechDayOrder = jest.fn(async () => {});
-    const result = await applyRollback(fakeLiveConn({ 't1:2026-10-05': live }), backup, NOW, rollbackDeps({ writeTechDayOrder }));
-    expect(writeTechDayOrder).toHaveBeenCalledTimes(1);
-    expect(writeTechDayOrder.mock.calls[0][1].opts.positions).toEqual(new Map([['A', 3], ['B', 3]]));
-    expect(result.restored).toBe(2);
+    const writeTechDayOrder = jest.fn();
+    const result = await applyRollback(fakeLiveConn({ 't1:2026-10-05': live }), [row('A', 1, 2), row('B', 2, 1)], NOW,
+      rollbackDeps({ writeTechDayOrder }));
+    expect(writeTechDayOrder).not.toHaveBeenCalled();
+    expect(result.summary.skipped).toEqual([expect.objectContaining({ reason: 'MISMATCH', mismatched_ids: ['NEW'] })]);
   });
 
-  test('restorePositionCollisions: unbacked rows now sharing a slot collide; nulls never do; a distinct restore is clean', () => {
-    const backed = [{ id: 'A', before: 1 }];
-    const pos = (entries) => new Map(entries);
-    expect(restorePositionCollisions(
-      [{ id: 'A' }, { id: 'X' }, { id: 'Y' }], backed, pos([['A', 1], ['X', 4], ['Y', 4]]),
-    )).toEqual(['X', 'Y']);
-    expect(restorePositionCollisions(
-      [{ id: 'A' }, { id: 'X' }], [{ id: 'A', before: null }], pos([['A', null], ['X', null]]),
-    )).toEqual([]);
-    expect(restorePositionCollisions(
-      [{ id: 'A' }, { id: 'X' }], backed, pos([['A', 1], ['X', 2]]),
-    )).toEqual([]);
+  test('mismatchedIdsForDay: moved and missing snapshot rows first, then rows added since; an exact match is clean', () => {
+    const snap = [{ id: 'A', after: 1 }, { id: 'B', after: 2 }, { id: 'C', after: 3 }];
+    expect(mismatchedIdsForDay(snap, [{ id: 'A', route_order: 1 }, { id: 'B', route_order: 2 }, { id: 'C', route_order: 3 }])).toEqual([]);
+    expect(mismatchedIdsForDay(snap, [{ id: 'A', route_order: 1 }, { id: 'B', route_order: 5 }, { id: 'D', route_order: 3 }]))
+      .toEqual(['B', 'C', 'D']);
   });
 });

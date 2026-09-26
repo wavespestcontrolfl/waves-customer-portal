@@ -991,6 +991,20 @@ function routeOrderChanges(techStops, finalOrdered) {
   }, []);
 }
 
+/** {id, before, after} for EVERY stop on the tech-day (unchanged ones with
+ *  before === after), in the written order — the route-order-cleanup
+ *  script's FULL tech-day backup snapshot (codex pre-push: a rollback that
+ *  only knew the rows that moved could neither tell a pre-existing duplicate
+ *  from a collision nor see a row moved/added since the backup). Built from
+ *  the load-time `techStops`, which writeTechDayOrder's FOR UPDATE re-read
+ *  proves identical at commit (same membership, same route_order, or the
+ *  write aborts), so it is exactly the committed before/after. Ids and
+ *  integers only. */
+function routeOrderSnapshot(techStops, finalOrdered) {
+  const beforeById = new Map(techStops.map((s) => [s.id, s.route_order == null ? null : Number(s.route_order)]));
+  return finalOrdered.map((stop, index) => ({ id: stop.id, before: beforeById.get(stop.id) ?? null, after: index + 1 }));
+}
+
 /** 'repair' | 'window_fit' | 'google' | 'promised_window' — the canonicalized
  *  ledger tag's source label, collapsing every optimizer/source string this
  *  pass can produce into the four the brief names. */
@@ -1221,6 +1235,7 @@ async function attemptCanonicalizeWrite({ conn, dateStr, techId, techStops, stal
   if (opts.dryRun) {
     summary.applied.push({ ...entryBase, dry_run: true, source: 'promised_window', saved_meters: 0,
       canonicalized, route_order_changes: changes,
+      route_order_snapshot: routeOrderSnapshot(techStops, baseline.orderedStops),
       before_ids: currentOrder(techStops).map((s) => s.id), after_ids: baseline.orderedStops.map((s) => s.id) });
     return { handled: true, failed: false };
   }
@@ -1230,7 +1245,8 @@ async function attemptCanonicalizeWrite({ conn, dateStr, techId, techStops, stal
     return { handled: true, failed: classifyWriteError(writeErr, { summary, entryBase }) };
   }
   summary.applied.push({ ...entryBase, saved_meters: 0, source: 'promised_window',
-    canonicalized, route_order_changes: changes });
+    canonicalized, route_order_changes: changes,
+    route_order_snapshot: routeOrderSnapshot(techStops, baseline.orderedStops) });
   return { handled: true, failed: false };
 }
 
@@ -1331,6 +1347,7 @@ function canonicalLedgerFields({ canonicalizeStaleEnabled, staleReasons, techSto
   if (!canonicalizeStaleEnabled) return {};
   return {
     route_order_changes: routeOrderChanges(techStops, finalOrdered),
+    route_order_snapshot: routeOrderSnapshot(techStops, finalOrdered),
     ...(staleReasons.length > 0
       ? { canonicalized: { reasons: staleReasons, source: canonicalSourceLabel(repair, source) } }
       : {}),
@@ -1359,6 +1376,7 @@ function withAppliedChanges(result, summary, canonicalizeStaleEnabled) {
       date: entry.date,
       technicianId: entry.technician_id,
       changes: entry.route_order_changes || [],
+      snapshot: entry.route_order_snapshot || [],
     })),
   };
 }
@@ -1838,6 +1856,8 @@ function buildDryRunPlan(summary) {
     // positions from the id-order arrays above (which describe SEQUENCE,
     // not the literal stored route_order a stale day can have gaps/nulls in).
     route_order_changes: entry.route_order_changes || [],
+    // The whole tech-day's {id, before, after} — the backup file's rows.
+    route_order_snapshot: entry.route_order_snapshot || [],
     skipped_reason: null,
   }));
   const notApplied = [...summary.skipped, ...summary.failed].map((entry) => ({
@@ -2029,5 +2049,5 @@ module.exports = {
   writeTechDayOrder,
   classifyWriteError,
   _internals: { currentOrder, modelDriveMinutes, effectiveWindowStart, effectiveWindowRange, violatesWindowFeasibility, withinFreezeClock, violatesWindowChronology, modelDistanceMeters, loadAutoDispatchSummary, EXCLUDE_STATUSES, GOOGLE_WAYPOINT_CAP, LIVE_HOLD_SQL,
-    UNCERTIFIABLE_REASONS, boundedDateList, canonicalizeBaselineOrder, routeOrderChanges, canonicalSourceLabel, buildDryRunPlan },
+    UNCERTIFIABLE_REASONS, boundedDateList, canonicalizeBaselineOrder, routeOrderChanges, routeOrderSnapshot, canonicalSourceLabel, buildDryRunPlan },
 };
