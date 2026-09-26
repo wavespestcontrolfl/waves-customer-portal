@@ -206,7 +206,11 @@ describe('species-catalog-v1 entries — schema (ported from validate.js)', () =
       expect(e.safety.venomous).toBe(true);
       expect(s.referral).toBe('wildlife_trapper');
     }
-    if (e.safety.protected === true && e.verdict === 'call') {
+    // brazilian-free-tailed-bat is a deliberate, owner-reviewed exception
+    // (validate.js carries the same one): bat exclusion is legal-permit
+    // work done by the same wildlife professional, so it stays a
+    // wildlife_trapper referral rather than protected_leave_alone/report_fwc.
+    if (e.safety.protected === true && e.verdict === 'call' && e.slug !== 'brazilian-free-tailed-bat') {
       expect(['protected_leave_alone', 'report_fwc']).toContain(s.referral);
     }
 
@@ -369,7 +373,11 @@ describe('resolveName regressions', () => {
   });
 
   test('a specific name inside a sentence still beats the group name inside it', () => {
-    expect(catalog.resolveName('drywood termite pellets on the sill').node.slug).toBe('drywood-termite');
+    // Now that drywood-termite-frass (the "pellets" sign entry) exists, its
+    // own longer alias ("drywood termite pellets") is the more specific
+    // match — beating both the group and the organism entry, exactly the
+    // "longest whole-word match wins" rule this test exercises.
+    expect(catalog.resolveName('drywood termite pellets on the sill').node.slug).toBe('drywood-termite-frass');
   });
 
   test('a raw v1 legacy slug resolves through the legacy map before any fuzzy match (Codex #4873 r1)', () => {
@@ -406,8 +414,10 @@ describe('resolveName regressions', () => {
     }
   });
 
-  test('a bare genus resolves an "X spp." scientific name', () => {
-    expect(catalog.resolveName('Phyllophaga').node.slug).toBe('white-grub');
+  test('a bare genus resolves an "X spp." scientific name, or the shared subgroup when two entries share it', () => {
+    // white-grub (larva) and june-beetle (adult) are both Phyllophaga spp. —
+    // same collision-to-common-ancestor rule as Apis mellifera above.
+    expect(catalog.resolveName('Phyllophaga').node).toMatchObject({ level: 'subgroup', id: 'scarabs-grubs' });
   });
 
   test('scientific name match takes priority and works case-insensitively', () => {
@@ -461,10 +471,10 @@ describe('loader API surface', () => {
   });
 
   test('listEntries filters by group, subgroup, and kind', () => {
-    expect(catalog.listEntries({ group: 'ants' }).length).toBe(6);
-    expect(catalog.listEntries({ group: 'ants', subgroup: 'fire-ants' }).length).toBe(1);
-    expect(catalog.listEntries({ kind: 'organism' }).length).toBe(allEntries.length);
-    expect(catalog.listEntries({ kind: 'sign' }).length).toBe(0);
+    expect(catalog.listEntries({ group: 'ants' }).length).toBe(19);
+    expect(catalog.listEntries({ group: 'ants', subgroup: 'fire-ants' }).length).toBe(3);
+    expect(catalog.listEntries({ kind: 'organism' }).length).toBe(allEntries.length - 12);
+    expect(catalog.listEntries({ kind: 'sign' }).length).toBe(12);
   });
 
   test('getNode resolves entries, subgroups, groups, and categories', () => {
@@ -538,7 +548,7 @@ describe('loader API surface', () => {
 });
 
 describe('catalog size (sanity)', () => {
-  test('exactly 60 owner-A entries are loaded for this PR', () => {
-    expect(allEntries.length).toBe(60);
+  test('exactly 239 entries are loaded (60 owner-A + 179 owner-B/C)', () => {
+    expect(allEntries.length).toBe(239);
   });
 });
