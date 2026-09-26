@@ -2005,6 +2005,40 @@ async function checkInvoiceDeliveryPreconditions(database, current, { sendClaimT
   return { ok: true };
 }
 
+// Whether ANY leg of a dispatchBillingChannels fan-out (channelResults,
+// keyed 'email'/'push'/'sms') was actually accepted — independent of the
+// fan-out's own "representative" outcome (billing-channel-routing.js's
+// billingDispatchOutcome deliberately surfaces an UNFINISHED leg's own
+// retry/hold as the top-level result when one leg accepted and another
+// still needs retry, so `sent:false` there does NOT mean nothing was
+// delivered). No fan-out at all (channelResults null/undefined — legacy
+// plain SMS, or the allowClaimed && hasEmailLeg wrapper leg) falls back to
+// the plain `sent` flag, byte-identical to before this existed.
+function anyBillingChannelAccepted(channelResults, sent) {
+  if (!channelResults) return sent === true;
+  return Object.values(channelResults).some(
+    (leg) => leg?.sent === true && leg?.deliveryOutcome === "accepted",
+  );
+}
+
+// Staff-facing wording for which channel(s) actually delivered, built from
+// the SAME channelResults fan-out truth finalizeInvoiceAfterSms stamps from
+// — never the legacy "sent via SMS" wording regardless of which channel(s)
+// were selected. No fan-out at all is definitionally SMS (byte-identical to
+// the description/log line this replaces). "App" matches the customer-
+// facing Email/Text/App channel-picker naming (client/src/pages/PortalPage.jsx).
+function describeInvoiceDeliveryChannels(channelResults) {
+  if (!channelResults) return "SMS";
+  const labels = [];
+  if (channelResults.email?.sent === true) labels.push("Email");
+  if (channelResults.sms?.sent === true) labels.push("SMS");
+  if (channelResults.push?.sent === true) labels.push("App");
+  if (!labels.length) return "SMS";
+  if (labels.length === 1) return labels[0];
+  if (labels.length === 2) return labels.join(" and ");
+  return `${labels.slice(0, -1).join(", ")}, and ${labels[labels.length - 1]}`;
+}
+
 // A text that carries THIS invoice's pay link and is queued for the send
 // window still owns the delivery after its sender released the 'sending'
 // claim (#4131): the replay body is frozen and its executor has no delivery
@@ -5322,8 +5356,25 @@ const InvoiceService = {
       // Available to the catch block's retry call too (declared outside the
       // try block) — see finalizeInvoiceAfterSms above.
       acceptedChannelResults = sendResult.channelResults || null;
+      // Codex round-2 P1 (#4963): billing-channel-routing.js's
+      // billingDispatchOutcome deliberately surfaces an UNFINISHED leg's own
+      // retry/hold as the top-level `sendResult` when one leg (Email, say)
+      // accepted and another (Text) still needs a retry — sendResult.sent
+      // stays false in that case even though a leg genuinely delivered.
+      // Gate on "was ANY leg accepted" instead of the representative
+      // `sendResult.sent`, or an accepted Email gets thrown away below:
+      // restoring the claim to draft and possibly reversing applied credit
+      // out from under a pay link the customer already has.
+      const anyChannelAccepted = anyBillingChannelAccepted(acceptedChannelResults, sendResult.sent);
+      // The unfinished leg (channelResults holds one when a partial fan-out
+      // both delivered and still owes a retry) — never populated for an
+      // ordinary single-leg or fully-accepted send.
+      const pendingChannel = acceptedChannelResults && anyChannelAccepted && !sendResult.sent
+        ? Object.entries(acceptedChannelResults)
+          .find(([, leg]) => !(leg?.sent === true && leg?.deliveryOutcome === "accepted"))
+        : null;
 
-      if (!sendResult.sent) {
+      if (!anyChannelAccepted) {
         logger.warn(
           `[invoice] payment-link SMS BLOCKED for invoice ${invoiceId}: ${sendResult.code} — ${sendResult.reason}`,
         );
@@ -5348,6 +5399,21 @@ const InvoiceService = {
         throw err;
       }
 
+      // The accepted leg(s) are delivered; a pending leg (if any) needs its
+      // own retry. sendViaSMS (unlike sendViaSMSAndEmail, which owns
+      // processScheduledSends' scheduled-retry rail) has no rail of its own
+      // to requeue just the unfinished leg — surfaced on the result below
+      // (pendingChannel*) instead, the same deferred/nextAllowedAt shape a
+      // thrown hold carries, so a caller that understands deferral can
+      // still act on it. Known gap: an automated direct caller (batch send,
+      // the AI-assistant tool, collections-conversation.js) that ignores
+      // these fields will not automatically retry the pending leg.
+      if (pendingChannel) {
+        logger.warn(
+          `[invoice] payment-link ${pendingChannel[0]} leg for invoice ${invoiceId} needs retry after another leg was accepted: ${pendingChannel[1]?.code} — ${pendingChannel[1]?.reason}`,
+        );
+      }
+
       smsDelivered = true;
       const finalized = await finalizeInvoiceAfterSms();
       if (!finalized) return { sent: true, payUrl, claimLost: true };
@@ -5361,18 +5427,21 @@ const InvoiceService = {
         );
       }
 
-      // Log
+      // Log — description/log line name whichever channel(s) actually
+      // accepted (Codex round-2 P2 #4963), never the legacy "sent via SMS"
+      // wording for an Email-only or App-only send.
+      const deliveredVia = describeInvoiceDeliveryChannels(acceptedChannelResults);
       await db("activity_log")
         .insert({
           customer_id: customer.id,
           action: "invoice_sent",
-          description: `Invoice ${invoice.invoice_number} sent via SMS: $${invoiceAmountDue(invoice)}`,
+          description: `Invoice ${invoice.invoice_number} sent via ${deliveredVia}: $${invoiceAmountDue(invoice)}`,
           metadata: JSON.stringify({ invoiceId, payUrl }),
         })
         .catch(() => {});
 
       logger.info(
-        `[invoice] SMS sent for ${invoice.invoice_number} (customerId=${customer.id})`,
+        `[invoice] ${deliveredVia} sent for ${invoice.invoice_number} (customerId=${customer.id})`,
       );
 
       // First send means the deal closed — convert the originating lead. Only
@@ -5393,7 +5462,17 @@ const InvoiceService = {
       const queueOutcome = await resolveAdoptedRowsAfterDelivery(invoiceId, invoice.send_claim_token, consumedQueuedSendRows, invoice.invoice_number);
       await releaseDirectSmsClaim();
 
-      return { sent: true, payUrl, ...queueOutcome };
+      return {
+        sent: true, payUrl, ...queueOutcome,
+        ...(pendingChannel ? {
+          pendingChannel: pendingChannel[0],
+          pendingChannelCode: pendingChannel[1]?.code,
+          pendingChannelReason: pendingChannel[1]?.reason,
+          pendingChannelDeliveryOutcome: pendingChannel[1]?.deliveryOutcome,
+          ...(pendingChannel[1]?.deferred ? { pendingChannelDeferred: true } : {}),
+          ...(pendingChannel[1]?.nextAllowedAt ? { pendingChannelNextAllowedAt: pendingChannel[1].nextAllowedAt } : {}),
+        } : {}),
+      };
     } catch (err) {
       err.deliveryOutcome ||= err.providerOutcome?.deliveryOutcome;
       if (smsDelivered) {
@@ -5407,8 +5486,9 @@ const InvoiceService = {
         // stale-claim recovery in processScheduledSends PARKS such rows for
         // operator review (delivery unverified, no automatic resend) — and
         // report the send as delivered.
+        const deliveredViaRecovery = describeInvoiceDeliveryChannels(acceptedChannelResults);
         logger.error(
-          `[invoice] SMS DELIVERED for ${invoice.invoice_number} but post-delivery bookkeeping failed: ${err.message} — retrying finalize`,
+          `[invoice] ${deliveredViaRecovery} DELIVERED for ${invoice.invoice_number} but post-delivery bookkeeping failed: ${err.message} — retrying finalize`,
         );
         try {
           const finalized = await finalizeInvoiceAfterSms();
@@ -5432,7 +5512,7 @@ const InvoiceService = {
           .insert({
             customer_id: invoice.customer_id,
             action: "invoice_sent",
-            description: `Invoice ${invoice.invoice_number} sent via SMS: $${invoiceAmountDue(invoice)}`,
+            description: `Invoice ${invoice.invoice_number} sent via ${deliveredViaRecovery}: $${invoiceAmountDue(invoice)}`,
             metadata: JSON.stringify({ invoiceId, payUrl }),
           })
           .catch(() => {});

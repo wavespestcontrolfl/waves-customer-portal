@@ -441,6 +441,186 @@ describe('invoice SMS provider handoff', () => {
     });
   });
 
+  // Codex round-2 findings on PR #4963. P1: billing-channel-routing.js's
+  // billingDispatchOutcome deliberately surfaces an UNFINISHED leg's own
+  // retry/hold as the top-level sendResult when one leg (Email) accepted and
+  // another (Text) still needs a retry — sendResult.sent stays false even
+  // though Email genuinely delivered, which used to fall into the
+  // full-failure branch and restore the claim (and could reverse applied
+  // credit) out from under an already-delivered pay link. P2: the activity
+  // log / info line must name the channel(s) that actually accepted, never
+  // hardcode "SMS".
+  describe('Codex #4963 round 2: a partially-accepted fan-out is finalized, never restored; activity log names the real channel(s)', () => {
+    function invoiceQueryDb({ activityInserts } = {}) {
+      const invoiceQueries = [];
+      return {
+        invoiceQueries,
+        mock: (table) => {
+          if (table === 'invoices') {
+            const q = query({ first: invoiceReads.shift() || invoice });
+            invoiceQueries.push(q);
+            return q;
+          }
+          if (table === 'customers') return query({ first: { id: 'cust-1', first_name: 'Pat', phone: '+19415550101' } });
+          if (table === 'activity_log') {
+            const q = query();
+            if (activityInserts) q.insert = jest.fn((row) => { activityInserts.push(row); return q; });
+            return q;
+          }
+          if (table === 'sms_log') return query({ returning: [] });
+          throw new Error(`Unexpected table: ${table}`);
+        },
+      };
+    }
+    // The one signal that distinguishes an actual claim RESTORE
+    // (restoreSendClaim writes a bare `status: <previousStatus string>`)
+    // from finalizeInvoiceAfterSms's own status write (always the mocked
+    // db.raw(...) CASE WHEN string, which starts with "CASE WHEN").
+    function claimWasRestored(invoiceQueries) {
+      return invoiceQueries
+        .flatMap((q) => q.update.mock.calls.map(([change]) => change))
+        .some((change) => typeof change.status === 'string' && !change.status.startsWith('CASE WHEN'));
+    }
+
+    test('an accepted Email leg is finalized and never restores the claim when the Text leg still needs a retryable retry', async () => {
+      const activityInserts = [];
+      const { invoiceQueries, mock } = invoiceQueryDb({ activityInserts });
+      db.mockImplementation(mock);
+      sendCustomerMessage.mockImplementation(async () => ({
+        sent: false, blocked: false, deliveryOutcome: 'not_sent',
+        code: 'BILLING_CHANNEL_FAILED', reason: 'twilio unavailable', retryable: true,
+        channelResults: {
+          email: { sent: true, deliveryOutcome: 'accepted' },
+          sms: { sent: false, blocked: false, deliveryOutcome: 'not_sent',
+            code: 'BILLING_CHANNEL_FAILED', reason: 'twilio unavailable', retryable: true },
+        },
+      }));
+
+      const result = await InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' });
+      expect(result).toMatchObject({
+        sent: true, pendingChannel: 'sms', pendingChannelCode: 'BILLING_CHANNEL_FAILED',
+      });
+      expect(claimWasRestored(invoiceQueries)).toBe(false);
+
+      const deliveryStamp = invoiceQueries.flatMap((q) => q.update.mock.calls.map(([change]) => change))
+        .find((change) => change.sent_at);
+      expect(deliveryStamp).toEqual(expect.objectContaining({ email_sent_at: expect.any(Date) }));
+      expect(deliveryStamp).not.toHaveProperty('sms_sent_at');
+      expect(activityInserts[0]?.description).toMatch(/^Invoice WPC-2026-1234 sent via Email:/);
+    });
+
+    test('an accepted Email leg is finalized and never restores the claim when the Text leg returns a deferred replay hold (deferred + nextAllowedAt preserved)', async () => {
+      const { invoiceQueries, mock } = invoiceQueryDb();
+      db.mockImplementation(mock);
+      const nextAllowedAt = new Date('2026-09-27T12:00:00.000Z').toISOString();
+      sendCustomerMessage.mockImplementation(async () => ({
+        sent: false, blocked: true, deliveryOutcome: 'not_sent',
+        code: 'QUIET_HOURS_HOLD', reason: 'Automated SMS is limited to 8:00 AM-8:00 PM ET',
+        retryable: true, deferred: true, nextAllowedAt,
+        channelResults: {
+          email: { sent: true, deliveryOutcome: 'accepted' },
+          sms: { sent: false, blocked: true, deliveryOutcome: 'not_sent',
+            code: 'QUIET_HOURS_HOLD', reason: 'Automated SMS is limited to 8:00 AM-8:00 PM ET',
+            retryable: true, deferred: true, nextAllowedAt },
+        },
+      }));
+
+      const result = await InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' });
+      expect(result).toMatchObject({
+        sent: true, pendingChannel: 'sms', pendingChannelCode: 'QUIET_HOURS_HOLD',
+        pendingChannelDeferred: true, pendingChannelNextAllowedAt: nextAllowedAt,
+      });
+      expect(claimWasRestored(invoiceQueries)).toBe(false);
+    });
+
+    test('an accepted Email leg is finalized and never restores the claim when the Text leg outcome is uncertain (no double-send)', async () => {
+      const { invoiceQueries, mock } = invoiceQueryDb();
+      db.mockImplementation(mock);
+      sendCustomerMessage.mockImplementation(async () => ({
+        sent: false, blocked: false, deliveryOutcome: 'uncertain',
+        code: 'INVOICE_PROVIDER_OUTCOME_UNCERTAIN', reason: 'provider socket closed',
+        channelResults: {
+          email: { sent: true, deliveryOutcome: 'accepted' },
+          sms: { sent: false, blocked: false, deliveryOutcome: 'uncertain',
+            code: 'INVOICE_PROVIDER_OUTCOME_UNCERTAIN', reason: 'provider socket closed' },
+        },
+      }));
+
+      const result = await InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' });
+      expect(result).toMatchObject({ sent: true, pendingChannel: 'sms' });
+      expect(claimWasRestored(invoiceQueries)).toBe(false);
+    });
+
+    test('a full fan-out failure (nothing accepted) still throws through the ordinary failure path, byte-identical to before', async () => {
+      const { mock } = invoiceQueryDb();
+      db.mockImplementation(mock);
+      sendCustomerMessage.mockImplementation(async () => ({
+        sent: false, blocked: true, deliveryOutcome: 'not_sent',
+        code: 'BILLING_CHANNEL_FAILED', reason: 'both legs failed', retryable: true,
+        channelResults: {
+          email: { sent: false, blocked: false, deliveryOutcome: 'not_sent',
+            code: 'BILLING_CHANNEL_FAILED', reason: 'email failed', retryable: true },
+          sms: { sent: false, blocked: false, deliveryOutcome: 'not_sent',
+            code: 'BILLING_CHANNEL_FAILED', reason: 'sms failed', retryable: true },
+        },
+      }));
+
+      // anyChannelAccepted correctly reads false here (not just checking
+      // !sendResult.sent), so nothing accepted still throws through the SAME
+      // full-failure branch as before this fix — its own restore/credit-
+      // reversal bookkeeping (claimInvoiceForSend's previousStatus) is
+      // already covered by the other tests in this file (e.g. the
+      // commit-failure and terminal-visit cases above) and unrelated to
+      // this fix, which only changes what happens when a leg WAS accepted.
+      await expect(InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' }))
+        .rejects.toMatchObject({ code: 'BILLING_CHANNEL_FAILED' });
+    });
+
+    test('an Email+Text accepted send logs the activity entry as "sent via Email and SMS"', async () => {
+      const activityInserts = [];
+      const { mock } = invoiceQueryDb({ activityInserts });
+      db.mockImplementation(mock);
+      sendCustomerMessage.mockImplementation(async () => ({
+        sent: true, deliveryOutcome: 'accepted',
+        channelResults: {
+          email: { sent: true, deliveryOutcome: 'accepted' },
+          sms: { sent: true, deliveryOutcome: 'accepted' },
+        },
+      }));
+
+      await expect(InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' }))
+        .resolves.toMatchObject({ sent: true });
+      expect(activityInserts[0]?.description).toMatch(/^Invoice WPC-2026-1234 sent via Email and SMS:/);
+    });
+
+    test('an App-only (push) accepted send logs the activity entry as "sent via App", not "SMS"', async () => {
+      const activityInserts = [];
+      const { mock } = invoiceQueryDb({ activityInserts });
+      db.mockImplementation(mock);
+      sendCustomerMessage.mockImplementation(async () => ({
+        sent: true, deliveryOutcome: 'accepted',
+        channelResults: { push: { sent: true, deliveryOutcome: 'accepted' } },
+      }));
+
+      await expect(InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' }))
+        .resolves.toMatchObject({ sent: true });
+      expect(activityInserts[0]?.description).toMatch(/^Invoice WPC-2026-1234 sent via App:/);
+    });
+
+    test('a plain SMS-only send (no fan-out at all) keeps the byte-identical "sent via SMS" wording', async () => {
+      const activityInserts = [];
+      const { mock } = invoiceQueryDb({ activityInserts });
+      db.mockImplementation(mock);
+      const dispatch = jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted' }));
+      sendCustomerMessage.mockImplementation(async ({ withProviderHandoff }) => withProviderHandoff(dispatch));
+      withInvoiceDepositSettlement.mockImplementation(async (_invoiceId, callback) => callback(db, invoice));
+
+      await expect(InvoiceService.sendViaSMS('inv-1', { allowClaimed: true, claimToken: 'claim-1' }))
+        .resolves.toMatchObject({ sent: true });
+      expect(activityInserts[0]?.description).toBe('Invoice WPC-2026-1234 sent via SMS: $100');
+    });
+  });
+
   test('blocks the provider handoff when the linked visit was cancelled during preparation', async () => {
     const cancelled = { ...invoice, scheduled_service_id: 'svc-cancelled' };
     invoiceReads = [cancelled, cancelled, cancelled];
