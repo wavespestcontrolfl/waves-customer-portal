@@ -329,6 +329,8 @@ test.each([
   'Friday, October 2, ’27',
   "Friday, October 2nd, '27",
   "Friday, October 2 in '27",
+  'Friday, October 2, 27',
+  'Friday, October 2nd (27)',
 ])('model output cannot add an abbreviated year to the supplied next-visit date: %s', (date) => {
   const facts = { nextVisit: { date: 'Friday, October 2', window: '8–10 AM' } };
   expect(appointmentClaimProblems(`Your next visit is ${date}, arriving 8–10 AM.`, facts))
@@ -346,6 +348,7 @@ test.each(['8 AM', '10 AM'])('a grounded range does not authorize an exact %s ar
 test.each([
   'Your next visit is Friday, October 2, arriving 8–10 AM.',
   'Your next visit is Friday, October 2, arriving 8–10 AM, and keep pets away until 8 AM.',
+  'Your next visit is Friday, October 2, arriving 8–10 AM, and keep pets away until 10 AM.',
 ])('grounded range copy remains valid without a year or exact arrival promise: %s', (summary) => {
   expect(appointmentClaimProblems(
     summary,

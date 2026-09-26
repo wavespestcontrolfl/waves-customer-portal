@@ -214,6 +214,10 @@ test('ungrounded numbers and unsupported capture/consumption claims are rejected
   // window into an exact arrival promise.
   expect(ungroundedClaims('Your next visit is Monday, August 3 at 8 PM.', facts))
     .toContain('ungrounded_time:8 PM');
+  expect(ungroundedClaims('Arriving Monday, August 3 at 8 PM.', facts))
+    .toContain('ungrounded_time:8 PM');
+  expect(ungroundedClaims('Your next visit is Monday, August 3, arriving 8–10 AM. Arrival is at 8 PM.', facts))
+    .toContain('ungrounded_time:8 PM');
   expect(ungroundedClaims('We arrive Monday, August 3 starting at 8 AM.', facts))
     .toContain('ungrounded_time:8 AM');
   expect(ungroundedClaims('Your next visit is Monday, August 3, arriving 8–10 AM, specifically at 10 AM.', facts))
