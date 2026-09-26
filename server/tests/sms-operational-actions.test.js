@@ -950,6 +950,8 @@ describe('fulfillment proof', () => {
     const verdict = await verifySmsFulfillment(callback, evidence, { eventOnly: true });
     expect(dispatchWithFallback.mock.calls.at(-1)[1].text).toContain('"witness_refs":["visit:v-1"]');
     expect(verdict.event_only).toBe(true);
+    // The instructions admit the same accepted-push proof admissibleWitness does (#4816 r41 pre-push).
+    expect(dispatchWithFallback.mock.calls.at(-1)[1].text).toContain('except an App push the provider accepted');
     // The window check and the after-deadline check never share a cached verdict.
     expect(fulfillmentFingerprint(callback, evidence, { eventOnly: true }).evidenceHash)
       .not.toBe(fulfillmentFingerprint(callback, evidence).evidenceHash);
