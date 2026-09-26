@@ -92,6 +92,8 @@ async function annualPrepayExtrasForVisit(svc, addons) {
   const InvoiceService = require('./invoice');
   const { lineItems } = await InvoiceService.buildLineItemsForScheduledService(svc.id, {
     fallbackDescription: svc.service_type,
+    // An outage throws (a hold, retried) instead of reading as "no add-ons".
+    strictReads: true,
   });
   const primaryId = `scheduled_${svc.id}_primary`;
   const lines = lineItems.filter((li) => addons.clientIds.has(li.client_id) || addons.clientIds.has(li.discount_for));
@@ -186,13 +188,13 @@ class CoveredVisitCloseout {
   }
 
   // Every invoice on the visit or its record, in any status (a voided or
-  // refunded one is history too).
-  async otherInvoices() {
+  // refunded one is history too), oldest first.
+  async invoiceHistory() {
     const { svc, record } = this;
     return db('invoices').where((qb) => {
       qb.where({ scheduled_service_id: svc.id });
       if (record?.id) qb.orWhere({ service_record_id: record.id });
-    }).select('id', 'invoice_number', 'status');
+    }).orderBy('created_at');
   }
 
   // Take an add-ons bill as the completion's invoice. Nothing due (paid,
@@ -286,7 +288,9 @@ class CoveredVisitCloseout {
       skipDepositCredit: quietBackfill,
       assertLinesCurrentInTrx: async (trx) => {
         if ((await annualPrepayAddonRows(current, trx)).fingerprint !== addons.fingerprint) {
-          throw Object.assign(new Error('the visit\'s add-ons changed while billing'), { code: 'ADDON_LINES_MOVED' });
+          // A status makes it terminal for the mint's deposit retry: it
+          // reaches bill(), which rebuilds the lines from the current rows.
+          throw Object.assign(new Error('the visit\'s add-ons changed while billing'), { code: 'ADDON_LINES_MOVED', status: 409 });
         }
       },
       buildCreateParams: () => ({
@@ -360,10 +364,12 @@ class CoveredVisitCloseout {
     return { kind: 'voided', invoice: office, otherCharges: lines.otherCharges };
   }
 
-  // The visit has an invoice this closeout did not make. Dark, only the
-  // covered base is handled. Live, the add-ons (and a voided invoice's
-  // other charges) go to the office — one alert naming the invoice.
-  async reconcileWithOfficeInvoices(others) {
+  // The visit has invoice history this closeout cannot claim. Dark, only
+  // the covered base is handled. Live, what is still owed is the office's
+  // call: one alert listing every invoice on the visit. An invoice is
+  // collected only when it is the visit's only one and bills just this
+  // visit's add-ons (beside another invoice, collecting it can charge twice).
+  async reconcileWithOfficeInvoices(history) {
     const { svc } = this;
     const open = this.invoice?.id && !['paid', 'prepaid', 'void'].includes(this.invoice.status);
     let addons = { clientIds: new Set(), owed: false };
@@ -385,15 +391,23 @@ class CoveredVisitCloseout {
         outcome = { kind: 'left', invoice: this.invoice };
       }
     }
-    // An office bill for the add-ons stays owed (pay link, collection).
-    if (outcome.kind === 'kept') await this.takeBill(outcome.invoice);
-    if (!this.live || !this.billable) return;
-    const named = outcome.invoice || this.ctx.terminalCompletionInvoice || this.invoice || others[0]
-      || { id: this.ownBillId, status: 'missing' };
-    if (outcome.kind === 'voided' && (addons.owed || outcome.otherCharges)) {
-      await this.alert(`invoice ${invoiceLabel(named)} was voided because the annual prepay covers the visit; re-bill the add-ons and anything else it charged besides the covered visit`, { voidedInvoiceId: named.id });
+    if (!this.live) return;
+    if (outcome.kind === 'kept' && history.length <= 1) await this.takeBill(outcome.invoice);
+    if (!this.billable) return;
+    // The history as it stands now: an invoice voided above reads void.
+    const listed = (history.length ? history : [{ id: this.ownBillId, status: 'missing' }])
+      .map((inv) => (outcome.kind === 'voided' && inv.id === outcome.invoice.id ? { ...inv, status: 'void' } : inv));
+    // A voided invoice that charged more than the covered visit — voided
+    // above, on an earlier attempt, or by the office — is re-billed by hand.
+    const voidedCharges = (outcome.kind === 'voided' && outcome.otherCharges)
+      || listed.some((inv) => inv.status === 'void' && classifyCoveredVisitInvoice(inv, addons).otherCharges);
+    const listing = listed.map((inv) => `${invoiceLabel(inv)} (${inv.status})`).join(', ');
+    const invoiceIds = listed.map((inv) => inv.id);
+    if (voidedCharges) {
+      await this.alert(`its invoices (${listing}) include a voided one that charged more than the covered visit; re-bill whatever it charged besides the covered visit that no other invoice covers`, { invoiceIds });
     } else if (addons.owed) {
-      await this.alert(`the visit already has invoice ${invoiceLabel(named)} (${named.status}); bill whatever of its add-ons that invoice does not already charge`, { invoiceId: named.id });
+      const one = listed.length === 1;
+      await this.alert(`the visit already has ${one ? 'invoice' : 'invoices'} ${listing}; bill whatever of its add-ons ${one ? 'that invoice does' : 'those invoices do'} not already charge`, { invoiceIds });
     }
   }
 
@@ -408,24 +422,23 @@ class CoveredVisitCloseout {
       if (this.invoice?.id) await this.reconcileWithOfficeInvoices([]);
       return this.outcome();
     }
-    let own = null;
-    let others;
+    let history;
     try {
-      if (this.ownBillId) own = await db('invoices').where({ id: this.ownBillId }).first();
-      others = await this.otherInvoices();
+      history = await this.invoiceHistory();
     } catch (err) {
       this.lookupError = err;
       logger.error(`[dispatch] annual-prepay invoice history unreadable for visit ${this.svc.id}: ${err.message}`);
       return this.outcome();
     }
+    const own = history.find((inv) => inv.id === this.ownBillId);
     // This closeout's own add-ons bill, found again on a retry, is taken
-    // back while it stands. Once recorded, nothing is minted again: voided,
-    // canceled or refunded since, it was the office's call — history like
-    // any other invoice.
-    if (own && !require('./invoice').CANCELLED_SERVICE_RESOLVED_STATUSES.includes(own.status)) {
+    // back while it stands and is still the visit's only invoice. Once
+    // recorded, nothing is minted again: voided, canceled or refunded since,
+    // or joined by another invoice, it is the office's call.
+    if (own && history.length === 1 && !require('./invoice').CANCELLED_SERVICE_RESOLVED_STATUSES.includes(own.status)) {
       await this.takeBill(own);
-    } else if (others.length || this.ctx.terminalCompletionInvoice || this.ownBillId) {
-      await this.reconcileWithOfficeInvoices(others);
+    } else if (history.length || this.ctx.terminalCompletionInvoice || this.ownBillId) {
+      await this.reconcileWithOfficeInvoices(history);
     } else if (this.billable) {
       await this.bill();
     }
