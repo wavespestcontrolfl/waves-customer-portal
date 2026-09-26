@@ -190,9 +190,8 @@ async function updatePrimaryVisits(trx, customer, primary, after, latitude, long
     .filter(row => visitMatchesPrimary(row, customer, primary))
     .filter(row => visitPinIsSafeToReplace(row, customer));
   const ids = eligible.map(row => row.id);
-  let updated = 0;
   if (ids.length) {
-    updated = await trx('scheduled_services')
+    await trx('scheduled_services')
       .whereIn('id', ids)
       .whereIn('status', ['pending', 'confirmed'])
       .where('scheduled_date', '>=', etDateString())
@@ -242,7 +241,7 @@ async function updatePrimaryVisits(trx, customer, primary, after, latitude, long
         });
     }
   }
-  return updated;
+  return ids;
 }
 
 async function clearMatchingPins(trx, customer, primary, storedReview, prelockedVisits) {
@@ -274,7 +273,7 @@ async function clearMatchingPins(trx, customer, primary, storedReview, prelocked
         .where({ customer_id: customer.id, lat: visitLatitude, lng: visitLongitude })
         .whereIn('status', ['pending', 'confirmed'])
         .where('scheduled_date', '>=', etDateString())
-        .update({ lat: null, lng: null, updated_at: new Date() });
+        .update({ lat: null, lng: null, route_order: null, updated_at: new Date() });
     }
   }
   let templates = 0;
@@ -383,7 +382,7 @@ async function verifyPin({
   if (address) {
     await require('./customer-address-fanout').propagateCustomerAddressChange({ before: customer, after }, trx);
   }
-  const visitsUpdated = await updatePrimaryVisits(
+  const updatedVisitIds = await updatePrimaryVisits(
     trx, visitReference, primary, after, latitude, longitude, visitContext,
   );
   await reviewStore.saveReview(trx, after, {
@@ -392,9 +391,10 @@ async function verifyPin({
   });
   await auditResolution(trx, customerId, actorId, input.action, {
     address_changed: !!address,
-    visits_updated: visitsUpdated,
+    visits_updated: updatedVisitIds.length,
     source: input.source,
   });
+  return { addressBriefIds: updatedVisitIds };
 }
 
 async function markOutside({ trx, customerId, input, actorId, customer, primary, storedReview, visitContext }) {
@@ -438,7 +438,7 @@ async function requestRetry({ trx, customerId, input, actorId, customer, storedR
     evidence: storedReview?.evidence || null, latitude: storedReview?.latitude, longitude: storedReview?.longitude,
   });
   await auditResolution(trx, customerId, actorId, input.action, {});
-  return require('./geocoder').buildAddress(customer);
+  return { retryAddress: require('./geocoder').buildAddress(customer) };
 }
 
 const ACTION_HANDLERS = {
@@ -450,6 +450,7 @@ const ACTION_HANDLERS = {
 
 async function resolveCustomerGeocodeReview(customerId, input, actorId, conn = db) {
   let retryAddress = null;
+  let addressBriefIds = [];
   await conn.transaction(async trx => {
     const needsVisitFence = ['verify_pin', 'outside_service_area', 'revoke'].includes(input.action);
     const includeProtected = ['outside_service_area', 'revoke'].includes(input.action);
@@ -465,9 +466,11 @@ async function resolveCustomerGeocodeReview(customerId, input, actorId, conn = d
     const visitContext = needsVisitFence
       ? await lockVisitContext(trx, customerId, prelocked, { includeProtected })
       : { visits: [], parents: [] };
-    retryAddress = await ACTION_HANDLERS[input.action]({
+    const outcome = await ACTION_HANDLERS[input.action]({
       trx, customerId, input, actorId, customer, primary, visitReference, storedReview, visitContext,
     }) || null;
+    retryAddress = outcome?.retryAddress || null;
+    addressBriefIds = outcome?.addressBriefIds || [];
     if (!reviewStore.reviewEnabled()) throw actionError('Geocode review is disabled.', 404, 'review_disabled');
   }).catch(err => {
     if (err?.code === '23505' && err?.constraint === PROPERTY_ADDRESS_CONSTRAINT) {
@@ -484,6 +487,11 @@ async function resolveCustomerGeocodeReview(customerId, input, actorId, conn = d
     const geocoder = require('./geocoder');
     geocoder.clearGeocodeMemo(retryAddress);
     await geocoder.ensureCustomerGeocoded(customerId);
+  }
+  if (addressBriefIds.length) {
+    void Promise.resolve()
+      .then(() => require('./appointment-address').refreshAppointmentAddressBriefs(conn, addressBriefIds))
+      .catch(() => {});
   }
   await require('./scheduling/quality-after-change')
     .refreshScheduleQualityAfterChange({ customerIds: [customerId] }, conn)

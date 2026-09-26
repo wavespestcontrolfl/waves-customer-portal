@@ -25,6 +25,9 @@ jest.mock('../services/geocoder', () => ({
 jest.mock('../services/scheduling/quality-after-change', () => ({
   refreshScheduleQualityAfterChange: jest.fn(),
 }));
+jest.mock('../services/appointment-address', () => ({
+  refreshAppointmentAddressBriefs: jest.fn(),
+}));
 
 const {
   resolveCustomerGeocodeReview,
@@ -37,6 +40,7 @@ const addressFanout = require('../services/customer-address-fanout');
 const customerProperties = require('../services/customer-properties');
 const geocoder = require('../services/geocoder');
 const scheduleQuality = require('../services/scheduling/quality-after-change');
+const appointmentAddress = require('../services/appointment-address');
 
 const customer = {
   id: 'customer-1', address_line1: '100 Main Street', address_line2: 'Apt 4',
@@ -68,6 +72,7 @@ function fakeConnection({
     ...reviewOverrides,
   };
   const updates = [];
+  const transactionState = { committed: false };
   let candidateRead = 0;
   function conn(table) {
     const state = { table, where: [] };
@@ -97,15 +102,20 @@ function fakeConnection({
     };
     return builder;
   }
-  conn.transaction = async callback => callback(conn);
+  conn.transaction = async callback => {
+    const result = await callback(conn);
+    transactionState.committed = true;
+    return result;
+  };
   conn.fn = { now: jest.fn(() => new Date('2026-09-25T12:00:00Z')) };
-  return { conn, updates, reviewRow };
+  return { conn, updates, reviewRow, transactionState };
 }
 
 beforeEach(() => {
   jest.clearAllMocks();
   reviewStore.reviewEnabled.mockReturnValue(true);
   scheduleQuality.refreshScheduleQualityAfterChange.mockResolvedValue({ status: 'gate_off' });
+  appointmentAddress.refreshAppointmentAddressBriefs.mockResolvedValue();
   reviewStore.reviewRevision.mockReturnValue('rev-1');
   reviewStore.getReviewDetail.mockResolvedValue({ customer, review: { status: 'verified' }, revision: 'rev-2' });
 });
@@ -184,6 +194,25 @@ test('verify releases a protected review before atomically saving address, pin, 
     action: 'customer_geocode_review.verify_pin', critical: true, trx: conn,
   }));
   expect(detail.revision).toBe('rev-2');
+});
+
+test('verify refreshes briefs for the exact updated visits after commit and ignores refresh failure', async () => {
+  const matching = visit({
+    id: 'visit-1', technician_id: 'tech-1', scheduled_date: '2099-10-01', status: 'confirmed',
+  });
+  const { conn, transactionState } = fakeConnection({ scheduledCandidates: [[matching], [matching]] });
+  let committedAtRefresh = false;
+  appointmentAddress.refreshAppointmentAddressBriefs.mockImplementationOnce(() => {
+    committedAtRefresh = transactionState.committed;
+    throw new Error('WDO refresh unavailable');
+  });
+
+  await expect(resolveCustomerGeocodeReview(customer.id, {
+    revision: 'rev-1', action: 'verify_pin', latitude: 27.4, longitude: -82.4,
+    source: 'site_visit', evidence: 'Marker observed', confirmed: true,
+  }, 'actor-1', conn)).resolves.toEqual(expect.objectContaining({ revision: 'rev-2' }));
+  expect(committedAtRefresh).toBe(true);
+  expect(appointmentAddress.refreshAppointmentAddressBriefs).toHaveBeenCalledWith(conn, ['visit-1']);
 });
 
 test('verify allowlists address fields, preserves an omitted unit and permits an explicit clear', async () => {
@@ -281,7 +310,10 @@ test.each([
 });
 
 test('revoke preserves the review pin as evidence and only clears exact matching live mirrors', async () => {
-  const { conn, updates, reviewRow } = fakeConnection();
+  const matching = visit({
+    id: 'visit-1', technician_id: 'tech-1', scheduled_date: '2099-10-01', status: 'confirmed', route_order: 8,
+  });
+  const { conn, updates, reviewRow } = fakeConnection({ scheduledCandidates: [[matching], [matching]] });
 
   await resolveCustomerGeocodeReview(customer.id, {
     revision: 'rev-1', action: 'revoke',
@@ -297,6 +329,10 @@ test('revoke preserves the review pin as evidence and only clears exact matching
     typeof args[0] === 'object' && args[0].latitude === customer.latitude && args[0].longitude === customer.longitude
   )))).toBe(true);
   expect(clears.every(update => update.patch.latitude === null && update.patch.longitude === null)).toBe(true);
+  expect(updates).toContainEqual(expect.objectContaining({
+    table: 'scheduled_services',
+    patch: expect.objectContaining({ lat: null, lng: null, route_order: null }),
+  }));
   expect(auditLog.recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
     action: 'customer_geocode_review.revoke', critical: true, trx: conn,
   }));

@@ -14,6 +14,9 @@ jest.mock('../services/geocoder', () => ({
 jest.mock('../services/scheduling/quality-after-change', () => ({
   refreshScheduleQualityAfterChange: jest.fn().mockResolvedValue({ status: 'checked' }),
 }));
+jest.mock('../services/appointment-address', () => ({
+  refreshAppointmentAddressBriefs: jest.fn().mockResolvedValue(),
+}));
 
 const knex = require('knex');
 const { randomUUID } = require('node:crypto');
@@ -23,6 +26,7 @@ const { addressKey } = require('../services/customer-properties');
 const { resolveCustomerGeocodeReview } = require('../services/customer-geocode-review-actions');
 const { recurringServiceAddress } = require('../services/booking/visit-financial-stamps');
 const { etDateString, addETDays } = require('../utils/datetime-et');
+const appointmentAddress = require('../services/appointment-address');
 
 const connection = process.env.SERVICE_GEOCODE_TEST_DATABASE_URL;
 const CUSTOMER = '71000000-0000-4000-8000-000000000011';
@@ -56,6 +60,7 @@ postgres('customer geocode review actions in PostgreSQL', () => {
   });
 
   beforeEach(async () => {
+    appointmentAddress.refreshAppointmentAddressBriefs.mockClear();
     process.env.GATE_GEOCODE_REVIEW = 'true';
     mockConnection = await database.transaction();
     const schema = `geocode_actions_${randomUUID().replaceAll('-', '')}`;
@@ -202,6 +207,11 @@ postgres('customer geocode review actions in PostgreSQL', () => {
       pre_service_brief_type: null, pre_service_brief_generated_at: null,
     });
     expect(Number(matching.lat)).toBe(Number(PIN.latitude.toFixed(6)));
+    expect(appointmentAddress.refreshAppointmentAddressBriefs).toHaveBeenCalledWith(
+      mockConnection,
+      expect.arrayContaining([visitIds.matching, visitIds.zeroLatitude, visitIds.zeroLongitude, visitIds.zeroBoth]),
+    );
+    expect(appointmentAddress.refreshAppointmentAddressBriefs.mock.calls[0][1]).toHaveLength(4);
     for (const name of ['started', 'completed', 'independentRoot', 'frozen', 'excluded', 'divergent']) {
       expect((await visit(visitIds[name])).lat).toBeNull();
     }
@@ -228,22 +238,26 @@ postgres('customer geocode review actions in PostgreSQL', () => {
   test('revoke retains provenance while guarded-clearing only matching live primary pins', async () => {
     await verify();
     await mockConnection('scheduled_services').whereIn('id', [visitIds.frozen, visitIds.excluded])
-      .update({ lat: PIN.latitude, lng: PIN.longitude });
+      .update({ lat: PIN.latitude, lng: PIN.longitude, route_order: 8 });
+    await mockConnection('scheduled_services').where({ id: visitIds.matching }).update({ route_order: 7 });
+    await mockConnection('scheduled_services').where({ id: visitIds.individual }).update({ route_order: 6 });
     await mockConnection('scheduled_services').where({ id: visitIds.completed })
-      .update({ lat: PIN.latitude, lng: PIN.longitude });
+      .update({ lat: PIN.latitude, lng: PIN.longitude, route_order: 5 });
     await resolveCustomerGeocodeReview(CUSTOMER, {
       revision: (await detail()).revision, action: 'revoke',
     }, ACTOR, mockConnection);
 
     expect((await customer()).latitude).toBeNull();
     expect((await primary()).latitude).toBeNull();
-    expect((await visit(visitIds.matching)).lat).toBeNull();
-    expect((await visit(visitIds.frozen)).lat).toBeNull();
-    expect((await visit(visitIds.excluded)).lat).toBeNull();
+    expect(await visit(visitIds.matching)).toMatchObject({ lat: null, route_order: null });
+    expect(await visit(visitIds.frozen)).toMatchObject({ lat: null, route_order: null });
+    expect(await visit(visitIds.excluded)).toMatchObject({ lat: null, route_order: null });
     expect(Number((await visit(visitIds.individual)).lat)).toBe(27.4);
+    expect((await visit(visitIds.individual)).route_order).toBe(6);
     const recurringParent = await visit(visitIds.completed);
     expect(recurringParent.service_address_line1).toBe(ADDRESS.address_line1);
     expect(Number(recurringParent.lat)).toBe(Number(PIN.latitude.toFixed(6)));
+    expect(recurringParent.route_order).toBe(5);
     expect(recurringServiceAddress(recurringParent)).toMatchObject({ lat: null, lng: null });
     expect(recurringServiceAddress(await visit(visitIds.independentRoot))).toMatchObject({ lat: 27.4, lng: -82.4 });
     const saved = await review();
@@ -409,9 +423,10 @@ postgres('customer geocode review actions in PostgreSQL', () => {
     await mockConnection('customers').where({ id: CUSTOMER }).update(PIN);
     await mockConnection('customer_properties').where({ id: PRIMARY }).update(PIN);
     await mockConnection('scheduled_services').where({ id: visitIds.matching })
-      .update({ lat: PIN.latitude, lng: PIN.longitude });
+      .update({ lat: PIN.latitude, lng: PIN.longitude, route_order: 7 });
     await mockConnection('scheduled_services').where({ id: visitIds.frozen })
-      .update({ lat: PIN.latitude, lng: PIN.longitude });
+      .update({ lat: PIN.latitude, lng: PIN.longitude, route_order: 8 });
+    await mockConnection('scheduled_services').where({ id: visitIds.individual }).update({ route_order: 6 });
     const recurringParent = await visit(visitIds.completed);
     await mockConnection('scheduled_services').where({ id: visitIds.completed }).update({
       recurring_template_overrides: {
@@ -429,8 +444,9 @@ postgres('customer geocode review actions in PostgreSQL', () => {
 
     expect((await customer()).latitude).toBeNull();
     expect((await primary()).latitude).toBeNull();
-    expect((await visit(visitIds.matching)).lat).toBeNull();
-    expect((await visit(visitIds.frozen)).lat).toBeNull();
+    expect(await visit(visitIds.matching)).toMatchObject({ lat: null, route_order: null });
+    expect(await visit(visitIds.frozen)).toMatchObject({ lat: null, route_order: null });
+    expect((await visit(visitIds.individual)).route_order).toBe(6);
     expect(recurringServiceAddress(await visit(visitIds.completed))).toMatchObject({ lat: null, lng: null });
     const saved = await review();
     expect(saved).toMatchObject({ status: 'outside_area', reason: 'staff_confirmed_outside_area', reviewed_by: ACTOR });
